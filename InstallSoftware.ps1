@@ -39,9 +39,14 @@ Foreach ($app in $apps) {
         $listApp = winget list --exact -q $app.name
         if (![String]::Join("", $listApp).Contains($app.name)) {
             Write-host "Installing: " $app.name
-            winget install -e -h --accept-source-agreements --accept-package-agreements --id $app.name 
-            Write-host "Successfully installed: " $app.name
-            $installedApps += $app.name
+            $installResult = winget install -e -h --accept-source-agreements --accept-package-agreements --id $app.name 
+            if ($installResult -match "No package found matching input criteria.") {
+                Write-Error "Failed to install: $($app.name). No package found matching input criteria."
+                $failedApps += $app.name
+            } else {
+                Write-host "Successfully installed: " $app.name
+                $installedApps += $app.name
+            }
         }
         else {
             Write-host "Skipping: " $app.name " (already installed)"
