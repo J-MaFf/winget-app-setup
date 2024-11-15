@@ -6,6 +6,9 @@
 # Check if the script is run as administrator
 If (-NOT ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")) {
     Write-Error "You need to run this script as an administrator!"
+    # Keep the console window open until the user presses a key
+    Write-Output "Press any key to exit..."
+    [System.Console]::ReadKey($true) > $null
     Exit 1
 } else {
     Write-Output "Running as administrator..."
@@ -55,3 +58,7 @@ Write-Output "Summary:"
 Write-Output "Installed Apps: $($installedApps -join ', ')"
 Write-Output "Skipped Apps: $($skippedApps -join ', ')"
 Write-Output "Failed Apps: $($failedApps -join ', ')"
+
+# Keep the console window open until the user presses a key
+Write-Output "Press any key to exit..."
+[System.Console]::ReadKey($true) > $null
