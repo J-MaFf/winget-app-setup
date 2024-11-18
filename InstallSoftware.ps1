@@ -5,13 +5,13 @@
 
 # Check if the script is run as administrator
 If (-NOT ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")) {
-    Write-Error "You need to run this script as an administrator!"
+    Write-Host "You need to run this script as an administrator!" -ForegroundColor Red
     # Keep the console window open until the user presses a key
-    Write-Output "Press any key to exit..."
+    Write-Host "Press any key to exit..." -ForegroundColor Blue
     [System.Console]::ReadKey($true) > $null
     Exit 1
 } else {
-    Write-Output "Running as administrator..."
+    Write-Host "Running as administrator..." -ForegroundColor Green
 }
 
 $apps = @(
@@ -19,15 +19,15 @@ $apps = @(
     @{name = "GlavSoft.TightVNC" },
     @{name = "Adobe.Acrobat.Reader.64-bit" },
     @{name = "Google.Chrome" },
-    @{name = "Google.Drive" },
+    @{name = "Google.GoogleDrive" },
     @{name = "Dell.CommandUpdate.Universal" },
     @{name = "Microsoft.PowerShell" },
     @{name = "Microsoft.WindowsTerminal" }
 );
 
-Write-Output "Installing the following Apps:"
+Write-Host "Installing the following Apps:" -ForegroundColor Blue
 ForEach ($app in $apps) {
-    Write-Output $app.name
+    Write-Host $app.name -ForegroundColor Blue
 }
 
 $installedApps = @()
@@ -38,32 +38,37 @@ Foreach ($app in $apps) {
     try {
         $listApp = winget list --exact -q $app.name
         if (![String]::Join("", $listApp).Contains($app.name)) {
-            Write-host "Installing: " $app.name
+            Write-Host "Installing: " $app.name -ForegroundColor Blue
             $installResult = winget install -e -h --accept-source-agreements --accept-package-agreements --id $app.name 
             if ($installResult -match "No package found matching input criteria.") {
-                Write-Error "Failed to install: $($app.name). No package found matching input criteria."
+                Write-Host "Failed to install: $($app.name). No package found matching input criteria." -ForegroundColor Red
                 $failedApps += $app.name
-            } else {
-                Write-host "Successfully installed: " $app.name
+            } elseif ($installResult -match "") {
+                <# Action when this condition is true #>
+            } 
+            
+            
+            else {
+                Write-Host "Successfully installed: " $app.name -ForegroundColor Green
                 $installedApps += $app.name
             }
         }
         else {
-            Write-host "Skipping: " $app.name " (already installed)"
+            Write-Host "Skipping: " $app.name " (already installed)" -ForegroundColor Yellow
             $skippedApps += $app.name
         }
     }
     catch {
-        Write-Error "Failed to install: $($app.name). Error: $_"
+        Write-Host "Failed to install: $($app.name). Error: $_" -ForegroundColor Red
         $failedApps += $app.name
     }
 }
 
-Write-Output "Summary:"
-Write-Output "Installed Apps: $($installedApps -join ', ')"
-Write-Output "Skipped Apps: $($skippedApps -join ', ')"
-Write-Output "Failed Apps: $($failedApps -join ', ')"
+Write-Host "Summary:" -ForegroundColor Blue
+Write-Host "Installed Apps: $($installedApps -join ', ')" -ForegroundColor Green
+Write-Host "Skipped Apps: $($skippedApps -join ', ')" -ForegroundColor Yellow
+Write-Host "Failed Apps: $($failedApps -join ', ')" -ForegroundColor Red
 
 # Keep the console window open until the user presses a key
-Write-Output "Press any key to exit..."
+Write-Host "Press any key to exit..." -ForegroundColor Blue
 [System.Console]::ReadKey($true) > $null
