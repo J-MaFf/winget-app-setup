@@ -39,8 +39,8 @@ Foreach ($app in $apps) {
         if ([String]::Join("", $listApp).Contains($app.name)) {
             Write-Host "Uninstalling: " $app.name -ForegroundColor Blue
             $uninstallResult = winget uninstall -e --id $app.name
-            if ($uninstallResult -match "No package found matching input criteria.") {
-                Write-Host "Failed to uninstall: $($app.name). No package found matching input criteria." -ForegroundColor Red
+            if ($uninstallResult -match "No installed package found matching input criteria.") {
+                Write-Host "Failed to uninstall: $($app.name). No installed package found matching input criteria." -ForegroundColor Red
                 $failedApps += $app.name
             } elseif ($uninstallResult -match "Successfully uninstalled") {
                 Write-Host "Successfully uninstalled: " $app.name -ForegroundColor Green
