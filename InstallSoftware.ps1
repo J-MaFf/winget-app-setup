@@ -40,16 +40,14 @@ Foreach ($app in $apps) {
         $listApp = winget list --exact -q $app.name
         if (![String]::Join("", $listApp).Contains($app.name)) {
             Write-Host "Installing: " $app.name -ForegroundColor Blue
-            $installResult = winget install -e --accept-source-agreements --accept-package-agreements --id $app.name 
-            if ($installResult -match "No package found matching input criteria.") {
+            Start-Process winget -ArgumentList "install -e --accept-source-agreements --accept-package-agreements --id $($app.name)" -NoNewWindow -Wait
+            $installResult = winget list --exact -q $app.name
+            if (![String]::Join("", $installResult).Contains($app.name)) {
                 Write-Host "Failed to install: $($app.name). No package found matching input criteria." -ForegroundColor Red
                 $failedApps += $app.name
-            } elseif ($installResult -match "Successfully installed") {
+            } else {
                 Write-Host "Successfully installed: " $app.name -ForegroundColor Green
                 $installedApps += $app.name
-            } else {
-                throw "Failed to install: $($app.name). Error: $installResult"
-
             }
         }
         else {
