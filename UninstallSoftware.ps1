@@ -19,10 +19,11 @@ $apps = @(
     @{name = "GlavSoft.TightVNC" },
     @{name = "Adobe.Acrobat.Reader.64-bit" },
     @{name = "Google.Chrome" },
-    @{name = "Google.Drive" },
+    @{name = "Google.GoogleDrive" },
     @{name = "Dell.CommandUpdate.Universal" },
     @{name = "Microsoft.PowerShell" },
     @{name = "Microsoft.WindowsTerminal" }
+    @{name = "Fake.Package" } # This package does not exist
 );
 
 Write-Host "Uninstalling the following Apps:" -ForegroundColor Blue
