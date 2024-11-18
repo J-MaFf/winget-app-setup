@@ -23,6 +23,7 @@ $apps = @(
     @{name = "Dell.CommandUpdate.Universal" },
     @{name = "Microsoft.PowerShell" },
     @{name = "Microsoft.WindowsTerminal" }
+    @{name = "Fake.Package" } # This package does not exist
 );
 
 Write-Host "Installing the following Apps:" -ForegroundColor Blue
@@ -43,14 +44,12 @@ Foreach ($app in $apps) {
             if ($installResult -match "No package found matching input criteria.") {
                 Write-Host "Failed to install: $($app.name). No package found matching input criteria." -ForegroundColor Red
                 $failedApps += $app.name
-            } elseif ($installResult -match "") {
-                <# Action when this condition is true #>
-            } 
-            
-            
-            else {
+            } elseif ($installResult -match "Successfully installed") {
                 Write-Host "Successfully installed: " $app.name -ForegroundColor Green
                 $installedApps += $app.name
+            } else {
+                throw "Failed to install: $($app.name). Error: $installResult"
+
             }
         }
         else {
