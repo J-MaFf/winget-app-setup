@@ -23,7 +23,6 @@ $apps = @(
     @{name = "Dell.CommandUpdate.Universal" },
     @{name = "Microsoft.PowerShell" },
     @{name = "Microsoft.WindowsTerminal" }
-    @{name = "Fake.Package" } # This package does not exist
 );
 
 Write-Host "Installing the following Apps:" -ForegroundColor Blue
