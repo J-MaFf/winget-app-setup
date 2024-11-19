@@ -1,3 +1,56 @@
+
+<#PSScriptInfo
+
+.VERSION 1.0
+
+.GUID 85a6c4a7-2ff2-4426-bd0d-593a33c919c9
+
+.AUTHOR jmaffiola
+
+.COMPANYNAME
+
+.COPYRIGHT
+
+.TAGS
+
+.LICENSEURI
+
+.PROJECTURI
+
+.ICONURI
+
+.EXTERNALMODULEDEPENDENCIES 
+
+.REQUIREDSCRIPTS
+
+.EXTERNALSCRIPTDEPENDENCIES
+
+.RELEASENOTES
+
+
+.PRIVATEDATA
+
+#>
+
+<# 
+
+.DESCRIPTION 
+ This script installs the following programs from winget:
+
+7-zip
+TightVNC
+Adobe Acrobat Reader 64 Bit
+Google Chrome
+Google Drive
+Dell Command Update (Universal)
+PowerShell
+Windows Terminal 
+
+#> 
+
+Param()
+
+
 # 1. Make sure the Microsoft App Installer is installed:
 #    https://www.microsoft.com/en-us/p/app-installer/9nblggh4nns1
 # 2. Edit the list of apps to install.
