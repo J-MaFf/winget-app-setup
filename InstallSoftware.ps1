@@ -1,7 +1,7 @@
 
 <#PSScriptInfo
 
-.VERSION 1.0
+.VERSION 1.0.1
 
 .GUID 85a6c4a7-2ff2-4426-bd0d-593a33c919c9
 
@@ -15,7 +15,8 @@
 
 .LICENSEURI
 
-.PROJECTURI https://github.com/J-MaFf/winget-app-setup
+.PROJECTURI
+ https://github.com/J-MaFf/winget-app-setup
  
 .ICONURI
 
