@@ -15,8 +15,8 @@
 
 .LICENSEURI
 
-.PROJECTURI
-
+.PROJECTURI https://github.com/J-MaFf/winget-app-setup
+ 
 .ICONURI
 
 .EXTERNALMODULEDEPENDENCIES 
@@ -25,14 +25,9 @@
 
 .EXTERNALSCRIPTDEPENDENCIES
 
-.RELEASENOTES
-
+.RELEASENOTES Initial version
 
 .PRIVATEDATA
-
-#>
-
-<# 
 
 .DESCRIPTION 
  This script installs the following programs from winget:
@@ -46,7 +41,7 @@
  PowerShell
  Windows Terminal 
  
-#> 
+#>
 
 Param()
 
