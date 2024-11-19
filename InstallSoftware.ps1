@@ -16,8 +16,7 @@
 .LICENSEURI
 
 .PROJECTURI
- https://github.com/J-MaFf/winget-app-setup
- 
+
 .ICONURI
 
 .EXTERNALMODULEDEPENDENCIES 
