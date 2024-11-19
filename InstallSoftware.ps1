@@ -37,15 +37,14 @@
 .DESCRIPTION 
  This script installs the following programs from winget:
 
-7-zip
-TightVNC
-Adobe Acrobat Reader 64 Bit
-Google Chrome
-Google Drive
-Dell Command Update (Universal)
-PowerShell
-Windows Terminal 
-
+ 7-zip
+ TightVNC
+ Adobe Acrobat Reader 64 Bit
+ Google Chrome
+ Google Drive
+ Dell Command Update (Universal)
+ PowerShell
+ Windows Terminal 
 #> 
 
 Param()
