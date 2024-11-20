@@ -1,7 +1,6 @@
-
 <#PSScriptInfo
 
-.VERSION 1.0.1
+.VERSION 1.0.2
 
 .GUID 85a6c4a7-2ff2-4426-bd0d-593a33c919c9
 
@@ -55,6 +54,62 @@ If (-NOT ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdent
 } else {
     Write-Host "Running as administrator..." -ForegroundColor Green
 }
+
+function Add-ToEnvironmentPath {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$PathToAdd,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('User', 'System')]
+        [string]$Scope
+    )
+
+    # Check if the path is already in the environment PATH variable
+    if (-not (Path-ExistsInEnvironment -PathToCheck $PathToAdd -Scope $Scope)) {
+        if ($Scope -eq 'System') {
+            # Get the current system PATH
+            $systemEnvPath = [System.Environment]::GetEnvironmentVariable('PATH', [System.EnvironmentVariableTarget]::Machine)
+            # Add to system PATH
+            $systemEnvPath += ";$PathToAdd"
+            [System.Environment]::SetEnvironmentVariable('PATH', $systemEnvPath, [System.EnvironmentVariableTarget]::Machine)
+        } elseif ($Scope -eq 'User') {
+            # Get the current user PATH
+            $userEnvPath = [System.Environment]::GetEnvironmentVariable('PATH', [System.EnvironmentVariableTarget]::User)
+            # Add to user PATH
+            $userEnvPath += ";$PathToAdd"
+            [System.Environment]::SetEnvironmentVariable('PATH', $userEnvPath, [System.EnvironmentVariableTarget]::User)
+        }
+
+        # Update the current process environment PATH
+        if (-not ($env:PATH -split ';').Contains($PathToAdd)) {
+            $env:PATH += ";$PathToAdd"
+        }
+    }
+}
+
+function Path-ExistsInEnvironment {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$PathToCheck,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('User', 'System')]
+        [string]$Scope
+    )
+
+    if ($Scope -eq 'System') {
+        $envPath = [System.Environment]::GetEnvironmentVariable('PATH', [System.EnvironmentVariableTarget]::Machine)
+    } elseif ($Scope -eq 'User') {
+        $envPath = [System.Environment]::GetEnvironmentVariable('PATH', [System.EnvironmentVariableTarget]::User)
+    }
+
+    return ($envPath -split ';').Contains($PathToCheck)
+}
+
+# Add the script directory to the PATH
+$scriptDirectory = Split-Path -Parent $MyInvocation.MyCommand.Definition
+Add-ToEnvironmentPath -PathToAdd $scriptDirectory -Scope 'User'
 
 $apps = @(
     @{name = "7zip.7zip" },
