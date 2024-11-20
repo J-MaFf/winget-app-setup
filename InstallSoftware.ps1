@@ -1,6 +1,6 @@
 <#PSScriptInfo
 
-.VERSION 1.0.2
+.VERSION 1.0.3
 
 .GUID 85a6c4a7-2ff2-4426-bd0d-593a33c919c9
 
@@ -13,6 +13,12 @@
 .PROJECTURI https://github.com/J-MaFf/winget-app-setup
 
 .RELEASENOTES Initial version
+
+.Changelog
+    1.0.0 - Initial version
+    1.0.1 - Added comments
+    1.0.2 - Fixed comments
+    1.0.3 - Added functions to add to the PATH environment variable so the script can be run from any directory, along with updating the readme.md file.
 
 #>
 
@@ -38,12 +44,6 @@
 
 Param()
 
-
-# 1. Make sure the Microsoft App Installer is installed:
-#    https://www.microsoft.com/en-us/p/app-installer/9nblggh4nns1
-# 2. Edit the list of apps to install.
-# 3. Run this script as administrator.
-
 # Check if the script is run as administrator
 If (-NOT ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")) {
     Write-Host "You need to run this script as an administrator!" -ForegroundColor Red
@@ -66,7 +66,7 @@ function Add-ToEnvironmentPath {
     )
 
     # Check if the path is already in the environment PATH variable
-    if (-not (Path-ExistsInEnvironment -PathToCheck $PathToAdd -Scope $Scope)) {
+    if (-not (Test-PathInEnvironment -PathToCheck $PathToAdd -Scope $Scope)) {
         if ($Scope -eq 'System') {
             # Get the current system PATH
             $systemEnvPath = [System.Environment]::GetEnvironmentVariable('PATH', [System.EnvironmentVariableTarget]::Machine)
@@ -88,7 +88,7 @@ function Add-ToEnvironmentPath {
     }
 }
 
-function Path-ExistsInEnvironment {
+function Test-PathInEnvironment {
     param (
         [Parameter(Mandatory = $true)]
         [string]$PathToCheck,
