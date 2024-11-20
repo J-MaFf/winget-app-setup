@@ -1,7 +1,6 @@
-
 <#PSScriptInfo
 
-.VERSION 1.0.1
+.VERSION 1.0.3
 
 .GUID 85a6c4a7-2ff2-4426-bd0d-593a33c919c9
 
@@ -9,26 +8,24 @@
 
 .COMPANYNAME
 
-.COPYRIGHT
-
 .TAGS
 
-.LICENSEURI
-
-.PROJECTURI
- https://github.com/J-MaFf/winget-app-setup
- 
-.ICONURI
-
-.EXTERNALMODULEDEPENDENCIES 
-
-.REQUIREDSCRIPTS
-
-.EXTERNALSCRIPTDEPENDENCIES
+.PROJECTURI https://github.com/J-MaFf/winget-app-setup
 
 .RELEASENOTES Initial version
 
-.PRIVATEDATA
+.Changelog
+    1.0.0 - Initial version
+    1.0.1 - Added comments
+    1.0.2 - Fixed comments
+    1.0.3 - Added functions to add to the PATH environment variable so the script can be run from any directory, along with updating the readme.md file.
+
+#>
+
+
+<#
+.SYNOPSIS
+ Installs a list of programs using winget.
 
 .DESCRIPTION 
  This script installs the following programs from winget:
@@ -44,13 +41,8 @@
  
 #>
 
+
 Param()
-
-
-# 1. Make sure the Microsoft App Installer is installed:
-#    https://www.microsoft.com/en-us/p/app-installer/9nblggh4nns1
-# 2. Edit the list of apps to install.
-# 3. Run this script as administrator.
 
 # Check if the script is run as administrator
 If (-NOT ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")) {
@@ -62,6 +54,62 @@ If (-NOT ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdent
 } else {
     Write-Host "Running as administrator..." -ForegroundColor Green
 }
+
+function Add-ToEnvironmentPath {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$PathToAdd,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('User', 'System')]
+        [string]$Scope
+    )
+
+    # Check if the path is already in the environment PATH variable
+    if (-not (Test-PathInEnvironment -PathToCheck $PathToAdd -Scope $Scope)) {
+        if ($Scope -eq 'System') {
+            # Get the current system PATH
+            $systemEnvPath = [System.Environment]::GetEnvironmentVariable('PATH', [System.EnvironmentVariableTarget]::Machine)
+            # Add to system PATH
+            $systemEnvPath += ";$PathToAdd"
+            [System.Environment]::SetEnvironmentVariable('PATH', $systemEnvPath, [System.EnvironmentVariableTarget]::Machine)
+        } elseif ($Scope -eq 'User') {
+            # Get the current user PATH
+            $userEnvPath = [System.Environment]::GetEnvironmentVariable('PATH', [System.EnvironmentVariableTarget]::User)
+            # Add to user PATH
+            $userEnvPath += ";$PathToAdd"
+            [System.Environment]::SetEnvironmentVariable('PATH', $userEnvPath, [System.EnvironmentVariableTarget]::User)
+        }
+
+        # Update the current process environment PATH
+        if (-not ($env:PATH -split ';').Contains($PathToAdd)) {
+            $env:PATH += ";$PathToAdd"
+        }
+    }
+}
+
+function Test-PathInEnvironment {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$PathToCheck,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('User', 'System')]
+        [string]$Scope
+    )
+
+    if ($Scope -eq 'System') {
+        $envPath = [System.Environment]::GetEnvironmentVariable('PATH', [System.EnvironmentVariableTarget]::Machine)
+    } elseif ($Scope -eq 'User') {
+        $envPath = [System.Environment]::GetEnvironmentVariable('PATH', [System.EnvironmentVariableTarget]::User)
+    }
+
+    return ($envPath -split ';').Contains($PathToCheck)
+}
+
+# Add the script directory to the PATH
+$scriptDirectory = Split-Path -Parent $MyInvocation.MyCommand.Definition
+Add-ToEnvironmentPath -PathToAdd $scriptDirectory -Scope 'User'
 
 $apps = @(
     @{name = "7zip.7zip" },
