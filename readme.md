@@ -15,24 +15,23 @@ This script installs the following programs from winget:
 
 - [Installation](#installation)
 - [Usage](#usage)
-- [Functions](#functions)
 
 ## Installation
 
-### Clone the Repository
-
-Clone the repository to your local machine:
+### PowerShell Gallery (Best)
 
 ```powershell
-https://github.com/J-MaFf/common-powershell-functions.git
+Install-Script -Name InstallSoftware -Force
+```
+
+### Clone the Repository
+
+Another option is to Clone the repository to your local machine:
+
+```powershell
+https://github.com/J-MaFf/winget-app-setup.git
 ```
 
 ## Usage
 
-Use the functions as you see fit!
-
-## Functions
-
-### add-script-to-path
-
-This script defines functions to add a specified path to the environment PATH variable for either the user or the system scope. It checks if the path is already present in the PATH variable before adding it.
+Use the command `InstallSoftware` to run the script from any directory (If installed via PowerShell Gallery). If not, you must provide the full path or open your shell in the apropriate directory to the script to run.
