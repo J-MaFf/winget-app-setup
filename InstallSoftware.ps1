@@ -9,25 +9,18 @@
 
 .COMPANYNAME
 
-.COPYRIGHT
-
 .TAGS
 
-.LICENSEURI
-
-.PROJECTURI
-
-.ICONURI
-
-.EXTERNALMODULEDEPENDENCIES 
-
-.REQUIREDSCRIPTS
-
-.EXTERNALSCRIPTDEPENDENCIES
+.PROJECTURI https://github.com/J-MaFf/winget-app-setup
 
 .RELEASENOTES Initial version
 
-.PRIVATEDATA
+#>
+
+
+<#
+.SYNOPSIS
+ Installs a list of programs using winget.
 
 .DESCRIPTION 
  This script installs the following programs from winget:
@@ -42,6 +35,7 @@
  Windows Terminal 
  
 #>
+
 
 Param()
 
