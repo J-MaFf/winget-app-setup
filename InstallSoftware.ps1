@@ -41,6 +41,8 @@
  
 #>
 
+# Found a bug. If the user has not installed any packages using winget, the source will not be trusted. I need
+# to add a command to trust the source.
 
 Param()
 
