@@ -219,6 +219,11 @@ Write-Host "Installed Apps: $($installedApps -join ', ')" -ForegroundColor Green
 Write-Host "Skipped Apps: $($skippedApps -join ', ')" -ForegroundColor Yellow
 Write-Host "Failed Apps: $($failedApps -join ', ')" -ForegroundColor Red
 
+# Check if any apps need to be updated. If so, update them.
+Write-Host "Checking if any apps need to be updated..." -ForegroundColor Blue
+winget update --all --include-unknown
+Write-Host "Finished checking for & installing updates." -ForegroundColor Green
+
 # Keep the console window open until the user presses a key
 Write-Host "Press any key to exit..." -ForegroundColor Blue
 [System.Console]::ReadKey($true) > $null
