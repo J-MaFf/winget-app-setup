@@ -220,7 +220,11 @@ $failedUpdateApps = @()
 # Check if any apps need to be updated. If so, update them.
 Write-Host "Checking if any apps need to be updated..." -ForegroundColor Blue
 
-winget upgrade --all --include-unknown | ForEach-Object {
+$updateResults = winget upgrade --all --include-unknown
+$appsToUpdate = $updateResults | Where-Object { $_ -match "Found" } | ForEach-Object { $_.Split()[1] }
+Write-Host "Apps to be updated: $($appsToUpdate -join ', ')" -ForegroundColor Blue
+
+$updateResults | ForEach-Object {
     if ($_ -match "Upgraded") {
         $updatedApps += $_.Split()[0]
     } elseif ($_ -match "Installer failed with exit code") {
