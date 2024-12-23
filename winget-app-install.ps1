@@ -214,15 +214,28 @@ Foreach ($app in $apps) {
     }
 }
 
+$updatedApps = @()
+$failedUpdateApps = @()
+
+# Check if any apps need to be updated. If so, update them.
+Write-Host "Checking if any apps need to be updated..." -ForegroundColor Blue
+
+winget upgrade --all --include-unknown | ForEach-Object {
+    if ($_ -match "Upgraded") {
+        $updatedApps += $_.Split()[0]
+    } elseif ($_ -match "Installer failed with exit code") {
+        $failedUpdateApps += $_.Split()[0]
+    }
+}
+Write-Host "Finished checking for & installing updates." -ForegroundColor Green
+
+# Display the summary of the installation
 Write-Host "Summary:" -ForegroundColor Blue
 Write-Host "Installed Apps: $($installedApps -join ', ')" -ForegroundColor Green
 Write-Host "Skipped Apps: $($skippedApps -join ', ')" -ForegroundColor Yellow
 Write-Host "Failed Apps: $($failedApps -join ', ')" -ForegroundColor Red
-
-# Check if any apps need to be updated. If so, update them.
-Write-Host "Checking if any apps need to be updated..." -ForegroundColor Blue
-winget update --all --include-unknown
-Write-Host "Finished checking for & installing updates." -ForegroundColor Green
+Write-Host "Updated Apps: $($updatedApps -join ', ')" -ForegroundColor Green
+Write-Host "Failed to Update Apps: $($failedUpdateApps -join ', ')" -ForegroundColor Red
 
 # Keep the console window open until the user presses a key
 Write-Host "Press any key to exit..." -ForegroundColor Blue
