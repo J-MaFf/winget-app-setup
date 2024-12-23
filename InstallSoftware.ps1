@@ -1,8 +1,8 @@
 <#PSScriptInfo
 
-.VERSION 1.0.3
+.VERSION 1.0.0
 
-.GUID 85a6c4a7-2ff2-4426-bd0d-593a33c919c9
+.GUID 
 
 .AUTHOR jmaffiola
 
@@ -16,10 +16,6 @@
 
 .Changelog
     1.0.0 - Initial version
-    1.0.1 - Added comments
-    1.0.2 - Fixed comments
-    1.0.3 - Added functions to add to the PATH environment variable so the script can be run from any directory, along with updating the readme.md file.
-
 #>
 
 
@@ -38,11 +34,10 @@
  Dell Command Update (Universal)
  PowerShell
  Windows Terminal 
- 
 #>
 
 # Found a bug. If the user has not installed any packages using winget, the source will not be trusted. I need
-# to add a command to trust the source.
+# to add a command to trust the source. I will add a function to check if the source is trusted and if not, trust it.
 
 Param()
 
@@ -55,58 +50,6 @@ If (-NOT ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdent
     Exit 1
 } else {
     Write-Host "Running as administrator..." -ForegroundColor Green
-}
-
-function Add-ToEnvironmentPath {
-    param (
-        [Parameter(Mandatory = $true)]
-        [string]$PathToAdd,
-
-        [Parameter(Mandatory = $true)]
-        [ValidateSet('User', 'System')]
-        [string]$Scope
-    )
-
-    # Check if the path is already in the environment PATH variable
-    if (-not (Test-PathInEnvironment -PathToCheck $PathToAdd -Scope $Scope)) {
-        if ($Scope -eq 'System') {
-            # Get the current system PATH
-            $systemEnvPath = [System.Environment]::GetEnvironmentVariable('PATH', [System.EnvironmentVariableTarget]::Machine)
-            # Add to system PATH
-            $systemEnvPath += ";$PathToAdd"
-            [System.Environment]::SetEnvironmentVariable('PATH', $systemEnvPath, [System.EnvironmentVariableTarget]::Machine)
-        } elseif ($Scope -eq 'User') {
-            # Get the current user PATH
-            $userEnvPath = [System.Environment]::GetEnvironmentVariable('PATH', [System.EnvironmentVariableTarget]::User)
-            # Add to user PATH
-            $userEnvPath += ";$PathToAdd"
-            [System.Environment]::SetEnvironmentVariable('PATH', $userEnvPath, [System.EnvironmentVariableTarget]::User)
-        }
-
-        # Update the current process environment PATH
-        if (-not ($env:PATH -split ';').Contains($PathToAdd)) {
-            $env:PATH += ";$PathToAdd"
-        }
-    }
-}
-
-function Test-PathInEnvironment {
-    param (
-        [Parameter(Mandatory = $true)]
-        [string]$PathToCheck,
-
-        [Parameter(Mandatory = $true)]
-        [ValidateSet('User', 'System')]
-        [string]$Scope
-    )
-
-    if ($Scope -eq 'System') {
-        $envPath = [System.Environment]::GetEnvironmentVariable('PATH', [System.EnvironmentVariableTarget]::Machine)
-    } elseif ($Scope -eq 'User') {
-        $envPath = [System.Environment]::GetEnvironmentVariable('PATH', [System.EnvironmentVariableTarget]::User)
-    }
-
-    return ($envPath -split ';').Contains($PathToCheck)
 }
 
 # Add the script directory to the PATH
@@ -132,6 +75,16 @@ ForEach ($app in $apps) {
 $installedApps = @()
 $skippedApps = @()
 $failedApps = @()
+
+# Verify sources are trusted
+$trustedSources = @("winget", "msstore")
+ForEach ($source in $trustedSources) {
+    if (-not (Test-Source-IsTrusted -target $source)) {
+        Write-Host "Trusting source: $source" -ForegroundColor Yellow
+        Set-Sources
+    }
+}
+
 
 Foreach ($app in $apps) {
     try {
@@ -167,3 +120,107 @@ Write-Host "Failed Apps: $($failedApps -join ', ')" -ForegroundColor Red
 # Keep the console window open until the user presses a key
 Write-Host "Press any key to exit..." -ForegroundColor Blue
 [System.Console]::ReadKey($true) > $null
+
+
+# ------------------------------------------------Functions------------------------------------------------
+
+<#
+.SYNOPSIS
+    Checks if a specific winget source is trusted.
+.DESCRIPTION
+    This function checks if a specific winget source is trusted by listing all sources and checking if the target source is in the list.
+.PARAMETER target
+    The name of the source to check.
+.RETURNS
+    [bool] True if the source is trusted, otherwise False.
+#>
+function Test-Source-IsTrusted($target) {
+    $sources = winget source list
+    
+    return $sources -contains $target
+}
+
+<#
+.SYNOPSIS
+    Adds and trusts the winget source.
+.DESCRIPTION
+    This function adds and trusts the winget source by adding it to the list of sources.
+#>
+function Set-Sources {
+    winget source add -n "winget" -s "https://cdn.winget.microsoft.com/cache"
+    winget source add -n "msstore" -s " https://storeedgefd.dsx.mp.microsoft.com/v9.0"
+}
+
+<#
+.SYNOPSIS
+    Adds a specified path to the environment PATH variable.
+.DESCRIPTION
+    This function adds a specified path to the environment PATH variable for either the user or the system scope.
+.PARAMETER PathToAdd
+    The path to add to the environment PATH variable.
+.PARAMETER Scope
+    The scope to which the path should be added. Valid values are 'User' and 'System'.
+#>
+function Add-ToEnvironmentPath {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$PathToAdd,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('User', 'System')]
+        [string]$Scope
+    )
+
+    # Check if the path is already in the environment PATH variable
+    if (-not (Test-PathInEnvironment -PathToCheck $PathToAdd -Scope $Scope)) {
+        if ($Scope -eq 'System') {
+            # Get the current system PATH
+            $systemEnvPath = [System.Environment]::GetEnvironmentVariable('PATH', [System.EnvironmentVariableTarget]::Machine)
+            # Add to system PATH
+            $systemEnvPath += ";$PathToAdd"
+            [System.Environment]::SetEnvironmentVariable('PATH', $systemEnvPath, [System.EnvironmentVariableTarget]::Machine)
+        } elseif ($Scope -eq 'User') {
+            # Get the current user PATH
+            $userEnvPath = [System.Environment]::GetEnvironmentVariable('PATH', [System.EnvironmentVariableTarget]::User)
+            # Add to user PATH
+            $userEnvPath += ";$PathToAdd"
+            [System.Environment]::SetEnvironmentVariable('PATH', $userEnvPath, [System.EnvironmentVariableTarget]::User)
+        }
+
+        # Update the current process environment PATH
+        if (-not ($env:PATH -split ';').Contains($PathToAdd)) {
+            $env:PATH += ";$PathToAdd"
+        }
+    }
+}
+
+<#
+.SYNOPSIS
+    Checks if a specified path is in the environment PATH variable.
+.DESCRIPTION
+    This function checks if a specified path is in the environment PATH variable for either the user or the system scope.
+.PARAMETER PathToCheck
+    The path to check in the environment PATH variable.
+.PARAMETER Scope
+    The scope in which to check the path. Valid values are 'User' and 'System'.
+.RETURNS
+    [bool] True if the path is in the environment PATH variable, otherwise False.
+#>
+function Test-PathInEnvironment {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$PathToCheck,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('User', 'System')]
+        [string]$Scope
+    )
+
+    if ($Scope -eq 'System') {
+        $envPath = [System.Environment]::GetEnvironmentVariable('PATH', [System.EnvironmentVariableTarget]::Machine)
+    } elseif ($Scope -eq 'User') {
+        $envPath = [System.Environment]::GetEnvironmentVariable('PATH', [System.EnvironmentVariableTarget]::User)
+    }
+
+    return ($envPath -split ';').Contains($PathToCheck)
+}
