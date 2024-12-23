@@ -50,8 +50,7 @@
 #>
 function Test-Source-IsTrusted($target) {
     $sources = winget source list
-    
-    return $sources -contains $target
+    return $sources -match [regex]::Escape($target)
 }
 
 <#
@@ -182,7 +181,9 @@ $trustedSources = @("winget", "msstore")
 ForEach ($source in $trustedSources) {
     if (-not (Test-Source-IsTrusted -target $source)) {
         Write-Host "Trusting source: $source" -ForegroundColor Yellow
-        Set-Source
+        Set-Sources
+    } else {
+        Write-Host "Source is already trusted: $source" -ForegroundColor Green
     }
 }
 
