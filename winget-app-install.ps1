@@ -221,25 +221,39 @@ $failedUpdateApps = @()
 Write-Host "Checking if any apps need to be updated..." -ForegroundColor Blue
 
 $updateResults = winget upgrade --all --include-unknown
-$appsToUpdate = $updateResults | Where-Object { $_ -match "Found" } | ForEach-Object { $_.Split()[1] }
+if ($updateResults -match "No installed package found matching input criteria.") {
+    $appsToUpdate = @()
+} else {
+    $appsToUpdate = $updateResults | Where-Object { $_ -match "Found" } | ForEach-Object { $_.Split()[2] }
+}
 Write-Host "Apps to be updated: $($appsToUpdate -join ', ')" -ForegroundColor Blue
 
 $updateResults | ForEach-Object {
     if ($_ -match "Upgraded") {
-        $updatedApps += $_.Split()[0]
+        $updatedApps += $_.Split()[1]
     } elseif ($_ -match "Installer failed with exit code") {
-        $failedUpdateApps += $_.Split()[0]
+        $failedUpdateApps += $_.Split()[1]
     }
 }
 Write-Host "Finished checking for & installing updates." -ForegroundColor Green
 
 # Display the summary of the installation
 Write-Host "Summary:" -ForegroundColor Blue
-Write-Host "Installed Apps: $($installedApps -join ', ')" -ForegroundColor Green
-Write-Host "Skipped Apps: $($skippedApps -join ', ')" -ForegroundColor Yellow
-Write-Host "Failed Apps: $($failedApps -join ', ')" -ForegroundColor Red
-Write-Host "Updated Apps: $($updatedApps -join ', ')" -ForegroundColor Green
-Write-Host "Failed to Update Apps: $($failedUpdateApps -join ', ')" -ForegroundColor Red
+if ($installedApps) {
+    Write-Host "Installed Apps: $($installedApps -join ', ')" -ForegroundColor Green
+}
+if ($skippedApps) {
+    Write-Host "Skipped Apps: $($skippedApps -join ', ')" -ForegroundColor Yellow
+}
+if ($failedApps) {
+    Write-Host "Failed Apps: $($failedApps -join ', ')" -ForegroundColor Red
+}
+if ($updatedApps) {
+    Write-Host "Updated Apps: $($updatedApps -join ', ')" -ForegroundColor Green
+}
+if ($failedUpdateApps) {
+    Write-Host "Failed to Update Apps: $($failedUpdateApps -join ', ')" -ForegroundColor Red
+}
 
 # Keep the console window open until the user presses a key
 Write-Host "Press any key to exit..." -ForegroundColor Blue
