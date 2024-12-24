@@ -1,4 +1,4 @@
-# InstallSoftware.ps1
+# winget-app-install.ps1
 
 This script installs the following programs from winget:
 
