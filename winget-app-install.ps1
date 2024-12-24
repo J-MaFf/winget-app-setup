@@ -139,8 +139,7 @@ function Test-PathInEnvironment {
 
     return ($envPath -split ';').Contains($PathToCheck)
 }
-
-function Print-Table {
+function Show-Table {
     param (
         [Parameter(Mandatory = $true)]
         [string[]]$Headers,
@@ -162,18 +161,31 @@ function Print-Table {
     }
 
     $divider = "+" + ($Headers | ForEach-Object { "-" * ($maxLengths[$_] + 2) }) -join "+" + "+"
-    $headerLine = "|" + ($Headers | ForEach-Object { " $_" + (" " * ($maxLengths[$_] - $_.Length)) + " " }) -join "|" + "|"
+
+    # Build header line
+    $headerLine = ""
+    for ($i = 0; $i -lt $Headers.Count; $i++) {
+        $padSize = $maxLengths[$Headers[$i]] - $Headers[$i].Length
+        $headerLine += "|" + " " + $Headers[$i] + (" " * $padSize) + " "
+    }
+    $headerLine += "|"
 
     Write-Host $divider
     Write-Host $headerLine
     Write-Host $divider
 
     foreach ($row in $Rows) {
-        $rowLine = "|" + ($row | ForEach-Object { " $_" + (" " * ($maxLengths[$Headers[$row.IndexOf($_)]] - $_.Length)) + " " }) -join "|" + "|"
-        Write-Host $rowLine
-    }
+        $rowLine = ""
+        for ($i = 0; $i -lt $Headers.Count; $i++) {
+            $cellValue = $row[$i]
+            $padSize = $maxLengths[$Headers[$i]] - $cellValue.Length
+            $rowLine += "|" + " " + $cellValue + (" " * $padSize) + " "
+        }
+        $rowLine += "|"
 
-    Write-Host $divider
+        Write-Host $rowLine
+        Write-Host $divider
+    }
 }
 
 #------------------------------------------------Main Script------------------------------------------------
@@ -318,7 +330,7 @@ if ($failedUpdateApps) {
     $rows += , @("Failed to Update", $failedUpdateApps -join ', ')
 }
 
-Print-Table -Headers $headers -Rows $rows
+Show-Table -Headers $headers -Rows $rows
 
 # Keep the console window open until the user presses a key
 Write-Host "Press any key to exit..." -ForegroundColor Blue
