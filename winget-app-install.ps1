@@ -225,19 +225,20 @@ $failedUpdateApps = @()
 # Check if any apps need to be updated. If so, update them.
 Write-Host "Checking if any apps need to be updated..." -ForegroundColor Blue
 
-$updateResults = winget update
-if ($updateResults -match "No installed package found matching input criteria.") {
-    Write-Host "No apps found that need to be updated." -ForegroundColor Yellow
-}
-else {
-    # Extract the names of the apps to be updated starting from index 11
-    $appsToUpdate = $updateResults | Where-Object { $_ -match "^\S+\s+\S+\s+\S+\s+\S+\s+\S+$" -and $_ -ne "Name       Id                    Version   Available Source" } | ForEach-Object {
-        $_.Split()[0]
+$appsToUpdate = @()
+$updateResults = winget update | ForEach-Object {
+    Write-Host $_
+    if ($_ -match "^\S+\s+\S+\s+\S+\s+\S+\s+\S+$" -and $_ -ne "Name       Id                    Version   Available Source") {
+        $appsToUpdate += $_.Split()[0]
     }
 }
 
-# Print the names of the apps to be updated
-Write-Host "Apps to update: $($appsToUpdate -join ', ')" -ForegroundColor Green
+if (-not $appsToUpdate) {
+    Write-Host "No apps found that need to be updated." -ForegroundColor Yellow
+}
+else {
+    Write-Host "Apps to update: $($appsToUpdate -join ', ')" -ForegroundColor Green
+}
 
 $updateResults | ForEach-Object {
     if ($_ -match "Upgraded") {
@@ -247,7 +248,18 @@ $updateResults | ForEach-Object {
         $failedUpdateApps += $_.Split()[1]
     }
 }
-Write-Host "Finished checking for & installing updates." -ForegroundColor Green
+
+# Output winget update --all --include-unknown
+Write-Host "Running winget update --all --include-unknown..." -ForegroundColor Blue
+winget update --all --include-unknown | ForEach-Object {
+    Write-Host $_
+    if ($_ -match "Upgraded") {
+        $updatedApps += $_.Split()[1]
+    }
+    elseif ($_ -match "Installer failed with exit code") {
+        $failedUpdateApps += $_.Split()[1]
+    }
+}
 
 # Display the summary of the installation
 Write-Host "Summary:" -ForegroundColor Blue
