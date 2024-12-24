@@ -140,6 +140,41 @@ function Test-PathInEnvironment {
     return ($envPath -split ';').Contains($PathToCheck)
 }
 
+function Print-Table {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string[]]$Headers,
+        [Parameter(Mandatory = $true)]
+        [string[][]]$Rows
+    )
+
+    $maxLengths = @{}
+    foreach ($header in $Headers) {
+        $maxLengths[$header] = $header.Length
+    }
+
+    foreach ($row in $Rows) {
+        for ($i = 0; $i -lt $row.Length; $i++) {
+            if ($row[$i].Length -gt $maxLengths[$Headers[$i]]) {
+                $maxLengths[$Headers[$i]] = $row[$i].Length
+            }
+        }
+    }
+
+    $divider = "+" + ($Headers | ForEach-Object { "-" * ($maxLengths[$_] + 2) }) -join "+" + "+"
+    $headerLine = "|" + ($Headers | ForEach-Object { " $_" + (" " * ($maxLengths[$_] - $_.Length)) + " " }) -join "|" + "|"
+
+    Write-Host $divider
+    Write-Host $headerLine
+    Write-Host $divider
+
+    foreach ($row in $Rows) {
+        $rowLine = "|" + ($row | ForEach-Object { " $_" + (" " * ($maxLengths[$Headers[$row.IndexOf($_)]] - $_.Length)) + " " }) -join "|" + "|"
+        Write-Host $rowLine
+    }
+
+    Write-Host $divider
+}
 
 #------------------------------------------------Main Script------------------------------------------------
 
@@ -253,7 +288,7 @@ $updateResults | ForEach-Object {
 Write-Host "Running winget update --all --include-unknown..." -ForegroundColor Blue
 winget update --all --include-unknown | ForEach-Object {
     Write-Host $_
-    if ($_ -match "Upgraded") {
+    if ($_ -match "Successfully installed") {
         $updatedApps += $_.Split()[1]
     }
     elseif ($_ -match "Installer failed with exit code") {
@@ -263,21 +298,27 @@ winget update --all --include-unknown | ForEach-Object {
 
 # Display the summary of the installation
 Write-Host "Summary:" -ForegroundColor Blue
+
+$headers = @("Status", "Apps")
+$rows = @()
+
 if ($installedApps) {
-    Write-Host "Installed Apps: $($installedApps -join ', ')" -ForegroundColor Green
+    $rows += , @("Installed", $installedApps -join ', ')
 }
 if ($skippedApps) {
-    Write-Host "Skipped Apps: $($skippedApps -join ', ')" -ForegroundColor Yellow
+    $rows += , @("Skipped", $skippedApps -join ', ')
 }
 if ($failedApps) {
-    Write-Host "Failed Apps: $($failedApps -join ', ')" -ForegroundColor Red
+    $rows += , @("Failed", $failedApps -join ', ')
 }
 if ($updatedApps) {
-    Write-Host "Updated Apps: $($updatedApps -join ', ')" -ForegroundColor Green
+    $rows += , @("Updated", $updatedApps -join ', ')
 }
 if ($failedUpdateApps) {
-    Write-Host "Failed to Update Apps: $($failedUpdateApps -join ', ')" -ForegroundColor Red
+    $rows += , @("Failed to Update", $failedUpdateApps -join ', ')
 }
+
+Print-Table -Headers $headers -Rows $rows
 
 # Keep the console window open until the user presses a key
 Write-Host "Press any key to exit..." -ForegroundColor Blue
