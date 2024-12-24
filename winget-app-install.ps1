@@ -92,7 +92,8 @@ function Add-ToEnvironmentPath {
             # Add to system PATH
             $systemEnvPath += ";$PathToAdd"
             [System.Environment]::SetEnvironmentVariable('PATH', $systemEnvPath, [System.EnvironmentVariableTarget]::Machine)
-        } elseif ($Scope -eq 'User') {
+        }
+        elseif ($Scope -eq 'User') {
             # Get the current user PATH
             $userEnvPath = [System.Environment]::GetEnvironmentVariable('PATH', [System.EnvironmentVariableTarget]::User)
             # Add to user PATH
@@ -131,7 +132,8 @@ function Test-PathInEnvironment {
 
     if ($Scope -eq 'System') {
         $envPath = [System.Environment]::GetEnvironmentVariable('PATH', [System.EnvironmentVariableTarget]::Machine)
-    } elseif ($Scope -eq 'User') {
+    }
+    elseif ($Scope -eq 'User') {
         $envPath = [System.Environment]::GetEnvironmentVariable('PATH', [System.EnvironmentVariableTarget]::User)
     }
 
@@ -148,7 +150,8 @@ If (-NOT ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdent
     Write-Host "Press any key to exit..." -ForegroundColor Blue
     [System.Console]::ReadKey($true) > $null
     Exit 1
-} else {
+}
+else {
     Write-Host "Running as administrator..." -ForegroundColor Green
 }
 
@@ -182,7 +185,8 @@ ForEach ($source in $trustedSources) {
     if (-not (Test-Source-IsTrusted -target $source)) {
         Write-Host "Trusting source: $source" -ForegroundColor Yellow
         Set-Sources
-    } else {
+    }
+    else {
         Write-Host "Source is already trusted: $source" -ForegroundColor Green
     }
 }
@@ -198,7 +202,8 @@ Foreach ($app in $apps) {
             if (![String]::Join("", $installResult).Contains($app.name)) {
                 Write-Host "Failed to install: $($app.name). No package found matching input criteria." -ForegroundColor Red
                 $failedApps += $app.name
-            } else {
+            }
+            else {
                 Write-Host "Successfully installed: " $app.name -ForegroundColor Green
                 $installedApps += $app.name
             }
@@ -220,18 +225,25 @@ $failedUpdateApps = @()
 # Check if any apps need to be updated. If so, update them.
 Write-Host "Checking if any apps need to be updated..." -ForegroundColor Blue
 
-$updateResults = winget upgrade --all --include-unknown
+$updateResults = winget update
 if ($updateResults -match "No installed package found matching input criteria.") {
-    $appsToUpdate = @()
-} else {
-    $appsToUpdate = $updateResults | Where-Object { $_ -match "Found" } | ForEach-Object { $_.Split()[2] }
+    Write-Host "No apps found that need to be updated." -ForegroundColor Yellow
 }
-Write-Host "Apps to be updated: $($appsToUpdate -join ', ')" -ForegroundColor Blue
+else {
+    # Extract the names of the apps to be updated starting from index 11
+    $appsToUpdate = $updateResults | Where-Object { $_ -match "^\S+\s+\S+\s+\S+\s+\S+\s+\S+$" -and $_ -ne "Name       Id                    Version   Available Source" } | ForEach-Object {
+        $_.Split()[0]
+    }
+}
+
+# Print the names of the apps to be updated
+Write-Host "Apps to update: $($appsToUpdate -join ', ')" -ForegroundColor Green
 
 $updateResults | ForEach-Object {
     if ($_ -match "Upgraded") {
         $updatedApps += $_.Split()[1]
-    } elseif ($_ -match "Installer failed with exit code") {
+    }
+    elseif ($_ -match "Installer failed with exit code") {
         $failedUpdateApps += $_.Split()[1]
     }
 }
