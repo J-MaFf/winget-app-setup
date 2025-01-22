@@ -117,8 +117,6 @@ function Add-ToEnvironmentPath {
     The path to check in the environment PATH variable.
 .PARAMETER Scope
     The scope in which to check the path. Valid values are 'User' and 'System'.
-.RETURNS
-    [bool] True if the path is in the environment PATH variable, otherwise False.
 #>
 function Test-PathInEnvironment {
     param (
