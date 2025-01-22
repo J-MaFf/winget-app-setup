@@ -60,8 +60,8 @@ function Test-Source-IsTrusted($target) {
     This function adds and trusts the winget source by adding it to the list of sources.
 #>
 function Set-Sources {
-    winget source add -n "winget" -s "https://cdn.winget.microsoft.com/cache"
-    winget source add -n "msstore" -s " https://storeedgefd.dsx.mp.microsoft.com/v9.0"
+    winget source add -n 'winget' -s 'https://cdn.winget.microsoft.com/cache'
+    winget source add -n 'msstore' -s ' https://storeedgefd.dsx.mp.microsoft.com/v9.0'
 }
 
 <#
@@ -158,28 +158,28 @@ function Show-Table {
         }
     }
 
-    $divider = "+" + ($Headers | ForEach-Object { "-" * ($maxLengths[$_] + 2) }) -join "+" + "+"
+    $divider = '+' + ($Headers | ForEach-Object { '-' * ($maxLengths[$_] + 2) }) -join '+' + '+'
 
     # Build header line
-    $headerLine = ""
+    $headerLine = ''
     for ($i = 0; $i -lt $Headers.Count; $i++) {
         $padSize = $maxLengths[$Headers[$i]] - $Headers[$i].Length
-        $headerLine += "|" + " " + $Headers[$i] + (" " * $padSize) + " "
+        $headerLine += '|' + ' ' + $Headers[$i] + (' ' * $padSize) + ' '
     }
-    $headerLine += "|"
+    $headerLine += '|'
 
     Write-Host $divider
     Write-Host $headerLine
     Write-Host $divider
 
     foreach ($row in $Rows) {
-        $rowLine = ""
+        $rowLine = ''
         for ($i = 0; $i -lt $Headers.Count; $i++) {
             $cellValue = $row[$i]
             $padSize = $maxLengths[$Headers[$i]] - $cellValue.Length
-            $rowLine += "|" + " " + $cellValue + (" " * $padSize) + " "
+            $rowLine += '|' + ' ' + $cellValue + (' ' * $padSize) + ' '
         }
-        $rowLine += "|"
+        $rowLine += '|'
 
         Write-Host $rowLine
         Write-Host $divider
@@ -189,15 +189,15 @@ function Show-Table {
 #------------------------------------------------Main Script------------------------------------------------
 
 # Check if the script is run as administrator
-If (-NOT ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")) {
-    Write-Host "You need to run this script as an administrator!" -ForegroundColor Red
+If (-NOT ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] 'Administrator')) {
+    Write-Host 'You need to run this script as an administrator!' -ForegroundColor Red
     # Keep the console window open until the user presses a key
-    Write-Host "Press any key to exit..." -ForegroundColor Blue
+    Write-Host 'Press any key to exit...' -ForegroundColor Blue
     [System.Console]::ReadKey($true) > $null
     Exit 1
 }
 else {
-    Write-Host "Running as administrator..." -ForegroundColor Green
+    Write-Host 'Running as administrator...' -ForegroundColor Green
 }
 
 # Add the script directory to the PATH
@@ -205,17 +205,17 @@ $scriptDirectory = Split-Path -Parent $MyInvocation.MyCommand.Definition
 Add-ToEnvironmentPath -PathToAdd $scriptDirectory -Scope 'User'
 
 $apps = @(
-    @{name = "7zip.7zip" },
-    @{name = "GlavSoft.TightVNC" },
-    @{name = "Adobe.Acrobat.Reader.64-bit" },
-    @{name = "Google.Chrome" },
-    @{name = "Google.GoogleDrive" },
-    @{name = "Dell.CommandUpdate.Universal" },
-    @{name = "Microsoft.PowerShell" },
-    @{name = "Microsoft.WindowsTerminal" }
+    @{name = '7zip.7zip' },
+    @{name = 'GlavSoft.TightVNC' },
+    @{name = 'Adobe.Acrobat.Reader.64-bit' },
+    @{name = 'Google.Chrome' },
+    @{name = 'Google.GoogleDrive' },
+    @{name = 'Dell.CommandUpdate.Universal' },
+    @{name = 'Microsoft.PowerShell' },
+    @{name = 'Microsoft.WindowsTerminal' }
 );
 
-Write-Host "Installing the following Apps:" -ForegroundColor Blue
+Write-Host 'Installing the following Apps:' -ForegroundColor Blue
 ForEach ($app in $apps) {
     Write-Host $app.name -ForegroundColor Blue
 }
@@ -225,7 +225,7 @@ $skippedApps = @()
 $failedApps = @()
 
 # Verify sources are trusted
-$trustedSources = @("winget", "msstore")
+$trustedSources = @('winget', 'msstore')
 ForEach ($source in $trustedSources) {
     if (-not (Test-Source-IsTrusted -target $source)) {
         Write-Host "Trusting source: $source" -ForegroundColor Yellow
@@ -240,21 +240,21 @@ ForEach ($source in $trustedSources) {
 Foreach ($app in $apps) {
     try {
         $listApp = winget list --exact -q $app.name
-        if (![String]::Join("", $listApp).Contains($app.name)) {
-            Write-Host "Installing: " $app.name -ForegroundColor Blue
+        if (![String]::Join('', $listApp).Contains($app.name)) {
+            Write-Host 'Installing: ' $app.name -ForegroundColor Blue
             Start-Process winget -ArgumentList "install -e --accept-source-agreements --accept-package-agreements --id $($app.name)" -NoNewWindow -Wait
             $installResult = winget list --exact -q $app.name
-            if (![String]::Join("", $installResult).Contains($app.name)) {
+            if (![String]::Join('', $installResult).Contains($app.name)) {
                 Write-Host "Failed to install: $($app.name). No package found matching input criteria." -ForegroundColor Red
                 $failedApps += $app.name
             }
             else {
-                Write-Host "Successfully installed: " $app.name -ForegroundColor Green
+                Write-Host 'Successfully installed: ' $app.name -ForegroundColor Green
                 $installedApps += $app.name
             }
         }
         else {
-            Write-Host "Skipping: " $app.name " (already installed)" -ForegroundColor Yellow
+            Write-Host 'Skipping: ' $app.name ' (already installed)' -ForegroundColor Yellow
             $skippedApps += $app.name
         }
     }
@@ -268,68 +268,68 @@ $updatedApps = @()
 $failedUpdateApps = @()
 
 # Check if any apps need to be updated. If so, update them.
-Write-Host "Checking if any apps need to be updated..." -ForegroundColor Blue
+Write-Host 'Checking if any apps need to be updated...' -ForegroundColor Blue
 
 $appsToUpdate = @()
 $updateResults = winget update | ForEach-Object {
     Write-Host $_
-    if ($_ -match "^\S+\s+\S+\s+\S+\s+\S+\s+\S+$" -and $_ -ne "Name       Id                    Version   Available Source") {
+    if ($_ -match '^\S+\s+\S+\s+\S+\s+\S+\s+\S+$' -and $_ -ne 'Name       Id                    Version   Available Source') {
         $appsToUpdate += $_.Split()[0]
     }
 }
 
 if (-not $appsToUpdate) {
-    Write-Host "No apps found that need to be updated." -ForegroundColor Yellow
+    Write-Host 'No apps found that need to be updated.' -ForegroundColor Yellow
 }
 else {
     Write-Host "Apps to update: $($appsToUpdate -join ', ')" -ForegroundColor Green
 }
 
 $updateResults | ForEach-Object {
-    if ($_ -match "Upgraded") {
+    if ($_ -match 'Upgraded') {
         $updatedApps += $_.Split()[1]
     }
-    elseif ($_ -match "Installer failed with exit code") {
+    elseif ($_ -match 'Installer failed with exit code') {
         $failedUpdateApps += $_.Split()[1]
     }
 }
 
 # Output winget update --all --include-unknown
-Write-Host "Running winget update --all --include-unknown..." -ForegroundColor Blue
+Write-Host 'Running winget update --all --include-unknown...' -ForegroundColor Blue
 winget update --all --include-unknown | ForEach-Object {
     Write-Host $_
-    if ($_ -match "Successfully installed") {
+    if ($_ -match 'Successfully installed') {
         $updatedApps += $_.Split()[1]
     }
-    elseif ($_ -match "Installer failed with exit code") {
+    elseif ($_ -match 'Installer failed with exit code') {
         $failedUpdateApps += $_.Split()[1]
     }
 }
 
 # Display the summary of the installation
-Write-Host "Summary:" -ForegroundColor Blue
+Write-Host 'Summary:' -ForegroundColor Blue
 
-$headers = @("Status", "Apps")
+$headers = @('Status', 'Apps')
 $rows = @()
 
 if ($installedApps) {
-    $rows += , @("Installed", $installedApps -join ', ')
+    $rows += , @('Installed', $installedApps -join ', ')
 }
 if ($skippedApps) {
-    $rows += , @("Skipped", $skippedApps -join ', ')
+    $rows += , @('Skipped', $skippedApps -join ', ')
 }
 if ($failedApps) {
-    $rows += , @("Failed", $failedApps -join ', ')
+    $rows += , @('Failed', $failedApps -join ', ')
 }
 if ($updatedApps) {
-    $rows += , @("Updated", $updatedApps -join ', ')
+    $rows += , @('Updated', $updatedApps -join ', ')
 }
 if ($failedUpdateApps) {
-    $rows += , @("Failed to Update", $failedUpdateApps -join ', ')
+    $rows += , @('Failed to Update', $failedUpdateApps -join ', ')
 }
 
 Show-Table -Headers $headers -Rows $rows
 
 # Keep the console window open until the user presses a key
-Write-Host "Press any key to exit..." -ForegroundColor Blue
+Write-Host 'Press any key to exit...' -ForegroundColor Blue
 [System.Console]::ReadKey($true) > $null
