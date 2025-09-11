@@ -6,6 +6,8 @@
 - Brace placement: One True Brace (OTBS)
 - Naming conventions:
   - Variables: Use camelCase for internal variables, Use PascalCase for PowerShell global variables and parameters. Use default PowerShell naming conventions for everything else.
+- Always follow the DRY principle (Don't Repeat Yourself)
+- Commenting: Use comments to explain complex logic, but avoid over-commenting obvious code
 
 ## Project Context
 
