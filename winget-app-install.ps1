@@ -143,13 +143,13 @@ function Test-PathInEnvironment {
 
 # Check if the script is run as administrator
 If (-NOT ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")) {
-    Write-Host "You need to run this script as an administrator!" -ForegroundColor Red
-    # Keep the console window open until the user presses a key
-    Write-Host "Press any key to exit..." -ForegroundColor Blue
-    [System.Console]::ReadKey($true) > $null
-    Exit 1
+    Write-Host "This script requires administrator privileges. Press Enter to restart script with elevated privileges." -ForegroundColor Red
+    Pause
+    # Relaunch the script with administrator privileges
+    Start-Process powershell.exe -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`"" -Verb RunAs
+    Exit
 } else {
-    Write-Host "Running as administrator..." -ForegroundColor Green
+    Write-Host "Starting..." -ForegroundColor Green
 }
 
 # Add the script directory to the PATH
