@@ -370,12 +370,17 @@ Write-Host 'Checking for available updates...' -ForegroundColor Blue
 
 # First check what updates are available
 $updateCheckArgs = 'upgrade', '--all'
-$updateCheckOutput = & winget $updateCheckArgs 2>&1 | Where-Object { $_ -notmatch '^[\s\-\|\\]*$' -and $_ -notmatch '^$' }
+$updateCheckOutput = & winget $updateCheckArgs 2>&1 | Where-Object { $_ -notmatch '^[\s\-\|\\]*$' -and $_ -notmatch '^$' -and $_ -notmatch '^Name\s+Id\s+Version\s+Available\s+Source$' }
 
-# Check if there are any packages that can be upgraded
+# Check if there are any packages that can be upgraded (look for lines that look like package entries)
 $hasUpdates = $false
 $updateCheckOutput | ForEach-Object {
-    if ($_ -match '^\S+') {
+    # Look for lines that have multiple space-separated fields (typical of package listings)
+    # but exclude header lines, status messages, and error messages
+    if ($_ -match '^\S+\s+\S+\s+\S+\s+\S+\s+\S+' -and
+        $_ -notmatch 'up to date|No packages|No installed package found' -and
+        $_ -notmatch '^Name\s+Id' -and
+        $_ -notmatch 'matching input criteria') {
         $hasUpdates = $true
     }
 }
