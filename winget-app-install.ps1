@@ -261,6 +261,29 @@ function Invoke-WingetCommand {
     }
 }
 
+<#
+.SYNOPSIS
+    Formats an array of app names for display in the summary table.
+.DESCRIPTION
+    This function checks if an array has content and formats it as a comma-separated string.
+.PARAMETER AppArray
+    The array of app names to format
+.RETURNS
+    A formatted string of app names, or $null if the array is empty
+#>
+function Format-AppList {
+    param (
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [string[]]$AppArray
+    )
+
+    if ($AppArray -and $AppArray.Count -gt 0) {
+        return $AppArray -join ', '
+    }
+    return $null
+}
+
 #------------------------------------------------Main Script------------------------------------------------
 
 # Check if the script is run as administrator
@@ -375,24 +398,28 @@ Write-Host 'Summary:' -ForegroundColor Blue
 $headers = @('Status', 'Apps')
 $rows = @()
 
-if ($installedApps -and $installedApps.Count -gt 0) {
-    $appList = $installedApps -join ', '
+$appList = Format-AppList -AppArray $installedApps
+if ($appList) {
     $rows += , @('Installed', $appList)
 }
-if ($skippedApps -and $skippedApps.Count -gt 0) {
-    $appList = $skippedApps -join ', '
+
+$appList = Format-AppList -AppArray $skippedApps
+if ($appList) {
     $rows += , @('Skipped', $appList)
 }
-if ($failedApps -and $failedApps.Count -gt 0) {
-    $appList = $failedApps -join ', '
+
+$appList = Format-AppList -AppArray $failedApps
+if ($appList) {
     $rows += , @('Failed', $appList)
 }
-if ($updatedApps -and $updatedApps.Count -gt 0) {
-    $appList = $updatedApps -join ', '
+
+$appList = Format-AppList -AppArray $updatedApps
+if ($appList) {
     $rows += , @('Updated', $appList)
 }
-if ($failedUpdateApps -and $failedUpdateApps.Count -gt 0) {
-    $appList = $failedUpdateApps -join ', '
+
+$appList = Format-AppList -AppArray $failedUpdateApps
+if ($appList) {
     $rows += , @('Failed to Update', $appList)
 }
 
