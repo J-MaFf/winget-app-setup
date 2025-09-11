@@ -23,7 +23,7 @@
 .SYNOPSIS
  Installs a list of programs using winget.
 
-.DESCRIPTION 
+.DESCRIPTION
  This script installs the following programs from winget:
 
  7-zip
@@ -33,7 +33,7 @@
  Google Drive
  Dell Command Update (Universal)
  PowerShell
- Windows Terminal 
+ Windows Terminal
 #>
 
 # ------------------------------------------------Functions------------------------------------------------
@@ -186,6 +186,81 @@ function Show-Table {
     }
 }
 
+<#
+.SYNOPSIS
+    Runs a winget command and processes its output for success/failure tracking.
+.DESCRIPTION
+    This function executes a winget command, displays its output naturally, and parses the results
+    to track successful and failed operations.
+.PARAMETER Command
+    The winget command to execute (e.g., "update --all --include-unknown")
+.PARAMETER SuccessPattern
+    Regex pattern to match successful operations
+.PARAMETER FailurePattern
+    Regex pattern to match failed operations
+.PARAMETER SuccessArray
+    Reference to array that will store successful app names
+.PARAMETER FailureArray
+    Reference to array that will store failed app names
+.PARAMETER SuccessIndex
+    Index in the split result to extract the app name for successful operations (default: 1)
+.PARAMETER FailureIndex
+    Index in the split result to extract the app name for failed operations (default: 1)
+#>
+function Invoke-WingetCommand {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$Command,
+
+        [Parameter(Mandatory = $true)]
+        [string]$SuccessPattern,
+
+        [Parameter(Mandatory = $true)]
+        [string]$FailurePattern,
+
+        [Parameter(Mandatory = $true)]
+        [ref]$SuccessArray,
+
+        [Parameter(Mandatory = $true)]
+        [ref]$FailureArray,
+
+        [Parameter(Mandatory = $false)]
+        [int]$SuccessIndex = 1,
+
+        [Parameter(Mandatory = $false)]
+        [int]$FailureIndex = 1
+    )
+
+    # Execute winget command with real-time output first
+    try {
+        # Split the command string into arguments properly
+        $commandArgs = $Command -split ' '
+        & winget $commandArgs
+    }
+    catch {
+        Write-Host "Error executing winget command: $_" -ForegroundColor Red
+    }
+
+    # Now run again to capture output for parsing (without progress display)
+    try {
+        $commandArgs = $Command -split ' '
+        $commandOutput = & winget $commandArgs 2>&1 | Where-Object { $_ -notmatch '^[\s\-\|\\]*$' }
+    }
+    catch {
+        Write-Host "Error capturing winget output: $_" -ForegroundColor Red
+        $commandOutput = @()
+    }
+
+    $commandOutput | ForEach-Object {
+        if ($_ -match $SuccessPattern) {
+            $SuccessArray.Value += $_.Split()[$SuccessIndex]
+        }
+        elseif ($_ -match $FailurePattern) {
+            $FailureArray.Value += $_.Split()[$FailureIndex]
+        }
+    }
+}
+
 #------------------------------------------------Main Script------------------------------------------------
 
 # Check if the script is run as administrator
@@ -267,43 +342,31 @@ Foreach ($app in $apps) {
 $updatedApps = @()
 $failedUpdateApps = @()
 
-# Check if any apps need to be updated. If so, update them.
-Write-Host 'Checking if any apps need to be updated...' -ForegroundColor Blue
+# Check for updates and perform them in one step
+Write-Host 'Checking for available updates...' -ForegroundColor Blue
 
-$appsToUpdate = @()
-$updateResults = winget update | ForEach-Object {
-    Write-Host $_
-    if ($_ -match '^\S+\s+\S+\s+\S+\s+\S+\s+\S+$' -and $_ -ne 'Name       Id                    Version   Available Source') {
-        $appsToUpdate += $_.Split()[0]
+# First check what updates are available
+$updateCheckArgs = 'upgrade', '--all'
+$updateCheckOutput = & winget $updateCheckArgs 2>&1 | Where-Object { $_ -notmatch '^[\s\-\|\\]*$' -and $_ -notmatch '^$' }
+
+# Check if there are any packages that can be upgraded
+$hasUpdates = $false
+$updateCheckOutput | ForEach-Object {
+    if ($_ -match '^\S+') {
+        $hasUpdates = $true
     }
 }
 
-if (-not $appsToUpdate) {
-    Write-Host 'No apps found that need to be updated.' -ForegroundColor Yellow
+if ($hasUpdates) {
+    Write-Host 'Updates found. Installing updates...' -ForegroundColor Green
+    Invoke-WingetCommand -Command 'upgrade --all' `
+        -SuccessPattern 'Successfully installed' `
+        -FailurePattern 'Installer failed with exit code' `
+        -SuccessArray ([ref]$updatedApps) `
+        -FailureArray ([ref]$failedUpdateApps)
 }
 else {
-    Write-Host "Apps to update: $($appsToUpdate -join ', ')" -ForegroundColor Green
-}
-
-$updateResults | ForEach-Object {
-    if ($_ -match 'Upgraded') {
-        $updatedApps += $_.Split()[1]
-    }
-    elseif ($_ -match 'Installer failed with exit code') {
-        $failedUpdateApps += $_.Split()[1]
-    }
-}
-
-# Output winget update --all --include-unknown
-Write-Host 'Running winget update --all --include-unknown...' -ForegroundColor Blue
-winget update --all --include-unknown | ForEach-Object {
-    Write-Host $_
-    if ($_ -match 'Successfully installed') {
-        $updatedApps += $_.Split()[1]
-    }
-    elseif ($_ -match 'Installer failed with exit code') {
-        $failedUpdateApps += $_.Split()[1]
-    }
+    Write-Host 'No updates available.' -ForegroundColor Yellow
 }
 
 # Display the summary of the installation
@@ -312,20 +375,25 @@ Write-Host 'Summary:' -ForegroundColor Blue
 $headers = @('Status', 'Apps')
 $rows = @()
 
-if ($installedApps) {
-    $rows += , @('Installed', $installedApps -join ', ')
+if ($installedApps -and $installedApps.Count -gt 0) {
+    $appList = $installedApps -join ', '
+    $rows += , @('Installed', $appList)
 }
-if ($skippedApps) {
-    $rows += , @('Skipped', $skippedApps -join ', ')
+if ($skippedApps -and $skippedApps.Count -gt 0) {
+    $appList = $skippedApps -join ', '
+    $rows += , @('Skipped', $appList)
 }
-if ($failedApps) {
-    $rows += , @('Failed', $failedApps -join ', ')
+if ($failedApps -and $failedApps.Count -gt 0) {
+    $appList = $failedApps -join ', '
+    $rows += , @('Failed', $appList)
 }
-if ($updatedApps) {
-    $rows += , @('Updated', $updatedApps -join ', ')
+if ($updatedApps -and $updatedApps.Count -gt 0) {
+    $appList = $updatedApps -join ', '
+    $rows += , @('Updated', $appList)
 }
-if ($failedUpdateApps) {
-    $rows += , @('Failed to Update', $failedUpdateApps -join ', ')
+if ($failedUpdateApps -and $failedUpdateApps.Count -gt 0) {
+    $appList = $failedUpdateApps -join ', '
+    $rows += , @('Failed to Update', $appList)
 }
 
 Show-Table -Headers $headers -Rows $rows
