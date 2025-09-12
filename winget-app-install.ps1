@@ -354,14 +354,14 @@ function Format-AppList {
 
 <#
 .SYNOPSIS
-    Checks if there are any available updates for installed packages using winget.
+    Tests if there are any available updates for installed packages using winget.
 .DESCRIPTION
-    This function checks for available updates by attempting different winget commands
+    This function tests for available updates by attempting different winget commands
     and parsing their output to determine if updates are available.
 .RETURNS
     [bool] True if updates are available, otherwise False.
 #>
-function Get-HasUpdates {
+function Test-UpdatesAvailable {
     try {
         Write-Host 'Checking for available updates...' -ForegroundColor Blue
 
@@ -483,7 +483,7 @@ $updatedApps = @()
 $failedUpdateApps = @()
 
 # Check for updates and perform them in one step
-$hasUpdates = Get-HasUpdates
+$hasUpdates = Test-UpdatesAvailable
 
 if ($hasUpdates) {
     Write-Host 'Updates found. Installing updates...' -ForegroundColor Green
