@@ -6,7 +6,7 @@
 
 .AUTHOR Joey Maffiola
 
-.EXTERNALMODULEDEPENDENCIES winget
+.EXTERNALMODULEDEPENDENCIES winget, Microsoft.WinGet.Client
 
 .TAGS winget, installation, automation
 
@@ -35,6 +35,16 @@
  PowerShell
  Windows Terminal
 #>
+
+# Import required modules
+try {
+    Import-Module Microsoft.WinGet.Client -ErrorAction Stop
+    Write-Host "Successfully imported Microsoft.WinGet.Client module" -ForegroundColor Green
+}
+catch {
+    Write-Warning "Failed to import Microsoft.WinGet.Client module: $_"
+    Write-Warning "Update functionality will use fallback CLI methods"
+}
 
 # ------------------------------------------------Functions------------------------------------------------
 
@@ -346,60 +356,42 @@ function Format-AppList {
 .SYNOPSIS
     Checks if there are any available updates for installed packages using winget.
 .DESCRIPTION
-    This function attempts to check for updates using winget's JSON output first,
-    with fallback to text parsing if JSON fails.
+    This function checks for available updates by attempting different winget commands
+    and parsing their output to determine if updates are available.
 .RETURNS
     [bool] True if updates are available, otherwise False.
 #>
 function Get-HasUpdates {
     try {
-        $updateCheckOutput = & winget upgrade --output json 2>&1
-        $updateJson = $updateCheckOutput | ConvertFrom-Json
+        Write-Host "Checking for available updates..." -ForegroundColor Blue
 
-        if ($updateJson.PSObject.Properties.Name -contains 'Sources') {
-            # Newer winget versions output an object with a 'Sources' property
-            $allPackages = @()
-            foreach ($source in $updateJson.Sources) {
-                if ($source.Packages) {
-                    $allPackages += $source.Packages
-                }
-            }
-            if ($allPackages.Count -gt 0) {
+        # Try PowerShell module first
+        if (Get-Command Get-WinGetPackage -ErrorAction SilentlyContinue) {
+            $packagesWithUpdates = Get-WinGetPackage | Where-Object IsUpdateAvailable
+
+            if ($packagesWithUpdates -and $packagesWithUpdates.Count -gt 0) {
+                Write-Host "Found $($packagesWithUpdates.Count) package(s) with available updates." -ForegroundColor Green
                 return $true
             }
         }
-        elseif ($updateJson -is [array] -and $updateJson.Count -gt 0) {
-            # Older winget versions may output an array of packages directly
-            return $true
-        }
-    }
-    catch {
-        Write-Warning 'Failed to parse winget upgrade output as JSON. Falling back to text parsing.'
-        # Fallback: Use text parsing logic as a backup
-        $updateCheckArgs = 'upgrade', '--all'
-        $updateCheckOutput = & winget $updateCheckArgs 2>&1 | Where-Object { $_ -notmatch '^[\s\-\|\\]*$' -and $_ -notmatch '^$' }
+        else {
+            Write-Host "PowerShell module not available, using CLI fallback..." -ForegroundColor Yellow
 
-        foreach ($line in $updateCheckOutput) {
-            $line = $line.Trim()
-            # More robust pattern matching for actual package entries
-            # Check for lines that look like package entries but exclude headers and status messages
-            if ($line -and
-                $line -notmatch '^Name\s+Id\s+Version\s+Available' -and # Header line
-                $line -notmatch '^[-]+$' -and # Separator lines
-                $line -notmatch 'No installed package found' -and
-                $line -notmatch 'No packages found' -and
-                $line -notmatch 'up to date' -and
-                $line -notmatch '^\d+ packages? available' -and
-                $line.Length -gt 10) {
-                # Reasonable minimum length for a valid package entry
+            # Fallback to CLI method
+            $basicUpgradeResult = & winget upgrade 2>&1
+            $basicOutput = $basicUpgradeResult | Out-String
 
-                # Additional validation: should contain version-like patterns (digits and dots)
-                if ($line -match '\d+\.\d+' -and $line -match '\s+\S+\s+\S+') {
-                    return $true
-                }
+            if ($basicOutput -notmatch 'No installed package found matching input criteria' -and
+                $basicOutput -notmatch 'No available upgrade found') {
+                return $true
             }
         }
     }
+    catch {
+        Write-Warning "Error checking for updates: $_"
+    }
+
+    Write-Host "No updates available." -ForegroundColor Yellow
     return $false
 }
 
@@ -485,17 +477,73 @@ $updatedApps = @()
 $failedUpdateApps = @()
 
 # Check for updates and perform them in one step
-Write-Host 'Checking for available updates...' -ForegroundColor Blue
-
 $hasUpdates = Get-HasUpdates
 
 if ($hasUpdates) {
     Write-Host 'Updates found. Installing updates...' -ForegroundColor Green
-    Invoke-WingetCommand -Command 'upgrade --all' `
-        -SuccessPattern 'Successfully installed' `
-        -FailurePattern 'Installer failed with exit code' `
-        -SuccessArray ([ref]$updatedApps) `
-        -FailureArray ([ref]$failedUpdateApps)
+
+    # Try PowerShell module first
+    if (Get-Command Update-WinGetPackage -ErrorAction SilentlyContinue) {
+        $updateResults = Get-WinGetPackage | Where-Object IsUpdateAvailable | Update-WinGetPackage
+
+        foreach ($result in $updateResults) {
+            if ($result.Status -eq 'Ok') {
+                $updatedApps += $result.Id
+                Write-Host "Successfully updated: $($result.Id)" -ForegroundColor Green
+            }
+            else {
+                $failedUpdateApps += $result.Id
+                Write-Host "Failed to update: $($result.Id) - $($result.Status)" -ForegroundColor Red
+            }
+        }
+    }
+    else {
+        Write-Host "PowerShell module not available, using CLI fallback..." -ForegroundColor Yellow
+
+        # Fallback to CLI method - get list of packages that have updates available
+        $installedPackages = & winget list --source winget 2>&1 | Where-Object {
+            $_ -and
+            $_ -notmatch '^[\s\-\|\\]*$' -and
+            $_ -notmatch '^$' -and
+            $_ -notmatch '^Name\s+Id\s+Version\s+Source' -and
+            $_ -notmatch '^[-]+$' -and
+            $_ -notmatch 'No installed package found'
+        }
+
+        foreach ($package in $installedPackages) {
+            $package = $package.Trim()
+            # Split the line by multiple spaces to get columns
+            # Format: Name | Id | Version | Source
+            $columns = $package -split '\s{2,}'
+            if ($columns.Count -ge 2) {
+                $packageId = $columns[1]  # Second column is the ID
+
+                # Skip if it's not a winget package or if it's a system component
+                if ($packageId -and $packageId -notmatch '^(ARP|MSIX)') {
+                    try {
+                        $upgradeResult = & winget upgrade $packageId 2>&1
+                        $upgradeOutput = $upgradeResult | Out-String
+
+                        # Check if upgrade is available and successful
+                        if ($upgradeOutput -match 'Successfully installed') {
+                            $updatedApps += $packageId
+                            Write-Host "Successfully updated: $packageId" -ForegroundColor Green
+                        }
+                        elseif ($upgradeOutput -notmatch 'No available upgrade found' -and
+                                $upgradeOutput -notmatch 'No newer package versions are available') {
+                            # Package has an update but installation may have failed
+                            $failedUpdateApps += $packageId
+                            Write-Host "Failed to update: $packageId" -ForegroundColor Red
+                        }
+                    }
+                    catch {
+                        $failedUpdateApps += $packageId
+                        Write-Host "Error updating ${packageId}: $_" -ForegroundColor Red
+                    }
+                }
+            }
+        }
+    }
 }
 else {
     Write-Host 'No updates available.' -ForegroundColor Yellow
