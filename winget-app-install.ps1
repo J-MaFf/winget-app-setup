@@ -397,12 +397,15 @@ function Get-HasUpdates {
 
 #------------------------------------------------Main Script------------------------------------------------
 
+# Determine which PowerShell executable to use
+$psExecutable = if (Get-Command pwsh -ErrorAction SilentlyContinue) { 'pwsh.exe' } else { 'powershell.exe' }
+
 # Check if the script is run as administrator
 If (-NOT ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] 'Administrator')) {
     Write-Host 'This script requires administrator privileges. Press Enter to restart script with elevated privileges.' -ForegroundColor Red
     Pause
     # Relaunch the script with administrator privileges
-    Start-Process powershell.exe -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`"" -Verb RunAs
+    Start-Process $psExecutable -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`"" -Verb RunAs
     Exit
 }
 else {
