@@ -21,11 +21,13 @@ function Show-Table {
     }
 
     # Build table divider with proper column separators
-    $divider = '+'
+    $dividerParts = @('+')
     foreach ($header in $Headers) {
         $columnWidth = $maxLengths[$header] + 2  # Add padding for spaces
-        $divider += ('-' * $columnWidth) + '+'
+        $dividerParts += ('-' * $columnWidth)
+        $dividerParts += '+'
     }
+    $divider = $dividerParts -join ''
 
     # Build header line
     $headerLine = ''

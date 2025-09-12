@@ -159,11 +159,13 @@ function Show-Table {
     }
 
     # Build table divider with proper column separators
-    $divider = '+'
+    $dividerParts = @('+')
     foreach ($header in $Headers) {
         $columnWidth = $maxLengths[$header] + 2  # Add padding for spaces
-        $divider += ('-' * $columnWidth) + '+'
+        $dividerParts += ('-' * $columnWidth)
+        $dividerParts += '+'
     }
+    $divider = $dividerParts -join ''
 
     # Build header line
     $headerLine = ''
@@ -443,7 +445,7 @@ $hasUpdates = $false
 try {
     $updateCheckOutput = & winget upgrade --output json 2>&1
     $updateJson = $updateCheckOutput | ConvertFrom-Json
-    
+
     if ($updateJson.PSObject.Properties.Name -contains 'Sources') {
         # Newer winget versions output an object with a 'Sources' property
         $allPackages = @()
@@ -466,16 +468,25 @@ catch {
     # Fallback: Use text parsing logic as a backup
     $updateCheckArgs = 'upgrade', '--all'
     $updateCheckOutput = & winget $updateCheckArgs 2>&1 | Where-Object { $_ -notmatch '^[\s\-\|\\]*$' -and $_ -notmatch '^$' }
-    
+
     $updateCheckOutput | ForEach-Object {
-        # More specific pattern matching for actual package entries
-        # Must have at least 4 space-separated fields AND contain version-like patterns
-        if ($_ -match '^\S+\s+\S+\s+\S+(\.\S+)+\s+\S+(\.\S+)+' -and
-            $_ -notmatch 'No installed package found|No packages found|up to date' -and
-            $_ -notmatch '^Name\s+Id' -and
-            $_.Length -gt 20) {
+        $line = $_.Trim()
+        # More robust pattern matching for actual package entries
+        # Check for lines that look like package entries but exclude headers and status messages
+        if ($line -and
+            $line -notmatch '^Name\s+Id\s+Version\s+Available' -and # Header line
+            $line -notmatch '^[-]+$' -and # Separator lines
+            $line -notmatch 'No installed package found' -and
+            $line -notmatch 'No packages found' -and
+            $line -notmatch 'up to date' -and
+            $line -notmatch '^\d+ packages? available' -and
+            $line.Length -gt 10) {
             # Reasonable minimum length for a valid package entry
-            $hasUpdates = $true
+
+            # Additional validation: should contain version-like patterns (digits and dots)
+            if ($line -match '\d+\.\d+' -and $line -match '\s+\S+\s+\S+') {
+                $hasUpdates = $true
+            }
         }
     }
 }
