@@ -27,6 +27,7 @@
 - **Summary Display**: Always show final table with operation counts
 
 ## Key Functions to Reuse
+- `Test-AndInstallWinget()`: Check winget availability and install if missing
 - `Test-Source-IsTrusted()`: Verify winget source trust status
 - `Set-Sources()`: Add and trust winget sources
 - `Add-ToEnvironmentPath()`: Add paths to user/system PATH
@@ -49,9 +50,12 @@
 - **PATH Management**: Use `Add-ToEnvironmentPath` for script accessibility
 
 ## Testing Approach
-- **Unit Testing**: Extract functions to separate test files (see `test-print-table.ps1`)
-- **Integration Testing**: Test with real winget commands and mock outputs
-- **Error Scenarios**: Test with non-existent packages and network failures
+- **Comprehensive Test Suite**: Use Pester for unit testing with comprehensive coverage in `Test-WingetAppInstall.Tests.ps1`
+- **Test Coverage**: All functions and main script logic are tested, including edge cases and error scenarios
+- **Running Tests**: Execute tests with `Invoke-Pester -Path .\Test-WingetAppInstall.Tests.ps1 -Output Detailed`
+- **Adding New Tests**: When creating new functions or functionality in `winget-app-install.ps1`, add corresponding tests to `Test-WingetAppInstall.Tests.ps1`
+- **Mocking Strategy**: Use Pester mocks for external commands (winget, Get-Command, etc.) to test logic without real system changes
+- **Error Scenarios**: Test with non-existent packages, network failures, and permission issues
 
 ## Deployment
 - **Current State**: Local repository only - not yet published to PowerShell Gallery
@@ -96,6 +100,11 @@
 - **Error Scenario Testing**: Use fake packages like `@{name = 'Fake.Package'}` to test error handling
 - **Output Validation**: Test table formatting with `Write-Table()` function
 - **Integration Testing**: Full script execution with real winget commands
+
+### Interaction Guidelines
+- **Explain Before Acting**: Always explain the purpose and impact of any action before executing terminal commands, installing packages, or making system changes
+- **Seek Confirmation**: For potentially disruptive actions (installations, system modifications), ask for user confirmation before proceeding
+- **Provide Context**: When suggesting commands or changes, include why they're needed and what they accomplish
 
 ## Integration Points & Dependencies
 
