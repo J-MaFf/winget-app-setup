@@ -39,11 +39,11 @@
 # Import required modules
 try {
     Import-Module Microsoft.WinGet.Client -ErrorAction Stop
-    Write-Host "Successfully imported Microsoft.WinGet.Client module" -ForegroundColor Green
+    Write-Host 'Successfully imported Microsoft.WinGet.Client module' -ForegroundColor Green
 }
 catch {
     Write-Warning "Failed to import Microsoft.WinGet.Client module: $_"
-    Write-Warning "Update functionality will use fallback CLI methods"
+    Write-Warning 'Update functionality will use fallback CLI methods'
 }
 
 # ------------------------------------------------Functions------------------------------------------------
@@ -363,7 +363,7 @@ function Format-AppList {
 #>
 function Get-HasUpdates {
     try {
-        Write-Host "Checking for available updates..." -ForegroundColor Blue
+        Write-Host 'Checking for available updates...' -ForegroundColor Blue
 
         # Try PowerShell module first
         if (Get-Command Get-WinGetPackage -ErrorAction SilentlyContinue) {
@@ -371,11 +371,14 @@ function Get-HasUpdates {
 
             if ($packagesWithUpdates -and $packagesWithUpdates.Count -gt 0) {
                 Write-Host "Found $($packagesWithUpdates.Count) package(s) with available updates." -ForegroundColor Green
+                $packagesWithUpdates | ForEach-Object {
+                    Write-Host " - $($_.Id) (Current: $($_.InstalledVersion), Available: $($_.AvailableVersion))"
+                }
                 return $true
             }
         }
         else {
-            Write-Host "PowerShell module not available, using CLI fallback..." -ForegroundColor Yellow
+            Write-Host 'PowerShell module not available, using CLI fallback...' -ForegroundColor Yellow
 
             # Fallback to CLI method
             $basicUpgradeResult = & winget upgrade 2>&1
@@ -391,7 +394,7 @@ function Get-HasUpdates {
         Write-Warning "Error checking for updates: $_"
     }
 
-    Write-Host "No updates available." -ForegroundColor Yellow
+    Write-Host 'No updates available.' -ForegroundColor Yellow
     return $false
 }
 
@@ -501,7 +504,7 @@ if ($hasUpdates) {
         }
     }
     else {
-        Write-Host "PowerShell module not available, using CLI fallback..." -ForegroundColor Yellow
+        Write-Host 'PowerShell module not available, using CLI fallback...' -ForegroundColor Yellow
 
         # Fallback to CLI method - get list of packages that have updates available
         $installedPackages = & winget list --source winget 2>&1 | Where-Object {
@@ -533,7 +536,7 @@ if ($hasUpdates) {
                             Write-Host "Successfully updated: $packageId" -ForegroundColor Green
                         }
                         elseif ($upgradeOutput -notmatch 'No available upgrade found' -and
-                                $upgradeOutput -notmatch 'No newer package versions are available') {
+                            $upgradeOutput -notmatch 'No newer package versions are available') {
                             # Package has an update but installation may have failed
                             $failedUpdateApps += $packageId
                             Write-Host "Failed to update: $packageId" -ForegroundColor Red
