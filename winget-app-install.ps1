@@ -150,16 +150,16 @@ function Test-PathInEnvironment {
 
 <#
 .SYNOPSIS
-    Parses a command string into an array of arguments, properly handling quoted arguments.
+    Converts a command string into an array of arguments, properly handling quoted arguments.
 .DESCRIPTION
     This function takes a command string and splits it into individual arguments while
     correctly handling quoted strings that may contain spaces.
 .PARAMETER Command
-    The command string to parse
+    The command string to convert
 .RETURNS
     An array of parsed command arguments
 #>
-function Convert-CommandToArguments {
+function ConvertTo-CommandArguments {
     param (
         [Parameter(Mandatory = $true)]
         [string]$Command
@@ -204,7 +204,7 @@ function Convert-CommandToArguments {
     return $commandArgs
 }
 
-function Show-Table {
+function Write-Table {
     param (
         [Parameter(Mandatory = $true)]
         [string[]]$Headers,
@@ -306,7 +306,7 @@ function Invoke-WingetCommand {
     )
 
     # Parse command string into arguments properly, handling quoted arguments
-    $commandArgs = Convert-CommandToArguments -Command $Command
+    $commandArgs = ConvertTo-CommandArguments -Command $Command
 
     & winget $commandArgs
 
@@ -586,7 +586,7 @@ if ($appList) {
     $rows += , @('Failed to Update', $appList)
 }
 
-Show-Table -Headers $headers -Rows $rows
+Write-Table -Headers $headers -Rows $rows
 
 # Keep the console window open until the user presses a key
 Write-Host 'Press any key to exit...' -ForegroundColor Blue

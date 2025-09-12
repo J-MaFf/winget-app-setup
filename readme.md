@@ -168,7 +168,7 @@ The scripts include several configurable functions:
 
 - `Test-Source-IsTrusted()` - Source trust verification
 - `Set-Sources()` - Source trust setup
-- `Show-Table()` - Result display formatting
+- `Write-Table()` - Result display formatting
 - `Invoke-WingetCommand()` - Winget command execution with parsing
 
 ## Troubleshooting

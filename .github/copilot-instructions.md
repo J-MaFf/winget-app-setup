@@ -22,7 +22,7 @@
 - **Result Tracking**: Maintain separate arrays for `$installedApps`, `$skippedApps`, `$failedApps`
 
 ### Output & Display
-- **Table Formatting**: Use custom `Show-Table` function for result summaries (see `winget-app-install.ps1`)
+- **Table Formatting**: Use custom `Write-Table` function for result summaries (see `winget-app-install.ps1`)
 - **Progress Messages**: Color-coded output (Blue for actions, Green for success, Yellow for skips, Red for errors)
 - **Summary Display**: Always show final table with operation counts
 
@@ -30,8 +30,8 @@
 - `Test-Source-IsTrusted()`: Verify winget source trust status
 - `Set-Sources()`: Add and trust winget sources
 - `Add-ToEnvironmentPath()`: Add paths to user/system PATH
-- `Convert-CommandToArguments()`: Parse command strings with quoted arguments
-- `Show-Table()`: Display formatted ASCII tables
+- `ConvertTo-CommandArguments()`: Parse command strings with quoted arguments
+- `Write-Table()`: Display formatted ASCII tables
 - `Invoke-WingetCommand()`: Execute winget commands with output parsing
 
 ## Workflow Patterns
@@ -80,7 +80,7 @@
 ### Cross-Component Communication
 - **Shared App Lists**: Same application definitions used across install/uninstall scripts
 - **Consistent Result Arrays**: `$installedApps`, `$skippedApps`, `$failedApps` pattern used universally
-- **Common Utility Functions**: Shared functions like `Show-Table()` and `Test-Source-IsTrusted()`
+- **Common Utility Functions**: Shared functions like `Write-Table()` and `Test-Source-IsTrusted()`
 
 ## Developer Workflows
 
@@ -94,7 +94,7 @@
 ### Build & Test Workflows
 - **Function Testing**: Extract and test individual functions in separate files
 - **Error Scenario Testing**: Use fake packages like `@{name = 'Fake.Package'}` to test error handling
-- **Output Validation**: Test table formatting with `Show-Table()` function
+- **Output Validation**: Test table formatting with `Write-Table()` function
 - **Integration Testing**: Full script execution with real winget commands
 
 ## Integration Points & Dependencies
