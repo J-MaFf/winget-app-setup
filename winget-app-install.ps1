@@ -319,7 +319,7 @@ function Invoke-WingetCommand {
         $commandOutput = & winget $commandArgs 2>&1 | Where-Object { $_ -notmatch '^[\s\-\|\\]*$' }
     }
     catch {
-        Write-Host 'Error capturing winget output: $_' -ForegroundColor Red
+        Write-Host "Error capturing winget output: $($_)" -ForegroundColor Red
         $commandOutput = @()
     }
 
