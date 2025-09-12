@@ -158,7 +158,12 @@ function Show-Table {
         }
     }
 
-    $divider = '+' + ($Headers | ForEach-Object { '-' * ($maxLengths[$_] + 2) }) -join '+' + '+'
+    # Build table divider with proper column separators
+    $divider = '+'
+    foreach ($header in $Headers) {
+        $columnWidth = $maxLengths[$header] + 2  # Add padding for spaces
+        $divider += ('-' * $columnWidth) + '+'
+    }
 
     # Build header line
     $headerLine = ''
@@ -244,18 +249,22 @@ function Invoke-WingetCommand {
             if ($char -eq $quoteChar) {
                 $inQuotes = $false
                 $quoteChar = ''
-            } else {
+            }
+            else {
                 $currentArg += $char
             }
-        } elseif ($char -eq '"' -or $char -eq "'") {
+        }
+        elseif ($char -eq '"' -or $char -eq "'") {
             $inQuotes = $true
             $quoteChar = $char
-        } elseif ($char -eq ' ') {
+        }
+        elseif ($char -eq ' ') {
             if ($currentArg) {
                 $commandArgs += $currentArg
                 $currentArg = ''
             }
-        } else {
+        }
+        else {
             $currentArg += $char
         }
     }
@@ -281,18 +290,22 @@ function Invoke-WingetCommand {
                 if ($char -eq $quoteChar) {
                     $inQuotes = $false
                     $quoteChar = ''
-                } else {
+                }
+                else {
                     $currentArg += $char
                 }
-            } elseif ($char -eq '"' -or $char -eq "'") {
+            }
+            elseif ($char -eq '"' -or $char -eq "'") {
                 $inQuotes = $true
                 $quoteChar = $char
-            } elseif ($char -eq ' ') {
+            }
+            elseif ($char -eq ' ') {
                 if ($currentArg) {
                     $commandArgs += $currentArg
                     $currentArg = ''
                 }
-            } else {
+            }
+            else {
                 $currentArg += $char
             }
         }
@@ -304,7 +317,7 @@ function Invoke-WingetCommand {
         $commandOutput = & winget $commandArgs 2>&1 | Where-Object { $_ -notmatch '^[\s\-\|\\]*$' }
     }
     catch {
-        Write-Host "Error capturing winget output: $_" -ForegroundColor Red
+        Write-Host 'Error capturing winget output: $_' -ForegroundColor Red
         $commandOutput = @()
     }
 
@@ -383,7 +396,7 @@ $failedApps = @()
 $trustedSources = @('winget', 'msstore')
 ForEach ($source in $trustedSources) {
     if (-not (Test-Source-IsTrusted -target $source)) {
-        Write-Host "Trusting source: $source" -ForegroundColor Yellow
+        Write-Host 'Trusting source: $source' -ForegroundColor Yellow
         Set-Sources
     }
     else {
@@ -437,7 +450,8 @@ $updateCheckOutput | ForEach-Object {
     if ($_ -match '^\S+\s+\S+\s+\S+(\.\S+)+\s+\S+(\.\S+)+' -and
         $_ -notmatch 'No installed package found|No packages found|up to date' -and
         $_ -notmatch '^Name\s+Id' -and
-        $_.Length -gt 20) {  # Reasonable minimum length for a valid package entry
+        $_.Length -gt 20) {
+        # Reasonable minimum length for a valid package entry
         $hasUpdates = $true
     }
 }

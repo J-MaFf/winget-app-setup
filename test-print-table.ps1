@@ -20,7 +20,12 @@ function Show-Table {
         }
     }
 
-    $divider = '+' + ($Headers | ForEach-Object { '-' * ($maxLengths[$_] + 2) }) -join '+' + '+'
+    # Build table divider with proper column separators
+    $divider = '+'
+    foreach ($header in $Headers) {
+        $columnWidth = $maxLengths[$header] + 2  # Add padding for spaces
+        $divider += ('-' * $columnWidth) + '+'
+    }
 
     # Build header line
     $headerLine = ''
