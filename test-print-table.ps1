@@ -20,15 +20,20 @@ function Show-Table {
         }
     }
 
-    $divider = "+" + ($Headers | ForEach-Object { "-" * ($maxLengths[$_] + 2) }) -join "+" + "+"
+    # Build table divider with proper column separators
+    $divider = '+'
+    foreach ($header in $Headers) {
+        $columnWidth = $maxLengths[$header] + 2  # Add padding for spaces
+        $divider += ('-' * $columnWidth) + '+'
+    }
 
     # Build header line
-    $headerLine = ""
+    $headerLine = ''
     for ($i = 0; $i -lt $Headers.Count; $i++) {
         $padSize = $maxLengths[$Headers[$i]] - $Headers[$i].Length
-        $headerLine += "|" + " " + $Headers[$i] + (" " * $padSize) + " "
+        $headerLine += '|' + ' ' + $Headers[$i] + (' ' * $padSize) + ' '
     }
-    $headerLine += "|"
+    $headerLine += '|'
 
     Write-Host $divider
     Write-Host $headerLine
@@ -36,13 +41,13 @@ function Show-Table {
 
     # Build each row
     foreach ($row in $Rows) {
-        $rowLine = ""
+        $rowLine = ''
         for ($i = 0; $i -lt $Headers.Count; $i++) {
             $cellValue = $row[$i]
             $padSize = $maxLengths[$Headers[$i]] - $cellValue.Length
-            $rowLine += "|" + " " + $cellValue + (" " * $padSize) + " "
+            $rowLine += '|' + ' ' + $cellValue + (' ' * $padSize) + ' '
         }
-        $rowLine += "|"
+        $rowLine += '|'
 
         Write-Host $rowLine
         Write-Host $divider
@@ -50,11 +55,11 @@ function Show-Table {
 }
 
 # Define headers and rows for testing
-$headers = @("Column1", "Column2", "Column3")
+$headers = @('Column1', 'Column2', 'Column3')
 $rows = @(
-    @("Row1Col1", "Row1Col2", "Row1Col3"),
-    @("Row2Col1", "Row2Col2", "Row2Col3"),
-    @("Row3Col1", "Row3Col2", "Row3Col3")
+    @('Row1Col1', 'Row1Col2', 'Row1Col3'),
+    @('Row2Col1', 'Row2Col2', 'Row2Col3'),
+    @('Row3Col1', 'Row3Col2', 'Row3Col3')
 )
 
 # Call the Show-Table function with the test data

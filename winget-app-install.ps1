@@ -158,7 +158,12 @@ function Show-Table {
         }
     }
 
-    $divider = '+' + ($Headers | ForEach-Object { '-' * ($maxLengths[$_] + 2) }) -join '+' + '+'
+    # Build table divider with proper column separators
+    $divider = '+'
+    foreach ($header in $Headers) {
+        $columnWidth = $maxLengths[$header] + 2  # Add padding for spaces
+        $divider += ('-' * $columnWidth) + '+'
+    }
 
     # Build header line
     $headerLine = ''
@@ -231,23 +236,88 @@ function Invoke-WingetCommand {
         [int]$FailureIndex = 1
     )
 
-    # Execute winget command with real-time output first
-    try {
-        # Split the command string into arguments properly
-        $commandArgs = $Command -split ' '
-        & winget $commandArgs
+    # Parse command string into arguments properly, handling quoted arguments
+    $commandArgs = @()
+    $currentArg = ''
+    $inQuotes = $false
+    $quoteChar = ''
+
+    for ($i = 0; $i -lt $Command.Length; $i++) {
+        $char = $Command[$i]
+
+        if ($inQuotes) {
+            if ($char -eq $quoteChar) {
+                $inQuotes = $false
+                $quoteChar = ''
+            }
+            else {
+                $currentArg += $char
+            }
+        }
+        elseif ($char -eq '"' -or $char -eq "'") {
+            $inQuotes = $true
+            $quoteChar = $char
+        }
+        elseif ($char -eq ' ') {
+            if ($currentArg) {
+                $commandArgs += $currentArg
+                $currentArg = ''
+            }
+        }
+        else {
+            $currentArg += $char
+        }
     }
-    catch {
-        Write-Host "Error executing winget command: $_" -ForegroundColor Red
+
+    if ($currentArg) {
+        $commandArgs += $currentArg
     }
+
+    & winget $commandArgs
 
     # Now run again to capture output for parsing (without progress display)
     try {
-        $commandArgs = $Command -split ' '
+        # Parse command string into arguments properly, handling quoted arguments
+        $commandArgs = @()
+        $currentArg = ''
+        $inQuotes = $false
+        $quoteChar = ''
+
+        for ($i = 0; $i -lt $Command.Length; $i++) {
+            $char = $Command[$i]
+
+            if ($inQuotes) {
+                if ($char -eq $quoteChar) {
+                    $inQuotes = $false
+                    $quoteChar = ''
+                }
+                else {
+                    $currentArg += $char
+                }
+            }
+            elseif ($char -eq '"' -or $char -eq "'") {
+                $inQuotes = $true
+                $quoteChar = $char
+            }
+            elseif ($char -eq ' ') {
+                if ($currentArg) {
+                    $commandArgs += $currentArg
+                    $currentArg = ''
+                }
+            }
+            else {
+                $currentArg += $char
+            }
+        }
+
+        if ($currentArg) {
+            $commandArgs += $currentArg
+        }
+
         $commandOutput = & winget $commandArgs 2>&1 | Where-Object { $_ -notmatch '^[\s\-\|\\]*$' }
     }
     catch {
-        Write-Host "Error capturing winget output: $_" -ForegroundColor Red
+        Write-Host 'Error capturing winget output: $_' -ForegroundColor Red
         $commandOutput = @()
     }
 
@@ -326,7 +396,7 @@ $failedApps = @()
 $trustedSources = @('winget', 'msstore')
 ForEach ($source in $trustedSources) {
     if (-not (Test-Source-IsTrusted -target $source)) {
-        Write-Host "Trusting source: $source" -ForegroundColor Yellow
+        Write-Host 'Trusting source: $source' -ForegroundColor Yellow
         Set-Sources
     }
     else {
@@ -368,20 +438,45 @@ $failedUpdateApps = @()
 # Check for updates and perform them in one step
 Write-Host 'Checking for available updates...' -ForegroundColor Blue
 
-# First check what updates are available
-$updateCheckArgs = 'upgrade', '--all'
-$updateCheckOutput = & winget $updateCheckArgs 2>&1 | Where-Object { $_ -notmatch '^[\s\-\|\\]*$' -and $_ -notmatch '^$' -and $_ -notmatch '^Name\s+Id\s+Version\s+Available\s+Source$' }
-
-# Check if there are any packages that can be upgraded (look for lines that look like package entries)
+# Use JSON output for robust parsing with fallback to text parsing
 $hasUpdates = $false
-$updateCheckOutput | ForEach-Object {
-    # Look for lines that have multiple space-separated fields (typical of package listings)
-    # but exclude header lines, status messages, and error messages
-    if ($_ -match '^\S+\s+\S+\s+\S+\s+\S+\s+\S+' -and
-        $_ -notmatch 'up to date|No packages|No installed package found' -and
-        $_ -notmatch '^Name\s+Id' -and
-        $_ -notmatch 'matching input criteria') {
+try {
+    $updateCheckOutput = & winget upgrade --output json 2>&1
+    $updateJson = $updateCheckOutput | ConvertFrom-Json
+    
+    if ($updateJson.PSObject.Properties.Name -contains 'Sources') {
+        # Newer winget versions output an object with a 'Sources' property
+        $allPackages = @()
+        foreach ($source in $updateJson.Sources) {
+            if ($source.Packages) {
+                $allPackages += $source.Packages
+            }
+        }
+        if ($allPackages.Count -gt 0) {
+            $hasUpdates = $true
+        }
+    }
+    elseif ($updateJson -is [array] -and $updateJson.Count -gt 0) {
+        # Older winget versions may output an array of packages directly
         $hasUpdates = $true
+    }
+}
+catch {
+    Write-Warning 'Failed to parse winget upgrade output as JSON. Falling back to text parsing.'
+    # Fallback: Use text parsing logic as a backup
+    $updateCheckArgs = 'upgrade', '--all'
+    $updateCheckOutput = & winget $updateCheckArgs 2>&1 | Where-Object { $_ -notmatch '^[\s\-\|\\]*$' -and $_ -notmatch '^$' }
+    
+    $updateCheckOutput | ForEach-Object {
+        # More specific pattern matching for actual package entries
+        # Must have at least 4 space-separated fields AND contain version-like patterns
+        if ($_ -match '^\S+\s+\S+\s+\S+(\.\S+)+\s+\S+(\.\S+)+' -and
+            $_ -notmatch 'No installed package found|No packages found|up to date' -and
+            $_ -notmatch '^Name\s+Id' -and
+            $_.Length -gt 20) {
+            # Reasonable minimum length for a valid package entry
+            $hasUpdates = $true
+        }
     }
 }
 
