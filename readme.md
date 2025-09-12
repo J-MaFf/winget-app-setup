@@ -1,37 +1,217 @@
-# winget-app-install.ps1
+# Winget App Setup
 
-This script installs the following programs from winget:
+A comprehensive PowerShell automation suite for managing Windows applications using winget (Windows Package Manager). This project provides scripts to install, uninstall, and manage software packages with robust error handling and detailed reporting.
 
-- 7-zip
-- TightVNC
-- Adobe Acrobat Reader 64 Bit
-- Google Chrome
-- Google Drive
-- Dell Command Update (Universal)
-- PowerShell
-- Windows Terminal
+## Features
 
-## Table of Contents
+- **Automated Installation**: Install multiple applications with a single command
+- **Smart Uninstallation**: Remove applications with status tracking
+- **Update Management**: Automatically check for and install available updates
+- **Admin Privilege Handling**: Automatically requests elevation when needed
+- **Source Trust Management**: Verifies and trusts winget sources
+- **Comprehensive Error Handling**: Detailed error reporting and result tracking
+- **Formatted Output**: Clean table-based summaries of all operations
+- **Color-Coded Feedback**: Visual status indicators for operations
 
-- [Installation](#installation)
-- [Usage](#usage)
+## Included Scripts
 
-## Installation
+### `winget-app-install.ps1`
 
-### PowerShell Gallery (Best)
+The main installation script that:
+
+- Installs a curated list of essential Windows applications
+- Checks for administrator privileges and relaunches elevated if needed
+- Verifies winget source trust status
+- Handles installation failures gracefully
+- Checks for and installs available updates
+- Displays results in a formatted ASCII table
+
+### `winget-app-uninstall.ps1`
+
+Uninstallation companion script that:
+
+- Removes the same applications installed by the install script
+- Provides detailed uninstallation status
+- Tracks successful, skipped, and failed operations
+
+### `test-print-table.ps1`
+
+Development utility for testing the table display functionality used in the main scripts.
+
+### `uninstall-install-teamviewer.ps1`
+
+Specialized script for TeamViewer management:
+
+- Uninstalls current TeamViewer installation
+- Installs a specific older version (15.59.5)
+
+## Default Application List
+
+The scripts work with this curated list of applications:
+
+- **7-Zip** (`7zip.7zip`) - File archiver
+- **TightVNC** (`GlavSoft.TightVNC`) - Remote desktop software
+- **Adobe Acrobat Reader** (`Adobe.Acrobat.Reader.64-bit`) - PDF viewer
+- **Google Chrome** (`Google.Chrome`) - Web browser
+- **Google Drive** (`Google.GoogleDrive`) - Cloud storage client
+- **Dell Command Update** (`Dell.CommandUpdate.Universal`) - System updates for Dell computers
+- **PowerShell** (`Microsoft.PowerShell`) - Microsoft's command-line shell
+- **Windows Terminal** (`Microsoft.WindowsTerminal`) - Modern terminal application
+
+## Prerequisites
+
+- **Windows 10/11** with winget installed
+- **Microsoft App Installer** from Microsoft Store
+- **Administrator privileges** (scripts will request elevation automatically)
+- **PowerShell execution policy** allowing script execution
+
+## Setup
+
+### Option 1: Clone Repository (Recommended)
 
 ```powershell
-Install-Script -Name InstallSoftware -Force
+git clone https://github.com/J-MaFf/winget-app-setup.git
+cd winget-app-setup
 ```
 
-### Clone the Repository
+### Option 2: Direct Download
 
-Another option is to Clone the repository to your local machine:
-
-```powershell
-https://github.com/J-MaFf/winget-app-setup.git
-```
+Download the scripts directly from the repository.
 
 ## Usage
 
-Use the command `InstallSoftware` to run the script from any directory (If installed via PowerShell Gallery). If not, you must provide the full path or open your shell in the apropriate directory to the script to run.
+### Installation
+
+Run the installation script as administrator:
+
+```powershell
+# From the script directory
+.\winget-app-install.ps1
+
+# Or with full path
+C:\Path\To\winget-app-setup\winget-app-install.ps1
+```
+
+### Uninstallation
+
+Run the uninstallation script as administrator:
+
+```powershell
+# From the script directory
+.\winget-app-uninstall.ps1
+
+# Or with full path
+C:\Path\To\winget-app-setup\winget-app-uninstall.ps1
+```
+
+### TeamViewer Management
+
+For specific TeamViewer operations:
+
+```powershell
+.\uninstall-install-teamviewer.ps1
+```
+
+## Script Behavior
+
+### Administrator Privileges
+
+All scripts automatically check for administrator privileges and will:
+
+- Display a message if elevation is required
+- Relaunch themselves with elevated privileges
+- Continue execution once elevated
+
+### Source Trust
+
+Scripts verify winget source trust for:
+
+- `winget` (Microsoft's official source)
+- `msstore` (Microsoft Store source)
+
+### Error Handling
+
+- **Installation failures** are tracked and reported
+- **Already installed apps** are skipped with notification
+- **Network issues** and **package not found** errors are handled gracefully
+- **Update operations** include fallback parsing methods
+
+### Output Format
+
+The main installation script provides:
+
+- Real-time progress with color-coded messages
+- Comprehensive summary table showing:
+  - Installed applications
+  - Skipped applications (already installed)
+  - Failed installations
+  - Updated applications
+  - Failed updates
+
+## Customization
+
+### Adding Applications
+
+To add new applications, edit the `$apps` array in the scripts:
+
+```powershell
+$apps = @(
+    @{name = 'Existing.App' },
+    @{name = 'New.Publisher.App' },  # Add new app here
+    @{name = 'Another.App' }
+);
+```
+
+### Modifying Behavior
+
+The scripts include several configurable functions:
+
+- `Test-Source-IsTrusted()` - Source trust verification
+- `Set-Sources()` - Source trust setup
+- `Show-Table()` - Result display formatting
+- `Invoke-WingetCommand()` - Winget command execution with parsing
+
+## Troubleshooting
+
+### Common Issues
+
+#### "winget command not found"
+
+- Ensure Microsoft App Installer is installed from Microsoft Store
+- Restart PowerShell after installation
+
+#### "Access denied"
+
+- Scripts require administrator privileges
+- Allow automatic elevation when prompted
+
+#### "Package not found"
+
+- Verify the package ID is correct
+- Check if the application is available in winget
+
+### Testing
+
+Use the included test script to verify table formatting:
+
+```powershell
+.\test-print-table.ps1
+```
+
+## Contributing
+
+1. Fork the repository
+2. Create a feature branch
+3. Test your changes thoroughly
+4. Submit a pull request
+
+## License
+
+This project is open source. Please check the repository for license details.
+
+## Future Plans
+
+- PowerShell Gallery publication for easier installation
+- Configuration file support for custom application lists
+- GUI interface option
+- Additional package managers support (Chocolatey, Scoop)
