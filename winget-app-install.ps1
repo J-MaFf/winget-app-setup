@@ -342,6 +342,67 @@ function Format-AppList {
     return $null
 }
 
+<#
+.SYNOPSIS
+    Checks if there are any available updates for installed packages using winget.
+.DESCRIPTION
+    This function attempts to check for updates using winget's JSON output first,
+    with fallback to text parsing if JSON fails.
+.RETURNS
+    [bool] True if updates are available, otherwise False.
+#>
+function Get-HasUpdates {
+    try {
+        $updateCheckOutput = & winget upgrade --output json 2>&1
+        $updateJson = $updateCheckOutput | ConvertFrom-Json
+
+        if ($updateJson.PSObject.Properties.Name -contains 'Sources') {
+            # Newer winget versions output an object with a 'Sources' property
+            $allPackages = @()
+            foreach ($source in $updateJson.Sources) {
+                if ($source.Packages) {
+                    $allPackages += $source.Packages
+                }
+            }
+            if ($allPackages.Count -gt 0) {
+                return $true
+            }
+        }
+        elseif ($updateJson -is [array] -and $updateJson.Count -gt 0) {
+            # Older winget versions may output an array of packages directly
+            return $true
+        }
+    }
+    catch {
+        Write-Warning 'Failed to parse winget upgrade output as JSON. Falling back to text parsing.'
+        # Fallback: Use text parsing logic as a backup
+        $updateCheckArgs = 'upgrade', '--all'
+        $updateCheckOutput = & winget $updateCheckArgs 2>&1 | Where-Object { $_ -notmatch '^[\s\-\|\\]*$' -and $_ -notmatch '^$' }
+
+        foreach ($line in $updateCheckOutput) {
+            $line = $line.Trim()
+            # More robust pattern matching for actual package entries
+            # Check for lines that look like package entries but exclude headers and status messages
+            if ($line -and
+                $line -notmatch '^Name\s+Id\s+Version\s+Available' -and # Header line
+                $line -notmatch '^[-]+$' -and # Separator lines
+                $line -notmatch 'No installed package found' -and
+                $line -notmatch 'No packages found' -and
+                $line -notmatch 'up to date' -and
+                $line -notmatch '^\d+ packages? available' -and
+                $line.Length -gt 10) {
+                # Reasonable minimum length for a valid package entry
+
+                # Additional validation: should contain version-like patterns (digits and dots)
+                if ($line -match '\d+\.\d+' -and $line -match '\s+\S+\s+\S+') {
+                    return $true
+                }
+            }
+        }
+    }
+    return $false
+}
+
 #------------------------------------------------Main Script------------------------------------------------
 
 # Check if the script is run as administrator
@@ -426,56 +487,7 @@ $failedUpdateApps = @()
 # Check for updates and perform them in one step
 Write-Host 'Checking for available updates...' -ForegroundColor Blue
 
-# Use JSON output for robust parsing with fallback to text parsing
-$hasUpdates = $false
-try {
-    $updateCheckOutput = & winget upgrade --output json 2>&1
-    $updateJson = $updateCheckOutput | ConvertFrom-Json
-
-    if ($updateJson.PSObject.Properties.Name -contains 'Sources') {
-        # Newer winget versions output an object with a 'Sources' property
-        $allPackages = @()
-        foreach ($source in $updateJson.Sources) {
-            if ($source.Packages) {
-                $allPackages += $source.Packages
-            }
-        }
-        if ($allPackages.Count -gt 0) {
-            $hasUpdates = $true
-        }
-    }
-    elseif ($updateJson -is [array] -and $updateJson.Count -gt 0) {
-        # Older winget versions may output an array of packages directly
-        $hasUpdates = $true
-    }
-}
-catch {
-    Write-Warning 'Failed to parse winget upgrade output as JSON. Falling back to text parsing.'
-    # Fallback: Use text parsing logic as a backup
-    $updateCheckArgs = 'upgrade', '--all'
-    $updateCheckOutput = & winget $updateCheckArgs 2>&1 | Where-Object { $_ -notmatch '^[\s\-\|\\]*$' -and $_ -notmatch '^$' }
-
-    $updateCheckOutput | ForEach-Object {
-        $line = $_.Trim()
-        # More robust pattern matching for actual package entries
-        # Check for lines that look like package entries but exclude headers and status messages
-        if ($line -and
-            $line -notmatch '^Name\s+Id\s+Version\s+Available' -and # Header line
-            $line -notmatch '^[-]+$' -and # Separator lines
-            $line -notmatch 'No installed package found' -and
-            $line -notmatch 'No packages found' -and
-            $line -notmatch 'up to date' -and
-            $line -notmatch '^\d+ packages? available' -and
-            $line.Length -gt 10) {
-            # Reasonable minimum length for a valid package entry
-
-            # Additional validation: should contain version-like patterns (digits and dots)
-            if ($line -match '\d+\.\d+' -and $line -match '\s+\S+\s+\S+') {
-                $hasUpdates = $true
-            }
-        }
-    }
-}
+$hasUpdates = Get-HasUpdates
 
 if ($hasUpdates) {
     Write-Host 'Updates found. Installing updates...' -ForegroundColor Green
