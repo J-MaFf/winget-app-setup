@@ -137,6 +137,63 @@ function Test-PathInEnvironment {
 
     return ($envPath -split ';').Contains($PathToCheck)
 }
+
+<#
+.SYNOPSIS
+    Parses a command string into an array of arguments, properly handling quoted arguments.
+.DESCRIPTION
+    This function takes a command string and splits it into individual arguments while
+    correctly handling quoted strings that may contain spaces.
+.PARAMETER Command
+    The command string to parse
+.RETURNS
+    An array of parsed command arguments
+#>
+function Convert-CommandToArguments {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$Command
+    )
+
+    $commandArgs = @()
+    $currentArg = ''
+    $inQuotes = $false
+    $quoteChar = ''
+
+    for ($i = 0; $i -lt $Command.Length; $i++) {
+        $char = $Command[$i]
+
+        if ($inQuotes) {
+            if ($char -eq $quoteChar) {
+                $inQuotes = $false
+                $quoteChar = ''
+            }
+            else {
+                $currentArg += $char
+            }
+        }
+        elseif ($char -eq '"' -or $char -eq "'") {
+            $inQuotes = $true
+            $quoteChar = $char
+        }
+        elseif ($char -eq ' ') {
+            if ($currentArg) {
+                $commandArgs += $currentArg
+                $currentArg = ''
+            }
+        }
+        else {
+            $currentArg += $char
+        }
+    }
+
+    if ($currentArg) {
+        $commandArgs += $currentArg
+    }
+
+    return $commandArgs
+}
+
 function Show-Table {
     param (
         [Parameter(Mandatory = $true)]
@@ -239,87 +296,12 @@ function Invoke-WingetCommand {
     )
 
     # Parse command string into arguments properly, handling quoted arguments
-    $commandArgs = @()
-    $currentArg = ''
-    $inQuotes = $false
-    $quoteChar = ''
-
-    for ($i = 0; $i -lt $Command.Length; $i++) {
-        $char = $Command[$i]
-
-        if ($inQuotes) {
-            if ($char -eq $quoteChar) {
-                $inQuotes = $false
-                $quoteChar = ''
-            }
-            else {
-                $currentArg += $char
-            }
-        }
-        elseif ($char -eq '"' -or $char -eq "'") {
-            $inQuotes = $true
-            $quoteChar = $char
-        }
-        elseif ($char -eq ' ') {
-            if ($currentArg) {
-                $commandArgs += $currentArg
-                $currentArg = ''
-            }
-        }
-        else {
-            $currentArg += $char
-        }
-    }
-
-    if ($currentArg) {
-        $commandArgs += $currentArg
-    }
+    $commandArgs = Convert-CommandToArguments -Command $Command
 
     & winget $commandArgs
 
     # Now run again to capture output for parsing (without progress display)
     try {
-        # Parse command string into arguments properly, handling quoted arguments
-        $commandArgs = @()
-        $currentArg = ''
-        $inQuotes = $false
-        $quoteChar = ''
-
-        for ($i = 0; $i -lt $Command.Length; $i++) {
-            $char = $Command[$i]
-
-            if ($inQuotes) {
-                if ($char -eq $quoteChar) {
-                    $inQuotes = $false
-                    $quoteChar = ''
-                }
-                else {
-                    $currentArg += $char
-                }
-            }
-            elseif ($char -eq '"' -or $char -eq "'") {
-                $inQuotes = $true
-                $quoteChar = $char
-            }
-            elseif ($char -eq ' ') {
-                if ($currentArg) {
-                    $commandArgs += $currentArg
-                    $currentArg = ''
-                }
-            }
-            else {
-                $currentArg += $char
-            }
-        }
-
-        if ($currentArg) {
-            $commandArgs += $currentArg
-        }
-
-        $commandOutput = & winget $commandArgs 2>&1 | Where-Object { $_ -notmatch '^[\s\-\|\\]*$' }
-        # Use helper to parse command string into arguments
-        $commandArgs = Parse-CommandArguments -Command $Command
-
         $commandOutput = & winget $commandArgs 2>&1 | Where-Object { $_ -notmatch '^[\s\-\|\\]*$' }
     }
     catch {
