@@ -398,6 +398,38 @@ function Test-UpdatesAvailable {
     return $false
 }
 
+<#
+.SYNOPSIS
+    Checks if winget is available and attempts to install it if not.
+.DESCRIPTION
+    This function verifies if winget is installed and available. If not, it attempts to install the Microsoft App Installer.
+.RETURNS
+    [bool] True if winget is available or successfully installed, otherwise False.
+#>
+function Test-AndInstallWinget {
+    if (Get-Command winget -ErrorAction SilentlyContinue) {
+        Write-Host 'Winget is available.' -ForegroundColor Green
+        return $true
+    }
+    else {
+        Write-Host 'Winget is not available. Attempting to install Microsoft App Installer...' -ForegroundColor Yellow
+        try {
+            $url = 'https://aka.ms/getwinget'
+            $outFile = "$env:TEMP\Microsoft.DesktopAppInstaller.appxbundle"
+            Invoke-WebRequest -Uri $url -OutFile $outFile -UseBasicParsing
+            Add-AppxPackage $outFile
+            Remove-Item $outFile -ErrorAction SilentlyContinue
+            Write-Host 'Microsoft App Installer installed successfully. Winget should now be available.' -ForegroundColor Green
+            return $true
+        }
+        catch {
+            Write-Host "Failed to install winget: $_" -ForegroundColor Red
+            Write-Host 'Please install winget manually from https://aka.ms/getwinget' -ForegroundColor Red
+            return $false
+        }
+    }
+}
+
 #------------------------------------------------Main Script------------------------------------------------
 
 # Determine which PowerShell executable to use
@@ -413,6 +445,12 @@ If (-NOT ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdent
 }
 else {
     Write-Host 'Starting...' -ForegroundColor Green
+}
+
+# Check if winget is available and install if necessary
+if (-not (Test-AndInstallWinget)) {
+    Write-Host 'Winget is required for this script. Exiting.' -ForegroundColor Red
+    Exit
 }
 
 # Add the script directory to the PATH
