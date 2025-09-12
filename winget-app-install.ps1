@@ -438,21 +438,45 @@ $failedUpdateApps = @()
 # Check for updates and perform them in one step
 Write-Host 'Checking for available updates...' -ForegroundColor Blue
 
-# First check what updates are available using text parsing (JSON not supported for upgrade command)
-$updateCheckArgs = 'upgrade', '--all'
-$updateCheckOutput = & winget $updateCheckArgs 2>&1 | Where-Object { $_ -notmatch '^[\s\-\|\\]*$' -and $_ -notmatch '^$' }
-
-# Check if there are any packages that can be upgraded
+# Use JSON output for robust parsing with fallback to text parsing
 $hasUpdates = $false
-$updateCheckOutput | ForEach-Object {
-    # More specific pattern matching for actual package entries
-    # Must have at least 4 space-separated fields AND contain version-like patterns
-    if ($_ -match '^\S+\s+\S+\s+\S+(\.\S+)+\s+\S+(\.\S+)+' -and
-        $_ -notmatch 'No installed package found|No packages found|up to date' -and
-        $_ -notmatch '^Name\s+Id' -and
-        $_.Length -gt 20) {
-        # Reasonable minimum length for a valid package entry
+try {
+    $updateCheckOutput = & winget upgrade --output json 2>&1
+    $updateJson = $updateCheckOutput | ConvertFrom-Json
+    
+    if ($updateJson.PSObject.Properties.Name -contains 'Sources') {
+        # Newer winget versions output an object with a 'Sources' property
+        $allPackages = @()
+        foreach ($source in $updateJson.Sources) {
+            if ($source.Packages) {
+                $allPackages += $source.Packages
+            }
+        }
+        if ($allPackages.Count -gt 0) {
+            $hasUpdates = $true
+        }
+    }
+    elseif ($updateJson -is [array] -and $updateJson.Count -gt 0) {
+        # Older winget versions may output an array of packages directly
         $hasUpdates = $true
+    }
+}
+catch {
+    Write-Warning 'Failed to parse winget upgrade output as JSON. Falling back to text parsing.'
+    # Fallback: Use text parsing logic as a backup
+    $updateCheckArgs = 'upgrade', '--all'
+    $updateCheckOutput = & winget $updateCheckArgs 2>&1 | Where-Object { $_ -notmatch '^[\s\-\|\\]*$' -and $_ -notmatch '^$' }
+    
+    $updateCheckOutput | ForEach-Object {
+        # More specific pattern matching for actual package entries
+        # Must have at least 4 space-separated fields AND contain version-like patterns
+        if ($_ -match '^\S+\s+\S+\s+\S+(\.\S+)+\s+\S+(\.\S+)+' -and
+            $_ -notmatch 'No installed package found|No packages found|up to date' -and
+            $_ -notmatch '^Name\s+Id' -and
+            $_.Length -gt 20) {
+            # Reasonable minimum length for a valid package entry
+            $hasUpdates = $true
+        }
     }
 }
 
