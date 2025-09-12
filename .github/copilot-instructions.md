@@ -63,6 +63,54 @@
 - **Local Execution**: Run from cloned repository with full paths
 - **Admin Requirements**: All scripts require administrator privileges
 
+## Architecture Insights
+
+### Big Picture Architecture
+- **Script-Based Design**: Two primary scripts (`winget-app-install.ps1`, `winget-app-uninstall.ps1`) with shared patterns
+- **Modular Functions**: Reusable utility functions for common operations (PATH management, source trust, table display)
+- **Result Tracking Pattern**: Consistent use of separate arrays for different operation outcomes
+- **Fallback Mechanisms**: Multiple approaches for operations (PowerShell module vs CLI fallback)
+
+### Data Flow Patterns
+- **App Array Processing**: Central `$apps` array drives all operations
+- **Existence Checking**: Pre-flight checks using `winget list` before install/uninstall operations
+- **Output Parsing**: Capture and parse winget command output for success/failure determination
+- **State Tracking**: Maintain operation state in arrays throughout execution
+
+### Cross-Component Communication
+- **Shared App Lists**: Same application definitions used across install/uninstall scripts
+- **Consistent Result Arrays**: `$installedApps`, `$skippedApps`, `$failedApps` pattern used universally
+- **Common Utility Functions**: Shared functions like `Show-Table()` and `Test-Source-IsTrusted()`
+
+## Developer Workflows
+
+### Critical Commands & Operations
+- **Admin Elevation**: `Start-Process $psExecutable -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`"" -Verb RunAs`
+- **Source Trust Check**: `winget source list` and pattern matching for trusted sources
+- **App Installation**: `winget install -e --accept-source-agreements --accept-package-agreements --id $app.name`
+- **Existence Verification**: `winget list --exact -q $app.name` for install status
+- **Update Detection**: `Get-WinGetPackage | Where-Object IsUpdateAvailable` (PowerShell module) or `winget upgrade` (CLI)
+
+### Build & Test Workflows
+- **Function Testing**: Extract and test individual functions in separate files
+- **Error Scenario Testing**: Use fake packages like `@{name = 'Fake.Package'}` to test error handling
+- **Output Validation**: Test table formatting with `Show-Table()` function
+- **Integration Testing**: Full script execution with real winget commands
+
+## Integration Points & Dependencies
+
+### External Dependencies
+- **Winget Package Manager**: Core dependency for all operations
+- **Microsoft.WinGet.Client Module**: Optional PowerShell module for enhanced functionality
+- **Microsoft App Installer**: Required for winget functionality
+- **PowerShell Execution Policy**: Must allow script execution
+
+### System Integration
+- **Administrator Privileges**: Required for package installation/uninstallation
+- **Environment PATH**: Modified to include script directory for accessibility
+- **Winget Sources**: 'winget' and 'msstore' sources must be trusted
+- **User PATH**: Script directory added for command-line accessibility
+
 ## Documentation Maintenance
 
 ### When to Update Documentation
