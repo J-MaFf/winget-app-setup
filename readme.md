@@ -12,6 +12,7 @@ A comprehensive PowerShell automation suite for managing Windows applications us
 - **Comprehensive Error Handling**: Detailed error reporting and result tracking
 - **Formatted Output**: Clean table-based summaries of all operations
 - **Color-Coded Feedback**: Visual status indicators for operations
+- **Self-Healing Winget Tooling**: Automatically installs required winget CLI and PowerShell module dependencies
 
 ## Included Scripts
 
@@ -34,16 +35,13 @@ Uninstallation companion script that:
 - Provides detailed uninstallation status
 - Tracks successful, skipped, and failed operations
 
-### `test-print-table.ps1`
+### `Test-WingetAppInstall.Tests.ps1`
 
-Development utility for testing the table display functionality used in the main scripts.
+Comprehensive Pester test suite that validates:
 
-### `uninstall-install-teamviewer.ps1`
-
-Specialized script for TeamViewer management:
-
-- Uninstalls current TeamViewer installation
-- Installs a specific older version (15.59.5)
+- Winget CLI remediation and source trust helpers
+- Environment PATH updates and command parsing utilities
+- Installation workflows, including success, skip, failure, and update scenarios
 
 ## Default Application List
 
@@ -54,6 +52,7 @@ The scripts work with this curated list of applications:
 - **Adobe Acrobat Reader** (`Adobe.Acrobat.Reader.64-bit`) - PDF viewer
 - **Google Chrome** (`Google.Chrome`) - Web browser
 - **Google Drive** (`Google.GoogleDrive`) - Cloud storage client
+- **Git** (`Git.Git`) - Distributed version control system
 - **Dell Command Update** (`Dell.CommandUpdate.Universal`) - System updates for Dell computers
 - **PowerShell** (`Microsoft.PowerShell`) - Microsoft's command-line shell
 - **Windows Terminal** (`Microsoft.WindowsTerminal`) - Modern terminal application
@@ -62,6 +61,7 @@ The scripts work with this curated list of applications:
 
 - **Windows 10/11** with winget installed
 - **Microsoft App Installer** from Microsoft Store
+- **PowerShell Gallery access** to download the Microsoft.WinGet.Client module (handled automatically by the script)
 - **Administrator privileges** (scripts will request elevation automatically)
 - **PowerShell execution policy** allowing script execution
 
@@ -104,14 +104,6 @@ Run the uninstallation script as administrator:
 C:\Path\To\winget-app-setup\winget-app-uninstall.ps1
 ```
 
-### TeamViewer Management
-
-For specific TeamViewer operations:
-
-```powershell
-.\uninstall-install-teamviewer.ps1
-```
-
 ## Script Behavior
 
 ### Administrator Privileges
@@ -128,6 +120,11 @@ Scripts verify winget source trust for:
 
 - `winget` (Microsoft's official source)
 - `msstore` (Microsoft Store source)
+
+### Winget Tooling Remediation
+
+- Ensures the `Microsoft.WinGet.Client` PowerShell module is installed (installs automatically if missing)
+- Validates winget CLI is present, installing Microsoft App Installer when required
 
 ### Error Handling
 
@@ -192,10 +189,10 @@ The scripts include several configurable functions:
 
 ### Testing
 
-Use the included test script to verify table formatting:
+Run the Pester suite to verify all behaviors and edge cases:
 
 ```powershell
-.\test-print-table.ps1
+Invoke-Pester -Path .\Test-WingetAppInstall.Tests.ps1 -Output Detailed
 ```
 
 ## Contributing

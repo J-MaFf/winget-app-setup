@@ -5,6 +5,17 @@
 - **Key Components**: PowerShell scripts using winget package manager
 - **Architecture**: Script-based with shared utility functions and consistent error handling patterns
 
+### Baseline Application Set
+- 7-Zip (`7zip.7zip`)
+- TightVNC (`GlavSoft.TightVNC`)
+- Adobe Acrobat Reader (`Adobe.Acrobat.Reader.64-bit`)
+- Google Chrome (`Google.Chrome`)
+- Google Drive (`Google.GoogleDrive`)
+- Git (`Git.Git`)
+- Dell Command Update (`Dell.CommandUpdate.Universal`)
+- PowerShell (`Microsoft.PowerShell`)
+- Windows Terminal (`Microsoft.WindowsTerminal`)
+
 ## Coding Style & Conventions
 
 ### PowerShell Specific
@@ -27,6 +38,8 @@
 - **Summary Display**: Always show final table with operation counts
 
 ## Key Functions to Reuse
+- `Test-AndInstallWingetModule()`: Ensure the Microsoft.WinGet.Client PowerShell module is installed and usable
+- `Test-AndInstallWinget()`: Check winget availability and install if missing
 - `Test-Source-IsTrusted()`: Verify winget source trust status
 - `Set-Sources()`: Add and trust winget sources
 - `Add-ToEnvironmentPath()`: Add paths to user/system PATH
@@ -36,11 +49,12 @@
 
 ## Workflow Patterns
 1. **Admin Check**: Verify elevated privileges, relaunch if needed
-2. **PATH Setup**: Add script directory to user PATH
-3. **Source Verification**: Ensure winget sources are trusted
-4. **App Processing**: Loop through app array with existence checks
-5. **Result Summary**: Display formatted table of all operations
-6. **User Interaction**: Keep console open with `[System.Console]::ReadKey($true)`
+2. **Winget Tooling Remediation**: Ensure winget CLI (via `Test-AndInstallWinget`) and Microsoft.WinGet.Client module (`Test-AndInstallWingetModule`) are available
+3. **PATH Setup**: Add script directory to user PATH
+4. **Source Verification**: Ensure winget sources are trusted
+5. **App Processing**: Loop through app array with existence checks
+6. **Result Summary**: Display formatted table of all operations
+7. **User Interaction**: Keep console open with `[System.Console]::ReadKey($true)`
 
 ## Common Tasks
 - **New App Addition**: Add to `$apps` array using format `@{name = 'Publisher.AppName'}`
@@ -49,9 +63,12 @@
 - **PATH Management**: Use `Add-ToEnvironmentPath` for script accessibility
 
 ## Testing Approach
-- **Unit Testing**: Extract functions to separate test files (see `test-print-table.ps1`)
-- **Integration Testing**: Test with real winget commands and mock outputs
-- **Error Scenarios**: Test with non-existent packages and network failures
+- **Comprehensive Test Suite**: Use Pester for unit testing with comprehensive coverage in `Test-WingetAppInstall.Tests.ps1`
+- **Test Coverage**: All functions and main script logic are tested, including edge cases and error scenarios
+- **Running Tests**: Execute tests with `Invoke-Pester -Path .\Test-WingetAppInstall.Tests.ps1 -Output Detailed`
+- **Adding New Tests**: When creating new functions or functionality in `winget-app-install.ps1`, add corresponding tests to `Test-WingetAppInstall.Tests.ps1`
+- **Mocking Strategy**: Use Pester mocks for external commands (winget, Get-Command, etc.) to test logic without real system changes
+- **Error Scenarios**: Test with non-existent packages, network failures, and permission issues
 
 ## Deployment
 - **Current State**: Local repository only - not yet published to PowerShell Gallery
@@ -96,6 +113,11 @@
 - **Error Scenario Testing**: Use fake packages like `@{name = 'Fake.Package'}` to test error handling
 - **Output Validation**: Test table formatting with `Write-Table()` function
 - **Integration Testing**: Full script execution with real winget commands
+
+### Interaction Guidelines
+- **Explain Before Acting**: Always explain the purpose and impact of any action before executing terminal commands, installing packages, or making system changes
+- **Seek Confirmation**: For potentially disruptive actions (installations, system modifications), ask for user confirmation before proceeding
+- **Provide Context**: When suggesting commands or changes, include why they're needed and what they accomplish
 
 ## Integration Points & Dependencies
 
