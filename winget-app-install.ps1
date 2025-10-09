@@ -75,21 +75,6 @@ function Test-AndInstallWingetModule {
     return $false
 }
 
-# Ensure required modules are available
-if (-not (Test-AndInstallWingetModule)) {
-    Write-Warning 'Microsoft.WinGet.Client module is not available. Update functionality will use fallback CLI methods.'
-}
-
-# Import required modules
-try {
-    Import-Module Microsoft.WinGet.Client -ErrorAction Stop
-    Write-Host 'Successfully imported Microsoft.WinGet.Client module' -ForegroundColor Green
-}
-catch {
-    Write-Warning "Failed to import Microsoft.WinGet.Client module: $_"
-    Write-Warning 'Update functionality will use fallback CLI methods'
-}
-
 <#
 .SYNOPSIS
     Checks if a specific winget source is trusted.
@@ -487,6 +472,21 @@ If (-NOT ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdent
 }
 else {
     Write-Host 'Starting...' -ForegroundColor Green
+}
+
+# Ensure required modules are available
+if (-not (Test-AndInstallWingetModule)) {
+    Write-Warning 'Microsoft.WinGet.Client module is not available. Update functionality will use fallback CLI methods.'
+}
+
+# Import required modules
+try {
+    Import-Module Microsoft.WinGet.Client -ErrorAction Stop
+    Write-Host 'Successfully imported Microsoft.WinGet.Client module' -ForegroundColor Green
+}
+catch {
+    Write-Warning "Failed to import Microsoft.WinGet.Client module: $_"
+    Write-Warning 'Update functionality will use fallback CLI methods'
 }
 
 # Check if winget is available and install if necessary
