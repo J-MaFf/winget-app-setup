@@ -5,29 +5,8 @@ Describe 'Test-AndInstallWinget' {
     BeforeAll {
         Mock Write-Host { }
 
-        function Test-AndInstallWinget {
-            if (Get-Command winget -ErrorAction SilentlyContinue) {
-                Write-Host 'Winget is available.' -ForegroundColor Green
-                return $true
-            }
-            else {
-                Write-Host 'Winget is not available. Attempting to install Microsoft App Installer...' -ForegroundColor Yellow
-                try {
-                    $url = 'https://aka.ms/getwinget'
-                    $outFile = "$env:TEMP\Microsoft.DesktopAppInstaller.appxbundle"
-                    Invoke-WebRequest -Uri $url -OutFile $outFile -UseBasicParsing
-                    Add-AppxPackage $outFile
-                    Remove-Item $outFile -ErrorAction SilentlyContinue
-                    Write-Host 'Microsoft App Installer installed successfully. Winget should now be available.' -ForegroundColor Green
-                    return $true
-                }
-                catch {
-                    Write-Host "Failed to install winget: $_" -ForegroundColor Red
-                    Write-Host 'Please install winget manually from https://aka.ms/getwinget' -ForegroundColor Red
-                    return $false
-                }
-            }
-        }
+        # Dot-source the main script to import Test-AndInstallWinget
+        . "$PSScriptRoot\winget-app-install.ps1"
     }
 
     Context 'When winget is available' {
