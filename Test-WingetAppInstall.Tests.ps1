@@ -440,72 +440,123 @@ Describe 'Restart-WithElevation' {
 Describe 'Write-Table' {
     BeforeAll {
         Mock Write-Host { }
+        
+        # Create a mock Out-GridView command if it doesn't exist
+        if (-not (Get-Command Out-GridView -ErrorAction SilentlyContinue)) {
+            function Out-GridView { param($Title, [switch]$Wait) }
+        }
+        Mock Out-GridView { }
 
         function Write-Table {
             param (
                 [Parameter(Mandatory = $true)]
                 [string[]]$Headers,
                 [Parameter(Mandatory = $true)]
-                [string[][]]$Rows
+                [string[][]]$Rows,
+                [Parameter(Mandatory = $false)]
+                [bool]$UseGridView = $false
             )
 
-            $maxLengths = @{}
-            foreach ($header in $Headers) {
-                $maxLengths[$header] = $header.Length
+            # Convert rows to objects for Format-Table
+            $tableData = @()
+            foreach ($row in $Rows) {
+                $obj = New-Object PSObject
+                for ($i = 0; $i -lt $Headers.Count; $i++) {
+                    $obj | Add-Member -MemberType NoteProperty -Name $Headers[$i] -Value $row[$i]
+                }
+                $tableData += $obj
             }
 
-            foreach ($row in $Rows) {
-                for ($i = 0; $i -lt $row.Length; $i++) {
-                    if ($row[$i].Length -gt $maxLengths[$Headers[$i]]) {
-                        $maxLengths[$Headers[$i]] = $row[$i].Length
+            # Try to use Out-GridView if requested and available
+            if ($UseGridView) {
+                $canUseGridView = $false
+                
+                # Check if we're in an interactive session
+                if ([Environment]::UserInteractive) {
+                    # Check if Out-GridView is available
+                    try {
+                        Get-Command Out-GridView -ErrorAction Stop | Out-Null
+                        $canUseGridView = $true
+                    }
+                    catch {
+                        Write-Host 'Out-GridView is not available. Falling back to text output.' -ForegroundColor Yellow
+                    }
+                }
+                
+                if ($canUseGridView) {
+                    try {
+                        $tableData | Out-GridView -Title 'Installation Summary' -Wait
+                        return
+                    }
+                    catch {
+                        Write-Host "Failed to display grid view: $_. Falling back to text output." -ForegroundColor Yellow
                     }
                 }
             }
 
-            # Build table divider with proper column separators
-            $dividerParts = @('+')
-            foreach ($header in $Headers) {
-                $columnWidth = $maxLengths[$header] + 2  # Add padding for spaces
-                $dividerParts += ('-' * $columnWidth)
-                $dividerParts += '+'
-            }
-            $divider = $dividerParts -join ''
-
-            # Build header line
-            $headerLine = ''
-            for ($i = 0; $i -lt $Headers.Count; $i++) {
-                $padSize = $maxLengths[$Headers[$i]] - $Headers[$i].Length
-                $headerLine += '|' + ' ' + $Headers[$i] + (' ' * $padSize) + ' '
-            }
-            $headerLine += '|'
-
-            Write-Host $divider
-            Write-Host $headerLine
-            Write-Host $divider
-
-            foreach ($row in $Rows) {
-                $rowLine = ''
-                for ($i = 0; $i -lt $Headers.Count; $i++) {
-                    $cellValue = $row[$i]
-                    $padSize = $maxLengths[$Headers[$i]] - $cellValue.Length
-                    $rowLine += '|' + ' ' + $cellValue + (' ' * $padSize) + ' '
-                }
-                $rowLine += '|'
-
-                Write-Host $rowLine
-                Write-Host $divider
-            }
+            # Use Format-Table for text output
+            $tableData | Format-Table -AutoSize | Out-String | Write-Host
         }
     }
 
-    It 'Should call Write-Host for table output' {
+    It 'Should format table data correctly with Format-Table' {
         $headers = @('Status', 'Apps')
         $rows = @(@('Installed', 'App1, App2'))
 
         Write-Table -Headers $headers -Rows $rows
 
-        # Should call Write-Host multiple times for divider, header, and rows
-        Assert-MockCalled Write-Host -Times 4  # divider, header, divider, row + divider
+        # Should call Write-Host at least once with formatted table output
+        Assert-MockCalled Write-Host -Times 1 -ParameterFilter { $Object -match 'Status' -or $Object -match 'Apps' }
+    }
+
+    It 'Should handle multiple rows correctly' {
+        $headers = @('Status', 'Apps')
+        $rows = @(
+            @('Installed', 'App1, App2'),
+            @('Skipped', 'App3'),
+            @('Failed', 'App4')
+        )
+
+        Write-Table -Headers $headers -Rows $rows
+
+        # Should call Write-Host with the formatted output
+        Assert-MockCalled Write-Host -Times 1
+    }
+
+    It 'Should use Out-GridView when requested and available' {
+        Mock Get-Command { return $true } -ParameterFilter { $Name -eq 'Out-GridView' }
+        
+        $headers = @('Status', 'Apps')
+        $rows = @(@('Installed', 'App1, App2'))
+
+        Write-Table -Headers $headers -Rows $rows -UseGridView $true
+
+        # Should call Out-GridView
+        Assert-MockCalled Out-GridView -Times 1
+    }
+
+    It 'Should fall back to text output when Out-GridView is not available' {
+        Mock Get-Command { throw 'Command not found' } -ParameterFilter { $Name -eq 'Out-GridView' }
+        
+        $headers = @('Status', 'Apps')
+        $rows = @(@('Installed', 'App1, App2'))
+
+        Write-Table -Headers $headers -Rows $rows -UseGridView $true
+
+        # Should call Write-Host for fallback
+        Assert-MockCalled Write-Host -Times 2  # Warning message + table output
+    }
+
+    It 'Should default to text output when UseGridView is false' {
+        $headers = @('Status', 'Apps')
+        $rows = @(@('Installed', 'App1, App2'))
+
+        Write-Table -Headers $headers -Rows $rows -UseGridView $false
+
+        # Should not call Out-GridView
+        Assert-MockCalled Out-GridView -Times 0
+        # Should call Write-Host for text output
+        Assert-MockCalled Write-Host -Times 1
     }
 }
 
