@@ -12,6 +12,7 @@
 - Google Chrome (`Google.Chrome`)
 - Google Drive (`Google.GoogleDrive`)
 - Git (`Git.Git`)
+- Bulk Crap Uninstaller (`Klocman.BulkCrapUninstaller`)
 - Dell Command Update (`Dell.CommandUpdate.Universal`)
 - PowerShell (`Microsoft.PowerShell`)
 - Windows Terminal (`Microsoft.WindowsTerminal`)

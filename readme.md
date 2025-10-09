@@ -53,6 +53,7 @@ The scripts work with this curated list of applications:
 - **Google Chrome** (`Google.Chrome`) - Web browser
 - **Google Drive** (`Google.GoogleDrive`) - Cloud storage client
 - **Git** (`Git.Git`) - Distributed version control system
+- **Bulk Crap Uninstaller** (`Klocman.BulkCrapUninstaller`) - Bulk program uninstaller and cleanup utility
 - **Dell Command Update** (`Dell.CommandUpdate.Universal`) - System updates for Dell computers
 - **PowerShell** (`Microsoft.PowerShell`) - Microsoft's command-line shell
 - **Windows Terminal** (`Microsoft.WindowsTerminal`) - Modern terminal application

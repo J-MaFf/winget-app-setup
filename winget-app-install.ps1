@@ -564,6 +564,7 @@ $apps = @(
     @{name = 'Google.Chrome' },
     @{name = 'Google.GoogleDrive' },
     @{name = 'Git.Git' },
+    @{name = 'Klocman.BulkCrapUninstaller' },
     @{name = 'Dell.CommandUpdate.Universal' },
     @{name = 'Microsoft.PowerShell' },
     @{name = 'Microsoft.WindowsTerminal' }
