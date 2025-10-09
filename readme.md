@@ -54,6 +54,7 @@ The scripts work with this curated list of applications:
 - **Adobe Acrobat Reader** (`Adobe.Acrobat.Reader.64-bit`) - PDF viewer
 - **Google Chrome** (`Google.Chrome`) - Web browser
 - **Google Drive** (`Google.GoogleDrive`) - Cloud storage client
+- **Git** (`Git.Git`) - Distributed version control system
 - **Dell Command Update** (`Dell.CommandUpdate.Universal`) - System updates for Dell computers
 - **PowerShell** (`Microsoft.PowerShell`) - Microsoft's command-line shell
 - **Windows Terminal** (`Microsoft.WindowsTerminal`) - Modern terminal application

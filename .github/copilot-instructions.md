@@ -5,6 +5,17 @@
 - **Key Components**: PowerShell scripts using winget package manager
 - **Architecture**: Script-based with shared utility functions and consistent error handling patterns
 
+### Baseline Application Set
+- 7-Zip (`7zip.7zip`)
+- TightVNC (`GlavSoft.TightVNC`)
+- Adobe Acrobat Reader (`Adobe.Acrobat.Reader.64-bit`)
+- Google Chrome (`Google.Chrome`)
+- Google Drive (`Google.GoogleDrive`)
+- Git (`Git.Git`)
+- Dell Command Update (`Dell.CommandUpdate.Universal`)
+- PowerShell (`Microsoft.PowerShell`)
+- Windows Terminal (`Microsoft.WindowsTerminal`)
+
 ## Coding Style & Conventions
 
 ### PowerShell Specific

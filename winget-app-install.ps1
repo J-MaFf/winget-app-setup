@@ -463,6 +463,7 @@ $apps = @(
     @{name = 'Adobe.Acrobat.Reader.64-bit' },
     @{name = 'Google.Chrome' },
     @{name = 'Google.GoogleDrive' },
+    @{name = 'Git.Git' },
     @{name = 'Dell.CommandUpdate.Universal' },
     @{name = 'Microsoft.PowerShell' },
     @{name = 'Microsoft.WindowsTerminal' }
