@@ -113,7 +113,7 @@ function Test-Source-IsTrusted($target) {
 #>
 function Set-Sources {
     winget source add -n 'winget' -s 'https://cdn.winget.microsoft.com/cache'
-    winget source add -n 'msstore' -s ' https://storeedgefd.dsx.mp.microsoft.com/v9.0'
+    winget source add -n 'msstore' -s 'https://storeedgefd.dsx.mp.microsoft.com/v9.0'
 }
 
 <#
