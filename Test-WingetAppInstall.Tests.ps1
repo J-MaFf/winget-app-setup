@@ -495,7 +495,8 @@ Describe 'Write-Table' {
             }
 
             # Use Format-Table for text output
-            $tableData | Format-Table -AutoSize | Out-String | Write-Host
+            $output = $tableData | Format-Table -AutoSize | Out-String
+            Write-Host $output.TrimEnd()
         }
     }
 
