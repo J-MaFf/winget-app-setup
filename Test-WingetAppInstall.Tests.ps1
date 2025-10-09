@@ -490,9 +490,10 @@ Describe 'Invoke-WingetCommand' {
 
         function ConvertTo-CommandArguments {
             param ([string]$Command)
-            # Properly split command string into arguments, handling quoted arguments
-            $tokens = [System.Management.Automation.PSParser]::Tokenize($Command, [ref]$null)
-            return $tokens | Where-Object { $_.Type -eq 'CommandArgument' -or $_.Type -eq 'String' } | ForEach-Object { $_.Content }
+            # Manual parsing logic to split command string into arguments, handling quoted arguments
+            $pattern = '("[^"]*"|''[^'']*''|\S+)'
+            $matches = [regex]::Matches($Command, $pattern)
+            return $matches | ForEach-Object { $_.Value.Trim('"').Trim("'") }
         }
     }
 
