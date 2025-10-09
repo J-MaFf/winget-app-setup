@@ -1034,3 +1034,21 @@ Describe 'Main Script Logic' {
         }
     }
 }
+
+Describe 'App list consistency' {
+    It 'Should keep install and uninstall app lists in sync' {
+        $installApps = Get-Content "$PSScriptRoot\winget-app-install.ps1" |
+            ForEach-Object {
+                if ($_ -match "@{name = '([^']+)'") { $matches[1] }
+            } |
+            Where-Object { $_ }
+
+        $uninstallApps = Get-Content "$PSScriptRoot\winget-app-uninstall.ps1" |
+            ForEach-Object {
+                if ($_ -match "@{name = '([^']+)'") { $matches[1] }
+            } |
+            Where-Object { $_ }
+
+        $installApps | Should -Be $uninstallApps
+    }
+}
