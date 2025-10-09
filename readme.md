@@ -35,16 +35,13 @@ Uninstallation companion script that:
 - Provides detailed uninstallation status
 - Tracks successful, skipped, and failed operations
 
-### `test-print-table.ps1`
+### `Test-WingetAppInstall.Tests.ps1`
 
-Development utility for testing the table display functionality used in the main scripts.
+Comprehensive Pester test suite that validates:
 
-### `uninstall-install-teamviewer.ps1`
-
-Specialized script for TeamViewer management:
-
-- Uninstalls current TeamViewer installation
-- Installs a specific older version (15.59.5)
+- Winget CLI remediation and source trust helpers
+- Environment PATH updates and command parsing utilities
+- Installation workflows, including success, skip, failure, and update scenarios
 
 ## Default Application List
 
@@ -105,14 +102,6 @@ Run the uninstallation script as administrator:
 
 # Or with full path
 C:\Path\To\winget-app-setup\winget-app-uninstall.ps1
-```
-
-### TeamViewer Management
-
-For specific TeamViewer operations:
-
-```powershell
-.\uninstall-install-teamviewer.ps1
 ```
 
 ## Script Behavior
@@ -200,10 +189,10 @@ The scripts include several configurable functions:
 
 ### Testing
 
-Use the included test script to verify table formatting:
+Run the Pester suite to verify all behaviors and edge cases:
 
 ```powershell
-.\test-print-table.ps1
+Invoke-Pester -Path .\Test-WingetAppInstall.Tests.ps1 -Output Detailed
 ```
 
 ## Contributing
