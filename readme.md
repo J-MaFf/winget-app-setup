@@ -111,7 +111,7 @@ C:\Path\To\winget-app-setup\winget-app-uninstall.ps1
 All scripts automatically check for administrator privileges and will:
 
 - Display a message if elevation is required
-- Relaunch themselves with elevated privileges
+- Relaunch themselves with elevated privileges (preferring Windows Terminal when available)
 - Continue execution once elevated
 
 ### Source Trust

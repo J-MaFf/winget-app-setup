@@ -358,6 +358,85 @@ Describe 'ConvertTo-CommandArguments' {
     }
 }
 
+Describe 'Restart-WithElevation' {
+    BeforeEach {
+        Mock Write-Host { }
+        Mock Write-Warning { }
+        Remove-Item function:Restart-WithElevation -ErrorAction SilentlyContinue
+
+        function Restart-WithElevation {
+            param (
+                [Parameter(Mandatory = $true)]
+                [string]$PowerShellExecutable,
+
+                [Parameter(Mandatory = $true)]
+                [string]$ScriptPath,
+
+                [Parameter(Mandatory = $false)]
+                [string]$WindowsTerminalExecutable
+            )
+
+            $quotedScriptPath = '"' + $ScriptPath.Replace('"', '`"') + '"'
+            $commandArguments = "-NoProfile -ExecutionPolicy Bypass -File $quotedScriptPath"
+            $windowsTerminalPath = $WindowsTerminalExecutable
+
+            if (-not $windowsTerminalPath) {
+                $wtCommand = Get-Command -Name 'wt.exe' -ErrorAction SilentlyContinue
+                if ($wtCommand) {
+                    $windowsTerminalPath = $wtCommand.Source
+                }
+            }
+
+            if ($windowsTerminalPath) {
+                Write-Host 'Attempting to relaunch script in Windows Terminal with elevated privileges...' -ForegroundColor Blue
+                try {
+                    Start-Process $windowsTerminalPath -ArgumentList @("$PowerShellExecutable $commandArguments") -Verb RunAs
+                    return 'WindowsTerminal'
+                }
+                catch {
+                    Write-Warning "Failed to start Windows Terminal: $_"
+                }
+            }
+
+            Write-Host 'Relaunching script in standard PowerShell window with elevated privileges...' -ForegroundColor Blue
+            Start-Process $PowerShellExecutable -ArgumentList $commandArguments -Verb RunAs
+            return 'PowerShell'
+        }
+    }
+
+    It 'Should use Windows Terminal when available' {
+        Mock Start-Process { } -ParameterFilter { $FilePath -eq 'wt.exe' }
+        Mock Start-Process { } -ParameterFilter { $FilePath -eq 'pwsh.exe' }
+
+        $result = Restart-WithElevation -PowerShellExecutable 'pwsh.exe' -ScriptPath 'C:\script.ps1' -WindowsTerminalExecutable 'wt.exe'
+
+        Assert-MockCalled Start-Process -ParameterFilter { $FilePath -eq 'wt.exe' } -Times 1
+        Assert-MockCalled Start-Process -ParameterFilter { $FilePath -eq 'pwsh.exe' } -Times 0
+        $result | Should -Be 'WindowsTerminal'
+    }
+
+    It 'Should fall back to PowerShell when Windows Terminal launch fails' {
+        Mock Start-Process { throw 'Failed to launch wt' } -ParameterFilter { $FilePath -eq 'wt.exe' }
+        Mock Start-Process { } -ParameterFilter { $FilePath -eq 'pwsh.exe' }
+
+        $result = Restart-WithElevation -PowerShellExecutable 'pwsh.exe' -ScriptPath 'C:\script.ps1' -WindowsTerminalExecutable 'wt.exe'
+
+        Assert-MockCalled Start-Process -ParameterFilter { $FilePath -eq 'wt.exe' } -Times 1
+        Assert-MockCalled Start-Process -ParameterFilter { $FilePath -eq 'pwsh.exe' } -Times 1
+        $result | Should -Be 'PowerShell'
+    }
+
+    It 'Should use PowerShell when Windows Terminal is not available' {
+        Mock Get-Command { return $null } -ParameterFilter { $Name -eq 'wt.exe' }
+        Mock Start-Process { } -ParameterFilter { $FilePath -eq 'pwsh.exe' }
+
+        $result = Restart-WithElevation -PowerShellExecutable 'pwsh.exe' -ScriptPath 'C:\script.ps1'
+
+        Assert-MockCalled Start-Process -ParameterFilter { $FilePath -eq 'pwsh.exe' } -Times 1
+        $result | Should -Be 'PowerShell'
+    }
+}
+
 Describe 'Write-Table' {
     BeforeAll {
         Mock Write-Host { }

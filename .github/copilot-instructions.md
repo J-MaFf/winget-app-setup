@@ -23,7 +23,7 @@
 - **Naming**: PascalCase for global variables/parameters, camelCase for internal variables
 - **Functions**: Use comment-based help with `.SYNOPSIS`, `.DESCRIPTION`, `.PARAMETER` blocks
 - **Error Handling**: Try-catch blocks with specific error messages and result tracking arrays
-- **Administrator Checks**: Always include admin privilege verification that relaunches script elevated
+- **Administrator Checks**: Always include admin privilege verification that relaunches script elevated (prefer Windows Terminal when available)
 
 ### Winget Integration Patterns
 - **App Definition**: Use array of hash tables: `@(@{name = 'Publisher.AppName'})`
@@ -46,6 +46,7 @@
 - `ConvertTo-CommandArguments()`: Parse command strings with quoted arguments
 - `Write-Table()`: Display formatted ASCII tables
 - `Invoke-WingetCommand()`: Execute winget commands with output parsing
+- `Restart-WithElevation()`: Relaunch the script with elevation, preferring Windows Terminal before falling back to classic PowerShell windows
 
 ## Workflow Patterns
 1. **Admin Check**: Verify elevated privileges, relaunch if needed
@@ -102,7 +103,7 @@
 ## Developer Workflows
 
 ### Critical Commands & Operations
-- **Admin Elevation**: `Start-Process $psExecutable -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`"" -Verb RunAs`
+- **Admin Elevation**: `Restart-WithElevation -PowerShellExecutable $psExecutable -ScriptPath $PSCommandPath` (helper prefers `wt.exe` when present, otherwise falls back to the classic `Start-Process` pattern)
 - **Source Trust Check**: `winget source list` and pattern matching for trusted sources
 - **App Installation**: `winget install -e --accept-source-agreements --accept-package-agreements --id $app.name`
 - **Existence Verification**: `winget list --exact -q $app.name` for install status
