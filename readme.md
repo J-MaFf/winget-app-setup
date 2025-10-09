@@ -53,6 +53,7 @@ The scripts work with this curated list of applications:
 - **Google Chrome** (`Google.Chrome`) - Web browser
 - **Google Drive** (`Google.GoogleDrive`) - Cloud storage client
 - **Git** (`Git.Git`) - Distributed version control system
+- **Bulk Crap Uninstaller** (`Klocman.BulkCrapUninstaller`) - Bulk program uninstaller and cleanup utility
 - **Dell Command Update** (`Dell.CommandUpdate.Universal`) - System updates for Dell computers
 - **PowerShell** (`Microsoft.PowerShell`) - Microsoft's command-line shell
 - **Windows Terminal** (`Microsoft.WindowsTerminal`) - Modern terminal application
@@ -111,7 +112,7 @@ C:\Path\To\winget-app-setup\winget-app-uninstall.ps1
 All scripts automatically check for administrator privileges and will:
 
 - Display a message if elevation is required
-- Relaunch themselves with elevated privileges
+- Relaunch themselves with elevated privileges (preferring Windows Terminal when available)
 - Continue execution once elevated
 
 ### Source Trust
