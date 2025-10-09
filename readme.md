@@ -12,6 +12,7 @@ A comprehensive PowerShell automation suite for managing Windows applications us
 - **Comprehensive Error Handling**: Detailed error reporting and result tracking
 - **Formatted Output**: Clean table-based summaries of all operations
 - **Color-Coded Feedback**: Visual status indicators for operations
+- **Self-Healing Winget Tooling**: Automatically installs required winget CLI and PowerShell module dependencies
 
 ## Included Scripts
 
@@ -63,6 +64,7 @@ The scripts work with this curated list of applications:
 
 - **Windows 10/11** with winget installed
 - **Microsoft App Installer** from Microsoft Store
+- **PowerShell Gallery access** to download the Microsoft.WinGet.Client module (handled automatically by the script)
 - **Administrator privileges** (scripts will request elevation automatically)
 - **PowerShell execution policy** allowing script execution
 
@@ -129,6 +131,11 @@ Scripts verify winget source trust for:
 
 - `winget` (Microsoft's official source)
 - `msstore` (Microsoft Store source)
+
+### Winget Tooling Remediation
+
+- Ensures the `Microsoft.WinGet.Client` PowerShell module is installed (installs automatically if missing)
+- Validates winget CLI is present, installing Microsoft App Installer when required
 
 ### Error Handling
 

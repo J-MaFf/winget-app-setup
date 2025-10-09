@@ -1,6 +1,90 @@
 # Test-WingetAppInstall.Tests.ps1
 # Comprehensive unit tests for winget-app-install.ps1 using Pester
 
+Describe 'Test-AndInstallWingetModule' {
+    BeforeAll {
+        Mock Write-Host { }
+        Mock Write-Warning { }
+
+        function Test-AndInstallWingetModule {
+            try {
+                if (Get-Module -ListAvailable -Name 'Microsoft.WinGet.Client') {
+                    return $true
+                }
+
+                Write-Host 'Microsoft.WinGet.Client module not found. Attempting installation...' -ForegroundColor Yellow
+
+                $nugetProvider = Get-PackageProvider -Name NuGet -ErrorAction SilentlyContinue
+                if (-not $nugetProvider) {
+                    Write-Host 'NuGet package provider not found. Installing...' -ForegroundColor Yellow
+                    Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force -Scope AllUsers | Out-Null
+                }
+
+                Install-Module -Name Microsoft.WinGet.Client -Scope AllUsers -Force -AllowClobber -ErrorAction Stop
+
+                if (Get-Module -ListAvailable -Name 'Microsoft.WinGet.Client') {
+                    return $true
+                }
+
+                Write-Warning 'Microsoft.WinGet.Client module installation completed, but module is still not detected.'
+            }
+            catch {
+                Write-Warning "Failed to install Microsoft.WinGet.Client module: $_"
+            }
+
+            return $false
+        }
+    }
+
+    Context 'When module is already available' {
+        It 'Should return true without installing' {
+            Mock Get-Module { @{ Name = 'Microsoft.WinGet.Client' } } -ParameterFilter { $Name -eq 'Microsoft.WinGet.Client' -and $ListAvailable }
+            Mock Get-PackageProvider { }
+            Mock Install-PackageProvider { }
+            Mock Install-Module { }
+
+            $result = Test-AndInstallWingetModule
+            $result | Should -Be $true
+            Assert-MockCalled Install-Module -Times 0
+        }
+    }
+
+    Context 'When module is missing and installation succeeds' {
+        It 'Should install dependencies and return true' {
+            $script:moduleInstalled = $false
+
+            Mock Get-Module {
+                if ($script:moduleInstalled) {
+                    return @{ Name = 'Microsoft.WinGet.Client' }
+                }
+                return $null
+            } -ParameterFilter { $Name -eq 'Microsoft.WinGet.Client' -and $ListAvailable }
+
+            Mock Get-PackageProvider { $null } -ParameterFilter { $Name -eq 'NuGet' }
+            Mock Install-PackageProvider { } -ParameterFilter { $Name -eq 'NuGet' }
+            Mock Install-Module { $script:moduleInstalled = $true }
+
+            $result = Test-AndInstallWingetModule
+            $result | Should -Be $true
+            Assert-MockCalled Install-PackageProvider -Times 1 -ParameterFilter { $Name -eq 'NuGet' }
+            Assert-MockCalled Install-Module -Times 1
+        }
+    }
+
+    Context 'When module installation fails' {
+        It 'Should return false and emit warning' {
+            Mock Get-Module { $null } -ParameterFilter { $Name -eq 'Microsoft.WinGet.Client' -and $ListAvailable }
+            Mock Get-PackageProvider { $null } -ParameterFilter { $Name -eq 'NuGet' }
+            Mock Install-PackageProvider { }
+            Mock Install-Module { throw 'Failure installing module' }
+
+            $result = Test-AndInstallWingetModule
+            $result | Should -Be $false
+            Assert-MockCalled Install-Module -Times 1
+        }
+    }
+}
+
 Describe 'Test-AndInstallWinget' {
     BeforeAll {
         Mock Write-Host { }

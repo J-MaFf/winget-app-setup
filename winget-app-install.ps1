@@ -36,6 +36,50 @@
  Windows Terminal
 #>
 
+# ------------------------------------------------Functions------------------------------------------------
+
+<#
+.SYNOPSIS
+    Ensures the Microsoft.WinGet.Client module is available, installing it if necessary.
+.DESCRIPTION
+    Checks for the module locally and attempts installation via PowerShell Gallery when missing, including ensuring the NuGet provider is present.
+.RETURNS
+    [bool] True when the module is available (either already installed or installed successfully), otherwise False.
+#>
+function Test-AndInstallWingetModule {
+    try {
+        if (Get-Module -ListAvailable -Name 'Microsoft.WinGet.Client') {
+            return $true
+        }
+
+        Write-Host 'Microsoft.WinGet.Client module not found. Attempting installation...' -ForegroundColor Yellow
+
+        $nugetProvider = Get-PackageProvider -Name NuGet -ErrorAction SilentlyContinue
+        if (-not $nugetProvider) {
+            Write-Host 'NuGet package provider not found. Installing...' -ForegroundColor Yellow
+            Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force -Scope AllUsers | Out-Null
+        }
+
+        Install-Module -Name Microsoft.WinGet.Client -Scope AllUsers -Force -AllowClobber -ErrorAction Stop
+
+        if (Get-Module -ListAvailable -Name 'Microsoft.WinGet.Client') {
+            return $true
+        }
+
+        Write-Warning 'Microsoft.WinGet.Client module installation completed, but module is still not detected.'
+    }
+    catch {
+        Write-Warning "Failed to install Microsoft.WinGet.Client module: $_"
+    }
+
+    return $false
+}
+
+# Ensure required modules are available
+if (-not (Test-AndInstallWingetModule)) {
+    Write-Warning 'Microsoft.WinGet.Client module is not available. Update functionality will use fallback CLI methods.'
+}
+
 # Import required modules
 try {
     Import-Module Microsoft.WinGet.Client -ErrorAction Stop
@@ -45,8 +89,6 @@ catch {
     Write-Warning "Failed to import Microsoft.WinGet.Client module: $_"
     Write-Warning 'Update functionality will use fallback CLI methods'
 }
-
-# ------------------------------------------------Functions------------------------------------------------
 
 <#
 .SYNOPSIS

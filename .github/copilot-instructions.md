@@ -38,6 +38,7 @@
 - **Summary Display**: Always show final table with operation counts
 
 ## Key Functions to Reuse
+- `Test-AndInstallWingetModule()`: Ensure the Microsoft.WinGet.Client PowerShell module is installed and usable
 - `Test-AndInstallWinget()`: Check winget availability and install if missing
 - `Test-Source-IsTrusted()`: Verify winget source trust status
 - `Set-Sources()`: Add and trust winget sources
@@ -48,11 +49,12 @@
 
 ## Workflow Patterns
 1. **Admin Check**: Verify elevated privileges, relaunch if needed
-2. **PATH Setup**: Add script directory to user PATH
-3. **Source Verification**: Ensure winget sources are trusted
-4. **App Processing**: Loop through app array with existence checks
-5. **Result Summary**: Display formatted table of all operations
-6. **User Interaction**: Keep console open with `[System.Console]::ReadKey($true)`
+2. **Winget Tooling Remediation**: Ensure winget CLI (via `Test-AndInstallWinget`) and Microsoft.WinGet.Client module (`Test-AndInstallWingetModule`) are available
+3. **PATH Setup**: Add script directory to user PATH
+4. **Source Verification**: Ensure winget sources are trusted
+5. **App Processing**: Loop through app array with existence checks
+6. **Result Summary**: Display formatted table of all operations
+7. **User Interaction**: Keep console open with `[System.Console]::ReadKey($true)`
 
 ## Common Tasks
 - **New App Addition**: Add to `$apps` array using format `@{name = 'Publisher.AppName'}`
