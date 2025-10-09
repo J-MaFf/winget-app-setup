@@ -406,7 +406,9 @@ Describe 'Invoke-WingetCommand' {
 
         function ConvertTo-CommandArguments {
             param ([string]$Command)
-            return $Command -split ' '
+            # Properly split command string into arguments, handling quoted arguments
+            $tokens = [System.Management.Automation.PSParser]::Tokenize($Command, [ref]$null)
+            return $tokens | Where-Object { $_.Type -eq 'CommandArgument' -or $_.Type -eq 'String' } | ForEach-Object { $_.Content }
         }
     }
 
