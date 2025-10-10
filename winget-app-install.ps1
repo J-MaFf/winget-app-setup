@@ -289,60 +289,101 @@ function Restart-WithElevation {
     return 'PowerShell'
 }
 
+<#
+.SYNOPSIS
+    Displays a formatted table of results, with optional interactive GUI view.
+.DESCRIPTION
+    Renders a summary table using PowerShell's built-in Format-Table for improved
+    readability and alignment. Optionally displays the data in Out-GridView when
+    running in an interactive session with GUI support.
+.PARAMETER Headers
+    Array of column header names
+.PARAMETER Rows
+    Array of row data (each row is an array matching the header count)
+.PARAMETER UseGridView
+    When set to $true and Out-GridView is available, displays results interactively
+.PARAMETER PromptForGridView
+    When set to $true, asks the user if they want to use Out-GridView (if available)
+#>
 function Write-Table {
     param (
         [Parameter(Mandatory = $true)]
         [string[]]$Headers,
         [Parameter(Mandatory = $true)]
-        [string[][]]$Rows
+        [string[][]]$Rows,
+        [Parameter(Mandatory = $false)]
+        [bool]$UseGridView = $false,
+        [Parameter(Mandatory = $false)]
+        [bool]$PromptForGridView = $false
     )
 
-    $maxLengths = @{}
-    foreach ($header in $Headers) {
-        $maxLengths[$header] = $header.Length
+    # Convert rows to objects for Format-Table
+    $tableData = @()
+    foreach ($row in $Rows) {
+        $obj = New-Object PSObject
+        for ($i = 0; $i -lt $Headers.Count; $i++) {
+            $obj | Add-Member -MemberType NoteProperty -Name $Headers[$i] -Value $row[$i]
+        }
+        $tableData += $obj
     }
 
-    foreach ($row in $Rows) {
-        for ($i = 0; $i -lt $row.Length; $i++) {
-            if ($row[$i].Length -gt $maxLengths[$Headers[$i]]) {
-                $maxLengths[$Headers[$i]] = $row[$i].Length
+    $shouldUseGridView = $UseGridView
+
+    # Prompt user if requested and Out-GridView is available
+    if ($PromptForGridView -and -not $UseGridView) {
+        $canUseGridView = $false
+        
+        # Check if we're in an interactive session
+        if ([Environment]::UserInteractive) {
+            # Check if Out-GridView is available
+            try {
+                Get-Command Out-GridView -ErrorAction Stop | Out-Null
+                $canUseGridView = $true
+            }
+            catch {
+                # Out-GridView not available, no need to prompt
+            }
+        }
+        
+        if ($canUseGridView) {
+            Write-Host ''
+            $response = Read-Host 'Would you like to view the results in an interactive grid view? (Y/N)'
+            if ($response -match '^[Yy]') {
+                $shouldUseGridView = $true
             }
         }
     }
 
-    # Build table divider with proper column separators
-    $dividerParts = @('+')
-    foreach ($header in $Headers) {
-        $columnWidth = $maxLengths[$header] + 2  # Add padding for spaces
-        $dividerParts += ('-' * $columnWidth)
-        $dividerParts += '+'
-    }
-    $divider = $dividerParts -join ''
-
-    # Build header line
-    $headerLine = ''
-    for ($i = 0; $i -lt $Headers.Count; $i++) {
-        $padSize = $maxLengths[$Headers[$i]] - $Headers[$i].Length
-        $headerLine += '|' + ' ' + $Headers[$i] + (' ' * $padSize) + ' '
-    }
-    $headerLine += '|'
-
-    Write-Host $divider
-    Write-Host $headerLine
-    Write-Host $divider
-
-    foreach ($row in $Rows) {
-        $rowLine = ''
-        for ($i = 0; $i -lt $Headers.Count; $i++) {
-            $cellValue = $row[$i]
-            $padSize = $maxLengths[$Headers[$i]] - $cellValue.Length
-            $rowLine += '|' + ' ' + $cellValue + (' ' * $padSize) + ' '
+    # Try to use Out-GridView if requested and available
+    if ($shouldUseGridView) {
+        $canUseGridView = $false
+        
+        # Check if we're in an interactive session
+        if ([Environment]::UserInteractive) {
+            # Check if Out-GridView is available
+            try {
+                Get-Command Out-GridView -ErrorAction Stop | Out-Null
+                $canUseGridView = $true
+            }
+            catch {
+                Write-Host 'Out-GridView is not available. Falling back to text output.' -ForegroundColor Yellow
+            }
         }
-        $rowLine += '|'
-
-        Write-Host $rowLine
-        Write-Host $divider
+        
+        if ($canUseGridView) {
+            try {
+                $tableData | Out-GridView -Title 'Installation Summary' -Wait
+                return
+            }
+            catch {
+                Write-Host "Failed to display grid view: $_. Falling back to text output." -ForegroundColor Yellow
+            }
+        }
     }
+
+    # Use Format-Table for text output
+    $output = $tableData | Format-Table -AutoSize | Out-String
+    Write-Host $output.TrimEnd()
 }
 
 <#
@@ -726,7 +767,7 @@ if ($appList) {
     $rows += , @('Failed to Update', $appList)
 }
 
-Write-Table -Headers $headers -Rows $rows
+Write-Table -Headers $headers -Rows $rows -PromptForGridView $true
 
 # Keep the console window open until the user presses a key
 Write-Host 'Press any key to exit...' -ForegroundColor Blue

@@ -10,7 +10,8 @@ A comprehensive PowerShell automation suite for managing Windows applications us
 - **Admin Privilege Handling**: Automatically requests elevation when needed
 - **Source Trust Management**: Verifies and trusts winget sources
 - **Comprehensive Error Handling**: Detailed error reporting and result tracking
-- **Formatted Output**: Clean table-based summaries of all operations
+- **Formatted Output**: Clean table-based summaries using PowerShell's Format-Table
+- **Interactive GUI Option**: Optional Out-GridView support for sortable, filterable results
 - **Color-Coded Feedback**: Visual status indicators for operations
 - **Self-Healing Winget Tooling**: Automatically installs required winget CLI and PowerShell module dependencies
 
@@ -25,7 +26,8 @@ The main installation script that:
 - Verifies winget source trust status
 - Handles installation failures gracefully
 - Checks for and installs available updates
-- Displays results in a formatted ASCII table
+- Displays results using PowerShell's Format-Table for improved readability
+- Optional interactive GUI summary with Out-GridView (when available)
 
 ### `winget-app-uninstall.ps1`
 
@@ -34,6 +36,7 @@ Uninstallation companion script that:
 - Removes the same applications installed by the install script
 - Provides detailed uninstallation status
 - Tracks successful, skipped, and failed operations
+- Displays summary using Format-Table for consistent, readable output
 
 ### `Test-WingetAppInstall.Tests.ps1`
 
@@ -136,15 +139,20 @@ Scripts verify winget source trust for:
 
 ### Output Format
 
-The main installation script provides:
+The scripts provide:
 
 - Real-time progress with color-coded messages
-- Comprehensive summary table showing:
+- Comprehensive summary table using PowerShell's Format-Table with automatic column sizing
+- Properly aligned columns that work in standard PowerShell, Windows Terminal, and when copied to documentation
+- Optional interactive GUI view using Out-GridView (when available and requested)
+- Summary table showing:
   - Installed applications
   - Skipped applications (already installed)
   - Failed installations
-  - Updated applications
-  - Failed updates
+  - Updated applications (install script only)
+  - Failed updates (install script only)
+
+**Interactive Grid View**: The scripts will automatically prompt you to view the results in an interactive grid view (Out-GridView) if it's available on your system. This provides a sortable, filterable window for easy review. The feature gracefully falls back to text output on Server Core or in remote sessions where Out-GridView is unavailable.
 
 ## Customization
 
@@ -166,7 +174,7 @@ The scripts include several configurable functions:
 
 - `Test-Source-IsTrusted()` - Source trust verification
 - `Set-Sources()` - Source trust setup
-- `Write-Table()` - Result display formatting
+- `Write-Table()` - Result display formatting using Format-Table or Out-GridView
 - `Invoke-WingetCommand()` - Winget command execution with parsing
 
 ## Troubleshooting

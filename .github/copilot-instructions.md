@@ -34,7 +34,10 @@
 - **Result Tracking**: Maintain separate arrays for `$installedApps`, `$skippedApps`, `$failedApps`
 
 ### Output & Display
-- **Table Formatting**: Use custom `Write-Table` function for result summaries (see `winget-app-install.ps1`)
+- **Table Formatting**: Use `Write-Table` function with PowerShell's built-in `Format-Table -AutoSize` for result summaries
+- **Interactive GUI**: Automatically prompts user to use `Out-GridView` when available via `-PromptForGridView $true` parameter
+- **Manual Override**: Can force GUI mode with `-UseGridView $true` parameter (skips prompt)
+- **Graceful Fallback**: Automatically falls back to text output when Out-GridView is unavailable (Server Core, remote sessions)
 - **Progress Messages**: Color-coded output (Blue for actions, Green for success, Yellow for skips, Red for errors)
 - **Summary Display**: Always show final table with operation counts
 
@@ -45,7 +48,7 @@
 - `Set-Sources()`: Add and trust winget sources
 - `Add-ToEnvironmentPath()`: Add paths to user/system PATH
 - `ConvertTo-CommandArguments()`: Parse command strings with quoted arguments
-- `Write-Table()`: Display formatted ASCII tables
+- `Write-Table()`: Display formatted tables using Format-Table or Out-GridView (with optional `-UseGridView` and `-PromptForGridView` parameters)
 - `Invoke-WingetCommand()`: Execute winget commands with output parsing
 - `Restart-WithElevation()`: Relaunch the script with elevation, preferring Windows Terminal before falling back to classic PowerShell windows
 
@@ -109,6 +112,7 @@
 - **App Installation**: `winget install -e --accept-source-agreements --accept-package-agreements --id $app.name`
 - **Existence Verification**: `winget list --exact -q $app.name` for install status
 - **Update Detection**: `Get-WinGetPackage | Where-Object IsUpdateAvailable` (PowerShell module) or `winget upgrade` (CLI)
+- **Table Display**: `Write-Table -Headers $headers -Rows $rows -PromptForGridView $true` (prompts user) or `Write-Table -Headers $headers -Rows $rows -UseGridView $true` (forces GUI mode)
 
 ### Build & Test Workflows
 - **Function Testing**: Extract and test individual functions in separate files
