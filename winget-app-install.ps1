@@ -77,6 +77,52 @@ function Test-AndInstallWingetModule {
 
 <#
 .SYNOPSIS
+    Ensures Out-GridView is available by installing Microsoft.PowerShell.GraphicalTools when required.
+.DESCRIPTION
+    Checks for the Out-GridView cmdlet and, when missing, installs the Microsoft.PowerShell.GraphicalTools module including NuGet provider remediation.
+.RETURNS
+    [bool] True when Out-GridView can be invoked, otherwise False.
+#>
+function Test-AndInstallGraphicalTools {
+    try {
+        if (Get-Command Out-GridView -ErrorAction SilentlyContinue) {
+            return $true
+        }
+
+        $graphicalModule = Get-Module -ListAvailable -Name 'Microsoft.PowerShell.GraphicalTools'
+        if (-not $graphicalModule) {
+            Write-Host 'Microsoft.PowerShell.GraphicalTools module is missing. Installing to enable Out-GridView...' -ForegroundColor Yellow
+        }
+        else {
+            Write-Host 'Microsoft.PowerShell.GraphicalTools module found but Out-GridView is unavailable. Importing module...' -ForegroundColor Yellow
+        }
+
+        $nugetProvider = Get-PackageProvider -Name NuGet -ErrorAction SilentlyContinue
+        if (-not $nugetProvider) {
+            Write-Host 'NuGet package provider not found. Installing...' -ForegroundColor Yellow
+            Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force -Scope AllUsers | Out-Null
+        }
+
+        Install-Module -Name Microsoft.PowerShell.GraphicalTools -Scope AllUsers -Force -AllowClobber -ErrorAction Stop
+        Import-Module Microsoft.PowerShell.GraphicalTools -ErrorAction Stop
+        Write-Host 'Microsoft.PowerShell.GraphicalTools is loaded for this session.' -ForegroundColor Green
+
+        if (Get-Command Out-GridView -ErrorAction SilentlyContinue) {
+            Write-Host 'Out-GridView is available for interactive summaries.' -ForegroundColor Green
+            return $true
+        }
+
+        Write-Warning 'Microsoft.PowerShell.GraphicalTools installation completed, but Out-GridView is still unavailable.'
+    }
+    catch {
+        Write-Warning "Failed to install Microsoft.PowerShell.GraphicalTools module: $_"
+    }
+
+    return $false
+}
+
+<#
+.SYNOPSIS
     Checks if a specific winget source is trusted.
 .DESCRIPTION
     This function checks if a specific winget source is trusted by listing all sources and checking if the target source is in the list.
@@ -332,7 +378,7 @@ function Write-Table {
     # Prompt user if requested and Out-GridView is available
     if ($PromptForGridView -and -not $UseGridView) {
         $canUseGridView = $false
-        
+
         # Check if we're in an interactive session
         if ([Environment]::UserInteractive) {
             # Check if Out-GridView is available
@@ -344,7 +390,7 @@ function Write-Table {
                 # Out-GridView not available, no need to prompt
             }
         }
-        
+
         if ($canUseGridView) {
             Write-Host ''
             $response = Read-Host 'Would you like to view the results in an interactive grid view? (Y/N)'
@@ -357,7 +403,7 @@ function Write-Table {
     # Try to use Out-GridView if requested and available
     if ($shouldUseGridView) {
         $canUseGridView = $false
-        
+
         # Check if we're in an interactive session
         if ([Environment]::UserInteractive) {
             # Check if Out-GridView is available
@@ -369,7 +415,7 @@ function Write-Table {
                 Write-Host 'Out-GridView is not available. Falling back to text output.' -ForegroundColor Yellow
             }
         }
-        
+
         if ($canUseGridView) {
             try {
                 $tableData | Out-GridView -Title 'Installation Summary' -Wait
@@ -576,6 +622,10 @@ else {
 # Ensure required modules are available
 if (-not (Test-AndInstallWingetModule)) {
     Write-Warning 'Microsoft.WinGet.Client module is not available. Update functionality will use fallback CLI methods.'
+}
+
+if (-not (Test-AndInstallGraphicalTools)) {
+    Write-Warning 'Out-GridView will be unavailable; results will be displayed in text mode only.'
 }
 
 # Import required modules
