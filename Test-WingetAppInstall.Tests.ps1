@@ -440,6 +440,7 @@ Describe 'Restart-WithElevation' {
 Describe 'Write-Table' {
     BeforeAll {
         Mock Write-Host { }
+        Mock Read-Host { return 'N' }
         
         # Create a mock Out-GridView command if it doesn't exist
         if (-not (Get-Command Out-GridView -ErrorAction SilentlyContinue)) {
@@ -454,7 +455,9 @@ Describe 'Write-Table' {
                 [Parameter(Mandatory = $true)]
                 [string[][]]$Rows,
                 [Parameter(Mandatory = $false)]
-                [bool]$UseGridView = $false
+                [bool]$UseGridView = $false,
+                [Parameter(Mandatory = $false)]
+                [bool]$PromptForGridView = $false
             )
 
             # Convert rows to objects for Format-Table
@@ -467,8 +470,35 @@ Describe 'Write-Table' {
                 $tableData += $obj
             }
 
+            $shouldUseGridView = $UseGridView
+
+            # Prompt user if requested and Out-GridView is available
+            if ($PromptForGridView -and -not $UseGridView) {
+                $canUseGridView = $false
+                
+                # Check if we're in an interactive session
+                if ([Environment]::UserInteractive) {
+                    # Check if Out-GridView is available
+                    try {
+                        Get-Command Out-GridView -ErrorAction Stop | Out-Null
+                        $canUseGridView = $true
+                    }
+                    catch {
+                        # Out-GridView not available, no need to prompt
+                    }
+                }
+                
+                if ($canUseGridView) {
+                    Write-Host ''
+                    $response = Read-Host 'Would you like to view the results in an interactive grid view? (Y/N)'
+                    if ($response -match '^[Yy]') {
+                        $shouldUseGridView = $true
+                    }
+                }
+            }
+
             # Try to use Out-GridView if requested and available
-            if ($UseGridView) {
+            if ($shouldUseGridView) {
                 $canUseGridView = $false
                 
                 # Check if we're in an interactive session
@@ -556,6 +586,53 @@ Describe 'Write-Table' {
 
         # Should not call Out-GridView
         Assert-MockCalled Out-GridView -Times 0
+        # Should call Write-Host for text output
+        Assert-MockCalled Write-Host -Times 1
+    }
+
+    It 'Should prompt user when PromptForGridView is true and user accepts' {
+        Mock Get-Command { return $true } -ParameterFilter { $Name -eq 'Out-GridView' }
+        Mock Read-Host { return 'Y' }
+        
+        $headers = @('Status', 'Apps')
+        $rows = @(@('Installed', 'App1, App2'))
+
+        Write-Table -Headers $headers -Rows $rows -PromptForGridView $true
+
+        # Should call Read-Host to prompt user
+        Assert-MockCalled Read-Host -Times 1
+        # Should call Out-GridView since user said yes
+        Assert-MockCalled Out-GridView -Times 1
+    }
+
+    It 'Should prompt user when PromptForGridView is true and user declines' {
+        Mock Get-Command { return $true } -ParameterFilter { $Name -eq 'Out-GridView' }
+        Mock Read-Host { return 'N' }
+        
+        $headers = @('Status', 'Apps')
+        $rows = @(@('Installed', 'App1, App2'))
+
+        Write-Table -Headers $headers -Rows $rows -PromptForGridView $true
+
+        # Should call Read-Host to prompt user
+        Assert-MockCalled Read-Host -Times 1
+        # Should not call Out-GridView since user said no
+        Assert-MockCalled Out-GridView -Times 0
+        # Should call Write-Host for text output
+        Assert-MockCalled Write-Host -Times 2  # Empty line + table output
+    }
+
+    It 'Should not prompt when Out-GridView is not available' {
+        Mock Get-Command { throw 'Command not found' } -ParameterFilter { $Name -eq 'Out-GridView' }
+        Mock Read-Host { return 'Y' }
+        
+        $headers = @('Status', 'Apps')
+        $rows = @(@('Installed', 'App1, App2'))
+
+        Write-Table -Headers $headers -Rows $rows -PromptForGridView $true
+
+        # Should not call Read-Host since Out-GridView is not available
+        Assert-MockCalled Read-Host -Times 0
         # Should call Write-Host for text output
         Assert-MockCalled Write-Host -Times 1
     }

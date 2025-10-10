@@ -152,7 +152,7 @@ The scripts provide:
   - Updated applications (install script only)
   - Failed updates (install script only)
 
-**Using Out-GridView**: To enable the interactive grid view, modify the `Write-Table` call in the script to include `-UseGridView $true`. This will display results in a sortable, filterable window when running in an interactive session with GUI support. The feature gracefully falls back to text output on Server Core or in remote sessions where Out-GridView is unavailable.
+**Interactive Grid View**: The scripts will automatically prompt you to view the results in an interactive grid view (Out-GridView) if it's available on your system. This provides a sortable, filterable window for easy review. The feature gracefully falls back to text output on Server Core or in remote sessions where Out-GridView is unavailable.
 
 ## Customization
 

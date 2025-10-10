@@ -302,6 +302,8 @@ function Restart-WithElevation {
     Array of row data (each row is an array matching the header count)
 .PARAMETER UseGridView
     When set to $true and Out-GridView is available, displays results interactively
+.PARAMETER PromptForGridView
+    When set to $true, asks the user if they want to use Out-GridView (if available)
 #>
 function Write-Table {
     param (
@@ -310,7 +312,9 @@ function Write-Table {
         [Parameter(Mandatory = $true)]
         [string[][]]$Rows,
         [Parameter(Mandatory = $false)]
-        [bool]$UseGridView = $false
+        [bool]$UseGridView = $false,
+        [Parameter(Mandatory = $false)]
+        [bool]$PromptForGridView = $false
     )
 
     # Convert rows to objects for Format-Table
@@ -323,8 +327,35 @@ function Write-Table {
         $tableData += $obj
     }
 
+    $shouldUseGridView = $UseGridView
+
+    # Prompt user if requested and Out-GridView is available
+    if ($PromptForGridView -and -not $UseGridView) {
+        $canUseGridView = $false
+        
+        # Check if we're in an interactive session
+        if ([Environment]::UserInteractive) {
+            # Check if Out-GridView is available
+            try {
+                Get-Command Out-GridView -ErrorAction Stop | Out-Null
+                $canUseGridView = $true
+            }
+            catch {
+                # Out-GridView not available, no need to prompt
+            }
+        }
+        
+        if ($canUseGridView) {
+            Write-Host ''
+            $response = Read-Host 'Would you like to view the results in an interactive grid view? (Y/N)'
+            if ($response -match '^[Yy]') {
+                $shouldUseGridView = $true
+            }
+        }
+    }
+
     # Try to use Out-GridView if requested and available
-    if ($UseGridView) {
+    if ($shouldUseGridView) {
         $canUseGridView = $false
         
         # Check if we're in an interactive session
@@ -736,7 +767,7 @@ if ($appList) {
     $rows += , @('Failed to Update', $appList)
 }
 
-Write-Table -Headers $headers -Rows $rows
+Write-Table -Headers $headers -Rows $rows -PromptForGridView $true
 
 # Keep the console window open until the user presses a key
 Write-Host 'Press any key to exit...' -ForegroundColor Blue
