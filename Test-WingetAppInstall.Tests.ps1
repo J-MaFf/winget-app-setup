@@ -1198,7 +1198,7 @@ Describe 'Test-AppDefinitions' {
             Write-Host ($commandDebug | Format-List Name, CommandType, Parameters | Out-String)
 
             try {
-                $result = & Test-AppDefinitions $apps
+                $result = Test-AppDefinitions -Apps $apps
             }
             catch {
                 Write-Host "ExceptionType: $($_.Exception.GetType().FullName)"
@@ -1210,8 +1210,8 @@ Describe 'Test-AppDefinitions' {
             }
 
             $result.ValidApps.Count | Should -Be 2
-            $result.Errors | Should -BeEmpty
-            $result.Warnings | Should -BeEmpty
+            $result.Errors | Should -BeNullOrEmpty
+            $result.Warnings | Should -BeNullOrEmpty
         }
     }
 
