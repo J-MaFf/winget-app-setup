@@ -441,7 +441,7 @@ Describe 'Write-Table' {
     BeforeAll {
         Mock Write-Host { }
         Mock Read-Host { return 'N' }
-        
+
         # Create a mock Out-GridView command if it doesn't exist
         if (-not (Get-Command Out-GridView -ErrorAction SilentlyContinue)) {
             function Out-GridView { param($Title, [switch]$Wait) }
@@ -475,7 +475,7 @@ Describe 'Write-Table' {
             # Prompt user if requested and Out-GridView is available
             if ($PromptForGridView -and -not $UseGridView) {
                 $canUseGridView = $false
-                
+
                 # Check if we're in an interactive session
                 if ([Environment]::UserInteractive) {
                     # Check if Out-GridView is available
@@ -487,7 +487,7 @@ Describe 'Write-Table' {
                         # Out-GridView not available, no need to prompt
                     }
                 }
-                
+
                 if ($canUseGridView) {
                     Write-Host ''
                     $response = Read-Host 'Would you like to view the results in an interactive grid view? (Y/N)'
@@ -500,7 +500,7 @@ Describe 'Write-Table' {
             # Try to use Out-GridView if requested and available
             if ($shouldUseGridView) {
                 $canUseGridView = $false
-                
+
                 # Check if we're in an interactive session
                 if ([Environment]::UserInteractive) {
                     # Check if Out-GridView is available
@@ -512,7 +512,7 @@ Describe 'Write-Table' {
                         Write-Host 'Out-GridView is not available. Falling back to text output.' -ForegroundColor Yellow
                     }
                 }
-                
+
                 if ($canUseGridView) {
                     try {
                         $tableData | Out-GridView -Title 'Installation Summary' -Wait
@@ -556,7 +556,7 @@ Describe 'Write-Table' {
 
     It 'Should use Out-GridView when requested and available' {
         Mock Get-Command { return $true } -ParameterFilter { $Name -eq 'Out-GridView' }
-        
+
         $headers = @('Status', 'Apps')
         $rows = @(@('Installed', 'App1, App2'))
 
@@ -568,7 +568,7 @@ Describe 'Write-Table' {
 
     It 'Should fall back to text output when Out-GridView is not available' {
         Mock Get-Command { throw 'Command not found' } -ParameterFilter { $Name -eq 'Out-GridView' }
-        
+
         $headers = @('Status', 'Apps')
         $rows = @(@('Installed', 'App1, App2'))
 
@@ -593,7 +593,7 @@ Describe 'Write-Table' {
     It 'Should prompt user when PromptForGridView is true and user accepts' {
         Mock Get-Command { return $true } -ParameterFilter { $Name -eq 'Out-GridView' }
         Mock Read-Host { return 'Y' }
-        
+
         $headers = @('Status', 'Apps')
         $rows = @(@('Installed', 'App1, App2'))
 
@@ -608,7 +608,7 @@ Describe 'Write-Table' {
     It 'Should prompt user when PromptForGridView is true and user declines' {
         Mock Get-Command { return $true } -ParameterFilter { $Name -eq 'Out-GridView' }
         Mock Read-Host { return 'N' }
-        
+
         $headers = @('Status', 'Apps')
         $rows = @(@('Installed', 'App1, App2'))
 
@@ -625,7 +625,7 @@ Describe 'Write-Table' {
     It 'Should not prompt when Out-GridView is not available' {
         Mock Get-Command { throw 'Command not found' } -ParameterFilter { $Name -eq 'Out-GridView' }
         Mock Read-Host { return 'Y' }
-        
+
         $headers = @('Status', 'Apps')
         $rows = @(@('Installed', 'App1, App2'))
 
@@ -1179,5 +1179,70 @@ Describe 'App list consistency' {
             Where-Object { $_ }
 
         $installApps | Should -Be $uninstallApps
+    }
+}
+
+Describe 'Test-AppDefinitions' {
+    BeforeAll {
+        . "$PSScriptRoot\winget-app-install.ps1"
+    }
+
+    Context 'When app definitions are valid' {
+        It 'Should return the same number of apps without errors or warnings' {
+            $apps = @(
+                @{ name = 'App.One' },
+                @{ name = 'App.Two' }
+            )
+
+            $commandDebug = Get-Command Test-AppDefinitions -All
+            Write-Host ($commandDebug | Format-List Name, CommandType, Parameters | Out-String)
+
+            try {
+                $result = Test-AppDefinitions -Apps $apps
+            }
+            catch {
+                Write-Host "ExceptionType: $($_.Exception.GetType().FullName)"
+                Write-Host "Message: $($_.Exception.Message)"
+                if ($_.Exception -and $_.Exception.ErrorRecord) {
+                    Write-Host (('ErrorRecord:'), ($_.Exception.ErrorRecord | Format-List * | Out-String))
+                }
+                throw
+            }
+
+            $result.ValidApps.Count | Should -Be 2
+            $result.Errors | Should -BeNullOrEmpty
+            $result.Warnings | Should -BeNullOrEmpty
+        }
+    }
+
+    Context 'When an entry is malformed' {
+        It 'Should return an error and skip the invalid entry' {
+            $apps = @(
+                @{ name = 'App.Valid' },
+                @{ bogus = 'value' }
+            )
+
+            $result = Test-AppDefinitions -Apps $apps
+
+            $result.ValidApps.Count | Should -Be 1
+            $result.Errors.Count | Should -Be 1
+            $result.Errors[0] | Should -Match "missing a valid 'name'"
+        }
+    }
+
+    Context 'When duplicate entries are present' {
+        It 'Should keep the first occurrence and warn about duplicates' {
+            $apps = @(
+                @{ name = 'App.Duplicate' },
+                @{ name = 'app.duplicate ' }
+            )
+
+            $result = Test-AppDefinitions -Apps $apps
+
+            $result.ValidApps.Count | Should -Be 1
+            $result.ValidApps[0].name | Should -Be 'App.Duplicate'
+            $result.Warnings.Count | Should -Be 1
+            $result.Warnings[0] | Should -Match 'Duplicate app definition'
+        }
     }
 }

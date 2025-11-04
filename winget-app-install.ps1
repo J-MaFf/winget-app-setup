@@ -121,6 +121,56 @@ function Test-AndInstallGraphicalTools {
     return $false
 }
 
+<#!
+.SYNOPSIS
+    Validates the list of application definitions before processing.
+.DESCRIPTION
+    Ensures each entry in the apps array is a hashtable containing a non-empty string `name` value and removes duplicates, warning about any issues.
+.PARAMETER Apps
+    The collection of application definition hash tables to validate.
+.RETURNS
+    [pscustomobject] containing ValidApps, Errors, and Warnings arrays.
+#>
+function Test-AppDefinitions {
+    param (
+        [Parameter(Mandatory = $true)]
+        [array]$Apps
+    )
+
+    $errors = @()
+    $warnings = @()
+    $validatedApps = @()
+    $seenNames = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+
+    for ($i = 0; $i -lt $Apps.Count; $i++) {
+        $app = $Apps[$i]
+        if (-not ($app -is [hashtable])) {
+            $errors += "App entry at index $i is not a hashtable."
+            continue
+        }
+
+        if (-not $app.ContainsKey('name') -or -not ($app['name'] -is [string]) -or [string]::IsNullOrWhiteSpace($app['name'])) {
+            $errors += "App entry at index $i is missing a valid 'name' value."
+            continue
+        }
+
+        $name = $app['name'].Trim()
+        if (-not $seenNames.Add($name)) {
+            $warnings += "Duplicate app definition detected for '$name'. Subsequent entry ignored."
+            continue
+        }
+
+        $app['name'] = $name
+        $validatedApps += $app
+    }
+
+    return [pscustomobject]@{
+        ValidApps = $validatedApps
+        Errors    = $errors
+        Warnings  = $warnings
+    }
+}
+
 <#
 .SYNOPSIS
     Checks if a specific winget source is trusted.
@@ -604,221 +654,253 @@ function Test-AndInstallWinget {
 
 #------------------------------------------------Main Script------------------------------------------------
 
-# Determine which PowerShell executable to use
-$psExecutable = if (Get-Command pwsh -ErrorAction SilentlyContinue) { 'pwsh.exe' } else { 'powershell.exe' }
+<#
+.SYNOPSIS
+    Executes the winget installation workflow when the script runs directly.
+.DESCRIPTION
+    Performs prerequisite checks, validates application definitions, installs requested apps, processes updates, and displays a summary when invoked.
+#>
+function Invoke-WingetInstall {
+    # Determine which PowerShell executable to use
+    $psExecutable = if (Get-Command pwsh -ErrorAction SilentlyContinue) { 'pwsh.exe' } else { 'powershell.exe' }
 
-# Check if the script is run as administrator
-If (-NOT ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] 'Administrator')) {
-    Write-Host 'This script requires administrator privileges. Press Enter to restart script with elevated privileges.' -ForegroundColor Red
-    Pause
-    # Relaunch the script with administrator privileges
-    Restart-WithElevation -PowerShellExecutable $psExecutable -ScriptPath $PSCommandPath | Out-Null
-    Exit
-}
-else {
-    Write-Host 'Starting...' -ForegroundColor Green
-}
-
-# Ensure required modules are available
-if (-not (Test-AndInstallWingetModule)) {
-    Write-Warning 'Microsoft.WinGet.Client module is not available. Update functionality will use fallback CLI methods.'
-}
-
-if (-not (Test-AndInstallGraphicalTools)) {
-    Write-Warning 'Out-GridView will be unavailable; results will be displayed in text mode only.'
-}
-
-# Import required modules
-try {
-    Import-Module Microsoft.WinGet.Client -ErrorAction Stop
-    Write-Host 'Successfully imported Microsoft.WinGet.Client module' -ForegroundColor Green
-}
-catch {
-    Write-Warning "Failed to import Microsoft.WinGet.Client module: $_"
-    Write-Warning 'Update functionality will use fallback CLI methods'
-}
-
-# Check if winget is available and install if necessary
-if (-not (Test-AndInstallWinget)) {
-    Write-Host 'Winget is required for this script. Exiting.' -ForegroundColor Red
-    Exit
-}
-
-# Add the script directory to the PATH
-$scriptDirectory = Split-Path -Parent $MyInvocation.MyCommand.Definition
-Add-ToEnvironmentPath -PathToAdd $scriptDirectory -Scope 'User'
-
-$apps = @(
-    @{name = '7zip.7zip' },
-    @{name = 'GlavSoft.TightVNC' },
-    @{name = 'Adobe.Acrobat.Reader.64-bit' },
-    @{name = 'Google.Chrome' },
-    @{name = 'Google.GoogleDrive' },
-    @{name = 'Git.Git' },
-    @{name = 'Klocman.BulkCrapUninstaller' },
-    @{name = 'Dell.CommandUpdate.Universal' },
-    @{name = 'Microsoft.PowerShell' },
-    @{name = 'Microsoft.WindowsTerminal' }
-);
-
-Write-Host 'Installing the following Apps:' -ForegroundColor Blue
-ForEach ($app in $apps) {
-    Write-Host $app.name -ForegroundColor Blue
-}
-
-$installedApps = @()
-$skippedApps = @()
-$failedApps = @()
-
-# Verify sources are trusted
-$trustedSources = @('winget', 'msstore')
-ForEach ($source in $trustedSources) {
-    if (-not (Test-Source-IsTrusted -target $source)) {
-        Write-Host 'Trusting source: $source' -ForegroundColor Yellow
-        Set-Sources
+    # Check if the script is run as administrator
+    If (-NOT ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] 'Administrator')) {
+        Write-Host 'This script requires administrator privileges. Press Enter to restart script with elevated privileges.' -ForegroundColor Red
+        Pause
+        # Relaunch the script with administrator privileges
+        Restart-WithElevation -PowerShellExecutable $psExecutable -ScriptPath $PSCommandPath | Out-Null
+        Exit
     }
     else {
-        Write-Host "Source is already trusted: $source" -ForegroundColor Green
+        Write-Host 'Starting...' -ForegroundColor Green
     }
-}
 
+    # Ensure required modules are available
+    if (-not (Test-AndInstallWingetModule)) {
+        Write-Warning 'Microsoft.WinGet.Client module is not available. Update functionality will use fallback CLI methods.'
+    }
 
-Foreach ($app in $apps) {
+    if (-not (Test-AndInstallGraphicalTools)) {
+        Write-Warning 'Out-GridView will be unavailable; results will be displayed in text mode only.'
+    }
+
+    # Import required modules
     try {
-        $listApp = winget list --exact -q $app.name
-        if (![String]::Join('', $listApp).Contains($app.name)) {
-            Write-Host 'Installing: ' $app.name -ForegroundColor Blue
-            Start-Process winget -ArgumentList "install -e --accept-source-agreements --accept-package-agreements --id $($app.name)" -NoNewWindow -Wait
-            $installResult = winget list --exact -q $app.name
-            if (![String]::Join('', $installResult).Contains($app.name)) {
-                Write-Host "Failed to install: $($app.name). No package found matching input criteria." -ForegroundColor Red
-                $failedApps += $app.name
+        Import-Module Microsoft.WinGet.Client -ErrorAction Stop
+        Write-Host 'Successfully imported Microsoft.WinGet.Client module' -ForegroundColor Green
+    }
+    catch {
+        Write-Warning "Failed to import Microsoft.WinGet.Client module: $_"
+        Write-Warning 'Update functionality will use fallback CLI methods'
+    }
+
+    # Check if winget is available and install if necessary
+    if (-not (Test-AndInstallWinget)) {
+        Write-Host 'Winget is required for this script. Exiting.' -ForegroundColor Red
+        Exit
+    }
+
+    # Add the script directory to the PATH
+    $scriptDirectory = Split-Path -Parent $MyInvocation.MyCommand.Definition
+    Add-ToEnvironmentPath -PathToAdd $scriptDirectory -Scope 'User'
+
+    $apps = @(
+        @{name = '7zip.7zip' },
+        @{name = 'GlavSoft.TightVNC' },
+        @{name = 'Adobe.Acrobat.Reader.64-bit' },
+        @{name = 'Google.Chrome' },
+        @{name = 'Google.GoogleDrive' },
+        @{name = 'Git.Git' },
+        @{name = 'Klocman.BulkCrapUninstaller' },
+        @{name = 'Dell.CommandUpdate.Universal' },
+        @{name = 'Microsoft.PowerShell' },
+        @{name = 'Microsoft.WindowsTerminal' }
+    );
+
+    $validationResult = Test-AppDefinitions -Apps $apps
+
+    foreach ($validationWarning in $validationResult.Warnings) {
+        Write-Warning $validationWarning
+    }
+
+    if ($validationResult.Errors.Count -gt 0) {
+        foreach ($validationError in $validationResult.Errors) {
+            Write-Host $validationError -ForegroundColor Red
+        }
+        Write-Host 'No valid application definitions found. Resolve the errors and re-run the script.' -ForegroundColor Red
+        Exit
+    }
+
+    $apps = $validationResult.ValidApps
+
+    if ($apps.Count -eq 0) {
+        Write-Host 'No application definitions remain after validation. Add at least one valid entry and re-run the script.' -ForegroundColor Red
+        Exit
+    }
+
+    Write-Host 'Installing the following Apps:' -ForegroundColor Blue
+    ForEach ($app in $apps) {
+        Write-Host $app.name -ForegroundColor Blue
+    }
+
+    $installedApps = @()
+    $skippedApps = @()
+    $failedApps = @()
+
+    # Verify sources are trusted
+    $trustedSources = @('winget', 'msstore')
+    ForEach ($source in $trustedSources) {
+        if (-not (Test-Source-IsTrusted -target $source)) {
+            Write-Host 'Trusting source: $source' -ForegroundColor Yellow
+            Set-Sources
+        }
+        else {
+            Write-Host "Source is already trusted: $source" -ForegroundColor Green
+        }
+    }
+
+    Foreach ($app in $apps) {
+        try {
+            $listApp = winget list --exact -q $app.name
+            if (![String]::Join('', $listApp).Contains($app.name)) {
+                Write-Host 'Installing: ' $app.name -ForegroundColor Blue
+                Start-Process winget -ArgumentList "install -e --accept-source-agreements --accept-package-agreements --id $($app.name)" -NoNewWindow -Wait
+                $installResult = winget list --exact -q $app.name
+                if (![String]::Join('', $installResult).Contains($app.name)) {
+                    Write-Host "Failed to install: $($app.name). No package found matching input criteria." -ForegroundColor Red
+                    $failedApps += $app.name
+                }
+                else {
+                    Write-Host 'Successfully installed: ' $app.name -ForegroundColor Green
+                    $installedApps += $app.name
+                }
             }
             else {
-                Write-Host 'Successfully installed: ' $app.name -ForegroundColor Green
-                $installedApps += $app.name
+                Write-Host 'Skipping: ' $app.name ' (already installed)' -ForegroundColor Yellow
+                $skippedApps += $app.name
+            }
+        }
+        catch {
+            Write-Host "Failed to install: $($app.name). Error: $_" -ForegroundColor Red
+            $failedApps += $app.name
+        }
+    }
+
+    $updatedApps = @()
+    $failedUpdateApps = @()
+
+    # Check for updates and perform them in one step
+    $hasUpdates = Test-UpdatesAvailable
+
+    if ($hasUpdates) {
+        Write-Host 'Updates found. Installing updates...' -ForegroundColor Green
+
+        # Try PowerShell module first
+        if (Get-Command Update-WinGetPackage -ErrorAction SilentlyContinue) {
+            $updateResults = Get-WinGetPackage | Where-Object IsUpdateAvailable | Update-WinGetPackage
+
+            foreach ($result in $updateResults) {
+                if ($result.Status -eq 'Ok') {
+                    $updatedApps += $result.Id
+                    Write-Host "Successfully updated: $($result.Id)" -ForegroundColor Green
+                }
+                else {
+                    $failedUpdateApps += $result.Id
+                    Write-Host "Failed to update: $($result.Id) - $($result.Status)" -ForegroundColor Red
+                }
             }
         }
         else {
-            Write-Host 'Skipping: ' $app.name ' (already installed)' -ForegroundColor Yellow
-            $skippedApps += $app.name
-        }
-    }
-    catch {
-        Write-Host "Failed to install: $($app.name). Error: $_" -ForegroundColor Red
-        $failedApps += $app.name
-    }
-}
+            Write-Host 'PowerShell module not available, using CLI fallback...' -ForegroundColor Yellow
 
-$updatedApps = @()
-$failedUpdateApps = @()
-
-# Check for updates and perform them in one step
-$hasUpdates = Test-UpdatesAvailable
-
-if ($hasUpdates) {
-    Write-Host 'Updates found. Installing updates...' -ForegroundColor Green
-
-    # Try PowerShell module first
-    if (Get-Command Update-WinGetPackage -ErrorAction SilentlyContinue) {
-        $updateResults = Get-WinGetPackage | Where-Object IsUpdateAvailable | Update-WinGetPackage
-
-        foreach ($result in $updateResults) {
-            if ($result.Status -eq 'Ok') {
-                $updatedApps += $result.Id
-                Write-Host "Successfully updated: $($result.Id)" -ForegroundColor Green
+            # Fallback to CLI method - get list of packages that have updates available
+            $installedPackages = & winget list --source winget 2>&1 | Where-Object {
+                $_ -and
+                $_ -notmatch '^[\s\-\|\\]*$' -and
+                $_ -notmatch '^$' -and
+                $_ -notmatch '^Name\s+Id\s+Version\s+Source' -and
+                $_ -notmatch '^[-]+$' -and
+                $_ -notmatch 'No installed package found'
             }
-            else {
-                $failedUpdateApps += $result.Id
-                Write-Host "Failed to update: $($result.Id) - $($result.Status)" -ForegroundColor Red
-            }
-        }
-    }
-    else {
-        Write-Host 'PowerShell module not available, using CLI fallback...' -ForegroundColor Yellow
 
-        # Fallback to CLI method - get list of packages that have updates available
-        $installedPackages = & winget list --source winget 2>&1 | Where-Object {
-            $_ -and
-            $_ -notmatch '^[\s\-\|\\]*$' -and
-            $_ -notmatch '^$' -and
-            $_ -notmatch '^Name\s+Id\s+Version\s+Source' -and
-            $_ -notmatch '^[-]+$' -and
-            $_ -notmatch 'No installed package found'
-        }
+            foreach ($package in $installedPackages) {
+                $package = $package.Trim()
+                # Split the line by multiple spaces to get columns
+                # Format: Name | Id | Version | Source
+                $columns = $package -split '\s{2,}'
+                if ($columns.Count -ge 2) {
+                    $packageId = $columns[1]  # Second column is the ID
 
-        foreach ($package in $installedPackages) {
-            $package = $package.Trim()
-            # Split the line by multiple spaces to get columns
-            # Format: Name | Id | Version | Source
-            $columns = $package -split '\s{2,}'
-            if ($columns.Count -ge 2) {
-                $packageId = $columns[1]  # Second column is the ID
+                    # Skip if it's not a winget package or if it's a system component
+                    if ($packageId -and $packageId -notmatch '^(ARP|MSIX)') {
+                        try {
+                            $upgradeResult = & winget upgrade $packageId 2>&1
+                            $upgradeOutput = $upgradeResult | Out-String
 
-                # Skip if it's not a winget package or if it's a system component
-                if ($packageId -and $packageId -notmatch '^(ARP|MSIX)') {
-                    try {
-                        $upgradeResult = & winget upgrade $packageId 2>&1
-                        $upgradeOutput = $upgradeResult | Out-String
-
-                        # Check if upgrade is available and successful
-                        if ($upgradeOutput -match 'Successfully installed') {
-                            $updatedApps += $packageId
-                            Write-Host "Successfully updated: $packageId" -ForegroundColor Green
+                            # Check if upgrade is available and successful
+                            if ($upgradeOutput -match 'Successfully installed') {
+                                $updatedApps += $packageId
+                                Write-Host "Successfully updated: $packageId" -ForegroundColor Green
+                            }
+                            elseif ($upgradeOutput -notmatch 'No available upgrade found' -and
+                                $upgradeOutput -notmatch 'No newer package versions are available') {
+                                # Package has an update but installation may have failed
+                                $failedUpdateApps += $packageId
+                                Write-Host "Failed to update: $packageId" -ForegroundColor Red
+                            }
                         }
-                        elseif ($upgradeOutput -notmatch 'No available upgrade found' -and
-                            $upgradeOutput -notmatch 'No newer package versions are available') {
-                            # Package has an update but installation may have failed
+                        catch {
                             $failedUpdateApps += $packageId
-                            Write-Host "Failed to update: $packageId" -ForegroundColor Red
+                            Write-Host "Error updating ${packageId}: $_" -ForegroundColor Red
                         }
-                    }
-                    catch {
-                        $failedUpdateApps += $packageId
-                        Write-Host "Error updating ${packageId}: $_" -ForegroundColor Red
                     }
                 }
             }
         }
     }
+    else {
+        Write-Host 'No updates available.' -ForegroundColor Yellow
+    }
+
+    # Display the summary of the installation
+    Write-Host 'Summary:' -ForegroundColor Blue
+
+    $headers = @('Status', 'Apps')
+    $rows = @()
+
+    $appList = Format-AppList -AppArray $installedApps
+    if ($appList) {
+        $rows += , @('Installed', $appList)
+    }
+
+    $appList = Format-AppList -AppArray $skippedApps
+    if ($appList) {
+        $rows += , @('Skipped', $appList)
+    }
+
+    $appList = Format-AppList -AppArray $failedApps
+    if ($appList) {
+        $rows += , @('Failed', $appList)
+    }
+
+    $appList = Format-AppList -AppArray $updatedApps
+    if ($appList) {
+        $rows += , @('Updated', $appList)
+    }
+
+    $appList = Format-AppList -AppArray $failedUpdateApps
+    if ($appList) {
+        $rows += , @('Failed to Update', $appList)
+    }
+
+    Write-Table -Headers $headers -Rows $rows -PromptForGridView $true
+
+    # Keep the console window open until the user presses a key
+    Write-Host 'Press any key to exit...' -ForegroundColor Blue
+    [System.Console]::ReadKey($true) > $null
 }
-else {
-    Write-Host 'No updates available.' -ForegroundColor Yellow
+
+if ($MyInvocation.InvocationName -ne '.') {
+    Invoke-WingetInstall
 }
-
-# Display the summary of the installation
-Write-Host 'Summary:' -ForegroundColor Blue
-
-$headers = @('Status', 'Apps')
-$rows = @()
-
-$appList = Format-AppList -AppArray $installedApps
-if ($appList) {
-    $rows += , @('Installed', $appList)
-}
-
-$appList = Format-AppList -AppArray $skippedApps
-if ($appList) {
-    $rows += , @('Skipped', $appList)
-}
-
-$appList = Format-AppList -AppArray $failedApps
-if ($appList) {
-    $rows += , @('Failed', $appList)
-}
-
-$appList = Format-AppList -AppArray $updatedApps
-if ($appList) {
-    $rows += , @('Updated', $appList)
-}
-
-$appList = Format-AppList -AppArray $failedUpdateApps
-if ($appList) {
-    $rows += , @('Failed to Update', $appList)
-}
-
-Write-Table -Headers $headers -Rows $rows -PromptForGridView $true
-
-# Keep the console window open until the user presses a key
-Write-Host 'Press any key to exit...' -ForegroundColor Blue
-[System.Console]::ReadKey($true) > $null
