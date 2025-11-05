@@ -941,7 +941,55 @@ Describe 'Write-Table' {
 Describe 'Invoke-WingetCommand' {
     BeforeAll {
         Mock Write-Host { }
+        
+        # Define the helper function inline for testing
+        function ConvertTo-CommandArguments {
+            param ([string]$Command)
+            $commandArgs = @()
+            $currentArg = ''
+            $inQuotes = $false
+            $quoteChar = ''
 
+            for ($i = 0; $i -lt $Command.Length; $i++) {
+                $char = $Command[$i]
+
+                if ($inQuotes) {
+                    if ($char -eq $quoteChar) {
+                        $inQuotes = $false
+                        $quoteChar = ''
+                    }
+                    else {
+                        $currentArg += $char
+                    }
+                }
+                elseif ($char -eq '"' -or $char -eq "'") {
+                    $inQuotes = $true
+                    $quoteChar = $char
+                }
+                elseif ($char -eq ' ') {
+                    if ($currentArg) {
+                        $commandArgs += $currentArg
+                        $currentArg = ''
+                    }
+                }
+                else {
+                    $currentArg += $char
+                }
+            }
+
+            if ($currentArg) {
+                $commandArgs += $currentArg
+            }
+
+            return $commandArgs
+        }
+
+        function Write-ErrorMessage {
+            param ([string]$Message)
+            Write-Host $Message -ForegroundColor Red
+        }
+
+        # Define Invoke-WingetCommand function with exit code handling
         function Invoke-WingetCommand {
             param (
                 [Parameter(Mandatory = $true)]
@@ -966,66 +1014,182 @@ Describe 'Invoke-WingetCommand' {
                 [int]$FailureIndex = 1
             )
 
-            # Parse command string into arguments properly, handling quoted arguments
             $commandArgs = ConvertTo-CommandArguments -Command $Command
 
             & winget $commandArgs
+            $displayExitCode = $LASTEXITCODE
 
-            # Now run again to capture output for parsing (without progress display)
             try {
                 $commandOutput = & winget $commandArgs 2>&1 | Where-Object { $_ -notmatch '^[\s\-\|\\]*$' }
+                $captureExitCode = $LASTEXITCODE
             }
             catch {
-                Write-Host "Error capturing winget output: $($_)" -ForegroundColor Red
+                Write-ErrorMessage "Error capturing winget output: $($_)"
                 $commandOutput = @()
+                $captureExitCode = -1
+            }
+
+            $exitCode = $captureExitCode
+            
+            $exitMessage = switch ($exitCode) {
+                0 { 'Success' }
+                -1978335189 { 'No applicable update found' }
+                -1978335191 { 'No packages found matching input criteria' }
+                -1978335192 { 'Package installation failed' }
+                -1978335212 { 'User cancelled the operation' }
+                -1978335213 { 'Package already installed' }
+                -1978335215 { 'Manifest validation failed' }
+                -1978335216 { 'Invalid manifest' }
+                -1978335221 { 'Package download failed' }
+                -1978335226 { 'Hash mismatch' }
+                default { "Winget exited with code: $exitCode" }
             }
 
             $commandOutput | ForEach-Object {
                 if ($_ -match $SuccessPattern) {
-                    $parts = $_ -split '\s+'
-                    if ($parts.Count -gt $SuccessIndex) {
-                        $SuccessArray.Value += $parts[$SuccessIndex]
-                    }
+                    $SuccessArray.Value += $_.Split()[$SuccessIndex]
                 }
                 elseif ($_ -match $FailurePattern) {
-                    $parts = $_ -split '\s+'
-                    if ($parts.Count -gt $FailureIndex) {
-                        $FailureArray.Value += $parts[$FailureIndex]
-                    }
+                    $FailureArray.Value += $_.Split()[$FailureIndex]
                 }
             }
-        }
 
-        function ConvertTo-CommandArguments {
-            param ([string]$Command)
-            # Properly split command string into arguments, handling quoted arguments
-            $tokens = [System.Management.Automation.PSParser]::Tokenize($Command, [ref]$null)
-            return $tokens | Where-Object { $_.Type -eq 'CommandArgument' -or $_.Type -eq 'String' } | ForEach-Object { $_.Content }
+            if ($exitCode -ne 0 -and $FailureArray.Value.Count -eq 0 -and $SuccessArray.Value.Count -eq 0) {
+                Write-ErrorMessage "Winget command failed: $exitMessage"
+                $FailureArray.Value += "Command failed with exit code $exitCode"
+            }
+
+            return @{
+                ExitCode = $exitCode
+                ExitMessage = $exitMessage
+            }
         }
     }
 
-    It 'Should parse successful operations' {
-        $successArray = [System.Collections.ArrayList]::new()
-        $failureArray = [System.Collections.ArrayList]::new()
+    Context 'Exit code capture and handling' {
+        It 'Should return exit code 0 for successful operations' {
+            $successArray = @()
+            $failureArray = @()
 
-        Mock winget { 'Successfully installed App1' }
+            Mock winget { 
+                $global:LASTEXITCODE = 0
+                'Successfully installed App1'
+            }
 
-        Invoke-WingetCommand -Command 'winget update --all' -SuccessPattern 'Successfully installed' -FailurePattern 'Failed' -SuccessArray ([ref]$successArray) -FailureArray ([ref]$failureArray) -SuccessIndex 2
+            $result = Invoke-WingetCommand -Command 'winget install App1' -SuccessPattern 'Successfully installed' -FailurePattern 'Failed' -SuccessArray ([ref]$successArray) -FailureArray ([ref]$failureArray) -SuccessIndex 2
 
-        $successArray | Should -Contain 'App1'
-        $failureArray | Should -Be @()
+            $result.ExitCode | Should -Be 0
+            $result.ExitMessage | Should -Be 'Success'
+            $successArray | Should -Contain 'App1'
+        }
+
+        It 'Should return exit code for package not found (0x8A150029 / -1978335191)' {
+            $successArray = @()
+            $failureArray = @()
+
+            Mock winget { 
+                $global:LASTEXITCODE = -1978335191
+                'No packages found matching input criteria'
+            }
+
+            $result = Invoke-WingetCommand -Command 'winget install NonExistent.Package' -SuccessPattern 'Successfully installed' -FailurePattern 'Failed' -SuccessArray ([ref]$successArray) -FailureArray ([ref]$failureArray)
+
+            $result.ExitCode | Should -Be -1978335191
+            $result.ExitMessage | Should -Be 'No packages found matching input criteria'
+        }
+
+        It 'Should return exit code for package installation failed (0x8A150028 / -1978335192)' {
+            $successArray = @()
+            $failureArray = @()
+
+            Mock winget { 
+                $global:LASTEXITCODE = -1978335192
+                'Installation failed'
+            }
+
+            $result = Invoke-WingetCommand -Command 'winget install App1' -SuccessPattern 'Successfully installed' -FailurePattern 'Failed' -SuccessArray ([ref]$successArray) -FailureArray ([ref]$failureArray)
+
+            $result.ExitCode | Should -Be -1978335192
+            $result.ExitMessage | Should -Be 'Package installation failed'
+        }
+
+        It 'Should return exit code for user cancelled (0x8A150014 / -1978335212)' {
+            $successArray = @()
+            $failureArray = @()
+
+            Mock winget { 
+                $global:LASTEXITCODE = -1978335212
+                'Operation cancelled by user'
+            }
+
+            $result = Invoke-WingetCommand -Command 'winget install App1' -SuccessPattern 'Successfully installed' -FailurePattern 'Failed' -SuccessArray ([ref]$successArray) -FailureArray ([ref]$failureArray)
+
+            $result.ExitCode | Should -Be -1978335212
+            $result.ExitMessage | Should -Be 'User cancelled the operation'
+        }
+
+        It 'Should handle unknown exit codes with generic message' {
+            $successArray = @()
+            $failureArray = @()
+
+            Mock winget { 
+                $global:LASTEXITCODE = 999
+                'Unknown error'
+            }
+
+            $result = Invoke-WingetCommand -Command 'winget install App1' -SuccessPattern 'Successfully installed' -FailurePattern 'Failed' -SuccessArray ([ref]$successArray) -FailureArray ([ref]$failureArray)
+
+            $result.ExitCode | Should -Be 999
+            $result.ExitMessage | Should -Be 'Winget exited with code: 999'
+        }
+
+        It 'Should add failure entry when exit code is non-zero and no output patterns match' {
+            $successArray = @()
+            $failureArray = @()
+
+            Mock winget { 
+                $global:LASTEXITCODE = -1978335192
+                'Some unrecognized output'
+            }
+
+            $result = Invoke-WingetCommand -Command 'winget install App1' -SuccessPattern 'Successfully installed' -FailurePattern 'Failed to install' -SuccessArray ([ref]$successArray) -FailureArray ([ref]$failureArray)
+
+            $result.ExitCode | Should -Be -1978335192
+            $failureArray.Count | Should -Be 1
+            $failureArray[0] | Should -Match 'Command failed with exit code'
+        }
     }
 
-    It 'Should parse failed operations' {
-        $successArray = [System.Collections.ArrayList]::new()
-        $failureArray = [System.Collections.ArrayList]::new()
+    Context 'Output pattern parsing' {
+        It 'Should parse successful operations' {
+            $successArray = @()
+            $failureArray = @()
 
-        Mock winget { 'Failed to install App2' }
+            Mock winget { 
+                $global:LASTEXITCODE = 0
+                'Successfully installed App1'
+            }
 
-        Invoke-WingetCommand -Command 'winget install App2' -SuccessPattern 'Successfully installed' -FailurePattern 'Failed' -SuccessArray ([ref]$successArray) -FailureArray ([ref]$failureArray) -FailureIndex 3
+            Invoke-WingetCommand -Command 'winget update --all' -SuccessPattern 'Successfully installed' -FailurePattern 'Failed' -SuccessArray ([ref]$successArray) -FailureArray ([ref]$failureArray) -SuccessIndex 2
 
-        $failureArray | Should -Contain 'App2'
-        $successArray | Should -Be @()
+            $successArray | Should -Contain 'App1'
+            $failureArray | Should -Be @()
+        }
+
+        It 'Should parse failed operations' {
+            $successArray = @()
+            $failureArray = @()
+
+            Mock winget { 
+                $global:LASTEXITCODE = 1
+                'Failed to install App2'
+            }
+
+            Invoke-WingetCommand -Command 'winget install App2' -SuccessPattern 'Successfully installed' -FailurePattern 'Failed' -SuccessArray ([ref]$successArray) -FailureArray ([ref]$failureArray) -FailureIndex 3
+
+            $failureArray | Should -Contain 'App2'
+            $successArray | Should -Be @()
+        }
     }
 }
 
