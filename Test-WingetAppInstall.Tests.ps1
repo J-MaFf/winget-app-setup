@@ -1077,7 +1077,7 @@ Describe 'Invoke-WingetCommand' {
             $successArray | Should -Contain 'App1'
         }
 
-        It 'Should return exit code for package not found (0x8A15001D / -1978335191)' {
+        It 'Should return exit code for package not found (0x8A150029 / -1978335191)' {
             $successArray = @()
             $failureArray = @()
 
@@ -1092,7 +1092,7 @@ Describe 'Invoke-WingetCommand' {
             $result.ExitMessage | Should -Be 'No packages found matching input criteria'
         }
 
-        It 'Should return exit code for package installation failed (0x8A150014 / -1978335192)' {
+        It 'Should return exit code for package installation failed (0x8A150028 / -1978335192)' {
             $successArray = @()
             $failureArray = @()
 
@@ -1107,7 +1107,7 @@ Describe 'Invoke-WingetCommand' {
             $result.ExitMessage | Should -Be 'Package installation failed'
         }
 
-        It 'Should return exit code for user cancelled (0x8A150004 / -1978335212)' {
+        It 'Should return exit code for user cancelled (0x8A150014 / -1978335212)' {
             $successArray = @()
             $failureArray = @()
 

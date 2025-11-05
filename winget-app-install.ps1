@@ -540,22 +540,20 @@ function Invoke-WingetCommand {
     # Parse command string into arguments properly, handling quoted arguments
     $commandArgs = ConvertTo-CommandArguments -Command $Command
 
+    # First execution: Display output to user with natural progress indicators
     & winget $commandArgs
-    $displayExitCode = $LASTEXITCODE
 
-    # Now run again to capture output for parsing (without progress display)
+    # Second execution: Capture output for parsing (suppresses progress bars and extra formatting)
+    # We use the second execution's exit code because it represents the final, complete state
     try {
         $commandOutput = & winget $commandArgs 2>&1 | Where-Object { $_ -notmatch '^[\s\-\|\\]*$' }
-        $captureExitCode = $LASTEXITCODE
+        $exitCode = $LASTEXITCODE
     }
     catch {
         Write-ErrorMessage "Error capturing winget output: $($_)"
         $commandOutput = @()
-        $captureExitCode = -1
+        $exitCode = -1
     }
-
-    # Use the capture exit code as it's the most recent and complete execution
-    $exitCode = $captureExitCode
     
     # Map exit code to meaningful message
     $exitMessage = switch ($exitCode) {
