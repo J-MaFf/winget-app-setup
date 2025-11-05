@@ -5,6 +5,7 @@ A comprehensive PowerShell automation suite for managing Windows applications us
 ## Features
 
 - **Automated Installation**: Install multiple applications with a single command
+- **Dry-Run / WhatIf Mode**: Preview all actions without making system changes - perfect for testing and approval workflows
 - **Smart Uninstallation**: Remove applications with status tracking
 - **Update Management**: Automatically check for and install available updates
 - **Execution Policy Management**: Automatically checks and adjusts PowerShell execution policy on first run
@@ -96,6 +97,30 @@ Run the installation script as administrator:
 # Or with full path
 C:\Path\To\winget-app-setup\winget-app-install.ps1
 ```
+
+### Dry-Run / WhatIf Mode
+
+Preview what the script would do without making any actual changes:
+
+```powershell
+# Run in dry-run mode to see what would be installed
+.\winget-app-install.ps1 -WhatIf
+
+# This mode will:
+# - Perform all pre-flight checks
+# - Show which apps would be installed
+# - Display which sources would be trusted
+# - Indicate PATH changes that would be made
+# - List available updates without installing them
+# - No system modifications will occur
+```
+
+**Use Cases for WhatIf Mode:**
+- Verify the script behavior before running on production systems
+- Review which applications will be installed in managed environments
+- Check for available updates without installing them
+- Test the script in new environments safely
+- Generate reports of planned changes for approval processes
 
 ### Uninstallation
 
