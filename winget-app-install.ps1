@@ -55,44 +55,44 @@ param (
     [bool] True when the execution policy allows script execution, otherwise False.
 #>
 function Test-AndSetExecutionPolicy {
-	try {
-		$currentPolicy = Get-ExecutionPolicy -Scope CurrentUser
-		
-		# Check if policy is already permissive
-		$permissivePolicies = @('RemoteSigned', 'Unrestricted', 'Bypass')
-		if ($permissivePolicies -contains $currentPolicy) {
-			return $true
-		}
-		
-		# Try to set to RemoteSigned
-		Write-WarningMessage "Current execution policy ($currentPolicy) prevents script execution. Attempting to set to RemoteSigned..."
-		try {
-			Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser -Force
-			
-			# Verify the change
-			$newPolicy = Get-ExecutionPolicy -Scope CurrentUser
-			if ($permissivePolicies -contains $newPolicy) {
-				Write-Success "Execution policy successfully set to $newPolicy"
-				return $true
-			}
-			else {
-				Write-Warning "Execution policy change may not have taken effect. Current policy: $newPolicy"
-				return $false
-			}
-		}
-		catch {
-			Write-Warning "Failed to set execution policy: $_"
-			Write-Warning 'You may need to manually set the execution policy using:'
-			Write-Warning '  Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser -Force'
-			Write-Warning 'Or run PowerShell as Administrator and use:'
-			Write-Warning '  Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope LocalMachine -Force'
-			return $false
-		}
-	}
-	catch {
-		Write-Warning "Error checking execution policy: $_"
-		return $false
-	}
+    try {
+        $currentPolicy = Get-ExecutionPolicy -Scope CurrentUser
+
+        # Check if policy is already permissive
+        $permissivePolicies = @('RemoteSigned', 'Unrestricted', 'Bypass')
+        if ($permissivePolicies -contains $currentPolicy) {
+            return $true
+        }
+
+        # Try to set to RemoteSigned
+        Write-WarningMessage "Current execution policy ($currentPolicy) prevents script execution. Attempting to set to RemoteSigned..."
+        try {
+            Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser -Force
+
+            # Verify the change
+            $newPolicy = Get-ExecutionPolicy -Scope CurrentUser
+            if ($permissivePolicies -contains $newPolicy) {
+                Write-Success "Execution policy successfully set to $newPolicy"
+                return $true
+            }
+            else {
+                Write-Warning "Execution policy change may not have taken effect. Current policy: $newPolicy"
+                return $false
+            }
+        }
+        catch {
+            Write-Warning "Failed to set execution policy: $_"
+            Write-Warning 'You may need to manually set the execution policy using:'
+            Write-Warning '  Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser -Force'
+            Write-Warning 'Or run PowerShell as Administrator and use:'
+            Write-Warning '  Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope LocalMachine -Force'
+            return $false
+        }
+    }
+    catch {
+        Write-Warning "Error checking execution policy: $_"
+        return $false
+    }
 }
 
 <#
@@ -628,7 +628,7 @@ function Invoke-WingetCommand {
         $commandOutput = @()
         $exitCode = -1
     }
-    
+
     # Map exit code to meaningful message
     $exitMessage = switch ($exitCode) {
         0 { 'Success' }
@@ -662,7 +662,7 @@ function Invoke-WingetCommand {
     }
 
     return @{
-        ExitCode = $exitCode
+        ExitCode    = $exitCode
         ExitMessage = $exitMessage
     }
 }
@@ -777,11 +777,11 @@ function Test-AndInstallWinget {
     The message to display
 #>
 function Write-Info {
-	param (
-		[Parameter(Mandatory = $true)]
-		[string]$Message
-	)
-	Write-Host $Message -ForegroundColor Blue
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$Message
+    )
+    Write-Host $Message -ForegroundColor Blue
 }
 
 <#
@@ -793,11 +793,11 @@ function Write-Info {
     The message to display
 #>
 function Write-Success {
-	param (
-		[Parameter(Mandatory = $true)]
-		[string]$Message
-	)
-	Write-Host $Message -ForegroundColor Green
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$Message
+    )
+    Write-Host $Message -ForegroundColor Green
 }
 
 <#
@@ -810,11 +810,11 @@ function Write-Success {
     The message to display
 #>
 function Write-WarningMessage {
-	param (
-		[Parameter(Mandatory = $true)]
-		[string]$Message
-	)
-	Write-Host $Message -ForegroundColor Yellow
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$Message
+    )
+    Write-Host $Message -ForegroundColor Yellow
 }
 
 <#
@@ -827,11 +827,11 @@ function Write-WarningMessage {
     The message to display
 #>
 function Write-ErrorMessage {
-	param (
-		[Parameter(Mandatory = $true)]
-		[string]$Message
-	)
-	Write-Host $Message -ForegroundColor Red
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$Message
+    )
+    Write-Host $Message -ForegroundColor Red
 }
 
 <#
@@ -843,11 +843,11 @@ function Write-ErrorMessage {
     The message to display
 #>
 function Write-Prompt {
-	param (
-		[Parameter(Mandatory = $true)]
-		[string]$Message
-	)
-	Write-Host $Message -ForegroundColor Blue
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$Message
+    )
+    Write-Host $Message -ForegroundColor Blue
 }
 
 #------------------------------------------------Main Script------------------------------------------------
@@ -878,7 +878,7 @@ function Invoke-WingetInstall {
             if (-not (Test-AndSetExecutionPolicy)) {
                 Write-WarningMessage 'Warning: Execution policy could not be verified or adjusted. Script may fail.'
                 Write-Prompt 'Press any key to continue anyway...'
-                [System.Console]::ReadKey($true) > $null
+                [void][System.Console]::ReadKey($true)
             }
         }
     }
@@ -1162,7 +1162,7 @@ function Invoke-WingetInstall {
 
     # Keep the console window open until the user presses a key
     Write-Prompt 'Press any key to exit...'
-    [System.Console]::ReadKey($true) > $null
+    [void][System.Console]::ReadKey($true)
 }
 
 if ($MyInvocation.InvocationName -ne '.') {
