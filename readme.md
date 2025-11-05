@@ -187,7 +187,25 @@ The scripts include several configurable functions:
 - `Test-Source-IsTrusted()` - Source trust verification
 - `Set-Sources()` - Source trust setup
 - `Write-Table()` - Result display formatting using Format-Table or Out-GridView
-- `Invoke-WingetCommand()` - Winget command execution with parsing
+- `Invoke-WingetCommand()` - Winget command execution with exit code capture, mapping, and output parsing
+
+#### Exit Code Handling
+
+The `Invoke-WingetCommand()` function captures and maps winget exit codes to meaningful error messages:
+
+- **Exit Code 0**: Success
+- **-1978335189** (0x8A15001B): No applicable update found
+- **-1978335191** (0x8A15001D): No packages found matching input criteria
+- **-1978335192** (0x8A150014): Package installation failed
+- **-1978335212** (0x8A150004): User cancelled the operation
+- **-1978335213** (0x8A150003): Package already installed
+- **-1978335215** (0x8A150001): Manifest validation failed
+- **-1978335216** (0x8A150000): Invalid manifest
+- **-1978335221** (0x8A15FFFB): Package download failed
+- **-1978335226** (0x8A15FFF6): Hash mismatch
+- **Unknown codes**: Generic message with the exit code
+
+When winget exits with a non-zero code and no output pattern matches are found, the function automatically reports the failure with actionable diagnostics to the `$failedApps` array.
 
 ## Troubleshooting
 

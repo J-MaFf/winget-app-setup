@@ -64,8 +64,15 @@
 - `Add-ToEnvironmentPath()`: Add paths to user/system PATH
 - `ConvertTo-CommandArguments()`: Parse command strings with quoted arguments
 - `Write-Table()`: Display formatted tables using Format-Table or Out-GridView (with optional `-UseGridView` and `-PromptForGridView` parameters)
-- `Invoke-WingetCommand()`: Execute winget commands with output parsing
+- `Invoke-WingetCommand()`: Execute winget commands with exit code capture, error code mapping, and output parsing. Returns hashtable with `ExitCode` and `ExitMessage`. Automatically reports failures to `$failedApps` when exit code is non-zero and no output patterns match.
 - `Restart-WithElevation()`: Relaunch the script with elevation, preferring Windows Terminal before falling back to classic PowerShell windows
+
+#### Exit Code Handling in Invoke-WingetCommand
+- Captures `$LASTEXITCODE` after each winget execution
+- Maps common winget exit codes (0, -1978335189, -1978335191, -1978335192, -1978335212, -1978335213, -1978335215, -1978335216, -1978335221, -1978335226) to meaningful messages
+- Returns hashtable: `@{ ExitCode = <int>; ExitMessage = <string> }`
+- Automatically adds failures with actionable diagnostics when exit code indicates error but output parsing finds no matches
+- Backward compatible - callers can ignore the return value if only using array references
 
 ## Workflow Patterns
 1. **Execution Policy Check**: Verify PowerShell execution policy allows scripts to run, adjust to RemoteSigned if needed
