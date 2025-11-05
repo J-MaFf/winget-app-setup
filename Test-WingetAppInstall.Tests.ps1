@@ -85,6 +85,122 @@ Describe 'Test-AndInstallWingetModule' {
     }
 }
 
+Describe 'Test-AndSetExecutionPolicy' {
+    BeforeAll {
+        Mock Write-Host { }
+        Mock Write-Warning { }
+
+        # Dot-source the main script to import Test-AndSetExecutionPolicy
+        . "$PSScriptRoot\winget-app-install.ps1"
+    }
+
+    Context 'When execution policy is already permissive' {
+        It 'Should return true for RemoteSigned policy' {
+            Mock Get-ExecutionPolicy { return 'RemoteSigned' } -ParameterFilter { $Scope -eq 'CurrentUser' }
+            Mock Set-ExecutionPolicy { }
+
+            $result = Test-AndSetExecutionPolicy
+            $result | Should -Be $true
+            Assert-MockCalled Set-ExecutionPolicy -Times 0
+        }
+
+        It 'Should return true for Unrestricted policy' {
+            Mock Get-ExecutionPolicy { return 'Unrestricted' } -ParameterFilter { $Scope -eq 'CurrentUser' }
+            Mock Set-ExecutionPolicy { }
+
+            $result = Test-AndSetExecutionPolicy
+            $result | Should -Be $true
+            Assert-MockCalled Set-ExecutionPolicy -Times 0
+        }
+
+        It 'Should return true for Bypass policy' {
+            Mock Get-ExecutionPolicy { return 'Bypass' } -ParameterFilter { $Scope -eq 'CurrentUser' }
+            Mock Set-ExecutionPolicy { }
+
+            $result = Test-AndSetExecutionPolicy
+            $result | Should -Be $true
+            Assert-MockCalled Set-ExecutionPolicy -Times 0
+        }
+    }
+
+    Context 'When execution policy is restrictive and change succeeds' {
+        It 'Should set policy to RemoteSigned and return true for Restricted policy' {
+            $script:getPolicyCalls = 0
+            Mock Get-ExecutionPolicy {
+                $script:getPolicyCalls++
+                if ($script:getPolicyCalls -eq 1) {
+                    return 'Restricted'
+                } else {
+                    return 'RemoteSigned'
+                }
+            } -ParameterFilter { $Scope -eq 'CurrentUser' }
+            Mock Set-ExecutionPolicy { }
+
+            $result = Test-AndSetExecutionPolicy
+            $result | Should -Be $true
+            Assert-MockCalled Set-ExecutionPolicy -Times 1 -ParameterFilter {
+                $ExecutionPolicy -eq 'RemoteSigned' -and $Scope -eq 'CurrentUser' -and $Force -eq $true
+            }
+        }
+
+        It 'Should set policy to RemoteSigned and return true for AllSigned policy' {
+            $script:getPolicyCalls = 0
+            Mock Get-ExecutionPolicy {
+                $script:getPolicyCalls++
+                if ($script:getPolicyCalls -eq 1) {
+                    return 'AllSigned'
+                } else {
+                    return 'RemoteSigned'
+                }
+            } -ParameterFilter { $Scope -eq 'CurrentUser' }
+            Mock Set-ExecutionPolicy { }
+
+            $result = Test-AndSetExecutionPolicy
+            $result | Should -Be $true
+            Assert-MockCalled Set-ExecutionPolicy -Times 1
+        }
+
+        It 'Should set policy to RemoteSigned and return true for Undefined policy' {
+            $script:getPolicyCalls = 0
+            Mock Get-ExecutionPolicy {
+                $script:getPolicyCalls++
+                if ($script:getPolicyCalls -eq 1) {
+                    return 'Undefined'
+                } else {
+                    return 'RemoteSigned'
+                }
+            } -ParameterFilter { $Scope -eq 'CurrentUser' }
+            Mock Set-ExecutionPolicy { }
+
+            $result = Test-AndSetExecutionPolicy
+            $result | Should -Be $true
+            Assert-MockCalled Set-ExecutionPolicy -Times 1
+        }
+    }
+
+    Context 'When execution policy change fails' {
+        It 'Should return false and display warning when Set-ExecutionPolicy throws error' {
+            Mock Get-ExecutionPolicy { return 'Restricted' } -ParameterFilter { $Scope -eq 'CurrentUser' }
+            Mock Set-ExecutionPolicy { throw 'Access denied' } -ParameterFilter { $Scope -eq 'CurrentUser' }
+
+            $result = Test-AndSetExecutionPolicy
+            $result | Should -Be $false
+            Assert-MockCalled Set-ExecutionPolicy -Times 1
+            Assert-MockCalled Write-Warning -Times 4
+        }
+    }
+
+    Context 'When Get-ExecutionPolicy fails' {
+        It 'Should return false and display warning when Get-ExecutionPolicy throws error' {
+            Mock Get-ExecutionPolicy { throw 'Policy check failed' } -ParameterFilter { $Scope -eq 'CurrentUser' }
+
+            $result = Test-AndSetExecutionPolicy
+            $result | Should -Be $false
+            Assert-MockCalled Write-Warning -Times 1
+        }
+    }
+}
+
 Describe 'Test-AndInstallWinget' {
     BeforeAll {
         Mock Write-Host { }

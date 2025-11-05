@@ -652,6 +652,50 @@ function Test-AndInstallWinget {
     }
 }
 
+<#
+.SYNOPSIS
+    Checks and adjusts PowerShell execution policy if necessary to allow script execution.
+.DESCRIPTION
+    Verifies the current execution policy for the CurrentUser scope and attempts to set it to RemoteSigned
+    if it's more restrictive. This ensures the script and future scripts can run without policy-related errors.
+    RemoteSigned is used as it's secure (requires signatures for downloaded scripts) while allowing local scripts to run.
+.RETURNS
+    [bool] True if the execution policy is permissive or was successfully adjusted, otherwise False.
+#>
+function Test-AndSetExecutionPolicy {
+    try {
+        $currentPolicy = Get-ExecutionPolicy -Scope CurrentUser
+        $permissivePolicies = @('RemoteSigned', 'Unrestricted', 'Bypass')
+        
+        if ($permissivePolicies -contains $currentPolicy) {
+            Write-Host "Execution policy is already set to '$currentPolicy' for CurrentUser scope." -ForegroundColor Green
+            return $true
+        }
+        
+        Write-Host "Current execution policy for CurrentUser is '$currentPolicy', which may prevent scripts from running." -ForegroundColor Yellow
+        Write-Host 'Attempting to set execution policy to RemoteSigned for CurrentUser scope...' -ForegroundColor Blue
+        
+        try {
+            Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser -Force -ErrorAction Stop
+            $newPolicy = Get-ExecutionPolicy -Scope CurrentUser
+            Write-Host "Execution policy successfully changed from '$currentPolicy' to '$newPolicy' for CurrentUser scope." -ForegroundColor Green
+            Write-Host 'This change allows local scripts to run and requires signatures for downloaded scripts (secure).' -ForegroundColor Green
+            return $true
+        }
+        catch {
+            Write-Warning "Failed to set execution policy: $_"
+            Write-Warning 'You may need to run this command manually with administrator privileges:'
+            Write-Warning '  Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser -Force'
+            Write-Warning 'Or run as administrator and use: Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope LocalMachine -Force'
+            return $false
+        }
+    }
+    catch {
+        Write-Warning "Error checking execution policy: $_"
+        return $false
+    }
+}
+
 #------------------------------------------------Main Script------------------------------------------------
 
 <#
@@ -661,6 +705,13 @@ function Test-AndInstallWinget {
     Performs prerequisite checks, validates application definitions, installs requested apps, processes updates, and displays a summary when invoked.
 #>
 function Invoke-WingetInstall {
+    # Check and set execution policy if needed (before any other checks)
+    if (-not (Test-AndSetExecutionPolicy)) {
+        Write-Host 'Warning: Execution policy could not be verified or adjusted. Script may fail.' -ForegroundColor Yellow
+        Write-Host 'Press any key to continue anyway...' -ForegroundColor Yellow
+        [System.Console]::ReadKey($true) > $null
+    }
+
     # Determine which PowerShell executable to use
     $psExecutable = if (Get-Command pwsh -ErrorAction SilentlyContinue) { 'pwsh.exe' } else { 'powershell.exe' }
 
