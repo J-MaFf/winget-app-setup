@@ -40,6 +40,55 @@
 
 <#
 .SYNOPSIS
+    Checks and adjusts PowerShell execution policy to allow script execution.
+.DESCRIPTION
+    Verifies the current execution policy for the CurrentUser scope and attempts to set it to RemoteSigned if it's too restrictive.
+.RETURNS
+    [bool] True when the execution policy allows script execution, otherwise False.
+#>
+function Test-AndSetExecutionPolicy {
+	try {
+		$currentPolicy = Get-ExecutionPolicy -Scope CurrentUser
+		
+		# Check if policy is already permissive
+		$permissivePolicies = @('RemoteSigned', 'Unrestricted', 'Bypass')
+		if ($permissivePolicies -contains $currentPolicy) {
+			return $true
+		}
+		
+		# Try to set to RemoteSigned
+		Write-WarningMessage "Current execution policy ($currentPolicy) prevents script execution. Attempting to set to RemoteSigned..."
+		try {
+			Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser -Force
+			
+			# Verify the change
+			$newPolicy = Get-ExecutionPolicy -Scope CurrentUser
+			if ($permissivePolicies -contains $newPolicy) {
+				Write-Success "Execution policy successfully set to $newPolicy"
+				return $true
+			}
+			else {
+				Write-Warning "Execution policy change may not have taken effect. Current policy: $newPolicy"
+				return $false
+			}
+		}
+		catch {
+			Write-Warning "Failed to set execution policy: $_"
+			Write-Warning 'You may need to manually set the execution policy using:'
+			Write-Warning '  Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser -Force'
+			Write-Warning 'Or run PowerShell as Administrator and use:'
+			Write-Warning '  Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope LocalMachine -Force'
+			return $false
+		}
+	}
+	catch {
+		Write-Warning "Error checking execution policy: $_"
+		return $false
+	}
+}
+
+<#
+.SYNOPSIS
     Ensures the Microsoft.WinGet.Client module is available, installing it if necessary.
 .DESCRIPTION
     Checks for the module locally and attempts installation via PowerShell Gallery when missing, including ensuring the NuGet provider is present.
@@ -183,14 +232,21 @@ function Test-AppDefinitions {
     Checks if a specific winget source is trusted.
 .DESCRIPTION
     This function checks if a specific winget source is trusted by listing all sources and checking if the target source is in the list.
+    Automatically accepts source agreements to prevent the script from hanging on first run.
 .PARAMETER target
     The name of the source to check.
 .RETURNS
     [bool] True if the source is trusted, otherwise False.
 #>
 function Test-Source-IsTrusted($target) {
-    $sources = winget source list
-    return $sources -match [regex]::Escape($target)
+    try {
+        $sources = winget source list --accept-source-agreements 2>&1
+        return $sources -match [regex]::Escape($target)
+    }
+    catch {
+        Write-Warning "Error checking source trust for ${target}: $_"
+        return $false
+    }
 }
 
 <#
@@ -198,10 +254,17 @@ function Test-Source-IsTrusted($target) {
     Adds and trusts the winget source.
 .DESCRIPTION
     This function adds and trusts the winget source by adding it to the list of sources.
+    Automatically accepts source agreements to prevent prompts.
 #>
 function Set-Sources {
-    winget source add -n 'winget' -s 'https://cdn.winget.microsoft.com/cache'
-    winget source add -n 'msstore' -s 'https://storeedgefd.dsx.mp.microsoft.com/v9.0'
+    try {
+        # Try to reset sources first which can help with trust issues
+        winget source reset --force --accept-source-agreements 2>&1 | Out-Null
+        Write-Success 'Winget sources reset successfully'
+    }
+    catch {
+        Write-WarningMessage "Could not reset sources (this is usually okay): $_"
+    }
 }
 
 <#

@@ -426,16 +426,15 @@ Describe 'Test-AndInstallWinget' {
 Describe 'Test-Source-IsTrusted' {
     BeforeAll {
         Mock Write-Host { }
+        Mock Write-Warning { }
 
-        function Test-Source-IsTrusted($target) {
-            $sources = winget source list
-            return $sources -match [regex]::Escape($target)
-        }
+        # Dot-source the main script to import Test-Source-IsTrusted
+        . "$PSScriptRoot\winget-app-install.ps1"
     }
 
     Context 'When source is trusted' {
-        It 'Should return true' {
-            Mock winget { return 'winget    https://cdn.winget.microsoft.com/cache' } -ParameterFilter { $args[0] -eq 'source' -and $args[1] -eq 'list' }
+        It 'Should return true and accept source agreements' {
+            Mock winget { return 'winget    https://cdn.winget.microsoft.com/cache' } -ParameterFilter { $args[0] -eq 'source' -and $args[1] -eq 'list' -and $args -contains '--accept-source-agreements' }
             $result = Test-Source-IsTrusted -target 'winget'
             $result | Should -Be $true
         }
@@ -443,9 +442,18 @@ Describe 'Test-Source-IsTrusted' {
 
     Context 'When source is not trusted' {
         It 'Should return false' {
-            Mock winget { return 'msstore    https://storeedgefd.dsx.mp.microsoft.com/v9.0' } -ParameterFilter { $args[0] -eq 'source' -and $args[1] -eq 'list' }
+            Mock winget { return 'msstore    https://storeedgefd.dsx.mp.microsoft.com/v9.0' } -ParameterFilter { $args[0] -eq 'source' -and $args[1] -eq 'list' -and $args -contains '--accept-source-agreements' }
             $result = Test-Source-IsTrusted -target 'winget'
             $result | Should -Be $false
+        }
+    }
+
+    Context 'When winget source list fails' {
+        It 'Should return false and emit warning' {
+            Mock winget { throw 'Command failed' } -ParameterFilter { $args[0] -eq 'source' -and $args[1] -eq 'list' }
+            $result = Test-Source-IsTrusted -target 'winget'
+            $result | Should -Be $false
+            Assert-MockCalled Write-Warning -Times 1
         }
     }
 }
@@ -454,16 +462,14 @@ Describe 'Set-Sources' {
     BeforeAll {
         Mock Write-Host { }
 
-        function Set-Sources {
-            winget source add -n 'winget' -s 'https://cdn.winget.microsoft.com/cache'
-            winget source add -n 'msstore' -s ' https://storeedgefd.dsx.mp.microsoft.com/v9.0'
-        }
+        # Dot-source the main script to import Set-Sources
+        . "$PSScriptRoot\winget-app-install.ps1"
     }
 
-    It 'Should call winget source add for both sources' {
+    It 'Should call winget source reset with accept-source-agreements flag' {
         Mock winget { }
         Set-Sources
-        Assert-MockCalled winget -Times 2 -ParameterFilter { $args[0] -eq 'source' -and $args[1] -eq 'add' }
+        Assert-MockCalled winget -Times 1 -ParameterFilter { $args[0] -eq 'source' -and $args[1] -eq 'reset' -and $args -contains '--accept-source-agreements' }
     }
 }
 
