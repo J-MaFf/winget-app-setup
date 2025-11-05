@@ -271,8 +271,10 @@ function Set-Sources {
 
         # Run winget source reset with a timeout to prevent hanging
         # Using Start-Process with a timeout to handle potential hangs
+        # Both --disable-interactivity and --accept-source-agreements are required:
+        # --disable-interactivity prevents prompts, --accept-source-agreements auto-accepts terms
         $resetProcess = Start-Process -FilePath 'winget' `
-            -ArgumentList 'source', 'reset', '--force', '--disable-interactivity' `
+            -ArgumentList 'source', 'reset', '--force', '--disable-interactivity', '--accept-source-agreements' `
             -NoNewWindow `
             -PassThru `
             -RedirectStandardOutput "$env:TEMP\winget_reset_output.txt" `
