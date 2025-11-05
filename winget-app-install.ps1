@@ -1021,7 +1021,7 @@ function Invoke-WingetInstall {
             if (-not $WhatIf) {
                 Write-WarningMessage "Trusting source: $source"
                 Set-Sources
-                Write-Info "Source reset completed, continuing..."
+                Write-Info 'Source reset completed, continuing...'
             }
             else {
                 Write-Info "[DRY-RUN] Would trust source: $source"
@@ -1032,11 +1032,13 @@ function Invoke-WingetInstall {
         }
     }
 
-    Write-Info "Source verification complete. Starting app installation..."
+    Write-Info 'Source verification complete. Starting app installation...'
 
     Foreach ($app in $apps) {
         try {
-            $listApp = winget list --exact -q $app.name
+            Write-Info "Checking if installed: $($app.name)"
+            $listApp = winget list --exact -q $app.name 2>&1
+            Write-Info "List command completed for: $($app.name)"
             if (![String]::Join('', $listApp).Contains($app.name)) {
                 if (-not $WhatIf) {
                     Write-Info "Installing: $($app.name)"
