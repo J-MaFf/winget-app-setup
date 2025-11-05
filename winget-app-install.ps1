@@ -122,10 +122,10 @@ function Test-AndInstallWingetModule {
         $installedModule = Get-Module -ListAvailable -Name 'Microsoft.WinGet.Client' | Select-Object -First 1
         if ($installedModule) {
             if ($installedModule.Version) {
-                Write-Host "Microsoft.WinGet.Client module installed successfully (Version: $($installedModule.Version))" -ForegroundColor Green
+                Write-Success "Microsoft.WinGet.Client module installed successfully (Version: $($installedModule.Version))"
             }
             else {
-                Write-Host 'Microsoft.WinGet.Client module installed successfully' -ForegroundColor Green
+                Write-Success 'Microsoft.WinGet.Client module installed successfully'
             }
             return $true
         }
