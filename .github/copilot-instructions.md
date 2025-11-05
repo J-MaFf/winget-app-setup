@@ -1,5 +1,22 @@
 # GitHub Copilot Custom Instructions
 
+This file provides custom instructions for GitHub Copilot when working on this repository. These guidelines ensure consistency, maintainability, and adherence to project standards.
+
+## Overview
+
+This repository provides PowerShell automation for managing Windows applications using the winget package manager. When contributing code or making changes, follow the patterns, conventions, and practices documented below.
+
+## Contributing Guidelines
+
+When working on code in this repository:
+
+- **Minimal Changes**: Make the smallest possible changes to achieve the goal
+- **Preserve Working Code**: Never delete or modify working code unless absolutely necessary
+- **Test Thoroughly**: Run Pester tests after making changes: `Invoke-Pester -Path .\Test-WingetAppInstall.Tests.ps1 -Output Detailed`
+- **Follow Existing Patterns**: Match the coding style and patterns already present in the codebase
+- **Document Changes**: Update comments and documentation when changing functionality
+- **Validate Scripts**: Test scripts manually before committing, especially admin elevation and winget operations
+
 ## Project Context
 - **Purpose**: PowerShell automation for installing/uninstalling Windows applications via winget
 - **Key Components**: PowerShell scripts using winget package manager
@@ -89,6 +106,15 @@
 - **Error Testing**: Include fake packages like `@{name = 'Fake.Package'}` for testing
 - **Update Operations**: Use `winget upgrade --all` with JSON parsing fallback
 - **PATH Management**: Use `Add-ToEnvironmentPath` for script accessibility
+
+## Security Practices
+- **No Hardcoded Secrets**: Never commit API keys, passwords, or credentials to the repository
+- **Execution Policy**: Use `RemoteSigned` execution policy for secure script execution (blocks unsigned downloaded scripts while allowing local scripts)
+- **Input Validation**: Always validate application names and package IDs before passing to winget commands
+- **Administrator Privileges**: Only request elevation when necessary; clearly document when admin rights are required
+- **Source Trust**: Verify and trust only official winget sources (`winget`, `msstore`)
+- **Error Messages**: Avoid exposing sensitive system information in error messages or logs
+- **PowerShell Best Practices**: Follow Microsoft's PowerShell security guidelines for script signing and execution
 
 ## Testing Approach
 - **Comprehensive Test Suite**: Use Pester for unit testing with comprehensive coverage in `Test-WingetAppInstall.Tests.ps1`
