@@ -122,10 +122,10 @@ Describe 'Test-AndInstallGraphicalTools' {
 
                 $loadedModule = Get-Module -Name 'Microsoft.PowerShell.GraphicalTools'
                 if ($loadedModule -and $loadedModule.Version) {
-                    Write-Success "Microsoft.PowerShell.GraphicalTools is loaded for this session (Version: $($loadedModule.Version))" -ForegroundColor Green
+                    Write-Success "Microsoft.PowerShell.GraphicalTools is loaded for this session (Version: $($loadedModule.Version))"
                 }
                 else {
-                    Write-Success 'Microsoft.PowerShell.GraphicalTools is loaded for this session.' -ForegroundColor Green
+                    Write-Success 'Microsoft.PowerShell.GraphicalTools is loaded for this session.'
                 }
 
                 if (Get-Command Out-GridView -ErrorAction SilentlyContinue) {
