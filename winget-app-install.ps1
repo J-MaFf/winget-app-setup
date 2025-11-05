@@ -268,16 +268,16 @@ function Test-Source-IsTrusted($target) {
 function Set-Sources {
     try {
         Write-Info 'Resetting winget sources (this may take a moment)...'
-        
+
         # Run winget source reset with a timeout to prevent hanging
         # Using Start-Process with a timeout to handle potential hangs
         $resetProcess = Start-Process -FilePath 'winget' `
-            -ArgumentList 'source', 'reset', '--force', '--accept-source-agreements' `
+            -ArgumentList 'source', 'reset', '--force', '--disable-interactivity' `
             -NoNewWindow `
             -PassThru `
             -RedirectStandardOutput "$env:TEMP\winget_reset_output.txt" `
             -RedirectStandardError "$env:TEMP\winget_reset_error.txt"
-        
+
         # Wait up to 30 seconds for the process to complete
         $timeout = 30
         if (-not $resetProcess.WaitForExit($timeout * 1000)) {
@@ -287,7 +287,7 @@ function Set-Sources {
             Write-WarningMessage 'Consider running "winget source reset --force" manually if sources are not properly configured.'
             return $false
         }
-        
+
         # Check the exit code
         if ($resetProcess.ExitCode -eq 0) {
             Write-Success 'Winget sources reset successfully'
