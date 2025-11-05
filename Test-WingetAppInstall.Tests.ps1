@@ -119,13 +119,13 @@ Describe 'Test-AndInstallGraphicalTools' {
 
                 Install-Module -Name Microsoft.PowerShell.GraphicalTools -Scope AllUsers -Force -AllowClobber -ErrorAction Stop
                 Import-Module Microsoft.PowerShell.GraphicalTools -ErrorAction Stop
-                
+
                 $loadedModule = Get-Module -Name 'Microsoft.PowerShell.GraphicalTools'
                 if ($loadedModule -and $loadedModule.Version) {
-                    Write-Host "Microsoft.PowerShell.GraphicalTools is loaded for this session (Version: $($loadedModule.Version))" -ForegroundColor Green
+                    Write-Success "Microsoft.PowerShell.GraphicalTools is loaded for this session (Version: $($loadedModule.Version))" -ForegroundColor Green
                 }
                 else {
-                    Write-Host 'Microsoft.PowerShell.GraphicalTools is loaded for this session.' -ForegroundColor Green
+                    Write-Success 'Microsoft.PowerShell.GraphicalTools is loaded for this session.' -ForegroundColor Green
                 }
 
                 if (Get-Command Out-GridView -ErrorAction SilentlyContinue) {
@@ -160,7 +160,7 @@ Describe 'Test-AndInstallGraphicalTools' {
         It 'Should install dependencies and return true' {
             $script:outGridViewAvailable = $false
 
-            Mock Get-Command { 
+            Mock Get-Command {
                 if ($script:outGridViewAvailable) {
                     return $true
                 }
@@ -192,7 +192,7 @@ Describe 'Test-AndInstallGraphicalTools' {
         It 'Should import existing module without reinstalling' {
             $script:outGridViewAvailable = $false
 
-            Mock Get-Command { 
+            Mock Get-Command {
                 if ($script:outGridViewAvailable) {
                     return $true
                 }
@@ -222,7 +222,7 @@ Describe 'Test-AndInstallGraphicalTools' {
         It 'Should install NuGet provider before installing module' {
             $script:outGridViewAvailable = $false
 
-            Mock Get-Command { 
+            Mock Get-Command {
                 if ($script:outGridViewAvailable) {
                     return $true
                 }
@@ -237,7 +237,7 @@ Describe 'Test-AndInstallGraphicalTools' {
 
             $result = Test-AndInstallGraphicalTools
             $result | Should -Be $true
-            Assert-MockCalled Install-PackageProvider -Times 1 -ParameterFilter { 
+            Assert-MockCalled Install-PackageProvider -Times 1 -ParameterFilter {
                 $Name -eq 'NuGet' -and $MinimumVersion -eq '2.8.5.201' -and $Force -eq $true -and $Scope -eq 'AllUsers'
             }
         }
@@ -331,7 +331,8 @@ Describe 'Test-AndSetExecutionPolicy' {
                 $script:getPolicyCalls++
                 if ($script:getPolicyCalls -eq 1) {
                     return 'Restricted'
-                } else {
+                }
+                else {
                     return 'RemoteSigned'
                 }
             } -ParameterFilter { $Scope -eq 'CurrentUser' }
@@ -350,7 +351,8 @@ Describe 'Test-AndSetExecutionPolicy' {
                 $script:getPolicyCalls++
                 if ($script:getPolicyCalls -eq 1) {
                     return 'AllSigned'
-                } else {
+                }
+                else {
                     return 'RemoteSigned'
                 }
             } -ParameterFilter { $Scope -eq 'CurrentUser' }
@@ -367,7 +369,8 @@ Describe 'Test-AndSetExecutionPolicy' {
                 $script:getPolicyCalls++
                 if ($script:getPolicyCalls -eq 1) {
                     return 'Undefined'
-                } else {
+                }
+                else {
                     return 'RemoteSigned'
                 }
             } -ParameterFilter { $Scope -eq 'CurrentUser' }
@@ -962,7 +965,7 @@ Describe 'Write-Table' {
 
     It 'Should accept case-insensitive affirmative responses (y, Y, yes, YES)' {
         Mock Get-Command { return $true } -ParameterFilter { $Name -eq 'Out-GridView' }
-        
+
         $testCases = @('y', 'Y', 'yes', 'YES', 'Yes', 'yEs')
         foreach ($response in $testCases) {
             Mock Read-Host { return $response }
@@ -980,7 +983,7 @@ Describe 'Write-Table' {
 
     It 'Should reject non-affirmative responses (n, N, no, anything else)' {
         Mock Get-Command { return $true } -ParameterFilter { $Name -eq 'Out-GridView' }
-        
+
         $testCases = @('n', 'N', 'no', 'NO', 'nope', 'maybe', '', 'x')
         foreach ($response in $testCases) {
             Mock Read-Host { return $response }
@@ -1031,11 +1034,11 @@ Describe 'Write-Table' {
     It 'Should not prompt in non-interactive session' {
         # Save original value
         $originalUserInteractive = [Environment]::UserInteractive
-        
+
         # Note: [Environment]::UserInteractive is read-only and cannot be mocked directly
         # This test validates that the code checks UserInteractive status
         # In actual non-interactive sessions, the prompt path would be skipped
-        
+
         Mock Get-Command { return $true } -ParameterFilter { $Name -eq 'Out-GridView' }
         Mock Read-Host { return 'Y' }
 
@@ -1055,7 +1058,7 @@ Describe 'Write-Table' {
 Describe 'Invoke-WingetCommand' {
     BeforeAll {
         Mock Write-Host { }
-        
+
         # Define the helper function inline for testing
         function ConvertTo-CommandArguments {
             param ([string]$Command)
@@ -1144,7 +1147,7 @@ Describe 'Invoke-WingetCommand' {
             }
 
             $exitCode = $captureExitCode
-            
+
             $exitMessage = switch ($exitCode) {
                 0 { 'Success' }
                 -1978335189 { 'No applicable update found' }
@@ -1174,7 +1177,7 @@ Describe 'Invoke-WingetCommand' {
             }
 
             return @{
-                ExitCode = $exitCode
+                ExitCode    = $exitCode
                 ExitMessage = $exitMessage
             }
         }
@@ -1185,7 +1188,7 @@ Describe 'Invoke-WingetCommand' {
             $successArray = @()
             $failureArray = @()
 
-            Mock winget { 
+            Mock winget {
                 $global:LASTEXITCODE = 0
                 'Successfully installed App1'
             }
@@ -1201,7 +1204,7 @@ Describe 'Invoke-WingetCommand' {
             $successArray = @()
             $failureArray = @()
 
-            Mock winget { 
+            Mock winget {
                 $global:LASTEXITCODE = -1978335191
                 'No packages found matching input criteria'
             }
@@ -1216,7 +1219,7 @@ Describe 'Invoke-WingetCommand' {
             $successArray = @()
             $failureArray = @()
 
-            Mock winget { 
+            Mock winget {
                 $global:LASTEXITCODE = -1978335192
                 'Installation failed'
             }
@@ -1231,7 +1234,7 @@ Describe 'Invoke-WingetCommand' {
             $successArray = @()
             $failureArray = @()
 
-            Mock winget { 
+            Mock winget {
                 $global:LASTEXITCODE = -1978335212
                 'Operation cancelled by user'
             }
@@ -1246,7 +1249,7 @@ Describe 'Invoke-WingetCommand' {
             $successArray = @()
             $failureArray = @()
 
-            Mock winget { 
+            Mock winget {
                 $global:LASTEXITCODE = 999
                 'Unknown error'
             }
@@ -1261,7 +1264,7 @@ Describe 'Invoke-WingetCommand' {
             $successArray = @()
             $failureArray = @()
 
-            Mock winget { 
+            Mock winget {
                 $global:LASTEXITCODE = -1978335192
                 'Some unrecognized output'
             }
@@ -1279,7 +1282,7 @@ Describe 'Invoke-WingetCommand' {
             $successArray = @()
             $failureArray = @()
 
-            Mock winget { 
+            Mock winget {
                 $global:LASTEXITCODE = 0
                 'Successfully installed App1'
             }
@@ -1294,7 +1297,7 @@ Describe 'Invoke-WingetCommand' {
             $successArray = @()
             $failureArray = @()
 
-            Mock winget { 
+            Mock winget {
                 $global:LASTEXITCODE = 1
                 'Failed to install App2'
             }
@@ -1909,18 +1912,18 @@ Describe 'WhatIf Mode - Unit Tests' {
         It 'Should skip Add-ToEnvironmentPath when WhatIf is true' {
             Mock Add-ToEnvironmentPath { }
             Mock Write-Info { }
-            
+
             # Simulate the code path
             $WhatIf = $true
             $scriptDirectory = 'C:\Test'
-            
+
             if (-not $WhatIf) {
                 Add-ToEnvironmentPath -PathToAdd $scriptDirectory -Scope 'User'
             }
             else {
                 Write-Info "[DRY-RUN] Would add '$scriptDirectory' to User PATH"
             }
-            
+
             Assert-MockCalled Add-ToEnvironmentPath -Times 0
             Assert-MockCalled Write-Info -Times 1
         }
@@ -1928,18 +1931,18 @@ Describe 'WhatIf Mode - Unit Tests' {
         It 'Should call Add-ToEnvironmentPath when WhatIf is false' {
             Mock Add-ToEnvironmentPath { }
             Mock Write-Info { }
-            
+
             # Simulate the code path
             $WhatIf = $false
             $scriptDirectory = 'C:\Test'
-            
+
             if (-not $WhatIf) {
                 Add-ToEnvironmentPath -PathToAdd $scriptDirectory -Scope 'User'
             }
             else {
                 Write-Info "[DRY-RUN] Would add '$scriptDirectory' to User PATH"
             }
-            
+
             Assert-MockCalled Add-ToEnvironmentPath -Times 1
             Assert-MockCalled Write-Info -Times 0
         }
@@ -1952,11 +1955,11 @@ Describe 'WhatIf Mode - Unit Tests' {
             Mock Write-WarningMessage { }
             Mock Write-Success { }
             Mock Test-Source-IsTrusted { return $false }
-            
+
             # Simulate the code path
             $WhatIf = $true
             $source = 'winget'
-            
+
             if (-not (Test-Source-IsTrusted -target $source)) {
                 if (-not $WhatIf) {
                     Write-WarningMessage "Trusting source: $source"
@@ -1966,7 +1969,7 @@ Describe 'WhatIf Mode - Unit Tests' {
                     Write-Info "[DRY-RUN] Would trust source: $source"
                 }
             }
-            
+
             Assert-MockCalled Set-Sources -Times 0
             Assert-MockCalled Write-Info -Times 1
         }
@@ -1977,11 +1980,11 @@ Describe 'WhatIf Mode - Unit Tests' {
             Mock Write-WarningMessage { }
             Mock Write-Success { }
             Mock Test-Source-IsTrusted { return $false }
-            
+
             # Simulate the code path
             $WhatIf = $false
             $source = 'winget'
-            
+
             if (-not (Test-Source-IsTrusted -target $source)) {
                 if (-not $WhatIf) {
                     Write-WarningMessage "Trusting source: $source"
@@ -1991,7 +1994,7 @@ Describe 'WhatIf Mode - Unit Tests' {
                     Write-Info "[DRY-RUN] Would trust source: $source"
                 }
             }
-            
+
             Assert-MockCalled Set-Sources -Times 1
             Assert-MockCalled Write-WarningMessage -Times 1
         }
@@ -2002,12 +2005,12 @@ Describe 'WhatIf Mode - Unit Tests' {
             Mock Start-Process { }
             Mock Write-Info { }
             Mock Write-Success { }
-            
+
             # Simulate the code path
             $WhatIf = $true
             $app = @{ name = 'Test.App' }
             $installedApps = @()
-            
+
             if (-not $WhatIf) {
                 Write-Info "Installing: $($app.name)"
                 Start-Process winget -ArgumentList "install -e --accept-source-agreements --accept-package-agreements --id $($app.name)" -NoNewWindow -Wait
@@ -2018,7 +2021,7 @@ Describe 'WhatIf Mode - Unit Tests' {
                 Write-Info "[DRY-RUN] Would install: $($app.name)"
                 $installedApps += $app.name
             }
-            
+
             Assert-MockCalled Start-Process -Times 0
             Assert-MockCalled Write-Info -Times 1 -ParameterFilter { $Message -match 'DRY-RUN' }
             $installedApps | Should -Contain 'Test.App'
@@ -2028,12 +2031,12 @@ Describe 'WhatIf Mode - Unit Tests' {
             Mock Start-Process { }
             Mock Write-Info { }
             Mock Write-Success { }
-            
+
             # Simulate the code path
             $WhatIf = $false
             $app = @{ name = 'Test.App' }
             $installedApps = @()
-            
+
             if (-not $WhatIf) {
                 Write-Info "Installing: $($app.name)"
                 Start-Process winget -ArgumentList "install -e --accept-source-agreements --accept-package-agreements --id $($app.name)" -NoNewWindow -Wait
@@ -2044,7 +2047,7 @@ Describe 'WhatIf Mode - Unit Tests' {
                 Write-Info "[DRY-RUN] Would install: $($app.name)"
                 $installedApps += $app.name
             }
-            
+
             Assert-MockCalled Start-Process -Times 1
             Assert-MockCalled Write-Info -Times 1 -ParameterFilter { $Message -notmatch 'DRY-RUN' }
             $installedApps | Should -Contain 'Test.App'
