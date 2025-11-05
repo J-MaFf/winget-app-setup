@@ -291,17 +291,17 @@ function Set-Sources {
         # Check the exit code
         if ($resetProcess.ExitCode -eq 0) {
             Write-Success 'Winget sources reset successfully'
-            [void] $true  # Suppress return value output
+            return $true
         }
         else {
             # Non-zero exit code, but not critical since script continues
             Write-Info "Winget source reset completed with exit code: $($resetProcess.ExitCode) (this is often not critical)"
-            [void] $false  # Suppress return value output
+            return $false
         }
     }
     catch {
         Write-WarningMessage "Could not reset sources (this is usually okay): $_"
-        [void] $false  # Suppress return value output
+        return $false
     }
     finally {
         # Clean up temp files
