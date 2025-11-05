@@ -261,17 +261,51 @@ function Test-Source-IsTrusted($target) {
 .SYNOPSIS
     Adds and trusts the winget source.
 .DESCRIPTION
-    This function adds and trusts the winget source by adding it to the list of sources.
+    This function adds and trusts the winget source by resetting sources to defaults.
     Automatically accepts source agreements to prevent prompts.
+    Uses a timeout mechanism to prevent the function from hanging indefinitely.
 #>
 function Set-Sources {
     try {
-        # Try to reset sources first which can help with trust issues
-        winget source reset --force --accept-source-agreements 2>&1 | Out-Null
-        Write-Success 'Winget sources reset successfully'
+        Write-Info 'Resetting winget sources (this may take a moment)...'
+        
+        # Run winget source reset with a timeout to prevent hanging
+        # Using Start-Process with a timeout to handle potential hangs
+        $resetProcess = Start-Process -FilePath 'winget' `
+            -ArgumentList 'source', 'reset', '--force', '--accept-source-agreements' `
+            -NoNewWindow `
+            -PassThru `
+            -RedirectStandardOutput "$env:TEMP\winget_reset_output.txt" `
+            -RedirectStandardError "$env:TEMP\winget_reset_error.txt"
+        
+        # Wait up to 30 seconds for the process to complete
+        $timeout = 30
+        if (-not $resetProcess.WaitForExit($timeout * 1000)) {
+            # Process timed out, kill it
+            Write-WarningMessage "Winget source reset timed out after $timeout seconds. Terminating process..."
+            $resetProcess.Kill()
+            Write-WarningMessage 'Consider running "winget source reset --force" manually if sources are not properly configured.'
+            return $false
+        }
+        
+        # Check the exit code
+        if ($resetProcess.ExitCode -eq 0) {
+            Write-Success 'Winget sources reset successfully'
+            return $true
+        }
+        else {
+            Write-WarningMessage "Winget source reset exited with code: $($resetProcess.ExitCode)"
+            return $false
+        }
     }
     catch {
         Write-WarningMessage "Could not reset sources (this is usually okay): $_"
+        return $false
+    }
+    finally {
+        # Clean up temp files
+        Remove-Item "$env:TEMP\winget_reset_output.txt" -ErrorAction SilentlyContinue
+        Remove-Item "$env:TEMP\winget_reset_error.txt" -ErrorAction SilentlyContinue
     }
 }
 
