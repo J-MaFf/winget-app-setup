@@ -493,8 +493,9 @@ function Write-Table {
 .SYNOPSIS
     Runs a winget command and processes its output for success/failure tracking.
 .DESCRIPTION
-    This function executes a winget command, displays its output naturally, and parses the results
-    to track successful and failed operations.
+    This function executes a winget command, displays its output naturally, captures exit codes,
+    and parses the results to track successful and failed operations. When winget exits with a
+    non-zero exit code, it maps the code to a meaningful error message.
 .PARAMETER Command
     The winget command to execute (e.g., "update --all --include-unknown")
 .PARAMETER SuccessPattern
@@ -509,6 +510,8 @@ function Write-Table {
     Index in the split result to extract the app name for successful operations (default: 1)
 .PARAMETER FailureIndex
     Index in the split result to extract the app name for failed operations (default: 1)
+.RETURNS
+    [hashtable] containing ExitCode and ExitMessage for the winget command execution
 #>
 function Invoke-WingetCommand {
     param (
@@ -538,14 +541,35 @@ function Invoke-WingetCommand {
     $commandArgs = ConvertTo-CommandArguments -Command $Command
 
     & winget $commandArgs
+    $displayExitCode = $LASTEXITCODE
 
     # Now run again to capture output for parsing (without progress display)
     try {
         $commandOutput = & winget $commandArgs 2>&1 | Where-Object { $_ -notmatch '^[\s\-\|\\]*$' }
+        $captureExitCode = $LASTEXITCODE
     }
     catch {
         Write-ErrorMessage "Error capturing winget output: $($_)"
         $commandOutput = @()
+        $captureExitCode = -1
+    }
+
+    # Use the capture exit code as it's the most recent and complete execution
+    $exitCode = $captureExitCode
+    
+    # Map exit code to meaningful message
+    $exitMessage = switch ($exitCode) {
+        0 { 'Success' }
+        -1978335189 { 'No applicable update found' }
+        -1978335191 { 'No packages found matching input criteria' }
+        -1978335192 { 'Package installation failed' }
+        -1978335212 { 'User cancelled the operation' }
+        -1978335213 { 'Package already installed' }
+        -1978335215 { 'Manifest validation failed' }
+        -1978335216 { 'Invalid manifest' }
+        -1978335221 { 'Package download failed' }
+        -1978335226 { 'Hash mismatch' }
+        default { "Winget exited with code: $exitCode" }
     }
 
     $commandOutput | ForEach-Object {
@@ -555,6 +579,19 @@ function Invoke-WingetCommand {
         elseif ($_ -match $FailurePattern) {
             $FailureArray.Value += $_.Split()[$FailureIndex]
         }
+    }
+
+    # If exit code indicates failure but no failures were captured via pattern matching,
+    # report a generic failure
+    if ($exitCode -ne 0 -and $FailureArray.Value.Count -eq 0 -and $SuccessArray.Value.Count -eq 0) {
+        Write-ErrorMessage "Winget command failed: $exitMessage"
+        # Add a generic failure entry to indicate the command failed
+        $FailureArray.Value += "Command failed with exit code $exitCode"
+    }
+
+    return @{
+        ExitCode = $exitCode
+        ExitMessage = $exitMessage
     }
 }
 
