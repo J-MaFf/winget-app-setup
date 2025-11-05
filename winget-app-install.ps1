@@ -355,7 +355,7 @@ function Add-ToEnvironmentPath {
                 $env:PATH = $newPath
             }
             else {
-                Write-WarningMessage "Current process PATH would exceed Windows limit (2048 chars). Path added to persistent environment but not to current session."
+                Write-WarningMessage 'Current process PATH would exceed Windows limit (2048 chars). Path added to persistent environment but not to current session.'
             }
         }
     }
@@ -1023,12 +1023,10 @@ function Invoke-WingetInstall {
     # Verify sources are trusted
     $trustedSources = @('winget', 'msstore')
     ForEach ($source in $trustedSources) {
-        Write-Info "Checking source trust status for: $source"
         if (-not (Test-Source-IsTrusted -target $source)) {
             if (-not $WhatIf) {
                 Write-WarningMessage "Trusting source: $source"
                 Set-Sources
-                Write-Info 'Source reset completed, continuing...'
             }
             else {
                 Write-Info "[DRY-RUN] Would trust source: $source"
@@ -1039,12 +1037,8 @@ function Invoke-WingetInstall {
         }
     }
 
-    Write-Info 'Source verification complete. Starting app installation...'
-
     Foreach ($app in $apps) {
         try {
-            Write-Info "Checking if installed: $($app.name)"
-
             # Run winget list with timeout to prevent hanging
             $listProcess = Start-Process -FilePath 'winget' `
                 -ArgumentList 'list', '--exact', '-q', '--accept-source-agreements', $app.name `
@@ -1063,7 +1057,6 @@ function Invoke-WingetInstall {
             }
 
             $listApp = Get-Content "$env:TEMP\winget_list_output.txt" -ErrorAction SilentlyContinue
-            Write-Info "List command completed for: $($app.name)"
 
             # Cleanup temp files
             Remove-Item "$env:TEMP\winget_list_output.txt" -ErrorAction SilentlyContinue
