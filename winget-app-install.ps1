@@ -1037,21 +1037,64 @@ function Invoke-WingetInstall {
     Foreach ($app in $apps) {
         try {
             Write-Info "Checking if installed: $($app.name)"
-            $listApp = winget list --exact -q $app.name 2>&1
+            
+            # Run winget list with timeout to prevent hanging
+            $listProcess = Start-Process -FilePath 'winget' `
+                -ArgumentList 'list', '--exact', '-q', $app.name `
+                -NoNewWindow `
+                -PassThru `
+                -RedirectStandardOutput "$env:TEMP\winget_list_output.txt" `
+                -RedirectStandardError "$env:TEMP\winget_list_error.txt"
+            
+            # Wait up to 15 seconds for the list command
+            if (-not $listProcess.WaitForExit(15000)) {
+                Write-WarningMessage "Winget list timed out for $($app.name). Skipping..."
+                $listProcess.Kill()
+                Remove-Item "$env:TEMP\winget_list_output.txt" -ErrorAction SilentlyContinue
+                Remove-Item "$env:TEMP\winget_list_error.txt" -ErrorAction SilentlyContinue
+                continue
+            }
+            
+            $listApp = Get-Content "$env:TEMP\winget_list_output.txt" -ErrorAction SilentlyContinue
             Write-Info "List command completed for: $($app.name)"
+            
+            # Cleanup temp files
+            Remove-Item "$env:TEMP\winget_list_output.txt" -ErrorAction SilentlyContinue
+            Remove-Item "$env:TEMP\winget_list_error.txt" -ErrorAction SilentlyContinue
+            
             if (![String]::Join('', $listApp).Contains($app.name)) {
                 if (-not $WhatIf) {
                     Write-Info "Installing: $($app.name)"
                     Start-Process winget -ArgumentList "install -e --accept-source-agreements --accept-package-agreements --id $($app.name)" -NoNewWindow -Wait
-                    $installResult = winget list --exact -q $app.name
-                    if (![String]::Join('', $installResult).Contains($app.name)) {
-                        Write-ErrorMessage "Failed to install: $($app.name). No package found matching input criteria."
-                        $failedApps += $app.name
+                    
+                    # Verify installation with timeout
+                    $verifyProcess = Start-Process -FilePath 'winget' `
+                        -ArgumentList 'list', '--exact', '-q', $app.name `
+                        -NoNewWindow `
+                        -PassThru `
+                        -RedirectStandardOutput "$env:TEMP\winget_verify_output.txt" `
+                        -RedirectStandardError "$env:TEMP\winget_verify_error.txt"
+                    
+                    if ($verifyProcess.WaitForExit(15000)) {
+                        $installResult = Get-Content "$env:TEMP\winget_verify_output.txt" -ErrorAction SilentlyContinue
+                        if (![String]::Join('', $installResult).Contains($app.name)) {
+                            Write-ErrorMessage "Failed to install: $($app.name). No package found matching input criteria."
+                            $failedApps += $app.name
+                        }
+                        else {
+                            Write-Success "Successfully installed: $($app.name)"
+                            $installedApps += $app.name
+                        }
                     }
                     else {
-                        Write-Success "Successfully installed: $($app.name)"
-                        $installedApps += $app.name
+                        Write-WarningMessage "Verification timed out for: $($app.name). Assuming installation failed."
+                        $verifyProcess.Kill()
+                        $failedApps += $app.name
                     }
+                    
+                    # Cleanup temp files
+                    Remove-Item "$env:TEMP\winget_verify_output.txt" -ErrorAction SilentlyContinue
+                    Remove-Item "$env:TEMP\winget_verify_error.txt" -ErrorAction SilentlyContinue
                 }
                 else {
                     Write-Info "[DRY-RUN] Would install: $($app.name)"
