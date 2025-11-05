@@ -248,7 +248,7 @@ function Test-AppDefinitions {
 #>
 function Test-Source-IsTrusted($target) {
     try {
-        $sources = winget source list --accept-source-agreements 2>&1
+        $sources = winget source list --disable-interactivity 2>&1
         return $sources -match [regex]::Escape($target)
     }
     catch {
@@ -1016,10 +1016,12 @@ function Invoke-WingetInstall {
     # Verify sources are trusted
     $trustedSources = @('winget', 'msstore')
     ForEach ($source in $trustedSources) {
+        Write-Info "Checking source trust status for: $source"
         if (-not (Test-Source-IsTrusted -target $source)) {
             if (-not $WhatIf) {
                 Write-WarningMessage "Trusting source: $source"
                 Set-Sources
+                Write-Info "Source reset completed, continuing..."
             }
             else {
                 Write-Info "[DRY-RUN] Would trust source: $source"
@@ -1029,6 +1031,8 @@ function Invoke-WingetInstall {
             Write-Success "Source is already trusted: $source"
         }
     }
+
+    Write-Info "Source verification complete. Starting app installation..."
 
     Foreach ($app in $apps) {
         try {
