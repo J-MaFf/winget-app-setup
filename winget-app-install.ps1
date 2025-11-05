@@ -465,6 +465,32 @@ function Restart-WithElevation {
 
 <#
 .SYNOPSIS
+    Checks if Out-GridView is available in the current session.
+.DESCRIPTION
+    Determines whether Out-GridView can be used by checking if the session is
+    interactive and if the Out-GridView command is available. This is used to
+    decide whether to offer or use the interactive grid view functionality.
+.OUTPUTS
+    Returns $true if Out-GridView is available, $false otherwise.
+#>
+function Test-CanUseGridView {
+    # Check if we're in an interactive session
+    if (-not [Environment]::UserInteractive) {
+        return $false
+    }
+
+    # Check if Out-GridView is available
+    try {
+        Get-Command Out-GridView -ErrorAction Stop | Out-Null
+        return $true
+    }
+    catch {
+        return $false
+    }
+}
+
+<#
+.SYNOPSIS
     Displays a formatted table of results, with optional interactive GUI view.
 .DESCRIPTION
     Renders a summary table using PowerShell's built-in Format-Table for improved
@@ -505,21 +531,7 @@ function Write-Table {
 
     # Prompt user if requested and Out-GridView is available
     if ($PromptForGridView -and -not $UseGridView) {
-        $canUseGridView = $false
-
-        # Check if we're in an interactive session
-        if ([Environment]::UserInteractive) {
-            # Check if Out-GridView is available
-            try {
-                Get-Command Out-GridView -ErrorAction Stop | Out-Null
-                $canUseGridView = $true
-            }
-            catch {
-                # Out-GridView not available, no need to prompt
-            }
-        }
-
-        if ($canUseGridView) {
+        if (Test-CanUseGridView) {
             Write-Host ''
             $response = Read-Host 'Would you like to view the results in an interactive grid view? (Y/N)'
             if ($response -match '^[Yy]') {
@@ -530,21 +542,10 @@ function Write-Table {
 
     # Try to use Out-GridView if requested and available
     if ($shouldUseGridView) {
-        $canUseGridView = $false
-
-        # Check if we're in an interactive session
-        if ([Environment]::UserInteractive) {
-            # Check if Out-GridView is available
-            try {
-                Get-Command Out-GridView -ErrorAction Stop | Out-Null
-                $canUseGridView = $true
-            }
-            catch {
-                Write-WarningMessage 'Out-GridView is not available. Falling back to text output.'
-            }
+        if (-not (Test-CanUseGridView)) {
+            Write-WarningMessage 'Out-GridView is not available. Falling back to text output.'
         }
-
-        if ($canUseGridView) {
+        else {
             try {
                 $tableData | Out-GridView -Title 'Installation Summary' -Wait
                 return
