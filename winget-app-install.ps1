@@ -62,7 +62,14 @@ function Test-AndInstallWingetModule {
 
         Install-Module -Name Microsoft.WinGet.Client -Scope AllUsers -Force -AllowClobber -ErrorAction Stop
 
-        if (Get-Module -ListAvailable -Name 'Microsoft.WinGet.Client') {
+        $installedModule = Get-Module -ListAvailable -Name 'Microsoft.WinGet.Client' | Select-Object -First 1
+        if ($installedModule) {
+            if ($installedModule.Version) {
+                Write-Host "Microsoft.WinGet.Client module installed successfully (Version: $($installedModule.Version))" -ForegroundColor Green
+            }
+            else {
+                Write-Host 'Microsoft.WinGet.Client module installed successfully' -ForegroundColor Green
+            }
             return $true
         }
 
@@ -743,6 +750,13 @@ function Write-Prompt {
     Performs prerequisite checks, validates application definitions, installs requested apps, processes updates, and displays a summary when invoked.
 #>
 function Invoke-WingetInstall {
+    # Check and set execution policy if needed (before any other checks)
+    if (-not (Test-AndSetExecutionPolicy)) {
+        Write-Host 'Warning: Execution policy could not be verified or adjusted. Script may fail.' -ForegroundColor Yellow
+        Write-Host 'Press any key to continue anyway...' -ForegroundColor Yellow
+        [System.Console]::ReadKey($true) > $null
+    }
+
     # Determine which PowerShell executable to use
     $psExecutable = if (Get-Command pwsh -ErrorAction SilentlyContinue) { 'pwsh.exe' } else { 'powershell.exe' }
 

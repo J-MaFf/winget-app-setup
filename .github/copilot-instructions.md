@@ -56,6 +56,7 @@
 - `Write-Prompt()`: Display user prompt messages in blue (replaces `Write-Host ... -ForegroundColor Blue` for prompts)
 
 ### Core Utility Functions
+- `Test-AndSetExecutionPolicy()`: Check and adjust PowerShell execution policy to allow script execution
 - `Test-AndInstallWingetModule()`: Ensure the Microsoft.WinGet.Client PowerShell module is installed and usable
 - `Test-AndInstallWinget()`: Check winget availability and install if missing
 - `Test-Source-IsTrusted()`: Verify winget source trust status
@@ -67,13 +68,14 @@
 - `Restart-WithElevation()`: Relaunch the script with elevation, preferring Windows Terminal before falling back to classic PowerShell windows
 
 ## Workflow Patterns
-1. **Admin Check**: Verify elevated privileges, relaunch if needed
-2. **Winget Tooling Remediation**: Ensure winget CLI (via `Test-AndInstallWinget`) and Microsoft.WinGet.Client module (`Test-AndInstallWingetModule`) are available
-3. **PATH Setup**: Add script directory to user PATH
-4. **Source Verification**: Ensure winget sources are trusted
-5. **App Processing**: Loop through app array with existence checks
-6. **Result Summary**: Display formatted table of all operations
-7. **User Interaction**: Keep console open with `[System.Console]::ReadKey($true)`
+1. **Execution Policy Check**: Verify PowerShell execution policy allows scripts to run, adjust to RemoteSigned if needed
+2. **Admin Check**: Verify elevated privileges, relaunch if needed
+3. **Winget Tooling Remediation**: Ensure winget CLI (via `Test-AndInstallWinget`) and Microsoft.WinGet.Client module (`Test-AndInstallWingetModule`) are available
+4. **PATH Setup**: Add script directory to user PATH
+5. **Source Verification**: Ensure winget sources are trusted
+6. **App Processing**: Loop through app array with existence checks
+7. **Result Summary**: Display formatted table of all operations
+8. **User Interaction**: Keep console open with `[System.Console]::ReadKey($true)`
 
 ## Common Tasks
 - **New App Addition**: Add to `$apps` array using format `@{name = 'Publisher.AppName'}`
