@@ -34,29 +34,55 @@
 - **Result Tracking**: Maintain separate arrays for `$installedApps`, `$skippedApps`, `$failedApps`
 
 ### Output & Display
-- **Table Formatting**: Use custom `Write-Table` function for result summaries (see `winget-app-install.ps1`)
-- **Progress Messages**: Color-coded output (Blue for actions, Green for success, Yellow for skips, Red for errors)
+- **Table Formatting**: Use `Write-Table` function with PowerShell's built-in `Format-Table -AutoSize` for result summaries
+- **Interactive GUI**: Automatically prompts user to use `Out-GridView` when available via `-PromptForGridView $true` parameter
+- **Manual Override**: Can force GUI mode with `-UseGridView $true` parameter (skips prompt)
+- **Graceful Fallback**: Automatically falls back to text output when Out-GridView is unavailable (Server Core, remote sessions)
+- **Messaging Helpers**: Always use helper functions instead of direct `Write-Host` calls for consistency
+  - `Write-Info`: Blue for informational/action messages (e.g., "Installing: AppName", "Checking for updates...")
+  - `Write-Success`: Green for success messages (e.g., "Successfully installed: AppName")
+  - `Write-WarningMessage`: Yellow for warnings/skips (e.g., "Skipping: AppName (already installed)")
+  - `Write-ErrorMessage`: Red for errors (e.g., "Failed to install: AppName")
+  - `Write-Prompt`: Blue for user prompts (e.g., "Press any key to exit...")
 - **Summary Display**: Always show final table with operation counts
 
 ## Key Functions to Reuse
+
+### Messaging Helper Functions
+- `Write-Info()`: Display informational/action messages in blue (replaces `Write-Host ... -ForegroundColor Blue`)
+- `Write-Success()`: Display success messages in green (replaces `Write-Host ... -ForegroundColor Green`)
+- `Write-WarningMessage()`: Display warning/skip messages in yellow (replaces `Write-Host ... -ForegroundColor Yellow`)
+- `Write-ErrorMessage()`: Display error messages in red (replaces `Write-Host ... -ForegroundColor Red`)
+- `Write-Prompt()`: Display user prompt messages in blue (replaces `Write-Host ... -ForegroundColor Blue` for prompts)
+
+### Core Utility Functions
+- `Test-AndSetExecutionPolicy()`: Check and adjust PowerShell execution policy to allow script execution
 - `Test-AndInstallWingetModule()`: Ensure the Microsoft.WinGet.Client PowerShell module is installed and usable
 - `Test-AndInstallWinget()`: Check winget availability and install if missing
 - `Test-Source-IsTrusted()`: Verify winget source trust status
 - `Set-Sources()`: Add and trust winget sources
 - `Add-ToEnvironmentPath()`: Add paths to user/system PATH
 - `ConvertTo-CommandArguments()`: Parse command strings with quoted arguments
-- `Write-Table()`: Display formatted ASCII tables
-- `Invoke-WingetCommand()`: Execute winget commands with output parsing
+- `Write-Table()`: Display formatted tables using Format-Table or Out-GridView (with optional `-UseGridView` and `-PromptForGridView` parameters)
+- `Invoke-WingetCommand()`: Execute winget commands with exit code capture, error code mapping, and output parsing. Returns hashtable with `ExitCode` and `ExitMessage`. Automatically reports failures to `$failedApps` when exit code is non-zero and no output patterns match.
 - `Restart-WithElevation()`: Relaunch the script with elevation, preferring Windows Terminal before falling back to classic PowerShell windows
 
+#### Exit Code Handling in Invoke-WingetCommand
+- Captures `$LASTEXITCODE` after each winget execution
+- Maps common winget exit codes (0, -1978335189, -1978335191, -1978335192, -1978335212, -1978335213, -1978335215, -1978335216, -1978335221, -1978335226) to meaningful messages
+- Returns hashtable: `@{ ExitCode = <int>; ExitMessage = <string> }`
+- Automatically adds failures with actionable diagnostics when exit code indicates error but output parsing finds no matches
+- Backward compatible - callers can ignore the return value if only using array references
+
 ## Workflow Patterns
-1. **Admin Check**: Verify elevated privileges, relaunch if needed
-2. **Winget Tooling Remediation**: Ensure winget CLI (via `Test-AndInstallWinget`) and Microsoft.WinGet.Client module (`Test-AndInstallWingetModule`) are available
-3. **PATH Setup**: Add script directory to user PATH
-4. **Source Verification**: Ensure winget sources are trusted
-5. **App Processing**: Loop through app array with existence checks
-6. **Result Summary**: Display formatted table of all operations
-7. **User Interaction**: Keep console open with `[System.Console]::ReadKey($true)`
+1. **Execution Policy Check**: Verify PowerShell execution policy allows scripts to run, adjust to RemoteSigned if needed
+2. **Admin Check**: Verify elevated privileges, relaunch if needed
+3. **Winget Tooling Remediation**: Ensure winget CLI (via `Test-AndInstallWinget`) and Microsoft.WinGet.Client module (`Test-AndInstallWingetModule`) are available
+4. **PATH Setup**: Add script directory to user PATH
+5. **Source Verification**: Ensure winget sources are trusted
+6. **App Processing**: Loop through app array with existence checks
+7. **Result Summary**: Display formatted table of all operations
+8. **User Interaction**: Keep console open with `[System.Console]::ReadKey($true)`
 
 ## Common Tasks
 - **New App Addition**: Add to `$apps` array using format `@{name = 'Publisher.AppName'}`
@@ -109,6 +135,7 @@
 - **App Installation**: `winget install -e --accept-source-agreements --accept-package-agreements --id $app.name`
 - **Existence Verification**: `winget list --exact -q $app.name` for install status
 - **Update Detection**: `Get-WinGetPackage | Where-Object IsUpdateAvailable` (PowerShell module) or `winget upgrade` (CLI)
+- **Table Display**: `Write-Table -Headers $headers -Rows $rows -PromptForGridView $true` (prompts user) or `Write-Table -Headers $headers -Rows $rows -UseGridView $true` (forces GUI mode)
 
 ### Build & Test Workflows
 - **Function Testing**: Extract and test individual functions in separate files

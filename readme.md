@@ -5,12 +5,15 @@ A comprehensive PowerShell automation suite for managing Windows applications us
 ## Features
 
 - **Automated Installation**: Install multiple applications with a single command
+- **Dry-Run / WhatIf Mode**: Preview all actions without making system changes - perfect for testing and approval workflows
 - **Smart Uninstallation**: Remove applications with status tracking
 - **Update Management**: Automatically check for and install available updates
+- **Execution Policy Management**: Automatically checks and adjusts PowerShell execution policy on first run
 - **Admin Privilege Handling**: Automatically requests elevation when needed
 - **Source Trust Management**: Verifies and trusts winget sources
 - **Comprehensive Error Handling**: Detailed error reporting and result tracking
-- **Formatted Output**: Clean table-based summaries of all operations
+- **Formatted Output**: Clean table-based summaries using PowerShell's Format-Table
+- **Interactive GUI Option**: Optional Out-GridView support for sortable, filterable results
 - **Color-Coded Feedback**: Visual status indicators for operations
 - **Self-Healing Winget Tooling**: Automatically installs required winget CLI and PowerShell module dependencies
 
@@ -25,7 +28,8 @@ The main installation script that:
 - Verifies winget source trust status
 - Handles installation failures gracefully
 - Checks for and installs available updates
-- Displays results in a formatted ASCII table
+- Displays results using PowerShell's Format-Table for improved readability
+- Optional interactive GUI summary with Out-GridView (when available)
 
 ### `winget-app-uninstall.ps1`
 
@@ -34,6 +38,7 @@ Uninstallation companion script that:
 - Removes the same applications installed by the install script
 - Provides detailed uninstallation status
 - Tracks successful, skipped, and failed operations
+- Displays summary using Format-Table for consistent, readable output
 
 ### `Test-WingetAppInstall.Tests.ps1`
 
@@ -64,7 +69,7 @@ The scripts work with this curated list of applications:
 - **Microsoft App Installer** from Microsoft Store
 - **PowerShell Gallery access** to download the Microsoft.WinGet.Client module (handled automatically by the script)
 - **Administrator privileges** (scripts will request elevation automatically)
-- **PowerShell execution policy** allowing script execution
+- **PowerShell execution policy** allowing script execution (handled automatically by the script)
 
 ## Setup
 
@@ -93,6 +98,30 @@ Run the installation script as administrator:
 C:\Path\To\winget-app-setup\winget-app-install.ps1
 ```
 
+### Dry-Run / WhatIf Mode
+
+Preview what the script would do without making any actual changes:
+
+```powershell
+# Run in dry-run mode to see what would be installed
+.\winget-app-install.ps1 -WhatIf
+
+# This mode will:
+# - Perform all pre-flight checks
+# - Show which apps would be installed
+# - Display which sources would be trusted
+# - Indicate PATH changes that would be made
+# - List available updates without installing them
+# - No system modifications will occur
+```
+
+**Use Cases for WhatIf Mode:**
+- Verify the script behavior before running on production systems
+- Review which applications will be installed in managed environments
+- Check for available updates without installing them
+- Test the script in new environments safely
+- Generate reports of planned changes for approval processes
+
 ### Uninstallation
 
 Run the uninstallation script as administrator:
@@ -106,6 +135,17 @@ C:\Path\To\winget-app-setup\winget-app-uninstall.ps1
 ```
 
 ## Script Behavior
+
+### Execution Policy Management
+
+Scripts automatically check the PowerShell execution policy on first run and will:
+
+- Detect if the current policy prevents scripts from running
+- Attempt to set the policy to `RemoteSigned` for the CurrentUser scope if needed
+- Provide clear feedback about policy changes
+- Display helpful instructions if policy adjustment requires manual intervention
+
+**Note**: The scripts use `RemoteSigned` policy, which is secure (requires signatures for downloaded scripts) while allowing local scripts to run without issues.
 
 ### Administrator Privileges
 
@@ -136,15 +176,20 @@ Scripts verify winget source trust for:
 
 ### Output Format
 
-The main installation script provides:
+The scripts provide:
 
 - Real-time progress with color-coded messages
-- Comprehensive summary table showing:
+- Comprehensive summary table using PowerShell's Format-Table with automatic column sizing
+- Properly aligned columns that work in standard PowerShell, Windows Terminal, and when copied to documentation
+- Optional interactive GUI view using Out-GridView (when available and requested)
+- Summary table showing:
   - Installed applications
   - Skipped applications (already installed)
   - Failed installations
-  - Updated applications
-  - Failed updates
+  - Updated applications (install script only)
+  - Failed updates (install script only)
+
+**Interactive Grid View**: The scripts will automatically prompt you to view the results in an interactive grid view (Out-GridView) if it's available on your system. This provides a sortable, filterable window for easy review. The feature gracefully falls back to text output on Server Core or in remote sessions where Out-GridView is unavailable.
 
 ## Customization
 
@@ -166,12 +211,36 @@ The scripts include several configurable functions:
 
 - `Test-Source-IsTrusted()` - Source trust verification
 - `Set-Sources()` - Source trust setup
-- `Write-Table()` - Result display formatting
-- `Invoke-WingetCommand()` - Winget command execution with parsing
+- `Write-Table()` - Result display formatting using Format-Table or Out-GridView
+- `Invoke-WingetCommand()` - Winget command execution with exit code capture, mapping, and output parsing
+
+#### Exit Code Handling
+
+The `Invoke-WingetCommand()` function captures and maps winget exit codes to meaningful error messages:
+
+- **Exit Code 0**: Success
+- **-1978335189** (0x8A15002B): No applicable update found
+- **-1978335191** (0x8A150029): No packages found matching input criteria
+- **-1978335192** (0x8A150028): Package installation failed
+- **-1978335212** (0x8A150014): User cancelled the operation
+- **-1978335213** (0x8A150013): Package already installed
+- **-1978335215** (0x8A150011): Manifest validation failed
+- **-1978335216** (0x8A150010): Invalid manifest
+- **-1978335221** (0x8A15000B): Package download failed
+- **-1978335226** (0x8A150006): Hash mismatch
+- **Unknown codes**: Generic message with the exit code
+
+When winget exits with a non-zero code and no output pattern matches are found, the function automatically reports the failure with actionable diagnostics to the `$failedApps` array.
 
 ## Troubleshooting
 
 ### Common Issues
+
+#### "cannot be loaded because running scripts is disabled"
+
+- The script automatically detects and attempts to fix execution policy issues
+- If automatic adjustment fails, manually run: `Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser -Force`
+- For system-wide changes (requires admin): `Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope LocalMachine -Force`
 
 #### "winget command not found"
 
