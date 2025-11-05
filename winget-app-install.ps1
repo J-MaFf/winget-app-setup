@@ -347,9 +347,16 @@ function Add-ToEnvironmentPath {
             [System.Environment]::SetEnvironmentVariable('PATH', $userEnvPath, [System.EnvironmentVariableTarget]::User)
         }
 
-        # Update the current process environment PATH
+        # Update the current process environment PATH (with length check to avoid Windows PATH limit of 2048)
         if (-not ($env:PATH -split ';').Contains($PathToAdd)) {
-            $env:PATH += ";$PathToAdd"
+            $newPath = "$env:PATH;$PathToAdd"
+            # Only update if it won't exceed the Windows PATH limit
+            if ($newPath.Length -le 2048) {
+                $env:PATH = $newPath
+            }
+            else {
+                Write-WarningMessage "Current process PATH would exceed Windows limit (2048 chars). Path added to persistent environment but not to current session."
+            }
         }
     }
 }
