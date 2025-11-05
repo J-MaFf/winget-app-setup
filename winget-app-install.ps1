@@ -53,6 +53,7 @@ function Test-AndInstallWingetModule {
         }
 
         Write-Host 'Microsoft.WinGet.Client module not found. Attempting installation...' -ForegroundColor Yellow
+        Write-Host "Host: $($host.Name) | PS Version: $($PSVersionTable.PSVersion)" -ForegroundColor Yellow
 
         $nugetProvider = Get-PackageProvider -Name NuGet -ErrorAction SilentlyContinue
         if (-not $nugetProvider) {
@@ -63,6 +64,8 @@ function Test-AndInstallWingetModule {
         Install-Module -Name Microsoft.WinGet.Client -Scope AllUsers -Force -AllowClobber -ErrorAction Stop
 
         if (Get-Module -ListAvailable -Name 'Microsoft.WinGet.Client') {
+            $installedModule = Get-Module -ListAvailable -Name 'Microsoft.WinGet.Client' | Select-Object -First 1
+            Write-Host "Microsoft.WinGet.Client module installed successfully (Version: $($installedModule.Version))" -ForegroundColor Green
             return $true
         }
 
@@ -92,9 +95,11 @@ function Test-AndInstallGraphicalTools {
         $graphicalModule = Get-Module -ListAvailable -Name 'Microsoft.PowerShell.GraphicalTools'
         if (-not $graphicalModule) {
             Write-Host 'Microsoft.PowerShell.GraphicalTools module is missing. Installing to enable Out-GridView...' -ForegroundColor Yellow
+            Write-Host "Host: $($host.Name) | PS Version: $($PSVersionTable.PSVersion)" -ForegroundColor Yellow
         }
         else {
             Write-Host 'Microsoft.PowerShell.GraphicalTools module found but Out-GridView is unavailable. Importing module...' -ForegroundColor Yellow
+            Write-Host "Host: $($host.Name) | PS Version: $($PSVersionTable.PSVersion)" -ForegroundColor Yellow
         }
 
         $nugetProvider = Get-PackageProvider -Name NuGet -ErrorAction SilentlyContinue
@@ -105,7 +110,9 @@ function Test-AndInstallGraphicalTools {
 
         Install-Module -Name Microsoft.PowerShell.GraphicalTools -Scope AllUsers -Force -AllowClobber -ErrorAction Stop
         Import-Module Microsoft.PowerShell.GraphicalTools -ErrorAction Stop
-        Write-Host 'Microsoft.PowerShell.GraphicalTools is loaded for this session.' -ForegroundColor Green
+        
+        $loadedModule = Get-Module -Name 'Microsoft.PowerShell.GraphicalTools'
+        Write-Host "Microsoft.PowerShell.GraphicalTools is loaded for this session (Version: $($loadedModule.Version))" -ForegroundColor Green
 
         if (Get-Command Out-GridView -ErrorAction SilentlyContinue) {
             Write-Host 'Out-GridView is available for interactive summaries.' -ForegroundColor Green

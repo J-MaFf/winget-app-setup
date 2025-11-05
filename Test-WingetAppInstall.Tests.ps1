@@ -13,6 +13,7 @@ Describe 'Test-AndInstallWingetModule' {
                 }
 
                 Write-Host 'Microsoft.WinGet.Client module not found. Attempting installation...' -ForegroundColor Yellow
+                Write-Host "Host: $($host.Name) | PS Version: $($PSVersionTable.PSVersion)" -ForegroundColor Yellow
 
                 $nugetProvider = Get-PackageProvider -Name NuGet -ErrorAction SilentlyContinue
                 if (-not $nugetProvider) {
@@ -23,6 +24,8 @@ Describe 'Test-AndInstallWingetModule' {
                 Install-Module -Name Microsoft.WinGet.Client -Scope AllUsers -Force -AllowClobber -ErrorAction Stop
 
                 if (Get-Module -ListAvailable -Name 'Microsoft.WinGet.Client') {
+                    $installedModule = Get-Module -ListAvailable -Name 'Microsoft.WinGet.Client' | Select-Object -First 1
+                    Write-Host "Microsoft.WinGet.Client module installed successfully (Version: $($installedModule.Version))" -ForegroundColor Green
                     return $true
                 }
 
@@ -81,6 +84,171 @@ Describe 'Test-AndInstallWingetModule' {
             $result = Test-AndInstallWingetModule
             $result | Should -Be $false
             Assert-MockCalled Install-Module -Times 1
+        }
+    }
+
+    Context 'When module installation succeeds - logging validation' {
+        It 'Should log host and version information during installation' {
+            $script:moduleInstalled = $false
+            $script:loggedMessages = @()
+
+            Mock Get-Module {
+                if ($script:moduleInstalled) {
+                    return @{ Name = 'Microsoft.WinGet.Client'; Version = '1.2.3' }
+                }
+                return $null
+            } -ParameterFilter { $Name -eq 'Microsoft.WinGet.Client' -and $ListAvailable }
+
+            Mock Get-PackageProvider { @{ Name = 'NuGet' } } -ParameterFilter { $Name -eq 'NuGet' }
+            Mock Install-Module { $script:moduleInstalled = $true }
+            Mock Write-Host { 
+                $script:loggedMessages += $Object 
+            }
+
+            $result = Test-AndInstallWingetModule
+            $result | Should -Be $true
+            
+            # Verify that host and PS version information was logged
+            $hostVersionLog = $script:loggedMessages | Where-Object { $_ -match 'Host:.*\|.*PS Version:' }
+            $hostVersionLog | Should -Not -BeNullOrEmpty
+            
+            # Verify that module version was logged
+            $moduleVersionLog = $script:loggedMessages | Where-Object { $_ -match 'Version:.*1\.2\.3' }
+            $moduleVersionLog | Should -Not -BeNullOrEmpty
+        }
+    }
+}
+
+Describe 'Test-AndInstallGraphicalTools' {
+    BeforeAll {
+        Mock Write-Host { }
+        Mock Write-Warning { }
+
+        function Test-AndInstallGraphicalTools {
+            try {
+                if (Get-Command Out-GridView -ErrorAction SilentlyContinue) {
+                    return $true
+                }
+
+                $graphicalModule = Get-Module -ListAvailable -Name 'Microsoft.PowerShell.GraphicalTools'
+                if (-not $graphicalModule) {
+                    Write-Host 'Microsoft.PowerShell.GraphicalTools module is missing. Installing to enable Out-GridView...' -ForegroundColor Yellow
+                    Write-Host "Host: $($host.Name) | PS Version: $($PSVersionTable.PSVersion)" -ForegroundColor Yellow
+                }
+                else {
+                    Write-Host 'Microsoft.PowerShell.GraphicalTools module found but Out-GridView is unavailable. Importing module...' -ForegroundColor Yellow
+                    Write-Host "Host: $($host.Name) | PS Version: $($PSVersionTable.PSVersion)" -ForegroundColor Yellow
+                }
+
+                $nugetProvider = Get-PackageProvider -Name NuGet -ErrorAction SilentlyContinue
+                if (-not $nugetProvider) {
+                    Write-Host 'NuGet package provider not found. Installing...' -ForegroundColor Yellow
+                    Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force -Scope AllUsers | Out-Null
+                }
+
+                Install-Module -Name Microsoft.PowerShell.GraphicalTools -Scope AllUsers -Force -AllowClobber -ErrorAction Stop
+                Import-Module Microsoft.PowerShell.GraphicalTools -ErrorAction Stop
+                
+                $loadedModule = Get-Module -Name 'Microsoft.PowerShell.GraphicalTools'
+                Write-Host "Microsoft.PowerShell.GraphicalTools is loaded for this session (Version: $($loadedModule.Version))" -ForegroundColor Green
+
+                if (Get-Command Out-GridView -ErrorAction SilentlyContinue) {
+                    Write-Host 'Out-GridView is available for interactive summaries.' -ForegroundColor Green
+                    return $true
+                }
+
+                Write-Warning 'Microsoft.PowerShell.GraphicalTools installation completed, but Out-GridView is still unavailable.'
+            }
+            catch {
+                Write-Warning "Failed to install Microsoft.PowerShell.GraphicalTools module: $_"
+            }
+
+            return $false
+        }
+    }
+
+    Context 'When Out-GridView is already available' {
+        It 'Should return true without installing' {
+            Mock Get-Command { return $true } -ParameterFilter { $Name -eq 'Out-GridView' }
+            Mock Get-Module { }
+            Mock Install-Module { }
+            Mock Import-Module { }
+
+            $result = Test-AndInstallGraphicalTools
+            $result | Should -Be $true
+            Assert-MockCalled Install-Module -Times 0
+        }
+    }
+
+    Context 'When module is missing and installation succeeds' {
+        It 'Should install dependencies and return true' {
+            $script:outGridViewAvailable = $false
+
+            Mock Get-Command { 
+                if ($script:outGridViewAvailable) {
+                    return $true
+                }
+                return $null
+            } -ParameterFilter { $Name -eq 'Out-GridView' }
+
+            Mock Get-Module {
+                param($Name, $ListAvailable)
+                if ($Name -eq 'Microsoft.PowerShell.GraphicalTools' -and -not $ListAvailable) {
+                    return @{ Name = 'Microsoft.PowerShell.GraphicalTools'; Version = '0.1.2' }
+                }
+                return $null
+            }
+
+            Mock Get-PackageProvider { $null } -ParameterFilter { $Name -eq 'NuGet' }
+            Mock Install-PackageProvider { } -ParameterFilter { $Name -eq 'NuGet' }
+            Mock Install-Module { }
+            Mock Import-Module { $script:outGridViewAvailable = $true }
+
+            $result = Test-AndInstallGraphicalTools
+            $result | Should -Be $true
+            Assert-MockCalled Install-PackageProvider -Times 1 -ParameterFilter { $Name -eq 'NuGet' }
+            Assert-MockCalled Install-Module -Times 1
+            Assert-MockCalled Import-Module -Times 1
+        }
+    }
+
+    Context 'When module installation succeeds - logging validation' {
+        It 'Should log host and version information during installation' {
+            $script:outGridViewAvailable = $false
+            $script:loggedMessages = @()
+
+            Mock Get-Command { 
+                if ($script:outGridViewAvailable) {
+                    return $true
+                }
+                return $null
+            } -ParameterFilter { $Name -eq 'Out-GridView' }
+
+            Mock Get-Module {
+                param($Name, $ListAvailable)
+                if ($Name -eq 'Microsoft.PowerShell.GraphicalTools' -and -not $ListAvailable) {
+                    return @{ Name = 'Microsoft.PowerShell.GraphicalTools'; Version = '0.1.2' }
+                }
+                return $null
+            }
+
+            Mock Get-PackageProvider { @{ Name = 'NuGet' } } -ParameterFilter { $Name -eq 'NuGet' }
+            Mock Install-Module { }
+            Mock Import-Module { $script:outGridViewAvailable = $true }
+            Mock Write-Host { 
+                $script:loggedMessages += $Object 
+            }
+
+            $result = Test-AndInstallGraphicalTools
+            $result | Should -Be $true
+            
+            # Verify that host and PS version information was logged
+            $hostVersionLog = $script:loggedMessages | Where-Object { $_ -match 'Host:.*\|.*PS Version:' }
+            $hostVersionLog | Should -Not -BeNullOrEmpty
+            
+            # Verify that module version was logged
+            $moduleVersionLog = $script:loggedMessages | Where-Object { $_ -match 'Version:.*0\.1\.2' }
+            $moduleVersionLog | Should -Not -BeNullOrEmpty
         }
     }
 }
