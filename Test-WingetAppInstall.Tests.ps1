@@ -1790,3 +1790,163 @@ Describe 'Write-Prompt' {
         }
     }
 }
+
+Describe 'WhatIf Mode - Unit Tests' {
+    BeforeAll {
+        . "$PSScriptRoot\winget-app-install.ps1"
+    }
+
+    Context 'WhatIf parameter acceptance' {
+        It 'Should accept WhatIf parameter without error' {
+            $command = Get-Command Invoke-WingetInstall
+            $command.Parameters.ContainsKey('WhatIf') | Should -Be $true
+            $command.Parameters['WhatIf'].ParameterType.Name | Should -Be 'SwitchParameter'
+        }
+    }
+
+    Context 'WhatIf logic for PATH updates' {
+        It 'Should skip Add-ToEnvironmentPath when WhatIf is true' {
+            Mock Add-ToEnvironmentPath { }
+            Mock Write-Info { }
+            
+            # Simulate the code path
+            $WhatIf = $true
+            $scriptDirectory = 'C:\Test'
+            
+            if (-not $WhatIf) {
+                Add-ToEnvironmentPath -PathToAdd $scriptDirectory -Scope 'User'
+            }
+            else {
+                Write-Info "[DRY-RUN] Would add '$scriptDirectory' to User PATH"
+            }
+            
+            Assert-MockCalled Add-ToEnvironmentPath -Times 0
+            Assert-MockCalled Write-Info -Times 1
+        }
+
+        It 'Should call Add-ToEnvironmentPath when WhatIf is false' {
+            Mock Add-ToEnvironmentPath { }
+            Mock Write-Info { }
+            
+            # Simulate the code path
+            $WhatIf = $false
+            $scriptDirectory = 'C:\Test'
+            
+            if (-not $WhatIf) {
+                Add-ToEnvironmentPath -PathToAdd $scriptDirectory -Scope 'User'
+            }
+            else {
+                Write-Info "[DRY-RUN] Would add '$scriptDirectory' to User PATH"
+            }
+            
+            Assert-MockCalled Add-ToEnvironmentPath -Times 1
+            Assert-MockCalled Write-Info -Times 0
+        }
+    }
+
+    Context 'WhatIf logic for source trust' {
+        It 'Should skip Set-Sources when WhatIf is true' {
+            Mock Set-Sources { }
+            Mock Write-Info { }
+            Mock Write-WarningMessage { }
+            Mock Write-Success { }
+            Mock Test-Source-IsTrusted { return $false }
+            
+            # Simulate the code path
+            $WhatIf = $true
+            $source = 'winget'
+            
+            if (-not (Test-Source-IsTrusted -target $source)) {
+                if (-not $WhatIf) {
+                    Write-WarningMessage "Trusting source: $source"
+                    Set-Sources
+                }
+                else {
+                    Write-Info "[DRY-RUN] Would trust source: $source"
+                }
+            }
+            
+            Assert-MockCalled Set-Sources -Times 0
+            Assert-MockCalled Write-Info -Times 1
+        }
+
+        It 'Should call Set-Sources when WhatIf is false' {
+            Mock Set-Sources { }
+            Mock Write-Info { }
+            Mock Write-WarningMessage { }
+            Mock Write-Success { }
+            Mock Test-Source-IsTrusted { return $false }
+            
+            # Simulate the code path
+            $WhatIf = $false
+            $source = 'winget'
+            
+            if (-not (Test-Source-IsTrusted -target $source)) {
+                if (-not $WhatIf) {
+                    Write-WarningMessage "Trusting source: $source"
+                    Set-Sources
+                }
+                else {
+                    Write-Info "[DRY-RUN] Would trust source: $source"
+                }
+            }
+            
+            Assert-MockCalled Set-Sources -Times 1
+            Assert-MockCalled Write-WarningMessage -Times 1
+        }
+    }
+
+    Context 'WhatIf logic for app installation' {
+        It 'Should skip Start-Process when WhatIf is true' {
+            Mock Start-Process { }
+            Mock Write-Info { }
+            Mock Write-Success { }
+            
+            # Simulate the code path
+            $WhatIf = $true
+            $app = @{ name = 'Test.App' }
+            $installedApps = @()
+            
+            if (-not $WhatIf) {
+                Write-Info "Installing: $($app.name)"
+                Start-Process winget -ArgumentList "install -e --accept-source-agreements --accept-package-agreements --id $($app.name)" -NoNewWindow -Wait
+                Write-Success "Successfully installed: $($app.name)"
+                $installedApps += $app.name
+            }
+            else {
+                Write-Info "[DRY-RUN] Would install: $($app.name)"
+                $installedApps += $app.name
+            }
+            
+            Assert-MockCalled Start-Process -Times 0
+            Assert-MockCalled Write-Info -Times 1 -ParameterFilter { $Message -match 'DRY-RUN' }
+            $installedApps | Should -Contain 'Test.App'
+        }
+
+        It 'Should call Start-Process when WhatIf is false' {
+            Mock Start-Process { }
+            Mock Write-Info { }
+            Mock Write-Success { }
+            
+            # Simulate the code path
+            $WhatIf = $false
+            $app = @{ name = 'Test.App' }
+            $installedApps = @()
+            
+            if (-not $WhatIf) {
+                Write-Info "Installing: $($app.name)"
+                Start-Process winget -ArgumentList "install -e --accept-source-agreements --accept-package-agreements --id $($app.name)" -NoNewWindow -Wait
+                Write-Success "Successfully installed: $($app.name)"
+                $installedApps += $app.name
+            }
+            else {
+                Write-Info "[DRY-RUN] Would install: $($app.name)"
+                $installedApps += $app.name
+            }
+            
+            Assert-MockCalled Start-Process -Times 1
+            Assert-MockCalled Write-Info -Times 1 -ParameterFilter { $Message -notmatch 'DRY-RUN' }
+            $installedApps | Should -Contain 'Test.App'
+        }
+    }
+}

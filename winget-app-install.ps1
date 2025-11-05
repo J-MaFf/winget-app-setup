@@ -34,7 +34,15 @@
  Dell Command Update (Universal)
  PowerShell
  Windows Terminal
+
+.PARAMETER WhatIf
+ When specified, performs all pre-flight checks and displays planned actions without making any system changes.
 #>
+
+param (
+    [Parameter(Mandatory = $false)]
+    [switch]$WhatIf
+)
 
 # ------------------------------------------------Functions------------------------------------------------
 
@@ -846,13 +854,33 @@ function Write-Prompt {
     Executes the winget installation workflow when the script runs directly.
 .DESCRIPTION
     Performs prerequisite checks, validates application definitions, installs requested apps, processes updates, and displays a summary when invoked.
+.PARAMETER WhatIf
+    When specified, the script performs all pre-flight checks and displays planned actions without making any system changes.
 #>
 function Invoke-WingetInstall {
+    param (
+        [Parameter(Mandatory = $false)]
+        [switch]$WhatIf
+    )
+
+    if ($WhatIf) {
+        Write-Info '=== DRY-RUN MODE ENABLED ==='
+        Write-Info 'No system changes will be made. This is a simulation of what would happen.'
+        Write-Host ''
+    }
+
     # Check and set execution policy if needed (before any other checks)
-    if (-not (Test-AndSetExecutionPolicy)) {
-        Write-Host 'Warning: Execution policy could not be verified or adjusted. Script may fail.' -ForegroundColor Yellow
-        Write-Host 'Press any key to continue anyway...' -ForegroundColor Yellow
-        [System.Console]::ReadKey($true) > $null
+    if (-not $WhatIf) {
+        if (Get-Command Test-AndSetExecutionPolicy -ErrorAction SilentlyContinue) {
+            if (-not (Test-AndSetExecutionPolicy)) {
+                Write-Host 'Warning: Execution policy could not be verified or adjusted. Script may fail.' -ForegroundColor Yellow
+                Write-Host 'Press any key to continue anyway...' -ForegroundColor Yellow
+                [System.Console]::ReadKey($true) > $null
+            }
+        }
+    }
+    else {
+        Write-Info '[DRY-RUN] Would check and set execution policy if needed'
     }
 
     # Determine which PowerShell executable to use
@@ -897,7 +925,12 @@ function Invoke-WingetInstall {
 
     # Add the script directory to the PATH
     $scriptDirectory = Split-Path -Parent $MyInvocation.MyCommand.Definition
-    Add-ToEnvironmentPath -PathToAdd $scriptDirectory -Scope 'User'
+    if (-not $WhatIf) {
+        Add-ToEnvironmentPath -PathToAdd $scriptDirectory -Scope 'User'
+    }
+    else {
+        Write-Info "[DRY-RUN] Would add '$scriptDirectory' to User PATH"
+    }
 
     $apps = @(
         @{name = '7zip.7zip' },
@@ -946,8 +979,13 @@ function Invoke-WingetInstall {
     $trustedSources = @('winget', 'msstore')
     ForEach ($source in $trustedSources) {
         if (-not (Test-Source-IsTrusted -target $source)) {
-            Write-WarningMessage "Trusting source: $source"
-            Set-Sources
+            if (-not $WhatIf) {
+                Write-WarningMessage "Trusting source: $source"
+                Set-Sources
+            }
+            else {
+                Write-Info "[DRY-RUN] Would trust source: $source"
+            }
         }
         else {
             Write-Success "Source is already trusted: $source"
@@ -958,15 +996,21 @@ function Invoke-WingetInstall {
         try {
             $listApp = winget list --exact -q $app.name
             if (![String]::Join('', $listApp).Contains($app.name)) {
-                Write-Info "Installing: $($app.name)"
-                Start-Process winget -ArgumentList "install -e --accept-source-agreements --accept-package-agreements --id $($app.name)" -NoNewWindow -Wait
-                $installResult = winget list --exact -q $app.name
-                if (![String]::Join('', $installResult).Contains($app.name)) {
-                    Write-ErrorMessage "Failed to install: $($app.name). No package found matching input criteria."
-                    $failedApps += $app.name
+                if (-not $WhatIf) {
+                    Write-Info "Installing: $($app.name)"
+                    Start-Process winget -ArgumentList "install -e --accept-source-agreements --accept-package-agreements --id $($app.name)" -NoNewWindow -Wait
+                    $installResult = winget list --exact -q $app.name
+                    if (![String]::Join('', $installResult).Contains($app.name)) {
+                        Write-ErrorMessage "Failed to install: $($app.name). No package found matching input criteria."
+                        $failedApps += $app.name
+                    }
+                    else {
+                        Write-Success "Successfully installed: $($app.name)"
+                        $installedApps += $app.name
+                    }
                 }
                 else {
-                    Write-Success "Successfully installed: $($app.name)"
+                    Write-Info "[DRY-RUN] Would install: $($app.name)"
                     $installedApps += $app.name
                 }
             }
@@ -988,68 +1032,84 @@ function Invoke-WingetInstall {
     $hasUpdates = Test-UpdatesAvailable
 
     if ($hasUpdates) {
-        Write-Success 'Updates found. Installing updates...'
+        if (-not $WhatIf) {
+            Write-Success 'Updates found. Installing updates...'
 
-        # Try PowerShell module first
-        if (Get-Command Update-WinGetPackage -ErrorAction SilentlyContinue) {
-            $updateResults = Get-WinGetPackage | Where-Object IsUpdateAvailable | Update-WinGetPackage
+            # Try PowerShell module first
+            if (Get-Command Update-WinGetPackage -ErrorAction SilentlyContinue) {
+                $updateResults = Get-WinGetPackage | Where-Object IsUpdateAvailable | Update-WinGetPackage
 
-            foreach ($result in $updateResults) {
-                if ($result.Status -eq 'Ok') {
-                    $updatedApps += $result.Id
-                    Write-Success "Successfully updated: $($result.Id)"
+                foreach ($result in $updateResults) {
+                    if ($result.Status -eq 'Ok') {
+                        $updatedApps += $result.Id
+                        Write-Success "Successfully updated: $($result.Id)"
+                    }
+                    else {
+                        $failedUpdateApps += $result.Id
+                        Write-ErrorMessage "Failed to update: $($result.Id) - $($result.Status)"
+                    }
                 }
-                else {
-                    $failedUpdateApps += $result.Id
-                    Write-ErrorMessage "Failed to update: $($result.Id) - $($result.Status)"
+            }
+            else {
+                Write-WarningMessage 'PowerShell module not available, using CLI fallback...'
+
+                # Fallback to CLI method - get list of packages that have updates available
+                $installedPackages = & winget list --source winget 2>&1 | Where-Object {
+                    $_ -and
+                    $_ -notmatch '^[\s\-\|\\]*$' -and
+                    $_ -notmatch '^$' -and
+                    $_ -notmatch '^Name\s+Id\s+Version\s+Source' -and
+                    $_ -notmatch '^[-]+$' -and
+                    $_ -notmatch 'No installed package found'
+                }
+
+                foreach ($package in $installedPackages) {
+                    $package = $package.Trim()
+                    # Split the line by multiple spaces to get columns
+                    # Format: Name | Id | Version | Source
+                    $columns = $package -split '\s{2,}'
+                    if ($columns.Count -ge 2) {
+                        $packageId = $columns[1]  # Second column is the ID
+
+                        # Skip if it's not a winget package or if it's a system component
+                        if ($packageId -and $packageId -notmatch '^(ARP|MSIX)') {
+                            try {
+                                $upgradeResult = & winget upgrade $packageId 2>&1
+                                $upgradeOutput = $upgradeResult | Out-String
+
+                                # Check if upgrade is available and successful
+                                if ($upgradeOutput -match 'Successfully installed') {
+                                    $updatedApps += $packageId
+                                    Write-Success "Successfully updated: $packageId"
+                                }
+                                elseif ($upgradeOutput -notmatch 'No available upgrade found' -and
+                                    $upgradeOutput -notmatch 'No newer package versions are available') {
+                                    # Package has an update but installation may have failed
+                                    $failedUpdateApps += $packageId
+                                    Write-ErrorMessage "Failed to update: $packageId"
+                                }
+                            }
+                            catch {
+                                $failedUpdateApps += $packageId
+                                Write-ErrorMessage "Error updating ${packageId}: $_"
+                            }
+                        }
+                    }
                 }
             }
         }
         else {
-            Write-WarningMessage 'PowerShell module not available, using CLI fallback...'
-
-            # Fallback to CLI method - get list of packages that have updates available
-            $installedPackages = & winget list --source winget 2>&1 | Where-Object {
-                $_ -and
-                $_ -notmatch '^[\s\-\|\\]*$' -and
-                $_ -notmatch '^$' -and
-                $_ -notmatch '^Name\s+Id\s+Version\s+Source' -and
-                $_ -notmatch '^[-]+$' -and
-                $_ -notmatch 'No installed package found'
-            }
-
-            foreach ($package in $installedPackages) {
-                $package = $package.Trim()
-                # Split the line by multiple spaces to get columns
-                # Format: Name | Id | Version | Source
-                $columns = $package -split '\s{2,}'
-                if ($columns.Count -ge 2) {
-                    $packageId = $columns[1]  # Second column is the ID
-
-                    # Skip if it's not a winget package or if it's a system component
-                    if ($packageId -and $packageId -notmatch '^(ARP|MSIX)') {
-                        try {
-                            $upgradeResult = & winget upgrade $packageId 2>&1
-                            $upgradeOutput = $upgradeResult | Out-String
-
-                            # Check if upgrade is available and successful
-                            if ($upgradeOutput -match 'Successfully installed') {
-                                $updatedApps += $packageId
-                                Write-Success "Successfully updated: $packageId"
-                            }
-                            elseif ($upgradeOutput -notmatch 'No available upgrade found' -and
-                                $upgradeOutput -notmatch 'No newer package versions are available') {
-                                # Package has an update but installation may have failed
-                                $failedUpdateApps += $packageId
-                                Write-ErrorMessage "Failed to update: $packageId"
-                            }
-                        }
-                        catch {
-                            $failedUpdateApps += $packageId
-                            Write-ErrorMessage "Error updating ${packageId}: $_"
-                        }
-                    }
+            Write-Info '[DRY-RUN] Updates are available. Would install the following updates:'
+            # Try PowerShell module first for listing
+            if (Get-Command Get-WinGetPackage -ErrorAction SilentlyContinue) {
+                $packagesWithUpdates = Get-WinGetPackage | Where-Object IsUpdateAvailable
+                foreach ($pkg in $packagesWithUpdates) {
+                    Write-Info "[DRY-RUN] Would update: $($pkg.Id) (Current: $($pkg.InstalledVersion), Available: $($pkg.AvailableVersion))"
+                    $updatedApps += $pkg.Id
                 }
+            }
+            else {
+                Write-Info '[DRY-RUN] Would update available packages (using CLI fallback)'
             }
         }
     }
@@ -1058,7 +1118,14 @@ function Invoke-WingetInstall {
     }
 
     # Display the summary of the installation
-    Write-Info 'Summary:'
+    if ($WhatIf) {
+        Write-Info ''
+        Write-Info '=== DRY-RUN SUMMARY ==='
+        Write-Info 'The following actions would have been performed:'
+    }
+    else {
+        Write-Info 'Summary:'
+    }
 
     $headers = @('Status', 'Apps')
     $rows = @()
@@ -1096,5 +1163,5 @@ function Invoke-WingetInstall {
 }
 
 if ($MyInvocation.InvocationName -ne '.') {
-    Invoke-WingetInstall
+    Invoke-WingetInstall -WhatIf:$WhatIf
 }
