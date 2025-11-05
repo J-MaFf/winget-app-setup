@@ -873,8 +873,8 @@ function Invoke-WingetInstall {
     if (-not $WhatIf) {
         if (Get-Command Test-AndSetExecutionPolicy -ErrorAction SilentlyContinue) {
             if (-not (Test-AndSetExecutionPolicy)) {
-                Write-Host 'Warning: Execution policy could not be verified or adjusted. Script may fail.' -ForegroundColor Yellow
-                Write-Host 'Press any key to continue anyway...' -ForegroundColor Yellow
+                Write-WarningMessage 'Warning: Execution policy could not be verified or adjusted. Script may fail.'
+                Write-Prompt 'Press any key to continue anyway...'
                 [System.Console]::ReadKey($true) > $null
             }
         }
