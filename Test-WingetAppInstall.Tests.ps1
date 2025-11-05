@@ -850,7 +850,9 @@ Describe 'Write-Table' {
                 [Parameter(Mandatory = $false)]
                 [bool]$UseGridView = $false,
                 [Parameter(Mandatory = $false)]
-                [bool]$PromptForGridView = $false
+                [bool]$PromptForGridView = $false,
+                [Parameter(Mandatory = $false)]
+                [string]$Title = 'Summary'
             )
 
             # Convert rows to objects for Format-Table
@@ -883,7 +885,7 @@ Describe 'Write-Table' {
                 }
                 else {
                     try {
-                        $tableData | Out-GridView -Title 'Installation Summary' -Wait
+                        $tableData | Out-GridView -Title $Title -Wait
                         return
                     }
                     catch {
@@ -1094,6 +1096,32 @@ Describe 'Write-Table' {
             # In interactive mode, prompt should be shown
             Assert-MockCalled Read-Host -Times 1
         }
+    }
+
+    It 'Should use custom title when provided' {
+        Mock Get-Command { return $true } -ParameterFilter { $Name -eq 'Out-GridView' }
+        Mock Out-GridView { } -Verifiable -ParameterFilter { $Title -eq 'Custom Title' }
+
+        $headers = @('Status', 'Apps')
+        $rows = @(@('Installed', 'App1, App2'))
+
+        Write-Table -Headers $headers -Rows $rows -UseGridView $true -Title 'Custom Title'
+
+        # Should call Out-GridView with custom title
+        Assert-MockCalled Out-GridView -Times 1 -ParameterFilter { $Title -eq 'Custom Title' }
+    }
+
+    It 'Should use default title when Title parameter is not provided' {
+        Mock Get-Command { return $true } -ParameterFilter { $Name -eq 'Out-GridView' }
+        Mock Out-GridView { } -Verifiable -ParameterFilter { $Title -eq 'Summary' }
+
+        $headers = @('Status', 'Apps')
+        $rows = @(@('Installed', 'App1, App2'))
+
+        Write-Table -Headers $headers -Rows $rows -UseGridView $true
+
+        # Should call Out-GridView with default title 'Summary'
+        Assert-MockCalled Out-GridView -Times 1 -ParameterFilter { $Title -eq 'Summary' }
     }
 }
 
