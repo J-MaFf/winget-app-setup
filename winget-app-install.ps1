@@ -1037,7 +1037,7 @@ function Invoke-WingetInstall {
     Foreach ($app in $apps) {
         try {
             Write-Info "Checking if installed: $($app.name)"
-            
+
             # Run winget list with timeout to prevent hanging
             $listProcess = Start-Process -FilePath 'winget' `
                 -ArgumentList 'list', '--exact', '-q', $app.name `
@@ -1045,7 +1045,7 @@ function Invoke-WingetInstall {
                 -PassThru `
                 -RedirectStandardOutput "$env:TEMP\winget_list_output.txt" `
                 -RedirectStandardError "$env:TEMP\winget_list_error.txt"
-            
+
             # Wait up to 15 seconds for the list command
             if (-not $listProcess.WaitForExit(15000)) {
                 Write-WarningMessage "Winget list timed out for $($app.name). Skipping..."
@@ -1054,19 +1054,19 @@ function Invoke-WingetInstall {
                 Remove-Item "$env:TEMP\winget_list_error.txt" -ErrorAction SilentlyContinue
                 continue
             }
-            
+
             $listApp = Get-Content "$env:TEMP\winget_list_output.txt" -ErrorAction SilentlyContinue
             Write-Info "List command completed for: $($app.name)"
-            
+
             # Cleanup temp files
             Remove-Item "$env:TEMP\winget_list_output.txt" -ErrorAction SilentlyContinue
             Remove-Item "$env:TEMP\winget_list_error.txt" -ErrorAction SilentlyContinue
-            
+
             if (![String]::Join('', $listApp).Contains($app.name)) {
                 if (-not $WhatIf) {
                     Write-Info "Installing: $($app.name)"
                     Start-Process winget -ArgumentList "install -e --accept-source-agreements --accept-package-agreements --id $($app.name)" -NoNewWindow -Wait
-                    
+
                     # Verify installation with timeout
                     $verifyProcess = Start-Process -FilePath 'winget' `
                         -ArgumentList 'list', '--exact', '-q', $app.name `
@@ -1074,7 +1074,7 @@ function Invoke-WingetInstall {
                         -PassThru `
                         -RedirectStandardOutput "$env:TEMP\winget_verify_output.txt" `
                         -RedirectStandardError "$env:TEMP\winget_verify_error.txt"
-                    
+
                     if ($verifyProcess.WaitForExit(15000)) {
                         $installResult = Get-Content "$env:TEMP\winget_verify_output.txt" -ErrorAction SilentlyContinue
                         if (![String]::Join('', $installResult).Contains($app.name)) {
@@ -1091,7 +1091,7 @@ function Invoke-WingetInstall {
                         $verifyProcess.Kill()
                         $failedApps += $app.name
                     }
-                    
+
                     # Cleanup temp files
                     Remove-Item "$env:TEMP\winget_verify_output.txt" -ErrorAction SilentlyContinue
                     Remove-Item "$env:TEMP\winget_verify_error.txt" -ErrorAction SilentlyContinue
