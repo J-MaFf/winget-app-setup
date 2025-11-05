@@ -248,7 +248,7 @@ function Test-AppDefinitions {
 #>
 function Test-Source-IsTrusted($target) {
     try {
-        $sources = winget source list --accept-source-agreements 2>&1
+        $sources = winget source list --disable-interactivity 2>&1
         return $sources -match [regex]::Escape($target)
     }
     catch {
@@ -261,17 +261,52 @@ function Test-Source-IsTrusted($target) {
 .SYNOPSIS
     Adds and trusts the winget source.
 .DESCRIPTION
-    This function adds and trusts the winget source by adding it to the list of sources.
+    This function adds and trusts the winget source by resetting sources to defaults.
     Automatically accepts source agreements to prevent prompts.
+    Uses a timeout mechanism to prevent the function from hanging indefinitely.
 #>
 function Set-Sources {
     try {
-        # Try to reset sources first which can help with trust issues
-        winget source reset --force --accept-source-agreements 2>&1 | Out-Null
-        Write-Success 'Winget sources reset successfully'
+        Write-Info 'Resetting winget sources (this may take a moment)...'
+
+        # Run winget source reset with a timeout to prevent hanging
+        # Using Start-Process with a timeout to handle potential hangs
+        $resetProcess = Start-Process -FilePath 'winget' `
+            -ArgumentList 'source', 'reset', '--force', '--disable-interactivity' `
+            -NoNewWindow `
+            -PassThru `
+            -RedirectStandardOutput "$env:TEMP\winget_reset_output.txt" `
+            -RedirectStandardError "$env:TEMP\winget_reset_error.txt"
+
+        # Wait up to 30 seconds for the process to complete
+        $timeout = 30
+        if (-not $resetProcess.WaitForExit($timeout * 1000)) {
+            # Process timed out, kill it
+            Write-WarningMessage "Winget source reset timed out after $timeout seconds. Terminating process..."
+            $resetProcess.Kill()
+            Write-WarningMessage 'Consider running "winget source reset --force" manually if sources are not properly configured.'
+            return $false
+        }
+
+        # Check the exit code
+        if ($resetProcess.ExitCode -eq 0) {
+            Write-Success 'Winget sources reset successfully'
+            return $true
+        }
+        else {
+            # Non-zero exit code, but not critical since script continues
+            Write-Info "Winget source reset completed with exit code: $($resetProcess.ExitCode) (this is often not critical)"
+            return $false
+        }
     }
     catch {
         Write-WarningMessage "Could not reset sources (this is usually okay): $_"
+        return $false
+    }
+    finally {
+        # Clean up temp files
+        Remove-Item "$env:TEMP\winget_reset_output.txt" -ErrorAction SilentlyContinue
+        Remove-Item "$env:TEMP\winget_reset_error.txt" -ErrorAction SilentlyContinue
     }
 }
 
@@ -312,9 +347,16 @@ function Add-ToEnvironmentPath {
             [System.Environment]::SetEnvironmentVariable('PATH', $userEnvPath, [System.EnvironmentVariableTarget]::User)
         }
 
-        # Update the current process environment PATH
+        # Update the current process environment PATH (with length check to avoid Windows PATH limit of 2048)
         if (-not ($env:PATH -split ';').Contains($PathToAdd)) {
-            $env:PATH += ";$PathToAdd"
+            $newPath = "$env:PATH;$PathToAdd"
+            # Only update if it won't exceed the Windows PATH limit
+            if ($newPath.Length -le 2048) {
+                $env:PATH = $newPath
+            }
+            else {
+                Write-WarningMessage 'Current process PATH would exceed Windows limit (2048 chars). Path added to persistent environment but not to current session.'
+            }
         }
     }
 }
@@ -997,20 +1039,62 @@ function Invoke-WingetInstall {
 
     Foreach ($app in $apps) {
         try {
-            $listApp = winget list --exact -q $app.name
+            # Run winget list with timeout to prevent hanging
+            $listProcess = Start-Process -FilePath 'winget' `
+                -ArgumentList 'list', '--exact', '-q', '--accept-source-agreements', $app.name `
+                -NoNewWindow `
+                -PassThru `
+                -RedirectStandardOutput "$env:TEMP\winget_list_output.txt" `
+                -RedirectStandardError "$env:TEMP\winget_list_error.txt"
+
+            # Wait up to 15 seconds for the list command
+            if (-not $listProcess.WaitForExit(15000)) {
+                Write-WarningMessage "Winget list timed out for $($app.name). Skipping..."
+                $listProcess.Kill()
+                Remove-Item "$env:TEMP\winget_list_output.txt" -ErrorAction SilentlyContinue
+                Remove-Item "$env:TEMP\winget_list_error.txt" -ErrorAction SilentlyContinue
+                continue
+            }
+
+            $listApp = Get-Content "$env:TEMP\winget_list_output.txt" -ErrorAction SilentlyContinue
+
+            # Cleanup temp files
+            Remove-Item "$env:TEMP\winget_list_output.txt" -ErrorAction SilentlyContinue
+            Remove-Item "$env:TEMP\winget_list_error.txt" -ErrorAction SilentlyContinue
+
             if (![String]::Join('', $listApp).Contains($app.name)) {
                 if (-not $WhatIf) {
                     Write-Info "Installing: $($app.name)"
                     Start-Process winget -ArgumentList "install -e --accept-source-agreements --accept-package-agreements --id $($app.name)" -NoNewWindow -Wait
-                    $installResult = winget list --exact -q $app.name
-                    if (![String]::Join('', $installResult).Contains($app.name)) {
-                        Write-ErrorMessage "Failed to install: $($app.name). No package found matching input criteria."
-                        $failedApps += $app.name
+
+                    # Verify installation with timeout
+                    $verifyProcess = Start-Process -FilePath 'winget' `
+                        -ArgumentList 'list', '--exact', '-q', '--accept-source-agreements', $app.name `
+                        -NoNewWindow `
+                        -PassThru `
+                        -RedirectStandardOutput "$env:TEMP\winget_verify_output.txt" `
+                        -RedirectStandardError "$env:TEMP\winget_verify_error.txt"
+
+                    if ($verifyProcess.WaitForExit(15000)) {
+                        $installResult = Get-Content "$env:TEMP\winget_verify_output.txt" -ErrorAction SilentlyContinue
+                        if (![String]::Join('', $installResult).Contains($app.name)) {
+                            Write-ErrorMessage "Failed to install: $($app.name). No package found matching input criteria."
+                            $failedApps += $app.name
+                        }
+                        else {
+                            Write-Success "Successfully installed: $($app.name)"
+                            $installedApps += $app.name
+                        }
                     }
                     else {
-                        Write-Success "Successfully installed: $($app.name)"
-                        $installedApps += $app.name
+                        Write-WarningMessage "Verification timed out for: $($app.name). Assuming installation failed."
+                        $verifyProcess.Kill()
+                        $failedApps += $app.name
                     }
+
+                    # Cleanup temp files
+                    Remove-Item "$env:TEMP\winget_verify_output.txt" -ErrorAction SilentlyContinue
+                    Remove-Item "$env:TEMP\winget_verify_error.txt" -ErrorAction SilentlyContinue
                 }
                 else {
                     Write-Info "[DRY-RUN] Would install: $($app.name)"

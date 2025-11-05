@@ -45,9 +45,13 @@ When working on code in this repository:
 
 ### Winget Integration Patterns
 - **App Definition**: Use array of hash tables: `@(@{name = 'Publisher.AppName'})`
-- **Command Flags**: Always use `-e` (exact match), `--accept-source-agreements`, `--accept-package-agreements`
-- **Source Trust**: Verify and trust 'winget' and 'msstore' sources before operations
-- **Installation Check**: Use `winget list --exact -q $app.name` to check if app is installed
+- **Command Flags**: CRITICAL - Flag usage depends on command type:
+  - **Source commands** (`winget source list`, `winget source reset`): Use `--disable-interactivity` (NOT `--accept-source-agreements`)
+  - **Package commands** (`winget list`, `winget install`): Use `--accept-source-agreements` and `--accept-package-agreements`
+  - Using wrong flags causes "source agreements not agreed to" errors
+- **Timeout Protection**: Wrap all winget commands in `Start-Process` with timeout (30s for source ops, 15s for package ops) to prevent hanging from interactive prompts
+- **Source Trust**: Verify and trust 'winget' and 'msstore' sources before operations using `--disable-interactivity` flag
+- **Installation Check**: Use `winget list --exact -q --accept-source-agreements $app.name` to check if app is installed
 - **Result Tracking**: Maintain separate arrays for `$installedApps`, `$skippedApps`, `$failedApps`
 
 ### Output & Display
@@ -157,17 +161,58 @@ When working on code in this repository:
 
 ### Critical Commands & Operations
 - **Admin Elevation**: `Restart-WithElevation -PowerShellExecutable $psExecutable -ScriptPath $PSCommandPath` (helper prefers `wt.exe` when present, otherwise falls back to the classic `Start-Process` pattern)
-- **Source Trust Check**: `winget source list` and pattern matching for trusted sources
+- **Source Trust Check**: `winget source list --disable-interactivity` and pattern matching for trusted sources
+- **Source Reset**: `winget source reset --force --disable-interactivity` (wrapped in Start-Process with 30-second timeout)
 - **App Installation**: `winget install -e --accept-source-agreements --accept-package-agreements --id $app.name`
-- **Existence Verification**: `winget list --exact -q $app.name` for install status
+- **Existence Verification**: `winget list --exact -q --accept-source-agreements $app.name` (wrapped in Start-Process with 15-second timeout)
 - **Update Detection**: `Get-WinGetPackage | Where-Object IsUpdateAvailable` (PowerShell module) or `winget upgrade` (CLI)
 - **Table Display**: `Write-Table -Headers $headers -Rows $rows -PromptForGridView $true` (prompts user) or `Write-Table -Headers $headers -Rows $rows -UseGridView $true` (forces GUI mode)
+
+### Timeout Mechanisms & Process Management
+Winget commands can hang indefinitely when prompting for source agreements in non-interactive script execution. All potentially hanging commands must use `Start-Process` with timeout protection:
+
+```powershell
+# Example: 30-second timeout for source operations
+$process = Start-Process -FilePath 'winget' `
+    -ArgumentList 'source', 'reset', '--force', '--disable-interactivity' `
+    -NoNewWindow -PassThru `
+    -RedirectStandardOutput "$env:TEMP\winget_output.txt" `
+    -RedirectStandardError "$env:TEMP\winget_error.txt"
+
+if (-not $process.WaitForExit(30000)) {
+    Write-WarningMessage "Command timed out. Terminating..."
+    $process.Kill()
+    # Clean up temp files
+}
+
+# Example: 15-second timeout for package operations
+$listProcess = Start-Process -FilePath 'winget' `
+    -ArgumentList 'list', '--exact', '-q', '--accept-source-agreements', $app.name `
+    -NoNewWindow -PassThru `
+    -RedirectStandardOutput "$env:TEMP\winget_list_output.txt"
+
+if (-not $listProcess.WaitForExit(15000)) {
+    Write-WarningMessage "List command timed out for $($app.name)"
+    $listProcess.Kill()
+}
+
+$output = Get-Content "$env:TEMP\winget_list_output.txt" -ErrorAction SilentlyContinue
+Remove-Item "$env:TEMP\winget_list_output.txt" -ErrorAction SilentlyContinue
+```
+
+**Key Points:**
+- Use `-NoNewWindow` and `-PassThru` for non-visible execution and process reference
+- Redirect output to temp files to prevent console blocking
+- Always clean up temp files in finally blocks or after processing
+- Timeout values: 30s for source operations, 15s for package operations
+- Check exit code after timeout for proper error handling
 
 ### Build & Test Workflows
 - **Function Testing**: Extract and test individual functions in separate files
 - **Error Scenario Testing**: Use fake packages like `@{name = 'Fake.Package'}` to test error handling
 - **Output Validation**: Test table formatting with `Write-Table()` function
 - **Integration Testing**: Full script execution with real winget commands
+- **Timeout Testing**: Test with hanging commands to verify timeout protection works
 
 ### Interaction Guidelines
 - **Explain Before Acting**: Always explain the purpose and impact of any action before executing terminal commands, installing packages, or making system changes
@@ -185,7 +230,9 @@ When working on code in this repository:
 ### System Integration
 - **Administrator Privileges**: Required for package installation/uninstallation
 - **Environment PATH**: Modified to include script directory for accessibility
-- **Winget Sources**: 'winget' and 'msstore' sources must be trusted
+  - **Windows PATH Limit**: 2048 character limit - Add-ToEnvironmentPath validates this before updating current session
+  - Graceful handling when limit is exceeded (persistent environment still updated, current session skips)
+- **Winget Sources**: 'winget' and 'msstore' sources must be trusted using `--disable-interactivity` flag
 - **User PATH**: Script directory added for command-line accessibility
 
 ## Documentation Maintenance
