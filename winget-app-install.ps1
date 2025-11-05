@@ -63,8 +63,8 @@ function Test-AndInstallWingetModule {
 
         Install-Module -Name Microsoft.WinGet.Client -Scope AllUsers -Force -AllowClobber -ErrorAction Stop
 
-        if (Get-Module -ListAvailable -Name 'Microsoft.WinGet.Client') {
-            $installedModule = Get-Module -ListAvailable -Name 'Microsoft.WinGet.Client' | Select-Object -First 1
+        $installedModule = Get-Module -ListAvailable -Name 'Microsoft.WinGet.Client' | Select-Object -First 1
+        if ($installedModule) {
             Write-Host "Microsoft.WinGet.Client module installed successfully (Version: $($installedModule.Version))" -ForegroundColor Green
             return $true
         }
@@ -112,7 +112,12 @@ function Test-AndInstallGraphicalTools {
         Import-Module Microsoft.PowerShell.GraphicalTools -ErrorAction Stop
         
         $loadedModule = Get-Module -Name 'Microsoft.PowerShell.GraphicalTools'
-        Write-Host "Microsoft.PowerShell.GraphicalTools is loaded for this session (Version: $($loadedModule.Version))" -ForegroundColor Green
+        if ($loadedModule) {
+            Write-Host "Microsoft.PowerShell.GraphicalTools is loaded for this session (Version: $($loadedModule.Version))" -ForegroundColor Green
+        }
+        else {
+            Write-Host 'Microsoft.PowerShell.GraphicalTools is loaded for this session.' -ForegroundColor Green
+        }
 
         if (Get-Command Out-GridView -ErrorAction SilentlyContinue) {
             Write-Host 'Out-GridView is available for interactive summaries.' -ForegroundColor Green
