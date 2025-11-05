@@ -185,7 +185,7 @@ function Test-AndInstallGraphicalTools {
     return $false
 }
 
-<#!
+<#
 .SYNOPSIS
     Validates the list of application definitions before processing.
 .DESCRIPTION
