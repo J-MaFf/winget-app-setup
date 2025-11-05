@@ -488,7 +488,9 @@ function Write-Table {
         [Parameter(Mandatory = $false)]
         [bool]$UseGridView = $false,
         [Parameter(Mandatory = $false)]
-        [bool]$PromptForGridView = $false
+        [bool]$PromptForGridView = $false,
+        [Parameter(Mandatory = $false)]
+        [string]$Title = 'Summary'
     )
 
     # Convert rows to objects for Format-Table
@@ -546,7 +548,7 @@ function Write-Table {
 
         if ($canUseGridView) {
             try {
-                $tableData | Out-GridView -Title 'Installation Summary' -Wait
+                $tableData | Out-GridView -Title $Title -Wait
                 return
             }
             catch {
@@ -1155,7 +1157,7 @@ function Invoke-WingetInstall {
         $rows += , @('Failed to Update', $appList)
     }
 
-    Write-Table -Headers $headers -Rows $rows -PromptForGridView $true
+    Write-Table -Headers $headers -Rows $rows -PromptForGridView $true -Title 'Installation Summary'
 
     # Keep the console window open until the user presses a key
     Write-Prompt 'Press any key to exit...'

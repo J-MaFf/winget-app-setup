@@ -161,7 +161,9 @@ function Write-Table {
         [Parameter(Mandatory = $false)]
         [bool]$UseGridView = $false,
         [Parameter(Mandatory = $false)]
-        [bool]$PromptForGridView = $false
+        [bool]$PromptForGridView = $false,
+        [Parameter(Mandatory = $false)]
+        [string]$Title = 'Summary'
     )
 
     # Convert rows to objects for Format-Table
@@ -219,7 +221,7 @@ function Write-Table {
         
         if ($canUseGridView) {
             try {
-                $tableData | Out-GridView -Title 'Uninstallation Summary' -Wait
+                $tableData | Out-GridView -Title $Title -Wait
                 return
             }
             catch {
@@ -271,4 +273,4 @@ if ($appList) {
     $rows += , @('Failed', $appList)
 }
 
-Write-Table -Headers $headers -Rows $rows -PromptForGridView $true
+Write-Table -Headers $headers -Rows $rows -PromptForGridView $true -Title 'Uninstallation Summary'
