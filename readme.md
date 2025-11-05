@@ -7,6 +7,7 @@ A comprehensive PowerShell automation suite for managing Windows applications us
 - **Automated Installation**: Install multiple applications with a single command
 - **Smart Uninstallation**: Remove applications with status tracking
 - **Update Management**: Automatically check for and install available updates
+- **Execution Policy Management**: Automatically checks and adjusts PowerShell execution policy on first run
 - **Admin Privilege Handling**: Automatically requests elevation when needed
 - **Source Trust Management**: Verifies and trusts winget sources
 - **Comprehensive Error Handling**: Detailed error reporting and result tracking
@@ -67,7 +68,7 @@ The scripts work with this curated list of applications:
 - **Microsoft App Installer** from Microsoft Store
 - **PowerShell Gallery access** to download the Microsoft.WinGet.Client module (handled automatically by the script)
 - **Administrator privileges** (scripts will request elevation automatically)
-- **PowerShell execution policy** allowing script execution
+- **PowerShell execution policy** allowing script execution (handled automatically by the script)
 
 ## Setup
 
@@ -109,6 +110,17 @@ C:\Path\To\winget-app-setup\winget-app-uninstall.ps1
 ```
 
 ## Script Behavior
+
+### Execution Policy Management
+
+Scripts automatically check the PowerShell execution policy on first run and will:
+
+- Detect if the current policy prevents scripts from running
+- Attempt to set the policy to `RemoteSigned` for the CurrentUser scope if needed
+- Provide clear feedback about policy changes
+- Display helpful instructions if policy adjustment requires manual intervention
+
+**Note**: The scripts use `RemoteSigned` policy, which is secure (requires signatures for downloaded scripts) while allowing local scripts to run without issues.
 
 ### Administrator Privileges
 
@@ -180,6 +192,12 @@ The scripts include several configurable functions:
 ## Troubleshooting
 
 ### Common Issues
+
+#### "cannot be loaded because running scripts is disabled"
+
+- The script automatically detects and attempts to fix execution policy issues
+- If automatic adjustment fails, manually run: `Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser -Force`
+- For system-wide changes (requires admin): `Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope LocalMachine -Force`
 
 #### "winget command not found"
 
