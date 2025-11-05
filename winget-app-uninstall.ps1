@@ -3,16 +3,86 @@
 # 2. Edit the list of apps to uninstall.
 # 3. Run this script as administrator.
 
+#------------------------------------------------Functions------------------------------------------------
+
+<#
+.SYNOPSIS
+    Writes an informational message in blue color.
+.DESCRIPTION
+    Helper function for consistent informational and action messages throughout the script.
+.PARAMETER Message
+    The message to display
+#>
+function Write-Info {
+	param (
+		[Parameter(Mandatory = $true)]
+		[string]$Message
+	)
+	Write-Host $Message -ForegroundColor Blue
+}
+
+<#
+.SYNOPSIS
+    Writes a success message in green color.
+.DESCRIPTION
+    Helper function for consistent success messages throughout the script.
+.PARAMETER Message
+    The message to display
+#>
+function Write-Success {
+	param (
+		[Parameter(Mandatory = $true)]
+		[string]$Message
+	)
+	Write-Host $Message -ForegroundColor Green
+}
+
+<#
+.SYNOPSIS
+    Writes a warning message in yellow color.
+.DESCRIPTION
+    Helper function for consistent warning and skip messages throughout the script.
+    Named Write-WarningMessage to avoid conflict with built-in Write-Warning cmdlet.
+.PARAMETER Message
+    The message to display
+#>
+function Write-WarningMessage {
+	param (
+		[Parameter(Mandatory = $true)]
+		[string]$Message
+	)
+	Write-Host $Message -ForegroundColor Yellow
+}
+
+<#
+.SYNOPSIS
+    Writes an error message in red color.
+.DESCRIPTION
+    Helper function for consistent error messages throughout the script.
+    Named Write-ErrorMessage to avoid conflict with built-in Write-Error cmdlet.
+.PARAMETER Message
+    The message to display
+#>
+function Write-ErrorMessage {
+	param (
+		[Parameter(Mandatory = $true)]
+		[string]$Message
+	)
+	Write-Host $Message -ForegroundColor Red
+}
+
+#------------------------------------------------Main Script------------------------------------------------
+
 # Check if the script is run as administrator
 If (-NOT ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] 'Administrator')) {
-    Write-Host 'This script requires administrator privileges. Press Enter to restart script with elevated privileges.' -ForegroundColor Red
+    Write-ErrorMessage 'This script requires administrator privileges. Press Enter to restart script with elevated privileges.'
     Pause
     # Relaunch the script with administrator privileges
     Start-Process powershell.exe -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`"" -Verb RunAs
     Exit
 }
 else {
-    Write-Host 'Starting...' -ForegroundColor Green
+    Write-Success 'Starting...'
 }
 
 $apps = @(
@@ -28,9 +98,9 @@ $apps = @(
     @{name = 'Microsoft.WindowsTerminal' }
 );
 
-Write-Host 'Uninstalling the following Apps:' -ForegroundColor Blue
+Write-Info 'Uninstalling the following Apps:'
 ForEach ($app in $apps) {
-    Write-Host $app.name -ForegroundColor Blue
+    Write-Info $app.name
 }
 
 $uninstalledApps = @()
@@ -41,14 +111,14 @@ Foreach ($app in $apps) {
     try {
         $listApp = winget list --exact -q $app.name
         if ([String]::Join('', $listApp).Contains($app.name)) {
-            Write-Host 'Uninstalling: ' $app.name -ForegroundColor Blue
+            Write-Info "Uninstalling: $($app.name)"
             $uninstallResult = winget uninstall -e --id $app.name
             if ($uninstallResult -match 'No installed package found matching input criteria.') {
-                Write-Host "Failed to uninstall: $($app.name). No installed package found matching input criteria." -ForegroundColor Red
+                Write-ErrorMessage "Failed to uninstall: $($app.name). No installed package found matching input criteria."
                 $failedApps += $app.name
             }
             elseif ($uninstallResult -match 'Successfully uninstalled') {
-                Write-Host 'Successfully uninstalled: ' $app.name -ForegroundColor Green
+                Write-Success "Successfully uninstalled: $($app.name)"
                 $uninstalledApps += $app.name
             }
             else {
@@ -56,12 +126,12 @@ Foreach ($app in $apps) {
             }
         }
         else {
-            Write-Host 'Skipping: ' $app.name ' (not installed)' -ForegroundColor Yellow
+            Write-WarningMessage "Skipping: $($app.name) (not installed)"
             $skippedApps += $app.name
         }
     }
     catch {
-        Write-Host "Failed to uninstall: $($app.name). Error: $_" -ForegroundColor Red
+        Write-ErrorMessage "Failed to uninstall: $($app.name). Error: $_"
         $failedApps += $app.name
     }
 }
@@ -143,7 +213,7 @@ function Write-Table {
                 $canUseGridView = $true
             }
             catch {
-                Write-Host 'Out-GridView is not available. Falling back to text output.' -ForegroundColor Yellow
+                Write-WarningMessage 'Out-GridView is not available. Falling back to text output.'
             }
         }
         
@@ -153,7 +223,7 @@ function Write-Table {
                 return
             }
             catch {
-                Write-Host "Failed to display grid view: $_. Falling back to text output." -ForegroundColor Yellow
+                Write-WarningMessage "Failed to display grid view: $_. Falling back to text output."
             }
         }
     }
@@ -181,7 +251,7 @@ function Format-AppList {
     return $null
 }
 
-Write-Host 'Summary:' -ForegroundColor Blue
+Write-Info 'Summary:'
 
 $headers = @('Status', 'Apps')
 $rows = @()
