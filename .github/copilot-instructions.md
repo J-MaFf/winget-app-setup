@@ -6,6 +6,17 @@ This file provides custom instructions for GitHub Copilot when working on this r
 
 This repository provides PowerShell automation for managing Windows applications using the winget package manager. When contributing code or making changes, follow the patterns, conventions, and practices documented below.
 
+## Contributing Guidelines
+
+When working on code in this repository:
+
+- **Minimal Changes**: Make the smallest possible changes to achieve the goal
+- **Preserve Working Code**: Never delete or modify working code unless absolutely necessary
+- **Test Thoroughly**: Run Pester tests after making changes: `Invoke-Pester -Path .\Test-WingetAppInstall.Tests.ps1 -Output Detailed`
+- **Follow Existing Patterns**: Match the coding style and patterns already present in the codebase
+- **Document Changes**: Update comments and documentation when changing functionality
+- **Validate Scripts**: Test scripts manually before committing, especially admin elevation and winget operations
+
 ## Project Context
 - **Purpose**: PowerShell automation for installing/uninstalling Windows applications via winget
 - **Key Components**: PowerShell scripts using winget package manager
