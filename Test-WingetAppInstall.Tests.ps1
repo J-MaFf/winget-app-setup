@@ -25,7 +25,12 @@ Describe 'Test-AndInstallWingetModule' {
 
                 $installedModule = Get-Module -ListAvailable -Name 'Microsoft.WinGet.Client' | Select-Object -First 1
                 if ($installedModule) {
-                    Write-Host "Microsoft.WinGet.Client module installed successfully (Version: $($installedModule.Version))" -ForegroundColor Green
+                    if ($installedModule.Version) {
+                        Write-Host "Microsoft.WinGet.Client module installed successfully (Version: $($installedModule.Version))" -ForegroundColor Green
+                    }
+                    else {
+                        Write-Host 'Microsoft.WinGet.Client module installed successfully' -ForegroundColor Green
+                    }
                     return $true
                 }
 
@@ -150,7 +155,7 @@ Describe 'Test-AndInstallGraphicalTools' {
                 Import-Module Microsoft.PowerShell.GraphicalTools -ErrorAction Stop
                 
                 $loadedModule = Get-Module -Name 'Microsoft.PowerShell.GraphicalTools'
-                if ($loadedModule) {
+                if ($loadedModule -and $loadedModule.Version) {
                     Write-Host "Microsoft.PowerShell.GraphicalTools is loaded for this session (Version: $($loadedModule.Version))" -ForegroundColor Green
                 }
                 else {
