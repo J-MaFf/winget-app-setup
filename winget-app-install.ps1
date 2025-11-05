@@ -52,12 +52,11 @@ function Test-AndInstallWingetModule {
             return $true
         }
 
-        Write-Host 'Microsoft.WinGet.Client module not found. Attempting installation...' -ForegroundColor Yellow
-        Write-Host "Host: $($host.Name) | PS Version: $($PSVersionTable.PSVersion)" -ForegroundColor Yellow
+        Write-WarningMessage 'Microsoft.WinGet.Client module not found. Attempting installation...'
 
         $nugetProvider = Get-PackageProvider -Name NuGet -ErrorAction SilentlyContinue
         if (-not $nugetProvider) {
-            Write-Host 'NuGet package provider not found. Installing...' -ForegroundColor Yellow
+            Write-WarningMessage 'NuGet package provider not found. Installing...'
             Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force -Scope AllUsers | Out-Null
         }
 
@@ -99,33 +98,24 @@ function Test-AndInstallGraphicalTools {
 
         $graphicalModule = Get-Module -ListAvailable -Name 'Microsoft.PowerShell.GraphicalTools'
         if (-not $graphicalModule) {
-            Write-Host 'Microsoft.PowerShell.GraphicalTools module is missing. Installing to enable Out-GridView...' -ForegroundColor Yellow
-            Write-Host "Host: $($host.Name) | PS Version: $($PSVersionTable.PSVersion)" -ForegroundColor Yellow
+            Write-WarningMessage 'Microsoft.PowerShell.GraphicalTools module is missing. Installing to enable Out-GridView...'
         }
         else {
-            Write-Host 'Microsoft.PowerShell.GraphicalTools module found but Out-GridView is unavailable. Importing module...' -ForegroundColor Yellow
-            Write-Host "Host: $($host.Name) | PS Version: $($PSVersionTable.PSVersion)" -ForegroundColor Yellow
+            Write-WarningMessage 'Microsoft.PowerShell.GraphicalTools module found but Out-GridView is unavailable. Importing module...'
         }
 
         $nugetProvider = Get-PackageProvider -Name NuGet -ErrorAction SilentlyContinue
         if (-not $nugetProvider) {
-            Write-Host 'NuGet package provider not found. Installing...' -ForegroundColor Yellow
+            Write-WarningMessage 'NuGet package provider not found. Installing...'
             Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force -Scope AllUsers | Out-Null
         }
 
         Install-Module -Name Microsoft.PowerShell.GraphicalTools -Scope AllUsers -Force -AllowClobber -ErrorAction Stop
         Import-Module Microsoft.PowerShell.GraphicalTools -ErrorAction Stop
-        
-        $loadedModule = Get-Module -Name 'Microsoft.PowerShell.GraphicalTools'
-        if ($loadedModule -and $loadedModule.Version) {
-            Write-Host "Microsoft.PowerShell.GraphicalTools is loaded for this session (Version: $($loadedModule.Version))" -ForegroundColor Green
-        }
-        else {
-            Write-Host 'Microsoft.PowerShell.GraphicalTools is loaded for this session.' -ForegroundColor Green
-        }
+        Write-Success 'Microsoft.PowerShell.GraphicalTools is loaded for this session.'
 
         if (Get-Command Out-GridView -ErrorAction SilentlyContinue) {
-            Write-Host 'Out-GridView is available for interactive summaries.' -ForegroundColor Green
+            Write-Success 'Out-GridView is available for interactive summaries.'
             return $true
         }
 
@@ -387,7 +377,7 @@ function Restart-WithElevation {
     }
 
     if ($windowsTerminalPath) {
-        Write-Host 'Attempting to relaunch script in Windows Terminal with elevated privileges...' -ForegroundColor Blue
+        Write-Info 'Attempting to relaunch script in Windows Terminal with elevated privileges...'
         try {
             Start-Process $windowsTerminalPath -ArgumentList @("$PowerShellExecutable $commandArguments") -Verb RunAs
             return 'WindowsTerminal'
@@ -397,7 +387,7 @@ function Restart-WithElevation {
         }
     }
 
-    Write-Host 'Relaunching script in standard PowerShell window with elevated privileges...' -ForegroundColor Blue
+    Write-Info 'Relaunching script in standard PowerShell window with elevated privileges...'
     Start-Process $PowerShellExecutable -ArgumentList $commandArguments -Verb RunAs
     return 'PowerShell'
 }
@@ -479,7 +469,7 @@ function Write-Table {
                 $canUseGridView = $true
             }
             catch {
-                Write-Host 'Out-GridView is not available. Falling back to text output.' -ForegroundColor Yellow
+                Write-WarningMessage 'Out-GridView is not available. Falling back to text output.'
             }
         }
 
@@ -489,7 +479,7 @@ function Write-Table {
                 return
             }
             catch {
-                Write-Host "Failed to display grid view: $_. Falling back to text output." -ForegroundColor Yellow
+                Write-WarningMessage "Failed to display grid view: $_. Falling back to text output."
             }
         }
     }
@@ -554,7 +544,7 @@ function Invoke-WingetCommand {
         $commandOutput = & winget $commandArgs 2>&1 | Where-Object { $_ -notmatch '^[\s\-\|\\]*$' }
     }
     catch {
-        Write-Host "Error capturing winget output: $($_)" -ForegroundColor Red
+        Write-ErrorMessage "Error capturing winget output: $($_)"
         $commandOutput = @()
     }
 
@@ -602,14 +592,14 @@ function Format-AppList {
 #>
 function Test-UpdatesAvailable {
     try {
-        Write-Host 'Checking for available updates...' -ForegroundColor Blue
+        Write-Info 'Checking for available updates...'
 
         # Try PowerShell module first
         if (Get-Command Get-WinGetPackage -ErrorAction SilentlyContinue) {
             $packagesWithUpdates = Get-WinGetPackage | Where-Object IsUpdateAvailable
 
             if ($packagesWithUpdates -and $packagesWithUpdates.Count -gt 0) {
-                Write-Host "Found $($packagesWithUpdates.Count) package(s) with available updates." -ForegroundColor Green
+                Write-Success "Found $($packagesWithUpdates.Count) package(s) with available updates."
                 $packagesWithUpdates | ForEach-Object {
                     Write-Host " - $($_.Id) (Current: $($_.InstalledVersion), Available: $($_.AvailableVersion))"
                 }
@@ -617,7 +607,7 @@ function Test-UpdatesAvailable {
             }
         }
         else {
-            Write-Host 'PowerShell module not available, using CLI fallback...' -ForegroundColor Yellow
+            Write-WarningMessage 'PowerShell module not available, using CLI fallback...'
 
             # Fallback to CLI method
             $basicUpgradeResult = & winget upgrade 2>&1
@@ -633,7 +623,7 @@ function Test-UpdatesAvailable {
         Write-Warning "Error checking for updates: $_"
     }
 
-    Write-Host 'No updates available.' -ForegroundColor Yellow
+    Write-WarningMessage 'No updates available.'
     return $false
 }
 
@@ -647,23 +637,23 @@ function Test-UpdatesAvailable {
 #>
 function Test-AndInstallWinget {
     if (Get-Command winget -ErrorAction SilentlyContinue) {
-        Write-Host 'Winget is available.' -ForegroundColor Green
+        Write-Success 'Winget is available.'
         return $true
     }
     else {
-        Write-Host 'Winget is not available. Attempting to install Microsoft App Installer...' -ForegroundColor Yellow
+        Write-WarningMessage 'Winget is not available. Attempting to install Microsoft App Installer...'
         try {
             $url = 'https://aka.ms/getwinget'
             $outFile = "$env:TEMP\Microsoft.DesktopAppInstaller.appxbundle"
             Invoke-WebRequest -Uri $url -OutFile $outFile -UseBasicParsing
             Add-AppxPackage $outFile
             Remove-Item $outFile -ErrorAction SilentlyContinue
-            Write-Host 'Microsoft App Installer installed successfully. Winget should now be available.' -ForegroundColor Green
+            Write-Success 'Microsoft App Installer installed successfully. Winget should now be available.'
             return $true
         }
         catch {
-            Write-Host "Failed to install winget: $_" -ForegroundColor Red
-            Write-Host 'Please install winget manually from https://aka.ms/getwinget' -ForegroundColor Red
+            Write-ErrorMessage "Failed to install winget: $_"
+            Write-ErrorMessage 'Please install winget manually from https://aka.ms/getwinget'
             return $false
         }
     }
@@ -671,46 +661,84 @@ function Test-AndInstallWinget {
 
 <#
 .SYNOPSIS
-    Checks and adjusts PowerShell execution policy if necessary to allow script execution.
+    Writes an informational message in blue color.
 .DESCRIPTION
-    Verifies the current execution policy for the CurrentUser scope and attempts to set it to RemoteSigned
-    if it's more restrictive. This ensures the script and future scripts can run without policy-related errors.
-    RemoteSigned is used as it's secure (requires signatures for downloaded scripts) while allowing local scripts to run.
-.RETURNS
-    [bool] True if the execution policy is permissive or was successfully adjusted, otherwise False.
+    Helper function for consistent informational and action messages throughout the script.
+.PARAMETER Message
+    The message to display
 #>
-function Test-AndSetExecutionPolicy {
-    try {
-        $currentPolicy = Get-ExecutionPolicy -Scope CurrentUser
-        $permissivePolicies = @('RemoteSigned', 'Unrestricted', 'Bypass')
-        
-        if ($permissivePolicies -contains $currentPolicy) {
-            Write-Host "Execution policy is already set to '$currentPolicy' for CurrentUser scope." -ForegroundColor Green
-            return $true
-        }
-        
-        Write-Host "Current execution policy for CurrentUser is '$currentPolicy', which may prevent scripts from running." -ForegroundColor Yellow
-        Write-Host 'Attempting to set execution policy to RemoteSigned for CurrentUser scope...' -ForegroundColor Blue
-        
-        try {
-            Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser -Force -ErrorAction Stop
-            $newPolicy = Get-ExecutionPolicy -Scope CurrentUser
-            Write-Host "Execution policy successfully changed from '$currentPolicy' to '$newPolicy' for CurrentUser scope." -ForegroundColor Green
-            Write-Host 'This change allows local scripts to run and requires signatures for downloaded scripts (secure).' -ForegroundColor Green
-            return $true
-        }
-        catch {
-            Write-Warning "Failed to set execution policy: $_"
-            Write-Warning 'You may need to run this command manually with administrator privileges:'
-            Write-Warning '  Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser -Force'
-            Write-Warning 'Or run as administrator and use: Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope LocalMachine -Force'
-            return $false
-        }
-    }
-    catch {
-        Write-Warning "Error checking execution policy: $_"
-        return $false
-    }
+function Write-Info {
+	param (
+		[Parameter(Mandatory = $true)]
+		[string]$Message
+	)
+	Write-Host $Message -ForegroundColor Blue
+}
+
+<#
+.SYNOPSIS
+    Writes a success message in green color.
+.DESCRIPTION
+    Helper function for consistent success messages throughout the script.
+.PARAMETER Message
+    The message to display
+#>
+function Write-Success {
+	param (
+		[Parameter(Mandatory = $true)]
+		[string]$Message
+	)
+	Write-Host $Message -ForegroundColor Green
+}
+
+<#
+.SYNOPSIS
+    Writes a warning message in yellow color.
+.DESCRIPTION
+    Helper function for consistent warning and skip messages throughout the script.
+    Named Write-WarningMessage to avoid conflict with built-in Write-Warning cmdlet.
+.PARAMETER Message
+    The message to display
+#>
+function Write-WarningMessage {
+	param (
+		[Parameter(Mandatory = $true)]
+		[string]$Message
+	)
+	Write-Host $Message -ForegroundColor Yellow
+}
+
+<#
+.SYNOPSIS
+    Writes an error message in red color.
+.DESCRIPTION
+    Helper function for consistent error messages throughout the script.
+    Named Write-ErrorMessage to avoid conflict with built-in Write-Error cmdlet.
+.PARAMETER Message
+    The message to display
+#>
+function Write-ErrorMessage {
+	param (
+		[Parameter(Mandatory = $true)]
+		[string]$Message
+	)
+	Write-Host $Message -ForegroundColor Red
+}
+
+<#
+.SYNOPSIS
+    Writes a prompt message in blue color.
+.DESCRIPTION
+    Helper function for consistent user prompt messages throughout the script.
+.PARAMETER Message
+    The message to display
+#>
+function Write-Prompt {
+	param (
+		[Parameter(Mandatory = $true)]
+		[string]$Message
+	)
+	Write-Host $Message -ForegroundColor Blue
 }
 
 #------------------------------------------------Main Script------------------------------------------------
@@ -734,14 +762,14 @@ function Invoke-WingetInstall {
 
     # Check if the script is run as administrator
     If (-NOT ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] 'Administrator')) {
-        Write-Host 'This script requires administrator privileges. Press Enter to restart script with elevated privileges.' -ForegroundColor Red
+        Write-ErrorMessage 'This script requires administrator privileges. Press Enter to restart script with elevated privileges.'
         Pause
         # Relaunch the script with administrator privileges
         Restart-WithElevation -PowerShellExecutable $psExecutable -ScriptPath $PSCommandPath | Out-Null
         Exit
     }
     else {
-        Write-Host 'Starting...' -ForegroundColor Green
+        Write-Success 'Starting...'
     }
 
     # Ensure required modules are available
@@ -756,7 +784,7 @@ function Invoke-WingetInstall {
     # Import required modules
     try {
         Import-Module Microsoft.WinGet.Client -ErrorAction Stop
-        Write-Host 'Successfully imported Microsoft.WinGet.Client module' -ForegroundColor Green
+        Write-Success 'Successfully imported Microsoft.WinGet.Client module'
     }
     catch {
         Write-Warning "Failed to import Microsoft.WinGet.Client module: $_"
@@ -765,7 +793,7 @@ function Invoke-WingetInstall {
 
     # Check if winget is available and install if necessary
     if (-not (Test-AndInstallWinget)) {
-        Write-Host 'Winget is required for this script. Exiting.' -ForegroundColor Red
+        Write-ErrorMessage 'Winget is required for this script. Exiting.'
         Exit
     }
 
@@ -794,22 +822,22 @@ function Invoke-WingetInstall {
 
     if ($validationResult.Errors.Count -gt 0) {
         foreach ($validationError in $validationResult.Errors) {
-            Write-Host $validationError -ForegroundColor Red
+            Write-ErrorMessage $validationError
         }
-        Write-Host 'No valid application definitions found. Resolve the errors and re-run the script.' -ForegroundColor Red
+        Write-ErrorMessage 'No valid application definitions found. Resolve the errors and re-run the script.'
         Exit
     }
 
     $apps = $validationResult.ValidApps
 
     if ($apps.Count -eq 0) {
-        Write-Host 'No application definitions remain after validation. Add at least one valid entry and re-run the script.' -ForegroundColor Red
+        Write-ErrorMessage 'No application definitions remain after validation. Add at least one valid entry and re-run the script.'
         Exit
     }
 
-    Write-Host 'Installing the following Apps:' -ForegroundColor Blue
+    Write-Info 'Installing the following Apps:'
     ForEach ($app in $apps) {
-        Write-Host $app.name -ForegroundColor Blue
+        Write-Info $app.name
     }
 
     $installedApps = @()
@@ -820,11 +848,11 @@ function Invoke-WingetInstall {
     $trustedSources = @('winget', 'msstore')
     ForEach ($source in $trustedSources) {
         if (-not (Test-Source-IsTrusted -target $source)) {
-            Write-Host 'Trusting source: $source' -ForegroundColor Yellow
+            Write-WarningMessage "Trusting source: $source"
             Set-Sources
         }
         else {
-            Write-Host "Source is already trusted: $source" -ForegroundColor Green
+            Write-Success "Source is already trusted: $source"
         }
     }
 
@@ -832,25 +860,25 @@ function Invoke-WingetInstall {
         try {
             $listApp = winget list --exact -q $app.name
             if (![String]::Join('', $listApp).Contains($app.name)) {
-                Write-Host 'Installing: ' $app.name -ForegroundColor Blue
+                Write-Info "Installing: $($app.name)"
                 Start-Process winget -ArgumentList "install -e --accept-source-agreements --accept-package-agreements --id $($app.name)" -NoNewWindow -Wait
                 $installResult = winget list --exact -q $app.name
                 if (![String]::Join('', $installResult).Contains($app.name)) {
-                    Write-Host "Failed to install: $($app.name). No package found matching input criteria." -ForegroundColor Red
+                    Write-ErrorMessage "Failed to install: $($app.name). No package found matching input criteria."
                     $failedApps += $app.name
                 }
                 else {
-                    Write-Host 'Successfully installed: ' $app.name -ForegroundColor Green
+                    Write-Success "Successfully installed: $($app.name)"
                     $installedApps += $app.name
                 }
             }
             else {
-                Write-Host 'Skipping: ' $app.name ' (already installed)' -ForegroundColor Yellow
+                Write-WarningMessage "Skipping: $($app.name) (already installed)"
                 $skippedApps += $app.name
             }
         }
         catch {
-            Write-Host "Failed to install: $($app.name). Error: $_" -ForegroundColor Red
+            Write-ErrorMessage "Failed to install: $($app.name). Error: $_"
             $failedApps += $app.name
         }
     }
@@ -862,7 +890,7 @@ function Invoke-WingetInstall {
     $hasUpdates = Test-UpdatesAvailable
 
     if ($hasUpdates) {
-        Write-Host 'Updates found. Installing updates...' -ForegroundColor Green
+        Write-Success 'Updates found. Installing updates...'
 
         # Try PowerShell module first
         if (Get-Command Update-WinGetPackage -ErrorAction SilentlyContinue) {
@@ -871,16 +899,16 @@ function Invoke-WingetInstall {
             foreach ($result in $updateResults) {
                 if ($result.Status -eq 'Ok') {
                     $updatedApps += $result.Id
-                    Write-Host "Successfully updated: $($result.Id)" -ForegroundColor Green
+                    Write-Success "Successfully updated: $($result.Id)"
                 }
                 else {
                     $failedUpdateApps += $result.Id
-                    Write-Host "Failed to update: $($result.Id) - $($result.Status)" -ForegroundColor Red
+                    Write-ErrorMessage "Failed to update: $($result.Id) - $($result.Status)"
                 }
             }
         }
         else {
-            Write-Host 'PowerShell module not available, using CLI fallback...' -ForegroundColor Yellow
+            Write-WarningMessage 'PowerShell module not available, using CLI fallback...'
 
             # Fallback to CLI method - get list of packages that have updates available
             $installedPackages = & winget list --source winget 2>&1 | Where-Object {
@@ -909,18 +937,18 @@ function Invoke-WingetInstall {
                             # Check if upgrade is available and successful
                             if ($upgradeOutput -match 'Successfully installed') {
                                 $updatedApps += $packageId
-                                Write-Host "Successfully updated: $packageId" -ForegroundColor Green
+                                Write-Success "Successfully updated: $packageId"
                             }
                             elseif ($upgradeOutput -notmatch 'No available upgrade found' -and
                                 $upgradeOutput -notmatch 'No newer package versions are available') {
                                 # Package has an update but installation may have failed
                                 $failedUpdateApps += $packageId
-                                Write-Host "Failed to update: $packageId" -ForegroundColor Red
+                                Write-ErrorMessage "Failed to update: $packageId"
                             }
                         }
                         catch {
                             $failedUpdateApps += $packageId
-                            Write-Host "Error updating ${packageId}: $_" -ForegroundColor Red
+                            Write-ErrorMessage "Error updating ${packageId}: $_"
                         }
                     }
                 }
@@ -928,11 +956,11 @@ function Invoke-WingetInstall {
         }
     }
     else {
-        Write-Host 'No updates available.' -ForegroundColor Yellow
+        Write-WarningMessage 'No updates available.'
     }
 
     # Display the summary of the installation
-    Write-Host 'Summary:' -ForegroundColor Blue
+    Write-Info 'Summary:'
 
     $headers = @('Status', 'Apps')
     $rows = @()
@@ -965,7 +993,7 @@ function Invoke-WingetInstall {
     Write-Table -Headers $headers -Rows $rows -PromptForGridView $true
 
     # Keep the console window open until the user presses a key
-    Write-Host 'Press any key to exit...' -ForegroundColor Blue
+    Write-Prompt 'Press any key to exit...'
     [System.Console]::ReadKey($true) > $null
 }
 

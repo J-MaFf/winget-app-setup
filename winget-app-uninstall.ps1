@@ -3,71 +3,86 @@
 # 2. Edit the list of apps to uninstall.
 # 3. Run this script as administrator.
 
-# ------------------------------------------------Functions------------------------------------------------
+#------------------------------------------------Functions------------------------------------------------
 
 <#
 .SYNOPSIS
-    Checks and adjusts PowerShell execution policy if necessary to allow script execution.
+    Writes an informational message in blue color.
 .DESCRIPTION
-    Verifies the current execution policy for the CurrentUser scope and attempts to set it to RemoteSigned
-    if it's more restrictive. This ensures the script and future scripts can run without policy-related errors.
-    RemoteSigned is used as it's secure (requires signatures for downloaded scripts) while allowing local scripts to run.
-.RETURNS
-    [bool] True if the execution policy is permissive or was successfully adjusted, otherwise False.
+    Helper function for consistent informational and action messages throughout the script.
+.PARAMETER Message
+    The message to display
 #>
-function Test-AndSetExecutionPolicy {
-    try {
-        $currentPolicy = Get-ExecutionPolicy -Scope CurrentUser
-        $permissivePolicies = @('RemoteSigned', 'Unrestricted', 'Bypass')
-        
-        if ($permissivePolicies -contains $currentPolicy) {
-            Write-Host "Execution policy is already set to '$currentPolicy' for CurrentUser scope." -ForegroundColor Green
-            return $true
-        }
-        
-        Write-Host "Current execution policy for CurrentUser is '$currentPolicy', which may prevent scripts from running." -ForegroundColor Yellow
-        Write-Host 'Attempting to set execution policy to RemoteSigned for CurrentUser scope...' -ForegroundColor Blue
-        
-        try {
-            Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser -Force -ErrorAction Stop
-            $newPolicy = Get-ExecutionPolicy -Scope CurrentUser
-            Write-Host "Execution policy successfully changed from '$currentPolicy' to '$newPolicy' for CurrentUser scope." -ForegroundColor Green
-            Write-Host 'This change allows local scripts to run and requires signatures for downloaded scripts (secure).' -ForegroundColor Green
-            return $true
-        }
-        catch {
-            Write-Warning "Failed to set execution policy: $_"
-            Write-Warning 'You may need to run this command manually with administrator privileges:'
-            Write-Warning '  Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser -Force'
-            Write-Warning 'Or run as administrator and use: Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope LocalMachine -Force'
-            return $false
-        }
-    }
-    catch {
-        Write-Warning "Error checking execution policy: $_"
-        return $false
-    }
+function Write-Info {
+	param (
+		[Parameter(Mandatory = $true)]
+		[string]$Message
+	)
+	Write-Host $Message -ForegroundColor Blue
+}
+
+<#
+.SYNOPSIS
+    Writes a success message in green color.
+.DESCRIPTION
+    Helper function for consistent success messages throughout the script.
+.PARAMETER Message
+    The message to display
+#>
+function Write-Success {
+	param (
+		[Parameter(Mandatory = $true)]
+		[string]$Message
+	)
+	Write-Host $Message -ForegroundColor Green
+}
+
+<#
+.SYNOPSIS
+    Writes a warning message in yellow color.
+.DESCRIPTION
+    Helper function for consistent warning and skip messages throughout the script.
+    Named Write-WarningMessage to avoid conflict with built-in Write-Warning cmdlet.
+.PARAMETER Message
+    The message to display
+#>
+function Write-WarningMessage {
+	param (
+		[Parameter(Mandatory = $true)]
+		[string]$Message
+	)
+	Write-Host $Message -ForegroundColor Yellow
+}
+
+<#
+.SYNOPSIS
+    Writes an error message in red color.
+.DESCRIPTION
+    Helper function for consistent error messages throughout the script.
+    Named Write-ErrorMessage to avoid conflict with built-in Write-Error cmdlet.
+.PARAMETER Message
+    The message to display
+#>
+function Write-ErrorMessage {
+	param (
+		[Parameter(Mandatory = $true)]
+		[string]$Message
+	)
+	Write-Host $Message -ForegroundColor Red
 }
 
 #------------------------------------------------Main Script------------------------------------------------
 
-# Check and set execution policy if needed (before any other checks)
-if (-not (Test-AndSetExecutionPolicy)) {
-    Write-Host 'Warning: Execution policy could not be verified or adjusted. Script may fail.' -ForegroundColor Yellow
-    Write-Host 'Press any key to continue anyway...' -ForegroundColor Yellow
-    [System.Console]::ReadKey($true) > $null
-}
-
 # Check if the script is run as administrator
 If (-NOT ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] 'Administrator')) {
-    Write-Host 'This script requires administrator privileges. Press Enter to restart script with elevated privileges.' -ForegroundColor Red
+    Write-ErrorMessage 'This script requires administrator privileges. Press Enter to restart script with elevated privileges.'
     Pause
     # Relaunch the script with administrator privileges
     Start-Process powershell.exe -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`"" -Verb RunAs
     Exit
 }
 else {
-    Write-Host 'Starting...' -ForegroundColor Green
+    Write-Success 'Starting...'
 }
 
 $apps = @(
@@ -83,9 +98,9 @@ $apps = @(
     @{name = 'Microsoft.WindowsTerminal' }
 );
 
-Write-Host 'Uninstalling the following Apps:' -ForegroundColor Blue
+Write-Info 'Uninstalling the following Apps:'
 ForEach ($app in $apps) {
-    Write-Host $app.name -ForegroundColor Blue
+    Write-Info $app.name
 }
 
 $uninstalledApps = @()
@@ -96,14 +111,14 @@ Foreach ($app in $apps) {
     try {
         $listApp = winget list --exact -q $app.name
         if ([String]::Join('', $listApp).Contains($app.name)) {
-            Write-Host 'Uninstalling: ' $app.name -ForegroundColor Blue
+            Write-Info "Uninstalling: $($app.name)"
             $uninstallResult = winget uninstall -e --id $app.name
             if ($uninstallResult -match 'No installed package found matching input criteria.') {
-                Write-Host "Failed to uninstall: $($app.name). No installed package found matching input criteria." -ForegroundColor Red
+                Write-ErrorMessage "Failed to uninstall: $($app.name). No installed package found matching input criteria."
                 $failedApps += $app.name
             }
             elseif ($uninstallResult -match 'Successfully uninstalled') {
-                Write-Host 'Successfully uninstalled: ' $app.name -ForegroundColor Green
+                Write-Success "Successfully uninstalled: $($app.name)"
                 $uninstalledApps += $app.name
             }
             else {
@@ -111,12 +126,12 @@ Foreach ($app in $apps) {
             }
         }
         else {
-            Write-Host 'Skipping: ' $app.name ' (not installed)' -ForegroundColor Yellow
+            Write-WarningMessage "Skipping: $($app.name) (not installed)"
             $skippedApps += $app.name
         }
     }
     catch {
-        Write-Host "Failed to uninstall: $($app.name). Error: $_" -ForegroundColor Red
+        Write-ErrorMessage "Failed to uninstall: $($app.name). Error: $_"
         $failedApps += $app.name
     }
 }
@@ -198,7 +213,7 @@ function Write-Table {
                 $canUseGridView = $true
             }
             catch {
-                Write-Host 'Out-GridView is not available. Falling back to text output.' -ForegroundColor Yellow
+                Write-WarningMessage 'Out-GridView is not available. Falling back to text output.'
             }
         }
         
@@ -208,7 +223,7 @@ function Write-Table {
                 return
             }
             catch {
-                Write-Host "Failed to display grid view: $_. Falling back to text output." -ForegroundColor Yellow
+                Write-WarningMessage "Failed to display grid view: $_. Falling back to text output."
             }
         }
     }
@@ -236,7 +251,7 @@ function Format-AppList {
     return $null
 }
 
-Write-Host 'Summary:' -ForegroundColor Blue
+Write-Info 'Summary:'
 
 $headers = @('Status', 'Apps')
 $rows = @()

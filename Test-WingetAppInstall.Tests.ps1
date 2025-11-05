@@ -1540,3 +1540,83 @@ Describe 'Test-AppDefinitions' {
         }
     }
 }
+
+Describe 'Write-Info' {
+    BeforeAll {
+        . "$PSScriptRoot\winget-app-install.ps1"
+    }
+
+    It 'Should write message in blue color' {
+        Mock Write-Host { }
+
+        Write-Info 'Test message'
+
+        Assert-MockCalled Write-Host -Times 1 -ParameterFilter {
+            $Object -eq 'Test message' -and $ForegroundColor -eq 'Blue'
+        }
+    }
+}
+
+Describe 'Write-Success' {
+    BeforeAll {
+        . "$PSScriptRoot\winget-app-install.ps1"
+    }
+
+    It 'Should write message in green color' {
+        Mock Write-Host { }
+
+        Write-Success 'Success message'
+
+        Assert-MockCalled Write-Host -Times 1 -ParameterFilter {
+            $Object -eq 'Success message' -and $ForegroundColor -eq 'Green'
+        }
+    }
+}
+
+Describe 'Write-WarningMessage' {
+    BeforeAll {
+        . "$PSScriptRoot\winget-app-install.ps1"
+    }
+
+    It 'Should write message in yellow color' {
+        Mock Write-Host { }
+
+        Write-WarningMessage 'Warning message'
+
+        Assert-MockCalled Write-Host -Times 1 -ParameterFilter {
+            $Object -eq 'Warning message' -and $ForegroundColor -eq 'Yellow'
+        }
+    }
+}
+
+Describe 'Write-ErrorMessage' {
+    BeforeAll {
+        . "$PSScriptRoot\winget-app-install.ps1"
+    }
+
+    It 'Should write message in red color' {
+        Mock Write-Host { }
+
+        Write-ErrorMessage 'Error message'
+
+        Assert-MockCalled Write-Host -Times 1 -ParameterFilter {
+            $Object -eq 'Error message' -and $ForegroundColor -eq 'Red'
+        }
+    }
+}
+
+Describe 'Write-Prompt' {
+    BeforeAll {
+        . "$PSScriptRoot\winget-app-install.ps1"
+    }
+
+    It 'Should write message in blue color' {
+        Mock Write-Host { }
+
+        Write-Prompt 'Press any key to continue...'
+
+        Assert-MockCalled Write-Host -Times 1 -ParameterFilter {
+            $Object -eq 'Press any key to continue...' -and $ForegroundColor -eq 'Blue'
+        }
+    }
+}

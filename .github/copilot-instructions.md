@@ -38,10 +38,24 @@
 - **Interactive GUI**: Automatically prompts user to use `Out-GridView` when available via `-PromptForGridView $true` parameter
 - **Manual Override**: Can force GUI mode with `-UseGridView $true` parameter (skips prompt)
 - **Graceful Fallback**: Automatically falls back to text output when Out-GridView is unavailable (Server Core, remote sessions)
-- **Progress Messages**: Color-coded output (Blue for actions, Green for success, Yellow for skips, Red for errors)
+- **Messaging Helpers**: Always use helper functions instead of direct `Write-Host` calls for consistency
+  - `Write-Info`: Blue for informational/action messages (e.g., "Installing: AppName", "Checking for updates...")
+  - `Write-Success`: Green for success messages (e.g., "Successfully installed: AppName")
+  - `Write-WarningMessage`: Yellow for warnings/skips (e.g., "Skipping: AppName (already installed)")
+  - `Write-ErrorMessage`: Red for errors (e.g., "Failed to install: AppName")
+  - `Write-Prompt`: Blue for user prompts (e.g., "Press any key to exit...")
 - **Summary Display**: Always show final table with operation counts
 
 ## Key Functions to Reuse
+
+### Messaging Helper Functions
+- `Write-Info()`: Display informational/action messages in blue (replaces `Write-Host ... -ForegroundColor Blue`)
+- `Write-Success()`: Display success messages in green (replaces `Write-Host ... -ForegroundColor Green`)
+- `Write-WarningMessage()`: Display warning/skip messages in yellow (replaces `Write-Host ... -ForegroundColor Yellow`)
+- `Write-ErrorMessage()`: Display error messages in red (replaces `Write-Host ... -ForegroundColor Red`)
+- `Write-Prompt()`: Display user prompt messages in blue (replaces `Write-Host ... -ForegroundColor Blue` for prompts)
+
+### Core Utility Functions
 - `Test-AndSetExecutionPolicy()`: Check and adjust PowerShell execution policy to allow script execution
 - `Test-AndInstallWingetModule()`: Ensure the Microsoft.WinGet.Client PowerShell module is installed and usable
 - `Test-AndInstallWinget()`: Check winget availability and install if missing
