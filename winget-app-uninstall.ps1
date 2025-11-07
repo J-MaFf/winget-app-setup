@@ -14,11 +14,11 @@
     The message to display
 #>
 function Write-Info {
-	param (
-		[Parameter(Mandatory = $true)]
-		[string]$Message
-	)
-	Write-Host $Message -ForegroundColor Blue
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$Message
+    )
+    Write-Host $Message -ForegroundColor Blue
 }
 
 <#
@@ -30,11 +30,11 @@ function Write-Info {
     The message to display
 #>
 function Write-Success {
-	param (
-		[Parameter(Mandatory = $true)]
-		[string]$Message
-	)
-	Write-Host $Message -ForegroundColor Green
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$Message
+    )
+    Write-Host $Message -ForegroundColor Green
 }
 
 <#
@@ -47,11 +47,11 @@ function Write-Success {
     The message to display
 #>
 function Write-WarningMessage {
-	param (
-		[Parameter(Mandatory = $true)]
-		[string]$Message
-	)
-	Write-Host $Message -ForegroundColor Yellow
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$Message
+    )
+    Write-Host $Message -ForegroundColor Yellow
 }
 
 <#
@@ -64,11 +64,11 @@ function Write-WarningMessage {
     The message to display
 #>
 function Write-ErrorMessage {
-	param (
-		[Parameter(Mandatory = $true)]
-		[string]$Message
-	)
-	Write-Host $Message -ForegroundColor Red
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$Message
+    )
+    Write-Host $Message -ForegroundColor Red
 }
 
 #------------------------------------------------Main Script------------------------------------------------
@@ -109,7 +109,7 @@ $failedApps = @()
 
 Foreach ($app in $apps) {
     try {
-        $listApp = winget list --exact -q $app.name
+        $listApp = winget list --exact --id $app.name
         if ([String]::Join('', $listApp).Contains($app.name)) {
             Write-Info "Uninstalling: $($app.name)"
             $uninstallResult = winget uninstall -e --id $app.name
@@ -181,7 +181,7 @@ function Write-Table {
     # Prompt user if requested and Out-GridView is available
     if ($PromptForGridView -and -not $UseGridView) {
         $canUseGridView = $false
-        
+
         # Check if we're in an interactive session
         if ([Environment]::UserInteractive) {
             # Check if Out-GridView is available
@@ -193,7 +193,7 @@ function Write-Table {
                 # Out-GridView not available, no need to prompt
             }
         }
-        
+
         if ($canUseGridView) {
             Write-Host ''
             $response = Read-Host 'Would you like to view the results in an interactive grid view? (Y/N)'
@@ -206,7 +206,7 @@ function Write-Table {
     # Try to use Out-GridView if requested and available
     if ($shouldUseGridView) {
         $canUseGridView = $false
-        
+
         # Check if we're in an interactive session
         if ([Environment]::UserInteractive) {
             # Check if Out-GridView is available
@@ -218,7 +218,7 @@ function Write-Table {
                 Write-WarningMessage 'Out-GridView is not available. Falling back to text output.'
             }
         }
-        
+
         if ($canUseGridView) {
             try {
                 $tableData | Out-GridView -Title $Title -Wait
@@ -246,7 +246,7 @@ function Format-AppList {
         [Parameter(Mandatory = $false)]
         [array]$AppArray
     )
-    
+
     if ($AppArray -and $AppArray.Count -gt 0) {
         return $AppArray -join ', '
     }
