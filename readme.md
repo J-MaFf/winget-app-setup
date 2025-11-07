@@ -133,6 +133,7 @@ Preview what the script would do without making any actual changes:
 ```
 
 **Use Cases for WhatIf Mode:**
+
 - Verify the script behavior before running on production systems
 - Review which applications will be installed in managed environments
 - Check for available updates without installing them
@@ -287,7 +288,7 @@ powershell -ExecutionPolicy Bypass -File .\winget-app-install.ps1
 **Why you can't just change the policy:**
 
 - Execution policies defined at multiple scopes (Machine Policy, User Policy) can prevent changes
-- Group Policy restrictions on corporate machines block policy changes  
+- Group Policy restrictions on corporate machines block policy changes
 - The launcher script bypasses the engine-level block, which is safer and more reliable than trying to change policies
 
 #### "winget command not found"

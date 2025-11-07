@@ -57,7 +57,7 @@ $mainScript = Join-Path -Path $scriptDir -ChildPath 'winget-app-install.ps1'
 # Verify the main script exists
 if (-not (Test-Path -Path $mainScript)) {
     Write-Host "Error: winget-app-install.ps1 not found in $scriptDir" -ForegroundColor Red
-    Write-Host "Please ensure this launcher script is in the same directory as winget-app-install.ps1" -ForegroundColor Yellow
+    Write-Host 'Please ensure this launcher script is in the same directory as winget-app-install.ps1' -ForegroundColor Yellow
     exit 1
 }
 
