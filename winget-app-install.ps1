@@ -906,6 +906,7 @@ function Invoke-WingetInstall {
     }
 
     # Add the script directory to the PATH
+    # Use $PSScriptRoot for reliable script directory detection (works with launcher)
     $scriptDirectory = $PSScriptRoot
     if (-not $WhatIf) {
         Add-ToEnvironmentPath -PathToAdd $scriptDirectory -Scope 'User'
