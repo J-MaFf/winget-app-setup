@@ -14,8 +14,14 @@ When working on code in this repository:
   - **Never commit directly to main branch**
   - Create a new feature branch with a descriptive name (e.g., `feature/winget-update`, `bugfix/install-checks`, `docs/update-docs-v1.0.0`)
   - Use existing branches if the change aligns with their purpose
-  - Branch naming convention: `<type>/<description>` (type: feature, bugfix, docs, refactor, etc.)
+  - Branch naming convention: `<type>/<description>` (type: feature, bugfix, docs, refactor, chore, etc.)
   - Submit changes via pull request for review before merging to main
+  - **Pull Request Labels**: Automatically add labels matching the branch type:
+    - `feature` for feature branches
+    - `bugfix` for bug fix branches
+    - `docs` for documentation branches
+    - `refactor` for refactoring branches
+    - `chore` for maintenance/housekeeping branches
 - **Minimal Changes**: Make the smallest possible changes to achieve the goal
 - **Preserve Working Code**: Never delete or modify working code unless absolutely necessary
 - **Test Thoroughly**: Run Pester tests after making changes: `Invoke-Pester -Path .\Test-WingetAppInstall.Tests.ps1 -Output Detailed`

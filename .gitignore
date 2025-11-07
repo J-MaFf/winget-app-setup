@@ -1,0 +1,24 @@
+# VS Code
+.vscode/
+*.code-workspace
+
+# PowerShell
+*.ps1xml
+PSScriptAnalyzerSettings.ps1
+.PSScriptAnalyzerSettings.psd1
+
+# Pester
+TestResults.xml
+
+# Temporary files
+*.tmp
+*.log
+$RECYCLE.BIN/
+
+# OS-specific
+.DS_Store
+Thumbs.db
+
+# Environment variables
+.env
+.env.local
