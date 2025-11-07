@@ -906,7 +906,7 @@ function Invoke-WingetInstall {
     }
 
     # Add the script directory to the PATH
-    $scriptDirectory = Split-Path -Parent $MyInvocation.MyCommand.Definition
+    $scriptDirectory = $PSScriptRoot
     if (-not $WhatIf) {
         Add-ToEnvironmentPath -PathToAdd $scriptDirectory -Scope 'User'
     }
