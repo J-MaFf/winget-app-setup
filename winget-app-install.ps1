@@ -979,7 +979,7 @@ function Invoke-WingetInstall {
         try {
             # Run winget list with timeout to prevent hanging
             $listProcess = Start-Process -FilePath 'winget' `
-                -ArgumentList 'list', '--exact', '-q', '--accept-source-agreements', $app.name `
+                -ArgumentList 'list', '--exact', '--id', $app.name, '--accept-source-agreements' `
                 -NoNewWindow `
                 -PassThru `
                 -RedirectStandardOutput "$env:TEMP\winget_list_output.txt" `
@@ -1007,7 +1007,7 @@ function Invoke-WingetInstall {
 
                     # Verify installation with timeout
                     $verifyProcess = Start-Process -FilePath 'winget' `
-                        -ArgumentList 'list', '--exact', '-q', '--accept-source-agreements', $app.name `
+                        -ArgumentList 'list', '--exact', '--id', $app.name, '--accept-source-agreements' `
                         -NoNewWindow `
                         -PassThru `
                         -RedirectStandardOutput "$env:TEMP\winget_verify_output.txt" `
