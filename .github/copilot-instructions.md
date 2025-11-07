@@ -10,6 +10,12 @@ This repository provides PowerShell automation for managing Windows applications
 
 When working on code in this repository:
 
+- **Branching Strategy**: 
+  - **Never commit directly to main branch**
+  - Create a new feature branch with a descriptive name (e.g., `feature/winget-update`, `bugfix/install-checks`, `docs/update-docs-v1.0.0`)
+  - Use existing branches if the change aligns with their purpose
+  - Branch naming convention: `<type>/<description>` (type: feature, bugfix, docs, refactor, etc.)
+  - Submit changes via pull request for review before merging to main
 - **Minimal Changes**: Make the smallest possible changes to achieve the goal
 - **Preserve Working Code**: Never delete or modify working code unless absolutely necessary
 - **Test Thoroughly**: Run Pester tests after making changes: `Invoke-Pester -Path .\Test-WingetAppInstall.Tests.ps1 -Output Detailed`
@@ -52,7 +58,7 @@ When working on code in this repository:
   - Using wrong flags causes "source agreements not agreed to" errors
 - **Timeout Protection**: Wrap all winget commands in `Start-Process` with timeout (30s for source ops, 15s for package ops) to prevent hanging from interactive prompts
 - **Source Trust**: Verify and trust 'winget' and 'msstore' sources before operations using `--disable-interactivity` flag
-- **Installation Check**: Use `winget list --exact -q --accept-source-agreements $app.name` to check if app is installed
+- **Installation Check**: Use `winget list --exact --id $app.name --accept-source-agreements` to check if app is installed
 - **Result Tracking**: Maintain separate arrays for `$installedApps`, `$skippedApps`, `$failedApps`
 
 ### Output & Display
@@ -166,7 +172,7 @@ When working on code in this repository:
 - **Source Trust Check**: `winget source list --disable-interactivity` and pattern matching for trusted sources
 - **Source Reset**: `winget source reset --force --disable-interactivity` (wrapped in Start-Process with 30-second timeout)
 - **App Installation**: `winget install -e --accept-source-agreements --accept-package-agreements --id $app.name`
-- **Existence Verification**: `winget list --exact -q --accept-source-agreements $app.name` (wrapped in Start-Process with 15-second timeout)
+- **Existence Verification**: `winget list --exact --id $app.name --accept-source-agreements` (wrapped in Start-Process with 15-second timeout)
 - **Update Detection**: `Get-WinGetPackage | Where-Object IsUpdateAvailable` (PowerShell module) or `winget upgrade` (CLI)
 - **Table Display**: `Write-Table -Headers $headers -Rows $rows -PromptForGridView $true` (prompts user) or `Write-Table -Headers $headers -Rows $rows -UseGridView $true` (forces GUI mode)
 
@@ -189,7 +195,7 @@ if (-not $process.WaitForExit(30000)) {
 
 # Example: 15-second timeout for package operations
 $listProcess = Start-Process -FilePath 'winget' `
-    -ArgumentList 'list', '--exact', '-q', '--accept-source-agreements', $app.name `
+    -ArgumentList 'list', '--exact', '--id', $app.name, '--accept-source-agreements' `
     -NoNewWindow -PassThru `
     -RedirectStandardOutput "$env:TEMP\winget_list_output.txt"
 
