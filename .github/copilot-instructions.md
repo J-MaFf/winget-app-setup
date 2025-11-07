@@ -21,6 +21,7 @@ When working on code in this repository:
 - **Purpose**: PowerShell automation for installing/uninstalling Windows applications via winget
 - **Key Components**: PowerShell scripts using winget package manager
 - **Architecture**: Script-based with shared utility functions and consistent error handling patterns
+- **Launcher Script**: `launch.ps1` handles execution policy bypass - users should run this instead of calling scripts directly
 
 ### Baseline Application Set
 - 7-Zip (`7zip.7zip`)
@@ -77,7 +78,6 @@ When working on code in this repository:
 - `Write-Prompt()`: Display user prompt messages in blue (replaces `Write-Host ... -ForegroundColor Blue` for prompts)
 
 ### Core Utility Functions
-- `Test-AndSetExecutionPolicy()`: Check and adjust PowerShell execution policy to allow script execution
 - `Test-AndInstallWingetModule()`: Ensure the Microsoft.WinGet.Client PowerShell module is installed and usable
 - `Test-AndInstallWinget()`: Check winget availability and install if missing
 - `Test-Source-IsTrusted()`: Verify winget source trust status
@@ -88,6 +88,8 @@ When working on code in this repository:
 - `Invoke-WingetCommand()`: Execute winget commands with exit code capture, error code mapping, and output parsing. Returns hashtable with `ExitCode` and `ExitMessage`. Automatically reports failures to `$failedApps` when exit code is non-zero and no output patterns match.
 - `Restart-WithElevation()`: Relaunch the script with elevation, preferring Windows Terminal before falling back to classic PowerShell windows
 
+**Note**: Execution policy handling is now managed by the `launch.ps1` launcher script instead of within the main scripts.
+
 #### Exit Code Handling in Invoke-WingetCommand
 - Captures `$LASTEXITCODE` after each winget execution
 - Maps common winget exit codes (0, -1978335189, -1978335191, -1978335192, -1978335212, -1978335213, -1978335215, -1978335216, -1978335221, -1978335226) to meaningful messages
@@ -96,7 +98,7 @@ When working on code in this repository:
 - Backward compatible - callers can ignore the return value if only using array references
 
 ## Workflow Patterns
-1. **Execution Policy Check**: Verify PowerShell execution policy allows scripts to run, adjust to RemoteSigned if needed
+1. **Launcher Script**: Users run `launch.ps1` to bypass execution policy restrictions
 2. **Admin Check**: Verify elevated privileges, relaunch if needed
 3. **Winget Tooling Remediation**: Ensure winget CLI (via `Test-AndInstallWinget`) and Microsoft.WinGet.Client module (`Test-AndInstallWingetModule`) are available
 4. **PATH Setup**: Add script directory to user PATH
@@ -113,7 +115,7 @@ When working on code in this repository:
 
 ## Security Practices
 - **No Hardcoded Secrets**: Never commit API keys, passwords, or credentials to the repository
-- **Execution Policy**: Use `RemoteSigned` execution policy for secure script execution (blocks unsigned downloaded scripts while allowing local scripts)
+- **Execution Policy**: Use launcher script (`launch.ps1`) to bypass restrictions securely. Do not attempt to change execution policies in main scripts.
 - **Input Validation**: Always validate application names and package IDs before passing to winget commands
 - **Administrator Privileges**: Only request elevation when necessary; clearly document when admin rights are required
 - **Source Trust**: Verify and trust only official winget sources (`winget`, `msstore`)

@@ -8,7 +8,7 @@ A comprehensive PowerShell automation suite for managing Windows applications us
 - **Dry-Run / WhatIf Mode**: Preview all actions without making system changes - perfect for testing and approval workflows
 - **Smart Uninstallation**: Remove applications with status tracking
 - **Update Management**: Automatically check for and install available updates
-- **Execution Policy Management**: Automatically checks and adjusts PowerShell execution policy on first run
+- **Execution Policy Bypass**: Included launcher script handles execution policy restrictions automatically
 - **Admin Privilege Handling**: Automatically requests elevation when needed
 - **Source Trust Management**: Verifies and trusts winget sources
 - **Comprehensive Error Handling**: Detailed error reporting and result tracking
@@ -30,6 +30,18 @@ The main installation script that:
 - Checks for and installs available updates
 - Displays results using PowerShell's Format-Table for improved readability
 - Optional interactive GUI summary with Out-GridView (when available)
+
+### `launch.ps1`
+
+Launcher script that bypasses execution policy restrictions to run the installer. Use this if you encounter execution policy errors.
+
+Simply run:
+
+```powershell
+.\launch.ps1
+```
+
+This is useful when execution policies are defined at multiple scopes (Group Policy, User Policy) and prevent running unsigned scripts.
 
 ### `winget-app-uninstall.ps1`
 
@@ -88,17 +100,22 @@ Download the scripts directly from the repository.
 
 ### Installation
 
-Run the installation script as administrator:
+Run the installation script. **If you encounter execution policy errors, use the launcher script:**
 
 ```powershell
-# From the script directory
-.\winget-app-install.ps1
+# Recommended: Use the launcher script (handles execution policy automatically)
+.\launch.ps1
+
+# Or run directly (requires execution policy bypass)
+powershell -ExecutionPolicy Bypass -File .\winget-app-install.ps1
 
 # Or with full path
-C:\Path\To\winget-app-setup\winget-app-install.ps1
+C:\Path\To\winget-app-setup\launch.ps1
 ```
 
-### Dry-Run / WhatIf Mode
+The launcher script (`launch.ps1`) automatically handles execution policy restrictions, which is necessary because PowerShell blocks unsigned scripts at the engine level.
+
+### Execution Policy Issues
 
 Preview what the script would do without making any actual changes:
 
@@ -116,19 +133,20 @@ Preview what the script would do without making any actual changes:
 ```
 
 **Use Cases for WhatIf Mode:**
+
 - Verify the script behavior before running on production systems
 - Review which applications will be installed in managed environments
 - Check for available updates without installing them
 - Test the script in new environments safely
 - Generate reports of planned changes for approval processes
 
-### Uninstallation
+### Uninstallation (with Execution Policy Bypass)
 
-Run the uninstallation script as administrator:
+Run the uninstallation script using the launcher:
 
 ```powershell
-# From the script directory
-.\winget-app-uninstall.ps1
+# Use the launcher script
+powershell -ExecutionPolicy Bypass -File .\winget-app-uninstall.ps1
 
 # Or with full path
 C:\Path\To\winget-app-setup\winget-app-uninstall.ps1
@@ -138,14 +156,29 @@ C:\Path\To\winget-app-setup\winget-app-uninstall.ps1
 
 ### Execution Policy Management
 
-Scripts automatically check the PowerShell execution policy on first run and will:
+**PowerShell blocks unsigned scripts at the engine level** before any script code runs. The scripts cannot modify execution policy from within themselves because they never load in the first place.
 
-- Detect if the current policy prevents scripts from running
-- Attempt to set the policy to `RemoteSigned` for the CurrentUser scope if needed
-- Provide clear feedback about policy changes
-- Display helpful instructions if policy adjustment requires manual intervention
+**Solution:** Use the `launch.ps1` script:
 
-**Note**: The scripts use `RemoteSigned` policy, which is secure (requires signatures for downloaded scripts) while allowing local scripts to run without issues.
+```powershell
+.\launch.ps1
+```
+
+This launcher handles the `-ExecutionPolicy Bypass` flag automatically.
+
+**Alternative:** Run directly with execution policy bypass:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\winget-app-install.ps1
+powershell -ExecutionPolicy Bypass -File .\winget-app-uninstall.ps1
+```
+
+**Why this approach?**
+
+- **Execution policies defined at multiple scopes** (Machine Policy, User Policy, CurrentUser) can prevent scripts from running
+- **Group Policy restrictions** on corporate machines block policy changes
+- The launcher script bypasses the engine-level block to allow the main scripts to run
+- No permanent policy changes are made; the bypass is temporary for that execution only
 
 ### Administrator Privileges
 
@@ -238,9 +271,25 @@ When winget exits with a non-zero code and no output pattern matches are found, 
 
 #### "cannot be loaded because running scripts is disabled"
 
-- The script automatically detects and attempts to fix execution policy issues
-- If automatic adjustment fails, manually run: `Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser -Force`
-- For system-wide changes (requires admin): `Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope LocalMachine -Force`
+**This is the most common issue.** PowerShell blocks unsigned scripts at the engine level.
+
+**Solution:** Use the launcher script (recommended):
+
+```powershell
+.\launch.ps1
+```
+
+**Alternative:** Run with execution policy bypass:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\winget-app-install.ps1
+```
+
+**Why you can't just change the policy:**
+
+- Execution policies defined at multiple scopes (Machine Policy, User Policy) can prevent changes
+- Group Policy restrictions on corporate machines block policy changes
+- The launcher script bypasses the engine-level block, which is safer and more reliable than trying to change policies
 
 #### "winget command not found"
 
