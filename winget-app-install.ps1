@@ -48,55 +48,6 @@ param (
 
 <#
 .SYNOPSIS
-    Checks and adjusts PowerShell execution policy to allow script execution.
-.DESCRIPTION
-    Verifies the current execution policy for the CurrentUser scope and attempts to set it to RemoteSigned if it's too restrictive.
-.RETURNS
-    [bool] True when the execution policy allows script execution, otherwise False.
-#>
-function Test-AndSetExecutionPolicy {
-    try {
-        $currentPolicy = Get-ExecutionPolicy -Scope CurrentUser
-
-        # Check if policy is already permissive
-        $permissivePolicies = @('RemoteSigned', 'Unrestricted', 'Bypass')
-        if ($permissivePolicies -contains $currentPolicy) {
-            return $true
-        }
-
-        # Try to set to RemoteSigned
-        Write-WarningMessage "Current execution policy ($currentPolicy) prevents script execution. Attempting to set to RemoteSigned..."
-        try {
-            Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser -Force
-
-            # Verify the change
-            $newPolicy = Get-ExecutionPolicy -Scope CurrentUser
-            if ($permissivePolicies -contains $newPolicy) {
-                Write-Success "Execution policy successfully set to $newPolicy"
-                return $true
-            }
-            else {
-                Write-Warning "Execution policy change may not have taken effect. Current policy: $newPolicy"
-                return $false
-            }
-        }
-        catch {
-            Write-Warning "Failed to set execution policy: $_"
-            Write-Warning 'You may need to manually set the execution policy using:'
-            Write-Warning '  Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser -Force'
-            Write-Warning 'Or run PowerShell as Administrator and use:'
-            Write-Warning '  Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope LocalMachine -Force'
-            return $false
-        }
-    }
-    catch {
-        Write-Warning "Error checking execution policy: $_"
-        return $false
-    }
-}
-
-<#
-.SYNOPSIS
     Ensures the Microsoft.WinGet.Client module is available, installing it if necessary.
 .DESCRIPTION
     Checks for the module locally and attempts installation via PowerShell Gallery when missing, including ensuring the NuGet provider is present.
@@ -912,20 +863,6 @@ function Invoke-WingetInstall {
         Write-Info '=== DRY-RUN MODE ENABLED ==='
         Write-Info 'No system changes will be made. This is a simulation of what would happen.'
         Write-Host ''
-    }
-
-    # Check and set execution policy if needed (before any other checks)
-    if (-not $WhatIf) {
-        if (Get-Command Test-AndSetExecutionPolicy -ErrorAction SilentlyContinue) {
-            if (-not (Test-AndSetExecutionPolicy)) {
-                Write-WarningMessage 'Warning: Execution policy could not be verified or adjusted. Script may fail.'
-                Write-Prompt 'Press any key to continue anyway...'
-                [void][System.Console]::ReadKey($true)
-            }
-        }
-    }
-    else {
-        Write-Info '[DRY-RUN] Would check and set execution policy if needed'
     }
 
     # Determine which PowerShell executable to use
