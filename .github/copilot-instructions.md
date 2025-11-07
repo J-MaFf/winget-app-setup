@@ -10,7 +10,7 @@ This repository provides PowerShell automation for managing Windows applications
 
 When working on code in this repository:
 
-- **Branching Strategy**: 
+- **Branching Strategy**:
   - **Never commit directly to main branch**
   - Create a new feature branch with a descriptive name (e.g., `feature/winget-update`, `bugfix/install-checks`, `docs/update-docs-v1.0.0`)
   - Use existing branches if the change aligns with their purpose
