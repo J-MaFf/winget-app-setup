@@ -1,0 +1,11 @@
+{
+  "chat.mcp.serverSampling": {
+    "memory": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-memory"],
+      "env": {
+        "MEMORY_FILE_PATH": "${workspaceFolder}/knowledge-graph.json"
+      }
+    }
+  }
+}
