@@ -8,7 +8,6 @@ node_modules/
 
 # IDE - VS Code
 .vscode/extensions.json
-.vscode/*.log
 *.code-workspace
 
 # PowerShell
