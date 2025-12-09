@@ -1,5 +1,13 @@
-# VS Code
-.vscode/
+# General
+.DS_Store
+Thumbs.db
+*.log
+
+# Dependencies
+node_modules/
+
+# IDE - VS Code
+.vscode/extensions.json
 *.code-workspace
 
 # PowerShell
@@ -12,13 +20,17 @@ TestResults.xml
 
 # Temporary files
 *.tmp
-*.log
-$RECYCLE.BIN/
 
-# OS-specific
-.DS_Store
-Thumbs.db
-
-# Environment variables
+# Environment
 .env
 .env.local
+*.pem
+
+# OS
+*.swp
+*.swo
+*~
+$RECYCLE.BIN/
+
+# Note: knowledge-graph.json is intentionally NOT ignored
+# It will be tracked in Git for backup and sync purposes
