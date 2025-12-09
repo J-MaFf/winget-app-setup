@@ -21,7 +21,6 @@ TestResults.xml
 
 # Temporary files
 *.tmp
-$RECYCLE.BIN/
 
 # Environment
 .env
@@ -32,6 +31,7 @@ $RECYCLE.BIN/
 *.swp
 *.swo
 *~
+$RECYCLE.BIN/
 
 # Note: knowledge-graph.json is intentionally NOT ignored
 # It will be tracked in Git for backup and sync purposes
