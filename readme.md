@@ -105,11 +105,14 @@ Run the installation script. **If you encounter execution policy errors, use the
 ```powershell
 # Recommended: Use the launcher script (handles execution policy automatically)
 .\launch.ps1
-
-# Or run directly (requires execution policy bypass)
+```
+Or run directly (requires execution policy bypass)
+```powershell
 powershell -ExecutionPolicy Bypass -File .\winget-app-install.ps1
+```
 
-# Or with full path
+Or with full path
+```powerhsell
 C:\Path\To\winget-app-setup\launch.ps1
 ```
 
