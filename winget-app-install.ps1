@@ -239,12 +239,19 @@ function Set-Sources {
             return $false
         }
 
+        # Read error output to provide better error messages
+        $errorOutput = Get-Content "$env:TEMP\winget_reset_error.txt" -ErrorAction SilentlyContinue | Where-Object { $_ -and $_.Trim() }
+
         # Check the exit code
         if ($resetProcess.ExitCode -eq 0) {
             Write-Success 'Winget sources reset successfully'
             return $true
         }
         else {
+            # Log the error details if available
+            if ($errorOutput) {
+                Write-WarningMessage "Winget source reset error details: $(($errorOutput -join ', '))"
+            }
             # Non-zero exit code, but not critical since script continues
             Write-Info "Winget source reset completed with exit code: $($resetProcess.ExitCode) (this is often not critical)"
             return $false
@@ -960,11 +967,22 @@ function Invoke-WingetInstall {
 
     # Verify sources are trusted
     $trustedSources = @('winget', 'msstore')
+    $sourceErrors = @()
     ForEach ($source in $trustedSources) {
         if (-not (Test-Source-IsTrusted -target $source)) {
             if (-not $WhatIf) {
                 Write-WarningMessage "Trusting source: $source"
-                Set-Sources
+                try {
+                    $sourceResetSuccess = Set-Sources
+                    if (-not $sourceResetSuccess) {
+                        $sourceErrors += $source
+                        Write-WarningMessage "Failed to reset sources for $source. Continuing with installation..."
+                    }
+                }
+                catch {
+                    $sourceErrors += $source
+                    Write-WarningMessage "Error resetting sources for $source: $_. Continuing with installation..."
+                }
             }
             else {
                 Write-Info "[DRY-RUN] Would trust source: $source"
