@@ -981,7 +981,7 @@ function Invoke-WingetInstall {
                 }
                 catch {
                     $sourceErrors += $source
-                    Write-WarningMessage "Error resetting sources for $source: $_. Continuing with installation..."
+                    Write-WarningMessage "Error resetting sources for ${source}: ${_}. Continuing with installation..."
                 }
             }
             else {
