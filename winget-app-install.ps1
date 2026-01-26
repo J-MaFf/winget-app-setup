@@ -1021,7 +1021,7 @@ function Invoke-WingetInstall {
             if (![String]::Join('', $listApp).Contains($app.name)) {
                 if (-not $WhatIf) {
                     Write-Info "Installing: $($app.name)"
-                    Start-Process winget -ArgumentList "install -e --accept-source-agreements --accept-package-agreements --id $($app.name)" -NoNewWindow -Wait
+                    Start-Process winget -ArgumentList "install -e --accept-source-agreements --accept-package-agreements --source winget --id $($app.name)" -NoNewWindow -Wait
 
                     # Verify installation with timeout
                     $verifyProcess = Start-Process -FilePath 'winget' `
@@ -1117,7 +1117,7 @@ function Invoke-WingetInstall {
                         # Skip if it's not a winget package or if it's a system component
                         if ($packageId -and $packageId -notmatch '^(ARP|MSIX)') {
                             try {
-                                $upgradeResult = & winget upgrade $packageId 2>&1
+                                $upgradeResult = & winget upgrade $packageId --source winget 2>&1
                                 $upgradeOutput = $upgradeResult | Out-String
 
                                 # Check if upgrade is available and successful
