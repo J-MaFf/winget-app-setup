@@ -492,10 +492,49 @@ Describe 'Set-Sources' {
         . "$PSScriptRoot\winget-app-install.ps1"
     }
 
-    It 'Should call winget source reset with accept-source-agreements flag' {
-        Mock winget { }
-        Set-Sources
-        Assert-MockCalled winget -Times 1 -ParameterFilter { $args[0] -eq 'source' -and $args[1] -eq 'reset' -and $args -contains '--accept-source-agreements' }
+    It 'Should call winget source reset and return true on success' {
+        Mock Start-Process {
+            param($FilePath, $ArgumentList, $NoNewWindow, $PassThru, $RedirectStandardOutput, $RedirectStandardError)
+            $mockProcess = New-Object PSObject
+            $mockProcess | Add-Member -MemberType NoteProperty -Name 'ExitCode' -Value 0
+            $mockProcess | Add-Member -MemberType ScriptMethod -Name 'WaitForExit' -Value { return $true }
+            return $mockProcess
+        }
+        Mock Get-Content { return $null } -ParameterFilter { $Path -match 'winget_reset_error' }
+        Mock Remove-Item { }
+
+        $result = Set-Sources
+        $result | Should -Be $true
+    }
+
+    It 'Should return false on non-zero exit code and log error details' {
+        Mock Start-Process {
+            param($FilePath, $ArgumentList, $NoNewWindow, $PassThru, $RedirectStandardOutput, $RedirectStandardError)
+            $mockProcess = New-Object PSObject
+            $mockProcess | Add-Member -MemberType NoteProperty -Name 'ExitCode' -Value 1
+            $mockProcess | Add-Member -MemberType ScriptMethod -Name 'WaitForExit' -Value { return $true }
+            return $mockProcess
+        }
+        Mock Get-Content { return 'Permission denied' } -ParameterFilter { $Path -match 'winget_reset_error' }
+        Mock Remove-Item { }
+
+        $result = Set-Sources
+        $result | Should -Be $false
+        Assert-MockCalled Write-Host -Times 1 -ParameterFilter { $Object -match 'Permission denied' }
+    }
+
+    It 'Should handle timeout and kill process' {
+        $mockProcess = New-Object PSObject
+        $mockProcess | Add-Member -MemberType NoteProperty -Name 'ExitCode' -Value 0
+        $mockProcess | Add-Member -MemberType ScriptMethod -Name 'WaitForExit' -Value { return $false }
+        $mockProcess | Add-Member -MemberType ScriptMethod -Name 'Kill' -Value { }
+
+        Mock Start-Process { return $mockProcess }
+        Mock Remove-Item { }
+
+        $result = Set-Sources
+        $result | Should -Be $false
+        Assert-MockCalled $mockProcess.Kill -Times 1 -ErrorAction SilentlyContinue
     }
 }
 
@@ -1579,16 +1618,51 @@ Describe 'Main Script Logic' {
 
         It 'Should call Set-Sources when source is not trusted' {
             Mock Test-Source-IsTrusted { param($target) return $false }
-            Mock Set-Sources { }
+            Mock Set-Sources { return $true }
 
             $trustedSources = @('winget', 'msstore')
+            $sourceErrors = @()
             foreach ($source in $trustedSources) {
                 if (-not (Test-Source-IsTrusted -target $source)) {
-                    Set-Sources
+                    try {
+                        $sourceResetSuccess = Set-Sources
+                        if (-not $sourceResetSuccess) {
+                            $sourceErrors += $source
+                        }
+                    }
+                    catch {
+                        $sourceErrors += $source
+                    }
                 }
             }
 
             Assert-MockCalled Set-Sources -Times 2
+            $sourceErrors | Should -Have -Length 0
+        }
+
+        It 'Should track source errors when Set-Sources fails' {
+            Mock Test-Source-IsTrusted { param($target) return $false }
+            Mock Set-Sources { return $false }
+
+            $trustedSources = @('winget', 'msstore')
+            $sourceErrors = @()
+            foreach ($source in $trustedSources) {
+                if (-not (Test-Source-IsTrusted -target $source)) {
+                    try {
+                        $sourceResetSuccess = Set-Sources
+                        if (-not $sourceResetSuccess) {
+                            $sourceErrors += $source
+                        }
+                    }
+                    catch {
+                        $sourceErrors += $source
+                    }
+                }
+            }
+
+            $sourceErrors | Should -Have -Length 2
+            $sourceErrors | Should -Contain 'winget'
+            $sourceErrors | Should -Contain 'msstore'
         }
     }
 
@@ -1635,6 +1709,24 @@ Describe 'Main Script Logic' {
             $installedApps | Should -Contain 'Test.App'
             $skippedApps | Should -Not -Contain 'Test.App'
             $failedApps | Should -Not -Contain 'Test.App'
+        }
+
+        It 'Should include --source winget flag in install command' {
+            $apps = @(@{name = 'Test.App' })
+            $installedApps = @()
+
+            Mock winget { '' } -ParameterFilter { $args -contains 'list' }
+            Mock Start-Process { }
+
+            foreach ($app in $apps) {
+                $listApp = winget list --exact -q $app.name
+                if (![String]::Join('', $listApp).Contains($app.name)) {
+                    Start-Process winget -ArgumentList "install -e --accept-source-agreements --accept-package-agreements --source winget --id $($app.name)" -NoNewWindow -Wait
+                    $installedApps += 'Test.App'
+                }
+            }
+
+            Assert-MockCalled Start-Process -Times 1 -ParameterFilter { $ArgumentList -match '--source winget' }
         }
 
         It 'Should skip app when already installed' {
@@ -1729,7 +1821,7 @@ Describe 'Main Script Logic' {
             Mock Test-UpdatesAvailable { return $true }
             Mock Get-Command { return $false } -ParameterFilter { $Name -eq 'Update-WinGetPackage' }
             Mock winget { 'Test.App 1.0.0 winget' } -ParameterFilter { $args -contains 'list' }
-            Mock winget { 'Successfully installed Test.App' } -ParameterFilter { $args -contains 'upgrade' }
+            Mock winget { 'Successfully installed Test.App' } -ParameterFilter { $args -contains 'upgrade' -and $args -contains '--source' }
 
             $hasUpdates = Test-UpdatesAvailable
             if ($hasUpdates) {
@@ -1748,7 +1840,7 @@ Describe 'Main Script Logic' {
                         if ($columns.Count -ge 2) {
                             $packageId = $columns[1]
                             if ($packageId -and $packageId -notmatch '^(ARP|MSIX)') {
-                                $upgradeResult = & winget upgrade $packageId 2>&1
+                                $upgradeResult = & winget upgrade $packageId --source winget 2>&1
                                 $upgradeOutput = $upgradeResult | Out-String
                                 $upgradeOutput | Should -Match 'Successfully installed'
                             }
@@ -1756,6 +1848,8 @@ Describe 'Main Script Logic' {
                     }
                 }
             }
+
+            Assert-MockCalled winget -Times 1 -ParameterFilter { $args -contains 'upgrade' -and $args -contains '--source' -and $args -contains 'winget' }
         }
     }
 
