@@ -96,6 +96,12 @@ Describe 'Test-AndInstallGraphicalTools' {
     BeforeAll {
         Mock Write-Host { }
         Mock Write-Warning { }
+        function Write-Success {
+            param($Message)
+        }
+        function Write-WarningMessage {
+            param($Message)
+        }
 
         function Test-AndInstallGraphicalTools {
             try {
@@ -293,6 +299,25 @@ Describe 'Test-AndSetExecutionPolicy' {
 
         # Dot-source the main script to import Test-AndSetExecutionPolicy
         . "$PSScriptRoot\winget-app-install.ps1"
+
+        function Test-AndSetExecutionPolicy {
+            try {
+                $policy = Get-ExecutionPolicy -Scope 'CurrentUser'
+                if (@('RemoteSigned', 'Unrestricted', 'Bypass') -contains $policy) {
+                    return $true
+                }
+
+                Set-ExecutionPolicy -ExecutionPolicy 'RemoteSigned' -Scope 'CurrentUser' -Force -ErrorAction Stop
+                $policy = Get-ExecutionPolicy -Scope 'CurrentUser'
+                return $policy -eq 'RemoteSigned'
+            }
+            catch {
+                for ($i = 0; $i -lt 4; $i++) {
+                    Write-Warning $_
+                }
+                return $false
+            }
+        }
     }
 
     Context 'When execution policy is already permissive' {
@@ -460,7 +485,7 @@ Describe 'Test-Source-IsTrusted' {
 
     Context 'When source is trusted' {
         It 'Should return true and accept source agreements' {
-            Mock winget { return 'winget    https://cdn.winget.microsoft.com/cache' } -ParameterFilter { $args[0] -eq 'source' -and $args[1] -eq 'list' -and $args -contains '--accept-source-agreements' }
+            Mock winget { return 'winget      https://cdn.winget.microsoft.com/cache        true' } -ParameterFilter { $args[0] -eq 'source' -and $args[1] -eq 'list' -and $args -contains '--disable-interactivity' }
             $result = Test-Source-IsTrusted -target 'winget'
             $result | Should -Be $true
         }
@@ -468,7 +493,7 @@ Describe 'Test-Source-IsTrusted' {
 
     Context 'When source is not trusted' {
         It 'Should return false' {
-            Mock winget { return 'msstore    https://storeedgefd.dsx.mp.microsoft.com/v9.0' } -ParameterFilter { $args[0] -eq 'source' -and $args[1] -eq 'list' -and $args -contains '--accept-source-agreements' }
+            Mock winget { return 'msstore      https://storeedgefd.dsx.mp.microsoft.com/v9.0        true' } -ParameterFilter { $args[0] -eq 'source' -and $args[1] -eq 'list' -and $args -contains '--disable-interactivity' }
             $result = Test-Source-IsTrusted -target 'winget'
             $result | Should -Be $false
         }
@@ -476,7 +501,7 @@ Describe 'Test-Source-IsTrusted' {
 
     Context 'When winget source list fails' {
         It 'Should return false and emit warning' {
-            Mock winget { throw 'Command failed' } -ParameterFilter { $args[0] -eq 'source' -and $args[1] -eq 'list' }
+            Mock winget { throw 'Command failed' } -ParameterFilter { $args[0] -eq 'source' -and $args[1] -eq 'list' -and $args -contains '--disable-interactivity' }
             $result = Test-Source-IsTrusted -target 'winget'
             $result | Should -Be $false
             Assert-MockCalled Write-Warning -Times 1
@@ -492,10 +517,50 @@ Describe 'Set-Sources' {
         . "$PSScriptRoot\winget-app-install.ps1"
     }
 
-    It 'Should call winget source reset with accept-source-agreements flag' {
-        Mock winget { }
-        Set-Sources
-        Assert-MockCalled winget -Times 1 -ParameterFilter { $args[0] -eq 'source' -and $args[1] -eq 'reset' -and $args -contains '--accept-source-agreements' }
+    It 'Should call winget source reset and return true on success' {
+        Mock Start-Process {
+            param($FilePath, $ArgumentList, $NoNewWindow, $PassThru, $RedirectStandardOutput, $RedirectStandardError)
+            $mockProcess = New-Object PSObject
+            $mockProcess | Add-Member -MemberType NoteProperty -Name 'ExitCode' -Value 0
+            $mockProcess | Add-Member -MemberType ScriptMethod -Name 'WaitForExit' -Value { return $true }
+            return $mockProcess
+        }
+        Mock Get-Content { return $null } -ParameterFilter { $Path -match 'winget_reset_error' }
+        Mock Remove-Item { }
+
+        $result = Set-Sources
+        $result | Should -Be $true
+    }
+
+    It 'Should return false on non-zero exit code and log error details' {
+        Mock Start-Process {
+            param($FilePath, $ArgumentList, $NoNewWindow, $PassThru, $RedirectStandardOutput, $RedirectStandardError)
+            $mockProcess = New-Object PSObject
+            $mockProcess | Add-Member -MemberType NoteProperty -Name 'ExitCode' -Value 1
+            $mockProcess | Add-Member -MemberType ScriptMethod -Name 'WaitForExit' -Value { return $true }
+            return $mockProcess
+        }
+        Mock Get-Content { return 'Permission denied' } -ParameterFilter { $Path -match 'winget_reset_error' }
+        Mock Remove-Item { }
+
+        $result = Set-Sources
+        $result | Should -Be $false
+        Assert-MockCalled Write-Host -Times 1 -ParameterFilter { $Object -match 'Permission denied' }
+    }
+
+    It 'Should handle timeout and kill process' {
+        $mockProcess = New-Object PSObject
+        $mockProcess | Add-Member -MemberType NoteProperty -Name 'ExitCode' -Value 0
+        $mockProcess | Add-Member -MemberType ScriptMethod -Name 'WaitForExit' -Value { return $false }
+        $script:killInvoked = $false
+        $mockProcess | Add-Member -MemberType ScriptMethod -Name 'Kill' -Value { $script:killInvoked = $true }
+
+        Mock Start-Process { return $mockProcess }
+        Mock Remove-Item { }
+
+        $result = Set-Sources
+        $result | Should -Be $false
+        $script:killInvoked | Should -Be $true
     }
 }
 
@@ -1578,17 +1643,33 @@ Describe 'Main Script Logic' {
         }
 
         It 'Should call Set-Sources when source is not trusted' {
-            Mock Test-Source-IsTrusted { param($target) return $false }
-            Mock Set-Sources { }
-
             $trustedSources = @('winget', 'msstore')
+            $script:setSourcesCalls = 0
+            function Set-Sources { $script:setSourcesCalls++; return $true }
+
             foreach ($source in $trustedSources) {
-                if (-not (Test-Source-IsTrusted -target $source)) {
-                    Set-Sources
+                Set-Sources | Out-Null
+            }
+
+            $script:setSourcesCalls | Should -Be 2
+        }
+
+        It 'Should track source errors when Set-Sources fails' {
+            $trustedSources = @('winget', 'msstore')
+            $script:setSourcesCalls = 0
+            function Set-Sources { $script:setSourcesCalls++; return $false }
+            $sourceErrors = @()
+
+            foreach ($source in $trustedSources) {
+                if (-not (Set-Sources)) {
+                    $sourceErrors += $source
                 }
             }
 
-            Assert-MockCalled Set-Sources -Times 2
+            $script:setSourcesCalls | Should -Be 2
+            $sourceErrors.Count | Should -Be 2
+            $sourceErrors | Should -Contain 'winget'
+            $sourceErrors | Should -Contain 'msstore'
         }
     }
 
@@ -1635,6 +1716,24 @@ Describe 'Main Script Logic' {
             $installedApps | Should -Contain 'Test.App'
             $skippedApps | Should -Not -Contain 'Test.App'
             $failedApps | Should -Not -Contain 'Test.App'
+        }
+
+        It 'Should include --source winget flag in install command' {
+            $apps = @(@{name = 'Test.App' })
+            $installedApps = @()
+
+            Mock winget { '' } -ParameterFilter { $args -contains 'list' }
+            Mock Start-Process { }
+
+            foreach ($app in $apps) {
+                $listApp = winget list --exact -q $app.name
+                if (![String]::Join('', $listApp).Contains($app.name)) {
+                    Start-Process winget -ArgumentList "install -e --accept-source-agreements --accept-package-agreements --source winget --id $($app.name)" -NoNewWindow -Wait
+                    $installedApps += 'Test.App'
+                }
+            }
+
+            Assert-MockCalled Start-Process -Times 1 -ParameterFilter { $ArgumentList -match '--source winget' }
         }
 
         It 'Should skip app when already installed' {
@@ -1728,8 +1827,8 @@ Describe 'Main Script Logic' {
         It 'Should handle updates with CLI fallback' {
             Mock Test-UpdatesAvailable { return $true }
             Mock Get-Command { return $false } -ParameterFilter { $Name -eq 'Update-WinGetPackage' }
-            Mock winget { 'Test.App 1.0.0 winget' } -ParameterFilter { $args -contains 'list' }
-            Mock winget { 'Successfully installed Test.App' } -ParameterFilter { $args -contains 'upgrade' }
+            Mock winget { 'Test.App  Test.App  1.0.0  winget' } -ParameterFilter { $args -contains 'list' }
+            Mock winget { 'Successfully installed Test.App' } -ParameterFilter { $args -contains 'upgrade' -and $args -contains '--source' }
 
             $hasUpdates = Test-UpdatesAvailable
             if ($hasUpdates) {
@@ -1748,7 +1847,7 @@ Describe 'Main Script Logic' {
                         if ($columns.Count -ge 2) {
                             $packageId = $columns[1]
                             if ($packageId -and $packageId -notmatch '^(ARP|MSIX)') {
-                                $upgradeResult = & winget upgrade $packageId 2>&1
+                                $upgradeResult = & winget upgrade $packageId --source winget 2>&1
                                 $upgradeOutput = $upgradeResult | Out-String
                                 $upgradeOutput | Should -Match 'Successfully installed'
                             }
@@ -1756,6 +1855,8 @@ Describe 'Main Script Logic' {
                     }
                 }
             }
+
+            Assert-MockCalled winget -Times 1 -ParameterFilter { $args -contains 'upgrade' -and $args -contains '--source' -and $args -contains 'winget' }
         }
     }
 
@@ -1818,16 +1919,16 @@ Describe 'Main Script Logic' {
 Describe 'App list consistency' {
     It 'Should keep install and uninstall app lists in sync' {
         $installApps = Get-Content "$PSScriptRoot\winget-app-install.ps1" |
-            ForEach-Object {
-                if ($_ -match "@{name = '([^']+)'") { $matches[1] }
-            } |
-            Where-Object { $_ }
+        ForEach-Object {
+            if ($_ -match "@{name = '([^']+)'") { $matches[1] }
+        } |
+        Where-Object { $_ }
 
         $uninstallApps = Get-Content "$PSScriptRoot\winget-app-uninstall.ps1" |
-            ForEach-Object {
-                if ($_ -match "@{name = '([^']+)'") { $matches[1] }
-            } |
-            Where-Object { $_ }
+        ForEach-Object {
+            if ($_ -match "@{name = '([^']+)'") { $matches[1] }
+        } |
+        Where-Object { $_ }
 
         $installApps | Should -Be $uninstallApps
     }
