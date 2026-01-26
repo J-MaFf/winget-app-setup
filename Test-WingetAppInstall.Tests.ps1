@@ -1141,9 +1141,6 @@ Describe 'Write-Table' {
     }
 
     It 'Should not prompt in non-interactive session' {
-        # Save original value
-        $originalUserInteractive = [Environment]::UserInteractive
-
         # Note: [Environment]::UserInteractive is read-only and cannot be mocked directly
         # This test validates that the code checks UserInteractive status
         # In actual non-interactive sessions, the prompt path would be skipped
@@ -1269,7 +1266,6 @@ Describe 'Invoke-WingetCommand' {
             $commandArgs = ConvertTo-CommandArguments -Command $Command
 
             & winget $commandArgs
-            $displayExitCode = $LASTEXITCODE
 
             try {
                 $commandOutput = & winget $commandArgs 2>&1 | Where-Object { $_ -notmatch '^[\s\-\|\\]*$' }
@@ -1678,7 +1674,6 @@ Describe 'Main Script Logic' {
             $apps = @(@{name = 'Test.App' })
             $installedApps = @()
             $skippedApps = @()
-            $failedApps = @()
 
             $script:installAttempted = $false
 
@@ -1740,7 +1735,6 @@ Describe 'Main Script Logic' {
             $apps = @(@{name = 'Test.App' })
             $installedApps = @()
             $skippedApps = @()
-            $failedApps = @()
 
             # Mock winget list to return the app (already installed)
             Mock winget { 'Test.App' } -ParameterFilter { $args -contains 'list' }
@@ -1816,7 +1810,6 @@ Describe 'Main Script Logic' {
             $hasUpdates = Test-UpdatesAvailable
             if ($hasUpdates) {
                 if (Get-Command Update-WinGetPackage -ErrorAction SilentlyContinue) {
-                    $packagesToUpdate = Get-WinGetPackage | Where-Object IsUpdateAvailable
                     # Simulate the update without piping to avoid mock issues
                     $updateResults = @(@{ Status = 'Ok'; Id = 'Test.App' })
                     $updateResults[0].Status | Should -Be 'Ok'
@@ -1897,10 +1890,6 @@ Describe 'Main Script Logic' {
 
         It 'Should handle empty result arrays' {
             $installedApps = @()
-            $skippedApps = @()
-            $failedApps = @()
-            $updatedApps = @()
-            $failedUpdateApps = @()
 
             Mock Format-AppList { param($AppArray) if ($AppArray -and $AppArray.Count -gt 0) { return $AppArray -join ', ' } return $null }
             Mock Write-Table { }
@@ -1910,6 +1899,8 @@ Describe 'Main Script Logic' {
 
             $appList = Format-AppList -AppArray $installedApps
             if ($appList) { $rows += , @('Installed', $appList) }
+
+            Write-Table -Headers $headers -Rows $rows
 
             $rows.Count | Should -Be 0
         }
