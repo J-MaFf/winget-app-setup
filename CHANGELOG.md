@@ -5,9 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.0.0] - 2025-11-07
+## [Unreleased]
 
 ### Added
+
+- Documented the repository's commit, PR, and metadata rules plus working GitHub CLI commands for labels and assignees inside `.github/copilot-instructions.md`.
+
+### Changed
+
+- Simplified the README to a two-step guide that starts with `Set-ExecutionPolicy Unrestricted -Scope Process -Force` followed by running `powershell -ExecutionPolicy Unrestricted -File .\winget-app-install.ps1`.
+- Configured the workspace's local Memory MCP storage plus `.gitignore` and `.vscode` settings so auto-generated knowledge graph data stays in the repo scope.
+
+### Removed
+
+- Dropped `launch.ps1`; the installer now runs directly when the required execution policy is temporarily relaxed.
+
+### Fixed (Unreleased)
+
+- Cleaned up `Test-WingetAppInstall.Tests.ps1` so it no longer defines unused variables and satisfies the linter.
+
+## [1.0.0] - 2025-11-07
+
+### Added (1.0.0)
 
 - Initial PowerShell automation suite for managing Windows applications using winget
 - **winget-app-install.ps1** - Main installation script with update management
