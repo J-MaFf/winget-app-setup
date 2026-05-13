@@ -2340,7 +2340,7 @@ Describe 'WhatIf Mode - Unit Tests' {
 
 Describe 'IEX non-admin execution behavior' {
     BeforeAll {
-        $script:isWindows = $env:OS -eq 'Windows_NT'
+        $script:isWindows = [System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Win32NT
         $script:isElevated = $false
 
         if ($script:isWindows) {
