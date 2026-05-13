@@ -351,6 +351,31 @@ function Test-PathInEnvironment {
 
 <#
 .SYNOPSIS
+    Detects if the script is running locally or from a remote source (e.g., via IEX).
+.DESCRIPTION
+    Checks if $PSScriptRoot is non-empty and represents a valid directory.
+    Returns $true for local execution (file on disk), $false for remote execution (piped script).
+.RETURNS
+    [bool] True if running locally, False if running remotely.
+#>
+function Test-IsRunningLocally {
+    # Check if $PSScriptRoot is non-empty and valid
+    if ([string]::IsNullOrWhiteSpace($PSScriptRoot)) {
+        return $false
+    }
+
+    # Verify it's an actual directory path
+    try {
+        $null = Get-Item -LiteralPath $PSScriptRoot -ErrorAction Stop
+        return $true
+    }
+    catch {
+        return $false
+    }
+}
+
+<#
+.SYNOPSIS
     Converts a command string into an array of arguments, properly handling quoted arguments.
 .DESCRIPTION
     This function takes a command string and splits it into individual arguments while
@@ -912,14 +937,19 @@ function Invoke-WingetInstall {
         Exit
     }
 
-    # Add the script directory to the PATH
+    # Add the script directory to the PATH (only if running locally)
     # Use $PSScriptRoot for reliable script directory detection (works with launcher)
-    $scriptDirectory = $PSScriptRoot
-    if (-not $WhatIf) {
-        Add-ToEnvironmentPath -PathToAdd $scriptDirectory -Scope 'User'
+    if (Test-IsRunningLocally) {
+        $scriptDirectory = $PSScriptRoot
+        if (-not $WhatIf) {
+            Add-ToEnvironmentPath -PathToAdd $scriptDirectory -Scope 'User'
+        }
+        else {
+            Write-Info "[DRY-RUN] Would add '$scriptDirectory' to User PATH"
+        }
     }
     else {
-        Write-Info "[DRY-RUN] Would add '$scriptDirectory' to User PATH"
+        Write-Info 'Skipping PATH update (remote execution detected)'
     }
 
     $apps = @(
