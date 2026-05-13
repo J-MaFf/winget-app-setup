@@ -902,11 +902,21 @@ function Invoke-WingetInstall {
 
     # Check if the script is run as administrator
     If (-NOT ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] 'Administrator')) {
-        Write-ErrorMessage 'This script requires administrator privileges. Press Enter to restart script with elevated privileges.'
-        Pause
-        # Relaunch the script with administrator privileges
-        Restart-WithElevation -PowerShellExecutable $psExecutable -ScriptPath $PSCommandPath | Out-Null
-        Exit
+        if (Test-IsRunningLocally) {
+            Write-ErrorMessage 'This script requires administrator privileges. Press Enter to restart script with elevated privileges.'
+            Pause
+            # Relaunch the script with administrator privileges
+            Restart-WithElevation -PowerShellExecutable $psExecutable -ScriptPath $PSCommandPath | Out-Null
+            Exit
+        }
+
+        # IEX/remote execution has no local script path to relaunch from.
+        Write-ErrorMessage 'This script requires administrator privileges.'
+        Write-ErrorMessage 'Auto-elevation is unavailable when running through IEX/remote execution.'
+        Write-Info 'Open an elevated PowerShell or Windows Terminal session and run the IEX command again.'
+        Write-Info 'Exiting in 5 seconds...'
+        Start-Sleep -Seconds 5
+        Exit 1
     }
     else {
         Write-Success 'Starting...'

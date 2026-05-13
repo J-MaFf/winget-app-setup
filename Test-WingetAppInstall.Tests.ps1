@@ -2337,3 +2337,36 @@ Describe 'WhatIf Mode - Unit Tests' {
         }
     }
 }
+
+Describe 'IEX non-admin execution behavior' {
+    BeforeAll {
+        $script:isWindows = [System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Win32NT
+        $script:isElevated = $false
+
+        if ($script:isWindows) {
+            $script:isElevated = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
+                [Security.Principal.WindowsBuiltInRole]::Administrator
+            )
+        }
+    }
+
+    It 'Should exit with code 1 and show remote elevation guidance' -Skip:(-not $script:isWindows -or $script:isElevated) {
+
+        $scriptPath = Join-Path $PSScriptRoot 'winget-app-install.ps1'
+        $psStringEscapedPath = $scriptPath.Replace("'", "''")
+        $currentPowerShell = (Get-Process -Id $PID).Path
+        $childCommand = @"
+Get-Content -Raw -LiteralPath '$psStringEscapedPath' | Invoke-Expression
+"@
+
+        $output = & $currentPowerShell -NoLogo -NoProfile -NonInteractive -Command $childCommand 2>&1 | Out-String
+        $exitCode = $LASTEXITCODE
+
+        $exitCode | Should -Be 1
+        $output | Should -Match 'This script requires administrator privileges\.'
+        $output | Should -Match 'Auto-elevation is unavailable when running through IEX/remote execution\.'
+        $output | Should -Match 'Open an elevated PowerShell or Windows Terminal session and run the IEX command again\.'
+        $output | Should -Match 'Exiting in 5 seconds\.\.\.'
+        $output | Should -Not -Match 'Press Enter to restart script with elevated privileges'
+    }
+}
