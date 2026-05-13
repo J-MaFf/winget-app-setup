@@ -2350,12 +2350,13 @@ Describe 'IEX non-admin execution behavior' {
         }
 
         $scriptPath = Join-Path $PSScriptRoot 'winget-app-install.ps1'
-        $escapedScriptPath = $scriptPath.Replace("'", "''")
+        $psStringEscapedPath = $scriptPath.Replace("'", "''")
+        $currentPowerShell = (Get-Process -Id $PID).Path
         $childCommand = @"
-Get-Content -Raw -LiteralPath '$escapedScriptPath' | Invoke-Expression
+Get-Content -Raw -LiteralPath '$psStringEscapedPath' | Invoke-Expression
 "@
 
-        $output = & pwsh -NoLogo -NoProfile -NonInteractive -Command $childCommand 2>&1 | Out-String
+        $output = & $currentPowerShell -NoLogo -NoProfile -NonInteractive -Command $childCommand 2>&1 | Out-String
         $exitCode = $LASTEXITCODE
 
         $exitCode | Should -Be 1
