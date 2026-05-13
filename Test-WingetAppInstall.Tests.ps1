@@ -2337,3 +2337,31 @@ Describe 'WhatIf Mode - Unit Tests' {
         }
     }
 }
+
+Describe 'IEX non-admin execution behavior' {
+    It 'Should exit with code 1 and show remote elevation guidance' -Skip:(-not $IsWindows) {
+        $isElevated = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
+            [Security.Principal.WindowsBuiltInRole]::Administrator
+        )
+
+        if ($isElevated) {
+            Set-ItResult -Skipped -Because 'This test requires a non-elevated PowerShell session.'
+            return
+        }
+
+        $scriptPath = Join-Path $PSScriptRoot 'winget-app-install.ps1'
+        $escapedScriptPath = $scriptPath.Replace("'", "''")
+        $childCommand = @"
+Get-Content -Raw -LiteralPath '$escapedScriptPath' | Invoke-Expression
+"@
+
+        $output = & pwsh -NoLogo -NoProfile -NonInteractive -Command $childCommand 2>&1 | Out-String
+        $exitCode = $LASTEXITCODE
+
+        $exitCode | Should -Be 1
+        $output | Should -Match 'This script requires administrator privileges\.'
+        $output | Should -Match 'Auto-elevation is unavailable when running through IEX/remote execution\.'
+        $output | Should -Match 'Open an elevated PowerShell or Windows Terminal session and run the IEX command again\.'
+        $output | Should -Not -Match 'Press Enter to restart script with elevated privileges'
+    }
+}
