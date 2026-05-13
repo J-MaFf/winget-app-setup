@@ -1163,7 +1163,7 @@ function Invoke-WingetInstall {
     # Retry any failed installations once before producing the final summary
     if ($failedApps.Count -gt 0) {
         if (-not $WhatIf) {
-            Write-Info ''
+            Write-Host ''
             Write-Info 'Retrying failed installations (1 final attempt)...'
 
             $appsToRetry = $failedApps
@@ -1210,7 +1210,7 @@ function Invoke-WingetInstall {
             }
         }
         else {
-            Write-Info ''
+            Write-Host ''
             Write-Info '[DRY-RUN] Would retry the following failed installations:'
             foreach ($appName in $failedApps) {
                 Write-Info "[DRY-RUN] Would retry: $appName"
@@ -1220,7 +1220,7 @@ function Invoke-WingetInstall {
 
     # Display the summary of the installation
     if ($WhatIf) {
-        Write-Info ''
+        Write-Host ''
         Write-Info '=== DRY-RUN SUMMARY ==='
         Write-Info 'The following actions would have been performed:'
     }
