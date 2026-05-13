@@ -914,8 +914,23 @@ function Invoke-WingetInstall {
         Write-ErrorMessage 'This script requires administrator privileges.'
         Write-ErrorMessage 'Auto-elevation is unavailable when running through IEX/remote execution.'
         Write-Info 'Open an elevated PowerShell or Windows Terminal session and run the IEX command again.'
-        Write-Prompt 'Press any key to exit...'
-        [void][System.Console]::ReadKey($true)
+
+        $canReadKey =
+            [Environment]::UserInteractive -and
+            $null -ne $Host.UI -and
+            $null -ne $Host.UI.RawUI -and
+            -not [System.Console]::IsInputRedirected
+
+        if ($canReadKey) {
+            Write-Prompt 'Press any key to exit...'
+            try {
+                [void][System.Console]::ReadKey($true)
+            }
+            catch [System.InvalidOperationException] {
+                # No attached console or redirected input; continue to the intended exit code.
+            }
+        }
+
         Exit 1
     }
     else {
