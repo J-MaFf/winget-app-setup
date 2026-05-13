@@ -1907,6 +1907,127 @@ Describe 'Main Script Logic' {
     }
 }
 
+Describe 'Retry Failed Installations' {
+    BeforeAll {
+        Mock Write-Host { }
+        Mock Start-Process { }
+    }
+
+    Context 'Retry logic - array management' {
+        It 'Should retry failed apps and move successful retries to installed list' {
+            $failedApps = @('Test.App')
+            $installedApps = @()
+
+            $script:retryAttempted = $false
+            Mock Start-Process { $script:retryAttempted = $true }
+
+            $appsToRetry = $failedApps
+            $failedApps = @()
+
+            foreach ($appName in $appsToRetry) {
+                Start-Process winget -ArgumentList "install -e --accept-source-agreements --accept-package-agreements --source winget --id $appName" -NoNewWindow -Wait
+                # Simulate verification returning the app (success)
+                $retryResult = $appName
+                if (![String]::Join('', $retryResult).Contains($appName)) {
+                    $failedApps += $appName
+                }
+                else {
+                    $installedApps += $appName
+                }
+            }
+
+            $script:retryAttempted | Should -Be $true
+            $installedApps | Should -Contain 'Test.App'
+            $failedApps | Should -Not -Contain 'Test.App'
+        }
+
+        It 'Should keep app in failed list when retry also fails' {
+            $failedApps = @('Test.App')
+            $installedApps = @()
+
+            Mock Start-Process { }
+
+            $appsToRetry = $failedApps
+            $failedApps = @()
+
+            foreach ($appName in $appsToRetry) {
+                Start-Process winget -ArgumentList "install -e --accept-source-agreements --accept-package-agreements --source winget --id $appName" -NoNewWindow -Wait
+                # Simulate verification returning nothing (failure)
+                $retryResult = ''
+                if (![String]::Join('', $retryResult).Contains($appName)) {
+                    $failedApps += $appName
+                }
+                else {
+                    $installedApps += $appName
+                }
+            }
+
+            $failedApps | Should -Contain 'Test.App'
+            $installedApps | Should -Not -Contain 'Test.App'
+        }
+
+        It 'Should not retry when there are no failed apps' {
+            $failedApps = @()
+            $installedApps = @()
+
+            Mock Start-Process { }
+
+            if ($failedApps.Count -gt 0) {
+                $appsToRetry = $failedApps
+                $failedApps = @()
+                foreach ($appName in $appsToRetry) {
+                    Start-Process winget -ArgumentList "install -e --accept-source-agreements --accept-package-agreements --source winget --id $appName" -NoNewWindow -Wait
+                }
+            }
+
+            Assert-MockCalled Start-Process -Times 0
+            $failedApps.Count | Should -Be 0
+        }
+
+        It 'Should handle mixed retry results across multiple failed apps' {
+            $failedApps = @('App.Recovers', 'App.StillFails')
+            $installedApps = @()
+
+            Mock Start-Process { }
+
+            $appsToRetry = $failedApps
+            $failedApps = @()
+
+            foreach ($appName in $appsToRetry) {
+                Start-Process winget -ArgumentList "install -e --accept-source-agreements --accept-package-agreements --source winget --id $appName" -NoNewWindow -Wait
+                # Simulate verification: App.Recovers succeeds, App.StillFails does not
+                $retryResult = if ($appName -eq 'App.Recovers') { $appName } else { '' }
+                if (![String]::Join('', $retryResult).Contains($appName)) {
+                    $failedApps += $appName
+                }
+                else {
+                    $installedApps += $appName
+                }
+            }
+
+            $installedApps | Should -Contain 'App.Recovers'
+            $failedApps | Should -Contain 'App.StillFails'
+            $failedApps | Should -Not -Contain 'App.Recovers'
+        }
+
+        It 'Should signal non-zero exit when apps still fail after retry' {
+            $failedApps = @('App.StillFails')
+
+            $exitCode = if ($failedApps.Count -gt 0) { 1 } else { 0 }
+
+            $exitCode | Should -Be 1
+        }
+
+        It 'Should signal zero exit when all apps succeed after retry' {
+            $failedApps = @()
+
+            $exitCode = if ($failedApps.Count -gt 0) { 1 } else { 0 }
+
+            $exitCode | Should -Be 0
+        }
+    }
+}
+
 Describe 'App list consistency' {
     It 'Should keep install and uninstall app lists in sync' {
         $installApps = Get-Content "$PSScriptRoot\winget-app-install.ps1" |

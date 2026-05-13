@@ -1160,6 +1160,64 @@ function Invoke-WingetInstall {
         Write-WarningMessage 'No updates available.'
     }
 
+    # Retry any failed installations once before producing the final summary
+    if ($failedApps.Count -gt 0) {
+        if (-not $WhatIf) {
+            Write-Info ''
+            Write-Info 'Retrying failed installations (1 final attempt)...'
+
+            $appsToRetry = $failedApps
+            $failedApps = @()
+
+            foreach ($appName in $appsToRetry) {
+                try {
+                    Write-Info "Retrying: $appName"
+                    Start-Process winget -ArgumentList "install -e --accept-source-agreements --accept-package-agreements --source winget --id $appName" -NoNewWindow -Wait
+
+                    # Verify installation with timeout
+                    $verifyProcess = Start-Process -FilePath 'winget' `
+                        -ArgumentList 'list', '--exact', '--id', $appName, '--accept-source-agreements' `
+                        -NoNewWindow `
+                        -PassThru `
+                        -RedirectStandardOutput "$env:TEMP\winget_retry_verify_output.txt" `
+                        -RedirectStandardError "$env:TEMP\winget_retry_verify_error.txt"
+
+                    if ($verifyProcess.WaitForExit(15000)) {
+                        $retryResult = Get-Content "$env:TEMP\winget_retry_verify_output.txt" -ErrorAction SilentlyContinue
+                        if (![String]::Join('', $retryResult).Contains($appName)) {
+                            Write-ErrorMessage "Retry failed: $appName"
+                            $failedApps += $appName
+                        }
+                        else {
+                            Write-Success "Retry succeeded: $appName"
+                            $installedApps += $appName
+                        }
+                    }
+                    else {
+                        Write-WarningMessage "Verification timed out for retry: $appName. Assuming installation failed."
+                        try { $verifyProcess.Kill() } catch { }
+                        $failedApps += $appName
+                    }
+
+                    # Cleanup temp files
+                    Remove-Item "$env:TEMP\winget_retry_verify_output.txt" -ErrorAction SilentlyContinue
+                    Remove-Item "$env:TEMP\winget_retry_verify_error.txt" -ErrorAction SilentlyContinue
+                }
+                catch {
+                    Write-ErrorMessage "Retry failed: $appName. Error: $_"
+                    $failedApps += $appName
+                }
+            }
+        }
+        else {
+            Write-Info ''
+            Write-Info '[DRY-RUN] Would retry the following failed installations:'
+            foreach ($appName in $failedApps) {
+                Write-Info "[DRY-RUN] Would retry: $appName"
+            }
+        }
+    }
+
     # Display the summary of the installation
     if ($WhatIf) {
         Write-Info ''
@@ -1203,6 +1261,10 @@ function Invoke-WingetInstall {
     # Keep the console window open until the user presses a key
     Write-Prompt 'Press any key to exit...'
     [void][System.Console]::ReadKey($true)
+
+    if ($failedApps.Count -gt 0) {
+        Exit 1
+    }
 }
 
 if ($MyInvocation.InvocationName -ne '.') {
