@@ -1195,7 +1195,7 @@ function Invoke-WingetInstall {
                     }
                     else {
                         Write-WarningMessage "Verification timed out for retry: $appName. Assuming installation failed."
-                        $verifyProcess.Kill()
+                        try { $verifyProcess.Kill() } catch { }
                         $failedApps += $appName
                     }
 
