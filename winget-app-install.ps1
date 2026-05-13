@@ -914,6 +914,8 @@ function Invoke-WingetInstall {
         Write-ErrorMessage 'This script requires administrator privileges.'
         Write-ErrorMessage 'Auto-elevation is unavailable when running through IEX/remote execution.'
         Write-Info 'Open an elevated PowerShell or Windows Terminal session and run the IEX command again.'
+        Write-Info 'Exiting in 5 seconds...'
+        Start-Sleep -Seconds 5
         Exit 1
     }
     else {

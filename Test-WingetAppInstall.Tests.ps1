@@ -2366,6 +2366,7 @@ Get-Content -Raw -LiteralPath '$psStringEscapedPath' | Invoke-Expression
         $output | Should -Match 'This script requires administrator privileges\.'
         $output | Should -Match 'Auto-elevation is unavailable when running through IEX/remote execution\.'
         $output | Should -Match 'Open an elevated PowerShell or Windows Terminal session and run the IEX command again\.'
+        $output | Should -Match 'Exiting in 5 seconds\.\.\.'
         $output | Should -Not -Match 'Press Enter to restart script with elevated privileges'
     }
 }
