@@ -2339,15 +2339,18 @@ Describe 'WhatIf Mode - Unit Tests' {
 }
 
 Describe 'IEX non-admin execution behavior' {
-    It 'Should exit with code 1 and show remote elevation guidance' -Skip:(-not $IsWindows) {
-        $isElevated = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
-            [Security.Principal.WindowsBuiltInRole]::Administrator
-        )
+    BeforeAll {
+        $script:isWindows = $env:OS -eq 'Windows_NT'
+        $script:isElevated = $false
 
-        if ($isElevated) {
-            Set-ItResult -Skipped -Because 'This test requires a non-elevated PowerShell session.'
-            return
+        if ($script:isWindows) {
+            $script:isElevated = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
+                [Security.Principal.WindowsBuiltInRole]::Administrator
+            )
         }
+    }
+
+    It 'Should exit with code 1 and show remote elevation guidance' -Skip:(-not $script:isWindows -or $script:isElevated) {
 
         $scriptPath = Join-Path $PSScriptRoot 'winget-app-install.ps1'
         $psStringEscapedPath = $scriptPath.Replace("'", "''")
