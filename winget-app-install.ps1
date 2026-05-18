@@ -981,7 +981,6 @@ function Invoke-WingetInstall {
 
     # Ensure required modules are available
     if (-not (Test-AndInstallWingetModule)) {
-
         Write-Warning 'Microsoft.WinGet.Client module is not available. Update functionality will use fallback CLI methods.'
     }
 
