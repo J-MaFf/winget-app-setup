@@ -474,6 +474,75 @@ Describe 'Test-AndInstallWinget' {
     }
 }
 
+Describe 'Test-WingetSources' {
+    BeforeAll {
+        Mock Write-Host { }
+        Mock Write-Warning { }
+
+        # Dot-source the main script to import Test-WingetSources
+        . "$PSScriptRoot\winget-app-install.ps1"
+    }
+
+    Context 'When winget sources are accessible' {
+        It 'Should return true without attempting repair' {
+            Mock winget { return 'winget      https://cdn.winget.microsoft.com/cache' } -ParameterFilter { $args[0] -eq 'source' -and $args[1] -eq 'list' -and $args -contains '--disable-interactivity' }
+            Mock Add-AppxPackage { }
+
+            $result = Test-WingetSources
+            $result | Should -Be $true
+            Assert-MockCalled Add-AppxPackage -Times 0
+        }
+    }
+
+    Context 'When winget sources are broken and repair succeeds' {
+        It 'Should attempt repair and return true after successful retry' {
+            $script:wingetSourceCallCount = 0
+            Mock winget {
+                $script:wingetSourceCallCount++
+                if ($script:wingetSourceCallCount -eq 1) {
+                    return 'msstore      https://storeedgefd.dsx.mp.microsoft.com/v9.0'
+                }
+                return 'winget      https://cdn.winget.microsoft.com/cache'
+            } -ParameterFilter { $args[0] -eq 'source' -and $args[1] -eq 'list' -and $args -contains '--disable-interactivity' }
+            Mock Add-AppxPackage { }
+
+            $result = Test-WingetSources
+            $result | Should -Be $true
+            Assert-MockCalled Add-AppxPackage -Times 1
+        }
+    }
+
+    Context 'When winget sources are broken and Add-AppxPackage fails' {
+        It 'Should return false and emit error messages' {
+            Mock winget { return 'msstore      https://storeedgefd.dsx.mp.microsoft.com/v9.0' } -ParameterFilter { $args[0] -eq 'source' -and $args[1] -eq 'list' -and $args -contains '--disable-interactivity' }
+            Mock Add-AppxPackage { throw 'Network error' }
+
+            $result = Test-WingetSources
+            $result | Should -Be $false
+        }
+    }
+
+    Context 'When winget sources are broken and still broken after repair' {
+        It 'Should return false and emit error messages' {
+            Mock winget { return 'msstore      https://storeedgefd.dsx.mp.microsoft.com/v9.0' } -ParameterFilter { $args[0] -eq 'source' -and $args[1] -eq 'list' -and $args -contains '--disable-interactivity' }
+            Mock Add-AppxPackage { }
+
+            $result = Test-WingetSources
+            $result | Should -Be $false
+        }
+    }
+
+    Context 'When winget source list throws an exception' {
+        It 'Should attempt repair and handle the error gracefully' {
+            Mock winget { throw 'Access denied' } -ParameterFilter { $args[0] -eq 'source' -and $args[1] -eq 'list' -and $args -contains '--disable-interactivity' }
+            Mock Add-AppxPackage { throw 'Network error' }
+
+            $result = Test-WingetSources
+            $result | Should -Be $false
+        }
+    }
+}
+
 Describe 'Test-Source-IsTrusted' {
     BeforeAll {
         Mock Write-Host { }

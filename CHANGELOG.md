@@ -10,11 +10,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Documented the repository's commit, PR, and metadata rules plus working GitHub CLI commands for labels and assignees inside `.github/copilot-instructions.md`.
+- Added `Test-WingetSources` function that checks whether the winget package source is accessible, auto-repairs it via `Add-AppxPackage` if broken, retries after repair, and surfaces a clear error with manual remediation guidance when the repair cannot restore access.
 
 ### Changed
 
 - Simplified the README to a two-step guide that starts with `Set-ExecutionPolicy Unrestricted -Scope Process -Force` followed by running `powershell -ExecutionPolicy Unrestricted -File .\winget-app-install.ps1`.
 - Configured the workspace's local Memory MCP storage plus `.gitignore` and `.vscode` settings so auto-generated knowledge graph data stays in the repo scope.
+- `Invoke-WingetInstall` now calls `Test-WingetSources` after confirming the winget binary is available to verify and optionally repair the "winget" package source before beginning app installations.
 
 ### Removed
 
@@ -23,6 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed (Unreleased)
 
 - Cleaned up `Test-WingetAppInstall.Tests.ps1` so it no longer defines unused variables and satisfies the linter.
+- Fixed broken winget source scenario: when running as admin on a standard user account the "winget" source registration may be missing or broken; the script now detects and auto-repairs this condition instead of silently failing (#66).
 
 ## [1.0.0] - 2025-11-07
 
