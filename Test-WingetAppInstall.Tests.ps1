@@ -2256,7 +2256,7 @@ Describe 'Windows Terminal configuration' {
 
     Context 'Set-WindowsTerminalDefaults orchestration' {
         It 'Should perform no writes in WhatIf mode' {
-            Mock Get-WindowsTerminalSettingsPath { return 'C:\temp\settings.json' }
+            Mock Get-WindowsTerminalSettingsPaths { return @('C:\temp\settings.json') }
             Mock Set-WindowsTerminalDefaultProfile { return $true }
             Mock Set-WindowsTerminalAsDefaultTerminalApplication { return $true }
             Mock Write-Info { }
@@ -2269,13 +2269,24 @@ Describe 'Windows Terminal configuration' {
         }
 
         It 'Should configure both settings file and registry in normal mode' {
-            Mock Get-WindowsTerminalSettingsPath { return 'C:\temp\settings.json' }
+            Mock Get-WindowsTerminalSettingsPaths { return @('C:\temp\settings.json') }
             Mock Set-WindowsTerminalDefaultProfile { return $true }
             Mock Set-WindowsTerminalAsDefaultTerminalApplication { return $true }
 
             Set-WindowsTerminalDefaults
 
             Assert-MockCalled Set-WindowsTerminalDefaultProfile -Times 1
+            Assert-MockCalled Set-WindowsTerminalAsDefaultTerminalApplication -Times 1
+        }
+
+        It 'Should configure all discovered settings files in normal mode' {
+            Mock Get-WindowsTerminalSettingsPaths { return @('C:\temp\stable-settings.json', 'C:\temp\preview-settings.json') }
+            Mock Set-WindowsTerminalDefaultProfile { return $true }
+            Mock Set-WindowsTerminalAsDefaultTerminalApplication { return $true }
+
+            Set-WindowsTerminalDefaults
+
+            Assert-MockCalled Set-WindowsTerminalDefaultProfile -Times 2
             Assert-MockCalled Set-WindowsTerminalAsDefaultTerminalApplication -Times 1
         }
     }

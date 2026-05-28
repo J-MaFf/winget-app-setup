@@ -988,19 +988,54 @@ function ConvertFrom-TerminalSettingsJson {
     [string] Existing settings path when found; otherwise $null.
 #>
 function Get-WindowsTerminalSettingsPath {
+    $settingsPaths = Get-WindowsTerminalSettingsPaths
+    if ($settingsPaths.Count -gt 0) {
+        return $settingsPaths[0]
+    }
+
+    return $null
+}
+
+<#
+.SYNOPSIS
+    Resolves all discovered Windows Terminal settings file paths.
+.DESCRIPTION
+    Includes packaged channels (stable/preview/dev/canary-style package names)
+    and unpackaged path when present.
+.RETURNS
+    [string[]] Existing settings paths when found; otherwise an empty array.
+#>
+function Get-WindowsTerminalSettingsPaths {
     $candidatePaths = @(
         (Join-Path $env:LOCALAPPDATA 'Packages\Microsoft.WindowsTerminal_8wekyb3d8bbwe\LocalState\settings.json'),
         (Join-Path $env:LOCALAPPDATA 'Packages\Microsoft.WindowsTerminalPreview_8wekyb3d8bbwe\LocalState\settings.json'),
         (Join-Path $env:LOCALAPPDATA 'Microsoft\Windows Terminal\settings.json')
     )
 
-    foreach ($path in $candidatePaths) {
-        if (Test-Path -Path $path) {
-            return $path
+    $packagesRoot = Join-Path $env:LOCALAPPDATA 'Packages'
+    if (Test-Path -Path $packagesRoot) {
+        try {
+            $dynamicPaths = Get-ChildItem -Path $packagesRoot -Directory -Filter 'Microsoft.WindowsTerminal*' -ErrorAction SilentlyContinue |
+            ForEach-Object { Join-Path $_.FullName 'LocalState\settings.json' }
+
+            if ($dynamicPaths) {
+                $candidatePaths += $dynamicPaths
+            }
+        }
+        catch {
+            # Best-effort discovery only; keep static candidates if enumeration fails.
         }
     }
 
-    return $null
+    $existingPaths = @()
+
+    foreach ($path in $candidatePaths) {
+        if (Test-Path -Path $path) {
+            $existingPaths += $path
+        }
+    }
+
+    return @($existingPaths | Select-Object -Unique)
 }
 
 <#
@@ -1122,11 +1157,11 @@ function Set-WindowsTerminalDefaults {
     )
 
     $powerShell7ProfileGuid = '{574e775e-4f2a-5b96-ac1e-a2962a402336}'
-    $settingsPath = Get-WindowsTerminalSettingsPath
+    $settingsPaths = @(Get-WindowsTerminalSettingsPaths)
 
     if ($WhatIf) {
-        if ($settingsPath) {
-            Write-Info "[DRY-RUN] Would set defaultProfile in '$settingsPath' to $powerShell7ProfileGuid"
+        if ($settingsPaths.Count -gt 0) {
+            Write-Info "[DRY-RUN] Would set defaultProfile to $powerShell7ProfileGuid in $($settingsPaths.Count) Windows Terminal settings file(s)"
         }
         else {
             Write-Info '[DRY-RUN] Would set Windows Terminal defaultProfile to PowerShell 7 when settings.json is available'
@@ -1135,8 +1170,10 @@ function Set-WindowsTerminalDefaults {
         return
     }
 
-    if ($settingsPath) {
-        [void](Set-WindowsTerminalDefaultProfile -SettingsPath $settingsPath -ProfileGuid $powerShell7ProfileGuid)
+    if ($settingsPaths.Count -gt 0) {
+        foreach ($settingsPath in $settingsPaths) {
+            [void](Set-WindowsTerminalDefaultProfile -SettingsPath $settingsPath -ProfileGuid $powerShell7ProfileGuid)
+        }
     }
     else {
         Write-WarningMessage 'Windows Terminal settings.json was not found. Skipping default profile configuration.'
