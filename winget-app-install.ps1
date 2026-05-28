@@ -962,7 +962,8 @@ function ConvertFrom-TerminalSettingsJson {
     }
 
     try {
-        return $JsonText | ConvertFrom-Json -Depth 100
+        # ConvertFrom-Json -Depth is unavailable in Windows PowerShell 5.1.
+        return $JsonText | ConvertFrom-Json
     }
     catch {
         # Windows Terminal settings are often JSONC; strip comments and trailing commas.
@@ -971,7 +972,8 @@ function ConvertFrom-TerminalSettingsJson {
         $sanitizedJson = $sanitizedJson -replace ',(\s*[}\]])', '$1'
 
         try {
-            return $sanitizedJson | ConvertFrom-Json -Depth 100
+            # Keep parsing compatible with both Windows PowerShell and PowerShell 7+.
+            return $sanitizedJson | ConvertFrom-Json
         }
         catch {
             return $null
