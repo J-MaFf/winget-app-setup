@@ -730,27 +730,35 @@ function Test-UpdatesAvailable {
 
         # Try PowerShell module first
         if (Get-Command Get-WinGetPackage -ErrorAction SilentlyContinue) {
-            $packagesWithUpdates = Get-WinGetPackage | Where-Object IsUpdateAvailable
+            try {
+                $packagesWithUpdates = Get-WinGetPackage | Where-Object IsUpdateAvailable
 
-            if ($packagesWithUpdates -and $packagesWithUpdates.Count -gt 0) {
-                Write-Success "Found $($packagesWithUpdates.Count) package(s) with available updates."
-                $packagesWithUpdates | ForEach-Object {
-                    Write-Host " - $($_.Id) (Current: $($_.InstalledVersion), Available: $($_.AvailableVersion))"
+                if ($packagesWithUpdates -and $packagesWithUpdates.Count -gt 0) {
+                    Write-Success "Found $($packagesWithUpdates.Count) package(s) with available updates."
+                    $packagesWithUpdates | ForEach-Object {
+                        Write-Host " - $($_.Id) (Current: $($_.InstalledVersion), Available: $($_.AvailableVersion))"
+                    }
+                    return $true
                 }
-                return $true
+                # Module succeeded but found no updates — return early without CLI fallback
+                Write-WarningMessage 'No updates available.'
+                return $false
+            }
+            catch {
+                Write-Warning "PowerShell module error, falling back to CLI: $_"
             }
         }
         else {
             Write-WarningMessage 'PowerShell module not available, using CLI fallback...'
+        }
 
-            # Fallback to CLI method
-            $basicUpgradeResult = & winget upgrade 2>&1
-            $basicOutput = $basicUpgradeResult | Out-String
+        # CLI fallback (used when module is unavailable or threw an error)
+        $basicUpgradeResult = & winget upgrade 2>&1
+        $basicOutput = $basicUpgradeResult | Out-String
 
-            if ($basicOutput -notmatch 'No installed package found matching input criteria' -and
-                $basicOutput -notmatch 'No available upgrade found') {
-                return $true
-            }
+        if ($basicOutput -notmatch 'No installed package found matching input criteria' -and
+            $basicOutput -notmatch 'No available upgrade found') {
+            return $true
         }
     }
     catch {
@@ -930,6 +938,211 @@ function Write-Prompt {
         [string]$Message
     )
     Write-Host $Message -ForegroundColor Blue
+}
+
+<#
+.SYNOPSIS
+    Attempts to parse Windows Terminal settings content, including JSONC variants.
+.DESCRIPTION
+    Tries ConvertFrom-Json first. If parsing fails, removes line/block comments and
+    trailing commas to support common Windows Terminal JSONC formatting before retrying.
+.PARAMETER JsonText
+    Raw settings content.
+.RETURNS
+    Parsed settings object when successful; otherwise $null.
+#>
+function ConvertFrom-TerminalSettingsJson {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$JsonText
+    )
+
+    if ([string]::IsNullOrWhiteSpace($JsonText)) {
+        return [pscustomobject]@{}
+    }
+
+    try {
+        return $JsonText | ConvertFrom-Json -Depth 100
+    }
+    catch {
+        # Windows Terminal settings are often JSONC; strip comments and trailing commas.
+        $sanitizedJson = $JsonText -replace '(?ms)/\*.*?\*/', ''
+        $sanitizedJson = $sanitizedJson -replace '(?m)^\s*//.*$', ''
+        $sanitizedJson = $sanitizedJson -replace ',(\s*[}\]])', '$1'
+
+        try {
+            return $sanitizedJson | ConvertFrom-Json -Depth 100
+        }
+        catch {
+            return $null
+        }
+    }
+}
+
+<#
+.SYNOPSIS
+    Resolves the most likely Windows Terminal settings file path.
+.DESCRIPTION
+    Prefers the stable packaged path, then preview, then unpackaged path.
+.RETURNS
+    [string] Existing settings path when found; otherwise $null.
+#>
+function Get-WindowsTerminalSettingsPath {
+    $candidatePaths = @(
+        (Join-Path $env:LOCALAPPDATA 'Packages\Microsoft.WindowsTerminal_8wekyb3d8bbwe\LocalState\settings.json'),
+        (Join-Path $env:LOCALAPPDATA 'Packages\Microsoft.WindowsTerminalPreview_8wekyb3d8bbwe\LocalState\settings.json'),
+        (Join-Path $env:LOCALAPPDATA 'Microsoft\Windows Terminal\settings.json')
+    )
+
+    foreach ($path in $candidatePaths) {
+        if (Test-Path -Path $path) {
+            return $path
+        }
+    }
+
+    return $null
+}
+
+<#
+.SYNOPSIS
+    Sets Windows Terminal default profile to a provided GUID.
+.DESCRIPTION
+    Reads settings.json, updates defaultProfile, and writes updated JSON.
+.PARAMETER SettingsPath
+    Full path to the Windows Terminal settings file.
+.PARAMETER ProfileGuid
+    Profile GUID to set as default. Braces are added when missing.
+.RETURNS
+    [bool] True when configuration is applied or already in desired state; otherwise False.
+#>
+function Set-WindowsTerminalDefaultProfile {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$SettingsPath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ProfileGuid
+    )
+
+    if (-not (Test-Path -Path $SettingsPath)) {
+        Write-WarningMessage "Windows Terminal settings file not found at '$SettingsPath'."
+        return $false
+    }
+
+    $normalizedGuid = if ($ProfileGuid.StartsWith('{') -and $ProfileGuid.EndsWith('}')) {
+        $ProfileGuid
+    }
+    else {
+        "{$ProfileGuid}"
+    }
+
+    try {
+        $settingsContent = Get-Content -Path $SettingsPath -Raw -ErrorAction Stop
+    }
+    catch {
+        Write-WarningMessage "Unable to read Windows Terminal settings: $_"
+        return $false
+    }
+
+    $settingsObject = ConvertFrom-TerminalSettingsJson -JsonText $settingsContent
+    if (-not $settingsObject) {
+        Write-WarningMessage 'Unable to parse Windows Terminal settings.json. Skipping default profile update.'
+        return $false
+    }
+
+    if ($settingsObject.defaultProfile -eq $normalizedGuid) {
+        Write-Success 'Windows Terminal default profile is already set to PowerShell 7.'
+        return $true
+    }
+
+    $settingsObject | Add-Member -MemberType NoteProperty -Name 'defaultProfile' -Value $normalizedGuid -Force
+
+    try {
+        $updatedJson = $settingsObject | ConvertTo-Json -Depth 100
+        Set-Content -Path $SettingsPath -Value $updatedJson -Encoding UTF8 -ErrorAction Stop
+        Write-Success 'Configured Windows Terminal default profile to PowerShell 7.'
+        return $true
+    }
+    catch {
+        Write-WarningMessage "Failed to update Windows Terminal settings.json: $_"
+        return $false
+    }
+}
+
+<#
+.SYNOPSIS
+    Sets Windows Terminal as the default terminal application via registry.
+.DESCRIPTION
+    Writes DelegationConsole and DelegationTerminal values under HKCU:\Console\%%Startup.
+.RETURNS
+    [bool] True when configuration is applied or already in desired state; otherwise False.
+#>
+function Set-WindowsTerminalAsDefaultTerminalApplication {
+    $registryPath = 'HKCU:\Console\%%Startup'
+    $delegationConsole = '{2EACA947-7F5F-4CFA-BA87-8F7FBEEFBE69}'
+    $delegationTerminal = '{E12CFF52-A866-4C77-9A90-F570A7AA2C6B}'
+
+    try {
+        if (-not (Test-Path -Path $registryPath)) {
+            New-Item -Path $registryPath -Force | Out-Null
+        }
+
+        $existingValues = Get-ItemProperty -Path $registryPath -ErrorAction SilentlyContinue
+        if ($existingValues -and
+            $existingValues.DelegationConsole -eq $delegationConsole -and
+            $existingValues.DelegationTerminal -eq $delegationTerminal) {
+            Write-Success 'Windows Terminal is already configured as the default terminal application.'
+            return $true
+        }
+
+        New-ItemProperty -Path $registryPath -Name 'DelegationConsole' -PropertyType String -Value $delegationConsole -Force | Out-Null
+        New-ItemProperty -Path $registryPath -Name 'DelegationTerminal' -PropertyType String -Value $delegationTerminal -Force | Out-Null
+        Write-Success 'Configured Windows Terminal as the default terminal application.'
+        return $true
+    }
+    catch {
+        Write-WarningMessage "Failed to set default terminal application in registry: $_"
+        return $false
+    }
+}
+
+<#
+.SYNOPSIS
+    Configures Windows Terminal defaults for shell profile and terminal delegation.
+.DESCRIPTION
+    Applies both issue #74 requirements: PowerShell 7 default profile and Windows Terminal
+    default terminal application setting.
+.PARAMETER WhatIf
+    When provided, only reports intended actions.
+#>
+function Set-WindowsTerminalDefaults {
+    param (
+        [Parameter(Mandatory = $false)]
+        [switch]$WhatIf
+    )
+
+    $powerShell7ProfileGuid = '{574e775e-4f2a-5b96-ac1e-a2962a402336}'
+    $settingsPath = Get-WindowsTerminalSettingsPath
+
+    if ($WhatIf) {
+        if ($settingsPath) {
+            Write-Info "[DRY-RUN] Would set defaultProfile in '$settingsPath' to $powerShell7ProfileGuid"
+        }
+        else {
+            Write-Info '[DRY-RUN] Would set Windows Terminal defaultProfile to PowerShell 7 when settings.json is available'
+        }
+        Write-Info '[DRY-RUN] Would set HKCU:\Console\%%Startup DelegationConsole and DelegationTerminal to Windows Terminal values'
+        return
+    }
+
+    if ($settingsPath) {
+        [void](Set-WindowsTerminalDefaultProfile -SettingsPath $settingsPath -ProfileGuid $powerShell7ProfileGuid)
+    }
+    else {
+        Write-WarningMessage 'Windows Terminal settings.json was not found. Skipping default profile configuration.'
+    }
+
+    [void](Set-WindowsTerminalAsDefaultTerminalApplication)
 }
 
 #------------------------------------------------Main Script------------------------------------------------
@@ -1258,9 +1471,9 @@ function Invoke-WingetInstall {
             }
         }
     }
-    else {
-        Write-WarningMessage 'No updates available.'
-    }
+
+    # Configure Windows Terminal defaults(issue #74): default profile and default terminal app.
+    Set-WindowsTerminalDefaults -WhatIf:$WhatIf
 
     # Retry any failed installations once before producing the final summary
     if ($failedApps.Count -gt 0) {
