@@ -2167,6 +2167,131 @@ Describe 'Test-AppDefinitions' {
     }
 }
 
+Describe 'Windows Terminal configuration' {
+    BeforeAll {
+        . "$PSScriptRoot\winget-app-install.ps1"
+    }
+
+    Context 'Set-WindowsTerminalDefaultProfile' {
+        It 'Should set defaultProfile in settings.json' {
+            $settingsPath = Join-Path $TestDrive 'settings.json'
+            Set-Content -Path $settingsPath -Value '{"profiles":{"list":[]}}' -Encoding UTF8
+
+            $result = Set-WindowsTerminalDefaultProfile -SettingsPath $settingsPath -ProfileGuid '{574e775e-4f2a-5b96-ac1e-a2962a402336}'
+            $updated = Get-Content -Path $settingsPath -Raw | ConvertFrom-Json
+
+            $result | Should -Be $true
+            $updated.defaultProfile | Should -Be '{574e775e-4f2a-5b96-ac1e-a2962a402336}'
+        }
+
+        It 'Should parse JSONC style settings with comments and trailing commas' {
+            $settingsPath = Join-Path $TestDrive 'settings-jsonc.json'
+            $jsonc = @'
+{
+  // sample comment
+  "profiles": {
+    "list": [
+    ],
+  },
+}
+'@
+            Set-Content -Path $settingsPath -Value $jsonc -Encoding UTF8
+
+            $result = Set-WindowsTerminalDefaultProfile -SettingsPath $settingsPath -ProfileGuid '574e775e-4f2a-5b96-ac1e-a2962a402336'
+            $updated = Get-Content -Path $settingsPath -Raw | ConvertFrom-Json
+
+            $result | Should -Be $true
+            $updated.defaultProfile | Should -Be '{574e775e-4f2a-5b96-ac1e-a2962a402336}'
+        }
+
+        It 'Should return false when settings path does not exist' {
+            $missingPath = Join-Path $TestDrive 'missing-settings.json'
+
+            $result = Set-WindowsTerminalDefaultProfile -SettingsPath $missingPath -ProfileGuid '{574e775e-4f2a-5b96-ac1e-a2962a402336}'
+
+            $result | Should -Be $false
+        }
+    }
+
+    Context 'Set-WindowsTerminalAsDefaultTerminalApplication' {
+        It 'Should create/update registry values when not already configured' {
+            Mock Test-Path { return $false } -ParameterFilter { $Path -eq 'HKCU:\Console\%%Startup' }
+            Mock New-Item { }
+            Mock Get-ItemProperty { return [pscustomobject]@{} }
+            Mock New-ItemProperty { }
+
+            $result = Set-WindowsTerminalAsDefaultTerminalApplication
+
+            $result | Should -Be $true
+            Assert-MockCalled New-Item -Times 1 -ParameterFilter { $Path -eq 'HKCU:\Console\%%Startup' -and $Force }
+            Assert-MockCalled New-ItemProperty -Times 2
+        }
+
+        It 'Should skip writes when registry is already configured' {
+            Mock Test-Path { return $true } -ParameterFilter { $Path -eq 'HKCU:\Console\%%Startup' }
+            Mock Get-ItemProperty {
+                [pscustomobject]@{
+                    DelegationConsole  = '{2EACA947-7F5F-4CFA-BA87-8F7FBEEFBE69}'
+                    DelegationTerminal = '{E12CFF52-A866-4C77-9A90-F570A7AA2C6B}'
+                }
+            }
+            Mock New-ItemProperty { }
+
+            $result = Set-WindowsTerminalAsDefaultTerminalApplication
+
+            $result | Should -Be $true
+            Assert-MockCalled New-ItemProperty -Times 0
+        }
+
+        It 'Should return false when registry write fails' {
+            Mock Test-Path { return $true } -ParameterFilter { $Path -eq 'HKCU:\Console\%%Startup' }
+            Mock Get-ItemProperty { return [pscustomobject]@{} }
+            Mock New-ItemProperty { throw 'Registry denied' }
+
+            $result = Set-WindowsTerminalAsDefaultTerminalApplication
+
+            $result | Should -Be $false
+        }
+    }
+
+    Context 'Set-WindowsTerminalDefaults orchestration' {
+        It 'Should perform no writes in WhatIf mode' {
+            Mock Get-WindowsTerminalSettingsPaths { return @('C:\temp\settings.json') }
+            Mock Set-WindowsTerminalDefaultProfile { return $true }
+            Mock Set-WindowsTerminalAsDefaultTerminalApplication { return $true }
+            Mock Write-Info { }
+
+            Set-WindowsTerminalDefaults -WhatIf
+
+            Assert-MockCalled Set-WindowsTerminalDefaultProfile -Times 0
+            Assert-MockCalled Set-WindowsTerminalAsDefaultTerminalApplication -Times 0
+            Assert-MockCalled Write-Info -Times 2
+        }
+
+        It 'Should configure both settings file and registry in normal mode' {
+            Mock Get-WindowsTerminalSettingsPaths { return @('C:\temp\settings.json') }
+            Mock Set-WindowsTerminalDefaultProfile { return $true }
+            Mock Set-WindowsTerminalAsDefaultTerminalApplication { return $true }
+
+            Set-WindowsTerminalDefaults
+
+            Assert-MockCalled Set-WindowsTerminalDefaultProfile -Times 1
+            Assert-MockCalled Set-WindowsTerminalAsDefaultTerminalApplication -Times 1
+        }
+
+        It 'Should configure all discovered settings files in normal mode' {
+            Mock Get-WindowsTerminalSettingsPaths { return @('C:\temp\stable-settings.json', 'C:\temp\preview-settings.json') }
+            Mock Set-WindowsTerminalDefaultProfile { return $true }
+            Mock Set-WindowsTerminalAsDefaultTerminalApplication { return $true }
+
+            Set-WindowsTerminalDefaults
+
+            Assert-MockCalled Set-WindowsTerminalDefaultProfile -Times 2
+            Assert-MockCalled Set-WindowsTerminalAsDefaultTerminalApplication -Times 1
+        }
+    }
+}
+
 Describe 'Write-Info' {
     BeforeAll {
         . "$PSScriptRoot\winget-app-install.ps1"
@@ -2409,17 +2534,17 @@ Describe 'WhatIf Mode - Unit Tests' {
 
 Describe 'IEX non-admin execution behavior' {
     BeforeAll {
-        $script:isWindows = [System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Win32NT
+        $script:isWindowsPlatform = [System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Win32NT
         $script:isElevated = $false
 
-        if ($script:isWindows) {
+        if ($script:isWindowsPlatform) {
             $script:isElevated = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
                 [Security.Principal.WindowsBuiltInRole]::Administrator
             )
         }
     }
 
-    It 'Should exit with code 1 and show remote elevation guidance' -Skip:(-not $script:isWindows -or $script:isElevated) {
+    It 'Should exit with code 1 and show remote elevation guidance' -Skip:(-not $script:isWindowsPlatform -or $script:isElevated) {
 
         $scriptPath = Join-Path $PSScriptRoot 'winget-app-install.ps1'
         $psStringEscapedPath = $scriptPath.Replace("'", "''")
