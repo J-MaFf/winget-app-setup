@@ -795,6 +795,63 @@ function Test-AndInstallWinget {
 
 <#
 .SYNOPSIS
+    Tests if winget sources are accessible and attempts to repair them if broken.
+.DESCRIPTION
+    Runs a basic winget source list command to verify the "winget" source is accessible.
+    If the source is broken or missing (e.g., when running as admin on a standard user
+    account), the function attempts to re-register it using Add-AppxPackage from the
+    Microsoft CDN. After repair, it retries the source check once. If still failing, a
+    clear error message with manual remediation guidance is displayed.
+.RETURNS
+    [bool] True if winget sources are accessible (or successfully repaired), otherwise False.
+#>
+function Test-WingetSources {
+    Write-Info 'Checking winget sources...'
+
+    try {
+        $output = winget source list --disable-interactivity 2>&1
+        if ($output -match 'winget') {
+            Write-Success 'Winget sources are accessible.'
+            return $true
+        }
+    }
+    catch {
+        Write-WarningMessage "Winget source list failed: $_"
+    }
+
+    Write-WarningMessage 'Winget source "winget" appears to be broken or missing. Attempting to repair...'
+
+    try {
+        Add-AppxPackage -Path 'https://cdn.winget.microsoft.com/cache/source.msix' -ErrorAction Stop
+        Write-Info 'Winget source package registered. Retrying source check...'
+    }
+    catch {
+        Write-ErrorMessage "Failed to register winget source package: $_"
+        Write-ErrorMessage 'Manual remediation: Run the following as the local user (not as admin):'
+        Write-ErrorMessage '  Add-AppxPackage -Path "https://cdn.winget.microsoft.com/cache/source.msix"'
+        return $false
+    }
+
+    # Retry source check after repair
+    try {
+        $output = winget source list --disable-interactivity 2>&1
+        if ($output -match 'winget') {
+            Write-Success 'Winget sources are now accessible.'
+            return $true
+        }
+    }
+    catch {
+        Write-WarningMessage "Winget source list failed after repair: $_"
+    }
+
+    Write-ErrorMessage 'Winget sources are still not accessible after repair attempt.'
+    Write-ErrorMessage 'Manual remediation: Run the following as the local user (not as admin):'
+    Write-ErrorMessage '  Add-AppxPackage -Path "https://cdn.winget.microsoft.com/cache/source.msix"'
+    return $false
+}
+
+<#
+.SYNOPSIS
     Writes an informational message in blue color.
 .DESCRIPTION
     Helper function for consistent informational and action messages throughout the script.
@@ -945,6 +1002,11 @@ function Invoke-WingetInstall {
     if (-not (Test-AndInstallWinget)) {
         Write-ErrorMessage 'Winget is required for this script. Exiting.'
         Exit
+    }
+
+    # Verify winget sources are accessible and auto-repair if broken
+    if (-not (Test-WingetSources)) {
+        Write-WarningMessage 'Winget sources could not be repaired. Some installations may fail.'
     }
 
     # Add the script directory to the PATH (only if running locally)
