@@ -1279,7 +1279,7 @@ function Invoke-WingetInstallWithRetry {
     Write-Info "[DEBUG] Executing: winget search --id $PackageId --accept-source-agreements"
     $searchResult = & winget search --id $PackageId --accept-source-agreements 2>&1
     $searchOutput = $searchResult | Out-String
-    
+
     Write-Info "[DEBUG] Search output:`n$searchOutput"
 
     if ($searchOutput -match 'No package found' -or -not ($searchOutput -match $PackageId)) {
@@ -1335,18 +1335,18 @@ function Invoke-WingetInstallWithRetry {
                 return $true
             }
 
-            # Check for session-related error that might benefit from retry
-            Write-Info "[DEBUG] Checking for session-related errors..."
-            if ($installMessage -match '0x80073d19|user was logged off|An error occurred because a user was logged') {
-                Write-Info "[DEBUG] Found session error pattern"
+            # Check for retryable errors (session errors and transient file system errors)
+            Write-Info "[DEBUG] Checking for retryable errors..."
+            if ($installMessage -match '0x80073d19|0x80070002|user was logged off|An error occurred because a user was logged|The system cannot find the file specified') {
+                Write-Info "[DEBUG] Found retryable error pattern (session error or transient file system error)"
                 if ($attempt -lt $MaxRetries) {
-                    Write-WarningMessage "Package install failed with session error (Attempt $attempt/$MaxRetries). Retrying..."
+                    Write-WarningMessage "Package install failed with retryable error (Attempt $attempt/$MaxRetries). Retrying..."
                     continue
                 }
             }
 
             # Other errors - don't retry
-            Write-Info "[DEBUG] Non-session error detected or max retries reached. Returning false."
+            Write-Info "[DEBUG] Non-retryable error detected or max retries reached. Returning false."
             return $false
         }
         catch {
@@ -1570,7 +1570,7 @@ function Invoke-WingetInstall {
             if (![String]::Join('', $listApp).Contains($app.name)) {
                 if (-not $WhatIf) {
                     Write-Info "Installing: $($app.name)"
-                    $installSuccess = Invoke-WingetInstallWithRetry -PackageId $app.name -MaxRetries 2
+                    $installSuccess = Invoke-WingetInstallWithRetry -PackageId $app.name -MaxRetries 4
 
                     # Verify installation with timeout
                     $verifyProcess = Start-Process -FilePath 'winget' `
@@ -1721,7 +1721,7 @@ function Invoke-WingetInstall {
             foreach ($appName in $appsToRetry) {
                 try {
                     Write-Info "Retrying: $appName"
-                    $retrySuccess = Invoke-WingetInstallWithRetry -PackageId $appName -MaxRetries 3
+                    $retrySuccess = Invoke-WingetInstallWithRetry -PackageId $appName -MaxRetries 5
 
                     # Verify installation with timeout
                     $verifyProcess = Start-Process -FilePath 'winget' `
