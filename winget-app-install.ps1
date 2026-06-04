@@ -1248,88 +1248,6 @@ function Set-WindowsTerminalDefaults {
     [void](Set-WindowsTerminalAsDefaultTerminalApplication)
 }
 
-<#
-.SYNOPSIS
-    Attempts to install a package with smart retry logic for session-related errors.
-.DESCRIPTION
-    Installs a package using winget with exponential backoff retry for packages that fail with session errors (like Microsoft.PowerShell).
-    Particularly handles error 0x80073d19 "An error occurred because a user was logged off".
-.PARAMETER PackageId
-    The package ID to install (e.g., 'Microsoft.PowerShell')
-.PARAMETER MaxRetries
-    Maximum number of retry attempts (default: 2)
-.RETURNS
-    [bool] True if installation succeeded, false otherwise
-#>
-function Invoke-WingetInstallWithRetry {
-    param (
-        [Parameter(Mandatory = $true)]
-        [string]$PackageId,
-
-        [Parameter(Mandatory = $false)]
-        [int]$MaxRetries = 2
-    )
-
-    # Packages known to have session-related install issues
-    $sessionSensitivePackages = @('Microsoft.PowerShell')
-    $isSessionSensitive = $sessionSensitivePackages -contains $PackageId
-
-    for ($attempt = 1; $attempt -le $MaxRetries; $attempt++) {
-        try {
-            # Add delay before retry attempts (exponential backoff: 3s, 6s, 12s...)
-            if ($attempt -gt 1) {
-                $delaySeconds = 3 * [Math]::Pow(2, $attempt - 2)
-                Write-Info "Retry attempt $($attempt): Waiting $delaySeconds seconds before retrying..."
-                Start-Sleep -Seconds $delaySeconds
-            }
-
-            # Attempt installation
-            $wingetArgs = @(
-                'install'
-                '-e'
-                '--accept-source-agreements'
-                '--accept-package-agreements'
-                '--source'
-                'winget'
-                '--id'
-                $PackageId
-            )
-
-            # Run winget install
-            & winget $wingetArgs 2>&1 | Out-Null
-            $exitCode = $LASTEXITCODE
-
-            # Check if installation succeeded
-            if ($exitCode -eq 0) {
-                return $true
-            }
-
-            # Check for session-related error that might benefit from retry
-            $errorOutput = & winget $wingetArgs 2>&1
-            $errorMessage = $errorOutput | Out-String
-
-            if ($errorMessage -match '0x80073d19|user was logged off|An error occurred because a user was logged') {
-                if ($attempt -lt $MaxRetries) {
-                    Write-WarningMessage "Package install failed with session error (Attempt $attempt/$MaxRetries). Retrying..."
-                    continue
-                }
-            }
-
-            # Other errors - don't retry
-            return $false
-        }
-        catch {
-            if ($attempt -lt $MaxRetries) {
-                Write-WarningMessage "Package install threw exception (Attempt $attempt/$MaxRetries): $_ - Retrying..."
-                continue
-            }
-            return $false
-        }
-    }
-
-    return $false
-}
-
 #------------------------------------------------Main Script------------------------------------------------
 
 <#
@@ -1521,7 +1439,7 @@ function Invoke-WingetInstall {
             if (![String]::Join('', $listApp).Contains($app.name)) {
                 if (-not $WhatIf) {
                     Write-Info "Installing: $($app.name)"
-                    $installSuccess = Invoke-WingetInstallWithRetry -PackageId $app.name -MaxRetries 2
+                    Start-Process winget -ArgumentList "install -e --accept-source-agreements --accept-package-agreements --source winget --id $($app.name)" -NoNewWindow -Wait
 
                     # Verify installation with timeout
                     $verifyProcess = Start-Process -FilePath 'winget' `
@@ -1672,7 +1590,7 @@ function Invoke-WingetInstall {
             foreach ($appName in $appsToRetry) {
                 try {
                     Write-Info "Retrying: $appName"
-                    $retrySuccess = Invoke-WingetInstallWithRetry -PackageId $appName -MaxRetries 3
+                    Start-Process winget -ArgumentList "install -e --accept-source-agreements --accept-package-agreements --source winget --id $appName" -NoNewWindow -Wait
 
                     # Verify installation with timeout
                     $verifyProcess = Start-Process -FilePath 'winget' `
