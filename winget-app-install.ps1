@@ -1302,9 +1302,9 @@ function Invoke-WingetInstallWithRetry {
             }
 
             # Attempt installation
+            # Use a simpler command structure: install without --exact/-e flag as it may conflict with --source and --id
             $wingetArgs = @(
                 'install'
-                '-e'
                 '--accept-source-agreements'
                 '--accept-package-agreements'
                 '--source'
