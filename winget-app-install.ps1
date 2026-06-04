@@ -1308,7 +1308,7 @@ function Enable-ScheduledUpdatesCheck {
         Write-Host "  - Notifications: Toast (with log file fallback)" -ForegroundColor Gray
         Write-Host "  - Rollback capability: Keep 1 previous version" -ForegroundColor Gray
         Write-Host ''
-        
+
         $userChoice = Read-Host 'Enable scheduled updates? (Y/N)'
         if ($userChoice -ne 'Y' -and $userChoice -ne 'y') {
             Write-WarningMessage 'Scheduled updates configuration skipped by user'
@@ -1326,7 +1326,7 @@ function Enable-ScheduledUpdatesCheck {
     # Create the helper script Update-InstalledApps.ps1 if it doesn't exist
     if (-not (Test-Path $updateScript)) {
         Write-Info 'Creating app update helper script...'
-        
+
         $helperScriptContent = @'
 # Update-InstalledApps.ps1
 # Helper script for scheduled app updates
@@ -1352,31 +1352,31 @@ try {
     # Get list of installed packages from winget
     $installedApps = @()
     $output = & winget list --disable-interactivity 2>&1
-    
+
     foreach ($line in $output) {
         if ($line -match '^(\S+)\s+') {
             $installedApps += $matches[1]
         }
     }
-    
+
     Write-Log "Found $($installedApps.Count) installed apps"
-    
+
     # Check for updates
     $updatedCount = 0
     $failedCount = 0
-    
+
     foreach ($app in $installedApps) {
         try {
             # Check if update is available
             $upgradeOutput = & winget upgrade --id $app --disable-interactivity 2>&1
-            
+
             if ($upgradeOutput -match 'upgrade available|newer.*available') {
                 # Create backup before updating
                 Write-Log "Update available for: $app"
-                
+
                 # Perform the update
                 & winget upgrade -e --id $app --accept-source-agreements --accept-package-agreements --disable-interactivity 2>&1 | Out-Null
-                
+
                 if ($LASTEXITCODE -eq 0) {
                     Write-Log "Successfully updated: $app"
                     $updatedCount++
@@ -1392,9 +1392,9 @@ try {
             $failedCount++
         }
     }
-    
+
     Write-Log "Update complete. Updated: $updatedCount, Failed: $failedCount"
-    
+
     # Send notification if requested and available
     if ($ShowNotification) {
         if (Get-Command 'New-BurntToastNotification' -ErrorAction SilentlyContinue) {
@@ -1417,7 +1417,7 @@ catch {
 
 Write-Log 'Update process finished'
 '@
-        
+
         $helperScriptContent | Set-Content $updateScript -Encoding UTF8
         Write-Success 'Helper script created'
     }
@@ -1446,12 +1446,12 @@ Write-Log 'Update process finished'
 
     # Save configuration
     $config = @{
-        Enabled       = $true
-        Day           = $Day.ToString()
-        Hour          = $Hour
-        CreatedDate   = (Get-Date).ToString('o')
-        LastRunDate   = $null
-        UpdateCount   = 0
+        Enabled     = $true
+        Day         = $Day.ToString()
+        Hour        = $Hour
+        CreatedDate = (Get-Date).ToString('o')
+        LastRunDate = $null
+        UpdateCount = 0
     }
 
     $config | ConvertTo-Json | Set-Content $configFile -Encoding UTF8
