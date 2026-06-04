@@ -483,9 +483,16 @@ Describe 'Test-WingetSources' {
         . "$PSScriptRoot\winget-app-install.ps1"
     }
 
-    Context 'When winget sources are accessible' {
+    Context 'When winget sources are listed and functional' {
         It 'Should return true without attempting repair' {
-            Mock winget { return 'winget      https://cdn.winget.microsoft.com/cache' } -ParameterFilter { $args[0] -eq 'source' -and $args[1] -eq 'list' -and $args -contains '--disable-interactivity' }
+            Mock winget {
+                if ($args[0] -eq 'source' -and $args[1] -eq 'list') {
+                    return 'winget      https://cdn.winget.microsoft.com/cache'
+                }
+                elseif ($args[0] -eq 'source' -and $args[1] -eq 'update') {
+                    return 'Operation completed successfully'
+                }
+            }
             Mock Add-AppxPackage { }
 
             $result = Test-WingetSources
@@ -494,16 +501,26 @@ Describe 'Test-WingetSources' {
         }
     }
 
-    Context 'When winget sources are broken and repair succeeds' {
-        It 'Should attempt repair and return true after successful retry' {
-            $script:wingetSourceCallCount = 0
+    Context 'When winget source is corrupted (0x8a15000f)' {
+        It 'Should detect corruption and attempt repair with source reset' {
+            $script:updateCount = 0
             Mock winget {
-                $script:wingetSourceCallCount++
-                if ($script:wingetSourceCallCount -eq 1) {
-                    return 'msstore      https://storeedgefd.dsx.mp.microsoft.com/v9.0'
+                if ($args[0] -eq 'source' -and $args[1] -eq 'list') {
+                    return 'winget      https://cdn.winget.microsoft.com/cache'
                 }
-                return 'winget      https://cdn.winget.microsoft.com/cache'
-            } -ParameterFilter { $args[0] -eq 'source' -and $args[1] -eq 'list' -and $args -contains '--disable-interactivity' }
+                elseif ($args[0] -eq 'source' -and $args[1] -eq 'update') {
+                    $script:updateCount++
+                    if ($script:updateCount -eq 1) {
+                        # First call: corrupted data
+                        return 'Failed: 0x8a15000f Data required by the source is missing'
+                    }
+                    # After reset: works
+                    return 'Operation completed successfully'
+                }
+                elseif ($args[0] -eq 'source' -and $args[1] -eq 'reset') {
+                    return 'Source reset completed'
+                }
+            }
             Mock Add-AppxPackage { }
 
             $result = Test-WingetSources
@@ -512,9 +529,44 @@ Describe 'Test-WingetSources' {
         }
     }
 
-    Context 'When winget sources are broken and Add-AppxPackage fails' {
-        It 'Should return false and emit error messages' {
-            Mock winget { return 'msstore      https://storeedgefd.dsx.mp.microsoft.com/v9.0' } -ParameterFilter { $args[0] -eq 'source' -and $args[1] -eq 'list' -and $args -contains '--disable-interactivity' }
+    Context 'When winget sources are missing entirely' {
+        It 'Should attempt repair with source reset and Add-AppxPackage' {
+            $script:listCallCount = 0
+            Mock winget {
+                if ($args[0] -eq 'source' -and $args[1] -eq 'list') {
+                    $script:listCallCount++
+                    if ($script:listCallCount -eq 1) {
+                        # Initially: only msstore, no winget
+                        return 'msstore      https://storeedgefd.dsx.mp.microsoft.com/v9.0'
+                    }
+                    # After repair: winget source is restored
+                    return 'winget      https://cdn.winget.microsoft.com/cache'
+                }
+                elseif ($args[0] -eq 'source' -and $args[1] -eq 'update') {
+                    return 'Operation completed successfully'
+                }
+                elseif ($args[0] -eq 'source' -and $args[1] -eq 'reset') {
+                    return 'Source reset completed'
+                }
+            }
+            Mock Add-AppxPackage { }
+
+            $result = Test-WingetSources
+            $result | Should -Be $true
+            Assert-MockCalled Add-AppxPackage -Times 1
+        }
+    }
+
+    Context 'When winget sources repair fails' {
+        It 'Should return false when Add-AppxPackage throws error' {
+            Mock winget {
+                if ($args[0] -eq 'source' -and $args[1] -eq 'list') {
+                    return 'msstore      https://storeedgefd.dsx.mp.microsoft.com/v9.0'
+                }
+                elseif ($args[0] -eq 'source' -and $args[1] -eq 'reset') {
+                    return 'Source reset completed'
+                }
+            }
             Mock Add-AppxPackage { throw 'Network error' }
 
             $result = Test-WingetSources
@@ -522,23 +574,66 @@ Describe 'Test-WingetSources' {
         }
     }
 
-    Context 'When winget sources are broken and still broken after repair' {
-        It 'Should return false and emit error messages' {
-            Mock winget { return 'msstore      https://storeedgefd.dsx.mp.microsoft.com/v9.0' } -ParameterFilter { $args[0] -eq 'source' -and $args[1] -eq 'list' -and $args -contains '--disable-interactivity' }
+    Context 'When winget source is corrupted and source reset fails' {
+        It 'Should still attempt Add-AppxPackage as fallback' {
+            $script:listCallCount = 0
+            $script:updateCallCount = 0
+            Mock winget {
+                if ($args[0] -eq 'source' -and $args[1] -eq 'list') {
+                    $script:listCallCount++
+                    if ($script:listCallCount -eq 1) {
+                        # Initially: source is listed
+                        return 'winget      https://cdn.winget.microsoft.com/cache'
+                    }
+                    # After repair attempt: still listed (but Add-AppxPackage will fix it)
+                    return 'winget      https://cdn.winget.microsoft.com/cache'
+                }
+                elseif ($args[0] -eq 'source' -and $args[1] -eq 'update') {
+                    $script:updateCallCount++
+                    if ($script:updateCallCount -eq 1) {
+                        # Initially: corrupted
+                        return '0x8a15000f Data required by the source is missing'
+                    }
+                    # After Add-AppxPackage: works
+                    return 'Operation completed successfully'
+                }
+                elseif ($args[0] -eq 'source' -and $args[1] -eq 'reset') {
+                    # Reset fails
+                    throw 'Access denied'
+                }
+            }
             Mock Add-AppxPackage { }
 
             $result = Test-WingetSources
-            $result | Should -Be $false
+            $result | Should -Be $true
+            Assert-MockCalled Add-AppxPackage -Times 1
         }
     }
 
     Context 'When winget source list throws an exception' {
         It 'Should attempt repair and handle the error gracefully' {
-            Mock winget { throw 'Access denied' } -ParameterFilter { $args[0] -eq 'source' -and $args[1] -eq 'list' -and $args -contains '--disable-interactivity' }
-            Mock Add-AppxPackage { throw 'Network error' }
+            $script:listCount = 0
+            Mock winget {
+                if ($args[0] -eq 'source' -and $args[1] -eq 'list') {
+                    $script:listCount++
+                    if ($script:listCount -eq 1) {
+                        throw 'Access denied'
+                    }
+                    # After repair, list succeeds
+                    return 'winget      https://cdn.winget.microsoft.com/cache'
+                }
+                elseif ($args[0] -eq 'source' -and $args[1] -eq 'update') {
+                    return 'Operation completed successfully'
+                }
+                elseif ($args[0] -eq 'source' -and $args[1] -eq 'reset') {
+                    return 'Source reset completed'
+                }
+            }
+            Mock Add-AppxPackage { }
 
             $result = Test-WingetSources
-            $result | Should -Be $false
+            $result | Should -Be $true
+            Assert-MockCalled Add-AppxPackage -Times 1
         }
     }
 }
