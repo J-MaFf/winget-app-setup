@@ -489,8 +489,8 @@ Describe 'Test-WingetSources' {
                 if ($args[0] -eq 'source' -and $args[1] -eq 'list') {
                     return 'winget      https://cdn.winget.microsoft.com/cache'
                 }
-                elseif ($args[0] -eq 'source' -and $args[1] -eq 'update') {
-                    return 'Operation completed successfully'
+                elseif ($args[0] -eq 'search' -and $args[1] -eq '7zip') {
+                    return '7zip.7zip    7.30'
                 }
             }
             Mock Add-AppxPackage { }
@@ -503,19 +503,21 @@ Describe 'Test-WingetSources' {
 
     Context 'When winget source is corrupted (0x8a15000f)' {
         It 'Should detect corruption and attempt repair with source reset' {
-            $script:updateCount = 0
+            $script:searchCount = 0
             Mock winget {
                 if ($args[0] -eq 'source' -and $args[1] -eq 'list') {
                     return 'winget      https://cdn.winget.microsoft.com/cache'
                 }
-                elseif ($args[0] -eq 'source' -and $args[1] -eq 'update') {
-                    $script:updateCount++
-                    if ($script:updateCount -eq 1) {
+                elseif ($args[0] -eq 'search' -and $args[1] -eq '7zip') {
+                    $script:searchCount++
+                    if ($script:searchCount -eq 1) {
                         # First call: corrupted data
-                        return 'Failed: 0x8a15000f Data required by the source is missing'
+                        $global:LASTEXITCODE = 1
+                        return 'Failed when opening source(s); try the source reset command if the problem persists. 0x8a15000f Data required by the source is missing'
                     }
                     # After reset: works
-                    return 'Operation completed successfully'
+                    $global:LASTEXITCODE = 0
+                    return '7zip.7zip    7.30'
                 }
                 elseif ($args[0] -eq 'source' -and $args[1] -eq 'reset') {
                     return 'Source reset completed'
@@ -532,6 +534,7 @@ Describe 'Test-WingetSources' {
     Context 'When winget sources are missing entirely' {
         It 'Should attempt repair with source reset and Add-AppxPackage' {
             $script:listCallCount = 0
+            $script:searchCallCount = 0
             Mock winget {
                 if ($args[0] -eq 'source' -and $args[1] -eq 'list') {
                     $script:listCallCount++
@@ -542,8 +545,13 @@ Describe 'Test-WingetSources' {
                     # After repair: winget source is restored
                     return 'winget      https://cdn.winget.microsoft.com/cache'
                 }
-                elseif ($args[0] -eq 'source' -and $args[1] -eq 'update') {
-                    return 'Operation completed successfully'
+                elseif ($args[0] -eq 'search' -and $args[1] -eq '7zip') {
+                    $script:searchCallCount++
+                    if ($script:searchCallCount -eq 2) {
+                        # After repair: search works
+                        $global:LASTEXITCODE = 0
+                        return '7zip.7zip    7.30'
+                    }
                 }
                 elseif ($args[0] -eq 'source' -and $args[1] -eq 'reset') {
                     return 'Source reset completed'
@@ -577,7 +585,7 @@ Describe 'Test-WingetSources' {
     Context 'When winget source is corrupted and source reset fails' {
         It 'Should still attempt Add-AppxPackage as fallback' {
             $script:listCallCount = 0
-            $script:updateCallCount = 0
+            $script:searchCallCount = 0
             Mock winget {
                 if ($args[0] -eq 'source' -and $args[1] -eq 'list') {
                     $script:listCallCount++
@@ -588,14 +596,16 @@ Describe 'Test-WingetSources' {
                     # After repair attempt: still listed (but Add-AppxPackage will fix it)
                     return 'winget      https://cdn.winget.microsoft.com/cache'
                 }
-                elseif ($args[0] -eq 'source' -and $args[1] -eq 'update') {
-                    $script:updateCallCount++
-                    if ($script:updateCallCount -eq 1) {
+                elseif ($args[0] -eq 'search' -and $args[1] -eq '7zip') {
+                    $script:searchCallCount++
+                    if ($script:searchCallCount -eq 1) {
                         # Initially: corrupted
+                        $global:LASTEXITCODE = 1
                         return '0x8a15000f Data required by the source is missing'
                     }
                     # After Add-AppxPackage: works
-                    return 'Operation completed successfully'
+                    $global:LASTEXITCODE = 0
+                    return '7zip.7zip    7.30'
                 }
                 elseif ($args[0] -eq 'source' -and $args[1] -eq 'reset') {
                     # Reset fails
@@ -613,6 +623,7 @@ Describe 'Test-WingetSources' {
     Context 'When winget source list throws an exception' {
         It 'Should attempt repair and handle the error gracefully' {
             $script:listCount = 0
+            $script:searchCount = 0
             Mock winget {
                 if ($args[0] -eq 'source' -and $args[1] -eq 'list') {
                     $script:listCount++
@@ -622,8 +633,13 @@ Describe 'Test-WingetSources' {
                     # After repair, list succeeds
                     return 'winget      https://cdn.winget.microsoft.com/cache'
                 }
-                elseif ($args[0] -eq 'source' -and $args[1] -eq 'update') {
-                    return 'Operation completed successfully'
+                elseif ($args[0] -eq 'search' -and $args[1] -eq '7zip') {
+                    $script:searchCount++
+                    if ($script:searchCount -eq 2) {
+                        # After repair: search works
+                        $global:LASTEXITCODE = 0
+                        return '7zip.7zip    7.30'
+                    }
                 }
                 elseif ($args[0] -eq 'source' -and $args[1] -eq 'reset') {
                     return 'Source reset completed'

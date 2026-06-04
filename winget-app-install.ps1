@@ -826,14 +826,17 @@ function Test-WingetSources {
         $sourceIsListed = $false
     }
 
-    # Second check: verify source is functional (not corrupted)
+    # Second check: verify source is functional (not corrupted) by attempting a search
     $sourceIsFunctional = $false
     if ($sourceIsListed) {
         try {
-            $updateOutput = winget source update --disable-interactivity 2>&1
+            # Actually test if the source works by attempting a search
+            # Use '7zip' as a known package that always exists
+            $searchOutput = winget search 7zip --source winget --disable-interactivity 2>&1
+            $searchExitCode = $LASTEXITCODE
 
             # Check for corruption error code 0x8a15000f or similar source errors
-            if ($updateOutput -match '0x8a150|failed when opening|data required') {
+            if ($searchOutput -match '0x8a150|failed when opening|data required' -or $searchExitCode -ne 0) {
                 Write-WarningMessage 'Winget source is listed but contains corrupted or missing data.'
                 $sourceIsFunctional = $false
             }
@@ -843,7 +846,7 @@ function Test-WingetSources {
             }
         }
         catch {
-            Write-WarningMessage "Winget source update check failed: $_"
+            Write-WarningMessage "Winget source functionality test failed: $_"
             $sourceIsFunctional = $false
         }
     }
@@ -897,8 +900,10 @@ function Test-WingetSources {
     $sourceIsFunctional = $false
     if ($sourceIsListed) {
         try {
-            $updateOutput = winget source update --disable-interactivity 2>&1
-            $sourceIsFunctional = -not ($updateOutput -match '0x8a150|failed when opening|data required')
+            # Test source functionality with actual search
+            $searchOutput = winget search 7zip --source winget --disable-interactivity 2>&1
+            $searchExitCode = $LASTEXITCODE
+            $sourceIsFunctional = -not ($searchOutput -match '0x8a150|failed when opening|data required' -or $searchExitCode -ne 0)
         }
         catch {
             $sourceIsFunctional = $false
