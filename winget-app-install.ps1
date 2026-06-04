@@ -816,45 +816,109 @@ function Test-AndInstallWinget {
 function Test-WingetSources {
     Write-Info 'Checking winget sources...'
 
+    # First check: verify source is listed
     try {
         $output = winget source list --disable-interactivity 2>&1
-        if ($output -match 'winget') {
-            Write-Success 'Winget sources are accessible.'
-            return $true
-        }
+        $sourceIsListed = $output -match 'winget'
     }
     catch {
         Write-WarningMessage "Winget source list failed: $_"
+        $sourceIsListed = $false
     }
 
-    Write-WarningMessage 'Winget source "winget" appears to be broken or missing. Attempting to repair...'
+    # Second check: verify source is functional (not corrupted) by attempting a search
+    $sourceIsFunctional = $false
+    if ($sourceIsListed) {
+        try {
+            # Actually test if the source works by attempting a search
+            # Use '7zip' as a known package that always exists
+            $searchOutput = winget search 7zip --source winget --disable-interactivity 2>&1
+            $searchExitCode = $LASTEXITCODE
+
+            # Check for corruption error code 0x8a15000f or similar source errors
+            if ($searchOutput -match '0x8a150|failed when opening|data required' -or $searchExitCode -ne 0) {
+                Write-WarningMessage 'Winget source is listed but contains corrupted or missing data.'
+                $sourceIsFunctional = $false
+            }
+            else {
+                Write-Success 'Winget sources are accessible and functional.'
+                $sourceIsFunctional = $true
+            }
+        }
+        catch {
+            Write-WarningMessage "Winget source functionality test failed: $_"
+            $sourceIsFunctional = $false
+        }
+    }
+
+    # If both checks pass, sources are good
+    if ($sourceIsListed -and $sourceIsFunctional) {
+        return $true
+    }
+
+    # If source is missing entirely, attempt repair
+    if (-not $sourceIsListed) {
+        Write-WarningMessage 'Winget source "winget" appears to be missing. Attempting to repair...'
+    }
+    else {
+        Write-WarningMessage 'Winget source data is corrupted. Attempting to repair...'
+    }
+
+    # Attempt repair: first try source reset, then re-register package
+    try {
+        Write-Info 'Running winget source reset...'
+        $resetOutput = winget source reset --force --disable-interactivity 2>&1
+        Write-Info 'Source reset completed.'
+    }
+    catch {
+        Write-WarningMessage "Winget source reset failed: $_"
+    }
 
     try {
+        Write-Info 'Re-registering winget source package...'
         Add-AppxPackage -Path 'https://cdn.winget.microsoft.com/cache/source.msix' -ErrorAction Stop
         Write-Info 'Winget source package registered. Retrying source check...'
     }
     catch {
         Write-ErrorMessage "Failed to register winget source package: $_"
-        Write-ErrorMessage 'Manual remediation: Run the following as the local user (not as admin):'
-        Write-ErrorMessage '  Add-AppxPackage -Path "https://cdn.winget.microsoft.com/cache/source.msix"'
+        Write-ErrorMessage 'Manual remediation steps:'
+        Write-ErrorMessage '  1. Run as local user (not as admin): Add-AppxPackage -Path "https://cdn.winget.microsoft.com/cache/source.msix"'
+        Write-ErrorMessage '  2. Or run: winget source reset --force'
         return $false
     }
 
-    # Retry source check after repair
+    # Retry both checks after repair
     try {
         $output = winget source list --disable-interactivity 2>&1
-        if ($output -match 'winget') {
-            Write-Success 'Winget sources are now accessible.'
-            return $true
-        }
+        $sourceIsListed = $output -match 'winget'
     }
     catch {
         Write-WarningMessage "Winget source list failed after repair: $_"
+        $sourceIsListed = $false
+    }
+
+    $sourceIsFunctional = $false
+    if ($sourceIsListed) {
+        try {
+            # Test source functionality with actual search
+            $searchOutput = winget search 7zip --source winget --disable-interactivity 2>&1
+            $searchExitCode = $LASTEXITCODE
+            $sourceIsFunctional = -not ($searchOutput -match '0x8a150|failed when opening|data required' -or $searchExitCode -ne 0)
+        }
+        catch {
+            $sourceIsFunctional = $false
+        }
+    }
+
+    if ($sourceIsListed -and $sourceIsFunctional) {
+        Write-Success 'Winget sources are now accessible and functional.'
+        return $true
     }
 
     Write-ErrorMessage 'Winget sources are still not accessible after repair attempt.'
-    Write-ErrorMessage 'Manual remediation: Run the following as the local user (not as admin):'
-    Write-ErrorMessage '  Add-AppxPackage -Path "https://cdn.winget.microsoft.com/cache/source.msix"'
+    Write-ErrorMessage 'Manual remediation steps:'
+    Write-ErrorMessage '  1. Run as local user (not as admin): Add-AppxPackage -Path "https://cdn.winget.microsoft.com/cache/source.msix"'
+    Write-ErrorMessage '  2. Or run: winget source reset --force'
     return $false
 }
 
