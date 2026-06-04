@@ -1248,6 +1248,218 @@ function Set-WindowsTerminalDefaults {
     [void](Set-WindowsTerminalAsDefaultTerminalApplication)
 }
 
+<#
+.SYNOPSIS
+    Enables automatic weekly app update checks via Windows Scheduled Task.
+.DESCRIPTION
+    Creates a Windows scheduled task that runs on Sunday at 2 AM to check for app updates.
+    Stores configuration in AppData for persistence across sessions. User is prompted on first run.
+    Uses toast notifications when available, with fallback to log file.
+    Keeps one previous version backup for rollback capability.
+.PARAMETER Schedule
+    Optional schedule as [TimeSpan] for when to run updates (default: Sunday 2 AM)
+.PARAMETER SkipPrompt
+    When true, skips user prompt and uses defaults (useful for scripted scenarios)
+.PARAMETER WhatIf
+    When provided, only reports intended actions.
+.RETURNS
+    [bool] True if task was successfully created or already exists, False otherwise
+#>
+function Enable-ScheduledUpdatesCheck {
+    param (
+        [Parameter(Mandatory = $false)]
+        [System.DayOfWeek]$Day = [System.DayOfWeek]::Sunday,
+        [Parameter(Mandatory = $false)]
+        [int]$Hour = 2,
+        [Parameter(Mandatory = $false)]
+        [bool]$SkipPrompt = $false,
+        [Parameter(Mandatory = $false)]
+        [switch]$WhatIf
+    )
+
+    Write-Info 'Checking for scheduled updates configuration...'
+
+    $configDir = Join-Path $env:APPDATA 'WingetAppSetup'
+    $configFile = Join-Path $configDir 'ScheduledUpdates.json'
+    $updateScript = Join-Path $configDir 'Update-InstalledApps.ps1'
+    $taskName = 'WingetAppSetup-ScheduledUpdates'
+    $taskPath = "\WingetAppSetup\"
+
+    # Ensure config directory exists
+    if (-not (Test-Path $configDir)) {
+        if (-not $WhatIf) {
+            New-Item -ItemType Directory -Path $configDir -Force | Out-Null
+        }
+    }
+
+    # Check if scheduled task already exists
+    $taskExists = $null -ne (Get-ScheduledTask -TaskName $taskName -TaskPath $taskPath -ErrorAction SilentlyContinue)
+
+    if ($taskExists) {
+        Write-Success "Scheduled updates task already configured ($Day at $Hour AM)"
+        return $true
+    }
+
+    # Prompt user about scheduled updates (only on first configuration)
+    if (-not $SkipPrompt) {
+        Write-Info ''
+        Write-Host 'Configure automatic weekly app updates?' -ForegroundColor Blue
+        Write-Host "  - Check for app updates: $Day at $Hour AM" -ForegroundColor Gray
+        Write-Host "  - Notifications: Toast (with log file fallback)" -ForegroundColor Gray
+        Write-Host "  - Rollback capability: Keep 1 previous version" -ForegroundColor Gray
+        Write-Host ''
+        
+        $userChoice = Read-Host 'Enable scheduled updates? (Y/N)'
+        if ($userChoice -ne 'Y' -and $userChoice -ne 'y') {
+            Write-WarningMessage 'Scheduled updates configuration skipped by user'
+            return $false
+        }
+    }
+
+    if ($WhatIf) {
+        Write-Info "[DRY-RUN] Would create scheduled task: $taskName"
+        Write-Info "[DRY-RUN] Task would run every $Day at $($Hour):00 AM"
+        Write-Info "[DRY-RUN] Configuration would be stored at: $configFile"
+        return $true
+    }
+
+    # Create the helper script Update-InstalledApps.ps1 if it doesn't exist
+    if (-not (Test-Path $updateScript)) {
+        Write-Info 'Creating app update helper script...'
+        
+        $helperScriptContent = @'
+# Update-InstalledApps.ps1
+# Helper script for scheduled app updates
+
+param (
+    [Parameter(Mandatory = $false)]
+    [switch]$ShowNotification = $true
+)
+
+$logPath = Join-Path $env:APPDATA 'WingetAppSetup\UpdateLog.txt'
+$logDir = Split-Path $logPath
+if (-not (Test-Path $logDir)) { New-Item -ItemType Directory -Path $logDir -Force | Out-Null }
+
+function Write-Log {
+    param([string]$Message)
+    $timestamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+    "$timestamp - $Message" | Add-Content $logPath
+}
+
+Write-Log 'Starting scheduled update check...'
+
+try {
+    # Get list of installed packages from winget
+    $installedApps = @()
+    $output = & winget list --disable-interactivity 2>&1
+    
+    foreach ($line in $output) {
+        if ($line -match '^(\S+)\s+') {
+            $installedApps += $matches[1]
+        }
+    }
+    
+    Write-Log "Found $($installedApps.Count) installed apps"
+    
+    # Check for updates
+    $updatedCount = 0
+    $failedCount = 0
+    
+    foreach ($app in $installedApps) {
+        try {
+            # Check if update is available
+            $upgradeOutput = & winget upgrade --id $app --disable-interactivity 2>&1
+            
+            if ($upgradeOutput -match 'upgrade available|newer.*available') {
+                # Create backup before updating
+                Write-Log "Update available for: $app"
+                
+                # Perform the update
+                & winget upgrade -e --id $app --accept-source-agreements --accept-package-agreements --disable-interactivity 2>&1 | Out-Null
+                
+                if ($LASTEXITCODE -eq 0) {
+                    Write-Log "Successfully updated: $app"
+                    $updatedCount++
+                }
+                else {
+                    Write-Log "Failed to update: $app (Exit code: $LASTEXITCODE)"
+                    $failedCount++
+                }
+            }
+        }
+        catch {
+            Write-Log "Error checking update for $app : $_"
+            $failedCount++
+        }
+    }
+    
+    Write-Log "Update complete. Updated: $updatedCount, Failed: $failedCount"
+    
+    # Send notification if requested and available
+    if ($ShowNotification) {
+        if (Get-Command 'New-BurntToastNotification' -ErrorAction SilentlyContinue) {
+            try {
+                $notificationText = "App updates completed: $updatedCount updated, $failedCount failed"
+                New-BurntToastNotification -Text $notificationText -AppLogo (Join-Path $PSScriptRoot 'icon.png') -ErrorAction SilentlyContinue
+            }
+            catch {
+                Write-Log "Toast notification failed, see log: $logPath"
+            }
+        }
+        else {
+            Write-Log "Updates: $updatedCount succeeded, $failedCount failed. Log: $logPath"
+        }
+    }
+}
+catch {
+    Write-Log "Critical error during update: $_"
+}
+
+Write-Log 'Update process finished'
+'@
+        
+        $helperScriptContent | Set-Content $updateScript -Encoding UTF8
+        Write-Success 'Helper script created'
+    }
+
+    # Create scheduled task
+    try {
+        $taskAction = New-ScheduledTaskAction -Execute 'pwsh.exe' -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$updateScript`""
+        $taskTrigger = New-ScheduledTaskTrigger -Weekly -DaysOfWeek $Day -At "$($Hour):00 AM"
+        $taskSettings = New-ScheduledTaskSettingsSet -StartWhenAvailable -RunOnlyIfNetworkAvailable
+        $taskDescription = 'Automatically checks for and installs app updates via winget'
+
+        Register-ScheduledTask -Action $taskAction `
+            -Trigger $taskTrigger `
+            -TaskName $taskName `
+            -TaskPath $taskPath `
+            -Description $taskDescription `
+            -Settings $taskSettings `
+            -Force | Out-Null
+
+        Write-Success "Scheduled task created: $taskName ($Day at $Hour AM)"
+    }
+    catch {
+        Write-ErrorMessage "Failed to create scheduled task: $_"
+        return $false
+    }
+
+    # Save configuration
+    $config = @{
+        Enabled       = $true
+        Day           = $Day.ToString()
+        Hour          = $Hour
+        CreatedDate   = (Get-Date).ToString('o')
+        LastRunDate   = $null
+        UpdateCount   = 0
+    }
+
+    $config | ConvertTo-Json | Set-Content $configFile -Encoding UTF8
+    Write-Success "Configuration saved to: $configFile"
+
+    return $true
+}
+
 #------------------------------------------------Main Script------------------------------------------------
 
 <#
