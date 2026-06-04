@@ -1493,6 +1493,21 @@ function Invoke-WingetInstall {
         }
     }
 
+    # Update winget sources to ensure package cache is current
+    if (-not $WhatIf) {
+        Write-Info 'Updating winget sources to refresh package cache...'
+        try {
+            & winget source update --disable-interactivity 2>&1 | Out-Null
+            Write-Success 'Winget sources updated successfully'
+        }
+        catch {
+            Write-WarningMessage "Failed to update winget sources: $_. Continuing with installation..."
+        }
+    }
+    else {
+        Write-Info '[DRY-RUN] Would update winget sources'
+    }
+
     Foreach ($app in $apps) {
         try {
             # Run winget list with timeout to prevent hanging
