@@ -1274,6 +1274,24 @@ function Invoke-WingetInstallWithRetry {
     $sessionSensitivePackages = @('Microsoft.PowerShell')
     $isSessionSensitive = $sessionSensitivePackages -contains $PackageId
 
+    # First, search for the package to verify it exists and identify the correct source
+    Write-Info "Searching for package: $PackageId"
+    $searchResult = & winget search --id $PackageId --accept-source-agreements 2>&1
+    $searchOutput = $searchResult | Out-String
+
+    if ($searchOutput -match 'No package found' -or -not ($searchOutput -match $PackageId)) {
+        Write-WarningMessage "Package $PackageId not found in any source. Skipping installation."
+        return $false
+    }
+
+    # Determine which source has the package (prefer winget over msstore)
+    $packageSource = 'winget'
+    if ($searchOutput -match 'msstore' -and -not ($searchOutput -match 'winget')) {
+        $packageSource = 'msstore'
+    }
+
+    Write-Info "Found package $PackageId in source: $packageSource"
+
     for ($attempt = 1; $attempt -le $MaxRetries; $attempt++) {
         try {
             # Add delay before retry attempts (exponential backoff: 3s, 6s, 12s...)
@@ -1290,7 +1308,7 @@ function Invoke-WingetInstallWithRetry {
                 '--accept-source-agreements'
                 '--accept-package-agreements'
                 '--source'
-                'winget'
+                $packageSource
                 '--id'
                 $PackageId
             )
