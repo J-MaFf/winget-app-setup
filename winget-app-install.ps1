@@ -1468,13 +1468,14 @@ function Enable-ScheduledUpdatesCheck {
     $taskPath = '\winget-app-setup\'
 
     if (-not $SkipPrompt) {
-        $userChoice = Read-Host 'Enable weekly automatic update checks? Updates will be checked every Sunday at 2:00 AM. (Y/N)'
+        $scheduleDescription = if ($UpdateFrequency -eq 'Daily') { 'every day at 2:00 AM' } else { 'every Sunday at 2:00 AM' }
+        $userChoice = Read-Host "Enable $($UpdateFrequency.ToLower()) automatic update checks? Updates will be checked $scheduleDescription. (Y/N)"
         $enableScheduledUpdates = $userChoice -in @('Y', 'y')
 
         $config = New-DefaultUpdateConfiguration -UpdateFrequency $UpdateFrequency -AutoInstall $AutoInstall -EnabledScheduledUpdates $enableScheduledUpdates -InitialPromptCompleted $true
         Save-UpdateConfiguration -Configuration $config
 
-        if ($userChoice -ne 'Y' -and $userChoice -ne 'y') {
+        if (-not $enableScheduledUpdates) {
             Write-WarningMessage 'Scheduled updates were not enabled.'
             return $false
         }

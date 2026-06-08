@@ -144,7 +144,11 @@ function Send-UpdateToast {
         [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null
         [Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime] | Out-Null
 
-        $escapedDetails = ($Details | ForEach-Object { [System.Security.SecurityElement]::Escape($_) })
+        $normalizedDetails = @($Details | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+        if ($normalizedDetails.Count -eq 0) {
+            $normalizedDetails = @('No package details available.')
+        }
+        $escapedDetails = ($normalizedDetails | ForEach-Object { [System.Security.SecurityElement]::Escape($_) })
         $body = ($escapedDetails -join '</text><text>')
         $xml = @"
 <toast>
@@ -188,14 +192,14 @@ $failedUpdates = @()
 if ($autoInstall) {
     foreach ($update in $updates) {
         try {
-            $null = & winget upgrade -e --id $update.PackageName --accept-source-agreements --accept-package-agreements --disable-interactivity 2>&1
+            $upgradeOutput = & winget upgrade -e --id $update.PackageName --accept-source-agreements --accept-package-agreements --disable-interactivity 2>&1
             if ($LASTEXITCODE -eq 0) {
                 $successfulUpdates += $update
                 Write-UpdateLog "SUCCESS | $($update.PackageName) | $($update.CurrentVersion) -> $($update.AvailableVersion)"
             }
             else {
                 $failedUpdates += $update
-                Write-UpdateLog "FAILED  | $($update.PackageName) | $($update.CurrentVersion) -> $($update.AvailableVersion)"
+                Write-UpdateLog "FAILED  | $($update.PackageName) | $($update.CurrentVersion) -> $($update.AvailableVersion) | Output: $($upgradeOutput | Out-String)"
             }
         }
         catch {
