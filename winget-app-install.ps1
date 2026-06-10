@@ -678,10 +678,16 @@ function Invoke-WingetCommand {
 
     $commandOutput | ForEach-Object {
         if ($_ -match $SuccessPattern) {
-            $SuccessArray.Value += $_.Split()[$SuccessIndex]
+            $parts = $_.Split()
+            if ($SuccessIndex -lt $parts.Count) {
+                $SuccessArray.Value += $parts[$SuccessIndex]
+            }
         }
         elseif ($_ -match $FailurePattern) {
-            $FailureArray.Value += $_.Split()[$FailureIndex]
+            $parts = $_.Split()
+            if ($FailureIndex -lt $parts.Count) {
+                $FailureArray.Value += $parts[$FailureIndex]
+            }
         }
     }
 
