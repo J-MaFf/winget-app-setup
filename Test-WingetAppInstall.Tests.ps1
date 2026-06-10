@@ -2475,6 +2475,7 @@ Describe 'Scheduled Updates - Unit Tests' -Tag 'ScheduledUpdates' {
 
     It 'Enable-ScheduledUpdatesCheck should create task and persist config' {
         Mock Get-Command { $null } -ParameterFilter { $Name -eq 'pwsh' }
+        Mock Install-UpdateHelperScript { $env:APPDATA + '\winget-app-setup\Update-InstalledApps.ps1' }
 
         $result = Enable-ScheduledUpdatesCheck -SkipPrompt:$true -UpdateFrequency Daily -AutoInstall:$false
         $paths = Get-UpdateSettingsPaths
