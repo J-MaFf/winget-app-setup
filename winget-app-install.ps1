@@ -784,6 +784,57 @@ function Test-UpdatesAvailable {
 
 <#
 .SYNOPSIS
+    Installs a winget package with exponential backoff retry for session errors (0x80073d19).
+.DESCRIPTION
+    Wraps Start-Process winget install, captures the exit code, and retries on the specific
+    session-logged-off error that intermittently affects packages like Microsoft.PowerShell.
+    Does NOT re-run winget on each attempt — only retries when the session error is detected.
+.PARAMETER PackageId
+    The winget package ID to install.
+.PARAMETER MaxRetries
+    Maximum retry attempts after the first try (default: 2).
+.RETURNS
+    [int] The final winget exit code.
+#>
+function Invoke-WingetInstallWithSessionRetry {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$PackageId,
+        [Parameter(Mandatory = $false)]
+        [int]$MaxRetries = 2
+    )
+
+    $sessionErrorCode = -2147009767  # 0x80073d19 as signed int32
+
+    for ($attempt = 1; $attempt -le ($MaxRetries + 1); $attempt++) {
+        if ($attempt -gt 1) {
+            $delaySeconds = 3 * [Math]::Pow(2, $attempt - 2)
+            Write-WarningMessage "Attempt $attempt/$($MaxRetries + 1): Waiting $delaySeconds seconds before retrying $PackageId..."
+            Start-Sleep -Seconds $delaySeconds
+        }
+
+        $process = Start-Process winget `
+            -ArgumentList "install -e --accept-source-agreements --accept-package-agreements --source winget --id $PackageId" `
+            -NoNewWindow -Wait -PassThru
+        $exitCode = $process.ExitCode
+
+        if ($exitCode -eq 0) {
+            return 0
+        }
+
+        if ($exitCode -eq $sessionErrorCode -and $attempt -le $MaxRetries) {
+            Write-WarningMessage "Session error (0x80073d19) installing $PackageId. Will retry..."
+            continue
+        }
+
+        return $exitCode
+    }
+
+    return $process.ExitCode
+}
+
+<#
+.SYNOPSIS
     Returns the filesystem paths used by scheduled update functionality.
 #>
 function Get-UpdateSettingsPaths {
@@ -1803,36 +1854,16 @@ function Invoke-WingetInstall {
             if (![String]::Join('', $listApp).Contains($app.name)) {
                 if (-not $WhatIf) {
                     Write-Info "Installing: $($app.name)"
-                    Start-Process winget -ArgumentList "install -e --accept-source-agreements --accept-package-agreements --source winget --id $($app.name)" -NoNewWindow -Wait
+                    $installExitCode = Invoke-WingetInstallWithSessionRetry -PackageId $app.name
 
-                    # Verify installation with timeout
-                    $verifyProcess = Start-Process -FilePath 'winget' `
-                        -ArgumentList 'list', '--exact', '--id', $app.name, '--accept-source-agreements' `
-                        -NoNewWindow `
-                        -PassThru `
-                        -RedirectStandardOutput "$env:TEMP\winget_verify_output.txt" `
-                        -RedirectStandardError "$env:TEMP\winget_verify_error.txt"
-
-                    if ($verifyProcess.WaitForExit(15000)) {
-                        $installResult = Get-Content "$env:TEMP\winget_verify_output.txt" -ErrorAction SilentlyContinue
-                        if (![String]::Join('', $installResult).Contains($app.name)) {
-                            Write-ErrorMessage "Failed to install: $($app.name). No package found matching input criteria."
-                            $failedApps += $app.name
-                        }
-                        else {
-                            Write-Success "Successfully installed: $($app.name)"
-                            $installedApps += $app.name
-                        }
+                    if ($installExitCode -eq 0) {
+                        Write-Success "Successfully installed: $($app.name)"
+                        $installedApps += $app.name
                     }
                     else {
-                        Write-WarningMessage "Verification timed out for: $($app.name). Assuming installation failed."
-                        $verifyProcess.Kill()
+                        Write-ErrorMessage "Failed to install: $($app.name) (exit code: $installExitCode)"
                         $failedApps += $app.name
                     }
-
-                    # Cleanup temp files
-                    Remove-Item "$env:TEMP\winget_verify_output.txt" -ErrorAction SilentlyContinue
-                    Remove-Item "$env:TEMP\winget_verify_error.txt" -ErrorAction SilentlyContinue
                 }
                 else {
                     Write-Info "[DRY-RUN] Would install: $($app.name)"
