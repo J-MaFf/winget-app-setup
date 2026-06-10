@@ -1554,6 +1554,122 @@ function Set-WindowsTerminalDefaults {
 
 <#
 .SYNOPSIS
+    Attempts to install a package with smart retry logic for session-related errors.
+.DESCRIPTION
+    Installs a package using winget with exponential backoff retry for packages that fail with session errors (like Microsoft.PowerShell).
+    Particularly handles error 0x80073d19 "An error occurred because a user was logged off".
+.PARAMETER PackageId
+    The package ID to install (e.g., 'Microsoft.PowerShell')
+.PARAMETER MaxRetries
+    Maximum number of retry attempts (default: 2)
+.RETURNS
+    [bool] True if installation succeeded, false otherwise
+#>
+function Invoke-WingetInstallWithRetry {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$PackageId,
+
+        [Parameter(Mandatory = $false)]
+        [int]$MaxRetries = 2
+    )
+
+    # Packages known to have session-related install issues
+    $sessionSensitivePackages = @('Microsoft.PowerShell')
+    $isSessionSensitive = $sessionSensitivePackages -contains $PackageId
+
+    # First, search for the package to verify it exists and identify the correct source
+    Write-Info "Searching for package: $PackageId"
+    Write-Info "[DEBUG] Executing: winget search --id $PackageId --accept-source-agreements"
+    $searchResult = & winget search --id $PackageId --accept-source-agreements 2>&1
+    $searchOutput = $searchResult | Out-String
+
+    Write-Info "[DEBUG] Search output:`n$searchOutput"
+
+    if ($searchOutput -match 'No package found' -or -not ($searchOutput -match $PackageId)) {
+        Write-WarningMessage "Package $PackageId not found in any source. Skipping installation."
+        Write-Info "[DEBUG] Search failed - no package found in output"
+        return $false
+    }
+
+    # Determine which source has the package (prefer winget over msstore)
+    $packageSource = 'winget'
+    if ($searchOutput -match 'msstore' -and -not ($searchOutput -match 'winget')) {
+        $packageSource = 'msstore'
+    }
+
+    Write-Info "[DEBUG] Source detection: winget match=$($searchOutput -match 'winget'), msstore match=$($searchOutput -match 'msstore')"
+    Write-Info "Found package $PackageId in source: $packageSource"
+
+    for ($attempt = 1; $attempt -le $MaxRetries; $attempt++) {
+        try {
+            # Add delay before retry attempts (exponential backoff: 3s, 6s, 12s...)
+            if ($attempt -gt 1) {
+                $delaySeconds = 3 * [Math]::Pow(2, $attempt - 2)
+                Write-Info "Retry attempt $($attempt): Waiting $delaySeconds seconds before retrying..."
+                Start-Sleep -Seconds $delaySeconds
+            }
+
+            # Attempt installation
+            # Use a simpler command structure: install without --exact/-e flag as it may conflict with --source and --id
+            $wingetArgs = @(
+                'install'
+                '--accept-source-agreements'
+                '--accept-package-agreements'
+                '--source'
+                $packageSource
+                '--id'
+                $PackageId
+            )
+
+            Write-Info "[DEBUG] Attempt $attempt/$MaxRetries - Executing install command:"
+            Write-Info "[DEBUG] winget $($wingetArgs -join ' ')"
+
+            # Run winget install and capture all output
+            $installOutput = & winget $wingetArgs 2>&1
+            $installMessage = $installOutput | Out-String
+            $exitCode = $LASTEXITCODE
+
+            Write-Info "[DEBUG] Exit code: $exitCode"
+            Write-Info "[DEBUG] Install output:`n$installMessage"
+
+            # Check if installation succeeded
+            if ($exitCode -eq 0) {
+                Write-Info "[DEBUG] Installation succeeded with exit code 0"
+                return $true
+            }
+
+            # Check for retryable errors (session errors and transient file system errors)
+            Write-Info "[DEBUG] Checking for retryable errors..."
+            if ($installMessage -match '0x80073d19|0x80070002|user was logged off|An error occurred because a user was logged|The system cannot find the file specified') {
+                Write-Info "[DEBUG] Found retryable error pattern (session error or transient file system error)"
+                if ($attempt -lt $MaxRetries) {
+                    Write-WarningMessage "Package install failed with retryable error (Attempt $attempt/$MaxRetries). Retrying..."
+                    continue
+                }
+            }
+
+            # Other errors - don't retry
+            Write-Info "[DEBUG] Non-retryable error detected or max retries reached. Returning false."
+            return $false
+        }
+        catch {
+            Write-Info "[DEBUG] Exception caught on attempt $attempt/$MaxRetries"
+            Write-Info "[DEBUG] Exception message: $_"
+            if ($attempt -lt $MaxRetries) {
+                Write-WarningMessage "Package install threw exception (Attempt $attempt/$MaxRetries): $_ - Retrying..."
+                continue
+            }
+            Write-Info "[DEBUG] Max retries reached. Returning false."
+            return $false
+        }
+    }
+
+    return $false
+}
+
+<#
+.SYNOPSIS
     Returns true when the scheduled updates task currently exists.
 .RETURNS
     [bool]
@@ -1935,6 +2051,21 @@ function Invoke-WingetInstall {
         }
     }
 
+    # Update winget sources to ensure package cache is current
+    if (-not $WhatIf) {
+        Write-Info 'Updating winget sources to refresh package cache...'
+        try {
+            & winget source update --disable-interactivity 2>&1 | Out-Null
+            Write-Success 'Winget sources updated successfully'
+        }
+        catch {
+            Write-WarningMessage "Failed to update winget sources: $_. Continuing with installation..."
+        }
+    }
+    else {
+        Write-Info '[DRY-RUN] Would update winget sources'
+    }
+
     Foreach ($app in $apps) {
         try {
             # Run winget list with timeout to prevent hanging
@@ -1963,14 +2094,14 @@ function Invoke-WingetInstall {
             if (![String]::Join('', $listApp).Contains($app.name)) {
                 if (-not $WhatIf) {
                     Write-Info "Installing: $($app.name)"
-                    $installExitCode = Invoke-WingetInstallWithSessionRetry -PackageId $app.name
+                    $installSuccess = Invoke-WingetInstallWithRetry -PackageId $app.name -MaxRetries 4
 
-                    if ($installExitCode -eq 0) {
+                    if ($installSuccess) {
                         Write-Success "Successfully installed: $($app.name)"
                         $installedApps += $app.name
                     }
                     else {
-                        Write-ErrorMessage "Failed to install: $($app.name) (exit code: $installExitCode)"
+                        Write-ErrorMessage "Failed to install: $($app.name)"
                         $failedApps += $app.name
                     }
                 }
@@ -2094,7 +2225,7 @@ function Invoke-WingetInstall {
             foreach ($appName in $appsToRetry) {
                 try {
                     Write-Info "Retrying: $appName"
-                    Start-Process winget -ArgumentList "install -e --accept-source-agreements --accept-package-agreements --source winget --id $appName" -NoNewWindow -Wait
+                    $retrySuccess = Invoke-WingetInstallWithRetry -PackageId $appName -MaxRetries 5
 
                     # Verify installation with timeout
                     $verifyProcess = Start-Process -FilePath 'winget' `
