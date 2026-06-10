@@ -148,23 +148,17 @@ function Send-UpdateToast {
         if ($normalizedDetails.Count -eq 0) {
             $normalizedDetails = @('No package details available.')
         }
-        $escapedDetails = ($normalizedDetails | ForEach-Object { [System.Security.SecurityElement]::Escape($_) })
-        $body = ($escapedDetails -join '</text><text>')
-        $xml = @"
-<toast>
-  <visual>
-    <binding template="ToastGeneric">
-      <text>Winget Updates Available</text>
-      <text>$([System.Security.SecurityElement]::Escape($SummaryText))</text>
-      <text>$body</text>
-      <text>$([System.Security.SecurityElement]::Escape("Timestamp: $timestamp"))</text>
-    </binding>
-  </visual>
-</toast>
-"@
 
         $xmlDoc = New-Object Windows.Data.Xml.Dom.XmlDocument
-        $xmlDoc.LoadXml($xml)
+        $xmlDoc.LoadXml('<toast><visual><binding template="ToastGeneric"></binding></visual></toast>')
+        $binding = $xmlDoc.SelectSingleNode('//binding')
+
+        foreach ($textValue in @('Winget Updates Available', $SummaryText) + $normalizedDetails + @("Timestamp: $timestamp")) {
+            $textNode = $xmlDoc.CreateElement('text')
+            $textNode.InnerText = $textValue
+            $binding.AppendChild($textNode) | Out-Null
+        }
+
         $toast = [Windows.UI.Notifications.ToastNotification]::new($xmlDoc)
         $notifier = [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('winget-app-setup')
         $notifier.Show($toast)
