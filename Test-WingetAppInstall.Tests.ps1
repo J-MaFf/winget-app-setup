@@ -487,9 +487,11 @@ Describe 'Test-WingetSources' {
         It 'Should return true without attempting repair' {
             Mock winget {
                 if ($args[0] -eq 'source' -and $args[1] -eq 'list') {
+                    $global:LASTEXITCODE = 0
                     return 'winget      https://cdn.winget.microsoft.com/cache'
                 }
                 elseif ($args[0] -eq 'search' -and $args[1] -eq '7zip') {
+                    $global:LASTEXITCODE = 0
                     return '7zip.7zip    7.30'
                 }
             }
@@ -506,6 +508,7 @@ Describe 'Test-WingetSources' {
             $script:searchCount = 0
             Mock winget {
                 if ($args[0] -eq 'source' -and $args[1] -eq 'list') {
+                    $global:LASTEXITCODE = 0
                     return 'winget      https://cdn.winget.microsoft.com/cache'
                 }
                 elseif ($args[0] -eq 'search' -and $args[1] -eq '7zip') {
@@ -520,6 +523,7 @@ Describe 'Test-WingetSources' {
                     return '7zip.7zip    7.30'
                 }
                 elseif ($args[0] -eq 'source' -and $args[1] -eq 'reset') {
+                    $global:LASTEXITCODE = 0
                     return 'Source reset completed'
                 }
             }
@@ -2197,13 +2201,32 @@ Describe 'Retry Failed Installations' {
 
             $exitCode | Should -Be 1
         }
+    }
+}
 
-        It 'Should signal zero exit when all apps succeed after retry' {
-            $failedApps = @()
+Describe 'Invoke-WingetInstallWithRetry' {
+    BeforeAll {
+        # Dot-source the main script to import the function
+        . "$PSScriptRoot\winget-app-install.ps1"
+        
+        Mock Write-Info { }
+        Mock Write-WarningMessage { }
+        Mock Write-ErrorMessage { }
+    }
 
-            $exitCode = if ($failedApps.Count -gt 0) { 1 } else { 0 }
+    Context 'Function exists and is callable' {
+        It 'Should exist as a function' {
+            Get-Command Invoke-WingetInstallWithRetry -ErrorAction SilentlyContinue | Should -Not -BeNullOrEmpty
+        }
+    }
 
-            $exitCode | Should -Be 0
+    Context 'Parameter validation' {
+        It 'Should accept PackageId parameter' {
+            { Invoke-WingetInstallWithRetry -PackageId 'Test.Package' 2>&1 } | Should -Not -Throw
+        }
+
+        It 'Should accept MaxRetries parameter' {
+            { Invoke-WingetInstallWithRetry -PackageId 'Test.Package' -MaxRetries 3 2>&1 } | Should -Not -Throw
         }
     }
 }
@@ -2498,6 +2521,63 @@ Describe 'Scheduled Updates - Unit Tests' -Tag 'ScheduledUpdates' {
         $config.EnabledScheduledUpdates | Should -BeFalse
         $config.Enabled | Should -BeFalse
         Assert-MockCalled Unregister-ScheduledTask -Times 1
+    }
+}
+
+Describe 'Test-SystemRequirements' -Tag 'SystemRequirements' {
+    BeforeAll {
+        . "$PSScriptRoot\winget-app-install.ps1"
+    }
+
+    BeforeEach {
+        Mock Write-Info { }
+        Mock Write-Success { }
+        Mock Write-WarningMessage { }
+        Mock Write-ErrorMessage { }
+        Mock Test-NetConnection { $true }
+        Mock Get-PSDrive {
+            [PSCustomObject]@{ Free = 100GB }
+        }
+        Mock Get-ItemProperty {
+            [PSCustomObject]@{ ProductName = 'Windows 11 Pro' }
+        }
+    }
+
+    It 'Returns $true when all checks pass' {
+        $result = Test-SystemRequirements
+        $result | Should -BeTrue
+    }
+
+    It 'Returns $false when network check fails' {
+        Mock Test-NetConnection { $false }
+        $result = Test-SystemRequirements
+        $result | Should -BeFalse
+    }
+
+    It 'Returns $false when network check throws' {
+        Mock Test-NetConnection { throw 'No network' }
+        $result = Test-SystemRequirements
+        $result | Should -BeFalse
+    }
+
+    It 'Returns $false when user declines low disk space prompt' {
+        Mock Get-PSDrive { [PSCustomObject]@{ Free = 10GB } }
+        Mock Read-Host { 'N' }
+        $result = Test-SystemRequirements
+        $result | Should -BeFalse
+    }
+
+    It 'Returns $true when user accepts low disk space prompt' {
+        Mock Get-PSDrive { [PSCustomObject]@{ Free = 10GB } }
+        Mock Read-Host { 'Y' }
+        $result = Test-SystemRequirements
+        $result | Should -BeTrue
+    }
+
+    It 'Skips disk space prompt in WhatIf mode' {
+        Mock Get-PSDrive { [PSCustomObject]@{ Free = 10GB } }
+        Mock Read-Host { throw 'Should not prompt in WhatIf mode' }
+        { Test-SystemRequirements -WhatIf } | Should -Not -Throw
     }
 }
 

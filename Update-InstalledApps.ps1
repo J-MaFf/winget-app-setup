@@ -94,7 +94,7 @@ function Get-UpdateReport {
         if ($line -match '^\s*-{3,}') { continue }
         if ($line -match 'No installed package found|No available upgrade found|No newer package versions are available') { continue }
         $columns = $line.Trim() -split '\s{2,}'
-        if ($columns.Count -ge 4) {
+        if ($columns.Count -ge 4 -and $columns[1] -match '^[\w][\w.\-]+\.[\w][\w.\-]+$') {
             $report += [PSCustomObject]@{
                 PackageName      = $columns[1]
                 CurrentVersion   = $columns[2]
@@ -148,23 +148,17 @@ function Send-UpdateToast {
         if ($normalizedDetails.Count -eq 0) {
             $normalizedDetails = @('No package details available.')
         }
-        $escapedDetails = ($normalizedDetails | ForEach-Object { [System.Security.SecurityElement]::Escape($_) })
-        $body = ($escapedDetails -join '</text><text>')
-        $xml = @"
-<toast>
-  <visual>
-    <binding template="ToastGeneric">
-      <text>Winget Updates Available</text>
-      <text>$([System.Security.SecurityElement]::Escape($SummaryText))</text>
-      <text>$body</text>
-      <text>$([System.Security.SecurityElement]::Escape("Timestamp: $timestamp"))</text>
-    </binding>
-  </visual>
-</toast>
-"@
 
         $xmlDoc = New-Object Windows.Data.Xml.Dom.XmlDocument
-        $xmlDoc.LoadXml($xml)
+        $xmlDoc.LoadXml('<toast><visual><binding template="ToastGeneric"></binding></visual></toast>')
+        $binding = $xmlDoc.SelectSingleNode('//binding')
+
+        foreach ($textValue in @('Winget Updates Available', $SummaryText) + $normalizedDetails + @("Timestamp: $timestamp")) {
+            $textNode = $xmlDoc.CreateElement('text')
+            $textNode.InnerText = $textValue
+            $binding.AppendChild($textNode) | Out-Null
+        }
+
         $toast = [Windows.UI.Notifications.ToastNotification]::new($xmlDoc)
         $notifier = [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('winget-app-setup')
         $notifier.Show($toast)
@@ -193,13 +187,14 @@ if ($autoInstall) {
     foreach ($update in $updates) {
         try {
             $upgradeOutput = & winget upgrade -e --id $update.PackageName --accept-source-agreements --accept-package-agreements --disable-interactivity 2>&1
-            if ($LASTEXITCODE -eq 0) {
+            $wingetExitCode = $LASTEXITCODE
+            if ($wingetExitCode -eq 0) {
                 $successfulUpdates += $update
                 Write-UpdateLog "SUCCESS | $($update.PackageName) | $($update.CurrentVersion) -> $($update.AvailableVersion)"
             }
             else {
                 $failedUpdates += $update
-                Write-UpdateLog "FAILED  | $($update.PackageName) | $($update.CurrentVersion) -> $($update.AvailableVersion) | Output: $($upgradeOutput | Out-String)"
+                Write-UpdateLog "FAILED  | $($update.PackageName) | $($update.CurrentVersion) -> $($update.AvailableVersion) | ExitCode: $wingetExitCode | Output: $($upgradeOutput | Out-String)"
             }
         }
         catch {
