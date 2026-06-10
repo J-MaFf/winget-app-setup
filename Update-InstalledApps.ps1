@@ -193,13 +193,14 @@ if ($autoInstall) {
     foreach ($update in $updates) {
         try {
             $upgradeOutput = & winget upgrade -e --id $update.PackageName --accept-source-agreements --accept-package-agreements --disable-interactivity 2>&1
-            if ($LASTEXITCODE -eq 0) {
+            $wingetExitCode = $LASTEXITCODE
+            if ($wingetExitCode -eq 0) {
                 $successfulUpdates += $update
                 Write-UpdateLog "SUCCESS | $($update.PackageName) | $($update.CurrentVersion) -> $($update.AvailableVersion)"
             }
             else {
                 $failedUpdates += $update
-                Write-UpdateLog "FAILED  | $($update.PackageName) | $($update.CurrentVersion) -> $($update.AvailableVersion) | Output: $($upgradeOutput | Out-String)"
+                Write-UpdateLog "FAILED  | $($update.PackageName) | $($update.CurrentVersion) -> $($update.AvailableVersion) | ExitCode: $wingetExitCode | Output: $($upgradeOutput | Out-String)"
             }
         }
         catch {
