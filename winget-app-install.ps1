@@ -52,7 +52,9 @@ param (
     [switch]$AutoInstallUpdates,
     [Parameter(Mandatory = $false)]
     [ValidateSet('Weekly', 'Daily')]
-    [string]$UpdateFrequency = 'Weekly'
+    [string]$UpdateFrequency = 'Weekly',
+    [Parameter(Mandatory = $false)]
+    [switch]$SkipSystemCheck
 )
 
 # ------------------------------------------------Functions------------------------------------------------
@@ -831,6 +833,103 @@ function Invoke-WingetInstallWithSessionRetry {
     }
 
     return $process.ExitCode
+}
+
+<#
+.SYNOPSIS
+    Runs pre-flight system checks and returns $true if the script should proceed.
+.DESCRIPTION
+    Checks OS version (warn only), disk space on C: (warn + prompt), and network
+    connectivity to winget CDN (blocking). Pass -WhatIf to report without prompting.
+    Pass -SkipSystemCheck to bypass all checks.
+.RETURNS
+    [bool] $false if a blocking check fails or the user cancels; $true otherwise.
+#>
+function Test-SystemRequirements {
+    param (
+        [Parameter(Mandatory = $false)]
+        [switch]$WhatIf
+    )
+
+    $results = @()
+    $proceed = $true
+
+    # --- OS Version (warn only, Windows 10 21H2 = build 19044) ---
+    try {
+        $build = [System.Environment]::OSVersion.Version.Build
+        $osName = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' -ErrorAction Stop).ProductName
+        if ($build -ge 19044) {
+            $results += [PSCustomObject]@{ Check = 'OS Version'; Status = 'OK'; Detail = $osName }
+        }
+        else {
+            $results += [PSCustomObject]@{ Check = 'OS Version'; Status = 'WARN'; Detail = "$osName (build $build — Windows 10 21H2 or later recommended)" }
+        }
+    }
+    catch {
+        $results += [PSCustomObject]@{ Check = 'OS Version'; Status = 'WARN'; Detail = "Could not determine OS version: $_" }
+    }
+
+    # --- Disk Space on C: (warn + prompt if under 50 GB) ---
+    try {
+        $drive = Get-PSDrive -Name C -ErrorAction Stop
+        $freeGB = [Math]::Round($drive.Free / 1GB, 1)
+        if ($freeGB -ge 50) {
+            $results += [PSCustomObject]@{ Check = 'Disk Space'; Status = 'OK'; Detail = "${freeGB} GB free on C:" }
+        }
+        else {
+            $results += [PSCustomObject]@{ Check = 'Disk Space'; Status = 'WARN'; Detail = "${freeGB} GB free on C: (50 GB recommended)" }
+        }
+    }
+    catch {
+        $results += [PSCustomObject]@{ Check = 'Disk Space'; Status = 'WARN'; Detail = "Could not read C: drive: $_" }
+        $freeGB = 999
+    }
+
+    # --- Network (blocking — required for winget) ---
+    try {
+        $netTest = Test-NetConnection -ComputerName 'cdn.winget.microsoft.com' -Port 443 -InformationLevel Quiet -WarningAction SilentlyContinue -ErrorAction Stop
+        if ($netTest) {
+            $results += [PSCustomObject]@{ Check = 'Network'; Status = 'OK'; Detail = 'Connected to cdn.winget.microsoft.com' }
+        }
+        else {
+            $results += [PSCustomObject]@{ Check = 'Network'; Status = 'FAIL'; Detail = 'Cannot reach cdn.winget.microsoft.com — network is required' }
+            $proceed = $false
+        }
+    }
+    catch {
+        $results += [PSCustomObject]@{ Check = 'Network'; Status = 'FAIL'; Detail = "Network check failed: $_" }
+        $proceed = $false
+    }
+
+    # --- Display results ---
+    Write-Info ''
+    Write-Info 'Pre-flight System Checks:'
+    foreach ($r in $results) {
+        $icon = switch ($r.Status) { 'OK' { '[OK]' } 'WARN' { '[WARN]' } 'FAIL' { '[FAIL]' } }
+        $msg = "$icon $($r.Check): $($r.Detail)"
+        switch ($r.Status) {
+            'OK'   { Write-Success $msg }
+            'WARN' { Write-WarningMessage $msg }
+            'FAIL' { Write-ErrorMessage $msg }
+        }
+    }
+    Write-Info ''
+
+    if (-not $proceed) {
+        return $false
+    }
+
+    # Prompt on low disk space (skip prompt in WhatIf mode)
+    $diskResult = $results | Where-Object { $_.Check -eq 'Disk Space' }
+    if ($diskResult.Status -eq 'WARN' -and -not $WhatIf) {
+        $choice = Read-Host 'Disk space is below the 50 GB recommendation. Continue anyway? (Y/N)'
+        if ($choice -notin @('Y', 'y')) {
+            Write-WarningMessage 'Installation cancelled by user due to low disk space.'
+            return $false
+        }
+    }
+
+    return $true
 }
 
 <#
@@ -1702,6 +1801,16 @@ function Invoke-WingetInstall {
     }
     else {
         Write-Success 'Starting...'
+    }
+
+    # Pre-flight system checks
+    if (-not $SkipSystemCheck) {
+        if ($WhatIf) {
+            Write-Info '[DRY-RUN] Would run pre-flight system checks (OS version, disk space, network).'
+        }
+        elseif (-not (Test-SystemRequirements -WhatIf:$WhatIf)) {
+            Exit
+        }
     }
 
     # Ensure required modules are available
