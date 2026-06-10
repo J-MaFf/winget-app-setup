@@ -302,18 +302,14 @@ function Add-ToEnvironmentPath {
     # Check if the path is already in the environment PATH variable
     if (-not (Test-PathInEnvironment -PathToCheck $PathToAdd -Scope $Scope)) {
         if ($Scope -eq 'System') {
-            # Get the current system PATH
             $systemEnvPath = [System.Environment]::GetEnvironmentVariable('PATH', [System.EnvironmentVariableTarget]::Machine)
-            # Add to system PATH
-            $systemEnvPath += ";$PathToAdd"
-            [System.Environment]::SetEnvironmentVariable('PATH', $systemEnvPath, [System.EnvironmentVariableTarget]::Machine)
+            $newSystemPath = if ([string]::IsNullOrEmpty($systemEnvPath)) { $PathToAdd } else { "$systemEnvPath;$PathToAdd" }
+            [System.Environment]::SetEnvironmentVariable('PATH', $newSystemPath, [System.EnvironmentVariableTarget]::Machine)
         }
         elseif ($Scope -eq 'User') {
-            # Get the current user PATH
             $userEnvPath = [System.Environment]::GetEnvironmentVariable('PATH', [System.EnvironmentVariableTarget]::User)
-            # Add to user PATH
-            $userEnvPath += ";$PathToAdd"
-            [System.Environment]::SetEnvironmentVariable('PATH', $userEnvPath, [System.EnvironmentVariableTarget]::User)
+            $newUserPath = if ([string]::IsNullOrEmpty($userEnvPath)) { $PathToAdd } else { "$userEnvPath;$PathToAdd" }
+            [System.Environment]::SetEnvironmentVariable('PATH', $newUserPath, [System.EnvironmentVariableTarget]::User)
         }
 
         # Update the current process environment PATH (with length check to avoid Windows PATH limit of 2048)
