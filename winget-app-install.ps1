@@ -861,7 +861,12 @@ function Save-UpdateConfiguration {
         New-Item -Path $paths.BasePath -ItemType Directory -Force | Out-Null
     }
 
-    $Configuration | ConvertTo-Json | Set-Content -Path $paths.ConfigFile -Encoding UTF8
+    try {
+        $Configuration | ConvertTo-Json | Set-Content -Path $paths.ConfigFile -Encoding UTF8 -ErrorAction Stop
+    }
+    catch {
+        Write-WarningMessage "Failed to save update configuration: $_"
+    }
 }
 
 <#
