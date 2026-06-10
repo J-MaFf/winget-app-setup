@@ -94,7 +94,7 @@ function Get-UpdateReport {
         if ($line -match '^\s*-{3,}') { continue }
         if ($line -match 'No installed package found|No available upgrade found|No newer package versions are available') { continue }
         $columns = $line.Trim() -split '\s{2,}'
-        if ($columns.Count -ge 4) {
+        if ($columns.Count -ge 4 -and $columns[1] -match '^[\w][\w.\-]+\.[\w][\w.\-]+$') {
             $report += [PSCustomObject]@{
                 PackageName      = $columns[1]
                 CurrentVersion   = $columns[2]
