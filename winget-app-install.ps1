@@ -41,7 +41,20 @@
 
 param (
     [Parameter(Mandatory = $false)]
-    [switch]$WhatIf
+    [switch]$WhatIf,
+    [Parameter(Mandatory = $false)]
+    [switch]$EnableScheduledUpdates,
+    [Parameter(Mandatory = $false)]
+    [switch]$DisableScheduledUpdates,
+    [Parameter(Mandatory = $false)]
+    [switch]$CheckForUpdates,
+    [Parameter(Mandatory = $false)]
+    [switch]$AutoInstallUpdates,
+    [Parameter(Mandatory = $false)]
+    [ValidateSet('Weekly', 'Daily')]
+    [string]$UpdateFrequency = 'Weekly',
+    [Parameter(Mandatory = $false)]
+    [switch]$SkipSystemCheck
 )
 
 # ------------------------------------------------Functions------------------------------------------------
@@ -291,18 +304,14 @@ function Add-ToEnvironmentPath {
     # Check if the path is already in the environment PATH variable
     if (-not (Test-PathInEnvironment -PathToCheck $PathToAdd -Scope $Scope)) {
         if ($Scope -eq 'System') {
-            # Get the current system PATH
             $systemEnvPath = [System.Environment]::GetEnvironmentVariable('PATH', [System.EnvironmentVariableTarget]::Machine)
-            # Add to system PATH
-            $systemEnvPath += ";$PathToAdd"
-            [System.Environment]::SetEnvironmentVariable('PATH', $systemEnvPath, [System.EnvironmentVariableTarget]::Machine)
+            $newSystemPath = if ([string]::IsNullOrEmpty($systemEnvPath)) { $PathToAdd } else { "$systemEnvPath;$PathToAdd" }
+            [System.Environment]::SetEnvironmentVariable('PATH', $newSystemPath, [System.EnvironmentVariableTarget]::Machine)
         }
         elseif ($Scope -eq 'User') {
-            # Get the current user PATH
             $userEnvPath = [System.Environment]::GetEnvironmentVariable('PATH', [System.EnvironmentVariableTarget]::User)
-            # Add to user PATH
-            $userEnvPath += ";$PathToAdd"
-            [System.Environment]::SetEnvironmentVariable('PATH', $userEnvPath, [System.EnvironmentVariableTarget]::User)
+            $newUserPath = if ([string]::IsNullOrEmpty($userEnvPath)) { $PathToAdd } else { "$userEnvPath;$PathToAdd" }
+            [System.Environment]::SetEnvironmentVariable('PATH', $newUserPath, [System.EnvironmentVariableTarget]::User)
         }
 
         # Update the current process environment PATH (with length check to avoid Windows PATH limit of 2048)
@@ -671,10 +680,16 @@ function Invoke-WingetCommand {
 
     $commandOutput | ForEach-Object {
         if ($_ -match $SuccessPattern) {
-            $SuccessArray.Value += $_.Split()[$SuccessIndex]
+            $parts = $_.Split()
+            if ($SuccessIndex -lt $parts.Count) {
+                $SuccessArray.Value += $parts[$SuccessIndex]
+            }
         }
         elseif ($_ -match $FailurePattern) {
-            $FailureArray.Value += $_.Split()[$FailureIndex]
+            $parts = $_.Split()
+            if ($FailureIndex -lt $parts.Count) {
+                $FailureArray.Value += $parts[$FailureIndex]
+            }
         }
     }
 
@@ -767,6 +782,295 @@ function Test-UpdatesAvailable {
 
     Write-WarningMessage 'No updates available.'
     return $false
+}
+
+<#
+.SYNOPSIS
+    Installs a winget package with exponential backoff retry for session errors (0x80073d19).
+.DESCRIPTION
+    Wraps Start-Process winget install, captures the exit code, and retries on the specific
+    session-logged-off error that intermittently affects packages like Microsoft.PowerShell.
+    Does NOT re-run winget on each attempt — only retries when the session error is detected.
+.PARAMETER PackageId
+    The winget package ID to install.
+.PARAMETER MaxRetries
+    Maximum retry attempts after the first try (default: 2).
+.RETURNS
+    [int] The final winget exit code.
+#>
+function Invoke-WingetInstallWithSessionRetry {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$PackageId,
+        [Parameter(Mandatory = $false)]
+        [int]$MaxRetries = 2
+    )
+
+    $sessionErrorCode = -2147009767  # 0x80073d19 as signed int32
+
+    for ($attempt = 1; $attempt -le ($MaxRetries + 1); $attempt++) {
+        if ($attempt -gt 1) {
+            $delaySeconds = 3 * [Math]::Pow(2, $attempt - 2)
+            Write-WarningMessage "Attempt $attempt/$($MaxRetries + 1): Waiting $delaySeconds seconds before retrying $PackageId..."
+            Start-Sleep -Seconds $delaySeconds
+        }
+
+        $process = Start-Process winget `
+            -ArgumentList "install -e --accept-source-agreements --accept-package-agreements --source winget --id $PackageId" `
+            -NoNewWindow -Wait -PassThru
+        $exitCode = $process.ExitCode
+
+        if ($exitCode -eq 0) {
+            return 0
+        }
+
+        if ($exitCode -eq $sessionErrorCode -and $attempt -le $MaxRetries) {
+            Write-WarningMessage "Session error (0x80073d19) installing $PackageId. Will retry..."
+            continue
+        }
+
+        return $exitCode
+    }
+
+    return $process.ExitCode
+}
+
+<#
+.SYNOPSIS
+    Runs pre-flight system checks and returns $true if the script should proceed.
+.DESCRIPTION
+    Checks OS version (warn only), disk space on C: (warn + prompt), and network
+    connectivity to winget CDN (blocking). Pass -WhatIf to report without prompting.
+    Pass -SkipSystemCheck to bypass all checks.
+.RETURNS
+    [bool] $false if a blocking check fails or the user cancels; $true otherwise.
+#>
+function Test-SystemRequirements {
+    param (
+        [Parameter(Mandatory = $false)]
+        [switch]$WhatIf
+    )
+
+    $results = @()
+    $proceed = $true
+
+    # --- OS Version (warn only, Windows 10 21H2 = build 19044) ---
+    try {
+        $build = [System.Environment]::OSVersion.Version.Build
+        $osName = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' -ErrorAction Stop).ProductName
+        if ($build -ge 19044) {
+            $results += [PSCustomObject]@{ Check = 'OS Version'; Status = 'OK'; Detail = $osName }
+        }
+        else {
+            $results += [PSCustomObject]@{ Check = 'OS Version'; Status = 'WARN'; Detail = "$osName (build $build — Windows 10 21H2 or later recommended)" }
+        }
+    }
+    catch {
+        $results += [PSCustomObject]@{ Check = 'OS Version'; Status = 'WARN'; Detail = "Could not determine OS version: $_" }
+    }
+
+    # --- Disk Space on C: (warn + prompt if under 50 GB) ---
+    try {
+        $drive = Get-PSDrive -Name C -ErrorAction Stop
+        $freeGB = [Math]::Round($drive.Free / 1GB, 1)
+        if ($freeGB -ge 50) {
+            $results += [PSCustomObject]@{ Check = 'Disk Space'; Status = 'OK'; Detail = "${freeGB} GB free on C:" }
+        }
+        else {
+            $results += [PSCustomObject]@{ Check = 'Disk Space'; Status = 'WARN'; Detail = "${freeGB} GB free on C: (50 GB recommended)" }
+        }
+    }
+    catch {
+        $results += [PSCustomObject]@{ Check = 'Disk Space'; Status = 'WARN'; Detail = "Could not read C: drive: $_" }
+        $freeGB = 999
+    }
+
+    # --- Network (blocking — required for winget) ---
+    try {
+        $netTest = Test-NetConnection -ComputerName 'cdn.winget.microsoft.com' -Port 443 -InformationLevel Quiet -WarningAction SilentlyContinue -ErrorAction Stop
+        if ($netTest) {
+            $results += [PSCustomObject]@{ Check = 'Network'; Status = 'OK'; Detail = 'Connected to cdn.winget.microsoft.com' }
+        }
+        else {
+            $results += [PSCustomObject]@{ Check = 'Network'; Status = 'FAIL'; Detail = 'Cannot reach cdn.winget.microsoft.com — network is required' }
+            $proceed = $false
+        }
+    }
+    catch {
+        $results += [PSCustomObject]@{ Check = 'Network'; Status = 'FAIL'; Detail = "Network check failed: $_" }
+        $proceed = $false
+    }
+
+    # --- Display results ---
+    Write-Info ''
+    Write-Info 'Pre-flight System Checks:'
+    foreach ($r in $results) {
+        $icon = switch ($r.Status) { 'OK' { '[OK]' } 'WARN' { '[WARN]' } 'FAIL' { '[FAIL]' } }
+        $msg = "$icon $($r.Check): $($r.Detail)"
+        switch ($r.Status) {
+            'OK'   { Write-Success $msg }
+            'WARN' { Write-WarningMessage $msg }
+            'FAIL' { Write-ErrorMessage $msg }
+        }
+    }
+    Write-Info ''
+
+    if (-not $proceed) {
+        return $false
+    }
+
+    # Prompt on low disk space (skip prompt in WhatIf mode)
+    $diskResult = $results | Where-Object { $_.Check -eq 'Disk Space' }
+    if ($diskResult.Status -eq 'WARN' -and -not $WhatIf) {
+        $choice = Read-Host 'Disk space is below the 50 GB recommendation. Continue anyway? (Y/N)'
+        if ($choice -notin @('Y', 'y')) {
+            Write-WarningMessage 'Installation cancelled by user due to low disk space.'
+            return $false
+        }
+    }
+
+    return $true
+}
+
+<#
+.SYNOPSIS
+    Returns the filesystem paths used by scheduled update functionality.
+#>
+function Get-UpdateSettingsPaths {
+    $basePath = Join-Path $env:APPDATA 'winget-app-setup'
+    return @{
+        BasePath        = $basePath
+        ConfigFile      = Join-Path $basePath 'update-config.json'
+        UpdateChecks    = Join-Path $basePath 'update-checks'
+        RollbackScripts = Join-Path $basePath 'rollback-scripts'
+        HelperScript    = Join-Path $basePath 'Update-InstalledApps.ps1'
+    }
+}
+
+<#
+.SYNOPSIS
+    Returns the default update configuration object.
+#>
+function New-DefaultUpdateConfiguration {
+    param (
+        [Parameter(Mandatory = $false)]
+        [ValidateSet('Weekly', 'Daily')]
+        [string]$UpdateFrequency = 'Weekly',
+        [Parameter(Mandatory = $false)]
+        [bool]$AutoInstall = $true,
+        [Parameter(Mandatory = $false)]
+        [bool]$EnabledScheduledUpdates = $false,
+        [Parameter(Mandatory = $false)]
+        [bool]$InitialPromptCompleted = $false
+    )
+
+    return @{
+        EnabledScheduledUpdates = $EnabledScheduledUpdates
+        UpdateFrequency         = $UpdateFrequency
+        AutoInstall             = $AutoInstall
+        LastCheckDate           = $null
+        Enabled                 = $EnabledScheduledUpdates
+        InitialPromptCompleted  = $InitialPromptCompleted
+    }
+}
+
+<#
+.SYNOPSIS
+    Reads persisted update configuration from AppData.
+#>
+function Get-UpdateConfiguration {
+    $paths = Get-UpdateSettingsPaths
+    if (-not (Test-Path $paths.ConfigFile)) {
+        return (New-DefaultUpdateConfiguration)
+    }
+
+    try {
+        $raw = Get-Content -Path $paths.ConfigFile -Raw -ErrorAction Stop
+        $config = $raw | ConvertFrom-Json -ErrorAction Stop
+        return @{
+            EnabledScheduledUpdates = [bool]$config.EnabledScheduledUpdates
+            UpdateFrequency         = if ($config.UpdateFrequency -in @('Weekly', 'Daily')) { [string]$config.UpdateFrequency } else { 'Weekly' }
+            AutoInstall             = [bool]$config.AutoInstall
+            LastCheckDate           = $config.LastCheckDate
+            Enabled                 = [bool]$config.Enabled
+            InitialPromptCompleted  = [bool]$config.InitialPromptCompleted
+        }
+    }
+    catch {
+        Write-WarningMessage "Failed to parse update configuration, using defaults: $_"
+        return (New-DefaultUpdateConfiguration)
+    }
+}
+
+<#
+.SYNOPSIS
+    Saves update configuration to AppData.
+#>
+function Save-UpdateConfiguration {
+    param (
+        [Parameter(Mandatory = $true)]
+        [hashtable]$Configuration
+    )
+
+    $paths = Get-UpdateSettingsPaths
+    if (-not (Test-Path $paths.BasePath)) {
+        New-Item -Path $paths.BasePath -ItemType Directory -Force | Out-Null
+    }
+
+    try {
+        $Configuration | ConvertTo-Json | Set-Content -Path $paths.ConfigFile -Encoding UTF8 -ErrorAction Stop
+    }
+    catch {
+        Write-WarningMessage "Failed to save update configuration: $_"
+    }
+}
+
+<#
+.SYNOPSIS
+    Returns updates available for installed packages.
+.DESCRIPTION
+    Output format: PackageName | CurrentVersion | AvailableVersion.
+#>
+function Get-UpdateReport {
+    try {
+        if (Get-Command Get-WinGetPackage -ErrorAction SilentlyContinue) {
+            return @(Get-WinGetPackage | Where-Object IsUpdateAvailable | ForEach-Object {
+                    [PSCustomObject]@{
+                        PackageName      = $_.Id
+                        CurrentVersion   = [string]$_.InstalledVersion
+                        AvailableVersion = [string]$_.AvailableVersion
+                    }
+                })
+        }
+    }
+    catch {
+        Write-WarningMessage "Failed to query updates using WinGet module. Falling back to CLI: $_"
+    }
+
+    $report = @()
+    try {
+        $upgradeOutput = & winget upgrade --disable-interactivity --accept-source-agreements 2>&1
+        foreach ($line in $upgradeOutput) {
+            if (-not $line) { continue }
+            if ($line -match '^\s*Name\s+Id\s+Version\s+Available') { continue }
+            if ($line -match '^\s*-{3,}') { continue }
+            if ($line -match 'No installed package found|No available upgrade found|No newer package versions are available') { continue }
+
+            $columns = $line.Trim() -split '\s{2,}'
+            if ($columns.Count -ge 4 -and $columns[1] -match '^[\w][\w.\-]+\.[\w][\w.\-]+$') {
+                $report += [PSCustomObject]@{
+                    PackageName      = $columns[1]
+                    CurrentVersion   = $columns[2]
+                    AvailableVersion = $columns[3]
+                }
+            }
+        }
+    }
+    catch {
+        Write-WarningMessage "Failed to query updates using winget CLI: $_"
+    }
+
+    return @($report | Sort-Object PackageName -Unique)
 }
 
 <#
@@ -1364,6 +1668,210 @@ function Invoke-WingetInstallWithRetry {
     return $false
 }
 
+<#
+.SYNOPSIS
+    Returns true when the scheduled updates task currently exists.
+.RETURNS
+    [bool]
+#>
+function Test-ScheduledUpdatesTaskExists {
+    $taskName = 'WingetAppSetup-ScheduledUpdates'
+    $taskPath = '\winget-app-setup\'
+
+    try {
+        $task = Get-ScheduledTask -TaskName $taskName -TaskPath $taskPath -ErrorAction Stop
+        return $null -ne $task
+    }
+    catch {
+        return $false
+    }
+}
+
+<#
+.SYNOPSIS
+    Copies the scheduled update helper script into AppData and returns its path.
+#>
+function Install-UpdateHelperScript {
+    $paths = Get-UpdateSettingsPaths
+    $sourceScript = Join-Path $PSScriptRoot 'Update-InstalledApps.ps1'
+
+    if (-not (Test-Path $sourceScript)) {
+        throw "Required helper script is missing: $sourceScript"
+    }
+
+    if (-not (Test-Path $paths.BasePath)) {
+        New-Item -ItemType Directory -Path $paths.BasePath -Force | Out-Null
+    }
+    if (-not (Test-Path $paths.UpdateChecks)) {
+        New-Item -ItemType Directory -Path $paths.UpdateChecks -Force | Out-Null
+    }
+    if (-not (Test-Path $paths.RollbackScripts)) {
+        New-Item -ItemType Directory -Path $paths.RollbackScripts -Force | Out-Null
+    }
+
+    Copy-Item -Path $sourceScript -Destination $paths.HelperScript -Force
+    return $paths.HelperScript
+}
+
+<#
+.SYNOPSIS
+    Enables automatic app update checks via Windows Scheduled Task.
+.DESCRIPTION
+    Creates a Windows scheduled task that runs as the current user (S4U, no elevated privileges).
+.PARAMETER SkipPrompt
+    When true, skips the user prompt and uses supplied parameter values.
+.PARAMETER WhatIf
+    When provided, only reports intended actions.
+#>
+function Enable-ScheduledUpdatesCheck {
+    param (
+        [Parameter(Mandatory = $false)]
+        [ValidateSet('Weekly', 'Daily')]
+        [string]$UpdateFrequency = 'Weekly',
+        [Parameter(Mandatory = $false)]
+        [bool]$AutoInstall = $true,
+        [Parameter(Mandatory = $false)]
+        [bool]$SkipPrompt = $false,
+        [Parameter(Mandatory = $false)]
+        [switch]$WhatIf
+    )
+
+    $paths = Get-UpdateSettingsPaths
+    $taskName = 'WingetAppSetup-ScheduledUpdates'
+    $taskPath = '\winget-app-setup\'
+
+    if (-not $SkipPrompt -and -not $WhatIf) {
+        $scheduleDescription = if ($UpdateFrequency -eq 'Daily') { 'every day at 2:00 AM' } else { 'every Sunday at 2:00 AM' }
+        $userChoice = Read-Host "Enable $($UpdateFrequency.ToLower()) automatic update checks? Updates will be checked $scheduleDescription. (Y/N)"
+        $enableScheduledUpdates = $userChoice -in @('Y', 'y')
+
+        $config = New-DefaultUpdateConfiguration -UpdateFrequency $UpdateFrequency -AutoInstall $AutoInstall -EnabledScheduledUpdates $enableScheduledUpdates -InitialPromptCompleted $true
+        Save-UpdateConfiguration -Configuration $config
+
+        if (-not $enableScheduledUpdates) {
+            Write-WarningMessage 'Scheduled updates were not enabled.'
+            return $false
+        }
+
+        $autoInstallChoice = Read-Host 'Automatically install found updates? (Y/N):'
+        $AutoInstall = $autoInstallChoice -in @('Y', 'y')
+    }
+
+    if ($WhatIf) {
+        Write-Info "[DRY-RUN] Would create/update scheduled task: $taskName"
+        Write-Info "[DRY-RUN] Frequency: $UpdateFrequency at 2:00 AM"
+        return $true
+    }
+
+    $null = Install-UpdateHelperScript
+
+    if (Test-ScheduledUpdatesTaskExists) {
+        Unregister-ScheduledTask -TaskName $taskName -TaskPath $taskPath -Confirm:$false
+    }
+
+    $psExecutable = if (Get-Command pwsh -ErrorAction SilentlyContinue) { 'pwsh.exe' } else { 'powershell.exe' }
+    try {
+        $taskAction = New-ScheduledTaskAction -Execute $psExecutable -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$($paths.HelperScript)`""
+        if ($UpdateFrequency -eq 'Daily') {
+            $taskTrigger = New-ScheduledTaskTrigger -Daily -At '2:00 AM'
+        }
+        else {
+            $taskTrigger = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Sunday -At '2:00 AM'
+        }
+        $taskSettings = New-ScheduledTaskSettingsSet -StartWhenAvailable -RunOnlyIfNetworkAvailable
+        $taskPrincipal = New-ScheduledTaskPrincipal -UserId ([System.Security.Principal.WindowsIdentity]::GetCurrent().Name) -LogonType S4U -RunLevel Limited
+
+        Register-ScheduledTask -Action $taskAction `
+            -Trigger $taskTrigger `
+            -TaskName $taskName `
+            -TaskPath $taskPath `
+            -Settings $taskSettings `
+            -Principal $taskPrincipal `
+            -Description 'Automatically checks and installs available updates for installed applications via winget.' `
+            -Force | Out-Null
+    }
+    catch {
+        Write-ErrorMessage "Failed to create scheduled task: $_"
+        return $false
+    }
+
+    $config = New-DefaultUpdateConfiguration -UpdateFrequency $UpdateFrequency -AutoInstall $AutoInstall -EnabledScheduledUpdates $true -InitialPromptCompleted $true
+    Save-UpdateConfiguration -Configuration $config
+    Write-Success 'Scheduled updates enabled successfully.'
+    return $true
+}
+
+<#
+.SYNOPSIS
+    Disables and removes the scheduled updates task.
+#>
+function Disable-ScheduledUpdatesCheck {
+    param (
+        [Parameter(Mandatory = $false)]
+        [switch]$WhatIf
+    )
+
+    $taskName = 'WingetAppSetup-ScheduledUpdates'
+    $taskPath = '\winget-app-setup\'
+
+    if ($WhatIf) {
+        Write-Info "[DRY-RUN] Would disable scheduled task: $taskPath$taskName"
+        return $true
+    }
+
+    try {
+        if (Test-ScheduledUpdatesTaskExists) {
+            Unregister-ScheduledTask -TaskName $taskName -TaskPath $taskPath -Confirm:$false
+        }
+
+        $config = Get-UpdateConfiguration
+        $config.EnabledScheduledUpdates = $false
+        $config.Enabled = $false
+        $config.InitialPromptCompleted = $true
+        Save-UpdateConfiguration -Configuration $config
+        Write-Success 'Scheduled updates disabled successfully.'
+        return $true
+    }
+    catch {
+        Write-ErrorMessage "Failed to disable scheduled updates: $_"
+        return $false
+    }
+}
+
+<#
+.SYNOPSIS
+    Runs update check immediately, optionally auto-installing updates.
+#>
+function Invoke-OnDemandUpdateCheck {
+    param (
+        [Parameter(Mandatory = $false)]
+        [switch]$AutoInstallUpdates,
+        [Parameter(Mandatory = $false)]
+        [switch]$WhatIf
+    )
+
+    $report = @(Get-UpdateReport)
+    if ($report.Count -eq 0) {
+        Write-Info 'No updates available.'
+    }
+    else {
+        Write-Info 'Available updates:'
+        $report | Format-Table PackageName, CurrentVersion, AvailableVersion
+    }
+
+    if (-not $AutoInstallUpdates) {
+        return
+    }
+
+    if ($WhatIf) {
+        Write-Info '[DRY-RUN] Would auto-install all available updates.'
+        return
+    }
+
+    $helperPath = Install-UpdateHelperScript
+    & $helperPath -AutoInstallOverride:$true -RunReason OnDemand
+}
+
 #------------------------------------------------Main Script------------------------------------------------
 
 <#
@@ -1411,6 +1919,16 @@ function Invoke-WingetInstall {
         Write-Success 'Starting...'
     }
 
+    # Pre-flight system checks
+    if (-not $SkipSystemCheck) {
+        if ($WhatIf) {
+            Write-Info '[DRY-RUN] Would run pre-flight system checks (OS version, disk space, network).'
+        }
+        elseif (-not (Test-SystemRequirements -WhatIf:$WhatIf)) {
+            Exit
+        }
+    }
+
     # Ensure required modules are available
     if (-not (Test-AndInstallWingetModule)) {
         Write-Warning 'Microsoft.WinGet.Client module is not available. Update functionality will use fallback CLI methods.'
@@ -1439,6 +1957,12 @@ function Invoke-WingetInstall {
     # Verify winget sources are accessible and auto-repair if broken
     if (-not (Test-WingetSources)) {
         Write-WarningMessage 'Winget sources could not be repaired. Some installations may fail.'
+    }
+
+    $scheduledTaskExists = Test-ScheduledUpdatesTaskExists
+    $updateConfig = Get-UpdateConfiguration
+    if (-not $WhatIf -and -not $scheduledTaskExists -and -not $updateConfig.InitialPromptCompleted) {
+        [void](Enable-ScheduledUpdatesCheck -UpdateFrequency $updateConfig.UpdateFrequency -AutoInstall $updateConfig.AutoInstall -WhatIf:$WhatIf)
     }
 
     # Add the script directory to the PATH (only if running locally)
@@ -1572,34 +2096,14 @@ function Invoke-WingetInstall {
                     Write-Info "Installing: $($app.name)"
                     $installSuccess = Invoke-WingetInstallWithRetry -PackageId $app.name -MaxRetries 4
 
-                    # Verify installation with timeout
-                    $verifyProcess = Start-Process -FilePath 'winget' `
-                        -ArgumentList 'list', '--exact', '--id', $app.name, '--accept-source-agreements' `
-                        -NoNewWindow `
-                        -PassThru `
-                        -RedirectStandardOutput "$env:TEMP\winget_verify_output.txt" `
-                        -RedirectStandardError "$env:TEMP\winget_verify_error.txt"
-
-                    if ($verifyProcess.WaitForExit(15000)) {
-                        $installResult = Get-Content "$env:TEMP\winget_verify_output.txt" -ErrorAction SilentlyContinue
-                        if (![String]::Join('', $installResult).Contains($app.name)) {
-                            Write-ErrorMessage "Failed to install: $($app.name). No package found matching input criteria."
-                            $failedApps += $app.name
-                        }
-                        else {
-                            Write-Success "Successfully installed: $($app.name)"
-                            $installedApps += $app.name
-                        }
+                    if ($installSuccess) {
+                        Write-Success "Successfully installed: $($app.name)"
+                        $installedApps += $app.name
                     }
                     else {
-                        Write-WarningMessage "Verification timed out for: $($app.name). Assuming installation failed."
-                        $verifyProcess.Kill()
+                        Write-ErrorMessage "Failed to install: $($app.name)"
                         $failedApps += $app.name
                     }
-
-                    # Cleanup temp files
-                    Remove-Item "$env:TEMP\winget_verify_output.txt" -ErrorAction SilentlyContinue
-                    Remove-Item "$env:TEMP\winget_verify_error.txt" -ErrorAction SilentlyContinue
                 }
                 else {
                     Write-Info "[DRY-RUN] Would install: $($app.name)"
@@ -1817,5 +2321,27 @@ function Invoke-WingetInstall {
 }
 
 if ($MyInvocation.InvocationName -ne '.') {
+    if ($EnableScheduledUpdates -and $DisableScheduledUpdates) {
+        Write-ErrorMessage 'EnableScheduledUpdates and DisableScheduledUpdates cannot be used together.'
+        exit 1
+    }
+
+    if ($DisableScheduledUpdates) {
+        [void](Disable-ScheduledUpdatesCheck -WhatIf:$WhatIf)
+        exit 0
+    }
+
+    if ($EnableScheduledUpdates) {
+        $config = Get-UpdateConfiguration
+        $autoInstall = if ($PSBoundParameters.ContainsKey('AutoInstallUpdates')) { [bool]$AutoInstallUpdates } else { [bool]$config.AutoInstall }
+        [void](Enable-ScheduledUpdatesCheck -UpdateFrequency $UpdateFrequency -AutoInstall:$autoInstall -SkipPrompt:$true -WhatIf:$WhatIf)
+        exit 0
+    }
+
+    if ($CheckForUpdates) {
+        Invoke-OnDemandUpdateCheck -AutoInstallUpdates:$AutoInstallUpdates -WhatIf:$WhatIf
+        exit 0
+    }
+
     Invoke-WingetInstall -WhatIf:$WhatIf
 }

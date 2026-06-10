@@ -2426,6 +2426,161 @@ Describe 'Windows Terminal configuration' {
     }
 }
 
+Describe 'Scheduled Updates - Unit Tests' -Tag 'ScheduledUpdates' {
+    BeforeAll {
+        . "$PSScriptRoot\winget-app-install.ps1"
+    }
+
+    BeforeEach {
+        $script:originalAppData = $env:APPDATA
+        $env:APPDATA = Join-Path $TestDrive 'appdata'
+        New-Item -Path $env:APPDATA -ItemType Directory -Force | Out-Null
+
+        Mock Get-WinGetPackage { }
+        Mock winget { }
+        Mock Get-ScheduledTask { $null }
+        Mock New-ScheduledTaskAction { @{ Action = 'ok' } }
+        Mock New-ScheduledTaskTrigger { @{ Trigger = 'ok' } }
+        Mock New-ScheduledTaskSettingsSet { @{ Settings = 'ok' } }
+        Mock New-ScheduledTaskPrincipal { @{ Principal = 'ok' } }
+        Mock Register-ScheduledTask { }
+        Mock Unregister-ScheduledTask { }
+        Mock Write-Info { }
+        Mock Write-WarningMessage { }
+        Mock Write-Success { }
+        Mock Write-ErrorMessage { }
+    }
+
+    AfterEach {
+        $env:APPDATA = $script:originalAppData
+    }
+
+    It 'Should expose scheduled update management functions' {
+        (Get-Command Enable-ScheduledUpdatesCheck -ErrorAction Stop) | Should -Not -BeNullOrEmpty
+        (Get-Command Disable-ScheduledUpdatesCheck -ErrorAction Stop) | Should -Not -BeNullOrEmpty
+        (Get-Command Get-UpdateReport -ErrorAction Stop) | Should -Not -BeNullOrEmpty
+    }
+
+    It 'Get-UpdateReport should return module-based update rows' {
+        Mock Get-Command { $true } -ParameterFilter { $Name -eq 'Get-WinGetPackage' }
+        Mock Get-WinGetPackage {
+            @(
+                [PSCustomObject]@{ Id = 'Git.Git'; InstalledVersion = '2.45.0'; AvailableVersion = '2.46.0'; IsUpdateAvailable = $true },
+                [PSCustomObject]@{ Id = 'Microsoft.PowerShell'; InstalledVersion = '7.4.2'; AvailableVersion = '7.4.3'; IsUpdateAvailable = $false }
+            )
+        }
+
+        $report = @(Get-UpdateReport)
+
+        $report.Count | Should -Be 1
+        $report[0].PackageName | Should -Be 'Git.Git'
+        $report[0].CurrentVersion | Should -Be '2.45.0'
+        $report[0].AvailableVersion | Should -Be '2.46.0'
+    }
+
+    It 'Get-UpdateReport should parse CLI output when module is unavailable' {
+        Mock Get-Command { $null } -ParameterFilter { $Name -eq 'Get-WinGetPackage' }
+        Mock winget {
+            @(
+                'Name                           Id                    Version     Available   Source'
+                '--------------------------------------------------------------------------------'
+                'Google Chrome                  Google.Chrome         126.0       127.0       winget'
+                'Git                            Git.Git               2.45.0      2.46.0      winget'
+            )
+        } -ParameterFilter { $args -contains 'upgrade' }
+
+        $report = @(Get-UpdateReport)
+
+        $report.Count | Should -Be 2
+        $report[0].PackageName | Should -Be 'Git.Git'
+        $report[1].PackageName | Should -Be 'Google.Chrome'
+    }
+
+    It 'Enable-ScheduledUpdatesCheck should create task and persist config' {
+        Mock Get-Command { $null } -ParameterFilter { $Name -eq 'pwsh' }
+        Mock Install-UpdateHelperScript { $env:APPDATA + '\winget-app-setup\Update-InstalledApps.ps1' }
+
+        $result = Enable-ScheduledUpdatesCheck -SkipPrompt:$true -UpdateFrequency Daily -AutoInstall:$false
+        $paths = Get-UpdateSettingsPaths
+        $config = Get-Content -Path $paths.ConfigFile -Raw | ConvertFrom-Json
+
+        $result | Should -BeTrue
+        $config.EnabledScheduledUpdates | Should -BeTrue
+        $config.UpdateFrequency | Should -Be 'Daily'
+        $config.AutoInstall | Should -BeFalse
+        Assert-MockCalled Register-ScheduledTask -Times 1
+    }
+
+    It 'Disable-ScheduledUpdatesCheck should remove task and persist disabled config' {
+        Mock Get-ScheduledTask { @{ Name = 'WingetAppSetup-ScheduledUpdates' } }
+
+        $result = Disable-ScheduledUpdatesCheck
+        $config = Get-UpdateConfiguration
+
+        $result | Should -BeTrue
+        $config.EnabledScheduledUpdates | Should -BeFalse
+        $config.Enabled | Should -BeFalse
+        Assert-MockCalled Unregister-ScheduledTask -Times 1
+    }
+}
+
+Describe 'Test-SystemRequirements' -Tag 'SystemRequirements' {
+    BeforeAll {
+        . "$PSScriptRoot\winget-app-install.ps1"
+    }
+
+    BeforeEach {
+        Mock Write-Info { }
+        Mock Write-Success { }
+        Mock Write-WarningMessage { }
+        Mock Write-ErrorMessage { }
+        Mock Test-NetConnection { $true }
+        Mock Get-PSDrive {
+            [PSCustomObject]@{ Free = 100GB }
+        }
+        Mock Get-ItemProperty {
+            [PSCustomObject]@{ ProductName = 'Windows 11 Pro' }
+        }
+    }
+
+    It 'Returns $true when all checks pass' {
+        $result = Test-SystemRequirements
+        $result | Should -BeTrue
+    }
+
+    It 'Returns $false when network check fails' {
+        Mock Test-NetConnection { $false }
+        $result = Test-SystemRequirements
+        $result | Should -BeFalse
+    }
+
+    It 'Returns $false when network check throws' {
+        Mock Test-NetConnection { throw 'No network' }
+        $result = Test-SystemRequirements
+        $result | Should -BeFalse
+    }
+
+    It 'Returns $false when user declines low disk space prompt' {
+        Mock Get-PSDrive { [PSCustomObject]@{ Free = 10GB } }
+        Mock Read-Host { 'N' }
+        $result = Test-SystemRequirements
+        $result | Should -BeFalse
+    }
+
+    It 'Returns $true when user accepts low disk space prompt' {
+        Mock Get-PSDrive { [PSCustomObject]@{ Free = 10GB } }
+        Mock Read-Host { 'Y' }
+        $result = Test-SystemRequirements
+        $result | Should -BeTrue
+    }
+
+    It 'Skips disk space prompt in WhatIf mode' {
+        Mock Get-PSDrive { [PSCustomObject]@{ Free = 10GB } }
+        Mock Read-Host { throw 'Should not prompt in WhatIf mode' }
+        { Test-SystemRequirements -WhatIf } | Should -Not -Throw
+    }
+}
+
 Describe 'Write-Info' {
     BeforeAll {
         . "$PSScriptRoot\winget-app-install.ps1"
