@@ -52,9 +52,7 @@ param (
     [switch]$AutoInstallUpdates,
     [Parameter(Mandatory = $false)]
     [ValidateSet('Weekly', 'Daily')]
-    [string]$UpdateFrequency = 'Weekly',
-    [Parameter(Mandatory = $false)]
-    [switch]$SkipSystemCheck
+    [string]$UpdateFrequency = 'Weekly'
 )
 
 # ------------------------------------------------Functions------------------------------------------------
@@ -304,14 +302,18 @@ function Add-ToEnvironmentPath {
     # Check if the path is already in the environment PATH variable
     if (-not (Test-PathInEnvironment -PathToCheck $PathToAdd -Scope $Scope)) {
         if ($Scope -eq 'System') {
+            # Get the current system PATH
             $systemEnvPath = [System.Environment]::GetEnvironmentVariable('PATH', [System.EnvironmentVariableTarget]::Machine)
-            $newSystemPath = if ([string]::IsNullOrEmpty($systemEnvPath)) { $PathToAdd } else { "$systemEnvPath;$PathToAdd" }
-            [System.Environment]::SetEnvironmentVariable('PATH', $newSystemPath, [System.EnvironmentVariableTarget]::Machine)
+            # Add to system PATH
+            $systemEnvPath += ";$PathToAdd"
+            [System.Environment]::SetEnvironmentVariable('PATH', $systemEnvPath, [System.EnvironmentVariableTarget]::Machine)
         }
         elseif ($Scope -eq 'User') {
+            # Get the current user PATH
             $userEnvPath = [System.Environment]::GetEnvironmentVariable('PATH', [System.EnvironmentVariableTarget]::User)
-            $newUserPath = if ([string]::IsNullOrEmpty($userEnvPath)) { $PathToAdd } else { "$userEnvPath;$PathToAdd" }
-            [System.Environment]::SetEnvironmentVariable('PATH', $newUserPath, [System.EnvironmentVariableTarget]::User)
+            # Add to user PATH
+            $userEnvPath += ";$PathToAdd"
+            [System.Environment]::SetEnvironmentVariable('PATH', $userEnvPath, [System.EnvironmentVariableTarget]::User)
         }
 
         # Update the current process environment PATH (with length check to avoid Windows PATH limit of 2048)
@@ -680,16 +682,10 @@ function Invoke-WingetCommand {
 
     $commandOutput | ForEach-Object {
         if ($_ -match $SuccessPattern) {
-            $parts = $_.Split()
-            if ($SuccessIndex -lt $parts.Count) {
-                $SuccessArray.Value += $parts[$SuccessIndex]
-            }
+            $SuccessArray.Value += $_.Split()[$SuccessIndex]
         }
         elseif ($_ -match $FailurePattern) {
-            $parts = $_.Split()
-            if ($FailureIndex -lt $parts.Count) {
-                $FailureArray.Value += $parts[$FailureIndex]
-            }
+            $FailureArray.Value += $_.Split()[$FailureIndex]
         }
     }
 
@@ -786,154 +782,6 @@ function Test-UpdatesAvailable {
 
 <#
 .SYNOPSIS
-    Installs a winget package with exponential backoff retry for session errors (0x80073d19).
-.DESCRIPTION
-    Wraps Start-Process winget install, captures the exit code, and retries on the specific
-    session-logged-off error that intermittently affects packages like Microsoft.PowerShell.
-    Does NOT re-run winget on each attempt — only retries when the session error is detected.
-.PARAMETER PackageId
-    The winget package ID to install.
-.PARAMETER MaxRetries
-    Maximum retry attempts after the first try (default: 2).
-.RETURNS
-    [int] The final winget exit code.
-#>
-function Invoke-WingetInstallWithSessionRetry {
-    param (
-        [Parameter(Mandatory = $true)]
-        [string]$PackageId,
-        [Parameter(Mandatory = $false)]
-        [int]$MaxRetries = 2
-    )
-
-    $sessionErrorCode = -2147009767  # 0x80073d19 as signed int32
-
-    for ($attempt = 1; $attempt -le ($MaxRetries + 1); $attempt++) {
-        if ($attempt -gt 1) {
-            $delaySeconds = 3 * [Math]::Pow(2, $attempt - 2)
-            Write-WarningMessage "Attempt $attempt/$($MaxRetries + 1): Waiting $delaySeconds seconds before retrying $PackageId..."
-            Start-Sleep -Seconds $delaySeconds
-        }
-
-        $process = Start-Process winget `
-            -ArgumentList "install -e --accept-source-agreements --accept-package-agreements --source winget --id $PackageId" `
-            -NoNewWindow -Wait -PassThru
-        $exitCode = $process.ExitCode
-
-        if ($exitCode -eq 0) {
-            return 0
-        }
-
-        if ($exitCode -eq $sessionErrorCode -and $attempt -le $MaxRetries) {
-            Write-WarningMessage "Session error (0x80073d19) installing $PackageId. Will retry..."
-            continue
-        }
-
-        return $exitCode
-    }
-
-    return $process.ExitCode
-}
-
-<#
-.SYNOPSIS
-    Runs pre-flight system checks and returns $true if the script should proceed.
-.DESCRIPTION
-    Checks OS version (warn only), disk space on C: (warn + prompt), and network
-    connectivity to winget CDN (blocking). Pass -WhatIf to report without prompting.
-    Pass -SkipSystemCheck to bypass all checks.
-.RETURNS
-    [bool] $false if a blocking check fails or the user cancels; $true otherwise.
-#>
-function Test-SystemRequirements {
-    param (
-        [Parameter(Mandatory = $false)]
-        [switch]$WhatIf
-    )
-
-    $results = @()
-    $proceed = $true
-
-    # --- OS Version (warn only, Windows 10 21H2 = build 19044) ---
-    try {
-        $build = [System.Environment]::OSVersion.Version.Build
-        $osName = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' -ErrorAction Stop).ProductName
-        if ($build -ge 19044) {
-            $results += [PSCustomObject]@{ Check = 'OS Version'; Status = 'OK'; Detail = $osName }
-        }
-        else {
-            $results += [PSCustomObject]@{ Check = 'OS Version'; Status = 'WARN'; Detail = "$osName (build $build — Windows 10 21H2 or later recommended)" }
-        }
-    }
-    catch {
-        $results += [PSCustomObject]@{ Check = 'OS Version'; Status = 'WARN'; Detail = "Could not determine OS version: $_" }
-    }
-
-    # --- Disk Space on C: (warn + prompt if under 50 GB) ---
-    try {
-        $drive = Get-PSDrive -Name C -ErrorAction Stop
-        $freeGB = [Math]::Round($drive.Free / 1GB, 1)
-        if ($freeGB -ge 50) {
-            $results += [PSCustomObject]@{ Check = 'Disk Space'; Status = 'OK'; Detail = "${freeGB} GB free on C:" }
-        }
-        else {
-            $results += [PSCustomObject]@{ Check = 'Disk Space'; Status = 'WARN'; Detail = "${freeGB} GB free on C: (50 GB recommended)" }
-        }
-    }
-    catch {
-        $results += [PSCustomObject]@{ Check = 'Disk Space'; Status = 'WARN'; Detail = "Could not read C: drive: $_" }
-        $freeGB = 999
-    }
-
-    # --- Network (blocking — required for winget) ---
-    try {
-        $netTest = Test-NetConnection -ComputerName 'cdn.winget.microsoft.com' -Port 443 -InformationLevel Quiet -WarningAction SilentlyContinue -ErrorAction Stop
-        if ($netTest) {
-            $results += [PSCustomObject]@{ Check = 'Network'; Status = 'OK'; Detail = 'Connected to cdn.winget.microsoft.com' }
-        }
-        else {
-            $results += [PSCustomObject]@{ Check = 'Network'; Status = 'FAIL'; Detail = 'Cannot reach cdn.winget.microsoft.com — network is required' }
-            $proceed = $false
-        }
-    }
-    catch {
-        $results += [PSCustomObject]@{ Check = 'Network'; Status = 'FAIL'; Detail = "Network check failed: $_" }
-        $proceed = $false
-    }
-
-    # --- Display results ---
-    Write-Info ''
-    Write-Info 'Pre-flight System Checks:'
-    foreach ($r in $results) {
-        $icon = switch ($r.Status) { 'OK' { '[OK]' } 'WARN' { '[WARN]' } 'FAIL' { '[FAIL]' } }
-        $msg = "$icon $($r.Check): $($r.Detail)"
-        switch ($r.Status) {
-            'OK'   { Write-Success $msg }
-            'WARN' { Write-WarningMessage $msg }
-            'FAIL' { Write-ErrorMessage $msg }
-        }
-    }
-    Write-Info ''
-
-    if (-not $proceed) {
-        return $false
-    }
-
-    # Prompt on low disk space (skip prompt in WhatIf mode)
-    $diskResult = $results | Where-Object { $_.Check -eq 'Disk Space' }
-    if ($diskResult.Status -eq 'WARN' -and -not $WhatIf) {
-        $choice = Read-Host 'Disk space is below the 50 GB recommendation. Continue anyway? (Y/N)'
-        if ($choice -notin @('Y', 'y')) {
-            Write-WarningMessage 'Installation cancelled by user due to low disk space.'
-            return $false
-        }
-    }
-
-    return $true
-}
-
-<#
-.SYNOPSIS
     Returns the filesystem paths used by scheduled update functionality.
 #>
 function Get-UpdateSettingsPaths {
@@ -1017,12 +865,7 @@ function Save-UpdateConfiguration {
         New-Item -Path $paths.BasePath -ItemType Directory -Force | Out-Null
     }
 
-    try {
-        $Configuration | ConvertTo-Json | Set-Content -Path $paths.ConfigFile -Encoding UTF8 -ErrorAction Stop
-    }
-    catch {
-        Write-WarningMessage "Failed to save update configuration: $_"
-    }
+    $Configuration | ConvertTo-Json | Set-Content -Path $paths.ConfigFile -Encoding UTF8
 }
 
 <#
@@ -1057,7 +900,7 @@ function Get-UpdateReport {
             if ($line -match 'No installed package found|No available upgrade found|No newer package versions are available') { continue }
 
             $columns = $line.Trim() -split '\s{2,}'
-            if ($columns.Count -ge 4 -and $columns[1] -match '^[\w][\w.\-]+\.[\w][\w.\-]+$') {
+            if ($columns.Count -ge 4) {
                 $report += [PSCustomObject]@{
                     PackageName      = $columns[1]
                     CurrentVersion   = $columns[2]
@@ -1554,122 +1397,6 @@ function Set-WindowsTerminalDefaults {
 
 <#
 .SYNOPSIS
-    Attempts to install a package with smart retry logic for session-related errors.
-.DESCRIPTION
-    Installs a package using winget with exponential backoff retry for packages that fail with session errors (like Microsoft.PowerShell).
-    Particularly handles error 0x80073d19 "An error occurred because a user was logged off".
-.PARAMETER PackageId
-    The package ID to install (e.g., 'Microsoft.PowerShell')
-.PARAMETER MaxRetries
-    Maximum number of retry attempts (default: 2)
-.RETURNS
-    [bool] True if installation succeeded, false otherwise
-#>
-function Invoke-WingetInstallWithRetry {
-    param (
-        [Parameter(Mandatory = $true)]
-        [string]$PackageId,
-
-        [Parameter(Mandatory = $false)]
-        [int]$MaxRetries = 2
-    )
-
-    # Packages known to have session-related install issues
-    $sessionSensitivePackages = @('Microsoft.PowerShell')
-    $isSessionSensitive = $sessionSensitivePackages -contains $PackageId
-
-    # First, search for the package to verify it exists and identify the correct source
-    Write-Info "Searching for package: $PackageId"
-    Write-Info "[DEBUG] Executing: winget search --id $PackageId --accept-source-agreements"
-    $searchResult = & winget search --id $PackageId --accept-source-agreements 2>&1
-    $searchOutput = $searchResult | Out-String
-
-    Write-Info "[DEBUG] Search output:`n$searchOutput"
-
-    if ($searchOutput -match 'No package found' -or -not ($searchOutput -match $PackageId)) {
-        Write-WarningMessage "Package $PackageId not found in any source. Skipping installation."
-        Write-Info "[DEBUG] Search failed - no package found in output"
-        return $false
-    }
-
-    # Determine which source has the package (prefer winget over msstore)
-    $packageSource = 'winget'
-    if ($searchOutput -match 'msstore' -and -not ($searchOutput -match 'winget')) {
-        $packageSource = 'msstore'
-    }
-
-    Write-Info "[DEBUG] Source detection: winget match=$($searchOutput -match 'winget'), msstore match=$($searchOutput -match 'msstore')"
-    Write-Info "Found package $PackageId in source: $packageSource"
-
-    for ($attempt = 1; $attempt -le $MaxRetries; $attempt++) {
-        try {
-            # Add delay before retry attempts (exponential backoff: 3s, 6s, 12s...)
-            if ($attempt -gt 1) {
-                $delaySeconds = 3 * [Math]::Pow(2, $attempt - 2)
-                Write-Info "Retry attempt $($attempt): Waiting $delaySeconds seconds before retrying..."
-                Start-Sleep -Seconds $delaySeconds
-            }
-
-            # Attempt installation
-            # Use a simpler command structure: install without --exact/-e flag as it may conflict with --source and --id
-            $wingetArgs = @(
-                'install'
-                '--accept-source-agreements'
-                '--accept-package-agreements'
-                '--source'
-                $packageSource
-                '--id'
-                $PackageId
-            )
-
-            Write-Info "[DEBUG] Attempt $attempt/$MaxRetries - Executing install command:"
-            Write-Info "[DEBUG] winget $($wingetArgs -join ' ')"
-
-            # Run winget install and capture all output
-            $installOutput = & winget $wingetArgs 2>&1
-            $installMessage = $installOutput | Out-String
-            $exitCode = $LASTEXITCODE
-
-            Write-Info "[DEBUG] Exit code: $exitCode"
-            Write-Info "[DEBUG] Install output:`n$installMessage"
-
-            # Check if installation succeeded
-            if ($exitCode -eq 0) {
-                Write-Info "[DEBUG] Installation succeeded with exit code 0"
-                return $true
-            }
-
-            # Check for retryable errors (session errors and transient file system errors)
-            Write-Info "[DEBUG] Checking for retryable errors..."
-            if ($installMessage -match '0x80073d19|0x80070002|user was logged off|An error occurred because a user was logged|The system cannot find the file specified') {
-                Write-Info "[DEBUG] Found retryable error pattern (session error or transient file system error)"
-                if ($attempt -lt $MaxRetries) {
-                    Write-WarningMessage "Package install failed with retryable error (Attempt $attempt/$MaxRetries). Retrying..."
-                    continue
-                }
-            }
-
-            # Other errors - don't retry
-            Write-Info "[DEBUG] Non-retryable error detected or max retries reached. Returning false."
-            return $false
-        }
-        catch {
-            Write-Info "[DEBUG] Exception caught on attempt $attempt/$MaxRetries"
-            Write-Info "[DEBUG] Exception message: $_"
-            if ($attempt -lt $MaxRetries) {
-                Write-WarningMessage "Package install threw exception (Attempt $attempt/$MaxRetries): $_ - Retrying..."
-                continue
-            }
-            Write-Info "[DEBUG] Max retries reached. Returning false."
-            return $false
-        }
-    }
-
-    return $false
-}
-
-<#
-.SYNOPSIS
     Returns true when the scheduled updates task currently exists.
 .RETURNS
     [bool]
@@ -1919,16 +1646,6 @@ function Invoke-WingetInstall {
         Write-Success 'Starting...'
     }
 
-    # Pre-flight system checks
-    if (-not $SkipSystemCheck) {
-        if ($WhatIf) {
-            Write-Info '[DRY-RUN] Would run pre-flight system checks (OS version, disk space, network).'
-        }
-        elseif (-not (Test-SystemRequirements -WhatIf:$WhatIf)) {
-            Exit
-        }
-    }
-
     # Ensure required modules are available
     if (-not (Test-AndInstallWingetModule)) {
         Write-Warning 'Microsoft.WinGet.Client module is not available. Update functionality will use fallback CLI methods.'
@@ -2051,21 +1768,6 @@ function Invoke-WingetInstall {
         }
     }
 
-    # Update winget sources to ensure package cache is current
-    if (-not $WhatIf) {
-        Write-Info 'Updating winget sources to refresh package cache...'
-        try {
-            & winget source update --disable-interactivity 2>&1 | Out-Null
-            Write-Success 'Winget sources updated successfully'
-        }
-        catch {
-            Write-WarningMessage "Failed to update winget sources: $_. Continuing with installation..."
-        }
-    }
-    else {
-        Write-Info '[DRY-RUN] Would update winget sources'
-    }
-
     Foreach ($app in $apps) {
         try {
             # Run winget list with timeout to prevent hanging
@@ -2094,16 +1796,36 @@ function Invoke-WingetInstall {
             if (![String]::Join('', $listApp).Contains($app.name)) {
                 if (-not $WhatIf) {
                     Write-Info "Installing: $($app.name)"
-                    $installSuccess = Invoke-WingetInstallWithRetry -PackageId $app.name -MaxRetries 4
+                    Start-Process winget -ArgumentList "install -e --accept-source-agreements --accept-package-agreements --source winget --id $($app.name)" -NoNewWindow -Wait
 
-                    if ($installSuccess) {
-                        Write-Success "Successfully installed: $($app.name)"
-                        $installedApps += $app.name
+                    # Verify installation with timeout
+                    $verifyProcess = Start-Process -FilePath 'winget' `
+                        -ArgumentList 'list', '--exact', '--id', $app.name, '--accept-source-agreements' `
+                        -NoNewWindow `
+                        -PassThru `
+                        -RedirectStandardOutput "$env:TEMP\winget_verify_output.txt" `
+                        -RedirectStandardError "$env:TEMP\winget_verify_error.txt"
+
+                    if ($verifyProcess.WaitForExit(15000)) {
+                        $installResult = Get-Content "$env:TEMP\winget_verify_output.txt" -ErrorAction SilentlyContinue
+                        if (![String]::Join('', $installResult).Contains($app.name)) {
+                            Write-ErrorMessage "Failed to install: $($app.name). No package found matching input criteria."
+                            $failedApps += $app.name
+                        }
+                        else {
+                            Write-Success "Successfully installed: $($app.name)"
+                            $installedApps += $app.name
+                        }
                     }
                     else {
-                        Write-ErrorMessage "Failed to install: $($app.name)"
+                        Write-WarningMessage "Verification timed out for: $($app.name). Assuming installation failed."
+                        $verifyProcess.Kill()
                         $failedApps += $app.name
                     }
+
+                    # Cleanup temp files
+                    Remove-Item "$env:TEMP\winget_verify_output.txt" -ErrorAction SilentlyContinue
+                    Remove-Item "$env:TEMP\winget_verify_error.txt" -ErrorAction SilentlyContinue
                 }
                 else {
                     Write-Info "[DRY-RUN] Would install: $($app.name)"
@@ -2225,7 +1947,7 @@ function Invoke-WingetInstall {
             foreach ($appName in $appsToRetry) {
                 try {
                     Write-Info "Retrying: $appName"
-                    $retrySuccess = Invoke-WingetInstallWithRetry -PackageId $appName -MaxRetries 5
+                    Start-Process winget -ArgumentList "install -e --accept-source-agreements --accept-package-agreements --source winget --id $appName" -NoNewWindow -Wait
 
                     # Verify installation with timeout
                     $verifyProcess = Start-Process -FilePath 'winget' `
