@@ -1416,9 +1416,9 @@ function Test-ScheduledUpdatesTaskExists {
 
 <#
 .SYNOPSIS
-    Ensures the scheduled update helper script exists in AppData.
+    Copies the scheduled update helper script into AppData and returns its path.
 #>
-function Ensure-UpdateHelperScript {
+function Install-UpdateHelperScript {
     $paths = Get-UpdateSettingsPaths
     $sourceScript = Join-Path $PSScriptRoot 'Update-InstalledApps.ps1'
 
@@ -1444,7 +1444,7 @@ function Ensure-UpdateHelperScript {
 .SYNOPSIS
     Enables automatic app update checks via Windows Scheduled Task.
 .DESCRIPTION
-    Creates a Windows scheduled task that runs as SYSTEM with highest privileges.
+    Creates a Windows scheduled task that runs as the current user (S4U, no elevated privileges).
 .PARAMETER SkipPrompt
     When true, skips the user prompt and uses supplied parameter values.
 .PARAMETER WhatIf
@@ -1467,7 +1467,7 @@ function Enable-ScheduledUpdatesCheck {
     $taskName = 'WingetAppSetup-ScheduledUpdates'
     $taskPath = '\winget-app-setup\'
 
-    if (-not $SkipPrompt) {
+    if (-not $SkipPrompt -and -not $WhatIf) {
         $scheduleDescription = if ($UpdateFrequency -eq 'Daily') { 'every day at 2:00 AM' } else { 'every Sunday at 2:00 AM' }
         $userChoice = Read-Host "Enable $($UpdateFrequency.ToLower()) automatic update checks? Updates will be checked $scheduleDescription. (Y/N)"
         $enableScheduledUpdates = $userChoice -in @('Y', 'y')
@@ -1490,7 +1490,7 @@ function Enable-ScheduledUpdatesCheck {
         return $true
     }
 
-    $null = Ensure-UpdateHelperScript
+    $null = Install-UpdateHelperScript
 
     if (Test-ScheduledUpdatesTaskExists) {
         Unregister-ScheduledTask -TaskName $taskName -TaskPath $taskPath -Confirm:$false
@@ -1506,7 +1506,7 @@ function Enable-ScheduledUpdatesCheck {
             $taskTrigger = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Sunday -At '2:00 AM'
         }
         $taskSettings = New-ScheduledTaskSettingsSet -StartWhenAvailable -RunOnlyIfNetworkAvailable
-        $taskPrincipal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
+        $taskPrincipal = New-ScheduledTaskPrincipal -UserId ([System.Security.Principal.WindowsIdentity]::GetCurrent().Name) -LogonType S4U -RunLevel Limited
 
         Register-ScheduledTask -Action $taskAction `
             -Trigger $taskTrigger `
@@ -1595,7 +1595,7 @@ function Invoke-OnDemandUpdateCheck {
         return
     }
 
-    $helperPath = Ensure-UpdateHelperScript
+    $helperPath = Install-UpdateHelperScript
     & $helperPath -AutoInstallOverride:$true -RunReason OnDemand
 }
 

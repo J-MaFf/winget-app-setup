@@ -2413,16 +2413,15 @@ Describe 'Scheduled Updates - Unit Tests' -Tag 'ScheduledUpdates' {
         $env:APPDATA = Join-Path $TestDrive 'appdata'
         New-Item -Path $env:APPDATA -ItemType Directory -Force | Out-Null
 
-        if (-not (Get-Command Get-WinGetPackage -ErrorAction SilentlyContinue)) { function Get-WinGetPackage { } }
-        if (-not (Get-Command winget -ErrorAction SilentlyContinue)) { function winget { } }
-        if (-not (Get-Command Get-ScheduledTask -ErrorAction SilentlyContinue)) { function Get-ScheduledTask { } }
-        if (-not (Get-Command New-ScheduledTaskAction -ErrorAction SilentlyContinue)) { function New-ScheduledTaskAction { } }
-        if (-not (Get-Command New-ScheduledTaskTrigger -ErrorAction SilentlyContinue)) { function New-ScheduledTaskTrigger { } }
-        if (-not (Get-Command New-ScheduledTaskSettingsSet -ErrorAction SilentlyContinue)) { function New-ScheduledTaskSettingsSet { } }
-        if (-not (Get-Command New-ScheduledTaskPrincipal -ErrorAction SilentlyContinue)) { function New-ScheduledTaskPrincipal { } }
-        if (-not (Get-Command Register-ScheduledTask -ErrorAction SilentlyContinue)) { function Register-ScheduledTask { } }
-        if (-not (Get-Command Unregister-ScheduledTask -ErrorAction SilentlyContinue)) { function Unregister-ScheduledTask { } }
-
+        Mock Get-WinGetPackage { }
+        Mock winget { }
+        Mock Get-ScheduledTask { $null }
+        Mock New-ScheduledTaskAction { @{ Action = 'ok' } }
+        Mock New-ScheduledTaskTrigger { @{ Trigger = 'ok' } }
+        Mock New-ScheduledTaskSettingsSet { @{ Settings = 'ok' } }
+        Mock New-ScheduledTaskPrincipal { @{ Principal = 'ok' } }
+        Mock Register-ScheduledTask { }
+        Mock Unregister-ScheduledTask { }
         Mock Write-Info { }
         Mock Write-WarningMessage { }
         Mock Write-Success { }
@@ -2475,14 +2474,7 @@ Describe 'Scheduled Updates - Unit Tests' -Tag 'ScheduledUpdates' {
     }
 
     It 'Enable-ScheduledUpdatesCheck should create task and persist config' {
-        Mock Get-ScheduledTask { $null }
         Mock Get-Command { $null } -ParameterFilter { $Name -eq 'pwsh' }
-        Mock New-ScheduledTaskAction { @{ Action = 'ok' } }
-        Mock New-ScheduledTaskTrigger { @{ Trigger = 'ok' } }
-        Mock New-ScheduledTaskSettingsSet { @{ Settings = 'ok' } }
-        Mock New-ScheduledTaskPrincipal { @{ Principal = 'ok' } }
-        Mock Register-ScheduledTask { }
-        Mock Unregister-ScheduledTask { }
 
         $result = Enable-ScheduledUpdatesCheck -SkipPrompt:$true -UpdateFrequency Daily -AutoInstall:$false
         $paths = Get-UpdateSettingsPaths
@@ -2497,7 +2489,6 @@ Describe 'Scheduled Updates - Unit Tests' -Tag 'ScheduledUpdates' {
 
     It 'Disable-ScheduledUpdatesCheck should remove task and persist disabled config' {
         Mock Get-ScheduledTask { @{ Name = 'WingetAppSetup-ScheduledUpdates' } }
-        Mock Unregister-ScheduledTask { }
 
         $result = Disable-ScheduledUpdatesCheck
         $config = Get-UpdateConfiguration
