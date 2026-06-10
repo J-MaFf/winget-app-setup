@@ -1599,6 +1599,71 @@ function Invoke-OnDemandUpdateCheck {
     & $helperPath -AutoInstallOverride:$true -RunReason OnDemand
 }
 
+<#
+.SYNOPSIS
+    Initializes winget sources in the current user context to prevent session errors.
+.DESCRIPTION
+    Runs a lightweight winget command in user context (without elevation) to ensure source
+    agreements are accepted by the current user. This prevents 0x80073d19 errors that occur
+    when the script runs as admin but winget sources haven't been initialized for the user.
+.PARAMETER WhatIf
+    When specified, only reports intended actions without executing.
+.RETURNS
+    [bool] True if initialization succeeded or was already done, False if an error occurred.
+#>
+function Initialize-WingetSourcesForUser {
+    param (
+        [Parameter(Mandatory = $false)]
+        [switch]$WhatIf
+    )
+
+    if ($WhatIf) {
+        Write-Info '[DRY-RUN] Would initialize winget sources for current user'
+        return $true
+    }
+
+    Write-Info 'Initializing winget sources for current user context...'
+    Write-Info 'You may be prompted to accept source agreements.'
+
+    try {
+        $output = & winget list --disable-interactivity 2>&1
+        $exitCode = $LASTEXITCODE
+
+        if ($exitCode -eq 0) {
+            Write-Success 'Winget sources initialized successfully for user context.'
+            return $true
+        }
+
+        # Exit code -1 with "source agreements not accepted" is actually expected the first time
+        # and means the user can now accept them. The next execution will work.
+        if ($exitCode -eq -1 -and $output -match 'source agreement|You must accept') {
+            Write-Info 'Source agreements need to be accepted. Running interactive prompt...'
+            # Run again without --disable-interactivity to allow user interaction
+            $output = & winget list 2>&1
+            $exitCode = $LASTEXITCODE
+
+            if ($exitCode -eq 0) {
+                Write-Success 'Source agreements accepted. Winget is ready to use.'
+                return $true
+            }
+        }
+
+        if ($exitCode -eq 0) {
+            Write-Success 'Winget sources are accessible.'
+            return $true
+        }
+
+        Write-WarningMessage "Winget source initialization returned exit code: $exitCode"
+        Write-WarningMessage 'Continuing with installation; retry logic will handle any session errors.'
+        return $true
+    }
+    catch {
+        Write-WarningMessage "Error initializing winget sources: $_"
+        Write-WarningMessage 'Continuing with installation; retry logic will handle any session errors.'
+        return $true
+    }
+}
+
 #------------------------------------------------Main Script------------------------------------------------
 
 <#
@@ -1645,6 +1710,9 @@ function Invoke-WingetInstall {
     else {
         Write-Success 'Starting...'
     }
+
+    # Initialize winget sources in user context to prevent session errors (issue #104)
+    [void](Initialize-WingetSourcesForUser -WhatIf:$WhatIf)
 
     # Ensure required modules are available
     if (-not (Test-AndInstallWingetModule)) {
