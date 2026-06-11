@@ -1781,8 +1781,23 @@ function Invoke-WingetInstall {
     # Determine which PowerShell executable to use
     $psExecutable = if (Get-Command pwsh -ErrorAction SilentlyContinue) { 'pwsh.exe' } else { 'powershell.exe' }
 
+    # Accept msstore source agreements in the user context before elevating.
+    # Agreements are per-user — they won't carry over into the elevated process.
+    # Running winget source update here surfaces the interactive prompt while we
+    # still have the normal user's identity.
+    $isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] 'Administrator')
+    if (-not $isAdmin -and Test-IsRunningLocally) {
+        if ($WhatIf) {
+            Write-Info '[DRY-RUN] Would run winget source update to prompt for source agreement acceptance in user context'
+        }
+        else {
+            Write-Info 'Updating winget sources — accept any prompts that appear to continue...'
+            Start-Process -FilePath 'winget' -ArgumentList 'source', 'update' -Wait -NoNewWindow
+        }
+    }
+
     # Check if the script is run as administrator
-    If (-NOT ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] 'Administrator')) {
+    If (-NOT $isAdmin) {
         if (Test-IsRunningLocally) {
             Write-ErrorMessage 'This script requires administrator privileges. Press Enter to restart script with elevated privileges.'
             Pause
