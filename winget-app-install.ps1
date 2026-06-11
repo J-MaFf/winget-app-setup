@@ -212,7 +212,7 @@ function Test-AppDefinitions {
 #>
 function Test-Source-IsTrusted($target) {
     try {
-        $sources = winget source list --disable-interactivity 2>&1
+        $sources = winget source list --disable-interactivity --accept-source-agreements 2>&1
         return $sources -match [regex]::Escape($target)
     }
     catch {
@@ -236,7 +236,7 @@ function Set-Sources {
         # Run winget source reset with a timeout to prevent hanging
         # Using Start-Process with a timeout to handle potential hangs
         $resetProcess = Start-Process -FilePath 'winget' `
-            -ArgumentList 'source', 'reset', '--force', '--disable-interactivity' `
+            -ArgumentList 'source', 'reset', '--force', '--disable-interactivity', '--accept-source-agreements' `
             -NoNewWindow `
             -PassThru `
             -RedirectStandardOutput "$env:TEMP\winget_reset_output.txt" `
@@ -1122,7 +1122,7 @@ function Test-WingetSources {
 
     # First check: verify source is listed
     try {
-        $output = winget source list --disable-interactivity 2>&1
+        $output = winget source list --disable-interactivity --accept-source-agreements 2>&1
         $sourceIsListed = $output -match 'winget'
     }
     catch {
@@ -1171,7 +1171,7 @@ function Test-WingetSources {
     # Attempt repair: first try source reset, then re-register package
     try {
         Write-Info 'Running winget source reset...'
-        $resetOutput = winget source reset --force --disable-interactivity 2>&1
+        $resetOutput = winget source reset --force --disable-interactivity --accept-source-agreements 2>&1
         Write-Info 'Source reset completed.'
     }
     catch {
@@ -1193,7 +1193,7 @@ function Test-WingetSources {
 
     # Retry both checks after repair
     try {
-        $output = winget source list --disable-interactivity 2>&1
+        $output = winget source list --disable-interactivity --accept-source-agreements 2>&1
         $sourceIsListed = $output -match 'winget'
     }
     catch {
