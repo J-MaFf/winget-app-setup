@@ -1786,7 +1786,7 @@ function Invoke-WingetInstall {
     # Running winget source update here surfaces the interactive prompt while we
     # still have the normal user's identity.
     $isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] 'Administrator')
-    if (-not $isAdmin -and Test-IsRunningLocally) {
+    if (-not $isAdmin -and (Test-IsRunningLocally)) {
         if ($WhatIf) {
             Write-Info '[DRY-RUN] Would run winget source update to prompt for source agreement acceptance in user context'
         }
