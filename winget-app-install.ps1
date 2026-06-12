@@ -210,7 +210,7 @@ function Test-AppDefinitions {
 #>
 function Test-Source-IsTrusted($target) {
     try {
-        $sources = winget source list --disable-interactivity 2>&1
+        $sources = winget source list --disable-interactivity --accept-source-agreements 2>&1
         return $sources -match [regex]::Escape($target)
     }
     catch {
@@ -234,7 +234,7 @@ function Set-Sources {
         # Run winget source reset with a timeout to prevent hanging
         # Using Start-Process with a timeout to handle potential hangs
         $resetProcess = Start-Process -FilePath 'winget' `
-            -ArgumentList 'source', 'reset', '--force', '--disable-interactivity' `
+            -ArgumentList 'source', 'reset', '--force', '--disable-interactivity', '--accept-source-agreements' `
             -NoNewWindow `
             -PassThru `
             -RedirectStandardOutput "$env:TEMP\winget_reset_output.txt" `
@@ -965,7 +965,7 @@ function Test-WingetSources {
 
     # First check: verify source is listed
     try {
-        $output = winget source list --disable-interactivity 2>&1
+        $output = winget source list --disable-interactivity --accept-source-agreements 2>&1
         $sourceIsListed = $output -match 'winget'
     }
     catch {
@@ -1014,7 +1014,7 @@ function Test-WingetSources {
     # Attempt repair: first try source reset, then re-register package
     try {
         Write-Info 'Running winget source reset...'
-        $resetOutput = winget source reset --force --disable-interactivity 2>&1
+        $resetOutput = winget source reset --force --disable-interactivity --accept-source-agreements 2>&1
         Write-Info 'Source reset completed.'
     }
     catch {
@@ -1036,7 +1036,7 @@ function Test-WingetSources {
 
     # Retry both checks after repair
     try {
-        $output = winget source list --disable-interactivity 2>&1
+        $output = winget source list --disable-interactivity --accept-source-agreements 2>&1
         $sourceIsListed = $output -match 'winget'
     }
     catch {
@@ -1689,8 +1689,23 @@ function Invoke-WingetInstall {
     # Determine which PowerShell executable to use
     $psExecutable = if (Get-Command pwsh -ErrorAction SilentlyContinue) { 'pwsh.exe' } else { 'powershell.exe' }
 
+    # Accept msstore source agreements in the user context before elevating.
+    # Agreements are per-user — they won't carry over into the elevated process.
+    # Running winget source update here surfaces the interactive prompt while we
+    # still have the normal user's identity.
+    $isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] 'Administrator')
+    if (-not $isAdmin -and (Test-IsRunningLocally)) {
+        if ($WhatIf) {
+            Write-Info '[DRY-RUN] Would run winget source update to prompt for source agreement acceptance in user context'
+        }
+        else {
+            Write-Info 'Updating winget sources — accept any prompts that appear to continue...'
+            Start-Process -FilePath 'winget' -ArgumentList 'source', 'update' -Wait -NoNewWindow
+        }
+    }
+
     # Check if the script is run as administrator
-    If (-NOT ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] 'Administrator')) {
+    If (-NOT $isAdmin) {
         if (Test-IsRunningLocally) {
             Write-ErrorMessage 'This script requires administrator privileges. Press Enter to restart script with elevated privileges.'
             Pause
