@@ -33,12 +33,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
+- Removed orphaned Pester `Describe` blocks that tested functions which no longer ship: `Test-AndSetExecutionPolicy` (its `launch.ps1` was already dropped), `Invoke-WingetInstallWithRetry`, and `Test-SystemRequirements` ([#111](https://github.com/J-MaFf/winget-app-setup/issues/111)).
 - Dropped `launch.ps1`; the installer now runs directly when the required execution policy is temporarily relaxed.
 
 ### Fixed (Unreleased)
 
 - Reconciled the README one-line install command with the CHANGELOG: the `Set-ExecutionPolicy Unrestricted -Scope Process` snippet now includes `-Force`, matching the documented simplified form (#136).
 - Fixed double winget command execution in `Invoke-WingetCommand`: the function previously ran each winget command twice (once to display output, once to capture it), causing duplicate prompts and spurious "already installed" failures. It now invokes winget a single time, reading the exit code directly before any pipeline can reset `$LASTEXITCODE` (#134).
+- Corrected the CLAUDE.md winget note that referenced a non-existent `Invoke-WingetInstallWithSessionRetry`; it now describes the actual `0x80073d19` mitigation (user-context source init plus the single failed-install retry pass) ([#111](https://github.com/J-MaFf/winget-app-setup/issues/111)).
 - Cleaned up `Test-WingetAppInstall.Tests.ps1` so it no longer defines unused variables and satisfies the linter.
 - Fixed all 17 Pester tests that failed on the new Windows CI (#132): install `Microsoft.WinGet.Client` in CI so the winget cmdlet mocks resolve, removed orphaned `Invoke-WingetInstallWithRetry` tests for the reverted retry feature (#83), and restored the missing `Test-SystemRequirements` implementation.
 - Made `Enable-ScheduledUpdatesCheck` resilient to `[WindowsIdentity]::GetCurrent()` failing in restricted execution contexts (e.g. CI or service accounts): it now falls back to environment variables for the task principal so scheduled-task creation no longer aborts (#132).

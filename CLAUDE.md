@@ -47,6 +47,6 @@ This repo targets **Windows only**. All scripts are PowerShell.
 
 ## Winget Notes
 
-- Exit code `0x80073d19` is a transient Windows session error — retry with backoff via `Invoke-WingetInstallWithSessionRetry`
+- Exit code `0x80073d19` is a transient Windows session error. It is mitigated by initializing winget sources in the user context before elevation (`Initialize-WingetSourcesForUser`, issues #104/#105); any install that still fails is retried once in the final retry pass of `Invoke-WingetInstall`. (There is no dedicated backoff-retry function.)
 - Always capture `$LASTEXITCODE` immediately after a winget call — it goes stale fast
 - Validate package IDs with regex before trusting winget output: `^[\w][\w.\-]+\.[\w][\w.\-]+`

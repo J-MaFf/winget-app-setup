@@ -43,6 +43,7 @@ baseline on Linux (the only failures are pre-existing Windows-only environment l
 |-------|-------------|----|
 | [#106](https://github.com/J-MaFf/winget-app-setup/issues/106) | Split `winget-app-install.ps1` into a module with a generated bundle | [#109](https://github.com/J-MaFf/winget-app-setup/pull/109) |
 | [#110](https://github.com/J-MaFf/winget-app-setup/issues/110) | Migrate uninstall + update-helper scripts to consume the module | [#109](https://github.com/J-MaFf/winget-app-setup/pull/109) |
+| [#111](https://github.com/J-MaFf/winget-app-setup/issues/111) | Remove orphaned tests for functions that no longer exist | [#109](https://github.com/J-MaFf/winget-app-setup/pull/109) |
 | [#134](https://github.com/J-MaFf/winget-app-setup/issues/134) | Double winget command execution in `Invoke-WingetCommand` | [#138](https://github.com/J-MaFf/winget-app-setup/pull/138) |
 | [#135](https://github.com/J-MaFf/winget-app-setup/issues/135) | Pester tests copied function bodies instead of dot-sourcing the script | [#139](https://github.com/J-MaFf/winget-app-setup/pull/139) |
 | [#136](https://github.com/J-MaFf/winget-app-setup/issues/136) | Missing `STATUS.md` and README/CHANGELOG execution-policy mismatch | [#140](https://github.com/J-MaFf/winget-app-setup/pull/140) |
@@ -50,7 +51,7 @@ baseline on Linux (the only failures are pre-existing Windows-only environment l
 
 ### Open Issues
 
-- Pre-existing test rot: orphaned `Describe` blocks for functions that no longer exist (`Test-AndSetExecutionPolicy`, `Invoke-WingetInstallWithRetry`, `Test-SystemRequirements`) should be removed or backed by real implementations ([#111](https://github.com/J-MaFf/winget-app-setup/issues/111)).
+None.
 
 ## Natural Next Steps
 
