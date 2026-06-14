@@ -75,15 +75,21 @@ foreach ($file in $functionFiles) {
 [void]$builder.AppendLine('')
 [void]$builder.AppendLine((Get-Content -Path (Join-Path $fragmentsRoot 'tail.ps1') -Raw).TrimEnd())
 
-# Normalize to a single trailing newline
-$content = $builder.ToString().TrimEnd() + "`n"
+# Normalize to LF line endings with a single trailing newline so the output is
+# byte-identical across platforms. StringBuilder.AppendLine emits [Environment]::NewLine
+# (CRLF on Windows, LF on Linux), and the source files may be checked out with CRLF under
+# core.autocrlf, so collapse everything to LF here. The installer is stored with LF (see
+# .gitattributes), keeping the -Check round-trip deterministic on Windows and Linux alike.
+$content = (($builder.ToString() -replace "`r`n", "`n").TrimEnd()) + "`n"
 
 if ($Check) {
     if (-not (Test-Path $OutputPath)) {
         Write-Error "Check failed: '$OutputPath' does not exist. Run the build to generate it."
         exit 1
     }
-    $current = (Get-Content -Path $OutputPath -Raw)
+    # Normalize the on-disk copy to LF before comparing; a Windows checkout with
+    # core.autocrlf=true can present the file with CRLF even when it is in sync.
+    $current = ((Get-Content -Path $OutputPath -Raw) -replace "`r`n", "`n")
     if ($current -ne $content) {
         Write-Error "Check failed: '$OutputPath' is out of date. Re-run build/Build-WingetInstallScript.ps1."
         exit 1
