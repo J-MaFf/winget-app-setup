@@ -1,5 +1,14 @@
 # Test-WingetAppInstall.Tests.ps1
-# Comprehensive unit tests for winget-app-install.ps1 using Pester
+# Comprehensive unit tests for the WingetAppSetup module (source of winget-app-install.ps1).
+
+# Load the module''s functions once for the whole suite. The WingetAppSetup module
+# (WingetAppSetup/Public + WingetAppSetup/Private) is the single source of truth; the
+# distributable winget-app-install.ps1 is generated from it by build/Build-WingetInstallScript.ps1.
+BeforeAll {
+    $script:WingetAppSetupRoot = Join-Path $PSScriptRoot 'WingetAppSetup'
+    Get-ChildItem -Path (Join-Path $script:WingetAppSetupRoot 'Private'), (Join-Path $script:WingetAppSetupRoot 'Public') -Filter '*.ps1' |
+        ForEach-Object { . $_.FullName }
+}
 
 Describe 'Test-AndInstallWingetModule' {
     BeforeAll {
@@ -218,7 +227,6 @@ Describe 'Test-AndInstallWinget' {
         Mock Write-Host { }
 
         # Dot-source the main script to import Test-AndInstallWinget
-        . "$PSScriptRoot\winget-app-install.ps1"
     }
 
     Context 'When winget is available' {
@@ -263,7 +271,6 @@ Describe 'Test-WingetSources' {
         Mock Write-Warning { }
 
         # Dot-source the main script to import Test-WingetSources
-        . "$PSScriptRoot\winget-app-install.ps1"
     }
 
     Context 'When winget sources are listed and functional' {
@@ -446,8 +453,7 @@ Describe 'Test-WingetSourceTrusted' {
         Mock Write-Host { }
         Mock Write-Warning { }
 
-        # Dot-source the main script to import Test-WingetSourceTrusted
-        . "$PSScriptRoot\winget-app-install.ps1"
+        # Functions loaded from the module via BeforeAll at the top of the suite
     }
 
     Context 'When source is trusted' {
@@ -481,7 +487,6 @@ Describe 'Set-Sources' {
         Mock Write-Host { }
 
         # Dot-source the main script to import Set-Sources
-        . "$PSScriptRoot\winget-app-install.ps1"
     }
 
     It 'Should call winget source reset and return true on success' {
@@ -533,11 +538,7 @@ Describe 'Set-Sources' {
 
 Describe 'Add-ToEnvironmentPath' {
     BeforeAll {
-        # Dot-source the script under test so these tests exercise the real implementation (#135).
-        . "$PSScriptRoot/winget-app-install.ps1"
-
         Mock Write-Host { }
-
     }
 
     Context 'When path is not in User scope' {
@@ -562,9 +563,6 @@ Describe 'Add-ToEnvironmentPath' {
 
 Describe 'Test-PathInEnvironment' {
     BeforeAll {
-        # Dot-source the script under test so these tests exercise the real implementation (#135).
-        . "$PSScriptRoot/winget-app-install.ps1"
-
     }
 
     Context 'User scope' {
@@ -583,9 +581,6 @@ Describe 'Test-PathInEnvironment' {
 
 Describe 'ConvertTo-CommandArguments' {
     BeforeAll {
-        # Dot-source the script under test so these tests exercise the real implementation (#135).
-        . "$PSScriptRoot/winget-app-install.ps1"
-
     }
 
     It 'Should parse simple command without quotes' {
@@ -653,9 +648,6 @@ Describe 'Restart-WithElevation' {
 
 Describe 'Test-CanUseGridView' {
     BeforeAll {
-        # Dot-source the script under test so these tests exercise the real implementation (#135).
-        . "$PSScriptRoot/winget-app-install.ps1"
-
     }
 
     It 'Should return true when Out-GridView is available and session is interactive' {
@@ -703,7 +695,6 @@ Describe 'Write-Table' {
             function Out-GridView { param($Title, [switch]$Wait) }
         }
         Mock Out-GridView { }
-
     }
 
     It 'Should format table data correctly with Format-Table' {
@@ -938,7 +929,6 @@ Describe 'Invoke-WingetCommand' {
         # Define the helper function inline for testing
 
         # Define Invoke-WingetCommand function with exit code handling
-
     }
 
     Context 'Exit code capture and handling' {
@@ -1070,9 +1060,6 @@ Describe 'Invoke-WingetCommand' {
 
 Describe 'Format-AppList' {
     BeforeAll {
-        # Dot-source the script under test so these tests exercise the real implementation (#135).
-        . "$PSScriptRoot/winget-app-install.ps1"
-
     }
 
     It 'Should format non-empty array' {
@@ -1623,7 +1610,6 @@ Describe 'App list consistency' {
 
 Describe 'Test-AppDefinitions' {
     BeforeAll {
-        . "$PSScriptRoot\winget-app-install.ps1"
     }
 
     Context 'When app definitions are valid' {
@@ -1675,7 +1661,6 @@ Describe 'Test-AppDefinitions' {
 
 Describe 'Windows Terminal configuration' {
     BeforeAll {
-        . "$PSScriptRoot\winget-app-install.ps1"
     }
 
     Context 'Set-WindowsTerminalDefaultProfile' {
@@ -1800,7 +1785,6 @@ Describe 'Windows Terminal configuration' {
 
 Describe 'Scheduled Updates - Unit Tests' -Tag 'ScheduledUpdates' {
     BeforeAll {
-        . "$PSScriptRoot\winget-app-install.ps1"
     }
 
     BeforeEach {
@@ -1902,7 +1886,6 @@ Describe 'Scheduled Updates - Unit Tests' -Tag 'ScheduledUpdates' {
 
 Describe 'Test-SystemRequirements' -Tag 'SystemRequirements' {
     BeforeAll {
-        . "$PSScriptRoot\winget-app-install.ps1"
     }
 
     BeforeEach {
@@ -1959,7 +1942,6 @@ Describe 'Test-SystemRequirements' -Tag 'SystemRequirements' {
 
 Describe 'Write-Info' {
     BeforeAll {
-        . "$PSScriptRoot\winget-app-install.ps1"
     }
 
     It 'Should write message in blue color' {
@@ -1975,7 +1957,6 @@ Describe 'Write-Info' {
 
 Describe 'Write-Success' {
     BeforeAll {
-        . "$PSScriptRoot\winget-app-install.ps1"
     }
 
     It 'Should write message in green color' {
@@ -1991,7 +1972,6 @@ Describe 'Write-Success' {
 
 Describe 'Write-WarningMessage' {
     BeforeAll {
-        . "$PSScriptRoot\winget-app-install.ps1"
     }
 
     It 'Should write message in yellow color' {
@@ -2007,7 +1987,6 @@ Describe 'Write-WarningMessage' {
 
 Describe 'Write-ErrorMessage' {
     BeforeAll {
-        . "$PSScriptRoot\winget-app-install.ps1"
     }
 
     It 'Should write message in red color' {
@@ -2023,7 +2002,6 @@ Describe 'Write-ErrorMessage' {
 
 Describe 'Write-Prompt' {
     BeforeAll {
-        . "$PSScriptRoot\winget-app-install.ps1"
     }
 
     It 'Should write message in blue color' {
@@ -2039,7 +2017,6 @@ Describe 'Write-Prompt' {
 
 Describe 'WhatIf Mode - Unit Tests' {
     BeforeAll {
-        . "$PSScriptRoot\winget-app-install.ps1"
     }
 
     Context 'WhatIf parameter acceptance' {

@@ -2,20 +2,37 @@
 
 ## What This Is
 
-`winget-app-setup` is a PowerShell automation suite for provisioning and maintaining a curated set of Windows applications with [winget](https://learn.microsoft.com/windows/package-manager/). The main installer trusts the required winget sources, self-heals broken source registrations, elevates when needed, installs or updates the curated app list, and can register a scheduled task for ongoing update checks. A companion uninstaller, an update helper, and a comprehensive Pester test suite round out the toolset. The scripts target **Windows PowerShell / PowerShell 7 on Windows**; they cannot run end-to-end on Linux or macOS because they depend on `winget`, the `Microsoft.WinGet.Client` module, and Windows-only cmdlets.
+`winget-app-setup` is a Windows-only PowerShell toolkit that installs a curated list of
+applications via winget, configures Windows Terminal, and manages scheduled/on-demand app
+updates. End users run a single self-contained `winget-app-install.ps1`, either locally or via a
+remote `irm | iex` one-liner. Internally, the installer's logic now lives in the reusable
+`WingetAppSetup` module, and the single-file script is generated from it by a build step. The
+scripts target **Windows PowerShell / PowerShell 7 on Windows**; they cannot run end-to-end on
+Linux or macOS because they depend on `winget`, the `Microsoft.WinGet.Client` module, and
+Windows-only cmdlets.
 
-## Current State — 2026-06-16
+## Current State — 2026-06-18
 
-Healthy. The `2026-review` integration branch is collecting the fixes from the 2026 code review (#134–#137). Each fix lands via its own squash-merged PR; an aggregate `2026-review → main` PR is open for human review and is intentionally **not** merged. All changed scripts parse clean under the PowerShell AST parser on pwsh 7, and the Pester suite's pass/fail set is unchanged from baseline on Linux (the only failures are pre-existing Windows-only environment limitations).
+Healthy. The install logic has been refactored from a 2,100-line monolith into a module
+([#106](https://github.com/J-MaFf/winget-app-setup/issues/106)), and the distributable script is a
+generated build artifact that remains byte-for-byte behaviour-equivalent to the previous monolith.
+The 2026 code-review batch (#134–#137) has also been applied: all changed scripts parse clean under
+the PowerShell AST parser on pwsh 7, and the Pester suite's pass/fail set is unchanged from
+baseline on Linux (the only failures are pre-existing Windows-only environment limitations).
 
 ### Components
 
-| File | Description |
-| --- | --- |
-| `winget-app-install.ps1` | Main installer: source trust/repair, elevation, curated app install/update, scheduled-update management, Windows Terminal configuration. |
+| Path | Description |
+|------|-------------|
+| `WingetAppSetup/` | Source-of-truth PowerShell module (`.psd1` manifest + `.psm1` loader) |
+| `WingetAppSetup/Public/` | Exported functions: logging, winget core, app validation, scheduled updates, Windows Terminal config, install orchestration |
+| `WingetAppSetup/Private/` | Internal helpers: environment/PATH, elevation, graphical tools |
+| `build/Build-WingetInstallScript.ps1` | Concatenates the module + entry fragments into `winget-app-install.ps1` |
+| `build/fragments/` | `head.ps1` (PSScriptInfo, help, `param`) and `tail.ps1` (entry-point dispatch) |
+| `winget-app-install.ps1` | **Generated** single-file installer for local and `irm \| iex` use — do not edit by hand |
 | `winget-app-uninstall.ps1` | Companion script that uninstalls a configurable list of applications. |
-| `Update-InstalledApps.ps1` | Standalone update helper invoked by the scheduled update task. |
-| `Test-WingetAppInstall.Tests.ps1` | Pester 5 unit-test suite; dot-sources the installer so tests exercise the real implementation. |
+| `Update-InstalledApps.ps1` | Standalone scheduled-update helper task |
+| `Test-WingetAppInstall.Tests.ps1` | Pester 5 unit-test suite; loads the module once |
 | `Test-WindowsTerminalConfiguration.ps1` | Smoke-test validation for the Windows Terminal default-shell configuration. |
 | `readme.md` | Quick-start run instructions (clone-and-run and one-line-run). |
 | `CHANGELOG.md` | Keep a Changelog history. |
@@ -23,22 +40,23 @@ Healthy. The `2026-review` integration branch is collecting the fixes from the 2
 ### Resolved Issues
 
 | Issue | Description | PR |
-| --- | --- | --- |
+|-------|-------------|----|
+| [#106](https://github.com/J-MaFf/winget-app-setup/issues/106) | Split `winget-app-install.ps1` into a module with a generated bundle | [#109](https://github.com/J-MaFf/winget-app-setup/pull/109) |
 | [#134](https://github.com/J-MaFf/winget-app-setup/issues/134) | Double winget command execution in `Invoke-WingetCommand` | [#138](https://github.com/J-MaFf/winget-app-setup/pull/138) |
 | [#135](https://github.com/J-MaFf/winget-app-setup/issues/135) | Pester tests copied function bodies instead of dot-sourcing the script | [#139](https://github.com/J-MaFf/winget-app-setup/pull/139) |
 | [#136](https://github.com/J-MaFf/winget-app-setup/issues/136) | Missing `STATUS.md` and README/CHANGELOG execution-policy mismatch | [#140](https://github.com/J-MaFf/winget-app-setup/pull/140) |
-| [#137](https://github.com/J-MaFf/winget-app-setup/issues/137) | Renamed `Test-Source-IsTrusted` to `Test-WingetSourceTrusted` for verb-noun compliance | this PR |
+| [#137](https://github.com/J-MaFf/winget-app-setup/issues/137) | Renamed `Test-Source-IsTrusted` to `Test-WingetSourceTrusted` for verb-noun compliance | [#142](https://github.com/J-MaFf/winget-app-setup/pull/142) |
 
 ### Open Issues
 
-None tracked for the 2026-review cycle beyond #134–#137 above.
+- Migrate `winget-app-uninstall.ps1` and `Update-InstalledApps.ps1` to consume the `WingetAppSetup` module (removes their duplicated logging/config functions) — follow-up to #106.
 
 ## Natural Next Steps
 
-- Review and merge the aggregate `2026-review → main` PR once all four fixes are verified on a Windows machine.
+- Wire `build/Build-WingetInstallScript.ps1 -Check` into CI / a pre-commit hook so the generated `winget-app-install.ps1` can never drift from the module.
 - Run the `windows-latest` Pester CI workflow (or a local Windows run) to confirm the winget-dependent tests pass — they cannot be exercised on the Linux dev VM.
-- Consider expanding test coverage for the scheduled-update and source-repair paths so more of the suite is mockable cross-platform.
 - Cut a tagged release and move the `[Unreleased]` CHANGELOG entries under a versioned heading.
+- Open the follow-up migration issue listed above.
 
 ## Prerequisites to Run
 
@@ -48,4 +66,6 @@ None tracked for the 2026-review cycle beyond #134–#137 above.
   ```powershell
   Set-ExecutionPolicy Unrestricted -Scope Process -Force
   ```
-- To run the test suite: **Pester 5.x** (`Install-Module Pester -MinimumVersion 5.0`), then `Invoke-Pester -Path ./Test-WingetAppInstall.Tests.ps1`.
+- Run the installer: `powershell -ExecutionPolicy Unrestricted -File .\winget-app-install.ps1`.
+- Run tests: `Invoke-Pester ./Test-WingetAppInstall.Tests.ps1`.
+- Regenerate the installer after editing the module: `pwsh -File ./build/Build-WingetInstallScript.ps1`.

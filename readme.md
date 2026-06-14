@@ -25,3 +25,28 @@ The script will trust the required Winget sources, elevate if necessary, and ins
 - `-CheckForUpdates` runs an immediate update check for installed applications
 - `-AutoInstallUpdates` auto-installs updates when used with `-CheckForUpdates` or `-EnableScheduledUpdates`
 - `-UpdateFrequency Weekly|Daily` selects the schedule frequency (default: `Weekly`)
+
+## Project layout (for contributors)
+
+The installer's logic lives in the **`WingetAppSetup` PowerShell module** under `WingetAppSetup/`
+(`Public/` for exported functions, `Private/` for internal helpers). The single-file
+`winget-app-install.ps1` is **generated** from that module so the `irm | iex` one-liner keeps
+working — do not edit it by hand.
+
+After changing anything under `WingetAppSetup/`, regenerate the installer:
+
+```powershell
+pwsh -File .\build\Build-WingetInstallScript.ps1
+```
+
+Verify the committed script is in sync with the module (useful in CI / pre-commit):
+
+```powershell
+pwsh -File .\build\Build-WingetInstallScript.ps1 -Check
+```
+
+Run the test suite (loads the module directly):
+
+```powershell
+Invoke-Pester .\Test-WingetAppInstall.Tests.ps1
+```
