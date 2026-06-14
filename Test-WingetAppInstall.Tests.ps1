@@ -1783,10 +1783,19 @@ Describe 'Scheduled Updates - Unit Tests' -Tag 'ScheduledUpdates' {
         Mock Get-WinGetPackage { }
         Mock winget { }
         Mock Get-ScheduledTask { $null }
-        Mock New-ScheduledTaskAction { @{ Action = 'ok' } }
-        Mock New-ScheduledTaskTrigger { @{ Trigger = 'ok' } }
-        Mock New-ScheduledTaskSettingsSet { @{ Settings = 'ok' } }
-        Mock New-ScheduledTaskPrincipal { @{ Principal = 'ok' } }
+        # On Windows Register-ScheduledTask is a real cmdlet whose -Action/-Trigger/-Settings/
+        # -Principal parameters require [CimInstance] arguments tagged with a specific PSTypeName
+        # (e.g. Microsoft.Management.Infrastructure.CimInstance#MSFT_TaskSettings). Returning plain
+        # hashtables from these mocks fails argument binding *before* the Register mock body runs,
+        # so Enable-ScheduledUpdatesCheck's try/catch swallows it and returns $false (issue #111).
+        # Pester's -RemoveParameterType can't help here: it strips the static type but leaves the
+        # CDXML argument-transformation / PSTypeName attributes. Returning bare client-side
+        # CimInstances with the matching class names satisfies binding on Windows, and is harmless
+        # on Linux where these cmdlets don't exist (the mocks become plain typeless functions).
+        Mock New-ScheduledTaskAction { [Microsoft.Management.Infrastructure.CimInstance]::new('MSFT_TaskAction') }
+        Mock New-ScheduledTaskTrigger { [Microsoft.Management.Infrastructure.CimInstance]::new('MSFT_TaskTrigger') }
+        Mock New-ScheduledTaskSettingsSet { [Microsoft.Management.Infrastructure.CimInstance]::new('MSFT_TaskSettings') }
+        Mock New-ScheduledTaskPrincipal { [Microsoft.Management.Infrastructure.CimInstance]::new('MSFT_TaskPrincipal') }
         Mock Register-ScheduledTask { }
         Mock Unregister-ScheduledTask { }
         Mock Write-Info { }
