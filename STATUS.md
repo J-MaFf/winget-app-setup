@@ -33,11 +33,12 @@ generated build artifact that remains byte-for-byte behaviour-equivalent to the 
 | Issue | Description | PR |
 |-------|-------------|----|
 | [#106](https://github.com/J-MaFf/winget-app-setup/issues/106) | Split `winget-app-install.ps1` into a module with a generated bundle | [#109](https://github.com/J-MaFf/winget-app-setup/pull/109) |
-| [#110](https://github.com/J-MaFf/winget-app-setup/issues/110) | Migrate uninstall + update-helper scripts to consume the module | _stacked on #109_ |
+| [#110](https://github.com/J-MaFf/winget-app-setup/issues/110) | Migrate uninstall + update-helper scripts to consume the module | _merged into #109_ |
+| [#111](https://github.com/J-MaFf/winget-app-setup/issues/111) | Remove orphaned tests for functions that no longer exist | _stacked on #109_ |
 
 ### Open Issues
 
-- Pre-existing test rot: orphaned `Describe` blocks for functions that no longer exist (`Test-AndSetExecutionPolicy`, `Invoke-WingetInstallWithRetry`, `Test-SystemRequirements`) should be removed or backed by real implementations ([#111](https://github.com/J-MaFf/winget-app-setup/issues/111)).
+None.
 
 ## Natural Next Steps
 

@@ -26,10 +26,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
+- Removed orphaned Pester `Describe` blocks that tested functions which no longer ship: `Test-AndSetExecutionPolicy` (its `launch.ps1` was already dropped), `Invoke-WingetInstallWithRetry`, and `Test-SystemRequirements` ([#111](https://github.com/J-MaFf/winget-app-setup/issues/111)).
 - Dropped `launch.ps1`; the installer now runs directly when the required execution policy is temporarily relaxed.
 
 ### Fixed (Unreleased)
 
+- Corrected the CLAUDE.md winget note that referenced a non-existent `Invoke-WingetInstallWithSessionRetry`; it now describes the actual `0x80073d19` mitigation (user-context source init plus the single failed-install retry pass) ([#111](https://github.com/J-MaFf/winget-app-setup/issues/111)).
 - Cleaned up `Test-WingetAppInstall.Tests.ps1` so it no longer defines unused variables and satisfies the linter.
 - Fixed broken winget source scenario: when running as admin on a standard user account the "winget" source registration may be missing or broken; the script now detects and auto-repairs this condition instead of silently failing (#66).
 - Added Pester coverage for Windows Terminal default profile and terminal delegation configuration paths, and corrected an `IsWindows` read-only variable name collision in the test suite.
