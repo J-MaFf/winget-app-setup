@@ -7,7 +7,6 @@ param (
 )
 
 $basePath = Join-Path $env:APPDATA 'winget-app-setup'
-$configPath = Join-Path $basePath 'update-config.json'
 $checksPath = Join-Path $basePath 'update-checks'
 $rollbackPath = Join-Path $basePath 'rollback-scripts'
 $timestamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
@@ -21,89 +20,17 @@ foreach ($path in @($basePath, $checksPath, $rollbackPath)) {
     }
 }
 
+# Config and update-report logic come from the WingetAppSetup module — the single source of
+# truth (see issue #106). Install-UpdateHelperScript deploys a copy of the module next to this
+# script under %APPDATA% so it is importable when the task runs without the repository present.
+Import-Module (Join-Path $PSScriptRoot 'WingetAppSetup\WingetAppSetup.psd1') -Force
+
 function Write-UpdateLog {
     param (
         [Parameter(Mandatory = $true)]
         [string]$Message
     )
     "$((Get-Date).ToString('yyyy-MM-dd HH:mm:ss')) - $Message" | Add-Content -Path $detailedLogFile
-}
-
-function Get-DefaultConfig {
-    return @{
-        EnabledScheduledUpdates = $false
-        UpdateFrequency         = 'Weekly'
-        AutoInstall             = $true
-        LastCheckDate           = $null
-        Enabled                 = $false
-        InitialPromptCompleted  = $false
-    }
-}
-
-function Get-Config {
-    if (-not (Test-Path $configPath)) {
-        return (Get-DefaultConfig)
-    }
-
-    try {
-        $config = Get-Content -Path $configPath -Raw | ConvertFrom-Json
-        return @{
-            EnabledScheduledUpdates = [bool]$config.EnabledScheduledUpdates
-            UpdateFrequency         = if ($config.UpdateFrequency -in @('Weekly', 'Daily')) { [string]$config.UpdateFrequency } else { 'Weekly' }
-            AutoInstall             = [bool]$config.AutoInstall
-            LastCheckDate           = $config.LastCheckDate
-            Enabled                 = [bool]$config.Enabled
-            InitialPromptCompleted  = [bool]$config.InitialPromptCompleted
-        }
-    }
-    catch {
-        Write-UpdateLog "Failed to parse configuration. Using defaults. Error: $_"
-        return (Get-DefaultConfig)
-    }
-}
-
-function Save-Config {
-    param (
-        [Parameter(Mandatory = $true)]
-        [hashtable]$Config
-    )
-    $Config | ConvertTo-Json | Set-Content -Path $configPath -Encoding UTF8
-}
-
-function Get-UpdateReport {
-    try {
-        if (Get-Command Get-WinGetPackage -ErrorAction SilentlyContinue) {
-            return @(Get-WinGetPackage | Where-Object IsUpdateAvailable | ForEach-Object {
-                    [PSCustomObject]@{
-                        PackageName      = $_.Id
-                        CurrentVersion   = [string]$_.InstalledVersion
-                        AvailableVersion = [string]$_.AvailableVersion
-                    }
-                })
-        }
-    }
-    catch {
-        Write-UpdateLog "Module update query failed. Falling back to CLI. Error: $_"
-    }
-
-    $report = @()
-    $upgradeOutput = & winget upgrade --disable-interactivity --accept-source-agreements 2>&1
-    foreach ($line in $upgradeOutput) {
-        if (-not $line) { continue }
-        if ($line -match '^\s*Name\s+Id\s+Version\s+Available') { continue }
-        if ($line -match '^\s*-{3,}') { continue }
-        if ($line -match 'No installed package found|No available upgrade found|No newer package versions are available') { continue }
-        $columns = $line.Trim() -split '\s{2,}'
-        if ($columns.Count -ge 4 -and $columns[1] -match '^[\w][\w.\-]+\.[\w][\w.\-]+$') {
-            $report += [PSCustomObject]@{
-                PackageName      = $columns[1]
-                CurrentVersion   = $columns[2]
-                AvailableVersion = $columns[3]
-            }
-        }
-    }
-
-    return @($report | Sort-Object PackageName -Unique)
 }
 
 function Write-RollbackScript {
@@ -169,14 +96,14 @@ function Send-UpdateToast {
     }
 }
 
-$config = Get-Config
+$config = Get-UpdateConfiguration
 $autoInstall = if ($PSBoundParameters.ContainsKey('AutoInstallOverride')) { [bool]$AutoInstallOverride } else { [bool]$config.AutoInstall }
 $updates = @(Get-UpdateReport)
 
 if ($updates.Count -eq 0) {
     Write-UpdateLog "[$RunReason] No updates available."
     $config.LastCheckDate = (Get-Date).ToString('yyyy-MM-dd')
-    Save-Config -Config $config
+    Save-UpdateConfiguration -Configuration $config
     exit 0
 }
 
@@ -214,7 +141,7 @@ if ($successfulUpdates.Count -gt 0) {
 }
 
 $config.LastCheckDate = (Get-Date).ToString('yyyy-MM-dd')
-Save-Config -Config $config
+Save-UpdateConfiguration -Configuration $config
 
 $updatedCount = if ($autoInstall) { $successfulUpdates.Count } else { 0 }
 $summary = if ($autoInstall) { "$updatedCount packages updated successfully" } else { "$($updates.Count) updates available" }

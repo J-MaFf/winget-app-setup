@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Refactored the 2,100-line `winget-app-install.ps1` into a reusable `WingetAppSetup` PowerShell module (`WingetAppSetup/Public` + `WingetAppSetup/Private`, with a `.psd1` manifest). The distributable single-file `winget-app-install.ps1` is now generated from the module by `build/Build-WingetInstallScript.ps1`, preserving the `irm | iex` one-liner workflow ([#106](https://github.com/J-MaFf/winget-app-setup/issues/106)).
+- `winget-app-uninstall.ps1` and `Update-InstalledApps.ps1` now consume the `WingetAppSetup` module instead of carrying their own copies of the logging, table, config, and update-report functions. `Install-UpdateHelperScript` deploys a copy of the module into `%APPDATA%` next to the scheduled-update helper so it remains importable when the task runs without the repository present ([#110](https://github.com/J-MaFf/winget-app-setup/issues/110)).
 - Documented the repository's commit, PR, and metadata rules plus working GitHub CLI commands for labels and assignees inside `.github/copilot-instructions.md`.
 - Added automatic detection and repair of broken or missing winget package sources (#66).
 - Added automated Windows Terminal post-install configuration to set PowerShell 7 as the default profile and register Windows Terminal as the default terminal application via `HKCU:\Console\%%Startup` delegation values (#74).
@@ -18,6 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `Test-WingetAppInstall.Tests.ps1` now loads the module's functions once for the whole suite instead of dot-sourcing the full script in 16 places and re-declaring 17 functions inline, eliminating copy-paste drift between tests and production code ([#106](https://github.com/J-MaFf/winget-app-setup/issues/106)).
 - `Format-AppList` now accepts `$null` (returning `$null`) in addition to empty collections, matching its documented contract and reconciling drift surfaced by the test consolidation ([#106](https://github.com/J-MaFf/winget-app-setup/issues/106)).
+- The module's `Get-UpdateReport` now validates the winget Id column against a package-id regex before parsing a row, adopting the stricter behavior that had drifted into `Update-InstalledApps.ps1` ([#110](https://github.com/J-MaFf/winget-app-setup/issues/110)).
 - Simplified the README to a two-step guide that starts with `Set-ExecutionPolicy Unrestricted -Scope Process -Force` followed by running `powershell -ExecutionPolicy Unrestricted -File .\winget-app-install.ps1`.
 - Configured the workspace's local Memory MCP storage plus `.gitignore` and `.vscode` settings so auto-generated knowledge graph data stays in the repo scope.
 - `Invoke-WingetInstall` now verifies and auto-repairs the winget package source before beginning app installations.

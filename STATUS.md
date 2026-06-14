@@ -24,20 +24,20 @@ generated build artifact that remains byte-for-byte behaviour-equivalent to the 
 | `build/Build-WingetInstallScript.ps1` | Concatenates the module + entry fragments into `winget-app-install.ps1` |
 | `build/fragments/` | `head.ps1` (PSScriptInfo, help, `param`) and `tail.ps1` (entry-point dispatch) |
 | `winget-app-install.ps1` | **Generated** single-file installer for local and `irm \| iex` use — do not edit by hand |
-| `Update-InstalledApps.ps1` | Standalone scheduled-update helper task |
-| `winget-app-uninstall.ps1` | Uninstall helper |
+| `Update-InstalledApps.ps1` | Standalone scheduled-update helper task; imports the module deployed beside it in `%APPDATA%` |
+| `winget-app-uninstall.ps1` | Uninstall helper; imports the module from the repo |
 | `Test-WingetAppInstall.Tests.ps1` | Pester suite; loads the module once |
 
 ### Resolved Issues
 
 | Issue | Description | PR |
 |-------|-------------|----|
-| [#106](https://github.com/J-MaFf/winget-app-setup/issues/106) | Split `winget-app-install.ps1` into a module with a generated bundle | _this PR_ |
+| [#106](https://github.com/J-MaFf/winget-app-setup/issues/106) | Split `winget-app-install.ps1` into a module with a generated bundle | [#109](https://github.com/J-MaFf/winget-app-setup/pull/109) |
+| [#110](https://github.com/J-MaFf/winget-app-setup/issues/110) | Migrate uninstall + update-helper scripts to consume the module | _stacked on #109_ |
 
 ### Open Issues
 
-- Migrate `winget-app-uninstall.ps1` and `Update-InstalledApps.ps1` to consume the `WingetAppSetup` module (removes their duplicated logging/config functions) — follow-up to #106.
-- Pre-existing test rot: orphaned `Describe` blocks for functions that no longer exist (`Test-AndSetExecutionPolicy`, `Invoke-WingetInstallWithRetry`, `Test-SystemRequirements`) should be removed or backed by real implementations.
+- Pre-existing test rot: orphaned `Describe` blocks for functions that no longer exist (`Test-AndSetExecutionPolicy`, `Invoke-WingetInstallWithRetry`, `Test-SystemRequirements`) should be removed or backed by real implementations ([#111](https://github.com/J-MaFf/winget-app-setup/issues/111)).
 
 ## Natural Next Steps
 
