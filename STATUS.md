@@ -30,9 +30,9 @@ baseline on Linux (the only failures are pre-existing Windows-only environment l
 | `build/Build-WingetInstallScript.ps1` | Concatenates the module + entry fragments into `winget-app-install.ps1` |
 | `build/fragments/` | `head.ps1` (PSScriptInfo, help, `param`) and `tail.ps1` (entry-point dispatch) |
 | `winget-app-install.ps1` | **Generated** single-file installer for local and `irm \| iex` use — do not edit by hand |
-| `winget-app-uninstall.ps1` | Companion script that uninstalls a configurable list of applications. |
-| `Update-InstalledApps.ps1` | Standalone scheduled-update helper task |
-| `Test-WingetAppInstall.Tests.ps1` | Pester 5 unit-test suite; loads the module once |
+| `Update-InstalledApps.ps1` | Standalone scheduled-update helper task; imports the module deployed beside it in `%APPDATA%` |
+| `winget-app-uninstall.ps1` | Uninstall helper; imports the module from the repo |
+| `Test-WingetAppInstall.Tests.ps1` | Pester suite; loads the module once |
 | `Test-WindowsTerminalConfiguration.ps1` | Smoke-test validation for the Windows Terminal default-shell configuration. |
 | `readme.md` | Quick-start run instructions (clone-and-run and one-line-run). |
 | `CHANGELOG.md` | Keep a Changelog history. |
@@ -42,6 +42,7 @@ baseline on Linux (the only failures are pre-existing Windows-only environment l
 | Issue | Description | PR |
 |-------|-------------|----|
 | [#106](https://github.com/J-MaFf/winget-app-setup/issues/106) | Split `winget-app-install.ps1` into a module with a generated bundle | [#109](https://github.com/J-MaFf/winget-app-setup/pull/109) |
+| [#110](https://github.com/J-MaFf/winget-app-setup/issues/110) | Migrate uninstall + update-helper scripts to consume the module | [#109](https://github.com/J-MaFf/winget-app-setup/pull/109) |
 | [#134](https://github.com/J-MaFf/winget-app-setup/issues/134) | Double winget command execution in `Invoke-WingetCommand` | [#138](https://github.com/J-MaFf/winget-app-setup/pull/138) |
 | [#135](https://github.com/J-MaFf/winget-app-setup/issues/135) | Pester tests copied function bodies instead of dot-sourcing the script | [#139](https://github.com/J-MaFf/winget-app-setup/pull/139) |
 | [#136](https://github.com/J-MaFf/winget-app-setup/issues/136) | Missing `STATUS.md` and README/CHANGELOG execution-policy mismatch | [#140](https://github.com/J-MaFf/winget-app-setup/pull/140) |
@@ -49,7 +50,7 @@ baseline on Linux (the only failures are pre-existing Windows-only environment l
 
 ### Open Issues
 
-- Migrate `winget-app-uninstall.ps1` and `Update-InstalledApps.ps1` to consume the `WingetAppSetup` module (removes their duplicated logging/config functions) — follow-up to #106.
+- Pre-existing test rot: orphaned `Describe` blocks for functions that no longer exist (`Test-AndSetExecutionPolicy`, `Invoke-WingetInstallWithRetry`, `Test-SystemRequirements`) should be removed or backed by real implementations ([#111](https://github.com/J-MaFf/winget-app-setup/issues/111)).
 
 ## Natural Next Steps
 

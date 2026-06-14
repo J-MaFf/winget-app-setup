@@ -1076,6 +1076,7 @@ function Get-UpdateSettingsPaths {
         UpdateChecks    = Join-Path $basePath 'update-checks'
         RollbackScripts = Join-Path $basePath 'rollback-scripts'
         HelperScript    = Join-Path $basePath 'Update-InstalledApps.ps1'
+        ModuleDir       = Join-Path $basePath 'WingetAppSetup'
     }
 }
 
@@ -1173,14 +1174,22 @@ function Test-ScheduledUpdatesTaskExists {
 
 <#
 .SYNOPSIS
-    Copies the scheduled update helper script into AppData and returns its path.
+    Copies the scheduled update helper script and the WingetAppSetup module into AppData and returns the helper path.
+.DESCRIPTION
+    The helper runs as a standalone scheduled task with the repository absent, so it imports the
+    WingetAppSetup module from a copy deployed next to it under %APPDATA%. Both the helper and the
+    module are refreshed on every call so the installed copies never drift from the repository.
 #>
 function Install-UpdateHelperScript {
     $paths = Get-UpdateSettingsPaths
     $sourceScript = Join-Path $PSScriptRoot 'Update-InstalledApps.ps1'
+    $sourceModule = Join-Path $PSScriptRoot 'WingetAppSetup'
 
     if (-not (Test-Path $sourceScript)) {
         throw "Required helper script is missing: $sourceScript"
+    }
+    if (-not (Test-Path $sourceModule)) {
+        throw "Required WingetAppSetup module is missing: $sourceModule"
     }
 
     if (-not (Test-Path $paths.BasePath)) {
@@ -1192,6 +1201,12 @@ function Install-UpdateHelperScript {
     if (-not (Test-Path $paths.RollbackScripts)) {
         New-Item -ItemType Directory -Path $paths.RollbackScripts -Force | Out-Null
     }
+
+    # Refresh the module copy the helper imports at runtime.
+    if (Test-Path $paths.ModuleDir) {
+        Remove-Item -Path $paths.ModuleDir -Recurse -Force
+    }
+    Copy-Item -Path $sourceModule -Destination $paths.ModuleDir -Recurse -Force
 
     Copy-Item -Path $sourceScript -Destination $paths.HelperScript -Force
     return $paths.HelperScript
@@ -2073,7 +2088,9 @@ function Get-UpdateReport {
             if ($line -match 'No installed package found|No available upgrade found|No newer package versions are available') { continue }
 
             $columns = $line.Trim() -split '\s{2,}'
-            if ($columns.Count -ge 4) {
+            # Validate the Id column looks like a real winget package id before trusting it,
+            # so wrapped descriptions or stray output rows are not parsed as packages.
+            if ($columns.Count -ge 4 -and $columns[1] -match '^[\w][\w.\-]+\.[\w][\w.\-]+$') {
                 $report += [PSCustomObject]@{
                     PackageName      = $columns[1]
                     CurrentVersion   = $columns[2]

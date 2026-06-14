@@ -2206,3 +2206,41 @@ Get-Content -Raw -LiteralPath '$psStringEscapedPath' | Invoke-Expression
         $output | Should -Not -Match 'Press Enter to restart script with elevated privileges'
     }
 }
+
+Describe 'Install-UpdateHelperScript module deployment' {
+    It 'deploys both the helper script and the WingetAppSetup module into AppData' {
+        $base = Join-Path ([IO.Path]::GetTempPath()) ('was-' + [guid]::NewGuid())
+        Mock Get-UpdateSettingsPaths {
+            @{
+                BasePath        = $base
+                ConfigFile      = Join-Path $base 'update-config.json'
+                UpdateChecks    = Join-Path $base 'update-checks'
+                RollbackScripts = Join-Path $base 'rollback-scripts'
+                HelperScript    = Join-Path $base 'Update-InstalledApps.ps1'
+                ModuleDir       = Join-Path $base 'WingetAppSetup'
+            }
+        }
+        # Pretend every source/destination path already exists so the real body runs without touching disk.
+        Mock Test-Path { $true }
+        Mock New-Item { }
+        Mock Remove-Item { }
+        Mock Copy-Item { }
+
+        $result = Install-UpdateHelperScript
+
+        Assert-MockCalled Copy-Item -Times 1 -Scope It -ParameterFilter { $Destination -like '*WingetAppSetup' -and $Recurse }
+        Assert-MockCalled Copy-Item -Times 1 -Scope It -ParameterFilter { $Destination -like '*Update-InstalledApps.ps1' }
+        $result | Should -Be (Join-Path $base 'Update-InstalledApps.ps1')
+    }
+
+    It 'throws a clear error when the module source is missing' {
+        Mock Get-UpdateSettingsPaths {
+            @{ BasePath = 'x'; UpdateChecks = 'x'; RollbackScripts = 'x'; HelperScript = 'x'; ModuleDir = 'x' }
+        }
+        # Helper script present, module folder absent.
+        Mock Test-Path { $true } -ParameterFilter { $Path -like '*Update-InstalledApps.ps1' }
+        Mock Test-Path { $false } -ParameterFilter { $Path -like '*WingetAppSetup' }
+
+        { Install-UpdateHelperScript } | Should -Throw '*WingetAppSetup module is missing*'
+    }
+}
