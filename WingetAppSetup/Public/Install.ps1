@@ -280,20 +280,10 @@ function Invoke-WingetInstall {
         if (-not $WhatIf) {
             Write-Success 'Updates found. Installing updates...'
 
-            # Try PowerShell module first
-            if (Get-Command Update-WinGetPackage -ErrorAction SilentlyContinue) {
-                $updateResults = Get-WinGetPackage | Where-Object IsUpdateAvailable | Update-WinGetPackage
-
-                foreach ($result in $updateResults) {
-                    if ($result.Status -eq 'Ok') {
-                        $updatedApps += $result.Id
-                        Write-Success "Successfully updated: $($result.Id)"
-                    }
-                    else {
-                        $failedUpdateApps += $result.Id
-                        Write-ErrorMessage "Failed to update: $($result.Id) - $($result.Status)"
-                    }
-                }
+            # Enumerate the package ids that have updates, preferring the PowerShell module.
+            $updateIds = @()
+            if (Get-Command Get-WinGetPackage -ErrorAction SilentlyContinue) {
+                $updateIds = @(Get-WinGetPackage | Where-Object IsUpdateAvailable | ForEach-Object { $_.Id })
             }
             else {
                 Write-WarningMessage 'PowerShell module not available, using CLI fallback...'
@@ -318,27 +308,31 @@ function Invoke-WingetInstall {
 
                         # Skip if it's not a winget package or if it's a system component
                         if ($packageId -and $packageId -notmatch '^(ARP|MSIX)') {
-                            try {
-                                $upgradeResult = & winget upgrade $packageId --source winget 2>&1
-                                $upgradeOutput = $upgradeResult | Out-String
-
-                                # Check if upgrade is available and successful
-                                if ($upgradeOutput -match 'Successfully installed') {
-                                    $updatedApps += $packageId
-                                    Write-Success "Successfully updated: $packageId"
-                                }
-                                elseif ($upgradeOutput -notmatch 'No available upgrade found' -and
-                                    $upgradeOutput -notmatch 'No newer package versions are available') {
-                                    # Package has an update but installation may have failed
-                                    $failedUpdateApps += $packageId
-                                    Write-ErrorMessage "Failed to update: $packageId"
-                                }
-                            }
-                            catch {
-                                $failedUpdateApps += $packageId
-                                Write-ErrorMessage "Error updating ${packageId}: $_"
-                            }
+                            $updateIds += $packageId
                         }
+                    }
+                }
+            }
+
+            # Upgrade each package through a timeout-guarded helper so a single stalled
+            # upgrade can no longer hang the entire run (issue #120).
+            foreach ($packageId in $updateIds) {
+                $result = Invoke-WingetPackageUpgrade -PackageId $packageId
+                switch ($result.Status) {
+                    'Ok' {
+                        $updatedApps += $packageId
+                        Write-Success "Successfully updated: $packageId"
+                    }
+                    'NoUpgrade' {
+                        # Nothing to do; the package was already current by the time we upgraded.
+                    }
+                    'TimedOut' {
+                        $failedUpdateApps += $packageId
+                        Write-ErrorMessage "Timed out updating: $packageId (skipped to continue)"
+                    }
+                    default {
+                        $failedUpdateApps += $packageId
+                        Write-ErrorMessage "Failed to update: $packageId"
                     }
                 }
             }
