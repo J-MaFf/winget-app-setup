@@ -31,6 +31,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed (Unreleased)
 
+- Fixed `-WhatIf` (dry-run) silently performing a real install: when run non-elevated, the script relaunched itself elevated but dropped the `-WhatIf` flag, so the admin session installed the full app list. A dry run now never elevates, and `Restart-WithElevation` forwards `-WhatIf` as a safety net ([#117](https://github.com/J-MaFf/winget-app-setup/issues/117)).
 - Corrected the CLAUDE.md winget note that referenced a non-existent `Invoke-WingetInstallWithSessionRetry`; it now describes the actual `0x80073d19` mitigation (user-context source init plus the single failed-install retry pass) ([#111](https://github.com/J-MaFf/winget-app-setup/issues/111)).
 - Cleaned up `Test-WingetAppInstall.Tests.ps1` so it no longer defines unused variables and satisfies the linter.
 - Fixed broken winget source scenario: when running as admin on a standard user account the "winget" source registration may be missing or broken; the script now detects and auto-repairs this condition instead of silently failing (#66).
