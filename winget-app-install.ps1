@@ -368,6 +368,72 @@ function Test-AndInstallGraphicalTools {
     return $false
 }
 
+# --- WingetUpgrade ---
+<#
+.SYNOPSIS
+    Upgrades a single winget package with a hard timeout so a stalled upgrade cannot hang the run.
+.DESCRIPTION
+    Runs `winget upgrade` for one package id as a child process and waits up to TimeoutSeconds for it
+    to exit. If the process does not finish in time it is killed and reported as timed out, so the
+    caller can move on to the next package instead of blocking indefinitely (issue #120). This mirrors
+    the Start-Process/WaitForExit/Kill timeout pattern already used by Set-Sources.
+.PARAMETER PackageId
+    The exact winget package identifier to upgrade (for example, 'Warp.Warp').
+.PARAMETER TimeoutSeconds
+    Maximum seconds to wait for the upgrade before terminating it. Defaults to 300 (5 minutes).
+.RETURNS
+    [PSCustomObject] with Id, Status ('Ok' | 'NoUpgrade' | 'Failed' | 'TimedOut'), and ExitCode.
+#>
+function Invoke-WingetPackageUpgrade {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$PackageId,
+
+        [Parameter(Mandatory = $false)]
+        [int]$TimeoutSeconds = 300
+    )
+
+    $token = [guid]::NewGuid().ToString('N')
+    $outFile = Join-Path $env:TEMP "winget_upgrade_out_$token.txt"
+    $errFile = Join-Path $env:TEMP "winget_upgrade_err_$token.txt"
+
+    try {
+        $upgradeProcess = Start-Process -FilePath 'winget' `
+            -ArgumentList 'upgrade', '--id', $PackageId, '--exact', '--silent', '--disable-interactivity', '--accept-source-agreements', '--accept-package-agreements' `
+            -NoNewWindow `
+            -PassThru `
+            -RedirectStandardOutput $outFile `
+            -RedirectStandardError $errFile
+
+        if (-not $upgradeProcess.WaitForExit($TimeoutSeconds * 1000)) {
+            Write-WarningMessage "Update for $PackageId timed out after $TimeoutSeconds seconds. Terminating..."
+            try { $upgradeProcess.Kill() } catch { }
+            return [PSCustomObject]@{ Id = $PackageId; Status = 'TimedOut'; ExitCode = $null }
+        }
+
+        $exitCode = $upgradeProcess.ExitCode
+        $output = (Get-Content -Path $outFile -ErrorAction SilentlyContinue) -join "`n"
+
+        if ($output -match 'No available upgrade found' -or $output -match 'No newer package versions are available') {
+            return [PSCustomObject]@{ Id = $PackageId; Status = 'NoUpgrade'; ExitCode = $exitCode }
+        }
+
+        if ($exitCode -eq 0 -or $output -match 'Successfully installed') {
+            return [PSCustomObject]@{ Id = $PackageId; Status = 'Ok'; ExitCode = $exitCode }
+        }
+
+        return [PSCustomObject]@{ Id = $PackageId; Status = 'Failed'; ExitCode = $exitCode }
+    }
+    catch {
+        Write-ErrorMessage "Error updating ${PackageId}: $_"
+        return [PSCustomObject]@{ Id = $PackageId; Status = 'Failed'; ExitCode = $null }
+    }
+    finally {
+        Remove-Item -Path $outFile, $errFile -ErrorAction SilentlyContinue
+    }
+}
+
 # --- AppValidation ---
 <#
 .SYNOPSIS
@@ -702,20 +768,10 @@ function Invoke-WingetInstall {
         if (-not $WhatIf) {
             Write-Success 'Updates found. Installing updates...'
 
-            # Try PowerShell module first
-            if (Get-Command Update-WinGetPackage -ErrorAction SilentlyContinue) {
-                $updateResults = Get-WinGetPackage | Where-Object IsUpdateAvailable | Update-WinGetPackage
-
-                foreach ($result in $updateResults) {
-                    if ($result.Status -eq 'Ok') {
-                        $updatedApps += $result.Id
-                        Write-Success "Successfully updated: $($result.Id)"
-                    }
-                    else {
-                        $failedUpdateApps += $result.Id
-                        Write-ErrorMessage "Failed to update: $($result.Id) - $($result.Status)"
-                    }
-                }
+            # Enumerate the package ids that have updates, preferring the PowerShell module.
+            $updateIds = @()
+            if (Get-Command Get-WinGetPackage -ErrorAction SilentlyContinue) {
+                $updateIds = @(Get-WinGetPackage | Where-Object IsUpdateAvailable | ForEach-Object { $_.Id })
             }
             else {
                 Write-WarningMessage 'PowerShell module not available, using CLI fallback...'
@@ -740,27 +796,31 @@ function Invoke-WingetInstall {
 
                         # Skip if it's not a winget package or if it's a system component
                         if ($packageId -and $packageId -notmatch '^(ARP|MSIX)') {
-                            try {
-                                $upgradeResult = & winget upgrade $packageId --source winget 2>&1
-                                $upgradeOutput = $upgradeResult | Out-String
-
-                                # Check if upgrade is available and successful
-                                if ($upgradeOutput -match 'Successfully installed') {
-                                    $updatedApps += $packageId
-                                    Write-Success "Successfully updated: $packageId"
-                                }
-                                elseif ($upgradeOutput -notmatch 'No available upgrade found' -and
-                                    $upgradeOutput -notmatch 'No newer package versions are available') {
-                                    # Package has an update but installation may have failed
-                                    $failedUpdateApps += $packageId
-                                    Write-ErrorMessage "Failed to update: $packageId"
-                                }
-                            }
-                            catch {
-                                $failedUpdateApps += $packageId
-                                Write-ErrorMessage "Error updating ${packageId}: $_"
-                            }
+                            $updateIds += $packageId
                         }
+                    }
+                }
+            }
+
+            # Upgrade each package through a timeout-guarded helper so a single stalled
+            # upgrade can no longer hang the entire run (issue #120).
+            foreach ($packageId in $updateIds) {
+                $result = Invoke-WingetPackageUpgrade -PackageId $packageId
+                switch ($result.Status) {
+                    'Ok' {
+                        $updatedApps += $packageId
+                        Write-Success "Successfully updated: $packageId"
+                    }
+                    'NoUpgrade' {
+                        # Nothing to do; the package was already current by the time we upgraded.
+                    }
+                    'TimedOut' {
+                        $failedUpdateApps += $packageId
+                        Write-ErrorMessage "Timed out updating: $packageId (skipped to continue)"
+                    }
+                    default {
+                        $failedUpdateApps += $packageId
+                        Write-ErrorMessage "Failed to update: $packageId"
                     }
                 }
             }

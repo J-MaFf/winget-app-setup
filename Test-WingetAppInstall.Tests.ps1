@@ -661,6 +661,70 @@ Describe 'Restart-WithElevation' {
     }
 }
 
+Describe 'Invoke-WingetPackageUpgrade' {
+    BeforeEach {
+        Mock Write-Success { }
+        Mock Write-WarningMessage { }
+        Mock Write-ErrorMessage { }
+        Mock Remove-Item { }
+        $script:killCalled = $false
+    }
+
+    It 'returns Ok when the upgrade exits 0' {
+        Mock Start-Process {
+            $p = [PSCustomObject]@{ ExitCode = 0 }
+            $p | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value { param($ms) $true }
+            $p | Add-Member -MemberType ScriptMethod -Name Kill -Value { }
+            $p
+        }
+        Mock Get-Content { 'Successfully installed' }
+
+        $result = Invoke-WingetPackageUpgrade -PackageId 'Test.App'
+
+        $result.Status | Should -Be 'Ok'
+        $result.Id | Should -Be 'Test.App'
+    }
+
+    It 'returns NoUpgrade when winget reports nothing to upgrade' {
+        Mock Start-Process {
+            $p = [PSCustomObject]@{ ExitCode = 0 }
+            $p | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value { param($ms) $true }
+            $p | Add-Member -MemberType ScriptMethod -Name Kill -Value { }
+            $p
+        }
+        Mock Get-Content { 'No available upgrade found' }
+
+        (Invoke-WingetPackageUpgrade -PackageId 'Test.App').Status | Should -Be 'NoUpgrade'
+    }
+
+    It 'returns Failed on a non-zero exit code' {
+        Mock Start-Process {
+            $p = [PSCustomObject]@{ ExitCode = 1 }
+            $p | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value { param($ms) $true }
+            $p | Add-Member -MemberType ScriptMethod -Name Kill -Value { }
+            $p
+        }
+        Mock Get-Content { 'install failed' }
+
+        (Invoke-WingetPackageUpgrade -PackageId 'Test.App').Status | Should -Be 'Failed'
+    }
+
+    It 'times out and kills the process when it does not exit in time' {
+        Mock Start-Process {
+            $p = [PSCustomObject]@{ ExitCode = 0 }
+            $p | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value { param($ms) $false }
+            $p | Add-Member -MemberType ScriptMethod -Name Kill -Value { Set-Variable -Name killCalled -Value $true -Scope script }
+            $p
+        }
+        Mock Get-Content { '' }
+
+        $result = Invoke-WingetPackageUpgrade -PackageId 'Test.App' -TimeoutSeconds 1
+
+        $result.Status | Should -Be 'TimedOut'
+        $script:killCalled | Should -BeTrue
+    }
+}
+
 Describe 'Test-CanUseGridView' {
     BeforeAll {
     }
