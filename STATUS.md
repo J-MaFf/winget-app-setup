@@ -8,11 +8,15 @@ updates. End users run a single self-contained `winget-app-install.ps1`, either 
 remote `irm | iex` one-liner. Internally, the installer's logic now lives in the reusable
 `WingetAppSetup` module, and the single-file script is generated from it by a build step.
 
-## Current State — 2026-06-14
+## Current State — 2026-06-15
 
-`main` is clean. The install logic has been refactored from a 2,100-line monolith into a module
-([#106](https://github.com/J-MaFf/winget-app-setup/issues/106)); the distributable script is a
-generated build artifact that remains byte-for-byte behaviour-equivalent to the previous monolith.
+The module refactor ([#106](https://github.com/J-MaFf/winget-app-setup/issues/106)) is staged on
+`fix/106-module-refactor` (PR [#109](https://github.com/J-MaFf/winget-app-setup/pull/109), open,
+not yet merged to `main`); the distributable script is a generated build artifact that remains
+behaviour-equivalent to the previous monolith. Stacked onto that branch: the scheduled-task test
+fix (#111, merged), the LF-determinism build fix (merged), and a `-WhatIf` safety fix
+([#117](https://github.com/J-MaFf/winget-app-setup/issues/117), PR
+[#116](https://github.com/J-MaFf/winget-app-setup/pull/116), open).
 
 ### Components
 
@@ -35,6 +39,7 @@ generated build artifact that remains byte-for-byte behaviour-equivalent to the 
 | [#106](https://github.com/J-MaFf/winget-app-setup/issues/106) | Split `winget-app-install.ps1` into a module with a generated bundle | [#109](https://github.com/J-MaFf/winget-app-setup/pull/109) |
 | [#110](https://github.com/J-MaFf/winget-app-setup/issues/110) | Migrate uninstall + update-helper scripts to consume the module | _merged into #109_ |
 | [#111](https://github.com/J-MaFf/winget-app-setup/issues/111) | Remove orphaned tests for functions that no longer exist | _stacked on #109_ |
+| [#117](https://github.com/J-MaFf/winget-app-setup/issues/117) | `-WhatIf` dropped the flag on elevation and ran a real install | [#116](https://github.com/J-MaFf/winget-app-setup/pull/116) |
 
 ### Open Issues
 
