@@ -111,6 +111,9 @@ function Test-IsRunningLocally {
 .PARAMETER WindowsTerminalExecutable
     Optional explicit path to the Windows Terminal executable (wt.exe). When not supplied, the
     function attempts to discover it automatically.
+.PARAMETER AdditionalArguments
+    Optional switches/arguments to forward to the elevated relaunch (for example, '-WhatIf'). These
+    are appended after the -File argument so the elevated session inherits the caller's intent.
 .RETURNS
     [string] Returns 'WindowsTerminal' when the Windows Terminal relaunch path succeeds, otherwise
     returns 'PowerShell'.
@@ -124,11 +127,17 @@ function Restart-WithElevation {
         [string]$ScriptPath,
 
         [Parameter(Mandatory = $false)]
-        [string]$WindowsTerminalExecutable
+        [string]$WindowsTerminalExecutable,
+
+        [Parameter(Mandatory = $false)]
+        [string[]]$AdditionalArguments = @()
     )
 
     $quotedScriptPath = '"' + $ScriptPath.Replace('"', '`"') + '"'
     $commandArguments = "-NoProfile -ExecutionPolicy Bypass -File $quotedScriptPath"
+    if ($AdditionalArguments.Count -gt 0) {
+        $commandArguments += ' ' + ($AdditionalArguments -join ' ')
+    }
     $windowsTerminalPath = $WindowsTerminalExecutable
 
     if (-not $windowsTerminalPath) {
@@ -462,20 +471,32 @@ function Invoke-WingetInstall {
     # Check if the script is run as administrator
     If (-NOT $isAdmin) {
         if (Test-IsRunningLocally) {
-            Write-ErrorMessage 'This script requires administrator privileges. Press Enter to restart script with elevated privileges.'
-            Pause
-            # Relaunch the script with administrator privileges
-            Restart-WithElevation -PowerShellExecutable $psExecutable -ScriptPath $PSCommandPath | Out-Null
-            Exit
+            # A dry run makes no system changes, so it never needs elevation. Relaunching
+            # elevated here would (a) be a surprising side effect for a preview and (b) — if
+            # the flag were ever dropped across the elevation boundary — silently turn a
+            # dry run into a real install. Stay in the current session and continue the preview.
+            if ($WhatIf) {
+                Write-Info '[DRY-RUN] Would relaunch with administrator privileges. Continuing the preview in the current (non-elevated) session; no system changes will be made.'
+            }
+            else {
+                Write-ErrorMessage 'This script requires administrator privileges. Press Enter to restart script with elevated privileges.'
+                Pause
+                # Relaunch the script with administrator privileges, forwarding -WhatIf as a
+                # safety net so the elevated session can never escalate a dry run into changes.
+                $elevationArgs = if ($WhatIf) { @('-WhatIf') } else { @() }
+                Restart-WithElevation -PowerShellExecutable $psExecutable -ScriptPath $PSCommandPath -AdditionalArguments $elevationArgs | Out-Null
+                Exit
+            }
         }
-
-        # IEX/remote execution has no local script path to relaunch from.
-        Write-ErrorMessage 'This script requires administrator privileges.'
-        Write-ErrorMessage 'Auto-elevation is unavailable when running through IEX/remote execution.'
-        Write-Info 'Open an elevated PowerShell or Windows Terminal session and run the IEX command again.'
-        Write-Info 'Exiting in 5 seconds...'
-        Start-Sleep -Seconds 5
-        Exit 1
+        else {
+            # IEX/remote execution has no local script path to relaunch from.
+            Write-ErrorMessage 'This script requires administrator privileges.'
+            Write-ErrorMessage 'Auto-elevation is unavailable when running through IEX/remote execution.'
+            Write-Info 'Open an elevated PowerShell or Windows Terminal session and run the IEX command again.'
+            Write-Info 'Exiting in 5 seconds...'
+            Start-Sleep -Seconds 5
+            Exit 1
+        }
     }
     else {
         Write-Success 'Starting...'

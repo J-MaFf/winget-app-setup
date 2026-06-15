@@ -644,6 +644,28 @@ Describe 'Restart-WithElevation' {
         Assert-MockCalled Start-Process -ParameterFilter { $FilePath -eq 'pwsh.exe' } -Times 1
         $result | Should -Be 'PowerShell'
     }
+
+    It 'Should forward AdditionalArguments to the elevated relaunch' {
+        Mock Get-Command { return $null } -ParameterFilter { $Name -eq 'wt.exe' }
+        Mock Start-Process { } -ParameterFilter { $FilePath -eq 'pwsh.exe' }
+
+        Restart-WithElevation -PowerShellExecutable 'pwsh.exe' -ScriptPath 'C:\script.ps1' -AdditionalArguments '-WhatIf'
+
+        Assert-MockCalled Start-Process -Times 1 -ParameterFilter {
+            $FilePath -eq 'pwsh.exe' -and (($ArgumentList -join ' ') -match '-File "C:\\script\.ps1" -WhatIf')
+        }
+    }
+
+    It 'Should not append arguments when AdditionalArguments is empty' {
+        Mock Get-Command { return $null } -ParameterFilter { $Name -eq 'wt.exe' }
+        Mock Start-Process { } -ParameterFilter { $FilePath -eq 'pwsh.exe' }
+
+        Restart-WithElevation -PowerShellExecutable 'pwsh.exe' -ScriptPath 'C:\script.ps1'
+
+        Assert-MockCalled Start-Process -Times 1 -ParameterFilter {
+            $FilePath -eq 'pwsh.exe' -and (($ArgumentList -join ' ') -notmatch '-WhatIf')
+        }
+    }
 }
 
 Describe 'Test-CanUseGridView' {
