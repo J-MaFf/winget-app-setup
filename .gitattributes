@@ -1,0 +1,7 @@
+# Keep PowerShell sources and the generated installer LF-normalized on every platform.
+# Without this, core.autocrlf=true rewrites the trailing newline to CRLF on Windows
+# checkouts, which makes build/Build-WingetInstallScript.ps1 -Check report a false
+# "out of date" even when the installer is in sync with the WingetAppSetup module.
+*.ps1  text eol=lf
+*.psm1 text eol=lf
+*.psd1 text eol=lf
