@@ -2412,13 +2412,14 @@ Describe 'Scheduled Updates - Unit Tests' -Tag 'ScheduledUpdates' {
         Mock Get-WinGetPackage { }
         Mock winget { }
         Mock Get-ScheduledTask { $null }
-        # Return typed CimInstance stand-ins: Register-ScheduledTask types its -Action/-Trigger/
+        # Return real CimInstance objects: Register-ScheduledTask types its -Action/-Trigger/
         # -Settings/-Principal params as [CimInstance[]], and Pester enforces that on the mock, so
         # plain hashtables fail argument transformation on a real Windows runner.
-        Mock New-ScheduledTaskAction { New-MockObject -Type 'Microsoft.Management.Infrastructure.CimInstance' }
-        Mock New-ScheduledTaskTrigger { New-MockObject -Type 'Microsoft.Management.Infrastructure.CimInstance' }
-        Mock New-ScheduledTaskSettingsSet { New-MockObject -Type 'Microsoft.Management.Infrastructure.CimInstance' }
-        Mock New-ScheduledTaskPrincipal { New-MockObject -Type 'Microsoft.Management.Infrastructure.CimInstance' }
+        $mockCim = { [Microsoft.Management.Infrastructure.CimInstance]::new('MockScheduledTaskClass') }
+        Mock New-ScheduledTaskAction $mockCim
+        Mock New-ScheduledTaskTrigger $mockCim
+        Mock New-ScheduledTaskSettingsSet $mockCim
+        Mock New-ScheduledTaskPrincipal $mockCim
         Mock Register-ScheduledTask { }
         Mock Unregister-ScheduledTask { }
         Mock Write-Info { }
