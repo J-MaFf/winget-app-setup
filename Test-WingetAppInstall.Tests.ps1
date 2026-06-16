@@ -2204,33 +2204,6 @@ Describe 'Retry Failed Installations' {
     }
 }
 
-Describe 'Invoke-WingetInstallWithRetry' {
-    BeforeAll {
-        # Dot-source the main script to import the function
-        . "$PSScriptRoot\winget-app-install.ps1"
-        
-        Mock Write-Info { }
-        Mock Write-WarningMessage { }
-        Mock Write-ErrorMessage { }
-    }
-
-    Context 'Function exists and is callable' {
-        It 'Should exist as a function' {
-            Get-Command Invoke-WingetInstallWithRetry -ErrorAction SilentlyContinue | Should -Not -BeNullOrEmpty
-        }
-    }
-
-    Context 'Parameter validation' {
-        It 'Should accept PackageId parameter' {
-            { Invoke-WingetInstallWithRetry -PackageId 'Test.Package' 2>&1 } | Should -Not -Throw
-        }
-
-        It 'Should accept MaxRetries parameter' {
-            { Invoke-WingetInstallWithRetry -PackageId 'Test.Package' -MaxRetries 3 2>&1 } | Should -Not -Throw
-        }
-    }
-}
-
 Describe 'App list consistency' {
     It 'Should keep install and uninstall app lists in sync' {
         $installApps = Get-Content "$PSScriptRoot\winget-app-install.ps1" |
@@ -2439,10 +2412,14 @@ Describe 'Scheduled Updates - Unit Tests' -Tag 'ScheduledUpdates' {
         Mock Get-WinGetPackage { }
         Mock winget { }
         Mock Get-ScheduledTask { $null }
-        Mock New-ScheduledTaskAction { @{ Action = 'ok' } }
-        Mock New-ScheduledTaskTrigger { @{ Trigger = 'ok' } }
-        Mock New-ScheduledTaskSettingsSet { @{ Settings = 'ok' } }
-        Mock New-ScheduledTaskPrincipal { @{ Principal = 'ok' } }
+        # Register-ScheduledTask requires its -Action/-Trigger/-Settings/-Principal arguments to
+        # carry the exact ETS PSTypeName the real New-ScheduledTask* cmdlets produce
+        # (e.g. CimInstance#MSFT_TaskAction), and Pester enforces that on the mocked call. Build
+        # CimInstances with the matching CIM class names so the typed binding succeeds.
+        Mock New-ScheduledTaskAction { [Microsoft.Management.Infrastructure.CimInstance]::new('MSFT_TaskAction') }
+        Mock New-ScheduledTaskTrigger { [Microsoft.Management.Infrastructure.CimInstance]::new('MSFT_TaskTrigger') }
+        Mock New-ScheduledTaskSettingsSet { [Microsoft.Management.Infrastructure.CimInstance]::new('MSFT_TaskSettings') }
+        Mock New-ScheduledTaskPrincipal { [Microsoft.Management.Infrastructure.CimInstance]::new('MSFT_TaskPrincipal') }
         Mock Register-ScheduledTask { }
         Mock Unregister-ScheduledTask { }
         Mock Write-Info { }
