@@ -1,0 +1,52 @@
+name: Windows Tests (Pester)
+
+# Runs the Pester v5 unit suite on a real Windows runner. This is where Windows-native
+# test execution happens, since the Claude Code action (claude.yml) cannot run on
+# windows-latest. @claude (on ubuntu) can read these results via `actions: read`.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pester:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Run Pester
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          # windows-latest ships Pester 5, but pin to be safe in case the image changes.
+          if (-not (Get-Module -ListAvailable -Name Pester | Where-Object { $_.Version -ge [version]'5.0.0' })) {
+            Install-Module Pester -MinimumVersion 5.0.0 -Force -SkipPublisherCheck -Scope CurrentUser
+          }
+          Import-Module Pester -MinimumVersion 5.0.0
+
+          $config = New-PesterConfiguration
+          $config.Run.Path = './Test-WingetAppInstall.Tests.ps1'
+          $config.Run.Exit = $true               # non-zero exit on failure -> fails the step
+          $config.Output.Verbosity = 'Detailed'
+          $config.TestResult.Enabled = $true
+          $config.TestResult.OutputFormat = 'NUnitXml'
+          $config.TestResult.OutputPath = 'testResults.xml'
+          Invoke-Pester -Configuration $config
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pester-results
+          path: testResults.xml
+          if-no-files-found: ignore
