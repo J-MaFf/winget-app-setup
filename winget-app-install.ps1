@@ -1502,6 +1502,11 @@ function Enable-ScheduledUpdatesCheck {
     }
 
     $psExecutable = if (Get-Command pwsh -ErrorAction SilentlyContinue) { 'pwsh.exe' } else { 'powershell.exe' }
+
+    # Resolve the current user defensively. [WindowsIdentity]::GetCurrent() can fail in some
+    # execution contexts (CI runners, service/managed accounts); fall back to env vars so a
+    # user-lookup failure does not abort scheduled-task creation.
+    $currentUser = try { [System.Security.Principal.WindowsIdentity]::GetCurrent().Name } catch { "$env:USERDOMAIN\$env:USERNAME" }
     try {
         $taskAction = New-ScheduledTaskAction -Execute $psExecutable -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$($paths.HelperScript)`""
         if ($UpdateFrequency -eq 'Daily') {
@@ -1511,7 +1516,7 @@ function Enable-ScheduledUpdatesCheck {
             $taskTrigger = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Sunday -At '2:00 AM'
         }
         $taskSettings = New-ScheduledTaskSettingsSet -StartWhenAvailable -RunOnlyIfNetworkAvailable
-        $taskPrincipal = New-ScheduledTaskPrincipal -UserId ([System.Security.Principal.WindowsIdentity]::GetCurrent().Name) -LogonType S4U -RunLevel Limited
+        $taskPrincipal = New-ScheduledTaskPrincipal -UserId $currentUser -LogonType S4U -RunLevel Limited
 
         Register-ScheduledTask -Action $taskAction `
             -Trigger $taskTrigger `
@@ -1738,7 +1743,7 @@ function Test-SystemRequirements {
     }
 
     # --- Display results ---
-    Write-Info ''
+    Write-Host ''
     Write-Info 'Pre-flight System Checks:'
     foreach ($r in $results) {
         $icon = switch ($r.Status) { 'OK' { '[OK]' } 'WARN' { '[WARN]' } 'FAIL' { '[FAIL]' } }
@@ -1749,7 +1754,7 @@ function Test-SystemRequirements {
             'FAIL' { Write-ErrorMessage $msg }
         }
     }
-    Write-Info ''
+    Write-Host ''
 
     if (-not $proceed) {
         return $false

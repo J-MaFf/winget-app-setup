@@ -31,6 +31,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Cleaned up `Test-WingetAppInstall.Tests.ps1` so it no longer defines unused variables and satisfies the linter.
 - Fixed all 17 Pester tests that failed on the new Windows CI (#132): install `Microsoft.WinGet.Client` in CI so the winget cmdlet mocks resolve, removed orphaned `Invoke-WingetInstallWithRetry` tests for the reverted retry feature (#83), and restored the missing `Test-SystemRequirements` implementation.
+- Made `Enable-ScheduledUpdatesCheck` resilient to `[WindowsIdentity]::GetCurrent()` failing in restricted execution contexts (e.g. CI or service accounts): it now falls back to environment variables for the task principal so scheduled-task creation no longer aborts (#132).
 - Fixed broken winget source scenario: when running as admin on a standard user account the "winget" source registration may be missing or broken; the script now detects and auto-repairs this condition instead of silently failing (#66).
 - Added Pester coverage for Windows Terminal default profile and terminal delegation configuration paths, and corrected an `IsWindows` read-only variable name collision in the test suite.
 - Fixed corrupted winget source data detection: `Test-WingetSources` now verifies source functionality with `winget source update`, detects corruption errors like `0x8a15000f`, and uses `winget source reset` as part of repair attempts (#77).
