@@ -579,19 +579,19 @@ Describe 'Test-WingetSources' {
     }
 }
 
-Describe 'Test-Source-IsTrusted' {
+Describe 'Test-WingetSourceTrusted' {
     BeforeAll {
         Mock Write-Host { }
         Mock Write-Warning { }
 
-        # Dot-source the main script to import Test-Source-IsTrusted
+        # Dot-source the main script to import Test-WingetSourceTrusted
         . "$PSScriptRoot\winget-app-install.ps1"
     }
 
     Context 'When source is trusted' {
         It 'Should return true and accept source agreements' {
             Mock winget { return 'winget      https://cdn.winget.microsoft.com/cache        true' } -ParameterFilter { $args[0] -eq 'source' -and $args[1] -eq 'list' -and $args -contains '--disable-interactivity' }
-            $result = Test-Source-IsTrusted -target 'winget'
+            $result = Test-WingetSourceTrusted -target 'winget'
             $result | Should -Be $true
         }
     }
@@ -599,7 +599,7 @@ Describe 'Test-Source-IsTrusted' {
     Context 'When source is not trusted' {
         It 'Should return false' {
             Mock winget { return 'msstore      https://storeedgefd.dsx.mp.microsoft.com/v9.0        true' } -ParameterFilter { $args[0] -eq 'source' -and $args[1] -eq 'list' -and $args -contains '--disable-interactivity' }
-            $result = Test-Source-IsTrusted -target 'winget'
+            $result = Test-WingetSourceTrusted -target 'winget'
             $result | Should -Be $false
         }
     }
@@ -607,7 +607,7 @@ Describe 'Test-Source-IsTrusted' {
     Context 'When winget source list fails' {
         It 'Should return false and emit warning' {
             Mock winget { throw 'Command failed' } -ParameterFilter { $args[0] -eq 'source' -and $args[1] -eq 'list' -and $args -contains '--disable-interactivity' }
-            $result = Test-Source-IsTrusted -target 'winget'
+            $result = Test-WingetSourceTrusted -target 'winget'
             $result | Should -Be $false
             Assert-MockCalled Write-Warning -Times 1
         }
@@ -1350,12 +1350,12 @@ Describe 'Main Script Logic' {
 
     Context 'Source verification' {
         It 'Should check trusted sources' {
-            Mock Test-Source-IsTrusted { param($target) return $true } -ParameterFilter { $target -eq 'winget' }
-            Mock Test-Source-IsTrusted { param($target) return $true } -ParameterFilter { $target -eq 'msstore' }
+            Mock Test-WingetSourceTrusted { param($target) return $true } -ParameterFilter { $target -eq 'winget' }
+            Mock Test-WingetSourceTrusted { param($target) return $true } -ParameterFilter { $target -eq 'msstore' }
 
             $trustedSources = @('winget', 'msstore')
             foreach ($source in $trustedSources) {
-                Test-Source-IsTrusted -target $source | Should -Be $true
+                Test-WingetSourceTrusted -target $source | Should -Be $true
             }
         }
 
@@ -2257,13 +2257,13 @@ Describe 'WhatIf Mode - Unit Tests' {
             Mock Write-Info { }
             Mock Write-WarningMessage { }
             Mock Write-Success { }
-            Mock Test-Source-IsTrusted { return $false }
+            Mock Test-WingetSourceTrusted { return $false }
 
             # Simulate the code path
             $WhatIf = $true
             $source = 'winget'
 
-            if (-not (Test-Source-IsTrusted -target $source)) {
+            if (-not (Test-WingetSourceTrusted -target $source)) {
                 if (-not $WhatIf) {
                     Write-WarningMessage "Trusting source: $source"
                     Set-Sources
@@ -2282,13 +2282,13 @@ Describe 'WhatIf Mode - Unit Tests' {
             Mock Write-Info { }
             Mock Write-WarningMessage { }
             Mock Write-Success { }
-            Mock Test-Source-IsTrusted { return $false }
+            Mock Test-WingetSourceTrusted { return $false }
 
             # Simulate the code path
             $WhatIf = $false
             $source = 'winget'
 
-            if (-not (Test-Source-IsTrusted -target $source)) {
+            if (-not (Test-WingetSourceTrusted -target $source)) {
                 if (-not $WhatIf) {
                     Write-WarningMessage "Trusting source: $source"
                     Set-Sources

@@ -208,7 +208,7 @@ function Test-AppDefinitions {
 .RETURNS
     [bool] True if the source is trusted, otherwise False.
 #>
-function Test-Source-IsTrusted($target) {
+function Test-WingetSourceTrusted($target) {
     try {
         $sources = winget source list --disable-interactivity --accept-source-agreements 2>&1
         return $sources -match [regex]::Escape($target)
@@ -1835,7 +1835,7 @@ function Invoke-WingetInstall {
     $trustedSources = @('winget', 'msstore')
     $sourceErrors = @()
     ForEach ($source in $trustedSources) {
-        if (-not (Test-Source-IsTrusted -target $source)) {
+        if (-not (Test-WingetSourceTrusted -target $source)) {
             if (-not $WhatIf) {
                 Write-WarningMessage "Trusting source: $source"
                 try {
