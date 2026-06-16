@@ -2412,14 +2412,14 @@ Describe 'Scheduled Updates - Unit Tests' -Tag 'ScheduledUpdates' {
         Mock Get-WinGetPackage { }
         Mock winget { }
         Mock Get-ScheduledTask { $null }
-        # Return real CimInstance objects: Register-ScheduledTask types its -Action/-Trigger/
-        # -Settings/-Principal params as [CimInstance[]], and Pester enforces that on the mock, so
-        # plain hashtables fail argument transformation on a real Windows runner.
-        $mockCim = { [Microsoft.Management.Infrastructure.CimInstance]::new('MockScheduledTaskClass') }
-        Mock New-ScheduledTaskAction $mockCim
-        Mock New-ScheduledTaskTrigger $mockCim
-        Mock New-ScheduledTaskSettingsSet $mockCim
-        Mock New-ScheduledTaskPrincipal $mockCim
+        # Register-ScheduledTask requires its -Action/-Trigger/-Settings/-Principal arguments to
+        # carry the exact ETS PSTypeName the real New-ScheduledTask* cmdlets produce
+        # (e.g. CimInstance#MSFT_TaskAction), and Pester enforces that on the mocked call. Build
+        # CimInstances with the matching CIM class names so the typed binding succeeds.
+        Mock New-ScheduledTaskAction { [Microsoft.Management.Infrastructure.CimInstance]::new('MSFT_TaskAction') }
+        Mock New-ScheduledTaskTrigger { [Microsoft.Management.Infrastructure.CimInstance]::new('MSFT_TaskTrigger') }
+        Mock New-ScheduledTaskSettingsSet { [Microsoft.Management.Infrastructure.CimInstance]::new('MSFT_TaskSettings3') }
+        Mock New-ScheduledTaskPrincipal { [Microsoft.Management.Infrastructure.CimInstance]::new('MSFT_TaskPrincipal2') }
         Mock Register-ScheduledTask { }
         Mock Unregister-ScheduledTask { }
         Mock Write-Info { }
