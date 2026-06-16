@@ -3,44 +3,12 @@
 
 Describe 'Test-AndInstallWingetModule' {
     BeforeAll {
+        # Dot-source the script under test so these tests exercise the real implementation (#135).
+        . "$PSScriptRoot/winget-app-install.ps1"
+
         Mock Write-Host { }
         Mock Write-Warning { }
 
-        function Test-AndInstallWingetModule {
-            try {
-                if (Get-Module -ListAvailable -Name 'Microsoft.WinGet.Client') {
-                    return $true
-                }
-
-                Write-Host 'Microsoft.WinGet.Client module not found. Attempting installation...' -ForegroundColor Yellow
-
-                $nugetProvider = Get-PackageProvider -Name NuGet -ErrorAction SilentlyContinue
-                if (-not $nugetProvider) {
-                    Write-Host 'NuGet package provider not found. Installing...' -ForegroundColor Yellow
-                    Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force -Scope AllUsers | Out-Null
-                }
-
-                Install-Module -Name Microsoft.WinGet.Client -Scope AllUsers -Force -AllowClobber -ErrorAction Stop
-
-                $installedModule = Get-Module -ListAvailable -Name 'Microsoft.WinGet.Client' | Select-Object -First 1
-                if ($installedModule) {
-                    if ($installedModule.Version) {
-                        Write-Host "Microsoft.WinGet.Client module installed successfully (Version: $($installedModule.Version))" -ForegroundColor Green
-                    }
-                    else {
-                        Write-Host 'Microsoft.WinGet.Client module installed successfully' -ForegroundColor Green
-                    }
-                    return $true
-                }
-
-                Write-Warning 'Microsoft.WinGet.Client module installation completed, but module is still not detected.'
-            }
-            catch {
-                Write-Warning "Failed to install Microsoft.WinGet.Client module: $_"
-            }
-
-            return $false
-        }
     }
 
     Context 'When module is already available' {
@@ -94,59 +62,12 @@ Describe 'Test-AndInstallWingetModule' {
 
 Describe 'Test-AndInstallGraphicalTools' {
     BeforeAll {
+        # Dot-source the script under test so these tests exercise the real implementation (#135).
+        . "$PSScriptRoot/winget-app-install.ps1"
+
         Mock Write-Host { }
         Mock Write-Warning { }
-        function Write-Success {
-            param($Message)
-        }
-        function Write-WarningMessage {
-            param($Message)
-        }
 
-        function Test-AndInstallGraphicalTools {
-            try {
-                if (Get-Command Out-GridView -ErrorAction SilentlyContinue) {
-                    return $true
-                }
-
-                $graphicalModule = Get-Module -ListAvailable -Name 'Microsoft.PowerShell.GraphicalTools'
-                if (-not $graphicalModule) {
-                    Write-Host 'Microsoft.PowerShell.GraphicalTools module is missing. Installing to enable Out-GridView...' -ForegroundColor Yellow
-                }
-                else {
-                    Write-Host 'Microsoft.PowerShell.GraphicalTools module found but Out-GridView is unavailable. Importing module...' -ForegroundColor Yellow
-                }
-
-                $nugetProvider = Get-PackageProvider -Name NuGet -ErrorAction SilentlyContinue
-                if (-not $nugetProvider) {
-                    Write-Host 'NuGet package provider not found. Installing...' -ForegroundColor Yellow
-                    Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force -Scope AllUsers | Out-Null
-                }
-
-                Install-Module -Name Microsoft.PowerShell.GraphicalTools -Scope AllUsers -Force -AllowClobber -ErrorAction Stop
-                Import-Module Microsoft.PowerShell.GraphicalTools -ErrorAction Stop
-
-                $loadedModule = Get-Module -Name 'Microsoft.PowerShell.GraphicalTools'
-                if ($loadedModule -and $loadedModule.Version) {
-                    Write-Success "Microsoft.PowerShell.GraphicalTools is loaded for this session (Version: $($loadedModule.Version))"
-                }
-                else {
-                    Write-Success 'Microsoft.PowerShell.GraphicalTools is loaded for this session.'
-                }
-
-                if (Get-Command Out-GridView -ErrorAction SilentlyContinue) {
-                    Write-Host 'Out-GridView is available for interactive summaries.' -ForegroundColor Green
-                    return $true
-                }
-
-                Write-Warning 'Microsoft.PowerShell.GraphicalTools installation completed, but Out-GridView is still unavailable.'
-            }
-            catch {
-                Write-Warning "Failed to install Microsoft.PowerShell.GraphicalTools module: $_"
-            }
-
-            return $false
-        }
     }
 
     Context 'When Out-GridView is already available' {
@@ -750,61 +671,11 @@ Describe 'Set-Sources' {
 
 Describe 'Add-ToEnvironmentPath' {
     BeforeAll {
+        # Dot-source the script under test so these tests exercise the real implementation (#135).
+        . "$PSScriptRoot/winget-app-install.ps1"
+
         Mock Write-Host { }
 
-        function Add-ToEnvironmentPath {
-            param (
-                [Parameter(Mandatory = $true)]
-                [string]$PathToAdd,
-
-                [Parameter(Mandatory = $true)]
-                [ValidateSet('User', 'System')]
-                [string]$Scope
-            )
-
-            # Check if the path is already in the environment PATH variable
-            if (-not (Test-PathInEnvironment -PathToCheck $PathToAdd -Scope $Scope)) {
-                if ($Scope -eq 'System') {
-                    # Get the current system PATH
-                    $systemEnvPath = [System.Environment]::GetEnvironmentVariable('PATH', [System.EnvironmentVariableTarget]::Machine)
-                    # Add to system PATH
-                    $systemEnvPath += ";$PathToAdd"
-                    [System.Environment]::SetEnvironmentVariable('PATH', $systemEnvPath, [System.EnvironmentVariableTarget]::Machine)
-                }
-                elseif ($Scope -eq 'User') {
-                    # Get the current user PATH
-                    $userEnvPath = [System.Environment]::GetEnvironmentVariable('PATH', [System.EnvironmentVariableTarget]::User)
-                    # Add to user PATH
-                    $userEnvPath += ";$PathToAdd"
-                    [System.Environment]::SetEnvironmentVariable('PATH', $userEnvPath, [System.EnvironmentVariableTarget]::User)
-                }
-
-                # Update the current process environment PATH
-                if (-not ($env:PATH -split ';').Contains($PathToAdd)) {
-                    $env:PATH += ";$PathToAdd"
-                }
-            }
-        }
-
-        function Test-PathInEnvironment {
-            param (
-                [Parameter(Mandatory = $true)]
-                [string]$PathToCheck,
-
-                [Parameter(Mandatory = $true)]
-                [ValidateSet('User', 'System')]
-                [string]$Scope
-            )
-
-            if ($Scope -eq 'System') {
-                $envPath = [System.Environment]::GetEnvironmentVariable('PATH', [System.EnvironmentVariableTarget]::Machine)
-            }
-            elseif ($Scope -eq 'User') {
-                $envPath = [System.Environment]::GetEnvironmentVariable('PATH', [System.EnvironmentVariableTarget]::User)
-            }
-
-            return ($envPath -split ';').Contains($PathToCheck)
-        }
     }
 
     Context 'When path is not in User scope' {
@@ -829,25 +700,9 @@ Describe 'Add-ToEnvironmentPath' {
 
 Describe 'Test-PathInEnvironment' {
     BeforeAll {
-        function Test-PathInEnvironment {
-            param (
-                [Parameter(Mandatory = $true)]
-                [string]$PathToCheck,
+        # Dot-source the script under test so these tests exercise the real implementation (#135).
+        . "$PSScriptRoot/winget-app-install.ps1"
 
-                [Parameter(Mandatory = $true)]
-                [ValidateSet('User', 'System')]
-                [string]$Scope
-            )
-
-            if ($Scope -eq 'System') {
-                $envPath = [System.Environment]::GetEnvironmentVariable('PATH', [System.EnvironmentVariableTarget]::Machine)
-            }
-            elseif ($Scope -eq 'User') {
-                $envPath = [System.Environment]::GetEnvironmentVariable('PATH', [System.EnvironmentVariableTarget]::User)
-            }
-
-            return ($envPath -split ';').Contains($PathToCheck)
-        }
     }
 
     Context 'User scope' {
@@ -866,50 +721,9 @@ Describe 'Test-PathInEnvironment' {
 
 Describe 'ConvertTo-CommandArguments' {
     BeforeAll {
-        function ConvertTo-CommandArguments {
-            param (
-                [Parameter(Mandatory = $true)]
-                [string]$Command
-            )
+        # Dot-source the script under test so these tests exercise the real implementation (#135).
+        . "$PSScriptRoot/winget-app-install.ps1"
 
-            $commandArgs = @()
-            $currentArg = ''
-            $inQuotes = $false
-            $quoteChar = ''
-
-            for ($i = 0; $i -lt $Command.Length; $i++) {
-                $char = $Command[$i]
-
-                if ($inQuotes) {
-                    if ($char -eq $quoteChar) {
-                        $inQuotes = $false
-                        $quoteChar = ''
-                    }
-                    else {
-                        $currentArg += $char
-                    }
-                }
-                elseif ($char -eq '"' -or $char -eq "'") {
-                    $inQuotes = $true
-                    $quoteChar = $char
-                }
-                elseif ($char -eq ' ') {
-                    if ($currentArg) {
-                        $commandArgs += $currentArg
-                        $currentArg = ''
-                    }
-                }
-                else {
-                    $currentArg += $char
-                }
-            }
-
-            if ($currentArg) {
-                $commandArgs += $currentArg
-            }
-
-            return $commandArgs
-        }
     }
 
     It 'Should parse simple command without quotes' {
@@ -934,49 +748,12 @@ Describe 'ConvertTo-CommandArguments' {
 }
 
 Describe 'Restart-WithElevation' {
-    BeforeEach {
+    BeforeAll {
+        # Dot-source the script under test so these tests exercise the real implementation (#135).
+        . "$PSScriptRoot/winget-app-install.ps1"
+
         Mock Write-Host { }
         Mock Write-Warning { }
-        Remove-Item function:Restart-WithElevation -ErrorAction SilentlyContinue
-
-        function Restart-WithElevation {
-            param (
-                [Parameter(Mandatory = $true)]
-                [string]$PowerShellExecutable,
-
-                [Parameter(Mandatory = $true)]
-                [string]$ScriptPath,
-
-                [Parameter(Mandatory = $false)]
-                [string]$WindowsTerminalExecutable
-            )
-
-            $quotedScriptPath = '"' + $ScriptPath.Replace('"', '`"') + '"'
-            $commandArguments = "-NoProfile -ExecutionPolicy Bypass -File $quotedScriptPath"
-            $windowsTerminalPath = $WindowsTerminalExecutable
-
-            if (-not $windowsTerminalPath) {
-                $wtCommand = Get-Command -Name 'wt.exe' -ErrorAction SilentlyContinue
-                if ($wtCommand) {
-                    $windowsTerminalPath = $wtCommand.Source
-                }
-            }
-
-            if ($windowsTerminalPath) {
-                Write-Host 'Attempting to relaunch script in Windows Terminal with elevated privileges...' -ForegroundColor Blue
-                try {
-                    Start-Process $windowsTerminalPath -ArgumentList @("$PowerShellExecutable $commandArguments") -Verb RunAs
-                    return 'WindowsTerminal'
-                }
-                catch {
-                    Write-Warning "Failed to start Windows Terminal: $_"
-                }
-            }
-
-            Write-Host 'Relaunching script in standard PowerShell window with elevated privileges...' -ForegroundColor Blue
-            Start-Process $PowerShellExecutable -ArgumentList $commandArguments -Verb RunAs
-            return 'PowerShell'
-        }
     }
 
     It 'Should use Windows Terminal when available' {
@@ -1014,21 +791,9 @@ Describe 'Restart-WithElevation' {
 
 Describe 'Test-CanUseGridView' {
     BeforeAll {
-        function Test-CanUseGridView {
-            # Check if we're in an interactive session
-            if (-not [Environment]::UserInteractive) {
-                return $false
-            }
+        # Dot-source the script under test so these tests exercise the real implementation (#135).
+        . "$PSScriptRoot/winget-app-install.ps1"
 
-            # Check if Out-GridView is available
-            try {
-                Get-Command Out-GridView -ErrorAction Stop | Out-Null
-                return $true
-            }
-            catch {
-                return $false
-            }
-        }
     }
 
     It 'Should return true when Out-GridView is available and session is interactive' {
@@ -1065,6 +830,9 @@ Describe 'Test-CanUseGridView' {
 
 Describe 'Write-Table' {
     BeforeAll {
+        # Dot-source the script under test so these tests exercise the real implementation (#135).
+        . "$PSScriptRoot/winget-app-install.ps1"
+
         Mock Write-Host { }
         Mock Read-Host { return 'N' }
 
@@ -1074,79 +842,6 @@ Describe 'Write-Table' {
         }
         Mock Out-GridView { }
 
-        function Test-CanUseGridView {
-            # Check if we're in an interactive session
-            if (-not [Environment]::UserInteractive) {
-                return $false
-            }
-
-            # Check if Out-GridView is available
-            try {
-                Get-Command Out-GridView -ErrorAction Stop | Out-Null
-                return $true
-            }
-            catch {
-                return $false
-            }
-        }
-
-        function Write-Table {
-            param (
-                [Parameter(Mandatory = $true)]
-                [string[]]$Headers,
-                [Parameter(Mandatory = $true)]
-                [string[][]]$Rows,
-                [Parameter(Mandatory = $false)]
-                [bool]$UseGridView = $false,
-                [Parameter(Mandatory = $false)]
-                [bool]$PromptForGridView = $false,
-                [Parameter(Mandatory = $false)]
-                [string]$Title = 'Summary'
-            )
-
-            # Convert rows to objects for Format-Table
-            $tableData = @()
-            foreach ($row in $Rows) {
-                $obj = New-Object PSObject
-                for ($i = 0; $i -lt $Headers.Count; $i++) {
-                    $obj | Add-Member -MemberType NoteProperty -Name $Headers[$i] -Value $row[$i]
-                }
-                $tableData += $obj
-            }
-
-            $shouldUseGridView = $UseGridView
-
-            # Prompt user if requested and Out-GridView is available
-            if ($PromptForGridView -and -not $UseGridView) {
-                if (Test-CanUseGridView) {
-                    Write-Host ''
-                    $response = Read-Host 'Would you like to view the results in an interactive grid view? (Y/N)'
-                    if ($response -match '^[Yy]') {
-                        $shouldUseGridView = $true
-                    }
-                }
-            }
-
-            # Try to use Out-GridView if requested and available
-            if ($shouldUseGridView) {
-                if (-not (Test-CanUseGridView)) {
-                    Write-Host 'Out-GridView is not available. Falling back to text output.' -ForegroundColor Yellow
-                }
-                else {
-                    try {
-                        $tableData | Out-GridView -Title $Title -Wait
-                        return
-                    }
-                    catch {
-                        Write-Host "Failed to display grid view: $_. Falling back to text output." -ForegroundColor Yellow
-                    }
-                }
-            }
-
-            # Use Format-Table for text output
-            $output = $tableData | Format-Table -AutoSize | Out-String
-            Write-Host $output.TrimEnd()
-        }
     }
 
     It 'Should format table data correctly with Format-Table' {
@@ -1373,129 +1068,15 @@ Describe 'Write-Table' {
 
 Describe 'Invoke-WingetCommand' {
     BeforeAll {
+        # Dot-source the script under test so these tests exercise the real implementation (#135).
+        . "$PSScriptRoot/winget-app-install.ps1"
+
         Mock Write-Host { }
 
         # Define the helper function inline for testing
-        function ConvertTo-CommandArguments {
-            param ([string]$Command)
-            $commandArgs = @()
-            $currentArg = ''
-            $inQuotes = $false
-            $quoteChar = ''
-
-            for ($i = 0; $i -lt $Command.Length; $i++) {
-                $char = $Command[$i]
-
-                if ($inQuotes) {
-                    if ($char -eq $quoteChar) {
-                        $inQuotes = $false
-                        $quoteChar = ''
-                    }
-                    else {
-                        $currentArg += $char
-                    }
-                }
-                elseif ($char -eq '"' -or $char -eq "'") {
-                    $inQuotes = $true
-                    $quoteChar = $char
-                }
-                elseif ($char -eq ' ') {
-                    if ($currentArg) {
-                        $commandArgs += $currentArg
-                        $currentArg = ''
-                    }
-                }
-                else {
-                    $currentArg += $char
-                }
-            }
-
-            if ($currentArg) {
-                $commandArgs += $currentArg
-            }
-
-            return $commandArgs
-        }
-
-        function Write-ErrorMessage {
-            param ([string]$Message)
-            Write-Host $Message -ForegroundColor Red
-        }
 
         # Define Invoke-WingetCommand function with exit code handling
-        function Invoke-WingetCommand {
-            param (
-                [Parameter(Mandatory = $true)]
-                [string]$Command,
 
-                [Parameter(Mandatory = $true)]
-                [string]$SuccessPattern,
-
-                [Parameter(Mandatory = $true)]
-                [string]$FailurePattern,
-
-                [Parameter(Mandatory = $true)]
-                [ref]$SuccessArray,
-
-                [Parameter(Mandatory = $true)]
-                [ref]$FailureArray,
-
-                [Parameter(Mandatory = $false)]
-                [int]$SuccessIndex = 1,
-
-                [Parameter(Mandatory = $false)]
-                [int]$FailureIndex = 1
-            )
-
-            $commandArgs = ConvertTo-CommandArguments -Command $Command
-
-            & winget $commandArgs
-
-            try {
-                $commandOutput = & winget $commandArgs 2>&1 | Where-Object { $_ -notmatch '^[\s\-\|\\]*$' }
-                $captureExitCode = $LASTEXITCODE
-            }
-            catch {
-                Write-ErrorMessage "Error capturing winget output: $($_)"
-                $commandOutput = @()
-                $captureExitCode = -1
-            }
-
-            $exitCode = $captureExitCode
-
-            $exitMessage = switch ($exitCode) {
-                0 { 'Success' }
-                -1978335189 { 'No applicable update found' }
-                -1978335191 { 'No packages found matching input criteria' }
-                -1978335192 { 'Package installation failed' }
-                -1978335212 { 'User cancelled the operation' }
-                -1978335213 { 'Package already installed' }
-                -1978335215 { 'Manifest validation failed' }
-                -1978335216 { 'Invalid manifest' }
-                -1978335221 { 'Package download failed' }
-                -1978335226 { 'Hash mismatch' }
-                default { "Winget exited with code: $exitCode" }
-            }
-
-            $commandOutput | ForEach-Object {
-                if ($_ -match $SuccessPattern) {
-                    $SuccessArray.Value += $_.Split()[$SuccessIndex]
-                }
-                elseif ($_ -match $FailurePattern) {
-                    $FailureArray.Value += $_.Split()[$FailureIndex]
-                }
-            }
-
-            if ($exitCode -ne 0 -and $FailureArray.Value.Count -eq 0 -and $SuccessArray.Value.Count -eq 0) {
-                Write-ErrorMessage "Winget command failed: $exitMessage"
-                $FailureArray.Value += "Command failed with exit code $exitCode"
-            }
-
-            return @{
-                ExitCode    = $exitCode
-                ExitMessage = $exitMessage
-            }
-        }
     }
 
     Context 'Exit code capture and handling' {
@@ -1627,19 +1208,9 @@ Describe 'Invoke-WingetCommand' {
 
 Describe 'Format-AppList' {
     BeforeAll {
-        function Format-AppList {
-            param (
-                [Parameter(Mandatory = $true)]
-                [AllowEmptyCollection()]
-                [AllowNull()]
-                [string[]]$AppArray
-            )
+        # Dot-source the script under test so these tests exercise the real implementation (#135).
+        . "$PSScriptRoot/winget-app-install.ps1"
 
-            if ($AppArray -and $AppArray.Count -gt 0) {
-                return $AppArray -join ', '
-            }
-            return $null
-        }
     }
 
     It 'Should format non-empty array' {
@@ -1652,52 +1223,22 @@ Describe 'Format-AppList' {
         $result | Should -Be $null
     }
 
-    It 'Should return null for null input' {
-        $result = Format-AppList -AppArray $null
+    It 'Should return null for empty input' {
+        # The real Format-AppList declares $AppArray as a mandatory [string[]] with
+        # [AllowEmptyCollection()], so an empty array (not $null) is the boundary case
+        # it is designed to handle; it returns $null when given no apps.
+        $result = Format-AppList -AppArray @()
         $result | Should -Be $null
     }
 }
 
 Describe 'Test-UpdatesAvailable' {
     BeforeAll {
+        # Dot-source the script under test so these tests exercise the real implementation (#135).
+        . "$PSScriptRoot/winget-app-install.ps1"
+
         Mock Write-Host { }
 
-        function Test-UpdatesAvailable {
-            try {
-                Write-Host 'Checking for available updates...' -ForegroundColor Blue
-
-                # Try PowerShell module first
-                if (Get-Command Get-WinGetPackage -ErrorAction SilentlyContinue) {
-                    $packagesWithUpdates = Get-WinGetPackage | Where-Object IsUpdateAvailable
-
-                    if ($packagesWithUpdates -and $packagesWithUpdates.Count -gt 0) {
-                        Write-Host "Found $($packagesWithUpdates.Count) package(s) with available updates." -ForegroundColor Green
-                        $packagesWithUpdates | ForEach-Object {
-                            Write-Host " - $($_.Id) (Current: $($_.InstalledVersion), Available: $($_.AvailableVersion))"
-                        }
-                        return $true
-                    }
-                }
-                else {
-                    Write-Host 'PowerShell module not available, using CLI fallback...' -ForegroundColor Yellow
-
-                    # Fallback to CLI method
-                    $basicUpgradeResult = & winget upgrade 2>&1
-                    $basicOutput = $basicUpgradeResult | Out-String
-
-                    if ($basicOutput -notmatch 'No installed package found matching input criteria' -and
-                        $basicOutput -notmatch 'No available upgrade found') {
-                        return $true
-                    }
-                }
-            }
-            catch {
-                Write-Warning "Error checking for updates: $_"
-            }
-
-            Write-Host 'No updates available.' -ForegroundColor Yellow
-            return $false
-        }
     }
 
     Context 'PowerShell module available' {
@@ -1744,18 +1285,14 @@ Describe 'Test-UpdatesAvailable' {
 
 Describe 'Main Script Logic' {
     BeforeAll {
+        # Dot-source the script under test so these tests exercise the real implementation (#135).
+        . "$PSScriptRoot/winget-app-install.ps1"
+
         Mock Write-Host { }
         Mock Pause { }
         Mock Start-Process { }
 
         # Mock the functions that are called
-        function Test-AndInstallWinget { return $true }
-        function Add-ToEnvironmentPath { }
-        function Test-Source-IsTrusted { param($target) return $true }
-        function Set-Sources { }
-        function Format-AppList { param($AppArray) if ($AppArray) { return $AppArray -join ', ' } return $null }
-        function Write-Table { }
-        function Test-UpdatesAvailable { return $false }
 
         # Mock external commands
         Mock Get-Command { return $true } -ParameterFilter { $Name -eq 'pwsh' }
@@ -2208,7 +1745,7 @@ Describe 'Invoke-WingetInstallWithRetry' {
     BeforeAll {
         # Dot-source the main script to import the function
         . "$PSScriptRoot\winget-app-install.ps1"
-        
+
         Mock Write-Info { }
         Mock Write-WarningMessage { }
         Mock Write-ErrorMessage { }
