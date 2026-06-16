@@ -18,11 +18,9 @@ jobs:
       (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@claude')) ||
       (github.event_name == 'pull_request_review' && contains(github.event.review.body, '@claude')) ||
       (github.event_name == 'issues' && (contains(github.event.issue.body, '@claude') || contains(github.event.issue.title, '@claude')))
-    # Windows runner so @claude executes in a real Windows environment and can run this
-    # repo's PowerShell scripts and Pester tests natively. The action is a bash-based
-    # composite action; windows-latest provides Git Bash and the action skips its
-    # Linux-only steps on Windows (note: Linux subprocess sandboxing does not apply here).
-    runs-on: windows-latest
+    # ubuntu-latest: the action installs the Claude CLI here reliably (it cannot on
+    # windows-latest). Windows-specific test execution lives in windows-tests.yml.
+    runs-on: ubuntu-latest
     permissions:
       contents: write
       pull-requests: write
