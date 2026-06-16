@@ -1528,6 +1528,7 @@ function Enable-ScheduledUpdatesCheck {
             -Force | Out-Null
     }
     catch {
+        Write-Host "DIAG132 ENABLE-CATCH: $($_.Exception.GetType().FullName) :: $($_.Exception.Message)"
         Write-ErrorMessage "Failed to create scheduled task: $_"
         return $false
     }
