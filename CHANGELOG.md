@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Refactored `Test-WingetAppInstall.Tests.ps1` to dot-source the real `winget-app-install.ps1` instead of copying function bodies verbatim into `BeforeAll`/`BeforeEach` blocks, so the suite now exercises the actual implementation and no longer drifts silently when the script changes. Removed 24 inline function copies across 12 `Describe` blocks and corrected the `Format-AppList` empty-input test to match the real function's mandatory `[string[]]` contract (#135).
 - Simplified the README to a two-step guide that starts with `Set-ExecutionPolicy Unrestricted -Scope Process -Force` followed by running `powershell -ExecutionPolicy Unrestricted -File .\winget-app-install.ps1`.
 - Configured the workspace's local Memory MCP storage plus `.gitignore` and `.vscode` settings so auto-generated knowledge graph data stays in the repo scope.
 - `Invoke-WingetInstall` now verifies and auto-repairs the winget package source before beginning app installations.
