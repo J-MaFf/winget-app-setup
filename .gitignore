@@ -17,6 +17,7 @@ PSScriptAnalyzerSettings.ps1
 
 # Pester
 TestResults.xml
+testResults.xml
 
 # Temporary files
 *.tmp
