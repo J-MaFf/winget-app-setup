@@ -2204,33 +2204,6 @@ Describe 'Retry Failed Installations' {
     }
 }
 
-Describe 'Invoke-WingetInstallWithRetry' {
-    BeforeAll {
-        # Dot-source the main script to import the function
-        . "$PSScriptRoot\winget-app-install.ps1"
-        
-        Mock Write-Info { }
-        Mock Write-WarningMessage { }
-        Mock Write-ErrorMessage { }
-    }
-
-    Context 'Function exists and is callable' {
-        It 'Should exist as a function' {
-            Get-Command Invoke-WingetInstallWithRetry -ErrorAction SilentlyContinue | Should -Not -BeNullOrEmpty
-        }
-    }
-
-    Context 'Parameter validation' {
-        It 'Should accept PackageId parameter' {
-            { Invoke-WingetInstallWithRetry -PackageId 'Test.Package' 2>&1 } | Should -Not -Throw
-        }
-
-        It 'Should accept MaxRetries parameter' {
-            { Invoke-WingetInstallWithRetry -PackageId 'Test.Package' -MaxRetries 3 2>&1 } | Should -Not -Throw
-        }
-    }
-}
-
 Describe 'App list consistency' {
     It 'Should keep install and uninstall app lists in sync' {
         $installApps = Get-Content "$PSScriptRoot\winget-app-install.ps1" |

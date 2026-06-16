@@ -23,6 +23,17 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6
 
+      - name: Install Microsoft.WinGet.Client (mockable winget cmdlets)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # The unit suite mocks Get-WinGetPackage etc.; Pester can only mock commands that
+          # already exist, so the Microsoft.WinGet.Client cmdlets must be present on the runner.
+          if (-not (Get-Command Get-WinGetPackage -ErrorAction SilentlyContinue)) {
+            Install-Module Microsoft.WinGet.Client -Force -SkipPublisherCheck -Scope CurrentUser
+          }
+          Import-Module Microsoft.WinGet.Client
+
       - name: Run Pester
         shell: pwsh
         run: |
