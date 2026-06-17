@@ -546,6 +546,7 @@ function Write-Table {
         [Parameter(Mandatory = $true)]
         [string[]]$Headers,
         [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
         [string[][]]$Rows,
         [Parameter(Mandatory = $false)]
         [bool]$UseGridView = $false,
