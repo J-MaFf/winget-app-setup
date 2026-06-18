@@ -60,7 +60,6 @@ param (
     [switch]$SkipSystemCheck
 )
 
-
 # ------------------------------------------------------------------------------------------------
 # GENERATED FILE - DO NOT EDIT BY HAND.
 # This script is assembled from the WingetAppSetup module by build/Build-WingetInstallScript.ps1.
@@ -162,7 +161,6 @@ function Restart-WithElevation {
     Start-Process $PowerShellExecutable -ArgumentList $commandArguments -Verb RunAs
     return 'PowerShell'
 }
-
 
 # --- Environment ---
 <#
@@ -301,7 +299,6 @@ function ConvertTo-CommandArguments {
 
     return $commandArgs
 }
-
 
 # --- GraphicalTools ---
 <#
@@ -492,7 +489,6 @@ function Test-AppDefinitions {
         Warnings  = $warnings
     }
 }
-
 
 # --- Install ---
 <#
@@ -960,7 +956,6 @@ function Invoke-WingetInstall {
     }
 }
 
-
 # --- Logging ---
 <#
 .SYNOPSIS
@@ -1089,6 +1084,7 @@ function Write-Table {
         [Parameter(Mandatory = $true)]
         [string[]]$Headers,
         [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
         [string[][]]$Rows,
         [Parameter(Mandatory = $false)]
         [bool]$UseGridView = $false,
@@ -1141,7 +1137,6 @@ function Write-Table {
     $output = $tableData | Format-Table -AutoSize | Out-String
     Write-Host $output.TrimEnd()
 }
-
 
 # --- ScheduledUpdates ---
 <#
@@ -1451,7 +1446,6 @@ function Invoke-OnDemandUpdateCheck {
     & $helperPath -AutoInstallOverride:$true -RunReason OnDemand
 }
 
-
 # --- WindowsTerminal ---
 <#
 .SYNOPSIS
@@ -1696,7 +1690,6 @@ function Set-WindowsTerminalDefaults {
 
     [void](Set-WindowsTerminalAsDefaultTerminalApplication)
 }
-
 
 # --- WingetCore ---
 <#
@@ -2250,7 +2243,6 @@ function Initialize-WingetSourcesForUser {
         return $true
     }
 }
-
 
 # ------------------------------------------------Main Script------------------------------------------------
 
