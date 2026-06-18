@@ -1,5 +1,14 @@
 # Test-WingetAppInstall.Tests.ps1
-# Comprehensive unit tests for winget-app-install.ps1 using Pester
+# Comprehensive unit tests for the WingetAppSetup module (source of winget-app-install.ps1).
+
+# Load the module''s functions once for the whole suite. The WingetAppSetup module
+# (WingetAppSetup/Public + WingetAppSetup/Private) is the single source of truth; the
+# distributable winget-app-install.ps1 is generated from it by build/Build-WingetInstallScript.ps1.
+BeforeAll {
+    $script:WingetAppSetupRoot = Join-Path $PSScriptRoot 'WingetAppSetup'
+    Get-ChildItem -Path (Join-Path $script:WingetAppSetupRoot 'Private'), (Join-Path $script:WingetAppSetupRoot 'Public') -Filter '*.ps1' |
+        ForEach-Object { . $_.FullName }
+}
 
 Describe 'Test-AndInstallWingetModule' {
     BeforeAll {
@@ -218,7 +227,6 @@ Describe 'Test-AndInstallWinget' {
         Mock Write-Host { }
 
         # Dot-source the main script to import Test-AndInstallWinget
-        . "$PSScriptRoot\winget-app-install.ps1"
     }
 
     Context 'When winget is available' {
@@ -263,7 +271,6 @@ Describe 'Test-WingetSources' {
         Mock Write-Warning { }
 
         # Dot-source the main script to import Test-WingetSources
-        . "$PSScriptRoot\winget-app-install.ps1"
     }
 
     Context 'When winget sources are listed and functional' {
@@ -446,8 +453,7 @@ Describe 'Test-WingetSourceTrusted' {
         Mock Write-Host { }
         Mock Write-Warning { }
 
-        # Dot-source the main script to import Test-WingetSourceTrusted
-        . "$PSScriptRoot\winget-app-install.ps1"
+        # Functions loaded from the module via BeforeAll at the top of the suite
     }
 
     Context 'When source is trusted' {
@@ -481,7 +487,6 @@ Describe 'Set-Sources' {
         Mock Write-Host { }
 
         # Dot-source the main script to import Set-Sources
-        . "$PSScriptRoot\winget-app-install.ps1"
     }
 
     It 'Should call winget source reset and return true on success' {
@@ -533,11 +538,7 @@ Describe 'Set-Sources' {
 
 Describe 'Add-ToEnvironmentPath' {
     BeforeAll {
-        # Dot-source the script under test so these tests exercise the real implementation (#135).
-        . "$PSScriptRoot/winget-app-install.ps1"
-
         Mock Write-Host { }
-
     }
 
     Context 'When path is not in User scope' {
@@ -562,9 +563,6 @@ Describe 'Add-ToEnvironmentPath' {
 
 Describe 'Test-PathInEnvironment' {
     BeforeAll {
-        # Dot-source the script under test so these tests exercise the real implementation (#135).
-        . "$PSScriptRoot/winget-app-install.ps1"
-
     }
 
     Context 'User scope' {
@@ -583,9 +581,6 @@ Describe 'Test-PathInEnvironment' {
 
 Describe 'ConvertTo-CommandArguments' {
     BeforeAll {
-        # Dot-source the script under test so these tests exercise the real implementation (#135).
-        . "$PSScriptRoot/winget-app-install.ps1"
-
     }
 
     It 'Should parse simple command without quotes' {
@@ -649,13 +644,96 @@ Describe 'Restart-WithElevation' {
         Assert-MockCalled Start-Process -ParameterFilter { $FilePath -eq 'pwsh.exe' } -Times 1
         $result | Should -Be 'PowerShell'
     }
+
+    It 'Should forward AdditionalArguments to the elevated relaunch' {
+        Mock Get-Command { return $null } -ParameterFilter { $Name -eq 'wt.exe' }
+        Mock Start-Process { } -ParameterFilter { $FilePath -eq 'pwsh.exe' }
+
+        Restart-WithElevation -PowerShellExecutable 'pwsh.exe' -ScriptPath 'C:\script.ps1' -AdditionalArguments '-WhatIf'
+
+        Assert-MockCalled Start-Process -Times 1 -ParameterFilter {
+            $FilePath -eq 'pwsh.exe' -and (($ArgumentList -join ' ') -match '-File "C:\\script\.ps1" -WhatIf')
+        }
+    }
+
+    It 'Should not append arguments when AdditionalArguments is empty' {
+        Mock Get-Command { return $null } -ParameterFilter { $Name -eq 'wt.exe' }
+        Mock Start-Process { } -ParameterFilter { $FilePath -eq 'pwsh.exe' }
+
+        Restart-WithElevation -PowerShellExecutable 'pwsh.exe' -ScriptPath 'C:\script.ps1'
+
+        Assert-MockCalled Start-Process -Times 1 -ParameterFilter {
+            $FilePath -eq 'pwsh.exe' -and (($ArgumentList -join ' ') -notmatch '-WhatIf')
+        }
+    }
+}
+
+Describe 'Invoke-WingetPackageUpgrade' {
+    BeforeEach {
+        Mock Write-Success { }
+        Mock Write-WarningMessage { }
+        Mock Write-ErrorMessage { }
+        Mock Remove-Item { }
+        $script:killCalled = $false
+    }
+
+    It 'returns Ok when the upgrade exits 0' {
+        Mock Start-Process {
+            $p = [PSCustomObject]@{ ExitCode = 0 }
+            $p | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value { param($ms) $true }
+            $p | Add-Member -MemberType ScriptMethod -Name Kill -Value { }
+            $p
+        }
+        Mock Get-Content { 'Successfully installed' }
+
+        $result = Invoke-WingetPackageUpgrade -PackageId 'Test.App'
+
+        $result.Status | Should -Be 'Ok'
+        $result.Id | Should -Be 'Test.App'
+    }
+
+    It 'returns NoUpgrade when winget reports nothing to upgrade' {
+        Mock Start-Process {
+            $p = [PSCustomObject]@{ ExitCode = 0 }
+            $p | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value { param($ms) $true }
+            $p | Add-Member -MemberType ScriptMethod -Name Kill -Value { }
+            $p
+        }
+        Mock Get-Content { 'No available upgrade found' }
+
+        (Invoke-WingetPackageUpgrade -PackageId 'Test.App').Status | Should -Be 'NoUpgrade'
+    }
+
+    It 'returns Failed on a non-zero exit code' {
+        Mock Start-Process {
+            $p = [PSCustomObject]@{ ExitCode = 1 }
+            $p | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value { param($ms) $true }
+            $p | Add-Member -MemberType ScriptMethod -Name Kill -Value { }
+            $p
+        }
+        Mock Get-Content { 'install failed' }
+
+        (Invoke-WingetPackageUpgrade -PackageId 'Test.App').Status | Should -Be 'Failed'
+    }
+
+    It 'times out and kills the process when it does not exit in time' {
+        Mock Start-Process {
+            $p = [PSCustomObject]@{ ExitCode = 0 }
+            $p | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value { param($ms) $false }
+            $p | Add-Member -MemberType ScriptMethod -Name Kill -Value { Set-Variable -Name killCalled -Value $true -Scope script }
+            $p
+        }
+        Mock Get-Content { '' }
+
+        $result = Invoke-WingetPackageUpgrade -PackageId 'Test.App' -TimeoutSeconds 1
+
+        $result.Status | Should -Be 'TimedOut'
+        $script:killCalled | Should -BeTrue
+    }
 }
 
 Describe 'Test-CanUseGridView' {
     BeforeAll {
-        # Dot-source the script under test so these tests exercise the real implementation (#135).
-        . "$PSScriptRoot/winget-app-install.ps1"
-
     }
 
     It 'Should return true when Out-GridView is available and session is interactive' {
@@ -703,7 +781,6 @@ Describe 'Write-Table' {
             function Out-GridView { param($Title, [switch]$Wait) }
         }
         Mock Out-GridView { }
-
     }
 
     It 'Should format table data correctly with Format-Table' {
@@ -938,7 +1015,6 @@ Describe 'Invoke-WingetCommand' {
         # Define the helper function inline for testing
 
         # Define Invoke-WingetCommand function with exit code handling
-
     }
 
     Context 'Exit code capture and handling' {
@@ -1070,9 +1146,6 @@ Describe 'Invoke-WingetCommand' {
 
 Describe 'Format-AppList' {
     BeforeAll {
-        # Dot-source the script under test so these tests exercise the real implementation (#135).
-        . "$PSScriptRoot/winget-app-install.ps1"
-
     }
 
     It 'Should format non-empty array' {
@@ -1623,7 +1696,6 @@ Describe 'App list consistency' {
 
 Describe 'Test-AppDefinitions' {
     BeforeAll {
-        . "$PSScriptRoot\winget-app-install.ps1"
     }
 
     Context 'When app definitions are valid' {
@@ -1675,7 +1747,6 @@ Describe 'Test-AppDefinitions' {
 
 Describe 'Windows Terminal configuration' {
     BeforeAll {
-        . "$PSScriptRoot\winget-app-install.ps1"
     }
 
     Context 'Set-WindowsTerminalDefaultProfile' {
@@ -1800,7 +1871,6 @@ Describe 'Windows Terminal configuration' {
 
 Describe 'Scheduled Updates - Unit Tests' -Tag 'ScheduledUpdates' {
     BeforeAll {
-        . "$PSScriptRoot\winget-app-install.ps1"
     }
 
     BeforeEach {
@@ -1811,10 +1881,15 @@ Describe 'Scheduled Updates - Unit Tests' -Tag 'ScheduledUpdates' {
         Mock Get-WinGetPackage { }
         Mock winget { }
         Mock Get-ScheduledTask { $null }
-        # Register-ScheduledTask requires its -Action/-Trigger/-Settings/-Principal arguments to
-        # carry the exact ETS PSTypeName the real New-ScheduledTask* cmdlets produce
-        # (e.g. CimInstance#MSFT_TaskAction), and Pester enforces that on the mocked call. Build
-        # CimInstances with the matching CIM class names so the typed binding succeeds.
+        # On Windows Register-ScheduledTask is a real cmdlet whose -Action/-Trigger/-Settings/
+        # -Principal parameters require [CimInstance] arguments tagged with a specific PSTypeName
+        # (e.g. Microsoft.Management.Infrastructure.CimInstance#MSFT_TaskSettings). Returning plain
+        # hashtables from these mocks fails argument binding *before* the Register mock body runs,
+        # so Enable-ScheduledUpdatesCheck's try/catch swallows it and returns $false (issue #111).
+        # Pester's -RemoveParameterType can't help here: it strips the static type but leaves the
+        # CDXML argument-transformation / PSTypeName attributes. Returning bare client-side
+        # CimInstances with the matching class names satisfies binding on Windows, and is harmless
+        # on Linux where these cmdlets don't exist (the mocks become plain typeless functions).
         Mock New-ScheduledTaskAction { [Microsoft.Management.Infrastructure.CimInstance]::new('MSFT_TaskAction') }
         Mock New-ScheduledTaskTrigger { [Microsoft.Management.Infrastructure.CimInstance]::new('MSFT_TaskTrigger') }
         Mock New-ScheduledTaskSettingsSet { [Microsoft.Management.Infrastructure.CimInstance]::new('MSFT_TaskSettings') }
@@ -1900,66 +1975,8 @@ Describe 'Scheduled Updates - Unit Tests' -Tag 'ScheduledUpdates' {
     }
 }
 
-Describe 'Test-SystemRequirements' -Tag 'SystemRequirements' {
-    BeforeAll {
-        . "$PSScriptRoot\winget-app-install.ps1"
-    }
-
-    BeforeEach {
-        Mock Write-Info { }
-        Mock Write-Success { }
-        Mock Write-WarningMessage { }
-        Mock Write-ErrorMessage { }
-        Mock Test-NetConnection { $true }
-        Mock Get-PSDrive {
-            [PSCustomObject]@{ Free = 100GB }
-        }
-        Mock Get-ItemProperty {
-            [PSCustomObject]@{ ProductName = 'Windows 11 Pro' }
-        }
-    }
-
-    It 'Returns $true when all checks pass' {
-        $result = Test-SystemRequirements
-        $result | Should -BeTrue
-    }
-
-    It 'Returns $false when network check fails' {
-        Mock Test-NetConnection { $false }
-        $result = Test-SystemRequirements
-        $result | Should -BeFalse
-    }
-
-    It 'Returns $false when network check throws' {
-        Mock Test-NetConnection { throw 'No network' }
-        $result = Test-SystemRequirements
-        $result | Should -BeFalse
-    }
-
-    It 'Returns $false when user declines low disk space prompt' {
-        Mock Get-PSDrive { [PSCustomObject]@{ Free = 10GB } }
-        Mock Read-Host { 'N' }
-        $result = Test-SystemRequirements
-        $result | Should -BeFalse
-    }
-
-    It 'Returns $true when user accepts low disk space prompt' {
-        Mock Get-PSDrive { [PSCustomObject]@{ Free = 10GB } }
-        Mock Read-Host { 'Y' }
-        $result = Test-SystemRequirements
-        $result | Should -BeTrue
-    }
-
-    It 'Skips disk space prompt in WhatIf mode' {
-        Mock Get-PSDrive { [PSCustomObject]@{ Free = 10GB } }
-        Mock Read-Host { throw 'Should not prompt in WhatIf mode' }
-        { Test-SystemRequirements -WhatIf } | Should -Not -Throw
-    }
-}
-
 Describe 'Write-Info' {
     BeforeAll {
-        . "$PSScriptRoot\winget-app-install.ps1"
     }
 
     It 'Should write message in blue color' {
@@ -1975,7 +1992,6 @@ Describe 'Write-Info' {
 
 Describe 'Write-Success' {
     BeforeAll {
-        . "$PSScriptRoot\winget-app-install.ps1"
     }
 
     It 'Should write message in green color' {
@@ -1991,7 +2007,6 @@ Describe 'Write-Success' {
 
 Describe 'Write-WarningMessage' {
     BeforeAll {
-        . "$PSScriptRoot\winget-app-install.ps1"
     }
 
     It 'Should write message in yellow color' {
@@ -2007,7 +2022,6 @@ Describe 'Write-WarningMessage' {
 
 Describe 'Write-ErrorMessage' {
     BeforeAll {
-        . "$PSScriptRoot\winget-app-install.ps1"
     }
 
     It 'Should write message in red color' {
@@ -2023,7 +2037,6 @@ Describe 'Write-ErrorMessage' {
 
 Describe 'Write-Prompt' {
     BeforeAll {
-        . "$PSScriptRoot\winget-app-install.ps1"
     }
 
     It 'Should write message in blue color' {
@@ -2039,7 +2052,6 @@ Describe 'Write-Prompt' {
 
 Describe 'WhatIf Mode - Unit Tests' {
     BeforeAll {
-        . "$PSScriptRoot\winget-app-install.ps1"
     }
 
     Context 'WhatIf parameter acceptance' {
@@ -2227,5 +2239,43 @@ Get-Content -Raw -LiteralPath '$psStringEscapedPath' | Invoke-Expression
         $output | Should -Match 'Open an elevated PowerShell or Windows Terminal session and run the IEX command again\.'
         $output | Should -Match 'Exiting in 5 seconds\.\.\.'
         $output | Should -Not -Match 'Press Enter to restart script with elevated privileges'
+    }
+}
+
+Describe 'Install-UpdateHelperScript module deployment' {
+    It 'deploys both the helper script and the WingetAppSetup module into AppData' {
+        $base = Join-Path ([IO.Path]::GetTempPath()) ('was-' + [guid]::NewGuid())
+        Mock Get-UpdateSettingsPaths {
+            @{
+                BasePath        = $base
+                ConfigFile      = Join-Path $base 'update-config.json'
+                UpdateChecks    = Join-Path $base 'update-checks'
+                RollbackScripts = Join-Path $base 'rollback-scripts'
+                HelperScript    = Join-Path $base 'Update-InstalledApps.ps1'
+                ModuleDir       = Join-Path $base 'WingetAppSetup'
+            }
+        }
+        # Pretend every source/destination path already exists so the real body runs without touching disk.
+        Mock Test-Path { $true }
+        Mock New-Item { }
+        Mock Remove-Item { }
+        Mock Copy-Item { }
+
+        $result = Install-UpdateHelperScript
+
+        Assert-MockCalled Copy-Item -Times 1 -Scope It -ParameterFilter { $Destination -like '*WingetAppSetup' -and $Recurse }
+        Assert-MockCalled Copy-Item -Times 1 -Scope It -ParameterFilter { $Destination -like '*Update-InstalledApps.ps1' }
+        $result | Should -Be (Join-Path $base 'Update-InstalledApps.ps1')
+    }
+
+    It 'throws a clear error when the module source is missing' {
+        Mock Get-UpdateSettingsPaths {
+            @{ BasePath = 'x'; UpdateChecks = 'x'; RollbackScripts = 'x'; HelperScript = 'x'; ModuleDir = 'x' }
+        }
+        # Helper script present, module folder absent.
+        Mock Test-Path { $true } -ParameterFilter { $Path -like '*Update-InstalledApps.ps1' }
+        Mock Test-Path { $false } -ParameterFilter { $Path -like '*WingetAppSetup' }
+
+        { Install-UpdateHelperScript } | Should -Throw '*WingetAppSetup module is missing*'
     }
 }

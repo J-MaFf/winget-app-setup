@@ -60,230 +60,109 @@ param (
     [switch]$SkipSystemCheck
 )
 
+# ------------------------------------------------------------------------------------------------
+# GENERATED FILE - DO NOT EDIT BY HAND.
+# This script is assembled from the WingetAppSetup module by build/Build-WingetInstallScript.ps1.
+# Edit the function source under WingetAppSetup/Public and WingetAppSetup/Private, then re-run the
+# build to regenerate this file. See readme.md ("Project layout") for details.
+# ------------------------------------------------------------------------------------------------
+
 # ------------------------------------------------Functions------------------------------------------------
 
+# --- Elevation ---
 <#
 .SYNOPSIS
-    Ensures the Microsoft.WinGet.Client module is available, installing it if necessary.
+    Detects if the script is running locally or from a remote source (e.g., via IEX).
 .DESCRIPTION
-    Checks for the module locally and attempts installation via PowerShell Gallery when missing, including ensuring the NuGet provider is present.
+    Checks if $PSScriptRoot is non-empty and represents a valid directory.
+    Returns $true for local execution (file on disk), $false for remote execution (piped script).
 .RETURNS
-    [bool] True when the module is available (either already installed or installed successfully), otherwise False.
+    [bool] True if running locally, False if running remotely.
 #>
-function Test-AndInstallWingetModule {
+function Test-IsRunningLocally {
+    # Check if $PSScriptRoot is non-empty and valid
+    if ([string]::IsNullOrWhiteSpace($PSScriptRoot)) {
+        return $false
+    }
+
+    # Verify it's an actual directory path
     try {
-        if (Get-Module -ListAvailable -Name 'Microsoft.WinGet.Client') {
-            return $true
-        }
-
-        Write-WarningMessage 'Microsoft.WinGet.Client module not found. Attempting installation...'
-
-        $nugetProvider = Get-PackageProvider -Name NuGet -ErrorAction SilentlyContinue
-        if (-not $nugetProvider) {
-            Write-WarningMessage 'NuGet package provider not found. Installing...'
-            Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force -Scope AllUsers | Out-Null
-        }
-
-        Install-Module -Name Microsoft.WinGet.Client -Scope AllUsers -Force -AllowClobber -ErrorAction Stop
-
-        $installedModule = Get-Module -ListAvailable -Name 'Microsoft.WinGet.Client' | Select-Object -First 1
-        if ($installedModule) {
-            if ($installedModule.Version) {
-                Write-Success "Microsoft.WinGet.Client module installed successfully (Version: $($installedModule.Version))"
-            }
-            else {
-                Write-Success 'Microsoft.WinGet.Client module installed successfully'
-            }
-            return $true
-        }
-
-        Write-Warning 'Microsoft.WinGet.Client module installation completed, but module is still not detected.'
+        $null = Get-Item -LiteralPath $PSScriptRoot -ErrorAction Stop
+        return $true
     }
     catch {
-        Write-Warning "Failed to install Microsoft.WinGet.Client module: $_"
+        return $false
     }
-
-    return $false
 }
 
 <#
 .SYNOPSIS
-    Ensures Out-GridView is available by installing Microsoft.PowerShell.GraphicalTools when required.
+    Relaunches the script with elevated privileges, preferring Windows Terminal when available.
 .DESCRIPTION
-    Checks for the Out-GridView cmdlet and, when missing, installs the Microsoft.PowerShell.GraphicalTools module including NuGet provider remediation.
+    Attempts to restart the current script in an elevated session. When Windows Terminal is installed,
+    the script is relaunched inside an elevated Windows Terminal tab running the specified PowerShell
+    executable. If Windows Terminal is unavailable or fails to start, the function falls back to the
+    standard Start-Process call for the provided PowerShell executable.
+.PARAMETER PowerShellExecutable
+    The PowerShell executable to use when relaunching (for example, pwsh.exe or powershell.exe).
+.PARAMETER ScriptPath
+    The full path to the script that should be relaunched.
+.PARAMETER WindowsTerminalExecutable
+    Optional explicit path to the Windows Terminal executable (wt.exe). When not supplied, the
+    function attempts to discover it automatically.
+.PARAMETER AdditionalArguments
+    Optional switches/arguments to forward to the elevated relaunch (for example, '-WhatIf'). These
+    are appended after the -File argument so the elevated session inherits the caller's intent.
 .RETURNS
-    [bool] True when Out-GridView can be invoked, otherwise False.
+    [string] Returns 'WindowsTerminal' when the Windows Terminal relaunch path succeeds, otherwise
+    returns 'PowerShell'.
 #>
-function Test-AndInstallGraphicalTools {
-    try {
-        if (Get-Command Out-GridView -ErrorAction SilentlyContinue) {
-            return $true
-        }
-
-        $graphicalModule = Get-Module -ListAvailable -Name 'Microsoft.PowerShell.GraphicalTools'
-        if (-not $graphicalModule) {
-            Write-WarningMessage 'Microsoft.PowerShell.GraphicalTools module is missing. Installing to enable Out-GridView...'
-        }
-        else {
-            Write-WarningMessage 'Microsoft.PowerShell.GraphicalTools module found but Out-GridView is unavailable. Importing module...'
-        }
-
-        $nugetProvider = Get-PackageProvider -Name NuGet -ErrorAction SilentlyContinue
-        if (-not $nugetProvider) {
-            Write-WarningMessage 'NuGet package provider not found. Installing...'
-            Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force -Scope AllUsers | Out-Null
-        }
-
-        Install-Module -Name Microsoft.PowerShell.GraphicalTools -Scope AllUsers -Force -AllowClobber -ErrorAction Stop
-        Import-Module Microsoft.PowerShell.GraphicalTools -ErrorAction Stop
-        Write-Success 'Microsoft.PowerShell.GraphicalTools is loaded for this session.'
-
-        if (Get-Command Out-GridView -ErrorAction SilentlyContinue) {
-            Write-Success 'Out-GridView is available for interactive summaries.'
-            return $true
-        }
-
-        Write-Warning 'Microsoft.PowerShell.GraphicalTools installation completed, but Out-GridView is still unavailable.'
-    }
-    catch {
-        Write-Warning "Failed to install Microsoft.PowerShell.GraphicalTools module: $_"
-    }
-
-    return $false
-}
-
-<#
-.SYNOPSIS
-    Validates the list of application definitions before processing.
-.DESCRIPTION
-    Ensures each entry in the apps array is a hashtable containing a non-empty string `name` value and removes duplicates, warning about any issues.
-.PARAMETER Apps
-    The collection of application definition hash tables to validate.
-.RETURNS
-    [pscustomobject] containing ValidApps, Errors, and Warnings arrays.
-#>
-function Test-AppDefinitions {
+function Restart-WithElevation {
     param (
         [Parameter(Mandatory = $true)]
-        [array]$Apps
+        [string]$PowerShellExecutable,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ScriptPath,
+
+        [Parameter(Mandatory = $false)]
+        [string]$WindowsTerminalExecutable,
+
+        [Parameter(Mandatory = $false)]
+        [string[]]$AdditionalArguments = @()
     )
 
-    $errors = @()
-    $warnings = @()
-    $validatedApps = @()
-    $seenNames = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    $quotedScriptPath = '"' + $ScriptPath.Replace('"', '`"') + '"'
+    $commandArguments = "-NoProfile -ExecutionPolicy Bypass -File $quotedScriptPath"
+    if ($AdditionalArguments.Count -gt 0) {
+        $commandArguments += ' ' + ($AdditionalArguments -join ' ')
+    }
+    $windowsTerminalPath = $WindowsTerminalExecutable
 
-    for ($i = 0; $i -lt $Apps.Count; $i++) {
-        $app = $Apps[$i]
-        if (-not ($app -is [hashtable])) {
-            $errors += "App entry at index $i is not a hashtable."
-            continue
+    if (-not $windowsTerminalPath) {
+        $wtCommand = Get-Command -Name 'wt.exe' -ErrorAction SilentlyContinue
+        if ($wtCommand) {
+            $windowsTerminalPath = $wtCommand.Source
         }
-
-        if (-not $app.ContainsKey('name') -or -not ($app['name'] -is [string]) -or [string]::IsNullOrWhiteSpace($app['name'])) {
-            $errors += "App entry at index $i is missing a valid 'name' value."
-            continue
-        }
-
-        $name = $app['name'].Trim()
-        if (-not $seenNames.Add($name)) {
-            $warnings += "Duplicate app definition detected for '$name'. Subsequent entry ignored."
-            continue
-        }
-
-        $app['name'] = $name
-        $validatedApps += $app
     }
 
-    return [pscustomobject]@{
-        ValidApps = $validatedApps
-        Errors    = $errors
-        Warnings  = $warnings
+    if ($windowsTerminalPath) {
+        Write-Info 'Attempting to relaunch script in Windows Terminal with elevated privileges...'
+        try {
+            Start-Process $windowsTerminalPath -ArgumentList @("$PowerShellExecutable $commandArguments") -Verb RunAs
+            return 'WindowsTerminal'
+        }
+        catch {
+            Write-Warning "Failed to start Windows Terminal: $_"
+        }
     }
+
+    Write-Info 'Relaunching script in standard PowerShell window with elevated privileges...'
+    Start-Process $PowerShellExecutable -ArgumentList $commandArguments -Verb RunAs
+    return 'PowerShell'
 }
 
-<#
-.SYNOPSIS
-    Checks if a specific winget source is trusted.
-.DESCRIPTION
-    This function checks if a specific winget source is trusted by listing all sources and checking if the target source is in the list.
-    Automatically accepts source agreements to prevent the script from hanging on first run.
-.PARAMETER target
-    The name of the source to check.
-.RETURNS
-    [bool] True if the source is trusted, otherwise False.
-#>
-function Test-WingetSourceTrusted($target) {
-    try {
-        $sources = winget source list --disable-interactivity --accept-source-agreements 2>&1
-        return $sources -match [regex]::Escape($target)
-    }
-    catch {
-        Write-Warning "Error checking source trust for ${target}: $_"
-        return $false
-    }
-}
-
-<#
-.SYNOPSIS
-    Adds and trusts the winget source.
-.DESCRIPTION
-    This function adds and trusts the winget source by resetting sources to defaults.
-    Automatically accepts source agreements to prevent prompts.
-    Uses a timeout mechanism to prevent the function from hanging indefinitely.
-#>
-function Set-Sources {
-    try {
-        Write-Info 'Resetting winget sources (this may take a moment)...'
-
-        # Run winget source reset with a timeout to prevent hanging
-        # Using Start-Process with a timeout to handle potential hangs
-        $resetProcess = Start-Process -FilePath 'winget' `
-            -ArgumentList 'source', 'reset', '--force', '--disable-interactivity', '--accept-source-agreements' `
-            -NoNewWindow `
-            -PassThru `
-            -RedirectStandardOutput "$env:TEMP\winget_reset_output.txt" `
-            -RedirectStandardError "$env:TEMP\winget_reset_error.txt"
-
-        # Wait up to 30 seconds for the process to complete
-        $timeout = 30
-        if (-not $resetProcess.WaitForExit($timeout * 1000)) {
-            # Process timed out, kill it
-            Write-WarningMessage "Winget source reset timed out after $timeout seconds. Terminating process..."
-            $resetProcess.Kill()
-            Write-WarningMessage 'Consider running "winget source reset --force" manually if sources are not properly configured.'
-            return $false
-        }
-
-        # Read error output to provide better error messages
-        $errorOutput = Get-Content "$env:TEMP\winget_reset_error.txt" -ErrorAction SilentlyContinue | Where-Object { $_ -and $_.Trim() }
-
-        # Check the exit code
-        if ($resetProcess.ExitCode -eq 0) {
-            Write-Success 'Winget sources reset successfully'
-            return $true
-        }
-        else {
-            # Log the error details if available
-            if ($errorOutput) {
-                Write-WarningMessage "Winget source reset error details: $(($errorOutput -join ', '))"
-            }
-            # Non-zero exit code, but not critical since script continues
-            Write-Info "Winget source reset completed with exit code: $($resetProcess.ExitCode) (this is often not critical)"
-            return $false
-        }
-    }
-    catch {
-        Write-WarningMessage "Could not reset sources (this is usually okay): $_"
-        return $false
-    }
-    finally {
-        # Clean up temp files
-        Remove-Item "$env:TEMP\winget_reset_output.txt" -ErrorAction SilentlyContinue
-        Remove-Item "$env:TEMP\winget_reset_error.txt" -ErrorAction SilentlyContinue
-    }
-}
-
+# --- Environment ---
 <#
 .SYNOPSIS
     Adds a specified path to the environment PATH variable.
@@ -367,31 +246,6 @@ function Test-PathInEnvironment {
 
 <#
 .SYNOPSIS
-    Detects if the script is running locally or from a remote source (e.g., via IEX).
-.DESCRIPTION
-    Checks if $PSScriptRoot is non-empty and represents a valid directory.
-    Returns $true for local execution (file on disk), $false for remote execution (piped script).
-.RETURNS
-    [bool] True if running locally, False if running remotely.
-#>
-function Test-IsRunningLocally {
-    # Check if $PSScriptRoot is non-empty and valid
-    if ([string]::IsNullOrWhiteSpace($PSScriptRoot)) {
-        return $false
-    }
-
-    # Verify it's an actual directory path
-    try {
-        $null = Get-Item -LiteralPath $PSScriptRoot -ErrorAction Stop
-        return $true
-    }
-    catch {
-        return $false
-    }
-}
-
-<#
-.SYNOPSIS
     Converts a command string into an array of arguments, properly handling quoted arguments.
 .DESCRIPTION
     This function takes a command string and splits it into individual arguments while
@@ -446,64 +300,7 @@ function ConvertTo-CommandArguments {
     return $commandArgs
 }
 
-<#
-.SYNOPSIS
-    Relaunches the script with elevated privileges, preferring Windows Terminal when available.
-.DESCRIPTION
-    Attempts to restart the current script in an elevated session. When Windows Terminal is installed,
-    the script is relaunched inside an elevated Windows Terminal tab running the specified PowerShell
-    executable. If Windows Terminal is unavailable or fails to start, the function falls back to the
-    standard Start-Process call for the provided PowerShell executable.
-.PARAMETER PowerShellExecutable
-    The PowerShell executable to use when relaunching (for example, pwsh.exe or powershell.exe).
-.PARAMETER ScriptPath
-    The full path to the script that should be relaunched.
-.PARAMETER WindowsTerminalExecutable
-    Optional explicit path to the Windows Terminal executable (wt.exe). When not supplied, the
-    function attempts to discover it automatically.
-.RETURNS
-    [string] Returns 'WindowsTerminal' when the Windows Terminal relaunch path succeeds, otherwise
-    returns 'PowerShell'.
-#>
-function Restart-WithElevation {
-    param (
-        [Parameter(Mandatory = $true)]
-        [string]$PowerShellExecutable,
-
-        [Parameter(Mandatory = $true)]
-        [string]$ScriptPath,
-
-        [Parameter(Mandatory = $false)]
-        [string]$WindowsTerminalExecutable
-    )
-
-    $quotedScriptPath = '"' + $ScriptPath.Replace('"', '`"') + '"'
-    $commandArguments = "-NoProfile -ExecutionPolicy Bypass -File $quotedScriptPath"
-    $windowsTerminalPath = $WindowsTerminalExecutable
-
-    if (-not $windowsTerminalPath) {
-        $wtCommand = Get-Command -Name 'wt.exe' -ErrorAction SilentlyContinue
-        if ($wtCommand) {
-            $windowsTerminalPath = $wtCommand.Source
-        }
-    }
-
-    if ($windowsTerminalPath) {
-        Write-Info 'Attempting to relaunch script in Windows Terminal with elevated privileges...'
-        try {
-            Start-Process $windowsTerminalPath -ArgumentList @("$PowerShellExecutable $commandArguments") -Verb RunAs
-            return 'WindowsTerminal'
-        }
-        catch {
-            Write-Warning "Failed to start Windows Terminal: $_"
-        }
-    }
-
-    Write-Info 'Relaunching script in standard PowerShell window with elevated privileges...'
-    Start-Process $PowerShellExecutable -ArgumentList $commandArguments -Verb RunAs
-    return 'PowerShell'
-}
-
+# --- GraphicalTools ---
 <#
 .SYNOPSIS
     Checks if Out-GridView is available in the current session.
@@ -532,557 +329,634 @@ function Test-CanUseGridView {
 
 <#
 .SYNOPSIS
-    Displays a formatted table of results, with optional interactive GUI view.
+    Ensures Out-GridView is available by installing Microsoft.PowerShell.GraphicalTools when required.
 .DESCRIPTION
-    Renders a summary table using PowerShell's built-in Format-Table for improved
-    readability and alignment. Optionally displays the data in Out-GridView when
-    running in an interactive session with GUI support.
-.PARAMETER Headers
-    Array of column header names
-.PARAMETER Rows
-    Array of row data (each row is an array matching the header count)
-.PARAMETER UseGridView
-    When set to $true and Out-GridView is available, displays results interactively
-.PARAMETER PromptForGridView
-    When set to $true, asks the user if they want to use Out-GridView (if available)
-#>
-function Write-Table {
-    param (
-        [Parameter(Mandatory = $true)]
-        [string[]]$Headers,
-        [Parameter(Mandatory = $true)]
-        [AllowEmptyCollection()]
-        [string[][]]$Rows,
-        [Parameter(Mandatory = $false)]
-        [bool]$UseGridView = $false,
-        [Parameter(Mandatory = $false)]
-        [bool]$PromptForGridView = $false,
-        [Parameter(Mandatory = $false)]
-        [string]$Title = 'Summary'
-    )
-
-    # Convert rows to objects for Format-Table
-    $tableData = @()
-    foreach ($row in $Rows) {
-        $obj = New-Object PSObject
-        for ($i = 0; $i -lt $Headers.Count; $i++) {
-            $obj | Add-Member -MemberType NoteProperty -Name $Headers[$i] -Value $row[$i]
-        }
-        $tableData += $obj
-    }
-
-    $shouldUseGridView = $UseGridView
-
-    # Prompt user if requested and Out-GridView is available
-    if ($PromptForGridView -and -not $UseGridView) {
-        if (Test-CanUseGridView) {
-            Write-Host ''
-            $response = Read-Host 'Would you like to view the results in an interactive grid view? (Y/N)'
-            if ($response -match '^[Yy]') {
-                $shouldUseGridView = $true
-            }
-        }
-    }
-
-    # Try to use Out-GridView if requested and available
-    if ($shouldUseGridView) {
-        if (-not (Test-CanUseGridView)) {
-            Write-WarningMessage 'Out-GridView is not available. Falling back to text output.'
-        }
-        else {
-            try {
-                $tableData | Out-GridView -Title $Title -Wait
-                return
-            }
-            catch {
-                Write-WarningMessage "Failed to display grid view: $_. Falling back to text output."
-            }
-        }
-    }
-
-    # Use Format-Table for text output
-    $output = $tableData | Format-Table -AutoSize | Out-String
-    Write-Host $output.TrimEnd()
-}
-
-<#
-.SYNOPSIS
-    Runs a winget command and processes its output for success/failure tracking.
-.DESCRIPTION
-    This function executes a winget command, displays its output naturally, captures exit codes,
-    and parses the results to track successful and failed operations. When winget exits with a
-    non-zero exit code, it maps the code to a meaningful error message.
-.PARAMETER Command
-    The winget command to execute (e.g., "update --all --include-unknown")
-.PARAMETER SuccessPattern
-    Regex pattern to match successful operations
-.PARAMETER FailurePattern
-    Regex pattern to match failed operations
-.PARAMETER SuccessArray
-    Reference to array that will store successful app names
-.PARAMETER FailureArray
-    Reference to array that will store failed app names
-.PARAMETER SuccessIndex
-    Index in the split result to extract the app name for successful operations (default: 1)
-.PARAMETER FailureIndex
-    Index in the split result to extract the app name for failed operations (default: 1)
+    Checks for the Out-GridView cmdlet and, when missing, installs the Microsoft.PowerShell.GraphicalTools module including NuGet provider remediation.
 .RETURNS
-    [hashtable] containing ExitCode and ExitMessage for the winget command execution
+    [bool] True when Out-GridView can be invoked, otherwise False.
 #>
-function Invoke-WingetCommand {
-    param (
-        [Parameter(Mandatory = $true)]
-        [string]$Command,
-
-        [Parameter(Mandatory = $true)]
-        [string]$SuccessPattern,
-
-        [Parameter(Mandatory = $true)]
-        [string]$FailurePattern,
-
-        [Parameter(Mandatory = $true)]
-        [ref]$SuccessArray,
-
-        [Parameter(Mandatory = $true)]
-        [ref]$FailureArray,
-
-        [Parameter(Mandatory = $false)]
-        [int]$SuccessIndex = 1,
-
-        [Parameter(Mandatory = $false)]
-        [int]$FailureIndex = 1
-    )
-
-    # Parse command string into arguments properly, handling quoted arguments
-    $commandArgs = ConvertTo-CommandArguments -Command $Command
-
-    # Single execution: invoke winget once, capturing all output (stdout + stderr) so we
-    # can both display it to the user and parse it. Running winget twice (as the previous
-    # implementation did) caused duplicate prompts and spurious "already installed" failures
-    # because the package state changed between the two invocations (see issue #134).
+function Test-AndInstallGraphicalTools {
     try {
-        # Capture the raw output first so $LASTEXITCODE reflects winget's own exit code,
-        # not the exit code of a downstream pipeline element (e.g. Where-Object), which
-        # would otherwise reset it to 0.
-        $rawOutput = & winget $commandArgs 2>&1
-        $exitCode = $LASTEXITCODE
-
-        # Echo the captured output to the user so they still see winget's progress/results.
-        $rawOutput | ForEach-Object { Write-Host $_ }
-
-        # Filter out blank lines and progress-bar artifacts before pattern parsing.
-        $commandOutput = $rawOutput | Where-Object { $_ -notmatch '^[\s\-\|\\]*$' }
-    }
-    catch {
-        Write-ErrorMessage "Error capturing winget output: $($_)"
-        $commandOutput = @()
-        $exitCode = -1
-    }
-
-    # Map exit code to meaningful message
-    $exitMessage = switch ($exitCode) {
-        0 { 'Success' }
-        -1978335189 { 'No applicable update found' }
-        -1978335191 { 'No packages found matching input criteria' }
-        -1978335192 { 'Package installation failed' }
-        -1978335212 { 'User cancelled the operation' }
-        -1978335213 { 'Package already installed' }
-        -1978335215 { 'Manifest validation failed' }
-        -1978335216 { 'Invalid manifest' }
-        -1978335221 { 'Package download failed' }
-        -1978335226 { 'Hash mismatch' }
-        default { "Winget exited with code: $exitCode" }
-    }
-
-    $commandOutput | ForEach-Object {
-        if ($_ -match $SuccessPattern) {
-            $SuccessArray.Value += $_.Split()[$SuccessIndex]
-        }
-        elseif ($_ -match $FailurePattern) {
-            $FailureArray.Value += $_.Split()[$FailureIndex]
-        }
-    }
-
-    # If exit code indicates failure but no failures were captured via pattern matching,
-    # report a generic failure
-    if ($exitCode -ne 0 -and $FailureArray.Value.Count -eq 0 -and $SuccessArray.Value.Count -eq 0) {
-        Write-ErrorMessage "Winget command failed: $exitMessage"
-        # Add a generic failure entry to indicate the command failed
-        $FailureArray.Value += "Command failed with exit code $exitCode"
-    }
-
-    return @{
-        ExitCode    = $exitCode
-        ExitMessage = $exitMessage
-    }
-}
-
-<#
-.SYNOPSIS
-    Formats an array of app names for display in the summary table.
-.DESCRIPTION
-    This function checks if an array has content and formats it as a comma-separated string.
-.PARAMETER AppArray
-    The array of app names to format
-.RETURNS
-    A formatted string of app names, or $null if the array is empty
-#>
-function Format-AppList {
-    param (
-        [Parameter(Mandatory = $true)]
-        [AllowEmptyCollection()]
-        [string[]]$AppArray
-    )
-
-    if ($AppArray -and $AppArray.Count -gt 0) {
-        return $AppArray -join ', '
-    }
-    return $null
-}
-
-<#
-.SYNOPSIS
-    Tests if there are any available updates for installed packages using winget.
-.DESCRIPTION
-    This function tests for available updates by attempting different winget commands
-    and parsing their output to determine if updates are available.
-.RETURNS
-    [bool] True if updates are available, otherwise False.
-#>
-function Test-UpdatesAvailable {
-    try {
-        Write-Info 'Checking for available updates...'
-
-        # Try PowerShell module first
-        if (Get-Command Get-WinGetPackage -ErrorAction SilentlyContinue) {
-            try {
-                $packagesWithUpdates = Get-WinGetPackage | Where-Object IsUpdateAvailable
-
-                if ($packagesWithUpdates -and $packagesWithUpdates.Count -gt 0) {
-                    Write-Success "Found $($packagesWithUpdates.Count) package(s) with available updates."
-                    $packagesWithUpdates | ForEach-Object {
-                        Write-Host " - $($_.Id) (Current: $($_.InstalledVersion), Available: $($_.AvailableVersion))"
-                    }
-                    return $true
-                }
-                # Module succeeded but found no updates — return early without CLI fallback
-                Write-WarningMessage 'No updates available.'
-                return $false
-            }
-            catch {
-                Write-Warning "PowerShell module error, falling back to CLI: $_"
-            }
-        }
-        else {
-            Write-WarningMessage 'PowerShell module not available, using CLI fallback...'
-        }
-
-        # CLI fallback (used when module is unavailable or threw an error)
-        $basicUpgradeResult = & winget upgrade 2>&1
-        $basicOutput = $basicUpgradeResult | Out-String
-
-        if ($basicOutput -notmatch 'No installed package found matching input criteria' -and
-            $basicOutput -notmatch 'No available upgrade found') {
+        if (Get-Command Out-GridView -ErrorAction SilentlyContinue) {
             return $true
         }
+
+        $graphicalModule = Get-Module -ListAvailable -Name 'Microsoft.PowerShell.GraphicalTools'
+        if (-not $graphicalModule) {
+            Write-WarningMessage 'Microsoft.PowerShell.GraphicalTools module is missing. Installing to enable Out-GridView...'
+        }
+        else {
+            Write-WarningMessage 'Microsoft.PowerShell.GraphicalTools module found but Out-GridView is unavailable. Importing module...'
+        }
+
+        $nugetProvider = Get-PackageProvider -Name NuGet -ErrorAction SilentlyContinue
+        if (-not $nugetProvider) {
+            Write-WarningMessage 'NuGet package provider not found. Installing...'
+            Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force -Scope AllUsers | Out-Null
+        }
+
+        Install-Module -Name Microsoft.PowerShell.GraphicalTools -Scope AllUsers -Force -AllowClobber -ErrorAction Stop
+        Import-Module Microsoft.PowerShell.GraphicalTools -ErrorAction Stop
+        Write-Success 'Microsoft.PowerShell.GraphicalTools is loaded for this session.'
+
+        if (Get-Command Out-GridView -ErrorAction SilentlyContinue) {
+            Write-Success 'Out-GridView is available for interactive summaries.'
+            return $true
+        }
+
+        Write-Warning 'Microsoft.PowerShell.GraphicalTools installation completed, but Out-GridView is still unavailable.'
     }
     catch {
-        Write-Warning "Error checking for updates: $_"
+        Write-Warning "Failed to install Microsoft.PowerShell.GraphicalTools module: $_"
     }
 
-    Write-WarningMessage 'No updates available.'
     return $false
 }
 
+# --- WingetUpgrade ---
 <#
 .SYNOPSIS
-    Returns the filesystem paths used by scheduled update functionality.
+    Upgrades a single winget package with a hard timeout so a stalled upgrade cannot hang the run.
+.DESCRIPTION
+    Runs `winget upgrade` for one package id as a child process and waits up to TimeoutSeconds for it
+    to exit. If the process does not finish in time it is killed and reported as timed out, so the
+    caller can move on to the next package instead of blocking indefinitely (issue #120). This mirrors
+    the Start-Process/WaitForExit/Kill timeout pattern already used by Set-Sources.
+.PARAMETER PackageId
+    The exact winget package identifier to upgrade (for example, 'Warp.Warp').
+.PARAMETER TimeoutSeconds
+    Maximum seconds to wait for the upgrade before terminating it. Defaults to 300 (5 minutes).
+.RETURNS
+    [PSCustomObject] with Id, Status ('Ok' | 'NoUpgrade' | 'Failed' | 'TimedOut'), and ExitCode.
 #>
-function Get-UpdateSettingsPaths {
-    $basePath = Join-Path $env:APPDATA 'winget-app-setup'
-    return @{
-        BasePath        = $basePath
-        ConfigFile      = Join-Path $basePath 'update-config.json'
-        UpdateChecks    = Join-Path $basePath 'update-checks'
-        RollbackScripts = Join-Path $basePath 'rollback-scripts'
-        HelperScript    = Join-Path $basePath 'Update-InstalledApps.ps1'
-    }
-}
-
-<#
-.SYNOPSIS
-    Returns the default update configuration object.
-#>
-function New-DefaultUpdateConfiguration {
-    param (
-        [Parameter(Mandatory = $false)]
-        [ValidateSet('Weekly', 'Daily')]
-        [string]$UpdateFrequency = 'Weekly',
-        [Parameter(Mandatory = $false)]
-        [bool]$AutoInstall = $true,
-        [Parameter(Mandatory = $false)]
-        [bool]$EnabledScheduledUpdates = $false,
-        [Parameter(Mandatory = $false)]
-        [bool]$InitialPromptCompleted = $false
-    )
-
-    return @{
-        EnabledScheduledUpdates = $EnabledScheduledUpdates
-        UpdateFrequency         = $UpdateFrequency
-        AutoInstall             = $AutoInstall
-        LastCheckDate           = $null
-        Enabled                 = $EnabledScheduledUpdates
-        InitialPromptCompleted  = $InitialPromptCompleted
-    }
-}
-
-<#
-.SYNOPSIS
-    Reads persisted update configuration from AppData.
-#>
-function Get-UpdateConfiguration {
-    $paths = Get-UpdateSettingsPaths
-    if (-not (Test-Path $paths.ConfigFile)) {
-        return (New-DefaultUpdateConfiguration)
-    }
-
-    try {
-        $raw = Get-Content -Path $paths.ConfigFile -Raw -ErrorAction Stop
-        $config = $raw | ConvertFrom-Json -ErrorAction Stop
-        return @{
-            EnabledScheduledUpdates = [bool]$config.EnabledScheduledUpdates
-            UpdateFrequency         = if ($config.UpdateFrequency -in @('Weekly', 'Daily')) { [string]$config.UpdateFrequency } else { 'Weekly' }
-            AutoInstall             = [bool]$config.AutoInstall
-            LastCheckDate           = $config.LastCheckDate
-            Enabled                 = [bool]$config.Enabled
-            InitialPromptCompleted  = [bool]$config.InitialPromptCompleted
-        }
-    }
-    catch {
-        Write-WarningMessage "Failed to parse update configuration, using defaults: $_"
-        return (New-DefaultUpdateConfiguration)
-    }
-}
-
-<#
-.SYNOPSIS
-    Saves update configuration to AppData.
-#>
-function Save-UpdateConfiguration {
+function Invoke-WingetPackageUpgrade {
+    [CmdletBinding()]
     param (
         [Parameter(Mandatory = $true)]
-        [hashtable]$Configuration
+        [string]$PackageId,
+
+        [Parameter(Mandatory = $false)]
+        [int]$TimeoutSeconds = 300
     )
 
-    $paths = Get-UpdateSettingsPaths
-    if (-not (Test-Path $paths.BasePath)) {
-        New-Item -Path $paths.BasePath -ItemType Directory -Force | Out-Null
-    }
+    $token = [guid]::NewGuid().ToString('N')
+    $outFile = Join-Path $env:TEMP "winget_upgrade_out_$token.txt"
+    $errFile = Join-Path $env:TEMP "winget_upgrade_err_$token.txt"
 
-    $Configuration | ConvertTo-Json | Set-Content -Path $paths.ConfigFile -Encoding UTF8
-}
-
-<#
-.SYNOPSIS
-    Returns updates available for installed packages.
-.DESCRIPTION
-    Output format: PackageName | CurrentVersion | AvailableVersion.
-#>
-function Get-UpdateReport {
     try {
-        if (Get-Command Get-WinGetPackage -ErrorAction SilentlyContinue) {
-            return @(Get-WinGetPackage | Where-Object IsUpdateAvailable | ForEach-Object {
-                    [PSCustomObject]@{
-                        PackageName      = $_.Id
-                        CurrentVersion   = [string]$_.InstalledVersion
-                        AvailableVersion = [string]$_.AvailableVersion
-                    }
-                })
+        $upgradeProcess = Start-Process -FilePath 'winget' `
+            -ArgumentList 'upgrade', '--id', $PackageId, '--exact', '--silent', '--disable-interactivity', '--accept-source-agreements', '--accept-package-agreements' `
+            -NoNewWindow `
+            -PassThru `
+            -RedirectStandardOutput $outFile `
+            -RedirectStandardError $errFile
+
+        if (-not $upgradeProcess.WaitForExit($TimeoutSeconds * 1000)) {
+            Write-WarningMessage "Update for $PackageId timed out after $TimeoutSeconds seconds. Terminating..."
+            try { $upgradeProcess.Kill() } catch { }
+            return [PSCustomObject]@{ Id = $PackageId; Status = 'TimedOut'; ExitCode = $null }
         }
+
+        $exitCode = $upgradeProcess.ExitCode
+        $output = (Get-Content -Path $outFile -ErrorAction SilentlyContinue) -join "`n"
+
+        if ($output -match 'No available upgrade found' -or $output -match 'No newer package versions are available') {
+            return [PSCustomObject]@{ Id = $PackageId; Status = 'NoUpgrade'; ExitCode = $exitCode }
+        }
+
+        if ($exitCode -eq 0 -or $output -match 'Successfully installed') {
+            return [PSCustomObject]@{ Id = $PackageId; Status = 'Ok'; ExitCode = $exitCode }
+        }
+
+        return [PSCustomObject]@{ Id = $PackageId; Status = 'Failed'; ExitCode = $exitCode }
     }
     catch {
-        Write-WarningMessage "Failed to query updates using WinGet module. Falling back to CLI: $_"
+        Write-ErrorMessage "Error updating ${PackageId}: $_"
+        return [PSCustomObject]@{ Id = $PackageId; Status = 'Failed'; ExitCode = $null }
     }
-
-    $report = @()
-    try {
-        $upgradeOutput = & winget upgrade --disable-interactivity --accept-source-agreements 2>&1
-        foreach ($line in $upgradeOutput) {
-            if (-not $line) { continue }
-            if ($line -match '^\s*Name\s+Id\s+Version\s+Available') { continue }
-            if ($line -match '^\s*-{3,}') { continue }
-            if ($line -match 'No installed package found|No available upgrade found|No newer package versions are available') { continue }
-
-            $columns = $line.Trim() -split '\s{2,}'
-            if ($columns.Count -ge 4) {
-                $report += [PSCustomObject]@{
-                    PackageName      = $columns[1]
-                    CurrentVersion   = $columns[2]
-                    AvailableVersion = $columns[3]
-                }
-            }
-        }
+    finally {
+        Remove-Item -Path $outFile, $errFile -ErrorAction SilentlyContinue
     }
-    catch {
-        Write-WarningMessage "Failed to query updates using winget CLI: $_"
-    }
-
-    return @($report | Sort-Object PackageName -Unique)
 }
 
+# --- AppValidation ---
 <#
 .SYNOPSIS
-    Checks if winget is available and attempts to install it if not.
+    Validates the list of application definitions before processing.
 .DESCRIPTION
-    This function verifies if winget is installed and available. If not, it attempts to install the Microsoft App Installer.
+    Ensures each entry in the apps array is a hashtable containing a non-empty string `name` value and removes duplicates, warning about any issues.
+.PARAMETER Apps
+    The collection of application definition hash tables to validate.
 .RETURNS
-    [bool] True if winget is available or successfully installed, otherwise False.
+    [pscustomobject] containing ValidApps, Errors, and Warnings arrays.
 #>
-function Test-AndInstallWinget {
-    if (Get-Command winget -ErrorAction SilentlyContinue) {
-        Write-Success 'Winget is available.'
-        return $true
+function Test-AppDefinitions {
+    param (
+        [Parameter(Mandatory = $true)]
+        [array]$Apps
+    )
+
+    $errors = @()
+    $warnings = @()
+    $validatedApps = @()
+    $seenNames = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+
+    for ($i = 0; $i -lt $Apps.Count; $i++) {
+        $app = $Apps[$i]
+        if (-not ($app -is [hashtable])) {
+            $errors += "App entry at index $i is not a hashtable."
+            continue
+        }
+
+        if (-not $app.ContainsKey('name') -or -not ($app['name'] -is [string]) -or [string]::IsNullOrWhiteSpace($app['name'])) {
+            $errors += "App entry at index $i is missing a valid 'name' value."
+            continue
+        }
+
+        $name = $app['name'].Trim()
+        if (-not $seenNames.Add($name)) {
+            $warnings += "Duplicate app definition detected for '$name'. Subsequent entry ignored."
+            continue
+        }
+
+        $app['name'] = $name
+        $validatedApps += $app
     }
-    else {
-        Write-WarningMessage 'Winget is not available. Attempting to install Microsoft App Installer...'
-        try {
-            $url = 'https://aka.ms/getwinget'
-            $outFile = "$env:TEMP\Microsoft.DesktopAppInstaller.appxbundle"
-            Invoke-WebRequest -Uri $url -OutFile $outFile -UseBasicParsing
-            Add-AppxPackage $outFile
-            Remove-Item $outFile -ErrorAction SilentlyContinue
-            Write-Success 'Microsoft App Installer installed successfully. Winget should now be available.'
-            return $true
-        }
-        catch {
-            Write-ErrorMessage "Failed to install winget: $_"
-            Write-ErrorMessage 'Please install winget manually from https://aka.ms/getwinget'
-            return $false
-        }
+
+    return [pscustomobject]@{
+        ValidApps = $validatedApps
+        Errors    = $errors
+        Warnings  = $warnings
     }
 }
 
+# --- Install ---
 <#
 .SYNOPSIS
-    Tests if winget sources are accessible and attempts to repair them if broken.
+    Executes the winget installation workflow when the script runs directly.
 .DESCRIPTION
-    Runs a basic winget source list command to verify the "winget" source is accessible.
-    If the source is broken or missing (e.g., when running as admin on a standard user
-    account), the function attempts to re-register it using Add-AppxPackage from the
-    Microsoft CDN. After repair, it retries the source check once. If still failing, a
-    clear error message with manual remediation guidance is displayed.
-.RETURNS
-    [bool] True if winget sources are accessible (or successfully repaired), otherwise False.
+    Performs prerequisite checks, validates application definitions, installs requested apps, processes updates, and displays a summary when invoked.
+.PARAMETER WhatIf
+    When specified, the script performs all pre-flight checks and displays planned actions without making any system changes.
 #>
-function Test-WingetSources {
-    Write-Info 'Checking winget sources...'
+function Invoke-WingetInstall {
+    param (
+        [Parameter(Mandatory = $false)]
+        [switch]$WhatIf
+    )
 
-    # First check: verify source is listed
-    try {
-        $output = winget source list --disable-interactivity --accept-source-agreements 2>&1
-        $sourceIsListed = $output -match 'winget'
+    if ($WhatIf) {
+        Write-Info '=== DRY-RUN MODE ENABLED ==='
+        Write-Info 'No system changes will be made. This is a simulation of what would happen.'
+        Write-Host ''
     }
-    catch {
-        Write-WarningMessage "Winget source list failed: $_"
-        $sourceIsListed = $false
+
+    # Determine which PowerShell executable to use
+    $psExecutable = if (Get-Command pwsh -ErrorAction SilentlyContinue) { 'pwsh.exe' } else { 'powershell.exe' }
+
+    # Accept msstore source agreements in the user context before elevating.
+    # Agreements are per-user — they won't carry over into the elevated process.
+    # Running winget source update here surfaces the interactive prompt while we
+    # still have the normal user's identity.
+    $isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] 'Administrator')
+    if (-not $isAdmin -and (Test-IsRunningLocally)) {
+        if ($WhatIf) {
+            Write-Info '[DRY-RUN] Would run winget source update to prompt for source agreement acceptance in user context'
+        }
+        else {
+            Write-Info 'Updating winget sources — accept any prompts that appear to continue...'
+            Start-Process -FilePath 'winget' -ArgumentList 'source', 'update' -Wait -NoNewWindow
+        }
     }
 
-    # Second check: verify source is functional (not corrupted) by attempting a search
-    $sourceIsFunctional = $false
-    if ($sourceIsListed) {
-        try {
-            # Actually test if the source works by attempting a search
-            # Use '7zip' as a known package that always exists
-            $searchOutput = winget search 7zip --source winget --disable-interactivity 2>&1
-            $searchExitCode = $LASTEXITCODE
-
-            # Check for corruption error code 0x8a15000f or similar source errors
-            if ($searchOutput -match '0x8a150|failed when opening|data required' -or $searchExitCode -ne 0) {
-                Write-WarningMessage 'Winget source is listed but contains corrupted or missing data.'
-                $sourceIsFunctional = $false
+    # Check if the script is run as administrator
+    If (-NOT $isAdmin) {
+        if (Test-IsRunningLocally) {
+            # A dry run makes no system changes, so it never needs elevation. Relaunching
+            # elevated here would (a) be a surprising side effect for a preview and (b) — if
+            # the flag were ever dropped across the elevation boundary — silently turn a
+            # dry run into a real install. Stay in the current session and continue the preview.
+            if ($WhatIf) {
+                Write-Info '[DRY-RUN] Would relaunch with administrator privileges. Continuing the preview in the current (non-elevated) session; no system changes will be made.'
             }
             else {
-                Write-Success 'Winget sources are accessible and functional.'
-                $sourceIsFunctional = $true
+                Write-ErrorMessage 'This script requires administrator privileges. Press Enter to restart script with elevated privileges.'
+                Pause
+                # Relaunch the script with administrator privileges, forwarding -WhatIf as a
+                # safety net so the elevated session can never escalate a dry run into changes.
+                $elevationArgs = if ($WhatIf) { @('-WhatIf') } else { @() }
+                Restart-WithElevation -PowerShellExecutable $psExecutable -ScriptPath $PSCommandPath -AdditionalArguments $elevationArgs | Out-Null
+                Exit
+            }
+        }
+        else {
+            # IEX/remote execution has no local script path to relaunch from.
+            Write-ErrorMessage 'This script requires administrator privileges.'
+            Write-ErrorMessage 'Auto-elevation is unavailable when running through IEX/remote execution.'
+            Write-Info 'Open an elevated PowerShell or Windows Terminal session and run the IEX command again.'
+            Write-Info 'Exiting in 5 seconds...'
+            Start-Sleep -Seconds 5
+            Exit 1
+        }
+    }
+    else {
+        Write-Success 'Starting...'
+    }
+
+    # Initialize winget sources in user context to prevent session errors (issue #104)
+    [void](Initialize-WingetSourcesForUser -WhatIf:$WhatIf)
+
+    # Ensure required modules are available
+    if (-not (Test-AndInstallWingetModule)) {
+        Write-Warning 'Microsoft.WinGet.Client module is not available. Update functionality will use fallback CLI methods.'
+    }
+
+    if (-not (Test-AndInstallGraphicalTools)) {
+        Write-Warning 'Out-GridView will be unavailable; results will be displayed in text mode only.'
+    }
+
+    # Import required modules
+    try {
+        Import-Module Microsoft.WinGet.Client -ErrorAction Stop
+        Write-Success 'Successfully imported Microsoft.WinGet.Client module'
+    }
+    catch {
+        Write-Warning "Failed to import Microsoft.WinGet.Client module: $_"
+        Write-Warning 'Update functionality will use fallback CLI methods'
+    }
+
+    # Check if winget is available and install if necessary
+    if (-not (Test-AndInstallWinget)) {
+        Write-ErrorMessage 'Winget is required for this script. Exiting.'
+        Exit
+    }
+
+    # Verify winget sources are accessible and auto-repair if broken
+    if (-not (Test-WingetSources)) {
+        Write-WarningMessage 'Winget sources could not be repaired. Some installations may fail.'
+    }
+
+    $scheduledTaskExists = Test-ScheduledUpdatesTaskExists
+    $updateConfig = Get-UpdateConfiguration
+    if (-not $WhatIf -and -not $scheduledTaskExists -and -not $updateConfig.InitialPromptCompleted) {
+        [void](Enable-ScheduledUpdatesCheck -UpdateFrequency $updateConfig.UpdateFrequency -AutoInstall $updateConfig.AutoInstall -WhatIf:$WhatIf)
+    }
+
+    # Add the script directory to the PATH (only if running locally)
+    # Use $PSScriptRoot for reliable script directory detection (works with launcher)
+    if (Test-IsRunningLocally) {
+        $scriptDirectory = $PSScriptRoot
+        if (-not $WhatIf) {
+            Add-ToEnvironmentPath -PathToAdd $scriptDirectory -Scope 'User'
+        }
+        else {
+            Write-Info "[DRY-RUN] Would add '$scriptDirectory' to User PATH"
+        }
+    }
+    else {
+        Write-Info 'Skipping PATH update (remote execution detected)'
+    }
+
+    $apps = @(
+        @{name = '7zip.7zip' },
+        @{name = 'GlavSoft.TightVNC' },
+        @{name = 'Adobe.Acrobat.Reader.64-bit' },
+        @{name = 'Google.Chrome' },
+        @{name = 'Google.GoogleDrive' },
+        @{name = 'Git.Git' },
+        @{name = 'Klocman.BulkCrapUninstaller' },
+        @{name = 'Dell.CommandUpdate.Universal' },
+        @{name = 'Microsoft.PowerShell' },
+        @{name = 'Microsoft.WindowsTerminal' }
+    );
+
+    $validationResult = Test-AppDefinitions -Apps $apps
+
+    foreach ($validationWarning in $validationResult.Warnings) {
+        Write-Warning $validationWarning
+    }
+
+    if ($validationResult.Errors.Count -gt 0) {
+        foreach ($validationError in $validationResult.Errors) {
+            Write-ErrorMessage $validationError
+        }
+        Write-ErrorMessage 'No valid application definitions found. Resolve the errors and re-run the script.'
+        Exit
+    }
+
+    $apps = $validationResult.ValidApps
+
+    if ($apps.Count -eq 0) {
+        Write-ErrorMessage 'No application definitions remain after validation. Add at least one valid entry and re-run the script.'
+        Exit
+    }
+
+    Write-Info 'Installing the following Apps:'
+    ForEach ($app in $apps) {
+        Write-Info $app.name
+    }
+
+    $installedApps = @()
+    $skippedApps = @()
+    $failedApps = @()
+
+    # Verify sources are trusted
+    $trustedSources = @('winget', 'msstore')
+    $sourceErrors = @()
+    ForEach ($source in $trustedSources) {
+        if (-not (Test-WingetSourceTrusted -target $source)) {
+            if (-not $WhatIf) {
+                Write-WarningMessage "Trusting source: $source"
+                try {
+                    $sourceResetSuccess = Set-Sources
+                    if (-not $sourceResetSuccess) {
+                        $sourceErrors += $source
+                        Write-WarningMessage "Failed to reset sources for $source. Continuing with installation..."
+                    }
+                }
+                catch {
+                    $sourceErrors += $source
+                    Write-WarningMessage "Error resetting sources for ${source}: ${_}. Continuing with installation..."
+                }
+            }
+            else {
+                Write-Info "[DRY-RUN] Would trust source: $source"
+            }
+        }
+        else {
+            Write-Success "Source is already trusted: $source"
+        }
+    }
+
+    Foreach ($app in $apps) {
+        try {
+            # Run winget list with timeout to prevent hanging
+            $listProcess = Start-Process -FilePath 'winget' `
+                -ArgumentList 'list', '--exact', '--id', $app.name, '--accept-source-agreements' `
+                -NoNewWindow `
+                -PassThru `
+                -RedirectStandardOutput "$env:TEMP\winget_list_output.txt" `
+                -RedirectStandardError "$env:TEMP\winget_list_error.txt"
+
+            # Wait up to 15 seconds for the list command
+            if (-not $listProcess.WaitForExit(15000)) {
+                Write-WarningMessage "Winget list timed out for $($app.name). Skipping..."
+                $listProcess.Kill()
+                Remove-Item "$env:TEMP\winget_list_output.txt" -ErrorAction SilentlyContinue
+                Remove-Item "$env:TEMP\winget_list_error.txt" -ErrorAction SilentlyContinue
+                continue
+            }
+
+            $listApp = Get-Content "$env:TEMP\winget_list_output.txt" -ErrorAction SilentlyContinue
+
+            # Cleanup temp files
+            Remove-Item "$env:TEMP\winget_list_output.txt" -ErrorAction SilentlyContinue
+            Remove-Item "$env:TEMP\winget_list_error.txt" -ErrorAction SilentlyContinue
+
+            if (![String]::Join('', $listApp).Contains($app.name)) {
+                if (-not $WhatIf) {
+                    Write-Info "Installing: $($app.name)"
+                    Start-Process winget -ArgumentList "install -e --accept-source-agreements --accept-package-agreements --source winget --id $($app.name)" -NoNewWindow -Wait
+
+                    # Verify installation with timeout
+                    $verifyProcess = Start-Process -FilePath 'winget' `
+                        -ArgumentList 'list', '--exact', '--id', $app.name, '--accept-source-agreements' `
+                        -NoNewWindow `
+                        -PassThru `
+                        -RedirectStandardOutput "$env:TEMP\winget_verify_output.txt" `
+                        -RedirectStandardError "$env:TEMP\winget_verify_error.txt"
+
+                    if ($verifyProcess.WaitForExit(15000)) {
+                        $installResult = Get-Content "$env:TEMP\winget_verify_output.txt" -ErrorAction SilentlyContinue
+                        if (![String]::Join('', $installResult).Contains($app.name)) {
+                            Write-ErrorMessage "Failed to install: $($app.name). No package found matching input criteria."
+                            $failedApps += $app.name
+                        }
+                        else {
+                            Write-Success "Successfully installed: $($app.name)"
+                            $installedApps += $app.name
+                        }
+                    }
+                    else {
+                        Write-WarningMessage "Verification timed out for: $($app.name). Assuming installation failed."
+                        $verifyProcess.Kill()
+                        $failedApps += $app.name
+                    }
+
+                    # Cleanup temp files
+                    Remove-Item "$env:TEMP\winget_verify_output.txt" -ErrorAction SilentlyContinue
+                    Remove-Item "$env:TEMP\winget_verify_error.txt" -ErrorAction SilentlyContinue
+                }
+                else {
+                    Write-Info "[DRY-RUN] Would install: $($app.name)"
+                    $installedApps += $app.name
+                }
+            }
+            else {
+                Write-WarningMessage "Skipping: $($app.name) (already installed)"
+                $skippedApps += $app.name
             }
         }
         catch {
-            Write-WarningMessage "Winget source functionality test failed: $_"
-            $sourceIsFunctional = $false
+            Write-ErrorMessage "Failed to install: $($app.name). Error: $_"
+            $failedApps += $app.name
         }
     }
 
-    # If both checks pass, sources are good
-    if ($sourceIsListed -and $sourceIsFunctional) {
-        return $true
+    $updatedApps = @()
+    $failedUpdateApps = @()
+
+    # Check for updates and perform them in one step
+    $hasUpdates = Test-UpdatesAvailable
+
+    if ($hasUpdates) {
+        if (-not $WhatIf) {
+            Write-Success 'Updates found. Installing updates...'
+
+            # Enumerate the package ids that have updates, preferring the PowerShell module.
+            $updateIds = @()
+            if (Get-Command Get-WinGetPackage -ErrorAction SilentlyContinue) {
+                $updateIds = @(Get-WinGetPackage | Where-Object IsUpdateAvailable | ForEach-Object { $_.Id })
+            }
+            else {
+                Write-WarningMessage 'PowerShell module not available, using CLI fallback...'
+
+                # Fallback to CLI method - get list of packages that have updates available
+                $installedPackages = & winget list --source winget 2>&1 | Where-Object {
+                    $_ -and
+                    $_ -notmatch '^[\s\-\|\\]*$' -and
+                    $_ -notmatch '^$' -and
+                    $_ -notmatch '^Name\s+Id\s+Version\s+Source' -and
+                    $_ -notmatch '^[-]+$' -and
+                    $_ -notmatch 'No installed package found'
+                }
+
+                foreach ($package in $installedPackages) {
+                    $package = $package.Trim()
+                    # Split the line by multiple spaces to get columns
+                    # Format: Name | Id | Version | Source
+                    $columns = $package -split '\s{2,}'
+                    if ($columns.Count -ge 2) {
+                        $packageId = $columns[1]  # Second column is the ID
+
+                        # Skip if it's not a winget package or if it's a system component
+                        if ($packageId -and $packageId -notmatch '^(ARP|MSIX)') {
+                            $updateIds += $packageId
+                        }
+                    }
+                }
+            }
+
+            # Upgrade each package through a timeout-guarded helper so a single stalled
+            # upgrade can no longer hang the entire run (issue #120).
+            foreach ($packageId in $updateIds) {
+                $result = Invoke-WingetPackageUpgrade -PackageId $packageId
+                switch ($result.Status) {
+                    'Ok' {
+                        $updatedApps += $packageId
+                        Write-Success "Successfully updated: $packageId"
+                    }
+                    'NoUpgrade' {
+                        # Nothing to do; the package was already current by the time we upgraded.
+                    }
+                    'TimedOut' {
+                        $failedUpdateApps += $packageId
+                        Write-ErrorMessage "Timed out updating: $packageId (skipped to continue)"
+                    }
+                    default {
+                        $failedUpdateApps += $packageId
+                        Write-ErrorMessage "Failed to update: $packageId"
+                    }
+                }
+            }
+        }
+        else {
+            Write-Info '[DRY-RUN] Updates are available. Would install the following updates:'
+            # Try PowerShell module first for listing
+            if (Get-Command Get-WinGetPackage -ErrorAction SilentlyContinue) {
+                $packagesWithUpdates = Get-WinGetPackage | Where-Object IsUpdateAvailable
+                foreach ($pkg in $packagesWithUpdates) {
+                    Write-Info "[DRY-RUN] Would update: $($pkg.Id) (Current: $($pkg.InstalledVersion), Available: $($pkg.AvailableVersion))"
+                    $updatedApps += $pkg.Id
+                }
+            }
+            else {
+                Write-Info '[DRY-RUN] Would update available packages (using CLI fallback)'
+            }
+        }
     }
 
-    # If source is missing entirely, attempt repair
-    if (-not $sourceIsListed) {
-        Write-WarningMessage 'Winget source "winget" appears to be missing. Attempting to repair...'
+    # Configure Windows Terminal defaults(issue #74): default profile and default terminal app.
+    Set-WindowsTerminalDefaults -WhatIf:$WhatIf
+
+    # Retry any failed installations once before producing the final summary
+    if ($failedApps.Count -gt 0) {
+        if (-not $WhatIf) {
+            Write-Host ''
+            Write-Info 'Retrying failed installations (1 final attempt)...'
+
+            $appsToRetry = $failedApps
+            $failedApps = @()
+
+            foreach ($appName in $appsToRetry) {
+                try {
+                    Write-Info "Retrying: $appName"
+                    Start-Process winget -ArgumentList "install -e --accept-source-agreements --accept-package-agreements --source winget --id $appName" -NoNewWindow -Wait
+
+                    # Verify installation with timeout
+                    $verifyProcess = Start-Process -FilePath 'winget' `
+                        -ArgumentList 'list', '--exact', '--id', $appName, '--accept-source-agreements' `
+                        -NoNewWindow `
+                        -PassThru `
+                        -RedirectStandardOutput "$env:TEMP\winget_retry_verify_output.txt" `
+                        -RedirectStandardError "$env:TEMP\winget_retry_verify_error.txt"
+
+                    if ($verifyProcess.WaitForExit(15000)) {
+                        $retryResult = Get-Content "$env:TEMP\winget_retry_verify_output.txt" -ErrorAction SilentlyContinue
+                        if (![String]::Join('', $retryResult).Contains($appName)) {
+                            Write-ErrorMessage "Retry failed: $appName"
+                            $failedApps += $appName
+                        }
+                        else {
+                            Write-Success "Retry succeeded: $appName"
+                            $installedApps += $appName
+                        }
+                    }
+                    else {
+                        Write-WarningMessage "Verification timed out for retry: $appName. Assuming installation failed."
+                        try { $verifyProcess.Kill() } catch { }
+                        $failedApps += $appName
+                    }
+
+                    # Cleanup temp files
+                    Remove-Item "$env:TEMP\winget_retry_verify_output.txt" -ErrorAction SilentlyContinue
+                    Remove-Item "$env:TEMP\winget_retry_verify_error.txt" -ErrorAction SilentlyContinue
+                }
+                catch {
+                    Write-ErrorMessage "Retry failed: $appName. Error: $_"
+                    $failedApps += $appName
+                }
+            }
+        }
+        else {
+            Write-Host ''
+            Write-Info '[DRY-RUN] Would retry the following failed installations:'
+            foreach ($appName in $failedApps) {
+                Write-Info "[DRY-RUN] Would retry: $appName"
+            }
+        }
+    }
+
+    # Display the summary of the installation
+    if ($WhatIf) {
+        Write-Host ''
+        Write-Info '=== DRY-RUN SUMMARY ==='
+        Write-Info 'The following actions would have been performed:'
     }
     else {
-        Write-WarningMessage 'Winget source data is corrupted. Attempting to repair...'
+        Write-Info 'Summary:'
     }
 
-    # Attempt repair: first try source reset, then re-register package
-    try {
-        Write-Info 'Running winget source reset...'
-        $resetOutput = winget source reset --force --disable-interactivity --accept-source-agreements 2>&1
-        Write-Info 'Source reset completed.'
-    }
-    catch {
-        Write-WarningMessage "Winget source reset failed: $_"
+    $headers = @('Status', 'Apps')
+    $rows = @()
+
+    $appList = Format-AppList -AppArray $installedApps
+    if ($appList) {
+        $rows += , @('Installed', $appList)
     }
 
-    try {
-        Write-Info 'Re-registering winget source package...'
-        Add-AppxPackage -Path 'https://cdn.winget.microsoft.com/cache/source.msix' -ErrorAction Stop
-        Write-Info 'Winget source package registered. Retrying source check...'
-    }
-    catch {
-        Write-ErrorMessage "Failed to register winget source package: $_"
-        Write-ErrorMessage 'Manual remediation steps:'
-        Write-ErrorMessage '  1. Run as local user (not as admin): Add-AppxPackage -Path "https://cdn.winget.microsoft.com/cache/source.msix"'
-        Write-ErrorMessage '  2. Or run: winget source reset --force'
-        return $false
+    $appList = Format-AppList -AppArray $skippedApps
+    if ($appList) {
+        $rows += , @('Skipped', $appList)
     }
 
-    # Retry both checks after repair
-    try {
-        $output = winget source list --disable-interactivity --accept-source-agreements 2>&1
-        $sourceIsListed = $output -match 'winget'
-    }
-    catch {
-        Write-WarningMessage "Winget source list failed after repair: $_"
-        $sourceIsListed = $false
+    $appList = Format-AppList -AppArray $failedApps
+    if ($appList) {
+        $rows += , @('Failed', $appList)
     }
 
-    $sourceIsFunctional = $false
-    if ($sourceIsListed) {
-        try {
-            # Test source functionality with actual search
-            $searchOutput = winget search 7zip --source winget --disable-interactivity 2>&1
-            $searchExitCode = $LASTEXITCODE
-            $sourceIsFunctional = -not ($searchOutput -match '0x8a150|failed when opening|data required' -or $searchExitCode -ne 0)
-        }
-        catch {
-            $sourceIsFunctional = $false
-        }
+    $appList = Format-AppList -AppArray $updatedApps
+    if ($appList) {
+        $rows += , @('Updated', $appList)
     }
 
-    if ($sourceIsListed -and $sourceIsFunctional) {
-        Write-Success 'Winget sources are now accessible and functional.'
-        return $true
+    $appList = Format-AppList -AppArray $failedUpdateApps
+    if ($appList) {
+        $rows += , @('Failed to Update', $appList)
     }
 
-    Write-ErrorMessage 'Winget sources are still not accessible after repair attempt.'
-    Write-ErrorMessage 'Manual remediation steps:'
-    Write-ErrorMessage '  1. Run as local user (not as admin): Add-AppxPackage -Path "https://cdn.winget.microsoft.com/cache/source.msix"'
-    Write-ErrorMessage '  2. Or run: winget source reset --force'
-    return $false
+    Write-Table -Headers $headers -Rows $rows -PromptForGridView $true -Title 'Installation Summary'
+
+    # Keep the console window open until the user presses a key
+    Write-Prompt 'Press any key to exit...'
+    [void][System.Console]::ReadKey($true)
+
+    if ($failedApps.Count -gt 0) {
+        Exit 1
+    }
 }
 
+# --- Logging ---
 <#
 .SYNOPSIS
     Writes an informational message in blue color.
@@ -1165,6 +1039,414 @@ function Write-Prompt {
     Write-Host $Message -ForegroundColor Blue
 }
 
+<#
+.SYNOPSIS
+    Formats an array of app names for display in the summary table.
+.DESCRIPTION
+    This function checks if an array has content and formats it as a comma-separated string.
+.PARAMETER AppArray
+    The array of app names to format
+.RETURNS
+    A formatted string of app names, or $null if the array is empty
+#>
+function Format-AppList {
+    param (
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [AllowNull()]
+        [string[]]$AppArray
+    )
+
+    if ($AppArray -and $AppArray.Count -gt 0) {
+        return $AppArray -join ', '
+    }
+    return $null
+}
+
+<#
+.SYNOPSIS
+    Displays a formatted table of results, with optional interactive GUI view.
+.DESCRIPTION
+    Renders a summary table using PowerShell's built-in Format-Table for improved
+    readability and alignment. Optionally displays the data in Out-GridView when
+    running in an interactive session with GUI support.
+.PARAMETER Headers
+    Array of column header names
+.PARAMETER Rows
+    Array of row data (each row is an array matching the header count)
+.PARAMETER UseGridView
+    When set to $true and Out-GridView is available, displays results interactively
+.PARAMETER PromptForGridView
+    When set to $true, asks the user if they want to use Out-GridView (if available)
+#>
+function Write-Table {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string[]]$Headers,
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [string[][]]$Rows,
+        [Parameter(Mandatory = $false)]
+        [bool]$UseGridView = $false,
+        [Parameter(Mandatory = $false)]
+        [bool]$PromptForGridView = $false,
+        [Parameter(Mandatory = $false)]
+        [string]$Title = 'Summary'
+    )
+
+    # Convert rows to objects for Format-Table
+    $tableData = @()
+    foreach ($row in $Rows) {
+        $obj = New-Object PSObject
+        for ($i = 0; $i -lt $Headers.Count; $i++) {
+            $obj | Add-Member -MemberType NoteProperty -Name $Headers[$i] -Value $row[$i]
+        }
+        $tableData += $obj
+    }
+
+    $shouldUseGridView = $UseGridView
+
+    # Prompt user if requested and Out-GridView is available
+    if ($PromptForGridView -and -not $UseGridView) {
+        if (Test-CanUseGridView) {
+            Write-Host ''
+            $response = Read-Host 'Would you like to view the results in an interactive grid view? (Y/N)'
+            if ($response -match '^[Yy]') {
+                $shouldUseGridView = $true
+            }
+        }
+    }
+
+    # Try to use Out-GridView if requested and available
+    if ($shouldUseGridView) {
+        if (-not (Test-CanUseGridView)) {
+            Write-WarningMessage 'Out-GridView is not available. Falling back to text output.'
+        }
+        else {
+            try {
+                $tableData | Out-GridView -Title $Title -Wait
+                return
+            }
+            catch {
+                Write-WarningMessage "Failed to display grid view: $_. Falling back to text output."
+            }
+        }
+    }
+
+    # Use Format-Table for text output
+    $output = $tableData | Format-Table -AutoSize | Out-String
+    Write-Host $output.TrimEnd()
+}
+
+# --- ScheduledUpdates ---
+<#
+.SYNOPSIS
+    Returns the filesystem paths used by scheduled update functionality.
+#>
+function Get-UpdateSettingsPaths {
+    $basePath = Join-Path $env:APPDATA 'winget-app-setup'
+    return @{
+        BasePath        = $basePath
+        ConfigFile      = Join-Path $basePath 'update-config.json'
+        UpdateChecks    = Join-Path $basePath 'update-checks'
+        RollbackScripts = Join-Path $basePath 'rollback-scripts'
+        HelperScript    = Join-Path $basePath 'Update-InstalledApps.ps1'
+        ModuleDir       = Join-Path $basePath 'WingetAppSetup'
+    }
+}
+
+<#
+.SYNOPSIS
+    Returns the default update configuration object.
+#>
+function New-DefaultUpdateConfiguration {
+    param (
+        [Parameter(Mandatory = $false)]
+        [ValidateSet('Weekly', 'Daily')]
+        [string]$UpdateFrequency = 'Weekly',
+        [Parameter(Mandatory = $false)]
+        [bool]$AutoInstall = $true,
+        [Parameter(Mandatory = $false)]
+        [bool]$EnabledScheduledUpdates = $false,
+        [Parameter(Mandatory = $false)]
+        [bool]$InitialPromptCompleted = $false
+    )
+
+    return @{
+        EnabledScheduledUpdates = $EnabledScheduledUpdates
+        UpdateFrequency         = $UpdateFrequency
+        AutoInstall             = $AutoInstall
+        LastCheckDate           = $null
+        Enabled                 = $EnabledScheduledUpdates
+        InitialPromptCompleted  = $InitialPromptCompleted
+    }
+}
+
+<#
+.SYNOPSIS
+    Reads persisted update configuration from AppData.
+#>
+function Get-UpdateConfiguration {
+    $paths = Get-UpdateSettingsPaths
+    if (-not (Test-Path $paths.ConfigFile)) {
+        return (New-DefaultUpdateConfiguration)
+    }
+
+    try {
+        $raw = Get-Content -Path $paths.ConfigFile -Raw -ErrorAction Stop
+        $config = $raw | ConvertFrom-Json -ErrorAction Stop
+        return @{
+            EnabledScheduledUpdates = [bool]$config.EnabledScheduledUpdates
+            UpdateFrequency         = if ($config.UpdateFrequency -in @('Weekly', 'Daily')) { [string]$config.UpdateFrequency } else { 'Weekly' }
+            AutoInstall             = [bool]$config.AutoInstall
+            LastCheckDate           = $config.LastCheckDate
+            Enabled                 = [bool]$config.Enabled
+            InitialPromptCompleted  = [bool]$config.InitialPromptCompleted
+        }
+    }
+    catch {
+        Write-WarningMessage "Failed to parse update configuration, using defaults: $_"
+        return (New-DefaultUpdateConfiguration)
+    }
+}
+
+<#
+.SYNOPSIS
+    Saves update configuration to AppData.
+#>
+function Save-UpdateConfiguration {
+    param (
+        [Parameter(Mandatory = $true)]
+        [hashtable]$Configuration
+    )
+
+    $paths = Get-UpdateSettingsPaths
+    if (-not (Test-Path $paths.BasePath)) {
+        New-Item -Path $paths.BasePath -ItemType Directory -Force | Out-Null
+    }
+
+    $Configuration | ConvertTo-Json | Set-Content -Path $paths.ConfigFile -Encoding UTF8
+}
+
+<#
+.SYNOPSIS
+    Returns true when the scheduled updates task currently exists.
+.RETURNS
+    [bool]
+#>
+function Test-ScheduledUpdatesTaskExists {
+    $taskName = 'WingetAppSetup-ScheduledUpdates'
+    $taskPath = '\winget-app-setup\'
+
+    try {
+        $task = Get-ScheduledTask -TaskName $taskName -TaskPath $taskPath -ErrorAction Stop
+        return $null -ne $task
+    }
+    catch {
+        return $false
+    }
+}
+
+<#
+.SYNOPSIS
+    Copies the scheduled update helper script and the WingetAppSetup module into AppData and returns the helper path.
+.DESCRIPTION
+    The helper runs as a standalone scheduled task with the repository absent, so it imports the
+    WingetAppSetup module from a copy deployed next to it under %APPDATA%. Both the helper and the
+    module are refreshed on every call so the installed copies never drift from the repository.
+#>
+function Install-UpdateHelperScript {
+    $paths = Get-UpdateSettingsPaths
+    $sourceScript = Join-Path $PSScriptRoot 'Update-InstalledApps.ps1'
+    $sourceModule = Join-Path $PSScriptRoot 'WingetAppSetup'
+
+    if (-not (Test-Path $sourceScript)) {
+        throw "Required helper script is missing: $sourceScript"
+    }
+    if (-not (Test-Path $sourceModule)) {
+        throw "Required WingetAppSetup module is missing: $sourceModule"
+    }
+
+    if (-not (Test-Path $paths.BasePath)) {
+        New-Item -ItemType Directory -Path $paths.BasePath -Force | Out-Null
+    }
+    if (-not (Test-Path $paths.UpdateChecks)) {
+        New-Item -ItemType Directory -Path $paths.UpdateChecks -Force | Out-Null
+    }
+    if (-not (Test-Path $paths.RollbackScripts)) {
+        New-Item -ItemType Directory -Path $paths.RollbackScripts -Force | Out-Null
+    }
+
+    # Refresh the module copy the helper imports at runtime.
+    if (Test-Path $paths.ModuleDir) {
+        Remove-Item -Path $paths.ModuleDir -Recurse -Force
+    }
+    Copy-Item -Path $sourceModule -Destination $paths.ModuleDir -Recurse -Force
+
+    Copy-Item -Path $sourceScript -Destination $paths.HelperScript -Force
+    return $paths.HelperScript
+}
+
+<#
+.SYNOPSIS
+    Enables automatic app update checks via Windows Scheduled Task.
+.DESCRIPTION
+    Creates a Windows scheduled task that runs as the current user (S4U, no elevated privileges).
+.PARAMETER SkipPrompt
+    When true, skips the user prompt and uses supplied parameter values.
+.PARAMETER WhatIf
+    When provided, only reports intended actions.
+#>
+function Enable-ScheduledUpdatesCheck {
+    param (
+        [Parameter(Mandatory = $false)]
+        [ValidateSet('Weekly', 'Daily')]
+        [string]$UpdateFrequency = 'Weekly',
+        [Parameter(Mandatory = $false)]
+        [bool]$AutoInstall = $true,
+        [Parameter(Mandatory = $false)]
+        [bool]$SkipPrompt = $false,
+        [Parameter(Mandatory = $false)]
+        [switch]$WhatIf
+    )
+
+    $paths = Get-UpdateSettingsPaths
+    $taskName = 'WingetAppSetup-ScheduledUpdates'
+    $taskPath = '\winget-app-setup\'
+
+    if (-not $SkipPrompt -and -not $WhatIf) {
+        $scheduleDescription = if ($UpdateFrequency -eq 'Daily') { 'every day at 2:00 AM' } else { 'every Sunday at 2:00 AM' }
+        $userChoice = Read-Host "Enable $($UpdateFrequency.ToLower()) automatic update checks? Updates will be checked $scheduleDescription. (Y/N)"
+        $enableScheduledUpdates = $userChoice -in @('Y', 'y')
+
+        $config = New-DefaultUpdateConfiguration -UpdateFrequency $UpdateFrequency -AutoInstall $AutoInstall -EnabledScheduledUpdates $enableScheduledUpdates -InitialPromptCompleted $true
+        Save-UpdateConfiguration -Configuration $config
+
+        if (-not $enableScheduledUpdates) {
+            Write-WarningMessage 'Scheduled updates were not enabled.'
+            return $false
+        }
+
+        $autoInstallChoice = Read-Host 'Automatically install found updates? (Y/N):'
+        $AutoInstall = $autoInstallChoice -in @('Y', 'y')
+    }
+
+    if ($WhatIf) {
+        Write-Info "[DRY-RUN] Would create/update scheduled task: $taskName"
+        Write-Info "[DRY-RUN] Frequency: $UpdateFrequency at 2:00 AM"
+        return $true
+    }
+
+    $null = Install-UpdateHelperScript
+
+    if (Test-ScheduledUpdatesTaskExists) {
+        Unregister-ScheduledTask -TaskName $taskName -TaskPath $taskPath -Confirm:$false
+    }
+
+    $psExecutable = if (Get-Command pwsh -ErrorAction SilentlyContinue) { 'pwsh.exe' } else { 'powershell.exe' }
+    try {
+        $taskAction = New-ScheduledTaskAction -Execute $psExecutable -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$($paths.HelperScript)`""
+        if ($UpdateFrequency -eq 'Daily') {
+            $taskTrigger = New-ScheduledTaskTrigger -Daily -At '2:00 AM'
+        }
+        else {
+            $taskTrigger = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Sunday -At '2:00 AM'
+        }
+        $taskSettings = New-ScheduledTaskSettingsSet -StartWhenAvailable -RunOnlyIfNetworkAvailable
+        $taskPrincipal = New-ScheduledTaskPrincipal -UserId ([System.Security.Principal.WindowsIdentity]::GetCurrent().Name) -LogonType S4U -RunLevel Limited
+
+        Register-ScheduledTask -Action $taskAction `
+            -Trigger $taskTrigger `
+            -TaskName $taskName `
+            -TaskPath $taskPath `
+            -Settings $taskSettings `
+            -Principal $taskPrincipal `
+            -Description 'Automatically checks and installs available updates for installed applications via winget.' `
+            -Force | Out-Null
+    }
+    catch {
+        Write-ErrorMessage "Failed to create scheduled task: $_"
+        return $false
+    }
+
+    $config = New-DefaultUpdateConfiguration -UpdateFrequency $UpdateFrequency -AutoInstall $AutoInstall -EnabledScheduledUpdates $true -InitialPromptCompleted $true
+    Save-UpdateConfiguration -Configuration $config
+    Write-Success 'Scheduled updates enabled successfully.'
+    return $true
+}
+
+<#
+.SYNOPSIS
+    Disables and removes the scheduled updates task.
+#>
+function Disable-ScheduledUpdatesCheck {
+    param (
+        [Parameter(Mandatory = $false)]
+        [switch]$WhatIf
+    )
+
+    $taskName = 'WingetAppSetup-ScheduledUpdates'
+    $taskPath = '\winget-app-setup\'
+
+    if ($WhatIf) {
+        Write-Info "[DRY-RUN] Would disable scheduled task: $taskPath$taskName"
+        return $true
+    }
+
+    try {
+        if (Test-ScheduledUpdatesTaskExists) {
+            Unregister-ScheduledTask -TaskName $taskName -TaskPath $taskPath -Confirm:$false
+        }
+
+        $config = Get-UpdateConfiguration
+        $config.EnabledScheduledUpdates = $false
+        $config.Enabled = $false
+        $config.InitialPromptCompleted = $true
+        Save-UpdateConfiguration -Configuration $config
+        Write-Success 'Scheduled updates disabled successfully.'
+        return $true
+    }
+    catch {
+        Write-ErrorMessage "Failed to disable scheduled updates: $_"
+        return $false
+    }
+}
+
+<#
+.SYNOPSIS
+    Runs update check immediately, optionally auto-installing updates.
+#>
+function Invoke-OnDemandUpdateCheck {
+    param (
+        [Parameter(Mandatory = $false)]
+        [switch]$AutoInstallUpdates,
+        [Parameter(Mandatory = $false)]
+        [switch]$WhatIf
+    )
+
+    $report = @(Get-UpdateReport)
+    if ($report.Count -eq 0) {
+        Write-Info 'No updates available.'
+    }
+    else {
+        Write-Info 'Available updates:'
+        $report | Format-Table PackageName, CurrentVersion, AvailableVersion
+    }
+
+    if (-not $AutoInstallUpdates) {
+        return
+    }
+
+    if ($WhatIf) {
+        Write-Info '[DRY-RUN] Would auto-install all available updates.'
+        return
+    }
+
+    $helperPath = Install-UpdateHelperScript
+    & $helperPath -AutoInstallOverride:$true -RunReason OnDemand
+}
+
+# --- WindowsTerminal ---
 <#
 .SYNOPSIS
     Attempts to parse Windows Terminal settings content, including JSONC variants.
@@ -1409,213 +1691,492 @@ function Set-WindowsTerminalDefaults {
     [void](Set-WindowsTerminalAsDefaultTerminalApplication)
 }
 
+# --- WingetCore ---
 <#
 .SYNOPSIS
-    Returns true when the scheduled updates task currently exists.
+    Ensures the Microsoft.WinGet.Client module is available, installing it if necessary.
+.DESCRIPTION
+    Checks for the module locally and attempts installation via PowerShell Gallery when missing, including ensuring the NuGet provider is present.
 .RETURNS
-    [bool]
+    [bool] True when the module is available (either already installed or installed successfully), otherwise False.
 #>
-function Test-ScheduledUpdatesTaskExists {
-    $taskName = 'WingetAppSetup-ScheduledUpdates'
-    $taskPath = '\winget-app-setup\'
-
+function Test-AndInstallWingetModule {
     try {
-        $task = Get-ScheduledTask -TaskName $taskName -TaskPath $taskPath -ErrorAction Stop
-        return $null -ne $task
+        if (Get-Module -ListAvailable -Name 'Microsoft.WinGet.Client') {
+            return $true
+        }
+
+        Write-WarningMessage 'Microsoft.WinGet.Client module not found. Attempting installation...'
+
+        $nugetProvider = Get-PackageProvider -Name NuGet -ErrorAction SilentlyContinue
+        if (-not $nugetProvider) {
+            Write-WarningMessage 'NuGet package provider not found. Installing...'
+            Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force -Scope AllUsers | Out-Null
+        }
+
+        Install-Module -Name Microsoft.WinGet.Client -Scope AllUsers -Force -AllowClobber -ErrorAction Stop
+
+        $installedModule = Get-Module -ListAvailable -Name 'Microsoft.WinGet.Client' | Select-Object -First 1
+        if ($installedModule) {
+            if ($installedModule.Version) {
+                Write-Success "Microsoft.WinGet.Client module installed successfully (Version: $($installedModule.Version))"
+            }
+            else {
+                Write-Success 'Microsoft.WinGet.Client module installed successfully'
+            }
+            return $true
+        }
+
+        Write-Warning 'Microsoft.WinGet.Client module installation completed, but module is still not detected.'
     }
     catch {
+        Write-Warning "Failed to install Microsoft.WinGet.Client module: $_"
+    }
+
+    return $false
+}
+
+<#
+.SYNOPSIS
+    Checks if winget is available and attempts to install it if not.
+.DESCRIPTION
+    This function verifies if winget is installed and available. If not, it attempts to install the Microsoft App Installer.
+.RETURNS
+    [bool] True if winget is available or successfully installed, otherwise False.
+#>
+function Test-AndInstallWinget {
+    if (Get-Command winget -ErrorAction SilentlyContinue) {
+        Write-Success 'Winget is available.'
+        return $true
+    }
+    else {
+        Write-WarningMessage 'Winget is not available. Attempting to install Microsoft App Installer...'
+        try {
+            $url = 'https://aka.ms/getwinget'
+            $outFile = "$env:TEMP\Microsoft.DesktopAppInstaller.appxbundle"
+            Invoke-WebRequest -Uri $url -OutFile $outFile -UseBasicParsing
+            Add-AppxPackage $outFile
+            Remove-Item $outFile -ErrorAction SilentlyContinue
+            Write-Success 'Microsoft App Installer installed successfully. Winget should now be available.'
+            return $true
+        }
+        catch {
+            Write-ErrorMessage "Failed to install winget: $_"
+            Write-ErrorMessage 'Please install winget manually from https://aka.ms/getwinget'
+            return $false
+        }
+    }
+}
+
+<#
+.SYNOPSIS
+    Checks if a specific winget source is trusted.
+.DESCRIPTION
+    This function checks if a specific winget source is trusted by listing all sources and checking if the target source is in the list.
+    Automatically accepts source agreements to prevent the script from hanging on first run.
+.PARAMETER target
+    The name of the source to check.
+.RETURNS
+    [bool] True if the source is trusted, otherwise False.
+#>
+function Test-WingetSourceTrusted($target) {
+    try {
+        $sources = winget source list --disable-interactivity --accept-source-agreements 2>&1
+        return $sources -match [regex]::Escape($target)
+    }
+    catch {
+        Write-Warning "Error checking source trust for ${target}: $_"
         return $false
     }
 }
 
 <#
 .SYNOPSIS
-    Copies the scheduled update helper script into AppData and returns its path.
-#>
-function Install-UpdateHelperScript {
-    $paths = Get-UpdateSettingsPaths
-    $sourceScript = Join-Path $PSScriptRoot 'Update-InstalledApps.ps1'
-
-    if (-not (Test-Path $sourceScript)) {
-        throw "Required helper script is missing: $sourceScript"
-    }
-
-    if (-not (Test-Path $paths.BasePath)) {
-        New-Item -ItemType Directory -Path $paths.BasePath -Force | Out-Null
-    }
-    if (-not (Test-Path $paths.UpdateChecks)) {
-        New-Item -ItemType Directory -Path $paths.UpdateChecks -Force | Out-Null
-    }
-    if (-not (Test-Path $paths.RollbackScripts)) {
-        New-Item -ItemType Directory -Path $paths.RollbackScripts -Force | Out-Null
-    }
-
-    Copy-Item -Path $sourceScript -Destination $paths.HelperScript -Force
-    return $paths.HelperScript
-}
-
-<#
-.SYNOPSIS
-    Enables automatic app update checks via Windows Scheduled Task.
+    Adds and trusts the winget source.
 .DESCRIPTION
-    Creates a Windows scheduled task that runs as the current user (S4U, no elevated privileges).
-.PARAMETER SkipPrompt
-    When true, skips the user prompt and uses supplied parameter values.
-.PARAMETER WhatIf
-    When provided, only reports intended actions.
+    This function adds and trusts the winget source by resetting sources to defaults.
+    Automatically accepts source agreements to prevent prompts.
+    Uses a timeout mechanism to prevent the function from hanging indefinitely.
 #>
-function Enable-ScheduledUpdatesCheck {
-    param (
-        [Parameter(Mandatory = $false)]
-        [ValidateSet('Weekly', 'Daily')]
-        [string]$UpdateFrequency = 'Weekly',
-        [Parameter(Mandatory = $false)]
-        [bool]$AutoInstall = $true,
-        [Parameter(Mandatory = $false)]
-        [bool]$SkipPrompt = $false,
-        [Parameter(Mandatory = $false)]
-        [switch]$WhatIf
-    )
+function Set-Sources {
+    try {
+        Write-Info 'Resetting winget sources (this may take a moment)...'
 
-    $paths = Get-UpdateSettingsPaths
-    $taskName = 'WingetAppSetup-ScheduledUpdates'
-    $taskPath = '\winget-app-setup\'
+        # Run winget source reset with a timeout to prevent hanging
+        # Using Start-Process with a timeout to handle potential hangs
+        $resetProcess = Start-Process -FilePath 'winget' `
+            -ArgumentList 'source', 'reset', '--force', '--disable-interactivity', '--accept-source-agreements' `
+            -NoNewWindow `
+            -PassThru `
+            -RedirectStandardOutput "$env:TEMP\winget_reset_output.txt" `
+            -RedirectStandardError "$env:TEMP\winget_reset_error.txt"
 
-    if (-not $SkipPrompt -and -not $WhatIf) {
-        $scheduleDescription = if ($UpdateFrequency -eq 'Daily') { 'every day at 2:00 AM' } else { 'every Sunday at 2:00 AM' }
-        $userChoice = Read-Host "Enable $($UpdateFrequency.ToLower()) automatic update checks? Updates will be checked $scheduleDescription. (Y/N)"
-        $enableScheduledUpdates = $userChoice -in @('Y', 'y')
-
-        $config = New-DefaultUpdateConfiguration -UpdateFrequency $UpdateFrequency -AutoInstall $AutoInstall -EnabledScheduledUpdates $enableScheduledUpdates -InitialPromptCompleted $true
-        Save-UpdateConfiguration -Configuration $config
-
-        if (-not $enableScheduledUpdates) {
-            Write-WarningMessage 'Scheduled updates were not enabled.'
+        # Wait up to 30 seconds for the process to complete
+        $timeout = 30
+        if (-not $resetProcess.WaitForExit($timeout * 1000)) {
+            # Process timed out, kill it
+            Write-WarningMessage "Winget source reset timed out after $timeout seconds. Terminating process..."
+            $resetProcess.Kill()
+            Write-WarningMessage 'Consider running "winget source reset --force" manually if sources are not properly configured.'
             return $false
         }
 
-        $autoInstallChoice = Read-Host 'Automatically install found updates? (Y/N):'
-        $AutoInstall = $autoInstallChoice -in @('Y', 'y')
-    }
+        # Read error output to provide better error messages
+        $errorOutput = Get-Content "$env:TEMP\winget_reset_error.txt" -ErrorAction SilentlyContinue | Where-Object { $_ -and $_.Trim() }
 
-    if ($WhatIf) {
-        Write-Info "[DRY-RUN] Would create/update scheduled task: $taskName"
-        Write-Info "[DRY-RUN] Frequency: $UpdateFrequency at 2:00 AM"
-        return $true
-    }
-
-    $null = Install-UpdateHelperScript
-
-    if (Test-ScheduledUpdatesTaskExists) {
-        Unregister-ScheduledTask -TaskName $taskName -TaskPath $taskPath -Confirm:$false
-    }
-
-    $psExecutable = if (Get-Command pwsh -ErrorAction SilentlyContinue) { 'pwsh.exe' } else { 'powershell.exe' }
-
-    # Resolve the current user defensively. [WindowsIdentity]::GetCurrent() can fail in some
-    # execution contexts (CI runners, service/managed accounts); fall back to env vars so a
-    # user-lookup failure does not abort scheduled-task creation.
-    $currentUser = try { [System.Security.Principal.WindowsIdentity]::GetCurrent().Name } catch { "$env:USERDOMAIN\$env:USERNAME" }
-    try {
-        $taskAction = New-ScheduledTaskAction -Execute $psExecutable -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$($paths.HelperScript)`""
-        if ($UpdateFrequency -eq 'Daily') {
-            $taskTrigger = New-ScheduledTaskTrigger -Daily -At '2:00 AM'
+        # Check the exit code
+        if ($resetProcess.ExitCode -eq 0) {
+            Write-Success 'Winget sources reset successfully'
+            return $true
         }
         else {
-            $taskTrigger = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Sunday -At '2:00 AM'
+            # Log the error details if available
+            if ($errorOutput) {
+                Write-WarningMessage "Winget source reset error details: $(($errorOutput -join ', '))"
+            }
+            # Non-zero exit code, but not critical since script continues
+            Write-Info "Winget source reset completed with exit code: $($resetProcess.ExitCode) (this is often not critical)"
+            return $false
         }
-        $taskSettings = New-ScheduledTaskSettingsSet -StartWhenAvailable -RunOnlyIfNetworkAvailable
-        $taskPrincipal = New-ScheduledTaskPrincipal -UserId $currentUser -LogonType S4U -RunLevel Limited
-
-        Register-ScheduledTask -Action $taskAction `
-            -Trigger $taskTrigger `
-            -TaskName $taskName `
-            -TaskPath $taskPath `
-            -Settings $taskSettings `
-            -Principal $taskPrincipal `
-            -Description 'Automatically checks and installs available updates for installed applications via winget.' `
-            -Force | Out-Null
     }
     catch {
-        Write-ErrorMessage "Failed to create scheduled task: $_"
+        Write-WarningMessage "Could not reset sources (this is usually okay): $_"
         return $false
     }
-
-    $config = New-DefaultUpdateConfiguration -UpdateFrequency $UpdateFrequency -AutoInstall $AutoInstall -EnabledScheduledUpdates $true -InitialPromptCompleted $true
-    Save-UpdateConfiguration -Configuration $config
-    Write-Success 'Scheduled updates enabled successfully.'
-    return $true
+    finally {
+        # Clean up temp files
+        Remove-Item "$env:TEMP\winget_reset_output.txt" -ErrorAction SilentlyContinue
+        Remove-Item "$env:TEMP\winget_reset_error.txt" -ErrorAction SilentlyContinue
+    }
 }
 
 <#
 .SYNOPSIS
-    Disables and removes the scheduled updates task.
+    Tests if winget sources are accessible and attempts to repair them if broken.
+.DESCRIPTION
+    Runs a basic winget source list command to verify the "winget" source is accessible.
+    If the source is broken or missing (e.g., when running as admin on a standard user
+    account), the function attempts to re-register it using Add-AppxPackage from the
+    Microsoft CDN. After repair, it retries the source check once. If still failing, a
+    clear error message with manual remediation guidance is displayed.
+.RETURNS
+    [bool] True if winget sources are accessible (or successfully repaired), otherwise False.
 #>
-function Disable-ScheduledUpdatesCheck {
-    param (
-        [Parameter(Mandatory = $false)]
-        [switch]$WhatIf
-    )
+function Test-WingetSources {
+    Write-Info 'Checking winget sources...'
 
-    $taskName = 'WingetAppSetup-ScheduledUpdates'
-    $taskPath = '\winget-app-setup\'
+    # First check: verify source is listed
+    try {
+        $output = winget source list --disable-interactivity --accept-source-agreements 2>&1
+        $sourceIsListed = $output -match 'winget'
+    }
+    catch {
+        Write-WarningMessage "Winget source list failed: $_"
+        $sourceIsListed = $false
+    }
 
-    if ($WhatIf) {
-        Write-Info "[DRY-RUN] Would disable scheduled task: $taskPath$taskName"
+    # Second check: verify source is functional (not corrupted) by attempting a search
+    $sourceIsFunctional = $false
+    if ($sourceIsListed) {
+        try {
+            # Actually test if the source works by attempting a search
+            # Use '7zip' as a known package that always exists
+            $searchOutput = winget search 7zip --source winget --disable-interactivity 2>&1
+            $searchExitCode = $LASTEXITCODE
+
+            # Check for corruption error code 0x8a15000f or similar source errors
+            if ($searchOutput -match '0x8a150|failed when opening|data required' -or $searchExitCode -ne 0) {
+                Write-WarningMessage 'Winget source is listed but contains corrupted or missing data.'
+                $sourceIsFunctional = $false
+            }
+            else {
+                Write-Success 'Winget sources are accessible and functional.'
+                $sourceIsFunctional = $true
+            }
+        }
+        catch {
+            Write-WarningMessage "Winget source functionality test failed: $_"
+            $sourceIsFunctional = $false
+        }
+    }
+
+    # If both checks pass, sources are good
+    if ($sourceIsListed -and $sourceIsFunctional) {
         return $true
+    }
+
+    # If source is missing entirely, attempt repair
+    if (-not $sourceIsListed) {
+        Write-WarningMessage 'Winget source "winget" appears to be missing. Attempting to repair...'
+    }
+    else {
+        Write-WarningMessage 'Winget source data is corrupted. Attempting to repair...'
+    }
+
+    # Attempt repair: first try source reset, then re-register package
+    try {
+        Write-Info 'Running winget source reset...'
+        $resetOutput = winget source reset --force --disable-interactivity --accept-source-agreements 2>&1
+        Write-Info 'Source reset completed.'
+    }
+    catch {
+        Write-WarningMessage "Winget source reset failed: $_"
     }
 
     try {
-        if (Test-ScheduledUpdatesTaskExists) {
-            Unregister-ScheduledTask -TaskName $taskName -TaskPath $taskPath -Confirm:$false
-        }
-
-        $config = Get-UpdateConfiguration
-        $config.EnabledScheduledUpdates = $false
-        $config.Enabled = $false
-        $config.InitialPromptCompleted = $true
-        Save-UpdateConfiguration -Configuration $config
-        Write-Success 'Scheduled updates disabled successfully.'
-        return $true
+        Write-Info 'Re-registering winget source package...'
+        Add-AppxPackage -Path 'https://cdn.winget.microsoft.com/cache/source.msix' -ErrorAction Stop
+        Write-Info 'Winget source package registered. Retrying source check...'
     }
     catch {
-        Write-ErrorMessage "Failed to disable scheduled updates: $_"
+        Write-ErrorMessage "Failed to register winget source package: $_"
+        Write-ErrorMessage 'Manual remediation steps:'
+        Write-ErrorMessage '  1. Run as local user (not as admin): Add-AppxPackage -Path "https://cdn.winget.microsoft.com/cache/source.msix"'
+        Write-ErrorMessage '  2. Or run: winget source reset --force'
         return $false
+    }
+
+    # Retry both checks after repair
+    try {
+        $output = winget source list --disable-interactivity --accept-source-agreements 2>&1
+        $sourceIsListed = $output -match 'winget'
+    }
+    catch {
+        Write-WarningMessage "Winget source list failed after repair: $_"
+        $sourceIsListed = $false
+    }
+
+    $sourceIsFunctional = $false
+    if ($sourceIsListed) {
+        try {
+            # Test source functionality with actual search
+            $searchOutput = winget search 7zip --source winget --disable-interactivity 2>&1
+            $searchExitCode = $LASTEXITCODE
+            $sourceIsFunctional = -not ($searchOutput -match '0x8a150|failed when opening|data required' -or $searchExitCode -ne 0)
+        }
+        catch {
+            $sourceIsFunctional = $false
+        }
+    }
+
+    if ($sourceIsListed -and $sourceIsFunctional) {
+        Write-Success 'Winget sources are now accessible and functional.'
+        return $true
+    }
+
+    Write-ErrorMessage 'Winget sources are still not accessible after repair attempt.'
+    Write-ErrorMessage 'Manual remediation steps:'
+    Write-ErrorMessage '  1. Run as local user (not as admin): Add-AppxPackage -Path "https://cdn.winget.microsoft.com/cache/source.msix"'
+    Write-ErrorMessage '  2. Or run: winget source reset --force'
+    return $false
+}
+
+<#
+.SYNOPSIS
+    Runs a winget command and processes its output for success/failure tracking.
+.DESCRIPTION
+    This function executes a winget command, displays its output naturally, captures exit codes,
+    and parses the results to track successful and failed operations. When winget exits with a
+    non-zero exit code, it maps the code to a meaningful error message.
+.PARAMETER Command
+    The winget command to execute (e.g., "update --all --include-unknown")
+.PARAMETER SuccessPattern
+    Regex pattern to match successful operations
+.PARAMETER FailurePattern
+    Regex pattern to match failed operations
+.PARAMETER SuccessArray
+    Reference to array that will store successful app names
+.PARAMETER FailureArray
+    Reference to array that will store failed app names
+.PARAMETER SuccessIndex
+    Index in the split result to extract the app name for successful operations (default: 1)
+.PARAMETER FailureIndex
+    Index in the split result to extract the app name for failed operations (default: 1)
+.RETURNS
+    [hashtable] containing ExitCode and ExitMessage for the winget command execution
+#>
+function Invoke-WingetCommand {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$Command,
+
+        [Parameter(Mandatory = $true)]
+        [string]$SuccessPattern,
+
+        [Parameter(Mandatory = $true)]
+        [string]$FailurePattern,
+
+        [Parameter(Mandatory = $true)]
+        [ref]$SuccessArray,
+
+        [Parameter(Mandatory = $true)]
+        [ref]$FailureArray,
+
+        [Parameter(Mandatory = $false)]
+        [int]$SuccessIndex = 1,
+
+        [Parameter(Mandatory = $false)]
+        [int]$FailureIndex = 1
+    )
+
+    # Parse command string into arguments properly, handling quoted arguments
+    $commandArgs = ConvertTo-CommandArguments -Command $Command
+
+    # First execution: Display output to user with natural progress indicators
+    & winget $commandArgs
+
+    # Second execution: Capture output for parsing (suppresses progress bars and extra formatting)
+    # We use the second execution's exit code because it represents the final, complete state
+    try {
+        $commandOutput = & winget $commandArgs 2>&1 | Where-Object { $_ -notmatch '^[\s\-\|\\]*$' }
+        $exitCode = $LASTEXITCODE
+    }
+    catch {
+        Write-ErrorMessage "Error capturing winget output: $($_)"
+        $commandOutput = @()
+        $exitCode = -1
+    }
+
+    # Map exit code to meaningful message
+    $exitMessage = switch ($exitCode) {
+        0 { 'Success' }
+        -1978335189 { 'No applicable update found' }
+        -1978335191 { 'No packages found matching input criteria' }
+        -1978335192 { 'Package installation failed' }
+        -1978335212 { 'User cancelled the operation' }
+        -1978335213 { 'Package already installed' }
+        -1978335215 { 'Manifest validation failed' }
+        -1978335216 { 'Invalid manifest' }
+        -1978335221 { 'Package download failed' }
+        -1978335226 { 'Hash mismatch' }
+        default { "Winget exited with code: $exitCode" }
+    }
+
+    $commandOutput | ForEach-Object {
+        if ($_ -match $SuccessPattern) {
+            $SuccessArray.Value += $_.Split()[$SuccessIndex]
+        }
+        elseif ($_ -match $FailurePattern) {
+            $FailureArray.Value += $_.Split()[$FailureIndex]
+        }
+    }
+
+    # If exit code indicates failure but no failures were captured via pattern matching,
+    # report a generic failure
+    if ($exitCode -ne 0 -and $FailureArray.Value.Count -eq 0 -and $SuccessArray.Value.Count -eq 0) {
+        Write-ErrorMessage "Winget command failed: $exitMessage"
+        # Add a generic failure entry to indicate the command failed
+        $FailureArray.Value += "Command failed with exit code $exitCode"
+    }
+
+    return @{
+        ExitCode    = $exitCode
+        ExitMessage = $exitMessage
     }
 }
 
 <#
 .SYNOPSIS
-    Runs update check immediately, optionally auto-installing updates.
+    Tests if there are any available updates for installed packages using winget.
+.DESCRIPTION
+    This function tests for available updates by attempting different winget commands
+    and parsing their output to determine if updates are available.
+.RETURNS
+    [bool] True if updates are available, otherwise False.
 #>
-function Invoke-OnDemandUpdateCheck {
-    param (
-        [Parameter(Mandatory = $false)]
-        [switch]$AutoInstallUpdates,
-        [Parameter(Mandatory = $false)]
-        [switch]$WhatIf
-    )
+function Test-UpdatesAvailable {
+    try {
+        Write-Info 'Checking for available updates...'
 
-    $report = @(Get-UpdateReport)
-    if ($report.Count -eq 0) {
-        Write-Info 'No updates available.'
+        # Try PowerShell module first
+        if (Get-Command Get-WinGetPackage -ErrorAction SilentlyContinue) {
+            try {
+                $packagesWithUpdates = Get-WinGetPackage | Where-Object IsUpdateAvailable
+
+                if ($packagesWithUpdates -and $packagesWithUpdates.Count -gt 0) {
+                    Write-Success "Found $($packagesWithUpdates.Count) package(s) with available updates."
+                    $packagesWithUpdates | ForEach-Object {
+                        Write-Host " - $($_.Id) (Current: $($_.InstalledVersion), Available: $($_.AvailableVersion))"
+                    }
+                    return $true
+                }
+                # Module succeeded but found no updates — return early without CLI fallback
+                Write-WarningMessage 'No updates available.'
+                return $false
+            }
+            catch {
+                Write-Warning "PowerShell module error, falling back to CLI: $_"
+            }
+        }
+        else {
+            Write-WarningMessage 'PowerShell module not available, using CLI fallback...'
+        }
+
+        # CLI fallback (used when module is unavailable or threw an error)
+        $basicUpgradeResult = & winget upgrade 2>&1
+        $basicOutput = $basicUpgradeResult | Out-String
+
+        if ($basicOutput -notmatch 'No installed package found matching input criteria' -and
+            $basicOutput -notmatch 'No available upgrade found') {
+            return $true
+        }
     }
-    else {
-        Write-Info 'Available updates:'
-        $report | Format-Table PackageName, CurrentVersion, AvailableVersion
+    catch {
+        Write-Warning "Error checking for updates: $_"
     }
 
-    if (-not $AutoInstallUpdates) {
-        return
+    Write-WarningMessage 'No updates available.'
+    return $false
+}
+
+<#
+.SYNOPSIS
+    Returns updates available for installed packages.
+.DESCRIPTION
+    Output format: PackageName | CurrentVersion | AvailableVersion.
+#>
+function Get-UpdateReport {
+    try {
+        if (Get-Command Get-WinGetPackage -ErrorAction SilentlyContinue) {
+            return @(Get-WinGetPackage | Where-Object IsUpdateAvailable | ForEach-Object {
+                    [PSCustomObject]@{
+                        PackageName      = $_.Id
+                        CurrentVersion   = [string]$_.InstalledVersion
+                        AvailableVersion = [string]$_.AvailableVersion
+                    }
+                })
+        }
+    }
+    catch {
+        Write-WarningMessage "Failed to query updates using WinGet module. Falling back to CLI: $_"
     }
 
-    if ($WhatIf) {
-        Write-Info '[DRY-RUN] Would auto-install all available updates.'
-        return
+    $report = @()
+    try {
+        $upgradeOutput = & winget upgrade --disable-interactivity --accept-source-agreements 2>&1
+        foreach ($line in $upgradeOutput) {
+            if (-not $line) { continue }
+            if ($line -match '^\s*Name\s+Id\s+Version\s+Available') { continue }
+            if ($line -match '^\s*-{3,}') { continue }
+            if ($line -match 'No installed package found|No available upgrade found|No newer package versions are available') { continue }
+
+            $columns = $line.Trim() -split '\s{2,}'
+            # Validate the Id column looks like a real winget package id before trusting it,
+            # so wrapped descriptions or stray output rows are not parsed as packages.
+            if ($columns.Count -ge 4 -and $columns[1] -match '^[\w][\w.\-]+\.[\w][\w.\-]+$') {
+                $report += [PSCustomObject]@{
+                    PackageName      = $columns[1]
+                    CurrentVersion   = $columns[2]
+                    AvailableVersion = $columns[3]
+                }
+            }
+        }
+    }
+    catch {
+        Write-WarningMessage "Failed to query updates using winget CLI: $_"
     }
 
-    $helperPath = Install-UpdateHelperScript
-    & $helperPath -AutoInstallOverride:$true -RunReason OnDemand
+    return @($report | Sort-Object PackageName -Unique)
 }
 
 <#
@@ -1683,565 +2244,7 @@ function Initialize-WingetSourcesForUser {
     }
 }
 
-<#
-.SYNOPSIS
-    Runs pre-flight system checks (OS version, disk space, network) before installation.
-.DESCRIPTION
-    Warns on Windows older than 10 21H2 (build 19044, non-blocking), warns and prompts to
-    continue when C: has less than 50 GB free, and blocks when cdn.winget.microsoft.com is
-    unreachable (network is required for winget). In -WhatIf mode the disk-space prompt is skipped.
-.PARAMETER WhatIf
-    When specified, reports intended checks without prompting on low disk space.
-.RETURNS
-    [bool] True when it is safe to proceed; False when a blocking check fails or the user declines.
-#>
-function Test-SystemRequirements {
-    param (
-        [Parameter(Mandatory = $false)]
-        [switch]$WhatIf
-    )
-
-    $results = @()
-    $proceed = $true
-
-    # --- OS Version (warn only, Windows 10 21H2 = build 19044) ---
-    try {
-        $build = [System.Environment]::OSVersion.Version.Build
-        $osName = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' -ErrorAction Stop).ProductName
-        if ($build -ge 19044) {
-            $results += [PSCustomObject]@{ Check = 'OS Version'; Status = 'OK'; Detail = $osName }
-        }
-        else {
-            $results += [PSCustomObject]@{ Check = 'OS Version'; Status = 'WARN'; Detail = "$osName (build $build — Windows 10 21H2 or later recommended)" }
-        }
-    }
-    catch {
-        $results += [PSCustomObject]@{ Check = 'OS Version'; Status = 'WARN'; Detail = "Could not determine OS version: $_" }
-    }
-
-    # --- Disk Space on C: (warn + prompt if under 50 GB) ---
-    try {
-        $drive = Get-PSDrive -Name C -ErrorAction Stop
-        $freeGB = [Math]::Round($drive.Free / 1GB, 1)
-        if ($freeGB -ge 50) {
-            $results += [PSCustomObject]@{ Check = 'Disk Space'; Status = 'OK'; Detail = "${freeGB} GB free on C:" }
-        }
-        else {
-            $results += [PSCustomObject]@{ Check = 'Disk Space'; Status = 'WARN'; Detail = "${freeGB} GB free on C: (50 GB recommended)" }
-        }
-    }
-    catch {
-        $results += [PSCustomObject]@{ Check = 'Disk Space'; Status = 'WARN'; Detail = "Could not read C: drive: $_" }
-        $freeGB = 999
-    }
-
-    # --- Network (blocking — required for winget) ---
-    try {
-        $netTest = Test-NetConnection -ComputerName 'cdn.winget.microsoft.com' -Port 443 -InformationLevel Quiet -WarningAction SilentlyContinue -ErrorAction Stop
-        if ($netTest) {
-            $results += [PSCustomObject]@{ Check = 'Network'; Status = 'OK'; Detail = 'Connected to cdn.winget.microsoft.com' }
-        }
-        else {
-            $results += [PSCustomObject]@{ Check = 'Network'; Status = 'FAIL'; Detail = 'Cannot reach cdn.winget.microsoft.com — network is required' }
-            $proceed = $false
-        }
-    }
-    catch {
-        $results += [PSCustomObject]@{ Check = 'Network'; Status = 'FAIL'; Detail = "Network check failed: $_" }
-        $proceed = $false
-    }
-
-    # --- Display results ---
-    Write-Host ''
-    Write-Info 'Pre-flight System Checks:'
-    foreach ($r in $results) {
-        $icon = switch ($r.Status) { 'OK' { '[OK]' } 'WARN' { '[WARN]' } 'FAIL' { '[FAIL]' } }
-        $msg = "$icon $($r.Check): $($r.Detail)"
-        switch ($r.Status) {
-            'OK' { Write-Success $msg }
-            'WARN' { Write-WarningMessage $msg }
-            'FAIL' { Write-ErrorMessage $msg }
-        }
-    }
-    Write-Host ''
-
-    if (-not $proceed) {
-        return $false
-    }
-
-    # Prompt on low disk space (skip prompt in WhatIf mode)
-    $diskResult = $results | Where-Object { $_.Check -eq 'Disk Space' }
-    if ($diskResult.Status -eq 'WARN' -and -not $WhatIf) {
-        $choice = Read-Host 'Disk space is below the 50 GB recommendation. Continue anyway? (Y/N)'
-        if ($choice -notin @('Y', 'y')) {
-            Write-WarningMessage 'Installation cancelled by user due to low disk space.'
-            return $false
-        }
-    }
-
-    return $true
-}
-
-#------------------------------------------------Main Script------------------------------------------------
-
-<#
-.SYNOPSIS
-    Executes the winget installation workflow when the script runs directly.
-.DESCRIPTION
-    Performs prerequisite checks, validates application definitions, installs requested apps, processes updates, and displays a summary when invoked.
-.PARAMETER WhatIf
-    When specified, the script performs all pre-flight checks and displays planned actions without making any system changes.
-#>
-function Invoke-WingetInstall {
-    param (
-        [Parameter(Mandatory = $false)]
-        [switch]$WhatIf
-    )
-
-    if ($WhatIf) {
-        Write-Info '=== DRY-RUN MODE ENABLED ==='
-        Write-Info 'No system changes will be made. This is a simulation of what would happen.'
-        Write-Host ''
-    }
-
-    # Determine which PowerShell executable to use
-    $psExecutable = if (Get-Command pwsh -ErrorAction SilentlyContinue) { 'pwsh.exe' } else { 'powershell.exe' }
-
-    # Accept msstore source agreements in the user context before elevating.
-    # Agreements are per-user — they won't carry over into the elevated process.
-    # Running winget source update here surfaces the interactive prompt while we
-    # still have the normal user's identity.
-    $isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] 'Administrator')
-    if (-not $isAdmin -and (Test-IsRunningLocally)) {
-        if ($WhatIf) {
-            Write-Info '[DRY-RUN] Would run winget source update to prompt for source agreement acceptance in user context'
-        }
-        else {
-            Write-Info 'Updating winget sources — accept any prompts that appear to continue...'
-            Start-Process -FilePath 'winget' -ArgumentList 'source', 'update' -Wait -NoNewWindow
-        }
-    }
-
-    # Check if the script is run as administrator
-    If (-NOT $isAdmin) {
-        if (Test-IsRunningLocally) {
-            Write-ErrorMessage 'This script requires administrator privileges. Press Enter to restart script with elevated privileges.'
-            Pause
-            # Relaunch the script with administrator privileges
-            Restart-WithElevation -PowerShellExecutable $psExecutable -ScriptPath $PSCommandPath | Out-Null
-            Exit
-        }
-
-        # IEX/remote execution has no local script path to relaunch from.
-        Write-ErrorMessage 'This script requires administrator privileges.'
-        Write-ErrorMessage 'Auto-elevation is unavailable when running through IEX/remote execution.'
-        Write-Info 'Open an elevated PowerShell or Windows Terminal session and run the IEX command again.'
-        Write-Info 'Exiting in 5 seconds...'
-        Start-Sleep -Seconds 5
-        Exit 1
-    }
-    else {
-        Write-Success 'Starting...'
-    }
-
-    # Initialize winget sources in user context to prevent session errors (issue #104)
-    [void](Initialize-WingetSourcesForUser -WhatIf:$WhatIf)
-
-    # Ensure required modules are available
-    if (-not (Test-AndInstallWingetModule)) {
-        Write-Warning 'Microsoft.WinGet.Client module is not available. Update functionality will use fallback CLI methods.'
-    }
-
-    if (-not (Test-AndInstallGraphicalTools)) {
-        Write-Warning 'Out-GridView will be unavailable; results will be displayed in text mode only.'
-    }
-
-    # Import required modules
-    try {
-        Import-Module Microsoft.WinGet.Client -ErrorAction Stop
-        Write-Success 'Successfully imported Microsoft.WinGet.Client module'
-    }
-    catch {
-        Write-Warning "Failed to import Microsoft.WinGet.Client module: $_"
-        Write-Warning 'Update functionality will use fallback CLI methods'
-    }
-
-    # Check if winget is available and install if necessary
-    if (-not (Test-AndInstallWinget)) {
-        Write-ErrorMessage 'Winget is required for this script. Exiting.'
-        Exit
-    }
-
-    # Verify winget sources are accessible and auto-repair if broken
-    if (-not (Test-WingetSources)) {
-        Write-WarningMessage 'Winget sources could not be repaired. Some installations may fail.'
-    }
-
-    $scheduledTaskExists = Test-ScheduledUpdatesTaskExists
-    $updateConfig = Get-UpdateConfiguration
-    if (-not $WhatIf -and -not $scheduledTaskExists -and -not $updateConfig.InitialPromptCompleted) {
-        [void](Enable-ScheduledUpdatesCheck -UpdateFrequency $updateConfig.UpdateFrequency -AutoInstall $updateConfig.AutoInstall -WhatIf:$WhatIf)
-    }
-
-    # Add the script directory to the PATH (only if running locally)
-    # Use $PSScriptRoot for reliable script directory detection (works with launcher)
-    if (Test-IsRunningLocally) {
-        $scriptDirectory = $PSScriptRoot
-        if (-not $WhatIf) {
-            Add-ToEnvironmentPath -PathToAdd $scriptDirectory -Scope 'User'
-        }
-        else {
-            Write-Info "[DRY-RUN] Would add '$scriptDirectory' to User PATH"
-        }
-    }
-    else {
-        Write-Info 'Skipping PATH update (remote execution detected)'
-    }
-
-    $apps = @(
-        @{name = '7zip.7zip' },
-        @{name = 'GlavSoft.TightVNC' },
-        @{name = 'Adobe.Acrobat.Reader.64-bit' },
-        @{name = 'Google.Chrome' },
-        @{name = 'Google.GoogleDrive' },
-        @{name = 'Git.Git' },
-        @{name = 'Klocman.BulkCrapUninstaller' },
-        @{name = 'Dell.CommandUpdate.Universal' },
-        @{name = 'Microsoft.PowerShell' },
-        @{name = 'Microsoft.WindowsTerminal' }
-    );
-
-    $validationResult = Test-AppDefinitions -Apps $apps
-
-    foreach ($validationWarning in $validationResult.Warnings) {
-        Write-Warning $validationWarning
-    }
-
-    if ($validationResult.Errors.Count -gt 0) {
-        foreach ($validationError in $validationResult.Errors) {
-            Write-ErrorMessage $validationError
-        }
-        Write-ErrorMessage 'No valid application definitions found. Resolve the errors and re-run the script.'
-        Exit
-    }
-
-    $apps = $validationResult.ValidApps
-
-    if ($apps.Count -eq 0) {
-        Write-ErrorMessage 'No application definitions remain after validation. Add at least one valid entry and re-run the script.'
-        Exit
-    }
-
-    Write-Info 'Installing the following Apps:'
-    ForEach ($app in $apps) {
-        Write-Info $app.name
-    }
-
-    $installedApps = @()
-    $skippedApps = @()
-    $failedApps = @()
-
-    # Verify sources are trusted
-    $trustedSources = @('winget', 'msstore')
-    $sourceErrors = @()
-    ForEach ($source in $trustedSources) {
-        if (-not (Test-WingetSourceTrusted -target $source)) {
-            if (-not $WhatIf) {
-                Write-WarningMessage "Trusting source: $source"
-                try {
-                    $sourceResetSuccess = Set-Sources
-                    if (-not $sourceResetSuccess) {
-                        $sourceErrors += $source
-                        Write-WarningMessage "Failed to reset sources for $source. Continuing with installation..."
-                    }
-                }
-                catch {
-                    $sourceErrors += $source
-                    Write-WarningMessage "Error resetting sources for ${source}: ${_}. Continuing with installation..."
-                }
-            }
-            else {
-                Write-Info "[DRY-RUN] Would trust source: $source"
-            }
-        }
-        else {
-            Write-Success "Source is already trusted: $source"
-        }
-    }
-
-    Foreach ($app in $apps) {
-        try {
-            # Run winget list with timeout to prevent hanging
-            $listProcess = Start-Process -FilePath 'winget' `
-                -ArgumentList 'list', '--exact', '--id', $app.name, '--accept-source-agreements' `
-                -NoNewWindow `
-                -PassThru `
-                -RedirectStandardOutput "$env:TEMP\winget_list_output.txt" `
-                -RedirectStandardError "$env:TEMP\winget_list_error.txt"
-
-            # Wait up to 15 seconds for the list command
-            if (-not $listProcess.WaitForExit(15000)) {
-                Write-WarningMessage "Winget list timed out for $($app.name). Skipping..."
-                $listProcess.Kill()
-                Remove-Item "$env:TEMP\winget_list_output.txt" -ErrorAction SilentlyContinue
-                Remove-Item "$env:TEMP\winget_list_error.txt" -ErrorAction SilentlyContinue
-                continue
-            }
-
-            $listApp = Get-Content "$env:TEMP\winget_list_output.txt" -ErrorAction SilentlyContinue
-
-            # Cleanup temp files
-            Remove-Item "$env:TEMP\winget_list_output.txt" -ErrorAction SilentlyContinue
-            Remove-Item "$env:TEMP\winget_list_error.txt" -ErrorAction SilentlyContinue
-
-            if (![String]::Join('', $listApp).Contains($app.name)) {
-                if (-not $WhatIf) {
-                    Write-Info "Installing: $($app.name)"
-                    Start-Process winget -ArgumentList "install -e --accept-source-agreements --accept-package-agreements --source winget --id $($app.name)" -NoNewWindow -Wait
-
-                    # Verify installation with timeout
-                    $verifyProcess = Start-Process -FilePath 'winget' `
-                        -ArgumentList 'list', '--exact', '--id', $app.name, '--accept-source-agreements' `
-                        -NoNewWindow `
-                        -PassThru `
-                        -RedirectStandardOutput "$env:TEMP\winget_verify_output.txt" `
-                        -RedirectStandardError "$env:TEMP\winget_verify_error.txt"
-
-                    if ($verifyProcess.WaitForExit(15000)) {
-                        $installResult = Get-Content "$env:TEMP\winget_verify_output.txt" -ErrorAction SilentlyContinue
-                        if (![String]::Join('', $installResult).Contains($app.name)) {
-                            Write-ErrorMessage "Failed to install: $($app.name). No package found matching input criteria."
-                            $failedApps += $app.name
-                        }
-                        else {
-                            Write-Success "Successfully installed: $($app.name)"
-                            $installedApps += $app.name
-                        }
-                    }
-                    else {
-                        Write-WarningMessage "Verification timed out for: $($app.name). Assuming installation failed."
-                        $verifyProcess.Kill()
-                        $failedApps += $app.name
-                    }
-
-                    # Cleanup temp files
-                    Remove-Item "$env:TEMP\winget_verify_output.txt" -ErrorAction SilentlyContinue
-                    Remove-Item "$env:TEMP\winget_verify_error.txt" -ErrorAction SilentlyContinue
-                }
-                else {
-                    Write-Info "[DRY-RUN] Would install: $($app.name)"
-                    $installedApps += $app.name
-                }
-            }
-            else {
-                Write-WarningMessage "Skipping: $($app.name) (already installed)"
-                $skippedApps += $app.name
-            }
-        }
-        catch {
-            Write-ErrorMessage "Failed to install: $($app.name). Error: $_"
-            $failedApps += $app.name
-        }
-    }
-
-    $updatedApps = @()
-    $failedUpdateApps = @()
-
-    # Check for updates and perform them in one step
-    $hasUpdates = Test-UpdatesAvailable
-
-    if ($hasUpdates) {
-        if (-not $WhatIf) {
-            Write-Success 'Updates found. Installing updates...'
-
-            # Try PowerShell module first
-            if (Get-Command Update-WinGetPackage -ErrorAction SilentlyContinue) {
-                $updateResults = Get-WinGetPackage | Where-Object IsUpdateAvailable | Update-WinGetPackage
-
-                foreach ($result in $updateResults) {
-                    if ($result.Status -eq 'Ok') {
-                        $updatedApps += $result.Id
-                        Write-Success "Successfully updated: $($result.Id)"
-                    }
-                    else {
-                        $failedUpdateApps += $result.Id
-                        Write-ErrorMessage "Failed to update: $($result.Id) - $($result.Status)"
-                    }
-                }
-            }
-            else {
-                Write-WarningMessage 'PowerShell module not available, using CLI fallback...'
-
-                # Fallback to CLI method - get list of packages that have updates available
-                $installedPackages = & winget list --source winget 2>&1 | Where-Object {
-                    $_ -and
-                    $_ -notmatch '^[\s\-\|\\]*$' -and
-                    $_ -notmatch '^$' -and
-                    $_ -notmatch '^Name\s+Id\s+Version\s+Source' -and
-                    $_ -notmatch '^[-]+$' -and
-                    $_ -notmatch 'No installed package found'
-                }
-
-                foreach ($package in $installedPackages) {
-                    $package = $package.Trim()
-                    # Split the line by multiple spaces to get columns
-                    # Format: Name | Id | Version | Source
-                    $columns = $package -split '\s{2,}'
-                    if ($columns.Count -ge 2) {
-                        $packageId = $columns[1]  # Second column is the ID
-
-                        # Skip if it's not a winget package or if it's a system component
-                        if ($packageId -and $packageId -notmatch '^(ARP|MSIX)') {
-                            try {
-                                $upgradeResult = & winget upgrade $packageId --source winget 2>&1
-                                $upgradeOutput = $upgradeResult | Out-String
-
-                                # Check if upgrade is available and successful
-                                if ($upgradeOutput -match 'Successfully installed') {
-                                    $updatedApps += $packageId
-                                    Write-Success "Successfully updated: $packageId"
-                                }
-                                elseif ($upgradeOutput -notmatch 'No available upgrade found' -and
-                                    $upgradeOutput -notmatch 'No newer package versions are available') {
-                                    # Package has an update but installation may have failed
-                                    $failedUpdateApps += $packageId
-                                    Write-ErrorMessage "Failed to update: $packageId"
-                                }
-                            }
-                            catch {
-                                $failedUpdateApps += $packageId
-                                Write-ErrorMessage "Error updating ${packageId}: $_"
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        else {
-            Write-Info '[DRY-RUN] Updates are available. Would install the following updates:'
-            # Try PowerShell module first for listing
-            if (Get-Command Get-WinGetPackage -ErrorAction SilentlyContinue) {
-                $packagesWithUpdates = Get-WinGetPackage | Where-Object IsUpdateAvailable
-                foreach ($pkg in $packagesWithUpdates) {
-                    Write-Info "[DRY-RUN] Would update: $($pkg.Id) (Current: $($pkg.InstalledVersion), Available: $($pkg.AvailableVersion))"
-                    $updatedApps += $pkg.Id
-                }
-            }
-            else {
-                Write-Info '[DRY-RUN] Would update available packages (using CLI fallback)'
-            }
-        }
-    }
-
-    # Configure Windows Terminal defaults(issue #74): default profile and default terminal app.
-    Set-WindowsTerminalDefaults -WhatIf:$WhatIf
-
-    # Retry any failed installations once before producing the final summary
-    if ($failedApps.Count -gt 0) {
-        if (-not $WhatIf) {
-            Write-Host ''
-            Write-Info 'Retrying failed installations (1 final attempt)...'
-
-            $appsToRetry = $failedApps
-            $failedApps = @()
-
-            foreach ($appName in $appsToRetry) {
-                try {
-                    Write-Info "Retrying: $appName"
-                    Start-Process winget -ArgumentList "install -e --accept-source-agreements --accept-package-agreements --source winget --id $appName" -NoNewWindow -Wait
-
-                    # Verify installation with timeout
-                    $verifyProcess = Start-Process -FilePath 'winget' `
-                        -ArgumentList 'list', '--exact', '--id', $appName, '--accept-source-agreements' `
-                        -NoNewWindow `
-                        -PassThru `
-                        -RedirectStandardOutput "$env:TEMP\winget_retry_verify_output.txt" `
-                        -RedirectStandardError "$env:TEMP\winget_retry_verify_error.txt"
-
-                    if ($verifyProcess.WaitForExit(15000)) {
-                        $retryResult = Get-Content "$env:TEMP\winget_retry_verify_output.txt" -ErrorAction SilentlyContinue
-                        if (![String]::Join('', $retryResult).Contains($appName)) {
-                            Write-ErrorMessage "Retry failed: $appName"
-                            $failedApps += $appName
-                        }
-                        else {
-                            Write-Success "Retry succeeded: $appName"
-                            $installedApps += $appName
-                        }
-                    }
-                    else {
-                        Write-WarningMessage "Verification timed out for retry: $appName. Assuming installation failed."
-                        try { $verifyProcess.Kill() } catch { }
-                        $failedApps += $appName
-                    }
-
-                    # Cleanup temp files
-                    Remove-Item "$env:TEMP\winget_retry_verify_output.txt" -ErrorAction SilentlyContinue
-                    Remove-Item "$env:TEMP\winget_retry_verify_error.txt" -ErrorAction SilentlyContinue
-                }
-                catch {
-                    Write-ErrorMessage "Retry failed: $appName. Error: $_"
-                    $failedApps += $appName
-                }
-            }
-        }
-        else {
-            Write-Host ''
-            Write-Info '[DRY-RUN] Would retry the following failed installations:'
-            foreach ($appName in $failedApps) {
-                Write-Info "[DRY-RUN] Would retry: $appName"
-            }
-        }
-    }
-
-    # Display the summary of the installation
-    if ($WhatIf) {
-        Write-Host ''
-        Write-Info '=== DRY-RUN SUMMARY ==='
-        Write-Info 'The following actions would have been performed:'
-    }
-    else {
-        Write-Info 'Summary:'
-    }
-
-    $headers = @('Status', 'Apps')
-    $rows = @()
-
-    $appList = Format-AppList -AppArray $installedApps
-    if ($appList) {
-        $rows += , @('Installed', $appList)
-    }
-
-    $appList = Format-AppList -AppArray $skippedApps
-    if ($appList) {
-        $rows += , @('Skipped', $appList)
-    }
-
-    $appList = Format-AppList -AppArray $failedApps
-    if ($appList) {
-        $rows += , @('Failed', $appList)
-    }
-
-    $appList = Format-AppList -AppArray $updatedApps
-    if ($appList) {
-        $rows += , @('Updated', $appList)
-    }
-
-    $appList = Format-AppList -AppArray $failedUpdateApps
-    if ($appList) {
-        $rows += , @('Failed to Update', $appList)
-    }
-
-    Write-Table -Headers $headers -Rows $rows -PromptForGridView $true -Title 'Installation Summary'
-
-    # Keep the console window open until the user presses a key
-    Write-Prompt 'Press any key to exit...'
-    [void][System.Console]::ReadKey($true)
-
-    if ($failedApps.Count -gt 0) {
-        Exit 1
-    }
-}
+# ------------------------------------------------Main Script------------------------------------------------
 
 if ($MyInvocation.InvocationName -ne '.') {
     if ($EnableScheduledUpdates -and $DisableScheduledUpdates) {
