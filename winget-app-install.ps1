@@ -213,7 +213,7 @@ function Test-AppDefinitions {
 .RETURNS
     [bool] True if the source is trusted, otherwise False.
 #>
-function Test-Source-IsTrusted($target) {
+function Test-WingetSourceTrusted($target) {
     try {
         $sources = winget source list --disable-interactivity --accept-source-agreements 2>&1
         return $sources -match [regex]::Escape($target)
@@ -551,6 +551,7 @@ function Write-Table {
         [Parameter(Mandatory = $true)]
         [string[]]$Headers,
         [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
         [string[][]]$Rows,
         [Parameter(Mandatory = $false)]
         [bool]$UseGridView = $false,
@@ -655,14 +656,22 @@ function Invoke-WingetCommand {
     # Parse command string into arguments properly, handling quoted arguments
     $commandArgs = ConvertTo-CommandArguments -Command $Command
 
-    # First execution: Display output to user with natural progress indicators
-    & winget $commandArgs
-
-    # Second execution: Capture output for parsing (suppresses progress bars and extra formatting)
-    # We use the second execution's exit code because it represents the final, complete state
+    # Single execution: invoke winget once, capturing all output (stdout + stderr) so we
+    # can both display it to the user and parse it. Running winget twice (as the previous
+    # implementation did) caused duplicate prompts and spurious "already installed" failures
+    # because the package state changed between the two invocations (see issue #134).
     try {
-        $commandOutput = & winget $commandArgs 2>&1 | Where-Object { $_ -notmatch '^[\s\-\|\\]*$' }
+        # Capture the raw output first so $LASTEXITCODE reflects winget's own exit code,
+        # not the exit code of a downstream pipeline element (e.g. Where-Object), which
+        # would otherwise reset it to 0.
+        $rawOutput = & winget $commandArgs 2>&1
         $exitCode = $LASTEXITCODE
+
+        # Echo the captured output to the user so they still see winget's progress/results.
+        $rawOutput | ForEach-Object { Write-Host $_ }
+
+        # Filter out blank lines and progress-bar artifacts before pattern parsing.
+        $commandOutput = $rawOutput | Where-Object { $_ -notmatch '^[\s\-\|\\]*$' }
     }
     catch {
         Write-ErrorMessage "Error capturing winget output: $($_)"
@@ -1936,7 +1945,7 @@ function Invoke-WingetInstall {
     $trustedSources = @('winget', 'msstore')
     $sourceErrors = @()
     ForEach ($source in $trustedSources) {
-        if (-not (Test-Source-IsTrusted -target $source)) {
+        if (-not (Test-WingetSourceTrusted -target $source)) {
             if (-not $WhatIf) {
                 Write-WarningMessage "Trusting source: $source"
                 try {
