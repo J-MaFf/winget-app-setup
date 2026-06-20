@@ -11,9 +11,14 @@ scripts target **Windows PowerShell / PowerShell 7 on Windows**; they cannot run
 Linux or macOS because they depend on `winget`, the `Microsoft.WinGet.Client` module, and
 Windows-only cmdlets.
 
-## Current State — 2026-06-18
+## Current State — 2026-06-20
 
-Healthy. The install logic has been refactored from a 2,100-line monolith into a module
+Healthy. **Beads (`bd`) adopted** as the dependency-graph task/memory layer beneath GitHub
+Issues ([#147](https://github.com/J-MaFf/winget-app-setup/issues/147), PR open) — `.beads/`
+holds the issue graph, a Dolt remote is wired to `origin` for cross-machine sync, and the
+CLAUDE.md beads section is reconciled with `git-policies` (merges stay human-gated).
+
+The install logic has been refactored from a 2,100-line monolith into a module
 ([#106](https://github.com/J-MaFf/winget-app-setup/issues/106)), and the distributable script is a
 generated build artifact that remains byte-for-byte behaviour-equivalent to the previous monolith.
 The 2026 code-review batch (#134–#137) has also been applied: all changed scripts parse clean under
@@ -53,7 +58,9 @@ baseline on Linux (the only failures are pre-existing Windows-only environment l
 
 ### Open Issues
 
-None.
+| Issue | Description | Status |
+|-------|-------------|--------|
+| [#147](https://github.com/J-MaFf/winget-app-setup/issues/147) | Adopt beads (`bd`) for AI task tracking | PR open |
 
 ## Natural Next Steps
 

@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added Claude Code GitHub automation (`.github/workflows/claude.yml`): mention `@claude` on an issue or PR to trigger AI assistance, authenticated with a Claude Max subscription OAuth token (#125).
 - Added a `windows-latest` Pester CI workflow (`.github/workflows/windows-tests.yml`) that runs the `Test-WingetAppInstall.Tests.ps1` suite on every push to `main` and on pull requests (#130).
 - Restored the pre-flight system checks (OS version, disk space, network) and the `-SkipSystemCheck` switch, whose implementation was lost after #101 (#132).
+- Adopted **beads** (`bd`) as a dependency-graph task/memory layer beneath GitHub Issues for AI-driven work. `bd init` (embedded Dolt) scaffolds `.beads/` with the issue graph; a Dolt remote is wired to `origin` for cross-machine sync via `refs/dolt/data`; Claude Code hooks run `bd prime` on SessionStart/PreCompact; and an `AGENTS.md` is generated. The CLAUDE.md beads section is reconciled with the `git-policies` skill so durability/sync stay automatic while merges to `main` remain human-gated via PR ([#147](https://github.com/J-MaFf/winget-app-setup/issues/147)).
 
 ### Changed
 
