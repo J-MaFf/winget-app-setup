@@ -60,7 +60,7 @@ baseline on Linux (the only failures are pre-existing Windows-only environment l
 
 | Issue | Description | Status |
 |-------|-------------|--------|
-| [#147](https://github.com/J-MaFf/winget-app-setup/issues/147) | Adopt beads (`bd`) for AI task tracking | PR open |
+| [#147](https://github.com/J-MaFf/winget-app-setup/issues/147) | Adopt beads (`bd`) for AI task tracking | [PR #148](https://github.com/J-MaFf/winget-app-setup/pull/148) open |
 
 ## Natural Next Steps
 
