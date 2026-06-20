@@ -35,3 +35,8 @@ $RECYCLE.BIN/
 
 # Note: knowledge-graph.jsonl is intentionally NOT ignored
 # It will be tracked in Git for backup and sync purposes
+
+# Beads / Dolt files (added by bd init)
+.dolt/
+*.db
+.beads-credential-key
