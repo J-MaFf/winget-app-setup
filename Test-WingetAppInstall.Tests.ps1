@@ -1676,6 +1676,80 @@ Describe 'Retry Failed Installations' {
     }
 }
 
+Describe 'Install-WingetPackage (0x80073d19 session-error backoff)' {
+    BeforeAll {
+        # 0x80073D19 (ERROR_INSTALL_USER_LOGOFF) as the signed Int32 winget reports.
+        $script:SessionLogoffExitCode = -2147009255
+    }
+
+    BeforeEach {
+        Mock Write-Host { }
+        Mock Write-WarningMessage { }
+        # Never actually wait during tests; the backoff is verified via Assert-MockCalled.
+        Mock Start-Sleep { }
+
+        # Each Start-Process call returns the next exit code from the queue, simulating winget.
+        $script:exitCodeQueue = @()
+        $script:procCallIndex = 0
+        Mock Start-Process {
+            $code = $script:exitCodeQueue[$script:procCallIndex]
+            $script:procCallIndex++
+            [pscustomobject]@{ ExitCode = $code }
+        }
+    }
+
+    It 'Succeeds on the first attempt without sleeping' {
+        $script:exitCodeQueue = @(0)
+
+        $result = Install-WingetPackage -PackageId 'Test.App' -MaxAttempts 3 -InitialDelaySeconds 1
+
+        $result.ExitCode | Should -Be 0
+        $result.Attempts | Should -Be 1
+        $result.SessionErrorExhausted | Should -Be $false
+        Assert-MockCalled Start-Process -Times 1 -Exactly
+        Assert-MockCalled Start-Sleep -Times 0 -Exactly
+    }
+
+    It 'Retries with backoff and recovers when the session error is transient' {
+        $script:exitCodeQueue = @($script:SessionLogoffExitCode, 0)
+
+        $result = Install-WingetPackage -PackageId 'Microsoft.PowerShell' -MaxAttempts 3 -InitialDelaySeconds 1
+
+        $result.ExitCode | Should -Be 0
+        $result.Attempts | Should -Be 2
+        $result.SessionErrorExhausted | Should -Be $false
+        Assert-MockCalled Start-Process -Times 2 -Exactly
+        # One backoff wait between the failed first attempt and the successful second.
+        Assert-MockCalled Start-Sleep -Times 1 -Exactly
+    }
+
+    It 'Exhausts MaxAttempts when the session error persists' {
+        $script:exitCodeQueue = @($script:SessionLogoffExitCode, $script:SessionLogoffExitCode, $script:SessionLogoffExitCode)
+
+        $result = Install-WingetPackage -PackageId 'Microsoft.PowerShell' -MaxAttempts 3 -InitialDelaySeconds 1
+
+        $result.ExitCode | Should -Be $script:SessionLogoffExitCode
+        $result.Attempts | Should -Be 3
+        $result.SessionErrorExhausted | Should -Be $true
+        Assert-MockCalled Start-Process -Times 3 -Exactly
+        # Sleeps between attempts only (1->2 and 2->3), never after the final attempt.
+        Assert-MockCalled Start-Sleep -Times 2 -Exactly
+    }
+
+    It 'Does not retry a non-session failure (lets the caller verify)' {
+        # -1978335189 = "No applicable update found"; any non-session code must stop immediately.
+        $script:exitCodeQueue = @(-1978335189)
+
+        $result = Install-WingetPackage -PackageId 'Test.App' -MaxAttempts 3 -InitialDelaySeconds 1
+
+        $result.ExitCode | Should -Be -1978335189
+        $result.Attempts | Should -Be 1
+        $result.SessionErrorExhausted | Should -Be $false
+        Assert-MockCalled Start-Process -Times 1 -Exactly
+        Assert-MockCalled Start-Sleep -Times 0 -Exactly
+    }
+}
+
 Describe 'App list consistency' {
     It 'Should keep install and uninstall app lists in sync' {
         $installApps = Get-Content "$PSScriptRoot\winget-app-install.ps1" |
