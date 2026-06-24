@@ -223,7 +223,9 @@ function Invoke-WingetInstall {
             if (![String]::Join('', $listApp).Contains($app.name)) {
                 if (-not $WhatIf) {
                     Write-Info "Installing: $($app.name)"
-                    Start-Process winget -ArgumentList "install -e --accept-source-agreements --accept-package-agreements --source winget --id $($app.name)" -NoNewWindow -Wait
+                    # Install through the helper so the transient 0x80073d19 session error is
+                    # retried with backoff (issue #150) instead of failing on the first hit.
+                    [void](Install-WingetPackage -PackageId $app.name)
 
                     # Verify installation with timeout
                     $verifyProcess = Start-Process -FilePath 'winget' `
@@ -368,7 +370,9 @@ function Invoke-WingetInstall {
             foreach ($appName in $appsToRetry) {
                 try {
                     Write-Info "Retrying: $appName"
-                    Start-Process winget -ArgumentList "install -e --accept-source-agreements --accept-package-agreements --source winget --id $appName" -NoNewWindow -Wait
+                    # Route the final retry through the same helper so a lingering 0x80073d19
+                    # session error gets its backoff retries here too (issue #150).
+                    [void](Install-WingetPackage -PackageId $appName)
 
                     # Verify installation with timeout
                     $verifyProcess = Start-Process -FilePath 'winget' `

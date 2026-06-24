@@ -550,3 +550,84 @@ function Initialize-WingetSourcesForUser {
     }
 }
 
+<#
+.SYNOPSIS
+    Installs a single winget package, retrying the transient 0x80073d19 session error with backoff.
+.DESCRIPTION
+    Runs `winget install` for one package id and captures winget's real process exit code via
+    Start-Process -PassThru -Wait. Exit code 0x80073d19 (ERROR_INSTALL_USER_LOGOFF — "an error
+    occurred because a user was logged off") is a transient MSIX/session-deployment race: an
+    immediate retry simply hits the same race, which is why issues #81/#100/#102 left it unresolved.
+    When that specific code is seen, this function waits with an increasing backoff and retries, up
+    to MaxAttempts. Any other exit code (success or a real failure) is returned immediately so the
+    caller can verify the result with `winget list` as before.
+
+    winget's output is intentionally left unredirected so its native progress is still shown to the
+    user; the session error is identified purely from the exit code, which winget reports as
+    0x80073d19 for this failure.
+.PARAMETER PackageId
+    The winget package id to install (e.g. 'Microsoft.PowerShell').
+.PARAMETER MaxAttempts
+    Maximum number of install attempts while the session error keeps recurring. Default 3.
+.PARAMETER InitialDelaySeconds
+    Seconds to wait before the first retry; the wait doubles on each subsequent retry. Default 5.
+.RETURNS
+    [hashtable] @{ ExitCode = <int>; Attempts = <int>; SessionErrorExhausted = <bool> }
+    SessionErrorExhausted is True only when every attempt failed with the session error.
+#>
+function Install-WingetPackage {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$PackageId,
+
+        [Parameter(Mandatory = $false)]
+        [int]$MaxAttempts = 3,
+
+        [Parameter(Mandatory = $false)]
+        [int]$InitialDelaySeconds = 5
+    )
+
+    # 0x80073D19 (ERROR_INSTALL_USER_LOGOFF) as a signed Int32, which is how winget reports it
+    # through Process.ExitCode.
+    $sessionLogoffExitCode = -2147009255
+
+    $attempt = 0
+    $delay = $InitialDelaySeconds
+    $exitCode = 0
+
+    while ($attempt -lt $MaxAttempts) {
+        $attempt++
+
+        $installArgs = @(
+            'install', '-e',
+            '--accept-source-agreements', '--accept-package-agreements',
+            '--source', 'winget',
+            '--id', $PackageId
+        )
+
+        $proc = Start-Process -FilePath 'winget' -ArgumentList $installArgs -NoNewWindow -Wait -PassThru
+        $exitCode = $proc.ExitCode
+
+        # Anything other than the transient session error (success or a real failure) is final here;
+        # the caller verifies the actual install state with `winget list`.
+        if ($exitCode -ne $sessionLogoffExitCode) {
+            break
+        }
+
+        if ($attempt -lt $MaxAttempts) {
+            Write-WarningMessage "Install of $PackageId hit transient session error 0x80073D19 (a user was logged off). Waiting ${delay}s before retry $($attempt + 1) of ${MaxAttempts}..."
+            Start-Sleep -Seconds $delay
+            $delay = $delay * 2
+        }
+        else {
+            Write-WarningMessage "Install of $PackageId still failing with session error 0x80073D19 after ${MaxAttempts} attempts."
+        }
+    }
+
+    return @{
+        ExitCode              = $exitCode
+        Attempts              = $attempt
+        SessionErrorExhausted = ($exitCode -eq $sessionLogoffExitCode)
+    }
+}
+
