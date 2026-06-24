@@ -1,1 +1,0 @@
-{"id":"int-e384c874","kind":"field_change","created_at":"2026-06-20T21:33:14.447455887Z","actor":"Joey Maffiola","issue_id":"wgt-6qx","extra":{"field":"status","new_value":"closed","old_value":"in_progress","reason":"Verified ready->claim->close loop end-to-end during beads adoption (winget #147)"}}
