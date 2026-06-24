@@ -2,6 +2,16 @@
 dolt/
 embeddeddolt/
 
+# Passive JSONL exports — NOT the sync channel (dolt-only sync policy, winget #152).
+# Bead state syncs via Dolt (refs/dolt/data) through `bd dolt push` / `bd dolt pull`;
+# these exports just drift from the live DB and create git churn, so don't track them.
+issues.jsonl
+interactions.jsonl
+
+# Git-hook shims — inert unless `bd hooks install` wires them into .git/hooks.
+# We sync explicitly with `bd dolt push` / `pull` instead; install hooks per-clone if wanted.
+hooks/
+
 # Runtime files
 bd.sock
 bd.sock.startlock
