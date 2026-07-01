@@ -23,6 +23,16 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6
 
+      - name: Verify generated installer is in sync with the module
+        shell: pwsh
+        run: |
+          # Fail fast (before the slower module/Pester setup) if winget-app-install.ps1 has
+          # drifted from the WingetAppSetup module, or if the installer invokes a hyphenated
+          # command that resolves to neither a module function nor an external cmdlet. Both
+          # checks live in the build script's -Check mode, which exits non-zero on failure;
+          # that propagates through $LASTEXITCODE and fails the job.
+          pwsh -File ./build/Build-WingetInstallScript.ps1 -Check
+
       - name: Install Microsoft.WinGet.Client (mockable winget cmdlets)
         shell: pwsh
         run: |
