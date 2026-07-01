@@ -11,10 +11,17 @@ scripts target **Windows PowerShell / PowerShell 7 on Windows**; they cannot run
 Linux or macOS because they depend on `winget`, the `Microsoft.WinGet.Client` module, and
 Windows-only cmdlets.
 
-## Current State — 2026-06-20
+## Current State — 2026-07-01
 
-Healthy. **Beads (`bd`) adopted** as the dependency-graph task/memory layer beneath GitHub
-Issues ([#147](https://github.com/J-MaFf/winget-app-setup/issues/147), PR open) — `.beads/`
+Healthy. **One-liner install fixed** ([#154](https://github.com/J-MaFf/winget-app-setup/issues/154)):
+the `#106` module extraction had dropped `Test-SystemRequirements` without carrying it into the
+module, so the default `irm | iex` path threw `CommandNotFoundException`. The function is restored as
+`WingetAppSetup/Public/SystemChecks.ps1`, and the build now fails when the generated installer calls
+a hyphenated command that resolves to neither a module function nor an external cmdlet, closing the
+drift class that let this ship.
+
+**Beads (`bd`) adopted** as the dependency-graph task/memory layer beneath GitHub
+Issues ([#147](https://github.com/J-MaFf/winget-app-setup/issues/147), PR merged) — `.beads/`
 holds the issue graph, a Dolt remote is wired to `origin` for cross-machine sync, and the
 CLAUDE.md beads section is reconciled with `git-policies` (merges stay human-gated).
 
@@ -64,7 +71,7 @@ baseline on Linux (the only failures are pre-existing Windows-only environment l
 
 ## Natural Next Steps
 
-- Wire `build/Build-WingetInstallScript.ps1 -Check` into CI / a pre-commit hook so the generated `winget-app-install.ps1` can never drift from the module.
+- Wire `build/Build-WingetInstallScript.ps1 -Check` into CI / a pre-commit hook so the generated `winget-app-install.ps1` can never drift from the module. (The build now also fails on undefined-command references — see #154 — but this still needs to run automatically on every push/PR.)
 - Run the `windows-latest` Pester CI workflow (or a local Windows run) to confirm the winget-dependent tests pass — they cannot be exercised on the Linux dev VM.
 - Cut a tagged release and move the `[Unreleased]` CHANGELOG entries under a versioned heading.
 - Open the follow-up migration issue listed above.

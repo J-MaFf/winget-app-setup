@@ -28,6 +28,47 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+function Get-UndefinedCommandReference {
+    <#
+    .SYNOPSIS
+        Returns Verb-Noun command invocations in the assembled script that are neither defined as a
+        function within it nor resolvable as an external command.
+    .DESCRIPTION
+        Guards against reference drift: the entry-point fragments (build/fragments/{head,tail}.ps1)
+        can invoke a module function that was never carried into WingetAppSetup/ — exactly how
+        Test-SystemRequirements went missing and broke the one-liner (issue #154). The byte-for-byte
+        -Check comparison cannot see this, because the on-disk file faithfully reproduces the same
+        broken concatenation. Parsing the assembled script and confirming every hyphenated command
+        resolves catches it at build time instead of at the user's prompt.
+    .PARAMETER ScriptContent
+        The fully assembled installer text to validate.
+    #>
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ScriptContent
+    )
+
+    $ast = [System.Management.Automation.Language.Parser]::ParseInput($ScriptContent, [ref]$null, [ref]$null)
+
+    $defined = $ast.FindAll({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true) |
+        ForEach-Object { $_.Name }
+    $definedSet = [System.Collections.Generic.HashSet[string]]::new([string[]]$defined, [System.StringComparer]::OrdinalIgnoreCase)
+
+    # Only hyphenated (Verb-Noun) names — this is how the module's own functions and PowerShell
+    # cmdlets are named, and it excludes native commands (winget), keywords, and operators that
+    # GetCommandName also returns.
+    $invoked = $ast.FindAll({ param($node) $node -is [System.Management.Automation.Language.CommandAst] }, $true) |
+        ForEach-Object { $_.GetCommandName() } |
+        Where-Object { $_ -and $_.Contains('-') } |
+        Sort-Object -Unique
+
+    foreach ($name in $invoked) {
+        if ($definedSet.Contains($name)) { continue }
+        if (Get-Command -Name $name -ErrorAction SilentlyContinue) { continue }
+        $name
+    }
+}
+
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $moduleRoot = Join-Path $repoRoot 'WingetAppSetup'
 $fragmentsRoot = Join-Path $PSScriptRoot 'fragments'
@@ -81,6 +122,22 @@ foreach ($file in $functionFiles) {
 # core.autocrlf, so collapse everything to LF here. The installer is stored with LF (see
 # .gitattributes), keeping the -Check round-trip deterministic on Windows and Linux alike.
 $content = (($builder.ToString() -replace "`r`n", "`n").TrimEnd()) + "`n"
+
+# Fail fast on reference drift (issue #154). Enforced on Windows only: the installer relies on
+# Windows-only cmdlets (Test-NetConnection, Get-ScheduledTask, the WinGet client module) that do
+# not resolve via Get-Command on Linux/macOS and would false-positive there. The dev machine and CI
+# are Windows, so this runs where it matters. Windows PowerShell 5.1 leaves $IsWindows unset but is
+# always Windows, so treat pre-6 as Windows too.
+if ($IsWindows -or $PSVersionTable.PSVersion.Major -lt 6) {
+    $undefinedReferences = Get-UndefinedCommandReference -ScriptContent $content
+    if ($undefinedReferences) {
+        Write-Error ("Reference check failed: the generated script invokes command(s) that are not defined in the module and do not resolve as external cmdlets: $($undefinedReferences -join ', '). Add the missing function under WingetAppSetup/Public or WingetAppSetup/Private (or fix the calling fragment), then re-run the build.")
+        exit 1
+    }
+}
+else {
+    Write-Host 'Skipping undefined-reference check: Windows-only cmdlets are unavailable on this platform.'
+}
 
 if ($Check) {
     if (-not (Test-Path $OutputPath)) {

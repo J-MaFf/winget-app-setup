@@ -21,6 +21,8 @@
         # Windows Terminal configuration
         'ConvertFrom-TerminalSettingsJson', 'Get-WindowsTerminalSettingsPath', 'Get-WindowsTerminalSettingsPaths',
         'Set-WindowsTerminalDefaultProfile', 'Set-WindowsTerminalAsDefaultTerminalApplication', 'Set-WindowsTerminalDefaults',
+        # System pre-flight checks
+        'Test-SystemRequirements',
         # Install orchestration
         'Invoke-WingetInstall'
     )
