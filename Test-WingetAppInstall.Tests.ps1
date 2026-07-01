@@ -1819,6 +1819,59 @@ Describe 'Test-AppDefinitions' {
     }
 }
 
+Describe 'Test-SystemRequirements' -Tag 'SystemRequirements' {
+    BeforeEach {
+        Mock Write-Info { }
+        Mock Write-Success { }
+        Mock Write-WarningMessage { }
+        Mock Write-ErrorMessage { }
+        Mock Test-NetConnection { $true }
+        Mock Get-PSDrive {
+            [PSCustomObject]@{ Free = 100GB }
+        }
+        Mock Get-ItemProperty {
+            [PSCustomObject]@{ ProductName = 'Windows 11 Pro' }
+        }
+    }
+
+    It 'Returns $true when all checks pass' {
+        $result = Test-SystemRequirements
+        $result | Should -BeTrue
+    }
+
+    It 'Returns $false when network check fails' {
+        Mock Test-NetConnection { $false }
+        $result = Test-SystemRequirements
+        $result | Should -BeFalse
+    }
+
+    It 'Returns $false when network check throws' {
+        Mock Test-NetConnection { throw 'No network' }
+        $result = Test-SystemRequirements
+        $result | Should -BeFalse
+    }
+
+    It 'Returns $false when user declines low disk space prompt' {
+        Mock Get-PSDrive { [PSCustomObject]@{ Free = 10GB } }
+        Mock Read-Host { 'N' }
+        $result = Test-SystemRequirements
+        $result | Should -BeFalse
+    }
+
+    It 'Returns $true when user accepts low disk space prompt' {
+        Mock Get-PSDrive { [PSCustomObject]@{ Free = 10GB } }
+        Mock Read-Host { 'Y' }
+        $result = Test-SystemRequirements
+        $result | Should -BeTrue
+    }
+
+    It 'Skips disk space prompt in WhatIf mode' {
+        Mock Get-PSDrive { [PSCustomObject]@{ Free = 10GB } }
+        Mock Read-Host { throw 'Should not prompt in WhatIf mode' }
+        { Test-SystemRequirements -WhatIf } | Should -Not -Throw
+    }
+}
+
 Describe 'Windows Terminal configuration' {
     BeforeAll {
     }
