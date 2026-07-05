@@ -1748,6 +1748,224 @@ Describe 'Install-WingetPackage (0x80073d19 session-error backoff)' {
         Assert-MockCalled Start-Process -Times 1 -Exactly
         Assert-MockCalled Start-Sleep -Times 0 -Exactly
     }
+
+    It 'Prefers machine scope on the first attempt (issue #159)' {
+        $script:exitCodeQueue = @(0)
+
+        $result = Install-WingetPackage -PackageId 'Microsoft.PowerShell' -MaxAttempts 3 -InitialDelaySeconds 1
+
+        $result.MachineScopeFellBack | Should -Be $false
+        Assert-MockCalled Start-Process -Times 1 -Exactly -ParameterFilter {
+            ($ArgumentList -contains '--scope') -and ($ArgumentList -contains 'machine')
+        }
+    }
+
+    It 'Falls back to default scope when the package has no machine-scope installer' {
+        # -1978335216 = 0x8A150010 NO_APPLICABLE_INSTALLER (e.g. MSIX-only Microsoft.WindowsTerminal).
+        $script:exitCodeQueue = @(-1978335216, 0)
+
+        $result = Install-WingetPackage -PackageId 'Microsoft.WindowsTerminal' -MaxAttempts 3 -InitialDelaySeconds 1
+
+        $result.ExitCode | Should -Be 0
+        $result.MachineScopeFellBack | Should -Be $true
+        # The scope fallback is not a session-error retry: it must not consume an attempt or sleep.
+        $result.Attempts | Should -Be 1
+        Assert-MockCalled Start-Process -Times 2 -Exactly
+        Assert-MockCalled Start-Process -Times 1 -Exactly -ParameterFilter { $ArgumentList -notcontains '--scope' }
+        Assert-MockCalled Start-Sleep -Times 0 -Exactly
+    }
+
+    It 'Falls back on scope at most once' {
+        # NO_APPLICABLE_INSTALLER at both scopes is a real failure and must be returned, not looped.
+        $script:exitCodeQueue = @(-1978335216, -1978335216)
+
+        $result = Install-WingetPackage -PackageId 'Broken.Package' -MaxAttempts 3 -InitialDelaySeconds 1
+
+        $result.ExitCode | Should -Be -1978335216
+        $result.MachineScopeFellBack | Should -Be $true
+        Assert-MockCalled Start-Process -Times 2 -Exactly
+        Assert-MockCalled Start-Sleep -Times 0 -Exactly
+    }
+
+    It 'Still retries the session error with backoff after a scope fallback' {
+        $script:exitCodeQueue = @(-1978335216, $script:SessionLogoffExitCode, 0)
+
+        $result = Install-WingetPackage -PackageId 'Microsoft.WindowsTerminal' -MaxAttempts 3 -InitialDelaySeconds 1
+
+        $result.ExitCode | Should -Be 0
+        $result.MachineScopeFellBack | Should -Be $true
+        $result.Attempts | Should -Be 2
+        $result.SessionErrorExhausted | Should -Be $false
+        Assert-MockCalled Start-Process -Times 3 -Exactly
+        Assert-MockCalled Start-Sleep -Times 1 -Exactly
+    }
+}
+
+Describe 'Invoke-WingetSourceProbe' {
+    BeforeEach {
+        Mock Write-Host { }
+        Mock Write-WarningMessage { }
+        Mock Remove-Item { }
+    }
+
+    It 'Runs winget source update with agreement acceptance and reports success' {
+        Mock Start-Process {
+            $p = [pscustomobject]@{ ExitCode = 0 }
+            $p | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value { param($ms) $true }
+            $p | Add-Member -MemberType ScriptMethod -Name Kill -Value { }
+            $p
+        }
+
+        $result = Invoke-WingetSourceProbe
+
+        $result.Succeeded | Should -Be $true
+        $result.ExitCode | Should -Be 0
+        $result.TimedOut | Should -Be $false
+        Assert-MockCalled Start-Process -Times 1 -Exactly -ParameterFilter {
+            ($ArgumentList -contains 'source') -and
+            ($ArgumentList -contains 'update') -and
+            ($ArgumentList -contains '--name') -and
+            ($ArgumentList -contains 'winget') -and
+            ($ArgumentList -contains '--accept-source-agreements') -and
+            ($ArgumentList -contains '--disable-interactivity')
+        }
+    }
+
+    It 'Passes through a failure exit code' {
+        Mock Start-Process {
+            # -2147009255 = 0x80073D19 ERROR_DEPLOYMENT_BLOCKED_BY_USER_LOG_OFF
+            $p = [pscustomobject]@{ ExitCode = -2147009255 }
+            $p | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value { param($ms) $true }
+            $p | Add-Member -MemberType ScriptMethod -Name Kill -Value { }
+            $p
+        }
+
+        $result = Invoke-WingetSourceProbe
+
+        $result.Succeeded | Should -Be $false
+        $result.ExitCode | Should -Be -2147009255
+        $result.TimedOut | Should -Be $false
+    }
+
+    It 'Kills the process and reports a timeout when winget hangs' {
+        $script:probeKillCalled = $false
+        Mock Start-Process {
+            $p = [pscustomobject]@{ ExitCode = 0 }
+            $p | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value { param($ms) $false }
+            $p | Add-Member -MemberType ScriptMethod -Name Kill -Value { Set-Variable -Name probeKillCalled -Value $true -Scope script }
+            $p
+        }
+
+        $result = Invoke-WingetSourceProbe -TimeoutSeconds 1
+
+        $result.Succeeded | Should -Be $false
+        $result.TimedOut | Should -Be $true
+        $result.ExitCode | Should -Be $null
+        $script:probeKillCalled | Should -Be $true
+    }
+
+    It 'Reports failure without throwing when winget cannot start' {
+        Mock Start-Process { throw 'winget not found' }
+
+        $result = Invoke-WingetSourceProbe
+
+        $result.Succeeded | Should -Be $false
+        $result.ExitCode | Should -Be $null
+        $result.TimedOut | Should -Be $false
+    }
+}
+
+Describe 'Initialize-WingetSourcesForUser (cross-user bootstrap, issue #159)' {
+    BeforeAll {
+        # Stub so the cmdlet can be mocked on machines without the Microsoft.WinGet.Client module.
+        function Repair-WinGetPackageManager { param([switch]$Latest, [switch]$Force) }
+    }
+
+    BeforeEach {
+        Mock Write-Host { }
+        Mock Write-WarningMessage { }
+        Mock Repair-WinGetPackageManager { }
+        Mock Get-ProcessUserName { 'CONTOSO\admin-jmaffiola' }
+        Mock Get-InteractiveSessionUserName { 'CONTOSO\admin-jmaffiola' }
+        # Repair-WinGetPackageManager resolves as available unless a test overrides this.
+        Mock Get-Command { [pscustomobject]@{ Name = 'Repair-WinGetPackageManager' } } -ParameterFilter { $Name -eq 'Repair-WinGetPackageManager' }
+    }
+
+    It 'Reports the dry run without probing' {
+        Mock Invoke-WingetSourceProbe { @{ Succeeded = $true; ExitCode = 0; TimedOut = $false } }
+
+        $result = Initialize-WingetSourcesForUser -WhatIf
+
+        $result | Should -Be $true
+        Assert-MockCalled Invoke-WingetSourceProbe -Times 0 -Exactly
+    }
+
+    It 'Returns true without repairing when the probe succeeds' {
+        Mock Invoke-WingetSourceProbe { @{ Succeeded = $true; ExitCode = 0; TimedOut = $false } }
+
+        $result = Initialize-WingetSourcesForUser
+
+        $result | Should -Be $true
+        Assert-MockCalled Invoke-WingetSourceProbe -Times 1 -Exactly
+        Assert-MockCalled Repair-WinGetPackageManager -Times 0 -Exactly
+    }
+
+    It 'Repairs the package manager and succeeds when the re-probe passes' {
+        $script:probeCallCount = 0
+        Mock Invoke-WingetSourceProbe {
+            $script:probeCallCount++
+            if ($script:probeCallCount -eq 1) {
+                # First probe: blocked per-user bootstrap (0x80073D19).
+                return @{ Succeeded = $false; ExitCode = -2147009255; TimedOut = $false }
+            }
+            return @{ Succeeded = $true; ExitCode = 0; TimedOut = $false }
+        }
+
+        $result = Initialize-WingetSourcesForUser
+
+        $result | Should -Be $true
+        Assert-MockCalled Repair-WinGetPackageManager -Times 1 -Exactly
+        Assert-MockCalled Invoke-WingetSourceProbe -Times 2 -Exactly
+    }
+
+    It 'Returns false when the probe still fails after repair' {
+        Mock Invoke-WingetSourceProbe { @{ Succeeded = $false; ExitCode = -2147009255; TimedOut = $false } }
+
+        $result = Initialize-WingetSourcesForUser
+
+        $result | Should -Be $false
+        Assert-MockCalled Repair-WinGetPackageManager -Times 1 -Exactly
+        Assert-MockCalled Invoke-WingetSourceProbe -Times 2 -Exactly
+    }
+
+    It 'Returns false and skips repair when Repair-WinGetPackageManager is unavailable' {
+        Mock Get-Command { $null } -ParameterFilter { $Name -eq 'Repair-WinGetPackageManager' }
+        Mock Invoke-WingetSourceProbe { @{ Succeeded = $false; ExitCode = -1978335162; TimedOut = $false } }
+
+        $result = Initialize-WingetSourcesForUser
+
+        $result | Should -Be $false
+        Assert-MockCalled Repair-WinGetPackageManager -Times 0 -Exactly
+        Assert-MockCalled Invoke-WingetSourceProbe -Times 1 -Exactly
+    }
+
+    It 'Warns about cross-user elevation when the process account differs from the session owner' {
+        Mock Get-ProcessUserName { 'CONTOSO\admin-jmaffiola' }
+        Mock Get-InteractiveSessionUserName { 'CONTOSO\jdoe' }
+        Mock Invoke-WingetSourceProbe { @{ Succeeded = $true; ExitCode = 0; TimedOut = $false } }
+
+        [void](Initialize-WingetSourcesForUser)
+
+        Assert-MockCalled Write-WarningMessage -Times 1 -ParameterFilter { $Message -match 'Cross-user elevation detected' }
+    }
+
+    It 'Does not warn about cross-user elevation for a same-account session' {
+        Mock Invoke-WingetSourceProbe { @{ Succeeded = $true; ExitCode = 0; TimedOut = $false } }
+
+        [void](Initialize-WingetSourcesForUser)
+
+        Assert-MockCalled Write-WarningMessage -Times 0 -ParameterFilter { $Message -match 'Cross-user elevation detected' }
+    }
 }
 
 Describe 'App list consistency' {

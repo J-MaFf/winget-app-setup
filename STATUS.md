@@ -11,9 +11,17 @@ scripts target **Windows PowerShell / PowerShell 7 on Windows**; they cannot run
 Linux or macOS because they depend on `winget`, the `Microsoft.WinGet.Client` module, and
 Windows-only cmdlets.
 
-## Current State — 2026-07-01
+## Current State — 2026-07-05
 
-Healthy. **One-liner install fixed** ([#154](https://github.com/J-MaFf/winget-app-setup/issues/154)):
+Healthy. **Cross-user `0x80073d19` root cause fixed** ([#159](https://github.com/J-MaFf/winget-app-setup/issues/159)):
+the error that persisted through #81/#104/#107/#150 is `ERROR_DEPLOYMENT_BLOCKED_BY_USER_LOG_OFF` —
+when the script is elevated as a different account than the logged-on user, winget's per-user MSIX
+bootstrap is blocked because that account has no interactive logon session. The installer now
+bootstraps the account via `Repair-WinGetPackageManager`, persists source agreements with a proper
+probe, detects cross-user elevation, and installs with `--scope machine` (auto-fallback for
+MSIX-only packages such as Windows Terminal).
+
+**One-liner install fixed** ([#154](https://github.com/J-MaFf/winget-app-setup/issues/154)):
 the `#106` module extraction had dropped `Test-SystemRequirements` without carrying it into the
 module, so the default `irm | iex` path threw `CommandNotFoundException`. The function is restored as
 `WingetAppSetup/Public/SystemChecks.ps1`, and the build now fails when the generated installer calls

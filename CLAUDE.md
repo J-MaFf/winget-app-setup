@@ -47,7 +47,7 @@ This repo targets **Windows only**. All scripts are PowerShell.
 
 ## Winget Notes
 
-- Exit code `0x80073d19` is a transient Windows session error. It is mitigated by initializing winget sources in the user context before elevation (`Initialize-WingetSourcesForUser`, issues #104/#105); any install that still fails is retried once in the final retry pass of `Invoke-WingetInstall`. (There is no dedicated backoff-retry function.)
+- Exit code `0x80073d19` (`ERROR_DEPLOYMENT_BLOCKED_BY_USER_LOG_OFF`) is an AppX deployment error: per-user MSIX registration is blocked when the invoking account has no interactive logon session — the classic case is elevating as a different admin account on a user's machine. Mitigations (issue #159): `Initialize-WingetSourcesForUser` probes with `winget source update --accept-source-agreements` and bootstraps the account via `Repair-WinGetPackageManager` on failure; `Install-WingetPackage` prefers `--scope machine` (auto-falls back for MSIX-only packages) and retries a still-transient `0x80073d19` with backoff (issue #150).
 - Always capture `$LASTEXITCODE` immediately after a winget call — it goes stale fast
 - Validate package IDs with regex before trusting winget output: `^[\w][\w.\-]+\.[\w][\w.\-]+`
 

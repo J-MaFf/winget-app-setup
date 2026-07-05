@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed the recurring `0x80073d19` install failure ("an error occurred because a user was logged off") that persisted through #81/#104/#107/#150 on machines where the script is elevated as a different account than the interactively logged-on user. Root cause: `0x80073d19` is `ERROR_DEPLOYMENT_BLOCKED_BY_USER_LOG_OFF` — the AppX deployment service blocks winget's per-user first-use bootstrap (registering `Microsoft.Winget.Source`) for an account with no interactive logon session, so no amount of retrying could recover. `Initialize-WingetSourcesForUser` is rewritten to probe with `winget source update --accept-source-agreements` (its old probe omitted the flag and its fallback checked a wrong exit code, making it a no-op) and to bootstrap the account via `Repair-WinGetPackageManager` when the probe fails; `Test-AndInstallWinget` prefers the same bootstrap over `Add-AppxPackage`; cross-user elevation is now detected and reported with remediation guidance; and `Install-WingetPackage` prefers `--scope machine` (falling back automatically for MSIX-only packages like Windows Terminal), which both avoids per-user MSIX deployment — the layer `0x80073d19` blocks, and what Microsoft.PowerShell's default user-scope MSIX installer hit — and stops installs from landing in the elevated admin account's profile instead of machine-wide ([#159](https://github.com/J-MaFf/winget-app-setup/issues/159)).
+
 ### Added
 
 - Wired `build/Build-WingetInstallScript.ps1 -Check` into the Windows CI workflow (`.github/workflows/windows-tests.yml`) so every push and pull request verifies the generated `winget-app-install.ps1` is byte-for-byte in sync with the `WingetAppSetup` module and passes the undefined-reference guard; drift now fails CI instead of shipping silently ([#156](https://github.com/J-MaFf/winget-app-setup/issues/156), [#157](https://github.com/J-MaFf/winget-app-setup/pull/157)).

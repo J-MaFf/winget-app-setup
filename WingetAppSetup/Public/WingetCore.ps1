@@ -56,6 +56,25 @@ function Test-AndInstallWinget {
         return $true
     }
     else {
+        # Prefer Repair-WinGetPackageManager when the WinGet PowerShell module is available: it
+        # registers the App Installer package for the current account even without an interactive
+        # logon session, where a plain Add-AppxPackage is blocked with 0x80073D19
+        # (microsoft/winget-cli#3862, issue #159).
+        if (Get-Command Repair-WinGetPackageManager -ErrorAction SilentlyContinue) {
+            Write-WarningMessage 'Winget is not available. Bootstrapping it via Repair-WinGetPackageManager...'
+            try {
+                Repair-WinGetPackageManager -Latest -Force -ErrorAction Stop
+                if (Get-Command winget -ErrorAction SilentlyContinue) {
+                    Write-Success 'Winget bootstrapped successfully via Repair-WinGetPackageManager.'
+                    return $true
+                }
+                Write-WarningMessage 'Repair-WinGetPackageManager completed but winget is still unavailable. Falling back to App Installer download...'
+            }
+            catch {
+                Write-WarningMessage "Repair-WinGetPackageManager failed: $_. Falling back to App Installer download..."
+            }
+        }
+
         Write-WarningMessage 'Winget is not available. Attempting to install Microsoft App Installer...'
         try {
             $url = 'https://aka.ms/getwinget'
@@ -487,15 +506,26 @@ function Get-UpdateReport {
 
 <#
 .SYNOPSIS
-    Initializes winget sources in the current user context to prevent session errors.
+    Initializes winget sources and agreements for the account performing the installs.
 .DESCRIPTION
-    Runs a lightweight winget command in user context (without elevation) to ensure source
-    agreements are accepted by the current user. This prevents 0x80073d19 errors that occur
-    when the script runs as admin but winget sources haven't been initialized for the user.
+    Winget state — source registration and agreement acceptance — is per-user. When the script is
+    elevated as a different account than the interactively logged-on user (e.g. an admin-* account
+    entered at the UAC prompt), that account has no interactive logon session, and winget's
+    first-use bootstrap (registering the Microsoft.Winget.Source MSIX package for the account) is
+    blocked by the AppX deployment service with 0x80073D19
+    (ERROR_DEPLOYMENT_BLOCKED_BY_USER_LOG_OFF). Every install then fails, and no amount of
+    retrying helps because the missing per-user state is persistent (issues #81/#104/#150, #159).
+
+    This function probes with `winget source update --accept-source-agreements` (which both forces
+    the bootstrap and persists agreement acceptance for the account). When the probe fails, it
+    bootstraps winget for the account via Repair-WinGetPackageManager — which registers the App
+    Installer and Microsoft.Winget.Source packages even without an interactive logon session
+    (microsoft/winget-cli#6334) — and probes again.
 .PARAMETER WhatIf
     When specified, only reports intended actions without executing.
 .RETURNS
-    [bool] True if initialization succeeded or was already done, False if an error occurred.
+    [bool] True when sources are initialized and agreements accepted for the current account,
+    otherwise False.
 #>
 function Initialize-WingetSourcesForUser {
     param (
@@ -504,50 +534,68 @@ function Initialize-WingetSourcesForUser {
     )
 
     if ($WhatIf) {
-        Write-Info '[DRY-RUN] Would initialize winget sources for current user'
+        Write-Info '[DRY-RUN] Would initialize winget sources and agreements for the current account'
         return $true
     }
 
-    Write-Info 'Initializing winget sources for current user context...'
-    Write-Info 'You may be prompted to accept source agreements.'
+    # 0x80073D19 (ERROR_DEPLOYMENT_BLOCKED_BY_USER_LOG_OFF) as a signed Int32.
+    $deploymentBlockedExitCode = -2147009255
+    # 0x8A150046 (APPINSTALLER_CLI_ERROR_SOURCE_AGREEMENTS_NOT_ACCEPTED) as a signed Int32.
+    $agreementsNotAcceptedExitCode = -1978335162
 
-    try {
-        $output = & winget list --disable-interactivity 2>&1
-        $exitCode = $LASTEXITCODE
+    $processUser = Get-ProcessUserName
+    $sessionUser = Get-InteractiveSessionUserName
+    $isCrossUserElevation = ($processUser -and $sessionUser -and ($processUser -ne $sessionUser))
+    if ($isCrossUserElevation) {
+        Write-WarningMessage "Cross-user elevation detected: running as '$processUser' while '$sessionUser' owns the interactive session."
+        Write-WarningMessage "Winget sources and agreements are per-user; initializing them for '$processUser'."
+    }
 
-        if ($exitCode -eq 0) {
-            Write-Success 'Winget sources initialized successfully for user context.'
+    Write-Info 'Initializing winget sources for the current account (this may take a moment)...'
+    $probe = Invoke-WingetSourceProbe
+    if ($probe.Succeeded) {
+        Write-Success 'Winget sources are initialized and agreements accepted for this account.'
+        return $true
+    }
+
+    if ($probe.ExitCode -eq $deploymentBlockedExitCode) {
+        Write-WarningMessage 'Winget source bootstrap was blocked by the AppX deployment service (0x80073D19): this account has no interactive logon session.'
+    }
+    elseif ($probe.ExitCode -eq $agreementsNotAcceptedExitCode) {
+        Write-WarningMessage 'Winget source agreements are not yet accepted for this account (0x8A150046).'
+    }
+    elseif ($null -ne $probe.ExitCode) {
+        Write-WarningMessage "Winget source update failed with exit code: $($probe.ExitCode)"
+    }
+
+    # Bootstrap via the WinGet PowerShell module: unlike winget's own first-use bootstrap (and
+    # unlike a plain Add-AppxPackage), Repair-WinGetPackageManager registers the App Installer and
+    # Microsoft.Winget.Source packages for the current account even without an interactive logon
+    # session (microsoft/winget-cli#6334).
+    if (Get-Command Repair-WinGetPackageManager -ErrorAction SilentlyContinue) {
+        Write-Info 'Bootstrapping winget for this account via Repair-WinGetPackageManager...'
+        try {
+            Repair-WinGetPackageManager -Latest -Force -ErrorAction Stop
+        }
+        catch {
+            Write-WarningMessage "Repair-WinGetPackageManager failed: $_"
+        }
+
+        $probe = Invoke-WingetSourceProbe
+        if ($probe.Succeeded) {
+            Write-Success 'Winget sources initialized for this account after repair.'
             return $true
         }
-
-        # Exit code -1 with "source agreements not accepted" is actually expected the first time
-        # and means the user can now accept them. The next execution will work.
-        if ($exitCode -eq -1 -and $output -match 'source agreement|You must accept') {
-            Write-Info 'Source agreements need to be accepted. Running interactive prompt...'
-            # Run again without --disable-interactivity to allow user interaction
-            $output = & winget list 2>&1
-            $exitCode = $LASTEXITCODE
-
-            if ($exitCode -eq 0) {
-                Write-Success 'Source agreements accepted. Winget is ready to use.'
-                return $true
-            }
-        }
-
-        if ($exitCode -eq 0) {
-            Write-Success 'Winget sources are accessible.'
-            return $true
-        }
-
-        Write-WarningMessage "Winget source initialization returned exit code: $exitCode"
-        Write-WarningMessage 'Continuing with installation; retry logic will handle any session errors.'
-        return $true
     }
-    catch {
-        Write-WarningMessage "Error initializing winget sources: $_"
-        Write-WarningMessage 'Continuing with installation; retry logic will handle any session errors.'
-        return $true
+    else {
+        Write-WarningMessage 'Repair-WinGetPackageManager is unavailable (Microsoft.WinGet.Client module missing); skipping winget bootstrap repair.'
     }
+
+    Write-WarningMessage "Winget sources could not be initialized for '$processUser'. Installations may fail with 0x80073D19."
+    if ($isCrossUserElevation) {
+        Write-WarningMessage "Fix: log on to Windows interactively as '$processUser' once (this registers winget for that account), or run 'winget source update' from any session running as '$processUser', then re-run this script."
+    }
+    return $false
 }
 
 <#
@@ -565,6 +613,13 @@ function Initialize-WingetSourcesForUser {
     winget's output is intentionally left unredirected so its native progress is still shown to the
     user; the session error is identified purely from the exit code, which winget reports as
     0x80073d19 for this failure.
+
+    Installs prefer `--scope machine` (issue #159): user-scope installs land in the elevated
+    account's profile rather than the logged-on user's, and packages that ship both MSIX and MSI
+    installers (e.g. Microsoft.PowerShell) resolve at user scope to the MSIX — whose per-user AppX
+    deployment is exactly what 0x80073D19 blocks under cross-user elevation. When a package has no
+    machine-scope installer (e.g. the MSIX-only Microsoft.WindowsTerminal), winget returns
+    0x8A150010 (NO_APPLICABLE_INSTALLER) and the install is retried once at winget's default scope.
 .PARAMETER PackageId
     The winget package id to install (e.g. 'Microsoft.PowerShell').
 .PARAMETER MaxAttempts
@@ -572,8 +627,11 @@ function Initialize-WingetSourcesForUser {
 .PARAMETER InitialDelaySeconds
     Seconds to wait before the first retry; the wait doubles on each subsequent retry. Default 5.
 .RETURNS
-    [hashtable] @{ ExitCode = <int>; Attempts = <int>; SessionErrorExhausted = <bool> }
+    [hashtable] @{ ExitCode = <int>; Attempts = <int>; SessionErrorExhausted = <bool>; MachineScopeFellBack = <bool> }
     SessionErrorExhausted is True only when every attempt failed with the session error.
+    MachineScopeFellBack is True when the package had no machine-scope installer and the install
+    was retried at winget's default scope. Attempts counts install attempts at the finally
+    selected scope; the one-time scope fallback does not consume a session-error attempt.
 #>
 function Install-WingetPackage {
     param (
@@ -587,13 +645,18 @@ function Install-WingetPackage {
         [int]$InitialDelaySeconds = 5
     )
 
-    # 0x80073D19 (ERROR_INSTALL_USER_LOGOFF) as a signed Int32, which is how winget reports it
-    # through Process.ExitCode.
+    # 0x80073D19 (ERROR_DEPLOYMENT_BLOCKED_BY_USER_LOG_OFF) as a signed Int32, which is how winget
+    # reports it through Process.ExitCode.
     $sessionLogoffExitCode = -2147009255
+    # 0x8A150010 (APPINSTALLER_CLI_ERROR_NO_APPLICABLE_INSTALLER) as a signed Int32: returned when
+    # the --scope machine requirement filters out every installer in the package's manifest.
+    $noApplicableInstallerExitCode = -1978335216
 
     $attempt = 0
     $delay = $InitialDelaySeconds
     $exitCode = 0
+    $useMachineScope = $true
+    $machineScopeFellBack = $false
 
     while ($attempt -lt $MaxAttempts) {
         $attempt++
@@ -604,9 +667,24 @@ function Install-WingetPackage {
             '--source', 'winget',
             '--id', $PackageId
         )
+        if ($useMachineScope) {
+            $installArgs += @('--scope', 'machine')
+        }
 
         $proc = Start-Process -FilePath 'winget' -ArgumentList $installArgs -NoNewWindow -Wait -PassThru
         $exitCode = $proc.ExitCode
+
+        # No installer matched the machine-scope requirement (e.g. MSIX-only packages such as
+        # Microsoft.WindowsTerminal, which only install per-user). Fall back to winget's default
+        # scope once; this is a manifest property, not a transient error, so it does not consume
+        # one of the session-error attempts.
+        if ($useMachineScope -and $exitCode -eq $noApplicableInstallerExitCode) {
+            Write-Info "$PackageId has no machine-scope installer. Retrying with winget's default scope..."
+            $useMachineScope = $false
+            $machineScopeFellBack = $true
+            $attempt--
+            continue
+        }
 
         # Anything other than the transient session error (success or a real failure) is final here;
         # the caller verifies the actual install state with `winget list`.
@@ -628,6 +706,7 @@ function Install-WingetPackage {
         ExitCode              = $exitCode
         Attempts              = $attempt
         SessionErrorExhausted = ($exitCode -eq $sessionLogoffExitCode)
+        MachineScopeFellBack  = $machineScopeFellBack
     }
 }
 
