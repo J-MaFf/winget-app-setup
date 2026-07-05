@@ -70,16 +70,11 @@ function Invoke-WingetInstall {
         Write-Success 'Starting...'
     }
 
-    # Initialize winget sources in user context to prevent session errors (issue #104)
-    [void](Initialize-WingetSourcesForUser -WhatIf:$WhatIf)
-
-    # Ensure required modules are available
+    # Ensure the WinGet PowerShell module is available before touching winget itself:
+    # Test-AndInstallWinget and Initialize-WingetSourcesForUser use Repair-WinGetPackageManager
+    # to bootstrap winget for accounts that have no interactive logon session (issue #159).
     if (-not (Test-AndInstallWingetModule)) {
         Write-Warning 'Microsoft.WinGet.Client module is not available. Update functionality will use fallback CLI methods.'
-    }
-
-    if (-not (Test-AndInstallGraphicalTools)) {
-        Write-Warning 'Out-GridView will be unavailable; results will be displayed in text mode only.'
     }
 
     # Import required modules
@@ -96,6 +91,15 @@ function Invoke-WingetInstall {
     if (-not (Test-AndInstallWinget)) {
         Write-ErrorMessage 'Winget is required for this script. Exiting.'
         Exit
+    }
+
+    # Initialize winget sources and agreements for the account performing the installs. This is
+    # what prevents 0x80073d19 when the script is elevated as a different account than the
+    # logged-on user (issues #104/#150, #159).
+    [void](Initialize-WingetSourcesForUser -WhatIf:$WhatIf)
+
+    if (-not (Test-AndInstallGraphicalTools)) {
+        Write-Warning 'Out-GridView will be unavailable; results will be displayed in text mode only.'
     }
 
     # Verify winget sources are accessible and auto-repair if broken
