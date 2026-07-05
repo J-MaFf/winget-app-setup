@@ -1824,6 +1824,8 @@ Describe 'Invoke-WingetSourceProbe' {
         Assert-MockCalled Start-Process -Times 1 -Exactly -ParameterFilter {
             ($ArgumentList -contains 'source') -and
             ($ArgumentList -contains 'update') -and
+            ($ArgumentList -contains '--name') -and
+            ($ArgumentList -contains 'winget') -and
             ($ArgumentList -contains '--accept-source-agreements') -and
             ($ArgumentList -contains '--disable-interactivity')
         }
