@@ -2,12 +2,17 @@ name: Windows Tests (Pester)
 
 # Runs the Pester v5 unit suite on a real Windows runner. This is where Windows-native
 # test execution happens, since the Claude Code action (claude.yml) cannot run on
-# windows-latest. @claude (on ubuntu) can read these results via `actions: read`.
+# Windows runners. @claude (on ubuntu) can read these results via `actions: read`.
+#
+# Runs on the self-hosted win-test runner (Windows Server 2025, pwsh 7.6.3). Module
+# installs (Microsoft.WinGet.Client, Pester) persist across runs there, so the guarded
+# installs below are no-ops after the first run.
 
 on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -18,7 +23,8 @@ concurrency:
 
 jobs:
   pester:
-    runs-on: windows-latest
+    runs-on: [self-hosted, windows]
+    timeout-minutes: 15
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
@@ -53,7 +59,7 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
 
-          # windows-latest ships Pester 5, but pin to be safe in case the image changes.
+          # Guarded install: Pester 5 persists on the self-hosted runner after the first run.
           if (-not (Get-Module -ListAvailable -Name Pester | Where-Object { $_.Version -ge [version]'5.0.0' })) {
             Install-Module Pester -MinimumVersion 5.0.0 -Force -SkipPublisherCheck -Scope CurrentUser
           }

@@ -11,7 +11,7 @@ scripts target **Windows PowerShell / PowerShell 7 on Windows**; they cannot run
 Linux or macOS because they depend on `winget`, the `Microsoft.WinGet.Client` module, and
 Windows-only cmdlets.
 
-## Current State — 2026-07-05
+## Current State — 2026-07-06
 
 Healthy. **Cross-user `0x80073d19` root cause fixed** ([#159](https://github.com/J-MaFf/winget-app-setup/issues/159)):
 the error that persisted through #81/#104/#107/#150 is `ERROR_DEPLOYMENT_BLOCKED_BY_USER_LOG_OFF` —
@@ -43,6 +43,9 @@ baseline on Linux (the only failures are pre-existing Windows-only environment l
 CI now runs `build/Build-WingetInstallScript.ps1 -Check` on every push and pull request, so the
 generated `winget-app-install.ps1` can no longer drift from the module (and the installer's
 undefined-reference guard runs automatically) ([#156](https://github.com/J-MaFf/winget-app-setup/issues/156)).
+The Windows CI workflow runs on the self-hosted **win-test** runner (Windows Server 2025,
+pwsh 7.6.3) instead of GitHub-hosted `windows-latest`; the guarded Microsoft.WinGet.Client and
+Pester installs persist across runs there ([#161](https://github.com/J-MaFf/winget-app-setup/issues/161)).
 
 ### Components
 
@@ -75,17 +78,17 @@ undefined-reference guard runs automatically) ([#156](https://github.com/J-MaFf/
 | [#136](https://github.com/J-MaFf/winget-app-setup/issues/136) | Missing `STATUS.md` and README/CHANGELOG execution-policy mismatch | [#140](https://github.com/J-MaFf/winget-app-setup/pull/140) |
 | [#137](https://github.com/J-MaFf/winget-app-setup/issues/137) | Renamed `Test-Source-IsTrusted` to `Test-WingetSourceTrusted` for verb-noun compliance | [#142](https://github.com/J-MaFf/winget-app-setup/pull/142) |
 | [#154](https://github.com/J-MaFf/winget-app-setup/issues/154) | One-liner install failed: `Test-SystemRequirements` undefined on the default path; build now guards undefined references | [#155](https://github.com/J-MaFf/winget-app-setup/pull/155) |
+| [#156](https://github.com/J-MaFf/winget-app-setup/issues/156) | Wire build-script `-Check` into CI so the installer can't drift | [#157](https://github.com/J-MaFf/winget-app-setup/pull/157) |
+| [#161](https://github.com/J-MaFf/winget-app-setup/issues/161) | Run Windows CI on the self-hosted win-test runner instead of `windows-latest` | [#162](https://github.com/J-MaFf/winget-app-setup/pull/162) |
 
 ### Open Issues
 
-| Issue | Description | Status |
-|-------|-------------|--------|
-| [#156](https://github.com/J-MaFf/winget-app-setup/issues/156) | Wire build-script `-Check` into CI so the installer can't drift | [PR #157](https://github.com/J-MaFf/winget-app-setup/pull/157) open |
+None.
 
 ## Natural Next Steps
 
 - Add a local pre-commit hook that runs `build/Build-WingetInstallScript.ps1 -Check` — CI already runs it on every push/PR (as of [#156](https://github.com/J-MaFf/winget-app-setup/issues/156)), so this just moves the same guard earlier and catches drift before pushing.
-- Run the `windows-latest` Pester CI workflow (or a local Windows run) to confirm the winget-dependent tests pass — they cannot be exercised on the Linux dev VM.
+- Watch the first Windows CI runs on the self-hosted win-test runner for environment drift — module versions now persist across runs instead of starting from a fresh `windows-latest` image (as of [#161](https://github.com/J-MaFf/winget-app-setup/issues/161)).
 - Cut a tagged release and move the `[Unreleased]` CHANGELOG entries under a versioned heading.
 - Open the follow-up migration issue listed above.
 
