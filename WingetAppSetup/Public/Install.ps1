@@ -297,88 +297,9 @@ function Invoke-WingetInstall {
         }
     }
 
-    $updatedApps = @()
-    $failedUpdateApps = @()
-
-    # Check for updates and perform them in one step
-    $hasUpdates = Test-UpdatesAvailable
-
-    if ($hasUpdates) {
-        if (-not $WhatIf) {
-            Write-Success 'Updates found. Installing updates...'
-
-            # Enumerate the package ids that have updates, preferring the PowerShell module.
-            $updateIds = @()
-            if (Get-Command Get-WinGetPackage -ErrorAction SilentlyContinue) {
-                $updateIds = @(Get-WinGetPackage | Where-Object IsUpdateAvailable | ForEach-Object { $_.Id })
-            }
-            else {
-                Write-WarningMessage 'PowerShell module not available, using CLI fallback...'
-
-                # Fallback to CLI method - get list of packages that have updates available
-                $installedPackages = & winget list --source winget 2>&1 | Where-Object {
-                    $_ -and
-                    $_ -notmatch '^[\s\-\|\\]*$' -and
-                    $_ -notmatch '^$' -and
-                    $_ -notmatch '^Name\s+Id\s+Version\s+Source' -and
-                    $_ -notmatch '^[-]+$' -and
-                    $_ -notmatch 'No installed package found'
-                }
-
-                foreach ($package in $installedPackages) {
-                    $package = $package.Trim()
-                    # Split the line by multiple spaces to get columns
-                    # Format: Name | Id | Version | Source
-                    $columns = $package -split '\s{2,}'
-                    if ($columns.Count -ge 2) {
-                        $packageId = $columns[1]  # Second column is the ID
-
-                        # Skip if it's not a winget package or if it's a system component
-                        if ($packageId -and $packageId -notmatch '^(ARP|MSIX)') {
-                            $updateIds += $packageId
-                        }
-                    }
-                }
-            }
-
-            # Upgrade each package through a timeout-guarded helper so a single stalled
-            # upgrade can no longer hang the entire run (issue #120).
-            foreach ($packageId in $updateIds) {
-                $result = Invoke-WingetPackageUpgrade -PackageId $packageId
-                switch ($result.Status) {
-                    'Ok' {
-                        $updatedApps += $packageId
-                        Write-Success "Successfully updated: $packageId"
-                    }
-                    'NoUpgrade' {
-                        # Nothing to do; the package was already current by the time we upgraded.
-                    }
-                    'TimedOut' {
-                        $failedUpdateApps += $packageId
-                        Write-ErrorMessage "Timed out updating: $packageId (skipped to continue)"
-                    }
-                    default {
-                        $failedUpdateApps += $packageId
-                        Write-ErrorMessage "Failed to update: $packageId"
-                    }
-                }
-            }
-        }
-        else {
-            Write-Info '[DRY-RUN] Updates are available. Would install the following updates:'
-            # Try PowerShell module first for listing
-            if (Get-Command Get-WinGetPackage -ErrorAction SilentlyContinue) {
-                $packagesWithUpdates = Get-WinGetPackage | Where-Object IsUpdateAvailable
-                foreach ($pkg in $packagesWithUpdates) {
-                    Write-Info "[DRY-RUN] Would update: $($pkg.Id) (Current: $($pkg.InstalledVersion), Available: $($pkg.AvailableVersion))"
-                    $updatedApps += $pkg.Id
-                }
-            }
-            else {
-                Write-Info '[DRY-RUN] Would update available packages (using CLI fallback)'
-            }
-        }
-    }
+    # Ongoing app updates are handled by Winget-AutoUpdate (set up below), which runs as SYSTEM on a
+    # schedule — not an install-time pass that upgrades every installed app synchronously as the
+    # elevating admin (that was slow, silent, and largely failed under cross-user elevation; issue #170).
 
     # Configure Windows Terminal defaults(issue #74): default profile and default terminal app.
     Set-WindowsTerminalDefaults -WhatIf:$WhatIf
@@ -488,16 +409,6 @@ function Invoke-WingetInstall {
     $appList = Format-AppList -AppArray $failedApps
     if ($appList) {
         $rows += , @('Failed', $appList)
-    }
-
-    $appList = Format-AppList -AppArray $updatedApps
-    if ($appList) {
-        $rows += , @('Updated', $appList)
-    }
-
-    $appList = Format-AppList -AppArray $failedUpdateApps
-    if ($appList) {
-        $rows += , @('Failed to Update', $appList)
     }
 
     Write-Table -Headers $headers -Rows $rows -PromptForGridView $true -Title 'Installation Summary'
