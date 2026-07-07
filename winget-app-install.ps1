@@ -210,6 +210,18 @@ function Restart-WithElevation {
 .PARAMETER Scope
     The scope to which the path should be added. Valid values are 'User' and 'System'.
 #>
+function Get-WindowsBuildNumber {
+    <#
+    .SYNOPSIS
+        Returns the current Windows OS build number as an integer (e.g. 19045, 26100).
+    .DESCRIPTION
+        Wrapped in a function so callers (and tests) can reason about the build gate used to decide
+        how to install the latest PowerShell: winget's machine-scope MSIX provisioning only works on
+        build 26100 (Windows 11 24H2) and later (issue #166).
+    #>
+    return [int][System.Environment]::OSVersion.Version.Build
+}
+
 function Add-ToEnvironmentPath {
     param (
         [Parameter(Mandatory = $true)]
@@ -726,13 +738,14 @@ function Invoke-WingetInstall {
         @{name = 'Git.Git' },
         @{name = 'Klocman.BulkCrapUninstaller' },
         @{name = 'Dell.CommandUpdate.Universal' },
-        # Force the MSI ('wix') installer for PowerShell. Since the winget package for PowerShell
-        # 7.6.0, winget picks the MSIX bundle by default, and MSIX registers per-user — it fails to
-        # deploy in an elevated cross-user / machine-scope context with "The current system
-        # configuration does not support the installation of this package." The MSI installs
-        # machine-wide and avoids that (issue #163). Note: PowerShell 7.7+ manifests drop the MSI, so
-        # this override will need revisiting when the default line moves past 7.6.
-        @{name = 'Microsoft.PowerShell'; installerType = 'wix' },
+        # PowerShell needs a version-agnostic install strategy (no pinning — always the latest):
+        # winget installs PowerShell 7.6+ as an MSIX by default, which registers per-user and fails
+        # to deploy in an elevated cross-user / machine-scope context ("The current system
+        # configuration does not support the installation of this package"). Install-PowerShellLatest
+        # prefers the MSI while it exists (<= 7.6), and once the MSI is gone (7.7+) installs the latest
+        # MSIX machine-wide — natively on Windows 24H2+, or via DISM provisioning on older Windows
+        # (issues #163/#166). It self-verifies, so the loop must not re-check it with `winget list`.
+        @{name = 'Microsoft.PowerShell'; install = 'Install-PowerShellLatest' },
         @{name = 'Microsoft.WindowsTerminal' }
     );
 
@@ -822,39 +835,54 @@ function Invoke-WingetInstall {
             if (![String]::Join('', $listApp).Contains($app.name)) {
                 if (-not $WhatIf) {
                     Write-Info "Installing: $($app.name)"
-                    # Install through the helper so the transient 0x80073d19 session error is
-                    # retried with backoff (issue #150) instead of failing on the first hit.
-                    # Pass any per-app installer-type override (e.g. 'wix' to force PowerShell's MSI).
-                    [void](Install-WingetPackage -PackageId $app.name -InstallerType $app.installerType)
-
-                    # Verify installation with timeout
-                    $verifyProcess = Start-Process -FilePath 'winget' `
-                        -ArgumentList 'list', '--exact', '--id', $app.name, '--accept-source-agreements' `
-                        -NoNewWindow `
-                        -PassThru `
-                        -RedirectStandardOutput "$env:TEMP\winget_verify_output.txt" `
-                        -RedirectStandardError "$env:TEMP\winget_verify_error.txt"
-
-                    if ($verifyProcess.WaitForExit(15000)) {
-                        $installResult = Get-Content "$env:TEMP\winget_verify_output.txt" -ErrorAction SilentlyContinue
-                        if (![String]::Join('', $installResult).Contains($app.name)) {
-                            Write-ErrorMessage "Failed to install: $($app.name). No package found matching input criteria."
-                            $failedApps += $app.name
-                        }
-                        else {
+                    if ($app.install) {
+                        # Package-specific installer that performs its own verification (e.g.
+                        # PowerShell, whose DISM-provisioned MSIX path never shows up under
+                        # `winget list` for the elevating account). Trust its Installed result.
+                        $installOutcome = & $app.install
+                        if ($installOutcome.Installed) {
                             Write-Success "Successfully installed: $($app.name)"
                             $installedApps += $app.name
                         }
+                        else {
+                            Write-ErrorMessage "Failed to install: $($app.name)."
+                            $failedApps += $app.name
+                        }
                     }
                     else {
-                        Write-WarningMessage "Verification timed out for: $($app.name). Assuming installation failed."
-                        $verifyProcess.Kill()
-                        $failedApps += $app.name
-                    }
+                        # Install through the helper so the transient 0x80073d19 session error is
+                        # retried with backoff (issue #150) instead of failing on the first hit.
+                        [void](Install-WingetPackage -PackageId $app.name -InstallerType $app.installerType)
 
-                    # Cleanup temp files
-                    Remove-Item "$env:TEMP\winget_verify_output.txt" -ErrorAction SilentlyContinue
-                    Remove-Item "$env:TEMP\winget_verify_error.txt" -ErrorAction SilentlyContinue
+                        # Verify installation with timeout
+                        $verifyProcess = Start-Process -FilePath 'winget' `
+                            -ArgumentList 'list', '--exact', '--id', $app.name, '--accept-source-agreements' `
+                            -NoNewWindow `
+                            -PassThru `
+                            -RedirectStandardOutput "$env:TEMP\winget_verify_output.txt" `
+                            -RedirectStandardError "$env:TEMP\winget_verify_error.txt"
+
+                        if ($verifyProcess.WaitForExit(15000)) {
+                            $installResult = Get-Content "$env:TEMP\winget_verify_output.txt" -ErrorAction SilentlyContinue
+                            if (![String]::Join('', $installResult).Contains($app.name)) {
+                                Write-ErrorMessage "Failed to install: $($app.name). No package found matching input criteria."
+                                $failedApps += $app.name
+                            }
+                            else {
+                                Write-Success "Successfully installed: $($app.name)"
+                                $installedApps += $app.name
+                            }
+                        }
+                        else {
+                            Write-WarningMessage "Verification timed out for: $($app.name). Assuming installation failed."
+                            $verifyProcess.Kill()
+                            $failedApps += $app.name
+                        }
+
+                        # Cleanup temp files
+                        Remove-Item "$env:TEMP\winget_verify_output.txt" -ErrorAction SilentlyContinue
+                        Remove-Item "$env:TEMP\winget_verify_error.txt" -ErrorAction SilentlyContinue
+                    }
                 }
                 else {
                     Write-Info "[DRY-RUN] Would install: $($app.name)"
@@ -970,40 +998,53 @@ function Invoke-WingetInstall {
             foreach ($appName in $appsToRetry) {
                 try {
                     Write-Info "Retrying: $appName"
-                    # Route the final retry through the same helper so a lingering 0x80073d19
-                    # session error gets its backoff retries here too (issue #150). Preserve any
-                    # per-app installer-type override (e.g. PowerShell's forced 'wix'/MSI installer).
-                    $retryInstallerType = ($apps | Where-Object { $_.name -eq $appName } | Select-Object -First 1).installerType
-                    [void](Install-WingetPackage -PackageId $appName -InstallerType $retryInstallerType)
-
-                    # Verify installation with timeout
-                    $verifyProcess = Start-Process -FilePath 'winget' `
-                        -ArgumentList 'list', '--exact', '--id', $appName, '--accept-source-agreements' `
-                        -NoNewWindow `
-                        -PassThru `
-                        -RedirectStandardOutput "$env:TEMP\winget_retry_verify_output.txt" `
-                        -RedirectStandardError "$env:TEMP\winget_retry_verify_error.txt"
-
-                    if ($verifyProcess.WaitForExit(15000)) {
-                        $retryResult = Get-Content "$env:TEMP\winget_retry_verify_output.txt" -ErrorAction SilentlyContinue
-                        if (![String]::Join('', $retryResult).Contains($appName)) {
-                            Write-ErrorMessage "Retry failed: $appName"
-                            $failedApps += $appName
-                        }
-                        else {
+                    $appDef = $apps | Where-Object { $_.name -eq $appName } | Select-Object -First 1
+                    if ($appDef.install) {
+                        # Package-specific self-verifying installer (e.g. PowerShell). Trust its result.
+                        $retryOutcome = & $appDef.install
+                        if ($retryOutcome.Installed) {
                             Write-Success "Retry succeeded: $appName"
                             $installedApps += $appName
                         }
+                        else {
+                            Write-ErrorMessage "Retry failed: $appName"
+                            $failedApps += $appName
+                        }
                     }
                     else {
-                        Write-WarningMessage "Verification timed out for retry: $appName. Assuming installation failed."
-                        try { $verifyProcess.Kill() } catch { }
-                        $failedApps += $appName
-                    }
+                        # Route the final retry through the same helper so a lingering 0x80073d19
+                        # session error gets its backoff retries here too (issue #150).
+                        [void](Install-WingetPackage -PackageId $appName -InstallerType $appDef.installerType)
 
-                    # Cleanup temp files
-                    Remove-Item "$env:TEMP\winget_retry_verify_output.txt" -ErrorAction SilentlyContinue
-                    Remove-Item "$env:TEMP\winget_retry_verify_error.txt" -ErrorAction SilentlyContinue
+                        # Verify installation with timeout
+                        $verifyProcess = Start-Process -FilePath 'winget' `
+                            -ArgumentList 'list', '--exact', '--id', $appName, '--accept-source-agreements' `
+                            -NoNewWindow `
+                            -PassThru `
+                            -RedirectStandardOutput "$env:TEMP\winget_retry_verify_output.txt" `
+                            -RedirectStandardError "$env:TEMP\winget_retry_verify_error.txt"
+
+                        if ($verifyProcess.WaitForExit(15000)) {
+                            $retryResult = Get-Content "$env:TEMP\winget_retry_verify_output.txt" -ErrorAction SilentlyContinue
+                            if (![String]::Join('', $retryResult).Contains($appName)) {
+                                Write-ErrorMessage "Retry failed: $appName"
+                                $failedApps += $appName
+                            }
+                            else {
+                                Write-Success "Retry succeeded: $appName"
+                                $installedApps += $appName
+                            }
+                        }
+                        else {
+                            Write-WarningMessage "Verification timed out for retry: $appName. Assuming installation failed."
+                            try { $verifyProcess.Kill() } catch { }
+                            $failedApps += $appName
+                        }
+
+                        # Cleanup temp files
+                        Remove-Item "$env:TEMP\winget_retry_verify_output.txt" -ErrorAction SilentlyContinue
+                        Remove-Item "$env:TEMP\winget_retry_verify_error.txt" -ErrorAction SilentlyContinue
+                    }
                 }
                 catch {
                     Write-ErrorMessage "Retry failed: $appName. Error: $_"
@@ -1499,7 +1540,11 @@ function Enable-ScheduledUpdatesCheck {
         Unregister-ScheduledTask -TaskName $taskName -TaskPath $taskPath -Confirm:$false
     }
 
-    $psExecutable = if (Get-Command pwsh -ErrorAction SilentlyContinue) { 'pwsh.exe' } else { 'powershell.exe' }
+    # Run the scheduled task under Windows PowerShell 5.1 rather than pwsh. As PowerShell moves to
+    # MSIX-only packaging (7.7+), an MSIX-installed pwsh isn't reliably launchable by system-level
+    # services like Task Scheduler, whereas powershell.exe is always present and service-runnable.
+    # The update helper only needs the WingetAppSetup module, which targets 5.1 (issue #166).
+    $psExecutable = 'powershell.exe'
     try {
         $taskAction = New-ScheduledTaskAction -Execute $psExecutable -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$($paths.HelperScript)`""
         if ($UpdateFrequency -eq 'Daily') {
@@ -2670,6 +2715,235 @@ function Install-WingetPackage {
         SessionErrorExhausted = ($exitCode -eq $sessionLogoffExitCode)
         MachineScopeFellBack  = $machineScopeFellBack
     }
+}
+
+<#
+.SYNOPSIS
+    Returns true when winget reports the given package id as installed for the current account.
+.PARAMETER PackageId
+    The winget package id to check.
+#>
+function Test-WingetPackageInstalled {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$PackageId
+    )
+
+    try {
+        $output = winget list --exact --id $PackageId --accept-source-agreements --disable-interactivity 2>&1
+        return ([String]::Join('', $output)).Contains($PackageId)
+    }
+    catch {
+        return $false
+    }
+}
+
+<#
+.SYNOPSIS
+    Returns true when an MSIX/Appx package matching the given DisplayName/PackageName pattern is
+    provisioned for all users on this machine.
+.PARAMETER NameLike
+    A wildcard pattern matched against provisioned packages' DisplayName and PackageName.
+#>
+function Test-AppxPackageProvisioned {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$NameLike
+    )
+
+    try {
+        $provisioned = Get-AppxProvisionedPackage -Online -ErrorAction Stop
+        return [bool]($provisioned | Where-Object { $_.DisplayName -like $NameLike -or $_.PackageName -like $NameLike })
+    }
+    catch {
+        return $false
+    }
+}
+
+<#
+.SYNOPSIS
+    Provisions a downloaded MSIX package (and its dependencies) for all users via DISM.
+.DESCRIPTION
+    Thin, mockable wrapper around Add-AppxProvisionedPackage. The Appx/DISM provider is unreliable
+    under PowerShell 7 (it throws 0x80131539 "Operation is not supported on this platform"), so when
+    running under pwsh the provisioning is delegated to Windows PowerShell 5.1. Returns True on
+    success. A winget-source MSIX has no Store license, so -SkipLicense is used when no license file
+    was downloaded alongside it.
+.PARAMETER PackagePath
+    Full path to the .msixbundle/.msix to provision.
+.PARAMETER DependencyPackagePath
+    Full paths to dependency packages (e.g. Microsoft.WindowsAppRuntime, VCLibs).
+.PARAMETER LicensePath
+    Optional path to a downloaded license .xml.
+#>
+function Invoke-AppxProvisioning {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$PackagePath,
+
+        [Parameter(Mandatory = $false)]
+        [string[]]$DependencyPackagePath = @(),
+
+        [Parameter(Mandatory = $false)]
+        [string]$LicensePath
+    )
+
+    $hasLicense = $LicensePath -and (Test-Path $LicensePath)
+
+    try {
+        if ($PSVersionTable.PSEdition -eq 'Core') {
+            # Delegate to Windows PowerShell 5.1, where the Appx/DISM provider works.
+            $depClause = if ($DependencyPackagePath.Count -gt 0) {
+                "-DependencyPackagePath @('" + ($DependencyPackagePath -join "','") + "')"
+            }
+            else { '' }
+            $licClause = if ($hasLicense) { "-LicensePath '$LicensePath'" } else { '-SkipLicense' }
+            $command = "Add-AppxProvisionedPackage -Online -PackagePath '$PackagePath' $depClause $licClause -ErrorAction Stop | Out-Null"
+            & powershell.exe -NoProfile -ExecutionPolicy Bypass -Command $command
+            return ($LASTEXITCODE -eq 0)
+        }
+
+        $params = @{ Online = $true; PackagePath = $PackagePath; ErrorAction = 'Stop' }
+        if ($DependencyPackagePath.Count -gt 0) { $params.DependencyPackagePath = $DependencyPackagePath }
+        if ($hasLicense) { $params.LicensePath = $LicensePath } else { $params.SkipLicense = $true }
+        Add-AppxProvisionedPackage @params | Out-Null
+        return $true
+    }
+    catch {
+        Write-ErrorMessage "Add-AppxProvisionedPackage failed for '$PackagePath': $_"
+        return $false
+    }
+}
+
+<#
+.SYNOPSIS
+    Installs the latest MSIX build of a winget package machine-wide by provisioning it via DISM.
+.DESCRIPTION
+    Used for the holdout case where a package is MSIX-only (e.g. PowerShell 7.7+) AND the machine is
+    Windows older than build 26100, where winget cannot machine-scope-provision an MSIX because it
+    calls the provisioning API from a packaged process. This function instead downloads the latest
+    MSIX (plus dependencies and license) with `winget download`, then provisions it for all users
+    with Add-AppxProvisionedPackage from a NON-packaged process, which is not subject to that bug
+    (issue #166).
+
+    VALIDATION NOTE: the DISM path is dormant until a package's winget default becomes MSIX-only
+    (PowerShell 7.7 GA). It is covered by unit tests with mocked external calls, but the end-to-end
+    behavior (winget download layout, license handling, all-users provisioning under cross-user
+    elevation) should be validated on a real Windows 10 machine before it is relied upon.
+.PARAMETER PackageId
+    The winget package id to provision (e.g. 'Microsoft.PowerShell').
+.PARAMETER VerifyNameLike
+    Wildcard matched against provisioned package names to confirm success. Defaults to *<last id
+    segment>* (e.g. '*PowerShell*').
+.RETURNS
+    [hashtable] @{ ExitCode = <int>; Installed = <bool> }
+#>
+function Install-MsixProvisionedPackage {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$PackageId,
+
+        [Parameter(Mandatory = $false)]
+        [string]$VerifyNameLike
+    )
+
+    if (-not $VerifyNameLike) {
+        $VerifyNameLike = '*' + ($PackageId -split '\.')[-1] + '*'
+    }
+
+    $downloadDir = Join-Path $env:TEMP ('winget-msix-' + [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $downloadDir -Force | Out-Null
+
+    try {
+        Write-Info "Downloading the latest MSIX for $PackageId to provision it machine-wide..."
+        $downloadArgs = @(
+            'download', '-e', '--id', $PackageId, '--source', 'winget', '--installer-type', 'msix',
+            '--accept-source-agreements', '--accept-package-agreements',
+            '--download-directory', $downloadDir
+        )
+        $download = Start-Process -FilePath 'winget' -ArgumentList $downloadArgs -NoNewWindow -Wait -PassThru
+        if ($download.ExitCode -ne 0) {
+            Write-ErrorMessage "winget download failed for $PackageId (exit code $($download.ExitCode))."
+            return @{ ExitCode = $download.ExitCode; Installed = $false }
+        }
+
+        $downloaded = Get-ChildItem -Path $downloadDir -Recurse -File -ErrorAction SilentlyContinue
+        $bundle = $downloaded |
+            Where-Object { $_.Extension -in '.msixbundle', '.appxbundle', '.msix', '.appx' -and $_.FullName -notmatch '[\\/]Dependencies[\\/]' } |
+            Select-Object -First 1
+        if (-not $bundle) {
+            Write-ErrorMessage "No MSIX package was found in the winget download for $PackageId."
+            return @{ ExitCode = -1; Installed = $false }
+        }
+        $dependencies = @($downloaded |
+                Where-Object { $_.Extension -in '.msix', '.appx' -and $_.FullName -match '[\\/]Dependencies[\\/]' } |
+                ForEach-Object { $_.FullName })
+        $license = $downloaded | Where-Object { $_.Extension -eq '.xml' -and $_.Name -match 'License' } | Select-Object -First 1
+
+        Write-Info "Provisioning $($bundle.Name) for all users..."
+        $provisioned = Invoke-AppxProvisioning -PackagePath $bundle.FullName -DependencyPackagePath $dependencies -LicensePath $license.FullName
+
+        $installed = $provisioned -and (Test-AppxPackageProvisioned -NameLike $VerifyNameLike)
+        if ($installed) {
+            Write-Success "$PackageId provisioned machine-wide via DISM."
+        }
+        else {
+            Write-ErrorMessage "Failed to provision $PackageId machine-wide."
+        }
+        return @{ ExitCode = if ($installed) { 0 } else { -1 }; Installed = $installed }
+    }
+    finally {
+        Remove-Item -Path $downloadDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+<#
+.SYNOPSIS
+    Installs the newest available PowerShell, choosing a delivery that works in an elevated
+    cross-user / machine-scope context (no version pinning).
+.DESCRIPTION
+    winget's default already tracks the latest PowerShell, so this never pins a version. It only
+    chooses HOW to deliver the latest so the install works machine-wide when the script is elevated
+    as a different account than the logged-on user (issues #163/#166):
+
+      1. Prefer the MSI while the current line still ships one (<= 7.6). The MSI installs machine-wide,
+         works on any Windows build, and is runnable under Task Scheduler.
+      2. Once the MSI is gone (7.7+), winget offers only the MSIX:
+         - Windows 24H2+ (build >= 26100): winget can machine-scope-provision the MSIX, so install the
+           default package directly.
+         - Older Windows: winget's machine-scope MSIX provisioning is broken (it calls the provisioning
+           API from a packaged process), so provision the MSIX for all users via DISM instead.
+
+    The result's Installed flag is authoritative — the DISM-provisioned path does not appear under
+    `winget list` for the elevating account, so the caller must not re-verify PowerShell with winget.
+.RETURNS
+    [hashtable] @{ ExitCode = <int>; Installed = <bool>; Method = 'msi' | 'msix-native' | 'msix-provisioned' }
+#>
+function Install-PowerShellLatest {
+    param (
+        [Parameter(Mandatory = $false)]
+        [string]$PackageId = 'Microsoft.PowerShell'
+    )
+
+    # 0x8A150010 (APPINSTALLER_CLI_ERROR_NO_APPLICABLE_INSTALLER) as a signed Int32 — what winget
+    # returns for `--installer-type wix` once the manifest no longer ships an MSI.
+    $noApplicableInstallerExitCode = -1978335216
+
+    # 1. Prefer the MSI while the latest version still ships one.
+    $result = Install-WingetPackage -PackageId $PackageId -InstallerType 'wix'
+    if ($result.ExitCode -ne $noApplicableInstallerExitCode) {
+        return @{ ExitCode = $result.ExitCode; Installed = (Test-WingetPackageInstalled -PackageId $PackageId); Method = 'msi' }
+    }
+
+    # 2. No MSI for the latest version (7.7+): install the latest MSIX machine-wide.
+    Write-Info "No MSI is available for the latest $PackageId; installing the MSIX package instead."
+    if ((Get-WindowsBuildNumber) -ge 26100) {
+        $result = Install-WingetPackage -PackageId $PackageId
+        return @{ ExitCode = $result.ExitCode; Installed = (Test-WingetPackageInstalled -PackageId $PackageId); Method = 'msix-native' }
+    }
+
+    $provision = Install-MsixProvisionedPackage -PackageId $PackageId
+    return @{ ExitCode = $provision.ExitCode; Installed = $provision.Installed; Method = 'msix-provisioned' }
 }
 
 # ------------------------------------------------Main Script------------------------------------------------

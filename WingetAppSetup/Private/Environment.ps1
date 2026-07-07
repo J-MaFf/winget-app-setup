@@ -8,6 +8,18 @@
 .PARAMETER Scope
     The scope to which the path should be added. Valid values are 'User' and 'System'.
 #>
+function Get-WindowsBuildNumber {
+    <#
+    .SYNOPSIS
+        Returns the current Windows OS build number as an integer (e.g. 19045, 26100).
+    .DESCRIPTION
+        Wrapped in a function so callers (and tests) can reason about the build gate used to decide
+        how to install the latest PowerShell: winget's machine-scope MSIX provisioning only works on
+        build 26100 (Windows 11 24H2) and later (issue #166).
+    #>
+    return [int][System.Environment]::OSVersion.Version.Build
+}
+
 function Add-ToEnvironmentPath {
     param (
         [Parameter(Mandatory = $true)]

@@ -722,3 +722,232 @@ function Install-WingetPackage {
     }
 }
 
+<#
+.SYNOPSIS
+    Returns true when winget reports the given package id as installed for the current account.
+.PARAMETER PackageId
+    The winget package id to check.
+#>
+function Test-WingetPackageInstalled {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$PackageId
+    )
+
+    try {
+        $output = winget list --exact --id $PackageId --accept-source-agreements --disable-interactivity 2>&1
+        return ([String]::Join('', $output)).Contains($PackageId)
+    }
+    catch {
+        return $false
+    }
+}
+
+<#
+.SYNOPSIS
+    Returns true when an MSIX/Appx package matching the given DisplayName/PackageName pattern is
+    provisioned for all users on this machine.
+.PARAMETER NameLike
+    A wildcard pattern matched against provisioned packages' DisplayName and PackageName.
+#>
+function Test-AppxPackageProvisioned {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$NameLike
+    )
+
+    try {
+        $provisioned = Get-AppxProvisionedPackage -Online -ErrorAction Stop
+        return [bool]($provisioned | Where-Object { $_.DisplayName -like $NameLike -or $_.PackageName -like $NameLike })
+    }
+    catch {
+        return $false
+    }
+}
+
+<#
+.SYNOPSIS
+    Provisions a downloaded MSIX package (and its dependencies) for all users via DISM.
+.DESCRIPTION
+    Thin, mockable wrapper around Add-AppxProvisionedPackage. The Appx/DISM provider is unreliable
+    under PowerShell 7 (it throws 0x80131539 "Operation is not supported on this platform"), so when
+    running under pwsh the provisioning is delegated to Windows PowerShell 5.1. Returns True on
+    success. A winget-source MSIX has no Store license, so -SkipLicense is used when no license file
+    was downloaded alongside it.
+.PARAMETER PackagePath
+    Full path to the .msixbundle/.msix to provision.
+.PARAMETER DependencyPackagePath
+    Full paths to dependency packages (e.g. Microsoft.WindowsAppRuntime, VCLibs).
+.PARAMETER LicensePath
+    Optional path to a downloaded license .xml.
+#>
+function Invoke-AppxProvisioning {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$PackagePath,
+
+        [Parameter(Mandatory = $false)]
+        [string[]]$DependencyPackagePath = @(),
+
+        [Parameter(Mandatory = $false)]
+        [string]$LicensePath
+    )
+
+    $hasLicense = $LicensePath -and (Test-Path $LicensePath)
+
+    try {
+        if ($PSVersionTable.PSEdition -eq 'Core') {
+            # Delegate to Windows PowerShell 5.1, where the Appx/DISM provider works.
+            $depClause = if ($DependencyPackagePath.Count -gt 0) {
+                "-DependencyPackagePath @('" + ($DependencyPackagePath -join "','") + "')"
+            }
+            else { '' }
+            $licClause = if ($hasLicense) { "-LicensePath '$LicensePath'" } else { '-SkipLicense' }
+            $command = "Add-AppxProvisionedPackage -Online -PackagePath '$PackagePath' $depClause $licClause -ErrorAction Stop | Out-Null"
+            & powershell.exe -NoProfile -ExecutionPolicy Bypass -Command $command
+            return ($LASTEXITCODE -eq 0)
+        }
+
+        $params = @{ Online = $true; PackagePath = $PackagePath; ErrorAction = 'Stop' }
+        if ($DependencyPackagePath.Count -gt 0) { $params.DependencyPackagePath = $DependencyPackagePath }
+        if ($hasLicense) { $params.LicensePath = $LicensePath } else { $params.SkipLicense = $true }
+        Add-AppxProvisionedPackage @params | Out-Null
+        return $true
+    }
+    catch {
+        Write-ErrorMessage "Add-AppxProvisionedPackage failed for '$PackagePath': $_"
+        return $false
+    }
+}
+
+<#
+.SYNOPSIS
+    Installs the latest MSIX build of a winget package machine-wide by provisioning it via DISM.
+.DESCRIPTION
+    Used for the holdout case where a package is MSIX-only (e.g. PowerShell 7.7+) AND the machine is
+    Windows older than build 26100, where winget cannot machine-scope-provision an MSIX because it
+    calls the provisioning API from a packaged process. This function instead downloads the latest
+    MSIX (plus dependencies and license) with `winget download`, then provisions it for all users
+    with Add-AppxProvisionedPackage from a NON-packaged process, which is not subject to that bug
+    (issue #166).
+
+    VALIDATION NOTE: the DISM path is dormant until a package's winget default becomes MSIX-only
+    (PowerShell 7.7 GA). It is covered by unit tests with mocked external calls, but the end-to-end
+    behavior (winget download layout, license handling, all-users provisioning under cross-user
+    elevation) should be validated on a real Windows 10 machine before it is relied upon.
+.PARAMETER PackageId
+    The winget package id to provision (e.g. 'Microsoft.PowerShell').
+.PARAMETER VerifyNameLike
+    Wildcard matched against provisioned package names to confirm success. Defaults to *<last id
+    segment>* (e.g. '*PowerShell*').
+.RETURNS
+    [hashtable] @{ ExitCode = <int>; Installed = <bool> }
+#>
+function Install-MsixProvisionedPackage {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$PackageId,
+
+        [Parameter(Mandatory = $false)]
+        [string]$VerifyNameLike
+    )
+
+    if (-not $VerifyNameLike) {
+        $VerifyNameLike = '*' + ($PackageId -split '\.')[-1] + '*'
+    }
+
+    $downloadDir = Join-Path $env:TEMP ('winget-msix-' + [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $downloadDir -Force | Out-Null
+
+    try {
+        Write-Info "Downloading the latest MSIX for $PackageId to provision it machine-wide..."
+        $downloadArgs = @(
+            'download', '-e', '--id', $PackageId, '--source', 'winget', '--installer-type', 'msix',
+            '--accept-source-agreements', '--accept-package-agreements',
+            '--download-directory', $downloadDir
+        )
+        $download = Start-Process -FilePath 'winget' -ArgumentList $downloadArgs -NoNewWindow -Wait -PassThru
+        if ($download.ExitCode -ne 0) {
+            Write-ErrorMessage "winget download failed for $PackageId (exit code $($download.ExitCode))."
+            return @{ ExitCode = $download.ExitCode; Installed = $false }
+        }
+
+        $downloaded = Get-ChildItem -Path $downloadDir -Recurse -File -ErrorAction SilentlyContinue
+        $bundle = $downloaded |
+            Where-Object { $_.Extension -in '.msixbundle', '.appxbundle', '.msix', '.appx' -and $_.FullName -notmatch '[\\/]Dependencies[\\/]' } |
+            Select-Object -First 1
+        if (-not $bundle) {
+            Write-ErrorMessage "No MSIX package was found in the winget download for $PackageId."
+            return @{ ExitCode = -1; Installed = $false }
+        }
+        $dependencies = @($downloaded |
+                Where-Object { $_.Extension -in '.msix', '.appx' -and $_.FullName -match '[\\/]Dependencies[\\/]' } |
+                ForEach-Object { $_.FullName })
+        $license = $downloaded | Where-Object { $_.Extension -eq '.xml' -and $_.Name -match 'License' } | Select-Object -First 1
+
+        Write-Info "Provisioning $($bundle.Name) for all users..."
+        $provisioned = Invoke-AppxProvisioning -PackagePath $bundle.FullName -DependencyPackagePath $dependencies -LicensePath $license.FullName
+
+        $installed = $provisioned -and (Test-AppxPackageProvisioned -NameLike $VerifyNameLike)
+        if ($installed) {
+            Write-Success "$PackageId provisioned machine-wide via DISM."
+        }
+        else {
+            Write-ErrorMessage "Failed to provision $PackageId machine-wide."
+        }
+        return @{ ExitCode = if ($installed) { 0 } else { -1 }; Installed = $installed }
+    }
+    finally {
+        Remove-Item -Path $downloadDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+<#
+.SYNOPSIS
+    Installs the newest available PowerShell, choosing a delivery that works in an elevated
+    cross-user / machine-scope context (no version pinning).
+.DESCRIPTION
+    winget's default already tracks the latest PowerShell, so this never pins a version. It only
+    chooses HOW to deliver the latest so the install works machine-wide when the script is elevated
+    as a different account than the logged-on user (issues #163/#166):
+
+      1. Prefer the MSI while the current line still ships one (<= 7.6). The MSI installs machine-wide,
+         works on any Windows build, and is runnable under Task Scheduler.
+      2. Once the MSI is gone (7.7+), winget offers only the MSIX:
+         - Windows 24H2+ (build >= 26100): winget can machine-scope-provision the MSIX, so install the
+           default package directly.
+         - Older Windows: winget's machine-scope MSIX provisioning is broken (it calls the provisioning
+           API from a packaged process), so provision the MSIX for all users via DISM instead.
+
+    The result's Installed flag is authoritative — the DISM-provisioned path does not appear under
+    `winget list` for the elevating account, so the caller must not re-verify PowerShell with winget.
+.RETURNS
+    [hashtable] @{ ExitCode = <int>; Installed = <bool>; Method = 'msi' | 'msix-native' | 'msix-provisioned' }
+#>
+function Install-PowerShellLatest {
+    param (
+        [Parameter(Mandatory = $false)]
+        [string]$PackageId = 'Microsoft.PowerShell'
+    )
+
+    # 0x8A150010 (APPINSTALLER_CLI_ERROR_NO_APPLICABLE_INSTALLER) as a signed Int32 — what winget
+    # returns for `--installer-type wix` once the manifest no longer ships an MSI.
+    $noApplicableInstallerExitCode = -1978335216
+
+    # 1. Prefer the MSI while the latest version still ships one.
+    $result = Install-WingetPackage -PackageId $PackageId -InstallerType 'wix'
+    if ($result.ExitCode -ne $noApplicableInstallerExitCode) {
+        return @{ ExitCode = $result.ExitCode; Installed = (Test-WingetPackageInstalled -PackageId $PackageId); Method = 'msi' }
+    }
+
+    # 2. No MSI for the latest version (7.7+): install the latest MSIX machine-wide.
+    Write-Info "No MSI is available for the latest $PackageId; installing the MSIX package instead."
+    if ((Get-WindowsBuildNumber) -ge 26100) {
+        $result = Install-WingetPackage -PackageId $PackageId
+        return @{ ExitCode = $result.ExitCode; Installed = (Test-WingetPackageInstalled -PackageId $PackageId); Method = 'msix-native' }
+    }
+
+    $provision = Install-MsixProvisionedPackage -PackageId $PackageId
+    return @{ ExitCode = $provision.ExitCode; Installed = $provision.Installed; Method = 'msix-provisioned' }
+}
+
