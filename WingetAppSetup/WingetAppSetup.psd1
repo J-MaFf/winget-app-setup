@@ -14,6 +14,7 @@
         # Winget core
         'Test-AndInstallWingetModule', 'Test-AndInstallWinget', 'Test-WingetSourceTrusted', 'Set-Sources', 'Test-WingetSources',
         'Invoke-WingetCommand', 'Test-UpdatesAvailable', 'Get-UpdateReport', 'Initialize-WingetSourcesForUser', 'Install-WingetPackage',
+        'Test-WingetPackageInstalled', 'Test-AppxPackageProvisioned', 'Invoke-AppxProvisioning', 'Install-MsixProvisionedPackage', 'Install-PowerShellLatest',
         # Scheduled / on-demand updates
         'Get-UpdateSettingsPaths', 'New-DefaultUpdateConfiguration', 'Get-UpdateConfiguration', 'Save-UpdateConfiguration',
         'Test-ScheduledUpdatesTaskExists', 'Install-UpdateHelperScript', 'Enable-ScheduledUpdatesCheck',

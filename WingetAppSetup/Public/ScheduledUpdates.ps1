@@ -245,7 +245,11 @@ function Enable-ScheduledUpdatesCheck {
         Unregister-ScheduledTask -TaskName $taskName -TaskPath $taskPath -Confirm:$false
     }
 
-    $psExecutable = if (Get-Command pwsh -ErrorAction SilentlyContinue) { 'pwsh.exe' } else { 'powershell.exe' }
+    # Run the scheduled task under Windows PowerShell 5.1 rather than pwsh. As PowerShell moves to
+    # MSIX-only packaging (7.7+), an MSIX-installed pwsh isn't reliably launchable by system-level
+    # services like Task Scheduler, whereas powershell.exe is always present and service-runnable.
+    # The update helper only needs the WingetAppSetup module, which targets 5.1 (issue #166).
+    $psExecutable = 'powershell.exe'
     try {
         $taskAction = New-ScheduledTaskAction -Execute $psExecutable -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$($paths.HelperScript)`""
         if ($UpdateFrequency -eq 'Daily') {

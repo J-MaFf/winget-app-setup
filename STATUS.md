@@ -13,7 +13,15 @@ Windows-only cmdlets.
 
 ## Current State — 2026-07-07
 
-Healthy. **Cross-user PowerShell install fixed** ([#163](https://github.com/J-MaFf/winget-app-setup/issues/163)):
+Healthy. **PowerShell now installs the latest version, version-agnostically** ([#166](https://github.com/J-MaFf/winget-app-setup/issues/166)):
+`Install-PowerShellLatest` prefers the MSI while the current line ships one (≤ 7.6), and once the MSI
+is gone (7.7+) installs the latest MSIX machine-wide — natively on Windows 24H2+ (build ≥ 26100) or via
+`Add-AppxProvisionedPackage` DISM provisioning on older Windows (a non-packaged process, so it dodges
+winget's packaged-context provisioning bug). No version is ever pinned. The scheduled-update task now
+runs under Windows PowerShell 5.1 so an MSIX-only pwsh can't break it. The DISM path is dormant until
+7.7 GA and needs validation on a real Windows 10 machine before it is relied upon.
+
+**Cross-user PowerShell install fixed** ([#163](https://github.com/J-MaFf/winget-app-setup/issues/163)):
 on an elevated session whose interactive desktop belongs to a different user, `Microsoft.PowerShell`
 still failed with "The current system configuration does not support the installation of this package"
 even after #159. winget installs PowerShell 7.6+ as an MSIX by default, and — even with `--scope machine`
@@ -79,6 +87,7 @@ Pester installs persist across runs there ([#161](https://github.com/J-MaFf/wing
 
 | Issue | Description | PR |
 |-------|-------------|----|
+| [#166](https://github.com/J-MaFf/winget-app-setup/issues/166) | Always-latest PowerShell install strategy for the MSIX-only (7.7+) future; harden scheduled task for MSIX | [#167](https://github.com/J-MaFf/winget-app-setup/pull/167) |
 | [#163](https://github.com/J-MaFf/winget-app-setup/issues/163) | PowerShell fails to install on elevated cross-user sessions (winget picks MSIX over MSI for 7.6+) | [#165](https://github.com/J-MaFf/winget-app-setup/pull/165) |
 | [#164](https://github.com/J-MaFf/winget-app-setup/issues/164) | Scheduled-update setup errors under `irm \| iex` (empty `$PSScriptRoot`); weekly task registered but never deployed | [#165](https://github.com/J-MaFf/winget-app-setup/pull/165) |
 | [#106](https://github.com/J-MaFf/winget-app-setup/issues/106) | Split `winget-app-install.ps1` into a module with a generated bundle | [#109](https://github.com/J-MaFf/winget-app-setup/pull/109) |

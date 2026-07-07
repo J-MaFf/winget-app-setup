@@ -1988,6 +1988,107 @@ Describe 'Initialize-WingetSourcesForUser (cross-user bootstrap, issue #159)' {
     }
 }
 
+Describe 'Install-PowerShellLatest (always-latest strategy, issue #166)' {
+    BeforeEach {
+        Mock Write-Host { }
+        Mock Write-Info { }
+        Mock Write-Success { }
+        Mock Write-WarningMessage { }
+        Mock Write-ErrorMessage { }
+    }
+
+    It 'installs the MSI while one is available and verifies via winget' {
+        Mock Install-WingetPackage { @{ ExitCode = 0 } }
+        Mock Test-WingetPackageInstalled { $true }
+        Mock Install-MsixProvisionedPackage { throw 'DISM provisioning should not run when an MSI is available' }
+
+        $result = Install-PowerShellLatest
+
+        $result.Method | Should -Be 'msi'
+        $result.Installed | Should -Be $true
+        Assert-MockCalled Install-WingetPackage -Times 1 -Exactly -ParameterFilter { $InstallerType -eq 'wix' }
+        Assert-MockCalled Install-MsixProvisionedPackage -Times 0 -Exactly
+    }
+
+    It 'installs the native MSIX on Windows 24H2+ when no MSI is available' {
+        # -1978335216 = NO_APPLICABLE_INSTALLER: the wix (MSI) installer is gone at 7.7+.
+        Mock Install-WingetPackage { @{ ExitCode = -1978335216 } } -ParameterFilter { $InstallerType -eq 'wix' }
+        Mock Install-WingetPackage { @{ ExitCode = 0 } } -ParameterFilter { -not $InstallerType }
+        Mock Get-WindowsBuildNumber { 26100 }
+        Mock Test-WingetPackageInstalled { $true }
+        Mock Install-MsixProvisionedPackage { throw 'DISM provisioning should not run on 24H2+' }
+
+        $result = Install-PowerShellLatest
+
+        $result.Method | Should -Be 'msix-native'
+        $result.Installed | Should -Be $true
+        Assert-MockCalled Install-MsixProvisionedPackage -Times 0 -Exactly
+    }
+
+    It 'provisions the MSIX via DISM on older Windows when no MSI is available' {
+        Mock Install-WingetPackage { @{ ExitCode = -1978335216 } }
+        Mock Get-WindowsBuildNumber { 19045 }
+        Mock Install-MsixProvisionedPackage { @{ ExitCode = 0; Installed = $true } }
+
+        $result = Install-PowerShellLatest
+
+        $result.Method | Should -Be 'msix-provisioned'
+        $result.Installed | Should -Be $true
+        Assert-MockCalled Install-MsixProvisionedPackage -Times 1 -Exactly
+    }
+}
+
+Describe 'Install-MsixProvisionedPackage (DISM provisioning, issue #166)' {
+    BeforeEach {
+        Mock Write-Host { }
+        Mock Write-Info { }
+        Mock Write-Success { }
+        Mock Write-ErrorMessage { }
+        Mock New-Item { }
+        Mock Remove-Item { }
+    }
+
+    It 'downloads, provisions, and verifies the MSIX for all users' {
+        Mock Start-Process { [pscustomobject]@{ ExitCode = 0 } }
+        Mock Get-ChildItem {
+            @(
+                [pscustomobject]@{ Name = 'PowerShell-7.7.0-win.msixbundle'; Extension = '.msixbundle'; FullName = 'C:\dl\PowerShell-7.7.0-win.msixbundle' },
+                [pscustomobject]@{ Name = 'Microsoft.WindowsAppRuntime.msix'; Extension = '.msix'; FullName = 'C:\dl\Dependencies\Microsoft.WindowsAppRuntime.msix' },
+                [pscustomobject]@{ Name = 'PowerShell_License1.xml'; Extension = '.xml'; FullName = 'C:\dl\PowerShell_License1.xml' }
+            )
+        }
+        Mock Invoke-AppxProvisioning { $true }
+        Mock Test-AppxPackageProvisioned { $true }
+
+        $result = Install-MsixProvisionedPackage -PackageId 'Microsoft.PowerShell'
+
+        $result.Installed | Should -Be $true
+        Assert-MockCalled Invoke-AppxProvisioning -Times 1 -Exactly -ParameterFilter {
+            $PackagePath -like '*PowerShell-7.7.0-win.msixbundle' -and (($DependencyPackagePath -join '') -like '*WindowsAppRuntime*')
+        }
+    }
+
+    It 'returns not-installed when winget download fails' {
+        Mock Start-Process { [pscustomobject]@{ ExitCode = 1 } }
+        Mock Invoke-AppxProvisioning { throw 'provisioning should not run after a failed download' }
+
+        $result = Install-MsixProvisionedPackage -PackageId 'Microsoft.PowerShell'
+
+        $result.Installed | Should -Be $false
+        Assert-MockCalled Invoke-AppxProvisioning -Times 0 -Exactly
+    }
+
+    It 'returns not-installed when no MSIX is found in the download' {
+        Mock Start-Process { [pscustomobject]@{ ExitCode = 0 } }
+        Mock Get-ChildItem { @() }
+        Mock Invoke-AppxProvisioning { throw 'provisioning should not run when no package was found' }
+
+        $result = Install-MsixProvisionedPackage -PackageId 'Microsoft.PowerShell'
+
+        $result.Installed | Should -Be $false
+    }
+}
+
 Describe 'App list consistency' {
     It 'Should keep install and uninstall app lists in sync' {
         $installApps = Get-Content "$PSScriptRoot\winget-app-install.ps1" |
@@ -2325,6 +2426,15 @@ Describe 'Scheduled Updates - Unit Tests' -Tag 'ScheduledUpdates' {
         $config.UpdateFrequency | Should -Be 'Daily'
         $config.AutoInstall | Should -BeFalse
         Assert-MockCalled Register-ScheduledTask -Times 1
+    }
+
+    It 'Enable-ScheduledUpdatesCheck runs the scheduled task under Windows PowerShell (powershell.exe)' {
+        Mock Install-UpdateHelperScript { $env:APPDATA + '\winget-app-setup\Update-InstalledApps.ps1' }
+
+        [void](Enable-ScheduledUpdatesCheck -SkipPrompt:$true -UpdateFrequency Weekly -AutoInstall:$true)
+
+        # MSIX-only pwsh (7.7+) isn't reliably runnable under Task Scheduler; the task must use 5.1.
+        Assert-MockCalled New-ScheduledTaskAction -Times 1 -ParameterFilter { $Execute -eq 'powershell.exe' }
     }
 
     It 'Enable-ScheduledUpdatesCheck degrades gracefully when helper deployment fails' {

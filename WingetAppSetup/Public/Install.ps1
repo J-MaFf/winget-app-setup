@@ -137,13 +137,14 @@ function Invoke-WingetInstall {
         @{name = 'Git.Git' },
         @{name = 'Klocman.BulkCrapUninstaller' },
         @{name = 'Dell.CommandUpdate.Universal' },
-        # Force the MSI ('wix') installer for PowerShell. Since the winget package for PowerShell
-        # 7.6.0, winget picks the MSIX bundle by default, and MSIX registers per-user — it fails to
-        # deploy in an elevated cross-user / machine-scope context with "The current system
-        # configuration does not support the installation of this package." The MSI installs
-        # machine-wide and avoids that (issue #163). Note: PowerShell 7.7+ manifests drop the MSI, so
-        # this override will need revisiting when the default line moves past 7.6.
-        @{name = 'Microsoft.PowerShell'; installerType = 'wix' },
+        # PowerShell needs a version-agnostic install strategy (no pinning — always the latest):
+        # winget installs PowerShell 7.6+ as an MSIX by default, which registers per-user and fails
+        # to deploy in an elevated cross-user / machine-scope context ("The current system
+        # configuration does not support the installation of this package"). Install-PowerShellLatest
+        # prefers the MSI while it exists (<= 7.6), and once the MSI is gone (7.7+) installs the latest
+        # MSIX machine-wide — natively on Windows 24H2+, or via DISM provisioning on older Windows
+        # (issues #163/#166). It self-verifies, so the loop must not re-check it with `winget list`.
+        @{name = 'Microsoft.PowerShell'; install = 'Install-PowerShellLatest' },
         @{name = 'Microsoft.WindowsTerminal' }
     );
 
@@ -233,39 +234,54 @@ function Invoke-WingetInstall {
             if (![String]::Join('', $listApp).Contains($app.name)) {
                 if (-not $WhatIf) {
                     Write-Info "Installing: $($app.name)"
-                    # Install through the helper so the transient 0x80073d19 session error is
-                    # retried with backoff (issue #150) instead of failing on the first hit.
-                    # Pass any per-app installer-type override (e.g. 'wix' to force PowerShell's MSI).
-                    [void](Install-WingetPackage -PackageId $app.name -InstallerType $app.installerType)
-
-                    # Verify installation with timeout
-                    $verifyProcess = Start-Process -FilePath 'winget' `
-                        -ArgumentList 'list', '--exact', '--id', $app.name, '--accept-source-agreements' `
-                        -NoNewWindow `
-                        -PassThru `
-                        -RedirectStandardOutput "$env:TEMP\winget_verify_output.txt" `
-                        -RedirectStandardError "$env:TEMP\winget_verify_error.txt"
-
-                    if ($verifyProcess.WaitForExit(15000)) {
-                        $installResult = Get-Content "$env:TEMP\winget_verify_output.txt" -ErrorAction SilentlyContinue
-                        if (![String]::Join('', $installResult).Contains($app.name)) {
-                            Write-ErrorMessage "Failed to install: $($app.name). No package found matching input criteria."
-                            $failedApps += $app.name
-                        }
-                        else {
+                    if ($app.install) {
+                        # Package-specific installer that performs its own verification (e.g.
+                        # PowerShell, whose DISM-provisioned MSIX path never shows up under
+                        # `winget list` for the elevating account). Trust its Installed result.
+                        $installOutcome = & $app.install
+                        if ($installOutcome.Installed) {
                             Write-Success "Successfully installed: $($app.name)"
                             $installedApps += $app.name
                         }
+                        else {
+                            Write-ErrorMessage "Failed to install: $($app.name)."
+                            $failedApps += $app.name
+                        }
                     }
                     else {
-                        Write-WarningMessage "Verification timed out for: $($app.name). Assuming installation failed."
-                        $verifyProcess.Kill()
-                        $failedApps += $app.name
-                    }
+                        # Install through the helper so the transient 0x80073d19 session error is
+                        # retried with backoff (issue #150) instead of failing on the first hit.
+                        [void](Install-WingetPackage -PackageId $app.name -InstallerType $app.installerType)
 
-                    # Cleanup temp files
-                    Remove-Item "$env:TEMP\winget_verify_output.txt" -ErrorAction SilentlyContinue
-                    Remove-Item "$env:TEMP\winget_verify_error.txt" -ErrorAction SilentlyContinue
+                        # Verify installation with timeout
+                        $verifyProcess = Start-Process -FilePath 'winget' `
+                            -ArgumentList 'list', '--exact', '--id', $app.name, '--accept-source-agreements' `
+                            -NoNewWindow `
+                            -PassThru `
+                            -RedirectStandardOutput "$env:TEMP\winget_verify_output.txt" `
+                            -RedirectStandardError "$env:TEMP\winget_verify_error.txt"
+
+                        if ($verifyProcess.WaitForExit(15000)) {
+                            $installResult = Get-Content "$env:TEMP\winget_verify_output.txt" -ErrorAction SilentlyContinue
+                            if (![String]::Join('', $installResult).Contains($app.name)) {
+                                Write-ErrorMessage "Failed to install: $($app.name). No package found matching input criteria."
+                                $failedApps += $app.name
+                            }
+                            else {
+                                Write-Success "Successfully installed: $($app.name)"
+                                $installedApps += $app.name
+                            }
+                        }
+                        else {
+                            Write-WarningMessage "Verification timed out for: $($app.name). Assuming installation failed."
+                            $verifyProcess.Kill()
+                            $failedApps += $app.name
+                        }
+
+                        # Cleanup temp files
+                        Remove-Item "$env:TEMP\winget_verify_output.txt" -ErrorAction SilentlyContinue
+                        Remove-Item "$env:TEMP\winget_verify_error.txt" -ErrorAction SilentlyContinue
+                    }
                 }
                 else {
                     Write-Info "[DRY-RUN] Would install: $($app.name)"
@@ -381,40 +397,53 @@ function Invoke-WingetInstall {
             foreach ($appName in $appsToRetry) {
                 try {
                     Write-Info "Retrying: $appName"
-                    # Route the final retry through the same helper so a lingering 0x80073d19
-                    # session error gets its backoff retries here too (issue #150). Preserve any
-                    # per-app installer-type override (e.g. PowerShell's forced 'wix'/MSI installer).
-                    $retryInstallerType = ($apps | Where-Object { $_.name -eq $appName } | Select-Object -First 1).installerType
-                    [void](Install-WingetPackage -PackageId $appName -InstallerType $retryInstallerType)
-
-                    # Verify installation with timeout
-                    $verifyProcess = Start-Process -FilePath 'winget' `
-                        -ArgumentList 'list', '--exact', '--id', $appName, '--accept-source-agreements' `
-                        -NoNewWindow `
-                        -PassThru `
-                        -RedirectStandardOutput "$env:TEMP\winget_retry_verify_output.txt" `
-                        -RedirectStandardError "$env:TEMP\winget_retry_verify_error.txt"
-
-                    if ($verifyProcess.WaitForExit(15000)) {
-                        $retryResult = Get-Content "$env:TEMP\winget_retry_verify_output.txt" -ErrorAction SilentlyContinue
-                        if (![String]::Join('', $retryResult).Contains($appName)) {
-                            Write-ErrorMessage "Retry failed: $appName"
-                            $failedApps += $appName
-                        }
-                        else {
+                    $appDef = $apps | Where-Object { $_.name -eq $appName } | Select-Object -First 1
+                    if ($appDef.install) {
+                        # Package-specific self-verifying installer (e.g. PowerShell). Trust its result.
+                        $retryOutcome = & $appDef.install
+                        if ($retryOutcome.Installed) {
                             Write-Success "Retry succeeded: $appName"
                             $installedApps += $appName
                         }
+                        else {
+                            Write-ErrorMessage "Retry failed: $appName"
+                            $failedApps += $appName
+                        }
                     }
                     else {
-                        Write-WarningMessage "Verification timed out for retry: $appName. Assuming installation failed."
-                        try { $verifyProcess.Kill() } catch { }
-                        $failedApps += $appName
-                    }
+                        # Route the final retry through the same helper so a lingering 0x80073d19
+                        # session error gets its backoff retries here too (issue #150).
+                        [void](Install-WingetPackage -PackageId $appName -InstallerType $appDef.installerType)
 
-                    # Cleanup temp files
-                    Remove-Item "$env:TEMP\winget_retry_verify_output.txt" -ErrorAction SilentlyContinue
-                    Remove-Item "$env:TEMP\winget_retry_verify_error.txt" -ErrorAction SilentlyContinue
+                        # Verify installation with timeout
+                        $verifyProcess = Start-Process -FilePath 'winget' `
+                            -ArgumentList 'list', '--exact', '--id', $appName, '--accept-source-agreements' `
+                            -NoNewWindow `
+                            -PassThru `
+                            -RedirectStandardOutput "$env:TEMP\winget_retry_verify_output.txt" `
+                            -RedirectStandardError "$env:TEMP\winget_retry_verify_error.txt"
+
+                        if ($verifyProcess.WaitForExit(15000)) {
+                            $retryResult = Get-Content "$env:TEMP\winget_retry_verify_output.txt" -ErrorAction SilentlyContinue
+                            if (![String]::Join('', $retryResult).Contains($appName)) {
+                                Write-ErrorMessage "Retry failed: $appName"
+                                $failedApps += $appName
+                            }
+                            else {
+                                Write-Success "Retry succeeded: $appName"
+                                $installedApps += $appName
+                            }
+                        }
+                        else {
+                            Write-WarningMessage "Verification timed out for retry: $appName. Assuming installation failed."
+                            try { $verifyProcess.Kill() } catch { }
+                            $failedApps += $appName
+                        }
+
+                        # Cleanup temp files
+                        Remove-Item "$env:TEMP\winget_retry_verify_output.txt" -ErrorAction SilentlyContinue
+                        Remove-Item "$env:TEMP\winget_retry_verify_error.txt" -ErrorAction SilentlyContinue
+                    }
                 }
                 catch {
                     Write-ErrorMessage "Retry failed: $appName. Error: $_"
