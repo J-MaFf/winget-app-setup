@@ -1524,8 +1524,9 @@ Describe 'Invoke-WingetSourceProbe' {
             ($ArgumentList -contains 'update') -and
             ($ArgumentList -contains '--name') -and
             ($ArgumentList -contains 'winget') -and
-            ($ArgumentList -contains '--accept-source-agreements') -and
-            ($ArgumentList -contains '--disable-interactivity')
+            ($ArgumentList -contains '--disable-interactivity') -and
+            # --accept-source-agreements is INVALID for `winget source update` (0x8A150002); must be absent.
+            ($ArgumentList -notcontains '--accept-source-agreements')
         }
     }
 

@@ -1,14 +1,18 @@
 <#
 .SYNOPSIS
-    Opens and updates the winget source for the current account, accepting source agreements.
+    Updates the winget source for the current account to force its per-user first-use bootstrap.
 .DESCRIPTION
-    Runs `winget source update --name winget --accept-source-agreements --disable-interactivity`
-    under a timeout guard. This is the lightest command that forces winget's per-user first-use
-    bootstrap: it registers the Microsoft.Winget.Source package for the invoking account and
-    persists source agreement acceptance in that account's winget state (acceptance is saved
-    per-user; see microsoft/winget-cli SourceList.cpp). Exit code 0 therefore means the account is
-    initialized for unattended installs from the winget source — the only source the install
-    phase uses (`--source winget`).
+    Runs `winget source update --name winget --disable-interactivity` under a timeout guard. This is
+    the lightest command that forces winget's per-user first-use bootstrap: it registers the
+    Microsoft.Winget.Source package for the invoking account. Exit code 0 therefore means the account
+    can reach the winget source — the only source the install phase uses (`--source winget`).
+
+    Do NOT pass `--accept-source-agreements` here: it is not a valid argument for `winget source
+    update` and makes winget reject the whole command with 0x8A150002 (INVALID_CL_ARGUMENTS,
+    -1978335230), which false-failed this probe on every machine (issue #172-followup). Source
+    agreements are accepted where the flag is valid — the install commands all pass
+    `--accept-source-agreements` (Install-WingetPackage), and the caller handles a genuine
+    0x8A150046 (agreements-not-accepted) result explicitly.
 
     The probe is deliberately scoped to the winget source: msstore can fail for an account that
     has never logged on interactively even when the winget source is healthy
@@ -28,7 +32,7 @@ function Invoke-WingetSourceProbe {
 
     try {
         $probeProcess = Start-Process -FilePath 'winget' `
-            -ArgumentList 'source', 'update', '--name', 'winget', '--accept-source-agreements', '--disable-interactivity' `
+            -ArgumentList 'source', 'update', '--name', 'winget', '--disable-interactivity' `
             -NoNewWindow `
             -PassThru `
             -RedirectStandardOutput "$env:TEMP\winget_source_probe_output.txt" `
