@@ -11,9 +11,20 @@ scripts target **Windows PowerShell / PowerShell 7 on Windows**; they cannot run
 Linux or macOS because they depend on `winget`, the `Microsoft.WinGet.Client` module, and
 Windows-only cmdlets.
 
-## Current State — 2026-07-06
+## Current State — 2026-07-07
 
-Healthy. **Cross-user `0x80073d19` root cause fixed** ([#159](https://github.com/J-MaFf/winget-app-setup/issues/159)):
+Healthy. **Cross-user PowerShell install fixed** ([#163](https://github.com/J-MaFf/winget-app-setup/issues/163)):
+on an elevated session whose interactive desktop belongs to a different user, `Microsoft.PowerShell`
+still failed with "The current system configuration does not support the installation of this package"
+even after #159. winget installs PowerShell 7.6+ as an MSIX by default, and — even with `--scope machine`
+— winget's installer-type precedence still selects the MSIX, whose machine-scope provisioning fails as a
+packaged app on Windows < build 26100. The PowerShell entry now forces `--installer-type wix` (the
+machine-wide MSI) via a new `-InstallerType` parameter on `Install-WingetPackage`. Also fixed the
+scheduled-update setup erroring under `irm | iex` (empty `$PSScriptRoot`) and registering a weekly task
+whose helper was never deployed ([#164](https://github.com/J-MaFf/winget-app-setup/issues/164)): the
+remote path now downloads the helper plus the self-contained script, and deployment is best-effort.
+
+Earlier, the **cross-user `0x80073d19` root cause was fixed** ([#159](https://github.com/J-MaFf/winget-app-setup/issues/159)):
 the error that persisted through #81/#104/#107/#150 is `ERROR_DEPLOYMENT_BLOCKED_BY_USER_LOG_OFF` —
 when the script is elevated as a different account than the logged-on user, winget's per-user MSIX
 bootstrap is blocked because that account has no interactive logon session. The installer now
@@ -68,6 +79,8 @@ Pester installs persist across runs there ([#161](https://github.com/J-MaFf/wing
 
 | Issue | Description | PR |
 |-------|-------------|----|
+| [#163](https://github.com/J-MaFf/winget-app-setup/issues/163) | PowerShell fails to install on elevated cross-user sessions (winget picks MSIX over MSI for 7.6+) | [#165](https://github.com/J-MaFf/winget-app-setup/pull/165) |
+| [#164](https://github.com/J-MaFf/winget-app-setup/issues/164) | Scheduled-update setup errors under `irm \| iex` (empty `$PSScriptRoot`); weekly task registered but never deployed | [#165](https://github.com/J-MaFf/winget-app-setup/pull/165) |
 | [#106](https://github.com/J-MaFf/winget-app-setup/issues/106) | Split `winget-app-install.ps1` into a module with a generated bundle | [#109](https://github.com/J-MaFf/winget-app-setup/pull/109) |
 | [#110](https://github.com/J-MaFf/winget-app-setup/issues/110) | Migrate uninstall + update-helper scripts to consume the module | [#109](https://github.com/J-MaFf/winget-app-setup/pull/109) |
 | [#111](https://github.com/J-MaFf/winget-app-setup/issues/111) | Remove orphaned tests for functions that no longer exist | [#109](https://github.com/J-MaFf/winget-app-setup/pull/109) |

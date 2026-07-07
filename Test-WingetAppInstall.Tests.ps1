@@ -1799,6 +1799,26 @@ Describe 'Install-WingetPackage (0x80073d19 session-error backoff)' {
         Assert-MockCalled Start-Process -Times 3 -Exactly
         Assert-MockCalled Start-Sleep -Times 1 -Exactly
     }
+
+    It 'Passes --installer-type to winget when an installer type is supplied' {
+        $script:exitCodeQueue = @(0)
+
+        Install-WingetPackage -PackageId 'Microsoft.PowerShell' -InstallerType 'wix' -MaxAttempts 1 | Out-Null
+
+        Assert-MockCalled Start-Process -Times 1 -Exactly -ParameterFilter {
+            ($ArgumentList -join ' ') -match '--installer-type\s+wix'
+        }
+    }
+
+    It 'Omits --installer-type when no installer type is supplied' {
+        $script:exitCodeQueue = @(0)
+
+        Install-WingetPackage -PackageId 'Test.App' -MaxAttempts 1 | Out-Null
+
+        Assert-MockCalled Start-Process -Times 1 -Exactly -ParameterFilter {
+            $ArgumentList -notcontains '--installer-type'
+        }
+    }
 }
 
 Describe 'Invoke-WingetSourceProbe' {
@@ -2307,6 +2327,18 @@ Describe 'Scheduled Updates - Unit Tests' -Tag 'ScheduledUpdates' {
         Assert-MockCalled Register-ScheduledTask -Times 1
     }
 
+    It 'Enable-ScheduledUpdatesCheck degrades gracefully when helper deployment fails' {
+        Mock Get-Command { $null } -ParameterFilter { $Name -eq 'pwsh' }
+        Mock Install-UpdateHelperScript { throw 'download blocked' }
+        Mock Write-WarningMessage { }
+
+        $result = Enable-ScheduledUpdatesCheck -SkipPrompt:$true -UpdateFrequency Daily -AutoInstall:$false
+
+        # A helper-deployment failure must not register a task or abort — it returns $false.
+        $result | Should -BeFalse
+        Assert-MockCalled Register-ScheduledTask -Times 0 -Scope It
+    }
+
     It 'Disable-ScheduledUpdatesCheck should remove task and persist disabled config' {
         Mock Get-ScheduledTask { @{ Name = 'WingetAppSetup-ScheduledUpdates' } }
 
@@ -2622,5 +2654,38 @@ Describe 'Install-UpdateHelperScript module deployment' {
         Mock Test-Path { $false } -ParameterFilter { $Path -like '*WingetAppSetup' }
 
         { Install-UpdateHelperScript } | Should -Throw '*WingetAppSetup module is missing*'
+    }
+
+    It 'downloads the helper and self-contained script when running remotely (no source root)' {
+        $base = Join-Path ([IO.Path]::GetTempPath()) ('was-' + [guid]::NewGuid())
+        Mock Get-UpdateSettingsPaths {
+            @{
+                BasePath        = $base
+                ConfigFile      = Join-Path $base 'update-config.json'
+                UpdateChecks    = Join-Path $base 'update-checks'
+                RollbackScripts = Join-Path $base 'rollback-scripts'
+                HelperScript    = Join-Path $base 'Update-InstalledApps.ps1'
+                ModuleDir       = Join-Path $base 'WingetAppSetup'
+            }
+        }
+        # Nothing exists on disk (remote iex install); the download branch should run.
+        Mock Test-Path { $false }
+        Mock New-Item { }
+        Mock Remove-Item { }
+        Mock Copy-Item { }
+        Mock Invoke-WebRequest { }
+
+        # An empty source root is how remote (irm | iex) execution presents ($PSScriptRoot is empty).
+        $result = Install-UpdateHelperScript -SourceRoot ''
+
+        Assert-MockCalled Copy-Item -Times 0 -Scope It
+        Assert-MockCalled Invoke-WebRequest -Times 2 -Scope It
+        Assert-MockCalled Invoke-WebRequest -Times 1 -Scope It -ParameterFilter {
+            $Uri -like '*/Update-InstalledApps.ps1' -and $OutFile -like '*Update-InstalledApps.ps1'
+        }
+        Assert-MockCalled Invoke-WebRequest -Times 1 -Scope It -ParameterFilter {
+            $Uri -like '*/winget-app-install.ps1' -and $OutFile -like '*winget-app-install.ps1'
+        }
+        $result | Should -Be (Join-Path $base 'Update-InstalledApps.ps1')
     }
 }

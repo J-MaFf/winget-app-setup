@@ -137,7 +137,13 @@ function Invoke-WingetInstall {
         @{name = 'Git.Git' },
         @{name = 'Klocman.BulkCrapUninstaller' },
         @{name = 'Dell.CommandUpdate.Universal' },
-        @{name = 'Microsoft.PowerShell' },
+        # Force the MSI ('wix') installer for PowerShell. Since the winget package for PowerShell
+        # 7.6.0, winget picks the MSIX bundle by default, and MSIX registers per-user — it fails to
+        # deploy in an elevated cross-user / machine-scope context with "The current system
+        # configuration does not support the installation of this package." The MSI installs
+        # machine-wide and avoids that (issue #163). Note: PowerShell 7.7+ manifests drop the MSI, so
+        # this override will need revisiting when the default line moves past 7.6.
+        @{name = 'Microsoft.PowerShell'; installerType = 'wix' },
         @{name = 'Microsoft.WindowsTerminal' }
     );
 
@@ -229,7 +235,8 @@ function Invoke-WingetInstall {
                     Write-Info "Installing: $($app.name)"
                     # Install through the helper so the transient 0x80073d19 session error is
                     # retried with backoff (issue #150) instead of failing on the first hit.
-                    [void](Install-WingetPackage -PackageId $app.name)
+                    # Pass any per-app installer-type override (e.g. 'wix' to force PowerShell's MSI).
+                    [void](Install-WingetPackage -PackageId $app.name -InstallerType $app.installerType)
 
                     # Verify installation with timeout
                     $verifyProcess = Start-Process -FilePath 'winget' `
@@ -375,8 +382,10 @@ function Invoke-WingetInstall {
                 try {
                     Write-Info "Retrying: $appName"
                     # Route the final retry through the same helper so a lingering 0x80073d19
-                    # session error gets its backoff retries here too (issue #150).
-                    [void](Install-WingetPackage -PackageId $appName)
+                    # session error gets its backoff retries here too (issue #150). Preserve any
+                    # per-app installer-type override (e.g. PowerShell's forced 'wix'/MSI installer).
+                    $retryInstallerType = ($apps | Where-Object { $_.name -eq $appName } | Select-Object -First 1).installerType
+                    [void](Install-WingetPackage -PackageId $appName -InstallerType $retryInstallerType)
 
                     # Verify installation with timeout
                     $verifyProcess = Start-Process -FilePath 'winget' `

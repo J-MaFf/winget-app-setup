@@ -21,9 +21,23 @@ foreach ($path in @($basePath, $checksPath, $rollbackPath)) {
 }
 
 # Config and update-report logic come from the WingetAppSetup module — the single source of
-# truth (see issue #106). Install-UpdateHelperScript deploys a copy of the module next to this
-# script under %APPDATA% so it is importable when the task runs without the repository present.
-Import-Module (Join-Path $PSScriptRoot 'WingetAppSetup\WingetAppSetup.psd1') -Force
+# truth (see issue #106). Install-UpdateHelperScript deploys the code next to this script under
+# %APPDATA% so it is available when the task runs without the repository present:
+#   - Local installs copy the WingetAppSetup module folder here (imported below).
+#   - Remote (irm | iex) installs have no module on disk, so they drop the self-contained
+#     winget-app-install.ps1 here instead; dot-sourcing it loads the same functions (its tail is
+#     guarded against executing when dot-sourced). See issue #164.
+$moduleManifest = Join-Path $PSScriptRoot 'WingetAppSetup\WingetAppSetup.psd1'
+$selfContainedScript = Join-Path $PSScriptRoot 'winget-app-install.ps1'
+if (Test-Path $moduleManifest) {
+    Import-Module $moduleManifest -Force
+}
+elseif (Test-Path $selfContainedScript) {
+    . $selfContainedScript
+}
+else {
+    throw "WingetAppSetup functions are unavailable: neither '$moduleManifest' nor '$selfContainedScript' was found next to the update helper."
+}
 
 function Write-UpdateLog {
     param (
