@@ -456,56 +456,6 @@ function Test-UpdatesAvailable {
 
 <#
 .SYNOPSIS
-    Returns updates available for installed packages.
-.DESCRIPTION
-    Output format: PackageName | CurrentVersion | AvailableVersion.
-#>
-function Get-UpdateReport {
-    try {
-        if (Get-Command Get-WinGetPackage -ErrorAction SilentlyContinue) {
-            return @(Get-WinGetPackage | Where-Object IsUpdateAvailable | ForEach-Object {
-                    [PSCustomObject]@{
-                        PackageName      = $_.Id
-                        CurrentVersion   = [string]$_.InstalledVersion
-                        AvailableVersion = [string]$_.AvailableVersion
-                    }
-                })
-        }
-    }
-    catch {
-        Write-WarningMessage "Failed to query updates using WinGet module. Falling back to CLI: $_"
-    }
-
-    $report = @()
-    try {
-        $upgradeOutput = & winget upgrade --disable-interactivity --accept-source-agreements 2>&1
-        foreach ($line in $upgradeOutput) {
-            if (-not $line) { continue }
-            if ($line -match '^\s*Name\s+Id\s+Version\s+Available') { continue }
-            if ($line -match '^\s*-{3,}') { continue }
-            if ($line -match 'No installed package found|No available upgrade found|No newer package versions are available') { continue }
-
-            $columns = $line.Trim() -split '\s{2,}'
-            # Validate the Id column looks like a real winget package id before trusting it,
-            # so wrapped descriptions or stray output rows are not parsed as packages.
-            if ($columns.Count -ge 4 -and $columns[1] -match '^[\w][\w.\-]+\.[\w][\w.\-]+$') {
-                $report += [PSCustomObject]@{
-                    PackageName      = $columns[1]
-                    CurrentVersion   = $columns[2]
-                    AvailableVersion = $columns[3]
-                }
-            }
-        }
-    }
-    catch {
-        Write-WarningMessage "Failed to query updates using winget CLI: $_"
-    }
-
-    return @($report | Sort-Object PackageName -Unique)
-}
-
-<#
-.SYNOPSIS
     Initializes winget sources and agreements for the account performing the installs.
 .DESCRIPTION
     Winget state — source registration and agreement acceptance — is per-user. When the script is

@@ -46,16 +46,5 @@ param (
     [Parameter(Mandatory = $false)]
     [switch]$WhatIf,
     [Parameter(Mandatory = $false)]
-    [switch]$EnableScheduledUpdates,
-    [Parameter(Mandatory = $false)]
-    [switch]$DisableScheduledUpdates,
-    [Parameter(Mandatory = $false)]
-    [switch]$CheckForUpdates,
-    [Parameter(Mandatory = $false)]
-    [switch]$AutoInstallUpdates,
-    [Parameter(Mandatory = $false)]
-    [ValidateSet('Weekly', 'Daily')]
-    [string]$UpdateFrequency = 'Weekly',
-    [Parameter(Mandatory = $false)]
     [switch]$SkipSystemCheck
 )

@@ -2335,133 +2335,6 @@ Describe 'Windows Terminal configuration' {
     }
 }
 
-Describe 'Scheduled Updates - Unit Tests' -Tag 'ScheduledUpdates' {
-    BeforeAll {
-    }
-
-    BeforeEach {
-        $script:originalAppData = $env:APPDATA
-        $env:APPDATA = Join-Path $TestDrive 'appdata'
-        New-Item -Path $env:APPDATA -ItemType Directory -Force | Out-Null
-
-        Mock Get-WinGetPackage { }
-        Mock winget { }
-        Mock Get-ScheduledTask { $null }
-        # On Windows Register-ScheduledTask is a real cmdlet whose -Action/-Trigger/-Settings/
-        # -Principal parameters require [CimInstance] arguments tagged with a specific PSTypeName
-        # (e.g. Microsoft.Management.Infrastructure.CimInstance#MSFT_TaskSettings). Returning plain
-        # hashtables from these mocks fails argument binding *before* the Register mock body runs,
-        # so Enable-ScheduledUpdatesCheck's try/catch swallows it and returns $false (issue #111).
-        # Pester's -RemoveParameterType can't help here: it strips the static type but leaves the
-        # CDXML argument-transformation / PSTypeName attributes. Returning bare client-side
-        # CimInstances with the matching class names satisfies binding on Windows, and is harmless
-        # on Linux where these cmdlets don't exist (the mocks become plain typeless functions).
-        Mock New-ScheduledTaskAction { [Microsoft.Management.Infrastructure.CimInstance]::new('MSFT_TaskAction') }
-        Mock New-ScheduledTaskTrigger { [Microsoft.Management.Infrastructure.CimInstance]::new('MSFT_TaskTrigger') }
-        Mock New-ScheduledTaskSettingsSet { [Microsoft.Management.Infrastructure.CimInstance]::new('MSFT_TaskSettings') }
-        Mock New-ScheduledTaskPrincipal { [Microsoft.Management.Infrastructure.CimInstance]::new('MSFT_TaskPrincipal') }
-        Mock Register-ScheduledTask { }
-        Mock Unregister-ScheduledTask { }
-        Mock Write-Info { }
-        Mock Write-WarningMessage { }
-        Mock Write-Success { }
-        Mock Write-ErrorMessage { }
-    }
-
-    AfterEach {
-        $env:APPDATA = $script:originalAppData
-    }
-
-    It 'Should expose scheduled update management functions' {
-        (Get-Command Enable-ScheduledUpdatesCheck -ErrorAction Stop) | Should -Not -BeNullOrEmpty
-        (Get-Command Disable-ScheduledUpdatesCheck -ErrorAction Stop) | Should -Not -BeNullOrEmpty
-        (Get-Command Get-UpdateReport -ErrorAction Stop) | Should -Not -BeNullOrEmpty
-    }
-
-    It 'Get-UpdateReport should return module-based update rows' {
-        Mock Get-Command { $true } -ParameterFilter { $Name -eq 'Get-WinGetPackage' }
-        Mock Get-WinGetPackage {
-            @(
-                [PSCustomObject]@{ Id = 'Git.Git'; InstalledVersion = '2.45.0'; AvailableVersion = '2.46.0'; IsUpdateAvailable = $true },
-                [PSCustomObject]@{ Id = 'Microsoft.PowerShell'; InstalledVersion = '7.4.2'; AvailableVersion = '7.4.3'; IsUpdateAvailable = $false }
-            )
-        }
-
-        $report = @(Get-UpdateReport)
-
-        $report.Count | Should -Be 1
-        $report[0].PackageName | Should -Be 'Git.Git'
-        $report[0].CurrentVersion | Should -Be '2.45.0'
-        $report[0].AvailableVersion | Should -Be '2.46.0'
-    }
-
-    It 'Get-UpdateReport should parse CLI output when module is unavailable' {
-        Mock Get-Command { $null } -ParameterFilter { $Name -eq 'Get-WinGetPackage' }
-        Mock winget {
-            @(
-                'Name                           Id                    Version     Available   Source'
-                '--------------------------------------------------------------------------------'
-                'Google Chrome                  Google.Chrome         126.0       127.0       winget'
-                'Git                            Git.Git               2.45.0      2.46.0      winget'
-            )
-        } -ParameterFilter { $args -contains 'upgrade' }
-
-        $report = @(Get-UpdateReport)
-
-        $report.Count | Should -Be 2
-        $report[0].PackageName | Should -Be 'Git.Git'
-        $report[1].PackageName | Should -Be 'Google.Chrome'
-    }
-
-    It 'Enable-ScheduledUpdatesCheck should create task and persist config' {
-        Mock Get-Command { $null } -ParameterFilter { $Name -eq 'pwsh' }
-        Mock Install-UpdateHelperScript { $env:APPDATA + '\winget-app-setup\Update-InstalledApps.ps1' }
-
-        $result = Enable-ScheduledUpdatesCheck -SkipPrompt:$true -UpdateFrequency Daily -AutoInstall:$false
-        $paths = Get-UpdateSettingsPaths
-        $config = Get-Content -Path $paths.ConfigFile -Raw | ConvertFrom-Json
-
-        $result | Should -BeTrue
-        $config.EnabledScheduledUpdates | Should -BeTrue
-        $config.UpdateFrequency | Should -Be 'Daily'
-        $config.AutoInstall | Should -BeFalse
-        Assert-MockCalled Register-ScheduledTask -Times 1
-    }
-
-    It 'Enable-ScheduledUpdatesCheck runs the scheduled task under Windows PowerShell (powershell.exe)' {
-        Mock Install-UpdateHelperScript { $env:APPDATA + '\winget-app-setup\Update-InstalledApps.ps1' }
-
-        [void](Enable-ScheduledUpdatesCheck -SkipPrompt:$true -UpdateFrequency Weekly -AutoInstall:$true)
-
-        # MSIX-only pwsh (7.7+) isn't reliably runnable under Task Scheduler; the task must use 5.1.
-        Assert-MockCalled New-ScheduledTaskAction -Times 1 -ParameterFilter { $Execute -eq 'powershell.exe' }
-    }
-
-    It 'Enable-ScheduledUpdatesCheck degrades gracefully when helper deployment fails' {
-        Mock Get-Command { $null } -ParameterFilter { $Name -eq 'pwsh' }
-        Mock Install-UpdateHelperScript { throw 'download blocked' }
-        Mock Write-WarningMessage { }
-
-        $result = Enable-ScheduledUpdatesCheck -SkipPrompt:$true -UpdateFrequency Daily -AutoInstall:$false
-
-        # A helper-deployment failure must not register a task or abort — it returns $false.
-        $result | Should -BeFalse
-        Assert-MockCalled Register-ScheduledTask -Times 0 -Scope It
-    }
-
-    It 'Disable-ScheduledUpdatesCheck should remove task and persist disabled config' {
-        Mock Get-ScheduledTask { @{ Name = 'WingetAppSetup-ScheduledUpdates' } }
-
-        $result = Disable-ScheduledUpdatesCheck
-        $config = Get-UpdateConfiguration
-
-        $result | Should -BeTrue
-        $config.EnabledScheduledUpdates | Should -BeFalse
-        $config.Enabled | Should -BeFalse
-        Assert-MockCalled Unregister-ScheduledTask -Times 1
-    }
-}
-
 Describe 'Write-Info' {
     BeforeAll {
     }
@@ -2729,73 +2602,129 @@ Get-Content -Raw -LiteralPath '$psStringEscapedPath' | Invoke-Expression
     }
 }
 
-Describe 'Install-UpdateHelperScript module deployment' {
-    It 'deploys both the helper script and the WingetAppSetup module into AppData' {
-        $base = Join-Path ([IO.Path]::GetTempPath()) ('was-' + [guid]::NewGuid())
-        Mock Get-UpdateSettingsPaths {
-            @{
-                BasePath        = $base
-                ConfigFile      = Join-Path $base 'update-config.json'
-                UpdateChecks    = Join-Path $base 'update-checks'
-                RollbackScripts = Join-Path $base 'rollback-scripts'
-                HelperScript    = Join-Path $base 'Update-InstalledApps.ps1'
-                ModuleDir       = Join-Path $base 'WingetAppSetup'
-            }
-        }
-        # Pretend every source/destination path already exists so the real body runs without touching disk.
-        Mock Test-Path { $true }
-        Mock New-Item { }
-        Mock Remove-Item { }
-        Mock Copy-Item { }
-
-        $result = Install-UpdateHelperScript
-
-        Assert-MockCalled Copy-Item -Times 1 -Scope It -ParameterFilter { $Destination -like '*WingetAppSetup' -and $Recurse }
-        Assert-MockCalled Copy-Item -Times 1 -Scope It -ParameterFilter { $Destination -like '*Update-InstalledApps.ps1' }
-        $result | Should -Be (Join-Path $base 'Update-InstalledApps.ps1')
+Describe 'Winget-AutoUpdate integration (issue #168)' {
+    BeforeEach {
+        Mock Write-Host { }
+        Mock Write-Info { }
+        Mock Write-Success { }
+        Mock Write-WarningMessage { }
+        Mock Write-ErrorMessage { }
     }
 
-    It 'throws a clear error when the module source is missing' {
-        Mock Get-UpdateSettingsPaths {
-            @{ BasePath = 'x'; UpdateChecks = 'x'; RollbackScripts = 'x'; HelperScript = 'x'; ModuleDir = 'x' }
+    Context 'Get-WauPin' {
+        It 'returns the pinned version, MSI url, sha256, and product code' {
+            $pin = Get-WauPin
+            $pin.Version | Should -Be '2.12.0'
+            $pin.MsiUrl | Should -Match 'v2\.12\.0/WAU\.msi$'
+            $pin.Sha256 | Should -Match '^[0-9A-Fa-f]{64}$'
+            $pin.ProductCode | Should -Match '^\{[0-9A-Fa-f-]+\}$'
         }
-        # Helper script present, module folder absent.
-        Mock Test-Path { $true } -ParameterFilter { $Path -like '*Update-InstalledApps.ps1' }
-        Mock Test-Path { $false } -ParameterFilter { $Path -like '*WingetAppSetup' }
-
-        { Install-UpdateHelperScript } | Should -Throw '*WingetAppSetup module is missing*'
     }
 
-    It 'downloads the helper and self-contained script when running remotely (no source root)' {
-        $base = Join-Path ([IO.Path]::GetTempPath()) ('was-' + [guid]::NewGuid())
-        Mock Get-UpdateSettingsPaths {
-            @{
-                BasePath        = $base
-                ConfigFile      = Join-Path $base 'update-config.json'
-                UpdateChecks    = Join-Path $base 'update-checks'
-                RollbackScripts = Join-Path $base 'rollback-scripts'
-                HelperScript    = Join-Path $base 'Update-InstalledApps.ps1'
-                ModuleDir       = Join-Path $base 'WingetAppSetup'
+    Context 'Install-WingetAutoUpdate' {
+        It 'downloads, verifies the hash, and installs silently with the pinned config' {
+            Mock Test-WauInstalled { $false }
+            Mock Invoke-WebRequest { }
+            Mock Get-FileHash { @{ Hash = (Get-WauPin).Sha256 } }
+            Mock Start-Process { [pscustomobject]@{ ExitCode = 0 } }
+            Mock Remove-Item { }
+
+            $result = Install-WingetAutoUpdate
+
+            $result | Should -Be $true
+            Assert-MockCalled Invoke-WebRequest -Times 1 -Exactly
+            Assert-MockCalled Start-Process -Times 1 -Exactly -ParameterFilter {
+                $FilePath -eq 'msiexec.exe' -and
+                $ArgumentList -match 'RUN_WAU=YES' -and $ArgumentList -match 'USERCONTEXT=1' -and
+                $ArgumentList -match 'DISABLEWAUAUTOUPDATE=1' -and $ArgumentList -match 'UPDATESINTERVAL=Weekly' -and
+                $ArgumentList -match 'NOTIFICATIONLEVEL=Full'
             }
         }
-        # Nothing exists on disk (remote iex install); the download branch should run.
-        Mock Test-Path { $false }
-        Mock New-Item { }
-        Mock Remove-Item { }
-        Mock Copy-Item { }
-        Mock Invoke-WebRequest { }
 
-        # An empty source root is how remote (irm | iex) execution presents ($PSScriptRoot is empty).
-        $result = Install-UpdateHelperScript -SourceRoot ''
+        It 'skips installation when WAU is already present' {
+            Mock Test-WauInstalled { $true }
+            Mock Invoke-WebRequest { throw 'should not download when WAU is present' }
+            Mock Start-Process { throw 'should not run msiexec when WAU is present' }
 
-        Assert-MockCalled Copy-Item -Times 0 -Scope It
-        Assert-MockCalled Invoke-WebRequest -Times 2 -Scope It
-        Assert-MockCalled Invoke-WebRequest -Times 1 -Scope It -ParameterFilter {
-            $Uri -like '*/Update-InstalledApps.ps1' -and $OutFile -like '*Update-InstalledApps.ps1'
+            (Install-WingetAutoUpdate) | Should -Be $true
+            Assert-MockCalled Invoke-WebRequest -Times 0 -Exactly
+            Assert-MockCalled Start-Process -Times 0 -Exactly
         }
-        Assert-MockCalled Invoke-WebRequest -Times 1 -Scope It -ParameterFilter {
-            $Uri -like '*/winget-app-install.ps1' -and $OutFile -like '*winget-app-install.ps1'
+
+        It 'aborts without installing when the MSI hash does not match' {
+            Mock Test-WauInstalled { $false }
+            Mock Invoke-WebRequest { }
+            Mock Get-FileHash { @{ Hash = 'DEADBEEF' } }
+            Mock Start-Process { throw 'must not run msiexec on a hash mismatch' }
+            Mock Remove-Item { }
+
+            (Install-WingetAutoUpdate) | Should -Be $false
+            Assert-MockCalled Start-Process -Times 0 -Exactly
         }
-        $result | Should -Be (Join-Path $base 'Update-InstalledApps.ps1')
+
+        It 'treats msiexec exit code 3010 (reboot required) as success' {
+            Mock Test-WauInstalled { $false }
+            Mock Invoke-WebRequest { }
+            Mock Get-FileHash { @{ Hash = (Get-WauPin).Sha256 } }
+            Mock Start-Process { [pscustomobject]@{ ExitCode = 3010 } }
+            Mock Remove-Item { }
+
+            (Install-WingetAutoUpdate) | Should -Be $true
+        }
+
+        It 'returns dry-run without side effects under -WhatIf' {
+            Mock Test-WauInstalled { throw 'should not probe under WhatIf' }
+            Mock Invoke-WebRequest { throw 'should not download under WhatIf' }
+
+            (Install-WingetAutoUpdate -WhatIf) | Should -Be $true
+        }
+    }
+
+    Context 'Uninstall-WingetAutoUpdate' {
+        It 'uninstalls via the pinned product code when present' {
+            Mock Test-WauInstalled { $true }
+            Mock Start-Process { [pscustomobject]@{ ExitCode = 0 } }
+
+            $result = Uninstall-WingetAutoUpdate
+
+            $result | Should -Be $true
+            Assert-MockCalled Start-Process -Times 1 -Exactly -ParameterFilter {
+                $FilePath -eq 'msiexec.exe' -and $ArgumentList -match '/x' -and
+                $ArgumentList -match ([regex]::Escape((Get-WauPin).ProductCode))
+            }
+        }
+
+        It 'is a no-op when WAU is not installed' {
+            Mock Test-WauInstalled { $false }
+            Mock Start-Process { throw 'should not run msiexec when WAU is absent' }
+
+            (Uninstall-WingetAutoUpdate) | Should -Be $true
+            Assert-MockCalled Start-Process -Times 0 -Exactly
+        }
+    }
+
+    Context 'Remove-LegacyScheduledUpdates' {
+        It 'unregisters the legacy task and removes the data directory when present' {
+            Mock Get-ScheduledTask { [pscustomobject]@{ TaskName = 'WingetAppSetup-ScheduledUpdates' } }
+            Mock Unregister-ScheduledTask { }
+            Mock Test-Path { $true }
+            Mock Remove-Item { }
+
+            $result = Remove-LegacyScheduledUpdates
+
+            $result | Should -Be $true
+            Assert-MockCalled Unregister-ScheduledTask -Times 1 -Exactly -ParameterFilter { $TaskName -eq 'WingetAppSetup-ScheduledUpdates' }
+            Assert-MockCalled Remove-Item -Times 1 -Exactly
+        }
+
+        It 'is a no-op when there is nothing to clean up' {
+            Mock Get-ScheduledTask { throw 'task not found' }
+            Mock Test-Path { $false }
+            Mock Unregister-ScheduledTask { throw 'should not unregister' }
+            Mock Remove-Item { throw 'should not remove' }
+
+            (Remove-LegacyScheduledUpdates) | Should -Be $false
+            Assert-MockCalled Unregister-ScheduledTask -Times 0 -Exactly
+        }
     }
 }

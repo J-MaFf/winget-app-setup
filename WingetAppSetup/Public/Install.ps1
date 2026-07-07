@@ -107,11 +107,9 @@ function Invoke-WingetInstall {
         Write-WarningMessage 'Winget sources could not be repaired. Some installations may fail.'
     }
 
-    $scheduledTaskExists = Test-ScheduledUpdatesTaskExists
-    $updateConfig = Get-UpdateConfiguration
-    if (-not $WhatIf -and -not $scheduledTaskExists -and -not $updateConfig.InitialPromptCompleted) {
-        [void](Enable-ScheduledUpdatesCheck -UpdateFrequency $updateConfig.UpdateFrequency -AutoInstall $updateConfig.AutoInstall -WhatIf:$WhatIf)
-    }
+    # Migrate away from the old homegrown scheduled-update task if a prior version installed one;
+    # ongoing updates are now handled by Winget-AutoUpdate, set up after the app installs (issue #168).
+    [void](Remove-LegacyScheduledUpdates -WhatIf:$WhatIf)
 
     # Add the script directory to the PATH (only if running locally)
     # Use $PSScriptRoot for reliable script directory detection (works with launcher)
@@ -384,6 +382,10 @@ function Invoke-WingetInstall {
 
     # Configure Windows Terminal defaults(issue #74): default profile and default terminal app.
     Set-WindowsTerminalDefaults -WhatIf:$WhatIf
+
+    # Set up ongoing automatic updates via Winget-AutoUpdate (issue #168). Best-effort: a failure
+    # here warns but does not fail the install.
+    [void](Install-WingetAutoUpdate -WhatIf:$WhatIf)
 
     # Retry any failed installations once before producing the final summary
     if ($failedApps.Count -gt 0) {
