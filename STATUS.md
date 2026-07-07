@@ -13,7 +13,12 @@ Windows-only cmdlets.
 
 ## Current State — 2026-07-07
 
-Healthy. **Auto-updates outsourced to Winget-AutoUpdate (WAU)** ([#168](https://github.com/J-MaFf/winget-app-setup/issues/168)):
+Healthy. **Removed the install-time inline update pass** ([#170](https://github.com/J-MaFf/winget-app-setup/issues/170)):
+it upgraded every installed app synchronously as the elevating admin (slow, silent, mostly failing
+under cross-user elevation) and is redundant now that WAU handles updates. The installer just installs
+the curated apps and sets up WAU (which runs once immediately via `RUN_WAU=YES`, then weekly as SYSTEM).
+
+**Auto-updates outsourced to Winget-AutoUpdate (WAU)** ([#168](https://github.com/J-MaFf/winget-app-setup/issues/168)):
 the homegrown scheduled/on-demand updater (which ran non-elevated as the elevating admin and couldn't
 do machine-scope updates) is removed — ~700 lines across `ScheduledUpdates.ps1`, `Update-InstalledApps.ps1`,
 `Get-UpdateReport`, five one-liner switches, and ~10 tests. The installer now bootstraps a pinned,
@@ -95,6 +100,7 @@ Pester installs persist across runs there ([#161](https://github.com/J-MaFf/wing
 
 | Issue | Description | PR |
 |-------|-------------|----|
+| [#170](https://github.com/J-MaFf/winget-app-setup/issues/170) | Remove the install-time inline update pass (redundant with WAU) | [#171](https://github.com/J-MaFf/winget-app-setup/pull/171) |
 | [#168](https://github.com/J-MaFf/winget-app-setup/issues/168) | Outsource auto-updates to Winget-AutoUpdate (WAU); remove homegrown updater | [#169](https://github.com/J-MaFf/winget-app-setup/pull/169) |
 | [#166](https://github.com/J-MaFf/winget-app-setup/issues/166) | Always-latest PowerShell install strategy for the MSIX-only (7.7+) future; harden scheduled task for MSIX | [#167](https://github.com/J-MaFf/winget-app-setup/pull/167) |
 | [#163](https://github.com/J-MaFf/winget-app-setup/issues/163) | PowerShell fails to install on elevated cross-user sessions (winget picks MSIX over MSI for 7.6+) | [#165](https://github.com/J-MaFf/winget-app-setup/pull/165) |

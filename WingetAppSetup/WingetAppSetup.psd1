@@ -13,7 +13,7 @@
         'Test-AppDefinitions',
         # Winget core
         'Test-AndInstallWingetModule', 'Test-AndInstallWinget', 'Test-WingetSourceTrusted', 'Set-Sources', 'Test-WingetSources',
-        'Invoke-WingetCommand', 'Test-UpdatesAvailable', 'Initialize-WingetSourcesForUser', 'Install-WingetPackage',
+        'Initialize-WingetSourcesForUser', 'Install-WingetPackage',
         'Test-WingetPackageInstalled', 'Test-AppxPackageProvisioned', 'Invoke-AppxProvisioning', 'Install-MsixProvisionedPackage', 'Install-PowerShellLatest',
         # Automatic updates (Winget-AutoUpdate)
         'Get-WauPin', 'Test-WauInstalled', 'Install-WingetAutoUpdate', 'Uninstall-WingetAutoUpdate', 'Remove-LegacyScheduledUpdates',

@@ -668,70 +668,6 @@ Describe 'Restart-WithElevation' {
     }
 }
 
-Describe 'Invoke-WingetPackageUpgrade' {
-    BeforeEach {
-        Mock Write-Success { }
-        Mock Write-WarningMessage { }
-        Mock Write-ErrorMessage { }
-        Mock Remove-Item { }
-        $script:killCalled = $false
-    }
-
-    It 'returns Ok when the upgrade exits 0' {
-        Mock Start-Process {
-            $p = [PSCustomObject]@{ ExitCode = 0 }
-            $p | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value { param($ms) $true }
-            $p | Add-Member -MemberType ScriptMethod -Name Kill -Value { }
-            $p
-        }
-        Mock Get-Content { 'Successfully installed' }
-
-        $result = Invoke-WingetPackageUpgrade -PackageId 'Test.App'
-
-        $result.Status | Should -Be 'Ok'
-        $result.Id | Should -Be 'Test.App'
-    }
-
-    It 'returns NoUpgrade when winget reports nothing to upgrade' {
-        Mock Start-Process {
-            $p = [PSCustomObject]@{ ExitCode = 0 }
-            $p | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value { param($ms) $true }
-            $p | Add-Member -MemberType ScriptMethod -Name Kill -Value { }
-            $p
-        }
-        Mock Get-Content { 'No available upgrade found' }
-
-        (Invoke-WingetPackageUpgrade -PackageId 'Test.App').Status | Should -Be 'NoUpgrade'
-    }
-
-    It 'returns Failed on a non-zero exit code' {
-        Mock Start-Process {
-            $p = [PSCustomObject]@{ ExitCode = 1 }
-            $p | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value { param($ms) $true }
-            $p | Add-Member -MemberType ScriptMethod -Name Kill -Value { }
-            $p
-        }
-        Mock Get-Content { 'install failed' }
-
-        (Invoke-WingetPackageUpgrade -PackageId 'Test.App').Status | Should -Be 'Failed'
-    }
-
-    It 'times out and kills the process when it does not exit in time' {
-        Mock Start-Process {
-            $p = [PSCustomObject]@{ ExitCode = 0 }
-            $p | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value { param($ms) $false }
-            $p | Add-Member -MemberType ScriptMethod -Name Kill -Value { Set-Variable -Name killCalled -Value $true -Scope script }
-            $p
-        }
-        Mock Get-Content { '' }
-
-        $result = Invoke-WingetPackageUpgrade -PackageId 'Test.App' -TimeoutSeconds 1
-
-        $result.Status | Should -Be 'TimedOut'
-        $script:killCalled | Should -BeTrue
-    }
-}
-
 Describe 'Test-CanUseGridView' {
     BeforeAll {
     }
@@ -1005,145 +941,6 @@ Describe 'Write-Table' {
     }
 }
 
-Describe 'Invoke-WingetCommand' {
-    BeforeAll {
-        # Dot-source the script under test so these tests exercise the real implementation (#135).
-        . "$PSScriptRoot/winget-app-install.ps1"
-
-        Mock Write-Host { }
-
-        # Define the helper function inline for testing
-
-        # Define Invoke-WingetCommand function with exit code handling
-    }
-
-    Context 'Exit code capture and handling' {
-        It 'Should return exit code 0 for successful operations' {
-            $successArray = @()
-            $failureArray = @()
-
-            Mock winget {
-                $global:LASTEXITCODE = 0
-                'Successfully installed App1'
-            }
-
-            $result = Invoke-WingetCommand -Command 'winget install App1' -SuccessPattern 'Successfully installed' -FailurePattern 'Failed' -SuccessArray ([ref]$successArray) -FailureArray ([ref]$failureArray) -SuccessIndex 2
-
-            $result.ExitCode | Should -Be 0
-            $result.ExitMessage | Should -Be 'Success'
-            $successArray | Should -Contain 'App1'
-        }
-
-        It 'Should return exit code for package not found (0x8A150029 / -1978335191)' {
-            $successArray = @()
-            $failureArray = @()
-
-            Mock winget {
-                $global:LASTEXITCODE = -1978335191
-                'No packages found matching input criteria'
-            }
-
-            $result = Invoke-WingetCommand -Command 'winget install NonExistent.Package' -SuccessPattern 'Successfully installed' -FailurePattern 'Failed' -SuccessArray ([ref]$successArray) -FailureArray ([ref]$failureArray)
-
-            $result.ExitCode | Should -Be -1978335191
-            $result.ExitMessage | Should -Be 'No packages found matching input criteria'
-        }
-
-        It 'Should return exit code for package installation failed (0x8A150028 / -1978335192)' {
-            $successArray = @()
-            $failureArray = @()
-
-            Mock winget {
-                $global:LASTEXITCODE = -1978335192
-                'Installation failed'
-            }
-
-            $result = Invoke-WingetCommand -Command 'winget install App1' -SuccessPattern 'Successfully installed' -FailurePattern 'Failed' -SuccessArray ([ref]$successArray) -FailureArray ([ref]$failureArray)
-
-            $result.ExitCode | Should -Be -1978335192
-            $result.ExitMessage | Should -Be 'Package installation failed'
-        }
-
-        It 'Should return exit code for user cancelled (0x8A150014 / -1978335212)' {
-            $successArray = @()
-            $failureArray = @()
-
-            Mock winget {
-                $global:LASTEXITCODE = -1978335212
-                'Operation cancelled by user'
-            }
-
-            $result = Invoke-WingetCommand -Command 'winget install App1' -SuccessPattern 'Successfully installed' -FailurePattern 'Failed' -SuccessArray ([ref]$successArray) -FailureArray ([ref]$failureArray)
-
-            $result.ExitCode | Should -Be -1978335212
-            $result.ExitMessage | Should -Be 'User cancelled the operation'
-        }
-
-        It 'Should handle unknown exit codes with generic message' {
-            $successArray = @()
-            $failureArray = @()
-
-            Mock winget {
-                $global:LASTEXITCODE = 999
-                'Unknown error'
-            }
-
-            $result = Invoke-WingetCommand -Command 'winget install App1' -SuccessPattern 'Successfully installed' -FailurePattern 'Failed' -SuccessArray ([ref]$successArray) -FailureArray ([ref]$failureArray)
-
-            $result.ExitCode | Should -Be 999
-            $result.ExitMessage | Should -Be 'Winget exited with code: 999'
-        }
-
-        It 'Should add failure entry when exit code is non-zero and no output patterns match' {
-            $successArray = @()
-            $failureArray = @()
-
-            Mock winget {
-                $global:LASTEXITCODE = -1978335192
-                'Some unrecognized output'
-            }
-
-            $result = Invoke-WingetCommand -Command 'winget install App1' -SuccessPattern 'Successfully installed' -FailurePattern 'Failed to install' -SuccessArray ([ref]$successArray) -FailureArray ([ref]$failureArray)
-
-            $result.ExitCode | Should -Be -1978335192
-            $failureArray.Count | Should -Be 1
-            $failureArray[0] | Should -Match 'Command failed with exit code'
-        }
-    }
-
-    Context 'Output pattern parsing' {
-        It 'Should parse successful operations' {
-            $successArray = @()
-            $failureArray = @()
-
-            Mock winget {
-                $global:LASTEXITCODE = 0
-                'Successfully installed App1'
-            }
-
-            Invoke-WingetCommand -Command 'winget update --all' -SuccessPattern 'Successfully installed' -FailurePattern 'Failed' -SuccessArray ([ref]$successArray) -FailureArray ([ref]$failureArray) -SuccessIndex 2
-
-            $successArray | Should -Contain 'App1'
-            $failureArray | Should -Be @()
-        }
-
-        It 'Should parse failed operations' {
-            $successArray = @()
-            $failureArray = @()
-
-            Mock winget {
-                $global:LASTEXITCODE = 1
-                'Failed to install App2'
-            }
-
-            Invoke-WingetCommand -Command 'winget install App2' -SuccessPattern 'Successfully installed' -FailurePattern 'Failed' -SuccessArray ([ref]$successArray) -FailureArray ([ref]$failureArray) -FailureIndex 3
-
-            $failureArray | Should -Contain 'App2'
-            $successArray | Should -Be @()
-        }
-    }
-}
-
 Describe 'Format-AppList' {
     BeforeAll {
     }
@@ -1164,57 +961,6 @@ Describe 'Format-AppList' {
         # it is designed to handle; it returns $null when given no apps.
         $result = Format-AppList -AppArray @()
         $result | Should -Be $null
-    }
-}
-
-Describe 'Test-UpdatesAvailable' {
-    BeforeAll {
-        # Dot-source the script under test so these tests exercise the real implementation (#135).
-        . "$PSScriptRoot/winget-app-install.ps1"
-
-        Mock Write-Host { }
-
-    }
-
-    Context 'PowerShell module available' {
-        It 'Should return true when updates are available' {
-            Mock Get-Command { return $true } -ParameterFilter { $Name -eq 'Get-WinGetPackage' }
-            Mock Get-WinGetPackage {
-                @(
-                    @{ Id = 'App1'; IsUpdateAvailable = $true; InstalledVersion = '1.0'; AvailableVersion = '1.1' },
-                    @{ Id = 'App2'; IsUpdateAvailable = $false }
-                )
-            }
-
-            $result = Test-UpdatesAvailable
-            $result | Should -Be $true
-        }
-
-        It 'Should return false when no updates are available' {
-            Mock Get-Command { return $true } -ParameterFilter { $Name -eq 'Get-WinGetPackage' }
-            Mock Get-WinGetPackage { @(@{ IsUpdateAvailable = $false }) }
-
-            $result = Test-UpdatesAvailable
-            $result | Should -Be $false
-        }
-    }
-
-    Context 'CLI fallback' {
-        It 'Should return true when CLI shows updates available' {
-            Mock Get-Command { return $false } -ParameterFilter { $Name -eq 'Get-WinGetPackage' }
-            Mock winget { 'Package1 has available update' } -ParameterFilter { $args -contains 'upgrade' }
-
-            $result = Test-UpdatesAvailable
-            $result | Should -Be $true
-        }
-
-        It 'Should return false when CLI shows no updates' {
-            Mock Get-Command { return $false } -ParameterFilter { $Name -eq 'Get-WinGetPackage' }
-            Mock winget { 'No available upgrade found' } -ParameterFilter { $args -contains 'upgrade' }
-
-            $result = Test-UpdatesAvailable
-            $result | Should -Be $false
-        }
     }
 }
 
@@ -1449,73 +1195,11 @@ Describe 'Main Script Logic' {
         }
     }
 
-    Context 'Update checking and installation' {
-        It 'Should handle no updates available' {
-            Mock Test-UpdatesAvailable { return $false }
-
-            $hasUpdates = Test-UpdatesAvailable
-            $hasUpdates | Should -Be $false
-        }
-
-        It 'Should handle updates available with PowerShell module' {
-            Mock Test-UpdatesAvailable { return $true }
-            Mock Get-Command { return $true } -ParameterFilter { $Name -eq 'Update-WinGetPackage' }
-            Mock Get-WinGetPackage { @(@{ IsUpdateAvailable = $true; Id = 'Test.App' }) }
-            Mock Update-WinGetPackage { @(@{ Status = 'Ok'; Id = 'Test.App' }) }
-
-            $hasUpdates = Test-UpdatesAvailable
-            if ($hasUpdates) {
-                if (Get-Command Update-WinGetPackage -ErrorAction SilentlyContinue) {
-                    # Simulate the update without piping to avoid mock issues
-                    $updateResults = @(@{ Status = 'Ok'; Id = 'Test.App' })
-                    $updateResults[0].Status | Should -Be 'Ok'
-                }
-            }
-        }
-
-        It 'Should handle updates with CLI fallback' {
-            Mock Test-UpdatesAvailable { return $true }
-            Mock Get-Command { return $false } -ParameterFilter { $Name -eq 'Update-WinGetPackage' }
-            Mock winget { 'Test.App  Test.App  1.0.0  winget' } -ParameterFilter { $args -contains 'list' }
-            Mock winget { 'Successfully installed Test.App' } -ParameterFilter { $args -contains 'upgrade' -and $args -contains '--source' }
-
-            $hasUpdates = Test-UpdatesAvailable
-            if ($hasUpdates) {
-                if (-not (Get-Command Update-WinGetPackage -ErrorAction SilentlyContinue)) {
-                    $installedPackages = & winget list --source winget 2>&1 | Where-Object {
-                        $_ -and
-                        $_ -notmatch '^[\s\-\|\\]*$' -and
-                        $_ -notmatch '^$' -and
-                        $_ -notmatch '^Name\s+Id\s+Version\s+Source' -and
-                        $_ -notmatch '^[-]+$' -and
-                        $_ -notmatch 'No installed package found'
-                    }
-
-                    foreach ($package in $installedPackages) {
-                        $columns = $package -split '\s{2,}'
-                        if ($columns.Count -ge 2) {
-                            $packageId = $columns[1]
-                            if ($packageId -and $packageId -notmatch '^(ARP|MSIX)') {
-                                $upgradeResult = & winget upgrade $packageId --source winget 2>&1
-                                $upgradeOutput = $upgradeResult | Out-String
-                                $upgradeOutput | Should -Match 'Successfully installed'
-                            }
-                        }
-                    }
-                }
-            }
-
-            Assert-MockCalled winget -Times 1 -ParameterFilter { $args -contains 'upgrade' -and $args -contains '--source' -and $args -contains 'winget' }
-        }
-    }
-
     Context 'Summary table generation' {
-        It 'Should format summary table with all result types' {
+        It 'Should format summary table with install, skip, and fail results' {
             $installedApps = @('App1', 'App2')
             $skippedApps = @('App3')
             $failedApps = @('App4')
-            $updatedApps = @('App5')
-            $failedUpdateApps = @('App6')
 
             Mock Format-AppList { param($AppArray) if ($AppArray) { return $AppArray -join ', ' } return $null }
             Mock Write-Table { }
@@ -1532,15 +1216,9 @@ Describe 'Main Script Logic' {
             $appList = Format-AppList -AppArray $failedApps
             if ($appList) { $rows += , @('Failed', $appList) }
 
-            $appList = Format-AppList -AppArray $updatedApps
-            if ($appList) { $rows += , @('Updated', $appList) }
-
-            $appList = Format-AppList -AppArray $failedUpdateApps
-            if ($appList) { $rows += , @('Failed to Update', $appList) }
-
             Write-Table -Headers $headers -Rows $rows
 
-            $rows.Count | Should -Be 5
+            $rows.Count | Should -Be 3
             Assert-MockCalled Write-Table -Times 1
         }
 
