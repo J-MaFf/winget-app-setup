@@ -1030,18 +1030,18 @@ Describe 'Main Script Logic' {
     }
 
     Context 'Source verification' {
-        It 'Should check trusted sources' {
+        It 'Should check the winget source only (msstore is never used)' {
             Mock Test-WingetSourceTrusted { param($target) return $true } -ParameterFilter { $target -eq 'winget' }
-            Mock Test-WingetSourceTrusted { param($target) return $true } -ParameterFilter { $target -eq 'msstore' }
 
-            $trustedSources = @('winget', 'msstore')
+            $trustedSources = @('winget')
+            $trustedSources | Should -Not -Contain 'msstore'
             foreach ($source in $trustedSources) {
                 Test-WingetSourceTrusted -target $source | Should -Be $true
             }
         }
 
-        It 'Should call Set-Sources when source is not trusted' {
-            $trustedSources = @('winget', 'msstore')
+        It 'Should call Set-Sources once when the winget source is not trusted' {
+            $trustedSources = @('winget')
             $script:setSourcesCalls = 0
             function Set-Sources { $script:setSourcesCalls++; return $true }
 
@@ -1049,11 +1049,11 @@ Describe 'Main Script Logic' {
                 Set-Sources | Out-Null
             }
 
-            $script:setSourcesCalls | Should -Be 2
+            $script:setSourcesCalls | Should -Be 1
         }
 
-        It 'Should track source errors when Set-Sources fails' {
-            $trustedSources = @('winget', 'msstore')
+        It 'Should track the source error when Set-Sources fails' {
+            $trustedSources = @('winget')
             $script:setSourcesCalls = 0
             function Set-Sources { $script:setSourcesCalls++; return $false }
             $sourceErrors = @()
@@ -1064,10 +1064,10 @@ Describe 'Main Script Logic' {
                 }
             }
 
-            $script:setSourcesCalls | Should -Be 2
-            $sourceErrors.Count | Should -Be 2
+            $script:setSourcesCalls | Should -Be 1
+            $sourceErrors.Count | Should -Be 1
             $sourceErrors | Should -Contain 'winget'
-            $sourceErrors | Should -Contain 'msstore'
+            $sourceErrors | Should -Not -Contain 'msstore'
         }
     }
 
