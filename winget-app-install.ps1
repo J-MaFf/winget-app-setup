@@ -726,7 +726,13 @@ function Invoke-WingetInstall {
         @{name = 'Git.Git' },
         @{name = 'Klocman.BulkCrapUninstaller' },
         @{name = 'Dell.CommandUpdate.Universal' },
-        @{name = 'Microsoft.PowerShell' },
+        # Force the MSI ('wix') installer for PowerShell. Since the winget package for PowerShell
+        # 7.6.0, winget picks the MSIX bundle by default, and MSIX registers per-user — it fails to
+        # deploy in an elevated cross-user / machine-scope context with "The current system
+        # configuration does not support the installation of this package." The MSI installs
+        # machine-wide and avoids that (issue #163). Note: PowerShell 7.7+ manifests drop the MSI, so
+        # this override will need revisiting when the default line moves past 7.6.
+        @{name = 'Microsoft.PowerShell'; installerType = 'wix' },
         @{name = 'Microsoft.WindowsTerminal' }
     );
 
@@ -818,7 +824,8 @@ function Invoke-WingetInstall {
                     Write-Info "Installing: $($app.name)"
                     # Install through the helper so the transient 0x80073d19 session error is
                     # retried with backoff (issue #150) instead of failing on the first hit.
-                    [void](Install-WingetPackage -PackageId $app.name)
+                    # Pass any per-app installer-type override (e.g. 'wix' to force PowerShell's MSI).
+                    [void](Install-WingetPackage -PackageId $app.name -InstallerType $app.installerType)
 
                     # Verify installation with timeout
                     $verifyProcess = Start-Process -FilePath 'winget' `
@@ -964,8 +971,10 @@ function Invoke-WingetInstall {
                 try {
                     Write-Info "Retrying: $appName"
                     # Route the final retry through the same helper so a lingering 0x80073d19
-                    # session error gets its backoff retries here too (issue #150).
-                    [void](Install-WingetPackage -PackageId $appName)
+                    # session error gets its backoff retries here too (issue #150). Preserve any
+                    # per-app installer-type override (e.g. PowerShell's forced 'wix'/MSI installer).
+                    $retryInstallerType = ($apps | Where-Object { $_.name -eq $appName } | Select-Object -First 1).installerType
+                    [void](Install-WingetPackage -PackageId $appName -InstallerType $retryInstallerType)
 
                     # Verify installation with timeout
                     $verifyProcess = Start-Process -FilePath 'winget' `
@@ -1353,41 +1362,74 @@ function Test-ScheduledUpdatesTaskExists {
 
 <#
 .SYNOPSIS
-    Copies the scheduled update helper script and the WingetAppSetup module into AppData and returns the helper path.
+    Deploys the scheduled update helper script (and the code it needs) into AppData and returns the helper path.
 .DESCRIPTION
-    The helper runs as a standalone scheduled task with the repository absent, so it imports the
-    WingetAppSetup module from a copy deployed next to it under %APPDATA%. Both the helper and the
-    module are refreshed on every call so the installed copies never drift from the repository.
+    The helper runs as a standalone scheduled task with the repository absent, so the functions it
+    needs (Get-UpdateReport, Get-UpdateConfiguration, ...) must be deployed next to it under %APPDATA%.
+
+    Local installs have the repository on disk ($PSScriptRoot is populated): the helper and a fresh
+    copy of the WingetAppSetup module are copied so the installed copies never drift from the repo.
+
+    Remote installs run via `irm | iex`, so $PSScriptRoot is empty and there are no source files to
+    copy (issue #164 — this previously threw "Cannot bind argument to parameter 'Path'" on every
+    Join-Path/Copy-Item and left the scheduled task pointing at a helper that never got deployed). In
+    that case the standalone helper and the self-contained winget-app-install.ps1 are downloaded from
+    the repository instead; Update-InstalledApps.ps1 dot-sources the self-contained script for its
+    functions when the module folder is absent.
+.PARAMETER SourceRoot
+    Directory holding the repository source files (Update-InstalledApps.ps1 and the WingetAppSetup
+    folder). Defaults to $PSScriptRoot; empty when running remotely via `irm | iex`.
 #>
 function Install-UpdateHelperScript {
+    param (
+        [Parameter(Mandatory = $false)]
+        [string]$SourceRoot = $PSScriptRoot
+    )
+
     $paths = Get-UpdateSettingsPaths
-    $sourceScript = Join-Path $PSScriptRoot 'Update-InstalledApps.ps1'
-    $sourceModule = Join-Path $PSScriptRoot 'WingetAppSetup'
 
-    if (-not (Test-Path $sourceScript)) {
-        throw "Required helper script is missing: $sourceScript"
-    }
-    if (-not (Test-Path $sourceModule)) {
-        throw "Required WingetAppSetup module is missing: $sourceModule"
-    }
+    $sourceScript = if ($SourceRoot) { Join-Path $SourceRoot 'Update-InstalledApps.ps1' } else { $null }
+    $sourceModule = if ($SourceRoot) { Join-Path $SourceRoot 'WingetAppSetup' } else { $null }
 
-    if (-not (Test-Path $paths.BasePath)) {
-        New-Item -ItemType Directory -Path $paths.BasePath -Force | Out-Null
-    }
-    if (-not (Test-Path $paths.UpdateChecks)) {
-        New-Item -ItemType Directory -Path $paths.UpdateChecks -Force | Out-Null
-    }
-    if (-not (Test-Path $paths.RollbackScripts)) {
-        New-Item -ItemType Directory -Path $paths.RollbackScripts -Force | Out-Null
+    # When the repository is on disk, the expected source files must be present; a missing file means
+    # a genuinely broken local install, so surface it rather than silently downloading.
+    if ($SourceRoot) {
+        if (-not (Test-Path $sourceScript)) {
+            throw "Required helper script is missing: $sourceScript"
+        }
+        if (-not (Test-Path $sourceModule)) {
+            throw "Required WingetAppSetup module is missing: $sourceModule"
+        }
     }
 
-    # Refresh the module copy the helper imports at runtime.
+    foreach ($dir in @($paths.BasePath, $paths.UpdateChecks, $paths.RollbackScripts)) {
+        if (-not (Test-Path $dir)) {
+            New-Item -ItemType Directory -Path $dir -Force | Out-Null
+        }
+    }
+
+    if ($SourceRoot) {
+        # Local install: refresh the module copy the helper imports at runtime, then the helper.
+        if (Test-Path $paths.ModuleDir) {
+            Remove-Item -Path $paths.ModuleDir -Recurse -Force
+        }
+        Copy-Item -Path $sourceModule -Destination $paths.ModuleDir -Recurse -Force
+        Copy-Item -Path $sourceScript -Destination $paths.HelperScript -Force
+        return $paths.HelperScript
+    }
+
+    # Remote (irm | iex) install: nothing on disk to copy. Download the standalone helper plus the
+    # self-contained script it dot-sources for the WingetAppSetup functions. Drop any stale module
+    # copy from a prior local install so it can't shadow the self-contained fallback.
     if (Test-Path $paths.ModuleDir) {
         Remove-Item -Path $paths.ModuleDir -Recurse -Force
     }
-    Copy-Item -Path $sourceModule -Destination $paths.ModuleDir -Recurse -Force
 
-    Copy-Item -Path $sourceScript -Destination $paths.HelperScript -Force
+    $rawBase = 'https://raw.githubusercontent.com/J-MaFf/winget-app-setup/refs/heads/main'
+    $selfContained = Join-Path $paths.BasePath 'winget-app-install.ps1'
+    Invoke-WebRequest -Uri "$rawBase/Update-InstalledApps.ps1" -OutFile $paths.HelperScript -UseBasicParsing -ErrorAction Stop
+    Invoke-WebRequest -Uri "$rawBase/winget-app-install.ps1" -OutFile $selfContained -UseBasicParsing -ErrorAction Stop
+
     return $paths.HelperScript
 }
 
@@ -1441,7 +1483,17 @@ function Enable-ScheduledUpdatesCheck {
         return $true
     }
 
-    $null = Install-UpdateHelperScript
+    # Deploying the helper is best-effort: if it fails (e.g. the remote download is blocked), warn
+    # and skip rather than aborting the whole install or registering a task that points at a helper
+    # that was never deployed.
+    try {
+        $null = Install-UpdateHelperScript
+    }
+    catch {
+        Write-WarningMessage "Could not deploy the scheduled-update helper: $_"
+        Write-WarningMessage 'Scheduled updates were not enabled.'
+        return $false
+    }
 
     if (Test-ScheduledUpdatesTaskExists) {
         Unregister-ScheduledTask -TaskName $taskName -TaskPath $taskPath -Confirm:$false
@@ -2520,6 +2572,12 @@ function Initialize-WingetSourcesForUser {
     0x8A150010 (NO_APPLICABLE_INSTALLER) and the install is retried once at winget's default scope.
 .PARAMETER PackageId
     The winget package id to install (e.g. 'Microsoft.PowerShell').
+.PARAMETER InstallerType
+    Optional winget installer-type override (e.g. 'wix' to force the MSI), passed as
+    `--installer-type <value>`. Needed for PowerShell: even with --scope machine, winget's
+    installer-type precedence still selects the default MSIX, whose machine-scope provisioning fails
+    as a packaged app on Windows < build 26100 with 0x8A150113 ("system configuration does not
+    support"). Forcing 'wix' installs the machine-wide MSI instead (issue #163).
 .PARAMETER MaxAttempts
     Maximum number of install attempts while the session error keeps recurring. Default 3.
 .PARAMETER InitialDelaySeconds
@@ -2535,6 +2593,9 @@ function Install-WingetPackage {
     param (
         [Parameter(Mandatory = $true)]
         [string]$PackageId,
+
+        [Parameter(Mandatory = $false)]
+        [string]$InstallerType,
 
         [Parameter(Mandatory = $false)]
         [int]$MaxAttempts = 3,
@@ -2567,6 +2628,9 @@ function Install-WingetPackage {
         )
         if ($useMachineScope) {
             $installArgs += @('--scope', 'machine')
+        }
+        if (-not [string]::IsNullOrWhiteSpace($InstallerType)) {
+            $installArgs += @('--installer-type', $InstallerType)
         }
 
         $proc = Start-Process -FilePath 'winget' -ArgumentList $installArgs -NoNewWindow -Wait -PassThru

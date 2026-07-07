@@ -622,6 +622,12 @@ function Initialize-WingetSourcesForUser {
     0x8A150010 (NO_APPLICABLE_INSTALLER) and the install is retried once at winget's default scope.
 .PARAMETER PackageId
     The winget package id to install (e.g. 'Microsoft.PowerShell').
+.PARAMETER InstallerType
+    Optional winget installer-type override (e.g. 'wix' to force the MSI), passed as
+    `--installer-type <value>`. Needed for PowerShell: even with --scope machine, winget's
+    installer-type precedence still selects the default MSIX, whose machine-scope provisioning fails
+    as a packaged app on Windows < build 26100 with 0x8A150113 ("system configuration does not
+    support"). Forcing 'wix' installs the machine-wide MSI instead (issue #163).
 .PARAMETER MaxAttempts
     Maximum number of install attempts while the session error keeps recurring. Default 3.
 .PARAMETER InitialDelaySeconds
@@ -637,6 +643,9 @@ function Install-WingetPackage {
     param (
         [Parameter(Mandatory = $true)]
         [string]$PackageId,
+
+        [Parameter(Mandatory = $false)]
+        [string]$InstallerType,
 
         [Parameter(Mandatory = $false)]
         [int]$MaxAttempts = 3,
@@ -669,6 +678,9 @@ function Install-WingetPackage {
         )
         if ($useMachineScope) {
             $installArgs += @('--scope', 'machine')
+        }
+        if (-not [string]::IsNullOrWhiteSpace($InstallerType)) {
+            $installArgs += @('--installer-type', $InstallerType)
         }
 
         $proc = Start-Process -FilePath 'winget' -ArgumentList $installArgs -NoNewWindow -Wait -PassThru
