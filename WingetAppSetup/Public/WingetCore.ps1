@@ -308,11 +308,12 @@ function Test-WingetSources {
     (ERROR_DEPLOYMENT_BLOCKED_BY_USER_LOG_OFF). Every install then fails, and no amount of
     retrying helps because the missing per-user state is persistent (issues #81/#104/#150, #159).
 
-    This function probes with `winget source update --accept-source-agreements` (which both forces
-    the bootstrap and persists agreement acceptance for the account). When the probe fails, it
-    bootstraps winget for the account via Repair-WinGetPackageManager — which registers the App
-    Installer and Microsoft.Winget.Source packages even without an interactive logon session
-    (microsoft/winget-cli#6334) — and probes again.
+    This function probes with `winget source update --name winget` (which forces the winget-source
+    first-use bootstrap; agreements are accepted by the install commands, which pass
+    `--accept-source-agreements`). When the probe fails, it bootstraps winget for the account via
+    Repair-WinGetPackageManager — which registers the App Installer and Microsoft.Winget.Source
+    packages even without an interactive logon session (microsoft/winget-cli#6334) — and probes
+    again.
 .PARAMETER WhatIf
     When specified, only reports intended actions without executing.
 .RETURNS

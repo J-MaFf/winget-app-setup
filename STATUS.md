@@ -13,7 +13,12 @@ Windows-only cmdlets.
 
 ## Current State — 2026-07-07
 
-Healthy. **Dropped the unused msstore source** ([#172](https://github.com/J-MaFf/winget-app-setup/issues/172)):
+Healthy. **Fixed the winget source probe false-failing every run** ([#174](https://github.com/J-MaFf/winget-app-setup/issues/174)):
+the `Invoke-WingetSourceProbe` command passed `--accept-source-agreements`, which is invalid for
+`winget source update` (0x8A150002 / -1978335230), so the probe always failed and always printed
+"could not be initialized … may fail with 0x80073D19" on healthy machines. Dropped the invalid flag.
+
+**Dropped the unused msstore source** ([#172](https://github.com/J-MaFf/winget-app-setup/issues/172)):
 the trusted-sources loop no longer trusts/resets msstore (the tool only installs from `--source winget`),
 eliminating the frequent `Failed to reset sources for msstore` noise; the pre-elevation source update is
 scoped to `--name winget` too.
@@ -105,6 +110,7 @@ Pester installs persist across runs there ([#161](https://github.com/J-MaFf/wing
 
 | Issue | Description | PR |
 |-------|-------------|----|
+| [#174](https://github.com/J-MaFf/winget-app-setup/issues/174) | Winget source probe false-fails (invalid `--accept-source-agreements` on `source update`) | [#175](https://github.com/J-MaFf/winget-app-setup/pull/175) |
 | [#172](https://github.com/J-MaFf/winget-app-setup/issues/172) | Stop trusting/resetting the unused msstore source (noisy reset failures) | [#173](https://github.com/J-MaFf/winget-app-setup/pull/173) |
 | [#170](https://github.com/J-MaFf/winget-app-setup/issues/170) | Remove the install-time inline update pass (redundant with WAU) | [#171](https://github.com/J-MaFf/winget-app-setup/pull/171) |
 | [#168](https://github.com/J-MaFf/winget-app-setup/issues/168) | Outsource auto-updates to Winget-AutoUpdate (WAU); remove homegrown updater | [#169](https://github.com/J-MaFf/winget-app-setup/pull/169) |
