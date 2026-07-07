@@ -72,6 +72,12 @@ Foreach ($app in $apps) {
     }
 }
 
+# Remove the automatic-update tooling this installer set up: any legacy homegrown scheduled task and
+# its %APPDATA% data, plus Winget-AutoUpdate (issue #168).
+Write-Info 'Removing automatic-update components...'
+[void](Remove-LegacyScheduledUpdates)
+[void](Uninstall-WingetAutoUpdate)
+
 Write-Info 'Summary:'
 
 $headers = @('Status', 'Apps')

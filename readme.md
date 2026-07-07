@@ -18,13 +18,15 @@ Set-ExecutionPolicy Unrestricted -Scope Process -Force; irm "https://raw.githubu
 
 The script will trust the required Winget sources, elevate if necessary, and install or update the curated app list. Repeat step 1 anytime you open a new PowerShell window before running it.
 
-## Scheduled and on-demand update options
+## Automatic updates
 
-- `-EnableScheduledUpdates` enables a weekly (Sunday 2:00 AM) or daily scheduled update check
-- `-DisableScheduledUpdates` removes the scheduled task
-- `-CheckForUpdates` runs an immediate update check for installed applications
-- `-AutoInstallUpdates` auto-installs updates when used with `-CheckForUpdates` or `-EnableScheduledUpdates`
-- `-UpdateFrequency Weekly|Daily` selects the schedule frequency (default: `Weekly`)
+Ongoing updates are handled by [Winget-AutoUpdate (WAU)](https://github.com/Romanitho/Winget-AutoUpdate),
+which the installer sets up automatically (a pinned, SHA256-verified version). WAU runs as SYSTEM on a
+weekly schedule (2 AM) and updates installed apps machine-wide, plus a user-context pass for the
+logged-on user — which avoids the cross-user `0x80073d19` problems a per-user scheduled task hits.
+WAU's own self-update is disabled so the version stays pinned; bump it via `Get-WauPin` in
+`WingetAppSetup/Public/WingetAutoUpdate.ps1`. `winget-app-uninstall.ps1` removes WAU (and any legacy
+scheduled-update task from older versions).
 
 ## Project layout (for contributors)
 

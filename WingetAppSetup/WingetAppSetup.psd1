@@ -13,12 +13,10 @@
         'Test-AppDefinitions',
         # Winget core
         'Test-AndInstallWingetModule', 'Test-AndInstallWinget', 'Test-WingetSourceTrusted', 'Set-Sources', 'Test-WingetSources',
-        'Invoke-WingetCommand', 'Test-UpdatesAvailable', 'Get-UpdateReport', 'Initialize-WingetSourcesForUser', 'Install-WingetPackage',
+        'Invoke-WingetCommand', 'Test-UpdatesAvailable', 'Initialize-WingetSourcesForUser', 'Install-WingetPackage',
         'Test-WingetPackageInstalled', 'Test-AppxPackageProvisioned', 'Invoke-AppxProvisioning', 'Install-MsixProvisionedPackage', 'Install-PowerShellLatest',
-        # Scheduled / on-demand updates
-        'Get-UpdateSettingsPaths', 'New-DefaultUpdateConfiguration', 'Get-UpdateConfiguration', 'Save-UpdateConfiguration',
-        'Test-ScheduledUpdatesTaskExists', 'Install-UpdateHelperScript', 'Enable-ScheduledUpdatesCheck',
-        'Disable-ScheduledUpdatesCheck', 'Invoke-OnDemandUpdateCheck',
+        # Automatic updates (Winget-AutoUpdate)
+        'Get-WauPin', 'Test-WauInstalled', 'Install-WingetAutoUpdate', 'Uninstall-WingetAutoUpdate', 'Remove-LegacyScheduledUpdates',
         # Windows Terminal configuration
         'ConvertFrom-TerminalSettingsJson', 'Get-WindowsTerminalSettingsPath', 'Get-WindowsTerminalSettingsPaths',
         'Set-WindowsTerminalDefaultProfile', 'Set-WindowsTerminalAsDefaultTerminalApplication', 'Set-WindowsTerminalDefaults',

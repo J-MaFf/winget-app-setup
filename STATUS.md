@@ -13,7 +13,15 @@ Windows-only cmdlets.
 
 ## Current State — 2026-07-07
 
-Healthy. **PowerShell now installs the latest version, version-agnostically** ([#166](https://github.com/J-MaFf/winget-app-setup/issues/166)):
+Healthy. **Auto-updates outsourced to Winget-AutoUpdate (WAU)** ([#168](https://github.com/J-MaFf/winget-app-setup/issues/168)):
+the homegrown scheduled/on-demand updater (which ran non-elevated as the elevating admin and couldn't
+do machine-scope updates) is removed — ~700 lines across `ScheduledUpdates.ps1`, `Update-InstalledApps.ps1`,
+`Get-UpdateReport`, five one-liner switches, and ~10 tests. The installer now bootstraps a pinned,
+SHA256-verified WAU 2.12.0 (weekly, SYSTEM + user-context, self-update disabled), and installer/uninstaller
+run `Remove-LegacyScheduledUpdates` to migrate machines that already had the old task. The curated
+cross-user install flow and install-time inline update pass are untouched.
+
+**PowerShell now installs the latest version, version-agnostically** ([#166](https://github.com/J-MaFf/winget-app-setup/issues/166)):
 `Install-PowerShellLatest` prefers the MSI while the current line ships one (≤ 7.6), and once the MSI
 is gone (7.7+) installs the latest MSIX machine-wide — natively on Windows 24H2+ (build ≥ 26100) or via
 `Add-AppxProvisionedPackage` DISM provisioning on older Windows (a non-packaged process, so it dodges
@@ -87,6 +95,7 @@ Pester installs persist across runs there ([#161](https://github.com/J-MaFf/wing
 
 | Issue | Description | PR |
 |-------|-------------|----|
+| [#168](https://github.com/J-MaFf/winget-app-setup/issues/168) | Outsource auto-updates to Winget-AutoUpdate (WAU); remove homegrown updater | [#169](https://github.com/J-MaFf/winget-app-setup/pull/169) |
 | [#166](https://github.com/J-MaFf/winget-app-setup/issues/166) | Always-latest PowerShell install strategy for the MSIX-only (7.7+) future; harden scheduled task for MSIX | [#167](https://github.com/J-MaFf/winget-app-setup/pull/167) |
 | [#163](https://github.com/J-MaFf/winget-app-setup/issues/163) | PowerShell fails to install on elevated cross-user sessions (winget picks MSIX over MSI for 7.6+) | [#165](https://github.com/J-MaFf/winget-app-setup/pull/165) |
 | [#164](https://github.com/J-MaFf/winget-app-setup/issues/164) | Scheduled-update setup errors under `irm \| iex` (empty `$PSScriptRoot`); weekly task registered but never deployed | [#165](https://github.com/J-MaFf/winget-app-setup/pull/165) |
