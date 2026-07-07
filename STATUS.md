@@ -13,7 +13,12 @@ Windows-only cmdlets.
 
 ## Current State — 2026-07-07
 
-Healthy. **Removed the install-time inline update pass** ([#170](https://github.com/J-MaFf/winget-app-setup/issues/170)):
+Healthy. **Dropped the unused msstore source** ([#172](https://github.com/J-MaFf/winget-app-setup/issues/172)):
+the trusted-sources loop no longer trusts/resets msstore (the tool only installs from `--source winget`),
+eliminating the frequent `Failed to reset sources for msstore` noise; the pre-elevation source update is
+scoped to `--name winget` too.
+
+**Removed the install-time inline update pass** ([#170](https://github.com/J-MaFf/winget-app-setup/issues/170)):
 it upgraded every installed app synchronously as the elevating admin (slow, silent, mostly failing
 under cross-user elevation) and is redundant now that WAU handles updates. The installer just installs
 the curated apps and sets up WAU (which runs once immediately via `RUN_WAU=YES`, then weekly as SYSTEM).
@@ -100,6 +105,7 @@ Pester installs persist across runs there ([#161](https://github.com/J-MaFf/wing
 
 | Issue | Description | PR |
 |-------|-------------|----|
+| [#172](https://github.com/J-MaFf/winget-app-setup/issues/172) | Stop trusting/resetting the unused msstore source (noisy reset failures) | [#173](https://github.com/J-MaFf/winget-app-setup/pull/173) |
 | [#170](https://github.com/J-MaFf/winget-app-setup/issues/170) | Remove the install-time inline update pass (redundant with WAU) | [#171](https://github.com/J-MaFf/winget-app-setup/pull/171) |
 | [#168](https://github.com/J-MaFf/winget-app-setup/issues/168) | Outsource auto-updates to Winget-AutoUpdate (WAU); remove homegrown updater | [#169](https://github.com/J-MaFf/winget-app-setup/pull/169) |
 | [#166](https://github.com/J-MaFf/winget-app-setup/issues/166) | Always-latest PowerShell install strategy for the MSIX-only (7.7+) future; harden scheduled task for MSIX | [#167](https://github.com/J-MaFf/winget-app-setup/pull/167) |

@@ -545,18 +545,19 @@ function Invoke-WingetInstall {
     # Determine which PowerShell executable to use
     $psExecutable = if (Get-Command pwsh -ErrorAction SilentlyContinue) { 'pwsh.exe' } else { 'powershell.exe' }
 
-    # Accept msstore source agreements in the user context before elevating.
-    # Agreements are per-user — they won't carry over into the elevated process.
-    # Running winget source update here surfaces the interactive prompt while we
-    # still have the normal user's identity.
+    # Accept the winget source agreement in the user context before elevating. Agreements are
+    # per-user and won't carry into the elevated process; running the update here surfaces any
+    # interactive prompt while we still have the normal user's identity. Scoped to --name winget —
+    # the only source this tool installs from — so it never triggers msstore's agreement/first-use
+    # handshake, which fails in non-interactive/cross-user contexts (issue #172).
     $isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] 'Administrator')
     if (-not $isAdmin -and (Test-IsRunningLocally)) {
         if ($WhatIf) {
-            Write-Info '[DRY-RUN] Would run winget source update to prompt for source agreement acceptance in user context'
+            Write-Info '[DRY-RUN] Would run winget source update --name winget to prompt for source agreement acceptance in user context'
         }
         else {
-            Write-Info 'Updating winget sources — accept any prompts that appear to continue...'
-            Start-Process -FilePath 'winget' -ArgumentList 'source', 'update' -Wait -NoNewWindow
+            Write-Info 'Updating the winget source — accept any prompts that appear to continue...'
+            Start-Process -FilePath 'winget' -ArgumentList 'source', 'update', '--name', 'winget' -Wait -NoNewWindow
         }
     }
 
@@ -700,8 +701,12 @@ function Invoke-WingetInstall {
     $skippedApps = @()
     $failedApps = @()
 
-    # Verify sources are trusted
-    $trustedSources = @('winget', 'msstore')
+    # Verify sources are trusted. Only the winget community source is used — every install forces
+    # --source winget — so msstore is intentionally excluded: it is never installed from, and
+    # trusting it here ran a global `winget source reset --force` that wiped/re-prompted source
+    # agreements and failed noisily on msstore's cert/agreement/licensing handshake in elevated or
+    # cross-user contexts (issue #172).
+    $trustedSources = @('winget')
     $sourceErrors = @()
     ForEach ($source in $trustedSources) {
         if (-not (Test-WingetSourceTrusted -target $source)) {
