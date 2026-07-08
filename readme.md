@@ -4,16 +4,28 @@ A one-line guide for running the installer.
 
 ## Run the installer
 
+> **Requires PowerShell 7+ (`pwsh`).** Run the commands below from a `pwsh` prompt — not the
+> built-in Windows PowerShell 5.1 (`powershell.exe`). Under 5.1 the installer prints a short
+> message and exits without changing anything. If you only have Windows PowerShell, install
+> PowerShell 7 first (`winget install Microsoft.PowerShell`) or prefix the one-liner with
+> `pwsh -Command "..."`.
+
 From the repository root, execute (after cloning):
 
 ```powershell
-powershell -ExecutionPolicy Unrestricted -File .\winget-app-install.ps1
+pwsh -ExecutionPolicy Unrestricted -File .\winget-app-install.ps1
 ```
 
-No download/clone needed (one-line-run):
+No download/clone needed (one-line-run, from a `pwsh` prompt):
 
 ```powershell
 Set-ExecutionPolicy Unrestricted -Scope Process -Force; irm "https://raw.githubusercontent.com/J-MaFf/winget-app-setup/refs/heads/main/winget-app-install.ps1" | iex
+```
+
+Or, from a Windows PowerShell 5.1 prompt, hand the one-liner to `pwsh`:
+
+```powershell
+pwsh -Command "irm 'https://raw.githubusercontent.com/J-MaFf/winget-app-setup/refs/heads/main/winget-app-install.ps1' | iex"
 ```
 
 The script will trust the required Winget sources, elevate if necessary, and install or update the curated app list. Repeat step 1 anytime you open a new PowerShell window before running it.
@@ -24,7 +36,7 @@ Pass `-NonInteractive` to suppress all interactive prompts (the elevation pause,
 prompt, and the final "press any key") for RMM, CI, or scheduled-task use:
 
 ```powershell
-powershell -ExecutionPolicy Unrestricted -File .\winget-app-install.ps1 -NonInteractive
+pwsh -ExecutionPolicy Unrestricted -File .\winget-app-install.ps1 -NonInteractive
 ```
 
 Non-interactive mode is also auto-detected when the session is non-interactive (e.g.
@@ -35,7 +47,7 @@ Non-interactive mode is also auto-detected when the session is non-interactive (
 | Code | Meaning |
 |------|---------|
 | 0 | Success — all apps installed or already present |
-| 1 | One or more apps failed to install (also: pre-flight system checks failed, or elevation unavailable under remote execution) |
+| 1 | One or more apps failed to install (also: run under PowerShell older than 7, pre-flight system checks failed, or elevation unavailable under remote execution) |
 | 2 | Winget is unavailable and could not be installed |
 | 3 | App-definition validation failed, or no valid app definitions remain |
 

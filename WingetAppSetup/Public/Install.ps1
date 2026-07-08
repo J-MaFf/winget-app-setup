@@ -67,7 +67,7 @@ function Invoke-WingetInstall {
             Write-Info '[DRY-RUN] Would run winget source update --name winget to prompt for source agreement acceptance in user context'
         }
         else {
-            Write-Info 'Updating the winget source — accept any prompts that appear to continue...'
+            Write-Info 'Updating the winget source - accept any prompts that appear to continue...'
             Start-Process -FilePath 'winget' -ArgumentList 'source', 'update', '--name', 'winget' -Wait -NoNewWindow
         }
     }
