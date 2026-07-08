@@ -12,8 +12,13 @@
     FunctionsToExport = @(
         # Logging (consumed by winget-app-uninstall.ps1)
         'Write-Info', 'Write-Success', 'Write-WarningMessage', 'Write-ErrorMessage', 'Format-AppList', 'Write-Table',
+        # App catalog — single source of truth for the curated list (issue #190; consumed by
+        # winget-app-uninstall.ps1 too)
+        'Get-DefaultAppCatalog',
         # App validation
         'Test-AppDefinitions',
+        # Elevation relaunch (consumed by winget-app-uninstall.ps1)
+        'Restart-WithElevation',
         # Winget core
         'Test-AndInstallWingetModule', 'Test-AndInstallWinget', 'Test-WingetSources',
         'Initialize-WingetSourcesForUser', 'Install-WingetPackage',

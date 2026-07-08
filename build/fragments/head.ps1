@@ -25,9 +25,10 @@
 
 .DESCRIPTION
  This script installs a curated list of programs from winget. The authoritative
- list is the $apps array in Invoke-WingetInstall (WingetAppSetup/Public/Install.ps1,
- inlined below in this generated file). Run the script with -WhatIf to preview the
- exact set of planned installs without making any system changes.
+ list is returned by Get-DefaultAppCatalog (WingetAppSetup/Public/AppCatalog.ps1,
+ inlined below in this generated file) and shared with winget-app-uninstall.ps1.
+ Run the script with -WhatIf to preview the exact set of planned installs without
+ making any system changes.
 
 .PARAMETER WhatIf
  When specified, performs all pre-flight checks and displays planned actions without making any system changes.
