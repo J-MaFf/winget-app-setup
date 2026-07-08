@@ -166,6 +166,7 @@ Pester installs persist across runs there ([#161](https://github.com/J-MaFf/wing
 |-------|-------------|--------|
 | [#210](https://github.com/J-MaFf/winget-app-setup/issues/210) | Generated installer fails to parse under Windows PowerShell 5.1 (BOM-less UTF-8 decoded as ANSI; em dashes corrupt string tokens) | In review — PR [#212](https://github.com/J-MaFf/winget-app-setup/pull/212) |
 | [#211](https://github.com/J-MaFf/winget-app-setup/issues/211) | Local pre-commit drift check + document the generated-script guard stack | In review — [PR #213](https://github.com/J-MaFf/winget-app-setup/pull/213), stacked on #212 |
+| [#217](https://github.com/J-MaFf/winget-app-setup/issues/217) | Dell Command Update cannot install on GitHub-hosted runners — manufacturer-aware catalog gating | In review — [PR #220](https://github.com/J-MaFf/winget-app-setup/pull/220) |
 
 ## Natural Next Steps
 
