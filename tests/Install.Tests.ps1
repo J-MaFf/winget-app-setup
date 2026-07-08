@@ -69,7 +69,8 @@ Describe 'Main Script Logic' {
     # copy of the install loop (single-string ArgumentList, no --scope machine) instead of
     # exercising the real code. The behavior it guarded is now covered for real by the
     # 'Install-AppWithVerification' and 'Invoke-WingetInstall wiring' Describes below, and the
-    # --source winget flag assertion lives in the 'Install-WingetPackage' Describe.
+    # --source winget flag assertion lives in the 'Install-WingetPackage' Describe
+    # (tests/WingetCore.Tests.ps1).
 
     Context 'Summary table generation' {
         It 'Should format summary table with install, skip, and fail results' {
