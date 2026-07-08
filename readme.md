@@ -18,6 +18,27 @@ Set-ExecutionPolicy Unrestricted -Scope Process -Force; irm "https://raw.githubu
 
 The script will trust the required Winget sources, elevate if necessary, and install or update the curated app list. Repeat step 1 anytime you open a new PowerShell window before running it.
 
+## Unattended runs
+
+Pass `-NonInteractive` to suppress all interactive prompts (the elevation pause, the grid-view
+prompt, and the final "press any key") for RMM, CI, or scheduled-task use:
+
+```powershell
+powershell -ExecutionPolicy Unrestricted -File .\winget-app-install.ps1 -NonInteractive
+```
+
+Non-interactive mode is also auto-detected when the session is non-interactive (e.g.
+`pwsh -NonInteractive`, services, scheduled tasks) or stdin is redirected.
+
+### Exit codes
+
+| Code | Meaning |
+|------|---------|
+| 0 | Success — all apps installed or already present |
+| 1 | One or more apps failed to install (also: pre-flight system checks failed, or elevation unavailable under remote execution) |
+| 2 | Winget is unavailable and could not be installed |
+| 3 | App-definition validation failed, or no valid app definitions remain |
+
 ## Automatic updates
 
 Ongoing updates are handled by [Winget-AutoUpdate (WAU)](https://github.com/Romanitho/Winget-AutoUpdate),

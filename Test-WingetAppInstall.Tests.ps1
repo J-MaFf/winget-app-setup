@@ -2374,6 +2374,12 @@ Describe 'WhatIf Mode - Unit Tests' {
             $command.Parameters.ContainsKey('WhatIf') | Should -Be $true
             $command.Parameters['WhatIf'].ParameterType.Name | Should -Be 'SwitchParameter'
         }
+
+        It 'Should accept NonInteractive parameter without error' {
+            $command = Get-Command Invoke-WingetInstall
+            $command.Parameters.ContainsKey('NonInteractive') | Should -Be $true
+            $command.Parameters['NonInteractive'].ParameterType.Name | Should -Be 'SwitchParameter'
+        }
     }
 
     # The 'WhatIf logic for source trust' context was removed in issue #177 along with the

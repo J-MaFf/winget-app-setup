@@ -34,13 +34,20 @@
 
 .PARAMETER SkipSystemCheck
  Bypasses the pre-flight system checks (OS version, disk space, network) for headless or automated use.
+
+.PARAMETER NonInteractive
+ Suppresses all interactive prompts (elevation pause, grid-view prompt, final "press any key") for
+ unattended runs (RMM, CI, scheduled tasks). Also auto-detected when the session is non-interactive
+ or stdin is redirected.
 #>
 
 param (
     [Parameter(Mandatory = $false)]
     [switch]$WhatIf,
     [Parameter(Mandatory = $false)]
-    [switch]$SkipSystemCheck
+    [switch]$SkipSystemCheck,
+    [Parameter(Mandatory = $false)]
+    [switch]$NonInteractive
 )
 
 # ------------------------------------------------------------------------------------------------
@@ -674,12 +681,33 @@ function Test-AppDefinitions {
     Performs prerequisite checks, validates application definitions, installs requested apps, processes updates, and displays a summary when invoked.
 .PARAMETER WhatIf
     When specified, the script performs all pre-flight checks and displays planned actions without making any system changes.
+.PARAMETER NonInteractive
+    Suppresses all interactive prompts (elevation pause, grid-view prompt, final "press any key")
+    for unattended runs (RMM, CI, scheduled tasks). Also auto-detected when the session is
+    non-interactive or stdin is redirected.
+.NOTES
+    Exit codes: 0 = success, 1 = one or more apps failed to install, 2 = winget unavailable,
+    3 = app-definition validation failed or no valid apps remain.
 #>
 function Invoke-WingetInstall {
     param (
         [Parameter(Mandatory = $false)]
-        [switch]$WhatIf
+        [switch]$WhatIf,
+        [Parameter(Mandatory = $false)]
+        [switch]$NonInteractive
     )
+
+    # Effective non-interactive mode: explicit switch, a non-interactive session (e.g. service,
+    # scheduled task, pwsh -NonInteractive), or redirected stdin (piped/irm|iex wrappers). A
+    # console probe failure means there is no usable console, so treat that as non-interactive.
+    $inputRedirected = $false
+    try {
+        $inputRedirected = [System.Console]::IsInputRedirected
+    }
+    catch {
+        $inputRedirected = $true
+    }
+    $effectiveNonInteractive = $NonInteractive -or (-not [Environment]::UserInteractive) -or $inputRedirected
 
     if ($WhatIf) {
         Write-Info '=== DRY-RUN MODE ENABLED ==='
@@ -717,11 +745,20 @@ function Invoke-WingetInstall {
                 Write-Info '[DRY-RUN] Would relaunch with administrator privileges. Continuing the preview in the current (non-elevated) session; no system changes will be made.'
             }
             else {
-                Write-ErrorMessage 'This script requires administrator privileges. Press Enter to restart script with elevated privileges.'
-                Pause
+                if ($effectiveNonInteractive) {
+                    Write-ErrorMessage 'This script requires administrator privileges. Restarting with elevated privileges...'
+                }
+                else {
+                    Write-ErrorMessage 'This script requires administrator privileges. Press Enter to restart script with elevated privileges.'
+                    Pause
+                }
                 # Relaunch the script with administrator privileges, forwarding -WhatIf as a
                 # safety net so the elevated session can never escalate a dry run into changes.
-                $elevationArgs = if ($WhatIf) { @('-WhatIf') } else { @() }
+                # Forward the effective non-interactive state too: the elevated child gets a fresh
+                # console and would otherwise re-detect as interactive and block on prompts.
+                $elevationArgs = @()
+                if ($WhatIf) { $elevationArgs += '-WhatIf' }
+                if ($effectiveNonInteractive) { $elevationArgs += '-NonInteractive' }
                 Restart-WithElevation -PowerShellExecutable $psExecutable -ScriptPath $PSCommandPath -AdditionalArguments $elevationArgs | Out-Null
                 Exit
             }
@@ -760,7 +797,7 @@ function Invoke-WingetInstall {
     # Check if winget is available and install if necessary
     if (-not (Test-AndInstallWinget)) {
         Write-ErrorMessage 'Winget is required for this script. Exiting.'
-        Exit
+        Exit 2
     }
 
     # Initialize winget sources and agreements for the account performing the installs. This is
@@ -817,14 +854,14 @@ function Invoke-WingetInstall {
             Write-ErrorMessage $validationError
         }
         Write-ErrorMessage 'No valid application definitions found. Resolve the errors and re-run the script.'
-        Exit
+        Exit 3
     }
 
     $apps = $validationResult.ValidApps
 
     if ($apps.Count -eq 0) {
         Write-ErrorMessage 'No application definitions remain after validation. Add at least one valid entry and re-run the script.'
-        Exit
+        Exit 3
     }
 
     Write-Info 'Installing the following Apps:'
@@ -852,10 +889,13 @@ function Invoke-WingetInstall {
 
             # Wait up to 15 seconds for the list command
             if (-not $listProcess.WaitForExit(15000)) {
-                Write-WarningMessage "Winget list timed out for $($app.name). Skipping..."
+                Write-WarningMessage "Winget list timed out for $($app.name). Marking as failed; it will be retried."
                 $listProcess.Kill()
                 Remove-Item "$env:TEMP\winget_list_output.txt" -ErrorAction SilentlyContinue
                 Remove-Item "$env:TEMP\winget_list_error.txt" -ErrorAction SilentlyContinue
+                # Mark the app failed instead of silently dropping it: it then flows through the
+                # retry pass, appears in the summary, and drives the non-zero exit code (issue #176).
+                $failedApps += $app.name
                 continue
             }
 
@@ -1047,11 +1087,14 @@ function Invoke-WingetInstall {
         $rows += , @('Failed', $appList)
     }
 
-    Write-Table -Headers $headers -Rows $rows -PromptForGridView $true -Title 'Installation Summary'
+    Write-Table -Headers $headers -Rows $rows -PromptForGridView (-not $effectiveNonInteractive) -Title 'Installation Summary'
 
-    # Keep the console window open until the user presses a key
-    Write-Prompt 'Press any key to exit...'
-    [void][System.Console]::ReadKey($true)
+    # Keep the console window open until the user presses a key. Skipped in non-interactive mode
+    # so unattended runs never block (and the failure exit below stays reachable).
+    if (-not $effectiveNonInteractive) {
+        Write-Prompt 'Press any key to exit...'
+        [void][System.Console]::ReadKey($true)
+    }
 
     if ($failedApps.Count -gt 0) {
         Exit 1
@@ -2447,5 +2490,5 @@ if ($MyInvocation.InvocationName -ne '.') {
         }
     }
 
-    Invoke-WingetInstall -WhatIf:$WhatIf
+    Invoke-WingetInstall -WhatIf:$WhatIf -NonInteractive:$NonInteractive
 }
