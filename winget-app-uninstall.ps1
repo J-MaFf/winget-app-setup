@@ -45,24 +45,25 @@ $failedApps = @()
 
 Foreach ($app in $apps) {
     try {
-        $listApp = winget list --exact --id $app.name
-        if ([String]::Join('', $listApp).Contains($app.name)) {
+        # Classify by exit code, not by matching English output strings — winget output is
+        # locale-dependent. Capture $LASTEXITCODE immediately after each winget call (issue #180).
+        $null = winget list --exact --id $app.name --accept-source-agreements --disable-interactivity
+        $listExitCode = $LASTEXITCODE
+        if ($listExitCode -eq 0) {
             Write-Info "Uninstalling: $($app.name)"
-            $uninstallResult = winget uninstall -e --id $app.name
-            if ($uninstallResult -match 'No installed package found matching input criteria.') {
-                Write-ErrorMessage "Failed to uninstall: $($app.name). No installed package found matching input criteria."
-                $failedApps += $app.name
-            }
-            elseif ($uninstallResult -match 'Successfully uninstalled') {
+            $uninstallOutput = winget uninstall -e --id $app.name --disable-interactivity
+            $uninstallExitCode = $LASTEXITCODE
+            if ($uninstallExitCode -eq 0) {
                 Write-Success "Successfully uninstalled: $($app.name)"
                 $uninstalledApps += $app.name
             }
             else {
-                throw "Failed to uninstall: $($app.name). Error: $uninstallResult"
+                throw "Failed to uninstall: $($app.name). Exit code: 0x$('{0:X8}' -f $uninstallExitCode). Output: $uninstallOutput"
             }
         }
         else {
-            Write-WarningMessage "Skipping: $($app.name) (not installed)"
+            # Nonzero exit (e.g. 0x8A150014 APPINSTALLER_CLI_ERROR_NO_APPLICATIONS_FOUND) => not installed.
+            Write-WarningMessage "Skipping: $($app.name) (not installed; winget list exit code 0x$('{0:X8}' -f $listExitCode))"
             $skippedApps += $app.name
         }
     }
