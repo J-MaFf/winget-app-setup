@@ -58,6 +58,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Made the module manifest the single export authority (issue #191): `WingetAppSetup.psm1` no longer AST-derives its own export list from `Public/*.ps1` (a second authority under which a new Public function passed the psm1's export while being silently filtered on manifest imports — how `winget-app-uninstall.ps1` loads the module) and instead reads `FunctionsToExport` from the psd1; `build/Build-WingetInstallScript.ps1` now asserts in both build and `-Check` modes that the psd1 list exactly matches the functions defined under `WingetAppSetup/Public/*.ps1`, failing with the difference listed. Also trimmed the public surface by moving the module-internal `Write-Prompt` (to `Private/LoggingInternal.ps1`) and `ConvertFrom-TerminalSettingsJson` (to `Private/Jsonc.ps1`, beside the `Convert-JsoncToJson` scanner it wraps) out of the exported set; `Write-Info`/`Write-Success`/`Write-WarningMessage`/`Write-ErrorMessage`/`Format-AppList`/`Write-Table` stay exported because `winget-app-uninstall.ps1` consumes them ([#205](https://github.com/J-MaFf/winget-app-setup/pull/205)).
 - Reconciled the agent-instruction files with CLAUDE.md as the single source of truth: AGENTS.md's beads block no longer mandates unconditional `git push` at session end (it now points at CLAUDE.md's Session Completion — push feature branches + `bd dolt push`; merges stay human-gated), and `.github/copilot-instructions.md` dropped the foreign-project examples and emoji PR-title scheme in favor of repo-specific guidance ([#199](https://github.com/J-MaFf/winget-app-setup/pull/199)).
 - Marked `winget-app-install.ps1` as `linguist-generated` in `.gitattributes` so the generated single-file installer's diff collapses by default in PR review ([#199](https://github.com/J-MaFf/winget-app-setup/pull/199)).
 - Extracted the duplicated source health probe in `Test-WingetSources` (the pre-repair and post-repair copies had already diverged in logging) into a single private helper, `Test-WingetSourceHealth` (`WingetAppSetup/Private/WingetBootstrap.ps1`), called twice with a `-Quiet` switch controlling per-step log verbosity (issue #177, [#202](https://github.com/J-MaFf/winget-app-setup/pull/202)).
@@ -77,6 +78,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
+- Removed the dead `ConvertTo-CommandArguments` helper (`WingetAppSetup/Private/Environment.ps1`, ~45 lines) and its 4 Pester tests — a remnant of the removed homegrown updater with zero production callers that still shipped in every generated installer ([#205](https://github.com/J-MaFf/winget-app-setup/pull/205)).
 - Removed orphaned Pester `Describe` blocks that tested functions which no longer ship: `Test-AndSetExecutionPolicy` (its `launch.ps1` was already dropped), `Invoke-WingetInstallWithRetry`, and `Test-SystemRequirements` ([#111](https://github.com/J-MaFf/winget-app-setup/issues/111)).
 - Dropped `launch.ps1`; the installer now runs directly when the required execution policy is temporarily relaxed.
 
