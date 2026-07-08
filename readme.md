@@ -76,6 +76,36 @@ WAU's own self-update is disabled so the version stays pinned; bump it via `Get-
 `WingetAppSetup/Public/WingetAutoUpdate.ps1`. `winget-app-uninstall.ps1` removes WAU (and any legacy
 scheduled-update task from older versions).
 
+## End-to-end monitoring (e2e tier 1)
+
+The unit suite mocks every external call, so a real install is exercised by a scheduled
+end-to-end run (`.github/workflows/e2e-install.yml`, issue #214) on a GitHub-hosted
+`windows-latest` runner — a throwaway VM by construction:
+
+- **When it runs:** weekly (Mondays 06:00 UTC), on manual dispatch, and on pull requests that
+  touch the e2e machinery itself (`.github/workflows/e2e-install.yml`, `e2e/**`) so those
+  changes validate themselves pre-merge.
+- **What it does:** installs the curated catalog twice — scheduled/dispatch runs use the true
+  production path (`irm <raw main URL> | iex`), PR runs use the checkout's
+  `winget-app-install.ps1` — asserting exit 0 both times (the second pass proves idempotence),
+  then runs the shared assertion script `e2e/Assert-Install.ps1 -ExpectAllSkippedOnSecondRun`:
+  every `Get-DefaultAppCatalog` app resolves via `winget list` (exit-code classified), the WAU
+  scheduled task exists, the installed WAU version matches `Get-WauPin`, and a transcript with
+  the `Installer build` stamp exists — with every app Skipped on the second pass. The script's
+  `-SkipApps` parameter is an escape hatch for runner-platform incompatibilities only; each use
+  must reference a GitHub issue at the call site.
+- **Where the transcripts land:** on the runner under `%ProgramData%\winget-app-setup\logs`
+  (the same place as production runs), always uploaded as the `e2e-install-transcripts`
+  artifact on the workflow run.
+- **On failure:** scheduled/dispatched runs (never PR runs) create — or comment on an existing
+  open — GitHub issue titled `E2E install run failed` with the run URL and the last 50
+  transcript lines.
+- **Trigger manually:** `gh workflow run e2e-install.yml`, then watch with
+  `gh run list --workflow e2e-install.yml` / `gh run watch <run-id>`.
+
+Tier 2 ([#215](https://github.com/J-MaFf/winget-app-setup/issues/215)) will reuse
+`e2e/Assert-Install.ps1` for a cross-user elevation run on a snapshot-rollback VM.
+
 ## Project layout (for contributors)
 
 The installer's logic lives in the **`WingetAppSetup` PowerShell module** under `WingetAppSetup/`
