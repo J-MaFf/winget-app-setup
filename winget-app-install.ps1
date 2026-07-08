@@ -503,13 +503,19 @@ function Invoke-WingetSourceProbe {
         [int]$TimeoutSeconds = 120
     )
 
+    # Unique per-run temp files: fixed names made concurrent runs (or a stale locked file from a
+    # killed run) fail Start-Process, which read as a false probe failure (issue #177).
+    $tempSuffix = [System.IO.Path]::GetRandomFileName()
+    $stdoutFile = Join-Path $env:TEMP "winget_source_probe_output_$tempSuffix.txt"
+    $stderrFile = Join-Path $env:TEMP "winget_source_probe_error_$tempSuffix.txt"
+
     try {
         $probeProcess = Start-Process -FilePath 'winget' `
             -ArgumentList 'source', 'update', '--name', 'winget', '--disable-interactivity' `
             -NoNewWindow `
             -PassThru `
-            -RedirectStandardOutput "$env:TEMP\winget_source_probe_output.txt" `
-            -RedirectStandardError "$env:TEMP\winget_source_probe_error.txt"
+            -RedirectStandardOutput $stdoutFile `
+            -RedirectStandardError $stderrFile
 
         if (-not $probeProcess.WaitForExit($TimeoutSeconds * 1000)) {
             Write-WarningMessage "Winget source update timed out after $TimeoutSeconds seconds. Terminating process..."
@@ -528,8 +534,84 @@ function Invoke-WingetSourceProbe {
         return @{ Succeeded = $false; ExitCode = $null; TimedOut = $false }
     }
     finally {
-        Remove-Item "$env:TEMP\winget_source_probe_output.txt" -ErrorAction SilentlyContinue
-        Remove-Item "$env:TEMP\winget_source_probe_error.txt" -ErrorAction SilentlyContinue
+        Remove-Item $stdoutFile -ErrorAction SilentlyContinue
+        Remove-Item $stderrFile -ErrorAction SilentlyContinue
+    }
+}
+
+<#
+.SYNOPSIS
+    Checks that the winget source is both listed and functional for the current account.
+.DESCRIPTION
+    Two-step health probe used by Test-WingetSources before and after its repair attempt (one
+    shared implementation so the two probes cannot diverge — issue #177):
+
+      1. Listed: `winget source list` output mentions the winget source.
+      2. Functional: a real `winget search 7zip --source winget` succeeds (exit code 0 and no
+         corruption markers such as 0x8a15000f in the output).
+
+    The search passes `--accept-source-agreements` — valid for `winget search`, unlike
+    `winget source update` (issues #174/#175) — so a fresh account's unaccepted source agreements
+    (0x8A150046) are accepted inline instead of being misdiagnosed as source corruption and
+    triggering a pointless `winget source reset --force` + repair cycle.
+.PARAMETER Quiet
+    Suppresses the per-step success/corruption messages; used for the post-repair re-probe where
+    the caller reports the overall outcome itself.
+.RETURNS
+    [hashtable] @{ Listed = <bool>; Functional = <bool>; Healthy = <bool> }
+    Healthy is True only when the source is listed AND functional.
+#>
+function Test-WingetSourceHealth {
+    param (
+        [Parameter(Mandatory = $false)]
+        [switch]$Quiet
+    )
+
+    # First check: verify source is listed
+    try {
+        $output = winget source list --disable-interactivity --accept-source-agreements 2>&1
+        $sourceIsListed = [bool]($output -match 'winget')
+    }
+    catch {
+        Write-WarningMessage "Winget source list failed: $_"
+        $sourceIsListed = $false
+    }
+
+    # Second check: verify source is functional (not corrupted) by attempting a search
+    $sourceIsFunctional = $false
+    if ($sourceIsListed) {
+        try {
+            # Actually test if the source works by attempting a search.
+            # Use '7zip' as a known package that always exists.
+            $searchOutput = winget search 7zip --source winget --disable-interactivity --accept-source-agreements 2>&1
+            $searchExitCode = $LASTEXITCODE
+
+            # Check for corruption error code 0x8a15000f or similar source errors
+            if ($searchOutput -match '0x8a150|failed when opening|data required' -or $searchExitCode -ne 0) {
+                if (-not $Quiet) {
+                    Write-WarningMessage 'Winget source is listed but contains corrupted or missing data.'
+                }
+                $sourceIsFunctional = $false
+            }
+            else {
+                if (-not $Quiet) {
+                    Write-Success 'Winget sources are accessible and functional.'
+                }
+                $sourceIsFunctional = $true
+            }
+        }
+        catch {
+            if (-not $Quiet) {
+                Write-WarningMessage "Winget source functionality test failed: $_"
+            }
+            $sourceIsFunctional = $false
+        }
+    }
+
+    return @{
+        Listed     = $sourceIsListed
+        Functional = $sourceIsFunctional
+        Healthy    = ($sourceIsListed -and $sourceIsFunctional)
     }
 }
 
@@ -754,37 +836,9 @@ function Invoke-WingetInstall {
     $skippedApps = @()
     $failedApps = @()
 
-    # Verify sources are trusted. Only the winget community source is used — every install forces
-    # --source winget — so msstore is intentionally excluded: it is never installed from, and
-    # trusting it here ran a global `winget source reset --force` that wiped/re-prompted source
-    # agreements and failed noisily on msstore's cert/agreement/licensing handshake in elevated or
-    # cross-user contexts (issue #172).
-    $trustedSources = @('winget')
-    $sourceErrors = @()
-    ForEach ($source in $trustedSources) {
-        if (-not (Test-WingetSourceTrusted -target $source)) {
-            if (-not $WhatIf) {
-                Write-WarningMessage "Trusting source: $source"
-                try {
-                    $sourceResetSuccess = Set-Sources
-                    if (-not $sourceResetSuccess) {
-                        $sourceErrors += $source
-                        Write-WarningMessage "Failed to reset sources for $source. Continuing with installation..."
-                    }
-                }
-                catch {
-                    $sourceErrors += $source
-                    Write-WarningMessage "Error resetting sources for ${source}: ${_}. Continuing with installation..."
-                }
-            }
-            else {
-                Write-Info "[DRY-RUN] Would trust source: $source"
-            }
-        }
-        else {
-            Write-Success "Source is already trusted: $source"
-        }
-    }
+    # No separate source-trust pass here: only the winget community source is used (every install
+    # forces --source winget), and its health was already verified — and repaired if needed — by
+    # Test-WingetSources above (issues #172, #177).
 
     Foreach ($app in $apps) {
         try {
@@ -1833,96 +1887,23 @@ function Test-AndInstallWinget {
             Invoke-WebRequest -Uri $url -OutFile $outFile -UseBasicParsing
             Add-AppxPackage $outFile
             Remove-Item $outFile -ErrorAction SilentlyContinue
-            Write-Success 'Microsoft App Installer installed successfully. Winget should now be available.'
-            return $true
+
+            # Verify the registration actually made winget available, like the Repair path above —
+            # Add-AppxPackage can complete without winget landing on PATH (issue #177).
+            if (Get-Command winget -ErrorAction SilentlyContinue) {
+                Write-Success 'Microsoft App Installer installed successfully. Winget is now available.'
+                return $true
+            }
+
+            Write-ErrorMessage 'Microsoft App Installer was registered, but winget is still unavailable.'
+            Write-ErrorMessage 'Please install winget manually from https://aka.ms/getwinget'
+            return $false
         }
         catch {
             Write-ErrorMessage "Failed to install winget: $_"
             Write-ErrorMessage 'Please install winget manually from https://aka.ms/getwinget'
             return $false
         }
-    }
-}
-
-<#
-.SYNOPSIS
-    Checks if a specific winget source is trusted.
-.DESCRIPTION
-    This function checks if a specific winget source is trusted by listing all sources and checking if the target source is in the list.
-    Automatically accepts source agreements to prevent the script from hanging on first run.
-.PARAMETER target
-    The name of the source to check.
-.RETURNS
-    [bool] True if the source is trusted, otherwise False.
-#>
-function Test-WingetSourceTrusted($target) {
-    try {
-        $sources = winget source list --disable-interactivity --accept-source-agreements 2>&1
-        return $sources -match [regex]::Escape($target)
-    }
-    catch {
-        Write-Warning "Error checking source trust for ${target}: $_"
-        return $false
-    }
-}
-
-<#
-.SYNOPSIS
-    Adds and trusts the winget source.
-.DESCRIPTION
-    This function adds and trusts the winget source by resetting sources to defaults.
-    Automatically accepts source agreements to prevent prompts.
-    Uses a timeout mechanism to prevent the function from hanging indefinitely.
-#>
-function Set-Sources {
-    try {
-        Write-Info 'Resetting winget sources (this may take a moment)...'
-
-        # Run winget source reset with a timeout to prevent hanging
-        # Using Start-Process with a timeout to handle potential hangs
-        $resetProcess = Start-Process -FilePath 'winget' `
-            -ArgumentList 'source', 'reset', '--force', '--disable-interactivity', '--accept-source-agreements' `
-            -NoNewWindow `
-            -PassThru `
-            -RedirectStandardOutput "$env:TEMP\winget_reset_output.txt" `
-            -RedirectStandardError "$env:TEMP\winget_reset_error.txt"
-
-        # Wait up to 30 seconds for the process to complete
-        $timeout = 30
-        if (-not $resetProcess.WaitForExit($timeout * 1000)) {
-            # Process timed out, kill it
-            Write-WarningMessage "Winget source reset timed out after $timeout seconds. Terminating process..."
-            $resetProcess.Kill()
-            Write-WarningMessage 'Consider running "winget source reset --force" manually if sources are not properly configured.'
-            return $false
-        }
-
-        # Read error output to provide better error messages
-        $errorOutput = Get-Content "$env:TEMP\winget_reset_error.txt" -ErrorAction SilentlyContinue | Where-Object { $_ -and $_.Trim() }
-
-        # Check the exit code
-        if ($resetProcess.ExitCode -eq 0) {
-            Write-Success 'Winget sources reset successfully'
-            return $true
-        }
-        else {
-            # Log the error details if available
-            if ($errorOutput) {
-                Write-WarningMessage "Winget source reset error details: $(($errorOutput -join ', '))"
-            }
-            # Non-zero exit code, but not critical since script continues
-            Write-Info "Winget source reset completed with exit code: $($resetProcess.ExitCode) (this is often not critical)"
-            return $false
-        }
-    }
-    catch {
-        Write-WarningMessage "Could not reset sources (this is usually okay): $_"
-        return $false
-    }
-    finally {
-        # Clean up temp files
-        Remove-Item "$env:TEMP\winget_reset_output.txt" -ErrorAction SilentlyContinue
-        Remove-Item "$env:TEMP\winget_reset_error.txt" -ErrorAction SilentlyContinue
     }
 }
 
@@ -1941,48 +1922,17 @@ function Set-Sources {
 function Test-WingetSources {
     Write-Info 'Checking winget sources...'
 
-    # First check: verify source is listed
-    try {
-        $output = winget source list --disable-interactivity --accept-source-agreements 2>&1
-        $sourceIsListed = $output -match 'winget'
-    }
-    catch {
-        Write-WarningMessage "Winget source list failed: $_"
-        $sourceIsListed = $false
-    }
-
-    # Second check: verify source is functional (not corrupted) by attempting a search
-    $sourceIsFunctional = $false
-    if ($sourceIsListed) {
-        try {
-            # Actually test if the source works by attempting a search
-            # Use '7zip' as a known package that always exists
-            $searchOutput = winget search 7zip --source winget --disable-interactivity 2>&1
-            $searchExitCode = $LASTEXITCODE
-
-            # Check for corruption error code 0x8a15000f or similar source errors
-            if ($searchOutput -match '0x8a150|failed when opening|data required' -or $searchExitCode -ne 0) {
-                Write-WarningMessage 'Winget source is listed but contains corrupted or missing data.'
-                $sourceIsFunctional = $false
-            }
-            else {
-                Write-Success 'Winget sources are accessible and functional.'
-                $sourceIsFunctional = $true
-            }
-        }
-        catch {
-            Write-WarningMessage "Winget source functionality test failed: $_"
-            $sourceIsFunctional = $false
-        }
-    }
+    # Probe the source (listed + functional). The same helper is reused for the post-repair
+    # re-probe below so the two checks can never diverge again (issue #177).
+    $health = Test-WingetSourceHealth
 
     # If both checks pass, sources are good
-    if ($sourceIsListed -and $sourceIsFunctional) {
+    if ($health.Healthy) {
         return $true
     }
 
     # If source is missing entirely, attempt repair
-    if (-not $sourceIsListed) {
+    if (-not $health.Listed) {
         Write-WarningMessage 'Winget source "winget" appears to be missing. Attempting to repair...'
     }
     else {
@@ -2012,30 +1962,10 @@ function Test-WingetSources {
         return $false
     }
 
-    # Retry both checks after repair
-    try {
-        $output = winget source list --disable-interactivity --accept-source-agreements 2>&1
-        $sourceIsListed = $output -match 'winget'
-    }
-    catch {
-        Write-WarningMessage "Winget source list failed after repair: $_"
-        $sourceIsListed = $false
-    }
+    # Retry both checks after repair (quiet: this function reports the outcome itself)
+    $health = Test-WingetSourceHealth -Quiet
 
-    $sourceIsFunctional = $false
-    if ($sourceIsListed) {
-        try {
-            # Test source functionality with actual search
-            $searchOutput = winget search 7zip --source winget --disable-interactivity 2>&1
-            $searchExitCode = $LASTEXITCODE
-            $sourceIsFunctional = -not ($searchOutput -match '0x8a150|failed when opening|data required' -or $searchExitCode -ne 0)
-        }
-        catch {
-            $sourceIsFunctional = $false
-        }
-    }
-
-    if ($sourceIsListed -and $sourceIsFunctional) {
+    if ($health.Healthy) {
         Write-Success 'Winget sources are now accessible and functional.'
         return $true
     }

@@ -12,7 +12,7 @@
         # App validation
         'Test-AppDefinitions',
         # Winget core
-        'Test-AndInstallWingetModule', 'Test-AndInstallWinget', 'Test-WingetSourceTrusted', 'Set-Sources', 'Test-WingetSources',
+        'Test-AndInstallWingetModule', 'Test-AndInstallWinget', 'Test-WingetSources',
         'Initialize-WingetSourcesForUser', 'Install-WingetPackage',
         'Test-WingetPackageInstalled', 'Test-AppxPackageProvisioned', 'Invoke-AppxProvisioning', 'Install-MsixProvisionedPackage', 'Install-PowerShellLatest',
         # Automatic updates (Winget-AutoUpdate)
