@@ -135,7 +135,7 @@ jobs:
 
       - name: Upload install transcripts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: e2e-install-transcripts
           path: C:\ProgramData\winget-app-setup\logs\*.log
