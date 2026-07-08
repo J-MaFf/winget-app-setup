@@ -23,6 +23,7 @@ This repo targets **Windows only**. All scripts are PowerShell.
 | `build/Build-WingetInstallScript.ps1` | Regenerates `winget-app-install.ps1` from the module (`-Check` verifies it is in sync) |
 | `winget-app-uninstall.ps1` | Uninstall helper |
 | `tests/` | Pester test suite, one `<Area>.Tests.ps1` per module file plus `EntryPoint.Tests.ps1`; `tests/TestHelpers.ps1` loads the module once per file |
+| `e2e/Assert-Install.ps1` + `.github/workflows/e2e-install.yml` | Scheduled real-install e2e run on GitHub-hosted runners (weekly + dispatch + self-validating PRs) — see readme.md "End-to-end monitoring" |
 
 ---
 

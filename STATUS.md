@@ -113,6 +113,8 @@ Pester installs persist across runs there ([#161](https://github.com/J-MaFf/wing
 | `winget-app-install.ps1` | **Generated** single-file installer for local and `irm \| iex` use — do not edit by hand |
 | `winget-app-uninstall.ps1` | Uninstall helper; imports the module from the repo |
 | `tests/` | Pester suite, one `<Area>.Tests.ps1` per module file plus `EntryPoint.Tests.ps1`; `TestHelpers.ps1` loads the module once per file |
+| `e2e/Assert-Install.ps1` | Shared post-install assertions for end-to-end runs (tier 1 workflow below; tier 2 [#215](https://github.com/J-MaFf/winget-app-setup/issues/215) reuses it) |
+| `.github/workflows/e2e-install.yml` | E2E tier 1: weekly real install run on GitHub-hosted `windows-latest` (schedule + dispatch + self-validating PRs; failure auto-files an issue) |
 | `Test-WindowsTerminalConfiguration.ps1` | Smoke-test validation for the Windows Terminal default-shell configuration. |
 | `readme.md` | Quick-start run instructions (clone-and-run and one-line-run). |
 | `CHANGELOG.md` | Keep a Changelog history. |
@@ -167,6 +169,8 @@ Pester installs persist across runs there ([#161](https://github.com/J-MaFf/wing
 
 ## Natural Next Steps
 
+- Watch the first scheduled e2e install runs (`.github/workflows/e2e-install.yml`, weekly Mondays 06:00 UTC, issue [#214](https://github.com/J-MaFf/winget-app-setup/issues/214)) — a failure auto-creates/comments the `E2E install run failed` issue with the transcript tail.
+- **E2E tier 2** ([#215](https://github.com/J-MaFf/winget-app-setup/issues/215)): cross-user elevation end-to-end run on a snapshot-rollback Proxmox VM, reusing `e2e/Assert-Install.ps1` (the shared assertion script from tier 1).
 - Watch the first Windows CI runs on the self-hosted win-test runner for environment drift — module versions now persist across runs instead of starting from a fresh `windows-latest` image (as of [#161](https://github.com/J-MaFf/winget-app-setup/issues/161)).
 - Validate the dormant DISM MSIX-provisioning path in `Install-PowerShellLatest` end-to-end on a real Windows 10 machine before PowerShell 7.7 GA makes it load-bearing (as of [#166](https://github.com/J-MaFf/winget-app-setup/issues/166)).
 - Cut a tagged release and move the `[Unreleased]` CHANGELOG entries under a versioned heading.

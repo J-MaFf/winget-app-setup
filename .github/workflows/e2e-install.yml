@@ -1,0 +1,187 @@
+name: E2E Install
+
+# End-to-end tier 1 (issue #214): a REAL install run of the curated catalog on a GitHub-hosted
+# windows-latest runner - a throwaway VM by construction, so this is the only automated place
+# where the installer executes without mocks. The 246-test Pester suite (windows-tests.yml)
+# mocks every external call; this workflow is the top rung of the testing pyramid.
+#
+# Two modes, selected by the trigger:
+#   - schedule / workflow_dispatch: runs the TRUE production path - the installer is fetched
+#     from raw main and piped to iex, exactly like the documented end-user one-liner.
+#   - pull_request (paths-filtered to the e2e machinery): runs the CHECKOUT's
+#     winget-app-install.ps1, so a PR that changes this workflow or e2e/** validates its own
+#     code before merge.
+#
+# The install runs TWICE: the second pass proves idempotence (must exit 0 with every app
+# Skipped), verified by e2e/Assert-Install.ps1 -ExpectAllSkippedOnSecondRun - the shared
+# assertion script that tier 2 (issue #215, snapshot-rollback Proxmox VM) will reuse.
+
+on:
+  schedule:
+    - cron: '0 6 * * 1' # weekly, Mondays 06:00 UTC
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - '.github/workflows/e2e-install.yml'
+      - 'e2e/**'
+
+permissions:
+  contents: read
+  issues: write # failure reporting: create-or-comment 'E2E install run failed'
+
+# Never cancel a real install mid-flight (a half-provisioned runner produces misleading
+# failures); later runs queue behind the active one instead.
+concurrency:
+  group: e2e-install
+  cancel-in-progress: false
+
+env:
+  # Catalog apps that provably CANNOT install on GitHub-hosted (Server-based) runner images —
+  # never product bugs. Each entry MUST reference an issue. The install passes tolerate exit 1
+  # only because Assert-Install.ps1 verifies that NOTHING outside this list failed.
+  #   - Dell.CommandUpdate.Universal: its Microsoft.DotNet.DesktopRuntime.8 dependency has no
+  #     installer applicable to the Server image (0x8A150104) — issue #217, which also proposes
+  #     manufacturer-aware catalog gating as the real fix that would retire this entry.
+  KNOWN_PLATFORM_INCOMPATIBLE: 'Dell.CommandUpdate.Universal'
+
+jobs:
+  e2e-install:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: First install pass (real install)
+        shell: pwsh
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          # Mode selection (see the header comment): PRs run their own checkout so e2e-machinery
+          # changes validate themselves pre-merge; scheduled/dispatched runs exercise the
+          # production irm | iex path against raw main. Both paths rely on the installer's
+          # effective non-interactive auto-detection (redirected stdin on a runner) - that
+          # detection is itself part of what this run verifies (issue #214).
+          if ($env:EVENT_NAME -eq 'pull_request') {
+            & pwsh -NoProfile -ExecutionPolicy Bypass -File ./winget-app-install.ps1
+          }
+          else {
+            & pwsh -NoProfile -Command 'irm https://raw.githubusercontent.com/J-MaFf/winget-app-setup/main/winget-app-install.ps1 | iex'
+          }
+          $exitCode = $LASTEXITCODE
+          # NOTE: GitHub's pwsh shell wrapper ends every step with 'exit $LASTEXITCODE', so the
+          # success/tolerated branches must exit 0 explicitly or the installer's lingering
+          # nonzero code fails the step anyway (observed on run 3).
+          if ($exitCode -eq 0) {
+            Write-Host 'First install pass exited 0.' -ForegroundColor Green
+            exit 0
+          }
+          elseif ($exitCode -eq 1 -and $env:KNOWN_PLATFORM_INCOMPATIBLE) {
+            # Exit 1 = 'some apps failed'. Tolerated ONLY pending the assertion step's
+            # containment check that nothing outside KNOWN_PLATFORM_INCOMPATIBLE failed.
+            Write-Host "First install pass exited 1 (some apps failed) - tolerated pending containment check against known platform-incompatible apps: $env:KNOWN_PLATFORM_INCOMPATIBLE" -ForegroundColor Yellow
+            exit 0
+          }
+          else {
+            # 2 = winget unavailable, 3 = validation failed, or anything unexpected: hard fail.
+            Write-Host "First install pass FAILED with exit code $exitCode" -ForegroundColor Red
+            exit $exitCode
+          }
+
+      - name: Second install pass (idempotence leg)
+        shell: pwsh
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          # Same command as the first pass, on the now-provisioned machine: it must exit 0
+          # again, and the assertions step below verifies (via the latest transcript) that
+          # every catalog app was Skipped and nothing was installed or failed.
+          if ($env:EVENT_NAME -eq 'pull_request') {
+            & pwsh -NoProfile -ExecutionPolicy Bypass -File ./winget-app-install.ps1
+          }
+          else {
+            & pwsh -NoProfile -Command 'irm https://raw.githubusercontent.com/J-MaFf/winget-app-setup/main/winget-app-install.ps1 | iex'
+          }
+          $exitCode = $LASTEXITCODE
+          # Same explicit-exit-0 requirement as the first pass (pwsh shell wrapper behavior).
+          if ($exitCode -eq 0) {
+            Write-Host 'Second install pass exited 0.' -ForegroundColor Green
+            exit 0
+          }
+          elseif ($exitCode -eq 1 -and $env:KNOWN_PLATFORM_INCOMPATIBLE) {
+            # Known-incompatible apps are still missing on the second pass, so the installer
+            # retries and fails them again - same containment rule as the first pass.
+            Write-Host "Second install pass exited 1 (some apps failed) - tolerated pending containment check against known platform-incompatible apps: $env:KNOWN_PLATFORM_INCOMPATIBLE" -ForegroundColor Yellow
+            exit 0
+          }
+          else {
+            Write-Host "Second install pass FAILED with exit code $exitCode" -ForegroundColor Red
+            exit $exitCode
+          }
+
+      - name: Run assertions (e2e/Assert-Install.ps1, shared with tier 2)
+        shell: pwsh
+        run: |
+          # Verifies from the checkout: every Get-DefaultAppCatalog app resolves via
+          # `winget list` (exit-code classified), the WAU scheduled task exists, the installed
+          # WAU version matches Get-WauPin, a transcript with the 'Installer build' stamp
+          # exists under %ProgramData%, and (idempotence) the latest transcript shows every
+          # app Skipped. -SkipApps is the documented escape hatch for runner-platform
+          # incompatibilities ONLY - each entry is justified at the KNOWN_PLATFORM_INCOMPATIBLE
+          # definition at the top of this file (currently: issue #217). The script also asserts
+          # CONTAINMENT: no app outside the skip list failed in either install pass.
+          & pwsh -NoProfile -ExecutionPolicy Bypass -File ./e2e/Assert-Install.ps1 -ExpectAllSkippedOnSecondRun -SkipApps "$env:KNOWN_PLATFORM_INCOMPATIBLE"
+          exit $LASTEXITCODE
+
+      - name: Upload install transcripts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-install-transcripts
+          path: C:\ProgramData\winget-app-setup\logs\*.log
+          if-no-files-found: warn
+
+      - name: Create or update failure issue (scheduled/dispatch runs only)
+        # Never for pull_request runs: a PR failure is visible on the PR itself; the issue
+        # channel exists so unattended scheduled runs cannot fail silently.
+        if: failure() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          $title = 'E2E install run failed'
+
+          $logDir = Join-Path $env:ProgramData 'winget-app-setup\logs'
+          $latest = Get-ChildItem -Path $logDir -Filter '*.log' -ErrorAction SilentlyContinue |
+            Sort-Object LastWriteTime | Select-Object -Last 1
+
+          $lines = @()
+          $lines += 'A scheduled/dispatched end-to-end install run failed.'
+          $lines += ''
+          $lines += "Run: $env:RUN_URL"
+          $lines += ''
+          if ($latest) {
+            $lines += "Last 50 lines of the most recent transcript ($($latest.Name); full logs are attached to the run as the e2e-install-transcripts artifact):"
+            $lines += ''
+            $lines += '```'
+            $lines += @(Get-Content -Path $latest.FullName -Tail 50)
+            $lines += '```'
+          }
+          else {
+            $lines += 'No install transcript was found on the runner (the run may have failed before the installer started); see the run log.'
+          }
+          $bodyFile = Join-Path $env:RUNNER_TEMP 'e2e-failure-body.md'
+          Set-Content -Path $bodyFile -Value ($lines -join "`n") -Encoding utf8
+
+          # Dedup: comment on an existing open issue with this exact title instead of piling
+          # up a new issue per failed weekly run.
+          $existing = gh issue list --repo $env:REPO --state open --search "in:title `"$title`"" --json number,title |
+            ConvertFrom-Json | Where-Object { $_.title -eq $title } | Select-Object -First 1
+          if ($existing) {
+            gh issue comment $existing.number --repo $env:REPO --body-file $bodyFile
+          }
+          else {
+            gh issue create --repo $env:REPO --title $title --body-file $bodyFile --label bug --assignee J-MaFf
+          }

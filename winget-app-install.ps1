@@ -56,12 +56,12 @@ param (
 # This script is assembled from the WingetAppSetup module by build/Build-WingetInstallScript.ps1.
 # Edit the function source under WingetAppSetup/Public and WingetAppSetup/Private, then re-run the
 # build to regenerate this file. See readme.md ("Project layout") for details.
-# Build id: 1.0.0+8d5e24fb (module version + SHA256 fragment of the function content; issue #189).
+# Build id: 1.0.0+e67bfa49 (module version + SHA256 fragment of the function content; issue #189).
 # ------------------------------------------------------------------------------------------------
 
 # Content-derived build identity, logged at startup so a transcript from a remote machine
 # identifies exactly which installer build produced it (issue #189).
-$script:InstallerBuildId = '1.0.0+8d5e24fb'
+$script:InstallerBuildId = '1.0.0+e67bfa49'
 
 # ------------------------------------------------Functions------------------------------------------------
 
@@ -600,6 +600,49 @@ function Install-AppWithVerification {
         return @{ Status = 'Installed'; InstallResult = $installResult; FailureReason = $null }
     }
     return @{ Status = 'Failed'; InstallResult = $installResult; FailureReason = 'VerifyNotFound' }
+}
+
+# --- Interactivity ---
+<#
+.SYNOPSIS
+    Determines whether the current run must behave as non-interactive (no prompts).
+.DESCRIPTION
+    Single source of truth for the effective non-interactive detection (issue #214). The logic
+    was previously inlined in Invoke-WingetInstall (issue #176), which left the pre-flight
+    disk-space prompt in Test-SystemRequirements unguarded: an unattended run (CI, RMM, scheduled
+    task) with measured-low disk blocked on Read-Host and auto-cancelled when redirected stdin
+    returned an empty string. Both callers now share this helper.
+
+    A run is effectively non-interactive when ANY of the following holds:
+      - the caller passed the explicit -NonInteractive switch;
+      - the session is non-interactive ([Environment]::UserInteractive is false — services,
+        scheduled tasks, pwsh -NonInteractive);
+      - stdin is redirected (piped input, irm | iex wrappers, CI runners). A console probe
+        failure means there is no usable console, so that counts as non-interactive too.
+.PARAMETER NonInteractive
+    The caller's explicit -NonInteractive switch, forwarded as -NonInteractive:$switch.
+.RETURNS
+    [bool] True when the run must not prompt; otherwise false.
+#>
+function Test-EffectiveNonInteractive {
+    param (
+        [Parameter(Mandatory = $false)]
+        [switch]$NonInteractive
+    )
+
+    if ($NonInteractive) {
+        return $true
+    }
+    if (-not [Environment]::UserInteractive) {
+        return $true
+    }
+    try {
+        return [System.Console]::IsInputRedirected
+    }
+    catch {
+        # No usable console to probe: treat as non-interactive rather than risk a blocked prompt.
+        return $true
+    }
 }
 
 # --- Jsonc ---
@@ -1276,16 +1319,10 @@ function Invoke-WingetInstall {
     )
 
     # Effective non-interactive mode: explicit switch, a non-interactive session (e.g. service,
-    # scheduled task, pwsh -NonInteractive), or redirected stdin (piped/irm|iex wrappers). A
-    # console probe failure means there is no usable console, so treat that as non-interactive.
-    $inputRedirected = $false
-    try {
-        $inputRedirected = [System.Console]::IsInputRedirected
-    }
-    catch {
-        $inputRedirected = $true
-    }
-    $effectiveNonInteractive = $NonInteractive -or (-not [Environment]::UserInteractive) -or $inputRedirected
+    # scheduled task, pwsh -NonInteractive), or redirected stdin (piped/irm|iex wrappers).
+    # Shared private helper (issue #214) — Test-SystemRequirements gates its disk-space prompt
+    # on the same detection.
+    $effectiveNonInteractive = Test-EffectiveNonInteractive -NonInteractive:$NonInteractive
 
     if ($WhatIf) {
         Write-Info '=== DRY-RUN MODE ENABLED ==='
@@ -1816,16 +1853,25 @@ function Write-Table {
     HTTPS (network is required for winget). The network probe uses Invoke-WebRequest, which
     honors system proxy settings; any HTTP response — including 4xx/5xx — counts as reachable,
     and only a transport-level failure (no response at all) blocks. In -WhatIf mode the
-    disk-space prompt is skipped.
+    disk-space prompt is skipped, and in effective non-interactive mode (issue #214 — explicit
+    switch, non-interactive session, or redirected stdin, via Test-EffectiveNonInteractive) the
+    prompt is replaced by a warning and the run continues: an unattended run must never block
+    on Read-Host (empty redirected stdin reads as "not Y" and silently cancelled the install).
 .PARAMETER WhatIf
     When specified, reports intended checks without prompting on low disk space.
+.PARAMETER NonInteractive
+    The caller's explicit non-interactive intent, forwarded into the shared effective
+    non-interactive detection (Test-EffectiveNonInteractive). When the effective state is
+    non-interactive, measured-low disk space warns and continues instead of prompting.
 .RETURNS
     [bool] True when it is safe to proceed; False when a blocking check fails or the user declines.
 #>
 function Test-SystemRequirements {
     param (
         [Parameter(Mandatory = $false)]
-        [switch]$WhatIf
+        [switch]$WhatIf,
+        [Parameter(Mandatory = $false)]
+        [switch]$NonInteractive
     )
 
     $results = @()
@@ -1908,10 +1954,18 @@ function Test-SystemRequirements {
     # Prompt only when free space was actually measured below the threshold
     # (skip prompt in WhatIf mode; never prompt when the drive could not be read).
     if ($null -ne $freeGB -and $freeGB -lt 50 -and -not $WhatIf) {
-        $choice = Read-Host 'Disk space is below the 50 GB recommendation. Continue anyway? (Y/N)'
-        if ($choice -notin @('Y', 'y')) {
-            Write-WarningMessage 'Installation cancelled by user due to low disk space.'
-            return $false
+        # Unattended runs must never block on Read-Host: redirected stdin returns an empty
+        # string, which reads as "not Y" and silently cancelled the install (issue #214).
+        # Warn and continue instead — low disk is a recommendation, not a blocker.
+        if (Test-EffectiveNonInteractive -NonInteractive:$NonInteractive) {
+            Write-WarningMessage 'Disk space is below the 50 GB recommendation. Continuing without prompting (non-interactive run).'
+        }
+        else {
+            $choice = Read-Host 'Disk space is below the 50 GB recommendation. Continue anyway? (Y/N)'
+            if ($choice -notin @('Y', 'y')) {
+                Write-WarningMessage 'Installation cancelled by user due to low disk space.'
+                return $false
+            }
         }
     }
 
@@ -3122,14 +3176,18 @@ if ($MyInvocation.InvocationName -ne '.') {
         # a transcript identifies exactly which installer build produced it.
         Write-Info "Installer build: $script:InstallerBuildId"
 
+        # -NonInteractive is forwarded so the pre-flight disk-space prompt is gated on the same
+        # effective non-interactive detection as the install orchestrator (issue #214): an
+        # unattended run with measured-low disk warns and continues instead of auto-cancelling
+        # on an empty Read-Host from redirected stdin.
         if (-not $SkipSystemCheck) {
             if ($WhatIf) {
                 Write-Info '[DRY-RUN] Running pre-flight system checks (OS version, disk space, network).'
-                if (-not (Test-SystemRequirements -WhatIf:$WhatIf)) {
+                if (-not (Test-SystemRequirements -WhatIf:$WhatIf -NonInteractive:$NonInteractive)) {
                     Write-WarningMessage '[DRY-RUN] A blocking pre-flight check failed - a real run would abort here.'
                 }
             }
-            elseif (-not (Test-SystemRequirements -WhatIf:$WhatIf)) {
+            elseif (-not (Test-SystemRequirements -WhatIf:$WhatIf -NonInteractive:$NonInteractive)) {
                 exit 1
             }
         }

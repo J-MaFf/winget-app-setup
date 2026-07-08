@@ -40,14 +40,18 @@ if ($MyInvocation.InvocationName -ne '.') {
         # a transcript identifies exactly which installer build produced it.
         Write-Info "Installer build: $script:InstallerBuildId"
 
+        # -NonInteractive is forwarded so the pre-flight disk-space prompt is gated on the same
+        # effective non-interactive detection as the install orchestrator (issue #214): an
+        # unattended run with measured-low disk warns and continues instead of auto-cancelling
+        # on an empty Read-Host from redirected stdin.
         if (-not $SkipSystemCheck) {
             if ($WhatIf) {
                 Write-Info '[DRY-RUN] Running pre-flight system checks (OS version, disk space, network).'
-                if (-not (Test-SystemRequirements -WhatIf:$WhatIf)) {
+                if (-not (Test-SystemRequirements -WhatIf:$WhatIf -NonInteractive:$NonInteractive)) {
                     Write-WarningMessage '[DRY-RUN] A blocking pre-flight check failed - a real run would abort here.'
                 }
             }
-            elseif (-not (Test-SystemRequirements -WhatIf:$WhatIf)) {
+            elseif (-not (Test-SystemRequirements -WhatIf:$WhatIf -NonInteractive:$NonInteractive)) {
                 exit 1
             }
         }
