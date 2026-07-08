@@ -11,5 +11,5 @@ if ($MyInvocation.InvocationName -ne '.') {
         }
     }
 
-    Invoke-WingetInstall -WhatIf:$WhatIf
+    Invoke-WingetInstall -WhatIf:$WhatIf -NonInteractive:$NonInteractive
 }

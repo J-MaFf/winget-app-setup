@@ -34,11 +34,18 @@
 
 .PARAMETER SkipSystemCheck
  Bypasses the pre-flight system checks (OS version, disk space, network) for headless or automated use.
+
+.PARAMETER NonInteractive
+ Suppresses all interactive prompts (elevation pause, grid-view prompt, final "press any key") for
+ unattended runs (RMM, CI, scheduled tasks). Also auto-detected when the session is non-interactive
+ or stdin is redirected.
 #>
 
 param (
     [Parameter(Mandatory = $false)]
     [switch]$WhatIf,
     [Parameter(Mandatory = $false)]
-    [switch]$SkipSystemCheck
+    [switch]$SkipSystemCheck,
+    [Parameter(Mandatory = $false)]
+    [switch]$NonInteractive
 )
