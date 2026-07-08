@@ -9,7 +9,7 @@ Inherits global rules from `/Scripts/CLAUDE.md`. Rules here override or extend g
 This repo targets **Windows only**. All scripts are PowerShell.
 
 - Use PowerShell 7+ syntax
-- Use Pester for all unit tests (`Test-WingetAppInstall.Tests.ps1`)
+- Use Pester for all unit tests (`tests/*.Tests.ps1`)
 - Claude Code runs on an Ubuntu Linux VM — it cannot execute these scripts directly; test on Windows or a VM
 
 ---
@@ -22,7 +22,7 @@ This repo targets **Windows only**. All scripts are PowerShell.
 | `winget-app-install.ps1` | **Generated** single-file installer (local + `irm \| iex`). Do not edit by hand — edit the module and rebuild |
 | `build/Build-WingetInstallScript.ps1` | Regenerates `winget-app-install.ps1` from the module (`-Check` verifies it is in sync) |
 | `winget-app-uninstall.ps1` | Uninstall helper |
-| `Test-WingetAppInstall.Tests.ps1` | Pester test suite; loads the module once |
+| `tests/` | Pester test suite, one `<Area>.Tests.ps1` per module file plus `EntryPoint.Tests.ps1`; `tests/TestHelpers.ps1` loads the module once per file |
 
 ---
 
@@ -36,9 +36,9 @@ This repo targets **Windows only**. All scripts are PowerShell.
 
 ## Testing
 
-- Run tests with Pester: `Invoke-Pester ./Test-WingetAppInstall.Tests.ps1`
+- Run tests with Pester: `Invoke-Pester ./tests` (or a single area file, e.g. `Invoke-Pester ./tests/WingetCore.Tests.ps1`)
 - The suite mocks all external/Windows calls, so it runs on Linux/macOS too — though winget/`Get-WinGetPackage`/`Test-NetConnection`-dependent tests only pass on Windows where those cmdlets exist.
-- The top-level `BeforeAll` dot-sources the module's function files once; do not re-declare production functions inline in `Describe` blocks (that reintroduces drift). Short test-double stubs for orchestration tests are fine.
+- Each test file's top-level `BeforeAll` dot-sources `tests/TestHelpers.ps1`, which loads the module's function files once per file; do not re-declare production functions inline in `Describe` blocks (that reintroduces drift). Short test-double stubs for orchestration tests are fine.
 - Mock all external calls (winget, scheduled task cmdlets, registry) — never rely on real system state in unit tests
 - Use unconditional `Mock` in `BeforeEach`, not conditional `if (-not (Get-Command...))` stubs
 

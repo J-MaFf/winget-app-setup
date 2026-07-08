@@ -66,7 +66,7 @@ jobs:
           Import-Module Pester -MinimumVersion 5.0.0
 
           $config = New-PesterConfiguration
-          $config.Run.Path = './Test-WingetAppInstall.Tests.ps1'
+          $config.Run.Path = './tests'
           $config.Run.Exit = $true               # non-zero exit on failure -> fails the step
           $config.Output.Verbosity = 'Detailed'
           $config.TestResult.Enabled = $true

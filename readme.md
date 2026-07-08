@@ -83,8 +83,9 @@ Verify the committed script is in sync with the module (useful in CI / pre-commi
 pwsh -File .\build\Build-WingetInstallScript.ps1 -Check
 ```
 
-Run the test suite (loads the module directly):
+Run the test suite (one `<Area>.Tests.ps1` per module file under `tests/`; each loads the
+module directly via `tests/TestHelpers.ps1`):
 
 ```powershell
-Invoke-Pester .\Test-WingetAppInstall.Tests.ps1
+Invoke-Pester .\tests
 ```
