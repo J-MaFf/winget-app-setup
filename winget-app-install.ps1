@@ -1192,8 +1192,12 @@ function Write-Table {
     Runs pre-flight system checks (OS version, disk space, network) before installation.
 .DESCRIPTION
     Warns on Windows older than 10 21H2 (build 19044, non-blocking), warns and prompts to
-    continue when C: has less than 50 GB free, and blocks when cdn.winget.microsoft.com is
-    unreachable (network is required for winget). In -WhatIf mode the disk-space prompt is skipped.
+    continue when C: has less than 50 GB free (measured only — an unreadable drive reports
+    UNKNOWN and never prompts), and blocks when cdn.winget.microsoft.com is unreachable over
+    HTTPS (network is required for winget). The network probe uses Invoke-WebRequest, which
+    honors system proxy settings; any HTTP response — including 4xx/5xx — counts as reachable,
+    and only a transport-level failure (no response at all) blocks. In -WhatIf mode the
+    disk-space prompt is skipped.
 .PARAMETER WhatIf
     When specified, reports intended checks without prompting on low disk space.
 .RETURNS
@@ -1224,6 +1228,7 @@ function Test-SystemRequirements {
     }
 
     # --- Disk Space on C: (warn + prompt if under 50 GB) ---
+    $freeGB = $null
     try {
         $drive = Get-PSDrive -Name C -ErrorAction Stop
         $freeGB = [Math]::Round($drive.Free / 1GB, 1)
@@ -1235,35 +1240,41 @@ function Test-SystemRequirements {
         }
     }
     catch {
-        $results += [PSCustomObject]@{ Check = 'Disk Space'; Status = 'WARN'; Detail = "Could not read C: drive: $_" }
-        $freeGB = 999
+        # Distinct from the low-space WARN: free space could not be measured, so the
+        # low-disk prompt below must not fire ($freeGB stays $null).
+        $results += [PSCustomObject]@{ Check = 'Disk Space'; Status = 'UNKNOWN'; Detail = "Could not read C: drive: $_" }
     }
 
     # --- Network (blocking — required for winget) ---
+    # Proxy-aware HTTPS probe: Invoke-WebRequest honors system proxy settings, unlike a raw
+    # TCP test (Test-NetConnection), which false-fails on proxy-only networks (#184). Any HTTP
+    # response — even 4xx/5xx — proves the CDN is reachable; only a transport-level failure
+    # (no response at all) blocks.
     try {
-        $netTest = Test-NetConnection -ComputerName 'cdn.winget.microsoft.com' -Port 443 -InformationLevel Quiet -WarningAction SilentlyContinue -ErrorAction Stop
-        if ($netTest) {
-            $results += [PSCustomObject]@{ Check = 'Network'; Status = 'OK'; Detail = 'Connected to cdn.winget.microsoft.com' }
-        }
-        else {
-            $results += [PSCustomObject]@{ Check = 'Network'; Status = 'FAIL'; Detail = 'Cannot reach cdn.winget.microsoft.com — network is required' }
-            $proceed = $false
-        }
+        $null = Invoke-WebRequest -Uri 'https://cdn.winget.microsoft.com/cache' -Method Head -TimeoutSec 10 -ErrorAction Stop
+        $results += [PSCustomObject]@{ Check = 'Network'; Status = 'OK'; Detail = 'HTTPS probe of cdn.winget.microsoft.com succeeded' }
     }
     catch {
-        $results += [PSCustomObject]@{ Check = 'Network'; Status = 'FAIL'; Detail = "Network check failed: $_" }
-        $proceed = $false
+        $response = $_.Exception.Response
+        if ($null -ne $response) {
+            $results += [PSCustomObject]@{ Check = 'Network'; Status = 'OK'; Detail = "cdn.winget.microsoft.com reachable (HTTP $([int]$response.StatusCode))" }
+        }
+        else {
+            $results += [PSCustomObject]@{ Check = 'Network'; Status = 'FAIL'; Detail = "Cannot reach cdn.winget.microsoft.com over HTTPS — network is required: $($_.Exception.Message)" }
+            $proceed = $false
+        }
     }
 
     # --- Display results ---
     Write-Host ''
     Write-Info 'Pre-flight System Checks:'
     foreach ($r in $results) {
-        $icon = switch ($r.Status) { 'OK' { '[OK]' } 'WARN' { '[WARN]' } 'FAIL' { '[FAIL]' } }
+        $icon = switch ($r.Status) { 'OK' { '[OK]' } 'WARN' { '[WARN]' } 'UNKNOWN' { '[UNKNOWN]' } 'FAIL' { '[FAIL]' } }
         $msg = "$icon $($r.Check): $($r.Detail)"
         switch ($r.Status) {
             'OK' { Write-Success $msg }
             'WARN' { Write-WarningMessage $msg }
+            'UNKNOWN' { Write-WarningMessage $msg }
             'FAIL' { Write-ErrorMessage $msg }
         }
     }
@@ -1273,9 +1284,9 @@ function Test-SystemRequirements {
         return $false
     }
 
-    # Prompt on low disk space (skip prompt in WhatIf mode)
-    $diskResult = $results | Where-Object { $_.Check -eq 'Disk Space' }
-    if ($diskResult.Status -eq 'WARN' -and -not $WhatIf) {
+    # Prompt only when free space was actually measured below the threshold
+    # (skip prompt in WhatIf mode; never prompt when the drive could not be read).
+    if ($null -ne $freeGB -and $freeGB -lt 50 -and -not $WhatIf) {
         $choice = Read-Host 'Disk space is below the 50 GB recommendation. Continue anyway? (Y/N)'
         if ($choice -notin @('Y', 'y')) {
             Write-WarningMessage 'Installation cancelled by user due to low disk space.'
@@ -2494,7 +2505,10 @@ function Install-PowerShellLatest {
 if ($MyInvocation.InvocationName -ne '.') {
     if (-not $SkipSystemCheck) {
         if ($WhatIf) {
-            Write-Info '[DRY-RUN] Would run pre-flight system checks (OS version, disk space, network).'
+            Write-Info '[DRY-RUN] Running pre-flight system checks (OS version, disk space, network).'
+            if (-not (Test-SystemRequirements -WhatIf:$WhatIf)) {
+                Write-WarningMessage '[DRY-RUN] A blocking pre-flight check failed — a real run would abort here.'
+            }
         }
         elseif (-not (Test-SystemRequirements -WhatIf:$WhatIf)) {
             exit 1
