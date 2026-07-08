@@ -80,17 +80,33 @@ foreach ($app in $skipped) {
 }
 
 # --- 1. Per-app: winget list resolves each catalog app -------------------------------------
+# Retried: winget list is observably flaky on hosted runners - PR #219's run saw a one-off
+# 0x8A150002 for an app the installer had just verified as installed (and that the identical
+# probe resolved on the previous run). A retry with backoff separates transient winget noise
+# from a genuinely missing app; the output is kept for diagnosis when all attempts fail.
+$probeAttempts = 3
 foreach ($app in $appsToAssert) {
     $id = $app.name
-    # --accept-source-agreements/--disable-interactivity: never hang on a first-use prompt.
-    $null = winget list --exact --id $id --accept-source-agreements --disable-interactivity 2>&1
-    # Capture immediately - $LASTEXITCODE goes stale fast (repo rule).
-    $exitCode = $LASTEXITCODE
+    $exitCode = $null
+    $output = @()
+    for ($attempt = 1; $attempt -le $probeAttempts; $attempt++) {
+        # --accept-source-agreements/--disable-interactivity: never hang on a first-use prompt.
+        $output = @(winget list --exact --id $id --accept-source-agreements --disable-interactivity 2>&1)
+        # Capture immediately - $LASTEXITCODE goes stale fast (repo rule).
+        $exitCode = $LASTEXITCODE
+        if ($exitCode -eq 0) { break }
+        if ($attempt -lt $probeAttempts) {
+            Write-Host ('winget list for {0} exited 0x{1:X8} (attempt {2}/{3}) - retrying...' -f $id, $exitCode, $attempt, $probeAttempts) -ForegroundColor Yellow
+            Start-Sleep -Seconds (5 * $attempt)
+        }
+    }
     if ($exitCode -eq 0) {
-        Add-AssertionResult -Name "App installed: $id" -Passed $true -Detail 'winget list exit 0'
+        $detail = if ($attempt -gt 1) { "winget list exit 0 (attempt $attempt/$probeAttempts)" } else { 'winget list exit 0' }
+        Add-AssertionResult -Name "App installed: $id" -Passed $true -Detail $detail
     }
     else {
-        Add-AssertionResult -Name "App installed: $id" -Passed $false -Detail ('winget list exit 0x{0:X8}' -f $exitCode)
+        $outputTail = (@($output | Select-Object -Last 3) -join ' | ')
+        Add-AssertionResult -Name "App installed: $id" -Passed $false -Detail (('winget list exit 0x{0:X8} after {1} attempts; last output: {2}' -f $exitCode, $probeAttempts, $outputTail))
     }
 }
 
