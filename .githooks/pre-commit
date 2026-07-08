@@ -1,0 +1,47 @@
+#!/bin/sh
+# Pre-commit drift guard for the generated installer (issue #211).
+#
+# Mirrors the CI drift check locally: when a staged change can affect the generated
+# winget-app-install.ps1 - the WingetAppSetup module, the build script/fragments, a
+# module manifest (*.psd1), or the installer itself - run
+# build/Build-WingetInstallScript.ps1 -Check and block the commit if the installer
+# is out of sync with the module or any other -Check assertion fails (parse errors,
+# non-ASCII code tokens, undefined references, export-list drift, UTF-8 BOM).
+#
+# One-time setup (per clone):  git config core.hooksPath .githooks
+# See readme.md ("Why winget-app-install.ps1 cannot drift from the module") for the
+# full guard stack, and the contributor-setup section there for how this interacts
+# with the opt-in beads hook shims (`bd hooks install` writes to .git/hooks, which
+# core.hooksPath bypasses).
+#
+# POSIX sh on purpose: on Windows this runs under Git for Windows' sh.exe.
+
+# Fast path: exit immediately unless the staged files can change the generated installer.
+if ! git diff --cached --name-only | grep -Eq '^WingetAppSetup/|^build/|^winget-app-install\.ps1$|^.*\.psd1$'; then
+    exit 0
+fi
+
+# Degrade gracefully: never hard-block a commit on missing tooling. CI runs the same
+# check on every push and pull request, so nothing ships unverified either way.
+if ! command -v pwsh >/dev/null 2>&1; then
+    echo "pre-commit: pwsh not found; skipping drift check - CI will enforce it" >&2
+    exit 0
+fi
+
+if ! pwsh -NoProfile -File ./build/Build-WingetInstallScript.ps1 -Check; then
+    echo "" >&2
+    echo "pre-commit: drift check FAILED (details above)." >&2
+    echo "" >&2
+    echo "winget-app-install.ps1 is generated from the WingetAppSetup module and must be" >&2
+    echo "regenerated whenever the module, the build script, or the fragments change:" >&2
+    echo "" >&2
+    echo "    pwsh -NoProfile -File ./build/Build-WingetInstallScript.ps1" >&2
+    echo "    git add winget-app-install.ps1    # stage it together with your module change" >&2
+    echo "" >&2
+    echo "If -Check failed on an assertion instead (parse error, undefined reference," >&2
+    echo "non-ASCII code token, export-list drift), fix the offending source under" >&2
+    echo "WingetAppSetup/ or build/fragments/, then re-run the build." >&2
+    exit 1
+fi
+
+exit 0

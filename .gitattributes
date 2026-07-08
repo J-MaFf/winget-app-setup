@@ -9,3 +9,7 @@
 # The single-file installer is a build artifact assembled from the WingetAppSetup
 # module — mark it generated so its 2,400+-line diff collapses in PR review.
 winget-app-install.ps1 linguist-generated=true
+
+# Git hooks are POSIX sh scripts run by Git for Windows' sh.exe, which cannot
+# execute CRLF files — keep them LF on every checkout.
+.githooks/* text eol=lf
