@@ -39,6 +39,21 @@ Non-interactive mode is also auto-detected when the session is non-interactive (
 | 2 | Winget is unavailable and could not be installed |
 | 3 | App-definition validation failed, or no valid app definitions remain |
 
+## Logs
+
+Every run writes a full transcript to
+`%ProgramData%\winget-app-setup\logs\install-<yyyyMMdd-HHmmss>.log` (dry runs get a `-whatif`
+suffix, e.g. `install-20260708-143000-whatif.log`). The path is printed at startup and repeated
+with the final summary. ProgramData is used — rather than the elevating account's `%TEMP%` — so
+the log survives cross-user elevation and can be collected after a failed install on a remote
+machine. If the transcript cannot be started, the installer warns and continues: logging never
+blocks an install.
+
+Each transcript begins with an `Installer build:` line carrying the content-derived build id
+(`<module version>+<8-char SHA256 fragment of the assembled functions>`) stamped by
+`build/Build-WingetInstallScript.ps1`, so you can tell exactly which installer build produced a
+given log.
+
 ## Automatic updates
 
 Ongoing updates are handled by [Winget-AutoUpdate (WAU)](https://github.com/Romanitho/Winget-AutoUpdate),

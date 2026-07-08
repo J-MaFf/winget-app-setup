@@ -242,6 +242,9 @@ function Invoke-WingetInstall {
                     $installedApps += $app.name
                 }
                 default {
+                    # Surface the diagnostic detail the install pipeline already returns (winget
+                    # exit code, attempts, scope fallback) instead of discarding it (issue #189).
+                    $failureReason = Format-InstallFailureReason -FailureReason $outcome.FailureReason -InstallResult $outcome.InstallResult
                     switch ($outcome.FailureReason) {
                         'PreCheckTimeout' {
                             # Failed instead of silently dropped: the app then flows through the
@@ -252,20 +255,19 @@ function Invoke-WingetInstall {
                         'VerifyTimeout' {
                             Write-WarningMessage "Verification timed out for: $($app.name). Assuming installation failed."
                         }
-                        'VerifyNotFound' {
-                            Write-ErrorMessage "Failed to install: $($app.name). No package found matching input criteria."
-                        }
                         default {
-                            Write-ErrorMessage "Failed to install: $($app.name)."
+                            Write-ErrorMessage "Failed to install: $($app.name) ($failureReason)."
                         }
                     }
-                    $failedApps += $app.name
+                    # Tracked as objects, not bare names, so the failed-apps summary can render a
+                    # Reason column (issue #189).
+                    $failedApps += @{ Name = $app.name; Reason = $failureReason }
                 }
             }
         }
         catch {
             Write-ErrorMessage "Failed to install: $($app.name). Error: $_"
-            $failedApps += $app.name
+            $failedApps += @{ Name = $app.name; Reason = "Unexpected error: $_" }
         }
     }
 
@@ -290,7 +292,8 @@ function Invoke-WingetInstall {
             $appsToRetry = $failedApps
             $failedApps = @()
 
-            foreach ($appName in $appsToRetry) {
+            foreach ($failedApp in $appsToRetry) {
+                $appName = $failedApp.Name
                 try {
                     Write-Info "Retrying: $appName"
                     $appDef = $apps | Where-Object { $_.name -eq $appName } | Select-Object -First 1
@@ -300,13 +303,14 @@ function Invoke-WingetInstall {
                     $outcome = Install-AppWithVerification -App $appDef
 
                     if ($outcome.Status -eq 'Failed') {
+                        $failureReason = Format-InstallFailureReason -FailureReason $outcome.FailureReason -InstallResult $outcome.InstallResult
                         if ($outcome.FailureReason -in 'PreCheckTimeout', 'VerifyTimeout') {
                             Write-WarningMessage "Verification timed out for retry: $appName. Assuming installation failed."
                         }
                         else {
-                            Write-ErrorMessage "Retry failed: $appName"
+                            Write-ErrorMessage "Retry failed: $appName ($failureReason)."
                         }
-                        $failedApps += $appName
+                        $failedApps += @{ Name = $appName; Reason = $failureReason }
                     }
                     else {
                         # 'Installed', or 'Skipped' when the first-pass install actually landed
@@ -317,15 +321,15 @@ function Invoke-WingetInstall {
                 }
                 catch {
                     Write-ErrorMessage "Retry failed: $appName. Error: $_"
-                    $failedApps += $appName
+                    $failedApps += @{ Name = $appName; Reason = "Unexpected error: $_" }
                 }
             }
         }
         else {
             Write-Host ''
             Write-Info '[DRY-RUN] Would retry the following failed installations:'
-            foreach ($appName in $failedApps) {
-                Write-Info "[DRY-RUN] Would retry: $appName"
+            foreach ($failedApp in $failedApps) {
+                Write-Info "[DRY-RUN] Would retry: $($failedApp.Name)"
             }
         }
     }
@@ -353,12 +357,18 @@ function Invoke-WingetInstall {
         $rows += , @('Skipped', $appList)
     }
 
-    $appList = Format-AppList -AppArray $failedApps
+    $failedAppNames = @($failedApps | ForEach-Object { $_.Name })
+    $appList = Format-AppList -AppArray $failedAppNames
     if ($appList) {
         $rows += , @('Failed', $appList)
     }
 
     Write-Table -Headers $headers -Rows $rows -PromptForGridView (-not $effectiveNonInteractive) -Title 'Installation Summary'
+
+    # Per-app failure reasons (issue #189): winget exit code, attempt count, and scope-fallback
+    # detail, so a failure is diagnosable from the summary (and the transcript) instead of a
+    # generic message. No-ops when nothing failed.
+    Write-FailedAppsSummary -FailedApps $failedApps
 
     # Surface the auto-update outcome with the summary so a machine that finished without an update
     # mechanism is visible at the end of the run (issue #186). Deliberately does not affect the exit
@@ -375,6 +385,14 @@ function Invoke-WingetInstall {
         }
         'DryRun' { Write-Info "[DRY-RUN] Auto-updates: Would configure Winget-AutoUpdate v$($wauResult.Version)." }
         default { Write-ErrorMessage 'Auto-updates: FAILED - Winget-AutoUpdate could not be installed; apps will not update automatically. Re-run the installer to retry.' }
+    }
+
+    # Repeat the persistent transcript path next to the summary (issue #189). The variable is set
+    # by the generated installer's entry script before dispatch; it is unset (and this is skipped)
+    # when the function runs outside that context (module import, tests) or the transcript could
+    # not be started.
+    if ($script:InstallLogPath) {
+        Write-Info "Full transcript of this run: $script:InstallLogPath"
     }
 
     # Keep the console window open until the user presses a key. Skipped in non-interactive mode
