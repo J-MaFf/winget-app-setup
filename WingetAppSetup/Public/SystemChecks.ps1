@@ -31,7 +31,7 @@ function Test-SystemRequirements {
             $results += [PSCustomObject]@{ Check = 'OS Version'; Status = 'OK'; Detail = $osName }
         }
         else {
-            $results += [PSCustomObject]@{ Check = 'OS Version'; Status = 'WARN'; Detail = "$osName (build $build — Windows 10 21H2 or later recommended)" }
+            $results += [PSCustomObject]@{ Check = 'OS Version'; Status = 'WARN'; Detail = "$osName (build $build - Windows 10 21H2 or later recommended)" }
         }
     }
     catch {
@@ -73,7 +73,7 @@ function Test-SystemRequirements {
             $results += [PSCustomObject]@{ Check = 'Network'; Status = 'OK'; Detail = "cdn.winget.microsoft.com reachable (HTTP $([int]$response.StatusCode))" }
         }
         else {
-            $results += [PSCustomObject]@{ Check = 'Network'; Status = 'FAIL'; Detail = "Cannot reach cdn.winget.microsoft.com over HTTPS — network is required: $($_.Exception.Message)" }
+            $results += [PSCustomObject]@{ Check = 'Network'; Status = 'FAIL'; Detail = "Cannot reach cdn.winget.microsoft.com over HTTPS - network is required: $($_.Exception.Message)" }
             $proceed = $false
         }
     }

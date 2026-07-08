@@ -1,4 +1,15 @@
 if ($MyInvocation.InvocationName -ne '.') {
+    # Fail fast on Windows PowerShell 5.1 (issue #210): the installer's logic requires PowerShell
+    # 7+, and 5.1 parses the WHOLE file before running any of it - which is why this check can
+    # exist at all: the build guards the assembled script to stay 5.1-PARSEABLE (ASCII-only code
+    # tokens) so 5.1 gets far enough to run this line and print a real message instead of a wall
+    # of parser errors. Write-Host (not Write-Error) so the message renders identically regardless
+    # of the caller's $ErrorActionPreference, then exit 1.
+    if ($PSVersionTable.PSVersion.Major -lt 7) {
+        Write-Host 'This installer requires PowerShell 7+ (pwsh). Install it (winget install Microsoft.PowerShell) and run the one-liner from a pwsh prompt, or run: pwsh -Command "irm https://raw.githubusercontent.com/J-MaFf/winget-app-setup/refs/heads/main/winget-app-install.ps1 | iex"' -ForegroundColor Red
+        exit 1
+    }
+
     # Persistent transcript (issue #189): a failed install on a remote user's machine used to
     # leave zero artifacts. The log lands under ProgramData - not the elevating account's TEMP -
     # so it survives cross-user elevation and stays findable afterwards. Logging must never block
@@ -33,7 +44,7 @@ if ($MyInvocation.InvocationName -ne '.') {
             if ($WhatIf) {
                 Write-Info '[DRY-RUN] Running pre-flight system checks (OS version, disk space, network).'
                 if (-not (Test-SystemRequirements -WhatIf:$WhatIf)) {
-                    Write-WarningMessage '[DRY-RUN] A blocking pre-flight check failed — a real run would abort here.'
+                    Write-WarningMessage '[DRY-RUN] A blocking pre-flight check failed - a real run would abort here.'
                 }
             }
             elseif (-not (Test-SystemRequirements -WhatIf:$WhatIf)) {

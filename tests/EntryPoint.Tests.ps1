@@ -89,6 +89,63 @@ Describe 'Generated installer: build stamp and transcript wiring (issue #189)' {
     }
 }
 
+Describe 'Generated installer: Windows PowerShell 5.1 parse safety (issue #210)' {
+    # The installer ships as BOM-less UTF-8. Windows PowerShell 5.1 decodes a BOM-less file as
+    # ANSI, so a multi-byte character inside a string literal misdecodes - and some byte sequences
+    # terminate the string early (an em dash's 0x94 byte becomes a closing curly quote), cascading
+    # into dozens of parser errors. Non-comment tokens must therefore stay pure ASCII so 5.1 can
+    # parse the file and reach the PowerShell-7 fail-fast in the dispatch. Comments are exempt:
+    # misdecoded bytes there cannot change tokenization.
+    BeforeDiscovery {
+        # Discovery-time (not BeforeAll) because -Skip is bound during discovery.
+        $script:winPowerShellAvailable = [bool](Get-Command -Name 'powershell.exe' -CommandType Application -ErrorAction SilentlyContinue)
+    }
+
+    It 'Contains no non-ASCII characters outside comment tokens (same rule the build enforces)' {
+        $content = Get-Content -Raw -Encoding UTF8 -Path $script:InstallerScriptPath
+        $tokens = $null
+        $parseErrors = $null
+        [System.Management.Automation.Language.Parser]::ParseInput($content, [ref]$tokens, [ref]$parseErrors) | Out-Null
+        $parseErrors | Should -BeNullOrEmpty
+
+        $offending = @($tokens |
+                Where-Object { $_.Kind -ne [System.Management.Automation.Language.TokenKind]::Comment -and $_.Text -match '[^\x00-\x7F]' } |
+                ForEach-Object { "line $($_.Extent.StartLineNumber): $($_.Kind) token" })
+        $offending | Should -BeNullOrEmpty
+    }
+
+    It 'Parses with zero errors under real Windows PowerShell 5.1' -Skip:(-not $script:winPowerShellAvailable) {
+        $escapedPath = $script:InstallerScriptPath.Replace("'", "''")
+        $probe = "`$t=`$null;`$e=`$null;[System.Management.Automation.Language.Parser]::ParseFile('$escapedPath',[ref]`$t,[ref]`$e)|Out-Null;`$e.Count;`$e|ForEach-Object{`$_.Extent.StartLineNumber.ToString()+': '+`$_.Message}"
+        $output = @(& powershell.exe -NoProfile -NonInteractive -Command $probe)
+        $exitCode = $LASTEXITCODE
+
+        $exitCode | Should -Be 0
+        # First output line is the parse-error count; any further lines describe the errors.
+        $output[0] | Should -Be '0' -Because ("Windows PowerShell 5.1 reported parse errors:`n" + ($output -join "`n"))
+    }
+
+    It 'Fails fast under Windows PowerShell 5.1 with pwsh guidance and exit code 1' -Skip:(-not $script:winPowerShellAvailable) {
+        # Safe to execute for real: the version check is the first statement of the dispatch, so
+        # 5.1 exits before the transcript starts or any system state is touched.
+        $output = & powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $script:InstallerScriptPath 2>&1 | Out-String
+        $exitCode = $LASTEXITCODE
+
+        $exitCode | Should -Be 1
+        $output | Should -Match 'requires PowerShell 7\+'
+        $output | Should -Match 'pwsh'
+        # Exits before the transcript is started - no log line, no log file side effects.
+        $output | Should -Not -Match 'Logging this run to:'
+    }
+
+    It 'Carries the PowerShell 7 fail-fast at the top of the dispatch' {
+        # Cross-platform pin of the guard's presence for environments without powershell.exe.
+        $installer = Get-Content -Raw -Encoding UTF8 -Path $script:InstallerScriptPath
+        $installer | Should -Match ([regex]::Escape('if ($PSVersionTable.PSVersion.Major -lt 7)'))
+        $installer | Should -Match 'This installer requires PowerShell 7\+ \(pwsh\)'
+    }
+}
+
 Describe 'Build determinism (issue #189)' {
     BeforeAll {
         $script:buildScriptPath = Join-Path $script:RepoRoot 'build/Build-WingetInstallScript.ps1'

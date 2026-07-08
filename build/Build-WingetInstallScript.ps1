@@ -179,12 +179,33 @@ $content = (($builder.ToString() -replace "`r`n", "`n").TrimEnd()) + "`n"
 # would ship a broken installer: the reference guard would walk the truncated AST and pass, and
 # -Check would pass because the on-disk file faithfully reproduces the same broken concatenation.
 $parseErrors = $null
-$assembledAst = [System.Management.Automation.Language.Parser]::ParseInput($content, [ref]$null, [ref]$parseErrors)
+$assembledTokens = $null
+$assembledAst = [System.Management.Automation.Language.Parser]::ParseInput($content, [ref]$assembledTokens, [ref]$parseErrors)
 if ($parseErrors -and $parseErrors.Count -gt 0) {
     $details = foreach ($parseError in $parseErrors) {
         "line $($parseError.Extent.StartLineNumber), column $($parseError.Extent.StartColumnNumber): $($parseError.Message)"
     }
     Write-Error ("Parse check failed: the assembled script has $($parseErrors.Count) syntax error(s). Fix the offending source file under WingetAppSetup/ or build/fragments/, then re-run the build.`n" + ($details -join "`n"))
+    exit 1
+}
+
+# Fail fast on non-ASCII in code tokens (issue #210). The installer ships as BOM-less UTF-8, which
+# Windows PowerShell 5.1 decodes as ANSI: a multi-byte character inside a string literal misdecodes
+# into garbage, and some byte sequences terminate the string early (an em dash's 0x94 byte becomes
+# a closing curly quote), cascading into dozens of parser errors before the tail's PowerShell-7
+# fail-fast can run. Keeping every NON-COMMENT token pure ASCII keeps the file 5.1-PARSEABLE, so
+# 5.1 reaches the version check and prints a real message. Comment tokens are exempt: misdecoded
+# bytes inside a comment cannot change tokenization, so doc comments may keep typographic
+# characters. Token-based and platform-independent, so it runs in both build and -Check modes.
+$nonAsciiTokens = @($assembledTokens | Where-Object {
+        $_.Kind -ne [System.Management.Automation.Language.TokenKind]::Comment -and $_.Text -match '[^\x00-\x7F]'
+    })
+if ($nonAsciiTokens.Count -gt 0) {
+    $details = foreach ($token in $nonAsciiTokens) {
+        $chars = ([regex]::Matches($token.Text, '[^\x00-\x7F]') | ForEach-Object { 'U+{0:X4}' -f [int][char]$_.Value } | Select-Object -Unique) -join ', '
+        "line $($token.Extent.StartLineNumber), column $($token.Extent.StartColumnNumber): $($token.Kind) token contains $chars"
+    }
+    Write-Error ("ASCII check failed: $($nonAsciiTokens.Count) non-comment token(s) in the assembled script contain non-ASCII characters, which break Windows PowerShell 5.1 parsing of the BOM-less UTF-8 installer (issue #210). Replace them with ASCII equivalents (em/en dash -> '-', curly quotes -> straight, ellipsis -> '...') in the offending source under WingetAppSetup/ or build/fragments/, then re-run the build.`n" + ($details -join "`n"))
     exit 1
 }
 
