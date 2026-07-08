@@ -156,6 +156,33 @@ if ($parseErrors -and $parseErrors.Count -gt 0) {
     exit 1
 }
 
+# Fail fast on export drift (issue #191). The manifest's FunctionsToExport is the single export
+# authority: winget-app-uninstall.ps1 imports the module via the psd1, so a Public function
+# missing from that list is silently filtered at import time while Pester (which dot-sources the
+# files) stays green. Assert the psd1 list EXACTLY equals the set of functions defined under
+# WingetAppSetup/Public/*.ps1 so the mismatch fails the build (and -Check) instead.
+$manifestPath = Join-Path $moduleRoot 'WingetAppSetup.psd1'
+$declaredExports = @((Import-PowerShellDataFile -Path $manifestPath).FunctionsToExport)
+$publicFunctionNames = @(foreach ($file in $publicFiles) {
+        $fileAst = [System.Management.Automation.Language.Parser]::ParseFile($file.FullName, [ref]$null, [ref]$null)
+        $fileAst.FindAll({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $false) |
+            ForEach-Object { $_.Name }
+    })
+# Case-sensitive on purpose: a casing mismatch between the manifest and the definition is drift too.
+$missingFromManifest = @($publicFunctionNames | Where-Object { $declaredExports -cnotcontains $_ })
+$extraInManifest = @($declaredExports | Where-Object { $publicFunctionNames -cnotcontains $_ })
+if ($missingFromManifest.Count -gt 0 -or $extraInManifest.Count -gt 0) {
+    $details = @()
+    if ($missingFromManifest.Count -gt 0) {
+        $details += "defined under WingetAppSetup/Public but missing from FunctionsToExport: $($missingFromManifest -join ', ')"
+    }
+    if ($extraInManifest.Count -gt 0) {
+        $details += "listed in FunctionsToExport but not defined under WingetAppSetup/Public: $($extraInManifest -join ', ')"
+    }
+    Write-Error ("Export check failed: WingetAppSetup.psd1 FunctionsToExport must exactly match the functions defined under WingetAppSetup/Public/*.ps1. " + ($details -join '; ') + '. Update the manifest (or move the function between Public/ and Private/), then re-run the build.')
+    exit 1
+}
+
 # Fail fast on reference drift (issue #154). Enforced on Windows only: the installer relies on
 # Windows-only cmdlets (Test-NetConnection, Get-ScheduledTask, the WinGet client module) that do
 # not resolve via Get-Command on Linux/macOS and would false-positive there. The dev machine and CI

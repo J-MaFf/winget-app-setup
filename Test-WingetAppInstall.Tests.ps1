@@ -663,6 +663,39 @@ Describe 'msstore-era source-trust helpers removed (issue #177)' {
     }
 }
 
+Describe 'Module export surface (issue #191)' {
+    # The psd1 FunctionsToExport list is the single export authority; the psm1 reads it and the
+    # build asserts it matches Public/*.ps1. These tests pin the reconciled surface.
+    It 'No longer defines the dead ConvertTo-CommandArguments helper' {
+        # Remnant of the removed homegrown updater; it had no production callers.
+        Test-Path Function:\ConvertTo-CommandArguments | Should -Be $false
+    }
+
+    It 'No longer exports module-internal helpers moved to Private/' {
+        $manifest = Import-PowerShellDataFile (Join-Path $PSScriptRoot 'WingetAppSetup/WingetAppSetup.psd1')
+        $manifest.FunctionsToExport | Should -Not -Contain 'Write-Prompt'
+        $manifest.FunctionsToExport | Should -Not -Contain 'ConvertFrom-TerminalSettingsJson'
+    }
+
+    It 'Still exports the logging helpers consumed by winget-app-uninstall.ps1' {
+        $manifest = Import-PowerShellDataFile (Join-Path $PSScriptRoot 'WingetAppSetup/WingetAppSetup.psd1')
+        foreach ($helper in @('Write-Info', 'Write-Success', 'Write-WarningMessage', 'Write-ErrorMessage', 'Format-AppList', 'Write-Table')) {
+            $manifest.FunctionsToExport | Should -Contain $helper
+        }
+    }
+
+    It 'FunctionsToExport exactly matches the functions defined under Public/*.ps1' {
+        # Cross-platform mirror of the Build-WingetInstallScript.ps1 export assertion.
+        $manifest = Import-PowerShellDataFile (Join-Path $PSScriptRoot 'WingetAppSetup/WingetAppSetup.psd1')
+        $publicFunctionNames = Get-ChildItem -Path (Join-Path $PSScriptRoot 'WingetAppSetup/Public') -Filter '*.ps1' | ForEach-Object {
+            $ast = [System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$null, [ref]$null)
+            $ast.FindAll({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $false) |
+                ForEach-Object { $_.Name }
+        }
+        ($manifest.FunctionsToExport | Sort-Object) | Should -Be ($publicFunctionNames | Sort-Object)
+    }
+}
+
 Describe 'Add-ToEnvironmentPath' {
     BeforeAll {
         Mock Write-Host { }
@@ -808,31 +841,6 @@ Describe 'Test-PathListContainsEntry' {
 
     It 'Should not treat empty entries from doubled semicolons as a match' {
         Test-PathListContainsEntry -PathList 'C:\Foo;;C:\Bar' -PathToCheck 'C:\Test' | Should -Be $false
-    }
-}
-
-Describe 'ConvertTo-CommandArguments' {
-    BeforeAll {
-    }
-
-    It 'Should parse simple command without quotes' {
-        $result = ConvertTo-CommandArguments -Command 'winget install --id test'
-        $result | Should -Be @('winget', 'install', '--id', 'test')
-    }
-
-    It 'Should handle quoted arguments' {
-        $result = ConvertTo-CommandArguments -Command 'winget install --id "test app"'
-        $result | Should -Be @('winget', 'install', '--id', 'test app')
-    }
-
-    It 'Should handle single quotes' {
-        $result = ConvertTo-CommandArguments -Command "winget install --id 'test app'"
-        $result | Should -Be @('winget', 'install', '--id', 'test app')
-    }
-
-    It 'Should handle multiple quoted arguments' {
-        $result = ConvertTo-CommandArguments -Command 'winget install --id "test app" --source "winget store"'
-        $result | Should -Be @('winget', 'install', '--id', 'test app', '--source', 'winget store')
     }
 }
 

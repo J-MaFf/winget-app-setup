@@ -384,62 +384,6 @@ function Test-PathInEnvironment {
     return Test-PathListContainsEntry -PathList $envPath -PathToCheck $PathToCheck
 }
 
-<#
-.SYNOPSIS
-    Converts a command string into an array of arguments, properly handling quoted arguments.
-.DESCRIPTION
-    This function takes a command string and splits it into individual arguments while
-    correctly handling quoted strings that may contain spaces.
-.PARAMETER Command
-    The command string to convert
-.RETURNS
-    An array of parsed command arguments
-#>
-function ConvertTo-CommandArguments {
-    param (
-        [Parameter(Mandatory = $true)]
-        [string]$Command
-    )
-
-    $commandArgs = @()
-    $currentArg = ''
-    $inQuotes = $false
-    $quoteChar = ''
-
-    for ($i = 0; $i -lt $Command.Length; $i++) {
-        $char = $Command[$i]
-
-        if ($inQuotes) {
-            if ($char -eq $quoteChar) {
-                $inQuotes = $false
-                $quoteChar = ''
-            }
-            else {
-                $currentArg += $char
-            }
-        }
-        elseif ($char -eq '"' -or $char -eq "'") {
-            $inQuotes = $true
-            $quoteChar = $char
-        }
-        elseif ($char -eq ' ') {
-            if ($currentArg) {
-                $commandArgs += $currentArg
-                $currentArg = ''
-            }
-        }
-        else {
-            $currentArg += $char
-        }
-    }
-
-    if ($currentArg) {
-        $commandArgs += $currentArg
-    }
-
-    return $commandArgs
-}
-
 # --- GraphicalTools ---
 <#
 .SYNOPSIS
@@ -658,6 +602,72 @@ function Convert-JsoncToJson {
     }
 
     return $sanitized.ToString()
+}
+
+<#
+.SYNOPSIS
+    Attempts to parse Windows Terminal settings content, including JSONC variants.
+.DESCRIPTION
+    Tries ConvertFrom-Json first (PowerShell 7+ tolerates JSONC natively). If parsing
+    fails — Windows PowerShell 5.1 rejects comments and trailing commas — sanitizes the
+    text with the string-aware Convert-JsoncToJson scanner and retries. The previous
+    regex sanitizer missed trailing inline // comments and could corrupt string values
+    containing comment-like sequences (issue #187).
+
+    Private (issue #191): only the module's Windows Terminal configuration functions call
+    this; no standalone script consumes it.
+.PARAMETER JsonText
+    Raw settings content.
+.RETURNS
+    Parsed settings object when successful; otherwise $null.
+#>
+function ConvertFrom-TerminalSettingsJson {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$JsonText
+    )
+
+    if ([string]::IsNullOrWhiteSpace($JsonText)) {
+        return [pscustomobject]@{}
+    }
+
+    try {
+        # ConvertFrom-Json -Depth is unavailable in Windows PowerShell 5.1.
+        return $JsonText | ConvertFrom-Json
+    }
+    catch {
+        # Windows Terminal settings are often JSONC; strip comments and trailing commas.
+        $sanitizedJson = Convert-JsoncToJson -JsonText $JsonText
+
+        try {
+            # Keep parsing compatible with both Windows PowerShell and PowerShell 7+.
+            return $sanitizedJson | ConvertFrom-Json
+        }
+        catch {
+            return $null
+        }
+    }
+}
+
+# --- LoggingInternal ---
+# Logging helpers used only by module functions (issue #191). The externally consumed logging
+# primitives (Write-Info/Success/WarningMessage/ErrorMessage, Format-AppList, Write-Table) live
+# in Public/Logging.ps1 because winget-app-uninstall.ps1 imports them through the manifest.
+
+<#
+.SYNOPSIS
+    Writes a prompt message in blue color.
+.DESCRIPTION
+    Helper function for consistent user prompt messages throughout the script.
+.PARAMETER Message
+    The message to display
+#>
+function Write-Prompt {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$Message
+    )
+    Write-Host $Message -ForegroundColor Blue
 }
 
 # --- WauSupport ---
@@ -1505,22 +1515,6 @@ function Write-ErrorMessage {
 
 <#
 .SYNOPSIS
-    Writes a prompt message in blue color.
-.DESCRIPTION
-    Helper function for consistent user prompt messages throughout the script.
-.PARAMETER Message
-    The message to display
-#>
-function Write-Prompt {
-    param (
-        [Parameter(Mandatory = $true)]
-        [string]$Message
-    )
-    Write-Host $Message -ForegroundColor Blue
-}
-
-<#
-.SYNOPSIS
     Formats an array of app names for display in the summary table.
 .DESCRIPTION
     This function checks if an array has content and formats it as a comma-separated string.
@@ -1732,48 +1726,6 @@ function Test-SystemRequirements {
 }
 
 # --- WindowsTerminal ---
-<#
-.SYNOPSIS
-    Attempts to parse Windows Terminal settings content, including JSONC variants.
-.DESCRIPTION
-    Tries ConvertFrom-Json first (PowerShell 7+ tolerates JSONC natively). If parsing
-    fails — Windows PowerShell 5.1 rejects comments and trailing commas — sanitizes the
-    text with the string-aware Convert-JsoncToJson scanner and retries. The previous
-    regex sanitizer missed trailing inline // comments and could corrupt string values
-    containing comment-like sequences (issue #187).
-.PARAMETER JsonText
-    Raw settings content.
-.RETURNS
-    Parsed settings object when successful; otherwise $null.
-#>
-function ConvertFrom-TerminalSettingsJson {
-    param (
-        [Parameter(Mandatory = $true)]
-        [string]$JsonText
-    )
-
-    if ([string]::IsNullOrWhiteSpace($JsonText)) {
-        return [pscustomobject]@{}
-    }
-
-    try {
-        # ConvertFrom-Json -Depth is unavailable in Windows PowerShell 5.1.
-        return $JsonText | ConvertFrom-Json
-    }
-    catch {
-        # Windows Terminal settings are often JSONC; strip comments and trailing commas.
-        $sanitizedJson = Convert-JsoncToJson -JsonText $JsonText
-
-        try {
-            # Keep parsing compatible with both Windows PowerShell and PowerShell 7+.
-            return $sanitizedJson | ConvertFrom-Json
-        }
-        catch {
-            return $null
-        }
-    }
-}
-
 <#
 .SYNOPSIS
     Resolves the most likely Windows Terminal settings file path.
