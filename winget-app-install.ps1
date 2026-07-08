@@ -183,16 +183,6 @@ function Restart-WithElevation {
 }
 
 # --- Environment ---
-<#
-.SYNOPSIS
-    Adds a specified path to the environment PATH variable.
-.DESCRIPTION
-    This function adds a specified path to the environment PATH variable for either the user or the system scope.
-.PARAMETER PathToAdd
-    The path to add to the environment PATH variable.
-.PARAMETER Scope
-    The scope to which the path should be added. Valid values are 'User' and 'System'.
-#>
 function Get-WindowsBuildNumber {
     <#
     .SYNOPSIS
@@ -205,6 +195,96 @@ function Get-WindowsBuildNumber {
     return [int][System.Environment]::OSVersion.Version.Build
 }
 
+<#
+.SYNOPSIS
+    Checks whether a semicolon-delimited PATH-style list already contains a path entry.
+.DESCRIPTION
+    Windows paths are case-insensitive and trailing separators are not significant, so
+    'C:\Program Files\Foo' and 'c:\program files\foo\' are the same directory. Each entry is
+    compared to the target with trailing '\'/'/' trimmed, using OrdinalIgnoreCase, to keep
+    repeated runs from appending duplicate PATH entries (issue #179).
+.PARAMETER PathList
+    The semicolon-delimited list to search (e.g. the value of $env:PATH).
+.PARAMETER PathToCheck
+    The path entry to look for.
+#>
+function Test-PathListContainsEntry {
+    param (
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
+        [string]$PathList,
+
+        [Parameter(Mandatory = $true)]
+        [string]$PathToCheck
+    )
+
+    $normalizedTarget = $PathToCheck.TrimEnd('\', '/')
+    foreach ($entry in ($PathList -split ';')) {
+        if ([string]::Equals($entry.TrimEnd('\', '/'), $normalizedTarget, [System.StringComparison]::OrdinalIgnoreCase)) {
+            return $true
+        }
+    }
+    return $false
+}
+
+<#
+.SYNOPSIS
+    Reads the persistent PATH value for the given scope.
+.DESCRIPTION
+    Thin wrapper around [System.Environment]::GetEnvironmentVariable so callers (and tests)
+    do not have to touch the unmockable static method directly.
+.PARAMETER Scope
+    'User' reads the per-user PATH; 'System' reads the machine PATH.
+#>
+function Get-PersistedEnvironmentPath {
+    param (
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('User', 'System')]
+        [string]$Scope
+    )
+
+    $target = if ($Scope -eq 'System') { [System.EnvironmentVariableTarget]::Machine } else { [System.EnvironmentVariableTarget]::User }
+    return [string][System.Environment]::GetEnvironmentVariable('PATH', $target)
+}
+
+<#
+.SYNOPSIS
+    Writes the persistent PATH value for the given scope.
+.DESCRIPTION
+    Thin wrapper around [System.Environment]::SetEnvironmentVariable so callers (and tests)
+    do not have to touch the unmockable static method directly.
+.PARAMETER Value
+    The full PATH value to persist.
+.PARAMETER Scope
+    'User' writes the per-user PATH; 'System' writes the machine PATH.
+#>
+function Set-PersistedEnvironmentPath {
+    param (
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
+        [string]$Value,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('User', 'System')]
+        [string]$Scope
+    )
+
+    $target = if ($Scope -eq 'System') { [System.EnvironmentVariableTarget]::Machine } else { [System.EnvironmentVariableTarget]::User }
+    [System.Environment]::SetEnvironmentVariable('PATH', $Value, $target)
+}
+
+<#
+.SYNOPSIS
+    Adds a specified path to the environment PATH variable.
+.DESCRIPTION
+    This function adds a specified path to the persistent PATH variable for either the user or the
+    system scope (skipping case-insensitive/trailing-slash duplicates), and mirrors the change into
+    the current process PATH so the new entry is usable in the same session.
+.PARAMETER PathToAdd
+    The path to add to the environment PATH variable.
+.PARAMETER Scope
+    The scope to which the path should be added. Valid values are 'User' and 'System'.
+#>
 function Add-ToEnvironmentPath {
     param (
         [Parameter(Mandatory = $true)]
@@ -217,30 +297,19 @@ function Add-ToEnvironmentPath {
 
     # Check if the path is already in the environment PATH variable
     if (-not (Test-PathInEnvironment -PathToCheck $PathToAdd -Scope $Scope)) {
-        if ($Scope -eq 'System') {
-            # Get the current system PATH
-            $systemEnvPath = [System.Environment]::GetEnvironmentVariable('PATH', [System.EnvironmentVariableTarget]::Machine)
-            # Add to system PATH
-            $systemEnvPath += ";$PathToAdd"
-            [System.Environment]::SetEnvironmentVariable('PATH', $systemEnvPath, [System.EnvironmentVariableTarget]::Machine)
-        }
-        elseif ($Scope -eq 'User') {
-            # Get the current user PATH
-            $userEnvPath = [System.Environment]::GetEnvironmentVariable('PATH', [System.EnvironmentVariableTarget]::User)
-            # Add to user PATH
-            $userEnvPath += ";$PathToAdd"
-            [System.Environment]::SetEnvironmentVariable('PATH', $userEnvPath, [System.EnvironmentVariableTarget]::User)
-        }
+        $persistedPath = Get-PersistedEnvironmentPath -Scope $Scope
+        $newPersistedPath = if ([string]::IsNullOrEmpty($persistedPath)) { $PathToAdd } else { "$persistedPath;$PathToAdd" }
+        Set-PersistedEnvironmentPath -Value $newPersistedPath -Scope $Scope
 
-        # Update the current process environment PATH (with length check to avoid Windows PATH limit of 2048)
-        if (-not ($env:PATH -split ';').Contains($PathToAdd)) {
-            $newPath = "$env:PATH;$PathToAdd"
-            # Only update if it won't exceed the Windows PATH limit
-            if ($newPath.Length -le 2048) {
-                $env:PATH = $newPath
+        # Mirror into the current process PATH so the entry is usable this session. Environment
+        # variable values are capped at 32767 characters on Windows (not 2048 — issue #179).
+        if (-not (Test-PathListContainsEntry -PathList $env:PATH -PathToCheck $PathToAdd)) {
+            $newProcessPath = "$env:PATH;$PathToAdd"
+            if ($newProcessPath.Length -le 32767) {
+                $env:PATH = $newProcessPath
             }
             else {
-                Write-WarningMessage 'Current process PATH would exceed Windows limit (2048 chars). Path added to persistent environment but not to current session.'
+                Write-WarningMessage 'Current process PATH would exceed the Windows environment variable limit (32767 chars). Path added to persistent environment but not to current session.'
             }
         }
     }
@@ -250,7 +319,9 @@ function Add-ToEnvironmentPath {
 .SYNOPSIS
     Checks if a specified path is in the environment PATH variable.
 .DESCRIPTION
-    This function checks if a specified path is in the environment PATH variable for either the user or the system scope.
+    This function checks if a specified path is in the persistent environment PATH variable for
+    either the user or the system scope. Comparison is case-insensitive and ignores trailing
+    path separators.
 .PARAMETER PathToCheck
     The path to check in the environment PATH variable.
 .PARAMETER Scope
@@ -266,14 +337,8 @@ function Test-PathInEnvironment {
         [string]$Scope
     )
 
-    if ($Scope -eq 'System') {
-        $envPath = [System.Environment]::GetEnvironmentVariable('PATH', [System.EnvironmentVariableTarget]::Machine)
-    }
-    elseif ($Scope -eq 'User') {
-        $envPath = [System.Environment]::GetEnvironmentVariable('PATH', [System.EnvironmentVariableTarget]::User)
-    }
-
-    return ($envPath -split ';').Contains($PathToCheck)
+    $envPath = Get-PersistedEnvironmentPath -Scope $Scope
+    return Test-PathListContainsEntry -PathList $envPath -PathToCheck $PathToCheck
 }
 
 <#
@@ -634,20 +699,10 @@ function Invoke-WingetInstall {
     # ongoing updates are now handled by Winget-AutoUpdate, set up after the app installs (issue #168).
     [void](Remove-LegacyScheduledUpdates -WhatIf:$WhatIf)
 
-    # Add the script directory to the PATH (only if running locally)
-    # Use $PSScriptRoot for reliable script directory detection (works with launcher)
-    if (Test-IsRunningLocally) {
-        $scriptDirectory = $PSScriptRoot
-        if (-not $WhatIf) {
-            Add-ToEnvironmentPath -PathToAdd $scriptDirectory -Scope 'User'
-        }
-        else {
-            Write-Info "[DRY-RUN] Would add '$scriptDirectory' to User PATH"
-        }
-    }
-    else {
-        Write-Info 'Skipping PATH update (remote execution detected)'
-    }
+    # Note: earlier versions added the script's own directory (often Downloads/) to the persistent
+    # User PATH here for the homegrown updater. The updater is gone (#168) and a user-writable
+    # directory on the PATH of an elevating account is a hijack surface, so no PATH changes are
+    # made anymore (issue #179).
 
     $apps = @(
         @{name = '7zip.7zip' },
