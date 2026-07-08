@@ -8,16 +8,25 @@
     HTTPS (network is required for winget). The network probe uses Invoke-WebRequest, which
     honors system proxy settings; any HTTP response — including 4xx/5xx — counts as reachable,
     and only a transport-level failure (no response at all) blocks. In -WhatIf mode the
-    disk-space prompt is skipped.
+    disk-space prompt is skipped, and in effective non-interactive mode (issue #214 — explicit
+    switch, non-interactive session, or redirected stdin, via Test-EffectiveNonInteractive) the
+    prompt is replaced by a warning and the run continues: an unattended run must never block
+    on Read-Host (empty redirected stdin reads as "not Y" and silently cancelled the install).
 .PARAMETER WhatIf
     When specified, reports intended checks without prompting on low disk space.
+.PARAMETER NonInteractive
+    The caller's explicit non-interactive intent, forwarded into the shared effective
+    non-interactive detection (Test-EffectiveNonInteractive). When the effective state is
+    non-interactive, measured-low disk space warns and continues instead of prompting.
 .RETURNS
     [bool] True when it is safe to proceed; False when a blocking check fails or the user declines.
 #>
 function Test-SystemRequirements {
     param (
         [Parameter(Mandatory = $false)]
-        [switch]$WhatIf
+        [switch]$WhatIf,
+        [Parameter(Mandatory = $false)]
+        [switch]$NonInteractive
     )
 
     $results = @()
@@ -100,10 +109,18 @@ function Test-SystemRequirements {
     # Prompt only when free space was actually measured below the threshold
     # (skip prompt in WhatIf mode; never prompt when the drive could not be read).
     if ($null -ne $freeGB -and $freeGB -lt 50 -and -not $WhatIf) {
-        $choice = Read-Host 'Disk space is below the 50 GB recommendation. Continue anyway? (Y/N)'
-        if ($choice -notin @('Y', 'y')) {
-            Write-WarningMessage 'Installation cancelled by user due to low disk space.'
-            return $false
+        # Unattended runs must never block on Read-Host: redirected stdin returns an empty
+        # string, which reads as "not Y" and silently cancelled the install (issue #214).
+        # Warn and continue instead — low disk is a recommendation, not a blocker.
+        if (Test-EffectiveNonInteractive -NonInteractive:$NonInteractive) {
+            Write-WarningMessage 'Disk space is below the 50 GB recommendation. Continuing without prompting (non-interactive run).'
+        }
+        else {
+            $choice = Read-Host 'Disk space is below the 50 GB recommendation. Continue anyway? (Y/N)'
+            if ($choice -notin @('Y', 'y')) {
+                Write-WarningMessage 'Installation cancelled by user due to low disk space.'
+                return $false
+            }
         }
     }
 

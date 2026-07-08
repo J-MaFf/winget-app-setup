@@ -36,16 +36,10 @@ function Invoke-WingetInstall {
     )
 
     # Effective non-interactive mode: explicit switch, a non-interactive session (e.g. service,
-    # scheduled task, pwsh -NonInteractive), or redirected stdin (piped/irm|iex wrappers). A
-    # console probe failure means there is no usable console, so treat that as non-interactive.
-    $inputRedirected = $false
-    try {
-        $inputRedirected = [System.Console]::IsInputRedirected
-    }
-    catch {
-        $inputRedirected = $true
-    }
-    $effectiveNonInteractive = $NonInteractive -or (-not [Environment]::UserInteractive) -or $inputRedirected
+    # scheduled task, pwsh -NonInteractive), or redirected stdin (piped/irm|iex wrappers).
+    # Shared private helper (issue #214) — Test-SystemRequirements gates its disk-space prompt
+    # on the same detection.
+    $effectiveNonInteractive = Test-EffectiveNonInteractive -NonInteractive:$NonInteractive
 
     if ($WhatIf) {
         Write-Info '=== DRY-RUN MODE ENABLED ==='

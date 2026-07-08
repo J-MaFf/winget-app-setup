@@ -23,6 +23,10 @@ Describe 'Test-SystemRequirements' -Tag 'SystemRequirements' {
         Mock Get-ItemProperty {
             [PSCustomObject]@{ ProductName = 'Windows 11 Pro' }
         }
+        # Default to an interactive session so the prompt-path tests below exercise Read-Host
+        # regardless of the host running Pester (CI runners have redirected stdin, which would
+        # otherwise flip the real detection to non-interactive). Issue #214.
+        Mock Test-EffectiveNonInteractive { $false }
     }
 
     It 'Returns $true when all checks pass' {
@@ -57,6 +61,40 @@ Describe 'Test-SystemRequirements' -Tag 'SystemRequirements' {
         Mock Read-Host { 'Y' }
         $result = Test-SystemRequirements
         $result | Should -BeTrue
+    }
+
+    It 'Warns and continues instead of prompting when low disk is measured non-interactively (issue #214)' {
+        Mock Get-PSDrive { [PSCustomObject]@{ Free = 10GB } }
+        Mock Test-EffectiveNonInteractive { $true }
+        Mock Read-Host { throw 'Should not prompt in non-interactive mode' }
+
+        $result = Test-SystemRequirements
+
+        $result | Should -BeTrue
+        Should -Invoke Read-Host -Times 0 -Exactly
+        Should -Invoke Write-WarningMessage -ParameterFilter { $Message -match 'Continuing without prompting' }
+    }
+
+    It 'Forwards the explicit -NonInteractive switch into the shared detection (issue #214)' {
+        Mock Get-PSDrive { [PSCustomObject]@{ Free = 10GB } }
+        Mock Test-EffectiveNonInteractive { [bool]$NonInteractive }
+        Mock Read-Host { throw 'Should not prompt when -NonInteractive is passed' }
+
+        $result = Test-SystemRequirements -NonInteractive
+
+        $result | Should -BeTrue
+        Should -Invoke Read-Host -Times 0 -Exactly
+        Should -Invoke Test-EffectiveNonInteractive -ParameterFilter { [bool]$NonInteractive }
+    }
+
+    It 'Still prompts interactively when low disk is measured and the session is interactive' {
+        Mock Get-PSDrive { [PSCustomObject]@{ Free = 10GB } }
+        Mock Read-Host { 'Y' }
+
+        $result = Test-SystemRequirements
+
+        $result | Should -BeTrue
+        Should -Invoke Read-Host -Times 1 -Exactly
     }
 
     It 'Skips disk space prompt in WhatIf mode' {
