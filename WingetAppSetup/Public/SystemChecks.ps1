@@ -62,7 +62,9 @@ function Test-SystemRequirements {
     # response — even 4xx/5xx — proves the CDN is reachable; only a transport-level failure
     # (no response at all) blocks.
     try {
-        $null = Invoke-WebRequest -Uri 'https://cdn.winget.microsoft.com/cache' -Method Head -TimeoutSec 10 -ErrorAction Stop
+        # -UseBasicParsing is a no-op on PowerShell 7 but prevents a false FAIL on Windows
+        # PowerShell 5.1 (README launch path) when the IE parsing engine is unavailable.
+        $null = Invoke-WebRequest -Uri 'https://cdn.winget.microsoft.com/cache' -Method Head -TimeoutSec 10 -UseBasicParsing -ErrorAction Stop
         $results += [PSCustomObject]@{ Check = 'Network'; Status = 'OK'; Detail = 'HTTPS probe of cdn.winget.microsoft.com succeeded' }
     }
     catch {
