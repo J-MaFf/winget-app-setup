@@ -69,13 +69,18 @@ jobs:
             & pwsh -NoProfile -Command 'irm https://raw.githubusercontent.com/J-MaFf/winget-app-setup/main/winget-app-install.ps1 | iex'
           }
           $exitCode = $LASTEXITCODE
+          # NOTE: GitHub's pwsh shell wrapper ends every step with 'exit $LASTEXITCODE', so the
+          # success/tolerated branches must exit 0 explicitly or the installer's lingering
+          # nonzero code fails the step anyway (observed on run 3).
           if ($exitCode -eq 0) {
             Write-Host 'First install pass exited 0.' -ForegroundColor Green
+            exit 0
           }
           elseif ($exitCode -eq 1 -and $env:KNOWN_PLATFORM_INCOMPATIBLE) {
             # Exit 1 = 'some apps failed'. Tolerated ONLY pending the assertion step's
             # containment check that nothing outside KNOWN_PLATFORM_INCOMPATIBLE failed.
             Write-Host "First install pass exited 1 (some apps failed) - tolerated pending containment check against known platform-incompatible apps: $env:KNOWN_PLATFORM_INCOMPATIBLE" -ForegroundColor Yellow
+            exit 0
           }
           else {
             # 2 = winget unavailable, 3 = validation failed, or anything unexpected: hard fail.
@@ -98,13 +103,16 @@ jobs:
             & pwsh -NoProfile -Command 'irm https://raw.githubusercontent.com/J-MaFf/winget-app-setup/main/winget-app-install.ps1 | iex'
           }
           $exitCode = $LASTEXITCODE
+          # Same explicit-exit-0 requirement as the first pass (pwsh shell wrapper behavior).
           if ($exitCode -eq 0) {
             Write-Host 'Second install pass exited 0.' -ForegroundColor Green
+            exit 0
           }
           elseif ($exitCode -eq 1 -and $env:KNOWN_PLATFORM_INCOMPATIBLE) {
             # Known-incompatible apps are still missing on the second pass, so the installer
             # retries and fails them again - same containment rule as the first pass.
             Write-Host "Second install pass exited 1 (some apps failed) - tolerated pending containment check against known platform-incompatible apps: $env:KNOWN_PLATFORM_INCOMPATIBLE" -ForegroundColor Yellow
+            exit 0
           }
           else {
             Write-Host "Second install pass FAILED with exit code $exitCode" -ForegroundColor Red
