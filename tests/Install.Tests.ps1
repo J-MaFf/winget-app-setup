@@ -239,6 +239,41 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
         }
     }
 
+    Context 'Not-applicable skip wiring (issue #217)' {
+        BeforeEach {
+            $script:skipWarnings = @()
+            Mock Write-WarningMessage { $script:skipWarnings += $Message }
+        }
+
+        It 'Logs the not-applicable skip line with the condition description and buckets the app as Skipped' {
+            Mock Install-AppWithVerification { @{ Status = 'Skipped'; InstallResult = $null; FailureReason = $null; SkipReason = 'NotApplicable' } }
+
+            Invoke-WingetInstall -Apps @(@{ name = 'Dell.CommandUpdate.Universal'; condition = { $false }; conditionDescription = 'Dell hardware only' }) -WhatIf -NonInteractive
+
+            # Exactly the message shape of the already-installed skip, with the gated reason.
+            $script:skipWarnings | Should -Contain 'Skipping: Dell.CommandUpdate.Universal (not applicable: Dell hardware only)'
+            $skippedRow = @($script:capturedRows | Where-Object { $_[0] -eq 'Skipped' })[0]
+            $skippedRow[1] | Should -Match 'Dell\.CommandUpdate\.Universal'
+            @($script:capturedRows | Where-Object { $_[0] -eq 'Failed' }).Count | Should -Be 0
+        }
+
+        It 'Falls back to a generic reason when the entry has no conditionDescription' {
+            Mock Install-AppWithVerification { @{ Status = 'Skipped'; InstallResult = $null; FailureReason = $null; SkipReason = 'NotApplicable' } }
+
+            Invoke-WingetInstall -Apps @(@{ name = 'Contoso.GatedApp'; condition = { $false } }) -WhatIf -NonInteractive
+
+            $script:skipWarnings | Should -Contain 'Skipping: Contoso.GatedApp (not applicable: condition not met)'
+        }
+
+        It 'Keeps the already-installed skip message for skips without a SkipReason' {
+            Mock Install-AppWithVerification { @{ Status = 'Skipped'; InstallResult = $null; FailureReason = $null } }
+
+            Invoke-WingetInstall -Apps @(@{ name = 'Contoso.PresentApp' }) -WhatIf -NonInteractive
+
+            $script:skipWarnings | Should -Contain 'Skipping: Contoso.PresentApp (already installed)'
+        }
+    }
+
     Context 'Retry pass (needs elevation: the non-dry-run path performs the real admin gate)' {
         It 'Sends a first-pass failure back through the helper and buckets a recovered app as installed' -Skip:(-not $script:wiringIsElevated) {
             $script:sevenZipCalls = 0
@@ -383,6 +418,83 @@ Describe 'Install-AppWithVerification (shared install-and-verify pipeline, issue
         Assert-MockCalled Install-WingetPackage -Times 1 -Exactly
     }
 
+    Context 'Applicability conditions (issue #217)' {
+        BeforeEach {
+            $script:conditionWarnings = @()
+            Mock Write-WarningMessage { $script:conditionWarnings += $Message }
+        }
+
+        It 'Skips a condition-false app as NotApplicable without any winget probe or install' {
+            $result = Install-AppWithVerification -App @{ name = 'Dell.CommandUpdate.Universal'; condition = { $false }; conditionDescription = 'Dell hardware only' }
+
+            $result.Status | Should -Be 'Skipped'
+            $result.SkipReason | Should -Be 'NotApplicable'
+            $result.InstallResult | Should -Be $null
+            $result.FailureReason | Should -Be $null
+            # The gate runs BEFORE the pre-check: no winget probe, no install dispatch.
+            Assert-MockCalled Test-WingetPackageInstalled -Times 0 -Exactly
+            Assert-MockCalled Install-WingetPackage -Times 0 -Exactly
+        }
+
+        It 'Reports the same NotApplicable skip in a dry run (-WhatIf)' {
+            $result = Install-AppWithVerification -App @{ name = 'Dell.CommandUpdate.Universal'; condition = { $false }; conditionDescription = 'Dell hardware only' } -WhatIf
+
+            $result.Status | Should -Be 'Skipped'
+            $result.SkipReason | Should -Be 'NotApplicable'
+            Assert-MockCalled Test-WingetPackageInstalled -Times 0 -Exactly
+            Assert-MockCalled Install-WingetPackage -Times 0 -Exactly
+        }
+
+        It 'Runs the normal install flow when the condition is true' {
+            $script:checkCount = 0
+            Mock Test-WingetPackageInstalled {
+                $script:checkCount++
+                if ($script:checkCount -eq 1) {
+                    return @{ Installed = $false; TimedOut = $false; ExitCode = 0 }
+                }
+                @{ Installed = $true; TimedOut = $false; ExitCode = 0 }
+            }
+
+            $result = Install-AppWithVerification -App @{ name = 'Dell.CommandUpdate.Universal'; condition = { $true }; conditionDescription = 'Dell hardware only' }
+
+            $result.Status | Should -Be 'Installed'
+            $result.SkipReason | Should -Be $null
+            Assert-MockCalled Install-WingetPackage -Times 1 -Exactly -ParameterFilter { $PackageId -eq 'Dell.CommandUpdate.Universal' }
+            Assert-MockCalled Test-WingetPackageInstalled -Times 2 -Exactly
+        }
+
+        It 'Fails open when the condition throws: warns and proceeds with the install' {
+            $script:checkCount = 0
+            Mock Test-WingetPackageInstalled {
+                $script:checkCount++
+                if ($script:checkCount -eq 1) {
+                    return @{ Installed = $false; TimedOut = $false; ExitCode = 0 }
+                }
+                @{ Installed = $true; TimedOut = $false; ExitCode = 0 }
+            }
+
+            $result = Install-AppWithVerification -App @{ name = 'Dell.CommandUpdate.Universal'; condition = { throw 'CIM unavailable' }; conditionDescription = 'Dell hardware only' }
+
+            # A broken probe must never silently drop an app: the install proceeds normally.
+            $result.Status | Should -Be 'Installed'
+            $result.SkipReason | Should -Be $null
+            Assert-MockCalled Install-WingetPackage -Times 1 -Exactly
+            $failOpenWarning = @($script:conditionWarnings | Where-Object { $_ -match 'failed to evaluate' })[0]
+            $failOpenWarning | Should -Match 'Dell\.CommandUpdate\.Universal'
+            $failOpenWarning | Should -Match 'CIM unavailable'
+            $failOpenWarning | Should -Match 'treating as applicable'
+        }
+
+        It 'Leaves SkipReason unset for an already-installed skip so the two skips stay distinguishable' {
+            Mock Test-WingetPackageInstalled { @{ Installed = $true; TimedOut = $false; ExitCode = 0 } }
+
+            $result = Install-AppWithVerification -App @{ name = 'Test.App' }
+
+            $result.Status | Should -Be 'Skipped'
+            $result.SkipReason | Should -Be $null
+        }
+    }
+
     Context 'Package-specific installers ($app.install dispatch)' {
         It 'Dispatches to the named self-verifying installer instead of Install-WingetPackage' {
             function Install-FakePowerShell { @{ ExitCode = 0; Installed = $true; Method = 'msi' } }
@@ -442,6 +554,55 @@ Describe 'Install-AppWithVerification (shared install-and-verify pipeline, issue
 
             $result.Status | Should -Be 'Installed'
         }
+    }
+}
+
+Describe 'Not-applicable gating end-to-end (issue #217)' {
+    # Drives the REAL Install-AppWithVerification through the real orchestrator (dry run, so no
+    # elevation is needed): only the orchestration boundary and the winget probes are mocked.
+    BeforeEach {
+        Mock Write-Host { }
+        Mock Pause { }
+        Mock Start-Process { }
+        Mock Restart-WithElevation { 'PowerShell' }
+        Mock Test-IsRunningLocally { $true }
+        Mock Test-AndInstallWingetModule { $true }
+        Mock Import-Module { }
+        Mock Test-AndInstallWinget { $true }
+        Mock Initialize-WingetSourcesForUser { $true }
+        Mock Test-AndInstallGraphicalTools { $true }
+        Mock Test-WingetSources { $true }
+        Mock Remove-LegacyScheduledUpdates { $true }
+        Mock Set-WindowsTerminalDefaults { }
+        Mock Install-WingetAutoUpdate { @{ Status = 'DryRun'; Version = '2.12.0' } }
+        Mock Install-WingetPackage { @{ ExitCode = 0; Attempts = 1; SessionErrorExhausted = $false; MachineScopeFellBack = $false } }
+        Mock Test-WingetPackageInstalled { @{ Installed = $false; TimedOut = $false; ExitCode = 0 } }
+
+        $script:capturedRows = $null
+        Mock Write-Table { $script:capturedRows = $Rows }
+        $script:warningMessages = @()
+        Mock Write-WarningMessage { $script:warningMessages += $Message }
+    }
+
+    It 'Gates a condition-false app before any winget probe and reports the not-applicable skip' {
+        $apps = @(
+            @{ name = 'Dell.CommandUpdate.Universal'; condition = { $false }; conditionDescription = 'Dell hardware only' },
+            @{ name = 'Contoso.NormalApp' }
+        )
+
+        Invoke-WingetInstall -Apps $apps -WhatIf -NonInteractive
+
+        # The gated app was skipped with the reason line; the ungated app went through the
+        # normal dry-run pipeline (pre-check probe ran for it, and only for it).
+        $script:warningMessages | Should -Contain 'Skipping: Dell.CommandUpdate.Universal (not applicable: Dell hardware only)'
+        Assert-MockCalled Test-WingetPackageInstalled -Times 1 -Exactly -ParameterFilter { $PackageId -eq 'Contoso.NormalApp' }
+        Assert-MockCalled Test-WingetPackageInstalled -Times 0 -Exactly -ParameterFilter { $PackageId -eq 'Dell.CommandUpdate.Universal' }
+
+        $skippedRow = @($script:capturedRows | Where-Object { $_[0] -eq 'Skipped' })[0]
+        $skippedRow[1] | Should -Match 'Dell\.CommandUpdate\.Universal'
+        $installedRow = @($script:capturedRows | Where-Object { $_[0] -eq 'Installed' })[0]
+        $installedRow[1] | Should -Match 'Contoso\.NormalApp'
+        @($script:capturedRows | Where-Object { $_[0] -eq 'Failed' }).Count | Should -Be 0
     }
 }
 

@@ -10,6 +10,20 @@ BeforeAll {
     . (Join-Path $PSScriptRoot 'TestHelpers.ps1')
 }
 
+Describe 'Get-ComputerManufacturer (issue #217)' {
+    BeforeEach {
+        Mock Get-CimInstance { [pscustomobject]@{ Manufacturer = 'Dell Inc.' } }
+    }
+
+    It 'Returns the Win32_ComputerSystem manufacturer as a string' {
+        $manufacturer = Get-ComputerManufacturer
+
+        $manufacturer | Should -Be 'Dell Inc.'
+        $manufacturer | Should -BeOfType [string]
+        Assert-MockCalled Get-CimInstance -Times 1 -Exactly -ParameterFilter { $ClassName -eq 'Win32_ComputerSystem' }
+    }
+}
+
 Describe 'Add-ToEnvironmentPath' {
     BeforeAll {
         Mock Write-Host { }

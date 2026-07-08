@@ -56,12 +56,12 @@ param (
 # This script is assembled from the WingetAppSetup module by build/Build-WingetInstallScript.ps1.
 # Edit the function source under WingetAppSetup/Public and WingetAppSetup/Private, then re-run the
 # build to regenerate this file. See readme.md ("Project layout") for details.
-# Build id: 1.0.0+e67bfa49 (module version + SHA256 fragment of the function content; issue #189).
+# Build id: 1.0.0+c25a8568 (module version + SHA256 fragment of the function content; issue #189).
 # ------------------------------------------------------------------------------------------------
 
 # Content-derived build identity, logged at startup so a transcript from a remote machine
 # identifies exactly which installer build produced it (issue #189).
-$script:InstallerBuildId = '1.0.0+e67bfa49'
+$script:InstallerBuildId = '1.0.0+c25a8568'
 
 # ------------------------------------------------Functions------------------------------------------------
 
@@ -178,6 +178,19 @@ function Get-WindowsBuildNumber {
         build 26100 (Windows 11 24H2) and later (issue #166).
     #>
     return [int][System.Environment]::OSVersion.Version.Build
+}
+
+function Get-ComputerManufacturer {
+    <#
+    .SYNOPSIS
+        Returns the machine's manufacturer string (e.g. 'Dell Inc.', 'Microsoft Corporation').
+    .DESCRIPTION
+        Thin, mockable wrapper around the Win32_ComputerSystem CIM class so catalog applicability
+        conditions (issue #217) — e.g. gating Dell Command Update on Dell hardware — can be unit
+        tested without touching real system state. Private on purpose: it is a seam for the
+        catalog's condition scriptblocks, not part of the module's public surface.
+    #>
+    return [string](Get-CimInstance -ClassName Win32_ComputerSystem).Manufacturer
 }
 
 <#
@@ -514,14 +527,19 @@ function Test-AndInstallGraphicalTools {
     Invoke-WingetInstall (issue #188). It replaces the three drifted inline Start-Process
     `winget list` verify blocks with a single implementation:
 
-      1. Pre-check: Test-WingetPackageInstalled under a timeout guard. Already installed maps to
+      1. Applicability: if the app declares a condition scriptblock and it evaluates falsy, the
+         app is Skipped with SkipReason 'NotApplicable' BEFORE any winget probe runs — e.g.
+         Dell Command Update on non-Dell hardware (issue #217). Evaluated once per call (so once
+         per pass). Fail-open: a condition that throws is warned about and treated as applicable,
+         because a broken probe must never silently drop an app.
+      2. Pre-check: Test-WingetPackageInstalled under a timeout guard. Already installed maps to
          Skipped; a hung `winget list` maps to Failed so the app flows into the retry pass and
          the non-zero exit code instead of being silently dropped (issue #176).
-      2. Dispatch: a package-specific self-verifying installer named in $App.install (e.g.
+      3. Dispatch: a package-specific self-verifying installer named in $App.install (e.g.
          Install-PowerShellLatest, whose DISM-provisioned MSIX path never shows up under
          `winget list` for the elevating account), or the default Install-WingetPackage, which
          retries the transient 0x80073d19 session error with backoff (issue #150).
-      3. Post-verify: winget installs are re-checked with Test-WingetPackageInstalled; an install
+      4. Post-verify: winget installs are re-checked with Test-WingetPackageInstalled; an install
          that reported success but does not show up under `winget list` is Failed.
 
     The helper contains no prompts, no Exit, and no ReadKey — user-facing messages, summary
@@ -529,12 +547,15 @@ function Test-AndInstallGraphicalTools {
     pipeline unit-testable (issue #188).
 .PARAMETER App
     A validated app-definition hashtable: @{ name = '<winget package id>' } with optional
-    'install' (name of a self-verifying installer command) and 'installerType' (winget
-    --installer-type override forwarded to Install-WingetPackage) entries.
+    'install' (name of a self-verifying installer command), 'installerType' (winget
+    --installer-type override forwarded to Install-WingetPackage), 'condition' (applicability
+    scriptblock, issue #217), and 'conditionDescription' (human reason for the skip message)
+    entries.
 .PARAMETER WhatIf
-    Dry run: the read-only pre-check still runs, but no installer is dispatched. An app that is
-    not yet installed reports Status 'Installed' so the caller's dry-run summary shows what would
-    change, matching the pre-#188 dry-run bucket semantics.
+    Dry run: the applicability condition and the read-only pre-check still run, but no installer
+    is dispatched. An app that is not yet installed reports Status 'Installed' so the caller's
+    dry-run summary shows what would change, matching the pre-#188 dry-run bucket semantics; a
+    not-applicable app reports the same Skipped/'NotApplicable' result as a real run.
 .RETURNS
     [hashtable] @{
         Status        = 'Installed' | 'Failed' | 'Skipped'
@@ -545,6 +566,9 @@ function Test-AndInstallGraphicalTools {
         FailureReason = $null when Status is not 'Failed'; otherwise 'PreCheckTimeout',
                         'CustomInstallFailed', 'VerifyTimeout', or 'VerifyNotFound' so the caller
                         can keep its per-situation message texts
+        SkipReason    = 'NotApplicable' when Status is 'Skipped' because the app's condition
+                        evaluated falsy (issue #217); absent/$null for an already-installed skip,
+                        so the caller can distinguish the two skip messages
     }
 #>
 function Install-AppWithVerification {
@@ -555,6 +579,26 @@ function Install-AppWithVerification {
         [Parameter(Mandatory = $false)]
         [switch]$WhatIf
     )
+
+    # Applicability gate (issue #217): evaluated BEFORE any winget probe so a not-applicable app
+    # (e.g. Dell Command Update on non-Dell hardware) costs nothing and cannot fail. Both the
+    # first pass and the retry pass call this helper, so the gate holds everywhere -- including
+    # dry runs. Fail-open on a throwing condition: warn and proceed with the install, because a
+    # broken probe must never silently drop an app.
+    if ($App.condition) {
+        $conditionMet = $true
+        $conditionEvaluated = $true
+        try {
+            $conditionMet = [bool](& $App.condition)
+        }
+        catch {
+            Write-WarningMessage "Condition for $($App.name) failed to evaluate ($($_.Exception.Message)); treating as applicable."
+            $conditionEvaluated = $false
+        }
+        if ($conditionEvaluated -and -not $conditionMet) {
+            return @{ Status = 'Skipped'; InstallResult = $null; FailureReason = $null; SkipReason = 'NotApplicable' }
+        }
+    }
 
     # Same 15-second guard the inlined blocks used: `winget list` can hang indefinitely on broken
     # sources or first-use prompts, and a hung check must not stall the whole install loop.
@@ -1130,6 +1174,13 @@ function Test-WingetSourceHealth {
       - install: name of a package-specific install function that performs its own verification
         (dispatched by Install-AppWithVerification instead of the generic winget path).
       - installerType: forwarded to Install-WingetPackage for machine-scope handling.
+      - condition: scriptblock returning a boolean — evaluated by Install-AppWithVerification
+        BEFORE any winget probe. Falsy means the app does not apply to this machine and is
+        reported as Skipped (not applicable) instead of installed (issue #217). Fail-open: a
+        condition that throws is warned about and treated as applicable, so a broken probe can
+        never silently drop an app.
+      - conditionDescription: short human-readable reason shown in the skip message, e.g.
+        "Skipping: <id> (not applicable: <conditionDescription>)".
     Add or remove apps HERE — never inline a copy of this list at a call site (the previous
     duplicates in Invoke-WingetInstall and winget-app-uninstall.ps1 had already drifted).
 .RETURNS
@@ -1144,7 +1195,11 @@ function Get-DefaultAppCatalog {
         @{name = 'Google.GoogleDrive' },
         @{name = 'Git.Git' },
         @{name = 'Klocman.BulkCrapUninstaller' },
-        @{name = 'Dell.CommandUpdate.Universal' },
+        # Dell Command Update is useless on non-Dell hardware, and its DotNet Desktop Runtime
+        # dependency cannot even install on Server-based images (0x8A150104 on GitHub-hosted
+        # runners). Manufacturer-gated so non-Dell machines report it Skipped (not applicable)
+        # instead of failing a pointless install (issue #217).
+        @{name = 'Dell.CommandUpdate.Universal'; condition = { (Get-ComputerManufacturer) -match 'Dell' }; conditionDescription = 'Dell hardware only' },
         # PowerShell needs a version-agnostic install strategy (no pinning — always the latest):
         # winget installs PowerShell 7.6+ as an MSIX by default, which registers per-user and fails
         # to deploy in an elevated cross-user / machine-scope context ("The current system
@@ -1498,7 +1553,17 @@ function Invoke-WingetInstall {
 
             switch ($outcome.Status) {
                 'Skipped' {
-                    Write-WarningMessage "Skipping: $($app.name) (already installed)"
+                    if ($outcome.SkipReason -eq 'NotApplicable') {
+                        # Applicability-gated skip (issue #217): the app's catalog condition
+                        # evaluated falsy on this machine (e.g. Dell Command Update on non-Dell
+                        # hardware). Same summary bucket as an already-installed skip, but the
+                        # message carries the condition's human-readable reason.
+                        $conditionText = if ($app.conditionDescription) { $app.conditionDescription } else { 'condition not met' }
+                        Write-WarningMessage "Skipping: $($app.name) (not applicable: $conditionText)"
+                    }
+                    else {
+                        Write-WarningMessage "Skipping: $($app.name) (already installed)"
+                    }
                     $skippedApps += $app.name
                 }
                 'Installed' {

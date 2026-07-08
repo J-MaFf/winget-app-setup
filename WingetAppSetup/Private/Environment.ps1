@@ -10,6 +10,19 @@ function Get-WindowsBuildNumber {
     return [int][System.Environment]::OSVersion.Version.Build
 }
 
+function Get-ComputerManufacturer {
+    <#
+    .SYNOPSIS
+        Returns the machine's manufacturer string (e.g. 'Dell Inc.', 'Microsoft Corporation').
+    .DESCRIPTION
+        Thin, mockable wrapper around the Win32_ComputerSystem CIM class so catalog applicability
+        conditions (issue #217) — e.g. gating Dell Command Update on Dell hardware — can be unit
+        tested without touching real system state. Private on purpose: it is a seam for the
+        catalog's condition scriptblocks, not part of the module's public surface.
+    #>
+    return [string](Get-CimInstance -ClassName Win32_ComputerSystem).Manufacturer
+}
+
 <#
 .SYNOPSIS
     Checks whether a semicolon-delimited PATH-style list already contains a path entry.

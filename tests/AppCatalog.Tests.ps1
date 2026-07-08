@@ -81,4 +81,30 @@ Describe 'Get-DefaultAppCatalog (issue #190)' {
         @($psApp).Count | Should -Be 1
         $psApp.install | Should -Be 'Install-PowerShellLatest'
     }
+
+    Context 'Manufacturer-aware gating for Dell Command Update (issue #217)' {
+        It 'Gates Dell.CommandUpdate.Universal behind a condition with a human-readable description' {
+            $dellApp = @(Get-DefaultAppCatalog) | Where-Object { $_.name -eq 'Dell.CommandUpdate.Universal' }
+
+            @($dellApp).Count | Should -Be 1
+            $dellApp.condition | Should -BeOfType [scriptblock]
+            $dellApp.conditionDescription | Should -Be 'Dell hardware only'
+        }
+
+        It 'Condition is true on Dell hardware and false on non-Dell hardware' {
+            $dellApp = @(Get-DefaultAppCatalog) | Where-Object { $_.name -eq 'Dell.CommandUpdate.Universal' }
+
+            Mock Get-ComputerManufacturer { 'Dell Inc.' }
+            [bool](& $dellApp.condition) | Should -Be $true
+
+            Mock Get-ComputerManufacturer { 'Microsoft Corporation' }
+            [bool](& $dellApp.condition) | Should -Be $false
+        }
+
+        It 'No other catalog entry carries a condition (gating stays deliberate and reviewed)' {
+            $conditioned = @(Get-DefaultAppCatalog) | Where-Object { $_.ContainsKey('condition') }
+
+            @($conditioned | ForEach-Object { $_.name }) | Should -Be @('Dell.CommandUpdate.Universal')
+        }
+    }
 }
