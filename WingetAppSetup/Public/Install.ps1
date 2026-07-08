@@ -13,6 +13,10 @@
     Pass-through of the entry script's -SkipSystemCheck switch. Used only so an elevated relaunch
     inherits the caller's intent to bypass the pre-flight system checks (issue #185); the checks
     themselves run in the entry script before this function is called.
+.PARAMETER Apps
+    App-definition hashtables to install. Defaults to the curated catalog returned by
+    Get-DefaultAppCatalog — the single source of truth shared with winget-app-uninstall.ps1
+    (issue #190). Overridable so tests (and callers) can inject a custom catalog.
 .NOTES
     Exit codes: 0 = success, 1 = one or more apps failed to install, 2 = winget unavailable,
     3 = app-definition validation failed or no valid apps remain.
@@ -25,7 +29,10 @@ function Invoke-WingetInstall {
         [switch]$NonInteractive,
 
         [Parameter(Mandatory = $false)]
-        [switch]$SkipSystemCheck
+        [switch]$SkipSystemCheck,
+
+        [Parameter(Mandatory = $false)]
+        [array]$Apps = (Get-DefaultAppCatalog)
     )
 
     # Effective non-interactive mode: explicit switch, a non-interactive session (e.g. service,
@@ -167,25 +174,10 @@ function Invoke-WingetInstall {
     # directory on the PATH of an elevating account is a hijack surface, so no PATH changes are
     # made anymore (issue #179).
 
-    $apps = @(
-        @{name = '7zip.7zip' },
-        @{name = 'GlavSoft.TightVNC' },
-        @{name = 'Adobe.Acrobat.Reader.64-bit' },
-        @{name = 'Google.Chrome' },
-        @{name = 'Google.GoogleDrive' },
-        @{name = 'Git.Git' },
-        @{name = 'Klocman.BulkCrapUninstaller' },
-        @{name = 'Dell.CommandUpdate.Universal' },
-        # PowerShell needs a version-agnostic install strategy (no pinning — always the latest):
-        # winget installs PowerShell 7.6+ as an MSIX by default, which registers per-user and fails
-        # to deploy in an elevated cross-user / machine-scope context ("The current system
-        # configuration does not support the installation of this package"). Install-PowerShellLatest
-        # prefers the MSI while it exists (<= 7.6), and once the MSI is gone (7.7+) installs the latest
-        # MSIX machine-wide — natively on Windows 24H2+, or via DISM provisioning on older Windows
-        # (issues #163/#166). It self-verifies, so the loop must not re-check it with `winget list`.
-        @{name = 'Microsoft.PowerShell'; install = 'Install-PowerShellLatest' },
-        @{name = 'Microsoft.WindowsTerminal' }
-    );
+    # The curated app list lives in Get-DefaultAppCatalog (issue #190) — the single source of
+    # truth shared with winget-app-uninstall.ps1. It arrives here through the -Apps parameter,
+    # which defaults to that catalog and lets tests inject a custom one.
+    $apps = $Apps
 
     $validationResult = Test-AppDefinitions -Apps $apps
 

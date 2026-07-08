@@ -25,9 +25,10 @@
 
 .DESCRIPTION
  This script installs a curated list of programs from winget. The authoritative
- list is the $apps array in Invoke-WingetInstall (WingetAppSetup/Public/Install.ps1,
- inlined below in this generated file). Run the script with -WhatIf to preview the
- exact set of planned installs without making any system changes.
+ list is returned by Get-DefaultAppCatalog (WingetAppSetup/Public/AppCatalog.ps1,
+ inlined below in this generated file) and shared with winget-app-uninstall.ps1.
+ Run the script with -WhatIf to preview the exact set of planned installs without
+ making any system changes.
 
 .PARAMETER WhatIf
  When specified, performs all pre-flight checks and displays planned actions without making any system changes.
@@ -55,12 +56,12 @@ param (
 # This script is assembled from the WingetAppSetup module by build/Build-WingetInstallScript.ps1.
 # Edit the function source under WingetAppSetup/Public and WingetAppSetup/Private, then re-run the
 # build to regenerate this file. See readme.md ("Project layout") for details.
-# Build id: 1.0.0+f4fb5063 (module version + SHA256 fragment of the function content; issue #189).
+# Build id: 1.0.0+c5cf4ed8 (module version + SHA256 fragment of the function content; issue #189).
 # ------------------------------------------------------------------------------------------------
 
 # Content-derived build identity, logged at startup so a transcript from a remote machine
 # identifies exactly which installer build produced it (issue #189).
-$script:InstallerBuildId = '1.0.0+f4fb5063'
+$script:InstallerBuildId = '1.0.0+c5cf4ed8'
 
 # ------------------------------------------------Functions------------------------------------------------
 
@@ -163,72 +164,8 @@ function Test-InvokedFromModuleContext {
     return [bool]($CommandPath -match '[\\/]WingetAppSetup[\\/]Public[\\/]Install\.ps1$')
 }
 
-<#
-.SYNOPSIS
-    Relaunches the script with elevated privileges, preferring Windows Terminal when available.
-.DESCRIPTION
-    Attempts to restart the current script in an elevated session. When Windows Terminal is installed,
-    the script is relaunched inside an elevated Windows Terminal tab running the specified PowerShell
-    executable. If Windows Terminal is unavailable or fails to start, the function falls back to the
-    standard Start-Process call for the provided PowerShell executable.
-.PARAMETER PowerShellExecutable
-    The PowerShell executable to use when relaunching (for example, pwsh.exe or powershell.exe).
-.PARAMETER ScriptPath
-    The full path to the script that should be relaunched.
-.PARAMETER WindowsTerminalExecutable
-    Optional explicit path to the Windows Terminal executable (wt.exe). When not supplied, the
-    function attempts to discover it automatically.
-.PARAMETER AdditionalArguments
-    Optional switches/arguments to forward to the elevated relaunch (for example, '-WhatIf'). These
-    are appended after the -File argument so the elevated session inherits the caller's intent.
-.RETURNS
-    [string] Returns 'WindowsTerminal' when the Windows Terminal relaunch path succeeds, otherwise
-    returns 'PowerShell'.
-#>
-function Restart-WithElevation {
-    param (
-        [Parameter(Mandatory = $true)]
-        [string]$PowerShellExecutable,
-
-        [Parameter(Mandatory = $true)]
-        [string]$ScriptPath,
-
-        [Parameter(Mandatory = $false)]
-        [string]$WindowsTerminalExecutable,
-
-        [Parameter(Mandatory = $false)]
-        [string[]]$AdditionalArguments = @()
-    )
-
-    $quotedScriptPath = '"' + $ScriptPath.Replace('"', '`"') + '"'
-    $commandArguments = "-NoProfile -ExecutionPolicy Bypass -File $quotedScriptPath"
-    if ($AdditionalArguments.Count -gt 0) {
-        $commandArguments += ' ' + ($AdditionalArguments -join ' ')
-    }
-    $windowsTerminalPath = $WindowsTerminalExecutable
-
-    if (-not $windowsTerminalPath) {
-        $wtCommand = Get-Command -Name 'wt.exe' -ErrorAction SilentlyContinue
-        if ($wtCommand) {
-            $windowsTerminalPath = $wtCommand.Source
-        }
-    }
-
-    if ($windowsTerminalPath) {
-        Write-Info 'Attempting to relaunch script in Windows Terminal with elevated privileges...'
-        try {
-            Start-Process $windowsTerminalPath -ArgumentList @("$PowerShellExecutable $commandArguments") -Verb RunAs
-            return 'WindowsTerminal'
-        }
-        catch {
-            Write-Warning "Failed to start Windows Terminal: $_"
-        }
-    }
-
-    Write-Info 'Relaunching script in standard PowerShell window with elevated privileges...'
-    Start-Process $PowerShellExecutable -ArgumentList $commandArguments -Verb RunAs
-    return 'PowerShell'
-}
+# Restart-WithElevation lives in Public/Elevation.ps1 (issue #190): it is exported so
+# winget-app-uninstall.ps1 can reuse it instead of hand-rolling its own relaunch.
 
 # --- Environment ---
 function Get-WindowsBuildNumber {
@@ -1137,6 +1074,46 @@ function Test-WingetSourceHealth {
     }
 }
 
+# --- AppCatalog ---
+<#
+.SYNOPSIS
+    Returns the curated default application catalog shared by the installer and uninstaller.
+.DESCRIPTION
+    Single source of truth for the app list (issue #190). Invoke-WingetInstall consumes it as the
+    default value of its -Apps parameter, and winget-app-uninstall.ps1 iterates the same catalog
+    for removal. Each entry is a hashtable with at least:
+      - name: the winget package id (validated by Test-AppDefinitions before use).
+    Optional fields:
+      - install: name of a package-specific install function that performs its own verification
+        (dispatched by Install-AppWithVerification instead of the generic winget path).
+      - installerType: forwarded to Install-WingetPackage for machine-scope handling.
+    Add or remove apps HERE — never inline a copy of this list at a call site (the previous
+    duplicates in Invoke-WingetInstall and winget-app-uninstall.ps1 had already drifted).
+.RETURNS
+    [array] of app-definition hashtables.
+#>
+function Get-DefaultAppCatalog {
+    return @(
+        @{name = '7zip.7zip' },
+        @{name = 'GlavSoft.TightVNC' },
+        @{name = 'Adobe.Acrobat.Reader.64-bit' },
+        @{name = 'Google.Chrome' },
+        @{name = 'Google.GoogleDrive' },
+        @{name = 'Git.Git' },
+        @{name = 'Klocman.BulkCrapUninstaller' },
+        @{name = 'Dell.CommandUpdate.Universal' },
+        # PowerShell needs a version-agnostic install strategy (no pinning — always the latest):
+        # winget installs PowerShell 7.6+ as an MSIX by default, which registers per-user and fails
+        # to deploy in an elevated cross-user / machine-scope context ("The current system
+        # configuration does not support the installation of this package"). Install-PowerShellLatest
+        # prefers the MSI while it exists (<= 7.6), and once the MSI is gone (7.7+) installs the latest
+        # MSIX machine-wide — natively on Windows 24H2+, or via DISM provisioning on older Windows
+        # (issues #163/#166). It self-verifies, so the loop must not re-check it with `winget list`.
+        @{name = 'Microsoft.PowerShell'; install = 'Install-PowerShellLatest' },
+        @{name = 'Microsoft.WindowsTerminal' }
+    )
+}
+
 # --- AppValidation ---
 <#
 .SYNOPSIS
@@ -1188,6 +1165,78 @@ function Test-AppDefinitions {
     }
 }
 
+# --- Elevation ---
+# Public (exported) elevation helper. The rest of the elevation detection helpers live in
+# Private/Elevation.ps1; this one is exported (issue #190) so winget-app-uninstall.ps1 can reuse
+# it instead of hand-rolling its own Start-Process relaunch.
+
+<#
+.SYNOPSIS
+    Relaunches the script with elevated privileges, preferring Windows Terminal when available.
+.DESCRIPTION
+    Attempts to restart the current script in an elevated session. When Windows Terminal is installed,
+    the script is relaunched inside an elevated Windows Terminal tab running the specified PowerShell
+    executable. If Windows Terminal is unavailable or fails to start, the function falls back to the
+    standard Start-Process call for the provided PowerShell executable.
+.PARAMETER PowerShellExecutable
+    The PowerShell executable to use when relaunching (for example, pwsh.exe or powershell.exe).
+.PARAMETER ScriptPath
+    The full path to the script that should be relaunched.
+.PARAMETER WindowsTerminalExecutable
+    Optional explicit path to the Windows Terminal executable (wt.exe). When not supplied, the
+    function attempts to discover it automatically.
+.PARAMETER AdditionalArguments
+    Optional switches/arguments to forward to the elevated relaunch (for example, '-WhatIf'). These
+    are appended after the -File argument so the elevated session inherits the caller's intent.
+.RETURNS
+    [string] Returns 'WindowsTerminal' when the Windows Terminal relaunch path succeeds, otherwise
+    returns 'PowerShell'.
+#>
+function Restart-WithElevation {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$PowerShellExecutable,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ScriptPath,
+
+        [Parameter(Mandatory = $false)]
+        [string]$WindowsTerminalExecutable,
+
+        [Parameter(Mandatory = $false)]
+        [string[]]$AdditionalArguments = @()
+    )
+
+    $quotedScriptPath = '"' + $ScriptPath.Replace('"', '`"') + '"'
+    $commandArguments = "-NoProfile -ExecutionPolicy Bypass -File $quotedScriptPath"
+    if ($AdditionalArguments.Count -gt 0) {
+        $commandArguments += ' ' + ($AdditionalArguments -join ' ')
+    }
+    $windowsTerminalPath = $WindowsTerminalExecutable
+
+    if (-not $windowsTerminalPath) {
+        $wtCommand = Get-Command -Name 'wt.exe' -ErrorAction SilentlyContinue
+        if ($wtCommand) {
+            $windowsTerminalPath = $wtCommand.Source
+        }
+    }
+
+    if ($windowsTerminalPath) {
+        Write-Info 'Attempting to relaunch script in Windows Terminal with elevated privileges...'
+        try {
+            Start-Process $windowsTerminalPath -ArgumentList @("$PowerShellExecutable $commandArguments") -Verb RunAs
+            return 'WindowsTerminal'
+        }
+        catch {
+            Write-Warning "Failed to start Windows Terminal: $_"
+        }
+    }
+
+    Write-Info 'Relaunching script in standard PowerShell window with elevated privileges...'
+    Start-Process $PowerShellExecutable -ArgumentList $commandArguments -Verb RunAs
+    return 'PowerShell'
+}
+
 # --- Install ---
 <#
 .SYNOPSIS
@@ -1204,6 +1253,10 @@ function Test-AppDefinitions {
     Pass-through of the entry script's -SkipSystemCheck switch. Used only so an elevated relaunch
     inherits the caller's intent to bypass the pre-flight system checks (issue #185); the checks
     themselves run in the entry script before this function is called.
+.PARAMETER Apps
+    App-definition hashtables to install. Defaults to the curated catalog returned by
+    Get-DefaultAppCatalog — the single source of truth shared with winget-app-uninstall.ps1
+    (issue #190). Overridable so tests (and callers) can inject a custom catalog.
 .NOTES
     Exit codes: 0 = success, 1 = one or more apps failed to install, 2 = winget unavailable,
     3 = app-definition validation failed or no valid apps remain.
@@ -1216,7 +1269,10 @@ function Invoke-WingetInstall {
         [switch]$NonInteractive,
 
         [Parameter(Mandatory = $false)]
-        [switch]$SkipSystemCheck
+        [switch]$SkipSystemCheck,
+
+        [Parameter(Mandatory = $false)]
+        [array]$Apps = (Get-DefaultAppCatalog)
     )
 
     # Effective non-interactive mode: explicit switch, a non-interactive session (e.g. service,
@@ -1358,25 +1414,10 @@ function Invoke-WingetInstall {
     # directory on the PATH of an elevating account is a hijack surface, so no PATH changes are
     # made anymore (issue #179).
 
-    $apps = @(
-        @{name = '7zip.7zip' },
-        @{name = 'GlavSoft.TightVNC' },
-        @{name = 'Adobe.Acrobat.Reader.64-bit' },
-        @{name = 'Google.Chrome' },
-        @{name = 'Google.GoogleDrive' },
-        @{name = 'Git.Git' },
-        @{name = 'Klocman.BulkCrapUninstaller' },
-        @{name = 'Dell.CommandUpdate.Universal' },
-        # PowerShell needs a version-agnostic install strategy (no pinning — always the latest):
-        # winget installs PowerShell 7.6+ as an MSIX by default, which registers per-user and fails
-        # to deploy in an elevated cross-user / machine-scope context ("The current system
-        # configuration does not support the installation of this package"). Install-PowerShellLatest
-        # prefers the MSI while it exists (<= 7.6), and once the MSI is gone (7.7+) installs the latest
-        # MSIX machine-wide — natively on Windows 24H2+, or via DISM provisioning on older Windows
-        # (issues #163/#166). It self-verifies, so the loop must not re-check it with `winget list`.
-        @{name = 'Microsoft.PowerShell'; install = 'Install-PowerShellLatest' },
-        @{name = 'Microsoft.WindowsTerminal' }
-    );
+    # The curated app list lives in Get-DefaultAppCatalog (issue #190) — the single source of
+    # truth shared with winget-app-uninstall.ps1. It arrives here through the -Apps parameter,
+    # which defaults to that catalog and lets tests inject a custom one.
+    $apps = $Apps
 
     $validationResult = Test-AppDefinitions -Apps $apps
 

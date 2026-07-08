@@ -1,10 +1,12 @@
 # 1. Make sure the Microsoft App Installer is installed:
 #    https://www.microsoft.com/en-us/p/app-installer/9nblggh4nns1
-# 2. Edit the list of apps to uninstall.
+# 2. The list of apps to uninstall is the module's curated catalog (Get-DefaultAppCatalog in
+#    WingetAppSetup/Public/AppCatalog.ps1) — edit it there, never here (issue #190).
 # 3. Run this script as administrator.
 
-# Shared helpers (Write-Info/Success/WarningMessage/ErrorMessage, Write-Table, Format-AppList)
-# come from the WingetAppSetup module — the single source of truth (see issue #106).
+# Shared helpers (Write-Info/Success/WarningMessage/ErrorMessage, Write-Table, Format-AppList,
+# Get-DefaultAppCatalog, Test-WingetPackageInstalled, Restart-WithElevation) come from the
+# WingetAppSetup module — the single source of truth (see issues #106, #190).
 Import-Module (Join-Path $PSScriptRoot 'WingetAppSetup\WingetAppSetup.psd1') -Force
 
 #------------------------------------------------Main Script------------------------------------------------
@@ -13,26 +15,19 @@ Import-Module (Join-Path $PSScriptRoot 'WingetAppSetup\WingetAppSetup.psd1') -Fo
 If (-NOT ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] 'Administrator')) {
     Write-ErrorMessage 'This script requires administrator privileges. Press Enter to restart script with elevated privileges.'
     Pause
-    # Relaunch the script with administrator privileges
-    Start-Process powershell.exe -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`"" -Verb RunAs
+    # Relaunch with administrator privileges via the module's shared helper (issue #190):
+    # prefers an elevated Windows Terminal tab and falls back to a plain PowerShell window.
+    $psExecutable = if (Get-Command pwsh -ErrorAction SilentlyContinue) { 'pwsh.exe' } else { 'powershell.exe' }
+    Restart-WithElevation -PowerShellExecutable $psExecutable -ScriptPath $PSCommandPath | Out-Null
     Exit
 }
 else {
     Write-Success 'Starting...'
 }
 
-$apps = @(
-    @{name = '7zip.7zip' },
-    @{name = 'GlavSoft.TightVNC' },
-    @{name = 'Adobe.Acrobat.Reader.64-bit' },
-    @{name = 'Google.Chrome' },
-    @{name = 'Google.GoogleDrive' },
-    @{name = 'Git.Git' },
-    @{name = 'Klocman.BulkCrapUninstaller' },
-    @{name = 'Dell.CommandUpdate.Universal' },
-    @{name = 'Microsoft.PowerShell' },
-    @{name = 'Microsoft.WindowsTerminal' }
-);
+# The same curated catalog the installer uses (issue #190). Uninstall only consumes the package
+# ids; custom install strategies (e.g. Microsoft.PowerShell's) are irrelevant for removal.
+$apps = Get-DefaultAppCatalog
 
 Write-Info 'Uninstalling the following Apps:'
 ForEach ($app in $apps) {
@@ -45,11 +40,16 @@ $failedApps = @()
 
 Foreach ($app in $apps) {
     try {
-        # Classify by exit code, not by matching English output strings — winget output is
-        # locale-dependent. Capture $LASTEXITCODE immediately after each winget call (issue #180).
-        $null = winget list --exact --id $app.name --accept-source-agreements --disable-interactivity
-        $listExitCode = $LASTEXITCODE
-        if ($listExitCode -eq 0) {
+        # Installed-check via the module's Test-WingetPackageInstalled (issue #190) — same
+        # agreement flags as the old inline call (--accept-source-agreements
+        # --disable-interactivity), plus a timeout guard so a hung `winget list` cannot stall the
+        # loop. Classification stays exit-code-based, never English output-string matching —
+        # winget output is locale-dependent (issue #180).
+        $listResult = Test-WingetPackageInstalled -PackageId $app.name -TimeoutSeconds 15
+        if ($listResult.TimedOut) {
+            throw "Timed out checking whether $($app.name) is installed."
+        }
+        if ($listResult.ExitCode -eq 0) {
             Write-Info "Uninstalling: $($app.name)"
             $uninstallOutput = winget uninstall -e --id $app.name --disable-interactivity
             $uninstallExitCode = $LASTEXITCODE
@@ -62,8 +62,10 @@ Foreach ($app in $apps) {
             }
         }
         else {
-            # Nonzero exit (e.g. 0x8A150014 APPINSTALLER_CLI_ERROR_NO_APPLICATIONS_FOUND) => not installed.
-            Write-WarningMessage "Skipping: $($app.name) (not installed; winget list exit code 0x$('{0:X8}' -f $listExitCode))"
+            # Nonzero exit (e.g. 0x8A150014 APPINSTALLER_CLI_ERROR_NO_APPLICATIONS_FOUND) => not
+            # installed. A $null exit code means `winget list` could not be started at all.
+            $listExitCodeText = if ($null -ne $listResult.ExitCode) { '0x{0:X8}' -f $listResult.ExitCode } else { 'unavailable' }
+            Write-WarningMessage "Skipping: $($app.name) (not installed; winget list exit code $listExitCodeText)"
             $skippedApps += $app.name
         }
     }

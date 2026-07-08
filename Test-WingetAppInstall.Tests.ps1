@@ -1459,12 +1459,13 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
 
             Invoke-WingetInstall -WhatIf -NonInteractive
 
-            # One helper call per app in the curated list (10 today — update alongside the list),
+            # One helper call per app in the curated catalog (the -Apps default; issue #190),
             # every one of them in dry-run mode, and no second (retry) round.
-            $script:verifiedApps.Count | Should -Be 10
+            $expectedCount = @(Get-DefaultAppCatalog).Count
+            $script:verifiedApps.Count | Should -Be $expectedCount
             $script:verifiedApps | Should -Contain '7zip.7zip'
             $script:verifiedApps | Should -Contain 'Microsoft.WindowsTerminal'
-            Assert-MockCalled Install-AppWithVerification -Times 10 -Exactly -ParameterFilter { [bool]$WhatIf }
+            Assert-MockCalled Install-AppWithVerification -Times $expectedCount -Exactly -ParameterFilter { [bool]$WhatIf }
 
             # Bucket routing: Skipped and Installed land in their own summary rows, nothing Failed.
             $installedRow = @($script:capturedRows | Where-Object { $_[0] -eq 'Installed' })[0]
@@ -1473,6 +1474,29 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
             $installedRow[1] | Should -Not -Match 'Google\.Chrome'
             $skippedRow[1] | Should -Match 'Google\.Chrome'
             @($script:capturedRows | Where-Object { $_[0] -eq 'Failed' }).Count | Should -Be 0
+        }
+    }
+
+    Context 'Catalog injection (issue #190)' {
+        It 'Accepts an -Apps parameter defaulting to Get-DefaultAppCatalog' {
+            $command = Get-Command Invoke-WingetInstall
+            $command.Parameters.ContainsKey('Apps') | Should -Be $true
+            $command.Parameters['Apps'].ParameterType.Name | Should -Be 'Array'
+            # Structural pin on the default: the curated catalog function, not an inline list.
+            $command.Definition | Should -Match '\[array\]\$Apps = \(Get-DefaultAppCatalog\)'
+        }
+
+        It 'Drives an injected one-app catalog through the helper instead of the curated list' {
+            $script:verifiedApps = @()
+            Mock Install-AppWithVerification {
+                $script:verifiedApps += $App.name
+                @{ Status = 'Installed'; InstallResult = $null; FailureReason = $null }
+            }
+
+            Invoke-WingetInstall -Apps @(@{ name = 'Contoso.OnlyApp' }) -WhatIf -NonInteractive
+
+            $script:verifiedApps | Should -Be @('Contoso.OnlyApp')
+            Assert-MockCalled Install-AppWithVerification -Times 1 -Exactly
         }
     }
 
@@ -2380,21 +2404,76 @@ Describe 'Invoke-AppxProvisioning (delegated command quoting, issue #178)' {
     }
 }
 
-Describe 'App list consistency' {
-    It 'Should keep install and uninstall app lists in sync' {
+Describe 'App list consistency (issue #190)' {
+    # The old form of this test parsed the duplicated inline lists in winget-app-install.ps1 and
+    # winget-app-uninstall.ps1 and compared them. Both scripts now consume Get-DefaultAppCatalog,
+    # so sync is structural; what remains worth guarding is (a) the generated installer actually
+    # carries the module's catalog and (b) the uninstaller never regrows an inline copy.
+    It 'Ships the module catalog inside the generated installer' {
         $installApps = Get-Content "$PSScriptRoot\winget-app-install.ps1" |
         ForEach-Object {
             if ($_ -match "@{name = '([^']+)'") { $matches[1] }
         } |
         Where-Object { $_ }
 
-        $uninstallApps = Get-Content "$PSScriptRoot\winget-app-uninstall.ps1" |
-        ForEach-Object {
-            if ($_ -match "@{name = '([^']+)'") { $matches[1] }
-        } |
-        Where-Object { $_ }
+        $catalogNames = @(Get-DefaultAppCatalog) | ForEach-Object { $_.name }
+        $installApps | Should -Be $catalogNames
+    }
 
-        $installApps | Should -Be $uninstallApps
+    It 'Uninstaller iterates Get-DefaultAppCatalog instead of an inline copy of the list' {
+        $uninstallScript = Get-Content "$PSScriptRoot\winget-app-uninstall.ps1" -Raw
+        $uninstallScript | Should -Match '\$apps = Get-DefaultAppCatalog'
+        # The previously duplicated inline list (which had already drifted in metadata) is gone.
+        $uninstallScript | Should -Not -Match "@\{name = '"
+    }
+
+    It 'Uninstaller reuses the module installed-check and elevation helpers (issue #190)' {
+        $uninstallScript = Get-Content "$PSScriptRoot\winget-app-uninstall.ps1" -Raw
+        $uninstallScript | Should -Match 'Test-WingetPackageInstalled -PackageId'
+        $uninstallScript | Should -Match 'Restart-WithElevation -PowerShellExecutable'
+        # The hand-rolled winget list probe and Start-Process relaunch are gone.
+        $uninstallScript | Should -Not -Match 'winget list --exact'
+        $uninstallScript | Should -Not -Match 'Start-Process powershell\.exe'
+    }
+
+    It 'Exports everything the uninstaller calls from the manifest (psd1 gates module imports)' {
+        # winget-app-uninstall.ps1 imports the module via the psd1, so a helper missing from
+        # FunctionsToExport fails at the user's prompt while dot-sourcing tests stay green (#191).
+        $manifest = Import-PowerShellDataFile (Join-Path $PSScriptRoot 'WingetAppSetup/WingetAppSetup.psd1')
+        foreach ($helper in @('Get-DefaultAppCatalog', 'Test-WingetPackageInstalled', 'Restart-WithElevation')) {
+            $manifest.FunctionsToExport | Should -Contain $helper
+        }
+    }
+}
+
+Describe 'Get-DefaultAppCatalog (issue #190)' {
+    It 'Returns a non-empty array in which every entry is a hashtable with a well-formed package id' {
+        $catalog = @(Get-DefaultAppCatalog)
+
+        $catalog.Count | Should -BeGreaterThan 0
+        foreach ($app in $catalog) {
+            $app | Should -BeOfType [hashtable]
+            $app.ContainsKey('name') | Should -Be $true
+            # Same package-id shape Install-WingetPackage validates before trusting winget output.
+            $app.name | Should -Match '^[\w][\w.\-]+\.[\w][\w.\-]+'
+        }
+    }
+
+    It 'Passes Test-AppDefinitions cleanly (no errors, warnings, or dropped entries)' {
+        $catalog = @(Get-DefaultAppCatalog)
+
+        $result = Test-AppDefinitions -Apps $catalog
+
+        $result.Errors.Count | Should -Be 0
+        $result.Warnings.Count | Should -Be 0
+        @($result.ValidApps).Count | Should -Be $catalog.Count
+    }
+
+    It 'Preserves the PowerShell custom install strategy (issues #163/#166)' {
+        $psApp = @(Get-DefaultAppCatalog) | Where-Object { $_.name -eq 'Microsoft.PowerShell' }
+
+        @($psApp).Count | Should -Be 1
+        $psApp.install | Should -Be 'Install-PowerShellLatest'
     }
 }
 
