@@ -15,9 +15,11 @@
          module's private Get-InstalledWauInfo helper, dot-sourced from the checkout).
       4. A transcript exists under %ProgramData%\winget-app-setup\logs and contains the
          'Installer build' stamp.
-      5. With -ExpectAllSkippedOnSecondRun: the LATEST transcript (the second, idempotence-leg
+      5. Containment: in EVERY real-run transcript, no app outside -SkipApps failed — this is
+         the promise that lets the workflow tolerate installer exit 1 for skip-listed apps.
+      6. With -ExpectAllSkippedOnSecondRun: the LATEST transcript (the second, idempotence-leg
          run) shows every non-skipped catalog app as 'Skipping: <name> (already installed)' and
-         records no installs and no failures.
+         records no installs and no failures for non-skip-listed apps.
 
     Prints a per-assertion PASS/FAIL table and exits nonzero listing the failures.
 .PARAMETER SkipApps
@@ -151,7 +153,34 @@ else {
         Add-AssertionResult -Name "Transcript contains 'Installer build'" -Passed $false -Detail "no 'Installer build' line in $($latest.Name)"
     }
 
-    # --- 5. Idempotence: the latest (second-run) transcript shows everything Skipped ---------
+    # --- 5. Containment: no app OUTSIDE -SkipApps failed, in ANY real-run transcript ---------
+    # The workflow tolerates installer exit 1 only on the promise that every failure belongs to
+    # the justified skip list (KNOWN_PLATFORM_INCOMPATIBLE / issue-referenced). Parse each
+    # transcript's summary table 'Failed    <app1>, <app2>' row and diff against $SkipApps.
+    foreach ($transcript in $transcripts) {
+        $content = if ($transcript.FullName -eq $latest.FullName) { $latestContent } else { Get-Content -Path $transcript.FullName -Raw }
+        # Primary source: the per-app failure lines ('Failed to install: <id> ...' and
+        # 'Retry failed: <id> ...'), which are logged unconditionally per app. The summary
+        # table's 'Failed' row is Format-Table output and can ellipsis-truncate long lists,
+        # which would hide offenders, so it is deliberately not parsed.
+        $failedApps = @()
+        foreach ($line in ($content -split "`n")) {
+            if ($line -match '^(Failed to install|Retry failed):\s+(?<app>[^\s(]+)') {
+                $failedApps += $Matches.app.TrimEnd('.', ',')
+            }
+        }
+        $failedApps = @($failedApps | Sort-Object -Unique)
+        $uncontained = @($failedApps | Where-Object { $SkipApps -notcontains $_ })
+        if ($uncontained.Count -eq 0) {
+            $detail = if ($failedApps.Count -gt 0) { "failed apps all skip-listed: $($failedApps -join ', ')" } else { 'no failed apps' }
+            Add-AssertionResult -Name "Failures contained ($($transcript.Name))" -Passed $true -Detail $detail
+        }
+        else {
+            Add-AssertionResult -Name "Failures contained ($($transcript.Name))" -Passed $false -Detail "apps outside -SkipApps failed: $($uncontained -join ', ')"
+        }
+    }
+
+    # --- 6. Idempotence: the latest (second-run) transcript shows everything Skipped ---------
     if ($ExpectAllSkippedOnSecondRun) {
         foreach ($app in $appsToAssert) {
             $id = $app.name
@@ -164,10 +193,12 @@ else {
                 Add-AssertionResult -Name "Second run skipped: $id" -Passed $false -Detail "transcript $($latest.Name) has no '$skipLine'"
             }
         }
-        $noInstalls = -not $latestContent.Contains('Successfully installed:')
-        Add-AssertionResult -Name 'Second run installed nothing' -Passed $noInstalls -Detail $(if ($noInstalls) { '' } else { "transcript $($latest.Name) contains 'Successfully installed:'" })
-        $noFailures = -not $latestContent.Contains('Failed to install:')
-        Add-AssertionResult -Name 'Second run failed nothing' -Passed $noFailures -Detail $(if ($noFailures) { '' } else { "transcript $($latest.Name) contains 'Failed to install:'" })
+        # Per-app checks so skip-listed apps (which legitimately install-retry-fail on this
+        # platform) don't trip the idempotence assertions for everything else.
+        $installedOffenders = @($appsToAssert | Where-Object { $latestContent.Contains("Successfully installed: $($_.name)") } | ForEach-Object { $_.name })
+        Add-AssertionResult -Name 'Second run installed nothing (non-skip-listed)' -Passed ($installedOffenders.Count -eq 0) -Detail $(if ($installedOffenders.Count) { "installed on second run: $($installedOffenders -join ', ')" } else { '' })
+        $failedOffenders = @($appsToAssert | Where-Object { $latestContent.Contains("Failed to install: $($_.name)") } | ForEach-Object { $_.name })
+        Add-AssertionResult -Name 'Second run failed nothing (non-skip-listed)' -Passed ($failedOffenders.Count -eq 0) -Detail $(if ($failedOffenders.Count) { "failed on second run: $($failedOffenders -join ', ')" } else { '' })
     }
 }
 

@@ -35,6 +35,15 @@ concurrency:
   group: e2e-install
   cancel-in-progress: false
 
+env:
+  # Catalog apps that provably CANNOT install on GitHub-hosted (Server-based) runner images —
+  # never product bugs. Each entry MUST reference an issue. The install passes tolerate exit 1
+  # only because Assert-Install.ps1 verifies that NOTHING outside this list failed.
+  #   - Dell.CommandUpdate.Universal: its Microsoft.DotNet.DesktopRuntime.8 dependency has no
+  #     installer applicable to the Server image (0x8A150104) — issue #217, which also proposes
+  #     manufacturer-aware catalog gating as the real fix that would retire this entry.
+  KNOWN_PLATFORM_INCOMPATIBLE: 'Dell.CommandUpdate.Universal'
+
 jobs:
   e2e-install:
     runs-on: windows-latest
@@ -60,11 +69,19 @@ jobs:
             & pwsh -NoProfile -Command 'irm https://raw.githubusercontent.com/J-MaFf/winget-app-setup/main/winget-app-install.ps1 | iex'
           }
           $exitCode = $LASTEXITCODE
-          if ($exitCode -ne 0) {
+          if ($exitCode -eq 0) {
+            Write-Host 'First install pass exited 0.' -ForegroundColor Green
+          }
+          elseif ($exitCode -eq 1 -and $env:KNOWN_PLATFORM_INCOMPATIBLE) {
+            # Exit 1 = 'some apps failed'. Tolerated ONLY pending the assertion step's
+            # containment check that nothing outside KNOWN_PLATFORM_INCOMPATIBLE failed.
+            Write-Host "First install pass exited 1 (some apps failed) - tolerated pending containment check against known platform-incompatible apps: $env:KNOWN_PLATFORM_INCOMPATIBLE" -ForegroundColor Yellow
+          }
+          else {
+            # 2 = winget unavailable, 3 = validation failed, or anything unexpected: hard fail.
             Write-Host "First install pass FAILED with exit code $exitCode" -ForegroundColor Red
             exit $exitCode
           }
-          Write-Host 'First install pass exited 0.' -ForegroundColor Green
 
       - name: Second install pass (idempotence leg)
         shell: pwsh
@@ -81,11 +98,18 @@ jobs:
             & pwsh -NoProfile -Command 'irm https://raw.githubusercontent.com/J-MaFf/winget-app-setup/main/winget-app-install.ps1 | iex'
           }
           $exitCode = $LASTEXITCODE
-          if ($exitCode -ne 0) {
+          if ($exitCode -eq 0) {
+            Write-Host 'Second install pass exited 0.' -ForegroundColor Green
+          }
+          elseif ($exitCode -eq 1 -and $env:KNOWN_PLATFORM_INCOMPATIBLE) {
+            # Known-incompatible apps are still missing on the second pass, so the installer
+            # retries and fails them again - same containment rule as the first pass.
+            Write-Host "Second install pass exited 1 (some apps failed) - tolerated pending containment check against known platform-incompatible apps: $env:KNOWN_PLATFORM_INCOMPATIBLE" -ForegroundColor Yellow
+          }
+          else {
             Write-Host "Second install pass FAILED with exit code $exitCode" -ForegroundColor Red
             exit $exitCode
           }
-          Write-Host 'Second install pass exited 0.' -ForegroundColor Green
 
       - name: Run assertions (e2e/Assert-Install.ps1, shared with tier 2)
         shell: pwsh
@@ -95,8 +119,10 @@ jobs:
           # WAU version matches Get-WauPin, a transcript with the 'Installer build' stamp
           # exists under %ProgramData%, and (idempotence) the latest transcript shows every
           # app Skipped. -SkipApps is the documented escape hatch for runner-platform
-          # incompatibilities ONLY - each use must reference a GitHub issue here.
-          & pwsh -NoProfile -ExecutionPolicy Bypass -File ./e2e/Assert-Install.ps1 -ExpectAllSkippedOnSecondRun
+          # incompatibilities ONLY - each entry is justified at the KNOWN_PLATFORM_INCOMPATIBLE
+          # definition at the top of this file (currently: issue #217). The script also asserts
+          # CONTAINMENT: no app outside the skip list failed in either install pass.
+          & pwsh -NoProfile -ExecutionPolicy Bypass -File ./e2e/Assert-Install.ps1 -ExpectAllSkippedOnSecondRun -SkipApps "$env:KNOWN_PLATFORM_INCOMPATIBLE"
           exit $LASTEXITCODE
 
       - name: Upload install transcripts
