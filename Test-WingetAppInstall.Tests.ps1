@@ -923,7 +923,7 @@ Describe 'SkipSystemCheck elevation forwarding (issue #185)' {
     Context 'Generated installer entry point' {
         It 'Should forward -SkipSystemCheck from the entry script into Invoke-WingetInstall' {
             $installer = Get-Content "$PSScriptRoot\winget-app-install.ps1" -Raw
-            $installer | Should -Match 'Invoke-WingetInstall -WhatIf:\$WhatIf -SkipSystemCheck:\$SkipSystemCheck'
+            $installer | Should -Match 'Invoke-WingetInstall -WhatIf:\$WhatIf -NonInteractive:\$NonInteractive -SkipSystemCheck:\$SkipSystemCheck'
         }
     }
 }
