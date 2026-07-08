@@ -898,6 +898,62 @@ Describe 'Restart-WithElevation' {
             $FilePath -eq 'pwsh.exe' -and (($ArgumentList -join ' ') -notmatch '-WhatIf')
         }
     }
+
+    It 'Should forward multiple AdditionalArguments to the elevated relaunch' {
+        Mock Get-Command { return $null } -ParameterFilter { $Name -eq 'wt.exe' }
+        Mock Start-Process { } -ParameterFilter { $FilePath -eq 'pwsh.exe' }
+
+        Restart-WithElevation -PowerShellExecutable 'pwsh.exe' -ScriptPath 'C:\script.ps1' -AdditionalArguments @('-WhatIf', '-SkipSystemCheck')
+
+        Assert-MockCalled Start-Process -Times 1 -ParameterFilter {
+            $FilePath -eq 'pwsh.exe' -and (($ArgumentList -join ' ') -match '-File "C:\\script\.ps1" -WhatIf -SkipSystemCheck')
+        }
+    }
+}
+
+Describe 'SkipSystemCheck elevation forwarding (issue #185)' {
+    Context 'Invoke-WingetInstall parameter surface' {
+        It 'Should accept a SkipSystemCheck switch parameter' {
+            $command = Get-Command Invoke-WingetInstall
+            $command.Parameters.ContainsKey('SkipSystemCheck') | Should -Be $true
+            $command.Parameters['SkipSystemCheck'].ParameterType.Name | Should -Be 'SwitchParameter'
+        }
+    }
+
+    Context 'Generated installer entry point' {
+        It 'Should forward -SkipSystemCheck from the entry script into Invoke-WingetInstall' {
+            $installer = Get-Content "$PSScriptRoot\winget-app-install.ps1" -Raw
+            $installer | Should -Match 'Invoke-WingetInstall -WhatIf:\$WhatIf -NonInteractive:\$NonInteractive -SkipSystemCheck:\$SkipSystemCheck'
+        }
+    }
+}
+
+Describe 'Test-InvokedFromModuleContext' {
+    It 'Should return true when the invocation carries module info' {
+        $fakeModule = New-Module -Name 'FakeWingetAppSetup' -ScriptBlock { }
+
+        Test-InvokedFromModuleContext -InvocationModule $fakeModule -CommandPath 'C:\repo\winget-app-install.ps1' | Should -Be $true
+    }
+
+    It 'Should return true when the command path is the module Install.ps1 (Windows separators)' {
+        Test-InvokedFromModuleContext -CommandPath 'C:\repo\WingetAppSetup\Public\Install.ps1' | Should -Be $true
+    }
+
+    It 'Should return true when the command path is the module Install.ps1 (forward slashes)' {
+        Test-InvokedFromModuleContext -CommandPath '/home/user/repo/WingetAppSetup/Public/Install.ps1' | Should -Be $true
+    }
+
+    It 'Should return false for the generated single-file installer path' {
+        Test-InvokedFromModuleContext -CommandPath 'C:\repo\winget-app-install.ps1' | Should -Be $false
+    }
+
+    It 'Should return false for an installer that merely lives under a WingetAppSetup directory' {
+        Test-InvokedFromModuleContext -CommandPath 'C:\Users\admin\WingetAppSetup\winget-app-install.ps1' | Should -Be $false
+    }
+
+    It 'Should return false when the command path is empty' {
+        Test-InvokedFromModuleContext -CommandPath '' | Should -Be $false
+    }
 }
 
 Describe 'Test-CanUseGridView' {

@@ -11,5 +11,7 @@ if ($MyInvocation.InvocationName -ne '.') {
         }
     }
 
-    Invoke-WingetInstall -WhatIf:$WhatIf -NonInteractive:$NonInteractive
+    # Forward -SkipSystemCheck so an elevated relaunch inherits the caller's intent to bypass the
+    # pre-flight checks (issue #185); the checks themselves already ran (or were skipped) above.
+    Invoke-WingetInstall -WhatIf:$WhatIf -NonInteractive:$NonInteractive -SkipSystemCheck:$SkipSystemCheck
 }

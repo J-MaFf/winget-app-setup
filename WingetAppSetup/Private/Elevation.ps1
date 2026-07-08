@@ -62,6 +62,42 @@ function Get-InteractiveSessionUserName {
 
 <#
 .SYNOPSIS
+    Detects whether Invoke-WingetInstall is executing from the WingetAppSetup module rather than
+    the generated single-file installer.
+.DESCRIPTION
+    Auto-elevation relaunches $PSCommandPath. When Invoke-WingetInstall comes from the imported
+    module, $PSCommandPath resolves to WingetAppSetup/Public/Install.ps1 — a functions-only file —
+    so the elevated window would define a function and exit without installing anything
+    (issue #185). Callers use this check to fail fast with guidance instead of silently
+    relaunching a no-op.
+.PARAMETER InvocationModule
+    The caller's $MyInvocation.MyCommand.Module. Non-null when the function was invoked from an
+    imported module.
+.PARAMETER CommandPath
+    The caller's $PSCommandPath. Matched against the module layout to also catch a dot-sourced
+    WingetAppSetup/Public/Install.ps1, where the module info is null but the defining file is
+    still functions-only.
+.RETURNS
+    [bool] True when running from module context (relaunching $PSCommandPath would be a no-op).
+#>
+function Test-InvokedFromModuleContext {
+    param (
+        [Parameter(Mandatory = $false)]
+        [System.Management.Automation.PSModuleInfo]$InvocationModule,
+
+        [Parameter(Mandatory = $false)]
+        [string]$CommandPath
+    )
+
+    if ($null -ne $InvocationModule) {
+        return $true
+    }
+
+    return [bool]($CommandPath -match '[\\/]WingetAppSetup[\\/]Public[\\/]Install\.ps1$')
+}
+
+<#
+.SYNOPSIS
     Relaunches the script with elevated privileges, preferring Windows Terminal when available.
 .DESCRIPTION
     Attempts to restart the current script in an elevated session. When Windows Terminal is installed,
