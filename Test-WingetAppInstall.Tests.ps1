@@ -1435,6 +1435,15 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
             $installBody = (Get-Command Invoke-WingetInstall).Definition
             $installBody | Should -Match 'if \(\$failedApps\.Count -gt 0\) \{\s*Exit 1\s*\}'
         }
+
+        It 'Tracks failures as objects with reasons and renders the failed-apps summary (issue #189)' {
+            $installBody = (Get-Command Invoke-WingetInstall).Definition
+            $installBody | Should -Match 'Format-InstallFailureReason'
+            $installBody | Should -Match 'Write-FailedAppsSummary'
+            $installBody | Should -Match '\$failedApps \+= @\{ Name ='
+            # The generic message the diagnostic detail replaces (issue #189).
+            $installBody | Should -Not -Match 'No package found matching input criteria'
+        }
     }
 
     Context 'Dry run (executes the real orchestrator end-to-end without system changes)' {
@@ -1488,6 +1497,34 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
             $installedRow = @($script:capturedRows | Where-Object { $_[0] -eq 'Installed' })[0]
             $installedRow[1] | Should -Match '7zip\.7zip'
             @($script:capturedRows | Where-Object { $_[0] -eq 'Failed' }).Count | Should -Be 0
+        }
+
+        It 'Surfaces the winget exit code, attempts, and scope fallback in the failure message (issue #189)' -Skip:(-not $script:wiringIsElevated) {
+            $script:sevenZipAttempts = 0
+            Mock Install-AppWithVerification {
+                if ($App.name -eq '7zip.7zip') {
+                    $script:sevenZipAttempts++
+                    if ($script:sevenZipAttempts -eq 1) {
+                        return @{
+                            Status        = 'Failed'
+                            InstallResult = @{ ExitCode = -2147009255; Attempts = 3; SessionErrorExhausted = $false; MachineScopeFellBack = $true }
+                            FailureReason = 'VerifyNotFound'
+                        }
+                    }
+                    return @{ Status = 'Installed'; InstallResult = @{ ExitCode = 0 }; FailureReason = $null }
+                }
+                @{ Status = 'Skipped'; InstallResult = $null; FailureReason = $null }
+            }
+            $script:errorMessages = @()
+            Mock Write-ErrorMessage { $script:errorMessages += $Message }
+
+            Invoke-WingetInstall -NonInteractive
+
+            $failureMessage = @($script:errorMessages | Where-Object { $_ -match 'Failed to install' })[0]
+            $failureMessage | Should -Match '7zip\.7zip'
+            $failureMessage | Should -Match 'winget exit 0x80073D19'
+            $failureMessage | Should -Match '3 attempts'
+            $failureMessage | Should -Match 'machine-scope fallback: yes'
         }
     }
 }
@@ -1922,6 +1959,93 @@ Describe 'Install-AppWithVerification (shared install-and-verify pipeline, issue
     }
 }
 
+Describe 'Format-InstallFailureReason (issue #189)' {
+    Context 'With the full Install-WingetPackage result shape' {
+        It 'Includes the hex exit code, attempt count, and machine-scope fallback' {
+            $installResult = @{ ExitCode = -2147009255; Attempts = 3; SessionErrorExhausted = $false; MachineScopeFellBack = $true }
+
+            $reason = Format-InstallFailureReason -FailureReason 'VerifyNotFound' -InstallResult $installResult
+
+            $reason | Should -Be 'package not found after install; winget exit 0x80073D19, 3 attempts, machine-scope fallback: yes'
+        }
+
+        It 'Uses singular wording for a single attempt' {
+            $installResult = @{ ExitCode = -1978335212; Attempts = 1; SessionErrorExhausted = $false; MachineScopeFellBack = $false }
+
+            $reason = Format-InstallFailureReason -FailureReason 'VerifyNotFound' -InstallResult $installResult
+
+            $reason | Should -Be 'package not found after install; winget exit 0x8A150014, 1 attempt, machine-scope fallback: no'
+        }
+
+        It 'Calls out exhausted 0x80073D19 session retries' {
+            $installResult = @{ ExitCode = -2147009255; Attempts = 3; SessionErrorExhausted = $true; MachineScopeFellBack = $false }
+
+            $reason = Format-InstallFailureReason -FailureReason 'VerifyNotFound' -InstallResult $installResult
+
+            $reason | Should -Match 'winget exit 0x80073D19'
+            $reason | Should -Match 'session error 0x80073D19 persisted through every retry'
+        }
+    }
+
+    Context 'With a custom installer result shape (ExitCode/Installed only)' {
+        It 'Formats the exit code without inventing attempts or fallback detail' {
+            $reason = Format-InstallFailureReason -FailureReason 'CustomInstallFailed' -InstallResult @{ ExitCode = 1603; Installed = $false }
+
+            $reason | Should -Be 'installer reported failure; winget exit 0x00000643'
+        }
+    }
+
+    Context 'With no install result (timeouts, exceptions)' {
+        It 'Maps PreCheckTimeout to the pre-install check wording' {
+            Format-InstallFailureReason -FailureReason 'PreCheckTimeout' -InstallResult $null |
+                Should -Be 'winget list timed out during the pre-install check'
+        }
+
+        It 'Maps VerifyTimeout to the verification wording' {
+            Format-InstallFailureReason -FailureReason 'VerifyTimeout' -InstallResult $null |
+                Should -Be 'post-install verification timed out'
+        }
+
+        It 'Falls back to a generic reason for unknown failure kinds' {
+            Format-InstallFailureReason -FailureReason $null -InstallResult $null | Should -Be 'install failed'
+        }
+    }
+}
+
+Describe 'Write-FailedAppsSummary (issue #189)' {
+    BeforeEach {
+        Mock Write-Host { }
+        $script:failedSummaryCalls = @()
+        Mock Write-Table { $script:failedSummaryCalls += , @{ Headers = $Headers; Rows = $Rows; Title = $Title } }
+    }
+
+    It 'Renders one row per failed app with a Reason column' {
+        $failed = @(
+            @{ Name = '7zip.7zip'; Reason = 'package not found after install; winget exit 0x80073D19, 3 attempts, machine-scope fallback: no' },
+            @{ Name = 'Google.Chrome'; Reason = 'post-install verification timed out' }
+        )
+
+        Write-FailedAppsSummary -FailedApps $failed
+
+        $script:failedSummaryCalls.Count | Should -Be 1
+        $call = $script:failedSummaryCalls[0]
+        $call.Headers | Should -Be @('App', 'Reason')
+        $call.Title | Should -Be 'Failed Installations'
+        $call.Rows.Count | Should -Be 2
+        $call.Rows[0][0] | Should -Be '7zip.7zip'
+        $call.Rows[0][1] | Should -Match '0x80073D19'
+        $call.Rows[1][0] | Should -Be 'Google.Chrome'
+        $call.Rows[1][1] | Should -Be 'post-install verification timed out'
+    }
+
+    It 'Renders nothing when no apps failed' {
+        Write-FailedAppsSummary -FailedApps @()
+        Write-FailedAppsSummary -FailedApps $null
+
+        Assert-MockCalled Write-Table -Times 0 -Exactly
+    }
+}
+
 Describe 'Invoke-WingetSourceProbe' {
     BeforeEach {
         Mock Write-Host { }
@@ -2271,6 +2395,57 @@ Describe 'App list consistency' {
         Where-Object { $_ }
 
         $installApps | Should -Be $uninstallApps
+    }
+}
+
+Describe 'Generated installer: build stamp and transcript wiring (issue #189)' {
+    BeforeAll {
+        $script:generatedInstaller = Get-Content -Raw -Encoding UTF8 -Path (Join-Path $PSScriptRoot 'winget-app-install.ps1')
+    }
+
+    It 'Stamps a content-derived $script:InstallerBuildId matching the module version' {
+        $moduleVersion = (Import-PowerShellDataFile -Path (Join-Path $script:WingetAppSetupRoot 'WingetAppSetup.psd1')).ModuleVersion
+        $expectedPattern = [regex]::Escape("`$script:InstallerBuildId = '$moduleVersion+") + '[0-9a-f]{8}'''
+
+        $script:generatedInstaller | Should -Match $expectedPattern
+    }
+
+    It 'Wraps the dispatch in a transcript under ProgramData that never blocks the install' {
+        $script:generatedInstaller | Should -Match 'Start-Transcript'
+        $script:generatedInstaller | Should -Match 'Stop-Transcript'
+        $script:generatedInstaller | Should -Match ([regex]::Escape("Join-Path `$env:ProgramData 'winget-app-setup\logs'"))
+        $script:generatedInstaller | Should -Match ([regex]::Escape("'install-{0:yyyyMMdd-HHmmss}{1}.log'"))
+        # Dry runs get a distinguishing suffix; transcript failures downgrade to a warning.
+        $script:generatedInstaller | Should -Match ([regex]::Escape("if (`$WhatIf) { '-whatif' } else { '' }"))
+        $script:generatedInstaller | Should -Match 'Transcript logging could not be started'
+    }
+
+    It 'Logs the log path and the build id at startup' {
+        $script:generatedInstaller | Should -Match ([regex]::Escape('Write-Info "Logging this run to: $script:InstallLogPath"'))
+        $script:generatedInstaller | Should -Match ([regex]::Escape('Write-Info "Installer build: $script:InstallerBuildId"'))
+    }
+}
+
+Describe 'Build determinism (issue #189)' {
+    BeforeAll {
+        $script:buildScriptPath = Join-Path $PSScriptRoot 'build/Build-WingetInstallScript.ps1'
+        $script:currentPowerShell = (Get-Process -Id $PID).Path
+    }
+
+    It 'Produces byte-identical output when the same tree is built twice' {
+        # The build id must derive from CONTENT only (module version + functions hash) — anything
+        # time- or git-based would make every rebuild differ and permanently break the CI -Check
+        # byte-compare. Verified the way CI would notice: build twice, compare bytes.
+        $firstOutput = Join-Path $TestDrive 'installer-build-one.ps1'
+        $secondOutput = Join-Path $TestDrive 'installer-build-two.ps1'
+
+        & $script:currentPowerShell -NoProfile -File $script:buildScriptPath -OutputPath $firstOutput | Out-Null
+        $LASTEXITCODE | Should -Be 0
+        & $script:currentPowerShell -NoProfile -File $script:buildScriptPath -OutputPath $secondOutput | Out-Null
+        $LASTEXITCODE | Should -Be 0
+
+        (Get-FileHash -Path $firstOutput -Algorithm SHA256).Hash |
+            Should -Be (Get-FileHash -Path $secondOutput -Algorithm SHA256).Hash
     }
 }
 

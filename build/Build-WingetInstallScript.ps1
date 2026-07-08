@@ -7,7 +7,8 @@
     which need a single self-contained script. This build concatenates, in order:
 
         1. build/fragments/head.ps1   - PSScriptInfo, comment-based help, and the param() block
-        2. an auto-generated banner   - warns against hand-editing the output
+        2. an auto-generated banner   - warns against hand-editing the output and stamps the
+                                        content-derived $script:InstallerBuildId (issue #189)
         3. WingetAppSetup/Private/*.ps1 then WingetAppSetup/Public/*.ps1 - every function, verbatim
         4. build/fragments/tail.ps1   - the `if ($MyInvocation.InvocationName -ne '.')` dispatch block
 
@@ -93,25 +94,13 @@ elseif (-not [System.IO.Path]::IsPathRooted($OutputPath)) {
     $OutputPath = Join-Path (Get-Location).ProviderPath $OutputPath
 }
 
-$banner = @'
-
-# ------------------------------------------------------------------------------------------------
-# GENERATED FILE - DO NOT EDIT BY HAND.
-# This script is assembled from the WingetAppSetup module by build/Build-WingetInstallScript.ps1.
-# Edit the function source under WingetAppSetup/Public and WingetAppSetup/Private, then re-run the
-# build to regenerate this file. See readme.md ("Project layout") for details.
-# ------------------------------------------------------------------------------------------------
-'@
-
 $builder = [System.Text.StringBuilder]::new()
 
 # 1. Header (PSScriptInfo + help + param)
 [void]$builder.AppendLine((Get-Content -Path (Join-Path $fragmentsRoot 'head.ps1') -Raw -Encoding UTF8).TrimEnd())
 
-# 2. Generated banner
-[void]$builder.AppendLine($banner)
-
-# 3. Function bodies: Private first, then Public, each glob ordered for stable output.
+# 3. Function bodies (assembled before the banner because the build id below is derived from
+#    them): Private first, then Public, each glob ordered for stable output.
 #    Sort-Object compares linguistically, which varies across locales and ICU/NLS versions, so pin
 #    the concatenation order with an ordinal (byte-wise) comparison that is identical everywhere.
 $ordinalByName = [System.Comparison[object]] { param($a, $b) [System.StringComparer]::Ordinal.Compare($a.Name, $b.Name) }
@@ -121,15 +110,58 @@ $publicFiles = @(Get-ChildItem -Path (Join-Path $moduleRoot 'Public') -Filter '*
 [Array]::Sort($publicFiles, $ordinalByName)
 $functionFiles = $privateFiles + $publicFiles
 
-[void]$builder.AppendLine('')
-[void]$builder.AppendLine('# ------------------------------------------------Functions------------------------------------------------')
-[void]$builder.AppendLine('')
+$functionsBuilder = [System.Text.StringBuilder]::new()
+[void]$functionsBuilder.AppendLine('')
+[void]$functionsBuilder.AppendLine('# ------------------------------------------------Functions------------------------------------------------')
+[void]$functionsBuilder.AppendLine('')
 
 foreach ($file in $functionFiles) {
-    [void]$builder.AppendLine("# --- $($file.BaseName) ---")
-    [void]$builder.AppendLine((Get-Content -Path $file.FullName -Raw -Encoding UTF8).TrimEnd())
-    [void]$builder.AppendLine('')
+    [void]$functionsBuilder.AppendLine("# --- $($file.BaseName) ---")
+    [void]$functionsBuilder.AppendLine((Get-Content -Path $file.FullName -Raw -Encoding UTF8).TrimEnd())
+    [void]$functionsBuilder.AppendLine('')
 }
+
+# Normalize to LF before hashing so the id is identical regardless of the checkout's line endings
+# or the build platform (the final output gets the same normalization below).
+$functionsSection = ($functionsBuilder.ToString() -replace "`r`n", "`n")
+
+# 2. Generated banner, stamped with a content-derived build id (issue #189):
+#    <module version from the psd1>+<first 8 hex chars of the SHA256 of the functions section>.
+#    Deterministic on purpose: rebuilding the same tree MUST produce a byte-identical installer or
+#    the -Check verification in CI would always fail. Do NOT switch this to git describe, a commit
+#    SHA, or a timestamp - those change without the content changing (or vice versa) and would
+#    break the byte-compare. The tail logs the id at startup so a transcript from a remote machine
+#    identifies exactly which installer build produced it.
+$manifestPath = Join-Path $moduleRoot 'WingetAppSetup.psd1'
+$manifest = Import-PowerShellDataFile -Path $manifestPath
+$sha256 = [System.Security.Cryptography.SHA256]::Create()
+try {
+    $functionsHash = $sha256.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($functionsSection))
+}
+finally {
+    $sha256.Dispose()
+}
+$hashFragment = [System.BitConverter]::ToString($functionsHash, 0, 4).Replace('-', '').ToLowerInvariant()
+$buildId = '{0}+{1}' -f $manifest.ModuleVersion, $hashFragment
+
+$banner = @'
+
+# ------------------------------------------------------------------------------------------------
+# GENERATED FILE - DO NOT EDIT BY HAND.
+# This script is assembled from the WingetAppSetup module by build/Build-WingetInstallScript.ps1.
+# Edit the function source under WingetAppSetup/Public and WingetAppSetup/Private, then re-run the
+# build to regenerate this file. See readme.md ("Project layout") for details.
+# Build id: {{BUILD_ID}} (module version + SHA256 fragment of the function content; issue #189).
+# ------------------------------------------------------------------------------------------------
+
+# Content-derived build identity, logged at startup so a transcript from a remote machine
+# identifies exactly which installer build produced it (issue #189).
+$script:InstallerBuildId = '{{BUILD_ID}}'
+'@
+$banner = $banner.Replace('{{BUILD_ID}}', $buildId)
+
+[void]$builder.AppendLine($banner)
+[void]$builder.Append($functionsSection)
 
 # 4. Tail (entry-point dispatch)
 [void]$builder.AppendLine('# ------------------------------------------------Main Script------------------------------------------------')
@@ -161,8 +193,7 @@ if ($parseErrors -and $parseErrors.Count -gt 0) {
 # missing from that list is silently filtered at import time while Pester (which dot-sources the
 # files) stays green. Assert the psd1 list EXACTLY equals the set of functions defined under
 # WingetAppSetup/Public/*.ps1 so the mismatch fails the build (and -Check) instead.
-$manifestPath = Join-Path $moduleRoot 'WingetAppSetup.psd1'
-$declaredExports = @((Import-PowerShellDataFile -Path $manifestPath).FunctionsToExport)
+$declaredExports = @($manifest.FunctionsToExport)
 $publicFunctionNames = @(foreach ($file in $publicFiles) {
         $fileAst = [System.Management.Automation.Language.Parser]::ParseFile($file.FullName, [ref]$null, [ref]$null)
         $fileAst.FindAll({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $false) |
