@@ -393,15 +393,75 @@ function Install-WingetPackage {
 
 <#
 .SYNOPSIS
-    Returns true when winget reports the given package id as installed for the current account.
+    Returns whether winget reports the given package id as installed for the current account.
+.DESCRIPTION
+    Without -TimeoutSeconds the check calls winget inline and returns a plain [bool], keeping the
+    original contract for existing callers (e.g. Install-PowerShellLatest).
+
+    With -TimeoutSeconds the check runs `winget list` via Start-Process with redirected output and
+    a hard timeout, killing a hung winget instead of blocking the install loop — the pattern
+    Invoke-WingetInstall used to inline three times before issue #188 centralized it here. Temp
+    file names are unique per run so concurrent checks (or a stale locked file left by a killed
+    run) cannot collide on fixed names (issue #177). In this mode a hashtable is returned so the
+    caller can tell a timeout apart from "not installed": a timeout must count as a failure rather
+    than being silently dropped (issue #176).
 .PARAMETER PackageId
     The winget package id to check.
+.PARAMETER TimeoutSeconds
+    Maximum seconds to wait for `winget list` before killing it. When omitted (or 0), the original
+    inline call without a timeout guard is used and a [bool] is returned.
+.RETURNS
+    [bool] when -TimeoutSeconds is not supplied.
+    [hashtable] @{ Installed = <bool>; TimedOut = <bool>; ExitCode = <int or $null> } when it is;
+    ExitCode is the winget process exit code, or $null when the process timed out or failed to
+    start.
 #>
 function Test-WingetPackageInstalled {
     param (
         [Parameter(Mandatory = $true)]
-        [string]$PackageId
+        [string]$PackageId,
+
+        [Parameter(Mandatory = $false)]
+        [int]$TimeoutSeconds = 0
     )
+
+    if ($TimeoutSeconds -gt 0) {
+        # Unique per-run temp files (issue #177): fixed names made concurrent runs (or a stale
+        # locked file from a killed run) fail Start-Process.
+        $tempSuffix = [System.IO.Path]::GetRandomFileName()
+        $stdoutFile = Join-Path $env:TEMP "winget_list_output_$tempSuffix.txt"
+        $stderrFile = Join-Path $env:TEMP "winget_list_error_$tempSuffix.txt"
+
+        try {
+            $listProcess = Start-Process -FilePath 'winget' `
+                -ArgumentList 'list', '--exact', '--id', $PackageId, '--accept-source-agreements', '--disable-interactivity' `
+                -NoNewWindow `
+                -PassThru `
+                -RedirectStandardOutput $stdoutFile `
+                -RedirectStandardError $stderrFile
+
+            if (-not $listProcess.WaitForExit($TimeoutSeconds * 1000)) {
+                try { $listProcess.Kill() } catch { }
+                return @{ Installed = $false; TimedOut = $true; ExitCode = $null }
+            }
+
+            # Capture the exit code from the process object immediately; the output files are
+            # only read after a confirmed non-timeout exit.
+            $output = @(Get-Content $stdoutFile -ErrorAction SilentlyContinue)
+            return @{
+                Installed = ([String]::Join('', $output)).Contains($PackageId)
+                TimedOut  = $false
+                ExitCode  = $listProcess.ExitCode
+            }
+        }
+        catch {
+            return @{ Installed = $false; TimedOut = $false; ExitCode = $null }
+        }
+        finally {
+            Remove-Item $stdoutFile -ErrorAction SilentlyContinue
+            Remove-Item $stderrFile -ErrorAction SilentlyContinue
+        }
+    }
 
     try {
         $output = winget list --exact --id $PackageId --accept-source-agreements --disable-interactivity 2>&1

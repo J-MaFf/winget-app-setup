@@ -143,3 +143,48 @@ function Convert-JsoncToJson {
 
     return $sanitized.ToString()
 }
+
+<#
+.SYNOPSIS
+    Attempts to parse Windows Terminal settings content, including JSONC variants.
+.DESCRIPTION
+    Tries ConvertFrom-Json first (PowerShell 7+ tolerates JSONC natively). If parsing
+    fails — Windows PowerShell 5.1 rejects comments and trailing commas — sanitizes the
+    text with the string-aware Convert-JsoncToJson scanner and retries. The previous
+    regex sanitizer missed trailing inline // comments and could corrupt string values
+    containing comment-like sequences (issue #187).
+
+    Private (issue #191): only the module's Windows Terminal configuration functions call
+    this; no standalone script consumes it.
+.PARAMETER JsonText
+    Raw settings content.
+.RETURNS
+    Parsed settings object when successful; otherwise $null.
+#>
+function ConvertFrom-TerminalSettingsJson {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$JsonText
+    )
+
+    if ([string]::IsNullOrWhiteSpace($JsonText)) {
+        return [pscustomobject]@{}
+    }
+
+    try {
+        # ConvertFrom-Json -Depth is unavailable in Windows PowerShell 5.1.
+        return $JsonText | ConvertFrom-Json
+    }
+    catch {
+        # Windows Terminal settings are often JSONC; strip comments and trailing commas.
+        $sanitizedJson = Convert-JsoncToJson -JsonText $JsonText
+
+        try {
+            # Keep parsing compatible with both Windows PowerShell and PowerShell 7+.
+            return $sanitizedJson | ConvertFrom-Json
+        }
+        catch {
+            return $null
+        }
+    }
+}

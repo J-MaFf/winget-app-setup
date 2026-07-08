@@ -663,6 +663,39 @@ Describe 'msstore-era source-trust helpers removed (issue #177)' {
     }
 }
 
+Describe 'Module export surface (issue #191)' {
+    # The psd1 FunctionsToExport list is the single export authority; the psm1 reads it and the
+    # build asserts it matches Public/*.ps1. These tests pin the reconciled surface.
+    It 'No longer defines the dead ConvertTo-CommandArguments helper' {
+        # Remnant of the removed homegrown updater; it had no production callers.
+        Test-Path Function:\ConvertTo-CommandArguments | Should -Be $false
+    }
+
+    It 'No longer exports module-internal helpers moved to Private/' {
+        $manifest = Import-PowerShellDataFile (Join-Path $PSScriptRoot 'WingetAppSetup/WingetAppSetup.psd1')
+        $manifest.FunctionsToExport | Should -Not -Contain 'Write-Prompt'
+        $manifest.FunctionsToExport | Should -Not -Contain 'ConvertFrom-TerminalSettingsJson'
+    }
+
+    It 'Still exports the logging helpers consumed by winget-app-uninstall.ps1' {
+        $manifest = Import-PowerShellDataFile (Join-Path $PSScriptRoot 'WingetAppSetup/WingetAppSetup.psd1')
+        foreach ($helper in @('Write-Info', 'Write-Success', 'Write-WarningMessage', 'Write-ErrorMessage', 'Format-AppList', 'Write-Table')) {
+            $manifest.FunctionsToExport | Should -Contain $helper
+        }
+    }
+
+    It 'FunctionsToExport exactly matches the functions defined under Public/*.ps1' {
+        # Cross-platform mirror of the Build-WingetInstallScript.ps1 export assertion.
+        $manifest = Import-PowerShellDataFile (Join-Path $PSScriptRoot 'WingetAppSetup/WingetAppSetup.psd1')
+        $publicFunctionNames = Get-ChildItem -Path (Join-Path $PSScriptRoot 'WingetAppSetup/Public') -Filter '*.ps1' | ForEach-Object {
+            $ast = [System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$null, [ref]$null)
+            $ast.FindAll({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $false) |
+                ForEach-Object { $_.Name }
+        }
+        ($manifest.FunctionsToExport | Sort-Object) | Should -Be ($publicFunctionNames | Sort-Object)
+    }
+}
+
 Describe 'Add-ToEnvironmentPath' {
     BeforeAll {
         Mock Write-Host { }
@@ -808,31 +841,6 @@ Describe 'Test-PathListContainsEntry' {
 
     It 'Should not treat empty entries from doubled semicolons as a match' {
         Test-PathListContainsEntry -PathList 'C:\Foo;;C:\Bar' -PathToCheck 'C:\Test' | Should -Be $false
-    }
-}
-
-Describe 'ConvertTo-CommandArguments' {
-    BeforeAll {
-    }
-
-    It 'Should parse simple command without quotes' {
-        $result = ConvertTo-CommandArguments -Command 'winget install --id test'
-        $result | Should -Be @('winget', 'install', '--id', 'test')
-    }
-
-    It 'Should handle quoted arguments' {
-        $result = ConvertTo-CommandArguments -Command 'winget install --id "test app"'
-        $result | Should -Be @('winget', 'install', '--id', 'test app')
-    }
-
-    It 'Should handle single quotes' {
-        $result = ConvertTo-CommandArguments -Command "winget install --id 'test app'"
-        $result | Should -Be @('winget', 'install', '--id', 'test app')
-    }
-
-    It 'Should handle multiple quoted arguments' {
-        $result = ConvertTo-CommandArguments -Command 'winget install --id "test app" --source "winget store"'
-        $result | Should -Be @('winget', 'install', '--id', 'test app', '--source', 'winget store')
     }
 }
 
@@ -1319,129 +1327,11 @@ Describe 'Main Script Logic' {
     # The msstore-era 'Source verification' loop (Test-WingetSourceTrusted/Set-Sources) was removed
     # in issue #177: source health is verified and repaired by Test-WingetSources before this point.
 
-    Context 'App installation loop' {
-        It 'Should install app when not already installed' {
-            $apps = @(@{name = 'Test.App' })
-            $installedApps = @()
-            $skippedApps = @()
-
-            $script:installAttempted = $false
-
-            # Mock winget list to return empty initially, then the app after install
-            Mock winget {
-                if ($script:installAttempted) {
-                    'Test.App'
-                }
-                else {
-                    ''
-                }
-            } -ParameterFilter { $args -contains 'list' -and $args -contains 'Test.App' }
-
-            Mock Start-Process {
-                $script:installAttempted = $true
-            }
-
-            foreach ($app in $apps) {
-                $listApp = winget list --exact -q $app.name
-                if (![String]::Join('', $listApp).Contains($app.name)) {
-                    Start-Process winget -ArgumentList "install -e --accept-source-agreements --accept-package-agreements --id $($app.name)" -NoNewWindow -Wait
-                    $installResult = winget list --exact -q $app.name
-                    if (![String]::Join('', $installResult).Contains($app.name)) {
-                        $failedApps += $app.name
-                    }
-                    else {
-                        $installedApps += $app.name
-                    }
-                }
-                else {
-                    $skippedApps += $app.name
-                }
-            }
-
-            $installedApps | Should -Contain 'Test.App'
-            $skippedApps | Should -Not -Contain 'Test.App'
-            $failedApps | Should -Not -Contain 'Test.App'
-        }
-
-        It 'Should include --source winget flag in install command' {
-            $apps = @(@{name = 'Test.App' })
-            $installedApps = @()
-
-            Mock winget { '' } -ParameterFilter { $args -contains 'list' }
-            Mock Start-Process { }
-
-            foreach ($app in $apps) {
-                $listApp = winget list --exact -q $app.name
-                if (![String]::Join('', $listApp).Contains($app.name)) {
-                    Start-Process winget -ArgumentList "install -e --accept-source-agreements --accept-package-agreements --source winget --id $($app.name)" -NoNewWindow -Wait
-                    $installedApps += 'Test.App'
-                }
-            }
-
-            Assert-MockCalled Start-Process -Times 1 -ParameterFilter { $ArgumentList -match '--source winget' }
-        }
-
-        It 'Should skip app when already installed' {
-            $apps = @(@{name = 'Test.App' })
-            $installedApps = @()
-            $skippedApps = @()
-
-            # Mock winget list to return the app (already installed)
-            Mock winget { 'Test.App' } -ParameterFilter { $args -contains 'list' }
-
-            foreach ($app in $apps) {
-                $listApp = winget list --exact -q $app.name
-                if (![String]::Join('', $listApp).Contains($app.name)) {
-                    # Install logic would go here
-                    $installedApps += $app.name
-                }
-                else {
-                    $skippedApps += $app.name
-                }
-            }
-
-            $installedApps | Should -Not -Contain 'Test.App'
-            $skippedApps | Should -Contain 'Test.App'
-        }
-
-        It 'Should handle installation failure' {
-            $apps = @(@{name = 'Test.App' })
-            $installedApps = @()
-            $skippedApps = @()
-            $failedApps = @()
-
-            # Mock winget list to return empty (app not installed)
-            Mock winget { '' } -ParameterFilter { $args -contains 'list' -and $args -notcontains 'install' }
-            # Mock winget list after install to still return empty (failed install)
-            Mock winget { '' } -ParameterFilter { $args -contains 'list' -and $args -contains 'Test.App' -and $args -notcontains 'install' }
-            Mock Start-Process { }
-
-            foreach ($app in $apps) {
-                try {
-                    $listApp = winget list --exact -q $app.name
-                    if (![String]::Join('', $listApp).Contains($app.name)) {
-                        Start-Process winget -ArgumentList "install -e --accept-source-agreements --accept-package-agreements --id $($app.name)" -NoNewWindow -Wait
-                        $installResult = winget list --exact -q $app.name
-                        if (![String]::Join('', $installResult).Contains($app.name)) {
-                            $failedApps += $app.name
-                        }
-                        else {
-                            $installedApps += $app.name
-                        }
-                    }
-                    else {
-                        $skippedApps += $app.name
-                    }
-                }
-                catch {
-                    $failedApps += $app.name
-                }
-            }
-
-            $failedApps | Should -Contain 'Test.App'
-            $installedApps | Should -Not -Contain 'Test.App'
-        }
-    }
+    # The 'App installation loop' context was removed in issue #188: it re-inlined an obsolete
+    # copy of the install loop (single-string ArgumentList, no --scope machine) instead of
+    # exercising the real code. The behavior it guarded is now covered for real by the
+    # 'Install-AppWithVerification' and 'Invoke-WingetInstall wiring' Describes below, and the
+    # --source winget flag assertion lives in the 'Install-WingetPackage' Describe.
 
     Context 'Summary table generation' {
         It 'Should format summary table with install, skip, and fail results' {
@@ -1489,115 +1379,115 @@ Describe 'Main Script Logic' {
     }
 }
 
-Describe 'Retry Failed Installations' {
-    BeforeAll {
-        Mock Write-Host { }
-        Mock Start-Process { }
+# The 'Retry Failed Installations' Describe was removed in issue #188: it simulated the retry
+# loop with an obsolete re-inlined copy (single-string ArgumentList, no --scope machine) instead
+# of exercising the real code. The retry semantics it guarded (success moves to installed,
+# failure stays failed, mixed results, no-op when nothing failed, non-zero exit signalling) are
+# now covered by the 'Install-AppWithVerification' Describe (per-app success/failure states) and
+# the 'Invoke-WingetInstall wiring (issue #188)' Describe below.
+Describe 'Invoke-WingetInstall wiring (issue #188)' {
+    BeforeDiscovery {
+        # Elevation state must be known at discovery time for -Skip to work: values assigned in
+        # run-phase BeforeAll blocks are not visible to -Skip expressions.
+        $script:wiringIsElevated = $false
+        if ([System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Win32NT) {
+            $script:wiringIsElevated = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
+                [Security.Principal.WindowsBuiltInRole]::Administrator
+            )
+        }
     }
 
-    Context 'Retry logic - array management' {
-        It 'Should retry failed apps and move successful retries to installed list' {
-            $failedApps = @('Test.App')
-            $installedApps = @()
+    BeforeEach {
+        Mock Write-Host { }
+        Mock Pause { }
+        Mock Start-Process { }
+        Mock Restart-WithElevation { 'PowerShell' }
+        Mock Test-IsRunningLocally { $true }
+        Mock Test-AndInstallWingetModule { $true }
+        Mock Import-Module { }
+        Mock Test-AndInstallWinget { $true }
+        Mock Initialize-WingetSourcesForUser { $true }
+        Mock Test-AndInstallGraphicalTools { $true }
+        Mock Test-WingetSources { $true }
+        Mock Remove-LegacyScheduledUpdates { $true }
+        Mock Set-WindowsTerminalDefaults { }
+        Mock Install-WingetAutoUpdate { @{ Status = 'DryRun'; Version = '2.12.0' } }
+        Mock Install-AppWithVerification { @{ Status = 'Installed'; InstallResult = $null; FailureReason = $null } }
 
-            $script:retryAttempted = $false
-            Mock Start-Process { $script:retryAttempted = $true }
+        $script:capturedRows = $null
+        Mock Write-Table { $script:capturedRows = $Rows }
+    }
 
-            $appsToRetry = $failedApps
-            $failedApps = @()
-
-            foreach ($appName in $appsToRetry) {
-                Start-Process winget -ArgumentList "install -e --accept-source-agreements --accept-package-agreements --source winget --id $appName" -NoNewWindow -Wait
-                # Simulate verification returning the app (success)
-                $retryResult = $appName
-                if (![String]::Join('', $retryResult).Contains($appName)) {
-                    $failedApps += $appName
-                }
-                else {
-                    $installedApps += $appName
-                }
-            }
-
-            $script:retryAttempted | Should -Be $true
-            $installedApps | Should -Contain 'Test.App'
-            $failedApps | Should -Not -Contain 'Test.App'
+    Context 'Structure: the shared helper replaced the inline verify blocks' {
+        It 'Routes both the first pass and the retry pass through Install-AppWithVerification' {
+            $installBody = (Get-Command Invoke-WingetInstall).Definition
+            ([regex]::Matches($installBody, 'Install-AppWithVerification')).Count | Should -Be 2
         }
 
-        It 'Should keep app in failed list when retry also fails' {
-            $failedApps = @('Test.App')
-            $installedApps = @()
-
-            Mock Start-Process { }
-
-            $appsToRetry = $failedApps
-            $failedApps = @()
-
-            foreach ($appName in $appsToRetry) {
-                Start-Process winget -ArgumentList "install -e --accept-source-agreements --accept-package-agreements --source winget --id $appName" -NoNewWindow -Wait
-                # Simulate verification returning nothing (failure)
-                $retryResult = ''
-                if (![String]::Join('', $retryResult).Contains($appName)) {
-                    $failedApps += $appName
-                }
-                else {
-                    $installedApps += $appName
-                }
-            }
-
-            $failedApps | Should -Contain 'Test.App'
-            $installedApps | Should -Not -Contain 'Test.App'
+        It 'No longer inlines Start-Process winget list verification blocks' {
+            $installBody = (Get-Command Invoke-WingetInstall).Definition
+            $installBody | Should -Not -Match 'RedirectStandardOutput'
+            $installBody | Should -Not -Match 'WaitForExit'
+            $installBody | Should -Not -Match 'winget_(list|verify|retry_verify)_'
         }
 
-        It 'Should not retry when there are no failed apps' {
-            $failedApps = @()
-            $installedApps = @()
+        It 'Still exits 1 when apps remain failed after the retry pass (issue #176)' {
+            $installBody = (Get-Command Invoke-WingetInstall).Definition
+            $installBody | Should -Match 'if \(\$failedApps\.Count -gt 0\) \{\s*Exit 1\s*\}'
+        }
+    }
 
-            Mock Start-Process { }
-
-            if ($failedApps.Count -gt 0) {
-                $appsToRetry = $failedApps
-                $failedApps = @()
-                foreach ($appName in $appsToRetry) {
-                    Start-Process winget -ArgumentList "install -e --accept-source-agreements --accept-package-agreements --source winget --id $appName" -NoNewWindow -Wait
+    Context 'Dry run (executes the real orchestrator end-to-end without system changes)' {
+        It 'Drives every curated app through the helper with -WhatIf and buckets the results' {
+            $script:verifiedApps = @()
+            Mock Install-AppWithVerification {
+                $script:verifiedApps += $App.name
+                if ($App.name -eq 'Google.Chrome') {
+                    return @{ Status = 'Skipped'; InstallResult = $null; FailureReason = $null }
                 }
+                @{ Status = 'Installed'; InstallResult = $null; FailureReason = $null }
             }
 
-            Assert-MockCalled Start-Process -Times 0
-            $failedApps.Count | Should -Be 0
+            Invoke-WingetInstall -WhatIf -NonInteractive
+
+            # One helper call per app in the curated list (10 today — update alongside the list),
+            # every one of them in dry-run mode, and no second (retry) round.
+            $script:verifiedApps.Count | Should -Be 10
+            $script:verifiedApps | Should -Contain '7zip.7zip'
+            $script:verifiedApps | Should -Contain 'Microsoft.WindowsTerminal'
+            Assert-MockCalled Install-AppWithVerification -Times 10 -Exactly -ParameterFilter { [bool]$WhatIf }
+
+            # Bucket routing: Skipped and Installed land in their own summary rows, nothing Failed.
+            $installedRow = @($script:capturedRows | Where-Object { $_[0] -eq 'Installed' })[0]
+            $skippedRow = @($script:capturedRows | Where-Object { $_[0] -eq 'Skipped' })[0]
+            $installedRow[1] | Should -Match '7zip\.7zip'
+            $installedRow[1] | Should -Not -Match 'Google\.Chrome'
+            $skippedRow[1] | Should -Match 'Google\.Chrome'
+            @($script:capturedRows | Where-Object { $_[0] -eq 'Failed' }).Count | Should -Be 0
         }
+    }
 
-        It 'Should handle mixed retry results across multiple failed apps' {
-            $failedApps = @('App.Recovers', 'App.StillFails')
-            $installedApps = @()
-
-            Mock Start-Process { }
-
-            $appsToRetry = $failedApps
-            $failedApps = @()
-
-            foreach ($appName in $appsToRetry) {
-                Start-Process winget -ArgumentList "install -e --accept-source-agreements --accept-package-agreements --source winget --id $appName" -NoNewWindow -Wait
-                # Simulate verification: App.Recovers succeeds, App.StillFails does not
-                $retryResult = if ($appName -eq 'App.Recovers') { $appName } else { '' }
-                if (![String]::Join('', $retryResult).Contains($appName)) {
-                    $failedApps += $appName
+    Context 'Retry pass (needs elevation: the non-dry-run path performs the real admin gate)' {
+        It 'Sends a first-pass failure back through the helper and buckets a recovered app as installed' -Skip:(-not $script:wiringIsElevated) {
+            $script:sevenZipCalls = 0
+            Mock Install-AppWithVerification {
+                if ($App.name -eq '7zip.7zip') {
+                    $script:sevenZipCalls++
+                    if ($script:sevenZipCalls -eq 1) {
+                        return @{ Status = 'Failed'; InstallResult = @{ ExitCode = 1 }; FailureReason = 'VerifyNotFound' }
+                    }
+                    return @{ Status = 'Installed'; InstallResult = @{ ExitCode = 0 }; FailureReason = $null }
                 }
-                else {
-                    $installedApps += $appName
-                }
+                @{ Status = 'Skipped'; InstallResult = $null; FailureReason = $null }
             }
 
-            $installedApps | Should -Contain 'App.Recovers'
-            $failedApps | Should -Contain 'App.StillFails'
-            $failedApps | Should -Not -Contain 'App.Recovers'
-        }
+            Invoke-WingetInstall -NonInteractive
 
-        It 'Should signal non-zero exit when apps still fail after retry' {
-            $failedApps = @('App.StillFails')
-
-            $exitCode = if ($failedApps.Count -gt 0) { 1 } else { 0 }
-
-            $exitCode | Should -Be 1
+            # First pass failed 7zip, the retry pass re-drove it through the helper and recovered.
+            $script:sevenZipCalls | Should -Be 2
+            $installedRow = @($script:capturedRows | Where-Object { $_[0] -eq 'Installed' })[0]
+            $installedRow[1] | Should -Match '7zip\.7zip'
+            @($script:capturedRows | Where-Object { $_[0] -eq 'Failed' }).Count | Should -Be 0
         }
     }
 }
@@ -1743,6 +1633,291 @@ Describe 'Install-WingetPackage (0x80073d19 session-error backoff)' {
 
         Assert-MockCalled Start-Process -Times 1 -Exactly -ParameterFilter {
             $ArgumentList -notcontains '--installer-type'
+        }
+    }
+
+    It 'Installs from the winget source with both agreement-acceptance flags (issue #172)' {
+        $script:exitCodeQueue = @(0)
+
+        Install-WingetPackage -PackageId 'Test.App' -MaxAttempts 1 | Out-Null
+
+        Assert-MockCalled Start-Process -Times 1 -Exactly -ParameterFilter {
+            (($ArgumentList -join ' ') -match '--source winget') -and
+            ($ArgumentList -contains '--accept-source-agreements') -and
+            ($ArgumentList -contains '--accept-package-agreements')
+        }
+    }
+}
+
+Describe 'Test-WingetPackageInstalled (timeout support, issue #188)' {
+    BeforeEach {
+        Mock Write-Host { }
+        Mock Remove-Item { }
+    }
+
+    Context 'Without -TimeoutSeconds (backward-compatible inline call)' {
+        It 'Returns $true when winget lists the package' {
+            Mock winget { "Name    Id       Version`n7-Zip   Test.App 24.09" }
+
+            $result = Test-WingetPackageInstalled -PackageId 'Test.App'
+
+            $result | Should -BeOfType [bool]
+            $result | Should -Be $true
+        }
+
+        It 'Returns $false when winget does not list the package' {
+            Mock winget { 'No installed package found matching input criteria.' }
+
+            Test-WingetPackageInstalled -PackageId 'Test.App' | Should -Be $false
+        }
+
+        It 'Returns $false when winget throws' {
+            Mock winget { throw 'winget not found' }
+
+            Test-WingetPackageInstalled -PackageId 'Test.App' | Should -Be $false
+        }
+    }
+
+    Context 'With -TimeoutSeconds (Start-Process guard, the pattern Invoke-WingetInstall inlined pre-#188)' {
+        It 'Reports installed with the process exit code when the id appears in the output' {
+            Mock Start-Process {
+                $p = [pscustomobject]@{ ExitCode = 0 }
+                $p | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value { param($ms) $true }
+                $p | Add-Member -MemberType ScriptMethod -Name Kill -Value { }
+                $p
+            }
+            Mock Get-Content { 'Test.App  1.2.3  winget' }
+
+            $result = Test-WingetPackageInstalled -PackageId 'Test.App' -TimeoutSeconds 15
+
+            $result.Installed | Should -Be $true
+            $result.TimedOut | Should -Be $false
+            $result.ExitCode | Should -Be 0
+            Assert-MockCalled Start-Process -Times 1 -Exactly -ParameterFilter {
+                ($ArgumentList -contains 'list') -and
+                ($ArgumentList -contains '--exact') -and
+                ($ArgumentList -contains '--id') -and
+                ($ArgumentList -contains 'Test.App') -and
+                ($ArgumentList -contains '--accept-source-agreements')
+            }
+        }
+
+        It 'Reports not-installed when the output does not mention the id' {
+            Mock Start-Process {
+                $p = [pscustomobject]@{ ExitCode = -1978335212 }
+                $p | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value { param($ms) $true }
+                $p | Add-Member -MemberType ScriptMethod -Name Kill -Value { }
+                $p
+            }
+            Mock Get-Content { 'No installed package found matching input criteria.' }
+
+            $result = Test-WingetPackageInstalled -PackageId 'Test.App' -TimeoutSeconds 15
+
+            $result.Installed | Should -Be $false
+            $result.TimedOut | Should -Be $false
+            $result.ExitCode | Should -Be -1978335212
+        }
+
+        It 'Kills a hung winget list and reports the timeout distinctly from not-installed (issue #176)' {
+            $script:listKillCalled = $false
+            Mock Start-Process {
+                $p = [pscustomobject]@{ ExitCode = 0 }
+                $p | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value { param($ms) $false }
+                $p | Add-Member -MemberType ScriptMethod -Name Kill -Value { Set-Variable -Name listKillCalled -Value $true -Scope script }
+                $p
+            }
+            Mock Get-Content { throw 'output must not be read after a timeout' }
+
+            $result = Test-WingetPackageInstalled -PackageId 'Test.App' -TimeoutSeconds 1
+
+            $result.Installed | Should -Be $false
+            $result.TimedOut | Should -Be $true
+            $result.ExitCode | Should -Be $null
+            $script:listKillCalled | Should -Be $true
+        }
+
+        It 'Reports a failure without throwing when winget cannot start' {
+            Mock Start-Process { throw 'winget not found' }
+
+            $result = Test-WingetPackageInstalled -PackageId 'Test.App' -TimeoutSeconds 15
+
+            $result.Installed | Should -Be $false
+            $result.TimedOut | Should -Be $false
+            $result.ExitCode | Should -Be $null
+        }
+
+        It 'Uses unique temp file names on every run and cleans them up (issue #177)' {
+            $script:listRedirectPaths = @()
+            Mock Start-Process {
+                $script:listRedirectPaths += @($RedirectStandardOutput, $RedirectStandardError)
+                $p = [pscustomobject]@{ ExitCode = 0 }
+                $p | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value { param($ms) $true }
+                $p | Add-Member -MemberType ScriptMethod -Name Kill -Value { }
+                $p
+            }
+            Mock Get-Content { '' }
+
+            [void](Test-WingetPackageInstalled -PackageId 'Test.App' -TimeoutSeconds 15)
+            [void](Test-WingetPackageInstalled -PackageId 'Test.App' -TimeoutSeconds 15)
+
+            $script:listRedirectPaths.Count | Should -Be 4
+            # stdout and stderr differ within one run, and neither repeats across runs.
+            ($script:listRedirectPaths | Select-Object -Unique).Count | Should -Be 4
+            # Both temp files are removed after each of the two runs.
+            Assert-MockCalled Remove-Item -Times 4 -Exactly
+        }
+    }
+}
+
+Describe 'Install-AppWithVerification (shared install-and-verify pipeline, issue #188)' {
+    BeforeEach {
+        Mock Write-Host { }
+
+        # Boundary mocks with safe defaults; individual tests override what they exercise.
+        Mock Install-WingetPackage { @{ ExitCode = 0; Attempts = 1; SessionErrorExhausted = $false; MachineScopeFellBack = $false } }
+        Mock Test-WingetPackageInstalled { @{ Installed = $false; TimedOut = $false; ExitCode = 0 } }
+    }
+
+    It 'Skips an app that is already installed without dispatching an install' {
+        Mock Test-WingetPackageInstalled { @{ Installed = $true; TimedOut = $false; ExitCode = 0 } }
+
+        $result = Install-AppWithVerification -App @{ name = 'Test.App' }
+
+        $result.Status | Should -Be 'Skipped'
+        $result.InstallResult | Should -Be $null
+        $result.FailureReason | Should -Be $null
+        Assert-MockCalled Install-WingetPackage -Times 0 -Exactly
+        Assert-MockCalled Test-WingetPackageInstalled -Times 1 -Exactly
+    }
+
+    It 'Installs a missing app and reports Installed when the post-verify finds it' {
+        $script:checkCount = 0
+        Mock Test-WingetPackageInstalled {
+            $script:checkCount++
+            if ($script:checkCount -eq 1) {
+                return @{ Installed = $false; TimedOut = $false; ExitCode = 0 }
+            }
+            @{ Installed = $true; TimedOut = $false; ExitCode = 0 }
+        }
+
+        $result = Install-AppWithVerification -App @{ name = 'Test.App' }
+
+        $result.Status | Should -Be 'Installed'
+        $result.FailureReason | Should -Be $null
+        # The Install-WingetPackage result comes back intact so exit codes can be surfaced (#189).
+        $result.InstallResult.ExitCode | Should -Be 0
+        $result.InstallResult.Attempts | Should -Be 1
+        Assert-MockCalled Install-WingetPackage -Times 1 -Exactly -ParameterFilter { $PackageId -eq 'Test.App' }
+        # Pre-check and post-verify both run under the 15-second timeout guard.
+        Assert-MockCalled Test-WingetPackageInstalled -Times 2 -Exactly -ParameterFilter { $TimeoutSeconds -eq 15 }
+    }
+
+    It 'Forwards the app''s installerType override to Install-WingetPackage' {
+        [void](Install-AppWithVerification -App @{ name = 'Test.App'; installerType = 'wix' })
+
+        Assert-MockCalled Install-WingetPackage -Times 1 -Exactly -ParameterFilter { $InstallerType -eq 'wix' }
+    }
+
+    It 'Reports Failed with the install result intact when the install ran but verification cannot find the app' {
+        Mock Install-WingetPackage { @{ ExitCode = 0; Attempts = 2; SessionErrorExhausted = $false; MachineScopeFellBack = $true } }
+        # Default Test-WingetPackageInstalled mock: not installed before or after.
+
+        $result = Install-AppWithVerification -App @{ name = 'Test.App' }
+
+        $result.Status | Should -Be 'Failed'
+        $result.FailureReason | Should -Be 'VerifyNotFound'
+        $result.InstallResult.ExitCode | Should -Be 0
+        $result.InstallResult.Attempts | Should -Be 2
+        $result.InstallResult.MachineScopeFellBack | Should -Be $true
+    }
+
+    It 'Marks a pre-check timeout as Failed without attempting the install (issue #176)' {
+        Mock Test-WingetPackageInstalled { @{ Installed = $false; TimedOut = $true; ExitCode = $null } }
+
+        $result = Install-AppWithVerification -App @{ name = 'Test.App' }
+
+        $result.Status | Should -Be 'Failed'
+        $result.FailureReason | Should -Be 'PreCheckTimeout'
+        $result.InstallResult | Should -Be $null
+        Assert-MockCalled Install-WingetPackage -Times 0 -Exactly
+    }
+
+    It 'Marks a verification timeout as Failed and keeps the install result (issue #176)' {
+        $script:checkCount = 0
+        Mock Test-WingetPackageInstalled {
+            $script:checkCount++
+            if ($script:checkCount -eq 1) {
+                return @{ Installed = $false; TimedOut = $false; ExitCode = 0 }
+            }
+            @{ Installed = $false; TimedOut = $true; ExitCode = $null }
+        }
+
+        $result = Install-AppWithVerification -App @{ name = 'Test.App' }
+
+        $result.Status | Should -Be 'Failed'
+        $result.FailureReason | Should -Be 'VerifyTimeout'
+        $result.InstallResult.ExitCode | Should -Be 0
+        Assert-MockCalled Install-WingetPackage -Times 1 -Exactly
+    }
+
+    Context 'Package-specific installers ($app.install dispatch)' {
+        It 'Dispatches to the named self-verifying installer instead of Install-WingetPackage' {
+            function Install-FakePowerShell { @{ ExitCode = 0; Installed = $true; Method = 'msi' } }
+
+            $result = Install-AppWithVerification -App @{ name = 'Microsoft.PowerShell'; install = 'Install-FakePowerShell' }
+
+            $result.Status | Should -Be 'Installed'
+            $result.FailureReason | Should -Be $null
+            # The custom installer's result is passed through intact (ExitCode/Method for #189).
+            $result.InstallResult.Method | Should -Be 'msi'
+            $result.InstallResult.ExitCode | Should -Be 0
+            Assert-MockCalled Install-WingetPackage -Times 0 -Exactly
+            # Only the pre-check runs: the custom installer self-verifies (a DISM-provisioned
+            # PowerShell never shows up under `winget list` for the elevating account).
+            Assert-MockCalled Test-WingetPackageInstalled -Times 1 -Exactly
+        }
+
+        It 'Trusts a self-verifying installer''s failure result and reports CustomInstallFailed' {
+            $app = @{ name = 'Microsoft.PowerShell'; install = { @{ ExitCode = -1; Installed = $false; Method = 'msix-provisioned' } } }
+
+            $result = Install-AppWithVerification -App $app
+
+            $result.Status | Should -Be 'Failed'
+            $result.FailureReason | Should -Be 'CustomInstallFailed'
+            $result.InstallResult.ExitCode | Should -Be -1
+            Assert-MockCalled Install-WingetPackage -Times 0 -Exactly
+        }
+    }
+
+    Context 'Dry run (-WhatIf)' {
+        It 'Reports a missing app as would-install without dispatching anything' {
+            $result = Install-AppWithVerification -App @{ name = 'Test.App' } -WhatIf
+
+            $result.Status | Should -Be 'Installed'
+            $result.InstallResult | Should -Be $null
+            $result.FailureReason | Should -Be $null
+            Assert-MockCalled Install-WingetPackage -Times 0 -Exactly
+        }
+
+        It 'Still reports an already-installed app as Skipped' {
+            Mock Test-WingetPackageInstalled { @{ Installed = $true; TimedOut = $false; ExitCode = 0 } }
+
+            (Install-AppWithVerification -App @{ name = 'Test.App' } -WhatIf).Status | Should -Be 'Skipped'
+        }
+
+        It 'Still counts a hung pre-check as Failed in a dry run (issue #176)' {
+            Mock Test-WingetPackageInstalled { @{ Installed = $false; TimedOut = $true; ExitCode = $null } }
+
+            $result = Install-AppWithVerification -App @{ name = 'Test.App' } -WhatIf
+
+            $result.Status | Should -Be 'Failed'
+            $result.FailureReason | Should -Be 'PreCheckTimeout'
+        }
+
+        It 'Never invokes a package-specific installer in a dry run' {
+            $result = Install-AppWithVerification -App @{ name = 'Microsoft.PowerShell'; install = { throw 'must not run in a dry run' } } -WhatIf
+
+            $result.Status | Should -Be 'Installed'
         }
     }
 }
@@ -2613,59 +2788,10 @@ Describe 'WhatIf Mode - Unit Tests' {
     # Install.ps1 trusted-sources loop it simulated (Test-WingetSourceTrusted/Set-Sources);
     # the 'WhatIf logic for PATH updates' context was removed in issue #179 with the PATH block.
 
-    Context 'WhatIf logic for app installation' {
-        It 'Should skip Start-Process when WhatIf is true' {
-            Mock Start-Process { }
-            Mock Write-Info { }
-            Mock Write-Success { }
-
-            # Simulate the code path
-            $WhatIf = $true
-            $app = @{ name = 'Test.App' }
-            $installedApps = @()
-
-            if (-not $WhatIf) {
-                Write-Info "Installing: $($app.name)"
-                Start-Process winget -ArgumentList "install -e --accept-source-agreements --accept-package-agreements --id $($app.name)" -NoNewWindow -Wait
-                Write-Success "Successfully installed: $($app.name)"
-                $installedApps += $app.name
-            }
-            else {
-                Write-Info "[DRY-RUN] Would install: $($app.name)"
-                $installedApps += $app.name
-            }
-
-            Assert-MockCalled Start-Process -Times 0
-            Assert-MockCalled Write-Info -Times 1 -ParameterFilter { $Message -match 'DRY-RUN' }
-            $installedApps | Should -Contain 'Test.App'
-        }
-
-        It 'Should call Start-Process when WhatIf is false' {
-            Mock Start-Process { }
-            Mock Write-Info { }
-            Mock Write-Success { }
-
-            # Simulate the code path
-            $WhatIf = $false
-            $app = @{ name = 'Test.App' }
-            $installedApps = @()
-
-            if (-not $WhatIf) {
-                Write-Info "Installing: $($app.name)"
-                Start-Process winget -ArgumentList "install -e --accept-source-agreements --accept-package-agreements --id $($app.name)" -NoNewWindow -Wait
-                Write-Success "Successfully installed: $($app.name)"
-                $installedApps += $app.name
-            }
-            else {
-                Write-Info "[DRY-RUN] Would install: $($app.name)"
-                $installedApps += $app.name
-            }
-
-            Assert-MockCalled Start-Process -Times 1
-            Assert-MockCalled Write-Info -Times 1 -ParameterFilter { $Message -notmatch 'DRY-RUN' }
-            $installedApps | Should -Contain 'Test.App'
-        }
-    }
+    # The 'WhatIf logic for app installation' context was removed in issue #188: it simulated the
+    # dry-run branch with a re-inlined obsolete copy of the install loop. The dry-run behavior is
+    # now tested for real against Install-AppWithVerification ('dry run (-WhatIf)' context) and
+    # against the whole orchestrator in 'Invoke-WingetInstall wiring (issue #188)'.
 }
 
 Describe 'IEX non-admin execution behavior' {
