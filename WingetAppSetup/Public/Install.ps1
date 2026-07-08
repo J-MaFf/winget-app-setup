@@ -112,20 +112,10 @@ function Invoke-WingetInstall {
     # ongoing updates are now handled by Winget-AutoUpdate, set up after the app installs (issue #168).
     [void](Remove-LegacyScheduledUpdates -WhatIf:$WhatIf)
 
-    # Add the script directory to the PATH (only if running locally)
-    # Use $PSScriptRoot for reliable script directory detection (works with launcher)
-    if (Test-IsRunningLocally) {
-        $scriptDirectory = $PSScriptRoot
-        if (-not $WhatIf) {
-            Add-ToEnvironmentPath -PathToAdd $scriptDirectory -Scope 'User'
-        }
-        else {
-            Write-Info "[DRY-RUN] Would add '$scriptDirectory' to User PATH"
-        }
-    }
-    else {
-        Write-Info 'Skipping PATH update (remote execution detected)'
-    }
+    # Note: earlier versions added the script's own directory (often Downloads/) to the persistent
+    # User PATH here for the homegrown updater. The updater is gone (#168) and a user-writable
+    # directory on the PATH of an elevating account is a hijack surface, so no PATH changes are
+    # made anymore (issue #179).
 
     $apps = @(
         @{name = '7zip.7zip' },
