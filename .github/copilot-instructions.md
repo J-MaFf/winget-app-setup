@@ -5,7 +5,7 @@
 ## Repo-Critical Rules
 
 - `WingetAppSetup/` (module) is the source of truth. **Never hand-edit `winget-app-install.ps1`** — it is generated. After changing the module or `build/fragments/`, regenerate with `pwsh -File ./build/Build-WingetInstallScript.ps1` and commit both.
-- Run the Pester suite before pushing: `Invoke-Pester ./Test-WingetAppInstall.Tests.ps1`.
+- Run the Pester suite before pushing: `Invoke-Pester ./tests`.
 - Always capture `$LASTEXITCODE` immediately after a winget call.
 
 ## Commit Messages (Conventional Commits)

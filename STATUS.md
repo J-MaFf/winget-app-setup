@@ -101,7 +101,7 @@ Pester installs persist across runs there ([#161](https://github.com/J-MaFf/wing
 | `build/fragments/` | `head.ps1` (PSScriptInfo, help, `param`) and `tail.ps1` (entry-point dispatch) |
 | `winget-app-install.ps1` | **Generated** single-file installer for local and `irm \| iex` use — do not edit by hand |
 | `winget-app-uninstall.ps1` | Uninstall helper; imports the module from the repo |
-| `Test-WingetAppInstall.Tests.ps1` | Pester suite; loads the module once |
+| `tests/` | Pester suite, one `<Area>.Tests.ps1` per module file plus `EntryPoint.Tests.ps1`; `TestHelpers.ps1` loads the module once per file |
 | `Test-WindowsTerminalConfiguration.ps1` | Smoke-test validation for the Windows Terminal default-shell configuration. |
 | `readme.md` | Quick-start run instructions (clone-and-run and one-line-run). |
 | `CHANGELOG.md` | Keep a Changelog history. |
@@ -170,5 +170,5 @@ Filed by the 2026-07-08 whole-repo multi-agent code review:
   Set-ExecutionPolicy Unrestricted -Scope Process -Force
   ```
 - Run the installer: `powershell -ExecutionPolicy Unrestricted -File .\winget-app-install.ps1`.
-- Run tests: `Invoke-Pester ./Test-WingetAppInstall.Tests.ps1`.
+- Run tests: `Invoke-Pester ./tests`.
 - Regenerate the installer after editing the module: `pwsh -File ./build/Build-WingetInstallScript.ps1`.
