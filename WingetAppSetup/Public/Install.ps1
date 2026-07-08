@@ -325,8 +325,9 @@ function Invoke-WingetInstall {
     Set-WindowsTerminalDefaults -WhatIf:$WhatIf
 
     # Set up ongoing automatic updates via Winget-AutoUpdate (issue #168). Best-effort: a failure
-    # here warns but does not fail the install.
-    [void](Install-WingetAutoUpdate -WhatIf:$WhatIf)
+    # here warns but does not fail the install; the outcome is captured and surfaced next to the
+    # final summary instead of being a scrolled-past warning (issue #186).
+    $wauResult = Install-WingetAutoUpdate -WhatIf:$WhatIf
 
     # Retry any failed installations once before producing the final summary
     if ($failedApps.Count -gt 0) {
@@ -432,6 +433,23 @@ function Invoke-WingetInstall {
     }
 
     Write-Table -Headers $headers -Rows $rows -PromptForGridView (-not $effectiveNonInteractive) -Title 'Installation Summary'
+
+    # Surface the auto-update outcome with the summary so a machine that finished without an update
+    # mechanism is visible at the end of the run (issue #186). Deliberately does not affect the exit
+    # code: the documented 0/1/2/3 contract stays scoped to app installs and winget availability.
+    switch ($wauResult.Status) {
+        'Configured' { Write-Success "Auto-updates: Configured (Winget-AutoUpdate v$($wauResult.Version))." }
+        'AlreadyPresent' {
+            if ($wauResult.Version) {
+                Write-Success "Auto-updates: Already present (v$($wauResult.Version))."
+            }
+            else {
+                Write-WarningMessage 'Auto-updates: Already present (installed version could not be determined).'
+            }
+        }
+        'DryRun' { Write-Info "[DRY-RUN] Auto-updates: Would configure Winget-AutoUpdate v$($wauResult.Version)." }
+        default { Write-ErrorMessage 'Auto-updates: FAILED - Winget-AutoUpdate could not be installed; apps will not update automatically. Re-run the installer to retry.' }
+    }
 
     # Keep the console window open until the user presses a key. Skipped in non-interactive mode
     # so unattended runs never block (and the failure exit below stays reachable).

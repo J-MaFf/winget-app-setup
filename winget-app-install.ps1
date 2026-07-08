@@ -513,6 +513,120 @@ function Test-AndInstallGraphicalTools {
     return $false
 }
 
+# --- WauSupport ---
+<#
+.SYNOPSIS
+    Reads the installed Winget-AutoUpdate (WAU) version and MSI ProductCode from the registry.
+.DESCRIPTION
+    The MSI Uninstall entry (HKLM Uninstall key whose DisplayName matches Winget-AutoUpdate) is
+    authoritative for both the installed DisplayVersion and the ProductCode (the key's name); the
+    WOW6432Node hive is scanned too in case a WAU build registered 32-bit. WAU's own configuration
+    key (HKLM:\SOFTWARE\Romanitho\Winget-AutoUpdate) serves as a version fallback when the uninstall
+    entry is missing or unparsable. Callers use the version to decide whether the pinned MSI should
+    upgrade an older install, and the ProductCode to uninstall whatever WAU version is actually
+    present instead of only the pinned one (issue #186).
+.RETURNS
+    [pscustomobject] with:
+      - Version:     [version] of the installed WAU, or $null when it cannot be determined.
+      - ProductCode: '{GUID}' of the installed WAU MSI, or $null when no uninstall entry matches.
+#>
+function Get-InstalledWauInfo {
+    $version = $null
+    $productCode = $null
+
+    $uninstallRoots = @(
+        'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall',
+        'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall'
+    )
+    foreach ($root in $uninstallRoots) {
+        if ($productCode) { break }
+        if (-not (Test-Path $root)) { continue }
+        foreach ($key in @(Get-ChildItem -Path $root -ErrorAction SilentlyContinue)) {
+            $entry = Get-ItemProperty -Path $key.PSPath -ErrorAction SilentlyContinue
+            if (-not $entry -or $entry.DisplayName -notlike 'Winget-AutoUpdate*') { continue }
+            if ($key.PSChildName -match '^\{[0-9A-Fa-f\-]+\}$') {
+                $productCode = $key.PSChildName
+            }
+            $parsedVersion = $null
+            if ($entry.DisplayVersion -and [version]::TryParse(([string]$entry.DisplayVersion -replace '^[vV]', ''), [ref]$parsedVersion)) {
+                $version = $parsedVersion
+            }
+            break
+        }
+    }
+
+    if (-not $version) {
+        $wauKey = 'HKLM:\SOFTWARE\Romanitho\Winget-AutoUpdate'
+        if (Test-Path $wauKey) {
+            $entry = Get-ItemProperty -Path $wauKey -ErrorAction SilentlyContinue
+            foreach ($candidate in @($entry.DisplayVersion, $entry.ProductVersion)) {
+                $parsedVersion = $null
+                if ($candidate -and [version]::TryParse(([string]$candidate -replace '^[vV]', ''), [ref]$parsedVersion)) {
+                    $version = $parsedVersion
+                    break
+                }
+            }
+        }
+    }
+
+    return [pscustomobject]@{
+        Version     = $version
+        ProductCode = $productCode
+    }
+}
+
+<#
+.SYNOPSIS
+    Locks a directory down to SYSTEM and Administrators (full control, inheritance removed).
+.DESCRIPTION
+    Used to protect the WAU MSI staging directory so a same-user non-elevated process cannot swap
+    the file between hash verification and msiexec (TOCTOU, issue #186). Grants use well-known SIDs
+    (S-1-5-18 = SYSTEM, S-1-5-32-544 = Administrators) instead of account names so the ACL applies
+    on non-English Windows. Throws when icacls reports failure — callers must treat the directory
+    as unsafe to use.
+.PARAMETER Path
+    The directory whose ACL should be replaced.
+#>
+function Set-RestrictedDirectoryAcl {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    # /inheritance:r strips inherited ACEs; the (OI)(CI)F grants leave SYSTEM and the local
+    # Administrators group as the only principals, inherited by everything created inside.
+    $icaclsArgs = "`"$Path`" /inheritance:r /grant *S-1-5-18:(OI)(CI)F *S-1-5-32-544:(OI)(CI)F"
+    $proc = Start-Process -FilePath 'icacls.exe' -ArgumentList $icaclsArgs -Wait -PassThru -NoNewWindow
+    if ($proc.ExitCode -ne 0) {
+        throw "icacls failed to restrict '$Path' (exit code $($proc.ExitCode))."
+    }
+}
+
+<#
+.SYNOPSIS
+    Creates a fresh, ACL-restricted staging directory for the WAU MSI download.
+.DESCRIPTION
+    %TEMP% is user-writable and the previous fixed path (%TEMP%\WAU-<version>.msi) was predictable,
+    so a non-elevated process running as the same user could swap the MSI between Get-FileHash and
+    msiexec (issue #186). The staging directory lives under %ProgramData%\winget-app-setup, is
+    uniquely named per run, and is locked to SYSTEM + Administrators BEFORE anything is downloaded
+    into it. The base directory is restricted first so an unprivileged process cannot observe the
+    per-run name or delete-and-recreate the staging directory through rights on the parent. Throws
+    when the directory cannot be created or secured. Callers own cleanup (Remove-Item -Recurse).
+.RETURNS
+    [string] The full path of the created staging directory.
+#>
+function New-WauStagingDirectory {
+    $baseDir = Join-Path $env:ProgramData 'winget-app-setup'
+    $null = New-Item -Path $baseDir -ItemType Directory -Force -ErrorAction Stop
+    Set-RestrictedDirectoryAcl -Path $baseDir
+
+    $stagingDir = Join-Path $baseDir ('wau-msi-' + [guid]::NewGuid().ToString('N'))
+    $null = New-Item -Path $stagingDir -ItemType Directory -Force -ErrorAction Stop
+    Set-RestrictedDirectoryAcl -Path $stagingDir
+    return $stagingDir
+}
+
 # --- WingetBootstrap ---
 <#
 .SYNOPSIS
@@ -1037,8 +1151,9 @@ function Invoke-WingetInstall {
     Set-WindowsTerminalDefaults -WhatIf:$WhatIf
 
     # Set up ongoing automatic updates via Winget-AutoUpdate (issue #168). Best-effort: a failure
-    # here warns but does not fail the install.
-    [void](Install-WingetAutoUpdate -WhatIf:$WhatIf)
+    # here warns but does not fail the install; the outcome is captured and surfaced next to the
+    # final summary instead of being a scrolled-past warning (issue #186).
+    $wauResult = Install-WingetAutoUpdate -WhatIf:$WhatIf
 
     # Retry any failed installations once before producing the final summary
     if ($failedApps.Count -gt 0) {
@@ -1144,6 +1259,23 @@ function Invoke-WingetInstall {
     }
 
     Write-Table -Headers $headers -Rows $rows -PromptForGridView (-not $effectiveNonInteractive) -Title 'Installation Summary'
+
+    # Surface the auto-update outcome with the summary so a machine that finished without an update
+    # mechanism is visible at the end of the run (issue #186). Deliberately does not affect the exit
+    # code: the documented 0/1/2/3 contract stays scoped to app installs and winget availability.
+    switch ($wauResult.Status) {
+        'Configured' { Write-Success "Auto-updates: Configured (Winget-AutoUpdate v$($wauResult.Version))." }
+        'AlreadyPresent' {
+            if ($wauResult.Version) {
+                Write-Success "Auto-updates: Already present (v$($wauResult.Version))."
+            }
+            else {
+                Write-WarningMessage 'Auto-updates: Already present (installed version could not be determined).'
+            }
+        }
+        'DryRun' { Write-Info "[DRY-RUN] Auto-updates: Would configure Winget-AutoUpdate v$($wauResult.Version)." }
+        default { Write-ErrorMessage 'Auto-updates: FAILED - Winget-AutoUpdate could not be installed; apps will not update automatically. Re-run the installer to retry.' }
+    }
 
     # Keep the console window open until the user presses a key. Skipped in non-interactive mode
     # so unattended runs never block (and the failure exit below stays reachable).
@@ -1739,22 +1871,33 @@ function Test-WauInstalled {
 
 <#
 .SYNOPSIS
-    Installs and configures Winget-AutoUpdate (WAU) to keep installed apps current.
+    Installs (or upgrades) and configures Winget-AutoUpdate (WAU) to keep installed apps current.
 .DESCRIPTION
-    Downloads the pinned WAU MSI, verifies its SHA256, and installs it silently with the configuration
-    this project standardizes on (issue #168):
+    Downloads the pinned WAU MSI into an ACL-restricted staging directory (SYSTEM + Administrators
+    only, so a non-elevated process cannot swap the file between hash verification and msiexec —
+    issue #186), verifies its SHA256, and installs it silently with the configuration this project
+    standardizes on (issue #168):
       - Weekly updates at 02:00 (WAU runs as SYSTEM for machine-scope packages and spawns a user-context
         task in the logged-on session for user-scope packages, which avoids the cross-user 0x80073d19
         class the homegrown updater fought).
       - USERCONTEXT=1 so user-scope apps update in the real interactive session.
       - DISABLEWAUAUTOUPDATE=1 so WAU stays on this pinned version until we bump it deliberately.
       - Full notifications; skip on metered connections.
-    Best-effort: any failure warns and returns $false rather than aborting the install. If WAU is
-    already present, its configuration is left as-is.
+    Version-aware (issue #186): because DISABLEWAUAUTOUPDATE=1 pins deployed machines, a bumped
+    Get-WauPin would otherwise only ever reach brand-new installs. When WAU is present but older
+    than the pin, the pinned MSI is run anyway — msiexec upgrades in place and re-applies this
+    project's standard configuration — making installer re-runs the WAU upgrade vehicle. An
+    equal/newer installed version, or one whose version cannot be read, is left untouched
+    (configuration included).
+    Best-effort: any failure warns and returns a Failed result rather than aborting the install.
 .PARAMETER WhatIf
     When specified, only reports intended actions.
 .RETURNS
-    [bool] True when WAU is installed (or already present), otherwise False.
+    [pscustomobject] with:
+      - Status:  'Configured' (installed or upgraded this run), 'AlreadyPresent' (left as-is),
+                 'Failed', or 'DryRun' (under -WhatIf).
+      - Version: the pinned version for Configured/Failed/DryRun; the installed version
+                 (or $null when unreadable) for AlreadyPresent.
 #>
 function Install-WingetAutoUpdate {
     param (
@@ -1766,24 +1909,36 @@ function Install-WingetAutoUpdate {
 
     if ($WhatIf) {
         Write-Info "[DRY-RUN] Would install Winget-AutoUpdate $($pin.Version) (weekly updates at 02:00, Full notifications, self-update disabled)."
-        return $true
+        return [pscustomobject]@{ Status = 'DryRun'; Version = $pin.Version }
     }
 
     if (Test-WauInstalled) {
-        Write-Success 'Winget-AutoUpdate is already installed; leaving its configuration unchanged.'
-        return $true
+        $installed = Get-InstalledWauInfo
+        if ($installed.Version -and $installed.Version -lt [version]$pin.Version) {
+            Write-Info "Winget-AutoUpdate v$($installed.Version) is older than the pinned v$($pin.Version); upgrading in place..."
+        }
+        else {
+            $versionLabel = if ($installed.Version) { "v$($installed.Version)" } else { 'version unknown' }
+            Write-Success "Winget-AutoUpdate is already installed ($versionLabel); leaving its configuration unchanged."
+            return [pscustomobject]@{ Status = 'AlreadyPresent'; Version = $installed.Version }
+        }
+    }
+    else {
+        Write-Info "Setting up automatic app updates via Winget-AutoUpdate $($pin.Version)..."
     }
 
-    Write-Info "Setting up automatic app updates via Winget-AutoUpdate $($pin.Version)..."
-    $msiPath = Join-Path $env:TEMP "WAU-$($pin.Version).msi"
-
+    $stagingDir = $null
     try {
+        # Download, verify, and install from a locked-down per-run directory instead of the
+        # predictable %TEMP% path a same-user non-elevated process could tamper with (issue #186).
+        $stagingDir = New-WauStagingDirectory
+        $msiPath = Join-Path $stagingDir "WAU-$($pin.Version).msi"
         Invoke-WebRequest -Uri $pin.MsiUrl -OutFile $msiPath -UseBasicParsing -ErrorAction Stop
 
         $actualHash = (Get-FileHash -Path $msiPath -Algorithm SHA256).Hash
         if ($actualHash -ne $pin.Sha256) {
             Write-ErrorMessage "Winget-AutoUpdate MSI hash mismatch (expected $($pin.Sha256), got $actualHash). Skipping installation."
-            return $false
+            return [pscustomobject]@{ Status = 'Failed'; Version = $pin.Version }
         }
 
         # Bake the configuration in via MSI properties (the winget-package install path allows no
@@ -1794,24 +1949,31 @@ function Install-WingetAutoUpdate {
         # 3010 = ERROR_SUCCESS_REBOOT_REQUIRED — still a success.
         if ($proc.ExitCode -eq 0 -or $proc.ExitCode -eq 3010) {
             Write-Success "Winget-AutoUpdate $($pin.Version) installed. Apps will update weekly at 2 AM."
-            return $true
+            return [pscustomobject]@{ Status = 'Configured'; Version = $pin.Version }
         }
 
         Write-ErrorMessage "Winget-AutoUpdate install failed (msiexec exit code $($proc.ExitCode))."
-        return $false
+        return [pscustomobject]@{ Status = 'Failed'; Version = $pin.Version }
     }
     catch {
         Write-ErrorMessage "Failed to install Winget-AutoUpdate: $_"
-        return $false
+        return [pscustomobject]@{ Status = 'Failed'; Version = $pin.Version }
     }
     finally {
-        Remove-Item -Path $msiPath -Force -ErrorAction SilentlyContinue
+        if ($stagingDir) {
+            Remove-Item -Path $stagingDir -Recurse -Force -ErrorAction SilentlyContinue
+        }
     }
 }
 
 <#
 .SYNOPSIS
-    Uninstalls Winget-AutoUpdate (WAU) via its pinned MSI product code.
+    Uninstalls Winget-AutoUpdate (WAU) via the MSI product code of the installed version.
+.DESCRIPTION
+    Resolves the ProductCode of the WAU actually installed from its uninstall registry entry
+    (issue #186): every MSI version of WAU has its own ProductCode, so uninstalling with only the
+    pinned code makes msiexec exit 1605 ('unknown product') against any other installed version and
+    leaves WAU in place. Falls back to the pinned ProductCode when the registry lookup finds none.
 .PARAMETER WhatIf
     When specified, only reports intended actions.
 .RETURNS
@@ -1833,9 +1995,12 @@ function Uninstall-WingetAutoUpdate {
         return $true
     }
 
-    $pin = Get-WauPin
+    $productCode = (Get-InstalledWauInfo).ProductCode
+    if (-not $productCode) {
+        $productCode = (Get-WauPin).ProductCode
+    }
     Write-Info 'Uninstalling Winget-AutoUpdate...'
-    $proc = Start-Process -FilePath 'msiexec.exe' -ArgumentList "/x $($pin.ProductCode) /qn /norestart" -Wait -PassThru
+    $proc = Start-Process -FilePath 'msiexec.exe' -ArgumentList "/x $productCode /qn /norestart" -Wait -PassThru
 
     if ($proc.ExitCode -eq 0 -or $proc.ExitCode -eq 3010) {
         Write-Success 'Winget-AutoUpdate uninstalled.'
