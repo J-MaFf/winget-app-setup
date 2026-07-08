@@ -21,7 +21,6 @@ This repo targets **Windows only**. All scripts are PowerShell.
 | `WingetAppSetup/` | **Source of truth** — PowerShell module (`.psd1` manifest + `.psm1` loader) holding all install logic in `Public/` and `Private/` |
 | `winget-app-install.ps1` | **Generated** single-file installer (local + `irm \| iex`). Do not edit by hand — edit the module and rebuild |
 | `build/Build-WingetInstallScript.ps1` | Regenerates `winget-app-install.ps1` from the module (`-Check` verifies it is in sync) |
-| `Update-InstalledApps.ps1` | Scheduled update helper, runs as a standalone task |
 | `winget-app-uninstall.ps1` | Uninstall helper |
 | `Test-WingetAppInstall.Tests.ps1` | Pester test suite; loads the module once |
 
@@ -47,7 +46,7 @@ This repo targets **Windows only**. All scripts are PowerShell.
 
 ## Winget Notes
 
-- Exit code `0x80073d19` (`ERROR_DEPLOYMENT_BLOCKED_BY_USER_LOG_OFF`) is an AppX deployment error: per-user MSIX registration is blocked when the invoking account has no interactive logon session — the classic case is elevating as a different admin account on a user's machine. Mitigations (issue #159): `Initialize-WingetSourcesForUser` probes with `winget source update --accept-source-agreements` and bootstraps the account via `Repair-WinGetPackageManager` on failure; `Install-WingetPackage` prefers `--scope machine` (auto-falls back for MSIX-only packages) and retries a still-transient `0x80073d19` with backoff (issue #150).
+- Exit code `0x80073d19` (`ERROR_DEPLOYMENT_BLOCKED_BY_USER_LOG_OFF`) is an AppX deployment error: per-user MSIX registration is blocked when the invoking account has no interactive logon session — the classic case is elevating as a different admin account on a user's machine. Mitigations (issue #159): `Initialize-WingetSourcesForUser` probes with `winget source update --name winget --disable-interactivity` — deliberately **without** `--accept-source-agreements`, which is invalid for `winget source update` and made the probe false-fail every run (issues #174/#175; agreements are accepted by the install commands instead) — and bootstraps the account via `Repair-WinGetPackageManager` on failure; `Install-WingetPackage` prefers `--scope machine` (auto-falls back for MSIX-only packages) and retries a still-transient `0x80073d19` with backoff (issue #150).
 - Always capture `$LASTEXITCODE` immediately after a winget call — it goes stale fast
 - Validate package IDs with regex before trusting winget output: `^[\w][\w.\-]+\.[\w][\w.\-]+`
 

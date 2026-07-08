@@ -161,4 +161,4 @@ The following 10 applications are included in this release:
 
 ---
 
-For detailed release information, see [release-notes.md](release-notes.md).
+For detailed release information, see the [GitHub releases page](https://github.com/J-MaFf/winget-app-setup/releases).
