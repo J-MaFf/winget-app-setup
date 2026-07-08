@@ -181,20 +181,14 @@ Describe 'Test-CanUseGridView' {
         $result | Should -Be $false
     }
 
-    It 'Should return false when session is not interactive' {
-        Mock Get-Command { return $true } -ParameterFilter { $Name -eq 'Out-GridView' }
-
-        # Mock the Environment.UserInteractive property
-        # This test assumes we're in an interactive session by default
-        # In a non-interactive context (e.g., CI/CD), this would naturally return false
-        $originalValue = [Environment]::UserInteractive
-
-        if ($originalValue) {
-            # We can't easily mock static properties, so we'll just verify the logic
-            # In actual non-interactive scenarios, this will correctly return false
-            $result = Test-CanUseGridView
-            # In interactive mode with Out-GridView available, should be true
-            $result | Should -Be $true
-        }
+    # The old 'Should return false when session is not interactive' test wrapped its only
+    # assertion in `if ([Environment]::UserInteractive)` and then asserted $true — the opposite
+    # of its name, and a no-op in non-interactive sessions (issue #192). The branch cannot be
+    # driven in-process ([Environment]::UserInteractive is a read-only static reflecting the
+    # real window station), so the replacement pins the guard structurally: it fails if the
+    # interactivity short-circuit is ever removed from the function.
+    It 'Gates grid view on [Environment]::UserInteractive before probing for Out-GridView' {
+        $definition = (Get-Command Test-CanUseGridView).Definition
+        $definition | Should -Match '\[Environment\]::UserInteractive'
     }
 }

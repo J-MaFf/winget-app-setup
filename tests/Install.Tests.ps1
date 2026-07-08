@@ -28,41 +28,28 @@ Describe 'Main Script Logic' {
         Mock Start-Process { }
     }
 
-    Context 'Administrator check' {
-        It 'Should handle admin check logic when running as admin' {
-            # Test that we can create a WindowsPrincipal (this will work when actually running as admin)
-            try {
-                $currentUser = [Security.Principal.WindowsIdentity]::GetCurrent()
-                $principal = [Security.Principal.WindowsPrincipal]::new($currentUser)
-                $isAdmin = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-                $isAdmin | Should -BeOfType [bool]
-            }
-            catch {
-                # If we can't create the principal, just verify the types exist
-                [Security.Principal.WindowsPrincipal] | Should -BeOfType [type]
-            }
-        }
-
-        It 'Should handle admin check logic when not running as admin' {
-            # This test verifies the logic structure without mocking constructors
-            $adminRole = [Security.Principal.WindowsBuiltInRole]::Administrator
-            $adminRole | Should -BeOfType [Security.Principal.WindowsBuiltInRole]
+    # The old 'Administrator check' context asserted `Should -BeOfType` on framework constants
+    # ([bool], the WindowsBuiltInRole enum) — tautologies that could never fail (issue #192).
+    # The replacement below pins the real gate structurally; the non-admin behavior itself is
+    # exercised end-to-end by 'IEX non-admin execution behavior' in tests/EntryPoint.Tests.ps1.
+    Context 'Administrator gate' {
+        It 'Performs a real WindowsPrincipal role check and refuses to install without elevation' {
+            $installBody = (Get-Command Invoke-WingetInstall).Definition
+            $installBody | Should -Match '\[Security\.Principal\.WindowsPrincipal\]'
+            $installBody | Should -Match 'IsInRole\(\[Security\.Principal\.WindowsBuiltInRole\]'
+            $installBody | Should -Match 'This script requires administrator privileges'
         }
     }
 
-    Context 'Winget check' {
-        It 'Should continue when winget is available' {
-            Mock Test-AndInstallWinget { return $true }
-
-            $result = Test-AndInstallWinget
-            $result | Should -Be $true
-        }
-
-        It 'Should exit when winget installation fails' {
-            Mock Test-AndInstallWinget { return $false }
-
-            $result = Test-AndInstallWinget
-            $result | Should -Be $false
+    # The old 'Winget check' context mocked Test-AndInstallWinget and then asserted the mock's
+    # own return value — a tautology that tested nothing (issue #192). The behavior it pretended
+    # to guard is the orchestrator's hard stop when winget cannot be installed; that gate is
+    # pinned structurally below because driving it for real would `Exit 2` the test process.
+    Context 'Winget availability gate' {
+        It 'Exits with code 2 when winget cannot be installed (dependency-failure exit code)' {
+            $installBody = (Get-Command Invoke-WingetInstall).Definition
+            $installBody | Should -Match 'if \(-not \(Test-AndInstallWinget\)\)'
+            $installBody | Should -Match "(?s)Winget is required for this script\. Exiting\.'\s*Exit 2"
         }
     }
 

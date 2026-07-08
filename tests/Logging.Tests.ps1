@@ -18,10 +18,14 @@ Describe 'Write-Table' {
         Mock Write-Host { }
         Mock Read-Host { return 'N' }
 
-        # Create a mock Out-GridView command if it doesn't exist
-        if (-not (Get-Command Out-GridView -ErrorAction SilentlyContinue)) {
-            function Out-GridView { param($Title, [switch]$Wait) }
-        }
+        # Unconditional test double (issue #192): shadows any real Out-GridView so Pester always
+        # has a command to mock on every platform, and the suite can never pop real UI. The old
+        # conditional `if (-not (Get-Command Out-GridView...))` stub made the mock target depend
+        # on the machine running the tests.
+        function Out-GridView { param($Title, [switch]$Wait) }
+    }
+
+    BeforeEach {
         Mock Out-GridView { }
     }
 
@@ -200,24 +204,24 @@ Describe 'Write-Table' {
         Assert-MockCalled Write-Host -Times 2
     }
 
-    It 'Should not prompt in non-interactive session' {
-        # Note: [Environment]::UserInteractive is read-only and cannot be mocked directly
-        # This test validates that the code checks UserInteractive status
-        # In actual non-interactive sessions, the prompt path would be skipped
-
-        Mock Get-Command { return $true } -ParameterFilter { $Name -eq 'Out-GridView' }
+    It 'Should not prompt when the session cannot use grid view (non-interactive sessions)' {
+        # Rewritten in issue #192: the old version wrapped its only assertion in
+        # `if ([Environment]::UserInteractive)` and asserted the prompt IS shown — the opposite
+        # of its name, and a no-op in non-interactive sessions. Write-Table's prompt is gated on
+        # Test-CanUseGridView, which returns $false when [Environment]::UserInteractive is false,
+        # so mocking that seam drives the real non-interactive code path deterministically.
+        Mock Test-CanUseGridView { return $false }
         Mock Read-Host { return 'Y' }
 
         $headers = @('Status', 'Apps')
         $rows = @(@('Installed', 'App1, App2'))
 
-        # In the current environment (interactive), Read-Host will be called
-        # This test validates the logic structure exists
-        if ([Environment]::UserInteractive) {
-            Write-Table -Headers $headers -Rows $rows -PromptForGridView $true
-            # In interactive mode, prompt should be shown
-            Assert-MockCalled Read-Host -Times 1
-        }
+        Write-Table -Headers $headers -Rows $rows -PromptForGridView $true
+
+        # No prompt, no grid view — straight to text output.
+        Assert-MockCalled Read-Host -Times 0
+        Assert-MockCalled Out-GridView -Times 0
+        Assert-MockCalled Write-Host -Times 1
     }
 
     It 'Should use custom title when provided' {
