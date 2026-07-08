@@ -5,3 +5,7 @@
 *.ps1  text eol=lf
 *.psm1 text eol=lf
 *.psd1 text eol=lf
+
+# The single-file installer is a build artifact assembled from the WingetAppSetup
+# module — mark it generated so its 2,400+-line diff collapses in PR review.
+winget-app-install.ps1 linguist-generated=true

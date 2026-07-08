@@ -24,16 +24,10 @@
  Installs a list of programs using winget.
 
 .DESCRIPTION
- This script installs the following programs from winget:
-
- 7-zip
- TightVNC
- Adobe Acrobat Reader 64 Bit
- Google Chrome
- Google Drive
- Dell Command Update (Universal)
- PowerShell
- Windows Terminal
+ This script installs a curated list of programs from winget. The authoritative
+ list is the $apps array in Invoke-WingetInstall (WingetAppSetup/Public/Install.ps1,
+ inlined below in this generated file). Run the script with -WhatIf to preview the
+ exact set of planned installs without making any system changes.
 
 .PARAMETER WhatIf
  When specified, performs all pre-flight checks and displays planned actions without making any system changes.

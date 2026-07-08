@@ -1,15 +1,21 @@
 # Copilot Instructions
 
-## Code Style & Formatting Standards
+**`CLAUDE.md` (repo root) is the single source of truth for this repository's workflow rules** — platform constraints (Windows-only PowerShell), key files, the module → generated-script build, testing conventions, and winget notes. Read it first; this file only adds commit/PR formatting specifics.
 
-### Commit Messages (Conventional Commits)
+## Repo-Critical Rules
 
-Use the following prefixes for all commits:
+- `WingetAppSetup/` (module) is the source of truth. **Never hand-edit `winget-app-install.ps1`** — it is generated. After changing the module or `build/fragments/`, regenerate with `pwsh -File ./build/Build-WingetInstallScript.ps1` and commit both.
+- Run the Pester suite before pushing: `Invoke-Pester ./Test-WingetAppInstall.Tests.ps1`.
+- Always capture `$LASTEXITCODE` immediately after a winget call.
+
+## Commit Messages (Conventional Commits)
+
+Use `<type>: <short summary>` with these prefixes:
 
 - `feat:` New features
 - `fix:` Bug fixes
 - `docs:` Documentation changes
-- `style:` Code style changes (formatting, missing semicolons, etc.)
+- `style:` Code style changes (formatting, etc.)
 - `refactor:` Code refactoring without changing behavior
 - `perf:` Performance improvements
 - `test:` Add or update tests
@@ -17,68 +23,28 @@ Use the following prefixes for all commits:
 - `ci:` CI/CD pipeline changes
 - `revert:` Revert a previous commit
 
-Example: `feat: Add ETA automation with timezone awareness`
+Example: `fix: capture winget exit code before the pipeline resets it`
 
-### PR Titles (Emoji Prefix)
+## PR Titles
 
-Use emoji prefix followed by brief description:
+Plain conventional-commit style, matching the squash-merge convention: `<type>: <short summary>` (no emoji prefixes).
 
-- `✨ Add new feature`
-- `🐛 Fix bug or issue`
-- `📚 Update documentation`
-- `🔧 Maintenance or refactoring`
-- `🚀 Deploy or release feature`
-- `⚡ Performance improvement`
-- `🧪 Add or update tests`
+## PR Body
 
-Example: `✨ Add interactive task selection with rich UI`
+- Start with the issue reference: `Fixes #N`
+- Then `## Changes` (bulleted) and `## Testing` (what was run and the results)
 
-### PR Body (GitHub-Flavored Markdown)
+## PR Metadata
 
-Structure all PR descriptions with these sections:
+Always set on every PR:
 
-```markdown
-### What does this PR do?
-
-Brief explanation of changes and what was implemented.
-
-### Why are we doing this?
-
-Context, motivation, and reason for the changes.
-
-### How should this be tested?
-
-Testing instructions, test cases, and validation steps.
-
-### Any deployment notes?
-
-Environment variables, migrations, breaking changes, or special instructions.
-```
-
-Include related issue references: `Closes #71, #77` (at end of description)
-
-### PR Metadata Requirements
-
-Always ensure the following metadata is set on every PR:
-
-- **Labels**: Assign relevant labels (e.g., `enhancement`, `bug`, `documentation`, `refactor`, `testing`)
-- **Assignees**: Assign to yourself (J-MaFf)
-- **Issues**: Link all related issues in the PR description and GitHub's linked issues feature
-
-**Using GitHub CLI to set metadata:**
+- **Labels**: relevant GitHub labels (e.g. `bug`, `enhancement`, `documentation`)
+- **Assignee**: `J-MaFf`
+- **Linked issues**: reference all related issues in the description
 
 ```bash
-# Add a single label
-gh issue edit <PR_NUMBER> --add-label "documentation"
-
-# Add multiple labels
-gh issue edit <PR_NUMBER> --add-label "documentation" --add-label "enhancement"
-
-# Assign to yourself
-gh issue edit <PR_NUMBER> --add-assignee <USERNAME>
-
-# Complete metadata setup example (add labels and assignee)
-gh pr edit 84 --add-label "documentation" --add-assignee "J-MaFf"
+# Set labels and assignee on an existing PR
+gh pr edit <PR_NUMBER> --add-label "documentation" --add-assignee "J-MaFf"
 ```
 
-Note: Use `gh pr edit <PR_NUMBER>` for pull requests and `gh issue edit <ISSUE_NUMBER>` for issues. These are separate commands. Replace `<PR_NUMBER>` or `<ISSUE_NUMBER>` with the number and `<USERNAME>` with the GitHub username. Labels must exist in the repository; check available labels with `gh label list`.
+Note: use `gh pr edit` for pull requests and `gh issue edit` for issues — they are separate commands. Labels must already exist in the repository; check with `gh label list`.
