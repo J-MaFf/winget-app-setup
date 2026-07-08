@@ -229,6 +229,17 @@ Describe 'Test-AndInstallWinget' {
         # Dot-source the main script to import Test-AndInstallWinget
     }
 
+    BeforeEach {
+        # Safety net (#181): never let the real Repair-WinGetPackageManager run during unit
+        # tests — it downloads and re-registers the App Installer. The cmdlet exists on dev
+        # machines and CI (Microsoft.WinGet.Client is installed), so Pester can mock it
+        # unconditionally.
+        Mock Repair-WinGetPackageManager { }
+        # Default: the repair cmdlet appears absent, so tests exercise the plain
+        # aka.ms/getwinget fallback unless a test overrides this lookup.
+        Mock Get-Command { $null } -ParameterFilter { $Name -eq 'Repair-WinGetPackageManager' }
+    }
+
     Context 'When winget is available' {
         It 'Should return true and not attempt installation' {
             Mock Get-Command { return $true } -ParameterFilter { $Name -eq 'winget' }
@@ -261,6 +272,43 @@ Describe 'Test-AndInstallWinget' {
             $result = Test-AndInstallWinget
             $result | Should -Be $false
             Assert-MockCalled Invoke-WebRequest -Times 1
+        }
+    }
+
+    Context 'When Repair-WinGetPackageManager is available and bootstraps winget' {
+        It 'Should return true without downloading the App Installer' {
+            $script:wingetAvailable = $false
+            Mock Get-Command {
+                if ($script:wingetAvailable) { return $true }
+                return $null
+            } -ParameterFilter { $Name -eq 'winget' }
+            Mock Get-Command { return $true } -ParameterFilter { $Name -eq 'Repair-WinGetPackageManager' }
+            Mock Repair-WinGetPackageManager { $script:wingetAvailable = $true }
+            Mock Invoke-WebRequest { }
+            Mock Add-AppxPackage { }
+
+            $result = Test-AndInstallWinget
+            $result | Should -Be $true
+            Assert-MockCalled Repair-WinGetPackageManager -Times 1 -Exactly
+            Assert-MockCalled Invoke-WebRequest -Times 0
+            Assert-MockCalled Add-AppxPackage -Times 0
+        }
+    }
+
+    Context 'When Repair-WinGetPackageManager is available but throws' {
+        It 'Should fall back to the App Installer download and return true' {
+            Mock Get-Command { return $null } -ParameterFilter { $Name -eq 'winget' }
+            Mock Get-Command { return $true } -ParameterFilter { $Name -eq 'Repair-WinGetPackageManager' }
+            Mock Repair-WinGetPackageManager { throw 'Repair failed' }
+            Mock Invoke-WebRequest { }
+            Mock Add-AppxPackage { }
+            Mock Remove-Item { }
+
+            $result = Test-AndInstallWinget
+            $result | Should -Be $true
+            Assert-MockCalled Repair-WinGetPackageManager -Times 1 -Exactly
+            Assert-MockCalled Invoke-WebRequest -Times 1
+            Assert-MockCalled Add-AppxPackage -Times 1
         }
     }
 }
@@ -327,11 +375,16 @@ Describe 'Test-WingetSources' {
 
     Context 'When winget sources are missing entirely' {
         It 'Should attempt repair with source reset and Add-AppxPackage' {
+            # Poison any exit code left over from other tests so this test only
+            # passes when the mock choreography below is complete (#181).
+            $global:LASTEXITCODE = 1
             $script:listCallCount = 0
-            $script:searchCallCount = 0
             Mock winget {
+                # Set $global:LASTEXITCODE on EVERY simulated call: production reads it
+                # right after each search, and stale values leak between tests (#181).
                 if ($args[0] -eq 'source' -and $args[1] -eq 'list') {
                     $script:listCallCount++
+                    $global:LASTEXITCODE = 0
                     if ($script:listCallCount -eq 1) {
                         # Initially: only msstore, no winget
                         return 'msstore      https://storeedgefd.dsx.mp.microsoft.com/v9.0'
@@ -340,14 +393,12 @@ Describe 'Test-WingetSources' {
                     return 'winget      https://cdn.winget.microsoft.com/cache'
                 }
                 elseif ($args[0] -eq 'search' -and $args[1] -eq '7zip') {
-                    $script:searchCallCount++
-                    if ($script:searchCallCount -eq 2) {
-                        # After repair: search works
-                        $global:LASTEXITCODE = 0
-                        return '7zip.7zip    7.30'
-                    }
+                    # Production performs a single post-repair search in this scenario
+                    $global:LASTEXITCODE = 0
+                    return '7zip.7zip    7.30'
                 }
                 elseif ($args[0] -eq 'source' -and $args[1] -eq 'reset') {
+                    $global:LASTEXITCODE = 0
                     return 'Source reset completed'
                 }
             }
@@ -416,26 +467,29 @@ Describe 'Test-WingetSources' {
 
     Context 'When winget source list throws an exception' {
         It 'Should attempt repair and handle the error gracefully' {
+            # Poison any exit code left over from other tests so this test only
+            # passes when the mock choreography below is complete (#181).
+            $global:LASTEXITCODE = 1
             $script:listCount = 0
-            $script:searchCount = 0
             Mock winget {
+                # Set $global:LASTEXITCODE on EVERY simulated call: production reads it
+                # right after each search, and stale values leak between tests (#181).
                 if ($args[0] -eq 'source' -and $args[1] -eq 'list') {
                     $script:listCount++
                     if ($script:listCount -eq 1) {
                         throw 'Access denied'
                     }
                     # After repair, list succeeds
+                    $global:LASTEXITCODE = 0
                     return 'winget      https://cdn.winget.microsoft.com/cache'
                 }
                 elseif ($args[0] -eq 'search' -and $args[1] -eq '7zip') {
-                    $script:searchCount++
-                    if ($script:searchCount -eq 2) {
-                        # After repair: search works
-                        $global:LASTEXITCODE = 0
-                        return '7zip.7zip    7.30'
-                    }
+                    # Production performs a single post-repair search in this scenario
+                    $global:LASTEXITCODE = 0
+                    return '7zip.7zip    7.30'
                 }
                 elseif ($args[0] -eq 'source' -and $args[1] -eq 'reset') {
+                    $global:LASTEXITCODE = 0
                     return 'Source reset completed'
                 }
             }
