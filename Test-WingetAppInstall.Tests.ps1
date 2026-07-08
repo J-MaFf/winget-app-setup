@@ -2046,7 +2046,7 @@ Describe 'Test-SystemRequirements' -Tag 'SystemRequirements' {
         Mock Write-Success { }
         Mock Write-WarningMessage { }
         Mock Write-ErrorMessage { }
-        Mock Test-NetConnection { $true }
+        Mock Invoke-WebRequest { [PSCustomObject]@{ StatusCode = 200 } }
         Mock Get-PSDrive {
             [PSCustomObject]@{ Free = 100GB }
         }
@@ -2060,16 +2060,19 @@ Describe 'Test-SystemRequirements' -Tag 'SystemRequirements' {
         $result | Should -BeTrue
     }
 
-    It 'Returns $false when network check fails' {
-        Mock Test-NetConnection { $false }
+    It 'Returns $false on a transport-level network failure (no HTTP response)' {
+        Mock Invoke-WebRequest { throw 'No network' }
         $result = Test-SystemRequirements
         $result | Should -BeFalse
     }
 
-    It 'Returns $false when network check throws' {
-        Mock Test-NetConnection { throw 'No network' }
+    It 'Treats an HTTP error response (e.g. 403) as reachable and returns $true' {
+        Mock Invoke-WebRequest {
+            $response = [System.Net.Http.HttpResponseMessage]::new([System.Net.HttpStatusCode]::Forbidden)
+            throw [Microsoft.PowerShell.Commands.HttpResponseException]::new('Response status code does not indicate success: 403 (Forbidden).', $response)
+        }
         $result = Test-SystemRequirements
-        $result | Should -BeFalse
+        $result | Should -BeTrue
     }
 
     It 'Returns $false when user declines low disk space prompt' {
@@ -2090,6 +2093,21 @@ Describe 'Test-SystemRequirements' -Tag 'SystemRequirements' {
         Mock Get-PSDrive { [PSCustomObject]@{ Free = 10GB } }
         Mock Read-Host { throw 'Should not prompt in WhatIf mode' }
         { Test-SystemRequirements -WhatIf } | Should -Not -Throw
+    }
+
+    It 'Does not prompt when the C: drive cannot be read (unattended-safe)' {
+        Mock Get-PSDrive { throw 'Drive read failure' }
+        Mock Read-Host { throw 'Should not prompt when free space was not measured' }
+        $result = Test-SystemRequirements
+        $result | Should -BeTrue
+        Should -Invoke Read-Host -Times 0 -Exactly
+    }
+
+    It 'Reports UNKNOWN (not the low-space WARN) when the C: drive cannot be read' {
+        Mock Get-PSDrive { throw 'Drive read failure' }
+        Mock Read-Host { throw 'Should not prompt when free space was not measured' }
+        $null = Test-SystemRequirements
+        Should -Invoke Write-WarningMessage -ParameterFilter { $Message -match '\[UNKNOWN\] Disk Space' }
     }
 }
 
