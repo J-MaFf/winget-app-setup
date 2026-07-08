@@ -513,6 +513,153 @@ function Test-AndInstallGraphicalTools {
     return $false
 }
 
+# --- Jsonc ---
+<#
+.SYNOPSIS
+    Converts JSONC (JSON with comments) text to strict JSON.
+.DESCRIPTION
+    Character-scanner sanitizer for Windows Terminal settings files, which commonly carry
+    // line comments (including trailing inline ones), /* */ block comments (possibly
+    spanning lines), and trailing commas. The previous regex approach (issue #187) missed
+    trailing inline comments and could corrupt string values containing comment-like
+    sequences such as "/*" or "//" — and because Set-WindowsTerminalDefaultProfile writes
+    the parsed object back to settings.json, a corrupted parse would persist the damage.
+
+    The scanner tracks JSON string state (honoring backslash escapes like \" and \\), so
+    comment markers and commas inside string values are never touched. Outside strings it:
+      - drops // comments up to (not including) the end-of-line, and
+      - drops /* */ comments, spanning lines, replaced with a single space so adjacent
+        tokens cannot fuse, and
+      - drops a trailing comma whose next non-whitespace character is '}' or ']'
+        (whitespace between comma and closer is preserved).
+
+    Comment stripping and trailing-comma removal run as two passes so a comma separated
+    from its closing brace only by a comment ("1, /* c */ }") is still removed.
+.PARAMETER JsonText
+    JSONC text to sanitize.
+.RETURNS
+    [string] Strict-JSON text suitable for ConvertFrom-Json on Windows PowerShell 5.1.
+#>
+function Convert-JsoncToJson {
+    param (
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
+        [string]$JsonText
+    )
+
+    # Pass 1: strip // and /* */ comments, string-aware.
+    $length = $JsonText.Length
+    $withoutComments = [System.Text.StringBuilder]::new($length)
+    $inString = $false
+    $i = 0
+
+    while ($i -lt $length) {
+        $currentChar = $JsonText[$i]
+
+        if ($inString) {
+            [void]$withoutComments.Append($currentChar)
+            if ($currentChar -eq '\') {
+                # Copy the escaped character verbatim so \" does not end the string.
+                if ($i + 1 -lt $length) {
+                    [void]$withoutComments.Append($JsonText[$i + 1])
+                    $i += 2
+                    continue
+                }
+            }
+            elseif ($currentChar -eq '"') {
+                $inString = $false
+            }
+            $i++
+            continue
+        }
+
+        if ($currentChar -eq '"') {
+            $inString = $true
+            [void]$withoutComments.Append($currentChar)
+            $i++
+            continue
+        }
+
+        if ($currentChar -eq '/' -and $i + 1 -lt $length) {
+            $nextChar = $JsonText[$i + 1]
+            if ($nextChar -eq '/') {
+                # Line comment: skip to end of line, keeping the line break itself.
+                $i += 2
+                while ($i -lt $length -and $JsonText[$i] -ne "`r" -and $JsonText[$i] -ne "`n") {
+                    $i++
+                }
+                continue
+            }
+            if ($nextChar -eq '*') {
+                # Block comment: skip past the closing */ (an unterminated comment
+                # swallows the rest of the text, matching JSONC tokenizer behavior).
+                $i += 2
+                while ($i + 1 -lt $length -and -not ($JsonText[$i] -eq '*' -and $JsonText[$i + 1] -eq '/')) {
+                    $i++
+                }
+                $i = [System.Math]::Min($i + 2, $length)
+                [void]$withoutComments.Append(' ')
+                continue
+            }
+        }
+
+        [void]$withoutComments.Append($currentChar)
+        $i++
+    }
+
+    # Pass 2: drop trailing commas (a ',' whose next non-whitespace char is '}' or ']'),
+    # string-aware for values like "a, ]" that must survive untouched.
+    $commentFreeText = $withoutComments.ToString()
+    $length = $commentFreeText.Length
+    $sanitized = [System.Text.StringBuilder]::new($length)
+    $inString = $false
+    $i = 0
+
+    while ($i -lt $length) {
+        $currentChar = $commentFreeText[$i]
+
+        if ($inString) {
+            [void]$sanitized.Append($currentChar)
+            if ($currentChar -eq '\') {
+                if ($i + 1 -lt $length) {
+                    [void]$sanitized.Append($commentFreeText[$i + 1])
+                    $i += 2
+                    continue
+                }
+            }
+            elseif ($currentChar -eq '"') {
+                $inString = $false
+            }
+            $i++
+            continue
+        }
+
+        if ($currentChar -eq '"') {
+            $inString = $true
+            [void]$sanitized.Append($currentChar)
+            $i++
+            continue
+        }
+
+        if ($currentChar -eq ',') {
+            $lookahead = $i + 1
+            while ($lookahead -lt $length -and [char]::IsWhiteSpace($commentFreeText[$lookahead])) {
+                $lookahead++
+            }
+            if ($lookahead -lt $length -and ($commentFreeText[$lookahead] -eq '}' -or $commentFreeText[$lookahead] -eq ']')) {
+                # Trailing comma: drop it; the whitespace and closer are appended normally.
+                $i++
+                continue
+            }
+        }
+
+        [void]$sanitized.Append($currentChar)
+        $i++
+    }
+
+    return $sanitized.ToString()
+}
+
 # --- WauSupport ---
 <#
 .SYNOPSIS
@@ -1589,8 +1736,11 @@ function Test-SystemRequirements {
 .SYNOPSIS
     Attempts to parse Windows Terminal settings content, including JSONC variants.
 .DESCRIPTION
-    Tries ConvertFrom-Json first. If parsing fails, removes line/block comments and
-    trailing commas to support common Windows Terminal JSONC formatting before retrying.
+    Tries ConvertFrom-Json first (PowerShell 7+ tolerates JSONC natively). If parsing
+    fails — Windows PowerShell 5.1 rejects comments and trailing commas — sanitizes the
+    text with the string-aware Convert-JsoncToJson scanner and retries. The previous
+    regex sanitizer missed trailing inline // comments and could corrupt string values
+    containing comment-like sequences (issue #187).
 .PARAMETER JsonText
     Raw settings content.
 .RETURNS
@@ -1612,9 +1762,7 @@ function ConvertFrom-TerminalSettingsJson {
     }
     catch {
         # Windows Terminal settings are often JSONC; strip comments and trailing commas.
-        $sanitizedJson = $JsonText -replace '(?ms)/\*.*?\*/', ''
-        $sanitizedJson = $sanitizedJson -replace '(?m)^\s*//.*$', ''
-        $sanitizedJson = $sanitizedJson -replace ',(\s*[}\]])', '$1'
+        $sanitizedJson = Convert-JsoncToJson -JsonText $JsonText
 
         try {
             # Keep parsing compatible with both Windows PowerShell and PowerShell 7+.
@@ -1794,6 +1942,15 @@ function Set-WindowsTerminalAsDefaultTerminalApplication {
 .DESCRIPTION
     Applies both issue #74 requirements: PowerShell 7 default profile and Windows Terminal
     default terminal application setting.
+
+    Both writes are strictly per-user: settings.json lives under the process account's
+    %LOCALAPPDATA% and the delegation values under its HKCU hive. Under this repo's
+    documented cross-user scenario — a tech elevating as an admin-* account on a user's
+    machine (issue #159) — that means the ADMIN account's terminal gets configured, not the
+    logged-on user's. This function reuses the #159 detection (Get-ProcessUserName vs
+    Get-InteractiveSessionUserName) to warn loudly and report honestly in that case
+    (issue #187). It deliberately does NOT write to another user's profile or registry
+    hive — impersonation/HKU writes are out of scope.
 .PARAMETER WhatIf
     When provided, only reports intended actions.
 #>
@@ -1805,6 +1962,19 @@ function Set-WindowsTerminalDefaults {
 
     $powerShell7ProfileGuid = '{574e775e-4f2a-5b96-ac1e-a2962a402336}'
     $settingsPaths = @(Get-WindowsTerminalSettingsPaths)
+
+    # Cross-user elevation detection (issue #187), reusing the #159 helpers.
+    $processUser = Get-ProcessUserName
+    $sessionUser = Get-InteractiveSessionUserName
+    $isCrossUserElevation = [bool]($processUser -and $sessionUser -and ($processUser -ne $sessionUser))
+    if ($isCrossUserElevation) {
+        Write-WarningMessage '================================ CROSS-USER ELEVATION ================================'
+        Write-WarningMessage "Running as '$processUser' while '$sessionUser' owns the interactive session."
+        Write-WarningMessage 'Windows Terminal settings.json and the HKCU default-terminal values are PER-USER:'
+        Write-WarningMessage "everything below is applied to '$processUser' (the ADMIN account), NOT to '$sessionUser'."
+        Write-WarningMessage "'$sessionUser' will be left unconfigured. Re-run this script as '$sessionUser' to configure their terminal."
+        Write-WarningMessage '======================================================================================'
+    }
 
     if ($WhatIf) {
         if ($settingsPaths.Count -gt 0) {
@@ -1827,6 +1997,13 @@ function Set-WindowsTerminalDefaults {
     }
 
     [void](Set-WindowsTerminalAsDefaultTerminalApplication)
+
+    # Honest reporting under cross-user elevation: the per-step success messages above refer
+    # to the PROCESS account's profile, so close with the caveat rather than an implied
+    # machine-wide success (issue #187).
+    if ($isCrossUserElevation) {
+        Write-WarningMessage "Windows Terminal defaults were applied to '$processUser' only; '$sessionUser' remains unconfigured."
+    }
 }
 
 # --- WingetAutoUpdate ---
