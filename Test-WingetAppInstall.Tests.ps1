@@ -320,12 +320,18 @@ Describe 'Test-AndInstallWinget' {
     }
 
     Context 'When Repair-WinGetPackageManager is available but throws' {
-        It 'Should fall back to the App Installer download and return true' {
-            Mock Get-Command { return $null } -ParameterFilter { $Name -eq 'winget' }
+        It 'Should fall back to the App Installer download and return true once winget resolves' {
+            # winget is absent until the App Installer fallback registers it; the fallback's
+            # post-install re-check (issue #177) must then find it and return $true.
+            $script:appInstallerRegistered = $false
+            Mock Get-Command {
+                if ($script:appInstallerRegistered) { return $true }
+                return $null
+            } -ParameterFilter { $Name -eq 'winget' }
             Mock Get-Command { return $true } -ParameterFilter { $Name -eq 'Repair-WinGetPackageManager' }
             Mock Repair-WinGetPackageManager { throw 'Repair failed' }
             Mock Invoke-WebRequest { }
-            Mock Add-AppxPackage { }
+            Mock Add-AppxPackage { $script:appInstallerRegistered = $true }
             Mock Remove-Item { }
 
             $result = Test-AndInstallWinget
