@@ -9,6 +9,10 @@
     Suppresses all interactive prompts (elevation pause, grid-view prompt, final "press any key")
     for unattended runs (RMM, CI, scheduled tasks). Also auto-detected when the session is
     non-interactive or stdin is redirected.
+.PARAMETER SkipSystemCheck
+    Pass-through of the entry script's -SkipSystemCheck switch. Used only so an elevated relaunch
+    inherits the caller's intent to bypass the pre-flight system checks (issue #185); the checks
+    themselves run in the entry script before this function is called.
 .NOTES
     Exit codes: 0 = success, 1 = one or more apps failed to install, 2 = winget unavailable,
     3 = app-definition validation failed or no valid apps remain.
@@ -18,7 +22,10 @@ function Invoke-WingetInstall {
         [Parameter(Mandatory = $false)]
         [switch]$WhatIf,
         [Parameter(Mandatory = $false)]
-        [switch]$NonInteractive
+        [switch]$NonInteractive,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$SkipSystemCheck
     )
 
     # Effective non-interactive mode: explicit switch, a non-interactive session (e.g. service,
@@ -69,6 +76,14 @@ function Invoke-WingetInstall {
                 Write-Info '[DRY-RUN] Would relaunch with administrator privileges. Continuing the preview in the current (non-elevated) session; no system changes will be made.'
             }
             else {
+                # Elevation relaunches $PSCommandPath. When Invoke-WingetInstall comes from the
+                # imported (or dot-sourced) module, that path is WingetAppSetup/Public/Install.ps1 —
+                # a functions-only file — so the elevated window would define a function and exit
+                # without installing anything (issue #185). Fail fast with guidance instead.
+                if (Test-InvokedFromModuleContext -InvocationModule $MyInvocation.MyCommand.Module -CommandPath $PSCommandPath) {
+                    Write-ErrorMessage 'Invoke-WingetInstall was invoked from the imported module without elevation; auto-elevation cannot relaunch a module function. Run winget-app-install.ps1, or start from an already-elevated session.'
+                    return
+                }
                 if ($effectiveNonInteractive) {
                     Write-ErrorMessage 'This script requires administrator privileges. Restarting with elevated privileges...'
                 }
@@ -76,13 +91,18 @@ function Invoke-WingetInstall {
                     Write-ErrorMessage 'This script requires administrator privileges. Press Enter to restart script with elevated privileges.'
                     Pause
                 }
-                # Relaunch the script with administrator privileges, forwarding -WhatIf as a
-                # safety net so the elevated session can never escalate a dry run into changes.
-                # Forward the effective non-interactive state too: the elevated child gets a fresh
-                # console and would otherwise re-detect as interactive and block on prompts.
+                # Relaunch the script with administrator privileges, forwarding the caller's
+                # switches so the elevated session inherits the same intent: -SkipSystemCheck so
+                # the pre-flight checks the caller explicitly bypassed are not re-run in the
+                # elevated session (issue #185); the effective non-interactive state because the
+                # elevated child gets a fresh console and would otherwise re-detect as interactive
+                # and block on prompts; and -WhatIf as a safety net so a dry run could never
+                # escalate into changes (unreachable today — a dry run never relaunches — but
+                # kept so the forwarding stays correct if that ever changes).
                 $elevationArgs = @()
                 if ($WhatIf) { $elevationArgs += '-WhatIf' }
                 if ($effectiveNonInteractive) { $elevationArgs += '-NonInteractive' }
+                if ($SkipSystemCheck) { $elevationArgs += '-SkipSystemCheck' }
                 Restart-WithElevation -PowerShellExecutable $psExecutable -ScriptPath $PSCommandPath -AdditionalArguments $elevationArgs | Out-Null
                 Exit
             }
