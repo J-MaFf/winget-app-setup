@@ -457,6 +457,103 @@ function Test-AndInstallGraphicalTools {
     return $false
 }
 
+# --- InstallVerification ---
+<#
+.SYNOPSIS
+    Installs a single curated app with pre-check and post-install verification, without prompting.
+.DESCRIPTION
+    Shared per-app install pipeline used by both the first pass and the retry pass of
+    Invoke-WingetInstall (issue #188). It replaces the three drifted inline Start-Process
+    `winget list` verify blocks with a single implementation:
+
+      1. Pre-check: Test-WingetPackageInstalled under a timeout guard. Already installed maps to
+         Skipped; a hung `winget list` maps to Failed so the app flows into the retry pass and
+         the non-zero exit code instead of being silently dropped (issue #176).
+      2. Dispatch: a package-specific self-verifying installer named in $App.install (e.g.
+         Install-PowerShellLatest, whose DISM-provisioned MSIX path never shows up under
+         `winget list` for the elevating account), or the default Install-WingetPackage, which
+         retries the transient 0x80073d19 session error with backoff (issue #150).
+      3. Post-verify: winget installs are re-checked with Test-WingetPackageInstalled; an install
+         that reported success but does not show up under `winget list` is Failed.
+
+    The helper contains no prompts, no Exit, and no ReadKey — user-facing messages, summary
+    bucketing, and exit-code policy stay in Invoke-WingetInstall — which is what makes the install
+    pipeline unit-testable (issue #188).
+.PARAMETER App
+    A validated app-definition hashtable: @{ name = '<winget package id>' } with optional
+    'install' (name of a self-verifying installer command) and 'installerType' (winget
+    --installer-type override forwarded to Install-WingetPackage) entries.
+.PARAMETER WhatIf
+    Dry run: the read-only pre-check still runs, but no installer is dispatched. An app that is
+    not yet installed reports Status 'Installed' so the caller's dry-run summary shows what would
+    change, matching the pre-#188 dry-run bucket semantics.
+.RETURNS
+    [hashtable] @{
+        Status        = 'Installed' | 'Failed' | 'Skipped'
+        InstallResult = the Install-WingetPackage result hashtable — or the $App.install command's
+                        result — returned intact so exit codes can be surfaced without
+                        restructuring (issue #189); $null when no installer ran (skip, dry run,
+                        pre-check timeout)
+        FailureReason = $null when Status is not 'Failed'; otherwise 'PreCheckTimeout',
+                        'CustomInstallFailed', 'VerifyTimeout', or 'VerifyNotFound' so the caller
+                        can keep its per-situation message texts
+    }
+#>
+function Install-AppWithVerification {
+    param (
+        [Parameter(Mandatory = $true)]
+        [hashtable]$App,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$WhatIf
+    )
+
+    # Same 15-second guard the inlined blocks used: `winget list` can hang indefinitely on broken
+    # sources or first-use prompts, and a hung check must not stall the whole install loop.
+    $checkTimeoutSeconds = 15
+
+    $preCheck = Test-WingetPackageInstalled -PackageId $App.name -TimeoutSeconds $checkTimeoutSeconds
+    if ($preCheck.TimedOut) {
+        # Failed, not skipped: the app then flows through the retry pass, appears in the summary,
+        # and drives the non-zero exit code (issue #176).
+        return @{ Status = 'Failed'; InstallResult = $null; FailureReason = 'PreCheckTimeout' }
+    }
+    if ($preCheck.Installed) {
+        return @{ Status = 'Skipped'; InstallResult = $null; FailureReason = $null }
+    }
+
+    if ($WhatIf) {
+        # Not installed and this is a dry run: report it as the install that would happen.
+        return @{ Status = 'Installed'; InstallResult = $null; FailureReason = $null }
+    }
+
+    Write-Info "Installing: $($App.name)"
+
+    if ($App.install) {
+        # Package-specific installer that performs its own verification (e.g. PowerShell, whose
+        # DISM-provisioned MSIX path never shows up under `winget list` for the elevating
+        # account). Trust its Installed result instead of re-checking with winget.
+        $customResult = & $App.install
+        if ($customResult.Installed) {
+            return @{ Status = 'Installed'; InstallResult = $customResult; FailureReason = $null }
+        }
+        return @{ Status = 'Failed'; InstallResult = $customResult; FailureReason = 'CustomInstallFailed' }
+    }
+
+    # Install through the helper so the transient 0x80073d19 session error is retried with
+    # backoff (issue #150) instead of failing on the first hit.
+    $installResult = Install-WingetPackage -PackageId $App.name -InstallerType $App.installerType
+
+    $verify = Test-WingetPackageInstalled -PackageId $App.name -TimeoutSeconds $checkTimeoutSeconds
+    if ($verify.TimedOut) {
+        return @{ Status = 'Failed'; InstallResult = $installResult; FailureReason = 'VerifyTimeout' }
+    }
+    if ($verify.Installed) {
+        return @{ Status = 'Installed'; InstallResult = $installResult; FailureReason = $null }
+    }
+    return @{ Status = 'Failed'; InstallResult = $installResult; FailureReason = 'VerifyNotFound' }
+}
+
 # --- Jsonc ---
 <#
 .SYNOPSIS
@@ -1206,92 +1303,44 @@ function Invoke-WingetInstall {
 
     Foreach ($app in $apps) {
         try {
-            # Run winget list with timeout to prevent hanging
-            $listProcess = Start-Process -FilePath 'winget' `
-                -ArgumentList 'list', '--exact', '--id', $app.name, '--accept-source-agreements' `
-                -NoNewWindow `
-                -PassThru `
-                -RedirectStandardOutput "$env:TEMP\winget_list_output.txt" `
-                -RedirectStandardError "$env:TEMP\winget_list_error.txt"
+            # Shared per-app pipeline — pre-check, dispatch, post-verify (issue #188). Messages,
+            # summary bucketing, and exit-code policy stay here in the orchestrator.
+            $outcome = Install-AppWithVerification -App $app -WhatIf:$WhatIf
 
-            # Wait up to 15 seconds for the list command
-            if (-not $listProcess.WaitForExit(15000)) {
-                Write-WarningMessage "Winget list timed out for $($app.name). Marking as failed; it will be retried."
-                $listProcess.Kill()
-                Remove-Item "$env:TEMP\winget_list_output.txt" -ErrorAction SilentlyContinue
-                Remove-Item "$env:TEMP\winget_list_error.txt" -ErrorAction SilentlyContinue
-                # Mark the app failed instead of silently dropping it: it then flows through the
-                # retry pass, appears in the summary, and drives the non-zero exit code (issue #176).
-                $failedApps += $app.name
-                continue
-            }
-
-            $listApp = Get-Content "$env:TEMP\winget_list_output.txt" -ErrorAction SilentlyContinue
-
-            # Cleanup temp files
-            Remove-Item "$env:TEMP\winget_list_output.txt" -ErrorAction SilentlyContinue
-            Remove-Item "$env:TEMP\winget_list_error.txt" -ErrorAction SilentlyContinue
-
-            if (![String]::Join('', $listApp).Contains($app.name)) {
-                if (-not $WhatIf) {
-                    Write-Info "Installing: $($app.name)"
-                    if ($app.install) {
-                        # Package-specific installer that performs its own verification (e.g.
-                        # PowerShell, whose DISM-provisioned MSIX path never shows up under
-                        # `winget list` for the elevating account). Trust its Installed result.
-                        $installOutcome = & $app.install
-                        if ($installOutcome.Installed) {
-                            Write-Success "Successfully installed: $($app.name)"
-                            $installedApps += $app.name
-                        }
-                        else {
-                            Write-ErrorMessage "Failed to install: $($app.name)."
-                            $failedApps += $app.name
-                        }
+            switch ($outcome.Status) {
+                'Skipped' {
+                    Write-WarningMessage "Skipping: $($app.name) (already installed)"
+                    $skippedApps += $app.name
+                }
+                'Installed' {
+                    if ($WhatIf) {
+                        Write-Info "[DRY-RUN] Would install: $($app.name)"
                     }
                     else {
-                        # Install through the helper so the transient 0x80073d19 session error is
-                        # retried with backoff (issue #150) instead of failing on the first hit.
-                        [void](Install-WingetPackage -PackageId $app.name -InstallerType $app.installerType)
-
-                        # Verify installation with timeout
-                        $verifyProcess = Start-Process -FilePath 'winget' `
-                            -ArgumentList 'list', '--exact', '--id', $app.name, '--accept-source-agreements' `
-                            -NoNewWindow `
-                            -PassThru `
-                            -RedirectStandardOutput "$env:TEMP\winget_verify_output.txt" `
-                            -RedirectStandardError "$env:TEMP\winget_verify_error.txt"
-
-                        if ($verifyProcess.WaitForExit(15000)) {
-                            $installResult = Get-Content "$env:TEMP\winget_verify_output.txt" -ErrorAction SilentlyContinue
-                            if (![String]::Join('', $installResult).Contains($app.name)) {
-                                Write-ErrorMessage "Failed to install: $($app.name). No package found matching input criteria."
-                                $failedApps += $app.name
-                            }
-                            else {
-                                Write-Success "Successfully installed: $($app.name)"
-                                $installedApps += $app.name
-                            }
-                        }
-                        else {
-                            Write-WarningMessage "Verification timed out for: $($app.name). Assuming installation failed."
-                            $verifyProcess.Kill()
-                            $failedApps += $app.name
-                        }
-
-                        # Cleanup temp files
-                        Remove-Item "$env:TEMP\winget_verify_output.txt" -ErrorAction SilentlyContinue
-                        Remove-Item "$env:TEMP\winget_verify_error.txt" -ErrorAction SilentlyContinue
+                        Write-Success "Successfully installed: $($app.name)"
                     }
-                }
-                else {
-                    Write-Info "[DRY-RUN] Would install: $($app.name)"
                     $installedApps += $app.name
                 }
-            }
-            else {
-                Write-WarningMessage "Skipping: $($app.name) (already installed)"
-                $skippedApps += $app.name
+                default {
+                    switch ($outcome.FailureReason) {
+                        'PreCheckTimeout' {
+                            # Failed instead of silently dropped: the app then flows through the
+                            # retry pass, appears in the summary, and drives the non-zero exit
+                            # code (issue #176).
+                            Write-WarningMessage "Winget list timed out for $($app.name). Marking as failed; it will be retried."
+                        }
+                        'VerifyTimeout' {
+                            Write-WarningMessage "Verification timed out for: $($app.name). Assuming installation failed."
+                        }
+                        'VerifyNotFound' {
+                            Write-ErrorMessage "Failed to install: $($app.name). No package found matching input criteria."
+                        }
+                        default {
+                            Write-ErrorMessage "Failed to install: $($app.name)."
+                        }
+                    }
+                    $failedApps += $app.name
+                }
             }
         }
         catch {
@@ -1325,51 +1374,25 @@ function Invoke-WingetInstall {
                 try {
                     Write-Info "Retrying: $appName"
                     $appDef = $apps | Where-Object { $_.name -eq $appName } | Select-Object -First 1
-                    if ($appDef.install) {
-                        # Package-specific self-verifying installer (e.g. PowerShell). Trust its result.
-                        $retryOutcome = & $appDef.install
-                        if ($retryOutcome.Installed) {
-                            Write-Success "Retry succeeded: $appName"
-                            $installedApps += $appName
+
+                    # Same shared pipeline as the first pass (issue #188), so a lingering
+                    # 0x80073d19 session error gets its backoff retries here too (issue #150).
+                    $outcome = Install-AppWithVerification -App $appDef
+
+                    if ($outcome.Status -eq 'Failed') {
+                        if ($outcome.FailureReason -in 'PreCheckTimeout', 'VerifyTimeout') {
+                            Write-WarningMessage "Verification timed out for retry: $appName. Assuming installation failed."
                         }
                         else {
                             Write-ErrorMessage "Retry failed: $appName"
-                            $failedApps += $appName
                         }
+                        $failedApps += $appName
                     }
                     else {
-                        # Route the final retry through the same helper so a lingering 0x80073d19
-                        # session error gets its backoff retries here too (issue #150).
-                        [void](Install-WingetPackage -PackageId $appName -InstallerType $appDef.installerType)
-
-                        # Verify installation with timeout
-                        $verifyProcess = Start-Process -FilePath 'winget' `
-                            -ArgumentList 'list', '--exact', '--id', $appName, '--accept-source-agreements' `
-                            -NoNewWindow `
-                            -PassThru `
-                            -RedirectStandardOutput "$env:TEMP\winget_retry_verify_output.txt" `
-                            -RedirectStandardError "$env:TEMP\winget_retry_verify_error.txt"
-
-                        if ($verifyProcess.WaitForExit(15000)) {
-                            $retryResult = Get-Content "$env:TEMP\winget_retry_verify_output.txt" -ErrorAction SilentlyContinue
-                            if (![String]::Join('', $retryResult).Contains($appName)) {
-                                Write-ErrorMessage "Retry failed: $appName"
-                                $failedApps += $appName
-                            }
-                            else {
-                                Write-Success "Retry succeeded: $appName"
-                                $installedApps += $appName
-                            }
-                        }
-                        else {
-                            Write-WarningMessage "Verification timed out for retry: $appName. Assuming installation failed."
-                            try { $verifyProcess.Kill() } catch { }
-                            $failedApps += $appName
-                        }
-
-                        # Cleanup temp files
-                        Remove-Item "$env:TEMP\winget_retry_verify_output.txt" -ErrorAction SilentlyContinue
-                        Remove-Item "$env:TEMP\winget_retry_verify_error.txt" -ErrorAction SilentlyContinue
+                        # 'Installed', or 'Skipped' when the first-pass install actually landed
+                        # and only its verification failed — either way the app is present now.
+                        Write-Success "Retry succeeded: $appName"
+                        $installedApps += $appName
                     }
                 }
                 catch {
@@ -2591,15 +2614,75 @@ function Install-WingetPackage {
 
 <#
 .SYNOPSIS
-    Returns true when winget reports the given package id as installed for the current account.
+    Returns whether winget reports the given package id as installed for the current account.
+.DESCRIPTION
+    Without -TimeoutSeconds the check calls winget inline and returns a plain [bool], keeping the
+    original contract for existing callers (e.g. Install-PowerShellLatest).
+
+    With -TimeoutSeconds the check runs `winget list` via Start-Process with redirected output and
+    a hard timeout, killing a hung winget instead of blocking the install loop — the pattern
+    Invoke-WingetInstall used to inline three times before issue #188 centralized it here. Temp
+    file names are unique per run so concurrent checks (or a stale locked file left by a killed
+    run) cannot collide on fixed names (issue #177). In this mode a hashtable is returned so the
+    caller can tell a timeout apart from "not installed": a timeout must count as a failure rather
+    than being silently dropped (issue #176).
 .PARAMETER PackageId
     The winget package id to check.
+.PARAMETER TimeoutSeconds
+    Maximum seconds to wait for `winget list` before killing it. When omitted (or 0), the original
+    inline call without a timeout guard is used and a [bool] is returned.
+.RETURNS
+    [bool] when -TimeoutSeconds is not supplied.
+    [hashtable] @{ Installed = <bool>; TimedOut = <bool>; ExitCode = <int or $null> } when it is;
+    ExitCode is the winget process exit code, or $null when the process timed out or failed to
+    start.
 #>
 function Test-WingetPackageInstalled {
     param (
         [Parameter(Mandatory = $true)]
-        [string]$PackageId
+        [string]$PackageId,
+
+        [Parameter(Mandatory = $false)]
+        [int]$TimeoutSeconds = 0
     )
+
+    if ($TimeoutSeconds -gt 0) {
+        # Unique per-run temp files (issue #177): fixed names made concurrent runs (or a stale
+        # locked file from a killed run) fail Start-Process.
+        $tempSuffix = [System.IO.Path]::GetRandomFileName()
+        $stdoutFile = Join-Path $env:TEMP "winget_list_output_$tempSuffix.txt"
+        $stderrFile = Join-Path $env:TEMP "winget_list_error_$tempSuffix.txt"
+
+        try {
+            $listProcess = Start-Process -FilePath 'winget' `
+                -ArgumentList 'list', '--exact', '--id', $PackageId, '--accept-source-agreements', '--disable-interactivity' `
+                -NoNewWindow `
+                -PassThru `
+                -RedirectStandardOutput $stdoutFile `
+                -RedirectStandardError $stderrFile
+
+            if (-not $listProcess.WaitForExit($TimeoutSeconds * 1000)) {
+                try { $listProcess.Kill() } catch { }
+                return @{ Installed = $false; TimedOut = $true; ExitCode = $null }
+            }
+
+            # Capture the exit code from the process object immediately; the output files are
+            # only read after a confirmed non-timeout exit.
+            $output = @(Get-Content $stdoutFile -ErrorAction SilentlyContinue)
+            return @{
+                Installed = ([String]::Join('', $output)).Contains($PackageId)
+                TimedOut  = $false
+                ExitCode  = $listProcess.ExitCode
+            }
+        }
+        catch {
+            return @{ Installed = $false; TimedOut = $false; ExitCode = $null }
+        }
+        finally {
+            Remove-Item $stdoutFile -ErrorAction SilentlyContinue
+            Remove-Item $stderrFile -ErrorAction SilentlyContinue
+        }
+    }
 
     try {
         $output = winget list --exact --id $PackageId --accept-source-agreements --disable-interactivity 2>&1
