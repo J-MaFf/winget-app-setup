@@ -14,7 +14,18 @@ Windows-only cmdlets.
 
 ## Current State — 2026-07-08
 
-Healthy. **Fixed the winget source probe false-failing every run** ([#174](https://github.com/J-MaFf/winget-app-setup/issues/174)):
+Healthy. **The 2026-07-08 whole-repo multi-agent code-review wave is fully resolved**: all 17
+issues it filed ([#176](https://github.com/J-MaFf/winget-app-setup/issues/176)–[#192](https://github.com/J-MaFf/winget-app-setup/issues/192))
+have landed via PRs #193–#209 — see the Resolved Issues table below. In review: Windows
+PowerShell 5.1 parse safety for the generated installer
+([#210](https://github.com/J-MaFf/winget-app-setup/issues/210), PR
+[#212](https://github.com/J-MaFf/winget-app-setup/pull/212)) and the local pre-commit drift
+check + guard-stack documentation
+([#211](https://github.com/J-MaFf/winget-app-setup/issues/211), stacked on #212). The full
+guard stack that keeps `winget-app-install.ps1` from drifting from the module is now
+documented in readme.md ("Why `winget-app-install.ps1` cannot drift from the module").
+
+Earlier, **fixed the winget source probe false-failing every run** ([#174](https://github.com/J-MaFf/winget-app-setup/issues/174)):
 the `Invoke-WingetSourceProbe` command passed `--accept-source-agreements`, which is invalid for
 `winget source update` (0x8A150002 / -1978335230), so the probe always failed and always printed
 "could not be initialized … may fail with 0x80073D19" on healthy machines. Dropped the invalid flag.
@@ -110,6 +121,23 @@ Pester installs persist across runs there ([#161](https://github.com/J-MaFf/wing
 
 | Issue | Description | PR |
 |-------|-------------|----|
+| [#192](https://github.com/J-MaFf/winget-app-setup/issues/192) | Split `Test-WingetAppInstall.Tests.ps1` into per-area files and remove tautological/drifted tests | [#209](https://github.com/J-MaFf/winget-app-setup/pull/209) |
+| [#191](https://github.com/J-MaFf/winget-app-setup/issues/191) | Module surface: reconcile psd1/psm1 export lists, remove dead `ConvertTo-CommandArguments`, move logging primitives to Private | [#205](https://github.com/J-MaFf/winget-app-setup/pull/205) |
+| [#190](https://github.com/J-MaFf/winget-app-setup/issues/190) | Single-source the app catalog and make the uninstaller consume the module | [#208](https://github.com/J-MaFf/winget-app-setup/pull/208) |
+| [#189](https://github.com/J-MaFf/winget-app-setup/issues/189) | Persistent transcript logging, build-stamped version, and surfacing winget exit codes in failures | [#207](https://github.com/J-MaFf/winget-app-setup/pull/207) |
+| [#188](https://github.com/J-MaFf/winget-app-setup/issues/188) | Extract a shared install-and-verify helper so `Invoke-WingetInstall` becomes testable | [#206](https://github.com/J-MaFf/winget-app-setup/pull/206) |
+| [#187](https://github.com/J-MaFf/winget-app-setup/issues/187) | Windows Terminal configuration targets the admin's profile under cross-user elevation; JSONC sanitizer misses inline comments; `-AsJson` output is polluted | [#204](https://github.com/J-MaFf/winget-app-setup/pull/204) |
+| [#186](https://github.com/J-MaFf/winget-app-setup/issues/186) | WAU operability: surface install result in summary, version-aware upgrades, uninstall the actual product code, harden the MSI temp path | [#203](https://github.com/J-MaFf/winget-app-setup/pull/203) |
+| [#185](https://github.com/J-MaFf/winget-app-setup/issues/185) | `-SkipSystemCheck` is dropped on elevated relaunch; `Invoke-WingetInstall` breaks when invoked from the imported module | [#198](https://github.com/J-MaFf/winget-app-setup/pull/198) |
+| [#184](https://github.com/J-MaFf/winget-app-setup/issues/184) | SystemChecks: proxy-only networks false-FAIL the blocking network check; disk-space prompt fires on drive-read failure; `-WhatIf` skips checks it promises to run | [#195](https://github.com/J-MaFf/winget-app-setup/pull/195) |
+| [#183](https://github.com/J-MaFf/winget-app-setup/issues/183) | Build script robustness: parse errors discarded, PS 5.1 encoding corruption, BOM-blind `-Check`, culture-sensitive sort | [#201](https://github.com/J-MaFf/winget-app-setup/pull/201) |
+| [#182](https://github.com/J-MaFf/winget-app-setup/issues/182) | Docs truth pass: stale updater references, wrong probe-flag description, dead links, conflicting agent instructions | [#199](https://github.com/J-MaFf/winget-app-setup/pull/199) |
+| [#181](https://github.com/J-MaFf/winget-app-setup/issues/181) | Pester suite executes the real `Repair-WinGetPackageManager` and has order-dependent tests via stale `LASTEXITCODE` | [#197](https://github.com/J-MaFf/winget-app-setup/pull/197) |
+| [#180](https://github.com/J-MaFf/winget-app-setup/issues/180) | `winget-app-uninstall.ps1`: locale-dependent success detection, no exit-code capture, hangs on first-run source agreements | [#193](https://github.com/J-MaFf/winget-app-setup/pull/193) |
+| [#179](https://github.com/J-MaFf/winget-app-setup/issues/179) | PATH handling: installer permanently adds its own directory to User PATH; duplicate detection is case-sensitive; 2048-char guard is wrong | [#196](https://github.com/J-MaFf/winget-app-setup/pull/196) |
+| [#178](https://github.com/J-MaFf/winget-app-setup/issues/178) | `Invoke-AppxProvisioning` interpolates paths into an elevated command with no escaping | [#194](https://github.com/J-MaFf/winget-app-setup/pull/194) |
+| [#177](https://github.com/J-MaFf/winget-app-setup/issues/177) | Winget source/bootstrap verification trusts error output and duplicates probes | [#202](https://github.com/J-MaFf/winget-app-setup/pull/202) |
+| [#176](https://github.com/J-MaFf/winget-app-setup/issues/176) | Orchestrator reports success on failure and blocks unattended runs | [#200](https://github.com/J-MaFf/winget-app-setup/pull/200) |
 | [#174](https://github.com/J-MaFf/winget-app-setup/issues/174) | Winget source probe false-fails (invalid `--accept-source-agreements` on `source update`) | [#175](https://github.com/J-MaFf/winget-app-setup/pull/175) |
 | [#172](https://github.com/J-MaFf/winget-app-setup/issues/172) | Stop trusting/resetting the unused msstore source (noisy reset failures) | [#173](https://github.com/J-MaFf/winget-app-setup/pull/173) |
 | [#170](https://github.com/J-MaFf/winget-app-setup/issues/170) | Remove the install-time inline update pass (redundant with WAU) | [#171](https://github.com/J-MaFf/winget-app-setup/pull/171) |
@@ -132,34 +160,16 @@ Pester installs persist across runs there ([#161](https://github.com/J-MaFf/wing
 
 ### Open Issues
 
-Filed by the 2026-07-08 whole-repo multi-agent code review:
-
-| Issue | Description |
-|-------|-------------|
-| [#176](https://github.com/J-MaFf/winget-app-setup/issues/176) | Orchestrator reports success on failure and blocks unattended runs |
-| [#177](https://github.com/J-MaFf/winget-app-setup/issues/177) | Winget source/bootstrap verification trusts error output and duplicates probes |
-| [#178](https://github.com/J-MaFf/winget-app-setup/issues/178) | `Invoke-AppxProvisioning` interpolates paths into an elevated command with no escaping |
-| [#179](https://github.com/J-MaFf/winget-app-setup/issues/179) | PATH handling: installer permanently adds its own directory to User PATH; duplicate detection is case-sensitive; 2048-char guard is wrong |
-| [#180](https://github.com/J-MaFf/winget-app-setup/issues/180) | `winget-app-uninstall.ps1`: locale-dependent success detection, no exit-code capture, hangs on first-run source agreements |
-| [#181](https://github.com/J-MaFf/winget-app-setup/issues/181) | Pester suite executes the real `Repair-WinGetPackageManager` and has order-dependent tests via stale `LASTEXITCODE` |
-| [#182](https://github.com/J-MaFf/winget-app-setup/issues/182) | Docs truth pass: stale updater references, wrong probe-flag description, dead links, conflicting agent instructions |
-| [#183](https://github.com/J-MaFf/winget-app-setup/issues/183) | Build script robustness: parse errors discarded, PS 5.1 encoding corruption, BOM-blind `-Check`, culture-sensitive sort |
-| [#184](https://github.com/J-MaFf/winget-app-setup/issues/184) | SystemChecks: proxy-only networks false-FAIL the blocking network check; disk-space prompt fires on drive-read failure; `-WhatIf` skips checks it promises to run |
-| [#185](https://github.com/J-MaFf/winget-app-setup/issues/185) | `-SkipSystemCheck` is dropped on elevated relaunch; `Invoke-WingetInstall` breaks when invoked from the imported module |
-| [#186](https://github.com/J-MaFf/winget-app-setup/issues/186) | WAU operability: surface install result in summary, version-aware upgrades, uninstall the actual product code, harden the MSI temp path |
-| [#187](https://github.com/J-MaFf/winget-app-setup/issues/187) | Windows Terminal configuration targets the admin's profile under cross-user elevation; JSONC sanitizer misses inline comments; `-AsJson` output is polluted |
-| [#188](https://github.com/J-MaFf/winget-app-setup/issues/188) | Extract a shared install-and-verify helper so `Invoke-WingetInstall` becomes testable |
-| [#189](https://github.com/J-MaFf/winget-app-setup/issues/189) | Persistent transcript logging, build-stamped version, and surfacing winget exit codes in failures |
-| [#190](https://github.com/J-MaFf/winget-app-setup/issues/190) | Single-source the app catalog and make the uninstaller consume the module |
-| [#191](https://github.com/J-MaFf/winget-app-setup/issues/191) | Module surface: reconcile psd1/psm1 export lists, remove dead `ConvertTo-CommandArguments`, move logging primitives to Private |
-| [#192](https://github.com/J-MaFf/winget-app-setup/issues/192) | Split `Test-WingetAppInstall.Tests.ps1` into per-area files and remove tautological/drifted tests |
+| Issue | Description | Status |
+|-------|-------------|--------|
+| [#210](https://github.com/J-MaFf/winget-app-setup/issues/210) | Generated installer fails to parse under Windows PowerShell 5.1 (BOM-less UTF-8 decoded as ANSI; em dashes corrupt string tokens) | In review — PR [#212](https://github.com/J-MaFf/winget-app-setup/pull/212) |
+| [#211](https://github.com/J-MaFf/winget-app-setup/issues/211) | Local pre-commit drift check + document the generated-script guard stack | In review — stacked on #212 |
 
 ## Natural Next Steps
 
-- Add a local pre-commit hook that runs `build/Build-WingetInstallScript.ps1 -Check` — CI already runs it on every push/PR (as of [#156](https://github.com/J-MaFf/winget-app-setup/issues/156)), so this just moves the same guard earlier and catches drift before pushing.
 - Watch the first Windows CI runs on the self-hosted win-test runner for environment drift — module versions now persist across runs instead of starting from a fresh `windows-latest` image (as of [#161](https://github.com/J-MaFf/winget-app-setup/issues/161)).
+- Validate the dormant DISM MSIX-provisioning path in `Install-PowerShellLatest` end-to-end on a real Windows 10 machine before PowerShell 7.7 GA makes it load-bearing (as of [#166](https://github.com/J-MaFf/winget-app-setup/issues/166)).
 - Cut a tagged release and move the `[Unreleased]` CHANGELOG entries under a versioned heading.
-- Open the follow-up migration issue listed above.
 
 ## Prerequisites to Run
 

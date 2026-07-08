@@ -31,6 +31,8 @@ This repo targets **Windows only**. All scripts are PowerShell.
 - All install logic lives in `WingetAppSetup/Public/*.ps1` and `WingetAppSetup/Private/*.ps1`.
 - `winget-app-install.ps1` is assembled from those files plus `build/fragments/{head,tail}.ps1`. Never hand-edit it.
 - After changing the module, run `pwsh -File ./build/Build-WingetInstallScript.ps1` to regenerate, and commit both.
+- Drift is enforced end-to-end: `-Check` (byte-compare + BOM guard, parse guard, undefined-reference guard, psd1 export assertion, non-ASCII/PS 5.1 token guard, content-derived build id) runs in CI on every push/PR **and** locally via the tracked `.githooks/pre-commit` hook. Full guard-stack description: readme.md, "Why `winget-app-install.ps1` cannot drift from the module".
+- One-time per clone, enable the local hook: `git config core.hooksPath .githooks`. Caveat: `core.hooksPath` makes git ignore `.git/hooks/`, so anyone who ran the opt-in `bd hooks install` (beads shims) should instead leave it unset and invoke `.githooks/pre-commit` from `.git/hooks/pre-commit` — details in readme.md.
 
 ---
 
