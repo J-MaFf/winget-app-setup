@@ -1822,6 +1822,51 @@ Describe 'Install-MsixProvisionedPackage (DISM provisioning, issue #166)' {
     }
 }
 
+Describe 'Invoke-AppxProvisioning (delegated command quoting, issue #178)' {
+    # Under pwsh, Invoke-AppxProvisioning delegates to Windows PowerShell 5.1 by string-building
+    # an elevated powershell.exe -Command payload. Every path interpolated into that string sits
+    # inside a single-quoted literal, so embedded apostrophes must be doubled — otherwise a path
+    # like C:\Users\O'Brien\... unbalances the quoting (or breaks out of the literal entirely).
+    # These tests mock the powershell.exe invocation boundary and inspect the -Command argument.
+    BeforeEach {
+        Mock Write-ErrorMessage { }
+        $script:capturedCommand = $null
+        Mock powershell.exe { $script:capturedCommand = "$($args[-1])"; $global:LASTEXITCODE = 0 }
+    }
+
+    It 'escapes an apostrophe in PackagePath by doubling the single quote' {
+        [void](Invoke-AppxProvisioning -PackagePath "C:\Users\O'Brien\pkg.msix")
+
+        Assert-MockCalled powershell.exe -Times 1 -Exactly
+        $script:capturedCommand | Should -BeLike "*-PackagePath 'C:\Users\O''Brien\pkg.msix'*"
+        $script:capturedCommand | Should -Not -BeLike "*-PackagePath 'C:\Users\O'Brien*"
+    }
+
+    It 'escapes apostrophes in every DependencyPackagePath element before joining' {
+        [void](Invoke-AppxProvisioning -PackagePath 'C:\dl\pkg.msix' -DependencyPackagePath @(
+                "C:\Users\O'Brien\dep1.msix",
+                "C:\Users\D'Arcy\dep2.msix"
+            ))
+
+        $script:capturedCommand | Should -BeLike "*-DependencyPackagePath @('C:\Users\O''Brien\dep1.msix','C:\Users\D''Arcy\dep2.msix')*"
+    }
+
+    It 'escapes an apostrophe in LicensePath' {
+        Mock Test-Path { $true }
+
+        [void](Invoke-AppxProvisioning -PackagePath 'C:\dl\pkg.msix' -LicensePath "C:\Users\O'Brien\license.xml")
+
+        $script:capturedCommand | Should -BeLike "*-LicensePath 'C:\Users\O''Brien\license.xml'*"
+    }
+
+    It 'leaves apostrophe-free paths unchanged and skips the license when none exists' {
+        $result = Invoke-AppxProvisioning -PackagePath 'C:\dl\pkg.msixbundle' -DependencyPackagePath @('C:\dl\Dependencies\runtime.msix')
+
+        $result | Should -Be $true
+        $script:capturedCommand | Should -BeLike "*-PackagePath 'C:\dl\pkg.msixbundle' -DependencyPackagePath @('C:\dl\Dependencies\runtime.msix') -SkipLicense*"
+    }
+}
+
 Describe 'App list consistency' {
     It 'Should keep install and uninstall app lists in sync' {
         $installApps = Get-Content "$PSScriptRoot\winget-app-install.ps1" |
