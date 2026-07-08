@@ -167,37 +167,9 @@ function Invoke-WingetInstall {
     $skippedApps = @()
     $failedApps = @()
 
-    # Verify sources are trusted. Only the winget community source is used — every install forces
-    # --source winget — so msstore is intentionally excluded: it is never installed from, and
-    # trusting it here ran a global `winget source reset --force` that wiped/re-prompted source
-    # agreements and failed noisily on msstore's cert/agreement/licensing handshake in elevated or
-    # cross-user contexts (issue #172).
-    $trustedSources = @('winget')
-    $sourceErrors = @()
-    ForEach ($source in $trustedSources) {
-        if (-not (Test-WingetSourceTrusted -target $source)) {
-            if (-not $WhatIf) {
-                Write-WarningMessage "Trusting source: $source"
-                try {
-                    $sourceResetSuccess = Set-Sources
-                    if (-not $sourceResetSuccess) {
-                        $sourceErrors += $source
-                        Write-WarningMessage "Failed to reset sources for $source. Continuing with installation..."
-                    }
-                }
-                catch {
-                    $sourceErrors += $source
-                    Write-WarningMessage "Error resetting sources for ${source}: ${_}. Continuing with installation..."
-                }
-            }
-            else {
-                Write-Info "[DRY-RUN] Would trust source: $source"
-            }
-        }
-        else {
-            Write-Success "Source is already trusted: $source"
-        }
-    }
+    # No separate source-trust pass here: only the winget community source is used (every install
+    # forces --source winget), and its health was already verified — and repaired if needed — by
+    # Test-WingetSources above (issues #172, #177).
 
     Foreach ($app in $apps) {
         try {

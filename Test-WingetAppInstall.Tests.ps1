@@ -252,22 +252,46 @@ Describe 'Test-AndInstallWinget' {
     }
 
     Context 'When winget is not available and installation succeeds' {
-        It 'Should attempt installation and return true' {
-            Mock Get-Command { return $false } -ParameterFilter { $Name -eq 'winget' }
+        It 'Should attempt installation, re-verify winget, and return true' {
+            $script:appInstallerRegistered = $false
+            Mock Get-Command {
+                if ($script:appInstallerRegistered) { return $true }
+                return $false
+            } -ParameterFilter { $Name -eq 'winget' }
+            Mock Get-Command { $null } -ParameterFilter { $Name -eq 'Repair-WinGetPackageManager' }
             Mock Invoke-WebRequest { }
-            Mock Add-AppxPackage { }
+            Mock Add-AppxPackage { $script:appInstallerRegistered = $true }
             Mock Remove-Item { }
             $result = Test-AndInstallWinget
             $result | Should -Be $true
             Assert-MockCalled Invoke-WebRequest -Times 1
             Assert-MockCalled Add-AppxPackage -Times 1
             Assert-MockCalled Remove-Item -Times 1
+            # The fallback must verify winget after Add-AppxPackage (issue #177): initial check + re-check.
+            Assert-MockCalled Get-Command -Times 2 -Exactly -ParameterFilter { $Name -eq 'winget' }
+        }
+    }
+
+    Context 'When App Installer registers but winget is still unavailable (issue #177)' {
+        It 'Should return false and direct the user to install winget manually' {
+            Mock Get-Command { $false } -ParameterFilter { $Name -eq 'winget' }
+            Mock Get-Command { $null } -ParameterFilter { $Name -eq 'Repair-WinGetPackageManager' }
+            Mock Invoke-WebRequest { }
+            Mock Add-AppxPackage { }
+            Mock Remove-Item { }
+            Mock Write-ErrorMessage { }
+
+            $result = Test-AndInstallWinget
+            $result | Should -Be $false
+            Assert-MockCalled Add-AppxPackage -Times 1
+            Assert-MockCalled Write-ErrorMessage -Times 1 -ParameterFilter { $Message -match 'install winget manually' }
         }
     }
 
     Context 'When winget is not available and installation fails' {
         It 'Should attempt installation, catch error, and return false' {
             Mock Get-Command { return $false } -ParameterFilter { $Name -eq 'winget' }
+            Mock Get-Command { $null } -ParameterFilter { $Name -eq 'Repair-WinGetPackageManager' }
             Mock Invoke-WebRequest { throw 'Network error' }
             $result = Test-AndInstallWinget
             $result | Should -Be $false
@@ -500,93 +524,136 @@ Describe 'Test-WingetSources' {
             Assert-MockCalled Add-AppxPackage -Times 1
         }
     }
-}
 
-Describe 'Test-WingetSourceTrusted' {
-    BeforeAll {
-        Mock Write-Host { }
-        Mock Write-Warning { }
+    Context 'Functional probe arguments (issue #177)' {
+        It 'Should pass --accept-source-agreements to the winget search probe' {
+            $script:searchArgs = $null
+            Mock winget {
+                if ($args[0] -eq 'source' -and $args[1] -eq 'list') {
+                    $global:LASTEXITCODE = 0
+                    return 'winget      https://cdn.winget.microsoft.com/cache'
+                }
+                elseif ($args[0] -eq 'search' -and $args[1] -eq '7zip') {
+                    $script:searchArgs = $args
+                    $global:LASTEXITCODE = 0
+                    return '7zip.7zip    7.30'
+                }
+            }
+            Mock Add-AppxPackage { }
 
-        # Functions loaded from the module via BeforeAll at the top of the suite
-    }
+            $result = Test-WingetSources
 
-    Context 'When source is trusted' {
-        It 'Should return true and accept source agreements' {
-            Mock winget { return 'winget      https://cdn.winget.microsoft.com/cache        true' } -ParameterFilter { $args[0] -eq 'source' -and $args[1] -eq 'list' -and $args -contains '--disable-interactivity' }
-            $result = Test-WingetSourceTrusted -target 'winget'
             $result | Should -Be $true
-        }
-    }
-
-    Context 'When source is not trusted' {
-        It 'Should return false' {
-            Mock winget { return 'msstore      https://storeedgefd.dsx.mp.microsoft.com/v9.0        true' } -ParameterFilter { $args[0] -eq 'source' -and $args[1] -eq 'list' -and $args -contains '--disable-interactivity' }
-            $result = Test-WingetSourceTrusted -target 'winget'
-            $result | Should -Be $false
-        }
-    }
-
-    Context 'When winget source list fails' {
-        It 'Should return false and emit warning' {
-            Mock winget { throw 'Command failed' } -ParameterFilter { $args[0] -eq 'source' -and $args[1] -eq 'list' -and $args -contains '--disable-interactivity' }
-            $result = Test-WingetSourceTrusted -target 'winget'
-            $result | Should -Be $false
-            Assert-MockCalled Write-Warning -Times 1
+            # --accept-source-agreements is valid for `winget search` (unlike `winget source
+            # update`, issues #174/#175) and stops a fresh account's unaccepted agreements
+            # (0x8A150046) from being misdiagnosed as source corruption.
+            $script:searchArgs | Should -Contain '--accept-source-agreements'
+            $script:searchArgs | Should -Contain '--disable-interactivity'
+            $script:searchArgs | Should -Contain '--source'
         }
     }
 }
 
-Describe 'Set-Sources' {
-    BeforeAll {
+Describe 'Test-WingetSourceHealth (shared source probe, issue #177)' {
+    BeforeEach {
         Mock Write-Host { }
-
-        # Dot-source the main script to import Set-Sources
+        Mock Write-Success { }
+        Mock Write-WarningMessage { }
     }
 
-    It 'Should call winget source reset and return true on success' {
-        Mock Start-Process {
-            param($FilePath, $ArgumentList, $NoNewWindow, $PassThru, $RedirectStandardOutput, $RedirectStandardError)
-            $mockProcess = New-Object PSObject
-            $mockProcess | Add-Member -MemberType NoteProperty -Name 'ExitCode' -Value 0
-            $mockProcess | Add-Member -MemberType ScriptMethod -Name 'WaitForExit' -Value { return $true }
-            return $mockProcess
+    It 'Reports healthy when the source is listed and a search succeeds' {
+        Mock winget {
+            if ($args[0] -eq 'source' -and $args[1] -eq 'list') {
+                $global:LASTEXITCODE = 0
+                return 'winget      https://cdn.winget.microsoft.com/cache'
+            }
+            elseif ($args[0] -eq 'search' -and $args[1] -eq '7zip') {
+                $global:LASTEXITCODE = 0
+                return '7zip.7zip    7.30'
+            }
         }
-        Mock Get-Content { return $null } -ParameterFilter { $Path -match 'winget_reset_error' }
-        Mock Remove-Item { }
 
-        $result = Set-Sources
-        $result | Should -Be $true
+        $health = Test-WingetSourceHealth
+
+        $health.Listed | Should -Be $true
+        $health.Functional | Should -Be $true
+        $health.Healthy | Should -Be $true
+        Assert-MockCalled Write-Success -Times 1 -ParameterFilter { $Message -match 'accessible and functional' }
     }
 
-    It 'Should return false on non-zero exit code and log error details' {
-        Mock Start-Process {
-            param($FilePath, $ArgumentList, $NoNewWindow, $PassThru, $RedirectStandardOutput, $RedirectStandardError)
-            $mockProcess = New-Object PSObject
-            $mockProcess | Add-Member -MemberType NoteProperty -Name 'ExitCode' -Value 1
-            $mockProcess | Add-Member -MemberType ScriptMethod -Name 'WaitForExit' -Value { return $true }
-            return $mockProcess
+    It 'Reports not listed (and skips the search) when the winget source is missing' {
+        Mock winget {
+            if ($args[0] -eq 'source' -and $args[1] -eq 'list') {
+                $global:LASTEXITCODE = 0
+                return 'msstore      https://storeedgefd.dsx.mp.microsoft.com/v9.0'
+            }
+            elseif ($args[0] -eq 'search') {
+                throw 'search should not run when the source is not listed'
+            }
         }
-        Mock Get-Content { return 'Permission denied' } -ParameterFilter { $Path -match 'winget_reset_error' }
-        Mock Remove-Item { }
 
-        $result = Set-Sources
-        $result | Should -Be $false
-        Assert-MockCalled Write-Host -Times 1 -ParameterFilter { $Object -match 'Permission denied' }
+        $health = Test-WingetSourceHealth
+
+        $health.Listed | Should -Be $false
+        $health.Functional | Should -Be $false
+        $health.Healthy | Should -Be $false
     }
 
-    It 'Should handle timeout and kill process' {
-        $mockProcess = New-Object PSObject
-        $mockProcess | Add-Member -MemberType NoteProperty -Name 'ExitCode' -Value 0
-        $mockProcess | Add-Member -MemberType ScriptMethod -Name 'WaitForExit' -Value { return $false }
-        $script:killInvoked = $false
-        $mockProcess | Add-Member -MemberType ScriptMethod -Name 'Kill' -Value { $script:killInvoked = $true }
+    It 'Reports not functional when the search probe exits nonzero' {
+        Mock winget {
+            if ($args[0] -eq 'source' -and $args[1] -eq 'list') {
+                $global:LASTEXITCODE = 0
+                return 'winget      https://cdn.winget.microsoft.com/cache'
+            }
+            elseif ($args[0] -eq 'search' -and $args[1] -eq '7zip') {
+                $global:LASTEXITCODE = 1
+                return '0x8a15000f Data required by the source is missing'
+            }
+        }
 
-        Mock Start-Process { return $mockProcess }
-        Mock Remove-Item { }
+        $health = Test-WingetSourceHealth
 
-        $result = Set-Sources
-        $result | Should -Be $false
-        $script:killInvoked | Should -Be $true
+        $health.Listed | Should -Be $true
+        $health.Functional | Should -Be $false
+        $health.Healthy | Should -Be $false
+        Assert-MockCalled Write-WarningMessage -Times 1 -ParameterFilter { $Message -match 'corrupted or missing data' }
+    }
+
+    It 'Suppresses per-step messages when -Quiet is passed' {
+        Mock winget {
+            if ($args[0] -eq 'source' -and $args[1] -eq 'list') {
+                $global:LASTEXITCODE = 0
+                return 'winget      https://cdn.winget.microsoft.com/cache'
+            }
+            elseif ($args[0] -eq 'search' -and $args[1] -eq '7zip') {
+                $global:LASTEXITCODE = 0
+                return '7zip.7zip    7.30'
+            }
+        }
+
+        $health = Test-WingetSourceHealth -Quiet
+
+        $health.Healthy | Should -Be $true
+        Assert-MockCalled Write-Success -Times 0 -Exactly
+    }
+}
+
+Describe 'msstore-era source-trust helpers removed (issue #177)' {
+    # Test-WingetSourceTrusted trusted error output (no $LASTEXITCODE check on merged stderr) and
+    # Set-Sources was only reachable from the removed Install.ps1 trusted-sources loop; source
+    # health is verified (and repaired) solely by Test-WingetSources now.
+    It 'No longer defines Test-WingetSourceTrusted' {
+        Test-Path Function:\Test-WingetSourceTrusted | Should -Be $false
+    }
+
+    It 'No longer defines Set-Sources' {
+        Test-Path Function:\Set-Sources | Should -Be $false
+    }
+
+    It 'No longer exports either helper from the module manifest' {
+        $manifest = Import-PowerShellDataFile (Join-Path $PSScriptRoot 'WingetAppSetup/WingetAppSetup.psd1')
+        $manifest.FunctionsToExport | Should -Not -Contain 'Test-WingetSourceTrusted'
+        $manifest.FunctionsToExport | Should -Not -Contain 'Set-Sources'
     }
 }
 
@@ -1187,47 +1254,8 @@ Describe 'Main Script Logic' {
         }
     }
 
-    Context 'Source verification' {
-        It 'Should check the winget source only (msstore is never used)' {
-            Mock Test-WingetSourceTrusted { param($target) return $true } -ParameterFilter { $target -eq 'winget' }
-
-            $trustedSources = @('winget')
-            $trustedSources | Should -Not -Contain 'msstore'
-            foreach ($source in $trustedSources) {
-                Test-WingetSourceTrusted -target $source | Should -Be $true
-            }
-        }
-
-        It 'Should call Set-Sources once when the winget source is not trusted' {
-            $trustedSources = @('winget')
-            $script:setSourcesCalls = 0
-            function Set-Sources { $script:setSourcesCalls++; return $true }
-
-            foreach ($source in $trustedSources) {
-                Set-Sources | Out-Null
-            }
-
-            $script:setSourcesCalls | Should -Be 1
-        }
-
-        It 'Should track the source error when Set-Sources fails' {
-            $trustedSources = @('winget')
-            $script:setSourcesCalls = 0
-            function Set-Sources { $script:setSourcesCalls++; return $false }
-            $sourceErrors = @()
-
-            foreach ($source in $trustedSources) {
-                if (-not (Set-Sources)) {
-                    $sourceErrors += $source
-                }
-            }
-
-            $script:setSourcesCalls | Should -Be 1
-            $sourceErrors.Count | Should -Be 1
-            $sourceErrors | Should -Contain 'winget'
-            $sourceErrors | Should -Not -Contain 'msstore'
-        }
-    }
+    # The msstore-era 'Source verification' loop (Test-WingetSourceTrusted/Set-Sources) was removed
+    # in issue #177: source health is verified and repaired by Test-WingetSources before this point.
 
     Context 'App installation loop' {
         It 'Should install app when not already installed' {
@@ -1729,6 +1757,26 @@ Describe 'Invoke-WingetSourceProbe' {
         $result.Succeeded | Should -Be $false
         $result.ExitCode | Should -Be $null
         $result.TimedOut | Should -Be $false
+    }
+
+    It 'Uses unique temp file names on every run (issue #177)' {
+        $script:probeRedirectPaths = @()
+        Mock Start-Process {
+            $script:probeRedirectPaths += @($RedirectStandardOutput, $RedirectStandardError)
+            $p = [pscustomobject]@{ ExitCode = 0 }
+            $p | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value { param($ms) $true }
+            $p | Add-Member -MemberType ScriptMethod -Name Kill -Value { }
+            $p
+        }
+
+        [void](Invoke-WingetSourceProbe)
+        [void](Invoke-WingetSourceProbe)
+
+        $script:probeRedirectPaths.Count | Should -Be 4
+        # stdout and stderr differ within one run, and neither repeats across runs.
+        ($script:probeRedirectPaths | Select-Object -Unique).Count | Should -Be 4
+        # Concurrent runs must not collide on the old fixed names.
+        $script:probeRedirectPaths[0] | Should -Not -Be $script:probeRedirectPaths[2]
     }
 }
 
@@ -2322,57 +2370,9 @@ Describe 'WhatIf Mode - Unit Tests' {
         }
     }
 
-    Context 'WhatIf logic for source trust' {
-        It 'Should skip Set-Sources when WhatIf is true' {
-            Mock Set-Sources { }
-            Mock Write-Info { }
-            Mock Write-WarningMessage { }
-            Mock Write-Success { }
-            Mock Test-WingetSourceTrusted { return $false }
-
-            # Simulate the code path
-            $WhatIf = $true
-            $source = 'winget'
-
-            if (-not (Test-WingetSourceTrusted -target $source)) {
-                if (-not $WhatIf) {
-                    Write-WarningMessage "Trusting source: $source"
-                    Set-Sources
-                }
-                else {
-                    Write-Info "[DRY-RUN] Would trust source: $source"
-                }
-            }
-
-            Assert-MockCalled Set-Sources -Times 0
-            Assert-MockCalled Write-Info -Times 1
-        }
-
-        It 'Should call Set-Sources when WhatIf is false' {
-            Mock Set-Sources { }
-            Mock Write-Info { }
-            Mock Write-WarningMessage { }
-            Mock Write-Success { }
-            Mock Test-WingetSourceTrusted { return $false }
-
-            # Simulate the code path
-            $WhatIf = $false
-            $source = 'winget'
-
-            if (-not (Test-WingetSourceTrusted -target $source)) {
-                if (-not $WhatIf) {
-                    Write-WarningMessage "Trusting source: $source"
-                    Set-Sources
-                }
-                else {
-                    Write-Info "[DRY-RUN] Would trust source: $source"
-                }
-            }
-
-            Assert-MockCalled Set-Sources -Times 1
-            Assert-MockCalled Write-WarningMessage -Times 1
-        }
-    }
+    # The 'WhatIf logic for source trust' context was removed in issue #177 along with the
+    # Install.ps1 trusted-sources loop it simulated (Test-WingetSourceTrusted/Set-Sources);
+    # the 'WhatIf logic for PATH updates' context was removed in issue #179 with the PATH block.
 
     Context 'WhatIf logic for app installation' {
         It 'Should skip Start-Process when WhatIf is true' {
