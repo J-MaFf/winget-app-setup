@@ -101,7 +101,10 @@ $allPassed = ($passedCount -eq $totalCount)
 Write-Host ''
 Write-Host 'Windows Terminal Configuration Smoke Test' -ForegroundColor Cyan
 Write-Host '----------------------------------------' -ForegroundColor Cyan
-$results | Format-Table -AutoSize
+# Route the table to the host (like the Write-Host lines around it) so the success stream
+# stays clean: with -AsJson, stdout must carry ONLY the JSON payload so callers can pipe
+# it straight into ConvertFrom-Json (issue #187).
+$results | Format-Table -AutoSize | Out-Host
 Write-Host "Result: $passedCount/$totalCount checks passed." -ForegroundColor $(if ($allPassed) { 'Green' } else { 'Yellow' })
 
 if ($AsJson) {

@@ -2266,6 +2266,116 @@ Describe 'Windows Terminal configuration' {
         }
     }
 
+    Context 'Convert-JsoncToJson sanitizer' {
+        It 'Should strip a trailing inline comment after a value' {
+            $jsonc = @'
+{
+  "copyOnSelect": true, // keep this setting
+  "defaultProfile": "{574e775e-4f2a-5b96-ac1e-a2962a402336}"
+}
+'@
+            $sanitized = Convert-JsoncToJson -JsonText $jsonc
+
+            $sanitized | Should -Not -Match 'keep this setting'
+            $parsed = $sanitized | ConvertFrom-Json
+            $parsed.copyOnSelect | Should -BeTrue
+            $parsed.defaultProfile | Should -Be '{574e775e-4f2a-5b96-ac1e-a2962a402336}'
+        }
+
+        It 'Should preserve comment-like sequences inside string values' {
+            $jsonc = @'
+{
+  "commandline": "cmd /* not a comment */ //still-not",
+  "url": "https://example.com/path"
+}
+'@
+            $parsed = Convert-JsoncToJson -JsonText $jsonc | ConvertFrom-Json
+
+            $parsed.commandline | Should -Be 'cmd /* not a comment */ //still-not'
+            $parsed.url | Should -Be 'https://example.com/path'
+        }
+
+        It 'Should honor escaped quotes so \" does not end the string' {
+            $jsonc = @'
+{
+  "name": "quoted \" // not a comment",
+  "next": 1 // real comment
+}
+'@
+            $sanitized = Convert-JsoncToJson -JsonText $jsonc
+
+            $sanitized | Should -Not -Match 'real comment'
+            $parsed = $sanitized | ConvertFrom-Json
+            $parsed.name | Should -Be 'quoted " // not a comment'
+            $parsed.next | Should -Be 1
+        }
+
+        It 'Should strip full-line comments' {
+            $jsonc = @'
+{
+  // full-line comment
+  "a": 1
+}
+'@
+            $sanitized = Convert-JsoncToJson -JsonText $jsonc
+
+            $sanitized | Should -Not -Match 'full-line comment'
+            ($sanitized | ConvertFrom-Json).a | Should -Be 1
+        }
+
+        It 'Should strip block comments spanning multiple lines' {
+            $jsonc = @'
+{
+  /* block comment
+     spanning lines */
+  "a": 1,
+  "b": /* inline block */ 2
+}
+'@
+            $sanitized = Convert-JsoncToJson -JsonText $jsonc
+
+            $sanitized | Should -Not -Match 'block comment'
+            $parsed = $sanitized | ConvertFrom-Json
+            $parsed.a | Should -Be 1
+            $parsed.b | Should -Be 2
+        }
+
+        It 'Should remove trailing commas, including one separated from the closer by a comment' {
+            $jsonc = @'
+{
+  "list": [1, 2, /* trailing */ ],
+  "a": 1,
+}
+'@
+            $parsed = Convert-JsoncToJson -JsonText $jsonc | ConvertFrom-Json
+
+            $parsed.list.Count | Should -Be 2
+            $parsed.a | Should -Be 1
+        }
+
+        It 'Should not treat comma-plus-closer content inside strings as a trailing comma' {
+            $jsonc = @'
+{
+  "text": "a, ]"
+}
+'@
+            (Convert-JsoncToJson -JsonText $jsonc | ConvertFrom-Json).text | Should -Be 'a, ]'
+        }
+
+        It 'Should parse settings with a trailing inline comment end-to-end' {
+            $jsonc = @'
+{
+  "copyOnSelect": true, // keep
+  "profiles": { "list": [] }
+}
+'@
+            $parsed = ConvertFrom-TerminalSettingsJson -JsonText $jsonc
+
+            $parsed | Should -Not -BeNullOrEmpty
+            $parsed.copyOnSelect | Should -BeTrue
+        }
+    }
+
     Context 'Set-WindowsTerminalAsDefaultTerminalApplication' {
         It 'Should create/update registry values when not already configured' {
             Mock Test-Path { return $false } -ParameterFilter { $Path -eq 'HKCU:\Console\%%Startup' }
@@ -2308,6 +2418,13 @@ Describe 'Windows Terminal configuration' {
     }
 
     Context 'Set-WindowsTerminalDefaults orchestration' {
+        BeforeEach {
+            # Deterministic same-user elevation state by default; cross-user tests override.
+            Mock Get-ProcessUserName { 'CONTOSO\jdoe' }
+            Mock Get-InteractiveSessionUserName { 'CONTOSO\jdoe' }
+            Mock Write-WarningMessage { }
+        }
+
         It 'Should perform no writes in WhatIf mode' {
             Mock Get-WindowsTerminalSettingsPaths { return @('C:\temp\settings.json') }
             Mock Set-WindowsTerminalDefaultProfile { return $true }
@@ -2341,6 +2458,60 @@ Describe 'Windows Terminal configuration' {
 
             Assert-MockCalled Set-WindowsTerminalDefaultProfile -Times 2
             Assert-MockCalled Set-WindowsTerminalAsDefaultTerminalApplication -Times 1
+        }
+
+        It 'Should not emit the cross-user warning when process and session users match' {
+            Mock Get-WindowsTerminalSettingsPaths { return @('C:\temp\settings.json') }
+            Mock Set-WindowsTerminalDefaultProfile { return $true }
+            Mock Set-WindowsTerminalAsDefaultTerminalApplication { return $true }
+
+            Set-WindowsTerminalDefaults
+
+            Assert-MockCalled Write-WarningMessage -Times 0 -ParameterFilter { $Message -match 'CROSS-USER ELEVATION' }
+        }
+
+        It 'Should warn loudly and still apply per-user config when cross-user elevation is detected' {
+            Mock Get-WindowsTerminalSettingsPaths { return @('C:\temp\settings.json') }
+            Mock Set-WindowsTerminalDefaultProfile { return $true }
+            Mock Set-WindowsTerminalAsDefaultTerminalApplication { return $true }
+            Mock Get-ProcessUserName { 'CONTOSO\admin-tech' }
+            Mock Get-InteractiveSessionUserName { 'CONTOSO\jdoe' }
+
+            Set-WindowsTerminalDefaults
+
+            Assert-MockCalled Write-WarningMessage -ParameterFilter { $Message -match 'CROSS-USER ELEVATION' }
+            Assert-MockCalled Write-WarningMessage -ParameterFilter { $Message -match "NOT to 'CONTOSO\\jdoe'" }
+            Assert-MockCalled Write-WarningMessage -ParameterFilter { $Message -match "applied to 'CONTOSO\\admin-tech' only" }
+            # Honest reporting only: the per-user writes still target the process account.
+            Assert-MockCalled Set-WindowsTerminalDefaultProfile -Times 1
+            Assert-MockCalled Set-WindowsTerminalAsDefaultTerminalApplication -Times 1
+        }
+
+        It 'Should warn about cross-user elevation in WhatIf mode without the applied-to caveat' {
+            Mock Get-WindowsTerminalSettingsPaths { return @('C:\temp\settings.json') }
+            Mock Set-WindowsTerminalDefaultProfile { return $true }
+            Mock Set-WindowsTerminalAsDefaultTerminalApplication { return $true }
+            Mock Write-Info { }
+            Mock Get-ProcessUserName { 'CONTOSO\admin-tech' }
+            Mock Get-InteractiveSessionUserName { 'CONTOSO\jdoe' }
+
+            Set-WindowsTerminalDefaults -WhatIf
+
+            Assert-MockCalled Write-WarningMessage -ParameterFilter { $Message -match 'CROSS-USER ELEVATION' }
+            Assert-MockCalled Write-WarningMessage -Times 0 -ParameterFilter { $Message -match 'remains unconfigured' }
+            Assert-MockCalled Set-WindowsTerminalDefaultProfile -Times 0
+        }
+
+        It 'Should not emit the cross-user warning when the interactive user is unknown' {
+            Mock Get-WindowsTerminalSettingsPaths { return @('C:\temp\settings.json') }
+            Mock Set-WindowsTerminalDefaultProfile { return $true }
+            Mock Set-WindowsTerminalAsDefaultTerminalApplication { return $true }
+            Mock Get-ProcessUserName { 'CONTOSO\admin-tech' }
+            Mock Get-InteractiveSessionUserName { $null }
+
+            Set-WindowsTerminalDefaults
+
+            Assert-MockCalled Write-WarningMessage -Times 0 -ParameterFilter { $Message -match 'CROSS-USER ELEVATION' }
         }
     }
 }

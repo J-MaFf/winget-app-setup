@@ -2,8 +2,11 @@
 .SYNOPSIS
     Attempts to parse Windows Terminal settings content, including JSONC variants.
 .DESCRIPTION
-    Tries ConvertFrom-Json first. If parsing fails, removes line/block comments and
-    trailing commas to support common Windows Terminal JSONC formatting before retrying.
+    Tries ConvertFrom-Json first (PowerShell 7+ tolerates JSONC natively). If parsing
+    fails — Windows PowerShell 5.1 rejects comments and trailing commas — sanitizes the
+    text with the string-aware Convert-JsoncToJson scanner and retries. The previous
+    regex sanitizer missed trailing inline // comments and could corrupt string values
+    containing comment-like sequences (issue #187).
 .PARAMETER JsonText
     Raw settings content.
 .RETURNS
@@ -25,9 +28,7 @@ function ConvertFrom-TerminalSettingsJson {
     }
     catch {
         # Windows Terminal settings are often JSONC; strip comments and trailing commas.
-        $sanitizedJson = $JsonText -replace '(?ms)/\*.*?\*/', ''
-        $sanitizedJson = $sanitizedJson -replace '(?m)^\s*//.*$', ''
-        $sanitizedJson = $sanitizedJson -replace ',(\s*[}\]])', '$1'
+        $sanitizedJson = Convert-JsoncToJson -JsonText $JsonText
 
         try {
             # Keep parsing compatible with both Windows PowerShell and PowerShell 7+.
@@ -207,6 +208,15 @@ function Set-WindowsTerminalAsDefaultTerminalApplication {
 .DESCRIPTION
     Applies both issue #74 requirements: PowerShell 7 default profile and Windows Terminal
     default terminal application setting.
+
+    Both writes are strictly per-user: settings.json lives under the process account's
+    %LOCALAPPDATA% and the delegation values under its HKCU hive. Under this repo's
+    documented cross-user scenario — a tech elevating as an admin-* account on a user's
+    machine (issue #159) — that means the ADMIN account's terminal gets configured, not the
+    logged-on user's. This function reuses the #159 detection (Get-ProcessUserName vs
+    Get-InteractiveSessionUserName) to warn loudly and report honestly in that case
+    (issue #187). It deliberately does NOT write to another user's profile or registry
+    hive — impersonation/HKU writes are out of scope.
 .PARAMETER WhatIf
     When provided, only reports intended actions.
 #>
@@ -218,6 +228,19 @@ function Set-WindowsTerminalDefaults {
 
     $powerShell7ProfileGuid = '{574e775e-4f2a-5b96-ac1e-a2962a402336}'
     $settingsPaths = @(Get-WindowsTerminalSettingsPaths)
+
+    # Cross-user elevation detection (issue #187), reusing the #159 helpers.
+    $processUser = Get-ProcessUserName
+    $sessionUser = Get-InteractiveSessionUserName
+    $isCrossUserElevation = [bool]($processUser -and $sessionUser -and ($processUser -ne $sessionUser))
+    if ($isCrossUserElevation) {
+        Write-WarningMessage '================================ CROSS-USER ELEVATION ================================'
+        Write-WarningMessage "Running as '$processUser' while '$sessionUser' owns the interactive session."
+        Write-WarningMessage 'Windows Terminal settings.json and the HKCU default-terminal values are PER-USER:'
+        Write-WarningMessage "everything below is applied to '$processUser' (the ADMIN account), NOT to '$sessionUser'."
+        Write-WarningMessage "'$sessionUser' will be left unconfigured. Re-run this script as '$sessionUser' to configure their terminal."
+        Write-WarningMessage '======================================================================================'
+    }
 
     if ($WhatIf) {
         if ($settingsPaths.Count -gt 0) {
@@ -240,5 +263,12 @@ function Set-WindowsTerminalDefaults {
     }
 
     [void](Set-WindowsTerminalAsDefaultTerminalApplication)
+
+    # Honest reporting under cross-user elevation: the per-step success messages above refer
+    # to the PROCESS account's profile, so close with the caveat rather than an implied
+    # machine-wide success (issue #187).
+    if ($isCrossUserElevation) {
+        Write-WarningMessage "Windows Terminal defaults were applied to '$processUser' only; '$sessionUser' remains unconfigured."
+    }
 }
 
