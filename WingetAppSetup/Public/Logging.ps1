@@ -66,22 +66,6 @@ function Write-ErrorMessage {
 
 <#
 .SYNOPSIS
-    Writes a prompt message in blue color.
-.DESCRIPTION
-    Helper function for consistent user prompt messages throughout the script.
-.PARAMETER Message
-    The message to display
-#>
-function Write-Prompt {
-    param (
-        [Parameter(Mandatory = $true)]
-        [string]$Message
-    )
-    Write-Host $Message -ForegroundColor Blue
-}
-
-<#
-.SYNOPSIS
     Formats an array of app names for display in the summary table.
 .DESCRIPTION
     This function checks if an array has content and formats it as a comma-separated string.

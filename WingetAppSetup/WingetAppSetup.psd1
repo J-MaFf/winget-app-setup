@@ -6,9 +6,12 @@
     Description       = 'Shared functions for installing and updating curated apps via winget (issue #106 refactor of winget-app-install.ps1).'
     PowerShellVersion = '5.1'
 
+    # Single export authority (issue #191): this list must exactly match the functions defined
+    # under Public/*.ps1 — build/Build-WingetInstallScript.ps1 asserts that in build and -Check
+    # modes, and the psm1 exports this same list.
     FunctionsToExport = @(
-        # Logging
-        'Write-Info', 'Write-Success', 'Write-WarningMessage', 'Write-ErrorMessage', 'Write-Prompt', 'Format-AppList', 'Write-Table',
+        # Logging (consumed by winget-app-uninstall.ps1)
+        'Write-Info', 'Write-Success', 'Write-WarningMessage', 'Write-ErrorMessage', 'Format-AppList', 'Write-Table',
         # App validation
         'Test-AppDefinitions',
         # Winget core
@@ -18,7 +21,7 @@
         # Automatic updates (Winget-AutoUpdate)
         'Get-WauPin', 'Test-WauInstalled', 'Install-WingetAutoUpdate', 'Uninstall-WingetAutoUpdate', 'Remove-LegacyScheduledUpdates',
         # Windows Terminal configuration
-        'ConvertFrom-TerminalSettingsJson', 'Get-WindowsTerminalSettingsPath', 'Get-WindowsTerminalSettingsPaths',
+        'Get-WindowsTerminalSettingsPath', 'Get-WindowsTerminalSettingsPaths',
         'Set-WindowsTerminalDefaultProfile', 'Set-WindowsTerminalAsDefaultTerminalApplication', 'Set-WindowsTerminalDefaults',
         # System pre-flight checks
         'Test-SystemRequirements',
