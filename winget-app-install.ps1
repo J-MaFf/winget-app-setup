@@ -2274,12 +2274,19 @@ function Invoke-AppxProvisioning {
     try {
         if ($PSVersionTable.PSEdition -eq 'Core') {
             # Delegate to Windows PowerShell 5.1, where the Appx/DISM provider works.
+            # Every path is interpolated into a single-quoted literal inside the delegated
+            # -Command string, so escape embedded single quotes by doubling them (issue #178).
+            # Otherwise an apostrophe in a path (e.g. C:\Users\O'Brien\...) unbalances the
+            # quoting — breaking provisioning at best, and at worst letting a crafted filename
+            # break out of the literal inside an elevated powershell.exe -Command.
+            $escapedPackagePath = $PackagePath.Replace("'", "''")
             $depClause = if ($DependencyPackagePath.Count -gt 0) {
-                "-DependencyPackagePath @('" + ($DependencyPackagePath -join "','") + "')"
+                $escapedDependencyPaths = @($DependencyPackagePath | ForEach-Object { $_.Replace("'", "''") })
+                "-DependencyPackagePath @('" + ($escapedDependencyPaths -join "','") + "')"
             }
             else { '' }
-            $licClause = if ($hasLicense) { "-LicensePath '$LicensePath'" } else { '-SkipLicense' }
-            $command = "Add-AppxProvisionedPackage -Online -PackagePath '$PackagePath' $depClause $licClause -ErrorAction Stop | Out-Null"
+            $licClause = if ($hasLicense) { "-LicensePath '$($LicensePath.Replace("'", "''"))'" } else { '-SkipLicense' }
+            $command = "Add-AppxProvisionedPackage -Online -PackagePath '$escapedPackagePath' $depClause $licClause -ErrorAction Stop | Out-Null"
             & powershell.exe -NoProfile -ExecutionPolicy Bypass -Command $command
             return ($LASTEXITCODE -eq 0)
         }
