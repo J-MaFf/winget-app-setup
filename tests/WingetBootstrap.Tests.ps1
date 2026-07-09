@@ -34,7 +34,7 @@ Describe 'Test-WingetSourceHealth (shared source probe, issue #177)' {
         $health.Listed | Should -Be $true
         $health.Functional | Should -Be $true
         $health.Healthy | Should -Be $true
-        Assert-MockCalled Write-Success -Times 1 -ParameterFilter { $Message -match 'accessible and functional' }
+        Should -Invoke Write-Success -Times 1 -ParameterFilter { $Message -match 'accessible and functional' }
     }
 
     It 'Reports not listed (and skips the search) when the winget source is missing' {
@@ -72,7 +72,7 @@ Describe 'Test-WingetSourceHealth (shared source probe, issue #177)' {
         $health.Listed | Should -Be $true
         $health.Functional | Should -Be $false
         $health.Healthy | Should -Be $false
-        Assert-MockCalled Write-WarningMessage -Times 1 -ParameterFilter { $Message -match 'corrupted or missing data' }
+        Should -Invoke Write-WarningMessage -Times 1 -ParameterFilter { $Message -match 'corrupted or missing data' }
     }
 
     It 'Suppresses per-step messages when -Quiet is passed' {
@@ -90,7 +90,7 @@ Describe 'Test-WingetSourceHealth (shared source probe, issue #177)' {
         $health = Test-WingetSourceHealth -Quiet
 
         $health.Healthy | Should -Be $true
-        Assert-MockCalled Write-Success -Times 0 -Exactly
+        Should -Invoke Write-Success -Times 0 -Exactly
     }
 }
 
@@ -114,7 +114,7 @@ Describe 'Invoke-WingetSourceProbe' {
         $result.Succeeded | Should -Be $true
         $result.ExitCode | Should -Be 0
         $result.TimedOut | Should -Be $false
-        Assert-MockCalled Start-Process -Times 1 -Exactly -ParameterFilter {
+        Should -Invoke Start-Process -Times 1 -Exactly -ParameterFilter {
             ($ArgumentList -contains 'source') -and
             ($ArgumentList -contains 'update') -and
             ($ArgumentList -contains '--name') -and

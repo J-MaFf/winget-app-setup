@@ -103,9 +103,9 @@ Describe 'Winget-AutoUpdate integration (issue #168)' {
 
             $baseDir = Join-Path $env:ProgramData 'winget-app-setup'
             $dir | Should -BeLike (Join-Path $baseDir 'wau-msi-*')
-            Assert-MockCalled New-Item -Times 2 -Exactly
-            Assert-MockCalled Set-RestrictedDirectoryAcl -Times 1 -Exactly -ParameterFilter { $Path -eq $baseDir }
-            Assert-MockCalled Set-RestrictedDirectoryAcl -Times 1 -Exactly -ParameterFilter { $Path -eq $dir }
+            Should -Invoke New-Item -Times 2 -Exactly
+            Should -Invoke Set-RestrictedDirectoryAcl -Times 1 -Exactly -ParameterFilter { $Path -eq $baseDir }
+            Should -Invoke Set-RestrictedDirectoryAcl -Times 1 -Exactly -ParameterFilter { $Path -eq $dir }
         }
 
         It 'generates a different staging directory name on every run' {
@@ -120,7 +120,7 @@ Describe 'Winget-AutoUpdate integration (issue #168)' {
 
             Set-RestrictedDirectoryAcl -Path 'C:\ProgramData\winget-app-setup\wau-msi-test'
 
-            Assert-MockCalled Start-Process -Times 1 -Exactly -ParameterFilter {
+            Should -Invoke Start-Process -Times 1 -Exactly -ParameterFilter {
                 $FilePath -eq 'icacls.exe' -and
                 $ArgumentList -match '/inheritance:r' -and
                 $ArgumentList -match ([regex]::Escape('*S-1-5-18:(OI)(CI)F')) -and
@@ -149,15 +149,15 @@ Describe 'Winget-AutoUpdate integration (issue #168)' {
 
             $result.Status | Should -Be 'Configured'
             $result.Version | Should -Be (Get-WauPin).Version
-            Assert-MockCalled New-WauStagingDirectory -Times 1 -Exactly
-            Assert-MockCalled Invoke-WebRequest -Times 1 -Exactly -ParameterFilter { $OutFile -like '*wau-msi-test*' }
-            Assert-MockCalled Start-Process -Times 1 -Exactly -ParameterFilter {
+            Should -Invoke New-WauStagingDirectory -Times 1 -Exactly
+            Should -Invoke Invoke-WebRequest -Times 1 -Exactly -ParameterFilter { $OutFile -like '*wau-msi-test*' }
+            Should -Invoke Start-Process -Times 1 -Exactly -ParameterFilter {
                 $FilePath -eq 'msiexec.exe' -and
                 $ArgumentList -match 'RUN_WAU=YES' -and $ArgumentList -match 'USERCONTEXT=1' -and
                 $ArgumentList -match 'DISABLEWAUAUTOUPDATE=1' -and $ArgumentList -match 'UPDATESINTERVAL=Weekly' -and
                 $ArgumentList -match 'NOTIFICATIONLEVEL=Full'
             }
-            Assert-MockCalled Remove-Item -Times 1 -Exactly -ParameterFilter {
+            Should -Invoke Remove-Item -Times 1 -Exactly -ParameterFilter {
                 $Path -eq 'C:\ProgramData\winget-app-setup\wau-msi-test' -and $Recurse
             }
         }
@@ -172,8 +172,8 @@ Describe 'Winget-AutoUpdate integration (issue #168)' {
 
             $result.Status | Should -Be 'AlreadyPresent'
             $result.Version | Should -Be ([version](Get-WauPin).Version)
-            Assert-MockCalled Invoke-WebRequest -Times 0 -Exactly
-            Assert-MockCalled Start-Process -Times 0 -Exactly
+            Should -Invoke Invoke-WebRequest -Times 0 -Exactly
+            Should -Invoke Start-Process -Times 0 -Exactly
         }
 
         It 'upgrades in place when the installed version is older than the pin (issue #186)' {
@@ -188,7 +188,7 @@ Describe 'Winget-AutoUpdate integration (issue #168)' {
             $result = Install-WingetAutoUpdate
 
             $result.Status | Should -Be 'Configured'
-            Assert-MockCalled Start-Process -Times 1 -Exactly -ParameterFilter {
+            Should -Invoke Start-Process -Times 1 -Exactly -ParameterFilter {
                 $FilePath -eq 'msiexec.exe' -and $ArgumentList -match '/i'
             }
         }
@@ -203,7 +203,7 @@ Describe 'Winget-AutoUpdate integration (issue #168)' {
 
             $result.Status | Should -Be 'AlreadyPresent'
             $result.Version | Should -Be ([version]'99.0.0')
-            Assert-MockCalled Start-Process -Times 0 -Exactly
+            Should -Invoke Start-Process -Times 0 -Exactly
         }
 
         It 'leaves an installed WAU with an unreadable version untouched' {
@@ -216,7 +216,7 @@ Describe 'Winget-AutoUpdate integration (issue #168)' {
 
             $result.Status | Should -Be 'AlreadyPresent'
             $result.Version | Should -BeNullOrEmpty
-            Assert-MockCalled Start-Process -Times 0 -Exactly
+            Should -Invoke Start-Process -Times 0 -Exactly
         }
 
         It 'aborts without installing when the MSI hash does not match, and still cleans the staging directory' {
@@ -230,8 +230,8 @@ Describe 'Winget-AutoUpdate integration (issue #168)' {
             $result = Install-WingetAutoUpdate
 
             $result.Status | Should -Be 'Failed'
-            Assert-MockCalled Start-Process -Times 0 -Exactly
-            Assert-MockCalled Remove-Item -Times 1 -Exactly -ParameterFilter {
+            Should -Invoke Start-Process -Times 0 -Exactly
+            Should -Invoke Remove-Item -Times 1 -Exactly -ParameterFilter {
                 $Path -eq 'C:\ProgramData\winget-app-setup\wau-msi-test' -and $Recurse
             }
         }
@@ -245,8 +245,8 @@ Describe 'Winget-AutoUpdate integration (issue #168)' {
             $result = Install-WingetAutoUpdate
 
             $result.Status | Should -Be 'Failed'
-            Assert-MockCalled Invoke-WebRequest -Times 0 -Exactly
-            Assert-MockCalled Remove-Item -Times 0 -Exactly
+            Should -Invoke Invoke-WebRequest -Times 0 -Exactly
+            Should -Invoke Remove-Item -Times 0 -Exactly
         }
 
         It 'treats msiexec exit code 3010 (reboot required) as success' {
@@ -280,7 +280,7 @@ Describe 'Winget-AutoUpdate integration (issue #168)' {
             $result = Uninstall-WingetAutoUpdate
 
             $result | Should -Be $true
-            Assert-MockCalled Start-Process -Times 1 -Exactly -ParameterFilter {
+            Should -Invoke Start-Process -Times 1 -Exactly -ParameterFilter {
                 $FilePath -eq 'msiexec.exe' -and $ArgumentList -match '/x' -and
                 $ArgumentList -match ([regex]::Escape('{11111111-2222-3333-4444-555555555555}'))
             }
@@ -294,7 +294,7 @@ Describe 'Winget-AutoUpdate integration (issue #168)' {
             $result = Uninstall-WingetAutoUpdate
 
             $result | Should -Be $true
-            Assert-MockCalled Start-Process -Times 1 -Exactly -ParameterFilter {
+            Should -Invoke Start-Process -Times 1 -Exactly -ParameterFilter {
                 $FilePath -eq 'msiexec.exe' -and $ArgumentList -match '/x' -and
                 $ArgumentList -match ([regex]::Escape((Get-WauPin).ProductCode))
             }
@@ -305,7 +305,7 @@ Describe 'Winget-AutoUpdate integration (issue #168)' {
             Mock Start-Process { throw 'should not run msiexec when WAU is absent' }
 
             (Uninstall-WingetAutoUpdate) | Should -Be $true
-            Assert-MockCalled Start-Process -Times 0 -Exactly
+            Should -Invoke Start-Process -Times 0 -Exactly
         }
     }
 
@@ -330,8 +330,8 @@ Describe 'Winget-AutoUpdate integration (issue #168)' {
             $result = Remove-LegacyScheduledUpdates
 
             $result | Should -Be $true
-            Assert-MockCalled Unregister-ScheduledTask -Times 1 -Exactly -ParameterFilter { $TaskName -eq 'WingetAppSetup-ScheduledUpdates' }
-            Assert-MockCalled Remove-Item -Times 1 -Exactly
+            Should -Invoke Unregister-ScheduledTask -Times 1 -Exactly -ParameterFilter { $TaskName -eq 'WingetAppSetup-ScheduledUpdates' }
+            Should -Invoke Remove-Item -Times 1 -Exactly
         }
 
         It 'is a no-op when there is nothing to clean up' {
@@ -341,7 +341,7 @@ Describe 'Winget-AutoUpdate integration (issue #168)' {
             Mock Remove-Item { throw 'should not remove' }
 
             (Remove-LegacyScheduledUpdates) | Should -Be $false
-            Assert-MockCalled Unregister-ScheduledTask -Times 0 -Exactly
+            Should -Invoke Unregister-ScheduledTask -Times 0 -Exactly
         }
     }
 }

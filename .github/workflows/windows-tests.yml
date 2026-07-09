@@ -1,6 +1,6 @@
 name: Windows Tests (Pester)
 
-# Runs the Pester v5 unit suite on a real Windows runner. This is where Windows-native
+# Runs the Pester v6 unit suite on a real Windows runner. This is where Windows-native
 # test execution happens, since the Claude Code action (claude.yml) cannot run on
 # Windows runners. @claude (on ubuntu) can read these results via `actions: read`.
 #
@@ -59,17 +59,15 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
 
-          # Pin to Pester 5.x. The suite uses Assert-MockCalled (193 call sites), which Pester 6
-          # removed; under Pester 6 discovery breaks (PowerShell auto-loads the stale bundled
-          # Pester 3.4.0 to satisfy the missing command, and every file then fails with "The Mock
-          # command may only be used inside a Describe block"). Both the availability guard AND the
-          # import must exclude 6.x, or an already-installed / newly-published 6.x wins: an unbounded
-          # `-MinimumVersion 5.0.0` selects the highest available, i.e. 6.x. (bd wgt-89n)
-          $pester5 = { $_.Version -ge [version]'5.0.0' -and $_.Version -lt [version]'6.0.0' }
-          if (-not (Get-Module -ListAvailable -Name Pester | Where-Object $pester5)) {
-            Install-Module Pester -MinimumVersion 5.0.0 -MaximumVersion 5.999.999 -Force -SkipPublisherCheck -Scope CurrentUser
+          # Pin to Pester 6.x. The suite was migrated off Assert-MockCalled (removed in Pester 6)
+          # to Should -Invoke (wgt-40e), so it targets Pester 6 now. Bound below 7.0.0 so an
+          # untested future major cannot silently change mock/assertion behavior, and keep the
+          # lower bound at 6.0.0 so the runner's cached 5.x (from the earlier wgt-89n pin) is not selected.
+          $pester6 = { $_.Version -ge [version]'6.0.0' -and $_.Version -lt [version]'7.0.0' }
+          if (-not (Get-Module -ListAvailable -Name Pester | Where-Object $pester6)) {
+            Install-Module Pester -MinimumVersion 6.0.0 -MaximumVersion 6.999.999 -Force -SkipPublisherCheck -Scope CurrentUser
           }
-          Import-Module Pester -MinimumVersion 5.0.0 -MaximumVersion 5.999.999
+          Import-Module Pester -MinimumVersion 6.0.0 -MaximumVersion 6.999.999
 
           $config = New-PesterConfiguration
           $config.Run.Path = './tests'

@@ -30,7 +30,7 @@ Describe 'Test-AndInstallWingetModule' {
 
             $result = Test-AndInstallWingetModule
             $result | Should -Be $true
-            Assert-MockCalled Install-Module -Times 0
+            Should -Invoke Install-Module -Times 0
         }
     }
 
@@ -51,8 +51,8 @@ Describe 'Test-AndInstallWingetModule' {
 
             $result = Test-AndInstallWingetModule
             $result | Should -Be $true
-            Assert-MockCalled Install-PackageProvider -Times 1 -ParameterFilter { $Name -eq 'NuGet' }
-            Assert-MockCalled Install-Module -Times 1
+            Should -Invoke Install-PackageProvider -Times 1 -ParameterFilter { $Name -eq 'NuGet' }
+            Should -Invoke Install-Module -Times 1
         }
     }
 
@@ -65,7 +65,7 @@ Describe 'Test-AndInstallWingetModule' {
 
             $result = Test-AndInstallWingetModule
             $result | Should -Be $false
-            Assert-MockCalled Install-Module -Times 1
+            Should -Invoke Install-Module -Times 1
         }
     }
 }
@@ -94,8 +94,8 @@ Describe 'Test-AndInstallWinget' {
             Mock Invoke-WebRequest { }
             $result = Test-AndInstallWinget
             $result | Should -Be $true
-            Assert-MockCalled Get-Command -Times 1
-            Assert-MockCalled Invoke-WebRequest -Times 0
+            Should -Invoke Get-Command -Times 1
+            Should -Invoke Invoke-WebRequest -Times 0
         }
     }
 
@@ -112,11 +112,11 @@ Describe 'Test-AndInstallWinget' {
             Mock Remove-Item { }
             $result = Test-AndInstallWinget
             $result | Should -Be $true
-            Assert-MockCalled Invoke-WebRequest -Times 1
-            Assert-MockCalled Add-AppxPackage -Times 1
-            Assert-MockCalled Remove-Item -Times 1
+            Should -Invoke Invoke-WebRequest -Times 1
+            Should -Invoke Add-AppxPackage -Times 1
+            Should -Invoke Remove-Item -Times 1
             # The fallback must verify winget after Add-AppxPackage (issue #177): initial check + re-check.
-            Assert-MockCalled Get-Command -Times 2 -Exactly -ParameterFilter { $Name -eq 'winget' }
+            Should -Invoke Get-Command -Times 2 -Exactly -ParameterFilter { $Name -eq 'winget' }
         }
     }
 
@@ -131,8 +131,8 @@ Describe 'Test-AndInstallWinget' {
 
             $result = Test-AndInstallWinget
             $result | Should -Be $false
-            Assert-MockCalled Add-AppxPackage -Times 1
-            Assert-MockCalled Write-ErrorMessage -Times 1 -ParameterFilter { $Message -match 'install winget manually' }
+            Should -Invoke Add-AppxPackage -Times 1
+            Should -Invoke Write-ErrorMessage -Times 1 -ParameterFilter { $Message -match 'install winget manually' }
         }
     }
 
@@ -143,7 +143,7 @@ Describe 'Test-AndInstallWinget' {
             Mock Invoke-WebRequest { throw 'Network error' }
             $result = Test-AndInstallWinget
             $result | Should -Be $false
-            Assert-MockCalled Invoke-WebRequest -Times 1
+            Should -Invoke Invoke-WebRequest -Times 1
         }
     }
 
@@ -161,9 +161,9 @@ Describe 'Test-AndInstallWinget' {
 
             $result = Test-AndInstallWinget
             $result | Should -Be $true
-            Assert-MockCalled Repair-WinGetPackageManager -Times 1 -Exactly
-            Assert-MockCalled Invoke-WebRequest -Times 0
-            Assert-MockCalled Add-AppxPackage -Times 0
+            Should -Invoke Repair-WinGetPackageManager -Times 1 -Exactly
+            Should -Invoke Invoke-WebRequest -Times 0
+            Should -Invoke Add-AppxPackage -Times 0
         }
     }
 
@@ -184,9 +184,9 @@ Describe 'Test-AndInstallWinget' {
 
             $result = Test-AndInstallWinget
             $result | Should -Be $true
-            Assert-MockCalled Repair-WinGetPackageManager -Times 1 -Exactly
-            Assert-MockCalled Invoke-WebRequest -Times 1
-            Assert-MockCalled Add-AppxPackage -Times 1
+            Should -Invoke Repair-WinGetPackageManager -Times 1 -Exactly
+            Should -Invoke Invoke-WebRequest -Times 1
+            Should -Invoke Add-AppxPackage -Times 1
         }
     }
 }
@@ -215,7 +215,7 @@ Describe 'Test-WingetSources' {
 
             $result = Test-WingetSources
             $result | Should -Be $true
-            Assert-MockCalled Add-AppxPackage -Times 0
+            Should -Invoke Add-AppxPackage -Times 0
         }
     }
 
@@ -247,7 +247,7 @@ Describe 'Test-WingetSources' {
 
             $result = Test-WingetSources
             $result | Should -Be $true
-            Assert-MockCalled Add-AppxPackage -Times 1
+            Should -Invoke Add-AppxPackage -Times 1
         }
     }
 
@@ -284,7 +284,7 @@ Describe 'Test-WingetSources' {
 
             $result = Test-WingetSources
             $result | Should -Be $true
-            Assert-MockCalled Add-AppxPackage -Times 1
+            Should -Invoke Add-AppxPackage -Times 1
         }
     }
 
@@ -339,7 +339,7 @@ Describe 'Test-WingetSources' {
 
             $result = Test-WingetSources
             $result | Should -Be $true
-            Assert-MockCalled Add-AppxPackage -Times 1
+            Should -Invoke Add-AppxPackage -Times 1
         }
     }
 
@@ -375,7 +375,7 @@ Describe 'Test-WingetSources' {
 
             $result = Test-WingetSources
             $result | Should -Be $true
-            Assert-MockCalled Add-AppxPackage -Times 1
+            Should -Invoke Add-AppxPackage -Times 1
         }
     }
 
@@ -436,7 +436,7 @@ Describe 'Install-WingetPackage (0x80073d19 session-error backoff)' {
     BeforeEach {
         Mock Write-Host { }
         Mock Write-WarningMessage { }
-        # Never actually wait during tests; the backoff is verified via Assert-MockCalled.
+        # Never actually wait during tests; the backoff is verified via Should -Invoke.
         Mock Start-Sleep { }
 
         # Each Start-Process call returns the next exit code from the queue, simulating winget.
@@ -457,8 +457,8 @@ Describe 'Install-WingetPackage (0x80073d19 session-error backoff)' {
         $result.ExitCode | Should -Be 0
         $result.Attempts | Should -Be 1
         $result.SessionErrorExhausted | Should -Be $false
-        Assert-MockCalled Start-Process -Times 1 -Exactly
-        Assert-MockCalled Start-Sleep -Times 0 -Exactly
+        Should -Invoke Start-Process -Times 1 -Exactly
+        Should -Invoke Start-Sleep -Times 0 -Exactly
     }
 
     It 'Retries with backoff and recovers when the session error is transient' {
@@ -469,9 +469,9 @@ Describe 'Install-WingetPackage (0x80073d19 session-error backoff)' {
         $result.ExitCode | Should -Be 0
         $result.Attempts | Should -Be 2
         $result.SessionErrorExhausted | Should -Be $false
-        Assert-MockCalled Start-Process -Times 2 -Exactly
+        Should -Invoke Start-Process -Times 2 -Exactly
         # One backoff wait between the failed first attempt and the successful second.
-        Assert-MockCalled Start-Sleep -Times 1 -Exactly
+        Should -Invoke Start-Sleep -Times 1 -Exactly
     }
 
     It 'Exhausts MaxAttempts when the session error persists' {
@@ -482,9 +482,9 @@ Describe 'Install-WingetPackage (0x80073d19 session-error backoff)' {
         $result.ExitCode | Should -Be $script:SessionLogoffExitCode
         $result.Attempts | Should -Be 3
         $result.SessionErrorExhausted | Should -Be $true
-        Assert-MockCalled Start-Process -Times 3 -Exactly
+        Should -Invoke Start-Process -Times 3 -Exactly
         # Sleeps between attempts only (1->2 and 2->3), never after the final attempt.
-        Assert-MockCalled Start-Sleep -Times 2 -Exactly
+        Should -Invoke Start-Sleep -Times 2 -Exactly
     }
 
     It 'Does not retry a non-session failure (lets the caller verify)' {
@@ -496,8 +496,8 @@ Describe 'Install-WingetPackage (0x80073d19 session-error backoff)' {
         $result.ExitCode | Should -Be -1978335189
         $result.Attempts | Should -Be 1
         $result.SessionErrorExhausted | Should -Be $false
-        Assert-MockCalled Start-Process -Times 1 -Exactly
-        Assert-MockCalled Start-Sleep -Times 0 -Exactly
+        Should -Invoke Start-Process -Times 1 -Exactly
+        Should -Invoke Start-Sleep -Times 0 -Exactly
     }
 
     It 'Prefers machine scope on the first attempt (issue #159)' {
@@ -506,7 +506,7 @@ Describe 'Install-WingetPackage (0x80073d19 session-error backoff)' {
         $result = Install-WingetPackage -PackageId 'Microsoft.PowerShell' -MaxAttempts 3 -InitialDelaySeconds 1
 
         $result.MachineScopeFellBack | Should -Be $false
-        Assert-MockCalled Start-Process -Times 1 -Exactly -ParameterFilter {
+        Should -Invoke Start-Process -Times 1 -Exactly -ParameterFilter {
             ($ArgumentList -contains '--scope') -and ($ArgumentList -contains 'machine')
         }
     }
@@ -521,9 +521,9 @@ Describe 'Install-WingetPackage (0x80073d19 session-error backoff)' {
         $result.MachineScopeFellBack | Should -Be $true
         # The scope fallback is not a session-error retry: it must not consume an attempt or sleep.
         $result.Attempts | Should -Be 1
-        Assert-MockCalled Start-Process -Times 2 -Exactly
-        Assert-MockCalled Start-Process -Times 1 -Exactly -ParameterFilter { $ArgumentList -notcontains '--scope' }
-        Assert-MockCalled Start-Sleep -Times 0 -Exactly
+        Should -Invoke Start-Process -Times 2 -Exactly
+        Should -Invoke Start-Process -Times 1 -Exactly -ParameterFilter { $ArgumentList -notcontains '--scope' }
+        Should -Invoke Start-Sleep -Times 0 -Exactly
     }
 
     It 'Falls back on scope at most once' {
@@ -534,8 +534,8 @@ Describe 'Install-WingetPackage (0x80073d19 session-error backoff)' {
 
         $result.ExitCode | Should -Be -1978335216
         $result.MachineScopeFellBack | Should -Be $true
-        Assert-MockCalled Start-Process -Times 2 -Exactly
-        Assert-MockCalled Start-Sleep -Times 0 -Exactly
+        Should -Invoke Start-Process -Times 2 -Exactly
+        Should -Invoke Start-Sleep -Times 0 -Exactly
     }
 
     It 'Still retries the session error with backoff after a scope fallback' {
@@ -547,8 +547,8 @@ Describe 'Install-WingetPackage (0x80073d19 session-error backoff)' {
         $result.MachineScopeFellBack | Should -Be $true
         $result.Attempts | Should -Be 2
         $result.SessionErrorExhausted | Should -Be $false
-        Assert-MockCalled Start-Process -Times 3 -Exactly
-        Assert-MockCalled Start-Sleep -Times 1 -Exactly
+        Should -Invoke Start-Process -Times 3 -Exactly
+        Should -Invoke Start-Sleep -Times 1 -Exactly
     }
 
     It 'Passes --installer-type to winget when an installer type is supplied' {
@@ -556,7 +556,7 @@ Describe 'Install-WingetPackage (0x80073d19 session-error backoff)' {
 
         Install-WingetPackage -PackageId 'Microsoft.PowerShell' -InstallerType 'wix' -MaxAttempts 1 | Out-Null
 
-        Assert-MockCalled Start-Process -Times 1 -Exactly -ParameterFilter {
+        Should -Invoke Start-Process -Times 1 -Exactly -ParameterFilter {
             ($ArgumentList -join ' ') -match '--installer-type\s+wix'
         }
     }
@@ -566,7 +566,7 @@ Describe 'Install-WingetPackage (0x80073d19 session-error backoff)' {
 
         Install-WingetPackage -PackageId 'Test.App' -MaxAttempts 1 | Out-Null
 
-        Assert-MockCalled Start-Process -Times 1 -Exactly -ParameterFilter {
+        Should -Invoke Start-Process -Times 1 -Exactly -ParameterFilter {
             $ArgumentList -notcontains '--installer-type'
         }
     }
@@ -576,7 +576,7 @@ Describe 'Install-WingetPackage (0x80073d19 session-error backoff)' {
 
         Install-WingetPackage -PackageId 'Test.App' -MaxAttempts 1 | Out-Null
 
-        Assert-MockCalled Start-Process -Times 1 -Exactly -ParameterFilter {
+        Should -Invoke Start-Process -Times 1 -Exactly -ParameterFilter {
             (($ArgumentList -join ' ') -match '--source winget') -and
             ($ArgumentList -contains '--accept-source-agreements') -and
             ($ArgumentList -contains '--accept-package-agreements')
@@ -628,7 +628,7 @@ Describe 'Test-WingetPackageInstalled (timeout support, issue #188)' {
             $result.Installed | Should -Be $true
             $result.TimedOut | Should -Be $false
             $result.ExitCode | Should -Be 0
-            Assert-MockCalled Start-Process -Times 1 -Exactly -ParameterFilter {
+            Should -Invoke Start-Process -Times 1 -Exactly -ParameterFilter {
                 ($ArgumentList -contains 'list') -and
                 ($ArgumentList -contains '--exact') -and
                 ($ArgumentList -contains '--id') -and
@@ -699,7 +699,7 @@ Describe 'Test-WingetPackageInstalled (timeout support, issue #188)' {
             # stdout and stderr differ within one run, and neither repeats across runs.
             ($script:listRedirectPaths | Select-Object -Unique).Count | Should -Be 4
             # Both temp files are removed after each of the two runs.
-            Assert-MockCalled Remove-Item -Times 4 -Exactly
+            Should -Invoke Remove-Item -Times 4 -Exactly
         }
     }
 }
@@ -726,7 +726,7 @@ Describe 'Initialize-WingetSourcesForUser (cross-user bootstrap, issue #159)' {
         $result = Initialize-WingetSourcesForUser -WhatIf
 
         $result | Should -Be $true
-        Assert-MockCalled Invoke-WingetSourceProbe -Times 0 -Exactly
+        Should -Invoke Invoke-WingetSourceProbe -Times 0 -Exactly
     }
 
     It 'Returns true without repairing when the probe succeeds' {
@@ -735,8 +735,8 @@ Describe 'Initialize-WingetSourcesForUser (cross-user bootstrap, issue #159)' {
         $result = Initialize-WingetSourcesForUser
 
         $result | Should -Be $true
-        Assert-MockCalled Invoke-WingetSourceProbe -Times 1 -Exactly
-        Assert-MockCalled Repair-WinGetPackageManager -Times 0 -Exactly
+        Should -Invoke Invoke-WingetSourceProbe -Times 1 -Exactly
+        Should -Invoke Repair-WinGetPackageManager -Times 0 -Exactly
     }
 
     It 'Repairs the package manager and succeeds when the re-probe passes' {
@@ -753,8 +753,8 @@ Describe 'Initialize-WingetSourcesForUser (cross-user bootstrap, issue #159)' {
         $result = Initialize-WingetSourcesForUser
 
         $result | Should -Be $true
-        Assert-MockCalled Repair-WinGetPackageManager -Times 1 -Exactly
-        Assert-MockCalled Invoke-WingetSourceProbe -Times 2 -Exactly
+        Should -Invoke Repair-WinGetPackageManager -Times 1 -Exactly
+        Should -Invoke Invoke-WingetSourceProbe -Times 2 -Exactly
     }
 
     It 'Returns false when the probe still fails after repair' {
@@ -763,8 +763,8 @@ Describe 'Initialize-WingetSourcesForUser (cross-user bootstrap, issue #159)' {
         $result = Initialize-WingetSourcesForUser
 
         $result | Should -Be $false
-        Assert-MockCalled Repair-WinGetPackageManager -Times 1 -Exactly
-        Assert-MockCalled Invoke-WingetSourceProbe -Times 2 -Exactly
+        Should -Invoke Repair-WinGetPackageManager -Times 1 -Exactly
+        Should -Invoke Invoke-WingetSourceProbe -Times 2 -Exactly
     }
 
     It 'Returns false and skips repair when Repair-WinGetPackageManager is unavailable' {
@@ -774,8 +774,8 @@ Describe 'Initialize-WingetSourcesForUser (cross-user bootstrap, issue #159)' {
         $result = Initialize-WingetSourcesForUser
 
         $result | Should -Be $false
-        Assert-MockCalled Repair-WinGetPackageManager -Times 0 -Exactly
-        Assert-MockCalled Invoke-WingetSourceProbe -Times 1 -Exactly
+        Should -Invoke Repair-WinGetPackageManager -Times 0 -Exactly
+        Should -Invoke Invoke-WingetSourceProbe -Times 1 -Exactly
     }
 
     It 'Warns about cross-user elevation when the process account differs from the session owner' {
@@ -785,7 +785,7 @@ Describe 'Initialize-WingetSourcesForUser (cross-user bootstrap, issue #159)' {
 
         [void](Initialize-WingetSourcesForUser)
 
-        Assert-MockCalled Write-WarningMessage -Times 1 -ParameterFilter { $Message -match 'Cross-user elevation detected' }
+        Should -Invoke Write-WarningMessage -Times 1 -ParameterFilter { $Message -match 'Cross-user elevation detected' }
     }
 
     It 'Does not warn about cross-user elevation for a same-account session' {
@@ -793,7 +793,7 @@ Describe 'Initialize-WingetSourcesForUser (cross-user bootstrap, issue #159)' {
 
         [void](Initialize-WingetSourcesForUser)
 
-        Assert-MockCalled Write-WarningMessage -Times 0 -ParameterFilter { $Message -match 'Cross-user elevation detected' }
+        Should -Invoke Write-WarningMessage -Times 0 -ParameterFilter { $Message -match 'Cross-user elevation detected' }
     }
 }
 
@@ -815,8 +815,8 @@ Describe 'Install-PowerShellLatest (always-latest strategy, issue #166)' {
 
         $result.Method | Should -Be 'msi'
         $result.Installed | Should -Be $true
-        Assert-MockCalled Install-WingetPackage -Times 1 -Exactly -ParameterFilter { $InstallerType -eq 'wix' }
-        Assert-MockCalled Install-MsixProvisionedPackage -Times 0 -Exactly
+        Should -Invoke Install-WingetPackage -Times 1 -Exactly -ParameterFilter { $InstallerType -eq 'wix' }
+        Should -Invoke Install-MsixProvisionedPackage -Times 0 -Exactly
     }
 
     It 'installs the native MSIX on Windows 24H2+ when no MSI is available' {
@@ -831,7 +831,7 @@ Describe 'Install-PowerShellLatest (always-latest strategy, issue #166)' {
 
         $result.Method | Should -Be 'msix-native'
         $result.Installed | Should -Be $true
-        Assert-MockCalled Install-MsixProvisionedPackage -Times 0 -Exactly
+        Should -Invoke Install-MsixProvisionedPackage -Times 0 -Exactly
     }
 
     It 'provisions the MSIX via DISM on older Windows when no MSI is available' {
@@ -843,7 +843,7 @@ Describe 'Install-PowerShellLatest (always-latest strategy, issue #166)' {
 
         $result.Method | Should -Be 'msix-provisioned'
         $result.Installed | Should -Be $true
-        Assert-MockCalled Install-MsixProvisionedPackage -Times 1 -Exactly
+        Should -Invoke Install-MsixProvisionedPackage -Times 1 -Exactly
     }
 }
 
@@ -872,7 +872,7 @@ Describe 'Install-MsixProvisionedPackage (DISM provisioning, issue #166)' {
         $result = Install-MsixProvisionedPackage -PackageId 'Microsoft.PowerShell'
 
         $result.Installed | Should -Be $true
-        Assert-MockCalled Invoke-AppxProvisioning -Times 1 -Exactly -ParameterFilter {
+        Should -Invoke Invoke-AppxProvisioning -Times 1 -Exactly -ParameterFilter {
             $PackagePath -like '*PowerShell-7.7.0-win.msixbundle' -and (($DependencyPackagePath -join '') -like '*WindowsAppRuntime*')
         }
     }
@@ -884,7 +884,7 @@ Describe 'Install-MsixProvisionedPackage (DISM provisioning, issue #166)' {
         $result = Install-MsixProvisionedPackage -PackageId 'Microsoft.PowerShell'
 
         $result.Installed | Should -Be $false
-        Assert-MockCalled Invoke-AppxProvisioning -Times 0 -Exactly
+        Should -Invoke Invoke-AppxProvisioning -Times 0 -Exactly
     }
 
     It 'returns not-installed when no MSIX is found in the download' {
@@ -913,7 +913,7 @@ Describe 'Invoke-AppxProvisioning (delegated command quoting, issue #178)' {
     It 'escapes an apostrophe in PackagePath by doubling the single quote' {
         [void](Invoke-AppxProvisioning -PackagePath "C:\Users\O'Brien\pkg.msix")
 
-        Assert-MockCalled powershell.exe -Times 1 -Exactly
+        Should -Invoke powershell.exe -Times 1 -Exactly
         $script:capturedCommand | Should -BeLike "*-PackagePath 'C:\Users\O''Brien\pkg.msix'*"
         $script:capturedCommand | Should -Not -BeLike "*-PackagePath 'C:\Users\O'Brien*"
     }

@@ -29,7 +29,7 @@ Describe 'Test-AndInstallGraphicalTools' {
 
             $result = Test-AndInstallGraphicalTools
             $result | Should -Be $true
-            Assert-MockCalled Install-Module -Times 0
+            Should -Invoke Install-Module -Times 0
         }
     }
 
@@ -59,9 +59,9 @@ Describe 'Test-AndInstallGraphicalTools' {
 
             $result = Test-AndInstallGraphicalTools
             $result | Should -Be $true
-            Assert-MockCalled Install-PackageProvider -Times 1 -ParameterFilter { $Name -eq 'NuGet' }
-            Assert-MockCalled Install-Module -Times 1
-            Assert-MockCalled Import-Module -Times 1
+            Should -Invoke Install-PackageProvider -Times 1 -ParameterFilter { $Name -eq 'NuGet' }
+            Should -Invoke Install-Module -Times 1
+            Should -Invoke Import-Module -Times 1
         }
     }
 
@@ -90,8 +90,8 @@ Describe 'Test-AndInstallGraphicalTools' {
 
             $result = Test-AndInstallGraphicalTools
             $result | Should -Be $true
-            Assert-MockCalled Install-Module -Times 1  # Still installs to ensure latest version
-            Assert-MockCalled Import-Module -Times 1
+            Should -Invoke Install-Module -Times 1  # Still installs to ensure latest version
+            Should -Invoke Import-Module -Times 1
         }
     }
 
@@ -114,7 +114,7 @@ Describe 'Test-AndInstallGraphicalTools' {
 
             $result = Test-AndInstallGraphicalTools
             $result | Should -Be $true
-            Assert-MockCalled Install-PackageProvider -Times 1 -ParameterFilter {
+            Should -Invoke Install-PackageProvider -Times 1 -ParameterFilter {
                 $Name -eq 'NuGet' -and $MinimumVersion -eq '2.8.5.201' -and $Force -eq $true -and $Scope -eq 'AllUsers'
             }
         }
@@ -129,7 +129,7 @@ Describe 'Test-AndInstallGraphicalTools' {
 
             $result = Test-AndInstallGraphicalTools
             $result | Should -Be $false
-            Assert-MockCalled Install-Module -Times 1
+            Should -Invoke Install-Module -Times 1
         }
     }
 
@@ -143,7 +143,7 @@ Describe 'Test-AndInstallGraphicalTools' {
 
             $result = Test-AndInstallGraphicalTools
             $result | Should -Be $false
-            Assert-MockCalled Import-Module -Times 1
+            Should -Invoke Import-Module -Times 1
         }
     }
 
@@ -157,8 +157,8 @@ Describe 'Test-AndInstallGraphicalTools' {
 
             $result = Test-AndInstallGraphicalTools
             $result | Should -Be $false
-            Assert-MockCalled Install-Module -Times 1
-            Assert-MockCalled Import-Module -Times 1
+            Should -Invoke Install-Module -Times 1
+            Should -Invoke Import-Module -Times 1
         }
     }
 }
