@@ -34,8 +34,20 @@ function Test-SystemRequirements {
 
     # --- OS Version (warn only, Windows 10 21H2 = build 19044) ---
     try {
-        $build = [System.Environment]::OSVersion.Version.Build
-        $osName = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' -ErrorAction Stop).ProductName
+        $cv = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' -ErrorAction Stop
+        $osName = $cv.ProductName
+        # Prefer the registry's CurrentBuildNumber over [Environment]::OSVersion: it is the
+        # ground-truth build (never capped by the host's compatibility manifest under Windows
+        # PowerShell 5.1) and, unlike the static .NET call, it is mockable in Pester. Fall back
+        # to OSVersion only when the value is somehow absent.
+        $build = if ($cv.CurrentBuildNumber) { [int]$cv.CurrentBuildNumber } else { [System.Environment]::OSVersion.Version.Build }
+        # Windows 11 still reports ProductName "Windows 10 ..." - Microsoft never updated the
+        # string, so build >= 22000 is what actually distinguishes it. Relabel so the report
+        # isn't misleading (issue #221). The "Windows 10" guard leaves Windows Server (e.g.
+        # "Windows Server 2025", build 26100) and an already-correct "Windows 11" untouched.
+        if ($build -ge 22000 -and $osName -match 'Windows 10') {
+            $osName = $osName -replace 'Windows 10', 'Windows 11'
+        }
         if ($build -ge 19044) {
             $results += [PSCustomObject]@{ Check = 'OS Version'; Status = 'OK'; Detail = $osName }
         }
