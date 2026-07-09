@@ -59,11 +59,17 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
 
-          # Guarded install: Pester 5 persists on the self-hosted runner after the first run.
-          if (-not (Get-Module -ListAvailable -Name Pester | Where-Object { $_.Version -ge [version]'5.0.0' })) {
-            Install-Module Pester -MinimumVersion 5.0.0 -Force -SkipPublisherCheck -Scope CurrentUser
+          # Pin to Pester 5.x. The suite uses Assert-MockCalled (193 call sites), which Pester 6
+          # removed; under Pester 6 discovery breaks (PowerShell auto-loads the stale bundled
+          # Pester 3.4.0 to satisfy the missing command, and every file then fails with "The Mock
+          # command may only be used inside a Describe block"). Both the availability guard AND the
+          # import must exclude 6.x, or an already-installed / newly-published 6.x wins: an unbounded
+          # `-MinimumVersion 5.0.0` selects the highest available, i.e. 6.x. (bd wgt-89n)
+          $pester5 = { $_.Version -ge [version]'5.0.0' -and $_.Version -lt [version]'6.0.0' }
+          if (-not (Get-Module -ListAvailable -Name Pester | Where-Object $pester5)) {
+            Install-Module Pester -MinimumVersion 5.0.0 -MaximumVersion 5.999.999 -Force -SkipPublisherCheck -Scope CurrentUser
           }
-          Import-Module Pester -MinimumVersion 5.0.0
+          Import-Module Pester -MinimumVersion 5.0.0 -MaximumVersion 5.999.999
 
           $config = New-PesterConfiguration
           $config.Run.Path = './tests'
