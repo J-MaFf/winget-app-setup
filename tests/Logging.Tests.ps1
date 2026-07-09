@@ -36,7 +36,7 @@ Describe 'Write-Table' {
         Write-Table -Headers $headers -Rows $rows
 
         # Should call Write-Host at least once with formatted table output
-        Assert-MockCalled Write-Host -Times 1 -ParameterFilter { $Object -match 'Status' -or $Object -match 'Apps' }
+        Should -Invoke Write-Host -Times 1 -ParameterFilter { $Object -match 'Status' -or $Object -match 'Apps' }
     }
 
     It 'Should handle multiple rows correctly' {
@@ -50,7 +50,7 @@ Describe 'Write-Table' {
         Write-Table -Headers $headers -Rows $rows
 
         # Should call Write-Host with the formatted output
-        Assert-MockCalled Write-Host -Times 1
+        Should -Invoke Write-Host -Times 1
     }
 
     It 'Should use Out-GridView when requested and available' {
@@ -62,7 +62,7 @@ Describe 'Write-Table' {
         Write-Table -Headers $headers -Rows $rows -UseGridView $true
 
         # Should call Out-GridView
-        Assert-MockCalled Out-GridView -Times 1
+        Should -Invoke Out-GridView -Times 1
     }
 
     It 'Should fall back to text output when Out-GridView is not available' {
@@ -74,7 +74,7 @@ Describe 'Write-Table' {
         Write-Table -Headers $headers -Rows $rows -UseGridView $true
 
         # Should call Write-Host for fallback
-        Assert-MockCalled Write-Host -Times 2  # Warning message + table output
+        Should -Invoke Write-Host -Times 2  # Warning message + table output
     }
 
     It 'Should default to text output when UseGridView is false' {
@@ -84,9 +84,9 @@ Describe 'Write-Table' {
         Write-Table -Headers $headers -Rows $rows -UseGridView $false
 
         # Should not call Out-GridView
-        Assert-MockCalled Out-GridView -Times 0
+        Should -Invoke Out-GridView -Times 0
         # Should call Write-Host for text output
-        Assert-MockCalled Write-Host -Times 1
+        Should -Invoke Write-Host -Times 1
     }
 
     It 'Should prompt user when PromptForGridView is true and user accepts' {
@@ -99,9 +99,9 @@ Describe 'Write-Table' {
         Write-Table -Headers $headers -Rows $rows -PromptForGridView $true
 
         # Should call Read-Host to prompt user
-        Assert-MockCalled Read-Host -Times 1
+        Should -Invoke Read-Host -Times 1
         # Should call Out-GridView since user said yes
-        Assert-MockCalled Out-GridView -Times 1
+        Should -Invoke Out-GridView -Times 1
     }
 
     It 'Should prompt user when PromptForGridView is true and user declines' {
@@ -114,11 +114,11 @@ Describe 'Write-Table' {
         Write-Table -Headers $headers -Rows $rows -PromptForGridView $true
 
         # Should call Read-Host to prompt user
-        Assert-MockCalled Read-Host -Times 1
+        Should -Invoke Read-Host -Times 1
         # Should not call Out-GridView since user said no
-        Assert-MockCalled Out-GridView -Times 0
+        Should -Invoke Out-GridView -Times 0
         # Should call Write-Host for text output
-        Assert-MockCalled Write-Host -Times 2  # Empty line + table output
+        Should -Invoke Write-Host -Times 2  # Empty line + table output
     }
 
     It 'Should not prompt when Out-GridView is not available' {
@@ -131,9 +131,9 @@ Describe 'Write-Table' {
         Write-Table -Headers $headers -Rows $rows -PromptForGridView $true
 
         # Should not call Read-Host since Out-GridView is not available
-        Assert-MockCalled Read-Host -Times 0
+        Should -Invoke Read-Host -Times 0
         # Should call Write-Host for text output
-        Assert-MockCalled Write-Host -Times 1
+        Should -Invoke Write-Host -Times 1
     }
 
     It 'Should accept case-insensitive affirmative responses (y, Y, yes, YES)' {
@@ -150,7 +150,7 @@ Describe 'Write-Table' {
             Write-Table -Headers $headers -Rows $rows -PromptForGridView $true
 
             # Should call Out-GridView for all case variations
-            Assert-MockCalled Out-GridView -Times 1
+            Should -Invoke Out-GridView -Times 1
         }
     }
 
@@ -168,9 +168,9 @@ Describe 'Write-Table' {
             Write-Table -Headers $headers -Rows $rows -PromptForGridView $true
 
             # Should NOT call Out-GridView for non-affirmative responses
-            Assert-MockCalled Out-GridView -Times 0
+            Should -Invoke Out-GridView -Times 0
             # Should call Write-Host for text output (empty line + table)
-            Assert-MockCalled Write-Host -Times 2
+            Should -Invoke Write-Host -Times 2
         }
     }
 
@@ -184,9 +184,9 @@ Describe 'Write-Table' {
         Write-Table -Headers $headers -Rows $rows -UseGridView $true -PromptForGridView $true
 
         # Should NOT call Read-Host since UseGridView takes precedence
-        Assert-MockCalled Read-Host -Times 0
+        Should -Invoke Read-Host -Times 0
         # Should call Out-GridView directly
-        Assert-MockCalled Out-GridView -Times 1
+        Should -Invoke Out-GridView -Times 1
     }
 
     It 'Should handle Out-GridView execution failure gracefully' {
@@ -199,9 +199,9 @@ Describe 'Write-Table' {
         Write-Table -Headers $headers -Rows $rows -UseGridView $true
 
         # Should call Out-GridView and catch the error
-        Assert-MockCalled Out-GridView -Times 1
+        Should -Invoke Out-GridView -Times 1
         # Should fall back to Write-Host (warning + table output)
-        Assert-MockCalled Write-Host -Times 2
+        Should -Invoke Write-Host -Times 2
     }
 
     It 'Should not prompt when the session cannot use grid view (non-interactive sessions)' {
@@ -219,9 +219,9 @@ Describe 'Write-Table' {
         Write-Table -Headers $headers -Rows $rows -PromptForGridView $true
 
         # No prompt, no grid view — straight to text output.
-        Assert-MockCalled Read-Host -Times 0
-        Assert-MockCalled Out-GridView -Times 0
-        Assert-MockCalled Write-Host -Times 1
+        Should -Invoke Read-Host -Times 0
+        Should -Invoke Out-GridView -Times 0
+        Should -Invoke Write-Host -Times 1
     }
 
     It 'Should use custom title when provided' {
@@ -234,7 +234,7 @@ Describe 'Write-Table' {
         Write-Table -Headers $headers -Rows $rows -UseGridView $true -Title 'Custom Title'
 
         # Should call Out-GridView with custom title
-        Assert-MockCalled Out-GridView -Times 1 -ParameterFilter { $Title -eq 'Custom Title' }
+        Should -Invoke Out-GridView -Times 1 -ParameterFilter { $Title -eq 'Custom Title' }
     }
 
     It 'Should use default title when Title parameter is not provided' {
@@ -247,7 +247,7 @@ Describe 'Write-Table' {
         Write-Table -Headers $headers -Rows $rows -UseGridView $true
 
         # Should call Out-GridView with default title 'Summary'
-        Assert-MockCalled Out-GridView -Times 1 -ParameterFilter { $Title -eq 'Summary' }
+        Should -Invoke Out-GridView -Times 1 -ParameterFilter { $Title -eq 'Summary' }
     }
 }
 
@@ -283,7 +283,7 @@ Describe 'Write-Info' {
 
         Write-Info 'Test message'
 
-        Assert-MockCalled Write-Host -Times 1 -ParameterFilter {
+        Should -Invoke Write-Host -Times 1 -ParameterFilter {
             $Object -eq 'Test message' -and $ForegroundColor -eq 'Blue'
         }
     }
@@ -298,7 +298,7 @@ Describe 'Write-Success' {
 
         Write-Success 'Success message'
 
-        Assert-MockCalled Write-Host -Times 1 -ParameterFilter {
+        Should -Invoke Write-Host -Times 1 -ParameterFilter {
             $Object -eq 'Success message' -and $ForegroundColor -eq 'Green'
         }
     }
@@ -313,7 +313,7 @@ Describe 'Write-WarningMessage' {
 
         Write-WarningMessage 'Warning message'
 
-        Assert-MockCalled Write-Host -Times 1 -ParameterFilter {
+        Should -Invoke Write-Host -Times 1 -ParameterFilter {
             $Object -eq 'Warning message' -and $ForegroundColor -eq 'Yellow'
         }
     }
@@ -328,7 +328,7 @@ Describe 'Write-ErrorMessage' {
 
         Write-ErrorMessage 'Error message'
 
-        Assert-MockCalled Write-Host -Times 1 -ParameterFilter {
+        Should -Invoke Write-Host -Times 1 -ParameterFilter {
             $Object -eq 'Error message' -and $ForegroundColor -eq 'Red'
         }
     }
@@ -343,7 +343,7 @@ Describe 'Write-Prompt' {
 
         Write-Prompt 'Press any key to continue...'
 
-        Assert-MockCalled Write-Host -Times 1 -ParameterFilter {
+        Should -Invoke Write-Host -Times 1 -ParameterFilter {
             $Object -eq 'Press any key to continue...' -and $ForegroundColor -eq 'Blue'
         }
     }

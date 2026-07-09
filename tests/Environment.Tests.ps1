@@ -20,7 +20,7 @@ Describe 'Get-ComputerManufacturer (issue #217)' {
 
         $manufacturer | Should -Be 'Dell Inc.'
         $manufacturer | Should -BeOfType [string]
-        Assert-MockCalled Get-CimInstance -Times 1 -Exactly -ParameterFilter { $ClassName -eq 'Win32_ComputerSystem' }
+        Should -Invoke Get-CimInstance -Times 1 -Exactly -ParameterFilter { $ClassName -eq 'Win32_ComputerSystem' }
     }
 }
 
@@ -45,7 +45,7 @@ Describe 'Add-ToEnvironmentPath' {
 
             Add-ToEnvironmentPath -PathToAdd 'C:\Test' -Scope 'User'
 
-            Assert-MockCalled Set-PersistedEnvironmentPath -Times 1 -ParameterFilter {
+            Should -Invoke Set-PersistedEnvironmentPath -Times 1 -ParameterFilter {
                 $Value -eq 'C:\Existing;C:\Test' -and $Scope -eq 'User'
             }
         }
@@ -55,7 +55,7 @@ Describe 'Add-ToEnvironmentPath' {
 
             Add-ToEnvironmentPath -PathToAdd 'C:\Test' -Scope 'User'
 
-            Assert-MockCalled Set-PersistedEnvironmentPath -Times 1 -ParameterFilter {
+            Should -Invoke Set-PersistedEnvironmentPath -Times 1 -ParameterFilter {
                 $Value -eq 'C:\Test' -and $Scope -eq 'User'
             }
         }
@@ -76,7 +76,7 @@ Describe 'Add-ToEnvironmentPath' {
 
             Add-ToEnvironmentPath -PathToAdd 'C:\Test' -Scope 'User'
 
-            Assert-MockCalled Set-PersistedEnvironmentPath -Times 0
+            Should -Invoke Set-PersistedEnvironmentPath -Times 0
         }
 
         It 'Should treat case and trailing-slash variants as already present' {
@@ -84,7 +84,7 @@ Describe 'Add-ToEnvironmentPath' {
 
             Add-ToEnvironmentPath -PathToAdd 'C:\Test' -Scope 'User'
 
-            Assert-MockCalled Set-PersistedEnvironmentPath -Times 0
+            Should -Invoke Set-PersistedEnvironmentPath -Times 0
         }
     }
 
@@ -96,7 +96,7 @@ Describe 'Add-ToEnvironmentPath' {
             Add-ToEnvironmentPath -PathToAdd 'C:\Test' -Scope 'User'
 
             $env:PATH | Should -BeLike '*;C:\Test'
-            Assert-MockCalled Write-WarningMessage -Times 0
+            Should -Invoke Write-WarningMessage -Times 0
         }
 
         It 'Should warn and leave the session PATH unchanged when it would exceed 32767 chars' {
@@ -107,9 +107,9 @@ Describe 'Add-ToEnvironmentPath' {
             Add-ToEnvironmentPath -PathToAdd 'C:\Test' -Scope 'User'
 
             $env:PATH | Should -Be $longPath
-            Assert-MockCalled Write-WarningMessage -Times 1
+            Should -Invoke Write-WarningMessage -Times 1
             # The persistent update must still happen
-            Assert-MockCalled Set-PersistedEnvironmentPath -Times 1
+            Should -Invoke Set-PersistedEnvironmentPath -Times 1
         }
     }
 }
@@ -153,7 +153,7 @@ Describe 'Test-PathInEnvironment' {
             Mock Get-PersistedEnvironmentPath { return 'C:\SystemDir' } -ParameterFilter { $Scope -eq 'System' }
 
             Test-PathInEnvironment -PathToCheck 'c:\systemdir\' -Scope 'System' | Should -Be $true
-            Assert-MockCalled Get-PersistedEnvironmentPath -Times 1 -ParameterFilter { $Scope -eq 'System' }
+            Should -Invoke Get-PersistedEnvironmentPath -Times 1 -ParameterFilter { $Scope -eq 'System' }
         }
     }
 }

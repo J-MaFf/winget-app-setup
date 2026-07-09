@@ -39,7 +39,7 @@ This repo targets **Windows only**. All scripts are PowerShell.
 
 ## Testing
 
-- **Requires Pester 5.x.** The suite uses `Assert-MockCalled` (removed in Pester 6), so Pester 6 breaks discovery — pin with `Import-Module Pester -MinimumVersion 5.0.0 -MaximumVersion 5.999.999` (CI does the same in `windows-tests.yml`). Migrating to `Should -Invoke` to unblock Pester 6 is tracked in bd `wgt-89n`.
+- **Targets Pester 6.x** (also still passes on 5.x). The suite was migrated off `Assert-MockCalled` — removed in Pester 6 — to `Should -Invoke` (wgt-40e). CI (`windows-tests.yml`) pins to 6.x; run locally the same way, e.g. `Import-Module Pester -MinimumVersion 6.0.0 -MaximumVersion 6.999.999`. Note the Pester-6 mock rule: a `Mock <cmd> -ParameterFilter {…}` with no default `Mock <cmd> {…}` now throws on a non-matching call instead of falling through to the real command.
 - Run tests with Pester: `Invoke-Pester ./tests` (or a single area file, e.g. `Invoke-Pester ./tests/WingetCore.Tests.ps1`)
 - The suite mocks all external/Windows calls, so it runs on Linux/macOS too — though winget/`Get-WinGetPackage`/`Test-NetConnection`-dependent tests only pass on Windows where those cmdlets exist.
 - Each test file's top-level `BeforeAll` dot-sources `tests/TestHelpers.ps1`, which loads the module's function files once per file; do not re-declare production functions inline in `Describe` blocks (that reintroduces drift). Short test-double stubs for orchestration tests are fine.

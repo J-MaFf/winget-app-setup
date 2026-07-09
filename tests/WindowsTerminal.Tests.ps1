@@ -175,8 +175,8 @@ Describe 'Windows Terminal configuration' {
             $result = Set-WindowsTerminalAsDefaultTerminalApplication
 
             $result | Should -Be $true
-            Assert-MockCalled New-Item -Times 1 -ParameterFilter { $Path -eq 'HKCU:\Console\%%Startup' -and $Force }
-            Assert-MockCalled New-ItemProperty -Times 2
+            Should -Invoke New-Item -Times 1 -ParameterFilter { $Path -eq 'HKCU:\Console\%%Startup' -and $Force }
+            Should -Invoke New-ItemProperty -Times 2
         }
 
         It 'Should skip writes when registry is already configured' {
@@ -192,7 +192,7 @@ Describe 'Windows Terminal configuration' {
             $result = Set-WindowsTerminalAsDefaultTerminalApplication
 
             $result | Should -Be $true
-            Assert-MockCalled New-ItemProperty -Times 0
+            Should -Invoke New-ItemProperty -Times 0
         }
 
         It 'Should return false when registry write fails' {
@@ -222,9 +222,9 @@ Describe 'Windows Terminal configuration' {
 
             Set-WindowsTerminalDefaults -WhatIf
 
-            Assert-MockCalled Set-WindowsTerminalDefaultProfile -Times 0
-            Assert-MockCalled Set-WindowsTerminalAsDefaultTerminalApplication -Times 0
-            Assert-MockCalled Write-Info -Times 2
+            Should -Invoke Set-WindowsTerminalDefaultProfile -Times 0
+            Should -Invoke Set-WindowsTerminalAsDefaultTerminalApplication -Times 0
+            Should -Invoke Write-Info -Times 2
         }
 
         It 'Should configure both settings file and registry in normal mode' {
@@ -234,8 +234,8 @@ Describe 'Windows Terminal configuration' {
 
             Set-WindowsTerminalDefaults
 
-            Assert-MockCalled Set-WindowsTerminalDefaultProfile -Times 1
-            Assert-MockCalled Set-WindowsTerminalAsDefaultTerminalApplication -Times 1
+            Should -Invoke Set-WindowsTerminalDefaultProfile -Times 1
+            Should -Invoke Set-WindowsTerminalAsDefaultTerminalApplication -Times 1
         }
 
         It 'Should configure all discovered settings files in normal mode' {
@@ -245,8 +245,8 @@ Describe 'Windows Terminal configuration' {
 
             Set-WindowsTerminalDefaults
 
-            Assert-MockCalled Set-WindowsTerminalDefaultProfile -Times 2
-            Assert-MockCalled Set-WindowsTerminalAsDefaultTerminalApplication -Times 1
+            Should -Invoke Set-WindowsTerminalDefaultProfile -Times 2
+            Should -Invoke Set-WindowsTerminalAsDefaultTerminalApplication -Times 1
         }
 
         It 'Should not emit the cross-user warning when process and session users match' {
@@ -256,7 +256,7 @@ Describe 'Windows Terminal configuration' {
 
             Set-WindowsTerminalDefaults
 
-            Assert-MockCalled Write-WarningMessage -Times 0 -ParameterFilter { $Message -match 'CROSS-USER ELEVATION' }
+            Should -Invoke Write-WarningMessage -Times 0 -ParameterFilter { $Message -match 'CROSS-USER ELEVATION' }
         }
 
         It 'Should warn loudly and still apply per-user config when cross-user elevation is detected' {
@@ -268,12 +268,12 @@ Describe 'Windows Terminal configuration' {
 
             Set-WindowsTerminalDefaults
 
-            Assert-MockCalled Write-WarningMessage -ParameterFilter { $Message -match 'CROSS-USER ELEVATION' }
-            Assert-MockCalled Write-WarningMessage -ParameterFilter { $Message -match "NOT to 'CONTOSO\\jdoe'" }
-            Assert-MockCalled Write-WarningMessage -ParameterFilter { $Message -match "applied to 'CONTOSO\\admin-tech' only" }
+            Should -Invoke Write-WarningMessage -ParameterFilter { $Message -match 'CROSS-USER ELEVATION' }
+            Should -Invoke Write-WarningMessage -ParameterFilter { $Message -match "NOT to 'CONTOSO\\jdoe'" }
+            Should -Invoke Write-WarningMessage -ParameterFilter { $Message -match "applied to 'CONTOSO\\admin-tech' only" }
             # Honest reporting only: the per-user writes still target the process account.
-            Assert-MockCalled Set-WindowsTerminalDefaultProfile -Times 1
-            Assert-MockCalled Set-WindowsTerminalAsDefaultTerminalApplication -Times 1
+            Should -Invoke Set-WindowsTerminalDefaultProfile -Times 1
+            Should -Invoke Set-WindowsTerminalAsDefaultTerminalApplication -Times 1
         }
 
         It 'Should warn about cross-user elevation in WhatIf mode without the applied-to caveat' {
@@ -286,9 +286,9 @@ Describe 'Windows Terminal configuration' {
 
             Set-WindowsTerminalDefaults -WhatIf
 
-            Assert-MockCalled Write-WarningMessage -ParameterFilter { $Message -match 'CROSS-USER ELEVATION' }
-            Assert-MockCalled Write-WarningMessage -Times 0 -ParameterFilter { $Message -match 'remains unconfigured' }
-            Assert-MockCalled Set-WindowsTerminalDefaultProfile -Times 0
+            Should -Invoke Write-WarningMessage -ParameterFilter { $Message -match 'CROSS-USER ELEVATION' }
+            Should -Invoke Write-WarningMessage -Times 0 -ParameterFilter { $Message -match 'remains unconfigured' }
+            Should -Invoke Set-WindowsTerminalDefaultProfile -Times 0
         }
 
         It 'Should not emit the cross-user warning when the interactive user is unknown' {
@@ -300,7 +300,7 @@ Describe 'Windows Terminal configuration' {
 
             Set-WindowsTerminalDefaults
 
-            Assert-MockCalled Write-WarningMessage -Times 0 -ParameterFilter { $Message -match 'CROSS-USER ELEVATION' }
+            Should -Invoke Write-WarningMessage -Times 0 -ParameterFilter { $Message -match 'CROSS-USER ELEVATION' }
         }
     }
 }

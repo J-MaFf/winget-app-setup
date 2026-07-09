@@ -16,6 +16,12 @@ Describe 'Main Script Logic' {
         # Dot-source the script under test so these tests exercise the real implementation (#135).
         . $script:InstallerScriptPath
 
+        # Capture Invoke-WingetInstall's source now, BEFORE Get-Command is mocked below. The
+        # structural tests inspect this definition; routing their `Get-Command Invoke-WingetInstall`
+        # through the filtered mock throws under Pester 6, which (unlike Pester 5) no longer falls
+        # back to the real command when no -ParameterFilter matches and there is no default mock.
+        $script:InvokeWingetInstallDef = (Get-Command Invoke-WingetInstall).Definition
+
         Mock Write-Host { }
         Mock Pause { }
         Mock Start-Process { }
@@ -34,7 +40,7 @@ Describe 'Main Script Logic' {
     # exercised end-to-end by 'IEX non-admin execution behavior' in tests/EntryPoint.Tests.ps1.
     Context 'Administrator gate' {
         It 'Performs a real WindowsPrincipal role check and refuses to install without elevation' {
-            $installBody = (Get-Command Invoke-WingetInstall).Definition
+            $installBody = $script:InvokeWingetInstallDef
             $installBody | Should -Match '\[Security\.Principal\.WindowsPrincipal\]'
             $installBody | Should -Match 'IsInRole\(\[Security\.Principal\.WindowsBuiltInRole\]'
             $installBody | Should -Match 'This script requires administrator privileges'
@@ -47,7 +53,7 @@ Describe 'Main Script Logic' {
     # pinned structurally below because driving it for real would `Exit 2` the test process.
     Context 'Winget availability gate' {
         It 'Exits with code 2 when winget cannot be installed (dependency-failure exit code)' {
-            $installBody = (Get-Command Invoke-WingetInstall).Definition
+            $installBody = $script:InvokeWingetInstallDef
             $installBody | Should -Match 'if \(-not \(Test-AndInstallWinget\)\)'
             $installBody | Should -Match "(?s)Winget is required for this script\. Exiting\.'\s*Exit 2"
         }
@@ -57,7 +63,7 @@ Describe 'Main Script Logic' {
         It 'Should not add the script directory to the persistent PATH (issue #179)' {
             # The installer must never put its own (user-writable) directory on the PATH —
             # that was a hijack surface and nothing needs it since the updater removal (#168).
-            $installBody = (Get-Command Invoke-WingetInstall).Definition
+            $installBody = $script:InvokeWingetInstallDef
             $installBody | Should -Not -Match 'Add-ToEnvironmentPath'
         }
     }
@@ -96,7 +102,7 @@ Describe 'Main Script Logic' {
             Write-Table -Headers $headers -Rows $rows
 
             $rows.Count | Should -Be 3
-            Assert-MockCalled Write-Table -Times 1
+            Should -Invoke Write-Table -Times 1
         }
 
         It 'Should handle empty result arrays' {
@@ -159,24 +165,24 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
 
     Context 'Structure: the shared helper replaced the inline verify blocks' {
         It 'Routes both the first pass and the retry pass through Install-AppWithVerification' {
-            $installBody = (Get-Command Invoke-WingetInstall).Definition
+            $installBody = $script:InvokeWingetInstallDef
             ([regex]::Matches($installBody, 'Install-AppWithVerification')).Count | Should -Be 2
         }
 
         It 'No longer inlines Start-Process winget list verification blocks' {
-            $installBody = (Get-Command Invoke-WingetInstall).Definition
+            $installBody = $script:InvokeWingetInstallDef
             $installBody | Should -Not -Match 'RedirectStandardOutput'
             $installBody | Should -Not -Match 'WaitForExit'
             $installBody | Should -Not -Match 'winget_(list|verify|retry_verify)_'
         }
 
         It 'Still exits 1 when apps remain failed after the retry pass (issue #176)' {
-            $installBody = (Get-Command Invoke-WingetInstall).Definition
+            $installBody = $script:InvokeWingetInstallDef
             $installBody | Should -Match 'if \(\$failedApps\.Count -gt 0\) \{\s*Exit 1\s*\}'
         }
 
         It 'Tracks failures as objects with reasons and renders the failed-apps summary (issue #189)' {
-            $installBody = (Get-Command Invoke-WingetInstall).Definition
+            $installBody = $script:InvokeWingetInstallDef
             $installBody | Should -Match 'Format-InstallFailureReason'
             $installBody | Should -Match 'Write-FailedAppsSummary'
             $installBody | Should -Match '\$failedApps \+= @\{ Name ='
@@ -204,7 +210,7 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
             $script:verifiedApps.Count | Should -Be $expectedCount
             $script:verifiedApps | Should -Contain '7zip.7zip'
             $script:verifiedApps | Should -Contain 'Microsoft.WindowsTerminal'
-            Assert-MockCalled Install-AppWithVerification -Times $expectedCount -Exactly -ParameterFilter { [bool]$WhatIf }
+            Should -Invoke Install-AppWithVerification -Times $expectedCount -Exactly -ParameterFilter { [bool]$WhatIf }
 
             # Bucket routing: Skipped and Installed land in their own summary rows, nothing Failed.
             $installedRow = @($script:capturedRows | Where-Object { $_[0] -eq 'Installed' })[0]
@@ -235,7 +241,7 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
             Invoke-WingetInstall -Apps @(@{ name = 'Contoso.OnlyApp' }) -WhatIf -NonInteractive
 
             $script:verifiedApps | Should -Be @('Contoso.OnlyApp')
-            Assert-MockCalled Install-AppWithVerification -Times 1 -Exactly
+            Should -Invoke Install-AppWithVerification -Times 1 -Exactly
         }
     }
 
@@ -344,8 +350,8 @@ Describe 'Install-AppWithVerification (shared install-and-verify pipeline, issue
         $result.Status | Should -Be 'Skipped'
         $result.InstallResult | Should -Be $null
         $result.FailureReason | Should -Be $null
-        Assert-MockCalled Install-WingetPackage -Times 0 -Exactly
-        Assert-MockCalled Test-WingetPackageInstalled -Times 1 -Exactly
+        Should -Invoke Install-WingetPackage -Times 0 -Exactly
+        Should -Invoke Test-WingetPackageInstalled -Times 1 -Exactly
     }
 
     It 'Installs a missing app and reports Installed when the post-verify finds it' {
@@ -365,15 +371,15 @@ Describe 'Install-AppWithVerification (shared install-and-verify pipeline, issue
         # The Install-WingetPackage result comes back intact so exit codes can be surfaced (#189).
         $result.InstallResult.ExitCode | Should -Be 0
         $result.InstallResult.Attempts | Should -Be 1
-        Assert-MockCalled Install-WingetPackage -Times 1 -Exactly -ParameterFilter { $PackageId -eq 'Test.App' }
+        Should -Invoke Install-WingetPackage -Times 1 -Exactly -ParameterFilter { $PackageId -eq 'Test.App' }
         # Pre-check and post-verify both run under the 15-second timeout guard.
-        Assert-MockCalled Test-WingetPackageInstalled -Times 2 -Exactly -ParameterFilter { $TimeoutSeconds -eq 15 }
+        Should -Invoke Test-WingetPackageInstalled -Times 2 -Exactly -ParameterFilter { $TimeoutSeconds -eq 15 }
     }
 
     It 'Forwards the app''s installerType override to Install-WingetPackage' {
         [void](Install-AppWithVerification -App @{ name = 'Test.App'; installerType = 'wix' })
 
-        Assert-MockCalled Install-WingetPackage -Times 1 -Exactly -ParameterFilter { $InstallerType -eq 'wix' }
+        Should -Invoke Install-WingetPackage -Times 1 -Exactly -ParameterFilter { $InstallerType -eq 'wix' }
     }
 
     It 'Reports Failed with the install result intact when the install ran but verification cannot find the app' {
@@ -397,7 +403,7 @@ Describe 'Install-AppWithVerification (shared install-and-verify pipeline, issue
         $result.Status | Should -Be 'Failed'
         $result.FailureReason | Should -Be 'PreCheckTimeout'
         $result.InstallResult | Should -Be $null
-        Assert-MockCalled Install-WingetPackage -Times 0 -Exactly
+        Should -Invoke Install-WingetPackage -Times 0 -Exactly
     }
 
     It 'Marks a verification timeout as Failed and keeps the install result (issue #176)' {
@@ -415,7 +421,7 @@ Describe 'Install-AppWithVerification (shared install-and-verify pipeline, issue
         $result.Status | Should -Be 'Failed'
         $result.FailureReason | Should -Be 'VerifyTimeout'
         $result.InstallResult.ExitCode | Should -Be 0
-        Assert-MockCalled Install-WingetPackage -Times 1 -Exactly
+        Should -Invoke Install-WingetPackage -Times 1 -Exactly
     }
 
     Context 'Applicability conditions (issue #217)' {
@@ -432,8 +438,8 @@ Describe 'Install-AppWithVerification (shared install-and-verify pipeline, issue
             $result.InstallResult | Should -Be $null
             $result.FailureReason | Should -Be $null
             # The gate runs BEFORE the pre-check: no winget probe, no install dispatch.
-            Assert-MockCalled Test-WingetPackageInstalled -Times 0 -Exactly
-            Assert-MockCalled Install-WingetPackage -Times 0 -Exactly
+            Should -Invoke Test-WingetPackageInstalled -Times 0 -Exactly
+            Should -Invoke Install-WingetPackage -Times 0 -Exactly
         }
 
         It 'Reports the same NotApplicable skip in a dry run (-WhatIf)' {
@@ -441,8 +447,8 @@ Describe 'Install-AppWithVerification (shared install-and-verify pipeline, issue
 
             $result.Status | Should -Be 'Skipped'
             $result.SkipReason | Should -Be 'NotApplicable'
-            Assert-MockCalled Test-WingetPackageInstalled -Times 0 -Exactly
-            Assert-MockCalled Install-WingetPackage -Times 0 -Exactly
+            Should -Invoke Test-WingetPackageInstalled -Times 0 -Exactly
+            Should -Invoke Install-WingetPackage -Times 0 -Exactly
         }
 
         It 'Runs the normal install flow when the condition is true' {
@@ -459,8 +465,8 @@ Describe 'Install-AppWithVerification (shared install-and-verify pipeline, issue
 
             $result.Status | Should -Be 'Installed'
             $result.SkipReason | Should -Be $null
-            Assert-MockCalled Install-WingetPackage -Times 1 -Exactly -ParameterFilter { $PackageId -eq 'Dell.CommandUpdate.Universal' }
-            Assert-MockCalled Test-WingetPackageInstalled -Times 2 -Exactly
+            Should -Invoke Install-WingetPackage -Times 1 -Exactly -ParameterFilter { $PackageId -eq 'Dell.CommandUpdate.Universal' }
+            Should -Invoke Test-WingetPackageInstalled -Times 2 -Exactly
         }
 
         It 'Fails open when the condition throws: warns and proceeds with the install' {
@@ -478,7 +484,7 @@ Describe 'Install-AppWithVerification (shared install-and-verify pipeline, issue
             # A broken probe must never silently drop an app: the install proceeds normally.
             $result.Status | Should -Be 'Installed'
             $result.SkipReason | Should -Be $null
-            Assert-MockCalled Install-WingetPackage -Times 1 -Exactly
+            Should -Invoke Install-WingetPackage -Times 1 -Exactly
             $failOpenWarning = @($script:conditionWarnings | Where-Object { $_ -match 'failed to evaluate' })[0]
             $failOpenWarning | Should -Match 'Dell\.CommandUpdate\.Universal'
             $failOpenWarning | Should -Match 'CIM unavailable'
@@ -506,10 +512,10 @@ Describe 'Install-AppWithVerification (shared install-and-verify pipeline, issue
             # The custom installer's result is passed through intact (ExitCode/Method for #189).
             $result.InstallResult.Method | Should -Be 'msi'
             $result.InstallResult.ExitCode | Should -Be 0
-            Assert-MockCalled Install-WingetPackage -Times 0 -Exactly
+            Should -Invoke Install-WingetPackage -Times 0 -Exactly
             # Only the pre-check runs: the custom installer self-verifies (a DISM-provisioned
             # PowerShell never shows up under `winget list` for the elevating account).
-            Assert-MockCalled Test-WingetPackageInstalled -Times 1 -Exactly
+            Should -Invoke Test-WingetPackageInstalled -Times 1 -Exactly
         }
 
         It 'Trusts a self-verifying installer''s failure result and reports CustomInstallFailed' {
@@ -520,7 +526,7 @@ Describe 'Install-AppWithVerification (shared install-and-verify pipeline, issue
             $result.Status | Should -Be 'Failed'
             $result.FailureReason | Should -Be 'CustomInstallFailed'
             $result.InstallResult.ExitCode | Should -Be -1
-            Assert-MockCalled Install-WingetPackage -Times 0 -Exactly
+            Should -Invoke Install-WingetPackage -Times 0 -Exactly
         }
     }
 
@@ -531,7 +537,7 @@ Describe 'Install-AppWithVerification (shared install-and-verify pipeline, issue
             $result.Status | Should -Be 'Installed'
             $result.InstallResult | Should -Be $null
             $result.FailureReason | Should -Be $null
-            Assert-MockCalled Install-WingetPackage -Times 0 -Exactly
+            Should -Invoke Install-WingetPackage -Times 0 -Exactly
         }
 
         It 'Still reports an already-installed app as Skipped' {
@@ -595,8 +601,8 @@ Describe 'Not-applicable gating end-to-end (issue #217)' {
         # The gated app was skipped with the reason line; the ungated app went through the
         # normal dry-run pipeline (pre-check probe ran for it, and only for it).
         $script:warningMessages | Should -Contain 'Skipping: Dell.CommandUpdate.Universal (not applicable: Dell hardware only)'
-        Assert-MockCalled Test-WingetPackageInstalled -Times 1 -Exactly -ParameterFilter { $PackageId -eq 'Contoso.NormalApp' }
-        Assert-MockCalled Test-WingetPackageInstalled -Times 0 -Exactly -ParameterFilter { $PackageId -eq 'Dell.CommandUpdate.Universal' }
+        Should -Invoke Test-WingetPackageInstalled -Times 1 -Exactly -ParameterFilter { $PackageId -eq 'Contoso.NormalApp' }
+        Should -Invoke Test-WingetPackageInstalled -Times 0 -Exactly -ParameterFilter { $PackageId -eq 'Dell.CommandUpdate.Universal' }
 
         $skippedRow = @($script:capturedRows | Where-Object { $_[0] -eq 'Skipped' })[0]
         $skippedRow[1] | Should -Match 'Dell\.CommandUpdate\.Universal'
@@ -689,7 +695,7 @@ Describe 'Write-FailedAppsSummary (issue #189)' {
         Write-FailedAppsSummary -FailedApps @()
         Write-FailedAppsSummary -FailedApps $null
 
-        Assert-MockCalled Write-Table -Times 0 -Exactly
+        Should -Invoke Write-Table -Times 0 -Exactly
     }
 }
 

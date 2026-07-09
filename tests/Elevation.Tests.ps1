@@ -25,8 +25,8 @@ Describe 'Restart-WithElevation' {
 
         $result = Restart-WithElevation -PowerShellExecutable 'pwsh.exe' -ScriptPath 'C:\script.ps1' -WindowsTerminalExecutable 'wt.exe'
 
-        Assert-MockCalled Start-Process -ParameterFilter { $FilePath -eq 'wt.exe' } -Times 1
-        Assert-MockCalled Start-Process -ParameterFilter { $FilePath -eq 'pwsh.exe' } -Times 0
+        Should -Invoke Start-Process -ParameterFilter { $FilePath -eq 'wt.exe' } -Times 1
+        Should -Invoke Start-Process -ParameterFilter { $FilePath -eq 'pwsh.exe' } -Times 0
         $result | Should -Be 'WindowsTerminal'
     }
 
@@ -36,8 +36,8 @@ Describe 'Restart-WithElevation' {
 
         $result = Restart-WithElevation -PowerShellExecutable 'pwsh.exe' -ScriptPath 'C:\script.ps1' -WindowsTerminalExecutable 'wt.exe'
 
-        Assert-MockCalled Start-Process -ParameterFilter { $FilePath -eq 'wt.exe' } -Times 1
-        Assert-MockCalled Start-Process -ParameterFilter { $FilePath -eq 'pwsh.exe' } -Times 1
+        Should -Invoke Start-Process -ParameterFilter { $FilePath -eq 'wt.exe' } -Times 1
+        Should -Invoke Start-Process -ParameterFilter { $FilePath -eq 'pwsh.exe' } -Times 1
         $result | Should -Be 'PowerShell'
     }
 
@@ -47,7 +47,7 @@ Describe 'Restart-WithElevation' {
 
         $result = Restart-WithElevation -PowerShellExecutable 'pwsh.exe' -ScriptPath 'C:\script.ps1'
 
-        Assert-MockCalled Start-Process -ParameterFilter { $FilePath -eq 'pwsh.exe' } -Times 1
+        Should -Invoke Start-Process -ParameterFilter { $FilePath -eq 'pwsh.exe' } -Times 1
         $result | Should -Be 'PowerShell'
     }
 
@@ -57,7 +57,7 @@ Describe 'Restart-WithElevation' {
 
         Restart-WithElevation -PowerShellExecutable 'pwsh.exe' -ScriptPath 'C:\script.ps1' -AdditionalArguments '-WhatIf'
 
-        Assert-MockCalled Start-Process -Times 1 -ParameterFilter {
+        Should -Invoke Start-Process -Times 1 -ParameterFilter {
             $FilePath -eq 'pwsh.exe' -and (($ArgumentList -join ' ') -match '-File "C:\\script\.ps1" -WhatIf')
         }
     }
@@ -68,7 +68,7 @@ Describe 'Restart-WithElevation' {
 
         Restart-WithElevation -PowerShellExecutable 'pwsh.exe' -ScriptPath 'C:\script.ps1'
 
-        Assert-MockCalled Start-Process -Times 1 -ParameterFilter {
+        Should -Invoke Start-Process -Times 1 -ParameterFilter {
             $FilePath -eq 'pwsh.exe' -and (($ArgumentList -join ' ') -notmatch '-WhatIf')
         }
     }
@@ -79,7 +79,7 @@ Describe 'Restart-WithElevation' {
 
         Restart-WithElevation -PowerShellExecutable 'pwsh.exe' -ScriptPath 'C:\script.ps1' -AdditionalArguments @('-WhatIf', '-SkipSystemCheck')
 
-        Assert-MockCalled Start-Process -Times 1 -ParameterFilter {
+        Should -Invoke Start-Process -Times 1 -ParameterFilter {
             $FilePath -eq 'pwsh.exe' -and (($ArgumentList -join ' ') -match '-File "C:\\script\.ps1" -WhatIf -SkipSystemCheck')
         }
     }
