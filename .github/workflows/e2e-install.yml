@@ -2,7 +2,7 @@ name: E2E Install
 
 # End-to-end tier 1 (issue #214): a REAL install run of the curated catalog on a GitHub-hosted
 # windows-latest runner - a throwaway VM by construction, so this is the only automated place
-# where the installer executes without mocks. The 246-test Pester suite (windows-tests.yml)
+# where the installer executes without mocks. The 259-test Pester suite (windows-tests.yml)
 # mocks every external call; this workflow is the top rung of the testing pyramid.
 #
 # Two modes, selected by the trigger:
@@ -37,12 +37,16 @@ concurrency:
 
 env:
   # Catalog apps that provably CANNOT install on GitHub-hosted (Server-based) runner images —
-  # never product bugs. Each entry MUST reference an issue. The install passes tolerate exit 1
-  # only because Assert-Install.ps1 verifies that NOTHING outside this list failed.
-  #   - Dell.CommandUpdate.Universal: its Microsoft.DotNet.DesktopRuntime.8 dependency has no
-  #     installer applicable to the Server image (0x8A150104) — issue #217, which also proposes
-  #     manufacturer-aware catalog gating as the real fix that would retire this entry.
-  KNOWN_PLATFORM_INCOMPATIBLE: 'Dell.CommandUpdate.Universal'
+  # never product bugs. Each entry MUST reference an issue. When non-empty, the install passes
+  # tolerate exit 1 only because Assert-Install.ps1 verifies that NOTHING outside this list
+  # failed. Currently EMPTY — and empty means STRICT: on the runner an empty env var reads as
+  # $null in pwsh, so the tolerate-exit-1 branches below are inert and both install passes must
+  # exit 0. The containment machinery is kept for future runner-only incompatibilities.
+  #   - Dell.CommandUpdate.Universal was retired from this list by issue #217: the product now
+  #     gates it with a manufacturer condition in the catalog, so non-Dell machines (including
+  #     these runners) report it 'Skipped (not applicable: Dell hardware only)' instead of
+  #     failing its Server-incompatible Microsoft.DotNet.DesktopRuntime.8 dependency (0x8A150104).
+  KNOWN_PLATFORM_INCOMPATIBLE: ''
 
 jobs:
   e2e-install:
@@ -77,8 +81,10 @@ jobs:
             exit 0
           }
           elseif ($exitCode -eq 1 -and $env:KNOWN_PLATFORM_INCOMPATIBLE) {
-            # Exit 1 = 'some apps failed'. Tolerated ONLY pending the assertion step's
-            # containment check that nothing outside KNOWN_PLATFORM_INCOMPATIBLE failed.
+            # Exit 1 = 'some apps failed'. Tolerated ONLY when KNOWN_PLATFORM_INCOMPATIBLE is
+            # non-empty (an empty workflow env var reads as $null here, making this branch
+            # inert - exit 1 then hard-fails below), and only pending the assertion step's
+            # containment check that nothing outside that list failed.
             Write-Host "First install pass exited 1 (some apps failed) - tolerated pending containment check against known platform-incompatible apps: $env:KNOWN_PLATFORM_INCOMPATIBLE" -ForegroundColor Yellow
             exit 0
           }
@@ -110,7 +116,8 @@ jobs:
           }
           elseif ($exitCode -eq 1 -and $env:KNOWN_PLATFORM_INCOMPATIBLE) {
             # Known-incompatible apps are still missing on the second pass, so the installer
-            # retries and fails them again - same containment rule as the first pass.
+            # retries and fails them again - same containment rule (and same empty-means-strict
+            # behavior) as the first pass.
             Write-Host "Second install pass exited 1 (some apps failed) - tolerated pending containment check against known platform-incompatible apps: $env:KNOWN_PLATFORM_INCOMPATIBLE" -ForegroundColor Yellow
             exit 0
           }
@@ -122,13 +129,16 @@ jobs:
       - name: Run assertions (e2e/Assert-Install.ps1, shared with tier 2)
         shell: pwsh
         run: |
-          # Verifies from the checkout: every Get-DefaultAppCatalog app resolves via
-          # `winget list` (exit-code classified), the WAU scheduled task exists, the installed
+          # Verifies from the checkout: every APPLICABLE Get-DefaultAppCatalog app resolves via
+          # `winget list` (exit-code classified) - the script evaluates each app's catalog
+          # condition on this machine, and not-applicable apps (e.g. Dell Command Update on
+          # these non-Dell runners, issue #217) must instead show their 'not applicable' skip
+          # line in the latest transcript. Also: the WAU scheduled task exists, the installed
           # WAU version matches Get-WauPin, a transcript with the 'Installer build' stamp
           # exists under %ProgramData%, and (idempotence) the latest transcript shows every
-          # app Skipped. -SkipApps is the documented escape hatch for runner-platform
+          # applicable app Skipped. -SkipApps is the documented escape hatch for runner-platform
           # incompatibilities ONLY - each entry is justified at the KNOWN_PLATFORM_INCOMPATIBLE
-          # definition at the top of this file (currently: issue #217). The script also asserts
+          # definition at the top of this file (currently empty). The script also asserts
           # CONTAINMENT: no app outside the skip list failed in either install pass.
           & pwsh -NoProfile -ExecutionPolicy Bypass -File ./e2e/Assert-Install.ps1 -ExpectAllSkippedOnSecondRun -SkipApps "$env:KNOWN_PLATFORM_INCOMPATIBLE"
           exit $LASTEXITCODE

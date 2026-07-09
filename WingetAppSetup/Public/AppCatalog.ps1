@@ -10,6 +10,13 @@
       - install: name of a package-specific install function that performs its own verification
         (dispatched by Install-AppWithVerification instead of the generic winget path).
       - installerType: forwarded to Install-WingetPackage for machine-scope handling.
+      - condition: scriptblock returning a boolean — evaluated by Install-AppWithVerification
+        BEFORE any winget probe. Falsy means the app does not apply to this machine and is
+        reported as Skipped (not applicable) instead of installed (issue #217). Fail-open: a
+        condition that throws is warned about and treated as applicable, so a broken probe can
+        never silently drop an app.
+      - conditionDescription: short human-readable reason shown in the skip message, e.g.
+        "Skipping: <id> (not applicable: <conditionDescription>)".
     Add or remove apps HERE — never inline a copy of this list at a call site (the previous
     duplicates in Invoke-WingetInstall and winget-app-uninstall.ps1 had already drifted).
 .RETURNS
@@ -24,7 +31,11 @@ function Get-DefaultAppCatalog {
         @{name = 'Google.GoogleDrive' },
         @{name = 'Git.Git' },
         @{name = 'Klocman.BulkCrapUninstaller' },
-        @{name = 'Dell.CommandUpdate.Universal' },
+        # Dell Command Update is useless on non-Dell hardware, and its DotNet Desktop Runtime
+        # dependency cannot even install on Server-based images (0x8A150104 on GitHub-hosted
+        # runners). Manufacturer-gated so non-Dell machines report it Skipped (not applicable)
+        # instead of failing a pointless install (issue #217).
+        @{name = 'Dell.CommandUpdate.Universal'; condition = { (Get-ComputerManufacturer) -match 'Dell' }; conditionDescription = 'Dell hardware only' },
         # PowerShell needs a version-agnostic install strategy (no pinning — always the latest):
         # winget installs PowerShell 7.6+ as an MSIX by default, which registers per-user and fails
         # to deploy in an elevated cross-user / machine-scope context ("The current system

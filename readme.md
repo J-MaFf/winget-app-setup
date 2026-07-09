@@ -30,6 +30,18 @@ pwsh -Command "irm 'https://raw.githubusercontent.com/J-MaFf/winget-app-setup/re
 
 The script will trust the required Winget sources, elevate if necessary, and install or update the curated app list. Repeat step 1 anytime you open a new PowerShell window before running it.
 
+## App catalog
+
+The curated app list is `Get-DefaultAppCatalog` (`WingetAppSetup/Public/AppCatalog.ps1`) — the
+single source of truth shared by the installer and `winget-app-uninstall.ps1`. Entries may
+declare an optional applicability **condition** (a scriptblock, with a human-readable
+`conditionDescription`), evaluated before any winget call: an app whose condition is falsy on
+the current machine is reported as `Skipping: <id> (not applicable: <reason>)` and counted as
+Skipped in the summary instead of being pointlessly installed. A condition that throws fails
+open — a warning, then a normal install — so a broken probe can never silently drop an app.
+`Dell.CommandUpdate.Universal` is gated this way (`Dell hardware only`): it installs only when
+`Win32_ComputerSystem` reports a Dell manufacturer ([#217](https://github.com/J-MaFf/winget-app-setup/issues/217)).
+
 ## Unattended runs
 
 Pass `-NonInteractive` to suppress all interactive prompts (the elevation pause, the grid-view
@@ -89,11 +101,16 @@ end-to-end run (`.github/workflows/e2e-install.yml`, issue #214) on a GitHub-hos
   production path (`irm <raw main URL> | iex`), PR runs use the checkout's
   `winget-app-install.ps1` — asserting exit 0 both times (the second pass proves idempotence),
   then runs the shared assertion script `e2e/Assert-Install.ps1 -ExpectAllSkippedOnSecondRun`:
-  every `Get-DefaultAppCatalog` app resolves via `winget list` (exit-code classified), the WAU
-  scheduled task exists, the installed WAU version matches `Get-WauPin`, and a transcript with
-  the `Installer build` stamp exists — with every app Skipped on the second pass. The script's
-  `-SkipApps` parameter is an escape hatch for runner-platform incompatibilities only; each use
-  must reference a GitHub issue at the call site.
+  every **applicable** `Get-DefaultAppCatalog` app resolves via `winget list` (exit-code
+  classified) — the script evaluates each app's catalog condition on the runner, and
+  not-applicable apps must instead show their `not applicable` skip line in the latest
+  transcript — the WAU scheduled task exists, the installed WAU version matches `Get-WauPin`,
+  and a transcript with the `Installer build` stamp exists — with every applicable app Skipped
+  on the second pass. The script's `-SkipApps` parameter is an escape hatch for runner-platform
+  incompatibilities only; each use must reference a GitHub issue at the call site. Dell Command
+  Update is **no longer skip-listed** there: the catalog's manufacturer condition
+  ([#217](https://github.com/J-MaFf/winget-app-setup/issues/217)) gates it in the product
+  itself, so the non-Dell runners exercise the gating for real on every run.
 - **Where the transcripts land:** on the runner under `%ProgramData%\winget-app-setup\logs`
   (the same place as production runs), always uploaded as the `e2e-install-transcripts`
   artifact on the workflow run.

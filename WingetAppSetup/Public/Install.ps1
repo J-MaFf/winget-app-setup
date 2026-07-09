@@ -215,7 +215,17 @@ function Invoke-WingetInstall {
 
             switch ($outcome.Status) {
                 'Skipped' {
-                    Write-WarningMessage "Skipping: $($app.name) (already installed)"
+                    if ($outcome.SkipReason -eq 'NotApplicable') {
+                        # Applicability-gated skip (issue #217): the app's catalog condition
+                        # evaluated falsy on this machine (e.g. Dell Command Update on non-Dell
+                        # hardware). Same summary bucket as an already-installed skip, but the
+                        # message carries the condition's human-readable reason.
+                        $conditionText = if ($app.conditionDescription) { $app.conditionDescription } else { 'condition not met' }
+                        Write-WarningMessage "Skipping: $($app.name) (not applicable: $conditionText)"
+                    }
+                    else {
+                        Write-WarningMessage "Skipping: $($app.name) (already installed)"
+                    }
                     $skippedApps += $app.name
                 }
                 'Installed' {
