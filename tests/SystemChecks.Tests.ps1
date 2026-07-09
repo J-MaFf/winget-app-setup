@@ -21,7 +21,7 @@ Describe 'Test-SystemRequirements' -Tag 'SystemRequirements' {
             [PSCustomObject]@{ Free = 100GB }
         }
         Mock Get-ItemProperty {
-            [PSCustomObject]@{ ProductName = 'Windows 11 Pro' }
+            [PSCustomObject]@{ ProductName = 'Windows 11 Pro'; CurrentBuildNumber = '22631' }
         }
         # Default to an interactive session so the prompt-path tests below exercise Read-Host
         # regardless of the host running Pester (CI runners have redirected stdin, which would
@@ -116,5 +116,34 @@ Describe 'Test-SystemRequirements' -Tag 'SystemRequirements' {
         Mock Read-Host { throw 'Should not prompt when free space was not measured' }
         $null = Test-SystemRequirements
         Should -Invoke Write-WarningMessage -ParameterFilter { $Message -match '\[UNKNOWN\] Disk Space' }
+    }
+
+    # Windows 11 still reports the registry ProductName "Windows 10 ..." (Microsoft never
+    # updated it); the build number (>= 22000) is the real discriminator (issue #221).
+    Context 'OS version relabel (issue #221)' {
+        It 'Relabels a Windows 11 machine that reports ProductName "Windows 10 Pro"' {
+            Mock Get-ItemProperty { [PSCustomObject]@{ ProductName = 'Windows 10 Pro'; CurrentBuildNumber = '26200' } }
+            $null = Test-SystemRequirements
+            Should -Invoke Write-Success -ParameterFilter { $Message -match 'OS Version: Windows 11 Pro' }
+        }
+
+        It 'Leaves a genuine Windows 10 name unchanged when the build is below 22000' {
+            Mock Get-ItemProperty { [PSCustomObject]@{ ProductName = 'Windows 10 Pro'; CurrentBuildNumber = '19045' } }
+            $null = Test-SystemRequirements
+            Should -Invoke Write-Success -ParameterFilter { $Message -match 'OS Version: Windows 10 Pro' }
+        }
+
+        It 'Does not relabel Windows Server 2025 (build >= 22000 but not a "Windows 10" name)' {
+            Mock Get-ItemProperty { [PSCustomObject]@{ ProductName = 'Windows Server 2025 Datacenter'; CurrentBuildNumber = '26100' } }
+            $null = Test-SystemRequirements
+            Should -Invoke Write-Success -ParameterFilter { $Message -match 'OS Version: Windows Server 2025 Datacenter' }
+        }
+
+        It 'Warns (non-blocking) and reports the true build on Windows older than build 19044' {
+            Mock Get-ItemProperty { [PSCustomObject]@{ ProductName = 'Windows 10 Pro'; CurrentBuildNumber = '19041' } }
+            $result = Test-SystemRequirements
+            $result | Should -BeTrue
+            Should -Invoke Write-WarningMessage -ParameterFilter { $Message -match '\[WARN\] OS Version' -and $Message -match 'build 19041' }
+        }
     }
 }
