@@ -12,18 +12,22 @@ scripts target **Windows PowerShell / PowerShell 7 on Windows**; they cannot run
 Linux or macOS because they depend on `winget`, the `Microsoft.WinGet.Client` module, and
 Windows-only cmdlets.
 
-## Current State — 2026-07-08
+## Current State — 2026-07-10
 
 Healthy. **The 2026-07-08 whole-repo multi-agent code-review wave is fully resolved**: all 17
 issues it filed ([#176](https://github.com/J-MaFf/winget-app-setup/issues/176)–[#192](https://github.com/J-MaFf/winget-app-setup/issues/192))
-have landed via PRs #193–#209 — see the Resolved Issues table below. In review: Windows
-PowerShell 5.1 parse safety for the generated installer
-([#210](https://github.com/J-MaFf/winget-app-setup/issues/210), PR
-[#212](https://github.com/J-MaFf/winget-app-setup/pull/212)) and the local pre-commit drift
-check + guard-stack documentation
-([#211](https://github.com/J-MaFf/winget-app-setup/issues/211), stacked on #212). The full
-guard stack that keeps `winget-app-install.ps1` from drifting from the module is now
-documented in readme.md ("Why `winget-app-install.ps1` cannot drift from the module").
+have landed via PRs #193–#209 — see the Resolved Issues table below. Windows PowerShell 5.1
+parse safety ([#210](https://github.com/J-MaFf/winget-app-setup/issues/210)) and the local
+pre-commit drift check + guard-stack documentation
+([#211](https://github.com/J-MaFf/winget-app-setup/issues/211)) have landed too; the full
+guard stack that keeps `winget-app-install.ps1` from drifting from the module is documented
+in readme.md ("Why `winget-app-install.ps1` cannot drift from the module").
+
+In review: **the installer now bootstraps PowerShell 7 from Windows PowerShell 5.1**
+([#225](https://github.com/J-MaFf/winget-app-setup/issues/225)) — instead of the #210
+fail-fast, the 5.1 branch finds or installs `pwsh` (winget, MSI fallback, interactive
+consent) and relaunches the installer in the same console with switches forwarded, so the
+documented one-liner works on fresh shop machines that ship with only Windows PowerShell.
 
 Earlier, **fixed the winget source probe false-failing every run** ([#174](https://github.com/J-MaFf/winget-app-setup/issues/174)):
 the `Invoke-WingetSourceProbe` command passed `--accept-source-agreements`, which is invalid for
@@ -107,7 +111,7 @@ Pester installs persist across runs there ([#161](https://github.com/J-MaFf/wing
 |------|-------------|
 | `WingetAppSetup/` | Source-of-truth PowerShell module (`.psd1` manifest + `.psm1` loader) |
 | `WingetAppSetup/Public/` | Exported functions: logging, winget core, app validation, Windows Terminal config, install orchestration (updates are outsourced to WAU) |
-| `WingetAppSetup/Private/` | Internal helpers: environment/PATH, elevation, graphical tools |
+| `WingetAppSetup/Private/` | Internal helpers: environment/PATH, elevation, graphical tools, the Windows PowerShell 5.1 → PowerShell 7 bootstrap |
 | `build/Build-WingetInstallScript.ps1` | Concatenates the module + entry fragments into `winget-app-install.ps1` |
 | `build/fragments/` | `head.ps1` (PSScriptInfo, help, `param`) and `tail.ps1` (entry-point dispatch) |
 | `winget-app-install.ps1` | **Generated** single-file installer for local and `irm \| iex` use — do not edit by hand |
@@ -123,6 +127,11 @@ Pester installs persist across runs there ([#161](https://github.com/J-MaFf/wing
 
 | Issue | Description | PR |
 |-------|-------------|----|
+| [#226](https://github.com/J-MaFf/winget-app-setup/issues/226) | IEX non-admin guidance test silently always skipped (`-Skip` bound at discovery time reads `BeforeAll` variables as `$null`) | [#227](https://github.com/J-MaFf/winget-app-setup/pull/227) |
+| [#217](https://github.com/J-MaFf/winget-app-setup/issues/217) | Dell Command Update cannot install on GitHub-hosted runners — manufacturer-aware catalog gating | [#220](https://github.com/J-MaFf/winget-app-setup/pull/220) |
+| [#221](https://github.com/J-MaFf/winget-app-setup/issues/221) | Pre-flight OS check misidentifies Windows 11 | [#222](https://github.com/J-MaFf/winget-app-setup/pull/222) |
+| [#211](https://github.com/J-MaFf/winget-app-setup/issues/211) | Local pre-commit drift check + document the generated-script guard stack | [#213](https://github.com/J-MaFf/winget-app-setup/pull/213) |
+| [#210](https://github.com/J-MaFf/winget-app-setup/issues/210) | Generated installer fails to parse under Windows PowerShell 5.1 (BOM-less UTF-8 decoded as ANSI) | [#212](https://github.com/J-MaFf/winget-app-setup/pull/212) |
 | [#192](https://github.com/J-MaFf/winget-app-setup/issues/192) | Split `Test-WingetAppInstall.Tests.ps1` into per-area files and remove tautological/drifted tests | [#209](https://github.com/J-MaFf/winget-app-setup/pull/209) |
 | [#191](https://github.com/J-MaFf/winget-app-setup/issues/191) | Module surface: reconcile psd1/psm1 export lists, remove dead `ConvertTo-CommandArguments`, move logging primitives to Private | [#205](https://github.com/J-MaFf/winget-app-setup/pull/205) |
 | [#190](https://github.com/J-MaFf/winget-app-setup/issues/190) | Single-source the app catalog and make the uninstaller consume the module | [#208](https://github.com/J-MaFf/winget-app-setup/pull/208) |
@@ -164,10 +173,7 @@ Pester installs persist across runs there ([#161](https://github.com/J-MaFf/wing
 
 | Issue | Description | Status |
 |-------|-------------|--------|
-| [#210](https://github.com/J-MaFf/winget-app-setup/issues/210) | Generated installer fails to parse under Windows PowerShell 5.1 (BOM-less UTF-8 decoded as ANSI; em dashes corrupt string tokens) | In review — PR [#212](https://github.com/J-MaFf/winget-app-setup/pull/212) |
-| [#211](https://github.com/J-MaFf/winget-app-setup/issues/211) | Local pre-commit drift check + document the generated-script guard stack | In review — [PR #213](https://github.com/J-MaFf/winget-app-setup/pull/213), stacked on #212 |
-| [#217](https://github.com/J-MaFf/winget-app-setup/issues/217) | Dell Command Update cannot install on GitHub-hosted runners — manufacturer-aware catalog gating | In review — [PR #220](https://github.com/J-MaFf/winget-app-setup/pull/220) |
-| [#226](https://github.com/J-MaFf/winget-app-setup/issues/226) | IEX non-admin guidance test silently always skipped (`-Skip` bound at discovery time reads `BeforeAll` variables as `$null`) | In review — PR [#227](https://github.com/J-MaFf/winget-app-setup/pull/227) |
+| [#225](https://github.com/J-MaFf/winget-app-setup/issues/225) | Bootstrap PowerShell 7 from Windows PowerShell 5.1 instead of failing fast | In review — PR [#228](https://github.com/J-MaFf/winget-app-setup/pull/228) |
 
 ## Natural Next Steps
 
@@ -180,11 +186,13 @@ Pester installs persist across runs there ([#161](https://github.com/J-MaFf/wing
 ## Prerequisites to Run
 
 - **Windows 10/11** with [App Installer / winget](https://www.microsoft.com/p/app-installer/9nblggh4nns1) available.
-- **PowerShell 7+** recommended (Windows PowerShell 5.1 also works for the installer).
+- **PowerShell 7+** (`pwsh`) is the installer's runtime — but starting it from Windows
+  PowerShell 5.1 works too: the entry dispatch bootstraps PowerShell 7 and relaunches itself
+  ([#225](https://github.com/J-MaFf/winget-app-setup/issues/225)).
 - Permission to temporarily relax the execution policy for the current process, e.g.:
   ```powershell
   Set-ExecutionPolicy Unrestricted -Scope Process -Force
   ```
-- Run the installer: `powershell -ExecutionPolicy Unrestricted -File .\winget-app-install.ps1`.
+- Run the installer: `pwsh -ExecutionPolicy Unrestricted -File .\winget-app-install.ps1` (or the same via `powershell`, which self-bootstraps).
 - Run tests: `Invoke-Pester ./tests`.
 - Regenerate the installer after editing the module: `pwsh -File ./build/Build-WingetInstallScript.ps1`.
