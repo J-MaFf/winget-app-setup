@@ -99,6 +99,13 @@ Describe 'Generated installer: Windows PowerShell 5.1 parse safety (issue #210)'
     BeforeDiscovery {
         # Discovery-time (not BeforeAll) because -Skip is bound during discovery.
         $script:winPowerShellAvailable = [bool](Get-Command -Name 'powershell.exe' -CommandType Application -ErrorAction SilentlyContinue)
+        $script:pwshAvailableForRelaunch = [bool](Get-Command -Name 'pwsh.exe' -CommandType Application -ErrorAction SilentlyContinue)
+        # The live-relaunch test is OPT-IN: it drives the machine's real pwsh through a full
+        # -WhatIf pipeline (real winget presence probes, a transcript under ProgramData), which
+        # violates the "unit tests never touch real system state" rule for a default run and has
+        # environment-dependent timing. Enable it explicitly when touching the bootstrap:
+        #   $env:WINGET_APP_SETUP_RUN_51_RELAUNCH_TEST = '1'; Invoke-Pester ./tests/EntryPoint.Tests.ps1
+        $script:runLiveRelaunchTest = ($env:WINGET_APP_SETUP_RUN_51_RELAUNCH_TEST -eq '1')
     }
 
     It 'Contains no non-ASCII characters outside comment tokens (same rule the build enforces)' {
@@ -125,23 +132,47 @@ Describe 'Generated installer: Windows PowerShell 5.1 parse safety (issue #210)'
         $output[0] | Should -Be '0' -Because ("Windows PowerShell 5.1 reported parse errors:`n" + ($output -join "`n"))
     }
 
-    It 'Fails fast under Windows PowerShell 5.1 with pwsh guidance and exit code 1' -Skip:(-not $script:winPowerShellAvailable) {
-        # Safe to execute for real: the version check is the first statement of the dispatch, so
-        # 5.1 exits before the transcript starts or any system state is touched.
-        $output = & powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $script:InstallerScriptPath 2>&1 | Out-String
+    It 'Under 5.1 with no pwsh discoverable, -WhatIf previews the bootstrap and exits 0' -Skip:(-not $script:winPowerShellAvailable) {
+        # NEVER run the installer BARE under 5.1 in a test: since issue #225 the 5.1 branch
+        # bootstraps - on a pwsh-equipped machine it would relaunch into a REAL install. This
+        # test poisons the child's lookup environment (PATH without pwsh; nonexistent
+        # ProgramFiles/ProgramW6432/LOCALAPPDATA roots) so Find-PowerShell7 cannot resolve
+        # anything, and passes -WhatIf, which returns before any install attempt - exercising
+        # the no-pwsh preview path with zero side effects.
+        $escapedPath = $script:InstallerScriptPath.Replace("'", "''")
+        $childCommand = "& { `$env:PATH = 'C:\Windows\System32'; `$env:ProgramFiles = 'C:\__was_no_such_dir__'; `$env:ProgramW6432 = 'C:\__was_no_such_dir__'; `$env:LOCALAPPDATA = 'C:\__was_no_such_dir__'; & '$escapedPath' -WhatIf }"
+        $output = & powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command $childCommand 2>&1 | Out-String
         $exitCode = $LASTEXITCODE
 
-        $exitCode | Should -Be 1
+        $exitCode | Should -Be 0
         $output | Should -Match 'requires PowerShell 7\+'
-        $output | Should -Match 'pwsh'
-        # Exits before the transcript is started - no log line, no log file side effects.
+        $output | Should -Match '\[DRY-RUN\] PowerShell 7 is not installed'
+        # Returns before the transcript is started - no log line, no log file side effects.
         $output | Should -Not -Match 'Logging this run to:'
     }
 
-    It 'Carries the PowerShell 7 fail-fast at the top of the dispatch' {
+    It 'Under 5.1 with pwsh available, relaunches under pwsh and forwards the switches (opt-in)' -Skip:(-not $script:winPowerShellAvailable -or -not $script:pwshAvailableForRelaunch -or -not $script:runLiveRelaunchTest) {
+        # Real end-to-end handoff (issue #225): 5.1 finds the machine's pwsh and relaunches the
+        # installer in the same console. -WhatIf keeps the child side-effect-free (it does write
+        # a -whatif transcript under ProgramData - the designed dry-run artifact),
+        # -SkipSystemCheck keeps it fast (~20s), and -NonInteractive is REQUIRED here: without
+        # it, a run from an interactive console would hit the dry run's prompts and hang the
+        # suite. Opt-in only (see BeforeDiscovery) - default runs cover the dispatch with the
+        # poisoned-env test above and the mocked suite in PowerShell7Bootstrap.Tests.ps1.
+        $output = & powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $script:InstallerScriptPath -WhatIf -SkipSystemCheck -NonInteractive 2>&1 | Out-String
+        $exitCode = $LASTEXITCODE
+
+        $exitCode | Should -Be 0
+        $output | Should -Match 'Relaunching the installer under PowerShell 7'
+        # Proof the switches crossed the relaunch boundary: the child announced dry-run mode.
+        $output | Should -Match 'DRY-RUN MODE ENABLED'
+    }
+
+    It 'Carries the PowerShell 7 bootstrap dispatch at the top of the entry block' {
         # Cross-platform pin of the guard's presence for environments without powershell.exe.
         $installer = Get-Content -Raw -Encoding UTF8 -Path $script:InstallerScriptPath
         $installer | Should -Match ([regex]::Escape('if ($PSVersionTable.PSVersion.Major -lt 7)'))
+        $installer | Should -Match ([regex]::Escape('exit (Invoke-PowerShell7Bootstrap -WhatIf:$WhatIf -NonInteractive:$NonInteractive -SkipSystemCheck:$SkipSystemCheck -CommandPath $PSCommandPath)'))
         $installer | Should -Match 'This installer requires PowerShell 7\+ \(pwsh\)'
     }
 }

@@ -4,11 +4,13 @@ A one-line guide for running the installer.
 
 ## Run the installer
 
-> **Requires PowerShell 7+ (`pwsh`).** Run the commands below from a `pwsh` prompt — not the
-> built-in Windows PowerShell 5.1 (`powershell.exe`). Under 5.1 the installer prints a short
-> message and exits without changing anything. If you only have Windows PowerShell, install
-> PowerShell 7 first (`winget install Microsoft.PowerShell`) or prefix the one-liner with
-> `pwsh -Command "..."`.
+> **Runs on PowerShell 7+ (`pwsh`), but bootstraps itself from Windows PowerShell 5.1.** The
+> installer's logic requires PowerShell 7. Run from the built-in Windows PowerShell 5.1
+> (`powershell.exe`) — the only shell on a fresh machine — and it finds PowerShell 7 (or
+> installs it via winget, asking first in interactive sessions), then relaunches itself under
+> `pwsh` in the same window with your switches forwarded
+> ([#225](https://github.com/J-MaFf/winget-app-setup/issues/225)). A `-WhatIf` run never
+> installs anything — without PowerShell 7 present it just previews the bootstrap.
 
 From the repository root, execute (after cloning):
 
@@ -16,17 +18,17 @@ From the repository root, execute (after cloning):
 pwsh -ExecutionPolicy Unrestricted -File .\winget-app-install.ps1
 ```
 
-No download/clone needed (one-line-run, from a `pwsh` prompt):
+No download/clone needed (one-line-run, from any PowerShell prompt — `pwsh` or the built-in
+Windows PowerShell 5.1, which self-bootstraps as described above):
 
 ```powershell
 Set-ExecutionPolicy Unrestricted -Scope Process -Force; irm "https://raw.githubusercontent.com/J-MaFf/winget-app-setup/refs/heads/main/winget-app-install.ps1" | iex
 ```
 
-Or, from a Windows PowerShell 5.1 prompt, hand the one-liner to `pwsh`:
-
-```powershell
-pwsh -Command "irm 'https://raw.githubusercontent.com/J-MaFf/winget-app-setup/refs/heads/main/winget-app-install.ps1' | iex"
-```
+Note for 5.1 starts via `irm | iex`: there is no script file on disk to relaunch, so the
+bootstrap re-downloads the installer from the URL above to a temp file and runs that under
+`pwsh`. Starting from a file (`-File .\winget-app-install.ps1`) relaunches the same file
+instead.
 
 The script will trust the required Winget sources, elevate if necessary, and install or update the curated app list. Repeat step 1 anytime you open a new PowerShell window before running it.
 
@@ -200,9 +202,10 @@ guards, most of which run in both build and `-Check` modes of
    of the assembled script must be pure ASCII. The installer ships as BOM-less UTF-8, which
    5.1 decodes as ANSI: a multi-byte character inside a string literal misdecodes (an em
    dash's 0x94 byte becomes a string-terminating curly quote) and cascades into parser
-   errors before the version fail-fast can run. Keeping code tokens ASCII keeps the file
-   5.1-parseable so 5.1 reaches the version check and prints a real message; comments are
-   exempt because misdecoded bytes there cannot change tokenization
+   errors before the version dispatch can run. Keeping code tokens ASCII keeps the file
+   5.1-parseable so 5.1 reaches the version check and runs the PowerShell 7 bootstrap
+   (find-or-install `pwsh`, then relaunch — [#225](https://github.com/J-MaFf/winget-app-setup/issues/225));
+   comments are exempt because misdecoded bytes there cannot change tokenization
    ([#210](https://github.com/J-MaFf/winget-app-setup/issues/210)).
 6. **Content-derived build id** — the banner and `$script:InstallerBuildId` are stamped with
    `<module version>+<8-hex SHA256 fragment of the assembled functions>`, derived from content
