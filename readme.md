@@ -61,7 +61,7 @@ Non-interactive mode is also auto-detected when the session is non-interactive (
 | Code | Meaning |
 |------|---------|
 | 0 | Success — all apps installed or already present |
-| 1 | One or more apps failed to install (also: run under PowerShell older than 7, pre-flight system checks failed, or elevation unavailable under remote execution) |
+| 1 | One or more apps failed to install (also: the PowerShell 7 bootstrap could not provision `pwsh` from a pre-7 session — declined consent or failed install — pre-flight system checks failed, or elevation unavailable under remote execution) |
 | 2 | Winget is unavailable and could not be installed |
 | 3 | App-definition validation failed, or no valid app definitions remain |
 
