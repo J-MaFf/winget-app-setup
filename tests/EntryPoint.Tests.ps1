@@ -170,7 +170,8 @@ Describe 'Build determinism (issue #189)' {
 }
 
 Describe 'IEX non-admin execution behavior' {
-    BeforeAll {
+    BeforeDiscovery {
+        # Discovery-time (not BeforeAll) because -Skip is bound during discovery.
         $script:isWindowsPlatform = [System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Win32NT
         $script:isElevated = $false
 
