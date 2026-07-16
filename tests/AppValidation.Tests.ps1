@@ -44,6 +44,31 @@ Describe 'Test-AppDefinitions' {
         }
     }
 
+    Context 'When an entry has a malformed package id (issue: CLAUDE.md regex enforcement)' {
+        It 'Should return an error and skip an entry whose name is not publisher.product shaped' {
+            $apps = @(
+                @{ name = 'App.Valid' },
+                @{ name = 'NotAPackageId' }
+            )
+
+            $result = Test-AppDefinitions -Apps $apps
+
+            $result.ValidApps.Count | Should -Be 1
+            $result.ValidApps[0].name | Should -Be 'App.Valid'
+            $result.Errors.Count | Should -Be 1
+            $result.Errors[0] | Should -Match 'invalid package id'
+        }
+
+        It 'Should accept every entry from the real, curated app catalog' {
+            $catalog = Get-DefaultAppCatalog
+
+            $result = Test-AppDefinitions -Apps $catalog
+
+            $result.Errors | Should -BeNullOrEmpty
+            $result.ValidApps.Count | Should -Be $catalog.Count
+        }
+    }
+
     Context 'When duplicate entries are present' {
         It 'Should keep the first occurrence and warn about duplicates' {
             $apps = @(
