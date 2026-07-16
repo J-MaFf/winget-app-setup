@@ -58,12 +58,12 @@ param (
 # This script is assembled from the WingetAppSetup module by build/Build-WingetInstallScript.ps1.
 # Edit the function source under WingetAppSetup/Public and WingetAppSetup/Private, then re-run the
 # build to regenerate this file. See readme.md ("Project layout") for details.
-# Build id: 1.0.0+d210acfc (module version + SHA256 fragment of the function content; issue #189).
+# Build id: 1.0.0+6fd66659 (module version + SHA256 fragment of the function content; issue #189).
 # ------------------------------------------------------------------------------------------------
 
 # Content-derived build identity, logged at startup so a transcript from a remote machine
 # identifies exactly which installer build produced it (issue #189).
-$script:InstallerBuildId = '1.0.0+d210acfc'
+$script:InstallerBuildId = '1.0.0+6fd66659'
 
 # ------------------------------------------------Functions------------------------------------------------
 
@@ -1949,11 +1949,16 @@ function Invoke-WingetInstall {
 
                     if ($outcome.Status -eq 'Failed') {
                         $failureReason = Format-InstallFailureReason -FailureReason $outcome.FailureReason -InstallResult $outcome.InstallResult
-                        if ($outcome.FailureReason -in 'PreCheckTimeout', 'VerifyTimeout') {
-                            Write-WarningMessage "Verification timed out for retry: $appName. Assuming installation failed."
-                        }
-                        else {
-                            Write-ErrorMessage "Retry failed: $appName ($failureReason)."
+                        switch ($outcome.FailureReason) {
+                            'PreCheckTimeout' {
+                                Write-WarningMessage "Winget list timed out for retry: $appName. Assuming installation failed."
+                            }
+                            'VerifyTimeout' {
+                                Write-WarningMessage "Verification timed out for retry: $appName. Assuming installation failed."
+                            }
+                            default {
+                                Write-ErrorMessage "Retry failed: $appName ($failureReason)."
+                            }
                         }
                         $failedApps += @{ Name = $appName; Reason = $failureReason }
                     }
