@@ -115,12 +115,20 @@ function Invoke-WingetInstall {
         }
         else {
             # IEX/remote execution has no local script path to relaunch from.
-            Write-ErrorMessage 'This script requires administrator privileges.'
-            Write-ErrorMessage 'Auto-elevation is unavailable when running through IEX/remote execution.'
-            Write-Info 'Open an elevated PowerShell or Windows Terminal session and run the IEX command again.'
-            Write-Info 'Exiting in 5 seconds...'
-            Start-Sleep -Seconds 5
-            Exit 1
+            if ($WhatIf) {
+                # Same rationale as the local-file dry-run branch above: a preview makes no
+                # system changes, so it never needs elevation. Continue the preview in the
+                # current (non-elevated) session instead of exiting.
+                Write-Info '[DRY-RUN] Would require administrator privileges for a real run (auto-elevation is unavailable when running through IEX/remote execution). Continuing the preview in the current (non-elevated) session; no system changes will be made.'
+            }
+            else {
+                Write-ErrorMessage 'This script requires administrator privileges.'
+                Write-ErrorMessage 'Auto-elevation is unavailable when running through IEX/remote execution.'
+                Write-Info 'Open an elevated PowerShell or Windows Terminal session and run the IEX command again.'
+                Write-Info 'Exiting in 5 seconds...'
+                Start-Sleep -Seconds 5
+                Exit 1
+            }
         }
     }
     else {

@@ -220,6 +220,46 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
         }
     }
 
+    # IEX/remote execution (Test-IsRunningLocally false) previously ignored -WhatIf entirely and
+    # unconditionally demanded elevation (Exit 1), unlike the local-file branch which already
+    # honored -WhatIf. -Skip:$wiringIsElevated because the non-admin gate this exercises is only
+    # reached when the test process itself is not elevated (mirrors the pattern used by the
+    # 'Retry pass' Context below, inverted).
+    Context 'IEX/remote elevation dry-run (WhatIf must preview, not demand elevation)' {
+        BeforeEach {
+            Mock Test-IsRunningLocally { $false }
+            $script:errorMessages = @()
+            Mock Write-ErrorMessage { $script:errorMessages += $Message }
+            $script:infoMessages = @()
+            Mock Write-Info { $script:infoMessages += $Message }
+        }
+
+        It 'Does not print the elevation-required errors or exit when non-admin, non-local, and -WhatIf is set' -Skip:$script:wiringIsElevated {
+            Mock Install-AppWithVerification { @{ Status = 'Installed'; InstallResult = $null; FailureReason = $null } }
+
+            Invoke-WingetInstall -Apps @(@{ name = 'Contoso.OnlyApp' }) -WhatIf -NonInteractive
+
+            $script:errorMessages | Should -Not -Contain 'This script requires administrator privileges.'
+            $script:errorMessages | Should -Not -Contain 'Auto-elevation is unavailable when running through IEX/remote execution.'
+            # Exit isn't mockable (it's a statement, not a command; real Exit is only ever
+            # exercised safely in a spawned child process, per 'IEX non-admin execution
+            # behavior' in tests/EntryPoint.Tests.ps1). Reaching this assertion at all is the
+            # proof: a real Exit would have torn down the whole Pester process before we got
+            # here. The dry-run pipeline completing and bucketing the app confirms it fell
+            # through instead of exiting.
+            Should -Invoke Install-AppWithVerification -Times 1 -Exactly
+        }
+
+        It 'Prints a [DRY-RUN] message stating elevation would be required and no changes are made' -Skip:$script:wiringIsElevated {
+            Mock Install-AppWithVerification { @{ Status = 'Installed'; InstallResult = $null; FailureReason = $null } }
+
+            Invoke-WingetInstall -Apps @(@{ name = 'Contoso.OnlyApp' }) -WhatIf -NonInteractive
+
+            ($script:infoMessages | Where-Object { $_ -match '\[DRY-RUN\]' -and $_ -match 'administrator' }) | Should -Not -BeNullOrEmpty
+            ($script:infoMessages | Where-Object { $_ -match 'no system changes' }) | Should -Not -BeNullOrEmpty
+        }
+    }
+
     Context 'Catalog injection (issue #190)' {
         It 'Accepts an -Apps parameter defaulting to Get-DefaultAppCatalog' {
             $command = Get-Command Invoke-WingetInstall

@@ -58,12 +58,12 @@ param (
 # This script is assembled from the WingetAppSetup module by build/Build-WingetInstallScript.ps1.
 # Edit the function source under WingetAppSetup/Public and WingetAppSetup/Private, then re-run the
 # build to regenerate this file. See readme.md ("Project layout") for details.
-# Build id: 1.0.0+d210acfc (module version + SHA256 fragment of the function content; issue #189).
+# Build id: 1.0.0+dd3a780d (module version + SHA256 fragment of the function content; issue #189).
 # ------------------------------------------------------------------------------------------------
 
 # Content-derived build identity, logged at startup so a transcript from a remote machine
 # identifies exactly which installer build produced it (issue #189).
-$script:InstallerBuildId = '1.0.0+d210acfc'
+$script:InstallerBuildId = '1.0.0+dd3a780d'
 
 # ------------------------------------------------Functions------------------------------------------------
 
@@ -1759,12 +1759,20 @@ function Invoke-WingetInstall {
         }
         else {
             # IEX/remote execution has no local script path to relaunch from.
-            Write-ErrorMessage 'This script requires administrator privileges.'
-            Write-ErrorMessage 'Auto-elevation is unavailable when running through IEX/remote execution.'
-            Write-Info 'Open an elevated PowerShell or Windows Terminal session and run the IEX command again.'
-            Write-Info 'Exiting in 5 seconds...'
-            Start-Sleep -Seconds 5
-            Exit 1
+            if ($WhatIf) {
+                # Same rationale as the local-file dry-run branch above: a preview makes no
+                # system changes, so it never needs elevation. Continue the preview in the
+                # current (non-elevated) session instead of exiting.
+                Write-Info '[DRY-RUN] Would require administrator privileges for a real run (auto-elevation is unavailable when running through IEX/remote execution). Continuing the preview in the current (non-elevated) session; no system changes will be made.'
+            }
+            else {
+                Write-ErrorMessage 'This script requires administrator privileges.'
+                Write-ErrorMessage 'Auto-elevation is unavailable when running through IEX/remote execution.'
+                Write-Info 'Open an elevated PowerShell or Windows Terminal session and run the IEX command again.'
+                Write-Info 'Exiting in 5 seconds...'
+                Start-Sleep -Seconds 5
+                Exit 1
+            }
         }
     }
     else {
