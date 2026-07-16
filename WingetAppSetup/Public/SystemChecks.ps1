@@ -2,31 +2,28 @@
 .SYNOPSIS
     Runs pre-flight system checks (OS version, disk space, network) before installation.
 .DESCRIPTION
-    Warns on Windows older than 10 21H2 (build 19044, non-blocking), warns and prompts to
-    continue when C: has less than 50 GB free (measured only — an unreadable drive reports
-    UNKNOWN and never prompts), and blocks when cdn.winget.microsoft.com is unreachable over
-    HTTPS (network is required for winget). The network probe uses Invoke-WebRequest, which
-    honors system proxy settings; any HTTP response — including 4xx/5xx — counts as reachable,
-    and only a transport-level failure (no response at all) blocks. In -WhatIf mode the
-    disk-space prompt is skipped, and in effective non-interactive mode (issue #214 — explicit
-    switch, non-interactive session, or redirected stdin, via Test-EffectiveNonInteractive) the
-    prompt is replaced by a warning and the run continues: an unattended run must never block
-    on Read-Host (empty redirected stdin reads as "not Y" and silently cancelled the install).
+    Warns on Windows older than 10 21H2 (build 19044, non-blocking), warns when C: has less than
+    50 GB free (measured only — an unreadable drive reports UNKNOWN and stays quiet), and blocks
+    when cdn.winget.microsoft.com is unreachable over HTTPS (network is required for winget). The
+    network probe uses Invoke-WebRequest, which honors system proxy settings; any HTTP response —
+    including 4xx/5xx — counts as reachable, and only a transport-level failure (no response at
+    all) blocks.
+
+    Nothing here prompts (issue #230): the only blocking check is the network probe, whose verdict
+    is not a matter of opinion, so the sole return-$false path is a genuine failure rather than a
+    declined question. Low disk warns and proceeds. That is also why this function has no
+    -NonInteractive parameter — with the prompt gone there is no interactive behavior left to
+    suppress (it previously gated the low-disk Read-Host, per issues #214/#176).
 .PARAMETER WhatIf
-    When specified, reports intended checks without prompting on low disk space.
-.PARAMETER NonInteractive
-    The caller's explicit non-interactive intent, forwarded into the shared effective
-    non-interactive detection (Test-EffectiveNonInteractive). When the effective state is
-    non-interactive, measured-low disk space warns and continues instead of prompting.
+    When specified, reports intended checks and skips the low-disk warning (a dry run makes no
+    changes that could run the disk out).
 .RETURNS
-    [bool] True when it is safe to proceed; False when a blocking check fails or the user declines.
+    [bool] True when it is safe to proceed; False when a blocking check fails.
 #>
 function Test-SystemRequirements {
     param (
         [Parameter(Mandatory = $false)]
-        [switch]$WhatIf,
-        [Parameter(Mandatory = $false)]
-        [switch]$NonInteractive
+        [switch]$WhatIf
     )
 
     $results = @()
@@ -59,7 +56,7 @@ function Test-SystemRequirements {
         $results += [PSCustomObject]@{ Check = 'OS Version'; Status = 'WARN'; Detail = "Could not determine OS version: $_" }
     }
 
-    # --- Disk Space on C: (warn + prompt if under 50 GB) ---
+    # --- Disk Space on C: (warn if under 50 GB) ---
     $freeGB = $null
     try {
         $drive = Get-PSDrive -Name C -ErrorAction Stop
@@ -72,8 +69,8 @@ function Test-SystemRequirements {
         }
     }
     catch {
-        # Distinct from the low-space WARN: free space could not be measured, so the
-        # low-disk prompt below must not fire ($freeGB stays $null).
+        # Distinct from the low-space WARN: free space could not be measured, so the low-disk
+        # warning below must not fire and claim a number it does not have ($freeGB stays $null).
         $results += [PSCustomObject]@{ Check = 'Disk Space'; Status = 'UNKNOWN'; Detail = "Could not read C: drive: $_" }
     }
 
@@ -118,22 +115,14 @@ function Test-SystemRequirements {
         return $false
     }
 
-    # Prompt only when free space was actually measured below the threshold
-    # (skip prompt in WhatIf mode; never prompt when the drive could not be read).
+    # Measured-low disk warns and continues; it never asks (issue #230). Low disk is a
+    # recommendation, not a blocker, so "continue anyway?" only ever had one useful answer, and
+    # asking it stalled the documented one-liner — an interactive `irm | iex` does not redirect
+    # stdin, so the interactivity detection this used to branch on reported interactive and the
+    # prompt fired. Silent when free space could not be measured ($freeGB stays $null) or under
+    # -WhatIf, which makes no changes that could run the disk out.
     if ($null -ne $freeGB -and $freeGB -lt 50 -and -not $WhatIf) {
-        # Unattended runs must never block on Read-Host: redirected stdin returns an empty
-        # string, which reads as "not Y" and silently cancelled the install (issue #214).
-        # Warn and continue instead — low disk is a recommendation, not a blocker.
-        if (Test-EffectiveNonInteractive -NonInteractive:$NonInteractive) {
-            Write-WarningMessage 'Disk space is below the 50 GB recommendation. Continuing without prompting (non-interactive run).'
-        }
-        else {
-            $choice = Read-Host 'Disk space is below the 50 GB recommendation. Continue anyway? (Y/N)'
-            if ($choice -notin @('Y', 'y')) {
-                Write-WarningMessage 'Installation cancelled by user due to low disk space.'
-                return $false
-            }
-        }
+        Write-WarningMessage 'Disk space is below the 50 GB recommendation. Continuing anyway.'
     }
 
     return $true

@@ -1,12 +1,17 @@
 <#
 .SYNOPSIS
-    Determines whether the current run must behave as non-interactive (no prompts).
+    Determines whether the current run has a human at the console.
 .DESCRIPTION
-    Single source of truth for the effective non-interactive detection (issue #214). The logic
-    was previously inlined in Invoke-WingetInstall (issue #176), which left the pre-flight
-    disk-space prompt in Test-SystemRequirements unguarded: an unattended run (CI, RMM, scheduled
-    task) with measured-low disk blocked on Read-Host and auto-cancelled when redirected stdin
-    returned an empty string. Both callers now share this helper.
+    Single source of truth for the effective non-interactive detection (issues #176, #214). Since
+    issue #230 this gates no prompt — there are none left — and its only caller is
+    Invoke-WingetInstall, which uses it for the two things that still depend on a human being
+    present: whether to open the summary grid view, and whether to hold the window with "press any
+    key to exit".
+
+    Note what it deliberately does NOT catch: an interactive `irm <url> | iex` reports INTERACTIVE
+    here, because the pipe is a PowerShell-internal pipeline and leaves the process's stdin alone.
+    That is correct — there really is a human there — but it is why prompts could never be the
+    mechanism that kept the documented one-liner unattended (issue #230).
 
     A run is effectively non-interactive when ANY of the following holds:
       - the caller passed the explicit -NonInteractive switch;
@@ -17,7 +22,7 @@
 .PARAMETER NonInteractive
     The caller's explicit -NonInteractive switch, forwarded as -NonInteractive:$switch.
 .RETURNS
-    [bool] True when the run must not prompt; otherwise false.
+    [bool] True when there is no human to interact with; otherwise false.
 #>
 function Test-EffectiveNonInteractive {
     param (

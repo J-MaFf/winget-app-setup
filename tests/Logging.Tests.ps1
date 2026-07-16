@@ -16,7 +16,9 @@ Describe 'Write-Table' {
         . $script:InstallerScriptPath
 
         Mock Write-Host { }
-        Mock Read-Host { return 'N' }
+        # Read-Host is mocked only so the "never prompts" assertions have a command to count.
+        # Write-Table has not called it since issue #230; a real call would block the suite.
+        Mock Read-Host { throw 'Write-Table must never prompt (issue #230)' }
 
         # Unconditional test double (issue #192): shadows any real Out-GridView so Pester always
         # has a command to mock on every platform, and the suite can never pop real UI. The old
@@ -89,104 +91,109 @@ Describe 'Write-Table' {
         Should -Invoke Write-Host -Times 1
     }
 
-    It 'Should prompt user when PromptForGridView is true and user accepts' {
-        Mock Get-Command { return $true } -ParameterFilter { $Name -eq 'Out-GridView' }
-        Mock Read-Host { return 'Y' }
-
-        $headers = @('Status', 'Apps')
-        $rows = @(@('Installed', 'App1, App2'))
-
-        Write-Table -Headers $headers -Rows $rows -PromptForGridView $true
-
-        # Should call Read-Host to prompt user
-        Should -Invoke Read-Host -Times 1
-        # Should call Out-GridView since user said yes
-        Should -Invoke Out-GridView -Times 1
-    }
-
-    It 'Should prompt user when PromptForGridView is true and user declines' {
-        Mock Get-Command { return $true } -ParameterFilter { $Name -eq 'Out-GridView' }
-        Mock Read-Host { return 'N' }
-
-        $headers = @('Status', 'Apps')
-        $rows = @(@('Installed', 'App1, App2'))
-
-        Write-Table -Headers $headers -Rows $rows -PromptForGridView $true
-
-        # Should call Read-Host to prompt user
-        Should -Invoke Read-Host -Times 1
-        # Should not call Out-GridView since user said no
-        Should -Invoke Out-GridView -Times 0
-        # Should call Write-Host for text output
-        Should -Invoke Write-Host -Times 2  # Empty line + table output
-    }
-
-    It 'Should not prompt when Out-GridView is not available' {
-        Mock Get-Command { throw 'Command not found' } -ParameterFilter { $Name -eq 'Out-GridView' }
-        Mock Read-Host { return 'Y' }
-
-        $headers = @('Status', 'Apps')
-        $rows = @(@('Installed', 'App1, App2'))
-
-        Write-Table -Headers $headers -Rows $rows -PromptForGridView $true
-
-        # Should not call Read-Host since Out-GridView is not available
-        Should -Invoke Read-Host -Times 0
-        # Should call Write-Host for text output
-        Should -Invoke Write-Host -Times 1
-    }
-
-    It 'Should accept case-insensitive affirmative responses (y, Y, yes, YES)' {
-        Mock Get-Command { return $true } -ParameterFilter { $Name -eq 'Out-GridView' }
-
-        $testCases = @('y', 'Y', 'yes', 'YES', 'Yes', 'yEs')
-        foreach ($response in $testCases) {
-            Mock Read-Host { return $response }
-            Mock Out-GridView { }
+    # -AutoGridView replaced -PromptForGridView in issue #230: the grid view is no longer offered
+    # as a Read-Host question, it just opens when the session can show one. Test-CanUseGridView is
+    # the mocked seam throughout (rather than Get-Command) because it is the single gate the
+    # function consults, and it makes the outcome independent of the host running Pester.
+    Context 'AutoGridView opens the grid view without asking (issue #230)' {
+        It 'Opens the grid view when the session can show one' {
+            Mock Test-CanUseGridView { return $true }
 
             $headers = @('Status', 'Apps')
             $rows = @(@('Installed', 'App1, App2'))
 
-            Write-Table -Headers $headers -Rows $rows -PromptForGridView $true
+            Write-Table -Headers $headers -Rows $rows -AutoGridView $true
 
-            # Should call Out-GridView for all case variations
             Should -Invoke Out-GridView -Times 1
         }
-    }
 
-    It 'Should reject non-affirmative responses (n, N, no, anything else)' {
-        Mock Get-Command { return $true } -ParameterFilter { $Name -eq 'Out-GridView' }
-
-        $testCases = @('n', 'N', 'no', 'NO', 'nope', 'maybe', '', 'x')
-        foreach ($response in $testCases) {
-            Mock Read-Host { return $response }
-            Mock Out-GridView { }
+        It 'Still writes the text table when the grid view opens' {
+            # Regression pin for the transcript (issue #230). Write-Table used to `return` the
+            # moment Out-GridView was shown; now that the grid opens automatically rather than on
+            # request, that early return would have silently dropped the summary from the
+            # Start-Transcript log of every interactive run - Out-GridView renders in its own
+            # window and is never transcribed. Both must happen.
+            Mock Test-CanUseGridView { return $true }
 
             $headers = @('Status', 'Apps')
             $rows = @(@('Installed', 'App1, App2'))
 
-            Write-Table -Headers $headers -Rows $rows -PromptForGridView $true
+            Write-Table -Headers $headers -Rows $rows -AutoGridView $true
 
-            # Should NOT call Out-GridView for non-affirmative responses
+            Should -Invoke Out-GridView -Times 1
+            Should -Invoke Write-Host -Times 1
+        }
+
+        It 'Never prompts, whatever the session looks like' {
+            # A throw rather than -Times 0: Read-Host is gone from the function entirely, so a
+            # count assertion would pass vacuously and keep passing if it ever came back.
+            Mock Test-CanUseGridView { return $true }
+            Mock Read-Host { throw 'Write-Table must never prompt (issue #230)' }
+
+            $headers = @('Status', 'Apps')
+            $rows = @(@('Installed', 'App1, App2'))
+
+            { Write-Table -Headers $headers -Rows $rows -AutoGridView $true } | Should -Not -Throw
+            Should -Invoke Read-Host -Times 0 -Exactly
+        }
+
+        It 'Silently skips the grid view when the session cannot show one' {
+            # -AutoGridView is an offer, not a request: no window and no warning, just the text.
+            Mock Test-CanUseGridView { return $false }
+
+            $headers = @('Status', 'Apps')
+            $rows = @(@('Installed', 'App1, App2'))
+
+            Write-Table -Headers $headers -Rows $rows -AutoGridView $true
+
             Should -Invoke Out-GridView -Times 0
-            # Should call Write-Host for text output (empty line + table)
-            Should -Invoke Write-Host -Times 2
+            Should -Invoke Write-Host -Times 1
+        }
+
+        It 'Does not open the grid view when neither switch is set' {
+            Mock Test-CanUseGridView { return $true }
+
+            $headers = @('Status', 'Apps')
+            $rows = @(@('Installed', 'App1, App2'))
+
+            Write-Table -Headers $headers -Rows $rows
+
+            Should -Invoke Out-GridView -Times 0
+            Should -Invoke Write-Host -Times 1
+        }
+
+        It 'Has no -PromptForGridView parameter' {
+            # Non-vacuous pin on the rename. No build guard inspects parameter binding, so a caller
+            # still passing the old name (winget-app-uninstall.ps1 did) would ship and fail at
+            # runtime, after the work was already done.
+            (Get-Command Write-Table).Parameters.ContainsKey('PromptForGridView') | Should -BeFalse
+            (Get-Command Write-Table).Parameters.ContainsKey('AutoGridView') | Should -BeTrue
         }
     }
 
-    It 'Should skip prompt when UseGridView is true regardless of PromptForGridView' {
-        Mock Get-Command { return $true } -ParameterFilter { $Name -eq 'Out-GridView' }
-        Mock Read-Host { return 'N' }  # User says no, but should be ignored
+    It 'Should open the grid view when UseGridView is set, without AutoGridView' {
+        Mock Test-CanUseGridView { return $true }
 
         $headers = @('Status', 'Apps')
         $rows = @(@('Installed', 'App1, App2'))
 
-        Write-Table -Headers $headers -Rows $rows -UseGridView $true -PromptForGridView $true
+        Write-Table -Headers $headers -Rows $rows -UseGridView $true
 
-        # Should NOT call Read-Host since UseGridView takes precedence
-        Should -Invoke Read-Host -Times 0
-        # Should call Out-GridView directly
         Should -Invoke Out-GridView -Times 1
+    }
+
+    It 'Should warn when UseGridView is explicitly requested but unavailable' {
+        # An explicit request that cannot be honored is worth a word; an -AutoGridView offer is not.
+        Mock Test-CanUseGridView { return $false }
+        Mock Write-WarningMessage { }
+
+        $headers = @('Status', 'Apps')
+        $rows = @(@('Installed', 'App1, App2'))
+
+        Write-Table -Headers $headers -Rows $rows -UseGridView $true
+
+        Should -Invoke Out-GridView -Times 0
+        Should -Invoke Write-WarningMessage -Times 1 -ParameterFilter { $Message -match 'not available' }
     }
 
     It 'Should handle Out-GridView execution failure gracefully' {
@@ -204,22 +211,18 @@ Describe 'Write-Table' {
         Should -Invoke Write-Host -Times 2
     }
 
-    It 'Should not prompt when the session cannot use grid view (non-interactive sessions)' {
-        # Rewritten in issue #192: the old version wrapped its only assertion in
-        # `if ([Environment]::UserInteractive)` and asserted the prompt IS shown — the opposite
-        # of its name, and a no-op in non-interactive sessions. Write-Table's prompt is gated on
-        # Test-CanUseGridView, which returns $false when [Environment]::UserInteractive is false,
-        # so mocking that seam drives the real non-interactive code path deterministically.
+    It 'Should not open a grid view in a session that cannot show one (non-interactive sessions)' {
+        # Rewritten in issue #192, then again in #230 when the prompt this guarded was removed.
+        # Test-CanUseGridView returns $false when [Environment]::UserInteractive is false, so
+        # mocking that seam drives the real non-interactive path deterministically — this is what
+        # keeps an unattended run from opening a modal Out-GridView -Wait nobody would close.
         Mock Test-CanUseGridView { return $false }
-        Mock Read-Host { return 'Y' }
 
         $headers = @('Status', 'Apps')
         $rows = @(@('Installed', 'App1, App2'))
 
-        Write-Table -Headers $headers -Rows $rows -PromptForGridView $true
+        Write-Table -Headers $headers -Rows $rows -AutoGridView $true
 
-        # No prompt, no grid view — straight to text output.
-        Should -Invoke Read-Host -Times 0
         Should -Invoke Out-GridView -Times 0
         Should -Invoke Write-Host -Times 1
     }

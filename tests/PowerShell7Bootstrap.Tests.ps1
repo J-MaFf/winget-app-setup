@@ -248,31 +248,31 @@ Describe 'Invoke-PowerShell7Bootstrap' {
         }
     }
 
-    Context 'PowerShell 7 missing, interactive consent' {
+    Context 'PowerShell 7 missing, interactive session (issue #230)' {
+        # There is no consent prompt anymore. PowerShell 7 is a hard requirement of everything the
+        # installer does, so the question only ever had one useful answer - and it fired on exactly
+        # the run that must not stop: `irm | iex` reads as INTERACTIVE, because the iex pipe is an
+        # in-process pipeline and leaves stdin alone.
         BeforeEach {
             Mock Find-PowerShell7 { $null }
             Mock Test-EffectiveNonInteractive { $false }
             Mock Get-Command { $null } -ParameterFilter { $Name -eq 'winget' }
             Mock Start-Process { [pscustomobject]@{ ExitCode = 0 } }
+            Mock Read-Host { throw 'The bootstrap must never prompt (issue #230)' }
         }
 
-        It 'Declining the prompt returns 1 without installing anything' {
-            Mock Read-Host { 'n' }
-
-            $result = Invoke-PowerShell7Bootstrap -CommandPath 'C:\repo\winget-app-install.ps1'
-
-            $result | Should -Be 1
-            Should -Invoke Start-Process -Times 0
-            Should -Invoke Invoke-RestMethod -Times 0
-        }
-
-        It 'Pressing Enter (default) proceeds with the install' {
-            Mock Read-Host { '' }
-
+        It 'Installs without asking, even though the session is interactive' {
             Invoke-PowerShell7Bootstrap -CommandPath 'C:\repo\winget-app-install.ps1' | Out-Null
 
+            Should -Invoke Read-Host -Times 0 -Exactly
             # winget is mocked away, so the flow reaches the MSI fallback download.
             Should -Invoke Invoke-RestMethod -Times 1 -ParameterFilter { $Uri -like '*install-powershell*' }
+        }
+
+        It 'Announces the install rather than asking about it' {
+            Invoke-PowerShell7Bootstrap -CommandPath 'C:\repo\winget-app-install.ps1' | Out-Null
+
+            Should -Invoke Write-Info -Times 1 -ParameterFilter { $Message -match 'Installing it now' }
         }
     }
 
@@ -308,7 +308,7 @@ Describe 'Invoke-PowerShell7Bootstrap' {
             Should -Invoke Start-Process -Times 1 -Exactly -ParameterFilter { $FilePath -eq 'C:\pf7\pwsh.exe' }
         }
 
-        It 'Skips the consent prompt and passes --disable-interactivity' {
+        It 'Passes --disable-interactivity and never prompts' {
             Invoke-PowerShell7Bootstrap -CommandPath 'C:\repo\winget-app-install.ps1' | Out-Null
 
             Should -Invoke Read-Host -Times 0
@@ -324,18 +324,22 @@ Describe 'Invoke-PowerShell7Bootstrap' {
         }
     }
 
-    Context 'Interactive winget install keeps winget interactive' {
-        It 'Omits --disable-interactivity when the session is interactive' {
+    Context 'The winget install is never interactive (issue #230)' {
+        It 'Passes --disable-interactivity even when the session is interactive' {
+            # Inverted from its original form, which asserted the flag was OMITTED for interactive
+            # sessions. That was exactly backwards for the case that matters: the documented
+            # one-liner reports interactive, so the run most likely to be walked away from was the
+            # one run that let winget stop and ask. Nothing here needs winget's UI - the agreements
+            # go in by flag, and a failure falls through to the MSI fallback.
             Mock Find-PowerShell7 { $null }
             Mock Test-EffectiveNonInteractive { $false }
-            Mock Read-Host { 'y' }
             Mock Get-Command { [pscustomobject]@{ Source = 'C:\winget.exe' } } -ParameterFilter { $Name -eq 'winget' }
             Mock Start-Process { [pscustomobject]@{ ExitCode = 0 } }
 
             Invoke-PowerShell7Bootstrap -CommandPath 'C:\repo\winget-app-install.ps1' | Out-Null
 
             Should -Invoke Start-Process -Times 1 -Exactly -ParameterFilter {
-                $FilePath -eq 'winget' -and -not ($ArgumentList -contains '--disable-interactivity')
+                $FilePath -eq 'winget' -and $ArgumentList -contains '--disable-interactivity'
             }
         }
     }

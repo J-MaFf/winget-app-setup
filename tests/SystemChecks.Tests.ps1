@@ -1,6 +1,6 @@
 # SystemChecks.Tests.ps1
 # Tests for WingetAppSetup/Public/SystemChecks.ps1: the Test-SystemRequirements pre-flight
-# checks (network reachability, disk space prompts, unattended-safe behavior).
+# checks (network reachability, disk space warnings, unattended-safe behavior).
 # Split from the old single-file suite Test-WingetAppInstall.Tests.ps1 (issue #192).
 
 # Load the module's functions once for this file. TestHelpers.ps1 resolves the repo paths
@@ -23,10 +23,10 @@ Describe 'Test-SystemRequirements' -Tag 'SystemRequirements' {
         Mock Get-ItemProperty {
             [PSCustomObject]@{ ProductName = 'Windows 11 Pro'; CurrentBuildNumber = '22631' }
         }
-        # Default to an interactive session so the prompt-path tests below exercise Read-Host
-        # regardless of the host running Pester (CI runners have redirected stdin, which would
-        # otherwise flip the real detection to non-interactive). Issue #214.
-        Mock Test-EffectiveNonInteractive { $false }
+        # No Test-EffectiveNonInteractive mock: Test-SystemRequirements stopped consulting the
+        # detection when its low-disk prompt was removed (issue #230), so these checks now behave
+        # identically on an interactive console and a CI runner. That invariance is the point, and
+        # it is pinned explicitly below rather than simulated with a mock.
     }
 
     It 'Returns $true when all checks pass' {
@@ -49,71 +49,62 @@ Describe 'Test-SystemRequirements' -Tag 'SystemRequirements' {
         $result | Should -BeTrue
     }
 
-    It 'Returns $false when user declines low disk space prompt' {
-        Mock Get-PSDrive { [PSCustomObject]@{ Free = 10GB } }
-        Mock Read-Host { 'N' }
-        $result = Test-SystemRequirements
-        $result | Should -BeFalse
+    # Measured-low disk warns and continues, unconditionally and without asking (issue #230).
+    # Previously it asked "Continue anyway? (Y/N)" and a declining (or empty) answer returned
+    # $false, which silently cancelled unattended installs (issues #195/#214).
+    Context 'Low disk space never blocks (issue #230)' {
+        BeforeEach {
+            Mock Get-PSDrive { [PSCustomObject]@{ Free = 10GB } }
+            # A throw is a stronger guard than -Times 0: it fails loudly at the call site with a
+            # real stack, and cannot pass vacuously if the assertion is ever dropped.
+            Mock Read-Host { throw 'Test-SystemRequirements must never prompt (issue #230)' }
+        }
+
+        It 'Warns and returns $true when low disk is measured, with no prompt' {
+            $result = Test-SystemRequirements
+
+            $result | Should -BeTrue
+            Should -Invoke Read-Host -Times 0 -Exactly
+            Should -Invoke Write-WarningMessage -ParameterFilter { $Message -match 'Continuing anyway' }
+        }
+
+        It 'Behaves identically when the caller declares itself non-interactive' {
+            # Regression pin for the removed branch: there is now ONE low-disk path, so an
+            # unattended run and an interactive one produce the same warning and the same $true.
+            # (The switch itself is gone from this function - see the parameter-surface test.)
+            $result = Test-SystemRequirements
+
+            $result | Should -BeTrue
+            Should -Invoke Write-WarningMessage -ParameterFilter { $Message -match 'Continuing anyway' }
+        }
+
+        It 'Skips the low-disk warning in WhatIf mode' {
+            # This is the only thing keeping -WhatIf load-bearing in this function; without it the
+            # tail's `Test-SystemRequirements -WhatIf:$WhatIf` would be the next thing to rot.
+            { Test-SystemRequirements -WhatIf } | Should -Not -Throw
+            Should -Invoke Write-WarningMessage -Times 0 -Exactly -ParameterFilter { $Message -match 'Continuing anyway' }
+        }
     }
 
-    It 'Returns $true when user accepts low disk space prompt' {
-        Mock Get-PSDrive { [PSCustomObject]@{ Free = 10GB } }
-        Mock Read-Host { 'Y' }
-        $result = Test-SystemRequirements
-        $result | Should -BeTrue
+    It 'Does not have a -NonInteractive parameter (issue #230)' {
+        # Non-vacuous pin on the signature change. The build's guard stack (parse, ASCII, export,
+        # undefined-reference, byte-compare) inspects command NAMES only and is blind to parameter
+        # binding, so a caller left passing -NonInteractive would ship and fail at runtime. This
+        # test is what actually catches that.
+        (Get-Command Test-SystemRequirements).Parameters.ContainsKey('NonInteractive') | Should -BeFalse
     }
 
-    It 'Warns and continues instead of prompting when low disk is measured non-interactively (issue #214)' {
-        Mock Get-PSDrive { [PSCustomObject]@{ Free = 10GB } }
-        Mock Test-EffectiveNonInteractive { $true }
-        Mock Read-Host { throw 'Should not prompt in non-interactive mode' }
-
-        $result = Test-SystemRequirements
-
-        $result | Should -BeTrue
-        Should -Invoke Read-Host -Times 0 -Exactly
-        Should -Invoke Write-WarningMessage -ParameterFilter { $Message -match 'Continuing without prompting' }
-    }
-
-    It 'Forwards the explicit -NonInteractive switch into the shared detection (issue #214)' {
-        Mock Get-PSDrive { [PSCustomObject]@{ Free = 10GB } }
-        Mock Test-EffectiveNonInteractive { [bool]$NonInteractive }
-        Mock Read-Host { throw 'Should not prompt when -NonInteractive is passed' }
-
-        $result = Test-SystemRequirements -NonInteractive
-
-        $result | Should -BeTrue
-        Should -Invoke Read-Host -Times 0 -Exactly
-        Should -Invoke Test-EffectiveNonInteractive -ParameterFilter { [bool]$NonInteractive }
-    }
-
-    It 'Still prompts interactively when low disk is measured and the session is interactive' {
-        Mock Get-PSDrive { [PSCustomObject]@{ Free = 10GB } }
-        Mock Read-Host { 'Y' }
-
-        $result = Test-SystemRequirements
-
-        $result | Should -BeTrue
-        Should -Invoke Read-Host -Times 1 -Exactly
-    }
-
-    It 'Skips disk space prompt in WhatIf mode' {
-        Mock Get-PSDrive { [PSCustomObject]@{ Free = 10GB } }
-        Mock Read-Host { throw 'Should not prompt in WhatIf mode' }
-        { Test-SystemRequirements -WhatIf } | Should -Not -Throw
-    }
-
-    It 'Does not prompt when the C: drive cannot be read (unattended-safe)' {
+    It 'Does not emit the low-disk warning when the C: drive cannot be read' {
+        # The UNKNOWN path has no measured number, so it must not claim one (issue #195).
         Mock Get-PSDrive { throw 'Drive read failure' }
-        Mock Read-Host { throw 'Should not prompt when free space was not measured' }
+        Mock Read-Host { throw 'Test-SystemRequirements must never prompt (issue #230)' }
         $result = Test-SystemRequirements
         $result | Should -BeTrue
-        Should -Invoke Read-Host -Times 0 -Exactly
+        Should -Invoke Write-WarningMessage -Times 0 -Exactly -ParameterFilter { $Message -match 'Continuing anyway' }
     }
 
     It 'Reports UNKNOWN (not the low-space WARN) when the C: drive cannot be read' {
         Mock Get-PSDrive { throw 'Drive read failure' }
-        Mock Read-Host { throw 'Should not prompt when free space was not measured' }
         $null = Test-SystemRequirements
         Should -Invoke Write-WarningMessage -ParameterFilter { $Message -match '\[UNKNOWN\] Disk Space' }
     }

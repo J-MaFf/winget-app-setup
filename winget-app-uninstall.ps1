@@ -13,8 +13,9 @@ Import-Module (Join-Path $PSScriptRoot 'WingetAppSetup\WingetAppSetup.psd1') -Fo
 
 # Check if the script is run as administrator
 If (-NOT ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] 'Administrator')) {
-    Write-ErrorMessage 'This script requires administrator privileges. Press Enter to restart script with elevated privileges.'
-    Pause
+    # No "press Enter" pause before elevating (issue #230), matching the installer: the relaunch is
+    # unconditional, and the UAC dialog it raises is the real consent gate.
+    Write-ErrorMessage 'This script requires administrator privileges. Restarting with elevated privileges...'
     # Relaunch with administrator privileges via the module's shared helper (issue #190):
     # prefers an elevated Windows Terminal tab and falls back to a plain PowerShell window.
     $psExecutable = if (Get-Command pwsh -ErrorAction SilentlyContinue) { 'pwsh.exe' } else { 'powershell.exe' }
@@ -101,4 +102,9 @@ if ($appList) {
     $rows += , @('Failed', $appList)
 }
 
-Write-Table -Headers $headers -Rows $rows -PromptForGridView $true -Title 'Uninstallation Summary'
+# -AutoGridView opens the grid view without asking (issue #230; formerly -PromptForGridView, which
+# Read-Host'd first). Hardcoded $true because this script has no non-interactive mode to consult —
+# Test-EffectiveNonInteractive is private to the module and not exported. That is safe: Write-Table
+# checks Test-CanUseGridView itself, so a session that cannot show a window simply gets the text
+# table, which now always prints regardless.
+Write-Table -Headers $headers -Rows $rows -AutoGridView $true -Title 'Uninstallation Summary'

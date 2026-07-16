@@ -7,7 +7,7 @@ A one-line guide for running the installer.
 > **Runs on PowerShell 7+ (`pwsh`), but bootstraps itself from Windows PowerShell 5.1.** The
 > installer's logic requires PowerShell 7. Run from the built-in Windows PowerShell 5.1
 > (`powershell.exe`) — the only shell on a fresh machine — and it finds PowerShell 7 (or
-> installs it via winget, asking first in interactive sessions), then relaunches itself under
+> installs it via winget, no consent prompt), then relaunches itself under
 > `pwsh` in the same window with your switches forwarded
 > ([#225](https://github.com/J-MaFf/winget-app-setup/issues/225)). A `-WhatIf` run never
 > installs anything — without PowerShell 7 present it just previews the bootstrap.
@@ -46,8 +46,11 @@ open — a warning, then a normal install — so a broken probe can never silent
 
 ## Unattended runs
 
-Pass `-NonInteractive` to suppress all interactive prompts (the elevation pause, the grid-view
-prompt, and the final "press any key") for RMM, CI, or scheduled-task use:
+The installer never asks a yes/no question on any path — elevation, the PowerShell 7 bootstrap,
+and low disk space all proceed without prompting, so the one-liner above can be run and left
+alone from a normal console. Pass `-NonInteractive` for RMM, CI, or scheduled-task use to also
+suppress the two interactive-only extras: the summary grid-view window and the final "press any
+key to exit":
 
 ```powershell
 pwsh -ExecutionPolicy Unrestricted -File .\winget-app-install.ps1 -NonInteractive
@@ -61,7 +64,7 @@ Non-interactive mode is also auto-detected when the session is non-interactive (
 | Code | Meaning |
 |------|---------|
 | 0 | Success — all apps installed or already present |
-| 1 | One or more apps failed to install (also: the PowerShell 7 bootstrap could not provision `pwsh` from a pre-7 session — declined consent or failed install — pre-flight system checks failed, or elevation unavailable under remote execution) |
+| 1 | One or more apps failed to install (also: the PowerShell 7 bootstrap could not provision `pwsh` from a pre-7 session, pre-flight system checks failed, or elevation unavailable under remote execution) |
 | 2 | Winget is unavailable and could not be installed |
 | 3 | App-definition validation failed, or no valid app definitions remain |
 

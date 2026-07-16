@@ -6,9 +6,10 @@
 .PARAMETER WhatIf
     When specified, the script performs all pre-flight checks and displays planned actions without making any system changes.
 .PARAMETER NonInteractive
-    Suppresses all interactive prompts (elevation pause, grid-view prompt, final "press any key")
-    for unattended runs (RMM, CI, scheduled tasks). Also auto-detected when the session is
-    non-interactive or stdin is redirected.
+    Suppresses the interactive extras for unattended runs (RMM, CI, scheduled tasks): the summary
+    grid-view window and the final "press any key to exit". Also auto-detected when the session is
+    non-interactive or stdin is redirected. No path asks a yes/no question anymore (issue #230), so
+    this switch is not needed to keep a run from blocking on a prompt.
 .PARAMETER SkipSystemCheck
     Pass-through of the entry script's -SkipSystemCheck switch. Used only so an elevated relaunch
     inherits the caller's intent to bypass the pre-flight system checks (issue #185); the checks
@@ -50,19 +51,26 @@ function Invoke-WingetInstall {
     # Determine which PowerShell executable to use
     $psExecutable = if (Get-Command pwsh -ErrorAction SilentlyContinue) { 'pwsh.exe' } else { 'powershell.exe' }
 
-    # Accept the winget source agreement in the user context before elevating. Agreements are
-    # per-user and won't carry into the elevated process; running the update here surfaces any
-    # interactive prompt while we still have the normal user's identity. Scoped to --name winget —
+    # Trigger the winget source's per-user first-use bootstrap in the user context before elevating.
+    # Agreements are per-user and won't carry into the elevated process. Scoped to --name winget —
     # the only source this tool installs from — so it never triggers msstore's agreement/first-use
     # handshake, which fails in non-interactive/cross-user contexts (issue #172).
+    #
+    # --disable-interactivity (issue #230): this used to run bare, on purpose, to surface winget's
+    # agreement prompt "while we still have the normal user's identity" - and -Wait meant an
+    # unattended run sat on that prompt forever. It was never load-bearing: the exit code is
+    # discarded (no -PassThru), so nothing here could act on the answer either way. The agreement
+    # is accepted where it actually counts - every install passes --accept-source-agreements, and
+    # the elevated Initialize-WingetSourcesForUser below re-probes and bootstraps the installing
+    # account via Repair-WinGetPackageManager (issue #159).
     $isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] 'Administrator')
     if (-not $isAdmin -and (Test-IsRunningLocally)) {
         if ($WhatIf) {
-            Write-Info '[DRY-RUN] Would run winget source update --name winget to prompt for source agreement acceptance in user context'
+            Write-Info '[DRY-RUN] Would run winget source update --name winget to bootstrap the source in user context'
         }
         else {
-            Write-Info 'Updating the winget source - accept any prompts that appear to continue...'
-            Start-Process -FilePath 'winget' -ArgumentList 'source', 'update', '--name', 'winget' -Wait -NoNewWindow
+            Write-Info 'Updating the winget source...'
+            Start-Process -FilePath 'winget' -ArgumentList 'source', 'update', '--name', 'winget', '--disable-interactivity' -Wait -NoNewWindow
         }
     }
 
@@ -85,13 +93,10 @@ function Invoke-WingetInstall {
                     Write-ErrorMessage 'Invoke-WingetInstall was invoked from the imported module without elevation; auto-elevation cannot relaunch a module function. Run winget-app-install.ps1, or start from an already-elevated session.'
                     return
                 }
-                if ($effectiveNonInteractive) {
-                    Write-ErrorMessage 'This script requires administrator privileges. Restarting with elevated privileges...'
-                }
-                else {
-                    Write-ErrorMessage 'This script requires administrator privileges. Press Enter to restart script with elevated privileges.'
-                    Pause
-                }
+                # No "press Enter to elevate" pause (issue #230): it gated the run on a keystroke
+                # without offering a decision - the relaunch happens either way, and the UAC dialog
+                # the relaunch raises is the actual consent gate. Announce and go.
+                Write-ErrorMessage 'This script requires administrator privileges. Restarting with elevated privileges...'
                 # Relaunch the script with administrator privileges, forwarding the caller's
                 # switches so the elevated session inherits the same intent: -SkipSystemCheck so
                 # the pre-flight checks the caller explicitly bypassed are not re-run in the
@@ -359,7 +364,10 @@ function Invoke-WingetInstall {
         $rows += , @('Failed', $appList)
     }
 
-    Write-Table -Headers $headers -Rows $rows -PromptForGridView (-not $effectiveNonInteractive) -Title 'Installation Summary'
+    # -AutoGridView opens the grid view without asking (issue #230), gated on the session actually
+    # being interactive so an unattended run never leaves a window open with nobody to close it.
+    # The text table prints either way, so the transcript keeps the summary regardless.
+    Write-Table -Headers $headers -Rows $rows -AutoGridView (-not $effectiveNonInteractive) -Title 'Installation Summary'
 
     # Per-app failure reasons (issue #189): winget exit code, attempt count, and scope-fallback
     # detail, so a failure is diagnosable from the summary (and the transcript) instead of a

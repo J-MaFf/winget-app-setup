@@ -37,9 +37,11 @@
  Bypasses the pre-flight system checks (OS version, disk space, network) for headless or automated use.
 
 .PARAMETER NonInteractive
- Suppresses all interactive prompts (elevation pause, grid-view prompt, final "press any key") for
- unattended runs (RMM, CI, scheduled tasks). Also auto-detected when the session is non-interactive
- or stdin is redirected.
+ Suppresses the interactive extras for unattended runs (RMM, CI, scheduled tasks): the summary
+ grid-view window and the final "press any key to exit". Also auto-detected when the session is
+ non-interactive or stdin is redirected. The installer asks no yes/no questions on any path (issue
+ #230), so this switch is only about those two extras - it is not needed to keep a run from
+ blocking on a prompt.
 #>
 
 param (

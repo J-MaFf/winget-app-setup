@@ -3,8 +3,8 @@
 # tail dispatch calls it BEFORE handing off to PowerShell 7. Keep every statement 5.1-runtime
 # compatible: no ternary, no null-coalescing, no 3-argument Join-Path, only .NET Framework 4.x
 # APIs, and only helpers that are themselves 5.1-safe (Write-Info/Write-WarningMessage/
-# Write-ErrorMessage/Write-Success are plain Write-Host wrappers; Test-EffectiveNonInteractive is
-# pure .NET Framework calls). The build's parse + ASCII guards keep the assembled installer
+# Write-ErrorMessage/Write-Success are plain Write-Host wrappers). The build's parse + ASCII guards
+# keep the assembled installer
 # 5.1-PARSEABLE (issue #210); runtime compatibility of this file is pinned by the unit tests in
 # tests/PowerShell7Bootstrap.Tests.ps1.
 
@@ -91,9 +91,9 @@ function Find-PowerShell7 {
 
         1. Find an existing pwsh.exe (Find-PowerShell7). Present -> relaunch immediately; this
            alone fixes the "opened the built-in Windows PowerShell out of habit" case.
-        2. Missing -> install it: winget first (an exe, version-agnostic, preinstalled on consumer
-           Windows 11), falling back to the official aka.ms/install-powershell.ps1 MSI script when
-           winget is absent or fails. Interactive runs are asked for consent first; -WhatIf never
+        2. Missing -> install it, no consent prompt (issue #230): winget first (an exe,
+           version-agnostic, preinstalled on consumer Windows 11), falling back to the official
+           aka.ms/install-powershell.ps1 MSI script when winget is absent or fails. -WhatIf never
            installs anything and previews the plan instead.
         3. Relaunch the installer under pwsh with -NoProfile -ExecutionPolicy Bypass in the SAME
            console (output and prompts stay in the caller's window), forwarding the caller's
@@ -110,9 +110,9 @@ function Find-PowerShell7 {
     Dry-run intent, forwarded to the relaunch. When PowerShell 7 is missing, the bootstrap prints
     what a real run would do and returns 0 without installing anything.
 .PARAMETER NonInteractive
-    Suppresses the install-consent prompt (auto-proceeds), forwarded to the relaunch. Effective
-    non-interactivity is also auto-detected (Test-EffectiveNonInteractive), so redirected-stdin
-    contexts (RMM, CI) never block on Read-Host.
+    Forwarded to the relaunch, and nothing else. Since issue #230 this function has no interactive
+    behavior of its own to gate: the install proceeds without asking, and its winget call always
+    passes --disable-interactivity.
 .PARAMETER SkipSystemCheck
     Forwarded to the relaunch untouched.
 .PARAMETER CommandPath
@@ -168,14 +168,12 @@ function Invoke-PowerShell7Bootstrap {
             return 0
         }
 
-        $effectiveNonInteractive = Test-EffectiveNonInteractive -NonInteractive:$NonInteractive
-        if (-not $effectiveNonInteractive) {
-            $answer = Read-Host 'PowerShell 7 (pwsh) is required but not installed. Install it now via winget? [Y/n]'
-            if ($answer -match '^\s*n') {
-                Write-ErrorMessage 'PowerShell 7 is required. Install it (winget install Microsoft.PowerShell) and re-run this installer from a pwsh prompt.'
-                return 1
-            }
-        }
+        # No consent prompt (issue #230). PowerShell 7 is a hard requirement of everything below,
+        # so the question only ever had one useful answer - and asking it stalled the documented
+        # one-liner: an interactive `irm | iex` does not redirect stdin, so the session read as
+        # interactive and the prompt fired. This function no longer consults the interactivity
+        # detection at all; -NonInteractive survives here purely to be forwarded to the relaunch.
+        Write-Info 'PowerShell 7 (pwsh) is required but not installed. Installing it now...'
 
         # The bootstrap runs before the module's elevation logic ever loads; a machine-wide
         # PowerShell 7 install from a non-admin session may surface a UAC prompt or fail outright.
@@ -194,10 +192,13 @@ function Invoke-PowerShell7Bootstrap {
         $wingetCommand = Get-Command -Name 'winget' -CommandType Application -ErrorAction SilentlyContinue
         if ($wingetCommand) {
             Write-Info 'Installing PowerShell 7 via winget...'
-            $wingetArguments = @('install', '--id', 'Microsoft.PowerShell', '--exact', '--source', 'winget', '--accept-source-agreements', '--accept-package-agreements')
-            if ($effectiveNonInteractive) {
-                $wingetArguments += '--disable-interactivity'
-            }
+            # --disable-interactivity unconditionally (issue #230). It used to be added only when
+            # the session read as non-interactive, which is exactly backwards for the case that
+            # matters: the documented one-liner reports INTERACTIVE (an `irm | iex` pipe leaves
+            # stdin alone), so the run most likely to be walked away from was the one run that let
+            # winget stop and ask. Nothing here needs winget's UI - the agreements are accepted by
+            # flag, and a failure falls through to the MSI fallback below.
+            $wingetArguments = @('install', '--id', 'Microsoft.PowerShell', '--exact', '--source', 'winget', '--accept-source-agreements', '--accept-package-agreements', '--disable-interactivity')
             # A Start-Process launch failure is non-terminating under 5.1's default
             # $ErrorActionPreference and would leave $wingetProcess $null - catch it explicitly
             # so a broken winget shim degrades to the MSI fallback with a real message.
