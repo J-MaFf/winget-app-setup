@@ -63,6 +63,16 @@ function Invoke-WingetInstall {
     # is accepted where it actually counts - every install passes --accept-source-agreements, and
     # the elevated Initialize-WingetSourcesForUser below re-probes and bootstraps the installing
     # account via Repair-WinGetPackageManager (issue #159).
+    #
+    # Reuses Invoke-WingetSourceProbe (WingetBootstrap.ps1) rather than calling Start-Process
+    # directly: it runs this exact command already wrapped in a timeout guard (120s default),
+    # which this pre-elevation call was missing entirely. A bare `-Wait` here could block the
+    # whole run forever on a corrupted/unreachable source, before elevation and before any of the
+    # timeout-guarded checks later in the pipeline ever ran. The return value is intentionally
+    # discarded here, same as before - this call remains best-effort.
+    # Test-IsAdmin (Public/Elevation.ps1, issue #239) wraps the WindowsPrincipal/IsInRole check
+    # behind a mockable command, so tests can drive the non-admin branch below deterministically
+    # instead of only when Pester itself happens to run non-elevated.
     $isAdmin = Test-IsAdmin
     if (-not $isAdmin -and (Test-IsRunningLocally)) {
         if ($WhatIf) {
@@ -70,7 +80,7 @@ function Invoke-WingetInstall {
         }
         else {
             Write-Info 'Updating the winget source...'
-            Start-Process -FilePath 'winget' -ArgumentList 'source', 'update', '--name', 'winget', '--disable-interactivity' -Wait -NoNewWindow
+            [void](Invoke-WingetSourceProbe)
         }
     }
 

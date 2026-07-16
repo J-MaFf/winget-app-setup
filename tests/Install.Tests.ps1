@@ -30,6 +30,7 @@ Describe 'Main Script Logic' {
         # through the filtered mock throws under Pester 6, which (unlike Pester 5) no longer falls
         # back to the real command when no -ParameterFilter matches and there is no default mock.
         $script:InvokeWingetInstallDef = (Get-Command Invoke-WingetInstall).Definition
+        $script:GetCurrentWindowsPrincipalDef = (Get-Command Get-CurrentWindowsPrincipal).Definition
 
         Mock Write-Host { }
         Mock Start-Process { }
@@ -51,10 +52,19 @@ Describe 'Main Script Logic' {
             # The inline WindowsPrincipal/IsInRole expression was consolidated into the shared
             # Test-IsAdmin helper (WingetAppSetup/Public/Elevation.ps1), reused by
             # winget-app-uninstall.ps1 and the PowerShell 7 bootstrap too (full-repo review
-            # finding, 2026-07-16). Test-IsAdmin itself is covered directly in Elevation.Tests.ps1.
+            # finding, 2026-07-16). Test-IsAdmin itself is covered directly in Elevation.Tests.ps1,
+            # and being a mockable command (unlike the raw .NET call) is what lets the
+            # pre-elevation source-update tests below drive the non-admin branch deterministically.
             $installBody = $script:InvokeWingetInstallDef
             $installBody | Should -Match '\$isAdmin\s*=\s*Test-IsAdmin'
             $installBody | Should -Match 'This script requires administrator privileges'
+
+            # ...and pin that Test-IsAdmin's underlying seam (Get-CurrentWindowsPrincipal) still
+            # performs the real WindowsPrincipal check, so the delegation chain ends at the
+            # genuine .NET call rather than a stub.
+            $probeBody = $script:GetCurrentWindowsPrincipalDef
+            $probeBody | Should -Match '\[Security\.Principal\.WindowsPrincipal\]'
+            $probeBody | Should -Match 'WindowsIdentity\]::GetCurrent\(\)'
         }
     }
 
@@ -199,6 +209,50 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
             $installBody | Should -Match '\$failedApps \+= @\{ Name ='
             # The generic message the diagnostic detail replaces (issue #189).
             $installBody | Should -Not -Match 'No package found matching input criteria'
+        }
+
+        It 'Routes the pre-elevation winget source update through the timeout-guarded probe instead of a bare -Wait Start-Process' {
+            # The pre-elevation `winget source update` call used to run via a bare
+            # `Start-Process ... -Wait` with no timeout, which could hang the whole run forever
+            # on a corrupted/unreachable source. It must now reuse Invoke-WingetSourceProbe
+            # (WingetBootstrap.ps1), which wraps the identical command in a 120s WaitForExit/Kill
+            # timeout guard, rather than duplicating that guard a third time.
+            $installBody = $script:InvokeWingetInstallDef
+            $installBody | Should -Match 'Invoke-WingetSourceProbe'
+            $installBody | Should -Not -Match "Start-Process -FilePath 'winget' -ArgumentList 'source', 'update'.*-Wait"
+        }
+    }
+
+    Context 'Pre-elevation source update (real non-admin, non-WhatIf code path)' {
+        # Every other non-WhatIf invocation in this file is gated behind
+        # -Skip:(-not $script:wiringIsElevated), because $isAdmin used to come from a real,
+        # unmockable IsInRole() call - the non-admin branch containing this call site was only
+        # reachable by actually running Pester non-elevated. Test-IsAdmin
+        # (Public/Elevation.ps1, issue #239) now wraps that check behind a mockable command, so
+        # this test drives Invoke-WingetInstall's real (non-WhatIf) pre-elevation block
+        # deterministically, on any machine, elevated or not.
+        BeforeEach {
+            Mock Write-Host { }
+            Mock Write-ErrorMessage { }
+            Mock Test-IsAdmin { $false }
+            Mock Test-IsRunningLocally { $true }
+            # Short-circuits the real function immediately after the pre-elevation block runs,
+            # via the existing early-return guard (issue #185), so this test never reaches the
+            # real `Exit` a few lines further down (which would kill the test process).
+            Mock Test-InvokedFromModuleContext { $true }
+            Mock Invoke-WingetSourceProbe { @{ Succeeded = $true; ExitCode = 0; TimedOut = $false } }
+        }
+
+        It 'Actually invokes Invoke-WingetSourceProbe before elevation when running non-admin, non-WhatIf' {
+            Invoke-WingetInstall -NonInteractive
+
+            Should -Invoke Invoke-WingetSourceProbe -Times 1 -Exactly
+        }
+
+        It 'Does not call Invoke-WingetSourceProbe in a dry run (-WhatIf), preserving the existing dry-run message instead' {
+            Invoke-WingetInstall -WhatIf -NonInteractive
+
+            Should -Invoke Invoke-WingetSourceProbe -Times 0 -Exactly
         }
     }
 
