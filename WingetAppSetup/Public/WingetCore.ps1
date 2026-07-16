@@ -676,17 +676,24 @@ function Install-PowerShellLatest {
     # returns for `--installer-type wix` once the manifest no longer ships an MSI.
     $noApplicableInstallerExitCode = -1978335216
 
+    # Matches Install-AppWithVerification's $checkTimeoutSeconds (Private/InstallVerification.ps1)
+    # so a hung `winget list` during PowerShell's own self-verification fails into the retry pass
+    # like every other catalog app's verification does, instead of blocking the run forever.
+    $checkTimeoutSeconds = 15
+
     # 1. Prefer the MSI while the latest version still ships one.
     $result = Install-WingetPackage -PackageId $PackageId -InstallerType 'wix'
     if ($result.ExitCode -ne $noApplicableInstallerExitCode) {
-        return @{ ExitCode = $result.ExitCode; Installed = (Test-WingetPackageInstalled -PackageId $PackageId); Method = 'msi' }
+        $installed = (Test-WingetPackageInstalled -PackageId $PackageId -TimeoutSeconds $checkTimeoutSeconds).Installed
+        return @{ ExitCode = $result.ExitCode; Installed = $installed; Method = 'msi' }
     }
 
     # 2. No MSI for the latest version (7.7+): install the latest MSIX machine-wide.
     Write-Info "No MSI is available for the latest $PackageId; installing the MSIX package instead."
     if ((Get-WindowsBuildNumber) -ge 26100) {
         $result = Install-WingetPackage -PackageId $PackageId
-        return @{ ExitCode = $result.ExitCode; Installed = (Test-WingetPackageInstalled -PackageId $PackageId); Method = 'msix-native' }
+        $installed = (Test-WingetPackageInstalled -PackageId $PackageId -TimeoutSeconds $checkTimeoutSeconds).Installed
+        return @{ ExitCode = $result.ExitCode; Installed = $installed; Method = 'msix-native' }
     }
 
     $provision = Install-MsixProvisionedPackage -PackageId $PackageId
