@@ -187,6 +187,17 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
             # The generic message the diagnostic detail replaces (issue #189).
             $installBody | Should -Not -Match 'No package found matching input criteria'
         }
+
+        It 'Routes the pre-elevation winget source update through the timeout-guarded probe instead of a bare -Wait Start-Process' {
+            # The pre-elevation `winget source update` call used to run via a bare
+            # `Start-Process ... -Wait` with no timeout, which could hang the whole run forever
+            # on a corrupted/unreachable source. It must now reuse Invoke-WingetSourceProbe
+            # (WingetBootstrap.ps1), which wraps the identical command in a 120s WaitForExit/Kill
+            # timeout guard, rather than duplicating that guard a third time.
+            $installBody = $script:InvokeWingetInstallDef
+            $installBody | Should -Match 'Invoke-WingetSourceProbe'
+            $installBody | Should -Not -Match "Start-Process -FilePath 'winget' -ArgumentList 'source', 'update'.*-Wait"
+        }
     }
 
     Context 'Dry run (executes the real orchestrator end-to-end without system changes)' {
