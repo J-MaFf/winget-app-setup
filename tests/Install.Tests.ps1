@@ -38,10 +38,13 @@ Describe 'Main Script Logic' {
     # The replacement below pins the real gate structurally; the non-admin behavior itself is
     # exercised end-to-end by 'IEX non-admin execution behavior' in tests/EntryPoint.Tests.ps1.
     Context 'Administrator gate' {
-        It 'Performs a real WindowsPrincipal role check and refuses to install without elevation' {
+        It 'Uses the shared Test-IsAdmin check and refuses to install without elevation' {
+            # The inline WindowsPrincipal/IsInRole expression was consolidated into the shared
+            # Test-IsAdmin helper (WingetAppSetup/Public/Elevation.ps1), reused by
+            # winget-app-uninstall.ps1 and the PowerShell 7 bootstrap too (full-repo review
+            # finding, 2026-07-16). Test-IsAdmin itself is covered directly in Elevation.Tests.ps1.
             $installBody = $script:InvokeWingetInstallDef
-            $installBody | Should -Match '\[Security\.Principal\.WindowsPrincipal\]'
-            $installBody | Should -Match 'IsInRole\(\[Security\.Principal\.WindowsBuiltInRole\]'
+            $installBody | Should -Match '\$isAdmin\s*=\s*Test-IsAdmin'
             $installBody | Should -Match 'This script requires administrator privileges'
         }
     }

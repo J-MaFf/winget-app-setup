@@ -63,7 +63,7 @@ function Invoke-WingetInstall {
     # is accepted where it actually counts - every install passes --accept-source-agreements, and
     # the elevated Initialize-WingetSourcesForUser below re-probes and bootstraps the installing
     # account via Repair-WinGetPackageManager (issue #159).
-    $isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] 'Administrator')
+    $isAdmin = Test-IsAdmin
     if (-not $isAdmin -and (Test-IsRunningLocally)) {
         if ($WhatIf) {
             Write-Info '[DRY-RUN] Would run winget source update --name winget to bootstrap the source in user context'
