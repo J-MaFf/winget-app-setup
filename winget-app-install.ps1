@@ -58,12 +58,12 @@ param (
 # This script is assembled from the WingetAppSetup module by build/Build-WingetInstallScript.ps1.
 # Edit the function source under WingetAppSetup/Public and WingetAppSetup/Private, then re-run the
 # build to regenerate this file. See readme.md ("Project layout") for details.
-# Build id: 1.0.0+48a68059 (module version + SHA256 fragment of the function content; issue #189).
+# Build id: 1.0.0+d210acfc (module version + SHA256 fragment of the function content; issue #189).
 # ------------------------------------------------------------------------------------------------
 
 # Content-derived build identity, logged at startup so a transcript from a remote machine
 # identifies exactly which installer build produced it (issue #189).
-$script:InstallerBuildId = '1.0.0+48a68059'
+$script:InstallerBuildId = '1.0.0+d210acfc'
 
 # ------------------------------------------------Functions------------------------------------------------
 
@@ -916,8 +916,8 @@ function Write-Prompt {
 # compatible: no ternary, no null-coalescing, no 3-argument Join-Path, only .NET Framework 4.x
 # APIs, and only helpers that are themselves 5.1-safe (Write-Info/Write-WarningMessage/
 # Write-ErrorMessage/Write-Success are plain Write-Host wrappers). The build's parse + ASCII guards
-# keep the assembled installer
-# 5.1-PARSEABLE (issue #210); runtime compatibility of this file is pinned by the unit tests in
+# keep the assembled installer 5.1-PARSEABLE (issue #210); runtime compatibility of this file is
+# pinned by the unit tests in
 # tests/PowerShell7Bootstrap.Tests.ps1.
 
 <#

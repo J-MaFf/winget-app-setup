@@ -4,8 +4,8 @@
 # compatible: no ternary, no null-coalescing, no 3-argument Join-Path, only .NET Framework 4.x
 # APIs, and only helpers that are themselves 5.1-safe (Write-Info/Write-WarningMessage/
 # Write-ErrorMessage/Write-Success are plain Write-Host wrappers). The build's parse + ASCII guards
-# keep the assembled installer
-# 5.1-PARSEABLE (issue #210); runtime compatibility of this file is pinned by the unit tests in
+# keep the assembled installer 5.1-PARSEABLE (issue #210); runtime compatibility of this file is
+# pinned by the unit tests in
 # tests/PowerShell7Bootstrap.Tests.ps1.
 
 <#
