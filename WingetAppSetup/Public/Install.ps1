@@ -313,11 +313,16 @@ function Invoke-WingetInstall {
 
                     if ($outcome.Status -eq 'Failed') {
                         $failureReason = Format-InstallFailureReason -FailureReason $outcome.FailureReason -InstallResult $outcome.InstallResult
-                        if ($outcome.FailureReason -in 'PreCheckTimeout', 'VerifyTimeout') {
-                            Write-WarningMessage "Verification timed out for retry: $appName. Assuming installation failed."
-                        }
-                        else {
-                            Write-ErrorMessage "Retry failed: $appName ($failureReason)."
+                        switch ($outcome.FailureReason) {
+                            'PreCheckTimeout' {
+                                Write-WarningMessage "Winget list timed out for retry: $appName. Assuming installation failed."
+                            }
+                            'VerifyTimeout' {
+                                Write-WarningMessage "Verification timed out for retry: $appName. Assuming installation failed."
+                            }
+                            default {
+                                Write-ErrorMessage "Retry failed: $appName ($failureReason)."
+                            }
                         }
                         $failedApps += @{ Name = $appName; Reason = $failureReason }
                     }

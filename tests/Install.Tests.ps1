@@ -368,6 +368,40 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
             $failureMessage | Should -Match '3 attempts'
             $failureMessage | Should -Match 'machine-scope fallback: yes'
         }
+
+        It 'Names the pre-check phase (not verification) when a retry fails with PreCheckTimeout' -Skip:(-not $script:wiringIsElevated) {
+            Mock Install-AppWithVerification {
+                if ($App.name -eq '7zip.7zip') {
+                    return @{ Status = 'Failed'; InstallResult = $null; FailureReason = 'PreCheckTimeout' }
+                }
+                @{ Status = 'Skipped'; InstallResult = $null; FailureReason = $null }
+            }
+            $script:warningMessages = @()
+            Mock Write-WarningMessage { $script:warningMessages += $Message }
+
+            Invoke-WingetInstall -NonInteractive
+
+            $retryMessage = @($script:warningMessages | Where-Object { $_ -match '7zip\.7zip' -and $_ -match 'retry' })[0]
+            $retryMessage | Should -Not -BeNullOrEmpty
+            $retryMessage | Should -Not -Match 'Verification timed out'
+            $retryMessage | Should -Match 'Winget list timed out|pre-check|pre-install check'
+        }
+
+        It 'Keeps the verification-timeout wording when a retry fails with VerifyTimeout' -Skip:(-not $script:wiringIsElevated) {
+            Mock Install-AppWithVerification {
+                if ($App.name -eq '7zip.7zip') {
+                    return @{ Status = 'Failed'; InstallResult = @{ ExitCode = 0 }; FailureReason = 'VerifyTimeout' }
+                }
+                @{ Status = 'Skipped'; InstallResult = $null; FailureReason = $null }
+            }
+            $script:warningMessages = @()
+            Mock Write-WarningMessage { $script:warningMessages += $Message }
+
+            Invoke-WingetInstall -NonInteractive
+
+            $retryMessage = @($script:warningMessages | Where-Object { $_ -match '7zip\.7zip' -and $_ -match 'retry' })[0]
+            $retryMessage | Should -Match 'Verification timed out for retry: 7zip\.7zip'
+        }
     }
 }
 
