@@ -339,15 +339,14 @@ function Install-WingetPackage {
     while ($attempt -lt $MaxAttempts) {
         $attempt++
 
-        # --disable-interactivity (issue #230): every other winget call in the module already
-        # passes it; this one - the path every app install takes - did not, so winget could stop
-        # and ask on the one code path where a human is least likely to be watching. The two
-        # --accept-*-agreements flags are the standing "yes" to the questions winget would
-        # otherwise ask; this flag is what stops it asking anything else.
+        # The shared agreement/interactivity flags come from Get-WingetAgreementArgs (issue #230
+        # follow-up): every other winget call in the module already passed them, but this one -
+        # the path every app install takes - did not, because each call site hand-duplicated the
+        # literal array. Routing through the shared helper makes that omission structurally
+        # impossible instead of relying on manual re-auditing.
         $installArgs = @(
-            'install', '-e',
-            '--accept-source-agreements', '--accept-package-agreements',
-            '--disable-interactivity',
+            'install', '-e'
+        ) + (Get-WingetAgreementArgs) + @(
             '--source', 'winget',
             '--id', $PackageId
         )
@@ -608,8 +607,8 @@ function Install-MsixProvisionedPackage {
     try {
         Write-Info "Downloading the latest MSIX for $PackageId to provision it machine-wide..."
         $downloadArgs = @(
-            'download', '-e', '--id', $PackageId, '--source', 'winget', '--installer-type', 'msix',
-            '--accept-source-agreements', '--accept-package-agreements', '--disable-interactivity',
+            'download', '-e', '--id', $PackageId, '--source', 'winget', '--installer-type', 'msix'
+        ) + (Get-WingetAgreementArgs) + @(
             '--download-directory', $downloadDir
         )
         $download = Start-Process -FilePath 'winget' -ArgumentList $downloadArgs -NoNewWindow -Wait -PassThru

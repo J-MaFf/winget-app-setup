@@ -197,8 +197,9 @@ function Invoke-PowerShell7Bootstrap {
             # matters: the documented one-liner reports INTERACTIVE (an `irm | iex` pipe leaves
             # stdin alone), so the run most likely to be walked away from was the one run that let
             # winget stop and ask. Nothing here needs winget's UI - the agreements are accepted by
-            # flag, and a failure falls through to the MSI fallback below.
-            $wingetArguments = @('install', '--id', 'Microsoft.PowerShell', '--exact', '--source', 'winget', '--accept-source-agreements', '--accept-package-agreements', '--disable-interactivity')
+            # flag, and a failure falls through to the MSI fallback below. The shared flags come
+            # from Get-WingetAgreementArgs so this call site cannot drift from the others again.
+            $wingetArguments = @('install', '--id', 'Microsoft.PowerShell', '--exact', '--source', 'winget') + (Get-WingetAgreementArgs)
             # A Start-Process launch failure is non-terminating under 5.1's default
             # $ErrorActionPreference and would leave $wingetProcess $null - catch it explicitly
             # so a broken winget shim degrades to the MSI fallback with a real message.
