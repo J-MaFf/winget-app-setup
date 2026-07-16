@@ -58,12 +58,12 @@ param (
 # This script is assembled from the WingetAppSetup module by build/Build-WingetInstallScript.ps1.
 # Edit the function source under WingetAppSetup/Public and WingetAppSetup/Private, then re-run the
 # build to regenerate this file. See readme.md ("Project layout") for details.
-# Build id: 1.0.0+d210acfc (module version + SHA256 fragment of the function content; issue #189).
+# Build id: 1.0.0+fae8155d (module version + SHA256 fragment of the function content; issue #189).
 # ------------------------------------------------------------------------------------------------
 
 # Content-derived build identity, logged at startup so a transcript from a remote machine
 # identifies exactly which installer build produced it (issue #189).
-$script:InstallerBuildId = '1.0.0+d210acfc'
+$script:InstallerBuildId = '1.0.0+fae8155d'
 
 # ------------------------------------------------Functions------------------------------------------------
 
@@ -1109,8 +1109,9 @@ function Invoke-PowerShell7Bootstrap {
             # matters: the documented one-liner reports INTERACTIVE (an `irm | iex` pipe leaves
             # stdin alone), so the run most likely to be walked away from was the one run that let
             # winget stop and ask. Nothing here needs winget's UI - the agreements are accepted by
-            # flag, and a failure falls through to the MSI fallback below.
-            $wingetArguments = @('install', '--id', 'Microsoft.PowerShell', '--exact', '--source', 'winget', '--accept-source-agreements', '--accept-package-agreements', '--disable-interactivity')
+            # flag, and a failure falls through to the MSI fallback below. The shared flags come
+            # from Get-WingetAgreementArgs so this call site cannot drift from the others again.
+            $wingetArguments = @('install', '--id', 'Microsoft.PowerShell', '--exact', '--source', 'winget') + (Get-WingetAgreementArgs)
             # A Start-Process launch failure is non-terminating under 5.1's default
             # $ErrorActionPreference and would leave $wingetProcess $null - catch it explicitly
             # so a broken winget shim degrades to the MSI fallback with a real message.
@@ -1320,6 +1321,33 @@ function New-WauStagingDirectory {
     $null = New-Item -Path $stagingDir -ItemType Directory -Force -ErrorAction Stop
     Set-RestrictedDirectoryAcl -Path $stagingDir
     return $stagingDir
+}
+
+# --- WingetAgreementArgs ---
+<#
+.SYNOPSIS
+    Returns the shared agreement/interactivity flag set used by every winget install-family call.
+.DESCRIPTION
+    `--accept-source-agreements --accept-package-agreements --disable-interactivity` was hand-
+    duplicated across three call sites (Install-WingetPackage, Install-MsixProvisionedPackage, and
+    the PowerShell 7 bootstrap's winget install). That duplication is exactly how issue #230
+    shipped: one of the three literal arrays was missing `--disable-interactivity`, and it went
+    unnoticed until winget stopped on the one code path every install takes and asked a human that
+    was never watching. Routing all three call sites through this single helper makes that class of
+    bug structurally impossible - there is only one place left to forget the flag.
+
+    This is deliberately scoped to the install/download flag combination, not a generic wrapper for
+    every winget subcommand: `winget source update` cannot take `--accept-source-agreements` at all
+    (issues #174/#175), and `source list` / `search` / `source reset` each pass their own different
+    subset. Callers with those different needs keep building their own argument lists.
+.RETURNS
+    [string[]] @('--accept-source-agreements', '--accept-package-agreements', '--disable-interactivity')
+#>
+function Get-WingetAgreementArgs {
+    [CmdletBinding()]
+    param ()
+
+    return @('--accept-source-agreements', '--accept-package-agreements', '--disable-interactivity')
 }
 
 # --- WingetBootstrap ---
@@ -3164,15 +3192,14 @@ function Install-WingetPackage {
     while ($attempt -lt $MaxAttempts) {
         $attempt++
 
-        # --disable-interactivity (issue #230): every other winget call in the module already
-        # passes it; this one - the path every app install takes - did not, so winget could stop
-        # and ask on the one code path where a human is least likely to be watching. The two
-        # --accept-*-agreements flags are the standing "yes" to the questions winget would
-        # otherwise ask; this flag is what stops it asking anything else.
+        # The shared agreement/interactivity flags come from Get-WingetAgreementArgs (issue #230
+        # follow-up): every other winget call in the module already passed them, but this one -
+        # the path every app install takes - did not, because each call site hand-duplicated the
+        # literal array. Routing through the shared helper makes that omission structurally
+        # impossible instead of relying on manual re-auditing.
         $installArgs = @(
-            'install', '-e',
-            '--accept-source-agreements', '--accept-package-agreements',
-            '--disable-interactivity',
+            'install', '-e'
+        ) + (Get-WingetAgreementArgs) + @(
             '--source', 'winget',
             '--id', $PackageId
         )
@@ -3429,8 +3456,8 @@ function Install-MsixProvisionedPackage {
     try {
         Write-Info "Downloading the latest MSIX for $PackageId to provision it machine-wide..."
         $downloadArgs = @(
-            'download', '-e', '--id', $PackageId, '--source', 'winget', '--installer-type', 'msix',
-            '--accept-source-agreements', '--accept-package-agreements', '--disable-interactivity',
+            'download', '-e', '--id', $PackageId, '--source', 'winget', '--installer-type', 'msix'
+        ) + (Get-WingetAgreementArgs) + @(
             '--download-directory', $downloadDir
         )
         $download = Start-Process -FilePath 'winget' -ArgumentList $downloadArgs -NoNewWindow -Wait -PassThru
