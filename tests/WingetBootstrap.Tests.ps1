@@ -75,6 +75,51 @@ Describe 'Test-WingetSourceHealth (shared source probe, issue #177)' {
         Should -Invoke Write-WarningMessage -Times 1 -ParameterFilter { $Message -match 'corrupted or missing data' }
     }
 
+    It 'Reports not functional via the numeric 0x8a15000f exit code alone, with output text that does not match the prose fallback' {
+        Mock winget {
+            if ($args[0] -eq 'source' -and $args[1] -eq 'list') {
+                $global:LASTEXITCODE = 0
+                return 'winget      https://cdn.winget.microsoft.com/cache'
+            }
+            elseif ($args[0] -eq 'search' -and $args[1] -eq '7zip') {
+                # -1978335217 is 0x8A15000F as a signed Int32. Output text deliberately avoids
+                # 'failed when opening'/'data required' so only the numeric exit code can catch this.
+                $global:LASTEXITCODE = -1978335217
+                return 'No package found matching input criteria.'
+            }
+        }
+
+        $health = Test-WingetSourceHealth
+
+        $health.Listed | Should -Be $true
+        $health.Functional | Should -Be $false
+        $health.Healthy | Should -Be $false
+        Should -Invoke Write-WarningMessage -Times 1 -ParameterFilter { $Message -match 'corrupted or missing data' }
+    }
+
+    It 'Reports not functional when the search exits 0 but the output text matches the corruption phrases (prose fallback)' {
+        Mock winget {
+            if ($args[0] -eq 'source' -and $args[1] -eq 'list') {
+                $global:LASTEXITCODE = 0
+                return 'winget      https://cdn.winget.microsoft.com/cache'
+            }
+            elseif ($args[0] -eq 'search' -and $args[1] -eq '7zip') {
+                # Isolates the scenario the prose fallback exists for: winget reportedly returns
+                # exit code 0 despite corrupted output in some observed cases (issues
+                # #150/#172/#174/#175/#177).
+                $global:LASTEXITCODE = 0
+                return 'Failed when opening source(s). 0x8a15000f Data required by the source is missing.'
+            }
+        }
+
+        $health = Test-WingetSourceHealth
+
+        $health.Listed | Should -Be $true
+        $health.Functional | Should -Be $false
+        $health.Healthy | Should -Be $false
+        Should -Invoke Write-WarningMessage -Times 1 -ParameterFilter { $Message -match 'corrupted or missing data' }
+    }
+
     It 'Suppresses per-step messages when -Quiet is passed' {
         Mock winget {
             if ($args[0] -eq 'source' -and $args[1] -eq 'list') {
