@@ -58,12 +58,12 @@ param (
 # This script is assembled from the WingetAppSetup module by build/Build-WingetInstallScript.ps1.
 # Edit the function source under WingetAppSetup/Public and WingetAppSetup/Private, then re-run the
 # build to regenerate this file. See readme.md ("Project layout") for details.
-# Build id: 1.0.0+8e85182a (module version + SHA256 fragment of the function content; issue #189).
+# Build id: 1.0.0+d07dc906 (module version + SHA256 fragment of the function content; issue #189).
 # ------------------------------------------------------------------------------------------------
 
 # Content-derived build identity, logged at startup so a transcript from a remote machine
 # identifies exactly which installer build produced it (issue #189).
-$script:InstallerBuildId = '1.0.0+8e85182a'
+$script:InstallerBuildId = '1.0.0+d07dc906'
 
 # ------------------------------------------------Functions------------------------------------------------
 
@@ -164,6 +164,21 @@ function Test-InvokedFromModuleContext {
     }
 
     return [bool]($CommandPath -match '[\\/]WingetAppSetup[\\/]Public[\\/]Install\.ps1$')
+}
+
+<#
+.SYNOPSIS
+    Returns a WindowsPrincipal wrapping the current process's WindowsIdentity.
+.DESCRIPTION
+    Thin wrapper around the static [Security.Principal.WindowsIdentity]::GetCurrent() /
+    [Security.Principal.WindowsPrincipal] construction, split out purely so Test-IsAdmin
+    (Public/Elevation.ps1) has a command it can Mock in unit tests to simulate the underlying
+    .NET call throwing (a static method call can't be mocked directly).
+.RETURNS
+    [Security.Principal.WindowsPrincipal] for the current process.
+#>
+function Get-CurrentWindowsPrincipal {
+    [Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()
 }
 
 # Restart-WithElevation lives in Public/Elevation.ps1 (issue #190): it is exported so
@@ -980,14 +995,10 @@ function Invoke-PowerShell7Bootstrap {
 
         # The bootstrap runs before the module's elevation logic ever loads; a machine-wide
         # PowerShell 7 install from a non-admin session may surface a UAC prompt or fail outright.
-        # Warn and let it ride - GetCurrent() is wrapped only so the unit tests stay runnable on
-        # non-Windows hosts; in production this file always runs on Windows.
-        $isAdmin = $true
-        try {
-            $isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] 'Administrator')
-        }
-        catch {
-        }
+        # Warn and let it ride - Test-IsAdmin (WingetAppSetup/Public/Elevation.ps1) already fails
+        # safe (assumes elevated) if the underlying check throws, which is what kept this call
+        # site's own try/catch runnable on non-Windows test hosts before consolidation.
+        $isAdmin = Test-IsAdmin
         if (-not $isAdmin) {
             Write-WarningMessage 'Not running as administrator: the PowerShell 7 install may show a UAC prompt or fail. If it fails, re-run this installer from an elevated prompt.'
         }
@@ -1540,9 +1551,37 @@ function Test-AppDefinitions {
 }
 
 # --- Elevation ---
-# Public (exported) elevation helper. The rest of the elevation detection helpers live in
-# Private/Elevation.ps1; this one is exported (issue #190) so winget-app-uninstall.ps1 can reuse
-# it instead of hand-rolling its own Start-Process relaunch.
+# Public (exported) elevation helpers. The rest of the elevation detection helpers live in
+# Private/Elevation.ps1; these are exported (issue #190) so winget-app-uninstall.ps1 can reuse
+# them instead of hand-rolling its own admin check / Start-Process relaunch.
+
+<#
+.SYNOPSIS
+    Detects whether the current process is running with administrator privileges.
+.DESCRIPTION
+    The single shared implementation of the
+    "[Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(...)"
+    check, previously copy-pasted (and already behaviorally diverged) across
+    WingetAppSetup/Public/Install.ps1, winget-app-uninstall.ps1, and
+    WingetAppSetup/Private/PowerShell7Bootstrap.ps1 (full-repo review finding, 2026-07-16).
+    Fails safe: if the underlying identity/role check throws for any reason (an exotic restricted
+    token, a non-interactive service context, or a mocked failure in tests), this warns and
+    returns $true rather than letting the exception propagate and abort the caller - matching the
+    PowerShell7Bootstrap.ps1 behavior that is now applied at every call site.
+.RETURNS
+    [bool] $true when the current process is elevated (or when the check itself failed and could
+    not determine elevation), $false when it is confirmed non-elevated.
+#>
+function Test-IsAdmin {
+    try {
+        $principal = Get-CurrentWindowsPrincipal
+        return $principal.IsInRole([Security.Principal.WindowsBuiltInRole] 'Administrator')
+    }
+    catch {
+        Write-WarningMessage "Could not determine administrator status; assuming elevated: $_"
+        return $true
+    }
+}
 
 <#
 .SYNOPSIS
@@ -1677,7 +1716,7 @@ function Invoke-WingetInstall {
     # is accepted where it actually counts - every install passes --accept-source-agreements, and
     # the elevated Initialize-WingetSourcesForUser below re-probes and bootstraps the installing
     # account via Repair-WinGetPackageManager (issue #159).
-    $isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] 'Administrator')
+    $isAdmin = Test-IsAdmin
     if (-not $isAdmin -and (Test-IsRunningLocally)) {
         if ($WhatIf) {
             Write-Info '[DRY-RUN] Would run winget source update --name winget to bootstrap the source in user context'

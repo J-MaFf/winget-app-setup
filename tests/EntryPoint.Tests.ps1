@@ -7,6 +7,15 @@
 # Load the module's functions once for this file. TestHelpers.ps1 resolves the repo paths
 # and dot-sources WingetAppSetup/Private + Public (the single source of truth; the
 # distributable winget-app-install.ps1 is generated from it by build/Build-WingetInstallScript.ps1).
+#
+# Also dot-source it here at the TOP LEVEL (script scope, outside any Describe/BeforeAll): top-
+# level code in a .Tests.ps1 file runs at Pester DISCOVERY time, before BeforeAll runs. The 'IEX
+# non-admin execution behavior' Describe below needs Test-IsAdmin inside its BeforeDiscovery
+# block to compute a -Skip condition, and BeforeDiscovery is itself evaluated at discovery time -
+# too early for the BeforeAll dot-source below to have run yet. Loading twice is harmless:
+# redefining a PowerShell function is not an error.
+. (Join-Path $PSScriptRoot 'TestHelpers.ps1')
+
 BeforeAll {
     . (Join-Path $PSScriptRoot 'TestHelpers.ps1')
 }
@@ -207,9 +216,10 @@ Describe 'IEX non-admin execution behavior' {
         $script:isElevated = $false
 
         if ($script:isWindowsPlatform) {
-            $script:isElevated = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
-                [Security.Principal.WindowsBuiltInRole]::Administrator
-            )
+            # Test-IsAdmin (WingetAppSetup/Public/Elevation.ps1) is the shared admin-check helper
+            # (full-repo review finding, 2026-07-16); loaded above at discovery time so it's
+            # available here.
+            $script:isElevated = Test-IsAdmin
         }
     }
 

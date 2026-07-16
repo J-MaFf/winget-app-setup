@@ -96,6 +96,21 @@ function Test-InvokedFromModuleContext {
     return [bool]($CommandPath -match '[\\/]WingetAppSetup[\\/]Public[\\/]Install\.ps1$')
 }
 
+<#
+.SYNOPSIS
+    Returns a WindowsPrincipal wrapping the current process's WindowsIdentity.
+.DESCRIPTION
+    Thin wrapper around the static [Security.Principal.WindowsIdentity]::GetCurrent() /
+    [Security.Principal.WindowsPrincipal] construction, split out purely so Test-IsAdmin
+    (Public/Elevation.ps1) has a command it can Mock in unit tests to simulate the underlying
+    .NET call throwing (a static method call can't be mocked directly).
+.RETURNS
+    [Security.Principal.WindowsPrincipal] for the current process.
+#>
+function Get-CurrentWindowsPrincipal {
+    [Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()
+}
+
 # Restart-WithElevation lives in Public/Elevation.ps1 (issue #190): it is exported so
 # winget-app-uninstall.ps1 can reuse it instead of hand-rolling its own relaunch.
 

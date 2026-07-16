@@ -177,14 +177,10 @@ function Invoke-PowerShell7Bootstrap {
 
         # The bootstrap runs before the module's elevation logic ever loads; a machine-wide
         # PowerShell 7 install from a non-admin session may surface a UAC prompt or fail outright.
-        # Warn and let it ride - GetCurrent() is wrapped only so the unit tests stay runnable on
-        # non-Windows hosts; in production this file always runs on Windows.
-        $isAdmin = $true
-        try {
-            $isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] 'Administrator')
-        }
-        catch {
-        }
+        # Warn and let it ride - Test-IsAdmin (WingetAppSetup/Public/Elevation.ps1) already fails
+        # safe (assumes elevated) if the underlying check throws, which is what kept this call
+        # site's own try/catch runnable on non-Windows test hosts before consolidation.
+        $isAdmin = Test-IsAdmin
         if (-not $isAdmin) {
             Write-WarningMessage 'Not running as administrator: the PowerShell 7 install may show a UAC prompt or fail. If it fails, re-run this installer from an elevated prompt.'
         }

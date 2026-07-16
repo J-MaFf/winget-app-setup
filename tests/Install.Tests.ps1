@@ -7,6 +7,15 @@
 # Load the module's functions once for this file. TestHelpers.ps1 resolves the repo paths
 # and dot-sources WingetAppSetup/Private + Public (the single source of truth; the
 # distributable winget-app-install.ps1 is generated from it by build/Build-WingetInstallScript.ps1).
+#
+# Also dot-source it here at the TOP LEVEL (script scope, outside any Describe/BeforeAll): top-
+# level code in a .Tests.ps1 file runs at Pester DISCOVERY time, before BeforeAll runs. The
+# 'Invoke-WingetInstall wiring (issue #188)' Describe below needs Test-IsAdmin inside its
+# BeforeDiscovery block to compute a -Skip condition, and BeforeDiscovery is itself evaluated at
+# discovery time - too early for the BeforeAll dot-source below to have run yet. Loading twice is
+# harmless: redefining a PowerShell function is not an error.
+. (Join-Path $PSScriptRoot 'TestHelpers.ps1')
+
 BeforeAll {
     . (Join-Path $PSScriptRoot 'TestHelpers.ps1')
 }
@@ -38,10 +47,13 @@ Describe 'Main Script Logic' {
     # The replacement below pins the real gate structurally; the non-admin behavior itself is
     # exercised end-to-end by 'IEX non-admin execution behavior' in tests/EntryPoint.Tests.ps1.
     Context 'Administrator gate' {
-        It 'Performs a real WindowsPrincipal role check and refuses to install without elevation' {
+        It 'Uses the shared Test-IsAdmin check and refuses to install without elevation' {
+            # The inline WindowsPrincipal/IsInRole expression was consolidated into the shared
+            # Test-IsAdmin helper (WingetAppSetup/Public/Elevation.ps1), reused by
+            # winget-app-uninstall.ps1 and the PowerShell 7 bootstrap too (full-repo review
+            # finding, 2026-07-16). Test-IsAdmin itself is covered directly in Elevation.Tests.ps1.
             $installBody = $script:InvokeWingetInstallDef
-            $installBody | Should -Match '\[Security\.Principal\.WindowsPrincipal\]'
-            $installBody | Should -Match 'IsInRole\(\[Security\.Principal\.WindowsBuiltInRole\]'
+            $installBody | Should -Match '\$isAdmin\s*=\s*Test-IsAdmin'
             $installBody | Should -Match 'This script requires administrator privileges'
         }
     }
@@ -135,9 +147,10 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
         # run-phase BeforeAll blocks are not visible to -Skip expressions.
         $script:wiringIsElevated = $false
         if ([System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Win32NT) {
-            $script:wiringIsElevated = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
-                [Security.Principal.WindowsBuiltInRole]::Administrator
-            )
+            # Test-IsAdmin (WingetAppSetup/Public/Elevation.ps1) is the shared admin-check helper
+            # (full-repo review finding, 2026-07-16); loaded above at discovery time so it's
+            # available here.
+            $script:wiringIsElevated = Test-IsAdmin
         }
     }
 

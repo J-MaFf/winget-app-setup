@@ -5,14 +5,14 @@
 # 3. Run this script as administrator.
 
 # Shared helpers (Write-Info/Success/WarningMessage/ErrorMessage, Write-Table, Format-AppList,
-# Get-DefaultAppCatalog, Test-WingetPackageInstalled, Restart-WithElevation) come from the
-# WingetAppSetup module — the single source of truth (see issues #106, #190).
+# Get-DefaultAppCatalog, Test-WingetPackageInstalled, Test-IsAdmin, Restart-WithElevation) come
+# from the WingetAppSetup module — the single source of truth (see issues #106, #190).
 Import-Module (Join-Path $PSScriptRoot 'WingetAppSetup\WingetAppSetup.psd1') -Force
 
 #------------------------------------------------Main Script------------------------------------------------
 
 # Check if the script is run as administrator
-If (-NOT ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] 'Administrator')) {
+If (-NOT (Test-IsAdmin)) {
     # No "press Enter" pause before elevating (issue #230), matching the installer: the relaunch is
     # unconditional, and the UAC dialog it raises is the real consent gate.
     Write-ErrorMessage 'This script requires administrator privileges. Restarting with elevated privileges...'
