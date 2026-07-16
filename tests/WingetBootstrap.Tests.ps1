@@ -75,7 +75,7 @@ Describe 'Test-WingetSourceHealth (shared source probe, issue #177)' {
         Should -Invoke Write-WarningMessage -Times 1 -ParameterFilter { $Message -match 'corrupted or missing data' }
     }
 
-    It 'Reports not functional via the numeric 0x8a15000f exit code alone, with output text that does not match the prose fallback' {
+    It 'Regression pin: the pre-existing nonzero-exit-code check alone catches the 0x8a15000f exit code, even with output text that does not match the prose fallback' {
         Mock winget {
             if ($args[0] -eq 'source' -and $args[1] -eq 'list') {
                 $global:LASTEXITCODE = 0
@@ -83,7 +83,9 @@ Describe 'Test-WingetSourceHealth (shared source probe, issue #177)' {
             }
             elseif ($args[0] -eq 'search' -and $args[1] -eq '7zip') {
                 # -1978335217 is 0x8A15000F as a signed Int32. Output text deliberately avoids
-                # 'failed when opening'/'data required' so only the numeric exit code can catch this.
+                # 'failed when opening'/'data required' to prove this is caught by the generic
+                # `-ne 0` branch alone, not by any dedicated numeric branch (there isn't one —
+                # this HRESULT is just one of many nonzero exit codes that clause already covers).
                 $global:LASTEXITCODE = -1978335217
                 return 'No package found matching input criteria.'
             }
