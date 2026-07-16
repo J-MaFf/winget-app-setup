@@ -339,9 +339,15 @@ function Install-WingetPackage {
     while ($attempt -lt $MaxAttempts) {
         $attempt++
 
+        # --disable-interactivity (issue #230): every other winget call in the module already
+        # passes it; this one - the path every app install takes - did not, so winget could stop
+        # and ask on the one code path where a human is least likely to be watching. The two
+        # --accept-*-agreements flags are the standing "yes" to the questions winget would
+        # otherwise ask; this flag is what stops it asking anything else.
         $installArgs = @(
             'install', '-e',
             '--accept-source-agreements', '--accept-package-agreements',
+            '--disable-interactivity',
             '--source', 'winget',
             '--id', $PackageId
         )
@@ -599,7 +605,7 @@ function Install-MsixProvisionedPackage {
         Write-Info "Downloading the latest MSIX for $PackageId to provision it machine-wide..."
         $downloadArgs = @(
             'download', '-e', '--id', $PackageId, '--source', 'winget', '--installer-type', 'msix',
-            '--accept-source-agreements', '--accept-package-agreements',
+            '--accept-source-agreements', '--accept-package-agreements', '--disable-interactivity',
             '--download-directory', $downloadDir
         )
         $download = Start-Process -FilePath 'winget' -ArgumentList $downloadArgs -NoNewWindow -Wait -PassThru

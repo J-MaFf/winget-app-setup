@@ -23,7 +23,6 @@ Describe 'Main Script Logic' {
         $script:InvokeWingetInstallDef = (Get-Command Invoke-WingetInstall).Definition
 
         Mock Write-Host { }
-        Mock Pause { }
         Mock Start-Process { }
 
         # Mock the functions that are called
@@ -144,7 +143,6 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
 
     BeforeEach {
         Mock Write-Host { }
-        Mock Pause { }
         Mock Start-Process { }
         Mock Restart-WithElevation { 'PowerShell' }
         Mock Test-IsRunningLocally { $true }
@@ -568,7 +566,6 @@ Describe 'Not-applicable gating end-to-end (issue #217)' {
     # elevation is needed): only the orchestration boundary and the winget probes are mocked.
     BeforeEach {
         Mock Write-Host { }
-        Mock Pause { }
         Mock Start-Process { }
         Mock Restart-WithElevation { 'PowerShell' }
         Mock Test-IsRunningLocally { $true }

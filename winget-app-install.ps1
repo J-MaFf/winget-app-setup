@@ -37,9 +37,11 @@
  Bypasses the pre-flight system checks (OS version, disk space, network) for headless or automated use.
 
 .PARAMETER NonInteractive
- Suppresses all interactive prompts (elevation pause, grid-view prompt, final "press any key") for
- unattended runs (RMM, CI, scheduled tasks). Also auto-detected when the session is non-interactive
- or stdin is redirected.
+ Suppresses the interactive extras for unattended runs (RMM, CI, scheduled tasks): the summary
+ grid-view window and the final "press any key to exit". Also auto-detected when the session is
+ non-interactive or stdin is redirected. The installer asks no yes/no questions on any path (issue
+ #230), so this switch is only about those two extras - it is not needed to keep a run from
+ blocking on a prompt.
 #>
 
 param (
@@ -56,12 +58,12 @@ param (
 # This script is assembled from the WingetAppSetup module by build/Build-WingetInstallScript.ps1.
 # Edit the function source under WingetAppSetup/Public and WingetAppSetup/Private, then re-run the
 # build to regenerate this file. See readme.md ("Project layout") for details.
-# Build id: 1.0.0+db4b491e (module version + SHA256 fragment of the function content; issue #189).
+# Build id: 1.0.0+d210acfc (module version + SHA256 fragment of the function content; issue #189).
 # ------------------------------------------------------------------------------------------------
 
 # Content-derived build identity, logged at startup so a transcript from a remote machine
 # identifies exactly which installer build produced it (issue #189).
-$script:InstallerBuildId = '1.0.0+db4b491e'
+$script:InstallerBuildId = '1.0.0+d210acfc'
 
 # ------------------------------------------------Functions------------------------------------------------
 
@@ -649,13 +651,18 @@ function Install-AppWithVerification {
 # --- Interactivity ---
 <#
 .SYNOPSIS
-    Determines whether the current run must behave as non-interactive (no prompts).
+    Determines whether the current run has a human at the console.
 .DESCRIPTION
-    Single source of truth for the effective non-interactive detection (issue #214). The logic
-    was previously inlined in Invoke-WingetInstall (issue #176), which left the pre-flight
-    disk-space prompt in Test-SystemRequirements unguarded: an unattended run (CI, RMM, scheduled
-    task) with measured-low disk blocked on Read-Host and auto-cancelled when redirected stdin
-    returned an empty string. Both callers now share this helper.
+    Single source of truth for the effective non-interactive detection (issues #176, #214). Since
+    issue #230 this gates no prompt — there are none left — and its only caller is
+    Invoke-WingetInstall, which uses it for the two things that still depend on a human being
+    present: whether to open the summary grid view, and whether to hold the window with "press any
+    key to exit".
+
+    Note what it deliberately does NOT catch: an interactive `irm <url> | iex` reports INTERACTIVE
+    here, because the pipe is a PowerShell-internal pipeline and leaves the process's stdin alone.
+    That is correct — there really is a human there — but it is why prompts could never be the
+    mechanism that kept the documented one-liner unattended (issue #230).
 
     A run is effectively non-interactive when ANY of the following holds:
       - the caller passed the explicit -NonInteractive switch;
@@ -666,7 +673,7 @@ function Install-AppWithVerification {
 .PARAMETER NonInteractive
     The caller's explicit -NonInteractive switch, forwarded as -NonInteractive:$switch.
 .RETURNS
-    [bool] True when the run must not prompt; otherwise false.
+    [bool] True when there is no human to interact with; otherwise false.
 #>
 function Test-EffectiveNonInteractive {
     param (
@@ -908,9 +915,9 @@ function Write-Prompt {
 # tail dispatch calls it BEFORE handing off to PowerShell 7. Keep every statement 5.1-runtime
 # compatible: no ternary, no null-coalescing, no 3-argument Join-Path, only .NET Framework 4.x
 # APIs, and only helpers that are themselves 5.1-safe (Write-Info/Write-WarningMessage/
-# Write-ErrorMessage/Write-Success are plain Write-Host wrappers; Test-EffectiveNonInteractive is
-# pure .NET Framework calls). The build's parse + ASCII guards keep the assembled installer
-# 5.1-PARSEABLE (issue #210); runtime compatibility of this file is pinned by the unit tests in
+# Write-ErrorMessage/Write-Success are plain Write-Host wrappers). The build's parse + ASCII guards
+# keep the assembled installer 5.1-PARSEABLE (issue #210); runtime compatibility of this file is
+# pinned by the unit tests in
 # tests/PowerShell7Bootstrap.Tests.ps1.
 
 <#
@@ -996,9 +1003,9 @@ function Find-PowerShell7 {
 
         1. Find an existing pwsh.exe (Find-PowerShell7). Present -> relaunch immediately; this
            alone fixes the "opened the built-in Windows PowerShell out of habit" case.
-        2. Missing -> install it: winget first (an exe, version-agnostic, preinstalled on consumer
-           Windows 11), falling back to the official aka.ms/install-powershell.ps1 MSI script when
-           winget is absent or fails. Interactive runs are asked for consent first; -WhatIf never
+        2. Missing -> install it, no consent prompt (issue #230): winget first (an exe,
+           version-agnostic, preinstalled on consumer Windows 11), falling back to the official
+           aka.ms/install-powershell.ps1 MSI script when winget is absent or fails. -WhatIf never
            installs anything and previews the plan instead.
         3. Relaunch the installer under pwsh with -NoProfile -ExecutionPolicy Bypass in the SAME
            console (output and prompts stay in the caller's window), forwarding the caller's
@@ -1015,9 +1022,9 @@ function Find-PowerShell7 {
     Dry-run intent, forwarded to the relaunch. When PowerShell 7 is missing, the bootstrap prints
     what a real run would do and returns 0 without installing anything.
 .PARAMETER NonInteractive
-    Suppresses the install-consent prompt (auto-proceeds), forwarded to the relaunch. Effective
-    non-interactivity is also auto-detected (Test-EffectiveNonInteractive), so redirected-stdin
-    contexts (RMM, CI) never block on Read-Host.
+    Forwarded to the relaunch, and nothing else. Since issue #230 this function has no interactive
+    behavior of its own to gate: the install proceeds without asking, and its winget call always
+    passes --disable-interactivity.
 .PARAMETER SkipSystemCheck
     Forwarded to the relaunch untouched.
 .PARAMETER CommandPath
@@ -1073,14 +1080,12 @@ function Invoke-PowerShell7Bootstrap {
             return 0
         }
 
-        $effectiveNonInteractive = Test-EffectiveNonInteractive -NonInteractive:$NonInteractive
-        if (-not $effectiveNonInteractive) {
-            $answer = Read-Host 'PowerShell 7 (pwsh) is required but not installed. Install it now via winget? [Y/n]'
-            if ($answer -match '^\s*n') {
-                Write-ErrorMessage 'PowerShell 7 is required. Install it (winget install Microsoft.PowerShell) and re-run this installer from a pwsh prompt.'
-                return 1
-            }
-        }
+        # No consent prompt (issue #230). PowerShell 7 is a hard requirement of everything below,
+        # so the question only ever had one useful answer - and asking it stalled the documented
+        # one-liner: an interactive `irm | iex` does not redirect stdin, so the session read as
+        # interactive and the prompt fired. This function no longer consults the interactivity
+        # detection at all; -NonInteractive survives here purely to be forwarded to the relaunch.
+        Write-Info 'PowerShell 7 (pwsh) is required but not installed. Installing it now...'
 
         # The bootstrap runs before the module's elevation logic ever loads; a machine-wide
         # PowerShell 7 install from a non-admin session may surface a UAC prompt or fail outright.
@@ -1099,10 +1104,13 @@ function Invoke-PowerShell7Bootstrap {
         $wingetCommand = Get-Command -Name 'winget' -CommandType Application -ErrorAction SilentlyContinue
         if ($wingetCommand) {
             Write-Info 'Installing PowerShell 7 via winget...'
-            $wingetArguments = @('install', '--id', 'Microsoft.PowerShell', '--exact', '--source', 'winget', '--accept-source-agreements', '--accept-package-agreements')
-            if ($effectiveNonInteractive) {
-                $wingetArguments += '--disable-interactivity'
-            }
+            # --disable-interactivity unconditionally (issue #230). It used to be added only when
+            # the session read as non-interactive, which is exactly backwards for the case that
+            # matters: the documented one-liner reports INTERACTIVE (an `irm | iex` pipe leaves
+            # stdin alone), so the run most likely to be walked away from was the one run that let
+            # winget stop and ask. Nothing here needs winget's UI - the agreements are accepted by
+            # flag, and a failure falls through to the MSI fallback below.
+            $wingetArguments = @('install', '--id', 'Microsoft.PowerShell', '--exact', '--source', 'winget', '--accept-source-agreements', '--accept-package-agreements', '--disable-interactivity')
             # A Start-Process launch failure is non-terminating under 5.1's default
             # $ErrorActionPreference and would leave $wingetProcess $null - catch it explicitly
             # so a broken winget shim degrades to the MSI fallback with a real message.
@@ -1642,9 +1650,10 @@ function Restart-WithElevation {
 .PARAMETER WhatIf
     When specified, the script performs all pre-flight checks and displays planned actions without making any system changes.
 .PARAMETER NonInteractive
-    Suppresses all interactive prompts (elevation pause, grid-view prompt, final "press any key")
-    for unattended runs (RMM, CI, scheduled tasks). Also auto-detected when the session is
-    non-interactive or stdin is redirected.
+    Suppresses the interactive extras for unattended runs (RMM, CI, scheduled tasks): the summary
+    grid-view window and the final "press any key to exit". Also auto-detected when the session is
+    non-interactive or stdin is redirected. No path asks a yes/no question anymore (issue #230), so
+    this switch is not needed to keep a run from blocking on a prompt.
 .PARAMETER SkipSystemCheck
     Pass-through of the entry script's -SkipSystemCheck switch. Used only so an elevated relaunch
     inherits the caller's intent to bypass the pre-flight system checks (issue #185); the checks
@@ -1686,19 +1695,26 @@ function Invoke-WingetInstall {
     # Determine which PowerShell executable to use
     $psExecutable = if (Get-Command pwsh -ErrorAction SilentlyContinue) { 'pwsh.exe' } else { 'powershell.exe' }
 
-    # Accept the winget source agreement in the user context before elevating. Agreements are
-    # per-user and won't carry into the elevated process; running the update here surfaces any
-    # interactive prompt while we still have the normal user's identity. Scoped to --name winget —
+    # Trigger the winget source's per-user first-use bootstrap in the user context before elevating.
+    # Agreements are per-user and won't carry into the elevated process. Scoped to --name winget —
     # the only source this tool installs from — so it never triggers msstore's agreement/first-use
     # handshake, which fails in non-interactive/cross-user contexts (issue #172).
+    #
+    # --disable-interactivity (issue #230): this used to run bare, on purpose, to surface winget's
+    # agreement prompt "while we still have the normal user's identity" - and -Wait meant an
+    # unattended run sat on that prompt forever. It was never load-bearing: the exit code is
+    # discarded (no -PassThru), so nothing here could act on the answer either way. The agreement
+    # is accepted where it actually counts - every install passes --accept-source-agreements, and
+    # the elevated Initialize-WingetSourcesForUser below re-probes and bootstraps the installing
+    # account via Repair-WinGetPackageManager (issue #159).
     $isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] 'Administrator')
     if (-not $isAdmin -and (Test-IsRunningLocally)) {
         if ($WhatIf) {
-            Write-Info '[DRY-RUN] Would run winget source update --name winget to prompt for source agreement acceptance in user context'
+            Write-Info '[DRY-RUN] Would run winget source update --name winget to bootstrap the source in user context'
         }
         else {
-            Write-Info 'Updating the winget source - accept any prompts that appear to continue...'
-            Start-Process -FilePath 'winget' -ArgumentList 'source', 'update', '--name', 'winget' -Wait -NoNewWindow
+            Write-Info 'Updating the winget source...'
+            Start-Process -FilePath 'winget' -ArgumentList 'source', 'update', '--name', 'winget', '--disable-interactivity' -Wait -NoNewWindow
         }
     }
 
@@ -1721,13 +1737,10 @@ function Invoke-WingetInstall {
                     Write-ErrorMessage 'Invoke-WingetInstall was invoked from the imported module without elevation; auto-elevation cannot relaunch a module function. Run winget-app-install.ps1, or start from an already-elevated session.'
                     return
                 }
-                if ($effectiveNonInteractive) {
-                    Write-ErrorMessage 'This script requires administrator privileges. Restarting with elevated privileges...'
-                }
-                else {
-                    Write-ErrorMessage 'This script requires administrator privileges. Press Enter to restart script with elevated privileges.'
-                    Pause
-                }
+                # No "press Enter to elevate" pause (issue #230): it gated the run on a keystroke
+                # without offering a decision - the relaunch happens either way, and the UAC dialog
+                # the relaunch raises is the actual consent gate. Announce and go.
+                Write-ErrorMessage 'This script requires administrator privileges. Restarting with elevated privileges...'
                 # Relaunch the script with administrator privileges, forwarding the caller's
                 # switches so the elevated session inherits the same intent: -SkipSystemCheck so
                 # the pre-flight checks the caller explicitly bypassed are not re-run in the
@@ -1995,7 +2008,10 @@ function Invoke-WingetInstall {
         $rows += , @('Failed', $appList)
     }
 
-    Write-Table -Headers $headers -Rows $rows -PromptForGridView (-not $effectiveNonInteractive) -Title 'Installation Summary'
+    # -AutoGridView opens the grid view without asking (issue #230), gated on the session actually
+    # being interactive so an unattended run never leaves a window open with nobody to close it.
+    # The text table prints either way, so the transcript keeps the summary regardless.
+    Write-Table -Headers $headers -Rows $rows -AutoGridView (-not $effectiveNonInteractive) -Title 'Installation Summary'
 
     # Per-app failure reasons (issue #189): winget exit code, attempt count, and scope-fallback
     # detail, so a failure is diagnosable from the summary (and the transcript) instead of a
@@ -2132,19 +2148,26 @@ function Format-AppList {
 
 <#
 .SYNOPSIS
-    Displays a formatted table of results, with optional interactive GUI view.
+    Displays a formatted table of results, and optionally also in an interactive GUI view.
 .DESCRIPTION
-    Renders a summary table using PowerShell's built-in Format-Table for improved
-    readability and alignment. Optionally displays the data in Out-GridView when
-    running in an interactive session with GUI support.
+    Always renders the summary as text via PowerShell's built-in Format-Table, then additionally
+    opens Out-GridView when a caller asked for it and the session can show one.
+
+    The grid view is never offered as a question (issue #230): it used to be a Read-Host that
+    stalled the documented one-liner, so -AutoGridView now just opens it. Text output is
+    unconditional for the same reason — the grid view renders in its own window and is never
+    captured by Start-Transcript, so returning early once it opened would drop the summary from
+    the log of every interactive run.
 .PARAMETER Headers
     Array of column header names
 .PARAMETER Rows
     Array of row data (each row is an array matching the header count)
 .PARAMETER UseGridView
-    When set to $true and Out-GridView is available, displays results interactively
-.PARAMETER PromptForGridView
-    When set to $true, asks the user if they want to use Out-GridView (if available)
+    Caller explicitly wants the grid view. Warns when Out-GridView is unavailable.
+.PARAMETER AutoGridView
+    Open the grid view whenever the session can show one, silently doing nothing when it cannot.
+    Callers pass the session's effective interactivity here, so an unattended run never opens a
+    window that nothing is around to close. (Formerly -PromptForGridView, which asked first.)
 #>
 function Write-Table {
     param (
@@ -2156,7 +2179,7 @@ function Write-Table {
         [Parameter(Mandatory = $false)]
         [bool]$UseGridView = $false,
         [Parameter(Mandatory = $false)]
-        [bool]$PromptForGridView = $false,
+        [bool]$AutoGridView = $false,
         [Parameter(Mandatory = $false)]
         [string]$Title = 'Summary'
     )
@@ -2171,38 +2194,31 @@ function Write-Table {
         $tableData += $obj
     }
 
-    $shouldUseGridView = $UseGridView
-
-    # Prompt user if requested and Out-GridView is available
-    if ($PromptForGridView -and -not $UseGridView) {
-        if (Test-CanUseGridView) {
-            Write-Host ''
-            $response = Read-Host 'Would you like to view the results in an interactive grid view? (Y/N)'
-            if ($response -match '^[Yy]') {
-                $shouldUseGridView = $true
-            }
-        }
-    }
-
-    # Try to use Out-GridView if requested and available
-    if ($shouldUseGridView) {
-        if (-not (Test-CanUseGridView)) {
-            Write-WarningMessage 'Out-GridView is not available. Falling back to text output.'
-        }
-        else {
-            try {
-                $tableData | Out-GridView -Title $Title -Wait
-                return
-            }
-            catch {
-                Write-WarningMessage "Failed to display grid view: $_. Falling back to text output."
-            }
-        }
-    }
-
-    # Use Format-Table for text output
+    # Text output first, unconditionally: Out-GridView is a window, not console output, so it is
+    # never transcribed (issue #230).
     $output = $tableData | Format-Table -AutoSize | Out-String
     Write-Host $output.TrimEnd()
+
+    if (-not ($UseGridView -or $AutoGridView)) {
+        return
+    }
+
+    if (-not (Test-CanUseGridView)) {
+        # Only an explicit -UseGridView deserves a warning. -AutoGridView is an offer, not a
+        # request: on a session that cannot show a window, having no window is the right outcome
+        # and not worth a line of noise.
+        if ($UseGridView) {
+            Write-WarningMessage 'Out-GridView is not available. The results are in the text summary above.'
+        }
+        return
+    }
+
+    try {
+        $tableData | Out-GridView -Title $Title -Wait
+    }
+    catch {
+        Write-WarningMessage "Failed to display grid view: $_. The results are in the text summary above."
+    }
 }
 
 # --- SystemChecks ---
@@ -2210,31 +2226,28 @@ function Write-Table {
 .SYNOPSIS
     Runs pre-flight system checks (OS version, disk space, network) before installation.
 .DESCRIPTION
-    Warns on Windows older than 10 21H2 (build 19044, non-blocking), warns and prompts to
-    continue when C: has less than 50 GB free (measured only — an unreadable drive reports
-    UNKNOWN and never prompts), and blocks when cdn.winget.microsoft.com is unreachable over
-    HTTPS (network is required for winget). The network probe uses Invoke-WebRequest, which
-    honors system proxy settings; any HTTP response — including 4xx/5xx — counts as reachable,
-    and only a transport-level failure (no response at all) blocks. In -WhatIf mode the
-    disk-space prompt is skipped, and in effective non-interactive mode (issue #214 — explicit
-    switch, non-interactive session, or redirected stdin, via Test-EffectiveNonInteractive) the
-    prompt is replaced by a warning and the run continues: an unattended run must never block
-    on Read-Host (empty redirected stdin reads as "not Y" and silently cancelled the install).
+    Warns on Windows older than 10 21H2 (build 19044, non-blocking), warns when C: has less than
+    50 GB free (measured only — an unreadable drive reports UNKNOWN and stays quiet), and blocks
+    when cdn.winget.microsoft.com is unreachable over HTTPS (network is required for winget). The
+    network probe uses Invoke-WebRequest, which honors system proxy settings; any HTTP response —
+    including 4xx/5xx — counts as reachable, and only a transport-level failure (no response at
+    all) blocks.
+
+    Nothing here prompts (issue #230): the only blocking check is the network probe, whose verdict
+    is not a matter of opinion, so the sole return-$false path is a genuine failure rather than a
+    declined question. Low disk warns and proceeds. That is also why this function has no
+    -NonInteractive parameter — with the prompt gone there is no interactive behavior left to
+    suppress (it previously gated the low-disk Read-Host, per issues #214/#176).
 .PARAMETER WhatIf
-    When specified, reports intended checks without prompting on low disk space.
-.PARAMETER NonInteractive
-    The caller's explicit non-interactive intent, forwarded into the shared effective
-    non-interactive detection (Test-EffectiveNonInteractive). When the effective state is
-    non-interactive, measured-low disk space warns and continues instead of prompting.
+    When specified, reports intended checks and skips the low-disk warning (a dry run makes no
+    changes that could run the disk out).
 .RETURNS
-    [bool] True when it is safe to proceed; False when a blocking check fails or the user declines.
+    [bool] True when it is safe to proceed; False when a blocking check fails.
 #>
 function Test-SystemRequirements {
     param (
         [Parameter(Mandatory = $false)]
-        [switch]$WhatIf,
-        [Parameter(Mandatory = $false)]
-        [switch]$NonInteractive
+        [switch]$WhatIf
     )
 
     $results = @()
@@ -2267,7 +2280,7 @@ function Test-SystemRequirements {
         $results += [PSCustomObject]@{ Check = 'OS Version'; Status = 'WARN'; Detail = "Could not determine OS version: $_" }
     }
 
-    # --- Disk Space on C: (warn + prompt if under 50 GB) ---
+    # --- Disk Space on C: (warn if under 50 GB) ---
     $freeGB = $null
     try {
         $drive = Get-PSDrive -Name C -ErrorAction Stop
@@ -2280,8 +2293,8 @@ function Test-SystemRequirements {
         }
     }
     catch {
-        # Distinct from the low-space WARN: free space could not be measured, so the
-        # low-disk prompt below must not fire ($freeGB stays $null).
+        # Distinct from the low-space WARN: free space could not be measured, so the low-disk
+        # warning below must not fire and claim a number it does not have ($freeGB stays $null).
         $results += [PSCustomObject]@{ Check = 'Disk Space'; Status = 'UNKNOWN'; Detail = "Could not read C: drive: $_" }
     }
 
@@ -2326,22 +2339,14 @@ function Test-SystemRequirements {
         return $false
     }
 
-    # Prompt only when free space was actually measured below the threshold
-    # (skip prompt in WhatIf mode; never prompt when the drive could not be read).
+    # Measured-low disk warns and continues; it never asks (issue #230). Low disk is a
+    # recommendation, not a blocker, so "continue anyway?" only ever had one useful answer, and
+    # asking it stalled the documented one-liner — an interactive `irm | iex` does not redirect
+    # stdin, so the interactivity detection this used to branch on reported interactive and the
+    # prompt fired. Silent when free space could not be measured ($freeGB stays $null) or under
+    # -WhatIf, which makes no changes that could run the disk out.
     if ($null -ne $freeGB -and $freeGB -lt 50 -and -not $WhatIf) {
-        # Unattended runs must never block on Read-Host: redirected stdin returns an empty
-        # string, which reads as "not Y" and silently cancelled the install (issue #214).
-        # Warn and continue instead — low disk is a recommendation, not a blocker.
-        if (Test-EffectiveNonInteractive -NonInteractive:$NonInteractive) {
-            Write-WarningMessage 'Disk space is below the 50 GB recommendation. Continuing without prompting (non-interactive run).'
-        }
-        else {
-            $choice = Read-Host 'Disk space is below the 50 GB recommendation. Continue anyway? (Y/N)'
-            if ($choice -notin @('Y', 'y')) {
-                Write-WarningMessage 'Installation cancelled by user due to low disk space.'
-                return $false
-            }
-        }
+        Write-WarningMessage 'Disk space is below the 50 GB recommendation. Continuing anyway.'
     }
 
     return $true
@@ -3159,9 +3164,15 @@ function Install-WingetPackage {
     while ($attempt -lt $MaxAttempts) {
         $attempt++
 
+        # --disable-interactivity (issue #230): every other winget call in the module already
+        # passes it; this one - the path every app install takes - did not, so winget could stop
+        # and ask on the one code path where a human is least likely to be watching. The two
+        # --accept-*-agreements flags are the standing "yes" to the questions winget would
+        # otherwise ask; this flag is what stops it asking anything else.
         $installArgs = @(
             'install', '-e',
             '--accept-source-agreements', '--accept-package-agreements',
+            '--disable-interactivity',
             '--source', 'winget',
             '--id', $PackageId
         )
@@ -3419,7 +3430,7 @@ function Install-MsixProvisionedPackage {
         Write-Info "Downloading the latest MSIX for $PackageId to provision it machine-wide..."
         $downloadArgs = @(
             'download', '-e', '--id', $PackageId, '--source', 'winget', '--installer-type', 'msix',
-            '--accept-source-agreements', '--accept-package-agreements',
+            '--accept-source-agreements', '--accept-package-agreements', '--disable-interactivity',
             '--download-directory', $downloadDir
         )
         $download = Start-Process -FilePath 'winget' -ArgumentList $downloadArgs -NoNewWindow -Wait -PassThru
@@ -3552,18 +3563,18 @@ if ($MyInvocation.InvocationName -ne '.') {
         # a transcript identifies exactly which installer build produced it.
         Write-Info "Installer build: $script:InstallerBuildId"
 
-        # -NonInteractive is forwarded so the pre-flight disk-space prompt is gated on the same
-        # effective non-interactive detection as the install orchestrator (issue #214): an
-        # unattended run with measured-low disk warns and continues instead of auto-cancelling
-        # on an empty Read-Host from redirected stdin.
+        # No -NonInteractive to forward: the pre-flight checks no longer prompt at all (issue
+        # #230), so there is no interactive behavior left for it to gate. Measured-low disk warns
+        # and continues for every run, and the only thing that can still return false here is the
+        # blocking network probe.
         if (-not $SkipSystemCheck) {
             if ($WhatIf) {
                 Write-Info '[DRY-RUN] Running pre-flight system checks (OS version, disk space, network).'
-                if (-not (Test-SystemRequirements -WhatIf:$WhatIf -NonInteractive:$NonInteractive)) {
+                if (-not (Test-SystemRequirements -WhatIf:$WhatIf)) {
                     Write-WarningMessage '[DRY-RUN] A blocking pre-flight check failed - a real run would abort here.'
                 }
             }
-            elseif (-not (Test-SystemRequirements -WhatIf:$WhatIf -NonInteractive:$NonInteractive)) {
+            elseif (-not (Test-SystemRequirements -WhatIf:$WhatIf)) {
                 exit 1
             }
         }

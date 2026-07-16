@@ -90,19 +90,26 @@ function Format-AppList {
 
 <#
 .SYNOPSIS
-    Displays a formatted table of results, with optional interactive GUI view.
+    Displays a formatted table of results, and optionally also in an interactive GUI view.
 .DESCRIPTION
-    Renders a summary table using PowerShell's built-in Format-Table for improved
-    readability and alignment. Optionally displays the data in Out-GridView when
-    running in an interactive session with GUI support.
+    Always renders the summary as text via PowerShell's built-in Format-Table, then additionally
+    opens Out-GridView when a caller asked for it and the session can show one.
+
+    The grid view is never offered as a question (issue #230): it used to be a Read-Host that
+    stalled the documented one-liner, so -AutoGridView now just opens it. Text output is
+    unconditional for the same reason — the grid view renders in its own window and is never
+    captured by Start-Transcript, so returning early once it opened would drop the summary from
+    the log of every interactive run.
 .PARAMETER Headers
     Array of column header names
 .PARAMETER Rows
     Array of row data (each row is an array matching the header count)
 .PARAMETER UseGridView
-    When set to $true and Out-GridView is available, displays results interactively
-.PARAMETER PromptForGridView
-    When set to $true, asks the user if they want to use Out-GridView (if available)
+    Caller explicitly wants the grid view. Warns when Out-GridView is unavailable.
+.PARAMETER AutoGridView
+    Open the grid view whenever the session can show one, silently doing nothing when it cannot.
+    Callers pass the session's effective interactivity here, so an unattended run never opens a
+    window that nothing is around to close. (Formerly -PromptForGridView, which asked first.)
 #>
 function Write-Table {
     param (
@@ -114,7 +121,7 @@ function Write-Table {
         [Parameter(Mandatory = $false)]
         [bool]$UseGridView = $false,
         [Parameter(Mandatory = $false)]
-        [bool]$PromptForGridView = $false,
+        [bool]$AutoGridView = $false,
         [Parameter(Mandatory = $false)]
         [string]$Title = 'Summary'
     )
@@ -129,37 +136,30 @@ function Write-Table {
         $tableData += $obj
     }
 
-    $shouldUseGridView = $UseGridView
-
-    # Prompt user if requested and Out-GridView is available
-    if ($PromptForGridView -and -not $UseGridView) {
-        if (Test-CanUseGridView) {
-            Write-Host ''
-            $response = Read-Host 'Would you like to view the results in an interactive grid view? (Y/N)'
-            if ($response -match '^[Yy]') {
-                $shouldUseGridView = $true
-            }
-        }
-    }
-
-    # Try to use Out-GridView if requested and available
-    if ($shouldUseGridView) {
-        if (-not (Test-CanUseGridView)) {
-            Write-WarningMessage 'Out-GridView is not available. Falling back to text output.'
-        }
-        else {
-            try {
-                $tableData | Out-GridView -Title $Title -Wait
-                return
-            }
-            catch {
-                Write-WarningMessage "Failed to display grid view: $_. Falling back to text output."
-            }
-        }
-    }
-
-    # Use Format-Table for text output
+    # Text output first, unconditionally: Out-GridView is a window, not console output, so it is
+    # never transcribed (issue #230).
     $output = $tableData | Format-Table -AutoSize | Out-String
     Write-Host $output.TrimEnd()
+
+    if (-not ($UseGridView -or $AutoGridView)) {
+        return
+    }
+
+    if (-not (Test-CanUseGridView)) {
+        # Only an explicit -UseGridView deserves a warning. -AutoGridView is an offer, not a
+        # request: on a session that cannot show a window, having no window is the right outcome
+        # and not worth a line of noise.
+        if ($UseGridView) {
+            Write-WarningMessage 'Out-GridView is not available. The results are in the text summary above.'
+        }
+        return
+    }
+
+    try {
+        $tableData | Out-GridView -Title $Title -Wait
+    }
+    catch {
+        Write-WarningMessage "Failed to display grid view: $_. The results are in the text summary above."
+    }
 }
 
