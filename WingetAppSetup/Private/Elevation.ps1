@@ -25,6 +25,22 @@ function Test-IsRunningLocally {
 
 <#
 .SYNOPSIS
+    Reports whether the current process is running with administrator privileges.
+.DESCRIPTION
+    Thin wrapper around the WindowsPrincipal/IsInRole check so callers (Invoke-WingetInstall) can
+    mock the admin state in tests. The check itself is unchanged (issue #wgt-timeout-followup) -
+    calling `[Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(...)` directly inline is
+    a real .NET call Pester cannot intercept, which left the non-admin branch of
+    Invoke-WingetInstall unreachable by any test short of actually running elevated.
+.RETURNS
+    [bool] True when the current process holds the local Administrator role.
+#>
+function Test-IsCurrentUserAdmin {
+    ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] 'Administrator')
+}
+
+<#
+.SYNOPSIS
     Returns the account name the current process is running as (DOMAIN\user), or $null.
 #>
 function Get-ProcessUserName {

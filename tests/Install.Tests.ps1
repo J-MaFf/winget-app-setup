@@ -21,6 +21,7 @@ Describe 'Main Script Logic' {
         # through the filtered mock throws under Pester 6, which (unlike Pester 5) no longer falls
         # back to the real command when no -ParameterFilter matches and there is no default mock.
         $script:InvokeWingetInstallDef = (Get-Command Invoke-WingetInstall).Definition
+        $script:TestIsCurrentUserAdminDef = (Get-Command Test-IsCurrentUserAdmin).Definition
 
         Mock Write-Host { }
         Mock Start-Process { }
@@ -38,11 +39,17 @@ Describe 'Main Script Logic' {
     # The replacement below pins the real gate structurally; the non-admin behavior itself is
     # exercised end-to-end by 'IEX non-admin execution behavior' in tests/EntryPoint.Tests.ps1.
     Context 'Administrator gate' {
-        It 'Performs a real WindowsPrincipal role check and refuses to install without elevation' {
+        It 'Delegates the admin check to the mockable Test-IsCurrentUserAdmin wrapper and refuses to install without elevation' {
+            # The real WindowsPrincipal/IsInRole check moved into Test-IsCurrentUserAdmin
+            # (Private/Elevation.ps1) so tests can mock the admin state and drive the non-admin
+            # branch deterministically instead of only when Pester itself runs non-elevated.
             $installBody = $script:InvokeWingetInstallDef
-            $installBody | Should -Match '\[Security\.Principal\.WindowsPrincipal\]'
-            $installBody | Should -Match 'IsInRole\(\[Security\.Principal\.WindowsBuiltInRole\]'
+            $installBody | Should -Match '\$isAdmin\s*=\s*Test-IsCurrentUserAdmin'
             $installBody | Should -Match 'This script requires administrator privileges'
+
+            $probeBody = $script:TestIsCurrentUserAdminDef
+            $probeBody | Should -Match '\[Security\.Principal\.WindowsPrincipal\]'
+            $probeBody | Should -Match 'IsInRole\(\[Security\.Principal\.WindowsBuiltInRole\]'
         }
     }
 
@@ -197,6 +204,39 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
             $installBody = $script:InvokeWingetInstallDef
             $installBody | Should -Match 'Invoke-WingetSourceProbe'
             $installBody | Should -Not -Match "Start-Process -FilePath 'winget' -ArgumentList 'source', 'update'.*-Wait"
+        }
+    }
+
+    Context 'Pre-elevation source update (real non-admin, non-WhatIf code path)' {
+        # Every other non-WhatIf invocation in this file is gated behind
+        # -Skip:(-not $script:wiringIsElevated), because $isAdmin used to come from a real,
+        # unmockable IsInRole() call - the non-admin branch containing this call site was only
+        # reachable by actually running Pester non-elevated. Test-IsCurrentUserAdmin
+        # (Private/Elevation.ps1) now wraps that check behind a mockable command, so this test
+        # drives Invoke-WingetInstall's real (non-WhatIf) pre-elevation block deterministically,
+        # on any machine, elevated or not.
+        BeforeEach {
+            Mock Write-Host { }
+            Mock Write-ErrorMessage { }
+            Mock Test-IsCurrentUserAdmin { $false }
+            Mock Test-IsRunningLocally { $true }
+            # Short-circuits the real function immediately after the pre-elevation block runs,
+            # via the existing early-return guard (issue #185), so this test never reaches the
+            # real `Exit` a few lines further down (which would kill the test process).
+            Mock Test-InvokedFromModuleContext { $true }
+            Mock Invoke-WingetSourceProbe { @{ Succeeded = $true; ExitCode = 0; TimedOut = $false } }
+        }
+
+        It 'Actually invokes Invoke-WingetSourceProbe before elevation when running non-admin, non-WhatIf' {
+            Invoke-WingetInstall -NonInteractive
+
+            Should -Invoke Invoke-WingetSourceProbe -Times 1 -Exactly
+        }
+
+        It 'Does not call Invoke-WingetSourceProbe in a dry run (-WhatIf), preserving the existing dry-run message instead' {
+            Invoke-WingetInstall -WhatIf -NonInteractive
+
+            Should -Invoke Invoke-WingetSourceProbe -Times 0 -Exactly
         }
     }
 

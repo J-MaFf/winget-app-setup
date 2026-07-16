@@ -58,12 +58,12 @@ param (
 # This script is assembled from the WingetAppSetup module by build/Build-WingetInstallScript.ps1.
 # Edit the function source under WingetAppSetup/Public and WingetAppSetup/Private, then re-run the
 # build to regenerate this file. See readme.md ("Project layout") for details.
-# Build id: 1.0.0+c216dcba (module version + SHA256 fragment of the function content; issue #189).
+# Build id: 1.0.0+0c62f03c (module version + SHA256 fragment of the function content; issue #189).
 # ------------------------------------------------------------------------------------------------
 
 # Content-derived build identity, logged at startup so a transcript from a remote machine
 # identifies exactly which installer build produced it (issue #189).
-$script:InstallerBuildId = '1.0.0+c216dcba'
+$script:InstallerBuildId = '1.0.0+0c62f03c'
 
 # ------------------------------------------------Functions------------------------------------------------
 
@@ -91,6 +91,22 @@ function Test-IsRunningLocally {
     catch {
         return $false
     }
+}
+
+<#
+.SYNOPSIS
+    Reports whether the current process is running with administrator privileges.
+.DESCRIPTION
+    Thin wrapper around the WindowsPrincipal/IsInRole check so callers (Invoke-WingetInstall) can
+    mock the admin state in tests. The check itself is unchanged (issue #wgt-timeout-followup) -
+    calling `[Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(...)` directly inline is
+    a real .NET call Pester cannot intercept, which left the non-admin branch of
+    Invoke-WingetInstall unreachable by any test short of actually running elevated.
+.RETURNS
+    [bool] True when the current process holds the local Administrator role.
+#>
+function Test-IsCurrentUserAdmin {
+    ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] 'Administrator')
 }
 
 <#
@@ -1714,7 +1730,10 @@ function Invoke-WingetInstall {
     # whole run forever on a corrupted/unreachable source, before elevation and before any of the
     # timeout-guarded checks later in the pipeline ever ran. The return value is intentionally
     # discarded here, same as before - this call remains best-effort.
-    $isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] 'Administrator')
+    # Test-IsCurrentUserAdmin (Private/Elevation.ps1) wraps the WindowsPrincipal/IsInRole check
+    # behind a mockable command, so tests can drive the non-admin branch below deterministically
+    # instead of only when Pester itself happens to run non-elevated.
+    $isAdmin = Test-IsCurrentUserAdmin
     if (-not $isAdmin -and (Test-IsRunningLocally)) {
         if ($WhatIf) {
             Write-Info '[DRY-RUN] Would run winget source update --name winget to bootstrap the source in user context'

@@ -70,7 +70,10 @@ function Invoke-WingetInstall {
     # whole run forever on a corrupted/unreachable source, before elevation and before any of the
     # timeout-guarded checks later in the pipeline ever ran. The return value is intentionally
     # discarded here, same as before - this call remains best-effort.
-    $isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] 'Administrator')
+    # Test-IsCurrentUserAdmin (Private/Elevation.ps1) wraps the WindowsPrincipal/IsInRole check
+    # behind a mockable command, so tests can drive the non-admin branch below deterministically
+    # instead of only when Pester itself happens to run non-elevated.
+    $isAdmin = Test-IsCurrentUserAdmin
     if (-not $isAdmin -and (Test-IsRunningLocally)) {
         if ($WhatIf) {
             Write-Info '[DRY-RUN] Would run winget source update --name winget to bootstrap the source in user context'
