@@ -611,6 +611,18 @@ Describe 'Test-WingetPackageInstalled (timeout support, issue #188)' {
 
             Test-WingetPackageInstalled -PackageId 'Test.App' | Should -Be $false
         }
+
+        It 'Returns $false when the output only contains a different id that has the target as a substring (CLAUDE.md regex enforcement)' {
+            Mock winget { "Name       Id           Version`nFoo BarBaz Foo.BarBaz  1.0" }
+
+            Test-WingetPackageInstalled -PackageId 'Foo.Bar' | Should -Be $false
+        }
+
+        It 'Still returns $true for a real matching line when a substring-only lookalike is also present' {
+            Mock winget { "Name       Id           Version`nFoo Bar    Foo.Bar      1.0`nFoo BarBaz Foo.BarBaz  1.0" }
+
+            Test-WingetPackageInstalled -PackageId 'Foo.Bar' | Should -Be $true
+        }
     }
 
     Context 'With -TimeoutSeconds (Start-Process guard, the pattern Invoke-WingetInstall inlined pre-#188)' {
@@ -635,6 +647,20 @@ Describe 'Test-WingetPackageInstalled (timeout support, issue #188)' {
                 ($ArgumentList -contains 'Test.App') -and
                 ($ArgumentList -contains '--accept-source-agreements')
             }
+        }
+
+        It 'Reports not-installed when the output only contains a different id that has the target as a substring' {
+            Mock Start-Process {
+                $p = [pscustomobject]@{ ExitCode = -1978335212 }
+                $p | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value { param($ms) $true }
+                $p | Add-Member -MemberType ScriptMethod -Name Kill -Value { }
+                $p
+            }
+            Mock Get-Content { 'Foo.BarBaz  1.0.0  winget' }
+
+            $result = Test-WingetPackageInstalled -PackageId 'Foo.Bar' -TimeoutSeconds 15
+
+            $result.Installed | Should -Be $false
         }
 
         It 'Reports not-installed when the output does not mention the id' {

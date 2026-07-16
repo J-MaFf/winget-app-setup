@@ -411,6 +411,10 @@ function Install-WingetPackage {
     run) cannot collide on fixed names (issue #177). In this mode a hashtable is returned so the
     caller can tell a timeout apart from "not installed": a timeout must count as a failure rather
     than being silently dropped (issue #176).
+
+    Both modes determine "installed" via Test-WingetListOutputContainsPackageId rather than a plain
+    substring .Contains check, so an unrelated listed id that merely contains $PackageId as a
+    substring (e.g. target 'Foo.Bar' inside listed id 'Foo.BarBaz') cannot false-positive.
 .PARAMETER PackageId
     The winget package id to check.
 .PARAMETER TimeoutSeconds
@@ -455,7 +459,7 @@ function Test-WingetPackageInstalled {
             # only read after a confirmed non-timeout exit.
             $output = @(Get-Content $stdoutFile -ErrorAction SilentlyContinue)
             return @{
-                Installed = ([String]::Join('', $output)).Contains($PackageId)
+                Installed = Test-WingetListOutputContainsPackageId -Output ([String]::Join('', $output)) -PackageId $PackageId
                 TimedOut  = $false
                 ExitCode  = $listProcess.ExitCode
             }
@@ -471,7 +475,7 @@ function Test-WingetPackageInstalled {
 
     try {
         $output = winget list --exact --id $PackageId --accept-source-agreements --disable-interactivity 2>&1
-        return ([String]::Join('', $output)).Contains($PackageId)
+        return Test-WingetListOutputContainsPackageId -Output ([String]::Join('', $output)) -PackageId $PackageId
     }
     catch {
         return $false

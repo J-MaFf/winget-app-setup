@@ -58,12 +58,12 @@ param (
 # This script is assembled from the WingetAppSetup module by build/Build-WingetInstallScript.ps1.
 # Edit the function source under WingetAppSetup/Public and WingetAppSetup/Private, then re-run the
 # build to regenerate this file. See readme.md ("Project layout") for details.
-# Build id: 1.0.0+8d9f5584 (module version + SHA256 fragment of the function content; issue #189).
+# Build id: 1.0.0+3c2e8386 (module version + SHA256 fragment of the function content; issue #189).
 # ------------------------------------------------------------------------------------------------
 
 # Content-derived build identity, logged at startup so a transcript from a remote machine
 # identifies exactly which installer build produced it (issue #189).
-$script:InstallerBuildId = '1.0.0+8d9f5584'
+$script:InstallerBuildId = '1.0.0+3c2e8386'
 
 # ------------------------------------------------Functions------------------------------------------------
 
@@ -909,6 +909,69 @@ function Write-Prompt {
     Write-Host $Message -ForegroundColor Blue
 }
 
+# --- PackageIdValidation ---
+<#
+.SYNOPSIS
+    Shared package-id shape validation, per CLAUDE.md's "Winget Notes" section.
+.DESCRIPTION
+    CLAUDE.md documents the exact regex a winget package id must satisfy before it is trusted (in
+    catalog entries or in `winget list` output matching). This file is the single place that regex
+    lives so Test-AppDefinitions (catalog load time) and Test-WingetPackageInstalled (runtime output
+    matching) cannot drift apart on the pattern.
+#>
+
+# Exact pattern from CLAUDE.md ("Winget Notes"): publisher.product shape, each side starting with a
+# word character and allowing word characters, dots, and hyphens after that.
+$script:WingetPackageIdPattern = '^[\w][\w.\-]+\.[\w][\w.\-]+'
+
+<#
+.SYNOPSIS
+    Returns whether a string has the publisher.product shape CLAUDE.md mandates for package ids.
+.PARAMETER PackageId
+    The candidate package id string.
+#>
+function Test-WingetPackageIdFormat {
+    param (
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
+        [string]$PackageId
+    )
+
+    return $PackageId -match $script:WingetPackageIdPattern
+}
+
+<#
+.SYNOPSIS
+    Returns whether `winget list` output contains the given package id as a whole id token, not
+    merely as a substring of a different (longer) id.
+.DESCRIPTION
+    A plain .Contains($PackageId) check against raw `winget list` text is an unanchored substring
+    match: an installed id like 'Foo.BarBaz' contains 'Foo.Bar' as a pure substring, which would
+    false-positive a "Foo.Bar is installed" verdict. CLAUDE.md's "Winget Notes" section mandates
+    validating package ids with a regex before trusting winget output; this tightens the match by
+    requiring that neither side of the matched substring continue with an id-shape character
+    ([\w.\-], the same character class the CLAUDE.md pattern is built from), so a match can only
+    land on a complete id token.
+.PARAMETER Output
+    The raw `winget list` stdout text to search.
+.PARAMETER PackageId
+    The winget package id being checked for.
+#>
+function Test-WingetListOutputContainsPackageId {
+    param (
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
+        [string]$Output,
+
+        [Parameter(Mandatory = $true)]
+        [string]$PackageId
+    )
+
+    $escapedId = [regex]::Escape($PackageId)
+    $boundaryPattern = "(?<![\w.\-])$escapedId(?![\w.\-])"
+    return [regex]::IsMatch($Output, $boundaryPattern)
+}
+
 # --- PowerShell7Bootstrap ---
 # Windows PowerShell 5.1 bootstrap (issue #225). EVERYTHING in this file runs under Windows
 # PowerShell 5.1 - the one engine the rest of the module explicitly does not support - because the
@@ -1523,7 +1586,9 @@ function Get-DefaultAppCatalog {
 .SYNOPSIS
     Validates the list of application definitions before processing.
 .DESCRIPTION
-    Ensures each entry in the apps array is a hashtable containing a non-empty string `name` value and removes duplicates, warning about any issues.
+    Ensures each entry in the apps array is a hashtable containing a non-empty string `name` value
+    matching the winget package-id shape CLAUDE.md documents (publisher.product), and removes
+    duplicates, warning about any issues.
 .PARAMETER Apps
     The collection of application definition hash tables to validate.
 .RETURNS
@@ -1553,6 +1618,14 @@ function Test-AppDefinitions {
         }
 
         $name = $app['name'].Trim()
+
+        # Package-id shape check (CLAUDE.md "Winget Notes"): reject any catalog entry whose name
+        # does not look like a winget publisher.product id before it is ever trusted downstream.
+        if (-not (Test-WingetPackageIdFormat -PackageId $name)) {
+            $errors += "App entry at index $i has an invalid package id '$name': does not match the required publisher.product shape."
+            continue
+        }
+
         if (-not $seenNames.Add($name)) {
             $warnings += "Duplicate app definition detected for '$name'. Subsequent entry ignored."
             continue
@@ -3249,6 +3322,10 @@ function Install-WingetPackage {
     run) cannot collide on fixed names (issue #177). In this mode a hashtable is returned so the
     caller can tell a timeout apart from "not installed": a timeout must count as a failure rather
     than being silently dropped (issue #176).
+
+    Both modes determine "installed" via Test-WingetListOutputContainsPackageId rather than a plain
+    substring .Contains check, so an unrelated listed id that merely contains $PackageId as a
+    substring (e.g. target 'Foo.Bar' inside listed id 'Foo.BarBaz') cannot false-positive.
 .PARAMETER PackageId
     The winget package id to check.
 .PARAMETER TimeoutSeconds
@@ -3293,7 +3370,7 @@ function Test-WingetPackageInstalled {
             # only read after a confirmed non-timeout exit.
             $output = @(Get-Content $stdoutFile -ErrorAction SilentlyContinue)
             return @{
-                Installed = ([String]::Join('', $output)).Contains($PackageId)
+                Installed = Test-WingetListOutputContainsPackageId -Output ([String]::Join('', $output)) -PackageId $PackageId
                 TimedOut  = $false
                 ExitCode  = $listProcess.ExitCode
             }
@@ -3309,7 +3386,7 @@ function Test-WingetPackageInstalled {
 
     try {
         $output = winget list --exact --id $PackageId --accept-source-agreements --disable-interactivity 2>&1
-        return ([String]::Join('', $output)).Contains($PackageId)
+        return Test-WingetListOutputContainsPackageId -Output ([String]::Join('', $output)) -PackageId $PackageId
     }
     catch {
         return $false
