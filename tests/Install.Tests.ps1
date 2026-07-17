@@ -329,38 +329,27 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
             $failureMessage | Should -Match 'machine-scope fallback: yes'
         }
 
-        It 'Names the pre-check phase (not verification) when a retry fails with PreCheckTimeout' -Skip:(-not $script:wiringIsElevated) {
-            Mock Install-AppWithVerification {
-                if ($App.name -eq '7zip.7zip') {
-                    return @{ Status = 'Failed'; InstallResult = $null; FailureReason = 'PreCheckTimeout' }
-                }
-                @{ Status = 'Skipped'; InstallResult = $null; FailureReason = $null }
-            }
-            $script:warningMessages = @()
-            Mock Write-WarningMessage { $script:warningMessages += $Message }
-
-            Invoke-WingetInstall -NonInteractive
-
-            $retryMessage = @($script:warningMessages | Where-Object { $_ -match '7zip\.7zip' -and $_ -match 'retry' })[0]
-            $retryMessage | Should -Not -BeNullOrEmpty
-            $retryMessage | Should -Not -Match 'Verification timed out'
-            $retryMessage | Should -Match 'Winget list timed out|pre-check|pre-install check'
+        # The retry-failure MESSAGES (issue #237) are pinned structurally rather than by driving
+        # a failed retry for real: a retry that stays Failed leaves $failedApps non-empty, and
+        # Invoke-WingetInstall then ends with `Exit 1` — which, executed inside a Pester test on
+        # an elevated runner, aborts the container mid-teardown and poisons every later test file
+        # (the CI failure on PR #248 was exactly this: a leaked TestDrive cascading 39 failures).
+        # Same convention as the winget-availability gate above: paths that terminate the process
+        # are pinned on source, not driven. The switch's *selection* semantics (PreCheckTimeout
+        # vs VerifyTimeout vs default) are what issue #237 fixed, and that is what these assert.
+        It 'Names the pre-check phase (not verification) when a retry fails with PreCheckTimeout (issue #237)' {
+            $installBody = $script:InvokeWingetInstallDef
+            # The retry loop's switch must give PreCheckTimeout its own arm with pre-check wording...
+            $installBody | Should -Match "(?s)'PreCheckTimeout'\s*\{\s*[^}]*Winget list timed out for retry"
+            # ...and that arm must not reuse the verification wording.
+            $installBody | Should -Not -Match "(?s)'PreCheckTimeout'\s*\{\s*[^}]*Verification timed out for retry"
         }
 
-        It 'Keeps the verification-timeout wording when a retry fails with VerifyTimeout' -Skip:(-not $script:wiringIsElevated) {
-            Mock Install-AppWithVerification {
-                if ($App.name -eq '7zip.7zip') {
-                    return @{ Status = 'Failed'; InstallResult = @{ ExitCode = 0 }; FailureReason = 'VerifyTimeout' }
-                }
-                @{ Status = 'Skipped'; InstallResult = $null; FailureReason = $null }
-            }
-            $script:warningMessages = @()
-            Mock Write-WarningMessage { $script:warningMessages += $Message }
-
-            Invoke-WingetInstall -NonInteractive
-
-            $retryMessage = @($script:warningMessages | Where-Object { $_ -match '7zip\.7zip' -and $_ -match 'retry' })[0]
-            $retryMessage | Should -Match 'Verification timed out for retry: 7zip\.7zip'
+        It 'Keeps the verification-timeout wording when a retry fails with VerifyTimeout (issue #237)' {
+            $installBody = $script:InvokeWingetInstallDef
+            $installBody | Should -Match "(?s)'VerifyTimeout'\s*\{\s*[^}]*Verification timed out for retry"
+            # The generic fallback stays intact for every other FailureReason.
+            $installBody | Should -Match 'Retry failed: \$appName \(\$failureReason\)'
         }
     }
 }
