@@ -157,16 +157,14 @@ function Get-UndefinedCatalogInstallReference {
 
     $installNames = foreach ($hashtable in $hashtables) {
         foreach ($pair in $hashtable.KeyValuePairs) {
+            # StringConstantExpressionAst covers every key shape this guard needs: bare-word
+            # hashtable keys (install = ...) parse as string constants with
+            # StringConstantType.BareWord — there is no separate "bare word" Ast type. An
+            # interpolated or computed key is not a constant the guard could resolve anyway,
+            # so anything else is skipped.
             $keyAst = $pair.Item1
-            $keyName = $null
-            if ($keyAst -is [System.Management.Automation.Language.StringConstantExpressionAst]) {
-                $keyName = $keyAst.Value
-            }
-            elseif ($keyAst -is [System.Management.Automation.Language.CommandParameterAst] -or
-                $keyAst -is [System.Management.Automation.Language.BareWordAst]) {
-                $keyName = $keyAst.Extent.Text
-            }
-            if ($keyName -ne 'install') { continue }
+            if ($keyAst -isnot [System.Management.Automation.Language.StringConstantExpressionAst]) { continue }
+            if ($keyAst.Value -ne 'install') { continue }
 
             $valueAst = $pair.Item2
             if ($valueAst -is [System.Management.Automation.Language.PipelineAst] -and $valueAst.PipelineElements.Count -eq 1) {

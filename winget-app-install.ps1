@@ -58,12 +58,12 @@ param (
 # This script is assembled from the WingetAppSetup module by build/Build-WingetInstallScript.ps1.
 # Edit the function source under WingetAppSetup/Public and WingetAppSetup/Private, then re-run the
 # build to regenerate this file. See readme.md ("Project layout") for details.
-# Build id: 1.0.0+5a3e5ebf (module version + SHA256 fragment of the function content; issue #189).
+# Build id: 1.0.0+134a9d49 (module version + SHA256 fragment of the function content; issue #189).
 # ------------------------------------------------------------------------------------------------
 
 # Content-derived build identity, logged at startup so a transcript from a remote machine
 # identifies exactly which installer build produced it (issue #189).
-$script:InstallerBuildId = '1.0.0+5a3e5ebf'
+$script:InstallerBuildId = '1.0.0+134a9d49'
 
 # ------------------------------------------------Functions------------------------------------------------
 
@@ -1394,23 +1394,20 @@ function Test-WingetSourceHealth {
             $searchOutput = winget search 7zip --source winget --disable-interactivity --accept-source-agreements 2>&1
             $searchExitCode = $LASTEXITCODE
 
-            # The known 0x8A15000F corruption signature (APPINSTALLER_CLI_ERROR_SOURCE_DATA_MISSING,
-            # -1978335217 as a signed Int32 — "Failed when opening source(s)... Data required by
-            # the source is missing") is just one of many nonzero exit codes already caught by the
-            # generic `-ne 0` check below; it does not need (and deliberately does not get) its own
-            # runtime branch.
+            # Any nonzero exit code fails the check — that includes the known 0x8A15000F
+            # corruption signature (APPINSTALLER_CLI_ERROR_SOURCE_DATA_MISSING, -1978335217 as a
+            # signed Int32 — "Failed when opening source(s)... Data required by the source is
+            # missing"), which needs no runtime branch of its own.
             #
-            # Prose fallback, kept deliberately narrow: per the codebase's hard-won history with
-            # flaky winget exit codes (issues #150/#172/#174/#175/#177), winget has reportedly
-            # emitted this exact corruption text while still returning exit code 0. Without a
-            # numeric signal available in that scenario, matching the English phrases is the only
-            # way to catch it — and, like the locale-dependency note in
-            # winget-app-uninstall.ps1 (issue #180), this text match is locale-sensitive and may
-            # stop matching if winget's output wording or locale changes.
-            $corruptedTextWithZeroExit = ($searchExitCode -eq 0) -and
-            ($searchOutput -match 'failed when opening|data required')
-
-            if ($corruptedTextWithZeroExit -or $searchExitCode -ne 0) {
+            # The output match is the fallback for the one scenario the exit code cannot catch:
+            # per the codebase's hard-won history with flaky winget exit codes (issues
+            # #150/#172/#174/#175/#177), winget has reportedly emitted this exact corruption text
+            # while still returning exit code 0. The '0x8a150' token is the load-bearing part —
+            # winget prints the hex HRESULT regardless of display language, so it survives locale
+            # and wording changes. The two English phrases are extra coverage only and, like the
+            # locale-dependency note in winget-app-uninstall.ps1 (issue #180), may stop matching
+            # if winget's output wording or locale changes.
+            if ($searchExitCode -ne 0 -or $searchOutput -match '0x8a150|failed when opening|data required') {
                 if (-not $Quiet) {
                     Write-WarningMessage 'Winget source is listed but contains corrupted or missing data.'
                 }

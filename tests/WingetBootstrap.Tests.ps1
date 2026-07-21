@@ -122,6 +122,29 @@ Describe 'Test-WingetSourceHealth (shared source probe, issue #177)' {
         Should -Invoke Write-WarningMessage -Times 1 -ParameterFilter { $Message -match 'corrupted or missing data' }
     }
 
+    It 'Catches exit-0 corruption via the locale-independent 0x8a150 hex token when the English phrases are absent (integration-review regression)' {
+        Mock winget {
+            if ($args[0] -eq 'source' -and $args[1] -eq 'list') {
+                $global:LASTEXITCODE = 0
+                return 'winget      https://cdn.winget.microsoft.com/cache'
+            }
+            elseif ($args[0] -eq 'search' -and $args[1] -eq '7zip') {
+                # A non-English locale (or future wording change) loses the English phrases, but
+                # winget prints the hex HRESULT regardless of display language. The '0x8a150'
+                # regex token is the only signal for this case — it was silently dropped once
+                # during the issue-#241 rework and restored by the integration-branch review.
+                $global:LASTEXITCODE = 0
+                return 'Quellfehler: 0x8A15000F - Von der Quelle benoetigte Daten fehlen.'
+            }
+        }
+
+        $health = Test-WingetSourceHealth
+
+        $health.Listed | Should -Be $true
+        $health.Functional | Should -Be $false
+        $health.Healthy | Should -Be $false
+    }
+
     It 'Suppresses per-step messages when -Quiet is passed' {
         Mock winget {
             if ($args[0] -eq 'source' -and $args[1] -eq 'list') {
