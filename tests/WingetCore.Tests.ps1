@@ -843,7 +843,7 @@ Describe 'Install-PowerShellLatest (always-latest strategy, issue #166)' {
         $result.Installed | Should -Be $true
         Should -Invoke Install-WingetPackage -Times 1 -Exactly -ParameterFilter { $InstallerType -eq 'wix' }
         Should -Invoke Install-MsixProvisionedPackage -Times 0 -Exactly
-        Should -Invoke Test-WingetPackageInstalled -Times 1 -Exactly -ParameterFilter { $TimeoutSeconds -gt 0 }
+        # Timeout-guarded verification is pinned separately below ('passes a 15-second timeout...').
     }
 
     It 'installs the native MSIX on Windows 24H2+ when no MSI is available' {
@@ -859,7 +859,7 @@ Describe 'Install-PowerShellLatest (always-latest strategy, issue #166)' {
         $result.Method | Should -Be 'msix-native'
         $result.Installed | Should -Be $true
         Should -Invoke Install-MsixProvisionedPackage -Times 0 -Exactly
-        Should -Invoke Test-WingetPackageInstalled -Times 1 -Exactly -ParameterFilter { $TimeoutSeconds -gt 0 }
+        # Timeout-guarded verification is pinned separately below ('passes a 15-second timeout...').
     }
 
     It 'provisions the MSIX via DISM on older Windows when no MSI is available' {

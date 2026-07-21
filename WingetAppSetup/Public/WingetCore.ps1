@@ -457,8 +457,11 @@ function Test-WingetPackageInstalled {
             # Capture the exit code from the process object immediately; the output files are
             # only read after a confirmed non-timeout exit.
             $output = @(Get-Content $stdoutFile -ErrorAction SilentlyContinue)
+            # Join with a newline, not '': Test-WingetListOutputContainsPackageId's boundary regex
+            # treats anything outside [\w.\-] as a token edge, so an empty separator would let the
+            # end of one line abut the start of the next and could hide a real match at that seam.
             return @{
-                Installed = Test-WingetListOutputContainsPackageId -Output ([String]::Join('', $output)) -PackageId $PackageId
+                Installed = Test-WingetListOutputContainsPackageId -Output ([String]::Join("`n", $output)) -PackageId $PackageId
                 TimedOut  = $false
                 ExitCode  = $listProcess.ExitCode
             }
@@ -474,7 +477,7 @@ function Test-WingetPackageInstalled {
 
     try {
         $output = winget list --exact --id $PackageId --accept-source-agreements --disable-interactivity 2>&1
-        return Test-WingetListOutputContainsPackageId -Output ([String]::Join('', $output)) -PackageId $PackageId
+        return Test-WingetListOutputContainsPackageId -Output ([String]::Join("`n", $output)) -PackageId $PackageId
     }
     catch {
         return $false

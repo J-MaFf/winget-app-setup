@@ -58,12 +58,12 @@ param (
 # This script is assembled from the WingetAppSetup module by build/Build-WingetInstallScript.ps1.
 # Edit the function source under WingetAppSetup/Public and WingetAppSetup/Private, then re-run the
 # build to regenerate this file. See readme.md ("Project layout") for details.
-# Build id: 1.0.0+134a9d49 (module version + SHA256 fragment of the function content; issue #189).
+# Build id: 1.0.0+9f271116 (module version + SHA256 fragment of the function content; issue #189).
 # ------------------------------------------------------------------------------------------------
 
 # Content-derived build identity, logged at startup so a transcript from a remote machine
 # identifies exactly which installer build produced it (issue #189).
-$script:InstallerBuildId = '1.0.0+134a9d49'
+$script:InstallerBuildId = '1.0.0+9f271116'
 
 # ------------------------------------------------Functions------------------------------------------------
 
@@ -470,6 +470,13 @@ function Install-AppWithVerification {
         # Package-specific installer that performs its own verification (e.g. PowerShell, whose
         # DISM-provisioned MSIX path never shows up under `winget list` for the elevating
         # account). Trust its Installed result instead of re-checking with winget.
+        #
+        # This is indirect dispatch on a catalog-carried function-name string, which
+        # build/Build-WingetInstallScript.ps1's AST-based undefined-reference guards cannot see
+        # through a generic CommandAst walk (issue #236) - Get-UndefinedCatalogInstallReference
+        # exists specifically to validate this 'install' field against the module's defined
+        # functions. If AppCatalog.ps1 ever gains another string-carried function-name field
+        # (e.g. 'uninstall' or 'verify') dispatched the same way, extend that guard to cover it too.
         $customResult = & $App.install
         if ($customResult.Installed) {
             return @{ Status = 'Installed'; InstallResult = $customResult; FailureReason = $null }
@@ -820,8 +827,14 @@ function Test-WingetListOutputContainsPackageId {
 # PowerShell 5.1 - the one engine the rest of the module explicitly does not support - because the
 # tail dispatch calls it BEFORE handing off to PowerShell 7. Keep every statement 5.1-runtime
 # compatible: no ternary, no null-coalescing, no 3-argument Join-Path, only .NET Framework 4.x
-# APIs, and only helpers that are themselves 5.1-safe (Write-Info/Write-WarningMessage/
-# Write-ErrorMessage/Write-Success are plain Write-Host wrappers). The build's parse + ASCII guards
+# APIs, and only helpers that are themselves 5.1-safe. Currently that is: Write-Info/
+# Write-WarningMessage/Write-ErrorMessage/Write-Success (plain Write-Host wrappers), Test-IsAdmin
+# and its Get-CurrentWindowsPrincipal seam (Public/Elevation.ps1, Private/Elevation.ps1 - a
+# try/catch and a type cast, issue #239), and Get-WingetAgreementArgs (a literal array,
+# Private/WingetAgreementArgs.ps1, issue #240). Check any function added to this list - or any
+# future edit to one already on it - against the same constraints before calling it from here; the
+# build's parse + ASCII guards only catch a parse-breaking token, not a PS7-only runtime construct
+# that still parses under 5.1 but behaves differently or throws. The build's parse + ASCII guards
 # keep the assembled installer 5.1-PARSEABLE (issue #210); runtime compatibility of this file is
 # pinned by the unit tests in
 # tests/PowerShell7Bootstrap.Tests.ps1.
@@ -1446,7 +1459,12 @@ function Test-WingetSourceHealth {
       - name: the winget package id (validated by Test-AppDefinitions before use).
     Optional fields:
       - install: name of a package-specific install function that performs its own verification
-        (dispatched by Install-AppWithVerification instead of the generic winget path).
+        (dispatched by Install-AppWithVerification instead of the generic winget path). This
+        string is validated against the module's defined functions by
+        build/Build-WingetInstallScript.ps1's Get-UndefinedCatalogInstallReference guard (issue
+        #236) - if you add another field carrying a function name the same way (e.g.
+        'uninstall', 'verify'), extend that guard to cover it too, or a stale/renamed function
+        will pass every build check and only fail at runtime.
       - installerType: forwarded to Install-WingetPackage for machine-scope handling.
       - condition: scriptblock returning a boolean — evaluated by Install-AppWithVerification
         BEFORE any winget probe. Falsy means the app does not apply to this machine and is
@@ -1565,6 +1583,18 @@ function Test-AppDefinitions {
     token, a non-interactive service context, or a mocked failure in tests), this warns and
     returns $true rather than letting the exception propagate and abort the caller - matching the
     PowerShell7Bootstrap.ps1 behavior that is now applied at every call site.
+
+    At the two call sites that gate elevation (Invoke-WingetInstall, winget-app-uninstall.ps1),
+    "assume elevated" on failure means a broken check SKIPS Restart-WithElevation and proceeds
+    unelevated rather than retrying elevation. This is a deliberate tradeoff, not an oversight
+    (full-repo mega-review, 2026-07-17): the trigger is vanishingly rare on a real Windows
+    session, the caller still warns loudly before proceeding, any operation that genuinely needed
+    elevation then fails just as loudly with an access-denied error, and the alternative
+    (fail-closed: assume non-admin, always attempt Restart-WithElevation) risks a relaunch loop if
+    the same check throws deterministically in the relaunched process too - a worse failure mode
+    than a noisy unelevated run. If a future caller's failure consequence is instead silent/unsafe
+    rather than loud, that caller should check the exception itself rather than rely on this
+    shared default.
 .RETURNS
     [bool] $true when the current process is elevated (or when the check itself failed and could
     not determine elevation), $false when it is confirmed non-elevated.
@@ -1701,6 +1731,13 @@ function Invoke-WingetInstall {
     # Determine which PowerShell executable to use
     $psExecutable = if (Get-Command pwsh -ErrorAction SilentlyContinue) { 'pwsh.exe' } else { 'powershell.exe' }
 
+    # Test-IsAdmin (Public/Elevation.ps1, issue #239) wraps the WindowsPrincipal/IsInRole check
+    # behind a mockable command, so tests can drive the non-admin branch below deterministically
+    # instead of only when Pester itself happens to run non-elevated. It also fails safe (assumes
+    # elevated) if the underlying check throws — see its own docstring for why that direction is
+    # the right one for this call site specifically.
+    $isAdmin = Test-IsAdmin
+
     # Trigger the winget source's per-user first-use bootstrap in the user context before elevating.
     # Agreements are per-user and won't carry into the elevated process. Scoped to --name winget —
     # the only source this tool installs from — so it never triggers msstore's agreement/first-use
@@ -1715,80 +1752,78 @@ function Invoke-WingetInstall {
     # account via Repair-WinGetPackageManager (issue #159).
     #
     # Reuses Invoke-WingetSourceProbe (WingetBootstrap.ps1) rather than calling Start-Process
-    # directly: it runs this exact command already wrapped in a timeout guard (120s default),
-    # which this pre-elevation call was missing entirely. A bare `-Wait` here could block the
-    # whole run forever on a corrupted/unreachable source, before elevation and before any of the
-    # timeout-guarded checks later in the pipeline ever ran. The return value is intentionally
-    # discarded here, same as before - this call remains best-effort.
-    # Test-IsAdmin (Public/Elevation.ps1, issue #239) wraps the WindowsPrincipal/IsInRole check
-    # behind a mockable command, so tests can drive the non-admin branch below deterministically
-    # instead of only when Pester itself happens to run non-elevated.
-    $isAdmin = Test-IsAdmin
+    # directly: it runs this exact command already wrapped in a timeout guard, which this
+    # pre-elevation call was missing entirely. A bare `-Wait` here could block the whole run
+    # forever on a corrupted/unreachable source, before elevation and before any of the
+    # timeout-guarded checks later in the pipeline ever ran. Capped at 30s (well under the probe's
+    # own 120s default) rather than the full default: the return value is discarded — this call
+    # remains best-effort, same as before — and Initialize-WingetSourcesForUser re-probes for real
+    # after elevation, so nothing here needs the generous timeout that call actually depends on.
     if (-not $isAdmin -and (Test-IsRunningLocally)) {
         if ($WhatIf) {
             Write-Info '[DRY-RUN] Would run winget source update --name winget to bootstrap the source in user context'
         }
         else {
             Write-Info 'Updating the winget source...'
-            [void](Invoke-WingetSourceProbe)
+            [void](Invoke-WingetSourceProbe -TimeoutSeconds 30)
         }
     }
 
-    # Check if the script is run as administrator
+    # Check if the script is run as administrator. The $WhatIf gate is checked once here, for
+    # both execution contexts below, rather than duplicated per-branch: a dry run makes no system
+    # changes, so it never needs elevation or an elevation-required exit — only which preview
+    # message to print depends on how this script is being run.
     If (-NOT $isAdmin) {
-        if (Test-IsRunningLocally) {
-            # A dry run makes no system changes, so it never needs elevation. Relaunching
-            # elevated here would (a) be a surprising side effect for a preview and (b) — if
-            # the flag were ever dropped across the elevation boundary — silently turn a
-            # dry run into a real install. Stay in the current session and continue the preview.
-            if ($WhatIf) {
+        if ($WhatIf) {
+            if (Test-IsRunningLocally) {
+                # Relaunching elevated here would (a) be a surprising side effect for a preview
+                # and (b) — if the flag were ever dropped across the elevation boundary —
+                # silently turn a dry run into a real install. Stay in the current session and
+                # continue the preview.
                 Write-Info '[DRY-RUN] Would relaunch with administrator privileges. Continuing the preview in the current (non-elevated) session; no system changes will be made.'
             }
             else {
-                # Elevation relaunches $PSCommandPath. When Invoke-WingetInstall comes from the
-                # imported (or dot-sourced) module, that path is WingetAppSetup/Public/Install.ps1 —
-                # a functions-only file — so the elevated window would define a function and exit
-                # without installing anything (issue #185). Fail fast with guidance instead.
-                if (Test-InvokedFromModuleContext -InvocationModule $MyInvocation.MyCommand.Module -CommandPath $PSCommandPath) {
-                    Write-ErrorMessage 'Invoke-WingetInstall was invoked from the imported module without elevation; auto-elevation cannot relaunch a module function. Run winget-app-install.ps1, or start from an already-elevated session.'
-                    return
-                }
-                # No "press Enter to elevate" pause (issue #230): it gated the run on a keystroke
-                # without offering a decision - the relaunch happens either way, and the UAC dialog
-                # the relaunch raises is the actual consent gate. Announce and go.
-                Write-ErrorMessage 'This script requires administrator privileges. Restarting with elevated privileges...'
-                # Relaunch the script with administrator privileges, forwarding the caller's
-                # switches so the elevated session inherits the same intent: -SkipSystemCheck so
-                # the pre-flight checks the caller explicitly bypassed are not re-run in the
-                # elevated session (issue #185); the effective non-interactive state because the
-                # elevated child gets a fresh console and would otherwise re-detect as interactive
-                # and block on prompts; and -WhatIf as a safety net so a dry run could never
-                # escalate into changes (unreachable today — a dry run never relaunches — but
-                # kept so the forwarding stays correct if that ever changes).
-                $elevationArgs = @()
-                if ($WhatIf) { $elevationArgs += '-WhatIf' }
-                if ($effectiveNonInteractive) { $elevationArgs += '-NonInteractive' }
-                if ($SkipSystemCheck) { $elevationArgs += '-SkipSystemCheck' }
-                Restart-WithElevation -PowerShellExecutable $psExecutable -ScriptPath $PSCommandPath -AdditionalArguments $elevationArgs | Out-Null
-                Exit
+                # IEX/remote execution has no local script path to relaunch from, but that's
+                # irrelevant to a preview: same rationale as the local-file case above.
+                Write-Info '[DRY-RUN] Would require administrator privileges for a real run (auto-elevation is unavailable when running through IEX/remote execution). Continuing the preview in the current (non-elevated) session; no system changes will be made.'
             }
+        }
+        elseif (Test-IsRunningLocally) {
+            # Elevation relaunches $PSCommandPath. When Invoke-WingetInstall comes from the
+            # imported (or dot-sourced) module, that path is WingetAppSetup/Public/Install.ps1 —
+            # a functions-only file — so the elevated window would define a function and exit
+            # without installing anything (issue #185). Fail fast with guidance instead.
+            if (Test-InvokedFromModuleContext -InvocationModule $MyInvocation.MyCommand.Module -CommandPath $PSCommandPath) {
+                Write-ErrorMessage 'Invoke-WingetInstall was invoked from the imported module without elevation; auto-elevation cannot relaunch a module function. Run winget-app-install.ps1, or start from an already-elevated session.'
+                return
+            }
+            # No "press Enter to elevate" pause (issue #230): it gated the run on a keystroke
+            # without offering a decision - the relaunch happens either way, and the UAC dialog
+            # the relaunch raises is the actual consent gate. Announce and go.
+            Write-ErrorMessage 'This script requires administrator privileges. Restarting with elevated privileges...'
+            # Relaunch the script with administrator privileges, forwarding the caller's
+            # switches so the elevated session inherits the same intent: -SkipSystemCheck so
+            # the pre-flight checks the caller explicitly bypassed are not re-run in the
+            # elevated session (issue #185); the effective non-interactive state because the
+            # elevated child gets a fresh console and would otherwise re-detect as interactive
+            # and block on prompts; and -WhatIf as a safety net so a dry run could never
+            # escalate into changes (unreachable today — a dry run never relaunches — but
+            # kept so the forwarding stays correct if that ever changes).
+            $elevationArgs = @()
+            if ($WhatIf) { $elevationArgs += '-WhatIf' }
+            if ($effectiveNonInteractive) { $elevationArgs += '-NonInteractive' }
+            if ($SkipSystemCheck) { $elevationArgs += '-SkipSystemCheck' }
+            Restart-WithElevation -PowerShellExecutable $psExecutable -ScriptPath $PSCommandPath -AdditionalArguments $elevationArgs | Out-Null
+            Exit
         }
         else {
             # IEX/remote execution has no local script path to relaunch from.
-            if ($WhatIf) {
-                # Same rationale as the local-file dry-run branch above: a preview makes no
-                # system changes, so it never needs elevation. Continue the preview in the
-                # current (non-elevated) session instead of exiting.
-                Write-Info '[DRY-RUN] Would require administrator privileges for a real run (auto-elevation is unavailable when running through IEX/remote execution). Continuing the preview in the current (non-elevated) session; no system changes will be made.'
-            }
-            else {
-                Write-ErrorMessage 'This script requires administrator privileges.'
-                Write-ErrorMessage 'Auto-elevation is unavailable when running through IEX/remote execution.'
-                Write-Info 'Open an elevated PowerShell or Windows Terminal session and run the IEX command again.'
-                Write-Info 'Exiting in 5 seconds...'
-                Start-Sleep -Seconds 5
-                Exit 1
-            }
+            Write-ErrorMessage 'This script requires administrator privileges.'
+            Write-ErrorMessage 'Auto-elevation is unavailable when running through IEX/remote execution.'
+            Write-Info 'Open an elevated PowerShell or Windows Terminal session and run the IEX command again.'
+            Write-Info 'Exiting in 5 seconds...'
+            Start-Sleep -Seconds 5
+            Exit 1
         }
     }
     else {
@@ -3311,8 +3346,11 @@ function Test-WingetPackageInstalled {
             # Capture the exit code from the process object immediately; the output files are
             # only read after a confirmed non-timeout exit.
             $output = @(Get-Content $stdoutFile -ErrorAction SilentlyContinue)
+            # Join with a newline, not '': Test-WingetListOutputContainsPackageId's boundary regex
+            # treats anything outside [\w.\-] as a token edge, so an empty separator would let the
+            # end of one line abut the start of the next and could hide a real match at that seam.
             return @{
-                Installed = Test-WingetListOutputContainsPackageId -Output ([String]::Join('', $output)) -PackageId $PackageId
+                Installed = Test-WingetListOutputContainsPackageId -Output ([String]::Join("`n", $output)) -PackageId $PackageId
                 TimedOut  = $false
                 ExitCode  = $listProcess.ExitCode
             }
@@ -3328,7 +3366,7 @@ function Test-WingetPackageInstalled {
 
     try {
         $output = winget list --exact --id $PackageId --accept-source-agreements --disable-interactivity 2>&1
-        return Test-WingetListOutputContainsPackageId -Output ([String]::Join('', $output)) -PackageId $PackageId
+        return Test-WingetListOutputContainsPackageId -Output ([String]::Join("`n", $output)) -PackageId $PackageId
     }
     catch {
         return $false

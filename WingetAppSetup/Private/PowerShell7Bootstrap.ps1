@@ -2,8 +2,14 @@
 # PowerShell 5.1 - the one engine the rest of the module explicitly does not support - because the
 # tail dispatch calls it BEFORE handing off to PowerShell 7. Keep every statement 5.1-runtime
 # compatible: no ternary, no null-coalescing, no 3-argument Join-Path, only .NET Framework 4.x
-# APIs, and only helpers that are themselves 5.1-safe (Write-Info/Write-WarningMessage/
-# Write-ErrorMessage/Write-Success are plain Write-Host wrappers). The build's parse + ASCII guards
+# APIs, and only helpers that are themselves 5.1-safe. Currently that is: Write-Info/
+# Write-WarningMessage/Write-ErrorMessage/Write-Success (plain Write-Host wrappers), Test-IsAdmin
+# and its Get-CurrentWindowsPrincipal seam (Public/Elevation.ps1, Private/Elevation.ps1 - a
+# try/catch and a type cast, issue #239), and Get-WingetAgreementArgs (a literal array,
+# Private/WingetAgreementArgs.ps1, issue #240). Check any function added to this list - or any
+# future edit to one already on it - against the same constraints before calling it from here; the
+# build's parse + ASCII guards only catch a parse-breaking token, not a PS7-only runtime construct
+# that still parses under 5.1 but behaves differently or throws. The build's parse + ASCII guards
 # keep the assembled installer 5.1-PARSEABLE (issue #210); runtime compatibility of this file is
 # pinned by the unit tests in
 # tests/PowerShell7Bootstrap.Tests.ps1.
