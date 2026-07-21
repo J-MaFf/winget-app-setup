@@ -17,8 +17,8 @@
         'Get-DefaultAppCatalog',
         # App validation
         'Test-AppDefinitions',
-        # Elevation relaunch (consumed by winget-app-uninstall.ps1)
-        'Restart-WithElevation',
+        # Elevation (consumed by winget-app-uninstall.ps1)
+        'Test-IsAdmin', 'Restart-WithElevation',
         # Winget core
         'Test-AndInstallWingetModule', 'Test-AndInstallWinget', 'Test-WingetSources',
         'Initialize-WingetSourcesForUser', 'Install-WingetPackage',

@@ -10,6 +10,45 @@ BeforeAll {
     . (Join-Path $PSScriptRoot 'TestHelpers.ps1')
 }
 
+Describe 'Test-IsAdmin' {
+    BeforeAll {
+        # Dot-source the script under test so these tests exercise the real implementation (#135).
+        . $script:InstallerScriptPath
+
+        Mock Write-Host { }
+        Mock Write-Warning { }
+    }
+
+    It 'Returns $true when the current principal is in the Administrator role' {
+        Mock Get-CurrentWindowsPrincipal {
+            [PSCustomObject]@{ } | Add-Member -MemberType ScriptMethod -Name IsInRole -Value { param($role) $true } -PassThru
+        }
+
+        Test-IsAdmin | Should -Be $true
+    }
+
+    It 'Returns $false when the current principal is not in the Administrator role' {
+        Mock Get-CurrentWindowsPrincipal {
+            [PSCustomObject]@{ } | Add-Member -MemberType ScriptMethod -Name IsInRole -Value { param($role) $false } -PassThru
+        }
+
+        Test-IsAdmin | Should -Be $false
+    }
+
+    It 'Fails safe: returns $true and warns instead of propagating when the identity check throws (issue: consolidate-admin-check-helper)' {
+        # This is the behavior PowerShell7Bootstrap.ps1 already had before consolidation and the
+        # other two call sites (Install.ps1, winget-app-uninstall.ps1) lacked; Test-IsAdmin now
+        # applies it everywhere. Mocking Get-CurrentWindowsPrincipal (rather than the static
+        # WindowsIdentity/WindowsPrincipal .NET calls, which Pester cannot mock directly) simulates
+        # the underlying check throwing.
+        Mock Get-CurrentWindowsPrincipal { throw 'simulated identity check failure' }
+        Mock Write-WarningMessage { }
+
+        Test-IsAdmin | Should -Be $true
+        Should -Invoke Write-WarningMessage -Times 1
+    }
+}
+
 Describe 'Restart-WithElevation' {
     BeforeAll {
         # Dot-source the script under test so these tests exercise the real implementation (#135).

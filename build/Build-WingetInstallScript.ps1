@@ -29,6 +29,31 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+function Get-DefinedFunctionLookup {
+    <#
+    .SYNOPSIS
+        Builds the case-sensitive and case-insensitive lookups of every function defined in the
+        assembled script's AST, shared by the direct- and indirect-dispatch reference guards below.
+    .PARAMETER Ast
+        The parsed AST of the fully assembled installer.
+    .RETURNS
+        A two-element array: [0] a case-sensitive (ordinal) HashSet[string] of defined names,
+        [1] a case-insensitive Dictionary[string,string] mapping folded name -> defined name.
+    #>
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.Management.Automation.Language.Ast]$Ast
+    )
+
+    $defined = $Ast.FindAll({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true) |
+        ForEach-Object { $_.Name }
+    $definedExact = [System.Collections.Generic.HashSet[string]]::new([string[]]$defined, [System.StringComparer]::Ordinal)
+    $definedFolded = [System.Collections.Generic.Dictionary[string, string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($functionName in $defined) { $definedFolded[$functionName] = $functionName }
+
+    return , @($definedExact, $definedFolded)
+}
+
 function Get-UndefinedCommandReference {
     <#
     .SYNOPSIS
@@ -50,17 +75,21 @@ function Get-UndefinedCommandReference {
         function behind a stale call site (issue #183).
     .PARAMETER Ast
         The parsed AST of the fully assembled installer.
+    .PARAMETER DefinedExact
+        Case-sensitive (ordinal) HashSet[string] of function names defined in the assembled script,
+        from Get-DefinedFunctionLookup.
+    .PARAMETER DefinedFolded
+        Case-insensitive Dictionary[string,string] of folded name -> defined name, from
+        Get-DefinedFunctionLookup.
     #>
     param(
         [Parameter(Mandatory = $true)]
-        [System.Management.Automation.Language.Ast]$Ast
+        [System.Management.Automation.Language.Ast]$Ast,
+        [Parameter(Mandatory = $true)]
+        [System.Collections.Generic.HashSet[string]]$DefinedExact,
+        [Parameter(Mandatory = $true)]
+        [System.Collections.Generic.Dictionary[string, string]]$DefinedFolded
     )
-
-    $defined = $Ast.FindAll({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true) |
-        ForEach-Object { $_.Name }
-    $definedExact = [System.Collections.Generic.HashSet[string]]::new([string[]]$defined, [System.StringComparer]::Ordinal)
-    $definedFolded = [System.Collections.Generic.Dictionary[string, string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-    foreach ($functionName in $defined) { $definedFolded[$functionName] = $functionName }
 
     # Only hyphenated (Verb-Noun) names — this is how the module's own functions and PowerShell
     # cmdlets are named, and it excludes native commands (winget), keywords, and operators that
@@ -71,9 +100,90 @@ function Get-UndefinedCommandReference {
         Sort-Object -Unique
 
     foreach ($name in $invoked) {
-        if ($definedExact.Contains($name)) { continue }
-        if ($definedFolded.ContainsKey($name)) {
-            "$name (case-insensitive collision with module function '$($definedFolded[$name])'; match the definition's casing at the call site)"
+        if ($DefinedExact.Contains($name)) { continue }
+        if ($DefinedFolded.ContainsKey($name)) {
+            "$name (case-insensitive collision with module function '$($DefinedFolded[$name])'; match the definition's casing at the call site)"
+            continue
+        }
+        if (Get-Command -Name $name -ErrorAction SilentlyContinue) { continue }
+        $name
+    }
+}
+
+function Get-UndefinedCatalogInstallReference {
+    <#
+    .SYNOPSIS
+        Returns catalog 'install' function names (from Get-DefaultAppCatalog) that are neither
+        defined as a function within the assembled script nor resolvable as an external command.
+    .DESCRIPTION
+        Get-UndefinedCommandReference walks CommandAst.GetCommandName(), which returns $null for an
+        indirect invocation - the call operator `&` applied to a variable/member-expression rather
+        than a literal command name. InstallVerification.ps1's Install-AppWithVerification does
+        exactly this: `& $App.install`. The invoked name is carried as DATA in AppCatalog.ps1 (e.g.
+        `install = 'Install-PowerShellLatest'`), not as code, so it is invisible to the AST-walk of
+        CommandAst nodes above and a rename of the target function (updating its definition and the
+        psd1's FunctionsToExport, but leaving the catalog string stale) passes every other guard and
+        only breaks at runtime with a CommandNotFoundException the moment that one app is installed.
+
+        This guard closes that blind spot by walking the assembled AST for HashtableAst key-value
+        pairs whose key is the literal 'install' and whose value is a string literal (exactly the
+        shape Get-DefaultAppCatalog's entries use), then validating each such string against the
+        same defined-function lookups the direct-dispatch guard above uses.
+
+        Chosen over a Pester-only test (the spec's alternative) because it lives in the same
+        AST-walking guard-stack as Get-UndefinedCommandReference right above it, runs on every build
+        and -Check (not only when `Invoke-Pester ./tests` happens to be run), and reuses the same
+        defined-function lookup - one guard family, one place to look when a reference-drift bug
+        report comes in, per this repo's existing convention (issue #154 / #183).
+    .PARAMETER Ast
+        The parsed AST of the fully assembled installer.
+    .PARAMETER DefinedExact
+        Case-sensitive (ordinal) HashSet[string] of function names defined in the assembled script,
+        from Get-DefinedFunctionLookup.
+    .PARAMETER DefinedFolded
+        Case-insensitive Dictionary[string,string] of folded name -> defined name, from
+        Get-DefinedFunctionLookup.
+    #>
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.Management.Automation.Language.Ast]$Ast,
+        [Parameter(Mandatory = $true)]
+        [System.Collections.Generic.HashSet[string]]$DefinedExact,
+        [Parameter(Mandatory = $true)]
+        [System.Collections.Generic.Dictionary[string, string]]$DefinedFolded
+    )
+
+    $hashtables = $Ast.FindAll({ param($node) $node -is [System.Management.Automation.Language.HashtableAst] }, $true)
+
+    $installNames = foreach ($hashtable in $hashtables) {
+        foreach ($pair in $hashtable.KeyValuePairs) {
+            # StringConstantExpressionAst covers every key shape this guard needs: bare-word
+            # hashtable keys (install = ...) parse as string constants with
+            # StringConstantType.BareWord — there is no separate "bare word" Ast type. An
+            # interpolated or computed key is not a constant the guard could resolve anyway,
+            # so anything else is skipped.
+            $keyAst = $pair.Item1
+            if ($keyAst -isnot [System.Management.Automation.Language.StringConstantExpressionAst]) { continue }
+            if ($keyAst.Value -ne 'install') { continue }
+
+            $valueAst = $pair.Item2
+            if ($valueAst -is [System.Management.Automation.Language.PipelineAst] -and $valueAst.PipelineElements.Count -eq 1) {
+                $valueAst = $valueAst.PipelineElements[0]
+            }
+            if ($valueAst -is [System.Management.Automation.Language.CommandExpressionAst]) {
+                $valueAst = $valueAst.Expression
+            }
+            if ($valueAst -is [System.Management.Automation.Language.StringConstantExpressionAst]) {
+                $valueAst.Value
+            }
+        }
+    }
+    $installNames = @($installNames | Sort-Object -Unique)
+
+    foreach ($name in $installNames) {
+        if ($DefinedExact.Contains($name)) { continue }
+        if ($DefinedFolded.ContainsKey($name)) {
+            "$name (case-insensitive collision with module function '$($DefinedFolded[$name])'; match the catalog entry's casing to the definition)"
             continue
         }
         if (Get-Command -Name $name -ErrorAction SilentlyContinue) { continue }
@@ -241,9 +351,20 @@ if ($missingFromManifest.Count -gt 0 -or $extraInManifest.Count -gt 0) {
 # are Windows, so this runs where it matters. Windows PowerShell 5.1 leaves $IsWindows unset but is
 # always Windows, so treat pre-6 as Windows too.
 if ($IsWindows -or $PSVersionTable.PSVersion.Major -lt 6) {
-    $undefinedReferences = Get-UndefinedCommandReference -Ast $assembledAst
+    $lookup = Get-DefinedFunctionLookup -Ast $assembledAst
+    $definedExact, $definedFolded = $lookup[0], $lookup[1]
+
+    $undefinedReferences = Get-UndefinedCommandReference -Ast $assembledAst -DefinedExact $definedExact -DefinedFolded $definedFolded
     if ($undefinedReferences) {
         Write-Error ("Reference check failed: the generated script invokes command(s) that are not defined in the module and do not resolve as external cmdlets: $($undefinedReferences -join ', '). Add the missing function under WingetAppSetup/Public or WingetAppSetup/Private (or fix the calling fragment), then re-run the build.")
+        exit 1
+    }
+
+    # Fail fast on catalog-carried indirect-dispatch drift (full-repo review finding, 2026-07-16).
+    # See Get-UndefinedCatalogInstallReference's help for why GetCommandName() alone misses this.
+    $undefinedCatalogInstallReferences = Get-UndefinedCatalogInstallReference -Ast $assembledAst -DefinedExact $definedExact -DefinedFolded $definedFolded
+    if ($undefinedCatalogInstallReferences) {
+        Write-Error ("Reference check failed: a catalog entry's 'install' field names function(s) that are not defined in the module and do not resolve as external cmdlets: $($undefinedCatalogInstallReferences -join ', '). Fix the 'install' string in WingetAppSetup/Public/AppCatalog.ps1 (or add the missing function), then re-run the build.")
         exit 1
     }
 }

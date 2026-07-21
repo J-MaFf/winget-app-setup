@@ -113,8 +113,20 @@ function Test-WingetSourceHealth {
             $searchOutput = winget search 7zip --source winget --disable-interactivity --accept-source-agreements 2>&1
             $searchExitCode = $LASTEXITCODE
 
-            # Check for corruption error code 0x8a15000f or similar source errors
-            if ($searchOutput -match '0x8a150|failed when opening|data required' -or $searchExitCode -ne 0) {
+            # Any nonzero exit code fails the check — that includes the known 0x8A15000F
+            # corruption signature (APPINSTALLER_CLI_ERROR_SOURCE_DATA_MISSING, -1978335217 as a
+            # signed Int32 — "Failed when opening source(s)... Data required by the source is
+            # missing"), which needs no runtime branch of its own.
+            #
+            # The output match is the fallback for the one scenario the exit code cannot catch:
+            # per the codebase's hard-won history with flaky winget exit codes (issues
+            # #150/#172/#174/#175/#177), winget has reportedly emitted this exact corruption text
+            # while still returning exit code 0. The '0x8a150' token is the load-bearing part —
+            # winget prints the hex HRESULT regardless of display language, so it survives locale
+            # and wording changes. The two English phrases are extra coverage only and, like the
+            # locale-dependency note in winget-app-uninstall.ps1 (issue #180), may stop matching
+            # if winget's output wording or locale changes.
+            if ($searchExitCode -ne 0 -or $searchOutput -match '0x8a150|failed when opening|data required') {
                 if (-not $Quiet) {
                     Write-WarningMessage 'Winget source is listed but contains corrupted or missing data.'
                 }

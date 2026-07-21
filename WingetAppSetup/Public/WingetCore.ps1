@@ -339,15 +339,14 @@ function Install-WingetPackage {
     while ($attempt -lt $MaxAttempts) {
         $attempt++
 
-        # --disable-interactivity (issue #230): every other winget call in the module already
-        # passes it; this one - the path every app install takes - did not, so winget could stop
-        # and ask on the one code path where a human is least likely to be watching. The two
-        # --accept-*-agreements flags are the standing "yes" to the questions winget would
-        # otherwise ask; this flag is what stops it asking anything else.
+        # The shared agreement/interactivity flags come from Get-WingetAgreementArgs (issue #230
+        # follow-up): every other winget call in the module already passed them, but this one -
+        # the path every app install takes - did not, because each call site hand-duplicated the
+        # literal array. Routing through the shared helper makes that omission structurally
+        # impossible instead of relying on manual re-auditing.
         $installArgs = @(
-            'install', '-e',
-            '--accept-source-agreements', '--accept-package-agreements',
-            '--disable-interactivity',
+            'install', '-e'
+        ) + (Get-WingetAgreementArgs) + @(
             '--source', 'winget',
             '--id', $PackageId
         )
@@ -411,6 +410,10 @@ function Install-WingetPackage {
     run) cannot collide on fixed names (issue #177). In this mode a hashtable is returned so the
     caller can tell a timeout apart from "not installed": a timeout must count as a failure rather
     than being silently dropped (issue #176).
+
+    Both modes determine "installed" via Test-WingetListOutputContainsPackageId rather than a plain
+    substring .Contains check, so an unrelated listed id that merely contains $PackageId as a
+    substring (e.g. target 'Foo.Bar' inside listed id 'Foo.BarBaz') cannot false-positive.
 .PARAMETER PackageId
     The winget package id to check.
 .PARAMETER TimeoutSeconds
@@ -455,7 +458,7 @@ function Test-WingetPackageInstalled {
             # only read after a confirmed non-timeout exit.
             $output = @(Get-Content $stdoutFile -ErrorAction SilentlyContinue)
             return @{
-                Installed = ([String]::Join('', $output)).Contains($PackageId)
+                Installed = Test-WingetListOutputContainsPackageId -Output ([String]::Join('', $output)) -PackageId $PackageId
                 TimedOut  = $false
                 ExitCode  = $listProcess.ExitCode
             }
@@ -471,7 +474,7 @@ function Test-WingetPackageInstalled {
 
     try {
         $output = winget list --exact --id $PackageId --accept-source-agreements --disable-interactivity 2>&1
-        return ([String]::Join('', $output)).Contains($PackageId)
+        return Test-WingetListOutputContainsPackageId -Output ([String]::Join('', $output)) -PackageId $PackageId
     }
     catch {
         return $false
@@ -604,8 +607,8 @@ function Install-MsixProvisionedPackage {
     try {
         Write-Info "Downloading the latest MSIX for $PackageId to provision it machine-wide..."
         $downloadArgs = @(
-            'download', '-e', '--id', $PackageId, '--source', 'winget', '--installer-type', 'msix',
-            '--accept-source-agreements', '--accept-package-agreements', '--disable-interactivity',
+            'download', '-e', '--id', $PackageId, '--source', 'winget', '--installer-type', 'msix'
+        ) + (Get-WingetAgreementArgs) + @(
             '--download-directory', $downloadDir
         )
         $download = Start-Process -FilePath 'winget' -ArgumentList $downloadArgs -NoNewWindow -Wait -PassThru
@@ -676,17 +679,24 @@ function Install-PowerShellLatest {
     # returns for `--installer-type wix` once the manifest no longer ships an MSI.
     $noApplicableInstallerExitCode = -1978335216
 
+    # Matches Install-AppWithVerification's $checkTimeoutSeconds (Private/InstallVerification.ps1)
+    # so a hung `winget list` during PowerShell's own self-verification fails into the retry pass
+    # like every other catalog app's verification does, instead of blocking the run forever.
+    $checkTimeoutSeconds = 15
+
     # 1. Prefer the MSI while the latest version still ships one.
     $result = Install-WingetPackage -PackageId $PackageId -InstallerType 'wix'
     if ($result.ExitCode -ne $noApplicableInstallerExitCode) {
-        return @{ ExitCode = $result.ExitCode; Installed = (Test-WingetPackageInstalled -PackageId $PackageId); Method = 'msi' }
+        $installed = (Test-WingetPackageInstalled -PackageId $PackageId -TimeoutSeconds $checkTimeoutSeconds).Installed
+        return @{ ExitCode = $result.ExitCode; Installed = $installed; Method = 'msi' }
     }
 
     # 2. No MSI for the latest version (7.7+): install the latest MSIX machine-wide.
     Write-Info "No MSI is available for the latest $PackageId; installing the MSIX package instead."
     if ((Get-WindowsBuildNumber) -ge 26100) {
         $result = Install-WingetPackage -PackageId $PackageId
-        return @{ ExitCode = $result.ExitCode; Installed = (Test-WingetPackageInstalled -PackageId $PackageId); Method = 'msix-native' }
+        $installed = (Test-WingetPackageInstalled -PackageId $PackageId -TimeoutSeconds $checkTimeoutSeconds).Installed
+        return @{ ExitCode = $result.ExitCode; Installed = $installed; Method = 'msix-native' }
     }
 
     $provision = Install-MsixProvisionedPackage -PackageId $PackageId

@@ -75,6 +75,76 @@ Describe 'Test-WingetSourceHealth (shared source probe, issue #177)' {
         Should -Invoke Write-WarningMessage -Times 1 -ParameterFilter { $Message -match 'corrupted or missing data' }
     }
 
+    It 'Regression pin: the pre-existing nonzero-exit-code check alone catches the 0x8a15000f exit code, even with output text that does not match the prose fallback' {
+        Mock winget {
+            if ($args[0] -eq 'source' -and $args[1] -eq 'list') {
+                $global:LASTEXITCODE = 0
+                return 'winget      https://cdn.winget.microsoft.com/cache'
+            }
+            elseif ($args[0] -eq 'search' -and $args[1] -eq '7zip') {
+                # -1978335217 is 0x8A15000F as a signed Int32. Output text deliberately avoids
+                # 'failed when opening'/'data required' to prove this is caught by the generic
+                # `-ne 0` branch alone, not by any dedicated numeric branch (there isn't one —
+                # this HRESULT is just one of many nonzero exit codes that clause already covers).
+                $global:LASTEXITCODE = -1978335217
+                return 'No package found matching input criteria.'
+            }
+        }
+
+        $health = Test-WingetSourceHealth
+
+        $health.Listed | Should -Be $true
+        $health.Functional | Should -Be $false
+        $health.Healthy | Should -Be $false
+        Should -Invoke Write-WarningMessage -Times 1 -ParameterFilter { $Message -match 'corrupted or missing data' }
+    }
+
+    It 'Reports not functional when the search exits 0 but the output text matches the corruption phrases (prose fallback)' {
+        Mock winget {
+            if ($args[0] -eq 'source' -and $args[1] -eq 'list') {
+                $global:LASTEXITCODE = 0
+                return 'winget      https://cdn.winget.microsoft.com/cache'
+            }
+            elseif ($args[0] -eq 'search' -and $args[1] -eq '7zip') {
+                # Isolates the scenario the prose fallback exists for: winget reportedly returns
+                # exit code 0 despite corrupted output in some observed cases (issues
+                # #150/#172/#174/#175/#177).
+                $global:LASTEXITCODE = 0
+                return 'Failed when opening source(s). 0x8a15000f Data required by the source is missing.'
+            }
+        }
+
+        $health = Test-WingetSourceHealth
+
+        $health.Listed | Should -Be $true
+        $health.Functional | Should -Be $false
+        $health.Healthy | Should -Be $false
+        Should -Invoke Write-WarningMessage -Times 1 -ParameterFilter { $Message -match 'corrupted or missing data' }
+    }
+
+    It 'Catches exit-0 corruption via the locale-independent 0x8a150 hex token when the English phrases are absent (integration-review regression)' {
+        Mock winget {
+            if ($args[0] -eq 'source' -and $args[1] -eq 'list') {
+                $global:LASTEXITCODE = 0
+                return 'winget      https://cdn.winget.microsoft.com/cache'
+            }
+            elseif ($args[0] -eq 'search' -and $args[1] -eq '7zip') {
+                # A non-English locale (or future wording change) loses the English phrases, but
+                # winget prints the hex HRESULT regardless of display language. The '0x8a150'
+                # regex token is the only signal for this case — it was silently dropped once
+                # during the issue-#241 rework and restored by the integration-branch review.
+                $global:LASTEXITCODE = 0
+                return 'Quellfehler: 0x8A15000F - Von der Quelle benoetigte Daten fehlen.'
+            }
+        }
+
+        $health = Test-WingetSourceHealth
+
+        $health.Listed | Should -Be $true
+        $health.Functional | Should -Be $false
+        $health.Healthy | Should -Be $false
+    }
+
     It 'Suppresses per-step messages when -Quiet is passed' {
         Mock winget {
             if ($args[0] -eq 'source' -and $args[1] -eq 'list') {

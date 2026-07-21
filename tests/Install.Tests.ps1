@@ -7,6 +7,15 @@
 # Load the module's functions once for this file. TestHelpers.ps1 resolves the repo paths
 # and dot-sources WingetAppSetup/Private + Public (the single source of truth; the
 # distributable winget-app-install.ps1 is generated from it by build/Build-WingetInstallScript.ps1).
+#
+# Also dot-source it here at the TOP LEVEL (script scope, outside any Describe/BeforeAll): top-
+# level code in a .Tests.ps1 file runs at Pester DISCOVERY time, before BeforeAll runs. The
+# 'Invoke-WingetInstall wiring (issue #188)' Describe below needs Test-IsAdmin inside its
+# BeforeDiscovery block to compute a -Skip condition, and BeforeDiscovery is itself evaluated at
+# discovery time - too early for the BeforeAll dot-source below to have run yet. Loading twice is
+# harmless: redefining a PowerShell function is not an error.
+. (Join-Path $PSScriptRoot 'TestHelpers.ps1')
+
 BeforeAll {
     . (Join-Path $PSScriptRoot 'TestHelpers.ps1')
 }
@@ -21,6 +30,7 @@ Describe 'Main Script Logic' {
         # through the filtered mock throws under Pester 6, which (unlike Pester 5) no longer falls
         # back to the real command when no -ParameterFilter matches and there is no default mock.
         $script:InvokeWingetInstallDef = (Get-Command Invoke-WingetInstall).Definition
+        $script:GetCurrentWindowsPrincipalDef = (Get-Command Get-CurrentWindowsPrincipal).Definition
 
         Mock Write-Host { }
         Mock Start-Process { }
@@ -38,11 +48,23 @@ Describe 'Main Script Logic' {
     # The replacement below pins the real gate structurally; the non-admin behavior itself is
     # exercised end-to-end by 'IEX non-admin execution behavior' in tests/EntryPoint.Tests.ps1.
     Context 'Administrator gate' {
-        It 'Performs a real WindowsPrincipal role check and refuses to install without elevation' {
+        It 'Uses the shared Test-IsAdmin check and refuses to install without elevation' {
+            # The inline WindowsPrincipal/IsInRole expression was consolidated into the shared
+            # Test-IsAdmin helper (WingetAppSetup/Public/Elevation.ps1), reused by
+            # winget-app-uninstall.ps1 and the PowerShell 7 bootstrap too (full-repo review
+            # finding, 2026-07-16). Test-IsAdmin itself is covered directly in Elevation.Tests.ps1,
+            # and being a mockable command (unlike the raw .NET call) is what lets the
+            # pre-elevation source-update tests below drive the non-admin branch deterministically.
             $installBody = $script:InvokeWingetInstallDef
-            $installBody | Should -Match '\[Security\.Principal\.WindowsPrincipal\]'
-            $installBody | Should -Match 'IsInRole\(\[Security\.Principal\.WindowsBuiltInRole\]'
+            $installBody | Should -Match '\$isAdmin\s*=\s*Test-IsAdmin'
             $installBody | Should -Match 'This script requires administrator privileges'
+
+            # ...and pin that Test-IsAdmin's underlying seam (Get-CurrentWindowsPrincipal) still
+            # performs the real WindowsPrincipal check, so the delegation chain ends at the
+            # genuine .NET call rather than a stub.
+            $probeBody = $script:GetCurrentWindowsPrincipalDef
+            $probeBody | Should -Match '\[Security\.Principal\.WindowsPrincipal\]'
+            $probeBody | Should -Match 'WindowsIdentity\]::GetCurrent\(\)'
         }
     }
 
@@ -135,9 +157,10 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
         # run-phase BeforeAll blocks are not visible to -Skip expressions.
         $script:wiringIsElevated = $false
         if ([System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Win32NT) {
-            $script:wiringIsElevated = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
-                [Security.Principal.WindowsBuiltInRole]::Administrator
-            )
+            # Test-IsAdmin (WingetAppSetup/Public/Elevation.ps1) is the shared admin-check helper
+            # (full-repo review finding, 2026-07-16); loaded above at discovery time so it's
+            # available here.
+            $script:wiringIsElevated = Test-IsAdmin
         }
     }
 
@@ -187,6 +210,50 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
             # The generic message the diagnostic detail replaces (issue #189).
             $installBody | Should -Not -Match 'No package found matching input criteria'
         }
+
+        It 'Routes the pre-elevation winget source update through the timeout-guarded probe instead of a bare -Wait Start-Process' {
+            # The pre-elevation `winget source update` call used to run via a bare
+            # `Start-Process ... -Wait` with no timeout, which could hang the whole run forever
+            # on a corrupted/unreachable source. It must now reuse Invoke-WingetSourceProbe
+            # (WingetBootstrap.ps1), which wraps the identical command in a 120s WaitForExit/Kill
+            # timeout guard, rather than duplicating that guard a third time.
+            $installBody = $script:InvokeWingetInstallDef
+            $installBody | Should -Match 'Invoke-WingetSourceProbe'
+            $installBody | Should -Not -Match "Start-Process -FilePath 'winget' -ArgumentList 'source', 'update'.*-Wait"
+        }
+    }
+
+    Context 'Pre-elevation source update (real non-admin, non-WhatIf code path)' {
+        # Every other non-WhatIf invocation in this file is gated behind
+        # -Skip:(-not $script:wiringIsElevated), because $isAdmin used to come from a real,
+        # unmockable IsInRole() call - the non-admin branch containing this call site was only
+        # reachable by actually running Pester non-elevated. Test-IsAdmin
+        # (Public/Elevation.ps1, issue #239) now wraps that check behind a mockable command, so
+        # this test drives Invoke-WingetInstall's real (non-WhatIf) pre-elevation block
+        # deterministically, on any machine, elevated or not.
+        BeforeEach {
+            Mock Write-Host { }
+            Mock Write-ErrorMessage { }
+            Mock Test-IsAdmin { $false }
+            Mock Test-IsRunningLocally { $true }
+            # Short-circuits the real function immediately after the pre-elevation block runs,
+            # via the existing early-return guard (issue #185), so this test never reaches the
+            # real `Exit` a few lines further down (which would kill the test process).
+            Mock Test-InvokedFromModuleContext { $true }
+            Mock Invoke-WingetSourceProbe { @{ Succeeded = $true; ExitCode = 0; TimedOut = $false } }
+        }
+
+        It 'Actually invokes Invoke-WingetSourceProbe before elevation when running non-admin, non-WhatIf' {
+            Invoke-WingetInstall -NonInteractive
+
+            Should -Invoke Invoke-WingetSourceProbe -Times 1 -Exactly
+        }
+
+        It 'Does not call Invoke-WingetSourceProbe in a dry run (-WhatIf), preserving the existing dry-run message instead' {
+            Invoke-WingetInstall -WhatIf -NonInteractive
+
+            Should -Invoke Invoke-WingetSourceProbe -Times 0 -Exactly
+        }
     }
 
     Context 'Dry run (executes the real orchestrator end-to-end without system changes)' {
@@ -217,6 +284,46 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
             $installedRow[1] | Should -Not -Match 'Google\.Chrome'
             $skippedRow[1] | Should -Match 'Google\.Chrome'
             @($script:capturedRows | Where-Object { $_[0] -eq 'Failed' }).Count | Should -Be 0
+        }
+    }
+
+    # IEX/remote execution (Test-IsRunningLocally false) previously ignored -WhatIf entirely and
+    # unconditionally demanded elevation (Exit 1), unlike the local-file branch which already
+    # honored -WhatIf. -Skip:$wiringIsElevated because the non-admin gate this exercises is only
+    # reached when the test process itself is not elevated (mirrors the pattern used by the
+    # 'Retry pass' Context below, inverted).
+    Context 'IEX/remote elevation dry-run (WhatIf must preview, not demand elevation)' {
+        BeforeEach {
+            Mock Test-IsRunningLocally { $false }
+            $script:errorMessages = @()
+            Mock Write-ErrorMessage { $script:errorMessages += $Message }
+            $script:infoMessages = @()
+            Mock Write-Info { $script:infoMessages += $Message }
+        }
+
+        It 'Does not print the elevation-required errors or exit when non-admin, non-local, and -WhatIf is set' -Skip:$script:wiringIsElevated {
+            Mock Install-AppWithVerification { @{ Status = 'Installed'; InstallResult = $null; FailureReason = $null } }
+
+            Invoke-WingetInstall -Apps @(@{ name = 'Contoso.OnlyApp' }) -WhatIf -NonInteractive
+
+            $script:errorMessages | Should -Not -Contain 'This script requires administrator privileges.'
+            $script:errorMessages | Should -Not -Contain 'Auto-elevation is unavailable when running through IEX/remote execution.'
+            # Exit isn't mockable (it's a statement, not a command; real Exit is only ever
+            # exercised safely in a spawned child process, per 'IEX non-admin execution
+            # behavior' in tests/EntryPoint.Tests.ps1). Reaching this assertion at all is the
+            # proof: a real Exit would have torn down the whole Pester process before we got
+            # here. The dry-run pipeline completing and bucketing the app confirms it fell
+            # through instead of exiting.
+            Should -Invoke Install-AppWithVerification -Times 1 -Exactly
+        }
+
+        It 'Prints a [DRY-RUN] message stating elevation would be required and no changes are made' -Skip:$script:wiringIsElevated {
+            Mock Install-AppWithVerification { @{ Status = 'Installed'; InstallResult = $null; FailureReason = $null } }
+
+            Invoke-WingetInstall -Apps @(@{ name = 'Contoso.OnlyApp' }) -WhatIf -NonInteractive
+
+            ($script:infoMessages | Where-Object { $_ -match '\[DRY-RUN\]' -and $_ -match 'administrator' }) | Should -Not -BeNullOrEmpty
+            ($script:infoMessages | Where-Object { $_ -match 'no system changes' }) | Should -Not -BeNullOrEmpty
         }
     }
 
@@ -327,6 +434,29 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
             $failureMessage | Should -Match 'winget exit 0x80073D19'
             $failureMessage | Should -Match '3 attempts'
             $failureMessage | Should -Match 'machine-scope fallback: yes'
+        }
+
+        # The retry-failure MESSAGES (issue #237) are pinned structurally rather than by driving
+        # a failed retry for real: a retry that stays Failed leaves $failedApps non-empty, and
+        # Invoke-WingetInstall then ends with `Exit 1` — which, executed inside a Pester test on
+        # an elevated runner, aborts the container mid-teardown and poisons every later test file
+        # (the CI failure on PR #248 was exactly this: a leaked TestDrive cascading 39 failures).
+        # Same convention as the winget-availability gate above: paths that terminate the process
+        # are pinned on source, not driven. The switch's *selection* semantics (PreCheckTimeout
+        # vs VerifyTimeout vs default) are what issue #237 fixed, and that is what these assert.
+        It 'Names the pre-check phase (not verification) when a retry fails with PreCheckTimeout (issue #237)' {
+            $installBody = $script:InvokeWingetInstallDef
+            # The retry loop's switch must give PreCheckTimeout its own arm with pre-check wording...
+            $installBody | Should -Match "(?s)'PreCheckTimeout'\s*\{\s*[^}]*Winget list timed out for retry"
+            # ...and that arm must not reuse the verification wording.
+            $installBody | Should -Not -Match "(?s)'PreCheckTimeout'\s*\{\s*[^}]*Verification timed out for retry"
+        }
+
+        It 'Keeps the verification-timeout wording when a retry fails with VerifyTimeout (issue #237)' {
+            $installBody = $script:InvokeWingetInstallDef
+            $installBody | Should -Match "(?s)'VerifyTimeout'\s*\{\s*[^}]*Verification timed out for retry"
+            # The generic fallback stays intact for every other FailureReason.
+            $installBody | Should -Match 'Retry failed: \$appName \(\$failureReason\)'
         }
     }
 }

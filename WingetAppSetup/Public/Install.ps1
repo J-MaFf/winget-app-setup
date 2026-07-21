@@ -63,14 +63,24 @@ function Invoke-WingetInstall {
     # is accepted where it actually counts - every install passes --accept-source-agreements, and
     # the elevated Initialize-WingetSourcesForUser below re-probes and bootstraps the installing
     # account via Repair-WinGetPackageManager (issue #159).
-    $isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] 'Administrator')
+    #
+    # Reuses Invoke-WingetSourceProbe (WingetBootstrap.ps1) rather than calling Start-Process
+    # directly: it runs this exact command already wrapped in a timeout guard (120s default),
+    # which this pre-elevation call was missing entirely. A bare `-Wait` here could block the
+    # whole run forever on a corrupted/unreachable source, before elevation and before any of the
+    # timeout-guarded checks later in the pipeline ever ran. The return value is intentionally
+    # discarded here, same as before - this call remains best-effort.
+    # Test-IsAdmin (Public/Elevation.ps1, issue #239) wraps the WindowsPrincipal/IsInRole check
+    # behind a mockable command, so tests can drive the non-admin branch below deterministically
+    # instead of only when Pester itself happens to run non-elevated.
+    $isAdmin = Test-IsAdmin
     if (-not $isAdmin -and (Test-IsRunningLocally)) {
         if ($WhatIf) {
             Write-Info '[DRY-RUN] Would run winget source update --name winget to bootstrap the source in user context'
         }
         else {
             Write-Info 'Updating the winget source...'
-            Start-Process -FilePath 'winget' -ArgumentList 'source', 'update', '--name', 'winget', '--disable-interactivity' -Wait -NoNewWindow
+            [void](Invoke-WingetSourceProbe)
         }
     }
 
@@ -115,12 +125,20 @@ function Invoke-WingetInstall {
         }
         else {
             # IEX/remote execution has no local script path to relaunch from.
-            Write-ErrorMessage 'This script requires administrator privileges.'
-            Write-ErrorMessage 'Auto-elevation is unavailable when running through IEX/remote execution.'
-            Write-Info 'Open an elevated PowerShell or Windows Terminal session and run the IEX command again.'
-            Write-Info 'Exiting in 5 seconds...'
-            Start-Sleep -Seconds 5
-            Exit 1
+            if ($WhatIf) {
+                # Same rationale as the local-file dry-run branch above: a preview makes no
+                # system changes, so it never needs elevation. Continue the preview in the
+                # current (non-elevated) session instead of exiting.
+                Write-Info '[DRY-RUN] Would require administrator privileges for a real run (auto-elevation is unavailable when running through IEX/remote execution). Continuing the preview in the current (non-elevated) session; no system changes will be made.'
+            }
+            else {
+                Write-ErrorMessage 'This script requires administrator privileges.'
+                Write-ErrorMessage 'Auto-elevation is unavailable when running through IEX/remote execution.'
+                Write-Info 'Open an elevated PowerShell or Windows Terminal session and run the IEX command again.'
+                Write-Info 'Exiting in 5 seconds...'
+                Start-Sleep -Seconds 5
+                Exit 1
+            }
         }
     }
     else {
@@ -305,11 +323,16 @@ function Invoke-WingetInstall {
 
                     if ($outcome.Status -eq 'Failed') {
                         $failureReason = Format-InstallFailureReason -FailureReason $outcome.FailureReason -InstallResult $outcome.InstallResult
-                        if ($outcome.FailureReason -in 'PreCheckTimeout', 'VerifyTimeout') {
-                            Write-WarningMessage "Verification timed out for retry: $appName. Assuming installation failed."
-                        }
-                        else {
-                            Write-ErrorMessage "Retry failed: $appName ($failureReason)."
+                        switch ($outcome.FailureReason) {
+                            'PreCheckTimeout' {
+                                Write-WarningMessage "Winget list timed out for retry: $appName. Assuming installation failed."
+                            }
+                            'VerifyTimeout' {
+                                Write-WarningMessage "Verification timed out for retry: $appName. Assuming installation failed."
+                            }
+                            default {
+                                Write-ErrorMessage "Retry failed: $appName ($failureReason)."
+                            }
                         }
                         $failedApps += @{ Name = $appName; Reason = $failureReason }
                     }

@@ -1,6 +1,34 @@
-# Public (exported) elevation helper. The rest of the elevation detection helpers live in
-# Private/Elevation.ps1; this one is exported (issue #190) so winget-app-uninstall.ps1 can reuse
-# it instead of hand-rolling its own Start-Process relaunch.
+# Public (exported) elevation helpers. The rest of the elevation detection helpers live in
+# Private/Elevation.ps1; these are exported (issue #190) so winget-app-uninstall.ps1 can reuse
+# them instead of hand-rolling its own admin check / Start-Process relaunch.
+
+<#
+.SYNOPSIS
+    Detects whether the current process is running with administrator privileges.
+.DESCRIPTION
+    The single shared implementation of the
+    "[Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(...)"
+    check, previously copy-pasted (and already behaviorally diverged) across
+    WingetAppSetup/Public/Install.ps1, winget-app-uninstall.ps1, and
+    WingetAppSetup/Private/PowerShell7Bootstrap.ps1 (full-repo review finding, 2026-07-16).
+    Fails safe: if the underlying identity/role check throws for any reason (an exotic restricted
+    token, a non-interactive service context, or a mocked failure in tests), this warns and
+    returns $true rather than letting the exception propagate and abort the caller - matching the
+    PowerShell7Bootstrap.ps1 behavior that is now applied at every call site.
+.RETURNS
+    [bool] $true when the current process is elevated (or when the check itself failed and could
+    not determine elevation), $false when it is confirmed non-elevated.
+#>
+function Test-IsAdmin {
+    try {
+        $principal = Get-CurrentWindowsPrincipal
+        return $principal.IsInRole([Security.Principal.WindowsBuiltInRole] 'Administrator')
+    }
+    catch {
+        Write-WarningMessage "Could not determine administrator status; assuming elevated: $_"
+        return $true
+    }
+}
 
 <#
 .SYNOPSIS

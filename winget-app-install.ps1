@@ -58,12 +58,12 @@ param (
 # This script is assembled from the WingetAppSetup module by build/Build-WingetInstallScript.ps1.
 # Edit the function source under WingetAppSetup/Public and WingetAppSetup/Private, then re-run the
 # build to regenerate this file. See readme.md ("Project layout") for details.
-# Build id: 1.0.0+d210acfc (module version + SHA256 fragment of the function content; issue #189).
+# Build id: 1.0.0+134a9d49 (module version + SHA256 fragment of the function content; issue #189).
 # ------------------------------------------------------------------------------------------------
 
 # Content-derived build identity, logged at startup so a transcript from a remote machine
 # identifies exactly which installer build produced it (issue #189).
-$script:InstallerBuildId = '1.0.0+d210acfc'
+$script:InstallerBuildId = '1.0.0+134a9d49'
 
 # ------------------------------------------------Functions------------------------------------------------
 
@@ -166,180 +166,23 @@ function Test-InvokedFromModuleContext {
     return [bool]($CommandPath -match '[\\/]WingetAppSetup[\\/]Public[\\/]Install\.ps1$')
 }
 
+<#
+.SYNOPSIS
+    Returns a WindowsPrincipal wrapping the current process's WindowsIdentity.
+.DESCRIPTION
+    Thin wrapper around the static [Security.Principal.WindowsIdentity]::GetCurrent() /
+    [Security.Principal.WindowsPrincipal] construction, split out purely so Test-IsAdmin
+    (Public/Elevation.ps1) has a command it can Mock in unit tests to simulate the underlying
+    .NET call throwing (a static method call can't be mocked directly).
+.RETURNS
+    [Security.Principal.WindowsPrincipal] for the current process.
+#>
+function Get-CurrentWindowsPrincipal {
+    [Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()
+}
+
 # Restart-WithElevation lives in Public/Elevation.ps1 (issue #190): it is exported so
 # winget-app-uninstall.ps1 can reuse it instead of hand-rolling its own relaunch.
-
-# --- Environment ---
-function Get-WindowsBuildNumber {
-    <#
-    .SYNOPSIS
-        Returns the current Windows OS build number as an integer (e.g. 19045, 26100).
-    .DESCRIPTION
-        Wrapped in a function so callers (and tests) can reason about the build gate used to decide
-        how to install the latest PowerShell: winget's machine-scope MSIX provisioning only works on
-        build 26100 (Windows 11 24H2) and later (issue #166).
-    #>
-    return [int][System.Environment]::OSVersion.Version.Build
-}
-
-function Get-ComputerManufacturer {
-    <#
-    .SYNOPSIS
-        Returns the machine's manufacturer string (e.g. 'Dell Inc.', 'Microsoft Corporation').
-    .DESCRIPTION
-        Thin, mockable wrapper around the Win32_ComputerSystem CIM class so catalog applicability
-        conditions (issue #217) — e.g. gating Dell Command Update on Dell hardware — can be unit
-        tested without touching real system state. Private on purpose: it is a seam for the
-        catalog's condition scriptblocks, not part of the module's public surface.
-    #>
-    return [string](Get-CimInstance -ClassName Win32_ComputerSystem).Manufacturer
-}
-
-<#
-.SYNOPSIS
-    Checks whether a semicolon-delimited PATH-style list already contains a path entry.
-.DESCRIPTION
-    Windows paths are case-insensitive and trailing separators are not significant, so
-    'C:\Program Files\Foo' and 'c:\program files\foo\' are the same directory. Each entry is
-    compared to the target with trailing '\'/'/' trimmed, using OrdinalIgnoreCase, to keep
-    repeated runs from appending duplicate PATH entries (issue #179).
-.PARAMETER PathList
-    The semicolon-delimited list to search (e.g. the value of $env:PATH).
-.PARAMETER PathToCheck
-    The path entry to look for.
-#>
-function Test-PathListContainsEntry {
-    param (
-        [Parameter(Mandatory = $true)]
-        [AllowEmptyString()]
-        [string]$PathList,
-
-        [Parameter(Mandatory = $true)]
-        [string]$PathToCheck
-    )
-
-    $normalizedTarget = $PathToCheck.TrimEnd('\', '/')
-    foreach ($entry in ($PathList -split ';')) {
-        if ([string]::Equals($entry.TrimEnd('\', '/'), $normalizedTarget, [System.StringComparison]::OrdinalIgnoreCase)) {
-            return $true
-        }
-    }
-    return $false
-}
-
-<#
-.SYNOPSIS
-    Reads the persistent PATH value for the given scope.
-.DESCRIPTION
-    Thin wrapper around [System.Environment]::GetEnvironmentVariable so callers (and tests)
-    do not have to touch the unmockable static method directly.
-.PARAMETER Scope
-    'User' reads the per-user PATH; 'System' reads the machine PATH.
-#>
-function Get-PersistedEnvironmentPath {
-    param (
-        [Parameter(Mandatory = $true)]
-        [ValidateSet('User', 'System')]
-        [string]$Scope
-    )
-
-    $target = if ($Scope -eq 'System') { [System.EnvironmentVariableTarget]::Machine } else { [System.EnvironmentVariableTarget]::User }
-    return [string][System.Environment]::GetEnvironmentVariable('PATH', $target)
-}
-
-<#
-.SYNOPSIS
-    Writes the persistent PATH value for the given scope.
-.DESCRIPTION
-    Thin wrapper around [System.Environment]::SetEnvironmentVariable so callers (and tests)
-    do not have to touch the unmockable static method directly.
-.PARAMETER Value
-    The full PATH value to persist.
-.PARAMETER Scope
-    'User' writes the per-user PATH; 'System' writes the machine PATH.
-#>
-function Set-PersistedEnvironmentPath {
-    param (
-        [Parameter(Mandatory = $true)]
-        [AllowEmptyString()]
-        [string]$Value,
-
-        [Parameter(Mandatory = $true)]
-        [ValidateSet('User', 'System')]
-        [string]$Scope
-    )
-
-    $target = if ($Scope -eq 'System') { [System.EnvironmentVariableTarget]::Machine } else { [System.EnvironmentVariableTarget]::User }
-    [System.Environment]::SetEnvironmentVariable('PATH', $Value, $target)
-}
-
-<#
-.SYNOPSIS
-    Adds a specified path to the environment PATH variable.
-.DESCRIPTION
-    This function adds a specified path to the persistent PATH variable for either the user or the
-    system scope (skipping case-insensitive/trailing-slash duplicates), and mirrors the change into
-    the current process PATH so the new entry is usable in the same session.
-.PARAMETER PathToAdd
-    The path to add to the environment PATH variable.
-.PARAMETER Scope
-    The scope to which the path should be added. Valid values are 'User' and 'System'.
-#>
-function Add-ToEnvironmentPath {
-    param (
-        [Parameter(Mandatory = $true)]
-        [string]$PathToAdd,
-
-        [Parameter(Mandatory = $true)]
-        [ValidateSet('User', 'System')]
-        [string]$Scope
-    )
-
-    # Check if the path is already in the environment PATH variable
-    if (-not (Test-PathInEnvironment -PathToCheck $PathToAdd -Scope $Scope)) {
-        $persistedPath = Get-PersistedEnvironmentPath -Scope $Scope
-        $newPersistedPath = if ([string]::IsNullOrEmpty($persistedPath)) { $PathToAdd } else { "$persistedPath;$PathToAdd" }
-        Set-PersistedEnvironmentPath -Value $newPersistedPath -Scope $Scope
-
-        # Mirror into the current process PATH so the entry is usable this session. Environment
-        # variable values are capped at 32767 characters on Windows (not 2048 — issue #179).
-        if (-not (Test-PathListContainsEntry -PathList $env:PATH -PathToCheck $PathToAdd)) {
-            $newProcessPath = "$env:PATH;$PathToAdd"
-            if ($newProcessPath.Length -le 32767) {
-                $env:PATH = $newProcessPath
-            }
-            else {
-                Write-WarningMessage 'Current process PATH would exceed the Windows environment variable limit (32767 chars). Path added to persistent environment but not to current session.'
-            }
-        }
-    }
-}
-
-<#
-.SYNOPSIS
-    Checks if a specified path is in the environment PATH variable.
-.DESCRIPTION
-    This function checks if a specified path is in the persistent environment PATH variable for
-    either the user or the system scope. Comparison is case-insensitive and ignores trailing
-    path separators.
-.PARAMETER PathToCheck
-    The path to check in the environment PATH variable.
-.PARAMETER Scope
-    The scope in which to check the path. Valid values are 'User' and 'System'.
-#>
-function Test-PathInEnvironment {
-    param (
-        [Parameter(Mandatory = $true)]
-        [string]$PathToCheck,
-
-        [Parameter(Mandatory = $true)]
-        [ValidateSet('User', 'System')]
-        [string]$Scope
-    )
-
-    $envPath = Get-PersistedEnvironmentPath -Scope $Scope
-    return Test-PathListContainsEntry -PathList $envPath -PathToCheck $PathToCheck
-}
 
 # --- FailureReporting ---
 # Failure-reporting helpers (issue #189). Install-WingetPackage returns a rich diagnostic
@@ -909,6 +752,69 @@ function Write-Prompt {
     Write-Host $Message -ForegroundColor Blue
 }
 
+# --- PackageIdValidation ---
+<#
+.SYNOPSIS
+    Shared package-id shape validation, per CLAUDE.md's "Winget Notes" section.
+.DESCRIPTION
+    CLAUDE.md documents the exact regex a winget package id must satisfy before it is trusted (in
+    catalog entries or in `winget list` output matching). This file is the single place that regex
+    lives so Test-AppDefinitions (catalog load time) and Test-WingetPackageInstalled (runtime output
+    matching) cannot drift apart on the pattern.
+#>
+
+# Exact pattern from CLAUDE.md ("Winget Notes"): publisher.product shape, each side starting with a
+# word character and allowing word characters, dots, and hyphens after that.
+$script:WingetPackageIdPattern = '^[\w][\w.\-]+\.[\w][\w.\-]+'
+
+<#
+.SYNOPSIS
+    Returns whether a string has the publisher.product shape CLAUDE.md mandates for package ids.
+.PARAMETER PackageId
+    The candidate package id string.
+#>
+function Test-WingetPackageIdFormat {
+    param (
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
+        [string]$PackageId
+    )
+
+    return $PackageId -match $script:WingetPackageIdPattern
+}
+
+<#
+.SYNOPSIS
+    Returns whether `winget list` output contains the given package id as a whole id token, not
+    merely as a substring of a different (longer) id.
+.DESCRIPTION
+    A plain .Contains($PackageId) check against raw `winget list` text is an unanchored substring
+    match: an installed id like 'Foo.BarBaz' contains 'Foo.Bar' as a pure substring, which would
+    false-positive a "Foo.Bar is installed" verdict. CLAUDE.md's "Winget Notes" section mandates
+    validating package ids with a regex before trusting winget output; this tightens the match by
+    requiring that neither side of the matched substring continue with an id-shape character
+    ([\w.\-], the same character class the CLAUDE.md pattern is built from), so a match can only
+    land on a complete id token.
+.PARAMETER Output
+    The raw `winget list` stdout text to search.
+.PARAMETER PackageId
+    The winget package id being checked for.
+#>
+function Test-WingetListOutputContainsPackageId {
+    param (
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
+        [string]$Output,
+
+        [Parameter(Mandatory = $true)]
+        [string]$PackageId
+    )
+
+    $escapedId = [regex]::Escape($PackageId)
+    $boundaryPattern = "(?<![\w.\-])$escapedId(?![\w.\-])"
+    return [regex]::IsMatch($Output, $boundaryPattern)
+}
+
 # --- PowerShell7Bootstrap ---
 # Windows PowerShell 5.1 bootstrap (issue #225). EVERYTHING in this file runs under Windows
 # PowerShell 5.1 - the one engine the rest of the module explicitly does not support - because the
@@ -1089,14 +995,10 @@ function Invoke-PowerShell7Bootstrap {
 
         # The bootstrap runs before the module's elevation logic ever loads; a machine-wide
         # PowerShell 7 install from a non-admin session may surface a UAC prompt or fail outright.
-        # Warn and let it ride - GetCurrent() is wrapped only so the unit tests stay runnable on
-        # non-Windows hosts; in production this file always runs on Windows.
-        $isAdmin = $true
-        try {
-            $isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] 'Administrator')
-        }
-        catch {
-        }
+        # Warn and let it ride - Test-IsAdmin (WingetAppSetup/Public/Elevation.ps1) already fails
+        # safe (assumes elevated) if the underlying check throws, which is what kept this call
+        # site's own try/catch runnable on non-Windows test hosts before consolidation.
+        $isAdmin = Test-IsAdmin
         if (-not $isAdmin) {
             Write-WarningMessage 'Not running as administrator: the PowerShell 7 install may show a UAC prompt or fail. If it fails, re-run this installer from an elevated prompt.'
         }
@@ -1109,8 +1011,9 @@ function Invoke-PowerShell7Bootstrap {
             # matters: the documented one-liner reports INTERACTIVE (an `irm | iex` pipe leaves
             # stdin alone), so the run most likely to be walked away from was the one run that let
             # winget stop and ask. Nothing here needs winget's UI - the agreements are accepted by
-            # flag, and a failure falls through to the MSI fallback below.
-            $wingetArguments = @('install', '--id', 'Microsoft.PowerShell', '--exact', '--source', 'winget', '--accept-source-agreements', '--accept-package-agreements', '--disable-interactivity')
+            # flag, and a failure falls through to the MSI fallback below. The shared flags come
+            # from Get-WingetAgreementArgs so this call site cannot drift from the others again.
+            $wingetArguments = @('install', '--id', 'Microsoft.PowerShell', '--exact', '--source', 'winget') + (Get-WingetAgreementArgs)
             # A Start-Process launch failure is non-terminating under 5.1's default
             # $ErrorActionPreference and would leave $wingetProcess $null - catch it explicitly
             # so a broken winget shim degrades to the MSI fallback with a real message.
@@ -1206,6 +1109,32 @@ function Invoke-PowerShell7Bootstrap {
         return 1
     }
     return $relaunchProcess.ExitCode
+}
+
+# --- SystemInfo ---
+function Get-WindowsBuildNumber {
+    <#
+    .SYNOPSIS
+        Returns the current Windows OS build number as an integer (e.g. 19045, 26100).
+    .DESCRIPTION
+        Wrapped in a function so callers (and tests) can reason about the build gate used to decide
+        how to install the latest PowerShell: winget's machine-scope MSIX provisioning only works on
+        build 26100 (Windows 11 24H2) and later (issue #166).
+    #>
+    return [int][System.Environment]::OSVersion.Version.Build
+}
+
+function Get-ComputerManufacturer {
+    <#
+    .SYNOPSIS
+        Returns the machine's manufacturer string (e.g. 'Dell Inc.', 'Microsoft Corporation').
+    .DESCRIPTION
+        Thin, mockable wrapper around the Win32_ComputerSystem CIM class so catalog applicability
+        conditions (issue #217) — e.g. gating Dell Command Update on Dell hardware — can be unit
+        tested without touching real system state. Private on purpose: it is a seam for the
+        catalog's condition scriptblocks, not part of the module's public surface.
+    #>
+    return [string](Get-CimInstance -ClassName Win32_ComputerSystem).Manufacturer
 }
 
 # --- WauSupport ---
@@ -1320,6 +1249,33 @@ function New-WauStagingDirectory {
     $null = New-Item -Path $stagingDir -ItemType Directory -Force -ErrorAction Stop
     Set-RestrictedDirectoryAcl -Path $stagingDir
     return $stagingDir
+}
+
+# --- WingetAgreementArgs ---
+<#
+.SYNOPSIS
+    Returns the shared agreement/interactivity flag set used by every winget install-family call.
+.DESCRIPTION
+    `--accept-source-agreements --accept-package-agreements --disable-interactivity` was hand-
+    duplicated across three call sites (Install-WingetPackage, Install-MsixProvisionedPackage, and
+    the PowerShell 7 bootstrap's winget install). That duplication is exactly how issue #230
+    shipped: one of the three literal arrays was missing `--disable-interactivity`, and it went
+    unnoticed until winget stopped on the one code path every install takes and asked a human that
+    was never watching. Routing all three call sites through this single helper makes that class of
+    bug structurally impossible - there is only one place left to forget the flag.
+
+    This is deliberately scoped to the install/download flag combination, not a generic wrapper for
+    every winget subcommand: `winget source update` cannot take `--accept-source-agreements` at all
+    (issues #174/#175), and `source list` / `search` / `source reset` each pass their own different
+    subset. Callers with those different needs keep building their own argument lists.
+.RETURNS
+    [string[]] @('--accept-source-agreements', '--accept-package-agreements', '--disable-interactivity')
+#>
+function Get-WingetAgreementArgs {
+    [CmdletBinding()]
+    param ()
+
+    return @('--accept-source-agreements', '--accept-package-agreements', '--disable-interactivity')
 }
 
 # --- WingetBootstrap ---
@@ -1438,8 +1394,20 @@ function Test-WingetSourceHealth {
             $searchOutput = winget search 7zip --source winget --disable-interactivity --accept-source-agreements 2>&1
             $searchExitCode = $LASTEXITCODE
 
-            # Check for corruption error code 0x8a15000f or similar source errors
-            if ($searchOutput -match '0x8a150|failed when opening|data required' -or $searchExitCode -ne 0) {
+            # Any nonzero exit code fails the check — that includes the known 0x8A15000F
+            # corruption signature (APPINSTALLER_CLI_ERROR_SOURCE_DATA_MISSING, -1978335217 as a
+            # signed Int32 — "Failed when opening source(s)... Data required by the source is
+            # missing"), which needs no runtime branch of its own.
+            #
+            # The output match is the fallback for the one scenario the exit code cannot catch:
+            # per the codebase's hard-won history with flaky winget exit codes (issues
+            # #150/#172/#174/#175/#177), winget has reportedly emitted this exact corruption text
+            # while still returning exit code 0. The '0x8a150' token is the load-bearing part —
+            # winget prints the hex HRESULT regardless of display language, so it survives locale
+            # and wording changes. The two English phrases are extra coverage only and, like the
+            # locale-dependency note in winget-app-uninstall.ps1 (issue #180), may stop matching
+            # if winget's output wording or locale changes.
+            if ($searchExitCode -ne 0 -or $searchOutput -match '0x8a150|failed when opening|data required') {
                 if (-not $Quiet) {
                     Write-WarningMessage 'Winget source is listed but contains corrupted or missing data.'
                 }
@@ -1523,7 +1491,9 @@ function Get-DefaultAppCatalog {
 .SYNOPSIS
     Validates the list of application definitions before processing.
 .DESCRIPTION
-    Ensures each entry in the apps array is a hashtable containing a non-empty string `name` value and removes duplicates, warning about any issues.
+    Ensures each entry in the apps array is a hashtable containing a non-empty string `name` value
+    matching the winget package-id shape CLAUDE.md documents (publisher.product), and removes
+    duplicates, warning about any issues.
 .PARAMETER Apps
     The collection of application definition hash tables to validate.
 .RETURNS
@@ -1553,6 +1523,14 @@ function Test-AppDefinitions {
         }
 
         $name = $app['name'].Trim()
+
+        # Package-id shape check (CLAUDE.md "Winget Notes"): reject any catalog entry whose name
+        # does not look like a winget publisher.product id before it is ever trusted downstream.
+        if (-not (Test-WingetPackageIdFormat -PackageId $name)) {
+            $errors += "App entry at index $i has an invalid package id '$name': does not match the required publisher.product shape."
+            continue
+        }
+
         if (-not $seenNames.Add($name)) {
             $warnings += "Duplicate app definition detected for '$name'. Subsequent entry ignored."
             continue
@@ -1570,9 +1548,37 @@ function Test-AppDefinitions {
 }
 
 # --- Elevation ---
-# Public (exported) elevation helper. The rest of the elevation detection helpers live in
-# Private/Elevation.ps1; this one is exported (issue #190) so winget-app-uninstall.ps1 can reuse
-# it instead of hand-rolling its own Start-Process relaunch.
+# Public (exported) elevation helpers. The rest of the elevation detection helpers live in
+# Private/Elevation.ps1; these are exported (issue #190) so winget-app-uninstall.ps1 can reuse
+# them instead of hand-rolling its own admin check / Start-Process relaunch.
+
+<#
+.SYNOPSIS
+    Detects whether the current process is running with administrator privileges.
+.DESCRIPTION
+    The single shared implementation of the
+    "[Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(...)"
+    check, previously copy-pasted (and already behaviorally diverged) across
+    WingetAppSetup/Public/Install.ps1, winget-app-uninstall.ps1, and
+    WingetAppSetup/Private/PowerShell7Bootstrap.ps1 (full-repo review finding, 2026-07-16).
+    Fails safe: if the underlying identity/role check throws for any reason (an exotic restricted
+    token, a non-interactive service context, or a mocked failure in tests), this warns and
+    returns $true rather than letting the exception propagate and abort the caller - matching the
+    PowerShell7Bootstrap.ps1 behavior that is now applied at every call site.
+.RETURNS
+    [bool] $true when the current process is elevated (or when the check itself failed and could
+    not determine elevation), $false when it is confirmed non-elevated.
+#>
+function Test-IsAdmin {
+    try {
+        $principal = Get-CurrentWindowsPrincipal
+        return $principal.IsInRole([Security.Principal.WindowsBuiltInRole] 'Administrator')
+    }
+    catch {
+        Write-WarningMessage "Could not determine administrator status; assuming elevated: $_"
+        return $true
+    }
+}
 
 <#
 .SYNOPSIS
@@ -1707,14 +1713,24 @@ function Invoke-WingetInstall {
     # is accepted where it actually counts - every install passes --accept-source-agreements, and
     # the elevated Initialize-WingetSourcesForUser below re-probes and bootstraps the installing
     # account via Repair-WinGetPackageManager (issue #159).
-    $isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] 'Administrator')
+    #
+    # Reuses Invoke-WingetSourceProbe (WingetBootstrap.ps1) rather than calling Start-Process
+    # directly: it runs this exact command already wrapped in a timeout guard (120s default),
+    # which this pre-elevation call was missing entirely. A bare `-Wait` here could block the
+    # whole run forever on a corrupted/unreachable source, before elevation and before any of the
+    # timeout-guarded checks later in the pipeline ever ran. The return value is intentionally
+    # discarded here, same as before - this call remains best-effort.
+    # Test-IsAdmin (Public/Elevation.ps1, issue #239) wraps the WindowsPrincipal/IsInRole check
+    # behind a mockable command, so tests can drive the non-admin branch below deterministically
+    # instead of only when Pester itself happens to run non-elevated.
+    $isAdmin = Test-IsAdmin
     if (-not $isAdmin -and (Test-IsRunningLocally)) {
         if ($WhatIf) {
             Write-Info '[DRY-RUN] Would run winget source update --name winget to bootstrap the source in user context'
         }
         else {
             Write-Info 'Updating the winget source...'
-            Start-Process -FilePath 'winget' -ArgumentList 'source', 'update', '--name', 'winget', '--disable-interactivity' -Wait -NoNewWindow
+            [void](Invoke-WingetSourceProbe)
         }
     }
 
@@ -1759,12 +1775,20 @@ function Invoke-WingetInstall {
         }
         else {
             # IEX/remote execution has no local script path to relaunch from.
-            Write-ErrorMessage 'This script requires administrator privileges.'
-            Write-ErrorMessage 'Auto-elevation is unavailable when running through IEX/remote execution.'
-            Write-Info 'Open an elevated PowerShell or Windows Terminal session and run the IEX command again.'
-            Write-Info 'Exiting in 5 seconds...'
-            Start-Sleep -Seconds 5
-            Exit 1
+            if ($WhatIf) {
+                # Same rationale as the local-file dry-run branch above: a preview makes no
+                # system changes, so it never needs elevation. Continue the preview in the
+                # current (non-elevated) session instead of exiting.
+                Write-Info '[DRY-RUN] Would require administrator privileges for a real run (auto-elevation is unavailable when running through IEX/remote execution). Continuing the preview in the current (non-elevated) session; no system changes will be made.'
+            }
+            else {
+                Write-ErrorMessage 'This script requires administrator privileges.'
+                Write-ErrorMessage 'Auto-elevation is unavailable when running through IEX/remote execution.'
+                Write-Info 'Open an elevated PowerShell or Windows Terminal session and run the IEX command again.'
+                Write-Info 'Exiting in 5 seconds...'
+                Start-Sleep -Seconds 5
+                Exit 1
+            }
         }
     }
     else {
@@ -1949,11 +1973,16 @@ function Invoke-WingetInstall {
 
                     if ($outcome.Status -eq 'Failed') {
                         $failureReason = Format-InstallFailureReason -FailureReason $outcome.FailureReason -InstallResult $outcome.InstallResult
-                        if ($outcome.FailureReason -in 'PreCheckTimeout', 'VerifyTimeout') {
-                            Write-WarningMessage "Verification timed out for retry: $appName. Assuming installation failed."
-                        }
-                        else {
-                            Write-ErrorMessage "Retry failed: $appName ($failureReason)."
+                        switch ($outcome.FailureReason) {
+                            'PreCheckTimeout' {
+                                Write-WarningMessage "Winget list timed out for retry: $appName. Assuming installation failed."
+                            }
+                            'VerifyTimeout' {
+                                Write-WarningMessage "Verification timed out for retry: $appName. Assuming installation failed."
+                            }
+                            default {
+                                Write-ErrorMessage "Retry failed: $appName ($failureReason)."
+                            }
                         }
                         $failedApps += @{ Name = $appName; Reason = $failureReason }
                     }
@@ -3164,15 +3193,14 @@ function Install-WingetPackage {
     while ($attempt -lt $MaxAttempts) {
         $attempt++
 
-        # --disable-interactivity (issue #230): every other winget call in the module already
-        # passes it; this one - the path every app install takes - did not, so winget could stop
-        # and ask on the one code path where a human is least likely to be watching. The two
-        # --accept-*-agreements flags are the standing "yes" to the questions winget would
-        # otherwise ask; this flag is what stops it asking anything else.
+        # The shared agreement/interactivity flags come from Get-WingetAgreementArgs (issue #230
+        # follow-up): every other winget call in the module already passed them, but this one -
+        # the path every app install takes - did not, because each call site hand-duplicated the
+        # literal array. Routing through the shared helper makes that omission structurally
+        # impossible instead of relying on manual re-auditing.
         $installArgs = @(
-            'install', '-e',
-            '--accept-source-agreements', '--accept-package-agreements',
-            '--disable-interactivity',
+            'install', '-e'
+        ) + (Get-WingetAgreementArgs) + @(
             '--source', 'winget',
             '--id', $PackageId
         )
@@ -3236,6 +3264,10 @@ function Install-WingetPackage {
     run) cannot collide on fixed names (issue #177). In this mode a hashtable is returned so the
     caller can tell a timeout apart from "not installed": a timeout must count as a failure rather
     than being silently dropped (issue #176).
+
+    Both modes determine "installed" via Test-WingetListOutputContainsPackageId rather than a plain
+    substring .Contains check, so an unrelated listed id that merely contains $PackageId as a
+    substring (e.g. target 'Foo.Bar' inside listed id 'Foo.BarBaz') cannot false-positive.
 .PARAMETER PackageId
     The winget package id to check.
 .PARAMETER TimeoutSeconds
@@ -3280,7 +3312,7 @@ function Test-WingetPackageInstalled {
             # only read after a confirmed non-timeout exit.
             $output = @(Get-Content $stdoutFile -ErrorAction SilentlyContinue)
             return @{
-                Installed = ([String]::Join('', $output)).Contains($PackageId)
+                Installed = Test-WingetListOutputContainsPackageId -Output ([String]::Join('', $output)) -PackageId $PackageId
                 TimedOut  = $false
                 ExitCode  = $listProcess.ExitCode
             }
@@ -3296,7 +3328,7 @@ function Test-WingetPackageInstalled {
 
     try {
         $output = winget list --exact --id $PackageId --accept-source-agreements --disable-interactivity 2>&1
-        return ([String]::Join('', $output)).Contains($PackageId)
+        return Test-WingetListOutputContainsPackageId -Output ([String]::Join('', $output)) -PackageId $PackageId
     }
     catch {
         return $false
@@ -3429,8 +3461,8 @@ function Install-MsixProvisionedPackage {
     try {
         Write-Info "Downloading the latest MSIX for $PackageId to provision it machine-wide..."
         $downloadArgs = @(
-            'download', '-e', '--id', $PackageId, '--source', 'winget', '--installer-type', 'msix',
-            '--accept-source-agreements', '--accept-package-agreements', '--disable-interactivity',
+            'download', '-e', '--id', $PackageId, '--source', 'winget', '--installer-type', 'msix'
+        ) + (Get-WingetAgreementArgs) + @(
             '--download-directory', $downloadDir
         )
         $download = Start-Process -FilePath 'winget' -ArgumentList $downloadArgs -NoNewWindow -Wait -PassThru
@@ -3501,17 +3533,24 @@ function Install-PowerShellLatest {
     # returns for `--installer-type wix` once the manifest no longer ships an MSI.
     $noApplicableInstallerExitCode = -1978335216
 
+    # Matches Install-AppWithVerification's $checkTimeoutSeconds (Private/InstallVerification.ps1)
+    # so a hung `winget list` during PowerShell's own self-verification fails into the retry pass
+    # like every other catalog app's verification does, instead of blocking the run forever.
+    $checkTimeoutSeconds = 15
+
     # 1. Prefer the MSI while the latest version still ships one.
     $result = Install-WingetPackage -PackageId $PackageId -InstallerType 'wix'
     if ($result.ExitCode -ne $noApplicableInstallerExitCode) {
-        return @{ ExitCode = $result.ExitCode; Installed = (Test-WingetPackageInstalled -PackageId $PackageId); Method = 'msi' }
+        $installed = (Test-WingetPackageInstalled -PackageId $PackageId -TimeoutSeconds $checkTimeoutSeconds).Installed
+        return @{ ExitCode = $result.ExitCode; Installed = $installed; Method = 'msi' }
     }
 
     # 2. No MSI for the latest version (7.7+): install the latest MSIX machine-wide.
     Write-Info "No MSI is available for the latest $PackageId; installing the MSIX package instead."
     if ((Get-WindowsBuildNumber) -ge 26100) {
         $result = Install-WingetPackage -PackageId $PackageId
-        return @{ ExitCode = $result.ExitCode; Installed = (Test-WingetPackageInstalled -PackageId $PackageId); Method = 'msix-native' }
+        $installed = (Test-WingetPackageInstalled -PackageId $PackageId -TimeoutSeconds $checkTimeoutSeconds).Installed
+        return @{ ExitCode = $result.ExitCode; Installed = $installed; Method = 'msix-native' }
     }
 
     $provision = Install-MsixProvisionedPackage -PackageId $PackageId

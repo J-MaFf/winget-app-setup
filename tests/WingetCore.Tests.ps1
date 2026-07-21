@@ -611,6 +611,18 @@ Describe 'Test-WingetPackageInstalled (timeout support, issue #188)' {
 
             Test-WingetPackageInstalled -PackageId 'Test.App' | Should -Be $false
         }
+
+        It 'Returns $false when the output only contains a different id that has the target as a substring (CLAUDE.md regex enforcement)' {
+            Mock winget { "Name       Id           Version`nFoo BarBaz Foo.BarBaz  1.0" }
+
+            Test-WingetPackageInstalled -PackageId 'Foo.Bar' | Should -Be $false
+        }
+
+        It 'Still returns $true for a real matching line when a substring-only lookalike is also present' {
+            Mock winget { "Name       Id           Version`nFoo Bar    Foo.Bar      1.0`nFoo BarBaz Foo.BarBaz  1.0" }
+
+            Test-WingetPackageInstalled -PackageId 'Foo.Bar' | Should -Be $true
+        }
     }
 
     Context 'With -TimeoutSeconds (Start-Process guard, the pattern Invoke-WingetInstall inlined pre-#188)' {
@@ -635,6 +647,20 @@ Describe 'Test-WingetPackageInstalled (timeout support, issue #188)' {
                 ($ArgumentList -contains 'Test.App') -and
                 ($ArgumentList -contains '--accept-source-agreements')
             }
+        }
+
+        It 'Reports not-installed when the output only contains a different id that has the target as a substring' {
+            Mock Start-Process {
+                $p = [pscustomobject]@{ ExitCode = -1978335212 }
+                $p | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value { param($ms) $true }
+                $p | Add-Member -MemberType ScriptMethod -Name Kill -Value { }
+                $p
+            }
+            Mock Get-Content { 'Foo.BarBaz  1.0.0  winget' }
+
+            $result = Test-WingetPackageInstalled -PackageId 'Foo.Bar' -TimeoutSeconds 15
+
+            $result.Installed | Should -Be $false
         }
 
         It 'Reports not-installed when the output does not mention the id' {
@@ -808,7 +834,7 @@ Describe 'Install-PowerShellLatest (always-latest strategy, issue #166)' {
 
     It 'installs the MSI while one is available and verifies via winget' {
         Mock Install-WingetPackage { @{ ExitCode = 0 } }
-        Mock Test-WingetPackageInstalled { $true }
+        Mock Test-WingetPackageInstalled { @{ Installed = $true; TimedOut = $false; ExitCode = 0 } }
         Mock Install-MsixProvisionedPackage { throw 'DISM provisioning should not run when an MSI is available' }
 
         $result = Install-PowerShellLatest
@@ -817,6 +843,7 @@ Describe 'Install-PowerShellLatest (always-latest strategy, issue #166)' {
         $result.Installed | Should -Be $true
         Should -Invoke Install-WingetPackage -Times 1 -Exactly -ParameterFilter { $InstallerType -eq 'wix' }
         Should -Invoke Install-MsixProvisionedPackage -Times 0 -Exactly
+        Should -Invoke Test-WingetPackageInstalled -Times 1 -Exactly -ParameterFilter { $TimeoutSeconds -gt 0 }
     }
 
     It 'installs the native MSIX on Windows 24H2+ when no MSI is available' {
@@ -824,7 +851,7 @@ Describe 'Install-PowerShellLatest (always-latest strategy, issue #166)' {
         Mock Install-WingetPackage { @{ ExitCode = -1978335216 } } -ParameterFilter { $InstallerType -eq 'wix' }
         Mock Install-WingetPackage { @{ ExitCode = 0 } } -ParameterFilter { -not $InstallerType }
         Mock Get-WindowsBuildNumber { 26100 }
-        Mock Test-WingetPackageInstalled { $true }
+        Mock Test-WingetPackageInstalled { @{ Installed = $true; TimedOut = $false; ExitCode = 0 } }
         Mock Install-MsixProvisionedPackage { throw 'DISM provisioning should not run on 24H2+' }
 
         $result = Install-PowerShellLatest
@@ -832,6 +859,7 @@ Describe 'Install-PowerShellLatest (always-latest strategy, issue #166)' {
         $result.Method | Should -Be 'msix-native'
         $result.Installed | Should -Be $true
         Should -Invoke Install-MsixProvisionedPackage -Times 0 -Exactly
+        Should -Invoke Test-WingetPackageInstalled -Times 1 -Exactly -ParameterFilter { $TimeoutSeconds -gt 0 }
     }
 
     It 'provisions the MSIX via DISM on older Windows when no MSI is available' {
@@ -844,6 +872,39 @@ Describe 'Install-PowerShellLatest (always-latest strategy, issue #166)' {
         $result.Method | Should -Be 'msix-provisioned'
         $result.Installed | Should -Be $true
         Should -Invoke Install-MsixProvisionedPackage -Times 1 -Exactly
+    }
+
+    It 'passes a 15-second timeout (matching Install-AppWithVerification) to the MSI-path verification call' {
+        Mock Install-WingetPackage { @{ ExitCode = 0 } }
+        Mock Test-WingetPackageInstalled { @{ Installed = $true; TimedOut = $false; ExitCode = 0 } }
+        Mock Install-MsixProvisionedPackage { throw 'DISM provisioning should not run when an MSI is available' }
+
+        [void](Install-PowerShellLatest)
+
+        Should -Invoke Test-WingetPackageInstalled -Times 1 -Exactly -ParameterFilter { $TimeoutSeconds -eq 15 }
+    }
+
+    It 'passes a 15-second timeout to the native-MSIX-path verification call' {
+        Mock Install-WingetPackage { @{ ExitCode = -1978335216 } } -ParameterFilter { $InstallerType -eq 'wix' }
+        Mock Install-WingetPackage { @{ ExitCode = 0 } } -ParameterFilter { -not $InstallerType }
+        Mock Get-WindowsBuildNumber { 26100 }
+        Mock Test-WingetPackageInstalled { @{ Installed = $true; TimedOut = $false; ExitCode = 0 } }
+        Mock Install-MsixProvisionedPackage { throw 'DISM provisioning should not run on 24H2+' }
+
+        [void](Install-PowerShellLatest)
+
+        Should -Invoke Test-WingetPackageInstalled -Times 1 -Exactly -ParameterFilter { $TimeoutSeconds -eq 15 }
+    }
+
+    It 'treats a timed-out MSI-path verification as not installed rather than throwing' {
+        Mock Install-WingetPackage { @{ ExitCode = 0 } }
+        Mock Test-WingetPackageInstalled { @{ Installed = $false; TimedOut = $true; ExitCode = $null } }
+        Mock Install-MsixProvisionedPackage { throw 'DISM provisioning should not run when an MSI is available' }
+
+        $result = Install-PowerShellLatest
+
+        $result.Method | Should -Be 'msi'
+        $result.Installed | Should -Be $false
     }
 }
 

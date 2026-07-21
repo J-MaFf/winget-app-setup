@@ -2,7 +2,9 @@
 .SYNOPSIS
     Validates the list of application definitions before processing.
 .DESCRIPTION
-    Ensures each entry in the apps array is a hashtable containing a non-empty string `name` value and removes duplicates, warning about any issues.
+    Ensures each entry in the apps array is a hashtable containing a non-empty string `name` value
+    matching the winget package-id shape CLAUDE.md documents (publisher.product), and removes
+    duplicates, warning about any issues.
 .PARAMETER Apps
     The collection of application definition hash tables to validate.
 .RETURNS
@@ -32,6 +34,14 @@ function Test-AppDefinitions {
         }
 
         $name = $app['name'].Trim()
+
+        # Package-id shape check (CLAUDE.md "Winget Notes"): reject any catalog entry whose name
+        # does not look like a winget publisher.product id before it is ever trusted downstream.
+        if (-not (Test-WingetPackageIdFormat -PackageId $name)) {
+            $errors += "App entry at index $i has an invalid package id '$name': does not match the required publisher.product shape."
+            continue
+        }
+
         if (-not $seenNames.Add($name)) {
             $warnings += "Duplicate app definition detected for '$name'. Subsequent entry ignored."
             continue
