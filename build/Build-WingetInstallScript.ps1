@@ -54,6 +54,52 @@ function Get-DefinedFunctionLookup {
     return , @($definedExact, $definedFolded)
 }
 
+function Get-UndefinedName {
+    <#
+    .SYNOPSIS
+        Shared name-resolution loop for the direct- and indirect-dispatch reference guards below:
+        reports which of the given candidate names fail to resolve to a defined function or an
+        external command.
+    .DESCRIPTION
+        Get-UndefinedCommandReference and Get-UndefinedCatalogInstallReference differ only in how
+        they COLLECT candidate names from the AST (a direct CommandAst walk vs. an indirect
+        catalog-hashtable walk); once collected, both resolved the same way. Factored out so a
+        future change to resolution semantics (e.g. also checking Get-Alias, or narrowing the
+        Get-Command fallback) cannot land in one guard and silently not the other.
+    .PARAMETER Names
+        Candidate hyphenated names to resolve (already deduplicated by the caller).
+    .PARAMETER DefinedExact
+        Case-sensitive (ordinal) HashSet[string] of function names defined in the assembled script,
+        from Get-DefinedFunctionLookup.
+    .PARAMETER DefinedFolded
+        Case-insensitive Dictionary[string,string] of folded name -> defined name, from
+        Get-DefinedFunctionLookup.
+    .PARAMETER CollisionFixHint
+        Short phrase naming where a case-insensitive collision should be fixed, used only in the
+        reported collision message (e.g. "the definition's casing at the call site").
+    #>
+    param(
+        [Parameter(Mandatory = $true)]
+        [string[]]$Names,
+        [Parameter(Mandatory = $true)]
+        [System.Collections.Generic.HashSet[string]]$DefinedExact,
+        [Parameter(Mandatory = $true)]
+        [System.Collections.Generic.Dictionary[string, string]]$DefinedFolded,
+        [Parameter(Mandatory = $true)]
+        [string]$CollisionFixHint
+    )
+
+    foreach ($name in $Names) {
+        if ($DefinedExact.Contains($name)) { continue }
+        if ($DefinedFolded.ContainsKey($name)) {
+            "$name (case-insensitive collision with module function '$($DefinedFolded[$name])'; match $CollisionFixHint)"
+            continue
+        }
+        if (Get-Command -Name $name -ErrorAction SilentlyContinue) { continue }
+        $name
+    }
+}
+
 function Get-UndefinedCommandReference {
     <#
     .SYNOPSIS
@@ -99,15 +145,8 @@ function Get-UndefinedCommandReference {
         Where-Object { $_ -and $_.Contains('-') } |
         Sort-Object -Unique
 
-    foreach ($name in $invoked) {
-        if ($DefinedExact.Contains($name)) { continue }
-        if ($DefinedFolded.ContainsKey($name)) {
-            "$name (case-insensitive collision with module function '$($DefinedFolded[$name])'; match the definition's casing at the call site)"
-            continue
-        }
-        if (Get-Command -Name $name -ErrorAction SilentlyContinue) { continue }
-        $name
-    }
+    Get-UndefinedName -Names $invoked -DefinedExact $DefinedExact -DefinedFolded $DefinedFolded `
+        -CollisionFixHint "the definition's casing at the call site"
 }
 
 function Get-UndefinedCatalogInstallReference {
@@ -180,15 +219,8 @@ function Get-UndefinedCatalogInstallReference {
     }
     $installNames = @($installNames | Sort-Object -Unique)
 
-    foreach ($name in $installNames) {
-        if ($DefinedExact.Contains($name)) { continue }
-        if ($DefinedFolded.ContainsKey($name)) {
-            "$name (case-insensitive collision with module function '$($DefinedFolded[$name])'; match the catalog entry's casing to the definition)"
-            continue
-        }
-        if (Get-Command -Name $name -ErrorAction SilentlyContinue) { continue }
-        $name
-    }
+    Get-UndefinedName -Names $installNames -DefinedExact $DefinedExact -DefinedFolded $DefinedFolded `
+        -CollisionFixHint "the catalog entry's casing to the definition"
 }
 
 $repoRoot = Split-Path -Parent $PSScriptRoot

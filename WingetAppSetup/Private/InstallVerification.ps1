@@ -104,6 +104,13 @@ function Install-AppWithVerification {
         # Package-specific installer that performs its own verification (e.g. PowerShell, whose
         # DISM-provisioned MSIX path never shows up under `winget list` for the elevating
         # account). Trust its Installed result instead of re-checking with winget.
+        #
+        # This is indirect dispatch on a catalog-carried function-name string, which
+        # build/Build-WingetInstallScript.ps1's AST-based undefined-reference guards cannot see
+        # through a generic CommandAst walk (issue #236) - Get-UndefinedCatalogInstallReference
+        # exists specifically to validate this 'install' field against the module's defined
+        # functions. If AppCatalog.ps1 ever gains another string-carried function-name field
+        # (e.g. 'uninstall' or 'verify') dispatched the same way, extend that guard to cover it too.
         $customResult = & $App.install
         if ($customResult.Installed) {
             return @{ Status = 'Installed'; InstallResult = $customResult; FailureReason = $null }

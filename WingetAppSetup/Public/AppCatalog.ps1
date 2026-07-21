@@ -8,7 +8,12 @@
       - name: the winget package id (validated by Test-AppDefinitions before use).
     Optional fields:
       - install: name of a package-specific install function that performs its own verification
-        (dispatched by Install-AppWithVerification instead of the generic winget path).
+        (dispatched by Install-AppWithVerification instead of the generic winget path). This
+        string is validated against the module's defined functions by
+        build/Build-WingetInstallScript.ps1's Get-UndefinedCatalogInstallReference guard (issue
+        #236) - if you add another field carrying a function name the same way (e.g.
+        'uninstall', 'verify'), extend that guard to cover it too, or a stale/renamed function
+        will pass every build check and only fail at runtime.
       - installerType: forwarded to Install-WingetPackage for machine-scope handling.
       - condition: scriptblock returning a boolean — evaluated by Install-AppWithVerification
         BEFORE any winget probe. Falsy means the app does not apply to this machine and is

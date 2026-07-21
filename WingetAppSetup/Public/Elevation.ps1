@@ -15,6 +15,18 @@
     token, a non-interactive service context, or a mocked failure in tests), this warns and
     returns $true rather than letting the exception propagate and abort the caller - matching the
     PowerShell7Bootstrap.ps1 behavior that is now applied at every call site.
+
+    At the two call sites that gate elevation (Invoke-WingetInstall, winget-app-uninstall.ps1),
+    "assume elevated" on failure means a broken check SKIPS Restart-WithElevation and proceeds
+    unelevated rather than retrying elevation. This is a deliberate tradeoff, not an oversight
+    (full-repo mega-review, 2026-07-17): the trigger is vanishingly rare on a real Windows
+    session, the caller still warns loudly before proceeding, any operation that genuinely needed
+    elevation then fails just as loudly with an access-denied error, and the alternative
+    (fail-closed: assume non-admin, always attempt Restart-WithElevation) risks a relaunch loop if
+    the same check throws deterministically in the relaunched process too - a worse failure mode
+    than a noisy unelevated run. If a future caller's failure consequence is instead silent/unsafe
+    rather than loud, that caller should check the exception itself rather than rely on this
+    shared default.
 .RETURNS
     [bool] $true when the current process is elevated (or when the check itself failed and could
     not determine elevation), $false when it is confirmed non-elevated.
