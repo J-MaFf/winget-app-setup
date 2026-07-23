@@ -64,6 +64,11 @@ function Format-InstallFailureReason {
         if ($InstallResult.ContainsKey('SessionErrorExhausted') -and $InstallResult.SessionErrorExhausted) {
             $detailParts += 'session error 0x80073D19 persisted through every retry'
         }
+        if ($InstallResult.ContainsKey('LaunchErrorExhausted') -and $InstallResult.LaunchErrorExhausted) {
+            # issue #253: Start-Process could not launch winget.exe (transient file lock) on every
+            # attempt, so no install ever actually ran.
+            $detailParts += 'winget executable was transiently inaccessible through every retry'
+        }
     }
 
     if ($detailParts.Count -gt 0) {

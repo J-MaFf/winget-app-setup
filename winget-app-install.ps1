@@ -58,12 +58,12 @@ param (
 # This script is assembled from the WingetAppSetup module by build/Build-WingetInstallScript.ps1.
 # Edit the function source under WingetAppSetup/Public and WingetAppSetup/Private, then re-run the
 # build to regenerate this file. See readme.md ("Project layout") for details.
-# Build id: 1.0.0+9f271116 (module version + SHA256 fragment of the function content; issue #189).
+# Build id: 1.0.0+b25dab43 (module version + SHA256 fragment of the function content; issue #189).
 # ------------------------------------------------------------------------------------------------
 
 # Content-derived build identity, logged at startup so a transcript from a remote machine
 # identifies exactly which installer build produced it (issue #189).
-$script:InstallerBuildId = '1.0.0+9f271116'
+$script:InstallerBuildId = '1.0.0+b25dab43'
 
 # ------------------------------------------------Functions------------------------------------------------
 
@@ -250,6 +250,11 @@ function Format-InstallFailureReason {
         }
         if ($InstallResult.ContainsKey('SessionErrorExhausted') -and $InstallResult.SessionErrorExhausted) {
             $detailParts += 'session error 0x80073D19 persisted through every retry'
+        }
+        if ($InstallResult.ContainsKey('LaunchErrorExhausted') -and $InstallResult.LaunchErrorExhausted) {
+            # issue #253: Start-Process could not launch winget.exe (transient file lock) on every
+            # attempt, so no install ever actually ran.
+            $detailParts += 'winget executable was transiently inaccessible through every retry'
         }
     }
 
@@ -3172,6 +3177,20 @@ function Initialize-WingetSourcesForUser {
     user; the session error is identified purely from the exit code, which winget reports as
     0x80073d19 for this failure.
 
+    Start-Process can also fail to launch winget.exe at all, throwing a terminating exception
+    ("This command cannot be run due to the error: The file cannot be accessed by the system.",
+    Win32 ERROR_CANT_ACCESS_FILE / 1920, or the sibling ERROR_SHARING_VIOLATION "being used by
+    another process") instead of returning a process object with an exit code. This happens when
+    winget.exe's own file is transiently locked — e.g. Windows Defender real-time scanning it, or
+    an AppX package-registration race right after Repair-WinGetPackageManager runs. Because that
+    exception is thrown before a process object ever exists, it used to bypass the exit-code-based
+    retry loop below entirely: on a GitHub-hosted E2E runner this was observed to fail every
+    install in a run, surviving even the caller's separate one-shot retry pass, because neither
+    layer paused before retrying (issue #253). The Start-Process call is now wrapped so this
+    specific class of launch exception is retried with the same backoff as the session error,
+    instead of propagating out of the function on the first attempt. Any other exception (e.g.
+    winget genuinely missing) is re-thrown unchanged so it is not silently swallowed.
+
     Installs prefer `--scope machine` (issue #159): user-scope installs land in the elevated
     account's profile rather than the logged-on user's, and packages that ship both MSIX and MSI
     installers (e.g. Microsoft.PowerShell) resolve at user scope to the MSIX — whose per-user AppX
@@ -3191,11 +3210,13 @@ function Initialize-WingetSourcesForUser {
 .PARAMETER InitialDelaySeconds
     Seconds to wait before the first retry; the wait doubles on each subsequent retry. Default 5.
 .RETURNS
-    [hashtable] @{ ExitCode = <int>; Attempts = <int>; SessionErrorExhausted = <bool>; MachineScopeFellBack = <bool> }
+    [hashtable] @{ ExitCode = <int|$null>; Attempts = <int>; SessionErrorExhausted = <bool>; MachineScopeFellBack = <bool>; LaunchErrorExhausted = <bool> }
     SessionErrorExhausted is True only when every attempt failed with the session error.
     MachineScopeFellBack is True when the package had no machine-scope installer and the install
     was retried at winget's default scope. Attempts counts install attempts at the finally
     selected scope; the one-time scope fallback does not consume a session-error attempt.
+    LaunchErrorExhausted is True only when every attempt failed to launch winget.exe at all (issue
+    #253); ExitCode is $null in that case, since no process ever ran to report one.
 #>
 function Install-WingetPackage {
     param (
@@ -3218,12 +3239,19 @@ function Install-WingetPackage {
     # 0x8A150010 (APPINSTALLER_CLI_ERROR_NO_APPLICABLE_INSTALLER) as a signed Int32: returned when
     # the --scope machine requirement filters out every installer in the package's manifest.
     $noApplicableInstallerExitCode = -1978335216
+    # Text fragments of the Win32 errors Start-Process surfaces as a terminating exception when it
+    # cannot even launch winget.exe (issue #253): ERROR_CANT_ACCESS_FILE (1920, "The file cannot be
+    # accessed by the system.") and the sibling ERROR_SHARING_VIOLATION ("...being used by another
+    # process."). Matched case-insensitively against the exception message; anything else is a real
+    # failure (e.g. winget missing from PATH) and is re-thrown rather than retried.
+    $transientLaunchErrorPattern = 'cannot be accessed by the system|being used by another process'
 
     $attempt = 0
     $delay = $InitialDelaySeconds
     $exitCode = 0
     $useMachineScope = $true
     $machineScopeFellBack = $false
+    $launchErrorExhausted = $false
 
     while ($attempt -lt $MaxAttempts) {
         $attempt++
@@ -3246,8 +3274,31 @@ function Install-WingetPackage {
             $installArgs += @('--installer-type', $InstallerType)
         }
 
-        $proc = Start-Process -FilePath 'winget' -ArgumentList $installArgs -NoNewWindow -Wait -PassThru
-        $exitCode = $proc.ExitCode
+        try {
+            $proc = Start-Process -FilePath 'winget' -ArgumentList $installArgs -NoNewWindow -Wait -PassThru
+            $exitCode = $proc.ExitCode
+            $launchErrorExhausted = $false
+        }
+        catch {
+            if ($_.Exception.Message -notmatch $transientLaunchErrorPattern) {
+                # Not a known-transient launch failure (e.g. winget genuinely missing) — preserve
+                # the prior behavior of letting it propagate instead of masking a real problem as
+                # an ordinary install failure.
+                throw
+            }
+
+            $launchErrorExhausted = $true
+            if ($attempt -lt $MaxAttempts) {
+                Write-WarningMessage "Could not launch winget for $PackageId - its executable appears transiently locked ($($_.Exception.Message)). Waiting ${delay}s before retry $($attempt + 1) of ${MaxAttempts}..."
+                Start-Sleep -Seconds $delay
+                $delay = $delay * 2
+                continue
+            }
+
+            Write-WarningMessage "Still unable to launch winget for $PackageId after ${MaxAttempts} attempts (executable transiently inaccessible on every attempt)."
+            $exitCode = $null
+            break
+        }
 
         # No installer matched the machine-scope requirement (e.g. MSIX-only packages such as
         # Microsoft.WindowsTerminal, which only install per-user). Fall back to winget's default
@@ -3282,6 +3333,7 @@ function Install-WingetPackage {
         Attempts              = $attempt
         SessionErrorExhausted = ($exitCode -eq $sessionLogoffExitCode)
         MachineScopeFellBack  = $machineScopeFellBack
+        LaunchErrorExhausted  = $launchErrorExhausted
     }
 }
 
