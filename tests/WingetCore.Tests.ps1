@@ -584,6 +584,78 @@ Describe 'Install-WingetPackage (0x80073d19 session-error backoff)' {
     }
 }
 
+Describe 'Install-WingetPackage (transient launch-exception backoff, issue #253)' {
+    BeforeEach {
+        Mock Write-Host { }
+        Mock Write-WarningMessage { }
+        Mock Write-Info { }
+        # Never actually wait during tests; the backoff is verified via Should -Invoke.
+        Mock Start-Sleep { }
+    }
+
+    It 'Retries with backoff and recovers when Start-Process throws a transient file-lock exception' {
+        $script:callIndex = 0
+        Mock Start-Process {
+            $script:callIndex++
+            if ($script:callIndex -eq 1) {
+                throw 'This command cannot be run due to the error: The file cannot be accessed by the system.'
+            }
+            [pscustomobject]@{ ExitCode = 0 }
+        }
+
+        $result = Install-WingetPackage -PackageId 'Klocman.BulkCrapUninstaller' -MaxAttempts 3 -InitialDelaySeconds 1
+
+        $result.ExitCode | Should -Be 0
+        $result.Attempts | Should -Be 2
+        $result.LaunchErrorExhausted | Should -Be $false
+        Should -Invoke Start-Process -Times 2 -Exactly
+        Should -Invoke Start-Sleep -Times 1 -Exactly
+    }
+
+    It 'Also retries the sibling sharing-violation launch exception' {
+        $script:callIndex = 0
+        Mock Start-Process {
+            $script:callIndex++
+            if ($script:callIndex -eq 1) {
+                throw 'This command cannot be run due to the error: The process cannot access the file because it is being used by another process.'
+            }
+            [pscustomobject]@{ ExitCode = 0 }
+        }
+
+        $result = Install-WingetPackage -PackageId 'Microsoft.WindowsTerminal' -MaxAttempts 3 -InitialDelaySeconds 1
+
+        $result.ExitCode | Should -Be 0
+        $result.LaunchErrorExhausted | Should -Be $false
+        Should -Invoke Start-Process -Times 2 -Exactly
+    }
+
+    It 'Exhausts MaxAttempts when winget.exe stays transiently inaccessible, returning a null ExitCode' {
+        Mock Start-Process {
+            throw 'This command cannot be run due to the error: The file cannot be accessed by the system.'
+        }
+
+        $result = Install-WingetPackage -PackageId 'Microsoft.PowerShell' -MaxAttempts 3 -InitialDelaySeconds 1
+
+        $result.ExitCode | Should -Be $null
+        $result.Attempts | Should -Be 3
+        $result.LaunchErrorExhausted | Should -Be $true
+        Should -Invoke Start-Process -Times 3 -Exactly
+        # Sleeps between attempts only (1->2 and 2->3), never after the final attempt.
+        Should -Invoke Start-Sleep -Times 2 -Exactly
+    }
+
+    It 'Re-throws an unrelated Start-Process exception instead of retrying it' {
+        Mock Start-Process {
+            throw 'The system cannot find the file specified.'
+        }
+
+        { Install-WingetPackage -PackageId 'Test.App' -MaxAttempts 3 -InitialDelaySeconds 1 } | Should -Throw '*cannot find the file specified*'
+
+        Should -Invoke Start-Process -Times 1 -Exactly
+        Should -Invoke Start-Sleep -Times 0 -Exactly
+    }
+}
+
 Describe 'Test-WingetPackageInstalled (timeout support, issue #188)' {
     BeforeEach {
         Mock Write-Host { }

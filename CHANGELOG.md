@@ -69,6 +69,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Fixed `Install-WingetPackage` losing its whole retry budget to a single Start-Process launch
+  failure (issue #253): on a scheduled E2E run, `winget.exe` was transiently inaccessible
+  (`Start-Process` threw "This command cannot be run due to the error: The file cannot be
+  accessed by the system." — Win32 `ERROR_CANT_ACCESS_FILE`, the classic AV-scan/AppX
+  registration-race symptom) for every app that actually needed installing, and every one of them
+  failed both the first pass and the one-shot app-level retry with zero delay in between. Because
+  the exception is thrown before `Start-Process` ever returns a process object, it previously
+  bypassed the function's exit-code-based backoff loop entirely on the very first attempt.
+  `Install-WingetPackage` now wraps the `Start-Process` call in a `try`/`catch`: this specific,
+  known-transient launch exception (plus its `ERROR_SHARING_VIOLATION` sibling) is retried with
+  the same increasing backoff already used for the `0x80073d19` session error, consuming the same
+  `MaxAttempts` budget and surfaced in the result as a new `LaunchErrorExhausted` flag
+  (`ExitCode` is `$null` in that case, since no process ever ran); `Format-InstallFailureReason`
+  reports it distinctly instead of a fabricated exit code. Any other launch exception (e.g.
+  winget genuinely missing) is re-thrown unchanged. Covered by new Pester coverage in
+  `tests/WingetCore.Tests.ps1` and `tests/Install.Tests.ps1`
+  ([#257](https://github.com/J-MaFf/winget-app-setup/pull/257)).
 - Fixed `-WhatIf` being ignored on the IEX/remote path when the invoking session is not
   administrator: `Invoke-WingetInstall`'s non-admin `else` branch for `Test-IsRunningLocally`
   returning `$false` (`WingetAppSetup/Public/Install.ps1`, every `irm <url> | iex` run, since there

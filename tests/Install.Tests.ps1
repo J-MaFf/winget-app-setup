@@ -765,6 +765,16 @@ Describe 'Format-InstallFailureReason (issue #189)' {
             $reason | Should -Match 'winget exit 0x80073D19'
             $reason | Should -Match 'session error 0x80073D19 persisted through every retry'
         }
+
+        It 'Calls out an exhausted transient launch failure without a fabricated exit code (issue #253)' {
+            $installResult = @{ ExitCode = $null; Attempts = 3; SessionErrorExhausted = $false; MachineScopeFellBack = $false; LaunchErrorExhausted = $true }
+
+            $reason = Format-InstallFailureReason -FailureReason 'VerifyNotFound' -InstallResult $installResult
+
+            $reason | Should -Not -Match 'winget exit'
+            $reason | Should -Match '3 attempts'
+            $reason | Should -Match 'winget executable was transiently inaccessible through every retry'
+        }
     }
 
     Context 'With a custom installer result shape (ExitCode/Installed only)' {
