@@ -84,7 +84,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`ExitCode` is `$null` in that case, since no process ever ran); `Format-InstallFailureReason`
   reports it distinctly instead of a fabricated exit code. Any other launch exception (e.g.
   winget genuinely missing) is re-thrown unchanged. Covered by new Pester coverage in
-  `tests/WingetCore.Tests.ps1` and `tests/Install.Tests.ps1`.
+  `tests/WingetCore.Tests.ps1` and `tests/Install.Tests.ps1`
+  ([#257](https://github.com/J-MaFf/winget-app-setup/pull/257)).
 - Fixed `-WhatIf` being ignored on the IEX/remote path when the invoking session is not
   administrator: `Invoke-WingetInstall`'s non-admin `else` branch for `Test-IsRunningLocally`
   returning `$false` (`WingetAppSetup/Public/Install.ps1`, every `irm <url> | iex` run, since there
