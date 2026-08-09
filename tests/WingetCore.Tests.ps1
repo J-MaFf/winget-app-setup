@@ -606,10 +606,36 @@ Describe 'Install-WingetPackage (transient launch-exception backoff, issue #253)
         $result = Install-WingetPackage -PackageId 'Klocman.BulkCrapUninstaller' -MaxAttempts 3 -InitialDelaySeconds 1
 
         $result.ExitCode | Should -Be 0
-        $result.Attempts | Should -Be 2
+        # A failed launch never ran winget, so it does not consume an install attempt (issue #258).
+        $result.Attempts | Should -Be 1
+        $result.LaunchAttempts | Should -Be 1
         $result.LaunchErrorExhausted | Should -Be $false
         Should -Invoke Start-Process -Times 2 -Exactly
         Should -Invoke Start-Sleep -Times 1 -Exactly
+    }
+
+    It 'Re-resolves the executable past the broken alias on each launch retry (issue #258)' {
+        $script:packageWinget = 'C:\Program Files\WindowsApps\Microsoft.DesktopAppInstaller_1.26.0.0_x64__8wekyb3d8bbwe\winget.exe'
+        Mock Resolve-WingetExecutable {
+            if ($BypassAlias) { $script:packageWinget } else { 'winget' }
+        }
+        Mock Start-Process {
+            if ($FilePath -eq 'winget') {
+                # The app-execution alias stays broken for the whole test: only the concrete
+                # package-location winget.exe can launch.
+                throw 'This command cannot be run due to the error: The file cannot be accessed by the system.'
+            }
+            [pscustomobject]@{ ExitCode = 0 }
+        }
+
+        $result = Install-WingetPackage -PackageId 'Microsoft.WindowsTerminal' -MaxAttempts 3 -InitialDelaySeconds 1
+
+        $result.ExitCode | Should -Be 0
+        $result.Attempts | Should -Be 1
+        $result.LaunchAttempts | Should -Be 1
+        $result.LaunchErrorExhausted | Should -Be $false
+        Should -Invoke Resolve-WingetExecutable -Times 1 -Exactly -ParameterFilter { [bool]$BypassAlias }
+        Should -Invoke Start-Process -Times 1 -Exactly -ParameterFilter { $FilePath -eq $packageWinget }
     }
 
     It 'Also retries the sibling sharing-violation launch exception' {
@@ -629,19 +655,37 @@ Describe 'Install-WingetPackage (transient launch-exception backoff, issue #253)
         Should -Invoke Start-Process -Times 2 -Exactly
     }
 
-    It 'Exhausts MaxAttempts when winget.exe stays transiently inaccessible, returning a null ExitCode' {
+    It 'Exhausts MaxLaunchAttempts when winget.exe stays transiently inaccessible, returning a null ExitCode' {
         Mock Start-Process {
             throw 'This command cannot be run due to the error: The file cannot be accessed by the system.'
         }
 
-        $result = Install-WingetPackage -PackageId 'Microsoft.PowerShell' -MaxAttempts 3 -InitialDelaySeconds 1
+        $result = Install-WingetPackage -PackageId 'Microsoft.PowerShell' -MaxAttempts 3 -InitialDelaySeconds 1 -MaxLaunchAttempts 3
 
         $result.ExitCode | Should -Be $null
-        $result.Attempts | Should -Be 3
+        # No install ever ran: failed launches have their own budget and counter (issue #258).
+        $result.Attempts | Should -Be 0
+        $result.LaunchAttempts | Should -Be 3
         $result.LaunchErrorExhausted | Should -Be $true
         Should -Invoke Start-Process -Times 3 -Exactly
-        # Sleeps between attempts only (1->2 and 2->3), never after the final attempt.
+        # Sleeps between launch attempts only (1->2 and 2->3), never after the final attempt.
         Should -Invoke Start-Sleep -Times 2 -Exactly
+    }
+
+    It 'Gives launch failures a larger default budget than install attempts (75s window, issue #258)' {
+        Mock Start-Process {
+            throw 'This command cannot be run due to the error: The file cannot be accessed by the system.'
+        }
+        $script:launchWaits = @()
+        Mock Start-Sleep { $script:launchWaits += $Seconds }
+
+        $result = Install-WingetPackage -PackageId 'Microsoft.WindowsTerminal' -MaxAttempts 3 -InitialDelaySeconds 5
+
+        $result.LaunchErrorExhausted | Should -Be $true
+        $result.LaunchAttempts | Should -Be 5
+        Should -Invoke Start-Process -Times 5 -Exactly
+        # Doubling backoff sized to outlast an App Installer re-registration window.
+        $script:launchWaits | Should -Be @(5, 10, 20, 40)
     }
 
     It 'Re-throws an unrelated Start-Process exception instead of retrying it' {
@@ -777,6 +821,45 @@ Describe 'Test-WingetPackageInstalled (timeout support, issue #188)' {
             $result.Installed | Should -Be $false
             $result.TimedOut | Should -Be $false
             $result.ExitCode | Should -Be $null
+        }
+
+        It 'Retries once past a broken winget alias via the package location so an installed app is not misreported (issue #258)' {
+            Mock Write-WarningMessage { }
+            $script:packageWinget = 'C:\Program Files\WindowsApps\Microsoft.DesktopAppInstaller_1.26.0.0_x64__8wekyb3d8bbwe\winget.exe'
+            Mock Resolve-WingetExecutable { $script:packageWinget }
+            Mock Start-Process {
+                if ($FilePath -eq 'winget') {
+                    throw 'This command cannot be run due to the error: The file cannot be accessed by the system.'
+                }
+                $p = [pscustomobject]@{ ExitCode = 0 }
+                $p | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value { param($ms) $true }
+                $p | Add-Member -MemberType ScriptMethod -Name Kill -Value { }
+                $p
+            }
+            Mock Get-Content { 'Microsoft.WindowsTerminal  1.22.0  winget' }
+
+            $result = Test-WingetPackageInstalled -PackageId 'Microsoft.WindowsTerminal' -TimeoutSeconds 15
+
+            $result.Installed | Should -Be $true
+            $result.TimedOut | Should -Be $false
+            $result.ExitCode | Should -Be 0
+            Should -Invoke Resolve-WingetExecutable -Times 1 -Exactly -ParameterFilter { [bool]$BypassAlias }
+            Should -Invoke Start-Process -Times 1 -Exactly -ParameterFilter { $FilePath -eq $script:packageWinget }
+        }
+
+        It 'Still reports a no-throw failure when both the alias and the package-location launch fail (issue #258)' {
+            Mock Write-WarningMessage { }
+            Mock Resolve-WingetExecutable { 'C:\pf\winget.exe' }
+            Mock Start-Process {
+                throw 'This command cannot be run due to the error: The file cannot be accessed by the system.'
+            }
+
+            $result = Test-WingetPackageInstalled -PackageId 'Test.App' -TimeoutSeconds 15
+
+            $result.Installed | Should -Be $false
+            $result.TimedOut | Should -Be $false
+            $result.ExitCode | Should -Be $null
+            Should -Invoke Start-Process -Times 2 -Exactly
         }
 
         It 'Uses unique temp file names on every run and cleans them up (issue #177)' {

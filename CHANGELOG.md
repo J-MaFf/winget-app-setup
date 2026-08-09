@@ -69,6 +69,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Fixed the winget launch retry never recovering when the `winget.exe` app-execution alias breaks
+  mid-run (issue #258): E2E run 30253761253's second (idempotence) pass failed
+  `Microsoft.WindowsTerminal` — an app that was already installed — because a background
+  Winget-AutoUpdate run (started by the installer itself via `RUN_WAU=YES` seconds earlier, and
+  capable of upgrading App Installer/winget) invalidated the per-user
+  `Microsoft.DesktopAppInstaller` alias for longer than the entire 15s retry window the #253 fix
+  covered, so every `Start-Process winget` — pre-check, three install attempts, verify, and the
+  whole retry pass — threw `ERROR_CANT_ACCESS_FILE` against the same broken alias. Two changes in
+  `WingetAppSetup/Public/WingetCore.ps1` plus the new private helper
+  `WingetAppSetup/Private/WingetLaunchResilience.ps1`: (1) launch failures now have their own
+  retry budget in `Install-WingetPackage` (`MaxLaunchAttempts`, default 5, doubling backoff
+  5s+10s+20s+40s = 75s — sized to outlast an App Installer re-registration; a failed launch no
+  longer consumes an install attempt since no process ran, and the result gains a
+  `LaunchAttempts` count), and each launch retry re-resolves the executable via
+  `Resolve-WingetExecutable -BypassAlias`, launching the registered DesktopAppInstaller package's
+  own `winget.exe` directly instead of the broken alias so the retry converges as soon as the new
+  package registers; (2) `Test-WingetPackageInstalled`'s timeout-mode check retries once through
+  the same alias bypass instead of silently swallowing the launch exception and misreporting an
+  installed package as missing — which is exactly how the already-installed Windows Terminal got
+  classified as a failed install. Covered by new Pester coverage in
+  `tests/WingetLaunchResilience.Tests.ps1` and `tests/WingetCore.Tests.ps1`.
 - Fixed `Install-WingetPackage` losing its whole retry budget to a single Start-Process launch
   failure (issue #253): on a scheduled E2E run, `winget.exe` was transiently inaccessible
   (`Start-Process` threw "This command cannot be run due to the error: The file cannot be

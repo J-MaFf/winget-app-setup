@@ -12,7 +12,17 @@ scripts target **Windows PowerShell / PowerShell 7 on Windows**; they cannot run
 Linux or macOS because they depend on `winget`, the `Microsoft.WinGet.Client` module, and
 Windows-only cmdlets.
 
-## Current State — 2026-07-10
+## Current State — 2026-08-09
+
+In review: **winget launch resilience while the app-execution alias is broken**
+([#258](https://github.com/J-MaFf/winget-app-setup/issues/258)) — the 2026-07-27 scheduled E2E
+run failed its idempotence pass because a background Winget-AutoUpdate run (kicked off by the
+installer itself via `RUN_WAU=YES`) invalidated the per-user `winget.exe` alias for longer than
+the 15s launch-retry window from #253, and the pre-check then misreported the already-installed
+Windows Terminal as missing. `Install-WingetPackage` now gives launch failures their own
+doubling-backoff budget (default 75s) and re-resolves the executable through the registered
+`Microsoft.DesktopAppInstaller` package location (bypassing the alias) on every launch retry;
+`Test-WingetPackageInstalled` retries once through the same bypass.
 
 Healthy. **The 2026-07-08 whole-repo multi-agent code-review wave is fully resolved**: all 17
 issues it filed ([#176](https://github.com/J-MaFf/winget-app-setup/issues/176)–[#192](https://github.com/J-MaFf/winget-app-setup/issues/192))
@@ -173,6 +183,7 @@ Pester installs persist across runs there ([#161](https://github.com/J-MaFf/wing
 
 | Issue | Description | Status |
 |-------|-------------|--------|
+| [#258](https://github.com/J-MaFf/winget-app-setup/issues/258) | E2E install run failed: winget alias inaccessible through every launch retry (WAU/App Installer upgrade race) | In review |
 | [#225](https://github.com/J-MaFf/winget-app-setup/issues/225) | Bootstrap PowerShell 7 from Windows PowerShell 5.1 instead of failing fast | In review — PR [#228](https://github.com/J-MaFf/winget-app-setup/pull/228) |
 
 ## Natural Next Steps

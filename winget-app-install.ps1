@@ -58,12 +58,12 @@ param (
 # This script is assembled from the WingetAppSetup module by build/Build-WingetInstallScript.ps1.
 # Edit the function source under WingetAppSetup/Public and WingetAppSetup/Private, then re-run the
 # build to regenerate this file. See readme.md ("Project layout") for details.
-# Build id: 1.0.0+b25dab43 (module version + SHA256 fragment of the function content; issue #189).
+# Build id: 1.0.0+5edd59af (module version + SHA256 fragment of the function content; issue #189).
 # ------------------------------------------------------------------------------------------------
 
 # Content-derived build identity, logged at startup so a transcript from a remote machine
 # identifies exactly which installer build produced it (issue #189).
-$script:InstallerBuildId = '1.0.0+b25dab43'
+$script:InstallerBuildId = '1.0.0+5edd59af'
 
 # ------------------------------------------------Functions------------------------------------------------
 
@@ -1451,6 +1451,92 @@ function Test-WingetSourceHealth {
         Functional = $sourceIsFunctional
         Healthy    = ($sourceIsListed -and $sourceIsFunctional)
     }
+}
+
+# --- WingetLaunchResilience ---
+# Winget launch resilience helpers (issue #258). Start-Process can fail to launch winget.exe at
+# all when the per-user app-execution alias under %LOCALAPPDATA%\Microsoft\WindowsApps is broken
+# or locked - most commonly because the Microsoft.DesktopAppInstaller MSIX package is being
+# upgraded or re-registered at that moment (e.g. by a background Winget-AutoUpdate run, which the
+# installer itself kicks off via RUN_WAU=YES). These helpers classify that failure and resolve a
+# concrete winget.exe path that bypasses the alias entirely, so retries can recover instead of
+# hammering the same broken reparse point.
+
+<#
+.SYNOPSIS
+    Returns true when a Start-Process exception message indicates a transient winget launch failure.
+.DESCRIPTION
+    Matches the two Win32 errors Start-Process surfaces as a terminating exception when winget.exe's
+    own file is transiently inaccessible (issues #253/#258): ERROR_CANT_ACCESS_FILE (1920, "The file
+    cannot be accessed by the system.") and the sibling ERROR_SHARING_VIOLATION ("...being used by
+    another process."). Matched case-insensitively; anything else (e.g. winget genuinely missing
+    from PATH) is a real failure the caller should not retry.
+.PARAMETER Message
+    The exception message to classify.
+.RETURNS
+    [bool]
+#>
+function Test-TransientWingetLaunchError {
+    param (
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [AllowEmptyString()]
+        [string]$Message
+    )
+
+    return $Message -match 'cannot be accessed by the system|being used by another process'
+}
+
+<#
+.SYNOPSIS
+    Resolves the winget executable to launch, optionally bypassing the app-execution alias.
+.DESCRIPTION
+    By default returns the bare command name 'winget', which Start-Process resolves through PATH to
+    the per-user app-execution alias - the fast path that works whenever winget is healthy.
+
+    With -BypassAlias, resolves the real winget.exe inside the registered
+    Microsoft.DesktopAppInstaller package's install location instead (the documented workaround for
+    contexts where the alias is unusable, e.g. SYSTEM). This matters during a DesktopAppInstaller
+    upgrade (issue #258): the alias reparse point can stay broken or locked for the whole
+    registration window, while Get-AppxPackage always reports the currently registered package - so
+    re-resolving on each retry converges on a launchable executable as soon as the new package
+    version lands. Falls back to 'winget' when the package (or its winget.exe) cannot be resolved,
+    preserving the prior behavior.
+.PARAMETER BypassAlias
+    Resolve the concrete winget.exe under the DesktopAppInstaller package install location instead
+    of relying on the PATH alias.
+.RETURNS
+    [string] An absolute path to winget.exe, or the bare command name 'winget'.
+#>
+function Resolve-WingetExecutable {
+    param (
+        [Parameter(Mandatory = $false)]
+        [switch]$BypassAlias
+    )
+
+    if (-not $BypassAlias) {
+        return 'winget'
+    }
+
+    try {
+        # Newest registered version first: mid-upgrade both old and new can briefly be visible, and
+        # the newest is the one whose files are guaranteed to exist once registration completes.
+        $package = Get-AppxPackage -Name 'Microsoft.DesktopAppInstaller' -ErrorAction Stop |
+            Sort-Object -Property { [version]$_.Version } -Descending |
+            Select-Object -First 1
+        if ($package -and $package.InstallLocation) {
+            $candidate = Join-Path $package.InstallLocation 'winget.exe'
+            if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+                return $candidate
+            }
+        }
+    }
+    catch {
+        # Get-AppxPackage can fail under PowerShell 7 when the Appx compatibility session is
+        # unavailable; the alias fallback below keeps the caller's retry loop functional.
+    }
+
+    return 'winget'
 }
 
 # --- AppCatalog ---
@@ -3187,9 +3273,21 @@ function Initialize-WingetSourcesForUser {
     retry loop below entirely: on a GitHub-hosted E2E runner this was observed to fail every
     install in a run, surviving even the caller's separate one-shot retry pass, because neither
     layer paused before retrying (issue #253). The Start-Process call is now wrapped so this
-    specific class of launch exception is retried with the same backoff as the session error,
-    instead of propagating out of the function on the first attempt. Any other exception (e.g.
-    winget genuinely missing) is re-thrown unchanged so it is not silently swallowed.
+    specific class of launch exception is retried, instead of propagating out of the function on
+    the first attempt. Any other exception (e.g. winget genuinely missing) is re-thrown unchanged
+    so it is not silently swallowed.
+
+    Launch failures have their own retry budget, longer than the session-error one (issue #258):
+    the dominant real-world cause is a Microsoft.DesktopAppInstaller (App Installer) upgrade or
+    re-registration in flight - e.g. the background Winget-AutoUpdate run this installer itself
+    starts via RUN_WAU=YES - which breaks the per-user winget.exe app-execution alias for the
+    whole registration window, far longer than the 15s the #253 backoff covered (observed on run
+    30253761253: every launch failed across both install passes). Two things changed: each launch
+    retry first re-resolves the executable via Resolve-WingetExecutable -BypassAlias, launching
+    the registered package's own winget.exe directly instead of the broken alias; and the launch
+    backoff doubles across MaxLaunchAttempts (default 5: 5s+10s+20s+40s = 75s of coverage) so the
+    retry window outlasts a typical App Installer registration. A failed launch never ran winget,
+    so it does not consume one of the MaxAttempts install attempts.
 
     Installs prefer `--scope machine` (issue #159): user-scope installs land in the elevated
     account's profile rather than the logged-on user's, and packages that ship both MSIX and MSI
@@ -3209,14 +3307,21 @@ function Initialize-WingetSourcesForUser {
     Maximum number of install attempts while the session error keeps recurring. Default 3.
 .PARAMETER InitialDelaySeconds
     Seconds to wait before the first retry; the wait doubles on each subsequent retry. Default 5.
+.PARAMETER MaxLaunchAttempts
+    Maximum number of times to attempt launching winget.exe while Start-Process keeps throwing the
+    transient file-lock exception (issue #258). Separate from MaxAttempts because a failed launch
+    never ran an install; the wait starts at InitialDelaySeconds and doubles on each launch retry.
+    Default 5 (75s of total backoff at the default InitialDelaySeconds).
 .RETURNS
-    [hashtable] @{ ExitCode = <int|$null>; Attempts = <int>; SessionErrorExhausted = <bool>; MachineScopeFellBack = <bool>; LaunchErrorExhausted = <bool> }
+    [hashtable] @{ ExitCode = <int|$null>; Attempts = <int>; SessionErrorExhausted = <bool>; MachineScopeFellBack = <bool>; LaunchErrorExhausted = <bool>; LaunchAttempts = <int> }
     SessionErrorExhausted is True only when every attempt failed with the session error.
     MachineScopeFellBack is True when the package had no machine-scope installer and the install
     was retried at winget's default scope. Attempts counts install attempts at the finally
-    selected scope; the one-time scope fallback does not consume a session-error attempt.
-    LaunchErrorExhausted is True only when every attempt failed to launch winget.exe at all (issue
-    #253); ExitCode is $null in that case, since no process ever ran to report one.
+    selected scope; the one-time scope fallback does not consume a session-error attempt, and
+    neither does a failed launch (no process ran). LaunchAttempts counts failed winget launches.
+    LaunchErrorExhausted is True only when winget.exe could not be launched at all through every
+    launch attempt (issues #253/#258); ExitCode is $null and Attempts is 0 in that case, since no
+    process ever ran to report an exit code.
 #>
 function Install-WingetPackage {
     param (
@@ -3230,7 +3335,10 @@ function Install-WingetPackage {
         [int]$MaxAttempts = 3,
 
         [Parameter(Mandatory = $false)]
-        [int]$InitialDelaySeconds = 5
+        [int]$InitialDelaySeconds = 5,
+
+        [Parameter(Mandatory = $false)]
+        [int]$MaxLaunchAttempts = 5
     )
 
     # 0x80073D19 (ERROR_DEPLOYMENT_BLOCKED_BY_USER_LOG_OFF) as a signed Int32, which is how winget
@@ -3239,12 +3347,6 @@ function Install-WingetPackage {
     # 0x8A150010 (APPINSTALLER_CLI_ERROR_NO_APPLICABLE_INSTALLER) as a signed Int32: returned when
     # the --scope machine requirement filters out every installer in the package's manifest.
     $noApplicableInstallerExitCode = -1978335216
-    # Text fragments of the Win32 errors Start-Process surfaces as a terminating exception when it
-    # cannot even launch winget.exe (issue #253): ERROR_CANT_ACCESS_FILE (1920, "The file cannot be
-    # accessed by the system.") and the sibling ERROR_SHARING_VIOLATION ("...being used by another
-    # process."). Matched case-insensitively against the exception message; anything else is a real
-    # failure (e.g. winget missing from PATH) and is re-thrown rather than retried.
-    $transientLaunchErrorPattern = 'cannot be accessed by the system|being used by another process'
 
     $attempt = 0
     $delay = $InitialDelaySeconds
@@ -3252,6 +3354,9 @@ function Install-WingetPackage {
     $useMachineScope = $true
     $machineScopeFellBack = $false
     $launchErrorExhausted = $false
+    $launchAttempt = 0
+    $launchDelay = $InitialDelaySeconds
+    $wingetExecutable = Resolve-WingetExecutable
 
     while ($attempt -lt $MaxAttempts) {
         $attempt++
@@ -3275,27 +3380,36 @@ function Install-WingetPackage {
         }
 
         try {
-            $proc = Start-Process -FilePath 'winget' -ArgumentList $installArgs -NoNewWindow -Wait -PassThru
+            $proc = Start-Process -FilePath $wingetExecutable -ArgumentList $installArgs -NoNewWindow -Wait -PassThru
             $exitCode = $proc.ExitCode
-            $launchErrorExhausted = $false
         }
         catch {
-            if ($_.Exception.Message -notmatch $transientLaunchErrorPattern) {
+            if (-not (Test-TransientWingetLaunchError -Message $_.Exception.Message)) {
                 # Not a known-transient launch failure (e.g. winget genuinely missing) — preserve
                 # the prior behavior of letting it propagate instead of masking a real problem as
                 # an ordinary install failure.
                 throw
             }
 
-            $launchErrorExhausted = $true
-            if ($attempt -lt $MaxAttempts) {
-                Write-WarningMessage "Could not launch winget for $PackageId - its executable appears transiently locked ($($_.Exception.Message)). Waiting ${delay}s before retry $($attempt + 1) of ${MaxAttempts}..."
-                Start-Sleep -Seconds $delay
-                $delay = $delay * 2
+            # A failed launch never ran winget, so it must not consume an install attempt; launch
+            # failures have their own budget (issue #258).
+            $attempt--
+            $launchAttempt++
+            if ($launchAttempt -lt $MaxLaunchAttempts) {
+                # The usual cause is the winget.exe app-execution alias breaking while the
+                # DesktopAppInstaller package is upgraded/re-registered underneath us (e.g. by a
+                # background Winget-AutoUpdate run). Re-resolve fresh each retry, preferring the
+                # registered package's own winget.exe over the alias: as soon as the new package
+                # version lands, this converges on a launchable executable.
+                $wingetExecutable = Resolve-WingetExecutable -BypassAlias
+                Write-WarningMessage "Could not launch winget for $PackageId - its executable appears transiently locked ($($_.Exception.Message)). Waiting ${launchDelay}s before launch retry $($launchAttempt + 1) of ${MaxLaunchAttempts} (next attempt uses '$wingetExecutable')..."
+                Start-Sleep -Seconds $launchDelay
+                $launchDelay = $launchDelay * 2
                 continue
             }
 
-            Write-WarningMessage "Still unable to launch winget for $PackageId after ${MaxAttempts} attempts (executable transiently inaccessible on every attempt)."
+            Write-WarningMessage "Still unable to launch winget for $PackageId after ${MaxLaunchAttempts} launch attempts (executable inaccessible through every attempt, including via the DesktopAppInstaller package location)."
+            $launchErrorExhausted = $true
             $exitCode = $null
             break
         }
@@ -3334,6 +3448,7 @@ function Install-WingetPackage {
         SessionErrorExhausted = ($exitCode -eq $sessionLogoffExitCode)
         MachineScopeFellBack  = $machineScopeFellBack
         LaunchErrorExhausted  = $launchErrorExhausted
+        LaunchAttempts        = $launchAttempt
     }
 }
 
@@ -3355,6 +3470,13 @@ function Install-WingetPackage {
     Both modes determine "installed" via Test-WingetListOutputContainsPackageId rather than a plain
     substring .Contains check, so an unrelated listed id that merely contains $PackageId as a
     substring (e.g. target 'Foo.Bar' inside listed id 'Foo.BarBaz') cannot false-positive.
+
+    In timeout mode, a Start-Process launch failure of the transient file-lock class (the winget
+    app-execution alias breaking during a DesktopAppInstaller upgrade, issue #258) is retried once
+    via Resolve-WingetExecutable -BypassAlias — launching the registered package's own winget.exe
+    directly — before the check gives up. Without this, the outage made this check silently report
+    an actually-installed package as missing, which is how run 30253761253 marked the already
+    installed Microsoft.WindowsTerminal as a failed install.
 .PARAMETER PackageId
     The winget package id to check.
 .PARAMETER TimeoutSeconds
@@ -3383,12 +3505,32 @@ function Test-WingetPackageInstalled {
         $stderrFile = Join-Path $env:TEMP "winget_list_error_$tempSuffix.txt"
 
         try {
-            $listProcess = Start-Process -FilePath 'winget' `
-                -ArgumentList 'list', '--exact', '--id', $PackageId, '--accept-source-agreements', '--disable-interactivity' `
-                -NoNewWindow `
-                -PassThru `
-                -RedirectStandardOutput $stdoutFile `
-                -RedirectStandardError $stderrFile
+            $listArgs = @('list', '--exact', '--id', $PackageId, '--accept-source-agreements', '--disable-interactivity')
+            try {
+                $listProcess = Start-Process -FilePath 'winget' `
+                    -ArgumentList $listArgs `
+                    -NoNewWindow `
+                    -PassThru `
+                    -RedirectStandardOutput $stdoutFile `
+                    -RedirectStandardError $stderrFile
+            }
+            catch {
+                if (-not (Test-TransientWingetLaunchError -Message $_.Exception.Message)) {
+                    throw
+                }
+                # The winget alias is transiently inaccessible (issue #258) — retry once through
+                # the DesktopAppInstaller package's own winget.exe so an installed package is not
+                # misreported as missing. A failure here falls through to the outer catch, which
+                # keeps the original no-throw contract.
+                $bypassExecutable = Resolve-WingetExecutable -BypassAlias
+                Write-WarningMessage "Could not launch winget to check $PackageId ($($_.Exception.Message)). Retrying once via '$bypassExecutable'..."
+                $listProcess = Start-Process -FilePath $bypassExecutable `
+                    -ArgumentList $listArgs `
+                    -NoNewWindow `
+                    -PassThru `
+                    -RedirectStandardOutput $stdoutFile `
+                    -RedirectStandardError $stderrFile
+            }
 
             if (-not $listProcess.WaitForExit($TimeoutSeconds * 1000)) {
                 try { $listProcess.Kill() } catch { }
