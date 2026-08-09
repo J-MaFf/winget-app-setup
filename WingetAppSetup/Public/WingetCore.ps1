@@ -404,10 +404,14 @@ function Install-WingetPackage {
             $exitCode = $proc.ExitCode
         }
         catch {
-            if (-not (Test-TransientWingetLaunchError -Message $_.Exception.Message)) {
-                # Not a known-transient launch failure (e.g. winget genuinely missing) — preserve
-                # the prior behavior of letting it propagate instead of masking a real problem as
-                # an ordinary install failure.
+            if (-not (Test-TransientWingetLaunchError -Message $_.Exception.Message) -and $wingetExecutable -eq 'winget') {
+                # Not a known-transient launch failure of the alias (e.g. winget genuinely
+                # missing) — preserve the prior behavior of letting it propagate instead of
+                # masking a real problem as an ordinary install failure. A concrete bypass path
+                # is exempt from this re-throw: the package version it named can be deleted
+                # mid-backoff by the very App Installer upgrade being ridden out (surfacing as
+                # ERROR_FILE_NOT_FOUND, not the file-lock errors), and the right response is to
+                # re-resolve on the next launch retry, not to abort the install loop.
                 throw
             }
 

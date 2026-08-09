@@ -88,8 +88,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   package registers; (2) `Test-WingetPackageInstalled`'s timeout-mode check retries once through
   the same alias bypass instead of silently swallowing the launch exception and misreporting an
   installed package as missing — which is exactly how the already-installed Windows Terminal got
-  classified as a failed install. Covered by new Pester coverage in
-  `tests/WingetLaunchResilience.Tests.ps1` and `tests/WingetCore.Tests.ps1`.
+  classified as a failed install. A launch failure of a concrete bypass path is always retried
+  (even `ERROR_FILE_NOT_FOUND`, since the resolved package version can be deleted mid-backoff by
+  the completing upgrade), while a non-transient failure of the plain `winget` alias still
+  re-throws so a genuinely missing winget is not masked. Covered by new Pester coverage in
+  `tests/WingetLaunchResilience.Tests.ps1` and `tests/WingetCore.Tests.ps1`
+  ([#259](https://github.com/J-MaFf/winget-app-setup/pull/259)).
 - Fixed `Install-WingetPackage` losing its whole retry budget to a single Start-Process launch
   failure (issue #253): on a scheduled E2E run, `winget.exe` was transiently inaccessible
   (`Start-Process` threw "This command cannot be run due to the error: The file cannot be

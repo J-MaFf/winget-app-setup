@@ -58,12 +58,12 @@ param (
 # This script is assembled from the WingetAppSetup module by build/Build-WingetInstallScript.ps1.
 # Edit the function source under WingetAppSetup/Public and WingetAppSetup/Private, then re-run the
 # build to regenerate this file. See readme.md ("Project layout") for details.
-# Build id: 1.0.0+5edd59af (module version + SHA256 fragment of the function content; issue #189).
+# Build id: 1.0.0+40fcd2ea (module version + SHA256 fragment of the function content; issue #189).
 # ------------------------------------------------------------------------------------------------
 
 # Content-derived build identity, logged at startup so a transcript from a remote machine
 # identifies exactly which installer build produced it (issue #189).
-$script:InstallerBuildId = '1.0.0+5edd59af'
+$script:InstallerBuildId = '1.0.0+40fcd2ea'
 
 # ------------------------------------------------Functions------------------------------------------------
 
@@ -3384,10 +3384,14 @@ function Install-WingetPackage {
             $exitCode = $proc.ExitCode
         }
         catch {
-            if (-not (Test-TransientWingetLaunchError -Message $_.Exception.Message)) {
-                # Not a known-transient launch failure (e.g. winget genuinely missing) — preserve
-                # the prior behavior of letting it propagate instead of masking a real problem as
-                # an ordinary install failure.
+            if (-not (Test-TransientWingetLaunchError -Message $_.Exception.Message) -and $wingetExecutable -eq 'winget') {
+                # Not a known-transient launch failure of the alias (e.g. winget genuinely
+                # missing) — preserve the prior behavior of letting it propagate instead of
+                # masking a real problem as an ordinary install failure. A concrete bypass path
+                # is exempt from this re-throw: the package version it named can be deleted
+                # mid-backoff by the very App Installer upgrade being ridden out (surfacing as
+                # ERROR_FILE_NOT_FOUND, not the file-lock errors), and the right response is to
+                # re-resolve on the next launch retry, not to abort the install loop.
                 throw
             }
 

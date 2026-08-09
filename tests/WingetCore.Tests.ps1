@@ -698,6 +698,36 @@ Describe 'Install-WingetPackage (transient launch-exception backoff, issue #253)
         Should -Invoke Start-Process -Times 1 -Exactly
         Should -Invoke Start-Sleep -Times 0 -Exactly
     }
+
+    It 'Keeps retrying when the resolved bypass path itself vanishes mid-backoff (issue #258)' {
+        # Attempt 1: the alias is locked. Attempt 2: the resolved package path was deleted by the
+        # completing App Installer upgrade (ERROR_FILE_NOT_FOUND - NOT a file-lock error). That
+        # must re-enter the launch retry with a fresh resolution, not abort the install loop.
+        # Attempt 3: the freshly re-resolved path works.
+        $script:resolveCount = 0
+        Mock Resolve-WingetExecutable {
+            if (-not $BypassAlias) { return 'winget' }
+            $script:resolveCount++
+            "C:\WindowsApps\DAI_v$script:resolveCount\winget.exe"
+        }
+        Mock Start-Process {
+            if ($FilePath -eq 'winget') {
+                throw 'This command cannot be run due to the error: The file cannot be accessed by the system.'
+            }
+            if ($FilePath -eq 'C:\WindowsApps\DAI_v1\winget.exe') {
+                throw 'This command cannot be run due to the error: The system cannot find the file specified.'
+            }
+            [pscustomobject]@{ ExitCode = 0 }
+        }
+
+        $result = Install-WingetPackage -PackageId 'Microsoft.WindowsTerminal' -MaxAttempts 3 -InitialDelaySeconds 1
+
+        $result.ExitCode | Should -Be 0
+        $result.Attempts | Should -Be 1
+        $result.LaunchAttempts | Should -Be 2
+        $result.LaunchErrorExhausted | Should -Be $false
+        Should -Invoke Start-Process -Times 1 -Exactly -ParameterFilter { $FilePath -eq 'C:\WindowsApps\DAI_v2\winget.exe' }
+    }
 }
 
 Describe 'Test-WingetPackageInstalled (timeout support, issue #188)' {
