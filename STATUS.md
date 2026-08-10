@@ -12,7 +12,7 @@ scripts target **Windows PowerShell / PowerShell 7 on Windows**; they cannot run
 Linux or macOS because they depend on `winget`, the `Microsoft.WinGet.Client` module, and
 Windows-only cmdlets.
 
-## Current State — 2026-08-09
+## Current State — 2026-08-10
 
 In review: **winget launch resilience while the app-execution alias is broken**
 ([#258](https://github.com/J-MaFf/winget-app-setup/issues/258)) — the 2026-07-27 scheduled E2E
@@ -137,6 +137,7 @@ Pester installs persist across runs there ([#161](https://github.com/J-MaFf/wing
 
 | Issue | Description | PR |
 |-------|-------------|----|
+| [#260](https://github.com/J-MaFf/winget-app-setup/issues/260) | Adopt shared reusable claude.yml workflow from J-MaFf/.github | [#261](https://github.com/J-MaFf/winget-app-setup/pull/261) |
 | [#226](https://github.com/J-MaFf/winget-app-setup/issues/226) | IEX non-admin guidance test silently always skipped (`-Skip` bound at discovery time reads `BeforeAll` variables as `$null`) | [#227](https://github.com/J-MaFf/winget-app-setup/pull/227) |
 | [#217](https://github.com/J-MaFf/winget-app-setup/issues/217) | Dell Command Update cannot install on GitHub-hosted runners — manufacturer-aware catalog gating | [#220](https://github.com/J-MaFf/winget-app-setup/pull/220) |
 | [#221](https://github.com/J-MaFf/winget-app-setup/issues/221) | Pre-flight OS check misidentifies Windows 11 | [#222](https://github.com/J-MaFf/winget-app-setup/pull/222) |
