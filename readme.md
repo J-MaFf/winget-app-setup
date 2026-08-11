@@ -6,11 +6,21 @@ A one-line guide for running the installer.
 
 > **Runs on PowerShell 7+ (`pwsh`), but bootstraps itself from Windows PowerShell 5.1.** The
 > installer's logic requires PowerShell 7. Run from the built-in Windows PowerShell 5.1
-> (`powershell.exe`) — the only shell on a fresh machine — and it finds PowerShell 7 (or
-> installs it via winget, no consent prompt), then relaunches itself under
-> `pwsh` in the same window with your switches forwarded
-> ([#225](https://github.com/J-MaFf/winget-app-setup/issues/225)). A `-WhatIf` run never
-> installs anything — without PowerShell 7 present it just previews the bootstrap.
+> (`powershell.exe`) — the only shell on a fresh machine — and it finds PowerShell 7, or
+> installs it with no consent prompt, then relaunches itself under `pwsh` in the same window
+> with your switches forwarded ([#225](https://github.com/J-MaFf/winget-app-setup/issues/225)).
+> A `-WhatIf` run never installs anything — without PowerShell 7 present it just previews the
+> bootstrap.
+>
+> Installing it takes one of two paths, in order:
+>
+> 1. **winget**, when the invoking account has it.
+> 2. **The official MSI**, when it does not — the usual reason being that you elevated as a
+>    separate admin account, since winget is a per-user MSIX and a never-logged-in account has
+>    no copy of it. This path downloads ~110 MB and then runs `msiexec`, so expect a couple of
+>    minutes; it prints `X of 110.2 MB (N%)` progress lines throughout, and a stalled download
+>    fails with a message rather than waiting forever
+>    ([#263](https://github.com/J-MaFf/winget-app-setup/issues/263)).
 
 From the repository root, execute (after cloning):
 
