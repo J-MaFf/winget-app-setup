@@ -14,7 +14,7 @@ Windows-only cmdlets.
 
 ## Current State — 2026-08-11
 
-In review: **cheapest-first winget bootstrap ladder**
+Landed: **cheapest-first winget bootstrap ladder**
 ([#265](https://github.com/J-MaFf/winget-app-setup/issues/265)) — on a real cross-user elevation run
 on 2026-08-11, `Repair-WinGetPackageManager -Latest -Force` was rejected with `0x80073D06` because
 the machine's `Microsoft.WindowsAppRuntime.1.8` (8000.921.1539.0) is newer than the version the
@@ -25,7 +25,17 @@ printing a wall of AppX errors that reads like a broken machine. The fix registe
 then falls back to the repair cmdlet — unforced before forced — and treats `0x80073D06` as
 non-retryable rather than escalating into a second large download.
 
-In review: **winget launch resilience while the app-execution alias is broken**
+Landed: **the PowerShell 7 MSI fallback can no longer read as a hang**
+([#263](https://github.com/J-MaFf/winget-app-setup/issues/263)) — on a machine whose invoking
+account has no winget (a secondary admin account, since winget is a per-user MSIX), the bootstrap
+used to hand the whole install to `aka.ms/install-powershell.ps1 -UseMSI -Quiet`, which suppresses
+progress on Windows PowerShell, downloads 110 MB with an untimed `Invoke-WebRequest`, and waits on
+`msiexec` forever — 3.5 minutes of measured silence on a healthy link and unbounded on a stalled
+one, with nothing to tell them apart. `Invoke-PowerShell7Bootstrap` now resolves, downloads, and
+installs the MSI itself with a stall timeout, an overall time limit, and periodic progress lines,
+keeping the upstream script only as a last resort.
+
+Landed: **winget launch resilience while the app-execution alias is broken**
 ([#258](https://github.com/J-MaFf/winget-app-setup/issues/258)) — the 2026-07-27 scheduled E2E
 run failed its idempotence pass because a background Winget-AutoUpdate run (kicked off by the
 installer itself via `RUN_WAU=YES`) invalidated the per-user `winget.exe` alias for longer than
@@ -44,11 +54,12 @@ pre-commit drift check + guard-stack documentation
 guard stack that keeps `winget-app-install.ps1` from drifting from the module is documented
 in readme.md ("Why `winget-app-install.ps1` cannot drift from the module").
 
-In review: **the installer now bootstraps PowerShell 7 from Windows PowerShell 5.1**
+Landed: **the installer bootstraps PowerShell 7 from Windows PowerShell 5.1**
 ([#225](https://github.com/J-MaFf/winget-app-setup/issues/225)) — instead of the #210
-fail-fast, the 5.1 branch finds or installs `pwsh` (winget, MSI fallback, interactive
-consent) and relaunches the installer in the same console with switches forwarded, so the
-documented one-liner works on fresh shop machines that ship with only Windows PowerShell.
+fail-fast, the 5.1 branch finds or installs `pwsh` (winget first, then the MSI) and relaunches
+the installer in the same console with switches forwarded, so the documented one-liner works on
+fresh shop machines that ship with only Windows PowerShell. The install-consent prompt that
+shipped with it was removed by #230, and the MSI path was made time-bounded by #263.
 
 Earlier, **fixed the winget source probe false-failing every run** ([#174](https://github.com/J-MaFf/winget-app-setup/issues/174)):
 the `Invoke-WingetSourceProbe` command passed `--accept-source-agreements`, which is invalid for
@@ -148,7 +159,11 @@ Pester installs persist across runs there ([#161](https://github.com/J-MaFf/wing
 
 | Issue | Description | PR |
 |-------|-------------|----|
+| [#265](https://github.com/J-MaFf/winget-app-setup/issues/265) | `Repair-WinGetPackageManager` aborts with 0x80073D06 when the machine has a newer WindowsAppRuntime, forcing a 200 MB fallback download | [#266](https://github.com/J-MaFf/winget-app-setup/pull/266) |
+| [#263](https://github.com/J-MaFf/winget-app-setup/issues/263) | PowerShell 7 MSI fallback blocks forever with no output (reads as a hang) | [#264](https://github.com/J-MaFf/winget-app-setup/pull/264) |
 | [#260](https://github.com/J-MaFf/winget-app-setup/issues/260) | Adopt shared reusable claude.yml workflow from J-MaFf/.github | [#261](https://github.com/J-MaFf/winget-app-setup/pull/261) |
+| [#258](https://github.com/J-MaFf/winget-app-setup/issues/258) | E2E install run failed: winget alias inaccessible through every launch retry (WAU/App Installer upgrade race) | [#259](https://github.com/J-MaFf/winget-app-setup/pull/259) |
+| [#225](https://github.com/J-MaFf/winget-app-setup/issues/225) | Bootstrap PowerShell 7 from Windows PowerShell 5.1 instead of failing fast | [#228](https://github.com/J-MaFf/winget-app-setup/pull/228) |
 | [#226](https://github.com/J-MaFf/winget-app-setup/issues/226) | IEX non-admin guidance test silently always skipped (`-Skip` bound at discovery time reads `BeforeAll` variables as `$null`) | [#227](https://github.com/J-MaFf/winget-app-setup/pull/227) |
 | [#217](https://github.com/J-MaFf/winget-app-setup/issues/217) | Dell Command Update cannot install on GitHub-hosted runners — manufacturer-aware catalog gating | [#220](https://github.com/J-MaFf/winget-app-setup/pull/220) |
 | [#221](https://github.com/J-MaFf/winget-app-setup/issues/221) | Pre-flight OS check misidentifies Windows 11 | [#222](https://github.com/J-MaFf/winget-app-setup/pull/222) |
@@ -195,11 +210,7 @@ Pester installs persist across runs there ([#161](https://github.com/J-MaFf/wing
 
 | Issue | Description | Status |
 |-------|-------------|--------|
-| [#265](https://github.com/J-MaFf/winget-app-setup/issues/265) | `Repair-WinGetPackageManager` aborts with `0x80073D06` when the machine has a newer `WindowsAppRuntime`, leaving winget unavailable | In review — PR [#266](https://github.com/J-MaFf/winget-app-setup/pull/266) |
-| [#263](https://github.com/J-MaFf/winget-app-setup/issues/263) | PowerShell 7 MSI fallback blocks forever with no output (looks like a hang) | Open |
-| [#258](https://github.com/J-MaFf/winget-app-setup/issues/258) | E2E install run failed: winget alias inaccessible through every launch retry (WAU/App Installer upgrade race) | In review — PR [#259](https://github.com/J-MaFf/winget-app-setup/pull/259) |
-| [#225](https://github.com/J-MaFf/winget-app-setup/issues/225) | Bootstrap PowerShell 7 from Windows PowerShell 5.1 instead of failing fast | In review — PR [#228](https://github.com/J-MaFf/winget-app-setup/pull/228) |
-| [#263](https://github.com/J-MaFf/winget-app-setup/issues/263) | PowerShell 7 MSI fallback blocks forever with no output (reads as a hang) | In review — PR [#264](https://github.com/J-MaFf/winget-app-setup/pull/264) |
+| [#215](https://github.com/J-MaFf/winget-app-setup/issues/215) | E2E tier 2: cross-user elevation end-to-end run on a snapshot-rollback Proxmox VM | Open |
 
 ## Natural Next Steps
 
