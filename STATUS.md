@@ -12,7 +12,18 @@ scripts target **Windows PowerShell / PowerShell 7 on Windows**; they cannot run
 Linux or macOS because they depend on `winget`, the `Microsoft.WinGet.Client` module, and
 Windows-only cmdlets.
 
-## Current State — 2026-08-10
+## Current State — 2026-08-11
+
+In review: **cheapest-first winget bootstrap ladder**
+([#265](https://github.com/J-MaFf/winget-app-setup/issues/265)) — on a real cross-user elevation run
+on 2026-08-11, `Repair-WinGetPackageManager -Latest -Force` was rejected with `0x80073D06` because
+the machine's `Microsoft.WindowsAppRuntime.1.8` (8000.921.1539.0) is newer than the version the
+WinGet release pins (8000.616.304.0), so the cmdlet aborted before registering App Installer. The run
+did finish, but only after falling all the way through to the ~200 MB `aka.ms/getwinget` download and
+printing a wall of AppX errors that reads like a broken machine. The fix registers the already-staged
+`Microsoft.DesktopAppInstaller` package for the elevating account first (no download at all), only
+then falls back to the repair cmdlet — unforced before forced — and treats `0x80073D06` as
+non-retryable rather than escalating into a second large download.
 
 In review: **winget launch resilience while the app-execution alias is broken**
 ([#258](https://github.com/J-MaFf/winget-app-setup/issues/258)) — the 2026-07-27 scheduled E2E
@@ -184,6 +195,8 @@ Pester installs persist across runs there ([#161](https://github.com/J-MaFf/wing
 
 | Issue | Description | Status |
 |-------|-------------|--------|
+| [#265](https://github.com/J-MaFf/winget-app-setup/issues/265) | `Repair-WinGetPackageManager` aborts with `0x80073D06` when the machine has a newer `WindowsAppRuntime`, leaving winget unavailable | In review — PR [#266](https://github.com/J-MaFf/winget-app-setup/pull/266) |
+| [#263](https://github.com/J-MaFf/winget-app-setup/issues/263) | PowerShell 7 MSI fallback blocks forever with no output (looks like a hang) | Open |
 | [#258](https://github.com/J-MaFf/winget-app-setup/issues/258) | E2E install run failed: winget alias inaccessible through every launch retry (WAU/App Installer upgrade race) | In review — PR [#259](https://github.com/J-MaFf/winget-app-setup/pull/259) |
 | [#225](https://github.com/J-MaFf/winget-app-setup/issues/225) | Bootstrap PowerShell 7 from Windows PowerShell 5.1 instead of failing fast | In review — PR [#228](https://github.com/J-MaFf/winget-app-setup/pull/228) |
 | [#263](https://github.com/J-MaFf/winget-app-setup/issues/263) | PowerShell 7 MSI fallback blocks forever with no output (reads as a hang) | In review — PR [#264](https://github.com/J-MaFf/winget-app-setup/pull/264) |
