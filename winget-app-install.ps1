@@ -58,12 +58,12 @@ param (
 # This script is assembled from the WingetAppSetup module by build/Build-WingetInstallScript.ps1.
 # Edit the function source under WingetAppSetup/Public and WingetAppSetup/Private, then re-run the
 # build to regenerate this file. See readme.md ("Project layout") for details.
-# Build id: 1.0.0+bc94bb48 (module version + SHA256 fragment of the function content; issue #189).
+# Build id: 1.0.0+8d8f7de6 (module version + SHA256 fragment of the function content; issue #189).
 # ------------------------------------------------------------------------------------------------
 
 # Content-derived build identity, logged at startup so a transcript from a remote machine
 # identifies exactly which installer build produced it (issue #189).
-$script:InstallerBuildId = '1.0.0+bc94bb48'
+$script:InstallerBuildId = '1.0.0+8d8f7de6'
 
 # ------------------------------------------------Functions------------------------------------------------
 
@@ -1756,7 +1756,8 @@ function Test-WingetSourceHealth {
     NEWER build of one of them - routine on managed fleets, where Teams / Phone Link / an MDM push
     updates WindowsAppRuntime independently - AppX rejects the downgrade with 0x80073D06
     (ERROR_INSTALL_PACKAGE_DOWNGRADE) and the cmdlet aborts BEFORE it ever registers App Installer,
-    so winget stays missing on a machine with nothing actually wrong with it (issue #265).
+    on a machine with nothing actually wrong with it. Callers still recover further down their
+    ladder, but only by paying for the heaviest rung they have (issue #265).
 
     That failure is not retryable: -Force only makes the cmdlet more insistent about deploying the
     older pinned build. Callers use this classifier to stop escalating and move to their next
@@ -3523,7 +3524,9 @@ function Test-AndInstallWinget {
         return $true
     }
     else {
-        Write-WarningMessage 'Winget is not available. Trying to register the App Installer package already on this machine...'
+        # Register-WingetAppInstallerForUser narrates its own progress, so this only states the
+        # condition - saying "trying to register..." here too would duplicate its first line.
+        Write-WarningMessage 'Winget is not available.'
         if (Register-WingetAppInstallerForUser) {
             if (Get-Command winget -ErrorAction SilentlyContinue) {
                 Write-Success 'Winget is available after registering App Installer for this account.'

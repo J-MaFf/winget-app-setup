@@ -70,7 +70,9 @@ function Test-AndInstallWinget {
         return $true
     }
     else {
-        Write-WarningMessage 'Winget is not available. Trying to register the App Installer package already on this machine...'
+        # Register-WingetAppInstallerForUser narrates its own progress, so this only states the
+        # condition - saying "trying to register..." here too would duplicate its first line.
+        Write-WarningMessage 'Winget is not available.'
         if (Register-WingetAppInstallerForUser) {
             if (Get-Command winget -ErrorAction SilentlyContinue) {
                 Write-Success 'Winget is available after registering App Installer for this account.'

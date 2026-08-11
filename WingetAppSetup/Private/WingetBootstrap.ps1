@@ -164,7 +164,8 @@ function Test-WingetSourceHealth {
     NEWER build of one of them - routine on managed fleets, where Teams / Phone Link / an MDM push
     updates WindowsAppRuntime independently - AppX rejects the downgrade with 0x80073D06
     (ERROR_INSTALL_PACKAGE_DOWNGRADE) and the cmdlet aborts BEFORE it ever registers App Installer,
-    so winget stays missing on a machine with nothing actually wrong with it (issue #265).
+    on a machine with nothing actually wrong with it. Callers still recover further down their
+    ladder, but only by paying for the heaviest rung they have (issue #265).
 
     That failure is not retryable: -Force only makes the cmdlet more insistent about deploying the
     older pinned build. Callers use this classifier to stop escalating and move to their next
