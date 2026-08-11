@@ -15,14 +15,15 @@ Windows-only cmdlets.
 ## Current State — 2026-08-11
 
 In review: **cheapest-first winget bootstrap ladder**
-([#265](https://github.com/J-MaFf/winget-app-setup/issues/265)) — a real cross-user elevation run on
-2026-08-11 got as far as installing and importing `Microsoft.WinGet.Client`, then failed to bootstrap
-winget at all: `Repair-WinGetPackageManager -Latest -Force` was rejected with `0x80073D06` because
+([#265](https://github.com/J-MaFf/winget-app-setup/issues/265)) — on a real cross-user elevation run
+on 2026-08-11, `Repair-WinGetPackageManager -Latest -Force` was rejected with `0x80073D06` because
 the machine's `Microsoft.WindowsAppRuntime.1.8` (8000.921.1539.0) is newer than the version the
-WinGet release pins (8000.616.304.0), so the cmdlet aborted before registering App Installer. The fix
-registers the already-staged `Microsoft.DesktopAppInstaller` package for the elevating account first
-(no download), only then falls back to the repair cmdlet — unforced before forced — and treats
-`0x80073D06` as non-retryable rather than escalating into a second large download.
+WinGet release pins (8000.616.304.0), so the cmdlet aborted before registering App Installer. The run
+did finish, but only after falling all the way through to the ~200 MB `aka.ms/getwinget` download and
+printing a wall of AppX errors that reads like a broken machine. The fix registers the already-staged
+`Microsoft.DesktopAppInstaller` package for the elevating account first (no download at all), only
+then falls back to the repair cmdlet — unforced before forced — and treats `0x80073D06` as
+non-retryable rather than escalating into a second large download.
 
 In review: **winget launch resilience while the app-execution alias is broken**
 ([#258](https://github.com/J-MaFf/winget-app-setup/issues/258)) — the 2026-07-27 scheduled E2E
