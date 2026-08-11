@@ -317,7 +317,10 @@ function Install-PowerShell7FromMsi {
     $downloadDirectory = Join-Path ([System.IO.Path]::GetTempPath()) ('winget-app-setup-pwsh-' + [System.Guid]::NewGuid().ToString('N'))
     $msiPath = Join-Path $downloadDirectory $msiInfo.FileName
     try {
-        [void](New-Item -Path $downloadDirectory -ItemType Directory -Force)
+        # -ErrorAction Stop, without which this catch would be decorative: a New-Item failure is
+        # non-terminating under 5.1's default preference, so the run would continue to a download
+        # into a directory that does not exist and report the far less legible stream error.
+        [void](New-Item -Path $downloadDirectory -ItemType Directory -Force -ErrorAction Stop)
     }
     catch {
         Write-WarningMessage "Could not create a temporary directory for the PowerShell 7 MSI: $_"

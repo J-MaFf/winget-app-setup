@@ -326,6 +326,15 @@ Describe 'Install-PowerShell7FromMsi' {
         Should -Invoke Remove-Item -Times 1 -Exactly -ParameterFilter { $LiteralPath -like '*winget-app-setup-pwsh-*' }
     }
 
+    It 'Never downloads when the temp directory cannot be created' {
+        Mock New-Item { throw 'Access to the path is denied.' }
+
+        Install-PowerShell7FromMsi | Should -Be $false
+        Should -Invoke Save-WebFileWithTimeout -Times 0
+        Should -Invoke Start-Process -Times 0
+        Should -Invoke Write-WarningMessage -Times 1 -ParameterFilter { $Message -match 'temporary directory' }
+    }
+
     It 'Never downloads when the release cannot be resolved' {
         Mock Get-PowerShell7MsiInfo { $null }
 

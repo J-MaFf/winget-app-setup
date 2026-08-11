@@ -58,12 +58,12 @@ param (
 # This script is assembled from the WingetAppSetup module by build/Build-WingetInstallScript.ps1.
 # Edit the function source under WingetAppSetup/Public and WingetAppSetup/Private, then re-run the
 # build to regenerate this file. See readme.md ("Project layout") for details.
-# Build id: 1.0.0+94e65293 (module version + SHA256 fragment of the function content; issue #189).
+# Build id: 1.0.0+45fed6f6 (module version + SHA256 fragment of the function content; issue #189).
 # ------------------------------------------------------------------------------------------------
 
 # Content-derived build identity, logged at startup so a transcript from a remote machine
 # identifies exactly which installer build produced it (issue #189).
-$script:InstallerBuildId = '1.0.0+94e65293'
+$script:InstallerBuildId = '1.0.0+45fed6f6'
 
 # ------------------------------------------------Functions------------------------------------------------
 
@@ -1147,7 +1147,10 @@ function Install-PowerShell7FromMsi {
     $downloadDirectory = Join-Path ([System.IO.Path]::GetTempPath()) ('winget-app-setup-pwsh-' + [System.Guid]::NewGuid().ToString('N'))
     $msiPath = Join-Path $downloadDirectory $msiInfo.FileName
     try {
-        [void](New-Item -Path $downloadDirectory -ItemType Directory -Force)
+        # -ErrorAction Stop, without which this catch would be decorative: a New-Item failure is
+        # non-terminating under 5.1's default preference, so the run would continue to a download
+        # into a directory that does not exist and report the far less legible stream error.
+        [void](New-Item -Path $downloadDirectory -ItemType Directory -Force -ErrorAction Stop)
     }
     catch {
         Write-WarningMessage "Could not create a temporary directory for the PowerShell 7 MSI: $_"
