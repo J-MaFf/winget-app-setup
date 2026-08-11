@@ -137,6 +137,222 @@ Describe 'Find-PowerShell7' {
     }
 }
 
+Describe 'Get-PowerShell7MsiInfo' {
+    BeforeEach {
+        Mock Write-WarningMessage { }
+        Mock Invoke-RestMethod { [pscustomobject]@{ ReleaseTag = 'v7.6.4' } }
+        $script:savedArchitecture = $env:PROCESSOR_ARCHITECTURE
+        $script:savedArchitectureW6432 = $env:PROCESSOR_ARCHITEW6432
+        $env:PROCESSOR_ARCHITECTURE = 'AMD64'
+        $env:PROCESSOR_ARCHITEW6432 = ''
+    }
+    AfterEach {
+        $env:PROCESSOR_ARCHITECTURE = $script:savedArchitecture
+        $env:PROCESSOR_ARCHITEW6432 = $script:savedArchitectureW6432
+    }
+
+    It 'Builds the x64 MSI url from the release metadata' {
+        $info = Get-PowerShell7MsiInfo
+
+        $info.Version | Should -Be '7.6.4'
+        $info.FileName | Should -Be 'PowerShell-7.6.4-win-x64.msi'
+        $info.Url | Should -Be 'https://github.com/PowerShell/PowerShell/releases/download/v7.6.4/PowerShell-7.6.4-win-x64.msi'
+    }
+
+    It 'Bounds the metadata request with a timeout' {
+        # The whole point of issue #263: no request on this path may be able to block forever.
+        Get-PowerShell7MsiInfo | Out-Null
+
+        Should -Invoke Invoke-RestMethod -Times 1 -Exactly -ParameterFilter {
+            $TimeoutSec -gt 0
+        }
+    }
+
+    It 'Honors a custom MetadataUrl' {
+        Get-PowerShell7MsiInfo -MetadataUrl 'https://example.test/metadata.json' | Out-Null
+
+        Should -Invoke Invoke-RestMethod -Times 1 -Exactly -ParameterFilter { $Uri -eq 'https://example.test/metadata.json' }
+    }
+
+    It 'Resolves arm64' {
+        $env:PROCESSOR_ARCHITECTURE = 'ARM64'
+
+        (Get-PowerShell7MsiInfo).FileName | Should -Be 'PowerShell-7.6.4-win-arm64.msi'
+    }
+
+    It 'Prefers PROCESSOR_ARCHITEW6432 so a 32-bit host does not pick the x86 MSI' {
+        # A 32-bit host process (some RMM agents) reports x86 on a 64-bit OS - the same stale-view
+        # problem Find-PowerShell7 handles with ProgramW6432.
+        $env:PROCESSOR_ARCHITECTURE = 'x86'
+        $env:PROCESSOR_ARCHITEW6432 = 'AMD64'
+
+        (Get-PowerShell7MsiInfo).FileName | Should -Be 'PowerShell-7.6.4-win-x64.msi'
+    }
+
+    It 'Uses the x86 MSI on a genuinely 32-bit OS' {
+        $env:PROCESSOR_ARCHITECTURE = 'x86'
+        $env:PROCESSOR_ARCHITEW6432 = ''
+
+        (Get-PowerShell7MsiInfo).FileName | Should -Be 'PowerShell-7.6.4-win-x86.msi'
+    }
+
+    It 'Returns $null for an unrecognized architecture without calling the network' {
+        $env:PROCESSOR_ARCHITECTURE = 'IA64'
+
+        Get-PowerShell7MsiInfo | Should -BeNullOrEmpty
+        Should -Invoke Invoke-RestMethod -Times 0
+    }
+
+    It 'Returns $null when the metadata request fails' {
+        Mock Invoke-RestMethod { throw 'network unreachable' }
+
+        Get-PowerShell7MsiInfo | Should -BeNullOrEmpty
+    }
+
+    It 'Returns $null when the metadata carries no ReleaseTag' {
+        Mock Invoke-RestMethod { [pscustomobject]@{ PreviewReleaseTag = 'v7.7.0-preview.1' } }
+
+        Get-PowerShell7MsiInfo | Should -BeNullOrEmpty
+    }
+}
+
+Describe 'Save-WebFileWithTimeout' {
+    BeforeEach {
+        Mock Write-Info { }
+        Mock Write-WarningMessage { }
+    }
+
+    It 'Returns $false instead of throwing when the request cannot even be created' {
+        Save-WebFileWithTimeout -Uri 'not-a-url' -DestinationPath (Join-Path $TestDrive 'out.bin') | Should -Be $false
+        Should -Invoke Write-WarningMessage -Times 1 -ParameterFilter { $Message -match 'download failed' }
+    }
+
+    It 'Returns $false when the host cannot be resolved' {
+        # Bounded by the request timeout rather than hanging - the defect issue #263 exists for.
+        Save-WebFileWithTimeout -Uri 'https://no-such-host.invalid/file.msi' -DestinationPath (Join-Path $TestDrive 'out.bin') -StallTimeoutSeconds 5 -MaximumSeconds 15 |
+            Should -Be $false
+    }
+}
+
+Describe 'Install-PowerShell7FromMsi' {
+    BeforeEach {
+        Mock Write-Info { }
+        Mock Write-WarningMessage { }
+        Mock New-Item { }
+        Mock Remove-Item { }
+        Mock Get-PowerShell7MsiInfo {
+            @{
+                Version  = '7.6.4'
+                FileName = 'PowerShell-7.6.4-win-x64.msi'
+                Url      = 'https://example.test/PowerShell-7.6.4-win-x64.msi'
+            }
+        }
+        Mock Save-WebFileWithTimeout { $true }
+
+        # msiexec stand-in. Start-Process -PassThru returns a real Process, so the double needs the
+        # two members production reads (WaitForExit/ExitCode) plus Kill for the timeout path.
+        $script:msiExited = $true
+        $script:msiExitCode = 0
+        $script:msiKilled = $false
+        $script:msiProcess = [pscustomobject]@{}
+        $script:msiProcess | Add-Member -MemberType ScriptProperty -Name ExitCode -Value { $script:msiExitCode }
+        $script:msiProcess | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value { param($Milliseconds) return $script:msiExited }
+        $script:msiProcess | Add-Member -MemberType ScriptMethod -Name Kill -Value { $script:msiKilled = $true }
+        Mock Start-Process { $script:msiProcess } -ParameterFilter { $FilePath -eq 'msiexec.exe' }
+    }
+
+    It 'Downloads the resolved MSI and installs it quietly' {
+        Install-PowerShell7FromMsi | Should -Be $true
+
+        Should -Invoke Save-WebFileWithTimeout -Times 1 -Exactly -ParameterFilter {
+            $Uri -eq 'https://example.test/PowerShell-7.6.4-win-x64.msi' -and
+            $DestinationPath -like '*winget-app-setup-pwsh-*PowerShell-7.6.4-win-x64.msi'
+        }
+        Should -Invoke Start-Process -Times 1 -Exactly -ParameterFilter {
+            $FilePath -eq 'msiexec.exe' -and
+            $ArgumentList -contains '/i' -and
+            $ArgumentList -contains '/quiet' -and
+            $ArgumentList -contains '/norestart'
+        }
+    }
+
+    It 'Downloads into a unique per-run directory, then removes it' {
+        Install-PowerShell7FromMsi | Out-Null
+
+        Should -Invoke New-Item -Times 1 -Exactly -ParameterFilter { $Path -like '*winget-app-setup-pwsh-*' }
+        Should -Invoke Remove-Item -Times 1 -Exactly -ParameterFilter { $LiteralPath -like '*winget-app-setup-pwsh-*' }
+    }
+
+    It 'Treats msiexec 3010 (reboot required) as success' {
+        # pwsh.exe is on disk and launchable at that point; the relaunch does not need the reboot.
+        $script:msiExitCode = 3010
+
+        Install-PowerShell7FromMsi | Should -Be $true
+    }
+
+    It 'Returns $false on a nonzero msiexec exit code' {
+        $script:msiExitCode = 1618
+
+        Install-PowerShell7FromMsi | Should -Be $false
+        Should -Invoke Write-WarningMessage -Times 1 -ParameterFilter { $Message -match '1618' }
+    }
+
+    It 'Kills msiexec and returns $false when the install outruns the timeout' {
+        $script:msiExited = $false
+
+        Install-PowerShell7FromMsi -InstallTimeoutSeconds 5 | Should -Be $false
+        $script:msiKilled | Should -Be $true
+        Should -Invoke Write-WarningMessage -Times 1 -ParameterFilter { $Message -match 'did not finish within 5 seconds' }
+    }
+
+    It 'Passes the install timeout to WaitForExit in milliseconds' {
+        $script:waitMilliseconds = $null
+        $script:msiProcess | Add-Member -MemberType ScriptMethod -Name WaitForExit -Force -Value {
+            param($Milliseconds)
+            $script:waitMilliseconds = $Milliseconds
+            return $true
+        }
+
+        Install-PowerShell7FromMsi -InstallTimeoutSeconds 42 | Out-Null
+
+        $script:waitMilliseconds | Should -Be 42000
+    }
+
+    It 'Never runs msiexec when the download fails' {
+        Mock Save-WebFileWithTimeout { $false }
+
+        Install-PowerShell7FromMsi | Should -Be $false
+        Should -Invoke Start-Process -Times 0
+        Should -Invoke Remove-Item -Times 1 -Exactly -ParameterFilter { $LiteralPath -like '*winget-app-setup-pwsh-*' }
+    }
+
+    It 'Never downloads when the temp directory cannot be created' {
+        Mock New-Item { throw 'Access to the path is denied.' }
+
+        Install-PowerShell7FromMsi | Should -Be $false
+        Should -Invoke Save-WebFileWithTimeout -Times 0
+        Should -Invoke Start-Process -Times 0
+        Should -Invoke Write-WarningMessage -Times 1 -ParameterFilter { $Message -match 'temporary directory' }
+    }
+
+    It 'Never downloads when the release cannot be resolved' {
+        Mock Get-PowerShell7MsiInfo { $null }
+
+        Install-PowerShell7FromMsi | Should -Be $false
+        Should -Invoke Save-WebFileWithTimeout -Times 0
+        Should -Invoke Start-Process -Times 0
+    }
+
+    It 'Returns $false when msiexec cannot be started' {
+        # Under 5.1 a Start-Process failure is non-terminating, so without production's try/catch
+        # $msiProcess would stay $null and the ExitCode read would blow up mid-bootstrap.
+        Mock Start-Process { throw 'The system cannot find the file specified.' } -ParameterFilter { $FilePath -eq 'msiexec.exe' }
+
+        Install-PowerShell7FromMsi | Should -Be $false
+        Should -Invoke Write-WarningMessage -Times 1 -ParameterFilter { $Message -match 'msiexec could not be started' }
+    }
+}
+
 Describe 'Invoke-PowerShell7Bootstrap' {
     BeforeEach {
         # Quiet the console helpers; every path is asserted through mocks, not output.
@@ -145,6 +361,10 @@ Describe 'Invoke-PowerShell7Bootstrap' {
         Mock Write-ErrorMessage { }
         Mock Write-Success { }
         Mock Invoke-RestMethod { '# stub' }
+        # Default the direct-MSI path to "did not work" so the pre-existing tests below keep
+        # exercising the upstream-script fallback deterministically, with no real network reachable
+        # from any of them. The direct path has its own context further down.
+        Mock Install-PowerShell7FromMsi { $false }
         # The function sets this relaunch-loop sentinel before relaunching; clear it so no test
         # inherits another test's (or an outer process's) bootstrap state.
         $env:WINGET_APP_SETUP_PS7_BOOTSTRAP = ''
@@ -344,6 +564,63 @@ Describe 'Invoke-PowerShell7Bootstrap' {
         }
     }
 
+    Context 'PowerShell 7 missing, direct MSI download (issue #263)' {
+        BeforeEach {
+            $script:findCallCount = 0
+            Mock Find-PowerShell7 {
+                $script:findCallCount++
+                if ($script:findCallCount -ge 2) {
+                    return 'C:\pf7\pwsh.exe'
+                }
+                return $null
+            }
+            Mock Get-Command { $null } -ParameterFilter { $Name -eq 'winget' }
+            Mock Start-Process { [pscustomobject]@{ ExitCode = 0 } } -ParameterFilter { $FilePath -eq 'C:\pf7\pwsh.exe' }
+        }
+
+        It 'Installs via the bounded direct MSI path and never touches the upstream script' {
+            # The regression this guards: the upstream script suppresses all download progress and
+            # downloads with an untimed Invoke-WebRequest, so reaching it is the slow, silent,
+            # unbounded path. It must now only run when the direct path has already failed.
+            Mock Install-PowerShell7FromMsi { $true }
+
+            $result = Invoke-PowerShell7Bootstrap -CommandPath 'C:\repo\winget-app-install.ps1'
+
+            $result | Should -Be 0
+            Should -Invoke Install-PowerShell7FromMsi -Times 1 -Exactly
+            Should -Invoke Invoke-RestMethod -Times 0 -ParameterFilter { $Uri -like '*install-powershell*' }
+        }
+
+        It 'Falls through to the upstream script only when the direct path fails' {
+            Mock Install-PowerShell7FromMsi { $false }
+
+            Invoke-PowerShell7Bootstrap -CommandPath 'C:\repo\winget-app-install.ps1' | Out-Null
+
+            Should -Invoke Install-PowerShell7FromMsi -Times 1 -Exactly
+            Should -Invoke Invoke-RestMethod -Times 1 -Exactly -ParameterFilter { $Uri -like '*install-powershell*' }
+        }
+
+        It 'Warns that the upstream script produces no output before handing off to it' {
+            # Silence is the whole complaint in issue #263; if this path is still reachable, the
+            # operator has to be told that no output is expected rather than inferring a hang.
+            Mock Install-PowerShell7FromMsi { $false }
+
+            Invoke-PowerShell7Bootstrap -CommandPath 'C:\repo\winget-app-install.ps1' | Out-Null
+
+            Should -Invoke Write-WarningMessage -Times 1 -ParameterFilter { $Message -match 'no download progress' }
+        }
+
+        It 'Bounds the upstream script download with a timeout' {
+            Mock Install-PowerShell7FromMsi { $false }
+
+            Invoke-PowerShell7Bootstrap -CommandPath 'C:\repo\winget-app-install.ps1' | Out-Null
+
+            Should -Invoke Invoke-RestMethod -Times 1 -Exactly -ParameterFilter {
+                $Uri -like '*install-powershell*' -and $TimeoutSec -gt 0
+            }
+        }
+    }
+
     Context 'PowerShell 7 missing, MSI fallback' {
         BeforeEach {
             Mock Test-EffectiveNonInteractive { $true }
@@ -440,6 +717,14 @@ Describe 'Invoke-PowerShell7Bootstrap' {
             Invoke-PowerShell7Bootstrap -InstallerUrl 'https://example.test/custom.ps1' | Out-Null
 
             Should -Invoke Invoke-RestMethod -Times 1 -Exactly -ParameterFilter { $Uri -eq 'https://example.test/custom.ps1' }
+        }
+
+        It 'Bounds the re-download with a timeout (issue #263)' {
+            Mock Invoke-RestMethod { '# installer body' }
+
+            Invoke-PowerShell7Bootstrap | Out-Null
+
+            Should -Invoke Invoke-RestMethod -Times 1 -Exactly -ParameterFilter { $TimeoutSec -gt 0 }
         }
 
         It 'Returns 1 when the re-download fails' {

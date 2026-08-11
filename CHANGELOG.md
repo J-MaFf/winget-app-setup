@@ -70,6 +70,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Fixed the PowerShell 7 MSI fallback blocking indefinitely with no output, which reads as a hang
+  (issue #263). On a machine where the invoking account has no winget — the classic case being a
+  secondary admin account, since winget is a per-user MSIX — `Invoke-PowerShell7Bootstrap` handed
+  the whole install to `aka.ms/install-powershell.ps1 -UseMSI -Quiet` and went silent. That script
+  sets `$ProgressPreference = 'SilentlyContinue'` on Windows PowerShell, downloads the 110 MB MSI
+  with a bare `Invoke-WebRequest -OutFile` (which has **no read timeout** under 5.1), logs its
+  install step through a `Write-Verbose` that never prints, and waits on `msiexec` forever — so
+  between `About to download package from...` and the next visible line there was a 110 MB download
+  plus a full MSI install with zero output. Measured on a real link that is 3.5 minutes of silence
+  on a *healthy* run, and unbounded on a stalled one, with nothing to tell the two apart. The
+  bootstrap now downloads and installs the MSI itself first (`Install-PowerShell7FromMsi`), falling
+  back to the upstream script only if that fails: the release is resolved from the same
+  `tools/metadata.json` the upstream script reads (not the rate-limited GitHub releases API, whose
+  unauthenticated budget is per source IP and so is shared by everyone behind one office NAT), the
+  architecture comes from `PROCESSOR_ARCHITEW6432`/`PROCESSOR_ARCHITECTURE` rather than a
+  seconds-long `Get-ComputerInfo` call, and the download runs through the new
+  `Save-WebFileWithTimeout` — an `HttpWebRequest` whose `ReadWriteTimeout` bounds every individual
+  read on the response stream (the guarantee `Invoke-WebRequest` cannot give), plus an overall time
+  limit for a link that trickles without ever formally stalling, periodic `X of 110.2 MB (N%)`
+  progress lines, WinINET proxy credentials so an authenticating corporate proxy fails visibly
+  instead of looking like another stall, and a short-read check so a truncated MSI is reported here
+  rather than as an opaque msiexec failure. `msiexec /i <msi> /quiet /norestart` then runs under a
+  bounded `WaitForExit` (killed and reported on timeout, the usual cause being another install
+  holding the Windows Installer mutex), with exit code 3010 treated as success. The two
+  `Invoke-RestMethod` calls in the same function — the upstream-script fetch and the `irm | iex`
+  installer re-download — gained `-TimeoutSec` for the same reason. Verified against real Windows
+  PowerShell 5.1: a full 110.2 MB download completing byte-exact with a valid MSI header, the
+  overall-limit abort stopping a download mid-stream instead of hanging, and DNS-failure/404 paths
+  returning `$false` rather than throwing. This closes the gap issue #230 left open — the run no
+  longer *asks* anything, but it could still park forever with no way to tell slow from dead.
 - Fixed the winget launch retry never recovering when the `winget.exe` app-execution alias breaks
   mid-run (issue #258): E2E run 30253761253's second (idempotence) pass failed
   `Microsoft.WindowsTerminal` — an app that was already installed — because a background

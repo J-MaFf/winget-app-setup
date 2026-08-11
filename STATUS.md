@@ -186,6 +186,7 @@ Pester installs persist across runs there ([#161](https://github.com/J-MaFf/wing
 |-------|-------------|--------|
 | [#258](https://github.com/J-MaFf/winget-app-setup/issues/258) | E2E install run failed: winget alias inaccessible through every launch retry (WAU/App Installer upgrade race) | In review — PR [#259](https://github.com/J-MaFf/winget-app-setup/pull/259) |
 | [#225](https://github.com/J-MaFf/winget-app-setup/issues/225) | Bootstrap PowerShell 7 from Windows PowerShell 5.1 instead of failing fast | In review — PR [#228](https://github.com/J-MaFf/winget-app-setup/pull/228) |
+| [#263](https://github.com/J-MaFf/winget-app-setup/issues/263) | PowerShell 7 MSI fallback blocks forever with no output (reads as a hang) | In review — PR [#264](https://github.com/J-MaFf/winget-app-setup/pull/264) |
 
 ## Natural Next Steps
 
