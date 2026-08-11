@@ -153,3 +153,183 @@ function Test-WingetSourceHealth {
         Healthy    = ($sourceIsListed -and $sourceIsFunctional)
     }
 }
+
+<#
+.SYNOPSIS
+    Tests whether an AppX/MSIX deployment error is the "a newer version is already installed"
+    downgrade rejection (0x80073D06).
+.DESCRIPTION
+    Repair-WinGetPackageManager deploys the framework dependencies pinned to the WinGet release it
+    installs (Microsoft.WindowsAppRuntime, VCLibs, UI.Xaml). When the machine already carries a
+    NEWER build of one of them - routine on managed fleets, where Teams / Phone Link / an MDM push
+    updates WindowsAppRuntime independently - AppX rejects the downgrade with 0x80073D06
+    (ERROR_INSTALL_PACKAGE_DOWNGRADE) and the cmdlet aborts BEFORE it ever registers App Installer,
+    so winget stays missing on a machine with nothing actually wrong with it (issue #265).
+
+    That failure is not retryable: -Force only makes the cmdlet more insistent about deploying the
+    older pinned build. Callers use this classifier to stop escalating and move to their next
+    fallback instead.
+
+    The '0x80073d06' token is the load-bearing part of the match - winget and AppX print the hex
+    HRESULT regardless of display language, so it survives locale and wording changes. The English
+    phrase is extra coverage only and, like the locale-dependency notes elsewhere in this module
+    (issues #177/#180), may stop matching if the wording changes.
+.PARAMETER Message
+    The exception or error text to classify.
+.RETURNS
+    [bool] True when the text carries the downgrade-rejection signature.
+#>
+function Test-AppxDowngradeRejection {
+    param (
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
+        [AllowNull()]
+        [string]$Message
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Message)) {
+        return $false
+    }
+
+    return [bool]($Message -match '0x80073d06|higher version of this package is already installed')
+}
+
+<#
+.SYNOPSIS
+    Registers the App Installer (winget) MSIX already staged on this machine for the current account.
+.DESCRIPTION
+    The winget CLI is delivered by the Microsoft.DesktopAppInstaller MSIX package, which is
+    registered PER USER. When the installer runs elevated as a different admin account than the
+    logged-on user - the cross-user elevation this module already handles for sources and agreements
+    (issues #104/#150/#159) - that account has no registration and therefore no
+    %LOCALAPPDATA%\Microsoft\WindowsApps\winget.exe alias, even though the machine plainly has a
+    working winget for the interactive user.
+
+    Registering the payload that is ALREADY on disk is the cheapest fix for that case: no download,
+    no framework dependency deployment, and therefore none of the 0x80073D06 downgrade rejections
+    that abort Repair-WinGetPackageManager on a machine carrying a newer WindowsAppRuntime
+    (issue #265). That is why callers try this BEFORE the repair cmdlet, not after it.
+
+    Two registration forms are attempted, in order:
+      1. -RegisterByFamilyName, which needs only the package family name.
+      2. -Register against the AppXManifest.xml under each candidate's InstallLocation, which also
+         covers a package staged on the machine but never registered for this account.
+
+    Get-AppxPackage/Add-AppxPackage are used from pwsh here, as they already are elsewhere in this
+    module (Resolve-WingetExecutable, Test-AndInstallWinget). The Appx cmdlet known to be unreliable
+    under PowerShell 7 is the DISM-backed Add-AppxProvisionedPackage, which Invoke-AppxProvisioning
+    delegates to Windows PowerShell 5.1 for that reason; the per-user registration cmdlets used here
+    are not affected.
+.RETURNS
+    [bool] True when a registration call completed without error, otherwise False. Callers re-check
+    winget availability themselves - a successful registration is not proof the alias resolved.
+#>
+function Register-WingetAppInstallerForUser {
+    $familyName = 'Microsoft.DesktopAppInstaller_8wekyb3d8bbwe'
+
+    # -AllUsers requires elevation (which the installer already has) and is what surfaces a package
+    # staged on the machine but not registered for THIS account - precisely the case this helper
+    # exists for. Fall back to the current-user view if it is refused, so a non-elevated or
+    # policy-restricted run degrades instead of erroring out.
+    $candidates = @()
+    try {
+        $candidates = @(Get-AppxPackage -Name 'Microsoft.DesktopAppInstaller' -AllUsers -ErrorAction Stop)
+    }
+    catch {
+        try {
+            $candidates = @(Get-AppxPackage -Name 'Microsoft.DesktopAppInstaller' -ErrorAction Stop)
+        }
+        catch {
+            Write-WarningMessage "Could not enumerate the App Installer package: $_"
+            return $false
+        }
+    }
+
+    if ($candidates.Count -eq 0) {
+        Write-Info 'App Installer is not staged on this machine; there is nothing to register for this account.'
+        return $false
+    }
+
+    Write-Info 'Registering the App Installer package already on this machine for the current account...'
+    try {
+        Add-AppxPackage -RegisterByFamilyName -MainPackage $familyName -ErrorAction Stop
+        Write-Success 'App Installer registered for this account.'
+        return $true
+    }
+    catch {
+        Write-WarningMessage "Registering App Installer by family name failed: $_"
+    }
+
+    foreach ($candidate in $candidates) {
+        if (-not $candidate.InstallLocation) { continue }
+        $manifest = Join-Path $candidate.InstallLocation 'AppXManifest.xml'
+        if (-not (Test-Path $manifest)) { continue }
+
+        try {
+            # -Path is passed by name: -Register is a switch, so `-Register $manifest` would bind
+            # the manifest positionally and read as though it were the switch's argument.
+            Add-AppxPackage -Path $manifest -Register -DisableDevelopmentMode -ErrorAction Stop
+            Write-Success "App Installer registered for this account from $($candidate.InstallLocation)."
+            return $true
+        }
+        catch {
+            Write-WarningMessage "Registering App Installer from '$manifest' failed: $_"
+        }
+    }
+
+    return $false
+}
+
+<#
+.SYNOPSIS
+    Runs Repair-WinGetPackageManager, unforced first, and reports a 0x80073D06 rejection distinctly.
+.DESCRIPTION
+    Shared wrapper for the two places that bootstrap winget through the WinGet PowerShell module
+    (Test-AndInstallWinget and Initialize-WingetSourcesForUser), so the retry and error-classification
+    policy cannot diverge between them - the same reasoning that made Test-WingetSourceHealth shared
+    in issue #177.
+
+    The unforced attempt runs first so the cmdlet can skip framework dependencies that are already
+    present at an equal or newer version. -Force is still attempted afterwards, because it remains
+    the documented remedy for a genuinely broken or partial App Installer registration
+    (learn.microsoft.com/windows/package-manager/winget/troubleshooting) - but only when the unforced
+    pass failed for some OTHER reason. A 0x80073D06 downgrade rejection short-circuits immediately:
+    -Force cannot help, and retrying would burn a second multi-hundred-megabyte download before
+    failing the same way (issue #265).
+.RETURNS
+    [hashtable] @{ Available = <bool>; Succeeded = <bool>; DowngradeRejected = <bool>; Message = <string> }
+    Available is False when the Microsoft.WinGet.Client module is missing, in which case no repair
+    was attempted. Succeeded means a repair call completed without throwing - callers still verify
+    the outcome themselves (winget on PATH, or a source probe).
+#>
+function Invoke-WingetPackageManagerRepair {
+    if (-not (Get-Command Repair-WinGetPackageManager -ErrorAction SilentlyContinue)) {
+        return @{ Available = $false; Succeeded = $false; DowngradeRejected = $false; Message = '' }
+    }
+
+    $lastMessage = ''
+    foreach ($useForce in @($false, $true)) {
+        try {
+            if ($useForce) {
+                Repair-WinGetPackageManager -Latest -Force -ErrorAction Stop
+            }
+            else {
+                Repair-WinGetPackageManager -Latest -ErrorAction Stop
+            }
+
+            return @{ Available = $true; Succeeded = $true; DowngradeRejected = $false; Message = '' }
+        }
+        catch {
+            $lastMessage = "$_"
+
+            if (Test-AppxDowngradeRejection -Message $lastMessage) {
+                Write-WarningMessage 'Repair-WinGetPackageManager was rejected (0x80073D06): this machine already has a newer framework dependency than the WinGet release pins. That is a WinGet packaging conflict, not a fault on this machine.'
+                return @{ Available = $true; Succeeded = $false; DowngradeRejected = $true; Message = $lastMessage }
+            }
+
+            Write-WarningMessage "Repair-WinGetPackageManager failed: $lastMessage"
+        }
+    }
+
+    return @{ Available = $true; Succeeded = $false; DowngradeRejected = $false; Message = $lastMessage }
+}

@@ -46,7 +46,21 @@ function Test-AndInstallWingetModule {
 .SYNOPSIS
     Checks if winget is available and attempts to install it if not.
 .DESCRIPTION
-    This function verifies if winget is installed and available. If not, it attempts to install the Microsoft App Installer.
+    Verifies that the winget CLI is on PATH for the current account and, when it is not, works
+    through a cheapest-first bootstrap ladder (issue #265):
+
+      1. Register the Microsoft.DesktopAppInstaller package already staged on this machine for the
+         current account. No download and no framework dependency deployment, and it is the direct
+         fix for the cross-user elevation case where the machine has a working winget for the
+         interactive user but none for the elevating account.
+      2. Repair-WinGetPackageManager (unforced, then forced). Unlike a plain Add-AppxPackage this
+         registers App Installer even without an interactive logon session, where deployment is
+         otherwise blocked with 0x80073D19 (microsoft/winget-cli#3862, issue #159).
+      3. Download and register App Installer from aka.ms/getwinget.
+
+    Rung 1 comes first specifically because rung 2 can be blocked outright by a 0x80073D06
+    dependency downgrade rejection on a machine whose WindowsAppRuntime is newer than the WinGet
+    release pins - see Invoke-WingetPackageManagerRepair.
 .RETURNS
     [bool] True if winget is available or successfully installed, otherwise False.
 #>
@@ -56,23 +70,26 @@ function Test-AndInstallWinget {
         return $true
     }
     else {
-        # Prefer Repair-WinGetPackageManager when the WinGet PowerShell module is available: it
-        # registers the App Installer package for the current account even without an interactive
-        # logon session, where a plain Add-AppxPackage is blocked with 0x80073D19
-        # (microsoft/winget-cli#3862, issue #159).
+        Write-WarningMessage 'Winget is not available. Trying to register the App Installer package already on this machine...'
+        if (Register-WingetAppInstallerForUser) {
+            if (Get-Command winget -ErrorAction SilentlyContinue) {
+                Write-Success 'Winget is available after registering App Installer for this account.'
+                return $true
+            }
+            Write-WarningMessage 'App Installer was registered but winget is still unavailable.'
+        }
+
         if (Get-Command Repair-WinGetPackageManager -ErrorAction SilentlyContinue) {
-            Write-WarningMessage 'Winget is not available. Bootstrapping it via Repair-WinGetPackageManager...'
-            try {
-                Repair-WinGetPackageManager -Latest -Force -ErrorAction Stop
-                if (Get-Command winget -ErrorAction SilentlyContinue) {
-                    Write-Success 'Winget bootstrapped successfully via Repair-WinGetPackageManager.'
-                    return $true
-                }
-                Write-WarningMessage 'Repair-WinGetPackageManager completed but winget is still unavailable. Falling back to App Installer download...'
+            Write-WarningMessage 'Bootstrapping winget via Repair-WinGetPackageManager...'
+            [void](Invoke-WingetPackageManagerRepair)
+
+            # The repair result's own Succeeded flag is deliberately not trusted here: the cmdlet can
+            # report success without winget landing on PATH, so availability is re-checked directly.
+            if (Get-Command winget -ErrorAction SilentlyContinue) {
+                Write-Success 'Winget bootstrapped successfully via Repair-WinGetPackageManager.'
+                return $true
             }
-            catch {
-                Write-WarningMessage "Repair-WinGetPackageManager failed: $_. Falling back to App Installer download..."
-            }
+            Write-WarningMessage 'Winget is still unavailable after the repair attempt. Falling back to App Installer download...'
         }
 
         Write-WarningMessage 'Winget is not available. Attempting to install Microsoft App Installer...'
@@ -186,10 +203,15 @@ function Test-WingetSources {
 
     This function probes with `winget source update --name winget` (which forces the winget-source
     first-use bootstrap; agreements are accepted by the install commands, which pass
-    `--accept-source-agreements`). When the probe fails, it bootstraps winget for the account via
-    Repair-WinGetPackageManager — which registers the App Installer and Microsoft.Winget.Source
-    packages even without an interactive logon session (microsoft/winget-cli#6334) — and probes
-    again.
+    `--accept-source-agreements`). When the probe fails it re-probes after each of two bootstrap
+    attempts, cheapest first (issue #265):
+
+      1. Register the Microsoft.DesktopAppInstaller package already staged on this machine for this
+         account (Register-WingetAppInstallerForUser) — no download, no framework dependency
+         deployment.
+      2. Repair-WinGetPackageManager, which registers the App Installer and Microsoft.Winget.Source
+         packages even without an interactive logon session (microsoft/winget-cli#6334), but which
+         can be blocked outright by a 0x80073D06 dependency downgrade rejection — hence the ordering.
 .PARAMETER WhatIf
     When specified, only reports intended actions without executing.
 .RETURNS
@@ -237,18 +259,27 @@ function Initialize-WingetSourcesForUser {
         Write-WarningMessage "Winget source update failed with exit code: $($probe.ExitCode)"
     }
 
+    # Cheapest rung first: register the App Installer payload already staged on this machine for this
+    # account. On a cross-user elevation that alone can restore winget with no download at all, and
+    # it sidesteps the 0x80073D06 dependency rejection that can abort the repair cmdlet outright
+    # (issue #265).
+    if (Register-WingetAppInstallerForUser) {
+        $probe = Invoke-WingetSourceProbe
+        if ($probe.Succeeded) {
+            Write-Success 'Winget sources initialized for this account after registering App Installer.'
+            return $true
+        }
+    }
+
     # Bootstrap via the WinGet PowerShell module: unlike winget's own first-use bootstrap (and
     # unlike a plain Add-AppxPackage), Repair-WinGetPackageManager registers the App Installer and
     # Microsoft.Winget.Source packages for the current account even without an interactive logon
     # session (microsoft/winget-cli#6334).
+    $downgradeRejected = $false
     if (Get-Command Repair-WinGetPackageManager -ErrorAction SilentlyContinue) {
         Write-Info 'Bootstrapping winget for this account via Repair-WinGetPackageManager...'
-        try {
-            Repair-WinGetPackageManager -Latest -Force -ErrorAction Stop
-        }
-        catch {
-            Write-WarningMessage "Repair-WinGetPackageManager failed: $_"
-        }
+        $repair = Invoke-WingetPackageManagerRepair
+        $downgradeRejected = [bool]$repair.DowngradeRejected
 
         $probe = Invoke-WingetSourceProbe
         if ($probe.Succeeded) {
@@ -261,6 +292,9 @@ function Initialize-WingetSourcesForUser {
     }
 
     Write-WarningMessage "Winget sources could not be initialized for '$processUser'. Installations may fail with 0x80073D19."
+    if ($downgradeRejected) {
+        Write-WarningMessage 'Fix: update App Installer from the Microsoft Store on this machine (the WinGet release this module can deploy is older than a framework package already installed here), then re-run this script.'
+    }
     if ($isCrossUserElevation) {
         Write-WarningMessage "Fix: log on to Windows interactively as '$processUser' once (this registers winget for that account), or run 'winget source update' from any session running as '$processUser', then re-run this script."
     }

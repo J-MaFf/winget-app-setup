@@ -86,6 +86,11 @@ Describe 'Test-AndInstallWinget' {
         # Default: the repair cmdlet appears absent, so tests exercise the plain
         # aka.ms/getwinget fallback unless a test overrides this lookup.
         Mock Get-Command { $null } -ParameterFilter { $Name -eq 'Repair-WinGetPackageManager' }
+        # Default: nothing to register for this account, so the ladder's first rung (issue #265)
+        # is a no-op and the pre-existing repair/download behavior below is what gets exercised.
+        # Mocked as a seam rather than mocking Get-AppxPackage/Add-AppxPackage directly, so an
+        # accidental miss can never reach the real AppX deployment cmdlets.
+        Mock Register-WingetAppInstallerForUser { $false }
     }
 
     Context 'When winget is available' {
@@ -184,8 +189,81 @@ Describe 'Test-AndInstallWinget' {
 
             $result = Test-AndInstallWinget
             $result | Should -Be $true
-            Should -Invoke Repair-WinGetPackageManager -Times 1 -Exactly
+            # Unforced then forced (issue #265): a non-downgrade failure still escalates to -Force,
+            # which remains the documented remedy for a broken App Installer registration.
+            Should -Invoke Repair-WinGetPackageManager -Times 2 -Exactly
+            Should -Invoke Repair-WinGetPackageManager -Times 1 -Exactly -ParameterFilter { -not $Force }
+            Should -Invoke Repair-WinGetPackageManager -Times 1 -Exactly -ParameterFilter { $Force }
             Should -Invoke Invoke-WebRequest -Times 1
+            Should -Invoke Add-AppxPackage -Times 1
+        }
+    }
+
+    Context 'When App Installer is already staged on the machine (issue #265)' {
+        It 'Registers it for this account and returns true without repairing or downloading' {
+            $script:registered = $false
+            Mock Get-Command {
+                if ($script:registered) { return $true }
+                return $null
+            } -ParameterFilter { $Name -eq 'winget' }
+            Mock Get-Command { return $true } -ParameterFilter { $Name -eq 'Repair-WinGetPackageManager' }
+            Mock Register-WingetAppInstallerForUser { $script:registered = $true; return $true }
+            Mock Invoke-WebRequest { }
+            Mock Add-AppxPackage { }
+
+            $result = Test-AndInstallWinget
+
+            $result | Should -Be $true
+            Should -Invoke Register-WingetAppInstallerForUser -Times 1 -Exactly
+            Should -Invoke Repair-WinGetPackageManager -Times 0 -Exactly
+            Should -Invoke Invoke-WebRequest -Times 0
+            Should -Invoke Add-AppxPackage -Times 0
+        }
+
+        It 'Falls through to the repair cmdlet when registration does not make winget resolve' {
+            # Registration can report success without the app-execution alias landing on PATH, so
+            # availability is re-checked rather than inferred from the registration result.
+            $script:wingetAvailable = $false
+            Mock Get-Command {
+                if ($script:wingetAvailable) { return $true }
+                return $null
+            } -ParameterFilter { $Name -eq 'winget' }
+            Mock Get-Command { return $true } -ParameterFilter { $Name -eq 'Repair-WinGetPackageManager' }
+            Mock Register-WingetAppInstallerForUser { $true }
+            Mock Repair-WinGetPackageManager { $script:wingetAvailable = $true }
+            Mock Invoke-WebRequest { }
+            Mock Add-AppxPackage { }
+
+            $result = Test-AndInstallWinget
+
+            $result | Should -Be $true
+            Should -Invoke Register-WingetAppInstallerForUser -Times 1 -Exactly
+            Should -Invoke Repair-WinGetPackageManager -Times 1 -Exactly
+            Should -Invoke Invoke-WebRequest -Times 0
+        }
+    }
+
+    Context 'When the repair cmdlet is blocked by a dependency downgrade (issue #265)' {
+        It 'Does not retry with -Force and falls through to the App Installer download' {
+            $script:appInstallerRegistered = $false
+            Mock Get-Command {
+                if ($script:appInstallerRegistered) { return $true }
+                return $null
+            } -ParameterFilter { $Name -eq 'winget' }
+            Mock Get-Command { return $true } -ParameterFilter { $Name -eq 'Repair-WinGetPackageManager' }
+            Mock Repair-WinGetPackageManager {
+                throw 'Deployment failed with HRESULT: 0x80073D06, The package could not be installed because a higher version of this package is already installed.'
+            }
+            Mock Invoke-WebRequest { }
+            Mock Add-AppxPackage { $script:appInstallerRegistered = $true }
+            Mock Remove-Item { }
+
+            $result = Test-AndInstallWinget
+
+            $result | Should -Be $true
+            # One attempt only: -Force cannot fix a rejection caused by a NEWER dependency already
+            # being present, and retrying would burn a second multi-hundred-megabyte download.
+            Should -Invoke Repair-WinGetPackageManager -Times 1 -Exactly
             Should -Invoke Add-AppxPackage -Times 1
         }
     }
@@ -929,6 +1007,9 @@ Describe 'Initialize-WingetSourcesForUser (cross-user bootstrap, issue #159)' {
         Mock Get-InteractiveSessionUserName { 'CONTOSO\admin-jmaffiola' }
         # Repair-WinGetPackageManager resolves as available unless a test overrides this.
         Mock Get-Command { [pscustomobject]@{ Name = 'Repair-WinGetPackageManager' } } -ParameterFilter { $Name -eq 'Repair-WinGetPackageManager' }
+        # Default: nothing staged to register for this account, so the ladder's first rung
+        # (issue #265) is a no-op and the repair path below is what gets exercised.
+        Mock Register-WingetAppInstallerForUser { $false }
     }
 
     It 'Reports the dry run without probing' {
@@ -987,6 +1068,38 @@ Describe 'Initialize-WingetSourcesForUser (cross-user bootstrap, issue #159)' {
         $result | Should -Be $false
         Should -Invoke Repair-WinGetPackageManager -Times 0 -Exactly
         Should -Invoke Invoke-WingetSourceProbe -Times 1 -Exactly
+    }
+
+    It 'Registers the staged App Installer before repairing and succeeds when the re-probe passes (issue #265)' {
+        $script:probeCallCount = 0
+        Mock Invoke-WingetSourceProbe {
+            $script:probeCallCount++
+            if ($script:probeCallCount -eq 1) {
+                return @{ Succeeded = $false; ExitCode = -2147009255; TimedOut = $false }
+            }
+            return @{ Succeeded = $true; ExitCode = 0; TimedOut = $false }
+        }
+        Mock Register-WingetAppInstallerForUser { $true }
+
+        $result = Initialize-WingetSourcesForUser
+
+        $result | Should -Be $true
+        Should -Invoke Register-WingetAppInstallerForUser -Times 1 -Exactly
+        Should -Invoke Repair-WinGetPackageManager -Times 0 -Exactly
+        Should -Invoke Invoke-WingetSourceProbe -Times 2 -Exactly
+    }
+
+    It 'Names the dependency conflict in its remediation advice when the repair is downgrade-rejected (issue #265)' {
+        Mock Invoke-WingetSourceProbe { @{ Succeeded = $false; ExitCode = -2147009255; TimedOut = $false } }
+        Mock Repair-WinGetPackageManager {
+            throw 'Deployment failed with HRESULT: 0x80073D06, The package could not be installed because a higher version of this package is already installed.'
+        }
+
+        $result = Initialize-WingetSourcesForUser
+
+        $result | Should -Be $false
+        Should -Invoke Repair-WinGetPackageManager -Times 1 -Exactly
+        Should -Invoke Write-WarningMessage -Times 1 -ParameterFilter { $Message -match 'update App Installer from the Microsoft Store' }
     }
 
     It 'Warns about cross-user elevation when the process account differs from the session owner' {

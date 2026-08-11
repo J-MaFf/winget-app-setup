@@ -70,6 +70,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Fixed winget bootstrap aborting outright when the machine carries a newer framework package than
+  the WinGet release pins (issue #265). `Repair-WinGetPackageManager -Latest -Force` deploys the
+  dependencies pinned to the release it installs, so on a machine whose
+  `Microsoft.WindowsAppRuntime` is already newer — routine wherever Teams / Phone Link / an MDM push
+  updates it independently — AppX rejects the downgrade with `0x80073D06`
+  (`ERROR_INSTALL_PACKAGE_DOWNGRADE`) and the cmdlet gives up *before* registering App Installer.
+  The run still recovers, but only on the last resort: a ~200 MB `aka.ms/getwinget` download, after
+  printing a wall of AppX deployment errors that reads like a broken machine. Both
+  `Repair-WinGetPackageManager` call sites (`Test-AndInstallWinget`,
+  `Initialize-WingetSourcesForUser`) now work through a cheapest-first ladder: the new private
+  `Register-WingetAppInstallerForUser` first registers the `Microsoft.DesktopAppInstaller` package
+  already staged on the machine for the current account (`Add-AppxPackage -RegisterByFamilyName`,
+  falling back to `-Register` against each candidate's `AppXManifest.xml`) — no download, no
+  dependency deployment, and the direct fix for the cross-user elevation case where the interactive
+  user has a working winget but the elevating admin account has no per-user registration and hence
+  no `winget.exe` alias. Only if that fails does the shared `Invoke-WingetPackageManagerRepair` run
+  the repair cmdlet unforced-then-forced, and a `0x80073D06` rejection (classified by
+  `Test-AppxDowngradeRejection` on the locale-independent hex HRESULT) short-circuits instead of
+  retrying with `-Force`, which cannot help and would burn a second multi-hundred-megabyte download.
+  `Initialize-WingetSourcesForUser` additionally names the dependency conflict in its remediation
+  advice. The `aka.ms/getwinget` download remains the unchanged last resort. This is the same
+  per-user-MSIX root cause as issue #263 below, one layer further into the run.
 - Fixed the PowerShell 7 MSI fallback blocking indefinitely with no output, which reads as a hang
   (issue #263). On a machine where the invoking account has no winget — the classic case being a
   secondary admin account, since winget is a per-user MSIX — `Invoke-PowerShell7Bootstrap` handed

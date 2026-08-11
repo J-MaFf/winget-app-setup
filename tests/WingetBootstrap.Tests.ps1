@@ -258,3 +258,187 @@ Describe 'Invoke-WingetSourceProbe' {
         $script:probeRedirectPaths[0] | Should -Not -Be $script:probeRedirectPaths[2]
     }
 }
+
+Describe 'Test-AppxDowngradeRejection (0x80073D06 classifier, issue #265)' {
+    It 'Matches the hex HRESULT regardless of case' {
+        Test-AppxDowngradeRejection -Message 'Deployment failed with HRESULT: 0x80073D06, ...' | Should -Be $true
+        Test-AppxDowngradeRejection -Message 'deployment failed with hresult: 0x80073d06' | Should -Be $true
+    }
+
+    It 'Matches the English phrasing when the hex code is absent' {
+        Test-AppxDowngradeRejection -Message 'The package could not be installed because a higher version of this package is already installed.' |
+            Should -Be $true
+    }
+
+    It 'Matches the real Repair-WinGetPackageManager failure text' {
+        $message = 'Deployment failed with HRESULT: 0x80073D06, The package could not be installed because a higher version of this package is already installed.' + [Environment]::NewLine +
+        'Windows cannot install package Microsoft.WindowsAppRuntime.1.8_8000.616.304.0_x64__8wekyb3d8bbwe because it has version 8000.616.304.0. A higher version 8000.921.1539.0 of this package is already installed.'
+
+        Test-AppxDowngradeRejection -Message $message | Should -Be $true
+    }
+
+    It 'Does not match unrelated deployment failures' {
+        # 0x80073D19 is the blocked-logoff error this module already handles separately; it must
+        # keep escalating through the ladder rather than being short-circuited as non-retryable.
+        Test-AppxDowngradeRejection -Message 'Deployment failed with HRESULT: 0x80073D19' | Should -Be $false
+        Test-AppxDowngradeRejection -Message 'Network error' | Should -Be $false
+    }
+
+    It 'Treats empty and null text as not a downgrade rejection' {
+        Test-AppxDowngradeRejection -Message '' | Should -Be $false
+        Test-AppxDowngradeRejection -Message $null | Should -Be $false
+    }
+}
+
+Describe 'Register-WingetAppInstallerForUser (issue #265)' {
+    BeforeEach {
+        Mock Write-Host { }
+        Mock Write-Info { }
+        Mock Write-Success { }
+        Mock Write-WarningMessage { }
+    }
+
+    It 'Registers the staged package by family name and reports success' {
+        Mock Get-AppxPackage { [pscustomobject]@{ InstallLocation = 'C:\Program Files\WindowsApps\Microsoft.DesktopAppInstaller_1.26.0.0_x64__8wekyb3d8bbwe' } }
+        Mock Add-AppxPackage { }
+
+        Register-WingetAppInstallerForUser | Should -Be $true
+
+        Should -Invoke Add-AppxPackage -Times 1 -Exactly -ParameterFilter {
+            $RegisterByFamilyName -and $MainPackage -eq 'Microsoft.DesktopAppInstaller_8wekyb3d8bbwe'
+        }
+    }
+
+    It 'Enumerates packages staged for other accounts, not just this one' {
+        # -AllUsers is what surfaces a package staged on the machine but never registered for the
+        # elevating account - the whole case this helper exists for.
+        Mock Get-AppxPackage { [pscustomobject]@{ InstallLocation = 'C:\Program Files\WindowsApps\Microsoft.DesktopAppInstaller_1.26.0.0_x64__8wekyb3d8bbwe' } }
+        Mock Add-AppxPackage { }
+
+        [void](Register-WingetAppInstallerForUser)
+
+        Should -Invoke Get-AppxPackage -Times 1 -Exactly -ParameterFilter { $AllUsers }
+    }
+
+    It 'Falls back to registering from the package manifest when the family-name form fails' {
+        $installLocation = 'C:\Program Files\WindowsApps\Microsoft.DesktopAppInstaller_1.26.0.0_x64__8wekyb3d8bbwe'
+        Mock Get-AppxPackage { [pscustomobject]@{ InstallLocation = $installLocation } }
+        Mock Test-Path { $true }
+        Mock Add-AppxPackage { throw 'family name registration failed' } -ParameterFilter { $RegisterByFamilyName }
+        Mock Add-AppxPackage { } -ParameterFilter { $Register }
+
+        Register-WingetAppInstallerForUser | Should -Be $true
+
+        Should -Invoke Add-AppxPackage -Times 1 -Exactly -ParameterFilter {
+            $Register -and $Path -eq (Join-Path $installLocation 'AppXManifest.xml')
+        }
+    }
+
+    It 'Returns false without registering anything when App Installer is not staged' {
+        Mock Get-AppxPackage { @() }
+        Mock Add-AppxPackage { throw 'nothing to register' }
+
+        Register-WingetAppInstallerForUser | Should -Be $false
+
+        Should -Invoke Add-AppxPackage -Times 0 -Exactly
+    }
+
+    It 'Returns false when every registration form fails' {
+        Mock Get-AppxPackage { [pscustomobject]@{ InstallLocation = 'C:\Program Files\WindowsApps\Microsoft.DesktopAppInstaller_1.26.0.0_x64__8wekyb3d8bbwe' } }
+        Mock Test-Path { $true }
+        Mock Add-AppxPackage { throw 'registration failed' }
+
+        Register-WingetAppInstallerForUser | Should -Be $false
+    }
+
+    It 'Falls back to the current-user view when the all-users enumeration is refused' {
+        Mock Get-AppxPackage { throw 'access denied' } -ParameterFilter { $AllUsers }
+        Mock Get-AppxPackage { [pscustomobject]@{ InstallLocation = 'C:\Program Files\WindowsApps\Microsoft.DesktopAppInstaller_1.26.0.0_x64__8wekyb3d8bbwe' } } -ParameterFilter { -not $AllUsers }
+        Mock Add-AppxPackage { }
+
+        Register-WingetAppInstallerForUser | Should -Be $true
+    }
+
+    It 'Returns false when the package cannot be enumerated at all' {
+        Mock Get-AppxPackage { throw 'Appx provider unavailable' }
+        Mock Add-AppxPackage { throw 'nothing to register' }
+
+        Register-WingetAppInstallerForUser | Should -Be $false
+
+        Should -Invoke Add-AppxPackage -Times 0 -Exactly
+    }
+}
+
+Describe 'Invoke-WingetPackageManagerRepair (issue #265)' {
+    BeforeAll {
+        # Stub so the cmdlet can be mocked on machines without the Microsoft.WinGet.Client module.
+        function Repair-WinGetPackageManager { param([switch]$Latest, [switch]$Force) }
+    }
+
+    BeforeEach {
+        Mock Write-Host { }
+        Mock Write-WarningMessage { }
+        # Safety net (#181): never let the real cmdlet run during unit tests.
+        Mock Repair-WinGetPackageManager { }
+        Mock Get-Command { [pscustomobject]@{ Name = 'Repair-WinGetPackageManager' } } -ParameterFilter { $Name -eq 'Repair-WinGetPackageManager' }
+    }
+
+    It 'Reports the cmdlet as unavailable without attempting a repair' {
+        Mock Get-Command { $null } -ParameterFilter { $Name -eq 'Repair-WinGetPackageManager' }
+
+        $result = Invoke-WingetPackageManagerRepair
+
+        $result.Available | Should -Be $false
+        $result.Succeeded | Should -Be $false
+        Should -Invoke Repair-WinGetPackageManager -Times 0 -Exactly
+    }
+
+    It 'Tries the unforced repair first and stops there when it succeeds' {
+        $result = Invoke-WingetPackageManagerRepair
+
+        $result.Succeeded | Should -Be $true
+        $result.DowngradeRejected | Should -Be $false
+        Should -Invoke Repair-WinGetPackageManager -Times 1 -Exactly -ParameterFilter { $Latest -and -not $Force }
+    }
+
+    It 'Escalates to -Force when the unforced repair fails for an unrelated reason' {
+        $script:repairAttempts = 0
+        Mock Repair-WinGetPackageManager {
+            $script:repairAttempts++
+            if ($script:repairAttempts -eq 1) { throw 'something else went wrong' }
+        }
+
+        $result = Invoke-WingetPackageManagerRepair
+
+        $result.Succeeded | Should -Be $true
+        Should -Invoke Repair-WinGetPackageManager -Times 2 -Exactly
+        Should -Invoke Repair-WinGetPackageManager -Times 1 -Exactly -ParameterFilter { $Force }
+    }
+
+    It 'Does not escalate to -Force on a 0x80073D06 downgrade rejection' {
+        Mock Repair-WinGetPackageManager {
+            throw 'Deployment failed with HRESULT: 0x80073D06, The package could not be installed because a higher version of this package is already installed.'
+        }
+
+        $result = Invoke-WingetPackageManagerRepair
+
+        $result.Available | Should -Be $true
+        $result.Succeeded | Should -Be $false
+        $result.DowngradeRejected | Should -Be $true
+        $result.Message | Should -Match '0x80073D06'
+        Should -Invoke Repair-WinGetPackageManager -Times 1 -Exactly
+        Should -Invoke Write-WarningMessage -Times 1 -ParameterFilter { $Message -match 'newer framework dependency' }
+    }
+
+    It 'Reports a plain failure when both the unforced and forced repairs fail' {
+        Mock Repair-WinGetPackageManager { throw 'network error' }
+
+        $result = Invoke-WingetPackageManagerRepair
+
+        $result.Available | Should -Be $true
+        $result.Succeeded | Should -Be $false
+        $result.DowngradeRejected | Should -Be $false
+        $result.Message | Should -Match 'network error'
+        Should -Invoke Repair-WinGetPackageManager -Times 2 -Exactly
+    }
+}
