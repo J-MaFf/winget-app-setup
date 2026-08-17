@@ -58,12 +58,12 @@ param (
 # This script is assembled from the WingetAppSetup module by build/Build-WingetInstallScript.ps1.
 # Edit the function source under WingetAppSetup/Public and WingetAppSetup/Private, then re-run the
 # build to regenerate this file. See readme.md ("Project layout") for details.
-# Build id: 1.0.0+8d8f7de6 (module version + SHA256 fragment of the function content; issue #189).
+# Build id: 1.0.0+3688242c (module version + SHA256 fragment of the function content; issue #189).
 # ------------------------------------------------------------------------------------------------
 
 # Content-derived build identity, logged at startup so a transcript from a remote machine
 # identifies exactly which installer build produced it (issue #189).
-$script:InstallerBuildId = '1.0.0+8d8f7de6'
+$script:InstallerBuildId = '1.0.0+3688242c'
 
 # ------------------------------------------------Functions------------------------------------------------
 
@@ -837,8 +837,8 @@ function Test-WingetListOutputContainsPackageId {
 # and its Get-CurrentWindowsPrincipal seam (Public/Elevation.ps1, Private/Elevation.ps1 - a
 # try/catch and a type cast, issue #239), Get-WingetAgreementArgs (a literal array,
 # Private/WingetAgreementArgs.ps1, issue #240), and this file's own
-# Get-PowerShell7MsiInfo/Save-WebFileWithTimeout/Install-PowerShell7FromMsi (issue #263). Check
-# any function added to this list - or any
+# Get-PowerShell7MsiInfo/Save-WebFileWithTimeout/Install-PowerShell7FromMsi (issue #263) and
+# Test-GitHubRateLimitError (issue #274). Check any function added to this list - or any
 # future edit to one already on it - against the same constraints before calling it from here; the
 # build's parse + ASCII guards only catch a parse-breaking token, not a PS7-only runtime construct
 # that still parses under 5.1 but behaves differently or throws. The build's parse + ASCII guards
@@ -920,6 +920,29 @@ function Find-PowerShell7 {
 
 <#
 .SYNOPSIS
+    Tests whether an error looks like a GitHub rate-limit / throttling response.
+.DESCRIPTION
+    Both GitHub-dependent fallbacks in this file (the metadata.json read below and the aka.ms
+    script delegation in Invoke-PowerShell7Bootstrap) surface the underlying exception text
+    verbatim via Write-WarningMessage, which is where a throttled machine actually sees
+    "429: Too Many Requests" or "(429) Too Many Requests" (issue #274). Matching that text is
+    how the caller distinguishes "GitHub is throttling this network" from any other network
+    failure without parsing a structured status code out of a caught ErrorRecord.
+.PARAMETER ErrorRecord
+    The $_ caught from a failed Invoke-RestMethod call.
+.RETURNS
+    [bool] True when the error text mentions HTTP 429 / "Too Many Requests".
+#>
+function Test-GitHubRateLimitError {
+    param (
+        [Parameter(Mandatory = $true)]
+        $ErrorRecord
+    )
+    return ($ErrorRecord.ToString() -match '429|Too Many Requests')
+}
+
+<#
+.SYNOPSIS
     Resolves the current stable PowerShell 7 release into an MSI download URL for this machine.
 .DESCRIPTION
     Reads the same tools/metadata.json the official aka.ms/install-powershell.ps1 script reads
@@ -973,6 +996,9 @@ function Get-PowerShell7MsiInfo {
     }
     catch {
         Write-WarningMessage "Could not read the PowerShell release metadata: $_"
+        if (Test-GitHubRateLimitError -ErrorRecord $_) {
+            $script:PowerShell7BootstrapGitHubThrottled = $true
+        }
         return $null
     }
     if (-not $release) {
@@ -1270,6 +1296,12 @@ function Invoke-PowerShell7Bootstrap {
         return 1
     }
 
+    # Reset per-call, not per-process: this flag is set deep in Get-PowerShell7MsiInfo/the aka.ms
+    # catch below and read back at the terminal failure message further down (issue #274). Without
+    # the reset here, a throttled call would leave a stale $true that a later, unrelated call in
+    # the same process (or Pester run) could inherit.
+    $script:PowerShell7BootstrapGitHubThrottled = $false
+
     # 5.1's .NET Framework can default to a protocol set without TLS 1.2 on older Windows 10
     # builds, which breaks the Invoke-RestMethod calls below. Opt in additively; never downgrade.
     try {
@@ -1353,13 +1385,25 @@ function Invoke-PowerShell7Bootstrap {
                 }
                 catch {
                     Write-WarningMessage "The MSI fallback failed: $_"
+                    if (Test-GitHubRateLimitError -ErrorRecord $_) {
+                        $script:PowerShell7BootstrapGitHubThrottled = $true
+                    }
                 }
             }
             $pwshPath = Find-PowerShell7
         }
 
         if (-not $pwshPath) {
-            Write-ErrorMessage 'PowerShell 7 could not be installed automatically. Install it manually (winget install Microsoft.PowerShell, or see https://aka.ms/powershell) and re-run this installer from a pwsh prompt.'
+            if ($script:PowerShell7BootstrapGitHubThrottled) {
+                # winget already failed by construction (this branch is only reached after it did),
+                # so pointing at 'source reset' costs nothing even when that is not the actual root
+                # cause - unlike the GitHub-hosted fallbacks above, it does not depend on the same
+                # throttled network path (issue #274).
+                Write-ErrorMessage 'PowerShell 7 could not be installed automatically: GitHub is rate-limiting this network (429 Too Many Requests), and every remaining fallback here reads from GitHub too. If winget failed above with a source error, try "winget source reset --force" and re-run - that path does not depend on GitHub. Otherwise wait a while for the throttle to clear, or install PowerShell 7 manually (winget install Microsoft.PowerShell, or see https://aka.ms/powershell) from a machine on a different network.'
+            }
+            else {
+                Write-ErrorMessage 'PowerShell 7 could not be installed automatically. Install it manually (winget install Microsoft.PowerShell, or see https://aka.ms/powershell) and re-run this installer from a pwsh prompt.'
+            }
             return 1
         }
         Write-Success 'PowerShell 7 is installed.'

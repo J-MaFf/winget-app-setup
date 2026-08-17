@@ -137,6 +137,20 @@ Describe 'Find-PowerShell7' {
     }
 }
 
+Describe 'Test-GitHubRateLimitError' {
+    It 'Matches the literal text GitHub returns for a throttled raw.githubusercontent.com request' {
+        Test-GitHubRateLimitError -ErrorRecord '429: Too Many Requests' | Should -Be $true
+    }
+
+    It 'Matches the WebException phrasing PowerShell formats for a 429 response' {
+        Test-GitHubRateLimitError -ErrorRecord 'The remote server returned an error: (429) Too Many Requests.' | Should -Be $true
+    }
+
+    It 'Does not match an unrelated network failure' {
+        Test-GitHubRateLimitError -ErrorRecord 'network unreachable' | Should -Be $false
+    }
+}
+
 Describe 'Get-PowerShell7MsiInfo' {
     BeforeEach {
         Mock Write-WarningMessage { }
@@ -145,6 +159,9 @@ Describe 'Get-PowerShell7MsiInfo' {
         $script:savedArchitectureW6432 = $env:PROCESSOR_ARCHITEW6432
         $env:PROCESSOR_ARCHITECTURE = 'AMD64'
         $env:PROCESSOR_ARCHITEW6432 = ''
+        # Isolate from any other test/call that set this (issue #274) - only the throttle test
+        # below should ever see it $true.
+        $script:PowerShell7BootstrapGitHubThrottled = $false
     }
     AfterEach {
         $env:PROCESSOR_ARCHITECTURE = $script:savedArchitecture
@@ -207,6 +224,22 @@ Describe 'Get-PowerShell7MsiInfo' {
         Mock Invoke-RestMethod { throw 'network unreachable' }
 
         Get-PowerShell7MsiInfo | Should -BeNullOrEmpty
+    }
+
+    It 'Flags a 429 metadata failure for the top-level bootstrap to explain (issue #274)' {
+        Mock Invoke-RestMethod { throw '429: Too Many Requests' }
+
+        Get-PowerShell7MsiInfo | Out-Null
+
+        $script:PowerShell7BootstrapGitHubThrottled | Should -Be $true
+    }
+
+    It 'Does not flag an unrelated metadata failure' {
+        Mock Invoke-RestMethod { throw 'network unreachable' }
+
+        Get-PowerShell7MsiInfo | Out-Null
+
+        $script:PowerShell7BootstrapGitHubThrottled | Should -Be $false
     }
 
     It 'Returns $null when the metadata carries no ReleaseTag' {
@@ -684,6 +717,22 @@ Describe 'Invoke-PowerShell7Bootstrap' {
             $result | Should -Be 1
             Should -Invoke Write-ErrorMessage -Times 1 -ParameterFilter { $Message -match 'could not be installed automatically' }
             Should -Invoke Start-Process -Times 0 -ParameterFilter { $FilePath -eq 'C:\pf7\pwsh.exe' }
+        }
+
+        It 'Points at "winget source reset" when the aka.ms fallback also hits a GitHub 429 (issue #274)' {
+            # A machine already throttled on raw.githubusercontent.com loses every GitHub-hosted
+            # fallback at once, so the generic manual-install message is not the most useful thing
+            # to print - see issue #274 for the real-world failure this reproduces.
+            Mock Find-PowerShell7 { $null }
+            Mock Get-Command { $null } -ParameterFilter { $Name -eq 'winget' }
+            Mock Invoke-RestMethod { throw '429: Too Many Requests' } -ParameterFilter { $Uri -like '*install-powershell*' }
+
+            $result = Invoke-PowerShell7Bootstrap -CommandPath 'C:\repo\winget-app-install.ps1'
+
+            $result | Should -Be 1
+            Should -Invoke Write-ErrorMessage -Times 1 -ParameterFilter {
+                $Message -match 'rate-limiting' -and $Message -match 'winget source reset --force'
+            }
         }
     }
 
