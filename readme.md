@@ -35,6 +35,14 @@ Windows PowerShell 5.1, which self-bootstraps as described above):
 Set-ExecutionPolicy Unrestricted -Scope Process -Force; irm "https://raw.githubusercontent.com/J-MaFf/winget-app-setup/refs/heads/main/winget-app-install.ps1" | iex
 ```
 
+> **`raw.githubusercontent.com` returns `429: Too Many Requests`?** That's GitHub throttling the
+> machine's shared public IP (common behind corporate NAT/VPN egress), not a problem with the
+> script. Retry in a few minutes, or fall back to the jsDelivr CDN mirror of the same file:
+>
+> ```powershell
+> Set-ExecutionPolicy Unrestricted -Scope Process -Force; irm "https://cdn.jsdelivr.net/gh/J-MaFf/winget-app-setup@main/winget-app-install.ps1" | iex
+> ```
+
 Note for 5.1 starts via `irm | iex`: there is no script file on disk to relaunch, so the
 bootstrap re-downloads the installer from the URL above to a temp file and runs that under
 `pwsh`. Starting from a file (`-File .\winget-app-install.ps1`) relaunches the same file
