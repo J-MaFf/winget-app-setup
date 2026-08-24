@@ -101,10 +101,33 @@ Describe 'Get-DefaultAppCatalog (issue #190)' {
             [bool](& $dellApp.condition) | Should -Be $false
         }
 
-        It 'No other catalog entry carries a condition (gating stays deliberate and reviewed)' {
+    }
+
+    Context 'Windows Terminal self-lock gating (issue #271)' {
+        It 'Gates Microsoft.WindowsTerminal behind a condition with a human-readable description' {
+            $wtApp = @(Get-DefaultAppCatalog) | Where-Object { $_.name -eq 'Microsoft.WindowsTerminal' }
+
+            @($wtApp).Count | Should -Be 1
+            $wtApp.condition | Should -BeOfType [scriptblock]
+            $wtApp.conditionDescription | Should -Match 'issue #271'
+        }
+
+        It 'Condition is false when the current session is hosted by Windows Terminal, true otherwise' {
+            $wtApp = @(Get-DefaultAppCatalog) | Where-Object { $_.name -eq 'Microsoft.WindowsTerminal' }
+
+            Mock Test-WindowsTerminalHostsCurrentSession { $true }
+            [bool](& $wtApp.condition) | Should -Be $false
+
+            Mock Test-WindowsTerminalHostsCurrentSession { $false }
+            [bool](& $wtApp.condition) | Should -Be $true
+        }
+    }
+
+    Context 'Deliberate catalog gating (issues #217, #271)' {
+        It 'No catalog entry other than the two reviewed exceptions carries a condition' {
             $conditioned = @(Get-DefaultAppCatalog) | Where-Object { $_.ContainsKey('condition') }
 
-            @($conditioned | ForEach-Object { $_.name }) | Should -Be @('Dell.CommandUpdate.Universal')
+            @($conditioned | ForEach-Object { $_.name }) | Should -Be @('Dell.CommandUpdate.Universal', 'Microsoft.WindowsTerminal')
         }
     }
 }

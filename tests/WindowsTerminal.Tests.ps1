@@ -212,6 +212,9 @@ Describe 'Windows Terminal configuration' {
             Mock Get-ProcessUserName { 'CONTOSO\jdoe' }
             Mock Get-InteractiveSessionUserName { 'CONTOSO\jdoe' }
             Mock Write-WarningMessage { }
+            # Windows Terminal is present by default (issue #271); the "not installed" gate is
+            # covered by its own tests below.
+            Mock Test-WindowsTerminalInstalled { $true }
         }
 
         It 'Should perform no writes in WhatIf mode' {
@@ -301,6 +304,29 @@ Describe 'Windows Terminal configuration' {
             Set-WindowsTerminalDefaults
 
             Should -Invoke Write-WarningMessage -Times 0 -ParameterFilter { $Message -match 'CROSS-USER ELEVATION' }
+        }
+
+        It 'Skips the default-terminal-application registry write when Windows Terminal is not installed (issue #271)' {
+            Mock Get-WindowsTerminalSettingsPaths { return @() }
+            Mock Test-WindowsTerminalInstalled { $false }
+            Mock Set-WindowsTerminalAsDefaultTerminalApplication { return $true }
+
+            Set-WindowsTerminalDefaults
+
+            Should -Invoke Set-WindowsTerminalAsDefaultTerminalApplication -Times 0
+            Should -Invoke Write-WarningMessage -ParameterFilter { $Message -match 'Windows Terminal is not installed' }
+        }
+
+        It 'Previews skipping the default-terminal-application write in WhatIf mode when Windows Terminal is not installed' {
+            Mock Get-WindowsTerminalSettingsPaths { return @() }
+            Mock Test-WindowsTerminalInstalled { $false }
+            Mock Set-WindowsTerminalAsDefaultTerminalApplication { return $true }
+            Mock Write-Info { }
+
+            Set-WindowsTerminalDefaults -WhatIf
+
+            Should -Invoke Set-WindowsTerminalAsDefaultTerminalApplication -Times 0
+            Should -Invoke Write-Info -ParameterFilter { $Message -match 'not installed' -and $Message -match 'skip' }
         }
     }
 }

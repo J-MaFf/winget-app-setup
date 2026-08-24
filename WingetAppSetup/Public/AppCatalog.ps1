@@ -49,6 +49,15 @@ function Get-DefaultAppCatalog {
         # MSIX machine-wide — natively on Windows 24H2+, or via DISM provisioning on older Windows
         # (issues #163/#166). It self-verifies, so the loop must not re-check it with `winget list`.
         @{name = 'Microsoft.PowerShell'; install = 'Install-PowerShellLatest' },
-        @{name = 'Microsoft.WindowsTerminal' }
+        # winget cannot reliably install/upgrade Microsoft.WindowsTerminal from a session that
+        # Windows Terminal itself is hosting: doing so would require replacing files belonging to
+        # the very console host rendering the session, which self-locks winget.exe's own launch
+        # ("Access is denied" / "The file cannot be accessed by the system") instead of failing
+        # transiently - retries never recover (issue #271: 5 launch attempts plus a full final
+        # retry pass all failed identically in the reported E2E run, while every other catalog app
+        # installed fine in the same run). Gated with the same condition mechanism as Dell Command
+        # Update above (issue #217): evaluated before any winget probe runs, so the
+        # structurally-doomed attempt is skipped instead of retried.
+        @{name = 'Microsoft.WindowsTerminal'; condition = { -not (Test-WindowsTerminalHostsCurrentSession) }; conditionDescription = 'winget cannot self-update Windows Terminal from a session Windows Terminal itself is hosting (issue #271)' }
     )
 }
