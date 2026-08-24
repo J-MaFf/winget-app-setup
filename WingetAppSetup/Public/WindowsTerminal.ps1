@@ -175,6 +175,18 @@ function Set-WindowsTerminalAsDefaultTerminalApplication {
     Get-InteractiveSessionUserName) to warn loudly and report honestly in that case
     (issue #187). It deliberately does NOT write to another user's profile or registry
     hive — impersonation/HKU writes are out of scope.
+
+    The "default terminal application" registry write is gated on Windows Terminal actually
+    being installed (Test-WindowsTerminalInstalled, issue #271). This function used to run
+    unconditionally after the app-install loop regardless of whether the Microsoft.WindowsTerminal
+    install had just failed, which could point HKCU:\Console\%%Startup at Windows Terminal even
+    though it was never actually deployed. Once set, that delegation makes every subsequently
+    created console (including a fresh top-level process such as the next CI job step) hosted by
+    Windows Terminal's console component - self-locking every later attempt to install/verify
+    Microsoft.WindowsTerminal via winget, since doing so would require replacing files belonging
+    to the very console host rendering the session. Skipping the write when Windows Terminal is
+    not installed keeps a failed install from poisoning the rest of the run (and later runs) this
+    way.
 .PARAMETER WhatIf
     When provided, only reports intended actions.
 #>
@@ -207,7 +219,12 @@ function Set-WindowsTerminalDefaults {
         else {
             Write-Info '[DRY-RUN] Would set Windows Terminal defaultProfile to PowerShell 7 when settings.json is available'
         }
-        Write-Info '[DRY-RUN] Would set HKCU:\Console\%%Startup DelegationConsole and DelegationTerminal to Windows Terminal values'
+        if (Test-WindowsTerminalInstalled) {
+            Write-Info '[DRY-RUN] Would set HKCU:\Console\%%Startup DelegationConsole and DelegationTerminal to Windows Terminal values'
+        }
+        else {
+            Write-Info '[DRY-RUN] Windows Terminal is not installed; would skip default terminal application configuration'
+        }
         return
     }
 
@@ -220,7 +237,14 @@ function Set-WindowsTerminalDefaults {
         Write-WarningMessage 'Windows Terminal settings.json was not found. Skipping default profile configuration.'
     }
 
-    [void](Set-WindowsTerminalAsDefaultTerminalApplication)
+    # Only claim Windows Terminal as the default terminal application when it is actually
+    # installed (issue #271) - see the function-level remark above for why this gate exists.
+    if (Test-WindowsTerminalInstalled) {
+        [void](Set-WindowsTerminalAsDefaultTerminalApplication)
+    }
+    else {
+        Write-WarningMessage 'Windows Terminal is not installed. Skipping default terminal application configuration.'
+    }
 
     # Honest reporting under cross-user elevation: the per-step success messages above refer
     # to the PROCESS account's profile, so close with the caveat rather than an implied
