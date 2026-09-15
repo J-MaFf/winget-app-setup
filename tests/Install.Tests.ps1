@@ -179,6 +179,8 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
         Mock Set-WindowsTerminalDefaults { }
         Mock Install-WingetAutoUpdate { @{ Status = 'DryRun'; Version = '2.12.0' } }
         Mock Install-AppWithVerification { @{ Status = 'Installed'; InstallResult = $null; FailureReason = $null } }
+        # Healthy (no conflict) by default (issue #279); tests for the deadlock fail-fast override this.
+        Mock Get-ConflictingDesktopAppInstallerVersions { @() }
 
         $script:capturedRows = $null
         Mock Write-Table { $script:capturedRows = $Rows }
@@ -425,6 +427,40 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
             { Invoke-WingetInstall -WhatIf -NonInteractive } | Should -Not -Throw
 
             $script:warnings | Should -Contain 'winget did not become launchable again within the post-WAU-install wait window; continuing anyway (later winget calls retry independently).'
+        }
+    }
+
+    Context 'Deadlocked DesktopAppInstaller versions (issue #279)' {
+        It 'Runs the normal per-app pipeline when no conflict is present' {
+            Mock Get-ConflictingDesktopAppInstallerVersions { @() }
+
+            Invoke-WingetInstall -Apps @(@{ name = 'Contoso.AppOne' }) -WhatIf -NonInteractive
+
+            Should -Invoke Install-AppWithVerification -Times 1 -Exactly
+        }
+
+        # The other two behaviors here - skipping every app's install attempt upfront, and skipping
+        # the retry pass - both leave $failedApps non-empty by design, which hits the orchestrator's
+        # real (unmockable) `Exit 1` a few lines later. Driving that live kills the whole Pester
+        # process mid-run (confirmed: it took out every later test in the file the first time this
+        # was tried). Same convention as the winget-availability gate and retry-failure-message
+        # tests above: pin the behavior on source instead of executing it.
+        It 'Marks every app failed without attempting an install when a version conflict is present upfront (pinned structurally - driving it live would Exit 1 the process)' {
+            $installBody = $script:InvokeWingetInstallDef
+            $installBody | Should -Match '\$conflictingVersions = Get-ConflictingDesktopAppInstallerVersions'
+            $installBody | Should -Match '\$wingetDeadlocked = \$conflictingVersions\.Count -gt 1'
+            # The per-app loop must check the flag and skip straight to a failure entry - with a
+            # reason naming the conflicting versions - before ever calling Install-AppWithVerification.
+            $installBody | Should -Match '(?s)if \(\$wingetDeadlocked\)\s*\{\s*\$failedApps \+= @\{ Name = \$app\.name; Reason = "winget deadlocked between conflicting DesktopAppInstaller versions.*?continue\s*\}'
+        }
+
+        It 'Skips the retry pass when the wait after WAU install detects the conflict (pinned structurally)' {
+            $installBody = $script:InvokeWingetInstallDef
+            # Re-checked after a failed Wait-WingetLaunchable, not just at the top - the conflict can
+            # appear partway through this same pass.
+            $installBody | Should -Match '(?s)if \(-not \(Wait-WingetLaunchable\)\)\s*\{.*?if \(-not \$wingetDeadlocked\)\s*\{\s*\$conflictingVersions = Get-ConflictingDesktopAppInstallerVersions'
+            # The retry-pass gate gives the deadlock its own branch, ahead of the normal -WhatIf check.
+            $installBody | Should -Match '(?s)if \(\$failedApps\.Count -gt 0\)\s*\{\s*if \(\$wingetDeadlocked\)\s*\{\s*Write-WarningMessage ''Skipping the retry pass'
         }
     }
 
