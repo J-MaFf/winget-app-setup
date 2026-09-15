@@ -72,6 +72,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Fixed the scheduled end-to-end install workflow failing 3 of its last 4 runs (issue #277). Root
+  cause: `Install-WingetAutoUpdate`'s `RUN_WAU=YES` triggers an immediate background WAU update run
+  right after WAU installs, and that run's own winget invocations were observed holding the
+  app-execution alias unlaunchable for up to ~5.5 minutes — far longer than the existing 75s launch-retry
+  budget (issue #258) covers, so the E2E workflow's retry pass, second install run, and
+  `e2e/Assert-Install.ps1` post-install checks raced that window on nearly every attempt. Separately,
+  `e2e/Assert-Install.ps1`'s `winget list` probe had no exception handling at all around the call
+  itself (only around its exit code), so hitting the same broken-alias condition there crashed the
+  whole assertion script before any assertion ran — the actual cause of the Aug 24 2026 failure,
+  which surfaced as a different-looking message ("StandardOutputEncoding is only supported when
+  standard output is redirected") because that call captures output natively instead of going
+  through `Start-Process`. Fixed with: a new private `Wait-WingetLaunchable`
+  (`WingetAppSetup/Private/WingetLaunchResilience.ps1`) that polls a cheap `winget --version` launch
+  until it succeeds instead of guessing a fixed sleep, called once right after
+  `Install-WingetAutoUpdate` returns `Configured` so later winget calls in the same run no longer
+  race the window at all; `Test-TransientWingetLaunchError`'s classifier now also matches the
+  `StandardOutputEncoding` message; and `e2e/Assert-Install.ps1`'s probe loop now waits for winget to
+  become launchable before starting and tolerates (instead of crashing on) a launch exception during
+  its own per-app retries.
 - Fixed winget bootstrap aborting outright when the machine carries a newer framework package than
   the WinGet release pins (issue #265). `Repair-WinGetPackageManager -Latest -Force` deploys the
   dependencies pinned to the release it installs, so on a machine whose
