@@ -58,12 +58,12 @@ param (
 # This script is assembled from the WingetAppSetup module by build/Build-WingetInstallScript.ps1.
 # Edit the function source under WingetAppSetup/Public and WingetAppSetup/Private, then re-run the
 # build to regenerate this file. See readme.md ("Project layout") for details.
-# Build id: 1.0.0+4ef1afba (module version + SHA256 fragment of the function content; issue #189).
+# Build id: 1.0.0+a2e9b6f1 (module version + SHA256 fragment of the function content; issue #189).
 # ------------------------------------------------------------------------------------------------
 
 # Content-derived build identity, logged at startup so a transcript from a remote machine
 # identifies exactly which installer build produced it (issue #189).
-$script:InstallerBuildId = '1.0.0+4ef1afba'
+$script:InstallerBuildId = '1.0.0+a2e9b6f1'
 
 # ------------------------------------------------Functions------------------------------------------------
 
@@ -2202,20 +2202,35 @@ function Resolve-WingetExecutable {
     pattern every other timeout-guarded winget call in this module uses (e.g.
     Invoke-WingetSourceProbe) — otherwise a probe that launches but never returns would block this
     function past TimeoutSeconds indefinitely, since that deadline is only checked between attempts.
+
+    Requires RequiredConsecutiveSuccesses probes in a row, PollIntervalSeconds apart, before
+    declaring winget launchable - not just one (issue #277 follow-up). A single success right after
+    Install-WingetAutoUpdate's msiexec returns does not prove the danger window has passed: Task
+    Scheduler dispatching WAU's immediate run, and WAU's own startup, are not instantaneous, so a
+    probe run in that gap can see winget healthy moments before WAU's own winget calls actually
+    start breaking it. A live PR run observed exactly this: the very first probe succeeded within
+    ~0.5s of the WAU install finishing, but a completely separate process attempting its own winget
+    calls ~17s later hit the full lock. Requiring the probe to stay healthy across more than one
+    check, spaced apart, catches that case instead of declaring victory in a lull.
 .PARAMETER TimeoutSeconds
     Maximum time to keep polling before giving up. Default 360 (6 minutes) — comfortably past the
     longest lock window observed so far.
 .PARAMETER PollIntervalSeconds
-    Seconds to wait between polls. Default 15.
+    Seconds to wait between polls - both after a failure and between the confirming probes
+    RequiredConsecutiveSuccesses needs. Default 20.
 .PARAMETER ProbeTimeoutSeconds
     Maximum seconds to wait for a single `winget --version` probe before killing it and counting
     that attempt as still-unlaunchable. Default 30 — generous for a command that does no network or
     source I/O.
+.PARAMETER RequiredConsecutiveSuccesses
+    How many probes in a row must succeed before winget is declared launchable. Default 2, so a
+    momentary gap before the real interference begins doesn't read as "all clear".
 .RETURNS
-    [bool] True as soon as winget launches successfully. False if it was still unlaunchable when
-    TimeoutSeconds elapsed, or if a launch attempt failed with something other than the known
-    transient class (e.g. winget genuinely missing). Best-effort either way: callers keep their own
-    retry/backoff paths as a fallback, this just makes hitting them far less likely.
+    [bool] True once winget has launched successfully RequiredConsecutiveSuccesses times in a row.
+    False if it never reached that streak before TimeoutSeconds elapsed, or if a launch attempt
+    failed with something other than the known transient class (e.g. winget genuinely missing).
+    Best-effort either way: callers keep their own retry/backoff paths as a fallback, this just
+    makes hitting them far less likely.
 #>
 function Wait-WingetLaunchable {
     param (
@@ -2223,28 +2238,35 @@ function Wait-WingetLaunchable {
         [int]$TimeoutSeconds = 360,
 
         [Parameter(Mandatory = $false)]
-        [int]$PollIntervalSeconds = 15,
+        [int]$PollIntervalSeconds = 20,
 
         [Parameter(Mandatory = $false)]
-        [int]$ProbeTimeoutSeconds = 30
+        [int]$ProbeTimeoutSeconds = 30,
+
+        [Parameter(Mandatory = $false)]
+        [int]$RequiredConsecutiveSuccesses = 2
     )
 
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
     $bypassAlias = $false
+    $consecutiveSuccesses = 0
 
     while ($true) {
         $tempSuffix = [System.IO.Path]::GetRandomFileName()
         $stdoutFile = Join-Path $env:TEMP "winget_launch_probe_output_$tempSuffix.txt"
         $stderrFile = Join-Path $env:TEMP "winget_launch_probe_error_$tempSuffix.txt"
+        $succeeded = $false
         try {
             $wingetExecutable = Resolve-WingetExecutable -BypassAlias:$bypassAlias
             $probeProcess = Start-Process -FilePath $wingetExecutable -ArgumentList '--version' -NoNewWindow -PassThru -RedirectStandardOutput $stdoutFile -RedirectStandardError $stderrFile
             if ($probeProcess.WaitForExit($ProbeTimeoutSeconds * 1000)) {
-                return $true
+                $succeeded = $true
             }
-            # Launched but never returned - kill it and fall through to the same retry path as a
-            # launch exception; not necessarily an alias problem, so bypassAlias is left as-is.
-            try { $probeProcess.Kill() } catch { }
+            else {
+                # Launched but never returned - kill it and fall through to the same retry path as
+                # a launch exception; not necessarily an alias problem, so bypassAlias is left as-is.
+                try { $probeProcess.Kill() } catch { }
+            }
         }
         catch {
             # Same exemption Install-WingetPackage documents (issue #258): once probing a concrete
@@ -2253,8 +2275,7 @@ function Wait-WingetLaunchable {
             # ERROR_FILE_NOT_FOUND - not one of Test-TransientWingetLaunchError's classes - rather
             # than a file-lock error. On the bare alias an unrecognized error might mean winget is
             # genuinely missing and is worth surfacing; on a bypass path it's presumed to be the
-            # same upgrade race, so re-resolve and keep polling instead of giving up early (as
-            # observed happening within ~17s on a real run - issue #277 follow-up).
+            # same upgrade race, so re-resolve and keep polling instead of giving up early.
             if (-not (Test-TransientWingetLaunchError -Message $_.Exception.Message) -and -not $bypassAlias) {
                 return $false
             }
@@ -2263,6 +2284,16 @@ function Wait-WingetLaunchable {
         finally {
             Remove-Item $stdoutFile -ErrorAction SilentlyContinue
             Remove-Item $stderrFile -ErrorAction SilentlyContinue
+        }
+
+        if ($succeeded) {
+            $consecutiveSuccesses++
+            if ($consecutiveSuccesses -ge $RequiredConsecutiveSuccesses) {
+                return $true
+            }
+        }
+        else {
+            $consecutiveSuccesses = 0
         }
 
         if ((Get-Date) -ge $deadline) {
