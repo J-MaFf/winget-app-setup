@@ -58,12 +58,12 @@ param (
 # This script is assembled from the WingetAppSetup module by build/Build-WingetInstallScript.ps1.
 # Edit the function source under WingetAppSetup/Public and WingetAppSetup/Private, then re-run the
 # build to regenerate this file. See readme.md ("Project layout") for details.
-# Build id: 1.0.0+b9dd6e3d (module version + SHA256 fragment of the function content; issue #189).
+# Build id: 1.0.0+e6d7b46b (module version + SHA256 fragment of the function content; issue #189).
 # ------------------------------------------------------------------------------------------------
 
 # Content-derived build identity, logged at startup so a transcript from a remote machine
 # identifies exactly which installer build produced it (issue #189).
-$script:InstallerBuildId = '1.0.0+b9dd6e3d'
+$script:InstallerBuildId = '1.0.0+e6d7b46b'
 
 # ------------------------------------------------Functions------------------------------------------------
 
@@ -2087,23 +2087,30 @@ function Invoke-WingetPackageManagerRepair {
 }
 
 # --- WingetLaunchResilience ---
-# Winget launch resilience helpers (issue #258). Start-Process can fail to launch winget.exe at
-# all when the per-user app-execution alias under %LOCALAPPDATA%\Microsoft\WindowsApps is broken
-# or locked - most commonly because the Microsoft.DesktopAppInstaller MSIX package is being
-# upgraded or re-registered at that moment (e.g. by a background Winget-AutoUpdate run, which the
-# installer itself kicks off via RUN_WAU=YES). These helpers classify that failure and resolve a
-# concrete winget.exe path that bypasses the alias entirely, so retries can recover instead of
-# hammering the same broken reparse point.
+# Winget launch resilience helpers (issues #258, #277). Start-Process (or PowerShell's own native
+# command invocation) can fail to launch winget.exe at all when the per-user app-execution alias
+# under %LOCALAPPDATA%\Microsoft\WindowsApps is broken or locked - most commonly because the
+# Microsoft.DesktopAppInstaller MSIX package is being upgraded or re-registered at that moment (e.g.
+# by a background Winget-AutoUpdate run, which the installer itself kicks off via RUN_WAU=YES).
+# These helpers classify that failure, resolve a concrete winget.exe path that bypasses the alias
+# entirely so retries can recover instead of hammering the same broken reparse point, and wait out
+# the window in one place right after the RUN_WAU-triggering install so callers further downstream
+# don't each have to race it independently.
 
 <#
 .SYNOPSIS
-    Returns true when a Start-Process exception message indicates a transient winget launch failure.
+    Returns true when a winget-launch exception message indicates a transient failure.
 .DESCRIPTION
-    Matches the two Win32 errors Start-Process surfaces as a terminating exception when winget.exe's
-    own file is transiently inaccessible (issues #253/#258): ERROR_CANT_ACCESS_FILE (1920, "The file
+    Matches the Win32 errors Start-Process surfaces as a terminating exception when winget.exe's own
+    file is transiently inaccessible (issues #253/#258): ERROR_CANT_ACCESS_FILE (1920, "The file
     cannot be accessed by the system.") and the sibling ERROR_SHARING_VIOLATION ("...being used by
-    another process."). Matched case-insensitively; anything else (e.g. winget genuinely missing
-    from PATH) is a real failure the caller should not retry.
+    another process."). Also matches the message PowerShell's native-command invocation throws for
+    the same underlying condition when a caller captures output directly (e.g. `$out = @(winget list
+    ... 2>&1)`) instead of going through Start-Process: "StandardOutputEncoding is only supported
+    when standard output is redirected." (issue #277) — a .NET Process-class symptom of resolving the
+    same broken/mid-registration app-execution alias, just surfaced through a different code path.
+    Matched case-insensitively; anything else (e.g. winget genuinely missing from PATH) is a real
+    failure the caller should not retry.
 .PARAMETER Message
     The exception message to classify.
 .RETURNS
@@ -2117,7 +2124,7 @@ function Test-TransientWingetLaunchError {
         [string]$Message
     )
 
-    return $Message -match 'cannot be accessed by the system|being used by another process'
+    return $Message -match 'cannot be accessed by the system|being used by another process|StandardOutputEncoding is only supported when standard output is redirected'
 }
 
 <#
@@ -2170,6 +2177,75 @@ function Resolve-WingetExecutable {
     }
 
     return 'winget'
+}
+
+<#
+.SYNOPSIS
+    Waits for winget.exe to become launchable again, retrying while it hits a transient launch
+    failure.
+.DESCRIPTION
+    Install-WingetAutoUpdate installs Winget-AutoUpdate (WAU) with RUN_WAU=YES, which makes WAU run
+    an update pass immediately instead of waiting for its 2 AM schedule. That immediate run's own
+    winget invocations were observed (issue #277) to hold the per-user app-execution alias — or the
+    DesktopAppInstaller package's files themselves — in a broken/inaccessible state for several
+    minutes (up to ~5.5 minutes across two GitHub-hosted E2E runs), far longer than the 75s budget
+    Install-WingetPackage's own launch retries cover for a single package (issue #258). Anything that
+    touches winget right after Install-WingetAutoUpdate returns — this script's own failed-install
+    retry pass a few lines later, a second end-to-end install run, or e2e/Assert-Install.ps1's
+    post-install checks — used to race that window on essentially every attempt.
+
+    Polls with a cheap `winget --version` launch (Start-Process, output discarded) rather than
+    sleeping a fixed duration, so a machine where WAU's run finishes quickly is not held up
+    unnecessarily. Each attempt re-resolves the executable, bypassing the alias after the first
+    failure — the same pattern Install-WingetPackage's own launch retries use.
+.PARAMETER TimeoutSeconds
+    Maximum time to keep polling before giving up. Default 360 (6 minutes) — comfortably past the
+    longest lock window observed so far.
+.PARAMETER PollIntervalSeconds
+    Seconds to wait between polls. Default 15.
+.RETURNS
+    [bool] True as soon as winget launches successfully. False if it was still unlaunchable when
+    TimeoutSeconds elapsed, or if the failure was not the known transient class (e.g. winget
+    genuinely missing). Best-effort either way: callers keep their own retry/backoff paths as a
+    fallback, this just makes hitting them far less likely.
+#>
+function Wait-WingetLaunchable {
+    param (
+        [Parameter(Mandatory = $false)]
+        [int]$TimeoutSeconds = 360,
+
+        [Parameter(Mandatory = $false)]
+        [int]$PollIntervalSeconds = 15
+    )
+
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    $bypassAlias = $false
+
+    while ($true) {
+        $tempSuffix = [System.IO.Path]::GetRandomFileName()
+        $stdoutFile = Join-Path $env:TEMP "winget_launch_probe_output_$tempSuffix.txt"
+        $stderrFile = Join-Path $env:TEMP "winget_launch_probe_error_$tempSuffix.txt"
+        try {
+            $wingetExecutable = Resolve-WingetExecutable -BypassAlias:$bypassAlias
+            [void](Start-Process -FilePath $wingetExecutable -ArgumentList '--version' -NoNewWindow -Wait -PassThru -RedirectStandardOutput $stdoutFile -RedirectStandardError $stderrFile)
+            return $true
+        }
+        catch {
+            if (-not (Test-TransientWingetLaunchError -Message $_.Exception.Message)) {
+                return $false
+            }
+            $bypassAlias = $true
+        }
+        finally {
+            Remove-Item $stdoutFile -ErrorAction SilentlyContinue
+            Remove-Item $stderrFile -ErrorAction SilentlyContinue
+        }
+
+        if ((Get-Date) -ge $deadline) {
+            return $false
+        }
+        Start-Sleep -Seconds $PollIntervalSeconds
+    }
 }
 
 # --- AppCatalog ---
@@ -2719,6 +2795,18 @@ function Invoke-WingetInstall {
     # here warns but does not fail the install; the outcome is captured and surfaced next to the
     # final summary instead of being a scrolled-past warning (issue #186).
     $wauResult = Install-WingetAutoUpdate -WhatIf:$WhatIf
+
+    # 'Configured' means this run just installed or upgraded WAU with RUN_WAU=YES, which triggers
+    # an immediate background WAU update run whose own winget calls can leave winget.exe
+    # unlaunchable for several minutes (issue #277). Wait it out here, once, before anything else
+    # in this run touches winget again - the retry pass immediately below, most directly - instead
+    # of letting every subsequent winget call race that window. Not needed for 'AlreadyPresent'
+    # (no install happened, so RUN_WAU never fired) or 'DryRun'/'Failed'.
+    if ($wauResult.Status -eq 'Configured') {
+        if (-not (Wait-WingetLaunchable)) {
+            Write-WarningMessage 'winget did not become launchable again within the post-WAU-install wait window; continuing anyway (later winget calls retry independently).'
+        }
+    }
 
     # Retry any failed installations once before producing the final summary
     if ($failedApps.Count -gt 0) {

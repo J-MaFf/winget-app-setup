@@ -385,6 +385,49 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
         }
     }
 
+    Context 'Post-WAU-install winget wait (issue #277)' {
+        # Driven with -WhatIf so these don't need the real elevation gate: Install-WingetAutoUpdate
+        # is mocked directly, so the returned Status controls the branch under test regardless of
+        # what a real (non-mocked) call would return for -WhatIf.
+        It 'Waits for winget to become launchable again when WAU was just installed/upgraded (Status Configured)' {
+            Mock Install-WingetAutoUpdate { @{ Status = 'Configured'; Version = '2.12.0' } }
+            Mock Wait-WingetLaunchable { $true }
+
+            Invoke-WingetInstall -WhatIf -NonInteractive
+
+            Should -Invoke Wait-WingetLaunchable -Times 1 -Exactly
+        }
+
+        It 'Does not wait when WAU was already present (RUN_WAU never fired)' {
+            Mock Install-WingetAutoUpdate { @{ Status = 'AlreadyPresent'; Version = '2.12.0' } }
+            Mock Wait-WingetLaunchable { $true }
+
+            Invoke-WingetInstall -WhatIf -NonInteractive
+
+            Should -Invoke Wait-WingetLaunchable -Times 0 -Exactly
+        }
+
+        It 'Does not wait when the WAU install failed' {
+            Mock Install-WingetAutoUpdate { @{ Status = 'Failed'; Version = '2.12.0' } }
+            Mock Wait-WingetLaunchable { $true }
+
+            Invoke-WingetInstall -WhatIf -NonInteractive
+
+            Should -Invoke Wait-WingetLaunchable -Times 0 -Exactly
+        }
+
+        It 'Warns but continues when winget is still unlaunchable after the wait window elapses' {
+            Mock Install-WingetAutoUpdate { @{ Status = 'Configured'; Version = '2.12.0' } }
+            Mock Wait-WingetLaunchable { $false }
+            $script:warnings = @()
+            Mock Write-WarningMessage { $script:warnings += $Message }
+
+            { Invoke-WingetInstall -WhatIf -NonInteractive } | Should -Not -Throw
+
+            $script:warnings | Should -Contain 'winget did not become launchable again within the post-WAU-install wait window; continuing anyway (later winget calls retry independently).'
+        }
+    }
+
     Context 'Retry pass (needs elevation: the non-dry-run path performs the real admin gate)' {
         It 'Sends a first-pass failure back through the helper and buckets a recovered app as installed' -Skip:(-not $script:wiringIsElevated) {
             $script:sevenZipCalls = 0

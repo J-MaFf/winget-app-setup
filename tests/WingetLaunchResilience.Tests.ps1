@@ -1,6 +1,7 @@
-# Tests for WingetAppSetup/Private/WingetLaunchResilience.ps1 (issue #258): classification of
-# transient Start-Process winget-launch failures, and resolution of a concrete winget.exe that
-# bypasses the per-user app-execution alias while DesktopAppInstaller is mid-upgrade.
+# Tests for WingetAppSetup/Private/WingetLaunchResilience.ps1 (issues #258, #277): classification of
+# transient winget-launch failures, resolution of a concrete winget.exe that bypasses the per-user
+# app-execution alias while DesktopAppInstaller is mid-upgrade, and waiting out that window after
+# Install-WingetAutoUpdate's RUN_WAU=YES background run.
 
 BeforeAll {
     . (Join-Path $PSScriptRoot 'TestHelpers.ps1')
@@ -30,6 +31,11 @@ Describe 'Test-TransientWingetLaunchError' {
     It 'Handles a null or empty message without throwing' {
         Test-TransientWingetLaunchError -Message $null | Should -Be $false
         Test-TransientWingetLaunchError -Message '' | Should -Be $false
+    }
+
+    It 'Classifies the native-command-invocation StandardOutputEncoding symptom as transient (issue #277)' {
+        Test-TransientWingetLaunchError -Message 'StandardOutputEncoding is only supported when standard output is redirected.' |
+            Should -Be $true
     }
 }
 
@@ -83,5 +89,92 @@ Describe 'Resolve-WingetExecutable' {
 
             Resolve-WingetExecutable -BypassAlias | Should -Be 'winget'
         }
+    }
+}
+
+Describe 'Wait-WingetLaunchable (issue #277)' {
+    BeforeEach {
+        Mock Remove-Item { }
+    }
+
+    It 'Returns true immediately when winget launches on the first probe' {
+        Mock Start-Process { [pscustomobject]@{ ExitCode = 0 } }
+        Mock Start-Sleep { }
+
+        Wait-WingetLaunchable | Should -Be $true
+
+        Should -Invoke Start-Process -Times 1 -Exactly -ParameterFilter { $FilePath -eq 'winget' }
+        Should -Invoke Start-Sleep -Times 0 -Exactly
+    }
+
+    It 'Retries a transient launch failure, bypassing the alias, and succeeds once it clears' {
+        $script:callIndex = 0
+        Mock Start-Process {
+            $script:callIndex++
+            if ($script:callIndex -eq 1) {
+                throw 'This command cannot be run due to the error: The file cannot be accessed by the system.'
+            }
+            [pscustomobject]@{ ExitCode = 0 }
+        }
+        Mock Start-Sleep { }
+        Mock Resolve-WingetExecutable {
+            if ($BypassAlias) { return 'C:\WindowsApps\DAI\winget.exe' }
+            'winget'
+        }
+
+        Wait-WingetLaunchable -PollIntervalSeconds 1 | Should -Be $true
+
+        Should -Invoke Start-Process -Times 2 -Exactly
+        Should -Invoke Start-Process -Times 1 -Exactly -ParameterFilter { $FilePath -eq 'C:\WindowsApps\DAI\winget.exe' }
+        Should -Invoke Start-Sleep -Times 1 -Exactly -ParameterFilter { $Seconds -eq 1 }
+    }
+
+    It 'Also retries the native-command-invocation StandardOutputEncoding symptom (issue #277)' {
+        $script:callIndex = 0
+        Mock Start-Process {
+            $script:callIndex++
+            if ($script:callIndex -eq 1) {
+                throw 'StandardOutputEncoding is only supported when standard output is redirected.'
+            }
+            [pscustomobject]@{ ExitCode = 0 }
+        }
+        Mock Start-Sleep { }
+
+        Wait-WingetLaunchable -PollIntervalSeconds 1 | Should -Be $true
+
+        Should -Invoke Start-Process -Times 2 -Exactly
+    }
+
+    It 'Returns false immediately for an unrelated (non-transient) launch failure, without retrying' {
+        Mock Start-Process { throw 'The system cannot find the file specified.' }
+        Mock Start-Sleep { }
+
+        Wait-WingetLaunchable | Should -Be $false
+
+        Should -Invoke Start-Process -Times 1 -Exactly
+        Should -Invoke Start-Sleep -Times 0 -Exactly
+    }
+
+    It 'Gives up once the timeout has elapsed, without sleeping further' {
+        Mock Start-Process {
+            throw 'This command cannot be run due to the error: The file cannot be accessed by the system.'
+        }
+        Mock Start-Sleep { }
+
+        # TimeoutSeconds 0 means the deadline is already "now" by the time the first attempt
+        # returns, so this proves the loop honors the deadline instead of always trying at least
+        # once more - without a test that actually has to wait on real wall-clock time.
+        Wait-WingetLaunchable -TimeoutSeconds 0 -PollIntervalSeconds 1 | Should -Be $false
+
+        Should -Invoke Start-Process -Times 1 -Exactly
+        Should -Invoke Start-Sleep -Times 0 -Exactly
+    }
+
+    It 'Cleans up its per-attempt probe temp files' {
+        Mock Start-Process { [pscustomobject]@{ ExitCode = 0 } }
+
+        Wait-WingetLaunchable | Out-Null
+
+        Should -Invoke Remove-Item -Times 2 -Exactly
     }
 }

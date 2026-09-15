@@ -66,6 +66,7 @@ $SkipApps = @($SkipApps | ForEach-Object { $_ -split ',' } | ForEach-Object { $_
 $repoRoot = Split-Path -Parent $PSScriptRoot
 Import-Module (Join-Path $repoRoot 'WingetAppSetup\WingetAppSetup.psd1') -Force
 . (Join-Path $repoRoot 'WingetAppSetup\Private\WauSupport.ps1')
+. (Join-Path $repoRoot 'WingetAppSetup\Private\WingetLaunchResilience.ps1')
 
 $results = [System.Collections.Generic.List[pscustomobject]]::new()
 
@@ -123,16 +124,51 @@ foreach ($app in $candidateApps) {
 # 0x8A150002 for an app the installer had just verified as installed (and that the identical
 # probe resolved on the previous run). A retry with backoff separates transient winget noise
 # from a genuinely missing app; the output is kept for diagnosis when all attempts fail.
+#
+# Waits out a still-broken winget launch path before starting (issue #277): the installer's
+# Install-WingetAutoUpdate triggers an immediate background WAU run (RUN_WAU=YES) whose own winget
+# calls can leave winget.exe unlaunchable for several minutes, and this script runs as a separate
+# process straight after the installer, so it can start mid-lock. Best-effort - the per-app retry
+# loop below still tolerates a launch exception if the lock outlasts this wait.
+if (-not (Wait-WingetLaunchable)) {
+    Write-Host 'winget did not confirm launchable before starting the per-app checks; proceeding anyway (each check retries independently).' -ForegroundColor Yellow
+}
+
 $probeAttempts = 3
 foreach ($app in $appsToAssert) {
     $id = $app.name
     $exitCode = $null
     $output = @()
+    $wingetExecutable = 'winget'
     for ($attempt = 1; $attempt -le $probeAttempts; $attempt++) {
-        # --accept-source-agreements/--disable-interactivity: never hang on a first-use prompt.
-        $output = @(winget list --exact --id $id --accept-source-agreements --disable-interactivity 2>&1)
-        # Capture immediately - $LASTEXITCODE goes stale fast (repo rule).
-        $exitCode = $LASTEXITCODE
+        try {
+            # --accept-source-agreements/--disable-interactivity: never hang on a first-use prompt.
+            $output = @(& $wingetExecutable list --exact --id $id --accept-source-agreements --disable-interactivity 2>&1)
+            # Capture immediately - $LASTEXITCODE goes stale fast (repo rule).
+            $exitCode = $LASTEXITCODE
+        }
+        catch {
+            # winget.exe's own launch can throw instead of just returning a bad exit code when its
+            # app-execution alias is transiently broken (issue #277) - most commonly right after
+            # Install-WingetAutoUpdate's RUN_WAU=YES background run. Invoked this way (captured
+            # native command output) the same broken-alias condition surfaces as a different
+            # message than Start-Process reports elsewhere in the module (e.g.
+            # "StandardOutputEncoding is only supported when standard output is redirected"), which
+            # is why Test-TransientWingetLaunchError matches both. Left unhandled, this used to
+            # crash the whole script before any assertion ran (Aug 24 2026 scheduled run); treat it
+            # as just another retryable attempt instead, bypassing the alias for the next try.
+            if (-not (Test-TransientWingetLaunchError -Message $_.Exception.Message)) { throw }
+            $exitCode = -1
+            if ($attempt -ge $probeAttempts) {
+                Write-Host "winget list for $id could not launch (attempt $attempt/$probeAttempts): $($_.Exception.Message)" -ForegroundColor Yellow
+                $output = @($_.Exception.Message)
+                break
+            }
+            Write-Host "winget list for $id failed to launch (attempt $attempt/$probeAttempts) - retrying via the DesktopAppInstaller package path: $($_.Exception.Message)" -ForegroundColor Yellow
+            $wingetExecutable = Resolve-WingetExecutable -BypassAlias
+            Start-Sleep -Seconds (5 * $attempt)
+            continue
+        }
         if ($exitCode -eq 0) { break }
         if ($attempt -lt $probeAttempts) {
             Write-Host ('winget list for {0} exited 0x{1:X8} (attempt {2}/{3}) - retrying...' -f $id, $exitCode, $attempt, $probeAttempts) -ForegroundColor Yellow

@@ -307,6 +307,18 @@ function Invoke-WingetInstall {
     # final summary instead of being a scrolled-past warning (issue #186).
     $wauResult = Install-WingetAutoUpdate -WhatIf:$WhatIf
 
+    # 'Configured' means this run just installed or upgraded WAU with RUN_WAU=YES, which triggers
+    # an immediate background WAU update run whose own winget calls can leave winget.exe
+    # unlaunchable for several minutes (issue #277). Wait it out here, once, before anything else
+    # in this run touches winget again - the retry pass immediately below, most directly - instead
+    # of letting every subsequent winget call race that window. Not needed for 'AlreadyPresent'
+    # (no install happened, so RUN_WAU never fired) or 'DryRun'/'Failed'.
+    if ($wauResult.Status -eq 'Configured') {
+        if (-not (Wait-WingetLaunchable)) {
+            Write-WarningMessage 'winget did not become launchable again within the post-WAU-install wait window; continuing anyway (later winget calls retry independently).'
+        }
+    }
+
     # Retry any failed installations once before producing the final summary
     if ($failedApps.Count -gt 0) {
         if (-not $WhatIf) {
