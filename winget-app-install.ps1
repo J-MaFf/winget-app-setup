@@ -58,12 +58,12 @@ param (
 # This script is assembled from the WingetAppSetup module by build/Build-WingetInstallScript.ps1.
 # Edit the function source under WingetAppSetup/Public and WingetAppSetup/Private, then re-run the
 # build to regenerate this file. See readme.md ("Project layout") for details.
-# Build id: 1.0.0+e6d7b46b (module version + SHA256 fragment of the function content; issue #189).
+# Build id: 1.0.0+9f566d38 (module version + SHA256 fragment of the function content; issue #189).
 # ------------------------------------------------------------------------------------------------
 
 # Content-derived build identity, logged at startup so a transcript from a remote machine
 # identifies exactly which installer build produced it (issue #189).
-$script:InstallerBuildId = '1.0.0+e6d7b46b'
+$script:InstallerBuildId = '1.0.0+9f566d38'
 
 # ------------------------------------------------Functions------------------------------------------------
 
@@ -2197,17 +2197,25 @@ function Resolve-WingetExecutable {
     Polls with a cheap `winget --version` launch (Start-Process, output discarded) rather than
     sleeping a fixed duration, so a machine where WAU's run finishes quickly is not held up
     unnecessarily. Each attempt re-resolves the executable, bypassing the alias after the first
-    failure — the same pattern Install-WingetPackage's own launch retries use.
+    launch exception — the same pattern Install-WingetPackage's own launch retries use. Each probe
+    is itself bounded by ProbeTimeoutSeconds and killed if it hangs, the same WaitForExit/Kill
+    pattern every other timeout-guarded winget call in this module uses (e.g.
+    Invoke-WingetSourceProbe) — otherwise a probe that launches but never returns would block this
+    function past TimeoutSeconds indefinitely, since that deadline is only checked between attempts.
 .PARAMETER TimeoutSeconds
     Maximum time to keep polling before giving up. Default 360 (6 minutes) — comfortably past the
     longest lock window observed so far.
 .PARAMETER PollIntervalSeconds
     Seconds to wait between polls. Default 15.
+.PARAMETER ProbeTimeoutSeconds
+    Maximum seconds to wait for a single `winget --version` probe before killing it and counting
+    that attempt as still-unlaunchable. Default 30 — generous for a command that does no network or
+    source I/O.
 .RETURNS
     [bool] True as soon as winget launches successfully. False if it was still unlaunchable when
-    TimeoutSeconds elapsed, or if the failure was not the known transient class (e.g. winget
-    genuinely missing). Best-effort either way: callers keep their own retry/backoff paths as a
-    fallback, this just makes hitting them far less likely.
+    TimeoutSeconds elapsed, or if a launch attempt failed with something other than the known
+    transient class (e.g. winget genuinely missing). Best-effort either way: callers keep their own
+    retry/backoff paths as a fallback, this just makes hitting them far less likely.
 #>
 function Wait-WingetLaunchable {
     param (
@@ -2215,7 +2223,10 @@ function Wait-WingetLaunchable {
         [int]$TimeoutSeconds = 360,
 
         [Parameter(Mandatory = $false)]
-        [int]$PollIntervalSeconds = 15
+        [int]$PollIntervalSeconds = 15,
+
+        [Parameter(Mandatory = $false)]
+        [int]$ProbeTimeoutSeconds = 30
     )
 
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
@@ -2227,8 +2238,13 @@ function Wait-WingetLaunchable {
         $stderrFile = Join-Path $env:TEMP "winget_launch_probe_error_$tempSuffix.txt"
         try {
             $wingetExecutable = Resolve-WingetExecutable -BypassAlias:$bypassAlias
-            [void](Start-Process -FilePath $wingetExecutable -ArgumentList '--version' -NoNewWindow -Wait -PassThru -RedirectStandardOutput $stdoutFile -RedirectStandardError $stderrFile)
-            return $true
+            $probeProcess = Start-Process -FilePath $wingetExecutable -ArgumentList '--version' -NoNewWindow -PassThru -RedirectStandardOutput $stdoutFile -RedirectStandardError $stderrFile
+            if ($probeProcess.WaitForExit($ProbeTimeoutSeconds * 1000)) {
+                return $true
+            }
+            # Launched but never returned - kill it and fall through to the same retry path as a
+            # launch exception; not necessarily an alias problem, so bypassAlias is left as-is.
+            try { $probeProcess.Kill() } catch { }
         }
         catch {
             if (-not (Test-TransientWingetLaunchError -Message $_.Exception.Message)) {

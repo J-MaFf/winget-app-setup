@@ -93,12 +93,29 @@ Describe 'Resolve-WingetExecutable' {
 }
 
 Describe 'Wait-WingetLaunchable (issue #277)' {
+    BeforeAll {
+        # Start-Process is mocked to return a fake process object exposing the WaitForExit/Kill
+        # members the function actually calls - same pattern tests/WingetCore.Tests.ps1 uses for
+        # its own WaitForExit-based winget checks. Defined in BeforeAll (not the Describe body)
+        # so it survives into Pester's separate run phase.
+        function New-FakeWingetProcess {
+            param ([bool]$Exited = $true, [scriptblock]$OnKill = { })
+            $p = [pscustomobject]@{ ExitCode = 0 }
+            # Local (non-$script:) variable + GetNewClosure() so each fake process instance
+            # captures its own $Exited value, independent of any other instance in the same test.
+            $exitedCopy = $Exited
+            $p | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value { param($ms) $exitedCopy }.GetNewClosure()
+            $p | Add-Member -MemberType ScriptMethod -Name Kill -Value $OnKill
+            $p
+        }
+    }
+
     BeforeEach {
         Mock Remove-Item { }
     }
 
-    It 'Returns true immediately when winget launches on the first probe' {
-        Mock Start-Process { [pscustomobject]@{ ExitCode = 0 } }
+    It 'Returns true immediately when winget launches and exits within the probe timeout' {
+        Mock Start-Process { New-FakeWingetProcess }
         Mock Start-Sleep { }
 
         Wait-WingetLaunchable | Should -Be $true
@@ -114,7 +131,7 @@ Describe 'Wait-WingetLaunchable (issue #277)' {
             if ($script:callIndex -eq 1) {
                 throw 'This command cannot be run due to the error: The file cannot be accessed by the system.'
             }
-            [pscustomobject]@{ ExitCode = 0 }
+            New-FakeWingetProcess
         }
         Mock Start-Sleep { }
         Mock Resolve-WingetExecutable {
@@ -136,7 +153,7 @@ Describe 'Wait-WingetLaunchable (issue #277)' {
             if ($script:callIndex -eq 1) {
                 throw 'StandardOutputEncoding is only supported when standard output is redirected.'
             }
-            [pscustomobject]@{ ExitCode = 0 }
+            New-FakeWingetProcess
         }
         Mock Start-Sleep { }
 
@@ -155,6 +172,24 @@ Describe 'Wait-WingetLaunchable (issue #277)' {
         Should -Invoke Start-Sleep -Times 0 -Exactly
     }
 
+    It 'Kills and retries a probe that launches but never returns within ProbeTimeoutSeconds' {
+        $script:killCalled = $false
+        $script:callIndex = 0
+        Mock Start-Process {
+            $script:callIndex++
+            if ($script:callIndex -eq 1) {
+                return New-FakeWingetProcess -Exited $false -OnKill { Set-Variable -Name killCalled -Value $true -Scope script }
+            }
+            New-FakeWingetProcess
+        }
+        Mock Start-Sleep { }
+
+        Wait-WingetLaunchable -PollIntervalSeconds 1 -ProbeTimeoutSeconds 1 | Should -Be $true
+
+        $script:killCalled | Should -Be $true
+        Should -Invoke Start-Process -Times 2 -Exactly
+    }
+
     It 'Gives up once the timeout has elapsed, without sleeping further' {
         Mock Start-Process {
             throw 'This command cannot be run due to the error: The file cannot be accessed by the system.'
@@ -171,7 +206,7 @@ Describe 'Wait-WingetLaunchable (issue #277)' {
     }
 
     It 'Cleans up its per-attempt probe temp files' {
-        Mock Start-Process { [pscustomobject]@{ ExitCode = 0 } }
+        Mock Start-Process { New-FakeWingetProcess }
 
         Wait-WingetLaunchable | Out-Null
 
