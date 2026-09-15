@@ -123,13 +123,27 @@ foreach ($app in $candidateApps) {
 # Retried: winget list is observably flaky on hosted runners - PR #219's run saw a one-off
 # 0x8A150002 for an app the installer had just verified as installed (and that the identical
 # probe resolved on the previous run). A retry with backoff separates transient winget noise
-# from a genuinely missing app; the output is kept for diagnosis when all attempts fail.
+# from a genuinely missing app.
+#
+# Routed through the module's own Test-WingetPackageInstalled -TimeoutSeconds (WingetCore.ps1)
+# instead of invoking `winget list` inline (issue #277 follow-up). The first version of this fix
+# called winget via `& $wingetExecutable list ...` so it could swap in a bypass path after a launch
+# failure - but that call style turned out to reliably reproduce the exact
+# "StandardOutputEncoding is only supported when standard output is redirected" exception it was
+# meant to tolerate: a live PR run against this change saw EVERY app fail with that message on
+# every attempt, for the full ~3 minutes the assertion step ran, immediately after the installer's
+# own Start-Process-based winget calls had just succeeded cleanly moments earlier - a 100% failure
+# rate is not what a genuinely clearing alias lock looks like, it is what a reliably-triggered bug
+# in the invocation style looks like. Test-WingetPackageInstalled -TimeoutSeconds never invokes
+# winget as a captured native command; it uses Start-Process with redirected output to a file (the
+# same pattern proven reliable by the install passes) plus its own launch-exception bypass-retry,
+# so it sidesteps that whole bug class instead of retrying into it.
 #
 # Waits out a still-broken winget launch path before starting (issue #277): the installer's
 # Install-WingetAutoUpdate triggers an immediate background WAU run (RUN_WAU=YES) whose own winget
 # calls can leave winget.exe unlaunchable for several minutes, and this script runs as a separate
 # process straight after the installer, so it can start mid-lock. Best-effort - the per-app retry
-# loop below still tolerates a launch exception if the lock outlasts this wait.
+# loop below still tolerates a timeout or launch failure if the lock outlasts this wait.
 if (-not (Wait-WingetLaunchable)) {
     Write-Host 'winget did not confirm launchable before starting the per-app checks; proceeding anyway (each check retries independently).' -ForegroundColor Yellow
 }
@@ -137,51 +151,23 @@ if (-not (Wait-WingetLaunchable)) {
 $probeAttempts = 3
 foreach ($app in $appsToAssert) {
     $id = $app.name
-    $exitCode = $null
-    $output = @()
-    $wingetExecutable = 'winget'
+    $result = $null
     for ($attempt = 1; $attempt -le $probeAttempts; $attempt++) {
-        try {
-            # --accept-source-agreements/--disable-interactivity: never hang on a first-use prompt.
-            $output = @(& $wingetExecutable list --exact --id $id --accept-source-agreements --disable-interactivity 2>&1)
-            # Capture immediately - $LASTEXITCODE goes stale fast (repo rule).
-            $exitCode = $LASTEXITCODE
-        }
-        catch {
-            # winget.exe's own launch can throw instead of just returning a bad exit code when its
-            # app-execution alias is transiently broken (issue #277) - most commonly right after
-            # Install-WingetAutoUpdate's RUN_WAU=YES background run. Invoked this way (captured
-            # native command output) the same broken-alias condition surfaces as a different
-            # message than Start-Process reports elsewhere in the module (e.g.
-            # "StandardOutputEncoding is only supported when standard output is redirected"), which
-            # is why Test-TransientWingetLaunchError matches both. Left unhandled, this used to
-            # crash the whole script before any assertion ran (Aug 24 2026 scheduled run); treat it
-            # as just another retryable attempt instead, bypassing the alias for the next try.
-            if (-not (Test-TransientWingetLaunchError -Message $_.Exception.Message)) { throw }
-            $exitCode = -1
-            if ($attempt -ge $probeAttempts) {
-                Write-Host "winget list for $id could not launch (attempt $attempt/$probeAttempts): $($_.Exception.Message)" -ForegroundColor Yellow
-                $output = @($_.Exception.Message)
-                break
-            }
-            Write-Host "winget list for $id failed to launch (attempt $attempt/$probeAttempts) - retrying via the DesktopAppInstaller package path: $($_.Exception.Message)" -ForegroundColor Yellow
-            $wingetExecutable = Resolve-WingetExecutable -BypassAlias
-            Start-Sleep -Seconds (5 * $attempt)
-            continue
-        }
-        if ($exitCode -eq 0) { break }
+        $result = Test-WingetPackageInstalled -PackageId $id -TimeoutSeconds 60
+        if ($result.Installed) { break }
         if ($attempt -lt $probeAttempts) {
-            Write-Host ('winget list for {0} exited 0x{1:X8} (attempt {2}/{3}) - retrying...' -f $id, $exitCode, $attempt, $probeAttempts) -ForegroundColor Yellow
+            $reason = if ($result.TimedOut) { 'timed out' } else { ('exit 0x{0:X8}' -f $result.ExitCode) }
+            Write-Host "winget list for $id did not confirm installed ($reason, attempt $attempt/$probeAttempts) - retrying..." -ForegroundColor Yellow
             Start-Sleep -Seconds (5 * $attempt)
         }
     }
-    if ($exitCode -eq 0) {
-        $detail = if ($attempt -gt 1) { "winget list exit 0 (attempt $attempt/$probeAttempts)" } else { 'winget list exit 0' }
+    if ($result.Installed) {
+        $detail = if ($attempt -gt 1) { "winget list confirmed installed (attempt $attempt/$probeAttempts)" } else { 'winget list confirmed installed' }
         Add-AssertionResult -Name "App installed: $id" -Passed $true -Detail $detail
     }
     else {
-        $outputTail = (@($output | Select-Object -Last 3) -join ' | ')
-        Add-AssertionResult -Name "App installed: $id" -Passed $false -Detail (('winget list exit 0x{0:X8} after {1} attempts; last output: {2}' -f $exitCode, $probeAttempts, $outputTail))
+        $reason = if ($result.TimedOut) { 'timed out' } else { ('exit 0x{0:X8}' -f $result.ExitCode) }
+        Add-AssertionResult -Name "App installed: $id" -Passed $false -Detail "winget list $reason after $probeAttempts attempts"
     }
 }
 

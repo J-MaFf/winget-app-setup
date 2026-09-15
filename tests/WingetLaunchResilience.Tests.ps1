@@ -162,7 +162,7 @@ Describe 'Wait-WingetLaunchable (issue #277)' {
         Should -Invoke Start-Process -Times 2 -Exactly
     }
 
-    It 'Returns false immediately for an unrelated (non-transient) launch failure, without retrying' {
+    It 'Returns false immediately for an unrelated (non-transient) launch failure on the bare alias, without retrying' {
         Mock Start-Process { throw 'The system cannot find the file specified.' }
         Mock Start-Sleep { }
 
@@ -170,6 +170,34 @@ Describe 'Wait-WingetLaunchable (issue #277)' {
 
         Should -Invoke Start-Process -Times 1 -Exactly
         Should -Invoke Start-Sleep -Times 0 -Exactly
+    }
+
+    It 'Keeps retrying when a resolved bypass path itself vanishes mid-poll, instead of giving up (issue #277 follow-up)' {
+        # Same exemption Install-WingetPackage already documents: once on a concrete bypass path
+        # (not the bare alias), the in-flight DesktopAppInstaller upgrade can delete that exact
+        # package version between resolving it and launching it - ERROR_FILE_NOT_FOUND, not a
+        # file-lock error, and not one of Test-TransientWingetLaunchError's classes. A real PR run
+        # hit exactly this and gave up after ~17s (one attempt + one retry) instead of polling for
+        # the full budget.
+        $script:callIndex = 0
+        Mock Start-Process {
+            $script:callIndex++
+            switch ($script:callIndex) {
+                1 { throw 'This command cannot be run due to the error: The file cannot be accessed by the system.' }
+                2 { throw 'The system cannot find the file specified.' }
+                default { New-FakeWingetProcess }
+            }
+        }
+        Mock Start-Sleep { }
+        Mock Resolve-WingetExecutable {
+            if ($BypassAlias) { return 'C:\WindowsApps\DAI\winget.exe' }
+            'winget'
+        }
+
+        Wait-WingetLaunchable -PollIntervalSeconds 1 | Should -Be $true
+
+        Should -Invoke Start-Process -Times 3 -Exactly
+        Should -Invoke Start-Sleep -Times 2 -Exactly -ParameterFilter { $Seconds -eq 1 }
     }
 
     It 'Kills and retries a probe that launches but never returns within ProbeTimeoutSeconds' {

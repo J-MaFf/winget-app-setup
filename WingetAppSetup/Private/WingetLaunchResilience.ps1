@@ -158,7 +158,15 @@ function Wait-WingetLaunchable {
             try { $probeProcess.Kill() } catch { }
         }
         catch {
-            if (-not (Test-TransientWingetLaunchError -Message $_.Exception.Message)) {
+            # Same exemption Install-WingetPackage documents (issue #258): once probing a concrete
+            # bypass path (not the bare alias), the DesktopAppInstaller upgrade in flight can delete
+            # that exact package version between resolving it and launching it, surfacing as
+            # ERROR_FILE_NOT_FOUND - not one of Test-TransientWingetLaunchError's classes - rather
+            # than a file-lock error. On the bare alias an unrecognized error might mean winget is
+            # genuinely missing and is worth surfacing; on a bypass path it's presumed to be the
+            # same upgrade race, so re-resolve and keep polling instead of giving up early (as
+            # observed happening within ~17s on a real run - issue #277 follow-up).
+            if (-not (Test-TransientWingetLaunchError -Message $_.Exception.Message) -and -not $bypassAlias) {
                 return $false
             }
             $bypassAlias = $true
