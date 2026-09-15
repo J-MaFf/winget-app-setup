@@ -39,6 +39,53 @@ Describe 'Test-TransientWingetLaunchError' {
     }
 }
 
+Describe 'Get-ConflictingDesktopAppInstallerVersions (issue #279)' {
+    It 'Returns an empty array when exactly one version is registered (the healthy case)' {
+        Mock Get-AppxPackage { [pscustomobject]@{ Version = '1.26.510.0' } }
+
+        @(Get-ConflictingDesktopAppInstallerVersions).Count | Should -Be 0
+        Should -Invoke Get-AppxPackage -Times 1 -Exactly -ParameterFilter { $Name -eq 'Microsoft.DesktopAppInstaller' }
+    }
+
+    It 'Returns an empty array when no version is registered at all' {
+        Mock Get-AppxPackage { $null }
+
+        @(Get-ConflictingDesktopAppInstallerVersions).Count | Should -Be 0
+    }
+
+    It 'Returns an empty array when Get-AppxPackage throws (e.g. no Appx compatibility session)' {
+        Mock Get-AppxPackage { throw 'Operation is not supported on this platform.' }
+
+        @(Get-ConflictingDesktopAppInstallerVersions).Count | Should -Be 0
+    }
+
+    It 'Returns both distinct versions when two are simultaneously registered (the deadlock case)' {
+        Mock Get-AppxPackage {
+            @(
+                [pscustomobject]@{ Version = '1.26.510.0' }
+                [pscustomobject]@{ Version = '1.29.290.0' }
+            )
+        }
+
+        $result = @(Get-ConflictingDesktopAppInstallerVersions)
+
+        $result.Count | Should -Be 2
+        $result | Should -Contain '1.26.510.0'
+        $result | Should -Contain '1.29.290.0'
+    }
+
+    It 'De-duplicates when the same version appears more than once' {
+        Mock Get-AppxPackage {
+            @(
+                [pscustomobject]@{ Version = '1.26.510.0' }
+                [pscustomobject]@{ Version = '1.26.510.0' }
+            )
+        }
+
+        @(Get-ConflictingDesktopAppInstallerVersions).Count | Should -Be 0
+    }
+}
+
 Describe 'Resolve-WingetExecutable' {
     It 'Returns the bare command name without -BypassAlias, and never queries the package database' {
         Mock Get-AppxPackage { throw 'must not be called on the fast path' }
@@ -112,6 +159,10 @@ Describe 'Wait-WingetLaunchable (issue #277)' {
 
     BeforeEach {
         Mock Remove-Item { }
+        # Healthy (single-version) by default so the issue #279 deadlock check inside the failure
+        # path doesn't depend on real machine state or short-circuit tests that expect retries.
+        # Tests for the deadlock behavior itself override this.
+        Mock Get-AppxPackage { [pscustomobject]@{ Version = '1.26.510.0' } }
     }
 
     It 'Requires two consecutive successful probes before declaring winget launchable (default RequiredConsecutiveSuccesses)' {
@@ -269,5 +320,48 @@ Describe 'Wait-WingetLaunchable (issue #277)' {
 
         # Two probe attempts (the required streak) x two files (stdout + stderr) each.
         Should -Invoke Remove-Item -Times 4 -Exactly
+    }
+
+    It 'Gives up immediately on a structural DesktopAppInstaller version conflict, instead of polling the rest of the budget (issue #279)' {
+        Mock Start-Process {
+            throw 'This command cannot be run due to the error: The file cannot be accessed by the system.'
+        }
+        Mock Start-Sleep { }
+        Mock Get-AppxPackage {
+            @(
+                [pscustomobject]@{ Version = '1.26.510.0' }
+                [pscustomobject]@{ Version = '1.29.290.0' }
+            )
+        }
+        $script:warnings = @()
+        Mock Write-WarningMessage { $script:warnings += $Message }
+
+        # A generous timeout/poll-interval that would otherwise keep this polling for a long time -
+        # proving the deadlock check short-circuits it rather than just happening to hit a deadline.
+        Wait-WingetLaunchable -TimeoutSeconds 360 -PollIntervalSeconds 20 | Should -Be $false
+
+        Should -Invoke Start-Process -Times 1 -Exactly
+        Should -Invoke Start-Sleep -Times 0 -Exactly
+        ($script:warnings -join "`n") | Should -Match 'deadlocked'
+        ($script:warnings -join "`n") | Should -Match '1\.26\.510\.0'
+        ($script:warnings -join "`n") | Should -Match '1\.29\.290\.0'
+    }
+
+    It 'Does not treat a single registered version as a deadlock' {
+        $script:callIndex = 0
+        Mock Start-Process {
+            $script:callIndex++
+            if ($script:callIndex -eq 1) {
+                throw 'This command cannot be run due to the error: The file cannot be accessed by the system.'
+            }
+            New-FakeWingetProcess
+        }
+        Mock Start-Sleep { }
+        Mock Get-AppxPackage { [pscustomobject]@{ Version = '1.26.510.0' } }
+
+        # Reaches the required streak normally instead of bailing out on the one failed attempt.
+        Wait-WingetLaunchable -PollIntervalSeconds 1 | Should -Be $true
+
+        Should -Invoke Start-Process -Times 3 -Exactly
     }
 }

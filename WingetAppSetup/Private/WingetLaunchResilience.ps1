@@ -40,6 +40,46 @@ function Test-TransientWingetLaunchError {
 
 <#
 .SYNOPSIS
+    Returns the distinct Microsoft.DesktopAppInstaller versions currently registered, when more
+    than one is present at once.
+.DESCRIPTION
+    Normally exactly one Microsoft.DesktopAppInstaller (winget) version is registered. Two GitHub-
+    hosted E2E runs (issue #279) observed a structural deadlock instead: a second version appeared
+    mid-job alongside the already-working one, and neither could finish registering - the newer
+    version failed because it depends on a framework (Microsoft.WindowsAppRuntime.1.8 as of this
+    writing) not present on the runner, and the older version was then rejected by AppX because the
+    newer one is "already installed". Something outside this project (most likely the Microsoft
+    Store's own background servicing) triggers the conflict; nothing here causes or controls it.
+
+    Unlike the transient app-execution-alias breakage Wait-WingetLaunchable and
+    Install-WingetPackage retry through, this is a structural conflict between two package versions
+    that no amount of waiting or retrying resolves - the same wedged state is still there minutes
+    later. Callers use this to recognize that case and fail fast with a clear diagnostic instead of
+    burning a full retry budget (or, per app, N retry budgets) against a dead end.
+.RETURNS
+    [string[]] The distinct version strings found. Empty when zero or exactly one version is
+    present (the healthy case, or winget not present/queryable at all). Two or more entries means a
+    conflict.
+#>
+function Get-ConflictingDesktopAppInstallerVersions {
+    try {
+        $versions = @(Get-AppxPackage -Name 'Microsoft.DesktopAppInstaller' -ErrorAction Stop |
+                Select-Object -ExpandProperty Version -Unique)
+    }
+    catch {
+        # Get-AppxPackage can fail under PowerShell 7 when the Appx compatibility session is
+        # unavailable (same caveat Resolve-WingetExecutable documents) - nothing conclusive to
+        # report either way, so treat it the same as "nothing found".
+        return @()
+    }
+    if ($versions.Count -le 1) {
+        return @()
+    }
+    return $versions
+}
+
+<#
+.SYNOPSIS
     Resolves the winget executable to launch, optionally bypassing the app-execution alias.
 .DESCRIPTION
     By default returns the bare command name 'winget', which Start-Process resolves through PATH to
@@ -205,6 +245,14 @@ function Wait-WingetLaunchable {
         }
         else {
             $consecutiveSuccesses = 0
+            # A structural version conflict (issue #279) never clears - no point burning the rest
+            # of the budget polling into it. Checked only on a failed attempt, since this is an
+            # explanation for failure, not a routine cost every healthy probe should pay.
+            $conflictingVersions = Get-ConflictingDesktopAppInstallerVersions
+            if ($conflictingVersions.Count -gt 1) {
+                Write-WarningMessage "winget is deadlocked between $($conflictingVersions.Count) conflicting DesktopAppInstaller versions ($($conflictingVersions -join ', ')) - a structural AppX conflict outside this installer's control, not a transient lock. Giving up early instead of polling the rest of the wait budget; see issue #279."
+                return $false
+            }
         }
 
         if ((Get-Date) -ge $deadline) {

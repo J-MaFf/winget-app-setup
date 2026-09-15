@@ -72,6 +72,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Fixed the installer hanging for 30+ minutes instead of failing fast when winget is deadlocked
+  between two conflicting `Microsoft.DesktopAppInstaller` versions (issue #279) — observed twice,
+  reproducibly, on independently-provisioned GitHub-hosted E2E runners: a second App Installer
+  version appears mid-job alongside the already-working one, and neither can finish registering (the
+  newer one depends on a framework, `Microsoft.WindowsAppRuntime.1.8` as of this writing, that isn't
+  present; the older one is then rejected by AppX because the newer one is "already installed").
+  Unlike the transient alias-lock issue #277/#278 fixed, this is a structural conflict external to
+  this installer that no amount of waiting or per-app retrying resolves — previously every catalog
+  app independently burned its own retry budget against the same wall, turning a diagnosable dead
+  end into a very long hang. A new private `Get-ConflictingDesktopAppInstallerVersions`
+  (`WingetAppSetup/Private/WingetLaunchResilience.ps1`) detects the condition via `Get-AppxPackage`;
+  `Wait-WingetLaunchable` now gives up immediately instead of polling into it, and
+  `Invoke-WingetInstall` checks once before its per-app loop (and again after a failed
+  `Wait-WingetLaunchable`, in case the conflict appears partway through) to skip straight to a clear,
+  all-apps-failed diagnostic and skip the retry pass, instead of driving every app through the same
+  dead end. Best-effort and narrowly scoped: it only short-circuits on a positively-detected version
+  conflict, never on ordinary or ambiguous failures.
 - Fixed the scheduled end-to-end install workflow failing 3 of its last 4 runs (issue #277). Root
   cause: `Install-WingetAutoUpdate`'s `RUN_WAU=YES` triggers an immediate background WAU update run
   right after WAU installs, and that run's own winget invocations were observed holding the

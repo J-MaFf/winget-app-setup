@@ -235,7 +235,25 @@ function Invoke-WingetInstall {
     # forces --source winget), and its health was already verified — and repaired if needed — by
     # Test-WingetSources above (issues #172, #177).
 
+    # A structural AppX version conflict (issue #279) never clears on its own - unlike the transient
+    # app-execution-alias breakage Wait-WingetLaunchable retries through, no amount of waiting or
+    # per-app retrying resolves two DesktopAppInstaller versions deadlocked against each other. Two
+    # live E2E runs let every catalog app independently burn its own retry budget against that same
+    # wall, turning a diagnosable dead end into a 30+ minute hang before either was cancelled.
+    # Checked once here (this pass can start already wedged - the observed real-world case, e.g. a
+    # second install pass right after a first pass's WAU run triggered the conflict) and re-checked
+    # after Install-WingetAutoUpdate below (in case it wedges partway through this same pass).
+    $conflictingVersions = Get-ConflictingDesktopAppInstallerVersions
+    $wingetDeadlocked = $conflictingVersions.Count -gt 1
+    if ($wingetDeadlocked) {
+        Write-ErrorMessage "winget is deadlocked between $($conflictingVersions.Count) conflicting DesktopAppInstaller versions ($($conflictingVersions -join ', ')) - a structural AppX conflict outside this installer's control, not something retrying resolves. Every app below will be marked failed without an install attempt; see issue #279 for details."
+    }
+
     Foreach ($app in $apps) {
+        if ($wingetDeadlocked) {
+            $failedApps += @{ Name = $app.name; Reason = "winget deadlocked between conflicting DesktopAppInstaller versions ($($conflictingVersions -join ', ')); see issue #279" }
+            continue
+        }
         try {
             # Shared per-app pipeline — pre-check, dispatch, post-verify (issue #188). Messages,
             # summary bucketing, and exit-code policy stay here in the orchestrator.
@@ -316,12 +334,22 @@ function Invoke-WingetInstall {
     if ($wauResult.Status -eq 'Configured') {
         if (-not (Wait-WingetLaunchable)) {
             Write-WarningMessage 'winget did not become launchable again within the post-WAU-install wait window; continuing anyway (later winget calls retry independently).'
+            # Re-check for the same structural deadlock (issue #279): it can appear partway through
+            # this pass, not just be inherited at the top. Recognizing it here also skips the retry
+            # pass just below, instead of burning its own budget per app against the same wall.
+            if (-not $wingetDeadlocked) {
+                $conflictingVersions = Get-ConflictingDesktopAppInstallerVersions
+                $wingetDeadlocked = $conflictingVersions.Count -gt 1
+            }
         }
     }
 
     # Retry any failed installations once before producing the final summary
     if ($failedApps.Count -gt 0) {
-        if (-not $WhatIf) {
+        if ($wingetDeadlocked) {
+            Write-WarningMessage 'Skipping the retry pass: winget is still deadlocked between conflicting DesktopAppInstaller versions (see above); retrying would not help.'
+        }
+        elseif (-not $WhatIf) {
             Write-Host ''
             Write-Info 'Retrying failed installations (1 final attempt)...'
 
