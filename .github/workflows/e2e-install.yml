@@ -50,7 +50,19 @@ env:
 
 jobs:
   e2e-install:
-    runs-on: windows-latest
+    # Pinned off the rolling windows-latest label (issue #279): windows-latest currently
+    # resolves to Windows Server 2025, whose image ships/stages a newer
+    # Microsoft.DesktopAppInstaller (1.29.290.0) than the one already registered
+    # (1.26.510.0) and is missing the Microsoft.WindowsAppRuntime.1.8 framework that newer
+    # version depends on. Two independent runs hit the identical, non-retryable AppX
+    # registration deadlock during the idempotence (second) install pass -
+    # Repair-WinGetPackageManager itself fails against that wedged state, so nothing in this
+    # repo can recover a runner that already hit it; avoiding the broken image is the only
+    # fix. windows-2022 is the last known-good major version per the issue's own
+    # reproduction. Revisit (move back to windows-latest, or to windows-2025 once it's
+    # confirmed fixed) after a real e2e-install run on windows-2022 confirms the idempotence
+    # pass completes, and once GitHub ships a corrected Server 2025 runner image.
+    runs-on: windows-2022
     timeout-minutes: 90
     steps:
       - name: Checkout repository

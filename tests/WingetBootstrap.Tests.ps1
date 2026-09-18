@@ -290,6 +290,43 @@ Describe 'Test-AppxDowngradeRejection (0x80073D06 classifier, issue #265)' {
     }
 }
 
+Describe 'Test-AppxMissingFrameworkDependency (0x80073CF3 classifier, issue #279)' {
+    It 'Matches the hex HRESULT combined with the framework-not-found phrasing, regardless of case' {
+        $message = 'Deployment failed with HRESULT: 0x80073CF3, Package failed updates, dependency or conflict validation.' + [Environment]::NewLine +
+        'Windows cannot install package Microsoft.DesktopAppInstaller_1.29.290.0_x64__8wekyb3d8bbwe because this package depends on a framework that could not be found.'
+        Test-AppxMissingFrameworkDependency -Message $message | Should -Be $true
+        Test-AppxMissingFrameworkDependency -Message 'deployment failed with hresult: 0x80073cf3 ... depends on a framework that could not be found' | Should -Be $true
+    }
+
+    It 'Matches when the message names the missing framework instead of the generic phrase' {
+        $message = 'Deployment failed with HRESULT: 0x80073CF3, Package failed updates, dependency or conflict validation.' + [Environment]::NewLine +
+        'Provide the framework "Microsoft.WindowsAppRuntime.1.8" published by "CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US", with neutral or x64 processor architecture and minimum version 8000.616.304.0, along with this package to install.'
+        Test-AppxMissingFrameworkDependency -Message $message | Should -Be $true
+    }
+
+    It 'Does not match the HRESULT alone without the framework-specific text' {
+        # 0x80073CF3 is a broad 'dependency or conflict validation' code reused for other, unrelated
+        # conflicts - it must not be over-matched just because it appears.
+        Test-AppxMissingFrameworkDependency -Message 'Deployment failed with HRESULT: 0x80073CF3, Package failed updates, dependency or conflict validation.' | Should -Be $false
+    }
+
+    It 'Does not match the framework text alone without the HRESULT' {
+        Test-AppxMissingFrameworkDependency -Message 'this package depends on a framework that could not be found' | Should -Be $false
+    }
+
+    It 'Does not match unrelated deployment failures' {
+        # 0x80073D06 is the downgrade rejection Test-AppxDowngradeRejection already owns; it must not
+        # also be classified as a missing-framework-dependency condition.
+        Test-AppxMissingFrameworkDependency -Message 'Deployment failed with HRESULT: 0x80073D06, The package could not be installed because a higher version of this package is already installed.' | Should -Be $false
+        Test-AppxMissingFrameworkDependency -Message 'Network error' | Should -Be $false
+    }
+
+    It 'Treats empty and null text as not a missing-framework-dependency condition' {
+        Test-AppxMissingFrameworkDependency -Message '' | Should -Be $false
+        Test-AppxMissingFrameworkDependency -Message $null | Should -Be $false
+    }
+}
+
 Describe 'Register-WingetAppInstallerForUser (issue #265)' {
     BeforeEach {
         Mock Write-Host { }
@@ -398,6 +435,7 @@ Describe 'Invoke-WingetPackageManagerRepair (issue #265)' {
 
         $result.Succeeded | Should -Be $true
         $result.DowngradeRejected | Should -Be $false
+        $result.MissingFrameworkDependency | Should -Be $false
         Should -Invoke Repair-WinGetPackageManager -Times 1 -Exactly -ParameterFilter { $Latest -and -not $Force }
     }
 
@@ -425,9 +463,27 @@ Describe 'Invoke-WingetPackageManagerRepair (issue #265)' {
         $result.Available | Should -Be $true
         $result.Succeeded | Should -Be $false
         $result.DowngradeRejected | Should -Be $true
+        $result.MissingFrameworkDependency | Should -Be $false
         $result.Message | Should -Match '0x80073D06'
         Should -Invoke Repair-WinGetPackageManager -Times 1 -Exactly
         Should -Invoke Write-WarningMessage -Times 1 -ParameterFilter { $Message -match 'newer framework dependency' }
+    }
+
+    It 'Does not escalate to -Force on a 0x80073CF3 missing-framework-dependency rejection (issue #279)' {
+        Mock Repair-WinGetPackageManager {
+            throw ('Deployment failed with HRESULT: 0x80073CF3, Package failed updates, dependency or conflict validation.' + [Environment]::NewLine +
+                'Windows cannot install package Microsoft.DesktopAppInstaller_1.29.290.0_x64__8wekyb3d8bbwe because this package depends on a framework that could not be found. Provide the framework "Microsoft.WindowsAppRuntime.1.8" published by "CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US", with neutral or x64 processor architecture and minimum version 8000.616.304.0, along with this package to install.')
+        }
+
+        $result = Invoke-WingetPackageManagerRepair
+
+        $result.Available | Should -Be $true
+        $result.Succeeded | Should -Be $false
+        $result.DowngradeRejected | Should -Be $false
+        $result.MissingFrameworkDependency | Should -Be $true
+        $result.Message | Should -Match '0x80073CF3'
+        Should -Invoke Repair-WinGetPackageManager -Times 1 -Exactly
+        Should -Invoke Write-WarningMessage -Times 1 -ParameterFilter { $Message -match 'WindowsAppRuntime.1.8' }
     }
 
     It 'Reports a plain failure when both the unforced and forced repairs fail' {
@@ -438,6 +494,7 @@ Describe 'Invoke-WingetPackageManagerRepair (issue #265)' {
         $result.Available | Should -Be $true
         $result.Succeeded | Should -Be $false
         $result.DowngradeRejected | Should -Be $false
+        $result.MissingFrameworkDependency | Should -Be $false
         $result.Message | Should -Match 'network error'
         Should -Invoke Repair-WinGetPackageManager -Times 2 -Exactly
     }

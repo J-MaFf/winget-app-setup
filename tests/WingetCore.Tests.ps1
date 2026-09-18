@@ -1102,6 +1102,20 @@ Describe 'Initialize-WingetSourcesForUser (cross-user bootstrap, issue #159)' {
         Should -Invoke Write-WarningMessage -Times 1 -ParameterFilter { $Message -match 'update App Installer from the Microsoft Store' }
     }
 
+    It 'Names the missing framework in its remediation advice when the repair hits a missing-framework-dependency rejection (issue #279)' {
+        Mock Invoke-WingetSourceProbe { @{ Succeeded = $false; ExitCode = -2147009255; TimedOut = $false } }
+        Mock Repair-WinGetPackageManager {
+            throw ('Deployment failed with HRESULT: 0x80073CF3, Package failed updates, dependency or conflict validation.' + [Environment]::NewLine +
+                'Windows cannot install package Microsoft.DesktopAppInstaller_1.29.290.0_x64__8wekyb3d8bbwe because this package depends on a framework that could not be found. Provide the framework "Microsoft.WindowsAppRuntime.1.8" published by "CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US", with neutral or x64 processor architecture and minimum version 8000.616.304.0, along with this package to install.')
+        }
+
+        $result = Initialize-WingetSourcesForUser
+
+        $result | Should -Be $false
+        Should -Invoke Repair-WinGetPackageManager -Times 1 -Exactly
+        Should -Invoke Write-WarningMessage -Times 1 -ParameterFilter { $Message -match 'Microsoft.WindowsAppRuntime.1.8' }
+    }
+
     It 'Warns about cross-user elevation when the process account differs from the session owner' {
         Mock Get-ProcessUserName { 'CONTOSO\admin-jmaffiola' }
         Mock Get-InteractiveSessionUserName { 'CONTOSO\jdoe' }
