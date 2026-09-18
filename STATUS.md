@@ -21,10 +21,13 @@ registration deadlock during the idempotence pass: the runner image ships/stages
 `Microsoft.DesktopAppInstaller_1.29.290.0` alongside the already-registered `1.26.510.0`; the
 newer version can't register because the image is missing the `Microsoft.WindowsAppRuntime.1.8`
 framework it depends on, and the older version is then rejected because the newer one is "already
-installed" — a structural runner-image defect, not a bug in this repo. Two complementary
-mitigations have landed: `.github/workflows/e2e-install.yml`'s `e2e-install` job is pinned off the
-rolling `windows-latest` label to `windows-2022` (the last known-good major version) to avoid the
-broken image outright, and `Test-AppxMissingFrameworkDependency`
+installed" — a structural runner-image defect, not a bug in this repo. Pinning
+`e2e-install`'s `runs-on` off `windows-latest` to `windows-2022` was tried as a workaround and
+**reverted**: that pin's own self-validating PR run failed every catalog app on the very first
+install pass with "No applicable app licenses found" — a distinct, total, immediate failure,
+worse than #279's slow partial one, tracked separately as
+[#282](https://github.com/J-MaFf/winget-app-setup/issues/282). `e2e-install` stays on
+`windows-latest` for now. `Test-AppxMissingFrameworkDependency`
 (`WingetAppSetup/Private/WingetBootstrap.ps1`) diagnoses the 0x80073CF3 signature distinctly
 inside `Invoke-WingetPackageManagerRepair`'s retry ladder, mirroring the existing
 `Test-AppxDowngradeRejection`/0x80073D06 precedent (issue #265) — purely diagnostic/fail-fast,
@@ -32,10 +35,9 @@ since no verified redistributable exists to actually install the missing framewo
 [#280](https://github.com/J-MaFf/winget-app-setup/pull/280)'s fail-fast
 `Get-ConflictingDesktopAppInstallerVersions` (`WingetAppSetup/Private/WingetLaunchResilience.ps1`)
 already stops `Wait-WingetLaunchable`/`Invoke-WingetInstall` from burning a full retry budget once
-this same conflict is observed mid-run. **The issue stays open**: pinning mitigates the symptom by
-avoiding the broken image, but does not fix the underlying runner-image defect — closing it needs
-a real `e2e-install` run on `windows-2022` (next scheduled run, or `gh workflow run
-e2e-install.yml`) confirming the idempotence pass completes.
+this same conflict is observed mid-run. **Both #279 and #282 stay open**: no pinned alternative to
+`windows-latest` has been found yet, and the underlying runner-image defect isn't fixed — only
+diagnosed and (for #279) worked around by staying off the affected pass where possible.
 
 Landed: **cheapest-first winget bootstrap ladder**
 ([#265](https://github.com/J-MaFf/winget-app-setup/issues/265)) — on a real cross-user elevation run
@@ -173,7 +175,7 @@ Pester installs persist across runs there ([#161](https://github.com/J-MaFf/wing
 | `winget-app-uninstall.ps1` | Uninstall helper; imports the module from the repo |
 | `tests/` | Pester suite, one `<Area>.Tests.ps1` per module file plus `EntryPoint.Tests.ps1`; `TestHelpers.ps1` loads the module once per file |
 | `e2e/Assert-Install.ps1` | Shared post-install assertions for end-to-end runs (tier 1 workflow below; tier 2 [#215](https://github.com/J-MaFf/winget-app-setup/issues/215) reuses it) |
-| `.github/workflows/e2e-install.yml` | E2E tier 1: weekly real install run on GitHub-hosted `windows-2022` (pinned off `windows-latest`, issue #279; schedule + dispatch + self-validating PRs; failure auto-files an issue) |
+| `.github/workflows/e2e-install.yml` | E2E tier 1: weekly real install run on GitHub-hosted `windows-latest` (issues #279/#282; schedule + dispatch + self-validating PRs; failure auto-files an issue) |
 | `Test-WindowsTerminalConfiguration.ps1` | Smoke-test validation for the Windows Terminal default-shell configuration. |
 | `readme.md` | Quick-start run instructions (clone-and-run and one-line-run). |
 | `CHANGELOG.md` | Keep a Changelog history. |
@@ -233,12 +235,13 @@ Pester installs persist across runs there ([#161](https://github.com/J-MaFf/wing
 
 | Issue | Description | Status |
 |-------|-------------|--------|
-| [#279](https://github.com/J-MaFf/winget-app-setup/issues/279) | E2E: `windows-latest`/Server 2025 runner image AppX conflict (App Installer 1.29.290.0 vs 1.26.510.0, missing WindowsAppRuntime.1.8) | Open — mitigated (runner pinned to `windows-2022`, distinct diagnostic added); needs a real `windows-2022` `e2e-install` run to confirm before closing |
+| [#279](https://github.com/J-MaFf/winget-app-setup/issues/279) | E2E: `windows-latest`/Server 2025 runner image AppX conflict (App Installer 1.29.290.0 vs 1.26.510.0, missing WindowsAppRuntime.1.8) | Open — distinct diagnostic added (`Test-AppxMissingFrameworkDependency`); `windows-2022` pin tried and reverted (see #282), no viable pin found yet |
+| [#282](https://github.com/J-MaFf/winget-app-setup/issues/282) | E2E: `windows-2022` runner fails every install immediately with "No applicable app licenses found" | Open |
 | [#215](https://github.com/J-MaFf/winget-app-setup/issues/215) | E2E tier 2: cross-user elevation end-to-end run on a snapshot-rollback Proxmox VM | Open |
 
 ## Natural Next Steps
 
-- Confirm [#279](https://github.com/J-MaFf/winget-app-setup/issues/279) is actually resolved by running `e2e-install` on the now-pinned `windows-2022` label (next scheduled Monday run, or `gh workflow run e2e-install.yml`) and checking the idempotence (second) pass completes; close the issue once confirmed, and periodically re-check whether `windows-latest`/Server 2025's runner image has been fixed upstream.
+- Find a viable runner target for `e2e-install` that avoids both #279 (`windows-latest`/Server 2025 AppX deadlock) and #282 (`windows-2022` licensing failure) — a `windows-2025`-labeled image (if GitHub offers one distinct from `windows-latest`) or a fixed image-version pin are worth trying next; re-check periodically whether GitHub has fixed the underlying `windows-latest` image.
 - Watch the first scheduled e2e install runs (`.github/workflows/e2e-install.yml`, weekly Mondays 06:00 UTC, issue [#214](https://github.com/J-MaFf/winget-app-setup/issues/214)) — a failure auto-creates/comments the `E2E install run failed` issue with the transcript tail.
 - **E2E tier 2** ([#215](https://github.com/J-MaFf/winget-app-setup/issues/215)): cross-user elevation end-to-end run on a snapshot-rollback Proxmox VM, reusing `e2e/Assert-Install.ps1` (the shared assertion script from tier 1).
 - Watch the first Windows CI runs on the self-hosted win-test runner for environment drift — module versions now persist across runs instead of starting from a fresh `windows-latest` image (as of [#161](https://github.com/J-MaFf/winget-app-setup/issues/161)).

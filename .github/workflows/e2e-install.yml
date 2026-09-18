@@ -50,19 +50,20 @@ env:
 
 jobs:
   e2e-install:
-    # Pinned off the rolling windows-latest label (issue #279): windows-latest currently
-    # resolves to Windows Server 2025, whose image ships/stages a newer
-    # Microsoft.DesktopAppInstaller (1.29.290.0) than the one already registered
-    # (1.26.510.0) and is missing the Microsoft.WindowsAppRuntime.1.8 framework that newer
-    # version depends on. Two independent runs hit the identical, non-retryable AppX
-    # registration deadlock during the idempotence (second) install pass -
+    # windows-latest (issue #279): windows-latest currently resolves to Windows Server 2025,
+    # whose image ships/stages a newer Microsoft.DesktopAppInstaller (1.29.290.0) than the one
+    # already registered (1.26.510.0) and is missing the Microsoft.WindowsAppRuntime.1.8
+    # framework that newer version depends on. Two independent runs hit the identical,
+    # non-retryable AppX registration deadlock during the idempotence (second) install pass -
     # Repair-WinGetPackageManager itself fails against that wedged state, so nothing in this
-    # repo can recover a runner that already hit it; avoiding the broken image is the only
-    # fix. windows-2022 is the last known-good major version per the issue's own
-    # reproduction. Revisit (move back to windows-latest, or to windows-2025 once it's
-    # confirmed fixed) after a real e2e-install run on windows-2022 confirms the idempotence
-    # pass completes, and once GitHub ships a corrected Server 2025 runner image.
-    runs-on: windows-2022
+    # repo can recover a runner that already hit it.
+    #
+    # Pinning to windows-2022 was tried as a workaround and reverted: this PR's own
+    # self-validating run on windows-2022 failed every app on the FIRST install pass with
+    # "No applicable app licenses found" - a distinct, total, immediate failure, worse than
+    # #279's slow partial one (issue #282). Staying on windows-latest until either GitHub
+    # ships a corrected Server 2025 image, or a viable pinned alternative is found.
+    runs-on: windows-latest
     timeout-minutes: 90
     steps:
       - name: Checkout repository
