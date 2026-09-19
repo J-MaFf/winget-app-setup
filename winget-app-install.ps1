@@ -58,12 +58,12 @@ param (
 # This script is assembled from the WingetAppSetup module by build/Build-WingetInstallScript.ps1.
 # Edit the function source under WingetAppSetup/Public and WingetAppSetup/Private, then re-run the
 # build to regenerate this file. See readme.md ("Project layout") for details.
-# Build id: 1.0.0+a4f2f7a1 (module version + SHA256 fragment of the function content; issue #189).
+# Build id: 1.0.0+4bbf1596 (module version + SHA256 fragment of the function content; issue #189).
 # ------------------------------------------------------------------------------------------------
 
 # Content-derived build identity, logged at startup so a transcript from a remote machine
 # identifies exactly which installer build produced it (issue #189).
-$script:InstallerBuildId = '1.0.0+a4f2f7a1'
+$script:InstallerBuildId = '1.0.0+4bbf1596'
 
 # ------------------------------------------------Functions------------------------------------------------
 
@@ -1926,6 +1926,9 @@ function Test-WingetSourceHealth {
     HRESULT regardless of display language, so it survives locale and wording changes. The English
     phrase is extra coverage only and, like the locale-dependency notes elsewhere in this module
     (issues #177/#180), may stop matching if the wording changes.
+
+    See Test-AppxMissingFrameworkDependency below for the sibling classifier added for issue #279's
+    distinct 0x80073CF3 signature.
 .PARAMETER Message
     The exception or error text to classify.
 .RETURNS
@@ -1944,6 +1947,57 @@ function Test-AppxDowngradeRejection {
     }
 
     return [bool]($Message -match '0x80073d06|higher version of this package is already installed')
+}
+
+<#
+.SYNOPSIS
+    Tests whether an AppX/MSIX deployment error is the "depends on a framework that could not
+    be found" conflict (0x80073CF3) seen on GitHub-hosted E2E runners (issue #279).
+.DESCRIPTION
+    Two independent GitHub-hosted `windows-latest` E2E runs hit a reproducible, non-transient AppX
+    deadlock: the runner image ships/stages a newer Microsoft.DesktopAppInstaller
+    (1.29.290.0) alongside the already-registered 1.26.510.0. The newer version cannot register
+    because it depends on a framework package (Microsoft.WindowsAppRuntime.1.8, minimum version
+    8000.616.304.0) that is not present on the image; the older version is then rejected because
+    AppX considers the newer, never-fully-registered one "already installed". Every subsequent
+    winget call in the job then fails against the same wedged state - including inside
+    Repair-WinGetPackageManager itself, which cannot recover it either.
+
+    Unlike Test-AppxDowngradeRejection's 0x80073D06, the 0x80073CF3 HRESULT is a broad "Package
+    failed updates, dependency or conflict validation" code reused for other, unrelated conflicts
+    (including the downgrade-rejection chain elsewhere in this file), so it is deliberately NOT
+    matched on its own. This classifier requires the HRESULT together with the missing-framework
+    phrasing (or the specific framework name this issue observed) before reporting the condition -
+    this keeps the classifier narrow to the one signature this issue actually reproduced, rather
+    than over-matching every 0x80073CF3.
+
+    This is diagnostic only: no amount of retrying repairs a framework that genuinely is not on
+    the machine, and this module does not attempt to install/repair
+    Microsoft.WindowsAppRuntime.1.8 itself (no verified redistributable URL, and it cannot be
+    tested from this Linux-developed repo). Callers use this classifier purely to fail fast with a
+    clear diagnostic instead of burning a retry budget against an external packaging gap.
+.PARAMETER Message
+    The exception or error text to classify.
+.RETURNS
+    [bool] True when the text carries the missing-framework-dependency signature.
+#>
+function Test-AppxMissingFrameworkDependency {
+    param (
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
+        [AllowNull()]
+        [string]$Message
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Message)) {
+        return $false
+    }
+
+    if ($Message -notmatch '0x80073cf3') {
+        return $false
+    }
+
+    return [bool]($Message -match 'depends on a framework that could not be found|Microsoft\.WindowsAppRuntime\.1\.8')
 }
 
 <#
@@ -2048,15 +2102,21 @@ function Register-WingetAppInstallerForUser {
     pass failed for some OTHER reason. A 0x80073D06 downgrade rejection short-circuits immediately:
     -Force cannot help, and retrying would burn a second multi-hundred-megabyte download before
     failing the same way (issue #265).
+
+    A 0x80073CF3 missing-framework-dependency rejection (issue #279) short-circuits the same way and
+    for the same reason: no framework genuinely missing from the machine/runner image appears just
+    because -Force asked more insistently, so retrying only spends the extra attempt to reach the
+    identical failure.
 .RETURNS
-    [hashtable] @{ Available = <bool>; Succeeded = <bool>; DowngradeRejected = <bool>; Message = <string> }
+    [hashtable] @{ Available = <bool>; Succeeded = <bool>; DowngradeRejected = <bool>;
+    MissingFrameworkDependency = <bool>; Message = <string> }
     Available is False when the Microsoft.WinGet.Client module is missing, in which case no repair
     was attempted. Succeeded means a repair call completed without throwing - callers still verify
     the outcome themselves (winget on PATH, or a source probe).
 #>
 function Invoke-WingetPackageManagerRepair {
     if (-not (Get-Command Repair-WinGetPackageManager -ErrorAction SilentlyContinue)) {
-        return @{ Available = $false; Succeeded = $false; DowngradeRejected = $false; Message = '' }
+        return @{ Available = $false; Succeeded = $false; DowngradeRejected = $false; MissingFrameworkDependency = $false; Message = '' }
     }
 
     $lastMessage = ''
@@ -2069,21 +2129,26 @@ function Invoke-WingetPackageManagerRepair {
                 Repair-WinGetPackageManager -Latest -ErrorAction Stop
             }
 
-            return @{ Available = $true; Succeeded = $true; DowngradeRejected = $false; Message = '' }
+            return @{ Available = $true; Succeeded = $true; DowngradeRejected = $false; MissingFrameworkDependency = $false; Message = '' }
         }
         catch {
             $lastMessage = "$_"
 
             if (Test-AppxDowngradeRejection -Message $lastMessage) {
                 Write-WarningMessage 'Repair-WinGetPackageManager was rejected (0x80073D06): this machine already has a newer framework dependency than the WinGet release pins. That is a WinGet packaging conflict, not a fault on this machine.'
-                return @{ Available = $true; Succeeded = $false; DowngradeRejected = $true; Message = $lastMessage }
+                return @{ Available = $true; Succeeded = $false; DowngradeRejected = $true; MissingFrameworkDependency = $false; Message = $lastMessage }
+            }
+
+            if (Test-AppxMissingFrameworkDependency -Message $lastMessage) {
+                Write-WarningMessage 'Repair-WinGetPackageManager was rejected (0x80073CF3): App Installer depends on a framework package (Microsoft.WindowsAppRuntime.1.8) that is not present on this machine. That is an external packaging gap - see issue #279 - not something a repair retry can fix.'
+                return @{ Available = $true; Succeeded = $false; DowngradeRejected = $false; MissingFrameworkDependency = $true; Message = $lastMessage }
             }
 
             Write-WarningMessage "Repair-WinGetPackageManager failed: $lastMessage"
         }
     }
 
-    return @{ Available = $true; Succeeded = $false; DowngradeRejected = $false; Message = $lastMessage }
+    return @{ Available = $true; Succeeded = $false; DowngradeRejected = $false; MissingFrameworkDependency = $false; Message = $lastMessage }
 }
 
 # --- WingetLaunchResilience ---
@@ -4079,6 +4144,9 @@ function Test-WingetSources {
       2. Repair-WinGetPackageManager, which registers the App Installer and Microsoft.Winget.Source
          packages even without an interactive logon session (microsoft/winget-cli#6334), but which
          can be blocked outright by a 0x80073D06 dependency downgrade rejection — hence the ordering.
+         It can also fail with a 0x80073CF3 missing-framework-dependency rejection (issue #279,
+         seen on GitHub-hosted E2E runners) when the machine/image lacks a framework App Installer
+         depends on; that case is diagnosed the same way and is equally not retryable.
 .PARAMETER WhatIf
     When specified, only reports intended actions without executing.
 .RETURNS
@@ -4143,10 +4211,12 @@ function Initialize-WingetSourcesForUser {
     # Microsoft.Winget.Source packages for the current account even without an interactive logon
     # session (microsoft/winget-cli#6334).
     $downgradeRejected = $false
+    $missingFrameworkDependency = $false
     if (Get-Command Repair-WinGetPackageManager -ErrorAction SilentlyContinue) {
         Write-Info 'Bootstrapping winget for this account via Repair-WinGetPackageManager...'
         $repair = Invoke-WingetPackageManagerRepair
         $downgradeRejected = [bool]$repair.DowngradeRejected
+        $missingFrameworkDependency = [bool]$repair.MissingFrameworkDependency
 
         $probe = Invoke-WingetSourceProbe
         if ($probe.Succeeded) {
@@ -4161,6 +4231,9 @@ function Initialize-WingetSourcesForUser {
     Write-WarningMessage "Winget sources could not be initialized for '$processUser'. Installations may fail with 0x80073D19."
     if ($downgradeRejected) {
         Write-WarningMessage 'Fix: update App Installer from the Microsoft Store on this machine (the WinGet release this module can deploy is older than a framework package already installed here), then re-run this script.'
+    }
+    if ($missingFrameworkDependency) {
+        Write-WarningMessage 'Fix: this machine (or runner image) is missing the Microsoft.WindowsAppRuntime.1.8 framework App Installer depends on. That is an external packaging gap, not something this script can install reliably on its own; see issue #279. Retrying will not help until the framework is present.'
     }
     if ($isCrossUserElevation) {
         Write-WarningMessage "Fix: log on to Windows interactively as '$processUser' once (this registers winget for that account), or run 'winget source update' from any session running as '$processUser', then re-run this script."

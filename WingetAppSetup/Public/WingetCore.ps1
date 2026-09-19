@@ -214,6 +214,9 @@ function Test-WingetSources {
       2. Repair-WinGetPackageManager, which registers the App Installer and Microsoft.Winget.Source
          packages even without an interactive logon session (microsoft/winget-cli#6334), but which
          can be blocked outright by a 0x80073D06 dependency downgrade rejection — hence the ordering.
+         It can also fail with a 0x80073CF3 missing-framework-dependency rejection (issue #279,
+         seen on GitHub-hosted E2E runners) when the machine/image lacks a framework App Installer
+         depends on; that case is diagnosed the same way and is equally not retryable.
 .PARAMETER WhatIf
     When specified, only reports intended actions without executing.
 .RETURNS
@@ -278,10 +281,12 @@ function Initialize-WingetSourcesForUser {
     # Microsoft.Winget.Source packages for the current account even without an interactive logon
     # session (microsoft/winget-cli#6334).
     $downgradeRejected = $false
+    $missingFrameworkDependency = $false
     if (Get-Command Repair-WinGetPackageManager -ErrorAction SilentlyContinue) {
         Write-Info 'Bootstrapping winget for this account via Repair-WinGetPackageManager...'
         $repair = Invoke-WingetPackageManagerRepair
         $downgradeRejected = [bool]$repair.DowngradeRejected
+        $missingFrameworkDependency = [bool]$repair.MissingFrameworkDependency
 
         $probe = Invoke-WingetSourceProbe
         if ($probe.Succeeded) {
@@ -296,6 +301,9 @@ function Initialize-WingetSourcesForUser {
     Write-WarningMessage "Winget sources could not be initialized for '$processUser'. Installations may fail with 0x80073D19."
     if ($downgradeRejected) {
         Write-WarningMessage 'Fix: update App Installer from the Microsoft Store on this machine (the WinGet release this module can deploy is older than a framework package already installed here), then re-run this script.'
+    }
+    if ($missingFrameworkDependency) {
+        Write-WarningMessage 'Fix: this machine (or runner image) is missing the Microsoft.WindowsAppRuntime.1.8 framework App Installer depends on. That is an external packaging gap, not something this script can install reliably on its own; see issue #279. Retrying will not help until the framework is present.'
     }
     if ($isCrossUserElevation) {
         Write-WarningMessage "Fix: log on to Windows interactively as '$processUser' once (this registers winget for that account), or run 'winget source update' from any session running as '$processUser', then re-run this script."
