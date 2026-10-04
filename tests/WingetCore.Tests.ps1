@@ -1740,6 +1740,18 @@ Describe 'Invoke-AppxProvisioning -TimeoutSeconds (work-order item 31)' {
         Should -Invoke powershell.exe -Times 0 -Exactly
     }
 
+    # Review of item 31: Windows PowerShell writes redirected output in the console's code page, so
+    # read as UTF-8 a localized DISM error would lose its non-ASCII letters in the transcript.
+    It 'reads Windows PowerShell''s output in the console''s encoding, not as UTF-8' -Skip:($PSVersionTable.PSEdition -ne 'Core') {
+        Mock Invoke-ExternalProcess { New-TestProcessResult -ExitCode 0 }
+
+        Invoke-AppxProvisioning -PackagePath 'C:\dl\fw.msix' -TimeoutSeconds 600 | Should -BeTrue
+
+        Should -Invoke Invoke-ExternalProcess -Times 1 -Exactly -ParameterFilter {
+            $null -ne $Encoding -and $Encoding.CodePage -eq [Console]::OutputEncoding.CodePage
+        }
+    }
+
     It 'returns false, and says so, when <Case>' -Skip:($PSVersionTable.PSEdition -ne 'Core') -ForEach @(
         @{ Case = 'Add-AppxProvisionedPackage fails'; Result = { New-TestProcessResult -ExitCode 1 }; Message = $null }
         @{ Case = 'it runs past the time limit'; Result = { New-TestProcessResult -TimedOut }; Message = "Add-AppxProvisionedPackage did not finish within 10 minutes for 'C:\dl\fw.msix' and was stopped." }

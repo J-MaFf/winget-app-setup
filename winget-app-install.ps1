@@ -61,12 +61,12 @@ param (
 # This script is assembled from the WingetAppSetup module by build/Build-WingetInstallScript.ps1.
 # Edit the function source under WingetAppSetup/Public and WingetAppSetup/Private, then re-run the
 # build to regenerate this file. See readme.md ("Project layout") for details.
-# Build id: 1.0.0+7a5d6609 (module version + SHA256 fragment of this whole script; issue #189).
+# Build id: 1.0.0+aaf5deb3 (module version + SHA256 fragment of this whole script; issue #189).
 # ------------------------------------------------------------------------------------------------
 
 # Content-derived build identity, logged at startup so a transcript from a remote machine
 # identifies exactly which installer build produced it (issue #189).
-$script:InstallerBuildId = '1.0.0+7a5d6609'
+$script:InstallerBuildId = '1.0.0+aaf5deb3'
 
 # ------------------------------------------------Functions------------------------------------------------
 
@@ -4540,6 +4540,12 @@ function Stop-ProcessTree {
 .PARAMETER Echo
     Live (default): print the command line, then each output line as it arrives. None: print
     nothing; the caller can pass the captured Output to Write-ProcessOutput later.
+.PARAMETER Encoding
+    The encoding the program writes its output in. Default UTF-8, which winget writes whatever the
+    console code page is. Windows PowerShell writes redirected output in the console's code page
+    instead, so Invoke-AppxProvisioning passes [Console]::OutputEncoding, the encoding PowerShell
+    itself reads a native program's output with; read as UTF-8, a localized error message would
+    lose its non-ASCII letters.
 .RETURNS
     [pscustomobject] with FilePath, Arguments, ExitCode ($null when the process timed out or did
     not start), TimedOut, LaunchFailed, LaunchErrorCode, LaunchError (message), LaunchException,
@@ -4563,7 +4569,10 @@ function Invoke-ExternalProcess {
 
         [Parameter(Mandatory = $false)]
         [ValidateSet('Live', 'None')]
-        [string]$Echo = 'Live'
+        [string]$Echo = 'Live',
+
+        [Parameter(Mandatory = $false)]
+        [System.Text.Encoding]$Encoding
     )
 
     $arguments = $ArgumentString
@@ -4613,8 +4622,11 @@ function Invoke-ExternalProcess {
     $startInfo.RedirectStandardOutput = $true
     $startInfo.RedirectStandardError = $true
     # winget writes UTF-8 whatever the console code page is; msiexec writes nothing.
-    $startInfo.StandardOutputEncoding = New-Object System.Text.UTF8Encoding($false)
-    $startInfo.StandardErrorEncoding = New-Object System.Text.UTF8Encoding($false)
+    if (-not $Encoding) {
+        $Encoding = New-Object System.Text.UTF8Encoding($false)
+    }
+    $startInfo.StandardOutputEncoding = $Encoding
+    $startInfo.StandardErrorEncoding = $Encoding
 
     if ($Echo -eq 'Live') {
         Write-Host ('  > {0} {1}' -f $displayName, $arguments).TrimEnd() -ForegroundColor DarkGray
@@ -6602,24 +6614,29 @@ function Test-WindowsAppRuntimeSignature {
          downloaded), with the download time limits Get-WebDownloadTimeoutParameters gives. The
          whole package rather than a byte range of it: the file's offset inside the package moves
          when NuGet re-signs it, and a proxy may ignore a range request, so a ranged read would
-         need this path as its fallback anyway. The cost is paid once, only on a PC without the
-         framework.
+         need this path as its fallback anyway. Only a PC without the framework downloads it, but
+         nothing remembers a failed attempt: until an install succeeds, every run there downloads
+         the package again.
       3. Extract this architecture's framework .msix (size checked against the pin first), open it
          with read-only sharing (Open-ReadLockedFile), hash it from that handle, check its
          Authenticode signature, and provision it with Add-AppxProvisionedPackage -Online
          -SkipLicense (Invoke-AppxProvisioning, run in Windows PowerShell with a time limit). The
          handle stays open until provisioning has finished, so what is provisioned is what was
          hashed.
-      4. Check again: Get-WindowsAppRuntimeStatus must now find it. The provisioned packages are
-         read too, and a framework that is present but not provisioned for all users gets a
-         warning.
+      4. Check again: Get-WindowsAppRuntimeStatus must now find it; when it reports it missing,
+         the install failed. When that check cannot run, the install counts as done, with a
+         warning: Add-AppxProvisionedPackage succeeded, and an unknown answer is not evidence that
+         the framework is missing (Install-WingetAutoUpdate goes ahead with WAU on one too). The
+         provisioned packages are read too, and a framework that is not listed as provisioned for
+         all users gets a warning.
     Writes one 'Windows App Runtime: installed ...' or 'Windows App Runtime: NOT INSTALLED - <reason>'
     line, which e2e/TranscriptAssertions.ps1 reads. Never uses Repair-WinGetPackageManager -AllUsers
     (issue #265). Never throws.
 .RETURNS
-    [pscustomobject] with Installed ([bool]: the framework is there now, checked after
-    provisioning), Status (Get-WindowsAppRuntimeStatus's result after provisioning, or $null when
-    nothing was provisioned) and Reason (why it was not installed, or $null).
+    [pscustomobject] with Installed ([bool]: Add-AppxProvisionedPackage succeeded and the check
+    afterwards found the framework, or could not run), Status (Get-WindowsAppRuntimeStatus's result
+    after provisioning, Present $null when that check could not run, or $null when nothing was
+    provisioned) and Reason (why it was not installed, or $null).
 #>
 function Install-WindowsAppRuntimeFramework {
     $pin = Get-WindowsAppRuntimePin
@@ -6627,6 +6644,7 @@ function Install-WindowsAppRuntimeFramework {
     $status = $null
     $architecture = $null
     $framework = $null
+    $unconfirmed = $false
 
     try {
         try {
@@ -6728,13 +6746,22 @@ function Install-WindowsAppRuntimeFramework {
         if (-not $reason) {
             # Add-AppxProvisionedPackage's success is not the answer: the check the WAU gate uses is.
             $status = Get-WindowsAppRuntimeStatus
-            if ($status.Present -ne $true) {
+            if ($status.Present -eq $false) {
                 $reason = "Add-AppxProvisionedPackage reported success, but the framework is still not there ($($status.Detail))"
             }
             else {
+                if ($status.Present -ne $true) {
+                    # The check could not run. Not evidence that the framework is missing: the WAU
+                    # gate goes ahead on an unknown answer, and provisioning has just succeeded.
+                    $unconfirmed = $true
+                    Write-WarningMessage "Add-AppxProvisionedPackage succeeded, but the check for Microsoft.WindowsAppRuntime.1.8 afterwards could not run ($($status.Detail)); going ahead as if it is there."
+                }
                 try {
                     $provisionedNow = @(Get-WindowsAppRuntimeProvisionedInfo | Where-Object { $_.Architecture -eq $architecture -and $_.Version -ge [version]$pin.FrameworkVersion })
-                    if ($provisionedNow.Count -eq 0) {
+                    if ($provisionedNow.Count -eq 0 -and $unconfirmed) {
+                        Write-WarningMessage 'Get-AppxProvisionedPackage does not list Microsoft.WindowsAppRuntime.1.8 as provisioned for all users either, so nothing confirms the install; accounts that sign in for the first time may not get it.'
+                    }
+                    elseif ($provisionedNow.Count -eq 0) {
                         Write-WarningMessage 'Microsoft.WindowsAppRuntime.1.8 is now on this PC, but Get-AppxProvisionedPackage does not list it as provisioned for all users; accounts that sign in for the first time may not get it.'
                     }
                 }
@@ -6754,7 +6781,11 @@ function Install-WindowsAppRuntimeFramework {
         Write-ErrorMessage "Windows App Runtime: NOT INSTALLED - $reason."
         return [pscustomobject]@{ Installed = $false; Status = $status; Reason = $reason }
     }
-    Write-Success ('Windows App Runtime: installed Microsoft.WindowsAppRuntime.1.8 {0} ({1}) for all users.' -f $pin.FrameworkVersion, $architecture)
+    $unconfirmedNote = ''
+    if ($unconfirmed) {
+        $unconfirmedNote = ', not confirmed: the check afterwards could not run'
+    }
+    Write-Success ('Windows App Runtime: installed Microsoft.WindowsAppRuntime.1.8 {0} ({1}) for all users{2}.' -f $pin.FrameworkVersion, $architecture, $unconfirmedNote)
     return [pscustomobject]@{ Installed = $true; Status = $status; Reason = $null }
 }
 
@@ -11325,7 +11356,9 @@ function Test-AppxPackageProvisioned {
 .PARAMETER TimeoutSeconds
     Under pwsh: a time limit for the Windows PowerShell child (Get-ProcessTimeoutSeconds -Operation
     AppxProvisioning), which then runs through Invoke-ExternalProcess, its output echoed into the
-    transcript, and is stopped when the limit runs out. 0 (the default): no limit, as before.
+    transcript, and is stopped when the limit runs out. Its output is read in the console's code
+    page ([Console]::OutputEncoding), which Windows PowerShell writes redirected output in, so a
+    localized DISM error keeps its non-ASCII letters. 0 (the default): no limit, as before.
 #>
 function Invoke-AppxProvisioning {
     param (
@@ -11362,7 +11395,10 @@ function Invoke-AppxProvisioning {
             $command = "Add-AppxProvisionedPackage -Online -PackagePath '$escapedPackagePath' $depClause $licClause -ErrorAction Stop | Out-Null"
             if ($TimeoutSeconds -gt 0) {
                 # No progress bar: on a redirected output Windows PowerShell writes it as CLIXML.
-                $run = Invoke-ExternalProcess -FilePath 'powershell.exe' -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', "`$ProgressPreference = 'SilentlyContinue'; $command") -TimeoutSeconds $TimeoutSeconds
+                # Windows PowerShell writes redirected output in the console's code page, not in
+                # UTF-8 as winget does; [Console]::OutputEncoding is what PowerShell reads a native
+                # program's output with too.
+                $run = Invoke-ExternalProcess -FilePath 'powershell.exe' -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', "`$ProgressPreference = 'SilentlyContinue'; $command") -TimeoutSeconds $TimeoutSeconds -Encoding ([Console]::OutputEncoding)
                 if ($run.LaunchFailed) {
                     Write-ErrorMessage "Add-AppxProvisionedPackage failed for '$PackagePath': Windows PowerShell could not be started ($($run.LaunchError))."
                     return $false

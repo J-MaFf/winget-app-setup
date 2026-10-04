@@ -569,8 +569,11 @@ that finds WAU already installed alike:
 
 - **What:** the framework file of Windows App Runtime 1.8.12 (`Microsoft.WindowsAppRuntime.1.8`
   8000.994.2142.0) for the PC's architecture (x64, x86 or ARM64), taken from Microsoft's
-  `Microsoft.WindowsAppSDK.Runtime` 1.8.260921001 package on NuGet.org. The download is the whole
-  package, about 150 MB, and happens only on a PC that lacks the framework. The version, the URL
+  `Microsoft.WindowsAppSDK.Runtime` 1.8.260921001 package on NuGet.org. That package is the
+  developer package, published under the Windows App SDK license terms for developers, not one of
+  the end-user runtime installers Microsoft documents for redistribution. The download is the whole
+  package, about 150 MB, and happens only on a PC that lacks the framework, but a failed install is
+  not remembered: until one succeeds, every run on that PC downloads it again. The version, the URL
   and each file's size and SHA256 are pinned in `Get-WindowsAppRuntimePin`.
 - **Checks:** the package goes into a new folder inside `%ProgramData%\winget-app-setup` that is
   limited to SYSTEM and Administrators first, like the WAU MSI's. The framework file must have the
@@ -578,9 +581,10 @@ that finds WAU already installed alike:
   held open from the hash until it is provisioned, so what is provisioned is what was checked.
 - **How:** `Add-AppxProvisionedPackage -Online -SkipLicense`, run in Windows PowerShell with a
   10-minute time limit, then the all-users check again (and `Get-AppxProvisionedPackage`, which
-  only warns when it does not list the framework). Microsoft's `WindowsAppRuntimeInstall` program
-  is not used: it registers the framework only for the account that runs it, and as SYSTEM only
-  stages it.
+  only warns when it does not list the framework). When that check cannot run, the install counts
+  as done, with a warning, and WAU is set up, as on any run where the check cannot run.
+  Microsoft's `WindowsAppRuntimeInstall` program is not used: it registers the framework only for
+  the account that runs it, and as SYSTEM only stages it.
 - **Never:** on a run that is not elevated (a run as SYSTEM is), on 32-bit Arm Windows or a Windows
   build older than 17763, over a framework of the same or a newer version that is already
   provisioned, or when the all-users check itself could not run. It never uses
@@ -592,8 +596,9 @@ WAU is skipped as before: the summary shows `Auto-updates: NOT CONFIGURED` (or `
 was already installed) with the reason on the next line, and the run exits 8. A dry run
 (`-WhatIf`) says that it would install the framework first if it is missing, and installs nothing.
 Not yet checked on a real Windows PC: whether provisioning the framework on its own registers it
-for existing and new accounts on Windows 10, Windows 11 and Windows Server 2025, and whether the
-signature check reads the `.msix` signature under PowerShell 7.
+for existing and new accounts on Windows 10, Windows 11 and Windows Server 2025, whether the
+signature check reads the `.msix` signature under PowerShell 7, and whether
+`Add-AppxProvisionedPackage` can read the file while the installer holds it open.
 
 WAU counts as set up only when its scheduled task `\WAU\Winget-AutoUpdate` exists, is enabled and
 has an enabled trigger. The installer checks this after it installs WAU and on every run that finds
@@ -730,14 +735,16 @@ throwaway VMs by construction:
   ships. In the 5.1 leg, the first pass's bootstrap downloads the installer from raw `main` again
   for its PowerShell 7 relaunch; on checkout runs that one download is answered with the checkout,
   so the PowerShell 7 half of the pass tests the change too. `e2e/Invoke-InstallPass.ps1` starts
-  every pass and decides whether it passed: it must exit 0, or 3010 (OK, restart required). Exit 8
-  passes only when that pass's own transcript says
-  `Auto-updates: NOT CONFIGURED - Microsoft.WindowsAppRuntime.1.8 is missing`, and the verdict then
-  quotes the transcript's `Windows App Runtime:` line with the reason the installer could not
-  install the framework. `windows-latest` ships without it, but the installer now installs the
-  pinned framework there, so both passes are expected to exit 0 with Winget-AutoUpdate set up; the
-  exit 8 is kept for a runner where that install is not possible. 8 for any other reason, or with
-  no transcript to check, fails the pass.
+  every pass and decides whether it passed: it must exit 0, or 3010 (OK, restart required).
+  `windows-latest` ships without `Microsoft.WindowsAppRuntime.1.8`, but the installer now installs
+  the pinned framework there, so both passes are expected to exit 0 with Winget-AutoUpdate set up.
+  Exit 8 passes only when that pass's own transcript says
+  `Auto-updates: NOT CONFIGURED - Microsoft.WindowsAppRuntime.1.8 is missing` and the installer
+  could not try to install the framework (the run was not elevated, Windows or its architecture is
+  not one the framework supports, or a framework was already provisioned); the verdict then quotes
+  the transcript's `Windows App Runtime:` line with the reason. An install of the framework that
+  started and then failed (download, checks or provisioning) fails the pass, as does 8 for any
+  other reason or with no transcript to check.
   Exit 1 is tolerated only while `KNOWN_PLATFORM_INCOMPATIBLE` is non-empty, and the assertions
   then check that nothing outside that list failed. Any other code fails the pass with the
   installer's code. The second pass proves idempotence.

@@ -411,6 +411,20 @@ exit 0
         $result.StandardOutput | Should -Contain 'read to the end'
     }
 
+    # Review of item 31: Windows PowerShell writes redirected output in the console's code page, so
+    # Invoke-AppxProvisioning reads it with -Encoding instead of the UTF-8 winget writes.
+    It 'Reads the output as UTF-8 by default, and in the encoding -Encoding names' {
+        # 'Gr', u-umlaut, sharp s, 'e' in ISO-8859-1 (code page 28591): not valid UTF-8.
+        $latin1Writer = New-PwshScript -Name 'latin1-writer' -Body '$bytes = [byte[]](0x47, 0x72, 0xFC, 0xDF, 0x65, 0x0A); $out = [Console]::OpenStandardOutput(); $out.Write($bytes, 0, $bytes.Length); $out.Flush()'
+        $expected = 'Gr' + [char]0x00FC + [char]0x00DF + 'e'
+
+        $default = Invoke-ExternalProcess -FilePath $script:PwshPath -ArgumentList @('-NoProfile', '-NonInteractive', '-File', $latin1Writer) -TimeoutSeconds 60 -Echo None
+        $latin1 = Invoke-ExternalProcess -FilePath $script:PwshPath -ArgumentList @('-NoProfile', '-NonInteractive', '-File', $latin1Writer) -TimeoutSeconds 60 -Echo None -Encoding ([System.Text.Encoding]::GetEncoding(28591))
+
+        $default.StandardOutput | Should -Be @('Gr' + [char]0xFFFD + [char]0xFFFD + 'e')
+        $latin1.StandardOutput | Should -Be @($expected)
+    }
+
     It 'Passes -ArgumentString unchanged' {
         $echoArgs = New-PwshScript -Name 'echo-args-raw' -Body '$args | ForEach-Object { "[$_]" }'
 

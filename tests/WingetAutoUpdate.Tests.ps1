@@ -376,9 +376,10 @@ Describe 'Winget-AutoUpdate integration (issue #168)' {
         }
     }
 
-    # Real icacls, Get-Acl and msiexec, on Windows only. The unit tests above mock all three; the
-    # E2E run does not install WAU (its runner lacks Microsoft.WindowsAppRuntime.1.8), so these are
-    # the only checks of the real calls before a PC runs them.
+    # Real icacls, Get-Acl and msiexec, on Windows only. The unit tests above mock all three. The
+    # E2E run now installs WAU too (the installer installs Microsoft.WindowsAppRuntime.1.8, which
+    # its runner lacks, first: work-order item 31), but these check the calls on their own, before
+    # a PC runs them.
     Context 'Staging-folder lockdown and the held-open MSI on real Windows (review finding P2-21)' {
         # icacls /setowner needs an elevated administrator token.
         It 'leaves a real folder owned by Administrators with only SYSTEM and Administrators entries' -Skip:(-not ($IsWindows -and ([System.Security.Principal.WindowsPrincipal][System.Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator))) {

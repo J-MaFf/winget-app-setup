@@ -658,7 +658,9 @@ function Test-AppxPackageProvisioned {
 .PARAMETER TimeoutSeconds
     Under pwsh: a time limit for the Windows PowerShell child (Get-ProcessTimeoutSeconds -Operation
     AppxProvisioning), which then runs through Invoke-ExternalProcess, its output echoed into the
-    transcript, and is stopped when the limit runs out. 0 (the default): no limit, as before.
+    transcript, and is stopped when the limit runs out. Its output is read in the console's code
+    page ([Console]::OutputEncoding), which Windows PowerShell writes redirected output in, so a
+    localized DISM error keeps its non-ASCII letters. 0 (the default): no limit, as before.
 #>
 function Invoke-AppxProvisioning {
     param (
@@ -695,7 +697,10 @@ function Invoke-AppxProvisioning {
             $command = "Add-AppxProvisionedPackage -Online -PackagePath '$escapedPackagePath' $depClause $licClause -ErrorAction Stop | Out-Null"
             if ($TimeoutSeconds -gt 0) {
                 # No progress bar: on a redirected output Windows PowerShell writes it as CLIXML.
-                $run = Invoke-ExternalProcess -FilePath 'powershell.exe' -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', "`$ProgressPreference = 'SilentlyContinue'; $command") -TimeoutSeconds $TimeoutSeconds
+                # Windows PowerShell writes redirected output in the console's code page, not in
+                # UTF-8 as winget does; [Console]::OutputEncoding is what PowerShell reads a native
+                # program's output with too.
+                $run = Invoke-ExternalProcess -FilePath 'powershell.exe' -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', "`$ProgressPreference = 'SilentlyContinue'; $command") -TimeoutSeconds $TimeoutSeconds -Encoding ([Console]::OutputEncoding)
                 if ($run.LaunchFailed) {
                     Write-ErrorMessage "Add-AppxProvisionedPackage failed for '$PackagePath': Windows PowerShell could not be started ($($run.LaunchError))."
                     return $false

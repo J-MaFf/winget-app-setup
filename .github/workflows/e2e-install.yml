@@ -34,15 +34,15 @@ name: E2E Install
 #     then checks that every transcript, the 5.1 bootstrap ones included, logged the checkout's
 #     build id.
 #
-# Winget-AutoUpdate's own update run is not exercised: windows-latest lacks the
-# Microsoft.WindowsAppRuntime.1.8 framework, so the installer skips WAU there and the assertions
-# expect 'Auto-updates: NOT CONFIGURED'. For the same reason every install pass on that image exits
-# 8 (apps OK, auto-updates not configured), which e2e/Invoke-InstallPass.ps1 accepts only when the
-# pass's own transcript gives the missing framework as the reason. A WAU leg (start the task, wait
-# for it, check that winget still starts) needs that framework on the runner first. It can be
-# provisioned as a preparation step (Microsoft's versioned WindowsAppRuntimeInstall-x64.exe
-# --quiet, or winget's Microsoft.WindowsAppRuntime.1.8 package; the framework's minimum OS covers
-# Server 2025), but that has not been tried on this image yet, so the leg is left for a follow-up.
+# Winget-AutoUpdate: windows-latest ships without the Microsoft.WindowsAppRuntime.1.8 framework
+# that WAU's winget updates need. The installer now installs a pinned, verified copy of it for all
+# users before it sets up WAU (work-order item 31), so the first pass is expected to install the
+# framework and WAU and both passes to exit 0, and the assertions then expect WAU at its pin. Exit
+# 8 (apps OK, auto-updates not configured) with 'Auto-updates: NOT CONFIGURED' for the missing
+# framework is accepted by e2e/Invoke-InstallPass.ps1 only when the installer could not try that
+# install; a framework install that started and failed fails the pass. WAU's own update run is
+# still not exercised: a WAU leg (start the task, wait for it, check that winget still starts) is
+# left for a follow-up.
 #
 # Pull requests: every PR starts this workflow, and the changes job lets both legs run only when
 # the PR touches the product (WingetAppSetup/**, build/**, winget-app-install.ps1) or the e2e
@@ -54,9 +54,9 @@ name: E2E Install
 # matrix would rename the e2e-install check.
 #
 # The install runs TWICE: the second pass proves idempotence (must pass the same exit-code policy
-# as the first, with every app Skipped; on windows-latest both passes exit 8 for the missing
-# framework, see above), verified by e2e/Assert-Install.ps1 -ExpectAllSkippedOnSecondRun - the
-# shared assertion script that tier 2 (issue #215, snapshot-rollback Proxmox VM) will reuse.
+# as the first, with every app Skipped and the framework not installed again), verified by
+# e2e/Assert-Install.ps1 -ExpectAllSkippedOnSecondRun - the shared assertion script that tier 2
+# (issue #215, snapshot-rollback Proxmox VM) will reuse.
 #
 # Evidence: e2e/Collect-Diagnostics.ps1 snapshots the pwsh version, the all-users AppX state of
 # App Installer and WindowsAppRuntime, and the WAU tasks before and after the first pass and at
@@ -96,9 +96,9 @@ env:
   # tolerate exit 1 only because Assert-Install.ps1 verifies that NOTHING outside this list
   # failed. Currently EMPTY — and empty means STRICT: on the runner an empty env var reads as
   # $null in pwsh, so the tolerate-exit-1 branches below are inert and both install passes must
-  # succeed: exit 0 or 3010, or 8 only for the missing WindowsAppRuntime framework (see
-  # e2e/Invoke-InstallPass.ps1). The containment machinery is kept for future runner-only
-  # incompatibilities.
+  # succeed: exit 0 or 3010, or 8 only for a missing WindowsAppRuntime framework the installer
+  # could not try to install (see e2e/Invoke-InstallPass.ps1). The containment machinery is kept
+  # for future runner-only incompatibilities.
   #   - Dell.CommandUpdate.Universal was retired from this list by issue #217: the product now
   #     gates it with a manufacturer condition in the catalog, so non-Dell machines (including
   #     these runners) report it 'Skipped (not applicable: Dell hardware only)' instead of
@@ -228,12 +228,13 @@ jobs:
         # detection is itself part of what this run verifies (issue #214). Invoke-InstallPass.ps1
         # applies the exit-code policy: 0 and 3010 (OK, restart required) pass; 8 (apps OK,
         # auto-updates not configured or unhealthy) passes only when the pass's own transcript
-        # says 'Auto-updates: NOT CONFIGURED - Microsoft.WindowsAppRuntime.1.8 is missing', which
-        # is why every pass on windows-latest exits 8, and fails the step with 8 for any other
-        # reason or with no transcript to check; 1 (some apps failed) is tolerated only while
-        # KNOWN_PLATFORM_INCOMPATIBLE is non-empty, pending the assertion step's containment
-        # check; anything else (2 = winget unavailable, 3 = validation failed, 5 = aborted, ...)
-        # fails the step with the installer's code.
+        # says 'Auto-updates: NOT CONFIGURED - Microsoft.WindowsAppRuntime.1.8 is missing' and
+        # the installer could not try to install the framework (on windows-latest it can, so a
+        # pass there is expected to exit 0), and fails the step with 8 for a framework install
+        # that started and failed, for any other reason or with no transcript to check; 1 (some
+        # apps failed) is tolerated only while KNOWN_PLATFORM_INCOMPATIBLE is non-empty, pending
+        # the assertion step's containment check; anything else (2 = winget unavailable,
+        # 3 = validation failed, 5 = aborted, ...) fails the step with the installer's code.
         run: ./e2e/Invoke-InstallPass.ps1 -Pass first -Shell pwsh -Entry OneLiner
 
       - name: Diagnostics after the first install pass
@@ -249,9 +250,9 @@ jobs:
         shell: pwsh
         timeout-minutes: 35
         # Same installer as the first pass, on the now-provisioned machine: it must succeed again
-        # (on windows-latest, exit 8 for the missing framework, as the first pass did), and the
-        # assertions step below verifies (via the latest transcript) that every catalog app was
-        # Skipped and nothing was installed or failed. The weekly run repeats the one-liner.
+        # (exit 0, finding the framework and WAU the first pass installed), and the assertions
+        # step below verifies (via the latest transcript) that every catalog app was Skipped and
+        # nothing was installed or failed. The weekly run repeats the one-liner.
         # Checkout runs switch to 'pwsh -File', the entry the readme documents for clone, RMM and
         # CI runs, so that path also gets an un-mocked run before it ships. Same exit-code policy
         # as the first pass: known-incompatible apps are still missing here, so the installer

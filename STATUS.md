@@ -143,7 +143,11 @@ freshly imaged PC, a Store-blocked PC or Windows Server gets WAU on the first ru
 `Repair-WinGetPackageManager -AllUsers`. The Server 2025 runner, which ships without the framework,
 is therefore expected to get it and WAU on the first pass and exit 0;
 `e2e/Invoke-InstallPass.ps1` still accepts exit 8 when the pass's transcript gives the missing
-framework as the reason, and quotes why the install did not happen. For RMM runs: `WINGET_APP_SETUP_NONINTERACTIVE=1` makes the one-liner non-interactive;
+framework as the reason and the installer could not try to install it (and quotes why), but fails a
+pass whose framework install started and failed. The package is Microsoft's developer NuGet package
+(Windows App SDK license terms for developers), not one of its end-user runtime installers, and a
+failed install is not remembered, so a PC where it keeps failing downloads the 150 MB again on
+every run. For RMM runs: `WINGET_APP_SETUP_NONINTERACTIVE=1` makes the one-liner non-interactive;
 one elevated run at a time holds the `Global\winget-app-setup-run` mutex, and a second one exits 6;
 every real run prints a `RESULT:` line, and the run that holds the lock writes
 `logs\last-run.json` (schema version 1); the logs folder keeps the newest 30 transcripts, and
@@ -352,7 +356,7 @@ every repository secret.
 | `winget-app-uninstall.ps1` | Uninstall entry script; imports the module from the repo and runs `Invoke-WingetUninstall` (exit codes in readme "Uninstall") |
 | `tests/` | Pester suite, one `<Area>.Tests.ps1` per module file plus `EntryPoint.Tests.ps1`, `TestHarness.Tests.ps1`, `BuildGuards.Tests.ps1` (the build guards and the pre-commit hook) and the `E2E*.Tests.ps1` files (for the `e2e/` scripts, with sample transcripts in `tests/fixtures/e2e`); `TestHelpers.ps1` loads the module once per file and stands in for Windows-only commands, so the suite also runs on Linux/macOS |
 | `e2e/Assert-Install.ps1` | Shared post-install assertions for end-to-end runs (tier 1 workflow below; tier 2 [#215](https://github.com/J-MaFf/winget-app-setup/issues/215) reuses it); the transcript checks are in `e2e/TranscriptAssertions.ps1` and fixture-tested; `-InstallerPath` checks that every pass ran the checkout's build |
-| `e2e/Invoke-InstallPass.ps1` | Starts each E2E install pass (one-liner or `-File`, from PowerShell 7 or Windows PowerShell 5.1) and applies the exit-code policy: 0 and 3010 pass, 8 only when the pass's transcript says WAU was skipped for the missing `Microsoft.WindowsAppRuntime.1.8` (quoting its `Windows App Runtime:` line), 1 only while `KNOWN_PLATFORM_INCOMPATIBLE` is non-empty |
+| `e2e/Invoke-InstallPass.ps1` | Starts each E2E install pass (one-liner or `-File`, from PowerShell 7 or Windows PowerShell 5.1) and applies the exit-code policy: 0 and 3010 pass, 8 only when the pass's transcript says WAU was skipped for the missing `Microsoft.WindowsAppRuntime.1.8` and the installer could not try to install it (quoting its `Windows App Runtime:` line), 1 only while `KNOWN_PLATFORM_INCOMPATIBLE` is non-empty |
 | `e2e/Remove-PreinstalledApps.ps1` | Uninstalls the catalog apps the runner image ships with (Chrome, 7-Zip, Git; with `-IncludePowerShell7`, PowerShell 7 too) before the first E2E pass; every call time-limited, failures become warnings |
 | `e2e/Collect-Diagnostics.ps1` | Windows PowerShell 5.1 snapshots for the E2E run: pwsh versions, App Installer / WindowsAppRuntime AppX state, WAU tasks; at the end MsiInstaller and RestartManager events, AppX deployment errors and warnings, and WAU logs (`e2e-diagnostics` artifact); always exits 0 |
 | `.github/workflows/e2e-install.yml` | E2E tier 1: real install runs on GitHub-hosted `windows-latest` in two legs, `e2e-install` from PowerShell 7 and `e2e-install-windows-powershell` from Windows PowerShell 5.1 through the PowerShell 7 bootstrap, after removing the preinstalled Chrome, 7-Zip and Git (issues #279/#282/#283; weekly against raw `main`, plus dispatches and PRs that touch the product or e2e files against the checkout; uploads transcripts and diagnostics; a failed, timed-out or cancelled weekly or `main`-dispatched run files an issue from the ubuntu `report-failure` job) |
@@ -453,9 +457,10 @@ every repository secret.
   makes it show for every user (`Get-AppxPackage -AllUsers`) and for an account that signs in for
   the first time, that `Get-AuthenticodeSignature` under PowerShell 7 reads the `.msix` as `Valid`
   from `Microsoft Corporation`, that `Add-AppxProvisionedPackage` can read the file while the
-  installer holds it open, and then that WAU's own run keeps winget working. Once the E2E run shows
-  the framework installed on `windows-latest`, drop its exit-8 acceptance so a broken install fails
-  the run.
+  installer holds it open, and then that WAU's own run keeps winget working. The E2E run already
+  fails a pass whose framework install started and failed, so the first run of this branch on
+  `windows-latest` shows whether the install works for the existing accounts on Server 2025. Owner: confirm that deploying the framework from
+  the developer NuGet package (Windows App SDK license terms) is acceptable for the fleet.
 - Check the Adobe Reader split on a real ARM64 PC (32-bit Reader installed, 64-bit skipped), and
   whether `Google.GoogleDrive` and `Dell.CommandUpdate.Universal`, which ship only x64 installers,
   need the same gate there.

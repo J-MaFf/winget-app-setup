@@ -398,6 +398,32 @@ Describe 'Install-WindowsAppRuntimeFramework (work-order item 31)' {
         $result.Reason | Should -Be 'Add-AppxProvisionedPackage reported success, but the framework is still not there (Microsoft.WindowsAppRuntime.1.8 >= 8000.616.304.0 for X64 required; found: none registered)'
     }
 
+    # Review of item 31: an unknown answer after a successful provisioning used to read as 'still
+    # not there', so WAU was skipped with exit 8, while the WAU gate goes ahead on an unknown answer.
+    It 'counts the install as done, with a warning, when the check afterwards cannot run' {
+        Mock Get-WindowsAppRuntimeStatus { [pscustomobject]@{ Present = $null; Detail = 'could not query installed packages: Access is denied' } }
+
+        $result = Install-WindowsAppRuntimeFramework
+
+        $result.Installed | Should -BeTrue
+        $result.Reason | Should -BeNullOrEmpty
+        $result.Status.Present | Should -BeNullOrEmpty
+        $script:errors | Should -BeNullOrEmpty
+        $script:warnings | Should -Be @('Add-AppxProvisionedPackage succeeded, but the check for Microsoft.WindowsAppRuntime.1.8 afterwards could not run (could not query installed packages: Access is denied); going ahead as if it is there.')
+        $script:successes | Should -Be @('Windows App Runtime: installed Microsoft.WindowsAppRuntime.1.8 8000.994.2142.0 (X64) for all users, not confirmed: the check afterwards could not run.')
+    }
+
+    It 'says that nothing confirms the install when neither check finds it' {
+        Mock Get-WindowsAppRuntimeStatus { [pscustomobject]@{ Present = $null; Detail = 'could not query installed packages: Access is denied' } }
+        Mock Get-WindowsAppRuntimeProvisionedInfo { }
+
+        $result = Install-WindowsAppRuntimeFramework
+
+        $result.Installed | Should -BeTrue
+        $script:warnings | Should -Contain 'Get-AppxProvisionedPackage does not list Microsoft.WindowsAppRuntime.1.8 as provisioned for all users either, so nothing confirms the install; accounts that sign in for the first time may not get it.'
+        $script:warnings | Should -Not -Contain 'Microsoft.WindowsAppRuntime.1.8 is now on this PC, but Get-AppxProvisionedPackage does not list it as provisioned for all users; accounts that sign in for the first time may not get it.'
+    }
+
     It 'counts a framework that is there but not provisioned for all users as installed, with a warning' {
         Mock Get-WindowsAppRuntimeStatus { [pscustomobject]@{ Present = $true; Detail = 'X64 8000.994.2142.0' } }
         Mock Get-WindowsAppRuntimeProvisionedInfo { }

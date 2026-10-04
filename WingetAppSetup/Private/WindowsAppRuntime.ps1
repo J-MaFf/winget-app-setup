@@ -212,24 +212,29 @@ function Test-WindowsAppRuntimeSignature {
          downloaded), with the download time limits Get-WebDownloadTimeoutParameters gives. The
          whole package rather than a byte range of it: the file's offset inside the package moves
          when NuGet re-signs it, and a proxy may ignore a range request, so a ranged read would
-         need this path as its fallback anyway. The cost is paid once, only on a PC without the
-         framework.
+         need this path as its fallback anyway. Only a PC without the framework downloads it, but
+         nothing remembers a failed attempt: until an install succeeds, every run there downloads
+         the package again.
       3. Extract this architecture's framework .msix (size checked against the pin first), open it
          with read-only sharing (Open-ReadLockedFile), hash it from that handle, check its
          Authenticode signature, and provision it with Add-AppxProvisionedPackage -Online
          -SkipLicense (Invoke-AppxProvisioning, run in Windows PowerShell with a time limit). The
          handle stays open until provisioning has finished, so what is provisioned is what was
          hashed.
-      4. Check again: Get-WindowsAppRuntimeStatus must now find it. The provisioned packages are
-         read too, and a framework that is present but not provisioned for all users gets a
-         warning.
+      4. Check again: Get-WindowsAppRuntimeStatus must now find it; when it reports it missing,
+         the install failed. When that check cannot run, the install counts as done, with a
+         warning: Add-AppxProvisionedPackage succeeded, and an unknown answer is not evidence that
+         the framework is missing (Install-WingetAutoUpdate goes ahead with WAU on one too). The
+         provisioned packages are read too, and a framework that is not listed as provisioned for
+         all users gets a warning.
     Writes one 'Windows App Runtime: installed ...' or 'Windows App Runtime: NOT INSTALLED - <reason>'
     line, which e2e/TranscriptAssertions.ps1 reads. Never uses Repair-WinGetPackageManager -AllUsers
     (issue #265). Never throws.
 .RETURNS
-    [pscustomobject] with Installed ([bool]: the framework is there now, checked after
-    provisioning), Status (Get-WindowsAppRuntimeStatus's result after provisioning, or $null when
-    nothing was provisioned) and Reason (why it was not installed, or $null).
+    [pscustomobject] with Installed ([bool]: Add-AppxProvisionedPackage succeeded and the check
+    afterwards found the framework, or could not run), Status (Get-WindowsAppRuntimeStatus's result
+    after provisioning, Present $null when that check could not run, or $null when nothing was
+    provisioned) and Reason (why it was not installed, or $null).
 #>
 function Install-WindowsAppRuntimeFramework {
     $pin = Get-WindowsAppRuntimePin
@@ -237,6 +242,7 @@ function Install-WindowsAppRuntimeFramework {
     $status = $null
     $architecture = $null
     $framework = $null
+    $unconfirmed = $false
 
     try {
         try {
@@ -338,13 +344,22 @@ function Install-WindowsAppRuntimeFramework {
         if (-not $reason) {
             # Add-AppxProvisionedPackage's success is not the answer: the check the WAU gate uses is.
             $status = Get-WindowsAppRuntimeStatus
-            if ($status.Present -ne $true) {
+            if ($status.Present -eq $false) {
                 $reason = "Add-AppxProvisionedPackage reported success, but the framework is still not there ($($status.Detail))"
             }
             else {
+                if ($status.Present -ne $true) {
+                    # The check could not run. Not evidence that the framework is missing: the WAU
+                    # gate goes ahead on an unknown answer, and provisioning has just succeeded.
+                    $unconfirmed = $true
+                    Write-WarningMessage "Add-AppxProvisionedPackage succeeded, but the check for Microsoft.WindowsAppRuntime.1.8 afterwards could not run ($($status.Detail)); going ahead as if it is there."
+                }
                 try {
                     $provisionedNow = @(Get-WindowsAppRuntimeProvisionedInfo | Where-Object { $_.Architecture -eq $architecture -and $_.Version -ge [version]$pin.FrameworkVersion })
-                    if ($provisionedNow.Count -eq 0) {
+                    if ($provisionedNow.Count -eq 0 -and $unconfirmed) {
+                        Write-WarningMessage 'Get-AppxProvisionedPackage does not list Microsoft.WindowsAppRuntime.1.8 as provisioned for all users either, so nothing confirms the install; accounts that sign in for the first time may not get it.'
+                    }
+                    elseif ($provisionedNow.Count -eq 0) {
                         Write-WarningMessage 'Microsoft.WindowsAppRuntime.1.8 is now on this PC, but Get-AppxProvisionedPackage does not list it as provisioned for all users; accounts that sign in for the first time may not get it.'
                     }
                 }
@@ -364,6 +379,10 @@ function Install-WindowsAppRuntimeFramework {
         Write-ErrorMessage "Windows App Runtime: NOT INSTALLED - $reason."
         return [pscustomobject]@{ Installed = $false; Status = $status; Reason = $reason }
     }
-    Write-Success ('Windows App Runtime: installed Microsoft.WindowsAppRuntime.1.8 {0} ({1}) for all users.' -f $pin.FrameworkVersion, $architecture)
+    $unconfirmedNote = ''
+    if ($unconfirmed) {
+        $unconfirmedNote = ', not confirmed: the check afterwards could not run'
+    }
+    Write-Success ('Windows App Runtime: installed Microsoft.WindowsAppRuntime.1.8 {0} ({1}) for all users{2}.' -f $pin.FrameworkVersion, $architecture, $unconfirmedNote)
     return [pscustomobject]@{ Installed = $true; Status = $status; Reason = $null }
 }

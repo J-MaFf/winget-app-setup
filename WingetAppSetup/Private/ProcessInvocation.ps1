@@ -446,6 +446,12 @@ function Stop-ProcessTree {
 .PARAMETER Echo
     Live (default): print the command line, then each output line as it arrives. None: print
     nothing; the caller can pass the captured Output to Write-ProcessOutput later.
+.PARAMETER Encoding
+    The encoding the program writes its output in. Default UTF-8, which winget writes whatever the
+    console code page is. Windows PowerShell writes redirected output in the console's code page
+    instead, so Invoke-AppxProvisioning passes [Console]::OutputEncoding, the encoding PowerShell
+    itself reads a native program's output with; read as UTF-8, a localized error message would
+    lose its non-ASCII letters.
 .RETURNS
     [pscustomobject] with FilePath, Arguments, ExitCode ($null when the process timed out or did
     not start), TimedOut, LaunchFailed, LaunchErrorCode, LaunchError (message), LaunchException,
@@ -469,7 +475,10 @@ function Invoke-ExternalProcess {
 
         [Parameter(Mandatory = $false)]
         [ValidateSet('Live', 'None')]
-        [string]$Echo = 'Live'
+        [string]$Echo = 'Live',
+
+        [Parameter(Mandatory = $false)]
+        [System.Text.Encoding]$Encoding
     )
 
     $arguments = $ArgumentString
@@ -519,8 +528,11 @@ function Invoke-ExternalProcess {
     $startInfo.RedirectStandardOutput = $true
     $startInfo.RedirectStandardError = $true
     # winget writes UTF-8 whatever the console code page is; msiexec writes nothing.
-    $startInfo.StandardOutputEncoding = New-Object System.Text.UTF8Encoding($false)
-    $startInfo.StandardErrorEncoding = New-Object System.Text.UTF8Encoding($false)
+    if (-not $Encoding) {
+        $Encoding = New-Object System.Text.UTF8Encoding($false)
+    }
+    $startInfo.StandardOutputEncoding = $Encoding
+    $startInfo.StandardErrorEncoding = $Encoding
 
     if ($Echo -eq 'Live') {
         Write-Host ('  > {0} {1}' -f $displayName, $arguments).TrimEnd() -ForegroundColor DarkGray

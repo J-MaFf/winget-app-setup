@@ -31,13 +31,19 @@
         containment check that nothing outside that list failed. An empty variable means strict.
       - 8 (apps OK, auto-updates not configured or unhealthy): the pass succeeded (exit 0) only
         when its own transcript says 'Auto-updates: NOT CONFIGURED - Microsoft.WindowsAppRuntime.1.8
-        is missing'. windows-latest lacks that framework; the installer now installs the pinned one
-        first (work-order item 31), so a pass there is expected to set Winget-AutoUpdate up and
-        exit 0, and 8 for the missing framework is still accepted for a runner where that install
-        is not possible. The message then quotes the transcript's 'Windows App Runtime:' line,
-        which says why. Any other reason for 8 (FAILED, UNHEALTHY, AT RISK), or no transcript of
-        the pass to check, fails the pass with 8. Assert-Install.ps1 then checks that WAU is
-        absent and the latest transcript says NOT CONFIGURED.
+        is missing' and the installer did not try to install the framework itself.
+        windows-latest lacks that framework; the installer now installs the pinned one first
+        (work-order item 31), so a pass there is expected to set Winget-AutoUpdate up and exit 0.
+        8 for the missing framework is still accepted where that install is not possible (the
+        run is not elevated, Windows or its architecture is not one the framework supports, or a
+        framework is already provisioned), and the message then quotes the transcript's
+        'Windows App Runtime:' line, which says why. A transcript that shows the install started
+        ('installing the pinned Windows App Runtime') and then 'Windows App Runtime: NOT
+        INSTALLED' fails the pass with 8: the download, the checks or the provisioning failed,
+        and that is what this run is there to catch. Any other reason for 8 (FAILED, UNHEALTHY,
+        AT RISK), or no transcript of the pass to check, fails the pass with 8 too.
+        Assert-Install.ps1 then checks that WAU is absent and the latest transcript says NOT
+        CONFIGURED.
       - anything else: the pass failed, with the installer's code.
 
     Runs under Windows PowerShell 5.1 and PowerShell 7: ASCII only, no 7-only syntax. Dot-sources
@@ -245,7 +251,8 @@ function Get-InstallPassTranscript {
     'first' or 'second'.
 .PARAMETER Transcript
     For exit code 8: the pass's transcript (Get-InstallPassTranscript), or $null when none was
-    found. 8 passes only when it says Winget-AutoUpdate was skipped for the missing framework.
+    found. 8 passes only when it says Winget-AutoUpdate was skipped for the missing framework and
+    the installer did not start an install of the framework that then failed.
 .RETURNS
     [pscustomobject] with StepExitCode, Outcome ('passed', 'tolerated' or 'failed') and Message.
 #>
@@ -275,11 +282,20 @@ function Get-InstallPassVerdict {
         # framework first (work-order item 31); where it cannot, it skips Winget-AutoUpdate and the
         # pass ends with 8. That reason, read from this pass's own transcript, is the only one
         # accepted: a WAU that failed to install, or whose task is broken, still fails the pass.
+        # So does an install of the framework that started and failed: accepting it would keep
+        # this run green while the framework install is broken on every PC.
         $what = "$passName install pass exited 8 (apps OK, auto-updates not configured or unhealthy)"
         if ($null -eq $Transcript) {
             return [pscustomobject]@{ StepExitCode = 8; Outcome = 'failed'; Message = "$what - FAILED: no transcript of this pass was found, so why cannot be checked" }
         }
         if ($Transcript.Parsed.AutoUpdatesFrameworkMissing) {
+            $runtimeLine = 'no Windows App Runtime: line'
+            if ($Transcript.Parsed.WindowsAppRuntimeLine) {
+                $runtimeLine = "'Windows App Runtime: $($Transcript.Parsed.WindowsAppRuntimeLine)'"
+            }
+            if ($Transcript.Parsed.WindowsAppRuntimeAttempted -and -not $Transcript.Parsed.WindowsAppRuntimeInstalled) {
+                return [pscustomobject]@{ StepExitCode = 8; Outcome = 'failed'; Message = "$what - FAILED: $($Transcript.Name) shows that the installer started its install of the pinned Microsoft.WindowsAppRuntime.1.8 and it failed ($runtimeLine), so Winget-AutoUpdate was skipped" }
+            }
             $runtimeNote = ''
             if ($Transcript.Parsed.WindowsAppRuntimeLine) {
                 $runtimeNote = " The installer's own install of the framework: 'Windows App Runtime: $($Transcript.Parsed.WindowsAppRuntimeLine)'"

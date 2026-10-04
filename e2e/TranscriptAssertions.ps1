@@ -126,6 +126,11 @@ function ConvertTo-TranscriptAppId {
                          (<arch>) for all users.' or 'NOT INSTALLED - <reason>.'. A run that found
                          the framework writes none.
       WindowsAppRuntimeInstalled  the run installed the framework ('Windows App Runtime: installed').
+      WindowsAppRuntimeAttempted  the run started that install ('Microsoft.WindowsAppRuntime.1.8 is
+                         missing; installing the pinned Windows App Runtime ...'): every
+                         precondition held (elevated, an architecture and Windows build the
+                         framework supports, no framework already provisioned), so a
+                         'NOT INSTALLED' after it is a failed download, check or provisioning.
       WingetNotUsable    the end-of-run check printed 'winget: NOT USABLE'.
 #>
 function ConvertFrom-InstallTranscript {
@@ -151,6 +156,7 @@ function ConvertFrom-InstallTranscript {
     $autoUpdatesLine = $null
     $windowsAppRuntimeLine = $null
     $windowsAppRuntimeInstalled = $false
+    $windowsAppRuntimeAttempted = $false
     $wingetNotUsable = $false
 
     # Summary table state: 'none' until 'Summary:', 'header' until the dashes under the column
@@ -229,6 +235,10 @@ function ConvertFrom-InstallTranscript {
             $autoUpdatesLine = $Matches.text
             continue
         }
+        if ($line -match '^Microsoft\.WindowsAppRuntime\.1\.8 is missing; installing the pinned Windows App Runtime\b') {
+            $windowsAppRuntimeAttempted = $true
+            continue
+        }
         if ($line -match '^Windows App Runtime:\s+(?<text>.+)$') {
             $windowsAppRuntimeLine = $Matches.text
             if ($windowsAppRuntimeLine -match '^installed\b') {
@@ -297,6 +307,7 @@ function ConvertFrom-InstallTranscript {
         AutoUpdatesFrameworkMissing = $autoUpdatesFrameworkMissing
         WindowsAppRuntimeLine = $windowsAppRuntimeLine
         WindowsAppRuntimeInstalled = $windowsAppRuntimeInstalled
+        WindowsAppRuntimeAttempted = $windowsAppRuntimeAttempted
         WingetNotUsable     = $wingetNotUsable
     }
 }

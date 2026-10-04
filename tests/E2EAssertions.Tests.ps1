@@ -108,6 +108,18 @@ Describe 'ConvertFrom-InstallTranscript' {
         $transcript.AutoUpdatesFrameworkMissing | Should -BeTrue
     }
 
+    # Review of item 31: e2e/Invoke-InstallPass.ps1 fails an exit 8 whose transcript shows the
+    # install started and failed, and accepts one where a precondition kept it from starting.
+    It 'Reads whether the installer started its install of the Windows App Runtime: <Fixture> -> <Attempted>' -ForEach @(
+        @{ Fixture = 'first-pass-runtime-installed'; Attempted = $true }
+        @{ Fixture = 'second-pass-runtime-present'; Attempted = $false }
+        @{ Fixture = 'first-pass'; Attempted = $false }
+    ) {
+        $transcript = ConvertFrom-InstallTranscript -Content (Get-Fixture -Name $Fixture)
+
+        $transcript.WindowsAppRuntimeAttempted | Should -Be $Attempted
+    }
+
     It 'Reads the timeout failures of both passes, which the old failure regex missed, and what the retry recovered' {
         $content = Get-Fixture -Name 'timeouts'
         # The regex Assert-Install.ps1 used before (P3-39) finds only the first-pass failure that
@@ -469,7 +481,8 @@ Describe 'Installer messages the transcript parser keys on' {
         @{ File = 'WingetAppSetup/Public/Install.ps1'; Text = 'Write-ErrorMessage "Auto-updates: UNHEALTHY - ' }
         @{ File = 'WingetAppSetup/Public/Install.ps1'; Text = 'Write-ErrorMessage "winget: NOT USABLE - ' }
         @{ File = 'WingetAppSetup/Private/WindowsAppRuntime.ps1'; Text = 'Write-ErrorMessage "Windows App Runtime: NOT INSTALLED - $reason."' }
-        @{ File = 'WingetAppSetup/Private/WindowsAppRuntime.ps1'; Text = "Write-Success ('Windows App Runtime: installed Microsoft.WindowsAppRuntime.1.8 {0} ({1}) for all users.'" }
+        @{ File = 'WingetAppSetup/Private/WindowsAppRuntime.ps1'; Text = "Write-Success ('Windows App Runtime: installed Microsoft.WindowsAppRuntime.1.8 {0} ({1}) for all users{2}.'" }
+        @{ File = 'WingetAppSetup/Private/WindowsAppRuntime.ps1'; Text = "Write-Info ('Microsoft.WindowsAppRuntime.1.8 is missing; installing the pinned Windows App Runtime {0} (framework {1}, {2}) for all users first...'" }
         @{ File = 'build/fragments/tail.ps1'; Text = 'Write-Info "Installer build: $script:InstallerBuildId"' }
         @{ File = 'build/fragments/tail.ps1'; Text = "Write-ErrorMessage 'UNEXPECTED ERROR - the run was aborted before it finished." }
         @{ File = 'build/fragments/tail.ps1'; Text = "`$abortMessage = 'The run was stopped before it finished (exit code 5).'" }

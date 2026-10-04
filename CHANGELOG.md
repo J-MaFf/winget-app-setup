@@ -29,18 +29,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   of the same or a newer version, or when the all-users check could not run, and it never uses
   `Repair-WinGetPackageManager -AllUsers` (#265). The whole 150 MB package is downloaded rather than
   a byte range of it: the framework's offset moves when NuGet re-signs the package, and a proxy can
-  ignore a range request. The transcript gets a `Windows App Runtime: installed ...` or
+  ignore a range request. A failed install is not remembered, so until one succeeds every run on
+  that PC downloads the package again. `Microsoft.WindowsAppSDK.Runtime` is the developer package,
+  published under the Windows App SDK license terms for developers, not one of the end-user runtime
+  installers Microsoft documents for redistribution. When the check after provisioning cannot run,
+  the install counts as done, with a warning, and WAU is set up, as on any run where that check
+  cannot run. The transcript gets a `Windows App Runtime: installed ...` or
   `Windows App Runtime: NOT INSTALLED - <reason>` line; when the install fails, WAU is skipped as
   before, exit code 8, and the summary's `Auto-updates:` line is followed by the reason. `-WhatIf`
   previews it. `New-WauStagingDirectory` takes a `-Prefix` for the folder name.
+  `Invoke-ExternalProcess` takes an `-Encoding` for the program's output (default UTF-8, which
+  winget writes); the time-limited Windows PowerShell child of `Invoke-AppxProvisioning` is read in
+  `[Console]::OutputEncoding`, the console code page Windows PowerShell writes redirected output in,
+  so a localized DISM error keeps its non-ASCII letters in the transcript.
   - **E2E.** `windows-latest` ships without the framework, so both passes there are now expected to
     install it (first pass) and set up Winget-AutoUpdate, and to exit 0. `e2e/Invoke-InstallPass.ps1`
-    still accepts exit 8 for the missing framework, and its message now quotes the transcript's
-    `Windows App Runtime:` line. `e2e/TranscriptAssertions.ps1` reads that line
-    (`WindowsAppRuntimeLine`, `WindowsAppRuntimeInstalled`), quotes it in the `NOT CONFIGURED`
-    detail, and `-ExpectAllSkippedOnSecondRun` adds the check that the second pass did not install
-    the framework again. New fixtures `first-pass-runtime-installed` and
-    `second-pass-runtime-present`.
+    accepts exit 8 for the missing framework only when the installer could not try to install it
+    (not elevated, an unsupported Windows build or architecture, or a framework already
+    provisioned), and its message then quotes the transcript's `Windows App Runtime:` line. An
+    install that started and failed (download, checks or provisioning) fails the pass, so a broken
+    framework install turns the run red instead of passing as a skipped WAU.
+    `e2e/TranscriptAssertions.ps1` reads that line (`WindowsAppRuntimeLine`,
+    `WindowsAppRuntimeInstalled`) and whether the install started (`WindowsAppRuntimeAttempted`),
+    quotes the line in the `NOT CONFIGURED` detail, and `-ExpectAllSkippedOnSecondRun` adds the
+    check that the second pass did not install the framework again. New fixtures
+    `first-pass-runtime-installed` and `second-pass-runtime-present`.
   - The bead's first idea, starting the Store's App Installer update and waiting for it, is not
     done: the pinned install covers Store-blocked PCs and Windows Server too, and the Store update
     can take hours.
