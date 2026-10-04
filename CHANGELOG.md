@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- The E2E install also runs from Windows PowerShell 5.1, in a second job,
+  `e2e-install-windows-powershell` (review finding P3-40). Every step there uses
+  `shell: powershell`, and PowerShell 7 is removed first, so the first pass goes through the
+  bootstrap that installs PowerShell 7 and relaunches the installer, as on a fresh PC, and the
+  second pass finds PowerShell 7 and relaunches.
+  `e2e/Assert-Install.ps1 -ExpectPowerShell7Bootstrap -ExpectPowerShell7Installed` checks that
+  every pass went through the bootstrap and that the first one installed PowerShell 7. On checkout
+  runs, the bootstrap's download of raw `main` for the relaunch is answered with the checkout by an
+  `Invoke-RestMethod` shim that lives only in the Windows PowerShell process, and the build-id
+  check covers the `-bootstrap` transcripts too. Both legs first uninstall the Chrome, 7-Zip and
+  Git that the runner image ships with (`e2e/Remove-PreinstalledApps.ps1`), so the first pass
+  really installs them; every call there has a time limit, and an app that cannot be removed only
+  gets a warning. The new `e2e/Invoke-InstallPass.ps1` starts every pass in both legs and holds the
+  exit-code policy the step scripts used to repeat: 0 and 3010 (OK, restart required) pass, and 1
+  passes only while `KNOWN_PLATFORM_INCOMPATIBLE` is non-empty. The weekly run now runs the
+  readme's one-liner verbatim (`Set-ExecutionPolicy` and the `refs/heads/main` URL), and a test
+  fails if the two drift apart. `report-failure` covers both legs, one section each, and shows the
+  latest 5.1 bootstrap transcript in a section of its own. A Winget-AutoUpdate leg is not added
+  yet: `windows-latest` lacks `Microsoft.WindowsAppRuntime.1.8`, so the installer skips WAU there.
 - Diagnosed the 0x80073CF3 "depends on a framework that could not be found" AppX rejection distinctly (issue #279): `Test-AppxMissingFrameworkDependency` (`WingetAppSetup/Private/WingetBootstrap.ps1`) mirrors the existing `Test-AppxDowngradeRejection` (0x80073D06) classifier — it requires the 0x80073CF3 HRESULT together with the missing-framework phrasing or the specific `Microsoft.WindowsAppRuntime.1.8` name, so it stays narrow to the signature two independent GitHub-hosted E2E runs actually reproduced rather than over-matching every 0x80073CF3 (a broad "dependency or conflict validation" code reused for unrelated conflicts). `Invoke-WingetPackageManagerRepair` now returns a parallel `MissingFrameworkDependency` flag in its result hashtable and short-circuits its `-Force` retry the same way it already does for `DowngradeRejected` — retrying cannot conjure a framework that genuinely is not on the machine. `Initialize-WingetSourcesForUser` (`WingetAppSetup/Public/WingetCore.ps1`) surfaces a dedicated remediation warning naming the missing framework and linking to issue #279. This is purely diagnostic/fail-fast — it does not attempt to install the missing framework itself, since there is no verified redistributable for it to deploy safely. Pinning `e2e-install`'s runner off `windows-latest` to `windows-2022` was tried as a workaround for #279 and reverted in the same PR: that pin's own self-validating run failed every catalog app immediately with "No applicable app licenses found" — a distinct, total failure worse than #279's slow partial one, filed separately as issue #282. `e2e-install` stays on `windows-latest`; both issues remain open pending a viable runner target. A third distinct `e2e-install` failure surfaced on this PR's own re-validation run: the first install pass completed cleanly and then an uncaught `Start-Process` error ("The file cannot be accessed by the system") crashed the whole script under 5 minutes later, most likely inside `Wait-WingetLaunchable`'s post-WAU-install probe even though its try/catch appears to cover that call — filed as issue #283 rather than patched blind, since `e2e-install` isn't a required merge check and the root cause needs a real Windows repro to confirm.
 - The PS7 bootstrap's terminal failure message now recognizes a GitHub-wide 429 throttle (issue #274): `Test-GitHubRateLimitError` (`WingetAppSetup/Private/PowerShell7Bootstrap.ps1`) matches "429"/"Too Many Requests" in the caught error text from the `raw.githubusercontent.com` metadata read and the `aka.ms/install-powershell.ps1` fallback — both of which independently depend on GitHub, so a machine already throttled loses them together. When either sets the flag, the final "PowerShell 7 could not be installed automatically" message explains the shared-throttle cause and suggests `winget source reset --force` (which does not depend on GitHub) instead of just repeating the generic manual-install instructions.
 - Documented a jsDelivr CDN mirror fallback in readme.md for the one-line bootstrap, for when `raw.githubusercontent.com` throttles a shared/corporate NAT egress IP with `429: Too Many Requests` (issue #272).
@@ -37,6 +56,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The Windows Terminal step no longer configures the elevating admin account (review finding
+  P3-21). Under cross-user elevation it wrote the admin's `settings.json` and
+  `HKCU:\Console\%%Startup` delegation values, behind a 6-line warning banner and a closing
+  warning. Both settings are per-user, so the step is now skipped, with one line, when the process
+  account is not the logged-on user and when the run is SYSTEM (as under an RMM agent; the new
+  private `Test-IsSystemAccount` in `WingetAppSetup/Private/Elevation.ps1` detects it). When no
+  console user is reported, the step runs as before. It never writes to another user's profile or
+  registry hive.
+- `e2e/Assert-Install.ps1` reads the transcripts through functions in the new
+  `e2e/TranscriptAssertions.ps1`, which `tests/E2EAssertions.Tests.ps1` tests against sample
+  transcripts in `tests/fixtures/e2e` (saved as `.txt`, because the repository ignores `*.log`)
+  (review finding P3-39). The containment check now reads each run's final outcome: the summary's
+  `Failed` row plus every failure line the retry pass did not recover, including the
+  `Winget list timed out` and `Verification timed out` lines it used to miss. A first-pass failure
+  that the retry pass recovered no longer fails it (the detail names it), and a transcript without
+  a summary (an aborted run or an early exit) now fails instead of passing with no failed apps. The
+  Windows PowerShell 5.1 `-bootstrap` transcripts are kept apart, so they are no longer taken for
+  the latest run. A test checks that the installer still writes every message the parser keys on.
 - The end-to-end install run (`.github/workflows/e2e-install.yml`) now also runs on pull requests
   that change the product (`WingetAppSetup/**`, `build/**`, `winget-app-install.ps1`), not only on
   changes to the workflow or `e2e/**`, so a module change gets a real install before it reaches the
@@ -379,6 +416,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     assertions step's time limit is sized for) and names a launch failure in a failed check's
     detail, and `e2e/TranscriptAssertions.ps1` reads the breaker's line (`WingetNotLaunchable`)
     instead of the removed deadlock line.
+- The Windows PowerShell 5.1 bootstrap checks what it downloads, keeps working once PowerShell 7.7
+  is the current release, and exits 7 when it fails (review findings P2-17, P2-18, P3-17):
+  - **MSI version.** The MSI fallback built its URL from `metadata.json`'s `ReleaseTag`, which
+    404s once that is 7.7: PowerShell 7.7 and later ship no MSI. `Get-PowerShell7MsiInfo` now
+    picks the newest release below 7.7 from `ReleaseTag` and `LTSReleaseTag` (a list, so it picks
+    by version, not position), which is the 7.6 LTS release once 7.7 is current. The installer
+    runs on any PowerShell 7.
+  - **Signature check.** Before `msiexec` runs, the downloaded MSI must carry a valid Authenticode
+    signature whose signer is `CN=Microsoft Corporation` (`Test-PowerShell7MsiSignature`). A web
+    page a proxy answered with now gets a clear message instead of `msiexec` exit code 1620.
+  - **No `aka.ms` tier.** The `aka.ms/install-powershell.ps1` tier behind the MSI path is gone. It
+    reads the same `metadata.json` and downloads the same MSI with no signature check, runs a
+    downloaded script with no check, and 404s once `ReleaseTag` is 7.7. It also had no time
+    limits, which let it finish a download on a slow link after the MSI path had given up. So the
+    MSI download's overall limit is now 60 minutes instead of 15
+    (`Install-PowerShell7FromMsi -DownloadTimeoutSeconds`, default 3600). The 60-second stall
+    timeout still fails a dead link quickly, and the 15-minute `msiexec` limit is unchanged. The
+    #274 throttle message now covers only the `metadata.json` read.
+  - **Relaunch download.** An `irm | iex` run has no file to relaunch under `pwsh`, so the
+    bootstrap downloads the installer again. It used to fetch raw `main` only and run whatever came
+    back: a run started from a branch URL relaunched `main`, and a run started from the jsDelivr
+    mirror went back to the throttled raw host. `Get-PowerShell7RelaunchInstaller` now tries
+    `raw.githubusercontent.com`, then the jsDelivr mirror, and uses a copy only when its stamped
+    build id matches the running build (the entry script passes `$script:InstallerBuildId`). When
+    no copy matches, the run says that PowerShell 7 is installed and to run the same one-liner from
+    an elevated `pwsh`, which needs no second download.
+  - **Exit 7.** Every bootstrap failure, an unexpected error in the bootstrap included, now exits 7
+    instead of 1. The early-exit notice explains code 7, and the install-failure issue form lists
+    it.
+- Setting the Windows Terminal default profile no longer rewrites `settings.json` (review finding
+  P2-23). It parsed the file and wrote it back with `ConvertTo-Json`, which deleted every comment
+  (including commented-out profiles and admin notes), reindented the file and moved keys, with no
+  backup and a success message. Now only the value of the top-level `defaultProfile` changes, or
+  the key is inserted before the first top-level key when it is missing
+  (`Set-JsoncTopLevelStringProperty`, `WingetAppSetup/Private/Jsonc.ps1`). The edited text must
+  parse with every other setting unchanged, or the file is left alone. The original is saved next
+  to it as `settings.json.winget-app-setup.bak`. The new content replaces the file from a temp
+  file in the same folder, so it is never left half-written. A `settings.json` that is a symbolic
+  or hard link (a dotfiles setup) is instead written in place through the link, so the link is
+  kept and the linked file gets the change. A UTF-8 byte-order mark and the file's line endings are
+  kept, and a file that is not valid UTF-8 is left alone.
 - winget and `msiexec` now run through one helper, `Invoke-ExternalProcess` with
   `Invoke-WingetProcess` on top (`WingetAppSetup/Private/ProcessInvocation.ps1`), so every winget
   and `msiexec` call has a time limit, its output reaches the log, and a failed launch is recognized
@@ -622,7 +700,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   plus a full MSI install with zero output. Measured on a real link that is 3.5 minutes of silence
   on a *healthy* run, and unbounded on a stalled one, with nothing to tell the two apart. The
   bootstrap now downloads and installs the MSI itself first (`Install-PowerShell7FromMsi`), falling
-  back to the upstream script only if that fails: the release is resolved from the same
+  back to the upstream script only if that fails (a later change removed that fallback; see the
+  P2-17 entry above): the release is resolved from the same
   `tools/metadata.json` the upstream script reads (not the rate-limited GitHub releases API, whose
   unauthenticated budget is per source IP and so is shared by everyone behind one office NAT), the
   architecture comes from `PROCESSOR_ARCHITEW6432`/`PROCESSOR_ARCHITECTURE` rather than a

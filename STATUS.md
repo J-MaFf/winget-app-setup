@@ -88,7 +88,15 @@ and Administrators, and the result is read back with `Get-Acl`; when it is not a
 not downloaded. The MSI is hashed from a handle that stays open, with read-only sharing, until
 `msiexec` has finished, so it cannot be swapped in between. `Install-Module` now passes
 `-Repository PSGallery`, so another repository registered on the machine cannot serve the modules
-the installer adds for all users.
+the installer adds for all users. The Windows PowerShell 5.1 bootstrap now checks what it
+downloads: its MSI fallback installs the newest release that still ships an MSI (7.6 LTS once 7.7,
+which ships none, is current) and refuses an MSI without a valid Microsoft Authenticode signature,
+the unchecked `aka.ms/install-powershell.ps1` fallback behind it is gone, an `irm | iex` relaunch
+downloads the installer from raw or jsDelivr and runs only a copy of the same build, and a failed
+bootstrap exits 7 instead of 1. The Windows Terminal step now changes only `defaultProfile` in
+`settings.json` (comments and formatting are kept, and a `.bak` copy is saved first), and it is
+skipped for SYSTEM and under cross-user elevation, where it used to configure the admin account
+instead of the user.
 
 The same branch changes CI. Fork pull requests that leave `windows-tests.yml` alone no longer run
 on the self-hosted win-test runner, and `claude.yml` calls the shared Claude workflow at a pinned
@@ -96,7 +104,12 @@ commit SHA instead of `@main`. The E2E workflow files its failure issue from a s
 so a run that lost PowerShell 7, timed out or was cancelled is still reported, and it uploads
 diagnostics snapshots next to the transcripts. It now also runs on pull requests that touch the
 product, and pull-request and dispatched runs install the checkout instead of raw `main`, so this
-branch's own E2E run tests its changes before they merge.
+branch's own E2E run tests its changes before they merge. A second E2E leg,
+`e2e-install-windows-powershell`, starts every pass from Windows PowerShell 5.1 with PowerShell 7
+removed first, so the bootstrap's install and relaunch get a real run. Both legs first uninstall
+the Chrome, 7-Zip and Git the runner image ships with, so those installs run too. The transcript
+checks moved into `e2e/TranscriptAssertions.ps1`, which is tested against sample transcripts and
+now also catches timed-out apps and runs that ended without a summary.
 
 In progress: **E2E: App Installer 1.29.290.0 vs 1.26.510.0 AppX conflict, missing
 WindowsAppRuntime.1.8** ([#279](https://github.com/J-MaFf/winget-app-setup/issues/279)) — two
@@ -150,8 +163,9 @@ used to hand the whole install to `aka.ms/install-powershell.ps1 -UseMSI -Quiet`
 progress on Windows PowerShell, downloads 110 MB with an untimed `Invoke-WebRequest`, and waits on
 `msiexec` forever — 3.5 minutes of measured silence on a healthy link and unbounded on a stalled
 one, with nothing to tell them apart. `Invoke-PowerShell7Bootstrap` now resolves, downloads, and
-installs the MSI itself with a stall timeout, an overall time limit, and periodic progress lines,
-keeping the upstream script only as a last resort.
+installs the MSI itself with a stall timeout, an overall time limit, and periodic progress lines.
+It kept the upstream script as a last resort; that script is no longer run (review findings
+P2-17, P3-17).
 
 Landed: **winget launch resilience while the app-execution alias is broken**
 ([#258](https://github.com/J-MaFf/winget-app-setup/issues/258)) — the 2026-07-27 scheduled E2E
@@ -277,10 +291,12 @@ every repository secret.
 | `build/fragments/` | `head.ps1` (PSScriptInfo, help, `param`) and `tail.ps1` (entry-point dispatch) |
 | `winget-app-install.ps1` | **Generated** single-file installer for local and `irm \| iex` use — do not edit by hand |
 | `winget-app-uninstall.ps1` | Uninstall helper; imports the module from the repo |
-| `tests/` | Pester suite, one `<Area>.Tests.ps1` per module file plus `EntryPoint.Tests.ps1`, `TestHarness.Tests.ps1`, `BuildGuards.Tests.ps1` (the build guards and the pre-commit hook) and `E2EDiagnostics.Tests.ps1` (for `e2e/Collect-Diagnostics.ps1`); `TestHelpers.ps1` loads the module once per file and stands in for Windows-only commands, so the suite also runs on Linux/macOS |
-| `e2e/Assert-Install.ps1` | Shared post-install assertions for end-to-end runs (tier 1 workflow below; tier 2 [#215](https://github.com/J-MaFf/winget-app-setup/issues/215) reuses it); `-InstallerPath` checks that every pass ran the checkout's build |
+| `tests/` | Pester suite, one `<Area>.Tests.ps1` per module file plus `EntryPoint.Tests.ps1`, `TestHarness.Tests.ps1`, `BuildGuards.Tests.ps1` (the build guards and the pre-commit hook) and the `E2E*.Tests.ps1` files (for the `e2e/` scripts, with sample transcripts in `tests/fixtures/e2e`); `TestHelpers.ps1` loads the module once per file and stands in for Windows-only commands, so the suite also runs on Linux/macOS |
+| `e2e/Assert-Install.ps1` | Shared post-install assertions for end-to-end runs (tier 1 workflow below; tier 2 [#215](https://github.com/J-MaFf/winget-app-setup/issues/215) reuses it); the transcript checks are in `e2e/TranscriptAssertions.ps1` and fixture-tested; `-InstallerPath` checks that every pass ran the checkout's build |
+| `e2e/Invoke-InstallPass.ps1` | Starts each E2E install pass (one-liner or `-File`, from PowerShell 7 or Windows PowerShell 5.1) and applies the exit-code policy: 0 and 3010 pass, 1 only while `KNOWN_PLATFORM_INCOMPATIBLE` is non-empty |
+| `e2e/Remove-PreinstalledApps.ps1` | Uninstalls the catalog apps the runner image ships with (Chrome, 7-Zip, Git; with `-IncludePowerShell7`, PowerShell 7 too) before the first E2E pass; every call time-limited, failures become warnings |
 | `e2e/Collect-Diagnostics.ps1` | Windows PowerShell 5.1 snapshots for the E2E run: pwsh versions, App Installer / WindowsAppRuntime AppX state, WAU tasks; at the end MsiInstaller and RestartManager events, AppX deployment errors and warnings, and WAU logs (`e2e-diagnostics` artifact); always exits 0 |
-| `.github/workflows/e2e-install.yml` | E2E tier 1: real install run on GitHub-hosted `windows-latest` (issues #279/#282/#283; weekly against raw `main`, plus dispatches and PRs that touch the product or e2e files against the checkout; uploads transcripts and diagnostics; a failed, timed-out or cancelled weekly or `main`-dispatched run files an issue from the ubuntu `report-failure` job) |
+| `.github/workflows/e2e-install.yml` | E2E tier 1: real install runs on GitHub-hosted `windows-latest` in two legs, `e2e-install` from PowerShell 7 and `e2e-install-windows-powershell` from Windows PowerShell 5.1 through the PowerShell 7 bootstrap, after removing the preinstalled Chrome, 7-Zip and Git (issues #279/#282/#283; weekly against raw `main`, plus dispatches and PRs that touch the product or e2e files against the checkout; uploads transcripts and diagnostics; a failed, timed-out or cancelled weekly or `main`-dispatched run files an issue from the ubuntu `report-failure` job) |
 | `.github/workflows/windows-tests.yml` | Pester suite and build `-Check` (job `pester`, the required check on `main`): self-hosted win-test for pushes, dispatch and same-repo PRs; GitHub-hosted `windows-latest` for fork PRs and `hosted` dispatches |
 | `Test-WindowsTerminalConfiguration.ps1` | Smoke-test validation for the Windows Terminal default-shell configuration. |
 | `readme.md` | Quick-start run instructions (clone-and-run and one-line-run). |
@@ -351,7 +367,7 @@ every repository secret.
 - Find a viable runner target for `e2e-install` that avoids #279 (`windows-latest`/Server 2025 AppX deadlock), #282 (`windows-2022` licensing failure), and #283 (uncaught `Start-Process` crash right after WAU install on `windows-latest`) — a `windows-2025`-labeled image (if GitHub offers one distinct from `windows-latest`) or a fixed image-version pin are worth trying next; re-check periodically whether GitHub has fixed the underlying `windows-latest` image.
 - Reproduce #283 on a real Windows VM with `RUN_WAU=YES` to confirm what stopped the console (`Wait-WingetLaunchable`, which the old transcript pointed at, has since been removed, and the entry script now reports an aborted run with exit code 5).
 - Watch the first scheduled e2e install runs (`.github/workflows/e2e-install.yml`, weekly Mondays 06:00 UTC, issue [#214](https://github.com/J-MaFf/winget-app-setup/issues/214)) — a failed, timed-out or cancelled run creates or comments on the `E2E install run failed` issue with the failing steps, the assertion table, transcript tails and diagnostics snapshots.
-- Make `e2e-install` a required status check for `main` (next to `pester`) once it is green again. Every PR now gets an `e2e-install` status, and a skip counts as passed, so requiring it does not block docs-only PRs. Keep the job id `e2e-install` and give it no `name:`, or the required check stops matching.
+- Make `e2e-install` a required status check for `main` (next to `pester`) once it is green again. Every PR now gets an `e2e-install` status, and a skip counts as passed, so requiring it does not block docs-only PRs. Keep the job id `e2e-install` and give it no `name:`, or the required check stops matching. The Windows PowerShell 5.1 leg, `e2e-install-windows-powershell`, is a separate check with the same `if:`; decide whether to require it too (it doubles the hosted-runner minutes per run, not the wall-clock time, since the legs run in parallel).
 - Dispatch Windows Tests once with `hosted` ticked (`gh workflow run windows-tests.yml -f hosted=true`) to confirm the suite passes on GitHub-hosted `windows-latest`, the runner fork pull requests now use.
 - Before the first fork PR, turn on "Require approval for all external contributors" (Settings > Actions > General) and add a job-started hook on win-test (`ACTIONS_RUNNER_HOOK_JOB_STARTED`) that refuses fork pull request jobs, since a fork PR can rewrite `runs-on` in its copy of `windows-tests.yml`.
 - In [J-MaFf/.github](https://github.com/J-MaFf/.github): pin `anthropics/claude-code-action` and `actions/checkout` in the shared `claude.yml` to commit SHAs, fetch git-policies at a pinned ref, and declare `CLAUDE_CODE_OAUTH_TOKEN` under `on.workflow_call.secrets`. Then move this repository's `claude.yml` pin to that SHA and replace `secrets: inherit` with that one secret.

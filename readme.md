@@ -18,14 +18,20 @@ A one-line guide for running the installer.
 > 2. **The official MSI**, when it does not — the usual reason being that you elevated as a
 >    separate admin account, since winget is a per-user MSIX and a never-logged-in account has
 >    no copy of it. This path downloads ~110 MB and then runs `msiexec`, so expect a couple of
->    minutes; it prints `X of 110.2 MB (N%)` progress lines throughout, and a stalled download
->    fails with a message rather than waiting forever
->    ([#263](https://github.com/J-MaFf/winget-app-setup/issues/263)). When another installation
->    is holding Windows Installer (`msiexec` exit code 1618, common on a freshly enrolled machine),
->    it waits 30 seconds and tries again, up to 6 times. `msiexec` writes a verbose log next to the
->    run's other logs (see [Logs](#logs)).
+>    minutes; it prints `X of 110.2 MB (N%)` progress lines throughout, and a download that gets
+>    no data for 60 seconds fails with a message rather than waiting forever (a slow one gets up
+>    to 60 minutes; [#263](https://github.com/J-MaFf/winget-app-setup/issues/263)). When another
+>    installation is holding Windows Installer (`msiexec` exit code 1618, common on a freshly
+>    enrolled machine), it waits 30 seconds and tries again, up to 6 times. `msiexec` writes a
+>    verbose log next to the run's other logs (see [Logs](#logs)). It installs the current
+>    PowerShell release while that still ships an MSI. PowerShell 7.7 and later ship none, so
+>    from 7.7 on this path installs the newest LTS release before it (7.6); the installer runs on
+>    any PowerShell 7. Before `msiexec` runs, the download must carry a valid Authenticode
+>    signature from Microsoft Corporation. Anything else, such as a web page a proxy answered
+>    with, is not installed, and the run says why.
 >
-> The bootstrap phase writes its own transcript, `install-<timestamp>-bootstrap.log`, before
+> If neither path works, the run stops with exit code 7 (see [Exit codes](#exit-codes)). The
+> bootstrap phase writes its own transcript, `install-<timestamp>-bootstrap.log`, before
 > `pwsh` takes over and writes the run's main log.
 
 From the repository root, execute (after cloning):
@@ -50,8 +56,13 @@ Set-ExecutionPolicy Unrestricted -Scope Process -Force; irm "https://raw.githubu
 > ```
 
 Note for 5.1 starts via `irm | iex`: there is no script file on disk to relaunch, so the
-bootstrap re-downloads the installer from the URL above to a temp file and runs that under
-`pwsh`. Starting from a file (`-File .\winget-app-install.ps1`) relaunches the same file
+bootstrap downloads the installer again to a temp file and runs that under `pwsh`, from
+`raw.githubusercontent.com` first and then from the jsDelivr mirror above. It uses a copy only
+when it is the same build as the one already running (the `Installer build:` id, see
+[Logs](#logs)), so a run started from a branch URL, or just before `main` changed, never
+relaunches different code. If no copy matches, the run stops with exit code 7. PowerShell 7 is
+installed by then, so open `pwsh` as administrator and run the same one-liner there: it needs no
+second download. Starting from a file (`-File .\winget-app-install.ps1`) relaunches the same file
 instead.
 
 The script will trust the required Winget sources, elevate if necessary, and install or update the curated app list. Repeat step 1 anytime you open a new PowerShell window before running it.
@@ -331,63 +342,114 @@ WAU's own self-update is disabled so the version stays pinned; bump it via `Get-
 `WingetAppSetup/Public/WingetAutoUpdate.ps1`. `winget-app-uninstall.ps1` removes WAU (and any legacy
 scheduled-update task from older versions).
 
+## Windows Terminal defaults
+
+After the first install pass, the installer makes PowerShell 7 the default Windows Terminal profile
+and Windows Terminal the default terminal application, for the logged-on user. It edits each
+Windows Terminal `settings.json` it finds under `%LOCALAPPDATA%` (stable, preview, other Terminal
+packages such as Canary, and unpackaged Terminal). Only the top-level `defaultProfile` changes, or
+is added when it is missing: comments, commented-out profiles, formatting and key order stay as
+they were, and the previous file is saved next to it as `settings.json.winget-app-setup.bak`. If
+the edit would change anything else, or the file is not valid UTF-8, the file is left as it is and
+the run prints a warning. A `settings.json` that is a symbolic or hard link is edited through the
+link. The default terminal application (`HKCU:\Console\%%Startup`) is only set when Windows
+Terminal is installed ([#271](https://github.com/J-MaFf/winget-app-setup/issues/271)).
+
+Both settings are per-user, so the step is skipped, with one line in the log, when the run is
+SYSTEM (for example under an RMM agent) or is elevated as a different account than the logged-on
+user. It never writes to another user's profile.
+
 ## End-to-end monitoring (e2e tier 1)
 
 The unit suite mocks every external call, so a real install is exercised by an end-to-end run
-(`.github/workflows/e2e-install.yml`, issue #214) on a GitHub-hosted `windows-latest` runner — a
-throwaway VM by construction:
+(`.github/workflows/e2e-install.yml`, issue #214) on GitHub-hosted `windows-latest` runners —
+throwaway VMs by construction:
 
 - **When it runs:** weekly (Mondays 06:00 UTC), on manual dispatch, and on pull requests. Every
-  pull request starts the workflow. A `changes` job lets `e2e-install` run only when the PR
+  pull request starts the workflow. A `changes` job lets the two install jobs run only when the PR
   touches the product (`WingetAppSetup/**`, `build/**`, `winget-app-install.ps1`) or the e2e
-  machinery (`.github/workflows/e2e-install.yml`, `e2e/**`), and installs anyway if that job does
-  not succeed. The filter is a job rather than a `paths:` filter so that `e2e-install` can be a
-  required check: a job skipped by its `if:` reports success, while a workflow that `paths:`
+  machinery (`.github/workflows/e2e-install.yml`, `e2e/**`), and they install anyway if that job
+  does not succeed. The filter is a job rather than a `paths:` filter so that `e2e-install` can be
+  a required check: a job skipped by its `if:` reports success, while a workflow that `paths:`
   skips reports no status and would block every other PR. `main` is production (the one-liner
   downloads it directly), so this is the only un-mocked run a product change gets before it
   reaches users.
-- **What it does:** installs the curated catalog twice and asserts exit 0 both times (the second
-  pass proves idempotence). The weekly run uses the true production path
-  (`irm <raw main URL> | iex`) for both passes. Pull-request and dispatched runs install the
-  checkout (the PR's merge commit, or the dispatched branch). The first pass pipes it to `iex`
-  like the one-liner, and the second runs it with `pwsh -File` like a clone or RMM run, so both
-  entry points get an un-mocked run before a change ships. The run then calls the shared
-  assertion script `e2e/Assert-Install.ps1 -ExpectAllSkippedOnSecondRun`. On checkout runs it
-  adds `-InstallerPath`, which requires every pass's transcript to log that file's build id. The
-  script checks that every **applicable** `Get-DefaultAppCatalog` app resolves via `winget list`
-  (exit-code classified) — the script evaluates each app's catalog condition on the runner, and
-  not-applicable apps must instead show their `not applicable` skip line in the latest
-  transcript — the WAU scheduled task exists and its version matches `Get-WauPin` (on a runner
-  without `Microsoft.WindowsAppRuntime.1.8`, such as `windows-latest`, WAU must instead be absent
-  and the transcript must say `Auto-updates: NOT CONFIGURED`), and a transcript with the
-  `Installer build` stamp exists — with every applicable app Skipped on the second pass. The
-  script's `-SkipApps` parameter is an escape hatch for runner-platform
-  incompatibilities only; each use must reference a GitHub issue at the call site. Dell Command
-  Update is **no longer skip-listed** there: the catalog's manufacturer condition
-  ([#217](https://github.com/J-MaFf/winget-app-setup/issues/217)) gates it in the product
-  itself, so the non-Dell runners exercise the gating for real on every run.
+- **Two legs:** each on its own VM, each installing the curated catalog twice. `e2e-install`
+  starts every pass from PowerShell 7. `e2e-install-windows-powershell` starts every pass from
+  Windows PowerShell 5.1, the way a fresh PC runs the one-liner. It removes PowerShell 7 first, so
+  its first pass goes through the bootstrap that installs PowerShell 7 and relaunches the
+  installer, and its second pass finds PowerShell 7 and relaunches. Before the first pass, both
+  legs uninstall the catalog apps the runner image ships with (Google Chrome, 7-Zip and Git;
+  `e2e/Remove-PreinstalledApps.ps1`), so the first pass really installs them. Every call there has
+  a time limit (`winget list` 45 s, uninstall 150 s), each app's result prints as soon as it is
+  done, and an app that cannot be removed gets a warning annotation and is skipped by the first
+  pass as already installed.
+- **What it does:** the weekly run uses the one-liner above, against raw `main`, in both passes.
+  Pull-request and dispatched runs install the checkout (the PR's merge commit, or the dispatched
+  branch). The first pass pipes it to `iex` like the one-liner, and the second runs it with
+  `-File` like a clone or RMM run, so both entry points get an un-mocked run before a change
+  ships. In the 5.1 leg, the first pass's bootstrap downloads the installer from raw `main` again
+  for its PowerShell 7 relaunch; on checkout runs that one download is answered with the checkout,
+  so the PowerShell 7 half of the pass tests the change too. `e2e/Invoke-InstallPass.ps1` starts
+  every pass and decides whether it passed: it must exit 0, or 3010 (OK, restart required). Exit 1
+  is tolerated only while `KNOWN_PLATFORM_INCOMPATIBLE` is non-empty, and the assertions then
+  check that nothing outside that list failed. Any other code fails the pass with the installer's
+  code. The second pass proves idempotence.
+- **What it checks:** the shared assertion script
+  `e2e/Assert-Install.ps1 -ExpectAllSkippedOnSecondRun` checks that every **applicable**
+  `Get-DefaultAppCatalog` app resolves via `winget list` (exit-code classified) — the script
+  evaluates each app's catalog condition on the runner, and not-applicable apps must instead show
+  their `not applicable` skip line in the latest transcript — the WAU scheduled task exists and its
+  version matches `Get-WauPin` (on a runner without `Microsoft.WindowsAppRuntime.1.8`, such as
+  `windows-latest`, WAU must instead be absent and the transcript must say
+  `Auto-updates: NOT CONFIGURED`), a transcript with the `Installer build` stamp exists, no app
+  outside the skip list is still failed at the end of either pass (read from the summary's `Failed`
+  row and every failure line the retry pass did not recover; a transcript with no summary fails),
+  and every applicable app is Skipped on the second pass. In pull-request and dispatched runs,
+  every transcript, the Windows PowerShell 5.1 `-bootstrap` ones included, must log the build id of
+  the checkout's `winget-app-install.ps1` (`-InstallerPath`), so a run that quietly tested another
+  copy fails. The weekly run fetches raw `main`, which can trail the checkout by a few minutes of
+  CDN caching, so it is not checked. The 5.1 leg adds
+  `-ExpectPowerShell7Bootstrap -ExpectPowerShell7Installed`: every pass went through the bootstrap
+  and relaunched under PowerShell 7, and the first pass's bootstrap installed PowerShell 7 rather
+  than finding it. The transcript checks live in `e2e/TranscriptAssertions.ps1` and are tested
+  against sample transcripts in `tests/fixtures/e2e`. The script's `-SkipApps` parameter is an
+  escape hatch for runner-platform incompatibilities only; each use must reference a GitHub issue
+  at the call site. Dell Command Update is **no longer skip-listed** there: the catalog's
+  manufacturer condition ([#217](https://github.com/J-MaFf/winget-app-setup/issues/217)) gates it
+  in the product itself, so the non-Dell runners exercise the gating for real on every run.
+- **Not covered yet:** Winget-AutoUpdate's own update run (`windows-latest` lacks
+  `Microsoft.WindowsAppRuntime.1.8`, so the installer skips WAU there; the framework could be
+  provisioned on the runner first, but that is untried on this image), the catalog's own
+  PowerShell install (`Install-PowerShellLatest`: PowerShell 7 is preinstalled in one leg and
+  installed by the bootstrap in the other), and cross-user elevation (tier 2, below).
 - **Where the evidence lands:** transcripts are written on the runner under
   `%ProgramData%\winget-app-setup\logs` (the same place as production runs) and always uploaded
-  as the `e2e-install-transcripts` artifact. `e2e/Collect-Diagnostics.ps1` runs in Windows
-  PowerShell 5.1 before the first pass, after it and at the end of the job. It records the pwsh
-  versions, the App Installer and `Microsoft.WindowsAppRuntime*` AppX packages registered for any
-  user or provisioned, and the `\WAU\` tasks with their last run. The end-of-job snapshot adds
+  as the `e2e-install-transcripts` artifact (`e2e-install-transcripts-windows-powershell` for the
+  5.1 leg, which also holds its `-bootstrap` transcripts). `e2e/Collect-Diagnostics.ps1` runs in
+  Windows PowerShell 5.1 before the first pass, after it and at the end of the job. It records the
+  pwsh versions, the App Installer and `Microsoft.WindowsAppRuntime*` AppX packages registered for
+  any user or provisioned, and the `\WAU\` tasks with their last run. The end-of-job snapshot adds
   MsiInstaller and RestartManager events, AppX deployment errors and warnings, and
   Winget-AutoUpdate's logs. A missing source is noted and the script still exits 0, so it never
   fails the job. The snapshots, plus the assertion output saved by the assertions step, are
-  always uploaded as the `e2e-diagnostics` artifact.
+  always uploaded as the `e2e-diagnostics` artifact (`e2e-diagnostics-windows-powershell` for the
+  5.1 leg).
 - **On failure:** when a scheduled run or a run dispatched on `main` fails, times out or is
-  cancelled, a separate `report-failure` job on `ubuntu-latest` downloads both artifacts. It
-  creates a GitHub issue titled `E2E install run failed`, or comments on an existing open one.
-  The issue lists the run URL, which installer ran, the steps that did not succeed and how long
-  each ran, the assertion PASS/FAIL table, the last 50 lines of the earliest and latest
-  transcripts, and the diagnostics snapshots. The same text goes to the run's summary page. The
-  job runs outside the Windows job, so it still reports a run that lost PowerShell 7 or hit its
-  time limit. Pull-request runs and runs dispatched on another branch never file the issue: they
-  test unmerged code, and their result shows on the PR or the run. The assertions also run after
-  a failed install pass (the idempotence checks only when the second pass ran). Each install pass
-  has a 35-minute limit and the assertions 40 minutes, under the job's 130, so a hung step fails
-  at its own limit while the diagnostics and uploads still run.
+  cancelled in either leg, a separate `report-failure` job on `ubuntu-latest` downloads the
+  artifacts. It creates a GitHub issue titled `E2E install run failed`, or comments on an existing
+  open one. The issue lists the run URL and which installer ran, then has one section per leg; a
+  leg that passed says so. For a leg that did not succeed it shows the steps that did not succeed
+  and how long each ran, the assertion PASS/FAIL table, the last 50 lines of the earliest and
+  latest install transcripts, the last 50 lines of the latest Windows PowerShell 5.1 bootstrap
+  transcript (5.1 leg), and the diagnostics snapshots. The same text goes to the run's summary
+  page. The job runs outside the Windows jobs, so it still reports a run that lost PowerShell 7 or
+  hit its time limit. Pull-request runs and runs dispatched on another branch never file the
+  issue: they test unmerged code, and their result shows on the PR or the run. The assertions also
+  run after a failed install pass (the idempotence checks only when the second pass ran). Removing
+  the preinstalled apps has a 15-minute limit (20 in the 5.1 leg, which also removes PowerShell 7),
+  each install pass 35 minutes and the assertions 40, under the job's 145 (150 in the 5.1 leg), so
+  a hung step fails at its own limit while the diagnostics and uploads still run.
 - **Trigger manually:** `gh workflow run e2e-install.yml` tests `main`.
   `gh workflow run e2e-install.yml --ref <branch>` installs that branch's checkout, so a change
   can be tested before it merges. The branch must already contain this version of the workflow,
@@ -417,10 +479,10 @@ pwsh -File .\build\Build-WingetInstallScript.ps1 -Check
 ```
 
 Run the test suite (one `<Area>.Tests.ps1` per module file under `tests/`, plus
-`EntryPoint.Tests.ps1`, `TestHarness.Tests.ps1`, `BuildGuards.Tests.ps1` and
-`E2EDiagnostics.Tests.ps1` for the entry point, the suite's own loading rules, the build guards
-and pre-commit hook, and `e2e/Collect-Diagnostics.ps1`; each loads the module directly via
-`tests/TestHelpers.ps1`):
+`EntryPoint.Tests.ps1`, `TestHarness.Tests.ps1`, `BuildGuards.Tests.ps1` and the `E2E*.Tests.ps1`
+files for the entry point, the suite's own loading rules, the build guards and pre-commit hook,
+and the `e2e/` scripts, with sample transcripts in `tests/fixtures/e2e`; each loads the module
+directly via `tests/TestHelpers.ps1`):
 
 ```powershell
 Invoke-Pester .\tests
