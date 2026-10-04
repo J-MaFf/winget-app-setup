@@ -518,12 +518,14 @@ function Format-ScheduledTaskTrigger {
     transcript as 'PS>TerminatingError(Get-ScheduledTask)' even when it is caught, and #283's was
     read as part of a crash. The error is still read, from -ErrorVariable: 'not found'
     (CmdletizationQuery_NotFound) means there is no task, and any other error means the task could
-    not be checked, which is not healthy either.
+    not be checked (CheckFailed), which is not healthy either: whether WAU will run is unknown.
 .RETURNS
-    [pscustomobject] with Healthy ([bool]), Exists ([bool]), State, Triggers ([string[]], from
-    Format-ScheduledTaskTrigger), LastRunTime ([datetime], $null when the task has never run or
-    the time could not be read), LastTaskResult ([int64] or $null), NextRunTime and Problem (why it
-    is not healthy, worded to follow 'Winget-AutoUpdate is installed, but', or $null).
+    [pscustomobject] with Healthy ([bool]), Exists ([bool]), CheckFailed ([bool], $true when the
+    task scheduler could not be queried, so the task's state is unknown rather than wrong), State,
+    Triggers ([string[]], from Format-ScheduledTaskTrigger), LastRunTime ([datetime], $null when
+    the task has never run or the time could not be read), LastTaskResult ([int64] or $null),
+    NextRunTime and Problem (why it is not healthy, worded to follow 'Winget-AutoUpdate is
+    installed, but', or $null).
 #>
 function Get-WauTaskHealth {
     $taskPath = '\WAU\'
@@ -531,6 +533,7 @@ function Get-WauTaskHealth {
     $health = [pscustomobject]@{
         Healthy        = $false
         Exists         = $false
+        CheckFailed    = $false
         State          = $null
         Triggers       = @()
         LastRunTime    = $null
@@ -551,6 +554,7 @@ function Get-WauTaskHealth {
     if (-not $task) {
         $failure = @($taskErrors | Where-Object { "$($_.FullyQualifiedErrorId)" -notlike 'CmdletizationQuery_NotFound*' }) | Select-Object -First 1
         if ($failure) {
+            $health.CheckFailed = $true
             $health.Problem = "its scheduled task $taskPath$taskName could not be checked ($($failure.Exception.Message))"
         }
         else {

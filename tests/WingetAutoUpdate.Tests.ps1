@@ -16,6 +16,7 @@ BeforeAll {
         [pscustomobject]@{
             Healthy        = -not $Problem
             Exists         = $Problem -notmatch 'does not exist|could not be checked'
+            CheckFailed    = $Problem -match 'could not be checked'
             State          = 'Ready'
             Triggers       = @('Weekly on Tuesday from 2026-10-06T02:00:00')
             LastRunTime    = $null
@@ -862,6 +863,7 @@ Describe 'Winget-AutoUpdate integration (issue #168)' {
 
             $result.Status | Should -Be 'Unhealthy'
             $result.Problem | Should -Be 'its scheduled task \WAU\Winget-AutoUpdate does not exist'
+            $result.CheckFailed | Should -BeFalse
             $result.Version | Should -Be ([version](Get-WauPin).Version)
             $script:errors | Should -Contain 'Winget-AutoUpdate is installed, but its scheduled task \WAU\Winget-AutoUpdate does not exist, so apps will not update automatically. To set it up again, uninstall Winget-AutoUpdate (Settings > Apps) and re-run this installer.'
             # Its state and WAU's own log go to the transcript either way.
@@ -879,6 +881,25 @@ Describe 'Winget-AutoUpdate integration (issue #168)' {
 
             $result.Status | Should -Be 'Unhealthy'
             $result.FrameworkMissing | Should -BeTrue
+        }
+
+        # Review of item 23: a task scheduler that could not be queried says nothing about the task,
+        # so the run must not claim apps will not update, nor send the user to reinstall WAU.
+        It 'reports Unhealthy with CheckFailed for an installed WAU whose task could not be checked, and sends the user to Task Scheduler instead of a reinstall' {
+            Mock Test-WauInstalled { $true }
+            Mock Get-InstalledWauInfo { [pscustomobject]@{ Version = [version](Get-WauPin).Version; ProductCode = (Get-WauPin).ProductCode } }
+            Mock Get-WauTaskHealth { New-TestWauTaskHealth -Problem 'its scheduled task \WAU\Winget-AutoUpdate could not be checked (Access is denied.)' }
+            Mock Invoke-ExternalProcess { throw 'should not run msiexec for an installed WAU' }
+            $script:errors = @()
+            Mock Write-ErrorMessage { $script:errors += $Message }
+
+            $result = Install-WingetAutoUpdate
+
+            $result.Status | Should -Be 'Unhealthy'
+            $result.CheckFailed | Should -BeTrue
+            $result.Problem | Should -Be 'its scheduled task \WAU\Winget-AutoUpdate could not be checked (Access is denied.)'
+            $script:errors | Should -Contain 'Winget-AutoUpdate is installed, but its scheduled task \WAU\Winget-AutoUpdate could not be checked (Access is denied.), so it is not known whether apps will update automatically. Check the task \WAU\Winget-AutoUpdate in Task Scheduler; if it is missing, disabled or has no enabled trigger, uninstall Winget-AutoUpdate (Settings > Apps) and re-run this installer.'
+            ($script:errors -join "`n") | Should -Not -Match 'apps will not update automatically|To set it up again'
         }
 
         It 'checks the task and logs its state before reporting AlreadyPresent' {
@@ -913,6 +934,27 @@ Describe 'Winget-AutoUpdate integration (issue #168)' {
             ($script:errors -join "`n") | Should -Match ('^Winget-AutoUpdate {0} was installed, but its scheduled task \\WAU\\Winget-AutoUpdate does not exist, so apps will not update automatically\..* msiexec log: {1}$' -f [regex]::Escape((Get-WauPin).Version), [regex]::Escape((Join-Path $TestDrive 'wau-msi-install-1.log')))
             Should -Invoke Write-Success -Times 0 -Exactly -ParameterFilter { $Message -match 'installed\. Apps will update weekly' }
             Should -Invoke Write-WauTaskHealth -Times 1 -Exactly
+        }
+
+        It 'reports Unhealthy with CheckFailed when msiexec succeeded but the task could not be checked, and sends the user to Task Scheduler instead of a reinstall' {
+            Mock Test-WauInstalled { $false }
+            Mock New-WauStagingDirectory { Join-Path $TestDrive 'wau-msi-test' }
+            Mock Invoke-WebRequest { }
+            Mock Get-FileHash { @{ Hash = (Get-WauPin).Sha256 } }
+            Mock Invoke-ExternalProcess { New-TestProcessResult -ExitCode 0 }
+            Mock Remove-Item { }
+            Mock Get-WauTaskHealth { New-TestWauTaskHealth -Problem 'its scheduled task \WAU\Winget-AutoUpdate could not be checked (Access is denied.)' }
+            $script:errors = @()
+            Mock Write-ErrorMessage { $script:errors += $Message }
+
+            $result = Install-WingetAutoUpdate
+
+            $result.Status | Should -Be 'Unhealthy'
+            $result.CheckFailed | Should -BeTrue
+            $result.RestartRequired | Should -BeFalse
+            ($script:errors -join "`n") | Should -Match ('^Winget-AutoUpdate {0} was installed, but its scheduled task \\WAU\\Winget-AutoUpdate could not be checked \(Access is denied\.\), so it is not known whether apps will update automatically\. Check the task \\WAU\\Winget-AutoUpdate in Task Scheduler; if it is missing, disabled or has no enabled trigger, uninstall Winget-AutoUpdate \(Settings > Apps\) and re-run this installer\. msiexec log: {1}$' -f [regex]::Escape((Get-WauPin).Version), [regex]::Escape((Join-Path $TestDrive 'wau-msi-install-1.log')))
+            ($script:errors -join "`n") | Should -Not -Match 'apps will not update automatically'
+            Should -Invoke Write-Success -Times 0 -Exactly -ParameterFilter { $Message -match 'installed\. Apps will update weekly' }
         }
 
         It 'checks the task after a successful install and only then says apps will update weekly' {
@@ -1401,6 +1443,8 @@ Describe 'Scheduled-task probes stay out of the transcript (review finding P3-38
 
         $script:health.Exists | Should -BeFalse
         $script:health.Healthy | Should -BeFalse
+        # Known to be missing, not unknown: the uninstall-and-re-run advice applies.
+        $script:health.CheckFailed | Should -BeFalse
         $script:health.Problem | Should -Be 'its scheduled task \WAU\Winget-AutoUpdate does not exist'
         $transcript | Should -Not -Match 'TerminatingError'
     }
@@ -1418,6 +1462,7 @@ Describe 'Get-WauTaskHealth (review finding P3-36)' {
 
         $health.Healthy | Should -BeTrue
         $health.Exists | Should -BeTrue
+        $health.CheckFailed | Should -BeFalse
         $health.Problem | Should -BeNullOrEmpty
         $health.State | Should -Be 'Ready'
         $health.Triggers | Should -Be @('Weekly on Tuesday from 2026-10-06T02:00:00')
@@ -1450,6 +1495,7 @@ Describe 'Get-WauTaskHealth (review finding P3-36)' {
 
         $health.Healthy | Should -BeFalse
         $health.Exists | Should -BeTrue
+        $health.CheckFailed | Should -BeFalse
         $health.Problem | Should -Be 'its scheduled task \WAU\Winget-AutoUpdate is disabled'
     }
 
@@ -1466,6 +1512,7 @@ Describe 'Get-WauTaskHealth (review finding P3-36)' {
         $health = Get-WauTaskHealth
 
         $health.Healthy | Should -BeFalse
+        $health.CheckFailed | Should -BeFalse
         $health.Problem | Should -Be 'its scheduled task \WAU\Winget-AutoUpdate has no enabled trigger, so it never runs on its own'
     }
 
@@ -1485,6 +1532,8 @@ Describe 'Get-WauTaskHealth (review finding P3-36)' {
 
         $health.Healthy | Should -BeFalse
         $health.Exists | Should -BeFalse
+        # Unknown, not known to be broken: the callers word their advice differently.
+        $health.CheckFailed | Should -BeTrue
         $health.Problem | Should -Be 'its scheduled task \WAU\Winget-AutoUpdate could not be checked (Access is denied.)'
     }
 

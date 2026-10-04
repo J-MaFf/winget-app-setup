@@ -268,6 +268,17 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
             @($script:errorMessages | Where-Object { $_.StartsWith($Line) }).Count | Should -Be 1
         }
 
+        # Review of item 23: a task that could not be checked is an unknown state, not a known bad
+        # one. Still 8 (auto-updates not verified), but the line must not claim apps will not update.
+        It 'Returns 8 when the Winget-AutoUpdate task could not be checked, and says the outcome is unknown' {
+            Mock Install-WingetAutoUpdate { [pscustomobject]@{ Status = 'Unhealthy'; Version = [version]'2.12.0'; FrameworkMissing = $false; RestartRequired = $false; Problem = 'its scheduled task \WAU\Winget-AutoUpdate could not be checked (Access is denied.)'; CheckFailed = $true } }
+
+            Invoke-WingetInstall -Apps @(@{ name = 'Contoso.AppOne' }) -NonInteractive | Should -Be 8
+
+            $script:errorMessages | Should -Contain 'Auto-updates: UNHEALTHY - Winget-AutoUpdate is installed, but its scheduled task \WAU\Winget-AutoUpdate could not be checked (Access is denied.); it is not known whether apps will update automatically (see above).'
+            ($script:errorMessages -join "`n") | Should -Not -Match 'apps will not update automatically'
+        }
+
         It 'Returns 0 when Winget-AutoUpdate is <Status> and its task will run' -ForEach @(
             @{ Status = 'Configured' }
             @{ Status = 'AlreadyPresent' }

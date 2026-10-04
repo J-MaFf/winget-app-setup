@@ -59,12 +59,12 @@ param (
 # This script is assembled from the WingetAppSetup module by build/Build-WingetInstallScript.ps1.
 # Edit the function source under WingetAppSetup/Public and WingetAppSetup/Private, then re-run the
 # build to regenerate this file. See readme.md ("Project layout") for details.
-# Build id: 1.0.0+ca517a58 (module version + SHA256 fragment of this whole script; issue #189).
+# Build id: 1.0.0+d44cfce7 (module version + SHA256 fragment of this whole script; issue #189).
 # ------------------------------------------------------------------------------------------------
 
 # Content-derived build identity, logged at startup so a transcript from a remote machine
 # identifies exactly which installer build produced it (issue #189).
-$script:InstallerBuildId = '1.0.0+ca517a58'
+$script:InstallerBuildId = '1.0.0+d44cfce7'
 
 # ------------------------------------------------Functions------------------------------------------------
 
@@ -4805,12 +4805,14 @@ function Format-ScheduledTaskTrigger {
     transcript as 'PS>TerminatingError(Get-ScheduledTask)' even when it is caught, and #283's was
     read as part of a crash. The error is still read, from -ErrorVariable: 'not found'
     (CmdletizationQuery_NotFound) means there is no task, and any other error means the task could
-    not be checked, which is not healthy either.
+    not be checked (CheckFailed), which is not healthy either: whether WAU will run is unknown.
 .RETURNS
-    [pscustomobject] with Healthy ([bool]), Exists ([bool]), State, Triggers ([string[]], from
-    Format-ScheduledTaskTrigger), LastRunTime ([datetime], $null when the task has never run or
-    the time could not be read), LastTaskResult ([int64] or $null), NextRunTime and Problem (why it
-    is not healthy, worded to follow 'Winget-AutoUpdate is installed, but', or $null).
+    [pscustomobject] with Healthy ([bool]), Exists ([bool]), CheckFailed ([bool], $true when the
+    task scheduler could not be queried, so the task's state is unknown rather than wrong), State,
+    Triggers ([string[]], from Format-ScheduledTaskTrigger), LastRunTime ([datetime], $null when
+    the task has never run or the time could not be read), LastTaskResult ([int64] or $null),
+    NextRunTime and Problem (why it is not healthy, worded to follow 'Winget-AutoUpdate is
+    installed, but', or $null).
 #>
 function Get-WauTaskHealth {
     $taskPath = '\WAU\'
@@ -4818,6 +4820,7 @@ function Get-WauTaskHealth {
     $health = [pscustomobject]@{
         Healthy        = $false
         Exists         = $false
+        CheckFailed    = $false
         State          = $null
         Triggers       = @()
         LastRunTime    = $null
@@ -4838,6 +4841,7 @@ function Get-WauTaskHealth {
     if (-not $task) {
         $failure = @($taskErrors | Where-Object { "$($_.FullyQualifiedErrorId)" -notlike 'CmdletizationQuery_NotFound*' }) | Select-Object -First 1
         if ($failure) {
+            $health.CheckFailed = $true
             $health.Problem = "its scheduled task $taskPath$taskName could not be checked ($($failure.Exception.Message))"
         }
         else {
@@ -7453,7 +7457,12 @@ function Invoke-WingetInstall {
             }
         }
         'Unhealthy' {
-            Write-ErrorMessage "Auto-updates: UNHEALTHY - Winget-AutoUpdate is installed, but $($wauResult.Problem); apps will not update automatically (see above)."
+            # CheckFailed: the task could not be queried, so the outcome is unknown, not known bad.
+            $autoUpdatesConsequence = 'apps will not update automatically'
+            if ($wauResult.CheckFailed) {
+                $autoUpdatesConsequence = 'it is not known whether apps will update automatically'
+            }
+            Write-ErrorMessage "Auto-updates: UNHEALTHY - Winget-AutoUpdate is installed, but $($wauResult.Problem); $autoUpdatesConsequence (see above)."
             $autoUpdatesHealthy = $false
         }
         'DryRun' { Write-Info "[DRY-RUN] Auto-updates: Would configure Winget-AutoUpdate v$($wauResult.Version)." }
@@ -8228,6 +8237,10 @@ function Test-WauInstalled {
                  Unhealthy after an install this run; the installed version (or $null when
                  unreadable) for AlreadyPresent, and for Unhealthy when WAU was already there.
       - Problem: for Unhealthy, what is wrong with the task (Get-WauTaskHealth's Problem).
+      - CheckFailed: for Unhealthy, $true when the task could not be checked at all (the task
+                 scheduler query failed), so whether WAU will run is unknown rather than known
+                 to be broken; the messages then send the user to Task Scheduler instead of
+                 telling them to reinstall.
       - FrameworkMissing: $true when the framework check found no suitable framework (on
                  AlreadyPresent this means the existing WAU may break winget on its next run).
       - RestartRequired: $true when msiexec returned 3010 (ERROR_SUCCESS_REBOOT_REQUIRED): WAU is
@@ -8278,8 +8291,14 @@ function Install-WingetAutoUpdate {
             $health = Get-WauTaskHealth
             Write-WauTaskHealth -Health $health
             if (-not $health.Healthy) {
-                Write-ErrorMessage "Winget-AutoUpdate is installed, but $($health.Problem), so apps will not update automatically. To set it up again, uninstall Winget-AutoUpdate (Settings > Apps) and re-run this installer."
-                return [pscustomobject]@{ Status = 'Unhealthy'; Version = $installed.Version; FrameworkMissing = $frameworkMissing; RestartRequired = $false; Problem = $health.Problem }
+                if ($health.CheckFailed) {
+                    # An unknown state: reinstalling would not fix a task scheduler that cannot be queried.
+                    Write-ErrorMessage "Winget-AutoUpdate is installed, but $($health.Problem), so it is not known whether apps will update automatically. Check the task \WAU\Winget-AutoUpdate in Task Scheduler; if it is missing, disabled or has no enabled trigger, uninstall Winget-AutoUpdate (Settings > Apps) and re-run this installer."
+                }
+                else {
+                    Write-ErrorMessage "Winget-AutoUpdate is installed, but $($health.Problem), so apps will not update automatically. To set it up again, uninstall Winget-AutoUpdate (Settings > Apps) and re-run this installer."
+                }
+                return [pscustomobject]@{ Status = 'Unhealthy'; Version = $installed.Version; FrameworkMissing = $frameworkMissing; RestartRequired = $false; Problem = $health.Problem; CheckFailed = [bool]$health.CheckFailed }
             }
             return [pscustomobject]@{ Status = 'AlreadyPresent'; Version = $installed.Version; FrameworkMissing = $frameworkMissing; RestartRequired = $false }
         }
@@ -8360,11 +8379,17 @@ function Install-WingetAutoUpdate {
         # 3010 = ERROR_SUCCESS_REBOOT_REQUIRED: installed, and a restart finishes it (P3-16).
         if ($msiexec.ExitCode -eq 0 -or $msiexec.ExitCode -eq 3010) {
             $restartRequired = $msiexec.ExitCode -eq 3010
-            # The MSI registers WAU's tasks in a custom action whose failure fails the install, so
-            # a task that is missing now is unexpected - and without it nothing updates (P3-36).
+            # msiexec 0 or 3010 does not prove the task exists: WAU's MSI registers its tasks from
+            # a post-install script (WAU-MSI_Actions.ps1, a deferred custom action) that catches
+            # its errors, writes them and still exits 0, so the install can succeed with no task -
+            # and without the task nothing updates (P3-36). Hence the check.
             $health = Get-WauTaskHealth
             if ($health.Healthy) {
                 Write-Success "Winget-AutoUpdate $($pin.Version) installed. Apps will update weekly, on Tuesdays at 02:00 (or soon after the next start if the machine was off)."
+            }
+            elseif ($health.CheckFailed) {
+                # An unknown state: reinstalling would not fix a task scheduler that cannot be queried.
+                Write-ErrorMessage ("Winget-AutoUpdate $($pin.Version) was installed, but $($health.Problem), so it is not known whether apps will update automatically. Check the task \WAU\Winget-AutoUpdate in Task Scheduler; if it is missing, disabled or has no enabled trigger, uninstall Winget-AutoUpdate (Settings > Apps) and re-run this installer." + $msiLogNote)
             }
             else {
                 Write-ErrorMessage ("Winget-AutoUpdate $($pin.Version) was installed, but $($health.Problem), so apps will not update automatically. Uninstall Winget-AutoUpdate (Settings > Apps) and re-run this installer; if this happens again, attach the msiexec log and this transcript to a GitHub issue." + $msiLogNote)
@@ -8374,7 +8399,7 @@ function Install-WingetAutoUpdate {
                 Write-WarningMessage 'The Winget-AutoUpdate installer reported that a restart finishes the installation (msiexec exit code 3010).'
             }
             if (-not $health.Healthy) {
-                return [pscustomobject]@{ Status = 'Unhealthy'; Version = $pin.Version; FrameworkMissing = $false; RestartRequired = $restartRequired; Problem = $health.Problem }
+                return [pscustomobject]@{ Status = 'Unhealthy'; Version = $pin.Version; FrameworkMissing = $false; RestartRequired = $restartRequired; Problem = $health.Problem; CheckFailed = [bool]$health.CheckFailed }
             }
             return [pscustomobject]@{ Status = 'Configured'; Version = $pin.Version; FrameworkMissing = $false; RestartRequired = $restartRequired }
         }

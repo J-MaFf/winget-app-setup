@@ -639,7 +639,12 @@ function Invoke-WingetInstall {
             }
         }
         'Unhealthy' {
-            Write-ErrorMessage "Auto-updates: UNHEALTHY - Winget-AutoUpdate is installed, but $($wauResult.Problem); apps will not update automatically (see above)."
+            # CheckFailed: the task could not be queried, so the outcome is unknown, not known bad.
+            $autoUpdatesConsequence = 'apps will not update automatically'
+            if ($wauResult.CheckFailed) {
+                $autoUpdatesConsequence = 'it is not known whether apps will update automatically'
+            }
+            Write-ErrorMessage "Auto-updates: UNHEALTHY - Winget-AutoUpdate is installed, but $($wauResult.Problem); $autoUpdatesConsequence (see above)."
             $autoUpdatesHealthy = $false
         }
         'DryRun' { Write-Info "[DRY-RUN] Auto-updates: Would configure Winget-AutoUpdate v$($wauResult.Version)." }
