@@ -253,7 +253,8 @@ function Open-ReadLockedFile {
 
 <#
 .SYNOPSIS
-    Creates a fresh, ACL-restricted staging directory for the WAU MSI download.
+    Creates a fresh, ACL-restricted staging directory for a download that runs elevated: the WAU
+    MSI, or the Windows App Runtime framework (Install-WindowsAppRuntimeFramework).
 .DESCRIPTION
     %TEMP% is user-writable and the previous fixed path (%TEMP%\WAU-<version>.msi) was predictable,
     so a non-elevated process running as the same user could swap the MSI between Get-FileHash and
@@ -266,15 +267,23 @@ function Open-ReadLockedFile {
     (Set-RestrictedDirectoryAcl). Throws when the directory cannot be created or secured; only a
     failure to secure it carries the error id 'RestrictedDirectoryAclFailed'. Callers own cleanup
     (Remove-Item -Recurse).
+.PARAMETER Prefix
+    The start of the per-run folder's name, which ends with a new GUID. Default 'wau-msi'.
 .RETURNS
     [string] The full path of the created staging directory.
 #>
 function New-WauStagingDirectory {
+    param (
+        [Parameter(Mandatory = $false)]
+        [ValidatePattern('^[A-Za-z0-9-]+$')]
+        [string]$Prefix = 'wau-msi'
+    )
+
     $baseDir = Join-Path $env:ProgramData 'winget-app-setup'
     $null = New-Item -Path $baseDir -ItemType Directory -Force -ErrorAction Stop
     Set-RestrictedDirectoryAcl -Path $baseDir
 
-    $stagingDir = Join-Path $baseDir ('wau-msi-' + [guid]::NewGuid().ToString('N'))
+    $stagingDir = Join-Path $baseDir ($Prefix + '-' + [guid]::NewGuid().ToString('N'))
     $null = New-Item -Path $stagingDir -ItemType Directory -Force -ErrorAction Stop
     Set-RestrictedDirectoryAcl -Path $stagingDir
     return $stagingDir
@@ -324,7 +333,8 @@ function Get-WindowsAppRuntimePackageInfo {
     newest winget release from GitHub without that framework. On a machine that lacks it (no
     Microsoft Store updates, Server SKUs) the new App Installer cannot register and the old one is
     then rejected as a downgrade, which leaves winget unusable (the #279/#284 wedge). Callers use
-    this to keep WAU off such machines.
+    this to keep WAU off such machines; Install-WingetAutoUpdate first installs the pinned framework
+    (Install-WindowsAppRuntimeFramework, WindowsAppRuntime.ps1) when this finds none.
 .PARAMETER MinimumVersion
     The lowest framework version that satisfies current winget releases.
 .RETURNS

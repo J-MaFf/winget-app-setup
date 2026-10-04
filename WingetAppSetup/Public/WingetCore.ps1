@@ -655,6 +655,10 @@ function Test-AppxPackageProvisioned {
     Full paths to dependency packages (e.g. Microsoft.WindowsAppRuntime, VCLibs).
 .PARAMETER LicensePath
     Optional path to a downloaded license .xml.
+.PARAMETER TimeoutSeconds
+    Under pwsh: a time limit for the Windows PowerShell child (Get-ProcessTimeoutSeconds -Operation
+    AppxProvisioning), which then runs through Invoke-ExternalProcess, its output echoed into the
+    transcript, and is stopped when the limit runs out. 0 (the default): no limit, as before.
 #>
 function Invoke-AppxProvisioning {
     param (
@@ -665,7 +669,10 @@ function Invoke-AppxProvisioning {
         [string[]]$DependencyPackagePath = @(),
 
         [Parameter(Mandatory = $false)]
-        [string]$LicensePath
+        [string]$LicensePath,
+
+        [Parameter(Mandatory = $false)]
+        [int]$TimeoutSeconds = 0
     )
 
     $hasLicense = $LicensePath -and (Test-Path $LicensePath)
@@ -686,6 +693,19 @@ function Invoke-AppxProvisioning {
             else { '' }
             $licClause = if ($hasLicense) { "-LicensePath '$($LicensePath.Replace("'", "''"))'" } else { '-SkipLicense' }
             $command = "Add-AppxProvisionedPackage -Online -PackagePath '$escapedPackagePath' $depClause $licClause -ErrorAction Stop | Out-Null"
+            if ($TimeoutSeconds -gt 0) {
+                # No progress bar: on a redirected output Windows PowerShell writes it as CLIXML.
+                $run = Invoke-ExternalProcess -FilePath 'powershell.exe' -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', "`$ProgressPreference = 'SilentlyContinue'; $command") -TimeoutSeconds $TimeoutSeconds
+                if ($run.LaunchFailed) {
+                    Write-ErrorMessage "Add-AppxProvisionedPackage failed for '$PackagePath': Windows PowerShell could not be started ($($run.LaunchError))."
+                    return $false
+                }
+                if ($run.TimedOut) {
+                    Write-ErrorMessage ("Add-AppxProvisionedPackage did not finish within {0} minutes for '{1}' and was stopped." -f [Math]::Round($TimeoutSeconds / 60), $PackagePath)
+                    return $false
+                }
+                return ($run.ExitCode -eq 0)
+            }
             & powershell.exe -NoProfile -ExecutionPolicy Bypass -Command $command
             return ($LASTEXITCODE -eq 0)
         }

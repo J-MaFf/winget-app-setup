@@ -389,7 +389,7 @@ will not run; decide whether your RMM job should count it as a success.
 | 5 | The run was aborted before it finished: an unexpected error (the message and stack trace are in the log), the run was stopped from outside (Ctrl+C, the console closing, an installer stopping the console) when run from a file or non-interactively, or the installer file changed before its elevated copy could run (see [Administrator rights](#administrator-rights)) |
 | 6 | Another run of the installer is in progress on this PC (started by an RMM job, a scheduled task or someone else). This run stopped before its pre-flight checks and changed nothing. Run it again once the other run has finished (see [One run at a time](#one-run-at-a-time)) |
 | 7 | Started from Windows PowerShell 5.1, the installer could not install PowerShell 7 or could not relaunch itself under it |
-| 8 | The apps are fine and winget still works, but automatic updates will not work or could not be verified. The summary's `Auto-updates:` line says which: `FAILED` (Winget-AutoUpdate could not be installed), `NOT CONFIGURED` (skipped because `Microsoft.WindowsAppRuntime.1.8` is missing), `AT RISK` (installed while that framework is missing) or `UNHEALTHY` (installed, but its `\WAU\Winget-AutoUpdate` task is missing, disabled, has no enabled trigger or could not be checked; see [Automatic updates](#automatic-updates)) |
+| 8 | The apps are fine and winget still works, but automatic updates will not work or could not be verified. The summary's `Auto-updates:` line says which: `FAILED` (Winget-AutoUpdate could not be installed), `NOT CONFIGURED` (skipped because `Microsoft.WindowsAppRuntime.1.8` is missing and the installer could not install it), `AT RISK` (installed while that framework is missing and could not be installed) or `UNHEALTHY` (installed, but its `\WAU\Winget-AutoUpdate` task is missing, disabled, has no enabled trigger or could not be checked; see [Automatic updates](#automatic-updates)) |
 | 3010 | Success, but a restart is required to finish: an install said so, the Winget-AutoUpdate MSI returned 3010, Windows gained a pending restart during the run, or installing PowerShell 7 from Windows PowerShell needed a restart (see **Restart required** above). RMM tools and Intune treat 3010 as "succeeded, restart required". A restart that was already pending before the run does not cause it |
 
 At the end of a run, when more than one applies, the code is the first of 1, 2, 8, 3010 and 0. A
@@ -560,8 +560,40 @@ up last, after the retry pass, it is not started immediately and not at user log
 by older versions have their logon trigger removed on the next run), and if a WAU run is already in
 progress when the installer starts, the installer waits up to 15 minutes for it to finish. WAU is only
 installed when `Microsoft.WindowsAppRuntime.1.8` is present, because the winget releases it installs
-need that framework and would otherwise leave winget unusable; the summary then shows
-`Auto-updates: NOT CONFIGURED` (issues #279, #283, #284).
+need that framework and would otherwise leave winget unusable (issues #279, #283, #284).
+
+A freshly imaged PC, a PC whose Microsoft Store updates are blocked, and Windows Server often lack
+that framework, so when the all-users check finds it missing, the installer first installs a pinned
+copy for every user of the PC (`Install-WindowsAppRuntimeFramework`), on a first run and on a re-run
+that finds WAU already installed alike:
+
+- **What:** the framework file of Windows App Runtime 1.8.12 (`Microsoft.WindowsAppRuntime.1.8`
+  8000.994.2142.0) for the PC's architecture (x64, x86 or ARM64), taken from Microsoft's
+  `Microsoft.WindowsAppSDK.Runtime` 1.8.260921001 package on NuGet.org. The download is the whole
+  package, about 150 MB, and happens only on a PC that lacks the framework. The version, the URL
+  and each file's size and SHA256 are pinned in `Get-WindowsAppRuntimePin`.
+- **Checks:** the package goes into a new folder inside `%ProgramData%\winget-app-setup` that is
+  limited to SYSTEM and Administrators first, like the WAU MSI's. The framework file must have the
+  pinned size and SHA256 and a valid Authenticode signature from `Microsoft Corporation`; it is
+  held open from the hash until it is provisioned, so what is provisioned is what was checked.
+- **How:** `Add-AppxProvisionedPackage -Online -SkipLicense`, run in Windows PowerShell with a
+  10-minute time limit, then the all-users check again (and `Get-AppxProvisionedPackage`, which
+  only warns when it does not list the framework). Microsoft's `WindowsAppRuntimeInstall` program
+  is not used: it registers the framework only for the account that runs it, and as SYSTEM only
+  stages it.
+- **Never:** on a run that is not elevated (a run as SYSTEM is), on 32-bit Arm Windows or a Windows
+  build older than 17763, over a framework of the same or a newer version that is already
+  provisioned, or when the all-users check itself could not run. It never uses
+  `Repair-WinGetPackageManager -AllUsers` (#265).
+
+The transcript then has one `Windows App Runtime: installed ...` or
+`Windows App Runtime: NOT INSTALLED - <reason>` line. When the install is not possible or fails,
+WAU is skipped as before: the summary shows `Auto-updates: NOT CONFIGURED` (or `AT RISK` when WAU
+was already installed) with the reason on the next line, and the run exits 8. A dry run
+(`-WhatIf`) says that it would install the framework first if it is missing, and installs nothing.
+Not yet checked on a real Windows PC: whether provisioning the framework on its own registers it
+for existing and new accounts on Windows 10, Windows 11 and Windows Server 2025, and whether the
+signature check reads the `.msix` signature under PowerShell 7.
 
 WAU counts as set up only when its scheduled task `\WAU\Winget-AutoUpdate` exists, is enabled and
 has an enabled trigger. The installer checks this after it installs WAU and on every run that finds
@@ -700,8 +732,12 @@ throwaway VMs by construction:
   so the PowerShell 7 half of the pass tests the change too. `e2e/Invoke-InstallPass.ps1` starts
   every pass and decides whether it passed: it must exit 0, or 3010 (OK, restart required). Exit 8
   passes only when that pass's own transcript says
-  `Auto-updates: NOT CONFIGURED - Microsoft.WindowsAppRuntime.1.8 is missing`, which is every pass
-  on `windows-latest`; 8 for any other reason, or with no transcript to check, fails the pass.
+  `Auto-updates: NOT CONFIGURED - Microsoft.WindowsAppRuntime.1.8 is missing`, and the verdict then
+  quotes the transcript's `Windows App Runtime:` line with the reason the installer could not
+  install the framework. `windows-latest` ships without it, but the installer now installs the
+  pinned framework there, so both passes are expected to exit 0 with Winget-AutoUpdate set up; the
+  exit 8 is kept for a runner where that install is not possible. 8 for any other reason, or with
+  no transcript to check, fails the pass.
   Exit 1 is tolerated only while `KNOWN_PLATFORM_INCOMPATIBLE` is non-empty, and the assertions
   then check that nothing outside that list failed. Any other code fails the pass with the
   installer's code. The second pass proves idempotence.
@@ -710,12 +746,13 @@ throwaway VMs by construction:
   `Get-DefaultAppCatalog` app resolves via `winget list` (exit-code classified) — the script
   evaluates each app's catalog condition on the runner, and not-applicable apps must instead show
   their `not applicable` skip line in the latest transcript — the WAU scheduled task exists and its
-  version matches `Get-WauPin` (on a runner without `Microsoft.WindowsAppRuntime.1.8`, such as
-  `windows-latest`, WAU must instead be absent and the transcript must say
-  `Auto-updates: NOT CONFIGURED`), a transcript with the `Installer build` stamp exists, no app
-  outside the skip list is still failed at the end of either pass (read from the summary's `Failed`
-  row and every failure line the retry pass did not recover; a transcript with no summary fails),
-  and every applicable app is Skipped on the second pass. In pull-request and dispatched runs,
+  version matches `Get-WauPin` (on a runner where `Microsoft.WindowsAppRuntime.1.8` is still missing
+  after the run, because the installer could not install it, WAU must instead be absent and the
+  transcript must say `Auto-updates: NOT CONFIGURED`), a transcript with the `Installer build` stamp
+  exists, no app outside the skip list is still failed at the end of either pass (read from the
+  summary's `Failed` row and every failure line the retry pass did not recover; a transcript with no
+  summary fails), and every applicable app is Skipped on the second pass, which also must not
+  install the framework again. In pull-request and dispatched runs,
   every transcript, the Windows PowerShell 5.1 `-bootstrap` ones included, must log the build id of
   the checkout's `winget-app-install.ps1` (`-InstallerPath`), so a run that quietly tested another
   copy fails. The weekly run fetches raw `main`, which can trail the checkout by a few minutes of
@@ -728,9 +765,9 @@ throwaway VMs by construction:
   at the call site. Dell Command Update is **no longer skip-listed** there: the catalog's
   manufacturer condition ([#217](https://github.com/J-MaFf/winget-app-setup/issues/217)) gates it
   in the product itself, so the non-Dell runners exercise the gating for real on every run.
-- **Not covered yet:** Winget-AutoUpdate's own update run (`windows-latest` lacks
-  `Microsoft.WindowsAppRuntime.1.8`, so the installer skips WAU there; the framework could be
-  provisioned on the runner first, but that is untried on this image), the catalog's own
+- **Not covered yet:** Winget-AutoUpdate's own update run (the installer now installs
+  `Microsoft.WindowsAppRuntime.1.8` and WAU on `windows-latest`, but no step starts WAU's task and
+  checks that winget still starts afterwards), the catalog's own
   PowerShell install (`Install-PowerShellLatest`: PowerShell 7 is preinstalled in one leg and
   installed by the bootstrap in the other), and cross-user elevation (tier 2, below).
 - **Where the evidence lands:** transcripts are written on the runner under

@@ -61,12 +61,12 @@ param (
 # This script is assembled from the WingetAppSetup module by build/Build-WingetInstallScript.ps1.
 # Edit the function source under WingetAppSetup/Public and WingetAppSetup/Private, then re-run the
 # build to regenerate this file. See readme.md ("Project layout") for details.
-# Build id: 1.0.0+3ddd7701 (module version + SHA256 fragment of this whole script; issue #189).
+# Build id: 1.0.0+7a5d6609 (module version + SHA256 fragment of this whole script; issue #189).
 # ------------------------------------------------------------------------------------------------
 
 # Content-derived build identity, logged at startup so a transcript from a remote machine
 # identifies exactly which installer build produced it (issue #189).
-$script:InstallerBuildId = '1.0.0+3ddd7701'
+$script:InstallerBuildId = '1.0.0+7a5d6609'
 
 # ------------------------------------------------Functions------------------------------------------------
 
@@ -4123,9 +4123,11 @@ function Invoke-PowerShell7Bootstrap {
     WingetSourceUpdate `winget source update`, the source check before the installs (2 minutes).
     WingetSourceReset `winget source reset`, which downloads the source again (5 minutes).
     MsiExec           one msiexec install or uninstall (15 minutes, as for the PowerShell 7 MSI).
-    WebDownload       a small file download, such as the Winget-AutoUpdate MSI: the connection
-                      and the wait for the response headers (5 minutes). Invoke-WebRequest's
-                      -TimeoutSec does not cover the body.
+    AppxProvisioning  one Add-AppxProvisionedPackage, run in Windows PowerShell, such as the Windows
+                      App Runtime framework's (10 minutes).
+    WebDownload       a file download, such as the Winget-AutoUpdate MSI or the Windows App
+                      Runtime package: the connection and the wait for the response headers
+                      (5 minutes). Invoke-WebRequest's -TimeoutSec does not cover the body.
     WebDownloadStall  how long a download may receive nothing once the file is arriving, on
                       PowerShell 7.4 and newer (2 minutes). 7.3 and older have no such limit.
 .RETURNS
@@ -4134,7 +4136,7 @@ function Invoke-PowerShell7Bootstrap {
 function Get-ProcessTimeoutSeconds {
     param (
         [Parameter(Mandatory = $true)]
-        [ValidateSet('WingetInstall', 'WingetDownload', 'WingetUninstall', 'WingetListCheck', 'WingetVersion', 'WingetList', 'WingetSourceUpdate', 'WingetSourceReset', 'MsiExec', 'WebDownload', 'WebDownloadStall')]
+        [ValidateSet('WingetInstall', 'WingetDownload', 'WingetUninstall', 'WingetListCheck', 'WingetVersion', 'WingetList', 'WingetSourceUpdate', 'WingetSourceReset', 'MsiExec', 'AppxProvisioning', 'WebDownload', 'WebDownloadStall')]
         [string]$Operation
     )
 
@@ -4148,6 +4150,7 @@ function Get-ProcessTimeoutSeconds {
         'WingetSourceUpdate' { return 120 }
         'WingetSourceReset' { return 300 }
         'MsiExec' { return 900 }
+        'AppxProvisioning' { return 600 }
         'WebDownload' { return 300 }
         'WebDownloadStall' { return 120 }
     }
@@ -5816,7 +5819,8 @@ function Open-ReadLockedFile {
 
 <#
 .SYNOPSIS
-    Creates a fresh, ACL-restricted staging directory for the WAU MSI download.
+    Creates a fresh, ACL-restricted staging directory for a download that runs elevated: the WAU
+    MSI, or the Windows App Runtime framework (Install-WindowsAppRuntimeFramework).
 .DESCRIPTION
     %TEMP% is user-writable and the previous fixed path (%TEMP%\WAU-<version>.msi) was predictable,
     so a non-elevated process running as the same user could swap the MSI between Get-FileHash and
@@ -5829,15 +5833,23 @@ function Open-ReadLockedFile {
     (Set-RestrictedDirectoryAcl). Throws when the directory cannot be created or secured; only a
     failure to secure it carries the error id 'RestrictedDirectoryAclFailed'. Callers own cleanup
     (Remove-Item -Recurse).
+.PARAMETER Prefix
+    The start of the per-run folder's name, which ends with a new GUID. Default 'wau-msi'.
 .RETURNS
     [string] The full path of the created staging directory.
 #>
 function New-WauStagingDirectory {
+    param (
+        [Parameter(Mandatory = $false)]
+        [ValidatePattern('^[A-Za-z0-9-]+$')]
+        [string]$Prefix = 'wau-msi'
+    )
+
     $baseDir = Join-Path $env:ProgramData 'winget-app-setup'
     $null = New-Item -Path $baseDir -ItemType Directory -Force -ErrorAction Stop
     Set-RestrictedDirectoryAcl -Path $baseDir
 
-    $stagingDir = Join-Path $baseDir ('wau-msi-' + [guid]::NewGuid().ToString('N'))
+    $stagingDir = Join-Path $baseDir ($Prefix + '-' + [guid]::NewGuid().ToString('N'))
     $null = New-Item -Path $stagingDir -ItemType Directory -Force -ErrorAction Stop
     Set-RestrictedDirectoryAcl -Path $stagingDir
     return $stagingDir
@@ -5887,7 +5899,8 @@ function Get-WindowsAppRuntimePackageInfo {
     newest winget release from GitHub without that framework. On a machine that lacks it (no
     Microsoft Store updates, Server SKUs) the new App Installer cannot register and the old one is
     then rejected as a downgrade, which leaves winget unusable (the #279/#284 wedge). Callers use
-    this to keep WAU off such machines.
+    this to keep WAU off such machines; Install-WingetAutoUpdate first installs the pinned framework
+    (Install-WindowsAppRuntimeFramework, WindowsAppRuntime.ps1) when this finds none.
 .PARAMETER MinimumVersion
     The lowest framework version that satisfies current winget releases.
 .RETURNS
@@ -6372,6 +6385,377 @@ function Invoke-WauMsiexec {
     $msiexec | Add-Member -NotePropertyName 'BusyRetries' -NotePropertyValue $busyRetries -Force
     $msiexec | Add-Member -NotePropertyName 'BusyWaitedSeconds' -NotePropertyValue $busyWaited -Force
     return $msiexec
+}
+
+# --- WindowsAppRuntime ---
+# Installs the Microsoft.WindowsAppRuntime.1.8 framework, pinned and verified, for every user of the
+# PC (work-order item 31, finding R13-3). Every winget release since 1.12 needs that framework, and
+# every Winget-AutoUpdate run provisions the newest winget, so WAU is only set up where the
+# framework is present (Get-WindowsAppRuntimeStatus, WauSupport.ps1). A freshly imaged PC, a PC
+# whose Microsoft Store updates are blocked and Windows Server lack it until something installs it,
+# and the run then ended with 'Auto-updates: NOT CONFIGURED' and exit code 8. Install-WingetAutoUpdate
+# now installs it first. Runs under PowerShell 7 only (Invoke-WingetInstall's WAU step).
+
+<#
+.SYNOPSIS
+    Returns the pinned Windows App Runtime 1.8 framework release.
+.DESCRIPTION
+    The single place the pin lives. The framework files come from the NuGet package
+    Microsoft.WindowsAppSDK.Runtime, where Microsoft publishes them from 1.8 on (the
+    Microsoft.WindowsAppSDK package itself no longer holds them). A NuGet version cannot be
+    overwritten once published.
+
+    The SHA256 of each framework .msix is the pin that matters. The .nupkg itself is not pinned:
+    NuGet re-signs a package when a signing certificate is revoked, which changes the .nupkg's bytes
+    but not the files inside it. Each file is also checked for a valid Authenticode signature by
+    SignerCommonName before it is provisioned.
+
+    Microsoft's WindowsAppRuntimeInstall-<arch>.exe is not used: it never provisions the framework
+    for all users (it registers it for the elevating account only, or, as SYSTEM, only stages it),
+    and it also deploys packages winget does not need, which can fail after the framework itself is
+    in place.
+
+    To move to a newer 1.8 servicing release, change every field together: the version numbers, the
+    URL, and each architecture's Entry, Size and Sha256, read from the new .nupkg
+    (tools/MSIX/win10-<arch>/Microsoft.WindowsAppRuntime.1.8.msix). The framework version of a
+    release is the Identity Version in that file's AppxManifest.xml. Moving to a newer framework
+    family (Microsoft.WindowsAppRuntime.2) is a different change: winget's dependency names 1.8.
+.RETURNS
+    [hashtable] with Release, NuGetVersion, FrameworkVersion, PackageUrl, SignerCommonName and
+    Frameworks: one entry per OS architecture, keyed as Get-OSArchitecture names it (X64, X86,
+    Arm64), each with Entry (the file's path inside the package), Size (bytes) and Sha256.
+#>
+function Get-WindowsAppRuntimePin {
+    return @{
+        Release          = '1.8.12'
+        NuGetVersion     = '1.8.260921001'
+        FrameworkVersion = '8000.994.2142.0'
+        PackageUrl       = 'https://api.nuget.org/v3-flatcontainer/microsoft.windowsappsdk.runtime/1.8.260921001/microsoft.windowsappsdk.runtime.1.8.260921001.nupkg'
+        SignerCommonName = 'Microsoft Corporation'
+        Frameworks       = @{
+            X64   = @{
+                Entry  = 'tools/MSIX/win10-x64/Microsoft.WindowsAppRuntime.1.8.msix'
+                Size   = 43025663
+                Sha256 = '07AF369968CD15C56A7FC8865B7190643A7ADEF49B8191752FF17094E4EFE504'
+            }
+            X86   = @{
+                Entry  = 'tools/MSIX/win10-x86/Microsoft.WindowsAppRuntime.1.8.msix'
+                Size   = 21691200
+                Sha256 = '0AF2A0E5FD6ED43D46240F930A5FDC6FCAB46DA5ACF10FA12C4A7AEE0FC9A74C'
+            }
+            Arm64 = @{
+                Entry  = 'tools/MSIX/win10-arm64/Microsoft.WindowsAppRuntime.1.8.msix'
+                Size   = 40928160
+                Sha256 = '9D6FE2B8D795859D725B4E1C25A4F7646C852BECB91D9D360B82BC32589E052F'
+            }
+        }
+    }
+}
+
+<#
+.SYNOPSIS
+    Lists the Microsoft.WindowsAppRuntime.1.8 framework packages provisioned for every user.
+.DESCRIPTION
+    Thin query seam (mocked in tests), the provisioned-package counterpart of
+    Get-WindowsAppRuntimePackageInfo. The version and architecture come from each package's
+    PackageName, for example Microsoft.WindowsAppRuntime.1.8_8000.994.2142.0_x64__8wekyb3d8bbwe.
+    `Get-AppxProvisionedPackage -Online` needs administrator rights; under PowerShell 7 it runs in
+    Windows PowerShell 5.1, where the DISM module always loads (as Get-ProvisionedAppxPackageName
+    does). Throws when the query fails.
+.RETURNS
+    [pscustomobject[]] with Version ([version]) and Architecture ('X64', 'X86', 'Arm64', 'Arm' or
+    'Neutral').
+#>
+function Get-WindowsAppRuntimeProvisionedInfo {
+    $query = "Get-AppxProvisionedPackage -Online -ErrorAction Stop | Where-Object { `$_.DisplayName -eq 'Microsoft.WindowsAppRuntime.1.8' } | ForEach-Object { `$_.PackageName }"
+    if ($PSVersionTable.PSEdition -eq 'Core') {
+        $lines = @(& powershell.exe -NoProfile -ExecutionPolicy Bypass -Command $query)
+        if ($LASTEXITCODE -ne 0) {
+            throw "Get-AppxProvisionedPackage failed in Windows PowerShell (exit code $LASTEXITCODE)."
+        }
+    }
+    else {
+        $lines = @(Get-AppxProvisionedPackage -Online -ErrorAction Stop |
+                Where-Object { $_.DisplayName -eq 'Microsoft.WindowsAppRuntime.1.8' } |
+                ForEach-Object { $_.PackageName })
+    }
+
+    $architectures = @{ x64 = 'X64'; x86 = 'X86'; arm64 = 'Arm64'; arm = 'Arm'; neutral = 'Neutral' }
+    foreach ($line in $lines) {
+        if ("$line".Trim() -match '^Microsoft\.WindowsAppRuntime\.1\.8_(?<version>\d+(\.\d+){1,3})_(?<arch>[A-Za-z0-9]+)_') {
+            $architecture = $Matches.arch.ToLowerInvariant()
+            if ($architectures.ContainsKey($architecture)) {
+                [pscustomobject]@{ Version = [version]$Matches.version; Architecture = $architectures[$architecture] }
+            }
+        }
+    }
+}
+
+<#
+.SYNOPSIS
+    Writes one framework .msix out of the downloaded Microsoft.WindowsAppSDK.Runtime package.
+.DESCRIPTION
+    A .nupkg is a zip file. The file's size inside the package is compared with the pin before
+    anything is written, so another package can neither be extracted under the pinned name nor fill
+    the disk; the caller checks the hash. Throws when the package cannot be read, has no such file,
+    or the file's size differs.
+.PARAMETER PackagePath
+    The downloaded .nupkg.
+.PARAMETER EntryName
+    The file's path inside the package (forward slashes).
+.PARAMETER ExpectedSize
+    The file's pinned size in bytes.
+.PARAMETER DestinationPath
+    Where to write it. Must not exist yet.
+#>
+function Expand-WindowsAppRuntimeMsix {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$PackagePath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$EntryName,
+
+        [Parameter(Mandatory = $true)]
+        [long]$ExpectedSize,
+
+        [Parameter(Mandatory = $true)]
+        [string]$DestinationPath
+    )
+
+    $archive = [System.IO.Compression.ZipFile]::OpenRead($PackagePath)
+    try {
+        $entry = $archive.GetEntry($EntryName)
+        if (-not $entry) {
+            throw "the package holds no $EntryName"
+        }
+        if ($entry.Length -ne $ExpectedSize) {
+            throw ('{0} in the package is {1} bytes, not the pinned {2}' -f $EntryName, $entry.Length, $ExpectedSize)
+        }
+        [System.IO.Compression.ZipFileExtensions]::ExtractToFile($entry, $DestinationPath, $false)
+    }
+    finally {
+        $archive.Dispose()
+    }
+}
+
+<#
+.SYNOPSIS
+    Checks that a file carries a valid Authenticode signature from the given signer.
+.DESCRIPTION
+    Status 'Valid' means Windows checked the signature against the file's content and chained the
+    signing certificate to a trusted root (an .msix is checked through Windows' own package
+    signature provider). The certificate subject's common name must also be exactly
+    SignerCommonName. The same rule Test-PowerShell7MsiSignature applies to the PowerShell MSI.
+.PARAMETER Path
+    The file to check.
+.PARAMETER SignerCommonName
+    The common name (CN) the signing certificate must have.
+.RETURNS
+    [pscustomobject] with Valid ([bool]) and Detail (the signer, or why the check failed).
+#>
+function Test-WindowsAppRuntimeSignature {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+
+        [Parameter(Mandatory = $true)]
+        [string]$SignerCommonName
+    )
+
+    try {
+        $signature = Get-AuthenticodeSignature -LiteralPath $Path -ErrorAction Stop
+    }
+    catch {
+        return [pscustomobject]@{ Valid = $false; Detail = "its signature could not be checked: $_" }
+    }
+
+    $status = 'unknown'
+    $signer = 'none'
+    if ($signature) {
+        if ("$($signature.Status)") {
+            $status = "$($signature.Status)"
+        }
+        if ($signature.SignerCertificate -and $signature.SignerCertificate.Subject) {
+            $signer = [string]$signature.SignerCertificate.Subject
+        }
+    }
+    $signerPattern = '(^|,\s*)CN=' + [regex]::Escape($SignerCommonName) + '(\s*,|$)'
+    if ($status -eq 'Valid' -and $signer -match $signerPattern) {
+        return [pscustomobject]@{ Valid = $true; Detail = $signer }
+    }
+    return [pscustomobject]@{ Valid = $false; Detail = ('it is not signed by {0} (signature status: {1}; signer: {2})' -f $SignerCommonName, $status, $signer) }
+}
+
+<#
+.SYNOPSIS
+    Installs the pinned Microsoft.WindowsAppRuntime.1.8 framework for every user of this PC.
+.DESCRIPTION
+    Called by Install-WingetAutoUpdate when Get-WindowsAppRuntimeStatus finds no suitable
+    framework (never when that check itself failed). Steps:
+      1. Preconditions: an elevated run (SYSTEM included), an OS architecture the pin has a file for
+         (X64, X86, Arm64), Windows build 17763 or later (the framework's minimum), and no
+         provisioned framework for this architecture at or above the pinned version: a newer build
+         is never replaced or downgraded.
+      2. Download Microsoft.WindowsAppSDK.Runtime (about 150 MB) from NuGet.org into a new folder
+         limited to SYSTEM and Administrators (New-WauStagingDirectory, checked before anything is
+         downloaded), with the download time limits Get-WebDownloadTimeoutParameters gives. The
+         whole package rather than a byte range of it: the file's offset inside the package moves
+         when NuGet re-signs it, and a proxy may ignore a range request, so a ranged read would
+         need this path as its fallback anyway. The cost is paid once, only on a PC without the
+         framework.
+      3. Extract this architecture's framework .msix (size checked against the pin first), open it
+         with read-only sharing (Open-ReadLockedFile), hash it from that handle, check its
+         Authenticode signature, and provision it with Add-AppxProvisionedPackage -Online
+         -SkipLicense (Invoke-AppxProvisioning, run in Windows PowerShell with a time limit). The
+         handle stays open until provisioning has finished, so what is provisioned is what was
+         hashed.
+      4. Check again: Get-WindowsAppRuntimeStatus must now find it. The provisioned packages are
+         read too, and a framework that is present but not provisioned for all users gets a
+         warning.
+    Writes one 'Windows App Runtime: installed ...' or 'Windows App Runtime: NOT INSTALLED - <reason>'
+    line, which e2e/TranscriptAssertions.ps1 reads. Never uses Repair-WinGetPackageManager -AllUsers
+    (issue #265). Never throws.
+.RETURNS
+    [pscustomobject] with Installed ([bool]: the framework is there now, checked after
+    provisioning), Status (Get-WindowsAppRuntimeStatus's result after provisioning, or $null when
+    nothing was provisioned) and Reason (why it was not installed, or $null).
+#>
+function Install-WindowsAppRuntimeFramework {
+    $pin = Get-WindowsAppRuntimePin
+    $reason = $null
+    $status = $null
+    $architecture = $null
+    $framework = $null
+
+    try {
+        try {
+            $architecture = Get-OSArchitecture
+            $framework = $pin.Frameworks[$architecture]
+            if (-not $framework) {
+                $reason = "Microsoft publishes no Windows App Runtime 1.8 framework for $architecture Windows"
+            }
+        }
+        catch {
+            $reason = "the OS architecture could not be read ($_)"
+        }
+
+        if (-not $reason -and -not (Test-IsAdmin)) {
+            $reason = 'installing it for all users needs administrator rights'
+        }
+        if (-not $reason) {
+            $build = Get-WindowsBuildNumber
+            if ($build -lt 17763) {
+                $reason = "Windows build $build is older than 17763, the oldest the framework supports"
+            }
+        }
+        if (-not $reason) {
+            # A newer (or the same) build already provisioned is left alone: never downgraded, never
+            # replaced. A failed query does not stop the install; the status check already found no
+            # suitable framework for any user.
+            $provisioned = @()
+            try {
+                $provisioned = @(Get-WindowsAppRuntimeProvisionedInfo)
+            }
+            catch {
+                Write-WarningMessage "Could not list the provisioned Microsoft.WindowsAppRuntime.1.8 packages: $_"
+            }
+            $newer = @($provisioned | Where-Object { $_.Architecture -eq $architecture -and $_.Version -ge [version]$pin.FrameworkVersion } | Sort-Object -Property Version -Descending)
+            if ($newer.Count -gt 0) {
+                $reason = ('Microsoft.WindowsAppRuntime.1.8 {0} ({1}) is already provisioned for this PC, at or above the pinned {2}, but no user has it; the installer does not replace it' -f $newer[0].Version, $architecture, $pin.FrameworkVersion)
+            }
+        }
+
+        if (-not $reason) {
+            Write-Info ('Microsoft.WindowsAppRuntime.1.8 is missing; installing the pinned Windows App Runtime {0} (framework {1}, {2}) for all users first...' -f $pin.Release, $pin.FrameworkVersion, $architecture)
+            $stagingDir = $null
+            $msixStream = $null
+            $stage = 'setting up its download folder'
+            try {
+                $stagingDir = New-WauStagingDirectory -Prefix 'appruntime'
+
+                $stage = "downloading $($pin.PackageUrl)"
+                $packagePath = Join-Path $stagingDir ('microsoft.windowsappsdk.runtime.{0}.nupkg' -f $pin.NuGetVersion)
+                Write-Info "Downloading Microsoft.WindowsAppSDK.Runtime $($pin.NuGetVersion) from NuGet.org (about 150 MB)..."
+                $downloadTimeouts = Get-WebDownloadTimeoutParameters
+                Invoke-WebRequest @downloadTimeouts -Uri $pin.PackageUrl -OutFile $packagePath -UseBasicParsing -ErrorAction Stop
+
+                $stage = 'extracting the framework from the package'
+                $msixPath = Join-Path $stagingDir 'Microsoft.WindowsAppRuntime.1.8.msix'
+                Expand-WindowsAppRuntimeMsix -PackagePath $packagePath -EntryName $framework.Entry -ExpectedSize $framework.Size -DestinationPath $msixPath
+                Remove-Item -LiteralPath $packagePath -Force -ErrorAction SilentlyContinue
+
+                # Held open, with read-only sharing, from the hash until provisioning has finished
+                # (as the WAU MSI is, review finding P2-21). Disposed in finally, before the cleanup.
+                $stage = 'verifying the framework'
+                $msixStream = Open-ReadLockedFile -Path $msixPath
+                $actualHash = (Get-FileHash -InputStream $msixStream -Algorithm SHA256).Hash
+                if ($actualHash -ne $framework.Sha256) {
+                    $reason = "the downloaded framework's SHA256 is $actualHash, not the pinned $($framework.Sha256)"
+                }
+                else {
+                    $signature = Test-WindowsAppRuntimeSignature -Path $msixPath -SignerCommonName $pin.SignerCommonName
+                    if (-not $signature.Valid) {
+                        $reason = "the downloaded framework failed its signature check: $($signature.Detail)"
+                    }
+                    else {
+                        Write-Info "Verified its SHA256 and its signature ($($signature.Detail)); provisioning it for all users..."
+                        $stage = 'provisioning the framework'
+                        if (-not (Invoke-AppxProvisioning -PackagePath $msixPath -TimeoutSeconds (Get-ProcessTimeoutSeconds -Operation AppxProvisioning))) {
+                            $reason = 'Add-AppxProvisionedPackage failed (its error is above); Windows Server without the Desktop Experience, or a policy that blocks app packages, cannot take it'
+                        }
+                    }
+                }
+            }
+            catch {
+                $reason = "$stage failed: $_"
+                if ($_.FullyQualifiedErrorId -eq 'RestrictedDirectoryAclFailed') {
+                    $baseDir = Join-Path $env:ProgramData 'winget-app-setup'
+                    $reason += " To reset the folder, run in an elevated prompt: takeown /f `"$baseDir`" /a, then icacls `"$baseDir`" /reset, and re-run this installer."
+                }
+            }
+            finally {
+                # Close the file first: the open handle refuses deletion, so the cleanup would fail.
+                if ($msixStream) {
+                    $msixStream.Dispose()
+                }
+                if ($stagingDir) {
+                    Remove-Item -Path $stagingDir -Recurse -Force -ErrorAction SilentlyContinue
+                }
+            }
+        }
+
+        if (-not $reason) {
+            # Add-AppxProvisionedPackage's success is not the answer: the check the WAU gate uses is.
+            $status = Get-WindowsAppRuntimeStatus
+            if ($status.Present -ne $true) {
+                $reason = "Add-AppxProvisionedPackage reported success, but the framework is still not there ($($status.Detail))"
+            }
+            else {
+                try {
+                    $provisionedNow = @(Get-WindowsAppRuntimeProvisionedInfo | Where-Object { $_.Architecture -eq $architecture -and $_.Version -ge [version]$pin.FrameworkVersion })
+                    if ($provisionedNow.Count -eq 0) {
+                        Write-WarningMessage 'Microsoft.WindowsAppRuntime.1.8 is now on this PC, but Get-AppxProvisionedPackage does not list it as provisioned for all users; accounts that sign in for the first time may not get it.'
+                    }
+                }
+                catch {
+                    Write-WarningMessage "Could not list the provisioned Microsoft.WindowsAppRuntime.1.8 packages to confirm the install: $_"
+                }
+            }
+        }
+    }
+    catch {
+        $reason = "unexpected error: $_"
+    }
+
+    if ($reason) {
+        # Callers put the reason inside their own sentences.
+        $reason = "$reason".Trim().TrimEnd('.')
+        Write-ErrorMessage "Windows App Runtime: NOT INSTALLED - $reason."
+        return [pscustomobject]@{ Installed = $false; Status = $status; Reason = $reason }
+    }
+    Write-Success ('Windows App Runtime: installed Microsoft.WindowsAppRuntime.1.8 {0} ({1}) for all users.' -f $pin.FrameworkVersion, $architecture)
+    return [pscustomobject]@{ Installed = $true; Status = $status; Reason = $null }
 }
 
 # --- WindowsInstallerState ---
@@ -8193,7 +8577,8 @@ function Restart-WithElevation {
     non-interactive run (nobody to approve a prompt, so none is shown), irm | iex, or the imported
     module (review finding P2-12), 8 = the apps are installed, but automatic updates are not
     configured or unhealthy: the run's 'Auto-updates:' line is FAILED, NOT CONFIGURED (no
-    Microsoft.WindowsAppRuntime.1.8), AT RISK or UNHEALTHY (review finding P3-36), 3010 = success,
+    Microsoft.WindowsAppRuntime.1.8, and the installer could not install the pinned one), AT RISK
+    or UNHEALTHY (review finding P3-36), 3010 = success,
     but a restart is required to finish (an install said so, or Windows gained a pending restart
     during the run; review finding P3-16). At the end of a run the precedence is
     1 > 2 > 8 > 3010 > 0 (Get-InstallerExitCode). Apps reported as Deferred (a run as SYSTEM or
@@ -8823,6 +9208,9 @@ function Invoke-WingetInstall {
         'AlreadyPresent' {
             if ($wauResult.FrameworkMissing) {
                 Write-ErrorMessage 'Auto-updates: AT RISK - Winget-AutoUpdate is installed but Microsoft.WindowsAppRuntime.1.8 is missing; its next run may leave winget unusable (see above).'
+                if ($wauResult.FrameworkInstallError) {
+                    Write-ErrorMessage "  The installer could not install it: $($wauResult.FrameworkInstallError)."
+                }
                 $autoUpdatesHealthy = $false
             }
             elseif ($wauResult.Version) {
@@ -8844,6 +9232,10 @@ function Invoke-WingetInstall {
         'DryRun' { Write-Info "[DRY-RUN] Auto-updates: Would configure Winget-AutoUpdate v$($wauResult.Version)." }
         'FrameworkMissing' {
             Write-ErrorMessage 'Auto-updates: NOT CONFIGURED - Microsoft.WindowsAppRuntime.1.8 is missing, and Winget-AutoUpdate would leave winget unusable without it. Install the Windows App Runtime 1.8 (or let the Microsoft Store update App Installer), then re-run the installer.'
+            # Why the installer's own attempt (Install-WindowsAppRuntimeFramework) did not help.
+            if ($wauResult.FrameworkInstallError) {
+                Write-ErrorMessage "  The installer could not install it: $($wauResult.FrameworkInstallError)."
+            }
             $autoUpdatesHealthy = $false
         }
         default {
@@ -9813,8 +10205,9 @@ function Set-WindowsTerminalDefaults {
     own self-update, so an upstream change can never roll out to managed machines unreviewed. Bump
     all fields together to move to a newer WAU (verify the new SHA256 against the winget-pkgs manifest
     for that version). See issue #168. Also re-check the WindowsAppRuntime requirement in
-    Get-WindowsAppRuntimeStatus (WauSupport.ps1): WAU installs the newest winget release, so the
-    framework that release needs is what decides whether WAU is safe to deploy.
+    Get-WindowsAppRuntimeStatus (WauSupport.ps1) and the framework pin in Get-WindowsAppRuntimePin
+    (WindowsAppRuntime.ps1): WAU installs the newest winget release, so the framework that release
+    needs is what decides whether WAU is safe to deploy.
 #>
 function Get-WauPin {
     return @{
@@ -9870,7 +10263,11 @@ function Test-WauInstalled {
         the homegrown updater fought.
       - Only when Microsoft.WindowsAppRuntime.1.8 is present (Get-WindowsAppRuntimeStatus): every
         WAU run provisions the newest winget, which needs that framework, and would otherwise leave
-        winget unusable.
+        winget unusable. When the check finds it missing, the pinned, verified framework is
+        installed for all users first (Install-WindowsAppRuntimeFramework, work-order item 31), on
+        a fresh install and on a machine that already has WAU alike; WAU is skipped (or reported
+        AT RISK) only when that install is not possible or fails. A check that could not run at
+        all installs nothing and goes ahead with WAU, as before.
       - USERCONTEXT=1 so user-scope apps update in the real interactive session.
       - DISABLEWAUAUTOUPDATE=1 so WAU stays on this pinned version until we bump it deliberately.
       - Full notifications; skip on metered connections.
@@ -9911,8 +10308,10 @@ function Test-WauInstalled {
                  scheduler query failed), so whether WAU will run is unknown rather than known
                  to be broken; the messages then send the user to Task Scheduler instead of
                  telling them to reinstall.
-      - FrameworkMissing: $true when the framework check found no suitable framework (on
-                 AlreadyPresent this means the existing WAU may break winget on its next run).
+      - FrameworkMissing: $true when no suitable framework is there, even after trying to install
+                 it (on AlreadyPresent this means the existing WAU may break winget on its next run).
+      - FrameworkInstallError: with FrameworkMissing, why the pinned framework could not be
+                 installed (Install-WindowsAppRuntimeFramework's Reason), or $null.
       - RestartRequired: $true when msiexec returned 3010 (ERROR_SUCCESS_REBOOT_REQUIRED): WAU is
                  installed, and a restart finishes it (review finding P3-16).
 #>
@@ -9929,21 +10328,43 @@ function Install-WingetAutoUpdate {
 
     if ($WhatIf) {
         # Read-only probe, so the preview matches what a real run would do on this machine.
+        $runtimePin = Get-WindowsAppRuntimePin
+        $runtimePreview = "If Microsoft.WindowsAppRuntime.1.8 is missing, would first install the pinned Windows App Runtime $($runtimePin.Release) (framework $($runtimePin.FrameworkVersion)) for all users from NuGet.org."
         if (Test-WauInstalled) {
-            Write-Info '[DRY-RUN] Winget-AutoUpdate is already installed: would leave it in place and remove its at-logon trigger if it has one (WAU_UpdatesAtLogon = 0).'
+            Write-Info "[DRY-RUN] Winget-AutoUpdate is already installed: would leave it in place and remove its at-logon trigger if it has one (WAU_UpdatesAtLogon = 0). $runtimePreview"
         }
         else {
-            Write-Info "[DRY-RUN] Would install Winget-AutoUpdate $($pin.Version) (weekly updates on Tuesdays at 02:00, not at logon, Full notifications, self-update disabled), if Microsoft.WindowsAppRuntime.1.8 is present."
+            Write-Info "[DRY-RUN] Would install Winget-AutoUpdate $($pin.Version) (weekly updates on Tuesdays at 02:00, not at logon, Full notifications, self-update disabled). $runtimePreview"
         }
         return [pscustomobject]@{ Status = 'DryRun'; Version = $pin.Version; FrameworkMissing = $false; RestartRequired = $false }
     }
 
     $framework = Get-WindowsAppRuntimeStatus
+    $frameworkInstallError = $null
     if ($null -eq $framework.Present) {
-        # A failed query is not evidence the framework is missing; keep the previous behavior.
+        # A failed query is not evidence the framework is missing; keep the previous behavior, and
+        # install nothing on an unknown answer.
         Write-WarningMessage "Could not check for Microsoft.WindowsAppRuntime.1.8 ($($framework.Detail)); continuing with Winget-AutoUpdate."
     }
+    elseif (-not $framework.Present) {
+        # Work-order item 31: install the pinned framework for all users, then go on with the
+        # status it re-checked. Also on a machine that already has WAU, which is then no longer
+        # at risk.
+        $frameworkInstall = Install-WindowsAppRuntimeFramework
+        if ($frameworkInstall.Installed) {
+            $framework = $frameworkInstall.Status
+        }
+        else {
+            $frameworkInstallError = $frameworkInstall.Reason
+        }
+    }
     $frameworkMissing = $framework.Present -eq $false
+    # For the messages below. Install-WindowsAppRuntimeFramework has just printed why, and the
+    # summary repeats it.
+    $frameworkInstallNote = ''
+    if ($frameworkInstallError) {
+        $frameworkInstallNote = " The installer could not install it (see 'Windows App Runtime: NOT INSTALLED' above)."
+    }
 
     if (Test-WauInstalled) {
         $installed = Get-InstalledWauInfo
@@ -9955,7 +10376,7 @@ function Install-WingetAutoUpdate {
             Write-Success "Winget-AutoUpdate is already installed ($versionLabel); leaving its configuration unchanged apart from the at-logon trigger."
             [void](Disable-WauLogonTrigger)
             if ($frameworkMissing) {
-                Write-ErrorMessage "Winget-AutoUpdate is installed, but Microsoft.WindowsAppRuntime.1.8 is missing ($($framework.Detail)). Its next update run may install a winget that cannot start and leave winget unusable. Install the Windows App Runtime 1.8 (update App Installer from the Microsoft Store, or install Microsoft's Windows App SDK 1.8 runtime), or uninstall Winget-AutoUpdate on this machine."
+                Write-ErrorMessage "Winget-AutoUpdate is installed, but Microsoft.WindowsAppRuntime.1.8 is missing ($($framework.Detail)).$frameworkInstallNote Its next update run may install a winget that cannot start and leave winget unusable. Install the Windows App Runtime 1.8 (update App Installer from the Microsoft Store, or install Microsoft's Windows App SDK 1.8 runtime), or uninstall Winget-AutoUpdate on this machine."
             }
             # WAU's registry key says it is installed, not that it will run (review finding P3-36).
             $health = Get-WauTaskHealth
@@ -9968,9 +10389,9 @@ function Install-WingetAutoUpdate {
                 else {
                     Write-ErrorMessage "Winget-AutoUpdate is installed, but $($health.Problem), so apps will not update automatically. To set it up again, uninstall Winget-AutoUpdate (Settings > Apps) and re-run this installer."
                 }
-                return [pscustomobject]@{ Status = 'Unhealthy'; Version = $installed.Version; FrameworkMissing = $frameworkMissing; RestartRequired = $false; Problem = $health.Problem; CheckFailed = [bool]$health.CheckFailed }
+                return [pscustomobject]@{ Status = 'Unhealthy'; Version = $installed.Version; FrameworkMissing = $frameworkMissing; FrameworkInstallError = $frameworkInstallError; RestartRequired = $false; Problem = $health.Problem; CheckFailed = [bool]$health.CheckFailed }
             }
-            return [pscustomobject]@{ Status = 'AlreadyPresent'; Version = $installed.Version; FrameworkMissing = $frameworkMissing; RestartRequired = $false }
+            return [pscustomobject]@{ Status = 'AlreadyPresent'; Version = $installed.Version; FrameworkMissing = $frameworkMissing; FrameworkInstallError = $frameworkInstallError; RestartRequired = $false }
         }
     }
     elseif (-not $frameworkMissing) {
@@ -9978,8 +10399,8 @@ function Install-WingetAutoUpdate {
     }
 
     if ($frameworkMissing) {
-        Write-ErrorMessage "Winget-AutoUpdate was NOT installed: Microsoft.WindowsAppRuntime.1.8 is missing ($($framework.Detail)). Every WAU update run installs the newest winget, which needs that framework, so WAU would leave winget unusable here. Install the Windows App Runtime 1.8 (update App Installer from the Microsoft Store, or install Microsoft's Windows App SDK 1.8 runtime), then re-run this installer. On a newly set-up PC this usually clears once the Store has updated App Installer."
-        return [pscustomobject]@{ Status = 'FrameworkMissing'; Version = $pin.Version; FrameworkMissing = $true; RestartRequired = $false }
+        Write-ErrorMessage "Winget-AutoUpdate was NOT installed: Microsoft.WindowsAppRuntime.1.8 is missing ($($framework.Detail)).$frameworkInstallNote Every WAU update run installs the newest winget, which needs that framework, so WAU would leave winget unusable here. Install the Windows App Runtime 1.8 (update App Installer from the Microsoft Store, or install Microsoft's Windows App SDK 1.8 runtime), then re-run this installer."
+        return [pscustomobject]@{ Status = 'FrameworkMissing'; Version = $pin.Version; FrameworkMissing = $true; FrameworkInstallError = $frameworkInstallError; RestartRequired = $false }
     }
 
     $stagingDir = $null
@@ -10901,6 +11322,10 @@ function Test-AppxPackageProvisioned {
     Full paths to dependency packages (e.g. Microsoft.WindowsAppRuntime, VCLibs).
 .PARAMETER LicensePath
     Optional path to a downloaded license .xml.
+.PARAMETER TimeoutSeconds
+    Under pwsh: a time limit for the Windows PowerShell child (Get-ProcessTimeoutSeconds -Operation
+    AppxProvisioning), which then runs through Invoke-ExternalProcess, its output echoed into the
+    transcript, and is stopped when the limit runs out. 0 (the default): no limit, as before.
 #>
 function Invoke-AppxProvisioning {
     param (
@@ -10911,7 +11336,10 @@ function Invoke-AppxProvisioning {
         [string[]]$DependencyPackagePath = @(),
 
         [Parameter(Mandatory = $false)]
-        [string]$LicensePath
+        [string]$LicensePath,
+
+        [Parameter(Mandatory = $false)]
+        [int]$TimeoutSeconds = 0
     )
 
     $hasLicense = $LicensePath -and (Test-Path $LicensePath)
@@ -10932,6 +11360,19 @@ function Invoke-AppxProvisioning {
             else { '' }
             $licClause = if ($hasLicense) { "-LicensePath '$($LicensePath.Replace("'", "''"))'" } else { '-SkipLicense' }
             $command = "Add-AppxProvisionedPackage -Online -PackagePath '$escapedPackagePath' $depClause $licClause -ErrorAction Stop | Out-Null"
+            if ($TimeoutSeconds -gt 0) {
+                # No progress bar: on a redirected output Windows PowerShell writes it as CLIXML.
+                $run = Invoke-ExternalProcess -FilePath 'powershell.exe' -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', "`$ProgressPreference = 'SilentlyContinue'; $command") -TimeoutSeconds $TimeoutSeconds
+                if ($run.LaunchFailed) {
+                    Write-ErrorMessage "Add-AppxProvisionedPackage failed for '$PackagePath': Windows PowerShell could not be started ($($run.LaunchError))."
+                    return $false
+                }
+                if ($run.TimedOut) {
+                    Write-ErrorMessage ("Add-AppxProvisionedPackage did not finish within {0} minutes for '{1}' and was stopped." -f [Math]::Round($TimeoutSeconds / 60), $PackagePath)
+                    return $false
+                }
+                return ($run.ExitCode -eq 0)
+            }
             & powershell.exe -NoProfile -ExecutionPolicy Bypass -Command $command
             return ($LASTEXITCODE -eq 0)
         }

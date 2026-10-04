@@ -849,6 +849,37 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
 
             ($script:errorMessages -join "`n") | Should -Match 'Auto-updates: AT RISK'
         }
+
+        # Work-order item 31: the summary says why the installer's own install of the framework
+        # did not help, under the Auto-updates line, and nothing when it did not try.
+        It 'Says under the Auto-updates line why the framework could not be installed (<Status>)' -ForEach @(
+            @{ Status = 'FrameworkMissing'; Line = 'Auto-updates: NOT CONFIGURED' }
+            @{ Status = 'AlreadyPresent'; Line = 'Auto-updates: AT RISK' }
+        ) {
+            $script:wauStatus = $Status
+            Mock Install-WingetAutoUpdate { [pscustomobject]@{ Status = $script:wauStatus; Version = '2.12.0'; FrameworkMissing = $true; FrameworkInstallError = 'installing it for all users needs administrator rights' } }
+
+            Invoke-WingetInstall -Apps @(@{ name = 'Contoso.AppOne' }) -NonInteractive | Should -Be 8
+
+            $messages = @($script:errorMessages)
+            $lineIndex = -1
+            for ($index = 0; $index -lt $messages.Count; $index++) {
+                if ($messages[$index].StartsWith($Line)) {
+                    $lineIndex = $index
+                    break
+                }
+            }
+            $lineIndex | Should -BeGreaterOrEqual 0
+            $messages[$lineIndex + 1] | Should -Be '  The installer could not install it: installing it for all users needs administrator rights.'
+        }
+
+        It 'Adds no reason line when the installer did not try to install the framework' {
+            Mock Install-WingetAutoUpdate { [pscustomobject]@{ Status = 'FrameworkMissing'; Version = '2.12.0'; FrameworkMissing = $true } }
+
+            Invoke-WingetInstall -Apps @(@{ name = 'Contoso.AppOne' }) -NonInteractive | Should -Be 8
+
+            ($script:errorMessages -join "`n") | Should -Not -Match 'The installer could not install it'
+        }
     }
 
     # Review findings P2-8 and P2-10. The signature-specific deadlock gate (two DesktopAppInstaller

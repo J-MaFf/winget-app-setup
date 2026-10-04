@@ -437,6 +437,10 @@ Describe 'Winget-AutoUpdate integration (issue #168)' {
             # Framework present by default; the framework-gate tests below override it. Without
             # this mock the real query would run on the CI runner, which lacks the framework.
             Mock Get-WindowsAppRuntimeStatus { [pscustomobject]@{ Present = $true; Detail = 'X64 8000.921.1539.0' } }
+            # Installing the framework (work-order item 31) has its own Describe below. Here it
+            # fails by default, so the framework-missing tests keep their WAU skip and nothing is
+            # downloaded or provisioned on the machine running the tests.
+            Mock Install-WindowsAppRuntimeFramework { [pscustomobject]@{ Installed = $false; Status = $null; Reason = 'the test does not install it' } }
             Mock Disable-WauLogonTrigger { $false }
             # The mocked downloads below write no file; the held-open MSI tests (next Context) use
             # the real Open-ReadLockedFile on a real file.
@@ -782,6 +786,109 @@ Describe 'Winget-AutoUpdate integration (issue #168)' {
             $result.FrameworkMissing | Should -BeTrue
             Should -Invoke Invoke-WebRequest -Times 0 -Exactly
             Should -Invoke Write-ErrorMessage -Times 1 -Exactly -ParameterFilter { $Message -match 'NOT installed: Microsoft\.WindowsAppRuntime\.1\.8 is missing' }
+        }
+
+        # Work-order item 31 (R13-3): a fresh PC lacks the framework until something installs it,
+        # so the run used to end with 'Auto-updates: NOT CONFIGURED' and exit 8.
+        It 'installs the pinned framework first when it is missing, then installs WAU (work-order item 31)' {
+            Mock Get-WindowsAppRuntimeStatus { [pscustomobject]@{ Present = $false; Detail = 'none registered' } }
+            $script:callOrder = [System.Collections.Generic.List[string]]::new()
+            Mock Install-WindowsAppRuntimeFramework {
+                $script:callOrder.Add('framework')
+                [pscustomobject]@{ Installed = $true; Status = [pscustomobject]@{ Present = $true; Detail = 'X64 8000.994.2142.0' }; Reason = $null }
+            }
+            Mock Test-WauInstalled { $false }
+            Mock New-WauStagingDirectory { Join-Path $TestDrive 'wau-msi-test' }
+            Mock Invoke-WebRequest { $script:callOrder.Add('wau download') }
+            Mock Get-FileHash { @{ Hash = (Get-WauPin).Sha256 } }
+            Mock Invoke-ExternalProcess { $script:callOrder.Add('msiexec'); New-TestProcessResult -ExitCode 0 }
+            Mock Remove-Item { }
+
+            $result = Install-WingetAutoUpdate
+
+            $result.Status | Should -Be 'Configured'
+            $result.FrameworkMissing | Should -BeFalse
+            @($script:callOrder) | Should -Be @('framework', 'wau download', 'msiexec')
+            Should -Invoke Install-WindowsAppRuntimeFramework -Times 1 -Exactly
+            Should -Invoke Write-ErrorMessage -Times 0 -Exactly
+        }
+
+        It 'no longer reports an already-installed WAU at risk once the framework is installed' {
+            Mock Get-WindowsAppRuntimeStatus { [pscustomobject]@{ Present = $false; Detail = 'none registered' } }
+            Mock Install-WindowsAppRuntimeFramework { [pscustomobject]@{ Installed = $true; Status = [pscustomobject]@{ Present = $true; Detail = 'X64 8000.994.2142.0' }; Reason = $null } }
+            Mock Test-WauInstalled { $true }
+            Mock Get-InstalledWauInfo { [pscustomobject]@{ Version = [version](Get-WauPin).Version; ProductCode = (Get-WauPin).ProductCode } }
+            Mock Invoke-ExternalProcess { throw 'should not run msiexec for a current WAU' }
+
+            $result = Install-WingetAutoUpdate
+
+            $result.Status | Should -Be 'AlreadyPresent'
+            $result.FrameworkMissing | Should -BeFalse
+            Should -Invoke Write-ErrorMessage -Times 0 -Exactly
+        }
+
+        It 'skips WAU and says why when the framework cannot be installed' {
+            Mock Get-WindowsAppRuntimeStatus { [pscustomobject]@{ Present = $false; Detail = 'none registered' } }
+            Mock Install-WindowsAppRuntimeFramework { [pscustomobject]@{ Installed = $false; Status = $null; Reason = 'Add-AppxProvisionedPackage failed (its error is above)' } }
+            Mock Test-WauInstalled { $false }
+            Mock Invoke-WebRequest { throw 'should not download WAU without the framework' }
+            $script:errors = @()
+            Mock Write-ErrorMessage { $script:errors += $Message }
+
+            $result = Install-WingetAutoUpdate
+
+            $result.Status | Should -Be 'FrameworkMissing'
+            $result.FrameworkMissing | Should -BeTrue
+            $result.FrameworkInstallError | Should -Be 'Add-AppxProvisionedPackage failed (its error is above)'
+            Should -Invoke Invoke-WebRequest -Times 0 -Exactly
+            ($script:errors -join "`n") | Should -Match 'NOT installed: Microsoft\.WindowsAppRuntime\.1\.8 is missing \(none registered\)\. The installer could not install it \(see ''Windows App Runtime: NOT INSTALLED'' above\)\.'
+        }
+
+        It 'reports an already-installed WAU at risk, with the reason, when the framework cannot be installed' {
+            Mock Get-WindowsAppRuntimeStatus { [pscustomobject]@{ Present = $false; Detail = 'none registered' } }
+            Mock Install-WindowsAppRuntimeFramework { [pscustomobject]@{ Installed = $false; Status = $null; Reason = 'installing it for all users needs administrator rights' } }
+            Mock Test-WauInstalled { $true }
+            Mock Get-InstalledWauInfo { [pscustomobject]@{ Version = [version](Get-WauPin).Version; ProductCode = (Get-WauPin).ProductCode } }
+            $script:errors = @()
+            Mock Write-ErrorMessage { $script:errors += $Message }
+
+            $result = Install-WingetAutoUpdate
+
+            $result.Status | Should -Be 'AlreadyPresent'
+            $result.FrameworkMissing | Should -BeTrue
+            $result.FrameworkInstallError | Should -Be 'installing it for all users needs administrator rights'
+            ($script:errors -join "`n") | Should -Match 'The installer could not install it \(see ''Windows App Runtime: NOT INSTALLED'' above\)\. Its next update run may install a winget that cannot start'
+        }
+
+        It 'does not try to install the framework when it is present, or when the check itself could not run' -ForEach @(
+            @{ Present = $true }
+            @{ Present = $null }
+        ) {
+            $script:present = $Present
+            Mock Get-WindowsAppRuntimeStatus { [pscustomobject]@{ Present = $script:present; Detail = 'checked' } }
+            Mock Test-WauInstalled { $true }
+            Mock Get-InstalledWauInfo { [pscustomobject]@{ Version = [version](Get-WauPin).Version; ProductCode = (Get-WauPin).ProductCode } }
+
+            $result = Install-WingetAutoUpdate
+
+            $result.Status | Should -Be 'AlreadyPresent'
+            Should -Invoke Install-WindowsAppRuntimeFramework -Times 0 -Exactly
+        }
+
+        It 'previews installing the framework under -WhatIf without installing it' -ForEach @(
+            @{ WauInstalled = $false }
+            @{ WauInstalled = $true }
+        ) {
+            $script:wauInstalled = $WauInstalled
+            Mock Test-WauInstalled { $script:wauInstalled }
+            $script:infos = @()
+            Mock Write-Info { $script:infos += $Message }
+
+            $result = Install-WingetAutoUpdate -WhatIf
+
+            $result.Status | Should -Be 'DryRun'
+            ($script:infos -join "`n") | Should -Match 'If Microsoft\.WindowsAppRuntime\.1\.8 is missing, would first install the pinned Windows App Runtime 1\.8\.12 \(framework 8000\.994\.2142\.0\) for all users'
+            Should -Invoke Install-WindowsAppRuntimeFramework -Times 0 -Exactly
         }
 
         It 'still installs WAU when the framework check itself cannot run' {

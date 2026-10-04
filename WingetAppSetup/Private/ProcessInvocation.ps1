@@ -29,9 +29,11 @@
     WingetSourceUpdate `winget source update`, the source check before the installs (2 minutes).
     WingetSourceReset `winget source reset`, which downloads the source again (5 minutes).
     MsiExec           one msiexec install or uninstall (15 minutes, as for the PowerShell 7 MSI).
-    WebDownload       a small file download, such as the Winget-AutoUpdate MSI: the connection
-                      and the wait for the response headers (5 minutes). Invoke-WebRequest's
-                      -TimeoutSec does not cover the body.
+    AppxProvisioning  one Add-AppxProvisionedPackage, run in Windows PowerShell, such as the Windows
+                      App Runtime framework's (10 minutes).
+    WebDownload       a file download, such as the Winget-AutoUpdate MSI or the Windows App
+                      Runtime package: the connection and the wait for the response headers
+                      (5 minutes). Invoke-WebRequest's -TimeoutSec does not cover the body.
     WebDownloadStall  how long a download may receive nothing once the file is arriving, on
                       PowerShell 7.4 and newer (2 minutes). 7.3 and older have no such limit.
 .RETURNS
@@ -40,7 +42,7 @@
 function Get-ProcessTimeoutSeconds {
     param (
         [Parameter(Mandatory = $true)]
-        [ValidateSet('WingetInstall', 'WingetDownload', 'WingetUninstall', 'WingetListCheck', 'WingetVersion', 'WingetList', 'WingetSourceUpdate', 'WingetSourceReset', 'MsiExec', 'WebDownload', 'WebDownloadStall')]
+        [ValidateSet('WingetInstall', 'WingetDownload', 'WingetUninstall', 'WingetListCheck', 'WingetVersion', 'WingetList', 'WingetSourceUpdate', 'WingetSourceReset', 'MsiExec', 'AppxProvisioning', 'WebDownload', 'WebDownloadStall')]
         [string]$Operation
     )
 
@@ -54,6 +56,7 @@ function Get-ProcessTimeoutSeconds {
         'WingetSourceUpdate' { return 120 }
         'WingetSourceReset' { return 300 }
         'MsiExec' { return 900 }
+        'AppxProvisioning' { return 600 }
         'WebDownload' { return 300 }
         'WebDownloadStall' { return 120 }
     }

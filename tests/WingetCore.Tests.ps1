@@ -1715,3 +1715,43 @@ Describe 'Invoke-AppxProvisioning (delegated command quoting, issue #178)' {
         $script:capturedCommand | Should -BeLike "*-PackagePath 'C:\dl\pkg.msixbundle' -DependencyPackagePath @('C:\dl\Dependencies\runtime.msix') -SkipLicense*"
     }
 }
+
+Describe 'Invoke-AppxProvisioning -TimeoutSeconds (work-order item 31)' {
+    # The Windows App Runtime framework install provisions with a time limit, so a DISM call that
+    # hangs cannot hold an unattended run for ever (review finding P2-5). The Windows PowerShell
+    # child then runs through Invoke-ExternalProcess, which echoes its output into the transcript.
+    BeforeEach {
+        $script:errors = @()
+        Mock Write-ErrorMessage { $script:errors += $Message }
+        Mock powershell.exe { throw 'the time-limited path must not call powershell.exe directly' }
+    }
+
+    It 'runs Add-AppxProvisionedPackage in Windows PowerShell with the time limit and no progress bar' -Skip:($PSVersionTable.PSEdition -ne 'Core') {
+        Mock Invoke-ExternalProcess { New-TestProcessResult -ExitCode 0 }
+
+        $result = Invoke-AppxProvisioning -PackagePath "C:\Users\O'Brien\fw.msix" -TimeoutSeconds 600
+
+        $result | Should -BeTrue
+        Should -Invoke Invoke-ExternalProcess -Times 1 -Exactly -ParameterFilter {
+            $FilePath -eq 'powershell.exe' -and $TimeoutSeconds -eq 600 -and
+            $ArgumentList[0] -eq '-NoProfile' -and $ArgumentList[-2] -eq '-Command' -and
+            $ArgumentList[-1] -like "`$ProgressPreference = 'SilentlyContinue'; Add-AppxProvisionedPackage -Online -PackagePath 'C:\Users\O''Brien\fw.msix'  -SkipLicense -ErrorAction Stop*"
+        }
+        Should -Invoke powershell.exe -Times 0 -Exactly
+    }
+
+    It 'returns false, and says so, when <Case>' -Skip:($PSVersionTable.PSEdition -ne 'Core') -ForEach @(
+        @{ Case = 'Add-AppxProvisionedPackage fails'; Result = { New-TestProcessResult -ExitCode 1 }; Message = $null }
+        @{ Case = 'it runs past the time limit'; Result = { New-TestProcessResult -TimedOut }; Message = "Add-AppxProvisionedPackage did not finish within 10 minutes for 'C:\dl\fw.msix' and was stopped." }
+        @{ Case = 'Windows PowerShell cannot be started'; Result = { New-TestProcessResult -LaunchFailed -LaunchErrorCode 2 -LaunchError 'The system cannot find the file specified.' }; Message = "Add-AppxProvisionedPackage failed for 'C:\dl\fw.msix': Windows PowerShell could not be started (The system cannot find the file specified.)." }
+    ) {
+        $script:processResult = & $Result
+        Mock Invoke-ExternalProcess { $script:processResult }
+
+        Invoke-AppxProvisioning -PackagePath 'C:\dl\fw.msix' -TimeoutSeconds 600 | Should -BeFalse
+
+        if ($Message) {
+            $script:errors | Should -Be @($Message)
+        }
+    }
+}

@@ -9,6 +9,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- When `Microsoft.WindowsAppRuntime.1.8` is missing, the installer now installs a pinned, verified
+  copy for every user of the PC before it sets up Winget-AutoUpdate (work-order item 31, finding
+  R13-3). A freshly imaged PC, one whose Microsoft Store updates are blocked, and Windows Server lack
+  the framework until something installs it, so such a run used to end with
+  `Auto-updates: NOT CONFIGURED` and exit code 8 and needed a re-run once the Store had updated App
+  Installer. `Install-WindowsAppRuntimeFramework` (`WingetAppSetup/Private/WindowsAppRuntime.ps1`)
+  downloads `Microsoft.WindowsAppSDK.Runtime` 1.8.260921001 (Windows App Runtime 1.8.12, framework
+  8000.994.2142.0) from NuGet.org into a folder limited to SYSTEM and Administrators, takes the
+  framework `.msix` for the PC's architecture (x64, x86 or ARM64) out of it, checks its pinned size
+  and SHA256 (`Get-WindowsAppRuntimePin`) and its Authenticode signature (`Microsoft Corporation`),
+  keeps it open from the hash until it is provisioned, provisions it with
+  `Add-AppxProvisionedPackage -Online -SkipLicense` in Windows PowerShell with a 10-minute limit
+  (`Invoke-AppxProvisioning -TimeoutSeconds`, new operation `AppxProvisioning` in
+  `Get-ProcessTimeoutSeconds`), and then checks again with `Get-WindowsAppRuntimeStatus` (and
+  `Get-AppxProvisionedPackage`, which only warns). It runs on a first install and on a re-run that
+  finds WAU already installed, which is then no longer `AT RISK`. It installs nothing when the run
+  is not elevated, on 32-bit Arm or a Windows build older than 17763, over a provisioned framework
+  of the same or a newer version, or when the all-users check could not run, and it never uses
+  `Repair-WinGetPackageManager -AllUsers` (#265). The whole 150 MB package is downloaded rather than
+  a byte range of it: the framework's offset moves when NuGet re-signs the package, and a proxy can
+  ignore a range request. The transcript gets a `Windows App Runtime: installed ...` or
+  `Windows App Runtime: NOT INSTALLED - <reason>` line; when the install fails, WAU is skipped as
+  before, exit code 8, and the summary's `Auto-updates:` line is followed by the reason. `-WhatIf`
+  previews it. `New-WauStagingDirectory` takes a `-Prefix` for the folder name.
+  - **E2E.** `windows-latest` ships without the framework, so both passes there are now expected to
+    install it (first pass) and set up Winget-AutoUpdate, and to exit 0. `e2e/Invoke-InstallPass.ps1`
+    still accepts exit 8 for the missing framework, and its message now quotes the transcript's
+    `Windows App Runtime:` line. `e2e/TranscriptAssertions.ps1` reads that line
+    (`WindowsAppRuntimeLine`, `WindowsAppRuntimeInstalled`), quotes it in the `NOT CONFIGURED`
+    detail, and `-ExpectAllSkippedOnSecondRun` adds the check that the second pass did not install
+    the framework again. New fixtures `first-pass-runtime-installed` and
+    `second-pass-runtime-present`.
+  - The bead's first idea, starting the Store's App Installer update and waiting for it, is not
+    done: the pinned install covers Store-blocked PCs and Windows Server too, and the Store update
+    can take hours.
+  - Not yet checked on a real Windows PC: whether provisioning the framework on its own registers
+    it for existing and new accounts on Windows 10, Windows 11 and Windows Server 2025, whether
+    `Get-AuthenticodeSignature` under PowerShell 7 reads the `.msix` signature as `Valid`, and
+    whether `Add-AppxProvisionedPackage` reads the file while the installer holds it open.
+
 - RMM runs get a non-interactive switch for the one-liner, one run at a time, a machine-readable
   result and log retention (review findings P3-41, P3-42).
   - **`WINGET_APP_SETUP_NONINTERACTIVE`.** `1`, `true` or `yes` turns on non-interactive mode, for
@@ -78,8 +118,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   passes only while `KNOWN_PLATFORM_INCOMPATIBLE` is non-empty. The weekly run now runs the
   readme's one-liner verbatim (`Set-ExecutionPolicy` and the `refs/heads/main` URL), and a test
   fails if the two drift apart. `report-failure` covers both legs, one section each, and shows the
-  latest 5.1 bootstrap transcript in a section of its own. A Winget-AutoUpdate leg is not added
-  yet: `windows-latest` lacks `Microsoft.WindowsAppRuntime.1.8`, so the installer skips WAU there.
+  latest 5.1 bootstrap transcript in a section of its own. A Winget-AutoUpdate leg (starting
+  WAU's task and checking that winget still starts) is not added yet; `windows-latest` lacks
+  `Microsoft.WindowsAppRuntime.1.8`, which the installer now installs itself (see above).
 - Diagnosed the 0x80073CF3 "depends on a framework that could not be found" AppX rejection distinctly (issue #279): `Test-AppxMissingFrameworkDependency` (`WingetAppSetup/Private/WingetBootstrap.ps1`) mirrors the existing `Test-AppxDowngradeRejection` (0x80073D06) classifier — it requires the 0x80073CF3 HRESULT together with the missing-framework phrasing or the specific `Microsoft.WindowsAppRuntime.1.8` name, so it stays narrow to the signature two independent GitHub-hosted E2E runs actually reproduced rather than over-matching every 0x80073CF3 (a broad "dependency or conflict validation" code reused for unrelated conflicts). `Invoke-WingetPackageManagerRepair` now returns a parallel `MissingFrameworkDependency` flag in its result hashtable and short-circuits its `-Force` retry the same way it already does for `DowngradeRejected` — retrying cannot conjure a framework that genuinely is not on the machine. `Initialize-WingetSourcesForUser` (`WingetAppSetup/Public/WingetCore.ps1`) surfaces a dedicated remediation warning naming the missing framework and linking to issue #279. This is purely diagnostic/fail-fast — it does not attempt to install the missing framework itself, since there is no verified redistributable for it to deploy safely. Pinning `e2e-install`'s runner off `windows-latest` to `windows-2022` was tried as a workaround for #279 and reverted in the same PR: that pin's own self-validating run failed every catalog app immediately with "No applicable app licenses found" — a distinct, total failure worse than #279's slow partial one, filed separately as issue #282. `e2e-install` stays on `windows-latest`; both issues remain open pending a viable runner target. A third distinct `e2e-install` failure surfaced on this PR's own re-validation run: the first install pass completed cleanly and then an uncaught `Start-Process` error ("The file cannot be accessed by the system") crashed the whole script under 5 minutes later, most likely inside `Wait-WingetLaunchable`'s post-WAU-install probe even though its try/catch appears to cover that call — filed as issue #283 rather than patched blind, since `e2e-install` isn't a required merge check and the root cause needs a real Windows repro to confirm.
 - The PS7 bootstrap's terminal failure message now recognizes a GitHub-wide 429 throttle (issue #274): `Test-GitHubRateLimitError` (`WingetAppSetup/Private/PowerShell7Bootstrap.ps1`) matches "429"/"Too Many Requests" in the caught error text from the `raw.githubusercontent.com` metadata read and the `aka.ms/install-powershell.ps1` fallback — both of which independently depend on GitHub, so a machine already throttled loses them together. When either sets the flag, the final "PowerShell 7 could not be installed automatically" message explains the shared-throttle cause and suggests `winget source reset --force` (which does not depend on GitHub) instead of just repeating the generic manual-install instructions.
 - Documented a jsDelivr CDN mirror fallback in readme.md for the one-line bootstrap, for when `raw.githubusercontent.com` throttles a shared/corporate NAT egress IP with `429: Too Many Requests` (issue #272).
@@ -122,15 +163,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Exit code 8.** The apps installed but auto-updates are not configured or will not run: the
     `Auto-updates:` line is `FAILED`, `NOT CONFIGURED`, `AT RISK` or `UNHEALTHY`.
     `Get-InstallerExitCode` now ranks 1 > 2 > 8 > 3010 > 0. A machine without
-    `Microsoft.WindowsAppRuntime.1.8` therefore exits 8 even when every app installed.
+    `Microsoft.WindowsAppRuntime.1.8` that the installer could not install it on (see Added)
+    therefore exits 8 even when every app installed.
   - **`msiexec` logs** (P3-37). WAU's install and uninstall run through `Invoke-WauMsiexec`, which
     writes a verbose log (`wau-msi-<install|uninstall>-<time>-<attempt>.log`) to the logs folder,
     names it on failure, and gives the uninstall the same time limit and 1618 wait as the install.
   - **Quieter transcripts** (P3-38). The 'task not found' probes no longer write
     `PS>TerminatingError(Get-ScheduledTask)` into every transcript, which #283's was misread as.
   - **E2E.** `e2e/Invoke-InstallPass.ps1` accepts exit 8 only when the pass's own transcript says
-    WAU was skipped because `Microsoft.WindowsAppRuntime.1.8` is missing, which is every pass on
-    `windows-latest`.
+    WAU was skipped because `Microsoft.WindowsAppRuntime.1.8` is missing. Before the installer
+    installed the framework itself (see Added), that was every pass on `windows-latest`.
 
 - A run as SYSTEM or under cross-user elevation no longer installs an app at winget's default
   (per-user) scope (review finding P3-22). An app with no machine-scope installer used to be
@@ -787,7 +829,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   while a WAU task is running waits up to 15 minutes for it (`Wait-WauIdle`). The schedule is
   described correctly now: weekly on Tuesdays at 02:00, not "weekly at 2 AM". `-WhatIf` previews
   the logon-trigger change on machines that already have WAU, and `e2e/Assert-Install.ps1` expects
-  no WAU plus `Auto-updates: NOT CONFIGURED` on runners without the framework (windows-latest).
+  no WAU plus `Auto-updates: NOT CONFIGURED` on runners without the framework (windows-latest,
+  until the installer installed the framework itself: see Added).
 - An aborted run no longer exits 0. The entry script's top-level `try/finally` (`build/fragments/tail.ps1`)
   had no catch, so inside it a .NET exception, a method call on `$null` or a parameter-binding
   error anywhere in the run aborted everything - no retry pass, no summary - and the process exited

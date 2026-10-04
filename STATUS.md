@@ -22,7 +22,7 @@ resets winget's sources and upgrades apps (PowerShell included). On the Server 2
 lacks the framework, that is the #279/#284 wedge; the PowerShell upgrade underneath the running
 installer is the most likely cause of the #283 console stop. The older "runner image" / "Store
 servicing" explanation below is superseded. The branch drops `RUN_WAU=YES`, installs WAU last and
-only when the framework is present (the runner now reports `Auto-updates: NOT CONFIGURED`), removes
+only when the framework is present (installing a pinned copy of it first, see below), removes
 WAU's at-logon run, waits for a running WAU before using winget, makes a run that leaves winget
 unusable exit 2, and makes an aborted run exit 5 instead of 0. #279, #283 and #284 stay open until
 an E2E run on this branch confirms it. `Invoke-WingetInstall` now returns its exit code instead of
@@ -133,10 +133,17 @@ removed Windows Terminal. Winget-AutoUpdate counts as set up only when its
 `\WAU\Winget-AutoUpdate` task exists, is enabled and has an enabled trigger; otherwise the summary
 says `Auto-updates: UNHEALTHY`, and the transcript shows the task's state and the end of WAU's
 `updates.log`. New exit code 8: the apps are fine, but auto-updates are `FAILED`,
-`NOT CONFIGURED`, `AT RISK` or `UNHEALTHY` (precedence 1 > 2 > 8 > 3010 > 0). On the Server 2025
-runner, which lacks the framework, every E2E pass therefore exits 8, which
-`e2e/Invoke-InstallPass.ps1` accepts only when the pass's transcript gives the missing framework as
-the reason. For RMM runs: `WINGET_APP_SETUP_NONINTERACTIVE=1` makes the one-liner non-interactive;
+`NOT CONFIGURED`, `AT RISK` or `UNHEALTHY` (precedence 1 > 2 > 8 > 3010 > 0). When
+`Microsoft.WindowsAppRuntime.1.8` is missing, the WAU step now first installs a pinned copy for every
+user (Windows App Runtime 1.8.12, framework 8000.994.2142.0, the framework `.msix` from Microsoft's
+`Microsoft.WindowsAppSDK.Runtime` package on NuGet.org, size, SHA256 and Microsoft signature
+checked, provisioned with `Add-AppxProvisionedPackage -SkipLicense`, then checked again), so a
+freshly imaged PC, a Store-blocked PC or Windows Server gets WAU on the first run instead of
+`NOT CONFIGURED` and exit 8; it never replaces a newer framework and never uses
+`Repair-WinGetPackageManager -AllUsers`. The Server 2025 runner, which ships without the framework,
+is therefore expected to get it and WAU on the first pass and exit 0;
+`e2e/Invoke-InstallPass.ps1` still accepts exit 8 when the pass's transcript gives the missing
+framework as the reason, and quotes why the install did not happen. For RMM runs: `WINGET_APP_SETUP_NONINTERACTIVE=1` makes the one-liner non-interactive;
 one elevated run at a time holds the `Global\winget-app-setup-run` mutex, and a second one exits 6;
 every real run prints a `RESULT:` line, and the run that holds the lock writes
 `logs\last-run.json` (schema version 1); the logs folder keeps the newest 30 transcripts, and
@@ -178,8 +185,9 @@ worse than #279's slow partial one, tracked separately as
 registration and `Repair-WinGetPackageManager` fail with, and `Get-WindowsAppRuntimeStatus` checks
 for all users whether `Microsoft.WindowsAppRuntime.1.8` is there. When it is missing, the repair runs
 `-AllUsers` first, and no forced repair follows once those codes or the missing framework explain
-the failure; the run then stops with one line that names the framework. It does not install the
-framework itself, since no verified redistributable exists to deploy it. Separately,
+the failure; the run then stops with one line that names the framework. That start-of-run step
+does not install the framework; the Winget-AutoUpdate step at the end of the run now does
+(`Install-WindowsAppRuntimeFramework`, a pinned and verified copy from NuGet.org). Separately,
 [#280](https://github.com/J-MaFf/winget-app-setup/pull/280)'s fail-fast
 `Get-ConflictingDesktopAppInstallerVersions` was meant to stop the run from burning a full retry
 budget once this conflict appeared mid-run; it read the current user's AppX view, never fired on the
@@ -337,14 +345,14 @@ every repository secret.
 |------|-------------|
 | `WingetAppSetup/` | Source-of-truth PowerShell module (`.psd1` manifest + `.psm1` loader) |
 | `WingetAppSetup/Public/` | Exported functions: logging, winget core, app validation, Windows Terminal config, install orchestration (updates are outsourced to WAU), uninstall orchestration (`Invoke-WingetUninstall`) |
-| `WingetAppSetup/Private/` | Internal helpers: system info, elevation, graphical tools, the Windows PowerShell 5.1 → PowerShell 7 bootstrap, the machine-wide winget and provisioning lookups a run as SYSTEM uses (`MachineContext.ps1`), the run lock (`RunLock.ps1`), the `RESULT` line and `last-run.json` (`RunRecord.ps1`), log retention (`Housekeeping.ps1`) and the uninstaller's per-app step (`AppUninstall.ps1`) |
+| `WingetAppSetup/Private/` | Internal helpers: system info, elevation, graphical tools, the Windows PowerShell 5.1 → PowerShell 7 bootstrap, the machine-wide winget and provisioning lookups a run as SYSTEM uses (`MachineContext.ps1`), the run lock (`RunLock.ps1`), the `RESULT` line and `last-run.json` (`RunRecord.ps1`), log retention (`Housekeeping.ps1`), the uninstaller's per-app step (`AppUninstall.ps1`) and the pinned `Microsoft.WindowsAppRuntime.1.8` install before Winget-AutoUpdate (`WindowsAppRuntime.ps1`) |
 | `build/Build-WingetInstallScript.ps1` | Concatenates the module + entry fragments into `winget-app-install.ps1` |
 | `build/fragments/` | `head.ps1` (PSScriptInfo, help, `param`) and `tail.ps1` (entry-point dispatch) |
 | `winget-app-install.ps1` | **Generated** single-file installer for local and `irm \| iex` use — do not edit by hand |
 | `winget-app-uninstall.ps1` | Uninstall entry script; imports the module from the repo and runs `Invoke-WingetUninstall` (exit codes in readme "Uninstall") |
 | `tests/` | Pester suite, one `<Area>.Tests.ps1` per module file plus `EntryPoint.Tests.ps1`, `TestHarness.Tests.ps1`, `BuildGuards.Tests.ps1` (the build guards and the pre-commit hook) and the `E2E*.Tests.ps1` files (for the `e2e/` scripts, with sample transcripts in `tests/fixtures/e2e`); `TestHelpers.ps1` loads the module once per file and stands in for Windows-only commands, so the suite also runs on Linux/macOS |
 | `e2e/Assert-Install.ps1` | Shared post-install assertions for end-to-end runs (tier 1 workflow below; tier 2 [#215](https://github.com/J-MaFf/winget-app-setup/issues/215) reuses it); the transcript checks are in `e2e/TranscriptAssertions.ps1` and fixture-tested; `-InstallerPath` checks that every pass ran the checkout's build |
-| `e2e/Invoke-InstallPass.ps1` | Starts each E2E install pass (one-liner or `-File`, from PowerShell 7 or Windows PowerShell 5.1) and applies the exit-code policy: 0 and 3010 pass, 8 only when the pass's transcript says WAU was skipped for the missing `Microsoft.WindowsAppRuntime.1.8`, 1 only while `KNOWN_PLATFORM_INCOMPATIBLE` is non-empty |
+| `e2e/Invoke-InstallPass.ps1` | Starts each E2E install pass (one-liner or `-File`, from PowerShell 7 or Windows PowerShell 5.1) and applies the exit-code policy: 0 and 3010 pass, 8 only when the pass's transcript says WAU was skipped for the missing `Microsoft.WindowsAppRuntime.1.8` (quoting its `Windows App Runtime:` line), 1 only while `KNOWN_PLATFORM_INCOMPATIBLE` is non-empty |
 | `e2e/Remove-PreinstalledApps.ps1` | Uninstalls the catalog apps the runner image ships with (Chrome, 7-Zip, Git; with `-IncludePowerShell7`, PowerShell 7 too) before the first E2E pass; every call time-limited, failures become warnings |
 | `e2e/Collect-Diagnostics.ps1` | Windows PowerShell 5.1 snapshots for the E2E run: pwsh versions, App Installer / WindowsAppRuntime AppX state, WAU tasks; at the end MsiInstaller and RestartManager events, AppX deployment errors and warnings, and WAU logs (`e2e-diagnostics` artifact); always exits 0 |
 | `.github/workflows/e2e-install.yml` | E2E tier 1: real install runs on GitHub-hosted `windows-latest` in two legs, `e2e-install` from PowerShell 7 and `e2e-install-windows-powershell` from Windows PowerShell 5.1 through the PowerShell 7 bootstrap, after removing the preinstalled Chrome, 7-Zip and Git (issues #279/#282/#283; weekly against raw `main`, plus dispatches and PRs that touch the product or e2e files against the checkout; uploads transcripts and diagnostics; a failed, timed-out or cancelled weekly or `main`-dispatched run files an issue from the ubuntu `report-failure` job) |
@@ -439,6 +447,15 @@ every repository secret.
   real "not found" error id matches `CmdletizationQuery_NotFound*`), and WAU's `updates.log` tail
   (WAU writes it from Windows PowerShell 5.1). Treat exit code 8 in the RMM policies as "apps OK,
   auto-updates need attention", not as a failed install.
+- Check the pinned Windows App Runtime install on real Windows: a fresh Windows 11 and Windows 10
+  PC without `Microsoft.WindowsAppRuntime.1.8`, cross-user elevated and as SYSTEM, and the first E2E
+  run of this branch on Server 2025. Confirm that provisioning the framework `.msix` on its own
+  makes it show for every user (`Get-AppxPackage -AllUsers`) and for an account that signs in for
+  the first time, that `Get-AuthenticodeSignature` under PowerShell 7 reads the `.msix` as `Valid`
+  from `Microsoft Corporation`, that `Add-AppxProvisionedPackage` can read the file while the
+  installer holds it open, and then that WAU's own run keeps winget working. Once the E2E run shows
+  the framework installed on `windows-latest`, drop its exit-8 acceptance so a broken install fails
+  the run.
 - Check the Adobe Reader split on a real ARM64 PC (32-bit Reader installed, 64-bit skipped), and
   whether `Google.GoogleDrive` and `Dell.CommandUpdate.Universal`, which ship only x64 installers,
   need the same gate there.

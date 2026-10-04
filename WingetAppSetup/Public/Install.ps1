@@ -35,7 +35,8 @@
     non-interactive run (nobody to approve a prompt, so none is shown), irm | iex, or the imported
     module (review finding P2-12), 8 = the apps are installed, but automatic updates are not
     configured or unhealthy: the run's 'Auto-updates:' line is FAILED, NOT CONFIGURED (no
-    Microsoft.WindowsAppRuntime.1.8), AT RISK or UNHEALTHY (review finding P3-36), 3010 = success,
+    Microsoft.WindowsAppRuntime.1.8, and the installer could not install the pinned one), AT RISK
+    or UNHEALTHY (review finding P3-36), 3010 = success,
     but a restart is required to finish (an install said so, or Windows gained a pending restart
     during the run; review finding P3-16). At the end of a run the precedence is
     1 > 2 > 8 > 3010 > 0 (Get-InstallerExitCode). Apps reported as Deferred (a run as SYSTEM or
@@ -665,6 +666,9 @@ function Invoke-WingetInstall {
         'AlreadyPresent' {
             if ($wauResult.FrameworkMissing) {
                 Write-ErrorMessage 'Auto-updates: AT RISK - Winget-AutoUpdate is installed but Microsoft.WindowsAppRuntime.1.8 is missing; its next run may leave winget unusable (see above).'
+                if ($wauResult.FrameworkInstallError) {
+                    Write-ErrorMessage "  The installer could not install it: $($wauResult.FrameworkInstallError)."
+                }
                 $autoUpdatesHealthy = $false
             }
             elseif ($wauResult.Version) {
@@ -686,6 +690,10 @@ function Invoke-WingetInstall {
         'DryRun' { Write-Info "[DRY-RUN] Auto-updates: Would configure Winget-AutoUpdate v$($wauResult.Version)." }
         'FrameworkMissing' {
             Write-ErrorMessage 'Auto-updates: NOT CONFIGURED - Microsoft.WindowsAppRuntime.1.8 is missing, and Winget-AutoUpdate would leave winget unusable without it. Install the Windows App Runtime 1.8 (or let the Microsoft Store update App Installer), then re-run the installer.'
+            # Why the installer's own attempt (Install-WindowsAppRuntimeFramework) did not help.
+            if ($wauResult.FrameworkInstallError) {
+                Write-ErrorMessage "  The installer could not install it: $($wauResult.FrameworkInstallError)."
+            }
             $autoUpdatesHealthy = $false
         }
         default {

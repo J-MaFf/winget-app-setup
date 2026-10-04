@@ -16,8 +16,10 @@
          `winget list --exact --id <id>`, classified by $LASTEXITCODE captured immediately
          after the call (exit 0 = installed; nonzero = missing).
       3. The Winget-AutoUpdate scheduled task exists ('\WAU\Winget-AutoUpdate') - or, when
-         Microsoft.WindowsAppRuntime.1.8 is missing (as on windows-latest), that WAU was NOT
-         installed and the latest transcript says 'Auto-updates: NOT CONFIGURED'.
+         Microsoft.WindowsAppRuntime.1.8 is still missing after the run (the installer installs
+         the pinned framework itself where it can, work-order item 31, so on windows-latest it is
+         expected to be there), that WAU was NOT installed and the latest transcript says
+         'Auto-updates: NOT CONFIGURED'.
       4. The installed WAU version matches the pin in Get-WauPin (read from the registry via the
          module's private Get-InstalledWauInfo helper, dot-sourced from the checkout).
     The transcript assertions (5-9) live in e2e/TranscriptAssertions.ps1, fixture-tested in
@@ -39,8 +41,8 @@
          summary fails: its run stopped early.
       8. With -ExpectAllSkippedOnSecondRun: the LATEST transcript (the second, idempotence-leg
          run) shows every applicable non-skipped catalog app as
-         'Skipping: <name> (already installed)' and records no installs and no failures for
-         non-skip-listed apps.
+         'Skipping: <name> (already installed)', records no installs and no failures for
+         non-skip-listed apps, and did not install the Windows App Runtime framework again.
       9. With -ExpectPowerShell7Bootstrap: every pass went through the Windows PowerShell 5.1
          bootstrap (one bootstrap transcript per real-run transcript), and each bootstrap
          relaunched the installer under PowerShell 7 and logged how that run ended. With
@@ -232,10 +234,13 @@ foreach ($app in $appsToAssert) {
 # --- 3/4. Winget-AutoUpdate: installed at the pin, unless the framework gate skipped it ------
 # The installer deliberately skips WAU when Microsoft.WindowsAppRuntime.1.8 is missing (every WAU
 # run installs the newest winget, which needs it; without it WAU wedged winget - issues #279/#284).
-# The windows-latest (Server 2025) runner lacks that framework, so there the correct outcome is
-# NO WAU plus an 'Auto-updates: NOT CONFIGURED' line in the latest real-run transcript (checked
-# with the other transcript assertions below). An unknown framework status falls back to
-# expecting WAU, matching the installer's own fallback.
+# The windows-latest (Server 2025) runner ships without that framework, and the installer now
+# installs the pinned one for all users first (work-order item 31), so there it is expected to be
+# present here and WAU installed at the pin. Where that install was not possible, the framework is
+# still missing now and the correct outcome is NO WAU plus an 'Auto-updates: NOT CONFIGURED' line
+# in the latest real-run transcript (checked with the other transcript assertions below, whose
+# detail quotes the transcript's 'Windows App Runtime:' line with the reason). An unknown framework
+# status falls back to expecting WAU, matching the installer's own fallback.
 $frameworkStatus = Get-WindowsAppRuntimeStatus
 if ($frameworkStatus.Present -eq $false) {
     $wauTask = Get-ScheduledTask -TaskName 'Winget-AutoUpdate' -TaskPath '\WAU\' -ErrorAction SilentlyContinue

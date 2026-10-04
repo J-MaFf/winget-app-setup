@@ -31,10 +31,13 @@
         containment check that nothing outside that list failed. An empty variable means strict.
       - 8 (apps OK, auto-updates not configured or unhealthy): the pass succeeded (exit 0) only
         when its own transcript says 'Auto-updates: NOT CONFIGURED - Microsoft.WindowsAppRuntime.1.8
-        is missing'. windows-latest lacks that framework, so the installer skips Winget-AutoUpdate
-        there and every pass ends with 8. Any other reason for 8 (FAILED, UNHEALTHY, AT RISK), or
-        no transcript of the pass to check, fails the pass with 8. Assert-Install.ps1 then checks
-        that WAU is absent and the latest transcript says NOT CONFIGURED.
+        is missing'. windows-latest lacks that framework; the installer now installs the pinned one
+        first (work-order item 31), so a pass there is expected to set Winget-AutoUpdate up and
+        exit 0, and 8 for the missing framework is still accepted for a runner where that install
+        is not possible. The message then quotes the transcript's 'Windows App Runtime:' line,
+        which says why. Any other reason for 8 (FAILED, UNHEALTHY, AT RISK), or no transcript of
+        the pass to check, fails the pass with 8. Assert-Install.ps1 then checks that WAU is
+        absent and the latest transcript says NOT CONFIGURED.
       - anything else: the pass failed, with the installer's code.
 
     Runs under Windows PowerShell 5.1 and PowerShell 7: ASCII only, no 7-only syntax. Dot-sources
@@ -268,16 +271,20 @@ function Get-InstallPassVerdict {
         return [pscustomobject]@{ StepExitCode = 0; Outcome = 'passed'; Message = "$passName install pass exited 3010 (OK, restart required)." }
     }
     if ($ExitCode -eq 8) {
-        # windows-latest lacks Microsoft.WindowsAppRuntime.1.8, so the installer skips
-        # Winget-AutoUpdate there and every pass ends with 8. That reason, read from this pass's
-        # own transcript, is the only one accepted: a WAU that failed to install, or whose task is
-        # broken, still fails the pass.
+        # windows-latest lacks Microsoft.WindowsAppRuntime.1.8. The installer installs the pinned
+        # framework first (work-order item 31); where it cannot, it skips Winget-AutoUpdate and the
+        # pass ends with 8. That reason, read from this pass's own transcript, is the only one
+        # accepted: a WAU that failed to install, or whose task is broken, still fails the pass.
         $what = "$passName install pass exited 8 (apps OK, auto-updates not configured or unhealthy)"
         if ($null -eq $Transcript) {
             return [pscustomobject]@{ StepExitCode = 8; Outcome = 'failed'; Message = "$what - FAILED: no transcript of this pass was found, so why cannot be checked" }
         }
         if ($Transcript.Parsed.AutoUpdatesFrameworkMissing) {
-            return [pscustomobject]@{ StepExitCode = 0; Outcome = 'passed'; Message = "$what - expected on this runner: $($Transcript.Name) says 'Auto-updates: NOT CONFIGURED' because Microsoft.WindowsAppRuntime.1.8 is missing." }
+            $runtimeNote = ''
+            if ($Transcript.Parsed.WindowsAppRuntimeLine) {
+                $runtimeNote = " The installer's own install of the framework: 'Windows App Runtime: $($Transcript.Parsed.WindowsAppRuntimeLine)'"
+            }
+            return [pscustomobject]@{ StepExitCode = 0; Outcome = 'passed'; Message = "$what - accepted: $($Transcript.Name) says 'Auto-updates: NOT CONFIGURED' because Microsoft.WindowsAppRuntime.1.8 is missing.$runtimeNote" }
         }
         $reported = "no 'Auto-updates:' line"
         if ($Transcript.Parsed.AutoUpdatesLine) {

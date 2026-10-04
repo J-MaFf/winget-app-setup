@@ -118,7 +118,14 @@ function ConvertTo-TranscriptAppId {
                          'UNHEALTHY' or 'FAILED', or $null.
       AutoUpdatesFrameworkMissing  the line is 'NOT CONFIGURED - Microsoft.WindowsAppRuntime.1.8
                          is missing ...': Winget-AutoUpdate was skipped because that framework is
-                         missing, which is what makes a run on windows-latest exit 8.
+                         missing and the installer could not install it, the one reason
+                         e2e/Invoke-InstallPass.ps1 accepts exit 8 for.
+      WindowsAppRuntimeLine  the text after the last 'Windows App Runtime: ', or $null: the
+                         installer's own install of the pinned framework (Install-WindowsAppRuntimeFramework,
+                         work-order item 31), 'installed Microsoft.WindowsAppRuntime.1.8 <version>
+                         (<arch>) for all users.' or 'NOT INSTALLED - <reason>.'. A run that found
+                         the framework writes none.
+      WindowsAppRuntimeInstalled  the run installed the framework ('Windows App Runtime: installed').
       WingetNotUsable    the end-of-run check printed 'winget: NOT USABLE'.
 #>
 function ConvertFrom-InstallTranscript {
@@ -142,6 +149,8 @@ function ConvertFrom-InstallTranscript {
     $aborted = $false
     $earlyExitCode = $null
     $autoUpdatesLine = $null
+    $windowsAppRuntimeLine = $null
+    $windowsAppRuntimeInstalled = $false
     $wingetNotUsable = $false
 
     # Summary table state: 'none' until 'Summary:', 'header' until the dashes under the column
@@ -220,6 +229,13 @@ function ConvertFrom-InstallTranscript {
             $autoUpdatesLine = $Matches.text
             continue
         }
+        if ($line -match '^Windows App Runtime:\s+(?<text>.+)$') {
+            $windowsAppRuntimeLine = $Matches.text
+            if ($windowsAppRuntimeLine -match '^installed\b') {
+                $windowsAppRuntimeInstalled = $true
+            }
+            continue
+        }
         if ($line -match '^winget: NOT USABLE') {
             $wingetNotUsable = $true
             continue
@@ -279,6 +295,8 @@ function ConvertFrom-InstallTranscript {
         AutoUpdatesLine     = $autoUpdatesLine
         AutoUpdatesStatus   = $autoUpdatesStatus
         AutoUpdatesFrameworkMissing = $autoUpdatesFrameworkMissing
+        WindowsAppRuntimeLine = $windowsAppRuntimeLine
+        WindowsAppRuntimeInstalled = $windowsAppRuntimeInstalled
         WingetNotUsable     = $wingetNotUsable
     }
 }
@@ -441,14 +459,18 @@ function New-TranscriptAssertionResult {
     The transcript half of e2e/Assert-Install.ps1 (the other half asks the machine: winget list
     per app and the Winget-AutoUpdate task). Assertions, in order:
       - a real-run transcript exists, and the latest one logs 'Installer build';
-      - with -ExpectedAutoUpdatesStatus: the latest one reports 'Auto-updates: <status>';
+      - with -ExpectedAutoUpdatesStatus: the latest one reports 'Auto-updates: <status>' (the
+        detail adds its 'Windows App Runtime:' line, which says why the installer could not install
+        the framework);
       - with -InstallerPath: every transcript, the 5.1 bootstrap ones included, logs the build id
         stamped into that file, so each pass provably ran the installer under test;
       - every not-applicable app shows its 'Skipping: <id> (not applicable: <reason>)' line in
         the latest transcript;
       - containment (Test-InstallFailureContainment) for every real-run transcript;
       - with -ExpectAllSkippedOnSecondRun: the latest transcript (the second pass) skipped every
-        app in -ExpectedAppIds as already installed, and installed and failed none of them;
+        app in -ExpectedAppIds as already installed, and installed and failed none of them, and did
+        not install the Windows App Runtime framework again (work-order item 31: a first pass that
+        installed it must leave it where the second pass's check finds it);
       - with -ExpectPowerShell7Bootstrap: every pass went through the Windows PowerShell 5.1
         bootstrap (one bootstrap transcript per real-run transcript), and each bootstrap
         relaunched the installer under PowerShell 7 and recorded how that run ended;
@@ -537,6 +559,9 @@ function Get-TranscriptAssertionResult {
             if ($latest.Parsed.AutoUpdatesLine) {
                 $autoUpdatesDetail = "$($latest.File.Name): Auto-updates: $($latest.Parsed.AutoUpdatesLine)"
             }
+            if ($latest.Parsed.WindowsAppRuntimeLine) {
+                $autoUpdatesDetail += " (Windows App Runtime: $($latest.Parsed.WindowsAppRuntimeLine))"
+            }
             New-TranscriptAssertionResult -Name "Transcript reports 'Auto-updates: $ExpectedAutoUpdatesStatus'" -Passed ($latest.Parsed.AutoUpdatesStatus -eq $ExpectedAutoUpdatesStatus) -Detail $autoUpdatesDetail
         }
 
@@ -582,6 +607,11 @@ function Get-TranscriptAssertionResult {
             }
             New-TranscriptAssertionResult -Name 'Second run installed nothing (non-skip-listed)' -Passed ($installedOffenders.Count -eq 0) -Detail $installedDetail
             New-TranscriptAssertionResult -Name 'Second run failed nothing (non-skip-listed)' -Passed ($failedOffenders.Count -eq 0) -Detail $failedDetail
+            $runtimeDetail = ''
+            if ($latest.Parsed.WindowsAppRuntimeInstalled) {
+                $runtimeDetail = "$($latest.File.Name): Windows App Runtime: $($latest.Parsed.WindowsAppRuntimeLine)"
+            }
+            New-TranscriptAssertionResult -Name 'Second run did not install the Windows App Runtime again' -Passed (-not $latest.Parsed.WindowsAppRuntimeInstalled) -Detail $runtimeDetail
         }
     }
 

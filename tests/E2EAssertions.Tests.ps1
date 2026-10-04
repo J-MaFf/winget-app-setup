@@ -3,7 +3,10 @@
 # sample transcripts in tests/fixtures/e2e (review finding P3-39). The fixtures follow what the
 # installer writes: a first and a second pass, a run with timeouts in both passes, a run whose
 # circuit breaker found that winget cannot be launched, an aborted run, and the two Windows
-# PowerShell 5.1 bootstrap transcripts of a 5.1 leg.
+# PowerShell 5.1 bootstrap transcripts of a 5.1 leg. first-pass-runtime-installed and
+# second-pass-runtime-present are the passes expected on windows-latest since work-order item 31:
+# the first installs the pinned Windows App Runtime framework and Winget-AutoUpdate, the second
+# finds both.
 
 BeforeAll {
     . (Join-Path $PSScriptRoot 'TestHelpers.ps1')
@@ -79,6 +82,30 @@ Describe 'ConvertFrom-InstallTranscript' {
 
         $transcript.AutoUpdatesStatus | Should -Be $Status
         $transcript.AutoUpdatesFrameworkMissing | Should -Be $FrameworkMissing
+    }
+
+    It 'Reads the installer''s own install of the Windows App Runtime and the Configured outcome that follows (work-order item 31)' {
+        $first = ConvertFrom-InstallTranscript -Content (Get-Fixture -Name 'first-pass-runtime-installed')
+
+        $first.WindowsAppRuntimeInstalled | Should -BeTrue
+        $first.WindowsAppRuntimeLine | Should -Be 'installed Microsoft.WindowsAppRuntime.1.8 8000.994.2142.0 (X64) for all users.'
+        $first.AutoUpdatesStatus | Should -Be 'Configured'
+        $first.AutoUpdatesFrameworkMissing | Should -BeFalse
+        $first.FinalFailed | Should -BeNullOrEmpty
+
+        $second = ConvertFrom-InstallTranscript -Content (Get-Fixture -Name 'second-pass-runtime-present')
+
+        $second.WindowsAppRuntimeInstalled | Should -BeFalse
+        $second.WindowsAppRuntimeLine | Should -BeNullOrEmpty
+        $second.AutoUpdatesStatus | Should -Be 'Already present'
+    }
+
+    It 'Reads a Windows App Runtime install that failed' {
+        $transcript = ConvertFrom-InstallTranscript -Content "Windows App Runtime: NOT INSTALLED - Add-AppxProvisionedPackage failed (its error is above).`nSummary:`nAuto-updates: NOT CONFIGURED - Microsoft.WindowsAppRuntime.1.8 is missing, and Winget-AutoUpdate would leave winget unusable without it."
+
+        $transcript.WindowsAppRuntimeInstalled | Should -BeFalse
+        $transcript.WindowsAppRuntimeLine | Should -Be 'NOT INSTALLED - Add-AppxProvisionedPackage failed (its error is above).'
+        $transcript.AutoUpdatesFrameworkMissing | Should -BeTrue
     }
 
     It 'Reads the timeout failures of both passes, which the old failure regex missed, and what the retry recovered' {
@@ -277,6 +304,47 @@ Describe 'Get-TranscriptAssertionResult' {
         ($rows | Where-Object Assertion -EQ 'Not-applicable skip logged: Dell.CommandUpdate.Universal').Detail | Should -Be 'Skipping: Dell.CommandUpdate.Universal (not applicable: Dell hardware only)'
     }
 
+    It 'Passes the leg expected on windows-latest: the first pass installs the Windows App Runtime and Winget-AutoUpdate, the second finds both (work-order item 31)' {
+        $logs = New-TestLogDirectory -Fixture @('first-pass-runtime-installed', 'second-pass-runtime-present') -Name @('install-20261005-060449.log', 'install-20261005-061511.log')
+        $installer = New-TestInstaller -BuildId '1.0.0+5ea1f00d'
+
+        $rows = @(Get-TranscriptAssertionResult -LogDirectory $logs -ExpectedAppIds $script:CatalogIds -NotApplicableApps $script:NotApplicable -ExpectAllSkippedOnSecondRun -InstallerPath $installer)
+
+        @($rows | Where-Object { $_.Result -ne 'PASS' } | ForEach-Object { "$($_.Assertion): $($_.Detail)" }) | Should -BeNullOrEmpty
+        ($rows | Where-Object Assertion -EQ 'Second run did not install the Windows App Runtime again').Result | Should -Be 'PASS'
+        @($rows | Where-Object Assertion -Like 'Second run skipped:*').Count | Should -Be 9
+    }
+
+    It 'Fails a second pass that installed the Windows App Runtime again' {
+        $logs = New-TestLogDirectory -Fixture @('first-pass-runtime-installed', 'second-pass-runtime-present')
+        $second = Get-ChildItem -LiteralPath $logs -Filter '*.log' | Sort-Object Name | Select-Object -Last 1
+        $content = (Get-Content -Raw -LiteralPath $second.FullName) -replace 'Summary:', "Windows App Runtime: installed Microsoft.WindowsAppRuntime.1.8 8000.994.2142.0 (X64) for all users.`nSummary:"
+        $writtenAt = $second.LastWriteTime
+        Set-Content -LiteralPath $second.FullName -Value $content -NoNewline
+        # Still the latest transcript: the rewrite must not reorder the passes.
+        (Get-Item -LiteralPath $second.FullName).LastWriteTime = $writtenAt
+
+        $rows = @(Get-TranscriptAssertionResult -LogDirectory $logs -ExpectedAppIds $script:CatalogIds -NotApplicableApps $script:NotApplicable -ExpectAllSkippedOnSecondRun)
+
+        $row = $rows | Where-Object Assertion -EQ 'Second run did not install the Windows App Runtime again'
+        ($rows | Where-Object Assertion -EQ 'Transcript exists').Detail | Should -Match "latest: $([regex]::Escape($second.Name))$"
+        $row.Result | Should -Be 'FAIL'
+        $row.Detail | Should -Be "$($second.Name): Windows App Runtime: installed Microsoft.WindowsAppRuntime.1.8 8000.994.2142.0 (X64) for all users."
+    }
+
+    It 'Quotes why the installer could not install the Windows App Runtime next to the expected NOT CONFIGURED' {
+        $logs = New-TestLogDirectory -Fixture @('second-pass')
+        $log = Get-ChildItem -LiteralPath $logs -Filter '*.log' | Select-Object -First 1
+        $content = (Get-Content -Raw -LiteralPath $log.FullName) -replace 'Summary:', "Windows App Runtime: NOT INSTALLED - Add-AppxProvisionedPackage failed (its error is above).`nSummary:"
+        Set-Content -LiteralPath $log.FullName -Value $content -NoNewline
+
+        $rows = @(Get-TranscriptAssertionResult -LogDirectory $logs -ExpectedAutoUpdatesStatus 'NOT CONFIGURED')
+
+        $row = $rows | Where-Object Assertion -EQ "Transcript reports 'Auto-updates: NOT CONFIGURED'"
+        $row.Result | Should -Be 'PASS'
+        $row.Detail | Should -Match '\(Windows App Runtime: NOT INSTALLED - Add-AppxProvisionedPackage failed \(its error is above\)\.\)$'
+    }
+
     It 'Keeps the 5.1 bootstrap transcripts apart, although each is written after the run it started' {
         # The order the 5.1 leg writes them in: each bootstrap transcript closes after its
         # PowerShell 7 run. Before this change the second bootstrap transcript counted as the
@@ -400,6 +468,8 @@ Describe 'Installer messages the transcript parser keys on' {
         @{ File = 'WingetAppSetup/Public/Install.ps1'; Text = "Write-ErrorMessage 'Auto-updates: NOT CONFIGURED - Microsoft.WindowsAppRuntime.1.8 is missing, " }
         @{ File = 'WingetAppSetup/Public/Install.ps1'; Text = 'Write-ErrorMessage "Auto-updates: UNHEALTHY - ' }
         @{ File = 'WingetAppSetup/Public/Install.ps1'; Text = 'Write-ErrorMessage "winget: NOT USABLE - ' }
+        @{ File = 'WingetAppSetup/Private/WindowsAppRuntime.ps1'; Text = 'Write-ErrorMessage "Windows App Runtime: NOT INSTALLED - $reason."' }
+        @{ File = 'WingetAppSetup/Private/WindowsAppRuntime.ps1'; Text = "Write-Success ('Windows App Runtime: installed Microsoft.WindowsAppRuntime.1.8 {0} ({1}) for all users.'" }
         @{ File = 'build/fragments/tail.ps1'; Text = 'Write-Info "Installer build: $script:InstallerBuildId"' }
         @{ File = 'build/fragments/tail.ps1'; Text = "Write-ErrorMessage 'UNEXPECTED ERROR - the run was aborted before it finished." }
         @{ File = 'build/fragments/tail.ps1'; Text = "`$abortMessage = 'The run was stopped before it finished (exit code 5).'" }

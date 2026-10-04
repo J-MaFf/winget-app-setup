@@ -67,6 +67,19 @@ Describe 'Get-InstallPassVerdict' {
         $verdict.Message | Should -Match 'install-20261005-060000\.log'
     }
 
+    # Work-order item 31: the installer installs the pinned framework itself, so an accepted exit 8
+    # now means that install was not possible here; the message says why.
+    It 'Quotes the transcript''s Windows App Runtime line when it accepts exit 8 for the missing framework' {
+        $content = "Windows App Runtime: NOT INSTALLED - Add-AppxProvisionedPackage failed (its error is above).`nSummary:`nAuto-updates: NOT CONFIGURED - Microsoft.WindowsAppRuntime.1.8 is missing, and Winget-AutoUpdate would leave winget unusable without it."
+        $transcript = [pscustomobject]@{ Name = 'install-20261005-060000.log'; Parsed = (ConvertFrom-InstallTranscript -Content $content) }
+
+        $verdict = Get-InstallPassVerdict -ExitCode 8 -KnownPlatformIncompatible '' -Pass 'first' -Transcript $transcript
+
+        $verdict.Outcome | Should -Be 'passed'
+        $verdict.StepExitCode | Should -Be 0
+        $verdict.Message | Should -Be "First install pass exited 8 (apps OK, auto-updates not configured or unhealthy) - accepted: install-20261005-060000.log says 'Auto-updates: NOT CONFIGURED' because Microsoft.WindowsAppRuntime.1.8 is missing. The installer's own install of the framework: 'Windows App Runtime: NOT INSTALLED - Add-AppxProvisionedPackage failed (its error is above).'"
+    }
+
     It 'Fails exit 8 when the pass''s transcript has no Auto-updates line, or there is no transcript' {
         $noLine = [pscustomobject]@{ Name = 'install-20261005-060000.log'; Parsed = (ConvertFrom-InstallTranscript -Content 'Summary:') }
 
