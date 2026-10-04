@@ -42,8 +42,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stand-in for each Windows-only command the tests mock (`Get-AppxPackage`, `Add-AppxPackage`,
   `Get-CimInstance`, `Get-/Set-/Unregister-ScheduledTask`, `Repair-WinGetPackageManager`, `winget`,
   `powershell.exe`), only where the command is missing, so Windows still mocks the real cmdlets.
-  Each stand-in declares the real parameter names that `-ParameterFilter` blocks read and fails
-  like a missing command when a test forgets its `Mock`. TestHelpers also sets the Windows folder
+  Each stand-in declares the real parameter names that `-ParameterFilter` blocks read (and the real
+  `CimInstance` types for the scheduled-task objects) and throws like a missing command when called
+  without a `Mock`. TestHelpers also sets the Windows folder
   variables when they are unset. Tests whose `C:\` paths reached `Join-Path` now use `TestDrive`;
   off Windows those paths had become `$null`, so several `Find-PowerShell7`,
   `Resolve-WingetExecutable` and Winget-AutoUpdate tests failed or passed without checking

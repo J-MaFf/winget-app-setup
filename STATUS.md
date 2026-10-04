@@ -26,8 +26,9 @@ only when the framework is present (the runner now reports `Auto-updates: NOT CO
 WAU's at-logon run, waits for a running WAU before using winget, makes a run that leaves winget
 unusable exit 2, and makes an aborted run exit 5 instead of 0. #279, #283 and #284 stay open until
 an E2E run on this branch confirms it. The Pester suite now also runs on Linux, with 2 known failures
-instead of 113, and no test loads the generated installer any more, so the tests always exercise the
-module source being edited.
+instead of 113, and no test dot-sources the generated installer any more, so the unit tests exercise
+the module source being edited (EntryPoint, AppCatalog and Interactivity tests still read or run the
+generated file itself, on purpose).
 
 In progress: **E2E: App Installer 1.29.290.0 vs 1.26.510.0 AppX conflict, missing
 WindowsAppRuntime.1.8** ([#279](https://github.com/J-MaFf/winget-app-setup/issues/279)) — two

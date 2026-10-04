@@ -187,6 +187,31 @@ Describe 'Test harness (tests/TestHelpers.ps1, wgt-gq8.5)' {
         $undeclared | Should -BeNullOrEmpty
     }
 
+    It 'types the scheduled-task object parameters as CimInstance, as the real cmdlets do' {
+        # The real cmdlets reject a fake [pscustomobject] trigger before a Mock body runs, so the
+        # tests that pass one use -RemoveParameterType. An [object] stand-in would accept it and
+        # let a test that forgets -RemoveParameterType pass here and fail on Windows.
+        $cimParameters = [ordered]@{
+            'Set-ScheduledTask'        = @('Action', 'Trigger', 'Settings', 'Principal', 'InputObject')
+            'Unregister-ScheduledTask' = @('InputObject')
+        }
+
+        $wrongType = foreach ($name in $cimParameters.Keys) {
+            $parameters = (Get-Command -Name $name | Select-Object -First 1).Parameters
+            foreach ($parameterName in $cimParameters[$name]) {
+                $type = $parameters[$parameterName].ParameterType
+                if ($type.IsArray) {
+                    $type = $type.GetElementType()
+                }
+                if ($type.FullName -ne 'Microsoft.Management.Infrastructure.CimInstance') {
+                    '{0} -{1} is {2}' -f $name, $parameterName, $parameters[$parameterName].ParameterType.FullName
+                }
+            }
+        }
+
+        $wrongType | Should -BeNullOrEmpty
+    }
+
     It 'stands in only for missing commands, and an unmocked stand-in fails like the missing command' {
         $script:WindowsOnlyCommandNames | Should -Contain 'Get-AppxPackage' -Because 'TestHelpers.ps1 lists the Windows-only commands it stands in for'
 

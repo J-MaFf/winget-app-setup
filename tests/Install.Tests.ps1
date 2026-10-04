@@ -895,6 +895,8 @@ Describe 'Not-applicable gating end-to-end (issue #217)' {
         Mock Install-WingetAutoUpdate { @{ Status = 'DryRun'; Version = '2.12.0' } }
         Mock Install-WingetPackage { @{ ExitCode = 0; Attempts = 1; SessionErrorExhausted = $false; MachineScopeFellBack = $false } }
         Mock Test-WingetPackageInstalled { @{ Installed = $false; TimedOut = $false; ExitCode = 0 } }
+        # Unmocked, this reads the real machine's AppX packages (issue #279 conflict check).
+        Mock Get-ConflictingDesktopAppInstallerVersions { @() }
 
         $script:capturedRows = $null
         Mock Write-Table { $script:capturedRows = $Rows }

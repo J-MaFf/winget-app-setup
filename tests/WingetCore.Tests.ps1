@@ -666,6 +666,9 @@ Describe 'Install-WingetPackage (transient launch-exception backoff, issue #253)
         Mock Write-Info { }
         # Never actually wait during tests; the backoff is verified via Should -Invoke.
         Mock Start-Sleep { }
+        # A launch retry re-resolves winget.exe through Get-AppxPackage. With no package found it
+        # falls back to 'winget'; unmocked, it would read the real machine's AppX packages.
+        Mock Get-AppxPackage { }
     }
 
     It 'Retries with backoff and recovers when Start-Process throws a transient file-lock exception' {
