@@ -391,7 +391,7 @@ Describe 'New-ElevationVerifierCommand (review finding P3-11)' {
         $markerPath = Join-Path $TestDrive 'ran.txt'
         $sourcePath = Join-Path $TestDrive 'tampered.ps1'
         Set-Content -LiteralPath $sourcePath -Value "Set-Content -LiteralPath '$markerPath' -Value 'ran'; exit 0" -Encoding UTF8
-        $copyRoot = Join-Path $TestDrive 'copies'
+        $copyRoot = Join-Path $TestDrive 'copies-tampered'
         [void](New-Item -ItemType Directory -Path $copyRoot)
         $command = New-ElevationVerifierCommand -ScriptPath $sourcePath -Sha256 ('0' * 64) -PowerShellPath $script:currentPowerShell -CopyRoot $copyRoot
 
@@ -445,7 +445,7 @@ exit 42
 '@
         Set-Content -LiteralPath $sourcePath -Value $fixture.Replace('@RESULT@', $resultPath) -Encoding UTF8
         $sha256 = (Get-FileHash -LiteralPath $sourcePath -Algorithm SHA256).Hash
-        $copyRoot = Join-Path $TestDrive 'copies'
+        $copyRoot = Join-Path $TestDrive 'copies-elevated'
         [void](New-Item -ItemType Directory -Path $copyRoot)
         $command = New-ElevationVerifierCommand -ScriptPath $sourcePath -Sha256 $sha256 -PowerShellPath $windowsPowerShell -CopyRoot $copyRoot -AdditionalArguments '-SkipSystemCheck'
 
