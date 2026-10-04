@@ -7,6 +7,28 @@
 
 <#
 .SYNOPSIS
+    Ends the installer run with the given exit code, marking the exit as intended.
+.DESCRIPTION
+    Every deliberate exit goes through here, so the entry script's abort guard
+    (build/fragments/tail.ps1) can tell a run that chose its exit code from one stopped from
+    outside: an outside stop (Ctrl+C, a console-stop event) unwinds through the entry script's
+    finally block without this marker set, and is then reported as exit code 5 instead of 0.
+    Like a bare `exit`, this ends the whole script (and, under irm | iex, the host process).
+.PARAMETER Code
+    The process exit code. Default 0.
+#>
+function Exit-Installer {
+    param (
+        [Parameter(Mandatory = $false)]
+        [int]$Code = 0
+    )
+
+    $script:InstallerExitRequested = $true
+    exit $Code
+}
+
+<#
+.SYNOPSIS
     Decides Invoke-WingetInstall's final exit code from the run's outcome.
 .DESCRIPTION
     Kept out of the orchestrator so the exit-code contract can be tested without executing an

@@ -58,12 +58,12 @@ param (
 # This script is assembled from the WingetAppSetup module by build/Build-WingetInstallScript.ps1.
 # Edit the function source under WingetAppSetup/Public and WingetAppSetup/Private, then re-run the
 # build to regenerate this file. See readme.md ("Project layout") for details.
-# Build id: 1.0.0+fe55cb76 (module version + SHA256 fragment of the function content; issue #189).
+# Build id: 1.0.0+1ba9ffa5 (module version + SHA256 fragment of the function content; issue #189).
 # ------------------------------------------------------------------------------------------------
 
 # Content-derived build identity, logged at startup so a transcript from a remote machine
 # identifies exactly which installer build produced it (issue #189).
-$script:InstallerBuildId = '1.0.0+fe55cb76'
+$script:InstallerBuildId = '1.0.0+1ba9ffa5'
 
 # ------------------------------------------------Functions------------------------------------------------
 
@@ -191,6 +191,28 @@ function Get-CurrentWindowsPrincipal {
 # Invoke-WingetInstall call sites used to discard it, reporting every failure as a generic
 # "No package found matching input criteria." These helpers turn that result into the failure
 # messages and the per-app Reason column of the failed-apps summary.
+
+<#
+.SYNOPSIS
+    Ends the installer run with the given exit code, marking the exit as intended.
+.DESCRIPTION
+    Every deliberate exit goes through here, so the entry script's abort guard
+    (build/fragments/tail.ps1) can tell a run that chose its exit code from one stopped from
+    outside: an outside stop (Ctrl+C, a console-stop event) unwinds through the entry script's
+    finally block without this marker set, and is then reported as exit code 5 instead of 0.
+    Like a bare `exit`, this ends the whole script (and, under irm | iex, the host process).
+.PARAMETER Code
+    The process exit code. Default 0.
+#>
+function Exit-Installer {
+    param (
+        [Parameter(Mandatory = $false)]
+        [int]$Code = 0
+    )
+
+    $script:InstallerExitRequested = $true
+    exit $Code
+}
 
 <#
 .SYNOPSIS
@@ -2715,7 +2737,8 @@ function Restart-WithElevation {
 .NOTES
     Exit codes: 0 = success, 1 = one or more apps failed to install, 2 = winget unavailable (at
     the start, or no longer launchable at the end of the run), 3 = app-definition validation
-    failed or no valid apps remain.
+    failed or no valid apps remain. Every exit goes through Exit-Installer. The generated entry
+    script adds 5 = the run was aborted by an unexpected error or stopped from outside.
 #>
 function Invoke-WingetInstall {
     param (
@@ -2829,7 +2852,7 @@ function Invoke-WingetInstall {
             if ($effectiveNonInteractive) { $elevationArgs += '-NonInteractive' }
             if ($SkipSystemCheck) { $elevationArgs += '-SkipSystemCheck' }
             Restart-WithElevation -PowerShellExecutable $psExecutable -ScriptPath $PSCommandPath -AdditionalArguments $elevationArgs | Out-Null
-            Exit
+            Exit-Installer
         }
         else {
             # IEX/remote execution has no local script path to relaunch from.
@@ -2838,7 +2861,7 @@ function Invoke-WingetInstall {
             Write-Info 'Open an elevated PowerShell or Windows Terminal session and run the IEX command again.'
             Write-Info 'Exiting in 5 seconds...'
             Start-Sleep -Seconds 5
-            Exit 1
+            Exit-Installer 1
         }
     }
     else {
@@ -2865,7 +2888,7 @@ function Invoke-WingetInstall {
     # Check if winget is available and install if necessary
     if (-not (Test-AndInstallWinget)) {
         Write-ErrorMessage 'Winget is required for this script. Exiting.'
-        Exit 2
+        Exit-Installer 2
     }
 
     # Initialize winget sources and agreements for the account performing the installs. This is
@@ -2907,14 +2930,14 @@ function Invoke-WingetInstall {
             Write-ErrorMessage $validationError
         }
         Write-ErrorMessage 'No valid application definitions found. Resolve the errors and re-run the script.'
-        Exit 3
+        Exit-Installer 3
     }
 
     $apps = $validationResult.ValidApps
 
     if ($apps.Count -eq 0) {
         Write-ErrorMessage 'No application definitions remain after validation. Add at least one valid entry and re-run the script.'
-        Exit 3
+        Exit-Installer 3
     }
 
     Write-Info 'Installing the following Apps:'
@@ -3012,7 +3035,14 @@ function Invoke-WingetInstall {
     # elevating admin (that was slow, silent, and largely failed under cross-user elevation; issue #170).
 
     # Configure Windows Terminal defaults(issue #74): default profile and default terminal app.
-    Set-WindowsTerminalDefaults -WhatIf:$WhatIf
+    # Best-effort and isolated: an unexpected error here must not skip the retry pass, the summary
+    # or the exit-code decision below.
+    try {
+        Set-WindowsTerminalDefaults -WhatIf:$WhatIf
+    }
+    catch {
+        Write-WarningMessage "Windows Terminal configuration failed unexpectedly: $_. Continuing; app installs are not affected."
+    }
 
     # Retry any failed installations once before producing the final summary
     if ($failedApps.Count -gt 0) {
@@ -3082,7 +3112,13 @@ function Invoke-WingetInstall {
     # run first calls its own Install-Prerequisites, which can re-provision App Installer and reset
     # winget's sources; letting that start mid-run is what wedged winget in the #279/#284 E2E runs
     # and what killed the console in #283. WAU's own schedule takes it from here.
-    $wauResult = Install-WingetAutoUpdate -WhatIf:$WhatIf
+    try {
+        $wauResult = Install-WingetAutoUpdate -WhatIf:$WhatIf
+    }
+    catch {
+        Write-ErrorMessage "Winget-AutoUpdate setup failed unexpectedly: $_"
+        $wauResult = [pscustomobject]@{ Status = 'Failed'; Version = $null }
+    }
 
     # A run must never report success while leaving winget unusable (whatever broke it, the next
     # run of this installer and every WAU update would fail). One bounded launch probe, after the
@@ -3090,7 +3126,13 @@ function Invoke-WingetInstall {
     # in a dry run, which never touched winget's state.
     $wingetUsableAtEnd = $true
     if (-not $WhatIf) {
-        $wingetUsableAtEnd = Wait-WingetLaunchable -TimeoutSeconds 60 -PollIntervalSeconds 15 -RequiredConsecutiveSuccesses 1
+        try {
+            $wingetUsableAtEnd = Wait-WingetLaunchable -TimeoutSeconds 60 -PollIntervalSeconds 15 -RequiredConsecutiveSuccesses 1
+        }
+        catch {
+            # A bug in the probe is not evidence that winget is broken; report it and move on.
+            Write-WarningMessage "Could not run the end-of-run winget check: $_"
+        }
     }
 
     # Display the summary of the installation
@@ -3170,7 +3212,7 @@ function Invoke-WingetInstall {
 
     $exitCode = Get-InstallerExitCode -FailedAppCount $failedApps.Count -WingetUsable $wingetUsableAtEnd
     if ($exitCode -ne 0) {
-        Exit $exitCode
+        Exit-Installer $exitCode
     }
 }
 
@@ -4841,8 +4883,29 @@ if ($MyInvocation.InvocationName -ne '.') {
     # relaunched run's exit code. Everything the bootstrap touches MUST stay 5.1-runtime
     # compatible - see WingetAppSetup/Private/PowerShell7Bootstrap.ps1.
     if ($PSVersionTable.PSVersion.Major -lt 7) {
-        exit (Invoke-PowerShell7Bootstrap -WhatIf:$WhatIf -NonInteractive:$NonInteractive -SkipSystemCheck:$SkipSystemCheck -CommandPath $PSCommandPath)
+        # try/catch, not a bare `exit (Invoke-PowerShell7Bootstrap ...)`: a statement-terminating
+        # error inside the bootstrap would abort only that `exit` statement, and 5.1 would then fall
+        # through into the PowerShell-7-only body below.
+        $bootstrapExitCode = 1
+        try {
+            $bootstrapExitCode = Invoke-PowerShell7Bootstrap -WhatIf:$WhatIf -NonInteractive:$NonInteractive -SkipSystemCheck:$SkipSystemCheck -CommandPath $PSCommandPath
+        }
+        catch {
+            Write-ErrorMessage "The PowerShell 7 bootstrap failed unexpectedly: $_"
+            $bootstrapExitCode = 1
+        }
+        exit $bootstrapExitCode
     }
+
+    # Abort guard state (see the catch and finally at the end of this block). Reset on every run:
+    # under irm | iex these live in the caller's scope and would otherwise carry over into a second
+    # run in the same console. Exit-Installer sets InstallerExitRequested before every intended exit.
+    $script:InstallerExitRequested = $false
+    $installerRunCompleted = $false
+    # Forcing exit code 5 after an outside stop is only safe where the process ends anyway: a run
+    # from a file, or a non-interactive session (RMM, CI, `pwsh -Command "irm ... | iex"`). In an
+    # interactive irm | iex console it would close the user's window on Ctrl+C.
+    $forceExitCodeOnAbort = [bool]$PSCommandPath -or (Test-EffectiveNonInteractive -NonInteractive:$NonInteractive)
 
     # Persistent transcript (issue #189): a failed install on a remote user's machine used to
     # leave zero artifacts. The log lands under ProgramData - not the elevating account's TEMP -
@@ -4886,15 +4949,40 @@ if ($MyInvocation.InvocationName -ne '.') {
                 }
             }
             elseif (-not (Test-SystemRequirements -WhatIf:$WhatIf)) {
-                exit 1
+                Exit-Installer 1
             }
         }
 
         # Forward -SkipSystemCheck so an elevated relaunch inherits the caller's intent to bypass the
         # pre-flight checks (issue #185); the checks themselves already ran (or were skipped) above.
         Invoke-WingetInstall -WhatIf:$WhatIf -NonInteractive:$NonInteractive -SkipSystemCheck:$SkipSystemCheck
+        $installerRunCompleted = $true
+    }
+    catch {
+        # Any unexpected error lands here instead of silently ending the run with exit 0: inside
+        # this try, a .NET exception, a method call on $null or a parameter-binding error anywhere
+        # in the run aborts the whole block - no retry pass, no summary. Logged while the transcript
+        # is still open, so the log a teammate attaches to a GitHub issue carries the stack trace.
+        Write-ErrorMessage 'UNEXPECTED ERROR - the run was aborted before it finished. No summary was produced, and apps may be only partly installed.'
+        Write-ErrorMessage "Error: $($_.Exception.Message)"
+        if ($_.InvocationInfo -and $_.InvocationInfo.PositionMessage) {
+            Write-ErrorMessage $_.InvocationInfo.PositionMessage
+        }
+        if ($_.ScriptStackTrace) {
+            Write-ErrorMessage "Stack trace:`n$($_.ScriptStackTrace)"
+        }
+        Exit-Installer 5
     }
     finally {
+        # An outside stop (Ctrl+C, closing the console, or an installer such as an MSI upgrade of
+        # PowerShell itself sending a console stop - issue #283) skips the catch above, because a
+        # PipelineStoppedException cannot be caught. A run from a file would then exit 0. Only .NET
+        # calls here: while the pipeline is stopping, PowerShell commands (our Write-* helpers
+        # included) fail.
+        if (-not $installerRunCompleted -and -not $script:InstallerExitRequested -and $forceExitCodeOnAbort) {
+            [Console]::Error.WriteLine('The run was stopped before it finished (exit code 5).')
+            $host.SetShouldExit(5)
+        }
         # Exit statements inside Invoke-WingetInstall unwind through here (PowerShell runs finally
         # blocks for the exit statement), so the transcript closes on every path.
         if ($transcriptStarted) {

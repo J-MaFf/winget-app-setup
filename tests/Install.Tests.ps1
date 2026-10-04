@@ -76,7 +76,7 @@ Describe 'Main Script Logic' {
         It 'Exits with code 2 when winget cannot be installed (dependency-failure exit code)' {
             $installBody = $script:InvokeWingetInstallDef
             $installBody | Should -Match 'if \(-not \(Test-AndInstallWinget\)\)'
-            $installBody | Should -Match "(?s)Winget is required for this script\. Exiting\.'\s*Exit 2"
+            $installBody | Should -Match "(?s)Winget is required for this script\. Exiting\.'\s*Exit-Installer 2"
         }
     }
 
@@ -208,7 +208,15 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
             # post-retry failure count and the end-of-run probe, and exits on any non-zero result.
             $installBody = $script:InvokeWingetInstallDef
             $installBody | Should -Match '\$exitCode = Get-InstallerExitCode -FailedAppCount \$failedApps\.Count -WingetUsable \$wingetUsableAtEnd'
-            $installBody | Should -Match 'if \(\$exitCode -ne 0\) \{\s*Exit \$exitCode\s*\}'
+            $installBody | Should -Match 'if \(\$exitCode -ne 0\) \{\s*Exit-Installer \$exitCode\s*\}'
+        }
+
+        It 'Routes every exit through Exit-Installer, so the entry script can tell an intended exit from an outside stop' {
+            # A bare `Exit` would leave the abort guard in build/fragments/tail.ps1 unable to tell
+            # a deliberate exit from Ctrl+C or a console-stop event, which it reports as exit 5.
+            $installBody = $script:InvokeWingetInstallDef
+            $installBody | Should -Not -Match '(?m)^\s*Exit(\s|$)'
+            ([regex]::Matches($installBody, '(?m)^\s*Exit-Installer\b')).Count | Should -Be 6
         }
 
         It 'Tracks failures as objects with reasons and renders the failed-apps summary (issue #189)' {
@@ -441,6 +449,40 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
             Invoke-WingetInstall -Apps @(@{ name = 'Contoso.AppOne' }) -WhatIf -NonInteractive
 
             Should -Invoke Wait-WingetLaunchable -Times 0 -Exactly
+        }
+
+        It 'Still reaches the retry pass, WAU setup and the summary when Windows Terminal configuration throws' {
+            Mock Set-WindowsTerminalDefaults { throw 'boom from the Terminal step' }
+            $script:warnings = @()
+            Mock Write-WarningMessage { $script:warnings += $Message }
+
+            Invoke-WingetInstall -Apps @(@{ name = 'Contoso.AppOne' }) -NonInteractive
+
+            $script:callOrder | Should -Be @('app:Contoso.AppOne', 'app:Contoso.AppOne', 'wau', 'probe')
+            ($script:warnings -join "`n") | Should -Match 'Windows Terminal configuration failed unexpectedly: boom from the Terminal step'
+            Should -Invoke Write-Table -Times 1 -Exactly
+        }
+
+        It 'Reports auto-updates as FAILED and still prints the summary when WAU setup throws' {
+            Mock Install-WingetAutoUpdate { throw 'boom from WAU' }
+            $script:errorMessages = @()
+            Mock Write-ErrorMessage { $script:errorMessages += $Message }
+
+            Invoke-WingetInstall -Apps @(@{ name = 'Contoso.AppOne' }) -NonInteractive
+
+            ($script:errorMessages -join "`n") | Should -Match 'Winget-AutoUpdate setup failed unexpectedly: boom from WAU'
+            ($script:errorMessages -join "`n") | Should -Match 'Auto-updates: FAILED'
+            Should -Invoke Write-Table -Times 1 -Exactly
+        }
+
+        It 'Treats a throwing end-of-run probe as unknown, not as a broken winget' {
+            Mock Wait-WingetLaunchable { throw 'boom from the probe' }
+            $script:errorMessages = @()
+            Mock Write-ErrorMessage { $script:errorMessages += $Message }
+
+            Invoke-WingetInstall -Apps @(@{ name = 'Contoso.AppOne' }) -NonInteractive
+
+            ($script:errorMessages -join "`n") | Should -Not -Match 'winget: NOT USABLE'
         }
 
         It 'Reports winget as not usable in the summary when the end-of-run probe fails (pinned structurally - driving it live would Exit 2 the process)' {

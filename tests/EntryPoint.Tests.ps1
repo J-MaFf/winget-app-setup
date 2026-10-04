@@ -181,8 +181,97 @@ Describe 'Generated installer: Windows PowerShell 5.1 parse safety (issue #210)'
         # Cross-platform pin of the guard's presence for environments without powershell.exe.
         $installer = Get-Content -Raw -Encoding UTF8 -Path $script:InstallerScriptPath
         $installer | Should -Match ([regex]::Escape('if ($PSVersionTable.PSVersion.Major -lt 7)'))
-        $installer | Should -Match ([regex]::Escape('exit (Invoke-PowerShell7Bootstrap -WhatIf:$WhatIf -NonInteractive:$NonInteractive -SkipSystemCheck:$SkipSystemCheck -CommandPath $PSCommandPath)'))
+        $installer | Should -Match ([regex]::Escape('$bootstrapExitCode = Invoke-PowerShell7Bootstrap -WhatIf:$WhatIf -NonInteractive:$NonInteractive -SkipSystemCheck:$SkipSystemCheck -CommandPath $PSCommandPath'))
+        # Wrapped in try/catch so a statement-terminating error in the bootstrap cannot fall through
+        # into the PowerShell-7-only body under 5.1.
+        $installer | Should -Match '(?s)try \{\s*\$bootstrapExitCode = Invoke-PowerShell7Bootstrap.*?\}\s*catch \{.*?\}\s*exit \$bootstrapExitCode'
         $installer | Should -Match 'This installer requires PowerShell 7\+ \(pwsh\)'
+    }
+}
+
+Describe 'Aborted runs exit non-zero (review P1: tail.ps1 try/finally exited 0)' {
+    BeforeAll {
+        $script:currentPowerShell = (Get-Process -Id $PID).Path
+        $script:installerText = Get-Content -Raw -Encoding UTF8 -Path $script:InstallerScriptPath
+
+        # Builds a copy of the generated installer whose Invoke-WingetInstall is replaced by $Body,
+        # injected just before the entry block so the real tail.ps1 logic runs unchanged.
+        function New-FaultInjectedInstaller {
+            param ([string]$Name, [string]$Body)
+            $entryIndex = $script:installerText.LastIndexOf("if (`$MyInvocation.InvocationName -ne '.') {")
+            $entryIndex | Should -BeGreaterThan 0
+            # Test-SystemRequirements is stubbed too: an irm | iex run cannot pass -SkipSystemCheck,
+            # and the real pre-flight checks probe the network and the OS.
+            $override = "function Test-SystemRequirements { param([switch]`$WhatIf) `$true }`n" +
+                "function Invoke-WingetInstall { param([switch]`$WhatIf, [switch]`$NonInteractive, [switch]`$SkipSystemCheck) $Body }`n"
+            $path = Join-Path $TestDrive $Name
+            Set-Content -LiteralPath $path -Value ($script:installerText.Insert($entryIndex, $override)) -Encoding UTF8
+            $path
+        }
+
+        # Runs a child pwsh with the transcript pointed into TestDrive (never the real ProgramData).
+        function Invoke-ChildInstaller {
+            param ([string[]]$Arguments)
+            $savedProgramData = $env:ProgramData
+            $env:ProgramData = Join-Path $TestDrive 'ProgramData'
+            try {
+                $output = & $script:currentPowerShell -NoLogo -NoProfile -NonInteractive @Arguments 2>&1 | Out-String
+                [pscustomobject]@{ ExitCode = $LASTEXITCODE; Output = $output }
+            }
+            finally {
+                $env:ProgramData = $savedProgramData
+            }
+        }
+    }
+
+    It 'Exits 5 and logs the error with a stack trace when an unexpected .NET error aborts the run' {
+        $path = New-FaultInjectedInstaller -Name 'net-error.ps1' -Body "[int]::Parse('not-a-number')"
+
+        $result = Invoke-ChildInstaller -Arguments @('-File', $path, '-SkipSystemCheck', '-NonInteractive')
+
+        $result.ExitCode | Should -Be 5
+        $result.Output | Should -Match 'UNEXPECTED ERROR - the run was aborted before it finished'
+        $result.Output | Should -Match 'Stack trace:'
+        $transcript = Get-ChildItem -Path (Join-Path $TestDrive 'ProgramData') -Recurse -Filter 'install-*.log' | Select-Object -First 1
+        $transcript | Should -Not -BeNullOrEmpty
+        (Get-Content -Raw -LiteralPath $transcript.FullName) | Should -Match 'Stack trace:'
+    }
+
+    It 'Exits 5 when the run is stopped from outside (PipelineStoppedException cannot be caught)' {
+        $path = New-FaultInjectedInstaller -Name 'stopped.ps1' -Body 'throw [System.Management.Automation.PipelineStoppedException]::new()'
+
+        $result = Invoke-ChildInstaller -Arguments @('-File', $path, '-SkipSystemCheck', '-NonInteractive')
+
+        $result.ExitCode | Should -Be 5
+        $result.Output | Should -Match 'The run was stopped before it finished'
+    }
+
+    It 'Keeps an intended exit code (Exit-Installer) instead of reporting it as an abort' {
+        $path = New-FaultInjectedInstaller -Name 'intended.ps1' -Body 'Exit-Installer 3'
+
+        $result = Invoke-ChildInstaller -Arguments @('-File', $path, '-SkipSystemCheck', '-NonInteractive')
+
+        $result.ExitCode | Should -Be 3
+        $result.Output | Should -Not -Match 'UNEXPECTED ERROR|stopped before it finished'
+    }
+
+    It 'Exits 0 when the run completes normally' {
+        $path = New-FaultInjectedInstaller -Name 'completed.ps1' -Body "Write-Host 'run finished'"
+
+        $result = Invoke-ChildInstaller -Arguments @('-File', $path, '-SkipSystemCheck', '-NonInteractive')
+
+        $result.ExitCode | Should -Be 0
+        $result.Output | Should -Match 'run finished'
+    }
+
+    It 'Exits 5 for an unexpected error under irm | iex too (non-interactive, e.g. RMM or CI)' {
+        $path = New-FaultInjectedInstaller -Name 'net-error-iex.ps1' -Body "[int]::Parse('not-a-number')"
+        $escapedPath = $path.Replace("'", "''")
+
+        $result = Invoke-ChildInstaller -Arguments @('-Command', "Get-Content -Raw -LiteralPath '$escapedPath' | Invoke-Expression")
+
+        $result.ExitCode | Should -Be 5
+        $result.Output | Should -Match 'UNEXPECTED ERROR'
     }
 }
 

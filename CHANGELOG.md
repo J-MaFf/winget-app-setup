@@ -73,6 +73,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- An aborted run no longer exits 0. The entry script's top-level `try/finally` (`build/fragments/tail.ps1`)
+  had no catch, so inside it a .NET exception, a method call on `$null` or a parameter-binding
+  error anywhere in the run aborted everything - no retry pass, no summary - and the process exited
+  0; an outside stop (Ctrl+C, or an MSI upgrade of PowerShell sending a console stop, as in #283)
+  did the same under `-File`. The entry script now catches unexpected errors, writes the message,
+  position and stack trace into the transcript and exits 5; a completion marker in its `finally`
+  turns an uncaught stop into exit 5 for file and non-interactive runs (interactive `irm | iex`
+  consoles are left open). Every intended exit goes through the new `Exit-Installer`, so the guard
+  can tell the two apart. Windows Terminal setup, Winget-AutoUpdate setup and the end-of-run winget
+  check are each isolated, so one failing helper can no longer skip the summary or the exit-code
+  decision, and the 5.1 bootstrap dispatch is wrapped so an error there cannot fall through into
+  the PowerShell 7 body.
 - Stopped the installer from starting Winget-AutoUpdate's first update pass in the middle of its
   own run, the root cause of the red E2E runs (issues #279, #283, #284). The WAU MSI was installed
   with `RUN_WAU=YES`, so WAU 2.12.0's SYSTEM run began immediately; every such run calls WAU's

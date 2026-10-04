@@ -8,8 +8,29 @@ if ($MyInvocation.InvocationName -ne '.') {
     # relaunched run's exit code. Everything the bootstrap touches MUST stay 5.1-runtime
     # compatible - see WingetAppSetup/Private/PowerShell7Bootstrap.ps1.
     if ($PSVersionTable.PSVersion.Major -lt 7) {
-        exit (Invoke-PowerShell7Bootstrap -WhatIf:$WhatIf -NonInteractive:$NonInteractive -SkipSystemCheck:$SkipSystemCheck -CommandPath $PSCommandPath)
+        # try/catch, not a bare `exit (Invoke-PowerShell7Bootstrap ...)`: a statement-terminating
+        # error inside the bootstrap would abort only that `exit` statement, and 5.1 would then fall
+        # through into the PowerShell-7-only body below.
+        $bootstrapExitCode = 1
+        try {
+            $bootstrapExitCode = Invoke-PowerShell7Bootstrap -WhatIf:$WhatIf -NonInteractive:$NonInteractive -SkipSystemCheck:$SkipSystemCheck -CommandPath $PSCommandPath
+        }
+        catch {
+            Write-ErrorMessage "The PowerShell 7 bootstrap failed unexpectedly: $_"
+            $bootstrapExitCode = 1
+        }
+        exit $bootstrapExitCode
     }
+
+    # Abort guard state (see the catch and finally at the end of this block). Reset on every run:
+    # under irm | iex these live in the caller's scope and would otherwise carry over into a second
+    # run in the same console. Exit-Installer sets InstallerExitRequested before every intended exit.
+    $script:InstallerExitRequested = $false
+    $installerRunCompleted = $false
+    # Forcing exit code 5 after an outside stop is only safe where the process ends anyway: a run
+    # from a file, or a non-interactive session (RMM, CI, `pwsh -Command "irm ... | iex"`). In an
+    # interactive irm | iex console it would close the user's window on Ctrl+C.
+    $forceExitCodeOnAbort = [bool]$PSCommandPath -or (Test-EffectiveNonInteractive -NonInteractive:$NonInteractive)
 
     # Persistent transcript (issue #189): a failed install on a remote user's machine used to
     # leave zero artifacts. The log lands under ProgramData - not the elevating account's TEMP -
@@ -53,15 +74,40 @@ if ($MyInvocation.InvocationName -ne '.') {
                 }
             }
             elseif (-not (Test-SystemRequirements -WhatIf:$WhatIf)) {
-                exit 1
+                Exit-Installer 1
             }
         }
 
         # Forward -SkipSystemCheck so an elevated relaunch inherits the caller's intent to bypass the
         # pre-flight checks (issue #185); the checks themselves already ran (or were skipped) above.
         Invoke-WingetInstall -WhatIf:$WhatIf -NonInteractive:$NonInteractive -SkipSystemCheck:$SkipSystemCheck
+        $installerRunCompleted = $true
+    }
+    catch {
+        # Any unexpected error lands here instead of silently ending the run with exit 0: inside
+        # this try, a .NET exception, a method call on $null or a parameter-binding error anywhere
+        # in the run aborts the whole block - no retry pass, no summary. Logged while the transcript
+        # is still open, so the log a teammate attaches to a GitHub issue carries the stack trace.
+        Write-ErrorMessage 'UNEXPECTED ERROR - the run was aborted before it finished. No summary was produced, and apps may be only partly installed.'
+        Write-ErrorMessage "Error: $($_.Exception.Message)"
+        if ($_.InvocationInfo -and $_.InvocationInfo.PositionMessage) {
+            Write-ErrorMessage $_.InvocationInfo.PositionMessage
+        }
+        if ($_.ScriptStackTrace) {
+            Write-ErrorMessage "Stack trace:`n$($_.ScriptStackTrace)"
+        }
+        Exit-Installer 5
     }
     finally {
+        # An outside stop (Ctrl+C, closing the console, or an installer such as an MSI upgrade of
+        # PowerShell itself sending a console stop - issue #283) skips the catch above, because a
+        # PipelineStoppedException cannot be caught. A run from a file would then exit 0. Only .NET
+        # calls here: while the pipeline is stopping, PowerShell commands (our Write-* helpers
+        # included) fail.
+        if (-not $installerRunCompleted -and -not $script:InstallerExitRequested -and $forceExitCodeOnAbort) {
+            [Console]::Error.WriteLine('The run was stopped before it finished (exit code 5).')
+            $host.SetShouldExit(5)
+        }
         # Exit statements inside Invoke-WingetInstall unwind through here (PowerShell runs finally
         # blocks for the exit statement), so the transcript closes on every path.
         if ($transcriptStarted) {
