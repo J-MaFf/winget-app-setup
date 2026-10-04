@@ -9,11 +9,12 @@
 .SYNOPSIS
     Ends the installer run with the given exit code, marking the exit as intended.
 .DESCRIPTION
-    Every deliberate exit goes through here, so the entry script's abort guard
-    (build/fragments/tail.ps1) can tell a run that chose its exit code from one stopped from
-    outside: an outside stop (Ctrl+C, a console-stop event) unwinds through the entry script's
-    finally block without this marker set, and is then reported as exit code 5 instead of 0.
-    Like a bare `exit`, this ends the whole script (and, under irm | iex, the host process).
+    Used by the generated entry script (build/fragments/tail.ps1) for every deliberate exit, so its
+    abort guard can tell a run that chose its exit code from one stopped from outside: an outside
+    stop (Ctrl+C, a console-stop event) unwinds through the entry script's finally block without
+    this marker set, and is then reported as exit code 5 instead of 0. Like a bare `exit`, this ends
+    the whole script (and, under irm | iex, the host process), so module functions never call it:
+    Invoke-WingetInstall returns its exit code and the entry script exits with it.
 .PARAMETER Code
     The process exit code. Default 0.
 #>
@@ -31,10 +32,10 @@ function Exit-Installer {
 .SYNOPSIS
     Decides Invoke-WingetInstall's final exit code from the run's outcome.
 .DESCRIPTION
-    Kept out of the orchestrator so the exit-code contract can be tested without executing an
-    `Exit` inside the test process. Failed apps take precedence (1); otherwise a winget that can no
-    longer be launched at the end of the run is reported as 2 - the same code as "winget
-    unavailable" at the start - so a run can never exit 0 while leaving winget broken.
+    Invoke-WingetInstall returns this as its exit code at the end of a run. Failed apps take
+    precedence (1); otherwise a winget that can no longer be launched at the end of the run is
+    reported as 2 - the same code as "winget unavailable" at the start - so a run can never exit 0
+    while leaving winget broken.
 .PARAMETER FailedAppCount
     Number of apps still failed after the retry pass.
 .PARAMETER WingetUsable
@@ -139,8 +140,7 @@ function Format-InstallFailureReason {
     Prints one row per failed app with its Format-InstallFailureReason diagnostic (issue #189), so
     the summary — and the persistent transcript — carry the winget exit code and retry detail
     instead of just a list of failed names. No-ops when nothing failed. Kept separate from
-    Invoke-WingetInstall so the rendering is unit-testable without driving the whole orchestrator
-    (whose failure path ends in Exit 1).
+    Invoke-WingetInstall so the rendering is unit-testable without driving the whole orchestrator.
 .PARAMETER FailedApps
     Array of @{ Name = <winget package id>; Reason = <string> } hashtables tracked by
     Invoke-WingetInstall.

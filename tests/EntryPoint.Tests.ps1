@@ -7,17 +7,54 @@
 # Load the module's functions once for this file. TestHelpers.ps1 resolves the repo paths
 # and dot-sources WingetAppSetup/Private + Public (the single source of truth; the
 # distributable winget-app-install.ps1 is generated from it by build/Build-WingetInstallScript.ps1).
-#
-# Also dot-source it here at the TOP LEVEL (script scope, outside any Describe/BeforeAll): top-
-# level code in a .Tests.ps1 file runs at Pester DISCOVERY time, before BeforeAll runs. The 'IEX
-# non-admin execution behavior' Describe below needs Test-IsAdmin inside its BeforeDiscovery
-# block to compute a -Skip condition, and BeforeDiscovery is itself evaluated at discovery time -
-# too early for the BeforeAll dot-source below to have run yet. Loading twice is harmless:
-# redefining a PowerShell function is not an error.
-. (Join-Path $PSScriptRoot 'TestHelpers.ps1')
-
 BeforeAll {
     . (Join-Path $PSScriptRoot 'TestHelpers.ps1')
+
+    # Child-process helpers for the entry-block tests below, which run the generated installer's
+    # real tail.ps1 logic in a separate pwsh, so its `exit` ends that child and not this test run.
+    $script:currentPowerShell = (Get-Process -Id $PID).Path
+    $script:installerText = Get-Content -Raw -Encoding UTF8 -Path $script:InstallerScriptPath
+
+    # Builds a copy of the generated installer with function overrides injected just before the
+    # entry block, so the real tail.ps1 logic runs unchanged. -Body replaces Invoke-WingetInstall;
+    # -Overrides adds further definitions, which win over the defaults here because they come later.
+    function New-FaultInjectedInstaller {
+        param ([string]$Name, [string]$Body, [string]$Overrides = '')
+        $entryIndex = $script:installerText.LastIndexOf("if (`$MyInvocation.InvocationName -ne '.') {")
+        $entryIndex | Should -BeGreaterThan 0
+        # Test-SystemRequirements is stubbed too: an irm | iex run cannot pass -SkipSystemCheck,
+        # and the real pre-flight checks probe the network and the OS.
+        $override = "function Test-SystemRequirements { param([switch]`$WhatIf) `$true }`n"
+        if ($PSBoundParameters.ContainsKey('Body')) {
+            $override += "function Invoke-WingetInstall { param([switch]`$WhatIf, [switch]`$NonInteractive, [switch]`$SkipSystemCheck) $Body }`n"
+        }
+        $override += "$Overrides`n"
+        $path = Join-Path $TestDrive $Name
+        Set-Content -LiteralPath $path -Value ($script:installerText.Insert($entryIndex, $override)) -Encoding UTF8
+        $path
+    }
+
+    # Runs a child pwsh with the transcript pointed into TestDrive (never the real ProgramData).
+    function Invoke-ChildInstaller {
+        param ([string[]]$Arguments)
+        $savedProgramData = $env:ProgramData
+        $env:ProgramData = Join-Path $TestDrive 'ProgramData'
+        try {
+            $output = & $script:currentPowerShell -NoLogo -NoProfile -NonInteractive @Arguments 2>&1 | Out-String
+            [pscustomobject]@{ ExitCode = $LASTEXITCODE; Output = $output }
+        }
+        finally {
+            $env:ProgramData = $savedProgramData
+        }
+    }
+
+    # The same child run through `Get-Content | Invoke-Expression`, the shape of the irm | iex
+    # one-liner (no script path, so Test-IsRunningLocally is false), non-interactive like RMM or CI.
+    function Invoke-ChildInstallerViaIex {
+        param ([string]$Path)
+        $escapedPath = $Path.Replace("'", "''")
+        Invoke-ChildInstaller -Arguments @('-Command', "Get-Content -Raw -LiteralPath '$escapedPath' | Invoke-Expression")
+    }
 }
 
 Describe 'Module export surface (issue #191)' {
@@ -190,40 +227,6 @@ Describe 'Generated installer: Windows PowerShell 5.1 parse safety (issue #210)'
 }
 
 Describe 'Aborted runs exit non-zero (review P1: tail.ps1 try/finally exited 0)' {
-    BeforeAll {
-        $script:currentPowerShell = (Get-Process -Id $PID).Path
-        $script:installerText = Get-Content -Raw -Encoding UTF8 -Path $script:InstallerScriptPath
-
-        # Builds a copy of the generated installer whose Invoke-WingetInstall is replaced by $Body,
-        # injected just before the entry block so the real tail.ps1 logic runs unchanged.
-        function New-FaultInjectedInstaller {
-            param ([string]$Name, [string]$Body)
-            $entryIndex = $script:installerText.LastIndexOf("if (`$MyInvocation.InvocationName -ne '.') {")
-            $entryIndex | Should -BeGreaterThan 0
-            # Test-SystemRequirements is stubbed too: an irm | iex run cannot pass -SkipSystemCheck,
-            # and the real pre-flight checks probe the network and the OS.
-            $override = "function Test-SystemRequirements { param([switch]`$WhatIf) `$true }`n" +
-                "function Invoke-WingetInstall { param([switch]`$WhatIf, [switch]`$NonInteractive, [switch]`$SkipSystemCheck) $Body }`n"
-            $path = Join-Path $TestDrive $Name
-            Set-Content -LiteralPath $path -Value ($script:installerText.Insert($entryIndex, $override)) -Encoding UTF8
-            $path
-        }
-
-        # Runs a child pwsh with the transcript pointed into TestDrive (never the real ProgramData).
-        function Invoke-ChildInstaller {
-            param ([string[]]$Arguments)
-            $savedProgramData = $env:ProgramData
-            $env:ProgramData = Join-Path $TestDrive 'ProgramData'
-            try {
-                $output = & $script:currentPowerShell -NoLogo -NoProfile -NonInteractive @Arguments 2>&1 | Out-String
-                [pscustomobject]@{ ExitCode = $LASTEXITCODE; Output = $output }
-            }
-            finally {
-                $env:ProgramData = $savedProgramData
-            }
-        }
-    }
-
     It 'Exits 5 and logs the error with a stack trace when an unexpected .NET error aborts the run' {
         $path = New-FaultInjectedInstaller -Name 'net-error.ps1' -Body "[int]::Parse('not-a-number')"
 
@@ -264,17 +267,8 @@ Describe 'Aborted runs exit non-zero (review P1: tail.ps1 try/finally exited 0)'
         $script:installerText | Should -Match '\$forceExitCodeOnAbort = \$launchedForScript -or \(Test-EffectiveNonInteractive'
     }
 
-    It 'Keeps an intended exit code (Exit-Installer) instead of reporting it as an abort' {
-        $path = New-FaultInjectedInstaller -Name 'intended.ps1' -Body 'Exit-Installer 3'
-
-        $result = Invoke-ChildInstaller -Arguments @('-File', $path, '-SkipSystemCheck', '-NonInteractive')
-
-        $result.ExitCode | Should -Be 3
-        $result.Output | Should -Not -Match 'UNEXPECTED ERROR|stopped before it finished'
-    }
-
     It 'Exits 0 when the run completes normally' {
-        $path = New-FaultInjectedInstaller -Name 'completed.ps1' -Body "Write-Host 'run finished'"
+        $path = New-FaultInjectedInstaller -Name 'completed.ps1' -Body "Write-Host 'run finished'; return 0"
 
         $result = Invoke-ChildInstaller -Arguments @('-File', $path, '-SkipSystemCheck', '-NonInteractive')
 
@@ -284,12 +278,73 @@ Describe 'Aborted runs exit non-zero (review P1: tail.ps1 try/finally exited 0)'
 
     It 'Exits 5 for an unexpected error under irm | iex too (non-interactive, e.g. RMM or CI)' {
         $path = New-FaultInjectedInstaller -Name 'net-error-iex.ps1' -Body "[int]::Parse('not-a-number')"
-        $escapedPath = $path.Replace("'", "''")
 
-        $result = Invoke-ChildInstaller -Arguments @('-Command', "Get-Content -Raw -LiteralPath '$escapedPath' | Invoke-Expression")
+        $result = Invoke-ChildInstallerViaIex -Path $path
 
         $result.ExitCode | Should -Be 5
         $result.Output | Should -Match 'UNEXPECTED ERROR'
+    }
+}
+
+# Invoke-WingetInstall returns its exit code instead of calling `exit` itself (wgt-gq8.6); the
+# entry block exits with it. Which code each path returns is covered in-process in
+# tests/Install.Tests.ps1; these check the hand-off in a real child process.
+Describe 'The entry block exits with the code Invoke-WingetInstall returns (wgt-gq8.6)' {
+    It 'Exits <_> when Invoke-WingetInstall returns <_>, without reporting an abort' -ForEach @(1, 2, 3) {
+        $path = New-FaultInjectedInstaller -Name "returns-$_.ps1" -Body "return $_"
+
+        $result = Invoke-ChildInstaller -Arguments @('-File', $path, '-SkipSystemCheck', '-NonInteractive')
+
+        $result.ExitCode | Should -Be $_
+        $result.Output | Should -Not -Match 'UNEXPECTED ERROR|stopped before it finished'
+    }
+
+    It 'Exits with the returned code under irm | iex too (non-interactive, e.g. RMM or CI)' {
+        $path = New-FaultInjectedInstaller -Name 'returns-2-iex.ps1' -Body 'return 2'
+
+        $result = Invoke-ChildInstallerViaIex -Path $path
+
+        $result.ExitCode | Should -Be 2
+        $result.Output | Should -Not -Match 'UNEXPECTED ERROR|stopped before it finished'
+    }
+
+    It 'Exits with the returned code, not a value a helper leaked into the output stream before it' {
+        $path = New-FaultInjectedInstaller -Name 'leaks-then-returns.ps1' -Body "Write-Output 'stray value'; Write-Output 7; return 3"
+
+        $result = Invoke-ChildInstaller -Arguments @('-File', $path, '-SkipSystemCheck', '-NonInteractive')
+
+        $result.ExitCode | Should -Be 3
+        $result.Output | Should -Not -Match 'UNEXPECTED ERROR'
+    }
+
+    It 'Exits 1 without running the install when a blocking pre-flight check fails' {
+        $path = New-FaultInjectedInstaller -Name 'preflight-fails.ps1' -Body "Write-Host 'install ran'; return 0" -Overrides "function Test-SystemRequirements { param([switch]`$WhatIf) `$false }"
+
+        $result = Invoke-ChildInstaller -Arguments @('-File', $path, '-NonInteractive')
+
+        $result.ExitCode | Should -Be 1
+        $result.Output | Should -Not -Match 'install ran'
+        $result.Output | Should -Not -Match 'UNEXPECTED ERROR|stopped before it finished'
+    }
+
+    It 'Exits 1 with the remote elevation guidance when an irm | iex run is not elevated (issues #226/#229)' {
+        # The real Invoke-WingetInstall, with Test-IsAdmin overridden instead of depending on the
+        # runner: CI is elevated, so the old version of this test (gated on real elevation) never
+        # ran there. Under Invoke-Expression there is no script path to relaunch from, so the run
+        # stops at the elevation gate. Start-Sleep is overridden to skip the 5-second pause.
+        $path = New-FaultInjectedInstaller -Name 'iex-not-elevated.ps1' -Overrides (
+            "function Test-IsAdmin { `$false }`n" +
+            "function Start-Sleep { param([int]`$Seconds) }")
+
+        $result = Invoke-ChildInstallerViaIex -Path $path
+
+        $result.ExitCode | Should -Be 1
+        $result.Output | Should -Match 'This script requires administrator privileges\.'
+        $result.Output | Should -Match 'Auto-elevation is unavailable when running through IEX/remote execution\.'
+        $result.Output | Should -Match 'Open an elevated PowerShell or Windows Terminal session and run the IEX command again\.'
+        $result.Output | Should -Match 'Exiting in 5 seconds\.\.\.'
+        $result.Output | Should -Not -Match 'Press Enter to restart script with elevated privileges'
+        $result.Output | Should -Not -Match 'UNEXPECTED ERROR|stopped before it finished'
     }
 }
 
@@ -313,40 +368,5 @@ Describe 'Build determinism (issue #189)' {
 
         (Get-FileHash -Path $firstOutput -Algorithm SHA256).Hash |
             Should -Be (Get-FileHash -Path $secondOutput -Algorithm SHA256).Hash
-    }
-}
-
-Describe 'IEX non-admin execution behavior' {
-    BeforeDiscovery {
-        # Discovery-time (not BeforeAll) because -Skip is bound during discovery.
-        $script:isWindowsPlatform = [System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Win32NT
-        $script:isElevated = $false
-
-        if ($script:isWindowsPlatform) {
-            # Test-IsAdmin (WingetAppSetup/Public/Elevation.ps1) is the shared admin-check helper
-            # (full-repo review finding, 2026-07-16); loaded above at discovery time so it's
-            # available here.
-            $script:isElevated = Test-IsAdmin
-        }
-    }
-
-    It 'Should exit with code 1 and show remote elevation guidance' -Skip:(-not $script:isWindowsPlatform -or $script:isElevated) {
-
-        $scriptPath = $script:InstallerScriptPath
-        $psStringEscapedPath = $scriptPath.Replace("'", "''")
-        $currentPowerShell = (Get-Process -Id $PID).Path
-        $childCommand = @"
-Get-Content -Raw -LiteralPath '$psStringEscapedPath' | Invoke-Expression
-"@
-
-        $output = & $currentPowerShell -NoLogo -NoProfile -NonInteractive -Command $childCommand 2>&1 | Out-String
-        $exitCode = $LASTEXITCODE
-
-        $exitCode | Should -Be 1
-        $output | Should -Match 'This script requires administrator privileges\.'
-        $output | Should -Match 'Auto-elevation is unavailable when running through IEX/remote execution\.'
-        $output | Should -Match 'Open an elevated PowerShell or Windows Terminal session and run the IEX command again\.'
-        $output | Should -Match 'Exiting in 5 seconds\.\.\.'
-        $output | Should -Not -Match 'Press Enter to restart script with elevated privileges'
     }
 }

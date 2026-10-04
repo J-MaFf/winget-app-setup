@@ -18,13 +18,20 @@
     App-definition hashtables to install. Defaults to the curated catalog returned by
     Get-DefaultAppCatalog — the single source of truth shared with winget-app-uninstall.ps1
     (issue #190). Overridable so tests (and callers) can inject a custom catalog.
+.OUTPUTS
+    [int] The run's exit code. The function never ends the process itself: the generated entry
+    script (build/fragments/tail.ps1) exits with the returned code, so every path here can be
+    driven from a test and asserted on its result.
 .NOTES
-    Exit codes: 0 = success, 1 = one or more apps failed to install, 2 = winget unavailable (at
-    the start, or no longer launchable at the end of the run), 3 = app-definition validation
-    failed or no valid apps remain. Every exit goes through Exit-Installer. The generated entry
-    script adds 5 = the run was aborted by an unexpected error or stopped from outside.
+    Exit codes: 0 = success (also returned right after handing the run to an elevated relaunch),
+    1 = one or more apps failed to install, or elevation was declined or is unavailable (irm | iex,
+    or the imported module), 2 = winget unavailable (at the start, or no longer launchable at the
+    end of the run), 3 = app-definition validation failed or no valid apps remain. The generated
+    entry script also exits 1 when a blocking pre-flight check fails (before this function runs)
+    and 5 when the run was aborted by an unexpected error or stopped from outside.
 #>
 function Invoke-WingetInstall {
+    [OutputType([int])]
     param (
         [Parameter(Mandatory = $false)]
         [switch]$WhatIf,
@@ -117,7 +124,7 @@ function Invoke-WingetInstall {
             # without installing anything (issue #185). Fail fast with guidance instead.
             if (Test-InvokedFromModuleContext -InvocationModule $MyInvocation.MyCommand.Module -CommandPath $PSCommandPath) {
                 Write-ErrorMessage 'Invoke-WingetInstall was invoked from the imported module without elevation; auto-elevation cannot relaunch a module function. Run winget-app-install.ps1, or start from an already-elevated session.'
-                return
+                return 1
             }
             # No "press Enter to elevate" pause (issue #230): it gated the run on a keystroke
             # without offering a decision - the relaunch happens either way, and the UAC dialog
@@ -138,9 +145,10 @@ function Invoke-WingetInstall {
             $relaunchedIn = Restart-WithElevation -PowerShellExecutable $psExecutable -ScriptPath $PSCommandPath -AdditionalArguments $elevationArgs
             if (-not $relaunchedIn) {
                 Write-ErrorMessage 'Elevation was declined or failed, so nothing was installed. Re-run the installer and approve the administrator (UAC) prompt.'
-                Exit-Installer 1
+                return 1
             }
-            Exit-Installer
+            # The elevated window does the install; this (non-elevated) run is done.
+            return 0
         }
         else {
             # IEX/remote execution has no local script path to relaunch from.
@@ -149,7 +157,7 @@ function Invoke-WingetInstall {
             Write-Info 'Open an elevated PowerShell or Windows Terminal session and run the IEX command again.'
             Write-Info 'Exiting in 5 seconds...'
             Start-Sleep -Seconds 5
-            Exit-Installer 1
+            return 1
         }
     }
     else {
@@ -184,7 +192,7 @@ function Invoke-WingetInstall {
     # Check if winget is available and install if necessary
     if (-not (Test-AndInstallWinget)) {
         Write-ErrorMessage 'Winget is required for this script. Exiting.'
-        Exit-Installer 2
+        return 2
     }
 
     # Initialize winget sources and agreements for the account performing the installs. This is
@@ -226,14 +234,14 @@ function Invoke-WingetInstall {
             Write-ErrorMessage $validationError
         }
         Write-ErrorMessage 'No valid application definitions found. Resolve the errors and re-run the script.'
-        Exit-Installer 3
+        return 3
     }
 
     $apps = $validationResult.ValidApps
 
     if ($apps.Count -eq 0) {
         Write-ErrorMessage 'No application definitions remain after validation. Add at least one valid entry and re-run the script.'
-        Exit-Installer 3
+        return 3
     }
 
     Write-Info 'Installing the following Apps:'
@@ -509,14 +517,12 @@ function Invoke-WingetInstall {
     $script:InstallerPendingExitCode = $exitCode
 
     # Keep the console window open until the user presses a key. Skipped in non-interactive mode
-    # so unattended runs never block (and the failure exit below stays reachable).
+    # so unattended runs never block.
     if (-not $effectiveNonInteractive) {
         Write-Prompt 'Press any key to exit...'
         [void][System.Console]::ReadKey($true)
     }
 
-    if ($exitCode -ne 0) {
-        Exit-Installer $exitCode
-    }
+    return $exitCode
 }
 

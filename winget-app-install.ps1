@@ -58,12 +58,12 @@ param (
 # This script is assembled from the WingetAppSetup module by build/Build-WingetInstallScript.ps1.
 # Edit the function source under WingetAppSetup/Public and WingetAppSetup/Private, then re-run the
 # build to regenerate this file. See readme.md ("Project layout") for details.
-# Build id: 1.0.0+02c31136 (module version + SHA256 fragment of the function content; issue #189).
+# Build id: 1.0.0+e6aeeae5 (module version + SHA256 fragment of the function content; issue #189).
 # ------------------------------------------------------------------------------------------------
 
 # Content-derived build identity, logged at startup so a transcript from a remote machine
 # identifies exactly which installer build produced it (issue #189).
-$script:InstallerBuildId = '1.0.0+02c31136'
+$script:InstallerBuildId = '1.0.0+e6aeeae5'
 
 # ------------------------------------------------Functions------------------------------------------------
 
@@ -196,11 +196,12 @@ function Get-CurrentWindowsPrincipal {
 .SYNOPSIS
     Ends the installer run with the given exit code, marking the exit as intended.
 .DESCRIPTION
-    Every deliberate exit goes through here, so the entry script's abort guard
-    (build/fragments/tail.ps1) can tell a run that chose its exit code from one stopped from
-    outside: an outside stop (Ctrl+C, a console-stop event) unwinds through the entry script's
-    finally block without this marker set, and is then reported as exit code 5 instead of 0.
-    Like a bare `exit`, this ends the whole script (and, under irm | iex, the host process).
+    Used by the generated entry script (build/fragments/tail.ps1) for every deliberate exit, so its
+    abort guard can tell a run that chose its exit code from one stopped from outside: an outside
+    stop (Ctrl+C, a console-stop event) unwinds through the entry script's finally block without
+    this marker set, and is then reported as exit code 5 instead of 0. Like a bare `exit`, this ends
+    the whole script (and, under irm | iex, the host process), so module functions never call it:
+    Invoke-WingetInstall returns its exit code and the entry script exits with it.
 .PARAMETER Code
     The process exit code. Default 0.
 #>
@@ -218,10 +219,10 @@ function Exit-Installer {
 .SYNOPSIS
     Decides Invoke-WingetInstall's final exit code from the run's outcome.
 .DESCRIPTION
-    Kept out of the orchestrator so the exit-code contract can be tested without executing an
-    `Exit` inside the test process. Failed apps take precedence (1); otherwise a winget that can no
-    longer be launched at the end of the run is reported as 2 - the same code as "winget
-    unavailable" at the start - so a run can never exit 0 while leaving winget broken.
+    Invoke-WingetInstall returns this as its exit code at the end of a run. Failed apps take
+    precedence (1); otherwise a winget that can no longer be launched at the end of the run is
+    reported as 2 - the same code as "winget unavailable" at the start - so a run can never exit 0
+    while leaving winget broken.
 .PARAMETER FailedAppCount
     Number of apps still failed after the retry pass.
 .PARAMETER WingetUsable
@@ -326,8 +327,7 @@ function Format-InstallFailureReason {
     Prints one row per failed app with its Format-InstallFailureReason diagnostic (issue #189), so
     the summary — and the persistent transcript — carry the winget exit code and retry detail
     instead of just a list of failed names. No-ops when nothing failed. Kept separate from
-    Invoke-WingetInstall so the rendering is unit-testable without driving the whole orchestrator
-    (whose failure path ends in Exit 1).
+    Invoke-WingetInstall so the rendering is unit-testable without driving the whole orchestrator.
 .PARAMETER FailedApps
     Array of @{ Name = <winget package id>; Reason = <string> } hashtables tracked by
     Invoke-WingetInstall.
@@ -2928,13 +2928,20 @@ function Restart-WithElevation {
     App-definition hashtables to install. Defaults to the curated catalog returned by
     Get-DefaultAppCatalog — the single source of truth shared with winget-app-uninstall.ps1
     (issue #190). Overridable so tests (and callers) can inject a custom catalog.
+.OUTPUTS
+    [int] The run's exit code. The function never ends the process itself: the generated entry
+    script (build/fragments/tail.ps1) exits with the returned code, so every path here can be
+    driven from a test and asserted on its result.
 .NOTES
-    Exit codes: 0 = success, 1 = one or more apps failed to install, 2 = winget unavailable (at
-    the start, or no longer launchable at the end of the run), 3 = app-definition validation
-    failed or no valid apps remain. Every exit goes through Exit-Installer. The generated entry
-    script adds 5 = the run was aborted by an unexpected error or stopped from outside.
+    Exit codes: 0 = success (also returned right after handing the run to an elevated relaunch),
+    1 = one or more apps failed to install, or elevation was declined or is unavailable (irm | iex,
+    or the imported module), 2 = winget unavailable (at the start, or no longer launchable at the
+    end of the run), 3 = app-definition validation failed or no valid apps remain. The generated
+    entry script also exits 1 when a blocking pre-flight check fails (before this function runs)
+    and 5 when the run was aborted by an unexpected error or stopped from outside.
 #>
 function Invoke-WingetInstall {
+    [OutputType([int])]
     param (
         [Parameter(Mandatory = $false)]
         [switch]$WhatIf,
@@ -3027,7 +3034,7 @@ function Invoke-WingetInstall {
             # without installing anything (issue #185). Fail fast with guidance instead.
             if (Test-InvokedFromModuleContext -InvocationModule $MyInvocation.MyCommand.Module -CommandPath $PSCommandPath) {
                 Write-ErrorMessage 'Invoke-WingetInstall was invoked from the imported module without elevation; auto-elevation cannot relaunch a module function. Run winget-app-install.ps1, or start from an already-elevated session.'
-                return
+                return 1
             }
             # No "press Enter to elevate" pause (issue #230): it gated the run on a keystroke
             # without offering a decision - the relaunch happens either way, and the UAC dialog
@@ -3048,9 +3055,10 @@ function Invoke-WingetInstall {
             $relaunchedIn = Restart-WithElevation -PowerShellExecutable $psExecutable -ScriptPath $PSCommandPath -AdditionalArguments $elevationArgs
             if (-not $relaunchedIn) {
                 Write-ErrorMessage 'Elevation was declined or failed, so nothing was installed. Re-run the installer and approve the administrator (UAC) prompt.'
-                Exit-Installer 1
+                return 1
             }
-            Exit-Installer
+            # The elevated window does the install; this (non-elevated) run is done.
+            return 0
         }
         else {
             # IEX/remote execution has no local script path to relaunch from.
@@ -3059,7 +3067,7 @@ function Invoke-WingetInstall {
             Write-Info 'Open an elevated PowerShell or Windows Terminal session and run the IEX command again.'
             Write-Info 'Exiting in 5 seconds...'
             Start-Sleep -Seconds 5
-            Exit-Installer 1
+            return 1
         }
     }
     else {
@@ -3094,7 +3102,7 @@ function Invoke-WingetInstall {
     # Check if winget is available and install if necessary
     if (-not (Test-AndInstallWinget)) {
         Write-ErrorMessage 'Winget is required for this script. Exiting.'
-        Exit-Installer 2
+        return 2
     }
 
     # Initialize winget sources and agreements for the account performing the installs. This is
@@ -3136,14 +3144,14 @@ function Invoke-WingetInstall {
             Write-ErrorMessage $validationError
         }
         Write-ErrorMessage 'No valid application definitions found. Resolve the errors and re-run the script.'
-        Exit-Installer 3
+        return 3
     }
 
     $apps = $validationResult.ValidApps
 
     if ($apps.Count -eq 0) {
         Write-ErrorMessage 'No application definitions remain after validation. Add at least one valid entry and re-run the script.'
-        Exit-Installer 3
+        return 3
     }
 
     Write-Info 'Installing the following Apps:'
@@ -3419,15 +3427,13 @@ function Invoke-WingetInstall {
     $script:InstallerPendingExitCode = $exitCode
 
     # Keep the console window open until the user presses a key. Skipped in non-interactive mode
-    # so unattended runs never block (and the failure exit below stays reachable).
+    # so unattended runs never block.
     if (-not $effectiveNonInteractive) {
         Write-Prompt 'Press any key to exit...'
         [void][System.Console]::ReadKey($true)
     }
 
-    if ($exitCode -ne 0) {
-        Exit-Installer $exitCode
-    }
+    return $exitCode
 }
 
 # --- Logging ---
@@ -5181,7 +5187,8 @@ if ($MyInvocation.InvocationName -ne '.') {
     # Abort guard state (see the catch and finally at the end of this block). Reset on every run:
     # under irm | iex these live in the caller's scope and would otherwise carry over into a second
     # run in the same console. Exit-Installer sets InstallerExitRequested before every intended
-    # exit; Invoke-WingetInstall records InstallerPendingExitCode once it has decided its exit code.
+    # exit below; Invoke-WingetInstall records InstallerPendingExitCode once it has decided its exit
+    # code, just before its final 'Press any key' prompt.
     $script:InstallerExitRequested = $false
     $script:InstallerPendingExitCode = $null
     $installerRunCompleted = $false
@@ -5234,8 +5241,16 @@ if ($MyInvocation.InvocationName -ne '.') {
 
         # Forward -SkipSystemCheck so an elevated relaunch inherits the caller's intent to bypass the
         # pre-flight checks (issue #185); the checks themselves already ran (or were skipped) above.
-        Invoke-WingetInstall -WhatIf:$WhatIf -NonInteractive:$NonInteractive -SkipSystemCheck:$SkipSystemCheck
+        # Invoke-WingetInstall returns its exit code instead of exiting, and its return value is the
+        # last thing it writes to the output stream: taking the last element keeps the code right
+        # even if a helper ever leaks a value into that stream.
+        $installerExitCode = [int](@(Invoke-WingetInstall -WhatIf:$WhatIf -NonInteractive:$NonInteractive -SkipSystemCheck:$SkipSystemCheck)[-1])
         $installerRunCompleted = $true
+        # Exit only for a non-zero code: a successful run ends normally (exit code 0 under -File), so
+        # an interactive irm | iex console stays open afterwards.
+        if ($installerExitCode -ne 0) {
+            Exit-Installer $installerExitCode
+        }
     }
     catch {
         # Any unexpected error lands here instead of silently ending the run with exit 0: inside
@@ -5282,8 +5297,8 @@ if ($MyInvocation.InvocationName -ne '.') {
                 $host.SetShouldExit(5)
             }
         }
-        # Exit statements inside Invoke-WingetInstall unwind through here (PowerShell runs finally
-        # blocks for the exit statement), so the transcript closes on every path.
+        # The exit statements above unwind through here (PowerShell runs finally blocks for the
+        # exit statement), so the transcript closes on every path.
         if ($transcriptStarted) {
             try {
                 [void](Stop-Transcript)

@@ -56,7 +56,8 @@ if ($MyInvocation.InvocationName -ne '.') {
     # Abort guard state (see the catch and finally at the end of this block). Reset on every run:
     # under irm | iex these live in the caller's scope and would otherwise carry over into a second
     # run in the same console. Exit-Installer sets InstallerExitRequested before every intended
-    # exit; Invoke-WingetInstall records InstallerPendingExitCode once it has decided its exit code.
+    # exit below; Invoke-WingetInstall records InstallerPendingExitCode once it has decided its exit
+    # code, just before its final 'Press any key' prompt.
     $script:InstallerExitRequested = $false
     $script:InstallerPendingExitCode = $null
     $installerRunCompleted = $false
@@ -109,8 +110,16 @@ if ($MyInvocation.InvocationName -ne '.') {
 
         # Forward -SkipSystemCheck so an elevated relaunch inherits the caller's intent to bypass the
         # pre-flight checks (issue #185); the checks themselves already ran (or were skipped) above.
-        Invoke-WingetInstall -WhatIf:$WhatIf -NonInteractive:$NonInteractive -SkipSystemCheck:$SkipSystemCheck
+        # Invoke-WingetInstall returns its exit code instead of exiting, and its return value is the
+        # last thing it writes to the output stream: taking the last element keeps the code right
+        # even if a helper ever leaks a value into that stream.
+        $installerExitCode = [int](@(Invoke-WingetInstall -WhatIf:$WhatIf -NonInteractive:$NonInteractive -SkipSystemCheck:$SkipSystemCheck)[-1])
         $installerRunCompleted = $true
+        # Exit only for a non-zero code: a successful run ends normally (exit code 0 under -File), so
+        # an interactive irm | iex console stays open afterwards.
+        if ($installerExitCode -ne 0) {
+            Exit-Installer $installerExitCode
+        }
     }
     catch {
         # Any unexpected error lands here instead of silently ending the run with exit 0: inside
@@ -157,8 +166,8 @@ if ($MyInvocation.InvocationName -ne '.') {
                 $host.SetShouldExit(5)
             }
         }
-        # Exit statements inside Invoke-WingetInstall unwind through here (PowerShell runs finally
-        # blocks for the exit statement), so the transcript closes on every path.
+        # The exit statements above unwind through here (PowerShell runs finally blocks for the
+        # exit statement), so the transcript closes on every path.
         if ($transcriptStarted) {
             try {
                 [void](Stop-Transcript)

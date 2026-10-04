@@ -37,6 +37,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `Invoke-WingetInstall` now returns its exit code as an `[int]` instead of calling `exit` itself,
+  and the generated entry script exits with the returned code (review findings P3-4 and P3-5,
+  wgt-gq8.6). The codes do not change, and neither do the abort guard's cases: an aborted run still
+  exits 5, Ctrl+C at the final prompt keeps the run's code, and an interactive `irm | iex` console
+  stays open after a success or an unexpected error. An `exit` inside the function used to end the
+  Pester process, so its exit paths were pinned only by regexes over its source, which broke on any
+  rewording yet let a real regression through. The tests now run those paths and assert the returned
+  code: failed and recovered apps, winget unusable at the end of the run, winget unavailable, a bad
+  catalog, a declined or impossible elevation, the winget deadlock, the retry-pass messages (#237)
+  and the summary rows. The summary tests used to check their own inline copy of the summary
+  code. One AST check remains, guarding that the function never calls `exit` again. Tests no longer
+  depend on whether the runner is elevated: they mock `Test-IsAdmin`. Before, the #232 IEX dry-run
+  tests skipped on elevated runners and the retry-pass tests on non-elevated ones, so the #232
+  regression tests never ran in CI. The #226/#229 IEX test now overrides `Test-IsAdmin` in its child
+  process and runs on every runner. New child-process tests check that the entry script exits with
+  the returned code under `-File` and `irm | iex`, ignores values leaked into the output stream
+  before it, and still exits 1 when a pre-flight check fails. A Linux run now has one known
+  failure instead of two. Called from the imported module without elevation, the function now
+  returns 1 instead of nothing.
 - The build guards now catch three more mistakes locally instead of leaving them to Windows CI
   (review findings P3-46, P3-47, P3-48). `build/Build-WingetInstallScript.ps1` (build and `-Check`)
   rejects syntax that only PowerShell 7 parses: `??`, `??=`, `?.`, `?[`, the ternary `?:`, `&&` /

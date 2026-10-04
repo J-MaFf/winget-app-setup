@@ -7,15 +7,6 @@
 # Load the module's functions once for this file. TestHelpers.ps1 resolves the repo paths
 # and dot-sources WingetAppSetup/Private + Public (the single source of truth; the
 # distributable winget-app-install.ps1 is generated from it by build/Build-WingetInstallScript.ps1).
-#
-# Also dot-source it here at the TOP LEVEL (script scope, outside any Describe/BeforeAll): top-
-# level code in a .Tests.ps1 file runs at Pester DISCOVERY time, before BeforeAll runs. The
-# 'Invoke-WingetInstall wiring (issue #188)' Describe below needs Test-IsAdmin inside its
-# BeforeDiscovery block to compute a -Skip condition, and BeforeDiscovery is itself evaluated at
-# discovery time - too early for the BeforeAll dot-source below to have run yet. Loading twice is
-# harmless: redefining a PowerShell function is not an error.
-. (Join-Path $PSScriptRoot 'TestHelpers.ps1')
-
 BeforeAll {
     . (Join-Path $PSScriptRoot 'TestHelpers.ps1')
 }
@@ -41,39 +32,19 @@ Describe 'Main Script Logic' {
     }
 
     # The old 'Administrator check' context asserted `Should -BeOfType` on framework constants
-    # ([bool], the WindowsBuiltInRole enum) — tautologies that could never fail (issue #192).
-    # The replacement below pins the real gate structurally; the non-admin behavior itself is
-    # exercised end-to-end by 'IEX non-admin execution behavior' in tests/EntryPoint.Tests.ps1.
+    # ([bool], the WindowsBuiltInRole enum) — tautologies that could never fail (issue #192). The
+    # orchestrator's admin gate is now driven for real, with Test-IsAdmin mocked, by the 'Elevation
+    # gate' context in 'Invoke-WingetInstall wiring' below.
     Context 'Administrator gate' {
-        It 'Uses the shared Test-IsAdmin check and refuses to install without elevation' {
-            # The inline WindowsPrincipal/IsInRole expression was consolidated into the shared
-            # Test-IsAdmin helper (WingetAppSetup/Public/Elevation.ps1), reused by
-            # winget-app-uninstall.ps1 and the PowerShell 7 bootstrap too (full-repo review
-            # finding, 2026-07-16). Test-IsAdmin itself is covered directly in Elevation.Tests.ps1,
-            # and being a mockable command (unlike the raw .NET call) is what lets the
-            # pre-elevation source-update tests below drive the non-admin branch deterministically.
-            $installBody = $script:InvokeWingetInstallDef
-            $installBody | Should -Match '\$isAdmin\s*=\s*Test-IsAdmin'
-            $installBody | Should -Match 'This script requires administrator privileges'
-
-            # ...and pin that Test-IsAdmin's underlying seam (Get-CurrentWindowsPrincipal) still
-            # performs the real WindowsPrincipal check, so the delegation chain ends at the
-            # genuine .NET call rather than a stub.
+        It 'Test-IsAdmin''s seam still performs the real WindowsPrincipal check (pinned structurally: every test mocks it)' {
+            # Test-IsAdmin (WingetAppSetup/Public/Elevation.ps1) is covered directly in
+            # Elevation.Tests.ps1 through its Get-CurrentWindowsPrincipal seam, and every orchestrator
+            # test mocks Test-IsAdmin itself. So pin here that the seam still ends at the genuine .NET
+            # call rather than a stub: running it would only report the test runner's own elevation
+            # (and it throws off Windows).
             $probeBody = $script:GetCurrentWindowsPrincipalDef
             $probeBody | Should -Match '\[Security\.Principal\.WindowsPrincipal\]'
             $probeBody | Should -Match 'WindowsIdentity\]::GetCurrent\(\)'
-        }
-    }
-
-    # The old 'Winget check' context mocked Test-AndInstallWinget and then asserted the mock's
-    # own return value — a tautology that tested nothing (issue #192). The behavior it pretended
-    # to guard is the orchestrator's hard stop when winget cannot be installed; that gate is
-    # pinned structurally below because driving it for real would `Exit 2` the test process.
-    Context 'Winget availability gate' {
-        It 'Exits with code 2 when winget cannot be installed (dependency-failure exit code)' {
-            $installBody = $script:InvokeWingetInstallDef
-            $installBody | Should -Match 'if \(-not \(Test-AndInstallWinget\)\)'
-            $installBody | Should -Match "(?s)Winget is required for this script\. Exiting\.'\s*Exit-Installer 2"
         }
     }
 
@@ -96,50 +67,10 @@ Describe 'Main Script Logic' {
     # --source winget flag assertion lives in the 'Install-WingetPackage' Describe
     # (tests/WingetCore.Tests.ps1).
 
-    Context 'Summary table generation' {
-        It 'Should format summary table with install, skip, and fail results' {
-            $installedApps = @('App1', 'App2')
-            $skippedApps = @('App3')
-            $failedApps = @('App4')
-
-            Mock Format-AppList { param($AppArray) if ($AppArray) { return $AppArray -join ', ' } return $null }
-            Mock Write-Table { }
-
-            $headers = @('Status', 'Apps')
-            $rows = @()
-
-            $appList = Format-AppList -AppArray $installedApps
-            if ($appList) { $rows += , @('Installed', $appList) }
-
-            $appList = Format-AppList -AppArray $skippedApps
-            if ($appList) { $rows += , @('Skipped', $appList) }
-
-            $appList = Format-AppList -AppArray $failedApps
-            if ($appList) { $rows += , @('Failed', $appList) }
-
-            Write-Table -Headers $headers -Rows $rows
-
-            $rows.Count | Should -Be 3
-            Should -Invoke Write-Table -Times 1
-        }
-
-        It 'Should handle empty result arrays' {
-            $installedApps = @()
-
-            Mock Format-AppList { param($AppArray) if ($AppArray -and $AppArray.Count -gt 0) { return $AppArray -join ', ' } return $null }
-            Mock Write-Table { }
-
-            $headers = @('Status', 'Apps')
-            $rows = @()
-
-            $appList = Format-AppList -AppArray $installedApps
-            if ($appList) { $rows += , @('Installed', $appList) }
-
-            Write-Table -Headers $headers -Rows $rows
-
-            $rows.Count | Should -Be 0
-        }
-    }
+    # The 'Winget availability gate' and 'Summary table generation' contexts were removed
+    # (wgt-gq8.6): the first pinned `Exit 2` with a regex on the source, the second re-implemented
+    # the summary rows inline and asserted on its own copy. Both are now driven through the real
+    # orchestrator in 'Invoke-WingetInstall wiring' ('Exit-code contract' and 'Summary').
 }
 
 # The 'Retry Failed Installations' Describe was removed in issue #188: it simulated the retry
@@ -148,22 +79,26 @@ Describe 'Main Script Logic' {
 # failure stays failed, mixed results, no-op when nothing failed, non-zero exit signalling) are
 # now covered by the 'Install-AppWithVerification' Describe (per-app success/failure states) and
 # the 'Invoke-WingetInstall wiring (issue #188)' Describe below.
+#
+# Invoke-WingetInstall returns its exit code instead of calling `exit` (wgt-gq8.6), so every path
+# below - failed apps, a broken winget, a declined elevation - is driven for real and asserted on
+# the returned code. Before that, any path ending in `Exit` would have ended the Pester process
+# itself, so those paths were pinned with regexes over the function's source.
 Describe 'Invoke-WingetInstall wiring (issue #188)' {
-    BeforeDiscovery {
-        # Elevation state must be known at discovery time for -Skip to work: values assigned in
-        # run-phase BeforeAll blocks are not visible to -Skip expressions.
-        $script:wiringIsElevated = $false
-        if ([System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Win32NT) {
-            # Test-IsAdmin (WingetAppSetup/Public/Elevation.ps1) is the shared admin-check helper
-            # (full-repo review finding, 2026-07-16); loaded above at discovery time so it's
-            # available here.
-            $script:wiringIsElevated = Test-IsAdmin
-        }
+    BeforeAll {
+        # The structural tests below read the source text; captured here too, so they do not depend
+        # on 'Main Script Logic' having run first (a filtered run skips its BeforeAll).
+        $script:InvokeWingetInstallDef = ${function:Invoke-WingetInstall}.ToString()
     }
 
     BeforeEach {
         Mock Write-Host { }
         Mock Start-Process { }
+        Mock Start-Sleep { }
+        # Elevated by default, so a real (non -WhatIf) run goes straight to the installs on every
+        # runner; the contexts that exercise the non-admin branches mock it to $false. Never read the
+        # runner's real elevation: CI runs elevated, so a test gated on it never ran there (wgt-gq8.6).
+        Mock Test-IsAdmin { $true }
         Mock Restart-WithElevation { 'PowerShell' }
         Mock Test-IsRunningLocally { $true }
         Mock Test-AndInstallWingetModule { $true }
@@ -179,13 +114,26 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
         # Healthy (no conflict) by default (issue #279); tests for the deadlock fail-fast override this.
         Mock Get-ConflictingDesktopAppInstallerVersions { @() }
         # The end-of-run winget health check launches real winget; healthy by default so a real
-        # (non -WhatIf) run in these tests never probes the machine or reaches `Exit 2`.
+        # (non -WhatIf) run in these tests never probes the machine.
         Mock Wait-WingetLaunchable { $true }
         # Never wait on (or query) the machine's real Winget-AutoUpdate tasks.
         Mock Wait-WauIdle { $true }
 
+        # Rows of every table the run prints, keyed by title; capturedRows is the main summary.
         $script:capturedRows = $null
-        Mock Write-Table { $script:capturedRows = $Rows }
+        $script:capturedTables = @{}
+        Mock Write-Table {
+            $script:capturedTables[$Title] = $Rows
+            if ($Title -eq 'Installation Summary') {
+                $script:capturedRows = $Rows
+            }
+        }
+        $script:errorMessages = @()
+        Mock Write-ErrorMessage { $script:errorMessages += $Message }
+        $script:warningMessages = @()
+        Mock Write-WarningMessage { $script:warningMessages += $Message }
+        $script:infoMessages = @()
+        Mock Write-Info { $script:infoMessages += $Message }
     }
 
     Context 'Structure: the shared helper replaced the inline verify blocks' {
@@ -201,40 +149,18 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
             $installBody | Should -Not -Match 'winget_(list|verify|retry_verify)_'
         }
 
-        It 'Exits with the code Get-InstallerExitCode derives from failed apps and the end-of-run winget check (issue #176)' {
-            # The precedence itself (1 over 2 over 0) is covered directly in the
-            # 'Get-InstallerExitCode' Describe below; this pins that the orchestrator feeds it the
-            # post-retry failure count and the end-of-run probe, and exits on any non-zero result.
-            $installBody = $script:InvokeWingetInstallDef
-            $installBody | Should -Match '\$exitCode = Get-InstallerExitCode -FailedAppCount \$failedApps\.Count -WingetUsable \$wingetUsableAtEnd'
-            $installBody | Should -Match 'if \(\$exitCode -ne 0\) \{\s*Exit-Installer \$exitCode\s*\}'
-        }
-
-        It 'Routes every exit through Exit-Installer, so the entry script can tell an intended exit from an outside stop' {
-            # A bare `Exit` would leave the abort guard in build/fragments/tail.ps1 unable to tell
-            # a deliberate exit from Ctrl+C or a console-stop event, which it reports as exit 5.
-            $installBody = $script:InvokeWingetInstallDef
-            $installBody | Should -Not -Match '(?m)^\s*Exit(\s|$)'
-            ([regex]::Matches($installBody, '(?m)^\s*Exit-Installer\b')).Count | Should -Be 7
-        }
-
-        It 'Reports a declined or failed elevation as exit 1, not as an unexpected error (pinned structurally - driving it live would Exit)' {
-            $installBody = $script:InvokeWingetInstallDef
-            $installBody | Should -Match '(?s)\$relaunchedIn = Restart-WithElevation .*?if \(-not \$relaunchedIn\) \{\s*Write-ErrorMessage ''Elevation was declined or failed.*?Exit-Installer 1\s*\}\s*Exit-Installer'
-        }
-
-        It 'Records the decided exit code before the final prompt, so Ctrl+C there keeps it' {
-            $installBody = $script:InvokeWingetInstallDef
-            $installBody | Should -Match '(?s)\$script:InstallerPendingExitCode = \$exitCode.*?ReadKey'
-        }
-
-        It 'Tracks failures as objects with reasons and renders the failed-apps summary (issue #189)' {
-            $installBody = $script:InvokeWingetInstallDef
-            $installBody | Should -Match 'Format-InstallFailureReason'
-            $installBody | Should -Match 'Write-FailedAppsSummary'
-            $installBody | Should -Match '\$failedApps \+= @\{ Name ='
-            # The generic message the diagnostic detail replaces (issue #189).
-            $installBody | Should -Not -Match 'No package found matching input criteria'
+        It 'Never ends the process itself: no exit statement and no Exit-Installer call (pinned structurally - an exit here would end the test run, not fail a test)' {
+            # The entry script (build/fragments/tail.ps1) exits with the returned code and tells an
+            # intended exit from an outside stop. An `exit` in here would bypass that, and the
+            # behavioral tests below could not report it: it would end the Pester process instead.
+            $functionAst = ${function:Invoke-WingetInstall}.Ast
+            $exitStatements = $functionAst.FindAll({ param($node) $node -is [System.Management.Automation.Language.ExitStatementAst] }, $true)
+            @($exitStatements).Count | Should -Be 0
+            $exitInstallerCalls = $functionAst.FindAll({
+                    param($node)
+                    $node -is [System.Management.Automation.Language.CommandAst] -and $node.GetCommandName() -eq 'Exit-Installer'
+                }, $true)
+            @($exitInstallerCalls).Count | Should -Be 0
         }
 
         It 'Routes the pre-elevation winget source update through the timeout-guarded probe instead of a bare -Wait Start-Process' {
@@ -249,34 +175,191 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
         }
     }
 
-    Context 'Pre-elevation source update (real non-admin, non-WhatIf code path)' {
-        # Every other non-WhatIf invocation in this file is gated behind
-        # -Skip:(-not $script:wiringIsElevated), because $isAdmin used to come from a real,
-        # unmockable IsInRole() call - the non-admin branch containing this call site was only
-        # reachable by actually running Pester non-elevated. Test-IsAdmin
-        # (Public/Elevation.ps1, issue #239) now wraps that check behind a mockable command, so
-        # this test drives Invoke-WingetInstall's real (non-WhatIf) pre-elevation block
-        # deterministically, on any machine, elevated or not.
+    Context 'Exit-code contract (returned to the entry script, which exits with it)' {
+        It 'Returns 0, and nothing else, when every app installs and winget still launches at the end' {
+            $result = Invoke-WingetInstall -Apps @(@{ name = 'Contoso.AppOne' }) -NonInteractive
+
+            # Exactly one [int]: the entry script exits with the last value the function writes, so
+            # a stray value in the output stream must never be the only thing it sees.
+            @($result).Count | Should -Be 1
+            $result | Should -BeOfType [int]
+            $result | Should -Be 0
+            Should -Invoke Wait-WingetLaunchable -Times 1 -Exactly
+        }
+
+        It 'Returns 1 when an app is still failed after the retry pass (issue #176)' {
+            Mock Install-AppWithVerification { @{ Status = 'Failed'; InstallResult = @{ ExitCode = 1; Attempts = 1 }; FailureReason = 'VerifyNotFound' } }
+
+            $result = Invoke-WingetInstall -Apps @(@{ name = 'Contoso.AppOne' }) -NonInteractive
+
+            $result | Should -Be 1
+            # Once in the first pass, once in the retry pass.
+            Should -Invoke Install-AppWithVerification -Times 2 -Exactly
+        }
+
+        It 'Returns 0 when the retry pass recovers the only failed app' {
+            $script:appCalls = 0
+            Mock Install-AppWithVerification {
+                $script:appCalls++
+                if ($script:appCalls -eq 1) {
+                    return @{ Status = 'Failed'; InstallResult = @{ ExitCode = 1 }; FailureReason = 'VerifyNotFound' }
+                }
+                @{ Status = 'Installed'; InstallResult = @{ ExitCode = 0 }; FailureReason = $null }
+            }
+
+            Invoke-WingetInstall -Apps @(@{ name = 'Contoso.AppOne' }) -NonInteractive | Should -Be 0
+        }
+
+        It 'Returns 2 and reports winget as NOT USABLE when the end-of-run probe fails and no app failed' {
+            Mock Wait-WingetLaunchable { $false }
+
+            $result = Invoke-WingetInstall -Apps @(@{ name = 'Contoso.AppOne' }) -NonInteractive
+
+            $result | Should -Be 2
+            $script:errorMessages | Should -Contain 'winget: NOT USABLE - winget could not be launched at the end of this run, so automatic updates and the next run of this installer will fail on this machine. Restart the machine and re-run the installer; if it persists, attach this transcript to a GitHub issue.'
+            # The summary still prints: a broken winget is reported, not a reason to stop early.
+            Should -Invoke Write-Table -Times 1 -Exactly -ParameterFilter { $Title -eq 'Installation Summary' }
+        }
+
+        It 'Returns 1, not 2, when apps failed and the end-of-run probe failed too (failed apps take precedence)' {
+            Mock Install-AppWithVerification { @{ Status = 'Failed'; InstallResult = @{ ExitCode = 1 }; FailureReason = 'VerifyNotFound' } }
+            Mock Wait-WingetLaunchable { $false }
+
+            Invoke-WingetInstall -Apps @(@{ name = 'Contoso.AppOne' }) -NonInteractive | Should -Be 1
+        }
+
+        It 'Returns 2 without installing anything when winget is unavailable and cannot be installed' {
+            Mock Test-AndInstallWinget { $false }
+
+            $result = Invoke-WingetInstall -Apps @(@{ name = 'Contoso.AppOne' }) -NonInteractive
+
+            $result | Should -Be 2
+            $script:errorMessages | Should -Contain 'Winget is required for this script. Exiting.'
+            Should -Invoke Install-AppWithVerification -Times 0 -Exactly
+            Should -Invoke Install-WingetAutoUpdate -Times 0 -Exactly
+            Should -Invoke Write-Table -Times 0 -Exactly
+        }
+
+        It 'Returns 3 without installing anything when an app definition fails validation' {
+            $result = Invoke-WingetInstall -Apps @(@{ name = 'Contoso.AppOne' }, @{ name = 'not a package id' }) -NonInteractive
+
+            $result | Should -Be 3
+            $script:errorMessages | Should -Contain 'No valid application definitions found. Resolve the errors and re-run the script.'
+            Should -Invoke Install-AppWithVerification -Times 0 -Exactly
+        }
+
+        It 'Keeps 0 when Winget-AutoUpdate could not be configured (auto-updates do not affect the exit code, issue #186)' {
+            Mock Install-WingetAutoUpdate { [pscustomobject]@{ Status = 'Failed'; Version = $null } }
+
+            $result = Invoke-WingetInstall -Apps @(@{ name = 'Contoso.AppOne' }) -NonInteractive
+
+            $result | Should -Be 0
+            ($script:errorMessages -join "`n") | Should -Match 'Auto-updates: FAILED'
+        }
+
+        It 'Returns the dry run''s outcome too, without probing winget at the end' {
+            Invoke-WingetInstall -Apps @(@{ name = 'Contoso.AppOne' }) -WhatIf -NonInteractive | Should -Be 0
+            Should -Invoke Wait-WingetLaunchable -Times 0 -Exactly
+        }
+
+        It 'Records the decided exit code before the final prompt, so Ctrl+C there keeps it' {
+            # Interactive run: the function asks 'Press any key to exit...' before returning. The
+            # entry script's abort guard reports InstallerPendingExitCode when a stop lands there.
+            # The prompt throws here to stand in for that stop (and to never reach ReadKey).
+            Mock Test-EffectiveNonInteractive { $false }
+            Mock Install-AppWithVerification { @{ Status = 'Failed'; InstallResult = @{ ExitCode = 1 }; FailureReason = 'VerifyNotFound' } }
+            $script:InstallerPendingExitCode = $null
+            $script:pendingCodeAtPrompt = 'prompt not reached'
+            Mock Write-Prompt {
+                $script:pendingCodeAtPrompt = $script:InstallerPendingExitCode
+                throw 'stopped at the final prompt'
+            }
+
+            { Invoke-WingetInstall -Apps @(@{ name = 'Contoso.AppOne' }) } | Should -Throw 'stopped at the final prompt'
+
+            $script:pendingCodeAtPrompt | Should -Be 1
+        }
+    }
+
+    Context 'Elevation gate (Test-IsAdmin mocked to $false, so it runs on any runner)' {
         BeforeEach {
-            Mock Write-Host { }
-            Mock Write-ErrorMessage { }
+            Mock Test-IsAdmin { $false }
+            Mock Invoke-WingetSourceProbe { @{ Succeeded = $true; ExitCode = 0; TimedOut = $false } }
+            # A run from the generated installer file, not from the imported module (issue #185).
+            Mock Test-InvokedFromModuleContext { $false }
+        }
+
+        It 'Relaunches elevated, forwarding the caller''s switches, and returns 0 without installing anything' {
+            $result = Invoke-WingetInstall -Apps @(@{ name = 'Contoso.AppOne' }) -NonInteractive -SkipSystemCheck
+
+            $result | Should -Be 0
+            Should -Invoke Restart-WithElevation -Times 1 -Exactly -ParameterFilter {
+                ($AdditionalArguments -contains '-NonInteractive') -and ($AdditionalArguments -contains '-SkipSystemCheck') -and -not ($AdditionalArguments -contains '-WhatIf')
+            }
+            Should -Invoke Test-AndInstallWinget -Times 0 -Exactly
+            Should -Invoke Install-AppWithVerification -Times 0 -Exactly
+        }
+
+        It 'Returns 1 and says so when the elevation is declined or fails' {
+            Mock Restart-WithElevation { $null }
+
+            $result = Invoke-WingetInstall -Apps @(@{ name = 'Contoso.AppOne' }) -NonInteractive
+
+            $result | Should -Be 1
+            $script:errorMessages | Should -Contain 'Elevation was declined or failed, so nothing was installed. Re-run the installer and approve the administrator (UAC) prompt.'
+            Should -Invoke Install-AppWithVerification -Times 0 -Exactly
+        }
+
+        It 'Returns 1 with the remote elevation guidance under irm | iex, where it cannot relaunch (issues #226/#229)' {
+            Mock Test-IsRunningLocally { $false }
+
+            $result = Invoke-WingetInstall -Apps @(@{ name = 'Contoso.AppOne' }) -NonInteractive
+
+            $result | Should -Be 1
+            $script:errorMessages | Should -Contain 'This script requires administrator privileges.'
+            $script:errorMessages | Should -Contain 'Auto-elevation is unavailable when running through IEX/remote execution.'
+            $script:infoMessages | Should -Contain 'Open an elevated PowerShell or Windows Terminal session and run the IEX command again.'
+            $script:infoMessages | Should -Contain 'Exiting in 5 seconds...'
+            # No "press Enter to restart" pause any more (issue #230).
+            (@($script:errorMessages) + @($script:infoMessages)) -join "`n" | Should -Not -Match 'Press Enter'
+            Should -Invoke Start-Sleep -Times 1 -Exactly -ParameterFilter { $Seconds -eq 5 }
+            Should -Invoke Restart-WithElevation -Times 0 -Exactly
+            Should -Invoke Install-AppWithVerification -Times 0 -Exactly
+        }
+
+        It 'Returns 1 without relaunching when called from the imported module (issue #185)' {
+            Mock Test-InvokedFromModuleContext { $true }
+
+            $result = Invoke-WingetInstall -Apps @(@{ name = 'Contoso.AppOne' }) -NonInteractive
+
+            $result | Should -Be 1
+            ($script:errorMessages -join "`n") | Should -Match 'invoked from the imported module without elevation'
+            Should -Invoke Restart-WithElevation -Times 0 -Exactly
+            Should -Invoke Install-AppWithVerification -Times 0 -Exactly
+        }
+    }
+
+    Context 'Pre-elevation source update (real non-admin, non-WhatIf code path)' {
+        # Test-IsAdmin (Public/Elevation.ps1, issue #239) wraps the admin check behind a mockable
+        # command, so this drives Invoke-WingetInstall's real (non-WhatIf) pre-elevation block on
+        # any machine, elevated or not. The run then stops at the (mocked) elevated relaunch.
+        BeforeEach {
             Mock Test-IsAdmin { $false }
             Mock Test-IsRunningLocally { $true }
-            # Short-circuits the real function immediately after the pre-elevation block runs,
-            # via the existing early-return guard (issue #185), so this test never reaches the
-            # real `Exit` a few lines further down (which would kill the test process).
-            Mock Test-InvokedFromModuleContext { $true }
+            Mock Test-InvokedFromModuleContext { $false }
             Mock Invoke-WingetSourceProbe { @{ Succeeded = $true; ExitCode = 0; TimedOut = $false } }
         }
 
         It 'Actually invokes Invoke-WingetSourceProbe before elevation when running non-admin, non-WhatIf' {
-            Invoke-WingetInstall -NonInteractive
+            Invoke-WingetInstall -NonInteractive | Should -Be 0
 
             Should -Invoke Invoke-WingetSourceProbe -Times 1 -Exactly
         }
 
         It 'Does not call Invoke-WingetSourceProbe in a dry run (-WhatIf), preserving the existing dry-run message instead' {
-            Invoke-WingetInstall -WhatIf -NonInteractive
+            Mock Install-AppWithVerification { @{ Status = 'Installed'; InstallResult = $null; FailureReason = $null } }
+
+            Invoke-WingetInstall -Apps @(@{ name = 'Contoso.AppOne' }) -WhatIf -NonInteractive | Should -Be 0
 
             Should -Invoke Invoke-WingetSourceProbe -Times 0 -Exactly
         }
@@ -293,7 +376,7 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
                 @{ Status = 'Installed'; InstallResult = $null; FailureReason = $null }
             }
 
-            Invoke-WingetInstall -WhatIf -NonInteractive
+            Invoke-WingetInstall -WhatIf -NonInteractive | Should -Be 0
 
             # One helper call per app in the curated catalog (the -Apps default; issue #190),
             # every one of them in dry-run mode, and no second (retry) round.
@@ -314,36 +397,29 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
     }
 
     # IEX/remote execution (Test-IsRunningLocally false) previously ignored -WhatIf entirely and
-    # unconditionally demanded elevation (Exit 1), unlike the local-file branch which already
-    # honored -WhatIf. -Skip:$wiringIsElevated because the non-admin gate this exercises is only
-    # reached when the test process itself is not elevated (mirrors the pattern used by the
-    # 'Retry pass' Context below, inverted).
+    # unconditionally demanded elevation (exit 1), unlike the local-file branch which already
+    # honored -WhatIf (issue #232). Test-IsAdmin is mocked to $false: these used to be skipped
+    # whenever the test runner itself was elevated, so on the elevated CI runner they never ran.
     Context 'IEX/remote elevation dry-run (WhatIf must preview, not demand elevation)' {
         BeforeEach {
+            Mock Test-IsAdmin { $false }
             Mock Test-IsRunningLocally { $false }
-            $script:errorMessages = @()
-            Mock Write-ErrorMessage { $script:errorMessages += $Message }
-            $script:infoMessages = @()
-            Mock Write-Info { $script:infoMessages += $Message }
         }
 
-        It 'Does not print the elevation-required errors or exit when non-admin, non-local, and -WhatIf is set' -Skip:$script:wiringIsElevated {
+        It 'Does not print the elevation-required errors or exit when non-admin, non-local, and -WhatIf is set' {
             Mock Install-AppWithVerification { @{ Status = 'Installed'; InstallResult = $null; FailureReason = $null } }
 
-            Invoke-WingetInstall -Apps @(@{ name = 'Contoso.OnlyApp' }) -WhatIf -NonInteractive
+            $result = Invoke-WingetInstall -Apps @(@{ name = 'Contoso.OnlyApp' }) -WhatIf -NonInteractive
 
             $script:errorMessages | Should -Not -Contain 'This script requires administrator privileges.'
             $script:errorMessages | Should -Not -Contain 'Auto-elevation is unavailable when running through IEX/remote execution.'
-            # Exit isn't mockable (it's a statement, not a command; real Exit is only ever
-            # exercised safely in a spawned child process, per 'IEX non-admin execution
-            # behavior' in tests/EntryPoint.Tests.ps1). Reaching this assertion at all is the
-            # proof: a real Exit would have torn down the whole Pester process before we got
-            # here. The dry-run pipeline completing and bucketing the app confirms it fell
-            # through instead of exiting.
+            # The dry run went on to the app instead of stopping at the elevation gate with 1.
+            $result | Should -Be 0
             Should -Invoke Install-AppWithVerification -Times 1 -Exactly
+            Should -Invoke Start-Sleep -Times 0 -Exactly
         }
 
-        It 'Prints a [DRY-RUN] message stating elevation would be required and no changes are made' -Skip:$script:wiringIsElevated {
+        It 'Prints a [DRY-RUN] message stating elevation would be required and no changes are made' {
             Mock Install-AppWithVerification { @{ Status = 'Installed'; InstallResult = $null; FailureReason = $null } }
 
             Invoke-WingetInstall -Apps @(@{ name = 'Contoso.OnlyApp' }) -WhatIf -NonInteractive
@@ -377,18 +453,13 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
     }
 
     Context 'Not-applicable skip wiring (issue #217)' {
-        BeforeEach {
-            $script:skipWarnings = @()
-            Mock Write-WarningMessage { $script:skipWarnings += $Message }
-        }
-
         It 'Logs the not-applicable skip line with the condition description and buckets the app as Skipped' {
             Mock Install-AppWithVerification { @{ Status = 'Skipped'; InstallResult = $null; FailureReason = $null; SkipReason = 'NotApplicable' } }
 
             Invoke-WingetInstall -Apps @(@{ name = 'Dell.CommandUpdate.Universal'; condition = { $false }; conditionDescription = 'Dell hardware only' }) -WhatIf -NonInteractive
 
             # Exactly the message shape of the already-installed skip, with the gated reason.
-            $script:skipWarnings | Should -Contain 'Skipping: Dell.CommandUpdate.Universal (not applicable: Dell hardware only)'
+            $script:warningMessages | Should -Contain 'Skipping: Dell.CommandUpdate.Universal (not applicable: Dell hardware only)'
             $skippedRow = @($script:capturedRows | Where-Object { $_[0] -eq 'Skipped' })[0]
             $skippedRow[1] | Should -Match 'Dell\.CommandUpdate\.Universal'
             @($script:capturedRows | Where-Object { $_[0] -eq 'Failed' }).Count | Should -Be 0
@@ -399,7 +470,7 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
 
             Invoke-WingetInstall -Apps @(@{ name = 'Contoso.GatedApp'; condition = { $false } }) -WhatIf -NonInteractive
 
-            $script:skipWarnings | Should -Contain 'Skipping: Contoso.GatedApp (not applicable: condition not met)'
+            $script:warningMessages | Should -Contain 'Skipping: Contoso.GatedApp (not applicable: condition not met)'
         }
 
         It 'Keeps the already-installed skip message for skips without a SkipReason' {
@@ -407,15 +478,61 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
 
             Invoke-WingetInstall -Apps @(@{ name = 'Contoso.PresentApp' }) -WhatIf -NonInteractive
 
-            $script:skipWarnings | Should -Contain 'Skipping: Contoso.PresentApp (already installed)'
+            $script:warningMessages | Should -Contain 'Skipping: Contoso.PresentApp (already installed)'
+        }
+    }
+
+    Context 'Summary' {
+        It 'Renders Installed, Skipped and Failed rows from the run''s outcomes' {
+            Mock Install-AppWithVerification {
+                switch ($App.name) {
+                    'Contoso.Present' { @{ Status = 'Skipped'; InstallResult = $null; FailureReason = $null } }
+                    'Contoso.Broken' { @{ Status = 'Failed'; InstallResult = @{ ExitCode = 1 }; FailureReason = 'VerifyNotFound' } }
+                    default { @{ Status = 'Installed'; InstallResult = @{ ExitCode = 0 }; FailureReason = $null } }
+                }
+            }
+
+            $result = Invoke-WingetInstall -Apps @(@{ name = 'Contoso.New' }, @{ name = 'Contoso.Present' }, @{ name = 'Contoso.Broken' }) -NonInteractive
+
+            $result | Should -Be 1
+            @($script:capturedRows).Count | Should -Be 3
+            @($script:capturedRows | Where-Object { $_[0] -eq 'Installed' })[0][1] | Should -Be 'Contoso.New'
+            @($script:capturedRows | Where-Object { $_[0] -eq 'Skipped' })[0][1] | Should -Be 'Contoso.Present'
+            @($script:capturedRows | Where-Object { $_[0] -eq 'Failed' })[0][1] | Should -Be 'Contoso.Broken'
+        }
+
+        It 'Leaves out the rows of empty buckets' {
+            Invoke-WingetInstall -Apps @(@{ name = 'Contoso.New' }) -NonInteractive | Should -Be 0
+
+            @($script:capturedRows).Count | Should -Be 1
+            $script:capturedRows[0][0] | Should -Be 'Installed'
+            $script:capturedTables.ContainsKey('Failed Installations') | Should -Be $false
+        }
+
+        It 'Tracks failures with their diagnostic reason and renders the failed-apps table (issue #189)' {
+            Mock Install-AppWithVerification {
+                @{
+                    Status        = 'Failed'
+                    InstallResult = @{ ExitCode = -2147009255; Attempts = 3; SessionErrorExhausted = $false; MachineScopeFellBack = $true }
+                    FailureReason = 'VerifyNotFound'
+                }
+            }
+
+            Invoke-WingetInstall -Apps @(@{ name = 'Contoso.Broken' }) -NonInteractive | Should -Be 1
+
+            $failedRows = @($script:capturedTables['Failed Installations'])
+            $failedRows.Count | Should -Be 1
+            $failedRows[0][0] | Should -Be 'Contoso.Broken'
+            # The winget exit code and retry detail, not the generic message issue #189 replaced.
+            $failedRows[0][1] | Should -Be 'package not found after install; winget exit 0x80073D19, 3 attempts, machine-scope fallback: yes'
+            ($script:errorMessages -join "`n") | Should -Not -Match 'No package found matching input criteria'
         }
     }
 
     Context 'Winget-AutoUpdate setup and the end-of-run winget check (RUN_WAU=YES removed)' {
-        # A real (non -WhatIf) run with Test-IsAdmin mocked, so these run on any machine instead
-        # of only on an elevated one. Every app ends Installed, so the run never reaches `Exit`.
+        # A real (non -WhatIf) run, elevated through the Test-IsAdmin mock, so these run on any
+        # machine. The app fails its first pass and recovers in the retry pass.
         BeforeEach {
-            Mock Test-IsAdmin { $true }
             $script:callOrder = [System.Collections.Generic.List[string]]::new()
             $script:appCalls = 0
             Mock Install-AppWithVerification {
@@ -451,8 +568,8 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
         }
 
         It 'Skips the end-of-run probe in a dry run' {
-            # A dry run has no retry pass, so the first-pass failure from BeforeEach would end in
-            # `Exit 1`; this test only needs the app to land.
+            # A dry run has no retry pass, so the first-pass failure from BeforeEach would stay
+            # failed; this test only needs the app to land.
             Mock Install-AppWithVerification { @{ Status = 'Installed'; InstallResult = $null; FailureReason = $null } }
 
             Invoke-WingetInstall -Apps @(@{ name = 'Contoso.AppOne' }) -WhatIf -NonInteractive
@@ -462,22 +579,18 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
 
         It 'Still reaches the retry pass, WAU setup and the summary when Windows Terminal configuration throws' {
             Mock Set-WindowsTerminalDefaults { throw 'boom from the Terminal step' }
-            $script:warnings = @()
-            Mock Write-WarningMessage { $script:warnings += $Message }
 
-            Invoke-WingetInstall -Apps @(@{ name = 'Contoso.AppOne' }) -NonInteractive
+            Invoke-WingetInstall -Apps @(@{ name = 'Contoso.AppOne' }) -NonInteractive | Should -Be 0
 
             $script:callOrder | Should -Be @('app:Contoso.AppOne', 'app:Contoso.AppOne', 'wau', 'probe')
-            ($script:warnings -join "`n") | Should -Match 'Windows Terminal configuration failed unexpectedly: boom from the Terminal step'
+            ($script:warningMessages -join "`n") | Should -Match 'Windows Terminal configuration failed unexpectedly: boom from the Terminal step'
             Should -Invoke Write-Table -Times 1 -Exactly
         }
 
         It 'Reports auto-updates as FAILED and still prints the summary when WAU setup throws' {
             Mock Install-WingetAutoUpdate { throw 'boom from WAU' }
-            $script:errorMessages = @()
-            Mock Write-ErrorMessage { $script:errorMessages += $Message }
 
-            Invoke-WingetInstall -Apps @(@{ name = 'Contoso.AppOne' }) -NonInteractive
+            Invoke-WingetInstall -Apps @(@{ name = 'Contoso.AppOne' }) -NonInteractive | Should -Be 0
 
             ($script:errorMessages -join "`n") | Should -Match 'Winget-AutoUpdate setup failed unexpectedly: boom from WAU'
             ($script:errorMessages -join "`n") | Should -Match 'Auto-updates: FAILED'
@@ -486,10 +599,8 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
 
         It 'Treats a throwing end-of-run probe as unknown, not as a broken winget' {
             Mock Wait-WingetLaunchable { throw 'boom from the probe' }
-            $script:errorMessages = @()
-            Mock Write-ErrorMessage { $script:errorMessages += $Message }
 
-            Invoke-WingetInstall -Apps @(@{ name = 'Contoso.AppOne' }) -NonInteractive
+            Invoke-WingetInstall -Apps @(@{ name = 'Contoso.AppOne' }) -NonInteractive | Should -Be 0
 
             ($script:errorMessages -join "`n") | Should -Not -Match 'winget: NOT USABLE'
         }
@@ -514,8 +625,6 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
 
         It 'Prints Auto-updates: NOT CONFIGURED when WAU was skipped for a missing framework' {
             Mock Install-WingetAutoUpdate { [pscustomobject]@{ Status = 'FrameworkMissing'; Version = '2.12.0'; FrameworkMissing = $true } }
-            $script:errorMessages = @()
-            Mock Write-ErrorMessage { $script:errorMessages += $Message }
 
             Invoke-WingetInstall -Apps @(@{ name = 'Contoso.AppOne' }) -NonInteractive
 
@@ -524,18 +633,10 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
 
         It 'Prints Auto-updates: AT RISK when an existing WAU sits on a machine without the framework' {
             Mock Install-WingetAutoUpdate { [pscustomobject]@{ Status = 'AlreadyPresent'; Version = [version]'2.12.0'; FrameworkMissing = $true } }
-            $script:errorMessages = @()
-            Mock Write-ErrorMessage { $script:errorMessages += $Message }
 
             Invoke-WingetInstall -Apps @(@{ name = 'Contoso.AppOne' }) -NonInteractive
 
             ($script:errorMessages -join "`n") | Should -Match 'Auto-updates: AT RISK'
-        }
-
-        It 'Reports winget as not usable in the summary when the end-of-run probe fails (pinned structurally - driving it live would Exit 2 the process)' {
-            $installBody = $script:InvokeWingetInstallDef
-            $installBody | Should -Match '(?s)\$wingetUsableAtEnd = Wait-WingetLaunchable -TimeoutSeconds 60'
-            $installBody | Should -Match "(?s)if \(-not \`$wingetUsableAtEnd\)\s*\{\s*Write-ErrorMessage 'winget: NOT USABLE"
         }
     }
 
@@ -548,30 +649,34 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
             Should -Invoke Install-AppWithVerification -Times 1 -Exactly
         }
 
-        # The other two behaviors here - skipping every app's install attempt upfront, and skipping
-        # the retry pass - both leave $failedApps non-empty by design, which hits the orchestrator's
-        # real (unmockable) `Exit 1` a few lines later. Driving that live kills the whole Pester
-        # process mid-run (confirmed: it took out every later test in the file the first time this
-        # was tried). Same convention as the winget-availability gate and retry-failure-message
-        # tests above: pin the behavior on source instead of executing it.
-        It 'Marks every app failed without attempting an install when a version conflict is present upfront (pinned structurally - driving it live would Exit 1 the process)' {
-            $installBody = $script:InvokeWingetInstallDef
-            $installBody | Should -Match '\$conflictingVersions = Get-ConflictingDesktopAppInstallerVersions'
-            $installBody | Should -Match '\$wingetDeadlocked = \$conflictingVersions\.Count -gt 1'
-            # The per-app loop must check the flag and skip straight to a failure entry - with a
-            # reason naming the conflicting versions - before ever calling Install-AppWithVerification.
-            $installBody | Should -Match '(?s)if \(\$wingetDeadlocked\)\s*\{\s*\$failedApps \+= @\{ Name = \$app\.name; Reason = "winget deadlocked between conflicting DesktopAppInstaller versions.*?continue\s*\}'
+        It 'Marks every app failed without attempting an install when a version conflict is present upfront' {
+            Mock Get-ConflictingDesktopAppInstallerVersions { @('1.26.510.0', '1.29.290.0') }
+
+            $result = Invoke-WingetInstall -Apps @(@{ name = 'Contoso.AppOne' }, @{ name = 'Contoso.AppTwo' }) -NonInteractive
+
+            $result | Should -Be 1
+            Should -Invoke Install-AppWithVerification -Times 0 -Exactly
+            $failedRows = @($script:capturedTables['Failed Installations'])
+            $failedRows.Count | Should -Be 2
+            $failedRows[0][0] | Should -Be 'Contoso.AppOne'
+            $failedRows[0][1] | Should -Be 'winget deadlocked between conflicting DesktopAppInstaller versions (1.26.510.0, 1.29.290.0); see issue #279'
         }
 
-        It 'Skips the retry pass when the conflict was detected upfront (pinned structurally)' {
-            $installBody = $script:InvokeWingetInstallDef
-            # The retry-pass gate gives the deadlock its own branch, ahead of the normal -WhatIf check.
-            $installBody | Should -Match '(?s)if \(\$failedApps\.Count -gt 0\)\s*\{\s*if \(\$wingetDeadlocked\)\s*\{\s*Write-WarningMessage ''Skipping the retry pass'
+        It 'Skips the retry pass when the conflict was detected upfront' {
+            Mock Get-ConflictingDesktopAppInstallerVersions { @('1.26.510.0', '1.29.290.0') }
+
+            Invoke-WingetInstall -Apps @(@{ name = 'Contoso.AppOne' }) -NonInteractive | Should -Be 1
+
+            ($script:warningMessages -join "`n") | Should -Match 'Skipping the retry pass'
+            $script:infoMessages | Should -Not -Contain 'Retrying failed installations (1 final attempt)...'
+            Should -Invoke Install-AppWithVerification -Times 0 -Exactly
         }
     }
 
-    Context 'Retry pass (needs elevation: the non-dry-run path performs the real admin gate)' {
-        It 'Sends a first-pass failure back through the helper and buckets a recovered app as installed' -Skip:(-not $script:wiringIsElevated) {
+    # Elevated through the Test-IsAdmin mock in BeforeEach; these were skipped on any runner that
+    # was not itself elevated (wgt-gq8.6).
+    Context 'Retry pass' {
+        It 'Sends a first-pass failure back through the helper and buckets a recovered app as installed' {
             $script:sevenZipCalls = 0
             Mock Install-AppWithVerification {
                 if ($App.name -eq '7zip.7zip') {
@@ -584,7 +689,7 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
                 @{ Status = 'Skipped'; InstallResult = $null; FailureReason = $null }
             }
 
-            Invoke-WingetInstall -NonInteractive
+            Invoke-WingetInstall -NonInteractive | Should -Be 0
 
             # First pass failed 7zip, the retry pass re-drove it through the helper and recovered.
             $script:sevenZipCalls | Should -Be 2
@@ -593,7 +698,7 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
             @($script:capturedRows | Where-Object { $_[0] -eq 'Failed' }).Count | Should -Be 0
         }
 
-        It 'Surfaces the winget exit code, attempts, and scope fallback in the failure message (issue #189)' -Skip:(-not $script:wiringIsElevated) {
+        It 'Surfaces the winget exit code, attempts, and scope fallback in the failure message (issue #189)' {
             $script:sevenZipAttempts = 0
             Mock Install-AppWithVerification {
                 if ($App.name -eq '7zip.7zip') {
@@ -609,8 +714,6 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
                 }
                 @{ Status = 'Skipped'; InstallResult = $null; FailureReason = $null }
             }
-            $script:errorMessages = @()
-            Mock Write-ErrorMessage { $script:errorMessages += $Message }
 
             Invoke-WingetInstall -NonInteractive
 
@@ -621,27 +724,47 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
             $failureMessage | Should -Match 'machine-scope fallback: yes'
         }
 
-        # The retry-failure MESSAGES (issue #237) are pinned structurally rather than by driving
-        # a failed retry for real: a retry that stays Failed leaves $failedApps non-empty, and
-        # Invoke-WingetInstall then ends with `Exit 1` — which, executed inside a Pester test on
-        # an elevated runner, aborts the container mid-teardown and poisons every later test file
-        # (the CI failure on PR #248 was exactly this: a leaked TestDrive cascading 39 failures).
-        # Same convention as the winget-availability gate above: paths that terminate the process
-        # are pinned on source, not driven. The switch's *selection* semantics (PreCheckTimeout
-        # vs VerifyTimeout vs default) are what issue #237 fixed, and that is what these assert.
+        # The retry-failure messages (issue #237): the switch's selection (PreCheckTimeout vs
+        # VerifyTimeout vs everything else) is what #237 fixed. A retry that stays failed returns 1.
         It 'Names the pre-check phase (not verification) when a retry fails with PreCheckTimeout (issue #237)' {
-            $installBody = $script:InvokeWingetInstallDef
-            # The retry loop's switch must give PreCheckTimeout its own arm with pre-check wording...
-            $installBody | Should -Match "(?s)'PreCheckTimeout'\s*\{\s*[^}]*Winget list timed out for retry"
-            # ...and that arm must not reuse the verification wording.
-            $installBody | Should -Not -Match "(?s)'PreCheckTimeout'\s*\{\s*[^}]*Verification timed out for retry"
+            Mock Install-AppWithVerification { @{ Status = 'Failed'; InstallResult = $null; FailureReason = 'PreCheckTimeout' } }
+
+            Invoke-WingetInstall -Apps @(@{ name = 'Contoso.AppOne' }) -NonInteractive | Should -Be 1
+
+            $script:warningMessages | Should -Contain 'Winget list timed out for retry: Contoso.AppOne. Assuming installation failed.'
+            ($script:warningMessages -join "`n") | Should -Not -Match 'Verification timed out for retry'
         }
 
         It 'Keeps the verification-timeout wording when a retry fails with VerifyTimeout (issue #237)' {
-            $installBody = $script:InvokeWingetInstallDef
-            $installBody | Should -Match "(?s)'VerifyTimeout'\s*\{\s*[^}]*Verification timed out for retry"
-            # The generic fallback stays intact for every other FailureReason.
-            $installBody | Should -Match 'Retry failed: \$appName \(\$failureReason\)'
+            Mock Install-AppWithVerification { @{ Status = 'Failed'; InstallResult = @{ ExitCode = 0 }; FailureReason = 'VerifyTimeout' } }
+
+            Invoke-WingetInstall -Apps @(@{ name = 'Contoso.AppOne' }) -NonInteractive | Should -Be 1
+
+            $script:warningMessages | Should -Contain 'Verification timed out for retry: Contoso.AppOne. Assuming installation failed.'
+        }
+
+        It 'Reports any other retry failure with its formatted reason (issue #237)' {
+            Mock Install-AppWithVerification { @{ Status = 'Failed'; InstallResult = @{ ExitCode = 1; Attempts = 1 }; FailureReason = 'VerifyNotFound' } }
+
+            Invoke-WingetInstall -Apps @(@{ name = 'Contoso.AppOne' }) -NonInteractive | Should -Be 1
+
+            $script:errorMessages | Should -Contain 'Retry failed: Contoso.AppOne (package not found after install; winget exit 0x00000001, 1 attempt).'
+        }
+
+        It 'Counts an unexpected error in the retry pass as a failure instead of aborting the run' {
+            $script:appCalls = 0
+            Mock Install-AppWithVerification {
+                $script:appCalls++
+                if ($script:appCalls -eq 1) {
+                    return @{ Status = 'Failed'; InstallResult = @{ ExitCode = 1 }; FailureReason = 'VerifyNotFound' }
+                }
+                throw 'boom in the retry'
+            }
+
+            Invoke-WingetInstall -Apps @(@{ name = 'Contoso.AppOne' }) -NonInteractive | Should -Be 1
+
+            ($script:errorMessages -join "`n") | Should -Match 'Retry failed: Contoso.AppOne. Error: boom in the retry'
+            @($script:capturedTables['Failed Installations'])[0][1] | Should -Be 'Unexpected error: boom in the retry'
         }
     }
 }
@@ -882,6 +1005,8 @@ Describe 'Not-applicable gating end-to-end (issue #217)' {
     BeforeEach {
         Mock Write-Host { }
         Mock Start-Process { }
+        # Not the runner's real elevation: the run must take the same path on every machine.
+        Mock Test-IsAdmin { $true }
         Mock Restart-WithElevation { 'PowerShell' }
         Mock Test-IsRunningLocally { $true }
         Mock Test-AndInstallWingetModule { $true }

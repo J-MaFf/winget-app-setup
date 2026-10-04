@@ -68,8 +68,9 @@ $script:WindowsOnlyCommandNames = @($windowsOnlyCommandParameters.Keys)
 $script:WindowsOnlyNativeCommandNames = @($script:WindowsOnlyCommandNames | Where-Object { $null -eq $windowsOnlyCommandParameters[$_] })
 $script:WindowsOnlyCommandStandIns = @()
 foreach ($commandName in $script:WindowsOnlyCommandNames) {
-    # A file that loads this helper twice (see Install.Tests.ps1) finds its own stand-in the
-    # second time; only a real command counts as present.
+    # A file that loads this helper twice (once more at its top level, for a BeforeDiscovery block
+    # that needs a module function) finds its own stand-in the second time; only a real command
+    # counts as present.
     $existingCommand = Get-Command -Name $commandName -ErrorAction SilentlyContinue
     if ($existingCommand -and "$($existingCommand.Definition)" -notmatch 'defines this stand-in') {
         continue

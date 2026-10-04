@@ -25,13 +25,17 @@ servicing" explanation below is superseded. The branch drops `RUN_WAU=YES`, inst
 only when the framework is present (the runner now reports `Auto-updates: NOT CONFIGURED`), removes
 WAU's at-logon run, waits for a running WAU before using winget, makes a run that leaves winget
 unusable exit 2, and makes an aborted run exit 5 instead of 0. #279, #283 and #284 stay open until
-an E2E run on this branch confirms it. The Pester suite now also runs on Linux, with 2 known failures
-instead of 113, and no test dot-sources the generated installer any more, so the unit tests exercise
-the module source being edited (EntryPoint, AppCatalog and Interactivity tests still read or run the
-generated file itself, on purpose). The build's `-Check` now also rejects syntax that only
-PowerShell 7 parses and runs the undefined-reference guards on Linux and macOS, the pre-commit hook
-checks the staged files instead of the working tree, and a catalog name must match the whole
-package-id pattern, so trailing text such as `--override` can no longer reach winget.
+an E2E run on this branch confirms it. `Invoke-WingetInstall` now returns its exit code instead of
+calling `exit`, so the tests run every exit path and assert the code instead of matching regexes
+over the source, and no test depends on whether the runner is elevated (they mock `Test-IsAdmin`;
+the #232 regression tests had never run on the elevated CI runner). The Pester suite now also runs
+on Linux, with 1 known failure instead of 113, and no test dot-sources the generated installer any
+more, so the unit tests exercise the module source being edited (EntryPoint, AppCatalog and
+Interactivity tests still read or run the generated file itself, on purpose). The build's `-Check`
+now also rejects syntax that only PowerShell 7 parses and runs the undefined-reference guards on
+Linux and macOS, the pre-commit hook checks the staged files instead of the working tree, and a
+catalog name must match the whole package-id pattern, so trailing text such as `--override` can no
+longer reach winget.
 
 In progress: **E2E: App Installer 1.29.290.0 vs 1.26.510.0 AppX conflict, missing
 WindowsAppRuntime.1.8** ([#279](https://github.com/J-MaFf/winget-app-setup/issues/279)) — two
