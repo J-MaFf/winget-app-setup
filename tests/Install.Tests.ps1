@@ -99,7 +99,7 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
         # runner; the contexts that exercise the non-admin branches mock it to $false. Never read the
         # runner's real elevation: CI runs elevated, so a test gated on it never ran there (wgt-gq8.6).
         Mock Test-IsAdmin { $true }
-        Mock Restart-WithElevation { 'PowerShell' }
+        Mock Restart-WithElevation { [pscustomobject]@{ Started = $true; ExitCode = 0 } }
         Mock Test-IsRunningLocally { $true }
         Mock Test-AndInstallWingetModule { $true }
         Mock Import-Module { }
@@ -284,40 +284,80 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
     }
 
     Context 'Elevation gate (Test-IsAdmin mocked to $false, so it runs on any runner)' {
+        # Review findings P2-11, P2-12 and P3-11: a run that is not elevated relaunches itself
+        # elevated only when someone is at the console, waits for that run and returns its exit
+        # code; every other run that needs administrator rights returns 4.
         BeforeEach {
             Mock Test-IsAdmin { $false }
             Mock Invoke-WingetSourceProbe { @{ Succeeded = $true; ExitCode = 0; TimedOut = $false } }
             # A run from the generated installer file, not from the imported module (issue #185).
             Mock Test-InvokedFromModuleContext { $false }
+            # Interactive unless the test passes -NonInteractive; never the runner's real console.
+            Mock Test-EffectiveNonInteractive { [bool]$NonInteractive }
+            $script:InstallerPendingExitCode = $null
+            $script:InstallerScriptSha256 = 'C0FFEE' + ('0' * 58)
         }
 
-        It 'Relaunches elevated, forwarding the caller''s switches, and returns 0 without installing anything' {
-            $result = Invoke-WingetInstall -Apps @(@{ name = 'Contoso.AppOne' }) -NonInteractive -SkipSystemCheck
+        AfterEach {
+            $script:InstallerPendingExitCode = $null
+            $script:InstallerScriptSha256 = $null
+        }
 
-            $result | Should -Be 0
+        It 'Relaunches elevated, waits for that run and returns its exit code <_> without installing anything here' -ForEach @(0, 1, 2, 3010) {
+            $script:elevatedExitCode = $_
+            Mock Restart-WithElevation { [pscustomobject]@{ Started = $true; ExitCode = $script:elevatedExitCode } }
+
+            $result = Invoke-WingetInstall -Apps @(@{ name = 'Contoso.AppOne' }) -SkipSystemCheck
+
+            $result | Should -Be $_
             Should -Invoke Restart-WithElevation -Times 1 -Exactly -ParameterFilter {
-                ($AdditionalArguments -contains '-NonInteractive') -and ($AdditionalArguments -contains '-SkipSystemCheck') -and -not ($AdditionalArguments -contains '-WhatIf')
+                ($AdditionalArguments -contains '-SkipSystemCheck') -and -not ($AdditionalArguments -contains '-WhatIf') -and
+                -not ($AdditionalArguments -contains '-NonInteractive') -and -not $InPlace -and
+                # The SHA256 the entry script took at startup, so a file changed since then is not run.
+                ($ExpectedSha256 -eq $script:InstallerScriptSha256)
             }
+            # The elevated window showed the outcome and its own key press: the entry script adds
+            # no second notice.
+            $script:InstallerPendingExitCode | Should -Be $_
+            Should -Invoke Invoke-WingetSourceProbe -Times 1 -Exactly
             Should -Invoke Test-AndInstallWinget -Times 0 -Exactly
             Should -Invoke Install-AppWithVerification -Times 0 -Exactly
         }
 
-        It 'Returns 1 and says so when the elevation is declined or fails' {
-            Mock Restart-WithElevation { $null }
+        It 'Returns 4 without a UAC prompt or the pre-elevation source update when the run is non-interactive' {
+            $result = Invoke-WingetInstall -Apps @(@{ name = 'Contoso.AppOne' }) -NonInteractive -SkipSystemCheck
 
-            $result = Invoke-WingetInstall -Apps @(@{ name = 'Contoso.AppOne' }) -NonInteractive
+            $result | Should -Be 4
+            Should -Invoke Restart-WithElevation -Times 0 -Exactly
+            Should -Invoke Invoke-WingetSourceProbe -Times 0 -Exactly
+            Should -Invoke Install-AppWithVerification -Times 0 -Exactly
+            ($script:errorMessages -join "`n") | Should -Match 'this run is non-interactive, so there is nobody to approve a UAC prompt and none was shown'
+        }
 
-            $result | Should -Be 1
+        It 'Returns 4 and says so when the elevation is declined or fails' {
+            Mock Restart-WithElevation { [pscustomobject]@{ Started = $false; ExitCode = 4 } }
+
+            $result = Invoke-WingetInstall -Apps @(@{ name = 'Contoso.AppOne' })
+
+            $result | Should -Be 4
             $script:errorMessages | Should -Contain 'Elevation was declined or failed, so nothing was installed. Re-run the installer and approve the administrator (UAC) prompt.'
+            # Nothing showed an outcome yet, so the entry script explains the exit.
+            $script:InstallerPendingExitCode | Should -BeNullOrEmpty
             Should -Invoke Install-AppWithVerification -Times 0 -Exactly
         }
 
-        It 'Returns 1 with the remote elevation guidance under irm | iex, where it cannot relaunch (issues #226/#229)' {
+        It 'Returns the code Restart-WithElevation gives when it starts nothing (the file changed: 5)' {
+            Mock Restart-WithElevation { [pscustomobject]@{ Started = $false; ExitCode = 5 } }
+
+            Invoke-WingetInstall -Apps @(@{ name = 'Contoso.AppOne' }) | Should -Be 5
+        }
+
+        It 'Returns 4 with the remote elevation guidance under irm | iex, where it cannot relaunch (issues #226/#229)' {
             Mock Test-IsRunningLocally { $false }
 
-            $result = Invoke-WingetInstall -Apps @(@{ name = 'Contoso.AppOne' }) -NonInteractive
+            $result = Invoke-WingetInstall -Apps @(@{ name = 'Contoso.AppOne' })
 
-            $result | Should -Be 1
+            $result | Should -Be 4
             $script:errorMessages | Should -Contain 'This script requires administrator privileges.'
             $script:errorMessages | Should -Contain 'Auto-elevation is unavailable when running through IEX/remote execution.'
             $script:infoMessages | Should -Contain 'Open an elevated PowerShell or Windows Terminal session and run the IEX command again.'
@@ -326,15 +366,37 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
             (@($script:errorMessages) + @($script:infoMessages)) -join "`n" | Should -Not -Match 'Press Enter|Exiting in 5 seconds'
             Should -Invoke Start-Sleep -Times 0 -Exactly -ParameterFilter { $Seconds -eq 5 }
             Should -Invoke Restart-WithElevation -Times 0 -Exactly
+            Should -Invoke Invoke-WingetSourceProbe -Times 0 -Exactly
             Should -Invoke Install-AppWithVerification -Times 0 -Exactly
         }
 
-        It 'Returns 1 without relaunching when called from the imported module (issue #185)' {
+        It 'A non-interactive dry run previews the stop with exit code 4 without doing anything' {
+            $result = Invoke-WingetInstall -Apps @(@{ name = 'Contoso.AppOne' }) -WhatIf -NonInteractive
+
+            $result | Should -Be 0
+            @($script:infoMessages | Where-Object { $_.StartsWith('[DRY-RUN] A real run would stop here with exit code 4: it needs administrator privileges, and a non-interactive run shows no UAC prompt.') }).Count | Should -Be 1
+            Should -Invoke Restart-WithElevation -Times 0 -Exactly
+            Should -Invoke Invoke-WingetSourceProbe -Times 0 -Exactly
+        }
+
+        It 'An interactive dry run previews the source update and the relaunch without doing either' {
+            # Interactive, so the preview ends at the final key press; stopped there.
+            Mock Write-Prompt { throw 'reached the final prompt' }
+
+            { Invoke-WingetInstall -Apps @(@{ name = 'Contoso.AppOne' }) -WhatIf } | Should -Throw 'reached the final prompt'
+
+            $script:infoMessages | Should -Contain '[DRY-RUN] Would run winget source update --name winget to bootstrap the source in user context'
+            @($script:infoMessages | Where-Object { $_.StartsWith('[DRY-RUN] Would relaunch with administrator privileges.') }).Count | Should -Be 1
+            Should -Invoke Restart-WithElevation -Times 0 -Exactly
+            Should -Invoke Invoke-WingetSourceProbe -Times 0 -Exactly
+        }
+
+        It 'Returns 4 without relaunching when called from the imported module (issue #185)' {
             Mock Test-InvokedFromModuleContext { $true }
 
-            $result = Invoke-WingetInstall -Apps @(@{ name = 'Contoso.AppOne' }) -NonInteractive
+            $result = Invoke-WingetInstall -Apps @(@{ name = 'Contoso.AppOne' })
 
-            $result | Should -Be 1
+            $result | Should -Be 4
             ($script:errorMessages -join "`n") | Should -Match 'invoked from the imported module without elevation'
             Should -Invoke Restart-WithElevation -Times 0 -Exactly
             Should -Invoke Install-AppWithVerification -Times 0 -Exactly
@@ -349,13 +411,15 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
             Mock Test-IsAdmin { $false }
             Mock Test-IsRunningLocally { $true }
             Mock Test-InvokedFromModuleContext { $false }
+            Mock Test-EffectiveNonInteractive { [bool]$NonInteractive }
             Mock Invoke-WingetSourceProbe { @{ Succeeded = $true; ExitCode = 0; TimedOut = $false } }
         }
 
         It 'Actually invokes Invoke-WingetSourceProbe before elevation when running non-admin, non-WhatIf' {
-            Invoke-WingetInstall -NonInteractive | Should -Be 0
+            Invoke-WingetInstall | Should -Be 0
 
             Should -Invoke Invoke-WingetSourceProbe -Times 1 -Exactly
+            Should -Invoke Restart-WithElevation -Times 1 -Exactly
         }
 
         It 'Does not call Invoke-WingetSourceProbe in a dry run (-WhatIf), preserving the existing dry-run message instead' {
@@ -1483,7 +1547,7 @@ Describe 'Not-applicable gating end-to-end (issue #217)' {
         Mock Start-Process { }
         # Not the runner's real elevation: the run must take the same path on every machine.
         Mock Test-IsAdmin { $true }
-        Mock Restart-WithElevation { 'PowerShell' }
+        Mock Restart-WithElevation { [pscustomobject]@{ Started = $true; ExitCode = 0 } }
         Mock Test-IsRunningLocally { $true }
         Mock Test-AndInstallWingetModule { $true }
         Mock Import-Module { }
@@ -1702,7 +1766,7 @@ Describe 'Dry run leaves the machine unchanged (P2-16)' {
         Mock Write-Warning { }
         Mock Start-Sleep { }
         Mock Test-IsRunningLocally { $true }
-        Mock Restart-WithElevation { 'PowerShell' }
+        Mock Restart-WithElevation { [pscustomobject]@{ Started = $true; ExitCode = 0 } }
         Mock Write-Table { }
         $script:infoMessages = @()
         Mock Write-Info { $script:infoMessages += $Message }
@@ -1877,9 +1941,10 @@ Describe 'Write-InstallerExitNotice (review findings P2-14 and P3-15)' {
     }
 
     It 'Says what exit code <Code> means when the caller gives no reason' -ForEach @(
-        @{ Code = 1; Meaning = 'administrator rights were not available or a pre-flight check failed (see above)' }
+        @{ Code = 1; Meaning = 'a pre-flight check failed (see above)' }
         @{ Code = 2; Meaning = 'winget is not available or could not be started (see above)' }
         @{ Code = 3; Meaning = 'the app catalog failed validation (see above)' }
+        @{ Code = 4; Meaning = 'administrator rights are required, and this run was not elevated (see above)' }
         @{ Code = 5; Meaning = 'the run was aborted before it finished (see above)' }
         @{ Code = 7; Meaning = 'PowerShell 7 could not be installed, or the installer could not be relaunched under it (see above)' }
     ) {

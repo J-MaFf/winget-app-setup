@@ -37,6 +37,7 @@ if ($MyInvocation.InvocationName -ne '.') {
     $script:InstallerExitRequested = $false
     $script:InstallerPendingExitCode = $null
     $script:InstallLogPath = $null
+    $script:InstallerScriptSha256 = $null
     $installerRunCompleted = $false
 
     if ($PSVersionTable.PSVersion.Major -lt 7) {
@@ -96,6 +97,20 @@ if ($MyInvocation.InvocationName -ne '.') {
         # Never reached unless Exit-Installer itself failed: never fall through into the
         # PowerShell-7-only body below.
         exit $bootstrapExitCode
+    }
+
+    # The SHA256 of this file as this run read it, taken before anything else runs (review finding
+    # P3-11). A run that is not elevated relaunches itself elevated, and the elevated window runs
+    # only a copy of this file with this hash, so a file rewritten in the meantime (it may sit in a
+    # user-writable folder, such as the bootstrap's copy in %TEMP%) is not run with administrator
+    # rights. Under irm | iex there is no file and nothing to relaunch.
+    if ($PSCommandPath) {
+        try {
+            $script:InstallerScriptSha256 = (Get-FileHash -LiteralPath $PSCommandPath -Algorithm SHA256 -ErrorAction Stop).Hash
+        }
+        catch {
+            # Restart-WithElevation then hashes the file when it relaunches.
+        }
     }
 
     # Persistent transcript (issue #189); see Start-InstallerTranscript. Logging never blocks an

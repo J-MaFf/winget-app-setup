@@ -36,7 +36,9 @@ Describe 'App list consistency (issue #190)' {
     It 'Uninstaller reuses the module installed-check and elevation helpers (issue #190)' {
         $uninstallScript = Get-Content $script:UninstallerScriptPath -Raw
         $uninstallScript | Should -Match 'Test-WingetPackageInstalled -PackageId'
-        $uninstallScript | Should -Match 'Restart-WithElevation -PowerShellExecutable'
+        # Relaunched in place: the uninstaller imports the module from its own folder (its relaunch
+        # is tested in Elevation.Tests.ps1).
+        $uninstallScript | Should -Match 'Restart-WithElevation -ScriptPath \$PSCommandPath -InPlace'
         # The hand-rolled winget list probe and Start-Process relaunch are gone.
         $uninstallScript | Should -Not -Match 'winget list --exact'
         $uninstallScript | Should -Not -Match 'Start-Process powershell\.exe'

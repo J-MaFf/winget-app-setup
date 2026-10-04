@@ -56,6 +56,35 @@ instead.
 
 The script will trust the required Winget sources, elevate if necessary, and install or update the curated app list. Repeat step 1 anytime you open a new PowerShell window before running it.
 
+### Administrator rights
+
+The installer needs administrator rights. Started from a PowerShell window that is not elevated, it
+asks for them (Windows' UAC prompt) and carries on in a new, elevated Windows PowerShell window. The
+window you started it in waits for that run, then exits with its exit code, so a script or RMM tool
+that started the installer gets the real result rather than a 0 for having opened the prompt.
+
+- The elevated window is always `C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe`, which
+  every account has. An admin account that has never signed in to this PC can approve the prompt:
+  the elevated run then finds or installs PowerShell 7 for itself, as in the bootstrap above, and
+  runs under it in the same window. (It used to reopen in Windows Terminal or a `pwsh.exe` found
+  through the signed-in user's own app aliases, which that admin account does not have, so the
+  elevated window could fail to start.)
+- The elevated window does not run the file the first window ran. The first window checks that the
+  file still has the SHA256 it had when the run started and copies it into its own `%TEMP%`, which
+  administrators can read even when the elevating account cannot see the original (a mapped drive
+  or a share). The elevated window compares that copy with the same SHA256, copies it into a new
+  folder under `%SystemRoot%\Temp` that only SYSTEM, administrators and the elevating account can
+  change, and runs that copy. A file rewritten while the prompt was up (the bootstrap's copy in
+  `%TEMP%`, or a clone in Downloads, are writable by the signed-in user) is not run: the run stops
+  with exit code 5.
+- Declining the prompt ends the run with exit code 4, with no second prompt.
+- A non-interactive run that is not elevated (`-NonInteractive`, a scheduled task, an RMM agent
+  running as the signed-in user) shows no prompt and exits 4 at once: nobody would be there to
+  approve it.
+- Under `irm | iex` in PowerShell 7 there is no file to relaunch, so a run that is not elevated exits
+  4 and asks you to open an elevated session. The Windows PowerShell 5.1 one-liner relaunches from
+  the copy it downloads.
+
 ## App catalog
 
 The curated app list is `Get-DefaultAppCatalog` (`WingetAppSetup/Public/AppCatalog.ps1`) — the
@@ -88,11 +117,13 @@ own per-user cache and source-agreement state.
 
 ## Unattended runs
 
-The installer never asks a yes/no question on any path — elevation, the PowerShell 7 bootstrap,
-and low disk space all proceed without prompting, so the one-liner above can be run and left
-alone from a normal console. Pass `-NonInteractive` for RMM, CI, or scheduled-task use to also
-suppress the interactive-only extras: the summary grid-view window and the "press any key to exit"
-that holds the window at the end of a run or after an early failure (see [Logs](#logs)):
+The installer never asks a yes/no question on any path — the PowerShell 7 bootstrap and low disk
+space proceed without prompting. The one prompt left is Windows' own UAC prompt when the run is not
+elevated (see [Administrator rights](#administrator-rights)), so an unattended run must already be
+elevated or run as SYSTEM: a non-interactive run that is not elevated exits 4 without showing a
+prompt. Pass `-NonInteractive` for RMM, CI, or scheduled-task use to also suppress the
+interactive-only extras: the summary grid-view window and the "press any key to exit" that holds
+the window at the end of a run or after an early failure (see [Logs](#logs)):
 
 ```powershell
 pwsh -ExecutionPolicy Unrestricted -File .\winget-app-install.ps1 -NonInteractive
@@ -190,19 +221,22 @@ run 3010 by itself. The installer never restarts the PC.
 | Code | Meaning |
 |------|---------|
 | 0 | Success — all apps installed or already present |
-| 1 | One or more apps failed to install, including an install stopped at its time limit and the apps not attempted because winget could no longer be started partway through the run (also: the PowerShell 7 bootstrap could not provision `pwsh` from a pre-7 session, pre-flight system checks failed, or elevation was declined or is unavailable under remote execution) |
+| 1 | One or more apps failed to install, including an install stopped at its time limit and the apps not attempted because winget could no longer be started partway through the run (also: a blocking pre-flight system check failed) |
 | 2 | Winget is unavailable or cannot be started (`winget --version` must run and print a version) and could not be set up, or winget could no longer be launched at the end of the run (no app failed, but automatic updates and the next run would) |
 | 3 | App-definition validation failed, or no valid app definitions remain |
-| 5 | The run was aborted before it finished: an unexpected error (the message and stack trace are in the log), or the run was stopped from outside (Ctrl+C, the console closing, an installer stopping the console) when run from a file or non-interactively |
+| 4 | Administrator rights are required and the run was not elevated: the UAC prompt was declined or the elevated window could not be started, the run is non-interactive (no prompt is shown), it runs through `irm \| iex` in PowerShell 7, or `Invoke-WingetInstall` was called from the imported module (see [Administrator rights](#administrator-rights)) |
+| 5 | The run was aborted before it finished: an unexpected error (the message and stack trace are in the log), the run was stopped from outside (Ctrl+C, the console closing, an installer stopping the console) when run from a file or non-interactively, or the installer file changed before its elevated copy could run (see [Administrator rights](#administrator-rights)) |
+| 7 | Started from Windows PowerShell 5.1, the installer could not install PowerShell 7 or could not relaunch itself under it |
 | 3010 | Success, but a restart is required to finish: an install said so, the Winget-AutoUpdate MSI returned 3010, Windows gained a pending restart during the run, or installing PowerShell 7 from Windows PowerShell needed a restart (see **Restart required** above). RMM tools and Intune treat 3010 as "succeeded, restart required". A restart that was already pending before the run does not cause it |
 
-At the end of a run, when more than one applies, the code is the first of 1, 2, 3010 and 0.
+At the end of a run, when more than one applies, the code is the first of 1, 2, 3010 and 0. A run
+that relaunched itself elevated exits with the elevated run's code.
 
 A script that imports the `WingetAppSetup` module and calls `Invoke-WingetInstall` itself gets
-codes 0-3 and 3010 back as the function's return value; the function never exits. Pass the code on
+codes 0-4 and 3010 back as the function's return value; the function never exits. Pass the code on
 with `exit (Invoke-WingetInstall -NonInteractive)`, or the wrapper exits 0 even after a failed run.
-Code 5, and code 1 for a failed pre-flight check or PowerShell 7 bootstrap, come from
-`winget-app-install.ps1` itself, not from the function.
+Codes 5 and 7, and code 1 for a failed pre-flight check, come from `winget-app-install.ps1`
+itself, not from the function.
 
 ## Logs
 
@@ -212,7 +246,8 @@ suffix, e.g. `install-20260708-143000-whatif.log`). The path is printed at start
 with the final summary. ProgramData is used — rather than the elevating account's `%TEMP%` — so
 the log survives cross-user elevation and can be collected after a failed install on a remote
 machine. If the transcript cannot be started, the installer warns and continues: logging never
-blocks an install.
+blocks an install. A run that relaunched itself elevated leaves the first window's log, which ends
+with `The elevated run ended with exit code N.`, next to the elevated run's own logs.
 
 The transcript includes winget's own output. Each `winget install`, `winget download` and
 `winget source reset` is logged as a `> winget ...` line with its full command line, followed by
@@ -227,7 +262,8 @@ The same folder also holds:
 
 - `install-<yyyyMMdd-HHmmss>-bootstrap.log` — the Windows PowerShell 5.1 phase of a run started
   from `powershell.exe`: finding or installing PowerShell 7 and relaunching under `pwsh`, ending
-  with the exit code the relaunched run returned.
+  with the exit code the relaunched run returned. The elevated window of a run that relaunched
+  itself elevated starts in Windows PowerShell too, so it writes one of these as well.
 - `pwsh-msi-<yyyyMMdd-HHmmss>-<attempt>.log` — `msiexec`'s verbose log when the bootstrap installs
   PowerShell 7 from the MSI.
 - `winget-install-<package id>-<yyyyMMdd-HHmmss>.log` — the installer's own log for each

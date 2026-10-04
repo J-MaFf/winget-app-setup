@@ -13,14 +13,17 @@ Import-Module (Join-Path $PSScriptRoot 'WingetAppSetup\WingetAppSetup.psd1') -Fo
 
 # Check if the script is run as administrator
 If (-NOT (Test-IsAdmin)) {
-    # No "press Enter" pause before elevating (issue #230), matching the installer: the relaunch is
-    # unconditional, and the UAC dialog it raises is the real consent gate.
+    # No "press Enter" pause before elevating (issue #230), matching the installer: the UAC dialog
+    # the relaunch raises is the real consent gate.
     Write-ErrorMessage 'This script requires administrator privileges. Restarting with elevated privileges...'
-    # Relaunch with administrator privileges via the module's shared helper (issue #190):
-    # prefers an elevated Windows Terminal tab and falls back to a plain PowerShell window.
-    $psExecutable = if (Get-Command pwsh -ErrorAction SilentlyContinue) { 'pwsh.exe' } else { 'powershell.exe' }
-    Restart-WithElevation -PowerShellExecutable $psExecutable -ScriptPath $PSCommandPath | Out-Null
-    Exit
+    # The module's shared helper (issue #190; review findings P2-11, P2-12), as in the installer: it
+    # runs this script in an elevated Windows PowerShell window (System32's powershell.exe, which
+    # every account has, never a per-user pwsh.exe or wt.exe alias), waits for it and returns its
+    # exit code. A declined UAC prompt, or a non-interactive run (no prompt is shown), returns 4.
+    # -InPlace: this script imports the module from its own folder, so the elevated window runs
+    # this file where it is rather than a checked copy elsewhere.
+    $elevation = Restart-WithElevation -ScriptPath $PSCommandPath -InPlace
+    exit $elevation.ExitCode
 }
 else {
     Write-Success 'Starting...'

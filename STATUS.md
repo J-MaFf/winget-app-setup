@@ -74,7 +74,13 @@ no longer retried. A run that needs a restart to finish (winget's restart warnin
 from Windows PowerShell) says `Restart: REQUIRED` and exits 3010; a restart already pending before
 the run is only reported. Every printed winget exit code carries its name (`0x8A150102
 INSTALL_INSTALL_IN_PROGRESS`), and a failure reason says what the code means instead of `package
-not found after install`.
+not found after install`. A run that is not elevated now relaunches itself in System32's Windows
+PowerShell (which every account has, unlike the signed-in user's per-user `pwsh.exe` and `wt.exe`
+aliases), waits for the elevated run and exits with its code, where it used to exit 0 as soon as it
+had asked; the elevated window runs a copy of the installer that it checks against the SHA256 taken
+at startup and keeps in a folder only administrators can change; a declined UAC prompt exits 4 after
+one prompt, and a non-interactive run that is not elevated exits 4 without showing one. The
+uninstaller relaunches the same way.
 
 The same branch changes CI. Fork pull requests that leave `windows-tests.yml` alone no longer run
 on the self-hosted win-test runner, and `claude.yml` calls the shared Claude workflow at a pinned

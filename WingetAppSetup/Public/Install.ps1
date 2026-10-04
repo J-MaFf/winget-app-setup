@@ -9,7 +9,9 @@
     Suppresses the interactive extras for unattended runs (RMM, CI, scheduled tasks): the summary
     grid-view window and the final "press any key to exit". Also auto-detected when the session is
     non-interactive or stdin is redirected. No path asks a yes/no question anymore (issue #230), so
-    this switch is not needed to keep a run from blocking on a prompt.
+    this switch is not needed to keep a run from blocking on a prompt. A non-interactive run that is
+    not elevated returns 4 instead of raising a UAC prompt that nobody would answer (review finding
+    P2-12).
 .PARAMETER SkipSystemCheck
     Pass-through of the entry script's -SkipSystemCheck switch. Used only so an elevated relaunch
     inherits the caller's intent to bypass the pre-flight system checks (issue #185); the checks
@@ -23,16 +25,18 @@
     script (build/fragments/tail.ps1) exits with the returned code, so every path here can be
     driven from a test and asserted on its result.
 .NOTES
-    Exit codes: 0 = success (also returned right after handing the run to an elevated relaunch),
-    1 = one or more apps failed to install (including the apps marked failed when winget could no
-    longer be launched mid-run), or elevation was declined or is unavailable (irm | iex, or the
-    imported module), 2 = winget unavailable (at the start, where `winget --version` must run and
-    print a version, or no longer launchable at the end of the run), 3 = app-definition validation
-    failed or no valid apps remain, 3010 = success, but a restart is required to finish (an install
+    Exit codes: 0 = success, 1 = one or more apps failed to install (including the apps marked
+    failed when winget could no longer be launched mid-run), 2 = winget unavailable (at the start,
+    where `winget --version` must run and print a version, or no longer launchable at the end of
+    the run), 3 = app-definition validation failed or no valid apps remain, 4 = administrator rights
+    are required and the run was not elevated: the UAC prompt was declined or could not be shown, a
+    non-interactive run (nobody to approve a prompt, so none is shown), irm | iex, or the imported
+    module (review finding P2-12), 3010 = success, but a restart is required to finish (an install
     said so, or Windows gained a pending restart during the run; review finding P3-16). At the end
-    of a run the precedence is 1 > 2 > 3010 > 0 (Get-InstallerExitCode). The generated entry script
-    also exits 1 when a blocking pre-flight check fails (before this function runs) and 5 when the
-    run was aborted by an unexpected error or stopped from outside.
+    of a run the precedence is 1 > 2 > 3010 > 0 (Get-InstallerExitCode). A run that relaunched
+    itself elevated returns the elevated run's exit code (Restart-WithElevation waits for it). The
+    generated entry script also exits 1 when a blocking pre-flight check fails (before this
+    function runs) and 5 when the run was aborted by an unexpected error or stopped from outside.
 #>
 function Invoke-WingetInstall {
     [OutputType([int])]
@@ -61,9 +65,6 @@ function Invoke-WingetInstall {
         Write-Host ''
     }
 
-    # Determine which PowerShell executable to use
-    $psExecutable = if (Get-Command pwsh -ErrorAction SilentlyContinue) { 'pwsh.exe' } else { 'powershell.exe' }
-
     # Test-IsAdmin (Public/Elevation.ps1, issue #239) wraps the WindowsPrincipal/IsInRole check
     # behind a mockable command, so tests can drive the non-admin branch below deterministically
     # instead of only when Pester itself happens to run non-elevated. It also fails safe (assumes
@@ -71,90 +72,32 @@ function Invoke-WingetInstall {
     # the right one for this call site specifically.
     $isAdmin = Test-IsAdmin
 
-    # Trigger the winget source's per-user first-use bootstrap in the user context before elevating.
-    # Agreements are per-user and won't carry into the elevated process. Scoped to --name winget —
-    # the only source this tool installs from — so it never triggers msstore's agreement/first-use
-    # handshake, which fails in non-interactive/cross-user contexts (issue #172).
-    #
-    # --disable-interactivity (issue #230): this used to run bare, on purpose, to surface winget's
-    # agreement prompt "while we still have the normal user's identity" - and -Wait meant an
-    # unattended run sat on that prompt forever. It was never load-bearing: the exit code is
-    # discarded (no -PassThru), so nothing here could act on the answer either way. The agreement
-    # is accepted where it actually counts - every install passes --accept-source-agreements, and
-    # the elevated Initialize-WingetSourcesForUser below re-probes and bootstraps the installing
-    # account via Repair-WinGetPackageManager (issue #159).
-    #
-    # Reuses Invoke-WingetSourceProbe (WingetBootstrap.ps1) rather than calling Start-Process
-    # directly: it runs this exact command already wrapped in a timeout guard, which this
-    # pre-elevation call was missing entirely. A bare `-Wait` here could block the whole run
-    # forever on a corrupted/unreachable source, before elevation and before any of the
-    # timeout-guarded checks later in the pipeline ever ran. Capped at 30s (well under the probe's
-    # own 120s default) rather than the full default: the return value is discarded — this call
-    # remains best-effort, same as before — and Initialize-WingetSourcesForUser re-probes for real
-    # after elevation, so nothing here needs the generous timeout that call actually depends on.
-    if (-not $isAdmin -and (Test-IsRunningLocally)) {
-        if ($WhatIf) {
-            Write-Info '[DRY-RUN] Would run winget source update --name winget to bootstrap the source in user context'
-        }
-        else {
-            Write-Info 'Updating the winget source...'
-            [void](Invoke-WingetSourceProbe -TimeoutSeconds 30)
-        }
-    }
-
     # Check if the script is run as administrator. The $WhatIf gate is checked once here, for
     # both execution contexts below, rather than duplicated per-branch: a dry run makes no system
     # changes, so it never needs elevation or an elevation-required exit — only which preview
-    # message to print depends on how this script is being run.
+    # message to print depends on how this script is being run. Every run that cannot go on without
+    # administrator rights returns 4 (review finding P2-12).
     If (-NOT $isAdmin) {
         if ($WhatIf) {
-            if (Test-IsRunningLocally) {
+            if (-not (Test-IsRunningLocally)) {
+                # IEX/remote execution has no local script path to relaunch from, but that's
+                # irrelevant to a preview: same rationale as the local-file case below.
+                Write-Info '[DRY-RUN] Would require administrator privileges for a real run (auto-elevation is unavailable when running through IEX/remote execution). Continuing the preview in the current (non-elevated) session; no system changes will be made.'
+            }
+            elseif ($effectiveNonInteractive) {
+                # A real run stops here with 4 (review finding P2-12); the preview says so.
+                Write-Info '[DRY-RUN] A real run would stop here with exit code 4: it needs administrator privileges, and a non-interactive run shows no UAC prompt. Continuing the preview in the current (non-elevated) session; no system changes will be made.'
+            }
+            else {
                 # Relaunching elevated here would (a) be a surprising side effect for a preview
                 # and (b) — if the flag were ever dropped across the elevation boundary —
                 # silently turn a dry run into a real install. Stay in the current session and
                 # continue the preview.
+                Write-Info '[DRY-RUN] Would run winget source update --name winget to bootstrap the source in user context'
                 Write-Info '[DRY-RUN] Would relaunch with administrator privileges. Continuing the preview in the current (non-elevated) session; no system changes will be made.'
             }
-            else {
-                # IEX/remote execution has no local script path to relaunch from, but that's
-                # irrelevant to a preview: same rationale as the local-file case above.
-                Write-Info '[DRY-RUN] Would require administrator privileges for a real run (auto-elevation is unavailable when running through IEX/remote execution). Continuing the preview in the current (non-elevated) session; no system changes will be made.'
-            }
         }
-        elseif (Test-IsRunningLocally) {
-            # Elevation relaunches $PSCommandPath. When Invoke-WingetInstall comes from the
-            # imported (or dot-sourced) module, that path is WingetAppSetup/Public/Install.ps1 —
-            # a functions-only file — so the elevated window would define a function and exit
-            # without installing anything (issue #185). Fail fast with guidance instead.
-            if (Test-InvokedFromModuleContext -InvocationModule $MyInvocation.MyCommand.Module -CommandPath $PSCommandPath) {
-                Write-ErrorMessage 'Invoke-WingetInstall was invoked from the imported module without elevation; auto-elevation cannot relaunch a module function. Run winget-app-install.ps1, or start from an already-elevated session.'
-                return 1
-            }
-            # No "press Enter to elevate" pause (issue #230): it gated the run on a keystroke
-            # without offering a decision - the relaunch happens either way, and the UAC dialog
-            # the relaunch raises is the actual consent gate. Announce and go.
-            Write-ErrorMessage 'This script requires administrator privileges. Restarting with elevated privileges...'
-            # Relaunch the script with administrator privileges, forwarding the caller's
-            # switches so the elevated session inherits the same intent: -SkipSystemCheck so
-            # the pre-flight checks the caller explicitly bypassed are not re-run in the
-            # elevated session (issue #185); the effective non-interactive state because the
-            # elevated child gets a fresh console and would otherwise re-detect as interactive
-            # and block on prompts; and -WhatIf as a safety net so a dry run could never
-            # escalate into changes (unreachable today — a dry run never relaunches — but
-            # kept so the forwarding stays correct if that ever changes).
-            $elevationArgs = @()
-            if ($WhatIf) { $elevationArgs += '-WhatIf' }
-            if ($effectiveNonInteractive) { $elevationArgs += '-NonInteractive' }
-            if ($SkipSystemCheck) { $elevationArgs += '-SkipSystemCheck' }
-            $relaunchedIn = Restart-WithElevation -PowerShellExecutable $psExecutable -ScriptPath $PSCommandPath -AdditionalArguments $elevationArgs
-            if (-not $relaunchedIn) {
-                Write-ErrorMessage 'Elevation was declined or failed, so nothing was installed. Re-run the installer and approve the administrator (UAC) prompt.'
-                return 1
-            }
-            # The elevated window does the install; this (non-elevated) run is done.
-            return 0
-        }
-        else {
+        elseif (-not (Test-IsRunningLocally)) {
             # IEX/remote execution has no local script path to relaunch from.
             Write-ErrorMessage 'This script requires administrator privileges.'
             Write-ErrorMessage 'Auto-elevation is unavailable when running through IEX/remote execution.'
@@ -162,7 +105,71 @@ function Invoke-WingetInstall {
             # No 'Exiting in 5 seconds' sleep any more: the entry script's Exit-Installer prints the
             # log path and build id and, when someone is at the console, waits for a key press
             # before the window closes (review finding P2-14).
-            return 1
+            return 4
+        }
+        elseif (Test-InvokedFromModuleContext -InvocationModule $MyInvocation.MyCommand.Module -CommandPath $PSCommandPath) {
+            # Elevation relaunches $PSCommandPath. When Invoke-WingetInstall comes from the
+            # imported (or dot-sourced) module, that path is WingetAppSetup/Public/Install.ps1 —
+            # a functions-only file — so the elevated window would define a function and exit
+            # without installing anything (issue #185). Fail fast with guidance instead.
+            Write-ErrorMessage 'Invoke-WingetInstall was invoked from the imported module without elevation; auto-elevation cannot relaunch a module function. Run winget-app-install.ps1, or start from an already-elevated session.'
+            return 4
+        }
+        elseif ($effectiveNonInteractive) {
+            # Nobody is there to approve a UAC prompt (review finding P2-12): an RMM job or a
+            # scheduled task running as a standard user used to raise one on the user's desktop and
+            # exit 0 within seconds, with nothing installed.
+            Write-ErrorMessage 'This script requires administrator privileges, and this run is non-interactive, so there is nobody to approve a UAC prompt and none was shown. Run it from an elevated session, or as SYSTEM (for example from an RMM tool).'
+            return 4
+        }
+        else {
+            # Trigger the winget source's per-user first-use bootstrap in the user context before
+            # elevating. Agreements are per-user and won't carry into the elevated process. Scoped
+            # to --name winget — the only source this tool installs from — so it never triggers
+            # msstore's agreement/first-use handshake, which fails in non-interactive/cross-user
+            # contexts (issue #172).
+            #
+            # --disable-interactivity (issue #230): this used to run bare, on purpose, to surface
+            # winget's agreement prompt "while we still have the normal user's identity" - and
+            # -Wait meant an unattended run sat on that prompt forever. It was never load-bearing:
+            # the result is discarded, so nothing here acts on the answer either way. The agreement
+            # is accepted where it actually counts - every install passes
+            # --accept-source-agreements, and the elevated Initialize-WingetSourcesForUser re-probes
+            # and bootstraps the installing account via Repair-WinGetPackageManager (issue #159).
+            #
+            # Invoke-WingetSourceProbe (WingetBootstrap.ps1) wraps this command in a timeout guard,
+            # so a corrupted or unreachable source cannot block the run before elevation. Capped at
+            # 30s (well under the probe's own 120s default): the return value is discarded — this
+            # call remains best-effort — and Initialize-WingetSourcesForUser re-probes for real
+            # after elevation.
+            Write-Info 'Updating the winget source...'
+            [void](Invoke-WingetSourceProbe -TimeoutSeconds 30)
+
+            # No "press Enter to elevate" pause (issue #230): the UAC dialog the relaunch raises is
+            # the actual consent gate.
+            Write-ErrorMessage 'This script requires administrator privileges. Restarting with elevated privileges...'
+            # Forward the caller's switches so the elevated run inherits the same intent:
+            # -SkipSystemCheck so the pre-flight checks the caller explicitly bypassed are not re-run
+            # (issue #185); -WhatIf as a safety net so a dry run could never escalate into changes
+            # (unreachable today — a dry run never relaunches — but kept so the forwarding stays
+            # correct if that ever changes). -NonInteractive is never forwarded: a non-interactive
+            # run returned 4 above.
+            $elevationArgs = @()
+            if ($WhatIf) { $elevationArgs += '-WhatIf' }
+            if ($SkipSystemCheck) { $elevationArgs += '-SkipSystemCheck' }
+            # Waits for the elevated window and returns its exit code (review finding P2-12), and
+            # runs only a checked copy of this file (P3-11): $script:InstallerScriptSha256 is the
+            # file's SHA256 taken by the entry script when this run started.
+            $elevation = Restart-WithElevation -ScriptPath $PSCommandPath -AdditionalArguments $elevationArgs -ExpectedSha256 $script:InstallerScriptSha256
+            if (-not $elevation.Started) {
+                Write-ErrorMessage 'Elevation was declined or failed, so nothing was installed. Re-run the installer and approve the administrator (UAC) prompt.'
+                return [int]$elevation.ExitCode
+            }
+            # The elevated window showed the run's summary, or why it stopped, and waited for a key
+            # press itself: recorded so the entry script exits with this code without a second
+            # notice and key press here.
+            $script:InstallerPendingExitCode = [int]$elevation.ExitCode
+            return [int]$elevation.ExitCode
         }
     }
     else {

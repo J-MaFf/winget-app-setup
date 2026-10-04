@@ -387,7 +387,7 @@ Describe 'The entry block exits with the code Invoke-WingetInstall returns (wgt-
         $result.Output | Should -Match 'stopped early with exit code 1: a blocking pre-flight system check failed'
     }
 
-    It 'Exits 1 with the remote elevation guidance when an irm | iex run is not elevated (issues #226/#229)' {
+    It 'Exits 4 with the remote elevation guidance when an irm | iex run is not elevated (issues #226/#229, review finding P2-12)' {
         # The real Invoke-WingetInstall, with Test-IsAdmin overridden instead of depending on the
         # runner: CI is elevated, so the old version of this test (gated on real elevation) never
         # ran there. Under Invoke-Expression there is no script path to relaunch from, so the run
@@ -396,12 +396,12 @@ Describe 'The entry block exits with the code Invoke-WingetInstall returns (wgt-
 
         $result = Invoke-ChildInstallerViaIex -Path $path
 
-        $result.ExitCode | Should -Be 1
+        $result.ExitCode | Should -Be 4
         $result.Output | Should -Match 'This script requires administrator privileges\.'
         $result.Output | Should -Match 'Auto-elevation is unavailable when running through IEX/remote execution\.'
         $result.Output | Should -Match 'Open an elevated PowerShell or Windows Terminal session and run the IEX command again\.'
         # The early-exit notice replaced the old 5-second sleep (review finding P2-14).
-        $result.Output | Should -Match 'The installer stopped early with exit code 1'
+        $result.Output | Should -Match 'The installer stopped early with exit code 4: administrator rights are required, and this run was not elevated'
         $result.Output | Should -Not -Match 'Exiting in 5 seconds'
         $result.Output | Should -Not -Match 'Press Enter to restart script with elevated privileges'
         $result.Output | Should -Not -Match 'UNEXPECTED ERROR|stopped before it finished'
@@ -585,5 +585,99 @@ Describe 'Build determinism (issue #189)' {
 
         (Get-FileHash -Path $firstOutput -Algorithm SHA256).Hash |
             Should -Be (Get-FileHash -Path $secondOutput -Algorithm SHA256).Hash
+    }
+}
+
+# Review findings P2-11, P2-12 and P3-11, through the generated installer's real entry block and
+# the real Invoke-WingetInstall and Restart-WithElevation: only the admin check, the console's
+# interactivity, the pre-elevation source update and the elevated launch itself (which would raise
+# a real UAC prompt) are overridden.
+Describe 'Elevated relaunch through the entry block (review findings P2-11, P2-12, P3-11)' {
+    BeforeAll {
+        # A run from a file, not elevated, with someone at the console unless -NonInteractive is
+        # passed. Write-Prompt throws, so a key press the run would wait for shows up as PROMPT:.
+        $script:notElevatedOverrides = @'
+function Test-IsAdmin { $false }
+function Test-EffectiveNonInteractive { param ([switch]$NonInteractive) [bool]$NonInteractive }
+function Test-IsContinuousIntegration { $false }
+function Write-Prompt { param ([string]$Message) Write-Host "PROMPT: $Message"; throw 'no key press in tests' }
+function Invoke-WingetSourceProbe { param ([int]$TimeoutSeconds) @{ Succeeded = $true; ExitCode = 0; TimedOut = $false } }
+'@
+        # The elevated Windows PowerShell, standing in: prints what it was asked to start and
+        # "ends" with exit code 1 at once.
+        $script:elevatedRunOverride = @'
+function Start-ElevatedProcess {
+    param ([string]$FilePath, [string]$ArgumentString)
+    Write-Host "ELEVATED: $FilePath $ArgumentString"
+    $process = [pscustomobject]@{ ExitCode = 1 }
+    $process | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value { param ($Milliseconds) $true }
+    $process
+}
+'@
+    }
+
+    It 'Waits for the elevated run and exits with its exit code, without a second notice or key press' {
+        $path = New-FaultInjectedInstaller -Name 'relaunch-waits.ps1' -Overrides ($script:notElevatedOverrides + "`n" + $script:elevatedRunOverride)
+        $sha256 = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
+
+        $result = Invoke-ChildInstaller -Arguments @('-File', $path, '-SkipSystemCheck')
+
+        $result.ExitCode | Should -Be 1
+        # System32's Windows PowerShell, running the check-and-copy command, not the file itself.
+        $result.Output | Should -Match 'ELEVATED: \S*\\System32\\WindowsPowerShell\\v1\.0\\powershell\.exe -NoProfile -Command "'
+        # The SHA256 the entry block took at startup, and the forwarded switch.
+        $result.Output | Should -Match ([regex]::Escape("-ne '$sha256'"))
+        $result.Output | Should -Match ([regex]::Escape('-File $copy -SkipSystemCheck;'))
+        $result.Output | Should -Match 'The elevated run ended with exit code 1\.'
+        # The elevated window showed the outcome and waited for its own key press.
+        $result.Output | Should -Not -Match 'stopped early|PROMPT:|UNEXPECTED ERROR'
+    }
+
+    It 'Does not relaunch a file that changed after the run started, and exits 5' {
+        # The file is rewritten while the run is still going, before it asks for elevation, as a
+        # same-user process could do to the bootstrap's copy in %TEMP%.
+        $tamperOverride = @'
+function Invoke-WingetSourceProbe {
+    param ([int]$TimeoutSeconds)
+    Add-Content -LiteralPath $PSCommandPath -Value '# rewritten before the UAC prompt'
+    @{ Succeeded = $true; ExitCode = 0; TimedOut = $false }
+}
+'@
+        $path = New-FaultInjectedInstaller -Name 'relaunch-tampered.ps1' -Overrides ($script:notElevatedOverrides + "`n" + $script:elevatedRunOverride + "`n" + $tamperOverride)
+
+        $result = Invoke-ChildInstaller -Arguments @('-File', $path, '-SkipSystemCheck')
+
+        $result.ExitCode | Should -Be 5
+        $result.Output | Should -Match 'changed after this run started, so it is not run with administrator rights'
+        $result.Output | Should -Not -Match 'ELEVATED:'
+    }
+
+    It 'Exits 4 after one UAC prompt when the prompt is declined' {
+        $declinedOverride = @'
+function Start-ElevatedProcess {
+    param ([string]$FilePath, [string]$ArgumentString)
+    Write-Host 'UAC PROMPT SHOWN'
+    throw [System.Management.Automation.MethodInvocationException]::new('Exception calling "Start"', [System.ComponentModel.Win32Exception]::new(1223))
+}
+'@
+        $path = New-FaultInjectedInstaller -Name 'relaunch-declined.ps1' -Overrides ($script:notElevatedOverrides + "`n" + $declinedOverride)
+
+        $result = Invoke-ChildInstaller -Arguments @('-File', $path, '-SkipSystemCheck')
+
+        $result.ExitCode | Should -Be 4
+        ([regex]::Matches($result.Output, 'UAC PROMPT SHOWN')).Count | Should -Be 1
+        $result.Output | Should -Match 'The administrator \(UAC\) prompt was declined'
+        $result.Output | Should -Match 'stopped early with exit code 4: administrator rights are required'
+    }
+
+    It 'Exits 4 without a UAC prompt when the run is non-interactive' {
+        $path = New-FaultInjectedInstaller -Name 'relaunch-unattended.ps1' -Overrides ($script:notElevatedOverrides + "`n" + $script:elevatedRunOverride)
+
+        $result = Invoke-ChildInstaller -Arguments @('-File', $path, '-SkipSystemCheck', '-NonInteractive')
+
+        $result.ExitCode | Should -Be 4
+        $result.Output | Should -Not -Match 'ELEVATED:'
+        $result.Output | Should -Match 'this run is non-interactive, so there is nobody to approve a UAC prompt'
+        $result.Output | Should -Not -Match 'PROMPT:'
     }
 }

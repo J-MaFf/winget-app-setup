@@ -1,6 +1,7 @@
 # Elevation.Tests.ps1
 # Tests for WingetAppSetup/Public/Elevation.ps1 and Private/Elevation.ps1:
-# Restart-WithElevation, the module-context invocation detection and Test-IsSystemAccount.
+# Restart-WithElevation and its parts (the elevated relaunch, review findings P2-11, P2-12, P3-11),
+# the uninstaller's use of it, the module-context invocation detection and Test-IsSystemAccount.
 # Split from the old single-file suite Test-WingetAppInstall.Tests.ps1 (issue #192).
 
 # Load the module's functions once for this file. TestHelpers.ps1 resolves the repo paths
@@ -46,86 +47,379 @@ Describe 'Test-IsAdmin' {
     }
 }
 
-Describe 'Restart-WithElevation' {
+Describe 'Restart-WithElevation (review findings P2-11, P2-12, P3-11)' {
     BeforeAll {
+        # A stand-in for the Process that Start-ElevatedProcess returns: WaitForExit(ms) reports
+        # 'still running' -PendingWaits times first, so the wait loop is exercised.
+        function New-FakeElevatedProcess {
+            param ([int]$ExitCode, [int]$PendingWaits = 0)
+            $process = [pscustomobject]@{ ExitCode = $ExitCode; PendingWaits = $PendingWaits; WaitCalls = 0 }
+            $process | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value {
+                param ($Milliseconds)
+                $this.WaitCalls++
+                return ($this.WaitCalls -gt $this.PendingWaits)
+            }
+            $process
+        }
+    }
+
+    BeforeEach {
         Mock Write-Host { }
-        Mock Write-Warning { }
-    }
+        $script:errorMessages = @()
+        Mock Write-ErrorMessage { $script:errorMessages += $Message }
+        $script:infoMessages = @()
+        Mock Write-Info { $script:infoMessages += $Message }
+        # Someone is at the console unless a test says otherwise; never the runner's real console.
+        Mock Test-EffectiveNonInteractive { [bool]$NonInteractive }
 
-    It 'Should use Windows Terminal when available' {
-        Mock Start-Process { } -ParameterFilter { $FilePath -eq 'wt.exe' }
-        Mock Start-Process { } -ParameterFilter { $FilePath -eq 'pwsh.exe' }
+        $script:scriptPath = Join-Path $TestDrive 'winget-app-install.ps1'
+        Set-Content -LiteralPath $script:scriptPath -Value "Write-Output 'installer'" -Encoding UTF8
+        $script:scriptSha256 = (Get-FileHash -LiteralPath $script:scriptPath -Algorithm SHA256).Hash
 
-        $result = Restart-WithElevation -PowerShellExecutable 'pwsh.exe' -ScriptPath 'C:\script.ps1' -WindowsTerminalExecutable 'wt.exe'
-
-        Should -Invoke Start-Process -ParameterFilter { $FilePath -eq 'wt.exe' } -Times 1
-        Should -Invoke Start-Process -ParameterFilter { $FilePath -eq 'pwsh.exe' } -Times 0
-        $result | Should -Be 'WindowsTerminal'
-    }
-
-    It 'Should fall back to PowerShell when Windows Terminal launch fails' {
-        Mock Start-Process { throw 'Failed to launch wt' } -ParameterFilter { $FilePath -eq 'wt.exe' }
-        Mock Start-Process { } -ParameterFilter { $FilePath -eq 'pwsh.exe' }
-
-        $result = Restart-WithElevation -PowerShellExecutable 'pwsh.exe' -ScriptPath 'C:\script.ps1' -WindowsTerminalExecutable 'wt.exe'
-
-        Should -Invoke Start-Process -ParameterFilter { $FilePath -eq 'wt.exe' } -Times 1
-        Should -Invoke Start-Process -ParameterFilter { $FilePath -eq 'pwsh.exe' } -Times 1
-        $result | Should -Be 'PowerShell'
-    }
-
-    It 'Should use PowerShell when Windows Terminal is not available' {
-        Mock Get-Command { return $null } -ParameterFilter { $Name -eq 'wt.exe' }
-        Mock Start-Process { } -ParameterFilter { $FilePath -eq 'pwsh.exe' }
-
-        $result = Restart-WithElevation -PowerShellExecutable 'pwsh.exe' -ScriptPath 'C:\script.ps1'
-
-        Should -Invoke Start-Process -ParameterFilter { $FilePath -eq 'pwsh.exe' } -Times 1
-        $result | Should -Be 'PowerShell'
-    }
-
-    It 'Returns $null (no elevated run started) when the PowerShell relaunch fails, e.g. a declined UAC prompt' {
-        # Previously this threw; inside the entry script's abort guard a declined UAC prompt then
-        # read as 'UNEXPECTED ERROR' with exit 5. Callers now report it as an elevation failure.
-        Mock Get-Command { return $null } -ParameterFilter { $Name -eq 'wt.exe' }
-        Mock Start-Process { throw 'This command cannot be run due to the error: The operation was canceled by the user.' } -ParameterFilter { $FilePath -eq 'pwsh.exe' }
-
-        $result = Restart-WithElevation -PowerShellExecutable 'pwsh.exe' -ScriptPath 'C:\script.ps1'
-
-        $result | Should -BeNullOrEmpty
-    }
-
-    It 'Should forward AdditionalArguments to the elevated relaunch' {
-        Mock Get-Command { return $null } -ParameterFilter { $Name -eq 'wt.exe' }
-        Mock Start-Process { } -ParameterFilter { $FilePath -eq 'pwsh.exe' }
-
-        Restart-WithElevation -PowerShellExecutable 'pwsh.exe' -ScriptPath 'C:\script.ps1' -AdditionalArguments '-WhatIf'
-
-        Should -Invoke Start-Process -Times 1 -ParameterFilter {
-            $FilePath -eq 'pwsh.exe' -and (($ArgumentList -join ' ') -match '-File "C:\\script\.ps1" -WhatIf')
+        $script:launch = $null
+        $script:fakeProcess = New-FakeElevatedProcess -ExitCode 0
+        Mock Start-ElevatedProcess {
+            $script:launch = @{ FilePath = $FilePath; ArgumentString = $ArgumentString }
+            $script:fakeProcess
         }
     }
 
-    It 'Should not append arguments when AdditionalArguments is empty' {
-        Mock Get-Command { return $null } -ParameterFilter { $Name -eq 'wt.exe' }
-        Mock Start-Process { } -ParameterFilter { $FilePath -eq 'pwsh.exe' }
+    It 'Starts System32''s Windows PowerShell elevated, never wt.exe or a per-user pwsh.exe alias' {
+        $result = Restart-WithElevation -ScriptPath $script:scriptPath
 
-        Restart-WithElevation -PowerShellExecutable 'pwsh.exe' -ScriptPath 'C:\script.ps1'
+        $result.Started | Should -BeTrue
+        Should -Invoke Start-ElevatedProcess -Times 1 -Exactly
+        $script:launch.FilePath | Should -Be (Get-WindowsPowerShellPath)
+        $script:launch.FilePath | Should -Match '\\System32\\WindowsPowerShell\\v1\.0\\powershell\.exe$'
+        $script:launch.ArgumentString | Should -Not -Match 'wt\.exe|pwsh'
+    }
 
-        Should -Invoke Start-Process -Times 1 -ParameterFilter {
-            $FilePath -eq 'pwsh.exe' -and (($ArgumentList -join ' ') -notmatch '-WhatIf')
+    It 'Waits for the elevated run and returns its exit code <_>' -ForEach @(0, 1, 2, 3010) {
+        $script:fakeProcess = New-FakeElevatedProcess -ExitCode $_ -PendingWaits 2
+
+        $result = Restart-WithElevation -ScriptPath $script:scriptPath
+
+        $result.Started | Should -BeTrue
+        $result.ExitCode | Should -Be $_
+        # It kept waiting while the elevated run was still going.
+        $script:fakeProcess.WaitCalls | Should -Be 3
+        $script:infoMessages | Should -Contain "The elevated run ended with exit code $_."
+    }
+
+    It 'Returns 4 after a declined UAC prompt (Win32 error 1223, ERROR_CANCELLED), with one prompt and no retry' {
+        # What Process.Start throws through PowerShell: the Win32Exception wrapped in a
+        # MethodInvocationException. The code is read, not the (translated) message.
+        Mock Start-ElevatedProcess {
+            throw [System.Management.Automation.MethodInvocationException]::new('Exception calling "Start" with "1" argument(s): "Translated text"', [System.ComponentModel.Win32Exception]::new(1223))
+        }
+
+        $result = Restart-WithElevation -ScriptPath $script:scriptPath
+
+        $result.Started | Should -BeFalse
+        $result.ExitCode | Should -Be 4
+        Should -Invoke Start-ElevatedProcess -Times 1 -Exactly
+        $script:errorMessages | Should -Contain 'The administrator (UAC) prompt was declined, so no elevated run was started.'
+    }
+
+    It 'Returns 4 and says why when the elevated process cannot be started for another reason' {
+        Mock Start-ElevatedProcess { throw [System.ComponentModel.Win32Exception]::new(2) }
+
+        $result = Restart-WithElevation -ScriptPath $script:scriptPath
+
+        $result.Started | Should -BeFalse
+        $result.ExitCode | Should -Be 4
+        Should -Invoke Start-ElevatedProcess -Times 1 -Exactly
+        ($script:errorMessages -join "`n") | Should -Match 'Could not start an elevated Windows PowerShell'
+    }
+
+    It 'Shows no UAC prompt and returns 4 when nobody is at the console (<Case>)' -ForEach @(
+        @{ Case = 'non-interactive session'; Detected = $true; Switch = $false }
+        @{ Case = '-NonInteractive'; Detected = $false; Switch = $true }
+    ) {
+        $script:detected = $Detected
+        Mock Test-EffectiveNonInteractive { $script:detected -or [bool]$NonInteractive }
+
+        $result = Restart-WithElevation -ScriptPath $script:scriptPath -NonInteractive:$Switch
+
+        $result.Started | Should -BeFalse
+        $result.ExitCode | Should -Be 4
+        Should -Invoke Start-ElevatedProcess -Times 0 -Exactly
+        ($script:errorMessages -join "`n") | Should -Match 'non-interactive, so there is nobody to approve a UAC prompt'
+    }
+
+    It 'Stages the bytes it checked in this account''s %TEMP% and has the elevated process check that copy against their SHA256, never running the file itself' {
+        Mock Start-ElevatedProcess {
+            $script:launch = @{ FilePath = $FilePath; ArgumentString = $ArgumentString }
+            if ($ArgumentString -match "ReadAllBytes\('([^']+)'\)") {
+                $script:stagedPath = $Matches[1]
+                $script:stagedSha256 = (Get-FileHash -LiteralPath $script:stagedPath -Algorithm SHA256).Hash
+            }
+            $script:fakeProcess
+        }
+        $script:stagedPath = $null
+        $script:stagedSha256 = $null
+
+        Restart-WithElevation -ScriptPath $script:scriptPath -AdditionalArguments '-SkipSystemCheck'
+
+        # A copy where the elevating account can read it (a mapped drive or share may be out of its
+        # reach), with the same bytes.
+        $script:stagedPath | Should -Not -BeNullOrEmpty
+        $script:stagedPath | Should -Not -Be $script:scriptPath
+        $script:stagedPath | Should -BeLike (Join-Path ([System.IO.Path]::GetTempPath()) 'winget-app-setup-elevate-*')
+        (Split-Path -Leaf $script:stagedPath) | Should -Be 'winget-app-install.ps1'
+        $script:stagedSha256 | Should -Be $script:scriptSha256
+        $expectedCommand = New-ElevationVerifierCommand -ScriptPath $script:stagedPath -Sha256 $script:scriptSha256 -PowerShellPath (Get-WindowsPowerShellPath) -CopyRoot (Get-ElevatedCopyRoot) -AdditionalArguments '-SkipSystemCheck'
+        $script:launch.ArgumentString | Should -BeExactly ('-NoProfile -Command "' + $expectedCommand + '"')
+        # The only -File in the command line is the one that runs the checked copy.
+        ([regex]::Matches($script:launch.ArgumentString, '-File ')).Count | Should -Be 1
+        $script:launch.ArgumentString | Should -Match ([regex]::Escape('-File $copy -SkipSystemCheck;'))
+        # Removed once the elevated run has ended.
+        Test-Path -LiteralPath (Split-Path -Parent $script:stagedPath) | Should -BeFalse
+    }
+
+    It 'Removes the staged copy when the UAC prompt is declined too' {
+        Mock Start-ElevatedProcess {
+            if ($ArgumentString -match "ReadAllBytes\('([^']+)'\)") {
+                $script:stagedPath = $Matches[1]
+            }
+            throw [System.ComponentModel.Win32Exception]::new(1223)
+        }
+        $script:stagedPath = $null
+
+        (Restart-WithElevation -ScriptPath $script:scriptPath).ExitCode | Should -Be 4
+
+        $script:stagedPath | Should -Not -BeNullOrEmpty
+        Test-Path -LiteralPath (Split-Path -Parent $script:stagedPath) | Should -BeFalse
+    }
+
+    It 'Starts nothing and returns 5 when the file changed after the run started' {
+        $result = Restart-WithElevation -ScriptPath $script:scriptPath -ExpectedSha256 ('0' * 64)
+
+        $result.Started | Should -BeFalse
+        $result.ExitCode | Should -Be 5
+        Should -Invoke Start-ElevatedProcess -Times 0 -Exactly
+        ($script:errorMessages -join "`n") | Should -Match 'changed after this run started'
+    }
+
+    It 'Starts the elevated run when the file still has the SHA256 it had when the run started' {
+        $result = Restart-WithElevation -ScriptPath $script:scriptPath -ExpectedSha256 $script:scriptSha256.ToLowerInvariant()
+
+        $result.Started | Should -BeTrue
+        $script:launch.ArgumentString | Should -Match ([regex]::Escape("-ne '$($script:scriptSha256)'"))
+    }
+
+    It 'Returns 5 when the file cannot be read' {
+        $result = Restart-WithElevation -ScriptPath (Join-Path $TestDrive 'missing.ps1')
+
+        $result.ExitCode | Should -Be 5
+        Should -Invoke Start-ElevatedProcess -Times 0 -Exactly
+    }
+
+    It '-InPlace runs the script itself with -File, quoted, followed by the forwarded switches' {
+        Restart-WithElevation -ScriptPath 'C:\Repo Clone\winget-app-uninstall.ps1' -InPlace -AdditionalArguments '-WhatIf', '-SkipSystemCheck'
+
+        $script:launch.ArgumentString | Should -BeExactly '-NoProfile -ExecutionPolicy Bypass -File "C:\Repo Clone\winget-app-uninstall.ps1" -WhatIf -SkipSystemCheck'
+    }
+
+    It 'Accepts only switch names as forwarded arguments, since they become part of a command line' {
+        { Restart-WithElevation -ScriptPath $script:scriptPath -AdditionalArguments '-SkipSystemCheck; Remove-Item C:\' } | Should -Throw
+        Should -Invoke Start-ElevatedProcess -Times 0 -Exactly
+    }
+
+    It 'Returns 4 without starting anything when the command line would be too long for ShellExecuteEx' {
+        $result = Restart-WithElevation -ScriptPath ('C:\' + ('d' * 2100) + '\x.ps1') -InPlace
+
+        $result.Started | Should -BeFalse
+        $result.ExitCode | Should -Be 4
+        Should -Invoke Start-ElevatedProcess -Times 0 -Exactly
+    }
+
+    It 'Clears the PowerShell 7 bootstrap''s relaunch-loop guard before starting the elevated Windows PowerShell' {
+        # The elevated Windows PowerShell enters the bootstrap legitimately; inheriting the guard
+        # would make it stop with exit code 7 ('re-entered itself').
+        $savedGuard = $env:WINGET_APP_SETUP_PS7_BOOTSTRAP
+        $env:WINGET_APP_SETUP_PS7_BOOTSTRAP = '1'
+        try {
+            $script:guardAtLaunch = 'not launched'
+            Mock Start-ElevatedProcess {
+                $script:guardAtLaunch = $env:WINGET_APP_SETUP_PS7_BOOTSTRAP
+                $script:fakeProcess
+            }
+
+            Restart-WithElevation -ScriptPath $script:scriptPath
+
+            $script:guardAtLaunch | Should -BeNullOrEmpty
+        }
+        finally {
+            $env:WINGET_APP_SETUP_PS7_BOOTSTRAP = $savedGuard
         }
     }
 
-    It 'Should forward multiple AdditionalArguments to the elevated relaunch' {
-        Mock Get-Command { return $null } -ParameterFilter { $Name -eq 'wt.exe' }
-        Mock Start-Process { } -ParameterFilter { $FilePath -eq 'pwsh.exe' }
+    It 'Returns 5 when Windows returns no process to wait for' {
+        Mock Start-ElevatedProcess { $null }
 
-        Restart-WithElevation -PowerShellExecutable 'pwsh.exe' -ScriptPath 'C:\script.ps1' -AdditionalArguments @('-WhatIf', '-SkipSystemCheck')
+        $result = Restart-WithElevation -ScriptPath $script:scriptPath
 
-        Should -Invoke Start-Process -Times 1 -ParameterFilter {
-            $FilePath -eq 'pwsh.exe' -and (($ArgumentList -join ' ') -match '-File "C:\\script\.ps1" -WhatIf -SkipSystemCheck')
+        $result.ExitCode | Should -Be 5
+    }
+}
+
+Describe 'Start-ElevatedProcess' {
+    It 'Starts the program through ShellExecuteEx with the runas verb, where a declined prompt surfaces as a Win32Exception' {
+        # Calling the seam would raise a real UAC prompt, so only its shape is pinned here.
+        $definition = ${function:Start-ElevatedProcess}.ToString()
+        $definition | Should -Match '\.UseShellExecute = \$true'
+        $definition | Should -Match ([regex]::Escape(".Verb = 'runas'"))
+        $definition | Should -Match ([regex]::Escape('[System.Diagnostics.Process]::Start($startInfo)'))
+    }
+}
+
+Describe 'Get-WindowsPowerShellPath and Get-ElevatedCopyRoot' {
+    BeforeEach {
+        $script:savedSystemRoot = $env:SystemRoot
+        $script:savedWindir = $env:windir
+    }
+
+    AfterEach {
+        $env:SystemRoot = $script:savedSystemRoot
+        $env:windir = $script:savedWindir
+    }
+
+    It 'Builds both under %SystemRoot%' {
+        $env:SystemRoot = 'D:\WINDOWS\'
+
+        Get-WindowsPowerShellPath | Should -BeExactly 'D:\WINDOWS\System32\WindowsPowerShell\v1.0\powershell.exe'
+        Get-ElevatedCopyRoot | Should -BeExactly 'D:\WINDOWS\Temp'
+    }
+
+    It 'Falls back to %windir%, then C:\Windows' {
+        $env:SystemRoot = $null
+        $env:windir = 'E:\Win'
+        Get-WindowsPowerShellPath | Should -BeExactly 'E:\Win\System32\WindowsPowerShell\v1.0\powershell.exe'
+
+        $env:windir = $null
+        Get-ElevatedCopyRoot | Should -BeExactly 'C:\Windows\Temp'
+    }
+}
+
+Describe 'New-ElevationVerifierCommand (review finding P3-11)' {
+    BeforeAll {
+        $script:sampleSha256 = 'ab' * 32
+        $script:currentPowerShell = (Get-Process -Id $PID).Path
+    }
+
+    It 'Is one line of PowerShell without double quotes, so it survives a quoted command-line argument' {
+        $command = New-ElevationVerifierCommand -ScriptPath 'C:\Users\o''brien\AppData\Local\Temp\winget-app-setup-1\winget-app-install.ps1' -Sha256 $script:sampleSha256 -PowerShellPath 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe' -CopyRoot 'C:\Windows\Temp' -AdditionalArguments '-SkipSystemCheck'
+
+        $parseErrors = $null
+        [void][System.Management.Automation.Language.Parser]::ParseInput($command, [ref]$null, [ref]$parseErrors)
+        $parseErrors | Should -BeNullOrEmpty
+        $command | Should -Not -Match '["\r\n]'
+        # Paths are single-quoted literals with quotes doubled; the hash is compared upper-case.
+        $command | Should -Match ([regex]::Escape("ReadAllBytes('C:\Users\o''brien\AppData\Local\Temp\winget-app-setup-1\winget-app-install.ps1')"))
+        $command | Should -Match ([regex]::Escape("-ne '$($script:sampleSha256.ToUpperInvariant())'"))
+        $command | Should -Match ([regex]::Escape('-File $copy -SkipSystemCheck;'))
+    }
+
+    It 'Replaces each placeholder once, so placeholder-like text in a path stays as it is' {
+        $command = New-ElevationVerifierCommand -ScriptPath 'C:\x\@SHA256@\@NAME@.ps1' -Sha256 $script:sampleSha256 -PowerShellPath 'p' -CopyRoot 'r'
+
+        $command | Should -Match ([regex]::Escape("ReadAllBytes('C:\x\@SHA256@\@NAME@.ps1')"))
+        $command | Should -Not -Match '@(SOURCE|COPYROOT|POWERSHELL|ARGUMENTS)@'
+    }
+
+    It 'Leaves room for a MAX_PATH script path within ShellExecuteEx''s command-line limit' {
+        $longPath = 'C:\' + ('p' * 240) + '\winget-app-install.ps1'
+        $command = New-ElevationVerifierCommand -ScriptPath $longPath -Sha256 $script:sampleSha256 -PowerShellPath 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe' -CopyRoot 'C:\Windows\Temp' -AdditionalArguments '-WhatIf', '-SkipSystemCheck'
+
+        ('-NoProfile -Command "' + $command + '"').Length | Should -BeLessOrEqual 2000
+    }
+
+    It 'Does not run the script, and exits 5, when the file no longer has the expected SHA256' {
+        # Real execution in a child PowerShell: the check runs before any of the file does.
+        $markerPath = Join-Path $TestDrive 'ran.txt'
+        $sourcePath = Join-Path $TestDrive 'tampered.ps1'
+        Set-Content -LiteralPath $sourcePath -Value "Set-Content -LiteralPath '$markerPath' -Value 'ran'; exit 0" -Encoding UTF8
+        $copyRoot = Join-Path $TestDrive 'copies'
+        [void](New-Item -ItemType Directory -Path $copyRoot)
+        $command = New-ElevationVerifierCommand -ScriptPath $sourcePath -Sha256 ('0' * 64) -PowerShellPath $script:currentPowerShell -CopyRoot $copyRoot
+
+        $output = & $script:currentPowerShell -NoLogo -NoProfile -NonInteractive -Command $command 2>&1 | Out-String
+        $exitCode = $LASTEXITCODE
+
+        $exitCode | Should -Be 5
+        Test-Path -LiteralPath $markerPath | Should -BeFalse
+        $output | Should -Match 'Did not run tampered\.ps1: the file changed after administrator rights were requested'
+        @(Get-ChildItem -LiteralPath $copyRoot).Count | Should -Be 0
+    }
+
+    It 'Under Windows PowerShell, runs a copy in a new folder only SYSTEM, Administrators and the elevating account can change, forwards the switches, exits with its code and removes the copy' -Skip:(-not $IsWindows) {
+        # Windows only: creating a folder with its access list is .NET Framework only, and the
+        # elevated process is always Windows PowerShell. Not elevated here: the check does not
+        # depend on it, and the access list includes the account that runs it.
+        $windowsPowerShell = Get-WindowsPowerShellPath
+        $resultPath = Join-Path $TestDrive 'result.json'
+        $sourcePath = Join-Path $TestDrive 'source.ps1'
+        $fixture = @'
+param ([switch]$SkipSystemCheck)
+$acl = Get-Acl -LiteralPath (Split-Path -Parent $PSCommandPath)
+$identities = @($acl.Access | ForEach-Object { $_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value })
+@{ Path = $PSCommandPath; SkipSystemCheck = [bool]$SkipSystemCheck; Protected = $acl.AreAccessRulesProtected; Inherited = @($acl.Access | Where-Object { $_.IsInherited }).Count; Identities = $identities } | ConvertTo-Json | Set-Content -LiteralPath '@RESULT@'
+exit 42
+'@
+        Set-Content -LiteralPath $sourcePath -Value $fixture.Replace('@RESULT@', $resultPath) -Encoding UTF8
+        $sha256 = (Get-FileHash -LiteralPath $sourcePath -Algorithm SHA256).Hash
+        $copyRoot = Join-Path $TestDrive 'copies'
+        [void](New-Item -ItemType Directory -Path $copyRoot)
+        $command = New-ElevationVerifierCommand -ScriptPath $sourcePath -Sha256 $sha256 -PowerShellPath $windowsPowerShell -CopyRoot $copyRoot -AdditionalArguments '-SkipSystemCheck'
+
+        & $windowsPowerShell -NoLogo -NoProfile -NonInteractive -Command $command | Out-Null
+        $exitCode = $LASTEXITCODE
+
+        $exitCode | Should -Be 42
+        $result = Get-Content -Raw -LiteralPath $resultPath | ConvertFrom-Json
+        $result.Path | Should -Not -Be $sourcePath
+        $result.Path | Should -BeLike (Join-Path $copyRoot 'winget-app-setup-*\source.ps1')
+        $result.SkipSystemCheck | Should -BeTrue
+        $result.Protected | Should -BeTrue
+        $result.Inherited | Should -Be 0
+        $allowed = @('S-1-5-18', 'S-1-5-32-544', [Security.Principal.WindowsIdentity]::GetCurrent().User.Value)
+        foreach ($identity in @($result.Identities)) {
+            $allowed | Should -Contain $identity
         }
+        @(Get-ChildItem -LiteralPath $copyRoot).Count | Should -Be 0
+    }
+}
+
+Describe 'winget-app-uninstall.ps1 elevation (review findings P2-11, P2-12)' {
+    It 'Relaunches itself in place through Restart-WithElevation and exits with the elevated run''s exit code' {
+        # The real uninstaller, next to a stand-in module (it imports the module from its own
+        # folder), run in a child PowerShell so its exit ends that child.
+        $root = Join-Path $TestDrive 'uninstaller'
+        $moduleRoot = Join-Path $root 'WingetAppSetup'
+        [void](New-Item -ItemType Directory -Path $moduleRoot -Force)
+        Copy-Item -LiteralPath $script:UninstallerScriptPath -Destination $root
+        Set-Content -LiteralPath (Join-Path $moduleRoot 'WingetAppSetup.psd1') -Value "@{ RootModule = 'WingetAppSetup.psm1'; ModuleVersion = '1.0.0'; FunctionsToExport = '*' }"
+        Set-Content -LiteralPath (Join-Path $moduleRoot 'WingetAppSetup.psm1') -Value @'
+function Test-IsAdmin { $false }
+function Write-ErrorMessage { param ([string]$Message) Write-Host "ERROR: $Message" }
+function Write-Success { param ([string]$Message) Write-Host "SUCCESS: $Message" }
+function Write-Info { param ([string]$Message) Write-Host "INFO: $Message" }
+function Get-DefaultAppCatalog { Write-Host 'UNINSTALL RAN'; @() }
+function Restart-WithElevation {
+    param ([string]$ScriptPath, [string[]]$AdditionalArguments, [string]$ExpectedSha256, [switch]$InPlace, [switch]$NonInteractive)
+    Write-Host "RELAUNCH InPlace=$([bool]$InPlace) Path=$ScriptPath"
+    [pscustomobject]@{ Started = $true; ExitCode = 42 }
+}
+'@
+        $uninstallerCopy = Join-Path $root 'winget-app-uninstall.ps1'
+
+        $output = & (Get-Process -Id $PID).Path -NoLogo -NoProfile -NonInteractive -File $uninstallerCopy 2>&1 | Out-String
+        $exitCode = $LASTEXITCODE
+
+        $exitCode | Should -Be 42
+        $output | Should -Match ([regex]::Escape("RELAUNCH InPlace=True Path=$uninstallerCopy"))
+        $output | Should -Not -Match 'UNINSTALL RAN'
     }
 }
 

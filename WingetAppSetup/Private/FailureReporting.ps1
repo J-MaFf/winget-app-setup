@@ -31,7 +31,8 @@
     The caller's -NonInteractive switch: no key press is awaited.
 .PARAMETER OutcomeShown
     The run already showed its outcome and waited for a key press (Invoke-WingetInstall's summary
-    and final prompt, or a PowerShell 7 run the bootstrap relaunched), so exit without the notice.
+    and final prompt, a PowerShell 7 run the bootstrap relaunched, or the elevated run of a run that
+    relaunched itself elevated), so exit without the notice.
 #>
 function Exit-Installer {
     param (
@@ -101,9 +102,10 @@ function Write-InstallerExitNotice {
     $why = $Reason
     if (-not $why) {
         switch ($Code) {
-            1 { $why = 'administrator rights were not available or a pre-flight check failed (see above)' }
+            1 { $why = 'a pre-flight check failed (see above)' }
             2 { $why = 'winget is not available or could not be started (see above)' }
             3 { $why = 'the app catalog failed validation (see above)' }
+            4 { $why = 'administrator rights are required, and this run was not elevated (see above)' }
             5 { $why = 'the run was aborted before it finished (see above)' }
             7 { $why = 'PowerShell 7 could not be installed, or the installer could not be relaunched under it (see above)' }
         }

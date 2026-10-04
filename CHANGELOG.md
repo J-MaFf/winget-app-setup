@@ -174,6 +174,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A run that is not elevated now waits for the elevated run it starts and exits with its exit code,
+  never shows a UAC prompt when nobody is at the console, and has the elevated window run a checked
+  copy of the installer (review findings P2-11, P2-12, P3-11). New exit code 4: administrator rights
+  are required and the run was not elevated.
+  - **Exit code.** `Invoke-WingetInstall` returned 0 as soon as it had asked for elevation, before
+    anything was installed, so a script or RMM tool saw success whatever the elevated window did.
+    `Restart-WithElevation` now starts the elevated process with `Process.Start` (ShellExecuteEx,
+    `runas`), waits for it and returns `@{ Started; ExitCode }`, and the run that asked exits with
+    the elevated run's code. The elevated window has already shown its summary (or why it stopped)
+    and waited for a key press, so the first window adds no second notice.
+  - **No unattended prompt.** A non-interactive run (`-NonInteractive`, a non-interactive session,
+    or redirected input) that is not elevated now exits 4 without a UAC prompt; it used to leave a
+    prompt on the signed-in user's desktop and exit 0 within seconds. `Restart-WithElevation` itself
+    refuses to prompt in a non-interactive session too, for its other caller.
+  - **Declined prompt.** A declined UAC prompt (Win32 error 1223, `ERROR_CANCELLED`, read from the
+    exception rather than its translated message) now exits 4 after one prompt; the Windows
+    Terminal branch used to retry with a second prompt. The irm | iex and imported-module cases,
+    which cannot relaunch, also exit 4 instead of 1.
+  - **Relaunch host.** The elevated window is always System32's `powershell.exe`, which every
+    account has. It used to be `wt.exe` (resolved through the signed-in user's app aliases) running
+    a bare `pwsh.exe`, or a bare `pwsh.exe` as the fallback: with cross-user elevation and
+    PowerShell 7 installed as the signed-in user's per-user MSIX, the admin account resolves
+    neither, so the elevated window failed to start while the first window had already exited 0.
+    The installer's Windows PowerShell 5.1 dispatch now finds or installs PowerShell 7 as the
+    elevating account and runs under it in the same elevated window. The Windows Terminal relaunch
+    is gone.
+  - **Checked copy.** The elevated process used to run `-File <path>` on the first window's file,
+    which on the Windows PowerShell 5.1 one-liner is a copy in the signed-in user's `%TEMP%`: that
+    user, or malware running as them, could rewrite it while the UAC prompt was up. The entry
+    script now takes the file's SHA256 at startup. Before elevating, `Restart-WithElevation` reads
+    the file once, checks it against that hash and stages those bytes in the account's own
+    `%TEMP%`, which administrators can read even when the elevating account cannot see the original
+    (drive mappings belong to the signed-in session; a share may be out of its reach), and removes
+    them once the elevated run has ended. The elevated process runs a short command given on its own
+    command line (`New-ElevationVerifierCommand`) that reads the staged file once, compares its
+    SHA256, writes those bytes into a new folder under `%SystemRoot%\Temp` with its own access list
+    (SYSTEM, Administrators and the elevating account, nothing inherited) and runs that copy. A file
+    that changed since startup is not run (exit code 5). The check cannot live in the
+    file itself, since a replaced file would not contain it, and the copy has to be made by the
+    elevated process: a non-elevated process cannot create a folder that it cannot change itself.
+    Same-account elevation (Admin Approval Mode) is not a security boundary, so this protects the
+    cross-user case.
+  - **Uninstaller.** `winget-app-uninstall.ps1` gets the same relaunch (System32 Windows PowerShell,
+    waits, exits with the elevated run's code, 4 when declined or non-interactive). It runs its own
+    file in place (`Restart-WithElevation -InPlace`), because it imports the module from its folder.
+  - The readme's exit-code table also gains code 7 (the PowerShell 7 bootstrap failed), which the
+    installer has returned since the bootstrap hardening but the table still listed under 1.
+
 - An install that hits another installation in progress now waits for it instead of failing at
   once, a run that needs a restart to finish says so and exits 3010, and winget's exit codes are
   named everywhere they are printed (review findings P2-15, P3-16):

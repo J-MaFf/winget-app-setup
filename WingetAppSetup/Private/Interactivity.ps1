@@ -6,8 +6,9 @@
     issue #230 this gates no prompt — there are none left — only the things that still depend on a
     human being present: whether Invoke-WingetInstall opens the summary grid view and holds the
     window with "press any key to exit", whether Write-InstallerExitNotice holds it the same way
-    before an early exit (review finding P2-14), and whether the entry script forces an exit code
-    after an abort.
+    before an early exit (review finding P2-14), whether the entry script forces an exit code
+    after an abort, and whether a run that is not elevated may show a UAC prompt at all
+    (Invoke-WingetInstall and Restart-WithElevation return 4 instead; review finding P2-12).
 
     Note what it deliberately does NOT catch: an interactive `irm <url> | iex` reports INTERACTIVE
     here, because the pipe is a PowerShell-internal pipeline and leaves the process's stdin alone.

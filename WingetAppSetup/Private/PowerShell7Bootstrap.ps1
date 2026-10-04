@@ -672,8 +672,9 @@ function Get-PowerShell7RelaunchInstaller {
     the OUTER command line, not the piped script body (verified empirically) - so the installer is
     downloaded again to a temp file, from raw.githubusercontent.com or else its jsDelivr mirror, and
     only a copy of the running build is used (Get-PowerShell7RelaunchInstaller, review finding
-    P2-18). That temp file is deliberately not cleaned up: a non-admin relaunch self-elevates by
-    spawning a third process from the same path, which can outlive this one.
+    P2-18). That temp file is not cleaned up. A non-admin relaunch elevates from it: the elevated
+    window checks it against the SHA256 the relaunched run took at startup and runs a copy kept in
+    a folder only administrators can change (Restart-WithElevation, review finding P3-11).
 
     There is no aka.ms/install-powershell.ps1 tier behind the MSI any more (review findings P2-17
     and P3-17). That script reads the same metadata.json and downloads the same MSI with no
@@ -893,9 +894,9 @@ function Invoke-PowerShell7Bootstrap {
             # pre-planted or swapped by another same-user process before the relaunch - which
             # matters extra here because the relaunched run may self-elevate from this very path -
             # and concurrent runs would overwrite each other. A fresh GUID-named directory removes
-            # predictability and cross-run collisions; the residual risk (a same-user process
-            # racing the write) is inherent to executing any script from a user-writable location,
-            # and the UAC prompt still names this exact path.
+            # predictability and cross-run collisions. The file stays writable by this user, so an
+            # elevated relaunch never runs it directly: it runs a copy checked against the SHA256
+            # the relaunched run took at startup (Restart-WithElevation, review finding P3-11).
             $relaunchDirectory = Join-Path ([System.IO.Path]::GetTempPath()) ('winget-app-setup-' + [System.Guid]::NewGuid().ToString('N'))
             [void](New-Item -Path $relaunchDirectory -ItemType Directory -Force -ErrorAction Stop)
             $relaunchPath = Join-Path $relaunchDirectory 'winget-app-install.ps1'

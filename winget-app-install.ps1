@@ -59,12 +59,12 @@ param (
 # This script is assembled from the WingetAppSetup module by build/Build-WingetInstallScript.ps1.
 # Edit the function source under WingetAppSetup/Public and WingetAppSetup/Private, then re-run the
 # build to regenerate this file. See readme.md ("Project layout") for details.
-# Build id: 1.0.0+bf3497d7 (module version + SHA256 fragment of this whole script; issue #189).
+# Build id: 1.0.0+909ddc8c (module version + SHA256 fragment of this whole script; issue #189).
 # ------------------------------------------------------------------------------------------------
 
 # Content-derived build identity, logged at startup so a transcript from a remote machine
 # identifies exactly which installer build produced it (issue #189).
-$script:InstallerBuildId = '1.0.0+bf3497d7'
+$script:InstallerBuildId = '1.0.0+909ddc8c'
 
 # ------------------------------------------------Functions------------------------------------------------
 
@@ -207,7 +207,210 @@ function Get-CurrentWindowsPrincipal {
 }
 
 # Restart-WithElevation lives in Public/Elevation.ps1 (issue #190): it is exported so
-# winget-app-uninstall.ps1 can reuse it instead of hand-rolling its own relaunch.
+# winget-app-uninstall.ps1 can reuse it instead of hand-rolling its own relaunch. The helpers below
+# are its parts. Restart-WithElevation also runs under Windows PowerShell 5.1 (the uninstaller can
+# be started from it), so they stay 5.1-runtime compatible.
+
+<#
+.SYNOPSIS
+    Returns the Windows directory (%SystemRoot%, normally C:\Windows), without a trailing backslash.
+.DESCRIPTION
+    Falls back to %windir%, then C:\Windows, so it never returns an empty path (off Windows in
+    tests, or in a process started with an emptied environment).
+.RETURNS
+    [string]
+#>
+function Get-WindowsDirectoryPath {
+    $windowsDirectory = $env:SystemRoot
+    if (-not $windowsDirectory) {
+        $windowsDirectory = $env:windir
+    }
+    if (-not $windowsDirectory) {
+        $windowsDirectory = 'C:\Windows'
+    }
+    return $windowsDirectory.TrimEnd('\')
+}
+
+<#
+.SYNOPSIS
+    Returns the path of Windows PowerShell (System32\WindowsPowerShell\v1.0\powershell.exe).
+.DESCRIPTION
+    Review finding P2-11. The elevated relaunch has to start a program that every account can run.
+    It used to start 'wt.exe' or a bare 'pwsh.exe', which resolve through the invoking user's PATH
+    and per-user app execution aliases (%LOCALAPPDATA%\Microsoft\WindowsApps). A separate admin
+    account that elevates has neither when PowerShell 7 or Windows Terminal is a per-user MSIX of
+    the end user, so the elevated window failed to start and nothing was installed. Windows
+    PowerShell ships with Windows at this path for every account; the installer re-enters its
+    Windows PowerShell 5.1 dispatch there and finds or installs PowerShell 7 as the elevating
+    account. Built by string concatenation, not Join-Path, which off Windows rejects a C: path.
+.RETURNS
+    [string] The full path of powershell.exe.
+#>
+function Get-WindowsPowerShellPath {
+    return (Get-WindowsDirectoryPath) + '\System32\WindowsPowerShell\v1.0\powershell.exe'
+}
+
+<#
+.SYNOPSIS
+    Returns the folder under which the elevated relaunch copies the installer: %SystemRoot%\Temp.
+.DESCRIPTION
+    Review finding P3-11. The elevated process copies the installer, after checking it, into a new
+    folder here whose access list it sets itself. Standard users can create entries in this folder
+    but cannot list it, rename or delete what another account created in it, so an account that is
+    not an administrator cannot reach the copy. A folder under the end user's %TEMP% would not do:
+    that user can rename anything in it. A function so tests can point it elsewhere.
+.RETURNS
+    [string]
+#>
+function Get-ElevatedCopyRoot {
+    return (Get-WindowsDirectoryPath) + '\Temp'
+}
+
+<#
+.SYNOPSIS
+    Builds the command the elevated Windows PowerShell runs to check a script, copy it into a folder
+    only administrators can change, and run the copy.
+.DESCRIPTION
+    Review finding P3-11. The non-elevated run used to relaunch `-File <its own path>` elevated. On
+    the Windows PowerShell 5.1 one-liner that path is a copy in the end user's %TEMP%, which that
+    user (or malware running as them) can rewrite while the UAC prompt is up, so the administrator
+    who approves it would run whatever the file holds by then.
+
+    A check inside the script itself would not help: whatever replaced the file would not contain
+    it. The check has to run before any of the file does, so it is this command, given on the
+    elevated process's command line (-Command), which the non-elevated run builds and the file
+    cannot change. It:
+      1. reads the file's bytes once and compares their SHA256 with the one the non-elevated run
+         computed, and stops (exit code 5) when they differ;
+      2. creates a new folder under -CopyRoot with an access list of its own (SYSTEM,
+         Administrators and the elevating account, no inherited entries) and writes those same
+         bytes into it;
+      3. runs that copy with Windows PowerShell -File, in the same window, forwarding the
+         arguments, and exits with its exit code;
+      4. deletes the folder.
+    The copy has to be made by the elevated process: a non-elevated process cannot create a folder
+    that it cannot change itself, because it would own the folder and keep the right to change its
+    access list.
+
+    On failure it prints why and waits for Enter, since this window closes when it exits; the
+    elevated relaunch only happens when someone is at the console.
+
+    One line, single quotes only: it is passed in double quotes on the command line, and
+    ShellExecuteEx limits that command line to about 2048 characters. It always runs under Windows
+    PowerShell 5.1 (Directory.CreateDirectory with a DirectorySecurity is .NET Framework only).
+.PARAMETER ScriptPath
+    The script to check and run.
+.PARAMETER Sha256
+    The SHA256 (hex) the script must have.
+.PARAMETER PowerShellPath
+    The Windows PowerShell that runs the copy.
+.PARAMETER CopyRoot
+    The folder the per-run copy folder is created in (Get-ElevatedCopyRoot).
+.PARAMETER AdditionalArguments
+    Switches forwarded to the script, for example '-SkipSystemCheck'.
+.RETURNS
+    [string] The PowerShell command text.
+#>
+function New-ElevationVerifierCommand {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$ScriptPath,
+
+        [Parameter(Mandatory = $true)]
+        [ValidatePattern('^[0-9A-Fa-f]{64}$')]
+        [string]$Sha256,
+
+        [Parameter(Mandatory = $true)]
+        [string]$PowerShellPath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$CopyRoot,
+
+        [Parameter(Mandatory = $false)]
+        [ValidatePattern('^-[A-Za-z][A-Za-z0-9]*$')]
+        [string[]]$AdditionalArguments = @()
+    )
+
+    # Each statement ends with ';' or a closing brace, so joining the lines with spaces keeps it valid.
+    $template = @'
+$ErrorActionPreference = 'Stop';
+$exitCode = 5;
+$copyDirectory = $null;
+try {
+    $bytes = [IO.File]::ReadAllBytes(@SOURCE@);
+    $hash = [BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash($bytes)).Replace('-', '');
+    if ($hash -ne @SHA256@) { throw 'the file changed after administrator rights were requested'; }
+    $security = New-Object Security.AccessControl.DirectorySecurity;
+    $security.SetAccessRuleProtection($true, $false);
+    foreach ($sid in @('S-1-5-18', 'S-1-5-32-544', [Security.Principal.WindowsIdentity]::GetCurrent().User.Value)) { $security.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule((New-Object Security.Principal.SecurityIdentifier($sid)), 'FullControl', 'ContainerInherit, ObjectInherit', 'None', 'Allow'))); }
+    $copyDirectory = Join-Path @COPYROOT@ ('winget-app-setup-' + [Guid]::NewGuid().ToString('N'));
+    [void][IO.Directory]::CreateDirectory($copyDirectory, $security);
+    $copy = Join-Path $copyDirectory @NAME@;
+    [IO.File]::WriteAllBytes($copy, $bytes);
+    & @POWERSHELL@ -NoProfile -ExecutionPolicy Bypass -File $copy@ARGUMENTS@;
+    $exitCode = $LASTEXITCODE;
+} catch {
+    Write-Host ('Did not run ' + @NAME@ + ': ' + $_) -ForegroundColor Red;
+    try { [void](Read-Host 'Press Enter to close this window'); } catch { }
+} finally {
+    if ($copyDirectory) { Remove-Item -LiteralPath $copyDirectory -Recurse -Force -ErrorAction SilentlyContinue; }
+}
+exit $exitCode
+'@
+
+    # Single-quoted PowerShell literals: only ' needs escaping, by doubling it. Windows paths
+    # cannot contain the double quote that would end the command-line argument.
+    $quote = { param ([string]$Text) "'" + $Text.Replace("'", "''") + "'" }
+    $forwardedArguments = ''
+    if ($AdditionalArguments.Count -gt 0) {
+        $forwardedArguments = ' ' + ($AdditionalArguments -join ' ')
+    }
+    $values = @{
+        SOURCE     = (& $quote $ScriptPath)
+        SHA256     = (& $quote $Sha256.ToUpperInvariant())
+        COPYROOT   = (& $quote $CopyRoot)
+        NAME       = (& $quote ($ScriptPath -split '[\\/]')[-1])
+        POWERSHELL = (& $quote $PowerShellPath)
+        ARGUMENTS  = $forwardedArguments
+    }
+    $command = (($template -split "`r?`n") | ForEach-Object { $_.Trim() } | Where-Object { $_ }) -join ' '
+    # One pass, so a placeholder-like text inside an inserted path is never replaced again.
+    return [regex]::Replace($command, '@(SOURCE|SHA256|COPYROOT|NAME|POWERSHELL|ARGUMENTS)@', [System.Text.RegularExpressions.MatchEvaluator] { param ($match) $values[$match.Groups[1].Value] })
+}
+
+<#
+.SYNOPSIS
+    Starts a program elevated (ShellExecuteEx with the 'runas' verb) and returns its Process.
+.DESCRIPTION
+    Process.Start rather than Start-Process -Verb RunAs: Start-Process turns a failed launch into an
+    InvalidOperationException that keeps only the translated message, while Process.Start throws
+    the Win32Exception itself, so a declined UAC prompt is recognized by its code (1223,
+    ERROR_CANCELLED) in every display language (review finding P2-12). A separate function so tests
+    can Mock it.
+.PARAMETER FilePath
+    The program.
+.PARAMETER ArgumentString
+    Its command line, without the program name.
+.RETURNS
+    [System.Diagnostics.Process]. Throws when the program could not be started (or the UAC prompt
+    was declined).
+#>
+function Start-ElevatedProcess {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$FilePath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ArgumentString
+    )
+
+    $startInfo = New-Object System.Diagnostics.ProcessStartInfo
+    $startInfo.FileName = $FilePath
+    $startInfo.Arguments = $ArgumentString
+    $startInfo.UseShellExecute = $true
+    $startInfo.Verb = 'runas'
+    return [System.Diagnostics.Process]::Start($startInfo)
+}
 
 # --- FailureReporting ---
 # Failure-reporting helpers (issue #189). Install-WingetPackage returns a rich diagnostic
@@ -243,7 +446,8 @@ function Get-CurrentWindowsPrincipal {
     The caller's -NonInteractive switch: no key press is awaited.
 .PARAMETER OutcomeShown
     The run already showed its outcome and waited for a key press (Invoke-WingetInstall's summary
-    and final prompt, or a PowerShell 7 run the bootstrap relaunched), so exit without the notice.
+    and final prompt, a PowerShell 7 run the bootstrap relaunched, or the elevated run of a run that
+    relaunched itself elevated), so exit without the notice.
 #>
 function Exit-Installer {
     param (
@@ -313,9 +517,10 @@ function Write-InstallerExitNotice {
     $why = $Reason
     if (-not $why) {
         switch ($Code) {
-            1 { $why = 'administrator rights were not available or a pre-flight check failed (see above)' }
+            1 { $why = 'a pre-flight check failed (see above)' }
             2 { $why = 'winget is not available or could not be started (see above)' }
             3 { $why = 'the app catalog failed validation (see above)' }
+            4 { $why = 'administrator rights are required, and this run was not elevated (see above)' }
             5 { $why = 'the run was aborted before it finished (see above)' }
             7 { $why = 'PowerShell 7 could not be installed, or the installer could not be relaunched under it (see above)' }
         }
@@ -1032,8 +1237,9 @@ function Invoke-WingetLaunchCircuitBreaker {
     issue #230 this gates no prompt — there are none left — only the things that still depend on a
     human being present: whether Invoke-WingetInstall opens the summary grid view and holds the
     window with "press any key to exit", whether Write-InstallerExitNotice holds it the same way
-    before an early exit (review finding P2-14), and whether the entry script forces an exit code
-    after an abort.
+    before an early exit (review finding P2-14), whether the entry script forces an exit code
+    after an abort, and whether a run that is not elevated may show a UAC prompt at all
+    (Invoke-WingetInstall and Restart-WithElevation return 4 instead; review finding P2-12).
 
     Note what it deliberately does NOT catch: an interactive `irm <url> | iex` reports INTERACTIVE
     here, because the pipe is a PowerShell-internal pipeline and leaves the process's stdin alone.
@@ -2374,8 +2580,9 @@ function Get-PowerShell7RelaunchInstaller {
     the OUTER command line, not the piped script body (verified empirically) - so the installer is
     downloaded again to a temp file, from raw.githubusercontent.com or else its jsDelivr mirror, and
     only a copy of the running build is used (Get-PowerShell7RelaunchInstaller, review finding
-    P2-18). That temp file is deliberately not cleaned up: a non-admin relaunch self-elevates by
-    spawning a third process from the same path, which can outlive this one.
+    P2-18). That temp file is not cleaned up. A non-admin relaunch elevates from it: the elevated
+    window checks it against the SHA256 the relaunched run took at startup and runs a copy kept in
+    a folder only administrators can change (Restart-WithElevation, review finding P3-11).
 
     There is no aka.ms/install-powershell.ps1 tier behind the MSI any more (review findings P2-17
     and P3-17). That script reads the same metadata.json and downloads the same MSI with no
@@ -2595,9 +2802,9 @@ function Invoke-PowerShell7Bootstrap {
             # pre-planted or swapped by another same-user process before the relaunch - which
             # matters extra here because the relaunched run may self-elevate from this very path -
             # and concurrent runs would overwrite each other. A fresh GUID-named directory removes
-            # predictability and cross-run collisions; the residual risk (a same-user process
-            # racing the write) is inherent to executing any script from a user-writable location,
-            # and the UAC prompt still names this exact path.
+            # predictability and cross-run collisions. The file stays writable by this user, so an
+            # elevated relaunch never runs it directly: it runs a copy checked against the SHA256
+            # the relaunched run took at startup (Restart-WithElevation, review finding P3-11).
             $relaunchDirectory = Join-Path ([System.IO.Path]::GetTempPath()) ('winget-app-setup-' + [System.Guid]::NewGuid().ToString('N'))
             [void](New-Item -Path $relaunchDirectory -ItemType Directory -Force -ErrorAction Stop)
             $relaunchPath = Join-Path $relaunchDirectory 'winget-app-install.ps1'
@@ -5146,77 +5353,166 @@ function Test-IsAdmin {
 
 <#
 .SYNOPSIS
-    Relaunches the script with elevated privileges, preferring Windows Terminal when available.
+    Runs the script again in an elevated Windows PowerShell window, waits for it, and returns its
+    exit code.
 .DESCRIPTION
-    Attempts to restart the current script in an elevated session. When Windows Terminal is installed,
-    the script is relaunched inside an elevated Windows Terminal tab running the specified PowerShell
-    executable. If Windows Terminal is unavailable or fails to start, the function falls back to the
-    standard Start-Process call for the provided PowerShell executable.
-.PARAMETER PowerShellExecutable
-    The PowerShell executable to use when relaunching (for example, pwsh.exe or powershell.exe).
+    Review findings P2-11, P2-12 and P3-11. Asks for administrator rights (the UAC prompt) and starts
+    Windows PowerShell (Get-WindowsPowerShellPath) elevated in a new window, waits for it to finish
+    and returns its exit code, so the run that asked reports what the elevated run did.
+
+    The elevated program is always System32's powershell.exe, which every account has. A bare
+    pwsh.exe or wt.exe resolved through the invoking user's PATH and per-user app aliases, which a
+    separate admin account that elevates does not have, so the elevated window could fail to start
+    while the run that asked had already exited 0. The installer's Windows PowerShell 5.1 dispatch
+    then finds or installs PowerShell 7 as the elevating account and runs under it in the same
+    elevated window. There is no Windows Terminal relaunch any more: it could not report an exit
+    code either.
+
+    By default the elevated process does not run ScriptPath itself. This function reads the file
+    once, checks it against -ExpectedSha256 and stages those bytes in this account's %TEMP%, which
+    the elevating account can read even when it cannot see ScriptPath (a mapped drive, a share).
+    The elevated process runs a short check given on its command line (New-ElevationVerifierCommand)
+    that compares the staged file with the SHA256 computed here, copies it into a folder only
+    administrators can change and runs that copy, so a file rewritten in a user-writable folder (the
+    bootstrap's copy in %TEMP%, a clone in Downloads, the staged copy) while the UAC prompt is up is
+    not run with administrator rights. The staged copy is removed once the elevated run has ended.
+    -InPlace runs ScriptPath directly, for a script that needs the files next to it
+    (winget-app-uninstall.ps1 imports the module from its own folder).
+
+    Never asks when nobody is at the console (Test-EffectiveNonInteractive): an unattended run would
+    leave a UAC prompt on someone's desktop and report nothing. A declined UAC prompt (Win32 error
+    1223, ERROR_CANCELLED) is reported once, with no second prompt.
 .PARAMETER ScriptPath
-    The full path to the script that should be relaunched.
-.PARAMETER WindowsTerminalExecutable
-    Optional explicit path to the Windows Terminal executable (wt.exe). When not supplied, the
-    function attempts to discover it automatically.
+    The full path of the script to run elevated.
 .PARAMETER AdditionalArguments
-    Optional switches/arguments to forward to the elevated relaunch (for example, '-WhatIf'). These
-    are appended after the -File argument so the elevated session inherits the caller's intent.
+    Switches forwarded to the elevated run (for example '-SkipSystemCheck'), appended after the
+    script path so the elevated run inherits the caller's intent. Only switch names are accepted:
+    they become part of a command line.
+.PARAMETER ExpectedSha256
+    The script's SHA256 when this run started (the generated installer computes it at startup). When
+    the file no longer has it, nothing is started. Empty: the hash is taken now.
+.PARAMETER InPlace
+    Run ScriptPath itself instead of a checked copy.
+.PARAMETER NonInteractive
+    The caller's -NonInteractive switch.
 .RETURNS
-    [string] Returns 'WindowsTerminal' when the Windows Terminal relaunch path succeeds,
-    'PowerShell' when the plain PowerShell relaunch starts, and $null when neither could be started
-    (e.g. the UAC prompt was declined).
+    [pscustomobject] @{ Started; ExitCode }. Started is $true when an elevated run started, and
+    ExitCode is then its exit code. Otherwise ExitCode is 4 (no UAC prompt in a non-interactive run,
+    the prompt was declined, or the elevated process could not be started) or 5 (the script could
+    not be read, or changed since the run started).
 #>
 function Restart-WithElevation {
+    [OutputType([pscustomobject])]
     param (
-        [Parameter(Mandatory = $true)]
-        [string]$PowerShellExecutable,
-
         [Parameter(Mandatory = $true)]
         [string]$ScriptPath,
 
         [Parameter(Mandatory = $false)]
-        [string]$WindowsTerminalExecutable,
+        [ValidatePattern('^-[A-Za-z][A-Za-z0-9]*$')]
+        [string[]]$AdditionalArguments = @(),
 
         [Parameter(Mandatory = $false)]
-        [string[]]$AdditionalArguments = @()
+        [string]$ExpectedSha256,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$InPlace,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$NonInteractive
     )
 
-    $quotedScriptPath = '"' + $ScriptPath.Replace('"', '`"') + '"'
-    $commandArguments = "-NoProfile -ExecutionPolicy Bypass -File $quotedScriptPath"
-    if ($AdditionalArguments.Count -gt 0) {
-        $commandArguments += ' ' + ($AdditionalArguments -join ' ')
-    }
-    $windowsTerminalPath = $WindowsTerminalExecutable
-
-    if (-not $windowsTerminalPath) {
-        $wtCommand = Get-Command -Name 'wt.exe' -ErrorAction SilentlyContinue
-        if ($wtCommand) {
-            $windowsTerminalPath = $wtCommand.Source
-        }
+    if (Test-EffectiveNonInteractive -NonInteractive:$NonInteractive) {
+        Write-ErrorMessage 'Administrator rights are required, and this run is non-interactive, so there is nobody to approve a UAC prompt and none was shown. Run it from an elevated session, or as SYSTEM.'
+        return [pscustomobject]@{ Started = $false; ExitCode = 4 }
     }
 
-    if ($windowsTerminalPath) {
-        Write-Info 'Attempting to relaunch script in Windows Terminal with elevated privileges...'
+    $powerShellPath = Get-WindowsPowerShellPath
+    $stagingDirectory = $null
+    if ($InPlace) {
+        $argumentString = ConvertTo-ProcessArgumentString -ArgumentList (@('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $ScriptPath) + $AdditionalArguments)
+    }
+    else {
+        # Read once: the hash and the staged copy below are both of these bytes.
         try {
-            Start-Process $windowsTerminalPath -ArgumentList @("$PowerShellExecutable $commandArguments") -Verb RunAs
-            return 'WindowsTerminal'
+            $bytes = [System.IO.File]::ReadAllBytes($ScriptPath)
         }
         catch {
-            Write-Warning "Failed to start Windows Terminal: $_"
+            Write-ErrorMessage "Could not read $ScriptPath to run it elevated: $($_.Exception.Message)"
+            return [pscustomobject]@{ Started = $false; ExitCode = 5 }
         }
+        $sha256 = [System.BitConverter]::ToString([System.Security.Cryptography.SHA256]::Create().ComputeHash($bytes)).Replace('-', '')
+        if ($ExpectedSha256 -and $sha256 -ne $ExpectedSha256) {
+            Write-ErrorMessage "$ScriptPath changed after this run started, so it is not run with administrator rights. Start it again."
+            return [pscustomobject]@{ Started = $false; ExitCode = 5 }
+        }
+        # Staged in this account's %TEMP%, which administrators can read (review finding P2-11): the
+        # elevated account may not see ScriptPath itself, for example on a mapped drive (drive
+        # mappings belong to the signed-in session) or a share it has no access to. The elevated
+        # process checks the staged copy against the hash all the same.
+        try {
+            $stagingDirectory = Join-Path ([System.IO.Path]::GetTempPath()) ('winget-app-setup-elevate-' + [System.Guid]::NewGuid().ToString('N'))
+            [void](New-Item -ItemType Directory -Path $stagingDirectory -Force -ErrorAction Stop)
+            $stagedPath = Join-Path $stagingDirectory (($ScriptPath -split '[\\/]')[-1])
+            [System.IO.File]::WriteAllBytes($stagedPath, $bytes)
+        }
+        catch {
+            Write-ErrorMessage "Could not copy $ScriptPath to run it elevated: $($_.Exception.Message)"
+            if ($stagingDirectory) {
+                Remove-Item -LiteralPath $stagingDirectory -Recurse -Force -ErrorAction SilentlyContinue
+            }
+            return [pscustomobject]@{ Started = $false; ExitCode = 5 }
+        }
+        $verifierCommand = New-ElevationVerifierCommand -ScriptPath $stagedPath -Sha256 $sha256 -PowerShellPath $powerShellPath -CopyRoot (Get-ElevatedCopyRoot) -AdditionalArguments $AdditionalArguments
+        $argumentString = ConvertTo-ProcessArgumentString -ArgumentList @('-NoProfile', '-Command', $verifierCommand)
     }
 
-    Write-Info 'Relaunching script in standard PowerShell window with elevated privileges...'
     try {
-        Start-Process $PowerShellExecutable -ArgumentList $commandArguments -Verb RunAs -ErrorAction Stop
-        return 'PowerShell'
+        # ShellExecuteEx, which starts an elevated process, accepts a command line of about 2048
+        # characters; a longer one would not start or would arrive cut off.
+        if ($argumentString.Length -gt 2000) {
+            Write-ErrorMessage "The path $ScriptPath is too long to start it elevated. Move it to a shorter path, or start it from an elevated session."
+            return [pscustomobject]@{ Started = $false; ExitCode = 4 }
+        }
+
+        # The PowerShell 7 bootstrap's relaunch-loop guard (Invoke-PowerShell7Bootstrap) is set in
+        # this process's environment. The elevated Windows PowerShell legitimately enters that
+        # bootstrap, so it must not inherit the guard, however Windows builds an elevated process's
+        # environment.
+        Remove-Item -Path Env:\WINGET_APP_SETUP_PS7_BOOTSTRAP -ErrorAction SilentlyContinue
+
+        Write-Info 'Approve the administrator (UAC) prompt. The run continues in a new, elevated Windows PowerShell window, and this window waits for it to finish.'
+        $process = $null
+        try {
+            $process = Start-ElevatedProcess -FilePath $powerShellPath -ArgumentString $argumentString
+        }
+        catch {
+            if ((Get-NativeErrorCode -Exception $_.Exception) -eq 1223) {
+                # ERROR_CANCELLED: the UAC prompt was declined. Reported once; no second prompt.
+                Write-ErrorMessage 'The administrator (UAC) prompt was declined, so no elevated run was started.'
+            }
+            else {
+                Write-ErrorMessage "Could not start an elevated Windows PowerShell ($powerShellPath): $($_.Exception.Message)"
+            }
+            return [pscustomobject]@{ Started = $false; ExitCode = 4 }
+        }
+        if (-not $process) {
+            Write-ErrorMessage 'An elevated Windows PowerShell was requested, but Windows returned no process to wait for, so its outcome is unknown. Check the elevated window and its log.'
+            return [pscustomobject]@{ Started = $true; ExitCode = 5 }
+        }
+
+        # Short waits in a loop rather than one WaitForExit(): Ctrl+C in this window is handled
+        # between statements, never during a blocking .NET call.
+        while (-not $process.WaitForExit(1000)) {
+        }
+        $exitCode = [int]$process.ExitCode
+        Write-Info "The elevated run ended with exit code $exitCode."
+        return [pscustomobject]@{ Started = $true; ExitCode = $exitCode }
     }
-    catch {
-        # Most often a declined UAC prompt ('The operation was canceled by the user'). Callers
-        # treat $null as "no elevated run was started".
-        Write-ErrorMessage "Could not start an elevated PowerShell window: $_"
-        return $null
+    finally {
+        # The elevated process made its own copy, and it has ended (or never started).
+        if ($stagingDirectory) {
+            Remove-Item -LiteralPath $stagingDirectory -Recurse -Force -ErrorAction SilentlyContinue
+        }
     }
 }
 
@@ -5232,7 +5528,9 @@ function Restart-WithElevation {
     Suppresses the interactive extras for unattended runs (RMM, CI, scheduled tasks): the summary
     grid-view window and the final "press any key to exit". Also auto-detected when the session is
     non-interactive or stdin is redirected. No path asks a yes/no question anymore (issue #230), so
-    this switch is not needed to keep a run from blocking on a prompt.
+    this switch is not needed to keep a run from blocking on a prompt. A non-interactive run that is
+    not elevated returns 4 instead of raising a UAC prompt that nobody would answer (review finding
+    P2-12).
 .PARAMETER SkipSystemCheck
     Pass-through of the entry script's -SkipSystemCheck switch. Used only so an elevated relaunch
     inherits the caller's intent to bypass the pre-flight system checks (issue #185); the checks
@@ -5246,16 +5544,18 @@ function Restart-WithElevation {
     script (build/fragments/tail.ps1) exits with the returned code, so every path here can be
     driven from a test and asserted on its result.
 .NOTES
-    Exit codes: 0 = success (also returned right after handing the run to an elevated relaunch),
-    1 = one or more apps failed to install (including the apps marked failed when winget could no
-    longer be launched mid-run), or elevation was declined or is unavailable (irm | iex, or the
-    imported module), 2 = winget unavailable (at the start, where `winget --version` must run and
-    print a version, or no longer launchable at the end of the run), 3 = app-definition validation
-    failed or no valid apps remain, 3010 = success, but a restart is required to finish (an install
+    Exit codes: 0 = success, 1 = one or more apps failed to install (including the apps marked
+    failed when winget could no longer be launched mid-run), 2 = winget unavailable (at the start,
+    where `winget --version` must run and print a version, or no longer launchable at the end of
+    the run), 3 = app-definition validation failed or no valid apps remain, 4 = administrator rights
+    are required and the run was not elevated: the UAC prompt was declined or could not be shown, a
+    non-interactive run (nobody to approve a prompt, so none is shown), irm | iex, or the imported
+    module (review finding P2-12), 3010 = success, but a restart is required to finish (an install
     said so, or Windows gained a pending restart during the run; review finding P3-16). At the end
-    of a run the precedence is 1 > 2 > 3010 > 0 (Get-InstallerExitCode). The generated entry script
-    also exits 1 when a blocking pre-flight check fails (before this function runs) and 5 when the
-    run was aborted by an unexpected error or stopped from outside.
+    of a run the precedence is 1 > 2 > 3010 > 0 (Get-InstallerExitCode). A run that relaunched
+    itself elevated returns the elevated run's exit code (Restart-WithElevation waits for it). The
+    generated entry script also exits 1 when a blocking pre-flight check fails (before this
+    function runs) and 5 when the run was aborted by an unexpected error or stopped from outside.
 #>
 function Invoke-WingetInstall {
     [OutputType([int])]
@@ -5284,9 +5584,6 @@ function Invoke-WingetInstall {
         Write-Host ''
     }
 
-    # Determine which PowerShell executable to use
-    $psExecutable = if (Get-Command pwsh -ErrorAction SilentlyContinue) { 'pwsh.exe' } else { 'powershell.exe' }
-
     # Test-IsAdmin (Public/Elevation.ps1, issue #239) wraps the WindowsPrincipal/IsInRole check
     # behind a mockable command, so tests can drive the non-admin branch below deterministically
     # instead of only when Pester itself happens to run non-elevated. It also fails safe (assumes
@@ -5294,90 +5591,32 @@ function Invoke-WingetInstall {
     # the right one for this call site specifically.
     $isAdmin = Test-IsAdmin
 
-    # Trigger the winget source's per-user first-use bootstrap in the user context before elevating.
-    # Agreements are per-user and won't carry into the elevated process. Scoped to --name winget —
-    # the only source this tool installs from — so it never triggers msstore's agreement/first-use
-    # handshake, which fails in non-interactive/cross-user contexts (issue #172).
-    #
-    # --disable-interactivity (issue #230): this used to run bare, on purpose, to surface winget's
-    # agreement prompt "while we still have the normal user's identity" - and -Wait meant an
-    # unattended run sat on that prompt forever. It was never load-bearing: the exit code is
-    # discarded (no -PassThru), so nothing here could act on the answer either way. The agreement
-    # is accepted where it actually counts - every install passes --accept-source-agreements, and
-    # the elevated Initialize-WingetSourcesForUser below re-probes and bootstraps the installing
-    # account via Repair-WinGetPackageManager (issue #159).
-    #
-    # Reuses Invoke-WingetSourceProbe (WingetBootstrap.ps1) rather than calling Start-Process
-    # directly: it runs this exact command already wrapped in a timeout guard, which this
-    # pre-elevation call was missing entirely. A bare `-Wait` here could block the whole run
-    # forever on a corrupted/unreachable source, before elevation and before any of the
-    # timeout-guarded checks later in the pipeline ever ran. Capped at 30s (well under the probe's
-    # own 120s default) rather than the full default: the return value is discarded — this call
-    # remains best-effort, same as before — and Initialize-WingetSourcesForUser re-probes for real
-    # after elevation, so nothing here needs the generous timeout that call actually depends on.
-    if (-not $isAdmin -and (Test-IsRunningLocally)) {
-        if ($WhatIf) {
-            Write-Info '[DRY-RUN] Would run winget source update --name winget to bootstrap the source in user context'
-        }
-        else {
-            Write-Info 'Updating the winget source...'
-            [void](Invoke-WingetSourceProbe -TimeoutSeconds 30)
-        }
-    }
-
     # Check if the script is run as administrator. The $WhatIf gate is checked once here, for
     # both execution contexts below, rather than duplicated per-branch: a dry run makes no system
     # changes, so it never needs elevation or an elevation-required exit — only which preview
-    # message to print depends on how this script is being run.
+    # message to print depends on how this script is being run. Every run that cannot go on without
+    # administrator rights returns 4 (review finding P2-12).
     If (-NOT $isAdmin) {
         if ($WhatIf) {
-            if (Test-IsRunningLocally) {
+            if (-not (Test-IsRunningLocally)) {
+                # IEX/remote execution has no local script path to relaunch from, but that's
+                # irrelevant to a preview: same rationale as the local-file case below.
+                Write-Info '[DRY-RUN] Would require administrator privileges for a real run (auto-elevation is unavailable when running through IEX/remote execution). Continuing the preview in the current (non-elevated) session; no system changes will be made.'
+            }
+            elseif ($effectiveNonInteractive) {
+                # A real run stops here with 4 (review finding P2-12); the preview says so.
+                Write-Info '[DRY-RUN] A real run would stop here with exit code 4: it needs administrator privileges, and a non-interactive run shows no UAC prompt. Continuing the preview in the current (non-elevated) session; no system changes will be made.'
+            }
+            else {
                 # Relaunching elevated here would (a) be a surprising side effect for a preview
                 # and (b) — if the flag were ever dropped across the elevation boundary —
                 # silently turn a dry run into a real install. Stay in the current session and
                 # continue the preview.
+                Write-Info '[DRY-RUN] Would run winget source update --name winget to bootstrap the source in user context'
                 Write-Info '[DRY-RUN] Would relaunch with administrator privileges. Continuing the preview in the current (non-elevated) session; no system changes will be made.'
             }
-            else {
-                # IEX/remote execution has no local script path to relaunch from, but that's
-                # irrelevant to a preview: same rationale as the local-file case above.
-                Write-Info '[DRY-RUN] Would require administrator privileges for a real run (auto-elevation is unavailable when running through IEX/remote execution). Continuing the preview in the current (non-elevated) session; no system changes will be made.'
-            }
         }
-        elseif (Test-IsRunningLocally) {
-            # Elevation relaunches $PSCommandPath. When Invoke-WingetInstall comes from the
-            # imported (or dot-sourced) module, that path is WingetAppSetup/Public/Install.ps1 —
-            # a functions-only file — so the elevated window would define a function and exit
-            # without installing anything (issue #185). Fail fast with guidance instead.
-            if (Test-InvokedFromModuleContext -InvocationModule $MyInvocation.MyCommand.Module -CommandPath $PSCommandPath) {
-                Write-ErrorMessage 'Invoke-WingetInstall was invoked from the imported module without elevation; auto-elevation cannot relaunch a module function. Run winget-app-install.ps1, or start from an already-elevated session.'
-                return 1
-            }
-            # No "press Enter to elevate" pause (issue #230): it gated the run on a keystroke
-            # without offering a decision - the relaunch happens either way, and the UAC dialog
-            # the relaunch raises is the actual consent gate. Announce and go.
-            Write-ErrorMessage 'This script requires administrator privileges. Restarting with elevated privileges...'
-            # Relaunch the script with administrator privileges, forwarding the caller's
-            # switches so the elevated session inherits the same intent: -SkipSystemCheck so
-            # the pre-flight checks the caller explicitly bypassed are not re-run in the
-            # elevated session (issue #185); the effective non-interactive state because the
-            # elevated child gets a fresh console and would otherwise re-detect as interactive
-            # and block on prompts; and -WhatIf as a safety net so a dry run could never
-            # escalate into changes (unreachable today — a dry run never relaunches — but
-            # kept so the forwarding stays correct if that ever changes).
-            $elevationArgs = @()
-            if ($WhatIf) { $elevationArgs += '-WhatIf' }
-            if ($effectiveNonInteractive) { $elevationArgs += '-NonInteractive' }
-            if ($SkipSystemCheck) { $elevationArgs += '-SkipSystemCheck' }
-            $relaunchedIn = Restart-WithElevation -PowerShellExecutable $psExecutable -ScriptPath $PSCommandPath -AdditionalArguments $elevationArgs
-            if (-not $relaunchedIn) {
-                Write-ErrorMessage 'Elevation was declined or failed, so nothing was installed. Re-run the installer and approve the administrator (UAC) prompt.'
-                return 1
-            }
-            # The elevated window does the install; this (non-elevated) run is done.
-            return 0
-        }
-        else {
+        elseif (-not (Test-IsRunningLocally)) {
             # IEX/remote execution has no local script path to relaunch from.
             Write-ErrorMessage 'This script requires administrator privileges.'
             Write-ErrorMessage 'Auto-elevation is unavailable when running through IEX/remote execution.'
@@ -5385,7 +5624,71 @@ function Invoke-WingetInstall {
             # No 'Exiting in 5 seconds' sleep any more: the entry script's Exit-Installer prints the
             # log path and build id and, when someone is at the console, waits for a key press
             # before the window closes (review finding P2-14).
-            return 1
+            return 4
+        }
+        elseif (Test-InvokedFromModuleContext -InvocationModule $MyInvocation.MyCommand.Module -CommandPath $PSCommandPath) {
+            # Elevation relaunches $PSCommandPath. When Invoke-WingetInstall comes from the
+            # imported (or dot-sourced) module, that path is WingetAppSetup/Public/Install.ps1 —
+            # a functions-only file — so the elevated window would define a function and exit
+            # without installing anything (issue #185). Fail fast with guidance instead.
+            Write-ErrorMessage 'Invoke-WingetInstall was invoked from the imported module without elevation; auto-elevation cannot relaunch a module function. Run winget-app-install.ps1, or start from an already-elevated session.'
+            return 4
+        }
+        elseif ($effectiveNonInteractive) {
+            # Nobody is there to approve a UAC prompt (review finding P2-12): an RMM job or a
+            # scheduled task running as a standard user used to raise one on the user's desktop and
+            # exit 0 within seconds, with nothing installed.
+            Write-ErrorMessage 'This script requires administrator privileges, and this run is non-interactive, so there is nobody to approve a UAC prompt and none was shown. Run it from an elevated session, or as SYSTEM (for example from an RMM tool).'
+            return 4
+        }
+        else {
+            # Trigger the winget source's per-user first-use bootstrap in the user context before
+            # elevating. Agreements are per-user and won't carry into the elevated process. Scoped
+            # to --name winget — the only source this tool installs from — so it never triggers
+            # msstore's agreement/first-use handshake, which fails in non-interactive/cross-user
+            # contexts (issue #172).
+            #
+            # --disable-interactivity (issue #230): this used to run bare, on purpose, to surface
+            # winget's agreement prompt "while we still have the normal user's identity" - and
+            # -Wait meant an unattended run sat on that prompt forever. It was never load-bearing:
+            # the result is discarded, so nothing here acts on the answer either way. The agreement
+            # is accepted where it actually counts - every install passes
+            # --accept-source-agreements, and the elevated Initialize-WingetSourcesForUser re-probes
+            # and bootstraps the installing account via Repair-WinGetPackageManager (issue #159).
+            #
+            # Invoke-WingetSourceProbe (WingetBootstrap.ps1) wraps this command in a timeout guard,
+            # so a corrupted or unreachable source cannot block the run before elevation. Capped at
+            # 30s (well under the probe's own 120s default): the return value is discarded — this
+            # call remains best-effort — and Initialize-WingetSourcesForUser re-probes for real
+            # after elevation.
+            Write-Info 'Updating the winget source...'
+            [void](Invoke-WingetSourceProbe -TimeoutSeconds 30)
+
+            # No "press Enter to elevate" pause (issue #230): the UAC dialog the relaunch raises is
+            # the actual consent gate.
+            Write-ErrorMessage 'This script requires administrator privileges. Restarting with elevated privileges...'
+            # Forward the caller's switches so the elevated run inherits the same intent:
+            # -SkipSystemCheck so the pre-flight checks the caller explicitly bypassed are not re-run
+            # (issue #185); -WhatIf as a safety net so a dry run could never escalate into changes
+            # (unreachable today — a dry run never relaunches — but kept so the forwarding stays
+            # correct if that ever changes). -NonInteractive is never forwarded: a non-interactive
+            # run returned 4 above.
+            $elevationArgs = @()
+            if ($WhatIf) { $elevationArgs += '-WhatIf' }
+            if ($SkipSystemCheck) { $elevationArgs += '-SkipSystemCheck' }
+            # Waits for the elevated window and returns its exit code (review finding P2-12), and
+            # runs only a checked copy of this file (P3-11): $script:InstallerScriptSha256 is the
+            # file's SHA256 taken by the entry script when this run started.
+            $elevation = Restart-WithElevation -ScriptPath $PSCommandPath -AdditionalArguments $elevationArgs -ExpectedSha256 $script:InstallerScriptSha256
+            if (-not $elevation.Started) {
+                Write-ErrorMessage 'Elevation was declined or failed, so nothing was installed. Re-run the installer and approve the administrator (UAC) prompt.'
+                return [int]$elevation.ExitCode
+            }
+            # The elevated window showed the run's summary, or why it stopped, and waited for a key
+            # press itself: recorded so the entry script exits with this code without a second
+            # notice and key press here.
+            $script:InstallerPendingExitCode = [int]$elevation.ExitCode
+            return [int]$elevation.ExitCode
         }
     }
     else {
@@ -7976,6 +8279,7 @@ if ($MyInvocation.InvocationName -ne '.') {
     $script:InstallerExitRequested = $false
     $script:InstallerPendingExitCode = $null
     $script:InstallLogPath = $null
+    $script:InstallerScriptSha256 = $null
     $installerRunCompleted = $false
 
     if ($PSVersionTable.PSVersion.Major -lt 7) {
@@ -8035,6 +8339,20 @@ if ($MyInvocation.InvocationName -ne '.') {
         # Never reached unless Exit-Installer itself failed: never fall through into the
         # PowerShell-7-only body below.
         exit $bootstrapExitCode
+    }
+
+    # The SHA256 of this file as this run read it, taken before anything else runs (review finding
+    # P3-11). A run that is not elevated relaunches itself elevated, and the elevated window runs
+    # only a copy of this file with this hash, so a file rewritten in the meantime (it may sit in a
+    # user-writable folder, such as the bootstrap's copy in %TEMP%) is not run with administrator
+    # rights. Under irm | iex there is no file and nothing to relaunch.
+    if ($PSCommandPath) {
+        try {
+            $script:InstallerScriptSha256 = (Get-FileHash -LiteralPath $PSCommandPath -Algorithm SHA256 -ErrorAction Stop).Hash
+        }
+        catch {
+            # Restart-WithElevation then hashes the file when it relaunches.
+        }
     }
 
     # Persistent transcript (issue #189); see Start-InstallerTranscript. Logging never blocks an
