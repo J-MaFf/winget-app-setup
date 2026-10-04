@@ -37,6 +37,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The end-to-end install run (`.github/workflows/e2e-install.yml`) now also runs on pull requests
+  that change the product (`WingetAppSetup/**`, `build/**`, `winget-app-install.ps1`), not only on
+  changes to the workflow or `e2e/**`, so a module change gets a real install before it reaches the
+  one-liner on `main` (review finding P2-7). Every pull request starts the workflow, and a `changes`
+  job decides whether to install; if that job does not succeed, the install runs anyway. The filter
+  is a job rather than a `paths:` filter so that `e2e-install` can become a required check: a job
+  skipped by its `if:` reports success, while a workflow skipped by `paths:` reports no status.
+  Dispatched runs now install the checkout instead of raw `main`, so
+  `gh workflow run e2e-install.yml --ref <branch>` tests that branch. Pull-request and dispatched
+  runs pipe the checkout to `iex` in the first pass, like the one-liner, and run it with `pwsh -File`
+  in the second, like a clone or RMM run; before this change, pull-request runs used `-File` for both
+  passes. Only the weekly run still fetches raw `main`. On checkout runs,
+  `e2e/Assert-Install.ps1 -InstallerPath` checks that every pass's transcript logged the checkout's
+  build id. Runs are grouped per ref: a pull-request push can no longer cancel a pending weekly run,
+  and each pull request's run is cancelled by the run for its next push. The `E2E install run failed`
+  issue is filed only for scheduled runs and runs dispatched on `main`.
+- Kept fork pull requests off the self-hosted win-test runner (review finding P2-20).
+  `windows-tests.yml` ran every pull request on that persistent runner, forks included, and the
+  runner runs jobs elevated. The `pester` job now picks its runner on each run. Pushes to `main`,
+  manual dispatch and pull requests from a branch of this repository stay on
+  `[self-hosted, windows]`. Fork pull requests, including those whose fork has been deleted, and any
+  other run go to GitHub-hosted `windows-latest`. The job id is unchanged, so `pester` is still the
+  required check on `main`. A new `hosted` dispatch input runs the `windows-latest` leg on demand. A
+  fork pull request that edits the workflow can still choose its own runner, because a
+  `pull_request` run uses the PR's copy of the file. Closing that gap needs the "Require approval
+  for all external contributors" setting and a job-started hook on the runner that refuses fork
+  pull request jobs.
+- Pinned `claude.yml`'s call to the shared Claude workflow in
+  [J-MaFf/.github](https://github.com/J-MaFf/.github) to a commit SHA (`e5f8b3f4`, `main` as of
+  2026-09-15) instead of `@main` (review finding P3-19). An edit to that workflow file now reaches
+  this repository's write token only after someone reads it and moves the pin. The pin does not
+  cover what that workflow pulls in when it runs: `anthropics/claude-code-action@v1`,
+  `actions/checkout@v7` and the git-policies text it fetches from `J-MaFf/J-MaFf.github.io` at
+  `main` still follow their tags or branch until J-MaFf/.github pins them. `secrets: inherit` also
+  stays, so every repository secret still reaches the shared workflow: that workflow declares no
+  `workflow_call` secrets, and a caller can pass a secret by name only when the callee declares it.
 - `Invoke-WingetInstall` now returns its exit code as an `[int]` instead of calling `exit` itself,
   and the generated entry script exits with the returned code (review finding P3-4 and the exit part
   of P3-5, wgt-gq8.6; P3-5's other part, one helper for the near-duplicate first-pass and retry-pass
@@ -128,6 +164,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The E2E install workflow now reports every failed scheduled run and every failed run dispatched
+  on `main`, with the evidence needed to diagnose it (review findings P2-4, P3-1). The failure issue
+  used to be filed by a step inside the Windows job that ran under PowerShell 7 with
+  `if: failure()`. Run 35566866223 removed PowerShell 7, so that step died with
+  `pwsh: command not found` and the failure was never reported. A job that hits its time limit is
+  cancelled, which `failure()` does not match, so a hung run never filed one either. A separate
+  `report-failure` job on `ubuntu-latest` now works from the uploaded artifacts and creates or
+  comments on `E2E install run failed` when the run fails, times out or is cancelled. The issue
+  lists which installer ran, the steps that did not succeed and how long each ran, the assertion
+  PASS/FAIL table, the last 50 lines of the earliest and latest transcripts, and the diagnostics
+  snapshots; the same text goes to the run's summary page. `issues: write` moved from the whole
+  workflow to that job, so the Windows job that runs the installer no longer holds it. The
+  assertions also run after a failed install pass. The install passes, the assertions and the job
+  have time limits (35, 35, 40 and 130 minutes), so a hung step fails at its own limit and the
+  diagnostics and uploads still run. The new `e2e/Collect-Diagnostics.ps1` runs in Windows
+  PowerShell 5.1 before the first pass, after it and at the end of the job. It records the pwsh
+  versions, the App Installer and `Microsoft.WindowsAppRuntime*` AppX packages registered for any
+  user or provisioned, and the `\WAU\` tasks with their last run; at the end it adds MsiInstaller
+  and RestartManager events, AppX deployment errors and warnings, and Winget-AutoUpdate's logs. It
+  always exits 0, so it never fails the job. The snapshots and the assertion output are uploaded as
+  the `e2e-diagnostics` artifact. Red runs that kept only transcripts were misdiagnosed twice
+  (#279, #283). Covered by `tests/E2EDiagnostics.Tests.ps1`.
 - Failed runs can now be debugged from what the teammate attaches (review findings P2-13, P2-14,
   P3-12, P3-13, P3-14 and P3-15):
   - **Early exits explain themselves.** Every early exit (a failed pre-flight check, winget

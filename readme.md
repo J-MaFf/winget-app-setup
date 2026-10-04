@@ -187,35 +187,66 @@ scheduled-update task from older versions).
 
 ## End-to-end monitoring (e2e tier 1)
 
-The unit suite mocks every external call, so a real install is exercised by a scheduled
-end-to-end run (`.github/workflows/e2e-install.yml`, issue #214) on a GitHub-hosted
-`windows-latest` runner — a throwaway VM by construction:
+The unit suite mocks every external call, so a real install is exercised by an end-to-end run
+(`.github/workflows/e2e-install.yml`, issue #214) on a GitHub-hosted `windows-latest` runner — a
+throwaway VM by construction:
 
-- **When it runs:** weekly (Mondays 06:00 UTC), on manual dispatch, and on pull requests that
-  touch the e2e machinery itself (`.github/workflows/e2e-install.yml`, `e2e/**`) so those
-  changes validate themselves pre-merge.
-- **What it does:** installs the curated catalog twice — scheduled/dispatch runs use the true
-  production path (`irm <raw main URL> | iex`), PR runs use the checkout's
-  `winget-app-install.ps1` — asserting exit 0 both times (the second pass proves idempotence),
-  then runs the shared assertion script `e2e/Assert-Install.ps1 -ExpectAllSkippedOnSecondRun`:
-  every **applicable** `Get-DefaultAppCatalog` app resolves via `winget list` (exit-code
-  classified) — the script evaluates each app's catalog condition on the runner, and
+- **When it runs:** weekly (Mondays 06:00 UTC), on manual dispatch, and on pull requests. Every
+  pull request starts the workflow. A `changes` job lets `e2e-install` run only when the PR
+  touches the product (`WingetAppSetup/**`, `build/**`, `winget-app-install.ps1`) or the e2e
+  machinery (`.github/workflows/e2e-install.yml`, `e2e/**`), and installs anyway if that job does
+  not succeed. The filter is a job rather than a `paths:` filter so that `e2e-install` can be a
+  required check: a job skipped by its `if:` reports success, while a workflow that `paths:`
+  skips reports no status and would block every other PR. `main` is production (the one-liner
+  downloads it directly), so this is the only un-mocked run a product change gets before it
+  reaches users.
+- **What it does:** installs the curated catalog twice and asserts exit 0 both times (the second
+  pass proves idempotence). The weekly run uses the true production path
+  (`irm <raw main URL> | iex`) for both passes. Pull-request and dispatched runs install the
+  checkout (the PR's merge commit, or the dispatched branch). The first pass pipes it to `iex`
+  like the one-liner, and the second runs it with `pwsh -File` like a clone or RMM run, so both
+  entry points get an un-mocked run before a change ships. The run then calls the shared
+  assertion script `e2e/Assert-Install.ps1 -ExpectAllSkippedOnSecondRun`. On checkout runs it
+  adds `-InstallerPath`, which requires every pass's transcript to log that file's build id. The
+  script checks that every **applicable** `Get-DefaultAppCatalog` app resolves via `winget list`
+  (exit-code classified) — the script evaluates each app's catalog condition on the runner, and
   not-applicable apps must instead show their `not applicable` skip line in the latest
-  transcript — the WAU scheduled task exists, the installed WAU version matches `Get-WauPin`,
-  and a transcript with the `Installer build` stamp exists — with every applicable app Skipped
-  on the second pass. The script's `-SkipApps` parameter is an escape hatch for runner-platform
+  transcript — the WAU scheduled task exists and its version matches `Get-WauPin` (on a runner
+  without `Microsoft.WindowsAppRuntime.1.8`, such as `windows-latest`, WAU must instead be absent
+  and the transcript must say `Auto-updates: NOT CONFIGURED`), and a transcript with the
+  `Installer build` stamp exists — with every applicable app Skipped on the second pass. The
+  script's `-SkipApps` parameter is an escape hatch for runner-platform
   incompatibilities only; each use must reference a GitHub issue at the call site. Dell Command
   Update is **no longer skip-listed** there: the catalog's manufacturer condition
   ([#217](https://github.com/J-MaFf/winget-app-setup/issues/217)) gates it in the product
   itself, so the non-Dell runners exercise the gating for real on every run.
-- **Where the transcripts land:** on the runner under `%ProgramData%\winget-app-setup\logs`
-  (the same place as production runs), always uploaded as the `e2e-install-transcripts`
-  artifact on the workflow run.
-- **On failure:** scheduled/dispatched runs (never PR runs) create — or comment on an existing
-  open — GitHub issue titled `E2E install run failed` with the run URL and the last 50
-  transcript lines.
-- **Trigger manually:** `gh workflow run e2e-install.yml`, then watch with
-  `gh run list --workflow e2e-install.yml` / `gh run watch <run-id>`.
+- **Where the evidence lands:** transcripts are written on the runner under
+  `%ProgramData%\winget-app-setup\logs` (the same place as production runs) and always uploaded
+  as the `e2e-install-transcripts` artifact. `e2e/Collect-Diagnostics.ps1` runs in Windows
+  PowerShell 5.1 before the first pass, after it and at the end of the job. It records the pwsh
+  versions, the App Installer and `Microsoft.WindowsAppRuntime*` AppX packages registered for any
+  user or provisioned, and the `\WAU\` tasks with their last run. The end-of-job snapshot adds
+  MsiInstaller and RestartManager events, AppX deployment errors and warnings, and
+  Winget-AutoUpdate's logs. A missing source is noted and the script still exits 0, so it never
+  fails the job. The snapshots, plus the assertion output saved by the assertions step, are
+  always uploaded as the `e2e-diagnostics` artifact.
+- **On failure:** when a scheduled run or a run dispatched on `main` fails, times out or is
+  cancelled, a separate `report-failure` job on `ubuntu-latest` downloads both artifacts. It
+  creates a GitHub issue titled `E2E install run failed`, or comments on an existing open one.
+  The issue lists the run URL, which installer ran, the steps that did not succeed and how long
+  each ran, the assertion PASS/FAIL table, the last 50 lines of the earliest and latest
+  transcripts, and the diagnostics snapshots. The same text goes to the run's summary page. The
+  job runs outside the Windows job, so it still reports a run that lost PowerShell 7 or hit its
+  time limit. Pull-request runs and runs dispatched on another branch never file the issue: they
+  test unmerged code, and their result shows on the PR or the run. The assertions also run after
+  a failed install pass (the idempotence checks only when the second pass ran). Each install pass
+  has a 35-minute limit and the assertions 40 minutes, under the job's 130, so a hung step fails
+  at its own limit while the diagnostics and uploads still run.
+- **Trigger manually:** `gh workflow run e2e-install.yml` tests `main`.
+  `gh workflow run e2e-install.yml --ref <branch>` installs that branch's checkout, so a change
+  can be tested before it merges. The branch must already contain this version of the workflow,
+  because `--ref` also runs that branch's copy of the workflow, and an older copy still installs
+  raw `main`. Watch with `gh run list --workflow e2e-install.yml` / `gh run watch <run-id>`.
 
 Tier 2 ([#215](https://github.com/J-MaFf/winget-app-setup/issues/215)) will reuse
 `e2e/Assert-Install.ps1` for a cross-user elevation run on a snapshot-rollback VM.
@@ -240,9 +271,10 @@ pwsh -File .\build\Build-WingetInstallScript.ps1 -Check
 ```
 
 Run the test suite (one `<Area>.Tests.ps1` per module file under `tests/`, plus
-`EntryPoint.Tests.ps1`, `TestHarness.Tests.ps1` and `BuildGuards.Tests.ps1` for the entry point,
-the suite's own loading rules, and the build guards and pre-commit hook; each loads the module
-directly via `tests/TestHelpers.ps1`):
+`EntryPoint.Tests.ps1`, `TestHarness.Tests.ps1`, `BuildGuards.Tests.ps1` and
+`E2EDiagnostics.Tests.ps1` for the entry point, the suite's own loading rules, the build guards
+and pre-commit hook, and `e2e/Collect-Diagnostics.ps1`; each loads the module directly via
+`tests/TestHelpers.ps1`):
 
 ```powershell
 Invoke-Pester .\tests

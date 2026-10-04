@@ -47,6 +47,14 @@ Installer); the `logs` folder stays readable for standard users after the WAU in
 no longer cut off at 120 columns; the build id covers the whole script; and an issue form asks for
 the exit code, the build and the log, with a privacy note because the repository is public.
 
+The same branch changes CI. Fork pull requests that leave `windows-tests.yml` alone no longer run
+on the self-hosted win-test runner, and `claude.yml` calls the shared Claude workflow at a pinned
+commit SHA instead of `@main`. The E2E workflow files its failure issue from a separate ubuntu job,
+so a run that lost PowerShell 7, timed out or was cancelled is still reported, and it uploads
+diagnostics snapshots next to the transcripts. It now also runs on pull requests that touch the
+product, and pull-request and dispatched runs install the checkout instead of raw `main`, so this
+branch's own E2E run tests its changes before they merge.
+
 In progress: **E2E: App Installer 1.29.290.0 vs 1.26.510.0 AppX conflict, missing
 WindowsAppRuntime.1.8** ([#279](https://github.com/J-MaFf/winget-app-setup/issues/279)) — two
 independent `windows-latest` (Windows Server 2025) E2E runs hit an identical, reproducible AppX
@@ -199,9 +207,20 @@ baseline on Linux (the only failures are pre-existing Windows-only environment l
 CI now runs `build/Build-WingetInstallScript.ps1 -Check` on every push and pull request, so the
 generated `winget-app-install.ps1` can no longer drift from the module (and the installer's
 undefined-reference guard runs automatically) ([#156](https://github.com/J-MaFf/winget-app-setup/issues/156)).
-The Windows CI workflow runs on the self-hosted **win-test** runner (Windows Server 2025,
-pwsh 7.6.3) instead of GitHub-hosted `windows-latest`; the guarded Microsoft.WinGet.Client and
-Pester installs persist across runs there ([#161](https://github.com/J-MaFf/winget-app-setup/issues/161)).
+The Windows CI workflow (job `pester`, the required check on `main`) runs trusted runs on the
+self-hosted **win-test** runner (Windows Server 2025, pwsh 7.6.3). Trusted runs are pushes to
+`main`, manual dispatch, and pull requests from a branch of this repository. The guarded
+Microsoft.WinGet.Client and Pester installs persist across runs there
+([#161](https://github.com/J-MaFf/winget-app-setup/issues/161)). win-test is a persistent machine
+that runs jobs elevated, so pull requests from forks, and any run not listed as trusted, go to
+GitHub-hosted `windows-latest` instead. To run that leg on demand, dispatch the workflow with
+`hosted` ticked. A fork PR that edits `windows-tests.yml` can still pick its own runner, because a
+`pull_request` run uses the PR's copy of the workflow. Closing that gap needs the "Require approval
+for all external contributors" setting (check `.github/` changes before approving a fork run) and a
+job-started hook on the runner that refuses fork PR jobs (see Natural Next Steps). `claude.yml`
+calls the shared Claude workflow in J-MaFf/.github at a pinned commit SHA. The actions and the
+git-policies text that workflow pulls in are not pinned yet, and `secrets: inherit` still passes it
+every repository secret.
 
 ### Components
 
@@ -214,9 +233,11 @@ Pester installs persist across runs there ([#161](https://github.com/J-MaFf/wing
 | `build/fragments/` | `head.ps1` (PSScriptInfo, help, `param`) and `tail.ps1` (entry-point dispatch) |
 | `winget-app-install.ps1` | **Generated** single-file installer for local and `irm \| iex` use — do not edit by hand |
 | `winget-app-uninstall.ps1` | Uninstall helper; imports the module from the repo |
-| `tests/` | Pester suite, one `<Area>.Tests.ps1` per module file plus `EntryPoint.Tests.ps1`, `TestHarness.Tests.ps1` and `BuildGuards.Tests.ps1` (the build guards and the pre-commit hook); `TestHelpers.ps1` loads the module once per file and stands in for Windows-only commands, so the suite also runs on Linux/macOS |
-| `e2e/Assert-Install.ps1` | Shared post-install assertions for end-to-end runs (tier 1 workflow below; tier 2 [#215](https://github.com/J-MaFf/winget-app-setup/issues/215) reuses it) |
-| `.github/workflows/e2e-install.yml` | E2E tier 1: weekly real install run on GitHub-hosted `windows-latest` (issues #279/#282/#283; schedule + dispatch + self-validating PRs; failure auto-files an issue) |
+| `tests/` | Pester suite, one `<Area>.Tests.ps1` per module file plus `EntryPoint.Tests.ps1`, `TestHarness.Tests.ps1`, `BuildGuards.Tests.ps1` (the build guards and the pre-commit hook) and `E2EDiagnostics.Tests.ps1` (for `e2e/Collect-Diagnostics.ps1`); `TestHelpers.ps1` loads the module once per file and stands in for Windows-only commands, so the suite also runs on Linux/macOS |
+| `e2e/Assert-Install.ps1` | Shared post-install assertions for end-to-end runs (tier 1 workflow below; tier 2 [#215](https://github.com/J-MaFf/winget-app-setup/issues/215) reuses it); `-InstallerPath` checks that every pass ran the checkout's build |
+| `e2e/Collect-Diagnostics.ps1` | Windows PowerShell 5.1 snapshots for the E2E run: pwsh versions, App Installer / WindowsAppRuntime AppX state, WAU tasks; at the end MsiInstaller and RestartManager events, AppX deployment errors and warnings, and WAU logs (`e2e-diagnostics` artifact); always exits 0 |
+| `.github/workflows/e2e-install.yml` | E2E tier 1: real install run on GitHub-hosted `windows-latest` (issues #279/#282/#283; weekly against raw `main`, plus dispatches and PRs that touch the product or e2e files against the checkout; uploads transcripts and diagnostics; a failed, timed-out or cancelled weekly or `main`-dispatched run files an issue from the ubuntu `report-failure` job) |
+| `.github/workflows/windows-tests.yml` | Pester suite and build `-Check` (job `pester`, the required check on `main`): self-hosted win-test for pushes, dispatch and same-repo PRs; GitHub-hosted `windows-latest` for fork PRs and `hosted` dispatches |
 | `Test-WindowsTerminalConfiguration.ps1` | Smoke-test validation for the Windows Terminal default-shell configuration. |
 | `readme.md` | Quick-start run instructions (clone-and-run and one-line-run). |
 | `CHANGELOG.md` | Keep a Changelog history. |
@@ -285,7 +306,11 @@ Pester installs persist across runs there ([#161](https://github.com/J-MaFf/wing
 
 - Find a viable runner target for `e2e-install` that avoids #279 (`windows-latest`/Server 2025 AppX deadlock), #282 (`windows-2022` licensing failure), and #283 (uncaught `Start-Process` crash right after WAU install on `windows-latest`) — a `windows-2025`-labeled image (if GitHub offers one distinct from `windows-latest`) or a fixed image-version pin are worth trying next; re-check periodically whether GitHub has fixed the underlying `windows-latest` image.
 - Reproduce #283 on a real Windows VM with `RUN_WAU=YES` to find exactly why the `Start-Process` error inside (or near) `Wait-WingetLaunchable` escapes its try/catch, and consider a defensive top-level try/catch around the whole post-WAU-install block regardless of root cause.
-- Watch the first scheduled e2e install runs (`.github/workflows/e2e-install.yml`, weekly Mondays 06:00 UTC, issue [#214](https://github.com/J-MaFf/winget-app-setup/issues/214)) — a failure auto-creates/comments the `E2E install run failed` issue with the transcript tail.
+- Watch the first scheduled e2e install runs (`.github/workflows/e2e-install.yml`, weekly Mondays 06:00 UTC, issue [#214](https://github.com/J-MaFf/winget-app-setup/issues/214)) — a failed, timed-out or cancelled run creates or comments on the `E2E install run failed` issue with the failing steps, the assertion table, transcript tails and diagnostics snapshots.
+- Make `e2e-install` a required status check for `main` (next to `pester`) once it is green again. Every PR now gets an `e2e-install` status, and a skip counts as passed, so requiring it does not block docs-only PRs. Keep the job id `e2e-install` and give it no `name:`, or the required check stops matching.
+- Dispatch Windows Tests once with `hosted` ticked (`gh workflow run windows-tests.yml -f hosted=true`) to confirm the suite passes on GitHub-hosted `windows-latest`, the runner fork pull requests now use.
+- Before the first fork PR, turn on "Require approval for all external contributors" (Settings > Actions > General) and add a job-started hook on win-test (`ACTIONS_RUNNER_HOOK_JOB_STARTED`) that refuses fork pull request jobs, since a fork PR can rewrite `runs-on` in its copy of `windows-tests.yml`.
+- In [J-MaFf/.github](https://github.com/J-MaFf/.github): pin `anthropics/claude-code-action` and `actions/checkout` in the shared `claude.yml` to commit SHAs, fetch git-policies at a pinned ref, and declare `CLAUDE_CODE_OAUTH_TOKEN` under `on.workflow_call.secrets`. Then move this repository's `claude.yml` pin to that SHA and replace `secrets: inherit` with that one secret.
 - **E2E tier 2** ([#215](https://github.com/J-MaFf/winget-app-setup/issues/215)): cross-user elevation end-to-end run on a snapshot-rollback Proxmox VM, reusing `e2e/Assert-Install.ps1` (the shared assertion script from tier 1).
 - Watch the first Windows CI runs on the self-hosted win-test runner for environment drift — module versions now persist across runs instead of starting from a fresh `windows-latest` image (as of [#161](https://github.com/J-MaFf/winget-app-setup/issues/161)).
 - Validate the dormant DISM MSIX-provisioning path in `Install-PowerShellLatest` end-to-end on a real Windows 10 machine before PowerShell 7.7 GA makes it load-bearing (as of [#166](https://github.com/J-MaFf/winget-app-setup/issues/166)).
