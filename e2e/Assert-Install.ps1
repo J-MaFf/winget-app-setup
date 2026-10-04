@@ -20,18 +20,29 @@
          installed and the latest transcript says 'Auto-updates: NOT CONFIGURED'.
       4. The installed WAU version matches the pin in Get-WauPin (read from the registry via the
          module's private Get-InstalledWauInfo helper, dot-sourced from the checkout).
-      5. A transcript exists under %ProgramData%\winget-app-setup\logs and contains the
-         'Installer build' stamp. With -InstallerPath: EVERY real-run transcript logs the build
-         id stamped into that file, so each install pass provably ran the installer under test.
+    The transcript assertions (5-9) live in e2e/TranscriptAssertions.ps1, fixture-tested in
+    tests/E2EAssertions.Tests.ps1. They read the real-run transcripts under
+    %ProgramData%\winget-app-setup\logs (dry-run '-whatif' transcripts left out) and keep the
+    Windows PowerShell 5.1 '-bootstrap' transcripts apart:
+      5. A transcript exists and the latest one contains the 'Installer build' stamp. With
+         -InstallerPath: EVERY transcript, bootstrap ones included, logs the build id stamped
+         into that file, so each install pass provably ran the installer under test.
       6. Every NOT-applicable app shows its 'Skipping: <name> (not applicable: <reason>)' line
          in the latest transcript; not-applicable apps are excluded from the per-app installed
          checks (2) and the idempotence checks (8).
-      7. Containment: in EVERY real-run transcript, no app outside -SkipApps failed — this is
-         the promise that lets the workflow tolerate installer exit 1 for skip-listed apps.
+      7. Containment: in EVERY real-run transcript, every app still failed at the end of the run
+         is on -SkipApps - this is the promise that lets the workflow tolerate installer exit 1
+         for skip-listed apps. Read from the summary's Failed row and every failure line the
+         retry pass did not recover (the 'Failed to install', 'Retry failed', 'Winget list timed
+         out' and 'Verification timed out' forms), so the #279 bulk failure, which logs no
+         per-app line, is caught too. A transcript with no summary fails: its run stopped early.
       8. With -ExpectAllSkippedOnSecondRun: the LATEST transcript (the second, idempotence-leg
          run) shows every applicable non-skipped catalog app as
          'Skipping: <name> (already installed)' and records no installs and no failures for
          non-skip-listed apps.
+      9. With -ExpectPowerShell7Bootstrap: every pass went through the Windows PowerShell 5.1
+         bootstrap (one bootstrap transcript per real-run transcript), and each bootstrap
+         relaunched the installer under PowerShell 7 and logged how that run ended.
 
     Prints a per-assertion PASS/FAIL table and exits nonzero listing the failures.
 .PARAMETER SkipApps
@@ -47,11 +58,13 @@
     applicable app Skipped and nothing Installed or Failed.
 .PARAMETER InstallerPath
     The installer file the runs were given (e.g. the checkout's winget-app-install.ps1). Each
-    real-run transcript must then log 'Installer build: <id>' with the $script:InstallerBuildId
+    transcript must then log 'Installer build: <id>' with the $script:InstallerBuildId
     stamped into this file, which catches a run that tested some other copy - for example a
-    workflow that fetched raw main while the branch under test changed the module. Limitation: the
-    build id hashes only the module's functions, so a change limited to build/fragments/head.ps1
-    or tail.ps1 keeps the id of the build before it. Default: no build check.
+    workflow that fetched raw main while the branch under test changed the module. Default: no
+    build check.
+.PARAMETER ExpectPowerShell7Bootstrap
+    Enables the bootstrap assertions (9). Pass this when every pass was started from Windows
+    PowerShell 5.1 (the e2e-install-windows-powershell leg).
 .NOTES
     Exit codes: 0 = all assertions passed, 1 = one or more assertions failed (each listed).
 #>
@@ -64,7 +77,10 @@ param (
     [switch]$ExpectAllSkippedOnSecondRun,
 
     [Parameter(Mandatory = $false)]
-    [string]$InstallerPath
+    [string]$InstallerPath,
+
+    [Parameter(Mandatory = $false)]
+    [switch]$ExpectPowerShell7Bootstrap
 )
 
 $ErrorActionPreference = 'Stop'
@@ -80,6 +96,10 @@ $repoRoot = Split-Path -Parent $PSScriptRoot
 Import-Module (Join-Path $repoRoot 'WingetAppSetup\WingetAppSetup.psd1') -Force
 . (Join-Path $repoRoot 'WingetAppSetup\Private\WauSupport.ps1')
 . (Join-Path $repoRoot 'WingetAppSetup\Private\WingetLaunchResilience.ps1')
+# Transcript parsing and the transcript assertions (sections 5-9).
+. (Join-Path $PSScriptRoot 'TranscriptAssertions.ps1')
+
+$logDirectory = Join-Path $env:ProgramData 'winget-app-setup\logs'
 
 $results = [System.Collections.Generic.List[pscustomobject]]::new()
 
@@ -188,17 +208,13 @@ foreach ($app in $appsToAssert) {
 # The installer deliberately skips WAU when Microsoft.WindowsAppRuntime.1.8 is missing (every WAU
 # run installs the newest winget, which needs it; without it WAU wedged winget - issues #279/#284).
 # The windows-latest (Server 2025) runner lacks that framework, so there the correct outcome is
-# NO WAU plus an 'Auto-updates: NOT CONFIGURED' line in the latest real-run transcript. An unknown
-# framework status falls back to expecting WAU, matching the installer's own fallback.
+# NO WAU plus an 'Auto-updates: NOT CONFIGURED' line in the latest real-run transcript (checked
+# with the other transcript assertions below). An unknown framework status falls back to
+# expecting WAU, matching the installer's own fallback.
 $frameworkStatus = Get-WindowsAppRuntimeStatus
-$realRunTranscripts = @(Get-ChildItem -Path (Join-Path $env:ProgramData 'winget-app-setup\logs') -Filter 'install-*.log' -ErrorAction SilentlyContinue |
-        Where-Object { $_.Name -notmatch '-whatif\.log$' } |
-        Sort-Object LastWriteTime)
 if ($frameworkStatus.Present -eq $false) {
     $wauTask = Get-ScheduledTask -TaskName 'Winget-AutoUpdate' -TaskPath '\WAU\' -ErrorAction SilentlyContinue
     Add-AssertionResult -Name 'WAU not installed without the WindowsAppRuntime framework' -Passed (-not $wauTask) -Detail $(if ($wauTask) { '\WAU\Winget-AutoUpdate exists although the framework is missing' } else { "skipped as designed ($($frameworkStatus.Detail))" })
-    $latestRealRun = if ($realRunTranscripts.Count -gt 0) { Get-Content -Path $realRunTranscripts[-1].FullName -Raw } else { '' }
-    Add-AssertionResult -Name "Transcript reports 'Auto-updates: NOT CONFIGURED'" -Passed ($latestRealRun -match 'Auto-updates: NOT CONFIGURED') -Detail $(if ($realRunTranscripts.Count -gt 0) { $realRunTranscripts[-1].Name } else { 'no real-run transcript' })
 }
 else {
     try {
@@ -237,132 +253,39 @@ else {
     }
 }
 
-# --- 5. Transcript exists and carries the build stamp ----------------------------------------
-$logDirectory = Join-Path $env:ProgramData 'winget-app-setup\logs'
-# Real-run transcripts only: dry runs get a -whatif suffix and prove nothing about an install.
-$transcripts = @(Get-ChildItem -Path $logDirectory -Filter 'install-*.log' -ErrorAction SilentlyContinue |
-        Where-Object { $_.Name -notmatch '-whatif\.log$' } |
-        Sort-Object LastWriteTime)
-if ($transcripts.Count -eq 0) {
-    Add-AssertionResult -Name 'Transcript exists' -Passed $false -Detail "no install-*.log under $logDirectory"
-    Add-AssertionResult -Name "Transcript contains 'Installer build'" -Passed $false -Detail 'no transcript to inspect'
-    foreach ($app in $notApplicableApps) {
-        Add-AssertionResult -Name "Not-applicable skip logged: $($app.name)" -Passed $false -Detail 'no transcript to inspect'
-    }
+# --- 5-9. Transcripts: build stamp, skip lines, containment, idempotence, bootstrap ---------
+# Read by e2e/TranscriptAssertions.ps1 (fixture-tested in tests/E2EAssertions.Tests.ps1). Dry-run
+# transcripts are left out, and the Windows PowerShell 5.1 bootstrap transcripts are kept apart
+# from the PowerShell 7 runs: the 5.1 parent writes its transcript last, so it would otherwise pass
+# for the latest run.
+$notApplicableReasons = [ordered]@{}
+foreach ($app in $notApplicableApps) {
+    $notApplicableReasons[$app.name] = if ($app.conditionDescription) { $app.conditionDescription } else { 'condition not met' }
 }
-else {
-    $latest = $transcripts[-1]
-    Add-AssertionResult -Name 'Transcript exists' -Passed $true -Detail "$($transcripts.Count) transcript(s); latest: $($latest.Name)"
-    $latestContent = Get-Content -Path $latest.FullName -Raw
-    if ($latestContent -match 'Installer build') {
-        $buildLine = (($latestContent -split "`n") | Where-Object { $_ -match 'Installer build' } | Select-Object -First 1).Trim()
-        Add-AssertionResult -Name "Transcript contains 'Installer build'" -Passed $true -Detail $buildLine
-    }
-    else {
-        Add-AssertionResult -Name "Transcript contains 'Installer build'" -Passed $false -Detail "no 'Installer build' line in $($latest.Name)"
-    }
-
-    # Every pass ran the installer under test: each real-run transcript logs the build id stamped
-    # into -InstallerPath. Read with a regex, never dot-sourced: dot-sourcing runs the installer.
-    if ($InstallerPath) {
-        $expectedBuildId = $null
-        if (Test-Path -LiteralPath $InstallerPath -PathType Leaf) {
-            $buildIdMatch = [regex]::Match((Get-Content -LiteralPath $InstallerPath -Raw), "(?m)^\`$script:InstallerBuildId = '(?<id>[^']+)'")
-            if ($buildIdMatch.Success) {
-                $expectedBuildId = $buildIdMatch.Groups['id'].Value
-            }
-        }
-        if (-not $expectedBuildId) {
-            Add-AssertionResult -Name 'Build id of the installer under test' -Passed $false -Detail "no `$script:InstallerBuildId line in '$InstallerPath'"
-        }
-        else {
-            $expectedBuildLine = "Installer build: $expectedBuildId"
-            foreach ($transcript in $transcripts) {
-                $content = if ($transcript.FullName -eq $latest.FullName) { $latestContent } else { Get-Content -Path $transcript.FullName -Raw }
-                if ($content -match ('(?m)' + [regex]::Escape($expectedBuildLine) + '\s*$')) {
-                    Add-AssertionResult -Name "Ran the installer under test ($($transcript.Name))" -Passed $true -Detail $expectedBuildLine
-                }
-                else {
-                    $loggedBuild = (($content -split "`n") | Where-Object { $_ -match 'Installer build' } | Select-Object -First 1)
-                    $loggedBuild = if ($loggedBuild) { "logged '$($loggedBuild.Trim())'" } else { "no 'Installer build' line" }
-                    Add-AssertionResult -Name "Ran the installer under test ($($transcript.Name))" -Passed $false -Detail "expected '$expectedBuildLine' from $InstallerPath, $loggedBuild"
-                }
-            }
-        }
-    }
-
-    # --- 6. Not-applicable apps: their gated skip line appears in the latest transcript ------
-    # The manufacturer-style catalog gating (issue #217) must actually have fired: a
-    # not-applicable app that is simply absent from the transcript would mean the installer
-    # dropped it silently instead of reporting the skip.
-    foreach ($app in $notApplicableApps) {
-        $id = $app.name
-        $reason = if ($app.conditionDescription) { $app.conditionDescription } else { 'condition not met' }
-        # Invoke-WingetInstall logs exactly this per not-applicable app.
-        $notApplicableLine = "Skipping: $id (not applicable: $reason)"
-        if ($latestContent.Contains($notApplicableLine)) {
-            Add-AssertionResult -Name "Not-applicable skip logged: $id" -Passed $true -Detail $notApplicableLine
-        }
-        else {
-            Add-AssertionResult -Name "Not-applicable skip logged: $id" -Passed $false -Detail "transcript $($latest.Name) has no '$notApplicableLine'"
-        }
-    }
-
-    # --- 7. Containment: no app OUTSIDE -SkipApps failed, in ANY real-run transcript ---------
-    # The workflow tolerates installer exit 1 only on the promise that every failure belongs to
-    # the justified skip list (KNOWN_PLATFORM_INCOMPATIBLE / issue-referenced). Parse each
-    # transcript's summary table 'Failed    <app1>, <app2>' row and diff against $SkipApps.
-    foreach ($transcript in $transcripts) {
-        $content = if ($transcript.FullName -eq $latest.FullName) { $latestContent } else { Get-Content -Path $transcript.FullName -Raw }
-        # Primary source: the per-app failure lines ('Failed to install: <id> ...' and
-        # 'Retry failed: <id> ...'), which are logged unconditionally per app. The summary
-        # table's 'Failed' row is Format-Table output and can ellipsis-truncate long lists,
-        # which would hide offenders, so it is deliberately not parsed.
-        $failedApps = @()
-        foreach ($line in ($content -split "`n")) {
-            if ($line -match '^(Failed to install|Retry failed):\s+(?<app>[^\s(]+)') {
-                $failedApps += $Matches.app.TrimEnd('.', ',')
-            }
-        }
-        $failedApps = @($failedApps | Sort-Object -Unique)
-        $uncontained = @($failedApps | Where-Object { $SkipApps -notcontains $_ })
-        if ($uncontained.Count -eq 0) {
-            $detail = if ($failedApps.Count -gt 0) { "failed apps all skip-listed: $($failedApps -join ', ')" } else { 'no failed apps' }
-            Add-AssertionResult -Name "Failures contained ($($transcript.Name))" -Passed $true -Detail $detail
-        }
-        else {
-            Add-AssertionResult -Name "Failures contained ($($transcript.Name))" -Passed $false -Detail "apps outside -SkipApps failed: $($uncontained -join ', ')"
-        }
-    }
-
-    # --- 8. Idempotence: the latest (second-run) transcript shows every applicable app
-    #        Skipped (not-applicable apps are covered by their own skip-line assertion above,
-    #        and skip-listed apps by the containment check) ---------------------------------
-    if ($ExpectAllSkippedOnSecondRun) {
-        foreach ($app in $appsToAssert) {
-            $id = $app.name
-            # Invoke-WingetInstall logs exactly this per already-installed app.
-            $skipLine = "Skipping: $id (already installed)"
-            if ($latestContent.Contains($skipLine)) {
-                Add-AssertionResult -Name "Second run skipped: $id" -Passed $true
-            }
-            else {
-                Add-AssertionResult -Name "Second run skipped: $id" -Passed $false -Detail "transcript $($latest.Name) has no '$skipLine'"
-            }
-        }
-        # Per-app checks so skip-listed apps (which legitimately install-retry-fail on this
-        # platform) don't trip the idempotence assertions for everything else.
-        $installedOffenders = @($appsToAssert | Where-Object { $latestContent.Contains("Successfully installed: $($_.name)") } | ForEach-Object { $_.name })
-        Add-AssertionResult -Name 'Second run installed nothing (non-skip-listed)' -Passed ($installedOffenders.Count -eq 0) -Detail $(if ($installedOffenders.Count) { "installed on second run: $($installedOffenders -join ', ')" } else { '' })
-        $failedOffenders = @($appsToAssert | Where-Object { $latestContent.Contains("Failed to install: $($_.name)") } | ForEach-Object { $_.name })
-        Add-AssertionResult -Name 'Second run failed nothing (non-skip-listed)' -Passed ($failedOffenders.Count -eq 0) -Detail $(if ($failedOffenders.Count) { "failed on second run: $($failedOffenders -join ', ')" } else { '' })
-    }
+$transcriptAssertionArgs = @{
+    LogDirectory                = $logDirectory
+    ExpectedAppIds              = @($appsToAssert | ForEach-Object { $_.name })
+    NotApplicableApps           = $notApplicableReasons
+    SkipApps                    = $SkipApps
+    ExpectAllSkippedOnSecondRun = $ExpectAllSkippedOnSecondRun
+    ExpectPowerShell7Bootstrap  = $ExpectPowerShell7Bootstrap
+}
+if ($InstallerPath) {
+    $transcriptAssertionArgs.InstallerPath = $InstallerPath
+}
+if ($frameworkStatus.Present -eq $false) {
+    $transcriptAssertionArgs.ExpectedAutoUpdatesStatus = 'NOT CONFIGURED'
+}
+foreach ($row in (Get-TranscriptAssertionResult @transcriptAssertionArgs)) {
+    $results.Add($row)
 }
 
 # --- Report ----------------------------------------------------------------------------------
 Write-Host ''
 Write-Host '=== E2E assertion results ==='
-$results | Format-Table -AutoSize -Wrap | Out-Host
+# An explicit width, as in the installer's Write-Table (review finding P3-13): Out-Host renders at
+# the console width, and printed nothing at all in a process without a console.
+Write-Host ($results | Format-Table -AutoSize -Wrap | Out-String -Width 4096).TrimEnd()
 
 $failures = @($results | Where-Object { $_.Result -eq 'FAIL' })
 if ($failures.Count -gt 0) {

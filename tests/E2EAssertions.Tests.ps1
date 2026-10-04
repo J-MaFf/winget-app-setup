@@ -1,0 +1,416 @@
+# E2EAssertions.Tests.ps1
+# Tests for e2e/TranscriptAssertions.ps1, the transcript half of e2e/Assert-Install.ps1, against the
+# sample transcripts in tests/fixtures/e2e (review finding P3-39). The fixtures follow what the
+# installer writes: a first and a second pass, a run with timeouts in both passes, the #279 bulk
+# failure, an aborted run, and the two Windows PowerShell 5.1 bootstrap transcripts of a 5.1 leg.
+
+BeforeAll {
+    . (Join-Path $PSScriptRoot 'TestHelpers.ps1')
+    . (Join-Path $script:RepoRoot 'e2e/TranscriptAssertions.ps1')
+    # .txt, not .log: the repository ignores *.log files.
+    $script:FixtureDirectory = Join-Path $PSScriptRoot 'fixtures/e2e'
+    $script:AssertInstallPath = Join-Path $script:RepoRoot 'e2e/Assert-Install.ps1'
+
+    function Get-Fixture {
+        param ([Parameter(Mandatory = $true)][string]$Name)
+        return [string](Get-Content -Raw -LiteralPath (Join-Path $script:FixtureDirectory "$Name.txt"))
+    }
+
+    # A log folder in TestDrive holding the given fixtures under installer-style names, written in
+    # the given order (LastWriteTime one minute apart).
+    function New-TestLogDirectory {
+        param (
+            [Parameter(Mandatory = $true)][string[]]$Fixture,
+            [Parameter(Mandatory = $false)][string[]]$Name
+        )
+        $directory = Join-Path $TestDrive ([guid]::NewGuid().ToString('N'))
+        $null = New-Item -ItemType Directory -Path $directory -Force
+        $time = [datetime]'2026-10-05T06:00:00'
+        for ($i = 0; $i -lt $Fixture.Count; $i++) {
+            $fileName = if ($Name) { $Name[$i] } else { 'install-20261005-06{0:D2}00.log' -f $i }
+            $path = Join-Path $directory $fileName
+            Set-Content -LiteralPath $path -Value (Get-Fixture -Name $Fixture[$i]) -NoNewline
+            (Get-Item -LiteralPath $path).LastWriteTime = $time.AddMinutes($i)
+        }
+        return $directory
+    }
+
+    function New-TestInstaller {
+        param ([Parameter(Mandatory = $true)][string]$BuildId)
+        $path = Join-Path $TestDrive ([guid]::NewGuid().ToString('N') + '-winget-app-install.ps1')
+        Set-Content -LiteralPath $path -Value @("# generated", "`$script:InstallerBuildId = '$BuildId'", 'Write-Host hi')
+        return $path
+    }
+
+    $script:CatalogIds = @('7zip.7zip', 'GlavSoft.TightVNC', 'Adobe.Acrobat.Reader.64-bit', 'Google.Chrome', 'Google.GoogleDrive', 'Git.Git', 'Klocman.BulkCrapUninstaller', 'Microsoft.PowerShell', 'Microsoft.WindowsTerminal')
+    $script:NotApplicable = [ordered]@{ 'Dell.CommandUpdate.Universal' = 'Dell hardware only' }
+}
+
+Describe 'ConvertFrom-InstallTranscript' {
+    It 'Reads the installs, skips, not-applicable apps, build id and auto-update status of a first pass' {
+        $transcript = ConvertFrom-InstallTranscript -Content (Get-Fixture -Name 'first-pass')
+
+        $transcript.BuildId | Should -Be '1.0.0+5ea1f00d'
+        $transcript.Installed | Should -Be @('7zip.7zip', 'Adobe.Acrobat.Reader.64-bit', 'Git.Git', 'GlavSoft.TightVNC', 'Google.Chrome', 'Google.GoogleDrive', 'Klocman.BulkCrapUninstaller')
+        $transcript.AlreadyInstalled | Should -Be @('Microsoft.PowerShell', 'Microsoft.WindowsTerminal')
+        $transcript.NotApplicable['Dell.CommandUpdate.Universal'] | Should -Be 'Dell hardware only'
+        $transcript.HasSummary | Should -BeTrue
+        $transcript.SummaryInstalled.Count | Should -Be 7
+        $transcript.SummarySkipped | Should -Be @('Dell.CommandUpdate.Universal', 'Microsoft.PowerShell', 'Microsoft.WindowsTerminal')
+        $transcript.FinalFailed | Should -BeNullOrEmpty
+        $transcript.AutoUpdatesStatus | Should -Be 'NOT CONFIGURED'
+        $transcript.WingetNotUsable | Should -BeFalse
+        $transcript.Aborted | Should -BeFalse
+    }
+
+    It 'Reads the timeout failures of both passes, which the old failure regex missed, and what the retry recovered' {
+        $content = Get-Fixture -Name 'timeouts'
+        # The regex Assert-Install.ps1 used before (P3-39) finds only the first-pass failure that
+        # the retry then recovered, and none of the two apps that are still failed.
+        $oldMatches = @(($content -split '\r?\n') | Where-Object { $_ -match '^(Failed to install|Retry failed):\s+' })
+        $oldMatches.Count | Should -Be 1
+
+        $transcript = ConvertFrom-InstallTranscript -Content $content
+
+        $transcript.FirstPassFailed | Should -Be @('Adobe.Acrobat.Reader.64-bit', 'Google.GoogleDrive', 'Klocman.BulkCrapUninstaller')
+        $transcript.RetryFailed | Should -Be @('Google.GoogleDrive', 'Klocman.BulkCrapUninstaller')
+        $transcript.RetrySucceeded | Should -Be @('Adobe.Acrobat.Reader.64-bit')
+        $transcript.RecoveredOnRetry | Should -Be @('Adobe.Acrobat.Reader.64-bit')
+        $transcript.SummaryFailed | Should -Be @('Google.GoogleDrive', 'Klocman.BulkCrapUninstaller')
+        $transcript.FinalFailed | Should -Be @('Google.GoogleDrive', 'Klocman.BulkCrapUninstaller')
+    }
+
+    It 'Finds the timeout failures from the per-app lines alone when the summary has no Failed row' {
+        $content = (Get-Fixture -Name 'timeouts') -replace '(?m)^Failed\s+Google\.GoogleDrive.*\r?\n', ''
+
+        $transcript = ConvertFrom-InstallTranscript -Content $content
+
+        $transcript.SummaryFailed | Should -BeNullOrEmpty
+        $transcript.FinalFailed | Should -Be @('Google.GoogleDrive', 'Klocman.BulkCrapUninstaller')
+    }
+
+    It 'Never reads a retry-pass timeout as a first-pass failure of an app called retry:' {
+        $transcript = ConvertFrom-InstallTranscript -Content "Winget list timed out for retry: Git.Git. Assuming installation failed.`nVerification timed out for retry: 7zip.7zip. Assuming installation failed."
+
+        $transcript.FirstPassFailed | Should -BeNullOrEmpty
+        $transcript.RetryFailed | Should -Be @('7zip.7zip', 'Git.Git')
+    }
+
+    It 'Reads the #279 bulk failure, which logs no per-app line, from the summary' {
+        $transcript = ConvertFrom-InstallTranscript -Content (Get-Fixture -Name 'deadlock')
+
+        $transcript.WingetDeadlocked | Should -BeTrue
+        $transcript.FirstPassFailed | Should -BeNullOrEmpty
+        $transcript.RetryFailed | Should -BeNullOrEmpty
+        $transcript.FinalFailed.Count | Should -Be 10
+        $transcript.FinalFailed | Should -Contain 'Dell.CommandUpdate.Universal'
+        $transcript.WingetNotUsable | Should -BeTrue
+    }
+
+    It 'Marks a run that was aborted before its summary' {
+        $transcript = ConvertFrom-InstallTranscript -Content (Get-Fixture -Name 'aborted')
+
+        $transcript.HasSummary | Should -BeFalse
+        $transcript.Aborted | Should -BeTrue
+        $transcript.EarlyExitCode | Should -Be 5
+        $transcript.FinalFailed | Should -Be @('GlavSoft.TightVNC')
+        $transcript.AutoUpdatesStatus | Should -BeNullOrEmpty
+    }
+
+    It 'Reads a CRLF transcript the same as an LF one' {
+        $lf = Get-Fixture -Name 'timeouts'
+        $crlf = ($lf -replace '\r?\n', "`r`n")
+
+        $fromLf = ConvertFrom-InstallTranscript -Content $lf
+        $fromCrlf = ConvertFrom-InstallTranscript -Content $crlf
+
+        $fromCrlf.FinalFailed | Should -Be $fromLf.FinalFailed
+        $fromCrlf.AlreadyInstalled | Should -Be $fromLf.AlreadyInstalled
+        $fromCrlf.BuildId | Should -Be $fromLf.BuildId
+        $fromCrlf.NotApplicable['Dell.CommandUpdate.Universal'] | Should -Be 'Dell hardware only'
+    }
+
+    It 'Drops an id that an older, console-width summary cut off, and says so' {
+        $ellipsis = [string][char]0x2026
+        $content = "Failed to install: Klocman.BulkCrapUninstaller (install failed).`nSummary:`n`nStatus  Apps`n------  ----`nFailed  7zip.7zip, Git.Git, Klocman.$ellipsis`nAuto-updates: FAILED - Winget-AutoUpdate could not be installed."
+
+        $transcript = ConvertFrom-InstallTranscript -Content $content
+
+        $transcript.SummaryTruncated | Should -BeTrue
+        $transcript.SummaryFailed | Should -Be @('7zip.7zip', 'Git.Git')
+        $transcript.FinalFailed | Should -Be @('7zip.7zip', 'Git.Git', 'Klocman.BulkCrapUninstaller')
+        $transcript.AutoUpdatesStatus | Should -Be 'FAILED'
+    }
+
+    It 'Still reads the line after Summary: when no table was printed' {
+        $transcript = ConvertFrom-InstallTranscript -Content "Summary:`nAuto-updates: Configured (Winget-AutoUpdate v2.12.0)."
+
+        $transcript.HasSummary | Should -BeTrue
+        $transcript.AutoUpdatesStatus | Should -Be 'Configured'
+    }
+
+    It 'Reads the summary table the way Write-Table renders it' {
+        $rows = @(@('Installed', '7zip.7zip, Git.Git'), @('Failed', 'Google.Chrome, Google.GoogleDrive'))
+        $table = Write-Table -Headers @('Status', 'Apps') -Rows $rows 6>&1 | Out-String
+
+        $transcript = ConvertFrom-InstallTranscript -Content ("Summary:`n" + $table + "`nAuto-updates: NOT CONFIGURED - missing.")
+
+        $transcript.SummaryInstalled | Should -Be @('7zip.7zip', 'Git.Git')
+        $transcript.SummaryFailed | Should -Be @('Google.Chrome', 'Google.GoogleDrive')
+        $transcript.AutoUpdatesStatus | Should -Be 'NOT CONFIGURED'
+    }
+}
+
+Describe 'ConvertFrom-BootstrapTranscript' {
+    It 'Reads a bootstrap that installed PowerShell 7 and relaunched' {
+        $bootstrap = ConvertFrom-BootstrapTranscript -Content (Get-Fixture -Name 'bootstrap-installed')
+
+        $bootstrap.BuildId | Should -Be '1.0.0+5ea1f00d'
+        $bootstrap.InstalledPowerShell7 | Should -BeTrue
+        $bootstrap.RelaunchPath | Should -Be 'C:\Users\runneradmin\AppData\Local\Microsoft\WindowsApps\pwsh.exe'
+        $bootstrap.ChildExitCode | Should -Be 0
+    }
+
+    It 'Reads a bootstrap that found PowerShell 7, and one that never relaunched' {
+        (ConvertFrom-BootstrapTranscript -Content (Get-Fixture -Name 'bootstrap-found')).InstalledPowerShell7 | Should -BeFalse
+
+        $failed = ConvertFrom-BootstrapTranscript -Content "Installer build: 1.0.0+5ea1f00d`nPowerShell 7 could not be installed automatically. Install it manually."
+        $failed.RelaunchPath | Should -BeNullOrEmpty
+        $failed.ChildExitCode | Should -BeNullOrEmpty
+    }
+}
+
+Describe 'Test-InstallFailureContainment' {
+    It 'Fails the timeout failures unless both apps are skip-listed, and names what the retry recovered' {
+        $transcript = ConvertFrom-InstallTranscript -Content (Get-Fixture -Name 'timeouts')
+
+        $strict = Test-InstallFailureContainment -Transcript $transcript -SkipApps @()
+        $strict.Passed | Should -BeFalse
+        $strict.Detail | Should -Be 'apps outside -SkipApps failed: Google.GoogleDrive, Klocman.BulkCrapUninstaller'
+
+        (Test-InstallFailureContainment -Transcript $transcript -SkipApps @('Google.GoogleDrive')).Passed | Should -BeFalse
+
+        $contained = Test-InstallFailureContainment -Transcript $transcript -SkipApps @('Google.GoogleDrive', 'Klocman.BulkCrapUninstaller')
+        $contained.Passed | Should -BeTrue
+        $contained.Detail | Should -Be 'failed apps all skip-listed: Google.GoogleDrive, Klocman.BulkCrapUninstaller; recovered on retry: Adobe.Acrobat.Reader.64-bit'
+    }
+
+    It 'Fails the #279 bulk failure with an unrelated skip list and says why every app failed' {
+        $transcript = ConvertFrom-InstallTranscript -Content (Get-Fixture -Name 'deadlock')
+
+        $verdict = Test-InstallFailureContainment -Transcript $transcript -SkipApps @('Google.GoogleDrive')
+
+        $verdict.Passed | Should -BeFalse
+        $verdict.Detail | Should -Match '^apps outside -SkipApps failed: 7zip\.7zip, '
+        $verdict.Detail | Should -Not -Match 'Google\.GoogleDrive,'
+        $verdict.Detail | Should -Match 'deadlocked between App Installer versions.*issue #279'
+    }
+
+    It 'Fails a transcript without a summary, whatever the skip list' {
+        $transcript = ConvertFrom-InstallTranscript -Content (Get-Fixture -Name 'aborted')
+
+        $verdict = Test-InstallFailureContainment -Transcript $transcript -SkipApps @('GlavSoft.TightVNC')
+
+        $verdict.Passed | Should -BeFalse
+        $verdict.Detail | Should -Be 'the run was aborted before its summary, so its failures cannot be checked; failed before that: GlavSoft.TightVNC'
+    }
+
+    It 'Passes a clean run' {
+        $verdict = Test-InstallFailureContainment -Transcript (ConvertFrom-InstallTranscript -Content (Get-Fixture -Name 'first-pass'))
+
+        $verdict.Passed | Should -BeTrue
+        $verdict.Detail | Should -Be 'no failed apps'
+    }
+}
+
+Describe 'Get-TranscriptAssertionResult' {
+    It 'Passes a clean PowerShell 7 leg and leaves the dry-run transcript out' {
+        $logs = New-TestLogDirectory -Fixture @('first-pass', 'second-pass', 'timeouts') -Name @('install-20261005-060449.log', 'install-20261005-061511.log', 'install-20261005-061700-whatif.log')
+        $installer = New-TestInstaller -BuildId '1.0.0+5ea1f00d'
+
+        $rows = @(Get-TranscriptAssertionResult -LogDirectory $logs -ExpectedAppIds $script:CatalogIds -NotApplicableApps $script:NotApplicable -ExpectAllSkippedOnSecondRun -InstallerPath $installer -ExpectedAutoUpdatesStatus 'NOT CONFIGURED')
+
+        @($rows | Where-Object { $_.Result -ne 'PASS' } | ForEach-Object { "$($_.Assertion): $($_.Detail)" }) | Should -BeNullOrEmpty
+        ($rows | Where-Object Assertion -EQ 'Transcript exists').Detail | Should -Be '2 transcript(s); latest: install-20261005-061511.log'
+        @($rows | Where-Object Assertion -Like 'Failures contained*').Count | Should -Be 2
+        @($rows | Where-Object Assertion -Like 'Second run skipped:*').Count | Should -Be 9
+        @($rows | Where-Object Assertion -Like 'Ran the installer under test*').Count | Should -Be 2
+        ($rows | Where-Object Assertion -EQ "Transcript reports 'Auto-updates: NOT CONFIGURED'") | Should -Not -BeNullOrEmpty
+        ($rows | Where-Object Assertion -EQ 'Not-applicable skip logged: Dell.CommandUpdate.Universal').Detail | Should -Be 'Skipping: Dell.CommandUpdate.Universal (not applicable: Dell hardware only)'
+    }
+
+    It 'Keeps the 5.1 bootstrap transcripts apart, although each is written after the run it started' {
+        # The order the 5.1 leg writes them in: each bootstrap transcript closes after its
+        # PowerShell 7 run. Before this change the second bootstrap transcript counted as the
+        # latest run, so every idempotence assertion failed on the 5.1 leg.
+        $logs = New-TestLogDirectory -Fixture @('first-pass', 'bootstrap-installed', 'second-pass', 'bootstrap-found') -Name @('install-20261005-060449.log', 'install-20261005-060431-bootstrap.log', 'install-20261005-061511.log', 'install-20261005-061510-bootstrap.log')
+        $installer = New-TestInstaller -BuildId '1.0.0+5ea1f00d'
+
+        $rows = @(Get-TranscriptAssertionResult -LogDirectory $logs -ExpectedAppIds $script:CatalogIds -NotApplicableApps $script:NotApplicable -ExpectAllSkippedOnSecondRun -InstallerPath $installer -ExpectedAutoUpdatesStatus 'NOT CONFIGURED' -ExpectPowerShell7Bootstrap)
+
+        @($rows | Where-Object { $_.Result -ne 'PASS' } | ForEach-Object { "$($_.Assertion): $($_.Detail)" }) | Should -BeNullOrEmpty
+        ($rows | Where-Object Assertion -EQ 'Transcript exists').Detail | Should -Be '2 transcript(s) and 2 bootstrap transcript(s); latest: install-20261005-061511.log'
+        @($rows | Where-Object Assertion -Like 'Failures contained*').Count | Should -Be 2
+        @($rows | Where-Object Assertion -Like 'Ran the installer under test*').Count | Should -Be 4
+        ($rows | Where-Object Assertion -EQ 'Every pass went through the PowerShell 7 bootstrap').Detail | Should -Be '2 bootstrap transcript(s), 2 PowerShell 7 run transcript(s)'
+        ($rows | Where-Object Assertion -EQ 'Bootstrap relaunched under PowerShell 7 (install-20261005-060431-bootstrap.log)').Detail | Should -Be 'installed PowerShell 7, relaunched under C:\Users\runneradmin\AppData\Local\Microsoft\WindowsApps\pwsh.exe, that run ended with exit code 0'
+        ($rows | Where-Object Assertion -EQ 'Bootstrap relaunched under PowerShell 7 (install-20261005-061510-bootstrap.log)').Detail | Should -Match '^found PowerShell 7, '
+    }
+
+    It 'Fails the bootstrap assertions when a pass never reached PowerShell 7' {
+        $logs = New-TestLogDirectory -Fixture @('first-pass', 'bootstrap-installed', 'bootstrap-found') -Name @('install-20261005-060449.log', 'install-20261005-060431-bootstrap.log', 'install-20261005-061510-bootstrap.log')
+        Set-Content -LiteralPath (Join-Path $logs 'install-20261005-061510-bootstrap.log') -Value "Installer build: 1.0.0+5ea1f00d`nPowerShell 7 could not be installed automatically."
+
+        $rows = @(Get-TranscriptAssertionResult -LogDirectory $logs -ExpectPowerShell7Bootstrap)
+
+        ($rows | Where-Object Assertion -EQ 'Every pass went through the PowerShell 7 bootstrap').Result | Should -Be 'FAIL'
+        $neverRelaunched = $rows | Where-Object Assertion -EQ 'Bootstrap relaunched under PowerShell 7 (install-20261005-061510-bootstrap.log)'
+        $neverRelaunched.Result | Should -Be 'FAIL'
+        $neverRelaunched.Detail | Should -Be 'never relaunched the installer under PowerShell 7 (see the bootstrap transcript)'
+    }
+
+    It 'Fails every transcript, bootstrap ones included, that logged another build than the installer under test' {
+        $logs = New-TestLogDirectory -Fixture @('bootstrap-installed', 'first-pass') -Name @('install-20261005-060431-bootstrap.log', 'install-20261005-060449.log')
+        $installer = New-TestInstaller -BuildId '1.0.0+0ddba11e'
+
+        $rows = @(Get-TranscriptAssertionResult -LogDirectory $logs -InstallerPath $installer)
+
+        $buildRows = @($rows | Where-Object Assertion -Like 'Ran the installer under test*')
+        $buildRows.Count | Should -Be 2
+        $buildRows | ForEach-Object { $_.Result | Should -Be 'FAIL' }
+        $buildRows[0].Detail | Should -Be "expected 'Installer build: 1.0.0+0ddba11e' from $installer, logged 'Installer build: 1.0.0+5ea1f00d'"
+    }
+
+    It 'Fails a second pass that hit timeouts on the idempotence and containment assertions' {
+        $logs = New-TestLogDirectory -Fixture @('first-pass', 'timeouts')
+
+        $rows = @(Get-TranscriptAssertionResult -LogDirectory $logs -ExpectedAppIds $script:CatalogIds -NotApplicableApps $script:NotApplicable -ExpectAllSkippedOnSecondRun)
+
+        ($rows | Where-Object Assertion -EQ 'Second run failed nothing (non-skip-listed)').Detail | Should -Be 'failed on second run: Adobe.Acrobat.Reader.64-bit, Google.GoogleDrive, Klocman.BulkCrapUninstaller'
+        ($rows | Where-Object Assertion -EQ 'Second run installed nothing (non-skip-listed)').Detail | Should -Be 'installed on second run: 7zip.7zip, GlavSoft.TightVNC, Adobe.Acrobat.Reader.64-bit, Google.Chrome, Git.Git'
+        ($rows | Where-Object Assertion -EQ 'Second run skipped: Google.GoogleDrive').Result | Should -Be 'FAIL'
+        ($rows | Where-Object Assertion -EQ 'Failures contained (install-20261005-060100.log)').Result | Should -Be 'FAIL'
+        ($rows | Where-Object Assertion -EQ 'Failures contained (install-20261005-060000.log)').Result | Should -Be 'PASS'
+    }
+
+    It 'Fails the transcript assertions when there is no real-run transcript' {
+        $logs = New-TestLogDirectory -Fixture @('first-pass') -Name @('install-20261005-060000-whatif.log')
+
+        $rows = @(Get-TranscriptAssertionResult -LogDirectory $logs -NotApplicableApps $script:NotApplicable -ExpectedAutoUpdatesStatus 'NOT CONFIGURED')
+
+        @($rows | ForEach-Object Assertion) | Should -Be @('Transcript exists', "Transcript contains 'Installer build'", "Transcript reports 'Auto-updates: NOT CONFIGURED'", 'Not-applicable skip logged: Dell.CommandUpdate.Universal')
+        @($rows | Where-Object Result -EQ 'PASS') | Should -BeNullOrEmpty
+    }
+
+    It 'Fails a missing not-applicable skip line and an unexpected auto-update status' {
+        $logs = New-TestLogDirectory -Fixture @('deadlock')
+
+        $rows = @(Get-TranscriptAssertionResult -LogDirectory $logs -NotApplicableApps $script:NotApplicable -ExpectedAutoUpdatesStatus 'Configured')
+
+        ($rows | Where-Object Assertion -EQ 'Not-applicable skip logged: Dell.CommandUpdate.Universal').Detail | Should -Be "transcript install-20261005-060000.log has no 'Skipping: Dell.CommandUpdate.Universal (not applicable: Dell hardware only)'"
+        ($rows | Where-Object Assertion -EQ "Transcript reports 'Auto-updates: Configured'").Result | Should -Be 'FAIL'
+    }
+}
+
+Describe 'Installer messages the transcript parser keys on' {
+    # A reworded message would make the parser match nothing, and the e2e assertions would then
+    # pass a failed run (for containment) or fail a good one. Each line below is copied from what
+    # e2e/TranscriptAssertions.ps1 matches; this checks the installer source still writes it.
+    It 'Is still written by <File>: <Text>' -ForEach @(
+        @{ File = 'WingetAppSetup/Public/Install.ps1'; Text = 'Write-Success "Successfully installed: $($app.name)"' }
+        @{ File = 'WingetAppSetup/Public/Install.ps1'; Text = 'Write-WarningMessage "Skipping: $($app.name) (already installed)"' }
+        @{ File = 'WingetAppSetup/Public/Install.ps1'; Text = 'Write-WarningMessage "Skipping: $($app.name) (not applicable: $conditionText)"' }
+        @{ File = 'WingetAppSetup/Public/Install.ps1'; Text = 'Write-ErrorMessage "Failed to install: $($app.name) ($failureReason)."' }
+        @{ File = 'WingetAppSetup/Public/Install.ps1'; Text = 'Write-ErrorMessage "Failed to install: $($app.name). Error: $_"' }
+        @{ File = 'WingetAppSetup/Public/Install.ps1'; Text = 'Write-WarningMessage "Winget list timed out for $($app.name). Marking as failed; it will be retried."' }
+        @{ File = 'WingetAppSetup/Public/Install.ps1'; Text = 'Write-WarningMessage "Verification timed out for: $($app.name). Assuming installation failed."' }
+        @{ File = 'WingetAppSetup/Public/Install.ps1'; Text = 'Write-WarningMessage "Winget list timed out for retry: $appName. Assuming installation failed."' }
+        @{ File = 'WingetAppSetup/Public/Install.ps1'; Text = 'Write-WarningMessage "Verification timed out for retry: $appName. Assuming installation failed."' }
+        @{ File = 'WingetAppSetup/Public/Install.ps1'; Text = 'Write-ErrorMessage "Retry failed: $appName ($failureReason)."' }
+        @{ File = 'WingetAppSetup/Public/Install.ps1'; Text = 'Write-ErrorMessage "Retry failed: $appName. Error: $_"' }
+        @{ File = 'WingetAppSetup/Public/Install.ps1'; Text = 'Write-Success "Retry succeeded: $appName"' }
+        @{ File = 'WingetAppSetup/Public/Install.ps1'; Text = 'Write-ErrorMessage "winget is deadlocked between ' }
+        @{ File = 'WingetAppSetup/Public/Install.ps1'; Text = "Write-Info 'Summary:'" }
+        @{ File = 'WingetAppSetup/Public/Install.ps1'; Text = "`$headers = @('Status', 'Apps')" }
+        @{ File = 'WingetAppSetup/Public/Install.ps1'; Text = "`$rows += , @('Installed', `$appList)" }
+        @{ File = 'WingetAppSetup/Public/Install.ps1'; Text = "`$rows += , @('Skipped', `$appList)" }
+        @{ File = 'WingetAppSetup/Public/Install.ps1'; Text = "`$rows += , @('Failed', `$appList)" }
+        @{ File = 'WingetAppSetup/Public/Install.ps1'; Text = "'FrameworkMissing' { Write-ErrorMessage 'Auto-updates: NOT CONFIGURED - " }
+        @{ File = 'WingetAppSetup/Public/Install.ps1'; Text = "Write-ErrorMessage 'winget: NOT USABLE - " }
+        @{ File = 'build/fragments/tail.ps1'; Text = 'Write-Info "Installer build: $script:InstallerBuildId"' }
+        @{ File = 'build/fragments/tail.ps1'; Text = "Write-ErrorMessage 'UNEXPECTED ERROR - the run was aborted before it finished." }
+        @{ File = 'build/fragments/tail.ps1'; Text = "`$abortMessage = 'The run was stopped before it finished (exit code 5).'" }
+        @{ File = 'WingetAppSetup/Private/FailureReporting.ps1'; Text = "'The installer stopped early with exit code {0}: {1}.'" }
+        @{ File = 'WingetAppSetup/Private/PowerShell7Bootstrap.ps1'; Text = "Write-Success 'PowerShell 7 is installed.'" }
+        @{ File = 'WingetAppSetup/Private/PowerShell7Bootstrap.ps1'; Text = "Write-Info ('Relaunching the installer under PowerShell 7: {0}' -f `$pwshPath)" }
+        @{ File = 'WingetAppSetup/Private/PowerShell7Bootstrap.ps1'; Text = "Write-Info ('The PowerShell 7 run ended with exit code {0}.' -f `$relaunchProcess.ExitCode)" }
+        @{ File = 'WingetAppSetup/Private/LoggingInternal.ps1'; Text = "`$phaseSuffix = '-bootstrap'" }
+        @{ File = 'WingetAppSetup/Private/LoggingInternal.ps1'; Text = "`$whatIfSuffix = '-whatif'" }
+        @{ File = 'WingetAppSetup/Private/LoggingInternal.ps1'; Text = "'install-{0:yyyyMMdd-HHmmss}{1}{2}.log'" }
+    ) {
+        $source = Get-Content -Raw -LiteralPath (Join-Path $script:RepoRoot $File)
+        $source.Contains($Text) | Should -BeTrue -Because "e2e/TranscriptAssertions.ps1 matches this line; update both together"
+    }
+}
+
+Describe 'e2e/Assert-Install.ps1 wiring' {
+    BeforeAll {
+        $tokens = $null
+        $parseErrors = $null
+        $script:AssertInstallAst = [System.Management.Automation.Language.Parser]::ParseFile($script:AssertInstallPath, [ref]$tokens, [ref]$parseErrors)
+        $script:AssertInstallParseErrors = $parseErrors
+    }
+
+    It 'Parses' {
+        $script:AssertInstallParseErrors | Should -BeNullOrEmpty
+    }
+
+    It 'Calls only commands that the module, e2e/TranscriptAssertions.ps1, the script itself or PowerShell define' {
+        # Assert-Install.ps1 only runs on a real install; a renamed helper would otherwise surface
+        # there first (P3-39: the rewritten script had never completed a CI run).
+        $definedHere = @($script:AssertInstallAst.FindAll({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true) | ForEach-Object Name)
+        $called = @($script:AssertInstallAst.FindAll({ param($node) $node -is [System.Management.Automation.Language.CommandAst] }, $true) |
+                ForEach-Object { $_.GetCommandName() } | Where-Object { $_ } | Sort-Object -Unique)
+
+        $unresolved = @($called | Where-Object { $definedHere -notcontains $_ -and -not (Get-Command -Name $_ -ErrorAction SilentlyContinue) })
+
+        $called | Should -Contain 'Get-TranscriptAssertionResult'
+        $unresolved | Should -BeNullOrEmpty
+    }
+
+    It 'Passes Get-TranscriptAssertionResult only parameters it declares' {
+        $keys = @()
+        $assignments = $script:AssertInstallAst.FindAll({ param($node) $node -is [System.Management.Automation.Language.AssignmentStatementAst] }, $true)
+        foreach ($assignment in $assignments) {
+            $left = $assignment.Left
+            if ($left -is [System.Management.Automation.Language.VariableExpressionAst] -and $left.VariablePath.UserPath -eq 'transcriptAssertionArgs') {
+                $hashtable = $assignment.Right.Find({ param($node) $node -is [System.Management.Automation.Language.HashtableAst] }, $true)
+                $keys += @($hashtable.KeyValuePairs | ForEach-Object { $_.Item1.Value })
+            }
+            elseif ($left -is [System.Management.Automation.Language.MemberExpressionAst] -and $left.Expression.Extent.Text -eq '$transcriptAssertionArgs') {
+                $keys += $left.Member.Value
+            }
+        }
+        $declared = @((Get-Command -Name Get-TranscriptAssertionResult).Parameters.Keys)
+
+        $keys | Should -Contain 'ExpectPowerShell7Bootstrap'
+        $keys | Should -Contain 'ExpectedAutoUpdatesStatus'
+        @($keys | Where-Object { $declared -notcontains $_ }) | Should -BeNullOrEmpty
+    }
+
+    It 'Declares the switches the workflow passes' {
+        $parameters = @($script:AssertInstallAst.ParamBlock.Parameters | ForEach-Object { $_.Name.VariablePath.UserPath })
+        $parameters | Should -Contain 'ExpectPowerShell7Bootstrap'
+        $parameters | Should -Contain 'ExpectAllSkippedOnSecondRun'
+        $parameters | Should -Contain 'InstallerPath'
+        $parameters | Should -Contain 'SkipApps'
+    }
+
+    It 'Stays ASCII, like the other e2e scripts: <Name>' -ForEach @(
+        @{ Name = 'e2e/Assert-Install.ps1' }
+        @{ Name = 'e2e/TranscriptAssertions.ps1' }
+    ) {
+        $bytes = [System.IO.File]::ReadAllBytes((Join-Path $script:RepoRoot $Name))
+        @($bytes | Where-Object { $_ -gt 0x7F }).Count | Should -Be 0
+    }
+}
