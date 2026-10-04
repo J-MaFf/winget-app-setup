@@ -44,7 +44,8 @@ function Get-OSArchitecture {
     .DESCRIPTION
         Mockable seam for catalog applicability conditions (review finding P3-32): for example,
         Adobe.Acrobat.Reader.64-bit ships only an x64 installer, which Adobe does not support on
-        ARM64 Windows, so the catalog keeps it off ARM64 PCs.
+        ARM64 Windows, so the catalog installs it everywhere but ARM64 and gives ARM64 PCs
+        Adobe.Acrobat.Reader.32-bit, the build Adobe supports there.
 
         Answers for the OS, not for this process. RuntimeInformation.OSArchitecture asks Windows'
         IsWow64Process2 for the native machine (.NET 7 and later, so PowerShell 7.3 and later;
@@ -53,7 +54,9 @@ function Get-OSArchitecture {
         variables do not: an x64 process under emulation on ARM64 sees PROCESSOR_ARCHITECTURE=AMD64
         and no PROCESSOR_ARCHITEW6432 (Microsoft Learn, "How emulation works on Arm": emulated
         apps are told about the emulated processor). Older .NET reads GetNativeSystemInfo instead,
-        which is still right for a 32-bit process but says X64 for an x64 one under emulation.
+        which is still right for a 32-bit process but says X64 for an x64 one under emulation: an
+        x64 PowerShell 7.0-7.2 (out of support) on an ARM64 PC reads X64, so that PC is offered the
+        64-bit Reader, as it was before the gate.
 
         Throws when the architecture cannot be read, so a condition built on it fails open
         (Test-AppApplicability): the installer warns and attempts the install.

@@ -205,7 +205,8 @@ Describe 'Get-DefaultAppCatalog (issue #190)' {
 
     # Review finding P3-32: Adobe.Acrobat.Reader.64-bit has only an x64 installer, which Adobe does
     # not support on ARM64 Windows, so an ARM64 PC failed it in both passes on every run (exit 1).
-    Context 'Architecture gating for Adobe Acrobat Reader 64-bit (review finding P3-32)' {
+    # ARM64 PCs get Adobe.Acrobat.Reader.32-bit (x86), the build Adobe supports there, instead.
+    Context 'Architecture gating for Adobe Acrobat Reader (review finding P3-32)' {
         It 'Gates Adobe.Acrobat.Reader.64-bit behind a condition whose description names ARM64' {
             $readerApp = @(Get-DefaultAppCatalog) | Where-Object { $_.name -eq 'Adobe.Acrobat.Reader.64-bit' }
 
@@ -246,13 +247,50 @@ Describe 'Get-DefaultAppCatalog (issue #190)' {
 
             Test-AppApplicability -App $readerApp | Should -Be $true
         }
+
+        # Gating the 64-bit Reader alone left ARM64 PCs with no PDF reader at all.
+        It 'Gates Adobe.Acrobat.Reader.32-bit behind a condition whose description names ARM64' {
+            $readerApp = @(Get-DefaultAppCatalog) | Where-Object { $_.name -eq 'Adobe.Acrobat.Reader.32-bit' }
+
+            @($readerApp).Count | Should -Be 1
+            $readerApp.condition | Should -BeOfType [scriptblock]
+            $readerApp.conditionDescription | Should -Match 'ARM64'
+        }
+
+        It 'Offers exactly one Reader on <Architecture>: <Expected>' -ForEach @(
+            @{ Architecture = 'Arm64'; Expected = 'Adobe.Acrobat.Reader.32-bit' }
+            @{ Architecture = 'X64'; Expected = 'Adobe.Acrobat.Reader.64-bit' }
+            @{ Architecture = 'X86'; Expected = 'Adobe.Acrobat.Reader.64-bit' }
+        ) {
+            $readerApps = @(Get-DefaultAppCatalog | Where-Object { $_.name -like 'Adobe.Acrobat.Reader.*' })
+            $script:mockedArchitecture = $Architecture
+            Mock Get-OSArchitecture { $script:mockedArchitecture }
+            Mock Write-WarningMessage { }
+
+            $applicable = @($readerApps | Where-Object { Test-AppApplicability -App $_ } | ForEach-Object { $_.name })
+
+            $applicable | Should -Be @($Expected)
+            Should -Invoke Write-WarningMessage -Times 0 -Exactly
+        }
+
+        It 'Reports the 32-bit Reader as not applicable on x64 without any winget probe or install' {
+            $readerApp = @(Get-DefaultAppCatalog) | Where-Object { $_.name -eq 'Adobe.Acrobat.Reader.32-bit' }
+            Mock Get-OSArchitecture { 'X64' }
+            Mock Test-WingetPackageInstalled { throw 'must not probe a not-applicable app' }
+            Mock Install-WingetPackage { throw 'must not install a not-applicable app' }
+
+            $outcome = Install-AppWithVerification -App $readerApp
+
+            $outcome.Status | Should -Be 'Skipped'
+            $outcome.SkipReason | Should -Be 'NotApplicable'
+        }
     }
 
     Context 'Deliberate catalog gating (issues #217, #271; review finding P3-32)' {
         It 'No catalog entry other than the reviewed exceptions carries a condition' {
             $conditioned = @(Get-DefaultAppCatalog) | Where-Object { $_.ContainsKey('condition') }
 
-            @($conditioned | ForEach-Object { $_.name }) | Should -Be @('Adobe.Acrobat.Reader.64-bit', 'Dell.CommandUpdate.Universal', 'Microsoft.WindowsTerminal')
+            @($conditioned | ForEach-Object { $_.name }) | Should -Be @('Adobe.Acrobat.Reader.64-bit', 'Adobe.Acrobat.Reader.32-bit', 'Dell.CommandUpdate.Universal', 'Microsoft.WindowsTerminal')
         }
     }
 }

@@ -39,11 +39,16 @@ function Get-DefaultAppCatalog {
     return @(
         @{name = '7zip.7zip' },
         @{name = 'GlavSoft.TightVNC' },
-        # The manifest's only installer is x64, and Adobe supports only the 32-bit (x86) Reader on
-        # Windows on ARM: on an ARM64 PC winget runs the x64 installer under emulation and it
-        # fails, in both passes, on every run (review finding P3-32). Architecture-gated so an
-        # ARM64 PC reports it Skipped (not applicable) with the reason instead.
+        # One Adobe Reader per PC, chosen by the OS architecture (review finding P3-32). The 64-bit
+        # package's only installer is x64, and Adobe supports only the 32-bit (x86) Reader on
+        # Windows on ARM: on an ARM64 PC winget ran the x64 installer under emulation and it
+        # failed, in both passes, on every run. So ARM64 PCs get the 32-bit package (x86, machine
+        # scope, run under emulation) and every other PC the 64-bit one; the other entry reports
+        # Skipped (not applicable) with its reason. The two conditions are exact opposites, so
+        # exactly one applies; only if Get-OSArchitecture threw (when .NET reports no architecture)
+        # would both fail open and be attempted.
         @{name = 'Adobe.Acrobat.Reader.64-bit'; condition = { (Get-OSArchitecture) -ne 'Arm64' }; conditionDescription = 'its only installer is x64, and Adobe supports only the 32-bit Reader on ARM64 Windows' },
+        @{name = 'Adobe.Acrobat.Reader.32-bit'; condition = { (Get-OSArchitecture) -eq 'Arm64' }; conditionDescription = 'ARM64 Windows only; other PCs get the 64-bit Reader' },
         @{name = 'Google.Chrome' },
         @{name = 'Google.GoogleDrive' },
         @{name = 'Git.Git' },

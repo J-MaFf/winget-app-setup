@@ -107,6 +107,11 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
         Mock Set-WindowsTerminalDefaults { }
         Mock Install-WingetAutoUpdate { @{ Status = 'DryRun'; Version = '2.12.0' } }
         Mock Install-AppWithVerification { @{ Status = 'Installed'; InstallResult = $null; FailureReason = $null } }
+        # Every app applies. The run decides applicability itself, before the first pass, so with
+        # the default catalog the real conditions would read this machine (Win32_ComputerSystem,
+        # the default-terminal registry values, the process ancestry, Get-AppxPackage); their
+        # wiring is tested in 'Applicability is decided once per run' and AppCatalog.Tests.ps1.
+        Mock Test-AppApplicability { $true }
         # The end-of-run winget check and the circuit breaker launch real winget; healthy by default
         # so a real (non -WhatIf) run in these tests never probes the machine.
         Mock Test-WingetLaunchable { [pscustomobject]@{ Launchable = $true; Version = 'v1.12.350'; Reason = $null; Attempts = 1 } }
@@ -438,6 +443,9 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
             $script:verifiedApps | Should -Contain '7zip.7zip'
             $script:verifiedApps | Should -Contain 'Microsoft.WindowsTerminal'
             Should -Invoke Install-AppWithVerification -Times $expectedCount -Exactly -ParameterFilter { [bool]$WhatIf }
+            # Applicability decided once per app, by the (mocked) gate, never by a real probe here.
+            Should -Invoke Test-AppApplicability -Times $expectedCount -Exactly
+            Should -Invoke Install-AppWithVerification -Times $expectedCount -Exactly -ParameterFilter { $Applicable -eq $true }
 
             # Bucket routing: Skipped and Installed land in their own summary rows, nothing Failed.
             $installedRow = @($script:capturedRows | Where-Object { $_[0] -eq 'Installed' })[0]
@@ -1841,6 +1849,27 @@ Describe 'Not-applicable gating end-to-end (issue #217)' {
         $skippedRow[1] | Should -Match 'Dell\.CommandUpdate\.Universal'
         $installedRow = @($script:capturedRows | Where-Object { $_[0] -eq 'Installed' })[0]
         $installedRow[1] | Should -Match 'Contoso\.NormalApp'
+        @($script:capturedRows | Where-Object { $_[0] -eq 'Failed' }).Count | Should -Be 0
+    }
+
+    # Review finding P3-32: the catalog's two Reader entries, real conditions and all, with only the
+    # architecture mocked. Gating the 64-bit Reader alone left an ARM64 PC with no PDF reader.
+    It 'Installs <Installs> and skips <Skips> as not applicable on <Architecture>' -ForEach @(
+        @{ Architecture = 'Arm64'; Installs = 'Adobe.Acrobat.Reader.32-bit'; Skips = 'Adobe.Acrobat.Reader.64-bit' }
+        @{ Architecture = 'X64'; Installs = 'Adobe.Acrobat.Reader.64-bit'; Skips = 'Adobe.Acrobat.Reader.32-bit' }
+    ) {
+        $script:mockedArchitecture = $Architecture
+        Mock Get-OSArchitecture { $script:mockedArchitecture }
+        $apps = @(Get-DefaultAppCatalog | Where-Object { $_.name -like 'Adobe.Acrobat.Reader.*' })
+        $skipped = $apps | Where-Object { $_.name -eq $Skips }
+
+        Invoke-WingetInstall -Apps $apps -WhatIf -NonInteractive
+
+        $script:warningMessages | Should -Contain "Skipping: $Skips (not applicable: $($skipped.conditionDescription))"
+        Should -Invoke Test-WingetPackageInstalled -Times 1 -Exactly -ParameterFilter { $PackageId -eq $Installs }
+        Should -Invoke Test-WingetPackageInstalled -Times 0 -Exactly -ParameterFilter { $PackageId -eq $Skips }
+        @($script:capturedRows | Where-Object { $_[0] -eq 'Installed' })[0][1] | Should -Be $Installs
+        @($script:capturedRows | Where-Object { $_[0] -eq 'Skipped' })[0][1] | Should -Be $Skips
         @($script:capturedRows | Where-Object { $_[0] -eq 'Failed' }).Count | Should -Be 0
     }
 }

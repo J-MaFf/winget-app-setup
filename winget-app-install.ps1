@@ -59,12 +59,12 @@ param (
 # This script is assembled from the WingetAppSetup module by build/Build-WingetInstallScript.ps1.
 # Edit the function source under WingetAppSetup/Public and WingetAppSetup/Private, then re-run the
 # build to regenerate this file. See readme.md ("Project layout") for details.
-# Build id: 1.0.0+1b230a41 (module version + SHA256 fragment of this whole script; issue #189).
+# Build id: 1.0.0+aea014f7 (module version + SHA256 fragment of this whole script; issue #189).
 # ------------------------------------------------------------------------------------------------
 
 # Content-derived build identity, logged at startup so a transcript from a remote machine
 # identifies exactly which installer build produced it (issue #189).
-$script:InstallerBuildId = '1.0.0+1b230a41'
+$script:InstallerBuildId = '1.0.0+aea014f7'
 
 # ------------------------------------------------Functions------------------------------------------------
 
@@ -4248,7 +4248,8 @@ function Get-OSArchitecture {
     .DESCRIPTION
         Mockable seam for catalog applicability conditions (review finding P3-32): for example,
         Adobe.Acrobat.Reader.64-bit ships only an x64 installer, which Adobe does not support on
-        ARM64 Windows, so the catalog keeps it off ARM64 PCs.
+        ARM64 Windows, so the catalog installs it everywhere but ARM64 and gives ARM64 PCs
+        Adobe.Acrobat.Reader.32-bit, the build Adobe supports there.
 
         Answers for the OS, not for this process. RuntimeInformation.OSArchitecture asks Windows'
         IsWow64Process2 for the native machine (.NET 7 and later, so PowerShell 7.3 and later;
@@ -4257,7 +4258,9 @@ function Get-OSArchitecture {
         variables do not: an x64 process under emulation on ARM64 sees PROCESSOR_ARCHITECTURE=AMD64
         and no PROCESSOR_ARCHITEW6432 (Microsoft Learn, "How emulation works on Arm": emulated
         apps are told about the emulated processor). Older .NET reads GetNativeSystemInfo instead,
-        which is still right for a 32-bit process but says X64 for an x64 one under emulation.
+        which is still right for a 32-bit process but says X64 for an x64 one under emulation: an
+        x64 PowerShell 7.0-7.2 (out of support) on an ARM64 PC reads X64, so that PC is offered the
+        64-bit Reader, as it was before the gate.
 
         Throws when the architecture cannot be read, so a condition built on it fails open
         (Test-AppApplicability): the installer warns and attempts the install.
@@ -6127,11 +6130,16 @@ function Get-DefaultAppCatalog {
     return @(
         @{name = '7zip.7zip' },
         @{name = 'GlavSoft.TightVNC' },
-        # The manifest's only installer is x64, and Adobe supports only the 32-bit (x86) Reader on
-        # Windows on ARM: on an ARM64 PC winget runs the x64 installer under emulation and it
-        # fails, in both passes, on every run (review finding P3-32). Architecture-gated so an
-        # ARM64 PC reports it Skipped (not applicable) with the reason instead.
+        # One Adobe Reader per PC, chosen by the OS architecture (review finding P3-32). The 64-bit
+        # package's only installer is x64, and Adobe supports only the 32-bit (x86) Reader on
+        # Windows on ARM: on an ARM64 PC winget ran the x64 installer under emulation and it
+        # failed, in both passes, on every run. So ARM64 PCs get the 32-bit package (x86, machine
+        # scope, run under emulation) and every other PC the 64-bit one; the other entry reports
+        # Skipped (not applicable) with its reason. The two conditions are exact opposites, so
+        # exactly one applies; only if Get-OSArchitecture threw (when .NET reports no architecture)
+        # would both fail open and be attempted.
         @{name = 'Adobe.Acrobat.Reader.64-bit'; condition = { (Get-OSArchitecture) -ne 'Arm64' }; conditionDescription = 'its only installer is x64, and Adobe supports only the 32-bit Reader on ARM64 Windows' },
+        @{name = 'Adobe.Acrobat.Reader.32-bit'; condition = { (Get-OSArchitecture) -eq 'Arm64' }; conditionDescription = 'ARM64 Windows only; other PCs get the 64-bit Reader' },
         @{name = 'Google.Chrome' },
         @{name = 'Google.GoogleDrive' },
         @{name = 'Git.Git' },
