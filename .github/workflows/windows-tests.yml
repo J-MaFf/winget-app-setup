@@ -4,15 +4,33 @@ name: Windows Tests (Pester)
 # test execution happens, since the Claude Code action (claude.yml) cannot run on
 # Windows runners. @claude (on ubuntu) can read these results via `actions: read`.
 #
-# Runs on the self-hosted win-test runner (Windows Server 2025, pwsh 7.6.3). Module
-# installs (Microsoft.WinGet.Client, Pester) persist across runs there, so the guarded
-# installs below are no-ops after the first run.
+# Which runner: trusted runs (pushes to main, manual dispatch, and pull requests from a branch
+# of this repository) use the self-hosted win-test runner (Windows Server 2025, pwsh 7.6.3).
+# Module installs (Microsoft.WinGet.Client, Pester) persist across runs there, so the guarded
+# installs below are no-ops after the first run. That runner is a persistent machine and runs
+# jobs elevated, so pull requests from forks run on GitHub-hosted windows-latest instead, a
+# throwaway VM where the guarded installs run every time. The choice fails closed: anything
+# not listed as trusted, including a PR whose fork has been deleted, gets windows-latest.
+# Dispatch with "hosted" ticked to run the windows-latest leg without a fork PR.
+#
+# This only covers fork PRs that leave this file alone. A pull_request run uses the workflow
+# file from the PR's merge commit, so a fork PR can rewrite runs-on. The repository setting
+# "Require approval for all external contributors" (check .github/ changes before approving a
+# run) and a job-started hook on the runner that refuses fork PR jobs close that gap.
+#
+# `pester` (the job id) is the required status check on main, whichever runner the job lands
+# on: renaming the job, or giving it a different `name:`, blocks every PR from merging.
 
 on:
   push:
     branches: [main]
   pull_request:
   workflow_dispatch:
+    inputs:
+      hosted:
+        description: Run on GitHub-hosted windows-latest (the runner fork PRs use) instead of the self-hosted runner
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -23,7 +41,11 @@ concurrency:
 
 jobs:
   pester:
-    runs-on: [self-hosted, windows]
+    runs-on: >-
+      ${{ (github.event_name == 'push'
+      || (github.event_name == 'workflow_dispatch' && !inputs.hosted)
+      || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository))
+      && fromJSON('["self-hosted", "windows"]') || 'windows-latest' }}
     timeout-minutes: 15
     steps:
       - name: Checkout repository

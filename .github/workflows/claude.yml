@@ -2,6 +2,16 @@ name: Claude Code
 
 # Thin caller for the shared reusable workflow — the @claude mention filter,
 # permissions, git-policies fetch, and action invocation live in J-MaFf/.github.
+#
+# The reusable workflow is pinned to a full commit SHA, not @main. This job holds contents: write
+# on a repository whose main branch is served straight to production machines (irm | iex), so
+# only a reviewed version of the shared workflow may run with that token. To move the pin, read
+# the diff of .github/workflows/claude.yml in J-MaFf/.github since the pinned SHA, then pin the
+# new main SHA (git ls-remote https://github.com/J-MaFf/.github refs/heads/main) and update the
+# date in the comment.
+#
+# secrets: inherit stays until the shared workflow declares CLAUDE_CODE_OAUTH_TOKEN under
+# on.workflow_call.secrets: a caller can pass a secret by name only when the callee declares it.
 
 on:
   issue_comment:
@@ -15,7 +25,7 @@ on:
 
 jobs:
   claude:
-    uses: J-MaFf/.github/.github/workflows/claude.yml@main
+    uses: J-MaFf/.github/.github/workflows/claude.yml@e5f8b3f4cc99d2c89f8218180ed135052cf13af1 # main as of 2026-09-15
     permissions:
       contents: write
       pull-requests: write
