@@ -769,6 +769,14 @@ Describe 'Invoke-PowerShell7Bootstrap' {
             Should -Invoke Write-WarningMessage -Times 0 -ParameterFilter { $Message -like 'Restart: REQUIRED*' }
         }
 
+        It 'Never removes the file it was started from (review finding P3-42)' {
+            Mock Remove-Item { }
+
+            Invoke-PowerShell7Bootstrap -CommandPath 'C:\repo\winget-app-install.ps1' | Out-Null
+
+            Should -Invoke Remove-Item -Times 0
+        }
+
         It 'Returns 7 instead of a false success when the pwsh launch itself fails' {
             # Under 5.1 a Start-Process failure is non-terminating: without the production
             # try/catch the result would be $null and the tail's exit ($null) would report 0.
@@ -1191,6 +1199,40 @@ Describe 'Invoke-PowerShell7Bootstrap' {
             Should -Invoke Start-Process -Times 1 -Exactly -ParameterFilter {
                 ($ArgumentList -join ' ') -match 'winget-app-setup-.*winget-app-install\.ps1'
             }
+        }
+
+        It 'Removes its downloaded copy once the PowerShell 7 run has ended (review finding P3-42)' {
+            # It used to stay in the temp folder for good: one 240 KB copy per run, which an RMM
+            # schedule turned into thousands.
+            $script:bootstrapEvents = [System.Collections.Generic.List[string]]::new()
+            Mock Start-Process { $script:bootstrapEvents.Add('relaunch'); [pscustomobject]@{ ExitCode = 42 } } -ParameterFilter { $FilePath -eq 'C:\pf7\pwsh.exe' }
+            Mock Remove-Item { $script:bootstrapEvents.Add("remove:$LiteralPath") }
+
+            Invoke-PowerShell7Bootstrap -ExpectedBuildId $script:runningBuildId | Should -Be 42
+
+            $script:bootstrapEvents.Count | Should -Be 2
+            $script:bootstrapEvents[0] | Should -Be 'relaunch'
+            $script:bootstrapEvents[1] | Should -Match 'remove:.*winget-app-setup-[0-9a-f]{32}$'
+            Should -Invoke Remove-Item -Times 1 -Exactly -ParameterFilter { $Recurse -and $Force }
+        }
+
+        It 'Removes its downloaded copy when PowerShell 7 cannot be started either' {
+            Mock Start-Process { throw 'broken alias' } -ParameterFilter { $FilePath -eq 'C:\pf7\pwsh.exe' }
+            Mock Remove-Item { }
+
+            Invoke-PowerShell7Bootstrap -ExpectedBuildId $script:runningBuildId | Should -Be 7
+
+            Should -Invoke Remove-Item -Times 1 -Exactly -ParameterFilter { $LiteralPath -match 'winget-app-setup-[0-9a-f]{32}$' }
+            Should -Invoke Write-ErrorMessage -Times 1 -Exactly -ParameterFilter { $Message -match 'PowerShell 7 could not be started \(C:\\pf7\\pwsh\.exe\): broken alias' }
+        }
+
+        It 'Removes its temp folder when the downloaded copy cannot be saved' {
+            Mock Set-Content { throw 'Access to the path is denied.' }
+            Mock Remove-Item { }
+
+            Invoke-PowerShell7Bootstrap -ExpectedBuildId $script:runningBuildId | Should -Be 7
+
+            Should -Invoke Remove-Item -Times 1 -Exactly -ParameterFilter { $LiteralPath -match 'winget-app-setup-[0-9a-f]{32}$' }
         }
 
         It 'Honors a custom InstallerUrl' {

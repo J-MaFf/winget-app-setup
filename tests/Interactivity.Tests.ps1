@@ -44,6 +44,57 @@ Describe 'Test-EffectiveNonInteractive (issue #214)' {
     }
 }
 
+# Review finding P3-41: the irm | iex one-liner cannot pass -NonInteractive, so an RMM job that runs
+# it as the logged-on user, with a console nobody watches, sets an environment variable instead.
+Describe 'Test-NonInteractiveRequested: the -NonInteractive switch or WINGET_APP_SETUP_NONINTERACTIVE (review finding P3-41)' {
+    BeforeEach {
+        $script:savedNonInteractiveVariable = [Environment]::GetEnvironmentVariable('WINGET_APP_SETUP_NONINTERACTIVE')
+        [Environment]::SetEnvironmentVariable('WINGET_APP_SETUP_NONINTERACTIVE', $null)
+    }
+
+    AfterEach {
+        [Environment]::SetEnvironmentVariable('WINGET_APP_SETUP_NONINTERACTIVE', $script:savedNonInteractiveVariable)
+    }
+
+    It 'Returns $true for the explicit switch' {
+        Test-NonInteractiveRequested -NonInteractive | Should -BeTrue
+    }
+
+    It 'Returns $false when neither the switch nor the variable is set' {
+        Test-NonInteractiveRequested | Should -BeFalse
+    }
+
+    It 'Returns $true for WINGET_APP_SETUP_NONINTERACTIVE=''<_>''' -ForEach @('1', 'true', 'TRUE', 'yes', 'Yes', ' 1 ') {
+        [Environment]::SetEnvironmentVariable('WINGET_APP_SETUP_NONINTERACTIVE', $_)
+
+        Test-NonInteractiveRequested | Should -BeTrue
+    }
+
+    It 'Returns $false for WINGET_APP_SETUP_NONINTERACTIVE=''<_>''' -ForEach @('0', 'false', 'no', 'off', '2') {
+        [Environment]::SetEnvironmentVariable('WINGET_APP_SETUP_NONINTERACTIVE', $_)
+
+        Test-NonInteractiveRequested | Should -BeFalse
+    }
+
+    It 'Makes Test-EffectiveNonInteractive report non-interactive before any auto-detection' {
+        # The auto-detection reads statics a test cannot set ([Environment]::UserInteractive, a
+        # redirected stdin), so the request is mocked and its use checked.
+        Mock Test-NonInteractiveRequested { $true }
+
+        Test-EffectiveNonInteractive | Should -BeTrue
+
+        Should -Invoke Test-NonInteractiveRequested -Times 1 -Exactly
+    }
+
+    It 'Passes the explicit switch through to it' {
+        Mock Test-NonInteractiveRequested { [bool]$NonInteractive }
+
+        Test-EffectiveNonInteractive -NonInteractive | Should -BeTrue
+
+        Should -Invoke Test-NonInteractiveRequested -Times 1 -Exactly -ParameterFilter { $NonInteractive }
+    }
+}
+
 Describe 'Test-IsContinuousIntegration (review finding P2-14)' {
     # The early-exit notice waits for a key press only outside CI, so these pin which variables
     # count. Every variable is saved and restored, because the suite itself may run under CI.

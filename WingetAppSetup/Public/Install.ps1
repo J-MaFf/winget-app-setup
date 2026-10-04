@@ -7,9 +7,10 @@
     When specified, the script performs all pre-flight checks and displays planned actions without making any system changes.
 .PARAMETER NonInteractive
     Suppresses the interactive extras for unattended runs (RMM, CI, scheduled tasks): the summary
-    grid-view window and the final "press any key to exit". Also auto-detected when the session is
-    non-interactive or stdin is redirected. No path asks a yes/no question anymore (issue #230), so
-    this switch is not needed to keep a run from blocking on a prompt. A non-interactive run that is
+    grid-view window and the final "press any key to exit". Also turned on by
+    $env:WINGET_APP_SETUP_NONINTERACTIVE (Test-NonInteractiveRequested), and auto-detected when the
+    session is non-interactive or stdin is redirected. No path asks a yes/no question anymore
+    (issue #230), so this switch is not needed to keep a run from blocking on a prompt. A non-interactive run that is
     not elevated returns 4 instead of raising a UAC prompt that nobody would answer (review finding
     P2-12).
 .PARAMETER SkipSystemCheck
@@ -43,7 +44,13 @@
     when no machine-wide winget.exe can be started. A run that relaunched
     itself elevated returns the elevated run's exit code (Restart-WithElevation waits for it). The
     generated entry script also exits 1 when a blocking pre-flight check fails (before this
-    function runs) and 5 when the run was aborted by an unexpected error or stopped from outside.
+    function runs), 5 when the run was aborted by an unexpected error or stopped from outside, and
+    6 when another run of the installer is in progress on the machine (review finding P3-41).
+
+    After the summary of a real run, the run's outcome is reported in machine-readable form
+    (Write-InstallerRunResult): one RESULT line, and last-run.json next to the transcript when the
+    entry script allows it ($script:InstallerRunRecordEnabled). Then the run lock is released, before
+    the final prompt. A dry run reports neither.
 #>
 function Invoke-WingetInstall {
     [OutputType([int])]
@@ -160,6 +167,9 @@ function Invoke-WingetInstall {
             # press itself: recorded so the entry script exits with this code without a second
             # notice and key press here.
             $script:InstallerPendingExitCode = [int]$elevation.ExitCode
+            # It also printed its own RESULT line and wrote last-run.json: this window adds no
+            # second, emptier record of the same run.
+            $script:InstallerRunReportPending = $false
             return [int]$elevation.ExitCode
         }
     }
@@ -311,6 +321,13 @@ function Invoke-WingetInstall {
         $applicableByName[$app.name] = Test-AppApplicability -App $app
     }
 
+    # One entry per app for the run's record (last-run.json and the RESULT line, review finding
+    # P3-41), in catalog order; the retry pass replaces an app's entry with its final outcome. Kept
+    # in $script: scope too, so a run that stops before its summary still reports the apps it had
+    # finished (build/fragments/tail.ps1).
+    $appRecords = [ordered]@{}
+    $script:InstallerAppRecords = $appRecords
+
     Foreach ($app in $apps) {
         $outcome = $null
         try {
@@ -331,6 +348,7 @@ function Invoke-WingetInstall {
                         # message carries the condition's human-readable reason.
                         $conditionText = if ($app.conditionDescription) { $app.conditionDescription } else { 'condition not met' }
                         Write-WarningMessage "Skipping: $($app.name) (not applicable: $conditionText)"
+                        $skipReason = "not applicable: $conditionText"
                     }
                     elseif ($outcome.SkipReason -eq 'Provisioned') {
                         # A run for the whole PC read it from the machine (review finding P3-24).
@@ -338,8 +356,10 @@ function Invoke-WingetInstall {
                     }
                     else {
                         Write-WarningMessage "Skipping: $($app.name) (already installed)"
+                        $skipReason = 'already installed'
                     }
                     $skippedApps += $app.name
+                    $appRecords[$app.name] = New-AppRunRecord -Id $app.name -Status 'Skipped' -Reason $skipReason
                 }
                 'Deferred' {
                     # No machine-wide installer, and this run installs for the whole PC only
@@ -360,6 +380,7 @@ function Invoke-WingetInstall {
                         }
                     }
                     $installedApps += $app.name
+                    $appRecords[$app.name] = New-AppRunRecord -Id $app.name -Status 'Installed' -InstallResult $outcome.InstallResult -RestartRequired ($restartRequiredApps -contains $app.name)
                 }
                 default {
                     # Surface the diagnostic detail the install pipeline already returns (winget
@@ -383,12 +404,14 @@ function Invoke-WingetInstall {
                     # Reason column (issue #189). RestartFirst: the installer cannot run until
                     # Windows restarts (0x8A15010A), so the retry pass leaves it alone.
                     $failedApps += @{ Name = $app.name; Reason = $failureReason; RestartFirst = (Test-RestartRequiredFirst -InstallResult $outcome.InstallResult) }
+                    $appRecords[$app.name] = New-AppRunRecord -Id $app.name -Status 'Failed' -Reason $failureReason -InstallResult $outcome.InstallResult
                 }
             }
         }
         catch {
             Write-ErrorMessage "Failed to install: $($app.name). Error: $_"
             $failedApps += @{ Name = $app.name; Reason = "Unexpected error: $_" }
+            $appRecords[$app.name] = New-AppRunRecord -Id $app.name -Status 'Failed' -Reason "Unexpected error: $_"
         }
 
         # A dry run never launches winget beyond its read-only checks, so it never trips this.
@@ -461,6 +484,7 @@ function Invoke-WingetInstall {
                             }
                         }
                         $failedApps += @{ Name = $appName; Reason = $failureReason; RestartFirst = (Test-RestartRequiredFirst -InstallResult $outcome.InstallResult) }
+                        $appRecords[$appName] = New-AppRunRecord -Id $appName -Status 'Failed' -Reason $failureReason -InstallResult $outcome.InstallResult
                     }
                     elseif ($outcome.Status -eq 'Deferred') {
                         # The retry got as far as the install, which found no machine-wide
@@ -483,11 +507,13 @@ function Invoke-WingetInstall {
                             $restartRequiredApps += $appName
                         }
                         $installedApps += $appName
+                        $appRecords[$appName] = New-AppRunRecord -Id $appName -Status 'Installed' -InstallResult $outcome.InstallResult -RestartRequired ($restartRequiredApps -contains $appName)
                     }
                 }
                 catch {
                     Write-ErrorMessage "Retry failed: $appName. Error: $_"
                     $failedApps += @{ Name = $appName; Reason = "Unexpected error: $_" }
+                    $appRecords[$appName] = New-AppRunRecord -Id $appName -Status 'Failed' -Reason "Unexpected error: $_"
                 }
 
                 if (-not $wingetNotLaunchable -and $outcome -and (Invoke-WingetLaunchCircuitBreaker -Outcome $outcome)) {
@@ -520,6 +546,8 @@ function Invoke-WingetInstall {
         Write-ErrorMessage "Winget-AutoUpdate setup failed unexpectedly: $_"
         $wauResult = [pscustomobject]@{ Status = 'Failed'; Version = $null }
     }
+    # For the record of a run that stops after this point but before its summary.
+    $script:InstallerAutoUpdateResult = $wauResult
 
     # A run must never report success while leaving winget unusable (whatever broke it, the next
     # run of this installer and every WAU update would fail). One bounded launch check, after the
@@ -691,6 +719,23 @@ function Invoke-WingetInstall {
     # Recorded before the final prompt: Ctrl+C there stops a run that has already finished, and
     # the entry script's abort guard then reports this code instead of an abort (5).
     $script:InstallerPendingExitCode = $exitCode
+
+    # The run's outcome in machine-readable form (review finding P3-41): last-run.json next to the
+    # transcript and one RESULT line, before the final prompt so someone at the console sees it too.
+    # A dry run changes nothing and reports neither.
+    if (-not $WhatIf) {
+        try {
+            $runRecord = New-InstallerRunRecord -ExitCode $exitCode -Apps @($appRecords.Values) -AutoUpdates (Get-AutoUpdateResultStatus -WauResult $wauResult) -AutoUpdatesVersion $wauResult.Version -RestartRequired $restartRequired -WingetUsable $wingetUsableAtEnd -SummaryReached
+            [void](Write-InstallerRunResult -Record $runRecord)
+        }
+        catch {
+            Write-WarningMessage "Could not report this run's result: $_"
+        }
+        $script:InstallerRunReportPending = $false
+        # The run is over: the next one (an RMM schedule) may start while this window waits for a
+        # key press.
+        Unlock-InstallerRun
+    }
 
     # Keep the console window open until the user presses a key. Skipped in non-interactive mode
     # so unattended runs never block.

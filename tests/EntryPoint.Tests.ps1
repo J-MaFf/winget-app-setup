@@ -14,6 +14,8 @@ BeforeAll {
     # real tail.ps1 logic in a separate pwsh, so its `exit` ends that child and not this test run.
     $script:currentPowerShell = (Get-Process -Id $PID).Path
     $script:installerText = Get-Content -Raw -Encoding UTF8 -Path $script:InstallerScriptPath
+    # The run lock name every child run below uses (review finding P3-41), never the real one.
+    $script:testRunLockName = 'Global\winget-app-setup-test-' + [Guid]::NewGuid().ToString('N')
 
     # Builds a copy of the generated installer with function overrides injected just before the
     # entry block, so the real tail.ps1 logic runs unchanged. -Body replaces Invoke-WingetInstall;
@@ -35,8 +37,13 @@ BeforeAll {
         # and the real pre-flight checks probe the network and the OS. Grant-InstallLogReadAccess
         # is stubbed because it runs icacls on the log folder in an elevated run (Windows-only, and
         # a test has no business changing ACLs); its own tests are in Logging.Tests.ps1.
+        # Invoke-InstallerHousekeeping is stubbed because it prunes the account's temp folder and
+        # %SystemRoot%\Temp (its own tests are in Housekeeping.Tests.ps1), and the run lock gets a
+        # name of this test run's own, so a child never contends with a real run on the machine.
         $override = "function Test-SystemRequirements { param([switch]`$WhatIf) `$true }`n"
         $override += "function Grant-InstallLogReadAccess { param([string]`$Path) `$true }`n"
+        $override += "function Invoke-InstallerHousekeeping { param([string]`$CurrentScriptPath) Write-Host ""HOUSEKEEPING RAN: `$CurrentScriptPath"" }`n"
+        $override += "function Get-InstallerRunLockName { '$($script:testRunLockName)' }`n"
         if ($PSBoundParameters.ContainsKey('Body')) {
             $override += "function Invoke-WingetInstall { param([switch]`$WhatIf, [switch]`$NonInteractive, [switch]`$SkipSystemCheck) $Body }`n"
         }
@@ -562,6 +569,188 @@ Describe 'Early exits explain themselves before the window closes (review findin
             $result.ExitCode | Should -Be 5
             $result.Output | Should -Not -Match 'install ran'
         }
+    }
+}
+
+# Review findings P3-41 and P3-42, in a real child process: one run at a time (exit code 6), a
+# RESULT line and last-run.json for every way a real run ends, and housekeeping only for the run
+# that holds the run lock. RunLock.Tests.ps1, RunRecord.Tests.ps1 and Housekeeping.Tests.ps1 test
+# the helpers themselves.
+Describe 'One run at a time, and the RESULT line and last-run.json of every run (review findings P3-41, P3-42)' {
+    BeforeAll {
+        $script:installerText -match "\`$script:InstallerBuildId = '([^']+)'" | Should -BeTrue
+        $script:runBuildId = $Matches[1]
+        # Elevated, whatever the runner: only an elevated run takes the lock and writes the record.
+        $script:elevated = "function Test-IsAdmin { `$true }"
+        $script:notElevated = "function Test-IsAdmin { `$false }"
+
+        # The last-run.json a child run wrote under its TestDrive ProgramData, or $null.
+        function Get-ChildRunRecord {
+            $file = Get-ChildItem -Path (Join-Path $TestDrive 'ProgramData') -Recurse -Filter 'last-run.json' -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($file) {
+                Get-Content -Raw -LiteralPath $file.FullName | ConvertFrom-Json
+            }
+        }
+
+        # The RESULT lines a child run printed.
+        function Get-ChildResultLine {
+            param ([string]$Output)
+            @([regex]::Matches($Output, 'RESULT: [^\r\n]*') | ForEach-Object { $_.Value })
+        }
+    }
+
+    BeforeEach {
+        # Each test reads only what its own child run wrote.
+        Remove-Item -Path (Join-Path $TestDrive 'ProgramData') -Recurse -Force -ErrorAction SilentlyContinue
+        $script:InstallerRunLock = $null
+    }
+
+    AfterEach {
+        Unlock-InstallerRun
+    }
+
+    It 'Exits 6 at once, changing nothing, while another run holds the lock' {
+        Lock-InstallerRun -Name $script:testRunLockName | Should -Be 'Acquired'
+        $path = New-FaultInjectedInstaller -Name 'another-run.ps1' -Body "Write-Host 'install ran'; return 0" -Overrides $script:elevated
+
+        $result = Invoke-ChildInstaller -Arguments @('-File', $path, '-SkipSystemCheck', '-NonInteractive')
+
+        $result.ExitCode | Should -Be 6
+        $result.Output | Should -Match 'Another run of this installer is in progress on this PC'
+        $result.Output | Should -Match 'The installer stopped early with exit code 6: another run of the installer is in progress on this PC'
+        $result.Output | Should -Not -Match 'install ran'
+        $result.Output | Should -Not -Match 'HOUSEKEEPING RAN'
+        $result.Output | Should -Not -Match 'UNEXPECTED ERROR|stopped before it finished'
+        # It reports its exit code, but the record belongs to the run in progress.
+        Get-ChildResultLine -Output $result.Output | Should -Be @("RESULT: exit=6 installed=0 skipped=0 failed=0 autoupdates=NotRun restart=no build=$($script:runBuildId) log=$((Get-ChildTranscript)[0].FullName)")
+        Get-ChildRunRecord | Should -BeNullOrEmpty
+    }
+
+    It 'Lets the next run start once the first one has ended, whatever its exit code' {
+        $path = New-FaultInjectedInstaller -Name 'sequential.ps1' -Body "Write-Host 'install ran'; return 3" -Overrides $script:elevated
+
+        $first = Invoke-ChildInstaller -Arguments @('-File', $path, '-SkipSystemCheck', '-NonInteractive')
+        $second = Invoke-ChildInstaller -Arguments @('-File', $path, '-SkipSystemCheck', '-NonInteractive')
+
+        $first.ExitCode | Should -Be 3
+        $second.ExitCode | Should -Be 3
+        $second.Output | Should -Match 'install ran'
+        $second.Output | Should -Not -Match 'in progress on this PC'
+        # The run lock is free again once the child has ended.
+        Lock-InstallerRun -Name $script:testRunLockName | Should -Be 'Acquired'
+    }
+
+    It 'Prunes old logs and leftover copies after taking the lock, giving housekeeping its own path' {
+        $path = New-FaultInjectedInstaller -Name 'housekeeping.ps1' -Body 'return 0' -Overrides $script:elevated
+
+        $result = Invoke-ChildInstaller -Arguments @('-File', $path, '-SkipSystemCheck', '-NonInteractive')
+
+        $result.ExitCode | Should -Be 0
+        $result.Output | Should -Match ('HOUSEKEEPING RAN: ' + [regex]::Escape($path))
+    }
+
+    It 'Ends an early exit with its RESULT line, after the notice, and records it in last-run.json' {
+        $path = New-FaultInjectedInstaller -Name 'early-exit.ps1' -Body "Write-ErrorMessage 'winget is missing'; return 2" -Overrides $script:elevated
+
+        $result = Invoke-ChildInstaller -Arguments @('-File', $path, '-SkipSystemCheck', '-NonInteractive')
+
+        $result.ExitCode | Should -Be 2
+        $transcript = (Get-ChildTranscript)[0].FullName
+        $resultLines = Get-ChildResultLine -Output $result.Output
+        $resultLines | Should -Be @("RESULT: exit=2 installed=0 skipped=0 failed=0 autoupdates=NotRun restart=no build=$($script:runBuildId) log=$transcript")
+        $result.Output.IndexOf('stopped early with exit code 2') | Should -BeLessThan $result.Output.IndexOf('RESULT: exit=2')
+        $record = Get-ChildRunRecord
+        $record.exitCode | Should -Be 2
+        $record.summaryReached | Should -BeFalse
+        $record.buildId | Should -Be $script:runBuildId
+        $record.transcriptPath | Should -Be $transcript
+        # Read from the text: ConvertFrom-Json turns the time into a DateTime.
+        (Get-Content -Raw -LiteralPath (Join-Path (Split-Path -Parent $transcript) 'last-run.json')) | Should -Match '"startedUtc":\s*"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z"'
+        @($record.apps).Count | Should -Be 0
+        # In the log the teammate attaches, too.
+        (Get-Content -Raw -LiteralPath $transcript) | Should -Match 'RESULT: exit=2 '
+    }
+
+    It 'Records an aborted run (exit code 5) with the apps it had finished' {
+        $body = "`$script:InstallerAppRecords = [ordered]@{ 'Git.Git' = (New-AppRunRecord -Id 'Git.Git' -Status 'Installed' -InstallResult @{ ExitCode = 0 }) }; [int]::Parse('not-a-number')"
+        $path = New-FaultInjectedInstaller -Name 'aborted.ps1' -Body $body -Overrides $script:elevated
+
+        $result = Invoke-ChildInstaller -Arguments @('-File', $path, '-SkipSystemCheck', '-NonInteractive')
+
+        $result.ExitCode | Should -Be 5
+        Get-ChildResultLine -Output $result.Output | Should -HaveCount 1
+        @(Get-ChildResultLine -Output $result.Output)[0] | Should -Match '^RESULT: exit=5 installed=1 skipped=0 failed=0 autoupdates=NotRun restart=no '
+        $record = Get-ChildRunRecord
+        $record.exitCode | Should -Be 5
+        $record.apps[0].id | Should -Be 'Git.Git'
+    }
+
+    It 'Records a run stopped from outside as exit code 5' {
+        $path = New-FaultInjectedInstaller -Name 'stopped-record.ps1' -Body 'throw [System.Management.Automation.PipelineStoppedException]::new()' -Overrides $script:elevated
+
+        $result = Invoke-ChildInstaller -Arguments @('-File', $path, '-SkipSystemCheck', '-NonInteractive')
+
+        $result.ExitCode | Should -Be 5
+        (Get-ChildRunRecord).exitCode | Should -Be 5
+        Get-ChildResultLine -Output $result.Output | Should -HaveCount 1
+    }
+
+    It 'Adds no second RESULT line after a run that reported at its summary' {
+        $body = "`$script:InstallerRunReportPending = `$false; Write-Host 'RESULT: exit=1 (from the summary)'; `$script:InstallerPendingExitCode = 1; return 1"
+        $path = New-FaultInjectedInstaller -Name 'reported.ps1' -Body $body -Overrides $script:elevated
+
+        $result = Invoke-ChildInstaller -Arguments @('-File', $path, '-SkipSystemCheck', '-NonInteractive')
+
+        $result.ExitCode | Should -Be 1
+        Get-ChildResultLine -Output $result.Output | Should -Be @('RESULT: exit=1 (from the summary)')
+    }
+
+    It 'Reports and releases the run lock before an early exit waits for a key press' {
+        # Someone at the console: the notice, then the RESULT line, then the prompt, by which time
+        # the lock is free, so a window left open does not make the next run (an RMM schedule)
+        # exit 6. Write-Prompt throws so the child never reaches [Console]::ReadKey.
+        $overrides = $script:elevated + "`n" +
+            "function Test-EffectiveNonInteractive { param([switch]`$NonInteractive) `$false }`n" +
+            "function Write-Prompt { param([string]`$Message) Write-Host ""PROMPT: `$Message (lock held: `$(`$null -ne `$script:InstallerRunLock))""; throw 'no key press in tests' }"
+        $path = New-FaultInjectedInstaller -Name 'early-exit-prompt.ps1' -Body "Write-ErrorMessage 'winget is missing'; return 2" -Overrides $overrides
+
+        $result = Invoke-ChildInstaller -Arguments @('-File', $path, '-SkipSystemCheck')
+
+        $result.ExitCode | Should -Be 2
+        $result.Output | Should -Match 'PROMPT: Press any key to exit\.\.\. \(lock held: False\)'
+        $noticeAt = $result.Output.IndexOf('stopped early with exit code 2')
+        $resultAt = $result.Output.IndexOf('RESULT: exit=2 ')
+        $promptAt = $result.Output.IndexOf('PROMPT: Press any key')
+        $noticeAt | Should -BeLessThan $resultAt
+        $resultAt | Should -BeLessThan $promptAt
+        Get-ChildResultLine -Output $result.Output | Should -HaveCount 1
+        (Get-ChildRunRecord).exitCode | Should -Be 2
+    }
+
+    It 'Takes no lock, prunes nothing and reports nothing in a dry run' {
+        Lock-InstallerRun -Name $script:testRunLockName | Should -Be 'Acquired'
+        $path = New-FaultInjectedInstaller -Name 'dry-run.ps1' -Body "Write-Host 'dry run ran'; return 0" -Overrides $script:elevated
+
+        $result = Invoke-ChildInstaller -Arguments @('-File', $path, '-SkipSystemCheck', '-NonInteractive', '-WhatIf')
+
+        $result.ExitCode | Should -Be 0
+        $result.Output | Should -Match 'dry run ran'
+        $result.Output | Should -Not -Match 'HOUSEKEEPING RAN|in progress on this PC'
+        Get-ChildResultLine -Output $result.Output | Should -HaveCount 0
+        Get-ChildRunRecord | Should -BeNullOrEmpty
+    }
+
+    It 'Takes no lock and writes no record when not elevated, and still ends with its RESULT line' {
+        # It stops with exit code 4 (or relaunches elevated, and that run takes the lock).
+        Lock-InstallerRun -Name $script:testRunLockName | Should -Be 'Acquired'
+        $path = New-FaultInjectedInstaller -Name 'not-elevated.ps1' -Body 'return 4' -Overrides $script:notElevated
+
+        $result = Invoke-ChildInstaller -Arguments @('-File', $path, '-SkipSystemCheck', '-NonInteractive')
+
+        $result.ExitCode | Should -Be 4
+        $result.Output | Should -Not -Match 'HOUSEKEEPING RAN|in progress on this PC'
+        @(Get-ChildResultLine -Output $result.Output)[0] | Should -Match '^RESULT: exit=4 '
+        Get-ChildRunRecord | Should -BeNullOrEmpty
     }
 }
 

@@ -16,7 +16,9 @@
     mechanism that kept the documented one-liner unattended (issue #230).
 
     A run is effectively non-interactive when ANY of the following holds:
-      - the caller passed the explicit -NonInteractive switch;
+      - the caller asked for an unattended run (Test-NonInteractiveRequested): the explicit
+        -NonInteractive switch, or $env:WINGET_APP_SETUP_NONINTERACTIVE, which the irm | iex
+        one-liner needs because it cannot pass a switch (review finding P3-41);
       - the process runs as SYSTEM (Test-IsSystemAccount; review finding P3-23): an RMM agent or a
         scheduled task, never a person at a console, whatever its session reports. Nobody would
         answer a key press, so none is waited for;
@@ -35,7 +37,7 @@ function Test-EffectiveNonInteractive {
         [switch]$NonInteractive
     )
 
-    if ($NonInteractive) {
+    if (Test-NonInteractiveRequested -NonInteractive:$NonInteractive) {
         return $true
     }
     if (Test-IsSystemAccount) {
@@ -51,6 +53,37 @@ function Test-EffectiveNonInteractive {
         # No usable console to probe: treat as non-interactive rather than risk a blocked prompt.
         return $true
     }
+}
+
+<#
+.SYNOPSIS
+    Determines whether the caller asked for an unattended run.
+.DESCRIPTION
+    True for the explicit -NonInteractive switch, or when the environment variable
+    WINGET_APP_SETUP_NONINTERACTIVE is 1, true or yes (any case, surrounding spaces ignored). The
+    documented irm | iex one-liner cannot pass a switch to the script it downloads (review finding
+    P3-41), so an RMM job or a wrapper that runs it as the logged-on user, with a console nobody
+    watches, sets the variable instead, and the run then never waits for a key press. Any other
+    value, or none, leaves the decision to Test-EffectiveNonInteractive's auto-detection. The
+    variable is inherited by the PowerShell 7 run the Windows PowerShell 5.1 bootstrap starts, so
+    it holds for the whole run. Runs under Windows PowerShell 5.1 too (the tail's bootstrap branch
+    calls Test-EffectiveNonInteractive).
+.PARAMETER NonInteractive
+    The caller's explicit -NonInteractive switch.
+.RETURNS
+    [bool]
+#>
+function Test-NonInteractiveRequested {
+    param (
+        [Parameter(Mandatory = $false)]
+        [switch]$NonInteractive
+    )
+
+    if ($NonInteractive) {
+        return $true
+    }
+    $requested = ([string]$env:WINGET_APP_SETUP_NONINTERACTIVE).Trim()
+    return (@('1', 'true', 'yes') -contains $requested)
 }
 
 <#

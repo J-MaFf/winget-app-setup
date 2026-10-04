@@ -19,11 +19,16 @@
 # Get-AuthenticodeSignature, which Test-PowerShell7MsiSignature calls, is a Windows PowerShell 5.1
 # cmdlet too. The tail's 5.1 branch also calls, around this file:
 # Test-EffectiveNonInteractive (with Test-IsSystemAccount, Private/Elevation.ps1: a try/catch around
-# WindowsIdentity.GetCurrent(), review finding P3-23) and Test-IsContinuousIntegration
+# WindowsIdentity.GetCurrent(), review finding P3-23), Test-NonInteractiveRequested and
+# Test-IsContinuousIntegration
 # (Private/Interactivity.ps1),
 # Start-InstallerTranscript, Grant-InstallLogReadAccess and Write-Prompt (Private/LoggingInternal.ps1),
-# and Exit-Installer and Write-InstallerExitNotice (Private/FailureReporting.ps1) - review findings
-# P2-13/P2-14/P3-14. Check any function added to this list - or any
+# Exit-Installer, Write-InstallerExitNotice and Wait-InstallerExitKeyPress
+# (Private/FailureReporting.ps1) - review findings P2-13/P2-14/P3-14 - and, through Exit-Installer,
+# Complete-InstallerRun (Private/RunRecord.ps1), which in this phase has nothing to report and only
+# calls Unlock-InstallerRun (Private/RunLock.ps1), which has no lock to release - review finding
+# P3-41.
+# Check any function added to this list - or any
 # future edit to one already on it - against the same constraints before calling it from here; the
 # build's parse + ASCII guards only catch a parse-breaking token, not a PS7-only runtime construct
 # that still parses under 5.1 but behaves differently or throws. The build's parse + ASCII guards
@@ -677,9 +682,13 @@ function Get-PowerShell7RelaunchInstaller {
     the OUTER command line, not the piped script body (verified empirically) - so the installer is
     downloaded again to a temp file, from raw.githubusercontent.com or else its jsDelivr mirror, and
     only a copy of the running build is used (Get-PowerShell7RelaunchInstaller, review finding
-    P2-18). That temp file is not cleaned up. A non-admin relaunch elevates from it: the elevated
-    window checks it against the SHA256 the relaunched run took at startup and runs a copy kept in
-    a folder only administrators can change (Restart-WithElevation, review finding P3-11).
+    P2-18). A non-admin relaunch elevates from it: the elevated window checks it against the SHA256
+    the relaunched run took at startup and runs a copy kept in a folder only administrators can
+    change (Restart-WithElevation, review finding P3-11). The temp folder is removed once the
+    relaunched run has ended (review finding P3-42): nothing reads it after that, because the
+    relaunched run waits for an elevated run it starts, and that run reads the file once at its
+    start. A folder left behind by a bootstrap that was stopped is removed by a later run
+    (Invoke-InstallerHousekeeping).
 
     There is no aka.ms/install-powershell.ps1 tier behind the MSI any more (review findings P2-17
     and P3-17). That script reads the same metadata.json and downloads the same MSI with no
@@ -887,6 +896,7 @@ function Invoke-PowerShell7Bootstrap {
     }
 
     $relaunchPath = $CommandPath
+    $relaunchDirectory = $null
     if (-not $relaunchPath) {
         $installerContent = Get-PowerShell7RelaunchInstaller -Url $InstallerUrl -ExpectedBuildId $ExpectedBuildId
         if (-not $installerContent) {
@@ -916,6 +926,9 @@ function Invoke-PowerShell7Bootstrap {
         }
         catch {
             Write-ErrorMessage "Could not save the installer for the relaunch: $_"
+            if ($relaunchDirectory) {
+                Remove-Item -LiteralPath $relaunchDirectory -Recurse -Force -ErrorAction SilentlyContinue
+            }
             return 7
         }
     }
@@ -939,11 +952,21 @@ function Invoke-PowerShell7Bootstrap {
     # the try/catch $relaunchProcess would stay $null and the tail's 'exit ($null)' would report
     # SUCCESS (exit 0) to the RMM/CI callers this exit code exists for (issue #225 review).
     $relaunchProcess = $null
+    $relaunchError = $null
     try {
         $relaunchProcess = Start-Process -FilePath $pwshPath -ArgumentList $relaunchArguments -NoNewWindow -Wait -PassThru -ErrorAction Stop
     }
     catch {
-        Write-ErrorMessage "PowerShell 7 could not be started ($pwshPath): $_"
+        $relaunchError = $_
+    }
+    # The downloaded copy of an irm | iex run is not needed any more (review finding P3-42): the
+    # relaunched run has ended, and an elevated run it started has ended too and ran its own copy.
+    # Only the folder this function made; a file the caller started from is never removed.
+    if ($relaunchDirectory) {
+        Remove-Item -LiteralPath $relaunchDirectory -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    if ($relaunchError) {
+        Write-ErrorMessage "PowerShell 7 could not be started ($pwshPath): $relaunchError"
         return 7
     }
     if (-not $relaunchProcess) {

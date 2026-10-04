@@ -39,8 +39,10 @@
 .PARAMETER NonInteractive
  Suppresses the interactive extras for unattended runs (RMM, CI, scheduled tasks): the summary
  grid-view window and the "press any key to exit" that holds the window at the end of a run or
- after an early failure. Also auto-detected when the session is non-interactive or stdin is
- redirected; under CI the early-failure key press is skipped too. The installer asks no yes/no
+ after an early failure. Also turned on by the environment variable
+ WINGET_APP_SETUP_NONINTERACTIVE=1 (or true, or yes), for the irm | iex one-liner, which cannot pass
+ a switch, and auto-detected when the session is non-interactive or stdin is redirected; under CI
+ the early-failure key press is skipped too. The installer asks no yes/no
  questions on any path (issue #230), so this switch is only about those extras - it is not needed
  to keep a run from blocking on a prompt.
 #>
@@ -59,12 +61,12 @@ param (
 # This script is assembled from the WingetAppSetup module by build/Build-WingetInstallScript.ps1.
 # Edit the function source under WingetAppSetup/Public and WingetAppSetup/Private, then re-run the
 # build to regenerate this file. See readme.md ("Project layout") for details.
-# Build id: 1.0.0+d44cfce7 (module version + SHA256 fragment of this whole script; issue #189).
+# Build id: 1.0.0+0c06b28e (module version + SHA256 fragment of this whole script; issue #189).
 # ------------------------------------------------------------------------------------------------
 
 # Content-derived build identity, logged at startup so a transcript from a remote machine
 # identifies exactly which installer build produced it (issue #189).
-$script:InstallerBuildId = '1.0.0+d44cfce7'
+$script:InstallerBuildId = '1.0.0+0c06b28e'
 
 # ------------------------------------------------Functions------------------------------------------------
 
@@ -473,12 +475,16 @@ function Start-ElevatedProcess {
     Invoke-WingetInstall returns its exit code and the entry script exits with it.
 
     A failed run that has not shown its outcome yet - an early exit, such as a failed pre-flight
-    check, winget missing, a declined elevation, a failed PowerShell 7 bootstrap or an aborted run -
-    first prints Write-InstallerExitNotice: the reason, the log path and the build id, then waits
-    for a key press when someone is at the console (review finding P2-14). Under irm | iex the exit
-    closes the window, which used to take the error and the log path with it before anyone could
-    read them. Runs under Windows PowerShell 5.1 too (the bootstrap phase), so it stays
-    5.1-runtime compatible.
+    check, another run in progress, winget missing, a declined elevation, a failed PowerShell 7
+    bootstrap or an aborted run - first prints Write-InstallerExitNotice: the reason, the log path
+    and the build id, then waits for a key press when someone is at the console (review finding
+    P2-14). Under irm | iex the exit closes the window, which used to take the error and the log
+    path with it before anyone could read them. Runs under Windows PowerShell 5.1 too (the bootstrap
+    phase), so it stays 5.1-runtime compatible.
+
+    Before that key press, Complete-InstallerRun prints the run's RESULT line, writes last-run.json
+    and releases the run lock (review finding P3-41), so the RESULT line follows the notice, and a
+    window left open at the prompt does not make the next run (an RMM schedule) exit 6.
 .PARAMETER Code
     The process exit code. Default 0.
 .PARAMETER Reason
@@ -502,15 +508,30 @@ function Exit-Installer {
         [switch]$OutcomeShown
     )
 
+    $noticeShown = $false
     if ($Code -ne 0 -and -not $OutcomeShown) {
         # Recorded before the key press: Ctrl+C there still ends the run with this code, through the
         # entry script's abort guard, instead of as an abort (5).
         $script:InstallerPendingExitCode = $Code
         try {
-            Write-InstallerExitNotice -Code $Code -Reason $Reason -NonInteractive:$NonInteractive
+            Write-InstallerExitNotice -Code $Code -Reason $Reason -NonInteractive:$NonInteractive -NoPause
+            $noticeShown = $true
         }
         catch {
             # The notice is a courtesy; nothing may keep the run from exiting with its code.
+        }
+    }
+    try {
+        Complete-InstallerRun -ExitCode $Code
+    }
+    catch {
+        # Best-effort as well.
+    }
+    if ($noticeShown) {
+        try {
+            Wait-InstallerExitKeyPress -NonInteractive:$NonInteractive
+        }
+        catch {
         }
     }
     $script:InstallerExitRequested = $true
@@ -563,6 +584,7 @@ function Write-InstallerExitNotice {
             3 { $why = 'the app catalog failed validation (see above)' }
             4 { $why = 'administrator rights are required, and this run was not elevated (see above)' }
             5 { $why = 'the run was aborted before it finished (see above)' }
+            6 { $why = 'another run of the installer is in progress on this PC' }
             7 { $why = 'PowerShell 7 could not be installed, or the installer could not be relaunched under it (see above)' }
         }
     }
@@ -589,6 +611,26 @@ function Write-InstallerExitNotice {
     if ($NoPause) {
         return
     }
+    Wait-InstallerExitKeyPress -NonInteractive:$NonInteractive
+}
+
+<#
+.SYNOPSIS
+    Waits for a key press before an early exit closes the window, when someone is at the console.
+.DESCRIPTION
+    Write-InstallerExitNotice's wait (review finding P2-14), on its own so Exit-Installer can report
+    the run's outcome between the notice and the wait. Never waits in a non-interactive run
+    (Test-EffectiveNonInteractive) or under CI (Test-IsContinuousIntegration). Runs under Windows
+    PowerShell 5.1 too.
+.PARAMETER NonInteractive
+    The caller's -NonInteractive switch.
+#>
+function Wait-InstallerExitKeyPress {
+    param (
+        [Parameter(Mandatory = $false)]
+        [switch]$NonInteractive
+    )
+
     if ((Test-EffectiveNonInteractive -NonInteractive:$NonInteractive) -or (Test-IsContinuousIntegration)) {
         return
     }
@@ -1045,6 +1087,265 @@ function Test-AndInstallGraphicalTools {
     return $false
 }
 
+# --- Housekeeping ---
+# Retention for what the installer leaves on disk (review finding P3-42). Every run used to add a
+# transcript, per-app installer logs and, on the Windows PowerShell 5.1 irm | iex path, a full copy
+# of the installer in a temp folder, and nothing ever removed them: an RMM schedule that starts the
+# installer every 90 minutes grew them without bound.
+
+<#
+.SYNOPSIS
+    Deletes the installer's old logs and its leftover temporary copies, never the current run's.
+.DESCRIPTION
+    Called by the generated entry script once a real (not -WhatIf) elevated run holds the run lock
+    (Lock-InstallerRun), so two runs never prune at the same time and a dry run changes nothing.
+    It keeps the logs of the newest KeepTranscripts transcripts (Remove-OldInstallerLog) and removes
+    the installer's temporary copy folders older than TempCopyMaxAgeHours
+    (Remove-StaleInstallerCopy). The retention numbers are this function's parameter defaults, the
+    one place they are set. Housekeeping never stops a run: any failure warns and the run goes on.
+.PARAMETER LogDirectory
+    The logs folder. Default: the folder of this run's transcript (Get-InstallerLogDirectory);
+    nothing is pruned there when there is none.
+.PARAMETER KeepTranscripts
+    How many install-*.log transcripts to keep, newest first. A run started from Windows PowerShell
+    writes two (the bootstrap's and the PowerShell 7 run's), and one that relaunches itself elevated
+    writes up to four, so 30 keeps the logs of at least the last 7 runs.
+.PARAMETER TempRoot
+    The folders to look for leftover copies in. Default: this account's temp folder and the
+    elevated relaunch's copy folder (Get-ElevatedCopyRoot, %SystemRoot%\Temp).
+.PARAMETER TempCopyMaxAgeHours
+    A copy folder at least this old is removed. No run lasts this long, so a folder this old does
+    not belong to a run still in progress.
+.PARAMETER CurrentScriptPath
+    The path of the running installer ($PSCommandPath). Its folder is never removed.
+.RETURNS
+    [pscustomobject] @{ LogsRemoved; CopiesRemoved }.
+#>
+function Invoke-InstallerHousekeeping {
+    param (
+        [Parameter(Mandatory = $false)]
+        [AllowEmptyString()]
+        [AllowNull()]
+        [string]$LogDirectory,
+
+        [Parameter(Mandatory = $false)]
+        [ValidateRange(1, 1000)]
+        [int]$KeepTranscripts = 30,
+
+        [Parameter(Mandatory = $false)]
+        [string[]]$TempRoot,
+
+        [Parameter(Mandatory = $false)]
+        [ValidateRange(1, 8760)]
+        [int]$TempCopyMaxAgeHours = 24,
+
+        [Parameter(Mandatory = $false)]
+        [AllowEmptyString()]
+        [AllowNull()]
+        [string]$CurrentScriptPath
+    )
+
+    $logsRemoved = 0
+    $copiesRemoved = 0
+    try {
+        if (-not $PSBoundParameters.ContainsKey('LogDirectory')) {
+            $LogDirectory = Get-InstallerLogDirectory
+        }
+        if (-not [string]::IsNullOrWhiteSpace($LogDirectory)) {
+            $logsRemoved = Remove-OldInstallerLog -LogDirectory $LogDirectory -KeepTranscripts $KeepTranscripts -CurrentTranscriptPath $script:InstallLogPath
+        }
+        if (-not $PSBoundParameters.ContainsKey('TempRoot')) {
+            $TempRoot = @([System.IO.Path]::GetTempPath(), (Get-ElevatedCopyRoot))
+        }
+        $copiesRemoved = Remove-StaleInstallerCopy -Root $TempRoot -MaxAgeHours $TempCopyMaxAgeHours -CurrentScriptPath $CurrentScriptPath
+        if ($logsRemoved -gt 0 -or $copiesRemoved -gt 0) {
+            Write-Info ('Removed {0} old log file(s), keeping the logs of the newest {1} transcripts, and {2} leftover temporary copy folder(s) of the installer.' -f $logsRemoved, $KeepTranscripts, $copiesRemoved)
+        }
+    }
+    catch {
+        Write-WarningMessage "Could not remove the installer's old logs and temporary copies: $($_.Exception.Message.Trim().TrimEnd('.')). Continuing."
+    }
+    return [pscustomobject]@{ LogsRemoved = $logsRemoved; CopiesRemoved = $copiesRemoved }
+}
+
+<#
+.SYNOPSIS
+    Keeps the newest transcripts in the logs folder and the installer logs of their runs, and
+    deletes the rest.
+.DESCRIPTION
+    Works on the file names the installer gives its logs, each of which carries the local time it
+    was started at (yyyyMMdd-HHmmss):
+      - transcripts: install-<time>.log, with -bootstrap and/or -whatif before .log;
+      - installer logs: winget-<install|upgrade|uninstall|repair>-<package id>-<time>[-<n>].log
+        (winget's --log, Invoke-WingetProcess) and pwsh-msi-<time>-<attempt>.log (msiexec's log of
+        the PowerShell 7 MSI, Install-PowerShell7FromMsi).
+    The newest KeepTranscripts transcripts are kept. When there are more, the older ones are
+    deleted, and so is every installer log older than the oldest transcript kept: a run writes its
+    installer logs after its transcript starts, so the logs of every run whose transcript is kept
+    stay. The order comes from the time in the names, not from file timestamps, which copying or
+    touching a file changes. Other files (last-run.json, anything a person put there) are
+    never touched, nor is the current run's transcript. A file that cannot be deleted (open in
+    another process) is left for the next run.
+.PARAMETER LogDirectory
+    The logs folder.
+.PARAMETER KeepTranscripts
+    How many transcripts to keep.
+.PARAMETER CurrentTranscriptPath
+    This run's transcript, never deleted.
+.RETURNS
+    [int] The number of files deleted.
+#>
+function Remove-OldInstallerLog {
+    [OutputType([int])]
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$LogDirectory,
+
+        [Parameter(Mandatory = $true)]
+        [int]$KeepTranscripts,
+
+        [Parameter(Mandatory = $false)]
+        [AllowEmptyString()]
+        [AllowNull()]
+        [string]$CurrentTranscriptPath
+    )
+
+    if (-not (Test-Path -LiteralPath $LogDirectory -PathType Container)) {
+        return 0
+    }
+
+    $transcripts = @()
+    $installerLogs = @()
+    foreach ($file in @(Get-ChildItem -LiteralPath $LogDirectory -File -Force -ErrorAction Stop)) {
+        if ($file.Name -match '^install-(\d{8}-\d{6})(?:-bootstrap)?(?:-whatif)?\.log$') {
+            $transcripts += [pscustomobject]@{ File = $file; Stamp = $Matches[1] }
+        }
+        elseif ($file.Name -match '^(?:winget-(?:install|upgrade|uninstall|repair)-.+|pwsh-msi)-(\d{8}-\d{6})(?:-\d+)?\.log$') {
+            $installerLogs += [pscustomobject]@{ File = $file; Stamp = $Matches[1] }
+        }
+    }
+    if ($transcripts.Count -le $KeepTranscripts) {
+        return 0
+    }
+
+    # Newest first; the name breaks a tie between the transcripts of one second.
+    $ordered = @($transcripts | Sort-Object -Property @{ Expression = 'Stamp'; Descending = $true }, @{ Expression = { $_.File.Name }; Descending = $true })
+    $oldestKeptStamp = $ordered[$KeepTranscripts - 1].Stamp
+    $toDelete = @($ordered | Select-Object -Skip $KeepTranscripts)
+    $toDelete += @($installerLogs | Where-Object { [string]::CompareOrdinal($_.Stamp, $oldestKeptStamp) -lt 0 })
+
+    $removed = 0
+    foreach ($entry in $toDelete) {
+        if ($CurrentTranscriptPath -and [string]::Equals($entry.File.FullName, $CurrentTranscriptPath, [System.StringComparison]::OrdinalIgnoreCase)) {
+            continue
+        }
+        try {
+            Remove-Item -LiteralPath $entry.File.FullName -Force -ErrorAction Stop
+            $removed++
+        }
+        catch {
+            # Open in another process, or already gone: the next run tries again.
+        }
+    }
+    return $removed
+}
+
+<#
+.SYNOPSIS
+    Deletes the installer's leftover temporary copy folders.
+.DESCRIPTION
+    The installer makes folders named winget-app-setup-<32 hex digits> (the Windows PowerShell 5.1
+    bootstrap's downloaded copy for an irm | iex run, and the elevated relaunch's checked copy under
+    %SystemRoot%\Temp), winget-app-setup-elevate-<32 hex digits> (the copy staged for the elevated
+    window) and winget-app-setup-pwsh-<32 hex digits> (the PowerShell 7 MSI download). Each is
+    removed by the run that made it, but a run that is killed, or whose window is closed, leaves its
+    folder behind.
+
+    This removes such folders once they are MaxAgeHours old. It skips the running installer's own
+    folder, and anything that is not one of those flat folders of files: a folder that is a link or
+    holds a folder or a link is left alone, because only someone else can have put it there (any
+    account can create entries in %SystemRoot%\Temp). Files are deleted one by one and the folder
+    last, so nothing outside the folder is ever followed.
+.PARAMETER Root
+    The folders to look in. Duplicates and folders that do not exist are skipped.
+.PARAMETER MaxAgeHours
+    The age (last write time) from which a folder is removed.
+.PARAMETER CurrentScriptPath
+    The running installer's path; its folder is kept.
+.RETURNS
+    [int] The number of folders deleted.
+#>
+function Remove-StaleInstallerCopy {
+    [OutputType([int])]
+    param (
+        [Parameter(Mandatory = $false)]
+        [AllowEmptyCollection()]
+        [string[]]$Root = @(),
+
+        [Parameter(Mandatory = $true)]
+        [int]$MaxAgeHours,
+
+        [Parameter(Mandatory = $false)]
+        [AllowEmptyString()]
+        [AllowNull()]
+        [string]$CurrentScriptPath
+    )
+
+    $cutoffUtc = [DateTime]::UtcNow.AddHours(-$MaxAgeHours)
+    $currentDirectory = $null
+    if (-not [string]::IsNullOrWhiteSpace($CurrentScriptPath)) {
+        $currentDirectory = [System.IO.Path]::GetDirectoryName([System.IO.Path]::GetFullPath($CurrentScriptPath)).TrimEnd('\', '/')
+    }
+
+    $removed = 0
+    $seenRoots = @{}
+    foreach ($rootPath in $Root) {
+        if ([string]::IsNullOrWhiteSpace($rootPath)) {
+            continue
+        }
+        $rootKey = $rootPath.TrimEnd('\', '/').ToUpperInvariant()
+        if ($seenRoots.ContainsKey($rootKey)) {
+            continue
+        }
+        $seenRoots[$rootKey] = $true
+        if (-not (Test-Path -LiteralPath $rootPath -PathType Container)) {
+            continue
+        }
+
+        $candidates = @(Get-ChildItem -LiteralPath $rootPath -Directory -Force -ErrorAction SilentlyContinue |
+                Where-Object { $_.Name -match '^winget-app-setup-(?:elevate-|pwsh-)?[0-9a-fA-F]{32}$' })
+        foreach ($directory in $candidates) {
+            if ($directory.LastWriteTimeUtc -gt $cutoffUtc) {
+                continue
+            }
+            if ($directory.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+                continue
+            }
+            if ($currentDirectory -and [string]::Equals($directory.FullName.TrimEnd('\', '/'), $currentDirectory, [System.StringComparison]::OrdinalIgnoreCase)) {
+                continue
+            }
+            try {
+                $children = @(Get-ChildItem -LiteralPath $directory.FullName -Force -ErrorAction Stop)
+                $foreign = @($children | Where-Object { $_.PSIsContainer -or ($_.Attributes -band [System.IO.FileAttributes]::ReparsePoint) })
+                if ($foreign.Count -gt 0) {
+                    continue
+                }
+                foreach ($child in $children) {
+                    Remove-Item -LiteralPath $child.FullName -Force -ErrorAction Stop
+                }
+                # Not Remove-Item: on a folder that is not empty (something was added meanwhile) it
+                # asks for confirmation instead of failing.
+                [System.IO.Directory]::Delete($directory.FullName, $false)
+                $removed++
+            }
+            catch {
+                # In use, or not this account's to delete: left alone.
+            }
+        }
+    }
+    return $removed
+}
+
 # --- InstallVerification ---
 <#
 .SYNOPSIS
@@ -1477,7 +1778,9 @@ function Invoke-WingetLaunchCircuitBreaker {
     mechanism that kept the documented one-liner unattended (issue #230).
 
     A run is effectively non-interactive when ANY of the following holds:
-      - the caller passed the explicit -NonInteractive switch;
+      - the caller asked for an unattended run (Test-NonInteractiveRequested): the explicit
+        -NonInteractive switch, or $env:WINGET_APP_SETUP_NONINTERACTIVE, which the irm | iex
+        one-liner needs because it cannot pass a switch (review finding P3-41);
       - the process runs as SYSTEM (Test-IsSystemAccount; review finding P3-23): an RMM agent or a
         scheduled task, never a person at a console, whatever its session reports. Nobody would
         answer a key press, so none is waited for;
@@ -1496,7 +1799,7 @@ function Test-EffectiveNonInteractive {
         [switch]$NonInteractive
     )
 
-    if ($NonInteractive) {
+    if (Test-NonInteractiveRequested -NonInteractive:$NonInteractive) {
         return $true
     }
     if (Test-IsSystemAccount) {
@@ -1512,6 +1815,37 @@ function Test-EffectiveNonInteractive {
         # No usable console to probe: treat as non-interactive rather than risk a blocked prompt.
         return $true
     }
+}
+
+<#
+.SYNOPSIS
+    Determines whether the caller asked for an unattended run.
+.DESCRIPTION
+    True for the explicit -NonInteractive switch, or when the environment variable
+    WINGET_APP_SETUP_NONINTERACTIVE is 1, true or yes (any case, surrounding spaces ignored). The
+    documented irm | iex one-liner cannot pass a switch to the script it downloads (review finding
+    P3-41), so an RMM job or a wrapper that runs it as the logged-on user, with a console nobody
+    watches, sets the variable instead, and the run then never waits for a key press. Any other
+    value, or none, leaves the decision to Test-EffectiveNonInteractive's auto-detection. The
+    variable is inherited by the PowerShell 7 run the Windows PowerShell 5.1 bootstrap starts, so
+    it holds for the whole run. Runs under Windows PowerShell 5.1 too (the tail's bootstrap branch
+    calls Test-EffectiveNonInteractive).
+.PARAMETER NonInteractive
+    The caller's explicit -NonInteractive switch.
+.RETURNS
+    [bool]
+#>
+function Test-NonInteractiveRequested {
+    param (
+        [Parameter(Mandatory = $false)]
+        [switch]$NonInteractive
+    )
+
+    if ($NonInteractive) {
+        return $true
+    }
+    $requested = ([string]$env:WINGET_APP_SETUP_NONINTERACTIVE).Trim()
+    return (@('1', 'true', 'yes') -contains $requested)
 }
 
 <#
@@ -2485,11 +2819,16 @@ function Test-WingetListOutputContainsPackageId {
 # Get-AuthenticodeSignature, which Test-PowerShell7MsiSignature calls, is a Windows PowerShell 5.1
 # cmdlet too. The tail's 5.1 branch also calls, around this file:
 # Test-EffectiveNonInteractive (with Test-IsSystemAccount, Private/Elevation.ps1: a try/catch around
-# WindowsIdentity.GetCurrent(), review finding P3-23) and Test-IsContinuousIntegration
+# WindowsIdentity.GetCurrent(), review finding P3-23), Test-NonInteractiveRequested and
+# Test-IsContinuousIntegration
 # (Private/Interactivity.ps1),
 # Start-InstallerTranscript, Grant-InstallLogReadAccess and Write-Prompt (Private/LoggingInternal.ps1),
-# and Exit-Installer and Write-InstallerExitNotice (Private/FailureReporting.ps1) - review findings
-# P2-13/P2-14/P3-14. Check any function added to this list - or any
+# Exit-Installer, Write-InstallerExitNotice and Wait-InstallerExitKeyPress
+# (Private/FailureReporting.ps1) - review findings P2-13/P2-14/P3-14 - and, through Exit-Installer,
+# Complete-InstallerRun (Private/RunRecord.ps1), which in this phase has nothing to report and only
+# calls Unlock-InstallerRun (Private/RunLock.ps1), which has no lock to release - review finding
+# P3-41.
+# Check any function added to this list - or any
 # future edit to one already on it - against the same constraints before calling it from here; the
 # build's parse + ASCII guards only catch a parse-breaking token, not a PS7-only runtime construct
 # that still parses under 5.1 but behaves differently or throws. The build's parse + ASCII guards
@@ -3143,9 +3482,13 @@ function Get-PowerShell7RelaunchInstaller {
     the OUTER command line, not the piped script body (verified empirically) - so the installer is
     downloaded again to a temp file, from raw.githubusercontent.com or else its jsDelivr mirror, and
     only a copy of the running build is used (Get-PowerShell7RelaunchInstaller, review finding
-    P2-18). That temp file is not cleaned up. A non-admin relaunch elevates from it: the elevated
-    window checks it against the SHA256 the relaunched run took at startup and runs a copy kept in
-    a folder only administrators can change (Restart-WithElevation, review finding P3-11).
+    P2-18). A non-admin relaunch elevates from it: the elevated window checks it against the SHA256
+    the relaunched run took at startup and runs a copy kept in a folder only administrators can
+    change (Restart-WithElevation, review finding P3-11). The temp folder is removed once the
+    relaunched run has ended (review finding P3-42): nothing reads it after that, because the
+    relaunched run waits for an elevated run it starts, and that run reads the file once at its
+    start. A folder left behind by a bootstrap that was stopped is removed by a later run
+    (Invoke-InstallerHousekeeping).
 
     There is no aka.ms/install-powershell.ps1 tier behind the MSI any more (review findings P2-17
     and P3-17). That script reads the same metadata.json and downloads the same MSI with no
@@ -3353,6 +3696,7 @@ function Invoke-PowerShell7Bootstrap {
     }
 
     $relaunchPath = $CommandPath
+    $relaunchDirectory = $null
     if (-not $relaunchPath) {
         $installerContent = Get-PowerShell7RelaunchInstaller -Url $InstallerUrl -ExpectedBuildId $ExpectedBuildId
         if (-not $installerContent) {
@@ -3382,6 +3726,9 @@ function Invoke-PowerShell7Bootstrap {
         }
         catch {
             Write-ErrorMessage "Could not save the installer for the relaunch: $_"
+            if ($relaunchDirectory) {
+                Remove-Item -LiteralPath $relaunchDirectory -Recurse -Force -ErrorAction SilentlyContinue
+            }
             return 7
         }
     }
@@ -3405,11 +3752,21 @@ function Invoke-PowerShell7Bootstrap {
     # the try/catch $relaunchProcess would stay $null and the tail's 'exit ($null)' would report
     # SUCCESS (exit 0) to the RMM/CI callers this exit code exists for (issue #225 review).
     $relaunchProcess = $null
+    $relaunchError = $null
     try {
         $relaunchProcess = Start-Process -FilePath $pwshPath -ArgumentList $relaunchArguments -NoNewWindow -Wait -PassThru -ErrorAction Stop
     }
     catch {
-        Write-ErrorMessage "PowerShell 7 could not be started ($pwshPath): $_"
+        $relaunchError = $_
+    }
+    # The downloaded copy of an irm | iex run is not needed any more (review finding P3-42): the
+    # relaunched run has ended, and an elevated run it started has ended too and ran its own copy.
+    # Only the folder this function made; a file the caller started from is never removed.
+    if ($relaunchDirectory) {
+        Remove-Item -LiteralPath $relaunchDirectory -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    if ($relaunchError) {
+        Write-ErrorMessage "PowerShell 7 could not be started ($pwshPath): $relaunchError"
         return 7
     }
     if (-not $relaunchProcess) {
@@ -4209,6 +4566,538 @@ function Invoke-WingetProcess {
     $result = Invoke-ExternalProcess -FilePath $WingetPath -ArgumentList $arguments -TimeoutSeconds $TimeoutSeconds -Echo $Echo
     $result.LogPath = $logPath
     return $result
+}
+
+# --- RunLock ---
+# One installer run at a time on a machine (review finding P3-41, exit code 6). An RMM tool that
+# starts the installer on a schedule, a teammate who starts it again while the first window is still
+# working, or both at once, would otherwise run two installs side by side: winget and msiexec then
+# fail each other's installs with 'another installation is in progress', and both runs report
+# failures that neither caused.
+
+<#
+.SYNOPSIS
+    Returns the name of the machine-wide mutex that marks an installer run in progress.
+.DESCRIPTION
+    Global\ puts it in the namespace every Windows session shares, so a run as SYSTEM from an RMM
+    agent (session 0) and a run in someone's desktop session see the same mutex. A function so tests
+    can give a run a name of its own and never collide with a real run on the same machine.
+.RETURNS
+    [string]
+#>
+function Get-InstallerRunLockName {
+    return 'Global\winget-app-setup-run'
+}
+
+<#
+.SYNOPSIS
+    Creates or opens a named mutex. A seam, so tests can make the open fail.
+.PARAMETER Name
+    The mutex name.
+.RETURNS
+    [System.Threading.Mutex]
+#>
+function New-InstallerRunMutex {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$Name
+    )
+
+    return (New-Object System.Threading.Mutex($false, $Name))
+}
+
+<#
+.SYNOPSIS
+    Takes the machine-wide installer run lock, without waiting for it.
+.DESCRIPTION
+    Review finding P3-41. The generated entry script calls this at the start of every real
+    (not -WhatIf) run that is elevated, before the pre-flight checks, and exits 6 when another run
+    holds the lock: it neither waits for that run nor stops it. A run that is not elevated takes no
+    lock, because it either stops with exit code 4 or relaunches itself elevated, and the elevated
+    run takes the lock.
+
+    The lock is a named mutex (Get-InstallerRunLockName) owned by the thread that runs the
+    installer, and Unlock-InstallerRun releases it in the entry script's finally block. A run that is
+    killed releases it with its process: the next run then finds the mutex abandoned, which Windows
+    reports with AbandonedMutexException, and takes it over.
+
+    Opening a mutex that another account created can fail with UnauthorizedAccessException when its
+    access list does not let this account open it (a run as SYSTEM, then one by an administrator).
+    The mutex exists only while a run holds a handle to it, so that also means another run is in
+    progress. Any other failure warns and returns 'Unavailable': the run goes on without the check
+    rather than being blocked by it.
+.PARAMETER Name
+    The mutex name. Default: Get-InstallerRunLockName.
+.RETURNS
+    [string] 'Acquired' (the mutex is stored in $script:InstallerRunLock), 'Busy' (another run holds
+    it) or 'Unavailable' (the check itself failed).
+#>
+function Lock-InstallerRun {
+    [OutputType([string])]
+    param (
+        [Parameter(Mandatory = $false)]
+        [string]$Name = (Get-InstallerRunLockName)
+    )
+
+    $mutex = $null
+    try {
+        $mutex = New-InstallerRunMutex -Name $Name
+    }
+    catch [System.UnauthorizedAccessException] {
+        return 'Busy'
+    }
+    catch {
+        Write-WarningMessage "Could not check whether another run of the installer is in progress: $($_.Exception.Message.Trim().TrimEnd('.')). Continuing without that check."
+        return 'Unavailable'
+    }
+
+    $acquired = $false
+    try {
+        $acquired = $mutex.WaitOne(0)
+    }
+    catch [System.Threading.AbandonedMutexException] {
+        # The run that held it ended without releasing it (killed, or its window closed); the mutex
+        # now belongs to this run.
+        $acquired = $true
+    }
+    catch {
+        Write-WarningMessage "Could not check whether another run of the installer is in progress: $($_.Exception.Message.Trim().TrimEnd('.')). Continuing without that check."
+        $mutex.Dispose()
+        return 'Unavailable'
+    }
+
+    if (-not $acquired) {
+        $mutex.Dispose()
+        return 'Busy'
+    }
+    $script:InstallerRunLock = $mutex
+    return 'Acquired'
+}
+
+<#
+.SYNOPSIS
+    Releases the installer run lock taken by Lock-InstallerRun, if this run holds it.
+.DESCRIPTION
+    Called from the entry script's finally block, so the lock is released on every way out of a
+    run. Never throws: a release that fails (not on the owning thread) still closes the handle.
+#>
+function Unlock-InstallerRun {
+    $mutex = $script:InstallerRunLock
+    $script:InstallerRunLock = $null
+    if ($null -eq $mutex) {
+        return
+    }
+    try {
+        $mutex.ReleaseMutex()
+    }
+    catch {
+        # Not owned by this thread (any more); disposing below still closes the handle.
+    }
+    try {
+        $mutex.Dispose()
+    }
+    catch {
+    }
+}
+
+# --- RunRecord ---
+# The machine-readable outcome of a run (review finding P3-41): one RESULT line at the end of the
+# output and %ProgramData%\winget-app-setup\logs\last-run.json. The exit code used to be the only
+# signal an RMM tool could read, and per-app results existed only as console text, which RMM
+# consoles cut to their last lines.
+
+<#
+.SYNOPSIS
+    Builds one app's entry for the run record.
+.PARAMETER Id
+    The winget package id.
+.PARAMETER Status
+    'Installed', 'Skipped' or 'Failed'.
+.PARAMETER Reason
+    Why the app was skipped or failed (the text the summary shows). Empty: none.
+.PARAMETER InstallResult
+    The app's install result (Install-AppWithVerification's InstallResult), for its exit code, or
+    $null when no installer ran.
+.PARAMETER RestartRequired
+    The install finished but needs a restart.
+.RETURNS
+    [System.Collections.Specialized.OrderedDictionary] id, status, reason, code (the exit code of
+    the winget install or package-specific installer, or $null), codeHex (the same as 0x%08X) and
+    restartRequired.
+#>
+function New-AppRunRecord {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$Id,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Status,
+
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [AllowEmptyString()]
+        [string]$Reason,
+
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [object]$InstallResult,
+
+        [Parameter(Mandatory = $false)]
+        [bool]$RestartRequired = $false
+    )
+
+    $code = $null
+    $codeHex = $null
+    if ($null -ne $InstallResult -and $null -ne $InstallResult.ExitCode) {
+        $code = [int]$InstallResult.ExitCode
+        $codeHex = '0x{0:X8}' -f $code
+    }
+    $reasonText = $null
+    if (-not [string]::IsNullOrWhiteSpace($Reason)) {
+        $reasonText = $Reason
+    }
+    return [ordered]@{
+        id              = $Id
+        status          = $Status
+        reason          = $reasonText
+        code            = $code
+        codeHex         = $codeHex
+        restartRequired = $RestartRequired
+    }
+}
+
+<#
+.SYNOPSIS
+    Names the auto-update outcome of a run in one word, for the run record.
+.PARAMETER WauResult
+    Install-WingetAutoUpdate's result, or $null when the run did not get that far.
+.RETURNS
+    [string] Install-WingetAutoUpdate's Status ('Configured', 'AlreadyPresent', 'FrameworkMissing',
+    'Failed'), 'AtRisk' for an existing install on a machine without its framework (what the
+    summary prints as 'AT RISK'), or 'NotRun'.
+#>
+function Get-AutoUpdateResultStatus {
+    param (
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [object]$WauResult
+    )
+
+    if ($null -eq $WauResult -or [string]::IsNullOrWhiteSpace([string]$WauResult.Status)) {
+        return 'NotRun'
+    }
+    if ($WauResult.Status -eq 'AlreadyPresent' -and $WauResult.FrameworkMissing) {
+        return 'AtRisk'
+    }
+    return [string]$WauResult.Status
+}
+
+<#
+.SYNOPSIS
+    Formats a time for the run record: UTC, ISO 8601, to the second.
+.PARAMETER Time
+    The time.
+.RETURNS
+    [string] For example '2026-10-04T14:30:00Z'.
+#>
+function Format-RunRecordTime {
+    param (
+        [Parameter(Mandatory = $true)]
+        [DateTime]$Time
+    )
+
+    return $Time.ToUniversalTime().ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", [System.Globalization.CultureInfo]::InvariantCulture)
+}
+
+<#
+.SYNOPSIS
+    Builds the record of a run: what last-run.json holds and the RESULT line shows.
+.DESCRIPTION
+    Invoke-WingetInstall builds it after its summary. The entry script builds it for a run that
+    ended before its summary (an early exit, an abort, another run in progress), from what the run
+    had recorded by then: the apps it had finished and the auto-update outcome, if it got that far.
+    The build id, the start time and the transcript path come from the entry script
+    ($script:InstallerBuildId, $script:InstallerRunStartedUtc, $script:InstallLogPath), and are
+    $null outside it.
+.PARAMETER ExitCode
+    The exit code the run ends with.
+.PARAMETER Apps
+    The apps' entries (New-AppRunRecord), in the order they were processed.
+.PARAMETER AutoUpdates
+    The auto-update outcome (Get-AutoUpdateResultStatus). Default 'NotRun'.
+.PARAMETER AutoUpdatesVersion
+    The Winget-AutoUpdate version installed or found, or $null.
+.PARAMETER RestartRequired
+    The run needs a restart to finish (what makes it exit 3010 when nothing failed).
+.PARAMETER WingetUsable
+    The end-of-run winget check's result, or $null when it did not run.
+.PARAMETER SummaryReached
+    The run reached its summary.
+.RETURNS
+    [System.Collections.Specialized.OrderedDictionary]
+#>
+function New-InstallerRunRecord {
+    param (
+        [Parameter(Mandatory = $true)]
+        [int]$ExitCode,
+
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [AllowEmptyCollection()]
+        [object[]]$Apps = @(),
+
+        [Parameter(Mandatory = $false)]
+        [string]$AutoUpdates = 'NotRun',
+
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [object]$AutoUpdatesVersion,
+
+        [Parameter(Mandatory = $false)]
+        [bool]$RestartRequired = $false,
+
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [Nullable[bool]]$WingetUsable = $null,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$SummaryReached
+    )
+
+    $appList = @($Apps | Where-Object { $null -ne $_ })
+    $autoUpdatesVersionText = $null
+    if ($null -ne $AutoUpdatesVersion -and -not [string]::IsNullOrWhiteSpace([string]$AutoUpdatesVersion)) {
+        $autoUpdatesVersionText = [string]$AutoUpdatesVersion
+    }
+    $startedUtc = $null
+    if ($script:InstallerRunStartedUtc -is [DateTime]) {
+        $startedUtc = Format-RunRecordTime -Time $script:InstallerRunStartedUtc
+    }
+    $buildId = $null
+    if ($script:InstallerBuildId) {
+        $buildId = [string]$script:InstallerBuildId
+    }
+    $transcriptPath = $null
+    if ($script:InstallLogPath) {
+        $transcriptPath = [string]$script:InstallLogPath
+    }
+
+    return [ordered]@{
+        schemaVersion   = 1
+        buildId         = $buildId
+        startedUtc      = $startedUtc
+        endedUtc        = Format-RunRecordTime -Time ([DateTime]::UtcNow)
+        exitCode        = $ExitCode
+        summaryReached  = [bool]$SummaryReached
+        counts          = [ordered]@{
+            installed = @($appList | Where-Object { $_.status -eq 'Installed' }).Count
+            skipped   = @($appList | Where-Object { $_.status -eq 'Skipped' }).Count
+            failed    = @($appList | Where-Object { $_.status -eq 'Failed' }).Count
+        }
+        apps            = $appList
+        autoUpdates     = [ordered]@{
+            status  = $AutoUpdates
+            version = $autoUpdatesVersionText
+        }
+        restartRequired = $RestartRequired
+        wingetUsable    = $WingetUsable
+        transcriptPath  = $transcriptPath
+    }
+}
+
+<#
+.SYNOPSIS
+    Formats the RESULT line of a run record.
+.DESCRIPTION
+    One line of space-separated key=value pairs, in a fixed order:
+
+        RESULT: exit=1 installed=12 skipped=2 failed=1 autoupdates=Configured restart=no build=1.0.0+1a2b3c4d log=C:\ProgramData\winget-app-setup\logs\install-20261004-143000.log
+
+    Values hold no spaces, except log, which comes last so that everything after 'log=' is the path.
+    autoupdates is Get-AutoUpdateResultStatus's word, restart is yes or no, and build and log are
+    'unknown' and 'none' when there is no build id or transcript.
+.PARAMETER Record
+    A record from New-InstallerRunRecord.
+.RETURNS
+    [string]
+#>
+function Format-InstallerResultLine {
+    param (
+        [Parameter(Mandatory = $true)]
+        [System.Collections.IDictionary]$Record
+    )
+
+    $restart = 'no'
+    if ($Record.restartRequired) {
+        $restart = 'yes'
+    }
+    $build = 'unknown'
+    if ($Record.buildId) {
+        $build = $Record.buildId
+    }
+    $log = 'none'
+    if ($Record.transcriptPath) {
+        $log = $Record.transcriptPath
+    }
+    return ('RESULT: exit={0} installed={1} skipped={2} failed={3} autoupdates={4} restart={5} build={6} log={7}' -f $Record.exitCode, $Record.counts.installed, $Record.counts.skipped, $Record.counts.failed, $Record.autoUpdates.status, $restart, $build, $log)
+}
+
+<#
+.SYNOPSIS
+    Writes a run record to <folder>\last-run.json, replacing the previous one in one step.
+.DESCRIPTION
+    The JSON goes to a temporary file in the same folder first, which is then moved over
+    last-run.json, so a reader (an RMM tool collecting it, the teammate opening it) never sees a
+    half-written file. A failure warns and leaves the previous file as it was. Runs only under
+    PowerShell 7 (File.Move with overwrite).
+.PARAMETER Record
+    A record from New-InstallerRunRecord.
+.PARAMETER Directory
+    The logs folder.
+.RETURNS
+    [string] The path written, or $null.
+#>
+function Save-InstallerRunRecord {
+    param (
+        [Parameter(Mandatory = $true)]
+        [System.Collections.IDictionary]$Record,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Directory
+    )
+
+    $path = Join-Path $Directory 'last-run.json'
+    $temporaryPath = Join-Path $Directory ('last-run.{0}.tmp' -f [System.Guid]::NewGuid().ToString('N'))
+    try {
+        $json = ConvertTo-Json -InputObject $Record -Depth 6
+        [System.IO.File]::WriteAllText($temporaryPath, $json, (New-Object System.Text.UTF8Encoding($false)))
+        [System.IO.File]::Move($temporaryPath, $path, $true)
+        return $path
+    }
+    catch {
+        Write-WarningMessage "Could not write the run record ${path}: $($_.Exception.Message)"
+        try {
+            if (Test-Path -LiteralPath $temporaryPath) {
+                Remove-Item -LiteralPath $temporaryPath -Force -ErrorAction Stop
+            }
+        }
+        catch {
+        }
+        return $null
+    }
+}
+
+<#
+.SYNOPSIS
+    Reports a run's outcome: writes last-run.json, then prints the RESULT line.
+.DESCRIPTION
+    last-run.json is written only by the run that did the work: the entry script sets
+    $script:InstallerRunRecordEnabled for a real, elevated run once it holds the run lock
+    (Lock-InstallerRun). So a dry run, a run that is not elevated (which stops with exit code 4, or
+    whose elevated run writes its own record), a run that found another one in progress (exit code
+    6) and a script that calls Invoke-WingetInstall from the imported module never replace the
+    record of the run that installed. The file is written next to the run's transcript
+    (Get-InstallerLogDirectory), and not at all without one.
+
+    The RESULT line is printed in every case, last, so it is the run's final line of output (the
+    'Press any key' prompt of an interactive run aside). Never throws.
+.PARAMETER Record
+    A record from New-InstallerRunRecord.
+.RETURNS
+    [string] The last-run.json path written, or $null.
+#>
+function Write-InstallerRunResult {
+    param (
+        [Parameter(Mandatory = $true)]
+        [System.Collections.IDictionary]$Record
+    )
+
+    $savedPath = $null
+    if ($script:InstallerRunRecordEnabled) {
+        $directory = Get-InstallerLogDirectory
+        if (-not [string]::IsNullOrWhiteSpace($directory)) {
+            $savedPath = Save-InstallerRunRecord -Record $Record -Directory $directory
+        }
+    }
+    try {
+        Write-Host (Format-InstallerResultLine -Record $Record)
+    }
+    catch {
+        Write-WarningMessage "Could not print the RESULT line: $($_.Exception.Message)"
+    }
+    return $savedPath
+}
+
+<#
+.SYNOPSIS
+    Ends a run's reporting: its RESULT line and last-run.json if it has not reported yet, then the
+    run lock.
+.DESCRIPTION
+    Called by Exit-Installer before it waits for a key press, and from the entry script's finally
+    block for every other way out of a run, so a run reports once whichever way it ends and releases
+    the run lock before a window waits at a prompt (review finding P3-41). Reports only while
+    $script:InstallerRunReportPending is set: the entry script sets it at the start of a real
+    (not -WhatIf) PowerShell 7 run, and Invoke-WingetInstall clears it once it has reported after its
+    summary, or when the elevated run it relaunched reported for it. A second call does nothing but
+    release the lock again, which is harmless.
+
+    Runs under Windows PowerShell 5.1 too (Exit-Installer in the bootstrap phase), where nothing is
+    pending, so only Unlock-InstallerRun runs, and it has no lock to release.
+.PARAMETER ExitCode
+    The exit code the run ends with.
+#>
+function Complete-InstallerRun {
+    param (
+        [Parameter(Mandatory = $true)]
+        [int]$ExitCode
+    )
+
+    if ($script:InstallerRunReportPending) {
+        $script:InstallerRunReportPending = $false
+        try {
+            [void](Write-InstallerEarlyExitResult -ExitCode $ExitCode)
+        }
+        catch {
+            # Reporting is best-effort; the exit code and the lock release are not.
+        }
+    }
+    Unlock-InstallerRun
+}
+
+<#
+.SYNOPSIS
+    Reports the outcome of a run that ended before its summary.
+.DESCRIPTION
+    Called by Complete-InstallerRun for an early exit (a failed pre-flight check, another run in
+    progress, winget unavailable, a catalog that failed validation, no elevation) and for an aborted
+    run. The record holds what the run had recorded by then: the apps it had finished
+    (Invoke-WingetInstall keeps them in $script:InstallerAppRecords) and the auto-update outcome if
+    it got that far ($script:InstallerAutoUpdateResult); restartRequired is set when one of those
+    apps needs a restart. summaryReached is false and wingetUsable is $null (the end-of-run
+    check did not run).
+.PARAMETER ExitCode
+    The exit code the run ends with.
+.RETURNS
+    [string] The last-run.json path written, or $null (see Write-InstallerRunResult).
+#>
+function Write-InstallerEarlyExitResult {
+    param (
+        [Parameter(Mandatory = $true)]
+        [int]$ExitCode
+    )
+
+    $apps = @()
+    if ($script:InstallerAppRecords) {
+        $apps = @($script:InstallerAppRecords.Values)
+    }
+    $autoUpdateResult = $script:InstallerAutoUpdateResult
+    $autoUpdateVersion = $null
+    if ($null -ne $autoUpdateResult) {
+        $autoUpdateVersion = $autoUpdateResult.Version
+    }
+    $restartRequired = @($apps | Where-Object { $_.restartRequired }).Count -gt 0
+    $record = New-InstallerRunRecord -ExitCode $ExitCode -Apps $apps -AutoUpdates (Get-AutoUpdateResultStatus -WauResult $autoUpdateResult) -AutoUpdatesVersion $autoUpdateVersion -RestartRequired $restartRequired
+    return (Write-InstallerRunResult -Record $record)
 }
 
 # --- SystemInfo ---
@@ -6825,9 +7714,10 @@ function Restart-WithElevation {
     When specified, the script performs all pre-flight checks and displays planned actions without making any system changes.
 .PARAMETER NonInteractive
     Suppresses the interactive extras for unattended runs (RMM, CI, scheduled tasks): the summary
-    grid-view window and the final "press any key to exit". Also auto-detected when the session is
-    non-interactive or stdin is redirected. No path asks a yes/no question anymore (issue #230), so
-    this switch is not needed to keep a run from blocking on a prompt. A non-interactive run that is
+    grid-view window and the final "press any key to exit". Also turned on by
+    $env:WINGET_APP_SETUP_NONINTERACTIVE (Test-NonInteractiveRequested), and auto-detected when the
+    session is non-interactive or stdin is redirected. No path asks a yes/no question anymore
+    (issue #230), so this switch is not needed to keep a run from blocking on a prompt. A non-interactive run that is
     not elevated returns 4 instead of raising a UAC prompt that nobody would answer (review finding
     P2-12).
 .PARAMETER SkipSystemCheck
@@ -6861,7 +7751,13 @@ function Restart-WithElevation {
     when no machine-wide winget.exe can be started. A run that relaunched
     itself elevated returns the elevated run's exit code (Restart-WithElevation waits for it). The
     generated entry script also exits 1 when a blocking pre-flight check fails (before this
-    function runs) and 5 when the run was aborted by an unexpected error or stopped from outside.
+    function runs), 5 when the run was aborted by an unexpected error or stopped from outside, and
+    6 when another run of the installer is in progress on the machine (review finding P3-41).
+
+    After the summary of a real run, the run's outcome is reported in machine-readable form
+    (Write-InstallerRunResult): one RESULT line, and last-run.json next to the transcript when the
+    entry script allows it ($script:InstallerRunRecordEnabled). Then the run lock is released, before
+    the final prompt. A dry run reports neither.
 #>
 function Invoke-WingetInstall {
     [OutputType([int])]
@@ -6978,6 +7874,9 @@ function Invoke-WingetInstall {
             # press itself: recorded so the entry script exits with this code without a second
             # notice and key press here.
             $script:InstallerPendingExitCode = [int]$elevation.ExitCode
+            # It also printed its own RESULT line and wrote last-run.json: this window adds no
+            # second, emptier record of the same run.
+            $script:InstallerRunReportPending = $false
             return [int]$elevation.ExitCode
         }
     }
@@ -7129,6 +8028,13 @@ function Invoke-WingetInstall {
         $applicableByName[$app.name] = Test-AppApplicability -App $app
     }
 
+    # One entry per app for the run's record (last-run.json and the RESULT line, review finding
+    # P3-41), in catalog order; the retry pass replaces an app's entry with its final outcome. Kept
+    # in $script: scope too, so a run that stops before its summary still reports the apps it had
+    # finished (build/fragments/tail.ps1).
+    $appRecords = [ordered]@{}
+    $script:InstallerAppRecords = $appRecords
+
     Foreach ($app in $apps) {
         $outcome = $null
         try {
@@ -7149,6 +8055,7 @@ function Invoke-WingetInstall {
                         # message carries the condition's human-readable reason.
                         $conditionText = if ($app.conditionDescription) { $app.conditionDescription } else { 'condition not met' }
                         Write-WarningMessage "Skipping: $($app.name) (not applicable: $conditionText)"
+                        $skipReason = "not applicable: $conditionText"
                     }
                     elseif ($outcome.SkipReason -eq 'Provisioned') {
                         # A run for the whole PC read it from the machine (review finding P3-24).
@@ -7156,8 +8063,10 @@ function Invoke-WingetInstall {
                     }
                     else {
                         Write-WarningMessage "Skipping: $($app.name) (already installed)"
+                        $skipReason = 'already installed'
                     }
                     $skippedApps += $app.name
+                    $appRecords[$app.name] = New-AppRunRecord -Id $app.name -Status 'Skipped' -Reason $skipReason
                 }
                 'Deferred' {
                     # No machine-wide installer, and this run installs for the whole PC only
@@ -7178,6 +8087,7 @@ function Invoke-WingetInstall {
                         }
                     }
                     $installedApps += $app.name
+                    $appRecords[$app.name] = New-AppRunRecord -Id $app.name -Status 'Installed' -InstallResult $outcome.InstallResult -RestartRequired ($restartRequiredApps -contains $app.name)
                 }
                 default {
                     # Surface the diagnostic detail the install pipeline already returns (winget
@@ -7201,12 +8111,14 @@ function Invoke-WingetInstall {
                     # Reason column (issue #189). RestartFirst: the installer cannot run until
                     # Windows restarts (0x8A15010A), so the retry pass leaves it alone.
                     $failedApps += @{ Name = $app.name; Reason = $failureReason; RestartFirst = (Test-RestartRequiredFirst -InstallResult $outcome.InstallResult) }
+                    $appRecords[$app.name] = New-AppRunRecord -Id $app.name -Status 'Failed' -Reason $failureReason -InstallResult $outcome.InstallResult
                 }
             }
         }
         catch {
             Write-ErrorMessage "Failed to install: $($app.name). Error: $_"
             $failedApps += @{ Name = $app.name; Reason = "Unexpected error: $_" }
+            $appRecords[$app.name] = New-AppRunRecord -Id $app.name -Status 'Failed' -Reason "Unexpected error: $_"
         }
 
         # A dry run never launches winget beyond its read-only checks, so it never trips this.
@@ -7279,6 +8191,7 @@ function Invoke-WingetInstall {
                             }
                         }
                         $failedApps += @{ Name = $appName; Reason = $failureReason; RestartFirst = (Test-RestartRequiredFirst -InstallResult $outcome.InstallResult) }
+                        $appRecords[$appName] = New-AppRunRecord -Id $appName -Status 'Failed' -Reason $failureReason -InstallResult $outcome.InstallResult
                     }
                     elseif ($outcome.Status -eq 'Deferred') {
                         # The retry got as far as the install, which found no machine-wide
@@ -7301,11 +8214,13 @@ function Invoke-WingetInstall {
                             $restartRequiredApps += $appName
                         }
                         $installedApps += $appName
+                        $appRecords[$appName] = New-AppRunRecord -Id $appName -Status 'Installed' -InstallResult $outcome.InstallResult -RestartRequired ($restartRequiredApps -contains $appName)
                     }
                 }
                 catch {
                     Write-ErrorMessage "Retry failed: $appName. Error: $_"
                     $failedApps += @{ Name = $appName; Reason = "Unexpected error: $_" }
+                    $appRecords[$appName] = New-AppRunRecord -Id $appName -Status 'Failed' -Reason "Unexpected error: $_"
                 }
 
                 if (-not $wingetNotLaunchable -and $outcome -and (Invoke-WingetLaunchCircuitBreaker -Outcome $outcome)) {
@@ -7338,6 +8253,8 @@ function Invoke-WingetInstall {
         Write-ErrorMessage "Winget-AutoUpdate setup failed unexpectedly: $_"
         $wauResult = [pscustomobject]@{ Status = 'Failed'; Version = $null }
     }
+    # For the record of a run that stops after this point but before its summary.
+    $script:InstallerAutoUpdateResult = $wauResult
 
     # A run must never report success while leaving winget unusable (whatever broke it, the next
     # run of this installer and every WAU update would fail). One bounded launch check, after the
@@ -7509,6 +8426,23 @@ function Invoke-WingetInstall {
     # Recorded before the final prompt: Ctrl+C there stops a run that has already finished, and
     # the entry script's abort guard then reports this code instead of an abort (5).
     $script:InstallerPendingExitCode = $exitCode
+
+    # The run's outcome in machine-readable form (review finding P3-41): last-run.json next to the
+    # transcript and one RESULT line, before the final prompt so someone at the console sees it too.
+    # A dry run changes nothing and reports neither.
+    if (-not $WhatIf) {
+        try {
+            $runRecord = New-InstallerRunRecord -ExitCode $exitCode -Apps @($appRecords.Values) -AutoUpdates (Get-AutoUpdateResultStatus -WauResult $wauResult) -AutoUpdatesVersion $wauResult.Version -RestartRequired $restartRequired -WingetUsable $wingetUsableAtEnd -SummaryReached
+            [void](Write-InstallerRunResult -Record $runRecord)
+        }
+        catch {
+            Write-WarningMessage "Could not report this run's result: $_"
+        }
+        $script:InstallerRunReportPending = $false
+        # The run is over: the next one (an RMM schedule) may start while this window waits for a
+        # key press.
+        Unlock-InstallerRun
+    }
 
     # Keep the console window open until the user presses a key. Skipped in non-interactive mode
     # so unattended runs never block.
@@ -9535,6 +10469,16 @@ if ($MyInvocation.InvocationName -ne '.') {
     $script:InstallLogPath = $null
     $script:InstallerScriptSha256 = $null
     $installerRunCompleted = $false
+    # Run record and run lock state (review findings P3-41, P3-42): when the run started, whether
+    # this run writes last-run.json (only a real, elevated run that holds the run lock does), whether
+    # its RESULT line is still to be printed (Complete-InstallerRun), and what it had recorded by the
+    # time it stopped. Nothing is pending in the Windows PowerShell 5.1 phase: the PowerShell 7 run
+    # reports.
+    $script:InstallerRunStartedUtc = [DateTime]::UtcNow
+    $script:InstallerRunRecordEnabled = $false
+    $script:InstallerRunReportPending = $false
+    $script:InstallerAppRecords = $null
+    $script:InstallerAutoUpdateResult = $null
 
     if ($PSVersionTable.PSVersion.Major -lt 7) {
         # The bootstrap phase gets its own transcript, install-<timestamp>-bootstrap.log, next to the
@@ -9613,6 +10557,8 @@ if ($MyInvocation.InvocationName -ne '.') {
     # install: when it cannot start, the run continues untranscribed and InstallLogPath stays $null.
     $script:InstallLogPath = Start-InstallerTranscript -WhatIf:$WhatIf
     $transcriptStarted = [bool]$script:InstallLogPath
+    # Every real run ends with a RESULT line (review finding P3-41); a dry run reports nothing.
+    $script:InstallerRunReportPending = -not $WhatIf
 
     try {
         if ($script:InstallLogPath) {
@@ -9621,6 +10567,22 @@ if ($MyInvocation.InvocationName -ne '.') {
         # Content-derived build id stamped by build/Build-WingetInstallScript.ps1 (issue #189), so
         # a transcript identifies exactly which installer build produced it.
         Write-Info "Installer build: $script:InstallerBuildId"
+
+        # One real run at a time (review finding P3-41): an elevated run takes the machine-wide run
+        # lock before it checks or changes anything, and a run started while another one holds it
+        # exits 6 at once, without waiting for that run or stopping it. A run that is not elevated
+        # takes no lock: it stops with exit code 4, or relaunches itself elevated and the elevated
+        # run takes it. A dry run changes nothing and takes none.
+        if (-not $WhatIf -and (Test-IsAdmin)) {
+            if ((Lock-InstallerRun) -eq 'Busy') {
+                Write-ErrorMessage 'Another run of this installer is in progress on this PC (started by an RMM tool, a scheduled task or someone else). This run stops without changing anything: let that run finish, then run the installer again if needed.'
+                Exit-Installer -Code 6 -Reason 'another run of the installer is in progress on this PC' -NonInteractive:$NonInteractive
+            }
+            # This run does the work: it writes last-run.json, and it removes old logs and the
+            # installer's leftover temporary copies (review finding P3-42).
+            $script:InstallerRunRecordEnabled = $true
+            [void](Invoke-InstallerHousekeeping -CurrentScriptPath $PSCommandPath)
+        }
 
         # No -NonInteractive to forward: the pre-flight checks no longer prompt at all (issue
         # #230), so there is no interactive behavior left for it to gate. Measured-low disk warns
@@ -9698,6 +10660,24 @@ if ($MyInvocation.InvocationName -ne '.') {
                 }
                 $host.SetShouldExit(5)
             }
+        }
+        # A run that has not reported yet (aborted, stopped from outside, or ended in this console
+        # without an exit) still ends with its RESULT line, and a run that holds the run lock records
+        # it in last-run.json, so that file never describes an older run than the one that just
+        # ended; then the run lock is released (review finding P3-41). A run that reached its summary
+        # or went through Exit-Installer has already done both, so this does nothing for it.
+        $finalExitCode = 0
+        if ($null -ne $script:InstallerPendingExitCode) {
+            $finalExitCode = [int]$script:InstallerPendingExitCode
+        }
+        elseif (-not $installerRunCompleted) {
+            $finalExitCode = 5
+        }
+        try {
+            Complete-InstallerRun -ExitCode $finalExitCode
+        }
+        catch {
+            # Best-effort: nothing may change the exit code decided above.
         }
         # The exit statements above unwind through here (PowerShell runs finally blocks for the
         # exit statement), so the transcript closes on every path.

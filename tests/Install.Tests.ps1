@@ -1102,6 +1102,192 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
         }
     }
 
+    # Review finding P3-41: the run's outcome in machine-readable form, for RMM tools and the
+    # teammate's issue reports. RunRecord.Tests.ps1 covers the record helpers themselves.
+    Context 'Run result: the RESULT line and last-run.json (review finding P3-41)' {
+        BeforeEach {
+            $script:reportedRecords = @()
+            $script:reportEvents = [System.Collections.Generic.List[string]]::new()
+            Mock Write-InstallerRunResult { $script:reportedRecords += , $Record; $script:reportEvents.Add('report'); $null }
+            Mock Unlock-InstallerRun { $script:reportEvents.Add('unlock') }
+            # As under the entry script, which sets it for every real run.
+            $script:InstallerRunReportPending = $true
+            $script:InstallerAppRecords = $null
+            $script:InstallerAutoUpdateResult = $null
+        }
+
+        It 'Records every app''s final outcome, with its reason and exit code, after the summary' {
+            $script:retryCalls = 0
+            Mock Install-AppWithVerification {
+                switch ($App.name) {
+                    'Contoso.New' { @{ Status = 'Installed'; InstallResult = @{ ExitCode = 0; Attempts = 1 }; FailureReason = $null } }
+                    'Contoso.Present' { @{ Status = 'Skipped'; InstallResult = $null; FailureReason = $null } }
+                    'Contoso.DellOnly' { @{ Status = 'Skipped'; SkipReason = 'NotApplicable'; InstallResult = $null; FailureReason = $null } }
+                    'Contoso.NeedsRestart' { @{ Status = 'Installed'; InstallResult = @{ ExitCode = -1978334967; Attempts = 1; RestartRequired = $true }; FailureReason = $null } }
+                    'Contoso.Flaky' {
+                        $script:retryCalls++
+                        if ($script:retryCalls -eq 1) {
+                            return @{ Status = 'Failed'; InstallResult = @{ ExitCode = 1603; Attempts = 1 }; FailureReason = 'CustomInstallFailed' }
+                        }
+                        @{ Status = 'Installed'; InstallResult = @{ ExitCode = 0; Attempts = 1 }; FailureReason = $null }
+                    }
+                    default { @{ Status = 'Failed'; InstallResult = @{ ExitCode = -1978335226; Attempts = 2 }; FailureReason = 'VerifyNotFound' } }
+                }
+            }
+            Mock Install-WingetAutoUpdate { [pscustomobject]@{ Status = 'Configured'; Version = [version]'2.12.0'; FrameworkMissing = $false; RestartRequired = $false } }
+            $apps = @(
+                @{ name = 'Contoso.New' }, @{ name = 'Contoso.Present' }, @{ name = 'Contoso.DellOnly'; conditionDescription = 'Dell hardware only' },
+                @{ name = 'Contoso.NeedsRestart' }, @{ name = 'Contoso.Flaky' }, @{ name = 'Contoso.Broken' }
+            )
+
+            Invoke-WingetInstall -Apps $apps -NonInteractive | Should -Be 1
+
+            $script:reportedRecords.Count | Should -Be 1
+            $record = $script:reportedRecords[0]
+            $record.exitCode | Should -Be 1
+            $record.summaryReached | Should -BeTrue
+            $record.counts.installed | Should -Be 3
+            $record.counts.skipped | Should -Be 2
+            $record.counts.failed | Should -Be 1
+            @($record.apps | ForEach-Object { $_.id }) | Should -Be @('Contoso.New', 'Contoso.Present', 'Contoso.DellOnly', 'Contoso.NeedsRestart', 'Contoso.Flaky', 'Contoso.Broken')
+            $byId = @{}
+            foreach ($app in $record.apps) { $byId[$app.id] = $app }
+            $byId['Contoso.New'].status | Should -Be 'Installed'
+            $byId['Contoso.New'].code | Should -Be 0
+            $byId['Contoso.Present'].reason | Should -Be 'already installed'
+            $byId['Contoso.DellOnly'].reason | Should -Be 'not applicable: Dell hardware only'
+            $byId['Contoso.NeedsRestart'].restartRequired | Should -BeTrue
+            $byId['Contoso.NeedsRestart'].codeHex | Should -Be '0x8A150109'
+            # The retry pass replaced the first-pass failure.
+            $byId['Contoso.Flaky'].status | Should -Be 'Installed'
+            $byId['Contoso.Flaky'].reason | Should -BeNullOrEmpty
+            $byId['Contoso.Broken'].status | Should -Be 'Failed'
+            $byId['Contoso.Broken'].codeHex | Should -Be '0x8A150006'
+            $byId['Contoso.Broken'].reason | Should -Be @($script:capturedTables['Failed Installations'])[0][1]
+            $record.autoUpdates.status | Should -Be 'Configured'
+            $record.autoUpdates.version | Should -Be '2.12.0'
+            $record.restartRequired | Should -BeTrue
+            $record.wingetUsable | Should -BeTrue
+            $script:InstallerRunReportPending | Should -BeFalse -Because 'the entry script must not add a second RESULT line'
+        }
+
+        It 'Releases the run lock once it has reported, before the final prompt' {
+            # A window left open at 'Press any key to exit...' must not make the next run (an RMM
+            # schedule) exit 6.
+            Invoke-WingetInstall -Apps @(@{ name = 'Contoso.New' }) -NonInteractive | Should -Be 0
+
+            $script:reportEvents | Should -Be @('report', 'unlock')
+        }
+
+        It 'Records an app whose install threw as failed' {
+            Mock Install-AppWithVerification { throw 'boom from the pipeline' }
+
+            Invoke-WingetInstall -Apps @(@{ name = 'Contoso.Throws' }) -NonInteractive | Should -Be 1
+
+            $app = @($script:reportedRecords[0].apps)[0]
+            $app.status | Should -Be 'Failed'
+            $app.reason | Should -Be 'Unexpected error: boom from the pipeline'
+        }
+
+        It 'Records the exit code the run returns, winget''s state at the end and an auto-update outcome that is at risk' {
+            Mock Install-WingetAutoUpdate { [pscustomobject]@{ Status = 'AlreadyPresent'; Version = [version]'2.12.0'; FrameworkMissing = $true; RestartRequired = $false } }
+            Mock Test-WingetLaunchable { [pscustomobject]@{ Launchable = $false; Version = $null; Reason = 'Access is denied'; Attempts = 5 } }
+
+            Invoke-WingetInstall -Apps @(@{ name = 'Contoso.New' }) -NonInteractive | Should -Be 2
+
+            $script:reportedRecords[0].exitCode | Should -Be 2
+            $script:reportedRecords[0].wingetUsable | Should -BeFalse
+            $script:reportedRecords[0].autoUpdates.status | Should -Be 'AtRisk'
+        }
+
+        It 'Keeps the apps it finished where the entry script can report them if the run stops early' {
+            Mock Install-AppWithVerification { @{ Status = 'Installed'; InstallResult = @{ ExitCode = 0 }; FailureReason = $null } }
+            Mock Install-WingetAutoUpdate { throw 'stopped' }
+
+            Invoke-WingetInstall -Apps @(@{ name = 'Contoso.New' }) -NonInteractive | Out-Null
+
+            @($script:InstallerAppRecords.Keys) | Should -Be @('Contoso.New')
+            $script:InstallerAutoUpdateResult.Status | Should -Be 'Failed'
+        }
+
+        It 'Reports nothing for a dry run' {
+            Invoke-WingetInstall -Apps @(@{ name = 'Contoso.New' }) -WhatIf -NonInteractive | Out-Null
+
+            Should -Invoke Write-InstallerRunResult -Times 0
+            Should -Invoke Unlock-InstallerRun -Times 0
+        }
+
+        It 'Reports nothing for a run that returns before its summary: the entry script does that' {
+            Mock Initialize-Winget { [pscustomobject]@{ Ready = $false; Diagnosis = 'NotLaunchable' } }
+
+            Invoke-WingetInstall -Apps @(@{ name = 'Contoso.New' }) -NonInteractive | Should -Be 2
+
+            Should -Invoke Write-InstallerRunResult -Times 0
+            $script:InstallerRunReportPending | Should -BeTrue
+        }
+
+        It 'Leaves the report to the elevated run it relaunched, which printed and wrote its own' {
+            Mock Test-IsAdmin { $false }
+            Mock Test-InvokedFromModuleContext { $false }
+            Mock Test-EffectiveNonInteractive { $false }
+            Mock Restart-WithElevation { [pscustomobject]@{ Started = $true; ExitCode = 1 } }
+
+            Invoke-WingetInstall -Apps @(@{ name = 'Contoso.New' }) | Should -Be 1
+
+            Should -Invoke Write-InstallerRunResult -Times 0
+            $script:InstallerRunReportPending | Should -BeFalse
+        }
+
+        It 'Lets the entry script report a relaunch that never started (the prompt was declined)' {
+            Mock Test-IsAdmin { $false }
+            Mock Test-InvokedFromModuleContext { $false }
+            Mock Test-EffectiveNonInteractive { $false }
+            Mock Restart-WithElevation { [pscustomobject]@{ Started = $false; ExitCode = 4 } }
+
+            Invoke-WingetInstall -Apps @(@{ name = 'Contoso.New' }) | Should -Be 4
+
+            $script:InstallerRunReportPending | Should -BeTrue
+        }
+    }
+
+    Context 'Run result: written to disk by a real run of the installer (review finding P3-41)' {
+        BeforeEach {
+            $script:savedLogPath = $script:InstallLogPath
+            $script:savedRecordEnabled = $script:InstallerRunRecordEnabled
+            $script:logDirectory = Join-Path $TestDrive ('run-result-' + [Guid]::NewGuid().ToString('N'))
+            [void](New-Item -ItemType Directory -Path $script:logDirectory -Force)
+            $script:InstallLogPath = Join-Path $script:logDirectory 'install-20261004-163005.log'
+            $script:hostLines = [System.Collections.Generic.List[string]]::new()
+            Mock Write-Host { $script:hostLines.Add([string]$Object) }
+        }
+
+        AfterEach {
+            $script:InstallLogPath = $script:savedLogPath
+            $script:InstallerRunRecordEnabled = $script:savedRecordEnabled
+        }
+
+        It 'Writes last-run.json next to the transcript and ends with the RESULT line, when the entry script allows it' {
+            $script:InstallerRunRecordEnabled = $true
+
+            Invoke-WingetInstall -Apps @(@{ name = 'Contoso.New' }) -NonInteractive | Should -Be 0
+
+            $json = Get-Content -Raw -LiteralPath (Join-Path $script:logDirectory 'last-run.json') | ConvertFrom-Json
+            $json.exitCode | Should -Be 0
+            $json.apps[0].id | Should -Be 'Contoso.New'
+            $json.transcriptPath | Should -Be $script:InstallLogPath
+            $script:hostLines[$script:hostLines.Count - 1] | Should -Match '^RESULT: exit=0 installed=1 skipped=0 failed=0 autoupdates=DryRun restart=no build=\S+ log=.*install-20261004-163005\.log$'
+        }
+
+        It 'Only prints the RESULT line when the entry script did not allow the record (or outside it)' {
+            $script:InstallerRunRecordEnabled = $false
+
+            Invoke-WingetInstall -Apps @(@{ name = 'Contoso.New' }) -NonInteractive | Should -Be 0
+
+            Test-Path -LiteralPath (Join-Path $script:logDirectory 'last-run.json') | Should -BeFalse
+            @($script:hostLines | Where-Object { $_ -like 'RESULT: *' }).Count | Should -Be 1
+        }
+    }
+
     Context 'Retry pass' {
         It 'Sends a first-pass failure back through the helper and buckets a recovered app as installed' {
             $script:sevenZipCalls = 0

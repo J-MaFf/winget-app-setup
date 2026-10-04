@@ -39,6 +39,16 @@ if ($MyInvocation.InvocationName -ne '.') {
     $script:InstallLogPath = $null
     $script:InstallerScriptSha256 = $null
     $installerRunCompleted = $false
+    # Run record and run lock state (review findings P3-41, P3-42): when the run started, whether
+    # this run writes last-run.json (only a real, elevated run that holds the run lock does), whether
+    # its RESULT line is still to be printed (Complete-InstallerRun), and what it had recorded by the
+    # time it stopped. Nothing is pending in the Windows PowerShell 5.1 phase: the PowerShell 7 run
+    # reports.
+    $script:InstallerRunStartedUtc = [DateTime]::UtcNow
+    $script:InstallerRunRecordEnabled = $false
+    $script:InstallerRunReportPending = $false
+    $script:InstallerAppRecords = $null
+    $script:InstallerAutoUpdateResult = $null
 
     if ($PSVersionTable.PSVersion.Major -lt 7) {
         # The bootstrap phase gets its own transcript, install-<timestamp>-bootstrap.log, next to the
@@ -117,6 +127,8 @@ if ($MyInvocation.InvocationName -ne '.') {
     # install: when it cannot start, the run continues untranscribed and InstallLogPath stays $null.
     $script:InstallLogPath = Start-InstallerTranscript -WhatIf:$WhatIf
     $transcriptStarted = [bool]$script:InstallLogPath
+    # Every real run ends with a RESULT line (review finding P3-41); a dry run reports nothing.
+    $script:InstallerRunReportPending = -not $WhatIf
 
     try {
         if ($script:InstallLogPath) {
@@ -125,6 +137,22 @@ if ($MyInvocation.InvocationName -ne '.') {
         # Content-derived build id stamped by build/Build-WingetInstallScript.ps1 (issue #189), so
         # a transcript identifies exactly which installer build produced it.
         Write-Info "Installer build: $script:InstallerBuildId"
+
+        # One real run at a time (review finding P3-41): an elevated run takes the machine-wide run
+        # lock before it checks or changes anything, and a run started while another one holds it
+        # exits 6 at once, without waiting for that run or stopping it. A run that is not elevated
+        # takes no lock: it stops with exit code 4, or relaunches itself elevated and the elevated
+        # run takes it. A dry run changes nothing and takes none.
+        if (-not $WhatIf -and (Test-IsAdmin)) {
+            if ((Lock-InstallerRun) -eq 'Busy') {
+                Write-ErrorMessage 'Another run of this installer is in progress on this PC (started by an RMM tool, a scheduled task or someone else). This run stops without changing anything: let that run finish, then run the installer again if needed.'
+                Exit-Installer -Code 6 -Reason 'another run of the installer is in progress on this PC' -NonInteractive:$NonInteractive
+            }
+            # This run does the work: it writes last-run.json, and it removes old logs and the
+            # installer's leftover temporary copies (review finding P3-42).
+            $script:InstallerRunRecordEnabled = $true
+            [void](Invoke-InstallerHousekeeping -CurrentScriptPath $PSCommandPath)
+        }
 
         # No -NonInteractive to forward: the pre-flight checks no longer prompt at all (issue
         # #230), so there is no interactive behavior left for it to gate. Measured-low disk warns
@@ -202,6 +230,24 @@ if ($MyInvocation.InvocationName -ne '.') {
                 }
                 $host.SetShouldExit(5)
             }
+        }
+        # A run that has not reported yet (aborted, stopped from outside, or ended in this console
+        # without an exit) still ends with its RESULT line, and a run that holds the run lock records
+        # it in last-run.json, so that file never describes an older run than the one that just
+        # ended; then the run lock is released (review finding P3-41). A run that reached its summary
+        # or went through Exit-Installer has already done both, so this does nothing for it.
+        $finalExitCode = 0
+        if ($null -ne $script:InstallerPendingExitCode) {
+            $finalExitCode = [int]$script:InstallerPendingExitCode
+        }
+        elseif (-not $installerRunCompleted) {
+            $finalExitCode = 5
+        }
+        try {
+            Complete-InstallerRun -ExitCode $finalExitCode
+        }
+        catch {
+            # Best-effort: nothing may change the exit code decided above.
         }
         # The exit statements above unwind through here (PowerShell runs finally blocks for the
         # exit statement), so the transcript closes on every path.

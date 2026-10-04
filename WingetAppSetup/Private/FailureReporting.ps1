@@ -17,12 +17,16 @@
     Invoke-WingetInstall returns its exit code and the entry script exits with it.
 
     A failed run that has not shown its outcome yet - an early exit, such as a failed pre-flight
-    check, winget missing, a declined elevation, a failed PowerShell 7 bootstrap or an aborted run -
-    first prints Write-InstallerExitNotice: the reason, the log path and the build id, then waits
-    for a key press when someone is at the console (review finding P2-14). Under irm | iex the exit
-    closes the window, which used to take the error and the log path with it before anyone could
-    read them. Runs under Windows PowerShell 5.1 too (the bootstrap phase), so it stays
-    5.1-runtime compatible.
+    check, another run in progress, winget missing, a declined elevation, a failed PowerShell 7
+    bootstrap or an aborted run - first prints Write-InstallerExitNotice: the reason, the log path
+    and the build id, then waits for a key press when someone is at the console (review finding
+    P2-14). Under irm | iex the exit closes the window, which used to take the error and the log
+    path with it before anyone could read them. Runs under Windows PowerShell 5.1 too (the bootstrap
+    phase), so it stays 5.1-runtime compatible.
+
+    Before that key press, Complete-InstallerRun prints the run's RESULT line, writes last-run.json
+    and releases the run lock (review finding P3-41), so the RESULT line follows the notice, and a
+    window left open at the prompt does not make the next run (an RMM schedule) exit 6.
 .PARAMETER Code
     The process exit code. Default 0.
 .PARAMETER Reason
@@ -46,15 +50,30 @@ function Exit-Installer {
         [switch]$OutcomeShown
     )
 
+    $noticeShown = $false
     if ($Code -ne 0 -and -not $OutcomeShown) {
         # Recorded before the key press: Ctrl+C there still ends the run with this code, through the
         # entry script's abort guard, instead of as an abort (5).
         $script:InstallerPendingExitCode = $Code
         try {
-            Write-InstallerExitNotice -Code $Code -Reason $Reason -NonInteractive:$NonInteractive
+            Write-InstallerExitNotice -Code $Code -Reason $Reason -NonInteractive:$NonInteractive -NoPause
+            $noticeShown = $true
         }
         catch {
             # The notice is a courtesy; nothing may keep the run from exiting with its code.
+        }
+    }
+    try {
+        Complete-InstallerRun -ExitCode $Code
+    }
+    catch {
+        # Best-effort as well.
+    }
+    if ($noticeShown) {
+        try {
+            Wait-InstallerExitKeyPress -NonInteractive:$NonInteractive
+        }
+        catch {
         }
     }
     $script:InstallerExitRequested = $true
@@ -107,6 +126,7 @@ function Write-InstallerExitNotice {
             3 { $why = 'the app catalog failed validation (see above)' }
             4 { $why = 'administrator rights are required, and this run was not elevated (see above)' }
             5 { $why = 'the run was aborted before it finished (see above)' }
+            6 { $why = 'another run of the installer is in progress on this PC' }
             7 { $why = 'PowerShell 7 could not be installed, or the installer could not be relaunched under it (see above)' }
         }
     }
@@ -133,6 +153,26 @@ function Write-InstallerExitNotice {
     if ($NoPause) {
         return
     }
+    Wait-InstallerExitKeyPress -NonInteractive:$NonInteractive
+}
+
+<#
+.SYNOPSIS
+    Waits for a key press before an early exit closes the window, when someone is at the console.
+.DESCRIPTION
+    Write-InstallerExitNotice's wait (review finding P2-14), on its own so Exit-Installer can report
+    the run's outcome between the notice and the wait. Never waits in a non-interactive run
+    (Test-EffectiveNonInteractive) or under CI (Test-IsContinuousIntegration). Runs under Windows
+    PowerShell 5.1 too.
+.PARAMETER NonInteractive
+    The caller's -NonInteractive switch.
+#>
+function Wait-InstallerExitKeyPress {
+    param (
+        [Parameter(Mandatory = $false)]
+        [switch]$NonInteractive
+    )
+
     if ((Test-EffectiveNonInteractive -NonInteractive:$NonInteractive) -or (Test-IsContinuousIntegration)) {
         return
     }
