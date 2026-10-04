@@ -130,15 +130,22 @@ App Installer download from aka.ms/getwinget), and, on PowerShell 7.3 and older,
 Winget-AutoUpdate MSI download once the file has started to arrive.
 
 A winget that cannot be started is not retried app by app. Before the installs, `winget --version`
-has to run and print a version; being on PATH is not enough. If it cannot, the installer tries to
-set winget up for the account (register App Installer, `Repair-WinGetPackageManager`, the
-aka.ms/getwinget download) and exits with code 2 when winget still does not start. If winget stops
-starting partway through the installs, the app that hit it fails with
-`winget could not be launched ...` and the installer checks once whether winget can still be
-started. If it cannot, every remaining app is marked failed with
-`not attempted: winget cannot be launched on this machine (see above)` without running winget, the
-retry pass is skipped, and the run ends with exit code 1 about a minute and a half later at most.
-Before, each app spent its own retries, twice, and the run took about 24 minutes to fail.
+has to run and print a version; being on PATH is not enough. A failure that can clear on its own
+(`winget.exe` locked, for example while App Installer updates) is checked again for up to 75
+seconds first. If winget still cannot run, the installer tries to set it up for the account
+(register App Installer, `Repair-WinGetPackageManager`, the aka.ms/getwinget download) and exits
+with code 2 when winget still does not start. If winget stops starting partway through the
+installs, the app that hit it fails with `winget could not be launched ...` and the installer
+checks, for up to 75 seconds (six tries 15 seconds apart), whether winget can be started again. If
+it can, the run carries on and the app gets its retry. If it cannot, every remaining app is marked
+failed with `not attempted: winget cannot be launched on this machine (see above)` without running
+winget, the retry pass is skipped, and the run ends with exit code 1 about 2.5 minutes later at
+most (about 6 if every check hangs until its 30-second limit); `Access is denied` or a missing
+winget stops the checks at once. Before, each app spent its own retries, twice, and the run took
+about 24 minutes to fail. A `winget list` check that runs but fails (any exit code other than 0 or
+`0x8A150014`, no packages found) is not read as "not installed" either: the app fails with
+`winget list failed during the pre-install check with exit 0x...` (or `post-install check`) and
+gets its retry.
 
 ### Exit codes
 

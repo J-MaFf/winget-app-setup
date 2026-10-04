@@ -324,7 +324,7 @@ function Invoke-WingetInstall {
                 default {
                     # Surface the diagnostic detail the install pipeline already returns (winget
                     # exit code, attempts, scope fallback) instead of discarding it (issue #189).
-                    $failureReason = Format-InstallFailureReason -FailureReason $outcome.FailureReason -InstallResult $outcome.InstallResult -LaunchError $outcome.LaunchError
+                    $failureReason = Format-InstallFailureReason -FailureReason $outcome.FailureReason -InstallResult $outcome.InstallResult -LaunchError $outcome.LaunchError -CheckExitCode $outcome.CheckExitCode
                     switch ($outcome.FailureReason) {
                         'PreCheckTimeout' {
                             # Failed instead of silently dropped: the app then flows through the
@@ -395,7 +395,7 @@ function Invoke-WingetInstall {
                     $outcome = Install-AppWithVerification -App $appDef -Silent:$effectiveNonInteractive -WingetNotLaunchable:$wingetNotLaunchable
 
                     if ($outcome.Status -eq 'Failed') {
-                        $failureReason = Format-InstallFailureReason -FailureReason $outcome.FailureReason -InstallResult $outcome.InstallResult -LaunchError $outcome.LaunchError
+                        $failureReason = Format-InstallFailureReason -FailureReason $outcome.FailureReason -InstallResult $outcome.InstallResult -LaunchError $outcome.LaunchError -CheckExitCode $outcome.CheckExitCode
                         switch ($outcome.FailureReason) {
                             'PreCheckTimeout' {
                                 Write-WarningMessage "Winget list timed out for retry: $appName. Assuming installation failed."
@@ -459,13 +459,18 @@ function Invoke-WingetInstall {
     # single one when the circuit breaker already found winget unusable. Skipped in a dry run,
     # which never touched winget's state.
     $wingetUsableAtEnd = $true
+    $endCheckReason = $null
     if (-not $WhatIf) {
         try {
             $endCheckAttempts = 5
             if ($wingetNotLaunchable) {
                 $endCheckAttempts = 1
             }
-            $wingetUsableAtEnd = [bool](Test-WingetLaunchable -Attempts $endCheckAttempts -RetryDelaySeconds 15).Launchable
+            $endCheck = Test-WingetLaunchable -Attempts $endCheckAttempts -RetryDelaySeconds 15
+            $wingetUsableAtEnd = [bool]$endCheck.Launchable
+            # Why, for the NOT USABLE line: a failure that is final at once ('Access is denied',
+            # winget missing) prints no retry warning and has no winget output to show.
+            $endCheckReason = $endCheck.Reason
         }
         catch {
             # A bug in the probe is not evidence that winget is broken; report it and move on.
@@ -534,7 +539,11 @@ function Invoke-WingetInstall {
     }
 
     if (-not $wingetUsableAtEnd) {
-        Write-ErrorMessage 'winget: NOT USABLE - winget could not be launched at the end of this run, so automatic updates and the next run of this installer will fail on this machine. Restart the machine and re-run the installer; if it persists, attach this transcript to a GitHub issue.'
+        $endCheckDetail = ''
+        if (-not [string]::IsNullOrWhiteSpace($endCheckReason)) {
+            $endCheckDetail = " ($endCheckReason)"
+        }
+        Write-ErrorMessage "winget: NOT USABLE - winget did not work at the end of this run$endCheckDetail, so automatic updates and the next run of this installer will fail on this machine. Restart the machine and re-run the installer; if it persists, attach this transcript to a GitHub issue."
     }
 
     # Repeat the persistent transcript path next to the summary (issue #189). The variable is set

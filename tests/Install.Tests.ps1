@@ -214,7 +214,9 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
             $result = Invoke-WingetInstall -Apps @(@{ name = 'Contoso.AppOne' }) -NonInteractive
 
             $result | Should -Be 2
-            $script:errorMessages | Should -Contain 'winget: NOT USABLE - winget could not be launched at the end of this run, so automatic updates and the next run of this installer will fail on this machine. Restart the machine and re-run the installer; if it persists, attach this transcript to a GitHub issue.'
+            # With the check's reason: 'Access is denied' is final at once, so no retry warning
+            # names it and there is no winget output to show (review of item 9).
+            $script:errorMessages | Should -Contain 'winget: NOT USABLE - winget did not work at the end of this run (winget could not be started: Access is denied), so automatic updates and the next run of this installer will fail on this machine. Restart the machine and re-run the installer; if it persists, attach this transcript to a GitHub issue.'
             # The summary still prints: a broken winget is reported, not a reason to stop early.
             Should -Invoke Write-Table -Times 1 -Exactly -ParameterFilter { $Title -eq 'Installation Summary' }
         }
@@ -659,8 +661,9 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
             $result = Invoke-WingetInstall -Apps $script:apps -NonInteractive
 
             $result | Should -Be 1
-            # One breaker check (two tries, 10 s apart) right after AppOne, then one end-of-run check.
-            Should -Invoke Test-WingetLaunchable -Times 1 -Exactly -ParameterFilter { $Attempts -eq 2 -and $RetryDelaySeconds -eq 10 }
+            # One breaker check right after AppOne (up to six tries 15 s apart: the 75 s an App
+            # Installer update in progress needs), then one end-of-run check.
+            Should -Invoke Test-WingetLaunchable -Times 1 -Exactly -ParameterFilter { $Attempts -eq 6 -and $RetryDelaySeconds -eq 15 }
             Should -Invoke Test-WingetLaunchable -Times 1 -Exactly -ParameterFilter { $Attempts -eq 1 }
             Should -Invoke Test-WingetLaunchable -Times 2 -Exactly
             # The rest went through the pipeline only to be failed without winget (so a
@@ -1222,6 +1225,55 @@ Describe 'Install-AppWithVerification when winget cannot be launched (review fin
         $result.Status | Should -Be 'Installed'
         $result.FailureReason | Should -Be $null
     }
+
+    # The rest of P2-9: a `winget list` that ran but failed (anything but 0 or 0x8A150014 without a
+    # match) is no answer either. 0x8A15004B is APPINSTALLER_CLI_ERROR_FAILED_TO_OPEN_ALL_SOURCES.
+    It 'Fails the app as PreCheckFailed, with the list''s exit code and without installing, when winget list ran and failed' {
+        Mock Invoke-WingetProcess { New-TestProcessResult -ExitCode -1978335157 -Output @('Failed when opening source(s); try the ''source reset'' command if the problem persists.') }
+
+        $result = Install-AppWithVerification -App @{ name = '7zip.7zip' }
+
+        $result.Status | Should -Be 'Failed'
+        $result.FailureReason | Should -Be 'PreCheckFailed'
+        $result.CheckExitCode | Should -Be -1978335157
+        $result.InstallResult | Should -Be $null
+        Should -Invoke Invoke-WingetProcess -Times 0 -Exactly -ParameterFilter { $ArgumentList[0] -eq 'install' }
+        Format-InstallFailureReason -FailureReason $result.FailureReason -InstallResult $result.InstallResult -LaunchError $result.LaunchError -CheckExitCode $result.CheckExitCode |
+            Should -Be 'winget list failed during the pre-install check with exit 0x8A15004B'
+    }
+
+    It 'Says that the post-install winget list failed, with its exit code, not that the package was not found' {
+        $script:listCalls = 0
+        Mock Invoke-WingetProcess {
+            if ($ArgumentList[0] -eq 'install') {
+                return New-TestProcessResult -ExitCode 0
+            }
+            $script:listCalls++
+            if ($script:listCalls -eq 1) {
+                return New-TestProcessResult -ExitCode -1978335212 -Output @('No installed package found matching input criteria.')
+            }
+            New-TestProcessResult -ExitCode -1978335157 -Output @('Failed when opening source(s); try the ''source reset'' command if the problem persists.')
+        }
+
+        $result = Install-AppWithVerification -App @{ name = '7zip.7zip' }
+
+        $result.Status | Should -Be 'Failed'
+        $result.FailureReason | Should -Be 'VerifyFailed'
+        $result.CheckExitCode | Should -Be -1978335157
+        Format-InstallFailureReason -FailureReason $result.FailureReason -InstallResult $result.InstallResult -LaunchError $result.LaunchError -CheckExitCode $result.CheckExitCode |
+            Should -Match '^winget list failed during the post-install check with exit 0x8A15004B; winget exit 0x00000000, 1 attempt'
+    }
+
+    It 'Maps a failed winget list in PowerShell''s own check to VerifyFailed too' {
+        Mock Install-PowerShellLatest { @{ ExitCode = 0; Attempts = 1; Installed = $false; Method = 'msi'; VerifyTimedOut = $false; VerifyLaunchFailed = $false; VerifyLaunchError = $null; VerifyCheckFailed = $true; VerifyExitCode = -1978335157 } }
+        Mock Invoke-WingetProcess { New-TestProcessResult -ExitCode -1978335212 -Output @('No installed package found matching input criteria.') }
+
+        $result = Install-AppWithVerification -App @{ name = 'Microsoft.PowerShell'; install = 'Install-PowerShellLatest' }
+
+        $result.Status | Should -Be 'Failed'
+        $result.FailureReason | Should -Be 'VerifyFailed'
+        $result.CheckExitCode | Should -Be -1978335157
+    }
 }
 
 Describe 'PowerShell''s own installer in the install pipeline (review of findings P2-5 and P2-6)' {
@@ -1360,7 +1412,7 @@ Describe 'Wedged winget: the run fails fast (review findings P2-8, P2-9, P2-10)'
     }
 
     It 'Stops after one app and one check when winget cannot start (<Case>)' -ForEach @(
-        @{ Case = 'a lock that could clear, 1920'; Code = 1920; Message = 'The file cannot be accessed by the system.'; MaxLaunches = 4; MaxSleep = 10 }
+        @{ Case = 'a lock that could clear, 1920'; Code = 1920; Message = 'The file cannot be accessed by the system.'; MaxLaunches = 8; MaxSleep = 75 }
         @{ Case = 'access denied, 5'; Code = 5; Message = 'Access is denied.'; MaxLaunches = 3; MaxSleep = 0 }
     ) {
         $script:launchCode = $Code
@@ -1375,8 +1427,9 @@ Describe 'Wedged winget: the run fails fast (review findings P2-8, P2-9, P2-10)'
 
         $result | Should -Be 1
         # Before: 9 launches and 75 seconds of backoff per app, in both passes (144 launches and
-        # 1200 seconds for these 8 apps). Now: the first app's pre-check, the breaker's check and
-        # the end-of-run check.
+        # 1200 seconds for these 8 apps). Now: the first app's pre-check, the breaker's check (six
+        # tries 15 s apart for a lock that could clear, one for access denied) and the end-of-run
+        # check.
         $script:launches | Should -BeLessOrEqual $MaxLaunches
         $script:sleptSeconds | Should -BeLessOrEqual $MaxSleep
         Should -Invoke Invoke-WingetProcess -Times 0 -Exactly -ParameterFilter { $ArgumentList[0] -eq 'install' }
@@ -1416,6 +1469,55 @@ Describe 'Wedged winget: the run fails fast (review findings P2-8, P2-9, P2-10)'
         $result | Should -Be 0
         ($script:infoMessages -join "`n") | Should -Match 'winget starts again'
         $script:capturedTables.ContainsKey('Failed Installations') | Should -BeFalse
+    }
+
+    It 'Rides out a <Seconds>-second lock that starts at a pre-check: every app installs and the run returns 0' -ForEach @(
+        @{ Seconds = 30 }
+        @{ Seconds = 60 }
+    ) {
+        # Review of item 9: the pre-check and the post-install check do not retry a failed launch,
+        # so the breaker's own check is all the tolerance such a lock gets. An App Installer update
+        # in progress (issues #253/#258) outlasts 15 seconds; with two tries 10 s apart the breaker
+        # tripped on it and failed every app. Simulated time: each winget launch takes a second and
+        # Start-Sleep advances the clock. Nothing is installed yet.
+        $script:clock = 0
+        $script:lockSeconds = $Seconds
+        $script:installed = @{}
+        Mock Start-Sleep { $script:clock += $Seconds; $script:sleptSeconds += $Seconds }
+        Mock Invoke-WingetProcess {
+            $script:clock++
+            if ($script:clock -le $script:lockSeconds) {
+                return New-TestProcessResult -LaunchFailed -LaunchErrorCode 1920 -LaunchError 'The file cannot be accessed by the system.'
+            }
+            $arguments = @($ArgumentList)
+            $id = $arguments[[array]::IndexOf($arguments, '--id') + 1]
+            switch ($arguments[0]) {
+                '--version' { return New-TestProcessResult -ExitCode 0 -Output @('v1.12.350') }
+                'install' {
+                    $script:installed[$id] = $true
+                    return New-TestProcessResult -ExitCode 0
+                }
+                'list' {
+                    if ($script:installed[$id]) {
+                        return New-TestProcessResult -ExitCode 0 -Output @("$id  1.0  winget")
+                    }
+                    return New-TestProcessResult -ExitCode -1978335212 -Output @('No installed package found matching input criteria.')
+                }
+            }
+            throw "unexpected winget call: $($arguments -join ' ')"
+        }
+
+        $result = Invoke-WingetInstall -Apps $script:catalog -NonInteractive
+
+        $result | Should -Be 0
+        ($script:infoMessages -join "`n") | Should -Match 'winget starts again'
+        $script:capturedTables.ContainsKey('Failed Installations') | Should -BeFalse
+        # The seven applicable apps: six in the first pass, 7zip (whose pre-check hit the lock) in
+        # the retry pass.
+        @($script:installed.Keys | Sort-Object) | Should -Be @('7zip.7zip', 'Git.Git', 'GlavSoft.TightVNC', 'Google.Chrome', 'Klocman.BulkCrapUninstaller', 'Microsoft.PowerShell', 'Microsoft.WindowsTerminal')
+        $script:infoMessages | Should -Contain 'Retrying failed installations (1 final attempt)...'
+        # Bounded: the breaker waits at most 75 seconds.
+        $script:sleptSeconds | Should -BeLessOrEqual 75
     }
 }
 
@@ -1744,6 +1846,20 @@ Describe 'Format-InstallFailureReason (issue #189)' {
         It 'Gives every app the circuit breaker failed one short reason' {
             Format-InstallFailureReason -FailureReason 'WingetNotLaunchable' -InstallResult $null |
                 Should -Be 'not attempted: winget cannot be launched on this machine (see above)'
+        }
+    }
+
+    Context 'When winget list ran but failed (review finding P2-9)' {
+        It 'Names the check <Reason> and the list''s own exit code, apart from the install''s' -ForEach @(
+            @{ Reason = 'PreCheckFailed'; InstallResult = $null; Expected = 'winget list failed during the pre-install check with exit 0x8A15004B' }
+            @{ Reason = 'VerifyFailed'; InstallResult = @{ ExitCode = 0; Attempts = 1; MachineScopeFellBack = $false }; Expected = 'winget list failed during the post-install check with exit 0x8A15004B; winget exit 0x00000000, 1 attempt, machine-scope fallback: no' }
+        ) {
+            Format-InstallFailureReason -FailureReason $Reason -InstallResult $InstallResult -CheckExitCode -1978335157 | Should -Be $Expected
+        }
+
+        It 'Leaves the exit code out when there is none, and ignores it for other reasons' {
+            Format-InstallFailureReason -FailureReason 'PreCheckFailed' -InstallResult $null | Should -Be 'winget list failed during the pre-install check'
+            Format-InstallFailureReason -FailureReason 'VerifyNotFound' -InstallResult $null -CheckExitCode -1978335157 | Should -Be 'package not found after install'
         }
     }
 

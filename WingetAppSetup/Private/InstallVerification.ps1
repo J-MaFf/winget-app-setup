@@ -15,7 +15,8 @@
          Skipped; a hung `winget list` maps to Failed so the app flows into the retry pass and
          the non-zero exit code instead of being silently dropped (issue #176). A winget that
          could not be started maps to Failed too (PreCheckLaunchFailed), without an install
-         attempt: "could not check" is not "not installed" (review finding P2-9).
+         attempt: "could not check" is not "not installed" (review finding P2-9). So does a
+         `winget list` that ran but failed (PreCheckFailed, with its exit code).
       3. Dispatch: a package-specific self-verifying installer named in $App.install (e.g.
          Install-PowerShellLatest, whose DISM-provisioned MSIX path never shows up under
          `winget list` for the elevating account), or the default Install-WingetPackage, which
@@ -25,7 +26,7 @@
       4. Post-verify: winget installs are re-checked with Test-WingetPackageInstalled; an install
          that reported success but does not show up under `winget list` is Failed, and a check
          that could not start winget says so (VerifyLaunchFailed) instead of 'package not found
-         after install'.
+         after install', and so does a check that ran but failed (VerifyFailed).
 
     The three launch-failure reasons are what Invoke-WingetInstall's circuit breaker
     (Invoke-WingetLaunchCircuitBreaker) watches for.
@@ -62,12 +63,14 @@
                         restructuring (issue #189); $null when no installer ran (skip, dry run,
                         pre-check timeout or launch failure)
         FailureReason = $null when Status is not 'Failed'; otherwise 'PreCheckTimeout',
-                        'PreCheckLaunchFailed', 'InstallLaunchFailed', 'CustomInstallFailed',
-                        'VerifyTimeout', 'VerifyLaunchFailed', 'VerifyNotFound' or
-                        'WingetNotLaunchable', so the caller can keep its per-situation message
-                        texts
+                        'PreCheckLaunchFailed', 'PreCheckFailed', 'InstallLaunchFailed',
+                        'CustomInstallFailed', 'VerifyTimeout', 'VerifyLaunchFailed',
+                        'VerifyFailed', 'VerifyNotFound' or 'WingetNotLaunchable', so the caller
+                        can keep its per-situation message texts
         LaunchError   = for the three *LaunchFailed reasons, why winget could not be started;
                         otherwise $null
+        CheckExitCode = for PreCheckFailed and VerifyFailed, the exit code of the `winget list`
+                        that failed; otherwise $null
         SkipReason    = 'NotApplicable' when Status is 'Skipped' because the app's condition
                         evaluated falsy (issue #217); absent/$null for an already-installed skip,
                         so the caller can distinguish the two skip messages
@@ -129,6 +132,11 @@ function Install-AppWithVerification {
         # failed to start, and its verify would then report an installed app as not found.
         return @{ Status = 'Failed'; InstallResult = $null; FailureReason = 'PreCheckLaunchFailed'; LaunchError = $preCheck.LaunchError }
     }
+    if ($preCheck.CheckFailed) {
+        # winget ran but `winget list` failed (P2-9): no answer either. Like a timed-out check,
+        # the app fails into the retry pass instead of being installed blind.
+        return @{ Status = 'Failed'; InstallResult = $null; FailureReason = 'PreCheckFailed'; CheckExitCode = $preCheck.ExitCode }
+    }
     if ($preCheck.Installed) {
         return @{ Status = 'Skipped'; InstallResult = $null; FailureReason = $null }
     }
@@ -169,6 +177,7 @@ function Install-AppWithVerification {
         # launch failure or a timeout reads the same as for every other app.
         $customReason = 'CustomInstallFailed'
         $customLaunchError = $null
+        $customCheckExitCode = $null
         if ($customResult.LaunchErrorExhausted) {
             $customReason = 'InstallLaunchFailed'
             $customLaunchError = $customResult.LaunchError
@@ -180,7 +189,11 @@ function Install-AppWithVerification {
         elseif ($customResult.VerifyTimedOut) {
             $customReason = 'VerifyTimeout'
         }
-        return @{ Status = 'Failed'; InstallResult = $customResult; FailureReason = $customReason; LaunchError = $customLaunchError }
+        elseif ($customResult.VerifyCheckFailed) {
+            $customReason = 'VerifyFailed'
+            $customCheckExitCode = $customResult.VerifyExitCode
+        }
+        return @{ Status = 'Failed'; InstallResult = $customResult; FailureReason = $customReason; LaunchError = $customLaunchError; CheckExitCode = $customCheckExitCode }
     }
 
     # Install through the helper so the transient 0x80073d19 session error is retried with
@@ -202,6 +215,9 @@ function Install-AppWithVerification {
     if ($verify.LaunchFailed) {
         return @{ Status = 'Failed'; InstallResult = $installResult; FailureReason = 'VerifyLaunchFailed'; LaunchError = $verify.LaunchError }
     }
+    if ($verify.CheckFailed) {
+        return @{ Status = 'Failed'; InstallResult = $installResult; FailureReason = 'VerifyFailed'; CheckExitCode = $verify.ExitCode }
+    }
     if ($verify.Installed) {
         return @{ Status = 'Installed'; InstallResult = $installResult; FailureReason = $null }
     }
@@ -221,11 +237,17 @@ function Install-AppWithVerification {
     current user's view) was meant to stop that and never fired on the real wedge.
 
     This is the generic replacement. When an outcome says winget could not be launched
-    (PreCheckLaunchFailed, InstallLaunchFailed or VerifyLaunchFailed), one short
-    Test-WingetLaunchable check (two tries, 10 seconds apart when the failure may clear on its
-    own) decides: winget starts again, so the run carries on with the next app (and the failed
+    (PreCheckLaunchFailed, InstallLaunchFailed or VerifyLaunchFailed), one Test-WingetLaunchable
+    check decides: winget starts again, so the run carries on with the next app (and the failed
     app gets its retry-pass attempt), or it still cannot be started, so the breaker trips. The
     caller then fails every remaining app at once with one reason and skips the retry pass.
+
+    A failure that can clear on its own (winget.exe locked, a timeout, a non-zero exit) gets up to
+    six tries 15 seconds apart: the same 75 seconds Install-WingetPackage's launch retries cover,
+    because the most common cause is an App Installer update in progress (issues #253/#258), which
+    outlasts a short check. The pre-check and the post-install check do not retry a failed launch
+    themselves, so this wait is all the tolerance a lock that starts at one of them gets. winget
+    missing or 'Access is denied' trips the breaker after one try: waiting does not change it.
 .PARAMETER Outcome
     The app's Install-AppWithVerification result.
 .RETURNS
@@ -242,7 +264,7 @@ function Invoke-WingetLaunchCircuitBreaker {
     }
 
     Write-WarningMessage 'winget could not be launched for that app. Checking whether winget can still be started...'
-    $probe = Test-WingetLaunchable -Attempts 2 -RetryDelaySeconds 10
+    $probe = Test-WingetLaunchable -Attempts 6 -RetryDelaySeconds 15
     if ($probe.Launchable) {
         Write-Info "winget starts again ($($probe.Version)); carrying on with the next app."
         return $false

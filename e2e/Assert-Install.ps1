@@ -188,9 +188,11 @@ foreach ($app in $candidateApps) {
 # Checks that winget can be started before starting (issue #277): a Winget-AutoUpdate run can leave
 # winget.exe unlaunchable for several minutes. The installer no longer starts one immediately
 # (RUN_WAU=YES was removed), so this normally passes on the first check; it stays as a guard
-# against a WAU run started by its own schedule, with up to 12 checks 30 seconds apart. Best-effort
-# - the per-app retry loop below still tolerates a timeout or launch failure if a lock outlasts it.
-$launchCheck = Test-WingetLaunchable -Attempts 12 -RetryDelaySeconds 30
+# against a WAU run started by its own schedule, with up to 7 checks 30 seconds apart: 3 minutes
+# when each check fails at once, about 6.5 minutes when each hangs to its 30-second limit, which is
+# what e2e-install.yml's assertions step limit is sized for. Best-effort - the per-app retry loop
+# below still tolerates a timeout or launch failure if a lock outlasts it.
+$launchCheck = Test-WingetLaunchable -Attempts 7 -RetryDelaySeconds 30
 if (-not $launchCheck.Launchable) {
     Write-Host "winget could not be started before the per-app checks ($($launchCheck.Reason)); proceeding anyway (each check retries independently)." -ForegroundColor Yellow
 }

@@ -361,7 +361,7 @@ Describe 'Installer messages the transcript parser keys on' {
         @{ File = 'WingetAppSetup/Public/Install.ps1'; Text = "`$rows += , @('Skipped', `$appList)" }
         @{ File = 'WingetAppSetup/Public/Install.ps1'; Text = "`$rows += , @('Failed', `$appList)" }
         @{ File = 'WingetAppSetup/Public/Install.ps1'; Text = "'FrameworkMissing' { Write-ErrorMessage 'Auto-updates: NOT CONFIGURED - " }
-        @{ File = 'WingetAppSetup/Public/Install.ps1'; Text = "Write-ErrorMessage 'winget: NOT USABLE - " }
+        @{ File = 'WingetAppSetup/Public/Install.ps1'; Text = 'Write-ErrorMessage "winget: NOT USABLE - ' }
         @{ File = 'build/fragments/tail.ps1'; Text = 'Write-Info "Installer build: $script:InstallerBuildId"' }
         @{ File = 'build/fragments/tail.ps1'; Text = "Write-ErrorMessage 'UNEXPECTED ERROR - the run was aborted before it finished." }
         @{ File = 'build/fragments/tail.ps1'; Text = "`$abortMessage = 'The run was stopped before it finished (exit code 5).'" }

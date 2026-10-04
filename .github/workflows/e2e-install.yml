@@ -173,13 +173,15 @@ jobs:
     #     12 min for the three; each app's result prints as soon as it is done, and the step
     #     continues on error, so a hang there only costs time.
     #   - install passes, 35 each: first passes have taken 3-11 min and passing second passes
-    #     under 1 min, but a pass where winget cannot launch costs about 1.4 min per applicable app
-    #     on each of its two loops (run 36384683838's second pass took 23.9 min, before the
-    #     end-of-run launch check added up to 1.5 min more).
-    #   - assertions, 40: Assert-Install.ps1 waits up to about 6.5 min for winget to launch, then
-    #     spends up to 3.25 min per applicable app when winget hangs (3 probes of 60 s plus 15 s
-    #     of pauses), about 36 min for the 9 apps that apply on this runner. Raise it if the
-    #     catalog grows.
+    #     under 1 min. A pass where winget stops launching now ends after about 2.5 min (75 s of
+    #     launch retries for one app, then the circuit breaker's 75 s check), about 6 min if every
+    #     30 s check hangs to its limit; it used to cost about 1.4 min per applicable app on each
+    #     of its two loops (run 36384683838's second pass took 23.9 min). The end-of-run launch
+    #     check adds up to 1 min (3.5 min if every check hangs).
+    #   - assertions, 40: Assert-Install.ps1 checks for up to about 6.5 min that winget launches
+    #     (7 checks 30 s apart, each up to 30 s), then spends up to 3.25 min per applicable app
+    #     when winget hangs (3 probes of 60 s plus 15 s of pauses), about 36 min for the 9 apps
+    #     that apply on this runner. Raise it if the catalog grows.
     timeout-minutes: 145
     env:
       # What both install passes run: 'raw-main' (the production one-liner) only for the weekly run,

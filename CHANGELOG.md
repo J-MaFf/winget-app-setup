@@ -186,7 +186,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     which only proved that the app-execution alias is on PATH: a run on E2E run 35406706712 printed
     `Winget bootstrapped successfully` after both repair attempts had failed, and every winget call
     after it failed. A winget that is on PATH but cannot run now goes down the same bootstrap
-    ladder, and the run exits 2 when nothing makes it start.
+    ladder, and the run exits 2 when nothing makes it start. Before the first rung, a failure that
+    may clear on its own gets up to six tries 15 seconds apart (the 75 seconds the install's launch
+    retries cover), so App Installer is not re-registered or repaired while a Store update of it
+    is still deploying.
   - **"Could not check" is no longer "not installed".** `Test-WingetPackageInstalled -TimeoutSeconds`
     returns `LaunchFailed` and `LaunchError` when winget could not be started. The per-app
     pipeline no longer installs an app whose pre-check could not run (`PreCheckLaunchFailed`),
@@ -195,33 +198,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     (`VerifyLaunchFailed`) instead of `package not found after install`. Each reason ends with the
     launch error, for example
     `winget could not be launched for the pre-install check; launch error: Access is denied`.
+    A `winget list` that ran but failed is not "not installed" either: it exits 0 when it lists
+    the package and `0x8A150014` when nothing matches, so any other exit code without a match
+    returns `CheckFailed`, and the app fails as `PreCheckFailed` (without an install attempt) or
+    `VerifyFailed`, for example
+    `winget list failed during the pre-install check with exit 0x8A15004B`.
     `Install-WingetPackage` reports any launch failure in its result (`LaunchErrorExhausted`,
     `LaunchError`) instead of throwing for one it does not retry, so it no longer shows up as an
     `Unexpected error`.
   - **Run-level circuit breaker.** After an app could not launch winget, `Invoke-WingetInstall`
-    checks once whether winget can still be started (`Invoke-WingetLaunchCircuitBreaker`: two
-    tries, 10 seconds apart). If it can, the run carries on. If it cannot, the run prints one
+    checks once whether winget can still be started (`Invoke-WingetLaunchCircuitBreaker`: up to
+    six tries 15 seconds apart, the 75 seconds the install's own launch retries cover, because the
+    pre-check and the post-install check do not retry a failed launch and an App Installer update
+    in progress outlasts a short check; `Access is denied` or a missing winget after one try). If
+    it can, the run carries on and the app gets its retry. If it cannot, the run prints one
     `winget cannot be launched on this machine (...)` line, marks every remaining applicable app
     failed with `not attempted: winget cannot be launched on this machine (see above)` without
     running winget, and skips the retry pass. Not-applicable apps are still skipped. The breaker
     also works inside the retry pass. The worst case on a wedged winget drops from about 24 minutes
-    (each app: 9 launches and 75 seconds of backoff, twice) to about a minute and a half: at most
-    75 seconds of launch backoff for the one app whose install hit the failure, then 10 seconds
-    between the breaker's two tries; the end-of-run check makes a single try once the breaker has
-    tripped. Every check has a 30-second limit, so even checks that hang until their limit keep it
-    under 4 minutes. When the pre-check is what fails, the run stops after about 10 seconds. The
-    exit code stays 1.
+    (each app: 9 launches and 75 seconds of backoff, twice) to about 2.5 minutes: at most 75
+    seconds of launch backoff for the one app whose install hit the failure, then 75 seconds of
+    the breaker's checks; the end-of-run check makes a single try once the breaker has tripped.
+    Every check has a 30-second limit, so even checks that hang until their limit keep it to about
+    6 minutes. When the pre-check is what fails, the run stops after about 75 seconds. The exit
+    code stays 1.
   - **PowerShell's failure reason.** `Install-PowerShellLatest` returns `Install-WingetPackage`'s
     whole result (exit code, attempts, scope fallback, session and launch errors) plus the outcome
-    of its own `winget list` check (`VerifyTimedOut`, `VerifyLaunchFailed`), so the summary says
-    why PowerShell failed like it does for every other app instead of `installer reported failure`.
+    of its own `winget list` check (`VerifyTimedOut`, `VerifyLaunchFailed`, `VerifyCheckFailed`),
+    so the summary says why PowerShell failed like it does for every other app instead of
+    `installer reported failure`.
     A check that timed out reads `post-install verification timed out`.
   - **End-of-run check.** The check that keeps a run from exiting 0 with winget unusable (exit 2)
     now uses `Test-WingetLaunchable`: up to five tries 15 seconds apart, about the minute
-    `Wait-WingetLaunchable` allowed, and it also requires the version output.
-  - `e2e/Assert-Install.ps1` uses `Test-WingetLaunchable` before its per-app checks and names a
-    launch failure in a failed check's detail, and `e2e/TranscriptAssertions.ps1` reads the
-    breaker's line (`WingetNotLaunchable`) instead of the removed deadlock line.
+    `Wait-WingetLaunchable` allowed, and it also requires the version output. The
+    `winget: NOT USABLE` line now says why, for example
+    `(winget could not be started: Access is denied)`.
+  - `e2e/Assert-Install.ps1` uses `Test-WingetLaunchable` before its per-app checks (up to seven
+    tries 30 seconds apart, about the 6.5 minutes `Wait-WingetLaunchable` allowed, which the
+    assertions step's time limit is sized for) and names a launch failure in a failed check's
+    detail, and `e2e/TranscriptAssertions.ps1` reads the breaker's line (`WingetNotLaunchable`)
+    instead of the removed deadlock line.
 - winget and `msiexec` now run through one helper, `Invoke-ExternalProcess` with
   `Invoke-WingetProcess` on top (`WingetAppSetup/Private/ProcessInvocation.ps1`), so every winget
   and `msiexec` call has a time limit, its output reaches the log, and a failed launch is recognized

@@ -58,13 +58,14 @@ non-English Windows; unattended runs pass `--silent`; and `winget source list` a
 had kept the source reset from ever running. A winget that cannot be started now fails the run
 fast: winget counts as usable only when `winget --version` runs and prints a version (being on PATH
 is not enough, so a failed repair no longer reports success), a `winget list` that could not start
-winget is no longer read as "not installed" (which had every installed app reported as
-`package not found after install`), and after the first app that could not launch winget, one check
-decides whether to carry on or to fail the remaining apps at once and skip the retry pass. A wedged
-winget used to cost about 24 minutes; it now costs about a minute and a half. PowerShell's failure
-reason names its exit code and launch errors like every other app's. The deadlock detector
-(`Get-ConflictingDesktopAppInstallerVersions`, which never fired on the real wedge), the
-`-BypassAlias` launch path and `Wait-WingetLaunchable` are gone.
+winget, or that ran and failed, is no longer read as "not installed" (which had every installed app
+reported as `package not found after install`), and after the first app that could not launch
+winget, one check (up to 75 seconds, for an App Installer update in progress) decides whether to
+carry on or to fail the remaining apps at once and skip the retry pass. A wedged winget used to cost
+about 24 minutes; it now costs about 2.5 minutes. The `winget: NOT USABLE` line at the end of a run
+says why. PowerShell's failure reason names its exit code and launch errors like every other app's.
+The deadlock detector (`Get-ConflictingDesktopAppInstallerVersions`, which never fired on the real
+wedge), the `-BypassAlias` launch path and `Wait-WingetLaunchable` are gone.
 
 The same branch changes CI. Fork pull requests that leave `windows-tests.yml` alone no longer run
 on the self-hosted win-test runner, and `claude.yml` calls the shared Claude workflow at a pinned

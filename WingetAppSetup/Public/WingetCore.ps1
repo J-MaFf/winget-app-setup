@@ -82,7 +82,9 @@ function Test-AndInstallWingetModule {
     on PATH. After both repair attempts had failed, that still printed 'Winget bootstrapped
     successfully', and every winget call afterwards failed (review finding P3-9). A winget that is
     on PATH but cannot run now goes down the same ladder, and the run stops with exit code 2 when
-    no rung makes it start.
+    no rung makes it start. A failure that can clear on its own (a locked winget.exe, a timeout, a
+    non-zero exit) is checked for up to 75 seconds before the first rung, so an App Installer
+    update in progress is not repaired underneath.
 .PARAMETER WhatIf
     Dry run: only checks whether winget can be started (a read-only `winget --version`) and, when
     it cannot, prints the bootstrap ladder a real run would work through. No rung runs (P2-16: the
@@ -97,11 +99,16 @@ function Test-AndInstallWinget {
         [switch]$WhatIf
     )
 
-    # Two checks, 5 seconds apart, when the first one hits a lock that can clear on its own (an
-    # antivirus scan of winget.exe): the rungs below re-register or download App Installer, which
-    # is far more than a momentary lock deserves. winget missing from PATH is final at once.
+    # Before the first rung: up to six checks 15 seconds apart when the failure can clear on its
+    # own (winget.exe locked by an antivirus scan or by an App Installer update in progress, issues
+    # #253/#258; a timeout; a non-zero exit). That is the 75 seconds Install-WingetPackage's launch
+    # retries cover. The rungs below re-register, repair or download App Installer, which must not
+    # run while a Store update of App Installer is still deploying. winget missing from PATH or
+    # 'Access is denied' goes to the rungs after one check: waiting does not change it.
+    # After a rung: two checks 5 seconds apart, for a package that was just registered.
+    $initialCheck = @{ Attempts = 6; RetryDelaySeconds = 15 }
     $launchCheck = @{ Attempts = 2; RetryDelaySeconds = 5 }
-    $probe = Test-WingetLaunchable @launchCheck
+    $probe = Test-WingetLaunchable @initialCheck
     if ($probe.Launchable) {
         Write-Success "Winget is available ($($probe.Version))."
         return $true
@@ -641,6 +648,10 @@ function Install-WingetPackage {
     installed" made Install-AppWithVerification install apps that were already there and then
     report them as 'package not found after install'. A failed launch is not retried here; the
     caller decides (Invoke-WingetInstall's circuit breaker checks whether winget can still start).
+    The same goes for a `winget list` that ran but failed (CheckFailed): it exits 0 when it lists
+    the package and 0x8A150014 (APPINSTALLER_CLI_ERROR_NO_APPLICATIONS_FOUND) when nothing matches,
+    and it only warns about a source it could not search. Any other exit code with no match (for
+    example 0x8A15004B, every source failed to open) means the check itself failed.
 
     Both modes determine "installed" via Test-WingetListOutputContainsPackageId rather than a plain
     substring .Contains check, so an unrelated listed id that merely contains $PackageId as a
@@ -653,10 +664,11 @@ function Install-WingetPackage {
 .RETURNS
     [bool] when -TimeoutSeconds is not supplied.
     [hashtable] @{ Installed = <bool>; TimedOut = <bool>; LaunchFailed = <bool>;
-    LaunchError = <string or $null>; ExitCode = <int or $null> } when it is. Installed is True only
-    when winget answered and listed the id. TimedOut and LaunchFailed mean there was no answer:
-    winget ran out of time, or could not be started (LaunchError says why). ExitCode is the winget
-    process exit code, or $null when there was no answer.
+    LaunchError = <string or $null>; CheckFailed = <bool>; ExitCode = <int or $null> } when it is.
+    Installed is True only when winget answered and listed the id. TimedOut, LaunchFailed and
+    CheckFailed mean there was no answer: winget ran out of time, could not be started (LaunchError
+    says why), or ran and failed without listing the id (ExitCode says how). ExitCode is the winget
+    process exit code, or $null when winget did not run to the end.
 #>
 function Test-WingetPackageInstalled {
     param (
@@ -672,22 +684,31 @@ function Test-WingetPackageInstalled {
     if ($TimeoutSeconds -gt 0) {
         $run = Invoke-WingetProcess -ArgumentList $listArgs -TimeoutSeconds $TimeoutSeconds -Echo None
         if ($run.LaunchFailed) {
-            return @{ Installed = $false; TimedOut = $false; LaunchFailed = $true; LaunchError = $run.LaunchError; ExitCode = $null }
+            return @{ Installed = $false; TimedOut = $false; LaunchFailed = $true; LaunchError = $run.LaunchError; CheckFailed = $false; ExitCode = $null }
         }
 
         if ($run.TimedOut) {
-            return @{ Installed = $false; TimedOut = $true; LaunchFailed = $false; LaunchError = $null; ExitCode = $null }
+            return @{ Installed = $false; TimedOut = $true; LaunchFailed = $false; LaunchError = $null; CheckFailed = $false; ExitCode = $null }
         }
 
         # Standard output only, as before: an error message on standard error can name the id too.
         # Join with a newline, not '': Test-WingetListOutputContainsPackageId's boundary regex
         # treats anything outside [\w.\-] as a token edge, so an empty separator would let the
         # end of one line abut the start of the next and could hide a real match at that seam.
+        $installed = Test-WingetListOutputContainsPackageId -Output ([String]::Join("`n", @($run.StandardOutput))) -PackageId $PackageId
+
+        # 0 (listed) and 0x8A150014 (APPINSTALLER_CLI_ERROR_NO_APPLICATIONS_FOUND, as a signed
+        # Int32) are the answers; any other exit code without a match is a failed check, not "not
+        # installed" (review finding P2-9).
+        $noApplicationsFoundExitCode = -1978335212
+        $checkFailed = (-not $installed) -and ($null -ne $run.ExitCode) -and (@(0, $noApplicationsFoundExitCode) -notcontains [int]$run.ExitCode)
+
         return @{
-            Installed    = Test-WingetListOutputContainsPackageId -Output ([String]::Join("`n", @($run.StandardOutput))) -PackageId $PackageId
+            Installed    = $installed
             TimedOut     = $false
             LaunchFailed = $false
             LaunchError  = $null
+            CheckFailed  = $checkFailed
             ExitCode     = $run.ExitCode
         }
     }
@@ -904,9 +925,10 @@ function Install-MsixProvisionedPackage {
     The winget paths (msi, msix-native) return Install-WingetPackage's whole result with Installed
     and Method added (review finding P3-8: only ExitCode survived, so PowerShell's failure reason
     read just 'installer reported failure' while every other app's said why), plus the outcome of
-    the `winget list` check: VerifyTimedOut, VerifyLaunchFailed and VerifyLaunchError. When winget
-    could not be launched for the install (LaunchErrorExhausted), the check is skipped: it would
-    only fail to launch again.
+    the `winget list` check: VerifyTimedOut, VerifyLaunchFailed, VerifyLaunchError, VerifyCheckFailed
+    (`winget list` ran and failed) and VerifyExitCode (its exit code). When winget could not be
+    launched for the install (LaunchErrorExhausted), the check is skipped: it would only fail to
+    launch again.
 #>
 function Install-PowerShellLatest {
     param (
@@ -961,6 +983,8 @@ function Install-PowerShellLatest {
     $outcome['VerifyTimedOut'] = $false
     $outcome['VerifyLaunchFailed'] = $false
     $outcome['VerifyLaunchError'] = $null
+    $outcome['VerifyCheckFailed'] = $false
+    $outcome['VerifyExitCode'] = $null
 
     if ($outcome['LaunchErrorExhausted']) {
         # winget never started, so nothing was installed, and the check would only fail to launch
@@ -974,6 +998,8 @@ function Install-PowerShellLatest {
     $outcome['VerifyTimedOut'] = [bool]$verify.TimedOut
     $outcome['VerifyLaunchFailed'] = [bool]$verify.LaunchFailed
     $outcome['VerifyLaunchError'] = $verify.LaunchError
+    $outcome['VerifyCheckFailed'] = [bool]$verify.CheckFailed
+    $outcome['VerifyExitCode'] = $verify.ExitCode
     return $outcome
 }
 

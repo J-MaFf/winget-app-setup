@@ -349,6 +349,65 @@ Describe 'Test-AndInstallWinget with winget on PATH but unable to run (review fi
     }
 }
 
+# Review of item 9: Get-Command used to let the run go on while winget.exe was briefly locked. The
+# launch check that replaced it went down the bootstrap ladder (re-register App Installer,
+# Repair-WinGetPackageManager, the aka.ms/getwinget download) after two tries 5 seconds apart, so an
+# App Installer update in progress (issues #253/#258) got repaired underneath. The real
+# Test-WingetLaunchable runs; time is simulated (each launch takes a second, Start-Sleep advances it).
+Describe 'Test-AndInstallWinget with winget locked at the start of the run' {
+    BeforeEach {
+        Mock Write-Host { }
+        Mock Write-Success { }
+        Mock Write-WarningMessage { }
+        Mock Write-ErrorMessage { }
+        Mock Write-Info { }
+        Mock Repair-WinGetPackageManager { }
+        Mock Register-WingetAppInstallerForUser { $false }
+        Mock Invoke-WingetPackageManagerRepair { @{ Available = $true; Succeeded = $false; DowngradeRejected = $false; MissingFrameworkDependency = $false; Message = '' } }
+        Mock Get-Command { return $true } -ParameterFilter { $Name -eq 'Repair-WinGetPackageManager' }
+        Mock Invoke-WebRequest { throw 'Network error' }
+        Mock Add-AppxPackage { }
+        $script:clock = 0
+        Mock Start-Sleep { $script:clock += $Seconds }
+    }
+
+    It 'Waits out a <Seconds>-second lock without re-registering, repairing or downloading App Installer' -ForEach @(
+        @{ Seconds = 30 }
+        @{ Seconds = 60 }
+    ) {
+        $script:lockSeconds = $Seconds
+        Mock Invoke-WingetProcess {
+            $script:clock++
+            if ($script:clock -le $script:lockSeconds) {
+                return New-TestProcessResult -LaunchFailed -LaunchErrorCode 1920 -LaunchError 'The file cannot be accessed by the system.'
+            }
+            New-TestProcessResult -ExitCode 0 -Output @('v1.12.350')
+        }
+
+        Test-AndInstallWinget | Should -Be $true
+
+        Should -Invoke Register-WingetAppInstallerForUser -Times 0 -Exactly
+        Should -Invoke Invoke-WingetPackageManagerRepair -Times 0 -Exactly
+        Should -Invoke Invoke-WebRequest -Times 0 -Exactly
+        # Six tries 15 seconds apart at most: the 75 seconds the install's launch retries cover.
+        $script:clock | Should -BeLessOrEqual 81
+    }
+
+    It 'Goes to the bootstrap rungs after one check when waiting cannot help (<Case>)' -ForEach @(
+        @{ Case = 'winget not on PATH'; Code = 2; Message = "'winget' was not found on PATH." }
+        @{ Case = 'access denied'; Code = 5; Message = 'Access is denied.' }
+    ) {
+        $script:launchCode = $Code
+        $script:launchMessage = $Message
+        Mock Invoke-WingetProcess { New-TestProcessResult -LaunchFailed -LaunchErrorCode $script:launchCode -LaunchError $script:launchMessage }
+
+        Test-AndInstallWinget | Should -Be $false
+
+        Should -Invoke Register-WingetAppInstallerForUser -Times 1 -Exactly
+        Should -Invoke Start-Sleep -Times 0 -Exactly
+    }
+}
+
 Describe 'Test-WingetSources' {
     BeforeAll {
         Mock Write-Host { }
@@ -1281,6 +1340,42 @@ Describe 'Test-WingetPackageInstalled (timeout support, issue #188)' {
             $result.LaunchFailed | Should -Be $false
             $result.LaunchError | Should -Be $null
         }
+
+        It 'Reports a winget list that ran and failed as CheckFailed, not as not installed (review finding P2-9, <Case>)' -ForEach @(
+            @{ Case = 'every source failed to open, 0x8A15004B'; Code = -1978335157 }
+            @{ Case = 'blocked by policy, 0x8A15003A'; Code = -1978335174 }
+            @{ Case = 'invalid arguments, 0x8A150002'; Code = -1978335230 }
+        ) {
+            # `winget list` exits 0 when it lists the package and 0x8A150014 when nothing matches;
+            # it only warns about a source it could not search. Any other code is no answer.
+            $script:listExitCode = $Code
+            Mock Invoke-WingetProcess { New-TestProcessResult -ExitCode $script:listExitCode -Output @('Failed when opening source(s); try the ''source reset'' command if the problem persists.') }
+
+            $result = Test-WingetPackageInstalled -PackageId 'Test.App' -TimeoutSeconds 15
+
+            $result.CheckFailed | Should -Be $true
+            $result.ExitCode | Should -Be $Code
+            $result.Installed | Should -Be $false
+            $result.LaunchFailed | Should -Be $false
+            $result.TimedOut | Should -Be $false
+        }
+
+        It 'Does not report CheckFailed for an answer from winget list (<Case>)' -ForEach @(
+            @{ Case = 'listed, exit 0'; Result = { New-TestProcessResult -ExitCode 0 -Output @('Test.App  1.0  winget') }; Installed = $true }
+            @{ Case = 'not found, 0x8A150014'; Result = { New-TestProcessResult -ExitCode -1978335212 -Output @('No installed package found matching input criteria.') }; Installed = $false }
+            @{ Case = 'exit 0 without the id'; Result = { New-TestProcessResult -ExitCode 0 -Output @('Other.App  1.0  winget') }; Installed = $false }
+            @{ Case = 'listed with a non-zero exit'; Result = { New-TestProcessResult -ExitCode -1978335157 -Output @('Test.App  1.0  winget') }; Installed = $true }
+            @{ Case = 'timed out'; Result = { New-TestProcessResult -TimedOut }; Installed = $false }
+            @{ Case = 'launch failed'; Result = { New-TestProcessResult -LaunchFailed -LaunchErrorCode 5 -LaunchError 'Access is denied.' }; Installed = $false }
+        ) {
+            $script:processResult = & $Result
+            Mock Invoke-WingetProcess { $script:processResult }
+
+            $result = Test-WingetPackageInstalled -PackageId 'Test.App' -TimeoutSeconds 15
+
+            $result.CheckFailed | Should -Be $false
+            $result.Installed | Should -Be $Installed
+        }
     }
 }
 
@@ -1593,6 +1688,13 @@ Describe 'Install-PowerShellLatest (always-latest strategy, issue #166)' {
         $launchFailed.VerifyLaunchFailed | Should -Be $true
         $launchFailed.VerifyLaunchError | Should -Be 'Access is denied.'
         $launchFailed.Installed | Should -Be $false
+        $launchFailed.VerifyCheckFailed | Should -Be $false
+
+        Mock Test-WingetPackageInstalled { @{ Installed = $false; TimedOut = $false; LaunchFailed = $false; LaunchError = $null; CheckFailed = $true; ExitCode = -1978335157 } }
+        $checkFailed = Install-PowerShellLatest
+        $checkFailed.VerifyCheckFailed | Should -Be $true
+        $checkFailed.VerifyExitCode | Should -Be -1978335157
+        $checkFailed.Installed | Should -Be $false
     }
 
     It 'skips its winget check when winget could not be launched for the install' {

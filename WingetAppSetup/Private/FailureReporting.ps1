@@ -188,9 +188,9 @@ function Get-InstallerExitCode {
     and for the Reason column in the failed-apps summary table.
 .PARAMETER FailureReason
     The FailureReason string from the shared install pipeline ('PreCheckTimeout',
-    'PreCheckLaunchFailed', 'InstallLaunchFailed', 'VerifyTimeout', 'VerifyLaunchFailed',
-    'VerifyNotFound', 'CustomInstallFailed', 'WingetNotLaunchable'). Unknown or empty values fall
-    back to a generic 'install failed'.
+    'PreCheckLaunchFailed', 'PreCheckFailed', 'InstallLaunchFailed', 'VerifyTimeout',
+    'VerifyLaunchFailed', 'VerifyFailed', 'VerifyNotFound', 'CustomInstallFailed',
+    'WingetNotLaunchable'). Unknown or empty values fall back to a generic 'install failed'.
 .PARAMETER InstallResult
     The InstallResult hashtable from the shared install pipeline: Install-WingetPackage's
     ExitCode/Attempts/SessionErrorExhausted/MachineScopeFellBack shape, a custom installer's
@@ -199,6 +199,9 @@ function Get-InstallerExitCode {
 .PARAMETER LaunchError
     Why winget could not be started, for the launch-failure reasons (the pipeline's LaunchError).
     Shown last, so the table row says what Windows reported (review finding P2-9).
+.PARAMETER CheckExitCode
+    The exit code of the `winget list` check that failed, for PreCheckFailed and VerifyFailed (the
+    pipeline's CheckExitCode). Shown with the reason, apart from the install's own exit code.
 .RETURNS
     [string] e.g. 'package not found after install; winget exit 0x80073D19, 3 attempts,
     machine-scope fallback: no'. Never $null or empty.
@@ -217,19 +220,29 @@ function Format-InstallFailureReason {
         [Parameter(Mandatory = $false)]
         [AllowNull()]
         [AllowEmptyString()]
-        [string]$LaunchError
+        [string]$LaunchError,
+
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [Nullable[int]]$CheckExitCode
     )
 
     $base = switch ($FailureReason) {
         'PreCheckTimeout' { 'winget list timed out during the pre-install check' }
         'PreCheckLaunchFailed' { 'winget could not be launched for the pre-install check' }
+        'PreCheckFailed' { 'winget list failed during the pre-install check' }
         'InstallLaunchFailed' { 'winget could not be launched to install it' }
         'VerifyTimeout' { 'post-install verification timed out' }
         'VerifyLaunchFailed' { 'winget could not be launched to verify the install' }
+        'VerifyFailed' { 'winget list failed during the post-install check' }
         'VerifyNotFound' { 'package not found after install' }
         'CustomInstallFailed' { 'installer reported failure' }
         'WingetNotLaunchable' { 'not attempted: winget cannot be launched on this machine (see above)' }
         default { 'install failed' }
+    }
+    if ($null -ne $CheckExitCode -and @('PreCheckFailed', 'VerifyFailed') -contains $FailureReason) {
+        # The list's own exit code (review finding P2-9), kept apart from the install's 'winget exit'.
+        $base = '{0} with exit 0x{1:X8}' -f $base, [int]$CheckExitCode
     }
 
     $detailParts = @()
