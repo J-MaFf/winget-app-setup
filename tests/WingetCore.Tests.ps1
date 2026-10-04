@@ -65,6 +65,37 @@ Describe 'Test-AndInstallWingetModule' {
             Should -Invoke Install-Module -Times 1
         }
     }
+
+    # P2-16: a dry run used to install the NuGet provider and this module for all users.
+    Context 'Dry run (-WhatIf)' {
+        BeforeEach {
+            Mock Get-PackageProvider { $null }
+            Mock Install-PackageProvider { }
+            Mock Install-Module { }
+            $script:infoMessages = @()
+            Mock Write-Info { $script:infoMessages += $Message }
+        }
+
+        It 'Reports what a real run would install and installs nothing when the module is missing' {
+            Mock Get-Module { $null } -ParameterFilter { $Name -eq 'Microsoft.WinGet.Client' -and $ListAvailable }
+
+            Test-AndInstallWingetModule -WhatIf | Should -Be $false
+
+            Should -Invoke Get-PackageProvider -Times 0 -Exactly
+            Should -Invoke Install-PackageProvider -Times 0 -Exactly
+            Should -Invoke Install-Module -Times 0 -Exactly
+            ($script:infoMessages -join "`n") | Should -Match '\[DRY-RUN\] Microsoft\.WinGet\.Client module not found\. A real run would install it for all users'
+        }
+
+        It 'Still reports an installed module as available' {
+            Mock Get-Module { @{ Name = 'Microsoft.WinGet.Client' } } -ParameterFilter { $Name -eq 'Microsoft.WinGet.Client' -and $ListAvailable }
+
+            Test-AndInstallWingetModule -WhatIf | Should -Be $true
+
+            Should -Invoke Install-Module -Times 0 -Exactly
+            $script:infoMessages.Count | Should -Be 0
+        }
+    }
 }
 
 Describe 'Test-AndInstallWinget' {
@@ -262,6 +293,43 @@ Describe 'Test-AndInstallWinget' {
             # being present, and retrying would burn a second multi-hundred-megabyte download.
             Should -Invoke Repair-WinGetPackageManager -Times 1 -Exactly
             Should -Invoke Add-AppxPackage -Times 1
+        }
+    }
+
+    # P2-16: a dry run used to register or repair App Installer, or download and install it.
+    Context 'Dry run (-WhatIf)' {
+        BeforeEach {
+            Mock Invoke-WingetPackageManagerRepair { @{ Available = $true; Succeeded = $true; DowngradeRejected = $false; MissingFrameworkDependency = $false; Message = '' } }
+            Mock Invoke-WebRequest { }
+            Mock Add-AppxPackage { }
+            Mock Remove-Item { }
+            $script:infoMessages = @()
+            Mock Write-Info { $script:infoMessages += $Message }
+        }
+
+        It 'Reports the bootstrap a real run would attempt and runs none of it when winget is missing' {
+            Mock Get-Command { $null } -ParameterFilter { $Name -eq 'winget' }
+            # Every rung is available, so only the -WhatIf short-circuit keeps them from running.
+            Mock Get-Command { $true } -ParameterFilter { $Name -eq 'Repair-WinGetPackageManager' }
+            Mock Register-WingetAppInstallerForUser { $true }
+
+            Test-AndInstallWinget -WhatIf | Should -Be $false
+
+            Should -Invoke Register-WingetAppInstallerForUser -Times 0 -Exactly
+            Should -Invoke Invoke-WingetPackageManagerRepair -Times 0 -Exactly
+            Should -Invoke Repair-WinGetPackageManager -Times 0 -Exactly
+            Should -Invoke Invoke-WebRequest -Times 0 -Exactly
+            Should -Invoke Add-AppxPackage -Times 0 -Exactly
+            ($script:infoMessages -join "`n") | Should -Match '\[DRY-RUN\] Winget is not available for this account\. A real run would bootstrap it'
+        }
+
+        It 'Still reports winget as available when it is on PATH' {
+            Mock Get-Command { $true } -ParameterFilter { $Name -eq 'winget' }
+
+            Test-AndInstallWinget -WhatIf | Should -Be $true
+
+            Should -Invoke Register-WingetAppInstallerForUser -Times 0 -Exactly
+            $script:infoMessages.Count | Should -Be 0
         }
     }
 }
@@ -479,6 +547,68 @@ Describe 'Test-WingetSources' {
             $script:searchArgs | Should -Contain '--accept-source-agreements'
             $script:searchArgs | Should -Contain '--disable-interactivity'
             $script:searchArgs | Should -Contain '--source'
+        }
+    }
+
+    # P2-16: a dry run used to run `winget source reset --force` (which also drops any source added
+    # beyond the defaults) and re-register the source package.
+    Context 'Dry run (-WhatIf)' {
+        BeforeEach {
+            Mock Add-AppxPackage { }
+            $script:infoMessages = @()
+            Mock Write-Info { $script:infoMessages += $Message }
+            $script:warningMessages = @()
+            Mock Write-WarningMessage { $script:warningMessages += $Message }
+        }
+
+        It 'Reports the repair of a corrupted source without resetting sources or registering the source package' {
+            Mock winget {
+                if ($args[0] -eq 'source' -and $args[1] -eq 'list') {
+                    $global:LASTEXITCODE = 0
+                    return 'winget      https://cdn.winget.microsoft.com/cache'
+                }
+                if ($args[0] -eq 'search') {
+                    $global:LASTEXITCODE = -1978335217
+                    return 'Failed when opening source(s); try the source reset command if the problem persists. 0x8a15000f'
+                }
+                $global:LASTEXITCODE = 0
+            }
+
+            Test-WingetSources -WhatIf | Should -Be $false
+
+            Should -Invoke winget -Times 0 -Exactly -ParameterFilter { $args -contains 'reset' }
+            Should -Invoke Add-AppxPackage -Times 0 -Exactly
+            ($script:infoMessages -join "`n") | Should -Match '\[DRY-RUN\] Winget source data is corrupted\. A real run would repair it: winget source reset --force'
+            ($script:warningMessages -join "`n") | Should -Not -Match 'Attempting to repair'
+        }
+
+        It 'Reports a missing source the same way, without repairing it' {
+            Mock winget {
+                $global:LASTEXITCODE = 0
+                if ($args[0] -eq 'source' -and $args[1] -eq 'list') {
+                    return 'msstore      https://storeedgefd.dsx.mp.microsoft.com/v9.0'
+                }
+            }
+
+            Test-WingetSources -WhatIf | Should -Be $false
+
+            Should -Invoke winget -Times 0 -Exactly -ParameterFilter { $args -contains 'reset' }
+            Should -Invoke Add-AppxPackage -Times 0 -Exactly
+            ($script:infoMessages -join "`n") | Should -Match '\[DRY-RUN\] Winget source "winget" appears to be missing\. A real run would repair it'
+        }
+
+        It 'Returns true for a healthy source without a dry-run line' {
+            Mock winget {
+                $global:LASTEXITCODE = 0
+                if ($args[0] -eq 'source' -and $args[1] -eq 'list') {
+                    return 'winget      https://cdn.winget.microsoft.com/cache'
+                }
+                return '7zip.7zip    7.30'
+            }
+
+            Test-WingetSources -WhatIf | Should -Be $true
+
+            ($script:infoMessages -join "`n") | Should -Not -Match '\[DRY-RUN\]'
         }
     }
 }

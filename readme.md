@@ -62,6 +62,23 @@ open — a warning, then a normal install — so a broken probe can never silent
 `Dell.CommandUpdate.Universal` is gated this way (`Dell hardware only`): it installs only when
 `Win32_ComputerSystem` reports a Dell manufacturer ([#217](https://github.com/J-MaFf/winget-app-setup/issues/217)).
 
+## Preview a run (`-WhatIf`)
+
+```powershell
+pwsh -ExecutionPolicy Unrestricted -File .\winget-app-install.ps1 -WhatIf
+```
+
+A dry run changes nothing on the machine and does not ask for elevation. It runs the checks a real
+run starts with and prints a `[DRY-RUN]` line for each change a real run would make: installing the
+`Microsoft.WinGet.Client` and `Microsoft.PowerShell.GraphicalTools` modules (and the NuGet
+provider), setting up winget for the account, repairing a broken winget source (a real repair runs
+`winget source reset --force`, which also removes any source added beyond the defaults),
+relaunching elevated, and each app it would install. When the account has no winget yet, for
+example an admin account used only to elevate, the preview lists every app as one a real run
+would install, because it cannot check which are already there. A dry run still writes its
+transcript (see [Logs](#logs)), and its `winget list` and `winget search` checks update winget's
+own per-user cache and source-agreement state.
+
 ## Unattended runs
 
 The installer never asks a yes/no question on any path — elevation, the PowerShell 7 bootstrap,

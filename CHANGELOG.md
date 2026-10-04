@@ -128,6 +128,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A `-WhatIf` dry run no longer changes the machine (review finding P2-16). It printed "No system
+  changes will be made", but its setup steps ran their real fixes: on a machine missing them it
+  installed the NuGet provider, `Microsoft.WinGet.Client` and `Microsoft.PowerShell.GraphicalTools`
+  for all users, registered, repaired or downloaded App Installer for the account, and ran
+  `winget source reset --force` on an unhealthy source, which also removes any source added beyond
+  the defaults. `Test-AndInstallWingetModule`, `Test-AndInstallWinget`,
+  `Test-AndInstallGraphicalTools` and `Test-WingetSources` now take `-WhatIf`: they only check, and
+  print a `[DRY-RUN]` line naming the fix a real run would make. A dry run on an account without
+  winget (the cross-user elevation case) carries on with the preview, since a real run would set
+  winget up first; it skips the source check and says that it cannot tell which apps are already
+  installed. The existing dry-run tests mocked all four helpers, which is how this went unnoticed;
+  a new test runs the whole dry run with them unmocked and asserts that no install, AppX,
+  download, registry, scheduled-task, `winget` or installer-process command runs.
 - `Test-AppDefinitions` now rejects a catalog name that has text after a valid package id, such as
   `Google.Chrome --override "/S"` (review finding P3-49). The package-id pattern had no end anchor,
   so any valid prefix passed, and `Start-Process -ArgumentList` would have handed the rest to

@@ -35,7 +35,9 @@ Interactivity tests still read or run the generated file itself, on purpose). Th
 now also rejects syntax that only PowerShell 7 parses and runs the undefined-reference guards on
 Linux and macOS, the pre-commit hook checks the staged files instead of the working tree, and a
 catalog name must match the whole package-id pattern, so trailing text such as `--override` can no
-longer reach winget.
+longer reach winget. A `-WhatIf` dry run no longer changes the machine: its module, winget,
+Out-GridView and source setup steps only check and print what a real run would fix, where they used
+to install modules for all users, set up App Installer and reset winget's sources.
 
 In progress: **E2E: App Installer 1.29.290.0 vs 1.26.510.0 AppX conflict, missing
 WindowsAppRuntime.1.8** ([#279](https://github.com/J-MaFf/winget-app-setup/issues/279)) — two

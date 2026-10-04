@@ -167,18 +167,27 @@ function Invoke-WingetInstall {
     # Ensure the WinGet PowerShell module is available before touching winget itself:
     # Test-AndInstallWinget and Initialize-WingetSourcesForUser use Repair-WinGetPackageManager
     # to bootstrap winget for accounts that have no interactive logon session (issue #159).
-    if (-not (Test-AndInstallWingetModule)) {
+    #
+    # A dry run passes -WhatIf to this and the other setup helpers below (winget, Out-GridView,
+    # sources): each then only probes and prints what a real run would change, and the dry run
+    # carries on with the preview whatever they find (P2-16: these used to install modules for all
+    # users, register or repair App Installer and reset winget's sources during a dry run). Their
+    # real-run warnings are skipped in a dry run, which never attempted the fix they report on.
+    $wingetModuleAvailable = Test-AndInstallWingetModule -WhatIf:$WhatIf
+    if (-not $wingetModuleAvailable -and -not $WhatIf) {
         Write-Warning 'Microsoft.WinGet.Client module is not available. Update functionality will use fallback CLI methods.'
     }
 
-    # Import required modules
-    try {
-        Import-Module Microsoft.WinGet.Client -ErrorAction Stop
-        Write-Success 'Successfully imported Microsoft.WinGet.Client module'
-    }
-    catch {
-        Write-Warning "Failed to import Microsoft.WinGet.Client module: $_"
-        Write-Warning 'Update functionality will use fallback CLI methods'
+    # Import required modules (a dry run imports it only when it is already installed)
+    if ($wingetModuleAvailable -or -not $WhatIf) {
+        try {
+            Import-Module Microsoft.WinGet.Client -ErrorAction Stop
+            Write-Success 'Successfully imported Microsoft.WinGet.Client module'
+        }
+        catch {
+            Write-Warning "Failed to import Microsoft.WinGet.Client module: $_"
+            Write-Warning 'Update functionality will use fallback CLI methods'
+        }
     }
 
     # Let a Winget-AutoUpdate run that is already in progress finish first (bounded): it
@@ -189,8 +198,11 @@ function Invoke-WingetInstall {
         [void](Wait-WauIdle)
     }
 
-    # Check if winget is available and install if necessary
-    if (-not (Test-AndInstallWinget)) {
+    # Check if winget is available and install if necessary. A dry run without winget carries on:
+    # a real run would bootstrap it first (Test-AndInstallWinget says how), so stopping here would
+    # misreport the very machine a dry run is used to preview (cross-user elevation, issue #265).
+    $wingetAvailable = Test-AndInstallWinget -WhatIf:$WhatIf
+    if (-not $wingetAvailable -and -not $WhatIf) {
         Write-ErrorMessage 'Winget is required for this script. Exiting.'
         return 2
     }
@@ -200,12 +212,16 @@ function Invoke-WingetInstall {
     # logged-on user (issues #104/#150, #159).
     [void](Initialize-WingetSourcesForUser -WhatIf:$WhatIf)
 
-    if (-not (Test-AndInstallGraphicalTools)) {
+    if (-not (Test-AndInstallGraphicalTools -WhatIf:$WhatIf) -and -not $WhatIf) {
         Write-Warning 'Out-GridView will be unavailable; results will be displayed in text mode only.'
     }
 
     # Verify winget sources are accessible and auto-repair if broken
-    if (-not (Test-WingetSources)) {
+    if (-not $wingetAvailable) {
+        # Only a dry run gets here without winget (a real run returned 2 above).
+        Write-Info '[DRY-RUN] Skipping the winget source check: winget is not available for this account yet. A real run checks the source once winget is bootstrapped, and repairs it if needed.'
+    }
+    elseif (-not (Test-WingetSources -WhatIf:$WhatIf) -and -not $WhatIf) {
         Write-WarningMessage 'Winget sources could not be repaired. Some installations may fail.'
     }
 
@@ -247,6 +263,12 @@ function Invoke-WingetInstall {
     Write-Info 'Installing the following Apps:'
     ForEach ($app in $apps) {
         Write-Info $app.name
+    }
+
+    if (-not $wingetAvailable) {
+        # Only a dry run gets here without winget: its per-app `winget list` checks cannot run, so
+        # each one reports the app as not installed.
+        Write-Info '[DRY-RUN] winget is not available for this account, so this preview cannot tell which apps are already installed: every app that applies to this machine is listed as one a real run would install.'
     }
 
     $installedApps = @()

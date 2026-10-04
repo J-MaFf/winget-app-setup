@@ -58,12 +58,12 @@ param (
 # This script is assembled from the WingetAppSetup module by build/Build-WingetInstallScript.ps1.
 # Edit the function source under WingetAppSetup/Public and WingetAppSetup/Private, then re-run the
 # build to regenerate this file. See readme.md ("Project layout") for details.
-# Build id: 1.0.0+e6aeeae5 (module version + SHA256 fragment of the function content; issue #189).
+# Build id: 1.0.0+7beffbdc (module version + SHA256 fragment of the function content; issue #189).
 # ------------------------------------------------------------------------------------------------
 
 # Content-derived build identity, logged at startup so a transcript from a remote machine
 # identifies exactly which installer build produced it (issue #189).
-$script:InstallerBuildId = '1.0.0+e6aeeae5'
+$script:InstallerBuildId = '1.0.0+7beffbdc'
 
 # ------------------------------------------------Functions------------------------------------------------
 
@@ -382,13 +382,28 @@ function Test-CanUseGridView {
     Ensures Out-GridView is available by installing Microsoft.PowerShell.GraphicalTools when required.
 .DESCRIPTION
     Checks for the Out-GridView cmdlet and, when missing, installs the Microsoft.PowerShell.GraphicalTools module including NuGet provider remediation.
+.PARAMETER WhatIf
+    Dry run: only checks whether Out-GridView is available and, when it is not, prints what a real
+    run would install. Nothing is installed (P2-16: the dry run used to install the NuGet provider
+    and the module for all users).
 .RETURNS
     [bool] True when Out-GridView can be invoked, otherwise False.
+    Under -WhatIf, True only when Out-GridView is already available.
 #>
 function Test-AndInstallGraphicalTools {
+    param (
+        [Parameter(Mandatory = $false)]
+        [switch]$WhatIf
+    )
+
     try {
         if (Get-Command Out-GridView -ErrorAction SilentlyContinue) {
             return $true
+        }
+
+        if ($WhatIf) {
+            Write-Info '[DRY-RUN] Out-GridView is not available. A real run would install Microsoft.PowerShell.GraphicalTools for all users from the PowerShell Gallery (and the NuGet package provider if it is missing) to show the summary in a grid view.'
+            return $false
         }
 
         $graphicalModule = Get-Module -ListAvailable -Name 'Microsoft.PowerShell.GraphicalTools'
@@ -3077,18 +3092,27 @@ function Invoke-WingetInstall {
     # Ensure the WinGet PowerShell module is available before touching winget itself:
     # Test-AndInstallWinget and Initialize-WingetSourcesForUser use Repair-WinGetPackageManager
     # to bootstrap winget for accounts that have no interactive logon session (issue #159).
-    if (-not (Test-AndInstallWingetModule)) {
+    #
+    # A dry run passes -WhatIf to this and the other setup helpers below (winget, Out-GridView,
+    # sources): each then only probes and prints what a real run would change, and the dry run
+    # carries on with the preview whatever they find (P2-16: these used to install modules for all
+    # users, register or repair App Installer and reset winget's sources during a dry run). Their
+    # real-run warnings are skipped in a dry run, which never attempted the fix they report on.
+    $wingetModuleAvailable = Test-AndInstallWingetModule -WhatIf:$WhatIf
+    if (-not $wingetModuleAvailable -and -not $WhatIf) {
         Write-Warning 'Microsoft.WinGet.Client module is not available. Update functionality will use fallback CLI methods.'
     }
 
-    # Import required modules
-    try {
-        Import-Module Microsoft.WinGet.Client -ErrorAction Stop
-        Write-Success 'Successfully imported Microsoft.WinGet.Client module'
-    }
-    catch {
-        Write-Warning "Failed to import Microsoft.WinGet.Client module: $_"
-        Write-Warning 'Update functionality will use fallback CLI methods'
+    # Import required modules (a dry run imports it only when it is already installed)
+    if ($wingetModuleAvailable -or -not $WhatIf) {
+        try {
+            Import-Module Microsoft.WinGet.Client -ErrorAction Stop
+            Write-Success 'Successfully imported Microsoft.WinGet.Client module'
+        }
+        catch {
+            Write-Warning "Failed to import Microsoft.WinGet.Client module: $_"
+            Write-Warning 'Update functionality will use fallback CLI methods'
+        }
     }
 
     # Let a Winget-AutoUpdate run that is already in progress finish first (bounded): it
@@ -3099,8 +3123,11 @@ function Invoke-WingetInstall {
         [void](Wait-WauIdle)
     }
 
-    # Check if winget is available and install if necessary
-    if (-not (Test-AndInstallWinget)) {
+    # Check if winget is available and install if necessary. A dry run without winget carries on:
+    # a real run would bootstrap it first (Test-AndInstallWinget says how), so stopping here would
+    # misreport the very machine a dry run is used to preview (cross-user elevation, issue #265).
+    $wingetAvailable = Test-AndInstallWinget -WhatIf:$WhatIf
+    if (-not $wingetAvailable -and -not $WhatIf) {
         Write-ErrorMessage 'Winget is required for this script. Exiting.'
         return 2
     }
@@ -3110,12 +3137,16 @@ function Invoke-WingetInstall {
     # logged-on user (issues #104/#150, #159).
     [void](Initialize-WingetSourcesForUser -WhatIf:$WhatIf)
 
-    if (-not (Test-AndInstallGraphicalTools)) {
+    if (-not (Test-AndInstallGraphicalTools -WhatIf:$WhatIf) -and -not $WhatIf) {
         Write-Warning 'Out-GridView will be unavailable; results will be displayed in text mode only.'
     }
 
     # Verify winget sources are accessible and auto-repair if broken
-    if (-not (Test-WingetSources)) {
+    if (-not $wingetAvailable) {
+        # Only a dry run gets here without winget (a real run returned 2 above).
+        Write-Info '[DRY-RUN] Skipping the winget source check: winget is not available for this account yet. A real run checks the source once winget is bootstrapped, and repairs it if needed.'
+    }
+    elseif (-not (Test-WingetSources -WhatIf:$WhatIf) -and -not $WhatIf) {
         Write-WarningMessage 'Winget sources could not be repaired. Some installations may fail.'
     }
 
@@ -3157,6 +3188,12 @@ function Invoke-WingetInstall {
     Write-Info 'Installing the following Apps:'
     ForEach ($app in $apps) {
         Write-Info $app.name
+    }
+
+    if (-not $wingetAvailable) {
+        # Only a dry run gets here without winget: its per-app `winget list` checks cannot run, so
+        # each one reports the app as not installed.
+        Write-Info '[DRY-RUN] winget is not available for this account, so this preview cannot tell which apps are already installed: every app that applies to this machine is listed as one a real run would install.'
     }
 
     $installedApps = @()
@@ -4273,13 +4310,28 @@ function Remove-LegacyScheduledUpdates {
     Ensures the Microsoft.WinGet.Client module is available, installing it if necessary.
 .DESCRIPTION
     Checks for the module locally and attempts installation via PowerShell Gallery when missing, including ensuring the NuGet provider is present.
+.PARAMETER WhatIf
+    Dry run: only checks whether the module is installed and, when it is not, prints what a real
+    run would install. Nothing is installed (P2-16: the dry run used to install the NuGet provider
+    and the module for all users).
 .RETURNS
     [bool] True when the module is available (either already installed or installed successfully), otherwise False.
+    Under -WhatIf, True only when the module is already installed.
 #>
 function Test-AndInstallWingetModule {
+    param (
+        [Parameter(Mandatory = $false)]
+        [switch]$WhatIf
+    )
+
     try {
         if (Get-Module -ListAvailable -Name 'Microsoft.WinGet.Client') {
             return $true
+        }
+
+        if ($WhatIf) {
+            Write-Info '[DRY-RUN] Microsoft.WinGet.Client module not found. A real run would install it for all users from the PowerShell Gallery, installing the NuGet package provider first if it is missing.'
+            return $false
         }
 
         Write-WarningMessage 'Microsoft.WinGet.Client module not found. Attempting installation...'
@@ -4331,13 +4383,27 @@ function Test-AndInstallWingetModule {
     Rung 1 comes first specifically because rung 2 can be blocked outright by a 0x80073D06
     dependency downgrade rejection on a machine whose WindowsAppRuntime is newer than the WinGet
     release pins - see Invoke-WingetPackageManagerRepair.
+.PARAMETER WhatIf
+    Dry run: only checks whether winget is on PATH and, when it is not, prints the bootstrap ladder
+    a real run would work through. No rung runs (P2-16: the dry run used to register or repair App
+    Installer, or download and install it).
 .RETURNS
     [bool] True if winget is available or successfully installed, otherwise False.
+    Under -WhatIf, True only when winget is already available.
 #>
 function Test-AndInstallWinget {
+    param (
+        [Parameter(Mandatory = $false)]
+        [switch]$WhatIf
+    )
+
     if (Get-Command winget -ErrorAction SilentlyContinue) {
         Write-Success 'Winget is available.'
         return $true
+    }
+    elseif ($WhatIf) {
+        Write-Info '[DRY-RUN] Winget is not available for this account. A real run would bootstrap it: register the App Installer package already on this machine for this account, then try Repair-WinGetPackageManager, then download App Installer from https://aka.ms/getwinget, and exit 2 if winget is still unavailable after that.'
+        return $false
     }
     else {
         # Register-WingetAppInstallerForUser narrates its own progress, so this only states the
@@ -4400,10 +4466,20 @@ function Test-AndInstallWinget {
     account), the function attempts to re-register it using Add-AppxPackage from the
     Microsoft CDN. After repair, it retries the source check once. If still failing, a
     clear error message with manual remediation guidance is displayed.
+.PARAMETER WhatIf
+    Dry run: runs only the health probe and, when the source is unhealthy, prints the repair a real
+    run would make. Nothing is reset or registered (P2-16: the dry run used to run
+    `winget source reset --force`, which also removes any source added beyond the defaults).
 .RETURNS
     [bool] True if winget sources are accessible (or successfully repaired), otherwise False.
+    Under -WhatIf, True only when the source is already healthy.
 #>
 function Test-WingetSources {
+    param (
+        [Parameter(Mandatory = $false)]
+        [switch]$WhatIf
+    )
+
     Write-Info 'Checking winget sources...'
 
     # Probe the source (listed + functional). The same helper is reused for the post-repair
@@ -4415,13 +4491,14 @@ function Test-WingetSources {
         return $true
     }
 
-    # If source is missing entirely, attempt repair
-    if (-not $health.Listed) {
-        Write-WarningMessage 'Winget source "winget" appears to be missing. Attempting to repair...'
+    $sourceProblem = if (-not $health.Listed) { 'Winget source "winget" appears to be missing.' } else { 'Winget source data is corrupted.' }
+    if ($WhatIf) {
+        Write-Info "[DRY-RUN] $sourceProblem A real run would repair it: winget source reset --force (which also removes any source added beyond the defaults), then re-register the source package from https://cdn.winget.microsoft.com/cache/source.msix."
+        return $false
     }
-    else {
-        Write-WarningMessage 'Winget source data is corrupted. Attempting to repair...'
-    }
+
+    # Missing or corrupted: attempt repair
+    Write-WarningMessage "$sourceProblem Attempting to repair..."
 
     # Attempt repair: first try source reset, then re-register package
     try {

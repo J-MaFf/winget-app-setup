@@ -29,13 +29,28 @@ function Test-CanUseGridView {
     Ensures Out-GridView is available by installing Microsoft.PowerShell.GraphicalTools when required.
 .DESCRIPTION
     Checks for the Out-GridView cmdlet and, when missing, installs the Microsoft.PowerShell.GraphicalTools module including NuGet provider remediation.
+.PARAMETER WhatIf
+    Dry run: only checks whether Out-GridView is available and, when it is not, prints what a real
+    run would install. Nothing is installed (P2-16: the dry run used to install the NuGet provider
+    and the module for all users).
 .RETURNS
     [bool] True when Out-GridView can be invoked, otherwise False.
+    Under -WhatIf, True only when Out-GridView is already available.
 #>
 function Test-AndInstallGraphicalTools {
+    param (
+        [Parameter(Mandatory = $false)]
+        [switch]$WhatIf
+    )
+
     try {
         if (Get-Command Out-GridView -ErrorAction SilentlyContinue) {
             return $true
+        }
+
+        if ($WhatIf) {
+            Write-Info '[DRY-RUN] Out-GridView is not available. A real run would install Microsoft.PowerShell.GraphicalTools for all users from the PowerShell Gallery (and the NuGet package provider if it is missing) to show the summary in a grid view.'
+            return $false
         }
 
         $graphicalModule = Get-Module -ListAvailable -Name 'Microsoft.PowerShell.GraphicalTools'

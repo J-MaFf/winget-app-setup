@@ -158,6 +158,40 @@ Describe 'Test-AndInstallGraphicalTools' {
             Should -Invoke Import-Module -Times 1
         }
     }
+
+    # P2-16: a dry run used to install the NuGet provider and this module for all users.
+    Context 'Dry run (-WhatIf)' {
+        BeforeEach {
+            Mock Get-Module { $null }
+            Mock Get-PackageProvider { $null }
+            Mock Install-PackageProvider { }
+            Mock Install-Module { }
+            Mock Import-Module { }
+            $script:infoMessages = @()
+            Mock Write-Info { $script:infoMessages += $Message }
+        }
+
+        It 'Reports what a real run would install and installs nothing when Out-GridView is missing' {
+            Mock Get-Command { $null } -ParameterFilter { $Name -eq 'Out-GridView' }
+
+            Test-AndInstallGraphicalTools -WhatIf | Should -Be $false
+
+            Should -Invoke Get-PackageProvider -Times 0 -Exactly
+            Should -Invoke Install-PackageProvider -Times 0 -Exactly
+            Should -Invoke Install-Module -Times 0 -Exactly
+            Should -Invoke Import-Module -Times 0 -Exactly
+            ($script:infoMessages -join "`n") | Should -Match '\[DRY-RUN\] Out-GridView is not available\. A real run would install Microsoft\.PowerShell\.GraphicalTools'
+        }
+
+        It 'Still reports Out-GridView as available when it already is' {
+            Mock Get-Command { $true } -ParameterFilter { $Name -eq 'Out-GridView' }
+
+            Test-AndInstallGraphicalTools -WhatIf | Should -Be $true
+
+            Should -Invoke Install-Module -Times 0 -Exactly
+            $script:infoMessages.Count | Should -Be 0
+        }
+    }
 }
 
 Describe 'Test-CanUseGridView' {
