@@ -591,6 +591,21 @@ Describe 'Install-PowerShell7FromMsi' {
         $script:waitMilliseconds | Should -Be 42000
     }
 
+    It 'Gives the MSI download 60 minutes by default, since no fallback runs after it' {
+        # The aka.ms/install-powershell.ps1 tier that used to follow a failed MSI path had no time
+        # limit, so a slow but working link (110 MB at under ~120 KB/s) still got PowerShell 7.
+        # With that tier gone, Save-WebFileWithTimeout's 15-minute default would fail that link.
+        Install-PowerShell7FromMsi | Should -Be $true
+
+        Should -Invoke Save-WebFileWithTimeout -Times 1 -Exactly -ParameterFilter { $MaximumSeconds -eq 3600 }
+    }
+
+    It 'Forwards -DownloadTimeoutSeconds to the download as its overall limit' {
+        Install-PowerShell7FromMsi -DownloadTimeoutSeconds 120 | Should -Be $true
+
+        Should -Invoke Save-WebFileWithTimeout -Times 1 -Exactly -ParameterFilter { $MaximumSeconds -eq 120 }
+    }
+
     It 'Never runs msiexec when the download fails' {
         Mock Save-WebFileWithTimeout { $false }
 

@@ -59,12 +59,12 @@ param (
 # This script is assembled from the WingetAppSetup module by build/Build-WingetInstallScript.ps1.
 # Edit the function source under WingetAppSetup/Public and WingetAppSetup/Private, then re-run the
 # build to regenerate this file. See readme.md ("Project layout") for details.
-# Build id: 1.0.0+d679db1d (module version + SHA256 fragment of this whole script; issue #189).
+# Build id: 1.0.0+d6691fcc (module version + SHA256 fragment of this whole script; issue #189).
 # ------------------------------------------------------------------------------------------------
 
 # Content-derived build identity, logged at startup so a transcript from a remote machine
 # identifies exactly which installer build produced it (issue #189).
-$script:InstallerBuildId = '1.0.0+d679db1d'
+$script:InstallerBuildId = '1.0.0+d6691fcc'
 
 # ------------------------------------------------Functions------------------------------------------------
 
@@ -1601,8 +1601,18 @@ function Test-PowerShell7MsiSignature {
 
     With -MsiLogDirectory, msiexec writes a verbose log (/l*v) there, one file per attempt, so a
     failed install can be diagnosed from the logs folder the teammate attaches.
+
+    Nothing runs after this path any more: the aka.ms/install-powershell.ps1 tier is gone (see
+    Invoke-PowerShell7Bootstrap). That script had no time limits at all, so on a slow but working
+    link it could finish a download this path had given up on. The download limit here is
+    therefore generous (-DownloadTimeoutSeconds, 60 minutes, about 30 KB/s for the 110 MB MSI); the
+    60-second stall timeout in Save-WebFileWithTimeout is what catches a dead or hung link.
 .PARAMETER MetadataUrl
     Forwarded to Get-PowerShell7MsiInfo. Parameterized for tests.
+.PARAMETER DownloadTimeoutSeconds
+    Maximum seconds for the whole MSI download, forwarded to Save-WebFileWithTimeout as
+    -MaximumSeconds. A link that is slow but still delivering data gets this long; one that stops
+    delivering data fails after the 60-second stall timeout instead.
 .PARAMETER InstallTimeoutSeconds
     Maximum seconds to wait for one msiexec attempt before killing it. Another installation in
     progress does not make msiexec wait (it returns 1618, see above), so reaching this limit means
@@ -1622,6 +1632,8 @@ function Install-PowerShell7FromMsi {
     param (
         [Parameter(Mandatory = $false)]
         [string]$MetadataUrl = 'https://raw.githubusercontent.com/PowerShell/PowerShell/master/tools/metadata.json',
+        [Parameter(Mandatory = $false)]
+        [int]$DownloadTimeoutSeconds = 3600,
         [Parameter(Mandatory = $false)]
         [int]$InstallTimeoutSeconds = 900,
         [Parameter(Mandatory = $false)]
@@ -1654,7 +1666,7 @@ function Install-PowerShell7FromMsi {
 
     try {
         Write-Info ('Downloading PowerShell {0} ({1})...' -f $msiInfo.Version, $msiInfo.FileName)
-        if (-not (Save-WebFileWithTimeout -Uri $msiInfo.Url -DestinationPath $msiPath)) {
+        if (-not (Save-WebFileWithTimeout -Uri $msiInfo.Url -DestinationPath $msiPath -MaximumSeconds $DownloadTimeoutSeconds)) {
             return $false
         }
         # msiexec checks no signature itself (review finding P3-17).
@@ -1839,10 +1851,15 @@ function Get-PowerShell7RelaunchInstaller {
     spawning a third process from the same path, which can outlive this one.
 
     There is no aka.ms/install-powershell.ps1 tier behind the MSI any more (review findings P2-17
-    and P3-17). That script reads the same metadata.json and downloads the same MSI, so it could
-    only fail where the MSI path had just failed, and it would install an MSI the signature check
-    had just rejected. It also ran a downloaded script with no check at all, and once the current
-    release is 7.7 it 404s, because it can only build the URL from ReleaseTag.
+    and P3-17). That script reads the same metadata.json and downloads the same MSI with no
+    signature check, so it would install an MSI the signature check had just rejected, and it runs
+    a downloaded script with no check at all. Once the current release is 7.7 it 404s, because it
+    can only build the URL from ReleaseTag. The one thing it could do that the MSI path could not
+    was outlast a time limit, because it has none: its download and its msiexec run are unbounded.
+    So the MSI path's download limit is 60 minutes, not 15, with the 60-second stall timeout still
+    catching a dead link (Install-PowerShell7FromMsi -DownloadTimeoutSeconds). Its 15-minute msiexec
+    limit stays: the PowerShell MSI installs in about a minute, so an msiexec run still going after
+    15 minutes is treated as hung rather than given a second, unbounded attempt.
 .PARAMETER WhatIf
     Dry-run intent, forwarded to the relaunch. When PowerShell 7 is missing, the bootstrap prints
     what a real run would do and returns 0 without installing anything.
