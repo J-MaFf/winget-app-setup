@@ -11,6 +11,7 @@ This repo targets **Windows only**. All scripts are PowerShell.
 - Use PowerShell 7+ syntax
 - Use Pester for all unit tests (`tests/*.Tests.ps1`)
 - Claude Code runs on an Ubuntu Linux VM — it cannot execute these scripts directly; test on Windows or a VM
+- Cloud sessions: `.claude/hooks/session-start.sh` (SessionStart hook) installs PowerShell 7, Pester 6.2.0 (from nuget.org) and `bd` (built from source with Go), then runs `bd bootstrap`. The Pester suite and `build/Build-WingetInstallScript.ps1 -Check` then run on Linux; Windows-only cmdlets make part of the suite fail there (see wgt-gq8.5), so Windows CI stays the verdict. `bd dolt push` is refused from cloud sessions (they can only push their own branch); export new beads with `bd export --include-memories` and import them on a dev machine.
 
 ---
 
