@@ -556,6 +556,9 @@ function Invoke-WingetInstall {
     # single one when the circuit breaker already found winget unusable. Skipped in a dry run,
     # which never touched winget's state.
     $wingetUsableAtEnd = $true
+    # For the run record: $null unless the check ran and answered (a check that threw is not
+    # evidence either way, although the exit code treats winget as usable then).
+    $wingetUsableForRecord = $null
     $endCheckReason = $null
     if (-not $WhatIf) {
         try {
@@ -565,6 +568,7 @@ function Invoke-WingetInstall {
             }
             $endCheck = Test-WingetLaunchable -Attempts $endCheckAttempts -RetryDelaySeconds 15
             $wingetUsableAtEnd = [bool]$endCheck.Launchable
+            $wingetUsableForRecord = $wingetUsableAtEnd
             # Why, for the NOT USABLE line: a failure that is final at once ('Access is denied',
             # winget missing) prints no retry warning and has no winget output to show.
             $endCheckReason = $endCheck.Reason
@@ -725,7 +729,7 @@ function Invoke-WingetInstall {
     # A dry run changes nothing and reports neither.
     if (-not $WhatIf) {
         try {
-            $runRecord = New-InstallerRunRecord -ExitCode $exitCode -Apps @($appRecords.Values) -AutoUpdates (Get-AutoUpdateResultStatus -WauResult $wauResult) -AutoUpdatesVersion $wauResult.Version -RestartRequired $restartRequired -WingetUsable $wingetUsableAtEnd -SummaryReached
+            $runRecord = New-InstallerRunRecord -ExitCode $exitCode -Apps @($appRecords.Values) -AutoUpdates (Get-AutoUpdateResultStatus -WauResult $wauResult) -AutoUpdatesVersion $wauResult.Version -RestartRequired $restartRequired -WingetUsable $wingetUsableForRecord -SummaryReached
             [void](Write-InstallerRunResult -Record $runRecord)
         }
         catch {

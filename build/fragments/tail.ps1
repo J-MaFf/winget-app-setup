@@ -127,7 +127,8 @@ if ($MyInvocation.InvocationName -ne '.') {
     # install: when it cannot start, the run continues untranscribed and InstallLogPath stays $null.
     $script:InstallLogPath = Start-InstallerTranscript -WhatIf:$WhatIf
     $transcriptStarted = [bool]$script:InstallLogPath
-    # Every real run ends with a RESULT line (review finding P3-41); a dry run reports nothing.
+    # Every real run reports a RESULT line (review finding P3-41), unless the elevated run it
+    # relaunched reports for it; a dry run reports nothing.
     $script:InstallerRunReportPending = -not $WhatIf
 
     try {
@@ -149,8 +150,11 @@ if ($MyInvocation.InvocationName -ne '.') {
                 Exit-Installer -Code 6 -Reason 'another run of the installer is in progress on this PC' -NonInteractive:$NonInteractive
             }
             # This run does the work: it writes last-run.json, and it removes old logs and the
-            # installer's leftover temporary copies (review finding P3-42).
+            # installer's leftover temporary copies (review finding P3-42). Its record replaces the
+            # previous run's at once (exitCode null until the run reports), so a run killed before
+            # it reports does not leave last-run.json describing an older run.
             $script:InstallerRunRecordEnabled = $true
+            [void](Save-InstallerRunStartRecord)
             [void](Invoke-InstallerHousekeeping -CurrentScriptPath $PSCommandPath)
         }
 
@@ -233,9 +237,10 @@ if ($MyInvocation.InvocationName -ne '.') {
         }
         # A run that has not reported yet (aborted, stopped from outside, or ended in this console
         # without an exit) still ends with its RESULT line, and a run that holds the run lock records
-        # it in last-run.json, so that file never describes an older run than the one that just
-        # ended; then the run lock is released (review finding P3-41). A run that reached its summary
-        # or went through Exit-Installer has already done both, so this does nothing for it.
+        # it in last-run.json, replacing the record it wrote when it took the lock; then the run
+        # lock is released (review finding P3-41). A run that reached its summary or went through
+        # Exit-Installer has already done both, so this does nothing for it. A killed process runs
+        # none of this: its record then keeps exitCode null.
         $finalExitCode = 0
         if ($null -ne $script:InstallerPendingExitCode) {
             $finalExitCode = [int]$script:InstallerPendingExitCode

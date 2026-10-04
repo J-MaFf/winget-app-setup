@@ -51,10 +51,14 @@ function New-InstallerRunMutex {
     reports with AbandonedMutexException, and takes it over.
 
     Opening a mutex that another account created can fail with UnauthorizedAccessException when its
-    access list does not let this account open it (a run as SYSTEM, then one by an administrator).
-    The mutex exists only while a run holds a handle to it, so that also means another run is in
-    progress. Any other failure warns and returns 'Unavailable': the run goes on without the check
-    rather than being blocked by it.
+    access list does not let this account open it (a run as SYSTEM, then one by an administrator),
+    and that counts as busy too. Any other failure warns and returns 'Unavailable': the run goes on
+    without the check rather than being blocked by it.
+
+    The lock does not check who holds the mutex. Windows lets any account create a mutex in the
+    Global namespace, so 'Busy' means that some process on the machine holds this name, normally
+    another run of the installer. A process that is not the installer and holds the name makes
+    every run exit 6 until that process ends.
 .PARAMETER Name
     The mutex name. Default: Get-InstallerRunLockName.
 .RETURNS

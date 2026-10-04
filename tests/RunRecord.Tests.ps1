@@ -308,3 +308,55 @@ Describe 'Write-InstallerRunResult and Write-InstallerEarlyExitResult (review fi
         $script:savedRecord.restartRequired | Should -BeFalse
     }
 }
+
+Describe 'Save-InstallerRunStartRecord (review of finding P3-41)' {
+    BeforeEach {
+        $script:savedRecordEnabled = $script:InstallerRunRecordEnabled
+        $script:savedLogPath = $script:InstallLogPath
+        $script:savedStartedUtc = $script:InstallerRunStartedUtc
+        $script:logDirectory = Join-Path $TestDrive ('logs-' + [Guid]::NewGuid().ToString('N'))
+        [void](New-Item -ItemType Directory -Path $script:logDirectory -Force)
+        $script:InstallLogPath = Join-Path $script:logDirectory 'install-20261004-163005.log'
+        $script:InstallerRunRecordEnabled = $true
+        $script:InstallerRunStartedUtc = [DateTime]::new(2026, 10, 4, 16, 30, 5, [DateTimeKind]::Utc)
+        Mock Write-Host { }
+        Mock Write-WarningMessage { }
+    }
+
+    AfterEach {
+        $script:InstallerRunRecordEnabled = $script:savedRecordEnabled
+        $script:InstallLogPath = $script:savedLogPath
+        $script:InstallerRunStartedUtc = $script:savedStartedUtc
+    }
+
+    It 'Replaces the previous run''s record with one that has no exit code yet, and prints nothing' {
+        # A run killed later (an RMM time limit) never reports: its record must not be the previous
+        # run's, which may say exit code 0.
+        $recordPath = Join-Path $script:logDirectory 'last-run.json'
+        Set-Content -LiteralPath $recordPath -Value '{ "exitCode": 0, "startedUtc": "2026-10-03T08:00:00Z", "summaryReached": true }' -Encoding UTF8
+
+        Save-InstallerRunStartRecord | Should -Be $recordPath
+
+        $text = Get-Content -Raw -LiteralPath $recordPath
+        $text | Should -Match '"exitCode":\s*null'
+        $text | Should -Match '"endedUtc":\s*null'
+        $text | Should -Match '"startedUtc":\s*"2026-10-04T16:30:05Z"'
+        $record = $text | ConvertFrom-Json
+        $record.summaryReached | Should -BeFalse
+        @($record.apps).Count | Should -Be 0
+        $record.wingetUsable | Should -BeNullOrEmpty
+        $record.transcriptPath | Should -Be $script:InstallLogPath
+        Should -Invoke Write-Host -Times 0
+    }
+
+    It 'Writes nothing for a run that does not write the record, or without a transcript' {
+        $script:InstallerRunRecordEnabled = $false
+        Save-InstallerRunStartRecord | Should -BeNullOrEmpty
+
+        $script:InstallerRunRecordEnabled = $true
+        $script:InstallLogPath = $null
+        Save-InstallerRunStartRecord | Should -BeNullOrEmpty
+
+        Test-Path -LiteralPath (Join-Path $script:logDirectory 'last-run.json') | Should -BeFalse
+    }
+}

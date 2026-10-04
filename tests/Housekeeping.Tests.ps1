@@ -132,6 +132,16 @@ Describe 'Remove-StaleInstallerCopy (review finding P3-42)' {
     BeforeEach {
         $script:tempRoot = Join-Path $TestDrive ('temp-' + [Guid]::NewGuid().ToString('N'))
         [void](New-Item -ItemType Directory -Path $script:tempRoot -Force)
+        # Owned by Administrators, as the installer's elevated run leaves them, unless a test says
+        # otherwise (Get-Acl reads the real owner on Windows, and does not exist elsewhere).
+        $script:ownerByPath = @{}
+        Mock Get-DirectoryAccessSummary {
+            $ownerSid = 'S-1-5-32-544'
+            if ($script:ownerByPath.ContainsKey($Path)) {
+                $ownerSid = $script:ownerByPath[$Path]
+            }
+            [pscustomobject]@{ OwnerSid = $ownerSid; OwnerName = $ownerSid; InheritanceProtected = $true; AccessRules = @() }
+        }
     }
 
     It 'Removes every kind of copy folder the installer makes once it is old enough' {
@@ -190,6 +200,32 @@ Describe 'Remove-StaleInstallerCopy (review finding P3-42)' {
         Test-Path -LiteralPath (Join-Path $foreign 'winget-app-install.ps1') | Should -BeTrue
     }
 
+    It 'Removes only folders owned by SYSTEM or Administrators, never one another account made' {
+        # Any account can create entries in %SystemRoot%\Temp and choose their names and times, so
+        # the name and the age alone do not show that the installer made a folder (review of P3-42).
+        $systemOwned = New-TestCopyFolder -Root $script:tempRoot -AgeHours 30
+        $administratorsOwned = New-TestCopyFolder -Root $script:tempRoot -AgeHours 30
+        $userOwned = New-TestCopyFolder -Root $script:tempRoot -AgeHours 30
+        $script:ownerByPath[$systemOwned] = 'S-1-5-18'
+        $script:ownerByPath[$administratorsOwned] = 'S-1-5-32-544'
+        $script:ownerByPath[$userOwned] = 'S-1-5-21-1111111111-2222222222-3333333333-1001'
+
+        Remove-StaleInstallerCopy -Root @($script:tempRoot) -MaxAgeHours 24 | Should -Be 2
+
+        Test-Path -LiteralPath $systemOwned | Should -BeFalse
+        Test-Path -LiteralPath $administratorsOwned | Should -BeFalse
+        Test-Path -LiteralPath (Join-Path $userOwned 'winget-app-install.ps1') | Should -BeTrue
+    }
+
+    It 'Leaves a folder whose owner cannot be read' {
+        Mock Get-DirectoryAccessSummary { throw 'Attempted to perform an unauthorized operation.' }
+        $unreadable = New-TestCopyFolder -Root $script:tempRoot -AgeHours 30
+
+        Remove-StaleInstallerCopy -Root @($script:tempRoot) -MaxAgeHours 24 | Should -Be 0
+
+        Test-Path -LiteralPath (Join-Path $unreadable 'winget-app-install.ps1') | Should -BeTrue
+    }
+
     It 'Skips roots that are missing or listed twice' {
         [void](New-TestCopyFolder -Root $script:tempRoot -AgeHours 30)
 
@@ -207,6 +243,8 @@ Describe 'Invoke-InstallerHousekeeping (review finding P3-42)' {
         $script:logDirectory = Join-Path $TestDrive ('logs-' + [Guid]::NewGuid().ToString('N'))
         $script:tempRoot = Join-Path $TestDrive ('temp-' + [Guid]::NewGuid().ToString('N'))
         [void](New-Item -ItemType Directory -Path $script:logDirectory, $script:tempRoot -Force)
+        Mock Get-DirectoryAccessSummary { [pscustomobject]@{ OwnerSid = 'S-1-5-32-544'; OwnerName = 'BUILTIN\Administrators'; InheritanceProtected = $true; AccessRules = @() } }
+        Mock Test-IsSystemAccount { $false }
     }
 
     AfterEach {
@@ -231,7 +269,9 @@ Describe 'Invoke-InstallerHousekeeping (review finding P3-42)' {
         Should -Invoke Write-Info -Times 1 -Exactly -ParameterFilter { $Message -eq 'Removed 3 old log file(s), keeping the logs of the newest 30 transcripts, and 1 leftover temporary copy folder(s) of the installer.' }
     }
 
-    It 'Looks in this account''s temp folder and the elevated relaunch''s copy folder by default' {
+    It 'Looks only in the elevated relaunch''s copy folder by default, not in a user profile''s temp folder' {
+        # An administrator's elevated run has a temp folder in a user profile, where that account's
+        # processes that are not elevated can rename and replace entries (review of P3-42).
         Mock Remove-OldInstallerLog { 0 }
         Mock Remove-StaleInstallerCopy { 0 }
         Mock Get-ElevatedCopyRoot { 'X:\Windows\Temp' }
@@ -239,10 +279,23 @@ Describe 'Invoke-InstallerHousekeeping (review finding P3-42)' {
         [void](Invoke-InstallerHousekeeping -LogDirectory $script:logDirectory -CurrentScriptPath 'X:\copy\winget-app-install.ps1')
 
         Should -Invoke Remove-StaleInstallerCopy -Times 1 -Exactly -ParameterFilter {
-            $Root.Count -eq 2 -and $Root[0] -eq [System.IO.Path]::GetTempPath() -and $Root[1] -eq 'X:\Windows\Temp' -and
+            $Root.Count -eq 1 -and $Root[0] -eq 'X:\Windows\Temp' -and
             $MaxAgeHours -eq 24 -and $CurrentScriptPath -eq 'X:\copy\winget-app-install.ps1'
         }
         Should -Invoke Remove-OldInstallerLog -Times 1 -Exactly -ParameterFilter { $LogDirectory -eq $script:logDirectory -and $KeepTranscripts -eq 30 }
+    }
+
+    It 'Also looks in its own temp folder when the run is SYSTEM (an RMM run)' {
+        Mock Test-IsSystemAccount { $true }
+        Mock Remove-OldInstallerLog { 0 }
+        Mock Remove-StaleInstallerCopy { 0 }
+        Mock Get-ElevatedCopyRoot { 'X:\Windows\Temp' }
+
+        [void](Invoke-InstallerHousekeeping -LogDirectory $script:logDirectory -CurrentScriptPath 'X:\copy\winget-app-install.ps1')
+
+        Should -Invoke Remove-StaleInstallerCopy -Times 1 -Exactly -ParameterFilter {
+            $Root.Count -eq 2 -and $Root[0] -eq [System.IO.Path]::GetTempPath() -and $Root[1] -eq 'X:\Windows\Temp'
+        }
     }
 
     It 'Prunes no logs when the run has no transcript' {

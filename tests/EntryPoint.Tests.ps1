@@ -695,6 +695,29 @@ Describe 'One run at a time, and the RESULT line and last-run.json of every run 
         Get-ChildResultLine -Output $result.Output | Should -HaveCount 1
     }
 
+    It 'Leaves a record without an exit code, not the previous run''s, when the run is killed' {
+        # An RMM time limit or taskkill /F ends the process: no catch, no finally, no report. The
+        # record written when the run took the lock must replace the previous run's (exit code 0
+        # here), so whoever collects last-run.json sees that this run did not finish.
+        $logDirectory = Join-Path (Join-Path $TestDrive 'ProgramData') 'winget-app-setup\logs'
+        [void](New-Item -ItemType Directory -Path $logDirectory -Force)
+        Set-Content -LiteralPath (Join-Path $logDirectory 'last-run.json') -Value '{ "exitCode": 0, "startedUtc": "2026-01-01T00:00:00Z", "summaryReached": true }' -Encoding UTF8
+        $path = New-FaultInjectedInstaller -Name 'killed.ps1' -Body "Write-Host 'install started'; [System.Diagnostics.Process]::GetCurrentProcess().Kill()" -Overrides $script:elevated
+
+        $result = Invoke-ChildInstaller -Arguments @('-File', $path, '-SkipSystemCheck', '-NonInteractive')
+
+        $result.Output | Should -Match 'install started'
+        Get-ChildResultLine -Output $result.Output | Should -HaveCount 0
+        $text = Get-Content -Raw -LiteralPath (Join-Path $logDirectory 'last-run.json')
+        $text | Should -Match '"exitCode":\s*null'
+        $text | Should -Match '"endedUtc":\s*null'
+        $text | Should -Match '"summaryReached":\s*false'
+        $text | Should -Not -Match '2026-01-01T00:00:00Z'
+        $record = $text | ConvertFrom-Json
+        $record.buildId | Should -Be $script:runBuildId
+        $record.transcriptPath | Should -Be (Get-ChildTranscript)[0].FullName
+    }
+
     It 'Adds no second RESULT line after a run that reported at its summary' {
         $body = "`$script:InstallerRunReportPending = `$false; Write-Host 'RESULT: exit=1 (from the summary)'; `$script:InstallerPendingExitCode = 1; return 1"
         $path = New-FaultInjectedInstaller -Name 'reported.ps1' -Body $body -Overrides $script:elevated
@@ -708,8 +731,11 @@ Describe 'One run at a time, and the RESULT line and last-run.json of every run 
     It 'Reports and releases the run lock before an early exit waits for a key press' {
         # Someone at the console: the notice, then the RESULT line, then the prompt, by which time
         # the lock is free, so a window left open does not make the next run (an RMM schedule)
-        # exit 6. Write-Prompt throws so the child never reaches [Console]::ReadKey.
+        # exit 6. Write-Prompt throws so the child never reaches [Console]::ReadKey. CI is
+        # overridden too: GitHub Actions sets CI and GITHUB_ACTIONS, and the child would then skip
+        # the prompt this test checks.
         $overrides = $script:elevated + "`n" +
+            "function Test-IsContinuousIntegration { `$false }`n" +
             "function Test-EffectiveNonInteractive { param([switch]`$NonInteractive) `$false }`n" +
             "function Write-Prompt { param([string]`$Message) Write-Host ""PROMPT: `$Message (lock held: `$(`$null -ne `$script:InstallerRunLock))""; throw 'no key press in tests' }"
         $path = New-FaultInjectedInstaller -Name 'early-exit-prompt.ps1' -Body "Write-ErrorMessage 'winget is missing'; return 2" -Overrides $overrides

@@ -21,8 +21,11 @@
     writes two (the bootstrap's and the PowerShell 7 run's), and one that relaunches itself elevated
     writes up to four, so 30 keeps the logs of at least the last 7 runs.
 .PARAMETER TempRoot
-    The folders to look for leftover copies in. Default: this account's temp folder and the
-    elevated relaunch's copy folder (Get-ElevatedCopyRoot, %SystemRoot%\Temp).
+    The folders to look for leftover copies in. Default: the elevated relaunch's copy folder
+    (Get-ElevatedCopyRoot, %SystemRoot%\Temp), plus this account's temp folder when the run is
+    SYSTEM (an RMM run, whose temp folder is a system folder). Any other account's temp folder is
+    in a user profile, where that account's processes that are not elevated can rename and replace
+    entries, so an elevated run leaves it alone (review of finding P3-42).
 .PARAMETER TempCopyMaxAgeHours
     A copy folder at least this old is removed. No run lasts this long, so a folder this old does
     not belong to a run still in progress.
@@ -65,7 +68,10 @@ function Invoke-InstallerHousekeeping {
             $logsRemoved = Remove-OldInstallerLog -LogDirectory $LogDirectory -KeepTranscripts $KeepTranscripts -CurrentTranscriptPath $script:InstallLogPath
         }
         if (-not $PSBoundParameters.ContainsKey('TempRoot')) {
-            $TempRoot = @([System.IO.Path]::GetTempPath(), (Get-ElevatedCopyRoot))
+            $TempRoot = @(Get-ElevatedCopyRoot)
+            if (Test-IsSystemAccount) {
+                $TempRoot = @([System.IO.Path]::GetTempPath()) + $TempRoot
+            }
         }
         $copiesRemoved = Remove-StaleInstallerCopy -Root $TempRoot -MaxAgeHours $TempCopyMaxAgeHours -CurrentScriptPath $CurrentScriptPath
         if ($logsRemoved -gt 0 -or $copiesRemoved -gt 0) {
@@ -171,11 +177,19 @@ function Remove-OldInstallerLog {
     removed by the run that made it, but a run that is killed, or whose window is closed, leaves its
     folder behind.
 
-    This removes such folders once they are MaxAgeHours old. It skips the running installer's own
-    folder, and anything that is not one of those flat folders of files: a folder that is a link or
-    holds a folder or a link is left alone, because only someone else can have put it there (any
-    account can create entries in %SystemRoot%\Temp). Files are deleted one by one and the folder
-    last, so nothing outside the folder is ever followed.
+    This removes such folders once they are MaxAgeHours old. The name and the age alone do not show
+    who made a folder: any account can create entries in %SystemRoot%\Temp and choose their names
+    (review of finding P3-42). So a folder is removed only when it is owned by SYSTEM (S-1-5-18)
+    or Administrators (S-1-5-32-544), which an account that is not an administrator cannot make
+    it, and only when it is a flat folder of files: a folder that is a link, or holds a folder or
+    a link, is left alone, as is a folder whose owner cannot be read. It also skips the running
+    installer's own folder. Within a folder it removes, it deletes the files it listed, one by one,
+    then the folder itself without recursing; a file added meanwhile makes that last step fail and
+    the folder stays.
+
+    Root must be a folder in which an account that is not an administrator cannot rename or
+    replace what SYSTEM or Administrators own, such as %SystemRoot%\Temp or SYSTEM's own temp
+    folder (see Invoke-InstallerHousekeeping), never a user profile's temp folder.
 .PARAMETER Root
     The folders to look in. Duplicates and folders that do not exist are skipped.
 .PARAMETER MaxAgeHours
@@ -202,6 +216,7 @@ function Remove-StaleInstallerCopy {
     )
 
     $cutoffUtc = [DateTime]::UtcNow.AddHours(-$MaxAgeHours)
+    $allowedOwnerSids = @('S-1-5-18', 'S-1-5-32-544')
     $currentDirectory = $null
     if (-not [string]::IsNullOrWhiteSpace($CurrentScriptPath)) {
         $currentDirectory = [System.IO.Path]::GetDirectoryName([System.IO.Path]::GetFullPath($CurrentScriptPath)).TrimEnd('\', '/')
@@ -235,6 +250,12 @@ function Remove-StaleInstallerCopy {
                 continue
             }
             try {
+                # Made by an administrator or SYSTEM, so by the installer's elevated or SYSTEM run;
+                # a folder another account made is left alone, whatever its name and age.
+                $ownerSid = (Get-DirectoryAccessSummary -Path $directory.FullName).OwnerSid
+                if ($allowedOwnerSids -notcontains $ownerSid) {
+                    continue
+                }
                 $children = @(Get-ChildItem -LiteralPath $directory.FullName -Force -ErrorAction Stop)
                 $foreign = @($children | Where-Object { $_.PSIsContainer -or ($_.Attributes -band [System.IO.FileAttributes]::ReparsePoint) })
                 if ($foreign.Count -gt 0) {
@@ -249,7 +270,7 @@ function Remove-StaleInstallerCopy {
                 $removed++
             }
             catch {
-                # In use, or not this account's to delete: left alone.
+                # In use, not this account's to delete, or its owner could not be read: left alone.
             }
         }
     }

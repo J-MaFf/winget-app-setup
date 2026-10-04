@@ -61,12 +61,12 @@ param (
 # This script is assembled from the WingetAppSetup module by build/Build-WingetInstallScript.ps1.
 # Edit the function source under WingetAppSetup/Public and WingetAppSetup/Private, then re-run the
 # build to regenerate this file. See readme.md ("Project layout") for details.
-# Build id: 1.0.0+0c06b28e (module version + SHA256 fragment of this whole script; issue #189).
+# Build id: 1.0.0+ce7a8332 (module version + SHA256 fragment of this whole script; issue #189).
 # ------------------------------------------------------------------------------------------------
 
 # Content-derived build identity, logged at startup so a transcript from a remote machine
 # identifies exactly which installer build produced it (issue #189).
-$script:InstallerBuildId = '1.0.0+0c06b28e'
+$script:InstallerBuildId = '1.0.0+ce7a8332'
 
 # ------------------------------------------------Functions------------------------------------------------
 
@@ -1111,8 +1111,11 @@ function Test-AndInstallGraphicalTools {
     writes two (the bootstrap's and the PowerShell 7 run's), and one that relaunches itself elevated
     writes up to four, so 30 keeps the logs of at least the last 7 runs.
 .PARAMETER TempRoot
-    The folders to look for leftover copies in. Default: this account's temp folder and the
-    elevated relaunch's copy folder (Get-ElevatedCopyRoot, %SystemRoot%\Temp).
+    The folders to look for leftover copies in. Default: the elevated relaunch's copy folder
+    (Get-ElevatedCopyRoot, %SystemRoot%\Temp), plus this account's temp folder when the run is
+    SYSTEM (an RMM run, whose temp folder is a system folder). Any other account's temp folder is
+    in a user profile, where that account's processes that are not elevated can rename and replace
+    entries, so an elevated run leaves it alone (review of finding P3-42).
 .PARAMETER TempCopyMaxAgeHours
     A copy folder at least this old is removed. No run lasts this long, so a folder this old does
     not belong to a run still in progress.
@@ -1155,7 +1158,10 @@ function Invoke-InstallerHousekeeping {
             $logsRemoved = Remove-OldInstallerLog -LogDirectory $LogDirectory -KeepTranscripts $KeepTranscripts -CurrentTranscriptPath $script:InstallLogPath
         }
         if (-not $PSBoundParameters.ContainsKey('TempRoot')) {
-            $TempRoot = @([System.IO.Path]::GetTempPath(), (Get-ElevatedCopyRoot))
+            $TempRoot = @(Get-ElevatedCopyRoot)
+            if (Test-IsSystemAccount) {
+                $TempRoot = @([System.IO.Path]::GetTempPath()) + $TempRoot
+            }
         }
         $copiesRemoved = Remove-StaleInstallerCopy -Root $TempRoot -MaxAgeHours $TempCopyMaxAgeHours -CurrentScriptPath $CurrentScriptPath
         if ($logsRemoved -gt 0 -or $copiesRemoved -gt 0) {
@@ -1261,11 +1267,19 @@ function Remove-OldInstallerLog {
     removed by the run that made it, but a run that is killed, or whose window is closed, leaves its
     folder behind.
 
-    This removes such folders once they are MaxAgeHours old. It skips the running installer's own
-    folder, and anything that is not one of those flat folders of files: a folder that is a link or
-    holds a folder or a link is left alone, because only someone else can have put it there (any
-    account can create entries in %SystemRoot%\Temp). Files are deleted one by one and the folder
-    last, so nothing outside the folder is ever followed.
+    This removes such folders once they are MaxAgeHours old. The name and the age alone do not show
+    who made a folder: any account can create entries in %SystemRoot%\Temp and choose their names
+    (review of finding P3-42). So a folder is removed only when it is owned by SYSTEM (S-1-5-18)
+    or Administrators (S-1-5-32-544), which an account that is not an administrator cannot make
+    it, and only when it is a flat folder of files: a folder that is a link, or holds a folder or
+    a link, is left alone, as is a folder whose owner cannot be read. It also skips the running
+    installer's own folder. Within a folder it removes, it deletes the files it listed, one by one,
+    then the folder itself without recursing; a file added meanwhile makes that last step fail and
+    the folder stays.
+
+    Root must be a folder in which an account that is not an administrator cannot rename or
+    replace what SYSTEM or Administrators own, such as %SystemRoot%\Temp or SYSTEM's own temp
+    folder (see Invoke-InstallerHousekeeping), never a user profile's temp folder.
 .PARAMETER Root
     The folders to look in. Duplicates and folders that do not exist are skipped.
 .PARAMETER MaxAgeHours
@@ -1292,6 +1306,7 @@ function Remove-StaleInstallerCopy {
     )
 
     $cutoffUtc = [DateTime]::UtcNow.AddHours(-$MaxAgeHours)
+    $allowedOwnerSids = @('S-1-5-18', 'S-1-5-32-544')
     $currentDirectory = $null
     if (-not [string]::IsNullOrWhiteSpace($CurrentScriptPath)) {
         $currentDirectory = [System.IO.Path]::GetDirectoryName([System.IO.Path]::GetFullPath($CurrentScriptPath)).TrimEnd('\', '/')
@@ -1325,6 +1340,12 @@ function Remove-StaleInstallerCopy {
                 continue
             }
             try {
+                # Made by an administrator or SYSTEM, so by the installer's elevated or SYSTEM run;
+                # a folder another account made is left alone, whatever its name and age.
+                $ownerSid = (Get-DirectoryAccessSummary -Path $directory.FullName).OwnerSid
+                if ($allowedOwnerSids -notcontains $ownerSid) {
+                    continue
+                }
                 $children = @(Get-ChildItem -LiteralPath $directory.FullName -Force -ErrorAction Stop)
                 $foreign = @($children | Where-Object { $_.PSIsContainer -or ($_.Attributes -band [System.IO.FileAttributes]::ReparsePoint) })
                 if ($foreign.Count -gt 0) {
@@ -1339,7 +1360,7 @@ function Remove-StaleInstallerCopy {
                 $removed++
             }
             catch {
-                # In use, or not this account's to delete: left alone.
+                # In use, not this account's to delete, or its owner could not be read: left alone.
             }
         }
     }
@@ -4622,10 +4643,14 @@ function New-InstallerRunMutex {
     reports with AbandonedMutexException, and takes it over.
 
     Opening a mutex that another account created can fail with UnauthorizedAccessException when its
-    access list does not let this account open it (a run as SYSTEM, then one by an administrator).
-    The mutex exists only while a run holds a handle to it, so that also means another run is in
-    progress. Any other failure warns and returns 'Unavailable': the run goes on without the check
-    rather than being blocked by it.
+    access list does not let this account open it (a run as SYSTEM, then one by an administrator),
+    and that counts as busy too. Any other failure warns and returns 'Unavailable': the run goes on
+    without the check rather than being blocked by it.
+
+    The lock does not check who holds the mutex. Windows lets any account create a mutex in the
+    Global namespace, so 'Busy' means that some process on the machine holds this name, normally
+    another run of the installer. A process that is not the installer and holds the name makes
+    every run exit 6 until that process ends.
 .PARAMETER Name
     The mutex name. Default: Get-InstallerRunLockName.
 .RETURNS
@@ -4701,7 +4726,7 @@ function Unlock-InstallerRun {
 }
 
 # --- RunRecord ---
-# The machine-readable outcome of a run (review finding P3-41): one RESULT line at the end of the
+# The machine-readable outcome of a run (review finding P3-41): one RESULT line near the end of the
 # output and %ProgramData%\winget-app-setup\logs\last-run.json. The exit code used to be the only
 # signal an RMM tool could read, and per-app results existed only as console text, which RMM
 # consoles cut to their last lines.
@@ -4999,8 +5024,15 @@ function Save-InstallerRunRecord {
     record of the run that installed. The file is written next to the run's transcript
     (Get-InstallerLogDirectory), and not at all without one.
 
-    The RESULT line is printed in every case, last, so it is the run's final line of output (the
-    'Press any key' prompt of an interactive run aside). Never throws.
+    The RESULT line is printed in every case, after the summary or the early-exit notice and before
+    any 'Press any key' prompt. It is printed by the run that did the work: a run that relaunched
+    itself elevated prints none of its own (the elevated window prints it). It is not always the
+    last line of the output either: a run started from Windows PowerShell 5.1 (the irm | iex
+    one-liner) prints the bootstrap's own lines after it, such as the PowerShell 7 run's exit code
+    and any restart notice; when that bootstrap installed PowerShell 7 and the install needs a
+    restart, the process exits 3010 where the line says exit=0. So a reader looks for the line that
+    starts with 'RESULT: ' rather than reading the last line, and takes the exit code from the
+    process. Never throws.
 .PARAMETER Record
     A record from New-InstallerRunRecord.
 .RETURNS
@@ -5026,6 +5058,43 @@ function Write-InstallerRunResult {
         Write-WarningMessage "Could not print the RESULT line: $($_.Exception.Message)"
     }
     return $savedPath
+}
+
+<#
+.SYNOPSIS
+    Replaces last-run.json with the record of a run that has started and not ended yet.
+.DESCRIPTION
+    Review of finding P3-41. The entry script calls this once a real, elevated run holds the run
+    lock, before the run changes anything. last-run.json is otherwise written only when a run
+    reports (Write-InstallerRunResult), and a run that is killed (an RMM time limit, taskkill /F)
+    never reports, so without this the file would go on describing the run before it, which may
+    have exited 0. This record has the new run's startedUtc, exitCode and endedUtc $null,
+    summaryReached false and no apps; the run's report replaces it. A record whose exitCode is
+    null therefore describes a run that is still going or was killed before it could report.
+
+    Prints nothing (no RESULT line). Writes nothing unless $script:InstallerRunRecordEnabled is
+    set and the run has a logs folder (Get-InstallerLogDirectory). Never throws.
+.RETURNS
+    [string] The last-run.json path written, or $null.
+#>
+function Save-InstallerRunStartRecord {
+    if (-not $script:InstallerRunRecordEnabled) {
+        return $null
+    }
+    $directory = Get-InstallerLogDirectory
+    if ([string]::IsNullOrWhiteSpace($directory)) {
+        return $null
+    }
+    try {
+        $record = New-InstallerRunRecord -ExitCode 0
+        $record.exitCode = $null
+        $record.endedUtc = $null
+        return (Save-InstallerRunRecord -Record $record -Directory $directory)
+    }
+    catch {
+        Write-WarningMessage "Could not write the run record: $($_.Exception.Message)"
+        return $null
+    }
 }
 
 <#
@@ -8263,6 +8332,9 @@ function Invoke-WingetInstall {
     # single one when the circuit breaker already found winget unusable. Skipped in a dry run,
     # which never touched winget's state.
     $wingetUsableAtEnd = $true
+    # For the run record: $null unless the check ran and answered (a check that threw is not
+    # evidence either way, although the exit code treats winget as usable then).
+    $wingetUsableForRecord = $null
     $endCheckReason = $null
     if (-not $WhatIf) {
         try {
@@ -8272,6 +8344,7 @@ function Invoke-WingetInstall {
             }
             $endCheck = Test-WingetLaunchable -Attempts $endCheckAttempts -RetryDelaySeconds 15
             $wingetUsableAtEnd = [bool]$endCheck.Launchable
+            $wingetUsableForRecord = $wingetUsableAtEnd
             # Why, for the NOT USABLE line: a failure that is final at once ('Access is denied',
             # winget missing) prints no retry warning and has no winget output to show.
             $endCheckReason = $endCheck.Reason
@@ -8432,7 +8505,7 @@ function Invoke-WingetInstall {
     # A dry run changes nothing and reports neither.
     if (-not $WhatIf) {
         try {
-            $runRecord = New-InstallerRunRecord -ExitCode $exitCode -Apps @($appRecords.Values) -AutoUpdates (Get-AutoUpdateResultStatus -WauResult $wauResult) -AutoUpdatesVersion $wauResult.Version -RestartRequired $restartRequired -WingetUsable $wingetUsableAtEnd -SummaryReached
+            $runRecord = New-InstallerRunRecord -ExitCode $exitCode -Apps @($appRecords.Values) -AutoUpdates (Get-AutoUpdateResultStatus -WauResult $wauResult) -AutoUpdatesVersion $wauResult.Version -RestartRequired $restartRequired -WingetUsable $wingetUsableForRecord -SummaryReached
             [void](Write-InstallerRunResult -Record $runRecord)
         }
         catch {
@@ -10557,7 +10630,8 @@ if ($MyInvocation.InvocationName -ne '.') {
     # install: when it cannot start, the run continues untranscribed and InstallLogPath stays $null.
     $script:InstallLogPath = Start-InstallerTranscript -WhatIf:$WhatIf
     $transcriptStarted = [bool]$script:InstallLogPath
-    # Every real run ends with a RESULT line (review finding P3-41); a dry run reports nothing.
+    # Every real run reports a RESULT line (review finding P3-41), unless the elevated run it
+    # relaunched reports for it; a dry run reports nothing.
     $script:InstallerRunReportPending = -not $WhatIf
 
     try {
@@ -10579,8 +10653,11 @@ if ($MyInvocation.InvocationName -ne '.') {
                 Exit-Installer -Code 6 -Reason 'another run of the installer is in progress on this PC' -NonInteractive:$NonInteractive
             }
             # This run does the work: it writes last-run.json, and it removes old logs and the
-            # installer's leftover temporary copies (review finding P3-42).
+            # installer's leftover temporary copies (review finding P3-42). Its record replaces the
+            # previous run's at once (exitCode null until the run reports), so a run killed before
+            # it reports does not leave last-run.json describing an older run.
             $script:InstallerRunRecordEnabled = $true
+            [void](Save-InstallerRunStartRecord)
             [void](Invoke-InstallerHousekeeping -CurrentScriptPath $PSCommandPath)
         }
 
@@ -10663,9 +10740,10 @@ if ($MyInvocation.InvocationName -ne '.') {
         }
         # A run that has not reported yet (aborted, stopped from outside, or ended in this console
         # without an exit) still ends with its RESULT line, and a run that holds the run lock records
-        # it in last-run.json, so that file never describes an older run than the one that just
-        # ended; then the run lock is released (review finding P3-41). A run that reached its summary
-        # or went through Exit-Installer has already done both, so this does nothing for it.
+        # it in last-run.json, replacing the record it wrote when it took the lock; then the run
+        # lock is released (review finding P3-41). A run that reached its summary or went through
+        # Exit-Installer has already done both, so this does nothing for it. A killed process runs
+        # none of this: its record then keeps exitCode null.
         $finalExitCode = 0
         if ($null -ne $script:InstallerPendingExitCode) {
             $finalExitCode = [int]$script:InstallerPendingExitCode

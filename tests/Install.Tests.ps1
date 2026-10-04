@@ -1200,6 +1200,18 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
             $script:reportedRecords[0].autoUpdates.status | Should -Be 'AtRisk'
         }
 
+        It 'Records winget''s state at the end as unknown when the end-of-run check could not run' {
+            # A check that threw is not evidence either way: the exit code treats winget as usable,
+            # but the record must not claim the check found it so.
+            Mock Test-WingetLaunchable { throw 'probe bug' }
+
+            Invoke-WingetInstall -Apps @(@{ name = 'Contoso.New' }) -NonInteractive | Should -Be 0
+
+            Should -Invoke Write-WarningMessage -ParameterFilter { $Message -match 'Could not run the end-of-run winget check' }
+            $script:reportedRecords[0].Contains('wingetUsable') | Should -BeTrue
+            $script:reportedRecords[0].wingetUsable | Should -BeNullOrEmpty
+        }
+
         It 'Keeps the apps it finished where the entry script can report them if the run stops early' {
             Mock Install-AppWithVerification { @{ Status = 'Installed'; InstallResult = @{ ExitCode = 0 }; FailureReason = $null } }
             Mock Install-WingetAutoUpdate { throw 'stopped' }

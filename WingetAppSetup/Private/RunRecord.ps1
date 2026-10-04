@@ -1,4 +1,4 @@
-# The machine-readable outcome of a run (review finding P3-41): one RESULT line at the end of the
+# The machine-readable outcome of a run (review finding P3-41): one RESULT line near the end of the
 # output and %ProgramData%\winget-app-setup\logs\last-run.json. The exit code used to be the only
 # signal an RMM tool could read, and per-app results existed only as console text, which RMM
 # consoles cut to their last lines.
@@ -296,8 +296,15 @@ function Save-InstallerRunRecord {
     record of the run that installed. The file is written next to the run's transcript
     (Get-InstallerLogDirectory), and not at all without one.
 
-    The RESULT line is printed in every case, last, so it is the run's final line of output (the
-    'Press any key' prompt of an interactive run aside). Never throws.
+    The RESULT line is printed in every case, after the summary or the early-exit notice and before
+    any 'Press any key' prompt. It is printed by the run that did the work: a run that relaunched
+    itself elevated prints none of its own (the elevated window prints it). It is not always the
+    last line of the output either: a run started from Windows PowerShell 5.1 (the irm | iex
+    one-liner) prints the bootstrap's own lines after it, such as the PowerShell 7 run's exit code
+    and any restart notice; when that bootstrap installed PowerShell 7 and the install needs a
+    restart, the process exits 3010 where the line says exit=0. So a reader looks for the line that
+    starts with 'RESULT: ' rather than reading the last line, and takes the exit code from the
+    process. Never throws.
 .PARAMETER Record
     A record from New-InstallerRunRecord.
 .RETURNS
@@ -323,6 +330,43 @@ function Write-InstallerRunResult {
         Write-WarningMessage "Could not print the RESULT line: $($_.Exception.Message)"
     }
     return $savedPath
+}
+
+<#
+.SYNOPSIS
+    Replaces last-run.json with the record of a run that has started and not ended yet.
+.DESCRIPTION
+    Review of finding P3-41. The entry script calls this once a real, elevated run holds the run
+    lock, before the run changes anything. last-run.json is otherwise written only when a run
+    reports (Write-InstallerRunResult), and a run that is killed (an RMM time limit, taskkill /F)
+    never reports, so without this the file would go on describing the run before it, which may
+    have exited 0. This record has the new run's startedUtc, exitCode and endedUtc $null,
+    summaryReached false and no apps; the run's report replaces it. A record whose exitCode is
+    null therefore describes a run that is still going or was killed before it could report.
+
+    Prints nothing (no RESULT line). Writes nothing unless $script:InstallerRunRecordEnabled is
+    set and the run has a logs folder (Get-InstallerLogDirectory). Never throws.
+.RETURNS
+    [string] The last-run.json path written, or $null.
+#>
+function Save-InstallerRunStartRecord {
+    if (-not $script:InstallerRunRecordEnabled) {
+        return $null
+    }
+    $directory = Get-InstallerLogDirectory
+    if ([string]::IsNullOrWhiteSpace($directory)) {
+        return $null
+    }
+    try {
+        $record = New-InstallerRunRecord -ExitCode 0
+        $record.exitCode = $null
+        $record.endedUtc = $null
+        return (Save-InstallerRunRecord -Record $record -Directory $directory)
+    }
+    catch {
+        Write-WarningMessage "Could not write the run record: $($_.Exception.Message)"
+        return $null
+    }
 }
 
 <#
