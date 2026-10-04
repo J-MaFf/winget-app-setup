@@ -306,7 +306,7 @@ Describe 'Winget-AutoUpdate integration (issue #168)' {
             Should -Invoke Remove-Item -Times 0 -Exactly
         }
 
-        It 'treats msiexec exit code 3010 (reboot required) as success' {
+        It 'treats msiexec exit code 3010 (reboot required) as success, and says a restart finishes it (review finding P3-16)' {
             Mock Test-WauInstalled { $false }
             Mock New-WauStagingDirectory { Join-Path $TestDrive 'wau-msi-test' }
             Mock Invoke-WebRequest { }
@@ -314,7 +314,65 @@ Describe 'Winget-AutoUpdate integration (issue #168)' {
             Mock Invoke-ExternalProcess { New-TestProcessResult -ExitCode 3010 }
             Mock Remove-Item { }
 
-            (Install-WingetAutoUpdate).Status | Should -Be 'Configured'
+            $result = Install-WingetAutoUpdate
+
+            $result.Status | Should -Be 'Configured'
+            $result.RestartRequired | Should -BeTrue
+        }
+
+        It 'does not say a restart is needed after a plain msiexec success' {
+            Mock Test-WauInstalled { $false }
+            Mock New-WauStagingDirectory { Join-Path $TestDrive 'wau-msi-test' }
+            Mock Invoke-WebRequest { }
+            Mock Get-FileHash { @{ Hash = (Get-WauPin).Sha256 } }
+            Mock Invoke-ExternalProcess { New-TestProcessResult -ExitCode 0 }
+            Mock Remove-Item { }
+
+            (Install-WingetAutoUpdate).RestartRequired | Should -BeFalse
+        }
+
+        # Review finding P2-15: msiexec returns 1618 at once while another installation holds
+        # Windows Installer, which used to fail the WAU install ('Auto-updates: FAILED') on the spot.
+        It 'waits for another installation to finish when msiexec returns 1618, then installs' {
+            Mock Test-WauInstalled { $false }
+            Mock New-WauStagingDirectory { Join-Path $TestDrive 'wau-msi-test' }
+            Mock Invoke-WebRequest { }
+            Mock Get-FileHash { @{ Hash = (Get-WauPin).Sha256 } }
+            Mock Remove-Item { }
+            $script:msiexecRuns = 0
+            Mock Invoke-ExternalProcess {
+                $script:msiexecRuns++
+                if ($script:msiexecRuns -eq 1) {
+                    return New-TestProcessResult -ExitCode 1618
+                }
+                New-TestProcessResult -ExitCode 0
+            }
+            Mock Wait-WindowsInstallerIdle { [pscustomobject]@{ WaitedSeconds = 45; Busy = $false } }
+
+            $result = Install-WingetAutoUpdate -InstallInProgressWaitSeconds 300
+
+            $result.Status | Should -Be 'Configured'
+            $script:msiexecRuns | Should -Be 2
+            Should -Invoke Wait-WindowsInstallerIdle -Times 1 -Exactly -ParameterFilter { $MaximumSeconds -eq 300 }
+        }
+
+        It 'fails with the reason when Windows Installer stays busy past the wait budget' {
+            Mock Test-WauInstalled { $false }
+            Mock New-WauStagingDirectory { Join-Path $TestDrive 'wau-msi-test' }
+            Mock Invoke-WebRequest { }
+            Mock Get-FileHash { @{ Hash = (Get-WauPin).Sha256 } }
+            Mock Remove-Item { }
+            Mock Invoke-ExternalProcess { New-TestProcessResult -ExitCode 1618 }
+            Mock Wait-WindowsInstallerIdle { [pscustomobject]@{ WaitedSeconds = $MaximumSeconds; Busy = $true } }
+            $script:errors = @()
+            Mock Write-ErrorMessage { $script:errors += $Message }
+
+            $result = Install-WingetAutoUpdate -InstallInProgressWaitSeconds 120
+
+            $result.Status | Should -Be 'Failed'
+            Should -Invoke Invoke-ExternalProcess -Times 2 -Exactly
+            Should -Invoke Wait-WindowsInstallerIdle -Times 1 -Exactly
+            ($script:errors -join "`n") | Should -Match 'Windows Installer was still busy with another installation after 1 retries and 120 seconds of waiting \(msiexec exit code 1618\)'
         }
 
         It 'does not install WAU when Microsoft.WindowsAppRuntime.1.8 is missing (it would leave winget unusable)' {

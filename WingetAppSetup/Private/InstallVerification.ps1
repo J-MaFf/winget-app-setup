@@ -55,6 +55,12 @@
     Invoke-WingetInstall's circuit breaker found that winget cannot be started on this machine.
     The applicability condition still runs, so a not-applicable app is still Skipped; an
     applicable app is Failed ('WingetNotLaunchable') without running winget at all.
+.PARAMETER InstallInProgressWaitSeconds
+    The most the install may wait for another installation to finish (review finding P2-15):
+    Invoke-WingetInstall passes what is left of the run's budget. Forwarded to Install-WingetPackage,
+    and to a package-specific installer that has a parameter of that name (Install-PowerShellLatest
+    does). Not given: Install-WingetPackage's default. The time waited comes back in the
+    InstallResult's InstallInProgressWaitedSeconds.
 .RETURNS
     [hashtable] @{
         Status        = 'Installed' | 'Failed' | 'Skipped'
@@ -88,7 +94,10 @@ function Install-AppWithVerification {
         [switch]$WhatIf,
 
         [Parameter(Mandatory = $false)]
-        [switch]$WingetNotLaunchable
+        [switch]$WingetNotLaunchable,
+
+        [Parameter(Mandatory = $false)]
+        [int]$InstallInProgressWaitSeconds
     )
 
     # Applicability gate (issue #217): evaluated BEFORE any winget probe so a not-applicable app
@@ -161,12 +170,21 @@ function Install-AppWithVerification {
         # (e.g. 'uninstall' or 'verify') dispatched the same way, extend that guard to cover it too.
         #
         # -Silent goes to the custom installer when it takes one (Install-PowerShellLatest does), so
-        # an explicit -NonInteractive installs PowerShell's MSI with /quiet like every other app.
+        # an explicit -NonInteractive installs PowerShell's MSI with /quiet like every other app. So
+        # does the run's remaining wait budget for another installation (review finding P2-15).
         $customParameters = @{}
-        if ($PSBoundParameters.ContainsKey('Silent') -and $App.install -is [string]) {
+        $forwardedParameters = @()
+        foreach ($parameterName in @('Silent', 'InstallInProgressWaitSeconds')) {
+            if ($PSBoundParameters.ContainsKey($parameterName)) {
+                $forwardedParameters += $parameterName
+            }
+        }
+        if ($forwardedParameters.Count -gt 0 -and $App.install -is [string]) {
             $customCommand = Get-Command -Name $App.install -ErrorAction SilentlyContinue | Select-Object -First 1
-            if ($customCommand -and $customCommand.Parameters -and $customCommand.Parameters.ContainsKey('Silent')) {
-                $customParameters['Silent'] = $Silent
+            foreach ($parameterName in $forwardedParameters) {
+                if ($customCommand -and $customCommand.Parameters -and $customCommand.Parameters.ContainsKey($parameterName)) {
+                    $customParameters[$parameterName] = $PSBoundParameters[$parameterName]
+                }
             }
         }
         $customResult = & $App.install @customParameters
@@ -201,6 +219,9 @@ function Install-AppWithVerification {
     $installParameters = @{ PackageId = $App.name; InstallerType = $App.installerType }
     if ($PSBoundParameters.ContainsKey('Silent')) {
         $installParameters['Silent'] = $Silent
+    }
+    if ($PSBoundParameters.ContainsKey('InstallInProgressWaitSeconds')) {
+        $installParameters['InstallInProgressWaitSeconds'] = $InstallInProgressWaitSeconds
     }
     $installResult = Install-WingetPackage @installParameters
     if ($installResult.LaunchErrorExhausted) {

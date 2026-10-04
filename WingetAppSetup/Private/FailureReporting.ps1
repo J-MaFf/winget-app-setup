@@ -147,16 +147,23 @@ function Write-InstallerExitNotice {
 .SYNOPSIS
     Decides Invoke-WingetInstall's final exit code from the run's outcome.
 .DESCRIPTION
-    Invoke-WingetInstall returns this as its exit code at the end of a run. Failed apps take
-    precedence (1); otherwise a winget that can no longer be launched at the end of the run is
-    reported as 2 - the same code as "winget unavailable" at the start - so a run can never exit 0
-    while leaving winget broken.
+    Invoke-WingetInstall returns this as its exit code at the end of a run. The precedence is
+    1 > 2 > 8 > 3010 > 0: failed apps first (1); then a winget that can no longer be launched at the
+    end of the run (2, the same code as "winget unavailable" at the start), so a run can never exit 0
+    while leaving winget broken; then a run that needs a restart to finish (3010, review finding
+    P3-16: the code RMM tools and Intune read as "succeeded, restart required"). Code 8 (apps
+    installed, but automatic updates not configured or unhealthy) is not returned yet; it belongs
+    between 2 and 3010.
 .PARAMETER FailedAppCount
     Number of apps still failed after the retry pass.
 .PARAMETER WingetUsable
     Result of the end-of-run winget launch probe.
+.PARAMETER RestartRequired
+    The run's installs finished but need a restart: an install reported it, or Windows gained a
+    pending restart during the run. A restart that was already pending before the run does not
+    count. Default False.
 .RETURNS
-    [int] 0, 1 or 2.
+    [int] 0, 1, 2 or 3010.
 #>
 function Get-InstallerExitCode {
     param (
@@ -164,7 +171,10 @@ function Get-InstallerExitCode {
         [int]$FailedAppCount,
 
         [Parameter(Mandatory = $true)]
-        [bool]$WingetUsable
+        [bool]$WingetUsable,
+
+        [Parameter(Mandatory = $false)]
+        [bool]$RestartRequired = $false
     )
 
     if ($FailedAppCount -gt 0) {
@@ -172,6 +182,10 @@ function Get-InstallerExitCode {
     }
     if (-not $WingetUsable) {
         return 2
+    }
+    # Code 8 (auto-updates not configured or unhealthy) goes here once it exists.
+    if ($RestartRequired) {
+        return 3010
     }
     return 0
 }
@@ -181,11 +195,19 @@ function Get-InstallerExitCode {
     Formats a one-line, human-readable reason for a failed app install.
 .DESCRIPTION
     Combines the shared install pipeline's FailureReason bucket with the diagnostic detail the
-    installer result carries: the winget exit code (hex), the attempt count, whether the
-    machine-scope preference fell back to winget's default scope, whether the 0x80073D19
-    session-error retries were exhausted (issue #189), whether the install ran out of time (review
-    finding P2-5), and where the installer's log is (P2-6). Used both for the console failure message
-    and for the Reason column in the failed-apps summary table.
+    installer result carries: the winget exit code (hex, with its name from Get-WingetExitCodeInfo),
+    the attempt count, whether the machine-scope preference fell back to winget's default scope,
+    whether the 0x80073D19 session-error retries were exhausted (issue #189), how long the install
+    waited for another installation to finish, whether the install ran out of time (review finding
+    P2-5), and where the installer's log is (P2-6). Used both for the console failure message and
+    for the Reason column in the failed-apps summary table.
+
+    When the package is missing after an install that winget reported as failed (VerifyNotFound, or
+    a package-specific installer's CustomInstallFailed), the reason starts with what the exit code
+    means, for example 'another installation was in progress (Windows Installer was busy) - re-run
+    the installer once it has finished', or 'winget install failed' for a code the table does not
+    know (review finding P2-15). 'package not found after install' is kept for an install that
+    winget reported as successful.
 .PARAMETER FailureReason
     The FailureReason string from the shared install pipeline ('PreCheckTimeout',
     'PreCheckLaunchFailed', 'PreCheckFailed', 'InstallLaunchFailed', 'VerifyTimeout',
@@ -203,8 +225,9 @@ function Get-InstallerExitCode {
     The exit code of the `winget list` check that failed, for PreCheckFailed and VerifyFailed (the
     pipeline's CheckExitCode). Shown with the reason, apart from the install's own exit code.
 .RETURNS
-    [string] e.g. 'package not found after install; winget exit 0x80073D19, 3 attempts,
-    machine-scope fallback: no'. Never $null or empty.
+    [string] e.g. 'another installation was in progress (Windows Installer was busy) - re-run the
+    installer once it has finished; winget exit 0x8A150102 INSTALL_INSTALL_IN_PROGRESS, 4 attempts,
+    machine-scope fallback: no, waited 600 seconds for another installation'. Never $null or empty.
 #>
 function Format-InstallFailureReason {
     param (
@@ -242,15 +265,29 @@ function Format-InstallFailureReason {
     }
     if ($null -ne $CheckExitCode -and @('PreCheckFailed', 'VerifyFailed') -contains $FailureReason) {
         # The list's own exit code (review finding P2-9), kept apart from the install's 'winget exit'.
-        $base = '{0} with exit 0x{1:X8}' -f $base, [int]$CheckExitCode
+        $base = '{0} with exit {1}' -f $base, (Format-WingetExitCode -ExitCode $CheckExitCode)
+    }
+
+    $installExitCode = $null
+    if ($InstallResult -and $InstallResult.ContainsKey('ExitCode') -and $null -ne $InstallResult.ExitCode) {
+        $installExitCode = [int]$InstallResult.ExitCode
+    }
+    if ($null -ne $installExitCode -and $installExitCode -ne 0 -and @('VerifyNotFound', 'CustomInstallFailed') -contains $FailureReason) {
+        # winget said the install failed, and the package is indeed missing: what winget's code
+        # means is the reason, not 'package not found after install' (review finding P2-15).
+        $codeInfo = Get-WingetExitCodeInfo -ExitCode $installExitCode
+        if ($codeInfo) {
+            $base = $codeInfo.Meaning
+        }
+        elseif ($FailureReason -eq 'VerifyNotFound') {
+            $base = 'winget install failed'
+        }
     }
 
     $detailParts = @()
     if ($InstallResult) {
-        if ($InstallResult.ContainsKey('ExitCode') -and $null -ne $InstallResult.ExitCode) {
-            # Winget reports HRESULT-style codes as signed Int32 (e.g. -2147009255); the X8 format
-            # renders the familiar hex form (0x80073D19) the winget docs and issues use.
-            $detailParts += ('winget exit 0x{0:X8}' -f [int]$InstallResult.ExitCode)
+        if ($null -ne $installExitCode) {
+            $detailParts += ('winget exit {0}' -f (Format-WingetExitCode -ExitCode $installExitCode))
         }
         if ($InstallResult.ContainsKey('Attempts') -and $InstallResult.Attempts) {
             $attemptWord = if ([int]$InstallResult.Attempts -eq 1) { 'attempt' } else { 'attempts' }
@@ -261,6 +298,9 @@ function Format-InstallFailureReason {
         }
         if ($InstallResult.ContainsKey('SessionErrorExhausted') -and $InstallResult.SessionErrorExhausted) {
             $detailParts += 'session error 0x80073D19 persisted through every retry'
+        }
+        if ($InstallResult.ContainsKey('InstallInProgressWaitedSeconds') -and $InstallResult.InstallInProgressWaitedSeconds) {
+            $detailParts += ('waited {0} seconds for another installation' -f [int]$InstallResult.InstallInProgressWaitedSeconds)
         }
         if ($InstallResult.ContainsKey('LaunchErrorExhausted') -and $InstallResult.LaunchErrorExhausted) {
             # issue #253: winget.exe could not be launched, so no install ever actually ran (the
@@ -296,6 +336,63 @@ function Format-InstallFailureReason {
         return ('{0}; {1}' -f $base, ($detailParts -join ', '))
     }
     return $base
+}
+
+<#
+.SYNOPSIS
+    Prints what an installed app's install result adds to 'Successfully installed', and returns
+    whether the install needs a restart to finish.
+.DESCRIPTION
+    Review finding P3-16. An app counts as installed when `winget list` finds it, whatever winget's
+    exit code was, and the success line used to drop that code. This prints, after it:
+      - '<app> needs a restart to finish installing (<why>).' when the result's RestartRequired is
+        set (winget 0x8A150109 or 0x8A15010B, or winget's 'Restart your PC to finish installation.'
+        warning; see Install-WingetPackage);
+      - 'winget reported <code> for <app>, but it is installed.' for any other non-zero exit code,
+        with the installer log when there is one, instead of dropping the code.
+    Nothing for a plain success, or when there is no install result.
+.PARAMETER AppName
+    The winget package id.
+.PARAMETER InstallResult
+    The app's Install-AppWithVerification InstallResult, or $null.
+.RETURNS
+    [bool] True when the install needs a restart to finish.
+#>
+function Write-InstalledAppNote {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$AppName,
+
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [object]$InstallResult
+    )
+
+    if ($null -eq $InstallResult) {
+        return $false
+    }
+    $exitCode = $null
+    if ($null -ne $InstallResult.ExitCode) {
+        $exitCode = [int]$InstallResult.ExitCode
+    }
+
+    if ($InstallResult.RestartRequired) {
+        $why = "winget printed 'Restart your PC to finish installation.'"
+        if ($null -ne $exitCode -and $exitCode -ne 0) {
+            $why = 'winget exit {0}' -f (Format-WingetExitCode -ExitCode $exitCode)
+        }
+        Write-WarningMessage ('{0} needs a restart to finish installing ({1}).' -f $AppName, $why)
+        return $true
+    }
+
+    if ($null -ne $exitCode -and $exitCode -ne 0) {
+        $logNote = ''
+        if ($InstallResult.InstallerLogPath) {
+            $logNote = '; installer log: {0}' -f $InstallResult.InstallerLogPath
+        }
+        Write-WarningMessage ('winget reported {0} for {1}, but it is installed{2}.' -f (Format-WingetExitCode -ExitCode $exitCode), $AppName, $logNote)
+    }
+    return $false
 }
 
 <#

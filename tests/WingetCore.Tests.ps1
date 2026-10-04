@@ -338,14 +338,14 @@ Describe 'Test-AndInstallWinget with winget on PATH but unable to run (review fi
         $result | Should -Be $false
         Should -Invoke Write-Success -Times 0 -Exactly
         Should -Invoke Invoke-WingetPackageManagerRepair -Times 1 -Exactly
-        ($script:warnings -join "`n") | Should -Match "Winget is present but cannot run after the repair attempt: 'winget --version' exited with 0x8A150002"
+        ($script:warnings -join "`n") | Should -Match "Winget is present but cannot run after the repair attempt: 'winget --version' exited with 0x8A150002 INVALID_CL_ARGUMENTS"
     }
 
     It 'Does not take an alias on PATH as a usable winget at the start of the run' {
         Test-AndInstallWinget | Out-Null
 
         Should -Invoke Invoke-WingetProcess -ParameterFilter { $ArgumentList[0] -eq '--version' }
-        $script:warnings | Should -Contain "Winget is not available: 'winget --version' exited with 0x8A150002."
+        $script:warnings | Should -Contain "Winget is not available: 'winget --version' exited with 0x8A150002 INVALID_CL_ARGUMENTS."
     }
 }
 
@@ -649,7 +649,7 @@ Describe 'Test-WingetSources' {
 
             [void](Test-WingetSources)
 
-            $script:resetWarnings | Should -Contain 'Winget source reset failed with exit code 0x8A150002.'
+            $script:resetWarnings | Should -Contain 'Winget source reset failed with exit code 0x8A150002 INVALID_CL_ARGUMENTS.'
             $script:resetInfos | Should -Not -Contain 'Source reset completed.'
         }
     }
@@ -921,6 +921,147 @@ Describe 'Install-WingetPackage (0x80073d19 session-error backoff)' {
             ($ArgumentList -contains '--accept-source-agreements') -and
             ($ArgumentList -contains '--accept-package-agreements')
         }
+    }
+}
+
+# Review findings P2-15 and P3-16. 0x8A150102 is winget's code for msiexec 1618: Windows Installer
+# was busy with another installation (on a fresh PC, the management agent, OEM tools or Teams) and
+# said so at once. It used to fail after one launch with no wait.
+Describe 'Install-WingetPackage (another installation in progress, in use, restart required; review findings P2-15, P3-16)' {
+    BeforeAll {
+        $script:InstallInProgress = -1978334974   # 0x8A150102 INSTALL_INSTALL_IN_PROGRESS
+        $script:RestartFirst = -1978334966        # 0x8A15010A INSTALL_REBOOT_REQUIRED_FOR_INSTALL
+    }
+
+    BeforeEach {
+        Mock Write-Host { }
+        Mock Write-Info { }
+        $script:warnings = @()
+        Mock Write-WarningMessage { $script:warnings += $Message }
+        Mock Start-Sleep { }
+        Mock Test-EffectiveNonInteractive { $false }
+        # Each wait for Windows Installer "takes" 30 seconds and ends with it idle.
+        Mock Wait-WindowsInstallerIdle { [pscustomobject]@{ WaitedSeconds = 30; Busy = $false } }
+
+        $script:runQueue = @()
+        $script:runIndex = 0
+        Mock Invoke-WingetProcess {
+            $next = $script:runQueue[$script:runIndex]
+            $script:runIndex++
+            if ($next -is [hashtable]) {
+                return New-TestProcessResult @next
+            }
+            New-TestProcessResult -ExitCode $next
+        }
+    }
+
+    It 'Waits for Windows Installer and retries after 0x8A150102, instead of failing after one launch' {
+        $script:runQueue = @($script:InstallInProgress, 0)
+
+        $result = Install-WingetPackage -PackageId 'Google.Chrome'
+
+        $result.ExitCode | Should -Be 0
+        $result.Attempts | Should -Be 2
+        $result.InstallInProgressWaitedSeconds | Should -Be 30
+        Should -Invoke Invoke-WingetProcess -Times 2 -Exactly
+        Should -Invoke Wait-WindowsInstallerIdle -Times 1 -Exactly -ParameterFilter { $MaximumSeconds -eq 600 }
+        ($script:warnings -join "`n") | Should -Match 'Windows Installer is busy with another installation \(0x8A150102 INSTALL_INSTALL_IN_PROGRESS\)'
+    }
+
+    It 'Retries 0x8A150102 at most InstallInProgressRetries times' {
+        $script:runQueue = @($script:InstallInProgress, $script:InstallInProgress, $script:InstallInProgress, $script:InstallInProgress, 0)
+
+        $result = Install-WingetPackage -PackageId 'Google.Chrome'
+
+        $result.ExitCode | Should -Be $script:InstallInProgress
+        $result.Attempts | Should -Be 4
+        $result.InstallInProgressWaitedSeconds | Should -Be 90
+        Should -Invoke Invoke-WingetProcess -Times 4 -Exactly
+        Should -Invoke Wait-WindowsInstallerIdle -Times 3 -Exactly
+    }
+
+    It 'Stops waiting once its share of the wait budget is spent' {
+        # The first wait uses up all 100 seconds this call was given (Windows Installer still busy).
+        Mock Wait-WindowsInstallerIdle { [pscustomobject]@{ WaitedSeconds = $MaximumSeconds; Busy = $true } }
+        $script:runQueue = @($script:InstallInProgress, $script:InstallInProgress, 0)
+
+        $result = Install-WingetPackage -PackageId 'Google.Chrome' -InstallInProgressWaitSeconds 100
+
+        $result.ExitCode | Should -Be $script:InstallInProgress
+        $result.Attempts | Should -Be 2
+        $result.InstallInProgressWaitedSeconds | Should -Be 100
+        Should -Invoke Wait-WindowsInstallerIdle -Times 1 -Exactly -ParameterFilter { $MaximumSeconds -eq 100 }
+    }
+
+    It 'Fails 0x8A150102 at once when the run has no wait budget left' {
+        $script:runQueue = @($script:InstallInProgress, 0)
+
+        $result = Install-WingetPackage -PackageId 'Google.Chrome' -InstallInProgressWaitSeconds 0
+
+        $result.ExitCode | Should -Be $script:InstallInProgress
+        $result.Attempts | Should -Be 1
+        Should -Invoke Wait-WindowsInstallerIdle -Times 0 -Exactly
+    }
+
+    It 'Retries an in-use result (<Hex>) once, after a delay' -ForEach @(
+        @{ Hex = '8A150101' }
+        @{ Hex = '8A150103' }
+        @{ Hex = '8A150111' }
+    ) {
+        $code = [Convert]::ToInt32($Hex, 16)
+        $script:runQueue = @($code, 0)
+
+        $result = Install-WingetPackage -PackageId 'Contoso.App'
+
+        $result.ExitCode | Should -Be 0
+        $result.Attempts | Should -Be 2
+        Should -Invoke Start-Sleep -Times 1 -Exactly -ParameterFilter { $Seconds -eq 60 }
+        Should -Invoke Wait-WindowsInstallerIdle -Times 0 -Exactly
+    }
+
+    It 'Retries an in-use result only once' {
+        $script:runQueue = @(-1978334975, -1978334975, 0)
+
+        $result = Install-WingetPackage -PackageId 'Contoso.App' -InUseRetryDelaySeconds 5
+
+        $result.ExitCode | Should -Be -1978334975
+        $result.Attempts | Should -Be 2
+        Should -Invoke Start-Sleep -Times 1 -Exactly -ParameterFilter { $Seconds -eq 5 }
+    }
+
+    It 'Never retries 0x8A15010A: only a restart lets that installer run' {
+        $script:runQueue = @($script:RestartFirst, 0)
+
+        $result = Install-WingetPackage -PackageId 'Git.Git'
+
+        $result.ExitCode | Should -Be $script:RestartFirst
+        $result.Attempts | Should -Be 1
+        $result.RestartRequired | Should -BeFalse
+        Should -Invoke Start-Sleep -Times 0 -Exactly
+        Should -Invoke Wait-WindowsInstallerIdle -Times 0 -Exactly
+    }
+
+    It 'Says a restart finishes the install for <Case>, without retrying' -ForEach @(
+        @{ Case = 'winget 1.6 and older (0x8A150109)'; Run = @{ ExitCode = -1978334967 } }
+        @{ Case = 'an installer that started a restart (0x8A15010B, MSI 1641)'; Run = @{ ExitCode = -1978334965 } }
+        @{ Case = 'winget 1.7 and later (exit 0 with its restart warning)'; Run = @{ ExitCode = 0; Output = @('Starting package install...', 'Restart your PC to finish installation.') } }
+    ) {
+        $script:runQueue = @($Run, 0)
+
+        $result = Install-WingetPackage -PackageId '7zip.7zip'
+
+        $result.RestartRequired | Should -BeTrue
+        $result.ExitCode | Should -Be $Run.ExitCode
+        $result.Attempts | Should -Be 1
+    }
+
+    It 'Does not say a restart is needed for a plain success' {
+        $script:runQueue = @(@{ ExitCode = 0; Output = @('Starting package install...', 'Successfully installed') })
+
+        $result = Install-WingetPackage -PackageId '7zip.7zip'
+
+        $result.RestartRequired | Should -BeFalse
+        $result.InstallInProgressWaitedSeconds | Should -Be 0
     }
 }
 
@@ -1626,6 +1767,20 @@ Describe 'Install-PowerShellLatest (always-latest strategy, issue #166)' {
         Should -Invoke Install-WingetPackage -Times 2 -Exactly -ParameterFilter { -not $PesterBoundParameters.ContainsKey('Silent') }
     }
 
+    It 'shares the run''s wait budget for another installation between its MSI and MSIX attempts (review finding P2-15)' {
+        Mock Install-WingetPackage { @{ ExitCode = -1978335216; InstallInProgressWaitedSeconds = 120 } } -ParameterFilter { $InstallerType -eq 'wix' }
+        Mock Install-WingetPackage { @{ ExitCode = 0; InstallInProgressWaitedSeconds = 30 } } -ParameterFilter { -not $InstallerType }
+        Mock Get-WindowsBuildNumber { 26100 }
+        Mock Test-WingetPackageInstalled { @{ Installed = $true; TimedOut = $false; ExitCode = 0 } }
+        Mock Install-MsixProvisionedPackage { throw 'DISM provisioning should not run on 24H2+' }
+
+        $result = Install-PowerShellLatest -InstallInProgressWaitSeconds 500
+
+        Should -Invoke Install-WingetPackage -Times 1 -Exactly -ParameterFilter { $InstallerType -eq 'wix' -and $InstallInProgressWaitSeconds -eq 500 }
+        Should -Invoke Install-WingetPackage -Times 1 -Exactly -ParameterFilter { -not $InstallerType -and $InstallInProgressWaitSeconds -eq 380 }
+        $result.InstallInProgressWaitedSeconds | Should -Be 150
+    }
+
     It 'returns a stopped install''s time limit and installer log, so the failure reason names them (review of P2-5/P2-6, <Method>)' -ForEach @(
         @{ Method = 'msi'; WixExitCode = $null }
         @{ Method = 'msix-native'; WixExitCode = -1978335216 }
@@ -1671,7 +1826,7 @@ Describe 'Install-PowerShellLatest (always-latest strategy, issue #166)' {
         $result.VerifyTimedOut | Should -Be $false
         $result.VerifyLaunchFailed | Should -Be $false
         Format-InstallFailureReason -FailureReason 'CustomInstallFailed' -InstallResult $result |
-            Should -Be 'installer reported failure; winget exit 0x80073D19, 3 attempts, machine-scope fallback: no, session error 0x80073D19 persisted through every retry'
+            Should -Be 'the installing account has no logon session, so Windows blocked the app package deployment; winget exit 0x80073D19 ERROR_DEPLOYMENT_BLOCKED_BY_USER_LOG_OFF, 3 attempts, machine-scope fallback: no, session error 0x80073D19 persisted through every retry'
     }
 
     It 'says whether its winget check timed out or could not start winget' {

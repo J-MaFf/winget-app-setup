@@ -163,7 +163,7 @@ function Test-WingetLaunchable {
             $reason = "'winget --version' did not answer within $timeoutSeconds seconds and was stopped"
         }
         elseif ($run.ExitCode -ne 0) {
-            $reason = "'winget --version' exited with 0x{0:X8}" -f [int]$run.ExitCode
+            $reason = "'winget --version' exited with {0}" -f (Format-WingetExitCode -ExitCode $run.ExitCode)
         }
         else {
             $versionLine = @($run.StandardOutput | ForEach-Object { "$_".Trim() } | Where-Object { $_ -match '^v\d' }) | Select-Object -First 1

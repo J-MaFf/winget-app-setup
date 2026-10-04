@@ -69,6 +69,11 @@ function Test-WauInstalled {
     Best-effort: any failure warns and returns a Failed result rather than aborting the install.
 .PARAMETER WhatIf
     When specified, only reports intended actions.
+.PARAMETER InstallInProgressWaitSeconds
+    The most to wait, in all, when msiexec exits 1618 because Windows Installer is busy with another
+    installation (review finding P2-15): it waits for that installation (Wait-WindowsInstallerIdle)
+    and retries, up to 3 times. Invoke-WingetInstall passes what is left of the run's budget.
+    Default 600. 0: 1618 fails at once.
 .RETURNS
     [pscustomobject] with:
       - Status:  'Configured' (installed or upgraded this run), 'AlreadyPresent' (left as-is),
@@ -78,11 +83,16 @@ function Test-WauInstalled {
                  version (or $null when unreadable) for AlreadyPresent.
       - FrameworkMissing: $true when the framework check found no suitable framework (on
                  AlreadyPresent this means the existing WAU may break winget on its next run).
+      - RestartRequired: $true when msiexec returned 3010 (ERROR_SUCCESS_REBOOT_REQUIRED): WAU is
+                 installed, and a restart finishes it (review finding P3-16).
 #>
 function Install-WingetAutoUpdate {
     param (
         [Parameter(Mandatory = $false)]
-        [switch]$WhatIf
+        [switch]$WhatIf,
+
+        [Parameter(Mandatory = $false)]
+        [int]$InstallInProgressWaitSeconds = 600
     )
 
     $pin = Get-WauPin
@@ -95,7 +105,7 @@ function Install-WingetAutoUpdate {
         else {
             Write-Info "[DRY-RUN] Would install Winget-AutoUpdate $($pin.Version) (weekly updates on Tuesdays at 02:00, not at logon, Full notifications, self-update disabled), if Microsoft.WindowsAppRuntime.1.8 is present."
         }
-        return [pscustomobject]@{ Status = 'DryRun'; Version = $pin.Version; FrameworkMissing = $false }
+        return [pscustomobject]@{ Status = 'DryRun'; Version = $pin.Version; FrameworkMissing = $false; RestartRequired = $false }
     }
 
     $framework = Get-WindowsAppRuntimeStatus
@@ -117,7 +127,7 @@ function Install-WingetAutoUpdate {
             if ($frameworkMissing) {
                 Write-ErrorMessage "Winget-AutoUpdate is installed, but Microsoft.WindowsAppRuntime.1.8 is missing ($($framework.Detail)). Its next update run may install a winget that cannot start and leave winget unusable. Install the Windows App Runtime 1.8 (update App Installer from the Microsoft Store, or install Microsoft's Windows App SDK 1.8 runtime), or uninstall Winget-AutoUpdate on this machine."
             }
-            return [pscustomobject]@{ Status = 'AlreadyPresent'; Version = $installed.Version; FrameworkMissing = $frameworkMissing }
+            return [pscustomobject]@{ Status = 'AlreadyPresent'; Version = $installed.Version; FrameworkMissing = $frameworkMissing; RestartRequired = $false }
         }
     }
     elseif (-not $frameworkMissing) {
@@ -126,7 +136,7 @@ function Install-WingetAutoUpdate {
 
     if ($frameworkMissing) {
         Write-ErrorMessage "Winget-AutoUpdate was NOT installed: Microsoft.WindowsAppRuntime.1.8 is missing ($($framework.Detail)). Every WAU update run installs the newest winget, which needs that framework, so WAU would leave winget unusable here. Install the Windows App Runtime 1.8 (update App Installer from the Microsoft Store, or install Microsoft's Windows App SDK 1.8 runtime), then re-run this installer. On a newly set-up PC this usually clears once the Store has updated App Installer."
-        return [pscustomobject]@{ Status = 'FrameworkMissing'; Version = $pin.Version; FrameworkMissing = $true }
+        return [pscustomobject]@{ Status = 'FrameworkMissing'; Version = $pin.Version; FrameworkMissing = $true; RestartRequired = $false }
     }
 
     $stagingDir = $null
@@ -143,7 +153,7 @@ function Install-WingetAutoUpdate {
         $actualHash = (Get-FileHash -Path $msiPath -Algorithm SHA256).Hash
         if ($actualHash -ne $pin.Sha256) {
             Write-ErrorMessage "Winget-AutoUpdate MSI hash mismatch (expected $($pin.Sha256), got $actualHash). Skipping installation."
-            return [pscustomobject]@{ Status = 'Failed'; Version = $pin.Version; FrameworkMissing = $false }
+            return [pscustomobject]@{ Status = 'Failed'; Version = $pin.Version; FrameworkMissing = $false; RestartRequired = $false }
         }
 
         # Bake the configuration in via MSI properties (the winget-package install path allows no
@@ -157,28 +167,53 @@ function Install-WingetAutoUpdate {
         $msiArgs = "/i `"$msiPath`" /qn /norestart UPDATESATLOGON=0 USERCONTEXT=1 DISABLEWAUAUTOUPDATE=1 UPDATESINTERVAL=Weekly UPDATESATTIME=02:00:00 NOTIFICATIONLEVEL=Full DONOTRUNONMETERED=1"
         # Time-limited (review finding P2-5): Start-Process -Wait used to wait for ever.
         $msiTimeoutSeconds = Get-ProcessTimeoutSeconds -Operation MsiExec
-        $msiexec = Invoke-ExternalProcess -FilePath 'msiexec.exe' -ArgumentString $msiArgs -TimeoutSeconds $msiTimeoutSeconds -Echo None
-        if ($msiexec.LaunchFailed) {
-            Write-ErrorMessage "Failed to install Winget-AutoUpdate: msiexec could not be started ($($msiexec.LaunchError))."
-            return [pscustomobject]@{ Status = 'Failed'; Version = $pin.Version; FrameworkMissing = $false }
-        }
-        if ($msiexec.TimedOut) {
-            Write-ErrorMessage ('Winget-AutoUpdate install failed: msiexec did not finish within {0} minutes and was stopped.' -f [Math]::Round($msiTimeoutSeconds / 60))
-            return [pscustomobject]@{ Status = 'Failed'; Version = $pin.Version; FrameworkMissing = $false }
+        $busyRetries = 0
+        $busyWaited = 0
+        while ($true) {
+            $msiexec = Invoke-ExternalProcess -FilePath 'msiexec.exe' -ArgumentString $msiArgs -TimeoutSeconds $msiTimeoutSeconds -Echo None
+            if ($msiexec.LaunchFailed) {
+                Write-ErrorMessage "Failed to install Winget-AutoUpdate: msiexec could not be started ($($msiexec.LaunchError))."
+                return [pscustomobject]@{ Status = 'Failed'; Version = $pin.Version; FrameworkMissing = $false; RestartRequired = $false }
+            }
+            if ($msiexec.TimedOut) {
+                Write-ErrorMessage ('Winget-AutoUpdate install failed: msiexec did not finish within {0} minutes and was stopped.' -f [Math]::Round($msiTimeoutSeconds / 60))
+                return [pscustomobject]@{ Status = 'Failed'; Version = $pin.Version; FrameworkMissing = $false; RestartRequired = $false }
+            }
+            # 1618 = ERROR_INSTALL_ALREADY_RUNNING: Windows Installer is busy with another
+            # installation and says so at once (review finding P2-15). Wait for it, within the
+            # run's budget, and try again.
+            $busyWaitLeft = $InstallInProgressWaitSeconds - $busyWaited
+            if ($msiexec.ExitCode -eq 1618 -and $busyRetries -lt 3 -and $busyWaitLeft -gt 0) {
+                $busyRetries++
+                Write-WarningMessage ('Windows Installer is busy with another installation (msiexec exit code 1618). Waiting for it to finish (at most {0} seconds) before retry {1} of 3 of the Winget-AutoUpdate install...' -f $busyWaitLeft, $busyRetries)
+                $wait = Wait-WindowsInstallerIdle -MaximumSeconds $busyWaitLeft
+                $busyWaited += [int]$wait.WaitedSeconds
+                continue
+            }
+            break
         }
 
-        # 3010 = ERROR_SUCCESS_REBOOT_REQUIRED — still a success.
+        # 3010 = ERROR_SUCCESS_REBOOT_REQUIRED: installed, and a restart finishes it (P3-16).
         if ($msiexec.ExitCode -eq 0 -or $msiexec.ExitCode -eq 3010) {
+            $restartRequired = $msiexec.ExitCode -eq 3010
             Write-Success "Winget-AutoUpdate $($pin.Version) installed. Apps will update weekly, on Tuesdays at 02:00 (or soon after the next start if the machine was off)."
-            return [pscustomobject]@{ Status = 'Configured'; Version = $pin.Version; FrameworkMissing = $false }
+            if ($restartRequired) {
+                Write-WarningMessage 'The Winget-AutoUpdate installer reported that a restart finishes the installation (msiexec exit code 3010).'
+            }
+            return [pscustomobject]@{ Status = 'Configured'; Version = $pin.Version; FrameworkMissing = $false; RestartRequired = $restartRequired }
+        }
+
+        if ($msiexec.ExitCode -eq 1618) {
+            Write-ErrorMessage ('Winget-AutoUpdate install failed: Windows Installer was still busy with another installation after {0} retries and {1} seconds of waiting (msiexec exit code 1618). Re-run the installer once that installation has finished.' -f $busyRetries, $busyWaited)
+            return [pscustomobject]@{ Status = 'Failed'; Version = $pin.Version; FrameworkMissing = $false; RestartRequired = $false }
         }
 
         Write-ErrorMessage "Winget-AutoUpdate install failed (msiexec exit code $($msiexec.ExitCode))."
-        return [pscustomobject]@{ Status = 'Failed'; Version = $pin.Version; FrameworkMissing = $false }
+        return [pscustomobject]@{ Status = 'Failed'; Version = $pin.Version; FrameworkMissing = $false; RestartRequired = $false }
     }
     catch {
         Write-ErrorMessage "Failed to install Winget-AutoUpdate: $_"
-        return [pscustomobject]@{ Status = 'Failed'; Version = $pin.Version; FrameworkMissing = $false }
+        return [pscustomobject]@{ Status = 'Failed'; Version = $pin.Version; FrameworkMissing = $false; RestartRequired = $false }
     }
     finally {
         if ($stagingDir) {

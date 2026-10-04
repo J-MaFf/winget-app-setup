@@ -28,9 +28,11 @@
     longer be launched mid-run), or elevation was declined or is unavailable (irm | iex, or the
     imported module), 2 = winget unavailable (at the start, where `winget --version` must run and
     print a version, or no longer launchable at the end of the run), 3 = app-definition validation
-    failed or no valid apps remain. The generated entry script also exits 1 when a blocking
-    pre-flight check fails (before this function runs) and 5 when the run was aborted by an
-    unexpected error or stopped from outside.
+    failed or no valid apps remain, 3010 = success, but a restart is required to finish (an install
+    said so, or Windows gained a pending restart during the run; review finding P3-16). At the end
+    of a run the precedence is 1 > 2 > 3010 > 0 (Get-InstallerExitCode). The generated entry script
+    also exits 1 when a blocking pre-flight check fails (before this function runs) and 5 when the
+    run was aborted by an unexpected error or stopped from outside.
 #>
 function Invoke-WingetInstall {
     [OutputType([int])]
@@ -167,6 +169,22 @@ function Invoke-WingetInstall {
         Write-Success 'Starting...'
     }
 
+    # Pending restart before the run (review finding P3-16), read before this run changes the
+    # machine: the end of the run compares against it, so a restart that this run's installs need
+    # (exit code 3010) is told apart from one that was already pending, which is reported but does
+    # not make the run 3010 by itself. Read-only, so a dry run reports it too.
+    $restartStateBefore = $null
+    try {
+        $restartStateBefore = Get-PendingRestartState
+    }
+    catch {
+        Write-WarningMessage "Could not check whether a restart is pending: $_"
+    }
+    $restartPendingBefore = @(Get-PendingRestartReason -State $restartStateBefore)
+    if ($restartPendingBefore.Count -gt 0) {
+        Write-WarningMessage ('A restart is already pending on this PC ({0}). An installer that needs a restart first fails with 0x8A15010A; if one does, restart this PC and re-run the installer.' -f ($restartPendingBefore -join '; '))
+    }
+
     # Ensure the WinGet PowerShell module is available before touching winget itself:
     # Test-AndInstallWinget and Initialize-WingetSourcesForUser use Repair-WinGetPackageManager
     # to bootstrap winget for accounts that have no interactive logon session (issue #159).
@@ -289,13 +307,27 @@ function Invoke-WingetInstall {
     # was not coming back (about 24 minutes before the run reported failure).
     $wingetNotLaunchable = $false
 
+    # Run-level budget for waiting on another installation (review finding P2-15): an app whose
+    # install finds Windows Installer busy (0x8A150102, msiexec 1618) waits for it and retries, and
+    # every wait comes out of these 10 minutes, the Winget-AutoUpdate msiexec's included. Once it
+    # is spent, a busy result fails at once with its reason, so a machine that stays busy costs the
+    # run 10 minutes at most rather than 10 minutes per app.
+    $installerBusyWaitSecondsLeft = 600
+
+    # Apps whose install finished but needs a restart to complete (review finding P3-16). Apps whose
+    # installer cannot run until Windows restarts (0x8A15010A) are failed apps marked RestartFirst.
+    $restartRequiredApps = @()
+
     Foreach ($app in $apps) {
         $outcome = $null
         try {
             # Shared per-app pipeline — pre-check, dispatch, post-verify (issue #188). Messages,
             # summary bucketing, and exit-code policy stay here in the orchestrator.
             # -Silent: an unattended run installs MSI packages with /quiet, not /passive.
-            $outcome = Install-AppWithVerification -App $app -Silent:$effectiveNonInteractive -WhatIf:$WhatIf -WingetNotLaunchable:$wingetNotLaunchable
+            $outcome = Install-AppWithVerification -App $app -Silent:$effectiveNonInteractive -WhatIf:$WhatIf -WingetNotLaunchable:$wingetNotLaunchable -InstallInProgressWaitSeconds $installerBusyWaitSecondsLeft
+            if ($outcome.InstallResult -and $outcome.InstallResult.InstallInProgressWaitedSeconds) {
+                $installerBusyWaitSecondsLeft = [Math]::Max(0, $installerBusyWaitSecondsLeft - [int]$outcome.InstallResult.InstallInProgressWaitedSeconds)
+            }
 
             switch ($outcome.Status) {
                 'Skipped' {
@@ -318,6 +350,11 @@ function Invoke-WingetInstall {
                     }
                     else {
                         Write-Success "Successfully installed: $($app.name)"
+                        # A restart that finishes the install, or a non-zero winget exit code
+                        # behind an app that is installed anyway (review finding P3-16).
+                        if (Write-InstalledAppNote -AppName $app.name -InstallResult $outcome.InstallResult) {
+                            $restartRequiredApps += $app.name
+                        }
                     }
                     $installedApps += $app.name
                 }
@@ -340,8 +377,9 @@ function Invoke-WingetInstall {
                         }
                     }
                     # Tracked as objects, not bare names, so the failed-apps summary can render a
-                    # Reason column (issue #189).
-                    $failedApps += @{ Name = $app.name; Reason = $failureReason }
+                    # Reason column (issue #189). RestartFirst: the installer cannot run until
+                    # Windows restarts (0x8A15010A), so the retry pass leaves it alone.
+                    $failedApps += @{ Name = $app.name; Reason = $failureReason; RestartFirst = (Test-RestartRequiredFirst -InstallResult $outcome.InstallResult) }
                 }
             }
         }
@@ -384,15 +422,26 @@ function Invoke-WingetInstall {
 
             foreach ($failedApp in $appsToRetry) {
                 $appName = $failedApp.Name
+                if ($failedApp.RestartFirst) {
+                    # 0x8A15010A (review finding P3-16): only a restart changes it, so another try
+                    # now would fail the same way.
+                    Write-WarningMessage "Not retrying ${appName}: its installer cannot run until this PC restarts."
+                    $failedApps += $failedApp
+                    continue
+                }
                 $outcome = $null
                 try {
                     Write-Info "Retrying: $appName"
                     $appDef = $apps | Where-Object { $_.name -eq $appName } | Select-Object -First 1
 
                     # Same shared pipeline as the first pass (issue #188), so a lingering
-                    # 0x80073d19 session error gets its backoff retries here too (issue #150).
+                    # 0x80073d19 session error gets its backoff retries here too (issue #150), and
+                    # a busy Windows Installer gets what is left of the run's wait budget.
                     # The circuit breaker holds here too: once it trips, the rest fail at once.
-                    $outcome = Install-AppWithVerification -App $appDef -Silent:$effectiveNonInteractive -WingetNotLaunchable:$wingetNotLaunchable
+                    $outcome = Install-AppWithVerification -App $appDef -Silent:$effectiveNonInteractive -WingetNotLaunchable:$wingetNotLaunchable -InstallInProgressWaitSeconds $installerBusyWaitSecondsLeft
+                    if ($outcome.InstallResult -and $outcome.InstallResult.InstallInProgressWaitedSeconds) {
+                        $installerBusyWaitSecondsLeft = [Math]::Max(0, $installerBusyWaitSecondsLeft - [int]$outcome.InstallResult.InstallInProgressWaitedSeconds)
+                    }
 
                     if ($outcome.Status -eq 'Failed') {
                         $failureReason = Format-InstallFailureReason -FailureReason $outcome.FailureReason -InstallResult $outcome.InstallResult -LaunchError $outcome.LaunchError -CheckExitCode $outcome.CheckExitCode
@@ -407,12 +456,15 @@ function Invoke-WingetInstall {
                                 Write-ErrorMessage "Retry failed: $appName ($failureReason)."
                             }
                         }
-                        $failedApps += @{ Name = $appName; Reason = $failureReason }
+                        $failedApps += @{ Name = $appName; Reason = $failureReason; RestartFirst = (Test-RestartRequiredFirst -InstallResult $outcome.InstallResult) }
                     }
                     else {
                         # 'Installed', or 'Skipped' when the first-pass install actually landed
                         # and only its verification failed — either way the app is present now.
                         Write-Success "Retry succeeded: $appName"
+                        if ($outcome.Status -eq 'Installed' -and (Write-InstalledAppNote -AppName $appName -InstallResult $outcome.InstallResult)) {
+                            $restartRequiredApps += $appName
+                        }
                         $installedApps += $appName
                     }
                 }
@@ -445,7 +497,7 @@ function Invoke-WingetInstall {
     # winget's sources; letting that start mid-run is what wedged winget in the #279/#284 E2E runs
     # and what killed the console in #283. WAU's own schedule takes it from here.
     try {
-        $wauResult = Install-WingetAutoUpdate -WhatIf:$WhatIf
+        $wauResult = Install-WingetAutoUpdate -WhatIf:$WhatIf -InstallInProgressWaitSeconds $installerBusyWaitSecondsLeft
     }
     catch {
         Write-ErrorMessage "Winget-AutoUpdate setup failed unexpectedly: $_"
@@ -477,6 +529,29 @@ function Invoke-WingetInstall {
             Write-WarningMessage "Could not run the end-of-run winget check: $_"
         }
     }
+
+    # Does this run need a restart to finish (review finding P3-16)? An install said so, the
+    # Winget-AutoUpdate MSI returned 3010, or Windows gained a pending restart during the run (for
+    # example an Inno or MSI installer queued a file replacement for the next restart, which winget
+    # does not report). A restart that was already pending before the run is not this run's.
+    # Skipped in a dry run, which installed nothing.
+    $restartReasons = @()
+    if ($restartRequiredApps.Count -gt 0) {
+        $restartReasons += ('{0} reported that a restart finishes the installation' -f ($restartRequiredApps -join ', '))
+    }
+    if ($wauResult -and $wauResult.RestartRequired) {
+        $restartReasons += 'the Winget-AutoUpdate installer reported that a restart finishes the installation'
+    }
+    if (-not $WhatIf -and $null -ne $restartStateBefore) {
+        try {
+            $restartReasons += @(Get-PendingRestartReason -State (Get-PendingRestartState) -Since $restartStateBefore)
+        }
+        catch {
+            Write-WarningMessage "Could not check whether a restart is pending after the run: $_"
+        }
+    }
+    $restartRequired = $restartReasons.Count -gt 0
+    $restartFirstApps = @($failedApps | Where-Object { $_.RestartFirst } | ForEach-Object { $_.Name })
 
     # Display the summary of the installation
     if ($WhatIf) {
@@ -546,6 +621,19 @@ function Invoke-WingetInstall {
         Write-ErrorMessage "winget: NOT USABLE - winget did not work at the end of this run$endCheckDetail, so automatic updates and the next run of this installer will fail on this machine. Restart the machine and re-run the installer; if it persists, attach this transcript to a GitHub issue."
     }
 
+    # Restart (review finding P3-16): a run whose installs need a restart says so here and exits
+    # 3010 when nothing failed; apps whose installer needs a restart first are named; a restart
+    # that was pending before the run is reported, nothing more.
+    if ($restartFirstApps.Count -gt 0) {
+        Write-ErrorMessage ('Restart: REQUIRED before {0} can install - restart this PC, then re-run the installer.' -f ($restartFirstApps -join ', '))
+    }
+    if ($restartRequired) {
+        Write-WarningMessage ('Restart: REQUIRED to finish this run - restart this PC before it is used ({0}).' -f ($restartReasons -join '; '))
+    }
+    elseif ($restartPendingBefore.Count -gt 0 -and $restartFirstApps.Count -eq 0) {
+        Write-WarningMessage ('Restart: already pending before this run ({0}) - restart this PC when you can.' -f ($restartPendingBefore -join '; '))
+    }
+
     # Repeat the persistent transcript path next to the summary (issue #189). The variable is set
     # by the generated installer's entry script before dispatch; it is unset (and this is skipped)
     # when the function runs outside that context (module import, tests) or the transcript could
@@ -554,7 +642,7 @@ function Invoke-WingetInstall {
         Write-Info "Full transcript of this run: $script:InstallLogPath"
     }
 
-    $exitCode = Get-InstallerExitCode -FailedAppCount $failedApps.Count -WingetUsable $wingetUsableAtEnd
+    $exitCode = Get-InstallerExitCode -FailedAppCount $failedApps.Count -WingetUsable $wingetUsableAtEnd -RestartRequired $restartRequired
     # Recorded before the final prompt: Ctrl+C there stops a run that has already finished, and
     # the entry script's abort guard then reports this code instead of an abort (5).
     $script:InstallerPendingExitCode = $exitCode

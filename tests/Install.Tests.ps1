@@ -116,6 +116,8 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
         Mock Test-WingetLaunchable { [pscustomobject]@{ Launchable = $true; Version = 'v1.12.350'; Reason = $null; Attempts = 1 } }
         # Never wait on (or query) the machine's real Winget-AutoUpdate tasks.
         Mock Wait-WauIdle { $true }
+        # Never read the machine's pending-restart state (review finding P3-16): nothing pending.
+        Mock Get-PendingRestartState { New-TestRestartState }
 
         # Rows of every table the run prints, keyed by title; capturedRows is the main summary.
         $script:capturedRows = $null
@@ -523,8 +525,9 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
             $failedRows = @($script:capturedTables['Failed Installations'])
             $failedRows.Count | Should -Be 1
             $failedRows[0][0] | Should -Be 'Contoso.Broken'
-            # The winget exit code and retry detail, not the generic message issue #189 replaced.
-            $failedRows[0][1] | Should -Be 'package not found after install; winget exit 0x80073D19, 3 attempts, machine-scope fallback: yes'
+            # The winget exit code (named, review finding P2-15) and retry detail, not the generic
+            # message issue #189 replaced.
+            $failedRows[0][1] | Should -Be 'the installing account has no logon session, so Windows blocked the app package deployment; winget exit 0x80073D19 ERROR_DEPLOYMENT_BLOCKED_BY_USER_LOG_OFF, 3 attempts, machine-scope fallback: yes'
             ($script:errorMessages -join "`n") | Should -Not -Match 'No package found matching input criteria'
         }
     }
@@ -736,6 +739,137 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
 
     # Elevated through the Test-IsAdmin mock in BeforeEach; these were skipped on any runner that
     # was not itself elevated (wgt-gq8.6).
+    Context 'Restart required, and the wait for another installation (review findings P2-15, P3-16)' {
+        It 'Exits 3010 and says a restart is required when an installed app needs one to finish' {
+            Mock Install-AppWithVerification {
+                if ($App.name -eq '7zip.7zip') {
+                    return @{ Status = 'Installed'; InstallResult = @{ ExitCode = -1978334967; Attempts = 1; RestartRequired = $true }; FailureReason = $null }
+                }
+                @{ Status = 'Installed'; InstallResult = @{ ExitCode = 0; Attempts = 1; RestartRequired = $false }; FailureReason = $null }
+            }
+
+            Invoke-WingetInstall -Apps @(@{ name = '7zip.7zip' }, @{ name = 'Google.Chrome' }) -NonInteractive | Should -Be 3010
+
+            $script:warningMessages | Should -Contain '7zip.7zip needs a restart to finish installing (winget exit 0x8A150109 INSTALL_REBOOT_REQUIRED_TO_FINISH).'
+            $script:warningMessages | Should -Contain 'Restart: REQUIRED to finish this run - restart this PC before it is used (7zip.7zip reported that a restart finishes the installation).'
+            # Still an installed app in the summary, not a failure.
+            @($script:capturedRows | Where-Object { $_[0] -eq 'Installed' })[0][1] | Should -Match '7zip\.7zip'
+        }
+
+        It 'Exits 3010 when the retry pass installs an app that needs a restart to finish' {
+            $script:appCalls = 0
+            Mock Install-AppWithVerification {
+                $script:appCalls++
+                if ($script:appCalls -eq 1) {
+                    return @{ Status = 'Failed'; InstallResult = @{ ExitCode = 1; Attempts = 1 }; FailureReason = 'VerifyNotFound' }
+                }
+                @{ Status = 'Installed'; InstallResult = @{ ExitCode = 0; Attempts = 1; RestartRequired = $true }; FailureReason = $null }
+            }
+
+            Invoke-WingetInstall -Apps @(@{ name = '7zip.7zip' }) -NonInteractive | Should -Be 3010
+
+            $script:warningMessages | Should -Contain "7zip.7zip needs a restart to finish installing (winget printed 'Restart your PC to finish installation.')."
+        }
+
+        It 'Exits 3010 when Windows gained a pending restart during the run (<Case>)' -ForEach @(
+            @{ Case = 'a queued file replacement'; After = @{ FileRenames = @('\??\C:\Program Files\Git\x.dll.new -> !\??\C:\Program Files\Git\x.dll') }; Reason = '1 file replacement is queued for the next restart' }
+            @{ Case = 'Windows Update'; After = @{ WindowsUpdate = $true }; Reason = 'Windows Update has a restart pending' }
+        ) {
+            $script:restartReads = 0
+            $script:afterState = $After
+            Mock Get-PendingRestartState {
+                $script:restartReads++
+                if ($script:restartReads -eq 1) {
+                    return New-TestRestartState
+                }
+                New-TestRestartState @script:afterState
+            }
+
+            Invoke-WingetInstall -Apps @(@{ name = 'Git.Git' }) -NonInteractive | Should -Be 3010
+
+            $script:restartReads | Should -Be 2
+            $script:warningMessages | Should -Contain "Restart: REQUIRED to finish this run - restart this PC before it is used ($Reason)."
+        }
+
+        It 'Reports a restart that was already pending before the run, without making the run 3010' {
+            Mock Get-PendingRestartState { New-TestRestartState -WindowsUpdate -FileRenames @('a -> b') }
+
+            Invoke-WingetInstall -Apps @(@{ name = 'Git.Git' }) -NonInteractive | Should -Be 0
+
+            ($script:warningMessages -join "`n") | Should -Match 'A restart is already pending on this PC \(Windows Update has a restart pending; 1 file replacement is queued for the next restart\)'
+            $script:warningMessages | Should -Contain 'Restart: already pending before this run (Windows Update has a restart pending; 1 file replacement is queued for the next restart) - restart this PC when you can.'
+            ($script:warningMessages -join "`n") | Should -Not -Match 'Restart: REQUIRED'
+        }
+
+        It 'Exits 3010 when the Winget-AutoUpdate MSI returned 3010' {
+            Mock Install-WingetAutoUpdate { [pscustomobject]@{ Status = 'Configured'; Version = '2.12.0'; FrameworkMissing = $false; RestartRequired = $true } }
+
+            Invoke-WingetInstall -Apps @(@{ name = 'Git.Git' }) -NonInteractive | Should -Be 3010
+
+            $script:warningMessages | Should -Contain 'Restart: REQUIRED to finish this run - restart this PC before it is used (the Winget-AutoUpdate installer reported that a restart finishes the installation).'
+        }
+
+        It 'Exits 1, not 3010, when an app failed as well (failures take precedence)' {
+            Mock Install-AppWithVerification {
+                if ($App.name -eq '7zip.7zip') {
+                    return @{ Status = 'Installed'; InstallResult = @{ ExitCode = 0; RestartRequired = $true }; FailureReason = $null }
+                }
+                @{ Status = 'Failed'; InstallResult = @{ ExitCode = 1; Attempts = 1 }; FailureReason = 'VerifyNotFound' }
+            }
+
+            Invoke-WingetInstall -Apps @(@{ name = '7zip.7zip' }, @{ name = 'Google.Chrome' }) -NonInteractive | Should -Be 1
+
+            ($script:warningMessages -join "`n") | Should -Match 'Restart: REQUIRED to finish this run'
+        }
+
+        It 'Does not retry an app whose installer cannot run until Windows restarts (0x8A15010A), and says to restart' {
+            $script:gitCalls = 0
+            Mock Install-AppWithVerification {
+                $script:gitCalls++
+                @{ Status = 'Failed'; InstallResult = @{ ExitCode = -1978334966; Attempts = 1; MachineScopeFellBack = $false }; FailureReason = 'VerifyNotFound' }
+            }
+
+            Invoke-WingetInstall -Apps @(@{ name = 'Git.Git' }) -NonInteractive | Should -Be 1
+
+            $script:gitCalls | Should -Be 1
+            $script:warningMessages | Should -Contain 'Not retrying Git.Git: its installer cannot run until this PC restarts.'
+            $script:errorMessages | Should -Contain 'Failed to install: Git.Git (a restart is required before this installer can run - restart this PC, then re-run the installer; winget exit 0x8A15010A INSTALL_REBOOT_REQUIRED_FOR_INSTALL, 1 attempt, machine-scope fallback: no).'
+            $script:errorMessages | Should -Contain 'Restart: REQUIRED before Git.Git can install - restart this PC, then re-run the installer.'
+            @($script:capturedTables['Failed Installations']).Count | Should -Be 1
+        }
+
+        It 'Shares one 10-minute wait for another installation across the run''s apps, the retry pass and Winget-AutoUpdate' {
+            $script:budgets = [System.Collections.Generic.List[int]]::new()
+            $script:appCalls = 0
+            Mock Install-AppWithVerification {
+                $script:appCalls++
+                $script:budgets.Add($InstallInProgressWaitSeconds)
+                if ($script:appCalls -eq 1) {
+                    # The first app waited 400 seconds for another installation, then failed.
+                    return @{ Status = 'Failed'; InstallResult = @{ ExitCode = -1978334974; Attempts = 4; InstallInProgressWaitedSeconds = 400 }; FailureReason = 'VerifyNotFound' }
+                }
+                if ($script:appCalls -eq 2) {
+                    return @{ Status = 'Installed'; InstallResult = @{ ExitCode = 0; Attempts = 2; InstallInProgressWaitedSeconds = 150 }; FailureReason = $null }
+                }
+                @{ Status = 'Installed'; InstallResult = @{ ExitCode = 0; Attempts = 1 }; FailureReason = $null }
+            }
+            Mock Install-WingetAutoUpdate { $script:budgets.Add($InstallInProgressWaitSeconds); [pscustomobject]@{ Status = 'Configured'; Version = '2.12.0'; FrameworkMissing = $false; RestartRequired = $false } }
+
+            Invoke-WingetInstall -Apps @(@{ name = 'Google.Chrome' }, @{ name = '7zip.7zip' }) -NonInteractive | Should -Be 0
+
+            # Chrome (600 left), 7zip (200 left), Chrome's retry (50 left), then WAU (50 left).
+            $script:budgets | Should -Be @(600, 200, 50, 50)
+        }
+
+        It 'Says so when an installed app''s winget exit code was not 0, instead of dropping the code' {
+            Mock Install-AppWithVerification { @{ Status = 'Installed'; InstallResult = @{ ExitCode = -1978335226; Attempts = 1; InstallerLogPath = 'C:\logs\winget-install-Contoso.App.log' }; FailureReason = $null } }
+
+            Invoke-WingetInstall -Apps @(@{ name = 'Contoso.App' }) -NonInteractive | Should -Be 0
+
+            $script:warningMessages | Should -Contain 'winget reported 0x8A150006 SHELLEXEC_INSTALL_FAILED for Contoso.App, but it is installed; installer log: C:\logs\winget-install-Contoso.App.log.'
+        }
+    }
+
     Context 'Unattended installs (winget --silent)' {
         It 'Asks both install passes for --silent when the run is non-interactive' {
             $script:passCalls = 0
@@ -826,7 +960,9 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
 
             Invoke-WingetInstall -Apps @(@{ name = 'Contoso.AppOne' }) -NonInteractive | Should -Be 1
 
-            $script:errorMessages | Should -Contain 'Retry failed: Contoso.AppOne (package not found after install; winget exit 0x00000001, 1 attempt).'
+            # winget said the install failed (exit 1, a code the table does not name), so the reason
+            # says that rather than 'package not found after install' (review finding P2-15).
+            $script:errorMessages | Should -Contain 'Retry failed: Contoso.AppOne (winget install failed; winget exit 0x00000001, 1 attempt).'
         }
 
         It 'Counts an unexpected error in the retry pass as a failure instead of aborting the run' {
@@ -854,6 +990,15 @@ Describe 'Install-AppWithVerification (shared install-and-verify pipeline, issue
         # Boundary mocks with safe defaults; individual tests override what they exercise.
         Mock Install-WingetPackage { @{ ExitCode = 0; Attempts = 1; SessionErrorExhausted = $false; MachineScopeFellBack = $false } }
         Mock Test-WingetPackageInstalled { @{ Installed = $false; TimedOut = $false; ExitCode = 0 } }
+    }
+
+    It 'Passes the run''s remaining wait budget for another installation to Install-WingetPackage (review finding P2-15)' {
+        [void](Install-AppWithVerification -App @{ name = 'Test.App' } -InstallInProgressWaitSeconds 240)
+        [void](Install-AppWithVerification -App @{ name = 'Test.App' })
+
+        Should -Invoke Install-WingetPackage -Times 1 -Exactly -ParameterFilter { $PesterBoundParameters.ContainsKey('InstallInProgressWaitSeconds') -and $InstallInProgressWaitSeconds -eq 240 }
+        # Not given: Install-WingetPackage's own default.
+        Should -Invoke Install-WingetPackage -Times 1 -Exactly -ParameterFilter { -not $PesterBoundParameters.ContainsKey('InstallInProgressWaitSeconds') }
     }
 
     It 'Skips an app that is already installed without dispatching an install' {
@@ -1077,6 +1222,25 @@ Describe 'Install-AppWithVerification (shared install-and-verify pipeline, issue
             $script:silentCalls[1][0] | Should -Be $false
         }
 
+        It 'Passes the run''s remaining wait budget to an installer that takes it, and to no other (review finding P2-15)' {
+            $script:budgetCalls = @()
+            function Install-FakeBudgetPowerShell {
+                param ([switch]$Silent, [int]$InstallInProgressWaitSeconds)
+                $script:budgetCalls += , @($PSBoundParameters.ContainsKey('InstallInProgressWaitSeconds'), $InstallInProgressWaitSeconds)
+                @{ ExitCode = 0; Installed = $true; Method = 'msi' }
+            }
+            function Install-FakePlainBudgetPowerShell { @{ ExitCode = 0; Installed = $true; Method = 'msi' } }
+
+            [void](Install-AppWithVerification -App @{ name = 'Microsoft.PowerShell'; install = 'Install-FakeBudgetPowerShell' } -InstallInProgressWaitSeconds 240)
+            [void](Install-AppWithVerification -App @{ name = 'Microsoft.PowerShell'; install = 'Install-FakeBudgetPowerShell' })
+            $plain = Install-AppWithVerification -App @{ name = 'Microsoft.PowerShell'; install = 'Install-FakePlainBudgetPowerShell' } -InstallInProgressWaitSeconds 240
+
+            $script:budgetCalls.Count | Should -Be 2
+            $script:budgetCalls[0] | Should -Be @($true, 240)
+            $script:budgetCalls[1][0] | Should -Be $false
+            $plain.Status | Should -Be 'Installed'
+        }
+
         It 'Still calls an installer that has no -Silent parameter when -Silent is given' {
             function Install-FakePlainPowerShell { @{ ExitCode = 0; Installed = $true; Method = 'msi' } }
 
@@ -1239,7 +1403,7 @@ Describe 'Install-AppWithVerification when winget cannot be launched (review fin
         $result.InstallResult | Should -Be $null
         Should -Invoke Invoke-WingetProcess -Times 0 -Exactly -ParameterFilter { $ArgumentList[0] -eq 'install' }
         Format-InstallFailureReason -FailureReason $result.FailureReason -InstallResult $result.InstallResult -LaunchError $result.LaunchError -CheckExitCode $result.CheckExitCode |
-            Should -Be 'winget list failed during the pre-install check with exit 0x8A15004B'
+            Should -Be 'winget list failed during the pre-install check with exit 0x8A15004B FAILED_TO_OPEN_ALL_SOURCES'
     }
 
     It 'Says that the post-install winget list failed, with its exit code, not that the package was not found' {
@@ -1261,7 +1425,7 @@ Describe 'Install-AppWithVerification when winget cannot be launched (review fin
         $result.FailureReason | Should -Be 'VerifyFailed'
         $result.CheckExitCode | Should -Be -1978335157
         Format-InstallFailureReason -FailureReason $result.FailureReason -InstallResult $result.InstallResult -LaunchError $result.LaunchError -CheckExitCode $result.CheckExitCode |
-            Should -Match '^winget list failed during the post-install check with exit 0x8A15004B; winget exit 0x00000000, 1 attempt'
+            Should -Match '^winget list failed during the post-install check with exit 0x8A15004B FAILED_TO_OPEN_ALL_SOURCES; winget exit 0x00000000, 1 attempt'
     }
 
     It 'Maps a failed winget list in PowerShell''s own check to VerifyFailed too' {
@@ -1330,6 +1494,7 @@ Describe 'Not-applicable gating end-to-end (issue #217)' {
         Mock Remove-LegacyScheduledUpdates { $true }
         Mock Set-WindowsTerminalDefaults { }
         Mock Install-WingetAutoUpdate { @{ Status = 'DryRun'; Version = '2.12.0' } }
+        Mock Get-PendingRestartState { New-TestRestartState }
         Mock Install-WingetPackage { @{ ExitCode = 0; Attempts = 1; SessionErrorExhausted = $false; MachineScopeFellBack = $false } }
         Mock Test-WingetPackageInstalled { @{ Installed = $false; TimedOut = $false; LaunchFailed = $false; LaunchError = $null; ExitCode = 0 } }
 
@@ -1382,6 +1547,7 @@ Describe 'Wedged winget: the run fails fast (review findings P2-8, P2-9, P2-10)'
         Mock Remove-LegacyScheduledUpdates { $true }
         Mock Set-WindowsTerminalDefaults { }
         Mock Install-WingetAutoUpdate { [pscustomobject]@{ Status = 'FrameworkMissing'; Version = '2.12.0'; FrameworkMissing = $true } }
+        Mock Get-PendingRestartState { New-TestRestartState }
         # Never read the machine's App Installer packages, and never start a real process: the
         # removed deadlock detector and Wait-WingetLaunchable did both.
         Mock Get-AppxPackage { }
@@ -1553,6 +1719,7 @@ Describe 'Dry run leaves the machine unchanged (P2-16)' {
         Mock Get-AppxPackage { @() }
         Mock Get-AppxPackage { [pscustomobject]@{ Name = 'Microsoft.DesktopAppInstaller'; Version = '1.26.510.0'; InstallLocation = $null } } -ParameterFilter { $Name -eq 'Microsoft.DesktopAppInstaller' }
         Mock Get-CimInstance { $null }
+        Mock Get-PendingRestartState { New-TestRestartState }
         # The legacy scheduled task, its data directory and WAU's task all "exist", so their
         # helpers reach the branch that would remove or change them.
         Mock Get-ScheduledTask { [pscustomobject]@{ TaskName = 'present' } }
@@ -1781,6 +1948,17 @@ Describe 'Get-InstallerExitCode' {
         Get-InstallerExitCode -FailedAppCount 3 -WingetUsable $true | Should -Be 1
         Get-InstallerExitCode -FailedAppCount 1 -WingetUsable $false | Should -Be 1
     }
+
+    # Review finding P3-16: 3010 is "succeeded, restart required" to RMM tools and Intune. The
+    # adopted precedence is 1 > 2 > 8 > 3010 > 0.
+    It 'Returns 3010 when nothing failed, winget works and the run needs a restart to finish' {
+        Get-InstallerExitCode -FailedAppCount 0 -WingetUsable $true -RestartRequired $true | Should -Be 3010
+    }
+
+    It 'Ranks failed apps (1) and an unusable winget (2) above a needed restart' {
+        Get-InstallerExitCode -FailedAppCount 2 -WingetUsable $true -RestartRequired $true | Should -Be 1
+        Get-InstallerExitCode -FailedAppCount 0 -WingetUsable $false -RestartRequired $true | Should -Be 2
+    }
 }
 
 Describe 'Format-InstallFailureReason (issue #189)' {
@@ -1790,7 +1968,7 @@ Describe 'Format-InstallFailureReason (issue #189)' {
 
             $reason = Format-InstallFailureReason -FailureReason 'VerifyNotFound' -InstallResult $installResult
 
-            $reason | Should -Be 'package not found after install; winget exit 0x80073D19, 3 attempts, machine-scope fallback: yes'
+            $reason | Should -Be 'the installing account has no logon session, so Windows blocked the app package deployment; winget exit 0x80073D19 ERROR_DEPLOYMENT_BLOCKED_BY_USER_LOG_OFF, 3 attempts, machine-scope fallback: yes'
         }
 
         It 'Uses singular wording for a single attempt' {
@@ -1798,7 +1976,7 @@ Describe 'Format-InstallFailureReason (issue #189)' {
 
             $reason = Format-InstallFailureReason -FailureReason 'VerifyNotFound' -InstallResult $installResult
 
-            $reason | Should -Be 'package not found after install; winget exit 0x8A150014, 1 attempt, machine-scope fallback: no'
+            $reason | Should -Be 'winget found no package with that id; winget exit 0x8A150014 NO_APPLICATIONS_FOUND, 1 attempt, machine-scope fallback: no'
         }
 
         It 'Calls out exhausted 0x80073D19 session retries' {
@@ -1823,7 +2001,7 @@ Describe 'Format-InstallFailureReason (issue #189)' {
 
             $reason = Format-InstallFailureReason -FailureReason 'VerifyNotFound' -InstallResult $installResult
 
-            $reason | Should -Be 'package not found after install; winget exit 0x8A150006, 1 attempt, machine-scope fallback: no, installer log: C:\ProgramData\winget-app-setup\logs\winget-install-Test.App-20261004-101500.log'
+            $reason | Should -Be 'the installer failed (its own exit code is in the log above, and in its installer log); winget exit 0x8A150006 SHELLEXEC_INSTALL_FAILED, 1 attempt, machine-scope fallback: no, installer log: C:\ProgramData\winget-app-setup\logs\winget-install-Test.App-20261004-101500.log'
         }
 
         It 'Says that winget could not be launched for the install, with its failed launches and error, and no fabricated exit code (issue #253)' {
@@ -1832,6 +2010,27 @@ Describe 'Format-InstallFailureReason (issue #189)' {
             $reason = Format-InstallFailureReason -FailureReason 'InstallLaunchFailed' -InstallResult $installResult -LaunchError $installResult.LaunchError
 
             $reason | Should -Be 'winget could not be launched to install it; machine-scope fallback: no, 5 failed launches, launch error: The file cannot be accessed by the system'
+        }
+    }
+
+    Context 'When winget reported why the install failed (review finding P2-15)' {
+        It 'Says another installation was in progress, names the code and the time waited, instead of ''package not found after install''' {
+            $installResult = @{ ExitCode = -1978334974; Attempts = 4; SessionErrorExhausted = $false; MachineScopeFellBack = $false; InstallInProgressWaitedSeconds = 600 }
+
+            $reason = Format-InstallFailureReason -FailureReason 'VerifyNotFound' -InstallResult $installResult
+
+            $reason | Should -Be 'another installation was in progress (Windows Installer was busy) - re-run the installer once it has finished; winget exit 0x8A150102 INSTALL_INSTALL_IN_PROGRESS, 4 attempts, machine-scope fallback: no, waited 600 seconds for another installation'
+        }
+
+        It 'Gives a package-specific installer''s known code the same reason' {
+            $reason = Format-InstallFailureReason -FailureReason 'CustomInstallFailed' -InstallResult @{ ExitCode = -1978334975; Installed = $false }
+
+            $reason | Should -Be 'the app is running - close it, then re-run the installer; winget exit 0x8A150101 INSTALL_PACKAGE_IN_USE'
+        }
+
+        It 'Keeps ''package not found after install'' when winget reported success' {
+            Format-InstallFailureReason -FailureReason 'VerifyNotFound' -InstallResult @{ ExitCode = 0; Attempts = 1 } |
+                Should -Be 'package not found after install; winget exit 0x00000000, 1 attempt'
         }
     }
 
@@ -1851,8 +2050,8 @@ Describe 'Format-InstallFailureReason (issue #189)' {
 
     Context 'When winget list ran but failed (review finding P2-9)' {
         It 'Names the check <Reason> and the list''s own exit code, apart from the install''s' -ForEach @(
-            @{ Reason = 'PreCheckFailed'; InstallResult = $null; Expected = 'winget list failed during the pre-install check with exit 0x8A15004B' }
-            @{ Reason = 'VerifyFailed'; InstallResult = @{ ExitCode = 0; Attempts = 1; MachineScopeFellBack = $false }; Expected = 'winget list failed during the post-install check with exit 0x8A15004B; winget exit 0x00000000, 1 attempt, machine-scope fallback: no' }
+            @{ Reason = 'PreCheckFailed'; InstallResult = $null; Expected = 'winget list failed during the pre-install check with exit 0x8A15004B FAILED_TO_OPEN_ALL_SOURCES' }
+            @{ Reason = 'VerifyFailed'; InstallResult = @{ ExitCode = 0; Attempts = 1; MachineScopeFellBack = $false }; Expected = 'winget list failed during the post-install check with exit 0x8A15004B FAILED_TO_OPEN_ALL_SOURCES; winget exit 0x00000000, 1 attempt, machine-scope fallback: no' }
         ) {
             Format-InstallFailureReason -FailureReason $Reason -InstallResult $InstallResult -CheckExitCode -1978335157 | Should -Be $Expected
         }

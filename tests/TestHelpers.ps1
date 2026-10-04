@@ -121,6 +121,24 @@ function New-TestProcessResult {
     }
 }
 
+# A Get-PendingRestartState result (review finding P3-16), for `Mock Get-PendingRestartState`. Every
+# test that drives Invoke-WingetInstall mocks that read: on Windows it reads the real registry, where
+# another installation on the machine could queue a file replacement mid-test and turn the run's
+# exit code into 3010.
+function New-TestRestartState {
+    param (
+        [switch]$ComponentServicing,
+        [switch]$WindowsUpdate,
+        [string[]]$FileRenames = @()
+    )
+
+    [pscustomobject]@{
+        ComponentServicing = [bool]$ComponentServicing
+        WindowsUpdate      = [bool]$WindowsUpdate
+        FileRenames        = @($FileRenames)
+    }
+}
+
 # For tests that script winget's behaviour with `Mock winget { ... }` (reading $args, setting
 # $global:LASTEXITCODE, throwing when winget cannot run): code that now runs winget through
 # Invoke-WingetProcess reaches that mock through

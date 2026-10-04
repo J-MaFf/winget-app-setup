@@ -65,7 +65,15 @@ carry on or to fail the remaining apps at once and skip the retry pass. A wedged
 about 24 minutes; it now costs about 2.5 minutes. The `winget: NOT USABLE` line at the end of a run
 says why. PowerShell's failure reason names its exit code and launch errors like every other app's.
 The deadlock detector (`Get-ConflictingDesktopAppInstallerVersions`, which never fired on the real
-wedge), the `-BypassAlias` launch path and `Wait-WingetLaunchable` are gone.
+wedge), the `-BypassAlias` launch path and `Wait-WingetLaunchable` are gone. An install that finds
+Windows Installer busy with another installation (`0x8A150102`, common on a freshly enrolled PC)
+now waits for it and retries, within one 10-minute budget per run, and an app that is in use gets
+one delayed retry; `0x8A15010A` (restart first) is no longer retried. A run that needs a restart to
+finish (winget's restart warning, the WAU MSI's 3010, or a pending restart that appeared during the
+run) says `Restart: REQUIRED` and exits 3010; a restart already pending before the run is only
+reported. Every printed winget exit code carries its name (`0x8A150102
+INSTALL_INSTALL_IN_PROGRESS`), and a failure reason says what the code means instead of `package
+not found after install`.
 
 The same branch changes CI. Fork pull requests that leave `windows-tests.yml` alone no longer run
 on the self-hosted win-test runner, and `claude.yml` calls the shared Claude workflow at a pinned

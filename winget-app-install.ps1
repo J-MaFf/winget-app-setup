@@ -59,12 +59,12 @@ param (
 # This script is assembled from the WingetAppSetup module by build/Build-WingetInstallScript.ps1.
 # Edit the function source under WingetAppSetup/Public and WingetAppSetup/Private, then re-run the
 # build to regenerate this file. See readme.md ("Project layout") for details.
-# Build id: 1.0.0+2298909c (module version + SHA256 fragment of this whole script; issue #189).
+# Build id: 1.0.0+920ca587 (module version + SHA256 fragment of this whole script; issue #189).
 # ------------------------------------------------------------------------------------------------
 
 # Content-derived build identity, logged at startup so a transcript from a remote machine
 # identifies exactly which installer build produced it (issue #189).
-$script:InstallerBuildId = '1.0.0+2298909c'
+$script:InstallerBuildId = '1.0.0+920ca587'
 
 # ------------------------------------------------Functions------------------------------------------------
 
@@ -359,16 +359,23 @@ function Write-InstallerExitNotice {
 .SYNOPSIS
     Decides Invoke-WingetInstall's final exit code from the run's outcome.
 .DESCRIPTION
-    Invoke-WingetInstall returns this as its exit code at the end of a run. Failed apps take
-    precedence (1); otherwise a winget that can no longer be launched at the end of the run is
-    reported as 2 - the same code as "winget unavailable" at the start - so a run can never exit 0
-    while leaving winget broken.
+    Invoke-WingetInstall returns this as its exit code at the end of a run. The precedence is
+    1 > 2 > 8 > 3010 > 0: failed apps first (1); then a winget that can no longer be launched at the
+    end of the run (2, the same code as "winget unavailable" at the start), so a run can never exit 0
+    while leaving winget broken; then a run that needs a restart to finish (3010, review finding
+    P3-16: the code RMM tools and Intune read as "succeeded, restart required"). Code 8 (apps
+    installed, but automatic updates not configured or unhealthy) is not returned yet; it belongs
+    between 2 and 3010.
 .PARAMETER FailedAppCount
     Number of apps still failed after the retry pass.
 .PARAMETER WingetUsable
     Result of the end-of-run winget launch probe.
+.PARAMETER RestartRequired
+    The run's installs finished but need a restart: an install reported it, or Windows gained a
+    pending restart during the run. A restart that was already pending before the run does not
+    count. Default False.
 .RETURNS
-    [int] 0, 1 or 2.
+    [int] 0, 1, 2 or 3010.
 #>
 function Get-InstallerExitCode {
     param (
@@ -376,7 +383,10 @@ function Get-InstallerExitCode {
         [int]$FailedAppCount,
 
         [Parameter(Mandatory = $true)]
-        [bool]$WingetUsable
+        [bool]$WingetUsable,
+
+        [Parameter(Mandatory = $false)]
+        [bool]$RestartRequired = $false
     )
 
     if ($FailedAppCount -gt 0) {
@@ -384,6 +394,10 @@ function Get-InstallerExitCode {
     }
     if (-not $WingetUsable) {
         return 2
+    }
+    # Code 8 (auto-updates not configured or unhealthy) goes here once it exists.
+    if ($RestartRequired) {
+        return 3010
     }
     return 0
 }
@@ -393,11 +407,19 @@ function Get-InstallerExitCode {
     Formats a one-line, human-readable reason for a failed app install.
 .DESCRIPTION
     Combines the shared install pipeline's FailureReason bucket with the diagnostic detail the
-    installer result carries: the winget exit code (hex), the attempt count, whether the
-    machine-scope preference fell back to winget's default scope, whether the 0x80073D19
-    session-error retries were exhausted (issue #189), whether the install ran out of time (review
-    finding P2-5), and where the installer's log is (P2-6). Used both for the console failure message
-    and for the Reason column in the failed-apps summary table.
+    installer result carries: the winget exit code (hex, with its name from Get-WingetExitCodeInfo),
+    the attempt count, whether the machine-scope preference fell back to winget's default scope,
+    whether the 0x80073D19 session-error retries were exhausted (issue #189), how long the install
+    waited for another installation to finish, whether the install ran out of time (review finding
+    P2-5), and where the installer's log is (P2-6). Used both for the console failure message and
+    for the Reason column in the failed-apps summary table.
+
+    When the package is missing after an install that winget reported as failed (VerifyNotFound, or
+    a package-specific installer's CustomInstallFailed), the reason starts with what the exit code
+    means, for example 'another installation was in progress (Windows Installer was busy) - re-run
+    the installer once it has finished', or 'winget install failed' for a code the table does not
+    know (review finding P2-15). 'package not found after install' is kept for an install that
+    winget reported as successful.
 .PARAMETER FailureReason
     The FailureReason string from the shared install pipeline ('PreCheckTimeout',
     'PreCheckLaunchFailed', 'PreCheckFailed', 'InstallLaunchFailed', 'VerifyTimeout',
@@ -415,8 +437,9 @@ function Get-InstallerExitCode {
     The exit code of the `winget list` check that failed, for PreCheckFailed and VerifyFailed (the
     pipeline's CheckExitCode). Shown with the reason, apart from the install's own exit code.
 .RETURNS
-    [string] e.g. 'package not found after install; winget exit 0x80073D19, 3 attempts,
-    machine-scope fallback: no'. Never $null or empty.
+    [string] e.g. 'another installation was in progress (Windows Installer was busy) - re-run the
+    installer once it has finished; winget exit 0x8A150102 INSTALL_INSTALL_IN_PROGRESS, 4 attempts,
+    machine-scope fallback: no, waited 600 seconds for another installation'. Never $null or empty.
 #>
 function Format-InstallFailureReason {
     param (
@@ -454,15 +477,29 @@ function Format-InstallFailureReason {
     }
     if ($null -ne $CheckExitCode -and @('PreCheckFailed', 'VerifyFailed') -contains $FailureReason) {
         # The list's own exit code (review finding P2-9), kept apart from the install's 'winget exit'.
-        $base = '{0} with exit 0x{1:X8}' -f $base, [int]$CheckExitCode
+        $base = '{0} with exit {1}' -f $base, (Format-WingetExitCode -ExitCode $CheckExitCode)
+    }
+
+    $installExitCode = $null
+    if ($InstallResult -and $InstallResult.ContainsKey('ExitCode') -and $null -ne $InstallResult.ExitCode) {
+        $installExitCode = [int]$InstallResult.ExitCode
+    }
+    if ($null -ne $installExitCode -and $installExitCode -ne 0 -and @('VerifyNotFound', 'CustomInstallFailed') -contains $FailureReason) {
+        # winget said the install failed, and the package is indeed missing: what winget's code
+        # means is the reason, not 'package not found after install' (review finding P2-15).
+        $codeInfo = Get-WingetExitCodeInfo -ExitCode $installExitCode
+        if ($codeInfo) {
+            $base = $codeInfo.Meaning
+        }
+        elseif ($FailureReason -eq 'VerifyNotFound') {
+            $base = 'winget install failed'
+        }
     }
 
     $detailParts = @()
     if ($InstallResult) {
-        if ($InstallResult.ContainsKey('ExitCode') -and $null -ne $InstallResult.ExitCode) {
-            # Winget reports HRESULT-style codes as signed Int32 (e.g. -2147009255); the X8 format
-            # renders the familiar hex form (0x80073D19) the winget docs and issues use.
-            $detailParts += ('winget exit 0x{0:X8}' -f [int]$InstallResult.ExitCode)
+        if ($null -ne $installExitCode) {
+            $detailParts += ('winget exit {0}' -f (Format-WingetExitCode -ExitCode $installExitCode))
         }
         if ($InstallResult.ContainsKey('Attempts') -and $InstallResult.Attempts) {
             $attemptWord = if ([int]$InstallResult.Attempts -eq 1) { 'attempt' } else { 'attempts' }
@@ -473,6 +510,9 @@ function Format-InstallFailureReason {
         }
         if ($InstallResult.ContainsKey('SessionErrorExhausted') -and $InstallResult.SessionErrorExhausted) {
             $detailParts += 'session error 0x80073D19 persisted through every retry'
+        }
+        if ($InstallResult.ContainsKey('InstallInProgressWaitedSeconds') -and $InstallResult.InstallInProgressWaitedSeconds) {
+            $detailParts += ('waited {0} seconds for another installation' -f [int]$InstallResult.InstallInProgressWaitedSeconds)
         }
         if ($InstallResult.ContainsKey('LaunchErrorExhausted') -and $InstallResult.LaunchErrorExhausted) {
             # issue #253: winget.exe could not be launched, so no install ever actually ran (the
@@ -508,6 +548,63 @@ function Format-InstallFailureReason {
         return ('{0}; {1}' -f $base, ($detailParts -join ', '))
     }
     return $base
+}
+
+<#
+.SYNOPSIS
+    Prints what an installed app's install result adds to 'Successfully installed', and returns
+    whether the install needs a restart to finish.
+.DESCRIPTION
+    Review finding P3-16. An app counts as installed when `winget list` finds it, whatever winget's
+    exit code was, and the success line used to drop that code. This prints, after it:
+      - '<app> needs a restart to finish installing (<why>).' when the result's RestartRequired is
+        set (winget 0x8A150109 or 0x8A15010B, or winget's 'Restart your PC to finish installation.'
+        warning; see Install-WingetPackage);
+      - 'winget reported <code> for <app>, but it is installed.' for any other non-zero exit code,
+        with the installer log when there is one, instead of dropping the code.
+    Nothing for a plain success, or when there is no install result.
+.PARAMETER AppName
+    The winget package id.
+.PARAMETER InstallResult
+    The app's Install-AppWithVerification InstallResult, or $null.
+.RETURNS
+    [bool] True when the install needs a restart to finish.
+#>
+function Write-InstalledAppNote {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$AppName,
+
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [object]$InstallResult
+    )
+
+    if ($null -eq $InstallResult) {
+        return $false
+    }
+    $exitCode = $null
+    if ($null -ne $InstallResult.ExitCode) {
+        $exitCode = [int]$InstallResult.ExitCode
+    }
+
+    if ($InstallResult.RestartRequired) {
+        $why = "winget printed 'Restart your PC to finish installation.'"
+        if ($null -ne $exitCode -and $exitCode -ne 0) {
+            $why = 'winget exit {0}' -f (Format-WingetExitCode -ExitCode $exitCode)
+        }
+        Write-WarningMessage ('{0} needs a restart to finish installing ({1}).' -f $AppName, $why)
+        return $true
+    }
+
+    if ($null -ne $exitCode -and $exitCode -ne 0) {
+        $logNote = ''
+        if ($InstallResult.InstallerLogPath) {
+            $logNote = '; installer log: {0}' -f $InstallResult.InstallerLogPath
+        }
+        Write-WarningMessage ('winget reported {0} for {1}, but it is installed{2}.' -f (Format-WingetExitCode -ExitCode $exitCode), $AppName, $logNote)
+    }
+    return $false
 }
 
 <#
@@ -686,6 +783,12 @@ function Test-AndInstallGraphicalTools {
     Invoke-WingetInstall's circuit breaker found that winget cannot be started on this machine.
     The applicability condition still runs, so a not-applicable app is still Skipped; an
     applicable app is Failed ('WingetNotLaunchable') without running winget at all.
+.PARAMETER InstallInProgressWaitSeconds
+    The most the install may wait for another installation to finish (review finding P2-15):
+    Invoke-WingetInstall passes what is left of the run's budget. Forwarded to Install-WingetPackage,
+    and to a package-specific installer that has a parameter of that name (Install-PowerShellLatest
+    does). Not given: Install-WingetPackage's default. The time waited comes back in the
+    InstallResult's InstallInProgressWaitedSeconds.
 .RETURNS
     [hashtable] @{
         Status        = 'Installed' | 'Failed' | 'Skipped'
@@ -719,7 +822,10 @@ function Install-AppWithVerification {
         [switch]$WhatIf,
 
         [Parameter(Mandatory = $false)]
-        [switch]$WingetNotLaunchable
+        [switch]$WingetNotLaunchable,
+
+        [Parameter(Mandatory = $false)]
+        [int]$InstallInProgressWaitSeconds
     )
 
     # Applicability gate (issue #217): evaluated BEFORE any winget probe so a not-applicable app
@@ -792,12 +898,21 @@ function Install-AppWithVerification {
         # (e.g. 'uninstall' or 'verify') dispatched the same way, extend that guard to cover it too.
         #
         # -Silent goes to the custom installer when it takes one (Install-PowerShellLatest does), so
-        # an explicit -NonInteractive installs PowerShell's MSI with /quiet like every other app.
+        # an explicit -NonInteractive installs PowerShell's MSI with /quiet like every other app. So
+        # does the run's remaining wait budget for another installation (review finding P2-15).
         $customParameters = @{}
-        if ($PSBoundParameters.ContainsKey('Silent') -and $App.install -is [string]) {
+        $forwardedParameters = @()
+        foreach ($parameterName in @('Silent', 'InstallInProgressWaitSeconds')) {
+            if ($PSBoundParameters.ContainsKey($parameterName)) {
+                $forwardedParameters += $parameterName
+            }
+        }
+        if ($forwardedParameters.Count -gt 0 -and $App.install -is [string]) {
             $customCommand = Get-Command -Name $App.install -ErrorAction SilentlyContinue | Select-Object -First 1
-            if ($customCommand -and $customCommand.Parameters -and $customCommand.Parameters.ContainsKey('Silent')) {
-                $customParameters['Silent'] = $Silent
+            foreach ($parameterName in $forwardedParameters) {
+                if ($customCommand -and $customCommand.Parameters -and $customCommand.Parameters.ContainsKey($parameterName)) {
+                    $customParameters[$parameterName] = $PSBoundParameters[$parameterName]
+                }
             }
         }
         $customResult = & $App.install @customParameters
@@ -832,6 +947,9 @@ function Install-AppWithVerification {
     $installParameters = @{ PackageId = $App.name; InstallerType = $App.installerType }
     if ($PSBoundParameters.ContainsKey('Silent')) {
         $installParameters['Silent'] = $Silent
+    }
+    if ($PSBoundParameters.ContainsKey('InstallInProgressWaitSeconds')) {
+        $installParameters['InstallInProgressWaitSeconds'] = $InstallInProgressWaitSeconds
     }
     $installResult = Install-WingetPackage @installParameters
     if ($installResult.LaunchErrorExhausted) {
@@ -2392,7 +2510,7 @@ function Invoke-PowerShell7Bootstrap {
                 Write-WarningMessage 'winget did not finish installing PowerShell 7 in time and was stopped.'
             }
             elseif ($wingetRun.ExitCode -ne 0) {
-                Write-WarningMessage ('winget could not install PowerShell 7 (exit code {0}).' -f $wingetRun.ExitCode)
+                Write-WarningMessage ('winget could not install PowerShell 7 (exit code {0}).' -f (Format-WingetExitCode -ExitCode $wingetRun.ExitCode))
                 if ($wingetRun.LogPath -and (Test-Path -LiteralPath $wingetRun.LogPath)) {
                     Write-Info "Installer log: $($wingetRun.LogPath)"
                 }
@@ -3598,6 +3716,234 @@ function Wait-WauIdle {
     }
 }
 
+# --- WindowsInstallerState ---
+# Machine state that decides whether an install can run now or needs a restart (review findings
+# P2-15 and P3-16): whether Windows Installer is busy with another installation, and whether Windows
+# has a restart pending. Read-only: nothing here takes the Windows Installer mutex or changes the
+# registry. Runs under Windows PowerShell 5.1 too: .NET Framework 4.5 APIs only.
+
+<#
+.SYNOPSIS
+    Returns whether Windows Installer is busy with another installation right now.
+.DESCRIPTION
+    Windows Installer holds the Global\_MSIExecute mutex while an installation runs its execute
+    sequence, and any other MSI install started meanwhile fails at once with 1618
+    (ERROR_INSTALL_ALREADY_RUNNING), which winget reports as 0x8A150102. This only checks whether the
+    mutex exists (Mutex.TryOpenExisting): it never waits on it or takes ownership, which could make
+    an installation starting at that moment fail with 1618 itself. The handle is closed at once, so
+    this check never keeps the mutex alive. A mutex that exists but that this account may not open
+    counts as busy. Existence is not proof that an installation is running (another process may
+    hold a handle to a released mutex), so callers bound how long they wait on it and then try the
+    install anyway.
+.PARAMETER Name
+    The mutex name. Default 'Global\_MSIExecute'; tests pass a name of their own.
+.RETURNS
+    [bool]
+#>
+function Test-WindowsInstallerBusy {
+    param (
+        [Parameter(Mandatory = $false)]
+        [string]$Name = 'Global\_MSIExecute'
+    )
+
+    $mutex = $null
+    try {
+        return [bool][System.Threading.Mutex]::TryOpenExisting($Name, [ref]$mutex)
+    }
+    catch [System.UnauthorizedAccessException] {
+        # The mutex exists, but this account may not open it.
+        return $true
+    }
+    catch {
+        # Cannot tell; the install attempt itself is the real test.
+        return $false
+    }
+    finally {
+        if ($null -ne $mutex) {
+            $mutex.Dispose()
+        }
+    }
+}
+
+<#
+.SYNOPSIS
+    Waits, within a time limit, until Windows Installer is no longer busy with another installation.
+.DESCRIPTION
+    Used after winget reported 0x8A150102 (another installation in progress, msiexec 1618) and
+    before the Winget-AutoUpdate msiexec is retried after 1618. Sleeps one poll interval, then
+    checks Test-WindowsInstallerBusy every poll interval until it reports idle or MaximumSeconds is
+    reached, printing a progress line every minute so a long wait shows in the transcript. Always
+    waits at least one poll interval (or MaximumSeconds, if shorter): 1618 means the installer was
+    busy a moment ago, and a chained installation (a bundle installing several MSIs in turn) takes
+    the mutex again right after releasing it.
+.PARAMETER MaximumSeconds
+    The longest this call may wait. 0 or less: return at once without waiting.
+.PARAMETER PollSeconds
+    Seconds between checks. Default 15.
+.PARAMETER Name
+    The mutex name, passed to Test-WindowsInstallerBusy.
+.RETURNS
+    [pscustomobject] @{ WaitedSeconds = <int>; Busy = <bool> }. Busy is the last check: True when
+    the time limit ran out with Windows Installer still busy.
+#>
+function Wait-WindowsInstallerIdle {
+    param (
+        [Parameter(Mandatory = $true)]
+        [int]$MaximumSeconds,
+
+        [Parameter(Mandatory = $false)]
+        [int]$PollSeconds = 15,
+
+        [Parameter(Mandatory = $false)]
+        [string]$Name = 'Global\_MSIExecute'
+    )
+
+    if ($PollSeconds -lt 1) {
+        $PollSeconds = 1
+    }
+    $waited = 0
+    $busy = $true
+    $nextProgressAt = 60
+    while ($waited -lt $MaximumSeconds) {
+        $step = [Math]::Min($PollSeconds, $MaximumSeconds - $waited)
+        Start-Sleep -Seconds $step
+        $waited += $step
+        $busy = Test-WindowsInstallerBusy -Name $Name
+        if (-not $busy) {
+            break
+        }
+        if ($waited -ge $nextProgressAt -and $waited -lt $MaximumSeconds) {
+            Write-Info ('Windows Installer is still busy with another installation ({0} of at most {1} seconds waited)...' -f $waited, $MaximumSeconds)
+            $nextProgressAt += 60
+        }
+    }
+    return [pscustomobject]@{ WaitedSeconds = $waited; Busy = $busy }
+}
+
+<#
+.SYNOPSIS
+    Reads whether Windows has a restart pending, and why.
+.DESCRIPTION
+    Reads the indicators Configuration Manager's pending-restart prerequisite check and Microsoft's
+    DSC RebootPending resource use:
+
+      ComponentServicing  HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based
+                          Servicing\RebootPending exists (Windows servicing, features, updates).
+      WindowsUpdate       HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto
+                          Update\RebootRequired exists.
+      FileRenames         HKLM\SYSTEM\CurrentControlSet\Control\Session Manager
+                          PendingFileRenameOperations: the file replacements queued for the next
+                          restart (MoveFileEx MOVEFILE_DELAY_UNTIL_REBOOT), which is how an MSI or
+                          Inno installer finishes replacing a file that was in use.
+
+    The value holds pairs of entries: a source, then a destination that is empty for a delete. Only
+    replacements (a non-empty destination) are kept. Queued deletes are left out: many programs
+    queue them to clean up temporary or rollback files (Edge Update, for example), and an install is
+    complete without them, so they would report a restart that nothing needs.
+
+    Best-effort and read-only: an indicator that cannot be read counts as absent.
+.RETURNS
+    [pscustomobject] @{ ComponentServicing = <bool>; WindowsUpdate = <bool>; FileRenames = <string[]>
+    ('<source> -> <destination>' per queued replacement) }
+#>
+function Get-PendingRestartState {
+    $componentServicing = $false
+    try {
+        $componentServicing = [bool](Test-Path -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending')
+    }
+    catch {
+        $componentServicing = $false
+    }
+
+    $windowsUpdate = $false
+    try {
+        $windowsUpdate = [bool](Test-Path -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired')
+    }
+    catch {
+        $windowsUpdate = $false
+    }
+
+    $fileRenames = @()
+    try {
+        $sessionManager = Get-ItemProperty -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager' -Name 'PendingFileRenameOperations' -ErrorAction Stop
+        $entries = @($sessionManager.PendingFileRenameOperations)
+        for ($index = 0; $index -lt $entries.Count; $index += 2) {
+            $source = [string]$entries[$index]
+            $destination = ''
+            if ($index + 1 -lt $entries.Count) {
+                $destination = [string]$entries[$index + 1]
+            }
+            if ([string]::IsNullOrWhiteSpace($source) -or [string]::IsNullOrWhiteSpace($destination)) {
+                continue
+            }
+            $fileRenames += ('{0} -> {1}' -f $source.Trim(), $destination.Trim())
+        }
+    }
+    catch {
+        # No value (nothing queued) or unreadable.
+        $fileRenames = @()
+    }
+
+    return [pscustomobject]@{
+        ComponentServicing = $componentServicing
+        WindowsUpdate      = $windowsUpdate
+        FileRenames        = @($fileRenames)
+    }
+}
+
+<#
+.SYNOPSIS
+    Lists why a restart is pending, or with -Since, the reasons that appeared since an earlier state.
+.DESCRIPTION
+    Turns a Get-PendingRestartState result into short reasons for the summary. With -Since (the state
+    read at the start of the run), only what appeared during the run counts: an indicator that was
+    already present, or a file replacement that was already queued, is left out, so a restart that
+    was pending before the run is reported as such and does not make the run's own result 'restart
+    required' (exit code 3010).
+.PARAMETER State
+    A Get-PendingRestartState result.
+.PARAMETER Since
+    An earlier Get-PendingRestartState result. Optional.
+.RETURNS
+    [string[]] Nothing when nothing is pending (or nothing new); call it inside @().
+#>
+function Get-PendingRestartReason {
+    param (
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [object]$State,
+
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [object]$Since
+    )
+
+    if ($null -eq $State) {
+        return
+    }
+
+    $reasons = @()
+    if ($State.ComponentServicing -and -not ($Since -and $Since.ComponentServicing)) {
+        $reasons += 'Windows component servicing has a restart pending'
+    }
+    if ($State.WindowsUpdate -and -not ($Since -and $Since.WindowsUpdate)) {
+        $reasons += 'Windows Update has a restart pending'
+    }
+
+    $known = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+    if ($Since) {
+        foreach ($rename in @($Since.FileRenames)) {
+            [void]$known.Add([string]$rename)
+        }
+    }
+    $newRenames = @(@($State.FileRenames) | Where-Object { $_ -and -not $known.Contains([string]$_) })
+    if ($newRenames.Count -gt 0) {
+        $renameWord = if ($newRenames.Count -eq 1) { 'file replacement is' } else { 'file replacements are' }
+        $reasons += ('{0} {1} queued for the next restart' -f $newRenames.Count, $renameWord)
+    }
+    return $reasons
+}
+
 # --- WindowsTerminalHostDetection ---
 # Windows Terminal self-lock detection (issue #271). A scheduled/dispatched E2E run showed
 # winget repeatedly fail to even LAUNCH while installing/verifying Microsoft.WindowsTerminal -
@@ -4313,7 +4659,7 @@ function Test-WingetLaunchable {
             $reason = "'winget --version' did not answer within $timeoutSeconds seconds and was stopped"
         }
         elseif ($run.ExitCode -ne 0) {
-            $reason = "'winget --version' exited with 0x{0:X8}" -f [int]$run.ExitCode
+            $reason = "'winget --version' exited with {0}" -f (Format-WingetExitCode -ExitCode $run.ExitCode)
         }
         else {
             $versionLine = @($run.StandardOutput | ForEach-Object { "$_".Trim() } | Where-Object { $_ -match '^v\d' }) | Select-Object -First 1
@@ -4335,6 +4681,182 @@ function Test-WingetLaunchable {
         Write-ProcessOutput -Line $run.Output -Tail 10
     }
     return [pscustomobject]@{ Launchable = $false; Version = $null; Reason = $reason; Attempts = [Math]::Min($attempt, $Attempts) }
+}
+
+# --- WingetResultCodes ---
+# winget result codes (review findings P2-15 and P3-16). winget reports its result as a signed Int32
+# HRESULT, and every place that printed one showed only the hex value, so a failure such as
+# 0x8A150102 (another installation in progress) read as 'package not found after install' plus a
+# number. This file is the one table of the codes the installer knows: their winget symbol, what
+# they mean in a sentence the summary can show, and how the install should treat them. Every place
+# that prints a winget exit code goes through Format-WingetExitCode, and Install-WingetPackage
+# decides its retries from the class below, so the name, the message and the behaviour cannot drift
+# apart. Values come from winget's own table (doc/windows/package-manager/winget/returnCodes.md,
+# "winget error --output"); the classes from how winget maps installer exit codes
+# (AppInstallerCLICore Workflows/InstallFlow.cpp ReportInstallerResult and Manifest/ManifestCommon.cpp
+# GetDefaultKnownReturnCodes). Runs under Windows PowerShell 5.1 too (the PowerShell 7 bootstrap
+# prints the exit code of winget's PowerShell install), so it uses nothing newer than .NET 4.5.
+
+<#
+.SYNOPSIS
+    Returns what the installer knows about a winget exit code, or $null for an unknown code.
+.DESCRIPTION
+    Keys are the hex form winget's documentation and issues use (0x8A150102). Classes:
+
+      InstallInProgress     Windows Installer was busy with another installation (msiexec 1618).
+                            Wait for it and retry (Install-WingetPackage).
+      InUse                 The app or its files were in use. One delayed retry.
+      RestartRequiredFirst  The installer cannot run until Windows restarts (Inno exit 8). Never
+                            retried: only a restart changes it.
+      RestartRequired       The package installed, and a restart finishes it (MSI 3010 on winget
+                            1.6 and older, which newer winget reports as exit 0 with a warning), or
+                            the installer started a restart itself (MSI 1641).
+      (empty)               Named for the reader only; no special handling.
+.PARAMETER ExitCode
+    The exit code as winget reports it (a signed Int32), or $null.
+.RETURNS
+    [pscustomobject] @{ ExitCode; Hex; Name; Meaning; Class }, or $null when the code is $null, 0 or
+    not in the table.
+#>
+function Get-WingetExitCodeInfo {
+    param (
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [Nullable[int]]$ExitCode
+    )
+
+    if ($null -eq $ExitCode -or $ExitCode -eq 0) {
+        return $null
+    }
+
+    # Name: the winget symbol without its APPINSTALLER_CLI_ERROR_ prefix (or the Windows symbol),
+    # searchable in winget's returnCodes.md. Meaning: a clause that completes "Failed to install: X
+    # (...)" and says what to do where there is something to do.
+    $table = @{
+        # Installer results (winget's installer-exit-code mapping).
+        '0x8A150102' = @('INSTALL_INSTALL_IN_PROGRESS', 'another installation was in progress (Windows Installer was busy) - re-run the installer once it has finished', 'InstallInProgress')
+        '0x8A150101' = @('INSTALL_PACKAGE_IN_USE', 'the app is running - close it, then re-run the installer', 'InUse')
+        '0x8A150103' = @('INSTALL_FILE_IN_USE', 'files the installer needs are in use - close the app, then re-run the installer', 'InUse')
+        '0x8A150111' = @('INSTALL_PACKAGE_IN_USE_BY_APPLICATION', 'the app is in use by another application - close it, then re-run the installer', 'InUse')
+        '0x8A150109' = @('INSTALL_REBOOT_REQUIRED_TO_FINISH', 'a restart is required to finish the installation', 'RestartRequired')
+        '0x8A15010A' = @('INSTALL_REBOOT_REQUIRED_FOR_INSTALL', 'a restart is required before this installer can run - restart this PC, then re-run the installer', 'RestartRequiredFirst')
+        '0x8A15010B' = @('INSTALL_REBOOT_INITIATED', 'the installer started a restart of this PC - re-run the installer after the restart', 'RestartRequired')
+        '0x8A15010C' = @('INSTALL_CANCELLED_BY_USER', 'the installation was cancelled', '')
+        '0x8A15010D' = @('INSTALL_ALREADY_INSTALLED', 'another version of the app is already installed', '')
+        '0x8A15010E' = @('INSTALL_DOWNGRADE', 'a higher version of the app is already installed', '')
+        '0x8A15010F' = @('INSTALL_BLOCKED_BY_POLICY', 'organization policy blocks this installation', '')
+        '0x8A150104' = @('INSTALL_MISSING_DEPENDENCY', 'a dependency of the package is missing from this system', '')
+        '0x8A150105' = @('INSTALL_DISK_FULL', 'the disk is full - free some space, then re-run the installer', '')
+        '0x8A150106' = @('INSTALL_INSUFFICIENT_MEMORY', 'there was not enough memory to install', '')
+        '0x8A150107' = @('INSTALL_NO_NETWORK', 'the installer needs an internet connection', '')
+        '0x8A150108' = @('INSTALL_CONTACT_SUPPORT', 'the installer failed (Windows Installer service error)', '')
+        '0x8A150110' = @('INSTALL_DEPENDENCIES', 'a dependency of the package failed to install', '')
+        '0x8A150112' = @('INSTALL_INVALID_PARAMETER', 'the installer rejected its parameters', '')
+        '0x8A150113' = @('INSTALL_SYSTEM_NOT_SUPPORTED', 'the package does not support this system', '')
+        '0x8A150115' = @('INSTALL_CUSTOM_ERROR', 'the installer failed with its own error', '')
+        '0x8A150006' = @('SHELLEXEC_INSTALL_FAILED', 'the installer failed (its own exit code is in the log above, and in its installer log)', '')
+        '0x8A150049' = @('MSI_INSTALL_FAILED', 'the MSI installer failed (its own exit code is in the log above, and in its installer log)', '')
+        '0x8A150052' = @('PORTABLE_INSTALL_FAILED', 'the portable package failed to install', '')
+        # Package selection, download and agreements.
+        '0x8A150010' = @('NO_APPLICABLE_INSTALLER', 'no installer in the package applies to this system', '')
+        '0x8A15002B' = @('UPDATE_NOT_APPLICABLE', 'no applicable update was found for the installed version', '')
+        '0x8A150061' = @('PACKAGE_ALREADY_INSTALLED', 'a version of the package is already installed', '')
+        '0x8A15008E' = @('UPDATE_INSTALL_TECHNOLOGY_MISMATCH', 'the installed version uses a different install technology', '')
+        '0x8A150068' = @('PACKAGE_IS_PINNED', 'the package is pinned in winget', '')
+        '0x8A150011' = @('INSTALLER_HASH_MISMATCH', 'the downloaded installer does not match the hash in its manifest', '')
+        '0x8A150086' = @('INSTALLER_ZERO_BYTE_FILE', 'the installer download was empty (network or proxy problem)', '')
+        '0x8A15006D' = @('SERVICE_UNAVAILABLE', 'a download server was busy or unavailable - re-run the installer later', '')
+        '0x8A150041' = @('PACKAGE_AGREEMENTS_NOT_ACCEPTED', 'the package agreements were not accepted', '')
+        '0x8A150046' = @('SOURCE_AGREEMENTS_NOT_ACCEPTED', 'the source agreements were not accepted', '')
+        # winget itself and its sources.
+        '0x8A150001' = @('INTERNAL_ERROR', 'winget hit an internal error', '')
+        '0x8A150002' = @('INVALID_CL_ARGUMENTS', 'winget rejected its command line', '')
+        '0x8A150003' = @('COMMAND_FAILED', 'the winget command failed', '')
+        '0x8A15000F' = @('SOURCE_DATA_MISSING', 'the winget source data is missing', '')
+        '0x8A150014' = @('NO_APPLICATIONS_FOUND', 'winget found no package with that id', '')
+        '0x8A150019' = @('COMMAND_REQUIRES_ADMIN', 'the winget command needs administrator rights', '')
+        '0x8A15003A' = @('BLOCKED_BY_POLICY', 'winget is disabled by Group Policy on this PC', '')
+        '0x8A15003F' = @('SOURCE_DATA_INTEGRITY_FAILURE', 'the winget source data is corrupted', '')
+        '0x8A150045' = @('SOURCE_OPEN_FAILED', 'the winget source could not be opened', '')
+        '0x8A15004B' = @('FAILED_TO_OPEN_ALL_SOURCES', 'one or more winget sources could not be opened', '')
+        '0x8A150056' = @('INSTALLER_PROHIBITS_ELEVATION', 'the installer cannot run as administrator', '')
+        '0x8A15007D' = @('ADMIN_CONTEXT_ACTION_PROHIBITED', 'not permitted as administrator on a package installed for one user', '')
+        # Windows HRESULTs winget passes through as its exit code.
+        '0x80073D19' = @('ERROR_DEPLOYMENT_BLOCKED_BY_USER_LOG_OFF', 'the installing account has no logon session, so Windows blocked the app package deployment', '')
+        # winget maps this to 0x8A150101 for MSIX installs, so it is named here but not retried.
+        '0x80073D02' = @('ERROR_PACKAGES_IN_USE', 'the app is running - close it, then re-run the installer', '')
+        '0x80004004' = @('E_ABORT', 'the operation was cancelled or stopped', '')
+        '0x80072EE2' = @('WININET_E_TIMEOUT', 'the download timed out', '')
+        '0x80072EE7' = @('WININET_E_NAME_NOT_RESOLVED', 'the download server name could not be resolved', '')
+        '0x80072EFD' = @('WININET_E_CANNOT_CONNECT', 'could not connect to the download server', '')
+        '0x80190194' = @('HTTP_E_STATUS_NOT_FOUND', 'the download returned HTTP 404 (not found)', '')
+    }
+
+    $hex = '0x{0:X8}' -f [int]$ExitCode
+    if (-not $table.ContainsKey($hex)) {
+        return $null
+    }
+    $row = $table[$hex]
+    return [pscustomobject]@{
+        ExitCode = [int]$ExitCode
+        Hex      = $hex
+        Name     = $row[0]
+        Meaning  = $row[1]
+        Class    = $row[2]
+    }
+}
+
+<#
+.SYNOPSIS
+    Formats a winget exit code for a message: its hex form, followed by its name when known.
+.DESCRIPTION
+    The one way a winget exit code is printed (review findings P2-15, P3-16), for example
+    '0x8A150102 INSTALL_INSTALL_IN_PROGRESS', or '0x00000001' for a code the table does not name.
+    Winget reports HRESULT-style codes as signed Int32 (e.g. -2147009255); the X8 format renders the
+    familiar hex form (0x80073D19) winget's documentation and issues use.
+.PARAMETER ExitCode
+    The exit code as winget reports it.
+.RETURNS
+    [string]
+#>
+function Format-WingetExitCode {
+    param (
+        [Parameter(Mandatory = $true)]
+        [int]$ExitCode
+    )
+
+    $info = Get-WingetExitCodeInfo -ExitCode $ExitCode
+    if ($info) {
+        return ('{0} {1}' -f $info.Hex, $info.Name)
+    }
+    return ('0x{0:X8}' -f $ExitCode)
+}
+
+<#
+.SYNOPSIS
+    Returns whether an install result says the installer cannot run until Windows restarts.
+.DESCRIPTION
+    True for 0x8A15010A (INSTALL_REBOOT_REQUIRED_FOR_INSTALL; Inno setup exit 8, for example Git's
+    installer while a Windows Update restart is pending). Invoke-WingetInstall's retry pass leaves
+    such an app alone, because retrying before a restart fails the same way (review finding P3-16).
+.PARAMETER InstallResult
+    An Install-AppWithVerification InstallResult (Install-WingetPackage's result, or a package-specific
+    installer's), or $null.
+.RETURNS
+    [bool]
+#>
+function Test-RestartRequiredFirst {
+    param (
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [object]$InstallResult
+    )
+
+    if ($null -eq $InstallResult -or $null -eq $InstallResult.ExitCode) {
+        return $false
+    }
+    $info = Get-WingetExitCodeInfo -ExitCode ([int]$InstallResult.ExitCode)
+    return [bool]($info -and $info.Class -eq 'RestartRequiredFirst')
 }
 
 # --- AppCatalog ---
@@ -4615,9 +5137,11 @@ function Restart-WithElevation {
     longer be launched mid-run), or elevation was declined or is unavailable (irm | iex, or the
     imported module), 2 = winget unavailable (at the start, where `winget --version` must run and
     print a version, or no longer launchable at the end of the run), 3 = app-definition validation
-    failed or no valid apps remain. The generated entry script also exits 1 when a blocking
-    pre-flight check fails (before this function runs) and 5 when the run was aborted by an
-    unexpected error or stopped from outside.
+    failed or no valid apps remain, 3010 = success, but a restart is required to finish (an install
+    said so, or Windows gained a pending restart during the run; review finding P3-16). At the end
+    of a run the precedence is 1 > 2 > 3010 > 0 (Get-InstallerExitCode). The generated entry script
+    also exits 1 when a blocking pre-flight check fails (before this function runs) and 5 when the
+    run was aborted by an unexpected error or stopped from outside.
 #>
 function Invoke-WingetInstall {
     [OutputType([int])]
@@ -4754,6 +5278,22 @@ function Invoke-WingetInstall {
         Write-Success 'Starting...'
     }
 
+    # Pending restart before the run (review finding P3-16), read before this run changes the
+    # machine: the end of the run compares against it, so a restart that this run's installs need
+    # (exit code 3010) is told apart from one that was already pending, which is reported but does
+    # not make the run 3010 by itself. Read-only, so a dry run reports it too.
+    $restartStateBefore = $null
+    try {
+        $restartStateBefore = Get-PendingRestartState
+    }
+    catch {
+        Write-WarningMessage "Could not check whether a restart is pending: $_"
+    }
+    $restartPendingBefore = @(Get-PendingRestartReason -State $restartStateBefore)
+    if ($restartPendingBefore.Count -gt 0) {
+        Write-WarningMessage ('A restart is already pending on this PC ({0}). An installer that needs a restart first fails with 0x8A15010A; if one does, restart this PC and re-run the installer.' -f ($restartPendingBefore -join '; '))
+    }
+
     # Ensure the WinGet PowerShell module is available before touching winget itself:
     # Test-AndInstallWinget and Initialize-WingetSourcesForUser use Repair-WinGetPackageManager
     # to bootstrap winget for accounts that have no interactive logon session (issue #159).
@@ -4876,13 +5416,27 @@ function Invoke-WingetInstall {
     # was not coming back (about 24 minutes before the run reported failure).
     $wingetNotLaunchable = $false
 
+    # Run-level budget for waiting on another installation (review finding P2-15): an app whose
+    # install finds Windows Installer busy (0x8A150102, msiexec 1618) waits for it and retries, and
+    # every wait comes out of these 10 minutes, the Winget-AutoUpdate msiexec's included. Once it
+    # is spent, a busy result fails at once with its reason, so a machine that stays busy costs the
+    # run 10 minutes at most rather than 10 minutes per app.
+    $installerBusyWaitSecondsLeft = 600
+
+    # Apps whose install finished but needs a restart to complete (review finding P3-16). Apps whose
+    # installer cannot run until Windows restarts (0x8A15010A) are failed apps marked RestartFirst.
+    $restartRequiredApps = @()
+
     Foreach ($app in $apps) {
         $outcome = $null
         try {
             # Shared per-app pipeline — pre-check, dispatch, post-verify (issue #188). Messages,
             # summary bucketing, and exit-code policy stay here in the orchestrator.
             # -Silent: an unattended run installs MSI packages with /quiet, not /passive.
-            $outcome = Install-AppWithVerification -App $app -Silent:$effectiveNonInteractive -WhatIf:$WhatIf -WingetNotLaunchable:$wingetNotLaunchable
+            $outcome = Install-AppWithVerification -App $app -Silent:$effectiveNonInteractive -WhatIf:$WhatIf -WingetNotLaunchable:$wingetNotLaunchable -InstallInProgressWaitSeconds $installerBusyWaitSecondsLeft
+            if ($outcome.InstallResult -and $outcome.InstallResult.InstallInProgressWaitedSeconds) {
+                $installerBusyWaitSecondsLeft = [Math]::Max(0, $installerBusyWaitSecondsLeft - [int]$outcome.InstallResult.InstallInProgressWaitedSeconds)
+            }
 
             switch ($outcome.Status) {
                 'Skipped' {
@@ -4905,6 +5459,11 @@ function Invoke-WingetInstall {
                     }
                     else {
                         Write-Success "Successfully installed: $($app.name)"
+                        # A restart that finishes the install, or a non-zero winget exit code
+                        # behind an app that is installed anyway (review finding P3-16).
+                        if (Write-InstalledAppNote -AppName $app.name -InstallResult $outcome.InstallResult) {
+                            $restartRequiredApps += $app.name
+                        }
                     }
                     $installedApps += $app.name
                 }
@@ -4927,8 +5486,9 @@ function Invoke-WingetInstall {
                         }
                     }
                     # Tracked as objects, not bare names, so the failed-apps summary can render a
-                    # Reason column (issue #189).
-                    $failedApps += @{ Name = $app.name; Reason = $failureReason }
+                    # Reason column (issue #189). RestartFirst: the installer cannot run until
+                    # Windows restarts (0x8A15010A), so the retry pass leaves it alone.
+                    $failedApps += @{ Name = $app.name; Reason = $failureReason; RestartFirst = (Test-RestartRequiredFirst -InstallResult $outcome.InstallResult) }
                 }
             }
         }
@@ -4971,15 +5531,26 @@ function Invoke-WingetInstall {
 
             foreach ($failedApp in $appsToRetry) {
                 $appName = $failedApp.Name
+                if ($failedApp.RestartFirst) {
+                    # 0x8A15010A (review finding P3-16): only a restart changes it, so another try
+                    # now would fail the same way.
+                    Write-WarningMessage "Not retrying ${appName}: its installer cannot run until this PC restarts."
+                    $failedApps += $failedApp
+                    continue
+                }
                 $outcome = $null
                 try {
                     Write-Info "Retrying: $appName"
                     $appDef = $apps | Where-Object { $_.name -eq $appName } | Select-Object -First 1
 
                     # Same shared pipeline as the first pass (issue #188), so a lingering
-                    # 0x80073d19 session error gets its backoff retries here too (issue #150).
+                    # 0x80073d19 session error gets its backoff retries here too (issue #150), and
+                    # a busy Windows Installer gets what is left of the run's wait budget.
                     # The circuit breaker holds here too: once it trips, the rest fail at once.
-                    $outcome = Install-AppWithVerification -App $appDef -Silent:$effectiveNonInteractive -WingetNotLaunchable:$wingetNotLaunchable
+                    $outcome = Install-AppWithVerification -App $appDef -Silent:$effectiveNonInteractive -WingetNotLaunchable:$wingetNotLaunchable -InstallInProgressWaitSeconds $installerBusyWaitSecondsLeft
+                    if ($outcome.InstallResult -and $outcome.InstallResult.InstallInProgressWaitedSeconds) {
+                        $installerBusyWaitSecondsLeft = [Math]::Max(0, $installerBusyWaitSecondsLeft - [int]$outcome.InstallResult.InstallInProgressWaitedSeconds)
+                    }
 
                     if ($outcome.Status -eq 'Failed') {
                         $failureReason = Format-InstallFailureReason -FailureReason $outcome.FailureReason -InstallResult $outcome.InstallResult -LaunchError $outcome.LaunchError -CheckExitCode $outcome.CheckExitCode
@@ -4994,12 +5565,15 @@ function Invoke-WingetInstall {
                                 Write-ErrorMessage "Retry failed: $appName ($failureReason)."
                             }
                         }
-                        $failedApps += @{ Name = $appName; Reason = $failureReason }
+                        $failedApps += @{ Name = $appName; Reason = $failureReason; RestartFirst = (Test-RestartRequiredFirst -InstallResult $outcome.InstallResult) }
                     }
                     else {
                         # 'Installed', or 'Skipped' when the first-pass install actually landed
                         # and only its verification failed — either way the app is present now.
                         Write-Success "Retry succeeded: $appName"
+                        if ($outcome.Status -eq 'Installed' -and (Write-InstalledAppNote -AppName $appName -InstallResult $outcome.InstallResult)) {
+                            $restartRequiredApps += $appName
+                        }
                         $installedApps += $appName
                     }
                 }
@@ -5032,7 +5606,7 @@ function Invoke-WingetInstall {
     # winget's sources; letting that start mid-run is what wedged winget in the #279/#284 E2E runs
     # and what killed the console in #283. WAU's own schedule takes it from here.
     try {
-        $wauResult = Install-WingetAutoUpdate -WhatIf:$WhatIf
+        $wauResult = Install-WingetAutoUpdate -WhatIf:$WhatIf -InstallInProgressWaitSeconds $installerBusyWaitSecondsLeft
     }
     catch {
         Write-ErrorMessage "Winget-AutoUpdate setup failed unexpectedly: $_"
@@ -5064,6 +5638,29 @@ function Invoke-WingetInstall {
             Write-WarningMessage "Could not run the end-of-run winget check: $_"
         }
     }
+
+    # Does this run need a restart to finish (review finding P3-16)? An install said so, the
+    # Winget-AutoUpdate MSI returned 3010, or Windows gained a pending restart during the run (for
+    # example an Inno or MSI installer queued a file replacement for the next restart, which winget
+    # does not report). A restart that was already pending before the run is not this run's.
+    # Skipped in a dry run, which installed nothing.
+    $restartReasons = @()
+    if ($restartRequiredApps.Count -gt 0) {
+        $restartReasons += ('{0} reported that a restart finishes the installation' -f ($restartRequiredApps -join ', '))
+    }
+    if ($wauResult -and $wauResult.RestartRequired) {
+        $restartReasons += 'the Winget-AutoUpdate installer reported that a restart finishes the installation'
+    }
+    if (-not $WhatIf -and $null -ne $restartStateBefore) {
+        try {
+            $restartReasons += @(Get-PendingRestartReason -State (Get-PendingRestartState) -Since $restartStateBefore)
+        }
+        catch {
+            Write-WarningMessage "Could not check whether a restart is pending after the run: $_"
+        }
+    }
+    $restartRequired = $restartReasons.Count -gt 0
+    $restartFirstApps = @($failedApps | Where-Object { $_.RestartFirst } | ForEach-Object { $_.Name })
 
     # Display the summary of the installation
     if ($WhatIf) {
@@ -5133,6 +5730,19 @@ function Invoke-WingetInstall {
         Write-ErrorMessage "winget: NOT USABLE - winget did not work at the end of this run$endCheckDetail, so automatic updates and the next run of this installer will fail on this machine. Restart the machine and re-run the installer; if it persists, attach this transcript to a GitHub issue."
     }
 
+    # Restart (review finding P3-16): a run whose installs need a restart says so here and exits
+    # 3010 when nothing failed; apps whose installer needs a restart first are named; a restart
+    # that was pending before the run is reported, nothing more.
+    if ($restartFirstApps.Count -gt 0) {
+        Write-ErrorMessage ('Restart: REQUIRED before {0} can install - restart this PC, then re-run the installer.' -f ($restartFirstApps -join ', '))
+    }
+    if ($restartRequired) {
+        Write-WarningMessage ('Restart: REQUIRED to finish this run - restart this PC before it is used ({0}).' -f ($restartReasons -join '; '))
+    }
+    elseif ($restartPendingBefore.Count -gt 0 -and $restartFirstApps.Count -eq 0) {
+        Write-WarningMessage ('Restart: already pending before this run ({0}) - restart this PC when you can.' -f ($restartPendingBefore -join '; '))
+    }
+
     # Repeat the persistent transcript path next to the summary (issue #189). The variable is set
     # by the generated installer's entry script before dispatch; it is unset (and this is skipped)
     # when the function runs outside that context (module import, tests) or the transcript could
@@ -5141,7 +5751,7 @@ function Invoke-WingetInstall {
         Write-Info "Full transcript of this run: $script:InstallLogPath"
     }
 
-    $exitCode = Get-InstallerExitCode -FailedAppCount $failedApps.Count -WingetUsable $wingetUsableAtEnd
+    $exitCode = Get-InstallerExitCode -FailedAppCount $failedApps.Count -WingetUsable $wingetUsableAtEnd -RestartRequired $restartRequired
     # Recorded before the final prompt: Ctrl+C there stops a run that has already finished, and
     # the entry script's abort guard then reports this code instead of an abort (5).
     $script:InstallerPendingExitCode = $exitCode
@@ -5842,6 +6452,11 @@ function Test-WauInstalled {
     Best-effort: any failure warns and returns a Failed result rather than aborting the install.
 .PARAMETER WhatIf
     When specified, only reports intended actions.
+.PARAMETER InstallInProgressWaitSeconds
+    The most to wait, in all, when msiexec exits 1618 because Windows Installer is busy with another
+    installation (review finding P2-15): it waits for that installation (Wait-WindowsInstallerIdle)
+    and retries, up to 3 times. Invoke-WingetInstall passes what is left of the run's budget.
+    Default 600. 0: 1618 fails at once.
 .RETURNS
     [pscustomobject] with:
       - Status:  'Configured' (installed or upgraded this run), 'AlreadyPresent' (left as-is),
@@ -5851,11 +6466,16 @@ function Test-WauInstalled {
                  version (or $null when unreadable) for AlreadyPresent.
       - FrameworkMissing: $true when the framework check found no suitable framework (on
                  AlreadyPresent this means the existing WAU may break winget on its next run).
+      - RestartRequired: $true when msiexec returned 3010 (ERROR_SUCCESS_REBOOT_REQUIRED): WAU is
+                 installed, and a restart finishes it (review finding P3-16).
 #>
 function Install-WingetAutoUpdate {
     param (
         [Parameter(Mandatory = $false)]
-        [switch]$WhatIf
+        [switch]$WhatIf,
+
+        [Parameter(Mandatory = $false)]
+        [int]$InstallInProgressWaitSeconds = 600
     )
 
     $pin = Get-WauPin
@@ -5868,7 +6488,7 @@ function Install-WingetAutoUpdate {
         else {
             Write-Info "[DRY-RUN] Would install Winget-AutoUpdate $($pin.Version) (weekly updates on Tuesdays at 02:00, not at logon, Full notifications, self-update disabled), if Microsoft.WindowsAppRuntime.1.8 is present."
         }
-        return [pscustomobject]@{ Status = 'DryRun'; Version = $pin.Version; FrameworkMissing = $false }
+        return [pscustomobject]@{ Status = 'DryRun'; Version = $pin.Version; FrameworkMissing = $false; RestartRequired = $false }
     }
 
     $framework = Get-WindowsAppRuntimeStatus
@@ -5890,7 +6510,7 @@ function Install-WingetAutoUpdate {
             if ($frameworkMissing) {
                 Write-ErrorMessage "Winget-AutoUpdate is installed, but Microsoft.WindowsAppRuntime.1.8 is missing ($($framework.Detail)). Its next update run may install a winget that cannot start and leave winget unusable. Install the Windows App Runtime 1.8 (update App Installer from the Microsoft Store, or install Microsoft's Windows App SDK 1.8 runtime), or uninstall Winget-AutoUpdate on this machine."
             }
-            return [pscustomobject]@{ Status = 'AlreadyPresent'; Version = $installed.Version; FrameworkMissing = $frameworkMissing }
+            return [pscustomobject]@{ Status = 'AlreadyPresent'; Version = $installed.Version; FrameworkMissing = $frameworkMissing; RestartRequired = $false }
         }
     }
     elseif (-not $frameworkMissing) {
@@ -5899,7 +6519,7 @@ function Install-WingetAutoUpdate {
 
     if ($frameworkMissing) {
         Write-ErrorMessage "Winget-AutoUpdate was NOT installed: Microsoft.WindowsAppRuntime.1.8 is missing ($($framework.Detail)). Every WAU update run installs the newest winget, which needs that framework, so WAU would leave winget unusable here. Install the Windows App Runtime 1.8 (update App Installer from the Microsoft Store, or install Microsoft's Windows App SDK 1.8 runtime), then re-run this installer. On a newly set-up PC this usually clears once the Store has updated App Installer."
-        return [pscustomobject]@{ Status = 'FrameworkMissing'; Version = $pin.Version; FrameworkMissing = $true }
+        return [pscustomobject]@{ Status = 'FrameworkMissing'; Version = $pin.Version; FrameworkMissing = $true; RestartRequired = $false }
     }
 
     $stagingDir = $null
@@ -5916,7 +6536,7 @@ function Install-WingetAutoUpdate {
         $actualHash = (Get-FileHash -Path $msiPath -Algorithm SHA256).Hash
         if ($actualHash -ne $pin.Sha256) {
             Write-ErrorMessage "Winget-AutoUpdate MSI hash mismatch (expected $($pin.Sha256), got $actualHash). Skipping installation."
-            return [pscustomobject]@{ Status = 'Failed'; Version = $pin.Version; FrameworkMissing = $false }
+            return [pscustomobject]@{ Status = 'Failed'; Version = $pin.Version; FrameworkMissing = $false; RestartRequired = $false }
         }
 
         # Bake the configuration in via MSI properties (the winget-package install path allows no
@@ -5930,28 +6550,53 @@ function Install-WingetAutoUpdate {
         $msiArgs = "/i `"$msiPath`" /qn /norestart UPDATESATLOGON=0 USERCONTEXT=1 DISABLEWAUAUTOUPDATE=1 UPDATESINTERVAL=Weekly UPDATESATTIME=02:00:00 NOTIFICATIONLEVEL=Full DONOTRUNONMETERED=1"
         # Time-limited (review finding P2-5): Start-Process -Wait used to wait for ever.
         $msiTimeoutSeconds = Get-ProcessTimeoutSeconds -Operation MsiExec
-        $msiexec = Invoke-ExternalProcess -FilePath 'msiexec.exe' -ArgumentString $msiArgs -TimeoutSeconds $msiTimeoutSeconds -Echo None
-        if ($msiexec.LaunchFailed) {
-            Write-ErrorMessage "Failed to install Winget-AutoUpdate: msiexec could not be started ($($msiexec.LaunchError))."
-            return [pscustomobject]@{ Status = 'Failed'; Version = $pin.Version; FrameworkMissing = $false }
-        }
-        if ($msiexec.TimedOut) {
-            Write-ErrorMessage ('Winget-AutoUpdate install failed: msiexec did not finish within {0} minutes and was stopped.' -f [Math]::Round($msiTimeoutSeconds / 60))
-            return [pscustomobject]@{ Status = 'Failed'; Version = $pin.Version; FrameworkMissing = $false }
+        $busyRetries = 0
+        $busyWaited = 0
+        while ($true) {
+            $msiexec = Invoke-ExternalProcess -FilePath 'msiexec.exe' -ArgumentString $msiArgs -TimeoutSeconds $msiTimeoutSeconds -Echo None
+            if ($msiexec.LaunchFailed) {
+                Write-ErrorMessage "Failed to install Winget-AutoUpdate: msiexec could not be started ($($msiexec.LaunchError))."
+                return [pscustomobject]@{ Status = 'Failed'; Version = $pin.Version; FrameworkMissing = $false; RestartRequired = $false }
+            }
+            if ($msiexec.TimedOut) {
+                Write-ErrorMessage ('Winget-AutoUpdate install failed: msiexec did not finish within {0} minutes and was stopped.' -f [Math]::Round($msiTimeoutSeconds / 60))
+                return [pscustomobject]@{ Status = 'Failed'; Version = $pin.Version; FrameworkMissing = $false; RestartRequired = $false }
+            }
+            # 1618 = ERROR_INSTALL_ALREADY_RUNNING: Windows Installer is busy with another
+            # installation and says so at once (review finding P2-15). Wait for it, within the
+            # run's budget, and try again.
+            $busyWaitLeft = $InstallInProgressWaitSeconds - $busyWaited
+            if ($msiexec.ExitCode -eq 1618 -and $busyRetries -lt 3 -and $busyWaitLeft -gt 0) {
+                $busyRetries++
+                Write-WarningMessage ('Windows Installer is busy with another installation (msiexec exit code 1618). Waiting for it to finish (at most {0} seconds) before retry {1} of 3 of the Winget-AutoUpdate install...' -f $busyWaitLeft, $busyRetries)
+                $wait = Wait-WindowsInstallerIdle -MaximumSeconds $busyWaitLeft
+                $busyWaited += [int]$wait.WaitedSeconds
+                continue
+            }
+            break
         }
 
-        # 3010 = ERROR_SUCCESS_REBOOT_REQUIRED — still a success.
+        # 3010 = ERROR_SUCCESS_REBOOT_REQUIRED: installed, and a restart finishes it (P3-16).
         if ($msiexec.ExitCode -eq 0 -or $msiexec.ExitCode -eq 3010) {
+            $restartRequired = $msiexec.ExitCode -eq 3010
             Write-Success "Winget-AutoUpdate $($pin.Version) installed. Apps will update weekly, on Tuesdays at 02:00 (or soon after the next start if the machine was off)."
-            return [pscustomobject]@{ Status = 'Configured'; Version = $pin.Version; FrameworkMissing = $false }
+            if ($restartRequired) {
+                Write-WarningMessage 'The Winget-AutoUpdate installer reported that a restart finishes the installation (msiexec exit code 3010).'
+            }
+            return [pscustomobject]@{ Status = 'Configured'; Version = $pin.Version; FrameworkMissing = $false; RestartRequired = $restartRequired }
+        }
+
+        if ($msiexec.ExitCode -eq 1618) {
+            Write-ErrorMessage ('Winget-AutoUpdate install failed: Windows Installer was still busy with another installation after {0} retries and {1} seconds of waiting (msiexec exit code 1618). Re-run the installer once that installation has finished.' -f $busyRetries, $busyWaited)
+            return [pscustomobject]@{ Status = 'Failed'; Version = $pin.Version; FrameworkMissing = $false; RestartRequired = $false }
         }
 
         Write-ErrorMessage "Winget-AutoUpdate install failed (msiexec exit code $($msiexec.ExitCode))."
-        return [pscustomobject]@{ Status = 'Failed'; Version = $pin.Version; FrameworkMissing = $false }
+        return [pscustomobject]@{ Status = 'Failed'; Version = $pin.Version; FrameworkMissing = $false; RestartRequired = $false }
     }
     catch {
         Write-ErrorMessage "Failed to install Winget-AutoUpdate: $_"
-        return [pscustomobject]@{ Status = 'Failed'; Version = $pin.Version; FrameworkMissing = $false }
+        return [pscustomobject]@{ Status = 'Failed'; Version = $pin.Version; FrameworkMissing = $false; RestartRequired = $false }
     }
     finally {
         if ($stagingDir) {
@@ -6298,7 +6943,7 @@ function Test-WingetSources {
         Write-WarningMessage 'Winget source reset failed: it did not finish in time and was stopped.'
     }
     elseif ($reset.ExitCode -ne 0) {
-        Write-WarningMessage ('Winget source reset failed with exit code 0x{0:X8}.' -f [int]$reset.ExitCode)
+        Write-WarningMessage ('Winget source reset failed with exit code {0}.' -f (Format-WingetExitCode -ExitCode $reset.ExitCode))
     }
     else {
         Write-Info 'Source reset completed.'
@@ -6402,7 +7047,7 @@ function Initialize-WingetSourcesForUser {
         Write-WarningMessage 'Winget source agreements are not yet accepted for this account (0x8A150046).'
     }
     elseif ($null -ne $probe.ExitCode) {
-        Write-WarningMessage "Winget source update failed with exit code: $($probe.ExitCode)"
+        Write-WarningMessage ('Winget source update failed with exit code {0}.' -f (Format-WingetExitCode -ExitCode $probe.ExitCode))
     }
 
     # Cheapest rung first: register the App Installer payload already staged on this machine for this
@@ -6454,15 +7099,37 @@ function Initialize-WingetSourcesForUser {
 
 <#
 .SYNOPSIS
-    Installs a single winget package, retrying the transient 0x80073d19 session error with backoff.
+    Installs a single winget package, retrying the results that clear on their own: the 0x80073d19
+    session error, another installation in progress, and an app or file in use.
 .DESCRIPTION
     Runs `winget install` for one package id through Invoke-WingetProcess and reads winget's real
     process exit code from the result. Exit code 0x80073d19 (ERROR_INSTALL_USER_LOGOFF — "an error
     occurred because a user was logged off") is a transient MSIX/session-deployment race: an
     immediate retry simply hits the same race, which is why issues #81/#100/#102 left it unresolved.
     When that specific code is seen, this function waits with an increasing backoff and retries, up
-    to MaxAttempts. Any other exit code (success or a real failure) is returned immediately so the
-    caller can verify the result with `winget list` as before.
+    to MaxAttempts.
+
+    Two more results are retried (review finding P2-15), decided by their class in
+    Get-WingetExitCodeInfo:
+      - 0x8A150102 (INSTALL_INSTALL_IN_PROGRESS): Windows Installer was busy with another
+        installation (msiexec 1618), which it reports at once instead of waiting. Common on a fresh
+        PC whose management agent, OEM tools or Teams are still installing. This function waits
+        until Windows Installer is idle (Wait-WindowsInstallerIdle, checking every 15 seconds) and
+        retries, up to InstallInProgressRetries times, waiting at most InstallInProgressWaitSeconds
+        in all. Invoke-WingetInstall passes what is left of the run's 10-minute budget, so a machine
+        that stays busy costs the run 10 minutes at most, not 10 minutes per app.
+      - 0x8A150101, 0x8A150103 and 0x8A150111 (the app or its files are in use): one retry after
+        InUseRetryDelaySeconds.
+    0x8A15010A (a restart is required before the installer can run) is never retried: only a restart
+    changes it. Any other exit code (success or a real failure) is returned at once so the caller
+    can verify the result with `winget list` as before.
+
+    Restart required to finish (review finding P3-16): winget 1.7 and later report an MSI, WiX or
+    Burn installer's 3010 as exit 0 and print 'Restart your PC to finish installation.'; winget 1.6
+    and older exit 0x8A150109, and an installer that started a restart itself (MSI 1641) gives
+    0x8A15010B. RestartRequired says so for any of the three. The printed warning is matched in
+    English only; on other display languages the caller's pending-restart registry check is what
+    notices it.
 
     Each install has a time limit (Get-ProcessTimeoutSeconds WingetInstall, review finding P2-5):
     when it runs out, winget and the installer it started are stopped, and the result says TimedOut
@@ -6524,13 +7191,24 @@ function Initialize-WingetSourcesForUser {
     Pass --silent to winget. Invoke-WingetInstall passes its effective non-interactive state. When
     the parameter is not given, Test-EffectiveNonInteractive decides (e.g. for a script that calls
     the function on its own).
+.PARAMETER InstallInProgressRetries
+    How many times to retry after 0x8A150102 (another installation in progress). Default 3.
+.PARAMETER InstallInProgressWaitSeconds
+    The most this call may wait, in all, for Windows Installer to finish another installation.
+    Default 600 (10 minutes). 0: no wait, so 0x8A150102 is final at once.
+.PARAMETER InUseRetryDelaySeconds
+    Seconds to wait before the one retry after an in-use result. Default 60.
 .RETURNS
-    [hashtable] @{ ExitCode = <int|$null>; Attempts = <int>; SessionErrorExhausted = <bool>; MachineScopeFellBack = <bool>; LaunchErrorExhausted = <bool>; LaunchAttempts = <int>; LaunchError = <string|$null>; TimedOut = <bool>; TimeoutSeconds = <int>; InstallerLogPath = <string|$null> }
+    [hashtable] @{ ExitCode = <int|$null>; Attempts = <int>; SessionErrorExhausted = <bool>; MachineScopeFellBack = <bool>; LaunchErrorExhausted = <bool>; LaunchAttempts = <int>; LaunchError = <string|$null>; TimedOut = <bool>; TimeoutSeconds = <int>; InstallerLogPath = <string|$null>; InstallInProgressWaitedSeconds = <int>; RestartRequired = <bool> }
     SessionErrorExhausted is True only when every attempt failed with the session error.
+    InstallInProgressWaitedSeconds is how long this call waited for another installation to finish.
+    RestartRequired is True when the last attempt's result says a restart finishes the installation
+    (see the description); the caller decides from `winget list` whether the package installed.
     MachineScopeFellBack is True when the package had no machine-scope installer and the install
     was retried at winget's default scope. Attempts counts install attempts at the finally
-    selected scope; the one-time scope fallback does not consume a session-error attempt, and
-    neither does a failed launch (no process ran). LaunchAttempts counts failed winget launches.
+    selected scope, the retries after another installation in progress or an in-use result
+    included; the one-time scope fallback does not consume a session-error attempt, and neither
+    does a failed launch (no process ran). LaunchAttempts counts failed winget launches.
     LaunchErrorExhausted is True when winget.exe could not be launched: a transient launch failure
     through every launch attempt (issues #253/#258), or any other launch failure at once; ExitCode
     is $null in that case, since no process ran to report an exit code, and LaunchError is the last
@@ -6556,7 +7234,16 @@ function Install-WingetPackage {
         [int]$MaxLaunchAttempts = 5,
 
         [Parameter(Mandatory = $false)]
-        [switch]$Silent
+        [switch]$Silent,
+
+        [Parameter(Mandatory = $false)]
+        [int]$InstallInProgressRetries = 3,
+
+        [Parameter(Mandatory = $false)]
+        [int]$InstallInProgressWaitSeconds = 600,
+
+        [Parameter(Mandatory = $false)]
+        [int]$InUseRetryDelaySeconds = 60
     )
 
     # 0x80073D19 (ERROR_DEPLOYMENT_BLOCKED_BY_USER_LOG_OFF) as a signed Int32, which is how winget
@@ -6573,8 +7260,13 @@ function Install-WingetPackage {
     $timeoutSeconds = Get-ProcessTimeoutSeconds -Operation WingetInstall
 
     $attempt = 0
+    $sessionErrors = 0
     $delay = $InitialDelaySeconds
     $exitCode = 0
+    $installInProgressRetried = 0
+    $installInProgressWaited = 0
+    $inUseRetried = $false
+    $restartRequired = $false
     $useMachineScope = $true
     $machineScopeFellBack = $false
     $launchErrorExhausted = $false
@@ -6584,8 +7276,9 @@ function Install-WingetPackage {
     $timedOut = $false
     $installerLogPath = $null
 
-    while ($attempt -lt $MaxAttempts) {
+    while ($true) {
         $attempt++
+        $restartRequired = $false
 
         # The shared agreement/interactivity flags come from Get-WingetAgreementArgs (issue #230
         # follow-up): every other winget call in the module already passed them, but this one -
@@ -6672,33 +7365,78 @@ function Install-WingetPackage {
             continue
         }
 
-        # Anything other than the transient session error (success or a real failure) is final here;
-        # the caller verifies the actual install state with `winget list`.
-        if ($exitCode -ne $sessionLogoffExitCode) {
+        if ($exitCode -eq $sessionLogoffExitCode) {
+            $sessionErrors++
+            if ($sessionErrors -lt $MaxAttempts) {
+                Write-WarningMessage "Install of $PackageId hit transient session error 0x80073D19 (a user was logged off). Waiting ${delay}s before retry $($sessionErrors + 1) of ${MaxAttempts}..."
+                Start-Sleep -Seconds $delay
+                $delay = $delay * 2
+                continue
+            }
+            Write-WarningMessage "Install of $PackageId still failing with session error 0x80073D19 after ${MaxAttempts} attempts."
             break
         }
 
-        if ($attempt -lt $MaxAttempts) {
-            Write-WarningMessage "Install of $PackageId hit transient session error 0x80073D19 (a user was logged off). Waiting ${delay}s before retry $($attempt + 1) of ${MaxAttempts}..."
-            Start-Sleep -Seconds $delay
-            $delay = $delay * 2
+        $codeClass = ''
+        $codeInfo = Get-WingetExitCodeInfo -ExitCode $exitCode
+        if ($codeInfo) {
+            $codeClass = $codeInfo.Class
         }
-        else {
-            Write-WarningMessage "Install of $PackageId still failing with session error 0x80073D19 after ${MaxAttempts} attempts."
+
+        if ($codeClass -eq 'InstallInProgress') {
+            # Windows Installer returns 1618 at once while another installation holds it (review
+            # finding P2-15): wait for that installation, within this call's share of the budget.
+            $waitLeft = $InstallInProgressWaitSeconds - $installInProgressWaited
+            if ($installInProgressRetried -lt $InstallInProgressRetries -and $waitLeft -gt 0) {
+                $installInProgressRetried++
+                Write-WarningMessage ("Windows Installer is busy with another installation ({0}). Waiting for it to finish (at most {1} seconds) before retry {2} of {3} for {4}..." -f (Format-WingetExitCode -ExitCode $exitCode), $waitLeft, $installInProgressRetried, $InstallInProgressRetries, $PackageId)
+                $wait = Wait-WindowsInstallerIdle -MaximumSeconds $waitLeft
+                $installInProgressWaited += [int]$wait.WaitedSeconds
+                continue
+            }
+            Write-WarningMessage ("Windows Installer was still busy with another installation after {0} retries and {1} seconds of waiting; {2} was not installed." -f $installInProgressRetried, $installInProgressWaited, $PackageId)
+            break
         }
+
+        if ($codeClass -eq 'InUse' -and -not $inUseRetried) {
+            $inUseRetried = $true
+            Write-WarningMessage ("{0} could not be installed because it or its files are in use ({1}). Waiting {2}s before one more try..." -f $PackageId, (Format-WingetExitCode -ExitCode $exitCode), $InUseRetryDelaySeconds)
+            Start-Sleep -Seconds $InUseRetryDelaySeconds
+            continue
+        }
+
+        # Success, a restart-required result (0x8A15010A is never retried: only a restart changes
+        # it) or another failure: final here. The caller verifies the actual install state with
+        # `winget list`.
+        if ($codeClass -eq 'RestartRequired') {
+            $restartRequired = $true
+        }
+        elseif ($exitCode -eq 0) {
+            # winget 1.7+ turns an installer's 3010 into exit 0 and says so only in its output
+            # ('Restart your PC to finish installation.', English display language only).
+            foreach ($line in @($run.Output)) {
+                if ([string]$line -match 'Restart your PC to finish installation') {
+                    $restartRequired = $true
+                    break
+                }
+            }
+        }
+        break
     }
 
     return @{
-        ExitCode              = $exitCode
-        Attempts              = $attempt
-        SessionErrorExhausted = ($exitCode -eq $sessionLogoffExitCode)
-        MachineScopeFellBack  = $machineScopeFellBack
-        LaunchErrorExhausted  = $launchErrorExhausted
-        LaunchAttempts        = $launchAttempt
-        LaunchError           = $(if ($launchErrorExhausted) { $launchError } else { $null })
-        TimedOut              = $timedOut
-        TimeoutSeconds        = $timeoutSeconds
-        InstallerLogPath      = $installerLogPath
+        ExitCode                       = $exitCode
+        Attempts                       = $attempt
+        SessionErrorExhausted          = ($exitCode -eq $sessionLogoffExitCode)
+        MachineScopeFellBack           = $machineScopeFellBack
+        LaunchErrorExhausted           = $launchErrorExhausted
+        LaunchAttempts                 = $launchAttempt
+        LaunchError                    = $(if ($launchErrorExhausted) { $launchError } else { $null })
+        TimedOut                       = $timedOut
+        TimeoutSeconds                 = $timeoutSeconds
+        InstallerLogPath               = $installerLogPath
+        InstallInProgressWaitedSeconds = $installInProgressWaited
+        RestartRequired                = $restartRequired
     }
 }
 
@@ -6931,7 +7669,7 @@ function Install-MsixProvisionedPackage {
             return @{ ExitCode = $null; Installed = $false }
         }
         if ($download.ExitCode -ne 0) {
-            Write-ErrorMessage "winget download failed for $PackageId (exit code $($download.ExitCode))."
+            Write-ErrorMessage ('winget download failed for {0} (exit code {1}).' -f $PackageId, (Format-WingetExitCode -ExitCode $download.ExitCode))
             return @{ ExitCode = $download.ExitCode; Installed = $false }
         }
 
@@ -6991,6 +7729,10 @@ function Install-MsixProvisionedPackage {
     /passive). Install-AppWithVerification passes the run's effective non-interactive state, so an
     explicit -NonInteractive reaches PowerShell's install too. Not given: Install-WingetPackage
     decides.
+.PARAMETER InstallInProgressWaitSeconds
+    The most to wait, in all, for another installation to finish (Install-WingetPackage's parameter
+    of the same name), shared by the MSI and MSIX attempts. Install-AppWithVerification passes what
+    is left of the run's budget. Not given: Install-WingetPackage's default.
 .RETURNS
     [hashtable] @{ ExitCode = <int>; Installed = <bool>; Method = 'msi' | 'msix-native' | 'msix-provisioned' }
     The winget paths (msi, msix-native) return Install-WingetPackage's whole result with Installed
@@ -7007,7 +7749,10 @@ function Install-PowerShellLatest {
         [string]$PackageId = 'Microsoft.PowerShell',
 
         [Parameter(Mandatory = $false)]
-        [switch]$Silent
+        [switch]$Silent,
+
+        [Parameter(Mandatory = $false)]
+        [int]$InstallInProgressWaitSeconds
     )
 
     # 0x8A150010 (APPINSTALLER_CLI_ERROR_NO_APPLICABLE_INSTALLER) as a signed Int32 — what winget
@@ -7024,18 +7769,29 @@ function Install-PowerShellLatest {
         $installParameters['Silent'] = $Silent
     }
 
+    # The wait for another installation to finish (review finding P2-15) is one budget for both
+    # attempts below.
+    if ($PSBoundParameters.ContainsKey('InstallInProgressWaitSeconds')) {
+        $installParameters['InstallInProgressWaitSeconds'] = $InstallInProgressWaitSeconds
+    }
+
     # 1. Prefer the MSI while the latest version still ships one.
     $method = 'msi'
     $result = Install-WingetPackage @installParameters -InstallerType 'wix'
+    $installInProgressWaited = [int]$result.InstallInProgressWaitedSeconds
     if ($result.ExitCode -eq $noApplicableInstallerExitCode) {
         # 2. No MSI for the latest version (7.7+): install the latest MSIX machine-wide.
         Write-Info "No MSI is available for the latest $PackageId; installing the MSIX package instead."
         if ((Get-WindowsBuildNumber) -lt 26100) {
             $provision = Install-MsixProvisionedPackage -PackageId $PackageId
-            return @{ ExitCode = $provision.ExitCode; Installed = $provision.Installed; Method = 'msix-provisioned' }
+            return @{ ExitCode = $provision.ExitCode; Installed = $provision.Installed; Method = 'msix-provisioned'; InstallInProgressWaitedSeconds = $installInProgressWaited }
         }
         $method = 'msix-native'
+        if ($installParameters.ContainsKey('InstallInProgressWaitSeconds')) {
+            $installParameters['InstallInProgressWaitSeconds'] = [Math]::Max(0, $InstallInProgressWaitSeconds - $installInProgressWaited)
+        }
         $result = Install-WingetPackage @installParameters
+        $installInProgressWaited += [int]$result.InstallInProgressWaitedSeconds
     }
 
     # Install-WingetPackage's whole result (exit code, attempts, scope fallback, session and launch
@@ -7051,6 +7807,7 @@ function Install-PowerShellLatest {
         $outcome['ExitCode'] = $result.ExitCode
     }
     $outcome['Method'] = $method
+    $outcome['InstallInProgressWaitedSeconds'] = $installInProgressWaited
     $outcome['VerifyTimedOut'] = $false
     $outcome['VerifyLaunchFailed'] = $false
     $outcome['VerifyLaunchError'] = $null

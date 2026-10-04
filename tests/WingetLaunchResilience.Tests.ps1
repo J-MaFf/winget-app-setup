@@ -127,7 +127,7 @@ Describe 'Test-WingetLaunchable (review findings P2-8, P3-9)' {
         $result = Test-WingetLaunchable
 
         $result.Launchable | Should -BeFalse
-        $result.Reason | Should -Be "'winget --version' exited with 0x8A150002"
+        $result.Reason | Should -Be "'winget --version' exited with 0x8A150002 INVALID_CL_ARGUMENTS"
     }
 
     It 'Is not launchable when winget --version does not answer in time' {

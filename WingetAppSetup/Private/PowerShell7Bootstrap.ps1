@@ -808,7 +808,7 @@ function Invoke-PowerShell7Bootstrap {
                 Write-WarningMessage 'winget did not finish installing PowerShell 7 in time and was stopped.'
             }
             elseif ($wingetRun.ExitCode -ne 0) {
-                Write-WarningMessage ('winget could not install PowerShell 7 (exit code {0}).' -f $wingetRun.ExitCode)
+                Write-WarningMessage ('winget could not install PowerShell 7 (exit code {0}).' -f (Format-WingetExitCode -ExitCode $wingetRun.ExitCode))
                 if ($wingetRun.LogPath -and (Test-Path -LiteralPath $wingetRun.LogPath)) {
                     Write-Info "Installer log: $($wingetRun.LogPath)"
                 }

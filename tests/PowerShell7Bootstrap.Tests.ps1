@@ -979,7 +979,8 @@ Describe 'Invoke-PowerShell7Bootstrap' {
 
             $result | Should -Be 0
             Should -Invoke Invoke-WingetProcess -Times 1 -Exactly
-            Should -Invoke Write-WarningMessage -Times 1 -Exactly -ParameterFilter { $Message -eq 'winget could not install PowerShell 7 (exit code 1).' }
+            # Printed in hex like every winget exit code (Format-WingetExitCode, review finding P2-15).
+            Should -Invoke Write-WarningMessage -Times 1 -Exactly -ParameterFilter { $Message -eq 'winget could not install PowerShell 7 (exit code 0x00000001).' }
             Should -Invoke Install-PowerShell7FromMsi -Times 1 -Exactly
             Should -Invoke Start-Process -Times 1 -Exactly -ParameterFilter { $FilePath -eq 'C:\pf7\pwsh.exe' }
             Should -Invoke Invoke-RestMethod -Times 0 -ParameterFilter { $Uri -like '*install-powershell*' }

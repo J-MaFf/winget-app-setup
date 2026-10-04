@@ -174,6 +174,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- An install that hits another installation in progress now waits for it instead of failing at
+  once, a run that needs a restart to finish says so and exits 3010, and winget's exit codes are
+  named everywhere they are printed (review findings P2-15, P3-16):
+  - **Another installation in progress.** Windows Installer refuses a second installation at once
+    with `msiexec` 1618, which winget reports as `0x8A150102`. On a freshly enrolled PC that made
+    an app fail after one launch with no wait, reported as
+    `package not found after install; winget exit 0x8A150102`. `Install-WingetPackage` now waits
+    until Windows Installer is idle (`Wait-WindowsInstallerIdle`, which checks whether the
+    `Global\_MSIExecute` mutex exists every 15 seconds without taking it) and retries, up to 3
+    times. All of a run's waits, the Winget-AutoUpdate `msiexec` included (which now also waits out
+    1618 instead of reporting `Auto-updates: FAILED`), share one 10-minute budget that
+    `Invoke-WingetInstall` passes down through `Install-AppWithVerification` and
+    `Install-PowerShellLatest`, so a machine that stays busy costs a run 10 minutes at most.
+  - **In use.** `0x8A150101`, `0x8A150103` and `0x8A150111` (the app or its files are in use) get
+    one retry after 60 seconds.
+  - **Restart before installing.** `0x8A15010A` (for example Inno setup exit 8 while a Windows
+    Update restart is pending) is no longer retried in the retry pass, where it could only fail
+    again; the summary says
+    `Restart: REQUIRED before <app> can install - restart this PC, then re-run the installer.`
+  - **Restart to finish.** winget reports an MSI's 3010 as exit 0 plus a console warning, and the
+    run used to report a plain success with no notice. `Install-WingetPackage` returns
+    `RestartRequired` for winget's `Restart your PC to finish installation.` warning (English
+    display language only), `0x8A150109` (winget 1.6 and older) and `0x8A15010B` (MSI 1641), and
+    `Install-WingetAutoUpdate` for its `msiexec` 3010. `Invoke-WingetInstall` also reads Windows'
+    pending-restart state (`Get-PendingRestartState`: component servicing, Windows Update, and the
+    file replacements queued in `PendingFileRenameOperations`, leaving out queued deletes) before
+    and after the run. A run that needs a restart prints
+    `Restart: REQUIRED to finish this run - restart this PC before it is used (...)` and returns
+    exit code 3010 when nothing failed and winget still works (`Get-InstallerExitCode`: 1 > 2 >
+    3010 > 0, with room for code 8 between 2 and 3010). A restart that was already pending before
+    the run is reported at the start and next to the summary, without making the run 3010. An
+    installed app whose winget exit code was not 0 now says so instead of the code being dropped.
+  - **Named codes.** `Get-WingetExitCodeInfo` (`WingetAppSetup/Private/WingetResultCodes.ps1`) is
+    one table of the winget exit codes the installer knows, with winget's symbol, a meaning and a
+    class that drives the retries above. `Format-WingetExitCode` prints `0x8A150102
+    INSTALL_INSTALL_IN_PROGRESS` wherever a winget exit code is printed (failure reasons, the
+    `winget list` check, `winget --version`, the source update and reset, `winget download`, the
+    PowerShell 7 bootstrap's winget install). When winget reported why an install failed, the
+    failure reason now starts with what the code means, for example
+    `another installation was in progress (Windows Installer was busy) - re-run the installer once it has finished`,
+    or `winget install failed` for a code the table does not know, instead of
+    `package not found after install`, which is kept for an install winget reported as successful.
 - A run on a machine where winget cannot be started now stops trying after one app, instead of
   spending about 24 minutes on retries and then reporting every app as
   `package not found after install` (review findings P2-8, P2-9, P2-10, P3-7, P3-8, P3-9, P3-10):

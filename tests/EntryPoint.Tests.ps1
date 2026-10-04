@@ -331,6 +331,17 @@ Describe 'The entry block exits with the code Invoke-WingetInstall returns (wgt-
         $result.Output | Should -Not -Match 'UNEXPECTED ERROR|stopped before it finished'
     }
 
+    # 3010: success, restart required (review finding P3-16), which RMM tools read as a soft reboot.
+    # Windows only: elsewhere a process exit code keeps only its low 8 bits (3010 arrives as 194).
+    It 'Exits 3010 when Invoke-WingetInstall returns 3010 after its summary, without a failure notice' -Skip:(-not $IsWindows) {
+        $path = New-FaultInjectedInstaller -Name 'returns-3010.ps1' -Body '$script:InstallerPendingExitCode = 3010; return 3010'
+
+        $result = Invoke-ChildInstaller -Arguments @('-File', $path, '-SkipSystemCheck', '-NonInteractive')
+
+        $result.ExitCode | Should -Be 3010
+        $result.Output | Should -Not -Match 'UNEXPECTED ERROR|stopped before it finished|stopped early'
+    }
+
     It 'Exits with the returned code under irm | iex too (non-interactive, e.g. RMM or CI)' {
         $path = New-FaultInjectedInstaller -Name 'returns-2-iex.ps1' -Body 'return 2'
 
