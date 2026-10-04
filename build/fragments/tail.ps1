@@ -7,30 +7,59 @@ if ($MyInvocation.InvocationName -ne '.') {
     # the same console, forwarding the caller's switches; the exit below propagates the
     # relaunched run's exit code. Everything the bootstrap touches MUST stay 5.1-runtime
     # compatible - see WingetAppSetup/Private/PowerShell7Bootstrap.ps1.
+    # Forcing an exit code after an abort is only safe where the process ends anyway: when this
+    # process was started to run this script (`pwsh -File <path>`, including the bootstrap and
+    # elevation relaunches), or in a non-interactive session (RMM, CI, `pwsh -Command "irm | iex"`).
+    # In a console where someone typed `irm ... | iex` or `.\winget-app-install.ps1`, exiting would
+    # close their window and take the error with it.
+    $launchedForScript = $false
+    if ($PSCommandPath) {
+        foreach ($commandLineArgument in [Environment]::GetCommandLineArgs()) {
+            try {
+                if ([System.IO.Path]::GetFullPath($commandLineArgument) -eq $PSCommandPath) {
+                    $launchedForScript = $true
+                    break
+                }
+            }
+            catch {
+                # Not a path (e.g. a switch with characters GetFullPath rejects); keep looking.
+            }
+        }
+    }
+    $forceExitCodeOnAbort = $launchedForScript -or (Test-EffectiveNonInteractive -NonInteractive:$NonInteractive)
+
     if ($PSVersionTable.PSVersion.Major -lt 7) {
         # try/catch, not a bare `exit (Invoke-PowerShell7Bootstrap ...)`: a statement-terminating
         # error inside the bootstrap would abort only that `exit` statement, and 5.1 would then fall
         # through into the PowerShell-7-only body below.
         $bootstrapExitCode = 1
+        $bootstrapReturned = $false
         try {
             $bootstrapExitCode = Invoke-PowerShell7Bootstrap -WhatIf:$WhatIf -NonInteractive:$NonInteractive -SkipSystemCheck:$SkipSystemCheck -CommandPath $PSCommandPath
+            $bootstrapReturned = $true
         }
         catch {
             Write-ErrorMessage "The PowerShell 7 bootstrap failed unexpectedly: $_"
             $bootstrapExitCode = 1
+            $bootstrapReturned = $true
+        }
+        finally {
+            # Ctrl+C or a console stop reaches this 5.1 parent too while it waits for the relaunched
+            # pwsh (same console), and cannot be caught; without this the parent would exit 0.
+            if (-not $bootstrapReturned -and $forceExitCodeOnAbort) {
+                $host.SetShouldExit(5)
+            }
         }
         exit $bootstrapExitCode
     }
 
     # Abort guard state (see the catch and finally at the end of this block). Reset on every run:
     # under irm | iex these live in the caller's scope and would otherwise carry over into a second
-    # run in the same console. Exit-Installer sets InstallerExitRequested before every intended exit.
+    # run in the same console. Exit-Installer sets InstallerExitRequested before every intended
+    # exit; Invoke-WingetInstall records InstallerPendingExitCode once it has decided its exit code.
     $script:InstallerExitRequested = $false
+    $script:InstallerPendingExitCode = $null
     $installerRunCompleted = $false
-    # Forcing exit code 5 after an outside stop is only safe where the process ends anyway: a run
-    # from a file, or a non-interactive session (RMM, CI, `pwsh -Command "irm ... | iex"`). In an
-    # interactive irm | iex console it would close the user's window on Ctrl+C.
-    $forceExitCodeOnAbort = [bool]$PSCommandPath -or (Test-EffectiveNonInteractive -NonInteractive:$NonInteractive)
 
     # Persistent transcript (issue #189): a failed install on a remote user's machine used to
     # leave zero artifacts. The log lands under ProgramData - not the elevating account's TEMP -
@@ -96,17 +125,37 @@ if ($MyInvocation.InvocationName -ne '.') {
         if ($_.ScriptStackTrace) {
             Write-ErrorMessage "Stack trace:`n$($_.ScriptStackTrace)"
         }
-        Exit-Installer 5
+        if ($forceExitCodeOnAbort) {
+            Exit-Installer 5
+        }
+        # Interactive console: exiting would close the window (under irm | iex the host itself),
+        # so leave the error on screen and the code in $LASTEXITCODE instead.
+        if ($script:InstallLogPath) {
+            Write-Info "Full transcript of this run: $script:InstallLogPath"
+        }
+        $script:InstallerExitRequested = $true
+        $global:LASTEXITCODE = 5
     }
     finally {
         # An outside stop (Ctrl+C, closing the console, or an installer such as an MSI upgrade of
         # PowerShell itself sending a console stop - issue #283) skips the catch above, because a
-        # PipelineStoppedException cannot be caught. A run from a file would then exit 0. Only .NET
-        # calls here: while the pipeline is stopping, PowerShell commands (our Write-* helpers
-        # included) fail.
+        # PipelineStoppedException cannot be caught. A run from a file would then exit 0.
         if (-not $installerRunCompleted -and -not $script:InstallerExitRequested -and $forceExitCodeOnAbort) {
-            [Console]::Error.WriteLine('The run was stopped before it finished (exit code 5).')
-            $host.SetShouldExit(5)
+            if ($null -ne $script:InstallerPendingExitCode) {
+                # Stopped at the final 'Press any key' prompt: the run had already finished and
+                # decided its exit code, so report that rather than an abort.
+                $host.SetShouldExit([int]$script:InstallerPendingExitCode)
+            }
+            else {
+                $abortMessage = 'The run was stopped before it finished (exit code 5).'
+                try {
+                    Write-ErrorMessage $abortMessage
+                }
+                catch {
+                    [Console]::Error.WriteLine($abortMessage)
+                }
+                $host.SetShouldExit(5)
+            }
         }
         # Exit statements inside Invoke-WingetInstall unwind through here (PowerShell runs finally
         # blocks for the exit statement), so the transcript closes on every path.

@@ -15,7 +15,9 @@
       2. Every APPLICABLE app in Get-DefaultAppCatalog (minus -SkipApps) resolves via
          `winget list --exact --id <id>`, classified by $LASTEXITCODE captured immediately
          after the call (exit 0 = installed; nonzero = missing).
-      3. The Winget-AutoUpdate scheduled task exists ('\WAU\Winget-AutoUpdate').
+      3. The Winget-AutoUpdate scheduled task exists ('\WAU\Winget-AutoUpdate') - or, when
+         Microsoft.WindowsAppRuntime.1.8 is missing (as on windows-latest), that WAU was NOT
+         installed and the latest transcript says 'Auto-updates: NOT CONFIGURED'.
       4. The installed WAU version matches the pin in Get-WauPin (read from the registry via the
          module's private Get-InstalledWauInfo helper, dot-sourced from the checkout).
       5. A transcript exists under %ProgramData%\winget-app-setup\logs and contains the
@@ -171,41 +173,57 @@ foreach ($app in $appsToAssert) {
     }
 }
 
-# --- 3. WAU scheduled task exists -----------------------------------------------------------
-try {
-    $null = Get-ScheduledTask -TaskName 'Winget-AutoUpdate' -TaskPath '\WAU\' -ErrorAction Stop
-    Add-AssertionResult -Name 'WAU scheduled task exists' -Passed $true -Detail '\WAU\Winget-AutoUpdate found'
-}
-catch {
-    Add-AssertionResult -Name 'WAU scheduled task exists' -Passed $false -Detail "Get-ScheduledTask: $($_.Exception.Message)"
-}
-
-# --- 4. Installed WAU version matches the pin ------------------------------------------------
-# Compared at the PIN's precision: the WAU MSI registers a DisplayVersion with an extra build
-# segment (e.g. 2.12.0.2118 for the pinned 2.12.0), so a strict [version] equality would
-# false-fail on every correctly provisioned machine. This mirrors the product's own comparison
-# (Install-WingetAutoUpdate upgrades only when installed -lt pin).
-$pin = Get-WauPin
-$installedWau = Get-InstalledWauInfo
-$pinFieldCount = ($pin.Version -split '\.').Count
-$installedAtPinPrecision = $null
-if ($installedWau.Version) {
-    try {
-        $installedAtPinPrecision = $installedWau.Version.ToString($pinFieldCount)
-    }
-    catch {
-        # Installed version carries fewer fields than the pin - treat as a plain mismatch below.
-        $installedAtPinPrecision = $installedWau.Version.ToString()
-    }
-}
-if ($installedAtPinPrecision -and $installedAtPinPrecision -eq ([version]$pin.Version).ToString($pinFieldCount)) {
-    Add-AssertionResult -Name 'WAU version matches pin' -Passed $true -Detail "installed v$($installedWau.Version) = pinned v$($pin.Version) (at pin precision)"
-}
-elseif ($installedWau.Version) {
-    Add-AssertionResult -Name 'WAU version matches pin' -Passed $false -Detail "installed v$($installedWau.Version) != pinned v$($pin.Version)"
+# --- 3/4. Winget-AutoUpdate: installed at the pin, unless the framework gate skipped it ------
+# The installer deliberately skips WAU when Microsoft.WindowsAppRuntime.1.8 is missing (every WAU
+# run installs the newest winget, which needs it; without it WAU wedged winget - issues #279/#284).
+# The windows-latest (Server 2025) runner lacks that framework, so there the correct outcome is
+# NO WAU plus an 'Auto-updates: NOT CONFIGURED' line in the latest real-run transcript. An unknown
+# framework status falls back to expecting WAU, matching the installer's own fallback.
+$frameworkStatus = Get-WindowsAppRuntimeStatus
+$realRunTranscripts = @(Get-ChildItem -Path (Join-Path $env:ProgramData 'winget-app-setup\logs') -Filter 'install-*.log' -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -notmatch '-whatif\.log$' } |
+        Sort-Object LastWriteTime)
+if ($frameworkStatus.Present -eq $false) {
+    $wauTask = Get-ScheduledTask -TaskName 'Winget-AutoUpdate' -TaskPath '\WAU\' -ErrorAction SilentlyContinue
+    Add-AssertionResult -Name 'WAU not installed without the WindowsAppRuntime framework' -Passed (-not $wauTask) -Detail $(if ($wauTask) { '\WAU\Winget-AutoUpdate exists although the framework is missing' } else { "skipped as designed ($($frameworkStatus.Detail))" })
+    $latestRealRun = if ($realRunTranscripts.Count -gt 0) { Get-Content -Path $realRunTranscripts[-1].FullName -Raw } else { '' }
+    Add-AssertionResult -Name "Transcript reports 'Auto-updates: NOT CONFIGURED'" -Passed ($latestRealRun -match 'Auto-updates: NOT CONFIGURED') -Detail $(if ($realRunTranscripts.Count -gt 0) { $realRunTranscripts[-1].Name } else { 'no real-run transcript' })
 }
 else {
-    Add-AssertionResult -Name 'WAU version matches pin' -Passed $false -Detail "installed WAU version could not be read (pinned v$($pin.Version))"
+    try {
+        $null = Get-ScheduledTask -TaskName 'Winget-AutoUpdate' -TaskPath '\WAU\' -ErrorAction Stop
+        Add-AssertionResult -Name 'WAU scheduled task exists' -Passed $true -Detail '\WAU\Winget-AutoUpdate found'
+    }
+    catch {
+        Add-AssertionResult -Name 'WAU scheduled task exists' -Passed $false -Detail "Get-ScheduledTask: $($_.Exception.Message)"
+    }
+
+    # Compared at the PIN's precision: the WAU MSI registers a DisplayVersion with an extra build
+    # segment (e.g. 2.12.0.2118 for the pinned 2.12.0), so a strict [version] equality would
+    # false-fail on every correctly provisioned machine. This mirrors the product's own comparison
+    # (Install-WingetAutoUpdate upgrades only when installed -lt pin).
+    $pin = Get-WauPin
+    $installedWau = Get-InstalledWauInfo
+    $pinFieldCount = ($pin.Version -split '\.').Count
+    $installedAtPinPrecision = $null
+    if ($installedWau.Version) {
+        try {
+            $installedAtPinPrecision = $installedWau.Version.ToString($pinFieldCount)
+        }
+        catch {
+            # Installed version carries fewer fields than the pin - treat as a plain mismatch below.
+            $installedAtPinPrecision = $installedWau.Version.ToString()
+        }
+    }
+    if ($installedAtPinPrecision -and $installedAtPinPrecision -eq ([version]$pin.Version).ToString($pinFieldCount)) {
+        Add-AssertionResult -Name 'WAU version matches pin' -Passed $true -Detail "installed v$($installedWau.Version) = pinned v$($pin.Version) (at pin precision)"
+    }
+    elseif ($installedWau.Version) {
+        Add-AssertionResult -Name 'WAU version matches pin' -Passed $false -Detail "installed v$($installedWau.Version) != pinned v$($pin.Version)"
+    }
+    else {
+        Add-AssertionResult -Name 'WAU version matches pin' -Passed $false -Detail "installed WAU version could not be read (pinned v$($pin.Version))"
+    }
 }
 
 # --- 5. Transcript exists and carries the build stamp ----------------------------------------

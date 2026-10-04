@@ -169,6 +169,8 @@ Describe 'Winget-AutoUpdate integration (issue #168)' {
             Should -Invoke Remove-Item -Times 1 -Exactly -ParameterFilter {
                 $Path -eq 'C:\ProgramData\winget-app-setup\wau-msi-test' -and $Recurse
             }
+            # A fresh install gets UPDATESATLOGON=0 from the MSI; no task edit needed.
+            Should -Invoke Disable-WauLogonTrigger -Times 0 -Exactly
         }
 
         It 'reports AlreadyPresent (with the installed version) when WAU is at the pinned version' {
@@ -183,6 +185,7 @@ Describe 'Winget-AutoUpdate integration (issue #168)' {
             $result.Version | Should -Be ([version](Get-WauPin).Version)
             Should -Invoke Invoke-WebRequest -Times 0 -Exactly
             Should -Invoke Start-Process -Times 0 -Exactly
+            Should -Invoke Disable-WauLogonTrigger -Times 1 -Exactly
         }
 
         It 'upgrades in place when the installed version is older than the pin (issue #186)' {
@@ -226,6 +229,7 @@ Describe 'Winget-AutoUpdate integration (issue #168)' {
             $result.Status | Should -Be 'AlreadyPresent'
             $result.Version | Should -BeNullOrEmpty
             Should -Invoke Start-Process -Times 0 -Exactly
+            Should -Invoke Disable-WauLogonTrigger -Times 1 -Exactly
         }
 
         It 'aborts without installing when the MSI hash does not match, and still cleans the staging directory' {
@@ -324,8 +328,22 @@ Describe 'Winget-AutoUpdate integration (issue #168)' {
             Should -Invoke Invoke-WebRequest -Times 0 -Exactly
         }
 
+        It 'previews leaving an existing WAU in place and removing its logon trigger under -WhatIf' {
+            Mock Test-WauInstalled { $true }
+            Mock Invoke-WebRequest { throw 'should not download under WhatIf' }
+            $script:infos = @()
+            Mock Write-Info { $script:infos += $Message }
+
+            $result = Install-WingetAutoUpdate -WhatIf
+
+            $result.Status | Should -Be 'DryRun'
+            ($script:infos -join "`n") | Should -Match 'already installed: would leave it in place and remove its at-logon trigger'
+            Should -Invoke Disable-WauLogonTrigger -Times 0 -Exactly
+            Should -Invoke Get-WindowsAppRuntimeStatus -Times 0 -Exactly
+        }
+
         It 'returns dry-run without side effects under -WhatIf' {
-            Mock Test-WauInstalled { throw 'should not probe under WhatIf' }
+            Mock Test-WauInstalled { $false }
             Mock Invoke-WebRequest { throw 'should not download under WhatIf' }
 
             $result = Install-WingetAutoUpdate -WhatIf
@@ -484,9 +502,12 @@ Describe 'Disable-WauLogonTrigger' {
     BeforeEach {
         Mock Write-Info { }
         Mock Write-WarningMessage { }
+        Mock Test-Path { $false }
         Mock Test-Path { $true } -ParameterFilter { $LiteralPath -eq 'HKLM:\SOFTWARE\Romanitho\Winget-AutoUpdate' }
         Mock Set-ItemProperty { }
-        Mock Set-ScheduledTask { }
+        # -RemoveParameterType: on Windows the real Set-ScheduledTask types -Trigger as
+        # CimInstance[], which would reject these fake triggers before the mock body runs.
+        Mock Set-ScheduledTask { } -RemoveParameterType Trigger
     }
 
     It 'removes the logon trigger, keeps the weekly one, and records WAU_UpdatesAtLogon = 0' {
@@ -518,11 +539,11 @@ Describe 'Disable-WauLogonTrigger' {
 
     It 'warns instead of throwing when the task cannot be changed' {
         Mock Get-ScheduledTask { [pscustomobject]@{ Triggers = @((New-FakeTrigger 'MSFT_TaskLogonTrigger'), (New-FakeTrigger 'MSFT_TaskWeeklyTrigger')) } }
-        Mock Set-ScheduledTask { throw 'Access is denied.' }
+        Mock Set-ScheduledTask { throw 'Access is denied.' } -RemoveParameterType Trigger
 
         { Disable-WauLogonTrigger } | Should -Not -Throw
 
-        Should -Invoke Write-WarningMessage -Times 1 -Exactly -ParameterFilter { $Message -match 'Could not remove the Winget-AutoUpdate at-logon trigger' }
+        Should -Invoke Write-WarningMessage -Times 1 -Exactly -ParameterFilter { $Message -match 'Could not remove the Winget-AutoUpdate at-logon trigger: Access is denied' }
     }
 }
 

@@ -218,7 +218,17 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
             # a deliberate exit from Ctrl+C or a console-stop event, which it reports as exit 5.
             $installBody = $script:InvokeWingetInstallDef
             $installBody | Should -Not -Match '(?m)^\s*Exit(\s|$)'
-            ([regex]::Matches($installBody, '(?m)^\s*Exit-Installer\b')).Count | Should -Be 6
+            ([regex]::Matches($installBody, '(?m)^\s*Exit-Installer\b')).Count | Should -Be 7
+        }
+
+        It 'Reports a declined or failed elevation as exit 1, not as an unexpected error (pinned structurally - driving it live would Exit)' {
+            $installBody = $script:InvokeWingetInstallDef
+            $installBody | Should -Match '(?s)\$relaunchedIn = Restart-WithElevation .*?if \(-not \$relaunchedIn\) \{\s*Write-ErrorMessage ''Elevation was declined or failed.*?Exit-Installer 1\s*\}\s*Exit-Installer'
+        }
+
+        It 'Records the decided exit code before the final prompt, so Ctrl+C there keeps it' {
+            $installBody = $script:InvokeWingetInstallDef
+            $installBody | Should -Match '(?s)\$script:InstallerPendingExitCode = \$exitCode.*?ReadKey'
         }
 
         It 'Tracks failures as objects with reasons and renders the failed-apps summary (issue #189)' {

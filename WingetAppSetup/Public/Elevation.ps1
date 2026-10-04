@@ -61,8 +61,9 @@ function Test-IsAdmin {
     Optional switches/arguments to forward to the elevated relaunch (for example, '-WhatIf'). These
     are appended after the -File argument so the elevated session inherits the caller's intent.
 .RETURNS
-    [string] Returns 'WindowsTerminal' when the Windows Terminal relaunch path succeeds, otherwise
-    returns 'PowerShell'.
+    [string] Returns 'WindowsTerminal' when the Windows Terminal relaunch path succeeds,
+    'PowerShell' when the plain PowerShell relaunch starts, and $null when neither could be started
+    (e.g. the UAC prompt was declined).
 #>
 function Restart-WithElevation {
     param (
@@ -105,6 +106,14 @@ function Restart-WithElevation {
     }
 
     Write-Info 'Relaunching script in standard PowerShell window with elevated privileges...'
-    Start-Process $PowerShellExecutable -ArgumentList $commandArguments -Verb RunAs
-    return 'PowerShell'
+    try {
+        Start-Process $PowerShellExecutable -ArgumentList $commandArguments -Verb RunAs -ErrorAction Stop
+        return 'PowerShell'
+    }
+    catch {
+        # Most often a declined UAC prompt ('The operation was canceled by the user'). Callers
+        # treat $null as "no elevated run was started".
+        Write-ErrorMessage "Could not start an elevated PowerShell window: $_"
+        return $null
+    }
 }

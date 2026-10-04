@@ -5,7 +5,9 @@
     We deploy a specific, SHA256-verified WAU release rather than tracking latest, and disable WAU's
     own self-update, so an upstream change can never roll out to managed machines unreviewed. Bump
     all fields together to move to a newer WAU (verify the new SHA256 against the winget-pkgs manifest
-    for that version). See issue #168.
+    for that version). See issue #168. Also re-check the WindowsAppRuntime requirement in
+    Get-WindowsAppRuntimeStatus (WauSupport.ps1): WAU installs the newest winget release, so the
+    framework that release needs is what decides whether WAU is safe to deploy.
 #>
 function Get-WauPin {
     return @{
@@ -86,7 +88,13 @@ function Install-WingetAutoUpdate {
     $pin = Get-WauPin
 
     if ($WhatIf) {
-        Write-Info "[DRY-RUN] Would install Winget-AutoUpdate $($pin.Version) (weekly updates on Tuesdays at 02:00, not at logon, Full notifications, self-update disabled), if Microsoft.WindowsAppRuntime.1.8 is present."
+        # Read-only probe, so the preview matches what a real run would do on this machine.
+        if (Test-WauInstalled) {
+            Write-Info '[DRY-RUN] Winget-AutoUpdate is already installed: would leave it in place and remove its at-logon trigger if it has one (WAU_UpdatesAtLogon = 0).'
+        }
+        else {
+            Write-Info "[DRY-RUN] Would install Winget-AutoUpdate $($pin.Version) (weekly updates on Tuesdays at 02:00, not at logon, Full notifications, self-update disabled), if Microsoft.WindowsAppRuntime.1.8 is present."
+        }
         return [pscustomobject]@{ Status = 'DryRun'; Version = $pin.Version; FrameworkMissing = $false }
     }
 
@@ -107,7 +115,7 @@ function Install-WingetAutoUpdate {
             Write-Success "Winget-AutoUpdate is already installed ($versionLabel); leaving its configuration unchanged apart from the at-logon trigger."
             [void](Disable-WauLogonTrigger)
             if ($frameworkMissing) {
-                Write-ErrorMessage "Winget-AutoUpdate is installed, but Microsoft.WindowsAppRuntime.1.8 is missing ($($framework.Detail)). Its next update run may install a winget that cannot start and leave winget unusable. Update App Installer from the Microsoft Store, or uninstall Winget-AutoUpdate on this machine."
+                Write-ErrorMessage "Winget-AutoUpdate is installed, but Microsoft.WindowsAppRuntime.1.8 is missing ($($framework.Detail)). Its next update run may install a winget that cannot start and leave winget unusable. Install the Windows App Runtime 1.8 (update App Installer from the Microsoft Store, or install Microsoft's Windows App SDK 1.8 runtime), or uninstall Winget-AutoUpdate on this machine."
             }
             return [pscustomobject]@{ Status = 'AlreadyPresent'; Version = $installed.Version; FrameworkMissing = $frameworkMissing }
         }
@@ -117,7 +125,7 @@ function Install-WingetAutoUpdate {
     }
 
     if ($frameworkMissing) {
-        Write-ErrorMessage "Winget-AutoUpdate was NOT installed: Microsoft.WindowsAppRuntime.1.8 is missing ($($framework.Detail)). Every WAU update run installs the newest winget, which needs that framework, so WAU would leave winget unusable here. Update App Installer from the Microsoft Store, then re-run this installer."
+        Write-ErrorMessage "Winget-AutoUpdate was NOT installed: Microsoft.WindowsAppRuntime.1.8 is missing ($($framework.Detail)). Every WAU update run installs the newest winget, which needs that framework, so WAU would leave winget unusable here. Install the Windows App Runtime 1.8 (update App Installer from the Microsoft Store, or install Microsoft's Windows App SDK 1.8 runtime), then re-run this installer. On a newly set-up PC this usually clears once the Store has updated App Installer."
         return [pscustomobject]@{ Status = 'FrameworkMissing'; Version = $pin.Version; FrameworkMissing = $true }
     }
 

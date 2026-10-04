@@ -83,15 +83,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `UPDATESATLOGON=0`, machines deployed earlier have the at-logon trigger removed and
   `WAU_UpdatesAtLogon` set to 0 on the next run (`Disable-WauLogonTrigger`), and a run that starts
   while a WAU task is running waits up to 15 minutes for it (`Wait-WauIdle`). The schedule is
-  described correctly now: weekly on Tuesdays at 02:00, not "weekly at 2 AM".
+  described correctly now: weekly on Tuesdays at 02:00, not "weekly at 2 AM". `-WhatIf` previews
+  the logon-trigger change on machines that already have WAU, and `e2e/Assert-Install.ps1` expects
+  no WAU plus `Auto-updates: NOT CONFIGURED` on runners without the framework (windows-latest).
 - An aborted run no longer exits 0. The entry script's top-level `try/finally` (`build/fragments/tail.ps1`)
   had no catch, so inside it a .NET exception, a method call on `$null` or a parameter-binding
   error anywhere in the run aborted everything - no retry pass, no summary - and the process exited
   0; an outside stop (Ctrl+C, or an MSI upgrade of PowerShell sending a console stop, as in #283)
   did the same under `-File`. The entry script now catches unexpected errors, writes the message,
   position and stack trace into the transcript and exits 5; a completion marker in its `finally`
-  turns an uncaught stop into exit 5 for file and non-interactive runs (interactive `irm | iex`
-  consoles are left open). Every intended exit goes through the new `Exit-Installer`, so the guard
+  turns an uncaught stop into exit 5. Both force the exit only when the process was started to run
+  the script or the session is non-interactive: in a console where someone typed `irm | iex` or
+  `.\winget-app-install.ps1`, the error stays on screen with `$LASTEXITCODE` = 5 instead of the
+  window closing. Ctrl+C at the final "Press any key" prompt keeps the run's own exit code, the 5.1
+  bootstrap parent no longer exits 0 when stopped, and a declined UAC prompt reports
+  "Elevation was declined or failed" with exit 1 (`Restart-WithElevation` returns `$null` instead of
+  throwing). Every intended exit goes through the new `Exit-Installer`, so the guard
   can tell the two apart. Windows Terminal setup, Winget-AutoUpdate setup and the end-of-run winget
   check are each isolated, so one failing helper can no longer skip the summary or the exit-code
   decision, and the 5.1 bootstrap dispatch is wrapped so an error there cannot fall through into

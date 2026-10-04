@@ -147,7 +147,10 @@ function Get-WindowsAppRuntimePackageInfo {
 .SYNOPSIS
     Reports whether the WindowsAppRuntime framework that current winget releases need is present.
 .DESCRIPTION
-    Every winget release since 1.12 depends on Microsoft.WindowsAppRuntime.1.8 >= 8000.616.304.0.
+    Every winget release from 1.12 through 1.29 (checked against DesktopAppInstaller_Dependencies.json)
+    depends on Microsoft.WindowsAppRuntime.1.8 >= 8000.616.304.0. WAU installs the newest release,
+    so re-check this requirement when winget moves to a newer framework (and when Get-WauPin is
+    bumped); a newer framework family does NOT satisfy a dependency on 1.8.
     Winget-AutoUpdate's Install-Prerequisites runs on every WAU SYSTEM run and provisions the
     newest winget release from GitHub without that framework. On a machine that lacks it (no
     Microsoft Store updates, Server SKUs) the new App Installer cannot register and the old one is

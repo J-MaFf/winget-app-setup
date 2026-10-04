@@ -90,6 +90,17 @@ Describe 'Restart-WithElevation' {
         $result | Should -Be 'PowerShell'
     }
 
+    It 'Returns $null (no elevated run started) when the PowerShell relaunch fails, e.g. a declined UAC prompt' {
+        # Previously this threw; inside the entry script's abort guard a declined UAC prompt then
+        # read as 'UNEXPECTED ERROR' with exit 5. Callers now report it as an elevation failure.
+        Mock Get-Command { return $null } -ParameterFilter { $Name -eq 'wt.exe' }
+        Mock Start-Process { throw 'This command cannot be run due to the error: The operation was canceled by the user.' } -ParameterFilter { $FilePath -eq 'pwsh.exe' }
+
+        $result = Restart-WithElevation -PowerShellExecutable 'pwsh.exe' -ScriptPath 'C:\script.ps1'
+
+        $result | Should -BeNullOrEmpty
+    }
+
     It 'Should forward AdditionalArguments to the elevated relaunch' {
         Mock Get-Command { return $null } -ParameterFilter { $Name -eq 'wt.exe' }
         Mock Start-Process { } -ParameterFilter { $FilePath -eq 'pwsh.exe' }

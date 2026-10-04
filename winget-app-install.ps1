@@ -58,12 +58,12 @@ param (
 # This script is assembled from the WingetAppSetup module by build/Build-WingetInstallScript.ps1.
 # Edit the function source under WingetAppSetup/Public and WingetAppSetup/Private, then re-run the
 # build to regenerate this file. See readme.md ("Project layout") for details.
-# Build id: 1.0.0+3a8c3183 (module version + SHA256 fragment of the function content; issue #189).
+# Build id: 1.0.0+827f9580 (module version + SHA256 fragment of the function content; issue #189).
 # ------------------------------------------------------------------------------------------------
 
 # Content-derived build identity, logged at startup so a transcript from a remote machine
 # identifies exactly which installer build produced it (issue #189).
-$script:InstallerBuildId = '1.0.0+3a8c3183'
+$script:InstallerBuildId = '1.0.0+827f9580'
 
 # ------------------------------------------------Functions------------------------------------------------
 
@@ -1697,7 +1697,10 @@ function Get-WindowsAppRuntimePackageInfo {
 .SYNOPSIS
     Reports whether the WindowsAppRuntime framework that current winget releases need is present.
 .DESCRIPTION
-    Every winget release since 1.12 depends on Microsoft.WindowsAppRuntime.1.8 >= 8000.616.304.0.
+    Every winget release from 1.12 through 1.29 (checked against DesktopAppInstaller_Dependencies.json)
+    depends on Microsoft.WindowsAppRuntime.1.8 >= 8000.616.304.0. WAU installs the newest release,
+    so re-check this requirement when winget moves to a newer framework (and when Get-WauPin is
+    bumped); a newer framework family does NOT satisfy a dependency on 1.8.
     Winget-AutoUpdate's Install-Prerequisites runs on every WAU SYSTEM run and provisions the
     newest winget release from GitHub without that framework. On a machine that lacks it (no
     Microsoft Store updates, Server SKUs) the new App Installer cannot register and the old one is
@@ -2841,8 +2844,9 @@ function Test-IsAdmin {
     Optional switches/arguments to forward to the elevated relaunch (for example, '-WhatIf'). These
     are appended after the -File argument so the elevated session inherits the caller's intent.
 .RETURNS
-    [string] Returns 'WindowsTerminal' when the Windows Terminal relaunch path succeeds, otherwise
-    returns 'PowerShell'.
+    [string] Returns 'WindowsTerminal' when the Windows Terminal relaunch path succeeds,
+    'PowerShell' when the plain PowerShell relaunch starts, and $null when neither could be started
+    (e.g. the UAC prompt was declined).
 #>
 function Restart-WithElevation {
     param (
@@ -2885,8 +2889,16 @@ function Restart-WithElevation {
     }
 
     Write-Info 'Relaunching script in standard PowerShell window with elevated privileges...'
-    Start-Process $PowerShellExecutable -ArgumentList $commandArguments -Verb RunAs
-    return 'PowerShell'
+    try {
+        Start-Process $PowerShellExecutable -ArgumentList $commandArguments -Verb RunAs -ErrorAction Stop
+        return 'PowerShell'
+    }
+    catch {
+        # Most often a declined UAC prompt ('The operation was canceled by the user'). Callers
+        # treat $null as "no elevated run was started".
+        Write-ErrorMessage "Could not start an elevated PowerShell window: $_"
+        return $null
+    }
 }
 
 # --- Install ---
@@ -3027,7 +3039,11 @@ function Invoke-WingetInstall {
             if ($WhatIf) { $elevationArgs += '-WhatIf' }
             if ($effectiveNonInteractive) { $elevationArgs += '-NonInteractive' }
             if ($SkipSystemCheck) { $elevationArgs += '-SkipSystemCheck' }
-            Restart-WithElevation -PowerShellExecutable $psExecutable -ScriptPath $PSCommandPath -AdditionalArguments $elevationArgs | Out-Null
+            $relaunchedIn = Restart-WithElevation -PowerShellExecutable $psExecutable -ScriptPath $PSCommandPath -AdditionalArguments $elevationArgs
+            if (-not $relaunchedIn) {
+                Write-ErrorMessage 'Elevation was declined or failed, so nothing was installed. Re-run the installer and approve the administrator (UAC) prompt.'
+                Exit-Installer 1
+            }
             Exit-Installer
         }
         else {
@@ -3375,7 +3391,7 @@ function Invoke-WingetInstall {
             }
         }
         'DryRun' { Write-Info "[DRY-RUN] Auto-updates: Would configure Winget-AutoUpdate v$($wauResult.Version)." }
-        'FrameworkMissing' { Write-ErrorMessage 'Auto-updates: NOT CONFIGURED - Microsoft.WindowsAppRuntime.1.8 is missing, and Winget-AutoUpdate would leave winget unusable without it. Update App Installer from the Microsoft Store, then re-run the installer.' }
+        'FrameworkMissing' { Write-ErrorMessage 'Auto-updates: NOT CONFIGURED - Microsoft.WindowsAppRuntime.1.8 is missing, and Winget-AutoUpdate would leave winget unusable without it. Install the Windows App Runtime 1.8 (or let the Microsoft Store update App Installer), then re-run the installer.' }
         default { Write-ErrorMessage 'Auto-updates: FAILED - Winget-AutoUpdate could not be installed; apps will not update automatically. Re-run the installer to retry.' }
     }
 
@@ -3391,6 +3407,11 @@ function Invoke-WingetInstall {
         Write-Info "Full transcript of this run: $script:InstallLogPath"
     }
 
+    $exitCode = Get-InstallerExitCode -FailedAppCount $failedApps.Count -WingetUsable $wingetUsableAtEnd
+    # Recorded before the final prompt: Ctrl+C there stops a run that has already finished, and
+    # the entry script's abort guard then reports this code instead of an abort (5).
+    $script:InstallerPendingExitCode = $exitCode
+
     # Keep the console window open until the user presses a key. Skipped in non-interactive mode
     # so unattended runs never block (and the failure exit below stays reachable).
     if (-not $effectiveNonInteractive) {
@@ -3398,7 +3419,6 @@ function Invoke-WingetInstall {
         [void][System.Console]::ReadKey($true)
     }
 
-    $exitCode = Get-InstallerExitCode -FailedAppCount $failedApps.Count -WingetUsable $wingetUsableAtEnd
     if ($exitCode -ne 0) {
         Exit-Installer $exitCode
     }
@@ -3966,7 +3986,9 @@ function Set-WindowsTerminalDefaults {
     We deploy a specific, SHA256-verified WAU release rather than tracking latest, and disable WAU's
     own self-update, so an upstream change can never roll out to managed machines unreviewed. Bump
     all fields together to move to a newer WAU (verify the new SHA256 against the winget-pkgs manifest
-    for that version). See issue #168.
+    for that version). See issue #168. Also re-check the WindowsAppRuntime requirement in
+    Get-WindowsAppRuntimeStatus (WauSupport.ps1): WAU installs the newest winget release, so the
+    framework that release needs is what decides whether WAU is safe to deploy.
 #>
 function Get-WauPin {
     return @{
@@ -4047,7 +4069,13 @@ function Install-WingetAutoUpdate {
     $pin = Get-WauPin
 
     if ($WhatIf) {
-        Write-Info "[DRY-RUN] Would install Winget-AutoUpdate $($pin.Version) (weekly updates on Tuesdays at 02:00, not at logon, Full notifications, self-update disabled), if Microsoft.WindowsAppRuntime.1.8 is present."
+        # Read-only probe, so the preview matches what a real run would do on this machine.
+        if (Test-WauInstalled) {
+            Write-Info '[DRY-RUN] Winget-AutoUpdate is already installed: would leave it in place and remove its at-logon trigger if it has one (WAU_UpdatesAtLogon = 0).'
+        }
+        else {
+            Write-Info "[DRY-RUN] Would install Winget-AutoUpdate $($pin.Version) (weekly updates on Tuesdays at 02:00, not at logon, Full notifications, self-update disabled), if Microsoft.WindowsAppRuntime.1.8 is present."
+        }
         return [pscustomobject]@{ Status = 'DryRun'; Version = $pin.Version; FrameworkMissing = $false }
     }
 
@@ -4068,7 +4096,7 @@ function Install-WingetAutoUpdate {
             Write-Success "Winget-AutoUpdate is already installed ($versionLabel); leaving its configuration unchanged apart from the at-logon trigger."
             [void](Disable-WauLogonTrigger)
             if ($frameworkMissing) {
-                Write-ErrorMessage "Winget-AutoUpdate is installed, but Microsoft.WindowsAppRuntime.1.8 is missing ($($framework.Detail)). Its next update run may install a winget that cannot start and leave winget unusable. Update App Installer from the Microsoft Store, or uninstall Winget-AutoUpdate on this machine."
+                Write-ErrorMessage "Winget-AutoUpdate is installed, but Microsoft.WindowsAppRuntime.1.8 is missing ($($framework.Detail)). Its next update run may install a winget that cannot start and leave winget unusable. Install the Windows App Runtime 1.8 (update App Installer from the Microsoft Store, or install Microsoft's Windows App SDK 1.8 runtime), or uninstall Winget-AutoUpdate on this machine."
             }
             return [pscustomobject]@{ Status = 'AlreadyPresent'; Version = $installed.Version; FrameworkMissing = $frameworkMissing }
         }
@@ -4078,7 +4106,7 @@ function Install-WingetAutoUpdate {
     }
 
     if ($frameworkMissing) {
-        Write-ErrorMessage "Winget-AutoUpdate was NOT installed: Microsoft.WindowsAppRuntime.1.8 is missing ($($framework.Detail)). Every WAU update run installs the newest winget, which needs that framework, so WAU would leave winget unusable here. Update App Installer from the Microsoft Store, then re-run this installer."
+        Write-ErrorMessage "Winget-AutoUpdate was NOT installed: Microsoft.WindowsAppRuntime.1.8 is missing ($($framework.Detail)). Every WAU update run installs the newest winget, which needs that framework, so WAU would leave winget unusable here. Install the Windows App Runtime 1.8 (update App Installer from the Microsoft Store, or install Microsoft's Windows App SDK 1.8 runtime), then re-run this installer. On a newly set-up PC this usually clears once the Store has updated App Installer."
         return [pscustomobject]@{ Status = 'FrameworkMissing'; Version = $pin.Version; FrameworkMissing = $true }
     }
 
@@ -5098,30 +5126,59 @@ if ($MyInvocation.InvocationName -ne '.') {
     # the same console, forwarding the caller's switches; the exit below propagates the
     # relaunched run's exit code. Everything the bootstrap touches MUST stay 5.1-runtime
     # compatible - see WingetAppSetup/Private/PowerShell7Bootstrap.ps1.
+    # Forcing an exit code after an abort is only safe where the process ends anyway: when this
+    # process was started to run this script (`pwsh -File <path>`, including the bootstrap and
+    # elevation relaunches), or in a non-interactive session (RMM, CI, `pwsh -Command "irm | iex"`).
+    # In a console where someone typed `irm ... | iex` or `.\winget-app-install.ps1`, exiting would
+    # close their window and take the error with it.
+    $launchedForScript = $false
+    if ($PSCommandPath) {
+        foreach ($commandLineArgument in [Environment]::GetCommandLineArgs()) {
+            try {
+                if ([System.IO.Path]::GetFullPath($commandLineArgument) -eq $PSCommandPath) {
+                    $launchedForScript = $true
+                    break
+                }
+            }
+            catch {
+                # Not a path (e.g. a switch with characters GetFullPath rejects); keep looking.
+            }
+        }
+    }
+    $forceExitCodeOnAbort = $launchedForScript -or (Test-EffectiveNonInteractive -NonInteractive:$NonInteractive)
+
     if ($PSVersionTable.PSVersion.Major -lt 7) {
         # try/catch, not a bare `exit (Invoke-PowerShell7Bootstrap ...)`: a statement-terminating
         # error inside the bootstrap would abort only that `exit` statement, and 5.1 would then fall
         # through into the PowerShell-7-only body below.
         $bootstrapExitCode = 1
+        $bootstrapReturned = $false
         try {
             $bootstrapExitCode = Invoke-PowerShell7Bootstrap -WhatIf:$WhatIf -NonInteractive:$NonInteractive -SkipSystemCheck:$SkipSystemCheck -CommandPath $PSCommandPath
+            $bootstrapReturned = $true
         }
         catch {
             Write-ErrorMessage "The PowerShell 7 bootstrap failed unexpectedly: $_"
             $bootstrapExitCode = 1
+            $bootstrapReturned = $true
+        }
+        finally {
+            # Ctrl+C or a console stop reaches this 5.1 parent too while it waits for the relaunched
+            # pwsh (same console), and cannot be caught; without this the parent would exit 0.
+            if (-not $bootstrapReturned -and $forceExitCodeOnAbort) {
+                $host.SetShouldExit(5)
+            }
         }
         exit $bootstrapExitCode
     }
 
     # Abort guard state (see the catch and finally at the end of this block). Reset on every run:
     # under irm | iex these live in the caller's scope and would otherwise carry over into a second
-    # run in the same console. Exit-Installer sets InstallerExitRequested before every intended exit.
+    # run in the same console. Exit-Installer sets InstallerExitRequested before every intended
+    # exit; Invoke-WingetInstall records InstallerPendingExitCode once it has decided its exit code.
     $script:InstallerExitRequested = $false
+    $script:InstallerPendingExitCode = $null
     $installerRunCompleted = $false
-    # Forcing exit code 5 after an outside stop is only safe where the process ends anyway: a run
-    # from a file, or a non-interactive session (RMM, CI, `pwsh -Command "irm ... | iex"`). In an
-    # interactive irm | iex console it would close the user's window on Ctrl+C.
-    $forceExitCodeOnAbort = [bool]$PSCommandPath -or (Test-EffectiveNonInteractive -NonInteractive:$NonInteractive)
 
     # Persistent transcript (issue #189): a failed install on a remote user's machine used to
     # leave zero artifacts. The log lands under ProgramData - not the elevating account's TEMP -
@@ -5187,17 +5244,37 @@ if ($MyInvocation.InvocationName -ne '.') {
         if ($_.ScriptStackTrace) {
             Write-ErrorMessage "Stack trace:`n$($_.ScriptStackTrace)"
         }
-        Exit-Installer 5
+        if ($forceExitCodeOnAbort) {
+            Exit-Installer 5
+        }
+        # Interactive console: exiting would close the window (under irm | iex the host itself),
+        # so leave the error on screen and the code in $LASTEXITCODE instead.
+        if ($script:InstallLogPath) {
+            Write-Info "Full transcript of this run: $script:InstallLogPath"
+        }
+        $script:InstallerExitRequested = $true
+        $global:LASTEXITCODE = 5
     }
     finally {
         # An outside stop (Ctrl+C, closing the console, or an installer such as an MSI upgrade of
         # PowerShell itself sending a console stop - issue #283) skips the catch above, because a
-        # PipelineStoppedException cannot be caught. A run from a file would then exit 0. Only .NET
-        # calls here: while the pipeline is stopping, PowerShell commands (our Write-* helpers
-        # included) fail.
+        # PipelineStoppedException cannot be caught. A run from a file would then exit 0.
         if (-not $installerRunCompleted -and -not $script:InstallerExitRequested -and $forceExitCodeOnAbort) {
-            [Console]::Error.WriteLine('The run was stopped before it finished (exit code 5).')
-            $host.SetShouldExit(5)
+            if ($null -ne $script:InstallerPendingExitCode) {
+                # Stopped at the final 'Press any key' prompt: the run had already finished and
+                # decided its exit code, so report that rather than an abort.
+                $host.SetShouldExit([int]$script:InstallerPendingExitCode)
+            }
+            else {
+                $abortMessage = 'The run was stopped before it finished (exit code 5).'
+                try {
+                    Write-ErrorMessage $abortMessage
+                }
+                catch {
+                    [Console]::Error.WriteLine($abortMessage)
+                }
+                $host.SetShouldExit(5)
+            }
         }
         # Exit statements inside Invoke-WingetInstall unwind through here (PowerShell runs finally
         # blocks for the exit statement), so the transcript closes on every path.

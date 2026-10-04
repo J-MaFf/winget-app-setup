@@ -246,6 +246,24 @@ Describe 'Aborted runs exit non-zero (review P1: tail.ps1 try/finally exited 0)'
         $result.Output | Should -Match 'The run was stopped before it finished'
     }
 
+    It 'Keeps the decided exit code when the run is stopped at the final prompt' {
+        # Invoke-WingetInstall records InstallerPendingExitCode before 'Press any key to exit';
+        # Ctrl+C there must not turn a finished run into an abort (5).
+        $path = New-FaultInjectedInstaller -Name 'stopped-at-prompt.ps1' -Body '$script:InstallerPendingExitCode = 1; throw [System.Management.Automation.PipelineStoppedException]::new()'
+
+        $result = Invoke-ChildInstaller -Arguments @('-File', $path, '-SkipSystemCheck', '-NonInteractive')
+
+        $result.ExitCode | Should -Be 1
+        $result.Output | Should -Not -Match 'stopped before it finished'
+    }
+
+    It 'Only force-exits after an unexpected error where the process ends anyway (file or non-interactive run)' {
+        # In an interactive console (irm | iex, or .\winget-app-install.ps1 typed at a prompt),
+        # exiting would close the window and the error with it.
+        $script:installerText | Should -Match '(?s)if \(\$forceExitCodeOnAbort\) \{\s*Exit-Installer 5\s*\}'
+        $script:installerText | Should -Match '\$forceExitCodeOnAbort = \$launchedForScript -or \(Test-EffectiveNonInteractive'
+    }
+
     It 'Keeps an intended exit code (Exit-Installer) instead of reporting it as an abort' {
         $path = New-FaultInjectedInstaller -Name 'intended.ps1' -Body 'Exit-Installer 3'
 

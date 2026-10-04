@@ -12,7 +12,20 @@ scripts target **Windows PowerShell / PowerShell 7 on Windows**; they cannot run
 Linux or macOS because they depend on `winget`, the `Microsoft.WinGet.Client` module, and
 Windows-only cmdlets.
 
-## Current State — 2026-09-18
+## Current State — 2026-10-04
+
+In review (branch `claude/trusting-dirac-foyiaa`, from the 2026-10-03 whole-repo review): **the red
+E2E was mostly self-inflicted.** The installer started Winget-AutoUpdate's first run in the middle of
+its own run (`RUN_WAU=YES`), and every WAU run calls `Install-Prerequisites`, which provisions the
+newest winget from GitHub without the `Microsoft.WindowsAppRuntime.1.8` framework it needs, then
+resets winget's sources and upgrades apps (PowerShell included). On the Server 2025 runner, which
+lacks the framework, that is the #279/#284 wedge; the PowerShell upgrade underneath the running
+installer is the most likely cause of the #283 console stop. The older "runner image" / "Store
+servicing" explanation below is superseded. The branch drops `RUN_WAU=YES`, installs WAU last and
+only when the framework is present (the runner now reports `Auto-updates: NOT CONFIGURED`), removes
+WAU's at-logon run, waits for a running WAU before using winget, makes a run that leaves winget
+unusable exit 2, and makes an aborted run exit 5 instead of 0. #279, #283 and #284 stay open until
+an E2E run on this branch confirms it.
 
 In progress: **E2E: App Installer 1.29.290.0 vs 1.26.510.0 AppX conflict, missing
 WindowsAppRuntime.1.8** ([#279](https://github.com/J-MaFf/winget-app-setup/issues/279)) — two

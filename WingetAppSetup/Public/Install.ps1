@@ -135,7 +135,11 @@ function Invoke-WingetInstall {
             if ($WhatIf) { $elevationArgs += '-WhatIf' }
             if ($effectiveNonInteractive) { $elevationArgs += '-NonInteractive' }
             if ($SkipSystemCheck) { $elevationArgs += '-SkipSystemCheck' }
-            Restart-WithElevation -PowerShellExecutable $psExecutable -ScriptPath $PSCommandPath -AdditionalArguments $elevationArgs | Out-Null
+            $relaunchedIn = Restart-WithElevation -PowerShellExecutable $psExecutable -ScriptPath $PSCommandPath -AdditionalArguments $elevationArgs
+            if (-not $relaunchedIn) {
+                Write-ErrorMessage 'Elevation was declined or failed, so nothing was installed. Re-run the installer and approve the administrator (UAC) prompt.'
+                Exit-Installer 1
+            }
             Exit-Installer
         }
         else {
@@ -483,7 +487,7 @@ function Invoke-WingetInstall {
             }
         }
         'DryRun' { Write-Info "[DRY-RUN] Auto-updates: Would configure Winget-AutoUpdate v$($wauResult.Version)." }
-        'FrameworkMissing' { Write-ErrorMessage 'Auto-updates: NOT CONFIGURED - Microsoft.WindowsAppRuntime.1.8 is missing, and Winget-AutoUpdate would leave winget unusable without it. Update App Installer from the Microsoft Store, then re-run the installer.' }
+        'FrameworkMissing' { Write-ErrorMessage 'Auto-updates: NOT CONFIGURED - Microsoft.WindowsAppRuntime.1.8 is missing, and Winget-AutoUpdate would leave winget unusable without it. Install the Windows App Runtime 1.8 (or let the Microsoft Store update App Installer), then re-run the installer.' }
         default { Write-ErrorMessage 'Auto-updates: FAILED - Winget-AutoUpdate could not be installed; apps will not update automatically. Re-run the installer to retry.' }
     }
 
@@ -499,6 +503,11 @@ function Invoke-WingetInstall {
         Write-Info "Full transcript of this run: $script:InstallLogPath"
     }
 
+    $exitCode = Get-InstallerExitCode -FailedAppCount $failedApps.Count -WingetUsable $wingetUsableAtEnd
+    # Recorded before the final prompt: Ctrl+C there stops a run that has already finished, and
+    # the entry script's abort guard then reports this code instead of an abort (5).
+    $script:InstallerPendingExitCode = $exitCode
+
     # Keep the console window open until the user presses a key. Skipped in non-interactive mode
     # so unattended runs never block (and the failure exit below stays reachable).
     if (-not $effectiveNonInteractive) {
@@ -506,7 +515,6 @@ function Invoke-WingetInstall {
         [void][System.Console]::ReadKey($true)
     }
 
-    $exitCode = Get-InstallerExitCode -FailedAppCount $failedApps.Count -WingetUsable $wingetUsableAtEnd
     if ($exitCode -ne 0) {
         Exit-Installer $exitCode
     }
