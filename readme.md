@@ -249,9 +249,9 @@ Invoke-Pester .\tests
 ```
 
 The suite also runs on Linux and macOS (PowerShell 7 with Pester 6): `tests/TestHelpers.ps1`
-stands in for the Windows-only commands the tests mock, so only one known test fails there
-(`Write-Table` prints nothing without a console; see CLAUDE.md, Testing). No test depends on
-whether the runner is elevated: the tests mock `Test-IsAdmin`. The Windows CI run stays the verdict.
+stands in for the Windows-only commands the tests mock, so no test is known to fail there and any
+failure is new. No test depends on whether the runner is elevated: the tests mock `Test-IsAdmin`.
+The Windows CI run stays the verdict.
 
 ### One-time setup: local pre-commit drift check
 
