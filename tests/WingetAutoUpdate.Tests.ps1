@@ -1124,7 +1124,8 @@ Describe 'Winget-AutoUpdate integration (issue #168)' {
 
             $result = Uninstall-WingetAutoUpdate
 
-            $result | Should -Be $true
+            $result.Succeeded | Should -BeTrue
+            $result.RestartRequired | Should -BeFalse
             Should -Invoke Invoke-ExternalProcess -Times 1 -Exactly -ParameterFilter {
                 $FilePath -eq 'msiexec.exe' -and $ArgumentString -match '/x' -and
                 $ArgumentString -match ([regex]::Escape('{11111111-2222-3333-4444-555555555555}')) -and
@@ -1139,7 +1140,7 @@ Describe 'Winget-AutoUpdate integration (issue #168)' {
 
             $result = Uninstall-WingetAutoUpdate
 
-            $result | Should -Be $true
+            $result.Succeeded | Should -BeTrue
             Should -Invoke Invoke-ExternalProcess -Times 1 -Exactly -ParameterFilter {
                 $FilePath -eq 'msiexec.exe' -and $ArgumentString -match '/x' -and
                 $ArgumentString -match ([regex]::Escape((Get-WauPin).ProductCode))
@@ -1151,15 +1152,39 @@ Describe 'Winget-AutoUpdate integration (issue #168)' {
             Mock Get-InstalledWauInfo { [pscustomobject]@{ Version = [version]'2.9.0'; ProductCode = '{11111111-2222-3333-4444-555555555555}' } }
             Mock Invoke-ExternalProcess { New-TestProcessResult -TimedOut }
 
-            Uninstall-WingetAutoUpdate | Should -Be $false
+            (Uninstall-WingetAutoUpdate).Succeeded | Should -BeFalse
             Should -Invoke Write-ErrorMessage -Times 1 -Exactly -ParameterFilter { $Message -match 'did not finish in time' }
+        }
+
+        It 'reports a removal msiexec finishes at the next restart (3010) as removed, restart required' {
+            Mock Test-WauInstalled { $true }
+            Mock Get-InstalledWauInfo { [pscustomobject]@{ Version = [version]'2.9.0'; ProductCode = '{11111111-2222-3333-4444-555555555555}' } }
+            Mock Invoke-ExternalProcess { New-TestProcessResult -ExitCode 3010 }
+
+            $result = Uninstall-WingetAutoUpdate
+
+            $result.Succeeded | Should -BeTrue
+            $result.RestartRequired | Should -BeTrue
+            Should -Invoke Write-Success -Times 1 -Exactly -ParameterFilter { $Message -match 'a restart finishes removing it: msiexec exit code 3010' }
+        }
+
+        It 'reports any other msiexec exit code as a failure' {
+            Mock Test-WauInstalled { $true }
+            Mock Get-InstalledWauInfo { [pscustomobject]@{ Version = [version]'2.9.0'; ProductCode = '{11111111-2222-3333-4444-555555555555}' } }
+            Mock Invoke-ExternalProcess { New-TestProcessResult -ExitCode 1603 }
+
+            $result = Uninstall-WingetAutoUpdate
+
+            $result.Succeeded | Should -BeFalse
+            $result.RestartRequired | Should -BeFalse
+            Should -Invoke Write-ErrorMessage -Times 1 -Exactly -ParameterFilter { $Message -match 'msiexec exit code 1603' }
         }
 
         It 'is a no-op when WAU is not installed' {
             Mock Test-WauInstalled { $false }
             Mock Invoke-ExternalProcess { throw 'should not run msiexec when WAU is absent' }
 
-            (Uninstall-WingetAutoUpdate) | Should -Be $true
+            (Uninstall-WingetAutoUpdate).Succeeded | Should -BeTrue
             Should -Invoke Invoke-ExternalProcess -Times 0 -Exactly
         }
 
@@ -1169,8 +1194,10 @@ Describe 'Winget-AutoUpdate integration (issue #168)' {
             Mock Invoke-ExternalProcess { New-TestProcessResult -ExitCode 1603 }
             $logPath = Join-Path $TestDrive 'wau-msi-uninstall-1.log'
 
-            Uninstall-WingetAutoUpdate | Should -Be $false
+            $result = Uninstall-WingetAutoUpdate
 
+            $result.Succeeded | Should -BeFalse
+            $result.RestartRequired | Should -BeFalse
             Should -Invoke Invoke-ExternalProcess -Times 1 -Exactly -ParameterFilter { $ArgumentString -eq "/x {11111111-2222-3333-4444-555555555555} /qn /norestart /l*v `"$logPath`"" }
             Should -Invoke Write-ErrorMessage -Times 1 -Exactly -ParameterFilter { $Message -eq "Winget-AutoUpdate uninstall failed (msiexec exit code 1603). msiexec log: $logPath" }
         }
@@ -1188,8 +1215,10 @@ Describe 'Winget-AutoUpdate integration (issue #168)' {
             }
             Mock Wait-WindowsInstallerIdle { [pscustomobject]@{ WaitedSeconds = 20; Busy = $false } }
 
-            Uninstall-WingetAutoUpdate | Should -Be $true
+            $result = Uninstall-WingetAutoUpdate
 
+            $result.Succeeded | Should -BeTrue
+            $result.RestartRequired | Should -BeFalse
             $script:msiexecRuns | Should -Be 2
             Should -Invoke Wait-WindowsInstallerIdle -Times 1 -Exactly -ParameterFilter { $MaximumSeconds -eq 600 }
         }

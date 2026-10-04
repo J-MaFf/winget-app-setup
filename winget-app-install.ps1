@@ -61,12 +61,12 @@ param (
 # This script is assembled from the WingetAppSetup module by build/Build-WingetInstallScript.ps1.
 # Edit the function source under WingetAppSetup/Public and WingetAppSetup/Private, then re-run the
 # build to regenerate this file. See readme.md ("Project layout") for details.
-# Build id: 1.0.0+e2654a24 (module version + SHA256 fragment of this whole script; issue #189).
+# Build id: 1.0.0+daecfe38 (module version + SHA256 fragment of this whole script; issue #189).
 # ------------------------------------------------------------------------------------------------
 
 # Content-derived build identity, logged at startup so a transcript from a remote machine
 # identifies exactly which installer build produced it (issue #189).
-$script:InstallerBuildId = '1.0.0+e2654a24'
+$script:InstallerBuildId = '1.0.0+daecfe38'
 
 # ------------------------------------------------Functions------------------------------------------------
 
@@ -89,9 +89,14 @@ $script:InstallerBuildId = '1.0.0+e2654a24'
         Started from a window that is not elevated, the uninstaller relaunches itself in Windows
         PowerShell, which can remove PowerShell 7.
       - Microsoft.WindowsTerminal when Windows Terminal hosts this session
-        (Test-WindowsTerminalHostsCurrentSession: inside a Windows Terminal tab, or Windows Terminal
-        is the default terminal application, which hands every new console window to it).
-    The reason says how to remove the app instead.
+        (Test-WindowsTerminalHostsCurrentSession: inside a Windows Terminal tab, below a
+        WindowsTerminal.exe process, or the default terminal application is set to Windows Terminal,
+        which hands every new console window to it).
+    The reason says how to remove the app instead. Not detected: Windows' automatic choice of
+    default terminal ('Let Windows decide', which on Windows 11 picks Windows Terminal when it is
+    installed). A window handed to Windows Terminal that way carries none of the signals above, so
+    there the uninstaller can remove the Windows Terminal hosting its own window: to remove Windows
+    Terminal on such a machine, run the uninstaller from a Windows Console Host window.
 .PARAMETER PackageId
     The catalog app's winget package id.
 .RETURNS
@@ -107,9 +112,59 @@ function Get-HostingShellSkipReason {
         return 'this uninstaller is running in PowerShell 7; to remove it, run winget-app-uninstall.ps1 from Windows PowerShell'
     }
     if ($PackageId -eq 'Microsoft.WindowsTerminal' -and (Test-WindowsTerminalHostsCurrentSession)) {
-        return 'Windows Terminal hosts this window, or is the default terminal application, so removing it would close this window; to remove it, set the default terminal application to Windows Console Host and run winget-app-uninstall.ps1 from a window Windows Terminal does not host'
+        return 'Windows Terminal hosts this window, or is set as the default terminal application, so removing it would close this window; to remove it, set the default terminal application to Windows Console Host and run winget-app-uninstall.ps1 from a window Windows Terminal does not host'
     }
     return $null
+}
+
+<#
+.SYNOPSIS
+    Returns whether a `winget uninstall` result says the app was removed and a restart finishes it.
+.DESCRIPTION
+    winget's uninstall flow has no restart result of its own, unlike its install flow (which
+    Test-WingetRestartRequiredResult reads). Any non-zero return from the app's uninstaller,
+    restart codes included, ends `winget uninstall` with 0x8A150030
+    (APPINSTALLER_CLI_ERROR_EXEC_UNINSTALL_COMMAND_FAILED), after winget prints the uninstaller's
+    own return code: 'Uninstall failed with exit code: 3010' (Workflows/UninstallFlow.cpp,
+    ReportUninstallerResult). For an MSI, --silent runs `msiexec /x <code> /quiet /norestart`, which
+    returns 3010 (ERROR_SUCCESS_REBOOT_REQUIRED) when files still in use are removed at the next
+    restart, and 1641 (ERROR_SUCCESS_REBOOT_INITIATED) when the uninstaller started a restart: both
+    are successes. So the result is True for exit 0x8A150030 whose output carries 3010 or 1641 as a
+    number of its own. The message around the number is translated on other display languages, so
+    only the number is matched; a line with a backslash (winget's 'Installer log is available at'
+    path) is not read.
+.PARAMETER ExitCode
+    winget's exit code, or $null when it did not run to the end.
+.PARAMETER Output
+    What winget printed (Invoke-WingetProcess's Output).
+.RETURNS
+    [bool]
+#>
+function Test-WingetUninstallRestartRequiredResult {
+    param (
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [Nullable[int]]$ExitCode,
+
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [object[]]$Output
+    )
+
+    # 0x8A150030 APPINSTALLER_CLI_ERROR_EXEC_UNINSTALL_COMMAND_FAILED as a signed Int32.
+    if ($null -eq $ExitCode -or $ExitCode -ne -1978335184) {
+        return $false
+    }
+    foreach ($line in @($Output)) {
+        $text = [string]$line
+        if ($text.Contains('\')) {
+            continue
+        }
+        if ($text -match '(?<![\w.])(3010|1641)(?![\w.])') {
+            return $true
+        }
+    }
+    return $false
 }
 
 <#
@@ -134,9 +189,10 @@ function Get-HostingShellSkipReason {
          (review finding P3-18): output echoed into the console and the transcript, the installer's
          log written next to it when there is a run log folder, and the process stopped when the
          limit runs out. --silent always: without it winget runs an app's interactive uninstall
-         command, which can wait for a click nobody makes. Exit 0 is Uninstalled. A result that
-         says a restart finishes it (Test-WingetRestartRequiredResult) is Uninstalled with
-         RestartRequired. Anything else is Failed.
+         command, which can wait for a click nobody makes. Exit 0 is Uninstalled. An uninstaller
+         that returned 3010 or 1641, which winget reports as a failure
+         (Test-WingetUninstallRestartRequiredResult), is Uninstalled with RestartRequired. Anything
+         else is Failed.
     The installed check comes first, unlike the install pipeline's condition-first order, so an app
     that is not on the machine is reported as not installed, not as a shell or an app this tool
     does not manage.
@@ -154,7 +210,7 @@ function Get-HostingShellSkipReason {
                           'UninstallLaunchFailed' | 'UninstallTimeout' | 'UninstallFailed' when Failed
         Reason          = the text the caller shows in parentheses after the app id
         ExitCode        = the exit code of the winget call that decided a failure, or $null
-        RestartRequired = True when the uninstall said a restart finishes it
+        RestartRequired = True when the app's uninstaller said a restart finishes removing it
     }
 #>
 function Uninstall-CatalogApp {
@@ -241,7 +297,7 @@ function Uninstall-CatalogApp {
         return $result
     }
 
-    $restartRequired = Test-WingetRestartRequiredResult -ExitCode $run.ExitCode -Output $run.Output
+    $restartRequired = Test-WingetUninstallRestartRequiredResult -ExitCode $run.ExitCode -Output $run.Output
     if ($run.ExitCode -eq 0 -or $restartRequired) {
         $result.Status = 'Uninstalled'
         $result.RestartRequired = [bool]$restartRequired
@@ -9123,7 +9179,8 @@ function Test-SystemRequirements {
          default-terminal setting that still names it is removed (Reset-WindowsTerminalDelegation).
       5. Winget-AutoUpdate (and the legacy scheduled-update task) is removed last, and only when no
          app failed: an app that could not be removed is still on the machine and keeps its
-         updates until a later run removes it.
+         updates until a later run removes it. The messages that say Winget-AutoUpdate is kept
+         appear only when it is installed (Test-WauInstalled).
 .PARAMETER WhatIf
     Dry run: the read-only checks run and the summary shows what a real run would remove. Nothing is
     uninstalled or changed, and nothing is installed (the winget setup only checks).
@@ -9139,11 +9196,14 @@ function Test-SystemRequirements {
 .NOTES
     Exit codes: 0 = every app was removed, was not installed, or was left alone on purpose (a shell
     this run depends on, or an app whose catalog condition does not hold here), and
-    Winget-AutoUpdate was removed or was not installed; 1 = an app could not be removed or checked
-    (Winget-AutoUpdate is then kept), or Winget-AutoUpdate could not be removed; 2 = winget cannot
-    be started for this account, so nothing was removed; 3 = the app list has invalid entries or is
-    empty. A dry run returns 0 when winget cannot be started. winget-app-uninstall.ps1 adds 4 (not
-    elevated and the UAC prompt was declined or could not be shown) and 5 (an unexpected error).
+    Winget-AutoUpdate was removed or was not installed; 3010 = the same, and a restart finishes
+    removing an app or Winget-AutoUpdate (its uninstaller returned 3010 or 1641); 1 = an app could
+    not be removed or checked (Winget-AutoUpdate is then kept), or Winget-AutoUpdate could not be
+    removed; 2 = winget cannot be started for this account, so nothing was removed; 3 = the app list
+    has invalid entries or is empty. 1 ranks above 3010. A dry run returns 0 when winget cannot be
+    started, and never 3010. winget-app-uninstall.ps1 adds 4 (not elevated and the UAC prompt was
+    declined or could not be shown) and 5 (an unexpected error, or the module could not be
+    loaded).
 #>
 function Invoke-WingetUninstall {
     [OutputType([int])]
@@ -9194,7 +9254,12 @@ function Invoke-WingetUninstall {
             Write-Info '[DRY-RUN] winget cannot be started for this account yet. A real run would try to set it up (see above) and, if winget still could not start, stop with exit code 2 before removing anything. Without winget this preview cannot tell which apps are installed, so it stops here.'
             return 0
         }
-        Write-ErrorMessage 'winget cannot be started for this account, so nothing was uninstalled: without winget the uninstaller cannot tell which apps are installed. Winget-AutoUpdate was left in place, so the apps keep getting updates. Run the uninstaller from an account where winget works (for example the signed-in user, elevated), or install App Installer from https://aka.ms/getwinget, then run it again.'
+        $message = 'winget cannot be started for this account, so nothing was uninstalled: without winget the uninstaller cannot tell which apps are installed.'
+        if (Test-WauInstalled) {
+            $message += ' Winget-AutoUpdate was left in place, so the apps keep getting updates.'
+        }
+        $message += ' Run the uninstaller from an account where winget works (for example the signed-in user, elevated), or install App Installer from https://aka.ms/getwinget, then run it again.'
+        Write-ErrorMessage $message
         return 2
     }
 
@@ -9206,6 +9271,7 @@ function Invoke-WingetUninstall {
     $uninstalledApps = @()
     $skippedApps = @()
     $failedApps = @()
+    # What a restart finishes removing: apps, and Winget-AutoUpdate (exit code 3010).
     $restartRequiredApps = @()
     $terminalGone = $false
     foreach ($app in $apps) {
@@ -9258,23 +9324,30 @@ function Invoke-WingetUninstall {
 
     # Automatic updates last, and only when every app is gone or was left alone on purpose: an app
     # that could not be removed (or checked) is still on the machine, and removing its updater would
-    # leave it without updates (review finding P2-19).
+    # leave it without updates (review finding P2-19). Said only when Winget-AutoUpdate is there:
+    # the installer sets it up only where its runtime is present, so many machines have none.
     $autoUpdatesKept = $false
     $autoUpdatesRemovalFailed = $false
     if ($failedApps.Count -gt 0) {
-        $autoUpdatesKept = $true
-        $dryRunPrefix = ''
-        if ($WhatIf) {
-            $dryRunPrefix = '[DRY-RUN] '
+        $autoUpdatesKept = Test-WauInstalled
+        if ($autoUpdatesKept) {
+            $dryRunPrefix = ''
+            if ($WhatIf) {
+                $dryRunPrefix = '[DRY-RUN] '
+            }
+            Write-WarningMessage ('{0}Winget-AutoUpdate is kept: {1} app(s) could not be uninstalled, and it keeps them updated. Fix the failures above and run the uninstaller again to remove it.' -f $dryRunPrefix, $failedApps.Count)
         }
-        Write-WarningMessage ('{0}Winget-AutoUpdate is kept: {1} app(s) could not be uninstalled, and it keeps them updated. Fix the failures above and run the uninstaller again to remove it.' -f $dryRunPrefix, $failedApps.Count)
     }
     else {
         Write-Info 'Removing automatic-update components...'
         try {
             [void](Remove-LegacyScheduledUpdates -WhatIf:$WhatIf)
-            if (-not (Uninstall-WingetAutoUpdate -WhatIf:$WhatIf)) {
+            $autoUpdateRemoval = Uninstall-WingetAutoUpdate -WhatIf:$WhatIf
+            if (-not ($autoUpdateRemoval -and $autoUpdateRemoval.Succeeded)) {
                 $autoUpdatesRemovalFailed = $true
+            }
+            elseif ($autoUpdateRemoval.RestartRequired) {
+                $restartRequiredApps += 'Winget-AutoUpdate'
             }
         }
         catch {
@@ -9320,8 +9393,13 @@ function Invoke-WingetUninstall {
         Write-WarningMessage ('Restart: REQUIRED to finish removing {0}.' -f ($restartRequiredApps -join ', '))
     }
 
+    # 1 > 3010 > 0, as in the installer (Get-InstallerExitCode): 3010 tells an RMM tool that the
+    # removal succeeded and a restart finishes it.
     if ($failedApps.Count -gt 0 -or $autoUpdatesRemovalFailed) {
         return 1
+    }
+    if ($restartRequiredApps.Count -gt 0) {
+        return 3010
     }
     return 0
 }
@@ -9943,13 +10021,18 @@ function Install-WingetAutoUpdate {
     msiexec runs through Invoke-WauMsiexec, like the install: a time limit, a wait for another
     installation that holds Windows Installer (exit code 1618), and a verbose log in the logs
     folder, named when the uninstall fails (review finding P3-37).
+    msiexec 3010 (ERROR_SUCCESS_REBOOT_REQUIRED) is a removal that a restart finishes: files still in
+    use go at the next restart. The uninstaller exits 3010 then.
 .PARAMETER WhatIf
     When specified, only reports intended actions.
 .PARAMETER InstallInProgressWaitSeconds
     The most to wait, in all, when msiexec exits 1618 because another installation is running.
     Default 600.
 .RETURNS
-    [bool] True when WAU was removed (or was not installed), otherwise False.
+    [hashtable] @{
+        Succeeded       = True when WAU was removed (or was not installed), otherwise False
+        RestartRequired = True when msiexec returned 3010
+    }
 #>
 function Uninstall-WingetAutoUpdate {
     param (
@@ -9960,14 +10043,17 @@ function Uninstall-WingetAutoUpdate {
         [int]$InstallInProgressWaitSeconds = 600
     )
 
+    $result = @{ Succeeded = $false; RestartRequired = $false }
     if (-not (Test-WauInstalled)) {
         Write-WarningMessage 'Winget-AutoUpdate is not installed; nothing to remove.'
-        return $true
+        $result.Succeeded = $true
+        return $result
     }
 
     if ($WhatIf) {
         Write-Info '[DRY-RUN] Would uninstall Winget-AutoUpdate.'
-        return $true
+        $result.Succeeded = $true
+        return $result
     }
 
     $productCode = (Get-InstalledWauInfo).ProductCode
@@ -9978,7 +10064,7 @@ function Uninstall-WingetAutoUpdate {
     $msiexec = Invoke-WauMsiexec -ArgumentString "/x $productCode /qn /norestart" -Action uninstall -InstallInProgressWaitSeconds $InstallInProgressWaitSeconds
     if ($msiexec.LaunchFailed) {
         Write-ErrorMessage "Winget-AutoUpdate uninstall failed: msiexec could not be started ($($msiexec.LaunchError))."
-        return $false
+        return $result
     }
     $msiLogNote = ''
     if ($msiexec.LogPath) {
@@ -9986,21 +10072,28 @@ function Uninstall-WingetAutoUpdate {
     }
     if ($msiexec.TimedOut) {
         Write-ErrorMessage ('Winget-AutoUpdate uninstall failed: msiexec did not finish in time and was stopped.' + $msiLogNote)
-        return $false
+        return $result
     }
 
-    if ($msiexec.ExitCode -eq 0 -or $msiexec.ExitCode -eq 3010) {
+    if ($msiexec.ExitCode -eq 0) {
         Write-Success 'Winget-AutoUpdate uninstalled.'
-        return $true
+        $result.Succeeded = $true
+        return $result
+    }
+    if ($msiexec.ExitCode -eq 3010) {
+        Write-Success 'Winget-AutoUpdate uninstalled (a restart finishes removing it: msiexec exit code 3010).'
+        $result.Succeeded = $true
+        $result.RestartRequired = $true
+        return $result
     }
 
     if ($msiexec.ExitCode -eq 1618) {
         Write-ErrorMessage (('Winget-AutoUpdate uninstall failed: Windows Installer was still busy with another installation after {0} retries and {1} seconds of waiting (msiexec exit code 1618). Run the uninstaller again once that installation has finished.' -f $msiexec.BusyRetries, $msiexec.BusyWaitedSeconds) + $msiLogNote)
-        return $false
+        return $result
     }
 
     Write-ErrorMessage ("Winget-AutoUpdate uninstall failed (msiexec exit code $($msiexec.ExitCode))." + $msiLogNote)
-    return $false
+    return $result
 }
 
 <#

@@ -23,7 +23,8 @@
          default-terminal setting that still names it is removed (Reset-WindowsTerminalDelegation).
       5. Winget-AutoUpdate (and the legacy scheduled-update task) is removed last, and only when no
          app failed: an app that could not be removed is still on the machine and keeps its
-         updates until a later run removes it.
+         updates until a later run removes it. The messages that say Winget-AutoUpdate is kept
+         appear only when it is installed (Test-WauInstalled).
 .PARAMETER WhatIf
     Dry run: the read-only checks run and the summary shows what a real run would remove. Nothing is
     uninstalled or changed, and nothing is installed (the winget setup only checks).
@@ -39,11 +40,14 @@
 .NOTES
     Exit codes: 0 = every app was removed, was not installed, or was left alone on purpose (a shell
     this run depends on, or an app whose catalog condition does not hold here), and
-    Winget-AutoUpdate was removed or was not installed; 1 = an app could not be removed or checked
-    (Winget-AutoUpdate is then kept), or Winget-AutoUpdate could not be removed; 2 = winget cannot
-    be started for this account, so nothing was removed; 3 = the app list has invalid entries or is
-    empty. A dry run returns 0 when winget cannot be started. winget-app-uninstall.ps1 adds 4 (not
-    elevated and the UAC prompt was declined or could not be shown) and 5 (an unexpected error).
+    Winget-AutoUpdate was removed or was not installed; 3010 = the same, and a restart finishes
+    removing an app or Winget-AutoUpdate (its uninstaller returned 3010 or 1641); 1 = an app could
+    not be removed or checked (Winget-AutoUpdate is then kept), or Winget-AutoUpdate could not be
+    removed; 2 = winget cannot be started for this account, so nothing was removed; 3 = the app list
+    has invalid entries or is empty. 1 ranks above 3010. A dry run returns 0 when winget cannot be
+    started, and never 3010. winget-app-uninstall.ps1 adds 4 (not elevated and the UAC prompt was
+    declined or could not be shown) and 5 (an unexpected error, or the module could not be
+    loaded).
 #>
 function Invoke-WingetUninstall {
     [OutputType([int])]
@@ -94,7 +98,12 @@ function Invoke-WingetUninstall {
             Write-Info '[DRY-RUN] winget cannot be started for this account yet. A real run would try to set it up (see above) and, if winget still could not start, stop with exit code 2 before removing anything. Without winget this preview cannot tell which apps are installed, so it stops here.'
             return 0
         }
-        Write-ErrorMessage 'winget cannot be started for this account, so nothing was uninstalled: without winget the uninstaller cannot tell which apps are installed. Winget-AutoUpdate was left in place, so the apps keep getting updates. Run the uninstaller from an account where winget works (for example the signed-in user, elevated), or install App Installer from https://aka.ms/getwinget, then run it again.'
+        $message = 'winget cannot be started for this account, so nothing was uninstalled: without winget the uninstaller cannot tell which apps are installed.'
+        if (Test-WauInstalled) {
+            $message += ' Winget-AutoUpdate was left in place, so the apps keep getting updates.'
+        }
+        $message += ' Run the uninstaller from an account where winget works (for example the signed-in user, elevated), or install App Installer from https://aka.ms/getwinget, then run it again.'
+        Write-ErrorMessage $message
         return 2
     }
 
@@ -106,6 +115,7 @@ function Invoke-WingetUninstall {
     $uninstalledApps = @()
     $skippedApps = @()
     $failedApps = @()
+    # What a restart finishes removing: apps, and Winget-AutoUpdate (exit code 3010).
     $restartRequiredApps = @()
     $terminalGone = $false
     foreach ($app in $apps) {
@@ -158,23 +168,30 @@ function Invoke-WingetUninstall {
 
     # Automatic updates last, and only when every app is gone or was left alone on purpose: an app
     # that could not be removed (or checked) is still on the machine, and removing its updater would
-    # leave it without updates (review finding P2-19).
+    # leave it without updates (review finding P2-19). Said only when Winget-AutoUpdate is there:
+    # the installer sets it up only where its runtime is present, so many machines have none.
     $autoUpdatesKept = $false
     $autoUpdatesRemovalFailed = $false
     if ($failedApps.Count -gt 0) {
-        $autoUpdatesKept = $true
-        $dryRunPrefix = ''
-        if ($WhatIf) {
-            $dryRunPrefix = '[DRY-RUN] '
+        $autoUpdatesKept = Test-WauInstalled
+        if ($autoUpdatesKept) {
+            $dryRunPrefix = ''
+            if ($WhatIf) {
+                $dryRunPrefix = '[DRY-RUN] '
+            }
+            Write-WarningMessage ('{0}Winget-AutoUpdate is kept: {1} app(s) could not be uninstalled, and it keeps them updated. Fix the failures above and run the uninstaller again to remove it.' -f $dryRunPrefix, $failedApps.Count)
         }
-        Write-WarningMessage ('{0}Winget-AutoUpdate is kept: {1} app(s) could not be uninstalled, and it keeps them updated. Fix the failures above and run the uninstaller again to remove it.' -f $dryRunPrefix, $failedApps.Count)
     }
     else {
         Write-Info 'Removing automatic-update components...'
         try {
             [void](Remove-LegacyScheduledUpdates -WhatIf:$WhatIf)
-            if (-not (Uninstall-WingetAutoUpdate -WhatIf:$WhatIf)) {
+            $autoUpdateRemoval = Uninstall-WingetAutoUpdate -WhatIf:$WhatIf
+            if (-not ($autoUpdateRemoval -and $autoUpdateRemoval.Succeeded)) {
                 $autoUpdatesRemovalFailed = $true
+            }
+            elseif ($autoUpdateRemoval.RestartRequired) {
+                $restartRequiredApps += 'Winget-AutoUpdate'
             }
         }
         catch {
@@ -220,8 +237,13 @@ function Invoke-WingetUninstall {
         Write-WarningMessage ('Restart: REQUIRED to finish removing {0}.' -f ($restartRequiredApps -join ', '))
     }
 
+    # 1 > 3010 > 0, as in the installer (Get-InstallerExitCode): 3010 tells an RMM tool that the
+    # removal succeeded and a restart finishes it.
     if ($failedApps.Count -gt 0 -or $autoUpdatesRemovalFailed) {
         return 1
+    }
+    if ($restartRequiredApps.Count -gt 0) {
+        return 3010
     }
     return 0
 }

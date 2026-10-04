@@ -16,11 +16,16 @@ BeforeAll {
             [Parameter(Mandatory = $true)][string]$Overrides,
             [string]$ModuleSource,
             [string[]]$ScriptArguments = @(),
-            [hashtable]$Environment = @{}
+            [hashtable]$Environment = @{},
+            [switch]$NoModule
         )
 
         $moduleRoot = Join-Path $Root 'WingetAppSetup'
-        if ($ModuleSource) {
+        if ($NoModule) {
+            # The script copied on its own, without the module folder next to it.
+            [void](New-Item -ItemType Directory -Path $Root -Force)
+        }
+        elseif ($ModuleSource) {
             Copy-Item -LiteralPath $ModuleSource -Destination $moduleRoot -Recurse
             Set-Content -LiteralPath (Join-Path $moduleRoot 'Public/zz-TestOverrides.ps1') -Value $Overrides
         }
@@ -56,7 +61,8 @@ Describe 'Invoke-WingetUninstall' {
         Mock Start-Sleep { }
         Mock Initialize-Winget { [pscustomobject]@{ Ready = $true; Diagnosis = 'Ok' } }
         Mock Remove-LegacyScheduledUpdates { $false }
-        Mock Uninstall-WingetAutoUpdate { $true }
+        Mock Uninstall-WingetAutoUpdate { @{ Succeeded = $true; RestartRequired = $false } }
+        Mock Test-WauInstalled { $true }
         Mock Reset-WindowsTerminalDelegation { $false }
         Mock Test-WindowsTerminalHostsCurrentSession { $false }
         Mock Get-PowerShellEdition { 'Desktop' }
@@ -134,6 +140,17 @@ Describe 'Invoke-WingetUninstall' {
             ($script:errorMessages -join "`n") | Should -Match 'Winget-AutoUpdate was left in place'
         }
 
+        It 'Does not claim Winget-AutoUpdate was left in place when it is not installed (winget unusable)' {
+            Mock Initialize-Winget { [pscustomobject]@{ Ready = $false; Diagnosis = 'NotLaunchable' } }
+            Mock Test-WauInstalled { $false }
+
+            $result = Invoke-WingetUninstall -Apps $script:apps -NonInteractive
+
+            $result | Should -Be 2
+            ($script:errorMessages -join "`n") | Should -Match 'winget cannot be started for this account, so nothing was uninstalled: without winget the uninstaller cannot tell which apps are installed\. Run the uninstaller from an account where winget works'
+            ($script:errorMessages -join "`n") | Should -Not -Match 'Winget-AutoUpdate'
+        }
+
         It 'Sets winget up the way the installer does before the first app' {
             Mock Initialize-Winget { $script:sequence += 'winget setup'; [pscustomobject]@{ Ready = $true; Diagnosis = 'Ok' } }
 
@@ -159,8 +176,20 @@ Describe 'Invoke-WingetUninstall' {
             $script:capturedTables['Failed Uninstalls'][0] | Should -Be @('Contoso.AppTwo', "'winget uninstall' exited with 0x8A150006 SHELLEXEC_INSTALL_FAILED")
         }
 
+        It 'Says nothing about keeping Winget-AutoUpdate when an app fails and it is not installed' {
+            Mock Test-WauInstalled { $false }
+            $script:uninstallResults['Contoso.AppTwo'] = { New-TestProcessResult -ExitCode -1978335226 }
+
+            $result = Invoke-WingetUninstall -Apps $script:apps -NonInteractive
+
+            $result | Should -Be 1
+            Should -Invoke Uninstall-WingetAutoUpdate -Times 0 -Exactly
+            @(@($script:warningMessages) + @($script:errorMessages) + @($script:infoMessages) | Where-Object { $_ -match 'Winget-AutoUpdate|Auto-updates' }) | Should -BeNullOrEmpty
+            $script:errorMessages | Should -Contain "Failed to uninstall: Contoso.AppTwo ('winget uninstall' exited with 0x8A150006 SHELLEXEC_INSTALL_FAILED)."
+        }
+
         It 'Returns 1 when Winget-AutoUpdate could not be removed (<Case>)' -ForEach @(
-            @{ Case = 'it reported a failure'; Behaviour = { $false } }
+            @{ Case = 'it reported a failure'; Behaviour = { @{ Succeeded = $false; RestartRequired = $false } } }
             @{ Case = 'it threw'; Behaviour = { throw 'msiexec exploded' } }
         ) {
             Mock Uninstall-WingetAutoUpdate $Behaviour
@@ -284,7 +313,7 @@ Describe 'Invoke-WingetUninstall' {
             $result | Should -Be 0
             Should -Invoke Invoke-WingetProcess -Times ([int](-not $Hosted)) -Exactly -ParameterFilter { $ArgumentList[0] -eq 'uninstall' }
             if ($Hosted) {
-                ($script:warningMessages -join "`n") | Should -Match 'Skipping: Microsoft\.WindowsTerminal \(Windows Terminal hosts this window, or is the default terminal application, so removing it would close this window; to remove it, set the default terminal application to Windows Console Host'
+                ($script:warningMessages -join "`n") | Should -Match 'Skipping: Microsoft\.WindowsTerminal \(Windows Terminal hosts this window, or is set as the default terminal application, so removing it would close this window; to remove it, set the default terminal application to Windows Console Host'
             }
         }
 
@@ -381,15 +410,57 @@ Describe 'Invoke-WingetUninstall' {
             $script:capturedTables['Failed Uninstalls'][0][1] | Should -Be "'winget uninstall' exited with 0x8A150049 MSI_INSTALL_FAILED; uninstaller log: $logPath"
         }
 
-        It 'Counts an uninstall a restart finishes as removed, and says so' {
-            $script:uninstallResults['Contoso.AppOne'] = { New-TestProcessResult -ExitCode -1978334967 }
+        # What winget prints and exits with when the app's uninstaller returns a restart code: its
+        # uninstall flow reports any non-zero return as 0x8A150030 EXEC_UNINSTALL_COMMAND_FAILED
+        # (Workflows/UninstallFlow.cpp ReportUninstallerResult), after the uninstaller's own code.
+        It 'Counts an uninstall a restart finishes (uninstaller returned <Code>) as removed, says so and returns 3010' -ForEach @(
+            @{ Code = 3010 }
+            @{ Code = 1641 }
+        ) {
+            $script:code = $Code
+            $script:uninstallResults['Contoso.AppOne'] = { New-TestProcessResult -ExitCode -1978335184 -Output @('Found Contoso App One [Contoso.AppOne]', 'Starting package uninstall...', "Uninstall failed with exit code: $script:code") }
+
+            $result = Invoke-WingetUninstall -Apps $script:apps -NonInteractive
+
+            $result | Should -Be 3010
+            $script:successMessages | Should -Contain 'Successfully uninstalled: Contoso.AppOne (a restart finishes removing it)'
+            $script:warningMessages | Should -Contain 'Restart: REQUIRED to finish removing Contoso.AppOne.'
+            $script:capturedTables['Uninstallation Summary'][0] | Should -Be @('Uninstalled', 'Contoso.AppOne, Contoso.AppTwo')
+            Should -Invoke Uninstall-WingetAutoUpdate -Times 1 -Exactly
+        }
+
+        It 'Fails the app when its uninstaller returned another code (<Case>)' -ForEach @(
+            @{ Case = 'MSI 1603'; Output = @('Uninstall failed with exit code: 1603') }
+            @{ Case = '3010 only inside the installer log path'; Output = @('Uninstall failed with exit code: 1603', 'Installer log is available at: C:\logs\3010\winget-uninstall-Contoso.AppOne-20261004-183010.log') }
+            @{ Case = '3010 inside a longer number'; Output = @('Uninstall failed with exit code: 13010') }
+        ) {
+            $script:output = $Output
+            $script:uninstallResults['Contoso.AppOne'] = { New-TestProcessResult -ExitCode -1978335184 -Output $script:output }
 
             $result = Invoke-WingetUninstall -Apps @(@{ name = 'Contoso.AppOne' }) -NonInteractive
 
-            $result | Should -Be 0
-            $script:successMessages | Should -Contain 'Successfully uninstalled: Contoso.AppOne (a restart finishes removing it)'
+            $result | Should -Be 1
+            $script:capturedTables['Failed Uninstalls'][0] | Should -Be @('Contoso.AppOne', "'winget uninstall' exited with 0x8A150030")
+            $script:warningMessages | Should -Not -Contain 'Restart: REQUIRED to finish removing Contoso.AppOne.'
+        }
+
+        It 'Returns 1, not 3010, when one app needs a restart and another failed' {
+            $script:uninstallResults['Contoso.AppOne'] = { New-TestProcessResult -ExitCode -1978335184 -Output @('Uninstall failed with exit code: 3010') }
+            $script:uninstallResults['Contoso.AppTwo'] = { New-TestProcessResult -ExitCode -1978335226 }
+
+            $result = Invoke-WingetUninstall -Apps $script:apps -NonInteractive
+
+            $result | Should -Be 1
             $script:warningMessages | Should -Contain 'Restart: REQUIRED to finish removing Contoso.AppOne.'
-            Should -Invoke Uninstall-WingetAutoUpdate -Times 1 -Exactly
+        }
+
+        It 'Returns 3010 when removing Winget-AutoUpdate needs a restart to finish' {
+            Mock Uninstall-WingetAutoUpdate { @{ Succeeded = $true; RestartRequired = $true } }
+
+            $result = Invoke-WingetUninstall -Apps $script:apps -NonInteractive
+
+            $result | Should -Be 3010
+            $script:warningMessages | Should -Contain 'Restart: REQUIRED to finish removing Winget-AutoUpdate.'
         }
     }
 
@@ -476,10 +547,16 @@ function Invoke-WingetUninstall {
         @{ Code = 0 }
         @{ Code = 1 }
         @{ Code = 2 }
+        @{ Code = 3010 }
     ) {
         $run = Invoke-TestUninstallerScript -Root (Join-Path $TestDrive "code-$Code") -Overrides $script:standInModule -ScriptArguments @('-NonInteractive') -Environment @{ UNINSTALL_TEST_ADMIN = '1'; UNINSTALL_TEST_CODE = "$Code"; UNINSTALL_TEST_THROW = $null }
 
-        $run.ExitCode | Should -Be $Code
+        # Off Windows a process exit code keeps only its low 8 bits (3010 arrives as 194).
+        $expected = $Code
+        if (-not $IsWindows) {
+            $expected = $Code -band 0xFF
+        }
+        $run.ExitCode | Should -Be $expected
         $run.Output | Should -Match 'UNINSTALL WhatIf=False NonInteractive=True'
         $run.Output | Should -Not -Match 'RELAUNCH'
     }
@@ -489,6 +566,27 @@ function Invoke-WingetUninstall {
 
         $run.ExitCode | Should -Be 5
         $run.Output | Should -Match 'ERROR: The uninstaller stopped on an unexpected error before it finished: unexpected \(test\)'
+    }
+
+    It 'Exits 5, not 0, when the module next to it cannot be loaded (<Case>)' -ForEach @(
+        @{ Case = 'no module folder'; NoModule = $true; Module = '# not written' }
+        @{ Case = 'a module file that fails to load'; NoModule = $false; Module = "throw 'module file broken (test)'" }
+    ) {
+        $run = Invoke-TestUninstallerScript -Root (Join-Path $TestDrive "no-module-$NoModule") -Overrides $Module -NoModule:$NoModule -ScriptArguments @('-NonInteractive') -Environment @{ UNINSTALL_TEST_ADMIN = '1'; UNINSTALL_TEST_CODE = '0'; UNINSTALL_TEST_THROW = $null }
+
+        $run.ExitCode | Should -Be 5
+        $run.Output | Should -Match 'The uninstaller cannot run: the WingetAppSetup module folder next to it could not be loaded'
+        $run.Output | Should -Not -Match 'UNINSTALL '
+    }
+
+    It 'Exits 5 when the unexpected-error report itself fails' {
+        # A module without Write-ErrorMessage: the catch block's report fails, which used to leave
+        # the exit code unset, and `exit $null` is 0.
+        $module = $script:standInModule -replace '(?m)^function Write-ErrorMessage .*$', ''
+        $run = Invoke-TestUninstallerScript -Root (Join-Path $TestDrive 'report-fails') -Overrides $module -Environment @{ UNINSTALL_TEST_ADMIN = '1'; UNINSTALL_TEST_CODE = '0'; UNINSTALL_TEST_THROW = '1' }
+
+        $run.Output | Should -Match 'UNINSTALL WhatIf=False'
+        $run.ExitCode | Should -Be 5
     }
 
     It 'Asks for elevation with the caller''s -NonInteractive and exits with its code when not elevated' {
@@ -531,7 +629,8 @@ function Get-InteractiveSessionUserName { $null }
 function Start-Sleep { param ([int]$Seconds) }
 function Test-CanUseGridView { $false }
 function Remove-LegacyScheduledUpdates { param ([switch]$WhatIf) $false }
-function Uninstall-WingetAutoUpdate { param ([switch]$WhatIf) Write-Host 'FAKE: Winget-AutoUpdate removed'; $true }
+function Test-WauInstalled { $true }
+function Uninstall-WingetAutoUpdate { param ([switch]$WhatIf) Write-Host 'FAKE: Winget-AutoUpdate removed'; @{ Succeeded = $true; RestartRequired = $false } }
 function Invoke-WingetProcess {
     param ([string[]]$ArgumentList, [int]$TimeoutSeconds, [string]$WingetPath, [string]$Echo = 'Live', [AllowNull()][AllowEmptyString()][string]$LogDirectory)
     $arguments = @($ArgumentList)
@@ -550,6 +649,11 @@ function Invoke-WingetProcess {
     }
     elseif ($arguments[0] -eq 'list') {
         $result.StandardOutput = @(('{0}  1.0  winget' -f $arguments[[array]::IndexOf($arguments, '--id') + 1]))
+    }
+    elseif ($arguments[0] -eq 'uninstall' -and $scenario -eq 'RestartToFinish') {
+        # winget's real result for an MSI whose `msiexec /x` returned 3010.
+        $result.ExitCode = -1978335184
+        $result.StandardOutput = @('Starting package uninstall...', 'Uninstall failed with exit code: 3010')
     }
     $result.Output = $result.StandardOutput
     return $result
@@ -584,5 +688,19 @@ function Invoke-WingetProcess {
         $run.Output | Should -Match 'FAKE: winget uninstall --exact --id Contoso\.AppOne --silent --accept-source-agreements --disable-interactivity'
         $run.Output | Should -Match 'FAKE: winget uninstall --exact --id Contoso\.AppTwo'
         $run.Output.IndexOf('FAKE: winget uninstall --exact --id Contoso.AppTwo') | Should -BeLessThan $run.Output.IndexOf('FAKE: Winget-AutoUpdate removed')
+    }
+
+    It 'Exits 3010 when the apps are removed and a restart finishes removing them' {
+        $run = Invoke-TestUninstallerScript -Root (Join-Path $TestDrive 'restart') -ModuleSource $script:moduleSource -Overrides $script:moduleOverrides -Environment @{ UNINSTALL_TEST_SCENARIO = 'RestartToFinish'; WINGET_APP_SETUP_NONINTERACTIVE = '1' }
+
+        # Off Windows a process exit code keeps only its low 8 bits (3010 arrives as 194).
+        $expected = 3010
+        if (-not $IsWindows) {
+            $expected = 3010 -band 0xFF
+        }
+        $run.ExitCode | Should -Be $expected
+        $run.Output | Should -Match 'FAKE: Winget-AutoUpdate removed'
+        $run.Output | Should -Match ([regex]::Escape('Restart: REQUIRED to finish removing Contoso.AppOne, Contoso.AppTwo.'))
+        $run.Output | Should -Not -Match 'Failed to uninstall'
     }
 }

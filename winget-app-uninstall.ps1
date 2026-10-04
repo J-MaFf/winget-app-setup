@@ -24,18 +24,31 @@
     window.
 .NOTES
     Exit codes: 0 = done (every app removed, not installed, or kept on purpose, and Winget-AutoUpdate
-    removed or not installed); 1 = an app could not be removed or checked (Winget-AutoUpdate is then
-    kept), or Winget-AutoUpdate could not be removed; 2 = winget cannot be started for this account,
-    so nothing was removed; 3 = the app list has invalid entries; 4 = not elevated, and the UAC
-    prompt was declined or could not be shown (a non-interactive run shows none); 5 = stopped by an
-    unexpected error.
+    removed or not installed); 3010 = done, and a restart finishes removing an app or
+    Winget-AutoUpdate; 1 = an app could not be removed or checked (Winget-AutoUpdate is then kept),
+    or Winget-AutoUpdate could not be removed; 2 = winget cannot be started for this account, so
+    nothing was removed; 3 = the app list has invalid entries; 4 = not elevated, and the UAC prompt
+    was declined or could not be shown (a non-interactive run shows none); 5 = stopped by an
+    unexpected error, or the WingetAppSetup module folder next to this script could not be loaded.
 #>
 param (
     [switch]$WhatIf,
     [switch]$NonInteractive
 )
 
-Import-Module (Join-Path $PSScriptRoot 'WingetAppSetup\WingetAppSetup.psd1') -Force
+# Any way out of this script that is not a deliberate exit is 5: set before anything can fail, so
+# an error that escapes the catch at the end cannot turn into `exit $null`, which is 0.
+$exitCode = 5
+
+# Without its module the script can do nothing, and every command after this would fail one by one
+# while the script still exited 0. Only Write-Host here: the module's message helpers are missing.
+try {
+    Import-Module (Join-Path $PSScriptRoot 'WingetAppSetup\WingetAppSetup.psd1') -Force -ErrorAction Stop
+}
+catch {
+    Write-Host "The uninstaller cannot run: the WingetAppSetup module folder next to it could not be loaded ($($_.Exception.Message)). Run winget-app-uninstall.ps1 from a full copy of the repository, with its WingetAppSetup folder." -ForegroundColor Red
+    exit 5
+}
 
 #------------------------------------------------Main Script------------------------------------------------
 
@@ -71,7 +84,7 @@ try {
     $exitCode = Invoke-WingetUninstall -WhatIf:$WhatIf -NonInteractive:$NonInteractive
 }
 catch {
-    Write-ErrorMessage "The uninstaller stopped on an unexpected error before it finished: $_"
     $exitCode = 5
+    Write-ErrorMessage "The uninstaller stopped on an unexpected error before it finished: $_"
 }
 exit $exitCode

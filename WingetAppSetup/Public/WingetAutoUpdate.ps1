@@ -301,13 +301,18 @@ function Install-WingetAutoUpdate {
     msiexec runs through Invoke-WauMsiexec, like the install: a time limit, a wait for another
     installation that holds Windows Installer (exit code 1618), and a verbose log in the logs
     folder, named when the uninstall fails (review finding P3-37).
+    msiexec 3010 (ERROR_SUCCESS_REBOOT_REQUIRED) is a removal that a restart finishes: files still in
+    use go at the next restart. The uninstaller exits 3010 then.
 .PARAMETER WhatIf
     When specified, only reports intended actions.
 .PARAMETER InstallInProgressWaitSeconds
     The most to wait, in all, when msiexec exits 1618 because another installation is running.
     Default 600.
 .RETURNS
-    [bool] True when WAU was removed (or was not installed), otherwise False.
+    [hashtable] @{
+        Succeeded       = True when WAU was removed (or was not installed), otherwise False
+        RestartRequired = True when msiexec returned 3010
+    }
 #>
 function Uninstall-WingetAutoUpdate {
     param (
@@ -318,14 +323,17 @@ function Uninstall-WingetAutoUpdate {
         [int]$InstallInProgressWaitSeconds = 600
     )
 
+    $result = @{ Succeeded = $false; RestartRequired = $false }
     if (-not (Test-WauInstalled)) {
         Write-WarningMessage 'Winget-AutoUpdate is not installed; nothing to remove.'
-        return $true
+        $result.Succeeded = $true
+        return $result
     }
 
     if ($WhatIf) {
         Write-Info '[DRY-RUN] Would uninstall Winget-AutoUpdate.'
-        return $true
+        $result.Succeeded = $true
+        return $result
     }
 
     $productCode = (Get-InstalledWauInfo).ProductCode
@@ -336,7 +344,7 @@ function Uninstall-WingetAutoUpdate {
     $msiexec = Invoke-WauMsiexec -ArgumentString "/x $productCode /qn /norestart" -Action uninstall -InstallInProgressWaitSeconds $InstallInProgressWaitSeconds
     if ($msiexec.LaunchFailed) {
         Write-ErrorMessage "Winget-AutoUpdate uninstall failed: msiexec could not be started ($($msiexec.LaunchError))."
-        return $false
+        return $result
     }
     $msiLogNote = ''
     if ($msiexec.LogPath) {
@@ -344,21 +352,28 @@ function Uninstall-WingetAutoUpdate {
     }
     if ($msiexec.TimedOut) {
         Write-ErrorMessage ('Winget-AutoUpdate uninstall failed: msiexec did not finish in time and was stopped.' + $msiLogNote)
-        return $false
+        return $result
     }
 
-    if ($msiexec.ExitCode -eq 0 -or $msiexec.ExitCode -eq 3010) {
+    if ($msiexec.ExitCode -eq 0) {
         Write-Success 'Winget-AutoUpdate uninstalled.'
-        return $true
+        $result.Succeeded = $true
+        return $result
+    }
+    if ($msiexec.ExitCode -eq 3010) {
+        Write-Success 'Winget-AutoUpdate uninstalled (a restart finishes removing it: msiexec exit code 3010).'
+        $result.Succeeded = $true
+        $result.RestartRequired = $true
+        return $result
     }
 
     if ($msiexec.ExitCode -eq 1618) {
         Write-ErrorMessage (('Winget-AutoUpdate uninstall failed: Windows Installer was still busy with another installation after {0} retries and {1} seconds of waiting (msiexec exit code 1618). Run the uninstaller again once that installation has finished.' -f $msiexec.BusyRetries, $msiexec.BusyWaitedSeconds) + $msiLogNote)
-        return $false
+        return $result
     }
 
     Write-ErrorMessage ("Winget-AutoUpdate uninstall failed (msiexec exit code $($msiexec.ExitCode))." + $msiLogNote)
-    return $false
+    return $result
 }
 
 <#
