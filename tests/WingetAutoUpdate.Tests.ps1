@@ -115,24 +115,252 @@ Describe 'Winget-AutoUpdate integration (issue #168)' {
             (New-WauStagingDirectory) | Should -Not -Be (New-WauStagingDirectory)
         }
 
-        It 'restricts the ACL to SYSTEM and Administrators with inheritance removed' {
-            Mock Start-Process { [pscustomobject]@{ ExitCode = 0 } }
+        It 'makes Administrators the owner first, then removes inherited entries and replaces the SYSTEM and Administrators grants (review finding P2-21)' {
+            $script:icaclsCalls = @()
+            Mock Start-Process { $script:icaclsCalls += $ArgumentList; [pscustomobject]@{ ExitCode = 0 } } -ParameterFilter { $FilePath -eq 'icacls.exe' }
+            Mock Assert-RestrictedDirectoryAcl { }
 
             Set-RestrictedDirectoryAcl -Path 'C:\ProgramData\winget-app-setup\wau-msi-test'
 
-            Should -Invoke Start-Process -Times 1 -Exactly -ParameterFilter {
-                $FilePath -eq 'icacls.exe' -and
-                $ArgumentList -match '/inheritance:r' -and
-                $ArgumentList -match ([regex]::Escape('*S-1-5-18:(OI)(CI)F')) -and
-                $ArgumentList -match ([regex]::Escape('*S-1-5-32-544:(OI)(CI)F')) -and
-                $ArgumentList -match ([regex]::Escape('"C:\ProgramData\winget-app-setup\wau-msi-test"'))
+            $script:icaclsCalls.Count | Should -Be 2
+            # The installer's non-elevated first launch creates the folder, owned by the signed-in
+            # user, and an owner can always rewrite the access list: ownership has to change first.
+            $script:icaclsCalls[0] | Should -Be '"C:\ProgramData\winget-app-setup\wau-msi-test" /setowner *S-1-5-32-544 /q'
+            # /grant:r replaces explicit SYSTEM and Administrators entries instead of adding to them.
+            $script:icaclsCalls[1] | Should -Be '"C:\ProgramData\winget-app-setup\wau-msi-test" /inheritance:r /grant:r *S-1-5-18:(OI)(CI)F *S-1-5-32-544:(OI)(CI)F /q'
+            Should -Invoke Assert-RestrictedDirectoryAcl -Times 1 -Exactly -ParameterFilter { $Path -eq 'C:\ProgramData\winget-app-setup\wau-msi-test' }
+        }
+
+        It 'changes only the folder itself, so the read grant on the logs folder inside it survives' {
+            $script:icaclsCalls = @()
+            Mock Start-Process { $script:icaclsCalls += $ArgumentList; [pscustomobject]@{ ExitCode = 0 } } -ParameterFilter { $FilePath -eq 'icacls.exe' }
+            Mock Assert-RestrictedDirectoryAcl { }
+
+            Set-RestrictedDirectoryAcl -Path 'C:\ProgramData\winget-app-setup'
+
+            # /T would replace the logs folder's explicit BUILTIN\Users read grant
+            # (Grant-InstallLogReadAccess, review finding P3-14), and so would /reset.
+            foreach ($arguments in $script:icaclsCalls) {
+                $arguments | Should -Not -Match '(^|\s)/[tT](\s|$)'
+                $arguments | Should -Not -Match '/reset'
             }
         }
 
         It 'throws when icacls fails so callers never use an unsecured directory' {
             Mock Start-Process { [pscustomobject]@{ ExitCode = 5 } }
+            Mock Assert-RestrictedDirectoryAcl { }
 
             { Set-RestrictedDirectoryAcl -Path 'C:\ProgramData\winget-app-setup\wau-msi-test' } | Should -Throw '*exit code 5*'
+            Should -Invoke Start-Process -Times 1 -Exactly
+            Should -Invoke Assert-RestrictedDirectoryAcl -Times 0 -Exactly
+        }
+
+        It 'throws when the folder is still owned by the user who created it, although icacls reported success (review finding P2-21)' {
+            Mock Start-Process { [pscustomobject]@{ ExitCode = 0 } } -ParameterFilter { $FilePath -eq 'icacls.exe' }
+            Mock Get-DirectoryAccessSummary {
+                [pscustomobject]@{
+                    OwnerSid             = 'S-1-5-21-1111111111-2222222222-3333333333-1001'
+                    OwnerName            = 'PC01\enduser'
+                    InheritanceProtected = $true
+                    AccessRules          = @(
+                        [pscustomobject]@{ Sid = 'S-1-5-18'; Name = 'NT AUTHORITY\SYSTEM'; AccessControlType = 'Allow'; IsInherited = $false },
+                        [pscustomobject]@{ Sid = 'S-1-5-32-544'; Name = 'BUILTIN\Administrators'; AccessControlType = 'Allow'; IsInherited = $false }
+                    )
+                }
+            }
+
+            { Set-RestrictedDirectoryAcl -Path 'C:\ProgramData\winget-app-setup' } |
+                Should -Throw "*'C:\ProgramData\winget-app-setup' is not limited to SYSTEM and Administrators: it is owned by PC01\enduser (S-1-5-21-1111111111-2222222222-3333333333-1001).*"
+        }
+    }
+
+    Context 'Assert-RestrictedDirectoryAcl (review finding P2-21)' {
+        BeforeAll {
+            function New-TestAccessRule {
+                param ([string]$Sid, [string]$Name = $Sid, [string]$Type = 'Allow', [switch]$Inherited)
+                [pscustomobject]@{ Sid = $Sid; Name = $Name; AccessControlType = $Type; IsInherited = [bool]$Inherited }
+            }
+            function New-TestAccessSummary {
+                param ([string]$OwnerSid = 'S-1-5-32-544', [string]$OwnerName = 'BUILTIN\Administrators', [switch]$Unprotected, [object[]]$ExtraRules = @())
+                [pscustomobject]@{
+                    OwnerSid             = $OwnerSid
+                    OwnerName            = $OwnerName
+                    InheritanceProtected = -not $Unprotected
+                    AccessRules          = @(
+                        (New-TestAccessRule -Sid 'S-1-5-18' -Name 'NT AUTHORITY\SYSTEM'),
+                        (New-TestAccessRule -Sid 'S-1-5-32-544' -Name 'BUILTIN\Administrators')
+                    ) + @($ExtraRules)
+                }
+            }
+        }
+
+        It 'accepts a folder owned by Administrators with only SYSTEM and Administrators entries' {
+            Mock Get-DirectoryAccessSummary { New-TestAccessSummary }
+
+            { Assert-RestrictedDirectoryAcl -Path 'C:\ProgramData\winget-app-setup' } | Should -Not -Throw
+            Should -Invoke Get-DirectoryAccessSummary -Times 1 -Exactly -ParameterFilter { $Path -eq 'C:\ProgramData\winget-app-setup' }
+        }
+
+        It 'accepts a folder owned by SYSTEM (a run as SYSTEM)' {
+            Mock Get-DirectoryAccessSummary { New-TestAccessSummary -OwnerSid 'S-1-5-18' -OwnerName 'NT AUTHORITY\SYSTEM' }
+
+            { Assert-RestrictedDirectoryAcl -Path 'C:\ProgramData\winget-app-setup' } | Should -Not -Throw
+        }
+
+        It 'rejects any other owner: an owner can always rewrite the access list' {
+            Mock Get-DirectoryAccessSummary { New-TestAccessSummary -OwnerSid 'S-1-5-21-1-2-3-1001' -OwnerName 'PC01\enduser' }
+
+            { Assert-RestrictedDirectoryAcl -Path 'C:\ProgramData\winget-app-setup' } | Should -Throw '*it is owned by PC01\enduser (S-1-5-21-1-2-3-1001)*'
+        }
+
+        It 'rejects an explicit entry for another account, which /grant:r leaves in place' {
+            Mock Get-DirectoryAccessSummary { New-TestAccessSummary -ExtraRules @(New-TestAccessRule -Sid 'S-1-5-21-1-2-3-1001' -Name 'PC01\enduser') }
+
+            { Assert-RestrictedDirectoryAcl -Path 'C:\ProgramData\winget-app-setup' } | Should -Throw '*PC01\enduser (S-1-5-21-1-2-3-1001) has an access entry (allow)*'
+        }
+
+        It 'rejects a deny entry for another account too' {
+            Mock Get-DirectoryAccessSummary { New-TestAccessSummary -ExtraRules @(New-TestAccessRule -Sid 'S-1-5-32-545' -Name 'BUILTIN\Users' -Type 'Deny') }
+
+            { Assert-RestrictedDirectoryAcl -Path 'C:\ProgramData\winget-app-setup' } | Should -Throw '*BUILTIN\Users (S-1-5-32-545) has an access entry (deny)*'
+        }
+
+        It 'rejects entries inherited from the parent folder' {
+            Mock Get-DirectoryAccessSummary { New-TestAccessSummary -Unprotected -ExtraRules @(New-TestAccessRule -Sid 'S-1-5-32-545' -Name 'BUILTIN\Users' -Inherited) }
+
+            { Assert-RestrictedDirectoryAcl -Path 'C:\ProgramData\winget-app-setup' } |
+                Should -Throw '*it still inherits permissions from its parent folder; BUILTIN\Users (S-1-5-32-545) has an access entry (allow)*'
+        }
+
+        It 'fails when the access list cannot be read' {
+            Mock Get-DirectoryAccessSummary { throw 'Attempted to perform an unauthorized operation.' }
+
+            { Assert-RestrictedDirectoryAcl -Path 'C:\ProgramData\winget-app-setup' } | Should -Throw '*unauthorized operation*'
+        }
+    }
+
+    Context 'Get-DirectoryAccessSummary' {
+        It 'reads the owner and every access entry by SID from Get-Acl' {
+            Mock Get-Acl {
+                $acl = [pscustomobject]@{
+                    AreAccessRulesProtected = $true
+                    TestOwner               = [pscustomobject]@{ Value = 'S-1-5-32-544' }
+                    TestRules               = @(
+                        [pscustomobject]@{ IdentityReference = [pscustomobject]@{ Value = 'S-1-5-18' }; AccessControlType = 'Allow'; IsInherited = $false },
+                        [pscustomobject]@{ IdentityReference = [pscustomobject]@{ Value = 'S-1-5-21-1-2-3-1001' }; AccessControlType = 'Deny'; IsInherited = $true }
+                    )
+                }
+                $acl | Add-Member -MemberType ScriptMethod -Name GetOwner -Value { param ($Type) $this.TestOwner }
+                $acl | Add-Member -MemberType ScriptMethod -Name GetAccessRules -Value { param ($Explicit, $Inherited, $Type) $this.TestRules }
+                $acl
+            }
+
+            $summary = Get-DirectoryAccessSummary -Path 'C:\ProgramData\winget-app-setup'
+
+            Should -Invoke Get-Acl -Times 1 -Exactly -ParameterFilter { $LiteralPath -eq 'C:\ProgramData\winget-app-setup' }
+            $summary.OwnerSid | Should -Be 'S-1-5-32-544'
+            $summary.InheritanceProtected | Should -BeTrue
+            @($summary.AccessRules).Count | Should -Be 2
+            $summary.AccessRules[1].Sid | Should -Be 'S-1-5-21-1-2-3-1001'
+            $summary.AccessRules[1].AccessControlType | Should -Be 'Deny'
+            $summary.AccessRules[1].IsInherited | Should -BeTrue
+            # A SID that does not resolve to a name is shown as the SID.
+            $summary.AccessRules[1].Name | Should -Be 'S-1-5-21-1-2-3-1001'
+        }
+    }
+
+    Context 'Open-ReadLockedFile (review finding P2-21)' {
+        It 'opens the file for reading only' {
+            $path = Join-Path $TestDrive 'locked.msi'
+            Set-Content -LiteralPath $path -Value 'msi'
+            $stream = Open-ReadLockedFile -Path $path
+            try {
+                $stream.CanRead | Should -BeTrue
+                $stream.CanWrite | Should -BeFalse
+            }
+            finally {
+                $stream.Dispose()
+            }
+        }
+
+        # Windows enforces the sharing mode; Linux does not, so this runs on Windows CI only. NTFS
+        # refuses to rename a folder with an open file beneath it ([MS-FSA] 2.1.5.15.12, note 186).
+        It 'keeps the file from being overwritten, deleted or moved, and its folder from being renamed, while it is open' -Skip:(-not $IsWindows) {
+            $folder = Join-Path $TestDrive 'wau-msi-locked'
+            $null = New-Item -ItemType Directory -Path $folder
+            $path = Join-Path $folder 'WAU.msi'
+            Set-Content -LiteralPath $path -Value 'genuine'
+            $stream = Open-ReadLockedFile -Path $path
+            try {
+                { [System.IO.File]::Open($path, 'Open', 'ReadWrite', 'ReadWrite').Dispose() } | Should -Throw
+                { [System.IO.File]::Delete($path) } | Should -Throw
+                { [System.IO.File]::Move($path, (Join-Path $TestDrive 'moved.msi')) } | Should -Throw
+                { [System.IO.Directory]::Move($folder, (Join-Path $TestDrive 'wau-msi-moved')) } | Should -Throw
+                # Reading, as msiexec does, still works.
+                $reader = [System.IO.File]::Open($path, 'Open', 'Read', 'ReadWrite')
+                $reader.Dispose()
+            }
+            finally {
+                $stream.Dispose()
+            }
+            # Once closed, the cleanup can delete it.
+            { Remove-Item -LiteralPath $folder -Recurse -Force -ErrorAction Stop } | Should -Not -Throw
+        }
+    }
+
+    # Real icacls, Get-Acl and msiexec, on Windows only. The unit tests above mock all three; the
+    # E2E run does not install WAU (its runner lacks Microsoft.WindowsAppRuntime.1.8), so these are
+    # the only checks of the real calls before a PC runs them.
+    Context 'Staging-folder lockdown and the held-open MSI on real Windows (review finding P2-21)' {
+        # icacls /setowner needs an elevated administrator token.
+        It 'leaves a real folder owned by Administrators with only SYSTEM and Administrators entries' -Skip:(-not ($IsWindows -and ([System.Security.Principal.WindowsPrincipal][System.Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator))) {
+            $folder = Join-Path $TestDrive ('acl-' + [guid]::NewGuid().ToString('N'))
+            $null = New-Item -ItemType Directory -Path $folder
+
+            { Set-RestrictedDirectoryAcl -Path $folder } | Should -Not -Throw
+
+            $summary = Get-DirectoryAccessSummary -Path $folder
+            $summary.OwnerSid | Should -Be 'S-1-5-32-544'
+            $summary.InheritanceProtected | Should -BeTrue
+            @($summary.AccessRules).Count | Should -BeGreaterThan 0
+            @($summary.AccessRules | Where-Object { $_.Sid -notin @('S-1-5-18', 'S-1-5-32-544') }).Count | Should -Be 0
+        }
+
+        It 'fails on a real folder that keeps an explicit entry for another account, which /grant:r does not remove' -Skip:(-not ($IsWindows -and ([System.Security.Principal.WindowsPrincipal][System.Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator))) {
+            $folder = Join-Path $TestDrive ('acl-' + [guid]::NewGuid().ToString('N'))
+            $null = New-Item -ItemType Directory -Path $folder
+            $grant = Start-Process -FilePath 'icacls.exe' -ArgumentList "`"$folder`" /grant *S-1-5-32-545:(OI)(CI)M /q" -Wait -PassThru -WindowStyle Hidden
+            $grant.ExitCode | Should -Be 0
+
+            { Set-RestrictedDirectoryAcl -Path $folder } | Should -Throw '*(S-1-5-32-545) has an access entry (allow)*'
+        }
+
+        # msiexec opens the package for reading; a sharing violation would make every WAU install
+        # fail with 1619 (ERROR_INSTALL_PACKAGE_OPEN_FAILED). A file that is not an MSI fails the
+        # same way whether or not the installer holds it open, as long as msiexec can open it.
+        It 'lets msiexec open the MSI while it is held open' -Skip:(-not $IsWindows) {
+            $path = Join-Path $TestDrive 'not-an-msi.msi'
+            [System.IO.File]::WriteAllBytes($path, [byte[]](1..64))
+            $runMsiexec = {
+                $process = Start-Process -FilePath 'msiexec.exe' -ArgumentList "/i `"$path`" /qn" -PassThru -WindowStyle Hidden
+                $null = $process.Handle
+                if (-not $process.WaitForExit(120000)) {
+                    $process.Kill()
+                    throw 'msiexec did not exit within 2 minutes'
+                }
+                $process.ExitCode
+            }
+
+            $exitCodeUnheld = & $runMsiexec
+            $stream = Open-ReadLockedFile -Path $path
+            try {
+                $exitCodeHeld = & $runMsiexec
+            }
+            finally {
+                $stream.Dispose()
+            }
+
+            $exitCodeHeld | Should -Be $exitCodeUnheld
         }
     }
 
@@ -142,6 +370,9 @@ Describe 'Winget-AutoUpdate integration (issue #168)' {
             # this mock the real query would run on the CI runner, which lacks the framework.
             Mock Get-WindowsAppRuntimeStatus { [pscustomobject]@{ Present = $true; Detail = 'X64 8000.921.1539.0' } }
             Mock Disable-WauLogonTrigger { $false }
+            # The mocked downloads below write no file; the held-open MSI tests (next Context) use
+            # the real Open-ReadLockedFile on a real file.
+            Mock Open-ReadLockedFile { [System.IO.MemoryStream]::new() }
         }
 
         It 'downloads into the ACL-restricted staging directory, verifies the hash, and installs silently with the pinned config' {
@@ -306,6 +537,45 @@ Describe 'Winget-AutoUpdate integration (issue #168)' {
             Should -Invoke Remove-Item -Times 0 -Exactly
         }
 
+        # Review finding P2-21: the non-elevated first launch creates %ProgramData%\winget-app-setup
+        # for its log, so the signed-in user owns it and could give themselves full control again
+        # after the old inheritance-only lockdown. Real New-WauStagingDirectory and
+        # Set-RestrictedDirectoryAcl here; only icacls and the access-list read are mocked.
+        It 'does not download when the staging folder is still owned by the user who created it, and says how to reset it' {
+            $savedProgramData = $env:ProgramData
+            $env:ProgramData = Join-Path $TestDrive 'ProgramData'
+            try {
+                Mock Test-WauInstalled { $false }
+                Mock Start-Process { [pscustomobject]@{ ExitCode = 0 } } -ParameterFilter { $FilePath -eq 'icacls.exe' }
+                Mock Get-DirectoryAccessSummary {
+                    [pscustomobject]@{
+                        OwnerSid             = 'S-1-5-21-1-2-3-1001'
+                        OwnerName            = 'PC01\enduser'
+                        InheritanceProtected = $true
+                        AccessRules          = @([pscustomobject]@{ Sid = 'S-1-5-32-544'; Name = 'BUILTIN\Administrators'; AccessControlType = 'Allow'; IsInherited = $false })
+                    }
+                }
+                Mock Invoke-WebRequest { throw 'must not download into a folder another account controls' }
+                Mock Invoke-ExternalProcess { throw 'must not run msiexec' }
+                $script:errors = @()
+                Mock Write-ErrorMessage { $script:errors += $Message }
+
+                $result = Install-WingetAutoUpdate
+
+                $result.Status | Should -Be 'Failed'
+                Should -Invoke Invoke-WebRequest -Times 0 -Exactly
+                Should -Invoke Invoke-ExternalProcess -Times 0 -Exactly
+                $baseDir = Join-Path $env:ProgramData 'winget-app-setup'
+                $message = $script:errors -join "`n"
+                $message | Should -BeLike '*Winget-AutoUpdate was NOT installed: its download folder could not be limited to SYSTEM and Administrators*'
+                $message | Should -BeLike "*it is owned by PC01\enduser (S-1-5-21-1-2-3-1001)*"
+                $message | Should -BeLike "*takeown /f `"$baseDir`" /a, then icacls `"$baseDir`" /reset*"
+            }
+            finally {
+                $env:ProgramData = $savedProgramData
+            }
+        }
+
         It 'treats msiexec exit code 3010 (reboot required) as success, and says a restart finishes it (review finding P3-16)' {
             Mock Test-WauInstalled { $false }
             Mock New-WauStagingDirectory { Join-Path $TestDrive 'wau-msi-test' }
@@ -452,6 +722,66 @@ Describe 'Winget-AutoUpdate integration (issue #168)' {
 
             $result.Status | Should -Be 'DryRun'
             $result.Version | Should -Be (Get-WauPin).Version
+        }
+    }
+
+    Context 'Install-WingetAutoUpdate holds the MSI open from the hash until msiexec has finished (review finding P2-21)' {
+        BeforeEach {
+            Mock Get-WindowsAppRuntimeStatus { [pscustomobject]@{ Present = $true; Detail = 'X64 8000.921.1539.0' } }
+            Mock Disable-WauLogonTrigger { $false }
+            Mock Test-WauInstalled { $false }
+            $script:stagingDir = Join-Path $TestDrive ('wau-msi-' + [guid]::NewGuid().ToString('N'))
+            Mock New-WauStagingDirectory { $null = New-Item -ItemType Directory -Path $script:stagingDir; $script:stagingDir }
+            Mock Invoke-WebRequest { Set-Content -LiteralPath $OutFile -Value 'genuine WAU msi' }
+            $script:hashedStream = $null
+            Mock Get-FileHash { $script:hashedStream = $InputStream; @{ Hash = (Get-WauPin).Sha256 } }
+            $script:streamOpenDuringMsiexec = $null
+            $script:msiexecArguments = $null
+            Mock Invoke-ExternalProcess {
+                $script:streamOpenDuringMsiexec = ($null -ne $script:hashedStream) -and $script:hashedStream.CanRead
+                $script:msiexecArguments = $ArgumentString
+                New-TestProcessResult -ExitCode 0
+            }
+        }
+
+        It 'hashes the downloaded MSI from an open read-only handle, keeps it open while msiexec runs, and closes it before the cleanup' {
+            $result = Install-WingetAutoUpdate
+
+            $result.Status | Should -Be 'Configured'
+            $msiPath = Join-Path $script:stagingDir "WAU-$((Get-WauPin).Version).msi"
+            # The hash comes from the open stream, not from a second open by path.
+            Should -Invoke Get-FileHash -Times 1 -Exactly -ParameterFilter { $null -ne $InputStream -and -not $Path -and -not $LiteralPath }
+            $script:hashedStream | Should -BeOfType [System.IO.FileStream]
+            $script:hashedStream.Name | Should -Be $msiPath
+            $script:streamOpenDuringMsiexec | Should -BeTrue
+            $script:msiexecArguments | Should -BeLike "/i `"$msiPath`" *"
+            # Closed afterwards, so the staging folder could be removed.
+            $script:hashedStream.CanRead | Should -BeFalse
+            Test-Path -LiteralPath $script:stagingDir | Should -BeFalse
+        }
+
+        It 'closes the MSI when the hash does not match, without running msiexec' {
+            Mock Get-FileHash { $script:hashedStream = $InputStream; @{ Hash = 'DEADBEEF' } }
+
+            (Install-WingetAutoUpdate).Status | Should -Be 'Failed'
+
+            Should -Invoke Invoke-ExternalProcess -Times 0 -Exactly
+            $script:hashedStream | Should -BeOfType [System.IO.FileStream]
+            $script:hashedStream.CanRead | Should -BeFalse
+            Test-Path -LiteralPath $script:stagingDir | Should -BeFalse
+        }
+
+        It 'closes the MSI when msiexec times out' {
+            Mock Invoke-ExternalProcess {
+                $script:streamOpenDuringMsiexec = $script:hashedStream.CanRead
+                New-TestProcessResult -TimedOut
+            }
+
+            (Install-WingetAutoUpdate).Status | Should -Be 'Failed'
+
+            $script:streamOpenDuringMsiexec | Should -BeTrue
+            $script:hashedStream.CanRead | Should -BeFalse
+            Test-Path -LiteralPath $script:stagingDir | Should -BeFalse
         }
     }
 

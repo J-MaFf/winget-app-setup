@@ -81,7 +81,14 @@ had asked; the elevated window runs a copy of the installer that it checks again
 at startup and keeps in a folder only administrators can change; a declined UAC prompt exits 4 after
 one prompt, and a non-interactive run that is not elevated exits 4 without showing one. The
 uninstaller relaunches the same way but runs its own files in place, without the checked copy,
-because it imports the module from its folder.
+because it imports the module from its folder. The Winget-AutoUpdate download folder under
+`%ProgramData%\winget-app-setup`, which the installer's first, non-elevated launch creates and the
+signed-in user therefore owned, is now taken over by Administrators before it is locked to SYSTEM
+and Administrators, and the result is read back with `Get-Acl`; when it is not as expected, WAU is
+not downloaded. The MSI is hashed from a handle that stays open, with read-only sharing, until
+`msiexec` has finished, so it cannot be swapped in between. `Install-Module` now passes
+`-Repository PSGallery`, so another repository registered on the machine cannot serve the modules
+the installer adds for all users.
 
 The same branch changes CI. Fork pull requests that leave `windows-tests.yml` alone no longer run
 on the self-hosted win-test runner, and `claude.yml` calls the shared Claude workflow at a pinned

@@ -67,7 +67,9 @@ function Test-AndInstallGraphicalTools {
             Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force -Scope AllUsers | Out-Null
         }
 
-        Install-Module -Name Microsoft.PowerShell.GraphicalTools -Scope AllUsers -Force -AllowClobber -ErrorAction Stop
+        # -Repository PSGallery: elevated, for all users, so never from another registered
+        # repository (review finding P3-20; see Test-AndInstallWingetModule).
+        Install-Module -Name Microsoft.PowerShell.GraphicalTools -Repository PSGallery -Scope AllUsers -Force -AllowClobber -ErrorAction Stop
         Import-Module Microsoft.PowerShell.GraphicalTools -ErrorAction Stop
         Write-Success 'Microsoft.PowerShell.GraphicalTools is loaded for this session.'
 

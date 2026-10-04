@@ -320,6 +320,12 @@ progress when the installer starts, the installer waits up to 15 minutes for it 
 installed when `Microsoft.WindowsAppRuntime.1.8` is present, because the winget releases it installs
 need that framework and would otherwise leave winget unusable; the summary then shows
 `Auto-updates: NOT CONFIGURED` (issues #279, #283, #284).
+The WAU MSI is downloaded into a new folder inside `%ProgramData%\winget-app-setup`. The installer
+first makes Administrators the owner of both folders, limits them to SYSTEM and Administrators, and
+reads the result back; if a folder still has another owner or access entry, WAU is not downloaded,
+the run says why and how to reset the folder, and the summary shows `Auto-updates: FAILED`. The MSI
+is hashed from a handle that stays open until `msiexec` has finished, so nothing can replace it in
+between.
 WAU's own self-update is disabled so the version stays pinned; bump it via `Get-WauPin` in
 `WingetAppSetup/Public/WingetAutoUpdate.ps1`. `winget-app-uninstall.ps1` removes WAU (and any legacy
 scheduled-update task from older versions).

@@ -35,7 +35,12 @@ function Test-AndInstallWingetModule {
             Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force -Scope AllUsers | Out-Null
         }
 
-        Install-Module -Name Microsoft.WinGet.Client -Scope AllUsers -Force -AllowClobber -ErrorAction Stop
+        # -Repository PSGallery (review finding P3-20): this runs elevated and installs for all
+        # users, so only the PowerShell Gallery may serve it, never another repository registered
+        # on the machine. (Install-PackageProvider has no -Repository parameter: the NuGet
+        # provider comes from PackageManagement's bootstrap feed, and current PackageManagement
+        # versions ship it built in.)
+        Install-Module -Name Microsoft.WinGet.Client -Repository PSGallery -Scope AllUsers -Force -AllowClobber -ErrorAction Stop
 
         $installedModule = Get-Module -ListAvailable -Name 'Microsoft.WinGet.Client' | Select-Object -First 1
         if ($installedModule) {

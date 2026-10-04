@@ -43,10 +43,11 @@ function Test-WauInstalled {
 .SYNOPSIS
     Installs (or upgrades) and configures Winget-AutoUpdate (WAU) to keep installed apps current.
 .DESCRIPTION
-    Downloads the pinned WAU MSI into an ACL-restricted staging directory (SYSTEM + Administrators
-    only, so a non-elevated process cannot swap the file between hash verification and msiexec —
-    issue #186), verifies its SHA256, and installs it silently with the configuration this project
-    standardizes on (issue #168):
+    Downloads the pinned WAU MSI into an ACL-restricted staging directory (owned by Administrators,
+    SYSTEM + Administrators only, checked before the download, so a non-elevated process cannot
+    swap the file between hash verification and msiexec: issue #186, review finding P2-21),
+    verifies its SHA256 from a handle it keeps open until msiexec has finished, and installs it
+    silently with the configuration this project standardizes on (issue #168):
       - Weekly updates on Tuesdays at 02:00 (WAU's "Weekly" schedule), and not at user logon
         (UPDATESATLOGON=0): a logon run collides with a technician signing in to re-run this
         installer. WAU runs as SYSTEM for machine-scope packages and spawns a user-context task in
@@ -140,17 +141,31 @@ function Install-WingetAutoUpdate {
     }
 
     $stagingDir = $null
+    $msiStream = $null
     try {
         # Download, verify, and install from a locked-down per-run directory instead of the
         # predictable %TEMP% path a same-user non-elevated process could tamper with (issue #186).
-        $stagingDir = New-WauStagingDirectory
+        # Nothing is downloaded unless the folder is verifiably limited to SYSTEM and
+        # Administrators (review finding P2-21).
+        try {
+            $stagingDir = New-WauStagingDirectory
+        }
+        catch {
+            $baseDir = Join-Path $env:ProgramData 'winget-app-setup'
+            Write-ErrorMessage "Winget-AutoUpdate was NOT installed: its download folder could not be limited to SYSTEM and Administrators, so its installer could have been swapped before it ran. $_ To reset the folder, run in an elevated prompt: takeown /f `"$baseDir`" /a, then icacls `"$baseDir`" /reset, and re-run this installer."
+            return [pscustomobject]@{ Status = 'Failed'; Version = $pin.Version; FrameworkMissing = $false; RestartRequired = $false }
+        }
         $msiPath = Join-Path $stagingDir "WAU-$($pin.Version).msi"
         # Time-limited (review finding P2-5): without a limit, a download that connects and then
         # stalls waits for ever.
         $downloadTimeouts = Get-WebDownloadTimeoutParameters
         Invoke-WebRequest @downloadTimeouts -Uri $pin.MsiUrl -OutFile $msiPath -UseBasicParsing -ErrorAction Stop
 
-        $actualHash = (Get-FileHash -Path $msiPath -Algorithm SHA256).Hash
+        # Held open, with read-only sharing, from the hash until msiexec has finished (review
+        # finding P2-21): while it is open the file cannot be overwritten, renamed or deleted, so
+        # msiexec installs exactly the bytes hashed here. Disposed in finally, before the cleanup.
+        $msiStream = Open-ReadLockedFile -Path $msiPath
+        $actualHash = (Get-FileHash -InputStream $msiStream -Algorithm SHA256).Hash
         if ($actualHash -ne $pin.Sha256) {
             Write-ErrorMessage "Winget-AutoUpdate MSI hash mismatch (expected $($pin.Sha256), got $actualHash). Skipping installation."
             return [pscustomobject]@{ Status = 'Failed'; Version = $pin.Version; FrameworkMissing = $false; RestartRequired = $false }
@@ -216,6 +231,10 @@ function Install-WingetAutoUpdate {
         return [pscustomobject]@{ Status = 'Failed'; Version = $pin.Version; FrameworkMissing = $false; RestartRequired = $false }
     }
     finally {
+        # Close the MSI first: the open handle refuses deletion, so the cleanup would fail.
+        if ($msiStream) {
+            $msiStream.Dispose()
+        }
         if ($stagingDir) {
             Remove-Item -Path $stagingDir -Recurse -Force -ErrorAction SilentlyContinue
         }

@@ -51,6 +51,21 @@ Describe 'Test-AndInstallWingetModule' {
             Should -Invoke Install-PackageProvider -Times 1 -ParameterFilter { $Name -eq 'NuGet' }
             Should -Invoke Install-Module -Times 1
         }
+
+        It 'Should install the module from the PowerShell Gallery only (review finding P3-20)' {
+            Mock Get-Module { $null } -ParameterFilter { $Name -eq 'Microsoft.WinGet.Client' -and $ListAvailable }
+            Mock Get-PackageProvider { [pscustomobject]@{ Name = 'NuGet' } } -ParameterFilter { $Name -eq 'NuGet' }
+            Mock Install-PackageProvider { }
+            Mock Install-Module { }
+
+            [void](Test-AndInstallWingetModule)
+
+            # Elevated and for all users: another repository registered on the machine must not be
+            # able to serve it.
+            Should -Invoke Install-Module -Times 1 -Exactly -ParameterFilter {
+                $Name -eq 'Microsoft.WinGet.Client' -and $Repository -eq 'PSGallery' -and $Scope -eq 'AllUsers'
+            }
+        }
     }
 
     Context 'When module installation fails' {

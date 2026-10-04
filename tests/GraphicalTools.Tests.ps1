@@ -59,6 +59,11 @@ Describe 'Test-AndInstallGraphicalTools' {
             Should -Invoke Install-PackageProvider -Times 1 -ParameterFilter { $Name -eq 'NuGet' }
             Should -Invoke Install-Module -Times 1
             Should -Invoke Import-Module -Times 1
+            # Review finding P3-20: elevated and for all users, so only the PowerShell Gallery may
+            # serve it, never another repository registered on the machine.
+            Should -Invoke Install-Module -Times 1 -Exactly -ParameterFilter {
+                $Name -eq 'Microsoft.PowerShell.GraphicalTools' -and $Repository -eq 'PSGallery' -and $Scope -eq 'AllUsers'
+            }
         }
     }
 

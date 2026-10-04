@@ -174,6 +174,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The Winget-AutoUpdate MSI can no longer be swapped between its hash check and `msiexec`, and the
+  modules the installer adds for all users now come only from the PowerShell Gallery (review
+  findings P2-21, P3-20).
+  - **Folder owner.** The installer's first, non-elevated launch creates
+    `%ProgramData%\winget-app-setup` for its log, so the signed-in user owned it. The #186 lockdown
+    (`icacls /inheritance:r /grant`) removed only inherited entries, and a folder's owner can always
+    change its access list, so that user (or malware running as them) could give themselves full
+    control again, replace the per-run `wau-msi-<guid>` folder and swap the MSI before `msiexec`
+    ran it elevated. `Set-RestrictedDirectoryAcl` now makes Administrators the owner first
+    (`/setowner *S-1-5-32-544`), then removes the inherited entries and replaces the SYSTEM and
+    Administrators grants (`/grant:r`), with `/q`. `Assert-RestrictedDirectoryAcl` then reads the
+    result back with `Get-Acl` and fails unless the owner is Administrators or SYSTEM, inheritance
+    is off and every entry belongs to SYSTEM or Administrators (an explicit entry another account
+    added survives `/grant:r`). When it fails nothing is downloaded: the run says `Winget-AutoUpdate
+    was NOT installed`, names the owner or entry at fault and how to reset the folder (`takeown /f
+    ... /a`, then `icacls ... /reset`), and the summary shows `Auto-updates: FAILED`.
+  - **MSI held open.** After the download the MSI is opened once with read-only sharing
+    (`Open-ReadLockedFile`), hashed from that open stream and kept open until `msiexec` has
+    finished, so it cannot be overwritten, renamed or deleted in between. It is closed before the
+    staging folder is removed.
+  - **Logs.** Only the folders themselves are changed (no `/T`, no `/reset`), so the read grant for
+    standard users on the `logs` folder inside `%ProgramData%\winget-app-setup` stays, and the
+    logs still open by their full path.
+  - **PowerShell Gallery only.** `Install-Module` for Microsoft.WinGet.Client and
+    Microsoft.PowerShell.GraphicalTools passes `-Repository PSGallery`: both run elevated and
+    install for all users, so another repository registered on the machine can no longer serve
+    them. `Install-PackageProvider` has no `-Repository` parameter and is unchanged. The module
+    versions are still not pinned.
+  - `Get-Acl` is added to `build/windows-only-commands.txt`, and `tests/TestHelpers.ps1` gets a
+    stand-in for it.
 - A run that is not elevated now waits for the elevated run it starts and exits with its exit code,
   never shows a UAC prompt when nobody is at the console, and has the elevated window run a checked
   copy of the installer (review findings P2-11, P2-12, P3-11). New exit code 4: administrator rights

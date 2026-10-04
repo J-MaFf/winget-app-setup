@@ -61,13 +61,126 @@ function Get-InstalledWauInfo {
 
 <#
 .SYNOPSIS
-    Locks a directory down to SYSTEM and Administrators (full control, inheritance removed).
+    Reads a directory's owner and access entries as SIDs.
+.DESCRIPTION
+    Thin seam over Get-Acl (Windows-only, mocked in tests) for Assert-RestrictedDirectoryAcl.
+    Every entry is read, explicit and inherited, by SID, so the result does not depend on the
+    display language. Name is the account name when the SID resolves, for messages. Throws when
+    the access list cannot be read.
+.PARAMETER Path
+    The directory to read.
+.RETURNS
+    [pscustomobject] with OwnerSid, OwnerName, InheritanceProtected ([bool], true when the
+    directory inherits nothing from its parent) and AccessRules (Sid, Name, AccessControlType
+    'Allow'/'Deny', IsInherited).
+#>
+function Get-DirectoryAccessSummary {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    $acl = Get-Acl -LiteralPath $Path -ErrorAction Stop
+    $sidType = [System.Security.Principal.SecurityIdentifier]
+    $nameOf = {
+        param ($Identity)
+        try {
+            return [string]$Identity.Translate([System.Security.Principal.NTAccount]).Value
+        }
+        catch {
+            return [string]$Identity.Value
+        }
+    }
+
+    $owner = $acl.GetOwner($sidType)
+    $rules = @(foreach ($rule in @($acl.GetAccessRules($true, $true, $sidType))) {
+            [pscustomobject]@{
+                Sid               = [string]$rule.IdentityReference.Value
+                Name              = (& $nameOf $rule.IdentityReference)
+                AccessControlType = [string]$rule.AccessControlType
+                IsInherited       = [bool]$rule.IsInherited
+            }
+        })
+
+    $ownerSid = $null
+    $ownerName = $null
+    if ($owner) {
+        $ownerSid = [string]$owner.Value
+        $ownerName = & $nameOf $owner
+    }
+    return [pscustomobject]@{
+        OwnerSid             = $ownerSid
+        OwnerName            = $ownerName
+        InheritanceProtected = [bool]$acl.AreAccessRulesProtected
+        AccessRules          = $rules
+    }
+}
+
+<#
+.SYNOPSIS
+    Throws unless a directory is owned by Administrators (or SYSTEM) and only SYSTEM and
+    Administrators have access entries on it.
+.DESCRIPTION
+    Review finding P2-21. Checks what Set-RestrictedDirectoryAcl was meant to leave behind, from the
+    directory's own access list, so a failed or partial change is caught before anything is
+    downloaded into it. Fails on any of:
+      - an owner other than Administrators (S-1-5-32-544) or SYSTEM (S-1-5-18): an object's owner
+        can always change its access list, whatever the list says;
+      - an access entry, allow or deny, explicit or inherited, for any other account;
+      - inheritance from the parent folder still turned on.
+.PARAMETER Path
+    The directory to check.
+#>
+function Assert-RestrictedDirectoryAcl {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    $allowedSids = @('S-1-5-18', 'S-1-5-32-544')
+    $security = Get-DirectoryAccessSummary -Path $Path
+    $problems = @()
+    if ($allowedSids -notcontains $security.OwnerSid) {
+        $problems += "it is owned by $($security.OwnerName) ($($security.OwnerSid))"
+    }
+    if (-not $security.InheritanceProtected) {
+        $problems += 'it still inherits permissions from its parent folder'
+    }
+    foreach ($rule in @($security.AccessRules)) {
+        if ($allowedSids -notcontains $rule.Sid) {
+            $problems += "$($rule.Name) ($($rule.Sid)) has an access entry ($($rule.AccessControlType.ToLowerInvariant()))"
+        }
+    }
+    if ($problems.Count -gt 0) {
+        throw ("'{0}' is not limited to SYSTEM and Administrators: {1}." -f $Path, ($problems -join '; '))
+    }
+}
+
+<#
+.SYNOPSIS
+    Locks a directory down to SYSTEM and Administrators (owner Administrators, full control,
+    inheritance removed) and checks the result.
 .DESCRIPTION
     Used to protect the WAU MSI staging directory so a same-user non-elevated process cannot swap
     the file between hash verification and msiexec (TOCTOU, issue #186). Grants use well-known SIDs
     (S-1-5-18 = SYSTEM, S-1-5-32-544 = Administrators) instead of account names so the ACL applies
-    on non-English Windows. Throws when icacls reports failure — callers must treat the directory
-    as unsafe to use.
+    on non-English Windows.
+
+    Ownership comes first (review finding P2-21): the installer's first, non-elevated launch
+    creates %ProgramData%\winget-app-setup for its log, so the signed-in user owns it, and an owner
+    can always rewrite the access list, whatever the list says. Removing the inherited entries
+    alone left that user able to give themselves full control again and swap the staging folder.
+    So icacls first makes Administrators the owner, then removes the inherited entries and replaces
+    (/grant:r) any explicit ones for SYSTEM and Administrators, and Assert-RestrictedDirectoryAcl
+    then reads the result back: any other owner or entry (an explicit entry another account added
+    survives /grant:r) fails the call instead of being used.
+
+    Changes only the directory itself (no /T and no /reset), so the explicit read grant that
+    Grant-InstallLogReadAccess puts on the logs folder inside %ProgramData%\winget-app-setup stays
+    in place: standard users can still open the logs. /q keeps icacls's per-folder success line
+    off the console; its errors still show.
+
+    Throws when icacls fails or the check does: callers must treat the directory as unsafe to use.
 .PARAMETER Path
     The directory whose ACL should be replaced.
 #>
@@ -77,13 +190,49 @@ function Set-RestrictedDirectoryAcl {
         [string]$Path
     )
 
-    # /inheritance:r strips inherited ACEs; the (OI)(CI)F grants leave SYSTEM and the local
-    # Administrators group as the only principals, inherited by everything created inside.
-    $icaclsArgs = "`"$Path`" /inheritance:r /grant *S-1-5-18:(OI)(CI)F *S-1-5-32-544:(OI)(CI)F"
-    $proc = Start-Process -FilePath 'icacls.exe' -ArgumentList $icaclsArgs -Wait -PassThru -NoNewWindow
-    if ($proc.ExitCode -ne 0) {
-        throw "icacls failed to restrict '$Path' (exit code $($proc.ExitCode))."
+    $steps = @(
+        @{
+            Arguments   = "`"$Path`" /setowner *S-1-5-32-544 /q"
+            Description = 'make Administrators the owner of'
+        },
+        @{
+            # /inheritance:r strips inherited ACEs; /grant:r replaces any explicit SYSTEM and
+            # Administrators entries with these (OI)(CI)F grants, inherited by everything created
+            # inside.
+            Arguments   = "`"$Path`" /inheritance:r /grant:r *S-1-5-18:(OI)(CI)F *S-1-5-32-544:(OI)(CI)F /q"
+            Description = 'restrict'
+        }
+    )
+    foreach ($step in $steps) {
+        $proc = Start-Process -FilePath 'icacls.exe' -ArgumentList $step.Arguments -Wait -PassThru -NoNewWindow
+        if ($proc.ExitCode -ne 0) {
+            throw "icacls failed to $($step.Description) '$Path' (exit code $($proc.ExitCode))."
+        }
     }
+    Assert-RestrictedDirectoryAcl -Path $Path
+}
+
+<#
+.SYNOPSIS
+    Opens a file for reading so that nobody can change, rename or delete it while it is open.
+.DESCRIPTION
+    Review finding P2-21. FileShare.Read lets other processes (msiexec) open the file for reading
+    only: while the returned stream is open, Windows refuses to open the file for writing or
+    deleting, so it cannot be overwritten, renamed or deleted, and the folder holding it cannot be
+    renamed. Hashing from this stream and keeping it open until msiexec has finished means msiexec
+    installs exactly the bytes that were hashed. The caller disposes the stream.
+.PARAMETER Path
+    The file to open.
+.RETURNS
+    [System.IO.FileStream]
+#>
+function Open-ReadLockedFile {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    return [System.IO.File]::Open($Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)
 }
 
 <#
@@ -94,9 +243,12 @@ function Set-RestrictedDirectoryAcl {
     so a non-elevated process running as the same user could swap the MSI between Get-FileHash and
     msiexec (issue #186). The staging directory lives under %ProgramData%\winget-app-setup, is
     uniquely named per run, and is locked to SYSTEM + Administrators BEFORE anything is downloaded
-    into it. The base directory is restricted first so an unprivileged process cannot observe the
-    per-run name or delete-and-recreate the staging directory through rights on the parent. Throws
-    when the directory cannot be created or secured. Callers own cleanup (Remove-Item -Recurse).
+    into it. The base directory is restricted first, and its owner changed to Administrators (the
+    installer's non-elevated first launch creates it, owned by the signed-in user: review finding
+    P2-21), so an unprivileged process cannot observe the per-run name or delete-and-recreate the
+    staging directory through rights on the parent. Both are checked after the change
+    (Set-RestrictedDirectoryAcl). Throws when the directory cannot be created or secured. Callers
+    own cleanup (Remove-Item -Recurse).
 .RETURNS
     [string] The full path of the created staging directory.
 #>

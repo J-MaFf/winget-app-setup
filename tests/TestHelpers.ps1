@@ -62,6 +62,7 @@ $windowsOnlyCommandParameters = [ordered]@{
     'Unregister-ScheduledTask'    = { [CmdletBinding(SupportsShouldProcess = $true)] param([Parameter(Position = 0)][string[]]$TaskName, [Parameter(Position = 1)][string[]]$TaskPath, [Microsoft.Management.Infrastructure.CimInstance[]]$InputObject) }
     'Repair-WinGetPackageManager' = { [CmdletBinding()] param([string]$Version, [switch]$Latest, [switch]$IncludePrerelease, [switch]$AllUsers, [switch]$Force) }
     'Get-AuthenticodeSignature'   = { [CmdletBinding()] param([Parameter(Position = 0)][string[]]$FilePath, [string[]]$LiteralPath, [string[]]$SourcePathOrExtension, [byte[]]$Content) }
+    'Get-Acl'                     = { [CmdletBinding()] param([Parameter(Position = 0)][string[]]$Path, [string[]]$LiteralPath, [psobject]$InputObject, [switch]$Audit, [string]$Filter, [string[]]$Include, [string[]]$Exclude) }
     'winget'                      = $null
     'powershell.exe'              = $null
 }

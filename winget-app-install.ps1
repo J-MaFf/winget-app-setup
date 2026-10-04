@@ -59,12 +59,12 @@ param (
 # This script is assembled from the WingetAppSetup module by build/Build-WingetInstallScript.ps1.
 # Edit the function source under WingetAppSetup/Public and WingetAppSetup/Private, then re-run the
 # build to regenerate this file. See readme.md ("Project layout") for details.
-# Build id: 1.0.0+6d4bb238 (module version + SHA256 fragment of this whole script; issue #189).
+# Build id: 1.0.0+06175f6b (module version + SHA256 fragment of this whole script; issue #189).
 # ------------------------------------------------------------------------------------------------
 
 # Content-derived build identity, logged at startup so a transcript from a remote machine
 # identifies exactly which installer build produced it (issue #189).
-$script:InstallerBuildId = '1.0.0+6d4bb238'
+$script:InstallerBuildId = '1.0.0+06175f6b'
 
 # ------------------------------------------------Functions------------------------------------------------
 
@@ -921,7 +921,9 @@ function Test-AndInstallGraphicalTools {
             Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force -Scope AllUsers | Out-Null
         }
 
-        Install-Module -Name Microsoft.PowerShell.GraphicalTools -Scope AllUsers -Force -AllowClobber -ErrorAction Stop
+        # -Repository PSGallery: elevated, for all users, so never from another registered
+        # repository (review finding P3-20; see Test-AndInstallWingetModule).
+        Install-Module -Name Microsoft.PowerShell.GraphicalTools -Repository PSGallery -Scope AllUsers -Force -AllowClobber -ErrorAction Stop
         Import-Module Microsoft.PowerShell.GraphicalTools -ErrorAction Stop
         Write-Success 'Microsoft.PowerShell.GraphicalTools is loaded for this session.'
 
@@ -3742,13 +3744,126 @@ function Get-InstalledWauInfo {
 
 <#
 .SYNOPSIS
-    Locks a directory down to SYSTEM and Administrators (full control, inheritance removed).
+    Reads a directory's owner and access entries as SIDs.
+.DESCRIPTION
+    Thin seam over Get-Acl (Windows-only, mocked in tests) for Assert-RestrictedDirectoryAcl.
+    Every entry is read, explicit and inherited, by SID, so the result does not depend on the
+    display language. Name is the account name when the SID resolves, for messages. Throws when
+    the access list cannot be read.
+.PARAMETER Path
+    The directory to read.
+.RETURNS
+    [pscustomobject] with OwnerSid, OwnerName, InheritanceProtected ([bool], true when the
+    directory inherits nothing from its parent) and AccessRules (Sid, Name, AccessControlType
+    'Allow'/'Deny', IsInherited).
+#>
+function Get-DirectoryAccessSummary {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    $acl = Get-Acl -LiteralPath $Path -ErrorAction Stop
+    $sidType = [System.Security.Principal.SecurityIdentifier]
+    $nameOf = {
+        param ($Identity)
+        try {
+            return [string]$Identity.Translate([System.Security.Principal.NTAccount]).Value
+        }
+        catch {
+            return [string]$Identity.Value
+        }
+    }
+
+    $owner = $acl.GetOwner($sidType)
+    $rules = @(foreach ($rule in @($acl.GetAccessRules($true, $true, $sidType))) {
+            [pscustomobject]@{
+                Sid               = [string]$rule.IdentityReference.Value
+                Name              = (& $nameOf $rule.IdentityReference)
+                AccessControlType = [string]$rule.AccessControlType
+                IsInherited       = [bool]$rule.IsInherited
+            }
+        })
+
+    $ownerSid = $null
+    $ownerName = $null
+    if ($owner) {
+        $ownerSid = [string]$owner.Value
+        $ownerName = & $nameOf $owner
+    }
+    return [pscustomobject]@{
+        OwnerSid             = $ownerSid
+        OwnerName            = $ownerName
+        InheritanceProtected = [bool]$acl.AreAccessRulesProtected
+        AccessRules          = $rules
+    }
+}
+
+<#
+.SYNOPSIS
+    Throws unless a directory is owned by Administrators (or SYSTEM) and only SYSTEM and
+    Administrators have access entries on it.
+.DESCRIPTION
+    Review finding P2-21. Checks what Set-RestrictedDirectoryAcl was meant to leave behind, from the
+    directory's own access list, so a failed or partial change is caught before anything is
+    downloaded into it. Fails on any of:
+      - an owner other than Administrators (S-1-5-32-544) or SYSTEM (S-1-5-18): an object's owner
+        can always change its access list, whatever the list says;
+      - an access entry, allow or deny, explicit or inherited, for any other account;
+      - inheritance from the parent folder still turned on.
+.PARAMETER Path
+    The directory to check.
+#>
+function Assert-RestrictedDirectoryAcl {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    $allowedSids = @('S-1-5-18', 'S-1-5-32-544')
+    $security = Get-DirectoryAccessSummary -Path $Path
+    $problems = @()
+    if ($allowedSids -notcontains $security.OwnerSid) {
+        $problems += "it is owned by $($security.OwnerName) ($($security.OwnerSid))"
+    }
+    if (-not $security.InheritanceProtected) {
+        $problems += 'it still inherits permissions from its parent folder'
+    }
+    foreach ($rule in @($security.AccessRules)) {
+        if ($allowedSids -notcontains $rule.Sid) {
+            $problems += "$($rule.Name) ($($rule.Sid)) has an access entry ($($rule.AccessControlType.ToLowerInvariant()))"
+        }
+    }
+    if ($problems.Count -gt 0) {
+        throw ("'{0}' is not limited to SYSTEM and Administrators: {1}." -f $Path, ($problems -join '; '))
+    }
+}
+
+<#
+.SYNOPSIS
+    Locks a directory down to SYSTEM and Administrators (owner Administrators, full control,
+    inheritance removed) and checks the result.
 .DESCRIPTION
     Used to protect the WAU MSI staging directory so a same-user non-elevated process cannot swap
     the file between hash verification and msiexec (TOCTOU, issue #186). Grants use well-known SIDs
     (S-1-5-18 = SYSTEM, S-1-5-32-544 = Administrators) instead of account names so the ACL applies
-    on non-English Windows. Throws when icacls reports failure — callers must treat the directory
-    as unsafe to use.
+    on non-English Windows.
+
+    Ownership comes first (review finding P2-21): the installer's first, non-elevated launch
+    creates %ProgramData%\winget-app-setup for its log, so the signed-in user owns it, and an owner
+    can always rewrite the access list, whatever the list says. Removing the inherited entries
+    alone left that user able to give themselves full control again and swap the staging folder.
+    So icacls first makes Administrators the owner, then removes the inherited entries and replaces
+    (/grant:r) any explicit ones for SYSTEM and Administrators, and Assert-RestrictedDirectoryAcl
+    then reads the result back: any other owner or entry (an explicit entry another account added
+    survives /grant:r) fails the call instead of being used.
+
+    Changes only the directory itself (no /T and no /reset), so the explicit read grant that
+    Grant-InstallLogReadAccess puts on the logs folder inside %ProgramData%\winget-app-setup stays
+    in place: standard users can still open the logs. /q keeps icacls's per-folder success line
+    off the console; its errors still show.
+
+    Throws when icacls fails or the check does: callers must treat the directory as unsafe to use.
 .PARAMETER Path
     The directory whose ACL should be replaced.
 #>
@@ -3758,13 +3873,49 @@ function Set-RestrictedDirectoryAcl {
         [string]$Path
     )
 
-    # /inheritance:r strips inherited ACEs; the (OI)(CI)F grants leave SYSTEM and the local
-    # Administrators group as the only principals, inherited by everything created inside.
-    $icaclsArgs = "`"$Path`" /inheritance:r /grant *S-1-5-18:(OI)(CI)F *S-1-5-32-544:(OI)(CI)F"
-    $proc = Start-Process -FilePath 'icacls.exe' -ArgumentList $icaclsArgs -Wait -PassThru -NoNewWindow
-    if ($proc.ExitCode -ne 0) {
-        throw "icacls failed to restrict '$Path' (exit code $($proc.ExitCode))."
+    $steps = @(
+        @{
+            Arguments   = "`"$Path`" /setowner *S-1-5-32-544 /q"
+            Description = 'make Administrators the owner of'
+        },
+        @{
+            # /inheritance:r strips inherited ACEs; /grant:r replaces any explicit SYSTEM and
+            # Administrators entries with these (OI)(CI)F grants, inherited by everything created
+            # inside.
+            Arguments   = "`"$Path`" /inheritance:r /grant:r *S-1-5-18:(OI)(CI)F *S-1-5-32-544:(OI)(CI)F /q"
+            Description = 'restrict'
+        }
+    )
+    foreach ($step in $steps) {
+        $proc = Start-Process -FilePath 'icacls.exe' -ArgumentList $step.Arguments -Wait -PassThru -NoNewWindow
+        if ($proc.ExitCode -ne 0) {
+            throw "icacls failed to $($step.Description) '$Path' (exit code $($proc.ExitCode))."
+        }
     }
+    Assert-RestrictedDirectoryAcl -Path $Path
+}
+
+<#
+.SYNOPSIS
+    Opens a file for reading so that nobody can change, rename or delete it while it is open.
+.DESCRIPTION
+    Review finding P2-21. FileShare.Read lets other processes (msiexec) open the file for reading
+    only: while the returned stream is open, Windows refuses to open the file for writing or
+    deleting, so it cannot be overwritten, renamed or deleted, and the folder holding it cannot be
+    renamed. Hashing from this stream and keeping it open until msiexec has finished means msiexec
+    installs exactly the bytes that were hashed. The caller disposes the stream.
+.PARAMETER Path
+    The file to open.
+.RETURNS
+    [System.IO.FileStream]
+#>
+function Open-ReadLockedFile {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    return [System.IO.File]::Open($Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)
 }
 
 <#
@@ -3775,9 +3926,12 @@ function Set-RestrictedDirectoryAcl {
     so a non-elevated process running as the same user could swap the MSI between Get-FileHash and
     msiexec (issue #186). The staging directory lives under %ProgramData%\winget-app-setup, is
     uniquely named per run, and is locked to SYSTEM + Administrators BEFORE anything is downloaded
-    into it. The base directory is restricted first so an unprivileged process cannot observe the
-    per-run name or delete-and-recreate the staging directory through rights on the parent. Throws
-    when the directory cannot be created or secured. Callers own cleanup (Remove-Item -Recurse).
+    into it. The base directory is restricted first, and its owner changed to Administrators (the
+    installer's non-elevated first launch creates it, owned by the signed-in user: review finding
+    P2-21), so an unprivileged process cannot observe the per-run name or delete-and-recreate the
+    staging directory through rights on the parent. Both are checked after the change
+    (Set-RestrictedDirectoryAcl). Throws when the directory cannot be created or secured. Callers
+    own cleanup (Remove-Item -Recurse).
 .RETURNS
     [string] The full path of the created staging directory.
 #>
@@ -6863,10 +7017,11 @@ function Test-WauInstalled {
 .SYNOPSIS
     Installs (or upgrades) and configures Winget-AutoUpdate (WAU) to keep installed apps current.
 .DESCRIPTION
-    Downloads the pinned WAU MSI into an ACL-restricted staging directory (SYSTEM + Administrators
-    only, so a non-elevated process cannot swap the file between hash verification and msiexec —
-    issue #186), verifies its SHA256, and installs it silently with the configuration this project
-    standardizes on (issue #168):
+    Downloads the pinned WAU MSI into an ACL-restricted staging directory (owned by Administrators,
+    SYSTEM + Administrators only, checked before the download, so a non-elevated process cannot
+    swap the file between hash verification and msiexec: issue #186, review finding P2-21),
+    verifies its SHA256 from a handle it keeps open until msiexec has finished, and installs it
+    silently with the configuration this project standardizes on (issue #168):
       - Weekly updates on Tuesdays at 02:00 (WAU's "Weekly" schedule), and not at user logon
         (UPDATESATLOGON=0): a logon run collides with a technician signing in to re-run this
         installer. WAU runs as SYSTEM for machine-scope packages and spawns a user-context task in
@@ -6960,17 +7115,31 @@ function Install-WingetAutoUpdate {
     }
 
     $stagingDir = $null
+    $msiStream = $null
     try {
         # Download, verify, and install from a locked-down per-run directory instead of the
         # predictable %TEMP% path a same-user non-elevated process could tamper with (issue #186).
-        $stagingDir = New-WauStagingDirectory
+        # Nothing is downloaded unless the folder is verifiably limited to SYSTEM and
+        # Administrators (review finding P2-21).
+        try {
+            $stagingDir = New-WauStagingDirectory
+        }
+        catch {
+            $baseDir = Join-Path $env:ProgramData 'winget-app-setup'
+            Write-ErrorMessage "Winget-AutoUpdate was NOT installed: its download folder could not be limited to SYSTEM and Administrators, so its installer could have been swapped before it ran. $_ To reset the folder, run in an elevated prompt: takeown /f `"$baseDir`" /a, then icacls `"$baseDir`" /reset, and re-run this installer."
+            return [pscustomobject]@{ Status = 'Failed'; Version = $pin.Version; FrameworkMissing = $false; RestartRequired = $false }
+        }
         $msiPath = Join-Path $stagingDir "WAU-$($pin.Version).msi"
         # Time-limited (review finding P2-5): without a limit, a download that connects and then
         # stalls waits for ever.
         $downloadTimeouts = Get-WebDownloadTimeoutParameters
         Invoke-WebRequest @downloadTimeouts -Uri $pin.MsiUrl -OutFile $msiPath -UseBasicParsing -ErrorAction Stop
 
-        $actualHash = (Get-FileHash -Path $msiPath -Algorithm SHA256).Hash
+        # Held open, with read-only sharing, from the hash until msiexec has finished (review
+        # finding P2-21): while it is open the file cannot be overwritten, renamed or deleted, so
+        # msiexec installs exactly the bytes hashed here. Disposed in finally, before the cleanup.
+        $msiStream = Open-ReadLockedFile -Path $msiPath
+        $actualHash = (Get-FileHash -InputStream $msiStream -Algorithm SHA256).Hash
         if ($actualHash -ne $pin.Sha256) {
             Write-ErrorMessage "Winget-AutoUpdate MSI hash mismatch (expected $($pin.Sha256), got $actualHash). Skipping installation."
             return [pscustomobject]@{ Status = 'Failed'; Version = $pin.Version; FrameworkMissing = $false; RestartRequired = $false }
@@ -7036,6 +7205,10 @@ function Install-WingetAutoUpdate {
         return [pscustomobject]@{ Status = 'Failed'; Version = $pin.Version; FrameworkMissing = $false; RestartRequired = $false }
     }
     finally {
+        # Close the MSI first: the open handle refuses deletion, so the cleanup would fail.
+        if ($msiStream) {
+            $msiStream.Dispose()
+        }
         if ($stagingDir) {
             Remove-Item -Path $stagingDir -Recurse -Force -ErrorAction SilentlyContinue
         }
@@ -7188,7 +7361,12 @@ function Test-AndInstallWingetModule {
             Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force -Scope AllUsers | Out-Null
         }
 
-        Install-Module -Name Microsoft.WinGet.Client -Scope AllUsers -Force -AllowClobber -ErrorAction Stop
+        # -Repository PSGallery (review finding P3-20): this runs elevated and installs for all
+        # users, so only the PowerShell Gallery may serve it, never another repository registered
+        # on the machine. (Install-PackageProvider has no -Repository parameter: the NuGet
+        # provider comes from PackageManagement's bootstrap feed, and current PackageManagement
+        # versions ship it built in.)
+        Install-Module -Name Microsoft.WinGet.Client -Repository PSGallery -Scope AllUsers -Force -AllowClobber -ErrorAction Stop
 
         $installedModule = Get-Module -ListAvailable -Name 'Microsoft.WinGet.Client' | Select-Object -First 1
         if ($installedModule) {
