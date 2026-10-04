@@ -458,3 +458,351 @@ function Wait-WauIdle {
         Start-Sleep -Seconds $PollIntervalSeconds
     }
 }
+
+<#
+.SYNOPSIS
+    Describes one scheduled-task trigger in a few words, for the transcript.
+.DESCRIPTION
+    The trigger's kind from its CIM class (MSFT_TaskWeeklyTrigger reads 'Weekly',
+    MSFT_TaskLogonTrigger 'Logon'), the days of a weekly trigger (its DaysOfWeek bit mask: 1 Sunday,
+    2 Monday, 4 Tuesday ... 64 Saturday), when it starts, and '(disabled)' for a disabled trigger.
+.PARAMETER Trigger
+    A trigger from a scheduled task's Triggers.
+.RETURNS
+    [string] For example 'Weekly on Tuesday from 2026-10-06T02:00:00'.
+#>
+function Format-ScheduledTaskTrigger {
+    param (
+        [Parameter(Mandatory = $true)]
+        $Trigger
+    )
+
+    $text = "$($Trigger.CimClass.CimClassName)" -replace '^MSFT_Task', '' -replace 'Trigger$', ''
+    if (-not $text) {
+        $text = 'Unknown'
+    }
+    if ("$($Trigger.DaysOfWeek)" -match '^\d+$' -and [int]$Trigger.DaysOfWeek -gt 0) {
+        $dayNames = @('Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday')
+        $days = @(for ($day = 0; $day -lt 7; $day++) {
+                if ([int]$Trigger.DaysOfWeek -band (1 -shl $day)) {
+                    $dayNames[$day]
+                }
+            })
+        $text += ' on ' + ($days -join ', ')
+    }
+    if ($Trigger.StartBoundary) {
+        $text += " from $($Trigger.StartBoundary)"
+    }
+    if ($Trigger.Enabled -eq $false) {
+        $text += ' (disabled)'
+    }
+    return $text
+}
+
+<#
+.SYNOPSIS
+    Reads the Winget-AutoUpdate scheduled task and says whether it will run.
+.DESCRIPTION
+    Review finding P3-36. WAU's registry key alone used to count as 'already present', and msiexec
+    exit code 0 as 'configured', so a machine whose WAU task had been deleted or disabled, or never
+    registered, showed a green 'Auto-updates' line and never updated. This reads the task WAU's MSI
+    registers, \WAU\Winget-AutoUpdate, and (Get-ScheduledTaskInfo) when it last ran and with what
+    result.
+
+    Healthy: the task exists, is not disabled, and has at least one enabled trigger (a task with
+    none never runs on its own). The last run's result is reported, not judged: why a WAU run went
+    wrong is in WAU's own log, whose end Write-WauTaskHealth prints.
+
+    Queried with -ErrorAction SilentlyContinue (review finding P3-38): with -ErrorAction Stop, a
+    task that does not exist, the normal answer before WAU is installed, is written to the
+    transcript as 'PS>TerminatingError(Get-ScheduledTask)' even when it is caught, and #283's was
+    read as part of a crash. The error is still read, from -ErrorVariable: 'not found'
+    (CmdletizationQuery_NotFound) means there is no task, and any other error means the task could
+    not be checked, which is not healthy either.
+.RETURNS
+    [pscustomobject] with Healthy ([bool]), Exists ([bool]), State, Triggers ([string[]], from
+    Format-ScheduledTaskTrigger), LastRunTime ([datetime], $null when the task has never run or
+    the time could not be read), LastTaskResult ([int64] or $null), NextRunTime and Problem (why it
+    is not healthy, worded to follow 'Winget-AutoUpdate is installed, but', or $null).
+#>
+function Get-WauTaskHealth {
+    $taskPath = '\WAU\'
+    $taskName = 'Winget-AutoUpdate'
+    $health = [pscustomobject]@{
+        Healthy        = $false
+        Exists         = $false
+        State          = $null
+        Triggers       = @()
+        LastRunTime    = $null
+        LastTaskResult = $null
+        NextRunTime    = $null
+        Problem        = $null
+    }
+
+    $task = $null
+    $taskErrors = @()
+    try {
+        $task = @(Get-ScheduledTask -TaskPath $taskPath -TaskName $taskName -ErrorAction SilentlyContinue -ErrorVariable taskErrors) | Select-Object -First 1
+    }
+    catch {
+        # The task scheduler cmdlets could not run at all.
+        $taskErrors = @($_)
+    }
+    if (-not $task) {
+        $failure = @($taskErrors | Where-Object { "$($_.FullyQualifiedErrorId)" -notlike 'CmdletizationQuery_NotFound*' }) | Select-Object -First 1
+        if ($failure) {
+            $health.Problem = "its scheduled task $taskPath$taskName could not be checked ($($failure.Exception.Message))"
+        }
+        else {
+            $health.Problem = "its scheduled task $taskPath$taskName does not exist"
+        }
+        return $health
+    }
+
+    $health.Exists = $true
+    $health.State = "$($task.State)"
+    $triggers = @($task.Triggers | Where-Object { $null -ne $_ })
+    $health.Triggers = @($triggers | ForEach-Object { Format-ScheduledTaskTrigger -Trigger $_ })
+    $enabledTriggers = @($triggers | Where-Object { $_.Enabled -ne $false })
+
+    $info = $null
+    try {
+        $info = Get-ScheduledTaskInfo -TaskPath $taskPath -TaskName $taskName -ErrorAction SilentlyContinue
+    }
+    catch {
+        $info = $null
+    }
+    if ($info) {
+        # The task scheduler gives 1999-11-30 as the last run time of a task that has never run.
+        if ($info.LastRunTime -and ([datetime]$info.LastRunTime).Year -ge 2000) {
+            $health.LastRunTime = [datetime]$info.LastRunTime
+        }
+        if ($null -ne $info.LastTaskResult) {
+            $health.LastTaskResult = [int64]$info.LastTaskResult
+        }
+        if ($info.NextRunTime) {
+            $health.NextRunTime = [datetime]$info.NextRunTime
+        }
+    }
+
+    if ($health.State -eq 'Disabled') {
+        $health.Problem = "its scheduled task $taskPath$taskName is disabled"
+    }
+    elseif ($enabledTriggers.Count -eq 0) {
+        $health.Problem = "its scheduled task $taskPath$taskName has no enabled trigger, so it never runs on its own"
+    }
+    else {
+        $health.Healthy = $true
+    }
+    return $health
+}
+
+<#
+.SYNOPSIS
+    Returns the path of Winget-AutoUpdate's own log, updates.log, or $null.
+.DESCRIPTION
+    WAU writes each run to <InstallLocation>\logs\updates.log, where InstallLocation is the value
+    its MSI records under HKLM:\SOFTWARE\Romanitho\Winget-AutoUpdate (by default
+    %ProgramFiles%\Winget-AutoUpdate\). The default folder is used when the value cannot be read.
+    The file need not exist: WAU creates it on its first run.
+.RETURNS
+    [string] or $null when no folder is known.
+#>
+function Get-WauUpdatesLogPath {
+    $installLocation = $null
+    try {
+        $installLocation = [string](Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Romanitho\Winget-AutoUpdate' -Name 'InstallLocation' -ErrorAction SilentlyContinue).InstallLocation
+    }
+    catch {
+        $installLocation = $null
+    }
+    if ([string]::IsNullOrWhiteSpace($installLocation)) {
+        if ([string]::IsNullOrWhiteSpace($env:ProgramFiles)) {
+            return $null
+        }
+        $installLocation = Join-Path $env:ProgramFiles 'Winget-AutoUpdate'
+    }
+    return (Join-Path $installLocation.Trim() 'logs\updates.log')
+}
+
+<#
+.SYNOPSIS
+    Writes the state of the Winget-AutoUpdate task, and the end of WAU's log, to the transcript.
+.DESCRIPTION
+    Review finding P3-36: whether auto-updates work used to be invisible in the log a teammate
+    attaches. One line gives the task's state, triggers, last run, last result and next run, from
+    Get-WauTaskHealth; then, when WAU's updates.log exists, its last lines follow, each indented
+    behind '| ' so the e2e transcript parser never reads one of WAU's lines as the installer's.
+    Best-effort: a log that cannot be read is noted and the run goes on.
+.PARAMETER Health
+    Get-WauTaskHealth's result.
+.PARAMETER LogTailLines
+    How many lines of updates.log to show. Default 20.
+#>
+function Write-WauTaskHealth {
+    param (
+        [Parameter(Mandatory = $true)]
+        [pscustomobject]$Health,
+
+        [Parameter(Mandatory = $false)]
+        [int]$LogTailLines = 20
+    )
+
+    if ($Health.Exists) {
+        $triggers = 'none'
+        if (@($Health.Triggers).Count -gt 0) {
+            $triggers = @($Health.Triggers) -join '; '
+        }
+        $lastRun = 'never'
+        if ($Health.LastRunTime) {
+            $lastRun = '{0:yyyy-MM-dd HH:mm}' -f $Health.LastRunTime
+        }
+        $lastResult = 'unknown'
+        if ($null -ne $Health.LastTaskResult) {
+            # The task scheduler's own codes (SCHED_S_*) for the results a healthy task shows.
+            $lastResult = '0x{0:X8}' -f $Health.LastTaskResult
+            switch ($Health.LastTaskResult) {
+                0 { $lastResult += ' (success)' }
+                267009 { $lastResult += ' (running now)' }
+                267011 { $lastResult += ' (has not run yet)' }
+                267014 { $lastResult += ' (stopped before it finished)' }
+            }
+        }
+        $nextRun = 'none scheduled'
+        if ($Health.NextRunTime) {
+            $nextRun = '{0:yyyy-MM-dd HH:mm}' -f $Health.NextRunTime
+        }
+        Write-Info ('Winget-AutoUpdate task \WAU\Winget-AutoUpdate: state {0}; triggers: {1}; last run: {2}, result {3}; next run: {4}.' -f $Health.State, $triggers, $lastRun, $lastResult, $nextRun)
+    }
+
+    $logPath = Get-WauUpdatesLogPath
+    if (-not $logPath -or -not (Test-Path -LiteralPath $logPath -PathType Leaf)) {
+        return
+    }
+    try {
+        $lines = @(Get-Content -LiteralPath $logPath -Tail $LogTailLines -ErrorAction Stop)
+    }
+    catch {
+        Write-WarningMessage "Could not read Winget-AutoUpdate's log ($logPath): $_"
+        return
+    }
+    Write-Info ("The last {0} lines of Winget-AutoUpdate's log ({1}):" -f $lines.Count, $logPath)
+    foreach ($line in $lines) {
+        Write-Host ('    | ' + $line) -ForegroundColor DarkGray
+    }
+}
+
+<#
+.SYNOPSIS
+    Returns a new path for one msiexec verbose log of a Winget-AutoUpdate install or uninstall.
+.DESCRIPTION
+    Review finding P3-37: a failed WAU msiexec used to leave only its exit code (1603, say) to debug
+    from. The log goes into the run's logs folder (Get-InstallerLogDirectory, next to the transcript
+    a teammate attaches) or, when there is no transcript (winget-app-uninstall.ps1, the imported
+    module), %ProgramData%\winget-app-setup\logs, where the installer's transcripts go. The folder
+    is created when missing; when it cannot be, there is no log: msiexec fails the whole operation
+    (1622) when it cannot open its log.
+.PARAMETER Action
+    'install' or 'uninstall', for the file name.
+.PARAMETER Attempt
+    The attempt number, for the file name: each retry after msiexec exit code 1618 gets its own log.
+.RETURNS
+    [string] wau-msi-<action>-<yyyyMMdd-HHmmss>-<attempt>.log in that folder, or $null.
+#>
+function New-WauMsiLogPath {
+    param (
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('install', 'uninstall')]
+        [string]$Action,
+
+        [Parameter(Mandatory = $false)]
+        [int]$Attempt = 1
+    )
+
+    $directory = Get-InstallerLogDirectory
+    if ([string]::IsNullOrWhiteSpace($directory)) {
+        if ([string]::IsNullOrWhiteSpace($env:ProgramData)) {
+            return $null
+        }
+        $directory = Join-Path $env:ProgramData 'winget-app-setup\logs'
+    }
+    try {
+        if (-not (Test-Path -LiteralPath $directory)) {
+            [void](New-Item -Path $directory -ItemType Directory -Force -ErrorAction Stop)
+        }
+    }
+    catch {
+        return $null
+    }
+    return (Join-Path $directory ('wau-msi-{0}-{1:yyyyMMdd-HHmmss}-{2}.log' -f $Action, (Get-Date), $Attempt))
+}
+
+<#
+.SYNOPSIS
+    Runs msiexec for Winget-AutoUpdate with a verbose log, a time limit and a wait for a busy
+    Windows Installer.
+.DESCRIPTION
+    Shared by Install-WingetAutoUpdate and Uninstall-WingetAutoUpdate:
+      - each attempt writes msiexec's verbose log (/l*v) to New-WauMsiLogPath (review finding
+        P3-37), so a failure can be diagnosed from the logs folder;
+      - each attempt has msiexec's time limit (Get-ProcessTimeoutSeconds -Operation MsiExec, review
+        finding P2-5);
+      - exit code 1618 (ERROR_INSTALL_ALREADY_RUNNING: another installation holds Windows Installer)
+        waits for that installation (Wait-WindowsInstallerIdle) and tries again, up to 3 times and
+        within -InstallInProgressWaitSeconds in all (review finding P2-15).
+.PARAMETER ArgumentString
+    msiexec's arguments, without a log option.
+.PARAMETER Action
+    'install' or 'uninstall': the log name and the wait message.
+.PARAMETER InstallInProgressWaitSeconds
+    The most to wait, in all, for another installation. 0: 1618 is returned at once.
+.RETURNS
+    Invoke-ExternalProcess's result of the last attempt, with LogPath set to that attempt's msiexec
+    log ($null when there is none), plus BusyRetries and BusyWaitedSeconds.
+#>
+function Invoke-WauMsiexec {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$ArgumentString,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('install', 'uninstall')]
+        [string]$Action,
+
+        [Parameter(Mandatory = $false)]
+        [int]$InstallInProgressWaitSeconds = 600
+    )
+
+    $timeoutSeconds = Get-ProcessTimeoutSeconds -Operation MsiExec
+    $busyRetries = 0
+    $busyWaited = 0
+    while ($true) {
+        $logPath = New-WauMsiLogPath -Action $Action -Attempt ($busyRetries + 1)
+        $arguments = $ArgumentString
+        if ($logPath) {
+            $arguments = '{0} /l*v "{1}"' -f $ArgumentString, $logPath
+        }
+        $msiexec = Invoke-ExternalProcess -FilePath 'msiexec.exe' -ArgumentString $arguments -TimeoutSeconds $timeoutSeconds -Echo None
+        $msiexec.LogPath = $logPath
+        if ($msiexec.LaunchFailed) {
+            # msiexec never ran, so it wrote no log.
+            $msiexec.LogPath = $null
+            break
+        }
+        if ($msiexec.TimedOut) {
+            break
+        }
+        $busyWaitLeft = $InstallInProgressWaitSeconds - $busyWaited
+        if ($msiexec.ExitCode -eq 1618 -and $busyRetries -lt 3 -and $busyWaitLeft -gt 0) {
+            $busyRetries++
+            Write-WarningMessage ('Windows Installer is busy with another installation (msiexec exit code 1618). Waiting for it to finish (at most {0} seconds) before retry {1} of 3 of the Winget-AutoUpdate {2}...' -f $busyWaitLeft, $busyRetries, $Action)
+            $wait = Wait-WindowsInstallerIdle -MaximumSeconds $busyWaitLeft
+            $busyWaited += [int]$wait.WaitedSeconds
+            continue
+        }
+        break
+    }
+    $msiexec | Add-Member -NotePropertyName 'BusyRetries' -NotePropertyValue $busyRetries -Force
+    $msiexec | Add-Member -NotePropertyName 'BusyWaitedSeconds' -NotePropertyValue $busyWaited -Force
+    return $msiexec
+}

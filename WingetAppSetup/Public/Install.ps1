@@ -32,12 +32,15 @@
     failed or no valid apps remain, 4 = administrator rights
     are required and the run was not elevated: the UAC prompt was declined or could not be shown, a
     non-interactive run (nobody to approve a prompt, so none is shown), irm | iex, or the imported
-    module (review finding P2-12), 3010 = success, but a restart is required to finish (an install
-    said so, or Windows gained a pending restart during the run; review finding P3-16). At the end
-    of a run the precedence is 1 > 2 > 3010 > 0 (Get-InstallerExitCode). Apps reported as Deferred
-    (a run as SYSTEM or under cross-user elevation found no machine-wide installer for them) count
-    neither as installed nor as failed and do not change the code. A run as SYSTEM returns 2 at the
-    start when no machine-wide winget.exe can be started. A run that relaunched
+    module (review finding P2-12), 8 = the apps are installed, but automatic updates are not
+    configured or unhealthy: the run's 'Auto-updates:' line is FAILED, NOT CONFIGURED (no
+    Microsoft.WindowsAppRuntime.1.8), AT RISK or UNHEALTHY (review finding P3-36), 3010 = success,
+    but a restart is required to finish (an install said so, or Windows gained a pending restart
+    during the run; review finding P3-16). At the end of a run the precedence is
+    1 > 2 > 8 > 3010 > 0 (Get-InstallerExitCode). Apps reported as Deferred (a run as SYSTEM or
+    under cross-user elevation found no machine-wide installer for them) count neither as
+    installed nor as failed and do not change the code. A run as SYSTEM returns 2 at the start
+    when no machine-wide winget.exe can be started. A run that relaunched
     itself elevated returns the elevated run's exit code (Restart-WithElevation waits for it). The
     generated entry script also exits 1 when a blocking pre-flight check fails (before this
     function runs) and 5 when the run was aborted by an unexpected error or stopped from outside.
@@ -502,8 +505,8 @@ function Invoke-WingetInstall {
     }
 
     # Set up ongoing automatic updates via Winget-AutoUpdate (issue #168). Best-effort: a failure
-    # here warns but does not fail the install; the outcome is captured and surfaced next to the
-    # final summary instead of being a scrolled-past warning (issue #186).
+    # here never stops the run; the outcome is captured, surfaced next to the final summary instead
+    # of being a scrolled-past warning (issue #186), and decides exit code 8 (review finding P3-36).
     #
     # Runs only after every winget call this run makes (the retry pass included), and WAU is no
     # longer told to start an update pass immediately (RUN_WAU=YES was removed). Every WAU SYSTEM
@@ -616,13 +619,17 @@ function Invoke-WingetInstall {
     Write-DeferredAppsSummary -DeferredApps $deferredApps -AccountContext $account
 
     # Surface the auto-update outcome with the summary so a machine that finished without an update
-    # mechanism is visible at the end of the run (issue #186). Deliberately does not affect the exit
-    # code: the documented 0/1/2/3 contract stays scoped to app installs and winget availability.
+    # mechanism is visible at the end of the run (issue #186). Every outcome printed as an error
+    # makes the run exit 8 when no app failed and winget still works (review finding P3-36): an RMM
+    # job reads only the exit code, and used to report success for a machine that would never
+    # update. Configured and Already present mean the WAU task was found ready to run.
+    $autoUpdatesHealthy = $true
     switch ($wauResult.Status) {
         'Configured' { Write-Success "Auto-updates: Configured (Winget-AutoUpdate v$($wauResult.Version))." }
         'AlreadyPresent' {
             if ($wauResult.FrameworkMissing) {
                 Write-ErrorMessage 'Auto-updates: AT RISK - Winget-AutoUpdate is installed but Microsoft.WindowsAppRuntime.1.8 is missing; its next run may leave winget unusable (see above).'
+                $autoUpdatesHealthy = $false
             }
             elseif ($wauResult.Version) {
                 Write-Success "Auto-updates: Already present (v$($wauResult.Version))."
@@ -631,9 +638,19 @@ function Invoke-WingetInstall {
                 Write-WarningMessage 'Auto-updates: Already present (installed version could not be determined).'
             }
         }
+        'Unhealthy' {
+            Write-ErrorMessage "Auto-updates: UNHEALTHY - Winget-AutoUpdate is installed, but $($wauResult.Problem); apps will not update automatically (see above)."
+            $autoUpdatesHealthy = $false
+        }
         'DryRun' { Write-Info "[DRY-RUN] Auto-updates: Would configure Winget-AutoUpdate v$($wauResult.Version)." }
-        'FrameworkMissing' { Write-ErrorMessage 'Auto-updates: NOT CONFIGURED - Microsoft.WindowsAppRuntime.1.8 is missing, and Winget-AutoUpdate would leave winget unusable without it. Install the Windows App Runtime 1.8 (or let the Microsoft Store update App Installer), then re-run the installer.' }
-        default { Write-ErrorMessage 'Auto-updates: FAILED - Winget-AutoUpdate could not be installed; apps will not update automatically. Re-run the installer to retry.' }
+        'FrameworkMissing' {
+            Write-ErrorMessage 'Auto-updates: NOT CONFIGURED - Microsoft.WindowsAppRuntime.1.8 is missing, and Winget-AutoUpdate would leave winget unusable without it. Install the Windows App Runtime 1.8 (or let the Microsoft Store update App Installer), then re-run the installer.'
+            $autoUpdatesHealthy = $false
+        }
+        default {
+            Write-ErrorMessage 'Auto-updates: FAILED - Winget-AutoUpdate could not be installed; apps will not update automatically. Re-run the installer to retry.'
+            $autoUpdatesHealthy = $false
+        }
     }
 
     if (-not $wingetUsableAtEnd) {
@@ -665,7 +682,7 @@ function Invoke-WingetInstall {
         Write-Info "Full transcript of this run: $script:InstallLogPath"
     }
 
-    $exitCode = Get-InstallerExitCode -FailedAppCount $failedApps.Count -WingetUsable $wingetUsableAtEnd -RestartRequired $restartRequired
+    $exitCode = Get-InstallerExitCode -FailedAppCount $failedApps.Count -WingetUsable $wingetUsableAtEnd -AutoUpdatesHealthy $autoUpdatesHealthy -RestartRequired $restartRequired
     # Recorded before the final prompt: Ctrl+C there stops a run that has already finished, and
     # the entry script's abort guard then reports this code instead of an abort (5).
     $script:InstallerPendingExitCode = $exitCode

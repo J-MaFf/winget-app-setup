@@ -18,6 +18,7 @@ Get-AppxProvisionedPackage
 Get-AuthenticodeSignature
 Get-CimInstance
 Get-ScheduledTask
+Get-ScheduledTaskInfo
 Out-GridView
 Repair-WinGetPackageManager
 Set-ScheduledTask

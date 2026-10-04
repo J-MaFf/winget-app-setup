@@ -47,6 +47,77 @@ Describe 'Get-InstallPassVerdict' {
         (Get-InstallPassVerdict -ExitCode 1 -KnownPlatformIncompatible 'Some.App' -Pass 'first').Message | Should -Match '^First install pass exited 1 \(some apps failed\) - tolerated .*: Some\.App$'
         (Get-InstallPassVerdict -ExitCode 3010 -KnownPlatformIncompatible '' -Pass 'first').Message | Should -Be 'First install pass exited 3010 (OK, restart required).'
     }
+
+    # Review finding P3-36: the installer exits 8 when auto-updates are not configured, which on
+    # windows-latest (no Microsoft.WindowsAppRuntime.1.8) is every pass. Only that reason passes.
+    It 'Exit 8 with ''Auto-updates: <Line>'' in the pass''s transcript -> <Outcome>, step exit <StepExitCode>' -ForEach @(
+        @{ Line = 'NOT CONFIGURED - Microsoft.WindowsAppRuntime.1.8 is missing, and Winget-AutoUpdate would leave winget unusable without it.'; Outcome = 'passed'; StepExitCode = 0 }
+        @{ Line = 'FAILED - Winget-AutoUpdate could not be installed; apps will not update automatically. Re-run the installer to retry.'; Outcome = 'failed'; StepExitCode = 8 }
+        @{ Line = 'UNHEALTHY - Winget-AutoUpdate is installed, but its scheduled task \WAU\Winget-AutoUpdate does not exist; apps will not update automatically (see above).'; Outcome = 'failed'; StepExitCode = 8 }
+        @{ Line = 'AT RISK - Winget-AutoUpdate is installed but Microsoft.WindowsAppRuntime.1.8 is missing; its next run may leave winget unusable (see above).'; Outcome = 'failed'; StepExitCode = 8 }
+        @{ Line = 'NOT CONFIGURED - some other reason.'; Outcome = 'failed'; StepExitCode = 8 }
+    ) {
+        $transcript = [pscustomobject]@{ Name = 'install-20261005-060000.log'; Parsed = (ConvertFrom-InstallTranscript -Content "Summary:`nAuto-updates: $Line") }
+
+        $verdict = Get-InstallPassVerdict -ExitCode 8 -KnownPlatformIncompatible 'Some.App' -Pass 'first' -Transcript $transcript
+
+        $verdict.Outcome | Should -Be $Outcome
+        $verdict.StepExitCode | Should -Be $StepExitCode
+        $verdict.Message | Should -Match '^First install pass exited 8 \(apps OK, auto-updates not configured or unhealthy\) - '
+        $verdict.Message | Should -Match 'install-20261005-060000\.log'
+    }
+
+    It 'Fails exit 8 when the pass''s transcript has no Auto-updates line, or there is no transcript' {
+        $noLine = [pscustomobject]@{ Name = 'install-20261005-060000.log'; Parsed = (ConvertFrom-InstallTranscript -Content 'Summary:') }
+
+        $verdict = Get-InstallPassVerdict -ExitCode 8 -KnownPlatformIncompatible '' -Pass 'second' -Transcript $noLine
+        $verdict.StepExitCode | Should -Be 8
+        $verdict.Message | Should -Be "Second install pass exited 8 (apps OK, auto-updates not configured or unhealthy) - FAILED: install-20261005-060000.log reports no 'Auto-updates:' line, not NOT CONFIGURED for a missing Microsoft.WindowsAppRuntime.1.8"
+
+        $verdict = Get-InstallPassVerdict -ExitCode 8 -KnownPlatformIncompatible '' -Pass 'second' -Transcript $null
+        $verdict.StepExitCode | Should -Be 8
+        $verdict.Message | Should -Be 'Second install pass exited 8 (apps OK, auto-updates not configured or unhealthy) - FAILED: no transcript of this pass was found, so why cannot be checked'
+    }
+}
+
+Describe 'Get-InstallPassTranscript' {
+    BeforeEach {
+        $script:logs = Join-Path $TestDrive ([guid]::NewGuid().ToString('N'))
+        $null = New-Item -ItemType Directory -Path $script:logs
+        $script:start = [datetime]'2026-10-05T06:00:00'
+        function New-TestTranscript {
+            param ([string]$Name, [string[]]$Lines, [int]$MinutesAfterStart)
+            $path = Join-Path $script:logs $Name
+            Set-Content -LiteralPath $path -Value $Lines
+            (Get-Item -LiteralPath $path).LastWriteTime = $script:start.AddMinutes($MinutesAfterStart)
+        }
+    }
+
+    It 'Reads the PowerShell 7 transcript written since the pass started, not an earlier pass''s, a bootstrap or a dry run' {
+        New-TestTranscript -Name 'install-20261005-053000.log' -Lines @('Summary:', 'Auto-updates: FAILED - earlier pass.') -MinutesAfterStart -20
+        New-TestTranscript -Name 'install-20261005-060010.log' -Lines @('Summary:', 'Auto-updates: NOT CONFIGURED - Microsoft.WindowsAppRuntime.1.8 is missing, this pass.') -MinutesAfterStart 10
+        New-TestTranscript -Name 'install-20261005-060005-bootstrap.log' -Lines @('Relaunching the installer under PowerShell 7: C:\pwsh.exe') -MinutesAfterStart 11
+        New-TestTranscript -Name 'install-20261005-060020-whatif.log' -Lines @('Summary:', 'Auto-updates: FAILED - dry run.') -MinutesAfterStart 12
+
+        $transcript = Get-InstallPassTranscript -LogDirectory $script:logs -Since $script:start
+
+        $transcript.Name | Should -Be 'install-20261005-060010.log'
+        $transcript.Parsed.AutoUpdatesFrameworkMissing | Should -BeTrue
+    }
+
+    It 'Prefers the transcript that reached its summary when the pass wrote two' {
+        New-TestTranscript -Name 'install-20261005-060010.log' -Lines @('Summary:', 'Auto-updates: NOT CONFIGURED - Microsoft.WindowsAppRuntime.1.8 is missing.') -MinutesAfterStart 10
+        New-TestTranscript -Name 'install-20261005-060001.log' -Lines @('This script requires administrator privileges. Restarting with elevated privileges...') -MinutesAfterStart 11
+
+        (Get-InstallPassTranscript -LogDirectory $script:logs -Since $script:start).Name | Should -Be 'install-20261005-060010.log'
+    }
+
+    It 'Returns nothing when the pass wrote no transcript' {
+        New-TestTranscript -Name 'install-20261005-053000.log' -Lines @('Summary:') -MinutesAfterStart -20
+
+        Get-InstallPassTranscript -LogDirectory $script:logs -Since $script:start | Should -BeNullOrEmpty
+        Get-InstallPassTranscript -LogDirectory (Join-Path $TestDrive 'no-such-folder') -Since $script:start | Should -BeNullOrEmpty
+    }
 }
 
 Describe 'Get-InstallPassCommand' {
@@ -157,6 +228,27 @@ Describe 'e2e/Invoke-InstallPass.ps1 run as a step' {
         $stdout | Should -Match 'stand-in installer'
         $stderr | Should -Not -Match 'CLIXML'
         $stderr | Should -Match 'stand-in error'
+    }
+
+    It 'Exits <Expected> when the installer exits 8 and <Case>' -ForEach @(
+        @{ Case = 'its transcript says auto-updates were skipped for the missing framework'; Line = 'NOT CONFIGURED - Microsoft.WindowsAppRuntime.1.8 is missing, and Winget-AutoUpdate would leave winget unusable without it.'; Expected = 0 }
+        @{ Case = 'its transcript says the auto-update setup failed'; Line = 'FAILED - Winget-AutoUpdate could not be installed; apps will not update automatically.'; Expected = 8 }
+        @{ Case = 'it wrote no transcript'; Line = $null; Expected = 8 }
+    ) {
+        $logs = Join-Path $TestDrive ([guid]::NewGuid().ToString('N'))
+        $null = New-Item -ItemType Directory -Path $logs
+        $writeTranscript = ''
+        if ($Line) {
+            $transcriptPath = Join-Path $logs 'install-20261005-060000.log'
+            $writeTranscript = "Set-Content -LiteralPath '$transcriptPath' -Value @('Summary:', 'Auto-updates: $Line'); "
+        }
+        $installer = New-StandInInstaller -Body ($writeTranscript + "Write-Host 'stand-in installer'; exit 8")
+
+        $output = & $script:Pwsh -NoProfile -File $script:InstallPassScript -Pass first -Shell pwsh -Entry File -Source checkout -KnownPlatformIncompatible '' -InstallerPath $installer -LogDirectory $logs 2>&1
+        $exitCode = $LASTEXITCODE
+
+        $exitCode | Should -Be $Expected
+        ($output -join "`n") | Should -Match 'First install pass exited 8'
     }
 
     It 'Exits 64 without a pass, shell and entry' {

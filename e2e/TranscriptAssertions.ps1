@@ -112,8 +112,11 @@ function ConvertTo-TranscriptAppId {
       Aborted            the run was aborted or stopped before it finished.
       EarlyExitCode      the code in 'The installer stopped early with exit code N', or $null.
       AutoUpdatesLine    the text after the last 'Auto-updates: ', or $null.
-      AutoUpdatesStatus  'Configured', 'Already present', 'AT RISK', 'NOT CONFIGURED' or
-                         'FAILED', or $null.
+      AutoUpdatesStatus  'Configured', 'Already present', 'AT RISK', 'NOT CONFIGURED',
+                         'UNHEALTHY' or 'FAILED', or $null.
+      AutoUpdatesFrameworkMissing  the line is 'NOT CONFIGURED - Microsoft.WindowsAppRuntime.1.8
+                         is missing ...': Winget-AutoUpdate was skipped because that framework is
+                         missing, which is what makes a run on windows-latest exit 8.
       WingetNotUsable    the end-of-run check printed 'winget: NOT USABLE'.
 #>
 function ConvertFrom-InstallTranscript {
@@ -247,9 +250,10 @@ function ConvertFrom-InstallTranscript {
     $finalFailed = @(@($stillFailedAfterFirstPass) + @($retryFailed) + @($summary['Failed']) | Where-Object { $_ } | Sort-Object -Unique)
 
     $autoUpdatesStatus = $null
-    if ($autoUpdatesLine -and $autoUpdatesLine -match '^(?<status>NOT CONFIGURED|AT RISK|FAILED|Configured|Already present)\b') {
+    if ($autoUpdatesLine -and $autoUpdatesLine -match '^(?<status>NOT CONFIGURED|AT RISK|UNHEALTHY|FAILED|Configured|Already present)\b') {
         $autoUpdatesStatus = $Matches.status
     }
+    $autoUpdatesFrameworkMissing = $autoUpdatesStatus -eq 'NOT CONFIGURED' -and $autoUpdatesLine -match '^NOT CONFIGURED - Microsoft\.WindowsAppRuntime\.1\.8 is missing\b'
 
     return [pscustomobject]@{
         BuildId             = $buildId
@@ -271,6 +275,7 @@ function ConvertFrom-InstallTranscript {
         EarlyExitCode       = $earlyExitCode
         AutoUpdatesLine     = $autoUpdatesLine
         AutoUpdatesStatus   = $autoUpdatesStatus
+        AutoUpdatesFrameworkMissing = $autoUpdatesFrameworkMissing
         WingetNotUsable     = $wingetNotUsable
     }
 }

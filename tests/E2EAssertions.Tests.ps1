@@ -60,8 +60,25 @@ Describe 'ConvertFrom-InstallTranscript' {
         $transcript.SummarySkipped | Should -Be @('Dell.CommandUpdate.Universal', 'Microsoft.PowerShell', 'Microsoft.WindowsTerminal')
         $transcript.FinalFailed | Should -BeNullOrEmpty
         $transcript.AutoUpdatesStatus | Should -Be 'NOT CONFIGURED'
+        $transcript.AutoUpdatesFrameworkMissing | Should -BeTrue
         $transcript.WingetNotUsable | Should -BeFalse
         $transcript.Aborted | Should -BeFalse
+    }
+
+    # Review finding P3-36: these runs exit 8, and e2e/Invoke-InstallPass.ps1 accepts 8 only for the
+    # missing framework.
+    It 'Tells the missing-framework NOT CONFIGURED from every other auto-update outcome: <Line>' -ForEach @(
+        @{ Line = 'NOT CONFIGURED - Microsoft.WindowsAppRuntime.1.8 is missing, and Winget-AutoUpdate would leave winget unusable without it.'; Status = 'NOT CONFIGURED'; FrameworkMissing = $true }
+        @{ Line = 'NOT CONFIGURED - some other reason.'; Status = 'NOT CONFIGURED'; FrameworkMissing = $false }
+        @{ Line = 'UNHEALTHY - Winget-AutoUpdate is installed, but its scheduled task \WAU\Winget-AutoUpdate does not exist; apps will not update automatically (see above).'; Status = 'UNHEALTHY'; FrameworkMissing = $false }
+        @{ Line = 'AT RISK - Winget-AutoUpdate is installed but Microsoft.WindowsAppRuntime.1.8 is missing; its next run may leave winget unusable (see above).'; Status = 'AT RISK'; FrameworkMissing = $false }
+        @{ Line = 'FAILED - Winget-AutoUpdate could not be installed; apps will not update automatically. Re-run the installer to retry.'; Status = 'FAILED'; FrameworkMissing = $false }
+        @{ Line = 'Configured (Winget-AutoUpdate v2.12.0).'; Status = 'Configured'; FrameworkMissing = $false }
+    ) {
+        $transcript = ConvertFrom-InstallTranscript -Content "Summary:`nAuto-updates: $Line"
+
+        $transcript.AutoUpdatesStatus | Should -Be $Status
+        $transcript.AutoUpdatesFrameworkMissing | Should -Be $FrameworkMissing
     }
 
     It 'Reads the timeout failures of both passes, which the old failure regex missed, and what the retry recovered' {
@@ -360,7 +377,8 @@ Describe 'Installer messages the transcript parser keys on' {
         @{ File = 'WingetAppSetup/Public/Install.ps1'; Text = "`$rows += , @('Installed', `$appList)" }
         @{ File = 'WingetAppSetup/Public/Install.ps1'; Text = "`$rows += , @('Skipped', `$appList)" }
         @{ File = 'WingetAppSetup/Public/Install.ps1'; Text = "`$rows += , @('Failed', `$appList)" }
-        @{ File = 'WingetAppSetup/Public/Install.ps1'; Text = "'FrameworkMissing' { Write-ErrorMessage 'Auto-updates: NOT CONFIGURED - " }
+        @{ File = 'WingetAppSetup/Public/Install.ps1'; Text = "Write-ErrorMessage 'Auto-updates: NOT CONFIGURED - Microsoft.WindowsAppRuntime.1.8 is missing, " }
+        @{ File = 'WingetAppSetup/Public/Install.ps1'; Text = 'Write-ErrorMessage "Auto-updates: UNHEALTHY - ' }
         @{ File = 'WingetAppSetup/Public/Install.ps1'; Text = 'Write-ErrorMessage "winget: NOT USABLE - ' }
         @{ File = 'build/fragments/tail.ps1'; Text = 'Write-Info "Installer build: $script:InstallerBuildId"' }
         @{ File = 'build/fragments/tail.ps1'; Text = "Write-ErrorMessage 'UNEXPECTED ERROR - the run was aborted before it finished." }

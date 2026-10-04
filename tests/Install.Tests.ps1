@@ -243,13 +243,53 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
             Should -Invoke Install-AppWithVerification -Times 0 -Exactly
         }
 
-        It 'Keeps 0 when Winget-AutoUpdate could not be configured (auto-updates do not affect the exit code, issue #186)' {
+        # Review finding P3-36: an RMM job reads only the exit code, and this used to be 0, so a
+        # machine that would never update was reported as a success.
+        It 'Returns 8 when the apps installed but Winget-AutoUpdate could not be configured (review finding P3-36)' {
             Mock Install-WingetAutoUpdate { [pscustomobject]@{ Status = 'Failed'; Version = $null } }
 
             $result = Invoke-WingetInstall -Apps @(@{ name = 'Contoso.AppOne' }) -NonInteractive
 
-            $result | Should -Be 0
+            @($result).Count | Should -Be 1
+            $result | Should -Be 8
             ($script:errorMessages -join "`n") | Should -Match 'Auto-updates: FAILED'
+        }
+
+        It 'Returns 8 for every auto-update outcome printed as an error: <Status>' -ForEach @(
+            @{ Status = 'FrameworkMissing'; FrameworkMissing = $true; Line = 'Auto-updates: NOT CONFIGURED - Microsoft.WindowsAppRuntime.1.8 is missing' }
+            @{ Status = 'AlreadyPresent'; FrameworkMissing = $true; Line = 'Auto-updates: AT RISK - ' }
+            @{ Status = 'Unhealthy'; FrameworkMissing = $false; Line = 'Auto-updates: UNHEALTHY - Winget-AutoUpdate is installed, but its scheduled task \WAU\Winget-AutoUpdate is disabled; apps will not update automatically (see above).' }
+        ) {
+            $script:wauResult = [pscustomobject]@{ Status = $Status; Version = [version]'2.12.0'; FrameworkMissing = $FrameworkMissing; RestartRequired = $false; Problem = 'its scheduled task \WAU\Winget-AutoUpdate is disabled' }
+            Mock Install-WingetAutoUpdate { $script:wauResult }
+
+            Invoke-WingetInstall -Apps @(@{ name = 'Contoso.AppOne' }) -NonInteractive | Should -Be 8
+
+            @($script:errorMessages | Where-Object { $_.StartsWith($Line) }).Count | Should -Be 1
+        }
+
+        It 'Returns 0 when Winget-AutoUpdate is <Status> and its task will run' -ForEach @(
+            @{ Status = 'Configured' }
+            @{ Status = 'AlreadyPresent' }
+        ) {
+            $script:wauResult = [pscustomobject]@{ Status = $Status; Version = [version]'2.12.0'; FrameworkMissing = $false; RestartRequired = $false }
+            Mock Install-WingetAutoUpdate { $script:wauResult }
+
+            Invoke-WingetInstall -Apps @(@{ name = 'Contoso.AppOne' }) -NonInteractive | Should -Be 0
+
+            ($script:errorMessages -join "`n") | Should -Not -Match 'Auto-updates:'
+        }
+
+        It 'Ranks failed apps (1) and an unusable winget (2) above auto-updates (8), and 8 above a needed restart (3010)' {
+            Mock Install-WingetAutoUpdate { [pscustomobject]@{ Status = 'FrameworkMissing'; Version = '2.12.0'; FrameworkMissing = $true; RestartRequired = $false } }
+            Mock Install-AppWithVerification { @{ Status = 'Failed'; InstallResult = @{ ExitCode = 1; Attempts = 1 }; FailureReason = 'VerifyNotFound' } }
+            Invoke-WingetInstall -Apps @(@{ name = 'Contoso.AppOne' }) -NonInteractive | Should -Be 1
+
+            Mock Install-AppWithVerification { @{ Status = 'Installed'; InstallResult = @{ ExitCode = 0; Attempts = 1; RestartRequired = $true }; FailureReason = $null } }
+            Invoke-WingetInstall -Apps @(@{ name = 'Contoso.AppOne' }) -NonInteractive | Should -Be 8
+
+            Mock Test-WingetLaunchable { [pscustomobject]@{ Launchable = $false; Version = $null; Reason = 'winget could not be started: Access is denied'; Attempts = 5 } }
+            Invoke-WingetInstall -Apps @(@{ name = 'Contoso.AppOne' }) -NonInteractive | Should -Be 2
         }
 
         It 'Returns the dry run''s outcome too, without probing winget at the end' {
@@ -747,10 +787,10 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
             Should -Invoke Write-Table -Times 1 -Exactly
         }
 
-        It 'Reports auto-updates as FAILED and still prints the summary when WAU setup throws' {
+        It 'Reports auto-updates as FAILED, exits 8 and still prints the summary when WAU setup throws' {
             Mock Install-WingetAutoUpdate { throw 'boom from WAU' }
 
-            Invoke-WingetInstall -Apps @(@{ name = 'Contoso.AppOne' }) -NonInteractive | Should -Be 0
+            Invoke-WingetInstall -Apps @(@{ name = 'Contoso.AppOne' }) -NonInteractive | Should -Be 8
 
             ($script:errorMessages -join "`n") | Should -Match 'Winget-AutoUpdate setup failed unexpectedly: boom from WAU'
             ($script:errorMessages -join "`n") | Should -Match 'Auto-updates: FAILED'
@@ -786,7 +826,7 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
         It 'Prints Auto-updates: NOT CONFIGURED when WAU was skipped for a missing framework' {
             Mock Install-WingetAutoUpdate { [pscustomobject]@{ Status = 'FrameworkMissing'; Version = '2.12.0'; FrameworkMissing = $true } }
 
-            Invoke-WingetInstall -Apps @(@{ name = 'Contoso.AppOne' }) -NonInteractive
+            Invoke-WingetInstall -Apps @(@{ name = 'Contoso.AppOne' }) -NonInteractive | Should -Be 8
 
             ($script:errorMessages -join "`n") | Should -Match 'Auto-updates: NOT CONFIGURED'
         }
@@ -794,7 +834,7 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
         It 'Prints Auto-updates: AT RISK when an existing WAU sits on a machine without the framework' {
             Mock Install-WingetAutoUpdate { [pscustomobject]@{ Status = 'AlreadyPresent'; Version = [version]'2.12.0'; FrameworkMissing = $true } }
 
-            Invoke-WingetInstall -Apps @(@{ name = 'Contoso.AppOne' }) -NonInteractive
+            Invoke-WingetInstall -Apps @(@{ name = 'Contoso.AppOne' }) -NonInteractive | Should -Be 8
 
             ($script:errorMessages -join "`n") | Should -Match 'Auto-updates: AT RISK'
         }
@@ -2265,7 +2305,9 @@ Describe 'Wedged winget: the run fails fast (review findings P2-8, P2-9, P2-10)'
         Mock Test-AndInstallGraphicalTools { $true }
         Mock Remove-LegacyScheduledUpdates { $true }
         Mock Set-WindowsTerminalDefaults { }
-        Mock Install-WingetAutoUpdate { [pscustomobject]@{ Status = 'FrameworkMissing'; Version = '2.12.0'; FrameworkMissing = $true } }
+        # Auto-updates set up, so the exit code here is about the apps and winget only (a run whose
+        # WAU was skipped for a missing framework exits 8, review finding P3-36).
+        Mock Install-WingetAutoUpdate { [pscustomobject]@{ Status = 'Configured'; Version = '2.12.0'; FrameworkMissing = $false; RestartRequired = $false } }
         Mock Get-PendingRestartState { New-TestRestartState }
         Mock Get-InstallAccountContext { New-TestAccountContext }
         # Never read the machine's App Installer packages, and never start a real process: the
@@ -2663,6 +2705,18 @@ Describe 'Get-InstallerExitCode' {
     It 'Ranks failed apps (1) and an unusable winget (2) above a needed restart' {
         Get-InstallerExitCode -FailedAppCount 2 -WingetUsable $true -RestartRequired $true | Should -Be 1
         Get-InstallerExitCode -FailedAppCount 0 -WingetUsable $false -RestartRequired $true | Should -Be 2
+    }
+
+    # Review finding P3-36: apps installed, but automatic updates not configured or unhealthy.
+    It 'Returns 8 when nothing failed and winget works, but auto-updates are not healthy' {
+        Get-InstallerExitCode -FailedAppCount 0 -WingetUsable $true -AutoUpdatesHealthy $false | Should -Be 8
+    }
+
+    It 'Ranks 8 below failed apps (1) and an unusable winget (2), and above a needed restart (3010)' {
+        Get-InstallerExitCode -FailedAppCount 1 -WingetUsable $true -AutoUpdatesHealthy $false | Should -Be 1
+        Get-InstallerExitCode -FailedAppCount 0 -WingetUsable $false -AutoUpdatesHealthy $false | Should -Be 2
+        Get-InstallerExitCode -FailedAppCount 0 -WingetUsable $true -AutoUpdatesHealthy $false -RestartRequired $true | Should -Be 8
+        Get-InstallerExitCode -FailedAppCount 0 -WingetUsable $true -AutoUpdatesHealthy $true -RestartRequired $true | Should -Be 3010
     }
 }
 

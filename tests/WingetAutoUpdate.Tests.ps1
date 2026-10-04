@@ -8,6 +8,48 @@
 # distributable winget-app-install.ps1 is generated from it by build/Build-WingetInstallScript.ps1).
 BeforeAll {
     . (Join-Path $PSScriptRoot 'TestHelpers.ps1')
+
+    # A Get-WauTaskHealth result (review finding P3-36): a task ready to run, or with -Problem one
+    # that will not run.
+    function New-TestWauTaskHealth {
+        param ([string]$Problem)
+        [pscustomobject]@{
+            Healthy        = -not $Problem
+            Exists         = $Problem -notmatch 'does not exist|could not be checked'
+            State          = 'Ready'
+            Triggers       = @('Weekly on Tuesday from 2026-10-06T02:00:00')
+            LastRunTime    = $null
+            LastTaskResult = 267011
+            NextRunTime    = [datetime]'2026-10-06T02:00:00'
+            Problem        = $(if ($Problem) { $Problem } else { $null })
+        }
+    }
+
+    # A trigger as Get-ScheduledTask returns it, with the properties the code reads.
+    function New-TestTaskTrigger {
+        param (
+            [string]$ClassName = 'MSFT_TaskWeeklyTrigger',
+            $DaysOfWeek = $null,
+            [string]$StartBoundary = $null,
+            $Enabled = $true
+        )
+        [pscustomobject]@{ CimClass = [pscustomobject]@{ CimClassName = $ClassName }; DaysOfWeek = $DaysOfWeek; StartBoundary = $StartBoundary; Enabled = $Enabled }
+    }
+
+    # Runs a script block under a transcript and returns the transcript's text (review finding
+    # P3-38: a caught -ErrorAction Stop error is still written there as 'PS>TerminatingError').
+    function Get-TranscriptText {
+        param ([Parameter(Mandatory = $true)][scriptblock]$ScriptBlock)
+        $path = Join-Path $TestDrive ([guid]::NewGuid().ToString('N') + '-transcript.txt')
+        $null = Start-Transcript -Path $path
+        try {
+            $null = & $ScriptBlock
+        }
+        finally {
+            $null = Stop-Transcript
+        }
+        return [string](Get-Content -Raw -LiteralPath $path)
+    }
 }
 
 Describe 'Winget-AutoUpdate integration (issue #168)' {
@@ -398,6 +440,11 @@ Describe 'Winget-AutoUpdate integration (issue #168)' {
             # The mocked downloads below write no file; the held-open MSI tests (next Context) use
             # the real Open-ReadLockedFile on a real file.
             Mock Open-ReadLockedFile { [System.IO.MemoryStream]::new() }
+            # The WAU task is ready to run by default (review finding P3-36); its log output and the
+            # msiexec log (P3-37) never touch the machine.
+            Mock Get-WauTaskHealth { New-TestWauTaskHealth }
+            Mock Write-WauTaskHealth { }
+            Mock New-WauMsiLogPath { Join-Path $TestDrive "wau-msi-$Action-$Attempt.log" }
         }
 
         It 'downloads into the ACL-restricted staging directory, verifies the hash, and installs silently with the pinned config' {
@@ -800,6 +847,162 @@ Describe 'Winget-AutoUpdate integration (issue #168)' {
             $result.Status | Should -Be 'DryRun'
             $result.Version | Should -Be (Get-WauPin).Version
         }
+
+        # Review finding P3-36: WAU's registry key alone used to make it 'AlreadyPresent' (a green
+        # 'Auto-updates: Already present') on a machine whose WAU task was gone.
+        It 'reports Unhealthy, not AlreadyPresent, when WAU is installed but its scheduled task does not exist (review finding P3-36)' {
+            Mock Test-WauInstalled { $true }
+            Mock Get-InstalledWauInfo { [pscustomobject]@{ Version = [version](Get-WauPin).Version; ProductCode = (Get-WauPin).ProductCode } }
+            Mock Get-WauTaskHealth { New-TestWauTaskHealth -Problem 'its scheduled task \WAU\Winget-AutoUpdate does not exist' }
+            Mock Invoke-ExternalProcess { throw 'should not run msiexec for an installed WAU' }
+            $script:errors = @()
+            Mock Write-ErrorMessage { $script:errors += $Message }
+
+            $result = Install-WingetAutoUpdate
+
+            $result.Status | Should -Be 'Unhealthy'
+            $result.Problem | Should -Be 'its scheduled task \WAU\Winget-AutoUpdate does not exist'
+            $result.Version | Should -Be ([version](Get-WauPin).Version)
+            $script:errors | Should -Contain 'Winget-AutoUpdate is installed, but its scheduled task \WAU\Winget-AutoUpdate does not exist, so apps will not update automatically. To set it up again, uninstall Winget-AutoUpdate (Settings > Apps) and re-run this installer.'
+            # Its state and WAU's own log go to the transcript either way.
+            Should -Invoke Write-WauTaskHealth -Times 1 -Exactly
+            Should -Invoke Disable-WauLogonTrigger -Times 1 -Exactly
+        }
+
+        It 'reports Unhealthy for an installed WAU whose task is disabled, and keeps the missing framework flag' {
+            Mock Get-WindowsAppRuntimeStatus { [pscustomobject]@{ Present = $false; Detail = 'none registered' } }
+            Mock Test-WauInstalled { $true }
+            Mock Get-InstalledWauInfo { [pscustomobject]@{ Version = [version](Get-WauPin).Version; ProductCode = (Get-WauPin).ProductCode } }
+            Mock Get-WauTaskHealth { New-TestWauTaskHealth -Problem 'its scheduled task \WAU\Winget-AutoUpdate is disabled' }
+
+            $result = Install-WingetAutoUpdate
+
+            $result.Status | Should -Be 'Unhealthy'
+            $result.FrameworkMissing | Should -BeTrue
+        }
+
+        It 'checks the task and logs its state before reporting AlreadyPresent' {
+            Mock Test-WauInstalled { $true }
+            Mock Get-InstalledWauInfo { [pscustomobject]@{ Version = [version](Get-WauPin).Version; ProductCode = (Get-WauPin).ProductCode } }
+            $script:healthLogged = $null
+            Mock Write-WauTaskHealth { $script:healthLogged = $Health }
+
+            (Install-WingetAutoUpdate).Status | Should -Be 'AlreadyPresent'
+
+            Should -Invoke Get-WauTaskHealth -Times 1 -Exactly
+            $script:healthLogged.Healthy | Should -BeTrue
+        }
+
+        It 'reports Unhealthy, not Configured, when msiexec succeeded but the task will not run, and names the msiexec log (review finding P3-36)' {
+            Mock Test-WauInstalled { $false }
+            Mock New-WauStagingDirectory { Join-Path $TestDrive 'wau-msi-test' }
+            Mock Invoke-WebRequest { }
+            Mock Get-FileHash { @{ Hash = (Get-WauPin).Sha256 } }
+            Mock Invoke-ExternalProcess { New-TestProcessResult -ExitCode 3010 }
+            Mock Remove-Item { }
+            Mock Get-WauTaskHealth { New-TestWauTaskHealth -Problem 'its scheduled task \WAU\Winget-AutoUpdate does not exist' }
+            $script:errors = @()
+            Mock Write-ErrorMessage { $script:errors += $Message }
+
+            $result = Install-WingetAutoUpdate
+
+            $result.Status | Should -Be 'Unhealthy'
+            $result.Version | Should -Be (Get-WauPin).Version
+            # Still installed: the restart msiexec asked for is not lost.
+            $result.RestartRequired | Should -BeTrue
+            ($script:errors -join "`n") | Should -Match ('^Winget-AutoUpdate {0} was installed, but its scheduled task \\WAU\\Winget-AutoUpdate does not exist, so apps will not update automatically\..* msiexec log: {1}$' -f [regex]::Escape((Get-WauPin).Version), [regex]::Escape((Join-Path $TestDrive 'wau-msi-install-1.log')))
+            Should -Invoke Write-Success -Times 0 -Exactly -ParameterFilter { $Message -match 'installed\. Apps will update weekly' }
+            Should -Invoke Write-WauTaskHealth -Times 1 -Exactly
+        }
+
+        It 'checks the task after a successful install and only then says apps will update weekly' {
+            Mock Test-WauInstalled { $false }
+            Mock New-WauStagingDirectory { Join-Path $TestDrive 'wau-msi-test' }
+            Mock Invoke-WebRequest { }
+            Mock Get-FileHash { @{ Hash = (Get-WauPin).Sha256 } }
+            Mock Invoke-ExternalProcess { New-TestProcessResult -ExitCode 0 }
+            Mock Remove-Item { }
+
+            (Install-WingetAutoUpdate).Status | Should -Be 'Configured'
+
+            Should -Invoke Get-WauTaskHealth -Times 1 -Exactly
+            Should -Invoke Write-WauTaskHealth -Times 1 -Exactly
+            Should -Invoke Write-Success -Times 1 -Exactly -ParameterFilter { $Message -match 'installed\. Apps will update weekly' }
+        }
+
+        # Review finding P3-37: a failed WAU msiexec used to leave only its exit code.
+        It 'gives msiexec a verbose log in the logs folder and names it when the install fails (review finding P3-37)' {
+            Mock Test-WauInstalled { $false }
+            Mock New-WauStagingDirectory { Join-Path $TestDrive 'wau-msi-test' }
+            Mock Invoke-WebRequest { }
+            Mock Get-FileHash { @{ Hash = (Get-WauPin).Sha256 } }
+            Mock Invoke-ExternalProcess { New-TestProcessResult -ExitCode 1603 }
+            Mock Remove-Item { }
+            $script:errors = @()
+            Mock Write-ErrorMessage { $script:errors += $Message }
+            $logPath = Join-Path $TestDrive 'wau-msi-install-1.log'
+
+            (Install-WingetAutoUpdate).Status | Should -Be 'Failed'
+
+            Should -Invoke New-WauMsiLogPath -Times 1 -Exactly -ParameterFilter { $Action -eq 'install' -and $Attempt -eq 1 }
+            Should -Invoke Invoke-ExternalProcess -Times 1 -Exactly -ParameterFilter { $FilePath -eq 'msiexec.exe' -and $ArgumentString.EndsWith(" /l*v `"$logPath`"") }
+            $script:errors | Should -Contain "Winget-AutoUpdate install failed (msiexec exit code 1603). msiexec log: $logPath"
+        }
+
+        It 'names the msiexec log when msiexec runs past its time limit' {
+            Mock Test-WauInstalled { $false }
+            Mock New-WauStagingDirectory { Join-Path $TestDrive 'wau-msi-test' }
+            Mock Invoke-WebRequest { }
+            Mock Get-FileHash { @{ Hash = (Get-WauPin).Sha256 } }
+            Mock Invoke-ExternalProcess { New-TestProcessResult -TimedOut }
+            Mock Remove-Item { }
+            $script:errors = @()
+            Mock Write-ErrorMessage { $script:errors += $Message }
+
+            (Install-WingetAutoUpdate).Status | Should -Be 'Failed'
+
+            $script:errors | Should -Contain "Winget-AutoUpdate install failed: msiexec did not finish within 15 minutes and was stopped. msiexec log: $(Join-Path $TestDrive 'wau-msi-install-1.log')"
+        }
+
+        It 'gives each attempt after msiexec exit code 1618 its own log' {
+            Mock Test-WauInstalled { $false }
+            Mock New-WauStagingDirectory { Join-Path $TestDrive 'wau-msi-test' }
+            Mock Invoke-WebRequest { }
+            Mock Get-FileHash { @{ Hash = (Get-WauPin).Sha256 } }
+            Mock Remove-Item { }
+            $script:msiexecArguments = [System.Collections.Generic.List[string]]::new()
+            Mock Invoke-ExternalProcess {
+                $script:msiexecArguments.Add($ArgumentString)
+                if ($script:msiexecArguments.Count -eq 1) {
+                    return New-TestProcessResult -ExitCode 1618
+                }
+                New-TestProcessResult -ExitCode 0
+            }
+            Mock Wait-WindowsInstallerIdle { [pscustomobject]@{ WaitedSeconds = 30; Busy = $false } }
+
+            (Install-WingetAutoUpdate).Status | Should -Be 'Configured'
+
+            $script:msiexecArguments.Count | Should -Be 2
+            $script:msiexecArguments[0] | Should -BeLike "* /l*v `"$(Join-Path $TestDrive 'wau-msi-install-1.log')`""
+            $script:msiexecArguments[1] | Should -BeLike "* /l*v `"$(Join-Path $TestDrive 'wau-msi-install-2.log')`""
+        }
+
+        It 'runs msiexec without a log when no logs folder can be used' {
+            Mock Test-WauInstalled { $false }
+            Mock New-WauStagingDirectory { Join-Path $TestDrive 'wau-msi-test' }
+            Mock Invoke-WebRequest { }
+            Mock Get-FileHash { @{ Hash = (Get-WauPin).Sha256 } }
+            Mock Invoke-ExternalProcess { New-TestProcessResult -ExitCode 1603 }
+            Mock Remove-Item { }
+            Mock New-WauMsiLogPath { $null }
+            $script:errors = @()
+            Mock Write-ErrorMessage { $script:errors += $Message }
+
+            (Install-WingetAutoUpdate).Status | Should -Be 'Failed'
+
+            Should -Invoke Invoke-ExternalProcess -Times 1 -Exactly -ParameterFilter { $ArgumentString -notmatch '/l\*v' }
+            $script:errors | Should -Contain 'Winget-AutoUpdate install failed (msiexec exit code 1603).'
+        }
     }
 
     Context 'Install-WingetAutoUpdate holds the MSI open from the hash until msiexec has finished (review finding P2-21)' {
@@ -807,6 +1010,9 @@ Describe 'Winget-AutoUpdate integration (issue #168)' {
             Mock Get-WindowsAppRuntimeStatus { [pscustomobject]@{ Present = $true; Detail = 'X64 8000.921.1539.0' } }
             Mock Disable-WauLogonTrigger { $false }
             Mock Test-WauInstalled { $false }
+            Mock Get-WauTaskHealth { New-TestWauTaskHealth }
+            Mock Write-WauTaskHealth { }
+            Mock New-WauMsiLogPath { Join-Path $TestDrive "wau-msi-$Action-$Attempt.log" }
             $script:stagingDir = Join-Path $TestDrive ('wau-msi-' + [guid]::NewGuid().ToString('N'))
             Mock New-WauStagingDirectory { $null = New-Item -ItemType Directory -Path $script:stagingDir; $script:stagingDir }
             Mock Invoke-WebRequest { Set-Content -LiteralPath $OutFile -Value 'genuine WAU msi' }
@@ -832,6 +1038,8 @@ Describe 'Winget-AutoUpdate integration (issue #168)' {
             $script:hashedStream.Name | Should -Be $msiPath
             $script:streamOpenDuringMsiexec | Should -BeTrue
             $script:msiexecArguments | Should -BeLike "/i `"$msiPath`" *"
+            # msiexec's verbose log (review finding P3-37) goes after the MSI's own arguments.
+            $script:msiexecArguments | Should -BeLike "* /l*v `"$(Join-Path $TestDrive 'wau-msi-install-1.log')`""
             # Closed afterwards, so the staging folder could be removed.
             $script:hashedStream.CanRead | Should -BeFalse
             Test-Path -LiteralPath $script:stagingDir | Should -BeFalse
@@ -863,6 +1071,10 @@ Describe 'Winget-AutoUpdate integration (issue #168)' {
     }
 
     Context 'Uninstall-WingetAutoUpdate' {
+        BeforeEach {
+            Mock New-WauMsiLogPath { Join-Path $TestDrive "wau-msi-$Action-$Attempt.log" }
+        }
+
         It 'uninstalls via the ProductCode of the actually-installed WAU (issue #186)' {
             Mock Test-WauInstalled { $true }
             Mock Get-InstalledWauInfo { [pscustomobject]@{ Version = [version]'2.9.0'; ProductCode = '{11111111-2222-3333-4444-555555555555}' } }
@@ -908,6 +1120,37 @@ Describe 'Winget-AutoUpdate integration (issue #168)' {
             (Uninstall-WingetAutoUpdate) | Should -Be $true
             Should -Invoke Invoke-ExternalProcess -Times 0 -Exactly
         }
+
+        It 'gives the uninstall a verbose msiexec log and names it when the uninstall fails (review finding P3-37)' {
+            Mock Test-WauInstalled { $true }
+            Mock Get-InstalledWauInfo { [pscustomobject]@{ Version = [version]'2.12.0'; ProductCode = '{11111111-2222-3333-4444-555555555555}' } }
+            Mock Invoke-ExternalProcess { New-TestProcessResult -ExitCode 1603 }
+            $logPath = Join-Path $TestDrive 'wau-msi-uninstall-1.log'
+
+            Uninstall-WingetAutoUpdate | Should -Be $false
+
+            Should -Invoke Invoke-ExternalProcess -Times 1 -Exactly -ParameterFilter { $ArgumentString -eq "/x {11111111-2222-3333-4444-555555555555} /qn /norestart /l*v `"$logPath`"" }
+            Should -Invoke Write-ErrorMessage -Times 1 -Exactly -ParameterFilter { $Message -eq "Winget-AutoUpdate uninstall failed (msiexec exit code 1603). msiexec log: $logPath" }
+        }
+
+        It 'waits for another installation to finish when the uninstall gets msiexec exit code 1618' {
+            Mock Test-WauInstalled { $true }
+            Mock Get-InstalledWauInfo { [pscustomobject]@{ Version = [version]'2.12.0'; ProductCode = '{11111111-2222-3333-4444-555555555555}' } }
+            $script:msiexecRuns = 0
+            Mock Invoke-ExternalProcess {
+                $script:msiexecRuns++
+                if ($script:msiexecRuns -eq 1) {
+                    return New-TestProcessResult -ExitCode 1618
+                }
+                New-TestProcessResult -ExitCode 0
+            }
+            Mock Wait-WindowsInstallerIdle { [pscustomobject]@{ WaitedSeconds = 20; Busy = $false } }
+
+            Uninstall-WingetAutoUpdate | Should -Be $true
+
+            $script:msiexecRuns | Should -Be 2
+            Should -Invoke Wait-WindowsInstallerIdle -Times 1 -Exactly -ParameterFilter { $MaximumSeconds -eq 600 }
+        }
     }
 
     Context 'Invoke-WingetInstall surfaces the WAU outcome (issue #186)' {
@@ -920,6 +1163,7 @@ Describe 'Winget-AutoUpdate integration (issue #168)' {
             $installBody | Should -Match 'Auto-updates: FAILED'
             $installBody | Should -Match 'Auto-updates: NOT CONFIGURED'
             $installBody | Should -Match 'Auto-updates: AT RISK'
+            $installBody | Should -Match 'Auto-updates: UNHEALTHY'
         }
     }
 
@@ -1110,5 +1354,273 @@ Describe 'Wait-WauIdle' {
         Wait-WauIdle -TimeoutSeconds 0 -PollIntervalSeconds 1 | Should -BeFalse
 
         Should -Invoke Write-WarningMessage -Times 1 -Exactly -ParameterFilter { $Message -match 'still running' }
+    }
+}
+
+# Review finding P3-38: Test-WauInstalled and Remove-LegacyScheduledUpdates probed with
+# -ErrorAction Stop inside try/catch, and a transcript records a caught Stop error as
+# 'PS>TerminatingError(Get-ScheduledTask)'. Every fresh install, and every run without the legacy
+# task, logged one; #283's was read as part of the crash. The mocks below answer like the real
+# cmdlet for a task that does not exist: a non-terminating 'not found' error that -ErrorAction Stop
+# turns into a terminating one.
+Describe 'Scheduled-task probes stay out of the transcript (review finding P3-38)' {
+    BeforeEach {
+        Mock Get-ScheduledTask {
+            Write-Error -Exception ([System.Exception]::new("No MSFT_ScheduledTask objects found with property 'TaskName' equal to '$TaskName'.")) -ErrorId 'CmdletizationQuery_NotFound_TaskName' -Category ObjectNotFound
+        }
+        Mock Test-Path { $false }
+        Mock Write-Info { }
+    }
+
+    It 'Test-WauInstalled finds no WAU without writing an error into the transcript' {
+        $script:installed = $null
+
+        $transcript = Get-TranscriptText { $script:installed = Test-WauInstalled }
+
+        $script:installed | Should -BeFalse
+        $transcript | Should -Not -Match 'TerminatingError'
+        $transcript | Should -Not -Match 'MSFT_ScheduledTask'
+        Should -Invoke Get-ScheduledTask -Times 1 -Exactly
+    }
+
+    It 'Remove-LegacyScheduledUpdates finds no legacy task without writing an error into the transcript' {
+        $script:removed = $null
+
+        $transcript = Get-TranscriptText { $script:removed = Remove-LegacyScheduledUpdates }
+
+        $script:removed | Should -BeFalse
+        $transcript | Should -Not -Match 'TerminatingError'
+        $transcript | Should -Not -Match 'MSFT_ScheduledTask'
+    }
+
+    It 'Get-WauTaskHealth reports a missing task without writing an error into the transcript' {
+        Mock Get-ScheduledTaskInfo { throw 'should not read run info for a missing task' }
+        $script:health = $null
+
+        $transcript = Get-TranscriptText { $script:health = Get-WauTaskHealth }
+
+        $script:health.Exists | Should -BeFalse
+        $script:health.Healthy | Should -BeFalse
+        $script:health.Problem | Should -Be 'its scheduled task \WAU\Winget-AutoUpdate does not exist'
+        $transcript | Should -Not -Match 'TerminatingError'
+    }
+}
+
+Describe 'Get-WauTaskHealth (review finding P3-36)' {
+    BeforeEach {
+        $script:weekly = New-TestTaskTrigger -ClassName 'MSFT_TaskWeeklyTrigger' -DaysOfWeek 4 -StartBoundary '2026-10-06T02:00:00'
+        Mock Get-ScheduledTask { [pscustomobject]@{ TaskName = 'Winget-AutoUpdate'; TaskPath = '\WAU\'; State = 'Ready'; Triggers = @($script:weekly) } }
+        Mock Get-ScheduledTaskInfo { [pscustomobject]@{ LastRunTime = [datetime]'2026-09-29T02:00:05'; LastTaskResult = 0; NextRunTime = [datetime]'2026-10-06T02:00:00' } }
+    }
+
+    It 'is healthy when the task exists, is enabled and has an enabled trigger, and reports its last and next run' {
+        $health = Get-WauTaskHealth
+
+        $health.Healthy | Should -BeTrue
+        $health.Exists | Should -BeTrue
+        $health.Problem | Should -BeNullOrEmpty
+        $health.State | Should -Be 'Ready'
+        $health.Triggers | Should -Be @('Weekly on Tuesday from 2026-10-06T02:00:00')
+        $health.LastRunTime | Should -Be ([datetime]'2026-09-29T02:00:05')
+        $health.LastTaskResult | Should -Be 0
+        $health.NextRunTime | Should -Be ([datetime]'2026-10-06T02:00:00')
+        Should -Invoke Get-ScheduledTask -Times 1 -Exactly -ParameterFilter { $TaskPath -eq '\WAU\' -and $TaskName -eq 'Winget-AutoUpdate' }
+    }
+
+    It 'reads the task scheduler''s 1999-11-30 as never run, and stays healthy' {
+        Mock Get-ScheduledTaskInfo { [pscustomobject]@{ LastRunTime = [datetime]'1999-11-30T00:00:00'; LastTaskResult = 267011; NextRunTime = [datetime]'2026-10-06T02:00:00' } }
+
+        $health = Get-WauTaskHealth
+
+        $health.Healthy | Should -BeTrue
+        $health.LastRunTime | Should -BeNullOrEmpty
+        $health.LastTaskResult | Should -Be 267011
+    }
+
+    It 'judges the task, not its last result: a failed last run stays healthy' {
+        Mock Get-ScheduledTaskInfo { [pscustomobject]@{ LastRunTime = [datetime]'2026-09-29T02:00:05'; LastTaskResult = 1; NextRunTime = $null } }
+
+        (Get-WauTaskHealth).Healthy | Should -BeTrue
+    }
+
+    It 'is not healthy when the task is disabled' {
+        Mock Get-ScheduledTask { [pscustomobject]@{ TaskName = 'Winget-AutoUpdate'; State = 'Disabled'; Triggers = @($script:weekly) } }
+
+        $health = Get-WauTaskHealth
+
+        $health.Healthy | Should -BeFalse
+        $health.Exists | Should -BeTrue
+        $health.Problem | Should -Be 'its scheduled task \WAU\Winget-AutoUpdate is disabled'
+    }
+
+    It 'is not healthy when the task has no enabled trigger (<Case>)' -ForEach @(
+        @{ Case = 'no trigger at all'; WithDisabledTrigger = $false }
+        @{ Case = 'only a disabled one'; WithDisabledTrigger = $true }
+    ) {
+        $script:triggers = @()
+        if ($WithDisabledTrigger) {
+            $script:triggers = @(New-TestTaskTrigger -ClassName 'MSFT_TaskWeeklyTrigger' -DaysOfWeek 4 -Enabled $false)
+        }
+        Mock Get-ScheduledTask { [pscustomobject]@{ TaskName = 'Winget-AutoUpdate'; State = 'Ready'; Triggers = $script:triggers } }
+
+        $health = Get-WauTaskHealth
+
+        $health.Healthy | Should -BeFalse
+        $health.Problem | Should -Be 'its scheduled task \WAU\Winget-AutoUpdate has no enabled trigger, so it never runs on its own'
+    }
+
+    It 'is not healthy, and says why, when the task scheduler cannot be queried (<Case>)' -ForEach @(
+        @{ Case = 'a terminating error'; Terminating = $true }
+        @{ Case = 'an error other than not found'; Terminating = $false }
+    ) {
+        $script:terminating = $Terminating
+        Mock Get-ScheduledTask {
+            if ($script:terminating) {
+                throw 'Access is denied.'
+            }
+            Write-Error -Exception ([System.UnauthorizedAccessException]::new('Access is denied.')) -ErrorId 'HRESULT 0x80070005' -Category PermissionDenied
+        }
+
+        $health = Get-WauTaskHealth
+
+        $health.Healthy | Should -BeFalse
+        $health.Exists | Should -BeFalse
+        $health.Problem | Should -Be 'its scheduled task \WAU\Winget-AutoUpdate could not be checked (Access is denied.)'
+    }
+
+    It 'still judges the task when its run information cannot be read' {
+        Mock Get-ScheduledTaskInfo { throw 'The system cannot find the file specified.' }
+
+        $health = Get-WauTaskHealth
+
+        $health.Healthy | Should -BeTrue
+        $health.LastRunTime | Should -BeNullOrEmpty
+        $health.LastTaskResult | Should -BeNullOrEmpty
+    }
+}
+
+Describe 'Format-ScheduledTaskTrigger' {
+    It 'Describes <Case>' -ForEach @(
+        @{ Case = 'a weekly trigger with its days and start'; ClassName = 'MSFT_TaskWeeklyTrigger'; DaysOfWeek = 4; StartBoundary = '2026-10-06T02:00:00'; Enabled = $true; Expected = 'Weekly on Tuesday from 2026-10-06T02:00:00' }
+        @{ Case = 'a weekly trigger on several days'; ClassName = 'MSFT_TaskWeeklyTrigger'; DaysOfWeek = 65; StartBoundary = $null; Enabled = $true; Expected = 'Weekly on Sunday, Saturday' }
+        @{ Case = 'a disabled logon trigger'; ClassName = 'MSFT_TaskLogonTrigger'; DaysOfWeek = $null; StartBoundary = $null; Enabled = $false; Expected = 'Logon (disabled)' }
+        @{ Case = 'a daily trigger'; ClassName = 'MSFT_TaskDailyTrigger'; DaysOfWeek = $null; StartBoundary = '2026-10-05T02:00:00'; Enabled = $true; Expected = 'Daily from 2026-10-05T02:00:00' }
+    ) {
+        $trigger = New-TestTaskTrigger -ClassName $ClassName -DaysOfWeek $DaysOfWeek -StartBoundary $StartBoundary -Enabled $Enabled
+        Format-ScheduledTaskTrigger -Trigger $trigger | Should -Be $Expected
+    }
+}
+
+Describe 'Write-WauTaskHealth (review finding P3-36)' {
+    BeforeEach {
+        $script:infos = @()
+        Mock Write-Info { $script:infos += $Message }
+        Mock Write-WarningMessage { }
+        $script:hostLines = @()
+        Mock Write-Host { $script:hostLines += "$Object" }
+        $script:logPath = Join-Path $TestDrive 'updates.log'
+        Mock Get-WauUpdatesLogPath { $script:logPath }
+        Remove-Item -LiteralPath $script:logPath -ErrorAction SilentlyContinue
+    }
+
+    It 'Logs the task''s state, triggers, last run and result, and next run on one line' {
+        $health = New-TestWauTaskHealth
+        $health.LastRunTime = [datetime]'2026-09-29T02:00:05'
+        $health.LastTaskResult = 0
+
+        Write-WauTaskHealth -Health $health
+
+        $script:infos | Should -Contain 'Winget-AutoUpdate task \WAU\Winget-AutoUpdate: state Ready; triggers: Weekly on Tuesday from 2026-10-06T02:00:00; last run: 2026-09-29 02:00, result 0x00000000 (success); next run: 2026-10-06 02:00.'
+    }
+
+    It 'Says when the task has not run yet' {
+        Write-WauTaskHealth -Health (New-TestWauTaskHealth)
+
+        $script:infos | Should -Contain 'Winget-AutoUpdate task \WAU\Winget-AutoUpdate: state Ready; triggers: Weekly on Tuesday from 2026-10-06T02:00:00; last run: never, result 0x00041303 (has not run yet); next run: 2026-10-06 02:00.'
+    }
+
+    It 'Prints the last 20 lines of WAU''s updates.log, each set off so the transcript parser never reads them as the installer''s' {
+        Set-Content -LiteralPath $script:logPath -Value @(1..30 | ForEach-Object { "02:00:{0:D2} - line $_" -f $_ })
+
+        Write-WauTaskHealth -Health (New-TestWauTaskHealth)
+
+        ($script:infos -join "`n") | Should -Match ([regex]::Escape("The last 20 lines of Winget-AutoUpdate's log ($script:logPath):"))
+        $script:hostLines.Count | Should -Be 20
+        $script:hostLines[0] | Should -Be '    | 02:00:11 - line 11'
+        $script:hostLines[-1] | Should -Be '    | 02:00:30 - line 30'
+    }
+
+    It 'Prints the log for a task that does not exist, without a task line' {
+        Set-Content -LiteralPath $script:logPath -Value 'Summary:'
+
+        Write-WauTaskHealth -Health (New-TestWauTaskHealth -Problem 'its scheduled task \WAU\Winget-AutoUpdate does not exist')
+
+        ($script:infos -join "`n") | Should -Not -Match 'Winget-AutoUpdate task'
+        $script:hostLines | Should -Be @('    | Summary:')
+    }
+
+    It 'Prints nothing more when WAU has no log yet' {
+        Write-WauTaskHealth -Health (New-TestWauTaskHealth)
+
+        $script:hostLines.Count | Should -Be 0
+        @($script:infos).Count | Should -Be 1
+    }
+}
+
+Describe 'Get-WauUpdatesLogPath' {
+    It 'Uses the InstallLocation WAU''s MSI recorded' {
+        # Through a script variable: the mock body would otherwise see the function's own local.
+        $script:installLocation = Join-Path $TestDrive 'Winget-AutoUpdate'
+        Mock Get-ItemProperty { [pscustomobject]@{ InstallLocation = "$script:installLocation " } }
+
+        Get-WauUpdatesLogPath | Should -Be (Join-Path $script:installLocation 'logs\updates.log')
+        Should -Invoke Get-ItemProperty -Times 1 -Exactly -ParameterFilter { $LiteralPath -eq 'HKLM:\SOFTWARE\Romanitho\Winget-AutoUpdate' }
+    }
+
+    It 'Falls back to the default folder under Program Files when the value cannot be read' {
+        Mock Get-ItemProperty { }
+        $savedProgramFiles = $env:ProgramFiles
+        $env:ProgramFiles = Join-Path $TestDrive 'Program Files'
+        try {
+            Get-WauUpdatesLogPath | Should -Be (Join-Path (Join-Path $env:ProgramFiles 'Winget-AutoUpdate') 'logs\updates.log')
+        }
+        finally {
+            $env:ProgramFiles = $savedProgramFiles
+        }
+    }
+}
+
+Describe 'New-WauMsiLogPath (review finding P3-37)' {
+    It 'Names a log for each action and attempt in the run''s logs folder, creating it when missing' {
+        $directory = Join-Path $TestDrive 'run-logs'
+        Mock Get-InstallerLogDirectory { $directory }
+
+        $path = New-WauMsiLogPath -Action uninstall -Attempt 2
+
+        Split-Path -Parent $path | Should -Be $directory
+        Split-Path -Leaf $path | Should -Match '^wau-msi-uninstall-\d{8}-\d{6}-2\.log$'
+        Test-Path -LiteralPath $directory -PathType Container | Should -BeTrue
+    }
+
+    It 'Uses the installer''s logs folder under ProgramData when the run has no transcript (winget-app-uninstall.ps1)' {
+        Mock Get-InstallerLogDirectory { $null }
+        $savedProgramData = $env:ProgramData
+        $env:ProgramData = Join-Path $TestDrive 'ProgramData'
+        try {
+            $path = New-WauMsiLogPath -Action install
+
+            Split-Path -Parent $path | Should -Be (Join-Path $env:ProgramData 'winget-app-setup\logs')
+            Split-Path -Leaf $path | Should -Match '^wau-msi-install-\d{8}-\d{6}-1\.log$'
+        }
+        finally {
+            $env:ProgramData = $savedProgramData
+        }
+    }
+
+    It 'Returns no path when the folder cannot be created, so msiexec is not given a log it cannot open' {
+        Mock Get-InstallerLogDirectory { Join-Path $TestDrive 'not-creatable' }
+        Mock New-Item { throw 'Access is denied.' }
+
+        New-WauMsiLogPath -Action install | Should -BeNullOrEmpty
     }
 }

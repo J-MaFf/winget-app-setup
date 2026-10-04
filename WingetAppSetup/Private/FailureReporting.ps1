@@ -152,20 +152,25 @@ function Write-InstallerExitNotice {
     Invoke-WingetInstall returns this as its exit code at the end of a run. The precedence is
     1 > 2 > 8 > 3010 > 0: failed apps first (1); then a winget that can no longer be launched at the
     end of the run (2, the same code as "winget unavailable" at the start), so a run can never exit 0
-    while leaving winget broken; then a run that needs a restart to finish (3010, review finding
-    P3-16: the code RMM tools and Intune read as "succeeded, restart required"). Code 8 (apps
-    installed, but automatic updates not configured or unhealthy) is not returned yet; it belongs
-    between 2 and 3010.
+    while leaving winget broken; then apps installed, but automatic updates not configured or
+    unhealthy (8, review finding P3-36: an RMM job used to report success for a machine that would
+    never update); then a run that needs a restart to finish (3010, review finding P3-16: the code
+    RMM tools and Intune read as "succeeded, restart required").
 .PARAMETER FailedAppCount
     Number of apps still failed after the retry pass.
 .PARAMETER WingetUsable
     Result of the end-of-run winget launch probe.
+.PARAMETER AutoUpdatesHealthy
+    False when the run's 'Auto-updates:' line is an error: Winget-AutoUpdate failed to install, was
+    skipped because Microsoft.WindowsAppRuntime.1.8 is missing (NOT CONFIGURED), is installed
+    without that framework (AT RISK), or is installed but its scheduled task will not run
+    (UNHEALTHY). Default True.
 .PARAMETER RestartRequired
     The run's installs finished but need a restart: an install reported it, or Windows gained a
     pending restart during the run. A restart that was already pending before the run does not
     count. Default False.
 .RETURNS
-    [int] 0, 1, 2 or 3010.
+    [int] 0, 1, 2, 8 or 3010.
 #>
 function Get-InstallerExitCode {
     param (
@@ -174,6 +179,9 @@ function Get-InstallerExitCode {
 
         [Parameter(Mandatory = $true)]
         [bool]$WingetUsable,
+
+        [Parameter(Mandatory = $false)]
+        [bool]$AutoUpdatesHealthy = $true,
 
         [Parameter(Mandatory = $false)]
         [bool]$RestartRequired = $false
@@ -185,7 +193,9 @@ function Get-InstallerExitCode {
     if (-not $WingetUsable) {
         return 2
     }
-    # Code 8 (auto-updates not configured or unhealthy) goes here once it exists.
+    if (-not $AutoUpdatesHealthy) {
+        return 8
+    }
     if ($RestartRequired) {
         return 3010
     }

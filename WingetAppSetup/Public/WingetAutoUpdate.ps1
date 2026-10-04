@@ -24,18 +24,26 @@ function Get-WauPin {
 .DESCRIPTION
     WAU records its configuration under HKLM and registers a scheduled task 'Winget-AutoUpdate' under
     the '\WAU\' task path. Either is a reliable indicator that WAU is already set up, so the installer
-    can leave an existing (possibly customized) WAU configuration untouched.
+    can leave an existing (possibly customized) WAU configuration untouched. Whether that WAU will
+    actually run is a separate question (Get-WauTaskHealth).
+
+    The task is probed with -ErrorAction SilentlyContinue (review finding P3-38): no task is the
+    normal answer on a machine without WAU, and with -ErrorAction Stop the transcript recorded it as
+    'PS>TerminatingError(Get-ScheduledTask)' even though it was caught, which #283's triage read as
+    part of the crash.
 #>
 function Test-WauInstalled {
     if (Test-Path 'HKLM:\SOFTWARE\Romanitho\Winget-AutoUpdate') {
         return $true
     }
     try {
-        if (Get-ScheduledTask -TaskName 'Winget-AutoUpdate' -TaskPath '\WAU\' -ErrorAction Stop) {
+        if (Get-ScheduledTask -TaskName 'Winget-AutoUpdate' -TaskPath '\WAU\' -ErrorAction SilentlyContinue) {
             return $true
         }
     }
-    catch { }
+    catch {
+        # The task scheduler cmdlets could not run at all.
+    }
     return $false
 }
 
@@ -67,6 +75,12 @@ function Test-WauInstalled {
     (configuration included).
     On a machine that already has WAU, its at-logon trigger is removed (Disable-WauLogonTrigger)
     and a missing framework is reported, but the installation is otherwise left alone.
+    WAU counts as set up only when its scheduled task \WAU\Winget-AutoUpdate exists, is enabled
+    and has an enabled trigger (Get-WauTaskHealth, review finding P3-36): WAU's registry key, or
+    msiexec exit code 0, used to be enough, so a machine whose task was gone still showed a green
+    'Auto-updates' line and never updated. The task's state, last run and result, and the end of
+    WAU's own log, go to the transcript either way (Write-WauTaskHealth).
+    msiexec writes a verbose log to the run's logs folder, named on failure (review finding P3-37).
     Best-effort: any failure warns and returns a Failed result rather than aborting the install.
 .PARAMETER WhatIf
     When specified, only reports intended actions.
@@ -78,10 +92,14 @@ function Test-WauInstalled {
 .RETURNS
     [pscustomobject] with:
       - Status:  'Configured' (installed or upgraded this run), 'AlreadyPresent' (left as-is),
-                 'FrameworkMissing' (not installed: WindowsAppRuntime 1.8 is missing), 'Failed',
-                 or 'DryRun' (under -WhatIf).
-      - Version: the pinned version for Configured/Failed/DryRun/FrameworkMissing; the installed
-                 version (or $null when unreadable) for AlreadyPresent.
+                 'Unhealthy' (installed, this run or before, but its scheduled task is missing,
+                 disabled, has no enabled trigger or could not be checked), 'FrameworkMissing'
+                 (not installed: WindowsAppRuntime 1.8 is missing), 'Failed', or 'DryRun' (under
+                 -WhatIf). Configured and AlreadyPresent mean the task was found ready to run.
+      - Version: the pinned version for Configured/Failed/DryRun/FrameworkMissing, and for
+                 Unhealthy after an install this run; the installed version (or $null when
+                 unreadable) for AlreadyPresent, and for Unhealthy when WAU was already there.
+      - Problem: for Unhealthy, what is wrong with the task (Get-WauTaskHealth's Problem).
       - FrameworkMissing: $true when the framework check found no suitable framework (on
                  AlreadyPresent this means the existing WAU may break winget on its next run).
       - RestartRequired: $true when msiexec returned 3010 (ERROR_SUCCESS_REBOOT_REQUIRED): WAU is
@@ -127,6 +145,13 @@ function Install-WingetAutoUpdate {
             [void](Disable-WauLogonTrigger)
             if ($frameworkMissing) {
                 Write-ErrorMessage "Winget-AutoUpdate is installed, but Microsoft.WindowsAppRuntime.1.8 is missing ($($framework.Detail)). Its next update run may install a winget that cannot start and leave winget unusable. Install the Windows App Runtime 1.8 (update App Installer from the Microsoft Store, or install Microsoft's Windows App SDK 1.8 runtime), or uninstall Winget-AutoUpdate on this machine."
+            }
+            # WAU's registry key says it is installed, not that it will run (review finding P3-36).
+            $health = Get-WauTaskHealth
+            Write-WauTaskHealth -Health $health
+            if (-not $health.Healthy) {
+                Write-ErrorMessage "Winget-AutoUpdate is installed, but $($health.Problem), so apps will not update automatically. To set it up again, uninstall Winget-AutoUpdate (Settings > Apps) and re-run this installer."
+                return [pscustomobject]@{ Status = 'Unhealthy'; Version = $installed.Version; FrameworkMissing = $frameworkMissing; RestartRequired = $false; Problem = $health.Problem }
             }
             return [pscustomobject]@{ Status = 'AlreadyPresent'; Version = $installed.Version; FrameworkMissing = $frameworkMissing; RestartRequired = $false }
         }
@@ -187,50 +212,51 @@ function Install-WingetAutoUpdate {
         # UPDATESATLOGON=0: no at-logon run (see the function help); WAU stores it as
         # WAU_UpdatesAtLogon, which later MSI upgrades read back.
         $msiArgs = "/i `"$msiPath`" /qn /norestart UPDATESATLOGON=0 USERCONTEXT=1 DISABLEWAUAUTOUPDATE=1 UPDATESINTERVAL=Weekly UPDATESATTIME=02:00:00 NOTIFICATIONLEVEL=Full DONOTRUNONMETERED=1"
-        # Time-limited (review finding P2-5): Start-Process -Wait used to wait for ever.
-        $msiTimeoutSeconds = Get-ProcessTimeoutSeconds -Operation MsiExec
-        $busyRetries = 0
-        $busyWaited = 0
-        while ($true) {
-            $msiexec = Invoke-ExternalProcess -FilePath 'msiexec.exe' -ArgumentString $msiArgs -TimeoutSeconds $msiTimeoutSeconds -Echo None
-            if ($msiexec.LaunchFailed) {
-                Write-ErrorMessage "Failed to install Winget-AutoUpdate: msiexec could not be started ($($msiexec.LaunchError))."
-                return [pscustomobject]@{ Status = 'Failed'; Version = $pin.Version; FrameworkMissing = $false; RestartRequired = $false }
-            }
-            if ($msiexec.TimedOut) {
-                Write-ErrorMessage ('Winget-AutoUpdate install failed: msiexec did not finish within {0} minutes and was stopped.' -f [Math]::Round($msiTimeoutSeconds / 60))
-                return [pscustomobject]@{ Status = 'Failed'; Version = $pin.Version; FrameworkMissing = $false; RestartRequired = $false }
-            }
-            # 1618 = ERROR_INSTALL_ALREADY_RUNNING: Windows Installer is busy with another
-            # installation and says so at once (review finding P2-15). Wait for it, within the
-            # run's budget, and try again.
-            $busyWaitLeft = $InstallInProgressWaitSeconds - $busyWaited
-            if ($msiexec.ExitCode -eq 1618 -and $busyRetries -lt 3 -and $busyWaitLeft -gt 0) {
-                $busyRetries++
-                Write-WarningMessage ('Windows Installer is busy with another installation (msiexec exit code 1618). Waiting for it to finish (at most {0} seconds) before retry {1} of 3 of the Winget-AutoUpdate install...' -f $busyWaitLeft, $busyRetries)
-                $wait = Wait-WindowsInstallerIdle -MaximumSeconds $busyWaitLeft
-                $busyWaited += [int]$wait.WaitedSeconds
-                continue
-            }
-            break
+        # Time-limited (review finding P2-5), waits for an installation that holds Windows Installer
+        # (msiexec 1618, review finding P2-15), and writes msiexec's verbose log to the run's logs
+        # folder (review finding P3-37): Invoke-WauMsiexec.
+        $msiexec = Invoke-WauMsiexec -ArgumentString $msiArgs -Action install -InstallInProgressWaitSeconds $InstallInProgressWaitSeconds
+        if ($msiexec.LaunchFailed) {
+            Write-ErrorMessage "Failed to install Winget-AutoUpdate: msiexec could not be started ($($msiexec.LaunchError))."
+            return [pscustomobject]@{ Status = 'Failed'; Version = $pin.Version; FrameworkMissing = $false; RestartRequired = $false }
+        }
+        $msiLogNote = ''
+        if ($msiexec.LogPath) {
+            $msiLogNote = " msiexec log: $($msiexec.LogPath)"
+        }
+        if ($msiexec.TimedOut) {
+            Write-ErrorMessage (('Winget-AutoUpdate install failed: msiexec did not finish within {0} minutes and was stopped.' -f [Math]::Round((Get-ProcessTimeoutSeconds -Operation MsiExec) / 60)) + $msiLogNote)
+            return [pscustomobject]@{ Status = 'Failed'; Version = $pin.Version; FrameworkMissing = $false; RestartRequired = $false }
         }
 
         # 3010 = ERROR_SUCCESS_REBOOT_REQUIRED: installed, and a restart finishes it (P3-16).
         if ($msiexec.ExitCode -eq 0 -or $msiexec.ExitCode -eq 3010) {
             $restartRequired = $msiexec.ExitCode -eq 3010
-            Write-Success "Winget-AutoUpdate $($pin.Version) installed. Apps will update weekly, on Tuesdays at 02:00 (or soon after the next start if the machine was off)."
+            # The MSI registers WAU's tasks in a custom action whose failure fails the install, so
+            # a task that is missing now is unexpected - and without it nothing updates (P3-36).
+            $health = Get-WauTaskHealth
+            if ($health.Healthy) {
+                Write-Success "Winget-AutoUpdate $($pin.Version) installed. Apps will update weekly, on Tuesdays at 02:00 (or soon after the next start if the machine was off)."
+            }
+            else {
+                Write-ErrorMessage ("Winget-AutoUpdate $($pin.Version) was installed, but $($health.Problem), so apps will not update automatically. Uninstall Winget-AutoUpdate (Settings > Apps) and re-run this installer; if this happens again, attach the msiexec log and this transcript to a GitHub issue." + $msiLogNote)
+            }
+            Write-WauTaskHealth -Health $health
             if ($restartRequired) {
                 Write-WarningMessage 'The Winget-AutoUpdate installer reported that a restart finishes the installation (msiexec exit code 3010).'
+            }
+            if (-not $health.Healthy) {
+                return [pscustomobject]@{ Status = 'Unhealthy'; Version = $pin.Version; FrameworkMissing = $false; RestartRequired = $restartRequired; Problem = $health.Problem }
             }
             return [pscustomobject]@{ Status = 'Configured'; Version = $pin.Version; FrameworkMissing = $false; RestartRequired = $restartRequired }
         }
 
         if ($msiexec.ExitCode -eq 1618) {
-            Write-ErrorMessage ('Winget-AutoUpdate install failed: Windows Installer was still busy with another installation after {0} retries and {1} seconds of waiting (msiexec exit code 1618). Re-run the installer once that installation has finished.' -f $busyRetries, $busyWaited)
+            Write-ErrorMessage (('Winget-AutoUpdate install failed: Windows Installer was still busy with another installation after {0} retries and {1} seconds of waiting (msiexec exit code 1618). Re-run the installer once that installation has finished.' -f $msiexec.BusyRetries, $msiexec.BusyWaitedSeconds) + $msiLogNote)
             return [pscustomobject]@{ Status = 'Failed'; Version = $pin.Version; FrameworkMissing = $false; RestartRequired = $false }
         }
 
-        Write-ErrorMessage "Winget-AutoUpdate install failed (msiexec exit code $($msiexec.ExitCode))."
+        Write-ErrorMessage ("Winget-AutoUpdate install failed (msiexec exit code $($msiexec.ExitCode))." + $msiLogNote)
         return [pscustomobject]@{ Status = 'Failed'; Version = $pin.Version; FrameworkMissing = $false; RestartRequired = $false }
     }
     catch {
@@ -256,15 +282,24 @@ function Install-WingetAutoUpdate {
     (issue #186): every MSI version of WAU has its own ProductCode, so uninstalling with only the
     pinned code makes msiexec exit 1605 ('unknown product') against any other installed version and
     leaves WAU in place. Falls back to the pinned ProductCode when the registry lookup finds none.
+    msiexec runs through Invoke-WauMsiexec, like the install: a time limit, a wait for another
+    installation that holds Windows Installer (exit code 1618), and a verbose log in the logs
+    folder, named when the uninstall fails (review finding P3-37).
 .PARAMETER WhatIf
     When specified, only reports intended actions.
+.PARAMETER InstallInProgressWaitSeconds
+    The most to wait, in all, when msiexec exits 1618 because another installation is running.
+    Default 600.
 .RETURNS
     [bool] True when WAU was removed (or was not installed), otherwise False.
 #>
 function Uninstall-WingetAutoUpdate {
     param (
         [Parameter(Mandatory = $false)]
-        [switch]$WhatIf
+        [switch]$WhatIf,
+
+        [Parameter(Mandatory = $false)]
+        [int]$InstallInProgressWaitSeconds = 600
     )
 
     if (-not (Test-WauInstalled)) {
@@ -282,13 +317,17 @@ function Uninstall-WingetAutoUpdate {
         $productCode = (Get-WauPin).ProductCode
     }
     Write-Info 'Uninstalling Winget-AutoUpdate...'
-    $msiexec = Invoke-ExternalProcess -FilePath 'msiexec.exe' -ArgumentString "/x $productCode /qn /norestart" -TimeoutSeconds (Get-ProcessTimeoutSeconds -Operation MsiExec) -Echo None
+    $msiexec = Invoke-WauMsiexec -ArgumentString "/x $productCode /qn /norestart" -Action uninstall -InstallInProgressWaitSeconds $InstallInProgressWaitSeconds
     if ($msiexec.LaunchFailed) {
         Write-ErrorMessage "Winget-AutoUpdate uninstall failed: msiexec could not be started ($($msiexec.LaunchError))."
         return $false
     }
+    $msiLogNote = ''
+    if ($msiexec.LogPath) {
+        $msiLogNote = " msiexec log: $($msiexec.LogPath)"
+    }
     if ($msiexec.TimedOut) {
-        Write-ErrorMessage 'Winget-AutoUpdate uninstall failed: msiexec did not finish in time and was stopped.'
+        Write-ErrorMessage ('Winget-AutoUpdate uninstall failed: msiexec did not finish in time and was stopped.' + $msiLogNote)
         return $false
     }
 
@@ -297,7 +336,12 @@ function Uninstall-WingetAutoUpdate {
         return $true
     }
 
-    Write-ErrorMessage "Winget-AutoUpdate uninstall failed (msiexec exit code $($msiexec.ExitCode))."
+    if ($msiexec.ExitCode -eq 1618) {
+        Write-ErrorMessage (('Winget-AutoUpdate uninstall failed: Windows Installer was still busy with another installation after {0} retries and {1} seconds of waiting (msiexec exit code 1618). Run the uninstaller again once that installation has finished.' -f $msiexec.BusyRetries, $msiexec.BusyWaitedSeconds) + $msiLogNote)
+        return $false
+    }
+
+    Write-ErrorMessage ("Winget-AutoUpdate uninstall failed (msiexec exit code $($msiexec.ExitCode))." + $msiLogNote)
     return $false
 }
 
@@ -326,10 +370,15 @@ function Remove-LegacyScheduledUpdates {
     $appDataDir = Join-Path $env:APPDATA 'winget-app-setup'
     $removed = $false
 
+    # -ErrorAction SilentlyContinue (review finding P3-38): most machines have no legacy task, and
+    # a caught -ErrorAction Stop error still wrote 'PS>TerminatingError(Get-ScheduledTask)' into
+    # every such run's transcript.
+    $task = $null
     try {
-        $task = Get-ScheduledTask -TaskName $taskName -TaskPath $taskPath -ErrorAction Stop
+        $task = Get-ScheduledTask -TaskName $taskName -TaskPath $taskPath -ErrorAction SilentlyContinue
     }
     catch {
+        # The task scheduler cmdlets could not run at all.
         $task = $null
     }
     if ($task) {

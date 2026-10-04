@@ -29,11 +29,16 @@
         restarted between the passes.
       - 1 with KNOWN_PLATFORM_INCOMPATIBLE set: tolerated (exit 0) pending the assertion step's
         containment check that nothing outside that list failed. An empty variable means strict.
-      - anything else: the pass failed, with the installer's code. That includes 8 (apps OK,
-        auto-updates not configured or unhealthy), which is not emitted yet: see
-        Get-InstallPassVerdict before the installer starts returning it.
+      - 8 (apps OK, auto-updates not configured or unhealthy): the pass succeeded (exit 0) only
+        when its own transcript says 'Auto-updates: NOT CONFIGURED - Microsoft.WindowsAppRuntime.1.8
+        is missing'. windows-latest lacks that framework, so the installer skips Winget-AutoUpdate
+        there and every pass ends with 8. Any other reason for 8 (FAILED, UNHEALTHY, AT RISK), or
+        no transcript of the pass to check, fails the pass with 8. Assert-Install.ps1 then checks
+        that WAU is absent and the latest transcript says NOT CONFIGURED.
+      - anything else: the pass failed, with the installer's code.
 
-    Runs under Windows PowerShell 5.1 and PowerShell 7: ASCII only, no 7-only syntax.
+    Runs under Windows PowerShell 5.1 and PowerShell 7: ASCII only, no 7-only syntax. Dot-sources
+    e2e/TranscriptAssertions.ps1 (same rules) to read a pass's transcript.
 .PARAMETER Pass
     'first' or 'second'; used in the messages.
 .PARAMETER Shell
@@ -47,6 +52,8 @@
     Default: $env:KNOWN_PLATFORM_INCOMPATIBLE.
 .PARAMETER InstallerPath
     The checkout's installer. Default: winget-app-install.ps1 at the repository root.
+.PARAMETER LogDirectory
+    Where the installer writes its transcripts. Default: %ProgramData%\winget-app-setup\logs.
 .NOTES
     Exit codes: the policy above. 64 = bad arguments.
 #>
@@ -68,8 +75,14 @@ param (
     [string]$KnownPlatformIncompatible = $env:KNOWN_PLATFORM_INCOMPATIBLE,
 
     [Parameter(Mandatory = $false)]
-    [string]$InstallerPath
+    [string]$InstallerPath,
+
+    [Parameter(Mandatory = $false)]
+    [string]$LogDirectory
 )
+
+# Get-InstallTranscriptFile and ConvertFrom-InstallTranscript, to read a pass's transcript.
+. (Join-Path $PSScriptRoot 'TranscriptAssertions.ps1')
 
 <#
 .SYNOPSIS
@@ -181,6 +194,45 @@ function Get-InstallPassCommand {
 
 <#
 .SYNOPSIS
+    Finds the transcript an install pass wrote.
+.DESCRIPTION
+    The PowerShell 7 run's transcript (install-<time>.log) last written at or after the pass
+    started; the Windows PowerShell 5.1 bootstrap transcripts and dry-run ones are left out
+    (Get-InstallTranscriptFile). When the pass wrote more than one, the latest one that reached its
+    summary is taken: a run that relaunched itself elevated leaves the parent's transcript, which
+    has none, open until the elevated run has ended.
+.PARAMETER LogDirectory
+    The installer's log folder.
+.PARAMETER Since
+    When the pass started.
+.RETURNS
+    [pscustomobject] with Name (the file name) and Parsed (ConvertFrom-InstallTranscript's
+    result), or $null when the pass wrote no transcript there.
+#>
+function Get-InstallPassTranscript {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$LogDirectory,
+        [Parameter(Mandatory = $true)]
+        [datetime]$Since
+    )
+
+    $files = @((Get-InstallTranscriptFile -LogDirectory $LogDirectory).RealRun | Where-Object { $_.LastWriteTime -ge $Since })
+    $transcripts = @(foreach ($file in $files) {
+            [pscustomobject]@{ Name = $file.Name; Parsed = (ConvertFrom-InstallTranscript -Content ([string](Get-Content -LiteralPath $file.FullName -Raw))) }
+        })
+    if ($transcripts.Count -eq 0) {
+        return $null
+    }
+    $withSummary = @($transcripts | Where-Object { $_.Parsed.HasSummary })
+    if ($withSummary.Count -gt 0) {
+        return $withSummary[-1]
+    }
+    return $transcripts[-1]
+}
+
+<#
+.SYNOPSIS
     Applies the e2e exit-code policy to one install pass.
 .PARAMETER ExitCode
     The installer's exit code.
@@ -188,6 +240,9 @@ function Get-InstallPassCommand {
     The KNOWN_PLATFORM_INCOMPATIBLE value; empty means strict.
 .PARAMETER Pass
     'first' or 'second'.
+.PARAMETER Transcript
+    For exit code 8: the pass's transcript (Get-InstallPassTranscript), or $null when none was
+    found. 8 passes only when it says Winget-AutoUpdate was skipped for the missing framework.
 .RETURNS
     [pscustomobject] with StepExitCode, Outcome ('passed', 'tolerated' or 'failed') and Message.
 #>
@@ -199,7 +254,10 @@ function Get-InstallPassVerdict {
         [AllowEmptyString()]
         [string]$KnownPlatformIncompatible,
         [Parameter(Mandatory = $true)]
-        [string]$Pass
+        [string]$Pass,
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        $Transcript
     )
 
     $passName = $Pass.Substring(0, 1).ToUpperInvariant() + $Pass.Substring(1)
@@ -209,12 +267,24 @@ function Get-InstallPassVerdict {
     if ($ExitCode -eq 3010) {
         return [pscustomobject]@{ StepExitCode = 0; Outcome = 'passed'; Message = "$passName install pass exited 3010 (OK, restart required)." }
     }
-    # Exit 8 (apps OK, auto-updates not configured or unhealthy) falls through to 'failed' on
-    # purpose. windows-latest lacks Microsoft.WindowsAppRuntime.1.8, so once the installer returns
-    # 8 every pass on it will end with 8 ('Auto-updates: NOT CONFIGURED'). Tolerating it here is
-    # only safe together with an assertion that checks each pass's Auto-updates outcome against
-    # the framework state (Assert-Install.ps1 checks only the latest transcript's, and only for
-    # NOT CONFIGURED), so the change that starts returning 8 has to add both.
+    if ($ExitCode -eq 8) {
+        # windows-latest lacks Microsoft.WindowsAppRuntime.1.8, so the installer skips
+        # Winget-AutoUpdate there and every pass ends with 8. That reason, read from this pass's
+        # own transcript, is the only one accepted: a WAU that failed to install, or whose task is
+        # broken, still fails the pass.
+        $what = "$passName install pass exited 8 (apps OK, auto-updates not configured or unhealthy)"
+        if ($null -eq $Transcript) {
+            return [pscustomobject]@{ StepExitCode = 8; Outcome = 'failed'; Message = "$what - FAILED: no transcript of this pass was found, so why cannot be checked" }
+        }
+        if ($Transcript.Parsed.AutoUpdatesFrameworkMissing) {
+            return [pscustomobject]@{ StepExitCode = 0; Outcome = 'passed'; Message = "$what - expected on this runner: $($Transcript.Name) says 'Auto-updates: NOT CONFIGURED' because Microsoft.WindowsAppRuntime.1.8 is missing." }
+        }
+        $reported = "no 'Auto-updates:' line"
+        if ($Transcript.Parsed.AutoUpdatesLine) {
+            $reported = "'Auto-updates: $($Transcript.Parsed.AutoUpdatesLine)'"
+        }
+        return [pscustomobject]@{ StepExitCode = 8; Outcome = 'failed'; Message = "$what - FAILED: $($Transcript.Name) reports $reported, not NOT CONFIGURED for a missing Microsoft.WindowsAppRuntime.1.8" }
+    }
     if ($ExitCode -eq 1 -and $KnownPlatformIncompatible.Trim()) {
         return [pscustomobject]@{
             StepExitCode = 0
@@ -237,6 +307,9 @@ if ($MyInvocation.InvocationName -ne '.') {
     if ($null -eq $KnownPlatformIncompatible) {
         $KnownPlatformIncompatible = ''
     }
+    if (-not $LogDirectory -and $env:ProgramData) {
+        $LogDirectory = Join-Path $env:ProgramData 'winget-app-setup\logs'
+    }
 
     $command = Get-InstallPassCommand -Shell $Shell -Entry $Entry -Source $Source -InstallerPath $InstallerPath
     Write-Host "Installer under test: $($command.Description) ($env:GITHUB_REF at $env:GITHUB_SHA)."
@@ -249,6 +322,7 @@ if ($MyInvocation.InvocationName -ne '.') {
     # $ErrorActionPreference = 'Stop', and Windows PowerShell turns redirected stderr into errors.
     $ErrorActionPreference = 'Continue'
     $global:LASTEXITCODE = $null
+    $passStartedAt = Get-Date
     & $command.FilePath @($command.Arguments)
     $installerExitCode = $global:LASTEXITCODE
     if ($null -eq $installerExitCode) {
@@ -256,7 +330,12 @@ if ($MyInvocation.InvocationName -ne '.') {
         exit 127
     }
 
-    $verdict = Get-InstallPassVerdict -ExitCode $installerExitCode -KnownPlatformIncompatible $KnownPlatformIncompatible -Pass $Pass
+    # Only exit 8 needs the pass's transcript (why auto-updates are not configured).
+    $passTranscript = $null
+    if ($installerExitCode -eq 8 -and $LogDirectory) {
+        $passTranscript = Get-InstallPassTranscript -LogDirectory $LogDirectory -Since $passStartedAt
+    }
+    $verdict = Get-InstallPassVerdict -ExitCode $installerExitCode -KnownPlatformIncompatible $KnownPlatformIncompatible -Pass $Pass -Transcript $passTranscript
     $color = 'Green'
     if ($verdict.Outcome -eq 'tolerated') {
         $color = 'Yellow'
