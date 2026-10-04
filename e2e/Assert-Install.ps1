@@ -21,7 +21,8 @@
       4. The installed WAU version matches the pin in Get-WauPin (read from the registry via the
          module's private Get-InstalledWauInfo helper, dot-sourced from the checkout).
       5. A transcript exists under %ProgramData%\winget-app-setup\logs and contains the
-         'Installer build' stamp.
+         'Installer build' stamp. With -InstallerPath: EVERY real-run transcript logs the build
+         id stamped into that file, so each install pass provably ran the installer under test.
       6. Every NOT-applicable app shows its 'Skipping: <name> (not applicable: <reason>)' line
          in the latest transcript; not-applicable apps are excluded from the per-app installed
          checks (2) and the idempotence checks (8).
@@ -44,6 +45,13 @@
     Enables the idempotence assertions (8). Pass this when the installer has just been run a
     second time on an already-provisioned machine, so the latest transcript must show every
     applicable app Skipped and nothing Installed or Failed.
+.PARAMETER InstallerPath
+    The installer file the runs were given (e.g. the checkout's winget-app-install.ps1). Each
+    real-run transcript must then log 'Installer build: <id>' with the $script:InstallerBuildId
+    stamped into this file, which catches a run that tested some other copy - for example a
+    workflow that fetched raw main while the branch under test changed the module. Limitation: the
+    build id hashes only the module's functions, so a change limited to build/fragments/head.ps1
+    or tail.ps1 keeps the id of the build before it. Default: no build check.
 .NOTES
     Exit codes: 0 = all assertions passed, 1 = one or more assertions failed (each listed).
 #>
@@ -53,7 +61,10 @@ param (
     [string[]]$SkipApps = @(),
 
     [Parameter(Mandatory = $false)]
-    [switch]$ExpectAllSkippedOnSecondRun
+    [switch]$ExpectAllSkippedOnSecondRun,
+
+    [Parameter(Mandatory = $false)]
+    [string]$InstallerPath
 )
 
 $ErrorActionPreference = 'Stop'
@@ -249,6 +260,35 @@ else {
     }
     else {
         Add-AssertionResult -Name "Transcript contains 'Installer build'" -Passed $false -Detail "no 'Installer build' line in $($latest.Name)"
+    }
+
+    # Every pass ran the installer under test: each real-run transcript logs the build id stamped
+    # into -InstallerPath. Read with a regex, never dot-sourced: dot-sourcing runs the installer.
+    if ($InstallerPath) {
+        $expectedBuildId = $null
+        if (Test-Path -LiteralPath $InstallerPath -PathType Leaf) {
+            $buildIdMatch = [regex]::Match((Get-Content -LiteralPath $InstallerPath -Raw), "(?m)^\`$script:InstallerBuildId = '(?<id>[^']+)'")
+            if ($buildIdMatch.Success) {
+                $expectedBuildId = $buildIdMatch.Groups['id'].Value
+            }
+        }
+        if (-not $expectedBuildId) {
+            Add-AssertionResult -Name 'Build id of the installer under test' -Passed $false -Detail "no `$script:InstallerBuildId line in '$InstallerPath'"
+        }
+        else {
+            $expectedBuildLine = "Installer build: $expectedBuildId"
+            foreach ($transcript in $transcripts) {
+                $content = if ($transcript.FullName -eq $latest.FullName) { $latestContent } else { Get-Content -Path $transcript.FullName -Raw }
+                if ($content -match ('(?m)' + [regex]::Escape($expectedBuildLine) + '\s*$')) {
+                    Add-AssertionResult -Name "Ran the installer under test ($($transcript.Name))" -Passed $true -Detail $expectedBuildLine
+                }
+                else {
+                    $loggedBuild = (($content -split "`n") | Where-Object { $_ -match 'Installer build' } | Select-Object -First 1)
+                    $loggedBuild = if ($loggedBuild) { "logged '$($loggedBuild.Trim())'" } else { "no 'Installer build' line" }
+                    Add-AssertionResult -Name "Ran the installer under test ($($transcript.Name))" -Passed $false -Detail "expected '$expectedBuildLine' from $InstallerPath, $loggedBuild"
+                }
+            }
+        }
     }
 
     # --- 6. Not-applicable apps: their gated skip line appears in the latest transcript ------

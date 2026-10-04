@@ -5,12 +5,24 @@ name: E2E Install
 # where the installer executes without mocks. The 259-test Pester suite (windows-tests.yml)
 # mocks every external call; this workflow is the top rung of the testing pyramid.
 #
-# Two modes, selected by the trigger:
-#   - schedule / workflow_dispatch: runs the TRUE production path - the installer is fetched
-#     from raw main and piped to iex, exactly like the documented end-user one-liner.
-#   - pull_request (paths-filtered to the e2e machinery): runs the CHECKOUT's
-#     winget-app-install.ps1, so a PR that changes this workflow or e2e/** validates its own
-#     code before merge.
+# Which installer runs (INSTALLER_SOURCE on the e2e-install job). Both install passes pipe it to
+# iex in a fresh pwsh -Command, as the documented one-liner does: the script runs from memory, with
+# no file path.
+#   - schedule: the TRUE production path - the installer is fetched from raw main, exactly as
+#     every helpdesk run gets it.
+#   - pull_request and workflow_dispatch: the CHECKOUT's winget-app-install.ps1 (the PR's merge
+#     commit, or the branch the run was dispatched on), read from disk and piped to iex. main is
+#     production - the one-liner downloads it directly - so this is the only un-mocked run a
+#     change gets before it reaches users, and any branch can be tested on demand with
+#     'gh workflow run e2e-install.yml --ref <branch>'. e2e/Assert-Install.ps1 -InstallerPath then
+#     checks that both passes logged the checkout's build id.
+#
+# Pull requests: every PR starts this workflow, and the changes job lets e2e-install run only when
+# the PR touches the product (WingetAppSetup/**, build/**, winget-app-install.ps1) or the e2e
+# machinery (this file, e2e/**). The filter is a job rather than pull_request.paths so that
+# e2e-install can be a required check: a workflow that a paths filter skips reports no status, and
+# a required check left without one blocks the PR from merging, while a job skipped by its if:
+# reports success.
 #
 # The install runs TWICE: the second pass proves idempotence (must exit 0 with every app
 # Skipped), verified by e2e/Assert-Install.ps1 -ExpectAllSkippedOnSecondRun - the shared
@@ -31,19 +43,22 @@ on:
   schedule:
     - cron: '0 6 * * 1' # weekly, Mondays 06:00 UTC
   workflow_dispatch:
-  pull_request:
-    paths:
-      - '.github/workflows/e2e-install.yml'
-      - 'e2e/**'
+  pull_request: # every PR; the changes job decides whether it needs the real install
 
 permissions:
   contents: read # report-failure adds what it needs at job level
 
-# Never cancel a real install mid-flight (a half-provisioned runner produces misleading
-# failures); later runs queue behind the active one instead.
+# One group per ref, so only runs of the same code queue behind each other: the weekly run and runs
+# dispatched on main share refs/heads/main, a branch dispatch gets its branch, and each pull request
+# its refs/pull/<n>/merge. A pull request push therefore cannot cancel a pending weekly run (in a
+# group, a newer pending run cancels the older pending one), and runs in different groups get
+# separate throwaway VMs. A scheduled or dispatched install is never cancelled mid-flight -
+# report-failure would file an issue for a run nobody chose to stop. A pull request's run is
+# cancelled by the run for its next push, which tests the newer code; its result only shows on the
+# PR, so nothing is filed.
 concurrency:
-  group: e2e-install
-  cancel-in-progress: false
+  group: e2e-install-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   # Catalog apps that provably CANNOT install on GitHub-hosted (Server-based) runner images —
@@ -59,7 +74,54 @@ env:
   KNOWN_PLATFORM_INCOMPATIBLE: ''
 
 jobs:
+  changes:
+    # Pull requests only: does this PR need the real install? Yes when it changes the product
+    # (WingetAppSetup/**, build/**, winget-app-install.ps1) or the e2e machinery (this file,
+    # e2e/**). Scheduled and dispatched runs skip this job and always install.
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      e2e: ${{ steps.filter.outputs.e2e }}
+    steps:
+      # The PR's merge commit and its parents: the first parent is the base branch.
+      - name: Checkout the merge commit
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+
+      - name: Match the changed files against the e2e paths
+        id: filter
+        shell: bash
+        run: |
+          set -uo pipefail
+          # Merge commit against its base: the files this PR changes, the same set a paths filter
+          # sees. --no-renames lists both sides of a rename, so moving a file out of the product
+          # still counts. If git cannot tell, install rather than skip.
+          if ! changed=$(git diff --no-renames --name-only HEAD^1 HEAD); then
+            echo '::warning::Could not list the files this pull request changes; running the e2e install anyway.'
+            echo 'e2e=true' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          pattern='^(WingetAppSetup/|build/|e2e/)|^(winget-app-install\.ps1|\.github/workflows/e2e-install\.yml)$'
+          if matched=$(grep -E "$pattern" <<< "$changed"); then
+            echo 'Changed files that need the real install:'
+            echo "$matched"
+            echo 'e2e=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'This pull request changes no product or e2e file; skipping the e2e install.'
+            echo 'e2e=false' >> "$GITHUB_OUTPUT"
+          fi
+
   e2e-install:
+    needs: changes
+    # Pull requests: only when the changes job found a product or e2e file. If that job did not
+    # succeed, install anyway: a skipped e2e-install counts as passed for a required check, so
+    # skipping on an unknown answer would let an untested change merge. Scheduled and dispatched
+    # runs always install (changes is skipped for them, hence !cancelled() instead of the default
+    # success()).
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.changes.result != 'success' || needs.changes.outputs.e2e == 'true') }}
     # windows-latest (issue #279): windows-latest currently resolves to Windows Server 2025,
     # which lacks the Microsoft.WindowsAppRuntime.1.8 framework that winget 1.12+ depends on.
     # The newer Microsoft.DesktopAppInstaller (1.29.x) seen in the #279/#284 deadlock was NOT
@@ -88,6 +150,10 @@ jobs:
     #     of pauses), about 36 min for the 9 apps that apply on this runner. Raise it if the
     #     catalog grows.
     timeout-minutes: 130
+    env:
+      # What both install passes run: 'raw-main' (the production one-liner) only for the weekly run,
+      # 'checkout' for pull requests and dispatched runs. See the header comment.
+      INSTALLER_SOURCE: ${{ github.event_name == 'schedule' && 'raw-main' || 'checkout' }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
@@ -106,19 +172,20 @@ jobs:
         id: first-pass
         shell: pwsh
         timeout-minutes: 35
-        env:
-          EVENT_NAME: ${{ github.event_name }}
         run: |
-          # Mode selection (see the header comment): PRs run their own checkout so e2e-machinery
-          # changes validate themselves pre-merge; scheduled/dispatched runs exercise the
-          # production irm | iex path against raw main. Both paths rely on the installer's
-          # effective non-interactive auto-detection (redirected stdin on a runner) - that
-          # detection is itself part of what this run verifies (issue #214).
-          if ($env:EVENT_NAME -eq 'pull_request') {
-            & pwsh -NoProfile -ExecutionPolicy Bypass -File ./winget-app-install.ps1
+          # INSTALLER_SOURCE (see the header comment): the weekly run exercises the production
+          # irm | iex path against raw main; pull requests and dispatched runs pipe the checkout's
+          # installer to iex the same way, so they test the code under review. Only 'raw-main'
+          # fetches main: anything else runs the checkout. Both rely on the installer's effective
+          # non-interactive auto-detection (redirected stdin on a runner) - that detection is
+          # itself part of what this run verifies (issue #214).
+          if ($env:INSTALLER_SOURCE -eq 'raw-main') {
+            Write-Host 'Installer under test: raw main (the production one-liner).'
+            & pwsh -NoProfile -Command 'irm https://raw.githubusercontent.com/J-MaFf/winget-app-setup/main/winget-app-install.ps1 | iex'
           }
           else {
-            & pwsh -NoProfile -Command 'irm https://raw.githubusercontent.com/J-MaFf/winget-app-setup/main/winget-app-install.ps1 | iex'
+            Write-Host "Installer under test: the checkout ($env:GITHUB_REF at $env:GITHUB_SHA)."
+            & pwsh -NoProfile -Command 'Get-Content -Raw -LiteralPath ./winget-app-install.ps1 | iex'
           }
           $exitCode = $LASTEXITCODE
           # NOTE: GitHub's pwsh shell wrapper ends every step with 'exit $LASTEXITCODE', so the
@@ -154,17 +221,15 @@ jobs:
         id: second-pass
         shell: pwsh
         timeout-minutes: 35
-        env:
-          EVENT_NAME: ${{ github.event_name }}
         run: |
-          # Same command as the first pass, on the now-provisioned machine: it must exit 0
-          # again, and the assertions step below verifies (via the latest transcript) that
+          # Same installer and command as the first pass, on the now-provisioned machine: it must
+          # exit 0 again, and the assertions step below verifies (via the latest transcript) that
           # every catalog app was Skipped and nothing was installed or failed.
-          if ($env:EVENT_NAME -eq 'pull_request') {
-            & pwsh -NoProfile -ExecutionPolicy Bypass -File ./winget-app-install.ps1
+          if ($env:INSTALLER_SOURCE -eq 'raw-main') {
+            & pwsh -NoProfile -Command 'irm https://raw.githubusercontent.com/J-MaFf/winget-app-setup/main/winget-app-install.ps1 | iex'
           }
           else {
-            & pwsh -NoProfile -Command 'irm https://raw.githubusercontent.com/J-MaFf/winget-app-setup/main/winget-app-install.ps1 | iex'
+            & pwsh -NoProfile -Command 'Get-Content -Raw -LiteralPath ./winget-app-install.ps1 | iex'
           }
           $exitCode = $LASTEXITCODE
           # Same explicit-exit-0 requirement as the first pass (pwsh shell wrapper behavior).
@@ -213,6 +278,12 @@ jobs:
           else {
             Write-Host "The second install pass did not run (outcome: '$env:SECOND_PASS_OUTCOME'); skipping the idempotence assertions." -ForegroundColor Yellow
           }
+          # Runs that installed the checkout must show its build id in every pass's transcript, so a
+          # run that quietly tested another copy (raw main) fails here. The weekly run fetches raw
+          # main, which can trail the checkout by a few minutes of CDN caching, so it is not checked.
+          if ($env:INSTALLER_SOURCE -ne 'raw-main') {
+            $assertArgs += @('-InstallerPath', (Join-Path $env:GITHUB_WORKSPACE 'winget-app-install.ps1'))
+          }
           # Also saved with the diagnostics, so report-failure can put the table in the issue.
           $diagnosticsDir = Join-Path $env:RUNNER_TEMP 'e2e-diagnostics'
           $null = New-Item -ItemType Directory -Path $diagnosticsDir -Force
@@ -245,16 +316,18 @@ jobs:
           if-no-files-found: warn
 
   report-failure:
-    # Creates, or comments on, the 'E2E install run failed' issue when a scheduled or dispatched
-    # run does not succeed: failed, timed out or cancelled. Never for pull_request runs, whose
-    # result shows on the PR; the issue channel exists so unattended runs cannot fail silently.
+    # Creates, or comments on, the 'E2E install run failed' issue when a scheduled run, or a run
+    # dispatched on main, does not succeed: failed, timed out or cancelled. Those runs test what
+    # users get. Never for pull_request runs, whose result shows on the PR, nor for a run
+    # dispatched on another branch, which tests unmerged code and reports to whoever started it;
+    # the issue channel exists so production failures cannot go unnoticed.
     #
     # A separate ubuntu-latest job, so it needs nothing from the Windows runner but the uploaded
     # artifacts. The old step inside e2e-install ran with 'shell: pwsh' and 'if: failure()': run
     # 35566866223 removed PowerShell 7 and the step died with 'pwsh: command not found', and a
     # job that hits timeout-minutes is cancelled, which failure() does not match.
     needs: e2e-install
-    if: ${{ always() && needs.e2e-install.result != 'success' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
+    if: ${{ always() && needs.e2e-install.result != 'success' && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -285,6 +358,7 @@ jobs:
           RUN_ATTEMPT: ${{ github.run_attempt }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           EVENT_NAME: ${{ github.event_name }}
+          TESTED_SHA: ${{ github.sha }}
           E2E_RESULT: ${{ needs.e2e-install.result }}
         run: |
           set -uo pipefail
@@ -316,6 +390,11 @@ jobs:
             echo
             echo "- Run: $RUN_URL (attempt $RUN_ATTEMPT)"
             echo "- Trigger: \`$EVENT_NAME\`"
+            if [ "$EVENT_NAME" = 'schedule' ]; then
+              echo "- Installer: the production one-liner, fetched from raw \`main\`"
+            else
+              echo "- Installer: the checkout of \`main\` at $TESTED_SHA"
+            fi
             echo "- \`e2e-install\` job result: \`$E2E_RESULT\`"
             if [ "$E2E_RESULT" = 'cancelled' ]; then
               echo "- The job was cancelled: it reached its job-level \`timeout-minutes\`, or someone cancelled the run. Steps after that point did not run, so some evidence below may be missing."
