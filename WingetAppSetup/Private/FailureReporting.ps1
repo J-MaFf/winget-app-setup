@@ -187,14 +187,18 @@ function Get-InstallerExitCode {
     finding P2-5), and where the installer's log is (P2-6). Used both for the console failure message
     and for the Reason column in the failed-apps summary table.
 .PARAMETER FailureReason
-    The FailureReason string from the shared install pipeline ('PreCheckTimeout', 'VerifyTimeout',
-    'VerifyNotFound', 'CustomInstallFailed'). Unknown or empty values fall back to a generic
-    'install failed'.
+    The FailureReason string from the shared install pipeline ('PreCheckTimeout',
+    'PreCheckLaunchFailed', 'InstallLaunchFailed', 'VerifyTimeout', 'VerifyLaunchFailed',
+    'VerifyNotFound', 'CustomInstallFailed', 'WingetNotLaunchable'). Unknown or empty values fall
+    back to a generic 'install failed'.
 .PARAMETER InstallResult
     The InstallResult hashtable from the shared install pipeline: Install-WingetPackage's
     ExitCode/Attempts/SessionErrorExhausted/MachineScopeFellBack shape, a custom installer's
     ExitCode/Installed shape, or $null when no installer ran (timeouts, dry runs). Keys are probed
     individually, so partial shapes format whatever detail they carry.
+.PARAMETER LaunchError
+    Why winget could not be started, for the launch-failure reasons (the pipeline's LaunchError).
+    Shown last, so the table row says what Windows reported (review finding P2-9).
 .RETURNS
     [string] e.g. 'package not found after install; winget exit 0x80073D19, 3 attempts,
     machine-scope fallback: no'. Never $null or empty.
@@ -208,14 +212,23 @@ function Format-InstallFailureReason {
 
         [Parameter(Mandatory = $false)]
         [AllowNull()]
-        [hashtable]$InstallResult
+        [hashtable]$InstallResult,
+
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [AllowEmptyString()]
+        [string]$LaunchError
     )
 
     $base = switch ($FailureReason) {
         'PreCheckTimeout' { 'winget list timed out during the pre-install check' }
+        'PreCheckLaunchFailed' { 'winget could not be launched for the pre-install check' }
+        'InstallLaunchFailed' { 'winget could not be launched to install it' }
         'VerifyTimeout' { 'post-install verification timed out' }
+        'VerifyLaunchFailed' { 'winget could not be launched to verify the install' }
         'VerifyNotFound' { 'package not found after install' }
         'CustomInstallFailed' { 'installer reported failure' }
+        'WingetNotLaunchable' { 'not attempted: winget cannot be launched on this machine (see above)' }
         default { 'install failed' }
     }
 
@@ -237,9 +250,16 @@ function Format-InstallFailureReason {
             $detailParts += 'session error 0x80073D19 persisted through every retry'
         }
         if ($InstallResult.ContainsKey('LaunchErrorExhausted') -and $InstallResult.LaunchErrorExhausted) {
-            # issue #253: winget.exe could not be launched (transient file lock) on every attempt,
-            # so no install ever actually ran.
-            $detailParts += 'winget executable was transiently inaccessible through every retry'
+            # issue #253: winget.exe could not be launched, so no install ever actually ran (the
+            # 'InstallLaunchFailed' reason says so); this counts the launches that failed.
+            $launchAttempts = 0
+            if ($InstallResult.ContainsKey('LaunchAttempts') -and $InstallResult.LaunchAttempts) {
+                $launchAttempts = [int]$InstallResult.LaunchAttempts
+            }
+            if ($launchAttempts -gt 0) {
+                $launchWord = if ($launchAttempts -eq 1) { 'failed launch' } else { 'failed launches' }
+                $detailParts += ('{0} {1}' -f $launchAttempts, $launchWord)
+            }
         }
         if ($InstallResult.ContainsKey('TimedOut') -and $InstallResult.TimedOut) {
             # Review finding P2-5: the install ran out of time and was stopped, so there is no exit
@@ -254,6 +274,9 @@ function Format-InstallFailureReason {
             # Review finding P2-6: the installer's own log, next to the transcript.
             $detailParts += ('installer log: {0}' -f $InstallResult.InstallerLogPath)
         }
+    }
+    if (-not [string]::IsNullOrWhiteSpace($LaunchError)) {
+        $detailParts += ('launch error: {0}' -f $LaunchError.Trim().TrimEnd('.'))
     }
 
     if ($detailParts.Count -gt 0) {

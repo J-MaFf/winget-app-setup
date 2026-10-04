@@ -84,8 +84,7 @@ function Test-WindowsTerminalHostsCurrentSession {
 .SYNOPSIS
     Returns whether Windows Terminal is registered/installed for the current user.
 .DESCRIPTION
-    Prefers Get-AppxPackage (the authoritative package-registration check, same technique
-    Resolve-WingetExecutable already uses for Microsoft.DesktopAppInstaller) and falls back to
+    Prefers Get-AppxPackage (the authoritative package-registration check) and falls back to
     Get-WindowsTerminalSettingsPaths when Get-AppxPackage is unavailable (e.g. PowerShell 7
     without the Appx compatibility session). Used to gate Set-WindowsTerminalDefaults so it never
     configures Windows Terminal as the default terminal application when Windows Terminal is not

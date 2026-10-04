@@ -12,7 +12,7 @@
 # Get-InstallerBuildIdFromText/Get-PowerShell7RelaunchInstaller (review findings P3-17, P2-18),
 # and Invoke-WingetProcess with what it calls (Private/ProcessInvocation.ps1: Invoke-ExternalProcess,
 # Get-ProcessTimeoutSeconds and their helpers, written against .NET Framework 4.5;
-# Resolve-WingetExecutable without -BypassAlias, a literal string) for the winget install (review
+# Resolve-WingetExecutable, which returns a literal string) for the winget install (review
 # findings P2-5/P2-6). Get-AuthenticodeSignature, which Test-PowerShell7MsiSignature calls, is a
 # Windows PowerShell 5.1 cmdlet too. The tail's 5.1 branch also calls, around this file:
 # Test-EffectiveNonInteractive and Test-IsContinuousIntegration (Private/Interactivity.ps1),

@@ -61,8 +61,9 @@ function Test-AndInstallWingetModule {
 .SYNOPSIS
     Checks if winget is available and attempts to install it if not.
 .DESCRIPTION
-    Verifies that the winget CLI is on PATH for the current account and, when it is not, works
-    through a cheapest-first bootstrap ladder (issue #265):
+    Verifies that winget can actually be started for the current account (Test-WingetLaunchable:
+    `winget --version` exits 0 and prints a version) and, when it cannot, works through a
+    cheapest-first bootstrap ladder (issue #265), re-checking the same way after each rung:
 
       1. Register the Microsoft.DesktopAppInstaller package already staged on this machine for the
          current account. No download and no framework dependency deployment, and it is the direct
@@ -76,13 +77,19 @@ function Test-AndInstallWingetModule {
     Rung 1 comes first specifically because rung 2 can be blocked outright by a 0x80073D06
     dependency downgrade rejection on a machine whose WindowsAppRuntime is newer than the WinGet
     release pins - see Invoke-WingetPackageManagerRepair.
+
+    The checks used to be `Get-Command winget`, which only proves that the app-execution alias is
+    on PATH. After both repair attempts had failed, that still printed 'Winget bootstrapped
+    successfully', and every winget call afterwards failed (review finding P3-9). A winget that is
+    on PATH but cannot run now goes down the same ladder, and the run stops with exit code 2 when
+    no rung makes it start.
 .PARAMETER WhatIf
-    Dry run: only checks whether winget is on PATH and, when it is not, prints the bootstrap ladder
-    a real run would work through. No rung runs (P2-16: the dry run used to register or repair App
-    Installer, or download and install it).
+    Dry run: only checks whether winget can be started (a read-only `winget --version`) and, when
+    it cannot, prints the bootstrap ladder a real run would work through. No rung runs (P2-16: the
+    dry run used to register or repair App Installer, or download and install it).
 .RETURNS
-    [bool] True if winget is available or successfully installed, otherwise False.
-    Under -WhatIf, True only when winget is already available.
+    [bool] True if winget can be started, at once or after a bootstrap rung, otherwise False.
+    Under -WhatIf, True only when winget can already be started.
 #>
 function Test-AndInstallWinget {
     param (
@@ -90,24 +97,30 @@ function Test-AndInstallWinget {
         [switch]$WhatIf
     )
 
-    if (Get-Command winget -ErrorAction SilentlyContinue) {
-        Write-Success 'Winget is available.'
+    # Two checks, 5 seconds apart, when the first one hits a lock that can clear on its own (an
+    # antivirus scan of winget.exe): the rungs below re-register or download App Installer, which
+    # is far more than a momentary lock deserves. winget missing from PATH is final at once.
+    $launchCheck = @{ Attempts = 2; RetryDelaySeconds = 5 }
+    $probe = Test-WingetLaunchable @launchCheck
+    if ($probe.Launchable) {
+        Write-Success "Winget is available ($($probe.Version))."
         return $true
     }
     elseif ($WhatIf) {
-        Write-Info '[DRY-RUN] Winget is not available for this account. A real run would bootstrap it: register the App Installer package already on this machine for this account, then try Repair-WinGetPackageManager, then download App Installer from https://aka.ms/getwinget, and exit 2 if winget is still unavailable after that.'
+        Write-Info "[DRY-RUN] Winget is not available for this account ($($probe.Reason)). A real run would bootstrap it: register the App Installer package already on this machine for this account, then try Repair-WinGetPackageManager, then download App Installer from https://aka.ms/getwinget, and exit 2 if winget still cannot be started after that."
         return $false
     }
     else {
         # Register-WingetAppInstallerForUser narrates its own progress, so this only states the
         # condition - saying "trying to register..." here too would duplicate its first line.
-        Write-WarningMessage 'Winget is not available.'
+        Write-WarningMessage "Winget is not available: $($probe.Reason)."
         if (Register-WingetAppInstallerForUser) {
-            if (Get-Command winget -ErrorAction SilentlyContinue) {
+            $probe = Test-WingetLaunchable @launchCheck
+            if ($probe.Launchable) {
                 Write-Success 'Winget is available after registering App Installer for this account.'
                 return $true
             }
-            Write-WarningMessage 'App Installer was registered but winget is still unavailable.'
+            Write-WarningMessage "App Installer was registered but winget still cannot be started: $($probe.Reason)."
         }
 
         if (Get-Command Repair-WinGetPackageManager -ErrorAction SilentlyContinue) {
@@ -115,12 +128,13 @@ function Test-AndInstallWinget {
             [void](Invoke-WingetPackageManagerRepair)
 
             # The repair result's own Succeeded flag is deliberately not trusted here: the cmdlet can
-            # report success without winget landing on PATH, so availability is re-checked directly.
-            if (Get-Command winget -ErrorAction SilentlyContinue) {
+            # report success without winget being able to start, so winget is started to check.
+            $probe = Test-WingetLaunchable @launchCheck
+            if ($probe.Launchable) {
                 Write-Success 'Winget bootstrapped successfully via Repair-WinGetPackageManager.'
                 return $true
             }
-            Write-WarningMessage 'Winget is still unavailable after the repair attempt. Falling back to App Installer download...'
+            Write-WarningMessage "Winget is present but cannot run after the repair attempt: $($probe.Reason). Falling back to App Installer download..."
         }
 
         Write-WarningMessage 'Winget is not available. Attempting to install Microsoft App Installer...'
@@ -131,14 +145,15 @@ function Test-AndInstallWinget {
             Add-AppxPackage $outFile
             Remove-Item $outFile -ErrorAction SilentlyContinue
 
-            # Verify the registration actually made winget available, like the Repair path above —
-            # Add-AppxPackage can complete without winget landing on PATH (issue #177).
-            if (Get-Command winget -ErrorAction SilentlyContinue) {
+            # Verify the registration actually made winget usable, like the Repair path above -
+            # Add-AppxPackage can complete without winget being able to start (issue #177).
+            $probe = Test-WingetLaunchable @launchCheck
+            if ($probe.Launchable) {
                 Write-Success 'Microsoft App Installer installed successfully. Winget is now available.'
                 return $true
             }
 
-            Write-ErrorMessage 'Microsoft App Installer was registered, but winget is still unavailable.'
+            Write-ErrorMessage "Microsoft App Installer was registered, but winget still cannot be started: $($probe.Reason)."
             Write-ErrorMessage 'Please install winget manually from https://aka.ms/getwinget'
             return $false
         }
@@ -389,20 +404,20 @@ function Initialize-WingetSourcesForUser {
     observed to fail every install in a run, surviving even the caller's separate one-shot retry
     pass, because neither layer paused before retrying (issue #253). This class of launch failure is
     now retried, recognized by its Win32 error code rather than by its translated message (P3-6).
-    Any other launch failure (e.g. winget genuinely missing) is re-thrown so it is not silently
-    swallowed.
+    Any other launch failure (e.g. winget genuinely missing, or 'Access is denied') is not retried:
+    it ends the install at once with LaunchErrorExhausted and the launch error in the result, so
+    the caller reports that winget could not be launched (and Invoke-WingetInstall's circuit
+    breaker can stop the run) instead of an unexpected error.
 
     Launch failures have their own retry budget, longer than the session-error one (issue #258):
     the dominant real-world cause is a Microsoft.DesktopAppInstaller (App Installer) upgrade or
-    re-registration in flight - e.g. a background Winget-AutoUpdate run (the installer used to
-    start one itself via RUN_WAU=YES) - which breaks the per-user winget.exe app-execution alias for the
-    whole registration window, far longer than the 15s the #253 backoff covered (observed on run
-    30253761253: every launch failed across both install passes). Two things changed: each launch
-    retry first re-resolves the executable via Resolve-WingetExecutable -BypassAlias, launching
-    the registered package's own winget.exe directly instead of the broken alias; and the launch
-    backoff doubles across MaxLaunchAttempts (default 5: 5s+10s+20s+40s = 75s of coverage) so the
-    retry window outlasts a typical App Installer registration. A failed launch never ran winget,
-    so it does not consume one of the MaxAttempts install attempts.
+    re-registration in flight - e.g. a background Winget-AutoUpdate run - which breaks the per-user
+    winget.exe app-execution alias for the whole registration window, far longer than the 15s the
+    #253 backoff covered. The launch backoff doubles across MaxLaunchAttempts (default 5:
+    5s+10s+20s+40s = 75s of coverage) so the retry window outlasts a typical App Installer
+    registration. A failed launch never ran winget, so it does not consume one of the MaxAttempts
+    install attempts. (Each retry used to launch the package's own winget.exe past the alias,
+    Resolve-WingetExecutable -BypassAlias; that never worked and was removed, review finding P3-7.)
 
     Installs prefer `--scope machine` (issue #159): user-scope installs land in the elevated
     account's profile rather than the logged-on user's, and packages that ship both MSIX and MSI
@@ -432,15 +447,16 @@ function Initialize-WingetSourcesForUser {
     the parameter is not given, Test-EffectiveNonInteractive decides (e.g. for a script that calls
     the function on its own).
 .RETURNS
-    [hashtable] @{ ExitCode = <int|$null>; Attempts = <int>; SessionErrorExhausted = <bool>; MachineScopeFellBack = <bool>; LaunchErrorExhausted = <bool>; LaunchAttempts = <int>; TimedOut = <bool>; TimeoutSeconds = <int>; InstallerLogPath = <string|$null> }
+    [hashtable] @{ ExitCode = <int|$null>; Attempts = <int>; SessionErrorExhausted = <bool>; MachineScopeFellBack = <bool>; LaunchErrorExhausted = <bool>; LaunchAttempts = <int>; LaunchError = <string|$null>; TimedOut = <bool>; TimeoutSeconds = <int>; InstallerLogPath = <string|$null> }
     SessionErrorExhausted is True only when every attempt failed with the session error.
     MachineScopeFellBack is True when the package had no machine-scope installer and the install
     was retried at winget's default scope. Attempts counts install attempts at the finally
     selected scope; the one-time scope fallback does not consume a session-error attempt, and
     neither does a failed launch (no process ran). LaunchAttempts counts failed winget launches.
-    LaunchErrorExhausted is True only when winget.exe could not be launched at all through every
-    launch attempt (issues #253/#258); ExitCode is $null and Attempts is 0 in that case, since no
-    process ever ran to report an exit code. TimedOut is True when the last attempt ran out of time
+    LaunchErrorExhausted is True when winget.exe could not be launched: a transient launch failure
+    through every launch attempt (issues #253/#258), or any other launch failure at once; ExitCode
+    is $null in that case, since no process ran to report an exit code, and LaunchError is the last
+    launch error. TimedOut is True when the last attempt ran out of time
     and was stopped (ExitCode is then $null); TimeoutSeconds is the limit it had. InstallerLogPath
     is the installer log winget wrote for the last attempt, or $null when there is none.
 #>
@@ -486,9 +502,9 @@ function Install-WingetPackage {
     $launchErrorExhausted = $false
     $launchAttempt = 0
     $launchDelay = $InitialDelaySeconds
+    $launchError = $null
     $timedOut = $false
     $installerLogPath = $null
-    $wingetExecutable = Resolve-WingetExecutable
 
     while ($attempt -lt $MaxAttempts) {
         $attempt++
@@ -516,44 +532,36 @@ function Install-WingetPackage {
             $installArgs += '--silent'
         }
 
-        $run = Invoke-WingetProcess -ArgumentList $installArgs -TimeoutSeconds $timeoutSeconds -WingetPath $wingetExecutable
+        $run = Invoke-WingetProcess -ArgumentList $installArgs -TimeoutSeconds $timeoutSeconds
         $installerLogPath = $null
         if ($run.LogPath -and (Test-Path -LiteralPath $run.LogPath)) {
             $installerLogPath = $run.LogPath
         }
         if ($run.LaunchFailed) {
-            if (-not (Test-TransientWingetLaunchError -NativeErrorCode $run.LaunchErrorCode -Message $run.LaunchError) -and $wingetExecutable -eq 'winget') {
-                # Not a known-transient launch failure of the alias (e.g. winget genuinely
-                # missing) — preserve the prior behavior of letting it propagate instead of
-                # masking a real problem as an ordinary install failure. A concrete bypass path
-                # is exempt from this re-throw: the package version it named can be deleted
-                # mid-backoff by the very App Installer upgrade being ridden out (surfacing as
-                # ERROR_FILE_NOT_FOUND, not the file-lock errors), and the right response is to
-                # re-resolve on the next launch retry, not to abort the install loop.
-                if ($run.LaunchException) {
-                    throw $run.LaunchException
-                }
-                throw "winget could not be started: $($run.LaunchError)"
-            }
-
             # A failed launch never ran winget, so it must not consume an install attempt; launch
             # failures have their own budget (issue #258).
             $attempt--
             $launchAttempt++
-            if ($launchAttempt -lt $MaxLaunchAttempts) {
+            $launchError = $run.LaunchError
+            $transient = Test-TransientWingetLaunchError -NativeErrorCode $run.LaunchErrorCode -Message $run.LaunchError
+            if ($transient -and $launchAttempt -lt $MaxLaunchAttempts) {
                 # The usual cause is the winget.exe app-execution alias breaking while the
-                # DesktopAppInstaller package is upgraded/re-registered underneath us (e.g. by a
-                # background Winget-AutoUpdate run). Re-resolve fresh each retry, preferring the
-                # registered package's own winget.exe over the alias: as soon as the new package
-                # version lands, this converges on a launchable executable.
-                $wingetExecutable = Resolve-WingetExecutable -BypassAlias
-                Write-WarningMessage "Could not launch winget for $PackageId - its executable appears transiently locked ($($run.LaunchError)). Waiting ${launchDelay}s before launch retry $($launchAttempt + 1) of ${MaxLaunchAttempts} (next attempt uses '$wingetExecutable')..."
+                # DesktopAppInstaller package is upgraded or re-registered underneath us (e.g. by
+                # a background Winget-AutoUpdate run), or an antivirus scan of winget.exe.
+                Write-WarningMessage "Could not launch winget for $PackageId - its executable appears transiently locked ($($run.LaunchError)). Waiting ${launchDelay}s before launch retry $($launchAttempt + 1) of ${MaxLaunchAttempts}..."
                 Start-Sleep -Seconds $launchDelay
                 $launchDelay = $launchDelay * 2
                 continue
             }
 
-            Write-WarningMessage "Still unable to launch winget for $PackageId after ${MaxLaunchAttempts} launch attempts (executable inaccessible through every attempt, including via the DesktopAppInstaller package location)."
+            if ($transient) {
+                Write-WarningMessage "Still unable to launch winget for $PackageId after ${MaxLaunchAttempts} launch attempts ($($run.LaunchError))."
+            }
+            else {
+                # Not a lock that clears on its own (e.g. winget missing, or 'Access is denied'):
+                # retrying would only wait.
+                Write-WarningMessage "Could not launch winget for ${PackageId}: $($run.LaunchError)"
+            }
             $launchErrorExhausted = $true
             $exitCode = $null
             break
@@ -609,6 +617,7 @@ function Install-WingetPackage {
         MachineScopeFellBack  = $machineScopeFellBack
         LaunchErrorExhausted  = $launchErrorExhausted
         LaunchAttempts        = $launchAttempt
+        LaunchError           = $(if ($launchErrorExhausted) { $launchError } else { $null })
         TimedOut              = $timedOut
         TimeoutSeconds        = $timeoutSeconds
         InstallerLogPath      = $installerLogPath
@@ -626,19 +635,16 @@ function Install-WingetPackage {
     Without -TimeoutSeconds the check uses the general `winget list` limit (Get-ProcessTimeoutSeconds
     WingetList) and returns a plain [bool], keeping the original contract for existing callers; any
     failure to get an answer reads as not installed. With -TimeoutSeconds a hashtable is returned so
-    the caller can tell a timeout apart from "not installed": a timeout must count as a failure
-    rather than being silently dropped (issue #176).
+    the caller can tell the three outcomes apart: installed, not installed, and no answer. A
+    timeout must count as a failure rather than being silently dropped (issue #176), and so must a
+    winget that could not be started (LaunchFailed, review finding P2-9): reading that as "not
+    installed" made Install-AppWithVerification install apps that were already there and then
+    report them as 'package not found after install'. A failed launch is not retried here; the
+    caller decides (Invoke-WingetInstall's circuit breaker checks whether winget can still start).
 
     Both modes determine "installed" via Test-WingetListOutputContainsPackageId rather than a plain
     substring .Contains check, so an unrelated listed id that merely contains $PackageId as a
     substring (e.g. target 'Foo.Bar' inside listed id 'Foo.BarBaz') cannot false-positive.
-
-    In timeout mode, a launch failure of the transient file-lock class (the winget app-execution
-    alias breaking during a DesktopAppInstaller upgrade, issue #258) is retried once via
-    Resolve-WingetExecutable -BypassAlias — launching the registered package's own winget.exe
-    directly — before the check gives up. Without this, the outage made this check silently report
-    an actually-installed package as missing, which is how run 30253761253 marked the already
-    installed Microsoft.WindowsTerminal as a failed install.
 .PARAMETER PackageId
     The winget package id to check.
 .PARAMETER TimeoutSeconds
@@ -646,9 +652,11 @@ function Install-WingetPackage {
     `winget list` limit applies and a [bool] is returned.
 .RETURNS
     [bool] when -TimeoutSeconds is not supplied.
-    [hashtable] @{ Installed = <bool>; TimedOut = <bool>; ExitCode = <int or $null> } when it is;
-    ExitCode is the winget process exit code, or $null when the process timed out or failed to
-    start.
+    [hashtable] @{ Installed = <bool>; TimedOut = <bool>; LaunchFailed = <bool>;
+    LaunchError = <string or $null>; ExitCode = <int or $null> } when it is. Installed is True only
+    when winget answered and listed the id. TimedOut and LaunchFailed mean there was no answer:
+    winget ran out of time, or could not be started (LaunchError says why). ExitCode is the winget
+    process exit code, or $null when there was no answer.
 #>
 function Test-WingetPackageInstalled {
     param (
@@ -664,22 +672,11 @@ function Test-WingetPackageInstalled {
     if ($TimeoutSeconds -gt 0) {
         $run = Invoke-WingetProcess -ArgumentList $listArgs -TimeoutSeconds $TimeoutSeconds -Echo None
         if ($run.LaunchFailed) {
-            if (-not (Test-TransientWingetLaunchError -NativeErrorCode $run.LaunchErrorCode -Message $run.LaunchError)) {
-                return @{ Installed = $false; TimedOut = $false; ExitCode = $null }
-            }
-            # The winget alias is transiently inaccessible (issue #258) — retry once through the
-            # DesktopAppInstaller package's own winget.exe so an installed package is not
-            # misreported as missing.
-            $bypassExecutable = Resolve-WingetExecutable -BypassAlias
-            Write-WarningMessage "Could not launch winget to check $PackageId ($($run.LaunchError)). Retrying once via '$bypassExecutable'..."
-            $run = Invoke-WingetProcess -ArgumentList $listArgs -TimeoutSeconds $TimeoutSeconds -Echo None -WingetPath $bypassExecutable
-            if ($run.LaunchFailed) {
-                return @{ Installed = $false; TimedOut = $false; ExitCode = $null }
-            }
+            return @{ Installed = $false; TimedOut = $false; LaunchFailed = $true; LaunchError = $run.LaunchError; ExitCode = $null }
         }
 
         if ($run.TimedOut) {
-            return @{ Installed = $false; TimedOut = $true; ExitCode = $null }
+            return @{ Installed = $false; TimedOut = $true; LaunchFailed = $false; LaunchError = $null; ExitCode = $null }
         }
 
         # Standard output only, as before: an error message on standard error can name the id too.
@@ -687,9 +684,11 @@ function Test-WingetPackageInstalled {
         # treats anything outside [\w.\-] as a token edge, so an empty separator would let the
         # end of one line abut the start of the next and could hide a real match at that seam.
         return @{
-            Installed = Test-WingetListOutputContainsPackageId -Output ([String]::Join("`n", @($run.StandardOutput))) -PackageId $PackageId
-            TimedOut  = $false
-            ExitCode  = $run.ExitCode
+            Installed    = Test-WingetListOutputContainsPackageId -Output ([String]::Join("`n", @($run.StandardOutput))) -PackageId $PackageId
+            TimedOut     = $false
+            LaunchFailed = $false
+            LaunchError  = $null
+            ExitCode     = $run.ExitCode
         }
     }
 
@@ -902,9 +901,12 @@ function Install-MsixProvisionedPackage {
     decides.
 .RETURNS
     [hashtable] @{ ExitCode = <int>; Installed = <bool>; Method = 'msi' | 'msix-native' | 'msix-provisioned' }
-    The winget paths (msi, msix-native) also carry Install-WingetPackage's TimedOut, TimeoutSeconds
-    and InstallerLogPath, so a failure reason can say that the install was stopped at its time limit
-    and where the installer's log is.
+    The winget paths (msi, msix-native) return Install-WingetPackage's whole result with Installed
+    and Method added (review finding P3-8: only ExitCode survived, so PowerShell's failure reason
+    read just 'installer reported failure' while every other app's said why), plus the outcome of
+    the `winget list` check: VerifyTimedOut, VerifyLaunchFailed and VerifyLaunchError. When winget
+    could not be launched for the install (LaunchErrorExhausted), the check is skipped: it would
+    only fail to launch again.
 #>
 function Install-PowerShellLatest {
     param (
@@ -943,18 +945,35 @@ function Install-PowerShellLatest {
         $result = Install-WingetPackage @installParameters
     }
 
-    $installed = (Test-WingetPackageInstalled -PackageId $PackageId -TimeoutSeconds $checkTimeoutSeconds).Installed
-    $outcome = @{ ExitCode = $result.ExitCode; Installed = $installed; Method = $method }
-    # Format-InstallFailureReason reads these to say that the install was stopped at its time limit
-    # (review finding P2-5) and where the installer's log is (P2-6). Without them PowerShell's
-    # failure reason read only 'installer reported failure'.
+    # Install-WingetPackage's whole result (exit code, attempts, scope fallback, session and launch
+    # errors, time limit, installer log), so Format-InstallFailureReason renders the same detail for
+    # PowerShell as for every other app (review finding P3-8).
+    $outcome = @{}
     if ($result -is [hashtable]) {
-        foreach ($key in @('TimedOut', 'TimeoutSeconds', 'InstallerLogPath')) {
-            if ($result.ContainsKey($key)) {
-                $outcome[$key] = $result[$key]
-            }
+        foreach ($key in $result.Keys) {
+            $outcome[$key] = $result[$key]
         }
     }
+    else {
+        $outcome['ExitCode'] = $result.ExitCode
+    }
+    $outcome['Method'] = $method
+    $outcome['VerifyTimedOut'] = $false
+    $outcome['VerifyLaunchFailed'] = $false
+    $outcome['VerifyLaunchError'] = $null
+
+    if ($outcome['LaunchErrorExhausted']) {
+        # winget never started, so nothing was installed, and the check would only fail to launch
+        # again.
+        $outcome['Installed'] = $false
+        return $outcome
+    }
+
+    $verify = Test-WingetPackageInstalled -PackageId $PackageId -TimeoutSeconds $checkTimeoutSeconds
+    $outcome['Installed'] = [bool]$verify.Installed
+    $outcome['VerifyTimedOut'] = [bool]$verify.TimedOut
+    $outcome['VerifyLaunchFailed'] = [bool]$verify.LaunchFailed
+    $outcome['VerifyLaunchError'] = $verify.LaunchError
     return $outcome
 }
 

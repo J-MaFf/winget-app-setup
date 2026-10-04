@@ -1,0 +1,77 @@
+**********************
+PowerShell transcript start
+Start time: 20261005080000
+Username: RUNNERVM00\runneradmin
+RunAs User: RUNNERVM00\runneradmin
+Configuration Name: 
+Machine: RUNNERVM00 (Microsoft Windows NT 10.0.26100.0)
+Host Application: C:\Program Files\PowerShell\7\pwsh.dll -NoProfile -ExecutionPolicy Bypass -File D:\a\winget-app-setup\winget-app-setup\winget-app-install.ps1
+Process ID: 4242
+PSVersion: 7.6.5
+PSEdition: Core
+**********************
+Transcript started, output file is C:\ProgramData\winget-app-setup\logs\install-20261005-080000.log
+Logging this run to: C:\ProgramData\winget-app-setup\logs\install-20261005-080000.log
+Installer build: 1.0.0+5ea1f00d
+
+Pre-flight System Checks:
+[OK] OS Version: Windows Server 2025 Datacenter
+[WARN] Disk Space: 24.2 GB free on C: (50 GB recommended)
+[OK] Network: cdn.winget.microsoft.com reachable (HTTP 404)
+
+Disk space is below the 50 GB recommendation. Continuing anyway.
+Starting...
+Successfully imported Microsoft.WinGet.Client module
+Winget is available (v1.26.510).
+Installing the following Apps:
+7zip.7zip
+GlavSoft.TightVNC
+Adobe.Acrobat.Reader.64-bit
+Google.Chrome
+Google.GoogleDrive
+Git.Git
+Klocman.BulkCrapUninstaller
+Dell.CommandUpdate.Universal
+Microsoft.PowerShell
+Microsoft.WindowsTerminal
+Failed to install: 7zip.7zip (winget could not be launched for the pre-install check; launch error: The file cannot be accessed by the system).
+winget could not be launched for that app. Checking whether winget can still be started...
+winget is not usable yet (winget could not be started: The file cannot be accessed by the system). Checking again in 10s (check 2 of 2)...
+winget cannot be launched on this machine (winget could not be started: The file cannot be accessed by the system). The remaining apps are marked failed without an install attempt and are not retried. Restart the machine and re-run the installer; if it persists, attach this transcript to a GitHub issue.
+Failed to install: GlavSoft.TightVNC (not attempted: winget cannot be launched on this machine (see above)).
+Failed to install: Adobe.Acrobat.Reader.64-bit (not attempted: winget cannot be launched on this machine (see above)).
+Failed to install: Google.Chrome (not attempted: winget cannot be launched on this machine (see above)).
+Failed to install: Google.GoogleDrive (not attempted: winget cannot be launched on this machine (see above)).
+Failed to install: Git.Git (not attempted: winget cannot be launched on this machine (see above)).
+Failed to install: Klocman.BulkCrapUninstaller (not attempted: winget cannot be launched on this machine (see above)).
+Skipping: Dell.CommandUpdate.Universal (not applicable: Dell hardware only)
+Failed to install: Microsoft.PowerShell (not attempted: winget cannot be launched on this machine (see above)).
+Failed to install: Microsoft.WindowsTerminal (not attempted: winget cannot be launched on this machine (see above)).
+Skipping the retry pass: winget cannot be launched on this machine (see above); retrying would not help.
+Setting up automatic app updates via Winget-AutoUpdate 2.12.0...
+Winget-AutoUpdate was NOT installed: Microsoft.WindowsAppRuntime.1.8 is missing (not installed for any user). Every WAU update run installs the newest winget, which needs that framework, so WAU would leave winget unusable here. Install the Windows App Runtime 1.8 (update App Installer from the Microsoft Store, or install Microsoft's Windows App SDK 1.8 runtime), then re-run this installer. On a newly set-up PC this usually clears once the Store has updated App Installer.
+Summary:
+
+Status  Apps
+------  ----
+Skipped Dell.CommandUpdate.Universal
+Failed  7zip.7zip, GlavSoft.TightVNC, Adobe.Acrobat.Reader.64-bit, Google.Chrome, Google.GoogleDrive, Git.Git, Klocman.BulkCrapUninstaller, Microsoft.PowerShell, Microsoft.WindowsTerminal
+
+App                         Reason
+---                         ------
+7zip.7zip                   winget could not be launched for the pre-install check; launch error: The file cannot be accessed by the system
+GlavSoft.TightVNC           not attempted: winget cannot be launched on this machine (see above)
+Adobe.Acrobat.Reader.64-bit not attempted: winget cannot be launched on this machine (see above)
+Google.Chrome               not attempted: winget cannot be launched on this machine (see above)
+Google.GoogleDrive          not attempted: winget cannot be launched on this machine (see above)
+Git.Git                     not attempted: winget cannot be launched on this machine (see above)
+Klocman.BulkCrapUninstaller not attempted: winget cannot be launched on this machine (see above)
+Microsoft.PowerShell        not attempted: winget cannot be launched on this machine (see above)
+Microsoft.WindowsTerminal   not attempted: winget cannot be launched on this machine (see above)
+Auto-updates: NOT CONFIGURED - Microsoft.WindowsAppRuntime.1.8 is missing, and Winget-AutoUpdate would leave winget unusable without it. Install the Windows App Runtime 1.8 (or let the Microsoft Store update App Installer), then re-run the installer.
+winget: NOT USABLE - winget could not be launched at the end of this run, so automatic updates and the next run of this installer will fail on this machine. Restart the machine and re-run the installer; if it persists, attach this transcript to a GitHub issue.
+Full transcript of this run: C:\ProgramData\winget-app-setup\logs\install-20261005-080000.log
+**********************
+PowerShell transcript end
+End time: 20261005080214
+**********************

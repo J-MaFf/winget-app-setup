@@ -22,6 +22,8 @@
     WingetDownload    one `winget download` (30 minutes).
     WingetListCheck   the per-app `winget list` check before and after an install (15 seconds, the
                       limit those checks have always had).
+    WingetVersion     the `winget --version` launch check (30 seconds; it does no network or
+                      source I/O).
     WingetList        any other `winget list` (2 minutes).
     WingetSourceList  `winget source list` (2 minutes).
     WingetSearch      the `winget search` source health check (2 minutes).
@@ -38,7 +40,7 @@
 function Get-ProcessTimeoutSeconds {
     param (
         [Parameter(Mandatory = $true)]
-        [ValidateSet('WingetInstall', 'WingetDownload', 'WingetListCheck', 'WingetList', 'WingetSourceList', 'WingetSearch', 'WingetSourceReset', 'MsiExec', 'WebDownload', 'WebDownloadStall')]
+        [ValidateSet('WingetInstall', 'WingetDownload', 'WingetListCheck', 'WingetVersion', 'WingetList', 'WingetSourceList', 'WingetSearch', 'WingetSourceReset', 'MsiExec', 'WebDownload', 'WebDownloadStall')]
         [string]$Operation
     )
 
@@ -46,6 +48,7 @@ function Get-ProcessTimeoutSeconds {
         'WingetInstall' { return 1800 }
         'WingetDownload' { return 1800 }
         'WingetListCheck' { return 15 }
+        'WingetVersion' { return 30 }
         'WingetList' { return 120 }
         'WingetSourceList' { return 120 }
         'WingetSearch' { return 120 }
@@ -682,8 +685,8 @@ function Get-InstallerLogDirectory {
 .SYNOPSIS
     Runs winget through Invoke-ExternalProcess, with its installer log in the run's logs folder.
 .DESCRIPTION
-    Resolves winget with Resolve-WingetExecutable unless the caller already has a path (a launch
-    retry past the alias), then runs it through Invoke-ExternalProcess with the caller's time
+    Resolves winget with Resolve-WingetExecutable unless the caller already has a path, then runs
+    it through Invoke-ExternalProcess with the caller's time
     limit. For the subcommands that run an installer (install, upgrade, uninstall, repair), winget
     is also passed `--log <file>` in the run's logs folder (Get-InstallerLogDirectory), named after
     the subcommand, the package id and the time, so the MSI or Inno log of a failed install is next

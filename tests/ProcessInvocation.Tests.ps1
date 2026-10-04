@@ -44,7 +44,7 @@ BeforeAll {
 
 Describe 'Get-ProcessTimeoutSeconds' {
     It 'Gives every operation a positive limit' {
-        foreach ($operation in 'WingetInstall', 'WingetDownload', 'WingetListCheck', 'WingetList', 'WingetSourceList', 'WingetSearch', 'WingetSourceReset', 'MsiExec', 'WebDownload', 'WebDownloadStall') {
+        foreach ($operation in 'WingetInstall', 'WingetDownload', 'WingetListCheck', 'WingetVersion', 'WingetList', 'WingetSourceList', 'WingetSearch', 'WingetSourceReset', 'MsiExec', 'WebDownload', 'WebDownloadStall') {
             Get-ProcessTimeoutSeconds -Operation $operation | Should -BeGreaterThan 0 -Because $operation
         }
     }
@@ -59,6 +59,10 @@ Describe 'Get-ProcessTimeoutSeconds' {
 
     It 'Keeps the 15-second limit the per-app list checks always had' {
         Get-ProcessTimeoutSeconds -Operation WingetListCheck | Should -Be 15
+    }
+
+    It 'Gives the winget --version launch check 30 seconds, as Wait-WingetLaunchable''s probe had' {
+        Get-ProcessTimeoutSeconds -Operation WingetVersion | Should -Be 30
     }
 }
 

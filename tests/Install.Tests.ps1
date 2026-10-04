@@ -111,11 +111,9 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
         Mock Set-WindowsTerminalDefaults { }
         Mock Install-WingetAutoUpdate { @{ Status = 'DryRun'; Version = '2.12.0' } }
         Mock Install-AppWithVerification { @{ Status = 'Installed'; InstallResult = $null; FailureReason = $null } }
-        # Healthy (no conflict) by default (issue #279); tests for the deadlock fail-fast override this.
-        Mock Get-ConflictingDesktopAppInstallerVersions { @() }
-        # The end-of-run winget health check launches real winget; healthy by default so a real
-        # (non -WhatIf) run in these tests never probes the machine.
-        Mock Wait-WingetLaunchable { $true }
+        # The end-of-run winget check and the circuit breaker launch real winget; healthy by default
+        # so a real (non -WhatIf) run in these tests never probes the machine.
+        Mock Test-WingetLaunchable { [pscustomobject]@{ Launchable = $true; Version = 'v1.12.350'; Reason = $null; Attempts = 1 } }
         # Never wait on (or query) the machine's real Winget-AutoUpdate tasks.
         Mock Wait-WauIdle { $true }
 
@@ -184,7 +182,7 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
             @($result).Count | Should -Be 1
             $result | Should -BeOfType [int]
             $result | Should -Be 0
-            Should -Invoke Wait-WingetLaunchable -Times 1 -Exactly
+            Should -Invoke Test-WingetLaunchable -Times 1 -Exactly
         }
 
         It 'Returns 1 when an app is still failed after the retry pass (issue #176)' {
@@ -211,7 +209,7 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
         }
 
         It 'Returns 2 and reports winget as NOT USABLE when the end-of-run probe fails and no app failed' {
-            Mock Wait-WingetLaunchable { $false }
+            Mock Test-WingetLaunchable { [pscustomobject]@{ Launchable = $false; Version = $null; Reason = 'winget could not be started: Access is denied'; Attempts = 5 } }
 
             $result = Invoke-WingetInstall -Apps @(@{ name = 'Contoso.AppOne' }) -NonInteractive
 
@@ -223,7 +221,7 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
 
         It 'Returns 1, not 2, when apps failed and the end-of-run probe failed too (failed apps take precedence)' {
             Mock Install-AppWithVerification { @{ Status = 'Failed'; InstallResult = @{ ExitCode = 1 }; FailureReason = 'VerifyNotFound' } }
-            Mock Wait-WingetLaunchable { $false }
+            Mock Test-WingetLaunchable { [pscustomobject]@{ Launchable = $false; Version = $null; Reason = 'winget could not be started: Access is denied'; Attempts = 5 } }
 
             Invoke-WingetInstall -Apps @(@{ name = 'Contoso.AppOne' }) -NonInteractive | Should -Be 1
         }
@@ -259,7 +257,7 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
 
         It 'Returns the dry run''s outcome too, without probing winget at the end' {
             Invoke-WingetInstall -Apps @(@{ name = 'Contoso.AppOne' }) -WhatIf -NonInteractive | Should -Be 0
-            Should -Invoke Wait-WingetLaunchable -Times 0 -Exactly
+            Should -Invoke Test-WingetLaunchable -Times 0 -Exactly
         }
 
         It 'Records the decided exit code before the final prompt, so Ctrl+C there keeps it' {
@@ -544,27 +542,20 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
                 @{ Status = 'Installed'; InstallResult = @{ ExitCode = 0 }; FailureReason = $null }
             }
             Mock Install-WingetAutoUpdate { $script:callOrder.Add('wau'); @{ Status = 'Configured'; Version = '2.12.0' } }
-            Mock Wait-WingetLaunchable { $script:callOrder.Add('probe'); $true }
+            Mock Test-WingetLaunchable { $script:callOrder.Add('probe'); [pscustomobject]@{ Launchable = $true; Version = 'v1.12.350'; Reason = $null; Attempts = 1 } }
         }
 
         It 'Sets up WAU only after the retry pass, then probes winget once with a short budget' {
             # WAU used to be installed (with RUN_WAU=YES) before the retry pass, so its immediate
             # SYSTEM run re-provisioned App Installer while the retry pass was still using winget
-            # (issues #279/#283/#284). Nothing may touch winget after WAU is set up except the probe.
+            # (issues #279/#283/#284). Nothing may touch winget after WAU is set up except the probe:
+            # up to five checks 15 seconds apart (about a minute, as before).
             Invoke-WingetInstall -Apps @(@{ name = 'Contoso.AppOne' }) -NonInteractive
 
             $script:callOrder | Should -Be @('app:Contoso.AppOne', 'app:Contoso.AppOne', 'wau', 'probe')
-            Should -Invoke Wait-WingetLaunchable -Times 1 -Exactly -ParameterFilter {
-                $TimeoutSeconds -eq 60 -and $RequiredConsecutiveSuccesses -eq 1
+            Should -Invoke Test-WingetLaunchable -Times 1 -Exactly -ParameterFilter {
+                $Attempts -eq 5 -and $RetryDelaySeconds -eq 15
             }
-        }
-
-        It 'Does not wait out a WAU run after installing WAU (no post-install wait window)' {
-            # The old post-WAU wait (up to 6 minutes, two consecutive probes) existed only to
-            # survive the immediate WAU run; the end-of-run probe is the only call left.
-            Invoke-WingetInstall -Apps @(@{ name = 'Contoso.AppOne' }) -NonInteractive
-
-            Should -Invoke Wait-WingetLaunchable -Times 0 -Exactly -ParameterFilter { $TimeoutSeconds -ne 60 }
         }
 
         It 'Skips the end-of-run probe in a dry run' {
@@ -574,7 +565,7 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
 
             Invoke-WingetInstall -Apps @(@{ name = 'Contoso.AppOne' }) -WhatIf -NonInteractive
 
-            Should -Invoke Wait-WingetLaunchable -Times 0 -Exactly
+            Should -Invoke Test-WingetLaunchable -Times 0 -Exactly
         }
 
         It 'Still reaches the retry pass, WAU setup and the summary when Windows Terminal configuration throws' {
@@ -598,7 +589,7 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
         }
 
         It 'Treats a throwing end-of-run probe as unknown, not as a broken winget' {
-            Mock Wait-WingetLaunchable { throw 'boom from the probe' }
+            Mock Test-WingetLaunchable { throw 'boom from the probe' }
 
             Invoke-WingetInstall -Apps @(@{ name = 'Contoso.AppOne' }) -NonInteractive | Should -Be 0
 
@@ -640,36 +631,103 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
         }
     }
 
-    Context 'Deadlocked DesktopAppInstaller versions (issue #279)' {
-        It 'Runs the normal per-app pipeline when no conflict is present' {
-            Mock Get-ConflictingDesktopAppInstallerVersions { @() }
-
-            Invoke-WingetInstall -Apps @(@{ name = 'Contoso.AppOne' }) -WhatIf -NonInteractive
-
-            Should -Invoke Install-AppWithVerification -Times 1 -Exactly
+    # Review findings P2-8 and P2-10. The signature-specific deadlock gate (two DesktopAppInstaller
+    # versions in the current user's AppX view) never fired on the real wedge; this generic breaker
+    # replaced it. Install-AppWithVerification is mocked here; the Describe 'Wedged winget: the run
+    # fails fast' below drives the real pipeline.
+    Context 'Circuit breaker: winget cannot be launched' {
+        BeforeEach {
+            $script:apps = @(@{ name = 'Contoso.AppOne' }, @{ name = 'Contoso.AppTwo' }, @{ name = 'Contoso.AppThree' })
+            $script:appCalls = [System.Collections.Generic.List[string]]::new()
+            # AppOne cannot launch winget for its pre-check; the others would install.
+            Mock Install-AppWithVerification {
+                $script:appCalls.Add("$($App.name):$([bool]$WingetNotLaunchable)")
+                if ($WingetNotLaunchable) {
+                    return @{ Status = 'Failed'; InstallResult = $null; FailureReason = 'WingetNotLaunchable'; LaunchError = $null }
+                }
+                if ($App.name -eq 'Contoso.AppOne') {
+                    return @{ Status = 'Failed'; InstallResult = $null; FailureReason = 'PreCheckLaunchFailed'; LaunchError = 'Access is denied.' }
+                }
+                @{ Status = 'Installed'; InstallResult = @{ ExitCode = 0 }; FailureReason = $null }
+            }
+            $script:notLaunchable = [pscustomobject]@{ Launchable = $false; Version = $null; Reason = 'winget could not be started: Access is denied'; Attempts = 1 }
         }
 
-        It 'Marks every app failed without attempting an install when a version conflict is present upfront' {
-            Mock Get-ConflictingDesktopAppInstallerVersions { @('1.26.510.0', '1.29.290.0') }
+        It 'Fails the remaining apps without running winget and skips the retry pass when winget still cannot be started' {
+            Mock Test-WingetLaunchable { $script:notLaunchable }
 
-            $result = Invoke-WingetInstall -Apps @(@{ name = 'Contoso.AppOne' }, @{ name = 'Contoso.AppTwo' }) -NonInteractive
+            $result = Invoke-WingetInstall -Apps $script:apps -NonInteractive
 
             $result | Should -Be 1
-            Should -Invoke Install-AppWithVerification -Times 0 -Exactly
+            # One breaker check (two tries, 10 s apart) right after AppOne, then one end-of-run check.
+            Should -Invoke Test-WingetLaunchable -Times 1 -Exactly -ParameterFilter { $Attempts -eq 2 -and $RetryDelaySeconds -eq 10 }
+            Should -Invoke Test-WingetLaunchable -Times 1 -Exactly -ParameterFilter { $Attempts -eq 1 }
+            Should -Invoke Test-WingetLaunchable -Times 2 -Exactly
+            # The rest went through the pipeline only to be failed without winget (so a
+            # not-applicable app is still skipped), and nothing ran a second time.
+            $script:appCalls | Should -Be @('Contoso.AppOne:False', 'Contoso.AppTwo:True', 'Contoso.AppThree:True')
+            $script:errorMessages | Should -Contain 'winget cannot be launched on this machine (winget could not be started: Access is denied). The remaining apps are marked failed without an install attempt and are not retried. Restart the machine and re-run the installer; if it persists, attach this transcript to a GitHub issue.'
+            $script:warningMessages | Should -Contain 'Skipping the retry pass: winget cannot be launched on this machine (see above); retrying would not help.'
+            $script:infoMessages | Should -Not -Contain 'Retrying failed installations (1 final attempt)...'
+
             $failedRows = @($script:capturedTables['Failed Installations'])
-            $failedRows.Count | Should -Be 2
-            $failedRows[0][0] | Should -Be 'Contoso.AppOne'
-            $failedRows[0][1] | Should -Be 'winget deadlocked between conflicting DesktopAppInstaller versions (1.26.510.0, 1.29.290.0); see issue #279'
+            $failedRows.Count | Should -Be 3
+            $failedRows[0][1] | Should -Be 'winget could not be launched for the pre-install check; launch error: Access is denied'
+            $failedRows[1][1] | Should -Be 'not attempted: winget cannot be launched on this machine (see above)'
+            $failedRows[2][1] | Should -Be 'not attempted: winget cannot be launched on this machine (see above)'
         }
 
-        It 'Skips the retry pass when the conflict was detected upfront' {
-            Mock Get-ConflictingDesktopAppInstallerVersions { @('1.26.510.0', '1.29.290.0') }
+        It 'Carries on with the next app, and retries the failed one, when winget starts again' {
+            $result = Invoke-WingetInstall -Apps $script:apps -NonInteractive
 
-            Invoke-WingetInstall -Apps @(@{ name = 'Contoso.AppOne' }) -NonInteractive | Should -Be 1
+            # The breaker check passed, so AppTwo and AppThree ran normally; AppOne got its retry.
+            $script:appCalls | Should -Be @('Contoso.AppOne:False', 'Contoso.AppTwo:False', 'Contoso.AppThree:False', 'Contoso.AppOne:False')
+            $script:infoMessages | Should -Contain 'Retrying failed installations (1 final attempt)...'
+            ($script:infoMessages -join "`n") | Should -Match 'winget starts again \(v1\.12\.350\); carrying on with the next app\.'
+            # AppOne failed again in the retry pass, so the breaker checked again: 2 checks + the
+            # end-of-run one.
+            Should -Invoke Test-WingetLaunchable -Times 3 -Exactly
+            $result | Should -Be 1
+        }
 
-            ($script:warningMessages -join "`n") | Should -Match 'Skipping the retry pass'
-            $script:infoMessages | Should -Not -Contain 'Retrying failed installations (1 final attempt)...'
-            Should -Invoke Install-AppWithVerification -Times 0 -Exactly
+        It 'Does not check winget after a failure that is not about launching it' {
+            Mock Install-AppWithVerification { @{ Status = 'Failed'; InstallResult = @{ ExitCode = 1 }; FailureReason = 'VerifyNotFound' } }
+
+            Invoke-WingetInstall -Apps $script:apps -NonInteractive | Should -Be 1
+
+            # Only the end-of-run check.
+            Should -Invoke Test-WingetLaunchable -Times 1 -Exactly
+            Should -Invoke Test-WingetLaunchable -Times 1 -Exactly -ParameterFilter { $Attempts -eq 5 }
+        }
+
+        It 'Trips in the retry pass too, failing the rest of the retries without running winget' {
+            # Every app fails its first pass for an ordinary reason; in the retry pass AppOne cannot
+            # launch winget, and winget then stays down.
+            $script:pass = @{}
+            Mock Install-AppWithVerification {
+                $script:appCalls.Add("$($App.name):$([bool]$WingetNotLaunchable)")
+                $script:pass[$App.name] = 1 + [int]$script:pass[$App.name]
+                if ($WingetNotLaunchable) {
+                    return @{ Status = 'Failed'; InstallResult = $null; FailureReason = 'WingetNotLaunchable'; LaunchError = $null }
+                }
+                if ($script:pass[$App.name] -eq 2 -and $App.name -eq 'Contoso.AppOne') {
+                    return @{ Status = 'Failed'; InstallResult = @{ LaunchErrorExhausted = $true; LaunchAttempts = 5 }; FailureReason = 'InstallLaunchFailed'; LaunchError = 'The file cannot be accessed by the system.' }
+                }
+                @{ Status = 'Failed'; InstallResult = @{ ExitCode = 1 }; FailureReason = 'VerifyNotFound' }
+            }
+            Mock Test-WingetLaunchable { $script:notLaunchable }
+
+            Invoke-WingetInstall -Apps $script:apps -NonInteractive | Should -Be 1
+
+            $script:appCalls | Should -Be @('Contoso.AppOne:False', 'Contoso.AppTwo:False', 'Contoso.AppThree:False', 'Contoso.AppOne:False', 'Contoso.AppTwo:True', 'Contoso.AppThree:True')
+            ($script:errorMessages -join "`n") | Should -Match 'Retry failed: Contoso\.AppTwo \(not attempted: winget cannot be launched on this machine \(see above\)\)\.'
+            ($script:errorMessages -join "`n") | Should -Match 'Retry failed: Contoso\.AppOne \(winget could not be launched to install it; 5 failed launches, launch error: The file cannot be accessed by the system\)\.'
+        }
+
+        It 'Never checks winget in a dry run' {
+            Invoke-WingetInstall -Apps $script:apps -WhatIf -NonInteractive | Out-Null
+
+            Should -Invoke Test-WingetLaunchable -Times 0 -Exactly
         }
     }
 
@@ -1023,6 +1081,21 @@ Describe 'Install-AppWithVerification (shared install-and-verify pipeline, issue
 
             $result.Status | Should -Be 'Installed'
         }
+
+        It 'Maps a self-verifying installer''s <Case> to <Reason>, like every other app (review finding P3-8)' -ForEach @(
+            @{ Case = 'install that could not launch winget'; Result = @{ ExitCode = $null; Installed = $false; LaunchErrorExhausted = $true; LaunchError = 'Access is denied.' }; Reason = 'InstallLaunchFailed'; LaunchError = 'Access is denied.' }
+            @{ Case = 'check that could not launch winget'; Result = @{ ExitCode = 0; Installed = $false; VerifyLaunchFailed = $true; VerifyLaunchError = 'The file cannot be accessed by the system.' }; Reason = 'VerifyLaunchFailed'; LaunchError = 'The file cannot be accessed by the system.' }
+            @{ Case = 'check that timed out'; Result = @{ ExitCode = 0; Installed = $false; VerifyTimedOut = $true }; Reason = 'VerifyTimeout'; LaunchError = $null }
+        ) {
+            $script:customResult = $Result
+            $app = @{ name = 'Microsoft.PowerShell'; install = { $script:customResult } }
+
+            $result = Install-AppWithVerification -App $app
+
+            $result.Status | Should -Be 'Failed'
+            $result.FailureReason | Should -Be $Reason
+            $result.LaunchError | Should -Be $LaunchError
+        }
     }
 
     Context 'Dry run (-WhatIf)' {
@@ -1055,6 +1128,99 @@ Describe 'Install-AppWithVerification (shared install-and-verify pipeline, issue
 
             $result.Status | Should -Be 'Installed'
         }
+    }
+}
+
+# Review finding P2-9: a `winget list` that could not start winget read as 'not installed', so
+# the pipeline installed apps that were already there and reported them as 'package not found
+# after install'. Only the winget process is mocked: the real Test-WingetPackageInstalled and
+# Install-WingetPackage run.
+Describe 'Install-AppWithVerification when winget cannot be launched (review finding P2-9)' {
+    BeforeEach {
+        Mock Write-Host { }
+        Mock Write-WarningMessage { }
+        Mock Write-Info { }
+        Mock Start-Sleep { }
+        Mock Test-EffectiveNonInteractive { $false }
+        # Never read the machine's App Installer packages (the removed bypass path did).
+        Mock Get-AppxPackage { }
+        $script:launchFailure = New-TestProcessResult -LaunchFailed -LaunchErrorCode 1920 -LaunchError 'The file cannot be accessed by the system.'
+    }
+
+    It 'Fails the app as PreCheckLaunchFailed without trying to install it' {
+        Mock Invoke-WingetProcess { $script:launchFailure }
+
+        $result = Install-AppWithVerification -App @{ name = '7zip.7zip' }
+
+        $result.Status | Should -Be 'Failed'
+        $result.FailureReason | Should -Be 'PreCheckLaunchFailed'
+        $result.LaunchError | Should -Be 'The file cannot be accessed by the system.'
+        $result.InstallResult | Should -Be $null
+        Should -Invoke Invoke-WingetProcess -Times 0 -Exactly -ParameterFilter { $ArgumentList[0] -eq 'install' }
+        Should -Invoke Invoke-WingetProcess -Times 1 -Exactly
+        Format-InstallFailureReason -FailureReason $result.FailureReason -InstallResult $result.InstallResult -LaunchError $result.LaunchError |
+            Should -Be 'winget could not be launched for the pre-install check; launch error: The file cannot be accessed by the system'
+    }
+
+    It 'Says that the post-install check could not launch winget, not that the package was not found' {
+        $script:listCalls = 0
+        Mock Invoke-WingetProcess {
+            if ($ArgumentList[0] -eq 'install') {
+                return New-TestProcessResult -ExitCode 0
+            }
+            $script:listCalls++
+            if ($script:listCalls -eq 1) {
+                return New-TestProcessResult -ExitCode -1978335212 -Output @('No installed package found matching input criteria.')
+            }
+            $script:launchFailure
+        }
+
+        $result = Install-AppWithVerification -App @{ name = '7zip.7zip' }
+
+        $result.Status | Should -Be 'Failed'
+        $result.FailureReason | Should -Be 'VerifyLaunchFailed'
+        $result.LaunchError | Should -Be 'The file cannot be accessed by the system.'
+        $result.InstallResult.ExitCode | Should -Be 0
+        Format-InstallFailureReason -FailureReason $result.FailureReason -InstallResult $result.InstallResult -LaunchError $result.LaunchError |
+            Should -Match '^winget could not be launched to verify the install; winget exit 0x00000000, 1 attempt'
+    }
+
+    It 'Fails the app as InstallLaunchFailed, without a post-install check, when winget could not be launched for the install' {
+        Mock Invoke-WingetProcess {
+            if ($ArgumentList[0] -eq 'install') {
+                return New-TestProcessResult -LaunchFailed -LaunchErrorCode 5 -LaunchError 'Access is denied.'
+            }
+            New-TestProcessResult -ExitCode -1978335212 -Output @('No installed package found matching input criteria.')
+        }
+
+        $result = Install-AppWithVerification -App @{ name = '7zip.7zip' }
+
+        $result.Status | Should -Be 'Failed'
+        $result.FailureReason | Should -Be 'InstallLaunchFailed'
+        $result.LaunchError | Should -Be 'Access is denied.'
+        Should -Invoke Invoke-WingetProcess -Times 1 -Exactly -ParameterFilter { $ArgumentList[0] -eq 'list' }
+    }
+
+    It 'Runs no winget at all once the circuit breaker tripped, but still skips a not-applicable app' {
+        Mock Invoke-WingetProcess { throw 'winget must not run once the breaker tripped' }
+
+        $failed = Install-AppWithVerification -App @{ name = '7zip.7zip' } -WingetNotLaunchable
+        $skipped = Install-AppWithVerification -App @{ name = 'Dell.CommandUpdate.Universal'; condition = { $false } } -WingetNotLaunchable
+
+        $failed.Status | Should -Be 'Failed'
+        $failed.FailureReason | Should -Be 'WingetNotLaunchable'
+        $skipped.Status | Should -Be 'Skipped'
+        $skipped.SkipReason | Should -Be 'NotApplicable'
+        Should -Invoke Invoke-WingetProcess -Times 0 -Exactly
+    }
+
+    It 'Lists the app as one a real run would install in a dry run, where the run already said winget is unavailable' {
+        Mock Invoke-WingetProcess { $script:launchFailure }
+
+        $result = Install-AppWithVerification -App @{ name = '7zip.7zip' } -WhatIf
+
+        $result.Status | Should -Be 'Installed'
+        $result.FailureReason | Should -Be $null
     }
 }
 
@@ -1113,9 +1279,7 @@ Describe 'Not-applicable gating end-to-end (issue #217)' {
         Mock Set-WindowsTerminalDefaults { }
         Mock Install-WingetAutoUpdate { @{ Status = 'DryRun'; Version = '2.12.0' } }
         Mock Install-WingetPackage { @{ ExitCode = 0; Attempts = 1; SessionErrorExhausted = $false; MachineScopeFellBack = $false } }
-        Mock Test-WingetPackageInstalled { @{ Installed = $false; TimedOut = $false; ExitCode = 0 } }
-        # Unmocked, this reads the real machine's AppX packages (issue #279 conflict check).
-        Mock Get-ConflictingDesktopAppInstallerVersions { @() }
+        Mock Test-WingetPackageInstalled { @{ Installed = $false; TimedOut = $false; LaunchFailed = $false; LaunchError = $null; ExitCode = 0 } }
 
         $script:capturedRows = $null
         Mock Write-Table { $script:capturedRows = $Rows }
@@ -1142,6 +1306,116 @@ Describe 'Not-applicable gating end-to-end (issue #217)' {
         $installedRow = @($script:capturedRows | Where-Object { $_[0] -eq 'Installed' })[0]
         $installedRow[1] | Should -Match 'Contoso\.NormalApp'
         @($script:capturedRows | Where-Object { $_[0] -eq 'Failed' }).Count | Should -Be 0
+    }
+}
+
+# Review findings P2-8, P2-9 and P2-10: with winget.exe unable to start (E2E run 36384683838, second
+# pass, every app already installed), each app spent 9 launches and 75 seconds of backoff, twice:
+# about 24 minutes, then every app reported as 'package not found after install'. Here the real
+# per-app pipeline runs (Install-AppWithVerification, Test-WingetPackageInstalled,
+# Install-WingetPackage, Install-PowerShellLatest, the circuit breaker and Test-WingetLaunchable);
+# only the winget process and the setup steps around the installs are mocked.
+Describe 'Wedged winget: the run fails fast (review findings P2-8, P2-9, P2-10)' {
+    BeforeEach {
+        Mock Write-Host { }
+        Mock Test-IsAdmin { $true }
+        Mock Test-IsRunningLocally { $true }
+        Mock Test-AndInstallWingetModule { $true }
+        Mock Import-Module { }
+        Mock Wait-WauIdle { $true }
+        Mock Test-AndInstallWinget { $true }
+        Mock Initialize-WingetSourcesForUser { $true }
+        Mock Test-AndInstallGraphicalTools { $true }
+        Mock Test-WingetSources { $true }
+        Mock Remove-LegacyScheduledUpdates { $true }
+        Mock Set-WindowsTerminalDefaults { }
+        Mock Install-WingetAutoUpdate { [pscustomobject]@{ Status = 'FrameworkMissing'; Version = '2.12.0'; FrameworkMissing = $true } }
+        # Never read the machine's App Installer packages, and never start a real process: the
+        # removed deadlock detector and Wait-WingetLaunchable did both.
+        Mock Get-AppxPackage { }
+        Mock Start-Process { throw 'Access is denied.' }
+        $script:sleptSeconds = 0
+        Mock Start-Sleep { $script:sleptSeconds += $Seconds }
+
+        $script:capturedTables = @{}
+        Mock Write-Table { $script:capturedTables[$Title] = $Rows }
+        $script:errorMessages = @()
+        Mock Write-ErrorMessage { $script:errorMessages += $Message }
+        $script:warningMessages = @()
+        Mock Write-WarningMessage { $script:warningMessages += $Message }
+        $script:infoMessages = @()
+        Mock Write-Info { $script:infoMessages += $Message }
+
+        # The catalog's shape: eight apps, one not applicable here, PowerShell with its own installer.
+        $script:catalog = @(
+            @{ name = '7zip.7zip' }
+            @{ name = 'GlavSoft.TightVNC' }
+            @{ name = 'Google.Chrome' }
+            @{ name = 'Git.Git' }
+            @{ name = 'Klocman.BulkCrapUninstaller' }
+            @{ name = 'Dell.CommandUpdate.Universal'; condition = { $false }; conditionDescription = 'Dell hardware only' }
+            @{ name = 'Microsoft.PowerShell'; install = 'Install-PowerShellLatest' }
+            @{ name = 'Microsoft.WindowsTerminal' }
+        )
+    }
+
+    It 'Stops after one app and one check when winget cannot start (<Case>)' -ForEach @(
+        @{ Case = 'a lock that could clear, 1920'; Code = 1920; Message = 'The file cannot be accessed by the system.'; MaxLaunches = 4; MaxSleep = 10 }
+        @{ Case = 'access denied, 5'; Code = 5; Message = 'Access is denied.'; MaxLaunches = 3; MaxSleep = 0 }
+    ) {
+        $script:launchCode = $Code
+        $script:launchMessage = $Message
+        $script:launches = 0
+        Mock Invoke-WingetProcess {
+            $script:launches++
+            New-TestProcessResult -LaunchFailed -LaunchErrorCode $script:launchCode -LaunchError $script:launchMessage
+        }
+
+        $result = Invoke-WingetInstall -Apps $script:catalog -NonInteractive
+
+        $result | Should -Be 1
+        # Before: 9 launches and 75 seconds of backoff per app, in both passes (144 launches and
+        # 1200 seconds for these 8 apps). Now: the first app's pre-check, the breaker's check and
+        # the end-of-run check.
+        $script:launches | Should -BeLessOrEqual $MaxLaunches
+        $script:sleptSeconds | Should -BeLessOrEqual $MaxSleep
+        Should -Invoke Invoke-WingetProcess -Times 0 -Exactly -ParameterFilter { $ArgumentList[0] -eq 'install' }
+        $script:infoMessages | Should -Not -Contain 'Retrying failed installations (1 final attempt)...'
+
+        # Every applicable app failed with a reason that says winget could not be launched; none
+        # says 'package not found after install'. The not-applicable app is still skipped.
+        $failedRows = @($script:capturedTables['Failed Installations'])
+        $failedRows.Count | Should -Be 7
+        $failedRows[0][0] | Should -Be '7zip.7zip'
+        $failedRows[0][1] | Should -Be ('winget could not be launched for the pre-install check; launch error: {0}' -f $Message.TrimEnd('.'))
+        @($failedRows | Select-Object -Skip 1 | ForEach-Object { $_[1] } | Sort-Object -Unique) | Should -Be @('not attempted: winget cannot be launched on this machine (see above)')
+        @($failedRows | Where-Object { $_[1] -match 'not found after install' }).Count | Should -Be 0
+        $script:warningMessages | Should -Contain 'Skipping: Dell.CommandUpdate.Universal (not applicable: Dell hardware only)'
+        ($script:errorMessages -join "`n") | Should -Match '(?m)^winget cannot be launched on this machine \(winget could not be started: '
+        ($script:errorMessages -join "`n") | Should -Match 'winget: NOT USABLE'
+    }
+
+    It 'Carries on normally when only one launch failed and winget starts again' {
+        $script:launches = 0
+        Mock Invoke-WingetProcess {
+            $script:launches++
+            if ($script:launches -eq 1) {
+                return New-TestProcessResult -LaunchFailed -LaunchErrorCode 1920 -LaunchError 'The file cannot be accessed by the system.'
+            }
+            if ($ArgumentList[0] -eq '--version') {
+                return New-TestProcessResult -ExitCode 0 -Output @('v1.12.350')
+            }
+            # Every app is installed already.
+            New-TestProcessResult -ExitCode 0 -Output @("$($ArgumentList[3])  1.0  winget")
+        }
+
+        $result = Invoke-WingetInstall -Apps $script:catalog -NonInteractive
+
+        # 7zip failed its first pre-check, the breaker found winget working, the other apps were
+        # skipped as installed, and 7zip's retry found it installed too.
+        $result | Should -Be 0
+        ($script:infoMessages -join "`n") | Should -Match 'winget starts again'
+        $script:capturedTables.ContainsKey('Failed Installations') | Should -BeFalse
     }
 }
 
@@ -1184,8 +1458,10 @@ Describe 'Dry run leaves the machine unchanged (P2-16)' {
         Mock Test-Path { $true } -ParameterFilter { "$Path" -like '*winget-app-setup' }
         # Every winget or msiexec process goes through Invoke-ExternalProcess (review findings
         # P2-5, P2-6). The per-app `winget list` check exits 0 without listing anything (not
-        # installed). Start-Process stays mocked so any other process start is visible.
+        # installed), and `winget --version` cannot start (no winget for this account). Start-Process
+        # stays mocked so any other process start is visible.
         Mock Invoke-ExternalProcess { New-TestProcessResult -ExitCode 0 }
+        Mock Invoke-ExternalProcess { New-TestProcessResult -LaunchFailed -LaunchErrorCode 2 -LaunchError "'winget' was not found on PATH." } -ParameterFilter { $ArgumentList[0] -eq '--version' }
         Mock Start-Process { }
 
         # Commands that change the machine: none of these may run in a dry run.
@@ -1235,10 +1511,10 @@ Describe 'Dry run leaves the machine unchanged (P2-16)' {
         Should -Invoke Set-ScheduledTask -Times 0 -Exactly
         Should -Invoke Restart-WithElevation -Times 0 -Exactly
         Should -Invoke winget -Times 0 -Exactly
-        # The only process a dry run starts is the per-app `winget list` check: no installer, no
-        # msiexec, no `winget source update/reset`.
+        # The only processes a dry run starts are the read-only `winget --version` launch check and
+        # the per-app `winget list` check: no installer, no msiexec, no `winget source update/reset`.
         Should -Invoke Start-Process -Times 0 -Exactly
-        Should -Invoke Invoke-ExternalProcess -Times 0 -Exactly -ParameterFilter { $FilePath -notmatch 'winget' -or $ArgumentList[0] -ne 'list' }
+        Should -Invoke Invoke-ExternalProcess -Times 0 -Exactly -ParameterFilter { $FilePath -notmatch 'winget' -or $ArgumentList[0] -notin @('list', '--version') }
         Should -Invoke Invoke-ExternalProcess -Times 1 -Exactly -ParameterFilter { $ArgumentList[0] -eq 'list' -and $ArgumentList -contains 'Contoso.AppOne' }
 
         # The preview carried on to the summary and says what a real run would have done.
@@ -1247,7 +1523,7 @@ Describe 'Dry run leaves the machine unchanged (P2-16)' {
         Should -Invoke Write-Table -Times 1 -Exactly -ParameterFilter { $Title -eq 'Installation Summary' }
         $dryRunLines = ($script:infoMessages | Where-Object { $_ -match '^\[DRY-RUN\]' }) -join "`n"
         $dryRunLines | Should -Match 'Microsoft\.WinGet\.Client module not found\. A real run would install it'
-        $dryRunLines | Should -Match 'Winget is not available for this account\. A real run would bootstrap it'
+        $dryRunLines | Should -Match 'Winget is not available for this account \(winget could not be started: .winget. was not found on PATH\)\. A real run would bootstrap it'
         $dryRunLines | Should -Match 'Out-GridView is not available\. A real run would install Microsoft\.PowerShell\.GraphicalTools'
         $dryRunLines | Should -Match 'Skipping the winget source check: winget is not available for this account yet'
         $dryRunLines | Should -Match 'this preview cannot tell which apps are already installed'
@@ -1261,6 +1537,10 @@ Describe 'Dry run leaves the machine unchanged (P2-16)' {
         # The winget mock below scripts each winget command.
         Mock Invoke-WingetProcess { Invoke-TestWingetMock -ArgumentList $ArgumentList }
         Mock winget {
+            if ($args[0] -eq '--version') {
+                $global:LASTEXITCODE = 0
+                return 'v1.12.350'
+            }
             if ($args[0] -eq 'source' -and $args[1] -eq 'list') {
                 $global:LASTEXITCODE = 0
                 return 'winget      https://cdn.winget.microsoft.com/cache'
@@ -1274,8 +1554,8 @@ Describe 'Dry run leaves the machine unchanged (P2-16)' {
 
         $result = Invoke-WingetInstall -Apps @(@{ name = 'Contoso.AppOne' }) -WhatIf -NonInteractive
 
-        # Only the read-only health probe ran: `winget source list` and `winget search`.
-        Should -Invoke winget -Times 0 -Exactly -ParameterFilter { $args[0] -notin @('list', 'search') -and -not ($args[0] -eq 'source' -and $args[1] -eq 'list') }
+        # Only the read-only probes ran: `winget --version`, `winget source list` and `winget search`.
+        Should -Invoke winget -Times 0 -Exactly -ParameterFilter { $args[0] -notin @('--version', 'list', 'search') -and -not ($args[0] -eq 'source' -and $args[1] -eq 'list') }
         Should -Invoke winget -Times 1 -Exactly -ParameterFilter { $args[0] -eq 'search' }
         Should -Invoke Add-AppxPackage -Times 0 -Exactly
         Should -Invoke Repair-WinGetPackageManager -Times 0 -Exactly
@@ -1444,14 +1724,26 @@ Describe 'Format-InstallFailureReason (issue #189)' {
             $reason | Should -Be 'package not found after install; winget exit 0x8A150006, 1 attempt, machine-scope fallback: no, installer log: C:\ProgramData\winget-app-setup\logs\winget-install-Test.App-20261004-101500.log'
         }
 
-        It 'Calls out an exhausted transient launch failure without a fabricated exit code (issue #253)' {
-            $installResult = @{ ExitCode = $null; Attempts = 3; SessionErrorExhausted = $false; MachineScopeFellBack = $false; LaunchErrorExhausted = $true }
+        It 'Says that winget could not be launched for the install, with its failed launches and error, and no fabricated exit code (issue #253)' {
+            $installResult = @{ ExitCode = $null; Attempts = 0; SessionErrorExhausted = $false; MachineScopeFellBack = $false; LaunchErrorExhausted = $true; LaunchAttempts = 5; LaunchError = 'The file cannot be accessed by the system.' }
 
-            $reason = Format-InstallFailureReason -FailureReason 'VerifyNotFound' -InstallResult $installResult
+            $reason = Format-InstallFailureReason -FailureReason 'InstallLaunchFailed' -InstallResult $installResult -LaunchError $installResult.LaunchError
 
-            $reason | Should -Not -Match 'winget exit'
-            $reason | Should -Match '3 attempts'
-            $reason | Should -Match 'winget executable was transiently inaccessible through every retry'
+            $reason | Should -Be 'winget could not be launched to install it; machine-scope fallback: no, 5 failed launches, launch error: The file cannot be accessed by the system'
+        }
+    }
+
+    Context 'When winget could not be launched (review findings P2-8, P2-9)' {
+        It 'Names the step <Reason> could not launch winget for, and the error' -ForEach @(
+            @{ Reason = 'PreCheckLaunchFailed'; Expected = 'winget could not be launched for the pre-install check; launch error: Access is denied' }
+            @{ Reason = 'VerifyLaunchFailed'; Expected = 'winget could not be launched to verify the install; launch error: Access is denied' }
+        ) {
+            Format-InstallFailureReason -FailureReason $Reason -InstallResult $null -LaunchError 'Access is denied.' | Should -Be $Expected
+        }
+
+        It 'Gives every app the circuit breaker failed one short reason' {
+            Format-InstallFailureReason -FailureReason 'WingetNotLaunchable' -InstallResult $null |
+                Should -Be 'not attempted: winget cannot be launched on this machine (see above)'
         }
     }
 

@@ -1,8 +1,9 @@
 # E2EAssertions.Tests.ps1
 # Tests for e2e/TranscriptAssertions.ps1, the transcript half of e2e/Assert-Install.ps1, against the
 # sample transcripts in tests/fixtures/e2e (review finding P3-39). The fixtures follow what the
-# installer writes: a first and a second pass, a run with timeouts in both passes, the #279 bulk
-# failure, an aborted run, and the two Windows PowerShell 5.1 bootstrap transcripts of a 5.1 leg.
+# installer writes: a first and a second pass, a run with timeouts in both passes, a run whose
+# circuit breaker found that winget cannot be launched, an aborted run, and the two Windows
+# PowerShell 5.1 bootstrap transcripts of a 5.1 leg.
 
 BeforeAll {
     . (Join-Path $PSScriptRoot 'TestHelpers.ps1')
@@ -96,14 +97,15 @@ Describe 'ConvertFrom-InstallTranscript' {
         $transcript.RetryFailed | Should -Be @('7zip.7zip', 'Git.Git')
     }
 
-    It 'Reads the #279 bulk failure, which logs no per-app line, from the summary' {
-        $transcript = ConvertFrom-InstallTranscript -Content (Get-Fixture -Name 'deadlock')
+    It 'Reads a run whose circuit breaker found that winget cannot be launched' {
+        $transcript = ConvertFrom-InstallTranscript -Content (Get-Fixture -Name 'winget-not-launchable')
 
-        $transcript.WingetDeadlocked | Should -BeTrue
-        $transcript.FirstPassFailed | Should -BeNullOrEmpty
+        $transcript.WingetNotLaunchable | Should -BeTrue
+        $transcript.FirstPassFailed.Count | Should -Be 9
         $transcript.RetryFailed | Should -BeNullOrEmpty
-        $transcript.FinalFailed.Count | Should -Be 10
-        $transcript.FinalFailed | Should -Contain 'Dell.CommandUpdate.Universal'
+        $transcript.FinalFailed.Count | Should -Be 9
+        $transcript.FinalFailed | Should -Not -Contain 'Dell.CommandUpdate.Universal'
+        $transcript.NotApplicable.Keys | Should -Contain 'Dell.CommandUpdate.Universal'
         $transcript.WingetNotUsable | Should -BeTrue
     }
 
@@ -195,15 +197,15 @@ Describe 'Test-InstallFailureContainment' {
         $contained.Detail | Should -Be 'failed apps all skip-listed: Google.GoogleDrive, Klocman.BulkCrapUninstaller; recovered on retry: Adobe.Acrobat.Reader.64-bit'
     }
 
-    It 'Fails the #279 bulk failure with an unrelated skip list and says why every app failed' {
-        $transcript = ConvertFrom-InstallTranscript -Content (Get-Fixture -Name 'deadlock')
+    It 'Fails a run where winget could not be launched with an unrelated skip list, and says why every app failed' {
+        $transcript = ConvertFrom-InstallTranscript -Content (Get-Fixture -Name 'winget-not-launchable')
 
         $verdict = Test-InstallFailureContainment -Transcript $transcript -SkipApps @('Google.GoogleDrive')
 
         $verdict.Passed | Should -BeFalse
         $verdict.Detail | Should -Match '^apps outside -SkipApps failed: 7zip\.7zip, '
         $verdict.Detail | Should -Not -Match 'Google\.GoogleDrive,'
-        $verdict.Detail | Should -Match 'deadlocked between App Installer versions.*issue #279'
+        $verdict.Detail | Should -Match 'winget could not be launched, so the remaining apps failed without an install attempt'
     }
 
     It 'Fails a transcript without a summary, whatever the skip list' {
@@ -322,7 +324,11 @@ Describe 'Get-TranscriptAssertionResult' {
     }
 
     It 'Fails a missing not-applicable skip line and an unexpected auto-update status' {
-        $logs = New-TestLogDirectory -Fixture @('deadlock')
+        $logs = New-TestLogDirectory -Fixture @('winget-not-launchable')
+        # The same run without its not-applicable skip line.
+        $log = Get-ChildItem -LiteralPath $logs -Filter '*.log' | Select-Object -First 1
+        $kept = @(Get-Content -LiteralPath $log.FullName | Where-Object { $_ -notmatch '^Skipping: Dell\.CommandUpdate\.Universal ' })
+        Set-Content -LiteralPath $log.FullName -Value $kept
 
         $rows = @(Get-TranscriptAssertionResult -LogDirectory $logs -NotApplicableApps $script:NotApplicable -ExpectedAutoUpdatesStatus 'Configured')
 
@@ -348,7 +354,7 @@ Describe 'Installer messages the transcript parser keys on' {
         @{ File = 'WingetAppSetup/Public/Install.ps1'; Text = 'Write-ErrorMessage "Retry failed: $appName ($failureReason)."' }
         @{ File = 'WingetAppSetup/Public/Install.ps1'; Text = 'Write-ErrorMessage "Retry failed: $appName. Error: $_"' }
         @{ File = 'WingetAppSetup/Public/Install.ps1'; Text = 'Write-Success "Retry succeeded: $appName"' }
-        @{ File = 'WingetAppSetup/Public/Install.ps1'; Text = 'Write-ErrorMessage "winget is deadlocked between ' }
+        @{ File = 'WingetAppSetup/Private/InstallVerification.ps1'; Text = 'Write-ErrorMessage "winget cannot be launched on this machine (' }
         @{ File = 'WingetAppSetup/Public/Install.ps1'; Text = "Write-Info 'Summary:'" }
         @{ File = 'WingetAppSetup/Public/Install.ps1'; Text = "`$headers = @('Status', 'Apps')" }
         @{ File = 'WingetAppSetup/Public/Install.ps1'; Text = "`$rows += , @('Installed', `$appList)" }

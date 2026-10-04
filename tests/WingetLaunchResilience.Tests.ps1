@@ -1,7 +1,7 @@
-# Tests for WingetAppSetup/Private/WingetLaunchResilience.ps1 (issues #258, #277): classification of
-# transient winget-launch failures, resolution of a concrete winget.exe that bypasses the per-user
-# app-execution alias while DesktopAppInstaller is mid-upgrade, and waiting out that window (used
-# as Invoke-WingetInstall's end-of-run winget health check).
+# Tests for WingetAppSetup/Private/WingetLaunchResilience.ps1 (issues #258, #277, review findings
+# P2-8, P3-7, P3-9): classification of transient winget-launch failures, the winget executable to
+# launch, and the bounded `winget --version` launch check (Test-WingetLaunchable) that
+# Test-AndInstallWinget, the circuit breaker and the end-of-run check use.
 
 BeforeAll {
     . (Join-Path $PSScriptRoot 'TestHelpers.ps1')
@@ -79,353 +79,153 @@ Describe 'Test-TransientWingetLaunchError' {
     }
 }
 
-Describe 'Get-ConflictingDesktopAppInstallerVersions (issue #279)' {
-    It 'Returns an empty array when exactly one version is registered (the healthy case)' {
-        Mock Get-AppxPackage { [pscustomobject]@{ Version = '1.26.510.0' } }
-
-        @(Get-ConflictingDesktopAppInstallerVersions).Count | Should -Be 0
-        Should -Invoke Get-AppxPackage -Times 1 -Exactly -ParameterFilter { $Name -eq 'Microsoft.DesktopAppInstaller' }
-    }
-
-    It 'Returns an empty array when no version is registered at all' {
-        Mock Get-AppxPackage { $null }
-
-        @(Get-ConflictingDesktopAppInstallerVersions).Count | Should -Be 0
-    }
-
-    It 'Returns an empty array when Get-AppxPackage throws (e.g. no Appx compatibility session)' {
-        Mock Get-AppxPackage { throw 'Operation is not supported on this platform.' }
-
-        @(Get-ConflictingDesktopAppInstallerVersions).Count | Should -Be 0
-    }
-
-    It 'Returns both distinct versions when two are simultaneously registered (the deadlock case)' {
-        Mock Get-AppxPackage {
-            @(
-                [pscustomobject]@{ Version = '1.26.510.0' }
-                [pscustomobject]@{ Version = '1.29.290.0' }
-            )
-        }
-
-        $result = @(Get-ConflictingDesktopAppInstallerVersions)
-
-        $result.Count | Should -Be 2
-        $result | Should -Contain '1.26.510.0'
-        $result | Should -Contain '1.29.290.0'
-    }
-
-    It 'De-duplicates when the same version appears more than once' {
-        Mock Get-AppxPackage {
-            @(
-                [pscustomobject]@{ Version = '1.26.510.0' }
-                [pscustomobject]@{ Version = '1.26.510.0' }
-            )
-        }
-
-        @(Get-ConflictingDesktopAppInstallerVersions).Count | Should -Be 0
-    }
-}
-
 Describe 'Resolve-WingetExecutable' {
-    It 'Returns the bare command name without -BypassAlias, and never queries the package database' {
-        Mock Get-AppxPackage { throw 'must not be called on the fast path' }
+    It 'Returns the bare command name, resolved on PATH, and never queries the package database (review finding P3-7)' {
+        Mock Get-AppxPackage { throw 'must not be called' }
 
         Resolve-WingetExecutable | Should -Be 'winget'
 
         Should -Invoke Get-AppxPackage -Times 0 -Exactly
     }
-
-    Context 'With -BypassAlias' {
-        BeforeEach {
-            # TestDrive paths, not 'C:\...' literals: Join-Path checks the drive exists, so off
-            # Windows a C: InstallLocation never produced a candidate path (wgt-gq8.5). Test-Path
-            # is mocked, so nothing touches the disk.
-            $script:windowsAppsRoot = Join-Path $TestDrive 'WindowsApps'
-        }
-
-        It 'Returns winget.exe under the registered DesktopAppInstaller package install location' {
-            $script:installLocation = Join-Path $script:windowsAppsRoot 'Microsoft.DesktopAppInstaller_1.26.0.0_x64__8wekyb3d8bbwe'
-            Mock Get-AppxPackage { [pscustomobject]@{ Version = '1.26.0.0'; InstallLocation = $script:installLocation } }
-            Mock Test-Path { $true }
-
-            Resolve-WingetExecutable -BypassAlias | Should -Be (Join-Path $script:installLocation 'winget.exe')
-
-            Should -Invoke Get-AppxPackage -Times 1 -Exactly -ParameterFilter { $Name -eq 'Microsoft.DesktopAppInstaller' }
-        }
-
-        It 'Prefers the newest registered version when several are visible mid-upgrade' {
-            Mock Get-AppxPackage {
-                @(
-                    [pscustomobject]@{ Version = '1.9.25200.0'; InstallLocation = (Join-Path $script:windowsAppsRoot 'DAI_old') }
-                    [pscustomobject]@{ Version = '1.26.0.0'; InstallLocation = (Join-Path $script:windowsAppsRoot 'DAI_new') }
-                )
-            }
-            Mock Test-Path { $true }
-
-            Resolve-WingetExecutable -BypassAlias | Should -Be (Join-Path (Join-Path $script:windowsAppsRoot 'DAI_new') 'winget.exe')
-        }
-
-        It 'Falls back to the alias when the package has no winget.exe on disk' {
-            Mock Get-AppxPackage { [pscustomobject]@{ Version = '1.26.0.0'; InstallLocation = (Join-Path $script:windowsAppsRoot 'DAI') } }
-            Mock Test-Path { $false }
-
-            Resolve-WingetExecutable -BypassAlias | Should -Be 'winget'
-        }
-
-        It 'Falls back to the alias when the package is not registered' {
-            Mock Get-AppxPackage { $null }
-
-            Resolve-WingetExecutable -BypassAlias | Should -Be 'winget'
-        }
-
-        It 'Falls back to the alias when Get-AppxPackage throws (e.g. no Appx compatibility session)' {
-            Mock Get-AppxPackage { throw 'Operation is not supported on this platform.' }
-
-            Resolve-WingetExecutable -BypassAlias | Should -Be 'winget'
-        }
-    }
 }
 
-Describe 'Wait-WingetLaunchable (issue #277)' {
-    BeforeAll {
-        # Start-Process is mocked to return a fake process object exposing the WaitForExit/Kill
-        # members the function actually calls - same pattern tests/WingetCore.Tests.ps1 uses for
-        # its own WaitForExit-based winget checks. Defined in BeforeAll (not the Describe body)
-        # so it survives into Pester's separate run phase.
-        function New-FakeWingetProcess {
-            param ([bool]$Exited = $true, [scriptblock]$OnKill = { }, $ExitCode = 0)
-            $p = [pscustomobject]@{ ExitCode = $ExitCode }
-            # Local (non-$script:) variable + GetNewClosure() so each fake process instance
-            # captures its own $Exited value, independent of any other instance in the same test.
-            $exitedCopy = $Exited
-            $p | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value { param($ms) $exitedCopy }.GetNewClosure()
-            $p | Add-Member -MemberType ScriptMethod -Name Kill -Value $OnKill
-            $p
-        }
-    }
-
+Describe 'Test-WingetLaunchable (review findings P2-8, P3-9)' {
     BeforeEach {
-        Mock Remove-Item { }
-        # Healthy (single-version) by default so the issue #279 deadlock check inside the failure
-        # path doesn't depend on real machine state or short-circuit tests that expect retries.
-        # Tests for the deadlock behavior itself override this.
-        Mock Get-AppxPackage { [pscustomobject]@{ Version = '1.26.510.0' } }
-    }
-
-    It 'Requires two consecutive successful probes before declaring winget launchable (default RequiredConsecutiveSuccesses)' {
-        # issue #277 follow-up: a live PR run saw the very first probe succeed within ~0.5s of
-        # Install-WingetAutoUpdate finishing, then a wholly separate process hit the full lock
-        # ~17s later - Task Scheduler dispatching WAU's immediate run, and WAU's own startup,
-        # are not instantaneous, so one success does not prove the danger window has passed.
-        Mock Start-Process { New-FakeWingetProcess }
+        Mock Write-Host { }
         Mock Start-Sleep { }
-
-        Wait-WingetLaunchable -PollIntervalSeconds 1 | Should -Be $true
-
-        Should -Invoke Start-Process -Times 2 -Exactly -ParameterFilter { $FilePath -eq 'winget' }
-        Should -Invoke Start-Sleep -Times 1 -Exactly -ParameterFilter { $Seconds -eq 1 }
-    }
-
-    It 'Counts a probe that launches but exits non-zero as not launchable' {
-        # A winget that starts but cannot run (e.g. a wedged App Installer) must not pass the
-        # end-of-run health check Invoke-WingetInstall uses to avoid exiting 0 with winget broken.
-        Mock Start-Process { New-FakeWingetProcess -ExitCode -1978335230 }
-        Mock Start-Sleep { }
-
-        Wait-WingetLaunchable -TimeoutSeconds 0 -PollIntervalSeconds 1 -RequiredConsecutiveSuccesses 1 | Should -Be $false
-    }
-
-    It 'Treats an unreadable ($null) exit code as success rather than reporting a healthy winget as broken' {
-        Mock Start-Process { New-FakeWingetProcess -ExitCode $null }
-        Mock Start-Sleep { }
-
-        Wait-WingetLaunchable -PollIntervalSeconds 1 -RequiredConsecutiveSuccesses 1 | Should -Be $true
-        Should -Invoke Start-Process -Times 1 -Exactly
-    }
-
-    It 'Resets the consecutive-success streak on an intervening failure, so a flaky clear does not count' {
-        # success, then failure, then two more successes - the pre-failure success must not count
-        # toward the two-in-a-row requirement.
-        $script:callIndex = 0
-        Mock Start-Process {
-            $script:callIndex++
-            if ($script:callIndex -eq 2) {
-                throw 'This command cannot be run due to the error: The file cannot be accessed by the system.'
-            }
-            New-FakeWingetProcess
-        }
-        Mock Start-Sleep { }
-        Mock Resolve-WingetExecutable {
-            if ($BypassAlias) { return 'C:\WindowsApps\DAI\winget.exe' }
-            'winget'
-        }
-
-        Wait-WingetLaunchable -PollIntervalSeconds 1 | Should -Be $true
-
-        # 1 (success) + 2 (fails, transient) + 3 (success, streak=1) + 4 (success, streak=2) = 4
-        Should -Invoke Start-Process -Times 4 -Exactly
-    }
-
-    It 'Retries a transient launch failure, bypassing the alias, and succeeds once it clears' {
-        $script:callIndex = 0
-        Mock Start-Process {
-            $script:callIndex++
-            if ($script:callIndex -eq 1) {
-                throw 'This command cannot be run due to the error: The file cannot be accessed by the system.'
-            }
-            New-FakeWingetProcess
-        }
-        Mock Start-Sleep { }
-        Mock Resolve-WingetExecutable {
-            if ($BypassAlias) { return 'C:\WindowsApps\DAI\winget.exe' }
-            'winget'
-        }
-
-        Wait-WingetLaunchable -PollIntervalSeconds 1 | Should -Be $true
-
-        # 1 (fails on the bare alias) + 2 successes (bypassed) to reach the required streak.
-        Should -Invoke Start-Process -Times 3 -Exactly
-        Should -Invoke Start-Process -Times 2 -Exactly -ParameterFilter { $FilePath -eq 'C:\WindowsApps\DAI\winget.exe' }
-        Should -Invoke Start-Sleep -Times 2 -Exactly -ParameterFilter { $Seconds -eq 1 }
-    }
-
-    It 'Also retries the native-command-invocation StandardOutputEncoding symptom (issue #277)' {
-        $script:callIndex = 0
-        Mock Start-Process {
-            $script:callIndex++
-            if ($script:callIndex -eq 1) {
-                throw 'StandardOutputEncoding is only supported when standard output is redirected.'
-            }
-            New-FakeWingetProcess
-        }
-        Mock Start-Sleep { }
-
-        Wait-WingetLaunchable -PollIntervalSeconds 1 | Should -Be $true
-
-        Should -Invoke Start-Process -Times 3 -Exactly
-    }
-
-    It 'Returns false immediately for an unrelated (non-transient) launch failure on the bare alias, without retrying' {
-        Mock Start-Process { throw 'The system cannot find the file specified.' }
-        Mock Start-Sleep { }
-
-        Wait-WingetLaunchable | Should -Be $false
-
-        Should -Invoke Start-Process -Times 1 -Exactly
-        Should -Invoke Start-Sleep -Times 0 -Exactly
-    }
-
-    It 'Keeps retrying when a resolved bypass path itself vanishes mid-poll, instead of giving up (issue #277 follow-up)' {
-        # Same exemption Install-WingetPackage already documents: once on a concrete bypass path
-        # (not the bare alias), the in-flight DesktopAppInstaller upgrade can delete that exact
-        # package version between resolving it and launching it - ERROR_FILE_NOT_FOUND, not a
-        # file-lock error, and not one of Test-TransientWingetLaunchError's classes.
-        $script:callIndex = 0
-        Mock Start-Process {
-            $script:callIndex++
-            switch ($script:callIndex) {
-                1 { throw 'This command cannot be run due to the error: The file cannot be accessed by the system.' }
-                2 { throw 'The system cannot find the file specified.' }
-                default { New-FakeWingetProcess }
-            }
-        }
-        Mock Start-Sleep { }
-        Mock Resolve-WingetExecutable {
-            if ($BypassAlias) { return 'C:\WindowsApps\DAI\winget.exe' }
-            'winget'
-        }
-
-        Wait-WingetLaunchable -PollIntervalSeconds 1 | Should -Be $true
-
-        # 1 (fails, transient) + 2 (fails, file-not-found but exempted on a bypass path) + 2
-        # successes to reach the required streak = 4 total.
-        Should -Invoke Start-Process -Times 4 -Exactly
-        Should -Invoke Start-Sleep -Times 3 -Exactly -ParameterFilter { $Seconds -eq 1 }
-    }
-
-    It 'Kills and retries a probe that launches but never returns within ProbeTimeoutSeconds' {
-        $script:killCalled = $false
-        $script:callIndex = 0
-        Mock Start-Process {
-            $script:callIndex++
-            if ($script:callIndex -eq 1) {
-                return New-FakeWingetProcess -Exited $false -OnKill { Set-Variable -Name killCalled -Value $true -Scope script }
-            }
-            New-FakeWingetProcess
-        }
-        Mock Start-Sleep { }
-
-        Wait-WingetLaunchable -PollIntervalSeconds 1 -ProbeTimeoutSeconds 1 | Should -Be $true
-
-        $script:killCalled | Should -Be $true
-        Should -Invoke Start-Process -Times 3 -Exactly
-    }
-
-    It 'Gives up once the timeout has elapsed, without sleeping further' {
-        Mock Start-Process {
-            throw 'This command cannot be run due to the error: The file cannot be accessed by the system.'
-        }
-        Mock Start-Sleep { }
-
-        # TimeoutSeconds 0 means the deadline is already "now" by the time the first attempt
-        # returns, so this proves the loop honors the deadline instead of always trying at least
-        # once more - without a test that actually has to wait on real wall-clock time.
-        Wait-WingetLaunchable -TimeoutSeconds 0 -PollIntervalSeconds 1 | Should -Be $false
-
-        Should -Invoke Start-Process -Times 1 -Exactly
-        Should -Invoke Start-Sleep -Times 0 -Exactly
-    }
-
-    It 'Cleans up its per-attempt probe temp files' {
-        Mock Start-Process { New-FakeWingetProcess }
-        Mock Start-Sleep { }
-
-        Wait-WingetLaunchable -PollIntervalSeconds 1 | Out-Null
-
-        # Two probe attempts (the required streak) x two files (stdout + stderr) each.
-        Should -Invoke Remove-Item -Times 4 -Exactly
-    }
-
-    It 'Gives up immediately on a structural DesktopAppInstaller version conflict, instead of polling the rest of the budget (issue #279)' {
-        Mock Start-Process {
-            throw 'This command cannot be run due to the error: The file cannot be accessed by the system.'
-        }
-        Mock Start-Sleep { }
-        Mock Get-AppxPackage {
-            @(
-                [pscustomobject]@{ Version = '1.26.510.0' }
-                [pscustomobject]@{ Version = '1.29.290.0' }
-            )
-        }
         $script:warnings = @()
         Mock Write-WarningMessage { $script:warnings += $Message }
-
-        # A generous timeout/poll-interval that would otherwise keep this polling for a long time -
-        # proving the deadlock check short-circuits it rather than just happening to hit a deadline.
-        Wait-WingetLaunchable -TimeoutSeconds 360 -PollIntervalSeconds 20 | Should -Be $false
-
-        Should -Invoke Start-Process -Times 1 -Exactly
-        Should -Invoke Start-Sleep -Times 0 -Exactly
-        ($script:warnings -join "`n") | Should -Match 'deadlocked'
-        ($script:warnings -join "`n") | Should -Match '1\.26\.510\.0'
-        ($script:warnings -join "`n") | Should -Match '1\.29\.290\.0'
     }
 
-    It 'Does not treat a single registered version as a deadlock' {
-        $script:callIndex = 0
-        Mock Start-Process {
-            $script:callIndex++
-            if ($script:callIndex -eq 1) {
-                throw 'This command cannot be run due to the error: The file cannot be accessed by the system.'
-            }
-            New-FakeWingetProcess
+    It 'Is launchable when winget --version exits 0 and prints a version' {
+        Mock Invoke-WingetProcess { New-TestProcessResult -ExitCode 0 -Output @('v1.12.350') }
+
+        $result = Test-WingetLaunchable
+
+        $result.Launchable | Should -BeTrue
+        $result.Version | Should -Be 'v1.12.350'
+        $result.Reason | Should -BeNullOrEmpty
+        $result.Attempts | Should -Be 1
+        Should -Invoke Invoke-WingetProcess -Times 1 -Exactly -ParameterFilter {
+            ($ArgumentList -join ' ') -eq '--version' -and $TimeoutSeconds -eq (Get-ProcessTimeoutSeconds -Operation WingetVersion) -and $Echo -eq 'None'
         }
-        Mock Start-Sleep { }
-        Mock Get-AppxPackage { [pscustomobject]@{ Version = '1.26.510.0' } }
+        Should -Invoke Start-Sleep -Times 0 -Exactly
+    }
 
-        # Reaches the required streak normally instead of bailing out on the one failed attempt.
-        Wait-WingetLaunchable -PollIntervalSeconds 1 | Should -Be $true
+    It 'Is not launchable when winget exits 0 without printing a version' {
+        Mock Invoke-WingetProcess { New-TestProcessResult -ExitCode 0 -Output @('Windows Package Manager') }
 
-        Should -Invoke Start-Process -Times 3 -Exactly
+        $result = Test-WingetLaunchable
+
+        $result.Launchable | Should -BeFalse
+        $result.Reason | Should -Be "'winget --version' printed no version"
+    }
+
+    It 'Is not launchable when winget starts but exits non-zero, and names the code' {
+        Mock Invoke-WingetProcess { New-TestProcessResult -ExitCode -1978335230 -Output @('Some error text') }
+
+        $result = Test-WingetLaunchable
+
+        $result.Launchable | Should -BeFalse
+        $result.Reason | Should -Be "'winget --version' exited with 0x8A150002"
+    }
+
+    It 'Is not launchable when winget --version does not answer in time' {
+        Mock Invoke-WingetProcess { New-TestProcessResult -TimedOut }
+
+        (Test-WingetLaunchable).Reason | Should -Match 'did not answer within 30 seconds'
+    }
+
+    It 'Stops at once on a launch failure that waiting does not change (<Case>), whatever -Attempts says' -ForEach @(
+        @{ Case = 'not on PATH'; Code = 2; Message = "'winget' was not found on PATH." }
+        @{ Case = 'access denied'; Code = 5; Message = 'Access is denied.' }
+    ) {
+        $script:launchCode = $Code
+        $script:launchMessage = $Message
+        Mock Invoke-WingetProcess { New-TestProcessResult -LaunchFailed -LaunchErrorCode $script:launchCode -LaunchError $script:launchMessage }
+
+        $result = Test-WingetLaunchable -Attempts 5 -RetryDelaySeconds 15
+
+        $result.Launchable | Should -BeFalse
+        $result.Reason | Should -Be ('winget could not be started: {0}' -f $Message.TrimEnd('.'))
+        $result.Attempts | Should -Be 1
+        Should -Invoke Invoke-WingetProcess -Times 1 -Exactly
+        Should -Invoke Start-Sleep -Times 0 -Exactly
+    }
+
+    It 'Checks again after RetryDelaySeconds when the launch failure can clear on its own, and passes once it does' {
+        $script:calls = 0
+        Mock Invoke-WingetProcess {
+            $script:calls++
+            if ($script:calls -eq 1) {
+                return New-TestProcessResult -LaunchFailed -LaunchErrorCode 1920 -LaunchError 'The file cannot be accessed by the system.'
+            }
+            New-TestProcessResult -ExitCode 0 -Output @('v1.12.350')
+        }
+
+        $result = Test-WingetLaunchable -Attempts 3 -RetryDelaySeconds 7
+
+        $result.Launchable | Should -BeTrue
+        $result.Attempts | Should -Be 2
+        Should -Invoke Invoke-WingetProcess -Times 2 -Exactly
+        Should -Invoke Start-Sleep -Times 1 -Exactly -ParameterFilter { $Seconds -eq 7 }
+        ($script:warnings -join "`n") | Should -Match 'Checking again in 7s \(check 2 of 3\)'
+    }
+
+    It 'Gives up after -Attempts checks that keep failing, sleeping only between them' {
+        Mock Invoke-WingetProcess { New-TestProcessResult -ExitCode 1 }
+
+        $result = Test-WingetLaunchable -Attempts 3 -RetryDelaySeconds 15
+
+        $result.Launchable | Should -BeFalse
+        $result.Attempts | Should -Be 3
+        Should -Invoke Invoke-WingetProcess -Times 3 -Exactly
+        Should -Invoke Start-Sleep -Times 2 -Exactly -ParameterFilter { $Seconds -eq 15 }
+    }
+
+    It 'Writes what winget printed when the last check failed, so the transcript says why' {
+        Mock Invoke-WingetProcess { New-TestProcessResult -ExitCode 1 -Output @('No applicable app licenses found.') }
+        Mock Write-ProcessOutput { }
+
+        [void](Test-WingetLaunchable)
+
+        Should -Invoke Write-ProcessOutput -Times 1 -Exactly -ParameterFilter { $Line -contains 'No applicable app licenses found.' }
+    }
+
+    Context 'With a real process (the Invoke-WingetProcess seam)' {
+        BeforeEach {
+            $script:fakeDirectory = Join-Path $TestDrive ([guid]::NewGuid().ToString('N'))
+            $null = New-Item -ItemType Directory -Path $script:fakeDirectory
+        }
+
+        It 'Passes a winget that prints its version and exits 0' {
+            $script:fakeWinget = New-FakeExecutable -Directory $script:fakeDirectory -Name 'fake-winget' -StandardOutput @('v1.12.350')
+            Mock Resolve-WingetExecutable { $script:fakeWinget }
+
+            $result = Test-WingetLaunchable
+
+            $result.Launchable | Should -BeTrue
+            $result.Version | Should -Be 'v1.12.350'
+        }
+
+        It 'Fails a winget that starts but exits non-zero' {
+            $script:fakeWinget = New-FakeExecutable -Directory $script:fakeDirectory -Name 'fake-winget-broken' -StandardError @('No applicable app licenses found.') -ExitCode 3
+            Mock Resolve-WingetExecutable { $script:fakeWinget }
+
+            $result = Test-WingetLaunchable
+
+            $result.Launchable | Should -BeFalse
+            $result.Reason | Should -Be "'winget --version' exited with 0x00000003"
+        }
+
+        It 'Fails a winget that cannot be started, without retrying' {
+            Mock Resolve-WingetExecutable { Join-Path $script:fakeDirectory 'missing-winget.exe' }
+
+            $result = Test-WingetLaunchable -Attempts 3
+
+            $result.Launchable | Should -BeFalse
+            $result.Reason | Should -Match '^winget could not be started: '
+            $result.Attempts | Should -Be 1
+        }
     }
 }

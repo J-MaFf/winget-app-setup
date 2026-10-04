@@ -84,11 +84,11 @@ function ConvertTo-TranscriptAppId {
       - retry pass: 'Retry succeeded: <id>', and 'Retry failed: <id> ...',
         'Winget list timed out for retry: <id>. ...' and 'Verification timed out for retry: <id>. ...'.
     The summary table under 'Summary:' ('Status  Apps', then one 'Installed', 'Skipped' and
-    'Failed' row each) lists the final outcome. It is the only place the #279 bulk failure shows
-    up: when winget is deadlocked between two App Installer versions, every app is marked failed
-    without a per-app line. The table is printed at full width since review finding P3-13; an
-    older transcript can still cut a long row off with an ellipsis, so a cut-off id is dropped and
-    SummaryTruncated is set.
+    'Failed' row each) lists the final outcome. When winget cannot be launched, the circuit
+    breaker logs 'winget cannot be launched on this machine (...)' once and every remaining app
+    fails with its own 'Failed to install: <id> (not attempted: ...)' line. The table is printed at
+    full width since review finding P3-13; an older transcript can still cut a long row off with an
+    ellipsis, so a cut-off id is dropped and SummaryTruncated is set.
 .PARAMETER Content
     The transcript text.
 .RETURNS
@@ -106,7 +106,9 @@ function ConvertTo-TranscriptAppId {
       FinalFailed        the apps still failed at the end of the run: first-pass failures that
                          did not succeed on retry, retry-pass failures and the summary's Failed row.
       RecoveredOnRetry   first-pass failures that succeeded on retry.
-      WingetDeadlocked   the #279 bulk failure ('winget is deadlocked between ...').
+      WingetNotLaunchable the circuit breaker found that winget cannot be launched ('winget cannot
+                         be launched on this machine ...'), so the remaining apps were not
+                         attempted.
       Aborted            the run was aborted or stopped before it finished.
       EarlyExitCode      the code in 'The installer stopped early with exit code N', or $null.
       AutoUpdatesLine    the text after the last 'Auto-updates: ', or $null.
@@ -131,7 +133,7 @@ function ConvertFrom-InstallTranscript {
     $summaryRows = @{ Installed = @(); Skipped = @(); Failed = @() }
     $hasSummary = $false
     $summaryTruncated = $false
-    $wingetDeadlocked = $false
+    $wingetNotLaunchable = $false
     $aborted = $false
     $earlyExitCode = $null
     $autoUpdatesLine = $null
@@ -197,8 +199,8 @@ function ConvertFrom-InstallTranscript {
             $firstPassFailed.Add((ConvertTo-TranscriptAppId -Text $Matches.app))
             continue
         }
-        if ($line -match '^winget is deadlocked between ') {
-            $wingetDeadlocked = $true
+        if ($line -match '^winget cannot be launched on this machine ') {
+            $wingetNotLaunchable = $true
             continue
         }
         if ($line -match '^(UNEXPECTED ERROR - the run was aborted|The run was stopped before it finished)') {
@@ -250,26 +252,26 @@ function ConvertFrom-InstallTranscript {
     }
 
     return [pscustomobject]@{
-        BuildId           = $buildId
-        Installed         = @($installed | Sort-Object -Unique)
-        AlreadyInstalled  = @($alreadyInstalled | Sort-Object -Unique)
-        NotApplicable     = $notApplicable
-        FirstPassFailed   = $firstPassFailedIds
-        RetrySucceeded    = $retrySucceededIds
-        RetryFailed       = @($retryFailed | Sort-Object -Unique)
-        HasSummary        = $hasSummary
-        SummaryInstalled  = $summary['Installed']
-        SummarySkipped    = $summary['Skipped']
-        SummaryFailed     = $summary['Failed']
-        SummaryTruncated  = $summaryTruncated
-        FinalFailed       = $finalFailed
-        RecoveredOnRetry  = @($firstPassFailedIds | Where-Object { $retrySucceededIds -contains $_ })
-        WingetDeadlocked  = $wingetDeadlocked
-        Aborted           = $aborted
-        EarlyExitCode     = $earlyExitCode
-        AutoUpdatesLine   = $autoUpdatesLine
-        AutoUpdatesStatus = $autoUpdatesStatus
-        WingetNotUsable   = $wingetNotUsable
+        BuildId             = $buildId
+        Installed           = @($installed | Sort-Object -Unique)
+        AlreadyInstalled    = @($alreadyInstalled | Sort-Object -Unique)
+        NotApplicable       = $notApplicable
+        FirstPassFailed     = $firstPassFailedIds
+        RetrySucceeded      = $retrySucceededIds
+        RetryFailed         = @($retryFailed | Sort-Object -Unique)
+        HasSummary          = $hasSummary
+        SummaryInstalled    = $summary['Installed']
+        SummarySkipped      = $summary['Skipped']
+        SummaryFailed       = $summary['Failed']
+        SummaryTruncated    = $summaryTruncated
+        FinalFailed         = $finalFailed
+        RecoveredOnRetry    = @($firstPassFailedIds | Where-Object { $retrySucceededIds -contains $_ })
+        WingetNotLaunchable = $wingetNotLaunchable
+        Aborted             = $aborted
+        EarlyExitCode       = $earlyExitCode
+        AutoUpdatesLine     = $autoUpdatesLine
+        AutoUpdatesStatus   = $autoUpdatesStatus
+        WingetNotUsable     = $wingetNotUsable
     }
 }
 
@@ -368,8 +370,8 @@ function Test-InstallFailureContainment {
     )
 
     $notes = @()
-    if ($Transcript.WingetDeadlocked) {
-        $notes += 'winget was deadlocked between App Installer versions, so every app failed without an install attempt (issue #279)'
+    if ($Transcript.WingetNotLaunchable) {
+        $notes += 'winget could not be launched, so the remaining apps failed without an install attempt'
     }
     if ($Transcript.SummaryTruncated) {
         $notes += 'the summary table was cut off, so only the per-app failure lines were read for the cut-off part'

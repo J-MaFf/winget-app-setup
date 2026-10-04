@@ -156,6 +156,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
+- Removed the launch-resilience code that existed to survive the Winget-AutoUpdate run the
+  installer used to start mid-run (`RUN_WAU=YES`, removed earlier on this branch), now replaced by
+  the circuit breaker above (review findings P2-10, P3-7, P3-10):
+  `Get-ConflictingDesktopAppInstallerVersions` and the #279 deadlock gate in `Invoke-WingetInstall`
+  (it read the current user's AppX view and never fired on the real wedge; counting versions with
+  `-AllUsers` instead would fail every app on multi-user desktops where users have different App
+  Installer versions), `Wait-WingetLaunchable`, and the `-BypassAlias` path of
+  `Resolve-WingetExecutable` with its three call sites (launching `winget.exe` from the App
+  Installer package folder failed with `Access is denied` in every E2E run and never recovered a
+  launch). `Resolve-WingetExecutable` now returns `winget`. Their tests went with them.
 - Removed the orphaned PATH-mutation helpers in `WingetAppSetup/Private/Environment.ps1` — `Add-ToEnvironmentPath`, `Test-PathInEnvironment`, `Test-PathListContainsEntry`, `Get-PersistedEnvironmentPath`, and `Set-PersistedEnvironmentPath` — dead since the homegrown updater that used them was removed (#168) and PATH mutation was deliberately dropped from the install path (issue #179); a repo-wide grep found zero remaining callers outside their own dedicated tests. The file's two still-live functions, `Get-WindowsBuildNumber` and `Get-ComputerManufacturer`, move to the renamed `WingetAppSetup/Private/SystemInfo.ps1`; their tests move from `tests/Environment.Tests.ps1` to `tests/SystemInfo.Tests.ps1` alongside the deletion of the five orphaned functions' tests.
 - Removed five tautological tests found by the 2026-07-08 review (issue #192): two `Should -BeOfType` assertions on framework constants in the 'Administrator check' context, two mock-then-assert-the-mock 'Winget check' tests, and a `Test-CanUseGridView` test whose only assertion was wrapped in `if ([Environment]::UserInteractive)` and asserted the opposite of its name. Each behavior they named is now pinned by a falsifiable replacement (the `Invoke-WingetInstall` admin gate and `Exit 2` winget gate structurally; the grid-view interactivity guard via its definition), the unfalsifiable `Write-Table` non-interactive prompt test was rewritten against the real `Test-CanUseGridView` seam, and the forbidden conditional `if (-not (Get-Command Out-GridView...))` stub was replaced with an unconditional test double plus `Mock` in `BeforeEach` ([#209](https://github.com/J-MaFf/winget-app-setup/pull/209)).
 - Removed the dead `ConvertTo-CommandArguments` helper (`WingetAppSetup/Private/Environment.ps1`, ~45 lines) and its 4 Pester tests — a remnant of the removed homegrown updater with zero production callers that still shipped in every generated installer ([#205](https://github.com/J-MaFf/winget-app-setup/pull/205)).
@@ -164,6 +174,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A run on a machine where winget cannot be started now stops trying after one app, instead of
+  spending about 24 minutes on retries and then reporting every app as
+  `package not found after install` (review findings P2-8, P2-9, P2-10, P3-7, P3-8, P3-9, P3-10):
+  - **Launch check.** The new private `Test-WingetLaunchable`
+    (`WingetAppSetup/Private/WingetLaunchResilience.ps1`) runs `winget --version` under a
+    30-second limit and counts winget as usable only when it exits 0 and prints a version (a line
+    starting `v` and a digit). It can check again after a delay for a failure that may clear on
+    its own (a locked `winget.exe`, a timeout, a non-zero exit); winget missing or `Access is
+    denied` is final at once. `Test-AndInstallWinget` uses it instead of `Get-Command winget`,
+    which only proved that the app-execution alias is on PATH: a run on E2E run 35406706712 printed
+    `Winget bootstrapped successfully` after both repair attempts had failed, and every winget call
+    after it failed. A winget that is on PATH but cannot run now goes down the same bootstrap
+    ladder, and the run exits 2 when nothing makes it start.
+  - **"Could not check" is no longer "not installed".** `Test-WingetPackageInstalled -TimeoutSeconds`
+    returns `LaunchFailed` and `LaunchError` when winget could not be started. The per-app
+    pipeline no longer installs an app whose pre-check could not run (`PreCheckLaunchFailed`),
+    skips the post-install check when winget could not be launched for the install
+    (`InstallLaunchFailed`), and says that the post-install check could not launch winget
+    (`VerifyLaunchFailed`) instead of `package not found after install`. Each reason ends with the
+    launch error, for example
+    `winget could not be launched for the pre-install check; launch error: Access is denied`.
+    `Install-WingetPackage` reports any launch failure in its result (`LaunchErrorExhausted`,
+    `LaunchError`) instead of throwing for one it does not retry, so it no longer shows up as an
+    `Unexpected error`.
+  - **Run-level circuit breaker.** After an app could not launch winget, `Invoke-WingetInstall`
+    checks once whether winget can still be started (`Invoke-WingetLaunchCircuitBreaker`: two
+    tries, 10 seconds apart). If it can, the run carries on. If it cannot, the run prints one
+    `winget cannot be launched on this machine (...)` line, marks every remaining applicable app
+    failed with `not attempted: winget cannot be launched on this machine (see above)` without
+    running winget, and skips the retry pass. Not-applicable apps are still skipped. The breaker
+    also works inside the retry pass. The worst case on a wedged winget drops from about 24 minutes
+    (each app: 9 launches and 75 seconds of backoff, twice) to about a minute and a half: at most
+    75 seconds of launch backoff for the one app whose install hit the failure, then 10 seconds
+    between the breaker's two tries; the end-of-run check makes a single try once the breaker has
+    tripped. Every check has a 30-second limit, so even checks that hang until their limit keep it
+    under 4 minutes. When the pre-check is what fails, the run stops after about 10 seconds. The
+    exit code stays 1.
+  - **PowerShell's failure reason.** `Install-PowerShellLatest` returns `Install-WingetPackage`'s
+    whole result (exit code, attempts, scope fallback, session and launch errors) plus the outcome
+    of its own `winget list` check (`VerifyTimedOut`, `VerifyLaunchFailed`), so the summary says
+    why PowerShell failed like it does for every other app instead of `installer reported failure`.
+    A check that timed out reads `post-install verification timed out`.
+  - **End-of-run check.** The check that keeps a run from exiting 0 with winget unusable (exit 2)
+    now uses `Test-WingetLaunchable`: up to five tries 15 seconds apart, about the minute
+    `Wait-WingetLaunchable` allowed, and it also requires the version output.
+  - `e2e/Assert-Install.ps1` uses `Test-WingetLaunchable` before its per-app checks and names a
+    launch failure in a failed check's detail, and `e2e/TranscriptAssertions.ps1` reads the
+    breaker's line (`WingetNotLaunchable`) instead of the removed deadlock line.
 - winget and `msiexec` now run through one helper, `Invoke-ExternalProcess` with
   `Invoke-WingetProcess` on top (`WingetAppSetup/Private/ProcessInvocation.ps1`), so every winget
   and `msiexec` call has a time limit, its output reaches the log, and a failed launch is recognized

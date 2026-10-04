@@ -80,8 +80,9 @@ run starts with and prints a `[DRY-RUN]` line for each change a real run would m
 provider), setting up winget for the account, repairing a broken winget source (a real repair runs
 `winget source reset --force`, which also removes any source added beyond the defaults),
 relaunching elevated, and each app it would install. When the account has no winget yet, for
-example an admin account used only to elevate, the preview lists every app as one a real run
-would install, because it cannot check which are already there. A dry run still writes its
+example an admin account used only to elevate, or winget is there but cannot be started, the
+preview lists every app as one a real run would install, because it cannot check which are already
+there. A dry run still writes its
 transcript (see [Logs](#logs)), and its `winget list` and `winget search` checks update winget's
 own per-user cache and source-agreement state.
 
@@ -111,6 +112,7 @@ the installer stops that process and every process it started, then carries on:
 | One `winget install` (download, installer, and waiting for another winget install) | 30 minutes |
 | `winget download` (the PowerShell MSIX fallback) | 30 minutes |
 | The per-app `winget list` check before and after each install | 15 seconds |
+| The `winget --version` check that winget can be started | 30 seconds |
 | `winget source update`, `source list`, `search` and other `winget list` calls | 2 minutes |
 | `winget source reset` | 5 minutes |
 | `msiexec` for Winget-AutoUpdate | 15 minutes |
@@ -127,13 +129,24 @@ summary grid (`Install-Module` for Microsoft.WinGet.Client and Microsoft.PowerSh
 App Installer download from aka.ms/getwinget), and, on PowerShell 7.3 and older, the
 Winget-AutoUpdate MSI download once the file has started to arrive.
 
+A winget that cannot be started is not retried app by app. Before the installs, `winget --version`
+has to run and print a version; being on PATH is not enough. If it cannot, the installer tries to
+set winget up for the account (register App Installer, `Repair-WinGetPackageManager`, the
+aka.ms/getwinget download) and exits with code 2 when winget still does not start. If winget stops
+starting partway through the installs, the app that hit it fails with
+`winget could not be launched ...` and the installer checks once whether winget can still be
+started. If it cannot, every remaining app is marked failed with
+`not attempted: winget cannot be launched on this machine (see above)` without running winget, the
+retry pass is skipped, and the run ends with exit code 1 about a minute and a half later at most.
+Before, each app spent its own retries, twice, and the run took about 24 minutes to fail.
+
 ### Exit codes
 
 | Code | Meaning |
 |------|---------|
 | 0 | Success — all apps installed or already present |
-| 1 | One or more apps failed to install, including an install stopped at its time limit (also: the PowerShell 7 bootstrap could not provision `pwsh` from a pre-7 session, pre-flight system checks failed, or elevation was declined or is unavailable under remote execution) |
-| 2 | Winget is unavailable and could not be installed, or winget could no longer be launched at the end of the run (no app failed, but automatic updates and the next run would) |
+| 1 | One or more apps failed to install, including an install stopped at its time limit and the apps not attempted because winget could no longer be started partway through the run (also: the PowerShell 7 bootstrap could not provision `pwsh` from a pre-7 session, pre-flight system checks failed, or elevation was declined or is unavailable under remote execution) |
+| 2 | Winget is unavailable or cannot be started (`winget --version` must run and print a version) and could not be set up, or winget could no longer be launched at the end of the run (no app failed, but automatic updates and the next run would) |
 | 3 | App-definition validation failed, or no valid app definitions remain |
 | 5 | The run was aborted before it finished: an unexpected error (the message and stack trace are in the log), or the run was stopped from outside (Ctrl+C, the console closing, an installer stopping the console) when run from a file or non-interactively |
 
@@ -326,8 +339,10 @@ The Windows CI run stays the verdict.
 Start winget through `Invoke-WingetProcess` and `msiexec` through `Invoke-ExternalProcess`
 (`WingetAppSetup/Private/ProcessInvocation.ps1`) rather than with `Start-Process` or a bare
 `winget` call, so every call gets a time limit, its output in the transcript and an exit code read
-from the process. Two older callers still use `Start-Process`, each with its own time limit:
-`Wait-WingetLaunchable`'s `winget --version` probe and the PowerShell 7 bootstrap's `msiexec`.
+from the process. One older caller still uses `Start-Process`, with its own time limit: the
+PowerShell 7 bootstrap's `msiexec`. To check that winget can be started, use
+`Test-WingetLaunchable` (`WingetAppSetup/Private/WingetLaunchResilience.ps1`), not
+`Get-Command winget`.
 Tests mock the two functions and build their results with `New-TestProcessResult` from
 `tests/TestHelpers.ps1`; a test that scripts winget with `Mock winget` routes it through
 `Invoke-TestWingetMock`.

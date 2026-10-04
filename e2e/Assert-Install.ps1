@@ -34,8 +34,9 @@
          is on -SkipApps - this is the promise that lets the workflow tolerate installer exit 1
          for skip-listed apps. Read from the summary's Failed row and every failure line the
          retry pass did not recover (the 'Failed to install', 'Retry failed', 'Winget list timed
-         out' and 'Verification timed out' forms), so the #279 bulk failure, which logs no
-         per-app line, is caught too. A transcript with no summary fails: its run stopped early.
+         out' and 'Verification timed out' forms), so a run whose circuit breaker failed the
+         remaining apps because winget could not be launched is caught too. A transcript with no
+         summary fails: its run stopped early.
       8. With -ExpectAllSkippedOnSecondRun: the LATEST transcript (the second, idempotence-leg
          run) shows every applicable non-skipped catalog app as
          'Skipping: <name> (already installed)' and records no installs and no failures for
@@ -104,6 +105,8 @@ $SkipApps = @($SkipApps | ForEach-Object { $_ -split ',' } | ForEach-Object { $_
 $repoRoot = Split-Path -Parent $PSScriptRoot
 Import-Module (Join-Path $repoRoot 'WingetAppSetup\WingetAppSetup.psd1') -Force
 . (Join-Path $repoRoot 'WingetAppSetup\Private\WauSupport.ps1')
+# Test-WingetLaunchable (private) and the process helpers it runs winget through.
+. (Join-Path $repoRoot 'WingetAppSetup\Private\ProcessInvocation.ps1')
 . (Join-Path $repoRoot 'WingetAppSetup\Private\WingetLaunchResilience.ps1')
 # Transcript parsing and the transcript assertions (sections 5-9).
 . (Join-Path $PSScriptRoot 'TranscriptAssertions.ps1')
@@ -177,17 +180,28 @@ foreach ($app in $candidateApps) {
 # own Start-Process-based winget calls had just succeeded cleanly moments earlier - a 100% failure
 # rate is not what a genuinely clearing alias lock looks like, it is what a reliably-triggered bug
 # in the invocation style looks like. Test-WingetPackageInstalled -TimeoutSeconds never invokes
-# winget as a captured native command; it uses Start-Process with redirected output to a file (the
-# same pattern proven reliable by the install passes) plus its own launch-exception bypass-retry,
-# so it sidesteps that whole bug class instead of retrying into it.
+# winget as a captured native command; it runs it through the module's Invoke-WingetProcess with
+# redirected output (the same helper the install passes use), so it sidesteps that whole bug class
+# instead of retrying into it. It reports a winget that could not be started as LaunchFailed, not
+# as 'not installed'.
 #
-# Waits out a still-broken winget launch path before starting (issue #277): a Winget-AutoUpdate run
-# can leave winget.exe unlaunchable for several minutes. The installer no longer starts one
-# immediately (RUN_WAU=YES was removed), so this normally returns on the first probe; it stays as a
-# guard against a WAU run started by its own schedule. Best-effort - the per-app retry loop below
-# still tolerates a timeout or launch failure if a lock outlasts this wait.
-if (-not (Wait-WingetLaunchable)) {
-    Write-Host 'winget did not confirm launchable before starting the per-app checks; proceeding anyway (each check retries independently).' -ForegroundColor Yellow
+# Checks that winget can be started before starting (issue #277): a Winget-AutoUpdate run can leave
+# winget.exe unlaunchable for several minutes. The installer no longer starts one immediately
+# (RUN_WAU=YES was removed), so this normally passes on the first check; it stays as a guard
+# against a WAU run started by its own schedule, with up to 12 checks 30 seconds apart. Best-effort
+# - the per-app retry loop below still tolerates a timeout or launch failure if a lock outlasts it.
+$launchCheck = Test-WingetLaunchable -Attempts 12 -RetryDelaySeconds 30
+if (-not $launchCheck.Launchable) {
+    Write-Host "winget could not be started before the per-app checks ($($launchCheck.Reason)); proceeding anyway (each check retries independently)." -ForegroundColor Yellow
+}
+
+# Why a check did not confirm the app: a timeout, a winget that could not be started, or the
+# exit code of a `winget list` that ran.
+function Get-InstalledCheckFailureText {
+    param ([Parameter(Mandatory = $true)][hashtable]$Result)
+    if ($Result.TimedOut) { return 'timed out' }
+    if ($Result.LaunchFailed) { return "winget could not be started: $($Result.LaunchError)" }
+    return ('exit 0x{0:X8}' -f $Result.ExitCode)
 }
 
 $probeAttempts = 3
@@ -198,7 +212,7 @@ foreach ($app in $appsToAssert) {
         $result = Test-WingetPackageInstalled -PackageId $id -TimeoutSeconds 60
         if ($result.Installed) { break }
         if ($attempt -lt $probeAttempts) {
-            $reason = if ($result.TimedOut) { 'timed out' } else { ('exit 0x{0:X8}' -f $result.ExitCode) }
+            $reason = Get-InstalledCheckFailureText -Result $result
             Write-Host "winget list for $id did not confirm installed ($reason, attempt $attempt/$probeAttempts) - retrying..." -ForegroundColor Yellow
             Start-Sleep -Seconds (5 * $attempt)
         }
@@ -208,7 +222,7 @@ foreach ($app in $appsToAssert) {
         Add-AssertionResult -Name "App installed: $id" -Passed $true -Detail $detail
     }
     else {
-        $reason = if ($result.TimedOut) { 'timed out' } else { ('exit 0x{0:X8}' -f $result.ExitCode) }
+        $reason = Get-InstalledCheckFailureText -Result $result
         Add-AssertionResult -Name "App installed: $id" -Passed $false -Detail "winget list $reason after $probeAttempts attempts"
     }
 }

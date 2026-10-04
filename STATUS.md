@@ -55,7 +55,16 @@ the transcript and the installer's log into the logs folder; a
 failed launch is classified by its Win32 error code, so the launch retries also work on a
 non-English Windows; unattended runs pass `--silent`; and `winget source list` and
 `winget source reset` no longer pass `--accept-source-agreements`, which winget rejects and which
-had kept the source reset from ever running.
+had kept the source reset from ever running. A winget that cannot be started now fails the run
+fast: winget counts as usable only when `winget --version` runs and prints a version (being on PATH
+is not enough, so a failed repair no longer reports success), a `winget list` that could not start
+winget is no longer read as "not installed" (which had every installed app reported as
+`package not found after install`), and after the first app that could not launch winget, one check
+decides whether to carry on or to fail the remaining apps at once and skip the retry pass. A wedged
+winget used to cost about 24 minutes; it now costs about a minute and a half. PowerShell's failure
+reason names its exit code and launch errors like every other app's. The deadlock detector
+(`Get-ConflictingDesktopAppInstallerVersions`, which never fired on the real wedge), the
+`-BypassAlias` launch path and `Wait-WingetLaunchable` are gone.
 
 The same branch changes CI. Fork pull requests that leave `windows-tests.yml` alone no longer run
 on the self-hosted win-test runner, and `claude.yml` calls the shared Claude workflow at a pinned
@@ -84,9 +93,10 @@ inside `Invoke-WingetPackageManagerRepair`'s retry ladder, mirroring the existin
 `Test-AppxDowngradeRejection`/0x80073D06 precedent (issue #265) — purely diagnostic/fail-fast,
 since no verified redistributable exists to actually install the missing framework. Separately,
 [#280](https://github.com/J-MaFf/winget-app-setup/pull/280)'s fail-fast
-`Get-ConflictingDesktopAppInstallerVersions` (`WingetAppSetup/Private/WingetLaunchResilience.ps1`)
-already stops `Wait-WingetLaunchable`/`Invoke-WingetInstall` from burning a full retry budget once
-this same conflict is observed mid-run. **Both #279 and #282 stay open**: no pinned alternative to
+`Get-ConflictingDesktopAppInstallerVersions` was meant to stop the run from burning a full retry
+budget once this conflict appeared mid-run; it read the current user's AppX view, never fired on the
+real wedge, and was replaced on the branch above by a generic circuit breaker that stops once winget
+cannot be started. **Both #279 and #282 stay open**: no pinned alternative to
 `windows-latest` has been found yet, and the underlying runner-image defect isn't fixed — only
 diagnosed and (for #279) worked around by staying off the affected pass where possible. A third,
 distinct `e2e-install` failure was found on the same PR's re-validation run: the first install pass
@@ -315,7 +325,7 @@ every repository secret.
 ## Natural Next Steps
 
 - Find a viable runner target for `e2e-install` that avoids #279 (`windows-latest`/Server 2025 AppX deadlock), #282 (`windows-2022` licensing failure), and #283 (uncaught `Start-Process` crash right after WAU install on `windows-latest`) — a `windows-2025`-labeled image (if GitHub offers one distinct from `windows-latest`) or a fixed image-version pin are worth trying next; re-check periodically whether GitHub has fixed the underlying `windows-latest` image.
-- Reproduce #283 on a real Windows VM with `RUN_WAU=YES` to find exactly why the `Start-Process` error inside (or near) `Wait-WingetLaunchable` escapes its try/catch, and consider a defensive top-level try/catch around the whole post-WAU-install block regardless of root cause.
+- Reproduce #283 on a real Windows VM with `RUN_WAU=YES` to confirm what stopped the console (`Wait-WingetLaunchable`, which the old transcript pointed at, has since been removed, and the entry script now reports an aborted run with exit code 5).
 - Watch the first scheduled e2e install runs (`.github/workflows/e2e-install.yml`, weekly Mondays 06:00 UTC, issue [#214](https://github.com/J-MaFf/winget-app-setup/issues/214)) — a failed, timed-out or cancelled run creates or comments on the `E2E install run failed` issue with the failing steps, the assertion table, transcript tails and diagnostics snapshots.
 - Make `e2e-install` a required status check for `main` (next to `pester`) once it is green again. Every PR now gets an `e2e-install` status, and a skip counts as passed, so requiring it does not block docs-only PRs. Keep the job id `e2e-install` and give it no `name:`, or the required check stops matching.
 - Dispatch Windows Tests once with `hosted` ticked (`gh workflow run windows-tests.yml -f hosted=true`) to confirm the suite passes on GitHub-hosted `windows-latest`, the runner fork pull requests now use.

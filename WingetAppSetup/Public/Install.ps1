@@ -24,11 +24,13 @@
     driven from a test and asserted on its result.
 .NOTES
     Exit codes: 0 = success (also returned right after handing the run to an elevated relaunch),
-    1 = one or more apps failed to install, or elevation was declined or is unavailable (irm | iex,
-    or the imported module), 2 = winget unavailable (at the start, or no longer launchable at the
-    end of the run), 3 = app-definition validation failed or no valid apps remain. The generated
-    entry script also exits 1 when a blocking pre-flight check fails (before this function runs)
-    and 5 when the run was aborted by an unexpected error or stopped from outside.
+    1 = one or more apps failed to install (including the apps marked failed when winget could no
+    longer be launched mid-run), or elevation was declined or is unavailable (irm | iex, or the
+    imported module), 2 = winget unavailable (at the start, where `winget --version` must run and
+    print a version, or no longer launchable at the end of the run), 3 = app-definition validation
+    failed or no valid apps remain. The generated entry script also exits 1 when a blocking
+    pre-flight check fails (before this function runs) and 5 when the run was aborted by an
+    unexpected error or stopped from outside.
 #>
 function Invoke-WingetInstall {
     [OutputType([int])]
@@ -280,29 +282,20 @@ function Invoke-WingetInstall {
     # forces --source winget), and its health was already verified — and repaired if needed — by
     # Test-WingetSources above (issues #172, #177).
 
-    # A structural AppX version conflict (issue #279) never clears on its own - unlike the transient
-    # app-execution-alias breakage Wait-WingetLaunchable retries through, no amount of waiting or
-    # per-app retrying resolves two DesktopAppInstaller versions deadlocked against each other. Two
-    # live E2E runs let every catalog app independently burn its own retry budget against that same
-    # wall, turning a diagnosable dead end into a 30+ minute hang before either was cancelled.
-    # Checked once here: this pass can start already wedged (the observed E2E case was a second
-    # install pass right after a WAU run re-provisioned App Installer without its framework).
-    $conflictingVersions = Get-ConflictingDesktopAppInstallerVersions
-    $wingetDeadlocked = $conflictingVersions.Count -gt 1
-    if ($wingetDeadlocked) {
-        Write-ErrorMessage "winget is deadlocked between $($conflictingVersions.Count) conflicting DesktopAppInstaller versions ($($conflictingVersions -join ', ')) - a structural AppX conflict outside this installer's control, not something retrying resolves. Every app below will be marked failed without an install attempt; see issue #279 for details."
-    }
+    # Run-level circuit breaker (review findings P2-8, P2-10). Set once an app could not launch
+    # winget and a follow-up check (Invoke-WingetLaunchCircuitBreaker) found that winget still
+    # cannot be started: every remaining app then fails at once with one reason, and the retry
+    # pass is skipped. Without it, each app spent its own launch retries, twice, on a winget that
+    # was not coming back (about 24 minutes before the run reported failure).
+    $wingetNotLaunchable = $false
 
     Foreach ($app in $apps) {
-        if ($wingetDeadlocked) {
-            $failedApps += @{ Name = $app.name; Reason = "winget deadlocked between conflicting DesktopAppInstaller versions ($($conflictingVersions -join ', ')); see issue #279" }
-            continue
-        }
+        $outcome = $null
         try {
             # Shared per-app pipeline — pre-check, dispatch, post-verify (issue #188). Messages,
             # summary bucketing, and exit-code policy stay here in the orchestrator.
             # -Silent: an unattended run installs MSI packages with /quiet, not /passive.
-            $outcome = Install-AppWithVerification -App $app -Silent:$effectiveNonInteractive -WhatIf:$WhatIf
+            $outcome = Install-AppWithVerification -App $app -Silent:$effectiveNonInteractive -WhatIf:$WhatIf -WingetNotLaunchable:$wingetNotLaunchable
 
             switch ($outcome.Status) {
                 'Skipped' {
@@ -331,7 +324,7 @@ function Invoke-WingetInstall {
                 default {
                     # Surface the diagnostic detail the install pipeline already returns (winget
                     # exit code, attempts, scope fallback) instead of discarding it (issue #189).
-                    $failureReason = Format-InstallFailureReason -FailureReason $outcome.FailureReason -InstallResult $outcome.InstallResult
+                    $failureReason = Format-InstallFailureReason -FailureReason $outcome.FailureReason -InstallResult $outcome.InstallResult -LaunchError $outcome.LaunchError
                     switch ($outcome.FailureReason) {
                         'PreCheckTimeout' {
                             # Failed instead of silently dropped: the app then flows through the
@@ -356,6 +349,11 @@ function Invoke-WingetInstall {
             Write-ErrorMessage "Failed to install: $($app.name). Error: $_"
             $failedApps += @{ Name = $app.name; Reason = "Unexpected error: $_" }
         }
+
+        # A dry run never launches winget beyond its read-only checks, so it never trips this.
+        if (-not $WhatIf -and -not $wingetNotLaunchable -and $outcome -and (Invoke-WingetLaunchCircuitBreaker -Outcome $outcome)) {
+            $wingetNotLaunchable = $true
+        }
     }
 
     # Ongoing app updates are handled by Winget-AutoUpdate (set up below), which runs as SYSTEM on a
@@ -374,8 +372,8 @@ function Invoke-WingetInstall {
 
     # Retry any failed installations once before producing the final summary
     if ($failedApps.Count -gt 0) {
-        if ($wingetDeadlocked) {
-            Write-WarningMessage 'Skipping the retry pass: winget is still deadlocked between conflicting DesktopAppInstaller versions (see above); retrying would not help.'
+        if ($wingetNotLaunchable) {
+            Write-WarningMessage 'Skipping the retry pass: winget cannot be launched on this machine (see above); retrying would not help.'
         }
         elseif (-not $WhatIf) {
             Write-Host ''
@@ -386,16 +384,18 @@ function Invoke-WingetInstall {
 
             foreach ($failedApp in $appsToRetry) {
                 $appName = $failedApp.Name
+                $outcome = $null
                 try {
                     Write-Info "Retrying: $appName"
                     $appDef = $apps | Where-Object { $_.name -eq $appName } | Select-Object -First 1
 
                     # Same shared pipeline as the first pass (issue #188), so a lingering
                     # 0x80073d19 session error gets its backoff retries here too (issue #150).
-                    $outcome = Install-AppWithVerification -App $appDef -Silent:$effectiveNonInteractive
+                    # The circuit breaker holds here too: once it trips, the rest fail at once.
+                    $outcome = Install-AppWithVerification -App $appDef -Silent:$effectiveNonInteractive -WingetNotLaunchable:$wingetNotLaunchable
 
                     if ($outcome.Status -eq 'Failed') {
-                        $failureReason = Format-InstallFailureReason -FailureReason $outcome.FailureReason -InstallResult $outcome.InstallResult
+                        $failureReason = Format-InstallFailureReason -FailureReason $outcome.FailureReason -InstallResult $outcome.InstallResult -LaunchError $outcome.LaunchError
                         switch ($outcome.FailureReason) {
                             'PreCheckTimeout' {
                                 Write-WarningMessage "Winget list timed out for retry: $appName. Assuming installation failed."
@@ -419,6 +419,10 @@ function Invoke-WingetInstall {
                 catch {
                     Write-ErrorMessage "Retry failed: $appName. Error: $_"
                     $failedApps += @{ Name = $appName; Reason = "Unexpected error: $_" }
+                }
+
+                if (-not $wingetNotLaunchable -and $outcome -and (Invoke-WingetLaunchCircuitBreaker -Outcome $outcome)) {
+                    $wingetNotLaunchable = $true
                 }
             }
         }
@@ -449,13 +453,19 @@ function Invoke-WingetInstall {
     }
 
     # A run must never report success while leaving winget unusable (whatever broke it, the next
-    # run of this installer and every WAU update would fail). One bounded launch probe, after the
-    # last thing this run does to the machine; a healthy winget answers on the first probe. Skipped
-    # in a dry run, which never touched winget's state.
+    # run of this installer and every WAU update would fail). One bounded launch check, after the
+    # last thing this run does to the machine; a healthy winget answers on the first try. Up to
+    # five tries 15 seconds apart (about a minute) for a failure that may clear on its own, and a
+    # single one when the circuit breaker already found winget unusable. Skipped in a dry run,
+    # which never touched winget's state.
     $wingetUsableAtEnd = $true
     if (-not $WhatIf) {
         try {
-            $wingetUsableAtEnd = Wait-WingetLaunchable -TimeoutSeconds 60 -PollIntervalSeconds 15 -RequiredConsecutiveSuccesses 1
+            $endCheckAttempts = 5
+            if ($wingetNotLaunchable) {
+                $endCheckAttempts = 1
+            }
+            $wingetUsableAtEnd = [bool](Test-WingetLaunchable -Attempts $endCheckAttempts -RetryDelaySeconds 15).Launchable
         }
         catch {
             # A bug in the probe is not evidence that winget is broken; report it and move on.

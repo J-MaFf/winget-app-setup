@@ -275,10 +275,10 @@ function Test-AppxMissingFrameworkDependency {
          covers a package staged on the machine but never registered for this account.
 
     Get-AppxPackage/Add-AppxPackage are used from pwsh here, as they already are elsewhere in this
-    module (Resolve-WingetExecutable, Test-AndInstallWinget). The Appx cmdlet known to be unreliable
-    under PowerShell 7 is the DISM-backed Add-AppxProvisionedPackage, which Invoke-AppxProvisioning
-    delegates to Windows PowerShell 5.1 for that reason; the per-user registration cmdlets used here
-    are not affected.
+    module (Test-AndInstallWinget, Test-WindowsTerminalInstalled). The Appx cmdlet known to be
+    unreliable under PowerShell 7 is the DISM-backed Add-AppxProvisionedPackage, which
+    Invoke-AppxProvisioning delegates to Windows PowerShell 5.1 for that reason; the per-user
+    registration cmdlets used here are not affected.
 .RETURNS
     [bool] True when a registration call completed without error, otherwise False. Callers re-check
     winget availability themselves - a successful registration is not proof the alias resolved.
