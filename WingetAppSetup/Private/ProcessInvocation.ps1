@@ -20,6 +20,7 @@
     WingetInstall     one `winget install`: the download, the installer itself, and winget's wait
                       for another winget install on the machine (30 minutes).
     WingetDownload    one `winget download` (30 minutes).
+    WingetUninstall   one `winget uninstall`, the app's own uninstaller included (15 minutes).
     WingetListCheck   the per-app `winget list` check before and after an install (15 seconds, the
                       limit those checks have always had).
     WingetVersion     the `winget --version` launch check (30 seconds; it does no network or
@@ -39,13 +40,14 @@
 function Get-ProcessTimeoutSeconds {
     param (
         [Parameter(Mandatory = $true)]
-        [ValidateSet('WingetInstall', 'WingetDownload', 'WingetListCheck', 'WingetVersion', 'WingetList', 'WingetSourceUpdate', 'WingetSourceReset', 'MsiExec', 'WebDownload', 'WebDownloadStall')]
+        [ValidateSet('WingetInstall', 'WingetDownload', 'WingetUninstall', 'WingetListCheck', 'WingetVersion', 'WingetList', 'WingetSourceUpdate', 'WingetSourceReset', 'MsiExec', 'WebDownload', 'WebDownloadStall')]
         [string]$Operation
     )
 
     switch ($Operation) {
         'WingetInstall' { return 1800 }
         'WingetDownload' { return 1800 }
+        'WingetUninstall' { return 900 }
         'WingetListCheck' { return 15 }
         'WingetVersion' { return 30 }
         'WingetList' { return 120 }

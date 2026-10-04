@@ -30,7 +30,9 @@
         # System pre-flight checks
         'Test-SystemRequirements',
         # Install orchestration
-        'Invoke-WingetInstall'
+        'Invoke-WingetInstall',
+        # Uninstall orchestration (the body of winget-app-uninstall.ps1)
+        'Invoke-WingetUninstall'
     )
 
     CmdletsToExport   = @()

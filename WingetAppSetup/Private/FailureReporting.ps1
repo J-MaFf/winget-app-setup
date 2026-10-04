@@ -519,14 +519,19 @@ function Write-DeferredAppsSummary {
     Invoke-WingetInstall so the rendering is unit-testable without driving the whole orchestrator.
 .PARAMETER FailedApps
     Array of @{ Name = <winget package id>; Reason = <string> } hashtables tracked by
-    Invoke-WingetInstall.
+    Invoke-WingetInstall (or Invoke-WingetUninstall).
+.PARAMETER Title
+    The table's title. Default 'Failed Installations'; the uninstaller passes 'Failed Uninstalls'.
 #>
 function Write-FailedAppsSummary {
     param (
         [Parameter(Mandatory = $false)]
         [AllowNull()]
         [AllowEmptyCollection()]
-        [hashtable[]]$FailedApps
+        [hashtable[]]$FailedApps,
+
+        [Parameter(Mandatory = $false)]
+        [string]$Title = 'Failed Installations'
     )
 
     if (-not $FailedApps -or $FailedApps.Count -eq 0) {
@@ -536,5 +541,5 @@ function Write-FailedAppsSummary {
     $failedRows = @(foreach ($failedApp in $FailedApps) {
             , @([string]$failedApp.Name, [string]$failedApp.Reason)
         })
-    Write-Table -Headers @('App', 'Reason') -Rows $failedRows -Title 'Failed Installations'
+    Write-Table -Headers @('App', 'Reason') -Rows $failedRows -Title $Title
 }

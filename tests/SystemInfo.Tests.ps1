@@ -1,5 +1,6 @@
 # SystemInfo.Tests.ps1
-# Tests for WingetAppSetup/Private/SystemInfo.ps1: OS build number and manufacturer lookups.
+# Tests for WingetAppSetup/Private/SystemInfo.ps1: OS build number, manufacturer and PowerShell
+# edition lookups.
 # Split from the old single-file suite Test-WingetAppInstall.Tests.ps1 (issue #192).
 # Renamed from Environment.Tests.ps1 when the dead PATH-mutation helpers (Add-ToEnvironmentPath,
 # Test-PathInEnvironment, Test-PathListContainsEntry, Get-PersistedEnvironmentPath,
@@ -75,5 +76,14 @@ Describe 'Get-OSArchitecture (review finding P3-32)' {
             $env:PROCESSOR_ARCHITECTURE = $savedArchitecture
             $env:PROCESSOR_ARCHITEW6432 = $savedArchitectureW6432
         }
+    }
+}
+
+Describe 'Get-PowerShellEdition (review finding P3-18)' {
+    It 'Returns the running PowerShell''s edition' {
+        $edition = Get-PowerShellEdition
+
+        $edition | Should -BeOfType [string]
+        $edition | Should -Be $PSVersionTable.PSEdition
     }
 }

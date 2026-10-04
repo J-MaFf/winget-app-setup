@@ -69,3 +69,16 @@ function Get-OSArchitecture {
     }
     return $architecture
 }
+
+function Get-PowerShellEdition {
+    <#
+    .SYNOPSIS
+        Returns the edition of the PowerShell running this code: 'Core' (PowerShell 7) or 'Desktop'
+        (Windows PowerShell 5.1).
+    .DESCRIPTION
+        A mockable seam for $PSVersionTable.PSEdition, which tests cannot change. The uninstaller
+        keeps PowerShell 7 when it is running in it (Get-HostingShellSkipReason, review finding
+        P3-18).
+    #>
+    return [string]$PSVersionTable.PSEdition
+}

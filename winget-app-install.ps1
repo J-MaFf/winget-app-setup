@@ -61,14 +61,201 @@ param (
 # This script is assembled from the WingetAppSetup module by build/Build-WingetInstallScript.ps1.
 # Edit the function source under WingetAppSetup/Public and WingetAppSetup/Private, then re-run the
 # build to regenerate this file. See readme.md ("Project layout") for details.
-# Build id: 1.0.0+ce7a8332 (module version + SHA256 fragment of this whole script; issue #189).
+# Build id: 1.0.0+e2654a24 (module version + SHA256 fragment of this whole script; issue #189).
 # ------------------------------------------------------------------------------------------------
 
 # Content-derived build identity, logged at startup so a transcript from a remote machine
 # identifies exactly which installer build produced it (issue #189).
-$script:InstallerBuildId = '1.0.0+ce7a8332'
+$script:InstallerBuildId = '1.0.0+e2654a24'
 
 # ------------------------------------------------Functions------------------------------------------------
+
+# --- AppUninstall ---
+# The uninstaller's per-app step (review findings P2-19 and P3-18). winget-app-uninstall.ps1 used
+# to decide "installed" from `winget list`'s exit code alone, so a winget that could not be started
+# (an admin account with no winget of its own, SYSTEM) read as "not installed" for every app; it
+# ran a bare `winget uninstall` with no time limit; and it removed every catalog app, whatever its
+# condition, the PowerShell 7 and Windows Terminal it was running in included. Runs under Windows
+# PowerShell 5.1 too: the uninstaller's elevated relaunch is System32's powershell.exe.
+
+<#
+.SYNOPSIS
+    Returns why the uninstaller must not remove a shell it is running in, or $null.
+.DESCRIPTION
+    Removing the shell that runs this script, or the terminal that hosts its window, ends the run
+    part-way: no summary, Winget-AutoUpdate left as it was, and no exit code to read (review finding
+    P3-18). So, by default, two catalog apps are kept when they host this run:
+      - Microsoft.PowerShell when this script runs in PowerShell 7 (Get-PowerShellEdition 'Core').
+        Started from a window that is not elevated, the uninstaller relaunches itself in Windows
+        PowerShell, which can remove PowerShell 7.
+      - Microsoft.WindowsTerminal when Windows Terminal hosts this session
+        (Test-WindowsTerminalHostsCurrentSession: inside a Windows Terminal tab, or Windows Terminal
+        is the default terminal application, which hands every new console window to it).
+    The reason says how to remove the app instead.
+.PARAMETER PackageId
+    The catalog app's winget package id.
+.RETURNS
+    [string] The skip reason, or $null when removing the app does not affect this run.
+#>
+function Get-HostingShellSkipReason {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$PackageId
+    )
+
+    if ($PackageId -eq 'Microsoft.PowerShell' -and (Get-PowerShellEdition) -eq 'Core') {
+        return 'this uninstaller is running in PowerShell 7; to remove it, run winget-app-uninstall.ps1 from Windows PowerShell'
+    }
+    if ($PackageId -eq 'Microsoft.WindowsTerminal' -and (Test-WindowsTerminalHostsCurrentSession)) {
+        return 'Windows Terminal hosts this window, or is the default terminal application, so removing it would close this window; to remove it, set the default terminal application to Windows Console Host and run winget-app-uninstall.ps1 from a window Windows Terminal does not host'
+    }
+    return $null
+}
+
+<#
+.SYNOPSIS
+    Uninstalls one catalog app with winget, without prompting, and says what happened.
+.DESCRIPTION
+    The uninstaller's counterpart of Install-AppWithVerification, in this order:
+      1. Installed check: Test-WingetPackageInstalled under the per-app time limit
+         (WingetListCheck). Only a `winget list` that answered counts. A winget that could not be
+         started (CheckLaunchFailed), a check that ran out of time (CheckTimeout) or a `winget list`
+         that ran and failed (CheckFailed) is a failure, never "not installed" (review finding
+         P2-19): that is what made an admin account with no winget of its own report every app as
+         not installed while all of them stayed on the machine.
+      2. Not installed: Skipped, NotInstalled.
+      3. A shell this run depends on (Get-HostingShellSkipReason): Skipped, HostsThisRun.
+      4. The app's catalog condition, with the installer's rule (review finding P3-18): falsy means
+         this tool does not manage the app on this machine (Dell Command Update on other hardware),
+         so it is Skipped, NotApplicable, and left alone. A condition that throws is warned about
+         and treated as applicable, as in the installer.
+      5. `winget uninstall --exact --id <id> --silent --accept-source-agreements
+         --disable-interactivity` through Invoke-WingetProcess, under the WingetUninstall time limit
+         (review finding P3-18): output echoed into the console and the transcript, the installer's
+         log written next to it when there is a run log folder, and the process stopped when the
+         limit runs out. --silent always: without it winget runs an app's interactive uninstall
+         command, which can wait for a click nobody makes. Exit 0 is Uninstalled. A result that
+         says a restart finishes it (Test-WingetRestartRequiredResult) is Uninstalled with
+         RestartRequired. Anything else is Failed.
+    The installed check comes first, unlike the install pipeline's condition-first order, so an app
+    that is not on the machine is reported as not installed, not as a shell or an app this tool
+    does not manage.
+.PARAMETER App
+    A validated catalog entry (Test-AppDefinitions): @{ name = '<winget package id>' }, with the
+    optional 'condition' and 'conditionDescription' entries.
+.PARAMETER WhatIf
+    Dry run: steps 1 to 4 run (they only read), and an app that would be removed comes back as
+    Uninstalled without winget uninstall being run.
+.RETURNS
+    [hashtable] @{
+        Status          = 'Uninstalled' | 'Skipped' | 'Failed'
+        SkipReason      = 'NotInstalled' | 'HostsThisRun' | 'NotApplicable' when Skipped
+        FailureReason   = 'CheckTimeout' | 'CheckLaunchFailed' | 'CheckFailed' |
+                          'UninstallLaunchFailed' | 'UninstallTimeout' | 'UninstallFailed' when Failed
+        Reason          = the text the caller shows in parentheses after the app id
+        ExitCode        = the exit code of the winget call that decided a failure, or $null
+        RestartRequired = True when the uninstall said a restart finishes it
+    }
+#>
+function Uninstall-CatalogApp {
+    param (
+        [Parameter(Mandatory = $true)]
+        [hashtable]$App,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$WhatIf
+    )
+
+    $id = $App.name
+    $result = @{ Status = 'Failed'; SkipReason = $null; FailureReason = $null; Reason = $null; ExitCode = $null; RestartRequired = $false }
+
+    $checkTimeoutSeconds = Get-ProcessTimeoutSeconds -Operation WingetListCheck
+    $check = Test-WingetPackageInstalled -PackageId $id -TimeoutSeconds $checkTimeoutSeconds
+    if ($check.TimedOut) {
+        $result.FailureReason = 'CheckTimeout'
+        $result.Reason = "could not check whether it is installed: 'winget list' did not answer within $checkTimeoutSeconds seconds"
+        return $result
+    }
+    if ($check.LaunchFailed) {
+        $result.FailureReason = 'CheckLaunchFailed'
+        $result.Reason = 'could not check whether it is installed: winget could not be started ({0})' -f "$($check.LaunchError)".Trim().TrimEnd('.')
+        return $result
+    }
+    if ($check.CheckFailed) {
+        $result.FailureReason = 'CheckFailed'
+        $result.ExitCode = $check.ExitCode
+        $result.Reason = "could not check whether it is installed: 'winget list' failed with {0}" -f (Format-WingetExitCode -ExitCode ([int]$check.ExitCode))
+        return $result
+    }
+    if (-not $check.Installed) {
+        $result.Status = 'Skipped'
+        $result.SkipReason = 'NotInstalled'
+        $result.Reason = 'not installed'
+        return $result
+    }
+
+    $hostReason = Get-HostingShellSkipReason -PackageId $id
+    if ($hostReason) {
+        $result.Status = 'Skipped'
+        $result.SkipReason = 'HostsThisRun'
+        $result.Reason = $hostReason
+        return $result
+    }
+
+    if ($App.condition) {
+        $conditionMet = $true
+        try {
+            $conditionMet = [bool](& $App.condition)
+        }
+        catch {
+            Write-WarningMessage "Condition for $id failed to evaluate ($($_.Exception.Message)); treating as applicable."
+        }
+        if (-not $conditionMet) {
+            $conditionText = 'condition not met'
+            if ($App.conditionDescription) {
+                $conditionText = $App.conditionDescription
+            }
+            $result.Status = 'Skipped'
+            $result.SkipReason = 'NotApplicable'
+            $result.Reason = "not applicable: $conditionText"
+            return $result
+        }
+    }
+
+    if ($WhatIf) {
+        $result.Status = 'Uninstalled'
+        return $result
+    }
+
+    Write-Info "Uninstalling: $id"
+    $timeoutSeconds = Get-ProcessTimeoutSeconds -Operation WingetUninstall
+    $run = Invoke-WingetProcess -ArgumentList @('uninstall', '--exact', '--id', $id, '--silent', '--accept-source-agreements', '--disable-interactivity') -TimeoutSeconds $timeoutSeconds
+    if ($run.LaunchFailed) {
+        $result.FailureReason = 'UninstallLaunchFailed'
+        $result.Reason = 'winget could not be started ({0})' -f "$($run.LaunchError)".Trim().TrimEnd('.')
+        return $result
+    }
+    if ($run.TimedOut) {
+        $result.FailureReason = 'UninstallTimeout'
+        $result.Reason = "'winget uninstall' did not finish within {0} minutes and was stopped" -f [Math]::Round($timeoutSeconds / 60)
+        return $result
+    }
+
+    $restartRequired = Test-WingetRestartRequiredResult -ExitCode $run.ExitCode -Output $run.Output
+    if ($run.ExitCode -eq 0 -or $restartRequired) {
+        $result.Status = 'Uninstalled'
+        $result.RestartRequired = [bool]$restartRequired
+        return $result
+    }
+
+    $result.FailureReason = 'UninstallFailed'
+    $result.ExitCode = $run.ExitCode
+    $result.Reason = "'winget uninstall' exited with {0}" -f (Format-WingetExitCode -ExitCode ([int]$run.ExitCode))
+    if ($run.LogPath -and (Test-Path -LiteralPath $run.LogPath)) {
+        $result.Reason += "; uninstaller log: $($run.LogPath)"
+    }
+    return $result
+}
 
 # --- Elevation ---
 <#
@@ -977,14 +1164,19 @@ function Write-DeferredAppsSummary {
     Invoke-WingetInstall so the rendering is unit-testable without driving the whole orchestrator.
 .PARAMETER FailedApps
     Array of @{ Name = <winget package id>; Reason = <string> } hashtables tracked by
-    Invoke-WingetInstall.
+    Invoke-WingetInstall (or Invoke-WingetUninstall).
+.PARAMETER Title
+    The table's title. Default 'Failed Installations'; the uninstaller passes 'Failed Uninstalls'.
 #>
 function Write-FailedAppsSummary {
     param (
         [Parameter(Mandatory = $false)]
         [AllowNull()]
         [AllowEmptyCollection()]
-        [hashtable[]]$FailedApps
+        [hashtable[]]$FailedApps,
+
+        [Parameter(Mandatory = $false)]
+        [string]$Title = 'Failed Installations'
     )
 
     if (-not $FailedApps -or $FailedApps.Count -eq 0) {
@@ -994,7 +1186,7 @@ function Write-FailedAppsSummary {
     $failedRows = @(foreach ($failedApp in $FailedApps) {
             , @([string]$failedApp.Name, [string]$failedApp.Reason)
         })
-    Write-Table -Headers @('App', 'Reason') -Rows $failedRows -Title 'Failed Installations'
+    Write-Table -Headers @('App', 'Reason') -Rows $failedRows -Title $Title
 }
 
 # --- GraphicalTools ---
@@ -3836,6 +4028,7 @@ function Invoke-PowerShell7Bootstrap {
     WingetInstall     one `winget install`: the download, the installer itself, and winget's wait
                       for another winget install on the machine (30 minutes).
     WingetDownload    one `winget download` (30 minutes).
+    WingetUninstall   one `winget uninstall`, the app's own uninstaller included (15 minutes).
     WingetListCheck   the per-app `winget list` check before and after an install (15 seconds, the
                       limit those checks have always had).
     WingetVersion     the `winget --version` launch check (30 seconds; it does no network or
@@ -3855,13 +4048,14 @@ function Invoke-PowerShell7Bootstrap {
 function Get-ProcessTimeoutSeconds {
     param (
         [Parameter(Mandatory = $true)]
-        [ValidateSet('WingetInstall', 'WingetDownload', 'WingetListCheck', 'WingetVersion', 'WingetList', 'WingetSourceUpdate', 'WingetSourceReset', 'MsiExec', 'WebDownload', 'WebDownloadStall')]
+        [ValidateSet('WingetInstall', 'WingetDownload', 'WingetUninstall', 'WingetListCheck', 'WingetVersion', 'WingetList', 'WingetSourceUpdate', 'WingetSourceReset', 'MsiExec', 'WebDownload', 'WebDownloadStall')]
         [string]$Operation
     )
 
     switch ($Operation) {
         'WingetInstall' { return 1800 }
         'WingetDownload' { return 1800 }
+        'WingetUninstall' { return 900 }
         'WingetListCheck' { return 15 }
         'WingetVersion' { return 30 }
         'WingetList' { return 120 }
@@ -5242,6 +5436,19 @@ function Get-OSArchitecture {
     return $architecture
 }
 
+function Get-PowerShellEdition {
+    <#
+    .SYNOPSIS
+        Returns the edition of the PowerShell running this code: 'Core' (PowerShell 7) or 'Desktop'
+        (Windows PowerShell 5.1).
+    .DESCRIPTION
+        A mockable seam for $PSVersionTable.PSEdition, which tests cannot change. The uninstaller
+        keeps PowerShell 7 when it is running in it (Get-HostingShellSkipReason, review finding
+        P3-18).
+    #>
+    return [string]$PSVersionTable.PSEdition
+}
+
 # --- WauSupport ---
 <#
 .SYNOPSIS
@@ -6439,6 +6646,67 @@ function Test-WindowsTerminalInstalled {
     return @(Get-WindowsTerminalSettingsPaths | Where-Object { $_ -match '\\Packages\\Microsoft\.WindowsTerminal_8wekyb3d8bbwe\\' }).Count -gt 0
 }
 
+<#
+.SYNOPSIS
+    Removes the "default terminal application" setting that names Windows Terminal when Windows
+    Terminal is not installed for this account.
+.DESCRIPTION
+    Set-WindowsTerminalAsDefaultTerminalApplication writes DelegationConsole and DelegationTerminal
+    under HKCU:\Console\%%Startup. Removing Windows Terminal leaves them behind (review finding
+    P3-18). Windows then falls back to the console host, but Test-WindowsTerminalHostsCurrentSession
+    still reads the values as "this session is hosted by Windows Terminal", so the installer would
+    skip Microsoft.WindowsTerminal as not applicable on every later run. The uninstaller calls this
+    after its app loop once winget no longer lists Windows Terminal: when both values still name
+    Windows Terminal (the values the installer writes) and Test-WindowsTerminalInstalled finds no
+    Windows Terminal either, both are removed, which is Windows' own default ("Let Windows
+    decide"). Values naming another terminal (Windows Terminal
+    Preview, the console host) are left alone, and so is everything while a Windows Terminal is
+    installed. The values are per-user: this changes only the account running it.
+.PARAMETER WhatIf
+    Dry run: says what would be removed and changes nothing.
+.RETURNS
+    [bool] True when the values were removed (under -WhatIf: would be removed).
+#>
+function Reset-WindowsTerminalDelegation {
+    param (
+        [Parameter(Mandatory = $false)]
+        [switch]$WhatIf
+    )
+
+    # The values Set-WindowsTerminalAsDefaultTerminalApplication writes.
+    $registryPath = 'HKCU:\Console\%%Startup'
+    $delegationConsole = '{2EACA947-7F5F-4CFA-BA87-8F7FBEEFBE69}'
+    $delegationTerminal = '{E12CFF52-A866-4C77-9A90-F570A7AA2C6B}'
+
+    try {
+        $values = Get-ItemProperty -Path $registryPath -ErrorAction Stop
+    }
+    catch {
+        # No such key: nothing names Windows Terminal.
+        return $false
+    }
+    if ($values.DelegationConsole -ne $delegationConsole -or $values.DelegationTerminal -ne $delegationTerminal) {
+        return $false
+    }
+    if (Test-WindowsTerminalInstalled) {
+        return $false
+    }
+
+    if ($WhatIf) {
+        Write-Info "[DRY-RUN] Would remove the default terminal application setting ($registryPath DelegationConsole and DelegationTerminal), which names Windows Terminal although it is not installed."
+        return $true
+    }
+    try {
+        Remove-ItemProperty -Path $registryPath -Name 'DelegationConsole', 'DelegationTerminal' -ErrorAction Stop
+        Write-Success 'Removed the default terminal application setting that named Windows Terminal, which is not installed: Windows chooses the terminal again.'
+        return $true
+    }
+    catch {
+        Write-WarningMessage "Could not remove the default terminal application setting that names Windows Terminal ($registryPath): $_"
+        return $false
+    }
+}
+
 # --- WingetAgreementArgs ---
 <#
 .SYNOPSIS
@@ -7414,8 +7682,8 @@ function Test-WingetRestartRequiredResult {
     Returns the curated default application catalog shared by the installer and uninstaller.
 .DESCRIPTION
     Single source of truth for the app list (issue #190). Invoke-WingetInstall consumes it as the
-    default value of its -Apps parameter, and winget-app-uninstall.ps1 iterates the same catalog
-    for removal. Each entry is a hashtable with at least:
+    default value of its -Apps parameter, and Invoke-WingetUninstall (winget-app-uninstall.ps1)
+    removes the same apps. Each entry is a hashtable with at least:
       - name: the winget package id (validated by Test-AppDefinitions before use).
     Optional fields:
       - install: name of a package-specific install function that performs its own verification
@@ -7434,7 +7702,8 @@ function Test-WingetRestartRequiredResult {
         applicable, so a broken probe can never silently drop an app. A probe a condition calls
         must therefore throw when it has no answer, never return an empty or default value that
         reads as "does not apply" (Get-ComputerManufacturer, Get-OSArchitecture; review finding
-        P3-33).
+        P3-33). The uninstaller honours it too (Uninstall-CatalogApp, review finding P3-18): an
+        installed app whose condition is falsy is not this tool's to remove.
       - conditionDescription: short human-readable reason shown in the skip message, e.g.
         "Skipping: <id> (not applicable: <conditionDescription>)".
       - msixName: the app's MSIX package name. In a run for the whole PC (SYSTEM, or cross-user
@@ -8826,6 +9095,235 @@ function Test-SystemRequirements {
     }
 
     return $true
+}
+
+# --- Uninstall ---
+<#
+.SYNOPSIS
+    Uninstalls the curated apps and the automatic updates the installer set up, and returns an exit
+    code.
+.DESCRIPTION
+    The body of winget-app-uninstall.ps1 (review findings P2-19 and P3-18), which runs it after it
+    has made sure it is elevated. It reuses the installer's pieces rather than its own copies:
+      1. The app list is validated with Test-AppDefinitions, as the installer does (exit code 3).
+      2. winget is set up the way Invoke-WingetInstall does it, with Initialize-Winget (review
+         finding P3-25): App Installer's Group Policy, `winget --version`, the account fixes
+         (registering App Installer, then Repair-WinGetPackageManager, whose module is installed
+         only then) and the winget source. When winget still cannot be used, nothing is removed
+         and the run returns 2: without winget the uninstaller cannot tell which apps are installed,
+         and removing Winget-AutoUpdate anyway would leave every app on the machine without
+         updates. It used to report every app as "not installed", remove Winget-AutoUpdate and exit
+         0, which is what an admin account with no winget of its own (cross-user elevation) or
+         SYSTEM got.
+      3. Each app goes through Uninstall-CatalogApp: a check winget could not answer is a failure,
+         not "not installed"; the shells this run depends on are kept (Get-HostingShellSkipReason);
+         the catalog conditions are honoured; winget uninstall runs with --silent under a time
+         limit.
+      4. Once winget no longer lists Windows Terminal (removed now, or not installed), the
+         default-terminal setting that still names it is removed (Reset-WindowsTerminalDelegation).
+      5. Winget-AutoUpdate (and the legacy scheduled-update task) is removed last, and only when no
+         app failed: an app that could not be removed is still on the machine and keeps its
+         updates until a later run removes it.
+.PARAMETER WhatIf
+    Dry run: the read-only checks run and the summary shows what a real run would remove. Nothing is
+    uninstalled or changed, and nothing is installed (the winget setup only checks).
+.PARAMETER NonInteractive
+    For unattended runs: no summary grid-view window. Also turned on by
+    $env:WINGET_APP_SETUP_NONINTERACTIVE and when the session is not interactive
+    (Test-EffectiveNonInteractive).
+.PARAMETER Apps
+    The app definitions to remove. Default: Get-DefaultAppCatalog, the installer's list.
+.OUTPUTS
+    [int] The exit code. The function never ends the process; winget-app-uninstall.ps1 exits with
+    the returned code.
+.NOTES
+    Exit codes: 0 = every app was removed, was not installed, or was left alone on purpose (a shell
+    this run depends on, or an app whose catalog condition does not hold here), and
+    Winget-AutoUpdate was removed or was not installed; 1 = an app could not be removed or checked
+    (Winget-AutoUpdate is then kept), or Winget-AutoUpdate could not be removed; 2 = winget cannot
+    be started for this account, so nothing was removed; 3 = the app list has invalid entries or is
+    empty. A dry run returns 0 when winget cannot be started. winget-app-uninstall.ps1 adds 4 (not
+    elevated and the UAC prompt was declined or could not be shown) and 5 (an unexpected error).
+#>
+function Invoke-WingetUninstall {
+    [OutputType([int])]
+    param (
+        [Parameter(Mandatory = $false)]
+        [switch]$WhatIf,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$NonInteractive,
+
+        [Parameter(Mandatory = $false)]
+        [array]$Apps = (Get-DefaultAppCatalog)
+    )
+
+    $effectiveNonInteractive = Test-EffectiveNonInteractive -NonInteractive:$NonInteractive
+
+    if ($WhatIf) {
+        Write-Info '=== DRY-RUN MODE ENABLED ==='
+        Write-Info 'Nothing will be uninstalled or changed. This is a preview of what a real run would do.'
+        Write-Host ''
+    }
+
+    if (@($Apps).Count -eq 0) {
+        Write-ErrorMessage 'The app list is empty, so there is nothing to uninstall.'
+        return 3
+    }
+    $validationResult = Test-AppDefinitions -Apps $Apps
+    foreach ($validationWarning in $validationResult.Warnings) {
+        Write-WarningMessage $validationWarning
+    }
+    if ($validationResult.Errors.Count -gt 0) {
+        foreach ($validationError in $validationResult.Errors) {
+            Write-ErrorMessage $validationError
+        }
+        Write-ErrorMessage 'The app list has invalid entries, so nothing was uninstalled. Fix them and run the uninstaller again.'
+        return 3
+    }
+    $apps = @($validationResult.ValidApps)
+
+    # winget first, set up as the installer does it (review finding P2-19): Initialize-Winget, the
+    # installer's one probe, classify and fix step (review finding P3-25). It says why when winget
+    # cannot be used (not startable, or turned off by Group Policy); this run then removes nothing.
+    # A dry run only probes (-WhatIf).
+    $winget = Initialize-Winget -WhatIf:$WhatIf
+    $wingetAvailable = [bool]$winget.Ready
+    if (-not $wingetAvailable) {
+        if ($WhatIf) {
+            Write-Info '[DRY-RUN] winget cannot be started for this account yet. A real run would try to set it up (see above) and, if winget still could not start, stop with exit code 2 before removing anything. Without winget this preview cannot tell which apps are installed, so it stops here.'
+            return 0
+        }
+        Write-ErrorMessage 'winget cannot be started for this account, so nothing was uninstalled: without winget the uninstaller cannot tell which apps are installed. Winget-AutoUpdate was left in place, so the apps keep getting updates. Run the uninstaller from an account where winget works (for example the signed-in user, elevated), or install App Installer from https://aka.ms/getwinget, then run it again.'
+        return 2
+    }
+
+    Write-Info 'Uninstalling the following apps:'
+    foreach ($app in $apps) {
+        Write-Info $app.name
+    }
+
+    $uninstalledApps = @()
+    $skippedApps = @()
+    $failedApps = @()
+    $restartRequiredApps = @()
+    $terminalGone = $false
+    foreach ($app in $apps) {
+        try {
+            $outcome = Uninstall-CatalogApp -App $app -WhatIf:$WhatIf
+            if ($app.name -eq 'Microsoft.WindowsTerminal') {
+                $terminalGone = ($outcome.Status -eq 'Uninstalled' -and -not $WhatIf) -or ($outcome.SkipReason -eq 'NotInstalled')
+            }
+            switch ($outcome.Status) {
+                'Uninstalled' {
+                    if ($WhatIf) {
+                        Write-Info "[DRY-RUN] Would uninstall: $($app.name)"
+                    }
+                    elseif ($outcome.RestartRequired) {
+                        Write-Success "Successfully uninstalled: $($app.name) (a restart finishes removing it)"
+                        $restartRequiredApps += $app.name
+                    }
+                    else {
+                        Write-Success "Successfully uninstalled: $($app.name)"
+                    }
+                    $uninstalledApps += $app.name
+                }
+                'Skipped' {
+                    Write-WarningMessage "Skipping: $($app.name) ($($outcome.Reason))"
+                    $skippedApps += $app.name
+                }
+                default {
+                    Write-ErrorMessage "Failed to uninstall: $($app.name) ($($outcome.Reason))."
+                    $failedApps += @{ Name = $app.name; Reason = [string]$outcome.Reason }
+                }
+            }
+        }
+        catch {
+            Write-ErrorMessage "Failed to uninstall: $($app.name). Error: $_"
+            $failedApps += @{ Name = $app.name; Reason = "Unexpected error: $_" }
+        }
+    }
+
+    # The default-terminal setting the installer writes, once winget says Windows Terminal is gone
+    # (removed now, or earlier), so it no longer names a terminal that is not there.
+    # Reset-WindowsTerminalDelegation checks the package itself as well, so both have to agree.
+    if ($terminalGone) {
+        try {
+            [void](Reset-WindowsTerminalDelegation -WhatIf:$WhatIf)
+        }
+        catch {
+            Write-WarningMessage "Could not check the default terminal application setting: $_"
+        }
+    }
+
+    # Automatic updates last, and only when every app is gone or was left alone on purpose: an app
+    # that could not be removed (or checked) is still on the machine, and removing its updater would
+    # leave it without updates (review finding P2-19).
+    $autoUpdatesKept = $false
+    $autoUpdatesRemovalFailed = $false
+    if ($failedApps.Count -gt 0) {
+        $autoUpdatesKept = $true
+        $dryRunPrefix = ''
+        if ($WhatIf) {
+            $dryRunPrefix = '[DRY-RUN] '
+        }
+        Write-WarningMessage ('{0}Winget-AutoUpdate is kept: {1} app(s) could not be uninstalled, and it keeps them updated. Fix the failures above and run the uninstaller again to remove it.' -f $dryRunPrefix, $failedApps.Count)
+    }
+    else {
+        Write-Info 'Removing automatic-update components...'
+        try {
+            [void](Remove-LegacyScheduledUpdates -WhatIf:$WhatIf)
+            if (-not (Uninstall-WingetAutoUpdate -WhatIf:$WhatIf)) {
+                $autoUpdatesRemovalFailed = $true
+            }
+        }
+        catch {
+            Write-ErrorMessage "Removing automatic updates failed unexpectedly: $_"
+            $autoUpdatesRemovalFailed = $true
+        }
+    }
+
+    if ($WhatIf) {
+        Write-Host ''
+        Write-Info '=== DRY-RUN SUMMARY ==='
+        Write-Info 'A real run would do the following:'
+    }
+    else {
+        Write-Info 'Summary:'
+    }
+
+    $headers = @('Status', 'Apps')
+    $rows = @()
+    $appList = Format-AppList -AppArray $uninstalledApps
+    if ($appList) {
+        $rows += , @('Uninstalled', $appList)
+    }
+    $appList = Format-AppList -AppArray $skippedApps
+    if ($appList) {
+        $rows += , @('Skipped', $appList)
+    }
+    $appList = Format-AppList -AppArray @($failedApps | ForEach-Object { $_.Name })
+    if ($appList) {
+        $rows += , @('Failed', $appList)
+    }
+    # The grid view only when someone is there to close it; the text table prints either way.
+    Write-Table -Headers $headers -Rows $rows -AutoGridView (-not $effectiveNonInteractive) -Title 'Uninstallation Summary'
+    Write-FailedAppsSummary -FailedApps $failedApps -Title 'Failed Uninstalls'
+
+    if ($autoUpdatesKept) {
+        Write-WarningMessage 'Auto-updates: KEPT - Winget-AutoUpdate stays until every app is removed (see above).'
+    }
+    elseif ($autoUpdatesRemovalFailed) {
+        Write-ErrorMessage 'Auto-updates: FAILED - Winget-AutoUpdate could not be removed (see above). Run the uninstaller again.'
+    }
+    if ($restartRequiredApps.Count -gt 0) {
+        Write-WarningMessage ('Restart: REQUIRED to finish removing {0}.' -f ($restartRequiredApps -join ', '))
+    }
+
+    if ($failedApps.Count -gt 0 -or $autoUpdatesRemovalFailed) {
+        return 1
+    }
+    return 0
 }
 
 # --- WindowsTerminal ---

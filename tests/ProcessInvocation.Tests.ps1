@@ -44,7 +44,7 @@ BeforeAll {
 
 Describe 'Get-ProcessTimeoutSeconds' {
     It 'Gives every operation a positive limit' {
-        foreach ($operation in 'WingetInstall', 'WingetDownload', 'WingetListCheck', 'WingetVersion', 'WingetList', 'WingetSourceUpdate', 'WingetSourceReset', 'MsiExec', 'WebDownload', 'WebDownloadStall') {
+        foreach ($operation in 'WingetInstall', 'WingetDownload', 'WingetUninstall', 'WingetListCheck', 'WingetVersion', 'WingetList', 'WingetSourceUpdate', 'WingetSourceReset', 'MsiExec', 'WebDownload', 'WebDownloadStall') {
             Get-ProcessTimeoutSeconds -Operation $operation | Should -BeGreaterThan 0 -Because $operation
         }
     }
@@ -55,6 +55,10 @@ Describe 'Get-ProcessTimeoutSeconds' {
         foreach ($operation in 'WingetList', 'WingetSourceUpdate', 'WingetSourceReset') {
             Get-ProcessTimeoutSeconds -Operation $operation | Should -BeLessOrEqual 300 -Because $operation
         }
+    }
+
+    It 'Gives one winget uninstall 15 minutes, as one msiexec has (review finding P3-18)' {
+        Get-ProcessTimeoutSeconds -Operation WingetUninstall | Should -Be 900
     }
 
     It 'Keeps the 15-second limit the per-app list checks always had' {

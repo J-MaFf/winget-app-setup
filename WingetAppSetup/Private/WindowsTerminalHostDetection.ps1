@@ -120,3 +120,64 @@ function Test-WindowsTerminalInstalled {
 
     return @(Get-WindowsTerminalSettingsPaths | Where-Object { $_ -match '\\Packages\\Microsoft\.WindowsTerminal_8wekyb3d8bbwe\\' }).Count -gt 0
 }
+
+<#
+.SYNOPSIS
+    Removes the "default terminal application" setting that names Windows Terminal when Windows
+    Terminal is not installed for this account.
+.DESCRIPTION
+    Set-WindowsTerminalAsDefaultTerminalApplication writes DelegationConsole and DelegationTerminal
+    under HKCU:\Console\%%Startup. Removing Windows Terminal leaves them behind (review finding
+    P3-18). Windows then falls back to the console host, but Test-WindowsTerminalHostsCurrentSession
+    still reads the values as "this session is hosted by Windows Terminal", so the installer would
+    skip Microsoft.WindowsTerminal as not applicable on every later run. The uninstaller calls this
+    after its app loop once winget no longer lists Windows Terminal: when both values still name
+    Windows Terminal (the values the installer writes) and Test-WindowsTerminalInstalled finds no
+    Windows Terminal either, both are removed, which is Windows' own default ("Let Windows
+    decide"). Values naming another terminal (Windows Terminal
+    Preview, the console host) are left alone, and so is everything while a Windows Terminal is
+    installed. The values are per-user: this changes only the account running it.
+.PARAMETER WhatIf
+    Dry run: says what would be removed and changes nothing.
+.RETURNS
+    [bool] True when the values were removed (under -WhatIf: would be removed).
+#>
+function Reset-WindowsTerminalDelegation {
+    param (
+        [Parameter(Mandatory = $false)]
+        [switch]$WhatIf
+    )
+
+    # The values Set-WindowsTerminalAsDefaultTerminalApplication writes.
+    $registryPath = 'HKCU:\Console\%%Startup'
+    $delegationConsole = '{2EACA947-7F5F-4CFA-BA87-8F7FBEEFBE69}'
+    $delegationTerminal = '{E12CFF52-A866-4C77-9A90-F570A7AA2C6B}'
+
+    try {
+        $values = Get-ItemProperty -Path $registryPath -ErrorAction Stop
+    }
+    catch {
+        # No such key: nothing names Windows Terminal.
+        return $false
+    }
+    if ($values.DelegationConsole -ne $delegationConsole -or $values.DelegationTerminal -ne $delegationTerminal) {
+        return $false
+    }
+    if (Test-WindowsTerminalInstalled) {
+        return $false
+    }
+
+    if ($WhatIf) {
+        Write-Info "[DRY-RUN] Would remove the default terminal application setting ($registryPath DelegationConsole and DelegationTerminal), which names Windows Terminal although it is not installed."
+        return $true
+    }
+    try {
+        Remove-ItemProperty -Path $registryPath -Name 'DelegationConsole', 'DelegationTerminal' -ErrorAction Stop
+        Write-Success 'Removed the default terminal application setting that named Windows Terminal, which is not installed: Windows chooses the terminal again.'
+        return $true
+    }
+    catch {
+        Write-WarningMessage "Could not remove the default terminal application setting that names Windows Terminal ($registryPath): $_"
+        return $false
+    }
+}

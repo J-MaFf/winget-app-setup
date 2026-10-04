@@ -1,7 +1,8 @@
 # Tests for WingetAppSetup/Private/WindowsTerminalHostDetection.ps1 (issue #271): detecting
 # whether the current session's console is itself hosted by Windows Terminal (the self-lock
 # condition that made winget repeatedly fail to launch while installing/verifying
-# Microsoft.WindowsTerminal), and whether Windows Terminal is actually installed.
+# Microsoft.WindowsTerminal), whether Windows Terminal is actually installed, and the uninstaller's
+# reset of the default-terminal setting once it is not (review finding P3-18).
 
 BeforeAll {
     . (Join-Path $PSScriptRoot 'TestHelpers.ps1')
@@ -161,5 +162,91 @@ Describe 'Test-WindowsTerminalInstalled' {
         Mock Get-WindowsTerminalSettingsPaths { @() }
 
         Test-WindowsTerminalInstalled | Should -Be $false
+    }
+}
+
+Describe 'Reset-WindowsTerminalDelegation (review finding P3-18)' {
+    BeforeEach {
+        Mock Write-Host { }
+        $script:successMessages = @()
+        Mock Write-Success { $script:successMessages += $Message }
+        $script:warningMessages = @()
+        Mock Write-WarningMessage { $script:warningMessages += $Message }
+        $script:infoMessages = @()
+        Mock Write-Info { $script:infoMessages += $Message }
+        Mock Test-WindowsTerminalInstalled { $false }
+        Mock Remove-ItemProperty { }
+
+        # What Set-WindowsTerminalAsDefaultTerminalApplication writes, captured from the real
+        # function so the two cannot drift apart.
+        $script:written = @{}
+        Mock Test-Path { $true } -ParameterFilter { $Path -eq 'HKCU:\Console\%%Startup' }
+        Mock Get-ItemProperty { [pscustomobject]@{} } -ParameterFilter { $Path -eq 'HKCU:\Console\%%Startup' }
+        Mock New-ItemProperty { $script:written[$Name] = $Value }
+        [void](Set-WindowsTerminalAsDefaultTerminalApplication)
+        $script:installerValues = [pscustomobject]@{
+            DelegationConsole  = $script:written['DelegationConsole']
+            DelegationTerminal = $script:written['DelegationTerminal']
+        }
+    }
+
+    It 'Removes the values the installer writes once Windows Terminal is not installed' {
+        Mock Get-ItemProperty { $script:installerValues } -ParameterFilter { $Path -eq 'HKCU:\Console\%%Startup' }
+
+        Reset-WindowsTerminalDelegation | Should -BeTrue
+
+        Should -Invoke Remove-ItemProperty -Times 1 -Exactly -ParameterFilter {
+            $Path -eq 'HKCU:\Console\%%Startup' -and (@($Name | Sort-Object) -join ',') -eq 'DelegationConsole,DelegationTerminal'
+        }
+        $script:successMessages | Should -Contain 'Removed the default terminal application setting that named Windows Terminal, which is not installed: Windows chooses the terminal again.'
+    }
+
+    It 'Leaves the values alone while Windows Terminal is installed' {
+        Mock Get-ItemProperty { $script:installerValues } -ParameterFilter { $Path -eq 'HKCU:\Console\%%Startup' }
+        Mock Test-WindowsTerminalInstalled { $true }
+
+        Reset-WindowsTerminalDelegation | Should -BeFalse
+
+        Should -Invoke Remove-ItemProperty -Times 0 -Exactly
+    }
+
+    It 'Leaves values that name another terminal (<Case>) alone' -ForEach @(
+        @{ Case = 'the console host'; Console = '{B23D10C0-E52E-411E-9D5B-C09FDF709C7D}'; Terminal = '{B23D10C0-E52E-411E-9D5B-C09FDF709C7D}' }
+        @{ Case = 'Windows Terminal Preview'; Console = '{06EC847C-C0A5-46B8-92CB-7C92F6E35CD5}'; Terminal = '{86633F1F-6454-40EC-89CE-DA4EBA977EE2}' }
+        @{ Case = 'Let Windows decide'; Console = '{00000000-0000-0000-0000-000000000000}'; Terminal = '{00000000-0000-0000-0000-000000000000}' }
+    ) {
+        $script:values = [pscustomobject]@{ DelegationConsole = $Console; DelegationTerminal = $Terminal }
+        Mock Get-ItemProperty { $script:values } -ParameterFilter { $Path -eq 'HKCU:\Console\%%Startup' }
+
+        Reset-WindowsTerminalDelegation | Should -BeFalse
+
+        Should -Invoke Remove-ItemProperty -Times 0 -Exactly
+        Should -Invoke Test-WindowsTerminalInstalled -Times 0 -Exactly
+    }
+
+    It 'Does nothing when there is no default-terminal setting' {
+        Mock Get-ItemProperty { throw 'key not found' } -ParameterFilter { $Path -eq 'HKCU:\Console\%%Startup' }
+
+        Reset-WindowsTerminalDelegation | Should -BeFalse
+
+        Should -Invoke Remove-ItemProperty -Times 0 -Exactly
+    }
+
+    It 'Only says what it would remove in a dry run' {
+        Mock Get-ItemProperty { $script:installerValues } -ParameterFilter { $Path -eq 'HKCU:\Console\%%Startup' }
+
+        Reset-WindowsTerminalDelegation -WhatIf | Should -BeTrue
+
+        Should -Invoke Remove-ItemProperty -Times 0 -Exactly
+        ($script:infoMessages -join "`n") | Should -Match '^\[DRY-RUN\] Would remove the default terminal application setting'
+    }
+
+    It 'Warns and returns false when the values cannot be removed' {
+        Mock Get-ItemProperty { $script:installerValues } -ParameterFilter { $Path -eq 'HKCU:\Console\%%Startup' }
+        Mock Remove-ItemProperty { throw 'Registry denied' }
+
+        Reset-WindowsTerminalDelegation | Should -BeFalse
+
+        ($script:warningMessages -join "`n") | Should -Match 'Could not remove the default terminal application setting that names Windows Terminal'
     }
 }

@@ -3128,6 +3128,12 @@ Describe 'Write-FailedAppsSummary (issue #189)' {
         $call.Rows[1][1] | Should -Be 'post-install verification timed out'
     }
 
+    It 'Takes the title the uninstaller passes' {
+        Write-FailedAppsSummary -FailedApps @(@{ Name = '7zip.7zip'; Reason = 'not installed' }) -Title 'Failed Uninstalls'
+
+        $script:failedSummaryCalls[0].Title | Should -Be 'Failed Uninstalls'
+    }
+
     It 'Renders nothing when no apps failed' {
         Write-FailedAppsSummary -FailedApps @()
         Write-FailedAppsSummary -FailedApps $null

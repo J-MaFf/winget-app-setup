@@ -3,8 +3,8 @@
     Returns the curated default application catalog shared by the installer and uninstaller.
 .DESCRIPTION
     Single source of truth for the app list (issue #190). Invoke-WingetInstall consumes it as the
-    default value of its -Apps parameter, and winget-app-uninstall.ps1 iterates the same catalog
-    for removal. Each entry is a hashtable with at least:
+    default value of its -Apps parameter, and Invoke-WingetUninstall (winget-app-uninstall.ps1)
+    removes the same apps. Each entry is a hashtable with at least:
       - name: the winget package id (validated by Test-AppDefinitions before use).
     Optional fields:
       - install: name of a package-specific install function that performs its own verification
@@ -23,7 +23,8 @@
         applicable, so a broken probe can never silently drop an app. A probe a condition calls
         must therefore throw when it has no answer, never return an empty or default value that
         reads as "does not apply" (Get-ComputerManufacturer, Get-OSArchitecture; review finding
-        P3-33).
+        P3-33). The uninstaller honours it too (Uninstall-CatalogApp, review finding P3-18): an
+        installed app whose condition is falsy is not this tool's to remove.
       - conditionDescription: short human-readable reason shown in the skip message, e.g.
         "Skipping: <id> (not applicable: <conditionDescription>)".
       - msixName: the app's MSIX package name. In a run for the whole PC (SYSTEM, or cross-user

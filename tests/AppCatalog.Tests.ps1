@@ -26,29 +26,46 @@ Describe 'App list consistency (issue #190)' {
         $installApps | Should -Be $catalogNames
     }
 
-    It 'Uninstaller iterates Get-DefaultAppCatalog instead of an inline copy of the list' {
+    It 'Uninstaller removes the Get-DefaultAppCatalog apps instead of an inline copy of the list' {
+        # The script runs Invoke-WingetUninstall (review findings P2-19, P3-18), whose -Apps defaults
+        # to the module catalog, as Invoke-WingetInstall's does.
         $uninstallScript = Get-Content $script:UninstallerScriptPath -Raw
-        $uninstallScript | Should -Match '\$apps = Get-DefaultAppCatalog'
+        $uninstallScript | Should -Match 'Invoke-WingetUninstall -WhatIf:\$WhatIf -NonInteractive:\$NonInteractive'
+        $appsParameter = ${function:Invoke-WingetUninstall}.Ast.Body.ParamBlock.Parameters | Where-Object { $_.Name.VariablePath.UserPath -eq 'Apps' }
+        $appsParameter.DefaultValue.Extent.Text | Should -Be '(Get-DefaultAppCatalog)'
         # The previously duplicated inline list (which had already drifted in metadata) is gone.
         $uninstallScript | Should -Not -Match "@\{name = '"
     }
 
-    It 'Uninstaller reuses the module installed-check and elevation helpers (issue #190)' {
+    It 'Uninstaller reuses the module installed-check, process and elevation helpers (issue #190)' {
         $uninstallScript = Get-Content $script:UninstallerScriptPath -Raw
-        $uninstallScript | Should -Match 'Test-WingetPackageInstalled -PackageId'
         # Relaunched in place: the uninstaller imports the module from its own folder (its relaunch
-        # is tested in Elevation.Tests.ps1).
+        # is tested in Elevation.Tests.ps1 and Uninstall.Tests.ps1).
         $uninstallScript | Should -Match 'Restart-WithElevation -ScriptPath \$PSCommandPath -InPlace'
-        # The hand-rolled winget list probe and Start-Process relaunch are gone.
-        $uninstallScript | Should -Not -Match 'winget list --exact'
         $uninstallScript | Should -Not -Match 'Start-Process powershell\.exe'
+        $appStep = ${function:Uninstall-CatalogApp}.ToString()
+        $appStep | Should -Match 'Test-WingetPackageInstalled -PackageId'
+        $appStep | Should -Match 'Invoke-WingetProcess -ArgumentList'
+        # No bare winget call anywhere on the uninstall path (review finding P3-18): it had no time
+        # limit and its output never reached the log.
+        foreach ($ast in @([System.Management.Automation.Language.Parser]::ParseFile($script:UninstallerScriptPath, [ref]$null, [ref]$null), ${function:Invoke-WingetUninstall}.Ast, ${function:Uninstall-CatalogApp}.Ast)) {
+            $bareWinget = $ast.FindAll({ param($node) $node -is [System.Management.Automation.Language.CommandAst] -and $node.GetCommandName() -eq 'winget' }, $true)
+            @($bareWinget).Count | Should -Be 0
+        }
     }
 
-    It 'Exports everything the uninstaller calls from the manifest (psd1 gates module imports)' {
+    It 'Exports every module function the uninstaller calls from the manifest (psd1 gates module imports)' {
         # winget-app-uninstall.ps1 imports the module via the psd1, so a helper missing from
         # FunctionsToExport fails at the user's prompt while dot-sourcing tests stay green (#191).
         $manifest = Import-PowerShellDataFile $script:ModuleManifestPath
-        foreach ($helper in @('Get-DefaultAppCatalog', 'Test-WingetPackageInstalled', 'Restart-WithElevation')) {
+        $scriptAst = [System.Management.Automation.Language.Parser]::ParseFile($script:UninstallerScriptPath, [ref]$null, [ref]$null)
+        $calledFunctions = @($scriptAst.FindAll({ param($node) $node -is [System.Management.Automation.Language.CommandAst] }, $true) |
+                ForEach-Object { $_.GetCommandName() } |
+                Where-Object { $_ -and (Get-Command -Name $_ -CommandType Function -ErrorAction SilentlyContinue) } |
+                Sort-Object -Unique)
+        $calledFunctions | Should -Contain 'Invoke-WingetUninstall'
+        $calledFunctions | Should -Contain 'Restart-WithElevation'
+        foreach ($helper in $calledFunctions) {
             $manifest.FunctionsToExport | Should -Contain $helper
         }
     }
