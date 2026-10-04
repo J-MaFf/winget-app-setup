@@ -169,6 +169,14 @@ function Invoke-WingetInstall {
         Write-Warning 'Update functionality will use fallback CLI methods'
     }
 
+    # Let a Winget-AutoUpdate run that is already in progress finish first (bounded): it
+    # re-provisions App Installer, resets winget's sources and runs MSI upgrades, and racing it makes
+    # healthy apps fail with launch errors or 'another installation is in progress'. Read-only, but
+    # skipped in a dry run so a preview never waits.
+    if (-not $WhatIf) {
+        [void](Wait-WauIdle)
+    }
+
     # Check if winget is available and install if necessary
     if (-not (Test-AndInstallWinget)) {
         Write-ErrorMessage 'Winget is required for this script. Exiting.'
@@ -464,7 +472,10 @@ function Invoke-WingetInstall {
     switch ($wauResult.Status) {
         'Configured' { Write-Success "Auto-updates: Configured (Winget-AutoUpdate v$($wauResult.Version))." }
         'AlreadyPresent' {
-            if ($wauResult.Version) {
+            if ($wauResult.FrameworkMissing) {
+                Write-ErrorMessage 'Auto-updates: AT RISK - Winget-AutoUpdate is installed but Microsoft.WindowsAppRuntime.1.8 is missing; its next run may leave winget unusable (see above).'
+            }
+            elseif ($wauResult.Version) {
                 Write-Success "Auto-updates: Already present (v$($wauResult.Version))."
             }
             else {
@@ -472,6 +483,7 @@ function Invoke-WingetInstall {
             }
         }
         'DryRun' { Write-Info "[DRY-RUN] Auto-updates: Would configure Winget-AutoUpdate v$($wauResult.Version)." }
+        'FrameworkMissing' { Write-ErrorMessage 'Auto-updates: NOT CONFIGURED - Microsoft.WindowsAppRuntime.1.8 is missing, and Winget-AutoUpdate would leave winget unusable without it. Update App Installer from the Microsoft Store, then re-run the installer.' }
         default { Write-ErrorMessage 'Auto-updates: FAILED - Winget-AutoUpdate could not be installed; apps will not update automatically. Re-run the installer to retry.' }
     }
 

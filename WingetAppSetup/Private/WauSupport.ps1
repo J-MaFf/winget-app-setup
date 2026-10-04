@@ -110,3 +110,179 @@ function New-WauStagingDirectory {
     Set-RestrictedDirectoryAcl -Path $stagingDir
     return $stagingDir
 }
+
+<#
+.SYNOPSIS
+    Lists the Microsoft.WindowsAppRuntime.1.8 framework packages registered for any user.
+.DESCRIPTION
+    Thin query seam for Get-WindowsAppRuntimeStatus (mocked in tests). `Get-AppxPackage -AllUsers`
+    needs elevation; under PowerShell 7 it runs in Windows PowerShell 5.1, where the Appx module
+    always loads - the same delegation Invoke-AppxProvisioning uses. Throws when the query fails.
+.RETURNS
+    [pscustomobject[]] with Version ([version]) and Architecture ([string], e.g. 'X64', 'Arm64').
+#>
+function Get-WindowsAppRuntimePackageInfo {
+    $query = "Get-AppxPackage -AllUsers -Name 'Microsoft.WindowsAppRuntime.1.8' -ErrorAction Stop | ForEach-Object { '{0}|{1}' -f `$_.Version, `$_.Architecture }"
+    if ($PSVersionTable.PSEdition -eq 'Core') {
+        $lines = @(& powershell.exe -NoProfile -ExecutionPolicy Bypass -Command $query)
+        if ($LASTEXITCODE -ne 0) {
+            throw "Get-AppxPackage -AllUsers failed in Windows PowerShell (exit code $LASTEXITCODE)."
+        }
+    }
+    else {
+        $lines = @(Get-AppxPackage -AllUsers -Name 'Microsoft.WindowsAppRuntime.1.8' -ErrorAction Stop |
+                ForEach-Object { '{0}|{1}' -f $_.Version, $_.Architecture })
+    }
+
+    foreach ($line in $lines) {
+        $parts = "$line".Trim() -split '\|'
+        $parsedVersion = $null
+        if ($parts.Count -eq 2 -and [version]::TryParse($parts[0], [ref]$parsedVersion)) {
+            [pscustomobject]@{ Version = $parsedVersion; Architecture = $parts[1] }
+        }
+    }
+}
+
+<#
+.SYNOPSIS
+    Reports whether the WindowsAppRuntime framework that current winget releases need is present.
+.DESCRIPTION
+    Every winget release since 1.12 depends on Microsoft.WindowsAppRuntime.1.8 >= 8000.616.304.0.
+    Winget-AutoUpdate's Install-Prerequisites runs on every WAU SYSTEM run and provisions the
+    newest winget release from GitHub without that framework. On a machine that lacks it (no
+    Microsoft Store updates, Server SKUs) the new App Installer cannot register and the old one is
+    then rejected as a downgrade, which leaves winget unusable (the #279/#284 wedge). Callers use
+    this to keep WAU off such machines.
+.PARAMETER MinimumVersion
+    The lowest framework version that satisfies current winget releases.
+.RETURNS
+    [pscustomobject] with:
+      - Present: $true when a package for this OS architecture at or above MinimumVersion is
+                 registered for any user; $false when none is; $null when the query failed.
+      - Detail:  the versions found (or the query error), for messages.
+#>
+function Get-WindowsAppRuntimeStatus {
+    param (
+        [Parameter(Mandatory = $false)]
+        [version]$MinimumVersion = [version]'8000.616.304.0'
+    )
+
+    try {
+        $packages = @(Get-WindowsAppRuntimePackageInfo)
+    }
+    catch {
+        return [pscustomobject]@{ Present = $null; Detail = "could not query installed packages: $_" }
+    }
+
+    $osArchitecture = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
+    $suitable = @($packages | Where-Object { $_.Architecture -eq $osArchitecture -and $_.Version -ge $MinimumVersion })
+    $found = if ($packages.Count -gt 0) {
+        ($packages | ForEach-Object { "$($_.Architecture) $($_.Version)" }) -join ', '
+    }
+    else {
+        'none registered'
+    }
+
+    return [pscustomobject]@{
+        Present = ($suitable.Count -gt 0)
+        Detail  = "Microsoft.WindowsAppRuntime.1.8 >= $MinimumVersion for $osArchitecture required; found: $found"
+    }
+}
+
+<#
+.SYNOPSIS
+    Removes the at-logon trigger from an already-deployed Winget-AutoUpdate task.
+.DESCRIPTION
+    Earlier installer versions did not pass UPDATESATLOGON, so WAU 2.12.0 defaulted it to 1 and its
+    SYSTEM task also runs at every user logon. That run re-provisions App Installer and resets
+    winget's sources, and it fires exactly when a technician signs in to re-run this installer, so
+    the two collide. New installs pass UPDATESATLOGON=0; this brings machines deployed before that
+    in line. It also writes WAU_UpdatesAtLogon = 0, which WAU's MSI reads back on later upgrades.
+    The weekly trigger is left alone, and a task whose only trigger is the logon one is not
+    touched (removing it would stop WAU from ever running). Best-effort: failures only warn.
+.RETURNS
+    [bool] True when a logon trigger was removed.
+#>
+function Disable-WauLogonTrigger {
+    $removed = $false
+    try {
+        $task = Get-ScheduledTask -TaskPath '\WAU\' -TaskName 'Winget-AutoUpdate' -ErrorAction SilentlyContinue
+        if ($task) {
+            $triggers = @($task.Triggers)
+            $logonTriggers = @($triggers | Where-Object { $_.CimClass.CimClassName -eq 'MSFT_TaskLogonTrigger' })
+            $otherTriggers = @($triggers | Where-Object { $_.CimClass.CimClassName -ne 'MSFT_TaskLogonTrigger' })
+            if ($logonTriggers.Count -gt 0 -and $otherTriggers.Count -gt 0) {
+                Set-ScheduledTask -TaskPath '\WAU\' -TaskName 'Winget-AutoUpdate' -Trigger $otherTriggers -ErrorAction Stop | Out-Null
+                Write-Info 'Removed the at-logon trigger from the Winget-AutoUpdate task; it keeps its weekly schedule.'
+                $removed = $true
+            }
+        }
+        $wauKey = 'HKLM:\SOFTWARE\Romanitho\Winget-AutoUpdate'
+        if (Test-Path -LiteralPath $wauKey) {
+            # An [int] value is written as REG_DWORD, the type WAU's MSI reads back.
+            Set-ItemProperty -LiteralPath $wauKey -Name 'WAU_UpdatesAtLogon' -Value ([int]0) -ErrorAction Stop
+        }
+    }
+    catch {
+        Write-WarningMessage "Could not remove the Winget-AutoUpdate at-logon trigger: $_"
+    }
+    return $removed
+}
+
+<#
+.SYNOPSIS
+    Waits, with a time limit, for a running Winget-AutoUpdate task to finish.
+.DESCRIPTION
+    A WAU run (its weekly schedule catching up after boot, or a logon run on machines deployed
+    before Disable-WauLogonTrigger) re-provisions App Installer, resets winget's sources and runs
+    MSI upgrades. Starting this installer's own winget work in the middle of that produces launch
+    failures and 'another installation is in progress' errors that read like broken apps. Polls
+    the \WAU\ tasks and returns as soon as none is running.
+.PARAMETER TimeoutSeconds
+    Longest time to wait before continuing anyway. Default 900 (15 minutes).
+.PARAMETER PollIntervalSeconds
+    Seconds between checks. Default 30.
+.RETURNS
+    [bool] True when no WAU task is running (including when WAU is not installed); false when one
+    was still running at the time limit.
+#>
+function Wait-WauIdle {
+    param (
+        [Parameter(Mandatory = $false)]
+        [int]$TimeoutSeconds = 900,
+
+        [Parameter(Mandatory = $false)]
+        [int]$PollIntervalSeconds = 30
+    )
+
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    $announced = $false
+    while ($true) {
+        $running = @()
+        try {
+            $running = @(Get-ScheduledTask -TaskPath '\WAU\' -ErrorAction SilentlyContinue | Where-Object { "$($_.State)" -eq 'Running' })
+        }
+        catch {
+            # No task scheduler cmdlets (or no access): nothing to wait for.
+            return $true
+        }
+
+        if ($running.Count -eq 0) {
+            if ($announced) {
+                Write-Success 'Winget-AutoUpdate has finished; continuing.'
+            }
+            return $true
+        }
+
+        $names = ($running | ForEach-Object { $_.TaskName }) -join ', '
+        if (-not $announced) {
+            Write-Info "Winget-AutoUpdate is running ($names); waiting up to $([math]::Ceiling($TimeoutSeconds / 60)) minutes so it does not collide with this run..."
+            $announced = $true
+        }
+        if ((Get-Date) -ge $deadline) {
+            Write-WarningMessage "Winget-AutoUpdate is still running ($names) after $([math]::Ceiling($TimeoutSeconds / 60)) minutes; continuing anyway. Installs may fail with 'another installation is in progress'; re-run the installer later if they do."
+            return $false
+        }
+        Start-Sleep -Seconds $PollIntervalSeconds
+    }
+}

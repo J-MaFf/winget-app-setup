@@ -73,6 +73,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Kept Winget-AutoUpdate from breaking winget after the installer has finished. Dropping
+  `RUN_WAU=YES` only moved WAU's `Install-Prerequisites` (newest winget, provisioned without
+  `Microsoft.WindowsAppRuntime.1.8`) to WAU's own runs, and WAU 2.12.0 also defaulted to a run at
+  every user logon, so a technician signing in to re-run the installer collided with it. WAU is now
+  installed (or upgraded) only when that framework is present for this OS architecture
+  (`Get-WindowsAppRuntimeStatus`); otherwise the summary shows `Auto-updates: NOT CONFIGURED`, and an
+  existing WAU on such a machine is reported as `Auto-updates: AT RISK`. New installs pass
+  `UPDATESATLOGON=0`, machines deployed earlier have the at-logon trigger removed and
+  `WAU_UpdatesAtLogon` set to 0 on the next run (`Disable-WauLogonTrigger`), and a run that starts
+  while a WAU task is running waits up to 15 minutes for it (`Wait-WauIdle`). The schedule is
+  described correctly now: weekly on Tuesdays at 02:00, not "weekly at 2 AM".
 - An aborted run no longer exits 0. The entry script's top-level `try/finally` (`build/fragments/tail.ps1`)
   had no catch, so inside it a .NET exception, a method call on `$null` or a parameter-binding
   error anywhere in the run aborted everything - no retry pass, no summary - and the process exited

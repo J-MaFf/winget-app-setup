@@ -58,12 +58,12 @@ param (
 # This script is assembled from the WingetAppSetup module by build/Build-WingetInstallScript.ps1.
 # Edit the function source under WingetAppSetup/Public and WingetAppSetup/Private, then re-run the
 # build to regenerate this file. See readme.md ("Project layout") for details.
-# Build id: 1.0.0+1ba9ffa5 (module version + SHA256 fragment of the function content; issue #189).
+# Build id: 1.0.0+3a8c3183 (module version + SHA256 fragment of the function content; issue #189).
 # ------------------------------------------------------------------------------------------------
 
 # Content-derived build identity, logged at startup so a transcript from a remote machine
 # identifies exactly which installer build produced it (issue #189).
-$script:InstallerBuildId = '1.0.0+1ba9ffa5'
+$script:InstallerBuildId = '1.0.0+3a8c3183'
 
 # ------------------------------------------------Functions------------------------------------------------
 
@@ -1661,6 +1661,182 @@ function New-WauStagingDirectory {
     return $stagingDir
 }
 
+<#
+.SYNOPSIS
+    Lists the Microsoft.WindowsAppRuntime.1.8 framework packages registered for any user.
+.DESCRIPTION
+    Thin query seam for Get-WindowsAppRuntimeStatus (mocked in tests). `Get-AppxPackage -AllUsers`
+    needs elevation; under PowerShell 7 it runs in Windows PowerShell 5.1, where the Appx module
+    always loads - the same delegation Invoke-AppxProvisioning uses. Throws when the query fails.
+.RETURNS
+    [pscustomobject[]] with Version ([version]) and Architecture ([string], e.g. 'X64', 'Arm64').
+#>
+function Get-WindowsAppRuntimePackageInfo {
+    $query = "Get-AppxPackage -AllUsers -Name 'Microsoft.WindowsAppRuntime.1.8' -ErrorAction Stop | ForEach-Object { '{0}|{1}' -f `$_.Version, `$_.Architecture }"
+    if ($PSVersionTable.PSEdition -eq 'Core') {
+        $lines = @(& powershell.exe -NoProfile -ExecutionPolicy Bypass -Command $query)
+        if ($LASTEXITCODE -ne 0) {
+            throw "Get-AppxPackage -AllUsers failed in Windows PowerShell (exit code $LASTEXITCODE)."
+        }
+    }
+    else {
+        $lines = @(Get-AppxPackage -AllUsers -Name 'Microsoft.WindowsAppRuntime.1.8' -ErrorAction Stop |
+                ForEach-Object { '{0}|{1}' -f $_.Version, $_.Architecture })
+    }
+
+    foreach ($line in $lines) {
+        $parts = "$line".Trim() -split '\|'
+        $parsedVersion = $null
+        if ($parts.Count -eq 2 -and [version]::TryParse($parts[0], [ref]$parsedVersion)) {
+            [pscustomobject]@{ Version = $parsedVersion; Architecture = $parts[1] }
+        }
+    }
+}
+
+<#
+.SYNOPSIS
+    Reports whether the WindowsAppRuntime framework that current winget releases need is present.
+.DESCRIPTION
+    Every winget release since 1.12 depends on Microsoft.WindowsAppRuntime.1.8 >= 8000.616.304.0.
+    Winget-AutoUpdate's Install-Prerequisites runs on every WAU SYSTEM run and provisions the
+    newest winget release from GitHub without that framework. On a machine that lacks it (no
+    Microsoft Store updates, Server SKUs) the new App Installer cannot register and the old one is
+    then rejected as a downgrade, which leaves winget unusable (the #279/#284 wedge). Callers use
+    this to keep WAU off such machines.
+.PARAMETER MinimumVersion
+    The lowest framework version that satisfies current winget releases.
+.RETURNS
+    [pscustomobject] with:
+      - Present: $true when a package for this OS architecture at or above MinimumVersion is
+                 registered for any user; $false when none is; $null when the query failed.
+      - Detail:  the versions found (or the query error), for messages.
+#>
+function Get-WindowsAppRuntimeStatus {
+    param (
+        [Parameter(Mandatory = $false)]
+        [version]$MinimumVersion = [version]'8000.616.304.0'
+    )
+
+    try {
+        $packages = @(Get-WindowsAppRuntimePackageInfo)
+    }
+    catch {
+        return [pscustomobject]@{ Present = $null; Detail = "could not query installed packages: $_" }
+    }
+
+    $osArchitecture = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
+    $suitable = @($packages | Where-Object { $_.Architecture -eq $osArchitecture -and $_.Version -ge $MinimumVersion })
+    $found = if ($packages.Count -gt 0) {
+        ($packages | ForEach-Object { "$($_.Architecture) $($_.Version)" }) -join ', '
+    }
+    else {
+        'none registered'
+    }
+
+    return [pscustomobject]@{
+        Present = ($suitable.Count -gt 0)
+        Detail  = "Microsoft.WindowsAppRuntime.1.8 >= $MinimumVersion for $osArchitecture required; found: $found"
+    }
+}
+
+<#
+.SYNOPSIS
+    Removes the at-logon trigger from an already-deployed Winget-AutoUpdate task.
+.DESCRIPTION
+    Earlier installer versions did not pass UPDATESATLOGON, so WAU 2.12.0 defaulted it to 1 and its
+    SYSTEM task also runs at every user logon. That run re-provisions App Installer and resets
+    winget's sources, and it fires exactly when a technician signs in to re-run this installer, so
+    the two collide. New installs pass UPDATESATLOGON=0; this brings machines deployed before that
+    in line. It also writes WAU_UpdatesAtLogon = 0, which WAU's MSI reads back on later upgrades.
+    The weekly trigger is left alone, and a task whose only trigger is the logon one is not
+    touched (removing it would stop WAU from ever running). Best-effort: failures only warn.
+.RETURNS
+    [bool] True when a logon trigger was removed.
+#>
+function Disable-WauLogonTrigger {
+    $removed = $false
+    try {
+        $task = Get-ScheduledTask -TaskPath '\WAU\' -TaskName 'Winget-AutoUpdate' -ErrorAction SilentlyContinue
+        if ($task) {
+            $triggers = @($task.Triggers)
+            $logonTriggers = @($triggers | Where-Object { $_.CimClass.CimClassName -eq 'MSFT_TaskLogonTrigger' })
+            $otherTriggers = @($triggers | Where-Object { $_.CimClass.CimClassName -ne 'MSFT_TaskLogonTrigger' })
+            if ($logonTriggers.Count -gt 0 -and $otherTriggers.Count -gt 0) {
+                Set-ScheduledTask -TaskPath '\WAU\' -TaskName 'Winget-AutoUpdate' -Trigger $otherTriggers -ErrorAction Stop | Out-Null
+                Write-Info 'Removed the at-logon trigger from the Winget-AutoUpdate task; it keeps its weekly schedule.'
+                $removed = $true
+            }
+        }
+        $wauKey = 'HKLM:\SOFTWARE\Romanitho\Winget-AutoUpdate'
+        if (Test-Path -LiteralPath $wauKey) {
+            # An [int] value is written as REG_DWORD, the type WAU's MSI reads back.
+            Set-ItemProperty -LiteralPath $wauKey -Name 'WAU_UpdatesAtLogon' -Value ([int]0) -ErrorAction Stop
+        }
+    }
+    catch {
+        Write-WarningMessage "Could not remove the Winget-AutoUpdate at-logon trigger: $_"
+    }
+    return $removed
+}
+
+<#
+.SYNOPSIS
+    Waits, with a time limit, for a running Winget-AutoUpdate task to finish.
+.DESCRIPTION
+    A WAU run (its weekly schedule catching up after boot, or a logon run on machines deployed
+    before Disable-WauLogonTrigger) re-provisions App Installer, resets winget's sources and runs
+    MSI upgrades. Starting this installer's own winget work in the middle of that produces launch
+    failures and 'another installation is in progress' errors that read like broken apps. Polls
+    the \WAU\ tasks and returns as soon as none is running.
+.PARAMETER TimeoutSeconds
+    Longest time to wait before continuing anyway. Default 900 (15 minutes).
+.PARAMETER PollIntervalSeconds
+    Seconds between checks. Default 30.
+.RETURNS
+    [bool] True when no WAU task is running (including when WAU is not installed); false when one
+    was still running at the time limit.
+#>
+function Wait-WauIdle {
+    param (
+        [Parameter(Mandatory = $false)]
+        [int]$TimeoutSeconds = 900,
+
+        [Parameter(Mandatory = $false)]
+        [int]$PollIntervalSeconds = 30
+    )
+
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    $announced = $false
+    while ($true) {
+        $running = @()
+        try {
+            $running = @(Get-ScheduledTask -TaskPath '\WAU\' -ErrorAction SilentlyContinue | Where-Object { "$($_.State)" -eq 'Running' })
+        }
+        catch {
+            # No task scheduler cmdlets (or no access): nothing to wait for.
+            return $true
+        }
+
+        if ($running.Count -eq 0) {
+            if ($announced) {
+                Write-Success 'Winget-AutoUpdate has finished; continuing.'
+            }
+            return $true
+        }
+
+        $names = ($running | ForEach-Object { $_.TaskName }) -join ', '
+        if (-not $announced) {
+            Write-Info "Winget-AutoUpdate is running ($names); waiting up to $([math]::Ceiling($TimeoutSeconds / 60)) minutes so it does not collide with this run..."
+            $announced = $true
+        }
+        if ((Get-Date) -ge $deadline) {
+            Write-WarningMessage "Winget-AutoUpdate is still running ($names) after $([math]::Ceiling($TimeoutSeconds / 60)) minutes; continuing anyway. Installs may fail with 'another installation is in progress'; re-run the installer later if they do."
+            return $false
+        }
+        Start-Sleep -Seconds $PollIntervalSeconds
+    }
+}
+
 # --- WindowsTerminalHostDetection ---
 # Windows Terminal self-lock detection (issue #271). A scheduled/dispatched E2E run showed
 # winget repeatedly fail to even LAUNCH while installing/verifying Microsoft.WindowsTerminal -
@@ -2885,6 +3061,14 @@ function Invoke-WingetInstall {
         Write-Warning 'Update functionality will use fallback CLI methods'
     }
 
+    # Let a Winget-AutoUpdate run that is already in progress finish first (bounded): it
+    # re-provisions App Installer, resets winget's sources and runs MSI upgrades, and racing it makes
+    # healthy apps fail with launch errors or 'another installation is in progress'. Read-only, but
+    # skipped in a dry run so a preview never waits.
+    if (-not $WhatIf) {
+        [void](Wait-WauIdle)
+    }
+
     # Check if winget is available and install if necessary
     if (-not (Test-AndInstallWinget)) {
         Write-ErrorMessage 'Winget is required for this script. Exiting.'
@@ -3180,7 +3364,10 @@ function Invoke-WingetInstall {
     switch ($wauResult.Status) {
         'Configured' { Write-Success "Auto-updates: Configured (Winget-AutoUpdate v$($wauResult.Version))." }
         'AlreadyPresent' {
-            if ($wauResult.Version) {
+            if ($wauResult.FrameworkMissing) {
+                Write-ErrorMessage 'Auto-updates: AT RISK - Winget-AutoUpdate is installed but Microsoft.WindowsAppRuntime.1.8 is missing; its next run may leave winget unusable (see above).'
+            }
+            elseif ($wauResult.Version) {
                 Write-Success "Auto-updates: Already present (v$($wauResult.Version))."
             }
             else {
@@ -3188,6 +3375,7 @@ function Invoke-WingetInstall {
             }
         }
         'DryRun' { Write-Info "[DRY-RUN] Auto-updates: Would configure Winget-AutoUpdate v$($wauResult.Version)." }
+        'FrameworkMissing' { Write-ErrorMessage 'Auto-updates: NOT CONFIGURED - Microsoft.WindowsAppRuntime.1.8 is missing, and Winget-AutoUpdate would leave winget unusable without it. Update App Installer from the Microsoft Store, then re-run the installer.' }
         default { Write-ErrorMessage 'Auto-updates: FAILED - Winget-AutoUpdate could not be installed; apps will not update automatically. Re-run the installer to retry.' }
     }
 
@@ -3818,9 +4006,14 @@ function Test-WauInstalled {
     only, so a non-elevated process cannot swap the file between hash verification and msiexec —
     issue #186), verifies its SHA256, and installs it silently with the configuration this project
     standardizes on (issue #168):
-      - Weekly updates at 02:00 (WAU runs as SYSTEM for machine-scope packages and spawns a user-context
-        task in the logged-on session for user-scope packages, which avoids the cross-user 0x80073d19
-        class the homegrown updater fought).
+      - Weekly updates on Tuesdays at 02:00 (WAU's "Weekly" schedule), and not at user logon
+        (UPDATESATLOGON=0): a logon run collides with a technician signing in to re-run this
+        installer. WAU runs as SYSTEM for machine-scope packages and spawns a user-context task in
+        the logged-on session for user-scope packages, which avoids the cross-user 0x80073d19 class
+        the homegrown updater fought.
+      - Only when Microsoft.WindowsAppRuntime.1.8 is present (Get-WindowsAppRuntimeStatus): every
+        WAU run provisions the newest winget, which needs that framework, and would otherwise leave
+        winget unusable.
       - USERCONTEXT=1 so user-scope apps update in the real interactive session.
       - DISABLEWAUAUTOUPDATE=1 so WAU stays on this pinned version until we bump it deliberately.
       - Full notifications; skip on metered connections.
@@ -3830,15 +4023,20 @@ function Test-WauInstalled {
     project's standard configuration — making installer re-runs the WAU upgrade vehicle. An
     equal/newer installed version, or one whose version cannot be read, is left untouched
     (configuration included).
+    On a machine that already has WAU, its at-logon trigger is removed (Disable-WauLogonTrigger)
+    and a missing framework is reported, but the installation is otherwise left alone.
     Best-effort: any failure warns and returns a Failed result rather than aborting the install.
 .PARAMETER WhatIf
     When specified, only reports intended actions.
 .RETURNS
     [pscustomobject] with:
       - Status:  'Configured' (installed or upgraded this run), 'AlreadyPresent' (left as-is),
-                 'Failed', or 'DryRun' (under -WhatIf).
-      - Version: the pinned version for Configured/Failed/DryRun; the installed version
-                 (or $null when unreadable) for AlreadyPresent.
+                 'FrameworkMissing' (not installed: WindowsAppRuntime 1.8 is missing), 'Failed',
+                 or 'DryRun' (under -WhatIf).
+      - Version: the pinned version for Configured/Failed/DryRun/FrameworkMissing; the installed
+                 version (or $null when unreadable) for AlreadyPresent.
+      - FrameworkMissing: $true when the framework check found no suitable framework (on
+                 AlreadyPresent this means the existing WAU may break winget on its next run).
 #>
 function Install-WingetAutoUpdate {
     param (
@@ -3849,23 +4047,39 @@ function Install-WingetAutoUpdate {
     $pin = Get-WauPin
 
     if ($WhatIf) {
-        Write-Info "[DRY-RUN] Would install Winget-AutoUpdate $($pin.Version) (weekly updates at 02:00, Full notifications, self-update disabled)."
-        return [pscustomobject]@{ Status = 'DryRun'; Version = $pin.Version }
+        Write-Info "[DRY-RUN] Would install Winget-AutoUpdate $($pin.Version) (weekly updates on Tuesdays at 02:00, not at logon, Full notifications, self-update disabled), if Microsoft.WindowsAppRuntime.1.8 is present."
+        return [pscustomobject]@{ Status = 'DryRun'; Version = $pin.Version; FrameworkMissing = $false }
     }
+
+    $framework = Get-WindowsAppRuntimeStatus
+    if ($null -eq $framework.Present) {
+        # A failed query is not evidence the framework is missing; keep the previous behavior.
+        Write-WarningMessage "Could not check for Microsoft.WindowsAppRuntime.1.8 ($($framework.Detail)); continuing with Winget-AutoUpdate."
+    }
+    $frameworkMissing = $framework.Present -eq $false
 
     if (Test-WauInstalled) {
         $installed = Get-InstalledWauInfo
-        if ($installed.Version -and $installed.Version -lt [version]$pin.Version) {
+        if ($installed.Version -and $installed.Version -lt [version]$pin.Version -and -not $frameworkMissing) {
             Write-Info "Winget-AutoUpdate v$($installed.Version) is older than the pinned v$($pin.Version); upgrading in place..."
         }
         else {
             $versionLabel = if ($installed.Version) { "v$($installed.Version)" } else { 'version unknown' }
-            Write-Success "Winget-AutoUpdate is already installed ($versionLabel); leaving its configuration unchanged."
-            return [pscustomobject]@{ Status = 'AlreadyPresent'; Version = $installed.Version }
+            Write-Success "Winget-AutoUpdate is already installed ($versionLabel); leaving its configuration unchanged apart from the at-logon trigger."
+            [void](Disable-WauLogonTrigger)
+            if ($frameworkMissing) {
+                Write-ErrorMessage "Winget-AutoUpdate is installed, but Microsoft.WindowsAppRuntime.1.8 is missing ($($framework.Detail)). Its next update run may install a winget that cannot start and leave winget unusable. Update App Installer from the Microsoft Store, or uninstall Winget-AutoUpdate on this machine."
+            }
+            return [pscustomobject]@{ Status = 'AlreadyPresent'; Version = $installed.Version; FrameworkMissing = $frameworkMissing }
         }
     }
-    else {
+    elseif (-not $frameworkMissing) {
         Write-Info "Setting up automatic app updates via Winget-AutoUpdate $($pin.Version)..."
+    }
+
+    if ($frameworkMissing) {
+        Write-ErrorMessage "Winget-AutoUpdate was NOT installed: Microsoft.WindowsAppRuntime.1.8 is missing ($($framework.Detail)). Every WAU update run installs the newest winget, which needs that framework, so WAU would leave winget unusable here. Update App Installer from the Microsoft Store, then re-run this installer."
+        return [pscustomobject]@{ Status = 'FrameworkMissing'; Version = $pin.Version; FrameworkMissing = $true }
     }
 
     $stagingDir = $null
@@ -3879,7 +4093,7 @@ function Install-WingetAutoUpdate {
         $actualHash = (Get-FileHash -Path $msiPath -Algorithm SHA256).Hash
         if ($actualHash -ne $pin.Sha256) {
             Write-ErrorMessage "Winget-AutoUpdate MSI hash mismatch (expected $($pin.Sha256), got $actualHash). Skipping installation."
-            return [pscustomobject]@{ Status = 'Failed'; Version = $pin.Version }
+            return [pscustomobject]@{ Status = 'Failed'; Version = $pin.Version; FrameworkMissing = $false }
         }
 
         # Bake the configuration in via MSI properties (the winget-package install path allows no
@@ -3888,21 +4102,23 @@ function Install-WingetAutoUpdate {
         # re-provisioning plus `winget source reset --force`) and app upgrades while this installer
         # is still running - the cause of the #279/#284 winget wedge and the #283 console stop.
         # WAU's own schedule runs the first pass instead.
-        $msiArgs = "/i `"$msiPath`" /qn /norestart USERCONTEXT=1 DISABLEWAUAUTOUPDATE=1 UPDATESINTERVAL=Weekly UPDATESATTIME=02:00:00 NOTIFICATIONLEVEL=Full DONOTRUNONMETERED=1"
+        # UPDATESATLOGON=0: no at-logon run (see the function help); WAU stores it as
+        # WAU_UpdatesAtLogon, which later MSI upgrades read back.
+        $msiArgs = "/i `"$msiPath`" /qn /norestart UPDATESATLOGON=0 USERCONTEXT=1 DISABLEWAUAUTOUPDATE=1 UPDATESINTERVAL=Weekly UPDATESATTIME=02:00:00 NOTIFICATIONLEVEL=Full DONOTRUNONMETERED=1"
         $proc = Start-Process -FilePath 'msiexec.exe' -ArgumentList $msiArgs -Wait -PassThru
 
         # 3010 = ERROR_SUCCESS_REBOOT_REQUIRED — still a success.
         if ($proc.ExitCode -eq 0 -or $proc.ExitCode -eq 3010) {
-            Write-Success "Winget-AutoUpdate $($pin.Version) installed. Apps will update weekly at 2 AM."
-            return [pscustomobject]@{ Status = 'Configured'; Version = $pin.Version }
+            Write-Success "Winget-AutoUpdate $($pin.Version) installed. Apps will update weekly, on Tuesdays at 02:00 (or soon after the next start if the machine was off)."
+            return [pscustomobject]@{ Status = 'Configured'; Version = $pin.Version; FrameworkMissing = $false }
         }
 
         Write-ErrorMessage "Winget-AutoUpdate install failed (msiexec exit code $($proc.ExitCode))."
-        return [pscustomobject]@{ Status = 'Failed'; Version = $pin.Version }
+        return [pscustomobject]@{ Status = 'Failed'; Version = $pin.Version; FrameworkMissing = $false }
     }
     catch {
         Write-ErrorMessage "Failed to install Winget-AutoUpdate: $_"
-        return [pscustomobject]@{ Status = 'Failed'; Version = $pin.Version }
+        return [pscustomobject]@{ Status = 'Failed'; Version = $pin.Version; FrameworkMissing = $false }
     }
     finally {
         if ($stagingDir) {

@@ -106,8 +106,17 @@ given log.
 
 Ongoing updates are handled by [Winget-AutoUpdate (WAU)](https://github.com/Romanitho/Winget-AutoUpdate),
 which the installer sets up automatically (a pinned, SHA256-verified version). WAU runs as SYSTEM on a
-weekly schedule (2 AM) and updates installed apps machine-wide, plus a user-context pass for the
-logged-on user — which avoids the cross-user `0x80073d19` problems a per-user scheduled task hits.
+weekly schedule (Tuesdays at 02:00; a missed run catches up shortly after the next start) and updates
+installed apps machine-wide, plus a user-context pass for the logged-on user — which avoids the
+cross-user `0x80073d19` problems a per-user scheduled task hits.
+
+Every WAU run first updates winget itself, so the installer keeps WAU out of its own way: WAU is set
+up last, after the retry pass, it is not started immediately and not at user logon (machines deployed
+by older versions have their logon trigger removed on the next run), and if a WAU run is already in
+progress when the installer starts, the installer waits up to 15 minutes for it to finish. WAU is only
+installed when `Microsoft.WindowsAppRuntime.1.8` is present, because the winget releases it installs
+need that framework and would otherwise leave winget unusable; the summary then shows
+`Auto-updates: NOT CONFIGURED` (issues #279, #283, #284).
 WAU's own self-update is disabled so the version stays pinned; bump it via `Get-WauPin` in
 `WingetAppSetup/Public/WingetAutoUpdate.ps1`. `winget-app-uninstall.ps1` removes WAU (and any legacy
 scheduled-update task from older versions).

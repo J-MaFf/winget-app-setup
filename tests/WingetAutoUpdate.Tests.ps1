@@ -137,6 +137,13 @@ Describe 'Winget-AutoUpdate integration (issue #168)' {
     }
 
     Context 'Install-WingetAutoUpdate' {
+        BeforeEach {
+            # Framework present by default; the framework-gate tests below override it. Without
+            # this mock the real query would run on the CI runner, which lacks the framework.
+            Mock Get-WindowsAppRuntimeStatus { [pscustomobject]@{ Present = $true; Detail = 'X64 8000.921.1539.0' } }
+            Mock Disable-WauLogonTrigger { $false }
+        }
+
         It 'downloads into the ACL-restricted staging directory, verifies the hash, and installs silently with the pinned config' {
             Mock Test-WauInstalled { $false }
             Mock New-WauStagingDirectory { 'C:\ProgramData\winget-app-setup\wau-msi-test' }
@@ -155,7 +162,7 @@ Describe 'Winget-AutoUpdate integration (issue #168)' {
                 $FilePath -eq 'msiexec.exe' -and
                 # No RUN_WAU=YES: an immediate WAU run re-provisions App Installer while the
                 # installer is still running (issues #279/#283/#284).
-                $ArgumentList -notmatch 'RUN_WAU' -and $ArgumentList -match 'USERCONTEXT=1' -and
+                $ArgumentList -notmatch 'RUN_WAU' -and $ArgumentList -match 'UPDATESATLOGON=0' -and $ArgumentList -match 'USERCONTEXT=1' -and
                 $ArgumentList -match 'DISABLEWAUAUTOUPDATE=1' -and $ArgumentList -match 'UPDATESINTERVAL=Weekly' -and
                 $ArgumentList -match 'NOTIFICATIONLEVEL=Full'
             }
@@ -262,6 +269,61 @@ Describe 'Winget-AutoUpdate integration (issue #168)' {
             (Install-WingetAutoUpdate).Status | Should -Be 'Configured'
         }
 
+        It 'does not install WAU when Microsoft.WindowsAppRuntime.1.8 is missing (it would leave winget unusable)' {
+            Mock Get-WindowsAppRuntimeStatus { [pscustomobject]@{ Present = $false; Detail = 'none registered' } }
+            Mock Test-WauInstalled { $false }
+            Mock Invoke-WebRequest { throw 'should not download WAU without the framework' }
+            Mock Start-Process { throw 'should not run msiexec without the framework' }
+
+            $result = Install-WingetAutoUpdate
+
+            $result.Status | Should -Be 'FrameworkMissing'
+            $result.FrameworkMissing | Should -BeTrue
+            Should -Invoke Invoke-WebRequest -Times 0 -Exactly
+            Should -Invoke Write-ErrorMessage -Times 1 -Exactly -ParameterFilter { $Message -match 'NOT installed: Microsoft\.WindowsAppRuntime\.1\.8 is missing' }
+        }
+
+        It 'still installs WAU when the framework check itself cannot run' {
+            Mock Get-WindowsAppRuntimeStatus { [pscustomobject]@{ Present = $null; Detail = 'could not query installed packages: boom' } }
+            Mock Test-WauInstalled { $false }
+            Mock New-WauStagingDirectory { Join-Path $TestDrive 'wau-msi-unknown' }
+            Mock Invoke-WebRequest { }
+            Mock Get-FileHash { @{ Hash = (Get-WauPin).Sha256 } }
+            Mock Start-Process { [pscustomobject]@{ ExitCode = 0 } }
+            Mock Remove-Item { }
+
+            $result = Install-WingetAutoUpdate
+
+            $result.Status | Should -Be 'Configured'
+            Should -Invoke Write-WarningMessage -Times 1 -Exactly -ParameterFilter { $Message -match 'Could not check for Microsoft\.WindowsAppRuntime\.1\.8' }
+        }
+
+        It 'removes the at-logon trigger from an already-installed WAU and reports a missing framework' {
+            Mock Get-WindowsAppRuntimeStatus { [pscustomobject]@{ Present = $false; Detail = 'none registered' } }
+            Mock Test-WauInstalled { $true }
+            Mock Get-InstalledWauInfo { [pscustomobject]@{ Version = [version](Get-WauPin).Version; ProductCode = (Get-WauPin).ProductCode } }
+            Mock Invoke-WebRequest { throw 'should not download when WAU is current' }
+
+            $result = Install-WingetAutoUpdate
+
+            $result.Status | Should -Be 'AlreadyPresent'
+            $result.FrameworkMissing | Should -BeTrue
+            Should -Invoke Disable-WauLogonTrigger -Times 1 -Exactly
+            Should -Invoke Write-ErrorMessage -Times 1 -Exactly -ParameterFilter { $Message -match 'its next update run may install a winget that cannot start' }
+        }
+
+        It 'does not upgrade an older WAU on a machine without the framework' {
+            Mock Get-WindowsAppRuntimeStatus { [pscustomobject]@{ Present = $false; Detail = 'none registered' } }
+            Mock Test-WauInstalled { $true }
+            Mock Get-InstalledWauInfo { [pscustomobject]@{ Version = [version]'2.11.0'; ProductCode = '{00000000-0000-0000-0000-000000000000}' } }
+            Mock Invoke-WebRequest { throw 'should not upgrade WAU without the framework' }
+
+            $result = Install-WingetAutoUpdate
+
+            $result.Status | Should -Be 'AlreadyPresent'
+            Should -Invoke Invoke-WebRequest -Times 0 -Exactly
+        }
+
         It 'returns dry-run without side effects under -WhatIf' {
             Mock Test-WauInstalled { throw 'should not probe under WhatIf' }
             Mock Invoke-WebRequest { throw 'should not download under WhatIf' }
@@ -319,6 +381,8 @@ Describe 'Winget-AutoUpdate integration (issue #168)' {
             $installBody | Should -Match 'Auto-updates: Configured'
             $installBody | Should -Match 'Auto-updates: Already present'
             $installBody | Should -Match 'Auto-updates: FAILED'
+            $installBody | Should -Match 'Auto-updates: NOT CONFIGURED'
+            $installBody | Should -Match 'Auto-updates: AT RISK'
         }
     }
 
@@ -345,5 +409,166 @@ Describe 'Winget-AutoUpdate integration (issue #168)' {
             (Remove-LegacyScheduledUpdates) | Should -Be $false
             Should -Invoke Unregister-ScheduledTask -Times 0 -Exactly
         }
+    }
+}
+
+Describe 'WindowsAppRuntime framework gate for Winget-AutoUpdate (issues #279/#284)' {
+    BeforeAll {
+        $script:osArch = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
+        $script:otherArch = if ($script:osArch -eq 'X64') { 'Arm64' } else { 'X64' }
+    }
+
+    Context 'Get-WindowsAppRuntimeStatus' {
+        It 'is satisfied by a framework for this OS architecture at or above 8000.616.304.0' {
+            Mock Get-WindowsAppRuntimePackageInfo { [pscustomobject]@{ Version = [version]'8000.921.1539.0'; Architecture = $script:osArch } }
+
+            (Get-WindowsAppRuntimeStatus).Present | Should -BeTrue
+        }
+
+        It 'is not satisfied by an older framework only' {
+            Mock Get-WindowsAppRuntimePackageInfo { [pscustomobject]@{ Version = [version]'8000.500.0.0'; Architecture = $script:osArch } }
+
+            (Get-WindowsAppRuntimeStatus).Present | Should -BeFalse
+        }
+
+        It 'is not satisfied by a framework for another architecture only' {
+            Mock Get-WindowsAppRuntimePackageInfo { [pscustomobject]@{ Version = [version]'8000.921.1539.0'; Architecture = $script:otherArch } }
+
+            (Get-WindowsAppRuntimeStatus).Present | Should -BeFalse
+        }
+
+        It 'reports none registered when no framework package exists' {
+            Mock Get-WindowsAppRuntimePackageInfo { }
+
+            $status = Get-WindowsAppRuntimeStatus
+            $status.Present | Should -BeFalse
+            $status.Detail | Should -Match 'none registered'
+        }
+
+        It 'returns an unknown result ($null), not "missing", when the query fails' {
+            Mock Get-WindowsAppRuntimePackageInfo { throw 'Appx module unavailable' }
+
+            $status = Get-WindowsAppRuntimeStatus
+            $status.Present | Should -BeNullOrEmpty
+            $status.Detail | Should -Match 'Appx module unavailable'
+        }
+    }
+
+    Context 'Get-WindowsAppRuntimePackageInfo' {
+        It 'parses Version|Architecture lines from the Windows PowerShell query and skips anything else' -Skip:($PSVersionTable.PSEdition -ne 'Core') {
+            Mock powershell.exe { $global:LASTEXITCODE = 0; '8000.921.1539.0|X64'; 'WARNING: noise'; '' }
+
+            $packages = @(Get-WindowsAppRuntimePackageInfo)
+
+            $packages.Count | Should -Be 1
+            $packages[0].Version | Should -Be ([version]'8000.921.1539.0')
+            $packages[0].Architecture | Should -Be 'X64'
+        }
+
+        It 'throws when the Windows PowerShell query fails' -Skip:($PSVersionTable.PSEdition -ne 'Core') {
+            Mock powershell.exe { $global:LASTEXITCODE = 1 }
+
+            { Get-WindowsAppRuntimePackageInfo } | Should -Throw '*Get-AppxPackage -AllUsers failed*'
+        }
+    }
+}
+
+Describe 'Disable-WauLogonTrigger' {
+    BeforeAll {
+        function New-FakeTrigger {
+            param ([string]$ClassName)
+            [pscustomobject]@{ CimClass = [pscustomobject]@{ CimClassName = $ClassName } }
+        }
+    }
+
+    BeforeEach {
+        Mock Write-Info { }
+        Mock Write-WarningMessage { }
+        Mock Test-Path { $true } -ParameterFilter { $LiteralPath -eq 'HKLM:\SOFTWARE\Romanitho\Winget-AutoUpdate' }
+        Mock Set-ItemProperty { }
+        Mock Set-ScheduledTask { }
+    }
+
+    It 'removes the logon trigger, keeps the weekly one, and records WAU_UpdatesAtLogon = 0' {
+        Mock Get-ScheduledTask { [pscustomobject]@{ Triggers = @((New-FakeTrigger 'MSFT_TaskLogonTrigger'), (New-FakeTrigger 'MSFT_TaskWeeklyTrigger')) } }
+
+        Disable-WauLogonTrigger | Should -BeTrue
+
+        Should -Invoke Set-ScheduledTask -Times 1 -Exactly -ParameterFilter {
+            @($Trigger).Count -eq 1 -and @($Trigger)[0].CimClass.CimClassName -eq 'MSFT_TaskWeeklyTrigger'
+        }
+        Should -Invoke Set-ItemProperty -Times 1 -Exactly -ParameterFilter { $Name -eq 'WAU_UpdatesAtLogon' -and $Value -eq 0 }
+    }
+
+    It 'leaves a task alone when the logon trigger is its only trigger (WAU would otherwise never run)' {
+        Mock Get-ScheduledTask { [pscustomobject]@{ Triggers = @((New-FakeTrigger 'MSFT_TaskLogonTrigger')) } }
+
+        Disable-WauLogonTrigger | Should -BeFalse
+
+        Should -Invoke Set-ScheduledTask -Times 0 -Exactly
+    }
+
+    It 'does nothing to the task when it has no logon trigger' {
+        Mock Get-ScheduledTask { [pscustomobject]@{ Triggers = @((New-FakeTrigger 'MSFT_TaskWeeklyTrigger')) } }
+
+        Disable-WauLogonTrigger | Should -BeFalse
+
+        Should -Invoke Set-ScheduledTask -Times 0 -Exactly
+    }
+
+    It 'warns instead of throwing when the task cannot be changed' {
+        Mock Get-ScheduledTask { [pscustomobject]@{ Triggers = @((New-FakeTrigger 'MSFT_TaskLogonTrigger'), (New-FakeTrigger 'MSFT_TaskWeeklyTrigger')) } }
+        Mock Set-ScheduledTask { throw 'Access is denied.' }
+
+        { Disable-WauLogonTrigger } | Should -Not -Throw
+
+        Should -Invoke Write-WarningMessage -Times 1 -Exactly -ParameterFilter { $Message -match 'Could not remove the Winget-AutoUpdate at-logon trigger' }
+    }
+}
+
+Describe 'Wait-WauIdle' {
+    BeforeEach {
+        Mock Write-Info { }
+        Mock Write-Success { }
+        Mock Write-WarningMessage { }
+        Mock Start-Sleep { }
+    }
+
+    It 'returns immediately when no WAU task is running' {
+        Mock Get-ScheduledTask { [pscustomobject]@{ TaskName = 'Winget-AutoUpdate'; State = 'Ready' } }
+
+        Wait-WauIdle | Should -BeTrue
+
+        Should -Invoke Start-Sleep -Times 0 -Exactly
+        Should -Invoke Write-Info -Times 0 -Exactly
+    }
+
+    It 'returns immediately when WAU is not installed' {
+        Mock Get-ScheduledTask { }
+
+        Wait-WauIdle | Should -BeTrue
+    }
+
+    It 'waits while a WAU task is running and continues once it finishes' {
+        $script:polls = 0
+        Mock Get-ScheduledTask {
+            $script:polls++
+            $state = if ($script:polls -lt 3) { 'Running' } else { 'Ready' }
+            [pscustomobject]@{ TaskName = 'Winget-AutoUpdate'; State = $state }
+        }
+
+        Wait-WauIdle -PollIntervalSeconds 1 | Should -BeTrue
+
+        Should -Invoke Start-Sleep -Times 2 -Exactly
+        Should -Invoke Write-Info -Times 1 -Exactly -ParameterFilter { $Message -match 'Winget-AutoUpdate is running \(Winget-AutoUpdate\)' }
+        Should -Invoke Write-Success -Times 1 -Exactly
+    }
+
+    It 'gives up with a warning at the time limit' {
+        Mock Get-ScheduledTask { [pscustomobject]@{ TaskName = 'Winget-AutoUpdate'; State = 'Running' } }
+
+        Wait-WauIdle -TimeoutSeconds 0 -PollIntervalSeconds 1 | Should -BeFalse
+
+        Should -Invoke Write-WarningMessage -Times 1 -Exactly -ParameterFilter { $Message -match 'still running' }
     }
 }

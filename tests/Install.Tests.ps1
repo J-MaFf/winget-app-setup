@@ -184,6 +184,8 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
         # The end-of-run winget health check launches real winget; healthy by default so a real
         # (non -WhatIf) run in these tests never probes the machine or reaches `Exit 2`.
         Mock Wait-WingetLaunchable { $true }
+        # Never wait on (or query) the machine's real Winget-AutoUpdate tasks.
+        Mock Wait-WauIdle { $true }
 
         $script:capturedRows = $null
         Mock Write-Table { $script:capturedRows = $Rows }
@@ -483,6 +485,44 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
             Invoke-WingetInstall -Apps @(@{ name = 'Contoso.AppOne' }) -NonInteractive
 
             ($script:errorMessages -join "`n") | Should -Not -Match 'winget: NOT USABLE'
+        }
+
+        It 'Waits for a running Winget-AutoUpdate before the first winget call of a real run' {
+            Mock Wait-WauIdle { $script:callOrder.Add('wau-idle'); $true }
+            Mock Test-AndInstallWinget { $script:callOrder.Add('winget-check'); $true }
+
+            Invoke-WingetInstall -Apps @(@{ name = 'Contoso.AppOne' }) -NonInteractive
+
+            $script:callOrder[0] | Should -Be 'wau-idle'
+            $script:callOrder[1] | Should -Be 'winget-check'
+        }
+
+        It 'Does not wait for Winget-AutoUpdate in a dry run' {
+            Mock Install-AppWithVerification { @{ Status = 'Installed'; InstallResult = $null; FailureReason = $null } }
+
+            Invoke-WingetInstall -Apps @(@{ name = 'Contoso.AppOne' }) -WhatIf -NonInteractive
+
+            Should -Invoke Wait-WauIdle -Times 0 -Exactly
+        }
+
+        It 'Prints Auto-updates: NOT CONFIGURED when WAU was skipped for a missing framework' {
+            Mock Install-WingetAutoUpdate { [pscustomobject]@{ Status = 'FrameworkMissing'; Version = '2.12.0'; FrameworkMissing = $true } }
+            $script:errorMessages = @()
+            Mock Write-ErrorMessage { $script:errorMessages += $Message }
+
+            Invoke-WingetInstall -Apps @(@{ name = 'Contoso.AppOne' }) -NonInteractive
+
+            ($script:errorMessages -join "`n") | Should -Match 'Auto-updates: NOT CONFIGURED'
+        }
+
+        It 'Prints Auto-updates: AT RISK when an existing WAU sits on a machine without the framework' {
+            Mock Install-WingetAutoUpdate { [pscustomobject]@{ Status = 'AlreadyPresent'; Version = [version]'2.12.0'; FrameworkMissing = $true } }
+            $script:errorMessages = @()
+            Mock Write-ErrorMessage { $script:errorMessages += $Message }
+
+            Invoke-WingetInstall -Apps @(@{ name = 'Contoso.AppOne' }) -NonInteractive
+
+            ($script:errorMessages -join "`n") | Should -Match 'Auto-updates: AT RISK'
         }
 
         It 'Reports winget as not usable in the summary when the end-of-run probe fails (pinned structurally - driving it live would Exit 2 the process)' {
