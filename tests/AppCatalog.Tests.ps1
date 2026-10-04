@@ -61,7 +61,7 @@ Describe 'Get-DefaultAppCatalog (issue #190)' {
             $app | Should -BeOfType [hashtable]
             $app.ContainsKey('name') | Should -Be $true
             # Same package-id shape Install-WingetPackage validates before trusting winget output.
-            $app.name | Should -Match '^[\w][\w.\-]+\.[\w][\w.\-]+$'
+            $app.name | Should -Match '^[\w][\w.\-]+\.[\w][\w.\-]+\z'
         }
     }
 

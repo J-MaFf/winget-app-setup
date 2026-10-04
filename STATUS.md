@@ -200,7 +200,7 @@ Pester installs persist across runs there ([#161](https://github.com/J-MaFf/wing
 | `build/fragments/` | `head.ps1` (PSScriptInfo, help, `param`) and `tail.ps1` (entry-point dispatch) |
 | `winget-app-install.ps1` | **Generated** single-file installer for local and `irm \| iex` use — do not edit by hand |
 | `winget-app-uninstall.ps1` | Uninstall helper; imports the module from the repo |
-| `tests/` | Pester suite, one `<Area>.Tests.ps1` per module file plus `EntryPoint.Tests.ps1` and `TestHarness.Tests.ps1`; `TestHelpers.ps1` loads the module once per file and stands in for Windows-only commands, so the suite also runs on Linux/macOS |
+| `tests/` | Pester suite, one `<Area>.Tests.ps1` per module file plus `EntryPoint.Tests.ps1`, `TestHarness.Tests.ps1` and `BuildGuards.Tests.ps1` (the build guards and the pre-commit hook); `TestHelpers.ps1` loads the module once per file and stands in for Windows-only commands, so the suite also runs on Linux/macOS |
 | `e2e/Assert-Install.ps1` | Shared post-install assertions for end-to-end runs (tier 1 workflow below; tier 2 [#215](https://github.com/J-MaFf/winget-app-setup/issues/215) reuses it) |
 | `.github/workflows/e2e-install.yml` | E2E tier 1: weekly real install run on GitHub-hosted `windows-latest` (issues #279/#282/#283; schedule + dispatch + self-validating PRs; failure auto-files an issue) |
 | `Test-WindowsTerminalConfiguration.ps1` | Smoke-test validation for the Windows Terminal default-shell configuration. |

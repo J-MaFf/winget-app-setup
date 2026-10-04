@@ -58,12 +58,12 @@ param (
 # This script is assembled from the WingetAppSetup module by build/Build-WingetInstallScript.ps1.
 # Edit the function source under WingetAppSetup/Public and WingetAppSetup/Private, then re-run the
 # build to regenerate this file. See readme.md ("Project layout") for details.
-# Build id: 1.0.0+a497f662 (module version + SHA256 fragment of the function content; issue #189).
+# Build id: 1.0.0+02c31136 (module version + SHA256 fragment of the function content; issue #189).
 # ------------------------------------------------------------------------------------------------
 
 # Content-derived build identity, logged at startup so a transcript from a remote machine
 # identifies exactly which installer build produced it (issue #189).
-$script:InstallerBuildId = '1.0.0+a497f662'
+$script:InstallerBuildId = '1.0.0+02c31136'
 
 # ------------------------------------------------Functions------------------------------------------------
 
@@ -833,11 +833,12 @@ function Write-Prompt {
 # Exact pattern from CLAUDE.md ("Winget Notes"): publisher.product shape, each side starting with a
 # word character and allowing word characters, dots, and hyphens after that. Anchored at both
 # ends: it validates a WHOLE id, so trailing text such as 'Google.Chrome --override /S' must fail.
-# Without the $ anchor any valid prefix passed, and Start-Process -ArgumentList (which joins its
+# Without an end anchor any valid prefix passed, and Start-Process -ArgumentList (which joins its
 # array with spaces, unquoted) would hand the rest to winget as extra switches (review finding
-# P3-49). Matching an id inside longer winget output is Test-WingetListOutputContainsPackageId's
-# job below, not this pattern's.
-$script:WingetPackageIdPattern = '^[\w][\w.\-]+\.[\w][\w.\-]+$'
+# P3-49). The end anchor is \z, not $: in .NET $ also matches before a final newline, so
+# "Google.Chrome`n" would pass. Matching an id inside longer winget output is
+# Test-WingetListOutputContainsPackageId's job below, not this pattern's.
+$script:WingetPackageIdPattern = '^[\w][\w.\-]+\.[\w][\w.\-]+\z'
 
 <#
 .SYNOPSIS

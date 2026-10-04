@@ -87,6 +87,8 @@ Describe 'Test-AppDefinitions' {
             Test-WingetPackageIdFormat -PackageId '7zip.7zip' | Should -BeTrue
             Test-WingetPackageIdFormat -PackageId 'Google.Chrome --override /S' | Should -BeFalse
             Test-WingetPackageIdFormat -PackageId ' Google.Chrome' | Should -BeFalse
+            # .NET's $ also matches before a final newline; the pattern must not.
+            Test-WingetPackageIdFormat -PackageId "Google.Chrome`n" | Should -BeFalse
         }
 
         It 'Should accept every entry from the real, curated app catalog' {

@@ -97,6 +97,9 @@ Describe 'Build guard: PowerShell-7-only syntax (review finding P3-46)' {
             @{ Kind = 'AndAnd'; Source = 'Get-Item . && Get-Item ..' }
             @{ Kind = 'OrOr'; Source = 'Get-Item . || Get-Item ..' }
             @{ Kind = 'CleanBlock'; Source = 'function Test-Clean { process { } clean { } }' }
+            @{ Kind = 'BackgroundOperator'; Source = 'Get-Item . &' }
+            @{ Kind = 'BackgroundOperator'; Source = '$job = Get-Process -Id $PID &' }
+            @{ Kind = 'BackgroundOperator'; Source = 'function Test-Background { if ($true) { Get-Item . & } }' }
         ) {
             $found = Get-SnippetPowerShell7OnlySyntax -Source $Source
 
@@ -112,19 +115,30 @@ $d = @"
 x $(Get-Item . && Get-Item ..) y
 "@
 $e = "x $("inner $(${f}?.Name)")"
+$g = "x $(Get-Item . &) y"
 '@
             $found = Get-SnippetPowerShell7OnlySyntax -Source $source
 
-            @($found | Sort-Object -Property Line, Column | ForEach-Object { $_.Kind }) | Should -Be @('QuestionQuestion', 'AndAnd', 'QuestionDot')
+            @($found | Sort-Object -Property Line, Column | ForEach-Object { $_.Kind }) | Should -Be @('QuestionQuestion', 'AndAnd', 'QuestionDot', 'BackgroundOperator')
+        }
+
+        It 'reports the position of the background operator itself' {
+            $found = Get-SnippetPowerShell7OnlySyntax -Source "`$x = 1`n`$job = Get-Process -Id `$PID   &"
+
+            $found.Count | Should -Be 1
+            $found[0].Line | Should -Be 2
+            $found[0].Column | Should -Be 31
+            $found[0].Text | Should -Be '&'
         }
 
         It 'does not flag 5.1-valid code that uses the same characters' {
             # Strings, comments and regexes holding the operators, the Where-Object alias ?, a
             # variable named x? (legal in 5.1, which is why 7 needs ${x}?. for null-conditional),
-            # and clean as a hashtable key, member, switch clause and class method name.
+            # clean as a hashtable key, member, switch clause and class method name, and the call
+            # and dot-source operators, which share the background operator's & token.
             $source = @'
-# A comment with ?? and ?. and $a ? 1 : 2 and && and || and clean { }
-$s = 'a || b && c ?? d ?. e ?[ f'
+# A comment with ?? and ?. and $a ? 1 : 2 and && and || and clean { } and Get-Item . &
+$s = 'a || b && c ?? d ?. e ?[ f & g'
 $t = "x || y && $($s.Length) ?? z"
 $u = @"
 here || there && ?? $($s.Length)
@@ -139,6 +153,13 @@ $p = $h.clean
 $q = $m -and $n -or $o
 switch ($s) { clean { 1 } default { 2 } }
 class ZzC { [void] clean() { } }
+$v = { Get-Item . }
+& $v
+& { Get-Item . }
+. { Get-Item . }
+& Get-Item .
+$w = & $v | Where-Object { $_ }
+$y = "x $(& $v) & y"
 '@
             Get-SnippetPowerShell7OnlySyntax -Source $source | Should -BeNullOrEmpty
         }

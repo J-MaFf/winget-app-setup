@@ -23,7 +23,7 @@ This repo targets **Windows only**. All scripts are PowerShell.
 | `winget-app-install.ps1` | **Generated** single-file installer (local + `irm \| iex`). Do not edit by hand — edit the module and rebuild |
 | `build/Build-WingetInstallScript.ps1` | Regenerates `winget-app-install.ps1` from the module (`-Check` verifies it is in sync) |
 | `winget-app-uninstall.ps1` | Uninstall helper |
-| `tests/` | Pester test suite, one `<Area>.Tests.ps1` per module file plus `EntryPoint.Tests.ps1` and `TestHarness.Tests.ps1` (the suite's own loading rules); `tests/TestHelpers.ps1` loads the module once per file and stands in for Windows-only commands off Windows |
+| `tests/` | Pester test suite, one `<Area>.Tests.ps1` per module file plus `EntryPoint.Tests.ps1`, `TestHarness.Tests.ps1` (the suite's own loading rules) and `BuildGuards.Tests.ps1` (the build guards and the pre-commit hook); `tests/TestHelpers.ps1` loads the module once per file and stands in for Windows-only commands off Windows |
 | `e2e/Assert-Install.ps1` + `.github/workflows/e2e-install.yml` | Scheduled real-install e2e run on GitHub-hosted runners (weekly + dispatch + self-validating PRs) — see readme.md "End-to-end monitoring" |
 
 ---
@@ -56,7 +56,7 @@ This repo targets **Windows only**. All scripts are PowerShell.
 
 - Exit code `0x80073d19` (`ERROR_DEPLOYMENT_BLOCKED_BY_USER_LOG_OFF`) is an AppX deployment error: per-user MSIX registration is blocked when the invoking account has no interactive logon session — the classic case is elevating as a different admin account on a user's machine. Mitigations (issue #159): `Initialize-WingetSourcesForUser` probes with `winget source update --name winget --disable-interactivity` — deliberately **without** `--accept-source-agreements`, which is invalid for `winget source update` and made the probe false-fail every run (issues #174/#175; agreements are accepted by the install commands instead) — and bootstraps the account via `Repair-WinGetPackageManager` on failure; `Install-WingetPackage` prefers `--scope machine` (auto-falls back for MSIX-only packages) and retries a still-transient `0x80073d19` with backoff (issue #150).
 - Always capture `$LASTEXITCODE` immediately after a winget call — it goes stale fast
-- Validate package IDs with regex before trusting winget output: `^[\w][\w.\-]+\.[\w][\w.\-]+$` (anchored at both ends: it validates a whole id; to find an id inside a longer `winget list` line, use the boundary match in `Test-WingetListOutputContainsPackageId`)
+- Validate package IDs with regex before trusting winget output: `^[\w][\w.\-]+\.[\w][\w.\-]+\z` (anchored at both ends, with `\z` because .NET's `$` also matches before a final newline: it validates a whole id; to find an id inside a longer `winget list` line, use the boundary match in `Test-WingetListOutputContainsPackageId`)
 
 
 <!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:7510c1e2 -->

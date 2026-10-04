@@ -175,8 +175,10 @@ Verify the committed script is in sync with the module (useful in CI / pre-commi
 pwsh -File .\build\Build-WingetInstallScript.ps1 -Check
 ```
 
-Run the test suite (one `<Area>.Tests.ps1` per module file under `tests/`; each loads the
-module directly via `tests/TestHelpers.ps1`):
+Run the test suite (one `<Area>.Tests.ps1` per module file under `tests/`, plus
+`EntryPoint.Tests.ps1`, `TestHarness.Tests.ps1` and `BuildGuards.Tests.ps1` for the entry point,
+the suite's own loading rules, and the build guards and pre-commit hook; each loads the module
+directly via `tests/TestHelpers.ps1`):
 
 ```powershell
 Invoke-Pester .\tests
@@ -233,8 +235,8 @@ guards, most of which run in both build and `-Check` modes of
    Linux and macOS the Windows-only cmdlets the installer calls, listed in
    `build/windows-only-commands.txt`, count as resolvable and every other name is checked as on
    Windows; when an off-Windows build fails on a genuine Windows-only cmdlet, add it to that list.
-   On Windows each listed name must resolve, so the list cannot hide a missing module function, and
-   a listed name the installer no longer calls draws a warning.
+   On Windows each listed name must resolve, so the list cannot hide a missing module function. On
+   every platform a listed name the installer no longer calls draws a warning.
 4. **psd1 export assertion** — `WingetAppSetup.psd1`'s `FunctionsToExport` must exactly
    (case-sensitively) match the functions defined under `WingetAppSetup/Public/*.ps1`, so a
    new public function cannot be silently filtered on manifest imports
@@ -242,12 +244,13 @@ guards, most of which run in both build and `-Check` modes of
 5. **Windows PowerShell 5.1 parse-safety guards** — 5.1 parses the whole installer before it
    runs any of it, so the file must stay 5.1-parseable even though the install itself runs under
    PowerShell 7. Syntax that only PowerShell 7 parses (`??`, `??=`, `?.`, `?[`, the ternary `?:`,
-   the `&&` / `||` pipeline chains and `clean { }` blocks) fails the build; the guard reads token
-   kinds and the AST, so the same characters inside strings, comments and regexes are fine. And
-   every non-comment token of the assembled script must be pure ASCII. The installer ships as
-   BOM-less UTF-8, which 5.1 decodes as ANSI: a multi-byte character inside a string literal
-   misdecodes (an em dash's 0x94 byte becomes a string-terminating curly quote) and cascades
-   into parser errors before the version dispatch can run. Keeping code tokens ASCII keeps the file
+   the `&&` / `||` pipeline chains, the background operator `&` as in `Get-Process &`, and
+   `clean { }` blocks) fails the build; the guard reads token kinds and the AST, so the same
+   characters inside strings, comments and regexes are fine, and so is the call operator
+   `& $cmd`. And every non-comment token of the assembled script must be pure ASCII. The
+   installer ships as BOM-less UTF-8, which 5.1 decodes as ANSI: a multi-byte character inside a
+   string literal misdecodes (an em dash's 0x94 byte becomes a string-terminating curly quote)
+   and cascades into parser errors before the version dispatch can run. Keeping code tokens ASCII keeps the file
    5.1-parseable so 5.1 reaches the version check and runs the PowerShell 7 bootstrap
    (find-or-install `pwsh`, then relaunch — [#225](https://github.com/J-MaFf/winget-app-setup/issues/225));
    comments are exempt because misdecoded bytes there cannot change tokenization

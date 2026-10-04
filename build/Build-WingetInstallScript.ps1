@@ -120,6 +120,12 @@ function Get-PowerShell7OnlySyntax {
         clean { } blocks (PowerShell 7.3) are found in the AST instead: the Clean token kind also
         marks a class method named clean, which 5.1 accepts. ScriptBlockAst.CleanBlock does not
         exist under 5.1 and reads as $null there.
+
+        So is the background operator & (PowerShell 6.0, as in 'Get-Process &'): its token kind,
+        Ampersand, is also the call operator (& $exe, & { }), which 5.1 accepts.
+        PipelineAst.Background is set only for a pipeline that ends in &, and does not exist
+        under 5.1, where it reads as $null. The pipeline's extent stops before the &, so the
+        report points at the first & token after it.
     .PARAMETER Ast
         The parsed AST of the fully assembled installer.
     .PARAMETER Tokens
@@ -136,6 +142,7 @@ function Get-PowerShell7OnlySyntax {
 
     $ps7OnlyTokenKinds = @('QuestionQuestion', 'QuestionQuestionEquals', 'QuestionDot', 'QuestionLBracket', 'QuestionMark', 'AndAnd', 'OrOr')
 
+    $ampersandTokens = [System.Collections.Generic.List[System.Management.Automation.Language.Token]]::new()
     $pending = [System.Collections.Generic.Queue[System.Management.Automation.Language.Token]]::new()
     foreach ($token in $Tokens) { $pending.Enqueue($token) }
     while ($pending.Count -gt 0) {
@@ -143,6 +150,7 @@ function Get-PowerShell7OnlySyntax {
         if ($token -is [System.Management.Automation.Language.StringExpandableToken] -and $token.NestedTokens) {
             foreach ($nestedToken in $token.NestedTokens) { $pending.Enqueue($nestedToken) }
         }
+        if ($token.Kind.ToString() -eq 'Ampersand') { $ampersandTokens.Add($token) }
         if ($ps7OnlyTokenKinds -contains $token.Kind.ToString()) {
             [pscustomobject]@{
                 Line   = $token.Extent.StartLineNumber
@@ -160,6 +168,26 @@ function Get-PowerShell7OnlySyntax {
             Column = $scriptBlock.CleanBlock.Extent.StartColumnNumber
             Text   = 'clean { }'
             Kind   = 'CleanBlock'
+        }
+    }
+
+    $backgroundPipelines = $Ast.FindAll({ param($node) $node -is [System.Management.Automation.Language.PipelineAst] -and $node.Background }, $true)
+    foreach ($pipeline in $backgroundPipelines) {
+        $operator = $ampersandTokens |
+            Where-Object { $_.Extent.StartOffset -ge $pipeline.Extent.EndOffset } |
+            Sort-Object -Property { $_.Extent.StartOffset } |
+            Select-Object -First 1
+        $line = $pipeline.Extent.EndLineNumber
+        $column = $pipeline.Extent.EndColumnNumber
+        if ($operator) {
+            $line = $operator.Extent.StartLineNumber
+            $column = $operator.Extent.StartColumnNumber
+        }
+        [pscustomobject]@{
+            Line   = $line
+            Column = $column
+            Text   = '&'
+            Kind   = 'BackgroundOperator'
         }
     }
 }
@@ -481,7 +509,7 @@ if ($ps7OnlySyntax.Count -gt 0) {
     $details = foreach ($finding in $ps7OnlySyntax) {
         "line $($finding.Line), column $($finding.Column): '$($finding.Text)' ($($finding.Kind))"
     }
-    Write-Error ("PowerShell 5.1 syntax check failed: $($ps7OnlySyntax.Count) place(s) in the assembled script use syntax only PowerShell 7 parses. Windows PowerShell 5.1 parses the whole installer before running any of it, so one of these anywhere breaks the irm | iex one-liner before the PowerShell 7 bootstrap can run. Rewrite them in 5.1 syntax (if/else instead of ?? and ?:, an explicit `$null check instead of ?. and ?[, separate statements that test `$? or `$LASTEXITCODE instead of && and ||, end { } or try/finally instead of clean { }) in the offending source under WingetAppSetup/ or build/fragments/, then re-run the build.`n" + ($details -join "`n"))
+    Write-Error ("PowerShell 5.1 syntax check failed: $($ps7OnlySyntax.Count) place(s) in the assembled script use syntax only PowerShell 7 parses. Windows PowerShell 5.1 parses the whole installer before running any of it, so one of these anywhere breaks the irm | iex one-liner before the PowerShell 7 bootstrap can run. Rewrite them in 5.1 syntax (if/else instead of ?? and ?:, an explicit `$null check instead of ?. and ?[, separate statements that test `$? or `$LASTEXITCODE instead of && and ||, end { } or try/finally instead of clean { }, Start-Job instead of a trailing &) in the offending source under WingetAppSetup/ or build/fragments/, then re-run the build.`n" + ($details -join "`n"))
     exit 1
 }
 
