@@ -61,7 +61,18 @@ function Get-WindowsTerminalSettingsPaths {
 .SYNOPSIS
     Sets Windows Terminal default profile to a provided GUID.
 .DESCRIPTION
-    Reads settings.json, updates defaultProfile, and writes updated JSON.
+    Changes only the value of the top-level "defaultProfile" in settings.json, or inserts that
+    key when it is missing (Set-JsoncTopLevelStringProperty). Comments, commented-out profiles,
+    formatting and key order are kept: the file used to be parsed and rewritten with
+    ConvertTo-Json, which deleted all of them.
+
+    Before anything is written, the edited text is parsed again and must have defaultProfile set
+    to the new GUID and every other setting unchanged; otherwise the file is left alone. The
+    original file is then copied to settings.json.winget-app-setup.bak next to it, and the new
+    content is written to a temporary file in the same folder that replaces settings.json in one
+    step ([System.IO.File]::Replace), so the file is never left truncated or half-written and keeps
+    its attributes and ACL. A UTF-8 byte-order mark is kept when the file has one; a file that is
+    not valid UTF-8 is left alone.
 .PARAMETER SettingsPath
     Full path to the Windows Terminal settings file.
 .PARAMETER ProfileGuid
@@ -78,7 +89,7 @@ function Set-WindowsTerminalDefaultProfile {
         [string]$ProfileGuid
     )
 
-    if (-not (Test-Path -Path $SettingsPath)) {
+    if (-not (Test-Path -LiteralPath $SettingsPath -PathType Leaf)) {
         Write-WarningMessage "Windows Terminal settings file not found at '$SettingsPath'."
         return $false
     }
@@ -90,11 +101,20 @@ function Set-WindowsTerminalDefaultProfile {
         "{$ProfileGuid}"
     }
 
+    # The .NET file APIs below resolve a relative path against the process directory, not the
+    # PowerShell location, so work with the full path.
+    $fullPath = Convert-Path -LiteralPath $SettingsPath
+
     try {
-        $settingsContent = Get-Content -Path $SettingsPath -Raw -ErrorAction Stop
+        $originalBytes = [System.IO.File]::ReadAllBytes($fullPath)
+        $hasBom = $originalBytes.Length -ge 3 -and $originalBytes[0] -eq 0xEF -and $originalBytes[1] -eq 0xBB -and $originalBytes[2] -eq 0xBF
+        # Throw on invalid bytes: decoding them to U+FFFD and writing that back would corrupt the file.
+        $encoding = [System.Text.UTF8Encoding]::new($hasBom, $true)
+        $bomLength = if ($hasBom) { 3 } else { 0 }
+        $settingsContent = $encoding.GetString($originalBytes, $bomLength, $originalBytes.Length - $bomLength)
     }
     catch {
-        Write-WarningMessage "Unable to read Windows Terminal settings: $_"
+        Write-WarningMessage "Unable to read Windows Terminal settings '$fullPath' as UTF-8: $_"
         return $false
     }
 
@@ -109,18 +129,44 @@ function Set-WindowsTerminalDefaultProfile {
         return $true
     }
 
-    $settingsObject | Add-Member -MemberType NoteProperty -Name 'defaultProfile' -Value $normalizedGuid -Force
+    $updatedContent = Set-JsoncTopLevelStringProperty -JsonText $settingsContent -Name 'defaultProfile' -Value $normalizedGuid
+    $updatedObject = if ($null -ne $updatedContent) { ConvertFrom-TerminalSettingsJson -JsonText $updatedContent }
+    $isValidEdit = [bool]$updatedObject -and $updatedObject.defaultProfile -eq $normalizedGuid
+    if ($isValidEdit) {
+        $otherSettingsBefore = $settingsObject | Select-Object -Property * -ExcludeProperty 'defaultProfile' | ConvertTo-Json -Depth 100 -Compress
+        $otherSettingsAfter = $updatedObject | Select-Object -Property * -ExcludeProperty 'defaultProfile' | ConvertTo-Json -Depth 100 -Compress
+        $isValidEdit = $otherSettingsAfter -ceq $otherSettingsBefore
+    }
+    if (-not $isValidEdit) {
+        Write-WarningMessage "Could not change only defaultProfile in '$fullPath'; the file was left unchanged."
+        return $false
+    }
 
+    $backupPath = "$fullPath.winget-app-setup.bak"
+    $tempPath = "$fullPath.winget-app-setup.tmp"
     try {
-        $updatedJson = $settingsObject | ConvertTo-Json -Depth 100
-        Set-Content -Path $SettingsPath -Value $updatedJson -Encoding UTF8 -ErrorAction Stop
-        Write-Success 'Configured Windows Terminal default profile to PowerShell 7.'
-        return $true
+        Copy-Item -LiteralPath $fullPath -Destination $backupPath -Force -ErrorAction Stop
+        [System.IO.File]::WriteAllText($tempPath, $updatedContent, $encoding)
+        # [NullString]::Value: PowerShell would pass $null to the string parameter as '' (rejected).
+        [System.IO.File]::Replace($tempPath, $fullPath, [NullString]::Value)
     }
     catch {
+        # Replace can fail after settings.json was moved aside (ERROR_UNABLE_TO_MOVE_REPLACEMENT);
+        # put the original back from the backup made just before.
+        if (-not (Test-Path -LiteralPath $fullPath) -and (Test-Path -LiteralPath $backupPath -PathType Leaf)) {
+            Copy-Item -LiteralPath $backupPath -Destination $fullPath -ErrorAction SilentlyContinue
+        }
         Write-WarningMessage "Failed to update Windows Terminal settings.json: $_"
         return $false
     }
+    finally {
+        if (Test-Path -LiteralPath $tempPath -PathType Leaf) {
+            Remove-Item -LiteralPath $tempPath -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    Write-Success "Configured Windows Terminal default profile to PowerShell 7 (previous file saved as '$backupPath')."
+    return $true
 }
 
 <#
@@ -168,13 +214,18 @@ function Set-WindowsTerminalAsDefaultTerminalApplication {
     default terminal application setting.
 
     Both writes are strictly per-user: settings.json lives under the process account's
-    %LOCALAPPDATA% and the delegation values under its HKCU hive. Under this repo's
-    documented cross-user scenario — a tech elevating as an admin-* account on a user's
-    machine (issue #159) — that means the ADMIN account's terminal gets configured, not the
-    logged-on user's. This function reuses the #159 detection (Get-ProcessUserName vs
-    Get-InteractiveSessionUserName) to warn loudly and report honestly in that case
-    (issue #187). It deliberately does NOT write to another user's profile or registry
-    hive — impersonation/HKU writes are out of scope.
+    %LOCALAPPDATA% and the delegation values under its HKCU hive. They are only made when that
+    account is the logged-on user. The whole step is skipped, with one line, when:
+      - the process runs as SYSTEM (Test-IsSystemAccount), as under an RMM agent: SYSTEM is not
+        a person and has no Terminal of its own; or
+      - the process account differs from the interactive session's user (the #159 detection,
+        Get-ProcessUserName vs Get-InteractiveSessionUserName): a tech elevating as an admin-*
+        account on a user's machine. Applying the settings there would configure the ADMIN
+        account, never the user, and the delegation values in the admin's HKCU would make later
+        admin sessions look Terminal-hosted to Test-WindowsTerminalHostsCurrentSession.
+    When the session user is unknown (no console user reported), the step runs as before. It
+    deliberately does NOT write to another user's profile or registry hive - impersonation/HKU
+    writes are out of scope.
 
     The "default terminal application" registry write is gated on Windows Terminal actually
     being installed (Test-WindowsTerminalInstalled, issue #271). This function used to run
@@ -196,21 +247,20 @@ function Set-WindowsTerminalDefaults {
         [switch]$WhatIf
     )
 
-    $powerShell7ProfileGuid = '{574e775e-4f2a-5b96-ac1e-a2962a402336}'
-    $settingsPaths = @(Get-WindowsTerminalSettingsPaths)
-
-    # Cross-user elevation detection (issue #187), reusing the #159 helpers.
+    # Per-user settings: only write them for the logged-on user (see the description above).
+    if (Test-IsSystemAccount) {
+        Write-Info 'Skipping Windows Terminal defaults: they are per-user settings, and this run is SYSTEM, not a logged-on user.'
+        return
+    }
     $processUser = Get-ProcessUserName
     $sessionUser = Get-InteractiveSessionUserName
-    $isCrossUserElevation = [bool]($processUser -and $sessionUser -and ($processUser -ne $sessionUser))
-    if ($isCrossUserElevation) {
-        Write-WarningMessage '================================ CROSS-USER ELEVATION ================================'
-        Write-WarningMessage "Running as '$processUser' while '$sessionUser' owns the interactive session."
-        Write-WarningMessage 'Windows Terminal settings.json and the HKCU default-terminal values are PER-USER:'
-        Write-WarningMessage "everything below is applied to '$processUser' (the ADMIN account), NOT to '$sessionUser'."
-        Write-WarningMessage "'$sessionUser' will be left unconfigured. Re-run this script as '$sessionUser' to configure their terminal."
-        Write-WarningMessage '======================================================================================'
+    if ($processUser -and $sessionUser -and ($processUser -ne $sessionUser)) {
+        Write-Info "Skipping Windows Terminal defaults: they are per-user settings, and this run is elevated as '$processUser' while '$sessionUser' is logged on."
+        return
     }
+
+    $powerShell7ProfileGuid = '{574e775e-4f2a-5b96-ac1e-a2962a402336}'
+    $settingsPaths = @(Get-WindowsTerminalSettingsPaths)
 
     if ($WhatIf) {
         if ($settingsPaths.Count -gt 0) {
@@ -244,13 +294,6 @@ function Set-WindowsTerminalDefaults {
     }
     else {
         Write-WarningMessage 'Windows Terminal is not installed. Skipping default terminal application configuration.'
-    }
-
-    # Honest reporting under cross-user elevation: the per-step success messages above refer
-    # to the PROCESS account's profile, so close with the caveat rather than an implied
-    # machine-wide success (issue #187).
-    if ($isCrossUserElevation) {
-        Write-WarningMessage "Windows Terminal defaults were applied to '$processUser' only; '$sessionUser' remains unconfigured."
     }
 }
 

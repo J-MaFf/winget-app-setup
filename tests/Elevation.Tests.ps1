@@ -1,6 +1,6 @@
 # Elevation.Tests.ps1
 # Tests for WingetAppSetup/Public/Elevation.ps1 and Private/Elevation.ps1:
-# Restart-WithElevation and the module-context invocation detection.
+# Restart-WithElevation, the module-context invocation detection and Test-IsSystemAccount.
 # Split from the old single-file suite Test-WingetAppInstall.Tests.ps1 (issue #192).
 
 # Load the module's functions once for this file. TestHelpers.ps1 resolves the repo paths
@@ -154,5 +154,24 @@ Describe 'Test-InvokedFromModuleContext' {
 
     It 'Should return false when the command path is empty' {
         Test-InvokedFromModuleContext -CommandPath '' | Should -Be $false
+    }
+}
+
+Describe 'Test-IsSystemAccount' {
+    It 'Returns a bool that matches the LocalSystem SID S-1-5-18, and false instead of throwing where the identity cannot be read' {
+        # Off Windows, WindowsIdentity.GetCurrent() throws a MethodInvocationException wrapping
+        # PlatformNotSupportedException; the function must catch that (an untyped catch) and say
+        # $false. On Windows it must agree with the token's SID, whichever account runs the suite.
+        $expected = try {
+            [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value -eq 'S-1-5-18'
+        }
+        catch {
+            $false
+        }
+
+        $result = Test-IsSystemAccount
+
+        $result | Should -BeOfType [bool]
+        $result | Should -Be $expected
     }
 }

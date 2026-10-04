@@ -38,6 +38,30 @@ function Get-ProcessUserName {
 
 <#
 .SYNOPSIS
+    Returns $true when the current process runs as LocalSystem (NT AUTHORITY\SYSTEM, S-1-5-18).
+.DESCRIPTION
+    RMM agents (ManageEngine Endpoint Central, Intune) run scripts as SYSTEM. SYSTEM is not a
+    logged-on person: it has no interactive session, no per-user app registrations, and its HKCU
+    is not any user's, so per-user steps must not run as if it were the user.
+    WindowsIdentity.IsSystem compares the token's user SID with S-1-5-18 on both .NET Framework
+    (Windows PowerShell 5.1) and .NET. The catch is untyped on purpose: off Windows, GetCurrent()
+    throws a MethodInvocationException wrapping PlatformNotSupportedException, which a typed catch
+    would miss. A separate function so tests can Mock it.
+.RETURNS
+    [bool] True when running as SYSTEM; False otherwise or when the identity cannot be read.
+#>
+function Test-IsSystemAccount {
+    try {
+        $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+        return [bool]$identity.IsSystem
+    }
+    catch {
+        return $false
+    }
+}
+
+<#
+.SYNOPSIS
     Returns the account name that owns the interactive console session (DOMAIN\user), or $null.
 .DESCRIPTION
     Win32_ComputerSystem.UserName reports the interactively logged-on console user regardless of
