@@ -5,17 +5,19 @@ name: E2E Install
 # where the installer executes without mocks. The 259-test Pester suite (windows-tests.yml)
 # mocks every external call; this workflow is the top rung of the testing pyramid.
 #
-# Which installer runs (INSTALLER_SOURCE on the e2e-install job). Both install passes pipe it to
-# iex in a fresh pwsh -Command, as the documented one-liner does: the script runs from memory, with
-# no file path.
-#   - schedule: the TRUE production path - the installer is fetched from raw main, exactly as
-#     every helpdesk run gets it.
+# Which installer runs (INSTALLER_SOURCE on the e2e-install job), and how:
+#   - schedule: the TRUE production path - the installer is fetched from raw main and piped to
+#     iex in a fresh pwsh -Command, in both passes, exactly as every helpdesk run gets it.
 #   - pull_request and workflow_dispatch: the CHECKOUT's winget-app-install.ps1 (the PR's merge
-#     commit, or the branch the run was dispatched on), read from disk and piped to iex. main is
-#     production - the one-liner downloads it directly - so this is the only un-mocked run a
-#     change gets before it reaches users, and any branch can be tested on demand with
-#     'gh workflow run e2e-install.yml --ref <branch>'. e2e/Assert-Install.ps1 -InstallerPath then
-#     checks that both passes logged the checkout's build id.
+#     commit, or the branch the run was dispatched on). main is production - the one-liner
+#     downloads it directly - so this is the only un-mocked run a change gets before it reaches
+#     users, and any branch can be tested on demand with
+#     'gh workflow run e2e-install.yml --ref <branch>'. The two passes use the two documented
+#     entry points: the first pipes the file to iex the way the one-liner runs (from memory, no
+#     file path), the second runs it with 'pwsh -File' the way a clone, RMM or CI run does (which
+#     sets $PSCommandPath for the abort guard in build/fragments/tail.ps1).
+#     e2e/Assert-Install.ps1 -InstallerPath then checks that both passes logged the checkout's
+#     build id.
 #
 # Pull requests: every PR starts this workflow, and the changes job lets e2e-install run only when
 # the PR touches the product (WingetAppSetup/**, build/**, winget-app-install.ps1) or the e2e
@@ -152,7 +154,8 @@ jobs:
     timeout-minutes: 130
     env:
       # What both install passes run: 'raw-main' (the production one-liner) only for the weekly run,
-      # 'checkout' for pull requests and dispatched runs. See the header comment.
+      # 'checkout' for pull requests and dispatched runs (piped to iex, then run with -File). See
+      # the header comment.
       INSTALLER_SOURCE: ${{ github.event_name == 'schedule' && 'raw-main' || 'checkout' }}
     steps:
       - name: Checkout repository
@@ -184,7 +187,7 @@ jobs:
             & pwsh -NoProfile -Command 'irm https://raw.githubusercontent.com/J-MaFf/winget-app-setup/main/winget-app-install.ps1 | iex'
           }
           else {
-            Write-Host "Installer under test: the checkout ($env:GITHUB_REF at $env:GITHUB_SHA)."
+            Write-Host "Installer under test: the checkout ($env:GITHUB_REF at $env:GITHUB_SHA), piped to iex."
             & pwsh -NoProfile -Command 'Get-Content -Raw -LiteralPath ./winget-app-install.ps1 | iex'
           }
           $exitCode = $LASTEXITCODE
@@ -222,14 +225,17 @@ jobs:
         shell: pwsh
         timeout-minutes: 35
         run: |
-          # Same installer and command as the first pass, on the now-provisioned machine: it must
-          # exit 0 again, and the assertions step below verifies (via the latest transcript) that
-          # every catalog app was Skipped and nothing was installed or failed.
+          # Same installer as the first pass, on the now-provisioned machine: it must exit 0 again,
+          # and the assertions step below verifies (via the latest transcript) that every catalog
+          # app was Skipped and nothing was installed or failed. The weekly run repeats the
+          # one-liner. Checkout runs switch to 'pwsh -File', the entry the readme documents for
+          # clone, RMM and CI runs, so that path also gets an un-mocked run before it ships.
           if ($env:INSTALLER_SOURCE -eq 'raw-main') {
             & pwsh -NoProfile -Command 'irm https://raw.githubusercontent.com/J-MaFf/winget-app-setup/main/winget-app-install.ps1 | iex'
           }
           else {
-            & pwsh -NoProfile -Command 'Get-Content -Raw -LiteralPath ./winget-app-install.ps1 | iex'
+            Write-Host "Installer under test: the checkout ($env:GITHUB_REF at $env:GITHUB_SHA), run with -File."
+            & pwsh -NoProfile -ExecutionPolicy Bypass -File ./winget-app-install.ps1
           }
           $exitCode = $LASTEXITCODE
           # Same explicit-exit-0 requirement as the first pass (pwsh shell wrapper behavior).
