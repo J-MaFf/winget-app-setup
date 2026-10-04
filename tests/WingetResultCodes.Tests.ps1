@@ -89,3 +89,23 @@ Describe 'Test-RestartRequiredFirst' {
         Test-RestartRequiredFirst -InstallResult $Result | Should -BeFalse
     }
 }
+
+Describe 'Test-WingetRestartRequiredResult' {
+    It 'Is true for <Case>' -ForEach @(
+        @{ Case = 'winget 1.6 and older (0x8A150109)'; Code = -1978334967; Output = @() }
+        @{ Case = 'an installer that started a restart (0x8A15010B, MSI 1641)'; Code = -1978334965; Output = @() }
+        @{ Case = 'winget 1.7 and later (exit 0 with its restart warning)'; Code = 0; Output = @('Starting package install...', 'Restart your PC to finish installation.') }
+    ) {
+        Test-WingetRestartRequiredResult -ExitCode $Code -Output $Output | Should -BeTrue
+    }
+
+    It 'Is false for <Case>' -ForEach @(
+        @{ Case = 'a plain success'; Code = 0; Output = @('Starting package install...', 'Successfully installed') }
+        @{ Case = 'no exit code (winget did not run to the end)'; Code = $null; Output = @('Restart your PC to finish installation.') }
+        @{ Case = 'a restart required before the installer can run (0x8A15010A)'; Code = -1978334966; Output = @() }
+        @{ Case = 'a failure that printed the restart warning'; Code = -1978334974; Output = @('Restart your PC to finish installation.') }
+        @{ Case = 'no output'; Code = 0; Output = $null }
+    ) {
+        Test-WingetRestartRequiredResult -ExitCode $Code -Output $Output | Should -BeFalse
+    }
+}

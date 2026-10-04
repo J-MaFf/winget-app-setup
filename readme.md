@@ -152,10 +152,11 @@ Some install results clear on their own, and are waited out instead of failing a
 - **Another installation in progress** (`0x8A150102`, `msiexec` 1618). Windows Installer runs one
   installation at a time and refuses a second one at once, which is common on a freshly enrolled PC
   while the management agent, OEM tools or Teams are still installing. The installer waits for
-  that installation to finish (it checks the `Global\_MSIExecute` mutex every 15 seconds, without
-  taking it), then retries, up to 3 times per app. All the waiting in a run, the Winget-AutoUpdate
-  `msiexec` included, comes out of one 10-minute budget, so a PC that stays busy costs the run 10
-  minutes at most. After that, the app fails with
+  that installation to finish (every 15 seconds it checks whether an installation owns the
+  `Global\_MSIExecute` mutex; when none does, the check holds the mutex for an instant and
+  releases it at once), then retries, up to 3 times per app. All the waiting in a run, the
+  Winget-AutoUpdate `msiexec` included, comes out of one 10-minute budget, so a PC that stays busy
+  costs the run 10 minutes at most. After that, the app fails with
   `another installation was in progress (Windows Installer was busy) - re-run the installer once it has finished`.
 - **The app or its files are in use** (`0x8A150101`, `0x8A150103`, `0x8A150111`): one retry after
   60 seconds.
@@ -176,10 +177,13 @@ up temporary files). A run that needs a restart to finish ends with
 `Restart: REQUIRED to finish this run - restart this PC before it is used (...)` and exit code 3010
 when nothing failed. That is when an install said so (winget's
 `Restart your PC to finish installation.`, recognized on an English Windows, or exit `0x8A150109`
-or `0x8A15010B`), the Winget-AutoUpdate MSI returned 3010, or a pending-restart indicator appeared
-during the run. A restart that was already pending before the run is reported at the start and
-next to the summary (`Restart: already pending before this run (...)`), but does not make the run
-3010 by itself. The installer never restarts the PC.
+or `0x8A15010B`), the Winget-AutoUpdate MSI returned 3010, a pending-restart indicator appeared
+during the run, or, on a run started from Windows PowerShell, installing PowerShell 7 needed a
+restart (its MSI returned 3010, or winget said so). The bootstrap reports that last case after the
+PowerShell 7 run (`Restart: REQUIRED to finish the PowerShell 7 installation - ...`) and turns
+that run's 0 into 3010. A restart that was already pending before the run is reported at the start
+and next to the summary (`Restart: already pending before this run (...)`), but does not make the
+run 3010 by itself. The installer never restarts the PC.
 
 ### Exit codes
 
@@ -190,7 +194,7 @@ next to the summary (`Restart: already pending before this run (...)`), but does
 | 2 | Winget is unavailable or cannot be started (`winget --version` must run and print a version) and could not be set up, or winget could no longer be launched at the end of the run (no app failed, but automatic updates and the next run would) |
 | 3 | App-definition validation failed, or no valid app definitions remain |
 | 5 | The run was aborted before it finished: an unexpected error (the message and stack trace are in the log), or the run was stopped from outside (Ctrl+C, the console closing, an installer stopping the console) when run from a file or non-interactively |
-| 3010 | Success, but a restart is required to finish: an install said so, the Winget-AutoUpdate MSI returned 3010, or Windows gained a pending restart during the run (see **Restart required** above). RMM tools and Intune treat 3010 as "succeeded, restart required". A restart that was already pending before the run does not cause it |
+| 3010 | Success, but a restart is required to finish: an install said so, the Winget-AutoUpdate MSI returned 3010, Windows gained a pending restart during the run, or installing PowerShell 7 from Windows PowerShell needed a restart (see **Restart required** above). RMM tools and Intune treat 3010 as "succeeded, restart required". A restart that was already pending before the run does not cause it |
 
 At the end of a run, when more than one applies, the code is the first of 1, 2, 3010 and 0.
 

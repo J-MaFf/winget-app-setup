@@ -409,7 +409,10 @@ function Test-PowerShell7MsiSignature {
     P3-17).
 
     Exit code 3010 (ERROR_SUCCESS_REBOOT_REQUIRED) counts as success: pwsh.exe is on disk and
-    launchable at that point, and the relaunch does not need the pending reboot.
+    launchable at that point, and the relaunch does not need the pending reboot. It still sets
+    $script:PowerShell7BootstrapRestartRequired, so Invoke-PowerShell7Bootstrap ends a run that
+    otherwise succeeded with 3010 (review finding P3-16): the relaunched run checks Windows'
+    pending-restart state only after this install, so it cannot see the restart this install needs.
 
     Exit code 1618 (ERROR_INSTALL_ALREADY_RUNNING) is retried after a wait (review finding P2-13).
     msiexec returns it at once, without waiting, whenever another installation holds the Windows
@@ -443,7 +446,7 @@ function Test-PowerShell7MsiSignature {
 .PARAMETER BusyRetryDelaySeconds
     Seconds to wait before each of those retries.
 .RETURNS
-    [bool] True when msiexec reported success.
+    [bool] True when msiexec reported success (0 or 3010).
 #>
 function Install-PowerShell7FromMsi {
     param (
@@ -525,7 +528,12 @@ function Install-PowerShell7FromMsi {
             }
 
             $msiExitCode = $msiProcess.ExitCode
-            if ($msiExitCode -eq 0 -or $msiExitCode -eq 3010) {
+            if ($msiExitCode -eq 3010) {
+                $script:PowerShell7BootstrapRestartRequired = $true
+                Write-WarningMessage 'PowerShell 7 is installed, and a restart finishes the installation (msiexec exit code 3010). The run continues; restart this PC once it has finished.'
+                return $true
+            }
+            if ($msiExitCode -eq 0) {
                 return $true
             }
             if ($msiExitCode -eq 1618 -and $attempt -le $BusyRetryCount) {
@@ -704,7 +712,13 @@ function Get-PowerShell7RelaunchInstaller {
 .RETURNS
     [int] Exit code for the tail dispatch to propagate: the relaunched run's exit code, 0 for a
     -WhatIf preview of a would-be install, or 7 when PowerShell 7 could not be installed or the
-    installer could not be relaunched under it. Sets
+    installer could not be relaunched under it. When installing PowerShell 7 needs a restart to
+    finish (msiexec 3010, or winget's restart result, see Test-WingetRestartRequiredResult) and the
+    relaunched run returned 0, the result is 3010 (review finding P3-16): that run checks Windows'
+    pending-restart state only after this install, so it cannot see this restart itself. Any other
+    code the relaunched run returned is kept: a failure at the end of the run ranks above 3010, and
+    an early exit stays what it is.
+    Sets
     $script:PowerShell7BootstrapRelaunched to $true once a relaunched PowerShell 7 run has ended,
     so the tail knows that run already reported its outcome to whoever is at the console.
 #>
@@ -747,6 +761,9 @@ function Invoke-PowerShell7Bootstrap {
     # the reset here, a throttled call would leave a stale $true that a later, unrelated call in
     # the same process (or Pester run) could inherit.
     $script:PowerShell7BootstrapGitHubThrottled = $false
+    # Set by the PowerShell 7 install below when it needs a restart to finish; reset per call for
+    # the same reason.
+    $script:PowerShell7BootstrapRestartRequired = $false
 
     # 5.1's .NET Framework can default to a protocol set without TLS 1.2 on older Windows 10
     # builds, which breaks the Invoke-RestMethod calls below. Opt in additively; never downgrade.
@@ -806,6 +823,16 @@ function Invoke-PowerShell7Bootstrap {
             }
             elseif ($wingetRun.TimedOut) {
                 Write-WarningMessage 'winget did not finish installing PowerShell 7 in time and was stopped.'
+            }
+            elseif (Test-WingetRestartRequiredResult -ExitCode $wingetRun.ExitCode -Output $wingetRun.Output) {
+                # Installed, and a restart finishes it (review finding P3-16): winget's restart
+                # warning on exit 0, or 0x8A150109 / 0x8A15010B.
+                $script:PowerShell7BootstrapRestartRequired = $true
+                $restartDetail = ''
+                if ($wingetRun.ExitCode -ne 0) {
+                    $restartDetail = ' (exit code {0})' -f (Format-WingetExitCode -ExitCode $wingetRun.ExitCode)
+                }
+                Write-WarningMessage ('winget reported that a restart finishes the PowerShell 7 installation{0}. The run continues; restart this PC once it has finished.' -f $restartDetail)
             }
             elseif ($wingetRun.ExitCode -ne 0) {
                 Write-WarningMessage ('winget could not install PowerShell 7 (exit code {0}).' -f (Format-WingetExitCode -ExitCode $wingetRun.ExitCode))
@@ -914,5 +941,17 @@ function Invoke-PowerShell7Bootstrap {
     # Into the bootstrap transcript: a relaunched run that failed before it could start its own
     # transcript (pwsh rejecting the arguments, a crash on load) leaves only this line behind.
     Write-Info ('The PowerShell 7 run ended with exit code {0}.' -f $relaunchProcess.ExitCode)
-    return $relaunchProcess.ExitCode
+    $relaunchExitCode = $relaunchProcess.ExitCode
+    if ($script:PowerShell7BootstrapRestartRequired) {
+        # The relaunched run read Windows' pending-restart state after the PowerShell 7 install
+        # above, so it took this restart as already pending and did not report it (review finding
+        # P3-16). Repeated here, after that run's summary, and turned into 3010 when nothing else
+        # went wrong.
+        Write-WarningMessage 'Restart: REQUIRED to finish the PowerShell 7 installation - restart this PC before it is used.'
+        if ($relaunchExitCode -eq 0) {
+            Write-Info 'Exit code 3010: the apps installed, and the PowerShell 7 installation needs a restart to finish.'
+            return 3010
+        }
+    }
+    return $relaunchExitCode
 }

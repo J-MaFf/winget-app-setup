@@ -1,21 +1,31 @@
 # Machine state that decides whether an install can run now or needs a restart (review findings
 # P2-15 and P3-16): whether Windows Installer is busy with another installation, and whether Windows
-# has a restart pending. Read-only: nothing here takes the Windows Installer mutex or changes the
-# registry. Runs under Windows PowerShell 5.1 too: .NET Framework 4.5 APIs only.
+# has a restart pending. Read-only: nothing here changes the registry, and the Windows Installer
+# mutex is only ever held for the instant it takes to test it (Test-WindowsInstallerBusy). Runs under
+# Windows PowerShell 5.1 too: .NET Framework 4.5 APIs only.
 
 <#
 .SYNOPSIS
     Returns whether Windows Installer is busy with another installation right now.
 .DESCRIPTION
-    Windows Installer holds the Global\_MSIExecute mutex while an installation runs its execute
+    Windows Installer owns the Global\_MSIExecute mutex while an installation runs its execute
     sequence, and any other MSI install started meanwhile fails at once with 1618
-    (ERROR_INSTALL_ALREADY_RUNNING), which winget reports as 0x8A150102. This only checks whether the
-    mutex exists (Mutex.TryOpenExisting): it never waits on it or takes ownership, which could make
-    an installation starting at that moment fail with 1618 itself. The handle is closed at once, so
-    this check never keeps the mutex alive. A mutex that exists but that this account may not open
-    counts as busy. Existence is not proof that an installation is running (another process may
-    hold a handle to a released mutex), so callers bound how long they wait on it and then try the
-    install anyway.
+    (ERROR_INSTALL_ALREADY_RUNNING), which winget reports as 0x8A150102. The busy signal is that
+    the mutex is owned, not that it exists: the mutex object lives as long as any process holds a
+    handle to it, released or not, so a check for existence alone could read busy for as long as
+    that handle stays open and run every wait to its time limit.
+
+    So the check opens the mutex (Mutex.TryOpenExisting; none of that name: idle) and tries to take
+    it without waiting (WaitOne(0)), the same test PSAppDeployToolkit's Test-ADTMutexAvailability
+    makes. Taken: nobody owned it, so Windows Installer is idle, and the mutex is released again at
+    once, on the same thread. A mutex whose owner ended without releasing it (abandoned) is taken
+    the same way and counts as idle. Not taken: an installation owns it, busy. For that instant an
+    MSI starting its execute sequence on another process could get 1618 itself; the window is a few
+    microseconds once per poll interval, the trade PSAppDeployToolkit makes before every MSI it
+    runs. A mutex that this account may not open (TryOpenExisting asks for the rights to wait on
+    and release it) counts as busy, without ever taking it; callers bound how long they wait and
+    then try the install anyway. The handle is always closed, so this check never keeps the mutex
+    alive.
 .PARAMETER Name
     The mutex name. Default 'Global\_MSIExecute'; tests pass a name of their own.
 .RETURNS
@@ -28,8 +38,19 @@ function Test-WindowsInstallerBusy {
     )
 
     $mutex = $null
+    $taken = $false
     try {
-        return [bool][System.Threading.Mutex]::TryOpenExisting($Name, [ref]$mutex)
+        if (-not [System.Threading.Mutex]::TryOpenExisting($Name, [ref]$mutex)) {
+            return $false
+        }
+        try {
+            $taken = $mutex.WaitOne(0)
+        }
+        catch [System.Threading.AbandonedMutexException] {
+            # Its owner ended without releasing it; this thread owns it now.
+            $taken = $true
+        }
+        return (-not $taken)
     }
     catch [System.UnauthorizedAccessException] {
         # The mutex exists, but this account may not open it.
@@ -40,6 +61,16 @@ function Test-WindowsInstallerBusy {
         return $false
     }
     finally {
+        if ($taken) {
+            # Released before anything else, on the thread that took it: a mutex this run kept
+            # would make every MSI on the PC fail with 1618 until the run ended.
+            try {
+                $mutex.ReleaseMutex()
+            }
+            catch {
+                # Only possible if this thread no longer owned it.
+            }
+        }
         if ($null -ne $mutex) {
             $mutex.Dispose()
         }

@@ -7,28 +7,155 @@ BeforeAll {
 }
 
 Describe 'Test-WindowsInstallerBusy' {
-    # A real named mutex with a name of its own (never Global\_MSIExecute, which would make a real
+    # Real named mutexes with a name of their own (never Global\_MSIExecute, which would make a real
     # MSI install on the test machine fail with 1618 while the test holds it). No Global\ prefix
-    # either: creating a global object needs a privilege a standard user may not have.
-    It 'Is false while no mutex of that name exists, true while one does, and false once it is gone' {
-        $name = 'winget-app-setup-test-' + [guid]::NewGuid().ToString('N')
+    # either: creating a global object needs a privilege a standard user may not have. A mutex
+    # belongs to a thread, and the thread that owns one can always take it again, so the "other
+    # installation" holds it on a thread of its own: a runspace whose every invocation runs on a
+    # new thread (PSThreadOptions.UseNewThread).
+    BeforeAll {
+        function Invoke-OnOtherThread {
+            param (
+                [Parameter(Mandatory = $true)]
+                [scriptblock]$ScriptBlock,
 
-        Test-WindowsInstallerBusy -Name $name | Should -BeFalse
+                [Parameter(Mandatory = $false)]
+                [object[]]$ArgumentList = @()
+            )
 
-        $mutex = [System.Threading.Mutex]::new($true, $name)
+            $runspace = [runspacefactory]::CreateRunspace()
+            $runspace.ThreadOptions = [System.Management.Automation.Runspaces.PSThreadOptions]::UseNewThread
+            $runspace.Open()
+            $shell = [powershell]::Create()
+            try {
+                $shell.Runspace = $runspace
+                [void]$shell.AddScript($ScriptBlock.ToString())
+                foreach ($argument in $ArgumentList) {
+                    [void]$shell.AddArgument($argument)
+                }
+                return $shell.Invoke()
+            }
+            finally {
+                $shell.Dispose()
+                $runspace.Dispose()
+            }
+        }
+
+        # Whether a thread other than the test's can take the mutex right now: false while anyone
+        # else, the busy check included, still owns it.
+        function Test-TakenOnOtherThread {
+            param ([string]$Name)
+
+            @(Invoke-OnOtherThread -ArgumentList $Name -ScriptBlock {
+                    param ($Name)
+                    $mutex = [System.Threading.Mutex]::OpenExisting($Name)
+                    try {
+                        $taken = $false
+                        try {
+                            $taken = $mutex.WaitOne(0)
+                        }
+                        catch [System.Threading.AbandonedMutexException] {
+                            $taken = $true
+                        }
+                        if ($taken) {
+                            $mutex.ReleaseMutex()
+                        }
+                        $taken
+                    }
+                    finally {
+                        $mutex.Dispose()
+                    }
+                })[-1]
+        }
+    }
+
+    BeforeEach {
+        $script:mutexName = 'winget-app-setup-test-' + [guid]::NewGuid().ToString('N')
+    }
+
+    It 'Is false while no mutex of that name exists' {
+        Test-WindowsInstallerBusy -Name $script:mutexName | Should -BeFalse
+    }
+
+    It 'Is true while another thread owns the mutex, and false once that owner has released it' {
+        $acquired = [System.Threading.ManualResetEvent]::new($false)
+        $release = [System.Threading.ManualResetEvent]::new($false)
+        $owner = [powershell]::Create()
         try {
-            Test-WindowsInstallerBusy -Name $name | Should -BeTrue
-            # Checking twice in a row still says busy: the check closes its own handle and never
-            # takes ownership.
-            Test-WindowsInstallerBusy -Name $name | Should -BeTrue
+            [void]$owner.AddScript({
+                    param ($Name, $Acquired, $Release)
+                    $mutex = [System.Threading.Mutex]::new($true, $Name)
+                    [void]$Acquired.Set()
+                    [void]$Release.WaitOne(30000)
+                    $mutex.ReleaseMutex()
+                    $mutex.Dispose()
+                }).AddArgument($script:mutexName).AddArgument($acquired).AddArgument($release)
+            $ownerRun = $owner.BeginInvoke()
+            $acquired.WaitOne(10000) | Should -BeTrue -Because 'the other thread must own the mutex before the check runs'
+
+            Test-WindowsInstallerBusy -Name $script:mutexName | Should -BeTrue
+            Test-WindowsInstallerBusy -Name $script:mutexName | Should -BeTrue
         }
         finally {
-            $mutex.ReleaseMutex()
-            $mutex.Dispose()
+            [void]$release.Set()
+            if ($ownerRun) {
+                $owner.EndInvoke($ownerRun)
+            }
+            $owner.Dispose()
         }
 
-        # The check left no handle open that would keep the mutex alive.
-        Test-WindowsInstallerBusy -Name $name | Should -BeFalse
+        # Once that installation has finished, the check reads idle.
+        Test-WindowsInstallerBusy -Name $script:mutexName | Should -BeFalse
+    }
+
+    It 'Is false while the mutex exists but nobody owns it, and leaves it free for the next installation' {
+        # Another process still has a handle to the released mutex (the review's msiexec service
+        # case): the mutex exists, but no installation is running.
+        $handle = [System.Threading.Mutex]::new($false, $script:mutexName)
+        try {
+            Test-WindowsInstallerBusy -Name $script:mutexName | Should -BeFalse
+            Test-WindowsInstallerBusy -Name $script:mutexName | Should -BeFalse
+
+            # The check released what it took: another thread can take the mutex at once.
+            Test-TakenOnOtherThread -Name $script:mutexName | Should -BeTrue
+        }
+        finally {
+            $handle.Dispose()
+        }
+    }
+
+    It 'Is false for a mutex whose owner ended without releasing it, and releases it' {
+        $handle = [System.Threading.Mutex]::new($false, $script:mutexName)
+        try {
+            # Take it on a thread that then ends: the mutex is abandoned.
+            $ownerThread = @(Invoke-OnOtherThread -ArgumentList $script:mutexName -ScriptBlock {
+                    param ($Name)
+                    $mutex = [System.Threading.Mutex]::OpenExisting($Name)
+                    [void]$mutex.WaitOne(0)
+                    [System.Threading.Thread]::CurrentThread
+                })[-1]
+            $ownerThread.Join(10000) | Should -BeTrue -Because 'the owning thread must have ended for the mutex to be abandoned'
+
+            Test-WindowsInstallerBusy -Name $script:mutexName | Should -BeFalse
+
+            # Released, not kept by the test's thread.
+            Test-TakenOnOtherThread -Name $script:mutexName | Should -BeTrue
+        }
+        finally {
+            $handle.Dispose()
+        }
+    }
+
+    It 'Leaves no handle open that would keep the mutex alive' {
+        $handle = [System.Threading.Mutex]::new($false, $script:mutexName)
+        [void](Test-WindowsInstallerBusy -Name $script:mutexName)
+        $handle.Dispose()
+
+        $reopened = $null
+        [System.Threading.Mutex]::TryOpenExisting($script:mutexName, [ref]$reopened) | Should -BeFalse
+        if ($reopened) {
+            $reopened.Dispose()
+        }
     }
 
     It 'Checks Global\_MSIExecute, the mutex Windows Installer holds during an installation, by default' {

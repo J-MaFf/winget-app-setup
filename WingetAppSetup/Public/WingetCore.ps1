@@ -692,19 +692,9 @@ function Install-WingetPackage {
         # Success, a restart-required result (0x8A15010A is never retried: only a restart changes
         # it) or another failure: final here. The caller verifies the actual install state with
         # `winget list`.
-        if ($codeClass -eq 'RestartRequired') {
-            $restartRequired = $true
-        }
-        elseif ($exitCode -eq 0) {
-            # winget 1.7+ turns an installer's 3010 into exit 0 and says so only in its output
-            # ('Restart your PC to finish installation.', English display language only).
-            foreach ($line in @($run.Output)) {
-                if ([string]$line -match 'Restart your PC to finish installation') {
-                    $restartRequired = $true
-                    break
-                }
-            }
-        }
+        # winget 1.7+ turns an installer's 3010 into exit 0 and says so only in its output
+        # ('Restart your PC to finish installation.', English display language only).
+        $restartRequired = Test-WingetRestartRequiredResult -ExitCode $exitCode -Output $run.Output
         break
     }
 

@@ -181,12 +181,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     with `msiexec` 1618, which winget reports as `0x8A150102`. On a freshly enrolled PC that made
     an app fail after one launch with no wait, reported as
     `package not found after install; winget exit 0x8A150102`. `Install-WingetPackage` now waits
-    until Windows Installer is idle (`Wait-WindowsInstallerIdle`, which checks whether the
-    `Global\_MSIExecute` mutex exists every 15 seconds without taking it) and retries, up to 3
-    times. All of a run's waits, the Winget-AutoUpdate `msiexec` included (which now also waits out
-    1618 instead of reporting `Auto-updates: FAILED`), share one 10-minute budget that
-    `Invoke-WingetInstall` passes down through `Install-AppWithVerification` and
-    `Install-PowerShellLatest`, so a machine that stays busy costs a run 10 minutes at most.
+    until Windows Installer is idle (`Wait-WindowsInstallerIdle`, which checks every 15 seconds
+    whether an installation owns the `Global\_MSIExecute` mutex) and retries, up to 3 times. The
+    check (`Test-WindowsInstallerBusy`) tries to take the mutex without waiting and releases it at
+    once when it can, the test PSAppDeployToolkit makes: the mutex lives as long as any process
+    holds a handle to it, so a check for its existence alone could read busy with no installation
+    running and spend the whole wait. An abandoned mutex counts as idle. All of a run's waits, the
+    Winget-AutoUpdate `msiexec` included (which now also waits out 1618 instead of reporting
+    `Auto-updates: FAILED`), share one 10-minute budget that `Invoke-WingetInstall` passes down
+    through `Install-AppWithVerification` and `Install-PowerShellLatest`, so a machine that stays
+    busy costs a run 10 minutes at most.
   - **In use.** `0x8A150101`, `0x8A150103` and `0x8A150111` (the app or its files are in use) get
     one retry after 60 seconds.
   - **Restart before installing.** `0x8A15010A` (for example Inno setup exit 8 while a Windows
@@ -196,8 +200,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Restart to finish.** winget reports an MSI's 3010 as exit 0 plus a console warning, and the
     run used to report a plain success with no notice. `Install-WingetPackage` returns
     `RestartRequired` for winget's `Restart your PC to finish installation.` warning (English
-    display language only), `0x8A150109` (winget 1.6 and older) and `0x8A15010B` (MSI 1641), and
-    `Install-WingetAutoUpdate` for its `msiexec` 3010. `Invoke-WingetInstall` also reads Windows'
+    display language only), `0x8A150109` (winget 1.6 and older) and `0x8A15010B` (MSI 1641), all
+    read by `Test-WingetRestartRequiredResult`, and `Install-WingetAutoUpdate` for its `msiexec`
+    3010. On a run started from Windows PowerShell, the PowerShell 7 bootstrap reads its own
+    install the same way (the MSI's 3010, or winget's restart result): it says
+    `Restart: REQUIRED to finish the PowerShell 7 installation - restart this PC before it is used.`
+    after the PowerShell 7 run and turns that run's 0 into 3010, because the PowerShell 7 run checks
+    the pending-restart state only after that install. `Invoke-WingetInstall` also reads Windows'
     pending-restart state (`Get-PendingRestartState`: component servicing, Windows Update, and the
     file replacements queued in `PendingFileRenameOperations`, leaving out queued deletes) before
     and after the run. A run that needs a restart prints

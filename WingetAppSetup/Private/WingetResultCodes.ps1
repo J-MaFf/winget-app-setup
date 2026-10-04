@@ -172,3 +172,47 @@ function Test-RestartRequiredFirst {
     $info = Get-WingetExitCodeInfo -ExitCode ([int]$InstallResult.ExitCode)
     return [bool]($info -and $info.Class -eq 'RestartRequiredFirst')
 }
+
+<#
+.SYNOPSIS
+    Returns whether a winget install says the package installed and a restart finishes it.
+.DESCRIPTION
+    winget 1.7 and later report an MSI, WiX or Burn installer's 3010 as exit 0 and print 'Restart
+    your PC to finish installation.'; winget 1.6 and older exit 0x8A150109, and an installer that
+    started a restart itself (MSI 1641) gives 0x8A15010B (review finding P3-16). True for any of the
+    three. The printed warning is matched in English only; on other display languages
+    Invoke-WingetInstall's pending-restart registry check is what notices it. Used by
+    Install-WingetPackage for every app and by the PowerShell 7 bootstrap for its winget install of
+    PowerShell, so both read winget's result the same way. Runs under Windows PowerShell 5.1 too.
+.PARAMETER ExitCode
+    winget's exit code, or $null when it did not run to the end.
+.PARAMETER Output
+    What winget printed (Invoke-WingetProcess's Output).
+.RETURNS
+    [bool]
+#>
+function Test-WingetRestartRequiredResult {
+    param (
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [Nullable[int]]$ExitCode,
+
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [object[]]$Output
+    )
+
+    if ($null -eq $ExitCode) {
+        return $false
+    }
+    if ($ExitCode -ne 0) {
+        $info = Get-WingetExitCodeInfo -ExitCode $ExitCode
+        return [bool]($info -and $info.Class -eq 'RestartRequired')
+    }
+    foreach ($line in @($Output)) {
+        if ([string]$line -match 'Restart your PC to finish installation') {
+            return $true
+        }
+    }
+    return $false
+}

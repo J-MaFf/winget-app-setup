@@ -486,6 +486,25 @@ Describe 'Install-PowerShell7FromMsi' {
         Install-PowerShell7FromMsi | Should -Be $true
     }
 
+    It 'Records that msiexec 3010 needs a restart, so the run can end with 3010 (review finding P3-16)' {
+        $script:PowerShell7BootstrapRestartRequired = $false
+        $script:msiExitCode = 3010
+
+        Install-PowerShell7FromMsi | Out-Null
+
+        $script:PowerShell7BootstrapRestartRequired | Should -BeTrue
+        Should -Invoke Write-WarningMessage -Times 1 -Exactly -ParameterFilter { $Message -match 'restart finishes the installation \(msiexec exit code 3010\)' }
+    }
+
+    It 'Records no restart for msiexec 0' {
+        $script:PowerShell7BootstrapRestartRequired = $false
+        $script:msiExitCode = 0
+
+        Install-PowerShell7FromMsi | Should -Be $true
+
+        $script:PowerShell7BootstrapRestartRequired | Should -BeFalse
+    }
+
     It 'Returns $false on a nonzero msiexec exit code' {
         $script:msiExitCode = 1603
 
@@ -736,6 +755,18 @@ Describe 'Invoke-PowerShell7Bootstrap' {
 
             $script:PowerShell7BootstrapRelaunched | Should -BeTrue
             Should -Invoke Write-Info -Times 1 -Exactly -ParameterFilter { $Message -eq 'The PowerShell 7 run ended with exit code 42.' }
+        }
+
+        It 'Does not carry a restart over from an earlier call (review finding P3-16)' {
+            # Nothing was installed by this call, so a flag left over from an earlier one in the
+            # same process must not turn a clean run into 3010.
+            Mock Start-Process { [pscustomobject]@{ ExitCode = 0 } } -ParameterFilter { $FilePath -eq 'C:\pf7\pwsh.exe' }
+            $script:PowerShell7BootstrapRestartRequired = $true
+
+            $result = Invoke-PowerShell7Bootstrap -CommandPath 'C:\repo\winget-app-install.ps1'
+
+            $result | Should -Be 0
+            Should -Invoke Write-WarningMessage -Times 0 -ParameterFilter { $Message -like 'Restart: REQUIRED*' }
         }
 
         It 'Returns 7 instead of a false success when the pwsh launch itself fails' {
@@ -1022,6 +1053,83 @@ Describe 'Invoke-PowerShell7Bootstrap' {
             Should -Invoke Write-ErrorMessage -Times 1 -ParameterFilter {
                 $Message -match 'rate-limiting' -and $Message -match 'winget source reset --force'
             }
+        }
+    }
+
+    Context 'Installing PowerShell 7 needs a restart to finish (review finding P3-16)' {
+        # The relaunched run reads Windows' pending-restart state only after the PowerShell 7
+        # install, so it cannot see the restart that install needs: the bootstrap reports it.
+        BeforeEach {
+            $script:findCallCount = 0
+            Mock Find-PowerShell7 {
+                $script:findCallCount++
+                if ($script:findCallCount -ge 2) {
+                    return 'C:\pf7\pwsh.exe'
+                }
+                return $null
+            }
+            Mock Test-EffectiveNonInteractive { $true }
+            Mock Get-Command { [pscustomobject]@{ Source = 'C:\winget.exe' } } -ParameterFilter { $Name -eq 'winget' }
+            $script:childExitCode = 0
+            Mock Start-Process { [pscustomobject]@{ ExitCode = $script:childExitCode } } -ParameterFilter { $FilePath -eq 'C:\pf7\pwsh.exe' }
+        }
+
+        It 'Ends with 3010 when <Case> and the relaunched run succeeded' -ForEach @(
+            @{ Case = 'winget printed its restart warning (exit 0)'; Run = @{ ExitCode = 0; Output = @('Successfully installed', 'Restart your PC to finish installation.') } }
+            @{ Case = 'winget exited 0x8A150109 (winget 1.6 and older)'; Run = @{ ExitCode = -1978334967; Output = @() } }
+        ) {
+            $wingetRun = $Run
+            Mock Invoke-WingetProcess { New-TestProcessResult -ExitCode $wingetRun.ExitCode -Output $wingetRun.Output }
+
+            $result = Invoke-PowerShell7Bootstrap -CommandPath 'C:\repo\winget-app-install.ps1'
+
+            $result | Should -Be 3010
+            $script:PowerShell7BootstrapRestartRequired | Should -BeTrue
+            Should -Invoke Write-WarningMessage -Times 1 -Exactly -ParameterFilter { $Message -like 'winget reported that a restart finishes the PowerShell 7 installation*' }
+            Should -Invoke Write-WarningMessage -Times 1 -Exactly -ParameterFilter { $Message -eq 'Restart: REQUIRED to finish the PowerShell 7 installation - restart this PC before it is used.' }
+            # Installed: no failure message, and no MSI fallback.
+            Should -Invoke Write-WarningMessage -Times 0 -ParameterFilter { $Message -like 'winget could not install PowerShell 7*' }
+            Should -Invoke Install-PowerShell7FromMsi -Times 0
+        }
+
+        It 'Ends with 3010 when the MSI fallback returned 3010 and the relaunched run succeeded' {
+            Mock Invoke-WingetProcess { New-TestProcessResult -ExitCode 1 }
+            $script:findCallCount = -1
+            Mock Install-PowerShell7FromMsi {
+                $script:PowerShell7BootstrapRestartRequired = $true
+                $true
+            }
+
+            $result = Invoke-PowerShell7Bootstrap -CommandPath 'C:\repo\winget-app-install.ps1'
+
+            $result | Should -Be 3010
+            Should -Invoke Install-PowerShell7FromMsi -Times 1 -Exactly
+            Should -Invoke Write-WarningMessage -Times 1 -Exactly -ParameterFilter { $Message -eq 'Restart: REQUIRED to finish the PowerShell 7 installation - restart this PC before it is used.' }
+        }
+
+        It 'Keeps the relaunched run''s exit code <Code>, which ranks above or ends before 3010' -ForEach @(
+            @{ Code = 1 }
+            @{ Code = 2 }
+            @{ Code = 3010 }
+            @{ Code = 5 }
+        ) {
+            Mock Invoke-WingetProcess { New-TestProcessResult -ExitCode 0 -Output @('Restart your PC to finish installation.') }
+            $script:childExitCode = $Code
+
+            $result = Invoke-PowerShell7Bootstrap -CommandPath 'C:\repo\winget-app-install.ps1'
+
+            $result | Should -Be $Code
+            Should -Invoke Write-WarningMessage -Times 1 -Exactly -ParameterFilter { $Message -eq 'Restart: REQUIRED to finish the PowerShell 7 installation - restart this PC before it is used.' }
+        }
+
+        It 'Keeps 0 when installing PowerShell 7 needed no restart' {
+            Mock Invoke-WingetProcess { New-TestProcessResult -ExitCode 0 -Output @('Successfully installed') }
+
+            $result = Invoke-PowerShell7Bootstrap -CommandPath 'C:\repo\winget-app-install.ps1'
+
+            $result | Should -Be 0
+            $script:PowerShell7BootstrapRestartRequired | Should -BeFalse
+            Should -Invoke Write-WarningMessage -Times 0 -ParameterFilter { $Message -like 'Restart: REQUIRED*' }
         }
     }
 

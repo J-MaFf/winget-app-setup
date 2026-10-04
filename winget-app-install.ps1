@@ -59,12 +59,12 @@ param (
 # This script is assembled from the WingetAppSetup module by build/Build-WingetInstallScript.ps1.
 # Edit the function source under WingetAppSetup/Public and WingetAppSetup/Private, then re-run the
 # build to regenerate this file. See readme.md ("Project layout") for details.
-# Build id: 1.0.0+920ca587 (module version + SHA256 fragment of this whole script; issue #189).
+# Build id: 1.0.0+bf3497d7 (module version + SHA256 fragment of this whole script; issue #189).
 # ------------------------------------------------------------------------------------------------
 
 # Content-derived build identity, logged at startup so a transcript from a remote machine
 # identifies exactly which installer build produced it (issue #189).
-$script:InstallerBuildId = '1.0.0+920ca587'
+$script:InstallerBuildId = '1.0.0+bf3497d7'
 
 # ------------------------------------------------Functions------------------------------------------------
 
@@ -2111,7 +2111,10 @@ function Test-PowerShell7MsiSignature {
     P3-17).
 
     Exit code 3010 (ERROR_SUCCESS_REBOOT_REQUIRED) counts as success: pwsh.exe is on disk and
-    launchable at that point, and the relaunch does not need the pending reboot.
+    launchable at that point, and the relaunch does not need the pending reboot. It still sets
+    $script:PowerShell7BootstrapRestartRequired, so Invoke-PowerShell7Bootstrap ends a run that
+    otherwise succeeded with 3010 (review finding P3-16): the relaunched run checks Windows'
+    pending-restart state only after this install, so it cannot see the restart this install needs.
 
     Exit code 1618 (ERROR_INSTALL_ALREADY_RUNNING) is retried after a wait (review finding P2-13).
     msiexec returns it at once, without waiting, whenever another installation holds the Windows
@@ -2145,7 +2148,7 @@ function Test-PowerShell7MsiSignature {
 .PARAMETER BusyRetryDelaySeconds
     Seconds to wait before each of those retries.
 .RETURNS
-    [bool] True when msiexec reported success.
+    [bool] True when msiexec reported success (0 or 3010).
 #>
 function Install-PowerShell7FromMsi {
     param (
@@ -2227,7 +2230,12 @@ function Install-PowerShell7FromMsi {
             }
 
             $msiExitCode = $msiProcess.ExitCode
-            if ($msiExitCode -eq 0 -or $msiExitCode -eq 3010) {
+            if ($msiExitCode -eq 3010) {
+                $script:PowerShell7BootstrapRestartRequired = $true
+                Write-WarningMessage 'PowerShell 7 is installed, and a restart finishes the installation (msiexec exit code 3010). The run continues; restart this PC once it has finished.'
+                return $true
+            }
+            if ($msiExitCode -eq 0) {
                 return $true
             }
             if ($msiExitCode -eq 1618 -and $attempt -le $BusyRetryCount) {
@@ -2406,7 +2414,13 @@ function Get-PowerShell7RelaunchInstaller {
 .RETURNS
     [int] Exit code for the tail dispatch to propagate: the relaunched run's exit code, 0 for a
     -WhatIf preview of a would-be install, or 7 when PowerShell 7 could not be installed or the
-    installer could not be relaunched under it. Sets
+    installer could not be relaunched under it. When installing PowerShell 7 needs a restart to
+    finish (msiexec 3010, or winget's restart result, see Test-WingetRestartRequiredResult) and the
+    relaunched run returned 0, the result is 3010 (review finding P3-16): that run checks Windows'
+    pending-restart state only after this install, so it cannot see this restart itself. Any other
+    code the relaunched run returned is kept: a failure at the end of the run ranks above 3010, and
+    an early exit stays what it is.
+    Sets
     $script:PowerShell7BootstrapRelaunched to $true once a relaunched PowerShell 7 run has ended,
     so the tail knows that run already reported its outcome to whoever is at the console.
 #>
@@ -2449,6 +2463,9 @@ function Invoke-PowerShell7Bootstrap {
     # the reset here, a throttled call would leave a stale $true that a later, unrelated call in
     # the same process (or Pester run) could inherit.
     $script:PowerShell7BootstrapGitHubThrottled = $false
+    # Set by the PowerShell 7 install below when it needs a restart to finish; reset per call for
+    # the same reason.
+    $script:PowerShell7BootstrapRestartRequired = $false
 
     # 5.1's .NET Framework can default to a protocol set without TLS 1.2 on older Windows 10
     # builds, which breaks the Invoke-RestMethod calls below. Opt in additively; never downgrade.
@@ -2508,6 +2525,16 @@ function Invoke-PowerShell7Bootstrap {
             }
             elseif ($wingetRun.TimedOut) {
                 Write-WarningMessage 'winget did not finish installing PowerShell 7 in time and was stopped.'
+            }
+            elseif (Test-WingetRestartRequiredResult -ExitCode $wingetRun.ExitCode -Output $wingetRun.Output) {
+                # Installed, and a restart finishes it (review finding P3-16): winget's restart
+                # warning on exit 0, or 0x8A150109 / 0x8A15010B.
+                $script:PowerShell7BootstrapRestartRequired = $true
+                $restartDetail = ''
+                if ($wingetRun.ExitCode -ne 0) {
+                    $restartDetail = ' (exit code {0})' -f (Format-WingetExitCode -ExitCode $wingetRun.ExitCode)
+                }
+                Write-WarningMessage ('winget reported that a restart finishes the PowerShell 7 installation{0}. The run continues; restart this PC once it has finished.' -f $restartDetail)
             }
             elseif ($wingetRun.ExitCode -ne 0) {
                 Write-WarningMessage ('winget could not install PowerShell 7 (exit code {0}).' -f (Format-WingetExitCode -ExitCode $wingetRun.ExitCode))
@@ -2616,7 +2643,19 @@ function Invoke-PowerShell7Bootstrap {
     # Into the bootstrap transcript: a relaunched run that failed before it could start its own
     # transcript (pwsh rejecting the arguments, a crash on load) leaves only this line behind.
     Write-Info ('The PowerShell 7 run ended with exit code {0}.' -f $relaunchProcess.ExitCode)
-    return $relaunchProcess.ExitCode
+    $relaunchExitCode = $relaunchProcess.ExitCode
+    if ($script:PowerShell7BootstrapRestartRequired) {
+        # The relaunched run read Windows' pending-restart state after the PowerShell 7 install
+        # above, so it took this restart as already pending and did not report it (review finding
+        # P3-16). Repeated here, after that run's summary, and turned into 3010 when nothing else
+        # went wrong.
+        Write-WarningMessage 'Restart: REQUIRED to finish the PowerShell 7 installation - restart this PC before it is used.'
+        if ($relaunchExitCode -eq 0) {
+            Write-Info 'Exit code 3010: the apps installed, and the PowerShell 7 installation needs a restart to finish.'
+            return 3010
+        }
+    }
+    return $relaunchExitCode
 }
 
 # --- ProcessInvocation ---
@@ -3719,22 +3758,32 @@ function Wait-WauIdle {
 # --- WindowsInstallerState ---
 # Machine state that decides whether an install can run now or needs a restart (review findings
 # P2-15 and P3-16): whether Windows Installer is busy with another installation, and whether Windows
-# has a restart pending. Read-only: nothing here takes the Windows Installer mutex or changes the
-# registry. Runs under Windows PowerShell 5.1 too: .NET Framework 4.5 APIs only.
+# has a restart pending. Read-only: nothing here changes the registry, and the Windows Installer
+# mutex is only ever held for the instant it takes to test it (Test-WindowsInstallerBusy). Runs under
+# Windows PowerShell 5.1 too: .NET Framework 4.5 APIs only.
 
 <#
 .SYNOPSIS
     Returns whether Windows Installer is busy with another installation right now.
 .DESCRIPTION
-    Windows Installer holds the Global\_MSIExecute mutex while an installation runs its execute
+    Windows Installer owns the Global\_MSIExecute mutex while an installation runs its execute
     sequence, and any other MSI install started meanwhile fails at once with 1618
-    (ERROR_INSTALL_ALREADY_RUNNING), which winget reports as 0x8A150102. This only checks whether the
-    mutex exists (Mutex.TryOpenExisting): it never waits on it or takes ownership, which could make
-    an installation starting at that moment fail with 1618 itself. The handle is closed at once, so
-    this check never keeps the mutex alive. A mutex that exists but that this account may not open
-    counts as busy. Existence is not proof that an installation is running (another process may
-    hold a handle to a released mutex), so callers bound how long they wait on it and then try the
-    install anyway.
+    (ERROR_INSTALL_ALREADY_RUNNING), which winget reports as 0x8A150102. The busy signal is that
+    the mutex is owned, not that it exists: the mutex object lives as long as any process holds a
+    handle to it, released or not, so a check for existence alone could read busy for as long as
+    that handle stays open and run every wait to its time limit.
+
+    So the check opens the mutex (Mutex.TryOpenExisting; none of that name: idle) and tries to take
+    it without waiting (WaitOne(0)), the same test PSAppDeployToolkit's Test-ADTMutexAvailability
+    makes. Taken: nobody owned it, so Windows Installer is idle, and the mutex is released again at
+    once, on the same thread. A mutex whose owner ended without releasing it (abandoned) is taken
+    the same way and counts as idle. Not taken: an installation owns it, busy. For that instant an
+    MSI starting its execute sequence on another process could get 1618 itself; the window is a few
+    microseconds once per poll interval, the trade PSAppDeployToolkit makes before every MSI it
+    runs. A mutex that this account may not open (TryOpenExisting asks for the rights to wait on
+    and release it) counts as busy, without ever taking it; callers bound how long they wait and
+    then try the install anyway. The handle is always closed, so this check never keeps the mutex
+    alive.
 .PARAMETER Name
     The mutex name. Default 'Global\_MSIExecute'; tests pass a name of their own.
 .RETURNS
@@ -3747,8 +3796,19 @@ function Test-WindowsInstallerBusy {
     )
 
     $mutex = $null
+    $taken = $false
     try {
-        return [bool][System.Threading.Mutex]::TryOpenExisting($Name, [ref]$mutex)
+        if (-not [System.Threading.Mutex]::TryOpenExisting($Name, [ref]$mutex)) {
+            return $false
+        }
+        try {
+            $taken = $mutex.WaitOne(0)
+        }
+        catch [System.Threading.AbandonedMutexException] {
+            # Its owner ended without releasing it; this thread owns it now.
+            $taken = $true
+        }
+        return (-not $taken)
     }
     catch [System.UnauthorizedAccessException] {
         # The mutex exists, but this account may not open it.
@@ -3759,6 +3819,16 @@ function Test-WindowsInstallerBusy {
         return $false
     }
     finally {
+        if ($taken) {
+            # Released before anything else, on the thread that took it: a mutex this run kept
+            # would make every MSI on the PC fail with 1618 until the run ended.
+            try {
+                $mutex.ReleaseMutex()
+            }
+            catch {
+                # Only possible if this thread no longer owned it.
+            }
+        }
         if ($null -ne $mutex) {
             $mutex.Dispose()
         }
@@ -4857,6 +4927,50 @@ function Test-RestartRequiredFirst {
     }
     $info = Get-WingetExitCodeInfo -ExitCode ([int]$InstallResult.ExitCode)
     return [bool]($info -and $info.Class -eq 'RestartRequiredFirst')
+}
+
+<#
+.SYNOPSIS
+    Returns whether a winget install says the package installed and a restart finishes it.
+.DESCRIPTION
+    winget 1.7 and later report an MSI, WiX or Burn installer's 3010 as exit 0 and print 'Restart
+    your PC to finish installation.'; winget 1.6 and older exit 0x8A150109, and an installer that
+    started a restart itself (MSI 1641) gives 0x8A15010B (review finding P3-16). True for any of the
+    three. The printed warning is matched in English only; on other display languages
+    Invoke-WingetInstall's pending-restart registry check is what notices it. Used by
+    Install-WingetPackage for every app and by the PowerShell 7 bootstrap for its winget install of
+    PowerShell, so both read winget's result the same way. Runs under Windows PowerShell 5.1 too.
+.PARAMETER ExitCode
+    winget's exit code, or $null when it did not run to the end.
+.PARAMETER Output
+    What winget printed (Invoke-WingetProcess's Output).
+.RETURNS
+    [bool]
+#>
+function Test-WingetRestartRequiredResult {
+    param (
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [Nullable[int]]$ExitCode,
+
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [object[]]$Output
+    )
+
+    if ($null -eq $ExitCode) {
+        return $false
+    }
+    if ($ExitCode -ne 0) {
+        $info = Get-WingetExitCodeInfo -ExitCode $ExitCode
+        return [bool]($info -and $info.Class -eq 'RestartRequired')
+    }
+    foreach ($line in @($Output)) {
+        if ([string]$line -match 'Restart your PC to finish installation') {
+            return $true
+        }
+    }
+    return $false
 }
 
 # --- AppCatalog ---
@@ -7408,19 +7522,9 @@ function Install-WingetPackage {
         # Success, a restart-required result (0x8A15010A is never retried: only a restart changes
         # it) or another failure: final here. The caller verifies the actual install state with
         # `winget list`.
-        if ($codeClass -eq 'RestartRequired') {
-            $restartRequired = $true
-        }
-        elseif ($exitCode -eq 0) {
-            # winget 1.7+ turns an installer's 3010 into exit 0 and says so only in its output
-            # ('Restart your PC to finish installation.', English display language only).
-            foreach ($line in @($run.Output)) {
-                if ([string]$line -match 'Restart your PC to finish installation') {
-                    $restartRequired = $true
-                    break
-                }
-            }
-        }
+        # winget 1.7+ turns an installer's 3010 into exit 0 and says so only in its output
+        # ('Restart your PC to finish installation.', English display language only).
+        $restartRequired = Test-WingetRestartRequiredResult -ExitCode $exitCode -Output $run.Output
         break
     }
 
