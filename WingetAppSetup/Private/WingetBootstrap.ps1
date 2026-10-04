@@ -122,6 +122,73 @@ function Test-AndInstallWingetModule {
 
 <#
 .SYNOPSIS
+    Registers an app package for the current account with Add-AppxPackage, by family name or from
+    its AppXManifest.xml; throws when the registration fails.
+.DESCRIPTION
+    Thin seam for Register-WingetAppInstallerForUser (mocked in tests). Under PowerShell 7 the
+    registration runs in Windows PowerShell 5.1 (review finding P3-29). Add-AppxPackage comes from
+    the Appx module, which cannot load under PowerShell 7 on Windows builds before 10.0.22453
+    (Windows 10, Windows Server 2022): every Appx cmdlet then fails with 0x80131539 'Operation is not
+    supported on this platform' (PowerShell issue #13138; Microsoft.WinGet.Client imports Appx with
+    -UseWindowsPowerShell for the same reason). In Windows PowerShell it always loads. The same
+    delegation Get-DesktopAppInstallerPackageInfo and Invoke-AppxProvisioning use; the child runs
+    as the same account, so the package is registered for this account.
+
+    The child prints the HRESULT of the error it caught, which is thrown here as a COMException
+    carrying it, with the child's message, so Get-AppxErrorCode reads the code as it would from
+    Add-AppxPackage itself (review finding P3-27).
+.PARAMETER FamilyName
+    Add-AppxPackage -RegisterByFamilyName -MainPackage <FamilyName>.
+.PARAMETER ManifestPath
+    Add-AppxPackage -Register <ManifestPath> -DisableDevelopmentMode.
+#>
+function Invoke-AppxRegistration {
+    [CmdletBinding(DefaultParameterSetName = 'FamilyName')]
+    param (
+        [Parameter(Mandatory = $true, ParameterSetName = 'FamilyName')]
+        [string]$FamilyName,
+
+        [Parameter(Mandatory = $true, ParameterSetName = 'Manifest')]
+        [string]$ManifestPath
+    )
+
+    if ($PSCmdlet.ParameterSetName -eq 'FamilyName') {
+        $parameters = @{ RegisterByFamilyName = $true; MainPackage = $FamilyName }
+        # Each value goes into a single-quoted literal of the child's -Command string, so embedded
+        # single quotes are doubled (issue #178).
+        $arguments = "-RegisterByFamilyName -MainPackage '{0}'" -f $FamilyName.Replace("'", "''")
+    }
+    else {
+        $parameters = @{ Path = $ManifestPath; Register = $true; DisableDevelopmentMode = $true }
+        $arguments = "-Path '{0}' -Register -DisableDevelopmentMode" -f $ManifestPath.Replace("'", "''")
+    }
+
+    if ($PSVersionTable.PSEdition -ne 'Core') {
+        Add-AppxPackage @parameters -ErrorAction Stop
+        return
+    }
+
+    $command = "`$ProgressPreference = 'SilentlyContinue'; try { Add-AppxPackage $arguments -ErrorAction Stop } catch { 'ERR|{0}|{1}' -f `$_.Exception.HResult, (`$_.Exception.Message -replace '\s+', ' '); exit 1 }"
+    $lines = @(& powershell.exe -NoProfile -ExecutionPolicy Bypass -Command $command)
+    $exitCode = $LASTEXITCODE
+    if ($exitCode -eq 0) {
+        return
+    }
+    foreach ($line in $lines) {
+        $parts = "$line" -split '\|', 3
+        if ($parts.Count -eq 3 -and $parts[0] -eq 'ERR') {
+            $hresult = 0
+            if ([int]::TryParse($parts[1], [ref]$hresult) -and $hresult -ne 0) {
+                throw [System.Runtime.InteropServices.COMException]::new($parts[2].Trim(), $hresult)
+            }
+            throw $parts[2].Trim()
+        }
+    }
+    throw "Add-AppxPackage $arguments failed in Windows PowerShell (exit code $exitCode)."
+}
+
+<#
+.SYNOPSIS
     Registers the App Installer (winget) package already on this PC for the current account.
 .DESCRIPTION
     winget comes with the Microsoft.DesktopAppInstaller package, which is registered per account. An
@@ -130,10 +197,12 @@ function Test-AndInstallWingetModule {
     rejection the repair cmdlet can (issue #265). Two forms are tried: -RegisterByFamilyName, then
     -Register against each package's AppXManifest.xml.
 
-    The packages are listed with Get-DesktopAppInstallerPackageInfo (`Get-AppxPackage -AllUsers`),
-    which under PowerShell 7 runs in Windows PowerShell: there the Appx module always loads, while
-    under PowerShell 7 on Windows Server 2022 and older Windows 10 builds it fails with 0x80131539,
-    which used to end this step before it registered anything (review finding P3-29).
+    Both the listing (Get-DesktopAppInstallerPackageInfo, `Get-AppxPackage -AllUsers`) and the
+    registrations (Invoke-AppxRegistration, Add-AppxPackage) run in Windows PowerShell under
+    PowerShell 7 (review finding P3-29). The Appx module they come from cannot load under PowerShell 7
+    on Windows Server 2022 and older Windows 10 builds (0x80131539), so this step used to fail there
+    at the listing and, had it got past it, at the registration; in E2E run 35406706712 it only
+    worked once Repair-WinGetPackageManager had loaded Appx into the session.
 
     The AppX codes the registrations fail with (Get-AppxErrorCode) are returned, so the caller can
     tell a missing framework (0x80073CF3) or a downgrade rejection (0x80073D06) from other failures
@@ -157,18 +226,18 @@ function Register-WingetAppInstallerForUser {
     }
 
     Write-Info 'Registering the App Installer package already on this PC for this account...'
-    $registrations = @(@{ Label = 'by family name'; Parameters = @{ RegisterByFamilyName = $true; MainPackage = 'Microsoft.DesktopAppInstaller_8wekyb3d8bbwe' } })
+    $registrations = @(@{ Label = 'by family name'; Parameters = @{ FamilyName = 'Microsoft.DesktopAppInstaller_8wekyb3d8bbwe' } })
     foreach ($candidate in $candidates) {
         if ([string]::IsNullOrWhiteSpace($candidate.InstallLocation)) { continue }
         $manifest = Join-Path $candidate.InstallLocation 'AppXManifest.xml'
         if (Test-Path -LiteralPath $manifest) {
-            $registrations += @{ Label = "from $manifest"; Parameters = @{ Path = $manifest; Register = $true; DisableDevelopmentMode = $true } }
+            $registrations += @{ Label = "from $manifest"; Parameters = @{ ManifestPath = $manifest } }
         }
     }
     foreach ($registration in $registrations) {
         $parameters = $registration.Parameters
         try {
-            Add-AppxPackage @parameters -ErrorAction Stop
+            Invoke-AppxRegistration @parameters -ErrorAction Stop
             Write-Success "App Installer registered for this account ($($registration.Label))."
             return [pscustomobject]@{ Registered = $true; ErrorCodes = $codes }
         }
@@ -184,28 +253,43 @@ function Register-WingetAppInstallerForUser {
 <#
 .SYNOPSIS
     Runs Repair-WinGetPackageManager: for all users first when the framework App Installer needs is
-    missing, then for this account, unforced and then forced.
+    missing, then for this account, unforced and then, unless the cause is known, forced.
 .DESCRIPTION
     -AllUsers (review finding P3-28) installs App Installer for the whole PC with the frameworks it
     depends on, which is what the cmdlet itself asks for when Microsoft.WindowsAppRuntime.1.8 is
     missing ('Try running with -AllUsers in administrator mode'). It runs only then: on a PC whose
     framework is newer than the one the WinGet release pins, it aborts with 0x80073D06 (issue #265).
-    -Force is tried only after an unforced failure the classifier cannot name: a missing framework
-    (0x80073CF3) or a downgrade rejection (0x80073D06) fails the same way however hard it is
-    pushed, and each attempt downloads App Installer again. The module is installed here, when it is
-    first needed (Test-AndInstallWingetModule).
+
+    -Force adds only ForceTargetApplicationShutdown (it closes running App Installer processes;
+    Microsoft.WinGet.Client AppxModuleHelper.AddAppInstallerBundleAsync), and each attempt downloads
+    App Installer again. So it is tried only after a failure nothing has named (review finding
+    P3-27). It is skipped when a missing framework (0x80073CF3) or a downgrade rejection (0x80073D06)
+    was seen, by this repair or by the App Installer registration before it (KnownErrorCodes: the
+    #279 wedge shows them there, while the repair only says 'Failed to repair winget. Try running
+    with -AllUsers in administrator mode.'), and when the framework is known to be missing and the
+    all-users repair for it failed. The module is installed here, when it is first needed
+    (Test-AndInstallWingetModule).
 .PARAMETER AllUsersFirst
     Microsoft.WindowsAppRuntime.1.8 is missing for this PC (Get-WindowsAppRuntimeStatus).
+.PARAMETER KnownErrorCodes
+    The AppX codes this run has already seen, from the App Installer registration.
 .RETURNS
     [pscustomobject] Available ([bool]: the cmdlet could be called), Succeeded ([bool]: an attempt
-    completed; the caller checks winget itself) and ErrorCodes ([int[]], the AppX codes seen).
+    completed; the caller checks winget itself) and ErrorCodes ([int[]], the AppX codes this repair
+    saw).
 #>
 function Invoke-WingetPackageManagerRepair {
     param (
         [Parameter(Mandatory = $false)]
-        [switch]$AllUsersFirst
+        [switch]$AllUsersFirst,
+
+        [Parameter(Mandatory = $false)]
+        [AllowEmptyCollection()]
+        [int[]]$KnownErrorCodes = @()
     )
 
+    # 0x80073CF3 and 0x80073D06: retrying, forced or not, fails the same way.
+    $finalCodes = @(-2147009293, -2147009274)
     $codes = @()
     if (-not (Test-AndInstallWingetModule)) {
         return [pscustomobject]@{ Available = $false; Succeeded = $false; ErrorCodes = $codes }
@@ -219,6 +303,20 @@ function Invoke-WingetPackageManagerRepair {
     $attempts += @{ Label = '-Latest -Force'; Parameters = @{ Latest = $true; Force = $true } }
     foreach ($attempt in $attempts) {
         $parameters = $attempt.Parameters
+        if ($parameters.Force) {
+            $named = @(@($KnownErrorCodes) | Where-Object { $finalCodes -contains $_ } | Select-Object -Unique)
+            $cause = $null
+            if ($named.Count -gt 0) {
+                $cause = 'registering App Installer failed with {0}' -f (@($named | ForEach-Object { Format-WingetExitCode -ExitCode $_ }) -join ', ')
+            }
+            elseif ($AllUsersFirst) {
+                $cause = 'the Microsoft.WindowsAppRuntime.1.8 framework App Installer needs is missing, and the all-users repair for it failed'
+            }
+            if ($cause) {
+                Write-Info "Not running Repair-WinGetPackageManager $($attempt.Label): $cause, which forcing cannot fix (-Force only closes running App Installer processes)."
+                break
+            }
+        }
         Write-Info "Running Repair-WinGetPackageManager $($attempt.Label)..."
         try {
             Repair-WinGetPackageManager @parameters -ErrorAction Stop
@@ -229,8 +327,7 @@ function Invoke-WingetPackageManagerRepair {
             $code = Get-AppxErrorCode -ErrorRecord $_
             if ($null -ne $code) {
                 $codes += $code
-                # 0x80073CF3 and 0x80073D06: retrying, forced or not, fails the same way.
-                if (@(-2147009293, -2147009274) -contains $code) {
+                if ($finalCodes -contains $code) {
                     break
                 }
             }
@@ -246,7 +343,9 @@ function Invoke-WingetPackageManagerRepair {
     Cheapest first: register the App Installer already on this PC (Register-WingetAppInstallerForUser),
     then Repair-WinGetPackageManager (for all users first when the all-users check finds
     Microsoft.WindowsAppRuntime.1.8 missing). A registration that fails moves straight on to the
-    repair. Initialize-Winget calls this in a loop, checking winget after each fix that ran.
+    repair, which is told the AppX codes the registration saw, so it does not force a retry those
+    codes say cannot help (review finding P3-27). Initialize-Winget calls this in a loop, checking
+    winget after each fix that ran.
 .PARAMETER State
     The run's ladder state, which this updates: Registered, Repair, Framework and ErrorCodes.
 .RETURNS
@@ -268,7 +367,7 @@ function Invoke-NextWingetAccountFix {
     }
     if (-not $State.ContainsKey('Repair')) {
         $State.Framework = Get-WindowsAppRuntimeStatus
-        $State.Repair = Invoke-WingetPackageManagerRepair -AllUsersFirst:($State.Framework.Present -eq $false)
+        $State.Repair = Invoke-WingetPackageManagerRepair -AllUsersFirst:($State.Framework.Present -eq $false) -KnownErrorCodes @($State.ErrorCodes)
         $State.ErrorCodes += @($State.Repair.ErrorCodes)
         return [bool]$State.Repair.Available
     }

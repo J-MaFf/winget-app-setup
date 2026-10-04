@@ -114,13 +114,15 @@ Setting winget up is now one step, `Initialize-Winget`, in place of three ladder
 back and gave one cause three diagnoses. It stops with exit code 2 and names the policy when App
 Installer's Group Policy turns winget or its source off (or winget answers `0x8A15003A`); reads the
 `0x80073CF3`/`0x80073D06` failures of the App Installer registration and repair from their HRESULT,
-not from text; repairs for all users (`Repair-WinGetPackageManager -AllUsers`) only when the
-all-users check finds `Microsoft.WindowsAppRuntime.1.8` missing; resets the source only when it is
-missing or corrupted, and repairs nothing for a timeout or a network error; runs each fix once a
-run; installs `Microsoft.WinGet.Client` only when it has to repair; and prints one line with the
-cause and the fix. The aka.ms/getwinget download, the source.msix registration and the source update
-before elevation are gone. The policy detection and the `-AllUsers` repair are not yet checked on a
-real Windows PC.
+not from text, and forces no repair those codes say cannot help; repairs for all users
+(`Repair-WinGetPackageManager -AllUsers`) only when the all-users check finds
+`Microsoft.WindowsAppRuntime.1.8` missing; registers App Installer in Windows PowerShell under
+PowerShell 7, where the Appx module cannot load on Windows 10 and Server 2022; resets the source
+only when it is missing or corrupted, and repairs nothing for a timeout or a network error; runs
+each fix once a run; installs `Microsoft.WinGet.Client` only when it has to repair; and prints one
+line with the cause and the fix. The aka.ms/getwinget download, the source.msix registration and
+the source update before elevation are gone. The policy detection, the `-AllUsers` repair and the
+registration through Windows PowerShell are not yet checked on a real Windows PC.
 
 The same branch changes CI. Fork pull requests that leave `windows-tests.yml` alone no longer run
 on the self-hosted win-test runner, and `claude.yml` calls the shared Claude workflow at a pinned
@@ -148,11 +150,13 @@ installed" — a structural runner-image defect, not a bug in this repo. Pinning
 install pass with "No applicable app licenses found" — a distinct, total, immediate failure,
 worse than #279's slow partial one, tracked separately as
 [#282](https://github.com/J-MaFf/winget-app-setup/issues/282). `e2e-install` stays on
-`windows-latest` for now. `Test-AppxMissingFrameworkDependency`
-(`WingetAppSetup/Private/WingetBootstrap.ps1`) diagnoses the 0x80073CF3 signature distinctly
-inside `Invoke-WingetPackageManagerRepair`'s retry ladder, mirroring the existing
-`Test-AppxDowngradeRejection`/0x80073D06 precedent (issue #265) — purely diagnostic/fail-fast,
-since no verified redistributable exists to actually install the missing framework. Separately,
+`windows-latest` for now. `Initialize-Winget` diagnoses the wedge from codes, not text:
+`Get-AppxErrorCode` reads 0x80073CF3 and 0x80073D06 from the HRESULTs the App Installer
+registration and `Repair-WinGetPackageManager` fail with, and `Get-WindowsAppRuntimeStatus` checks
+for all users whether `Microsoft.WindowsAppRuntime.1.8` is there. When it is missing, the repair runs
+`-AllUsers` first, and no forced repair follows once those codes or the missing framework explain
+the failure; the run then stops with one line that names the framework. It does not install the
+framework itself, since no verified redistributable exists to deploy it. Separately,
 [#280](https://github.com/J-MaFf/winget-app-setup/pull/280)'s fail-fast
 `Get-ConflictingDesktopAppInstallerVersions` was meant to stop the run from burning a full retry
 budget once this conflict appeared mid-run; it read the current user's AppX view, never fired on the
@@ -381,7 +385,7 @@ every repository secret.
 
 | Issue | Description | Status |
 |-------|-------------|--------|
-| [#279](https://github.com/J-MaFf/winget-app-setup/issues/279) | E2E: `windows-latest`/Server 2025 runner image AppX conflict (App Installer 1.29.290.0 vs 1.26.510.0, missing WindowsAppRuntime.1.8) | Open — distinct diagnostic added (`Test-AppxMissingFrameworkDependency`); `windows-2022` pin tried and reverted (see #282), no viable pin found yet |
+| [#279](https://github.com/J-MaFf/winget-app-setup/issues/279) | E2E: `windows-latest`/Server 2025 runner image AppX conflict (App Installer 1.29.290.0 vs 1.26.510.0, missing WindowsAppRuntime.1.8) | Open — diagnosed from HRESULTs (`Get-AppxErrorCode`) and the all-users framework check (`Get-WindowsAppRuntimeStatus`), with an `-AllUsers` repair when the framework is missing; `windows-2022` pin tried and reverted (see #282), no viable pin found yet |
 | [#282](https://github.com/J-MaFf/winget-app-setup/issues/282) | E2E: `windows-2022` runner fails every install immediately with "No applicable app licenses found" | Open |
 | [#283](https://github.com/J-MaFf/winget-app-setup/issues/283) | E2E: uncaught `Start-Process` error crashes first install pass right after WAU install on `windows-latest` | Open |
 | [#215](https://github.com/J-MaFf/winget-app-setup/issues/215) | E2E tier 2: cross-user elevation end-to-end run on a snapshot-rollback Proxmox VM | Open |

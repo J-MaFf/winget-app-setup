@@ -193,6 +193,7 @@ Describe 'Test-MachineWingetAvailable (review finding P2-24)' {
         Mock Invoke-WingetPackageManagerRepair { throw 'must not repair winget for SYSTEM' }
         Mock Invoke-WebRequest { throw 'must not download App Installer for SYSTEM' }
         Mock Add-AppxPackage { throw 'must not register a package for SYSTEM' }
+        Mock Invoke-AppxRegistration { throw 'must not register a package for SYSTEM' }
 
         $script:newest = Join-Path $TestDrive 'Microsoft.DesktopAppInstaller_1.27.460.0_x64__8wekyb3d8bbwe\winget.exe'
         $script:older = Join-Path $TestDrive 'Microsoft.DesktopAppInstaller_1.26.510.0_x64__8wekyb3d8bbwe\winget.exe'
@@ -258,6 +259,7 @@ Describe 'Test-MachineWingetAvailable (review finding P2-24)' {
         Should -Invoke Invoke-WingetPackageManagerRepair -Times 0 -Exactly
         Should -Invoke Invoke-WebRequest -Times 0 -Exactly
         Should -Invoke Add-AppxPackage -Times 0 -Exactly
+        Should -Invoke Invoke-AppxRegistration -Times 0 -Exactly
     }
 
     It 'Says no machine-wide winget was found, without starting anything, when App Installer is not installed for the machine' {

@@ -195,15 +195,19 @@ a run. When something cannot be fixed it prints one line that says why and what 
    enough. A failure that can clear on its own (`winget.exe` locked, for example while App Installer
    updates) is checked again for up to 75 seconds first. If winget still cannot run, the installer
    sets it up for the account, cheapest first: it registers the App Installer already on the PC
-   for the account (the fix for an admin account elevating on a user's PC), then runs
-   `Repair-WinGetPackageManager`. The `Microsoft.WinGet.Client` module that provides the repair is
-   installed from the PowerShell Gallery only then, never on a PC whose winget works. When
+   for the account (the fix for an admin account elevating on a user's PC; under PowerShell 7 this
+   runs in Windows PowerShell, because the Appx module cannot load in PowerShell 7 on Windows 10
+   and Windows Server 2022), then runs `Repair-WinGetPackageManager`. The
+   `Microsoft.WinGet.Client` module that provides the repair is installed from the PowerShell
+   Gallery only then, never on a PC whose winget works. When
    `Get-AppxPackage -AllUsers` shows the `Microsoft.WindowsAppRuntime.1.8` framework App Installer
    needs is missing, the repair runs for all users first (`-AllUsers`, which installs App
    Installer with its frameworks, as the cmdlet itself asks); on a PC with a newer framework it is
-   never used, because there it aborts with `0x80073D06` (#265). `-Force` follows only a failure
-   without a code: a missing framework (`0x80073CF3`) or a newer one (`0x80073D06`) fails the same
-   way however often it is tried. When winget still does not start, the run exits with code 2, and
+   never used, because there it aborts with `0x80073D06` (#265). `-Force`, which only closes
+   running App Installer processes, follows only a failure nothing has explained: not after the
+   registration or the repair saw a missing framework (`0x80073CF3`) or a newer one (`0x80073D06`),
+   which fail the same way however often they are tried, nor after the all-users repair for a
+   missing framework failed. When winget still does not start, the run exits with code 2, and
    the line names the AppX codes it saw and the fix (install the framework, update App Installer
    from the Microsoft Store, or install it from the Store or https://aka.ms/getwinget). The
    installer no longer downloads App Installer from aka.ms/getwinget itself: it installed the same

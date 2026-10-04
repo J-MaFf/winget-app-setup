@@ -136,48 +136,47 @@ Describe 'Register-WingetAppInstallerForUser (issue #265, review findings P3-27,
     }
 
     It 'Registers the package on this PC by family name' {
-        Mock Add-AppxPackage { }
+        Mock Invoke-AppxRegistration { }
 
         $result = Register-WingetAppInstallerForUser
 
         $result.Registered | Should -Be $true
-        Should -Invoke Add-AppxPackage -Times 1 -Exactly -ParameterFilter {
-            $RegisterByFamilyName -and $MainPackage -eq 'Microsoft.DesktopAppInstaller_8wekyb3d8bbwe'
-        }
+        Should -Invoke Invoke-AppxRegistration -Times 1 -Exactly
+        Should -Invoke Invoke-AppxRegistration -Times 1 -Exactly -ParameterFilter { $FamilyName -eq 'Microsoft.DesktopAppInstaller_8wekyb3d8bbwe' }
     }
 
     It 'Falls back to the package manifest when the family-name form fails' {
-        Mock Add-AppxPackage { throw 'family name registration failed' } -ParameterFilter { $RegisterByFamilyName }
-        Mock Add-AppxPackage { } -ParameterFilter { $Register }
+        Mock Invoke-AppxRegistration { throw 'family name registration failed' } -ParameterFilter { $FamilyName }
+        Mock Invoke-AppxRegistration { } -ParameterFilter { $ManifestPath }
 
         (Register-WingetAppInstallerForUser).Registered | Should -Be $true
 
-        Should -Invoke Add-AppxPackage -Times 1 -Exactly -ParameterFilter {
-            $Register -and $DisableDevelopmentMode -and $Path -eq (Join-Path $script:installLocation 'AppXManifest.xml')
+        Should -Invoke Invoke-AppxRegistration -Times 1 -Exactly -ParameterFilter {
+            $ManifestPath -eq (Join-Path $script:installLocation 'AppXManifest.xml')
         }
     }
 
     It 'Registers nothing when App Installer is not on this PC' {
         Mock Get-DesktopAppInstallerPackageInfo { }
-        Mock Add-AppxPackage { throw 'nothing to register' }
+        Mock Invoke-AppxRegistration { throw 'nothing to register' }
 
         (Register-WingetAppInstallerForUser).Registered | Should -Be $false
 
-        Should -Invoke Add-AppxPackage -Times 0 -Exactly
+        Should -Invoke Invoke-AppxRegistration -Times 0 -Exactly
     }
 
     It 'Registers nothing when the packages cannot be listed' {
         Mock Get-DesktopAppInstallerPackageInfo { throw 'Get-AppxPackage -AllUsers failed in Windows PowerShell (exit code 1).' }
-        Mock Add-AppxPackage { throw 'nothing to register' }
+        Mock Invoke-AppxRegistration { throw 'nothing to register' }
 
         (Register-WingetAppInstallerForUser).Registered | Should -Be $false
 
-        Should -Invoke Add-AppxPackage -Times 0 -Exactly
+        Should -Invoke Invoke-AppxRegistration -Times 0 -Exactly
     }
 
     It 'Returns the AppX codes its registrations failed with, read from the HRESULT (review finding P3-27)' {
-        Mock Add-AppxPackage { throw (New-AppxException -HResult -2147009293 -Message 'Abhängigkeit nicht gefunden.') } -ParameterFilter { $RegisterByFamilyName }
-        Mock Add-AppxPackage { throw 'Deployment failed with HRESULT: 0x80073D06, The package could not be installed because a higher version of this package is already installed.' } -ParameterFilter { $Register }
+        Mock Invoke-AppxRegistration { throw (New-AppxException -HResult -2147009293 -Message 'Abhängigkeit nicht gefunden.') } -ParameterFilter { $FamilyName }
+        Mock Invoke-AppxRegistration { throw 'Deployment failed with HRESULT: 0x80073D06, The package could not be installed because a higher version of this package is already installed.' } -ParameterFilter { $ManifestPath }
 
         $result = Register-WingetAppInstallerForUser
 
@@ -187,26 +186,90 @@ Describe 'Register-WingetAppInstallerForUser (issue #265, review findings P3-27,
 }
 
 # Review finding P3-29: under PowerShell 7 on Windows Server 2022 (E2E run 35406706712) the Appx
-# module could not load, so Get-AppxPackage failed with 0x80131539 and the registration step ended
-# before it registered anything. The real Get-DesktopAppInstallerPackageInfo runs here.
+# module could not load (0x80131539). That fails every cmdlet of the module, Add-AppxPackage as well
+# as Get-AppxPackage, so the registration step failed at the listing and would have failed at the
+# registration; it only worked there once Repair-WinGetPackageManager had loaded Appx into the
+# session. Both run in Windows PowerShell here: the real Get-DesktopAppInstallerPackageInfo and the
+# real Invoke-AppxRegistration run, and both Appx cmdlets fail in this session.
 Describe 'Register-WingetAppInstallerForUser under PowerShell 7 where Appx cannot load (review finding P3-29)' {
     BeforeEach {
         Mock Write-Info { }
         Mock Write-Success { }
-        Mock Write-WarningMessage { }
+        $script:warnings = @()
+        Mock Write-WarningMessage { $script:warnings += $Message }
         $script:installLocation = Join-Path $TestDrive 'WindowsApps\Microsoft.DesktopAppInstaller_1.26.510.0_x64__8wekyb3d8bbwe'
+        Mock Test-Path { $true }
         Mock Get-AppxPackage { throw [System.PlatformNotSupportedException]::new("The 'Get-AppxPackage' command was found in the module 'Appx', but the module could not be loaded. Operation is not supported on this platform. (0x80131539)") }
-        # Windows PowerShell, where it always loads, answers.
-        Mock powershell.exe { $global:LASTEXITCODE = 0; "1.26.510.0|X64|Ok|$script:installLocation" }
-        Mock Add-AppxPackage { }
+        Mock Add-AppxPackage { throw [System.PlatformNotSupportedException]::new("The 'Add-AppxPackage' command was found in the module 'Appx', but the module could not be loaded. Operation is not supported on this platform. (0x80131539)") }
+        # Windows PowerShell, where Appx always loads, answers: it lists App Installer and registers it.
+        Mock powershell.exe { $global:LASTEXITCODE = 0 }
+        Mock powershell.exe { $global:LASTEXITCODE = 0; "1.26.510.0|X64|Ok|$script:installLocation" } -ParameterFilter { "$args" -match 'Get-AppxPackage -AllUsers' }
     }
 
-    It 'Lists the packages through Windows PowerShell and registers App Installer' -Skip:($PSVersionTable.PSEdition -ne 'Core') {
+    It 'Lists and registers App Installer through Windows PowerShell' -Skip:($PSVersionTable.PSEdition -ne 'Core') {
         $result = Register-WingetAppInstallerForUser
 
         $result.Registered | Should -Be $true
+        $script:warnings | Should -BeNullOrEmpty
         Should -Invoke powershell.exe -Times 1 -Exactly -ParameterFilter { "$args" -match "Get-AppxPackage -AllUsers -Name 'Microsoft\.DesktopAppInstaller'" }
-        Should -Invoke Add-AppxPackage -Times 1 -Exactly -ParameterFilter { $RegisterByFamilyName }
+        Should -Invoke powershell.exe -Times 1 -Exactly -ParameterFilter { "$args" -match "Add-AppxPackage -RegisterByFamilyName -MainPackage 'Microsoft\.DesktopAppInstaller_8wekyb3d8bbwe'" }
+        Should -Invoke Get-AppxPackage -Times 0 -Exactly
+        Should -Invoke Add-AppxPackage -Times 0 -Exactly
+    }
+
+    It 'Returns the codes Windows PowerShell reports, read from the HRESULT it prints' -Skip:($PSVersionTable.PSEdition -ne 'Core') {
+        Mock powershell.exe { $global:LASTEXITCODE = 1; 'ERR|-2147009293|Das Paket hängt von einem Framework ab, das nicht gefunden wurde.' } -ParameterFilter { "$args" -match 'RegisterByFamilyName' }
+        Mock powershell.exe { $global:LASTEXITCODE = 1; 'ERR|-2147009274|Deployment failed with HRESULT: 0x80073D06, The package could not be installed because a higher version of this package is already installed.' } -ParameterFilter { "$args" -match 'Add-AppxPackage -Path' }
+
+        $result = Register-WingetAppInstallerForUser
+
+        $result.Registered | Should -Be $false
+        $result.ErrorCodes | Should -Be @(-2147009293, -2147009274)
+        Should -Invoke Add-AppxPackage -Times 0 -Exactly
+    }
+}
+
+Describe 'Invoke-AppxRegistration (review findings P3-27, P3-29)' {
+    BeforeEach {
+        Mock Add-AppxPackage { throw [System.PlatformNotSupportedException]::new("The 'Add-AppxPackage' command was found in the module 'Appx', but the module could not be loaded. Operation is not supported on this platform. (0x80131539)") }
+        Mock powershell.exe { $global:LASTEXITCODE = 0 }
+    }
+
+    It 'Registers by family name in Windows PowerShell under PowerShell 7, without progress output' -Skip:($PSVersionTable.PSEdition -ne 'Core') {
+        Invoke-AppxRegistration -FamilyName 'Microsoft.DesktopAppInstaller_8wekyb3d8bbwe'
+
+        Should -Invoke powershell.exe -Times 1 -Exactly -ParameterFilter {
+            $command = "$($args[-1])"
+            $args -contains '-NoProfile' -and $args -contains '-Command' -and
+            $command -match "^\`$ProgressPreference = 'SilentlyContinue'; try \{ Add-AppxPackage -RegisterByFamilyName -MainPackage 'Microsoft\.DesktopAppInstaller_8wekyb3d8bbwe' -ErrorAction Stop \}"
+        }
+        Should -Invoke Add-AppxPackage -Times 0 -Exactly
+    }
+
+    It 'Registers from a manifest, keeping an apostrophe in its path inside the quoted literal (issue #178)' -Skip:($PSVersionTable.PSEdition -ne 'Core') {
+        Invoke-AppxRegistration -ManifestPath "C:\Users\O'Brien\AppXManifest.xml"
+
+        Should -Invoke powershell.exe -Times 1 -Exactly -ParameterFilter {
+            "$($args[-1])".Contains("Add-AppxPackage -Path 'C:\Users\O''Brien\AppXManifest.xml' -Register -DisableDevelopmentMode -ErrorAction Stop")
+        }
+    }
+
+    It 'Throws the HRESULT Windows PowerShell printed, whatever language the message is in' -Skip:($PSVersionTable.PSEdition -ne 'Core') {
+        Mock powershell.exe { $global:LASTEXITCODE = 1; 'ERR|-2147009293|Das Paket hängt von einem Framework ab, das nicht gefunden wurde.' }
+
+        try { Invoke-AppxRegistration -FamilyName 'Microsoft.DesktopAppInstaller_8wekyb3d8bbwe'; $record = $null }
+        catch { $record = $_ }
+
+        $record | Should -Not -BeNullOrEmpty
+        $record.Exception.HResult | Should -Be -2147009293
+        "$record" | Should -Be 'Das Paket hängt von einem Framework ab, das nicht gefunden wurde.'
+        Get-AppxErrorCode -ErrorRecord $record | Should -Be -2147009293
+    }
+
+    It 'Throws with the exit code when Windows PowerShell failed without saying why' -Skip:($PSVersionTable.PSEdition -ne 'Core') {
+        Mock powershell.exe { $global:LASTEXITCODE = 1 }
+
+        { Invoke-AppxRegistration -FamilyName 'Microsoft.DesktopAppInstaller_8wekyb3d8bbwe' } | Should -Throw '*failed in Windows PowerShell (exit code 1)*'
     }
 }
 
@@ -258,16 +321,61 @@ Describe 'Invoke-WingetPackageManagerRepair (issue #265, review findings P3-26, 
         Should -Invoke Repair-WinGetPackageManager -Times 1 -Exactly -ParameterFilter { $AllUsers -and $Latest -and -not $Force }
     }
 
-    It 'Goes on to this account, unforced then forced, when the failure has no code (the real wedge message)' {
+    It 'Goes on to an unforced, then a forced repair for this account when nothing names the cause' {
         Mock Repair-WinGetPackageManager { throw $script:realRepairMessage }
+
+        $result = Invoke-WingetPackageManagerRepair
+
+        $result.Available | Should -Be $true
+        $result.Succeeded | Should -Be $false
+        Should -Invoke Repair-WinGetPackageManager -Times 2 -Exactly
+        Should -Invoke Repair-WinGetPackageManager -Times 1 -Exactly -ParameterFilter { $Latest -and -not $Force -and -not $AllUsers }
+        Should -Invoke Repair-WinGetPackageManager -Times 1 -Exactly -ParameterFilter { $Latest -and $Force -and -not $AllUsers }
+    }
+
+    # Review finding P3-27, the #279 wedge (E2E run 36384683838): the repair only says 'Try running
+    # with -AllUsers', with no code, and used to be forced anyway.
+    It 'Does not force a repair for this account after the all-users repair for a missing framework failed' {
+        Mock Repair-WinGetPackageManager { throw $script:realRepairMessage }
+        $script:infos = @()
+        Mock Write-Info { $script:infos += $Message }
 
         $result = Invoke-WingetPackageManagerRepair -AllUsersFirst
 
         $result.Available | Should -Be $true
         $result.Succeeded | Should -Be $false
-        Should -Invoke Repair-WinGetPackageManager -Times 3 -Exactly
-        Should -Invoke Repair-WinGetPackageManager -Times 1 -Exactly -ParameterFilter { $Force }
+        Should -Invoke Repair-WinGetPackageManager -Times 2 -Exactly
+        Should -Invoke Repair-WinGetPackageManager -Times 1 -Exactly -ParameterFilter { $AllUsers -and $Latest -and -not $Force }
+        Should -Invoke Repair-WinGetPackageManager -Times 1 -Exactly -ParameterFilter { $Latest -and -not $Force -and -not $AllUsers }
+        Should -Invoke Repair-WinGetPackageManager -Times 0 -Exactly -ParameterFilter { $Force }
         ($script:warnings -join "`n") | Should -Match 'Repair-WinGetPackageManager -AllUsers -Latest failed: Failed to repair winget'
+        $script:infos | Should -Contain 'Not running Repair-WinGetPackageManager -Latest -Force: the Microsoft.WindowsAppRuntime.1.8 framework App Installer needs is missing, and the all-users repair for it failed, which forcing cannot fix (-Force only closes running App Installer processes).'
+    }
+
+    It 'Does not force a repair after the App Installer registration failed with <Name>' -ForEach @(
+        @{ Name = '0x80073CF3 (a missing framework, issue #279)'; Codes = @(-2147009293); Shown = '0x80073CF3 ERROR_INSTALL_RESOLVE_DEPENDENCY_FAILED' }
+        @{ Name = '0x80073D06 (a newer framework, issue #265)'; Codes = @(-2147009274); Shown = '0x80073D06 ERROR_INSTALL_PACKAGE_DOWNGRADE' }
+        @{ Name = 'both, as on the #279 wedge'; Codes = @(-2147009293, -2147009274, -2147009293); Shown = '0x80073CF3 ERROR_INSTALL_RESOLVE_DEPENDENCY_FAILED, 0x80073D06 ERROR_INSTALL_PACKAGE_DOWNGRADE' }
+    ) {
+        Mock Repair-WinGetPackageManager { throw $script:realRepairMessage }
+        $script:infos = @()
+        Mock Write-Info { $script:infos += $Message }
+
+        $result = Invoke-WingetPackageManagerRepair -KnownErrorCodes $Codes
+
+        $result.Succeeded | Should -Be $false
+        $result.ErrorCodes | Should -BeNullOrEmpty
+        Should -Invoke Repair-WinGetPackageManager -Times 1 -Exactly
+        Should -Invoke Repair-WinGetPackageManager -Times 0 -Exactly -ParameterFilter { $Force }
+        $script:infos | Should -Contain "Not running Repair-WinGetPackageManager -Latest -Force: registering App Installer failed with $Shown, which forcing cannot fix (-Force only closes running App Installer processes)."
+    }
+
+    It 'Still forces the repair when the registration failed with another code' {
+        Mock Repair-WinGetPackageManager { throw $script:realRepairMessage }
+
+        [void](Invoke-WingetPackageManagerRepair -KnownErrorCodes @(-2147009255))
+
+        Should -Invoke Repair-WinGetPackageManager -Times 1 -Exactly -ParameterFilter { $Force }
     }
 
     It 'Does not escalate to -Force on <Name>, which fails the same way however hard it is pushed' -ForEach @(
@@ -301,10 +409,11 @@ Describe 'Invoke-NextWingetAccountFix (review findings P3-25, P3-28)' {
         Should -Invoke Invoke-WingetPackageManagerRepair -Times 0 -Exactly
     }
 
-    It 'Goes straight on to the repair when the registration fails, keeping the codes it saw' {
+    It 'Goes straight on to the repair when the registration fails, keeping the codes it saw and telling the repair (P3-27)' {
         Invoke-NextWingetAccountFix -State $script:state | Should -Be $true
 
         Should -Invoke Invoke-WingetPackageManagerRepair -Times 1 -Exactly
+        Should -Invoke Invoke-WingetPackageManagerRepair -Times 1 -Exactly -ParameterFilter { @($KnownErrorCodes) -contains -2147009293 }
         $script:state.ErrorCodes | Should -Contain -2147009293
     }
 

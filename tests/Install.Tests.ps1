@@ -1820,6 +1820,7 @@ Describe 'A run as SYSTEM from an RMM agent (review findings P2-24, P3-22, P3-23
         Mock Repair-WinGetPackageManager { throw 'must not repair winget for SYSTEM' }
         Mock Invoke-WebRequest { throw 'must not download App Installer for SYSTEM' }
         Mock Add-AppxPackage { throw 'must not register a package for SYSTEM' }
+        Mock Invoke-AppxRegistration { throw 'must not register a package for SYSTEM' }
         # No App Installer Group Policy on this PC (never the runner's real registry).
         Mock Get-WingetPolicyBlock { $null }
         # The console is hosted by Windows Terminal as far as the #271 check can tell; it must not
@@ -1922,6 +1923,7 @@ Describe 'A run as SYSTEM from an RMM agent (review findings P2-24, P3-22, P3-23
         Should -Invoke Invoke-WingetPackageManagerRepair -Times 0 -Exactly
         Should -Invoke Invoke-WebRequest -Times 0 -Exactly
         Should -Invoke Add-AppxPackage -Times 0 -Exactly
+        Should -Invoke Invoke-AppxRegistration -Times 0 -Exactly
     }
 
     It 'Stops with exit code 2, saying so for SYSTEM, without any per-account step, when App Installer is not installed for the machine' {
@@ -1966,6 +1968,7 @@ Describe 'Invoke-WingetInstall with the real winget setup ladder (review finding
         # Commands that would change the machine.
         Mock Invoke-WebRequest { throw 'must not download App Installer' }
         Mock Add-AppxPackage { throw 'must not register a package' }
+        Mock Invoke-AppxRegistration { throw 'must not register a package' }
         Mock Repair-WinGetPackageManager { throw 'must not repair App Installer' }
         Mock Get-AppxPackage { }
         # No App Installer Group Policy (never the runner's real registry) unless a test sets one.
@@ -2015,6 +2018,7 @@ Describe 'Invoke-WingetInstall with the real winget setup ladder (review finding
         Should -Invoke Invoke-ExternalProcess -Times 1 -Exactly
         Should -Invoke Repair-WinGetPackageManager -Times 0 -Exactly
         Should -Invoke Add-AppxPackage -Times 0 -Exactly
+        Should -Invoke Invoke-AppxRegistration -Times 0 -Exactly
         Should -Invoke Install-WingetAutoUpdate -Times 0 -Exactly
         ($script:messages -join "`n") | Should -Match 'Group Policy on this PC blocks winget'
     }
@@ -2026,6 +2030,7 @@ Describe 'Invoke-WingetInstall with the real winget setup ladder (review finding
 
         Should -Invoke Repair-WinGetPackageManager -Times 0 -Exactly
         Should -Invoke Add-AppxPackage -Times 0 -Exactly
+        Should -Invoke Invoke-AppxRegistration -Times 0 -Exactly
         Should -Invoke Invoke-ExternalProcess -Times 0 -Exactly -ParameterFilter { $ArgumentList[0] -eq 'source' -and $ArgumentList[1] -eq 'reset' }
         @($script:messages | Where-Object { $_ -like 'WARN: The winget source could not be set up*' }).Count | Should -Be 1
     }
@@ -2038,7 +2043,9 @@ Describe 'Invoke-WingetInstall with the real winget setup ladder (review finding
         $script:newFolder = Join-Path $TestDrive 'Microsoft.DesktopAppInstaller_1.29.290.0_x64__8wekyb3d8bbwe'
         Mock Get-DesktopAppInstallerPackageInfo { [pscustomobject]@{ Version = [version]'1.29.290.0'; Architecture = 'X64'; Status = 'Ok'; InstallLocation = $script:newFolder } }
         Mock Get-AppxPackage { [pscustomobject]@{ Name = 'Microsoft.DesktopAppInstaller'; InstallLocation = $script:newFolder } }
-        Mock Add-AppxPackage { throw [System.Runtime.InteropServices.COMException]::new('Deployment failed with HRESULT: 0x80073CF3, Package failed updates, dependency or conflict validation. Provide the framework "Microsoft.WindowsAppRuntime.1.8"', -2147009293) }
+        # The registration seam (Add-AppxPackage, in Windows PowerShell under PowerShell 7) fails as
+        # Add-AppxPackage does there: with the HRESULT.
+        Mock Invoke-AppxRegistration { throw [System.Runtime.InteropServices.COMException]::new('Deployment failed with HRESULT: 0x80073CF3, Package failed updates, dependency or conflict validation. Provide the framework "Microsoft.WindowsAppRuntime.1.8"', -2147009293) }
         Mock Get-WindowsAppRuntimePackageInfo { }
         Mock Test-AndInstallWingetModule { $true }
         Mock Repair-WinGetPackageManager { throw 'Failed to repair winget. Try running with -AllUsers in administrator mode.' }
@@ -2046,6 +2053,8 @@ Describe 'Invoke-WingetInstall with the real winget setup ladder (review finding
         Invoke-WingetInstall -Apps @(@{ name = 'Contoso.AppOne' }) -NonInteractive | Should -Be 2
 
         Should -Invoke Repair-WinGetPackageManager -Times 1 -Exactly -ParameterFilter { $AllUsers }
+        # Not forced: the registration's 0x80073CF3 says forcing cannot help (P3-27).
+        Should -Invoke Repair-WinGetPackageManager -Times 0 -Exactly -ParameterFilter { $Force }
         Should -Invoke Invoke-WebRequest -Times 0 -Exactly
         Should -Invoke Install-AppWithVerification -Times 0 -Exactly
         $diagnosis = @($script:messages | Where-Object { $_ -like 'ERROR: *' -and $_ -ne 'ERROR: Winget is required for this script. Exiting.' })
@@ -2265,6 +2274,7 @@ Describe 'Dry run leaves the machine unchanged (P2-16)' {
         Mock Import-Module { }
         Mock Repair-WinGetPackageManager { }
         Mock Add-AppxPackage { }
+        Mock Invoke-AppxRegistration { }
         Mock Invoke-WebRequest { }
         Mock Invoke-RestMethod { }
         Mock Set-ItemProperty { }
@@ -2298,6 +2308,7 @@ Describe 'Dry run leaves the machine unchanged (P2-16)' {
         Should -Invoke Install-Module -Times 0 -Exactly
         Should -Invoke Repair-WinGetPackageManager -Times 0 -Exactly
         Should -Invoke Add-AppxPackage -Times 0 -Exactly
+        Should -Invoke Invoke-AppxRegistration -Times 0 -Exactly
         Should -Invoke Invoke-WebRequest -Times 0 -Exactly
         Should -Invoke Invoke-RestMethod -Times 0 -Exactly
         Should -Invoke Set-ItemProperty -Times 0 -Exactly
@@ -2336,6 +2347,7 @@ Describe 'Dry run leaves the machine unchanged (P2-16)' {
         # Only the read-only checks ran: `winget --version` and the per-app `winget list`.
         Should -Invoke Invoke-ExternalProcess -Times 0 -Exactly -ParameterFilter { $ArgumentList[0] -notin @('list', '--version') }
         Should -Invoke Add-AppxPackage -Times 0 -Exactly
+        Should -Invoke Invoke-AppxRegistration -Times 0 -Exactly
         Should -Invoke Repair-WinGetPackageManager -Times 0 -Exactly
         Should -Invoke Start-Process -Times 0 -Exactly
 

@@ -58,6 +58,7 @@ BeforeAll {
         Mock Repair-WinGetPackageManager { throw 'must not run the real repair cmdlet' }
         Mock Invoke-WebRequest { throw 'must not download App Installer' }
         Mock Add-AppxPackage { throw 'must not register a package' }
+        Mock Invoke-AppxRegistration { throw 'must not register a package' }
         $script:account = New-TestAccountContext
     }
 }
@@ -460,6 +461,7 @@ Describe 'Initialize-Winget as SYSTEM (review findings P2-24, P3-23)' {
 
         Should -Invoke Reset-WingetSource -Times 1 -Exactly
         Should -Invoke Add-AppxPackage -Times 0 -Exactly
+        Should -Invoke Invoke-AppxRegistration -Times 0 -Exactly
     }
 
     It 'Passes a dry run on' {
@@ -505,7 +507,8 @@ Describe 'Initialize-Winget dry run (P2-16)' {
 # Microsoft.WindowsAppRuntime.1.8 framework is missing) and then 0x80073D06, and
 # Repair-WinGetPackageManager throws 'Try running with -AllUsers'. Three ladders gave three wrong
 # diagnoses there: 'Installations may fail with 0x80073D19', 'source "winget" appears to be missing'
-# and a source.msix rejection. Only the cmdlets and the winget process are mocked.
+# and a source.msix rejection. Only the cmdlets, Windows PowerShell (where Invoke-AppxRegistration
+# runs Add-AppxPackage under PowerShell 7, review finding P3-29) and the winget process are mocked.
 Describe 'Initialize-Winget on the #279 wedge (review findings P3-25, P3-27, P3-28, P3-31)' {
     BeforeEach {
         Register-LadderMessageCapture
@@ -525,6 +528,9 @@ Describe 'Initialize-Winget on the #279 wedge (review findings P3-25, P3-27, P3-
             throw [System.Runtime.InteropServices.COMException]::new('Deployment failed with HRESULT: 0x80073CF3, Package failed updates, dependency or conflict validation. Windows cannot install package Microsoft.DesktopAppInstaller_1.29.290.0_x64__8wekyb3d8bbwe because this package depends on a framework that could not be found. Provide the framework "Microsoft.WindowsAppRuntime.1.8"', -2147009293)
         } -ParameterFilter { $RegisterByFamilyName }
         Mock Add-AppxPackage { throw 'Deployment failed with HRESULT: 0x80073D06, The package could not be installed because a higher version of this package is already installed.' }
+        # Under PowerShell 7 the registrations run in Windows PowerShell, which prints the HRESULT.
+        Mock powershell.exe { $global:LASTEXITCODE = 1; 'ERR|-2147009293|Deployment failed with HRESULT: 0x80073CF3, Package failed updates, dependency or conflict validation. Windows cannot install package Microsoft.DesktopAppInstaller_1.29.290.0_x64__8wekyb3d8bbwe because this package depends on a framework that could not be found. Provide the framework "Microsoft.WindowsAppRuntime.1.8"' } -ParameterFilter { "$args" -match 'Add-AppxPackage -RegisterByFamilyName' }
+        Mock powershell.exe { $global:LASTEXITCODE = 1; 'ERR|-2147009274|Deployment failed with HRESULT: 0x80073D06, The package could not be installed because a higher version of this package is already installed.' } -ParameterFilter { "$args" -match 'Add-AppxPackage -Path' }
         Mock Get-WindowsAppRuntimePackageInfo { }
         Mock Test-AndInstallWingetModule { $true }
         Mock Repair-WinGetPackageManager { throw 'Failed to repair winget. Try running with -AllUsers in administrator mode.' }
@@ -536,9 +542,11 @@ Describe 'Initialize-Winget on the #279 wedge (review findings P3-25, P3-27, P3-
 
         $result.Ready | Should -Be $false
         $result.Diagnosis | Should -Be 'NotLaunchable'
-        # -AllUsers first, as the cmdlet asks, because the framework is missing; then this account.
-        Should -Invoke Repair-WinGetPackageManager -Times 3 -Exactly
+        # -AllUsers first, as the cmdlet asks, because the framework is missing; then this account,
+        # but not forced: the codes the registration saw say forcing cannot help (P3-27).
+        Should -Invoke Repair-WinGetPackageManager -Times 2 -Exactly
         Should -Invoke Repair-WinGetPackageManager -Times 1 -Exactly -ParameterFilter { $AllUsers -and $Latest }
+        Should -Invoke Repair-WinGetPackageManager -Times 0 -Exactly -ParameterFilter { $Force }
         Should -Invoke Invoke-WebRequest -Times 0 -Exactly
         # winget never started, so the source was not touched: no update, no reset, no source.msix.
         Should -Invoke Invoke-WingetProcess -Times 0 -Exactly -ParameterFilter { $ArgumentList[0] -ne '--version' }
@@ -569,7 +577,7 @@ Describe 'The ladders Initialize-Winget replaced are gone (review finding P3-25)
 Describe 'msstore-era source-trust helpers removed (issue #177)' {
     # Test-WingetSourceTrusted trusted error output (no $LASTEXITCODE check on merged stderr) and
     # Set-Sources was only reachable from the removed Install.ps1 trusted-sources loop; source
-    # health is verified (and repaired) solely by Test-WingetSources now.
+    # health is verified (and repaired) solely by Initialize-Winget now.
     It 'No longer defines Test-WingetSourceTrusted' {
         Test-Path Function:\Test-WingetSourceTrusted | Should -Be $false
     }

@@ -283,7 +283,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     those codes ('Failed to repair winget. Try running with -AllUsers in administrator mode.'), so
     the framework advice never printed. The codes are now read from the HRESULT of what the App
     Installer registration and the repair throw (`Get-AppxErrorCode`), and whether the framework
-    is missing comes from the all-users check `Get-WindowsAppRuntimeStatus` already makes.
+    is missing comes from the all-users check `Get-WindowsAppRuntimeStatus` already makes. The
+    forced repair (`-Force`, which only closes running App Installer processes) no longer runs
+    when those codes, from the registration or the repair, or a missing framework the all-users
+    repair could not install, already explain the failure: on the wedge it ran anyway, and
+    downloaded App Installer once more.
   - **`-AllUsers`** (P3-28). When that check finds `Microsoft.WindowsAppRuntime.1.8` missing, the
     repair runs `Repair-WinGetPackageManager -AllUsers -Latest` first, as the cmdlet asks; never
     otherwise, since it aborts with 0x80073D06 on a PC with a newer framework (#265). A source
@@ -293,10 +297,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     installed from the PowerShell Gallery on every first run, for a repair that rarely runs, with
     two warnings about an 'Update functionality' that no longer exists when the Gallery was
     blocked. It is now installed inside the repair step, the first time a run needs it.
-  - **App Installer listed through Windows PowerShell** (P3-29). The registration step lists the
-    App Installer packages with `Get-DesktopAppInstallerPackageInfo`, which runs
-    `Get-AppxPackage -AllUsers` in Windows PowerShell under PowerShell 7, so the Appx module failing
-    to load there (0x80131539, seen on Windows Server 2022) no longer ends the step.
+  - **App Installer listed and registered through Windows PowerShell** (P3-29). Under PowerShell 7
+    the registration step lists the App Installer packages (`Get-DesktopAppInstallerPackageInfo`,
+    `Get-AppxPackage -AllUsers`) and registers them (`Invoke-AppxRegistration`,
+    `Add-AppxPackage`) in Windows PowerShell. The Appx module both cmdlets come from cannot load
+    in PowerShell 7 on Windows 10 and Windows Server 2022 (0x80131539, seen on Server 2022), so the
+    step failed there at the listing and would have failed at the registration; it only worked
+    once `Repair-WinGetPackageManager` had loaded Appx into the session.
   - The source is reset (`winget source reset --force`, its exit code reported) only for a missing
     or corrupted source (`0x8A15000B`, `0x8A15000F`, `0x8A150012`, `0x8A150015`, `0x8A15003F`),
     which the exit-code table now marks as `SourceBroken`. `0x8A150046` (agreements not accepted)
