@@ -124,6 +124,29 @@ line with the cause and the fix. The aka.ms/getwinget download, the source.msix 
 the source update before elevation are gone. The policy detection, the `-AllUsers` repair and the
 registration through Windows PowerShell are not yet checked on a real Windows PC.
 
+Catalog conditions are now decided once per run, before anything is installed, and both passes use
+that answer, so the retry pass can no longer count an app it found not applicable as installed. A
+condition that cannot answer (a failed CIM query, for example) fails open and the install is
+attempted. ARM64 PCs get the 32-bit Adobe Reader and every other PC the 64-bit one
+(`Get-OSArchitecture`), and stale default-terminal values no longer make the installer skip a
+removed Windows Terminal. Winget-AutoUpdate counts as set up only when its
+`\WAU\Winget-AutoUpdate` task exists, is enabled and has an enabled trigger; otherwise the summary
+says `Auto-updates: UNHEALTHY`, and the transcript shows the task's state and the end of WAU's
+`updates.log`. New exit code 8: the apps are fine, but auto-updates are `FAILED`,
+`NOT CONFIGURED`, `AT RISK` or `UNHEALTHY` (precedence 1 > 2 > 8 > 3010 > 0). On the Server 2025
+runner, which lacks the framework, every E2E pass therefore exits 8, which
+`e2e/Invoke-InstallPass.ps1` accepts only when the pass's transcript gives the missing framework as
+the reason. For RMM runs: `WINGET_APP_SETUP_NONINTERACTIVE=1` makes the one-liner non-interactive;
+one elevated run at a time holds the `Global\winget-app-setup-run` mutex, and a second one exits 6;
+every real run prints a `RESULT:` line, and the run that holds the lock writes
+`logs\last-run.json` (schema version 1); the logs folder keeps the newest 30 transcripts, and
+leftover temporary copies of the installer are removed after a day. The uninstaller's logic moved
+into the module (`Invoke-WingetUninstall`): it sets winget up first and removes nothing (exit 2)
+when winget cannot be used, fails an app whose check winget could not answer, honours catalog
+conditions, keeps the PowerShell 7 and Windows Terminal it runs in, removes Winget-AutoUpdate last
+and only when no app failed, and exits 0, 3010, 1, 2, 3, 4 or 5 instead of always 0. None of this
+is checked on a real Windows PC yet.
+
 The same branch changes CI. Fork pull requests that leave `windows-tests.yml` alone no longer run
 on the self-hosted win-test runner, and `claude.yml` calls the shared Claude workflow at a pinned
 commit SHA instead of `@main`. The E2E workflow files its failure issue from a separate ubuntu job,
@@ -313,15 +336,15 @@ every repository secret.
 | Path | Description |
 |------|-------------|
 | `WingetAppSetup/` | Source-of-truth PowerShell module (`.psd1` manifest + `.psm1` loader) |
-| `WingetAppSetup/Public/` | Exported functions: logging, winget core, app validation, Windows Terminal config, install orchestration (updates are outsourced to WAU) |
-| `WingetAppSetup/Private/` | Internal helpers: environment/PATH, elevation, graphical tools, the Windows PowerShell 5.1 → PowerShell 7 bootstrap, the machine-wide winget and provisioning lookups a run as SYSTEM uses (`MachineContext.ps1`) |
+| `WingetAppSetup/Public/` | Exported functions: logging, winget core, app validation, Windows Terminal config, install orchestration (updates are outsourced to WAU), uninstall orchestration (`Invoke-WingetUninstall`) |
+| `WingetAppSetup/Private/` | Internal helpers: system info, elevation, graphical tools, the Windows PowerShell 5.1 → PowerShell 7 bootstrap, the machine-wide winget and provisioning lookups a run as SYSTEM uses (`MachineContext.ps1`), the run lock (`RunLock.ps1`), the `RESULT` line and `last-run.json` (`RunRecord.ps1`), log retention (`Housekeeping.ps1`) and the uninstaller's per-app step (`AppUninstall.ps1`) |
 | `build/Build-WingetInstallScript.ps1` | Concatenates the module + entry fragments into `winget-app-install.ps1` |
 | `build/fragments/` | `head.ps1` (PSScriptInfo, help, `param`) and `tail.ps1` (entry-point dispatch) |
 | `winget-app-install.ps1` | **Generated** single-file installer for local and `irm \| iex` use — do not edit by hand |
-| `winget-app-uninstall.ps1` | Uninstall helper; imports the module from the repo |
+| `winget-app-uninstall.ps1` | Uninstall entry script; imports the module from the repo and runs `Invoke-WingetUninstall` (exit codes in readme "Uninstall") |
 | `tests/` | Pester suite, one `<Area>.Tests.ps1` per module file plus `EntryPoint.Tests.ps1`, `TestHarness.Tests.ps1`, `BuildGuards.Tests.ps1` (the build guards and the pre-commit hook) and the `E2E*.Tests.ps1` files (for the `e2e/` scripts, with sample transcripts in `tests/fixtures/e2e`); `TestHelpers.ps1` loads the module once per file and stands in for Windows-only commands, so the suite also runs on Linux/macOS |
 | `e2e/Assert-Install.ps1` | Shared post-install assertions for end-to-end runs (tier 1 workflow below; tier 2 [#215](https://github.com/J-MaFf/winget-app-setup/issues/215) reuses it); the transcript checks are in `e2e/TranscriptAssertions.ps1` and fixture-tested; `-InstallerPath` checks that every pass ran the checkout's build |
-| `e2e/Invoke-InstallPass.ps1` | Starts each E2E install pass (one-liner or `-File`, from PowerShell 7 or Windows PowerShell 5.1) and applies the exit-code policy: 0 and 3010 pass, 1 only while `KNOWN_PLATFORM_INCOMPATIBLE` is non-empty |
+| `e2e/Invoke-InstallPass.ps1` | Starts each E2E install pass (one-liner or `-File`, from PowerShell 7 or Windows PowerShell 5.1) and applies the exit-code policy: 0 and 3010 pass, 8 only when the pass's transcript says WAU was skipped for the missing `Microsoft.WindowsAppRuntime.1.8`, 1 only while `KNOWN_PLATFORM_INCOMPATIBLE` is non-empty |
 | `e2e/Remove-PreinstalledApps.ps1` | Uninstalls the catalog apps the runner image ships with (Chrome, 7-Zip, Git; with `-IncludePowerShell7`, PowerShell 7 too) before the first E2E pass; every call time-limited, failures become warnings |
 | `e2e/Collect-Diagnostics.ps1` | Windows PowerShell 5.1 snapshots for the E2E run: pwsh versions, App Installer / WindowsAppRuntime AppX state, WAU tasks; at the end MsiInstaller and RestartManager events, AppX deployment errors and warnings, and WAU logs (`e2e-diagnostics` artifact); always exits 0 |
 | `.github/workflows/e2e-install.yml` | E2E tier 1: real install runs on GitHub-hosted `windows-latest` in two legs, `e2e-install` from PowerShell 7 and `e2e-install-windows-powershell` from Windows PowerShell 5.1 through the PowerShell 7 bootstrap, after removing the preinstalled Chrome, 7-Zip and Git (issues #279/#282/#283; weekly against raw `main`, plus dispatches and PRs that touch the product or e2e files against the checkout; uploads transcripts and diagnostics; a failed, timed-out or cancelled weekly or `main`-dispatched run files an issue from the ubuntu `report-failure` job) |
@@ -410,6 +433,19 @@ every repository secret.
   machine-wide `winget.exe` instead of the MSI download (whose GitHub release list can answer 429
   when many PCs ask at once), and how deferred apps reach a standard user's PC, where only a
   per-user deployment can install them.
+- Check the RMM and auto-update changes on real Windows: two runs at once (the second exits 6), a
+  run killed mid-way (`last-run.json` keeps `exitCode` null), the `RESULT` line from Endpoint
+  Central, a deleted or disabled `\WAU\Winget-AutoUpdate` task (`UNHEALTHY`, exit 8, and whether the
+  real "not found" error id matches `CmdletizationQuery_NotFound*`), and WAU's `updates.log` tail
+  (WAU writes it from Windows PowerShell 5.1). Treat exit code 8 in the RMM policies as "apps OK,
+  auto-updates need attention", not as a failed install.
+- Check the Adobe Reader split on a real ARM64 PC (32-bit Reader installed, 64-bit skipped), and
+  whether `Google.GoogleDrive` and `Dell.CommandUpdate.Universal`, which ship only x64 installers,
+  need the same gate there.
+- Run the reworked uninstaller on real Windows, cross-user elevated and as SYSTEM, where
+  `winget list` does not see per-user MSIX apps such as Windows Terminal.
+- Add a whole-run time budget (`-MaxRuntimeMinutes`), deferred from the RMM work: the
+  per-process time limits are the only limits today.
 - Validate the dormant DISM MSIX-provisioning path in `Install-PowerShellLatest` end-to-end on a real Windows 10 machine before PowerShell 7.7 GA makes it load-bearing (as of [#166](https://github.com/J-MaFf/winget-app-setup/issues/166)).
 - Cut a tagged release and move the `[Unreleased]` CHANGELOG entries under a versioned heading.
 

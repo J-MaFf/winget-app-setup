@@ -9,6 +9,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- RMM runs get a non-interactive switch for the one-liner, one run at a time, a machine-readable
+  result and log retention (review findings P3-41, P3-42).
+  - **`WINGET_APP_SETUP_NONINTERACTIVE`.** `1`, `true` or `yes` turns on non-interactive mode, for
+    the `irm | iex` one-liner, which cannot pass `-NonInteractive` (`Test-NonInteractiveRequested`).
+    The PowerShell 7 run the 5.1 bootstrap starts inherits it, and the uninstaller reads it too.
+  - **Exit code 6.** A real, elevated run takes the machine-wide `Global\winget-app-setup-run`
+    mutex (`Lock-InstallerRun`) before its pre-flight checks. A run started while another one
+    holds it exits 6 at once, without waiting for that run or stopping it. The lock is released
+    before any key-press prompt, so a window left open does not block the next scheduled run.
+  - **`RESULT` line and `last-run.json`.** Every real run prints
+    `RESULT: exit=... installed=... skipped=... deferred=... failed=... autoupdates=... restart=... build=... log=...`
+    after its summary or early-exit notice (`Format-InstallerResultLine`). The run that holds the
+    lock writes `%ProgramData%\winget-app-setup\logs\last-run.json` (`schemaVersion` 1: build id,
+    start and end UTC, exit code, counts with `deferred`, per-app status, reason and exit code,
+    auto-update status, restart flag, end-of-run winget check, transcript path), through a
+    temporary file and a replacing move. It writes the file once when it takes the lock, with
+    `exitCode` null, so a killed run no longer leaves the previous run's record, and again however
+    it ends. `wingetUsable` is null when the end-of-run check did not run or could not complete.
+  - **Retention.** The run that holds the lock keeps the newest 30 transcripts and the `winget-*`
+    and `pwsh-msi-*` logs of their runs (`Invoke-InstallerHousekeeping`), and removes the
+    installer's temporary copy folders once they are a day old, only from `%SystemRoot%\Temp` (and
+    SYSTEM's temp folders for a SYSTEM run) and only when SYSTEM or Administrators owns them. The
+    5.1 bootstrap now deletes its `irm | iex` relaunch copy when the PowerShell 7 run ends.
+  - A whole-run time budget (`-MaxRuntimeMinutes`) is not part of this; the per-process time
+    limits still apply.
+
 - Runs as SYSTEM are supported for the apps that install for the whole PC (review findings P2-24,
   P3-23, P3-24). An RMM agent such as ManageEngine Endpoint Central runs scripts as SYSTEM, which
   has no winget of its own (winget is a per-user packaged app that cannot be registered for
@@ -81,6 +107,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Adopted **beads** (`bd`) as a dependency-graph task/memory layer beneath GitHub Issues for AI-driven work. `bd init` (embedded Dolt) scaffolds `.beads/` with the issue graph; a Dolt remote is wired to `origin` for cross-machine sync via `refs/dolt/data`; Claude Code hooks run `bd prime` on SessionStart/PreCompact; and an `AGENTS.md` is generated. The CLAUDE.md beads section is reconciled with the `git-policies` skill so durability/sync stay automatic while merges to `main` remain human-gated via PR ([#147](https://github.com/J-MaFf/winget-app-setup/issues/147), [#148](https://github.com/J-MaFf/winget-app-setup/pull/148)).
 
 ### Changed
+
+- Auto-updates now count as set up only when Winget-AutoUpdate's `\WAU\Winget-AutoUpdate` task
+  exists, is enabled and has an enabled trigger (`Get-WauTaskHealth`), checked after installing WAU
+  and on every run that finds it already installed (review finding P3-36). WAU's registry key, or
+  `msiexec` exit 0, used to be enough, so a machine whose task was missing or disabled showed a
+  green `Auto-updates:` line and never updated. Otherwise the summary shows
+  `Auto-updates: UNHEALTHY - <reason>`, and `Install-WingetAutoUpdate` returns the new status
+  `Unhealthy`. A task the Task Scheduler query cannot read is reported as unknown ("it is not known
+  whether apps will update automatically") with a pointer to Task Scheduler, not as broken with
+  advice to reinstall WAU. The task's state, triggers, last run and result, and the last 20 lines
+  of WAU's `updates.log`, go to the transcript (`Write-WauTaskHealth`). The installer does not
+  repair the task.
+  - **Exit code 8.** The apps installed but auto-updates are not configured or will not run: the
+    `Auto-updates:` line is `FAILED`, `NOT CONFIGURED`, `AT RISK` or `UNHEALTHY`.
+    `Get-InstallerExitCode` now ranks 1 > 2 > 8 > 3010 > 0. A machine without
+    `Microsoft.WindowsAppRuntime.1.8` therefore exits 8 even when every app installed.
+  - **`msiexec` logs** (P3-37). WAU's install and uninstall run through `Invoke-WauMsiexec`, which
+    writes a verbose log (`wau-msi-<install|uninstall>-<time>-<attempt>.log`) to the logs folder,
+    names it on failure, and gives the uninstall the same time limit and 1618 wait as the install.
+  - **Quieter transcripts** (P3-38). The 'task not found' probes no longer write
+    `PS>TerminatingError(Get-ScheduledTask)` into every transcript, which #283's was misread as.
+  - **E2E.** `e2e/Invoke-InstallPass.ps1` accepts exit 8 only when the pass's own transcript says
+    WAU was skipped because `Microsoft.WindowsAppRuntime.1.8` is missing, which is every pass on
+    `windows-latest`.
 
 - A run as SYSTEM or under cross-user elevation no longer installs an app at winget's default
   (per-user) scope (review finding P3-22). An app with no machine-scope installer used to be
@@ -262,6 +312,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The uninstaller no longer reports every app as not installed, removes Winget-AutoUpdate and exits
+  0 when winget cannot be started (review findings P2-19, P3-18). `winget-app-uninstall.ps1` is now
+  a thin entry script that runs `Invoke-WingetUninstall` (`WingetAppSetup/Public/Uninstall.ps1`),
+  with one app at a time in `Uninstall-CatalogApp` (`WingetAppSetup/Private/AppUninstall.ps1`).
+  - It sets winget up as the installer does (`Initialize-Winget`) and, when winget still cannot be
+    used, removes nothing and exits 2.
+  - A check winget could not answer fails the app instead of skipping it as not installed.
+  - `winget uninstall` runs with `--silent` through `Invoke-WingetProcess`, under a new 15-minute
+    `WingetUninstall` limit. An uninstaller that returns 3010 or 1641, which winget reports as
+    `0x8A150030`, counts as removed (`Test-WingetUninstallRestartRequiredResult`).
+  - Catalog conditions are honoured (`Test-AppApplicability`), and PowerShell 7 and Windows
+    Terminal are kept when the run depends on them (`Get-HostingShellSkipReason`).
+  - Once Windows Terminal is gone, the default-terminal setting that still names it is removed
+    (`Reset-WindowsTerminalDelegation`).
+  - Winget-AutoUpdate is removed last, and only when no app failed; the messages saying it was kept
+    appear only when it is installed.
+  - New `-WhatIf` and `-NonInteractive`. Exit codes: 0 done, 3010 done with a restart to finish,
+    1 an app or Winget-AutoUpdate failure, 2 winget unusable, 3 invalid or empty app list, 4 not
+    elevated, 5 an unexpected error or a module that could not be loaded. It used to exit 0
+    always.
+- Catalog applicability is decided once per run, fails open, and no longer reports a missing app
+  as installed (review findings P3-32 to P3-35).
+  - Each condition is evaluated once, before anything is installed and before the Windows Terminal
+    step writes HKCU, by the new private `Test-AppApplicability`, and both passes use that verdict
+    (`Install-AppWithVerification -Applicable`). The retry pass used to evaluate it again and
+    report a `not applicable` answer as `Retry succeeded` and Installed (exit 0, app missing); it
+    now counts such a result as Skipped.
+  - A condition that throws or writes an error is treated as applicable, so the install is
+    attempted. `Get-ComputerManufacturer` now uses `-ErrorAction Stop` and throws on an empty
+    manufacturer, so a CIM error no longer skips Dell Command Update on a Dell PC with exit 0.
+  - Windows Terminal's default-terminal values count as "Windows Terminal hosts this session" only
+    while Windows Terminal is installed, and `Test-WindowsTerminalInstalled` now asks for exactly
+    `Microsoft.WindowsTerminal`, so a removed Windows Terminal is installed again instead of being
+    skipped on every run.
+  - ARM64 PCs no longer fail Adobe Acrobat Reader on every run. The catalog installs
+    `Adobe.Acrobat.Reader.32-bit` (x86, the build Adobe supports on Windows on ARM) on ARM64 and
+    `Adobe.Acrobat.Reader.64-bit` everywhere else, and reports the other one as not applicable. The
+    new private `Get-OSArchitecture` reads `RuntimeInformation.OSArchitecture`.
 - Setting winget up is one step that diagnoses a failure once, instead of three ladders that ran
   back to back and gave one cause three diagnoses (review findings P3-25 to P3-31). On the #279
   wedge (E2E run 36384683838) the run used to say 'Installations may fail with 0x80073D19', then
