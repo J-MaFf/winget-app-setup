@@ -8,7 +8,11 @@
 # try/catch and a type cast, issue #239), Get-WingetAgreementArgs (a literal array,
 # Private/WingetAgreementArgs.ps1, issue #240), and this file's own
 # Get-PowerShell7MsiInfo/Save-WebFileWithTimeout/Install-PowerShell7FromMsi (issue #263) and
-# Test-GitHubRateLimitError (issue #274). Check any function added to this list - or any
+# Test-GitHubRateLimitError (issue #274). The tail's 5.1 branch also calls, around this file:
+# Test-EffectiveNonInteractive and Test-IsContinuousIntegration (Private/Interactivity.ps1),
+# Start-InstallerTranscript, Grant-InstallLogReadAccess and Write-Prompt (Private/LoggingInternal.ps1),
+# and Exit-Installer and Write-InstallerExitNotice (Private/FailureReporting.ps1) - review findings
+# P2-13/P2-14/P3-14. Check any function added to this list - or any
 # future edit to one already on it - against the same constraints before calling it from here; the
 # build's parse + ASCII guards only catch a parse-breaking token, not a PS7-only runtime construct
 # that still parses under 5.1 but behaves differently or throws. The build's parse + ASCII guards
@@ -317,11 +321,28 @@ function Save-WebFileWithTimeout {
 
     Exit code 3010 (ERROR_SUCCESS_REBOOT_REQUIRED) counts as success: pwsh.exe is on disk and
     launchable at that point, and the relaunch does not need the pending reboot.
+
+    Exit code 1618 (ERROR_INSTALL_ALREADY_RUNNING) is retried after a wait (review finding P2-13).
+    msiexec returns it at once, without waiting, whenever another installation holds the Windows
+    Installer - common on a freshly enrolled machine whose management agent, OEM tools or Teams are
+    still installing. It used to fail the bootstrap on the spot.
+
+    With -MsiLogDirectory, msiexec writes a verbose log (/l*v) there, one file per attempt, so a
+    failed install can be diagnosed from the logs folder the teammate attaches.
 .PARAMETER MetadataUrl
     Forwarded to Get-PowerShell7MsiInfo. Parameterized for tests.
 .PARAMETER InstallTimeoutSeconds
-    Maximum seconds to wait for msiexec before killing it. The common cause of a long wait here is
-    another MSI install holding the Windows Installer mutex (msiexec 1618).
+    Maximum seconds to wait for one msiexec attempt before killing it. Another installation in
+    progress does not make msiexec wait (it returns 1618, see above), so reaching this limit means
+    msiexec itself hung.
+.PARAMETER MsiLogDirectory
+    Folder for msiexec's verbose logs, named pwsh-msi-<timestamp>-<attempt>.log. Empty: no msiexec
+    log. The caller passes the folder its own transcript is in, which this account can write to;
+    msiexec fails the whole install (1622) when it cannot open its log.
+.PARAMETER BusyRetryCount
+    How many times to retry after msiexec exit code 1618.
+.PARAMETER BusyRetryDelaySeconds
+    Seconds to wait before each of those retries.
 .RETURNS
     [bool] True when msiexec reported success. False sends the caller to the upstream script.
 #>
@@ -330,7 +351,13 @@ function Install-PowerShell7FromMsi {
         [Parameter(Mandatory = $false)]
         [string]$MetadataUrl = 'https://raw.githubusercontent.com/PowerShell/PowerShell/master/tools/metadata.json',
         [Parameter(Mandatory = $false)]
-        [int]$InstallTimeoutSeconds = 900
+        [int]$InstallTimeoutSeconds = 900,
+        [Parameter(Mandatory = $false)]
+        [string]$MsiLogDirectory,
+        [Parameter(Mandatory = $false)]
+        [int]$BusyRetryCount = 6,
+        [Parameter(Mandatory = $false)]
+        [int]$BusyRetryDelaySeconds = 30
     )
 
     $msiInfo = Get-PowerShell7MsiInfo -MetadataUrl $MetadataUrl
@@ -360,34 +387,58 @@ function Install-PowerShell7FromMsi {
         }
 
         Write-Info 'Installing PowerShell 7 (this takes about a minute)...'
-        $msiProcess = $null
-        try {
+        $attempt = 0
+        while ($true) {
+            $attempt = $attempt + 1
             # Quoted because the MSI path contains a GUID-named directory under the user's temp
             # path, which can sit under a profile directory containing spaces.
             $msiArguments = @('/i', ('"' + $msiPath + '"'), '/quiet', '/norestart')
-            $msiProcess = Start-Process -FilePath 'msiexec.exe' -ArgumentList $msiArguments -PassThru -ErrorAction Stop
-        }
-        catch {
-            Write-WarningMessage "msiexec could not be started: $_"
-            return $false
-        }
-        if (-not $msiProcess) {
-            Write-WarningMessage 'msiexec could not be started.'
-            return $false
-        }
+            $msiLogPath = $null
+            if ($MsiLogDirectory) {
+                $msiLogPath = Join-Path $MsiLogDirectory ('pwsh-msi-{0:yyyyMMdd-HHmmss}-{1}.log' -f (Get-Date), $attempt)
+                $msiArguments += @('/l*v', ('"' + $msiLogPath + '"'))
+                Write-Info ('  msiexec log: {0}' -f $msiLogPath)
+            }
 
-        if (-not $msiProcess.WaitForExit($InstallTimeoutSeconds * 1000)) {
-            try { $msiProcess.Kill() } catch { }
-            Write-WarningMessage ('The PowerShell 7 MSI install did not finish within {0} seconds and was stopped. Another installation may be holding the Windows Installer service.' -f $InstallTimeoutSeconds)
+            $msiProcess = $null
+            try {
+                $msiProcess = Start-Process -FilePath 'msiexec.exe' -ArgumentList $msiArguments -PassThru -ErrorAction Stop
+            }
+            catch {
+                Write-WarningMessage "msiexec could not be started: $_"
+                return $false
+            }
+            if (-not $msiProcess) {
+                Write-WarningMessage 'msiexec could not be started.'
+                return $false
+            }
+
+            if (-not $msiProcess.WaitForExit($InstallTimeoutSeconds * 1000)) {
+                try { $msiProcess.Kill() } catch { }
+                Write-WarningMessage ('The PowerShell 7 MSI install did not finish within {0} seconds and was stopped.' -f $InstallTimeoutSeconds)
+                return $false
+            }
+
+            $msiExitCode = $msiProcess.ExitCode
+            if ($msiExitCode -eq 0 -or $msiExitCode -eq 3010) {
+                return $true
+            }
+            if ($msiExitCode -eq 1618 -and $attempt -le $BusyRetryCount) {
+                Write-WarningMessage ('Windows Installer is busy with another installation (msiexec exit code 1618). Waiting {0} seconds before trying again (retry {1} of {2})...' -f $BusyRetryDelaySeconds, $attempt, $BusyRetryCount)
+                Start-Sleep -Seconds $BusyRetryDelaySeconds
+                continue
+            }
+            if ($msiExitCode -eq 1618) {
+                Write-WarningMessage ('The PowerShell 7 MSI install failed: Windows Installer was still busy with another installation after {0} retries (msiexec exit code 1618). Re-run the installer once that installation has finished.' -f $BusyRetryCount)
+            }
+            else {
+                Write-WarningMessage ('The PowerShell 7 MSI install failed (msiexec exit code {0}).' -f $msiExitCode)
+            }
+            if ($msiLogPath) {
+                Write-WarningMessage ('msiexec''s log of the failed attempt: {0}' -f $msiLogPath)
+            }
             return $false
         }
-
-        $msiExitCode = $msiProcess.ExitCode
-        if ($msiExitCode -eq 0 -or $msiExitCode -eq 3010) {
-            return $true
-        }
-        Write-WarningMessage ('The PowerShell 7 MSI install failed (msiexec exit code {0}).' -f $msiExitCode)
-        return $false
     }
     finally {
         Remove-Item -LiteralPath $downloadDirectory -Recurse -Force -ErrorAction SilentlyContinue
@@ -437,9 +488,14 @@ function Install-PowerShell7FromMsi {
 .PARAMETER InstallerUrl
     Raw URL the iex relaunch path re-downloads the installer from. Defaults to the canonical
     one-liner URL; parameterized for tests.
+.PARAMETER LogDirectory
+    The folder of the bootstrap transcript the tail started, or empty when it could not start one.
+    Forwarded to Install-PowerShell7FromMsi for msiexec's verbose log (review finding P2-13).
 .RETURNS
     [int] Exit code for the tail dispatch to propagate: the relaunched run's exit code, 0 for a
-    -WhatIf preview of a would-be install, or 1 when PowerShell 7 could not be provisioned.
+    -WhatIf preview of a would-be install, or 1 when PowerShell 7 could not be provisioned. Sets
+    $script:PowerShell7BootstrapRelaunched to $true once a relaunched PowerShell 7 run has ended,
+    so the tail knows that run already reported its outcome to whoever is at the console.
 #>
 function Invoke-PowerShell7Bootstrap {
     param (
@@ -452,8 +508,12 @@ function Invoke-PowerShell7Bootstrap {
         [Parameter(Mandatory = $false)]
         [string]$CommandPath,
         [Parameter(Mandatory = $false)]
-        [string]$InstallerUrl = 'https://raw.githubusercontent.com/J-MaFf/winget-app-setup/refs/heads/main/winget-app-install.ps1'
+        [string]$InstallerUrl = 'https://raw.githubusercontent.com/J-MaFf/winget-app-setup/refs/heads/main/winget-app-install.ps1',
+        [Parameter(Mandatory = $false)]
+        [string]$LogDirectory
     )
+
+    $script:PowerShell7BootstrapRelaunched = $false
 
     Write-WarningMessage 'This installer requires PowerShell 7+ (pwsh), but this session is Windows PowerShell. Handing off...'
 
@@ -543,7 +603,7 @@ function Invoke-PowerShell7Bootstrap {
             # stalled link is indistinguishable from the run having died. Doing the download here
             # makes progress visible and both steps time-bounded.
             Write-Info 'Falling back to the official PowerShell MSI installer...'
-            if (-not (Install-PowerShell7FromMsi)) {
+            if (-not (Install-PowerShell7FromMsi -MsiLogDirectory $LogDirectory)) {
                 Write-WarningMessage 'Falling back to the official installer script (https://aka.ms/install-powershell.ps1). It reports no download progress, so this step can run for several minutes with no output.'
                 try {
                     # -TimeoutSec bounds the script download itself; the script's own MSI download
@@ -633,5 +693,9 @@ function Invoke-PowerShell7Bootstrap {
         Write-ErrorMessage "PowerShell 7 could not be started ($pwshPath)."
         return 1
     }
+    $script:PowerShell7BootstrapRelaunched = $true
+    # Into the bootstrap transcript: a relaunched run that failed before it could start its own
+    # transcript (pwsh rejecting the arguments, a crash on load) leaves only this line behind.
+    Write-Info ('The PowerShell 7 run ended with exit code {0}.' -f $relaunchProcess.ExitCode)
     return $relaunchProcess.ExitCode
 }

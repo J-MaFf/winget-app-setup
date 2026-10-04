@@ -20,7 +20,13 @@ A one-line guide for running the installer.
 >    no copy of it. This path downloads ~110 MB and then runs `msiexec`, so expect a couple of
 >    minutes; it prints `X of 110.2 MB (N%)` progress lines throughout, and a stalled download
 >    fails with a message rather than waiting forever
->    ([#263](https://github.com/J-MaFf/winget-app-setup/issues/263)).
+>    ([#263](https://github.com/J-MaFf/winget-app-setup/issues/263)). When another installation
+>    is holding Windows Installer (`msiexec` exit code 1618, common on a freshly enrolled machine),
+>    it waits 30 seconds and tries again, up to 6 times. `msiexec` writes a verbose log next to the
+>    run's other logs (see [Logs](#logs)).
+>
+> The bootstrap phase writes its own transcript, `install-<timestamp>-bootstrap.log`, before
+> `pwsh` takes over and writes the run's main log.
 
 From the repository root, execute (after cloning):
 
@@ -84,15 +90,17 @@ own per-user cache and source-agreement state.
 The installer never asks a yes/no question on any path — elevation, the PowerShell 7 bootstrap,
 and low disk space all proceed without prompting, so the one-liner above can be run and left
 alone from a normal console. Pass `-NonInteractive` for RMM, CI, or scheduled-task use to also
-suppress the two interactive-only extras: the summary grid-view window and the final "press any
-key to exit":
+suppress the interactive-only extras: the summary grid-view window and the "press any key to exit"
+that holds the window at the end of a run or after an early failure (see [Logs](#logs)):
 
 ```powershell
 pwsh -ExecutionPolicy Unrestricted -File .\winget-app-install.ps1 -NonInteractive
 ```
 
 Non-interactive mode is also auto-detected when the session is non-interactive (e.g.
-`pwsh -NonInteractive`, services, scheduled tasks) or stdin is redirected.
+`pwsh -NonInteractive`, services, scheduled tasks) or stdin is redirected. Under CI (the `CI`,
+`GITHUB_ACTIONS` or `TF_BUILD` variable is set) an early failure never waits for a key press
+either.
 
 ### Exit codes
 
@@ -120,10 +128,43 @@ the log survives cross-user elevation and can be collected after a failed instal
 machine. If the transcript cannot be started, the installer warns and continues: logging never
 blocks an install.
 
+The same folder also holds:
+
+- `install-<yyyyMMdd-HHmmss>-bootstrap.log` — the Windows PowerShell 5.1 phase of a run started
+  from `powershell.exe`: finding or installing PowerShell 7 and relaunching under `pwsh`, ending
+  with the exit code the relaunched run returned.
+- `pwsh-msi-<yyyyMMdd-HHmmss>-<attempt>.log` — `msiexec`'s verbose log when the bootstrap installs
+  PowerShell 7 from the MSI.
+
+An elevated run gives standard users read access to the `logs` folder, so the log can be opened
+from the end user's own session after a cross-user elevated run. Installing Winget-AutoUpdate
+makes the parent `%ProgramData%\winget-app-setup` folder admin-only, so open the logs by their full
+path (for example, paste `C:\ProgramData\winget-app-setup\logs` into File Explorer's address
+bar).
+
 Each transcript begins with an `Installer build:` line carrying the content-derived build id
-(`<module version>+<8-char SHA256 fragment of the assembled functions>`) stamped by
+(`<module version>+<8-char SHA256 fragment of the whole generated script>`) stamped by
 `build/Build-WingetInstallScript.ps1`, so you can tell exactly which installer build produced a
-given log.
+given log. The summary and failure tables are written at full width, so long app lists and
+failure reasons are never cut off in the log.
+
+### When a run fails
+
+A run that stops early (a failed pre-flight check, winget missing, a declined elevation, a failed
+PowerShell 7 setup, an unexpected error) ends with one block: the exit code and why, the log file
+path, the installer build, and where to report it. When someone is at the console, it then waits
+for a key press, so the window does not close before you can read it (under `irm | iex` the run
+ends the PowerShell window it runs in). Unattended runs never wait.
+
+To report a failure, open an
+[install failure issue](https://github.com/J-MaFf/winget-app-setup/issues/new?template=install-failure.yml)
+with the exit code, the installer build and the log file.
+
+> **Privacy: this repository and its issues are public.** Every PowerShell transcript starts with a
+> header that names the computer, the signed-in account and the account that ran the installer
+> (`Username`, `RunAs User`, `Machine`). Delete that header, or replace the names in it, before
+> you paste or attach a log, and check the rest for account or computer names. If a log cannot be
+> shared publicly, send it to the maintainer privately.
 
 ## Automatic updates
 
@@ -280,10 +321,12 @@ guards, most of which run in both build and `-Check` modes of
    comments are exempt because misdecoded bytes there cannot change tokenization
    ([#210](https://github.com/J-MaFf/winget-app-setup/issues/210)).
 6. **Content-derived build id** — the banner and `$script:InstallerBuildId` are stamped with
-   `<module version>+<8-hex SHA256 fragment of the assembled functions>`, derived from content
-   only (never git metadata or timestamps) so rebuilding the same tree is byte-identical and
-   the `-Check` byte-compare stays deterministic; transcripts log the id at startup so a log
-   identifies the exact installer build ([#189](https://github.com/J-MaFf/winget-app-setup/issues/189)).
+   `<module version>+<8-hex SHA256 fragment of the whole generated script>` (hashed with the id
+   slots blanked, so a change to `build/fragments/head.ps1` or `tail.ps1` changes the id too),
+   derived from content only (never git metadata or timestamps) so rebuilding the same tree is
+   byte-identical and the `-Check` byte-compare stays deterministic; transcripts log the id at
+   startup so a log identifies the exact installer build
+   ([#189](https://github.com/J-MaFf/winget-app-setup/issues/189)).
 7. **CI enforcement** — `.github/workflows/windows-tests.yml` runs `-Check` on every push to
    `main` and on every pull request, so drift fails CI instead of shipping
    ([#156](https://github.com/J-MaFf/winget-app-setup/issues/156)).

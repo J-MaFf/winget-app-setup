@@ -15,17 +15,131 @@
     this marker set, and is then reported as exit code 5 instead of 0. Like a bare `exit`, this ends
     the whole script (and, under irm | iex, the host process), so module functions never call it:
     Invoke-WingetInstall returns its exit code and the entry script exits with it.
+
+    A failed run that has not shown its outcome yet - an early exit, such as a failed pre-flight
+    check, winget missing, a declined elevation, a failed PowerShell 7 bootstrap or an aborted run -
+    first prints Write-InstallerExitNotice: the reason, the log path and the build id, then waits
+    for a key press when someone is at the console (review finding P2-14). Under irm | iex the exit
+    closes the window, which used to take the error and the log path with it before anyone could
+    read them. Runs under Windows PowerShell 5.1 too (the bootstrap phase), so it stays
+    5.1-runtime compatible.
 .PARAMETER Code
     The process exit code. Default 0.
+.PARAMETER Reason
+    What stopped the run, when the caller knows more than the exit code says. Optional.
+.PARAMETER NonInteractive
+    The caller's -NonInteractive switch: no key press is awaited.
+.PARAMETER OutcomeShown
+    The run already showed its outcome and waited for a key press (Invoke-WingetInstall's summary
+    and final prompt, or a PowerShell 7 run the bootstrap relaunched), so exit without the notice.
 #>
 function Exit-Installer {
     param (
         [Parameter(Mandatory = $false)]
-        [int]$Code = 0
+        [int]$Code = 0,
+        [Parameter(Mandatory = $false)]
+        [string]$Reason,
+        [Parameter(Mandatory = $false)]
+        [switch]$NonInteractive,
+        [Parameter(Mandatory = $false)]
+        [switch]$OutcomeShown
     )
 
+    if ($Code -ne 0 -and -not $OutcomeShown) {
+        # Recorded before the key press: Ctrl+C there still ends the run with this code, through the
+        # entry script's abort guard, instead of as an abort (5).
+        $script:InstallerPendingExitCode = $Code
+        try {
+            Write-InstallerExitNotice -Code $Code -Reason $Reason -NonInteractive:$NonInteractive
+        }
+        catch {
+            # The notice is a courtesy; nothing may keep the run from exiting with its code.
+        }
+    }
     $script:InstallerExitRequested = $true
     exit $Code
+}
+
+<#
+.SYNOPSIS
+    Prints why the installer is stopping early, where its log is and which build ran, then waits for
+    a key press when someone is at the console.
+.DESCRIPTION
+    Review findings P2-14 and P3-15. A teammate who runs the irm | iex one-liner in an elevated
+    console files a GitHub issue when a run fails. Every early exit used to print one red line and
+    close the window at once, so the issue said only that the window closed. This prints, in one
+    block: the exit code with the caller's reason (or what the code means), the log file path, the
+    installer build id and where to report the failure, with a privacy note (the repository is
+    public, and a transcript header names the computer and the accounts). Then it waits for a key
+    press, unless the run is non-interactive (Test-EffectiveNonInteractive) or under CI
+    (Test-IsContinuousIntegration), so an unattended or RMM run never blocks.
+
+    Runs under Windows PowerShell 5.1 too (the bootstrap phase): 5.1-runtime compatible only.
+.PARAMETER Code
+    The exit code the run is about to end with.
+.PARAMETER Reason
+    What stopped the run, when the caller knows more than the exit code says. Optional.
+.PARAMETER NonInteractive
+    The caller's -NonInteractive switch: no key press is awaited.
+.PARAMETER NoPause
+    Print the notice without waiting for a key press (the console stays open anyway).
+#>
+function Write-InstallerExitNotice {
+    param (
+        [Parameter(Mandatory = $true)]
+        [int]$Code,
+        [Parameter(Mandatory = $false)]
+        [string]$Reason,
+        [Parameter(Mandatory = $false)]
+        [switch]$NonInteractive,
+        [Parameter(Mandatory = $false)]
+        [switch]$NoPause
+    )
+
+    # What the code means for a run that stopped early. Without a reason from the caller, this is
+    # the line under the specific error the run printed just above.
+    $why = $Reason
+    if (-not $why) {
+        switch ($Code) {
+            1 { $why = 'administrator rights were not available, a pre-flight check failed, or PowerShell 7 could not be set up (see above)' }
+            2 { $why = 'winget is not available or could not be started (see above)' }
+            3 { $why = 'the app catalog failed validation (see above)' }
+            5 { $why = 'the run was aborted before it finished (see above)' }
+        }
+    }
+
+    Write-Host ''
+    if ($why) {
+        Write-ErrorMessage ('The installer stopped early with exit code {0}: {1}.' -f $Code, $why)
+    }
+    else {
+        Write-ErrorMessage ('The installer stopped early with exit code {0}.' -f $Code)
+    }
+    if ($script:InstallLogPath) {
+        Write-Info "Log file: $script:InstallLogPath"
+    }
+    else {
+        Write-WarningMessage 'Log file: none - the transcript could not be started (see the warning at the start of the run).'
+    }
+    if ($script:InstallerBuildId) {
+        Write-Info "Installer build: $script:InstallerBuildId"
+    }
+    Write-Info 'To report this, open https://github.com/J-MaFf/winget-app-setup/issues/new?template=install-failure.yml and give the exit code, the installer build and the log file.'
+    Write-WarningMessage 'That repository is public, and the log names this computer and the accounts that ran the installer: remove or redact the log''s header before attaching it.'
+
+    if ($NoPause) {
+        return
+    }
+    if ((Test-EffectiveNonInteractive -NonInteractive:$NonInteractive) -or (Test-IsContinuousIntegration)) {
+        return
+    }
+    Write-Prompt 'Press any key to exit...'
+    try {
+        [void][System.Console]::ReadKey($true)
+    }
+    catch {
+        # No console to read a key from after all: nothing to wait for.
+    }
 }
 
 <#

@@ -29,15 +29,23 @@ an E2E run on this branch confirms it. `Invoke-WingetInstall` now returns its ex
 calling `exit`, so the tests run every exit path and assert the code instead of matching regexes
 over the source, and no test depends on whether the runner is elevated (they mock `Test-IsAdmin`;
 the #232 regression tests had never run on the elevated CI runner). The Pester suite now also runs
-on Linux, with 1 known failure instead of 113, and no test dot-sources the generated installer any
-more, so the unit tests exercise the module source being edited (EntryPoint, AppCatalog and
-Interactivity tests still read or run the generated file itself, on purpose). The build's `-Check`
-now also rejects syntax that only PowerShell 7 parses and runs the undefined-reference guards on
-Linux and macOS, the pre-commit hook checks the staged files instead of the working tree, and a
-catalog name must match the whole package-id pattern, so trailing text such as `--override` can no
-longer reach winget. A `-WhatIf` dry run no longer changes the machine: its module, winget,
+on Linux with no known failures (there were 113; the last one, the `Write-Table` console test, went
+with the full-width table fix), and no test dot-sources the generated installer any more, so the
+unit tests exercise the module source being edited (EntryPoint, AppCatalog and Interactivity tests
+still read or run the generated file itself, on purpose). The build's `-Check` now also rejects
+syntax that only PowerShell 7 parses and runs the undefined-reference guards on Linux and macOS,
+the pre-commit hook checks the staged files instead of the working tree, and a catalog name must
+match the whole package-id pattern, so trailing text such as `--override` can no longer reach
+winget. A `-WhatIf` dry run no longer changes the machine: its module, winget,
 Out-GridView and source setup steps only check and print what a real run would fix, where they used
-to install modules for all users, set up App Installer and reset winget's sources.
+to install modules for all users, set up App Installer and reset winget's sources. A failed run is
+now debuggable from what the teammate attaches: an early exit prints the exit code and why, the log
+path and the build id, and waits for a key press when someone is at the console instead of closing
+the `irm | iex` window at once; the Windows PowerShell 5.1 bootstrap writes its own
+`-bootstrap.log` (plus an `msiexec` log, with a retry when another installation holds Windows
+Installer); the `logs` folder stays readable for standard users after the WAU install; tables are
+no longer cut off at 120 columns; the build id covers the whole script; and an issue form asks for
+the exit code, the build and the log, with a privacy note because the repository is public.
 
 In progress: **E2E: App Installer 1.29.290.0 vs 1.26.510.0 AppX conflict, missing
 WindowsAppRuntime.1.8** ([#279](https://github.com/J-MaFf/winget-app-setup/issues/279)) — two

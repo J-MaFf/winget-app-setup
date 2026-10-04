@@ -330,10 +330,87 @@ Describe 'Install-PowerShell7FromMsi' {
     }
 
     It 'Returns $false on a nonzero msiexec exit code' {
-        $script:msiExitCode = 1618
+        $script:msiExitCode = 1603
 
         Install-PowerShell7FromMsi | Should -Be $false
-        Should -Invoke Write-WarningMessage -Times 1 -ParameterFilter { $Message -match '1618' }
+        Should -Invoke Write-WarningMessage -Times 1 -ParameterFilter { $Message -match 'exit code 1603' }
+        Should -Invoke Start-Process -Times 1 -Exactly -ParameterFilter { $FilePath -eq 'msiexec.exe' }
+    }
+
+    Context 'Another installation in progress: msiexec 1618 (review finding P2-13)' {
+        BeforeEach {
+            Mock Start-Sleep { }
+        }
+
+        It 'Waits and retries while Windows Installer is busy, then succeeds' {
+            # msiexec returns 1618 at once when another installation holds Windows Installer, as on
+            # a freshly enrolled machine whose agents are still installing. One busy moment used to
+            # fail the bootstrap outright.
+            $script:msiExitCodes = [System.Collections.Generic.Queue[int]]::new([int[]]@(1618, 1618, 0))
+            $script:msiProcess | Add-Member -MemberType ScriptProperty -Name ExitCode -Force -Value { $script:msiExitCodes.Dequeue() }
+
+            Install-PowerShell7FromMsi -BusyRetryCount 6 -BusyRetryDelaySeconds 30 | Should -Be $true
+
+            Should -Invoke Start-Process -Times 3 -Exactly -ParameterFilter { $FilePath -eq 'msiexec.exe' }
+            Should -Invoke Start-Sleep -Times 2 -Exactly -ParameterFilter { $Seconds -eq 30 }
+            Should -Invoke Write-WarningMessage -Times 2 -Exactly -ParameterFilter { $Message -match 'busy with another installation \(msiexec exit code 1618\)' }
+        }
+
+        It 'Gives up after the retry budget and says why' {
+            $script:msiExitCode = 1618
+
+            Install-PowerShell7FromMsi -BusyRetryCount 2 -BusyRetryDelaySeconds 1 | Should -Be $false
+
+            Should -Invoke Start-Process -Times 3 -Exactly -ParameterFilter { $FilePath -eq 'msiexec.exe' }
+            Should -Invoke Start-Sleep -Times 2 -Exactly
+            Should -Invoke Write-WarningMessage -Times 1 -Exactly -ParameterFilter { $Message -match 'still busy with another installation after 2 retries' }
+        }
+
+        It 'Does not retry any other failure' {
+            $script:msiExitCode = 1603
+
+            Install-PowerShell7FromMsi | Should -Be $false
+
+            Should -Invoke Start-Process -Times 1 -Exactly -ParameterFilter { $FilePath -eq 'msiexec.exe' }
+            Should -Invoke Start-Sleep -Times 0 -Exactly
+        }
+    }
+
+    Context 'msiexec log (review finding P2-13)' {
+        It 'Writes a verbose msiexec log, one file per attempt, into the given folder' {
+            Mock Start-Sleep { }
+            $logDirectory = Join-Path $TestDrive 'logs'
+            $script:msiExitCodes = [System.Collections.Generic.Queue[int]]::new([int[]]@(1618, 0))
+            $script:msiProcess | Add-Member -MemberType ScriptProperty -Name ExitCode -Force -Value { $script:msiExitCodes.Dequeue() }
+            $script:msiLogArguments = @()
+            Mock Start-Process {
+                $logIndex = [array]::IndexOf([string[]]$ArgumentList, '/l*v')
+                $script:msiLogArguments += $(if ($logIndex -ge 0) { $ArgumentList[$logIndex + 1] } else { '<none>' })
+                $script:msiProcess
+            } -ParameterFilter { $FilePath -eq 'msiexec.exe' }
+
+            Install-PowerShell7FromMsi -MsiLogDirectory $logDirectory | Should -Be $true
+
+            $script:msiLogArguments.Count | Should -Be 2
+            $script:msiLogArguments[0] | Should -BeLike ('"' + (Join-Path $logDirectory 'pwsh-msi-*-1.log') + '"')
+            $script:msiLogArguments[1] | Should -BeLike ('"' + (Join-Path $logDirectory 'pwsh-msi-*-2.log') + '"')
+        }
+
+        It 'Names the log of a failed attempt' {
+            $script:msiExitCode = 1603
+
+            Install-PowerShell7FromMsi -MsiLogDirectory (Join-Path $TestDrive 'logs') | Should -Be $false
+
+            Should -Invoke Write-WarningMessage -Times 1 -Exactly -ParameterFilter { $Message -match 'log of the failed attempt: .*pwsh-msi-.*-1\.log' }
+        }
+
+        It 'Asks msiexec for no log without a folder (it fails the install when it cannot write one)' {
+            Install-PowerShell7FromMsi | Should -Be $true
+
+            Should -Invoke Start-Process -Times 1 -Exactly -ParameterFilter {
+                $FilePath -eq 'msiexec.exe' -and -not ($ArgumentList -contains '/l*v')
+            }
+        }
     }
 
     It 'Kills msiexec and returns $false when the install outruns the timeout' {
@@ -478,6 +555,15 @@ Describe 'Invoke-PowerShell7Bootstrap' {
             Should -Invoke Write-ErrorMessage -Times 1 -ParameterFilter { $Message -match 're-entered' }
         }
 
+        It 'Records that the relaunched run reported its own outcome, and logs its exit code (review finding P2-14)' {
+            $script:PowerShell7BootstrapRelaunched = $false
+
+            Invoke-PowerShell7Bootstrap -CommandPath 'C:\repo\winget-app-install.ps1' | Out-Null
+
+            $script:PowerShell7BootstrapRelaunched | Should -BeTrue
+            Should -Invoke Write-Info -Times 1 -Exactly -ParameterFilter { $Message -eq 'The PowerShell 7 run ended with exit code 42.' }
+        }
+
         It 'Returns 1 instead of a false success when the pwsh launch itself fails' {
             # Under 5.1 a Start-Process failure is non-terminating: without the production
             # try/catch the result would be $null and the tail's exit ($null) would report 0.
@@ -487,6 +573,8 @@ Describe 'Invoke-PowerShell7Bootstrap' {
 
             $result | Should -Be 1
             Should -Invoke Write-ErrorMessage -Times 1 -ParameterFilter { $Message -match 'could not be started' }
+            # Nothing ran, so the tail must report this failure itself.
+            $script:PowerShell7BootstrapRelaunched | Should -BeFalse
         }
     }
 
@@ -628,6 +716,14 @@ Describe 'Invoke-PowerShell7Bootstrap' {
             $result | Should -Be 0
             Should -Invoke Install-PowerShell7FromMsi -Times 1 -Exactly
             Should -Invoke Invoke-RestMethod -Times 0 -ParameterFilter { $Uri -like '*install-powershell*' }
+        }
+
+        It 'Hands the bootstrap log folder to the MSI install for msiexec''s log (review finding P2-13)' {
+            Mock Install-PowerShell7FromMsi { $true }
+
+            Invoke-PowerShell7Bootstrap -CommandPath 'C:\repo\winget-app-install.ps1' -LogDirectory 'C:\ProgramData\winget-app-setup\logs' | Out-Null
+
+            Should -Invoke Install-PowerShell7FromMsi -Times 1 -Exactly -ParameterFilter { $MsiLogDirectory -eq 'C:\ProgramData\winget-app-setup\logs' }
         }
 
         It 'Falls through to the upstream script only when the direct path fails' {

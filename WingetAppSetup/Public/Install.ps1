@@ -155,8 +155,9 @@ function Invoke-WingetInstall {
             Write-ErrorMessage 'This script requires administrator privileges.'
             Write-ErrorMessage 'Auto-elevation is unavailable when running through IEX/remote execution.'
             Write-Info 'Open an elevated PowerShell or Windows Terminal session and run the IEX command again.'
-            Write-Info 'Exiting in 5 seconds...'
-            Start-Sleep -Seconds 5
+            # No 'Exiting in 5 seconds' sleep any more: the entry script's Exit-Installer prints the
+            # log path and build id and, when someone is at the console, waits for a key press
+            # before the window closes (review finding P2-14).
             return 1
         }
     }

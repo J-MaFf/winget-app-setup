@@ -38,10 +38,11 @@
 
 .PARAMETER NonInteractive
  Suppresses the interactive extras for unattended runs (RMM, CI, scheduled tasks): the summary
- grid-view window and the final "press any key to exit". Also auto-detected when the session is
- non-interactive or stdin is redirected. The installer asks no yes/no questions on any path (issue
- #230), so this switch is only about those two extras - it is not needed to keep a run from
- blocking on a prompt.
+ grid-view window and the "press any key to exit" that holds the window at the end of a run or
+ after an early failure. Also auto-detected when the session is non-interactive or stdin is
+ redirected; under CI the early-failure key press is skipped too. The installer asks no yes/no
+ questions on any path (issue #230), so this switch is only about those extras - it is not needed
+ to keep a run from blocking on a prompt.
 #>
 
 param (
@@ -58,12 +59,12 @@ param (
 # This script is assembled from the WingetAppSetup module by build/Build-WingetInstallScript.ps1.
 # Edit the function source under WingetAppSetup/Public and WingetAppSetup/Private, then re-run the
 # build to regenerate this file. See readme.md ("Project layout") for details.
-# Build id: 1.0.0+7beffbdc (module version + SHA256 fragment of the function content; issue #189).
+# Build id: 1.0.0+f2f663f3 (module version + SHA256 fragment of this whole script; issue #189).
 # ------------------------------------------------------------------------------------------------
 
 # Content-derived build identity, logged at startup so a transcript from a remote machine
 # identifies exactly which installer build produced it (issue #189).
-$script:InstallerBuildId = '1.0.0+7beffbdc'
+$script:InstallerBuildId = '1.0.0+f2f663f3'
 
 # ------------------------------------------------Functions------------------------------------------------
 
@@ -202,17 +203,131 @@ function Get-CurrentWindowsPrincipal {
     this marker set, and is then reported as exit code 5 instead of 0. Like a bare `exit`, this ends
     the whole script (and, under irm | iex, the host process), so module functions never call it:
     Invoke-WingetInstall returns its exit code and the entry script exits with it.
+
+    A failed run that has not shown its outcome yet - an early exit, such as a failed pre-flight
+    check, winget missing, a declined elevation, a failed PowerShell 7 bootstrap or an aborted run -
+    first prints Write-InstallerExitNotice: the reason, the log path and the build id, then waits
+    for a key press when someone is at the console (review finding P2-14). Under irm | iex the exit
+    closes the window, which used to take the error and the log path with it before anyone could
+    read them. Runs under Windows PowerShell 5.1 too (the bootstrap phase), so it stays
+    5.1-runtime compatible.
 .PARAMETER Code
     The process exit code. Default 0.
+.PARAMETER Reason
+    What stopped the run, when the caller knows more than the exit code says. Optional.
+.PARAMETER NonInteractive
+    The caller's -NonInteractive switch: no key press is awaited.
+.PARAMETER OutcomeShown
+    The run already showed its outcome and waited for a key press (Invoke-WingetInstall's summary
+    and final prompt, or a PowerShell 7 run the bootstrap relaunched), so exit without the notice.
 #>
 function Exit-Installer {
     param (
         [Parameter(Mandatory = $false)]
-        [int]$Code = 0
+        [int]$Code = 0,
+        [Parameter(Mandatory = $false)]
+        [string]$Reason,
+        [Parameter(Mandatory = $false)]
+        [switch]$NonInteractive,
+        [Parameter(Mandatory = $false)]
+        [switch]$OutcomeShown
     )
 
+    if ($Code -ne 0 -and -not $OutcomeShown) {
+        # Recorded before the key press: Ctrl+C there still ends the run with this code, through the
+        # entry script's abort guard, instead of as an abort (5).
+        $script:InstallerPendingExitCode = $Code
+        try {
+            Write-InstallerExitNotice -Code $Code -Reason $Reason -NonInteractive:$NonInteractive
+        }
+        catch {
+            # The notice is a courtesy; nothing may keep the run from exiting with its code.
+        }
+    }
     $script:InstallerExitRequested = $true
     exit $Code
+}
+
+<#
+.SYNOPSIS
+    Prints why the installer is stopping early, where its log is and which build ran, then waits for
+    a key press when someone is at the console.
+.DESCRIPTION
+    Review findings P2-14 and P3-15. A teammate who runs the irm | iex one-liner in an elevated
+    console files a GitHub issue when a run fails. Every early exit used to print one red line and
+    close the window at once, so the issue said only that the window closed. This prints, in one
+    block: the exit code with the caller's reason (or what the code means), the log file path, the
+    installer build id and where to report the failure, with a privacy note (the repository is
+    public, and a transcript header names the computer and the accounts). Then it waits for a key
+    press, unless the run is non-interactive (Test-EffectiveNonInteractive) or under CI
+    (Test-IsContinuousIntegration), so an unattended or RMM run never blocks.
+
+    Runs under Windows PowerShell 5.1 too (the bootstrap phase): 5.1-runtime compatible only.
+.PARAMETER Code
+    The exit code the run is about to end with.
+.PARAMETER Reason
+    What stopped the run, when the caller knows more than the exit code says. Optional.
+.PARAMETER NonInteractive
+    The caller's -NonInteractive switch: no key press is awaited.
+.PARAMETER NoPause
+    Print the notice without waiting for a key press (the console stays open anyway).
+#>
+function Write-InstallerExitNotice {
+    param (
+        [Parameter(Mandatory = $true)]
+        [int]$Code,
+        [Parameter(Mandatory = $false)]
+        [string]$Reason,
+        [Parameter(Mandatory = $false)]
+        [switch]$NonInteractive,
+        [Parameter(Mandatory = $false)]
+        [switch]$NoPause
+    )
+
+    # What the code means for a run that stopped early. Without a reason from the caller, this is
+    # the line under the specific error the run printed just above.
+    $why = $Reason
+    if (-not $why) {
+        switch ($Code) {
+            1 { $why = 'administrator rights were not available, a pre-flight check failed, or PowerShell 7 could not be set up (see above)' }
+            2 { $why = 'winget is not available or could not be started (see above)' }
+            3 { $why = 'the app catalog failed validation (see above)' }
+            5 { $why = 'the run was aborted before it finished (see above)' }
+        }
+    }
+
+    Write-Host ''
+    if ($why) {
+        Write-ErrorMessage ('The installer stopped early with exit code {0}: {1}.' -f $Code, $why)
+    }
+    else {
+        Write-ErrorMessage ('The installer stopped early with exit code {0}.' -f $Code)
+    }
+    if ($script:InstallLogPath) {
+        Write-Info "Log file: $script:InstallLogPath"
+    }
+    else {
+        Write-WarningMessage 'Log file: none - the transcript could not be started (see the warning at the start of the run).'
+    }
+    if ($script:InstallerBuildId) {
+        Write-Info "Installer build: $script:InstallerBuildId"
+    }
+    Write-Info 'To report this, open https://github.com/J-MaFf/winget-app-setup/issues/new?template=install-failure.yml and give the exit code, the installer build and the log file.'
+    Write-WarningMessage 'That repository is public, and the log names this computer and the accounts that ran the installer: remove or redact the log''s header before attaching it.'
+
+    if ($NoPause) {
+        return
+    }
+    if ((Test-EffectiveNonInteractive -NonInteractive:$NonInteractive) -or (Test-IsContinuousIntegration)) {
+        return
+    }
+    Write-Prompt 'Press any key to exit...'
+    try {
+        [void][System.Console]::ReadKey($true)
+    }
+    catch {
+        # No console to read a key from after all: nothing to wait for.
+    }
 }
 
 <#
@@ -579,10 +694,11 @@ function Install-AppWithVerification {
     Determines whether the current run has a human at the console.
 .DESCRIPTION
     Single source of truth for the effective non-interactive detection (issues #176, #214). Since
-    issue #230 this gates no prompt — there are none left — and its only caller is
-    Invoke-WingetInstall, which uses it for the two things that still depend on a human being
-    present: whether to open the summary grid view, and whether to hold the window with "press any
-    key to exit".
+    issue #230 this gates no prompt — there are none left — only the things that still depend on a
+    human being present: whether Invoke-WingetInstall opens the summary grid view and holds the
+    window with "press any key to exit", whether Write-InstallerExitNotice holds it the same way
+    before an early exit (review finding P2-14), and whether the entry script forces an exit code
+    after an abort.
 
     Note what it deliberately does NOT catch: an interactive `irm <url> | iex` reports INTERACTIVE
     here, because the pipe is a PowerShell-internal pipeline and leaves the process's stdin alone.
@@ -619,6 +735,28 @@ function Test-EffectiveNonInteractive {
         # No usable console to probe: treat as non-interactive rather than risk a blocked prompt.
         return $true
     }
+}
+
+<#
+.SYNOPSIS
+    Determines whether the run is under a CI system.
+.DESCRIPTION
+    Used by Write-InstallerExitNotice so a failed early exit never waits for a key press on a CI
+    runner, even where the runner's console looks interactive. Checks the variables CI systems set:
+    CI (GitHub Actions, GitLab, Azure Pipelines' agents and most others), GITHUB_ACTIONS and TF_BUILD
+    (Azure Pipelines). A CI value of 'false' or '0' does not count. Runs under Windows PowerShell 5.1
+    too.
+.RETURNS
+    [bool] True under CI.
+#>
+function Test-IsContinuousIntegration {
+    if ($env:CI -and $env:CI -ne 'false' -and $env:CI -ne '0') {
+        return $true
+    }
+    if ($env:GITHUB_ACTIONS -eq 'true' -or $env:TF_BUILD -eq 'True') {
+        return $true
+    }
+    return $false
 }
 
 # --- Jsonc ---
@@ -814,9 +952,10 @@ function ConvertFrom-TerminalSettingsJson {
 }
 
 # --- LoggingInternal ---
-# Logging helpers used only by module functions (issue #191). The externally consumed logging
-# primitives (Write-Info/Success/WarningMessage/ErrorMessage, Format-AppList, Write-Table) live
-# in Public/Logging.ps1 because winget-app-uninstall.ps1 imports them through the manifest.
+# Logging helpers used only by module functions and the generated entry script (issue #191). The
+# externally consumed logging primitives (Write-Info/Success/WarningMessage/ErrorMessage,
+# Format-AppList, Write-Table) live in Public/Logging.ps1 because winget-app-uninstall.ps1 imports
+# them through the manifest.
 
 <#
 .SYNOPSIS
@@ -832,6 +971,118 @@ function Write-Prompt {
         [string]$Message
     )
     Write-Host $Message -ForegroundColor Blue
+}
+
+<#
+.SYNOPSIS
+    Starts the run's transcript under %ProgramData%\winget-app-setup\logs and returns its path.
+.DESCRIPTION
+    Persistent transcript (issue #189): a failed install on a remote user's machine used to leave
+    zero artifacts. The log lands under ProgramData - not the elevating account's TEMP - so it
+    survives cross-user elevation and stays findable afterwards. Logging must never block an
+    install: any failure here downgrades to a warning and the run continues untranscribed.
+
+    Called by the generated entry script for both phases of a run: the Windows PowerShell 5.1
+    bootstrap (-Bootstrap, review finding P2-13), whose PowerShell 7 install used to leave no log
+    at all, and the PowerShell 7 run itself. Runs under Windows PowerShell 5.1, so it must stay
+    5.1-runtime compatible (see WingetAppSetup/Private/PowerShell7Bootstrap.ps1).
+
+    Once the transcript is running, the log folder is made readable for standard users
+    (Grant-InstallLogReadAccess, review finding P3-14), so the log can be opened from the end
+    user's own session after a cross-user elevated run.
+.PARAMETER WhatIf
+    A dry run: the file name gets a -whatif suffix, so dry-run transcripts are never mistaken for
+    real install logs.
+.PARAMETER Bootstrap
+    The Windows PowerShell 5.1 bootstrap phase: the file name gets a -bootstrap suffix. The
+    PowerShell 7 run it relaunches writes its own transcript next to it.
+.RETURNS
+    [string] The transcript path, or $null when the transcript could not be started.
+#>
+function Start-InstallerTranscript {
+    param (
+        [Parameter(Mandatory = $false)]
+        [switch]$WhatIf,
+        [Parameter(Mandatory = $false)]
+        [switch]$Bootstrap
+    )
+
+    $phaseSuffix = ''
+    if ($Bootstrap) {
+        $phaseSuffix = '-bootstrap'
+    }
+    $whatIfSuffix = ''
+    if ($WhatIf) {
+        $whatIfSuffix = '-whatif'
+    }
+    try {
+        $logDirectory = Join-Path $env:ProgramData 'winget-app-setup\logs'
+        if (-not (Test-Path -LiteralPath $logDirectory)) {
+            [void](New-Item -Path $logDirectory -ItemType Directory -Force -ErrorAction Stop)
+        }
+        $logPath = Join-Path $logDirectory ('install-{0:yyyyMMdd-HHmmss}{1}{2}.log' -f (Get-Date), $phaseSuffix, $whatIfSuffix)
+        [void](Start-Transcript -Path $logPath -ErrorAction Stop)
+    }
+    catch {
+        Write-WarningMessage "Transcript logging could not be started: $_. Continuing without a log file."
+        return $null
+    }
+
+    # After Start-Transcript, so a failure to change the folder's ACL is in the log too; the grant
+    # is inheritable, so the transcript file already created inside the folder picks it up.
+    [void](Grant-InstallLogReadAccess -Path $logDirectory)
+    return $logPath
+}
+
+<#
+.SYNOPSIS
+    Lets standard users read the installer's log folder (and the logs inside it).
+.DESCRIPTION
+    Review finding P3-14. Installing Winget-AutoUpdate restricts %ProgramData%\winget-app-setup to
+    SYSTEM and Administrators (New-WauStagingDirectory, issue #186), and that inheritance-removing
+    ACL reaches the logs folder beneath it. From then on the teammate who elevated as an admin on
+    the end user's machine got Access Denied opening the log from the end user's own session, which
+    is where they file the GitHub issue from.
+
+    This adds an explicit, inheritable read-and-execute grant for BUILTIN\Users (well-known SID
+    S-1-5-32-545, so it works on non-English Windows) on the logs folder only. Explicit entries are
+    kept when the parent's inheritable entries change, so the grant survives that restriction, and
+    every elevated run re-applies it, which also repairs machines restricted by an earlier run. The
+    WAU staging directory's lockdown is untouched: it is a sibling folder with its own ACL, and the
+    grant gives no write access. The parent stays unlistable for standard users, so they open the
+    log by its full path, which the installer prints.
+
+    Only an elevated process changes the ACL: a non-elevated first launch could not change an admin-
+    created folder, and the elevated run it starts does it instead. Best-effort: a failure warns and
+    the run continues. Runs under Windows PowerShell 5.1 too (the bootstrap transcript).
+.PARAMETER Path
+    The log folder.
+.RETURNS
+    [bool] True when the grant was applied.
+#>
+function Grant-InstallLogReadAccess {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    if (-not (Test-IsAdmin)) {
+        return $false
+    }
+    try {
+        # -WindowStyle Hidden, not -NoNewWindow: icacls prints a 'processed file' line per folder,
+        # which would otherwise land on the console of every run.
+        $icaclsArgs = '"{0}" /grant *S-1-5-32-545:(OI)(CI)RX' -f $Path
+        $proc = Start-Process -FilePath 'icacls.exe' -ArgumentList $icaclsArgs -Wait -PassThru -WindowStyle Hidden -ErrorAction Stop
+        if ($proc.ExitCode -eq 0) {
+            return $true
+        }
+        Write-WarningMessage ("Could not make the log folder readable for standard users (icacls exit code {0}). Open the log from an elevated session." -f $proc.ExitCode)
+    }
+    catch {
+        Write-WarningMessage "Could not make the log folder readable for standard users: $_. Open the log from an elevated session."
+    }
+    return $false
 }
 
 # --- PackageIdValidation ---
@@ -914,7 +1165,11 @@ function Test-WingetListOutputContainsPackageId {
 # try/catch and a type cast, issue #239), Get-WingetAgreementArgs (a literal array,
 # Private/WingetAgreementArgs.ps1, issue #240), and this file's own
 # Get-PowerShell7MsiInfo/Save-WebFileWithTimeout/Install-PowerShell7FromMsi (issue #263) and
-# Test-GitHubRateLimitError (issue #274). Check any function added to this list - or any
+# Test-GitHubRateLimitError (issue #274). The tail's 5.1 branch also calls, around this file:
+# Test-EffectiveNonInteractive and Test-IsContinuousIntegration (Private/Interactivity.ps1),
+# Start-InstallerTranscript, Grant-InstallLogReadAccess and Write-Prompt (Private/LoggingInternal.ps1),
+# and Exit-Installer and Write-InstallerExitNotice (Private/FailureReporting.ps1) - review findings
+# P2-13/P2-14/P3-14. Check any function added to this list - or any
 # future edit to one already on it - against the same constraints before calling it from here; the
 # build's parse + ASCII guards only catch a parse-breaking token, not a PS7-only runtime construct
 # that still parses under 5.1 but behaves differently or throws. The build's parse + ASCII guards
@@ -1223,11 +1478,28 @@ function Save-WebFileWithTimeout {
 
     Exit code 3010 (ERROR_SUCCESS_REBOOT_REQUIRED) counts as success: pwsh.exe is on disk and
     launchable at that point, and the relaunch does not need the pending reboot.
+
+    Exit code 1618 (ERROR_INSTALL_ALREADY_RUNNING) is retried after a wait (review finding P2-13).
+    msiexec returns it at once, without waiting, whenever another installation holds the Windows
+    Installer - common on a freshly enrolled machine whose management agent, OEM tools or Teams are
+    still installing. It used to fail the bootstrap on the spot.
+
+    With -MsiLogDirectory, msiexec writes a verbose log (/l*v) there, one file per attempt, so a
+    failed install can be diagnosed from the logs folder the teammate attaches.
 .PARAMETER MetadataUrl
     Forwarded to Get-PowerShell7MsiInfo. Parameterized for tests.
 .PARAMETER InstallTimeoutSeconds
-    Maximum seconds to wait for msiexec before killing it. The common cause of a long wait here is
-    another MSI install holding the Windows Installer mutex (msiexec 1618).
+    Maximum seconds to wait for one msiexec attempt before killing it. Another installation in
+    progress does not make msiexec wait (it returns 1618, see above), so reaching this limit means
+    msiexec itself hung.
+.PARAMETER MsiLogDirectory
+    Folder for msiexec's verbose logs, named pwsh-msi-<timestamp>-<attempt>.log. Empty: no msiexec
+    log. The caller passes the folder its own transcript is in, which this account can write to;
+    msiexec fails the whole install (1622) when it cannot open its log.
+.PARAMETER BusyRetryCount
+    How many times to retry after msiexec exit code 1618.
+.PARAMETER BusyRetryDelaySeconds
+    Seconds to wait before each of those retries.
 .RETURNS
     [bool] True when msiexec reported success. False sends the caller to the upstream script.
 #>
@@ -1236,7 +1508,13 @@ function Install-PowerShell7FromMsi {
         [Parameter(Mandatory = $false)]
         [string]$MetadataUrl = 'https://raw.githubusercontent.com/PowerShell/PowerShell/master/tools/metadata.json',
         [Parameter(Mandatory = $false)]
-        [int]$InstallTimeoutSeconds = 900
+        [int]$InstallTimeoutSeconds = 900,
+        [Parameter(Mandatory = $false)]
+        [string]$MsiLogDirectory,
+        [Parameter(Mandatory = $false)]
+        [int]$BusyRetryCount = 6,
+        [Parameter(Mandatory = $false)]
+        [int]$BusyRetryDelaySeconds = 30
     )
 
     $msiInfo = Get-PowerShell7MsiInfo -MetadataUrl $MetadataUrl
@@ -1266,34 +1544,58 @@ function Install-PowerShell7FromMsi {
         }
 
         Write-Info 'Installing PowerShell 7 (this takes about a minute)...'
-        $msiProcess = $null
-        try {
+        $attempt = 0
+        while ($true) {
+            $attempt = $attempt + 1
             # Quoted because the MSI path contains a GUID-named directory under the user's temp
             # path, which can sit under a profile directory containing spaces.
             $msiArguments = @('/i', ('"' + $msiPath + '"'), '/quiet', '/norestart')
-            $msiProcess = Start-Process -FilePath 'msiexec.exe' -ArgumentList $msiArguments -PassThru -ErrorAction Stop
-        }
-        catch {
-            Write-WarningMessage "msiexec could not be started: $_"
-            return $false
-        }
-        if (-not $msiProcess) {
-            Write-WarningMessage 'msiexec could not be started.'
-            return $false
-        }
+            $msiLogPath = $null
+            if ($MsiLogDirectory) {
+                $msiLogPath = Join-Path $MsiLogDirectory ('pwsh-msi-{0:yyyyMMdd-HHmmss}-{1}.log' -f (Get-Date), $attempt)
+                $msiArguments += @('/l*v', ('"' + $msiLogPath + '"'))
+                Write-Info ('  msiexec log: {0}' -f $msiLogPath)
+            }
 
-        if (-not $msiProcess.WaitForExit($InstallTimeoutSeconds * 1000)) {
-            try { $msiProcess.Kill() } catch { }
-            Write-WarningMessage ('The PowerShell 7 MSI install did not finish within {0} seconds and was stopped. Another installation may be holding the Windows Installer service.' -f $InstallTimeoutSeconds)
+            $msiProcess = $null
+            try {
+                $msiProcess = Start-Process -FilePath 'msiexec.exe' -ArgumentList $msiArguments -PassThru -ErrorAction Stop
+            }
+            catch {
+                Write-WarningMessage "msiexec could not be started: $_"
+                return $false
+            }
+            if (-not $msiProcess) {
+                Write-WarningMessage 'msiexec could not be started.'
+                return $false
+            }
+
+            if (-not $msiProcess.WaitForExit($InstallTimeoutSeconds * 1000)) {
+                try { $msiProcess.Kill() } catch { }
+                Write-WarningMessage ('The PowerShell 7 MSI install did not finish within {0} seconds and was stopped.' -f $InstallTimeoutSeconds)
+                return $false
+            }
+
+            $msiExitCode = $msiProcess.ExitCode
+            if ($msiExitCode -eq 0 -or $msiExitCode -eq 3010) {
+                return $true
+            }
+            if ($msiExitCode -eq 1618 -and $attempt -le $BusyRetryCount) {
+                Write-WarningMessage ('Windows Installer is busy with another installation (msiexec exit code 1618). Waiting {0} seconds before trying again (retry {1} of {2})...' -f $BusyRetryDelaySeconds, $attempt, $BusyRetryCount)
+                Start-Sleep -Seconds $BusyRetryDelaySeconds
+                continue
+            }
+            if ($msiExitCode -eq 1618) {
+                Write-WarningMessage ('The PowerShell 7 MSI install failed: Windows Installer was still busy with another installation after {0} retries (msiexec exit code 1618). Re-run the installer once that installation has finished.' -f $BusyRetryCount)
+            }
+            else {
+                Write-WarningMessage ('The PowerShell 7 MSI install failed (msiexec exit code {0}).' -f $msiExitCode)
+            }
+            if ($msiLogPath) {
+                Write-WarningMessage ('msiexec''s log of the failed attempt: {0}' -f $msiLogPath)
+            }
             return $false
         }
-
-        $msiExitCode = $msiProcess.ExitCode
-        if ($msiExitCode -eq 0 -or $msiExitCode -eq 3010) {
-            return $true
-        }
-        Write-WarningMessage ('The PowerShell 7 MSI install failed (msiexec exit code {0}).' -f $msiExitCode)
-        return $false
     }
     finally {
         Remove-Item -LiteralPath $downloadDirectory -Recurse -Force -ErrorAction SilentlyContinue
@@ -1343,9 +1645,14 @@ function Install-PowerShell7FromMsi {
 .PARAMETER InstallerUrl
     Raw URL the iex relaunch path re-downloads the installer from. Defaults to the canonical
     one-liner URL; parameterized for tests.
+.PARAMETER LogDirectory
+    The folder of the bootstrap transcript the tail started, or empty when it could not start one.
+    Forwarded to Install-PowerShell7FromMsi for msiexec's verbose log (review finding P2-13).
 .RETURNS
     [int] Exit code for the tail dispatch to propagate: the relaunched run's exit code, 0 for a
-    -WhatIf preview of a would-be install, or 1 when PowerShell 7 could not be provisioned.
+    -WhatIf preview of a would-be install, or 1 when PowerShell 7 could not be provisioned. Sets
+    $script:PowerShell7BootstrapRelaunched to $true once a relaunched PowerShell 7 run has ended,
+    so the tail knows that run already reported its outcome to whoever is at the console.
 #>
 function Invoke-PowerShell7Bootstrap {
     param (
@@ -1358,8 +1665,12 @@ function Invoke-PowerShell7Bootstrap {
         [Parameter(Mandatory = $false)]
         [string]$CommandPath,
         [Parameter(Mandatory = $false)]
-        [string]$InstallerUrl = 'https://raw.githubusercontent.com/J-MaFf/winget-app-setup/refs/heads/main/winget-app-install.ps1'
+        [string]$InstallerUrl = 'https://raw.githubusercontent.com/J-MaFf/winget-app-setup/refs/heads/main/winget-app-install.ps1',
+        [Parameter(Mandatory = $false)]
+        [string]$LogDirectory
     )
+
+    $script:PowerShell7BootstrapRelaunched = $false
 
     Write-WarningMessage 'This installer requires PowerShell 7+ (pwsh), but this session is Windows PowerShell. Handing off...'
 
@@ -1449,7 +1760,7 @@ function Invoke-PowerShell7Bootstrap {
             # stalled link is indistinguishable from the run having died. Doing the download here
             # makes progress visible and both steps time-bounded.
             Write-Info 'Falling back to the official PowerShell MSI installer...'
-            if (-not (Install-PowerShell7FromMsi)) {
+            if (-not (Install-PowerShell7FromMsi -MsiLogDirectory $LogDirectory)) {
                 Write-WarningMessage 'Falling back to the official installer script (https://aka.ms/install-powershell.ps1). It reports no download progress, so this step can run for several minutes with no output.'
                 try {
                     # -TimeoutSec bounds the script download itself; the script's own MSI download
@@ -1539,6 +1850,10 @@ function Invoke-PowerShell7Bootstrap {
         Write-ErrorMessage "PowerShell 7 could not be started ($pwshPath)."
         return 1
     }
+    $script:PowerShell7BootstrapRelaunched = $true
+    # Into the bootstrap transcript: a relaunched run that failed before it could start its own
+    # transcript (pwsh rejecting the arguments, a crash on load) leaves only this line behind.
+    Write-Info ('The PowerShell 7 run ended with exit code {0}.' -f $relaunchProcess.ExitCode)
     return $relaunchProcess.ExitCode
 }
 
@@ -3080,8 +3395,9 @@ function Invoke-WingetInstall {
             Write-ErrorMessage 'This script requires administrator privileges.'
             Write-ErrorMessage 'Auto-elevation is unavailable when running through IEX/remote execution.'
             Write-Info 'Open an elevated PowerShell or Windows Terminal session and run the IEX command again.'
-            Write-Info 'Exiting in 5 seconds...'
-            Start-Sleep -Seconds 5
+            # No 'Exiting in 5 seconds' sleep any more: the entry script's Exit-Installer prints the
+            # log path and build id and, when someone is at the console, waits for a key press
+            # before the window closes (review finding P2-14).
             return 1
         }
     }
@@ -3614,7 +3930,11 @@ function Write-Table {
 
     # Text output first, unconditionally: Out-GridView is a window, not console output, so it is
     # never transcribed (issue #230).
-    $output = $tableData | Format-Table -AutoSize | Out-String
+    # An explicit width (review finding P3-13): without one, Out-String uses the console width, so a
+    # transcript or captured output (120 columns on a runner or an RMM agent) cut long rows off with
+    # an ellipsis - the failed-app list and its reasons, the very text a failure report needs - and a
+    # process with no console at all rendered an empty table. Lines are not padded to this width.
+    $output = $tableData | Format-Table -AutoSize -Wrap | Out-String -Width 4096
     Write-Host $output.TrimEnd()
 
     if (-not ($UseGridView -or $AutoGridView)) {
@@ -5236,61 +5556,79 @@ if ($MyInvocation.InvocationName -ne '.') {
     }
     $forceExitCodeOnAbort = $launchedForScript -or (Test-EffectiveNonInteractive -NonInteractive:$NonInteractive)
 
+    # Abort guard state (see the catch and finally blocks below). Reset on every run: under
+    # irm | iex these live in the caller's scope and would otherwise carry over into a second run in
+    # the same console. Exit-Installer sets InstallerExitRequested right before every intended exit,
+    # and InstallerPendingExitCode before it waits for a key press; Invoke-WingetInstall records
+    # InstallerPendingExitCode once it has decided its exit code, just before its final 'Press any
+    # key' prompt.
+    $script:InstallerExitRequested = $false
+    $script:InstallerPendingExitCode = $null
+    $script:InstallLogPath = $null
+    $installerRunCompleted = $false
+
     if ($PSVersionTable.PSVersion.Major -lt 7) {
-        # try/catch, not a bare `exit (Invoke-PowerShell7Bootstrap ...)`: a statement-terminating
-        # error inside the bootstrap would abort only that `exit` statement, and 5.1 would then fall
-        # through into the PowerShell-7-only body below.
-        $bootstrapExitCode = 1
-        $bootstrapReturned = $false
-        try {
-            $bootstrapExitCode = Invoke-PowerShell7Bootstrap -WhatIf:$WhatIf -NonInteractive:$NonInteractive -SkipSystemCheck:$SkipSystemCheck -CommandPath $PSCommandPath
-            $bootstrapReturned = $true
+        # The bootstrap phase gets its own transcript, install-<timestamp>-bootstrap.log, next to the
+        # PowerShell 7 run's (review finding P2-13): the PowerShell 7 install (winget, the MSI and
+        # its msiexec log, the aka.ms fallback), GitHub throttling and relaunch errors used to leave
+        # no log at all. It stays open while the relaunched run works, so it also records the exit
+        # code that run ended with.
+        $script:PowerShell7BootstrapRelaunched = $false
+        $script:InstallLogPath = Start-InstallerTranscript -Bootstrap -WhatIf:$WhatIf
+        $bootstrapLogDirectory = ''
+        if ($script:InstallLogPath) {
+            $bootstrapLogDirectory = Split-Path -Parent $script:InstallLogPath
         }
-        catch {
-            Write-ErrorMessage "The PowerShell 7 bootstrap failed unexpectedly: $_"
-            $bootstrapExitCode = 1
-            $bootstrapReturned = $true
+        $bootstrapExitCode = 1
+        try {
+            if ($script:InstallLogPath) {
+                Write-Info "Logging the PowerShell 7 bootstrap to: $script:InstallLogPath"
+            }
+            Write-Info "Installer build: $script:InstallerBuildId"
+            # try/catch, not a bare `exit (Invoke-PowerShell7Bootstrap ...)`: a statement-terminating
+            # error inside the bootstrap would abort only that `exit` statement, and 5.1 would then
+            # fall through into the PowerShell-7-only body below.
+            try {
+                $bootstrapExitCode = Invoke-PowerShell7Bootstrap -WhatIf:$WhatIf -NonInteractive:$NonInteractive -SkipSystemCheck:$SkipSystemCheck -CommandPath $PSCommandPath -LogDirectory $bootstrapLogDirectory
+            }
+            catch {
+                Write-ErrorMessage "The PowerShell 7 bootstrap failed unexpectedly: $_"
+                $bootstrapExitCode = 1
+            }
+            # A relaunched PowerShell 7 run reported its own outcome (and waited for a key press when
+            # someone was there); a bootstrap that failed before it could relaunch reports here.
+            Exit-Installer -Code $bootstrapExitCode -NonInteractive:$NonInteractive -OutcomeShown:$script:PowerShell7BootstrapRelaunched
         }
         finally {
             # Ctrl+C or a console stop reaches this 5.1 parent too while it waits for the relaunched
             # pwsh (same console), and cannot be caught; without this the parent would exit 0.
-            if (-not $bootstrapReturned -and $forceExitCodeOnAbort) {
-                $host.SetShouldExit(5)
+            if (-not $script:InstallerExitRequested -and $forceExitCodeOnAbort) {
+                if ($null -ne $script:InstallerPendingExitCode) {
+                    # Stopped while waiting for a key press after the failure notice.
+                    $host.SetShouldExit([int]$script:InstallerPendingExitCode)
+                }
+                else {
+                    $host.SetShouldExit(5)
+                }
+            }
+            if ($script:InstallLogPath) {
+                try {
+                    [void](Stop-Transcript)
+                }
+                catch {
+                    # Best-effort, as in the PowerShell 7 branch below.
+                }
             }
         }
+        # Never reached unless Exit-Installer itself failed: never fall through into the
+        # PowerShell-7-only body below.
         exit $bootstrapExitCode
     }
 
-    # Abort guard state (see the catch and finally at the end of this block). Reset on every run:
-    # under irm | iex these live in the caller's scope and would otherwise carry over into a second
-    # run in the same console. Exit-Installer sets InstallerExitRequested before every intended
-    # exit below; Invoke-WingetInstall records InstallerPendingExitCode once it has decided its exit
-    # code, just before its final 'Press any key' prompt.
-    $script:InstallerExitRequested = $false
-    $script:InstallerPendingExitCode = $null
-    $installerRunCompleted = $false
-
-    # Persistent transcript (issue #189): a failed install on a remote user's machine used to
-    # leave zero artifacts. The log lands under ProgramData - not the elevating account's TEMP -
-    # so it survives cross-user elevation and stays findable afterwards. Logging must never block
-    # an install: any failure here downgrades to a warning and the run continues untranscribed.
-    $script:InstallLogPath = $null
-    $transcriptStarted = $false
-    try {
-        $logDirectory = Join-Path $env:ProgramData 'winget-app-setup\logs'
-        if (-not (Test-Path -LiteralPath $logDirectory)) {
-            [void](New-Item -Path $logDirectory -ItemType Directory -Force)
-        }
-        # The -whatif suffix keeps dry-run transcripts from being mistaken for real install logs.
-        $logSuffix = if ($WhatIf) { '-whatif' } else { '' }
-        $logCandidate = Join-Path $logDirectory ('install-{0:yyyyMMdd-HHmmss}{1}.log' -f (Get-Date), $logSuffix)
-        [void](Start-Transcript -Path $logCandidate -ErrorAction Stop)
-        $transcriptStarted = $true
-        $script:InstallLogPath = $logCandidate
-    }
-    catch {
-        Write-WarningMessage "Transcript logging could not be started: $_. Continuing without a log file."
-    }
+    # Persistent transcript (issue #189); see Start-InstallerTranscript. Logging never blocks an
+    # install: when it cannot start, the run continues untranscribed and InstallLogPath stays $null.
+    $script:InstallLogPath = Start-InstallerTranscript -WhatIf:$WhatIf
+    $transcriptStarted = [bool]$script:InstallLogPath
 
     try {
         if ($script:InstallLogPath) {
@@ -5312,7 +5650,7 @@ if ($MyInvocation.InvocationName -ne '.') {
                 }
             }
             elseif (-not (Test-SystemRequirements -WhatIf:$WhatIf)) {
-                Exit-Installer 1
+                Exit-Installer -Code 1 -Reason 'a blocking pre-flight system check failed (see above)' -NonInteractive:$NonInteractive
             }
         }
 
@@ -5322,12 +5660,15 @@ if ($MyInvocation.InvocationName -ne '.') {
         # last thing it writes to the output stream: taking the last element keeps the code right
         # even if a helper ever leaks a value into that stream.
         $installerExitCode = [int](@(Invoke-WingetInstall -WhatIf:$WhatIf -NonInteractive:$NonInteractive -SkipSystemCheck:$SkipSystemCheck)[-1])
-        $installerRunCompleted = $true
         # Exit only for a non-zero code: a successful run ends normally (exit code 0 under -File), so
-        # an interactive irm | iex console stays open afterwards.
+        # an interactive irm | iex console stays open afterwards. A run that reached its summary set
+        # InstallerPendingExitCode before its final prompt and has shown its outcome; any other
+        # non-zero code is an early exit (winget missing, a bad catalog, elevation declined), which
+        # Exit-Installer explains before the window closes.
         if ($installerExitCode -ne 0) {
-            Exit-Installer $installerExitCode
+            Exit-Installer -Code $installerExitCode -NonInteractive:$NonInteractive -OutcomeShown:($null -ne $script:InstallerPendingExitCode)
         }
+        $installerRunCompleted = $true
     }
     catch {
         # Any unexpected error lands here instead of silently ending the run with exit 0: inside
@@ -5343,13 +5684,12 @@ if ($MyInvocation.InvocationName -ne '.') {
             Write-ErrorMessage "Stack trace:`n$($_.ScriptStackTrace)"
         }
         if ($forceExitCodeOnAbort) {
-            Exit-Installer 5
+            Exit-Installer -Code 5 -NonInteractive:$NonInteractive
         }
         # Interactive console: exiting would close the window (under irm | iex the host itself),
-        # so leave the error on screen and the code in $LASTEXITCODE instead.
-        if ($script:InstallLogPath) {
-            Write-Info "Full transcript of this run: $script:InstallLogPath"
-        }
+        # so leave the error on screen and the code in $LASTEXITCODE instead. The console stays
+        # open, so the notice needs no key press.
+        Write-InstallerExitNotice -Code 5 -NoPause
         $script:InstallerExitRequested = $true
         $global:LASTEXITCODE = 5
     }
@@ -5359,8 +5699,9 @@ if ($MyInvocation.InvocationName -ne '.') {
         # PipelineStoppedException cannot be caught. A run from a file would then exit 0.
         if (-not $installerRunCompleted -and -not $script:InstallerExitRequested -and $forceExitCodeOnAbort) {
             if ($null -ne $script:InstallerPendingExitCode) {
-                # Stopped at the final 'Press any key' prompt: the run had already finished and
-                # decided its exit code, so report that rather than an abort.
+                # Stopped at a 'Press any key' prompt (the run's final one, or Exit-Installer's
+                # after an early failure): the exit code was already decided, so report that
+                # rather than an abort.
                 $host.SetShouldExit([int]$script:InstallerPendingExitCode)
             }
             else {

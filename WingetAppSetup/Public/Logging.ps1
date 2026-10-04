@@ -138,7 +138,11 @@ function Write-Table {
 
     # Text output first, unconditionally: Out-GridView is a window, not console output, so it is
     # never transcribed (issue #230).
-    $output = $tableData | Format-Table -AutoSize | Out-String
+    # An explicit width (review finding P3-13): without one, Out-String uses the console width, so a
+    # transcript or captured output (120 columns on a runner or an RMM agent) cut long rows off with
+    # an ellipsis - the failed-app list and its reasons, the very text a failure report needs - and a
+    # process with no console at all rendered an empty table. Lines are not padded to this width.
+    $output = $tableData | Format-Table -AutoSize -Wrap | Out-String -Width 4096
     Write-Host $output.TrimEnd()
 
     if (-not ($UseGridView -or $AutoGridView)) {

@@ -128,6 +128,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Failed runs can now be debugged from what the teammate attaches (review findings P2-13, P2-14,
+  P3-12, P3-13, P3-14 and P3-15):
+  - **Early exits explain themselves.** Every early exit (a failed pre-flight check, winget
+    missing, a declined elevation, a bad catalog, a failed PowerShell 7 bootstrap, an aborted run)
+    goes through `Exit-Installer`, which prints one block: the exit code and why, the log file
+    path, the installer build and where to report it, with a privacy note. When someone is at the
+    console it then waits for a key press; under `irm | iex` the exit ends the PowerShell window,
+    which used to close before anyone could read the error. Non-interactive and CI runs never wait
+    (`Test-IsContinuousIntegration` checks `CI`, `GITHUB_ACTIONS` and `TF_BUILD`), and a run that
+    reached its summary adds nothing after its own final prompt. The irm | iex non-admin path no
+    longer sleeps 5 seconds before exiting. Exit codes are unchanged.
+  - **The Windows PowerShell 5.1 bootstrap is logged.** It writes its own transcript,
+    `install-<timestamp>-bootstrap.log`, next to the PowerShell 7 run's, ending with the exit code
+    the relaunched run returned; the PowerShell 7 install (winget, MSI, aka.ms fallback), GitHub
+    throttling and relaunch errors used to leave no log at all. The PowerShell 7 MSI install
+    writes a verbose `msiexec` log (`pwsh-msi-<timestamp>-<attempt>.log`) there too, and waits 30
+    seconds and retries, up to 6 times, when `msiexec` returns 1618 (another installation in
+    progress), which it does at once on a freshly enrolled machine still installing its agents.
+  - **Logs stay readable from the end user's session.** Installing Winget-AutoUpdate makes
+    `%ProgramData%\winget-app-setup` admin-only, and that reached the `logs` folder, so a teammate
+    who elevated as an admin got Access Denied opening the log from the end user's session. Every
+    elevated run now grants `BUILTIN\Users` read access to the `logs` folder only
+    (`Grant-InstallLogReadAccess`); the WAU staging folder's lockdown is unchanged.
+  - **Tables are written at full width.** `Write-Table` renders with `Out-String -Width 4096`, so
+    the summary and failed-apps tables are no longer cut off at 120 columns in transcripts and
+    captured output (issue #284's failed list dropped `Microsoft.PowerShell` that way) or empty
+    without a console. This also fixes the known Linux test failure in `Logging.Tests.ps1`.
+  - **The build id covers the whole installer.** It is now the SHA256 of the whole generated
+    script with the id slots blanked, not only of the functions, so a change to
+    `build/fragments/head.ps1` or `tail.ps1` gets a new `Installer build:` id.
+  - **An issue form for install failures** (`.github/ISSUE_TEMPLATE/install-failure.yml`) asks for
+    the exit code, the installer build, the target (cross-user, fresh 5.1 machine, SYSTEM) and the
+    log file, and tells the reporter to remove the transcript header (it names the computer and
+    the accounts) because the repository is public; readme.md's new "When a run fails" section
+    says the same.
 - A `-WhatIf` dry run no longer changes the machine (review finding P2-16). It printed "No system
   changes will be made", but its setup steps ran their real fixes: on a machine missing them it
   installed the NuGet provider, `Microsoft.WinGet.Client` and `Microsoft.PowerShell.GraphicalTools`

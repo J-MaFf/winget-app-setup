@@ -385,11 +385,31 @@ elseif (-not [System.IO.Path]::IsPathRooted($OutputPath)) {
 
 $builder = [System.Text.StringBuilder]::new()
 
+# The build id slot. The banner below carries this placeholder while the whole script is hashed,
+# and the id replaces it afterwards (see step 5).
+$buildIdPlaceholder = '{{BUILD_ID}}'
+
 # 1. Header (PSScriptInfo + help + param)
 [void]$builder.AppendLine((Get-Content -Path (Join-Path $fragmentsRoot 'head.ps1') -Raw -Encoding UTF8).TrimEnd())
 
-# 3. Function bodies (assembled before the banner because the build id below is derived from
-#    them): Private first, then Public, each glob ordered for stable output.
+# 2. Generated banner, with the build id slot left as the placeholder.
+$banner = @'
+
+# ------------------------------------------------------------------------------------------------
+# GENERATED FILE - DO NOT EDIT BY HAND.
+# This script is assembled from the WingetAppSetup module by build/Build-WingetInstallScript.ps1.
+# Edit the function source under WingetAppSetup/Public and WingetAppSetup/Private, then re-run the
+# build to regenerate this file. See readme.md ("Project layout") for details.
+# Build id: {{BUILD_ID}} (module version + SHA256 fragment of this whole script; issue #189).
+# ------------------------------------------------------------------------------------------------
+
+# Content-derived build identity, logged at startup so a transcript from a remote machine
+# identifies exactly which installer build produced it (issue #189).
+$script:InstallerBuildId = '{{BUILD_ID}}'
+'@
+[void]$builder.AppendLine($banner)
+
+# 3. Function bodies: Private first, then Public, each glob ordered for stable output.
 #    Sort-Object compares linguistically, which varies across locales and ICU/NLS versions, so pin
 #    the concatenation order with an ordinal (byte-wise) comparison that is identical everywhere.
 $ordinalByName = [System.Comparison[object]] { param($a, $b) [System.StringComparer]::Ordinal.Compare($a.Name, $b.Name) }
@@ -399,58 +419,15 @@ $publicFiles = @(Get-ChildItem -Path (Join-Path $moduleRoot 'Public') -Filter '*
 [Array]::Sort($publicFiles, $ordinalByName)
 $functionFiles = $privateFiles + $publicFiles
 
-$functionsBuilder = [System.Text.StringBuilder]::new()
-[void]$functionsBuilder.AppendLine('')
-[void]$functionsBuilder.AppendLine('# ------------------------------------------------Functions------------------------------------------------')
-[void]$functionsBuilder.AppendLine('')
+[void]$builder.AppendLine('')
+[void]$builder.AppendLine('# ------------------------------------------------Functions------------------------------------------------')
+[void]$builder.AppendLine('')
 
 foreach ($file in $functionFiles) {
-    [void]$functionsBuilder.AppendLine("# --- $($file.BaseName) ---")
-    [void]$functionsBuilder.AppendLine((Get-Content -Path $file.FullName -Raw -Encoding UTF8).TrimEnd())
-    [void]$functionsBuilder.AppendLine('')
+    [void]$builder.AppendLine("# --- $($file.BaseName) ---")
+    [void]$builder.AppendLine((Get-Content -Path $file.FullName -Raw -Encoding UTF8).TrimEnd())
+    [void]$builder.AppendLine('')
 }
-
-# Normalize to LF before hashing so the id is identical regardless of the checkout's line endings
-# or the build platform (the final output gets the same normalization below).
-$functionsSection = ($functionsBuilder.ToString() -replace "`r`n", "`n")
-
-# 2. Generated banner, stamped with a content-derived build id (issue #189):
-#    <module version from the psd1>+<first 8 hex chars of the SHA256 of the functions section>.
-#    Deterministic on purpose: rebuilding the same tree MUST produce a byte-identical installer or
-#    the -Check verification in CI would always fail. Do NOT switch this to git describe, a commit
-#    SHA, or a timestamp - those change without the content changing (or vice versa) and would
-#    break the byte-compare. The tail logs the id at startup so a transcript from a remote machine
-#    identifies exactly which installer build produced it.
-$manifestPath = Join-Path $moduleRoot 'WingetAppSetup.psd1'
-$manifest = Import-PowerShellDataFile -Path $manifestPath
-$sha256 = [System.Security.Cryptography.SHA256]::Create()
-try {
-    $functionsHash = $sha256.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($functionsSection))
-}
-finally {
-    $sha256.Dispose()
-}
-$hashFragment = [System.BitConverter]::ToString($functionsHash, 0, 4).Replace('-', '').ToLowerInvariant()
-$buildId = '{0}+{1}' -f $manifest.ModuleVersion, $hashFragment
-
-$banner = @'
-
-# ------------------------------------------------------------------------------------------------
-# GENERATED FILE - DO NOT EDIT BY HAND.
-# This script is assembled from the WingetAppSetup module by build/Build-WingetInstallScript.ps1.
-# Edit the function source under WingetAppSetup/Public and WingetAppSetup/Private, then re-run the
-# build to regenerate this file. See readme.md ("Project layout") for details.
-# Build id: {{BUILD_ID}} (module version + SHA256 fragment of the function content; issue #189).
-# ------------------------------------------------------------------------------------------------
-
-# Content-derived build identity, logged at startup so a transcript from a remote machine
-# identifies exactly which installer build produced it (issue #189).
-$script:InstallerBuildId = '{{BUILD_ID}}'
-'@
-$banner = $banner.Replace('{{BUILD_ID}}', $buildId)
-
-[void]$builder.AppendLine($banner)
-[void]$builder.Append($functionsSection)
 
 # 4. Tail (entry-point dispatch)
 [void]$builder.AppendLine('# ------------------------------------------------Main Script------------------------------------------------')
@@ -462,7 +439,39 @@ $banner = $banner.Replace('{{BUILD_ID}}', $buildId)
 # (CRLF on Windows, LF on Linux), and the source files may be checked out with CRLF under
 # core.autocrlf, so collapse everything to LF here. The installer is stored with LF (see
 # .gitattributes), keeping the -Check round-trip deterministic on Windows and Linux alike.
-$content = (($builder.ToString() -replace "`r`n", "`n").TrimEnd()) + "`n"
+$contentTemplate = (($builder.ToString() -replace "`r`n", "`n").TrimEnd()) + "`n"
+
+# The placeholder may appear only in the banner's two slots: anywhere else in the sources, the
+# substitution below would rewrite that code too.
+$placeholderCount = ([regex]::Matches($contentTemplate, [regex]::Escape($buildIdPlaceholder))).Count
+if ($placeholderCount -ne 2) {
+    Write-Error "Build id check failed: '$buildIdPlaceholder' is reserved for the generated banner, but the sources under WingetAppSetup/ or build/fragments/ contain it too ($placeholderCount occurrences in total, expected 2). Remove it from the source, then re-run the build."
+    exit 1
+}
+
+# 5. Content-derived build id (issue #189): <module version from the psd1>+<first 8 hex chars of the
+#    SHA256 of the whole assembled script, LF-normalized, with the id slots still holding the
+#    placeholder>. The whole script, not only the functions (review finding P3-12): a change to
+#    the param block, the help, or the entry dispatch in build/fragments/tail.ps1 (transcript,
+#    PowerShell 7 bootstrap, exit handling) must change the id too, or two different installers
+#    log the same 'Installer build:' line.
+#    Deterministic on purpose: rebuilding the same tree MUST produce a byte-identical installer or
+#    the -Check verification in CI would always fail. Do NOT switch this to git describe, a commit
+#    SHA, or a timestamp - those change without the content changing (or vice versa) and would
+#    break the byte-compare. The tail logs the id at startup so a transcript from a remote machine
+#    identifies exactly which installer build produced it.
+$manifestPath = Join-Path $moduleRoot 'WingetAppSetup.psd1'
+$manifest = Import-PowerShellDataFile -Path $manifestPath
+$sha256 = [System.Security.Cryptography.SHA256]::Create()
+try {
+    $contentHash = $sha256.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($contentTemplate))
+}
+finally {
+    $sha256.Dispose()
+}
+$hashFragment = [System.BitConverter]::ToString($contentHash, 0, 4).Replace('-', '').ToLowerInvariant()
+$buildId = '{0}+{1}' -f $manifest.ModuleVersion, $hashFragment
+$content = $contentTemplate.Replace($buildIdPlaceholder, $buildId)
 
 # Fail fast on syntax errors (issue #183). Without this, a module file with an unbalanced brace
 # would ship a broken installer: the reference guard would walk the truncated AST and pass, and

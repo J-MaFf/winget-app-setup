@@ -38,10 +38,11 @@
 
 .PARAMETER NonInteractive
  Suppresses the interactive extras for unattended runs (RMM, CI, scheduled tasks): the summary
- grid-view window and the final "press any key to exit". Also auto-detected when the session is
- non-interactive or stdin is redirected. The installer asks no yes/no questions on any path (issue
- #230), so this switch is only about those two extras - it is not needed to keep a run from
- blocking on a prompt.
+ grid-view window and the "press any key to exit" that holds the window at the end of a run or
+ after an early failure. Also auto-detected when the session is non-interactive or stdin is
+ redirected; under CI the early-failure key press is skipped too. The installer asks no yes/no
+ questions on any path (issue #230), so this switch is only about those extras - it is not needed
+ to keep a run from blocking on a prompt.
 #>
 
 param (

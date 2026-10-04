@@ -18,20 +18,38 @@ BeforeAll {
     # Builds a copy of the generated installer with function overrides injected just before the
     # entry block, so the real tail.ps1 logic runs unchanged. -Body replaces Invoke-WingetInstall;
     # -Overrides adds further definitions, which win over the defaults here because they come later.
+    # -EmulateWindowsPowerShell sends the run down the entry block's Windows PowerShell 5.1 branch
+    # (the PowerShell 7 bootstrap) under this pwsh: $PSVersionTable is read-only, so the version
+    # test itself is rewritten. Override Invoke-PowerShell7Bootstrap with it.
     function New-FaultInjectedInstaller {
-        param ([string]$Name, [string]$Body, [string]$Overrides = '')
-        $entryIndex = $script:installerText.LastIndexOf("if (`$MyInvocation.InvocationName -ne '.') {")
+        param ([string]$Name, [string]$Body, [string]$Overrides = '', [switch]$EmulateWindowsPowerShell)
+        $text = $script:installerText
+        if ($EmulateWindowsPowerShell) {
+            $versionTest = 'if ($PSVersionTable.PSVersion.Major -lt 7) {'
+            $text.Contains($versionTest) | Should -BeTrue
+            $text = $text.Replace($versionTest, 'if ($true) {')
+        }
+        $entryIndex = $text.LastIndexOf("if (`$MyInvocation.InvocationName -ne '.') {")
         $entryIndex | Should -BeGreaterThan 0
         # Test-SystemRequirements is stubbed too: an irm | iex run cannot pass -SkipSystemCheck,
-        # and the real pre-flight checks probe the network and the OS.
+        # and the real pre-flight checks probe the network and the OS. Grant-InstallLogReadAccess
+        # is stubbed because it runs icacls on the log folder in an elevated run (Windows-only, and
+        # a test has no business changing ACLs); its own tests are in Logging.Tests.ps1.
         $override = "function Test-SystemRequirements { param([switch]`$WhatIf) `$true }`n"
+        $override += "function Grant-InstallLogReadAccess { param([string]`$Path) `$true }`n"
         if ($PSBoundParameters.ContainsKey('Body')) {
             $override += "function Invoke-WingetInstall { param([switch]`$WhatIf, [switch]`$NonInteractive, [switch]`$SkipSystemCheck) $Body }`n"
         }
         $override += "$Overrides`n"
         $path = Join-Path $TestDrive $Name
-        Set-Content -LiteralPath $path -Value ($script:installerText.Insert($entryIndex, $override)) -Encoding UTF8
+        Set-Content -LiteralPath $path -Value ($text.Insert($entryIndex, $override)) -Encoding UTF8
         $path
+    }
+
+    # The transcripts a child run left under its TestDrive ProgramData.
+    function Get-ChildTranscript {
+        param ([string]$Filter = 'install-*.log')
+        @(Get-ChildItem -Path (Join-Path $TestDrive 'ProgramData') -Recurse -Filter $Filter -ErrorAction SilentlyContinue)
     }
 
     # Runs a child pwsh with the transcript pointed into TestDrive (never the real ProgramData).
@@ -120,13 +138,22 @@ Describe 'Generated installer: build stamp and transcript wiring (issue #189)' {
     }
 
     It 'Wraps the dispatch in a transcript under ProgramData that never blocks the install' {
-        $script:generatedInstaller | Should -Match 'Start-Transcript'
+        # File naming and the never-blocks rule are tested on Start-InstallerTranscript itself
+        # (Logging.Tests.ps1); here, that the entry block starts it for both phases and stops it.
+        $script:generatedInstaller | Should -Match ([regex]::Escape('$script:InstallLogPath = Start-InstallerTranscript -WhatIf:$WhatIf'))
+        $script:generatedInstaller | Should -Match ([regex]::Escape('$script:InstallLogPath = Start-InstallerTranscript -Bootstrap -WhatIf:$WhatIf'))
         $script:generatedInstaller | Should -Match 'Stop-Transcript'
-        $script:generatedInstaller | Should -Match ([regex]::Escape("Join-Path `$env:ProgramData 'winget-app-setup\logs'"))
-        $script:generatedInstaller | Should -Match ([regex]::Escape("'install-{0:yyyyMMdd-HHmmss}{1}.log'"))
-        # Dry runs get a distinguishing suffix; transcript failures downgrade to a warning.
-        $script:generatedInstaller | Should -Match ([regex]::Escape("if (`$WhatIf) { '-whatif' } else { '' }"))
-        $script:generatedInstaller | Should -Match 'Transcript logging could not be started'
+    }
+
+    It 'Writes the transcript of a dry run under ProgramData with a -whatif suffix' {
+        $path = New-FaultInjectedInstaller -Name 'dry-run-transcript.ps1' -Body "Write-Host 'dry run finished'; return 0"
+
+        $result = Invoke-ChildInstaller -Arguments @('-File', $path, '-WhatIf', '-SkipSystemCheck', '-NonInteractive')
+
+        $result.ExitCode | Should -Be 0
+        $transcripts = Get-ChildTranscript
+        $transcripts.Name | Should -Match '^install-\d{8}-\d{6}-whatif\.log$'
+        $result.Output | Should -Match ('Logging this run to: ' + [regex]::Escape($transcripts[0].FullName))
     }
 
     It 'Logs the log path and the build id at startup' {
@@ -184,17 +211,24 @@ Describe 'Generated installer: Windows PowerShell 5.1 parse safety (issue #210)'
         # test poisons the child's lookup environment (PATH without pwsh; nonexistent
         # ProgramFiles/ProgramW6432/LOCALAPPDATA roots) so Find-PowerShell7 cannot resolve
         # anything, and passes -WhatIf, which returns before any install attempt - exercising
-        # the no-pwsh preview path with zero side effects.
+        # the no-pwsh preview path with zero side effects. ProgramData points into TestDrive, where
+        # the bootstrap phase writes its own transcript (review finding P2-13).
         $escapedPath = $script:InstallerScriptPath.Replace("'", "''")
-        $childCommand = "& { `$env:PATH = 'C:\Windows\System32'; `$env:ProgramFiles = 'C:\__was_no_such_dir__'; `$env:ProgramW6432 = 'C:\__was_no_such_dir__'; `$env:LOCALAPPDATA = 'C:\__was_no_such_dir__'; & '$escapedPath' -WhatIf }"
+        $programData = Join-Path $TestDrive 'ProgramData-51-preview'
+        $escapedProgramData = $programData.Replace("'", "''")
+        $childCommand = "& { `$env:PATH = 'C:\Windows\System32'; `$env:ProgramFiles = 'C:\__was_no_such_dir__'; `$env:ProgramW6432 = 'C:\__was_no_such_dir__'; `$env:LOCALAPPDATA = 'C:\__was_no_such_dir__'; `$env:ProgramData = '$escapedProgramData'; & '$escapedPath' -WhatIf }"
         $output = & powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command $childCommand 2>&1 | Out-String
         $exitCode = $LASTEXITCODE
 
         $exitCode | Should -Be 0
         $output | Should -Match 'requires PowerShell 7\+'
         $output | Should -Match '\[DRY-RUN\] PowerShell 7 is not installed'
-        # Returns before the transcript is started - no log line, no log file side effects.
+        # The PowerShell 7 run's transcript never starts; the bootstrap phase's does, under 5.1.
         $output | Should -Not -Match 'Logging this run to:'
+        $output | Should -Match 'Logging the PowerShell 7 bootstrap to:'
+        $bootstrapLogs = @(Get-ChildItem -Path $programData -Recurse -Filter 'install-*-bootstrap-whatif.log')
+        $bootstrapLogs.Count | Should -Be 1
+        (Get-Content -Raw -LiteralPath $bootstrapLogs[0].FullName) | Should -Match '\[DRY-RUN\] PowerShell 7 is not installed'
     }
 
     It 'Under 5.1 with pwsh available, relaunches under pwsh and forwards the switches (opt-in)' -Skip:(-not $script:winPowerShellAvailable -or -not $script:pwshAvailableForRelaunch -or -not $script:runLiveRelaunchTest) {
@@ -215,13 +249,11 @@ Describe 'Generated installer: Windows PowerShell 5.1 parse safety (issue #210)'
     }
 
     It 'Carries the PowerShell 7 bootstrap dispatch at the top of the entry block' {
-        # Cross-platform pin of the guard's presence for environments without powershell.exe.
+        # Cross-platform pin of the guard's presence for environments without powershell.exe. What
+        # the branch does is run under pwsh by the 'Windows PowerShell 5.1 bootstrap phase' tests.
         $installer = Get-Content -Raw -Encoding UTF8 -Path $script:InstallerScriptPath
         $installer | Should -Match ([regex]::Escape('if ($PSVersionTable.PSVersion.Major -lt 7)'))
-        $installer | Should -Match ([regex]::Escape('$bootstrapExitCode = Invoke-PowerShell7Bootstrap -WhatIf:$WhatIf -NonInteractive:$NonInteractive -SkipSystemCheck:$SkipSystemCheck -CommandPath $PSCommandPath'))
-        # Wrapped in try/catch so a statement-terminating error in the bootstrap cannot fall through
-        # into the PowerShell-7-only body under 5.1.
-        $installer | Should -Match '(?s)try \{\s*\$bootstrapExitCode = Invoke-PowerShell7Bootstrap.*?\}\s*catch \{.*?\}\s*exit \$bootstrapExitCode'
+        $installer | Should -Match ([regex]::Escape('$bootstrapExitCode = Invoke-PowerShell7Bootstrap -WhatIf:$WhatIf -NonInteractive:$NonInteractive -SkipSystemCheck:$SkipSystemCheck -CommandPath $PSCommandPath -LogDirectory $bootstrapLogDirectory'))
         $installer | Should -Match 'This installer requires PowerShell 7\+ \(pwsh\)'
     }
 }
@@ -263,7 +295,7 @@ Describe 'Aborted runs exit non-zero (review P1: tail.ps1 try/finally exited 0)'
     It 'Only force-exits after an unexpected error where the process ends anyway (file or non-interactive run)' {
         # In an interactive console (irm | iex, or .\winget-app-install.ps1 typed at a prompt),
         # exiting would close the window and the error with it.
-        $script:installerText | Should -Match '(?s)if \(\$forceExitCodeOnAbort\) \{\s*Exit-Installer 5\s*\}'
+        $script:installerText | Should -Match '(?s)if \(\$forceExitCodeOnAbort\) \{\s*Exit-Installer -Code 5 -NonInteractive:\$NonInteractive\s*\}'
         $script:installerText | Should -Match '\$forceExitCodeOnAbort = \$launchedForScript -or \(Test-EffectiveNonInteractive'
     }
 
@@ -341,16 +373,15 @@ Describe 'The entry block exits with the code Invoke-WingetInstall returns (wgt-
         $result.ExitCode | Should -Be 1
         $result.Output | Should -Not -Match 'install ran'
         $result.Output | Should -Not -Match 'UNEXPECTED ERROR|stopped before it finished'
+        $result.Output | Should -Match 'stopped early with exit code 1: a blocking pre-flight system check failed'
     }
 
     It 'Exits 1 with the remote elevation guidance when an irm | iex run is not elevated (issues #226/#229)' {
         # The real Invoke-WingetInstall, with Test-IsAdmin overridden instead of depending on the
         # runner: CI is elevated, so the old version of this test (gated on real elevation) never
         # ran there. Under Invoke-Expression there is no script path to relaunch from, so the run
-        # stops at the elevation gate. Start-Sleep is overridden to skip the 5-second pause.
-        $path = New-FaultInjectedInstaller -Name 'iex-not-elevated.ps1' -Overrides (
-            "function Test-IsAdmin { `$false }`n" +
-            "function Start-Sleep { param([int]`$Seconds) }")
+        # stops at the elevation gate.
+        $path = New-FaultInjectedInstaller -Name 'iex-not-elevated.ps1' -Overrides "function Test-IsAdmin { `$false }"
 
         $result = Invoke-ChildInstallerViaIex -Path $path
 
@@ -358,9 +389,158 @@ Describe 'The entry block exits with the code Invoke-WingetInstall returns (wgt-
         $result.Output | Should -Match 'This script requires administrator privileges\.'
         $result.Output | Should -Match 'Auto-elevation is unavailable when running through IEX/remote execution\.'
         $result.Output | Should -Match 'Open an elevated PowerShell or Windows Terminal session and run the IEX command again\.'
-        $result.Output | Should -Match 'Exiting in 5 seconds\.\.\.'
+        # The early-exit notice replaced the old 5-second sleep (review finding P2-14).
+        $result.Output | Should -Match 'The installer stopped early with exit code 1'
+        $result.Output | Should -Not -Match 'Exiting in 5 seconds'
         $result.Output | Should -Not -Match 'Press Enter to restart script with elevated privileges'
         $result.Output | Should -Not -Match 'UNEXPECTED ERROR|stopped before it finished'
+    }
+}
+
+# Review finding P2-14: under irm | iex an early exit ends the host, so the window used to close
+# before the teammate could read the error or the log path.
+Describe 'Early exits explain themselves before the window closes (review finding P2-14)' {
+    BeforeAll {
+        $script:installerText -match "\`$script:InstallerBuildId = '([^']+)'" | Should -BeTrue
+        $script:buildId = $Matches[1]
+
+        # The log file a child run printed, read back.
+        function Get-PrintedLog {
+            param ([string]$Output, [string]$Label)
+            $Output -match ([regex]::Escape($Label) + '\s*([^\r\n\x1b]+?\.log)') | Should -BeTrue -Because "the run prints '$Label <path>'"
+            $logPath = $Matches[1].Trim()
+            Test-Path -LiteralPath $logPath | Should -BeTrue
+            Get-Content -Raw -LiteralPath $logPath
+        }
+    }
+
+    It 'Prints the exit code, the log file, the build and where to report it, for exit code <_>' -ForEach @(1, 2, 3) {
+        $path = New-FaultInjectedInstaller -Name "early-exit-$_.ps1" -Body "Write-ErrorMessage 'early failure'; return $_"
+
+        $result = Invoke-ChildInstaller -Arguments @('-File', $path, '-SkipSystemCheck', '-NonInteractive')
+
+        $result.ExitCode | Should -Be $_
+        $result.Output | Should -Match "The installer stopped early with exit code ${_}: "
+        $result.Output | Should -Match ('Installer build: ' + [regex]::Escape($script:buildId))
+        $result.Output | Should -Match 'issues/new\?template=install-failure\.yml'
+        $result.Output | Should -Match 'remove or redact the log''s header'
+        # The notice is in the log the teammate attaches, too.
+        Get-PrintedLog -Output $result.Output -Label 'Log file:' | Should -Match "stopped early with exit code $_"
+        # -NonInteractive: nothing waits for a key press.
+        $result.Output | Should -Not -Match 'Press any key'
+    }
+
+    It 'Explains an aborted run (exit code 5) the same way' {
+        $path = New-FaultInjectedInstaller -Name 'abort-notice.ps1' -Body "[int]::Parse('not-a-number')"
+
+        $result = Invoke-ChildInstaller -Arguments @('-File', $path, '-SkipSystemCheck', '-NonInteractive')
+
+        $result.ExitCode | Should -Be 5
+        $result.Output | Should -Match 'The installer stopped early with exit code 5: the run was aborted before it finished'
+    }
+
+    It 'Adds nothing after a run that reached its summary (it showed its outcome and its own prompt)' {
+        $path = New-FaultInjectedInstaller -Name 'summary-shown.ps1' -Body "`$script:InstallerPendingExitCode = 1; Write-Host 'summary shown'; return 1"
+
+        $result = Invoke-ChildInstaller -Arguments @('-File', $path, '-SkipSystemCheck', '-NonInteractive')
+
+        $result.ExitCode | Should -Be 1
+        $result.Output | Should -Match 'summary shown'
+        $result.Output | Should -Not -Match 'stopped early'
+    }
+
+    Context 'Waiting for a key press' {
+        BeforeAll {
+            # The child's console is not interactive, so its interactivity is overridden; Write-Prompt
+            # throws so the child never reaches [Console]::ReadKey (Exit-Installer still exits with
+            # the code when the notice fails).
+            $script:interactiveOverrides = (
+                "function Test-EffectiveNonInteractive { param([switch]`$NonInteractive) `$false }`n" +
+                "function Write-Prompt { param([string]`$Message) Write-Host ""PROMPT: `$Message""; throw 'no key press in tests' }")
+        }
+
+        It 'Waits for a key press when someone is at the console, then exits with the code' {
+            $path = New-FaultInjectedInstaller -Name 'interactive-early-exit.ps1' -Body 'return 2' -Overrides (
+                $script:interactiveOverrides + "`nfunction Test-IsContinuousIntegration { `$false }")
+
+            $result = Invoke-ChildInstaller -Arguments @('-File', $path, '-SkipSystemCheck')
+
+            $result.ExitCode | Should -Be 2
+            $result.Output | Should -Match 'stopped early with exit code 2'
+            $result.Output | Should -Match 'PROMPT: Press any key to exit\.\.\.'
+        }
+
+        It 'Never waits under CI' {
+            $path = New-FaultInjectedInstaller -Name 'ci-early-exit.ps1' -Body 'return 2' -Overrides (
+                $script:interactiveOverrides + "`nfunction Test-IsContinuousIntegration { `$true }")
+
+            $result = Invoke-ChildInstaller -Arguments @('-File', $path, '-SkipSystemCheck')
+
+            $result.ExitCode | Should -Be 2
+            $result.Output | Should -Match 'stopped early with exit code 2'
+            $result.Output | Should -Not -Match 'PROMPT:'
+        }
+    }
+
+    # The entry block's Windows PowerShell 5.1 branch, run under pwsh (see
+    # New-FaultInjectedInstaller -EmulateWindowsPowerShell) with Invoke-PowerShell7Bootstrap
+    # overridden. Invoke-WingetInstall is overridden too, so a fall-through into the PowerShell 7
+    # body would print 'install ran'.
+    Context 'Windows PowerShell 5.1 bootstrap phase (review findings P2-13 and P2-14)' {
+        BeforeAll {
+            $script:bootstrapSignature = 'param([switch]$WhatIf, [switch]$NonInteractive, [switch]$SkipSystemCheck, [string]$CommandPath, [string]$LogDirectory)'
+        }
+
+        It 'Logs the bootstrap to its own transcript, hands msiexec that folder, and explains a failure' {
+            $path = New-FaultInjectedInstaller -Name 'bootstrap-fails.ps1' -EmulateWindowsPowerShell -Body "Write-Host 'install ran'; return 0" -Overrides (
+                "function Invoke-PowerShell7Bootstrap { $($script:bootstrapSignature) Write-Host ""bootstrap log folder: [`$LogDirectory]""; Write-ErrorMessage 'PowerShell 7 could not be installed automatically.'; return 1 }")
+
+            $result = Invoke-ChildInstaller -Arguments @('-File', $path, '-NonInteractive')
+
+            $result.ExitCode | Should -Be 1
+            $result.Output | Should -Not -Match 'install ran|Logging this run to:'
+            $result.Output | Should -Match 'Logging the PowerShell 7 bootstrap to: [^\r\n]*install-\d{8}-\d{6}-bootstrap\.log'
+            $result.Output | Should -Match 'The installer stopped early with exit code 1'
+            $bootstrapLog = Get-PrintedLog -Output $result.Output -Label 'Logging the PowerShell 7 bootstrap to:'
+            $bootstrapLog | Should -Match ('Installer build: ' + [regex]::Escape($script:buildId))
+            $bootstrapLog | Should -Match 'PowerShell 7 could not be installed automatically'
+            $bootstrapLog | Should -Match 'stopped early with exit code 1'
+            $result.Output -match 'Logging the PowerShell 7 bootstrap to:\s*([^\r\n\x1b]+?)[\\/]install-' | Should -BeTrue
+            $result.Output | Should -Match ('bootstrap log folder: \[' + [regex]::Escape($Matches[1].Trim()) + '\]')
+        }
+
+        It 'Exits with the relaunched run''s code and adds nothing to the outcome it reported' {
+            $path = New-FaultInjectedInstaller -Name 'bootstrap-relaunched.ps1' -EmulateWindowsPowerShell -Body "Write-Host 'install ran'; return 0" -Overrides (
+                "function Invoke-PowerShell7Bootstrap { $($script:bootstrapSignature) `$script:PowerShell7BootstrapRelaunched = `$true; return 3 }")
+
+            $result = Invoke-ChildInstaller -Arguments @('-File', $path, '-WhatIf', '-NonInteractive')
+
+            $result.ExitCode | Should -Be 3
+            $result.Output | Should -Not -Match 'install ran|stopped early'
+            $result.Output | Should -Match 'Logging the PowerShell 7 bootstrap to: [^\r\n]*install-\d{8}-\d{6}-bootstrap-whatif\.log'
+        }
+
+        It 'Exits 1 with the notice when the bootstrap throws, never falling through' {
+            $path = New-FaultInjectedInstaller -Name 'bootstrap-throws.ps1' -EmulateWindowsPowerShell -Body "Write-Host 'install ran'; return 0" -Overrides (
+                "function Invoke-PowerShell7Bootstrap { $($script:bootstrapSignature) throw 'bootstrap exploded' }")
+
+            $result = Invoke-ChildInstaller -Arguments @('-File', $path, '-NonInteractive')
+
+            $result.ExitCode | Should -Be 1
+            $result.Output | Should -Match 'The PowerShell 7 bootstrap failed unexpectedly: bootstrap exploded'
+            $result.Output | Should -Match 'The installer stopped early with exit code 1'
+            $result.Output | Should -Not -Match 'install ran'
+        }
+
+        It 'Exits 5 when the bootstrap is stopped from outside' {
+            $path = New-FaultInjectedInstaller -Name 'bootstrap-stopped.ps1' -EmulateWindowsPowerShell -Body "Write-Host 'install ran'; return 0" -Overrides (
+                "function Invoke-PowerShell7Bootstrap { $($script:bootstrapSignature) throw [System.Management.Automation.PipelineStoppedException]::new() }")
+
+            $result = Invoke-ChildInstaller -Arguments @('-File', $path, '-NonInteractive')
+
+            $result.ExitCode | Should -Be 5
+            $result.Output | Should -Not -Match 'install ran'
+        }
     }
 }
 

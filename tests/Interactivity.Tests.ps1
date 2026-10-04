@@ -1,7 +1,7 @@
 # Interactivity.Tests.ps1
 # Tests for WingetAppSetup/Private/Interactivity.ps1: the shared Test-EffectiveNonInteractive
-# detection (issue #214), whose sole remaining caller is Invoke-WingetInstall (issue #230), plus
-# the repo-wide "no install path prompts" contract that issue #230 established.
+# detection (issue #214) and Test-IsContinuousIntegration (review finding P2-14), plus the
+# repo-wide "no install path prompts" contract that issue #230 established.
 
 # Load the module's functions once for this file. TestHelpers.ps1 resolves the repo paths
 # and dot-sources WingetAppSetup/Private + Public (the single source of truth; the
@@ -32,6 +32,45 @@ Describe 'Test-EffectiveNonInteractive (issue #214)' {
         $body | Should -Match '\[Environment\]::UserInteractive'
         $body | Should -Match '\[System\.Console\]::IsInputRedirected'
         $body | Should -Match '(?s)catch\s*\{.*return \$true'
+    }
+}
+
+Describe 'Test-IsContinuousIntegration (review finding P2-14)' {
+    # The early-exit notice waits for a key press only outside CI, so these pin which variables
+    # count. Every variable is saved and restored, because the suite itself may run under CI.
+    BeforeEach {
+        $script:savedCiVariables = @{}
+        foreach ($ciVariableName in @('CI', 'GITHUB_ACTIONS', 'TF_BUILD')) {
+            $script:savedCiVariables[$ciVariableName] = [Environment]::GetEnvironmentVariable($ciVariableName)
+            [Environment]::SetEnvironmentVariable($ciVariableName, $null)
+        }
+    }
+
+    AfterEach {
+        foreach ($ciVariableName in $script:savedCiVariables.Keys) {
+            [Environment]::SetEnvironmentVariable($ciVariableName, $script:savedCiVariables[$ciVariableName])
+        }
+    }
+
+    It 'Returns $false when no CI variable is set' {
+        Test-IsContinuousIntegration | Should -BeFalse
+    }
+
+    It 'Returns $true for <Name>=<Value>' -ForEach @(
+        @{ Name = 'CI'; Value = 'true' }
+        @{ Name = 'CI'; Value = '1' }
+        @{ Name = 'GITHUB_ACTIONS'; Value = 'true' }
+        @{ Name = 'TF_BUILD'; Value = 'True' }
+    ) {
+        [Environment]::SetEnvironmentVariable($Name, $Value)
+
+        Test-IsContinuousIntegration | Should -BeTrue
+    }
+
+    It 'Returns $false for CI=<_>' -ForEach @('false', '0') {
+        [Environment]::SetEnvironmentVariable('CI', $_)
+
+        Test-IsContinuousIntegration | Should -BeFalse
     }
 }
 

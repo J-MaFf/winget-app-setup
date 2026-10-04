@@ -244,6 +244,61 @@ Describe 'Build guard: undefined references on every platform (review finding P3
     }
 }
 
+Describe 'Build id covers the whole generated script (review finding P3-12)' {
+    BeforeAll {
+        # Builds the fixture and returns the id the build stamped into its installer.
+        function Get-FixtureBuildId {
+            param ([Parameter(Mandatory = $true)][string]$Root)
+
+            $result = Invoke-FixtureBuild -Root $Root
+            $result.ExitCode | Should -Be 0 -Because $result.Output
+            $installer = Get-Content -Raw -Encoding UTF8 -Path (Join-Path $Root 'winget-app-install.ps1')
+            if ($installer -notmatch "\`$script:InstallerBuildId = '([^']+)'") { throw 'The fixture build stamped no build id.' }
+            $Matches[1]
+        }
+
+        $script:unchangedBuildId = Get-FixtureBuildId -Root (New-BuildFixture -Name 'build-id-unchanged')
+    }
+
+    It 'changes the id when only build/fragments/<_> changes' -ForEach @('tail.ps1', 'head.ps1') {
+        # Before P3-12 only the functions were hashed, so a fix to the entry dispatch shipped under
+        # the same 'Installer build:' id as the code it fixed.
+        $root = New-BuildFixture -Name "build-id-$($_ -replace '\.ps1$', '')"
+        $fragmentPath = Join-Path $root "build/fragments/$_"
+        $fragment = Get-Content -Raw -Encoding UTF8 -Path $fragmentPath
+        if ($_ -eq 'head.ps1') {
+            $fragment = $fragment.Replace('param (', "# build id probe`nparam (")
+        }
+        else {
+            $fragment = $fragment.TrimEnd() + "`n# build id probe`n"
+        }
+        [System.IO.File]::WriteAllText($fragmentPath, $fragment)
+
+        Get-FixtureBuildId -Root $root | Should -Not -Be $script:unchangedBuildId
+    }
+
+    It 'derives the id from the whole script with the id slots blanked, so it can be recomputed' {
+        $installer = Get-Content -Raw -Encoding UTF8 -Path $script:InstallerScriptPath
+        $installer -match "\`$script:InstallerBuildId = '(?<version>[^+']+)\+(?<hash>[0-9a-f]{8})'" | Should -BeTrue
+        $buildId = '{0}+{1}' -f $Matches.version, $Matches.hash
+        $template = ($installer -replace "`r`n", "`n").Replace($buildId, '{{BUILD_ID}}')
+
+        $sha256 = [System.Security.Cryptography.SHA256]::Create()
+        try { $hash = $sha256.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($template)) } finally { $sha256.Dispose() }
+
+        ([System.BitConverter]::ToString($hash, 0, 4).Replace('-', '').ToLowerInvariant()) | Should -Be $Matches.hash
+    }
+
+    It 'fails the build when a source file contains the reserved build id placeholder' {
+        $root = New-BuildFixture -Name 'build-id-placeholder' -ProbeSource "function Get-ZzProbeValue { '{{BUILD_ID}}' }`n"
+
+        $result = Invoke-FixtureBuild -Root $root
+
+        $result.ExitCode | Should -Not -Be 0
+        $result.Output | Should -Match 'Build id check failed'
+    }
+}
+
 Describe 'pre-commit hook checks the staged files (review finding P3-47)' {
     BeforeAll {
         # Git for Windows' sh.exe lives next to git; elsewhere sh is on PATH. Resolved here so a

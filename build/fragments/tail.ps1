@@ -28,61 +28,79 @@ if ($MyInvocation.InvocationName -ne '.') {
     }
     $forceExitCodeOnAbort = $launchedForScript -or (Test-EffectiveNonInteractive -NonInteractive:$NonInteractive)
 
+    # Abort guard state (see the catch and finally blocks below). Reset on every run: under
+    # irm | iex these live in the caller's scope and would otherwise carry over into a second run in
+    # the same console. Exit-Installer sets InstallerExitRequested right before every intended exit,
+    # and InstallerPendingExitCode before it waits for a key press; Invoke-WingetInstall records
+    # InstallerPendingExitCode once it has decided its exit code, just before its final 'Press any
+    # key' prompt.
+    $script:InstallerExitRequested = $false
+    $script:InstallerPendingExitCode = $null
+    $script:InstallLogPath = $null
+    $installerRunCompleted = $false
+
     if ($PSVersionTable.PSVersion.Major -lt 7) {
-        # try/catch, not a bare `exit (Invoke-PowerShell7Bootstrap ...)`: a statement-terminating
-        # error inside the bootstrap would abort only that `exit` statement, and 5.1 would then fall
-        # through into the PowerShell-7-only body below.
-        $bootstrapExitCode = 1
-        $bootstrapReturned = $false
-        try {
-            $bootstrapExitCode = Invoke-PowerShell7Bootstrap -WhatIf:$WhatIf -NonInteractive:$NonInteractive -SkipSystemCheck:$SkipSystemCheck -CommandPath $PSCommandPath
-            $bootstrapReturned = $true
+        # The bootstrap phase gets its own transcript, install-<timestamp>-bootstrap.log, next to the
+        # PowerShell 7 run's (review finding P2-13): the PowerShell 7 install (winget, the MSI and
+        # its msiexec log, the aka.ms fallback), GitHub throttling and relaunch errors used to leave
+        # no log at all. It stays open while the relaunched run works, so it also records the exit
+        # code that run ended with.
+        $script:PowerShell7BootstrapRelaunched = $false
+        $script:InstallLogPath = Start-InstallerTranscript -Bootstrap -WhatIf:$WhatIf
+        $bootstrapLogDirectory = ''
+        if ($script:InstallLogPath) {
+            $bootstrapLogDirectory = Split-Path -Parent $script:InstallLogPath
         }
-        catch {
-            Write-ErrorMessage "The PowerShell 7 bootstrap failed unexpectedly: $_"
-            $bootstrapExitCode = 1
-            $bootstrapReturned = $true
+        $bootstrapExitCode = 1
+        try {
+            if ($script:InstallLogPath) {
+                Write-Info "Logging the PowerShell 7 bootstrap to: $script:InstallLogPath"
+            }
+            Write-Info "Installer build: $script:InstallerBuildId"
+            # try/catch, not a bare `exit (Invoke-PowerShell7Bootstrap ...)`: a statement-terminating
+            # error inside the bootstrap would abort only that `exit` statement, and 5.1 would then
+            # fall through into the PowerShell-7-only body below.
+            try {
+                $bootstrapExitCode = Invoke-PowerShell7Bootstrap -WhatIf:$WhatIf -NonInteractive:$NonInteractive -SkipSystemCheck:$SkipSystemCheck -CommandPath $PSCommandPath -LogDirectory $bootstrapLogDirectory
+            }
+            catch {
+                Write-ErrorMessage "The PowerShell 7 bootstrap failed unexpectedly: $_"
+                $bootstrapExitCode = 1
+            }
+            # A relaunched PowerShell 7 run reported its own outcome (and waited for a key press when
+            # someone was there); a bootstrap that failed before it could relaunch reports here.
+            Exit-Installer -Code $bootstrapExitCode -NonInteractive:$NonInteractive -OutcomeShown:$script:PowerShell7BootstrapRelaunched
         }
         finally {
             # Ctrl+C or a console stop reaches this 5.1 parent too while it waits for the relaunched
             # pwsh (same console), and cannot be caught; without this the parent would exit 0.
-            if (-not $bootstrapReturned -and $forceExitCodeOnAbort) {
-                $host.SetShouldExit(5)
+            if (-not $script:InstallerExitRequested -and $forceExitCodeOnAbort) {
+                if ($null -ne $script:InstallerPendingExitCode) {
+                    # Stopped while waiting for a key press after the failure notice.
+                    $host.SetShouldExit([int]$script:InstallerPendingExitCode)
+                }
+                else {
+                    $host.SetShouldExit(5)
+                }
+            }
+            if ($script:InstallLogPath) {
+                try {
+                    [void](Stop-Transcript)
+                }
+                catch {
+                    # Best-effort, as in the PowerShell 7 branch below.
+                }
             }
         }
+        # Never reached unless Exit-Installer itself failed: never fall through into the
+        # PowerShell-7-only body below.
         exit $bootstrapExitCode
     }
 
-    # Abort guard state (see the catch and finally at the end of this block). Reset on every run:
-    # under irm | iex these live in the caller's scope and would otherwise carry over into a second
-    # run in the same console. Exit-Installer sets InstallerExitRequested before every intended
-    # exit below; Invoke-WingetInstall records InstallerPendingExitCode once it has decided its exit
-    # code, just before its final 'Press any key' prompt.
-    $script:InstallerExitRequested = $false
-    $script:InstallerPendingExitCode = $null
-    $installerRunCompleted = $false
-
-    # Persistent transcript (issue #189): a failed install on a remote user's machine used to
-    # leave zero artifacts. The log lands under ProgramData - not the elevating account's TEMP -
-    # so it survives cross-user elevation and stays findable afterwards. Logging must never block
-    # an install: any failure here downgrades to a warning and the run continues untranscribed.
-    $script:InstallLogPath = $null
-    $transcriptStarted = $false
-    try {
-        $logDirectory = Join-Path $env:ProgramData 'winget-app-setup\logs'
-        if (-not (Test-Path -LiteralPath $logDirectory)) {
-            [void](New-Item -Path $logDirectory -ItemType Directory -Force)
-        }
-        # The -whatif suffix keeps dry-run transcripts from being mistaken for real install logs.
-        $logSuffix = if ($WhatIf) { '-whatif' } else { '' }
-        $logCandidate = Join-Path $logDirectory ('install-{0:yyyyMMdd-HHmmss}{1}.log' -f (Get-Date), $logSuffix)
-        [void](Start-Transcript -Path $logCandidate -ErrorAction Stop)
-        $transcriptStarted = $true
-        $script:InstallLogPath = $logCandidate
-    }
-    catch {
-        Write-WarningMessage "Transcript logging could not be started: $_. Continuing without a log file."
-    }
+    # Persistent transcript (issue #189); see Start-InstallerTranscript. Logging never blocks an
+    # install: when it cannot start, the run continues untranscribed and InstallLogPath stays $null.
+    $script:InstallLogPath = Start-InstallerTranscript -WhatIf:$WhatIf
+    $transcriptStarted = [bool]$script:InstallLogPath
 
     try {
         if ($script:InstallLogPath) {
@@ -104,7 +122,7 @@ if ($MyInvocation.InvocationName -ne '.') {
                 }
             }
             elseif (-not (Test-SystemRequirements -WhatIf:$WhatIf)) {
-                Exit-Installer 1
+                Exit-Installer -Code 1 -Reason 'a blocking pre-flight system check failed (see above)' -NonInteractive:$NonInteractive
             }
         }
 
@@ -114,12 +132,15 @@ if ($MyInvocation.InvocationName -ne '.') {
         # last thing it writes to the output stream: taking the last element keeps the code right
         # even if a helper ever leaks a value into that stream.
         $installerExitCode = [int](@(Invoke-WingetInstall -WhatIf:$WhatIf -NonInteractive:$NonInteractive -SkipSystemCheck:$SkipSystemCheck)[-1])
-        $installerRunCompleted = $true
         # Exit only for a non-zero code: a successful run ends normally (exit code 0 under -File), so
-        # an interactive irm | iex console stays open afterwards.
+        # an interactive irm | iex console stays open afterwards. A run that reached its summary set
+        # InstallerPendingExitCode before its final prompt and has shown its outcome; any other
+        # non-zero code is an early exit (winget missing, a bad catalog, elevation declined), which
+        # Exit-Installer explains before the window closes.
         if ($installerExitCode -ne 0) {
-            Exit-Installer $installerExitCode
+            Exit-Installer -Code $installerExitCode -NonInteractive:$NonInteractive -OutcomeShown:($null -ne $script:InstallerPendingExitCode)
         }
+        $installerRunCompleted = $true
     }
     catch {
         # Any unexpected error lands here instead of silently ending the run with exit 0: inside
@@ -135,13 +156,12 @@ if ($MyInvocation.InvocationName -ne '.') {
             Write-ErrorMessage "Stack trace:`n$($_.ScriptStackTrace)"
         }
         if ($forceExitCodeOnAbort) {
-            Exit-Installer 5
+            Exit-Installer -Code 5 -NonInteractive:$NonInteractive
         }
         # Interactive console: exiting would close the window (under irm | iex the host itself),
-        # so leave the error on screen and the code in $LASTEXITCODE instead.
-        if ($script:InstallLogPath) {
-            Write-Info "Full transcript of this run: $script:InstallLogPath"
-        }
+        # so leave the error on screen and the code in $LASTEXITCODE instead. The console stays
+        # open, so the notice needs no key press.
+        Write-InstallerExitNotice -Code 5 -NoPause
         $script:InstallerExitRequested = $true
         $global:LASTEXITCODE = 5
     }
@@ -151,8 +171,9 @@ if ($MyInvocation.InvocationName -ne '.') {
         # PipelineStoppedException cannot be caught. A run from a file would then exit 0.
         if (-not $installerRunCompleted -and -not $script:InstallerExitRequested -and $forceExitCodeOnAbort) {
             if ($null -ne $script:InstallerPendingExitCode) {
-                # Stopped at the final 'Press any key' prompt: the run had already finished and
-                # decided its exit code, so report that rather than an abort.
+                # Stopped at a 'Press any key' prompt (the run's final one, or Exit-Installer's
+                # after an early failure): the exit code was already decided, so report that
+                # rather than an abort.
                 $host.SetShouldExit([int]$script:InstallerPendingExitCode)
             }
             else {

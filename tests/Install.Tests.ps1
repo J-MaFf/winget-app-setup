@@ -319,10 +319,10 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
             $script:errorMessages | Should -Contain 'This script requires administrator privileges.'
             $script:errorMessages | Should -Contain 'Auto-elevation is unavailable when running through IEX/remote execution.'
             $script:infoMessages | Should -Contain 'Open an elevated PowerShell or Windows Terminal session and run the IEX command again.'
-            $script:infoMessages | Should -Contain 'Exiting in 5 seconds...'
-            # No "press Enter to restart" pause any more (issue #230).
-            (@($script:errorMessages) + @($script:infoMessages)) -join "`n" | Should -Not -Match 'Press Enter'
-            Should -Invoke Start-Sleep -Times 1 -Exactly -ParameterFilter { $Seconds -eq 5 }
+            # No "press Enter to restart" pause any more (issue #230), and no 5-second sleep either:
+            # the entry script's Exit-Installer holds the window when someone is there (P2-14).
+            (@($script:errorMessages) + @($script:infoMessages)) -join "`n" | Should -Not -Match 'Press Enter|Exiting in 5 seconds'
+            Should -Invoke Start-Sleep -Times 0 -Exactly -ParameterFilter { $Seconds -eq 5 }
             Should -Invoke Restart-WithElevation -Times 0 -Exactly
             Should -Invoke Install-AppWithVerification -Times 0 -Exactly
         }
@@ -1189,6 +1189,103 @@ Describe 'Dry run leaves the machine unchanged (P2-16)' {
         $result | Should -Be 0
         ($script:infoMessages -join "`n") | Should -Match '\[DRY-RUN\] Winget source data is corrupted\. A real run would repair it: winget source reset --force'
         $script:warningMessages | Should -Not -Contain 'Winget sources could not be repaired. Some installations may fail.'
+    }
+}
+
+Describe 'Write-InstallerExitNotice (review findings P2-14 and P3-15)' {
+    # What Exit-Installer prints before an early exit. Under irm | iex the exit closes the window, so
+    # this block is all the teammate who files the GitHub issue gets to see.
+    BeforeEach {
+        $script:noticeLines = @()
+        Mock Write-ErrorMessage { $script:noticeLines += "ERROR: $Message" }
+        Mock Write-WarningMessage { $script:noticeLines += "WARN: $Message" }
+        Mock Write-Info { $script:noticeLines += "INFO: $Message" }
+        Mock Write-Host { }
+        # Throws so a test can never reach [Console]::ReadKey, which would block the suite.
+        Mock Write-Prompt { throw 'waited for a key press' }
+        Mock Test-EffectiveNonInteractive { $true }
+        Mock Test-IsContinuousIntegration { $false }
+        $script:savedLogPath = $script:InstallLogPath
+        $script:savedBuildId = $script:InstallerBuildId
+        $script:InstallLogPath = 'C:\ProgramData\winget-app-setup\logs\install-20261004-101500.log'
+        $script:InstallerBuildId = '1.0.0+0badc0de'
+    }
+
+    AfterEach {
+        $script:InstallLogPath = $script:savedLogPath
+        $script:InstallerBuildId = $script:savedBuildId
+    }
+
+    It 'Prints the exit code with the reason, the log file and the build' {
+        Write-InstallerExitNotice -Code 1 -Reason 'a blocking pre-flight system check failed (see above)'
+
+        $script:noticeLines | Should -Contain 'ERROR: The installer stopped early with exit code 1: a blocking pre-flight system check failed (see above).'
+        $script:noticeLines | Should -Contain 'INFO: Log file: C:\ProgramData\winget-app-setup\logs\install-20261004-101500.log'
+        $script:noticeLines | Should -Contain 'INFO: Installer build: 1.0.0+0badc0de'
+    }
+
+    It 'Says where to report it, with the privacy note for the public repository' {
+        Write-InstallerExitNotice -Code 1
+
+        ($script:noticeLines -join "`n") | Should -Match ([regex]::Escape('https://github.com/J-MaFf/winget-app-setup/issues/new?template=install-failure.yml'))
+        ($script:noticeLines -join "`n") | Should -Match 'WARN: That repository is public, and the log names this computer and the accounts'
+    }
+
+    It 'Says what exit code <Code> means when the caller gives no reason' -ForEach @(
+        @{ Code = 1; Meaning = 'administrator rights were not available, a pre-flight check failed, or PowerShell 7 could not be set up (see above)' }
+        @{ Code = 2; Meaning = 'winget is not available or could not be started (see above)' }
+        @{ Code = 3; Meaning = 'the app catalog failed validation (see above)' }
+        @{ Code = 5; Meaning = 'the run was aborted before it finished (see above)' }
+    ) {
+        Write-InstallerExitNotice -Code $Code
+
+        $script:noticeLines | Should -Contain ('ERROR: The installer stopped early with exit code {0}: {1}.' -f $Code, $Meaning)
+    }
+
+    It 'Prints the code alone when it has no known meaning and no reason' {
+        Write-InstallerExitNotice -Code 64
+
+        $script:noticeLines | Should -Contain 'ERROR: The installer stopped early with exit code 64.'
+    }
+
+    It 'Says that there is no log file when the transcript could not be started' {
+        $script:InstallLogPath = $null
+
+        Write-InstallerExitNotice -Code 3
+
+        ($script:noticeLines -join "`n") | Should -Match 'WARN: Log file: none'
+    }
+
+    It 'Waits for a key press when someone is at the console' {
+        Mock Test-EffectiveNonInteractive { $false }
+
+        { Write-InstallerExitNotice -Code 2 } | Should -Throw 'waited for a key press'
+        Should -Invoke Write-Prompt -Times 1 -Exactly -ParameterFilter { $Message -eq 'Press any key to exit...' }
+    }
+
+    It 'Never waits in a non-interactive run (RMM, scheduled task, -NonInteractive)' {
+        Write-InstallerExitNotice -Code 2 -NonInteractive
+
+        Should -Invoke Test-EffectiveNonInteractive -Times 1 -Exactly -ParameterFilter { $NonInteractive }
+        Should -Invoke Write-Prompt -Times 0 -Exactly
+    }
+
+    It 'Never waits under CI, even when the console looks interactive' {
+        Mock Test-EffectiveNonInteractive { $false }
+        Mock Test-IsContinuousIntegration { $true }
+
+        Write-InstallerExitNotice -Code 2
+
+        Should -Invoke Write-Prompt -Times 0 -Exactly
+    }
+
+    It 'Never waits with -NoPause (the console stays open anyway)' {
+        Mock Test-EffectiveNonInteractive { $false }
+
+        Write-InstallerExitNotice -Code 5 -NoPause
+
+        Should -Invoke Write-Prompt -Times 0 -Exactly
+        ($script:noticeLines -join "`n") | Should -Match 'stopped early with exit code 5'
     }
 }
 
