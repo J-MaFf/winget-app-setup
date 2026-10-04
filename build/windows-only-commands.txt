@@ -14,6 +14,7 @@ Add-AppxPackage
 Add-AppxProvisionedPackage
 Get-AppxPackage
 Get-AppxProvisionedPackage
+Get-AuthenticodeSignature
 Get-CimInstance
 Get-ScheduledTask
 Out-GridView

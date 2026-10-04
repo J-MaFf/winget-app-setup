@@ -42,16 +42,16 @@ if ($MyInvocation.InvocationName -ne '.') {
     if ($PSVersionTable.PSVersion.Major -lt 7) {
         # The bootstrap phase gets its own transcript, install-<timestamp>-bootstrap.log, next to the
         # PowerShell 7 run's (review finding P2-13): the PowerShell 7 install (winget, the MSI and
-        # its msiexec log, the aka.ms fallback), GitHub throttling and relaunch errors used to leave
-        # no log at all. It stays open while the relaunched run works, so it also records the exit
-        # code that run ended with.
+        # its msiexec log), GitHub throttling and relaunch errors used to leave no log at all. It
+        # stays open while the relaunched run works, so it also records the exit code that run
+        # ended with. A bootstrap that fails before it can relaunch exits 7.
         $script:PowerShell7BootstrapRelaunched = $false
         $script:InstallLogPath = Start-InstallerTranscript -Bootstrap -WhatIf:$WhatIf
         $bootstrapLogDirectory = ''
         if ($script:InstallLogPath) {
             $bootstrapLogDirectory = Split-Path -Parent $script:InstallLogPath
         }
-        $bootstrapExitCode = 1
+        $bootstrapExitCode = 7
         try {
             if ($script:InstallLogPath) {
                 Write-Info "Logging the PowerShell 7 bootstrap to: $script:InstallLogPath"
@@ -59,13 +59,14 @@ if ($MyInvocation.InvocationName -ne '.') {
             Write-Info "Installer build: $script:InstallerBuildId"
             # try/catch, not a bare `exit (Invoke-PowerShell7Bootstrap ...)`: a statement-terminating
             # error inside the bootstrap would abort only that `exit` statement, and 5.1 would then
-            # fall through into the PowerShell-7-only body below.
+            # fall through into the PowerShell-7-only body below. The build id goes along so an
+            # irm | iex run relaunches this same build and never another one (review finding P2-18).
             try {
-                $bootstrapExitCode = Invoke-PowerShell7Bootstrap -WhatIf:$WhatIf -NonInteractive:$NonInteractive -SkipSystemCheck:$SkipSystemCheck -CommandPath $PSCommandPath -LogDirectory $bootstrapLogDirectory
+                $bootstrapExitCode = Invoke-PowerShell7Bootstrap -WhatIf:$WhatIf -NonInteractive:$NonInteractive -SkipSystemCheck:$SkipSystemCheck -CommandPath $PSCommandPath -ExpectedBuildId $script:InstallerBuildId -LogDirectory $bootstrapLogDirectory
             }
             catch {
                 Write-ErrorMessage "The PowerShell 7 bootstrap failed unexpectedly: $_"
-                $bootstrapExitCode = 1
+                $bootstrapExitCode = 7
             }
             # A relaunched PowerShell 7 run reported its own outcome (and waited for a key press when
             # someone was there); a bootstrap that failed before it could relaunch reports here.

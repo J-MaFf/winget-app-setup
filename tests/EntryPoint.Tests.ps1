@@ -253,7 +253,7 @@ Describe 'Generated installer: Windows PowerShell 5.1 parse safety (issue #210)'
         # the branch does is run under pwsh by the 'Windows PowerShell 5.1 bootstrap phase' tests.
         $installer = Get-Content -Raw -Encoding UTF8 -Path $script:InstallerScriptPath
         $installer | Should -Match ([regex]::Escape('if ($PSVersionTable.PSVersion.Major -lt 7)'))
-        $installer | Should -Match ([regex]::Escape('$bootstrapExitCode = Invoke-PowerShell7Bootstrap -WhatIf:$WhatIf -NonInteractive:$NonInteractive -SkipSystemCheck:$SkipSystemCheck -CommandPath $PSCommandPath -LogDirectory $bootstrapLogDirectory'))
+        $installer | Should -Match ([regex]::Escape('$bootstrapExitCode = Invoke-PowerShell7Bootstrap -WhatIf:$WhatIf -NonInteractive:$NonInteractive -SkipSystemCheck:$SkipSystemCheck -CommandPath $PSCommandPath -ExpectedBuildId $script:InstallerBuildId -LogDirectory $bootstrapLogDirectory'))
         $installer | Should -Match 'This installer requires PowerShell 7\+ \(pwsh\)'
     }
 }
@@ -488,23 +488,23 @@ Describe 'Early exits explain themselves before the window closes (review findin
     # body would print 'install ran'.
     Context 'Windows PowerShell 5.1 bootstrap phase (review findings P2-13 and P2-14)' {
         BeforeAll {
-            $script:bootstrapSignature = 'param([switch]$WhatIf, [switch]$NonInteractive, [switch]$SkipSystemCheck, [string]$CommandPath, [string]$LogDirectory)'
+            $script:bootstrapSignature = 'param([switch]$WhatIf, [switch]$NonInteractive, [switch]$SkipSystemCheck, [string]$CommandPath, [string]$ExpectedBuildId, [string]$LogDirectory)'
         }
 
         It 'Logs the bootstrap to its own transcript, hands msiexec that folder, and explains a failure' {
             $path = New-FaultInjectedInstaller -Name 'bootstrap-fails.ps1' -EmulateWindowsPowerShell -Body "Write-Host 'install ran'; return 0" -Overrides (
-                "function Invoke-PowerShell7Bootstrap { $($script:bootstrapSignature) Write-Host ""bootstrap log folder: [`$LogDirectory]""; Write-ErrorMessage 'PowerShell 7 could not be installed automatically.'; return 1 }")
+                "function Invoke-PowerShell7Bootstrap { $($script:bootstrapSignature) Write-Host ""bootstrap log folder: [`$LogDirectory]""; Write-ErrorMessage 'PowerShell 7 could not be installed automatically.'; return 7 }")
 
             $result = Invoke-ChildInstaller -Arguments @('-File', $path, '-NonInteractive')
 
-            $result.ExitCode | Should -Be 1
+            $result.ExitCode | Should -Be 7
             $result.Output | Should -Not -Match 'install ran|Logging this run to:'
             $result.Output | Should -Match 'Logging the PowerShell 7 bootstrap to: [^\r\n]*install-\d{8}-\d{6}-bootstrap\.log'
-            $result.Output | Should -Match 'The installer stopped early with exit code 1'
+            $result.Output | Should -Match 'The installer stopped early with exit code 7: PowerShell 7 could not be installed, or the installer could not be relaunched under it'
             $bootstrapLog = Get-PrintedLog -Output $result.Output -Label 'Logging the PowerShell 7 bootstrap to:'
             $bootstrapLog | Should -Match ('Installer build: ' + [regex]::Escape($script:buildId))
             $bootstrapLog | Should -Match 'PowerShell 7 could not be installed automatically'
-            $bootstrapLog | Should -Match 'stopped early with exit code 1'
+            $bootstrapLog | Should -Match 'stopped early with exit code 7'
             $result.Output -match 'Logging the PowerShell 7 bootstrap to:\s*([^\r\n\x1b]+?)[\\/]install-' | Should -BeTrue
             $result.Output | Should -Match ('bootstrap log folder: \[' + [regex]::Escape($Matches[1].Trim()) + '\]')
         }
@@ -520,15 +520,25 @@ Describe 'Early exits explain themselves before the window closes (review findin
             $result.Output | Should -Match 'Logging the PowerShell 7 bootstrap to: [^\r\n]*install-\d{8}-\d{6}-bootstrap-whatif\.log'
         }
 
-        It 'Exits 1 with the notice when the bootstrap throws, never falling through' {
+        It 'Hands the bootstrap the running build id, so an irm | iex relaunch runs this same build (review finding P2-18)' {
+            $path = New-FaultInjectedInstaller -Name 'bootstrap-build-id.ps1' -EmulateWindowsPowerShell -Body "Write-Host 'install ran'; return 0" -Overrides (
+                "function Invoke-PowerShell7Bootstrap { $($script:bootstrapSignature) Write-Host ""expected build: [`$ExpectedBuildId]""; `$script:PowerShell7BootstrapRelaunched = `$true; return 0 }")
+
+            $result = Invoke-ChildInstaller -Arguments @('-File', $path, '-NonInteractive')
+
+            $result.ExitCode | Should -Be 0
+            $result.Output | Should -Match ('expected build: \[' + [regex]::Escape($script:buildId) + '\]')
+        }
+
+        It 'Exits 7 with the notice when the bootstrap throws, never falling through' {
             $path = New-FaultInjectedInstaller -Name 'bootstrap-throws.ps1' -EmulateWindowsPowerShell -Body "Write-Host 'install ran'; return 0" -Overrides (
                 "function Invoke-PowerShell7Bootstrap { $($script:bootstrapSignature) throw 'bootstrap exploded' }")
 
             $result = Invoke-ChildInstaller -Arguments @('-File', $path, '-NonInteractive')
 
-            $result.ExitCode | Should -Be 1
+            $result.ExitCode | Should -Be 7
             $result.Output | Should -Match 'The PowerShell 7 bootstrap failed unexpectedly: bootstrap exploded'
-            $result.Output | Should -Match 'The installer stopped early with exit code 1'
+            $result.Output | Should -Match 'The installer stopped early with exit code 7'
             $result.Output | Should -Not -Match 'install ran'
         }
 

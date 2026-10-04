@@ -61,6 +61,7 @@ $windowsOnlyCommandParameters = [ordered]@{
     'Set-ScheduledTask'           = { [CmdletBinding()] param([Parameter(Position = 0)][string]$TaskName, [string]$TaskPath, [Microsoft.Management.Infrastructure.CimInstance[]]$Action, [Microsoft.Management.Infrastructure.CimInstance[]]$Trigger, [Microsoft.Management.Infrastructure.CimInstance]$Settings, [Microsoft.Management.Infrastructure.CimInstance]$Principal, [string]$User, [string]$Password, [Microsoft.Management.Infrastructure.CimInstance]$InputObject) }
     'Unregister-ScheduledTask'    = { [CmdletBinding(SupportsShouldProcess = $true)] param([Parameter(Position = 0)][string[]]$TaskName, [Parameter(Position = 1)][string[]]$TaskPath, [Microsoft.Management.Infrastructure.CimInstance[]]$InputObject) }
     'Repair-WinGetPackageManager' = { [CmdletBinding()] param([string]$Version, [switch]$Latest, [switch]$IncludePrerelease, [switch]$AllUsers, [switch]$Force) }
+    'Get-AuthenticodeSignature'   = { [CmdletBinding()] param([Parameter(Position = 0)][string[]]$FilePath, [string[]]$LiteralPath, [string[]]$SourcePathOrExtension, [byte[]]$Content) }
     'winget'                      = $null
     'powershell.exe'              = $null
 }

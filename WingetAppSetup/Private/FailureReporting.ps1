@@ -101,10 +101,11 @@ function Write-InstallerExitNotice {
     $why = $Reason
     if (-not $why) {
         switch ($Code) {
-            1 { $why = 'administrator rights were not available, a pre-flight check failed, or PowerShell 7 could not be set up (see above)' }
+            1 { $why = 'administrator rights were not available or a pre-flight check failed (see above)' }
             2 { $why = 'winget is not available or could not be started (see above)' }
             3 { $why = 'the app catalog failed validation (see above)' }
             5 { $why = 'the run was aborted before it finished (see above)' }
+            7 { $why = 'PowerShell 7 could not be installed, or the installer could not be relaunched under it (see above)' }
         }
     }
 

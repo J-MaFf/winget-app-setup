@@ -159,6 +159,7 @@ Describe 'Test-GitHubRateLimitError' {
 
 Describe 'Get-PowerShell7MsiInfo' {
     BeforeEach {
+        Mock Write-Info { }
         Mock Write-WarningMessage { }
         Mock Invoke-RestMethod { [pscustomobject]@{ ReleaseTag = 'v7.6.4' } }
         $script:savedArchitecture = $env:PROCESSOR_ARCHITECTURE
@@ -253,6 +254,59 @@ Describe 'Get-PowerShell7MsiInfo' {
 
         Get-PowerShell7MsiInfo | Should -BeNullOrEmpty
     }
+
+    Context 'PowerShell 7.7 and later ship no MSI (review finding P2-17)' {
+        # The PowerShell team stopped shipping the MSI with 7.7 (7.7.0-preview.5 has none); 7.6, an
+        # LTS release, keeps it. A URL built from ReleaseTag alone 404s once ReleaseTag is 7.7, and
+        # an elevating admin account with no winget has no other way to get PowerShell 7.
+
+        It 'Uses the newest LTS release once the current release ships no MSI' {
+            Mock Invoke-RestMethod { [pscustomobject]@{ ReleaseTag = 'v7.7.0'; LTSReleaseTag = @('v7.6.6') } }
+
+            $info = Get-PowerShell7MsiInfo
+
+            $info.Version | Should -Be '7.6.6'
+            $info.FileName | Should -Be 'PowerShell-7.6.6-win-x64.msi'
+            $info.Url | Should -Be 'https://github.com/PowerShell/PowerShell/releases/download/v7.6.6/PowerShell-7.6.6-win-x64.msi'
+            Should -Invoke Write-Info -Times 1 -Exactly -ParameterFilter { $Message -match 'PowerShell 7\.7\.0, the current release, ships no MSI installer, so this installs PowerShell 7\.6\.6 \(LTS\) instead' }
+        }
+
+        It 'Picks the newest LTS release by version, not by its place in the list: <_>' -ForEach @('v7.4.20,v7.6.6', 'v7.6.6,v7.4.20') {
+            # metadata.json lists LTSReleaseTag as ["v7.4.20", "v7.6.6"] (October 2026), oldest first.
+            $script:ltsTags = $_ -split ','
+            Mock Invoke-RestMethod { [pscustomobject]@{ ReleaseTag = 'v7.7.1'; LTSReleaseTag = $script:ltsTags } }
+
+            (Get-PowerShell7MsiInfo).Version | Should -Be '7.6.6'
+        }
+
+        It 'Reads a single LTS tag as well as a list' {
+            Mock Invoke-RestMethod { [pscustomobject]@{ ReleaseTag = 'v7.7.0'; LTSReleaseTag = 'v7.6.7' } }
+
+            (Get-PowerShell7MsiInfo).Version | Should -Be '7.6.7'
+        }
+
+        It 'Skips LTS entries that are not plain release tags' {
+            Mock Invoke-RestMethod { [pscustomobject]@{ ReleaseTag = 'v7.7.0'; LTSReleaseTag = @('v7.6.6', 'v7.6.9-rc.1', '', 'garbage') } }
+
+            (Get-PowerShell7MsiInfo).Version | Should -Be '7.6.6'
+        }
+
+        It 'Keeps the current release while it still ships an MSI, as metadata.json reads today' {
+            Mock Invoke-RestMethod { [pscustomobject]@{ ReleaseTag = 'v7.6.6'; LTSReleaseTag = @('v7.4.20', 'v7.6.6') } }
+
+            (Get-PowerShell7MsiInfo).Version | Should -Be '7.6.6'
+            Should -Invoke Write-Info -Times 0 -ParameterFilter { $Message -match 'ships no MSI' }
+        }
+
+        It 'Returns $null and says why when no listed release ships an MSI' {
+            Mock Invoke-RestMethod { [pscustomobject]@{ ReleaseTag = 'v7.8.0'; LTSReleaseTag = @('v7.8.0') } }
+
+            Get-PowerShell7MsiInfo | Should -BeNullOrEmpty
+            Should -Invoke Write-WarningMessage -Times 1 -Exactly -ParameterFilter {
+                $Message -match 'lists no release that ships an MSI installer \(current release: v7\.8\.0; LTS releases: v7\.8\.0\)'
+            }
+        }
+    }
 }
 
 Describe 'Save-WebFileWithTimeout' {
@@ -273,12 +327,95 @@ Describe 'Save-WebFileWithTimeout' {
     }
 }
 
+Describe 'Test-PowerShell7MsiSignature (review finding P3-17)' {
+    # msiexec installs an unsigned or altered MSI without complaint, so the bootstrap checks the
+    # download's Authenticode signature first. Get-AuthenticodeSignature is the Windows seam here.
+    BeforeAll {
+        $script:microsoftSubject = 'CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US'
+        function New-TestSignature {
+            param ([string]$Status, [string]$Subject)
+            $certificate = $null
+            if ($Subject) {
+                $certificate = [pscustomobject]@{ Subject = $Subject }
+            }
+            [pscustomobject]@{ Status = $Status; SignerCertificate = $certificate }
+        }
+    }
+
+    BeforeEach {
+        Mock Write-Info { }
+        Mock Write-WarningMessage { }
+        $script:msiPath = Join-Path $TestDrive 'PowerShell-7.6.6-win-x64.msi'
+    }
+
+    It 'Accepts a valid signature from Microsoft Corporation' {
+        Mock Get-AuthenticodeSignature { New-TestSignature -Status 'Valid' -Subject $script:microsoftSubject }
+
+        Test-PowerShell7MsiSignature -Path $script:msiPath | Should -BeTrue
+
+        Should -Invoke Get-AuthenticodeSignature -Times 1 -Exactly -ParameterFilter { $LiteralPath -eq $script:msiPath }
+        Should -Invoke Write-WarningMessage -Times 0
+    }
+
+    It 'Rejects a download that is not signed at all, such as a proxy''s web page, and says so' {
+        Mock Get-AuthenticodeSignature { New-TestSignature -Status 'NotSigned' }
+
+        Test-PowerShell7MsiSignature -Path $script:msiPath | Should -BeFalse
+
+        Should -Invoke Write-WarningMessage -Times 1 -Exactly -ParameterFilter {
+            $Message -match 'not a PowerShell installer signed by Microsoft \(signature status: NotSigned; signer: none\), so it was not installed' -and
+            $Message -match 'web page instead of the MSI'
+        }
+    }
+
+    It 'Rejects a file whose content no longer matches its signature (status <_>)' -ForEach @('HashMismatch', 'NotTrusted', 'UnknownError') {
+        $script:status = $_
+        Mock Get-AuthenticodeSignature { New-TestSignature -Status $script:status -Subject $script:microsoftSubject }
+
+        Test-PowerShell7MsiSignature -Path $script:msiPath | Should -BeFalse
+    }
+
+    It 'Rejects a valid signature from anyone but Microsoft: <_>' -ForEach @(
+        'CN=Contoso Ltd, O=Contoso Ltd, C=US'
+        'CN=Microsoft Corporation Lookalike, O=Lookalike, C=US'
+        'CN=Not Microsoft Corporation, O=Lookalike, C=US'
+        'O=Microsoft Corporation, C=US'
+    ) {
+        $script:subject = $_
+        Mock Get-AuthenticodeSignature { New-TestSignature -Status 'Valid' -Subject $script:subject }
+
+        Test-PowerShell7MsiSignature -Path $script:msiPath | Should -BeFalse
+        Should -Invoke Write-WarningMessage -Times 1 -Exactly -ParameterFilter { $Message -match 'signature status: Valid; signer: ' }
+    }
+
+    It 'Rejects the file when the signature cannot be read' {
+        Mock Get-AuthenticodeSignature { throw 'Cannot find path because it does not exist.' }
+
+        Test-PowerShell7MsiSignature -Path $script:msiPath | Should -BeFalse
+        Should -Invoke Write-WarningMessage -Times 1 -Exactly -ParameterFilter { $Message -match 'Could not check the signature of the downloaded PowerShell MSI, so it was not installed' }
+    }
+
+    It 'Rejects the file when no signature information comes back' {
+        Mock Get-AuthenticodeSignature { $null }
+
+        Test-PowerShell7MsiSignature -Path $script:msiPath | Should -BeFalse
+        Should -Invoke Write-WarningMessage -Times 1 -Exactly -ParameterFilter { $Message -match 'signature status: unknown; signer: none' }
+    }
+}
+
 Describe 'Install-PowerShell7FromMsi' {
     BeforeEach {
         Mock Write-Info { }
         Mock Write-WarningMessage { }
         Mock New-Item { }
         Mock Remove-Item { }
+        # The download is Microsoft's signed MSI unless a test says otherwise (review finding P3-17).
+        Mock Get-AuthenticodeSignature {
+            [pscustomobject]@{
+                Status            = 'Valid'
+                SignerCertificate = [pscustomobject]@{ Subject = 'CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US' }
+            }
+        }
         Mock Get-PowerShell7MsiInfo {
             @{
                 Version  = '7.6.4'
@@ -313,6 +450,26 @@ Describe 'Install-PowerShell7FromMsi' {
             $ArgumentList -contains '/quiet' -and
             $ArgumentList -contains '/norestart'
         }
+    }
+
+    It 'Checks the downloaded MSI''s signature before msiexec sees it (review finding P3-17)' {
+        Install-PowerShell7FromMsi | Should -Be $true
+
+        Should -Invoke Get-AuthenticodeSignature -Times 1 -Exactly -ParameterFilter {
+            $LiteralPath -like '*winget-app-setup-pwsh-*PowerShell-7.6.4-win-x64.msi'
+        }
+    }
+
+    It 'Never runs msiexec on a download that is not Microsoft''s signed MSI (review finding P3-17)' {
+        # A proxy that answers with an HTML page leaves an unsigned file behind; msiexec used to get
+        # it anyway and fail with an opaque 1620, or install a substituted package without a word.
+        Mock Get-AuthenticodeSignature { [pscustomobject]@{ Status = 'NotSigned'; SignerCertificate = $null } }
+
+        Install-PowerShell7FromMsi | Should -Be $false
+
+        Should -Invoke Start-Process -Times 0 -ParameterFilter { $FilePath -eq 'msiexec.exe' }
+        Should -Invoke Write-WarningMessage -Times 1 -Exactly -ParameterFilter { $Message -match 'not a PowerShell installer signed by Microsoft' }
+        Should -Invoke Remove-Item -Times 1 -Exactly -ParameterFilter { $LiteralPath -like '*winget-app-setup-pwsh-*' }
     }
 
     It 'Downloads into a unique per-run directory, then removes it' {
@@ -477,9 +634,8 @@ Describe 'Invoke-PowerShell7Bootstrap' {
         Mock Write-ErrorMessage { }
         Mock Write-Success { }
         Mock Invoke-RestMethod { '# stub' }
-        # Default the direct-MSI path to "did not work" so the pre-existing tests below keep
-        # exercising the upstream-script fallback deterministically, with no real network reachable
-        # from any of them. The direct path has its own context further down.
+        # Default the direct-MSI path to "did not work", so no test reaches the real network. The
+        # MSI path has its own contexts further down.
         Mock Install-PowerShell7FromMsi { $false }
         # The winget install runs through Invoke-WingetProcess (review findings P2-5, P2-6): no test
         # starts a real winget. The winget-path contexts below override this.
@@ -548,12 +704,12 @@ Describe 'Invoke-PowerShell7Bootstrap' {
             $env:WINGET_APP_SETUP_PS7_BOOTSTRAP | Should -Be '1'
         }
 
-        It 'Fails fast (exit 1) when the sentinel says a relaunched child re-entered the dispatch' {
+        It 'Fails fast (exit 7) when the sentinel says a relaunched child re-entered the dispatch' {
             $env:WINGET_APP_SETUP_PS7_BOOTSTRAP = '1'
 
             $result = Invoke-PowerShell7Bootstrap -CommandPath 'C:\repo\winget-app-install.ps1'
 
-            $result | Should -Be 1
+            $result | Should -Be 7
             Should -Invoke Start-Process -Times 0
             Should -Invoke Write-ErrorMessage -Times 1 -ParameterFilter { $Message -match 're-entered' }
         }
@@ -567,14 +723,14 @@ Describe 'Invoke-PowerShell7Bootstrap' {
             Should -Invoke Write-Info -Times 1 -Exactly -ParameterFilter { $Message -eq 'The PowerShell 7 run ended with exit code 42.' }
         }
 
-        It 'Returns 1 instead of a false success when the pwsh launch itself fails' {
+        It 'Returns 7 instead of a false success when the pwsh launch itself fails' {
             # Under 5.1 a Start-Process failure is non-terminating: without the production
             # try/catch the result would be $null and the tail's exit ($null) would report 0.
             Mock Start-Process { throw 'This command cannot be run due to the error: broken alias.' } -ParameterFilter { $FilePath -eq 'C:\pf7\pwsh.exe' }
 
             $result = Invoke-PowerShell7Bootstrap -CommandPath 'C:\repo\winget-app-install.ps1'
 
-            $result | Should -Be 1
+            $result | Should -Be 7
             Should -Invoke Write-ErrorMessage -Times 1 -ParameterFilter { $Message -match 'could not be started' }
             # Nothing ran, so the tail must report this failure itself.
             $script:PowerShell7BootstrapRelaunched | Should -BeFalse
@@ -616,8 +772,8 @@ Describe 'Invoke-PowerShell7Bootstrap' {
             Invoke-PowerShell7Bootstrap -CommandPath 'C:\repo\winget-app-install.ps1' | Out-Null
 
             Should -Invoke Read-Host -Times 0 -Exactly
-            # winget is mocked away, so the flow reaches the MSI fallback download.
-            Should -Invoke Invoke-RestMethod -Times 1 -ParameterFilter { $Uri -like '*install-powershell*' }
+            # winget is mocked away, so the flow reaches the MSI fallback.
+            Should -Invoke Install-PowerShell7FromMsi -Times 1 -Exactly
         }
 
         It 'Announces the install rather than asking about it' {
@@ -706,6 +862,7 @@ Describe 'Invoke-PowerShell7Bootstrap' {
         It 'Does not reach the MSI fallback when winget succeeds' {
             Invoke-PowerShell7Bootstrap -CommandPath 'C:\repo\winget-app-install.ps1' | Out-Null
 
+            Should -Invoke Install-PowerShell7FromMsi -Times 0
             Should -Invoke Invoke-RestMethod -Times 0
         }
     }
@@ -749,7 +906,7 @@ Describe 'Invoke-PowerShell7Bootstrap' {
         It 'Installs via the bounded direct MSI path and never touches the upstream script' {
             # The regression this guards: the upstream script suppresses all download progress and
             # downloads with an untimed Invoke-WebRequest, so reaching it is the slow, silent,
-            # unbounded path. It must now only run when the direct path has already failed.
+            # unbounded path. Since review findings P2-17 and P3-17 it never runs (next context).
             Mock Install-PowerShell7FromMsi { $true }
 
             $result = Invoke-PowerShell7Bootstrap -CommandPath 'C:\repo\winget-app-install.ps1'
@@ -767,33 +924,18 @@ Describe 'Invoke-PowerShell7Bootstrap' {
             Should -Invoke Install-PowerShell7FromMsi -Times 1 -Exactly -ParameterFilter { $MsiLogDirectory -eq 'C:\ProgramData\winget-app-setup\logs' }
         }
 
-        It 'Falls through to the upstream script only when the direct path fails' {
+        It 'Never falls back to the aka.ms install script when the MSI path fails (review findings P2-17 and P3-17)' {
+            # That script reads the same metadata.json and downloads the same MSI, so it could only
+            # fail where the MSI path just failed - or install the MSI the signature check just
+            # rejected, and it 404s once the current release is 7.7.
+            Mock Find-PowerShell7 { $null }
             Mock Install-PowerShell7FromMsi { $false }
 
-            Invoke-PowerShell7Bootstrap -CommandPath 'C:\repo\winget-app-install.ps1' | Out-Null
+            $result = Invoke-PowerShell7Bootstrap -CommandPath 'C:\repo\winget-app-install.ps1'
 
+            $result | Should -Be 7
             Should -Invoke Install-PowerShell7FromMsi -Times 1 -Exactly
-            Should -Invoke Invoke-RestMethod -Times 1 -Exactly -ParameterFilter { $Uri -like '*install-powershell*' }
-        }
-
-        It 'Warns that the upstream script produces no output before handing off to it' {
-            # Silence is the whole complaint in issue #263; if this path is still reachable, the
-            # operator has to be told that no output is expected rather than inferring a hang.
-            Mock Install-PowerShell7FromMsi { $false }
-
-            Invoke-PowerShell7Bootstrap -CommandPath 'C:\repo\winget-app-install.ps1' | Out-Null
-
-            Should -Invoke Write-WarningMessage -Times 1 -ParameterFilter { $Message -match 'no download progress' }
-        }
-
-        It 'Bounds the upstream script download with a timeout' {
-            Mock Install-PowerShell7FromMsi { $false }
-
-            Invoke-PowerShell7Bootstrap -CommandPath 'C:\repo\winget-app-install.ps1' | Out-Null
-
-            Should -Invoke Invoke-RestMethod -Times 1 -Exactly -ParameterFilter {
-                $Uri -like '*install-powershell*' -and $TimeoutSec -gt 0
-            }
+            Should -Invoke Invoke-RestMethod -Times 0
         }
     }
 
@@ -803,35 +945,9 @@ Describe 'Invoke-PowerShell7Bootstrap' {
             Mock Read-Host { '' }
             Mock Invoke-WingetProcess { New-TestProcessResult -ExitCode 1 }
             Mock Start-Process { [pscustomobject]@{ ExitCode = 0 } } -ParameterFilter { $FilePath -eq 'C:\pf7\pwsh.exe' }
-            # A parameter-bound no-op stands in for the downloaded aka.ms install script. The
-            # params MUST be [switch]: production invokes it as `-UseMSI -Quiet`, and non-switch
-            # params would throw at binding - silently diverting these tests into the catch path
-            # (the review caught exactly that in an earlier revision of this file).
-            Mock Invoke-RestMethod { 'param([switch]$UseMSI, [switch]$Quiet)' } -ParameterFilter { $Uri -like '*install-powershell*' }
         }
 
-        It 'Uses the aka.ms MSI script when winget is absent' {
-            $script:findCallCount = 0
-            Mock Find-PowerShell7 {
-                $script:findCallCount++
-                if ($script:findCallCount -ge 2) {
-                    return 'C:\pf7\pwsh.exe'
-                }
-                return $null
-            }
-            Mock Get-Command { $null } -ParameterFilter { $Name -eq 'winget' }
-
-            $result = Invoke-PowerShell7Bootstrap -CommandPath 'C:\repo\winget-app-install.ps1'
-
-            $result | Should -Be 0
-            Should -Invoke Invoke-RestMethod -Times 1 -Exactly -ParameterFilter { $Uri -like '*install-powershell*' }
-            Should -Invoke Invoke-WingetProcess -Times 0
-            # The stand-in script must have executed cleanly - a binding/runtime throw would be
-            # swallowed by production's try/catch and this test would pass vacuously.
-            Should -Invoke Write-WarningMessage -Times 0 -ParameterFilter { $Message -match 'MSI fallback failed' }
-        }
-
-        It 'Uses the aka.ms MSI script when the winget install fails' {
+        It 'Uses the MSI when the winget install fails' {
             # Misses on the initial probe AND after the failed winget install; resolves after MSI.
             $script:findCallCount = 0
             Mock Find-PowerShell7 {
@@ -842,38 +958,51 @@ Describe 'Invoke-PowerShell7Bootstrap' {
                 return $null
             }
             Mock Get-Command { [pscustomobject]@{ Source = 'C:\winget.exe' } } -ParameterFilter { $Name -eq 'winget' }
+            Mock Install-PowerShell7FromMsi { $true }
 
             $result = Invoke-PowerShell7Bootstrap -CommandPath 'C:\repo\winget-app-install.ps1'
 
             $result | Should -Be 0
             Should -Invoke Invoke-WingetProcess -Times 1 -Exactly
             Should -Invoke Write-WarningMessage -Times 1 -Exactly -ParameterFilter { $Message -eq 'winget could not install PowerShell 7 (exit code 1).' }
-            Should -Invoke Invoke-RestMethod -Times 1 -Exactly -ParameterFilter { $Uri -like '*install-powershell*' }
-            Should -Invoke Write-WarningMessage -Times 0 -ParameterFilter { $Message -match 'MSI fallback failed' }
+            Should -Invoke Install-PowerShell7FromMsi -Times 1 -Exactly
+            Should -Invoke Start-Process -Times 1 -Exactly -ParameterFilter { $FilePath -eq 'C:\pf7\pwsh.exe' }
+            Should -Invoke Invoke-RestMethod -Times 0 -ParameterFilter { $Uri -like '*install-powershell*' }
         }
 
-        It 'Returns 1 with manual guidance when nothing can provision PowerShell 7' {
+        It 'Returns 7 with manual guidance when nothing can provision PowerShell 7' {
             Mock Find-PowerShell7 { $null }
             Mock Get-Command { $null } -ParameterFilter { $Name -eq 'winget' }
 
             $result = Invoke-PowerShell7Bootstrap -CommandPath 'C:\repo\winget-app-install.ps1'
 
-            $result | Should -Be 1
+            $result | Should -Be 7
             Should -Invoke Write-ErrorMessage -Times 1 -ParameterFilter { $Message -match 'could not be installed automatically' }
             Should -Invoke Start-Process -Times 0 -ParameterFilter { $FilePath -eq 'C:\pf7\pwsh.exe' }
         }
 
-        It 'Points at "winget source reset" when the aka.ms fallback also hits a GitHub 429 (issue #274)' {
-            # A machine already throttled on raw.githubusercontent.com loses every GitHub-hosted
-            # fallback at once, so the generic manual-install message is not the most useful thing
-            # to print - see issue #274 for the real-world failure this reproduces.
+        It 'Points at "winget source reset" when the MSI path''s release list hits a GitHub 429 (issue #274)' {
+            # A machine already throttled on raw.githubusercontent.com cannot read metadata.json, so
+            # the generic manual-install message is not the most useful thing to print - see issue
+            # #274 for the real-world failure this reproduces. The real Get-PowerShell7MsiInfo runs.
             Mock Find-PowerShell7 { $null }
             Mock Get-Command { $null } -ParameterFilter { $Name -eq 'winget' }
-            Mock Invoke-RestMethod { throw '429: Too Many Requests' } -ParameterFilter { $Uri -like '*install-powershell*' }
+            Mock Invoke-RestMethod { throw '429: Too Many Requests' } -ParameterFilter { $Uri -like '*metadata.json' }
+            Mock Install-PowerShell7FromMsi { [void](Get-PowerShell7MsiInfo); $false }
+            $savedArchitecture = $env:PROCESSOR_ARCHITECTURE
+            $savedArchitectureW6432 = $env:PROCESSOR_ARCHITEW6432
+            $env:PROCESSOR_ARCHITECTURE = 'AMD64'
+            $env:PROCESSOR_ARCHITEW6432 = ''
+            try {
+                $result = Invoke-PowerShell7Bootstrap -CommandPath 'C:\repo\winget-app-install.ps1'
+            }
+            finally {
+                $env:PROCESSOR_ARCHITECTURE = $savedArchitecture
+                $env:PROCESSOR_ARCHITEW6432 = $savedArchitectureW6432
+            }
 
-            $result = Invoke-PowerShell7Bootstrap -CommandPath 'C:\repo\winget-app-install.ps1'
-
-            $result | Should -Be 1
+            $result | Should -Be 7
+            Should -Invoke Invoke-RestMethod -Times 1 -Exactly -ParameterFilter { $Uri -like '*metadata.json' }
             Should -Invoke Write-ErrorMessage -Times 1 -ParameterFilter {
                 $Message -match 'rate-limiting' -and $Message -match 'winget source reset --force'
             }
@@ -881,19 +1010,30 @@ Describe 'Invoke-PowerShell7Bootstrap' {
     }
 
     Context 'iex mode: no script file on disk' {
+        BeforeAll {
+            # A downloaded installer, stamped the way build/Build-WingetInstallScript.ps1 does it.
+            function New-TestInstallerText {
+                param ([string]$BuildId)
+                "<#PSScriptInfo #>`n`$script:InstallerBuildId = '$BuildId'`nfunction Invoke-WingetInstall { }`n"
+            }
+            $script:runningBuildId = '1.0.0+aaaaaaaa'
+            $script:otherBuildId = '1.0.0+bbbbbbbb'
+            $script:rawUrl = 'https://raw.githubusercontent.com/J-MaFf/winget-app-setup/refs/heads/main/winget-app-install.ps1'
+            $script:jsDelivrUrl = 'https://cdn.jsdelivr.net/gh/J-MaFf/winget-app-setup@main/winget-app-install.ps1'
+        }
+
         BeforeEach {
             Mock Find-PowerShell7 { 'C:\pf7\pwsh.exe' }
             Mock Set-Content { }
             Mock New-Item { } -ParameterFilter { $Path -like '*winget-app-setup-*' }
-            Mock Start-Process { [pscustomobject]@{ ExitCode = 7 } } -ParameterFilter { $FilePath -eq 'C:\pf7\pwsh.exe' }
+            Mock Start-Process { [pscustomobject]@{ ExitCode = 42 } } -ParameterFilter { $FilePath -eq 'C:\pf7\pwsh.exe' }
+            Mock Invoke-RestMethod { New-TestInstallerText -BuildId $script:runningBuildId }
         }
 
         It 'Re-downloads the installer to a unique per-run temp directory and relaunches it' {
-            Mock Invoke-RestMethod { '# installer body' }
+            $result = Invoke-PowerShell7Bootstrap -ExpectedBuildId $script:runningBuildId
 
-            $result = Invoke-PowerShell7Bootstrap
-
-            $result | Should -Be 7
+            $result | Should -Be 42
             Should -Invoke Invoke-RestMethod -Times 1 -Exactly -ParameterFilter { $Uri -like '*winget-app-install.ps1' }
             # The relaunch file must live inside the fresh GUID-named directory, not at a fixed
             # predictable temp path (pre-planting / concurrent-run collision hazard).
@@ -905,28 +1045,118 @@ Describe 'Invoke-PowerShell7Bootstrap' {
         }
 
         It 'Honors a custom InstallerUrl' {
-            Mock Invoke-RestMethod { '# installer body' }
-
-            Invoke-PowerShell7Bootstrap -InstallerUrl 'https://example.test/custom.ps1' | Out-Null
+            Invoke-PowerShell7Bootstrap -InstallerUrl 'https://example.test/custom.ps1' -ExpectedBuildId $script:runningBuildId | Out-Null
 
             Should -Invoke Invoke-RestMethod -Times 1 -Exactly -ParameterFilter { $Uri -eq 'https://example.test/custom.ps1' }
         }
 
         It 'Bounds the re-download with a timeout (issue #263)' {
-            Mock Invoke-RestMethod { '# installer body' }
-
-            Invoke-PowerShell7Bootstrap | Out-Null
+            Invoke-PowerShell7Bootstrap -ExpectedBuildId $script:runningBuildId | Out-Null
 
             Should -Invoke Invoke-RestMethod -Times 1 -Exactly -ParameterFilter { $TimeoutSec -gt 0 }
         }
 
-        It 'Returns 1 when the re-download fails' {
+        It 'Returns 7 when the re-download fails everywhere, and says PowerShell 7 is installed' {
             Mock Invoke-RestMethod { throw 'network unreachable' }
 
-            $result = Invoke-PowerShell7Bootstrap
+            $result = Invoke-PowerShell7Bootstrap -ExpectedBuildId $script:runningBuildId
 
-            $result | Should -Be 1
+            $result | Should -Be 7
             Should -Invoke Start-Process -Times 0
+            Should -Invoke Write-ErrorMessage -Times 1 -Exactly -ParameterFilter { $Message -match 'Could not download installer build 1\.0\.0\+aaaaaaaa' }
+            Should -Invoke Write-ErrorMessage -Times 1 -Exactly -ParameterFilter { $Message -match 'PowerShell 7 is installed on this machine\. Open PowerShell 7 \(pwsh\) as administrator and run the same one-liner there' }
         }
+
+        Context 'Same build, from raw or its jsDelivr mirror (review finding P2-18)' {
+            It 'Tries raw.githubusercontent.com first, then the jsDelivr mirror the readme offers' {
+                Mock Invoke-RestMethod { throw '429: Too Many Requests' }
+
+                Invoke-PowerShell7Bootstrap -ExpectedBuildId $script:runningBuildId | Out-Null
+
+                Should -Invoke Invoke-RestMethod -Times 2 -Exactly
+                Should -Invoke Invoke-RestMethod -Times 1 -Exactly -ParameterFilter { $Uri -eq $script:rawUrl }
+                Should -Invoke Invoke-RestMethod -Times 1 -Exactly -ParameterFilter { $Uri -eq $script:jsDelivrUrl }
+            }
+
+            It 'Relaunches from the jsDelivr mirror when raw.githubusercontent.com is rate-limiting the network' {
+                # An office behind one NAT IP throttled by raw: the jsDelivr one-liner got the first
+                # copy, and the relaunch used to go straight back to raw and fail with exit 1.
+                Mock Invoke-RestMethod { throw 'The remote server returned an error: (429) Too Many Requests.' } -ParameterFilter { $Uri -eq $script:rawUrl }
+                Mock Invoke-RestMethod { New-TestInstallerText -BuildId $script:runningBuildId } -ParameterFilter { $Uri -eq $script:jsDelivrUrl }
+
+                $result = Invoke-PowerShell7Bootstrap -ExpectedBuildId $script:runningBuildId
+
+                $result | Should -Be 42
+                Should -Invoke Set-Content -Times 1 -Exactly -ParameterFilter { $Value -match [regex]::Escape("'$($script:runningBuildId)'") }
+                Should -Invoke Start-Process -Times 1 -Exactly -ParameterFilter { $FilePath -eq 'C:\pf7\pwsh.exe' }
+            }
+
+            It 'Never relaunches another build: a run started from a branch URL does not silently run main' {
+                Mock Invoke-RestMethod { New-TestInstallerText -BuildId $script:otherBuildId }
+
+                $result = Invoke-PowerShell7Bootstrap -ExpectedBuildId $script:runningBuildId
+
+                $result | Should -Be 7
+                Should -Invoke Set-Content -Times 0
+                Should -Invoke Start-Process -Times 0
+                Should -Invoke Write-WarningMessage -Times 2 -Exactly -ParameterFilter {
+                    $Message -match 'installer build 1\.0\.0\+bbbbbbbb, not build 1\.0\.0\+aaaaaaaa that this run started with'
+                }
+            }
+
+            It 'Takes the mirror''s copy when raw already serves a newer build of main' {
+                Mock Invoke-RestMethod { New-TestInstallerText -BuildId $script:otherBuildId } -ParameterFilter { $Uri -eq $script:rawUrl }
+                Mock Invoke-RestMethod { New-TestInstallerText -BuildId $script:runningBuildId } -ParameterFilter { $Uri -eq $script:jsDelivrUrl }
+
+                $result = Invoke-PowerShell7Bootstrap -ExpectedBuildId $script:runningBuildId
+
+                $result | Should -Be 42
+                Should -Invoke Set-Content -Times 1 -Exactly -ParameterFilter {
+                    $Value -match [regex]::Escape("'$($script:runningBuildId)'") -and $Value -notmatch [regex]::Escape($script:otherBuildId)
+                }
+            }
+
+            It 'Rejects a download that is not the installer, such as an error page' {
+                Mock Invoke-RestMethod { '<html><body>Sign in to continue</body></html>' } -ParameterFilter { $Uri -eq $script:rawUrl }
+                Mock Invoke-RestMethod { New-TestInstallerText -BuildId $script:runningBuildId } -ParameterFilter { $Uri -eq $script:jsDelivrUrl }
+
+                $result = Invoke-PowerShell7Bootstrap -ExpectedBuildId $script:runningBuildId
+
+                $result | Should -Be 42
+                Should -Invoke Write-WarningMessage -Times 1 -Exactly -ParameterFilter { $Message -match 'not the installer: it carries no installer build id' }
+                Should -Invoke Set-Content -Times 1 -Exactly -ParameterFilter { $Value -notmatch '<html>' }
+            }
+
+            It 'Returns 7 when the downloaded copy cannot be saved' {
+                Mock Set-Content { throw 'Access to the path is denied.' }
+
+                $result = Invoke-PowerShell7Bootstrap -ExpectedBuildId $script:runningBuildId
+
+                $result | Should -Be 7
+                Should -Invoke Start-Process -Times 0
+                Should -Invoke Write-ErrorMessage -Times 1 -Exactly -ParameterFilter { $Message -match 'Could not save the installer for the relaunch' }
+            }
+        }
+    }
+}
+
+Describe 'Get-InstallerBuildIdFromText (review finding P2-18)' {
+    It 'Reads the build id the build stamped into the generated installer' {
+        $installerText = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:InstallerScriptPath
+        $installerText -match "(?m)^\`$script:InstallerBuildId = '([^']+)'" | Should -BeTrue
+        $stampedBuildId = $Matches[1]
+
+        Get-InstallerBuildIdFromText -Text $installerText | Should -Be $stampedBuildId
+    }
+
+    It 'Returns $null for text that is not the installer' {
+        Get-InstallerBuildIdFromText -Text '<html><body>Too Many Requests</body></html>' | Should -BeNullOrEmpty
+        Get-InstallerBuildIdFromText -Text '' | Should -BeNullOrEmpty
+    }
+
+    It 'Counts only the stamped line, not code that mentions the variable' {
+        $text = "function Show-Build {`n    `$script:InstallerBuildId = '9.9.9+deadbeef'`n}`n"
+
+        Get-InstallerBuildIdFromText -Text $text | Should -BeNullOrEmpty
     }
 }

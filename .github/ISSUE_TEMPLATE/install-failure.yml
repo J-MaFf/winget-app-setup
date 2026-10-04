@@ -15,7 +15,7 @@ body:
     id: exit-code
     attributes:
       label: Exit code
-      description: From "The installer stopped early with exit code N", or `$LASTEXITCODE` after the run. 1 = an app failed, elevation was not available, a pre-flight check or the PowerShell 7 setup failed; 2 = winget unavailable or broken; 3 = app catalog invalid; 5 = the run was aborted.
+      description: From "The installer stopped early with exit code N", or `$LASTEXITCODE` after the run. 1 = an app failed, elevation was not available, or a pre-flight check failed; 2 = winget unavailable or broken; 3 = app catalog invalid; 5 = the run was aborted; 7 = the PowerShell 7 setup failed.
       placeholder: "2"
     validations:
       required: true

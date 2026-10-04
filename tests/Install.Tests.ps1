@@ -1264,10 +1264,11 @@ Describe 'Write-InstallerExitNotice (review findings P2-14 and P3-15)' {
     }
 
     It 'Says what exit code <Code> means when the caller gives no reason' -ForEach @(
-        @{ Code = 1; Meaning = 'administrator rights were not available, a pre-flight check failed, or PowerShell 7 could not be set up (see above)' }
+        @{ Code = 1; Meaning = 'administrator rights were not available or a pre-flight check failed (see above)' }
         @{ Code = 2; Meaning = 'winget is not available or could not be started (see above)' }
         @{ Code = 3; Meaning = 'the app catalog failed validation (see above)' }
         @{ Code = 5; Meaning = 'the run was aborted before it finished (see above)' }
+        @{ Code = 7; Meaning = 'PowerShell 7 could not be installed, or the installer could not be relaunched under it (see above)' }
     ) {
         Write-InstallerExitNotice -Code $Code
 
