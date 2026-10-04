@@ -119,6 +119,11 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
         Mock Wait-WauIdle { $true }
         # Never read the machine's pending-restart state (review finding P3-16): nothing pending.
         Mock Get-PendingRestartState { New-TestRestartState }
+        # The environment pre-flight (wgt-gq8.39) reads neither the runner's registry nor its
+        # proxy settings: no Group Policy, and no proxy to report.
+        Mock Get-ProxyInheritanceWarning { $null }
+        Mock Get-ScriptExecutionPolicyBlock { $null }
+        Mock Get-WingetPolicyBlock { $null }
         # Never read the runner's real account or console session: a same-user run unless a test
         # says otherwise (review findings P2-24, P3-22).
         Mock Get-InstallAccountContext { New-TestAccountContext }
@@ -461,6 +466,30 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
             @($script:infoMessages | Where-Object { $_.StartsWith('[DRY-RUN] Would relaunch with administrator privileges.') }).Count | Should -Be 1
             Should -Invoke Restart-WithElevation -Times 0 -Exactly
             Should -Invoke Invoke-WingetProcess -Times 0 -Exactly
+        }
+
+        It 'An interactive dry run says a real run would stop with exit code 4 when Group Policy''s machine execution policy refuses the elevated relaunch (wgt-gq8.39)' {
+            Mock Write-Prompt { throw 'reached the final prompt' }
+            Mock Get-ScriptExecutionPolicyBlock { [pscustomobject]@{ Engine = 'WindowsPowerShell'; Scope = 'MachinePolicy'; Policy = 'AllSigned'; Key = 'HKLM\K'; GroupPolicyPath = 'Computer Configuration > P'; Description = 'Group Policy sets the Windows PowerShell execution policy for this PC to AllSigned (MachinePolicy, HKLM\K)' } }
+
+            { Invoke-WingetInstall -Apps @(@{ name = 'Contoso.AppOne' }) -WhatIf } | Should -Throw 'reached the final prompt'
+
+            Should -Invoke Get-ScriptExecutionPolicyBlock -Times 1 -Exactly -ParameterFilter { $Engine -eq 'WindowsPowerShell' }
+            $stopLines = @($script:infoMessages | Where-Object { $_.StartsWith('[DRY-RUN] A real run would stop here with exit code 4, without a UAC prompt: Group Policy sets the Windows PowerShell execution policy for this PC to AllSigned') })
+            $stopLines | Should -HaveCount 1
+            $stopLines[0] | Should -Match 'Computer Configuration > P'
+            @($script:infoMessages | Where-Object { $_.StartsWith('[DRY-RUN] Would relaunch') }) | Should -HaveCount 0
+            Should -Invoke Restart-WithElevation -Times 0 -Exactly
+        }
+
+        It 'An interactive dry run previews the relaunch and adds the warning for a user execution policy (wgt-gq8.39)' {
+            Mock Write-Prompt { throw 'reached the final prompt' }
+            Mock Get-ScriptExecutionPolicyBlock { [pscustomobject]@{ Engine = 'WindowsPowerShell'; Scope = 'UserPolicy'; Policy = 'Restricted'; Key = 'HKCU\K'; GroupPolicyPath = 'User Configuration > P'; Description = 'Group Policy sets the Windows PowerShell execution policy for this account to Restricted (UserPolicy, HKCU\K)' } }
+
+            { Invoke-WingetInstall -Apps @(@{ name = 'Contoso.AppOne' }) -WhatIf } | Should -Throw 'reached the final prompt'
+
+            @($script:infoMessages | Where-Object { $_.StartsWith('[DRY-RUN] Would relaunch with administrator privileges.') }) | Should -HaveCount 1
+            @($script:infoMessages | Where-Object { $_ -like '`[DRY-RUN`] Group Policy sets the Windows PowerShell execution policy for this account to Restricted*if this account approves the UAC prompt*' }) | Should -HaveCount 1
         }
 
         It 'Returns 4 without relaunching when called from the imported module (issue #185)' {
@@ -859,6 +888,52 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
 
             $script:warningMessages | Should -Contain 'Skipping: Microsoft.WindowsTerminal (already provisioned for every user on this PC)'
             @($script:capturedRows | Where-Object { $_[0] -eq 'Skipped' })[0][1] | Should -Be 'Microsoft.WindowsTerminal'
+        }
+    }
+
+    Context 'Environment pre-flight for the account the run installs as (wgt-gq8.39)' {
+        BeforeEach {
+            $script:blockedPolicy = [pscustomobject]@{ Name = 'EnableAppInstaller'; Policy = 'Enable App Installer' }
+            $script:steps = @()
+            Mock Wait-WauIdle { $script:steps += 'Wait-WauIdle'; $true }
+            Mock Initialize-Winget { $script:steps += 'Initialize-Winget'; [pscustomobject]@{ Ready = $true; Diagnosis = 'Ok' } }
+        }
+
+        It 'Stops with exit code 2 when Group Policy turns winget off, before it waits for Winget-AutoUpdate or sets winget up, and says so once' {
+            Mock Get-WingetPolicyBlock { $script:blockedPolicy }
+
+            $result = Invoke-WingetInstall -Apps @(@{ name = 'Contoso.AppOne' }) -NonInteractive
+
+            $result | Should -Be 2
+            $script:steps | Should -HaveCount 0
+            Should -Invoke Install-AppWithVerification -Times 0 -Exactly
+            Should -Invoke Install-WingetAutoUpdate -Times 0 -Exactly
+            @($script:errorMessages | Where-Object { $_ -like 'Group Policy on this PC blocks winget*' }) | Should -HaveCount 1
+        }
+
+        It 'A dry run reports the Group Policy block once and previews the rest without setting winget up' {
+            Mock Get-WingetPolicyBlock { $script:blockedPolicy }
+
+            $result = Invoke-WingetInstall -Apps @(@{ name = 'Contoso.AppOne' }) -WhatIf -NonInteractive
+
+            $result | Should -Be 0
+            Should -Invoke Initialize-Winget -Times 0 -Exactly
+            @($script:infoMessages | Where-Object { $_ -like '`[DRY-RUN`] Group Policy on this PC blocks winget*A real run would stop here with exit code 2.' }) | Should -HaveCount 1
+            @($script:errorMessages | Where-Object { $_ -like '*Group Policy*' }) | Should -HaveCount 0
+            ($script:infoMessages -join "`n") | Should -Match '\[DRY-RUN\] winget is not available for this account, so this preview cannot tell which apps are already installed'
+        }
+
+        It 'Warns once about the signed-in user''s proxy for a run as SYSTEM, before it waits for Winget-AutoUpdate, and goes on' {
+            Mock Get-InstallAccountContext { New-TestAccountContext -System -SessionUser 'CONTOSO\jdoe' }
+            Mock Get-ProxyInheritanceWarning { 'PROXY LINE' }
+            Mock Write-WarningMessage { $script:warningMessages += $Message; $script:steps += "WARN: $Message" }
+
+            $result = Invoke-WingetInstall -Apps @(@{ name = 'Contoso.AppOne' }) -NonInteractive
+
+            $result | Should -Be 0
+            Should -Invoke Get-ProxyInheritanceWarning -Times 1 -Exactly -ParameterFilter { $AccountContext.IsSystem -and $AccountContext.SessionUser -eq 'CONTOSO\jdoe' }
+            @($script:warningMessages | Where-Object { $_ -eq 'PROXY LINE' }) | Should -HaveCount 1
+            $script:steps.IndexOf('WARN: PROXY LINE') | Should -BeLessThan $script:steps.IndexOf('Wait-WauIdle')
         }
     }
 
@@ -2319,6 +2394,9 @@ Describe 'Not-applicable gating end-to-end (issue #217)' {
         Mock Set-WindowsTerminalDefaults { }
         Mock Install-WingetAutoUpdate { @{ Status = 'DryRun'; Version = '2.12.0' } }
         Mock Get-PendingRestartState { New-TestRestartState }
+        Mock Get-ProxyInheritanceWarning { $null }
+        Mock Get-ScriptExecutionPolicyBlock { $null }
+        Mock Get-WingetPolicyBlock { $null }
         Mock Get-InstallAccountContext { New-TestAccountContext }
         Mock Install-WingetPackage { @{ ExitCode = 0; Attempts = 1; SessionErrorExhausted = $false; MachineScopeFellBack = $false } }
         Mock Test-WingetPackageInstalled { @{ Installed = $false; TimedOut = $false; LaunchFailed = $false; LaunchError = $null; ExitCode = 0 } }
@@ -2387,6 +2465,8 @@ Describe 'A run as SYSTEM from an RMM agent (review findings P2-24, P3-22, P3-23
         Mock Get-ProcessUserName { 'NT AUTHORITY\SYSTEM' }
         Mock Get-InteractiveSessionUserName { 'CONTOSO\jdoe' }
         Mock Get-PendingRestartState { New-TestRestartState }
+        Mock Get-ProxyInheritanceWarning { $null }
+        Mock Get-ScriptExecutionPolicyBlock { $null }
         Mock Wait-WauIdle { $true }
         Mock Test-AndInstallGraphicalTools { $true }
         Mock Remove-LegacyScheduledUpdates { $false }
@@ -2567,6 +2647,8 @@ Describe 'Invoke-WingetInstall with the real winget setup ladder (review finding
         Mock Test-IsRunningLocally { $true }
         Mock Get-InstallAccountContext { New-TestAccountContext }
         Mock Get-PendingRestartState { New-TestRestartState }
+        Mock Get-ProxyInheritanceWarning { $null }
+        Mock Get-ScriptExecutionPolicyBlock { $null }
         Mock Wait-WauIdle { $true }
         Mock Test-AndInstallGraphicalTools { $true }
         Mock Remove-LegacyScheduledUpdates { $false }
@@ -2700,6 +2782,9 @@ Describe 'Applicability is decided once per run (review finding P3-34)' {
         Mock Test-WingetLaunchable { [pscustomobject]@{ Launchable = $true; Version = 'v1.12.350'; Reason = $null; Attempts = 1 } }
         Mock Wait-WauIdle { $true }
         Mock Get-PendingRestartState { New-TestRestartState }
+        Mock Get-ProxyInheritanceWarning { $null }
+        Mock Get-ScriptExecutionPolicyBlock { $null }
+        Mock Get-WingetPolicyBlock { $null }
         Mock Get-InstallAccountContext { New-TestAccountContext }
         # The app never installs: both passes attempt it and it stays failed.
         Mock Install-WingetPackage { @{ ExitCode = 1; Attempts = 1; SessionErrorExhausted = $false; MachineScopeFellBack = $false } }
@@ -2821,6 +2906,9 @@ Describe 'Wedged winget: the run fails fast (review findings P2-8, P2-9, P2-10)'
         # WAU was skipped for a missing framework exits 8, review finding P3-36).
         Mock Install-WingetAutoUpdate { [pscustomobject]@{ Status = 'Configured'; Version = '2.12.0'; FrameworkMissing = $false; RestartRequired = $false } }
         Mock Get-PendingRestartState { New-TestRestartState }
+        Mock Get-ProxyInheritanceWarning { $null }
+        Mock Get-ScriptExecutionPolicyBlock { $null }
+        Mock Get-WingetPolicyBlock { $null }
         Mock Get-InstallAccountContext { New-TestAccountContext }
         # Never read the machine's App Installer packages, and never start a real process: the
         # removed deadlock detector and Wait-WingetLaunchable did both.
@@ -2994,6 +3082,8 @@ Describe 'Dry run leaves the machine unchanged (P2-16)' {
         Mock Get-AppxPackage { [pscustomobject]@{ Name = 'Microsoft.DesktopAppInstaller'; Version = '1.26.510.0'; InstallLocation = $null } } -ParameterFilter { $Name -eq 'Microsoft.DesktopAppInstaller' }
         Mock Get-CimInstance { $null }
         Mock Get-PendingRestartState { New-TestRestartState }
+        Mock Get-ProxyInheritanceWarning { $null }
+        Mock Get-ScriptExecutionPolicyBlock { $null }
         # The legacy scheduled task, its data directory and WAU's task all "exist", so their
         # helpers reach the branch that would remove or change them.
         Mock Get-ScheduledTask { [pscustomobject]@{ TaskName = 'present' } }

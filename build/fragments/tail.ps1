@@ -1,4 +1,31 @@
 if ($MyInvocation.InvocationName -ne '.') {
+    # Constrained Language Mode before anything else (wgt-gq8.39): an application control policy
+    # (App Control for Business/WDAC, AppLocker) runs an untrusted script in it, and it refuses the
+    # .NET calls the lines below already make, so the run used to print PowerShell's errors and die
+    # further on (under PowerShell 7, in its pre-flight checks with an 'UNEXPECTED ERROR'). Nothing
+    # can work around it, so the run stops at once with exit code 5, saying why in one line, and
+    # touches nothing. Only what every language mode allows runs on this path, under Windows
+    # PowerShell 5.1 too. A run from a file, or with nobody at the console, exits 5; an interactive
+    # irm | iex console keeps its window open (exiting there would close the window with the
+    # message) and gets $LASTEXITCODE 5.
+    if (-not (Test-FullLanguageMode)) {
+        $global:LASTEXITCODE = 5
+        $exitForLanguageMode = [bool]$PSCommandPath
+        if (-not $exitForLanguageMode) {
+            try {
+                $exitForLanguageMode = [bool](Test-EffectiveNonInteractive -NonInteractive:$NonInteractive)
+            }
+            catch {
+                # Cannot tell: keep the window, and the message, open.
+                $exitForLanguageMode = $false
+            }
+        }
+        if ($exitForLanguageMode) {
+            exit 5
+        }
+        return
+    }
+
     # Windows PowerShell 5.1 bootstrap (issue #225; supersedes the #210 fail-fast). The
     # installer's logic requires PowerShell 7+, and 5.1 parses the WHOLE file before running any
     # of it - which is why this dispatch can exist at all: the build guards the assembled script

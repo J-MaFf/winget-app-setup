@@ -72,6 +72,9 @@ Describe 'Restart-WithElevation (review findings P2-11, P2-12, P3-11)' {
         Mock Write-Info { $script:infoMessages += $Message }
         # Someone is at the console unless a test says otherwise; never the runner's real console.
         Mock Test-EffectiveNonInteractive { [bool]$NonInteractive }
+        # No Group Policy execution policy (wgt-gq8.39) unless a test sets one; never the runner's
+        # real registry.
+        Mock Get-ScriptExecutionPolicyBlock { $null }
 
         $script:scriptPath = Join-Path $TestDrive 'winget-app-install.ps1'
         Set-Content -LiteralPath $script:scriptPath -Value "Write-Output 'installer'" -Encoding UTF8
@@ -146,6 +149,43 @@ Describe 'Restart-WithElevation (review findings P2-11, P2-12, P3-11)' {
         $result.ExitCode | Should -Be 4
         Should -Invoke Start-ElevatedProcess -Times 0 -Exactly
         ($script:errorMessages -join "`n") | Should -Match 'non-interactive, so there is nobody to approve a UAC prompt'
+    }
+
+    Context 'Group Policy execution policy (wgt-gq8.39)' {
+        BeforeEach {
+            $script:warningMessages = @()
+            Mock Write-WarningMessage { $script:warningMessages += $Message }
+            Mock New-Item { throw 'must not stage a copy' }
+        }
+
+        It 'Shows no UAC prompt, stages nothing and returns 4 when the machine policy refuses the script (<Case>)' -ForEach @(
+            @{ Case = 'checked copy'; InPlace = $false }
+            @{ Case = 'in place'; InPlace = $true }
+        ) {
+            Mock Get-ScriptExecutionPolicyBlock { [pscustomobject]@{ Engine = 'WindowsPowerShell'; Scope = 'MachinePolicy'; Policy = 'AllSigned'; Key = 'HKLM\K'; GroupPolicyPath = 'Computer Configuration > P'; Description = 'Group Policy sets the Windows PowerShell execution policy for this PC to AllSigned (MachinePolicy, HKLM\K)' } }
+
+            $result = Restart-WithElevation -ScriptPath $script:scriptPath -InPlace:$InPlace
+
+            $result.Started | Should -BeFalse
+            $result.ExitCode | Should -Be 4
+            Should -Invoke Get-ScriptExecutionPolicyBlock -Times 1 -Exactly -ParameterFilter { $Engine -eq 'WindowsPowerShell' }
+            Should -Invoke Start-ElevatedProcess -Times 0 -Exactly
+            Should -Invoke New-Item -Times 0 -Exactly
+            $script:errorMessages | Should -HaveCount 1
+            $script:errorMessages[0] | Should -Be 'Group Policy sets the Windows PowerShell execution policy for this PC to AllSigned (MachinePolicy, HKLM\K), which -ExecutionPolicy Bypass on the command line cannot override, so an elevated Windows PowerShell cannot run this script from a file. Ask whoever manages this PC''s policies to allow scripts (Computer Configuration > P), or start it from an elevated PowerShell 7 (pwsh) session, where it needs no relaunch. No UAC prompt was shown.'
+        }
+
+        It 'Warns about this account''s user policy and still asks: another administrator may approve the prompt' {
+            Mock New-Item { [pscustomobject]@{ FullName = $Path } }
+            Mock Get-ScriptExecutionPolicyBlock { [pscustomobject]@{ Engine = 'WindowsPowerShell'; Scope = 'UserPolicy'; Policy = 'Restricted'; Key = 'HKCU\K'; GroupPolicyPath = 'User Configuration > P'; Description = 'Group Policy sets the Windows PowerShell execution policy for this account to Restricted (UserPolicy, HKCU\K)' } }
+
+            $result = Restart-WithElevation -ScriptPath $script:scriptPath -InPlace
+
+            $result.Started | Should -BeTrue
+            Should -Invoke Start-ElevatedProcess -Times 1 -Exactly
+            $script:warningMessages | Should -HaveCount 1
+            $script:warningMessages[0] | Should -Match '^Group Policy sets the Windows PowerShell execution policy for this account to Restricted .*: if this account approves the UAC prompt, the elevated Windows PowerShell cannot run this script from a file\.'
+        }
     }
 
     It 'Stages the bytes it checked in this account''s %TEMP% and has the elevated process check that copy against their SHA256, never running the file itself' {

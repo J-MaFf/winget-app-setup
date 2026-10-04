@@ -75,6 +75,11 @@ function Test-IsAdmin {
     Never asks when nobody is at the console (Test-EffectiveNonInteractive): an unattended run would
     leave a UAC prompt on someone's desktop and report nothing. A declined UAC prompt (Win32 error
     1223, ERROR_CANCELLED) is reported once, with no second prompt.
+
+    Never asks either when Group Policy's Windows PowerShell execution policy for the PC is AllSigned
+    or Restricted (Get-ScriptExecutionPolicyBlock, wgt-gq8.39): -ExecutionPolicy Bypass cannot
+    override it, so the elevated window could not run the script. One line says so instead. Such a
+    policy for this account only is a warning: it applies only if this account approves the prompt.
 .PARAMETER ScriptPath
     The full path of the script to run elevated.
 .PARAMETER AdditionalArguments
@@ -91,8 +96,9 @@ function Test-IsAdmin {
 .RETURNS
     [pscustomobject] @{ Started; ExitCode }. Started is $true when an elevated run started, and
     ExitCode is then its exit code. Otherwise ExitCode is 4 (no UAC prompt in a non-interactive run,
-    the prompt was declined, or the elevated process could not be started) or 5 (the script could
-    not be read, or changed since the run started).
+    Group Policy's execution policy would refuse the script in the elevated window, the prompt was
+    declined, or the elevated process could not be started) or 5 (the script could not be read, or
+    changed since the run started).
 #>
 function Restart-WithElevation {
     [OutputType([pscustomobject])]
@@ -117,6 +123,22 @@ function Restart-WithElevation {
     if (Test-EffectiveNonInteractive -NonInteractive:$NonInteractive) {
         Write-ErrorMessage 'Administrator rights are required, and this run is non-interactive, so there is nobody to approve a UAC prompt and none was shown. Run it from an elevated session, or as SYSTEM.'
         return [pscustomobject]@{ Started = $false; ExitCode = 4 }
+    }
+
+    # The elevated Windows PowerShell runs the script with -File, and Group Policy's execution policy
+    # overrides -ExecutionPolicy Bypass (wgt-gq8.39). Under a machine policy of AllSigned or
+    # Restricted the elevated window refused the file, printed PowerShell's own error and closed at
+    # once, and this run passed on its non-zero exit code as the run's result; nothing is started
+    # then. A user policy is this account's, and holds only if this same account approves the
+    # prompt: a warning.
+    $policyBlock = Get-ScriptExecutionPolicyBlock -Engine WindowsPowerShell
+    if ($policyBlock) {
+        $policyMessage = Format-ElevationPolicyBlockMessage -Block $policyBlock
+        if ($policyBlock.Scope -eq 'MachinePolicy') {
+            Write-ErrorMessage "$policyMessage No UAC prompt was shown."
+            return [pscustomobject]@{ Started = $false; ExitCode = 4 }
+        }
+        Write-WarningMessage $policyMessage
     }
 
     $powerShellPath = Get-WindowsPowerShellPath

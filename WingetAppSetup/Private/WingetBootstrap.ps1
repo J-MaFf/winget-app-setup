@@ -47,6 +47,48 @@ function Get-WingetPolicyBlock {
 
 <#
 .SYNOPSIS
+    Prints the one line that says Group Policy blocks winget and what to do about it.
+.DESCRIPTION
+    Shared by the two places that find the block (wgt-gq8.39): the install run's pre-flight
+    (Invoke-EnvironmentPreflight), which checks the policy before any other winget step, and
+    Initialize-Winget, which checks it for the uninstaller and also recognizes winget's own
+    0x8A15003A BLOCKED_BY_POLICY answer. A run prints it once: the pre-flight's stop keeps a real run
+    from reaching Initialize-Winget, and a dry run skips Initialize-Winget after the pre-flight
+    reported it.
+.PARAMETER Block
+    Get-WingetPolicyBlock's result: the line names the policy and its registry value.
+.PARAMETER Detail
+    What showed the block instead, for example "'winget --version' answered 0x8A15003A ...".
+.PARAMETER WhatIf
+    Dry run: an informational [DRY-RUN] line that says a real run would stop with exit code 2.
+#>
+function Write-WingetPolicyBlockMessage {
+    param (
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [object]$Block,
+
+        [Parameter(Mandatory = $false)]
+        [string]$Detail,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$WhatIf
+    )
+
+    if ($Block) {
+        $Detail = "'{0}' is Disabled ({1} = 0 under HKLM\SOFTWARE\Policies\Microsoft\Windows\AppInstaller)" -f $Block.Policy, $Block.Name
+    }
+    $message = "Group Policy on this PC blocks winget: $Detail. This installer cannot install apps until the policy allows it; ask whoever manages this PC's policies (Computer Configuration > Administrative Templates > Windows Components > Desktop App Installer) to allow it, then re-run the installer."
+    if ($WhatIf) {
+        Write-Info "[DRY-RUN] $message A real run would stop here with exit code 2."
+    }
+    else {
+        Write-ErrorMessage $message
+    }
+}
+
+<#
+.SYNOPSIS
     Returns the AppX deployment HRESULT (0x80073xxx) an Appx or WinGet cmdlet failed with, or $null.
 .DESCRIPTION
     Review finding P3-27. Reads the HResult of the exception and of each inner exception first. When

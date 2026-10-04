@@ -7,7 +7,9 @@
     when cdn.winget.microsoft.com is unreachable over HTTPS (network is required for winget). The
     network probe uses Invoke-WebRequest, which honors system proxy settings; any HTTP response —
     including 4xx/5xx — counts as reachable, and only a transport-level failure (no response at
-    all) blocks.
+    all) blocks. When it blocks a run as SYSTEM or as another admin account, a 'Proxy' warning
+    names the proxy the signed-in user has and this account does not (Get-ProxyInheritanceWarning,
+    wgt-gq8.39), a likely cause.
 
     Nothing here prompts (issue #230): the only blocking check is the network probe, whose verdict
     is not a matter of opinion, so the sole return-$false path is a genuine failure rather than a
@@ -93,6 +95,22 @@ function Test-SystemRequirements {
         else {
             $results += [PSCustomObject]@{ Check = 'Network'; Status = 'FAIL'; Detail = "Cannot reach cdn.winget.microsoft.com over HTTPS - network is required: $($_.Exception.Message)" }
             $proceed = $false
+            # A likely cause the run would otherwise never get to name (wgt-gq8.39): as SYSTEM or an
+            # elevating admin account, this run lacks the proxy the signed-in user has. A real run
+            # stops here, so the line is added here; a dry run goes on, and the environment
+            # pre-flight in Invoke-WingetInstall reports it once.
+            if (-not $WhatIf) {
+                $proxyWarning = $null
+                try {
+                    $proxyWarning = Get-ProxyInheritanceWarning -AccountContext (Get-InstallAccountContext)
+                }
+                catch {
+                    $proxyWarning = $null
+                }
+                if ($proxyWarning) {
+                    $results += [PSCustomObject]@{ Check = 'Proxy'; Status = 'WARN'; Detail = $proxyWarning }
+                }
+            }
         }
     }
 

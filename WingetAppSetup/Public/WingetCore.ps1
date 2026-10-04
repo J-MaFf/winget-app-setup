@@ -10,7 +10,10 @@
 
       1. Group Policy (Get-WingetPolicyBlock, review finding P3-30). When App Installer's policy
          turns winget or its source off, no fix can help: the run stops with exit code 2 and names
-         the policy. So does a winget that answers 0x8A15003A BLOCKED_BY_POLICY.
+         the policy. So does a winget that answers 0x8A15003A BLOCKED_BY_POLICY. The install run
+         checks the policy values in its pre-flight (Invoke-EnvironmentPreflight, wgt-gq8.39),
+         before it waits for Winget-AutoUpdate, and does not get here when they block winget; the
+         uninstaller relies on this check.
       2. Can winget start? `winget --version` must run and print a version (Test-WingetLaunchable).
          A failure that can clear on its own (winget.exe locked during an App Installer update,
          issues #253/#258) is checked for up to 75 seconds first, so an update in progress is not
@@ -77,19 +80,14 @@ function Initialize-Winget {
 
     $policyBlocked = {
         param ([string]$Detail)
-        $message = "Group Policy on this PC blocks winget: $Detail. This installer cannot install apps until the policy allows it; ask whoever manages this PC's policies (Computer Configuration > Administrative Templates > Windows Components > Desktop App Installer) to allow it, then re-run the installer."
-        if ($WhatIf) {
-            Write-Info "[DRY-RUN] $message A real run would stop here with exit code 2."
-        }
-        else {
-            Write-ErrorMessage $message
-        }
+        Write-WingetPolicyBlockMessage -Detail $Detail -WhatIf:$WhatIf
         [pscustomobject]@{ Ready = $false; Diagnosis = 'PolicyBlocked' }
     }
 
     $policy = Get-WingetPolicyBlock
     if ($policy) {
-        return (& $policyBlocked ("'{0}' is Disabled ({1} = 0 under HKLM\SOFTWARE\Policies\Microsoft\Windows\AppInstaller)" -f $policy.Policy, $policy.Name))
+        Write-WingetPolicyBlockMessage -Block $policy -WhatIf:$WhatIf
+        return [pscustomobject]@{ Ready = $false; Diagnosis = 'PolicyBlocked' }
     }
 
     if ($AccountContext.IsCrossUserElevation) {

@@ -726,13 +726,15 @@ function Get-PowerShell7RelaunchInstaller {
     the winget install for the installer's log (--log, review finding P2-6).
 .RETURNS
     [int] Exit code for the tail dispatch to propagate: the relaunched run's exit code, 0 for a
-    -WhatIf preview of a would-be install, or 7 when PowerShell 7 could not be installed or the
-    installer could not be relaunched under it. When installing PowerShell 7 needs a restart to
-    finish (msiexec 3010, or winget's restart result, see Test-WingetRestartRequiredResult) and the
-    relaunched run returned 0, the result is 3010 (review finding P3-16): that run checks Windows'
-    pending-restart state only after this install, so it cannot see this restart itself. Any other
-    code the relaunched run returned is kept: a failure at the end of the run ranks above 3010, and
-    an early exit stays what it is.
+    -WhatIf preview of a would-be install or of a relaunch Group Policy would refuse, or 7 when
+    PowerShell 7 could not be installed or the installer could not be relaunched under it, which
+    includes a Group Policy execution policy for PowerShell 7 of AllSigned or Restricted
+    (Get-ScriptExecutionPolicyBlock, checked before anything is installed; wgt-gq8.39). When
+    installing PowerShell 7 needs a restart to finish (msiexec 3010, or winget's restart result, see
+    Test-WingetRestartRequiredResult) and the relaunched run returned 0, the result is 3010 (review
+    finding P3-16): that run checks Windows' pending-restart state only after this install, so it
+    cannot see this restart itself. Any other code the relaunched run returned is kept: a failure at
+    the end of the run ranks above 3010, and an early exit stays what it is.
     Sets
     $script:PowerShell7BootstrapRelaunched to $true once a relaunched PowerShell 7 run has ended,
     so the tail knows that run already reported its outcome to whoever is at the console.
@@ -768,6 +770,22 @@ function Invoke-PowerShell7Bootstrap {
     # machine's pwsh is that broken, fail fast instead of spawning processes forever.
     if ($env:WINGET_APP_SETUP_PS7_BOOTSTRAP -eq '1') {
         Write-ErrorMessage 'The PowerShell 7 bootstrap re-entered itself after a relaunch: the relaunched PowerShell still reports a version below 7. Install PowerShell 7 manually (winget install Microsoft.PowerShell) and re-run this installer from a pwsh prompt.'
+        return 7
+    }
+
+    # The relaunch below runs the installer with pwsh -ExecutionPolicy Bypass -File, and Group
+    # Policy's PowerShell 7 execution policy overrides -ExecutionPolicy (wgt-gq8.39). Under
+    # AllSigned or Restricted pwsh refuses the file and the run ended with pwsh's own error and a
+    # misleading exit code, after PowerShell 7 may have been installed for nothing. Checked first,
+    # before anything is installed; both scopes count, since the relaunch runs as this same account.
+    $relaunchPolicyBlock = Get-ScriptExecutionPolicyBlock -Engine PowerShell7
+    if ($relaunchPolicyBlock) {
+        $policyMessage = '{0}, which -ExecutionPolicy Bypass on the command line cannot override, so PowerShell 7 cannot run this installer from a file, and the run cannot continue in PowerShell 7. Ask whoever manages this PC''s policies to allow scripts ({1}), then re-run the installer.' -f $relaunchPolicyBlock.Description, $relaunchPolicyBlock.GroupPolicyPath
+        if ($WhatIf) {
+            Write-Info "[DRY-RUN] $policyMessage A real run would stop here with exit code 7."
+            return 0
+        }
+        Write-ErrorMessage "$policyMessage Nothing was installed."
         return 7
     }
 

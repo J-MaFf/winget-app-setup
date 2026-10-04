@@ -33,11 +33,13 @@
     Exit codes: 0 = success, 1 = one or more apps failed to install (including the apps marked
     failed when winget could no longer be launched mid-run), 2 = winget unavailable (at the start,
     where `winget --version` must run and print a version, or Group Policy turns winget or its
-    source off; or no longer launchable at the end of the run), 3 = app-definition validation
-    failed or no valid apps remain, 4 = administrator rights
-    are required and the run was not elevated: the UAC prompt was declined or could not be shown, a
-    non-interactive run (nobody to approve a prompt, so none is shown), irm | iex, or the imported
-    module (review finding P2-12), 8 = the apps are installed, but automatic updates are not
+    source off, which the pre-flight checks before anything else; or no longer launchable at the
+    end of the run), 3 = app-definition validation failed or no valid apps remain, 4 = administrator
+    rights are required and the run was not elevated: the UAC prompt was declined or could not be
+    shown, a non-interactive run (nobody to approve a prompt, so none is shown), Group Policy's
+    Windows PowerShell execution policy for the PC is AllSigned or Restricted, so the elevated window
+    could not run the script (no prompt is shown; wgt-gq8.39), irm | iex, or the imported module
+    (review finding P2-12), 8 = the apps are installed, but automatic updates are not
     configured or unhealthy: the run's 'Auto-updates:' line is FAILED, NOT CONFIGURED (no
     Microsoft.WindowsAppRuntime.1.8, or whatever the latest winget release needs, and the installer
     could not install it), AT RISK
@@ -53,8 +55,9 @@
     when no machine-wide winget.exe can be started. A run that relaunched
     itself elevated returns the elevated run's exit code (Restart-WithElevation waits for it). The
     generated entry script also exits 1 when a blocking pre-flight check fails (before this
-    function runs), 5 when the run was aborted by an unexpected error or stopped from outside, and
-    6 when another run of the installer is in progress on the machine (review finding P3-41).
+    function runs), 5 when the run was aborted by an unexpected error or stopped from outside, or
+    PowerShell runs it in Constrained Language Mode (wgt-gq8.39), and 6 when another run of the
+    installer is in progress on the machine (review finding P3-41).
 
     After the summary of a real run, the run's outcome is reported in machine-readable form
     (Write-InstallerRunResult): one RESULT line, and last-run.json next to the transcript when the
@@ -116,8 +119,18 @@ function Invoke-WingetInstall {
                 # Relaunching elevated here would (a) be a surprising side effect for a preview
                 # and (b) — if the flag were ever dropped across the elevation boundary —
                 # silently turn a dry run into a real install. Stay in the current session and
-                # continue the preview.
-                Write-Info '[DRY-RUN] Would relaunch with administrator privileges. Continuing the preview in the current (non-elevated) session; no system changes will be made.'
+                # continue the preview. Restart-WithElevation's execution-policy check (wgt-gq8.39) is
+                # read-only, so the preview says what it would find.
+                $elevationPolicyBlock = Get-ScriptExecutionPolicyBlock -Engine WindowsPowerShell
+                if ($elevationPolicyBlock -and $elevationPolicyBlock.Scope -eq 'MachinePolicy') {
+                    Write-Info ('[DRY-RUN] A real run would stop here with exit code 4, without a UAC prompt: {0} Continuing the preview in the current (non-elevated) session; no system changes will be made.' -f (Format-ElevationPolicyBlockMessage -Block $elevationPolicyBlock))
+                }
+                else {
+                    Write-Info '[DRY-RUN] Would relaunch with administrator privileges. Continuing the preview in the current (non-elevated) session; no system changes will be made.'
+                    if ($elevationPolicyBlock) {
+                        Write-Info ('[DRY-RUN] {0}' -f (Format-ElevationPolicyBlockMessage -Block $elevationPolicyBlock))
+                    }
+                }
             }
         }
         elseif (-not (Test-IsRunningLocally)) {
@@ -200,6 +213,20 @@ function Invoke-WingetInstall {
         Write-Info 'Running as SYSTEM (for example from an RMM agent): installing for the whole PC only, with the winget.exe that App Installer installed for this PC. An app with no machine-wide installer is not installed: it is reported as Deferred, with how it can still be installed for the user. Microsoft does not support the winget command line as SYSTEM, so a SYSTEM run can fail where a run as a user would not.'
     }
 
+    # Pre-flight for the account this run installs as (wgt-gq8.39), before this run changes or waits
+    # for anything: one line for each problem it finds. A proxy the signed-in user has that this
+    # account does not and a restart that is already pending are warnings; App Installer's Group
+    # Policy turning winget off stops a real run with exit code 2. Read-only, so a dry run runs it
+    # too. The pending-restart state it read is the one the end of the run compares against (review
+    # finding P3-16), so a restart this run's installs need (exit code 3010) is told apart from one
+    # that was already pending, which is reported but does not make the run 3010 by itself.
+    $preflight = Invoke-EnvironmentPreflight -WhatIf:$WhatIf -AccountContext $account
+    if ($preflight.ExitCode -ne 0) {
+        return [int]$preflight.ExitCode
+    }
+    $restartStateBefore = $preflight.RestartState
+    $restartPendingBefore = @($preflight.RestartPendingReasons)
+
     # TightVNC's passwords for its post-install hook (work-order item 18, review finding P2-22),
     # before winget or any installer starts: taken out of this process's environment so no child
     # process it starts from here on inherits them, or asked for now when someone is at the console
@@ -215,22 +242,6 @@ function Invoke-WingetInstall {
         Write-WarningMessage "Could not read the TightVNC password for this run: $($_.Exception.Message)"
     }
 
-    # Pending restart before the run (review finding P3-16), read before this run changes the
-    # machine: the end of the run compares against it, so a restart that this run's installs need
-    # (exit code 3010) is told apart from one that was already pending, which is reported but does
-    # not make the run 3010 by itself. Read-only, so a dry run reports it too.
-    $restartStateBefore = $null
-    try {
-        $restartStateBefore = Get-PendingRestartState
-    }
-    catch {
-        Write-WarningMessage "Could not check whether a restart is pending: $_"
-    }
-    $restartPendingBefore = @(Get-PendingRestartReason -State $restartStateBefore)
-    if ($restartPendingBefore.Count -gt 0) {
-        Write-WarningMessage ('A restart is already pending on this PC ({0}). An installer that needs a restart first fails with 0x8A15010A; if one does, restart this PC and re-run the installer.' -f ($restartPendingBefore -join '; '))
-    }
-
     # Let a Winget-AutoUpdate run that is already in progress finish first (bounded): it
     # re-provisions App Installer, resets winget's sources and runs MSI upgrades, and racing it makes
     # healthy apps fail with launch errors or 'another installation is in progress'. Read-only, but
@@ -244,8 +255,14 @@ function Invoke-WingetInstall {
     # with exit code 2 when winget cannot be started or Group Policy turns it off. A dry run only
     # probes (P2-16) and carries on whatever it finds: a real run would set winget up first, so
     # stopping here would misreport the very machine a dry run previews (cross-user elevation,
-    # issue #265).
-    $winget = Initialize-Winget -WhatIf:$WhatIf -AccountContext $account
+    # issue #265). A dry run whose pre-flight already reported the Group Policy block skips it:
+    # its first step would report the same policy again, and winget cannot run either way.
+    if ($preflight.WingetPolicyBlocked) {
+        $winget = [pscustomobject]@{ Ready = $false; Diagnosis = 'PolicyBlocked' }
+    }
+    else {
+        $winget = Initialize-Winget -WhatIf:$WhatIf -AccountContext $account
+    }
     $wingetAvailable = [bool]$winget.Ready
     if (-not $wingetAvailable -and -not $WhatIf) {
         Write-ErrorMessage 'Winget is required for this script. Exiting.'

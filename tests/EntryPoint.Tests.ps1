@@ -44,6 +44,10 @@ BeforeAll {
         $override += "function Grant-InstallLogReadAccess { param([string]`$Path) `$true }`n"
         $override += "function Invoke-InstallerHousekeeping { param([string]`$CurrentScriptPath) Write-Host ""HOUSEKEEPING RAN: `$CurrentScriptPath"" }`n"
         $override += "function Get-InstallerRunLockName { '$($script:testRunLockName)' }`n"
+        # The environment pre-flight's registry reads (wgt-gq8.39): no Group Policy execution policy
+        # and no proxy to report, never the runner's own.
+        $override += "function Get-ScriptExecutionPolicyBlock { param([string]`$Engine) `$null }`n"
+        $override += "function Get-ProxyInheritanceWarning { param(`$AccountContext) `$null }`n"
         if ($PSBoundParameters.ContainsKey('Body')) {
             $override += "function Invoke-WingetInstall { param([switch]`$WhatIf, [switch]`$NonInteractive, [switch]`$SkipSystemCheck) $Body }`n"
         }
@@ -322,6 +326,91 @@ Describe 'Aborted runs exit non-zero (review P1: tail.ps1 try/finally exited 0)'
 
         $result.ExitCode | Should -Be 5
         $result.Output | Should -Match 'UNEXPECTED ERROR'
+    }
+}
+
+Describe 'Constrained Language Mode stops the run at once, in one line (wgt-gq8.39)' {
+    BeforeAll {
+        $script:clmLine = 'PowerShell runs this installer in ConstrainedLanguage mode on this PC, which an application control policy (App Control for Business/WDAC or AppLocker) sets for scripts it does not trust.'
+
+        # Runs a command in a child pwsh whose session is put in Constrained Language Mode first, the
+        # way an application control policy runs an untrusted script. A probe script reports the
+        # mode a script file then runs in: where the platform runs it in FullLanguage anyway, the
+        # child exits 99 and the test is skipped instead of running the installer for real.
+        function Invoke-ChildUnderConstrainedLanguage {
+            param ([string]$Command)
+            $probe = Join-Path $TestDrive 'language-mode-probe.ps1'
+            Set-Content -LiteralPath $probe -Value '[string]$ExecutionContext.SessionState.LanguageMode' -Encoding UTF8
+            $escapedProbe = $probe.Replace("'", "''")
+            $script = "`$ExecutionContext.SessionState.LanguageMode = 'ConstrainedLanguage'; if ((& '$escapedProbe') -ne 'ConstrainedLanguage') { exit 99 }; $Command"
+            Invoke-ChildInstaller -Arguments @('-Command', $script)
+        }
+    }
+
+    It 'Stops before the transcript, the build line and the run, with exit code 5 (the language-mode seam)' {
+        $path = New-FaultInjectedInstaller -Name 'clm-seam.ps1' -Body "Write-Host 'install ran'; return 0" -Overrides "function Get-PowerShellLanguageMode { 'ConstrainedLanguage' }"
+
+        $result = Invoke-ChildInstaller -Arguments @('-File', $path, '-NonInteractive')
+
+        $result.ExitCode | Should -Be 5
+        $result.Output | Should -Match ([regex]::Escape($script:clmLine))
+        $result.Output | Should -Not -Match 'install ran|Installer build:|Logging this run to:|UNEXPECTED ERROR|RESULT:'
+        Get-ChildTranscript | Should -HaveCount 0
+    }
+
+    It 'Stops before the Windows PowerShell 5.1 bootstrap too' {
+        $path = New-FaultInjectedInstaller -Name 'clm-seam-51.ps1' -EmulateWindowsPowerShell -Body "Write-Host 'install ran'; return 0" -Overrides (
+            "function Get-PowerShellLanguageMode { 'ConstrainedLanguage' }`n" +
+            "function Invoke-PowerShell7Bootstrap { param([switch]`$WhatIf, [switch]`$NonInteractive, [switch]`$SkipSystemCheck, [string]`$CommandPath, [string]`$ExpectedBuildId, [string]`$LogDirectory) Write-Host 'bootstrap ran'; return 0 }")
+
+        $result = Invoke-ChildInstaller -Arguments @('-File', $path, '-NonInteractive')
+
+        $result.ExitCode | Should -Be 5
+        $result.Output | Should -Match ([regex]::Escape($script:clmLine))
+        $result.Output | Should -Not -Match 'bootstrap ran|install ran|Logging the PowerShell 7 bootstrap'
+    }
+
+    It 'Says so in one line and exits 5 when the run really is in Constrained Language Mode, from a file' {
+        $path = New-FaultInjectedInstaller -Name 'clm-real.ps1' -Body "Write-Host 'install ran'; return 0"
+        $escapedPath = $path.Replace("'", "''")
+
+        $result = Invoke-ChildUnderConstrainedLanguage -Command "& '$escapedPath' -WhatIf -NonInteractive; exit `$LASTEXITCODE"
+        if ($result.ExitCode -eq 99) {
+            Set-ItResult -Skipped -Because 'this platform runs a script file in FullLanguage mode even from a Constrained Language session'
+            return
+        }
+
+        $result.ExitCode | Should -Be 5
+        $result.Output | Should -Match ([regex]::Escape($script:clmLine))
+        $result.Output | Should -Not -Match 'install ran|UNEXPECTED ERROR|Method invocation is supported only on core types'
+    }
+
+    It 'Exits 5 under irm | iex when nobody is at the console (an RMM job)' {
+        $path = New-FaultInjectedInstaller -Name 'clm-real-iex.ps1' -Body "Write-Host 'install ran'; return 0"
+        $escapedPath = $path.Replace("'", "''")
+
+        $result = Invoke-ChildUnderConstrainedLanguage -Command "`$env:WINGET_APP_SETUP_NONINTERACTIVE = '1'; Get-Content -Raw -LiteralPath '$escapedPath' | Invoke-Expression; Write-Host 'console kept'"
+        if ($result.ExitCode -eq 99) {
+            Set-ItResult -Skipped -Because 'this platform runs a script file in FullLanguage mode even from a Constrained Language session'
+            return
+        }
+
+        $result.ExitCode | Should -Be 5
+        $result.Output | Should -Match ([regex]::Escape($script:clmLine))
+        $result.Output | Should -Not -Match 'install ran|console kept|UNEXPECTED ERROR'
+    }
+
+    It 'Keeps an interactive irm | iex console open, with $LASTEXITCODE 5, instead of closing it with the message' {
+        # The branch the tests above cannot reach in a child process (stdin is redirected there):
+        # pinned on the generated installer's text.
+        $script:installerText | Should -Match '(?s)if \(-not \(Test-FullLanguageMode\)\) \{\s*\$global:LASTEXITCODE = 5\s*\$exitForLanguageMode = \[bool\]\$PSCommandPath'
+        $script:installerText | Should -Match '(?s)if \(\$exitForLanguageMode\) \{\s*exit 5\s*\}\s*return\s*\}'
+        # Checked first: before the command-line probe, the first .NET call that Constrained Language
+        # Mode refuses.
+        $entryIndex = $script:installerText.LastIndexOf("if (`$MyInvocation.InvocationName -ne '.') {")
+        $checkIndex = $script:installerText.IndexOf('if (-not (Test-FullLanguageMode)) {', $entryIndex)
+        $checkIndex | Should -BeGreaterThan $entryIndex
+        $checkIndex | Should -BeLessThan $script:installerText.IndexOf('[Environment]::GetCommandLineArgs()', $entryIndex)
     }
 }
 
@@ -768,8 +857,9 @@ Describe 'One run at a time, and the RESULT line and last-run.json of every run 
     }
 
     It 'Ends a run Group Policy stops at the winget setup (exit code 2) with its RESULT line and last-run.json (review findings P3-30, P3-41)' {
-        # The real Invoke-WingetInstall: Initialize-Winget finds the policy before any winget call,
-        # the run returns 2 before its summary, and the entry script's early-exit route reports it.
+        # The real Invoke-WingetInstall: its environment pre-flight finds the policy before any
+        # winget call (wgt-gq8.39), the run returns 2 before its summary, and the entry script's
+        # early-exit route reports it.
         $overrides = $script:elevated + "`n" +
             "function Get-InstallAccountContext { [pscustomobject]@{ IsSystem = `$false; ProcessUser = 'CONTOSO\admin-tech'; SessionUser = 'CONTOSO\admin-tech'; IsCrossUserElevation = `$false } }`n" +
             "function Get-PendingRestartState { `$null }`n" +
@@ -1003,5 +1093,18 @@ function Start-ElevatedProcess {
         $result.Output | Should -Not -Match 'ELEVATED:'
         $result.Output | Should -Match 'this run is non-interactive, so there is nobody to approve a UAC prompt'
         $result.Output | Should -Not -Match 'PROMPT:'
+    }
+
+    It 'Exits 4 without a UAC prompt when Group Policy''s machine execution policy would refuse the elevated run (wgt-gq8.39)' {
+        # Defined after the fault-injection default, so this one wins.
+        $policyOverride = "function Get-ScriptExecutionPolicyBlock { param([string]`$Engine) if (`$Engine -eq 'WindowsPowerShell') { [pscustomobject]@{ Engine = `$Engine; Scope = 'MachinePolicy'; Policy = 'AllSigned'; Key = 'HKLM\K'; GroupPolicyPath = 'Computer Configuration > P'; Description = 'Group Policy sets the Windows PowerShell execution policy for this PC to AllSigned (MachinePolicy, HKLM\K)' } } }"
+        $path = New-FaultInjectedInstaller -Name 'relaunch-policy.ps1' -Overrides ($script:notElevatedOverrides + "`n" + $script:elevatedRunOverride + "`n" + $policyOverride)
+
+        $result = Invoke-ChildInstaller -Arguments @('-File', $path, '-SkipSystemCheck')
+
+        $result.ExitCode | Should -Be 4
+        $result.Output | Should -Not -Match 'ELEVATED:'
+        $result.Output | Should -Match 'Group Policy sets the Windows PowerShell execution policy for this PC to AllSigned .*cannot run this script from a file.* No UAC prompt was shown\.'
+        $result.Output | Should -Match 'stopped early with exit code 4: administrator rights are required'
     }
 }

@@ -63,12 +63,12 @@ param (
 # This script is assembled from the WingetAppSetup module by build/Build-WingetInstallScript.ps1.
 # Edit the function source under WingetAppSetup/Public and WingetAppSetup/Private, then re-run the
 # build to regenerate this file. See readme.md ("Project layout") for details.
-# Build id: 1.0.0+c92768bc (module version + SHA256 fragment of this whole script; issue #189).
+# Build id: 1.0.0+a3f18b70 (module version + SHA256 fragment of this whole script; issue #189).
 # ------------------------------------------------------------------------------------------------
 
 # Content-derived build identity, logged at startup so a transcript from a remote machine
 # identifies exactly which installer build produced it (issue #189).
-$script:InstallerBuildId = '1.0.0+c92768bc'
+$script:InstallerBuildId = '1.0.0+a3f18b70'
 
 # ------------------------------------------------Functions------------------------------------------------
 
@@ -1008,6 +1008,462 @@ function Start-ElevatedProcess {
     $startInfo.UseShellExecute = $true
     $startInfo.Verb = 'runas'
     return [System.Diagnostics.Process]::Start($startInfo)
+}
+
+# --- EnvironmentPreflight ---
+# Environment pre-flight checks (wgt-gq8.39): find what about this PC keeps a run from working,
+# and say it in one line before the run starts down a path that cannot succeed, instead of a
+# cascade of failures and wrong repairs. Each check sits where it can still act:
+#   - Constrained Language Mode: first thing in the entry script (build/fragments/tail.ps1),
+#     because the run breaks on its first .NET call, long before any later step (Test-FullLanguageMode).
+#   - An execution policy set by Group Policy that refuses this unsigned script: right before each
+#     relaunch with -File, the Windows PowerShell 5.1 bootstrap's under pwsh and the elevated
+#     relaunch (Get-ScriptExecutionPolicyBlock).
+#   - For the account the run installs as, once it is elevated (Invoke-EnvironmentPreflight): a
+#     proxy the signed-in user has that SYSTEM or the elevating admin does not, a restart that is
+#     already pending, and App Installer's Group Policy turning winget off.
+# Every check is read-only, so a dry run (-WhatIf) runs them too.
+
+<#
+.SYNOPSIS
+    Returns the language mode PowerShell runs this code in ('FullLanguage', 'ConstrainedLanguage',
+    'RestrictedLanguage' or 'NoLanguage').
+.DESCRIPTION
+    A separate function so tests can mock it. Constrained Language Mode safe and Windows PowerShell
+    5.1 safe: it reads one property and converts it to a string, which every language mode allows.
+#>
+function Get-PowerShellLanguageMode {
+    return [string]$ExecutionContext.SessionState.LanguageMode
+}
+
+<#
+.SYNOPSIS
+    Says in one line, and returns $false, when PowerShell does not run in Full Language Mode.
+.DESCRIPTION
+    An application control policy (App Control for Business, formerly WDAC, or AppLocker) runs the
+    scripts it does not trust in Constrained Language Mode, and this installer is not signed. That
+    mode refuses .NET method calls and most .NET types, which the installer uses from its first
+    lines on: before this check, such a run printed PowerShell's errors and then died further on,
+    under PowerShell 7 in its pre-flight system checks with 'UNEXPECTED ERROR' and exit code 5. No
+    step can work around it.
+
+    The entry script calls this before anything else and stops with exit code 5 (the run is aborted
+    before it starts; no other code in the table fits). Only constructs every language mode allows,
+    under Windows PowerShell 5.1 too: Write-Host and string formatting.
+.RETURNS
+    [bool] True in Full Language Mode.
+#>
+function Test-FullLanguageMode {
+    $mode = Get-PowerShellLanguageMode
+    if ($mode -eq 'FullLanguage') {
+        return $true
+    }
+    Write-ErrorMessage ('PowerShell runs this installer in {0} mode on this PC, which an application control policy (App Control for Business/WDAC or AppLocker) sets for scripts it does not trust. The installer needs FullLanguage mode, so it stops here with exit code 5 and changes nothing: run it on a PC without that policy, or ask whoever manages the policy to allow it.' -f $mode)
+    return $false
+}
+
+<#
+.SYNOPSIS
+    Returns the Group Policy execution policy that keeps PowerShell from running this unsigned
+    script with -File, even with -ExecutionPolicy Bypass, or $null.
+.DESCRIPTION
+    The installer relaunches itself with `-ExecutionPolicy Bypass -File <copy>` twice: the Windows
+    PowerShell 5.1 bootstrap under pwsh (Invoke-PowerShell7Bootstrap), and the elevated Windows
+    PowerShell (Restart-WithElevation). -ExecutionPolicy sets the Process scope, and Group Policy's
+    'Turn on Script Execution' (the MachinePolicy and UserPolicy scopes) overrides every other
+    scope, so under 'Allow only signed scripts' (AllSigned) or with the setting Disabled
+    (Restricted) the relaunch refuses the file and the run ended with a misleading exit code 1. The
+    irm | iex one-liner itself is not a script file, so the policy does not stop it before then.
+
+    Read from the registry the way PowerShell reads it, so it works for either engine from either
+    engine (and under Windows PowerShell 5.1):
+      WindowsPowerShell  HKLM, then HKCU: SOFTWARE\Policies\Microsoft\Windows\PowerShell.
+      PowerShell7        HKLM, then HKCU: SOFTWARE\Policies\Microsoft\PowerShellCore, or the Windows
+                         PowerShell key above when that key sets UseWindowsPowerShellPolicySetting
+                         ('Use Windows PowerShell Policy setting'). Windows PowerShell's policy alone
+                         does not apply to pwsh.
+    In a key, EnableScripts 0 means Restricted, and EnableScripts 1 means the ExecutionPolicy value
+    (a value PowerShell does not know counts as its default, Restricted); without EnableScripts the
+    key sets nothing. The first scope that sets a policy decides: a machine policy of RemoteSigned
+    wins over a user policy of AllSigned. Only AllSigned and Restricted refuse the script; the
+    relaunched copies are written by the installer itself, so they carry no internet zone mark that
+    RemoteSigned would refuse. PowerShell 7's powershell.config.json policies are not read.
+.PARAMETER Engine
+    'WindowsPowerShell' (powershell.exe) or 'PowerShell7' (pwsh.exe): the program that will run the
+    script.
+.RETURNS
+    [pscustomobject] Engine, Scope ('MachinePolicy' or 'UserPolicy'), Policy ('AllSigned' or
+    'Restricted'), Key (the registry key that set it), GroupPolicyPath (where to change it) and
+    Description (one sentence for a message), or $null.
+#>
+function Get-ScriptExecutionPolicyBlock {
+    param (
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('WindowsPowerShell', 'PowerShell7')]
+        [string]$Engine
+    )
+
+    $windowsKey = 'SOFTWARE\Policies\Microsoft\Windows\PowerShell'
+    $coreKey = 'SOFTWARE\Policies\Microsoft\PowerShellCore'
+    $engineName = 'Windows PowerShell'
+    if ($Engine -eq 'PowerShell7') {
+        $engineName = 'PowerShell 7'
+    }
+
+    $scopes = @(
+        @{ Name = 'MachinePolicy'; Hive = 'HKLM'; Target = 'this PC'; Node = 'Computer Configuration' },
+        @{ Name = 'UserPolicy'; Hive = 'HKCU'; Target = 'this account'; Node = 'User Configuration' }
+    )
+    foreach ($scope in $scopes) {
+        $keyPath = $windowsKey
+        $templatePath = 'Windows Components > Windows PowerShell'
+        $templateNote = ''
+        $values = $null
+        if ($Engine -eq 'PowerShell7') {
+            try {
+                $values = Get-ItemProperty -LiteralPath ('{0}:\{1}' -f $scope.Hive, $coreKey) -ErrorAction Stop
+            }
+            catch {
+                # No PowerShellCore policy key in this scope: it sets nothing for pwsh.
+                continue
+            }
+            $keyPath = $coreKey
+            $templatePath = 'PowerShell Core'
+            $fallback = "$($values.UseWindowsPowerShellPolicySetting)"
+            if ($fallback -and $fallback -ne '0') {
+                $keyPath = $windowsKey
+                $templatePath = 'Windows Components > Windows PowerShell'
+                $templateNote = ', which PowerShell 7 follows through ''Use Windows PowerShell Policy setting'' under PowerShell Core'
+                $values = $null
+            }
+        }
+
+        if ($null -eq $values) {
+            try {
+                $values = Get-ItemProperty -LiteralPath ('{0}:\{1}' -f $scope.Hive, $keyPath) -ErrorAction Stop
+            }
+            catch {
+                continue
+            }
+        }
+        $enableScripts = "$($values.EnableScripts)"
+        $policy = $null
+        if ($enableScripts -eq '0') {
+            $policy = 'Restricted'
+        }
+        elseif ($enableScripts -eq '1') {
+            $policy = "$($values.ExecutionPolicy)".Trim()
+        }
+        if (-not $policy) {
+            # This scope sets nothing; the next one may.
+            continue
+        }
+
+        # This scope decides the policy for the engine: no later scope can change it.
+        if (@('Bypass', 'Unrestricted', 'RemoteSigned') -contains $policy) {
+            return $null
+        }
+        if ($policy -eq 'AllSigned') {
+            $policy = 'AllSigned'
+        }
+        else {
+            $policy = 'Restricted'
+        }
+        $key = '{0}\{1}' -f $scope.Hive, $keyPath
+        return [pscustomobject]@{
+            Engine          = $Engine
+            Scope           = $scope.Name
+            Policy          = $policy
+            Key             = $key
+            GroupPolicyPath = '{0} > Administrative Templates > {1} > Turn on Script Execution{2}' -f $scope.Node, $templatePath, $templateNote
+            Description     = 'Group Policy sets the {0} execution policy for {1} to {2} ({3}, {4})' -f $engineName, $scope.Target, $policy, $scope.Name, $key
+        }
+    }
+    return $null
+}
+
+<#
+.SYNOPSIS
+    Says what a Windows PowerShell execution policy set by Group Policy does to the elevated relaunch.
+.DESCRIPTION
+    For Restart-WithElevation and Invoke-WingetInstall's dry run. The elevated program is always
+    Windows PowerShell (powershell.exe), so only its policy matters here. A machine policy refuses
+    the elevated run whoever approves the UAC prompt. A user policy is this account's: it refuses
+    the elevated run only when this same account approves the prompt, which cannot be known before.
+.PARAMETER Block
+    Get-ScriptExecutionPolicyBlock -Engine WindowsPowerShell's result.
+.RETURNS
+    [string]
+#>
+function Format-ElevationPolicyBlockMessage {
+    param (
+        [Parameter(Mandatory = $true)]
+        [object]$Block
+    )
+
+    if ($Block.Scope -eq 'MachinePolicy') {
+        return ('{0}, which -ExecutionPolicy Bypass on the command line cannot override, so an elevated Windows PowerShell cannot run this script from a file. Ask whoever manages this PC''s policies to allow scripts ({1}), or start it from an elevated PowerShell 7 (pwsh) session, where it needs no relaunch.' -f $Block.Description, $Block.GroupPolicyPath)
+    }
+    return ('{0}, which -ExecutionPolicy Bypass on the command line cannot override: if this account approves the UAC prompt, the elevated Windows PowerShell cannot run this script from a file. Approve it with another administrator account, or ask whoever manages the policies to allow scripts ({1}).' -f $Block.Description, $Block.GroupPolicyPath)
+}
+
+<#
+.SYNOPSIS
+    Returns the security identifier (S-1-5-21-...) of an account name such as CONTOSO\jdoe, or $null.
+.DESCRIPTION
+    A separate function so tests can mock it. $null when the name cannot be translated (an unknown
+    or deleted account, or off Windows).
+#>
+function Get-AccountSid {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$AccountName
+    )
+
+    try {
+        $account = New-Object System.Security.Principal.NTAccount($AccountName)
+        return $account.Translate([System.Security.Principal.SecurityIdentifier]).Value
+    }
+    catch {
+        return $null
+    }
+}
+
+<#
+.SYNOPSIS
+    Reads an account's Windows Internet (WinINet) proxy settings, or $null when they cannot be read.
+.DESCRIPTION
+    The per-user settings under Software\Microsoft\Windows\CurrentVersion\Internet Settings, which
+    Settings > Network & Internet > Proxy, Internet Options and the Internet Explorer Group Policy
+    settings write: ProxyServer (only while ProxyEnable is 1), with its bypass list ProxyOverride,
+    and AutoConfigURL (a proxy auto-configuration script). A separate function so tests can mock it.
+.PARAMETER UserSid
+    The account's SID: its hive is read under HKEY_USERS, where Windows loads it while the user is
+    signed in. Empty: the account this process runs as (HKCU).
+.RETURNS
+    [pscustomobject] ProxyServer, ProxyOverride and AutoConfigUrl (each '' when not set), or $null.
+#>
+function Get-WinInetProxySetting {
+    param (
+        [Parameter(Mandatory = $false)]
+        [string]$UserSid
+    )
+
+    $path = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings'
+    if ($UserSid) {
+        $path = 'Registry::HKEY_USERS\{0}\Software\Microsoft\Windows\CurrentVersion\Internet Settings' -f $UserSid
+    }
+    try {
+        $values = Get-ItemProperty -LiteralPath $path -ErrorAction Stop
+    }
+    catch {
+        return $null
+    }
+
+    $server = ''
+    $override = ''
+    if ("$($values.ProxyEnable)" -eq '1') {
+        $server = "$($values.ProxyServer)".Trim()
+        if ($server) {
+            $override = "$($values.ProxyOverride)".Trim()
+        }
+    }
+    return [pscustomobject]@{
+        ProxyServer   = $server
+        ProxyOverride = $override
+        AutoConfigUrl = "$($values.AutoConfigURL)".Trim()
+    }
+}
+
+<#
+.SYNOPSIS
+    Returns $true when Group Policy makes the Windows Internet proxy settings one setting for the
+    whole PC ('Make proxy settings per-machine (rather than per-user)').
+.DESCRIPTION
+    HKLM\SOFTWARE\Policies\Microsoft\Windows\CurrentVersion\Internet Settings, ProxySettingsPerUser
+    0 (NetworkProxy CSP ProxySettingsPerUser). Every account, SYSTEM included, then uses the same
+    proxy. A separate function so tests can mock it.
+#>
+function Test-ProxySettingsPerMachine {
+    try {
+        $values = Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\CurrentVersion\Internet Settings' -ErrorAction Stop
+    }
+    catch {
+        return $false
+    }
+    return ("$($values.ProxySettingsPerUser)" -eq '0')
+}
+
+<#
+.SYNOPSIS
+    Formats WinINet proxy settings for a message: 'proxy server proxy:8080 (bypass: <local>),
+    automatic configuration script http://wpad/proxy.pac', or 'no proxy'.
+#>
+function Format-WinInetProxySetting {
+    param (
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [object]$Setting
+    )
+
+    $parts = @()
+    if ($Setting -and $Setting.ProxyServer) {
+        $server = 'proxy server {0}' -f $Setting.ProxyServer
+        if ($Setting.ProxyOverride) {
+            $server += ' (bypass: {0})' -f $Setting.ProxyOverride
+        }
+        $parts += $server
+    }
+    if ($Setting -and $Setting.AutoConfigUrl) {
+        $parts += 'automatic configuration script {0}' -f $Setting.AutoConfigUrl
+    }
+    if ($parts.Count -eq 0) {
+        return 'no proxy'
+    }
+    return ($parts -join ', ')
+}
+
+<#
+.SYNOPSIS
+    Returns a one-line warning when the signed-in user has a Windows Internet proxy that the account
+    this run installs as does not have, or $null.
+.DESCRIPTION
+    The Windows Internet (WinINet) proxy settings belong to each account. A run as SYSTEM (an RMM
+    agent) or as another admin account (cross-user elevation) reads its own, not the signed-in
+    user's, so on a network that only lets traffic out through the proxy the user has, its downloads
+    fail (winget's downloads and source update, the PowerShell 7 and Winget-AutoUpdate MSIs, the
+    network pre-flight check). The WinHTTP proxy (netsh winhttp) is one setting for the whole PC, so
+    every account already shares it, and so does a WinINet proxy that Group Policy makes per-machine
+    (Test-ProxySettingsPerMachine): neither is reported.
+
+    Quiet (returns $null) for a run as the signed-in user, when nobody is signed in, when the user's
+    settings cannot be read, when the user has no proxy, and when this account has the same one.
+.PARAMETER AccountContext
+    Get-InstallAccountContext's result.
+.RETURNS
+    [string] e.g. "The signed-in user 'CONTOSO\jdoe' has a proxy in their Windows Internet settings
+    (proxy server proxy.contoso.com:8080 (bypass: <local>)) that this run as SYSTEM does not use
+    (SYSTEM has no proxy). ...", or $null.
+#>
+function Get-ProxyInheritanceWarning {
+    param (
+        [Parameter(Mandatory = $true)]
+        [AllowNull()]
+        [object]$AccountContext
+    )
+
+    if ($null -eq $AccountContext -or -not ($AccountContext.IsSystem -or $AccountContext.IsCrossUserElevation)) {
+        return $null
+    }
+    $sessionUser = "$($AccountContext.SessionUser)"
+    if ([string]::IsNullOrWhiteSpace($sessionUser)) {
+        return $null
+    }
+    if (Test-ProxySettingsPerMachine) {
+        return $null
+    }
+    $sid = Get-AccountSid -AccountName $sessionUser
+    if (-not $sid) {
+        return $null
+    }
+    $userProxy = Get-WinInetProxySetting -UserSid $sid
+    if (-not $userProxy -or -not ($userProxy.ProxyServer -or $userProxy.AutoConfigUrl)) {
+        return $null
+    }
+    $ownProxy = Get-WinInetProxySetting
+    if ($ownProxy -and $ownProxy.ProxyServer -eq $userProxy.ProxyServer -and $ownProxy.AutoConfigUrl -eq $userProxy.AutoConfigUrl) {
+        return $null
+    }
+
+    $who = 'SYSTEM'
+    if (-not $AccountContext.IsSystem) {
+        $who = "'$($AccountContext.ProcessUser)'"
+    }
+    return ("The signed-in user '{0}' has a proxy in their Windows Internet settings ({1}) that this run as {2} does not use ({2} has {3}). On a network that only allows traffic through that proxy, downloads fail; if they do, give {2} the same proxy settings, or set the proxy for the whole PC, and re-run the installer." -f $sessionUser, (Format-WinInetProxySetting -Setting $userProxy), $who, (Format-WinInetProxySetting -Setting $ownProxy))
+}
+
+<#
+.SYNOPSIS
+    The pre-flight checks for the account a run installs as: one line per problem, and the exit code
+    when the run cannot go on.
+.DESCRIPTION
+    Invoke-WingetInstall runs this once it is elevated (or runs as SYSTEM), before it waits for
+    Winget-AutoUpdate or sets winget up (wgt-gq8.39). Read-only, so a dry run runs it too. In this
+    order:
+      1. Proxy (warning): the signed-in user's proxy that this account does not have
+         (Get-ProxyInheritanceWarning).
+      2. Pending restart (warning, review finding P3-16): a restart Windows already wants before
+         the run. Its state is returned, and the end of the run compares against it, so a restart
+         this run's installs need (exit code 3010) is told apart from this one.
+      3. App Installer's Group Policy (stop, review finding P3-30): winget, its command line or its
+         default source turned off (Get-WingetPolicyBlock). No repair can help, so a real run stops
+         with exit code 2. Initialize-Winget checks the same policy first; a run that this check
+         stops never gets there, and a dry run does not call it once this check has reported the
+         policy, so the line appears once.
+    The warnings come first, so the line that stops the run is the last one.
+.PARAMETER WhatIf
+    Dry run: a policy block is reported with [DRY-RUN] and the exit code a real run would stop with,
+    and the run goes on.
+.PARAMETER AccountContext
+    Get-InstallAccountContext's result; read here when not given.
+.RETURNS
+    [pscustomobject] ExitCode (0, or 2 when a real run must stop), RestartState
+    (Get-PendingRestartState's result, or $null), RestartPendingReasons ([string[]]) and
+    WingetPolicyBlocked ([bool]).
+#>
+function Invoke-EnvironmentPreflight {
+    param (
+        [Parameter(Mandatory = $false)]
+        [switch]$WhatIf,
+
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [object]$AccountContext
+    )
+
+    if ($null -eq $AccountContext) {
+        $AccountContext = Get-InstallAccountContext
+    }
+
+    $proxyWarning = $null
+    try {
+        $proxyWarning = Get-ProxyInheritanceWarning -AccountContext $AccountContext
+    }
+    catch {
+        # Best-effort: a warning that cannot be worked out is not a reason to stop.
+        $proxyWarning = $null
+    }
+    if ($proxyWarning) {
+        Write-WarningMessage $proxyWarning
+    }
+
+    $restartState = $null
+    try {
+        $restartState = Get-PendingRestartState
+    }
+    catch {
+        Write-WarningMessage "Could not check whether a restart is pending: $_"
+    }
+    $restartReasons = @(Get-PendingRestartReason -State $restartState)
+    if ($restartReasons.Count -gt 0) {
+        Write-WarningMessage ('A restart is already pending on this PC ({0}). An installer that needs a restart first fails with 0x8A15010A; if one does, restart this PC and re-run the installer.' -f ($restartReasons -join '; '))
+    }
+
+    $exitCode = 0
+    $policy = Get-WingetPolicyBlock
+    if ($policy) {
+        Write-WingetPolicyBlockMessage -Block $policy -WhatIf:$WhatIf
+        if (-not $WhatIf) {
+            $exitCode = 2
+        }
+    }
+
+    return [pscustomobject]@{
+        ExitCode              = $exitCode
+        RestartState          = $restartState
+        RestartPendingReasons = $restartReasons
+        WingetPolicyBlocked   = [bool]$policy
+    }
 }
 
 # --- FailureReporting ---
@@ -4442,13 +4898,15 @@ function Get-PowerShell7RelaunchInstaller {
     the winget install for the installer's log (--log, review finding P2-6).
 .RETURNS
     [int] Exit code for the tail dispatch to propagate: the relaunched run's exit code, 0 for a
-    -WhatIf preview of a would-be install, or 7 when PowerShell 7 could not be installed or the
-    installer could not be relaunched under it. When installing PowerShell 7 needs a restart to
-    finish (msiexec 3010, or winget's restart result, see Test-WingetRestartRequiredResult) and the
-    relaunched run returned 0, the result is 3010 (review finding P3-16): that run checks Windows'
-    pending-restart state only after this install, so it cannot see this restart itself. Any other
-    code the relaunched run returned is kept: a failure at the end of the run ranks above 3010, and
-    an early exit stays what it is.
+    -WhatIf preview of a would-be install or of a relaunch Group Policy would refuse, or 7 when
+    PowerShell 7 could not be installed or the installer could not be relaunched under it, which
+    includes a Group Policy execution policy for PowerShell 7 of AllSigned or Restricted
+    (Get-ScriptExecutionPolicyBlock, checked before anything is installed; wgt-gq8.39). When
+    installing PowerShell 7 needs a restart to finish (msiexec 3010, or winget's restart result, see
+    Test-WingetRestartRequiredResult) and the relaunched run returned 0, the result is 3010 (review
+    finding P3-16): that run checks Windows' pending-restart state only after this install, so it
+    cannot see this restart itself. Any other code the relaunched run returned is kept: a failure at
+    the end of the run ranks above 3010, and an early exit stays what it is.
     Sets
     $script:PowerShell7BootstrapRelaunched to $true once a relaunched PowerShell 7 run has ended,
     so the tail knows that run already reported its outcome to whoever is at the console.
@@ -4484,6 +4942,22 @@ function Invoke-PowerShell7Bootstrap {
     # machine's pwsh is that broken, fail fast instead of spawning processes forever.
     if ($env:WINGET_APP_SETUP_PS7_BOOTSTRAP -eq '1') {
         Write-ErrorMessage 'The PowerShell 7 bootstrap re-entered itself after a relaunch: the relaunched PowerShell still reports a version below 7. Install PowerShell 7 manually (winget install Microsoft.PowerShell) and re-run this installer from a pwsh prompt.'
+        return 7
+    }
+
+    # The relaunch below runs the installer with pwsh -ExecutionPolicy Bypass -File, and Group
+    # Policy's PowerShell 7 execution policy overrides -ExecutionPolicy (wgt-gq8.39). Under
+    # AllSigned or Restricted pwsh refuses the file and the run ended with pwsh's own error and a
+    # misleading exit code, after PowerShell 7 may have been installed for nothing. Checked first,
+    # before anything is installed; both scopes count, since the relaunch runs as this same account.
+    $relaunchPolicyBlock = Get-ScriptExecutionPolicyBlock -Engine PowerShell7
+    if ($relaunchPolicyBlock) {
+        $policyMessage = '{0}, which -ExecutionPolicy Bypass on the command line cannot override, so PowerShell 7 cannot run this installer from a file, and the run cannot continue in PowerShell 7. Ask whoever manages this PC''s policies to allow scripts ({1}), then re-run the installer.' -f $relaunchPolicyBlock.Description, $relaunchPolicyBlock.GroupPolicyPath
+        if ($WhatIf) {
+            Write-Info "[DRY-RUN] $policyMessage A real run would stop here with exit code 7."
+            return 0
+        }
+        Write-ErrorMessage "$policyMessage Nothing was installed."
         return 7
     }
 
@@ -9512,6 +9986,48 @@ function Get-WingetPolicyBlock {
 
 <#
 .SYNOPSIS
+    Prints the one line that says Group Policy blocks winget and what to do about it.
+.DESCRIPTION
+    Shared by the two places that find the block (wgt-gq8.39): the install run's pre-flight
+    (Invoke-EnvironmentPreflight), which checks the policy before any other winget step, and
+    Initialize-Winget, which checks it for the uninstaller and also recognizes winget's own
+    0x8A15003A BLOCKED_BY_POLICY answer. A run prints it once: the pre-flight's stop keeps a real run
+    from reaching Initialize-Winget, and a dry run skips Initialize-Winget after the pre-flight
+    reported it.
+.PARAMETER Block
+    Get-WingetPolicyBlock's result: the line names the policy and its registry value.
+.PARAMETER Detail
+    What showed the block instead, for example "'winget --version' answered 0x8A15003A ...".
+.PARAMETER WhatIf
+    Dry run: an informational [DRY-RUN] line that says a real run would stop with exit code 2.
+#>
+function Write-WingetPolicyBlockMessage {
+    param (
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [object]$Block,
+
+        [Parameter(Mandatory = $false)]
+        [string]$Detail,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$WhatIf
+    )
+
+    if ($Block) {
+        $Detail = "'{0}' is Disabled ({1} = 0 under HKLM\SOFTWARE\Policies\Microsoft\Windows\AppInstaller)" -f $Block.Policy, $Block.Name
+    }
+    $message = "Group Policy on this PC blocks winget: $Detail. This installer cannot install apps until the policy allows it; ask whoever manages this PC's policies (Computer Configuration > Administrative Templates > Windows Components > Desktop App Installer) to allow it, then re-run the installer."
+    if ($WhatIf) {
+        Write-Info "[DRY-RUN] $message A real run would stop here with exit code 2."
+    }
+    else {
+        Write-ErrorMessage $message
+    }
+}
+
+<#
+.SYNOPSIS
     Returns the AppX deployment HRESULT (0x80073xxx) an Appx or WinGet cmdlet failed with, or $null.
 .DESCRIPTION
     Review finding P3-27. Reads the HResult of the exception and of each inner exception first. When
@@ -10688,6 +11204,11 @@ function Test-IsAdmin {
     Never asks when nobody is at the console (Test-EffectiveNonInteractive): an unattended run would
     leave a UAC prompt on someone's desktop and report nothing. A declined UAC prompt (Win32 error
     1223, ERROR_CANCELLED) is reported once, with no second prompt.
+
+    Never asks either when Group Policy's Windows PowerShell execution policy for the PC is AllSigned
+    or Restricted (Get-ScriptExecutionPolicyBlock, wgt-gq8.39): -ExecutionPolicy Bypass cannot
+    override it, so the elevated window could not run the script. One line says so instead. Such a
+    policy for this account only is a warning: it applies only if this account approves the prompt.
 .PARAMETER ScriptPath
     The full path of the script to run elevated.
 .PARAMETER AdditionalArguments
@@ -10704,8 +11225,9 @@ function Test-IsAdmin {
 .RETURNS
     [pscustomobject] @{ Started; ExitCode }. Started is $true when an elevated run started, and
     ExitCode is then its exit code. Otherwise ExitCode is 4 (no UAC prompt in a non-interactive run,
-    the prompt was declined, or the elevated process could not be started) or 5 (the script could
-    not be read, or changed since the run started).
+    Group Policy's execution policy would refuse the script in the elevated window, the prompt was
+    declined, or the elevated process could not be started) or 5 (the script could not be read, or
+    changed since the run started).
 #>
 function Restart-WithElevation {
     [OutputType([pscustomobject])]
@@ -10730,6 +11252,22 @@ function Restart-WithElevation {
     if (Test-EffectiveNonInteractive -NonInteractive:$NonInteractive) {
         Write-ErrorMessage 'Administrator rights are required, and this run is non-interactive, so there is nobody to approve a UAC prompt and none was shown. Run it from an elevated session, or as SYSTEM.'
         return [pscustomobject]@{ Started = $false; ExitCode = 4 }
+    }
+
+    # The elevated Windows PowerShell runs the script with -File, and Group Policy's execution policy
+    # overrides -ExecutionPolicy Bypass (wgt-gq8.39). Under a machine policy of AllSigned or
+    # Restricted the elevated window refused the file, printed PowerShell's own error and closed at
+    # once, and this run passed on its non-zero exit code as the run's result; nothing is started
+    # then. A user policy is this account's, and holds only if this same account approves the
+    # prompt: a warning.
+    $policyBlock = Get-ScriptExecutionPolicyBlock -Engine WindowsPowerShell
+    if ($policyBlock) {
+        $policyMessage = Format-ElevationPolicyBlockMessage -Block $policyBlock
+        if ($policyBlock.Scope -eq 'MachinePolicy') {
+            Write-ErrorMessage "$policyMessage No UAC prompt was shown."
+            return [pscustomobject]@{ Started = $false; ExitCode = 4 }
+        }
+        Write-WarningMessage $policyMessage
     }
 
     $powerShellPath = Get-WindowsPowerShellPath
@@ -10865,11 +11403,13 @@ function Restart-WithElevation {
     Exit codes: 0 = success, 1 = one or more apps failed to install (including the apps marked
     failed when winget could no longer be launched mid-run), 2 = winget unavailable (at the start,
     where `winget --version` must run and print a version, or Group Policy turns winget or its
-    source off; or no longer launchable at the end of the run), 3 = app-definition validation
-    failed or no valid apps remain, 4 = administrator rights
-    are required and the run was not elevated: the UAC prompt was declined or could not be shown, a
-    non-interactive run (nobody to approve a prompt, so none is shown), irm | iex, or the imported
-    module (review finding P2-12), 8 = the apps are installed, but automatic updates are not
+    source off, which the pre-flight checks before anything else; or no longer launchable at the
+    end of the run), 3 = app-definition validation failed or no valid apps remain, 4 = administrator
+    rights are required and the run was not elevated: the UAC prompt was declined or could not be
+    shown, a non-interactive run (nobody to approve a prompt, so none is shown), Group Policy's
+    Windows PowerShell execution policy for the PC is AllSigned or Restricted, so the elevated window
+    could not run the script (no prompt is shown; wgt-gq8.39), irm | iex, or the imported module
+    (review finding P2-12), 8 = the apps are installed, but automatic updates are not
     configured or unhealthy: the run's 'Auto-updates:' line is FAILED, NOT CONFIGURED (no
     Microsoft.WindowsAppRuntime.1.8, or whatever the latest winget release needs, and the installer
     could not install it), AT RISK
@@ -10885,8 +11425,9 @@ function Restart-WithElevation {
     when no machine-wide winget.exe can be started. A run that relaunched
     itself elevated returns the elevated run's exit code (Restart-WithElevation waits for it). The
     generated entry script also exits 1 when a blocking pre-flight check fails (before this
-    function runs), 5 when the run was aborted by an unexpected error or stopped from outside, and
-    6 when another run of the installer is in progress on the machine (review finding P3-41).
+    function runs), 5 when the run was aborted by an unexpected error or stopped from outside, or
+    PowerShell runs it in Constrained Language Mode (wgt-gq8.39), and 6 when another run of the
+    installer is in progress on the machine (review finding P3-41).
 
     After the summary of a real run, the run's outcome is reported in machine-readable form
     (Write-InstallerRunResult): one RESULT line, and last-run.json next to the transcript when the
@@ -10948,8 +11489,18 @@ function Invoke-WingetInstall {
                 # Relaunching elevated here would (a) be a surprising side effect for a preview
                 # and (b) — if the flag were ever dropped across the elevation boundary —
                 # silently turn a dry run into a real install. Stay in the current session and
-                # continue the preview.
-                Write-Info '[DRY-RUN] Would relaunch with administrator privileges. Continuing the preview in the current (non-elevated) session; no system changes will be made.'
+                # continue the preview. Restart-WithElevation's execution-policy check (wgt-gq8.39) is
+                # read-only, so the preview says what it would find.
+                $elevationPolicyBlock = Get-ScriptExecutionPolicyBlock -Engine WindowsPowerShell
+                if ($elevationPolicyBlock -and $elevationPolicyBlock.Scope -eq 'MachinePolicy') {
+                    Write-Info ('[DRY-RUN] A real run would stop here with exit code 4, without a UAC prompt: {0} Continuing the preview in the current (non-elevated) session; no system changes will be made.' -f (Format-ElevationPolicyBlockMessage -Block $elevationPolicyBlock))
+                }
+                else {
+                    Write-Info '[DRY-RUN] Would relaunch with administrator privileges. Continuing the preview in the current (non-elevated) session; no system changes will be made.'
+                    if ($elevationPolicyBlock) {
+                        Write-Info ('[DRY-RUN] {0}' -f (Format-ElevationPolicyBlockMessage -Block $elevationPolicyBlock))
+                    }
+                }
             }
         }
         elseif (-not (Test-IsRunningLocally)) {
@@ -11032,6 +11583,20 @@ function Invoke-WingetInstall {
         Write-Info 'Running as SYSTEM (for example from an RMM agent): installing for the whole PC only, with the winget.exe that App Installer installed for this PC. An app with no machine-wide installer is not installed: it is reported as Deferred, with how it can still be installed for the user. Microsoft does not support the winget command line as SYSTEM, so a SYSTEM run can fail where a run as a user would not.'
     }
 
+    # Pre-flight for the account this run installs as (wgt-gq8.39), before this run changes or waits
+    # for anything: one line for each problem it finds. A proxy the signed-in user has that this
+    # account does not and a restart that is already pending are warnings; App Installer's Group
+    # Policy turning winget off stops a real run with exit code 2. Read-only, so a dry run runs it
+    # too. The pending-restart state it read is the one the end of the run compares against (review
+    # finding P3-16), so a restart this run's installs need (exit code 3010) is told apart from one
+    # that was already pending, which is reported but does not make the run 3010 by itself.
+    $preflight = Invoke-EnvironmentPreflight -WhatIf:$WhatIf -AccountContext $account
+    if ($preflight.ExitCode -ne 0) {
+        return [int]$preflight.ExitCode
+    }
+    $restartStateBefore = $preflight.RestartState
+    $restartPendingBefore = @($preflight.RestartPendingReasons)
+
     # TightVNC's passwords for its post-install hook (work-order item 18, review finding P2-22),
     # before winget or any installer starts: taken out of this process's environment so no child
     # process it starts from here on inherits them, or asked for now when someone is at the console
@@ -11047,22 +11612,6 @@ function Invoke-WingetInstall {
         Write-WarningMessage "Could not read the TightVNC password for this run: $($_.Exception.Message)"
     }
 
-    # Pending restart before the run (review finding P3-16), read before this run changes the
-    # machine: the end of the run compares against it, so a restart that this run's installs need
-    # (exit code 3010) is told apart from one that was already pending, which is reported but does
-    # not make the run 3010 by itself. Read-only, so a dry run reports it too.
-    $restartStateBefore = $null
-    try {
-        $restartStateBefore = Get-PendingRestartState
-    }
-    catch {
-        Write-WarningMessage "Could not check whether a restart is pending: $_"
-    }
-    $restartPendingBefore = @(Get-PendingRestartReason -State $restartStateBefore)
-    if ($restartPendingBefore.Count -gt 0) {
-        Write-WarningMessage ('A restart is already pending on this PC ({0}). An installer that needs a restart first fails with 0x8A15010A; if one does, restart this PC and re-run the installer.' -f ($restartPendingBefore -join '; '))
-    }
-
     # Let a Winget-AutoUpdate run that is already in progress finish first (bounded): it
     # re-provisions App Installer, resets winget's sources and runs MSI upgrades, and racing it makes
     # healthy apps fail with launch errors or 'another installation is in progress'. Read-only, but
@@ -11076,8 +11625,14 @@ function Invoke-WingetInstall {
     # with exit code 2 when winget cannot be started or Group Policy turns it off. A dry run only
     # probes (P2-16) and carries on whatever it finds: a real run would set winget up first, so
     # stopping here would misreport the very machine a dry run previews (cross-user elevation,
-    # issue #265).
-    $winget = Initialize-Winget -WhatIf:$WhatIf -AccountContext $account
+    # issue #265). A dry run whose pre-flight already reported the Group Policy block skips it:
+    # its first step would report the same policy again, and winget cannot run either way.
+    if ($preflight.WingetPolicyBlocked) {
+        $winget = [pscustomobject]@{ Ready = $false; Diagnosis = 'PolicyBlocked' }
+    }
+    else {
+        $winget = Initialize-Winget -WhatIf:$WhatIf -AccountContext $account
+    }
     $wingetAvailable = [bool]$winget.Ready
     if (-not $wingetAvailable -and -not $WhatIf) {
         Write-ErrorMessage 'Winget is required for this script. Exiting.'
@@ -11892,7 +12447,9 @@ function Write-Table {
     when cdn.winget.microsoft.com is unreachable over HTTPS (network is required for winget). The
     network probe uses Invoke-WebRequest, which honors system proxy settings; any HTTP response —
     including 4xx/5xx — counts as reachable, and only a transport-level failure (no response at
-    all) blocks.
+    all) blocks. When it blocks a run as SYSTEM or as another admin account, a 'Proxy' warning
+    names the proxy the signed-in user has and this account does not (Get-ProxyInheritanceWarning,
+    wgt-gq8.39), a likely cause.
 
     Nothing here prompts (issue #230): the only blocking check is the network probe, whose verdict
     is not a matter of opinion, so the sole return-$false path is a genuine failure rather than a
@@ -11978,6 +12535,22 @@ function Test-SystemRequirements {
         else {
             $results += [PSCustomObject]@{ Check = 'Network'; Status = 'FAIL'; Detail = "Cannot reach cdn.winget.microsoft.com over HTTPS - network is required: $($_.Exception.Message)" }
             $proceed = $false
+            # A likely cause the run would otherwise never get to name (wgt-gq8.39): as SYSTEM or an
+            # elevating admin account, this run lacks the proxy the signed-in user has. A real run
+            # stops here, so the line is added here; a dry run goes on, and the environment
+            # pre-flight in Invoke-WingetInstall reports it once.
+            if (-not $WhatIf) {
+                $proxyWarning = $null
+                try {
+                    $proxyWarning = Get-ProxyInheritanceWarning -AccountContext (Get-InstallAccountContext)
+                }
+                catch {
+                    $proxyWarning = $null
+                }
+                if ($proxyWarning) {
+                    $results += [PSCustomObject]@{ Check = 'Proxy'; Status = 'WARN'; Detail = $proxyWarning }
+                }
+            }
         }
     }
 
@@ -13107,7 +13680,10 @@ function Remove-LegacyScheduledUpdates {
 
       1. Group Policy (Get-WingetPolicyBlock, review finding P3-30). When App Installer's policy
          turns winget or its source off, no fix can help: the run stops with exit code 2 and names
-         the policy. So does a winget that answers 0x8A15003A BLOCKED_BY_POLICY.
+         the policy. So does a winget that answers 0x8A15003A BLOCKED_BY_POLICY. The install run
+         checks the policy values in its pre-flight (Invoke-EnvironmentPreflight, wgt-gq8.39),
+         before it waits for Winget-AutoUpdate, and does not get here when they block winget; the
+         uninstaller relies on this check.
       2. Can winget start? `winget --version` must run and print a version (Test-WingetLaunchable).
          A failure that can clear on its own (winget.exe locked during an App Installer update,
          issues #253/#258) is checked for up to 75 seconds first, so an update in progress is not
@@ -13174,19 +13750,14 @@ function Initialize-Winget {
 
     $policyBlocked = {
         param ([string]$Detail)
-        $message = "Group Policy on this PC blocks winget: $Detail. This installer cannot install apps until the policy allows it; ask whoever manages this PC's policies (Computer Configuration > Administrative Templates > Windows Components > Desktop App Installer) to allow it, then re-run the installer."
-        if ($WhatIf) {
-            Write-Info "[DRY-RUN] $message A real run would stop here with exit code 2."
-        }
-        else {
-            Write-ErrorMessage $message
-        }
+        Write-WingetPolicyBlockMessage -Detail $Detail -WhatIf:$WhatIf
         [pscustomobject]@{ Ready = $false; Diagnosis = 'PolicyBlocked' }
     }
 
     $policy = Get-WingetPolicyBlock
     if ($policy) {
-        return (& $policyBlocked ("'{0}' is Disabled ({1} = 0 under HKLM\SOFTWARE\Policies\Microsoft\Windows\AppInstaller)" -f $policy.Policy, $policy.Name))
+        Write-WingetPolicyBlockMessage -Block $policy -WhatIf:$WhatIf
+        return [pscustomobject]@{ Ready = $false; Diagnosis = 'PolicyBlocked' }
     }
 
     if ($AccountContext.IsCrossUserElevation) {
@@ -14082,6 +14653,33 @@ function Install-PowerShellLatest {
 # ------------------------------------------------Main Script------------------------------------------------
 
 if ($MyInvocation.InvocationName -ne '.') {
+    # Constrained Language Mode before anything else (wgt-gq8.39): an application control policy
+    # (App Control for Business/WDAC, AppLocker) runs an untrusted script in it, and it refuses the
+    # .NET calls the lines below already make, so the run used to print PowerShell's errors and die
+    # further on (under PowerShell 7, in its pre-flight checks with an 'UNEXPECTED ERROR'). Nothing
+    # can work around it, so the run stops at once with exit code 5, saying why in one line, and
+    # touches nothing. Only what every language mode allows runs on this path, under Windows
+    # PowerShell 5.1 too. A run from a file, or with nobody at the console, exits 5; an interactive
+    # irm | iex console keeps its window open (exiting there would close the window with the
+    # message) and gets $LASTEXITCODE 5.
+    if (-not (Test-FullLanguageMode)) {
+        $global:LASTEXITCODE = 5
+        $exitForLanguageMode = [bool]$PSCommandPath
+        if (-not $exitForLanguageMode) {
+            try {
+                $exitForLanguageMode = [bool](Test-EffectiveNonInteractive -NonInteractive:$NonInteractive)
+            }
+            catch {
+                # Cannot tell: keep the window, and the message, open.
+                $exitForLanguageMode = $false
+            }
+        }
+        if ($exitForLanguageMode) {
+            exit 5
+        }
+        return
+    }
+
     # Windows PowerShell 5.1 bootstrap (issue #225; supersedes the #210 fail-fast). The
     # installer's logic requires PowerShell 7+, and 5.1 parses the WHOLE file before running any
     # of it - which is why this dispatch can exist at all: the build guards the assembled script

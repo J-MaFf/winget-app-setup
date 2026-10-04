@@ -677,9 +677,47 @@ Describe 'Invoke-PowerShell7Bootstrap' {
         # The function sets this relaunch-loop sentinel before relaunching; clear it so no test
         # inherits another test's (or an outer process's) bootstrap state.
         $env:WINGET_APP_SETUP_PS7_BOOTSTRAP = ''
+        # No Group Policy execution policy for PowerShell 7 (wgt-gq8.39) unless a context sets one;
+        # never the runner's real registry.
+        Mock Get-ScriptExecutionPolicyBlock { $null }
     }
     AfterEach {
         $env:WINGET_APP_SETUP_PS7_BOOTSTRAP = ''
+    }
+
+    Context 'Group Policy refuses scripts for PowerShell 7 (wgt-gq8.39)' {
+        BeforeEach {
+            Mock Get-ScriptExecutionPolicyBlock { [pscustomobject]@{ Engine = 'PowerShell7'; Scope = 'MachinePolicy'; Policy = 'AllSigned'; Key = 'HKLM\SOFTWARE\Policies\Microsoft\PowerShellCore'; GroupPolicyPath = 'Computer Configuration > Administrative Templates > PowerShell Core > Turn on Script Execution'; Description = 'Group Policy sets the PowerShell 7 execution policy for this PC to AllSigned (MachinePolicy, HKLM\SOFTWARE\Policies\Microsoft\PowerShellCore)' } }
+            Mock Find-PowerShell7 { $null }
+            Mock Start-Process { [pscustomobject]@{ ExitCode = 0 } }
+            $script:errors = @()
+            Mock Write-ErrorMessage { $script:errors += $Message }
+            $script:infos = @()
+            Mock Write-Info { $script:infos += $Message }
+        }
+
+        It 'Returns 7 before looking for, installing or relaunching PowerShell 7, and says why in one line' {
+            $result = Invoke-PowerShell7Bootstrap -CommandPath 'C:\repo\winget-app-install.ps1'
+
+            $result | Should -Be 7
+            Should -Invoke Get-ScriptExecutionPolicyBlock -Times 1 -Exactly -ParameterFilter { $Engine -eq 'PowerShell7' }
+            Should -Invoke Find-PowerShell7 -Times 0 -Exactly
+            Should -Invoke Invoke-WingetProcess -Times 0 -Exactly
+            Should -Invoke Install-PowerShell7FromMsi -Times 0 -Exactly
+            Should -Invoke Start-Process -Times 0 -Exactly
+            $script:PowerShell7BootstrapRelaunched | Should -BeFalse
+            $script:errors | Should -Be @('Group Policy sets the PowerShell 7 execution policy for this PC to AllSigned (MachinePolicy, HKLM\SOFTWARE\Policies\Microsoft\PowerShellCore), which -ExecutionPolicy Bypass on the command line cannot override, so PowerShell 7 cannot run this installer from a file, and the run cannot continue in PowerShell 7. Ask whoever manages this PC''s policies to allow scripts (Computer Configuration > Administrative Templates > PowerShell Core > Turn on Script Execution), then re-run the installer. Nothing was installed.')
+        }
+
+        It 'A dry run says a real run would stop with exit code 7, and returns 0 without relaunching' {
+            $result = Invoke-PowerShell7Bootstrap -CommandPath 'C:\repo\winget-app-install.ps1' -WhatIf
+
+            $result | Should -Be 0
+            Should -Invoke Start-Process -Times 0 -Exactly
+            Should -Invoke Find-PowerShell7 -Times 0 -Exactly
+            $script:errors | Should -HaveCount 0
+            @($script:infos | Where-Object { $_ -like '`[DRY-RUN`] Group Policy sets the PowerShell 7 execution policy*A real run would stop here with exit code 7.' }) | Should -HaveCount 1
+        }
     }
 
     Context 'PowerShell 7 already installed' {
