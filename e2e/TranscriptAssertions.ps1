@@ -441,7 +441,9 @@ function New-TranscriptAssertionResult {
         app in -ExpectedAppIds as already installed, and installed and failed none of them;
       - with -ExpectPowerShell7Bootstrap: every pass went through the Windows PowerShell 5.1
         bootstrap (one bootstrap transcript per real-run transcript), and each bootstrap
-        relaunched the installer under PowerShell 7 and recorded how that run ended.
+        relaunched the installer under PowerShell 7 and recorded how that run ended;
+      - with -ExpectPowerShell7Installed: the earliest bootstrap (the first pass's) installed
+        PowerShell 7 rather than finding one, so the bootstrap's install path really ran.
 .PARAMETER LogDirectory
     The installer's log folder.
 .PARAMETER ExpectedAppIds
@@ -458,6 +460,9 @@ function New-TranscriptAssertionResult {
     The 'Auto-updates:' status the latest run must report (e.g. 'NOT CONFIGURED').
 .PARAMETER ExpectPowerShell7Bootstrap
     Adds the Windows PowerShell 5.1 bootstrap assertions.
+.PARAMETER ExpectPowerShell7Installed
+    Adds the assertion that the first pass's bootstrap installed PowerShell 7. For runs that
+    start on a machine without it (the 5.1 leg removes it first).
 .RETURNS
     Assertion rows ([pscustomobject] with Assertion, Result and Detail).
 #>
@@ -480,7 +485,9 @@ function Get-TranscriptAssertionResult {
         [Parameter(Mandatory = $false)]
         [string]$ExpectedAutoUpdatesStatus,
         [Parameter(Mandatory = $false)]
-        [switch]$ExpectPowerShell7Bootstrap
+        [switch]$ExpectPowerShell7Bootstrap,
+        [Parameter(Mandatory = $false)]
+        [switch]$ExpectPowerShell7Installed
     )
 
     $files = Get-InstallTranscriptFile -LogDirectory $LogDirectory
@@ -617,6 +624,29 @@ function Get-TranscriptAssertionResult {
                 $detail = 'never relaunched the installer under PowerShell 7 (see the bootstrap transcript)'
             }
             New-TranscriptAssertionResult -Name "Bootstrap relaunched under PowerShell 7 ($($bootstrap.File.Name))" -Passed $passed -Detail $detail
+        }
+    }
+
+    if ($ExpectPowerShell7Installed) {
+        # The first pass starts without PowerShell 7, so its bootstrap must install it. A bootstrap
+        # that found one instead (runner preparation left it in place, or another pwsh is on the
+        # machine) leaves the install path, which is what this run is for, untested.
+        $name = 'First pass installed PowerShell 7'
+        if ($bootstraps.Count -eq 0) {
+            New-TranscriptAssertionResult -Name $name -Passed $false -Detail 'no bootstrap transcript'
+        }
+        else {
+            $first = $bootstraps[0]
+            if ($first.Parsed.InstalledPowerShell7) {
+                New-TranscriptAssertionResult -Name $name -Passed $true -Detail "$($first.File.Name): PowerShell 7 is installed."
+            }
+            else {
+                $found = 'never logged installing it'
+                if ($first.Parsed.RelaunchPath) {
+                    $found = "found $($first.Parsed.RelaunchPath) instead of installing it"
+                }
+                New-TranscriptAssertionResult -Name $name -Passed $false -Detail "$($first.File.Name) $found; runner preparation did not remove PowerShell 7 (see its warning), or the bootstrap found another pwsh"
+            }
         }
     }
 }

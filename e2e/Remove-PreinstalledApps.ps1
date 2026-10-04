@@ -11,7 +11,14 @@
 
     Tolerant: an app that is not installed is fine, and an app that cannot be removed is reported
     as a GitHub warning annotation and left in place (the pass then skips it, as before), so
-    runner preparation never fails the run on its own. Every winget and msiexec call is bounded.
+    runner preparation never fails the run on its own. Each app's result and warning are printed
+    as soon as that app is done, so a step stopped part-way still shows what it got through.
+
+    Every winget and msiexec call is bounded, and the limits add up to less than the step's
+    timeout-minutes (Get-RunnerPreparationWorstCase; tests/E2EPreinstalledApps.Tests.ps1 checks
+    both steps in .github/workflows/e2e-install.yml): with the defaults an app costs at most
+    45 + 150 + 45 s = 4 min (winget list, uninstall, list again), so 12 min for the three apps,
+    and PowerShell 7 at most 150 s (its MSI) + 4 min (the winget fallback), 18.5 min in all.
 
     The catalog apps are checked the way the installer checks them, with
     'winget list --id <id> --exact': absent there means the first pass installs it. PowerShell 7 is
@@ -25,9 +32,9 @@
 .PARAMETER IncludePowerShell7
     Also remove PowerShell 7.
 .PARAMETER ListTimeoutSeconds
-    Limit for each 'winget list'. Default 90.
+    Limit for each 'winget list'. Default 45 (the installer's own list check allows 15).
 .PARAMETER UninstallTimeoutSeconds
-    Limit for each uninstall. Default 240.
+    Limit for each uninstall. Default 150.
 .NOTES
     Exit codes: 0 = done (warnings for anything left installed), 1 = unexpected error.
 #>
@@ -40,10 +47,10 @@ param (
     [switch]$IncludePowerShell7,
 
     [Parameter(Mandatory = $false)]
-    [int]$ListTimeoutSeconds = 90,
+    [int]$ListTimeoutSeconds = 45,
 
     [Parameter(Mandatory = $false)]
-    [int]$UninstallTimeoutSeconds = 240
+    [int]$UninstallTimeoutSeconds = 150
 )
 
 <#
@@ -249,10 +256,56 @@ function Remove-PowerShell7 {
 
 <#
 .SYNOPSIS
+    The longest runner preparation can take with the given limits.
+.DESCRIPTION
+    Per app: winget list, winget uninstall, winget list. PowerShell 7: msiexec for one Windows
+    Installer entry (the image has one), then the same three winget calls as the fallback. Process
+    start-up is not counted; leave a minute or two of slack under the step's timeout-minutes.
+.RETURNS
+    [int] seconds.
+#>
+function Get-RunnerPreparationWorstCase {
+    param (
+        [Parameter(Mandatory = $true)]
+        [int]$PackageCount,
+        [Parameter(Mandatory = $false)]
+        [switch]$IncludePowerShell7,
+        [Parameter(Mandatory = $true)]
+        [int]$ListTimeoutSeconds,
+        [Parameter(Mandatory = $true)]
+        [int]$UninstallTimeoutSeconds
+    )
+
+    $perPackage = (2 * $ListTimeoutSeconds) + $UninstallTimeoutSeconds
+    $total = $PackageCount * $perPackage
+    if ($IncludePowerShell7) {
+        $total += $UninstallTimeoutSeconds + $perPackage
+    }
+    return $total
+}
+
+# One app's result line and, when it is still installed or unknown, its warning annotation.
+function Write-PreparationResult {
+    param (
+        [Parameter(Mandatory = $true)]
+        [pscustomobject]$Result
+    )
+
+    Write-Host ('{0,-22} {1,-14} {2}' -f $Result.App, $Result.Result, $Result.Detail)
+    if ($Result.Result -eq 'still present' -or $Result.Result -eq 'unknown') {
+        # One line, no '%': an annotation ends at the newline, and '%' is its escape character.
+        $message = ('{0} could not be removed ({1}): {2}. The first install pass will skip it as already installed.' -f $Result.App, $Result.Result, $Result.Detail) -replace '[\r\n%]', ' '
+        Write-Host "::warning title=E2E runner preparation::$message"
+    }
+}
+
+<#
+.SYNOPSIS
     Removes the preinstalled apps and prints what happened, one line per app.
 .DESCRIPTION
-    An app left installed (or whose state winget could not tell) gets a GitHub warning
-    annotation: the run carries on, and the first pass will skip that app.
+    Each app's line is printed as soon as that app is done, and an app left installed (or whose
+    state winget could not tell) gets a GitHub warning annotation right away: the run carries on,
+    and the first pass will skip that app. A summary of every app follows at the end.
 .RETURNS
     The per-app results (see Remove-PreinstalledPackage).
 #>
@@ -269,25 +322,27 @@ function Invoke-RunnerPreparation {
         [int]$UninstallTimeoutSeconds
     )
 
+    $worstCase = Get-RunnerPreparationWorstCase -PackageCount @($PackageId).Count -IncludePowerShell7:$IncludePowerShell7 -ListTimeoutSeconds $ListTimeoutSeconds -UninstallTimeoutSeconds $UninstallTimeoutSeconds
+    Write-Host ('Every call is bounded (winget list {0} s, uninstall {1} s): at most {2:N1} min in all.' -f $ListTimeoutSeconds, $UninstallTimeoutSeconds, ($worstCase / 60))
+
     $results = @()
     foreach ($id in $PackageId) {
         Write-Host "Removing $id..."
-        $results += Remove-PreinstalledPackage -Id $id -ListTimeoutSeconds $ListTimeoutSeconds -UninstallTimeoutSeconds $UninstallTimeoutSeconds
+        $result = Remove-PreinstalledPackage -Id $id -ListTimeoutSeconds $ListTimeoutSeconds -UninstallTimeoutSeconds $UninstallTimeoutSeconds
+        Write-PreparationResult -Result $result
+        $results += $result
     }
     if ($IncludePowerShell7) {
         Write-Host 'Removing PowerShell 7...'
-        $results += Remove-PowerShell7 -ListTimeoutSeconds $ListTimeoutSeconds -UninstallTimeoutSeconds $UninstallTimeoutSeconds
+        $result = Remove-PowerShell7 -ListTimeoutSeconds $ListTimeoutSeconds -UninstallTimeoutSeconds $UninstallTimeoutSeconds
+        Write-PreparationResult -Result $result
+        $results += $result
     }
 
     Write-Host ''
     Write-Host '=== Runner preparation: preinstalled apps ==='
     foreach ($result in $results) {
         Write-Host ('{0,-22} {1,-14} {2}' -f $result.App, $result.Result, $result.Detail)
-        if ($result.Result -eq 'still present' -or $result.Result -eq 'unknown') {
-            # One line, no '%': an annotation ends at the newline, and '%' is its escape character.
-            $message = ('{0} could not be removed ({1}): {2}. The first install pass will skip it as already installed.' -f $result.App, $result.Result, $result.Detail) -replace '[\r\n%]', ' '
-            Write-Host "::warning title=E2E runner preparation::$message"
-        }
     }
     return $results
 }

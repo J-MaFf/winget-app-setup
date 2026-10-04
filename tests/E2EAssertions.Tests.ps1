@@ -246,9 +246,10 @@ Describe 'Get-TranscriptAssertionResult' {
         $logs = New-TestLogDirectory -Fixture @('first-pass', 'bootstrap-installed', 'second-pass', 'bootstrap-found') -Name @('install-20261005-060449.log', 'install-20261005-060431-bootstrap.log', 'install-20261005-061511.log', 'install-20261005-061510-bootstrap.log')
         $installer = New-TestInstaller -BuildId '1.0.0+5ea1f00d'
 
-        $rows = @(Get-TranscriptAssertionResult -LogDirectory $logs -ExpectedAppIds $script:CatalogIds -NotApplicableApps $script:NotApplicable -ExpectAllSkippedOnSecondRun -InstallerPath $installer -ExpectedAutoUpdatesStatus 'NOT CONFIGURED' -ExpectPowerShell7Bootstrap)
+        $rows = @(Get-TranscriptAssertionResult -LogDirectory $logs -ExpectedAppIds $script:CatalogIds -NotApplicableApps $script:NotApplicable -ExpectAllSkippedOnSecondRun -InstallerPath $installer -ExpectedAutoUpdatesStatus 'NOT CONFIGURED' -ExpectPowerShell7Bootstrap -ExpectPowerShell7Installed)
 
         @($rows | Where-Object { $_.Result -ne 'PASS' } | ForEach-Object { "$($_.Assertion): $($_.Detail)" }) | Should -BeNullOrEmpty
+        ($rows | Where-Object Assertion -EQ 'First pass installed PowerShell 7').Detail | Should -Be 'install-20261005-060431-bootstrap.log: PowerShell 7 is installed.'
         ($rows | Where-Object Assertion -EQ 'Transcript exists').Detail | Should -Be '2 transcript(s) and 2 bootstrap transcript(s); latest: install-20261005-061511.log'
         @($rows | Where-Object Assertion -Like 'Failures contained*').Count | Should -Be 2
         @($rows | Where-Object Assertion -Like 'Ran the installer under test*').Count | Should -Be 4
@@ -267,6 +268,24 @@ Describe 'Get-TranscriptAssertionResult' {
         $neverRelaunched = $rows | Where-Object Assertion -EQ 'Bootstrap relaunched under PowerShell 7 (install-20261005-061510-bootstrap.log)'
         $neverRelaunched.Result | Should -Be 'FAIL'
         $neverRelaunched.Detail | Should -Be 'never relaunched the installer under PowerShell 7 (see the bootstrap transcript)'
+    }
+
+    It 'Fails -ExpectPowerShell7Installed when the first pass''s bootstrap found PowerShell 7 instead of installing it' {
+        # Runner preparation left PowerShell 7 in place: both passes find it, everything else
+        # passes, and the bootstrap's install path never ran.
+        $logs = New-TestLogDirectory -Fixture @('first-pass', 'bootstrap-found', 'second-pass', 'bootstrap-found') -Name @('install-20261005-060449.log', 'install-20261005-060431-bootstrap.log', 'install-20261005-061511.log', 'install-20261005-061510-bootstrap.log')
+
+        $rows = @(Get-TranscriptAssertionResult -LogDirectory $logs -ExpectPowerShell7Bootstrap -ExpectPowerShell7Installed)
+
+        @($rows | Where-Object { $_.Result -ne 'PASS' } | ForEach-Object Assertion) | Should -Be @('First pass installed PowerShell 7')
+        ($rows | Where-Object Assertion -EQ 'First pass installed PowerShell 7').Detail | Should -Be 'install-20261005-060431-bootstrap.log found C:\Users\runneradmin\AppData\Local\Microsoft\WindowsApps\pwsh.exe instead of installing it; runner preparation did not remove PowerShell 7 (see its warning), or the bootstrap found another pwsh'
+    }
+
+    It 'Fails -ExpectPowerShell7Installed without a bootstrap transcript, and adds nothing without the switch' {
+        $logs = New-TestLogDirectory -Fixture @('first-pass')
+
+        (@(Get-TranscriptAssertionResult -LogDirectory $logs -ExpectPowerShell7Installed) | Where-Object Assertion -EQ 'First pass installed PowerShell 7').Detail | Should -Be 'no bootstrap transcript'
+        @(Get-TranscriptAssertionResult -LogDirectory $logs -ExpectPowerShell7Bootstrap | Where-Object Assertion -EQ 'First pass installed PowerShell 7') | Should -BeNullOrEmpty
     }
 
     It 'Fails every transcript, bootstrap ones included, that logged another build than the installer under test' {
@@ -394,6 +413,7 @@ Describe 'e2e/Assert-Install.ps1 wiring' {
         $declared = @((Get-Command -Name Get-TranscriptAssertionResult).Parameters.Keys)
 
         $keys | Should -Contain 'ExpectPowerShell7Bootstrap'
+        $keys | Should -Contain 'ExpectPowerShell7Installed'
         $keys | Should -Contain 'ExpectedAutoUpdatesStatus'
         @($keys | Where-Object { $declared -notcontains $_ }) | Should -BeNullOrEmpty
     }
@@ -401,6 +421,7 @@ Describe 'e2e/Assert-Install.ps1 wiring' {
     It 'Declares the switches the workflow passes' {
         $parameters = @($script:AssertInstallAst.ParamBlock.Parameters | ForEach-Object { $_.Name.VariablePath.UserPath })
         $parameters | Should -Contain 'ExpectPowerShell7Bootstrap'
+        $parameters | Should -Contain 'ExpectPowerShell7Installed'
         $parameters | Should -Contain 'ExpectAllSkippedOnSecondRun'
         $parameters | Should -Contain 'InstallerPath'
         $parameters | Should -Contain 'SkipApps'

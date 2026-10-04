@@ -212,7 +212,46 @@ Describe 'Removing the preinstalled apps' {
         $warnings[0] | Should -Match '^::warning title=E2E runner preparation::7zip\.7zip could not be removed \(still present\): '
         $warnings[1] | Should -Match '^::warning title=E2E runner preparation::Microsoft\.PowerShell could not be removed \(still present\): '
         $warnings | ForEach-Object { $_ | Should -Not -Match '[\r\n%]' }
+        # Printed as each app finishes, so a step stopped part-way still shows the apps it did.
+        [array]::IndexOf($lines, $warnings[0]) | Should -BeLessThan ([array]::IndexOf($lines, 'Removing Git.Git...'))
+        $chromeLine = @($lines | Where-Object { $_ -match '^Google\.Chrome\s+removed\s' })[0]
+        [array]::IndexOf($lines, $chromeLine) | Should -BeLessThan ([array]::IndexOf($lines, 'Removing 7zip.7zip...'))
         $results = @($output | Where-Object { $_ -isnot [System.Management.Automation.InformationRecord] })
         @($results | ForEach-Object { "$($_.App)=$($_.Result)" }) | Should -Be @('Google.Chrome=removed', '7zip.7zip=still present', 'Git.Git=absent', 'Microsoft.PowerShell=still present')
+    }
+}
+
+Describe 'The time limits of runner preparation' {
+    It 'Adds up the worst case of every bounded call' {
+        Get-RunnerPreparationWorstCase -PackageCount 3 -ListTimeoutSeconds 45 -UninstallTimeoutSeconds 150 | Should -Be 720
+        Get-RunnerPreparationWorstCase -PackageCount 3 -IncludePowerShell7 -ListTimeoutSeconds 45 -UninstallTimeoutSeconds 150 | Should -Be 1110
+    }
+
+    It 'Fits the defaults into the timeout-minutes of the workflow step <Step>, with a minute to spare' -ForEach @(
+        @{ Step = 'Remove the catalog apps the runner image ships with'; IncludePowerShell7 = $false }
+        @{ Step = 'Remove the catalog apps the runner image ships with, and PowerShell 7'; IncludePowerShell7 = $true }
+    ) {
+        # Over the limit, the runner stops the step part-way, and a killed winget's uninstaller
+        # can still be running when the first pass starts.
+        $scriptPath = Join-Path $script:RepoRoot 'e2e/Remove-PreinstalledApps.ps1'
+        $defaults = @{}
+        foreach ($parameter in [System.Management.Automation.Language.Parser]::ParseFile($scriptPath, [ref]$null, [ref]$null).ParamBlock.Parameters) {
+            if ($parameter.DefaultValue) {
+                $defaults[$parameter.Name.VariablePath.UserPath] = $parameter.DefaultValue.SafeGetValue()
+            }
+        }
+        $worstCase = Get-RunnerPreparationWorstCase -PackageCount @($defaults['PackageId']).Count -IncludePowerShell7:$IncludePowerShell7 -ListTimeoutSeconds $defaults['ListTimeoutSeconds'] -UninstallTimeoutSeconds $defaults['UninstallTimeoutSeconds']
+
+        $workflow = Get-Content -Raw -LiteralPath (Join-Path $script:RepoRoot '.github/workflows/e2e-install.yml')
+        $stepPattern = '(?ms)^\s+- name: ' + [regex]::Escape($Step) + '\r?\n(?<body>.*?)(?=^\s+- name: |\z)'
+        $match = [regex]::Match($workflow, $stepPattern)
+        $match.Success | Should -BeTrue
+        $match.Groups['body'].Value | Should -Match 'Remove-PreinstalledApps\.ps1'
+        ($match.Groups['body'].Value -match '-IncludePowerShell7') | Should -Be $IncludePowerShell7
+        $limit = [regex]::Match($match.Groups['body'].Value, 'timeout-minutes: (?<minutes>\d+)')
+        $limit.Success | Should -BeTrue
+        $limitSeconds = 60 * [int]$limit.Groups['minutes'].Value
+
+        $worstCase + 60 | Should -BeLessOrEqual $limitSeconds
     }
 }

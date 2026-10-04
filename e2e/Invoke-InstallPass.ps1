@@ -25,9 +25,13 @@
 
     Exit-code policy (the step fails with the code this script exits with):
       - 0: the pass succeeded.
+      - 3010 (OK, restart required): the pass succeeded; the step exits 0. The runner is not
+        restarted between the passes.
       - 1 with KNOWN_PLATFORM_INCOMPATIBLE set: tolerated (exit 0) pending the assertion step's
         containment check that nothing outside that list failed. An empty variable means strict.
-      - anything else: the pass failed, with the installer's code.
+      - anything else: the pass failed, with the installer's code. That includes 8 (apps OK,
+        auto-updates not configured or unhealthy), which is not emitted yet: see
+        Get-InstallPassVerdict before the installer starts returning it.
 
     Runs under Windows PowerShell 5.1 and PowerShell 7: ASCII only, no 7-only syntax.
 .PARAMETER Pass
@@ -162,10 +166,14 @@ function Get-InstallPassCommand {
 
     # -EncodedCommand: no quoting rules to get wrong in either shell, and like -Command it runs
     # the text with no script file, so $PSCommandPath stays empty as under the real one-liner.
+    # -OutputFormat Text: with -EncodedCommand alone, a PowerShell whose stderr is redirected (on
+    # the runner it is a pipe) writes its host output, progress and errors to stderr as CLIXML,
+    # so the step log repeated every line as XML and showed the installer's errors only escaped
+    # inside it. The transcripts and the exit code were not affected.
     $encoded = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($script))
     return [pscustomobject]@{
         FilePath    = $Shell
-        Arguments   = @('-NoProfile', '-EncodedCommand', $encoded)
+        Arguments   = @('-NoProfile', '-OutputFormat', 'Text', '-EncodedCommand', $encoded)
         Description = $description
         Script      = $script
     }
@@ -198,6 +206,15 @@ function Get-InstallPassVerdict {
     if ($ExitCode -eq 0) {
         return [pscustomobject]@{ StepExitCode = 0; Outcome = 'passed'; Message = "$passName install pass exited 0." }
     }
+    if ($ExitCode -eq 3010) {
+        return [pscustomobject]@{ StepExitCode = 0; Outcome = 'passed'; Message = "$passName install pass exited 3010 (OK, restart required)." }
+    }
+    # Exit 8 (apps OK, auto-updates not configured or unhealthy) falls through to 'failed' on
+    # purpose. windows-latest lacks Microsoft.WindowsAppRuntime.1.8, so once the installer returns
+    # 8 every pass on it will end with 8 ('Auto-updates: NOT CONFIGURED'). Tolerating it here is
+    # only safe together with an assertion that checks each pass's Auto-updates outcome against
+    # the framework state (Assert-Install.ps1 checks only the latest transcript's, and only for
+    # NOT CONFIGURED), so the change that starts returning 8 has to add both.
     if ($ExitCode -eq 1 -and $KnownPlatformIncompatible.Trim()) {
         return [pscustomobject]@{
             StepExitCode = 0

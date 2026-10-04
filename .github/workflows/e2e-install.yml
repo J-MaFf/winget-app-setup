@@ -37,7 +37,10 @@ name: E2E Install
 # Winget-AutoUpdate's own update run is not exercised: windows-latest lacks the
 # Microsoft.WindowsAppRuntime.1.8 framework, so the installer skips WAU there and the assertions
 # expect 'Auto-updates: NOT CONFIGURED'. A WAU leg (start the task, wait for it, check that winget
-# still starts) needs that framework on the runner first.
+# still starts) needs that framework on the runner first. It can be provisioned as a preparation
+# step (Microsoft's versioned WindowsAppRuntimeInstall-x64.exe --quiet, or winget's
+# Microsoft.WindowsAppRuntime.1.8 package; the framework's minimum OS covers Server 2025), but that
+# has not been tried on this image yet, so the leg is left for a follow-up.
 #
 # Pull requests: every PR starts this workflow, and the changes job lets both legs run only when
 # the PR touches the product (WingetAppSetup/**, build/**, winget-app-install.ps1) or the e2e
@@ -165,8 +168,10 @@ jobs:
     # own limit and the diagnostics and upload steps still run. A job that reaches this limit is
     # cancelled instead; report-failure still files the issue. Each step limit sits above that
     # step's slow red-run path, so it ends with its own summary instead of being cut off:
-    #   - runner preparation, 15: uninstalling three apps takes a minute or two; every winget
-    #     call in it is bounded, and the step continues on error, so a hang there only costs time.
+    #   - runner preparation, 15: uninstalling three apps takes a minute or two. Every winget
+    #     call in it is bounded, at most 4 min per app (list 45 s, uninstall 150 s, list 45 s), so
+    #     12 min for the three; each app's result prints as soon as it is done, and the step
+    #     continues on error, so a hang there only costs time.
     #   - install passes, 35 each: first passes have taken 3-11 min and passing second passes
     #     under 1 min, but a pass where winget cannot launch costs about 1.4 min per applicable app
     #     on each of its two loops (run 36384683838's second pass took 23.9 min, before the
@@ -214,10 +219,10 @@ jobs:
         # installer to iex the same way, so they test the code under review. Both rely on the
         # installer's effective non-interactive auto-detection (redirected stdin on a runner) - that
         # detection is itself part of what this run verifies (issue #214). Invoke-InstallPass.ps1
-        # applies the exit-code policy: 0 passes; 1 (some apps failed) is tolerated only while
-        # KNOWN_PLATFORM_INCOMPATIBLE is non-empty, pending the assertion step's containment check;
-        # anything else (2 = winget unavailable, 3 = validation failed, 5 = aborted, ...) fails the
-        # step with the installer's code.
+        # applies the exit-code policy: 0 and 3010 (OK, restart required) pass; 1 (some apps
+        # failed) is tolerated only while KNOWN_PLATFORM_INCOMPATIBLE is non-empty, pending the
+        # assertion step's containment check; anything else (2 = winget unavailable, 3 = validation
+        # failed, 5 = aborted, ...) fails the step with the installer's code.
         run: ./e2e/Invoke-InstallPass.ps1 -Pass first -Shell pwsh -Entry OneLiner
 
       - name: Diagnostics after the first install pass
@@ -317,9 +322,9 @@ jobs:
     needs: changes
     if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.changes.result != 'success' || needs.changes.outputs.e2e == 'true') }}
     runs-on: windows-latest
-    # Backstop, sized like e2e-install's: 15 + 3 + 35 + 3 + 35 + 40 + 5 = 136, plus checkout and
+    # Backstop, sized like e2e-install's: 20 + 3 + 35 + 3 + 35 + 40 + 5 = 141, plus checkout and
     # uploads. Installing PowerShell 7 adds a minute or two to the first pass.
-    timeout-minutes: 145
+    timeout-minutes: 150
     env:
       INSTALLER_SOURCE: ${{ github.event_name == 'schedule' && 'raw-main' || 'checkout' }}
     steps:
@@ -327,11 +332,14 @@ jobs:
         uses: actions/checkout@v6
 
       # As in e2e-install, plus PowerShell 7 (MSI uninstall, winget as the fallback). If it cannot
-      # be removed, a warning says so and the first pass finds it instead of installing it.
+      # be removed, a warning says so, the first pass finds it instead of installing it, and the
+      # assertions fail (-ExpectPowerShell7Installed): the leg would not have tested the install.
+      # 20 minutes: at most 12 for the three apps, as in e2e-install, and 6.5 for PowerShell 7
+      # (msiexec 150 s, then the winget fallback's 4 min).
       - name: Remove the catalog apps the runner image ships with, and PowerShell 7
         shell: powershell
         continue-on-error: true
-        timeout-minutes: 15
+        timeout-minutes: 20
         run: |
           & .\e2e\Remove-PreinstalledApps.ps1 -IncludePowerShell7
 
@@ -377,11 +385,13 @@ jobs:
           SECOND_PASS_OUTCOME: ${{ steps.second-pass.outcome }}
         run: |
           # The same assertions as in e2e-install, plus -ExpectPowerShell7Bootstrap: one bootstrap
-          # transcript per pass, each of which relaunched the installer under PowerShell 7.
+          # transcript per pass, each of which relaunched the installer under PowerShell 7; and
+          # -ExpectPowerShell7Installed: the first pass's bootstrap installed PowerShell 7 rather
+          # than finding one, so its install path really ran.
           # Windows PowerShell turns a program's stderr into errors and drops empty arguments, so
           # errors do not stop this step and -SkipApps is passed only when the list has entries.
           $ErrorActionPreference = 'Continue'
-          $assertArgs = @('-ExpectPowerShell7Bootstrap')
+          $assertArgs = @('-ExpectPowerShell7Bootstrap', '-ExpectPowerShell7Installed')
           if ($env:KNOWN_PLATFORM_INCOMPATIBLE) {
             $assertArgs += @('-SkipApps', $env:KNOWN_PLATFORM_INCOMPATIBLE)
           }
@@ -556,14 +566,21 @@ jobs:
             fi
             echo
 
-            # Transcripts are install-yyyyMMdd-HHmmss.log (with -bootstrap for the Windows
-            # PowerShell 5.1 phase), so name order is run order. The earliest is shown too: a red
-            # second pass often starts from damage done in the first.
-            mapfile -t logs < <(find "$transcripts" -maxdepth 1 -type f -name 'install-*.log' ! -name '*-whatif.log' -printf '%f\n' 2>/dev/null | sort)
+            # Transcripts are install-yyyyMMdd-HHmmss.log, so name order is run order. The earliest
+            # is shown too: a red second pass often starts from damage done in the first. The
+            # Windows PowerShell 5.1 phase of a pass writes its own install-*-bootstrap.log, which
+            # holds no install and is named before the PowerShell 7 run it starts, so it is kept
+            # out of that pair and its latest one gets a section of its own.
+            mapfile -t logs < <(find "$transcripts" -maxdepth 1 -type f -name 'install-*.log' ! -name '*-whatif.log' ! -name '*-bootstrap.log' -printf '%f\n' 2>/dev/null | sort)
+            mapfile -t bootstraps < <(find "$transcripts" -maxdepth 1 -type f -name 'install-*-bootstrap.log' -printf '%f\n' 2>/dev/null | sort)
             if [ "${#logs[@]}" -eq 0 ]; then
               echo '### Install transcripts'
               echo
-              echo 'No install transcript was uploaded: the run stopped before the installer started, or before the upload step. See the run log.'
+              if [ "${#bootstraps[@]}" -gt 0 ]; then
+                echo 'No PowerShell 7 install transcript was uploaded: the Windows PowerShell 5.1 bootstrap did not start PowerShell 7 (see its transcript below), or the run stopped before the upload step.'
+              else
+                echo 'No install transcript was uploaded: the run stopped before the installer started, or before the upload step. See the run log.'
+              fi
             else
               earliest=${logs[0]}
               latest=${logs[${#logs[@]}-1]}
@@ -578,6 +595,13 @@ jobs:
               tail -n 50 "$transcripts/$latest" | fence
             fi
             echo
+            if [ "${#bootstraps[@]}" -gt 0 ]; then
+              bootstrap=${bootstraps[${#bootstraps[@]}-1]}
+              echo "### Latest Windows PowerShell 5.1 bootstrap transcript, last 50 lines (\`$bootstrap\`)"
+              echo
+              tail -n 50 "$transcripts/$bootstrap" | fence
+              echo
+            fi
 
             echo '### Diagnostics snapshots'
             echo

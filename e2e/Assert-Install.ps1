@@ -42,7 +42,9 @@
          non-skip-listed apps.
       9. With -ExpectPowerShell7Bootstrap: every pass went through the Windows PowerShell 5.1
          bootstrap (one bootstrap transcript per real-run transcript), and each bootstrap
-         relaunched the installer under PowerShell 7 and logged how that run ended.
+         relaunched the installer under PowerShell 7 and logged how that run ended. With
+         -ExpectPowerShell7Installed also: the first pass's bootstrap installed PowerShell 7
+         instead of finding one.
 
     Prints a per-assertion PASS/FAIL table and exits nonzero listing the failures.
 .PARAMETER SkipApps
@@ -65,6 +67,10 @@
 .PARAMETER ExpectPowerShell7Bootstrap
     Enables the bootstrap assertions (9). Pass this when every pass was started from Windows
     PowerShell 5.1 (the e2e-install-windows-powershell leg).
+.PARAMETER ExpectPowerShell7Installed
+    Adds the assertion that the first pass's bootstrap installed PowerShell 7 (9). Pass this when
+    the first pass started on a machine without PowerShell 7 (the e2e-install-windows-powershell
+    leg removes it first), so a leftover PowerShell 7 cannot leave the install path untested.
 .NOTES
     Exit codes: 0 = all assertions passed, 1 = one or more assertions failed (each listed).
 #>
@@ -80,7 +86,10 @@ param (
     [string]$InstallerPath,
 
     [Parameter(Mandatory = $false)]
-    [switch]$ExpectPowerShell7Bootstrap
+    [switch]$ExpectPowerShell7Bootstrap,
+
+    [Parameter(Mandatory = $false)]
+    [switch]$ExpectPowerShell7Installed
 )
 
 $ErrorActionPreference = 'Stop'
@@ -269,6 +278,7 @@ $transcriptAssertionArgs = @{
     SkipApps                    = $SkipApps
     ExpectAllSkippedOnSecondRun = $ExpectAllSkippedOnSecondRun
     ExpectPowerShell7Bootstrap  = $ExpectPowerShell7Bootstrap
+    ExpectPowerShell7Installed  = $ExpectPowerShell7Installed
 }
 if ($InstallerPath) {
     $transcriptAssertionArgs.InstallerPath = $InstallerPath

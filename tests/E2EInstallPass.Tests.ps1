@@ -33,7 +33,8 @@ Describe 'Get-InstallPassVerdict' {
         @{ ExitCode = 1; Known = 'Some.App'; Outcome = 'tolerated'; StepExitCode = 0 }
         @{ ExitCode = 2; Known = 'Some.App'; Outcome = 'failed'; StepExitCode = 2 }
         @{ ExitCode = 5; Known = ''; Outcome = 'failed'; StepExitCode = 5 }
-        @{ ExitCode = 3010; Known = ''; Outcome = 'failed'; StepExitCode = 3010 }
+        @{ ExitCode = 3010; Known = ''; Outcome = 'passed'; StepExitCode = 0 }
+        @{ ExitCode = 8; Known = 'Some.App'; Outcome = 'failed'; StepExitCode = 8 }
     ) {
         $verdict = Get-InstallPassVerdict -ExitCode $ExitCode -KnownPlatformIncompatible $Known -Pass 'first'
 
@@ -44,6 +45,7 @@ Describe 'Get-InstallPassVerdict' {
     It 'Names the pass and the code in its message' {
         (Get-InstallPassVerdict -ExitCode 2 -KnownPlatformIncompatible '' -Pass 'second').Message | Should -Be 'Second install pass FAILED with exit code 2'
         (Get-InstallPassVerdict -ExitCode 1 -KnownPlatformIncompatible 'Some.App' -Pass 'first').Message | Should -Match '^First install pass exited 1 \(some apps failed\) - tolerated .*: Some\.App$'
+        (Get-InstallPassVerdict -ExitCode 3010 -KnownPlatformIncompatible '' -Pass 'first').Message | Should -Be 'First install pass exited 3010 (OK, restart required).'
     }
 }
 
@@ -61,7 +63,8 @@ Describe 'Get-InstallPassCommand' {
         $command = Get-InstallPassCommand -Shell $Shell -Entry $Entry -Source 'raw-main' -InstallerPath $script:Installer
 
         $command.FilePath | Should -Be $Shell
-        $command.Arguments[0..1] | Should -Be @('-NoProfile', '-EncodedCommand')
+        # -OutputFormat Text keeps the child's stderr plain text instead of CLIXML.
+        $command.Arguments[0..3] | Should -Be @('-NoProfile', '-OutputFormat', 'Text', '-EncodedCommand')
         ConvertFrom-EncodedArgument -Arguments $command.Arguments | Should -Be $command.Script
         $command.Script | Should -Not -Match 'Invoke-RestMethod'
         $readme = Get-Content -Raw -LiteralPath (Join-Path $script:RepoRoot 'readme.md')
@@ -131,6 +134,29 @@ Describe 'e2e/Invoke-InstallPass.ps1 run as a step' {
 
         $exitCode | Should -Be $Expected
         ($output -join "`n") | Should -Match 'stand-in installer'
+    }
+
+    It 'Leaves a one-liner pass''s output plain text on a redirected stderr, not CLIXML' {
+        # As on the runner: the step's stderr is a pipe the installer's PowerShell inherits.
+        # ProcessStartInfo, not '2>&1': PowerShell would decode CLIXML it reads itself.
+        $installer = New-StandInInstaller -Body "Write-Host 'stand-in installer'; Write-Error 'stand-in error'; exit 0"
+        $startInfo = [System.Diagnostics.ProcessStartInfo]::new($script:Pwsh)
+        foreach ($argument in @('-NoProfile', '-File', $script:InstallPassScript, '-Pass', 'first', '-Shell', 'pwsh', '-Entry', 'OneLiner', '-Source', 'checkout', '-KnownPlatformIncompatible', '', '-InstallerPath', $installer)) {
+            $startInfo.ArgumentList.Add($argument)
+        }
+        $startInfo.UseShellExecute = $false
+        $startInfo.RedirectStandardOutput = $true
+        $startInfo.RedirectStandardError = $true
+        $process = [System.Diagnostics.Process]::Start($startInfo)
+        $stderrTask = $process.StandardError.ReadToEndAsync()
+        $stdout = $process.StandardOutput.ReadToEnd()
+        $process.WaitForExit()
+        $stderr = $stderrTask.Result
+
+        $process.ExitCode | Should -Be 0
+        $stdout | Should -Match 'stand-in installer'
+        $stderr | Should -Not -Match 'CLIXML'
+        $stderr | Should -Match 'stand-in error'
     }
 
     It 'Exits 64 without a pass, shell and entry' {
