@@ -139,11 +139,11 @@ foreach ($app in $candidateApps) {
 # same pattern proven reliable by the install passes) plus its own launch-exception bypass-retry,
 # so it sidesteps that whole bug class instead of retrying into it.
 #
-# Waits out a still-broken winget launch path before starting (issue #277): the installer's
-# Install-WingetAutoUpdate triggers an immediate background WAU run (RUN_WAU=YES) whose own winget
-# calls can leave winget.exe unlaunchable for several minutes, and this script runs as a separate
-# process straight after the installer, so it can start mid-lock. Best-effort - the per-app retry
-# loop below still tolerates a timeout or launch failure if the lock outlasts this wait.
+# Waits out a still-broken winget launch path before starting (issue #277): a Winget-AutoUpdate run
+# can leave winget.exe unlaunchable for several minutes. The installer no longer starts one
+# immediately (RUN_WAU=YES was removed), so this normally returns on the first probe; it stays as a
+# guard against a WAU run started by its own schedule. Best-effort - the per-app retry loop below
+# still tolerates a timeout or launch failure if a lock outlasts this wait.
 if (-not (Wait-WingetLaunchable)) {
     Write-Host 'winget did not confirm launchable before starting the per-app checks; proceeding anyway (each check retries independently).' -ForegroundColor Yellow
 }

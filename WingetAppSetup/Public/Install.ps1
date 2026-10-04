@@ -19,8 +19,9 @@
     Get-DefaultAppCatalog — the single source of truth shared with winget-app-uninstall.ps1
     (issue #190). Overridable so tests (and callers) can inject a custom catalog.
 .NOTES
-    Exit codes: 0 = success, 1 = one or more apps failed to install, 2 = winget unavailable,
-    3 = app-definition validation failed or no valid apps remain.
+    Exit codes: 0 = success, 1 = one or more apps failed to install, 2 = winget unavailable (at
+    the start, or no longer launchable at the end of the run), 3 = app-definition validation
+    failed or no valid apps remain.
 #>
 function Invoke-WingetInstall {
     param (
@@ -240,9 +241,8 @@ function Invoke-WingetInstall {
     # per-app retrying resolves two DesktopAppInstaller versions deadlocked against each other. Two
     # live E2E runs let every catalog app independently burn its own retry budget against that same
     # wall, turning a diagnosable dead end into a 30+ minute hang before either was cancelled.
-    # Checked once here (this pass can start already wedged - the observed real-world case, e.g. a
-    # second install pass right after a first pass's WAU run triggered the conflict) and re-checked
-    # after Install-WingetAutoUpdate below (in case it wedges partway through this same pass).
+    # Checked once here: this pass can start already wedged (the observed E2E case was a second
+    # install pass right after a WAU run re-provisioned App Installer without its framework).
     $conflictingVersions = Get-ConflictingDesktopAppInstallerVersions
     $wingetDeadlocked = $conflictingVersions.Count -gt 1
     if ($wingetDeadlocked) {
@@ -320,30 +320,6 @@ function Invoke-WingetInstall {
     # Configure Windows Terminal defaults(issue #74): default profile and default terminal app.
     Set-WindowsTerminalDefaults -WhatIf:$WhatIf
 
-    # Set up ongoing automatic updates via Winget-AutoUpdate (issue #168). Best-effort: a failure
-    # here warns but does not fail the install; the outcome is captured and surfaced next to the
-    # final summary instead of being a scrolled-past warning (issue #186).
-    $wauResult = Install-WingetAutoUpdate -WhatIf:$WhatIf
-
-    # 'Configured' means this run just installed or upgraded WAU with RUN_WAU=YES, which triggers
-    # an immediate background WAU update run whose own winget calls can leave winget.exe
-    # unlaunchable for several minutes (issue #277). Wait it out here, once, before anything else
-    # in this run touches winget again - the retry pass immediately below, most directly - instead
-    # of letting every subsequent winget call race that window. Not needed for 'AlreadyPresent'
-    # (no install happened, so RUN_WAU never fired) or 'DryRun'/'Failed'.
-    if ($wauResult.Status -eq 'Configured') {
-        if (-not (Wait-WingetLaunchable)) {
-            Write-WarningMessage 'winget did not become launchable again within the post-WAU-install wait window; continuing anyway (later winget calls retry independently).'
-            # Re-check for the same structural deadlock (issue #279): it can appear partway through
-            # this pass, not just be inherited at the top. Recognizing it here also skips the retry
-            # pass just below, instead of burning its own budget per app against the same wall.
-            if (-not $wingetDeadlocked) {
-                $conflictingVersions = Get-ConflictingDesktopAppInstallerVersions
-                $wingetDeadlocked = $conflictingVersions.Count -gt 1
-            }
-        }
-    }
-
     # Retry any failed installations once before producing the final summary
     if ($failedApps.Count -gt 0) {
         if ($wingetDeadlocked) {
@@ -403,6 +379,26 @@ function Invoke-WingetInstall {
         }
     }
 
+    # Set up ongoing automatic updates via Winget-AutoUpdate (issue #168). Best-effort: a failure
+    # here warns but does not fail the install; the outcome is captured and surfaced next to the
+    # final summary instead of being a scrolled-past warning (issue #186).
+    #
+    # Runs only after every winget call this run makes (the retry pass included), and WAU is no
+    # longer told to start an update pass immediately (RUN_WAU=YES was removed). Every WAU SYSTEM
+    # run first calls its own Install-Prerequisites, which can re-provision App Installer and reset
+    # winget's sources; letting that start mid-run is what wedged winget in the #279/#284 E2E runs
+    # and what killed the console in #283. WAU's own schedule takes it from here.
+    $wauResult = Install-WingetAutoUpdate -WhatIf:$WhatIf
+
+    # A run must never report success while leaving winget unusable (whatever broke it, the next
+    # run of this installer and every WAU update would fail). One bounded launch probe, after the
+    # last thing this run does to the machine; a healthy winget answers on the first probe. Skipped
+    # in a dry run, which never touched winget's state.
+    $wingetUsableAtEnd = $true
+    if (-not $WhatIf) {
+        $wingetUsableAtEnd = Wait-WingetLaunchable -TimeoutSeconds 60 -PollIntervalSeconds 15 -RequiredConsecutiveSuccesses 1
+    }
+
     # Display the summary of the installation
     if ($WhatIf) {
         Write-Host ''
@@ -459,6 +455,10 @@ function Invoke-WingetInstall {
         default { Write-ErrorMessage 'Auto-updates: FAILED - Winget-AutoUpdate could not be installed; apps will not update automatically. Re-run the installer to retry.' }
     }
 
+    if (-not $wingetUsableAtEnd) {
+        Write-ErrorMessage 'winget: NOT USABLE - winget could not be launched at the end of this run, so automatic updates and the next run of this installer will fail on this machine. Restart the machine and re-run the installer; if it persists, attach this transcript to a GitHub issue.'
+    }
+
     # Repeat the persistent transcript path next to the summary (issue #189). The variable is set
     # by the generated installer's entry script before dispatch; it is unset (and this is skipped)
     # when the function runs outside that context (module import, tests) or the transcript could
@@ -474,8 +474,9 @@ function Invoke-WingetInstall {
         [void][System.Console]::ReadKey($true)
     }
 
-    if ($failedApps.Count -gt 0) {
-        Exit 1
+    $exitCode = Get-InstallerExitCode -FailedAppCount $failedApps.Count -WingetUsable $wingetUsableAtEnd
+    if ($exitCode -ne 0) {
+        Exit $exitCode
     }
 }
 

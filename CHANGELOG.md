@@ -73,6 +73,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Stopped the installer from starting Winget-AutoUpdate's first update pass in the middle of its
+  own run, the root cause of the red E2E runs (issues #279, #283, #284). The WAU MSI was installed
+  with `RUN_WAU=YES`, so WAU 2.12.0's SYSTEM run began immediately; every such run calls WAU's
+  `Install-Prerequisites`, which provisions the newest winget release from GitHub with
+  `-SkipLicense` but without the `Microsoft.WindowsAppRuntime.1.8` framework it needs, then runs
+  `winget source reset --force` and upgrades apps (PowerShell included). On the Server 2025 runner
+  that wedged App Installer for the rest of the job (#279, #284), and the PowerShell upgrade stopped
+  the running console (#283); the "Store servicing" and "runner image" explanations were wrong.
+  `RUN_WAU=YES` is gone, WAU is now set up after the retry pass so nothing else in the run touches
+  winget afterwards, and the up-to-6-minute post-WAU wait is removed. A run also can no longer exit
+  0 while leaving winget broken: a single bounded `winget --version` probe at the end reports
+  `winget: NOT USABLE` and exits 2 when no app failed (1 still takes precedence), via the new
+  `Get-InstallerExitCode`. `Wait-WingetLaunchable` now counts a probe that exits non-zero as a
+  failure.
 - Fixed the installer hanging for 30+ minutes instead of failing fast when winget is deadlocked
   between two conflicting `Microsoft.DesktopAppInstaller` versions (issue #279) — observed twice,
   reproducibly, on independently-provisioned GitHub-hosted E2E runners: a second App Installer

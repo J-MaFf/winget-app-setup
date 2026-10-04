@@ -111,7 +111,11 @@ function Install-WingetAutoUpdate {
 
         # Bake the configuration in via MSI properties (the winget-package install path allows no
         # install-time customization). Single quoted-path argument string for reliable msiexec parsing.
-        $msiArgs = "/i `"$msiPath`" /qn /norestart RUN_WAU=YES USERCONTEXT=1 DISABLEWAUAUTOUPDATE=1 UPDATESINTERVAL=Weekly UPDATESATTIME=02:00:00 NOTIFICATIONLEVEL=Full DONOTRUNONMETERED=1"
+        # No RUN_WAU=YES: an immediate WAU run starts WAU's Install-Prerequisites (App Installer
+        # re-provisioning plus `winget source reset --force`) and app upgrades while this installer
+        # is still running - the cause of the #279/#284 winget wedge and the #283 console stop.
+        # WAU's own schedule runs the first pass instead.
+        $msiArgs = "/i `"$msiPath`" /qn /norestart USERCONTEXT=1 DISABLEWAUAUTOUPDATE=1 UPDATESINTERVAL=Weekly UPDATESATTIME=02:00:00 NOTIFICATIONLEVEL=Full DONOTRUNONMETERED=1"
         $proc = Start-Process -FilePath 'msiexec.exe' -ArgumentList $msiArgs -Wait -PassThru
 
         # 3010 = ERROR_SUCCESS_REBOOT_REQUIRED — still a success.

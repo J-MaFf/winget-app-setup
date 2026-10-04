@@ -181,6 +181,9 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
         Mock Install-AppWithVerification { @{ Status = 'Installed'; InstallResult = $null; FailureReason = $null } }
         # Healthy (no conflict) by default (issue #279); tests for the deadlock fail-fast override this.
         Mock Get-ConflictingDesktopAppInstallerVersions { @() }
+        # The end-of-run winget health check launches real winget; healthy by default so a real
+        # (non -WhatIf) run in these tests never probes the machine or reaches `Exit 2`.
+        Mock Wait-WingetLaunchable { $true }
 
         $script:capturedRows = $null
         Mock Write-Table { $script:capturedRows = $Rows }
@@ -199,9 +202,13 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
             $installBody | Should -Not -Match 'winget_(list|verify|retry_verify)_'
         }
 
-        It 'Still exits 1 when apps remain failed after the retry pass (issue #176)' {
+        It 'Exits with the code Get-InstallerExitCode derives from failed apps and the end-of-run winget check (issue #176)' {
+            # The precedence itself (1 over 2 over 0) is covered directly in the
+            # 'Get-InstallerExitCode' Describe below; this pins that the orchestrator feeds it the
+            # post-retry failure count and the end-of-run probe, and exits on any non-zero result.
             $installBody = $script:InvokeWingetInstallDef
-            $installBody | Should -Match 'if \(\$failedApps\.Count -gt 0\) \{\s*Exit 1\s*\}'
+            $installBody | Should -Match '\$exitCode = Get-InstallerExitCode -FailedAppCount \$failedApps\.Count -WingetUsable \$wingetUsableAtEnd'
+            $installBody | Should -Match 'if \(\$exitCode -ne 0\) \{\s*Exit \$exitCode\s*\}'
         }
 
         It 'Tracks failures as objects with reasons and renders the failed-apps summary (issue #189)' {
@@ -387,46 +394,59 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
         }
     }
 
-    Context 'Post-WAU-install winget wait (issue #277)' {
-        # Driven with -WhatIf so these don't need the real elevation gate: Install-WingetAutoUpdate
-        # is mocked directly, so the returned Status controls the branch under test regardless of
-        # what a real (non-mocked) call would return for -WhatIf.
-        It 'Waits for winget to become launchable again when WAU was just installed/upgraded (Status Configured)' {
-            Mock Install-WingetAutoUpdate { @{ Status = 'Configured'; Version = '2.12.0' } }
-            Mock Wait-WingetLaunchable { $true }
-
-            Invoke-WingetInstall -WhatIf -NonInteractive
-
-            Should -Invoke Wait-WingetLaunchable -Times 1 -Exactly
+    Context 'Winget-AutoUpdate setup and the end-of-run winget check (RUN_WAU=YES removed)' {
+        # A real (non -WhatIf) run with Test-IsAdmin mocked, so these run on any machine instead
+        # of only on an elevated one. Every app ends Installed, so the run never reaches `Exit`.
+        BeforeEach {
+            Mock Test-IsAdmin { $true }
+            $script:callOrder = [System.Collections.Generic.List[string]]::new()
+            $script:appCalls = 0
+            Mock Install-AppWithVerification {
+                $script:appCalls++
+                $script:callOrder.Add("app:$($App.name)")
+                if ($script:appCalls -eq 1) {
+                    return @{ Status = 'Failed'; InstallResult = @{ ExitCode = 1 }; FailureReason = 'VerifyNotFound' }
+                }
+                @{ Status = 'Installed'; InstallResult = @{ ExitCode = 0 }; FailureReason = $null }
+            }
+            Mock Install-WingetAutoUpdate { $script:callOrder.Add('wau'); @{ Status = 'Configured'; Version = '2.12.0' } }
+            Mock Wait-WingetLaunchable { $script:callOrder.Add('probe'); $true }
         }
 
-        It 'Does not wait when WAU was already present (RUN_WAU never fired)' {
-            Mock Install-WingetAutoUpdate { @{ Status = 'AlreadyPresent'; Version = '2.12.0' } }
-            Mock Wait-WingetLaunchable { $true }
+        It 'Sets up WAU only after the retry pass, then probes winget once with a short budget' {
+            # WAU used to be installed (with RUN_WAU=YES) before the retry pass, so its immediate
+            # SYSTEM run re-provisioned App Installer while the retry pass was still using winget
+            # (issues #279/#283/#284). Nothing may touch winget after WAU is set up except the probe.
+            Invoke-WingetInstall -Apps @(@{ name = 'Contoso.AppOne' }) -NonInteractive
 
-            Invoke-WingetInstall -WhatIf -NonInteractive
+            $script:callOrder | Should -Be @('app:Contoso.AppOne', 'app:Contoso.AppOne', 'wau', 'probe')
+            Should -Invoke Wait-WingetLaunchable -Times 1 -Exactly -ParameterFilter {
+                $TimeoutSeconds -eq 60 -and $RequiredConsecutiveSuccesses -eq 1
+            }
+        }
+
+        It 'Does not wait out a WAU run after installing WAU (no post-install wait window)' {
+            # The old post-WAU wait (up to 6 minutes, two consecutive probes) existed only to
+            # survive the immediate WAU run; the end-of-run probe is the only call left.
+            Invoke-WingetInstall -Apps @(@{ name = 'Contoso.AppOne' }) -NonInteractive
+
+            Should -Invoke Wait-WingetLaunchable -Times 0 -Exactly -ParameterFilter { $TimeoutSeconds -ne 60 }
+        }
+
+        It 'Skips the end-of-run probe in a dry run' {
+            # A dry run has no retry pass, so the first-pass failure from BeforeEach would end in
+            # `Exit 1`; this test only needs the app to land.
+            Mock Install-AppWithVerification { @{ Status = 'Installed'; InstallResult = $null; FailureReason = $null } }
+
+            Invoke-WingetInstall -Apps @(@{ name = 'Contoso.AppOne' }) -WhatIf -NonInteractive
 
             Should -Invoke Wait-WingetLaunchable -Times 0 -Exactly
         }
 
-        It 'Does not wait when the WAU install failed' {
-            Mock Install-WingetAutoUpdate { @{ Status = 'Failed'; Version = '2.12.0' } }
-            Mock Wait-WingetLaunchable { $true }
-
-            Invoke-WingetInstall -WhatIf -NonInteractive
-
-            Should -Invoke Wait-WingetLaunchable -Times 0 -Exactly
-        }
-
-        It 'Warns but continues when winget is still unlaunchable after the wait window elapses' {
-            Mock Install-WingetAutoUpdate { @{ Status = 'Configured'; Version = '2.12.0' } }
-            Mock Wait-WingetLaunchable { $false }
-            $script:warnings = @()
-            Mock Write-WarningMessage { $script:warnings += $Message }
-
-            { Invoke-WingetInstall -WhatIf -NonInteractive } | Should -Not -Throw
-
-            $script:warnings | Should -Contain 'winget did not become launchable again within the post-WAU-install wait window; continuing anyway (later winget calls retry independently).'
+        It 'Reports winget as not usable in the summary when the end-of-run probe fails (pinned structurally - driving it live would Exit 2 the process)' {
+            $installBody = $script:InvokeWingetInstallDef
+            $installBody | Should -Match '(?s)\$wingetUsableAtEnd = Wait-WingetLaunchable -TimeoutSeconds 60'
+            $installBody | Should -Match "(?s)if \(-not \`$wingetUsableAtEnd\)\s*\{\s*Write-ErrorMessage 'winget: NOT USABLE"
         }
     }
 
@@ -454,11 +474,8 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
             $installBody | Should -Match '(?s)if \(\$wingetDeadlocked\)\s*\{\s*\$failedApps \+= @\{ Name = \$app\.name; Reason = "winget deadlocked between conflicting DesktopAppInstaller versions.*?continue\s*\}'
         }
 
-        It 'Skips the retry pass when the wait after WAU install detects the conflict (pinned structurally)' {
+        It 'Skips the retry pass when the conflict was detected upfront (pinned structurally)' {
             $installBody = $script:InvokeWingetInstallDef
-            # Re-checked after a failed Wait-WingetLaunchable, not just at the top - the conflict can
-            # appear partway through this same pass.
-            $installBody | Should -Match '(?s)if \(-not \(Wait-WingetLaunchable\)\)\s*\{.*?if \(-not \$wingetDeadlocked\)\s*\{\s*\$conflictingVersions = Get-ConflictingDesktopAppInstallerVersions'
             # The retry-pass gate gives the deadlock its own branch, ahead of the normal -WhatIf check.
             $installBody | Should -Match '(?s)if \(\$failedApps\.Count -gt 0\)\s*\{\s*if \(\$wingetDeadlocked\)\s*\{\s*Write-WarningMessage ''Skipping the retry pass'
         }
@@ -815,6 +832,21 @@ Describe 'Not-applicable gating end-to-end (issue #217)' {
         $installedRow = @($script:capturedRows | Where-Object { $_[0] -eq 'Installed' })[0]
         $installedRow[1] | Should -Match 'Contoso\.NormalApp'
         @($script:capturedRows | Where-Object { $_[0] -eq 'Failed' }).Count | Should -Be 0
+    }
+}
+
+Describe 'Get-InstallerExitCode' {
+    It 'Returns 0 when no app failed and winget is still usable' {
+        Get-InstallerExitCode -FailedAppCount 0 -WingetUsable $true | Should -Be 0
+    }
+
+    It 'Returns 2 when no app failed but winget can no longer be launched (never exit 0 with winget broken)' {
+        Get-InstallerExitCode -FailedAppCount 0 -WingetUsable $false | Should -Be 2
+    }
+
+    It 'Returns 1 when apps failed, whatever the winget check says (failed apps take precedence)' {
+        Get-InstallerExitCode -FailedAppCount 3 -WingetUsable $true | Should -Be 1
+        Get-InstallerExitCode -FailedAppCount 1 -WingetUsable $false | Should -Be 1
     }
 }
 

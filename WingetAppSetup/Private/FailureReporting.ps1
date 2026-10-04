@@ -7,6 +7,39 @@
 
 <#
 .SYNOPSIS
+    Decides Invoke-WingetInstall's final exit code from the run's outcome.
+.DESCRIPTION
+    Kept out of the orchestrator so the exit-code contract can be tested without executing an
+    `Exit` inside the test process. Failed apps take precedence (1); otherwise a winget that can no
+    longer be launched at the end of the run is reported as 2 - the same code as "winget
+    unavailable" at the start - so a run can never exit 0 while leaving winget broken.
+.PARAMETER FailedAppCount
+    Number of apps still failed after the retry pass.
+.PARAMETER WingetUsable
+    Result of the end-of-run winget launch probe.
+.RETURNS
+    [int] 0, 1 or 2.
+#>
+function Get-InstallerExitCode {
+    param (
+        [Parameter(Mandatory = $true)]
+        [int]$FailedAppCount,
+
+        [Parameter(Mandatory = $true)]
+        [bool]$WingetUsable
+    )
+
+    if ($FailedAppCount -gt 0) {
+        return 1
+    }
+    if (-not $WingetUsable) {
+        return 2
+    }
+    return 0
+}
+
+<#
+.SYNOPSIS
     Formats a one-line, human-readable reason for a failed app install.
 .DESCRIPTION
     Combines the shared install pipeline's FailureReason bucket with the diagnostic detail the

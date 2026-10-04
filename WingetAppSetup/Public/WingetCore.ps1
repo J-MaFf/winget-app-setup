@@ -343,8 +343,8 @@ function Initialize-WingetSourcesForUser {
 
     Launch failures have their own retry budget, longer than the session-error one (issue #258):
     the dominant real-world cause is a Microsoft.DesktopAppInstaller (App Installer) upgrade or
-    re-registration in flight - e.g. the background Winget-AutoUpdate run this installer itself
-    starts via RUN_WAU=YES - which breaks the per-user winget.exe app-execution alias for the
+    re-registration in flight - e.g. a background Winget-AutoUpdate run (the installer used to
+    start one itself via RUN_WAU=YES) - which breaks the per-user winget.exe app-execution alias for the
     whole registration window, far longer than the 15s the #253 backoff covered (observed on run
     30253761253: every launch failed across both install passes). Two things changed: each launch
     retry first re-resolves the executable via Resolve-WingetExecutable -BypassAlias, launching

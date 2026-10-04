@@ -153,7 +153,9 @@ Describe 'Winget-AutoUpdate integration (issue #168)' {
             Should -Invoke Invoke-WebRequest -Times 1 -Exactly -ParameterFilter { $OutFile -like '*wau-msi-test*' }
             Should -Invoke Start-Process -Times 1 -Exactly -ParameterFilter {
                 $FilePath -eq 'msiexec.exe' -and
-                $ArgumentList -match 'RUN_WAU=YES' -and $ArgumentList -match 'USERCONTEXT=1' -and
+                # No RUN_WAU=YES: an immediate WAU run re-provisions App Installer while the
+                # installer is still running (issues #279/#283/#284).
+                $ArgumentList -notmatch 'RUN_WAU' -and $ArgumentList -match 'USERCONTEXT=1' -and
                 $ArgumentList -match 'DISABLEWAUAUTOUPDATE=1' -and $ArgumentList -match 'UPDATESINTERVAL=Weekly' -and
                 $ArgumentList -match 'NOTIFICATIONLEVEL=Full'
             }

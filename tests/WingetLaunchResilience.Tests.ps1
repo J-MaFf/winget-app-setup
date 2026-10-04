@@ -1,7 +1,7 @@
 # Tests for WingetAppSetup/Private/WingetLaunchResilience.ps1 (issues #258, #277): classification of
 # transient winget-launch failures, resolution of a concrete winget.exe that bypasses the per-user
-# app-execution alias while DesktopAppInstaller is mid-upgrade, and waiting out that window after
-# Install-WingetAutoUpdate's RUN_WAU=YES background run.
+# app-execution alias while DesktopAppInstaller is mid-upgrade, and waiting out that window (used
+# as Invoke-WingetInstall's end-of-run winget health check).
 
 BeforeAll {
     . (Join-Path $PSScriptRoot 'TestHelpers.ps1')
@@ -146,8 +146,8 @@ Describe 'Wait-WingetLaunchable (issue #277)' {
         # its own WaitForExit-based winget checks. Defined in BeforeAll (not the Describe body)
         # so it survives into Pester's separate run phase.
         function New-FakeWingetProcess {
-            param ([bool]$Exited = $true, [scriptblock]$OnKill = { })
-            $p = [pscustomobject]@{ ExitCode = 0 }
+            param ([bool]$Exited = $true, [scriptblock]$OnKill = { }, $ExitCode = 0)
+            $p = [pscustomobject]@{ ExitCode = $ExitCode }
             # Local (non-$script:) variable + GetNewClosure() so each fake process instance
             # captures its own $Exited value, independent of any other instance in the same test.
             $exitedCopy = $Exited
@@ -177,6 +177,23 @@ Describe 'Wait-WingetLaunchable (issue #277)' {
 
         Should -Invoke Start-Process -Times 2 -Exactly -ParameterFilter { $FilePath -eq 'winget' }
         Should -Invoke Start-Sleep -Times 1 -Exactly -ParameterFilter { $Seconds -eq 1 }
+    }
+
+    It 'Counts a probe that launches but exits non-zero as not launchable' {
+        # A winget that starts but cannot run (e.g. a wedged App Installer) must not pass the
+        # end-of-run health check Invoke-WingetInstall uses to avoid exiting 0 with winget broken.
+        Mock Start-Process { New-FakeWingetProcess -ExitCode -1978335230 }
+        Mock Start-Sleep { }
+
+        Wait-WingetLaunchable -TimeoutSeconds 0 -PollIntervalSeconds 1 -RequiredConsecutiveSuccesses 1 | Should -Be $false
+    }
+
+    It 'Treats an unreadable ($null) exit code as success rather than reporting a healthy winget as broken' {
+        Mock Start-Process { New-FakeWingetProcess -ExitCode $null }
+        Mock Start-Sleep { }
+
+        Wait-WingetLaunchable -PollIntervalSeconds 1 -RequiredConsecutiveSuccesses 1 | Should -Be $true
+        Should -Invoke Start-Process -Times 1 -Exactly
     }
 
     It 'Resets the consecutive-success streak on an intervening failure, so a flaky clear does not count' {
