@@ -59,12 +59,12 @@ param (
 # This script is assembled from the WingetAppSetup module by build/Build-WingetInstallScript.ps1.
 # Edit the function source under WingetAppSetup/Public and WingetAppSetup/Private, then re-run the
 # build to regenerate this file. See readme.md ("Project layout") for details.
-# Build id: 1.0.0+bd4c7efd (module version + SHA256 fragment of this whole script; issue #189).
+# Build id: 1.0.0+83dc3415 (module version + SHA256 fragment of this whole script; issue #189).
 # ------------------------------------------------------------------------------------------------
 
 # Content-derived build identity, logged at startup so a transcript from a remote machine
 # identifies exactly which installer build produced it (issue #189).
-$script:InstallerBuildId = '1.0.0+bd4c7efd'
+$script:InstallerBuildId = '1.0.0+83dc3415'
 
 # ------------------------------------------------Functions------------------------------------------------
 
@@ -2186,13 +2186,13 @@ function Get-MachineWingetCandidate {
 
 <#
 .SYNOPSIS
-    The SYSTEM form of Test-AndInstallWinget: finds the machine-wide winget.exe and checks it starts.
+    The SYSTEM form of Initialize-Winget's launch check: finds the machine-wide winget.exe and
+    checks it starts.
 .DESCRIPTION
-    Review finding P2-24. As SYSTEM the per-account steps Test-AndInstallWinget otherwise works
-    through cannot help: SYSTEM has no `winget` alias, App Installer cannot be registered for it,
-    Repair-WinGetPackageManager does nothing for it (and throws with -AllUsers), and the
-    aka.ms/getwinget download registers App Installer per account again. They used to run anyway,
-    with minutes of downloads, before the run stopped with exit code 2.
+    Review finding P2-24. As SYSTEM the per-account steps Initialize-Winget otherwise works through
+    cannot help: SYSTEM has no `winget` alias, App Installer cannot be registered for it, and
+    Repair-WinGetPackageManager does nothing for it (and throws with -AllUsers). They used to run
+    anyway, with minutes of downloads, before the run stopped with exit code 2.
 
     Instead, each winget.exe from Get-MachineWingetCandidate is tried, best first, with
     Test-WingetLaunchable: the first is checked for up to 75 seconds (for a lock or an App Installer
@@ -2221,7 +2221,7 @@ function Test-MachineWingetAvailable {
         if (-not $windowsApps) {
             $windowsApps = '%ProgramFiles%\WindowsApps'
         }
-        $message = "No machine-wide winget was found: as SYSTEM the installer runs the winget.exe of the App Installer package (Microsoft.DesktopAppInstaller) installed for this PC, and Get-AppxPackage -AllUsers lists none with status Ok, nor is there one under $windowsApps. SYSTEM cannot set winget up for itself, so the per-account steps (registering App Installer, Repair-WinGetPackageManager, the aka.ms/getwinget download) do not apply. Install or update App Installer for this PC, then re-run the installer."
+        $message = "No machine-wide winget was found: as SYSTEM the installer runs the winget.exe of the App Installer package (Microsoft.DesktopAppInstaller) installed for this PC, and Get-AppxPackage -AllUsers lists none with status Ok, nor is there one under $windowsApps. SYSTEM cannot set winget up for itself, so the per-account steps (registering App Installer, Repair-WinGetPackageManager) do not apply. Install or update App Installer for this PC, then re-run the installer."
         if ($WhatIf) {
             Write-Info "[DRY-RUN] $message A real run would stop here with exit code 2."
         }
@@ -2258,7 +2258,7 @@ function Test-MachineWingetAvailable {
     if ($tried -gt 1) {
         $wingetWord = "$tried winget.exe files"
     }
-    $message = "winget could not be started as SYSTEM (tried the machine-wide $wingetWord above).$hint The per-account steps a signed-in user's run would try (registering App Installer, Repair-WinGetPackageManager, the aka.ms/getwinget download) do not apply to SYSTEM and were skipped."
+    $message = "winget could not be started as SYSTEM (tried the machine-wide $wingetWord above).$hint The per-account steps a signed-in user's run would try (registering App Installer, Repair-WinGetPackageManager) do not apply to SYSTEM and were skipped."
     if ($WhatIf) {
         Write-Info "[DRY-RUN] $message A real run would stop here with exit code 2."
     }
@@ -3401,8 +3401,7 @@ function Invoke-PowerShell7Bootstrap {
     WingetVersion     the `winget --version` launch check (30 seconds; it does no network or
                       source I/O).
     WingetList        any other `winget list` (2 minutes).
-    WingetSourceList  `winget source list` (2 minutes).
-    WingetSearch      the `winget search` source health check (2 minutes).
+    WingetSourceUpdate `winget source update`, the source check before the installs (2 minutes).
     WingetSourceReset `winget source reset`, which downloads the source again (5 minutes).
     MsiExec           one msiexec install or uninstall (15 minutes, as for the PowerShell 7 MSI).
     WebDownload       a small file download, such as the Winget-AutoUpdate MSI: the connection
@@ -3416,7 +3415,7 @@ function Invoke-PowerShell7Bootstrap {
 function Get-ProcessTimeoutSeconds {
     param (
         [Parameter(Mandatory = $true)]
-        [ValidateSet('WingetInstall', 'WingetDownload', 'WingetListCheck', 'WingetVersion', 'WingetList', 'WingetSourceList', 'WingetSearch', 'WingetSourceReset', 'MsiExec', 'WebDownload', 'WebDownloadStall')]
+        [ValidateSet('WingetInstall', 'WingetDownload', 'WingetListCheck', 'WingetVersion', 'WingetList', 'WingetSourceUpdate', 'WingetSourceReset', 'MsiExec', 'WebDownload', 'WebDownloadStall')]
         [string]$Operation
     )
 
@@ -3426,8 +3425,7 @@ function Get-ProcessTimeoutSeconds {
         'WingetListCheck' { return 15 }
         'WingetVersion' { return 30 }
         'WingetList' { return 120 }
-        'WingetSourceList' { return 120 }
-        'WingetSearch' { return 120 }
+        'WingetSourceUpdate' { return 120 }
         'WingetSourceReset' { return 300 }
         'MsiExec' { return 900 }
         'WebDownload' { return 300 }
@@ -5041,410 +5039,392 @@ function Get-WingetAgreementArgs {
 }
 
 # --- WingetBootstrap ---
-<#
-.SYNOPSIS
-    Updates the winget source for the current account to force its per-user first-use bootstrap.
-.DESCRIPTION
-    Runs `winget source update --name winget --disable-interactivity` under a timeout guard. This is
-    the lightest command that forces winget's per-user first-use bootstrap: it registers the
-    Microsoft.Winget.Source package for the invoking account. Exit code 0 therefore means the account
-    can reach the winget source — the only source the install phase uses (`--source winget`).
-
-    Do NOT pass `--accept-source-agreements` here: it is not a valid argument for `winget source
-    update` and makes winget reject the whole command with 0x8A150002 (INVALID_CL_ARGUMENTS,
-    -1978335230), which false-failed this probe on every machine (issue #172-followup). Source
-    agreements are accepted where the flag is valid — the install commands all pass
-    `--accept-source-agreements` (Install-WingetPackage), and the caller handles a genuine
-    0x8A150046 (agreements-not-accepted) result explicitly.
-
-    The probe is deliberately scoped to the winget source: msstore can fail for an account that
-    has never logged on interactively even when the winget source is healthy
-    (microsoft/winget-cli#5398/#6334), and probing it would report a false failure for the only
-    source that matters here.
-.PARAMETER TimeoutSeconds
-    Maximum seconds to wait for winget before stopping it. Default 120.
-.RETURNS
-    [hashtable] @{ Succeeded = <bool>; ExitCode = <int or $null>; TimedOut = <bool> }
-    ExitCode is $null when the process timed out or failed to start.
-#>
-function Invoke-WingetSourceProbe {
-    param (
-        [Parameter(Mandatory = $false)]
-        [int]$TimeoutSeconds = 120
-    )
-
-    # Through Invoke-WingetProcess (review finding P2-6): quiet when the probe succeeds, and winget's
-    # own explanation is echoed into the transcript when it does not.
-    $probe = Invoke-WingetProcess -ArgumentList @('source', 'update', '--name', 'winget', '--disable-interactivity') -TimeoutSeconds $TimeoutSeconds -Echo None
-    if ($probe.LaunchFailed) {
-        Write-WarningMessage "Winget source update failed to run: $($probe.LaunchError)"
-        return @{ Succeeded = $false; ExitCode = $null; TimedOut = $false }
-    }
-    if ($probe.TimedOut) {
-        Write-WarningMessage "Winget source update timed out after $TimeoutSeconds seconds and was stopped."
-        Write-ProcessOutput -Line $probe.Output -Tail 20
-        return @{ Succeeded = $false; ExitCode = $null; TimedOut = $true }
-    }
-    if ($probe.ExitCode -ne 0) {
-        Write-ProcessOutput -Line $probe.Output -Tail 20
-    }
-
-    return @{
-        Succeeded = ($probe.ExitCode -eq 0)
-        ExitCode  = $probe.ExitCode
-        TimedOut  = $false
-    }
-}
+# Helpers for Initialize-Winget (Public/WingetCore.ps1), the one ladder that makes winget usable
+# for a run: probe, classify the failure, apply the fix for that class (review findings P3-25 to
+# P3-31). Each fix runs at most once per run, and the classification comes from exit codes and
+# HRESULTs, never from English text.
 
 <#
 .SYNOPSIS
-    Checks that the winget source is both listed and functional for the current account.
+    Returns the App Installer Group Policy value that turns off what this installer needs, or $null.
 .DESCRIPTION
-    Two-step health probe used by Test-WingetSources before and after its repair attempt (one
-    shared implementation so the two probes cannot diverge — issue #177):
-
-      1. Listed: `winget source list` output mentions the winget source.
-      2. Functional: a real `winget search 7zip --source winget` succeeds (exit code 0 and no
-         corruption markers such as 0x8a15000f in the output).
-
-    The search passes `--accept-source-agreements` — valid for `winget search`, unlike
-    `winget source update` (issues #174/#175) — so a fresh account's unaccepted source agreements
-    (0x8A150046) are accepted inline instead of being misdiagnosed as source corruption and
-    triggering a pointless `winget source reset --force` + repair cycle.
-.PARAMETER Quiet
-    Suppresses the per-step success/corruption messages; used for the post-repair re-probe where
-    the caller reports the overall outcome itself.
+    Review finding P3-30. Under these policies the winget alias still runs, but every command it
+    is given ends with 0x8A15003A BLOCKED_BY_POLICY (or, for the source, finds no winget source),
+    and no repair can change that. The values live under
+    HKLM:\SOFTWARE\Policies\Microsoft\Windows\AppInstaller (Policy CSP DesktopAppInstaller,
+    Computer Configuration > Administrative Templates > Windows Components > Desktop App
+    Installer); 0 means Disabled:
+      EnableAppInstaller                                'Enable App Installer'
+      EnableWindowsPackageManagerCommandLineInterfaces  'Enable Windows Package Manager command line
+                                                        interfaces' (Windows 11 24H2 and later)
+      EnableDefaultSource                               'Enable App Installer Default Source': the
+                                                        winget source every install uses.
+    EnableAllowedSources is not checked: it governs only sources added beyond the defaults.
 .RETURNS
-    [hashtable] @{ Listed = <bool>; Functional = <bool>; Healthy = <bool> }
-    Healthy is True only when the source is listed AND functional.
+    [pscustomobject] with Name (the value name) and Policy (its Group Policy name), or $null.
 #>
-function Test-WingetSourceHealth {
-    param (
-        [Parameter(Mandatory = $false)]
-        [switch]$Quiet
-    )
-
-    # First check: verify source is listed. No --accept-source-agreements: `winget source list`
-    # does not accept it and rejects the whole command with 0x8A150002 (INVALID_CL_ARGUMENTS),
-    # whose usage text happened to contain 'winget', so a missing source still read as listed.
-    $sourceIsListed = $false
-    $list = Invoke-WingetProcess -ArgumentList @('source', 'list', '--disable-interactivity') -TimeoutSeconds (Get-ProcessTimeoutSeconds -Operation WingetSourceList) -Echo None
-    if ($list.LaunchFailed) {
-        Write-WarningMessage "Winget source list failed: $($list.LaunchError)"
-    }
-    elseif ($list.TimedOut) {
-        Write-WarningMessage 'Winget source list failed: it did not finish in time and was stopped.'
-    }
-    else {
-        $sourceIsListed = [bool](@($list.Output) -match 'winget')
-        if (-not $sourceIsListed -and -not $Quiet) {
-            Write-ProcessOutput -Line $list.Output -Tail 20
-        }
-    }
-
-    # Second check: verify source is functional (not corrupted) by attempting a search
-    $sourceIsFunctional = $false
-    if ($sourceIsListed) {
-        try {
-            # Actually test if the source works by attempting a search.
-            # Use '7zip' as a known package that always exists. The exit code comes from the
-            # process object, so it cannot be a stale $LASTEXITCODE.
-            $search = Invoke-WingetProcess -ArgumentList @('search', '7zip', '--source', 'winget', '--disable-interactivity', '--accept-source-agreements') -TimeoutSeconds (Get-ProcessTimeoutSeconds -Operation WingetSearch) -Echo None
-            if ($search.LaunchFailed) {
-                throw $search.LaunchError
-            }
-            if ($search.TimedOut) {
-                throw 'winget search did not finish in time and was stopped.'
-            }
-            $searchOutput = @($search.Output)
-            $searchExitCode = $search.ExitCode
-
-            # Any nonzero exit code fails the check — that includes the known 0x8A15000F
-            # corruption signature (APPINSTALLER_CLI_ERROR_SOURCE_DATA_MISSING, -1978335217 as a
-            # signed Int32 — "Failed when opening source(s)... Data required by the source is
-            # missing"), which needs no runtime branch of its own.
-            #
-            # The output match is the fallback for the one scenario the exit code cannot catch:
-            # per the codebase's hard-won history with flaky winget exit codes (issues
-            # #150/#172/#174/#175/#177), winget has reportedly emitted this exact corruption text
-            # while still returning exit code 0. The '0x8a150' token is the load-bearing part —
-            # winget prints the hex HRESULT regardless of display language, so it survives locale
-            # and wording changes. The two English phrases are extra coverage only and, like the
-            # locale-dependency note in winget-app-uninstall.ps1 (issue #180), may stop matching
-            # if winget's output wording or locale changes.
-            if ($searchExitCode -ne 0 -or $searchOutput -match '0x8a150|failed when opening|data required') {
-                if (-not $Quiet) {
-                    Write-WarningMessage 'Winget source is listed but contains corrupted or missing data.'
-                    Write-ProcessOutput -Line $searchOutput -Tail 20
-                }
-                $sourceIsFunctional = $false
-            }
-            else {
-                if (-not $Quiet) {
-                    Write-Success 'Winget sources are accessible and functional.'
-                }
-                $sourceIsFunctional = $true
-            }
-        }
-        catch {
-            if (-not $Quiet) {
-                Write-WarningMessage "Winget source functionality test failed: $_"
-            }
-            $sourceIsFunctional = $false
-        }
-    }
-
-    return @{
-        Listed     = $sourceIsListed
-        Functional = $sourceIsFunctional
-        Healthy    = ($sourceIsListed -and $sourceIsFunctional)
-    }
-}
-
-<#
-.SYNOPSIS
-    Tests whether an AppX/MSIX deployment error is the "a newer version is already installed"
-    downgrade rejection (0x80073D06).
-.DESCRIPTION
-    Repair-WinGetPackageManager deploys the framework dependencies pinned to the WinGet release it
-    installs (Microsoft.WindowsAppRuntime, VCLibs, UI.Xaml). When the machine already carries a
-    NEWER build of one of them - routine on managed fleets, where Teams / Phone Link / an MDM push
-    updates WindowsAppRuntime independently - AppX rejects the downgrade with 0x80073D06
-    (ERROR_INSTALL_PACKAGE_DOWNGRADE) and the cmdlet aborts BEFORE it ever registers App Installer,
-    on a machine with nothing actually wrong with it. Callers still recover further down their
-    ladder, but only by paying for the heaviest rung they have (issue #265).
-
-    That failure is not retryable: -Force only makes the cmdlet more insistent about deploying the
-    older pinned build. Callers use this classifier to stop escalating and move to their next
-    fallback instead.
-
-    The '0x80073d06' token is the load-bearing part of the match - winget and AppX print the hex
-    HRESULT regardless of display language, so it survives locale and wording changes. The English
-    phrase is extra coverage only and, like the locale-dependency notes elsewhere in this module
-    (issues #177/#180), may stop matching if the wording changes.
-
-    See Test-AppxMissingFrameworkDependency below for the sibling classifier added for issue #279's
-    distinct 0x80073CF3 signature.
-.PARAMETER Message
-    The exception or error text to classify.
-.RETURNS
-    [bool] True when the text carries the downgrade-rejection signature.
-#>
-function Test-AppxDowngradeRejection {
-    param (
-        [Parameter(Mandatory = $true)]
-        [AllowEmptyString()]
-        [AllowNull()]
-        [string]$Message
-    )
-
-    if ([string]::IsNullOrWhiteSpace($Message)) {
-        return $false
-    }
-
-    return [bool]($Message -match '0x80073d06|higher version of this package is already installed')
-}
-
-<#
-.SYNOPSIS
-    Tests whether an AppX/MSIX deployment error is the "depends on a framework that could not
-    be found" conflict (0x80073CF3) seen on GitHub-hosted E2E runners (issue #279).
-.DESCRIPTION
-    Two independent GitHub-hosted `windows-latest` E2E runs hit a reproducible, non-transient AppX
-    deadlock: the runner image ships/stages a newer Microsoft.DesktopAppInstaller
-    (1.29.290.0) alongside the already-registered 1.26.510.0. The newer version cannot register
-    because it depends on a framework package (Microsoft.WindowsAppRuntime.1.8, minimum version
-    8000.616.304.0) that is not present on the image; the older version is then rejected because
-    AppX considers the newer, never-fully-registered one "already installed". Every subsequent
-    winget call in the job then fails against the same wedged state - including inside
-    Repair-WinGetPackageManager itself, which cannot recover it either.
-
-    Unlike Test-AppxDowngradeRejection's 0x80073D06, the 0x80073CF3 HRESULT is a broad "Package
-    failed updates, dependency or conflict validation" code reused for other, unrelated conflicts
-    (including the downgrade-rejection chain elsewhere in this file), so it is deliberately NOT
-    matched on its own. This classifier requires the HRESULT together with the missing-framework
-    phrasing (or the specific framework name this issue observed) before reporting the condition -
-    this keeps the classifier narrow to the one signature this issue actually reproduced, rather
-    than over-matching every 0x80073CF3.
-
-    This is diagnostic only: no amount of retrying repairs a framework that genuinely is not on
-    the machine, and this module does not attempt to install/repair
-    Microsoft.WindowsAppRuntime.1.8 itself (no verified redistributable URL, and it cannot be
-    tested from this Linux-developed repo). Callers use this classifier purely to fail fast with a
-    clear diagnostic instead of burning a retry budget against an external packaging gap.
-.PARAMETER Message
-    The exception or error text to classify.
-.RETURNS
-    [bool] True when the text carries the missing-framework-dependency signature.
-#>
-function Test-AppxMissingFrameworkDependency {
-    param (
-        [Parameter(Mandatory = $true)]
-        [AllowEmptyString()]
-        [AllowNull()]
-        [string]$Message
-    )
-
-    if ([string]::IsNullOrWhiteSpace($Message)) {
-        return $false
-    }
-
-    if ($Message -notmatch '0x80073cf3') {
-        return $false
-    }
-
-    return [bool]($Message -match 'depends on a framework that could not be found|Microsoft\.WindowsAppRuntime\.1\.8')
-}
-
-<#
-.SYNOPSIS
-    Registers the App Installer (winget) MSIX already staged on this machine for the current account.
-.DESCRIPTION
-    The winget CLI is delivered by the Microsoft.DesktopAppInstaller MSIX package, which is
-    registered PER USER. When the installer runs elevated as a different admin account than the
-    logged-on user - the cross-user elevation this module already handles for sources and agreements
-    (issues #104/#150/#159) - that account has no registration and therefore no
-    %LOCALAPPDATA%\Microsoft\WindowsApps\winget.exe alias, even though the machine plainly has a
-    working winget for the interactive user.
-
-    Registering the payload that is ALREADY on disk is the cheapest fix for that case: no download,
-    no framework dependency deployment, and therefore none of the 0x80073D06 downgrade rejections
-    that abort Repair-WinGetPackageManager on a machine carrying a newer WindowsAppRuntime
-    (issue #265). That is why callers try this BEFORE the repair cmdlet, not after it.
-
-    Two registration forms are attempted, in order:
-      1. -RegisterByFamilyName, which needs only the package family name.
-      2. -Register against the AppXManifest.xml under each candidate's InstallLocation, which also
-         covers a package staged on the machine but never registered for this account.
-
-    Get-AppxPackage/Add-AppxPackage are used from pwsh here, as they already are elsewhere in this
-    module (Test-AndInstallWinget, Test-WindowsTerminalInstalled). The Appx cmdlet known to be
-    unreliable under PowerShell 7 is the DISM-backed Add-AppxProvisionedPackage, which
-    Invoke-AppxProvisioning delegates to Windows PowerShell 5.1 for that reason; the per-user
-    registration cmdlets used here are not affected.
-.RETURNS
-    [bool] True when a registration call completed without error, otherwise False. Callers re-check
-    winget availability themselves - a successful registration is not proof the alias resolved.
-#>
-function Register-WingetAppInstallerForUser {
-    $familyName = 'Microsoft.DesktopAppInstaller_8wekyb3d8bbwe'
-
-    # -AllUsers requires elevation (which the installer already has) and is what surfaces a package
-    # staged on the machine but not registered for THIS account - precisely the case this helper
-    # exists for. Fall back to the current-user view if it is refused, so a non-elevated or
-    # policy-restricted run degrades instead of erroring out.
-    $candidates = @()
+function Get-WingetPolicyBlock {
     try {
-        $candidates = @(Get-AppxPackage -Name 'Microsoft.DesktopAppInstaller' -AllUsers -ErrorAction Stop)
+        $values = Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\AppInstaller' -ErrorAction Stop
     }
     catch {
-        try {
-            $candidates = @(Get-AppxPackage -Name 'Microsoft.DesktopAppInstaller' -ErrorAction Stop)
-        }
-        catch {
-            Write-WarningMessage "Could not enumerate the App Installer package: $_"
-            return $false
-        }
+        # No such key: nothing is configured.
+        return $null
     }
 
-    if ($candidates.Count -eq 0) {
-        Write-Info 'App Installer is not staged on this machine; there is nothing to register for this account.'
-        return $false
+    $policies = [ordered]@{
+        EnableAppInstaller                               = 'Enable App Installer'
+        EnableWindowsPackageManagerCommandLineInterfaces = 'Enable Windows Package Manager command line interfaces'
+        EnableDefaultSource                              = 'Enable App Installer Default Source'
+    }
+    foreach ($name in $policies.Keys) {
+        $value = $values.$name
+        if ($null -ne $value -and "$value" -eq '0') {
+            return [pscustomobject]@{ Name = $name; Policy = $policies[$name] }
+        }
+    }
+    return $null
+}
+
+<#
+.SYNOPSIS
+    Returns the AppX deployment HRESULT (0x80073xxx) an Appx or WinGet cmdlet failed with, or $null.
+.DESCRIPTION
+    Review finding P3-27. Reads the HResult of the exception and of each inner exception first. When
+    none is an AppX deployment code, the hex form in the message ('HRESULT: 0x80073CF3', which
+    Windows prints the same in every display language) is used. The codes that matter here:
+      0x80073CF3 ERROR_INSTALL_RESOLVE_DEPENDENCY_FAILED  a framework App Installer needs is missing
+                                                          (issue #279: Microsoft.WindowsAppRuntime.1.8)
+      0x80073D06 ERROR_INSTALL_PACKAGE_DOWNGRADE          a newer version of a package is already
+                                                          installed (issue #265)
+.PARAMETER ErrorRecord
+    The ErrorRecord (or exception) the cmdlet failed with.
+.RETURNS
+    [int] or $null.
+#>
+function Get-AppxErrorCode {
+    param (
+        [Parameter(Mandatory = $true)]
+        [AllowNull()]
+        [object]$ErrorRecord
+    )
+
+    $exception = $ErrorRecord
+    if ($ErrorRecord -is [System.Management.Automation.ErrorRecord]) {
+        $exception = $ErrorRecord.Exception
+    }
+    while ($exception -is [System.Exception]) {
+        if (('0x{0:X8}' -f $exception.HResult).StartsWith('0x80073')) {
+            return [int]$exception.HResult
+        }
+        $exception = $exception.InnerException
     }
 
-    Write-Info 'Registering the App Installer package already on this machine for the current account...'
-    try {
-        Add-AppxPackage -RegisterByFamilyName -MainPackage $familyName -ErrorAction Stop
-        Write-Success 'App Installer registered for this account.'
+    $match = [regex]::Match("$ErrorRecord", '0x80073[0-9A-F]{3}', [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+    if ($match.Success) {
+        return [Convert]::ToInt32($match.Value.Substring(2), 16)
+    }
+    return $null
+}
+
+<#
+.SYNOPSIS
+    Makes Repair-WinGetPackageManager available, installing the Microsoft.WinGet.Client module when
+    it is missing.
+.DESCRIPTION
+    Called only by the repair rung, so a run whose winget works never installs the module (review
+    finding P3-26: every fresh PC used to install the NuGet provider and the module from the
+    PowerShell Gallery for a repair that rarely runs, and warned about an update feature that no
+    longer exists when the Gallery was blocked). The module is installed for all users from the
+    PowerShell Gallery only (review finding P3-20): this runs elevated, so no other repository
+    registered on the PC may serve it.
+.RETURNS
+    [bool] True when Repair-WinGetPackageManager can be called.
+#>
+function Test-AndInstallWingetModule {
+    if (Get-Command Repair-WinGetPackageManager -ErrorAction SilentlyContinue) {
         return $true
     }
+
+    try {
+        Write-Info 'Installing the Microsoft.WinGet.Client module for all users from the PowerShell Gallery, for Repair-WinGetPackageManager...'
+        if (-not (Get-PackageProvider -Name NuGet -ErrorAction SilentlyContinue)) {
+            Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force -Scope AllUsers | Out-Null
+        }
+        Install-Module -Name Microsoft.WinGet.Client -Repository PSGallery -Scope AllUsers -Force -AllowClobber -ErrorAction Stop
+        Import-Module Microsoft.WinGet.Client -ErrorAction Stop
+    }
     catch {
-        Write-WarningMessage "Registering App Installer by family name failed: $_"
+        Write-WarningMessage "The Microsoft.WinGet.Client module could not be installed, so Repair-WinGetPackageManager cannot run: $_"
+        return $false
+    }
+    return [bool](Get-Command Repair-WinGetPackageManager -ErrorAction SilentlyContinue)
+}
+
+<#
+.SYNOPSIS
+    Registers the App Installer (winget) package already on this PC for the current account.
+.DESCRIPTION
+    winget comes with the Microsoft.DesktopAppInstaller package, which is registered per account. An
+    admin account elevating on a signed-in user's PC has none, although the PC has the package on
+    disk. Registering it needs no download and deploys no framework, so it cannot hit the 0x80073D06
+    rejection the repair cmdlet can (issue #265). Two forms are tried: -RegisterByFamilyName, then
+    -Register against each package's AppXManifest.xml.
+
+    The packages are listed with Get-DesktopAppInstallerPackageInfo (`Get-AppxPackage -AllUsers`),
+    which under PowerShell 7 runs in Windows PowerShell: there the Appx module always loads, while
+    under PowerShell 7 on Windows Server 2022 and older Windows 10 builds it fails with 0x80131539,
+    which used to end this step before it registered anything (review finding P3-29).
+
+    The AppX codes the registrations fail with (Get-AppxErrorCode) are returned, so the caller can
+    tell a missing framework (0x80073CF3) or a downgrade rejection (0x80073D06) from other failures
+    (review finding P3-27: these codes appear here, not in Repair-WinGetPackageManager's error).
+.RETURNS
+    [pscustomobject] Registered ([bool]: a registration call completed; winget is checked by the
+    caller) and ErrorCodes ([int[]]).
+#>
+function Register-WingetAppInstallerForUser {
+    $codes = @()
+    try {
+        $candidates = @(Get-DesktopAppInstallerPackageInfo)
+    }
+    catch {
+        Write-WarningMessage "Could not list the App Installer packages on this PC: $_"
+        return [pscustomobject]@{ Registered = $false; ErrorCodes = $codes }
+    }
+    if ($candidates.Count -eq 0) {
+        Write-Info 'App Installer is not on this PC, so there is nothing to register for this account.'
+        return [pscustomobject]@{ Registered = $false; ErrorCodes = $codes }
     }
 
+    Write-Info 'Registering the App Installer package already on this PC for this account...'
+    $registrations = @(@{ Label = 'by family name'; Parameters = @{ RegisterByFamilyName = $true; MainPackage = 'Microsoft.DesktopAppInstaller_8wekyb3d8bbwe' } })
     foreach ($candidate in $candidates) {
-        if (-not $candidate.InstallLocation) { continue }
+        if ([string]::IsNullOrWhiteSpace($candidate.InstallLocation)) { continue }
         $manifest = Join-Path $candidate.InstallLocation 'AppXManifest.xml'
-        if (-not (Test-Path $manifest)) { continue }
-
+        if (Test-Path -LiteralPath $manifest) {
+            $registrations += @{ Label = "from $manifest"; Parameters = @{ Path = $manifest; Register = $true; DisableDevelopmentMode = $true } }
+        }
+    }
+    foreach ($registration in $registrations) {
+        $parameters = $registration.Parameters
         try {
-            # -Path is passed by name: -Register is a switch, so `-Register $manifest` would bind
-            # the manifest positionally and read as though it were the switch's argument.
-            Add-AppxPackage -Path $manifest -Register -DisableDevelopmentMode -ErrorAction Stop
-            Write-Success "App Installer registered for this account from $($candidate.InstallLocation)."
-            return $true
+            Add-AppxPackage @parameters -ErrorAction Stop
+            Write-Success "App Installer registered for this account ($($registration.Label))."
+            return [pscustomobject]@{ Registered = $true; ErrorCodes = $codes }
         }
         catch {
-            Write-WarningMessage "Registering App Installer from '$manifest' failed: $_"
+            $code = Get-AppxErrorCode -ErrorRecord $_
+            if ($null -ne $code) { $codes += $code }
+            Write-WarningMessage "Registering App Installer $($registration.Label) failed: $_"
         }
     }
+    return [pscustomobject]@{ Registered = $false; ErrorCodes = $codes }
+}
 
+<#
+.SYNOPSIS
+    Runs Repair-WinGetPackageManager: for all users first when the framework App Installer needs is
+    missing, then for this account, unforced and then forced.
+.DESCRIPTION
+    -AllUsers (review finding P3-28) installs App Installer for the whole PC with the frameworks it
+    depends on, which is what the cmdlet itself asks for when Microsoft.WindowsAppRuntime.1.8 is
+    missing ('Try running with -AllUsers in administrator mode'). It runs only then: on a PC whose
+    framework is newer than the one the WinGet release pins, it aborts with 0x80073D06 (issue #265).
+    -Force is tried only after an unforced failure the classifier cannot name: a missing framework
+    (0x80073CF3) or a downgrade rejection (0x80073D06) fails the same way however hard it is
+    pushed, and each attempt downloads App Installer again. The module is installed here, when it is
+    first needed (Test-AndInstallWingetModule).
+.PARAMETER AllUsersFirst
+    Microsoft.WindowsAppRuntime.1.8 is missing for this PC (Get-WindowsAppRuntimeStatus).
+.RETURNS
+    [pscustomobject] Available ([bool]: the cmdlet could be called), Succeeded ([bool]: an attempt
+    completed; the caller checks winget itself) and ErrorCodes ([int[]], the AppX codes seen).
+#>
+function Invoke-WingetPackageManagerRepair {
+    param (
+        [Parameter(Mandatory = $false)]
+        [switch]$AllUsersFirst
+    )
+
+    $codes = @()
+    if (-not (Test-AndInstallWingetModule)) {
+        return [pscustomobject]@{ Available = $false; Succeeded = $false; ErrorCodes = $codes }
+    }
+
+    $attempts = @()
+    if ($AllUsersFirst) {
+        $attempts += @{ Label = '-AllUsers -Latest'; Parameters = @{ AllUsers = $true; Latest = $true } }
+    }
+    $attempts += @{ Label = '-Latest'; Parameters = @{ Latest = $true } }
+    $attempts += @{ Label = '-Latest -Force'; Parameters = @{ Latest = $true; Force = $true } }
+    foreach ($attempt in $attempts) {
+        $parameters = $attempt.Parameters
+        Write-Info "Running Repair-WinGetPackageManager $($attempt.Label)..."
+        try {
+            Repair-WinGetPackageManager @parameters -ErrorAction Stop
+            return [pscustomobject]@{ Available = $true; Succeeded = $true; ErrorCodes = $codes }
+        }
+        catch {
+            Write-WarningMessage "Repair-WinGetPackageManager $($attempt.Label) failed: $_"
+            $code = Get-AppxErrorCode -ErrorRecord $_
+            if ($null -ne $code) {
+                $codes += $code
+                # 0x80073CF3 and 0x80073D06: retrying, forced or not, fails the same way.
+                if (@(-2147009293, -2147009274) -contains $code) {
+                    break
+                }
+            }
+        }
+    }
+    return [pscustomobject]@{ Available = $true; Succeeded = $false; ErrorCodes = $codes }
+}
+
+<#
+.SYNOPSIS
+    Runs the next fix that sets winget up for this account, if one is left; each runs once a run.
+.DESCRIPTION
+    Cheapest first: register the App Installer already on this PC (Register-WingetAppInstallerForUser),
+    then Repair-WinGetPackageManager (for all users first when the all-users check finds
+    Microsoft.WindowsAppRuntime.1.8 missing). A registration that fails moves straight on to the
+    repair. Initialize-Winget calls this in a loop, checking winget after each fix that ran.
+.PARAMETER State
+    The run's ladder state, which this updates: Registered, Repair, Framework and ErrorCodes.
+.RETURNS
+    [bool] True when a fix ran and winget should be checked again; False when none is left.
+#>
+function Invoke-NextWingetAccountFix {
+    param (
+        [Parameter(Mandatory = $true)]
+        [hashtable]$State
+    )
+
+    if (-not $State.ContainsKey('Registered')) {
+        $register = Register-WingetAppInstallerForUser
+        $State.Registered = [bool]$register.Registered
+        $State.ErrorCodes += @($register.ErrorCodes)
+        if ($State.Registered) {
+            return $true
+        }
+    }
+    if (-not $State.ContainsKey('Repair')) {
+        $State.Framework = Get-WindowsAppRuntimeStatus
+        $State.Repair = Invoke-WingetPackageManagerRepair -AllUsersFirst:($State.Framework.Present -eq $false)
+        $State.ErrorCodes += @($State.Repair.ErrorCodes)
+        return [bool]$State.Repair.Available
+    }
     return $false
 }
 
 <#
 .SYNOPSIS
-    Runs Repair-WinGetPackageManager, unforced first, and reports a 0x80073D06 rejection distinctly.
-.DESCRIPTION
-    Shared wrapper for the two places that bootstrap winget through the WinGet PowerShell module
-    (Test-AndInstallWinget and Initialize-WingetSourcesForUser), so the retry and error-classification
-    policy cannot diverge between them - the same reasoning that made Test-WingetSourceHealth shared
-    in issue #177.
-
-    The unforced attempt runs first so the cmdlet can skip framework dependencies that are already
-    present at an equal or newer version. -Force is still attempted afterwards, because it remains
-    the documented remedy for a genuinely broken or partial App Installer registration
-    (learn.microsoft.com/windows/package-manager/winget/troubleshooting) - but only when the unforced
-    pass failed for some OTHER reason. A 0x80073D06 downgrade rejection short-circuits immediately:
-    -Force cannot help, and retrying would burn a second multi-hundred-megabyte download before
-    failing the same way (issue #265).
-
-    A 0x80073CF3 missing-framework-dependency rejection (issue #279) short-circuits the same way and
-    for the same reason: no framework genuinely missing from the machine/runner image appears just
-    because -Force asked more insistently, so retrying only spends the extra attempt to reach the
-    identical failure.
+    Returns the one line that says how to fix what the ladder could not, from what it saw.
+.PARAMETER State
+    The ladder state (Invoke-NextWingetAccountFix).
+.PARAMETER Account
+    Who the run installs as: the account name, or 'SYSTEM'.
+.PARAMETER Source
+    The winget source could not be set up. Without it, the advice is for a winget that cannot be
+    started.
+.PARAMETER SourceExitCode
+    The source check's exit code, if it ran to the end.
 .RETURNS
-    [hashtable] @{ Available = <bool>; Succeeded = <bool>; DowngradeRejected = <bool>;
-    MissingFrameworkDependency = <bool>; Message = <string> }
-    Available is False when the Microsoft.WinGet.Client module is missing, in which case no repair
-    was attempted. Succeeded means a repair call completed without throwing - callers still verify
-    the outcome themselves (winget on PATH, or a source probe).
+    [string]
 #>
-function Invoke-WingetPackageManagerRepair {
-    if (-not (Get-Command Repair-WinGetPackageManager -ErrorAction SilentlyContinue)) {
-        return @{ Available = $false; Succeeded = $false; DowngradeRejected = $false; MissingFrameworkDependency = $false; Message = '' }
-    }
+function Get-WingetSetupAdvice {
+    param (
+        [Parameter(Mandatory = $true)]
+        [hashtable]$State,
 
-    $lastMessage = ''
-    foreach ($useForce in @($false, $true)) {
-        try {
-            if ($useForce) {
-                Repair-WinGetPackageManager -Latest -Force -ErrorAction Stop
-            }
-            else {
-                Repair-WinGetPackageManager -Latest -ErrorAction Stop
-            }
+        [Parameter(Mandatory = $true)]
+        [string]$Account,
 
-            return @{ Available = $true; Succeeded = $true; DowngradeRejected = $false; MissingFrameworkDependency = $false; Message = '' }
+        [Parameter(Mandatory = $false)]
+        [switch]$Source,
+
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [Nullable[int]]$SourceExitCode
+    )
+
+    if ($Source) {
+        if ($SourceExitCode -eq -2147009255 -and $Account -eq 'SYSTEM') {
+            return 'The steps that set winget up for a signed-in account do not apply to SYSTEM; if the installs fail, run the installer once as an administrator signed in to this PC.'
         }
-        catch {
-            $lastMessage = "$_"
-
-            if (Test-AppxDowngradeRejection -Message $lastMessage) {
-                Write-WarningMessage 'Repair-WinGetPackageManager was rejected (0x80073D06): this machine already has a newer framework dependency than the WinGet release pins. That is a WinGet packaging conflict, not a fault on this machine.'
-                return @{ Available = $true; Succeeded = $false; DowngradeRejected = $true; MissingFrameworkDependency = $false; Message = $lastMessage }
-            }
-
-            if (Test-AppxMissingFrameworkDependency -Message $lastMessage) {
-                Write-WarningMessage 'Repair-WinGetPackageManager was rejected (0x80073CF3): App Installer depends on a framework package (Microsoft.WindowsAppRuntime.1.8) that is not present on this machine. That is an external packaging gap - see issue #279 - not something a repair retry can fix.'
-                return @{ Available = $true; Succeeded = $false; DowngradeRejected = $false; MissingFrameworkDependency = $true; Message = $lastMessage }
-            }
-
-            Write-WarningMessage "Repair-WinGetPackageManager failed: $lastMessage"
+        if ($SourceExitCode -eq -2147009255) {
+            return "Fix: sign in to Windows as '$Account' once (that sets winget up for the account), or run 'winget source update' in a session running as '$Account', then re-run the installer."
         }
+        return 'Fix: check that this PC can reach https://cdn.winget.microsoft.com, then re-run the installer.'
     }
+    if ($State.Framework -and $State.Framework.Present -eq $false) {
+        return "Fix: install the Microsoft.WindowsAppRuntime.1.8 framework App Installer depends on, which this PC lacks ($($State.Framework.Detail)), or let the Microsoft Store update App Installer, then re-run the installer (issue #279)."
+    }
+    if (@($State.ErrorCodes) -contains -2147009274) {
+        return 'Fix: a framework package on this PC is newer than the one the WinGet release deploys, so App Installer could not be repaired; update App Installer from the Microsoft Store on this PC, then re-run the installer.'
+    }
+    if ($State.Repair -and -not $State.Repair.Available) {
+        return 'Fix: install App Installer from the Microsoft Store or https://aka.ms/getwinget (Repair-WinGetPackageManager could not run: its PowerShell module could not be installed), then re-run the installer.'
+    }
+    return 'Fix: install or update App Installer from the Microsoft Store or https://aka.ms/getwinget, then re-run the installer.'
+}
 
-    return @{ Available = $true; Succeeded = $false; DowngradeRejected = $false; MissingFrameworkDependency = $false; Message = $lastMessage }
+<#
+.SYNOPSIS
+    Updates the winget source for the account running winget, which also registers it on first use.
+.DESCRIPTION
+    `winget source update --name winget --disable-interactivity`, the lightest command that makes
+    winget register its source package for an account that has never used it (on a cross-user
+    elevation that registration is what fails with 0x80073D19). Only the winget source: the
+    installs use no other, and msstore can fail for an account that never signed in while the winget
+    source is fine. No --accept-source-agreements: `source update` rejects it with 0x8A150002
+    (issues #174/#175); the installs accept the agreements. winget's output is echoed into the
+    transcript only when the update fails.
+.RETURNS
+    [hashtable] @{ Succeeded; ExitCode (or $null); TimedOut; LaunchError (or $null) }
+#>
+function Invoke-WingetSourceProbe {
+    $probe = Invoke-WingetProcess -ArgumentList @('source', 'update', '--name', 'winget', '--disable-interactivity') -TimeoutSeconds (Get-ProcessTimeoutSeconds -Operation WingetSourceUpdate) -Echo None
+    if ($probe.LaunchFailed) {
+        return @{ Succeeded = $false; ExitCode = $null; TimedOut = $false; LaunchError = $probe.LaunchError }
+    }
+    if ($probe.TimedOut -or $probe.ExitCode -ne 0) {
+        Write-ProcessOutput -Line $probe.Output -Tail 20
+    }
+    return @{
+        Succeeded   = (-not $probe.TimedOut -and $probe.ExitCode -eq 0)
+        ExitCode    = $probe.ExitCode
+        TimedOut    = [bool]$probe.TimedOut
+        LaunchError = $null
+    }
+}
+
+<#
+.SYNOPSIS
+    Runs `winget source reset --force` and says whether it worked, with its exit code when not.
+.DESCRIPTION
+    The fix for a missing or corrupted winget source. It also removes any source added beyond the
+    defaults. No --accept-source-agreements: `source reset` rejects it with 0x8A150002, so the reset
+    used to never run.
+.RETURNS
+    [bool]
+#>
+function Reset-WingetSource {
+    Write-Info 'Resetting the winget source (winget source reset --force)...'
+    $reset = Invoke-WingetProcess -ArgumentList @('source', 'reset', '--force', '--disable-interactivity') -TimeoutSeconds (Get-ProcessTimeoutSeconds -Operation WingetSourceReset)
+    if ($reset.LaunchFailed) {
+        Write-WarningMessage "Winget source reset failed: $($reset.LaunchError)"
+    }
+    elseif ($reset.TimedOut) {
+        Write-WarningMessage 'Winget source reset failed: it did not finish in time and was stopped.'
+    }
+    elseif ($reset.ExitCode -ne 0) {
+        Write-WarningMessage ('Winget source reset failed with exit code {0}.' -f (Format-WingetExitCode -ExitCode $reset.ExitCode))
+    }
+    else {
+        Write-Info 'Source reset completed.'
+        return $true
+    }
+    return $false
 }
 
 # --- WingetLaunchResilience ---
@@ -5593,9 +5573,11 @@ function Resolve-WingetExecutable {
     (STATUS_DLL_NOT_FOUND): the Windows loader could not find a DLL winget.exe needs, which stays
     so until that DLL is installed. A machine-wide winget.exe started as SYSTEM fails this way on a
     PC without the Visual C++ runtime, and checking it again only made every such run wait 75
-    seconds before trying the next one (review of finding P2-24).
+    seconds before trying the next one (review of finding P2-24). And so is 0x8A15003A
+    (BLOCKED_BY_POLICY): Group Policy turned winget off, which no wait changes (review finding
+    P3-30).
 
-    Used by Test-AndInstallWinget (is winget usable before the run), by Invoke-WingetInstall's
+    Used by Initialize-Winget (is winget usable before the run), by Invoke-WingetInstall's
     circuit breaker (after an app could not launch winget) and end-of-run check, and by
     e2e/Assert-Install.ps1. It replaced Wait-WingetLaunchable, whose multi-minute polling and
     consecutive-success streaks existed only to survive the Winget-AutoUpdate run the installer
@@ -5608,7 +5590,8 @@ function Resolve-WingetExecutable {
     Seconds to wait between checks. Default 10.
 .RETURNS
     [pscustomobject] with Launchable ([bool]), Version (the version winget printed, or $null),
-    Reason (why it is not launchable, for a message; $null when it is) and Attempts (checks made).
+    Reason (why it is not launchable, for a message; $null when it is), ExitCode (the last check's
+    exit code; $null when winget did not start or did not finish) and Attempts (checks made).
 #>
 function Test-WingetLaunchable {
     param (
@@ -5622,8 +5605,9 @@ function Test-WingetLaunchable {
     )
 
     $timeoutSeconds = Get-ProcessTimeoutSeconds -Operation WingetVersion
-    # 0xC0000135 STATUS_DLL_NOT_FOUND, as the signed Int32 a process exit code is.
-    $dllNotFoundExitCode = -1073741515
+    # 0xC0000135 STATUS_DLL_NOT_FOUND and 0x8A15003A BLOCKED_BY_POLICY, as the signed Int32 a
+    # process exit code is: neither changes by waiting.
+    $finalExitCodes = @(-1073741515, -1978335174)
     $reason = $null
     $run = $null
     for ($attempt = 1; $attempt -le $Attempts; $attempt++) {
@@ -5638,14 +5622,14 @@ function Test-WingetLaunchable {
         }
         elseif ($run.ExitCode -ne 0) {
             $reason = "'winget --version' exited with {0}" -f (Format-WingetExitCode -ExitCode $run.ExitCode)
-            if ($run.ExitCode -eq $dllNotFoundExitCode) {
+            if ($finalExitCodes -contains $run.ExitCode) {
                 $retryable = $false
             }
         }
         else {
             $versionLine = @($run.StandardOutput | ForEach-Object { "$_".Trim() } | Where-Object { $_ -match '^v\d' }) | Select-Object -First 1
             if ($versionLine) {
-                return [pscustomobject]@{ Launchable = $true; Version = $versionLine; Reason = $null; Attempts = $attempt }
+                return [pscustomobject]@{ Launchable = $true; Version = $versionLine; Reason = $null; ExitCode = 0; Attempts = $attempt }
             }
             $reason = "'winget --version' printed no version"
         }
@@ -5661,7 +5645,7 @@ function Test-WingetLaunchable {
     if ($run -and -not $run.LaunchFailed -and @($run.Output).Count -gt 0) {
         Write-ProcessOutput -Line $run.Output -Tail 10
     }
-    return [pscustomobject]@{ Launchable = $false; Version = $null; Reason = $reason; Attempts = [Math]::Min($attempt, $Attempts) }
+    return [pscustomobject]@{ Launchable = $false; Version = $null; Reason = $reason; ExitCode = $run.ExitCode; Attempts = [Math]::Min($attempt, $Attempts) }
 }
 
 # --- WingetResultCodes ---
@@ -5692,6 +5676,8 @@ function Test-WingetLaunchable {
       RestartRequired       The package installed, and a restart finishes it (MSI 3010 on winget
                             1.6 and older, which newer winget reports as exit 0 with a warning), or
                             the installer started a restart itself (MSI 1641).
+      SourceBroken          The winget source is missing or its data is corrupted.
+                            Initialize-Winget runs `winget source reset --force` for it.
       (empty)               Named for the reader only; no special handling.
 .PARAMETER ExitCode
     The exit code as winget reports it (a signed Int32), or $null.
@@ -5753,17 +5739,24 @@ function Get-WingetExitCodeInfo {
         '0x8A150001' = @('INTERNAL_ERROR', 'winget hit an internal error', '')
         '0x8A150002' = @('INVALID_CL_ARGUMENTS', 'winget rejected its command line', '')
         '0x8A150003' = @('COMMAND_FAILED', 'the winget command failed', '')
-        '0x8A15000F' = @('SOURCE_DATA_MISSING', 'the winget source data is missing', '')
+        '0x8A15000B' = @('SOURCES_INVALID', 'the configured winget sources are corrupted', 'SourceBroken')
+        '0x8A15000F' = @('SOURCE_DATA_MISSING', 'the winget source data is missing', 'SourceBroken')
+        '0x8A150012' = @('SOURCE_NAME_DOES_NOT_EXIST', 'the winget source is not configured', 'SourceBroken')
         '0x8A150014' = @('NO_APPLICATIONS_FOUND', 'winget found no package with that id', '')
+        '0x8A150015' = @('NO_SOURCES_DEFINED', 'no winget source is configured', 'SourceBroken')
         '0x8A150019' = @('COMMAND_REQUIRES_ADMIN', 'the winget command needs administrator rights', '')
         '0x8A15003A' = @('BLOCKED_BY_POLICY', 'winget is disabled by Group Policy on this PC', '')
-        '0x8A15003F' = @('SOURCE_DATA_INTEGRITY_FAILURE', 'the winget source data is corrupted', '')
+        '0x8A15003F' = @('SOURCE_DATA_INTEGRITY_FAILURE', 'the winget source data is corrupted', 'SourceBroken')
         '0x8A150045' = @('SOURCE_OPEN_FAILED', 'the winget source could not be opened', '')
         '0x8A15004B' = @('FAILED_TO_OPEN_ALL_SOURCES', 'one or more winget sources could not be opened', '')
         '0x8A150056' = @('INSTALLER_PROHIBITS_ELEVATION', 'the installer cannot run as administrator', '')
         '0x8A15007D' = @('ADMIN_CONTEXT_ACTION_PROHIBITED', 'not permitted as administrator on a package installed for one user', '')
         # Windows HRESULTs winget passes through as its exit code.
         '0x80073D19' = @('ERROR_DEPLOYMENT_BLOCKED_BY_USER_LOG_OFF', 'the installing account has no logon session, so Windows blocked the app package deployment', '')
+        # App package deployment errors seen when App Installer is registered or repaired (issues
+        # #265, #279).
+        '0x80073CF3' = @('ERROR_INSTALL_RESOLVE_DEPENDENCY_FAILED', 'a package it depends on, such as a framework, is missing', '')
+        '0x80073D06' = @('ERROR_INSTALL_PACKAGE_DOWNGRADE', 'a higher version of the package is already installed', '')
         # winget maps this to 0x8A150101 for MSIX installs, so it is named here but not retried.
         '0x80073D02' = @('ERROR_PACKAGES_IN_USE', 'the app is running - close it, then re-run the installer', '')
         '0x80004004' = @('E_ABORT', 'the operation was cancelled or stopped', '')
@@ -6269,8 +6262,9 @@ function Restart-WithElevation {
 .NOTES
     Exit codes: 0 = success, 1 = one or more apps failed to install (including the apps marked
     failed when winget could no longer be launched mid-run), 2 = winget unavailable (at the start,
-    where `winget --version` must run and print a version, or no longer launchable at the end of
-    the run), 3 = app-definition validation failed or no valid apps remain, 4 = administrator rights
+    where `winget --version` must run and print a version, or Group Policy turns winget or its
+    source off; or no longer launchable at the end of the run), 3 = app-definition validation
+    failed or no valid apps remain, 4 = administrator rights
     are required and the run was not elevated: the UAC prompt was declined or could not be shown, a
     non-interactive run (nobody to approve a prompt, so none is shown), irm | iex, or the imported
     module (review finding P2-12), 3010 = success, but a restart is required to finish (an install
@@ -6338,7 +6332,6 @@ function Invoke-WingetInstall {
                 # and (b) — if the flag were ever dropped across the elevation boundary —
                 # silently turn a dry run into a real install. Stay in the current session and
                 # continue the preview.
-                Write-Info '[DRY-RUN] Would run winget source update --name winget to bootstrap the source in user context'
                 Write-Info '[DRY-RUN] Would relaunch with administrator privileges. Continuing the preview in the current (non-elevated) session; no system changes will be made.'
             }
         }
@@ -6368,28 +6361,11 @@ function Invoke-WingetInstall {
             return 4
         }
         else {
-            # Trigger the winget source's per-user first-use bootstrap in the user context before
-            # elevating. Agreements are per-user and won't carry into the elevated process. Scoped
-            # to --name winget — the only source this tool installs from — so it never triggers
-            # msstore's agreement/first-use handshake, which fails in non-interactive/cross-user
-            # contexts (issue #172).
+            # No winget call before elevating: the elevated run sets winget up for the account it
+            # runs as (Initialize-Winget). A source update here set up the signed-in user's source,
+            # which under cross-user elevation is not the account that installs, and was a fourth
+            # source probe in the run (review finding P3-25).
             #
-            # --disable-interactivity (issue #230): this used to run bare, on purpose, to surface
-            # winget's agreement prompt "while we still have the normal user's identity" - and
-            # -Wait meant an unattended run sat on that prompt forever. It was never load-bearing:
-            # the result is discarded, so nothing here acts on the answer either way. The agreement
-            # is accepted where it actually counts - every install passes
-            # --accept-source-agreements, and the elevated Initialize-WingetSourcesForUser re-probes
-            # and bootstraps the installing account via Repair-WinGetPackageManager (issue #159).
-            #
-            # Invoke-WingetSourceProbe (WingetBootstrap.ps1) wraps this command in a timeout guard,
-            # so a corrupted or unreachable source cannot block the run before elevation. Capped at
-            # 30s (well under the probe's own 120s default): the return value is discarded — this
-            # call remains best-effort — and Initialize-WingetSourcesForUser re-probes for real
-            # after elevation.
-            Write-Info 'Updating the winget source...'
-            [void](Invoke-WingetSourceProbe -TimeoutSeconds 30)
-
             # No "press Enter to elevate" pause (issue #230): the UAC dialog the relaunch raises is
             # the actual consent gate.
             Write-ErrorMessage 'This script requires administrator privileges. Restarting with elevated privileges...'
@@ -6427,7 +6403,7 @@ function Invoke-WingetInstall {
     # an RMM agent such as Endpoint Central, or an admin account elevating on a signed-in user's PC.
     # Either way the run installs for the whole PC only, so an app whose package has no machine-wide
     # installer is deferred instead of being installed for the wrong account. A SYSTEM run uses the
-    # machine-wide winget.exe (Test-AndInstallWinget finds it), which Resolve-WingetExecutable
+    # machine-wide winget.exe (Initialize-Winget finds it), which Resolve-WingetExecutable
     # returns from then on; a stale path from an earlier run in this session is dropped first.
     $script:MachineWingetPath = $null
     $account = Get-InstallAccountContext
@@ -6452,41 +6428,6 @@ function Invoke-WingetInstall {
         Write-WarningMessage ('A restart is already pending on this PC ({0}). An installer that needs a restart first fails with 0x8A15010A; if one does, restart this PC and re-run the installer.' -f ($restartPendingBefore -join '; '))
     }
 
-    # Ensure the WinGet PowerShell module is available before touching winget itself:
-    # Test-AndInstallWinget and Initialize-WingetSourcesForUser use Repair-WinGetPackageManager
-    # to bootstrap winget for accounts that have no interactive logon session (issue #159).
-    #
-    # A dry run passes -WhatIf to this and the other setup helpers below (winget, Out-GridView,
-    # sources): each then only probes and prints what a real run would change, and the dry run
-    # carries on with the preview whatever they find (P2-16: these used to install modules for all
-    # users, register or repair App Installer and reset winget's sources during a dry run). Their
-    # real-run warnings are skipped in a dry run, which never attempted the fix they report on.
-    #
-    # Not as SYSTEM (review finding P2-24): the module is only used for Repair-WinGetPackageManager,
-    # which sets winget up for one account. As SYSTEM it does nothing (and throws with -AllUsers),
-    # so installing the module from the PowerShell Gallery would be a download for nothing.
-    if ($account.IsSystem) {
-        Write-Info 'Skipping the Microsoft.WinGet.Client module: it only repairs winget for a signed-in account, which does not apply to SYSTEM.'
-    }
-    else {
-        $wingetModuleAvailable = Test-AndInstallWingetModule -WhatIf:$WhatIf
-        if (-not $wingetModuleAvailable -and -not $WhatIf) {
-            Write-Warning 'Microsoft.WinGet.Client module is not available. Update functionality will use fallback CLI methods.'
-        }
-
-        # Import required modules (a dry run imports it only when it is already installed)
-        if ($wingetModuleAvailable -or -not $WhatIf) {
-            try {
-                Import-Module Microsoft.WinGet.Client -ErrorAction Stop
-                Write-Success 'Successfully imported Microsoft.WinGet.Client module'
-            }
-            catch {
-                Write-Warning "Failed to import Microsoft.WinGet.Client module: $_"
-                Write-Warning 'Update functionality will use fallback CLI methods'
-            }
-        }
-    }
-
     # Let a Winget-AutoUpdate run that is already in progress finish first (bounded): it
     # re-provisions App Installer, resets winget's sources and runs MSI upgrades, and racing it makes
     # healthy apps fail with launch errors or 'another installation is in progress'. Read-only, but
@@ -6495,38 +6436,21 @@ function Invoke-WingetInstall {
         [void](Wait-WauIdle)
     }
 
-    # Check if winget is available and install if necessary. A dry run without winget carries on:
-    # a real run would bootstrap it first (Test-AndInstallWinget says how), so stopping here would
-    # misreport the very machine a dry run is used to preview (cross-user elevation, issue #265).
-    # As SYSTEM this finds and checks the machine-wide winget.exe instead of setting winget up for
-    # an account (review finding P2-24).
-    $wingetAvailable = Test-AndInstallWinget -WhatIf:$WhatIf -SystemContext:$account.IsSystem
+    # Make winget usable for the account this run installs as: one probe, classify, fix ladder
+    # (review finding P3-25; as SYSTEM it finds the machine-wide winget.exe, P2-24). It stops the run
+    # with exit code 2 when winget cannot be started or Group Policy turns it off. A dry run only
+    # probes (P2-16) and carries on whatever it finds: a real run would set winget up first, so
+    # stopping here would misreport the very machine a dry run previews (cross-user elevation,
+    # issue #265).
+    $winget = Initialize-Winget -WhatIf:$WhatIf -AccountContext $account
+    $wingetAvailable = [bool]$winget.Ready
     if (-not $wingetAvailable -and -not $WhatIf) {
         Write-ErrorMessage 'Winget is required for this script. Exiting.'
         return 2
     }
 
-    # Initialize winget sources and agreements for the account performing the installs. This is
-    # what prevents 0x80073d19 when the script is elevated as a different account than the
-    # logged-on user (issues #104/#150, #159).
-    [void](Initialize-WingetSourcesForUser -WhatIf:$WhatIf -AccountContext $account)
-
     if (-not (Test-AndInstallGraphicalTools -WhatIf:$WhatIf) -and -not $WhatIf) {
         Write-Warning 'Out-GridView will be unavailable; results will be displayed in text mode only.'
-    }
-
-    # Verify winget sources are accessible and auto-repair if broken
-    if (-not $wingetAvailable) {
-        # Only a dry run gets here without winget (a real run returned 2 above).
-        if ($account.IsSystem) {
-            Write-Info '[DRY-RUN] Skipping the winget source check: no machine-wide winget could be started, so a real run would already have stopped with exit code 2.'
-        }
-        else {
-            Write-Info '[DRY-RUN] Skipping the winget source check: winget is not available for this account yet. A real run checks the source once winget is bootstrapped, and repairs it if needed.'
-        }
-    }
-    elseif (-not (Test-WingetSources -WhatIf:$WhatIf -SystemContext:$account.IsSystem) -and -not $WhatIf) {
-        Write-WarningMessage 'Winget sources could not be repaired. Some installations may fail.'
     }
 
     # Migrate away from the old homegrown scheduled-update task if a prior version installed one;
@@ -6587,8 +6511,8 @@ function Invoke-WingetInstall {
     $deferredApps = @()
 
     # No separate source-trust pass here: only the winget community source is used (every install
-    # forces --source winget), and its health was already verified — and repaired if needed — by
-    # Test-WingetSources above (issues #172, #177).
+    # forces --source winget), and Initialize-Winget above already updated it, and repaired it if
+    # needed (issues #172, #177).
 
     # Run-level circuit breaker (review findings P2-8, P2-10). Set once an app could not launch
     # winget and a follow-up check (Invoke-WingetLaunchCircuitBreaker) found that winget still
@@ -7948,363 +7872,55 @@ function Remove-LegacyScheduledUpdates {
 # --- WingetCore ---
 <#
 .SYNOPSIS
-    Ensures the Microsoft.WinGet.Client module is available, installing it if necessary.
+    Makes winget usable for this run: checks it, works out what is wrong, applies the fix for that,
+    and says in one line what could not be fixed.
 .DESCRIPTION
-    Checks for the module locally and attempts installation via PowerShell Gallery when missing, including ensuring the NuGet provider is present.
+    One ladder (review finding P3-25) in place of three that ran back to back and gave one cause
+    three diagnoses (Test-AndInstallWinget, Initialize-WingetSourcesForUser, Test-WingetSources),
+    plus a source update before elevation that only ever set up the signed-in user's source. Each
+    fix runs at most once per run.
+
+      1. Group Policy (Get-WingetPolicyBlock, review finding P3-30). When App Installer's policy
+         turns winget or its source off, no fix can help: the run stops with exit code 2 and names
+         the policy. So does a winget that answers 0x8A15003A BLOCKED_BY_POLICY.
+      2. Can winget start? `winget --version` must run and print a version (Test-WingetLaunchable).
+         A failure that can clear on its own (winget.exe locked during an App Installer update,
+         issues #253/#258) is checked for up to 75 seconds first, so an update in progress is not
+         repaired underneath. Then the account fixes run (Invoke-NextWingetAccountFix), each
+         followed by two checks 5 seconds apart: register the App Installer already on this PC for
+         this account (the cross-user elevation fix), then Repair-WinGetPackageManager. When winget
+         still cannot start, one line says why and what to do, and the run stops with exit code 2.
+      3. The winget source: `winget source update --name winget` (Invoke-WingetSourceProbe). Its
+         exit code picks the fix: 0x80073D19 (the account has no logon session, so Windows blocked
+         registering the source for it, issue #159) gets the account fixes that have not run; a
+         missing or corrupted source (class SourceBroken in Get-WingetExitCodeInfo) gets
+         `winget source reset --force`. A timeout, a network error or any other code gets none: no
+         repair fixes a network, and a slow proxy used to get App Installer replaced (review finding
+         P3-28). A source that still fails is reported in one line, and the run carries on: each
+         install then says why it failed.
+
+    As SYSTEM (review finding P2-24) step 2 is Test-MachineWingetAvailable, which finds and checks
+    the winget.exe App Installer installed for the PC, and no account fix runs: each sets winget up
+    for one account, which SYSTEM cannot have.
+
+    Two rungs were dropped. The aka.ms/getwinget download (review findings P3-25, P3-31: it also
+    used a fixed file name in %TEMP%) installed the bundle Repair-WinGetPackageManager -Latest
+    installs, but without the frameworks the bundle needs, and through the per-account deployment
+    that 0x80073D19 blocks under cross-user elevation; the run it once rescued (issue #265) is now
+    rescued by the registration rung. Registering cdn.winget.microsoft.com/cache/source.msix with
+    Add-AppxPackage was that same per-account deployment, which `winget source update` and
+    `winget source reset` make themselves.
 .PARAMETER WhatIf
-    Dry run: only checks whether the module is installed and, when it is not, prints what a real
-    run would install. Nothing is installed (P2-16: the dry run used to install the NuGet provider
-    and the module for all users).
-.RETURNS
-    [bool] True when the module is available (either already installed or installed successfully), otherwise False.
-    Under -WhatIf, True only when the module is already installed.
-#>
-function Test-AndInstallWingetModule {
-    param (
-        [Parameter(Mandatory = $false)]
-        [switch]$WhatIf
-    )
-
-    try {
-        if (Get-Module -ListAvailable -Name 'Microsoft.WinGet.Client') {
-            return $true
-        }
-
-        if ($WhatIf) {
-            Write-Info '[DRY-RUN] Microsoft.WinGet.Client module not found. A real run would install it for all users from the PowerShell Gallery, installing the NuGet package provider first if it is missing.'
-            return $false
-        }
-
-        Write-WarningMessage 'Microsoft.WinGet.Client module not found. Attempting installation...'
-
-        $nugetProvider = Get-PackageProvider -Name NuGet -ErrorAction SilentlyContinue
-        if (-not $nugetProvider) {
-            Write-WarningMessage 'NuGet package provider not found. Installing...'
-            Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force -Scope AllUsers | Out-Null
-        }
-
-        # -Repository PSGallery (review finding P3-20): this runs elevated and installs for all
-        # users, so only the PowerShell Gallery may serve it, never another repository registered
-        # on the machine. (Install-PackageProvider has no -Repository parameter: the NuGet
-        # provider comes from PackageManagement's bootstrap feed, and current PackageManagement
-        # versions ship it built in.)
-        Install-Module -Name Microsoft.WinGet.Client -Repository PSGallery -Scope AllUsers -Force -AllowClobber -ErrorAction Stop
-
-        $installedModule = Get-Module -ListAvailable -Name 'Microsoft.WinGet.Client' | Select-Object -First 1
-        if ($installedModule) {
-            if ($installedModule.Version) {
-                Write-Success "Microsoft.WinGet.Client module installed successfully (Version: $($installedModule.Version))"
-            }
-            else {
-                Write-Success 'Microsoft.WinGet.Client module installed successfully'
-            }
-            return $true
-        }
-
-        Write-Warning 'Microsoft.WinGet.Client module installation completed, but module is still not detected.'
-    }
-    catch {
-        Write-Warning "Failed to install Microsoft.WinGet.Client module: $_"
-    }
-
-    return $false
-}
-
-<#
-.SYNOPSIS
-    Checks if winget is available and attempts to install it if not.
-.DESCRIPTION
-    Verifies that winget can actually be started for the current account (Test-WingetLaunchable:
-    `winget --version` exits 0 and prints a version) and, when it cannot, works through a
-    cheapest-first bootstrap ladder (issue #265), re-checking the same way after each rung:
-
-      1. Register the Microsoft.DesktopAppInstaller package already staged on this machine for the
-         current account. No download and no framework dependency deployment, and it is the direct
-         fix for the cross-user elevation case where the machine has a working winget for the
-         interactive user but none for the elevating account.
-      2. Repair-WinGetPackageManager (unforced, then forced). Unlike a plain Add-AppxPackage this
-         registers App Installer even without an interactive logon session, where deployment is
-         otherwise blocked with 0x80073D19 (microsoft/winget-cli#3862, issue #159).
-      3. Download and register App Installer from aka.ms/getwinget.
-
-    Rung 1 comes first specifically because rung 2 can be blocked outright by a 0x80073D06
-    dependency downgrade rejection on a machine whose WindowsAppRuntime is newer than the WinGet
-    release pins - see Invoke-WingetPackageManagerRepair.
-
-    The checks used to be `Get-Command winget`, which only proves that the app-execution alias is
-    on PATH. After both repair attempts had failed, that still printed 'Winget bootstrapped
-    successfully', and every winget call afterwards failed (review finding P3-9). A winget that is
-    on PATH but cannot run now goes down the same ladder, and the run stops with exit code 2 when
-    no rung makes it start. A failure that can clear on its own (a locked winget.exe, a timeout, a
-    non-zero exit) is checked for up to 75 seconds before the first rung, so an App Installer
-    update in progress is not repaired underneath.
-
-    As SYSTEM none of the rungs can help, because all three set winget up for one account and SYSTEM
-    cannot have one (review finding P2-24). Test-MachineWingetAvailable runs instead: it finds the
-    winget.exe that App Installer installed for the machine and checks that it starts.
-.PARAMETER WhatIf
-    Dry run: only checks whether winget can be started (a read-only `winget --version`) and, when
-    it cannot, prints the bootstrap ladder a real run would work through. No rung runs (P2-16: the
-    dry run used to register or repair App Installer, or download and install it).
-.PARAMETER SystemContext
-    The run is SYSTEM. Invoke-WingetInstall passes what Get-InstallAccountContext found; when not
-    given, Test-IsSystemAccount decides.
-.RETURNS
-    [bool] True if winget can be started, at once or after a bootstrap rung, otherwise False.
-    Under -WhatIf, True only when winget can already be started.
-#>
-function Test-AndInstallWinget {
-    param (
-        [Parameter(Mandatory = $false)]
-        [switch]$WhatIf,
-
-        [Parameter(Mandatory = $false)]
-        [switch]$SystemContext
-    )
-
-    $isSystem = [bool]$SystemContext
-    if (-not $PSBoundParameters.ContainsKey('SystemContext')) {
-        $isSystem = [bool](Test-IsSystemAccount)
-    }
-    if ($isSystem) {
-        return (Test-MachineWingetAvailable -WhatIf:$WhatIf)
-    }
-
-    # Before the first rung: up to six checks 15 seconds apart when the failure can clear on its
-    # own (winget.exe locked by an antivirus scan or by an App Installer update in progress, issues
-    # #253/#258; a timeout; a non-zero exit). That is the 75 seconds Install-WingetPackage's launch
-    # retries cover. The rungs below re-register, repair or download App Installer, which must not
-    # run while a Store update of App Installer is still deploying. winget missing from PATH or
-    # 'Access is denied' goes to the rungs after one check: waiting does not change it.
-    # After a rung: two checks 5 seconds apart, for a package that was just registered.
-    $initialCheck = @{ Attempts = 6; RetryDelaySeconds = 15 }
-    $launchCheck = @{ Attempts = 2; RetryDelaySeconds = 5 }
-    $probe = Test-WingetLaunchable @initialCheck
-    if ($probe.Launchable) {
-        Write-Success "Winget is available ($($probe.Version))."
-        return $true
-    }
-    elseif ($WhatIf) {
-        Write-Info "[DRY-RUN] Winget is not available for this account ($($probe.Reason)). A real run would bootstrap it: register the App Installer package already on this machine for this account, then try Repair-WinGetPackageManager, then download App Installer from https://aka.ms/getwinget, and exit 2 if winget still cannot be started after that."
-        return $false
-    }
-    else {
-        # Register-WingetAppInstallerForUser narrates its own progress, so this only states the
-        # condition - saying "trying to register..." here too would duplicate its first line.
-        Write-WarningMessage "Winget is not available: $($probe.Reason)."
-        if (Register-WingetAppInstallerForUser) {
-            $probe = Test-WingetLaunchable @launchCheck
-            if ($probe.Launchable) {
-                Write-Success 'Winget is available after registering App Installer for this account.'
-                return $true
-            }
-            Write-WarningMessage "App Installer was registered but winget still cannot be started: $($probe.Reason)."
-        }
-
-        if (Get-Command Repair-WinGetPackageManager -ErrorAction SilentlyContinue) {
-            Write-WarningMessage 'Bootstrapping winget via Repair-WinGetPackageManager...'
-            [void](Invoke-WingetPackageManagerRepair)
-
-            # The repair result's own Succeeded flag is deliberately not trusted here: the cmdlet can
-            # report success without winget being able to start, so winget is started to check.
-            $probe = Test-WingetLaunchable @launchCheck
-            if ($probe.Launchable) {
-                Write-Success 'Winget bootstrapped successfully via Repair-WinGetPackageManager.'
-                return $true
-            }
-            Write-WarningMessage "Winget is present but cannot run after the repair attempt: $($probe.Reason). Falling back to App Installer download..."
-        }
-
-        Write-WarningMessage 'Winget is not available. Attempting to install Microsoft App Installer...'
-        try {
-            $url = 'https://aka.ms/getwinget'
-            $outFile = "$env:TEMP\Microsoft.DesktopAppInstaller.appxbundle"
-            Invoke-WebRequest -Uri $url -OutFile $outFile -UseBasicParsing
-            Add-AppxPackage $outFile
-            Remove-Item $outFile -ErrorAction SilentlyContinue
-
-            # Verify the registration actually made winget usable, like the Repair path above -
-            # Add-AppxPackage can complete without winget being able to start (issue #177).
-            $probe = Test-WingetLaunchable @launchCheck
-            if ($probe.Launchable) {
-                Write-Success 'Microsoft App Installer installed successfully. Winget is now available.'
-                return $true
-            }
-
-            Write-ErrorMessage "Microsoft App Installer was registered, but winget still cannot be started: $($probe.Reason)."
-            Write-ErrorMessage 'Please install winget manually from https://aka.ms/getwinget'
-            return $false
-        }
-        catch {
-            Write-ErrorMessage "Failed to install winget: $_"
-            Write-ErrorMessage 'Please install winget manually from https://aka.ms/getwinget'
-            return $false
-        }
-    }
-}
-
-<#
-.SYNOPSIS
-    Tests if winget sources are accessible and attempts to repair them if broken.
-.DESCRIPTION
-    Runs a basic winget source list command to verify the "winget" source is accessible.
-    If the source is broken or missing (e.g., when running as admin on a standard user
-    account), the function attempts to re-register it using Add-AppxPackage from the
-    Microsoft CDN. After repair, it retries the source check once. If still failing, a
-    clear error message with manual remediation guidance is displayed.
-
-    As SYSTEM the source package is not re-registered (review finding P2-24): Add-AppxPackage
-    registers it for one account, which SYSTEM cannot have, so only the reset and the re-check run,
-    and the advice to run Add-AppxPackage as the local user is left out.
-.PARAMETER WhatIf
-    Dry run: runs only the health probe and, when the source is unhealthy, prints the repair a real
-    run would make. Nothing is reset or registered (P2-16: the dry run used to run
-    `winget source reset --force`, which also removes any source added beyond the defaults).
-.PARAMETER SystemContext
-    The run is SYSTEM. Invoke-WingetInstall passes what Get-InstallAccountContext found; when not
-    given, Test-IsSystemAccount decides.
-.RETURNS
-    [bool] True if winget sources are accessible (or successfully repaired), otherwise False.
-    Under -WhatIf, True only when the source is already healthy.
-#>
-function Test-WingetSources {
-    param (
-        [Parameter(Mandatory = $false)]
-        [switch]$WhatIf,
-
-        [Parameter(Mandatory = $false)]
-        [switch]$SystemContext
-    )
-
-    $isSystem = [bool]$SystemContext
-    if (-not $PSBoundParameters.ContainsKey('SystemContext')) {
-        $isSystem = [bool](Test-IsSystemAccount)
-    }
-
-    Write-Info 'Checking winget sources...'
-
-    # Probe the source (listed + functional). The same helper is reused for the post-repair
-    # re-probe below so the two checks can never diverge again (issue #177).
-    $health = Test-WingetSourceHealth
-
-    # If both checks pass, sources are good
-    if ($health.Healthy) {
-        return $true
-    }
-
-    $sourceProblem = if (-not $health.Listed) { 'Winget source "winget" appears to be missing.' } else { 'Winget source data is corrupted.' }
-    if ($WhatIf) {
-        if ($isSystem) {
-            Write-Info "[DRY-RUN] $sourceProblem A real run would repair it: winget source reset --force (which also removes any source added beyond the defaults), then check the source again. (Re-registering the source package is a per-account step that does not apply to SYSTEM.)"
-        }
-        else {
-            Write-Info "[DRY-RUN] $sourceProblem A real run would repair it: winget source reset --force (which also removes any source added beyond the defaults), then re-register the source package from https://cdn.winget.microsoft.com/cache/source.msix."
-        }
-        return $false
-    }
-
-    # Missing or corrupted: attempt repair
-    Write-WarningMessage "$sourceProblem Attempting to repair..."
-
-    # Attempt repair: first try source reset, then re-register package. No
-    # --accept-source-agreements: `winget source reset` does not accept it and rejects the whole
-    # command with 0x8A150002 (INVALID_CL_ARGUMENTS), so the reset never ran (the #174/#175 class).
-    Write-Info 'Running winget source reset...'
-    $reset = Invoke-WingetProcess -ArgumentList @('source', 'reset', '--force', '--disable-interactivity') -TimeoutSeconds (Get-ProcessTimeoutSeconds -Operation WingetSourceReset)
-    if ($reset.LaunchFailed) {
-        Write-WarningMessage "Winget source reset failed: $($reset.LaunchError)"
-    }
-    elseif ($reset.TimedOut) {
-        Write-WarningMessage 'Winget source reset failed: it did not finish in time and was stopped.'
-    }
-    elseif ($reset.ExitCode -ne 0) {
-        Write-WarningMessage ('Winget source reset failed with exit code {0}.' -f (Format-WingetExitCode -ExitCode $reset.ExitCode))
-    }
-    else {
-        Write-Info 'Source reset completed.'
-    }
-
-    if ($isSystem) {
-        # Add-AppxPackage registers the source package for one account, and SYSTEM cannot have
-        # one (review finding P2-24), so the reset is the whole repair: check the source again.
-        $health = Test-WingetSourceHealth -Quiet
-        if ($health.Healthy) {
-            Write-Success 'Winget sources are now accessible and functional.'
-            return $true
-        }
-        Write-ErrorMessage 'Winget sources are still not accessible after winget source reset. Check that this PC can reach https://cdn.winget.microsoft.com, then re-run the installer.'
-        return $false
-    }
-
-    try {
-        Write-Info 'Re-registering winget source package...'
-        Add-AppxPackage -Path 'https://cdn.winget.microsoft.com/cache/source.msix' -ErrorAction Stop
-        Write-Info 'Winget source package registered. Retrying source check...'
-    }
-    catch {
-        Write-ErrorMessage "Failed to register winget source package: $_"
-        Write-ErrorMessage 'Manual remediation steps:'
-        Write-ErrorMessage '  1. Run as local user (not as admin): Add-AppxPackage -Path "https://cdn.winget.microsoft.com/cache/source.msix"'
-        Write-ErrorMessage '  2. Or run: winget source reset --force'
-        return $false
-    }
-
-    # Retry both checks after repair (quiet: this function reports the outcome itself)
-    $health = Test-WingetSourceHealth -Quiet
-
-    if ($health.Healthy) {
-        Write-Success 'Winget sources are now accessible and functional.'
-        return $true
-    }
-
-    Write-ErrorMessage 'Winget sources are still not accessible after repair attempt.'
-    Write-ErrorMessage 'Manual remediation steps:'
-    Write-ErrorMessage '  1. Run as local user (not as admin): Add-AppxPackage -Path "https://cdn.winget.microsoft.com/cache/source.msix"'
-    Write-ErrorMessage '  2. Or run: winget source reset --force'
-    return $false
-}
-
-<#
-.SYNOPSIS
-    Initializes winget sources and agreements for the account performing the installs.
-.DESCRIPTION
-    Winget state — source registration and agreement acceptance — is per-user. When the script is
-    elevated as a different account than the interactively logged-on user (e.g. an admin-* account
-    entered at the UAC prompt), that account has no interactive logon session, and winget's
-    first-use bootstrap (registering the Microsoft.Winget.Source MSIX package for the account) is
-    blocked by the AppX deployment service with 0x80073D19
-    (ERROR_DEPLOYMENT_BLOCKED_BY_USER_LOG_OFF). Every install then fails, and no amount of
-    retrying helps because the missing per-user state is persistent (issues #81/#104/#150, #159).
-
-    This function probes with `winget source update --name winget` (which forces the winget-source
-    first-use bootstrap; agreements are accepted by the install commands, which pass
-    `--accept-source-agreements`). When the probe fails it re-probes after each of two bootstrap
-    attempts, cheapest first (issue #265):
-
-      1. Register the Microsoft.DesktopAppInstaller package already staged on this machine for this
-         account (Register-WingetAppInstallerForUser) — no download, no framework dependency
-         deployment.
-      2. Repair-WinGetPackageManager, which registers the App Installer and Microsoft.Winget.Source
-         packages even without an interactive logon session (microsoft/winget-cli#6334), but which
-         can be blocked outright by a 0x80073D06 dependency downgrade rejection — hence the ordering.
-         It can also fail with a 0x80073CF3 missing-framework-dependency rejection (issue #279,
-         seen on GitHub-hosted E2E runners) when the machine/image lacks a framework App Installer
-         depends on; that case is diagnosed the same way and is equally not retryable.
-
-    As SYSTEM only the probe runs (review findings P2-24, P3-23). Both rungs set winget up for one
-    account, which SYSTEM cannot have, and a SYSTEM run with someone signed in is not a cross-user
-    elevation: it used to be reported as one, with advice to sign in to Windows as
-    NT AUTHORITY\SYSTEM.
-.PARAMETER WhatIf
-    When specified, only reports intended actions without executing.
+    Dry run (P2-16): only the policy and `winget --version` checks run. Nothing is registered,
+    repaired, updated or reset; [DRY-RUN] lines say what a real run would do.
 .PARAMETER AccountContext
-    Get-InstallAccountContext's result, which Invoke-WingetInstall passes so the run decides who it
-    installs as once. When not given, Get-InstallAccountContext is called here.
+    Get-InstallAccountContext's result, which Invoke-WingetInstall passes; read here when not given.
 .RETURNS
-    [bool] True when sources are initialized and agreements accepted for the current account,
-    otherwise False.
+    [pscustomobject] Ready ([bool]: winget starts and no policy blocks it; a real run stops with exit
+    code 2 when it is $false) and Diagnosis: 'Ok', 'SourceFailed' (ready, but the winget source
+    could not be set up), 'PolicyBlocked' or 'NotLaunchable'.
 #>
-function Initialize-WingetSourcesForUser {
+function Initialize-Winget {
     param (
         [Parameter(Mandatory = $false)]
         [switch]$WhatIf,
@@ -8317,110 +7933,118 @@ function Initialize-WingetSourcesForUser {
     if ($null -eq $AccountContext) {
         $AccountContext = Get-InstallAccountContext
     }
+    $isSystem = [bool]$AccountContext.IsSystem
+    $account = 'SYSTEM'
+    $who = 'SYSTEM'
+    if (-not $isSystem) {
+        $account = "$($AccountContext.ProcessUser)"
+        $who = "'$account'"
+    }
+    # 0x8A15003A BLOCKED_BY_POLICY, 0x80073D19 ERROR_DEPLOYMENT_BLOCKED_BY_USER_LOG_OFF and
+    # 0x8A150046 SOURCE_AGREEMENTS_NOT_ACCEPTED, as the signed Int32 winget exits with.
+    $policyExitCode = -1978335174
+    $sessionBlockedExitCode = -2147009255
+    $agreementsExitCode = -1978335162
+    $state = @{ ErrorCodes = @() }
 
-    if ($WhatIf) {
-        if ($AccountContext.IsSystem) {
-            Write-Info '[DRY-RUN] Would update the winget source for SYSTEM'
+    $policyBlocked = {
+        param ([string]$Detail)
+        $message = "Group Policy on this PC blocks winget: $Detail. This installer cannot install apps until the policy allows it; ask whoever manages this PC's policies (Computer Configuration > Administrative Templates > Windows Components > Desktop App Installer) to allow it, then re-run the installer."
+        if ($WhatIf) {
+            Write-Info "[DRY-RUN] $message A real run would stop here with exit code 2."
         }
         else {
-            Write-Info '[DRY-RUN] Would initialize winget sources and agreements for the current account'
+            Write-ErrorMessage $message
         }
-        return $true
+        [pscustomobject]@{ Ready = $false; Diagnosis = 'PolicyBlocked' }
     }
 
-    # 0x80073D19 (ERROR_DEPLOYMENT_BLOCKED_BY_USER_LOG_OFF) as a signed Int32.
-    $deploymentBlockedExitCode = -2147009255
-    # 0x8A150046 (APPINSTALLER_CLI_ERROR_SOURCE_AGREEMENTS_NOT_ACCEPTED) as a signed Int32.
-    $agreementsNotAcceptedExitCode = -1978335162
-
-    if ($AccountContext.IsSystem) {
-        Write-Info 'Updating the winget source for SYSTEM (this may take a moment)...'
-        $probe = Invoke-WingetSourceProbe
-        if ($probe.Succeeded) {
-            Write-Success 'The winget source is up to date for SYSTEM.'
-            return $true
-        }
-        $probeDetail = ''
-        if ($probe.TimedOut) {
-            $probeDetail = ' (it did not finish in time)'
-        }
-        elseif ($null -ne $probe.ExitCode) {
-            $probeDetail = ' (exit code {0})' -f (Format-WingetExitCode -ExitCode $probe.ExitCode)
-        }
-        Write-WarningMessage "The winget source could not be updated for SYSTEM$probeDetail. The steps that set winget up for a signed-in account (registering App Installer, Repair-WinGetPackageManager) do not apply to SYSTEM and were skipped; the source check that follows repairs the source if it can."
-        return $false
+    $policy = Get-WingetPolicyBlock
+    if ($policy) {
+        return (& $policyBlocked ("'{0}' is Disabled ({1} = 0 under HKLM\SOFTWARE\Policies\Microsoft\Windows\AppInstaller)" -f $policy.Policy, $policy.Name))
     }
 
-    $processUser = $AccountContext.ProcessUser
-    $sessionUser = $AccountContext.SessionUser
-    $isCrossUserElevation = [bool]$AccountContext.IsCrossUserElevation
-    if ($isCrossUserElevation) {
-        Write-WarningMessage "Cross-user elevation detected: running as '$processUser' while '$sessionUser' owns the interactive session."
-        Write-WarningMessage "Winget sources and agreements are per-user; initializing them for '$processUser'."
+    if ($AccountContext.IsCrossUserElevation) {
+        Write-WarningMessage "Cross-user elevation detected: running as '$account' while '$($AccountContext.SessionUser)' owns the interactive session."
+        Write-WarningMessage "winget is set up per account; setting it up for '$account'."
     }
 
-    Write-Info 'Initializing winget sources for the current account (this may take a moment)...'
-    $probe = Invoke-WingetSourceProbe
-    if ($probe.Succeeded) {
-        Write-Success 'Winget sources are initialized and agreements accepted for this account.'
-        return $true
-    }
-
-    if ($probe.ExitCode -eq $deploymentBlockedExitCode) {
-        Write-WarningMessage 'Winget source bootstrap was blocked by the AppX deployment service (0x80073D19): this account has no interactive logon session.'
-    }
-    elseif ($probe.ExitCode -eq $agreementsNotAcceptedExitCode) {
-        Write-WarningMessage 'Winget source agreements are not yet accepted for this account (0x8A150046).'
-    }
-    elseif ($null -ne $probe.ExitCode) {
-        Write-WarningMessage ('Winget source update failed with exit code {0}.' -f (Format-WingetExitCode -ExitCode $probe.ExitCode))
-    }
-
-    # Cheapest rung first: register the App Installer payload already staged on this machine for this
-    # account. On a cross-user elevation that alone can restore winget with no download at all, and
-    # it sidesteps the 0x80073D06 dependency rejection that can abort the repair cmdlet outright
-    # (issue #265).
-    if (Register-WingetAppInstallerForUser) {
-        $probe = Invoke-WingetSourceProbe
-        if ($probe.Succeeded) {
-            Write-Success 'Winget sources initialized for this account after registering App Installer.'
-            return $true
-        }
-    }
-
-    # Bootstrap via the WinGet PowerShell module: unlike winget's own first-use bootstrap (and
-    # unlike a plain Add-AppxPackage), Repair-WinGetPackageManager registers the App Installer and
-    # Microsoft.Winget.Source packages for the current account even without an interactive logon
-    # session (microsoft/winget-cli#6334).
-    $downgradeRejected = $false
-    $missingFrameworkDependency = $false
-    if (Get-Command Repair-WinGetPackageManager -ErrorAction SilentlyContinue) {
-        Write-Info 'Bootstrapping winget for this account via Repair-WinGetPackageManager...'
-        $repair = Invoke-WingetPackageManagerRepair
-        $downgradeRejected = [bool]$repair.DowngradeRejected
-        $missingFrameworkDependency = [bool]$repair.MissingFrameworkDependency
-
-        $probe = Invoke-WingetSourceProbe
-        if ($probe.Succeeded) {
-            Write-Success 'Winget sources initialized for this account after repair.'
-            return $true
+    if ($isSystem) {
+        if (-not (Test-MachineWingetAvailable -WhatIf:$WhatIf)) {
+            return [pscustomobject]@{ Ready = $false; Diagnosis = 'NotLaunchable' }
         }
     }
     else {
-        Write-WarningMessage 'Repair-WinGetPackageManager is unavailable (Microsoft.WinGet.Client module missing); skipping winget bootstrap repair.'
+        $probe = Test-WingetLaunchable -Attempts 6 -RetryDelaySeconds 15
+        if (-not $probe.Launchable -and -not $WhatIf) {
+            Write-WarningMessage "Winget is not available: $($probe.Reason)."
+            while (-not $probe.Launchable -and $probe.ExitCode -ne $policyExitCode -and (Invoke-NextWingetAccountFix -State $state)) {
+                $probe = Test-WingetLaunchable -Attempts 2 -RetryDelaySeconds 5
+            }
+        }
+        if ($probe.ExitCode -eq $policyExitCode) {
+            return (& $policyBlocked ("'winget --version' answered {0}" -f (Format-WingetExitCode -ExitCode $probe.ExitCode)))
+        }
+        if (-not $probe.Launchable) {
+            if ($WhatIf) {
+                Write-Info "[DRY-RUN] Winget is not available for this account ($($probe.Reason)). A real run would set it up: register the App Installer package already on this PC for this account, then run Repair-WinGetPackageManager (installing its Microsoft.WinGet.Client module from the PowerShell Gallery first if it is missing), and stop with exit code 2 if winget still cannot be started."
+                return [pscustomobject]@{ Ready = $false; Diagnosis = 'NotLaunchable' }
+            }
+            $seen = ''
+            $codes = @($state.ErrorCodes | Select-Object -Unique)
+            if ($codes.Count -gt 0) {
+                $seen = ' App Installer could not be registered or repaired ({0}).' -f (@($codes | ForEach-Object { Format-WingetExitCode -ExitCode $_ }) -join ', ')
+            }
+            Write-ErrorMessage ("Winget cannot be started for {0}: {1}.{2} {3}" -f $who, $probe.Reason, $seen, (Get-WingetSetupAdvice -State $state -Account $account))
+            return [pscustomobject]@{ Ready = $false; Diagnosis = 'NotLaunchable' }
+        }
+        Write-Success "Winget is available ($($probe.Version))."
     }
 
-    Write-WarningMessage "Winget sources could not be initialized for '$processUser'. Installations may fail with 0x80073D19."
-    if ($downgradeRejected) {
-        Write-WarningMessage 'Fix: update App Installer from the Microsoft Store on this machine (the WinGet release this module can deploy is older than a framework package already installed here), then re-run this script.'
+    if ($WhatIf) {
+        Write-Info "[DRY-RUN] Would update the winget source for $who (winget source update --name winget), and fix it if that fails: winget source reset --force for a missing or corrupted source, which also removes any source added beyond the defaults."
+        return [pscustomobject]@{ Ready = $true; Diagnosis = 'Ok' }
     }
-    if ($missingFrameworkDependency) {
-        Write-WarningMessage 'Fix: this machine (or runner image) is missing the Microsoft.WindowsAppRuntime.1.8 framework App Installer depends on. That is an external packaging gap, not something this script can install reliably on its own; see issue #279. Retrying will not help until the framework is present.'
+
+    Write-Info "Updating the winget source for $who (this may take a moment)..."
+    $source = Invoke-WingetSourceProbe
+    while (-not $source.Succeeded) {
+        $fixed = $false
+        $codeInfo = Get-WingetExitCodeInfo -ExitCode $source.ExitCode
+        if ($source.ExitCode -eq $sessionBlockedExitCode -and -not $isSystem) {
+            $fixed = Invoke-NextWingetAccountFix -State $state
+        }
+        elseif ($codeInfo -and $codeInfo.Class -eq 'SourceBroken' -and -not $state.ContainsKey('SourceReset')) {
+            $state.SourceReset = Reset-WingetSource
+            $fixed = $true
+        }
+        if (-not $fixed) {
+            break
+        }
+        $source = Invoke-WingetSourceProbe
     }
-    if ($isCrossUserElevation) {
-        Write-WarningMessage "Fix: log on to Windows interactively as '$processUser' once (this registers winget for that account), or run 'winget source update' from any session running as '$processUser', then re-run this script."
+
+    if ($source.Succeeded) {
+        Write-Success "The winget source is up to date for $who."
+        return [pscustomobject]@{ Ready = $true; Diagnosis = 'Ok' }
     }
-    return $false
+    if ($source.ExitCode -eq $policyExitCode) {
+        return (& $policyBlocked ("'winget source update' answered {0}" -f (Format-WingetExitCode -ExitCode $source.ExitCode)))
+    }
+    if ($source.ExitCode -eq $agreementsExitCode) {
+        Write-Info 'The winget source agreements are not accepted for this account yet (0x8A150046); each install accepts them.'
+        return [pscustomobject]@{ Ready = $true; Diagnosis = 'Ok' }
+    }
+
+    $detail = 'it did not finish in time and was stopped'
+    if ($source.LaunchError) {
+        $detail = "winget could not be started: $($source.LaunchError)"
+    }
+    elseif (-not $source.TimedOut) {
+        $detail = 'exit code {0}' -f (Format-WingetExitCode -ExitCode $source.ExitCode)
+    }
+    Write-WarningMessage ('The winget source could not be set up for {0} ({1}). {2} Installations may fail.' -f $who, $detail, (Get-WingetSetupAdvice -State $state -Account $account -Source -SourceExitCode $source.ExitCode))
+    return [pscustomobject]@{ Ready = $true; Diagnosis = 'SourceFailed' }
 }
 
 <#

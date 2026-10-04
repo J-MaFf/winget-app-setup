@@ -44,7 +44,7 @@ BeforeAll {
 
 Describe 'Get-ProcessTimeoutSeconds' {
     It 'Gives every operation a positive limit' {
-        foreach ($operation in 'WingetInstall', 'WingetDownload', 'WingetListCheck', 'WingetVersion', 'WingetList', 'WingetSourceList', 'WingetSearch', 'WingetSourceReset', 'MsiExec', 'WebDownload', 'WebDownloadStall') {
+        foreach ($operation in 'WingetInstall', 'WingetDownload', 'WingetListCheck', 'WingetVersion', 'WingetList', 'WingetSourceUpdate', 'WingetSourceReset', 'MsiExec', 'WebDownload', 'WebDownloadStall') {
             Get-ProcessTimeoutSeconds -Operation $operation | Should -BeGreaterThan 0 -Because $operation
         }
     }
@@ -52,7 +52,7 @@ Describe 'Get-ProcessTimeoutSeconds' {
     It 'Is generous for installs and downloads, and a few minutes at most for queries' {
         Get-ProcessTimeoutSeconds -Operation WingetInstall | Should -BeGreaterOrEqual 1200
         Get-ProcessTimeoutSeconds -Operation WingetDownload | Should -BeGreaterOrEqual 1200
-        foreach ($operation in 'WingetList', 'WingetSourceList', 'WingetSearch', 'WingetSourceReset') {
+        foreach ($operation in 'WingetList', 'WingetSourceUpdate', 'WingetSourceReset') {
             Get-ProcessTimeoutSeconds -Operation $operation | Should -BeLessOrEqual 300 -Because $operation
         }
     }

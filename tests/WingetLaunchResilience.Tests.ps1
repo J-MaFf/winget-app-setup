@@ -1,7 +1,7 @@
 # Tests for WingetAppSetup/Private/WingetLaunchResilience.ps1 (issues #258, #277, review findings
 # P2-8, P3-7, P3-9): classification of transient winget-launch failures, the winget executable to
 # launch, and the bounded `winget --version` launch check (Test-WingetLaunchable) that
-# Test-AndInstallWinget, the circuit breaker and the end-of-run check use.
+# Initialize-Winget, the circuit breaker and the end-of-run check use.
 
 BeforeAll {
     . (Join-Path $PSScriptRoot 'TestHelpers.ps1')
@@ -198,6 +198,24 @@ Describe 'Test-WingetLaunchable (review findings P2-8, P3-9)' {
         $result.Attempts | Should -Be 1
         Should -Invoke Invoke-WingetProcess -Times 1 -Exactly
         Should -Invoke Start-Sleep -Times 0 -Exactly
+    }
+
+    It 'Stops at once, and hands the code on, when Group Policy turns winget off (0x8A15003A, review finding P3-30)' {
+        Mock Invoke-WingetProcess { New-TestProcessResult -ExitCode -1978335174 }
+
+        $result = Test-WingetLaunchable -Attempts 6 -RetryDelaySeconds 15
+
+        $result.Launchable | Should -BeFalse
+        $result.ExitCode | Should -Be -1978335174
+        $result.Reason | Should -Be "'winget --version' exited with 0x8A15003A BLOCKED_BY_POLICY"
+        Should -Invoke Invoke-WingetProcess -Times 1 -Exactly
+        Should -Invoke Start-Sleep -Times 0 -Exactly
+    }
+
+    It 'Reports no exit code when winget did not start' {
+        Mock Invoke-WingetProcess { New-TestProcessResult -LaunchFailed -LaunchErrorCode 2 -LaunchError "'winget' was not found on PATH." }
+
+        (Test-WingetLaunchable).ExitCode | Should -BeNullOrEmpty
     }
 
     It 'Checks again after RetryDelaySeconds when the launch failure can clear on its own, and passes once it does' {

@@ -590,8 +590,7 @@ Describe 'Build determinism (issue #189)' {
 
 # Review findings P2-11, P2-12 and P3-11, through the generated installer's real entry block and
 # the real Invoke-WingetInstall and Restart-WithElevation: only the admin check, the console's
-# interactivity, the pre-elevation source update and the elevated launch itself (which would raise
-# a real UAC prompt) are overridden.
+# interactivity and the elevated launch itself (which would raise a real UAC prompt) are overridden.
 Describe 'Elevated relaunch through the entry block (review findings P2-11, P2-12, P3-11)' {
     BeforeAll {
         # A run from a file, not elevated, with someone at the console unless -NonInteractive is
@@ -601,7 +600,6 @@ function Test-IsAdmin { $false }
 function Test-EffectiveNonInteractive { param ([switch]$NonInteractive) [bool]$NonInteractive }
 function Test-IsContinuousIntegration { $false }
 function Write-Prompt { param ([string]$Message) Write-Host "PROMPT: $Message"; throw 'no key press in tests' }
-function Invoke-WingetSourceProbe { param ([int]$TimeoutSeconds) @{ Succeeded = $true; ExitCode = 0; TimedOut = $false } }
 '@
         # The elevated Windows PowerShell, standing in: prints what it was asked to start and
         # "ends" with exit code 1 at once.
@@ -635,12 +633,13 @@ function Start-ElevatedProcess {
 
     It 'Does not relaunch a file that changed after the run started, and exits 5' {
         # The file is rewritten while the run is still going, before it asks for elevation, as a
-        # same-user process could do to the bootstrap's copy in %TEMP%.
+        # same-user process could do to the bootstrap's copy in %TEMP%: here, in the last check the
+        # run makes before it relaunches.
         $tamperOverride = @'
-function Invoke-WingetSourceProbe {
-    param ([int]$TimeoutSeconds)
+function Test-InvokedFromModuleContext {
+    param ($InvocationModule, [string]$CommandPath)
     Add-Content -LiteralPath $PSCommandPath -Value '# rewritten before the UAC prompt'
-    @{ Succeeded = $true; ExitCode = 0; TimedOut = $false }
+    $false
 }
 '@
         $path = New-FaultInjectedInstaller -Name 'relaunch-tampered.ps1' -Overrides ($script:notElevatedOverrides + "`n" + $script:elevatedRunOverride + "`n" + $tamperOverride)

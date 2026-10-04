@@ -110,6 +110,18 @@ whether it is provisioned for every user, which Windows 11 does. Microsoft does 
 winget command line as SYSTEM; its `Microsoft.WinGet.Client` module on PowerShell 7 is the supported
 route and a follow-up.
 
+Setting winget up is now one step, `Initialize-Winget`, in place of three ladders that ran back to
+back and gave one cause three diagnoses. It stops with exit code 2 and names the policy when App
+Installer's Group Policy turns winget or its source off (or winget answers `0x8A15003A`); reads the
+`0x80073CF3`/`0x80073D06` failures of the App Installer registration and repair from their HRESULT,
+not from text; repairs for all users (`Repair-WinGetPackageManager -AllUsers`) only when the
+all-users check finds `Microsoft.WindowsAppRuntime.1.8` missing; resets the source only when it is
+missing or corrupted, and repairs nothing for a timeout or a network error; runs each fix once a
+run; installs `Microsoft.WinGet.Client` only when it has to repair; and prints one line with the
+cause and the fix. The aka.ms/getwinget download, the source.msix registration and the source update
+before elevation are gone. The policy detection and the `-AllUsers` repair are not yet checked on a
+real Windows PC.
+
 The same branch changes CI. Fork pull requests that leave `windows-tests.yml` alone no longer run
 on the self-hosted win-test runner, and `claude.yml` calls the shared Claude workflow at a pinned
 commit SHA instead of `@main`. The E2E workflow files its failure issue from a separate ubuntu job,

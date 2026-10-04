@@ -23,6 +23,17 @@ Describe 'Get-WingetExitCodeInfo' {
         @{ Hex = '8A15002B'; Name = 'UPDATE_NOT_APPLICABLE'; Class = '' }
         @{ Hex = '80004004'; Name = 'E_ABORT'; Class = '' }
         @{ Hex = '80073D19'; Name = 'ERROR_DEPLOYMENT_BLOCKED_BY_USER_LOG_OFF'; Class = '' }
+        # A missing or corrupted source, which Initialize-Winget resets (review finding P3-25).
+        @{ Hex = '8A15000B'; Name = 'SOURCES_INVALID'; Class = 'SourceBroken' }
+        @{ Hex = '8A15000F'; Name = 'SOURCE_DATA_MISSING'; Class = 'SourceBroken' }
+        @{ Hex = '8A150012'; Name = 'SOURCE_NAME_DOES_NOT_EXIST'; Class = 'SourceBroken' }
+        @{ Hex = '8A150015'; Name = 'NO_SOURCES_DEFINED'; Class = 'SourceBroken' }
+        @{ Hex = '8A15003F'; Name = 'SOURCE_DATA_INTEGRITY_FAILURE'; Class = 'SourceBroken' }
+        # A source that cannot be opened may be a network failure, which a reset does not fix.
+        @{ Hex = '8A150045'; Name = 'SOURCE_OPEN_FAILED'; Class = '' }
+        # App Installer registration and repair (issues #265, #279, review finding P3-27).
+        @{ Hex = '80073CF3'; Name = 'ERROR_INSTALL_RESOLVE_DEPENDENCY_FAILED'; Class = '' }
+        @{ Hex = '80073D06'; Name = 'ERROR_INSTALL_PACKAGE_DOWNGRADE'; Class = '' }
         # winget.exe not starting at all, reported for winget run outside its package as SYSTEM
         # (review finding P2-24).
         @{ Hex = 'C0000135'; Name = 'STATUS_DLL_NOT_FOUND'; Class = '' }

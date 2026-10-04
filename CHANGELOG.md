@@ -231,6 +231,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
+- Removed the aka.ms/getwinget download rung and the source.msix registration rung (review findings
+  P3-25, P3-31), with `Test-AndInstallWinget`, `Initialize-WingetSourcesForUser`,
+  `Test-WingetSources`, `Test-WingetSourceHealth` (the `winget source list` and `winget search 7zip`
+  checks), and the text classifiers `Test-AppxDowngradeRejection` and
+  `Test-AppxMissingFrameworkDependency`. The download saved App Installer to a fixed file name in
+  `%TEMP%` and registered it with `Add-AppxPackage`, without the frameworks it needs and through the
+  per-account deployment that 0x80073D19 blocks under cross-user elevation;
+  `Repair-WinGetPackageManager -Latest` installs the same bundle with its frameworks, and the run it
+  once rescued (#265) is now rescued by registering the App Installer already on the PC. The
+  source.msix registration was the same per-account deployment, which `winget source update` and
+  `winget source reset` make themselves. `Test-AndInstallWingetModule` is private now and installs
+  the module only for the repair. The `WingetSourceList` and `WingetSearch` time limits went with
+  their checks (`WingetSourceUpdate` is the source update's).
 - Removed the launch-resilience code that existed to survive the Winget-AutoUpdate run the
   installer used to start mid-run (`RUN_WAU=YES`, removed earlier on this branch), now replaced by
   the circuit breaker above (review findings P2-10, P3-7, P3-10):
@@ -248,6 +261,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Dropped `launch.ps1`; the installer now runs directly when the required execution policy is temporarily relaxed.
 
 ### Fixed
+
+- Setting winget up is one step that diagnoses a failure once, instead of three ladders that ran
+  back to back and gave one cause three diagnoses (review findings P3-25 to P3-31). On the #279
+  wedge (E2E run 36384683838) the run used to say 'Installations may fail with 0x80073D19', then
+  'source "winget" appears to be missing', then print a source.msix rejection and manual steps,
+  after running `Repair-WinGetPackageManager` up to four times and downloading App Installer from
+  aka.ms/getwinget. `Initialize-Winget` (`WingetAppSetup/Public/WingetCore.ps1`) replaces
+  `Test-AndInstallWinget`, `Initialize-WingetSourcesForUser` and `Test-WingetSources`: it checks
+  App Installer's Group Policy, then `winget --version`, then `winget source update --name winget`,
+  picks the fix from the exit code, runs each fix at most once a run, and prints one line with the
+  cause and what to do when it cannot fix it.
+  - **Group Policy** (P3-30). When `EnableAppInstaller`,
+    `EnableWindowsPackageManagerCommandLineInterfaces` or `EnableDefaultSource` is 0 under
+    `HKLM\SOFTWARE\Policies\Microsoft\Windows\AppInstaller`, or winget answers
+    `0x8A15003A BLOCKED_BY_POLICY` (no longer checked again for 75 seconds), the run stops with
+    exit code 2 and names the policy, instead of repairing App Installer, resetting the source,
+    installing Winget-AutoUpdate and blaming 0x80073D19 or a corrupted source.
+  - **Codes, not text** (P3-27). The 0x80073CF3 (missing framework) and 0x80073D06 (newer
+    framework) classifiers only read `Repair-WinGetPackageManager`'s message, which never holds
+    those codes ('Failed to repair winget. Try running with -AllUsers in administrator mode.'), so
+    the framework advice never printed. The codes are now read from the HRESULT of what the App
+    Installer registration and the repair throw (`Get-AppxErrorCode`), and whether the framework
+    is missing comes from the all-users check `Get-WindowsAppRuntimeStatus` already makes.
+  - **`-AllUsers`** (P3-28). When that check finds `Microsoft.WindowsAppRuntime.1.8` missing, the
+    repair runs `Repair-WinGetPackageManager -AllUsers -Latest` first, as the cmdlet asks; never
+    otherwise, since it aborts with 0x80073D06 on a PC with a newer framework (#265). A source
+    update that times out or fails for any reason other than 0x80073D19 or a missing or corrupted
+    source no longer gets App Installer registered or repaired.
+  - **Microsoft.WinGet.Client only when needed** (P3-26). The module (and the NuGet provider) was
+    installed from the PowerShell Gallery on every first run, for a repair that rarely runs, with
+    two warnings about an 'Update functionality' that no longer exists when the Gallery was
+    blocked. It is now installed inside the repair step, the first time a run needs it.
+  - **App Installer listed through Windows PowerShell** (P3-29). The registration step lists the
+    App Installer packages with `Get-DesktopAppInstallerPackageInfo`, which runs
+    `Get-AppxPackage -AllUsers` in Windows PowerShell under PowerShell 7, so the Appx module failing
+    to load there (0x80131539, seen on Windows Server 2022) no longer ends the step.
+  - The source is reset (`winget source reset --force`, its exit code reported) only for a missing
+    or corrupted source (`0x8A15000B`, `0x8A15000F`, `0x8A150012`, `0x8A150015`, `0x8A15003F`),
+    which the exit-code table now marks as `SourceBroken`. `0x8A150046` (agreements not accepted)
+    is no fault: every install accepts them.
+  - No winget call before elevating: the source update the non-elevated window made set up the
+    signed-in user's source, not the account the elevated run installs as.
 
 - The Winget-AutoUpdate MSI can no longer be swapped between its hash check and `msiexec`, and the
   modules the installer adds for all users now come only from the PowerShell Gallery (review

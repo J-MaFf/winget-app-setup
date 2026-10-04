@@ -173,13 +173,13 @@ function Get-MachineWingetCandidate {
 
 <#
 .SYNOPSIS
-    The SYSTEM form of Test-AndInstallWinget: finds the machine-wide winget.exe and checks it starts.
+    The SYSTEM form of Initialize-Winget's launch check: finds the machine-wide winget.exe and
+    checks it starts.
 .DESCRIPTION
-    Review finding P2-24. As SYSTEM the per-account steps Test-AndInstallWinget otherwise works
-    through cannot help: SYSTEM has no `winget` alias, App Installer cannot be registered for it,
-    Repair-WinGetPackageManager does nothing for it (and throws with -AllUsers), and the
-    aka.ms/getwinget download registers App Installer per account again. They used to run anyway,
-    with minutes of downloads, before the run stopped with exit code 2.
+    Review finding P2-24. As SYSTEM the per-account steps Initialize-Winget otherwise works through
+    cannot help: SYSTEM has no `winget` alias, App Installer cannot be registered for it, and
+    Repair-WinGetPackageManager does nothing for it (and throws with -AllUsers). They used to run
+    anyway, with minutes of downloads, before the run stopped with exit code 2.
 
     Instead, each winget.exe from Get-MachineWingetCandidate is tried, best first, with
     Test-WingetLaunchable: the first is checked for up to 75 seconds (for a lock or an App Installer
@@ -208,7 +208,7 @@ function Test-MachineWingetAvailable {
         if (-not $windowsApps) {
             $windowsApps = '%ProgramFiles%\WindowsApps'
         }
-        $message = "No machine-wide winget was found: as SYSTEM the installer runs the winget.exe of the App Installer package (Microsoft.DesktopAppInstaller) installed for this PC, and Get-AppxPackage -AllUsers lists none with status Ok, nor is there one under $windowsApps. SYSTEM cannot set winget up for itself, so the per-account steps (registering App Installer, Repair-WinGetPackageManager, the aka.ms/getwinget download) do not apply. Install or update App Installer for this PC, then re-run the installer."
+        $message = "No machine-wide winget was found: as SYSTEM the installer runs the winget.exe of the App Installer package (Microsoft.DesktopAppInstaller) installed for this PC, and Get-AppxPackage -AllUsers lists none with status Ok, nor is there one under $windowsApps. SYSTEM cannot set winget up for itself, so the per-account steps (registering App Installer, Repair-WinGetPackageManager) do not apply. Install or update App Installer for this PC, then re-run the installer."
         if ($WhatIf) {
             Write-Info "[DRY-RUN] $message A real run would stop here with exit code 2."
         }
@@ -245,7 +245,7 @@ function Test-MachineWingetAvailable {
     if ($tried -gt 1) {
         $wingetWord = "$tried winget.exe files"
     }
-    $message = "winget could not be started as SYSTEM (tried the machine-wide $wingetWord above).$hint The per-account steps a signed-in user's run would try (registering App Installer, Repair-WinGetPackageManager, the aka.ms/getwinget download) do not apply to SYSTEM and were skipped."
+    $message = "winget could not be started as SYSTEM (tried the machine-wide $wingetWord above).$hint The per-account steps a signed-in user's run would try (registering App Installer, Repair-WinGetPackageManager) do not apply to SYSTEM and were skipped."
     if ($WhatIf) {
         Write-Info "[DRY-RUN] $message A real run would stop here with exit code 2."
     }

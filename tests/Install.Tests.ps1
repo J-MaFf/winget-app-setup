@@ -58,7 +58,7 @@ Describe 'Main Script Logic' {
     }
 
     # The msstore-era 'Source verification' loop (Test-WingetSourceTrusted/Set-Sources) was removed
-    # in issue #177: source health is verified and repaired by Test-WingetSources before this point.
+    # in issue #177: the winget source is updated, and repaired if needed, by Initialize-Winget before this point.
 
     # The 'App installation loop' context was removed in issue #188: it re-inlined an obsolete
     # copy of the install loop (single-string ArgumentList, no --scope machine) instead of
@@ -101,12 +101,8 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
         Mock Test-IsAdmin { $true }
         Mock Restart-WithElevation { [pscustomobject]@{ Started = $true; ExitCode = 0 } }
         Mock Test-IsRunningLocally { $true }
-        Mock Test-AndInstallWingetModule { $true }
-        Mock Import-Module { }
-        Mock Test-AndInstallWinget { $true }
-        Mock Initialize-WingetSourcesForUser { $true }
+        Mock Initialize-Winget { [pscustomobject]@{ Ready = $true; Diagnosis = 'Ok' } }
         Mock Test-AndInstallGraphicalTools { $true }
-        Mock Test-WingetSources { $true }
         Mock Remove-LegacyScheduledUpdates { $true }
         Mock Set-WindowsTerminalDefaults { }
         Mock Install-WingetAutoUpdate { @{ Status = 'DryRun'; Version = '2.12.0' } }
@@ -164,17 +160,6 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
                     $node -is [System.Management.Automation.Language.CommandAst] -and $node.GetCommandName() -eq 'Exit-Installer'
                 }, $true)
             @($exitInstallerCalls).Count | Should -Be 0
-        }
-
-        It 'Routes the pre-elevation winget source update through the timeout-guarded probe instead of a bare -Wait Start-Process' {
-            # The pre-elevation `winget source update` call used to run via a bare
-            # `Start-Process ... -Wait` with no timeout, which could hang the whole run forever
-            # on a corrupted/unreachable source. It must now reuse Invoke-WingetSourceProbe
-            # (WingetBootstrap.ps1), which wraps the identical command in a 120s WaitForExit/Kill
-            # timeout guard, rather than duplicating that guard a third time.
-            $installBody = $script:InvokeWingetInstallDef
-            $installBody | Should -Match 'Invoke-WingetSourceProbe'
-            $installBody | Should -Not -Match "Start-Process -FilePath 'winget' -ArgumentList 'source', 'update'.*-Wait"
         }
     }
 
@@ -234,7 +219,7 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
         }
 
         It 'Returns 2 without installing anything when winget is unavailable and cannot be installed' {
-            Mock Test-AndInstallWinget { $false }
+            Mock Initialize-Winget { [pscustomobject]@{ Ready = $false; Diagnosis = 'NotLaunchable' } }
 
             $result = Invoke-WingetInstall -Apps @(@{ name = 'Contoso.AppOne' }) -NonInteractive
 
@@ -292,7 +277,9 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
         # code; every other run that needs administrator rights returns 4.
         BeforeEach {
             Mock Test-IsAdmin { $false }
-            Mock Invoke-WingetSourceProbe { @{ Succeeded = $true; ExitCode = 0; TimedOut = $false } }
+            # No winget call before elevating (review finding P3-25): the elevated run sets winget up
+            # for the account it runs as.
+            Mock Invoke-WingetProcess { throw "no winget call before elevating: $($ArgumentList -join ' ')" }
             # A run from the generated installer file, not from the imported module (issue #185).
             Mock Test-InvokedFromModuleContext { $false }
             # Interactive unless the test passes -NonInteractive; never the runner's real console.
@@ -322,17 +309,17 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
             # The elevated window showed the outcome and its own key press: the entry script adds
             # no second notice.
             $script:InstallerPendingExitCode | Should -Be $_
-            Should -Invoke Invoke-WingetSourceProbe -Times 1 -Exactly
-            Should -Invoke Test-AndInstallWinget -Times 0 -Exactly
+            Should -Invoke Invoke-WingetProcess -Times 0 -Exactly
+            Should -Invoke Initialize-Winget -Times 0 -Exactly
             Should -Invoke Install-AppWithVerification -Times 0 -Exactly
         }
 
-        It 'Returns 4 without a UAC prompt or the pre-elevation source update when the run is non-interactive' {
+        It 'Returns 4 without a UAC prompt or any winget call when the run is non-interactive' {
             $result = Invoke-WingetInstall -Apps @(@{ name = 'Contoso.AppOne' }) -NonInteractive -SkipSystemCheck
 
             $result | Should -Be 4
             Should -Invoke Restart-WithElevation -Times 0 -Exactly
-            Should -Invoke Invoke-WingetSourceProbe -Times 0 -Exactly
+            Should -Invoke Invoke-WingetProcess -Times 0 -Exactly
             Should -Invoke Install-AppWithVerification -Times 0 -Exactly
             ($script:errorMessages -join "`n") | Should -Match 'this run is non-interactive, so there is nobody to approve a UAC prompt and none was shown'
         }
@@ -372,7 +359,7 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
             (@($script:errorMessages) + @($script:infoMessages)) -join "`n" | Should -Not -Match 'Press Enter|Exiting in 5 seconds'
             Should -Invoke Start-Sleep -Times 0 -Exactly -ParameterFilter { $Seconds -eq 5 }
             Should -Invoke Restart-WithElevation -Times 0 -Exactly
-            Should -Invoke Invoke-WingetSourceProbe -Times 0 -Exactly
+            Should -Invoke Invoke-WingetProcess -Times 0 -Exactly
             Should -Invoke Install-AppWithVerification -Times 0 -Exactly
         }
 
@@ -382,19 +369,20 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
             $result | Should -Be 0
             @($script:infoMessages | Where-Object { $_.StartsWith('[DRY-RUN] A real run would stop here with exit code 4: it needs administrator privileges, and a non-interactive run shows no UAC prompt.') }).Count | Should -Be 1
             Should -Invoke Restart-WithElevation -Times 0 -Exactly
-            Should -Invoke Invoke-WingetSourceProbe -Times 0 -Exactly
+            Should -Invoke Invoke-WingetProcess -Times 0 -Exactly
         }
 
-        It 'An interactive dry run previews the source update and the relaunch without doing either' {
+        It 'An interactive dry run previews the relaunch without doing it' {
             # Interactive, so the preview ends at the final key press; stopped there.
             Mock Write-Prompt { throw 'reached the final prompt' }
 
             { Invoke-WingetInstall -Apps @(@{ name = 'Contoso.AppOne' }) -WhatIf } | Should -Throw 'reached the final prompt'
 
-            $script:infoMessages | Should -Contain '[DRY-RUN] Would run winget source update --name winget to bootstrap the source in user context'
+            # No source update before elevating any more, so none to preview (review finding P3-25).
+            ($script:infoMessages -join "`n") | Should -Not -Match 'Would run winget source update'
             @($script:infoMessages | Where-Object { $_.StartsWith('[DRY-RUN] Would relaunch with administrator privileges.') }).Count | Should -Be 1
             Should -Invoke Restart-WithElevation -Times 0 -Exactly
-            Should -Invoke Invoke-WingetSourceProbe -Times 0 -Exactly
+            Should -Invoke Invoke-WingetProcess -Times 0 -Exactly
         }
 
         It 'Returns 4 without relaunching when called from the imported module (issue #185)' {
@@ -409,31 +397,24 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
         }
     }
 
-    Context 'Pre-elevation source update (real non-admin, non-WhatIf code path)' {
-        # Test-IsAdmin (Public/Elevation.ps1, issue #239) wraps the admin check behind a mockable
-        # command, so this drives Invoke-WingetInstall's real (non-WhatIf) pre-elevation block on
-        # any machine, elevated or not. The run then stops at the (mocked) elevated relaunch.
+    Context 'No winget call before elevation (review finding P3-25)' {
+        # The run used to update the winget source before relaunching elevated. Under cross-user
+        # elevation that set up the signed-in user's source, not the elevating account's, and it was
+        # a fourth source probe in the run. The real non-admin path runs; it stops at the (mocked)
+        # elevated relaunch.
         BeforeEach {
             Mock Test-IsAdmin { $false }
             Mock Test-IsRunningLocally { $true }
             Mock Test-InvokedFromModuleContext { $false }
             Mock Test-EffectiveNonInteractive { [bool]$NonInteractive }
-            Mock Invoke-WingetSourceProbe { @{ Succeeded = $true; ExitCode = 0; TimedOut = $false } }
+            Mock Invoke-WingetProcess { throw "no winget call before elevating: $($ArgumentList -join ' ')" }
         }
 
-        It 'Actually invokes Invoke-WingetSourceProbe before elevation when running non-admin, non-WhatIf' {
+        It 'Relaunches elevated without running winget first' {
             Invoke-WingetInstall | Should -Be 0
 
-            Should -Invoke Invoke-WingetSourceProbe -Times 1 -Exactly
+            Should -Invoke Invoke-WingetProcess -Times 0 -Exactly
             Should -Invoke Restart-WithElevation -Times 1 -Exactly
-        }
-
-        It 'Does not call Invoke-WingetSourceProbe in a dry run (-WhatIf), preserving the existing dry-run message instead' {
-            Mock Install-AppWithVerification { @{ Status = 'Installed'; InstallResult = $null; FailureReason = $null } }
-
-            Invoke-WingetInstall -Apps @(@{ name = 'Contoso.AppOne' }) -WhatIf -NonInteractive | Should -Be 0
-
-            Should -Invoke Invoke-WingetSourceProbe -Times 0 -Exactly
         }
     }
 
@@ -605,18 +586,13 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
     # Review findings P2-24, P3-22, P3-23: who the run installs as is decided once, and a run as
     # SYSTEM or under cross-user elevation installs for the whole PC only.
     Context 'A run for the whole PC: SYSTEM or cross-user elevation' {
-        It 'Tells the winget setup steps it is SYSTEM, installs every app for the whole PC and leaves the WinGet.Client module out' {
+        It 'Tells the winget setup it is SYSTEM and installs every app for the whole PC' {
             Mock Get-InstallAccountContext { New-TestAccountContext -System -SessionUser 'CONTOSO\jdoe' }
 
             Invoke-WingetInstall -Apps @(@{ name = 'Contoso.App' }) -NonInteractive | Should -Be 0
 
-            Should -Invoke Test-AndInstallWinget -Times 1 -Exactly -ParameterFilter { $SystemContext }
-            Should -Invoke Test-WingetSources -Times 1 -Exactly -ParameterFilter { $SystemContext }
-            Should -Invoke Initialize-WingetSourcesForUser -Times 1 -Exactly -ParameterFilter { $AccountContext.IsSystem }
+            Should -Invoke Initialize-Winget -Times 1 -Exactly -ParameterFilter { $AccountContext.IsSystem }
             Should -Invoke Install-AppWithVerification -Times 1 -Exactly -ParameterFilter { $MachineWide }
-            # Only Repair-WinGetPackageManager uses it, and that does nothing for SYSTEM.
-            Should -Invoke Test-AndInstallWingetModule -Times 0 -Exactly
-            Should -Invoke Import-Module -Times 0 -Exactly
             $info = $script:infoMessages -join "`n"
             $info | Should -Match 'Running as SYSTEM'
             $info | Should -Match 'Microsoft does not support the winget command line as SYSTEM'
@@ -624,7 +600,7 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
 
         It 'Stops with exit code 2 when a run as SYSTEM finds no machine-wide winget it can start' {
             Mock Get-InstallAccountContext { New-TestAccountContext -System }
-            Mock Test-AndInstallWinget { $false }
+            Mock Initialize-Winget { [pscustomobject]@{ Ready = $false; Diagnosis = 'NotLaunchable' } }
 
             Invoke-WingetInstall -Apps @(@{ name = 'Contoso.App' }) -NonInteractive | Should -Be 2
 
@@ -637,8 +613,7 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
             Invoke-WingetInstall -Apps @(@{ name = 'Contoso.App' }) -NonInteractive | Should -Be 0
 
             Should -Invoke Install-AppWithVerification -Times 1 -Exactly -ParameterFilter { $MachineWide }
-            Should -Invoke Test-AndInstallWinget -Times 1 -Exactly -ParameterFilter { -not $SystemContext }
-            Should -Invoke Test-AndInstallWingetModule -Times 1 -Exactly
+            Should -Invoke Initialize-Winget -Times 1 -Exactly -ParameterFilter { $AccountContext.IsCrossUserElevation -and -not $AccountContext.IsSystem }
             ($script:infoMessages -join "`n") | Should -Not -Match 'Running as SYSTEM'
         }
 
@@ -784,7 +759,7 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
 
         It 'Waits for a running Winget-AutoUpdate before the first winget call of a real run' {
             Mock Wait-WauIdle { $script:callOrder.Add('wau-idle'); $true }
-            Mock Test-AndInstallWinget { $script:callOrder.Add('winget-check'); $true }
+            Mock Initialize-Winget { $script:callOrder.Add('winget-check'); [pscustomobject]@{ Ready = $true; Diagnosis = 'Ok' } }
 
             Invoke-WingetInstall -Apps @(@{ name = 'Contoso.AppOne' }) -NonInteractive
 
@@ -1779,12 +1754,8 @@ Describe 'Not-applicable gating end-to-end (issue #217)' {
         Mock Test-IsAdmin { $true }
         Mock Restart-WithElevation { [pscustomobject]@{ Started = $true; ExitCode = 0 } }
         Mock Test-IsRunningLocally { $true }
-        Mock Test-AndInstallWingetModule { $true }
-        Mock Import-Module { }
-        Mock Test-AndInstallWinget { $true }
-        Mock Initialize-WingetSourcesForUser { $true }
+        Mock Initialize-Winget { [pscustomobject]@{ Ready = $true; Diagnosis = 'Ok' } }
         Mock Test-AndInstallGraphicalTools { $true }
-        Mock Test-WingetSources { $true }
         Mock Remove-LegacyScheduledUpdates { $true }
         Mock Set-WindowsTerminalDefaults { }
         Mock Install-WingetAutoUpdate { @{ Status = 'DryRun'; Version = '2.12.0' } }
@@ -1849,6 +1820,8 @@ Describe 'A run as SYSTEM from an RMM agent (review findings P2-24, P3-22, P3-23
         Mock Repair-WinGetPackageManager { throw 'must not repair winget for SYSTEM' }
         Mock Invoke-WebRequest { throw 'must not download App Installer for SYSTEM' }
         Mock Add-AppxPackage { throw 'must not register a package for SYSTEM' }
+        # No App Installer Group Policy on this PC (never the runner's real registry).
+        Mock Get-WingetPolicyBlock { $null }
         # The console is hosted by Windows Terminal as far as the #271 check can tell; it must not
         # matter to SYSTEM.
         Mock Test-WindowsTerminalHostsCurrentSession { $true }
@@ -1966,6 +1939,122 @@ Describe 'A run as SYSTEM from an RMM agent (review findings P2-24, P3-22, P3-23
     }
 }
 
+# Review findings P3-25 to P3-30, through the real orchestrator and the real winget setup ladder
+# (Initialize-Winget and its helpers): only the winget process, the Appx and WinGet cmdlets, the
+# module installs and the registry are mocked, and the steps around the setup.
+Describe 'Invoke-WingetInstall with the real winget setup ladder (review findings P3-25 to P3-30)' {
+    BeforeEach {
+        Mock Write-Host { }
+        Mock Test-IsAdmin { $true }
+        Mock Test-IsRunningLocally { $true }
+        Mock Get-InstallAccountContext { New-TestAccountContext }
+        Mock Get-PendingRestartState { New-TestRestartState }
+        Mock Wait-WauIdle { $true }
+        Mock Test-AndInstallGraphicalTools { $true }
+        Mock Remove-LegacyScheduledUpdates { $false }
+        Mock Set-WindowsTerminalDefaults { }
+        Mock Install-WingetAutoUpdate { [pscustomobject]@{ Status = 'AlreadyPresent'; Version = '2.12.0' } }
+        Mock Install-AppWithVerification { @{ Status = 'Installed'; InstallResult = @{ ExitCode = 0 }; FailureReason = $null } }
+        $script:sleptSeconds = 0
+        Mock Start-Sleep { $script:sleptSeconds += $Seconds }
+        # The Microsoft.WinGet.Client module is not installed, and installing it must be visible.
+        Mock Get-Module { $null }
+        Mock Get-PackageProvider { $null }
+        Mock Install-PackageProvider { }
+        Mock Install-Module { }
+        Mock Import-Module { }
+        # Commands that would change the machine.
+        Mock Invoke-WebRequest { throw 'must not download App Installer' }
+        Mock Add-AppxPackage { throw 'must not register a package' }
+        Mock Repair-WinGetPackageManager { throw 'must not repair App Installer' }
+        Mock Get-AppxPackage { }
+        # No App Installer Group Policy (never the runner's real registry) unless a test sets one.
+        Mock Get-ItemProperty { throw [System.Management.Automation.ItemNotFoundException]::new('Cannot find path') }
+        # A healthy winget unless a test says otherwise.
+        Mock Invoke-ExternalProcess { New-TestProcessResult -ExitCode 0 }
+        Mock Invoke-ExternalProcess { New-TestProcessResult -ExitCode 0 -Output @('v1.12.350') } -ParameterFilter { $ArgumentList[0] -eq '--version' }
+        $script:InstallLogPath = $null
+        $script:messages = @()
+        Mock Write-Info { $script:messages += "INFO: $Message" }
+        Mock Write-Success { $script:messages += "OK: $Message" }
+        Mock Write-WarningMessage { $script:messages += "WARN: $Message" }
+        Mock Write-ErrorMessage { $script:messages += "ERROR: $Message" }
+        Mock Write-Warning { $script:messages += "WARN: $Message" }
+        Mock Write-Table { }
+    }
+
+    It 'Never installs or loads the Microsoft.WinGet.Client module when winget works (P3-26)' {
+        Invoke-WingetInstall -Apps @(@{ name = 'Contoso.AppOne' }) -NonInteractive | Should -Be 0
+
+        Should -Invoke Install-PackageProvider -Times 0 -Exactly
+        Should -Invoke Install-Module -Times 0 -Exactly
+        Should -Invoke Import-Module -Times 0 -Exactly -ParameterFilter { "$Name" -eq 'Microsoft.WinGet.Client' }
+        ($script:messages -join "`n") | Should -Not -Match 'Update functionality|Microsoft\.WinGet\.Client'
+        # One source update, and no other source command.
+        Should -Invoke Invoke-ExternalProcess -Times 1 -Exactly -ParameterFilter { $ArgumentList[0] -eq 'source' }
+        Should -Invoke Invoke-ExternalProcess -Times 1 -Exactly -ParameterFilter { ($ArgumentList -join ' ') -eq 'source update --name winget --disable-interactivity' }
+    }
+
+    It 'Stops with exit code 2 before running winget, naming the policy, when Group Policy turns winget off (P3-30)' {
+        Mock Get-ItemProperty { [pscustomobject]@{ EnableAppInstaller = 0 } } -ParameterFilter { $LiteralPath -eq 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\AppInstaller' }
+
+        Invoke-WingetInstall -Apps @(@{ name = 'Contoso.AppOne' }) -NonInteractive | Should -Be 2
+
+        Should -Invoke Invoke-ExternalProcess -Times 0 -Exactly
+        Should -Invoke Install-AppWithVerification -Times 0 -Exactly
+        Should -Invoke Install-WingetAutoUpdate -Times 0 -Exactly
+        ($script:messages -join "`n") | Should -Match "Group Policy on this PC blocks winget: 'Enable App Installer' is Disabled"
+    }
+
+    It 'Stops with exit code 2 at once when winget answers 0x8A15003A, repairing and resetting nothing (P3-30)' {
+        Mock Invoke-ExternalProcess { New-TestProcessResult -ExitCode -1978335174 -Output @('This operation is disabled by Group Policy : Enable App Installer') } -ParameterFilter { $ArgumentList[0] -eq '--version' }
+
+        Invoke-WingetInstall -Apps @(@{ name = 'Contoso.AppOne' }) -NonInteractive | Should -Be 2
+
+        $script:sleptSeconds | Should -Be 0
+        Should -Invoke Invoke-ExternalProcess -Times 1 -Exactly
+        Should -Invoke Repair-WinGetPackageManager -Times 0 -Exactly
+        Should -Invoke Add-AppxPackage -Times 0 -Exactly
+        Should -Invoke Install-WingetAutoUpdate -Times 0 -Exactly
+        ($script:messages -join "`n") | Should -Match 'Group Policy on this PC blocks winget'
+    }
+
+    It 'Repairs nothing when the source update times out: a repair cannot fix a network (P3-28)' {
+        Mock Invoke-ExternalProcess { New-TestProcessResult -TimedOut } -ParameterFilter { $ArgumentList[0] -eq 'source' -and $ArgumentList[1] -eq 'update' }
+
+        Invoke-WingetInstall -Apps @(@{ name = 'Contoso.AppOne' }) -NonInteractive | Should -Be 0
+
+        Should -Invoke Repair-WinGetPackageManager -Times 0 -Exactly
+        Should -Invoke Add-AppxPackage -Times 0 -Exactly
+        Should -Invoke Invoke-ExternalProcess -Times 0 -Exactly -ParameterFilter { $ArgumentList[0] -eq 'source' -and $ArgumentList[1] -eq 'reset' }
+        @($script:messages | Where-Object { $_ -like 'WARN: The winget source could not be set up*' }).Count | Should -Be 1
+    }
+
+    # E2E run 36384683838, second pass: three ladders, three wrong diagnoses ('Installations may fail
+    # with 0x80073D19', 'source "winget" appears to be missing', a source.msix rejection), the
+    # aka.ms/getwinget download, and never the -AllUsers repair the cmdlet asked for.
+    It 'On the #279 wedge, repairs for all users first and gives one diagnosis that names the missing framework (P3-25, P3-27, P3-28)' {
+        Mock Invoke-ExternalProcess { New-TestProcessResult -LaunchFailed -LaunchErrorCode 1920 -LaunchError 'The file cannot be accessed by the system.' } -ParameterFilter { $ArgumentList[0] -eq '--version' }
+        $script:newFolder = Join-Path $TestDrive 'Microsoft.DesktopAppInstaller_1.29.290.0_x64__8wekyb3d8bbwe'
+        Mock Get-DesktopAppInstallerPackageInfo { [pscustomobject]@{ Version = [version]'1.29.290.0'; Architecture = 'X64'; Status = 'Ok'; InstallLocation = $script:newFolder } }
+        Mock Get-AppxPackage { [pscustomobject]@{ Name = 'Microsoft.DesktopAppInstaller'; InstallLocation = $script:newFolder } }
+        Mock Add-AppxPackage { throw [System.Runtime.InteropServices.COMException]::new('Deployment failed with HRESULT: 0x80073CF3, Package failed updates, dependency or conflict validation. Provide the framework "Microsoft.WindowsAppRuntime.1.8"', -2147009293) }
+        Mock Get-WindowsAppRuntimePackageInfo { }
+        Mock Test-AndInstallWingetModule { $true }
+        Mock Repair-WinGetPackageManager { throw 'Failed to repair winget. Try running with -AllUsers in administrator mode.' }
+
+        Invoke-WingetInstall -Apps @(@{ name = 'Contoso.AppOne' }) -NonInteractive | Should -Be 2
+
+        Should -Invoke Repair-WinGetPackageManager -Times 1 -Exactly -ParameterFilter { $AllUsers }
+        Should -Invoke Invoke-WebRequest -Times 0 -Exactly
+        Should -Invoke Install-AppWithVerification -Times 0 -Exactly
+        $diagnosis = @($script:messages | Where-Object { $_ -like 'ERROR: *' -and $_ -ne 'ERROR: Winget is required for this script. Exiting.' })
+        $diagnosis.Count | Should -Be 1
+        $diagnosis[0] | Should -Match '0x80073CF3 ERROR_INSTALL_RESOLVE_DEPENDENCY_FAILED.*Fix: install the Microsoft\.WindowsAppRuntime\.1\.8 framework'
+        ($script:messages -join "`n") | Should -Not -Match 'Installations may fail with 0x80073D19|appears to be missing|source\.msix|install winget manually'
+    }
+}
+
 # Review findings P2-8, P2-9 and P2-10: with winget.exe unable to start (E2E run 36384683838, second
 # pass, every app already installed), each app spent 9 launches and 75 seconds of backoff, twice:
 # about 24 minutes, then every app reported as 'package not found after install'. Here the real
@@ -1977,13 +2066,9 @@ Describe 'Wedged winget: the run fails fast (review findings P2-8, P2-9, P2-10)'
         Mock Write-Host { }
         Mock Test-IsAdmin { $true }
         Mock Test-IsRunningLocally { $true }
-        Mock Test-AndInstallWingetModule { $true }
-        Mock Import-Module { }
         Mock Wait-WauIdle { $true }
-        Mock Test-AndInstallWinget { $true }
-        Mock Initialize-WingetSourcesForUser { $true }
+        Mock Initialize-Winget { [pscustomobject]@{ Ready = $true; Diagnosis = 'Ok' } }
         Mock Test-AndInstallGraphicalTools { $true }
-        Mock Test-WingetSources { $true }
         Mock Remove-LegacyScheduledUpdates { $true }
         Mock Set-WindowsTerminalDefaults { }
         Mock Install-WingetAutoUpdate { [pscustomobject]@{ Status = 'FrameworkMissing'; Version = '2.12.0'; FrameworkMissing = $true } }
@@ -2131,10 +2216,10 @@ Describe 'Wedged winget: the run fails fast (review findings P2-8, P2-9, P2-10)'
 # P2-16: the dry run promised 'No system changes will be made' but its setup helpers ran their real
 # remediation - the NuGet provider and two PSGallery modules installed for all users, App Installer
 # registered, repaired or downloaded, and `winget source reset --force` - because every dry-run test
-# mocked those helpers away. Here they all run for real (Test-AndInstallWingetModule,
-# Test-AndInstallWinget with Register-WingetAppInstallerForUser and Invoke-WingetPackageManagerRepair
-# behind it, Initialize-WingetSourcesForUser, Test-AndInstallGraphicalTools, Test-WingetSources,
-# Install-AppWithVerification and the rest), on a machine where each of them has something to fix.
+# mocked those helpers away. Here they all run for real (Initialize-Winget with
+# Register-WingetAppInstallerForUser and Invoke-WingetPackageManagerRepair behind it,
+# Test-AndInstallGraphicalTools, Install-AppWithVerification and the rest), on a machine where each
+# of them has something to fix.
 # Only the commands that read or change the machine are mocked: the read-only probes describe that
 # machine, and every command that would change it is asserted never to run.
 Describe 'Dry run leaves the machine unchanged (P2-16)' {
@@ -2190,8 +2275,9 @@ Describe 'Dry run leaves the machine unchanged (P2-16)' {
         Mock Unregister-ScheduledTask { }
         Mock Set-ScheduledTask { }
         Mock winget { $global:LASTEXITCODE = 0 }
-        # A same-user run, whatever account runs the suite.
+        # A same-user run, whatever account runs the suite, and no App Installer Group Policy.
         Mock Get-InstallAccountContext { New-TestAccountContext }
+        Mock Get-WingetPolicyBlock { $null }
 
         # Last: mocking Get-Command breaks the command lookup that Mock itself relies on for the
         # targets above (see TestHelpers.ps1). Nothing is available by default: no winget, no
@@ -2234,49 +2320,27 @@ Describe 'Dry run leaves the machine unchanged (P2-16)' {
         ($script:infoMessages -join "`n") | Should -Match '\[DRY-RUN\] Would remove the legacy update data directory'
         Should -Invoke Write-Table -Times 1 -Exactly -ParameterFilter { $Title -eq 'Installation Summary' }
         $dryRunLines = ($script:infoMessages | Where-Object { $_ -match '^\[DRY-RUN\]' }) -join "`n"
-        $dryRunLines | Should -Match 'Microsoft\.WinGet\.Client module not found\. A real run would install it'
-        $dryRunLines | Should -Match 'Winget is not available for this account \(winget could not be started: .winget. was not found on PATH\)\. A real run would bootstrap it'
+        $dryRunLines | Should -Match 'Winget is not available for this account \(winget could not be started: .winget. was not found on PATH\)\. A real run would set it up: .*Repair-WinGetPackageManager \(installing its Microsoft\.WinGet\.Client module from the PowerShell Gallery first if it is missing\)'
         $dryRunLines | Should -Match 'Out-GridView is not available\. A real run would install Microsoft\.PowerShell\.GraphicalTools'
-        $dryRunLines | Should -Match 'Skipping the winget source check: winget is not available for this account yet'
         $dryRunLines | Should -Match 'this preview cannot tell which apps are already installed'
         $dryRunLines | Should -Match 'Would install: Contoso\.AppOne'
         $script:errorMessages | Should -Not -Contain 'Winget is required for this script. Exiting.'
     }
 
-    It 'Reports a broken winget source instead of resetting it when winget is present' {
+    It 'Neither updates nor resets the winget source when winget is present, and says what a real run would do' {
         Mock Test-IsAdmin { $true }
-        Mock Get-Command { [pscustomobject]@{ Name = 'winget.exe' } } -ParameterFilter { $Name -eq 'winget' }
-        # The winget mock below scripts each winget command.
-        Mock Invoke-WingetProcess { Invoke-TestWingetMock -ArgumentList $ArgumentList }
-        Mock winget {
-            if ($args[0] -eq '--version') {
-                $global:LASTEXITCODE = 0
-                return 'v1.12.350'
-            }
-            if ($args[0] -eq 'source' -and $args[1] -eq 'list') {
-                $global:LASTEXITCODE = 0
-                return 'winget      https://cdn.winget.microsoft.com/cache'
-            }
-            if ($args[0] -eq 'search') {
-                $global:LASTEXITCODE = -1978335217
-                return 'Failed when opening source(s); try the source reset command if the problem persists. 0x8a15000f'
-            }
-            $global:LASTEXITCODE = 0
-        }
+        Mock Invoke-ExternalProcess { New-TestProcessResult -ExitCode 0 -Output @('v1.12.350') } -ParameterFilter { $ArgumentList[0] -eq '--version' }
 
         $result = Invoke-WingetInstall -Apps @(@{ name = 'Contoso.AppOne' }) -WhatIf -NonInteractive
 
-        # Only the read-only probes ran: `winget --version`, `winget source list` and `winget search`.
-        Should -Invoke winget -Times 0 -Exactly -ParameterFilter { $args[0] -notin @('--version', 'list', 'search') -and -not ($args[0] -eq 'source' -and $args[1] -eq 'list') }
-        Should -Invoke winget -Times 1 -Exactly -ParameterFilter { $args[0] -eq 'search' }
+        # Only the read-only checks ran: `winget --version` and the per-app `winget list`.
+        Should -Invoke Invoke-ExternalProcess -Times 0 -Exactly -ParameterFilter { $ArgumentList[0] -notin @('list', '--version') }
         Should -Invoke Add-AppxPackage -Times 0 -Exactly
         Should -Invoke Repair-WinGetPackageManager -Times 0 -Exactly
         Should -Invoke Start-Process -Times 0 -Exactly
-        Should -Invoke Invoke-ExternalProcess -Times 0 -Exactly
 
         $result | Should -Be 0
-        ($script:infoMessages -join "`n") | Should -Match '\[DRY-RUN\] Winget source data is corrupted\. A real run would repair it: winget source reset --force'
-        $script:warningMessages | Should -Not -Contain 'Winget sources could not be repaired. Some installations may fail.'
+        ($script:infoMessages -join "`n") | Should -Match '\[DRY-RUN\] Would update the winget source for .CONTOSO\\admin-tech. \(winget source update --name winget\), and fix it if that fails: winget source reset --force'
     }
 }
 

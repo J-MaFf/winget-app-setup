@@ -51,13 +51,15 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6
 
-      - name: Install Microsoft.WinGet.Client (mockable winget cmdlets)
+      - name: Install Microsoft.WinGet.Client (Repair-WinGetPackageManager)
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          # The unit suite mocks Get-WinGetPackage etc.; Pester can only mock commands that
-          # already exist, so the Microsoft.WinGet.Client cmdlets must be present on the runner.
-          if (-not (Get-Command Get-WinGetPackage -ErrorAction SilentlyContinue)) {
+          # The installer's only cmdlet from this module is Repair-WinGetPackageManager, which it
+          # installs the module for only when it has to repair winget. Here it is needed twice: the
+          # build guard below requires every entry of build/windows-only-commands.txt to resolve on
+          # Windows, and the repair tests mock the real cmdlet with its typed parameters.
+          if (-not (Get-Command Repair-WinGetPackageManager -ErrorAction SilentlyContinue)) {
             Install-Module Microsoft.WinGet.Client -Force -SkipPublisherCheck -Scope CurrentUser
           }
           Import-Module Microsoft.WinGet.Client
@@ -71,9 +73,9 @@ jobs:
           # which exits non-zero on failure; that propagates through $LASTEXITCODE and fails the job.
           #
           # This runs AFTER the Microsoft.WinGet.Client install: the undefined-reference guard
-          # resolves external cmdlets via Get-Command, so the WinGet client cmdlets the installer
-          # calls (Get-WinGetPackage, etc.) must already be discoverable on the runner or the guard
-          # false-positives on them.
+          # resolves external cmdlets via Get-Command, so the WinGet client cmdlet the installer
+          # calls (Repair-WinGetPackageManager) must already be discoverable on the runner or the
+          # guard false-positives on it.
           pwsh -File ./build/Build-WingetInstallScript.ps1 -Check
 
       - name: Run Pester

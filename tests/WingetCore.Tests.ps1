@@ -1,7 +1,7 @@
 # WingetCore.Tests.ps1
-# Tests for WingetAppSetup/Public/WingetCore.ps1: winget bootstrap, source health/repair,
-# package install (0x80073d19 backoff, scope fallback), installed-checks, per-user source
-# init, and the PowerShell always-latest / MSIX provisioning strategies.
+# Tests for WingetAppSetup/Public/WingetCore.ps1: the winget setup ladder (Initialize-Winget),
+# package install (0x80073d19 backoff, scope fallback), installed-checks, and the PowerShell
+# always-latest / MSIX provisioning strategies.
 # Split from the old single-file suite Test-WingetAppInstall.Tests.ps1 (issue #192).
 
 # Load the module's functions once for this file. TestHelpers.ps1 resolves the repo paths
@@ -9,389 +9,207 @@
 # distributable winget-app-install.ps1 is generated from it by build/Build-WingetInstallScript.ps1).
 BeforeAll {
     . (Join-Path $PSScriptRoot 'TestHelpers.ps1')
-}
 
-Describe 'Test-AndInstallWingetModule' {
-    BeforeAll {
+    # Every message the ladder prints, in order, with its kind.
+    function Register-LadderMessageCapture {
+        $script:log = @()
         Mock Write-Host { }
-        Mock Write-Warning { }
-
+        Mock Write-Info { $script:log += "INFO: $Message" }
+        Mock Write-Success { $script:log += "OK: $Message" }
+        Mock Write-WarningMessage { $script:log += "WARN: $Message" }
+        Mock Write-ErrorMessage { $script:log += "ERROR: $Message" }
     }
 
-    Context 'When module is already available' {
-        It 'Should return true without installing' {
-            Mock Get-Module { @{ Name = 'Microsoft.WinGet.Client' } } -ParameterFilter { $Name -eq 'Microsoft.WinGet.Client' -and $ListAvailable }
-            Mock Get-PackageProvider { }
-            Mock Install-PackageProvider { }
-            Mock Install-Module { }
-
-            $result = Test-AndInstallWingetModule
-            $result | Should -Be $true
-            Should -Invoke Install-Module -Times 0
+    function New-LaunchProbe {
+        param ([switch]$Launchable, [string]$Reason = "winget could not be started: 'winget' was not found on PATH", $ExitCode = $null)
+        if ($Launchable) {
+            return [pscustomobject]@{ Launchable = $true; Version = 'v1.12.350'; Reason = $null; ExitCode = 0; Attempts = 1 }
         }
+        [pscustomobject]@{ Launchable = $false; Version = $null; Reason = $Reason; ExitCode = $ExitCode; Attempts = 1 }
     }
 
-    Context 'When module is missing and installation succeeds' {
-        It 'Should install dependencies and return true' {
-            $script:moduleInstalled = $false
-
-            Mock Get-Module {
-                if ($script:moduleInstalled) {
-                    return @{ Name = 'Microsoft.WinGet.Client' }
-                }
-                return $null
-            } -ParameterFilter { $Name -eq 'Microsoft.WinGet.Client' -and $ListAvailable }
-
-            Mock Get-PackageProvider { $null } -ParameterFilter { $Name -eq 'NuGet' }
-            Mock Install-PackageProvider { } -ParameterFilter { $Name -eq 'NuGet' }
-            Mock Install-Module { $script:moduleInstalled = $true }
-
-            $result = Test-AndInstallWingetModule
-            $result | Should -Be $true
-            Should -Invoke Install-PackageProvider -Times 1 -ParameterFilter { $Name -eq 'NuGet' }
-            Should -Invoke Install-Module -Times 1
+    function New-SourceProbe {
+        param ($ExitCode = 0, [switch]$TimedOut, [string]$LaunchError)
+        if ($LaunchError) {
+            return @{ Succeeded = $false; ExitCode = $null; TimedOut = $false; LaunchError = $LaunchError }
         }
-
-        It 'Should install the module from the PowerShell Gallery only (review finding P3-20)' {
-            Mock Get-Module { $null } -ParameterFilter { $Name -eq 'Microsoft.WinGet.Client' -and $ListAvailable }
-            Mock Get-PackageProvider { [pscustomobject]@{ Name = 'NuGet' } } -ParameterFilter { $Name -eq 'NuGet' }
-            Mock Install-PackageProvider { }
-            Mock Install-Module { }
-
-            [void](Test-AndInstallWingetModule)
-
-            # Elevated and for all users: another repository registered on the machine must not be
-            # able to serve it.
-            Should -Invoke Install-Module -Times 1 -Exactly -ParameterFilter {
-                $Name -eq 'Microsoft.WinGet.Client' -and $Repository -eq 'PSGallery' -and $Scope -eq 'AllUsers'
-            }
+        if ($TimedOut) {
+            return @{ Succeeded = $false; ExitCode = $null; TimedOut = $true; LaunchError = $null }
         }
+        @{ Succeeded = ($ExitCode -eq 0); ExitCode = $ExitCode; TimedOut = $false; LaunchError = $null }
     }
 
-    Context 'When module installation fails' {
-        It 'Should return false and emit warning' {
-            Mock Get-Module { $null } -ParameterFilter { $Name -eq 'Microsoft.WinGet.Client' -and $ListAvailable }
-            Mock Get-PackageProvider { $null } -ParameterFilter { $Name -eq 'NuGet' }
-            Mock Install-PackageProvider { }
-            Mock Install-Module { throw 'Failure installing module' }
-
-            $result = Test-AndInstallWingetModule
-            $result | Should -Be $false
-            Should -Invoke Install-Module -Times 1
-        }
-    }
-
-    # P2-16: a dry run used to install the NuGet provider and this module for all users.
-    Context 'Dry run (-WhatIf)' {
-        BeforeEach {
-            Mock Get-PackageProvider { $null }
-            Mock Install-PackageProvider { }
-            Mock Install-Module { }
-            $script:infoMessages = @()
-            Mock Write-Info { $script:infoMessages += $Message }
-        }
-
-        It 'Reports what a real run would install and installs nothing when the module is missing' {
-            Mock Get-Module { $null } -ParameterFilter { $Name -eq 'Microsoft.WinGet.Client' -and $ListAvailable }
-
-            Test-AndInstallWingetModule -WhatIf | Should -Be $false
-
-            Should -Invoke Get-PackageProvider -Times 0 -Exactly
-            Should -Invoke Install-PackageProvider -Times 0 -Exactly
-            Should -Invoke Install-Module -Times 0 -Exactly
-            ($script:infoMessages -join "`n") | Should -Match '\[DRY-RUN\] Microsoft\.WinGet\.Client module not found\. A real run would install it for all users'
-        }
-
-        It 'Still reports an installed module as available' {
-            Mock Get-Module { @{ Name = 'Microsoft.WinGet.Client' } } -ParameterFilter { $Name -eq 'Microsoft.WinGet.Client' -and $ListAvailable }
-
-            Test-AndInstallWingetModule -WhatIf | Should -Be $true
-
-            Should -Invoke Install-Module -Times 0 -Exactly
-            $script:infoMessages.Count | Should -Be 0
-        }
-    }
-}
-
-Describe 'Test-AndInstallWinget' {
-    BeforeAll {
-        Mock Write-Host { }
-    }
-
-    BeforeEach {
-        # Safety net (#181): never let the real Repair-WinGetPackageManager run during unit
-        # tests — it downloads and re-registers the App Installer. The cmdlet exists on dev
-        # machines and CI (Microsoft.WinGet.Client is installed), so Pester can mock it
-        # unconditionally.
-        Mock Repair-WinGetPackageManager { }
-        # Default: the repair cmdlet appears absent, so tests exercise the plain
-        # aka.ms/getwinget fallback unless a test overrides this lookup.
-        Mock Get-Command { $null } -ParameterFilter { $Name -eq 'Repair-WinGetPackageManager' }
-        # Default: nothing to register for this account, so the ladder's first rung (issue #265)
-        # is a no-op and the pre-existing repair/download behavior below is what gets exercised.
-        # Mocked as a seam rather than mocking Get-AppxPackage/Add-AppxPackage directly, so an
-        # accidental miss can never reach the real AppX deployment cmdlets.
-        Mock Register-WingetAppInstallerForUser { $false }
-        # A signed-in account's run, not SYSTEM's, whatever account runs the suite (review finding
-        # P2-24: a SYSTEM run takes Test-MachineWingetAvailable instead of these rungs).
-        Mock Test-IsSystemAccount { $false }
-        # Whether winget can be started (review finding P3-9: a real `winget --version`, not
-        # Get-Command). Tests flip $script:wingetLaunchable from the rung that fixes winget.
-        $script:wingetLaunchable = $false
-        Mock Test-WingetLaunchable {
-            if ($script:wingetLaunchable) {
-                return [pscustomobject]@{ Launchable = $true; Version = 'v1.12.350'; Reason = $null; Attempts = 1 }
-            }
-            [pscustomobject]@{ Launchable = $false; Version = $null; Reason = "winget could not be started: 'winget' was not found on PATH"; Attempts = 1 }
-        }
-    }
-
-    Context 'When winget is available' {
-        It 'Should return true and not attempt installation' {
-            $script:wingetLaunchable = $true
-            Mock Invoke-WebRequest { }
-            $result = Test-AndInstallWinget
-            $result | Should -Be $true
-            Should -Invoke Test-WingetLaunchable -Times 1 -Exactly
-            Should -Invoke Register-WingetAppInstallerForUser -Times 0 -Exactly
-            Should -Invoke Invoke-WebRequest -Times 0
-        }
-    }
-
-    Context 'When winget is not available and installation succeeds' {
-        It 'Should attempt installation, re-verify winget, and return true' {
-            Mock Get-Command { $null } -ParameterFilter { $Name -eq 'Repair-WinGetPackageManager' }
-            Mock Invoke-WebRequest { }
-            Mock Add-AppxPackage { $script:wingetLaunchable = $true }
-            Mock Remove-Item { }
-            $result = Test-AndInstallWinget
-            $result | Should -Be $true
-            Should -Invoke Invoke-WebRequest -Times 1
-            Should -Invoke Add-AppxPackage -Times 1
-            Should -Invoke Remove-Item -Times 1
-            # The fallback must verify winget after Add-AppxPackage (issue #177): initial check + re-check.
-            Should -Invoke Test-WingetLaunchable -Times 2 -Exactly
-        }
-    }
-
-    Context 'When App Installer registers but winget is still unavailable (issue #177)' {
-        It 'Should return false and direct the user to install winget manually' {
-            Mock Get-Command { $null } -ParameterFilter { $Name -eq 'Repair-WinGetPackageManager' }
-            Mock Invoke-WebRequest { }
-            Mock Add-AppxPackage { }
-            Mock Remove-Item { }
-            Mock Write-ErrorMessage { }
-
-            $result = Test-AndInstallWinget
-            $result | Should -Be $false
-            Should -Invoke Add-AppxPackage -Times 1
-            Should -Invoke Write-ErrorMessage -Times 1 -ParameterFilter { $Message -match 'install winget manually' }
-        }
-    }
-
-    Context 'When winget is not available and installation fails' {
-        It 'Should attempt installation, catch error, and return false' {
-            Mock Get-Command { $null } -ParameterFilter { $Name -eq 'Repair-WinGetPackageManager' }
-            Mock Invoke-WebRequest { throw 'Network error' }
-            $result = Test-AndInstallWinget
-            $result | Should -Be $false
-            Should -Invoke Invoke-WebRequest -Times 1
-        }
-    }
-
-    Context 'When Repair-WinGetPackageManager is available and bootstraps winget' {
-        It 'Should return true without downloading the App Installer' {
-            Mock Get-Command { return $true } -ParameterFilter { $Name -eq 'Repair-WinGetPackageManager' }
-            Mock Repair-WinGetPackageManager { $script:wingetLaunchable = $true }
-            Mock Invoke-WebRequest { }
-            Mock Add-AppxPackage { }
-
-            $result = Test-AndInstallWinget
-            $result | Should -Be $true
-            Should -Invoke Repair-WinGetPackageManager -Times 1 -Exactly
-            Should -Invoke Invoke-WebRequest -Times 0
-            Should -Invoke Add-AppxPackage -Times 0
-        }
-    }
-
-    Context 'When Repair-WinGetPackageManager is available but throws' {
-        It 'Should fall back to the App Installer download and return true once winget resolves' {
-            # winget is absent until the App Installer fallback registers it; the fallback's
-            # post-install re-check (issue #177) must then find it and return $true.
-            Mock Get-Command { return $true } -ParameterFilter { $Name -eq 'Repair-WinGetPackageManager' }
-            Mock Repair-WinGetPackageManager { throw 'Repair failed' }
-            Mock Invoke-WebRequest { }
-            Mock Add-AppxPackage { $script:wingetLaunchable = $true }
-            Mock Remove-Item { }
-
-            $result = Test-AndInstallWinget
-            $result | Should -Be $true
-            # Unforced then forced (issue #265): a non-downgrade failure still escalates to -Force,
-            # which remains the documented remedy for a broken App Installer registration.
-            Should -Invoke Repair-WinGetPackageManager -Times 2 -Exactly
-            Should -Invoke Repair-WinGetPackageManager -Times 1 -Exactly -ParameterFilter { -not $Force }
-            Should -Invoke Repair-WinGetPackageManager -Times 1 -Exactly -ParameterFilter { $Force }
-            Should -Invoke Invoke-WebRequest -Times 1
-            Should -Invoke Add-AppxPackage -Times 1
-        }
-    }
-
-    Context 'When App Installer is already staged on the machine (issue #265)' {
-        It 'Registers it for this account and returns true without repairing or downloading' {
-            Mock Get-Command { return $true } -ParameterFilter { $Name -eq 'Repair-WinGetPackageManager' }
-            Mock Register-WingetAppInstallerForUser { $script:wingetLaunchable = $true; return $true }
-            Mock Invoke-WebRequest { }
-            Mock Add-AppxPackage { }
-
-            $result = Test-AndInstallWinget
-
-            $result | Should -Be $true
-            Should -Invoke Register-WingetAppInstallerForUser -Times 1 -Exactly
-            Should -Invoke Repair-WinGetPackageManager -Times 0 -Exactly
-            Should -Invoke Invoke-WebRequest -Times 0
-            Should -Invoke Add-AppxPackage -Times 0
-        }
-
-        It 'Falls through to the repair cmdlet when registration does not make winget start' {
-            # Registration can report success without winget being able to start, so winget is
-            # started to check rather than trusting the registration result.
-            Mock Get-Command { return $true } -ParameterFilter { $Name -eq 'Repair-WinGetPackageManager' }
-            Mock Register-WingetAppInstallerForUser { $true }
-            Mock Repair-WinGetPackageManager { $script:wingetLaunchable = $true }
-            Mock Invoke-WebRequest { }
-            Mock Add-AppxPackage { }
-
-            $result = Test-AndInstallWinget
-
-            $result | Should -Be $true
-            Should -Invoke Register-WingetAppInstallerForUser -Times 1 -Exactly
-            Should -Invoke Repair-WinGetPackageManager -Times 1 -Exactly
-            Should -Invoke Invoke-WebRequest -Times 0
-        }
-    }
-
-    Context 'When the repair cmdlet is blocked by a dependency downgrade (issue #265)' {
-        It 'Does not retry with -Force and falls through to the App Installer download' {
-            Mock Get-Command { return $true } -ParameterFilter { $Name -eq 'Repair-WinGetPackageManager' }
-            Mock Repair-WinGetPackageManager {
-                throw 'Deployment failed with HRESULT: 0x80073D06, The package could not be installed because a higher version of this package is already installed.'
-            }
-            Mock Invoke-WebRequest { }
-            Mock Add-AppxPackage { $script:wingetLaunchable = $true }
-            Mock Remove-Item { }
-
-            $result = Test-AndInstallWinget
-
-            $result | Should -Be $true
-            # One attempt only: -Force cannot fix a rejection caused by a NEWER dependency already
-            # being present, and retrying would burn a second multi-hundred-megabyte download.
-            Should -Invoke Repair-WinGetPackageManager -Times 1 -Exactly
-            Should -Invoke Add-AppxPackage -Times 1
-        }
-    }
-
-    # P2-16: a dry run used to register or repair App Installer, or download and install it.
-    Context 'Dry run (-WhatIf)' {
-        BeforeEach {
-            Mock Invoke-WingetPackageManagerRepair { @{ Available = $true; Succeeded = $true; DowngradeRejected = $false; MissingFrameworkDependency = $false; Message = '' } }
-            Mock Invoke-WebRequest { }
-            Mock Add-AppxPackage { }
-            Mock Remove-Item { }
-            $script:infoMessages = @()
-            Mock Write-Info { $script:infoMessages += $Message }
-        }
-
-        It 'Reports the bootstrap a real run would attempt and runs none of it when winget is missing' {
-            # Every rung is available, so only the -WhatIf short-circuit keeps them from running.
-            Mock Get-Command { $true } -ParameterFilter { $Name -eq 'Repair-WinGetPackageManager' }
-            Mock Register-WingetAppInstallerForUser { $true }
-
-            Test-AndInstallWinget -WhatIf | Should -Be $false
-
-            Should -Invoke Register-WingetAppInstallerForUser -Times 0 -Exactly
-            Should -Invoke Invoke-WingetPackageManagerRepair -Times 0 -Exactly
-            Should -Invoke Repair-WinGetPackageManager -Times 0 -Exactly
-            Should -Invoke Invoke-WebRequest -Times 0 -Exactly
-            Should -Invoke Add-AppxPackage -Times 0 -Exactly
-            ($script:infoMessages -join "`n") | Should -Match '\[DRY-RUN\] Winget is not available for this account \(winget could not be started: .*\)\. A real run would bootstrap it'
-        }
-
-        It 'Still reports winget as available when it can be started' {
-            $script:wingetLaunchable = $true
-
-            Test-AndInstallWinget -WhatIf | Should -Be $true
-
-            Should -Invoke Register-WingetAppInstallerForUser -Times 0 -Exactly
-            $script:infoMessages.Count | Should -Be 0
-        }
-    }
-}
-
-# Review finding P3-9: Test-AndInstallWinget's checks were `Get-Command winget`, which only proves the
-# alias is on PATH. Run 35406706712 printed 'Winget bootstrapped successfully' after both repair
-# attempts failed, then every winget call failed with 'No applicable app licenses found'. These run
-# the real Test-WingetLaunchable against a mocked Invoke-WingetProcess.
-Describe 'Test-AndInstallWinget with winget on PATH but unable to run (review finding P3-9)' {
-    BeforeEach {
-        Mock Write-Host { }
-        Mock Repair-WinGetPackageManager { }
-        Mock Register-WingetAppInstallerForUser { $false }
-        Mock Write-Success { }
-        $script:warnings = @()
-        Mock Write-WarningMessage { $script:warnings += $Message }
-        Mock Write-ErrorMessage { }
-        Mock Write-Info { }
+    # The ladder's helpers, mocked: winget starts unless a test says otherwise, no fix changes
+    # anything, and the source updates. Commands that would change the machine throw.
+    function Register-LadderMocks {
+        param ([switch]$RealLaunchCheck)
+        Register-LadderMessageCapture
         Mock Start-Sleep { }
-        Mock Invoke-WebRequest { throw 'Network error' }
-        # The alias is on PATH (Get-Command finds it) but winget cannot run.
-        Mock Get-Command { [pscustomobject]@{ Name = 'winget.exe'; Source = 'C:\Users\admin\AppData\Local\Microsoft\WindowsApps\winget.exe' } } -ParameterFilter { $Name -eq 'winget' }
-        Mock Get-Command { return $true } -ParameterFilter { $Name -eq 'Repair-WinGetPackageManager' }
-        Mock Invoke-WingetProcess { New-TestProcessResult -ExitCode -1978335230 -Output @('No applicable app licenses found.') } -ParameterFilter { $ArgumentList[0] -eq '--version' }
-        Mock Invoke-WingetPackageManagerRepair { @{ Available = $true; Succeeded = $false; DowngradeRejected = $false; MissingFrameworkDependency = $false; Message = 'Repair-WinGetPackageManager failed' } }
-        Mock Test-IsSystemAccount { $false }
-    }
-
-    It 'Does not report success after the repair attempts failed, and says that winget cannot run' {
-        $result = Test-AndInstallWinget
-
-        $result | Should -Be $false
-        Should -Invoke Write-Success -Times 0 -Exactly
-        Should -Invoke Invoke-WingetPackageManagerRepair -Times 1 -Exactly
-        ($script:warnings -join "`n") | Should -Match "Winget is present but cannot run after the repair attempt: 'winget --version' exited with 0x8A150002 INVALID_CL_ARGUMENTS"
-    }
-
-    It 'Does not take an alias on PATH as a usable winget at the start of the run' {
-        Test-AndInstallWinget | Out-Null
-
-        Should -Invoke Invoke-WingetProcess -ParameterFilter { $ArgumentList[0] -eq '--version' }
-        $script:warnings | Should -Contain "Winget is not available: 'winget --version' exited with 0x8A150002 INVALID_CL_ARGUMENTS."
+        Mock Get-WingetPolicyBlock { $null }
+        $script:wingetLaunchable = $true
+        if (-not $RealLaunchCheck) {
+            Mock Test-WingetLaunchable { New-LaunchProbe -Launchable:$script:wingetLaunchable }
+        }
+        Mock Register-WingetAppInstallerForUser { [pscustomobject]@{ Registered = $false; ErrorCodes = @() } }
+        Mock Invoke-WingetPackageManagerRepair { [pscustomobject]@{ Available = $true; Succeeded = $false; ErrorCodes = @() } }
+        Mock Get-WindowsAppRuntimeStatus { [pscustomobject]@{ Present = $true; Detail = 'Microsoft.WindowsAppRuntime.1.8 >= 8000.616.304.0 for X64 required; found: X64 8000.994.2142.0' } }
+        Mock Invoke-WingetSourceProbe { New-SourceProbe -ExitCode 0 }
+        Mock Reset-WingetSource { $true }
+        Mock Repair-WinGetPackageManager { throw 'must not run the real repair cmdlet' }
+        Mock Invoke-WebRequest { throw 'must not download App Installer' }
+        Mock Add-AppxPackage { throw 'must not register a package' }
+        $script:account = New-TestAccountContext
     }
 }
 
-# Review of item 9: Get-Command used to let the run go on while winget.exe was briefly locked. The
-# launch check that replaced it went down the bootstrap ladder (re-register App Installer,
-# Repair-WinGetPackageManager, the aka.ms/getwinget download) after two tries 5 seconds apart, so an
-# App Installer update in progress (issues #253/#258) got repaired underneath. The real
-# Test-WingetLaunchable runs; time is simulated (each launch takes a second, Start-Sleep advances it).
-Describe 'Test-AndInstallWinget with winget locked at the start of the run' {
+# Initialize-Winget: one probe, classify, fix ladder (review findings P3-25 to P3-31), in place of
+# Test-AndInstallWinget, Initialize-WingetSourcesForUser and Test-WingetSources. The helpers it calls
+# are tested in WingetBootstrap.Tests.ps1; here they are mocked, except where a Describe says it runs
+# them for real.
+Describe 'Initialize-Winget: can winget start? (review findings P3-9, P3-25)' {
     BeforeEach {
-        Mock Write-Host { }
-        Mock Write-Success { }
-        Mock Write-WarningMessage { }
-        Mock Write-ErrorMessage { }
-        Mock Write-Info { }
-        Mock Repair-WinGetPackageManager { }
-        Mock Register-WingetAppInstallerForUser { $false }
-        Mock Invoke-WingetPackageManagerRepair { @{ Available = $true; Succeeded = $false; DowngradeRejected = $false; MissingFrameworkDependency = $false; Message = '' } }
-        Mock Get-Command { return $true } -ParameterFilter { $Name -eq 'Repair-WinGetPackageManager' }
-        Mock Invoke-WebRequest { throw 'Network error' }
-        Mock Add-AppxPackage { }
-        Mock Test-IsSystemAccount { $false }
+        Register-LadderMocks
+    }
+
+    It 'Checks winget once, waiting up to 75 seconds for a failure that can clear, runs no fix and updates the source' {
+        $result = Initialize-Winget -AccountContext $script:account
+
+        $result.Ready | Should -Be $true
+        $result.Diagnosis | Should -Be 'Ok'
+        Should -Invoke Test-WingetLaunchable -Times 1 -Exactly -ParameterFilter { $Attempts -eq 6 -and $RetryDelaySeconds -eq 15 }
+        Should -Invoke Register-WingetAppInstallerForUser -Times 0 -Exactly
+        Should -Invoke Invoke-WingetPackageManagerRepair -Times 0 -Exactly
+        Should -Invoke Invoke-WingetSourceProbe -Times 1 -Exactly
+        $script:log | Should -Contain 'OK: Winget is available (v1.12.350).'
+    }
+
+    It 'Registers the App Installer already on this PC first, and stops there when winget then starts' {
+        $script:wingetLaunchable = $false
+        Mock Register-WingetAppInstallerForUser { $script:wingetLaunchable = $true; [pscustomobject]@{ Registered = $true; ErrorCodes = @() } }
+
+        (Initialize-Winget -AccountContext $script:account).Ready | Should -Be $true
+
+        Should -Invoke Register-WingetAppInstallerForUser -Times 1 -Exactly
+        Should -Invoke Invoke-WingetPackageManagerRepair -Times 0 -Exactly
+        Should -Invoke Test-WingetLaunchable -Times 1 -Exactly -ParameterFilter { $Attempts -eq 2 -and $RetryDelaySeconds -eq 5 }
+    }
+
+    It 'Repairs when registering does not make winget start' {
+        $script:wingetLaunchable = $false
+        Mock Register-WingetAppInstallerForUser { [pscustomobject]@{ Registered = $true; ErrorCodes = @() } }
+        Mock Invoke-WingetPackageManagerRepair { $script:wingetLaunchable = $true; [pscustomobject]@{ Available = $true; Succeeded = $true; ErrorCodes = @() } }
+
+        (Initialize-Winget -AccountContext $script:account).Ready | Should -Be $true
+
+        Should -Invoke Invoke-WingetPackageManagerRepair -Times 1 -Exactly
+        Should -Invoke Test-WingetLaunchable -Times 2 -Exactly -ParameterFilter { $Attempts -eq 2 }
+    }
+
+    It 'Stops with one line that says why and what to do when no fix makes winget start, without the aka.ms download or the source steps' {
+        $script:wingetLaunchable = $false
+
+        $result = Initialize-Winget -AccountContext $script:account
+
+        $result.Ready | Should -Be $false
+        $result.Diagnosis | Should -Be 'NotLaunchable'
+        $errors = @($script:log | Where-Object { $_ -like 'ERROR: *' })
+        $errors.Count | Should -Be 1
+        $errors[0] | Should -Be "ERROR: Winget cannot be started for 'CONTOSO\admin-tech': winget could not be started: 'winget' was not found on PATH. Fix: install or update App Installer from the Microsoft Store or https://aka.ms/getwinget, then re-run the installer."
+        Should -Invoke Register-WingetAppInstallerForUser -Times 1 -Exactly
+        Should -Invoke Invoke-WingetPackageManagerRepair -Times 1 -Exactly
+        Should -Invoke Invoke-WebRequest -Times 0 -Exactly
+        Should -Invoke Invoke-WingetSourceProbe -Times 0 -Exactly
+        Should -Invoke Reset-WingetSource -Times 0 -Exactly
+    }
+
+    It 'Names the codes it saw and the missing framework when the all-users check finds Microsoft.WindowsAppRuntime.1.8 missing (issue #279, review finding P3-27)' {
+        $script:wingetLaunchable = $false
+        Mock Register-WingetAppInstallerForUser { [pscustomobject]@{ Registered = $false; ErrorCodes = @(-2147009293, -2147009274) } }
+        Mock Get-WindowsAppRuntimeStatus { [pscustomobject]@{ Present = $false; Detail = 'Microsoft.WindowsAppRuntime.1.8 >= 8000.616.304.0 for X64 required; found: none registered' } }
+
+        [void](Initialize-Winget -AccountContext $script:account)
+
+        $line = @($script:log | Where-Object { $_ -like 'ERROR: *' })[0]
+        $line | Should -Match 'App Installer could not be registered or repaired \(0x80073CF3 ERROR_INSTALL_RESOLVE_DEPENDENCY_FAILED, 0x80073D06 ERROR_INSTALL_PACKAGE_DOWNGRADE\)'
+        $line | Should -Match 'Fix: install the Microsoft\.WindowsAppRuntime\.1\.8 framework App Installer depends on, which this PC lacks \(.*found: none registered\)'
+        # The repair was told to go for all users first (review finding P3-28).
+        Should -Invoke Invoke-WingetPackageManagerRepair -Times 1 -Exactly -ParameterFilter { $AllUsersFirst }
+    }
+
+    It 'Says to update App Installer from the Store when a newer framework rejected the repair (0x80073D06, issue #265)' {
+        $script:wingetLaunchable = $false
+        Mock Invoke-WingetPackageManagerRepair { [pscustomobject]@{ Available = $true; Succeeded = $false; ErrorCodes = @(-2147009274) } }
+
+        [void](Initialize-Winget -AccountContext $script:account)
+
+        @($script:log | Where-Object { $_ -like 'ERROR: *' })[0] | Should -Match 'Fix: a framework package on this PC is newer than the one the WinGet release deploys.*update App Installer from the Microsoft Store'
+    }
+
+    It 'Says the repair could not run when its module could not be installed (review finding P3-26)' {
+        $script:wingetLaunchable = $false
+        Mock Invoke-WingetPackageManagerRepair { [pscustomobject]@{ Available = $false; Succeeded = $false; ErrorCodes = @() } }
+
+        [void](Initialize-Winget -AccountContext $script:account)
+
+        @($script:log | Where-Object { $_ -like 'ERROR: *' })[0] | Should -Match 'Repair-WinGetPackageManager could not run: its PowerShell module could not be installed'
+        # Nothing was repaired, so winget is not checked again for it.
+        Should -Invoke Test-WingetLaunchable -Times 0 -Exactly -ParameterFilter { $Attempts -eq 2 }
+    }
+
+    It 'Says who it sets winget up for under cross-user elevation' {
+        Initialize-Winget -AccountContext (New-TestAccountContext -CrossUser -ProcessUser 'CONTOSO\admin-tech' -SessionUser 'CONTOSO\jdoe') | Out-Null
+
+        $script:log | Should -Contain "WARN: Cross-user elevation detected: running as 'CONTOSO\admin-tech' while 'CONTOSO\jdoe' owns the interactive session."
+    }
+
+    It 'Does not mention cross-user elevation for a same-account run' {
+        Initialize-Winget -AccountContext $script:account | Out-Null
+
+        ($script:log -join "`n") | Should -Not -Match 'Cross-user elevation'
+    }
+
+    It 'Reads the account context itself when the run does not pass it' {
+        Mock Get-InstallAccountContext { New-TestAccountContext -ProcessUser 'CONTOSO\admin-other' -SessionUser 'CONTOSO\admin-other' }
+
+        (Initialize-Winget).Ready | Should -Be $true
+
+        Should -Invoke Get-InstallAccountContext -Times 1 -Exactly
+        $script:log | Should -Contain "OK: The winget source is up to date for 'CONTOSO\admin-other'."
+    }
+}
+
+# Review finding P3-9: `Get-Command winget` only proved the alias was on PATH. Run 35406706712 printed
+# 'Winget bootstrapped successfully' after both repair attempts failed, then every winget call failed
+# with 'No applicable app licenses found'. The real Test-WingetLaunchable runs against a mocked
+# Invoke-WingetProcess.
+Describe 'Initialize-Winget with winget on PATH but unable to run (review finding P3-9)' {
+    BeforeEach {
+        Register-LadderMocks -RealLaunchCheck
+        Mock Invoke-WingetProcess { New-TestProcessResult -ExitCode -1978335230 -Output @('No applicable app licenses found.') } -ParameterFilter { $ArgumentList[0] -eq '--version' }
+        Mock Invoke-WingetProcess { throw "unexpected winget call: $($ArgumentList -join ' ')" }
+    }
+
+    It 'Does not report success after the fixes failed, and says that winget cannot run' {
+        $result = Initialize-Winget -AccountContext $script:account
+
+        $result.Ready | Should -Be $false
+        Should -Invoke Write-Success -Times 0 -Exactly
+        $script:log | Should -Contain "WARN: Winget is not available: 'winget --version' exited with 0x8A150002 INVALID_CL_ARGUMENTS."
+        @($script:log | Where-Object { $_ -like 'ERROR: *' })[0] | Should -Match "^ERROR: Winget cannot be started for 'CONTOSO\\admin-tech': 'winget --version' exited with 0x8A150002 INVALID_CL_ARGUMENTS\."
+    }
+}
+
+# Review of item 9: an App Installer update in progress (issues #253/#258) must not be repaired
+# underneath. The real Test-WingetLaunchable runs; time is simulated (each launch takes a second,
+# Start-Sleep advances it).
+Describe 'Initialize-Winget with winget locked at the start of the run' {
+    BeforeEach {
+        Register-LadderMocks -RealLaunchCheck
         $script:clock = 0
         Mock Start-Sleep { $script:clock += $Seconds }
     }
 
-    It 'Waits out a <Seconds>-second lock without re-registering, repairing or downloading App Installer' -ForEach @(
+    It 'Waits out a <Seconds>-second lock without registering or repairing App Installer' -ForEach @(
         @{ Seconds = 30 }
         @{ Seconds = 60 }
     ) {
@@ -404,16 +222,15 @@ Describe 'Test-AndInstallWinget with winget locked at the start of the run' {
             New-TestProcessResult -ExitCode 0 -Output @('v1.12.350')
         }
 
-        Test-AndInstallWinget | Should -Be $true
+        (Initialize-Winget -AccountContext $script:account).Ready | Should -Be $true
 
         Should -Invoke Register-WingetAppInstallerForUser -Times 0 -Exactly
         Should -Invoke Invoke-WingetPackageManagerRepair -Times 0 -Exactly
-        Should -Invoke Invoke-WebRequest -Times 0 -Exactly
         # Six tries 15 seconds apart at most: the 75 seconds the install's launch retries cover.
         $script:clock | Should -BeLessOrEqual 81
     }
 
-    It 'Goes to the bootstrap rungs after one check when waiting cannot help (<Case>)' -ForEach @(
+    It 'Goes to the fixes after one check when waiting cannot help (<Case>)' -ForEach @(
         @{ Case = 'winget not on PATH'; Code = 2; Message = "'winget' was not found on PATH." }
         @{ Case = 'access denied'; Code = 5; Message = 'Access is denied.' }
     ) {
@@ -421,468 +238,330 @@ Describe 'Test-AndInstallWinget with winget locked at the start of the run' {
         $script:launchMessage = $Message
         Mock Invoke-WingetProcess { New-TestProcessResult -LaunchFailed -LaunchErrorCode $script:launchCode -LaunchError $script:launchMessage }
 
-        Test-AndInstallWinget | Should -Be $false
+        (Initialize-Winget -AccountContext $script:account).Ready | Should -Be $false
 
         Should -Invoke Register-WingetAppInstallerForUser -Times 1 -Exactly
         Should -Invoke Start-Sleep -Times 0 -Exactly
     }
 }
 
-# Review finding P2-24: as SYSTEM, every rung of the ladder above sets winget up for one account, which
-# SYSTEM cannot have. A run from an RMM agent used to register, repair and download App Installer for
-# minutes, then stop with exit code 2 on a PC whose users all had a working winget. A SYSTEM run now
-# finds and checks the machine-wide winget.exe instead (Test-MachineWingetAvailable, tested in
-# MachineContext.Tests.ps1).
-Describe 'Test-AndInstallWinget as SYSTEM (review finding P2-24)' {
+Describe 'Initialize-Winget: the winget source (review findings P3-25, P3-28)' {
     BeforeEach {
-        Mock Write-Host { }
+        Register-LadderMocks
+        # Exit codes the source update answers, one per call; the last one repeats.
+        $script:sourceAnswers = @(0)
+        $script:sourceCalls = 0
+        Mock Invoke-WingetSourceProbe {
+            $answer = $script:sourceAnswers[[Math]::Min($script:sourceCalls, $script:sourceAnswers.Count - 1)]
+            $script:sourceCalls++
+            if ($answer -is [hashtable]) { return $answer }
+            New-SourceProbe -ExitCode $answer
+        }
+    }
+
+    It 'Registers App Installer, then repairs, for an account Windows blocked with 0x80073D19, checking the source after each fix (issue #159)' {
+        $script:sourceAnswers = @(-2147009255, -2147009255, 0)
+        Mock Register-WingetAppInstallerForUser { [pscustomobject]@{ Registered = $true; ErrorCodes = @() } }
+
+        $result = Initialize-Winget -AccountContext $script:account
+
+        $result.Diagnosis | Should -Be 'Ok'
+        Should -Invoke Register-WingetAppInstallerForUser -Times 1 -Exactly
+        Should -Invoke Invoke-WingetPackageManagerRepair -Times 1 -Exactly
+        Should -Invoke Invoke-WingetSourceProbe -Times 3 -Exactly
+        Should -Invoke Reset-WingetSource -Times 0 -Exactly
+    }
+
+    It 'Runs no fix twice in a run: none is left for the source when the launch check used them' {
+        $script:wingetLaunchable = $false
+        Mock Invoke-WingetPackageManagerRepair { $script:wingetLaunchable = $true; [pscustomobject]@{ Available = $true; Succeeded = $true; ErrorCodes = @() } }
+        $script:sourceAnswers = @(-2147009255)
+
+        $result = Initialize-Winget -AccountContext $script:account
+
+        $result.Ready | Should -Be $true
+        $result.Diagnosis | Should -Be 'SourceFailed'
+        Should -Invoke Register-WingetAppInstallerForUser -Times 1 -Exactly
+        Should -Invoke Invoke-WingetPackageManagerRepair -Times 1 -Exactly
+        Should -Invoke Invoke-WingetSourceProbe -Times 1 -Exactly
+    }
+
+    It 'Resets a missing or corrupted source once and checks it again (<Name>)' -ForEach @(
+        @{ Name = '0x8A15000F SOURCE_DATA_MISSING'; Code = -1978335217 }
+        @{ Name = '0x8A150012 SOURCE_NAME_DOES_NOT_EXIST'; Code = -1978335214 }
+        @{ Name = '0x8A15003F SOURCE_DATA_INTEGRITY_FAILURE'; Code = -1978335169 }
+    ) {
+        $script:sourceAnswers = @($Code, 0)
+
+        (Initialize-Winget -AccountContext $script:account).Diagnosis | Should -Be 'Ok'
+
+        Should -Invoke Reset-WingetSource -Times 1 -Exactly
+        Should -Invoke Invoke-WingetSourceProbe -Times 2 -Exactly
+        Should -Invoke Register-WingetAppInstallerForUser -Times 0 -Exactly
+        Should -Invoke Invoke-WingetPackageManagerRepair -Times 0 -Exactly
+    }
+
+    It 'Resets only once when the source is still broken after the reset' {
+        $script:sourceAnswers = @(-1978335217)
+
+        (Initialize-Winget -AccountContext $script:account).Diagnosis | Should -Be 'SourceFailed'
+
+        Should -Invoke Reset-WingetSource -Times 1 -Exactly
+        Should -Invoke Invoke-WingetSourceProbe -Times 2 -Exactly
+        @($script:log | Where-Object { $_ -like 'WARN: The winget source could not be set up*' }) | Should -Be @("WARN: The winget source could not be set up for 'CONTOSO\admin-tech' (exit code 0x8A15000F SOURCE_DATA_MISSING). Fix: check that this PC can reach https://cdn.winget.microsoft.com, then re-run the installer. Installations may fail.")
+    }
+
+    It 'Fixes nothing when <Case>, which no repair fixes (review finding P3-28)' -ForEach @(
+        @{ Case = 'the update times out'; Answer = @{ Succeeded = $false; ExitCode = $null; TimedOut = $true; LaunchError = $null }; Detail = 'it did not finish in time and was stopped' }
+        @{ Case = 'the network fails'; Answer = -2147012889; Detail = 'exit code 0x80072EE7 WININET_E_NAME_NOT_RESOLVED' }
+        @{ Case = 'winget cannot be started for it'; Answer = @{ Succeeded = $false; ExitCode = $null; TimedOut = $false; LaunchError = 'The file cannot be accessed by the system.' }; Detail = 'winget could not be started: The file cannot be accessed by the system.' }
+    ) {
+        $script:sourceAnswers = @(, $Answer)
+
+        $result = Initialize-Winget -AccountContext $script:account
+
+        $result.Ready | Should -Be $true
+        $result.Diagnosis | Should -Be 'SourceFailed'
+        Should -Invoke Register-WingetAppInstallerForUser -Times 0 -Exactly
+        Should -Invoke Invoke-WingetPackageManagerRepair -Times 0 -Exactly
+        Should -Invoke Reset-WingetSource -Times 0 -Exactly
+        Should -Invoke Invoke-WingetSourceProbe -Times 1 -Exactly
+        $script:log | Should -Contain "WARN: The winget source could not be set up for 'CONTOSO\admin-tech' ($Detail). Fix: check that this PC can reach https://cdn.winget.microsoft.com, then re-run the installer. Installations may fail."
+    }
+
+    It 'Gives one diagnosis, the sign-in advice, when 0x80073D19 outlasts every fix under cross-user elevation' {
+        $script:sourceAnswers = @(-2147009255)
+
+        [void](Initialize-Winget -AccountContext (New-TestAccountContext -CrossUser -ProcessUser 'CONTOSO\admin-tech' -SessionUser 'CONTOSO\jdoe'))
+
+        $lines = @($script:log | Where-Object { $_ -like 'WARN: The winget source could not be set up*' })
+        $lines.Count | Should -Be 1
+        $lines[0] | Should -Be "WARN: The winget source could not be set up for 'CONTOSO\admin-tech' (exit code 0x80073D19 ERROR_DEPLOYMENT_BLOCKED_BY_USER_LOG_OFF). Fix: sign in to Windows as 'CONTOSO\admin-tech' once (that sets winget up for the account), or run 'winget source update' in a session running as 'CONTOSO\admin-tech', then re-run the installer. Installations may fail."
+        ($script:log -join "`n") | Should -Not -Match 'appears to be missing|source\.msix|Run as local user'
+    }
+
+    It 'Takes unaccepted source agreements (0x8A150046) as no fault: each install accepts them' {
+        $script:sourceAnswers = @(-1978335162)
+
+        (Initialize-Winget -AccountContext $script:account).Diagnosis | Should -Be 'Ok'
+
+        Should -Invoke Register-WingetAppInstallerForUser -Times 0 -Exactly
+        Should -Invoke Invoke-WingetPackageManagerRepair -Times 0 -Exactly
+        @($script:log | Where-Object { $_ -like 'WARN:*' }).Count | Should -Be 0
+    }
+}
+
+Describe 'Initialize-Winget: Group Policy (review finding P3-30)' {
+    BeforeEach {
+        Register-LadderMocks
+    }
+
+    It 'Stops before running winget when <Policy> is Disabled' -ForEach @(
+        @{ Name = 'EnableAppInstaller'; Policy = 'Enable App Installer' }
+        @{ Name = 'EnableDefaultSource'; Policy = 'Enable App Installer Default Source' }
+    ) {
+        $script:block = [pscustomobject]@{ Name = $Name; Policy = $Policy }
+        Mock Get-WingetPolicyBlock { $script:block }
+
+        $result = Initialize-Winget -AccountContext $script:account
+
+        $result.Ready | Should -Be $false
+        $result.Diagnosis | Should -Be 'PolicyBlocked'
+        @($script:log | Where-Object { $_ -like 'ERROR: *' }) | Should -Be @("ERROR: Group Policy on this PC blocks winget: '$Policy' is Disabled ($Name = 0 under HKLM\SOFTWARE\Policies\Microsoft\Windows\AppInstaller). This installer cannot install apps until the policy allows it; ask whoever manages this PC's policies (Computer Configuration > Administrative Templates > Windows Components > Desktop App Installer) to allow it, then re-run the installer.")
+        Should -Invoke Test-WingetLaunchable -Times 0 -Exactly
+        Should -Invoke Register-WingetAppInstallerForUser -Times 0 -Exactly
+        Should -Invoke Invoke-WingetSourceProbe -Times 0 -Exactly
+    }
+
+    It 'Stops when the source update answers 0x8A15003A, without resetting the source' {
+        Mock Invoke-WingetSourceProbe { New-SourceProbe -ExitCode -1978335174 }
+
+        (Initialize-Winget -AccountContext $script:account).Diagnosis | Should -Be 'PolicyBlocked'
+
+        Should -Invoke Reset-WingetSource -Times 0 -Exactly
+        Should -Invoke Register-WingetAppInstallerForUser -Times 0 -Exactly
+    }
+
+    It 'A dry run says a real run would stop here' {
+        Mock Get-WingetPolicyBlock { [pscustomobject]@{ Name = 'EnableAppInstaller'; Policy = 'Enable App Installer' } }
+
+        (Initialize-Winget -AccountContext $script:account -WhatIf).Ready | Should -Be $false
+
+        @($script:log | Where-Object { $_ -like 'INFO: `[DRY-RUN`] Group Policy on this PC blocks winget*A real run would stop here with exit code 2.' }).Count | Should -Be 1
+        @($script:log | Where-Object { $_ -like 'ERROR: *' }).Count | Should -Be 0
+    }
+}
+
+# The real Test-WingetLaunchable: a policy block does not clear by waiting (review finding P3-30).
+Describe 'Initialize-Winget when winget answers 0x8A15003A BLOCKED_BY_POLICY' {
+    BeforeEach {
+        Register-LadderMocks -RealLaunchCheck
+    }
+
+    It 'Stops at once, with no wait and no fix, when winget answers 0x8A15003A BLOCKED_BY_POLICY' {
+        Mock Invoke-WingetProcess { New-TestProcessResult -ExitCode -1978335174 -Output @('This operation is disabled by Group Policy : Enable Windows Package Manager') }
+
+        $result = Initialize-Winget -AccountContext $script:account
+
+        $result.Diagnosis | Should -Be 'PolicyBlocked'
+        Should -Invoke Invoke-WingetProcess -Times 1 -Exactly
+        Should -Invoke Start-Sleep -Times 0 -Exactly
+        Should -Invoke Register-WingetAppInstallerForUser -Times 0 -Exactly
+        Should -Invoke Invoke-WingetPackageManagerRepair -Times 0 -Exactly
+        @($script:log | Where-Object { $_ -like 'ERROR: *' })[0] | Should -Match "^ERROR: Group Policy on this PC blocks winget: 'winget --version' answered 0x8A15003A BLOCKED_BY_POLICY\."
+    }
+}
+
+# Review finding P2-24: as SYSTEM, every account fix sets winget up for one account, which SYSTEM
+# cannot have. A SYSTEM run finds and checks the machine-wide winget.exe instead
+# (Test-MachineWingetAvailable, tested in MachineContext.Tests.ps1).
+Describe 'Initialize-Winget as SYSTEM (review findings P2-24, P3-23)' {
+    BeforeEach {
+        Register-LadderMocks
+        Mock Test-WingetLaunchable { throw 'the per-account check must not run for SYSTEM' }
         Mock Register-WingetAppInstallerForUser { throw 'must not register App Installer for SYSTEM' }
         Mock Invoke-WingetPackageManagerRepair { throw 'must not repair winget for SYSTEM' }
-        Mock Repair-WinGetPackageManager { throw 'must not repair winget for SYSTEM' }
-        Mock Invoke-WebRequest { throw 'must not download App Installer for SYSTEM' }
-        Mock Add-AppxPackage { throw 'must not register a package for SYSTEM' }
-        Mock Test-WingetLaunchable { throw 'the per-account check must not run for SYSTEM' }
         Mock Test-MachineWingetAvailable { $true }
+        $script:account = New-TestAccountContext -System -SessionUser 'CONTOSO\jdoe'
     }
 
-    It 'Checks the machine-wide winget.exe and runs none of the per-account rungs when <Case>' -ForEach @(
-        @{ Case = 'the run says it is SYSTEM'; Explicit = $true }
-        @{ Case = 'it finds that out itself'; Explicit = $false }
-    ) {
-        if ($Explicit) {
-            Mock Test-IsSystemAccount { throw 'the caller already said' }
-            $result = Test-AndInstallWinget -SystemContext
-        }
-        else {
-            Mock Test-IsSystemAccount { $true }
-            $result = Test-AndInstallWinget
-        }
+    It 'Checks the machine-wide winget.exe, updates the source and runs no per-account fix' {
+        $result = Initialize-Winget -AccountContext $script:account
 
-        $result | Should -Be $true
+        $result.Ready | Should -Be $true
         Should -Invoke Test-MachineWingetAvailable -Times 1 -Exactly
-        Should -Invoke Register-WingetAppInstallerForUser -Times 0 -Exactly
-        Should -Invoke Invoke-WingetPackageManagerRepair -Times 0 -Exactly
-        Should -Invoke Invoke-WebRequest -Times 0 -Exactly
-        Should -Invoke Add-AppxPackage -Times 0 -Exactly
+        Should -Invoke Invoke-WingetSourceProbe -Times 1 -Exactly
+        $script:log | Should -Contain 'OK: The winget source is up to date for SYSTEM.'
     }
 
-    It 'Returns false, so the run stops with exit code 2, when no machine-wide winget starts, still without any per-account rung' {
-        Mock Test-IsSystemAccount { $true }
+    It 'Is not ready, so the run stops with exit code 2, when no machine-wide winget starts' {
         Mock Test-MachineWingetAvailable { $false }
 
-        Test-AndInstallWinget | Should -Be $false
+        (Initialize-Winget -AccountContext $script:account).Ready | Should -Be $false
 
-        Should -Invoke Register-WingetAppInstallerForUser -Times 0 -Exactly
-        Should -Invoke Invoke-WingetPackageManagerRepair -Times 0 -Exactly
-        Should -Invoke Invoke-WebRequest -Times 0 -Exactly
+        Should -Invoke Invoke-WingetSourceProbe -Times 0 -Exactly
+    }
+
+    It 'Fixes nothing for 0x80073D19 and gives no advice to sign in, nor any cross-user banner' {
+        Mock Invoke-WingetSourceProbe { New-SourceProbe -ExitCode -2147009255 }
+
+        (Initialize-Winget -AccountContext $script:account).Diagnosis | Should -Be 'SourceFailed'
+
+        $text = $script:log -join "`n"
+        $text | Should -Match 'could not be set up for SYSTEM \(exit code 0x80073D19 ERROR_DEPLOYMENT_BLOCKED_BY_USER_LOG_OFF\)\. The steps that set winget up for a signed-in account do not apply to SYSTEM'
+        $text | Should -Not -Match 'Cross-user elevation|sign in to Windows|NT AUTHORITY'
+    }
+
+    It 'Still resets a corrupted source, without registering any package' {
+        $script:sourceCalls = 0
+        Mock Invoke-WingetSourceProbe { $script:sourceCalls++; if ($script:sourceCalls -eq 1) { return New-SourceProbe -ExitCode -1978335217 } New-SourceProbe -ExitCode 0 }
+
+        (Initialize-Winget -AccountContext $script:account).Diagnosis | Should -Be 'Ok'
+
+        Should -Invoke Reset-WingetSource -Times 1 -Exactly
+        Should -Invoke Add-AppxPackage -Times 0 -Exactly
     }
 
     It 'Passes a dry run on' {
-        Test-AndInstallWinget -SystemContext -WhatIf | Should -Be $true
+        [void](Initialize-Winget -AccountContext $script:account -WhatIf)
 
         Should -Invoke Test-MachineWingetAvailable -Times 1 -Exactly -ParameterFilter { $WhatIf }
-    }
-
-    It 'Takes the per-account ladder when the run says it is not SYSTEM' {
-        Mock Test-IsSystemAccount { $true }
-        Mock Test-WingetLaunchable { [pscustomobject]@{ Launchable = $true; Version = 'v1.12.350'; Reason = $null; Attempts = 1 } }
-
-        Test-AndInstallWinget -SystemContext:$false | Should -Be $true
-
-        Should -Invoke Test-MachineWingetAvailable -Times 0 -Exactly
+        Should -Invoke Invoke-WingetSourceProbe -Times 0 -Exactly
     }
 }
 
-# Review finding P2-24: Add-AppxPackage registers the source package for one account, which SYSTEM
-# cannot have, and the advice to run it as the local user does not apply to SYSTEM either.
-Describe 'Test-WingetSources as SYSTEM (review finding P2-24)' {
+# P2-16: a dry run used to register or repair App Installer, download it, and run
+# `winget source reset --force`.
+Describe 'Initialize-Winget dry run (P2-16)' {
     BeforeEach {
-        Mock Write-Host { }
-        Mock Write-Success { }
-        Mock Write-WarningMessage { }
-        $script:errorMessages = @()
-        Mock Write-ErrorMessage { $script:errorMessages += $Message }
-        $script:infoMessages = @()
-        Mock Write-Info { $script:infoMessages += $Message }
-        Mock Add-AppxPackage { throw 'must not register the source package for SYSTEM' }
-        Mock Invoke-WingetProcess { throw "unexpected winget call: $($ArgumentList -join ' ')" }
-        Mock Invoke-WingetProcess { New-TestProcessResult -ExitCode 0 } -ParameterFilter { $ArgumentList[0] -eq 'source' -and $ArgumentList[1] -eq 'reset' }
-        $script:healthChecks = 0
-        $script:healthyAfterReset = $true
-        Mock Test-WingetSourceHealth {
-            $script:healthChecks++
-            if ($script:healthChecks -gt 1 -and $script:healthyAfterReset) {
-                return @{ Listed = $true; Functional = $true; Healthy = $true }
-            }
-            @{ Listed = $true; Functional = $false; Healthy = $false }
-        }
+        Register-LadderMocks
     }
 
-    It 'Resets the source and checks it again, without registering the source package' {
-        Mock Test-IsSystemAccount { $true }
+    It 'Says what a real run would do to set winget up, and runs none of it, when winget cannot start' {
+        $script:wingetLaunchable = $false
 
-        Test-WingetSources | Should -Be $true
+        $result = Initialize-Winget -AccountContext $script:account -WhatIf
 
-        Should -Invoke Invoke-WingetProcess -Times 1 -Exactly -ParameterFilter { $ArgumentList[0] -eq 'source' -and $ArgumentList[1] -eq 'reset' }
-        Should -Invoke Test-WingetSourceHealth -Times 2 -Exactly
-        Should -Invoke Add-AppxPackage -Times 0 -Exactly
+        $result.Ready | Should -Be $false
+        Should -Invoke Register-WingetAppInstallerForUser -Times 0 -Exactly
+        Should -Invoke Invoke-WingetPackageManagerRepair -Times 0 -Exactly
+        Should -Invoke Invoke-WingetSourceProbe -Times 0 -Exactly
+        ($script:log -join "`n") | Should -Match "\[DRY-RUN\] Winget is not available for this account \(winget could not be started: 'winget' was not found on PATH\)\. A real run would set it up: register the App Installer package already on this PC for this account, then run Repair-WinGetPackageManager \(installing its Microsoft\.WinGet\.Client module from the PowerShell Gallery first if it is missing\)"
+        @($script:log | Where-Object { $_ -like 'WARN: *' -or $_ -like 'ERROR: *' }).Count | Should -Be 0
     }
 
-    It 'Gives advice that works for SYSTEM when the source is still broken after the reset' {
-        $script:healthyAfterReset = $false
+    It 'Neither updates nor resets the source when winget starts, and says what a real run would do' {
+        $result = Initialize-Winget -AccountContext $script:account -WhatIf
 
-        Test-WingetSources -SystemContext | Should -Be $false
-
-        $text = $script:errorMessages -join "`n"
-        $text | Should -Match 'still not accessible after winget source reset'
-        $text | Should -Not -Match 'Run as local user|Add-AppxPackage'
-        Should -Invoke Add-AppxPackage -Times 0 -Exactly
-    }
-
-    It 'Leaves the source package out of the repair a dry run describes' {
-        Test-WingetSources -SystemContext -WhatIf | Should -Be $false
-
-        ($script:infoMessages -join "`n") | Should -Match '\[DRY-RUN\].*winget source reset --force.*does not apply to SYSTEM'
-        ($script:infoMessages -join "`n") | Should -Not -Match 'source\.msix'
-        Should -Invoke Invoke-WingetProcess -Times 0 -Exactly
+        $result.Ready | Should -Be $true
+        Should -Invoke Invoke-WingetSourceProbe -Times 0 -Exactly
+        Should -Invoke Reset-WingetSource -Times 0 -Exactly
+        $script:log | Should -Contain "INFO: [DRY-RUN] Would update the winget source for 'CONTOSO\admin-tech' (winget source update --name winget), and fix it if that fails: winget source reset --force for a missing or corrupted source, which also removes any source added beyond the defaults."
     }
 }
 
-Describe 'Test-WingetSources' {
-    BeforeAll {
-        Mock Write-Host { }
-        Mock Write-Warning { }
-        # A signed-in account's run (the SYSTEM form is tested below).
-        Mock Test-IsSystemAccount { $false }
-        # Every winget call goes through Invoke-WingetProcess (review findings P2-5, P2-6); the
-        # tests below script winget itself, with Mock winget.
-        Mock Invoke-WingetProcess { Invoke-TestWingetMock -ArgumentList $ArgumentList }
+# The #279/#284 wedge as E2E run 36384683838 (second pass) saw it, from the cmdlets up: winget.exe
+# cannot be accessed, App Installer's registration is rejected with 0x80073CF3 (the
+# Microsoft.WindowsAppRuntime.1.8 framework is missing) and then 0x80073D06, and
+# Repair-WinGetPackageManager throws 'Try running with -AllUsers'. Three ladders gave three wrong
+# diagnoses there: 'Installations may fail with 0x80073D19', 'source "winget" appears to be missing'
+# and a source.msix rejection. Only the cmdlets and the winget process are mocked.
+Describe 'Initialize-Winget on the #279 wedge (review findings P3-25, P3-27, P3-28, P3-31)' {
+    BeforeEach {
+        Register-LadderMessageCapture
+        Mock Start-Sleep { }
+        Mock Get-WingetPolicyBlock { $null }
+        Mock Invoke-WingetProcess { New-TestProcessResult -LaunchFailed -LaunchErrorCode 1920 -LaunchError 'The file cannot be accessed by the system.' } -ParameterFilter { $ArgumentList[0] -eq '--version' }
+        Mock Invoke-WingetProcess { throw "unexpected winget call: $($ArgumentList -join ' ')" }
+        $script:newFolder = Join-Path $TestDrive 'Microsoft.DesktopAppInstaller_1.29.290.0_x64__8wekyb3d8bbwe'
+        $script:oldFolder = Join-Path $TestDrive 'Microsoft.DesktopAppInstaller_1.26.510.0_x64__8wekyb3d8bbwe'
+        Mock Get-DesktopAppInstallerPackageInfo {
+            [pscustomobject]@{ Version = [version]'1.29.290.0'; Architecture = 'X64'; Status = 'Ok'; InstallLocation = $script:newFolder }
+            [pscustomobject]@{ Version = [version]'1.26.510.0'; Architecture = 'X64'; Status = 'Ok'; InstallLocation = $script:oldFolder }
+        }
+        Mock Test-Path { $true } -ParameterFilter { "$LiteralPath" -like '*AppXManifest.xml' }
+        Mock Test-Path { $false }
+        Mock Add-AppxPackage {
+            throw [System.Runtime.InteropServices.COMException]::new('Deployment failed with HRESULT: 0x80073CF3, Package failed updates, dependency or conflict validation. Windows cannot install package Microsoft.DesktopAppInstaller_1.29.290.0_x64__8wekyb3d8bbwe because this package depends on a framework that could not be found. Provide the framework "Microsoft.WindowsAppRuntime.1.8"', -2147009293)
+        } -ParameterFilter { $RegisterByFamilyName }
+        Mock Add-AppxPackage { throw 'Deployment failed with HRESULT: 0x80073D06, The package could not be installed because a higher version of this package is already installed.' }
+        Mock Get-WindowsAppRuntimePackageInfo { }
+        Mock Test-AndInstallWingetModule { $true }
+        Mock Repair-WinGetPackageManager { throw 'Failed to repair winget. Try running with -AllUsers in administrator mode.' }
+        Mock Invoke-WebRequest { throw 'must not download App Installer (the aka.ms/getwinget rung is gone)' }
     }
 
-    Context 'When winget sources are listed and functional' {
-        It 'Should return true without attempting repair' {
-            Mock winget {
-                if ($args[0] -eq 'source' -and $args[1] -eq 'list') {
-                    $global:LASTEXITCODE = 0
-                    return 'winget      https://cdn.winget.microsoft.com/cache'
-                }
-                elseif ($args[0] -eq 'search' -and $args[1] -eq '7zip') {
-                    $global:LASTEXITCODE = 0
-                    return '7zip.7zip    7.30'
-                }
-            }
-            Mock Add-AppxPackage { }
+    It 'Repairs for all users first and ends with one diagnosis that names the missing framework' {
+        $result = Initialize-Winget -AccountContext (New-TestAccountContext)
 
-            $result = Test-WingetSources
-            $result | Should -Be $true
-            Should -Invoke Add-AppxPackage -Times 0
-        }
+        $result.Ready | Should -Be $false
+        $result.Diagnosis | Should -Be 'NotLaunchable'
+        # -AllUsers first, as the cmdlet asks, because the framework is missing; then this account.
+        Should -Invoke Repair-WinGetPackageManager -Times 3 -Exactly
+        Should -Invoke Repair-WinGetPackageManager -Times 1 -Exactly -ParameterFilter { $AllUsers -and $Latest }
+        Should -Invoke Invoke-WebRequest -Times 0 -Exactly
+        # winget never started, so the source was not touched: no update, no reset, no source.msix.
+        Should -Invoke Invoke-WingetProcess -Times 0 -Exactly -ParameterFilter { $ArgumentList[0] -ne '--version' }
+        Should -Invoke Add-AppxPackage -Times 0 -Exactly -ParameterFilter { "$Path" -match '^https?:' }
+
+        $errors = @($script:log | Where-Object { $_ -like 'ERROR: *' })
+        $errors.Count | Should -Be 1
+        $errors[0] | Should -Match '0x80073CF3 ERROR_INSTALL_RESOLVE_DEPENDENCY_FAILED, 0x80073D06 ERROR_INSTALL_PACKAGE_DOWNGRADE'
+        $errors[0] | Should -Match 'Fix: install the Microsoft\.WindowsAppRuntime\.1\.8 framework'
+        ($script:log -join "`n") | Should -Not -Match 'Installations may fail with 0x80073D19|appears to be missing|source\.msix|Run as local user|Update functionality'
+    }
+}
+
+Describe 'The ladders Initialize-Winget replaced are gone (review finding P3-25)' {
+    It 'No longer defines <_>' -ForEach @('Test-AndInstallWinget', 'Test-WingetSources', 'Initialize-WingetSourcesForUser', 'Test-WingetSourceHealth', 'Test-AppxDowngradeRejection', 'Test-AppxMissingFrameworkDependency') {
+        Test-Path "Function:\$_" | Should -Be $false
     }
 
-    Context 'When winget source is corrupted (0x8a15000f)' {
-        It 'Should detect corruption and attempt repair with source reset' {
-            $script:searchCount = 0
-            Mock winget {
-                if ($args[0] -eq 'source' -and $args[1] -eq 'list') {
-                    $global:LASTEXITCODE = 0
-                    return 'winget      https://cdn.winget.microsoft.com/cache'
-                }
-                elseif ($args[0] -eq 'search' -and $args[1] -eq '7zip') {
-                    $script:searchCount++
-                    if ($script:searchCount -eq 1) {
-                        # First call: corrupted data
-                        $global:LASTEXITCODE = 1
-                        return 'Failed when opening source(s); try the source reset command if the problem persists. 0x8a15000f Data required by the source is missing'
-                    }
-                    # After reset: works
-                    $global:LASTEXITCODE = 0
-                    return '7zip.7zip    7.30'
-                }
-                elseif ($args[0] -eq 'source' -and $args[1] -eq 'reset') {
-                    $global:LASTEXITCODE = 0
-                    return 'Source reset completed'
-                }
-            }
-            Mock Add-AppxPackage { }
-
-            $result = Test-WingetSources
-            $result | Should -Be $true
-            Should -Invoke Add-AppxPackage -Times 1
-        }
-    }
-
-    Context 'When winget sources are missing entirely' {
-        It 'Should attempt repair with source reset and Add-AppxPackage' {
-            # Poison any exit code left over from other tests so this test only
-            # passes when the mock choreography below is complete (#181).
-            $global:LASTEXITCODE = 1
-            $script:listCallCount = 0
-            Mock winget {
-                # Set $global:LASTEXITCODE on EVERY simulated call: production reads it
-                # right after each search, and stale values leak between tests (#181).
-                if ($args[0] -eq 'source' -and $args[1] -eq 'list') {
-                    $script:listCallCount++
-                    $global:LASTEXITCODE = 0
-                    if ($script:listCallCount -eq 1) {
-                        # Initially: only msstore, no winget
-                        return 'msstore      https://storeedgefd.dsx.mp.microsoft.com/v9.0'
-                    }
-                    # After repair: winget source is restored
-                    return 'winget      https://cdn.winget.microsoft.com/cache'
-                }
-                elseif ($args[0] -eq 'search' -and $args[1] -eq '7zip') {
-                    # Production performs a single post-repair search in this scenario
-                    $global:LASTEXITCODE = 0
-                    return '7zip.7zip    7.30'
-                }
-                elseif ($args[0] -eq 'source' -and $args[1] -eq 'reset') {
-                    $global:LASTEXITCODE = 0
-                    return 'Source reset completed'
-                }
-            }
-            Mock Add-AppxPackage { }
-
-            $result = Test-WingetSources
-            $result | Should -Be $true
-            Should -Invoke Add-AppxPackage -Times 1
-        }
-    }
-
-    Context 'When winget sources repair fails' {
-        It 'Should return false when Add-AppxPackage throws error' {
-            Mock winget {
-                if ($args[0] -eq 'source' -and $args[1] -eq 'list') {
-                    return 'msstore      https://storeedgefd.dsx.mp.microsoft.com/v9.0'
-                }
-                elseif ($args[0] -eq 'source' -and $args[1] -eq 'reset') {
-                    return 'Source reset completed'
-                }
-            }
-            Mock Add-AppxPackage { throw 'Network error' }
-
-            $result = Test-WingetSources
-            $result | Should -Be $false
-        }
-    }
-
-    Context 'When winget source is corrupted and source reset fails' {
-        It 'Should still attempt Add-AppxPackage as fallback' {
-            $script:listCallCount = 0
-            $script:searchCallCount = 0
-            Mock winget {
-                if ($args[0] -eq 'source' -and $args[1] -eq 'list') {
-                    $script:listCallCount++
-                    if ($script:listCallCount -eq 1) {
-                        # Initially: source is listed
-                        return 'winget      https://cdn.winget.microsoft.com/cache'
-                    }
-                    # After repair attempt: still listed (but Add-AppxPackage will fix it)
-                    return 'winget      https://cdn.winget.microsoft.com/cache'
-                }
-                elseif ($args[0] -eq 'search' -and $args[1] -eq '7zip') {
-                    $script:searchCallCount++
-                    if ($script:searchCallCount -eq 1) {
-                        # Initially: corrupted
-                        $global:LASTEXITCODE = 1
-                        return '0x8a15000f Data required by the source is missing'
-                    }
-                    # After Add-AppxPackage: works
-                    $global:LASTEXITCODE = 0
-                    return '7zip.7zip    7.30'
-                }
-                elseif ($args[0] -eq 'source' -and $args[1] -eq 'reset') {
-                    # Reset fails
-                    throw 'Access denied'
-                }
-            }
-            Mock Add-AppxPackage { }
-
-            $result = Test-WingetSources
-            $result | Should -Be $true
-            Should -Invoke Add-AppxPackage -Times 1
-        }
-    }
-
-    Context 'When winget source list throws an exception' {
-        It 'Should attempt repair and handle the error gracefully' {
-            # Poison any exit code left over from other tests so this test only
-            # passes when the mock choreography below is complete (#181).
-            $global:LASTEXITCODE = 1
-            $script:listCount = 0
-            Mock winget {
-                # Set $global:LASTEXITCODE on EVERY simulated call: production reads it
-                # right after each search, and stale values leak between tests (#181).
-                if ($args[0] -eq 'source' -and $args[1] -eq 'list') {
-                    $script:listCount++
-                    if ($script:listCount -eq 1) {
-                        throw 'Access denied'
-                    }
-                    # After repair, list succeeds
-                    $global:LASTEXITCODE = 0
-                    return 'winget      https://cdn.winget.microsoft.com/cache'
-                }
-                elseif ($args[0] -eq 'search' -and $args[1] -eq '7zip') {
-                    # Production performs a single post-repair search in this scenario
-                    $global:LASTEXITCODE = 0
-                    return '7zip.7zip    7.30'
-                }
-                elseif ($args[0] -eq 'source' -and $args[1] -eq 'reset') {
-                    $global:LASTEXITCODE = 0
-                    return 'Source reset completed'
-                }
-            }
-            Mock Add-AppxPackage { }
-
-            $result = Test-WingetSources
-            $result | Should -Be $true
-            Should -Invoke Add-AppxPackage -Times 1
-        }
-    }
-
-    Context 'Source reset (review findings P2-5, P2-6)' {
-        It 'Runs winget source reset without --accept-source-agreements, which source reset rejects, under its time limit' {
-            Mock winget {
-                if ($args[0] -eq 'source' -and $args[1] -eq 'list') {
-                    $global:LASTEXITCODE = 0
-                    return 'winget      https://cdn.winget.microsoft.com/cache'
-                }
-                if ($args[0] -eq 'search') {
-                    $global:LASTEXITCODE = -1978335217
-                    return '0x8a15000f Data required by the source is missing'
-                }
-                if ($args -contains '--accept-source-agreements') {
-                    $global:LASTEXITCODE = -1978335230
-                    return 'usage: winget source reset [[-n] <name>] [--force]'
-                }
-                $global:LASTEXITCODE = 0
-            }
-            Mock Add-AppxPackage { }
-
-            [void](Test-WingetSources)
-
-            Should -Invoke winget -Times 1 -Exactly -ParameterFilter {
-                $args[0] -eq 'source' -and $args[1] -eq 'reset' -and $args -contains '--force' -and $args -notcontains '--accept-source-agreements'
-            }
-            Should -Invoke Invoke-WingetProcess -Times 1 -Exactly -ParameterFilter {
-                $ArgumentList[1] -eq 'reset' -and $TimeoutSeconds -eq (Get-ProcessTimeoutSeconds -Operation WingetSourceReset)
-            }
-        }
-
-        It 'Says when the reset failed, with its exit code, instead of reporting it completed' {
-            $script:resetWarnings = @()
-            Mock Write-WarningMessage { $script:resetWarnings += $Message }
-            $script:resetInfos = @()
-            Mock Write-Info { $script:resetInfos += $Message }
-            Mock winget {
-                if ($args[0] -eq 'source' -and $args[1] -eq 'list') {
-                    $global:LASTEXITCODE = 0
-                    return 'winget      https://cdn.winget.microsoft.com/cache'
-                }
-                if ($args[0] -eq 'search') {
-                    $global:LASTEXITCODE = -1978335217
-                    return '0x8a15000f Data required by the source is missing'
-                }
-                if ($args[1] -eq 'reset') {
-                    $global:LASTEXITCODE = -1978335230
-                    return 'An unexpected error occurred'
-                }
-            }
-            Mock Add-AppxPackage { }
-
-            [void](Test-WingetSources)
-
-            $script:resetWarnings | Should -Contain 'Winget source reset failed with exit code 0x8A150002 INVALID_CL_ARGUMENTS.'
-            $script:resetInfos | Should -Not -Contain 'Source reset completed.'
-        }
-    }
-
-    Context 'Functional probe arguments (issue #177)' {
-        It 'Should pass --accept-source-agreements to the winget search probe' {
-            $script:searchArgs = $null
-            Mock winget {
-                if ($args[0] -eq 'source' -and $args[1] -eq 'list') {
-                    $global:LASTEXITCODE = 0
-                    return 'winget      https://cdn.winget.microsoft.com/cache'
-                }
-                elseif ($args[0] -eq 'search' -and $args[1] -eq '7zip') {
-                    $script:searchArgs = $args
-                    $global:LASTEXITCODE = 0
-                    return '7zip.7zip    7.30'
-                }
-            }
-            Mock Add-AppxPackage { }
-
-            $result = Test-WingetSources
-
-            $result | Should -Be $true
-            # --accept-source-agreements is valid for `winget search` (unlike `winget source
-            # update`, issues #174/#175) and stops a fresh account's unaccepted agreements
-            # (0x8A150046) from being misdiagnosed as source corruption.
-            $script:searchArgs | Should -Contain '--accept-source-agreements'
-            $script:searchArgs | Should -Contain '--disable-interactivity'
-            $script:searchArgs | Should -Contain '--source'
-        }
-    }
-
-    # P2-16: a dry run used to run `winget source reset --force` (which also drops any source added
-    # beyond the defaults) and re-register the source package.
-    Context 'Dry run (-WhatIf)' {
-        BeforeEach {
-            Mock Add-AppxPackage { }
-            $script:infoMessages = @()
-            Mock Write-Info { $script:infoMessages += $Message }
-            $script:warningMessages = @()
-            Mock Write-WarningMessage { $script:warningMessages += $Message }
-        }
-
-        It 'Reports the repair of a corrupted source without resetting sources or registering the source package' {
-            Mock winget {
-                if ($args[0] -eq 'source' -and $args[1] -eq 'list') {
-                    $global:LASTEXITCODE = 0
-                    return 'winget      https://cdn.winget.microsoft.com/cache'
-                }
-                if ($args[0] -eq 'search') {
-                    $global:LASTEXITCODE = -1978335217
-                    return 'Failed when opening source(s); try the source reset command if the problem persists. 0x8a15000f'
-                }
-                $global:LASTEXITCODE = 0
-            }
-
-            Test-WingetSources -WhatIf | Should -Be $false
-
-            Should -Invoke winget -Times 0 -Exactly -ParameterFilter { $args -contains 'reset' }
-            Should -Invoke Add-AppxPackage -Times 0 -Exactly
-            ($script:infoMessages -join "`n") | Should -Match '\[DRY-RUN\] Winget source data is corrupted\. A real run would repair it: winget source reset --force'
-            ($script:warningMessages -join "`n") | Should -Not -Match 'Attempting to repair'
-        }
-
-        It 'Reports a missing source the same way, without repairing it' {
-            Mock winget {
-                $global:LASTEXITCODE = 0
-                if ($args[0] -eq 'source' -and $args[1] -eq 'list') {
-                    return 'msstore      https://storeedgefd.dsx.mp.microsoft.com/v9.0'
-                }
-            }
-
-            Test-WingetSources -WhatIf | Should -Be $false
-
-            Should -Invoke winget -Times 0 -Exactly -ParameterFilter { $args -contains 'reset' }
-            Should -Invoke Add-AppxPackage -Times 0 -Exactly
-            ($script:infoMessages -join "`n") | Should -Match '\[DRY-RUN\] Winget source "winget" appears to be missing\. A real run would repair it'
-        }
-
-        It 'Returns true for a healthy source without a dry-run line' {
-            Mock winget {
-                $global:LASTEXITCODE = 0
-                if ($args[0] -eq 'source' -and $args[1] -eq 'list') {
-                    return 'winget      https://cdn.winget.microsoft.com/cache'
-                }
-                return '7zip.7zip    7.30'
-            }
-
-            Test-WingetSources -WhatIf | Should -Be $true
-
-            ($script:infoMessages -join "`n") | Should -Not -Match '\[DRY-RUN\]'
+    It 'Exports Initialize-Winget and none of the old ladder functions' {
+        $manifest = Import-PowerShellDataFile $script:ModuleManifestPath
+        $manifest.FunctionsToExport | Should -Contain 'Initialize-Winget'
+        foreach ($name in 'Test-AndInstallWinget', 'Test-WingetSources', 'Initialize-WingetSourcesForUser', 'Test-AndInstallWingetModule') {
+            $manifest.FunctionsToExport | Should -Not -Contain $name
         }
     }
 }
@@ -1684,185 +1363,6 @@ Describe 'Test-WingetPackageInstalled (timeout support, issue #188)' {
             $result.CheckFailed | Should -Be $false
             $result.Installed | Should -Be $Installed
         }
-    }
-}
-
-Describe 'Initialize-WingetSourcesForUser (cross-user bootstrap, issue #159)' {
-    BeforeAll {
-        # Stub so the cmdlet can be mocked on machines without the Microsoft.WinGet.Client module.
-        function Repair-WinGetPackageManager { param([switch]$Latest, [switch]$Force) }
-    }
-
-    BeforeEach {
-        Mock Write-Host { }
-        Mock Write-WarningMessage { }
-        Mock Repair-WinGetPackageManager { }
-        Mock Get-ProcessUserName { 'CONTOSO\admin-jmaffiola' }
-        Mock Get-InteractiveSessionUserName { 'CONTOSO\admin-jmaffiola' }
-        Mock Test-IsSystemAccount { $false }
-        # Repair-WinGetPackageManager resolves as available unless a test overrides this.
-        Mock Get-Command { [pscustomobject]@{ Name = 'Repair-WinGetPackageManager' } } -ParameterFilter { $Name -eq 'Repair-WinGetPackageManager' }
-        # Default: nothing staged to register for this account, so the ladder's first rung
-        # (issue #265) is a no-op and the repair path below is what gets exercised.
-        Mock Register-WingetAppInstallerForUser { $false }
-    }
-
-    It 'Reports the dry run without probing' {
-        Mock Invoke-WingetSourceProbe { @{ Succeeded = $true; ExitCode = 0; TimedOut = $false } }
-
-        $result = Initialize-WingetSourcesForUser -WhatIf
-
-        $result | Should -Be $true
-        Should -Invoke Invoke-WingetSourceProbe -Times 0 -Exactly
-    }
-
-    It 'Returns true without repairing when the probe succeeds' {
-        Mock Invoke-WingetSourceProbe { @{ Succeeded = $true; ExitCode = 0; TimedOut = $false } }
-
-        $result = Initialize-WingetSourcesForUser
-
-        $result | Should -Be $true
-        Should -Invoke Invoke-WingetSourceProbe -Times 1 -Exactly
-        Should -Invoke Repair-WinGetPackageManager -Times 0 -Exactly
-    }
-
-    It 'Repairs the package manager and succeeds when the re-probe passes' {
-        $script:probeCallCount = 0
-        Mock Invoke-WingetSourceProbe {
-            $script:probeCallCount++
-            if ($script:probeCallCount -eq 1) {
-                # First probe: blocked per-user bootstrap (0x80073D19).
-                return @{ Succeeded = $false; ExitCode = -2147009255; TimedOut = $false }
-            }
-            return @{ Succeeded = $true; ExitCode = 0; TimedOut = $false }
-        }
-
-        $result = Initialize-WingetSourcesForUser
-
-        $result | Should -Be $true
-        Should -Invoke Repair-WinGetPackageManager -Times 1 -Exactly
-        Should -Invoke Invoke-WingetSourceProbe -Times 2 -Exactly
-    }
-
-    It 'Returns false when the probe still fails after repair' {
-        Mock Invoke-WingetSourceProbe { @{ Succeeded = $false; ExitCode = -2147009255; TimedOut = $false } }
-
-        $result = Initialize-WingetSourcesForUser
-
-        $result | Should -Be $false
-        Should -Invoke Repair-WinGetPackageManager -Times 1 -Exactly
-        Should -Invoke Invoke-WingetSourceProbe -Times 2 -Exactly
-    }
-
-    It 'Returns false and skips repair when Repair-WinGetPackageManager is unavailable' {
-        Mock Get-Command { $null } -ParameterFilter { $Name -eq 'Repair-WinGetPackageManager' }
-        Mock Invoke-WingetSourceProbe { @{ Succeeded = $false; ExitCode = -1978335162; TimedOut = $false } }
-
-        $result = Initialize-WingetSourcesForUser
-
-        $result | Should -Be $false
-        Should -Invoke Repair-WinGetPackageManager -Times 0 -Exactly
-        Should -Invoke Invoke-WingetSourceProbe -Times 1 -Exactly
-    }
-
-    It 'Registers the staged App Installer before repairing and succeeds when the re-probe passes (issue #265)' {
-        $script:probeCallCount = 0
-        Mock Invoke-WingetSourceProbe {
-            $script:probeCallCount++
-            if ($script:probeCallCount -eq 1) {
-                return @{ Succeeded = $false; ExitCode = -2147009255; TimedOut = $false }
-            }
-            return @{ Succeeded = $true; ExitCode = 0; TimedOut = $false }
-        }
-        Mock Register-WingetAppInstallerForUser { $true }
-
-        $result = Initialize-WingetSourcesForUser
-
-        $result | Should -Be $true
-        Should -Invoke Register-WingetAppInstallerForUser -Times 1 -Exactly
-        Should -Invoke Repair-WinGetPackageManager -Times 0 -Exactly
-        Should -Invoke Invoke-WingetSourceProbe -Times 2 -Exactly
-    }
-
-    It 'Names the dependency conflict in its remediation advice when the repair is downgrade-rejected (issue #265)' {
-        Mock Invoke-WingetSourceProbe { @{ Succeeded = $false; ExitCode = -2147009255; TimedOut = $false } }
-        Mock Repair-WinGetPackageManager {
-            throw 'Deployment failed with HRESULT: 0x80073D06, The package could not be installed because a higher version of this package is already installed.'
-        }
-
-        $result = Initialize-WingetSourcesForUser
-
-        $result | Should -Be $false
-        Should -Invoke Repair-WinGetPackageManager -Times 1 -Exactly
-        Should -Invoke Write-WarningMessage -Times 1 -ParameterFilter { $Message -match 'update App Installer from the Microsoft Store' }
-    }
-
-    It 'Names the missing framework in its remediation advice when the repair hits a missing-framework-dependency rejection (issue #279)' {
-        Mock Invoke-WingetSourceProbe { @{ Succeeded = $false; ExitCode = -2147009255; TimedOut = $false } }
-        Mock Repair-WinGetPackageManager {
-            throw ('Deployment failed with HRESULT: 0x80073CF3, Package failed updates, dependency or conflict validation.' + [Environment]::NewLine +
-                'Windows cannot install package Microsoft.DesktopAppInstaller_1.29.290.0_x64__8wekyb3d8bbwe because this package depends on a framework that could not be found. Provide the framework "Microsoft.WindowsAppRuntime.1.8" published by "CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US", with neutral or x64 processor architecture and minimum version 8000.616.304.0, along with this package to install.')
-        }
-
-        $result = Initialize-WingetSourcesForUser
-
-        $result | Should -Be $false
-        Should -Invoke Repair-WinGetPackageManager -Times 1 -Exactly
-        Should -Invoke Write-WarningMessage -Times 1 -ParameterFilter { $Message -match 'Microsoft.WindowsAppRuntime.1.8' }
-    }
-
-    It 'Warns about cross-user elevation when the process account differs from the session owner' {
-        Mock Get-ProcessUserName { 'CONTOSO\admin-jmaffiola' }
-        Mock Get-InteractiveSessionUserName { 'CONTOSO\jdoe' }
-        Mock Invoke-WingetSourceProbe { @{ Succeeded = $true; ExitCode = 0; TimedOut = $false } }
-
-        [void](Initialize-WingetSourcesForUser)
-
-        Should -Invoke Write-WarningMessage -Times 1 -ParameterFilter { $Message -match 'Cross-user elevation detected' }
-    }
-
-    It 'Does not warn about cross-user elevation for a same-account session' {
-        Mock Invoke-WingetSourceProbe { @{ Succeeded = $true; ExitCode = 0; TimedOut = $false } }
-
-        [void](Initialize-WingetSourcesForUser)
-
-        Should -Invoke Write-WarningMessage -Times 0 -ParameterFilter { $Message -match 'Cross-user elevation detected' }
-    }
-
-    # Review findings P2-24, P3-23: a SYSTEM run with someone signed in compared like an admin
-    # elevating on their PC, so it said 'Cross-user elevation detected', ran the per-account rungs
-    # and advised signing in to Windows as NT AUTHORITY\SYSTEM.
-    It 'As SYSTEM with a user signed in, updates the source with no cross-user banner, per-account rung or advice to sign in as SYSTEM' {
-        Mock Test-IsSystemAccount { $true }
-        Mock Get-ProcessUserName { 'NT AUTHORITY\SYSTEM' }
-        Mock Get-InteractiveSessionUserName { 'CONTOSO\jdoe' }
-        Mock Invoke-WingetSourceProbe { @{ Succeeded = $false; ExitCode = -2147009255; TimedOut = $false } }
-
-        $result = Initialize-WingetSourcesForUser
-
-        $result | Should -Be $false
-        Should -Invoke Invoke-WingetSourceProbe -Times 1 -Exactly
-        Should -Invoke Register-WingetAppInstallerForUser -Times 0 -Exactly
-        Should -Invoke Repair-WinGetPackageManager -Times 0 -Exactly
-        Should -Invoke Write-WarningMessage -Times 0 -Exactly -ParameterFilter { $Message -match 'Cross-user elevation|log on to Windows|NT AUTHORITY' }
-        Should -Invoke Write-WarningMessage -Times 1 -Exactly -ParameterFilter { $Message -match 'could not be updated for SYSTEM \(exit code 0x80073D19 ERROR_DEPLOYMENT_BLOCKED_BY_USER_LOG_OFF\)' }
-    }
-
-    It 'As SYSTEM, returns true when the source update works' {
-        Mock Invoke-WingetSourceProbe { @{ Succeeded = $true; ExitCode = 0; TimedOut = $false } }
-
-        Initialize-WingetSourcesForUser -AccountContext (New-TestAccountContext -System -SessionUser 'CONTOSO\jdoe') | Should -Be $true
-
-        Should -Invoke Register-WingetAppInstallerForUser -Times 0 -Exactly
-    }
-
-    It 'Uses the account context the run passes instead of reading it again' {
-        Mock Get-InstallAccountContext { throw 'the run already decided' }
-        Mock Invoke-WingetSourceProbe { @{ Succeeded = $true; ExitCode = 0; TimedOut = $false } }
-
-        Initialize-WingetSourcesForUser -AccountContext (New-TestAccountContext -CrossUser -ProcessUser 'CONTOSO\admin-tech' -SessionUser 'CONTOSO\jdoe') | Should -Be $true
-
-        Should -Invoke Write-WarningMessage -Times 1 -Exactly -ParameterFilter { $Message -eq "Cross-user elevation detected: running as 'CONTOSO\admin-tech' while 'CONTOSO\jdoe' owns the interactive session." }
     }
 }
 

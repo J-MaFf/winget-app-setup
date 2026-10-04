@@ -20,8 +20,7 @@
         # Elevation (consumed by winget-app-uninstall.ps1)
         'Test-IsAdmin', 'Restart-WithElevation',
         # Winget core
-        'Test-AndInstallWingetModule', 'Test-AndInstallWinget', 'Test-WingetSources',
-        'Initialize-WingetSourcesForUser', 'Install-WingetPackage',
+        'Initialize-Winget', 'Install-WingetPackage',
         'Test-WingetPackageInstalled', 'Test-AppxPackageProvisioned', 'Invoke-AppxProvisioning', 'Install-MsixProvisionedPackage', 'Install-PowerShellLatest',
         # Automatic updates (Winget-AutoUpdate)
         'Get-WauPin', 'Test-WauInstalled', 'Install-WingetAutoUpdate', 'Uninstall-WingetAutoUpdate', 'Remove-LegacyScheduledUpdates',

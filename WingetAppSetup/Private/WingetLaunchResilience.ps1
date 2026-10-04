@@ -143,9 +143,11 @@ function Resolve-WingetExecutable {
     (STATUS_DLL_NOT_FOUND): the Windows loader could not find a DLL winget.exe needs, which stays
     so until that DLL is installed. A machine-wide winget.exe started as SYSTEM fails this way on a
     PC without the Visual C++ runtime, and checking it again only made every such run wait 75
-    seconds before trying the next one (review of finding P2-24).
+    seconds before trying the next one (review of finding P2-24). And so is 0x8A15003A
+    (BLOCKED_BY_POLICY): Group Policy turned winget off, which no wait changes (review finding
+    P3-30).
 
-    Used by Test-AndInstallWinget (is winget usable before the run), by Invoke-WingetInstall's
+    Used by Initialize-Winget (is winget usable before the run), by Invoke-WingetInstall's
     circuit breaker (after an app could not launch winget) and end-of-run check, and by
     e2e/Assert-Install.ps1. It replaced Wait-WingetLaunchable, whose multi-minute polling and
     consecutive-success streaks existed only to survive the Winget-AutoUpdate run the installer
@@ -158,7 +160,8 @@ function Resolve-WingetExecutable {
     Seconds to wait between checks. Default 10.
 .RETURNS
     [pscustomobject] with Launchable ([bool]), Version (the version winget printed, or $null),
-    Reason (why it is not launchable, for a message; $null when it is) and Attempts (checks made).
+    Reason (why it is not launchable, for a message; $null when it is), ExitCode (the last check's
+    exit code; $null when winget did not start or did not finish) and Attempts (checks made).
 #>
 function Test-WingetLaunchable {
     param (
@@ -172,8 +175,9 @@ function Test-WingetLaunchable {
     )
 
     $timeoutSeconds = Get-ProcessTimeoutSeconds -Operation WingetVersion
-    # 0xC0000135 STATUS_DLL_NOT_FOUND, as the signed Int32 a process exit code is.
-    $dllNotFoundExitCode = -1073741515
+    # 0xC0000135 STATUS_DLL_NOT_FOUND and 0x8A15003A BLOCKED_BY_POLICY, as the signed Int32 a
+    # process exit code is: neither changes by waiting.
+    $finalExitCodes = @(-1073741515, -1978335174)
     $reason = $null
     $run = $null
     for ($attempt = 1; $attempt -le $Attempts; $attempt++) {
@@ -188,14 +192,14 @@ function Test-WingetLaunchable {
         }
         elseif ($run.ExitCode -ne 0) {
             $reason = "'winget --version' exited with {0}" -f (Format-WingetExitCode -ExitCode $run.ExitCode)
-            if ($run.ExitCode -eq $dllNotFoundExitCode) {
+            if ($finalExitCodes -contains $run.ExitCode) {
                 $retryable = $false
             }
         }
         else {
             $versionLine = @($run.StandardOutput | ForEach-Object { "$_".Trim() } | Where-Object { $_ -match '^v\d' }) | Select-Object -First 1
             if ($versionLine) {
-                return [pscustomobject]@{ Launchable = $true; Version = $versionLine; Reason = $null; Attempts = $attempt }
+                return [pscustomobject]@{ Launchable = $true; Version = $versionLine; Reason = $null; ExitCode = 0; Attempts = $attempt }
             }
             $reason = "'winget --version' printed no version"
         }
@@ -211,5 +215,5 @@ function Test-WingetLaunchable {
     if ($run -and -not $run.LaunchFailed -and @($run.Output).Count -gt 0) {
         Write-ProcessOutput -Line $run.Output -Tail 10
     }
-    return [pscustomobject]@{ Launchable = $false; Version = $null; Reason = $reason; Attempts = [Math]::Min($attempt, $Attempts) }
+    return [pscustomobject]@{ Launchable = $false; Version = $null; Reason = $reason; ExitCode = $run.ExitCode; Attempts = [Math]::Min($attempt, $Attempts) }
 }

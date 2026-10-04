@@ -27,8 +27,9 @@
 .NOTES
     Exit codes: 0 = success, 1 = one or more apps failed to install (including the apps marked
     failed when winget could no longer be launched mid-run), 2 = winget unavailable (at the start,
-    where `winget --version` must run and print a version, or no longer launchable at the end of
-    the run), 3 = app-definition validation failed or no valid apps remain, 4 = administrator rights
+    where `winget --version` must run and print a version, or Group Policy turns winget or its
+    source off; or no longer launchable at the end of the run), 3 = app-definition validation
+    failed or no valid apps remain, 4 = administrator rights
     are required and the run was not elevated: the UAC prompt was declined or could not be shown, a
     non-interactive run (nobody to approve a prompt, so none is shown), irm | iex, or the imported
     module (review finding P2-12), 3010 = success, but a restart is required to finish (an install
@@ -96,7 +97,6 @@ function Invoke-WingetInstall {
                 # and (b) — if the flag were ever dropped across the elevation boundary —
                 # silently turn a dry run into a real install. Stay in the current session and
                 # continue the preview.
-                Write-Info '[DRY-RUN] Would run winget source update --name winget to bootstrap the source in user context'
                 Write-Info '[DRY-RUN] Would relaunch with administrator privileges. Continuing the preview in the current (non-elevated) session; no system changes will be made.'
             }
         }
@@ -126,28 +126,11 @@ function Invoke-WingetInstall {
             return 4
         }
         else {
-            # Trigger the winget source's per-user first-use bootstrap in the user context before
-            # elevating. Agreements are per-user and won't carry into the elevated process. Scoped
-            # to --name winget — the only source this tool installs from — so it never triggers
-            # msstore's agreement/first-use handshake, which fails in non-interactive/cross-user
-            # contexts (issue #172).
+            # No winget call before elevating: the elevated run sets winget up for the account it
+            # runs as (Initialize-Winget). A source update here set up the signed-in user's source,
+            # which under cross-user elevation is not the account that installs, and was a fourth
+            # source probe in the run (review finding P3-25).
             #
-            # --disable-interactivity (issue #230): this used to run bare, on purpose, to surface
-            # winget's agreement prompt "while we still have the normal user's identity" - and
-            # -Wait meant an unattended run sat on that prompt forever. It was never load-bearing:
-            # the result is discarded, so nothing here acts on the answer either way. The agreement
-            # is accepted where it actually counts - every install passes
-            # --accept-source-agreements, and the elevated Initialize-WingetSourcesForUser re-probes
-            # and bootstraps the installing account via Repair-WinGetPackageManager (issue #159).
-            #
-            # Invoke-WingetSourceProbe (WingetBootstrap.ps1) wraps this command in a timeout guard,
-            # so a corrupted or unreachable source cannot block the run before elevation. Capped at
-            # 30s (well under the probe's own 120s default): the return value is discarded — this
-            # call remains best-effort — and Initialize-WingetSourcesForUser re-probes for real
-            # after elevation.
-            Write-Info 'Updating the winget source...'
-            [void](Invoke-WingetSourceProbe -TimeoutSeconds 30)
-
             # No "press Enter to elevate" pause (issue #230): the UAC dialog the relaunch raises is
             # the actual consent gate.
             Write-ErrorMessage 'This script requires administrator privileges. Restarting with elevated privileges...'
@@ -185,7 +168,7 @@ function Invoke-WingetInstall {
     # an RMM agent such as Endpoint Central, or an admin account elevating on a signed-in user's PC.
     # Either way the run installs for the whole PC only, so an app whose package has no machine-wide
     # installer is deferred instead of being installed for the wrong account. A SYSTEM run uses the
-    # machine-wide winget.exe (Test-AndInstallWinget finds it), which Resolve-WingetExecutable
+    # machine-wide winget.exe (Initialize-Winget finds it), which Resolve-WingetExecutable
     # returns from then on; a stale path from an earlier run in this session is dropped first.
     $script:MachineWingetPath = $null
     $account = Get-InstallAccountContext
@@ -210,41 +193,6 @@ function Invoke-WingetInstall {
         Write-WarningMessage ('A restart is already pending on this PC ({0}). An installer that needs a restart first fails with 0x8A15010A; if one does, restart this PC and re-run the installer.' -f ($restartPendingBefore -join '; '))
     }
 
-    # Ensure the WinGet PowerShell module is available before touching winget itself:
-    # Test-AndInstallWinget and Initialize-WingetSourcesForUser use Repair-WinGetPackageManager
-    # to bootstrap winget for accounts that have no interactive logon session (issue #159).
-    #
-    # A dry run passes -WhatIf to this and the other setup helpers below (winget, Out-GridView,
-    # sources): each then only probes and prints what a real run would change, and the dry run
-    # carries on with the preview whatever they find (P2-16: these used to install modules for all
-    # users, register or repair App Installer and reset winget's sources during a dry run). Their
-    # real-run warnings are skipped in a dry run, which never attempted the fix they report on.
-    #
-    # Not as SYSTEM (review finding P2-24): the module is only used for Repair-WinGetPackageManager,
-    # which sets winget up for one account. As SYSTEM it does nothing (and throws with -AllUsers),
-    # so installing the module from the PowerShell Gallery would be a download for nothing.
-    if ($account.IsSystem) {
-        Write-Info 'Skipping the Microsoft.WinGet.Client module: it only repairs winget for a signed-in account, which does not apply to SYSTEM.'
-    }
-    else {
-        $wingetModuleAvailable = Test-AndInstallWingetModule -WhatIf:$WhatIf
-        if (-not $wingetModuleAvailable -and -not $WhatIf) {
-            Write-Warning 'Microsoft.WinGet.Client module is not available. Update functionality will use fallback CLI methods.'
-        }
-
-        # Import required modules (a dry run imports it only when it is already installed)
-        if ($wingetModuleAvailable -or -not $WhatIf) {
-            try {
-                Import-Module Microsoft.WinGet.Client -ErrorAction Stop
-                Write-Success 'Successfully imported Microsoft.WinGet.Client module'
-            }
-            catch {
-                Write-Warning "Failed to import Microsoft.WinGet.Client module: $_"
-                Write-Warning 'Update functionality will use fallback CLI methods'
-            }
-        }
-    }
-
     # Let a Winget-AutoUpdate run that is already in progress finish first (bounded): it
     # re-provisions App Installer, resets winget's sources and runs MSI upgrades, and racing it makes
     # healthy apps fail with launch errors or 'another installation is in progress'. Read-only, but
@@ -253,38 +201,21 @@ function Invoke-WingetInstall {
         [void](Wait-WauIdle)
     }
 
-    # Check if winget is available and install if necessary. A dry run without winget carries on:
-    # a real run would bootstrap it first (Test-AndInstallWinget says how), so stopping here would
-    # misreport the very machine a dry run is used to preview (cross-user elevation, issue #265).
-    # As SYSTEM this finds and checks the machine-wide winget.exe instead of setting winget up for
-    # an account (review finding P2-24).
-    $wingetAvailable = Test-AndInstallWinget -WhatIf:$WhatIf -SystemContext:$account.IsSystem
+    # Make winget usable for the account this run installs as: one probe, classify, fix ladder
+    # (review finding P3-25; as SYSTEM it finds the machine-wide winget.exe, P2-24). It stops the run
+    # with exit code 2 when winget cannot be started or Group Policy turns it off. A dry run only
+    # probes (P2-16) and carries on whatever it finds: a real run would set winget up first, so
+    # stopping here would misreport the very machine a dry run previews (cross-user elevation,
+    # issue #265).
+    $winget = Initialize-Winget -WhatIf:$WhatIf -AccountContext $account
+    $wingetAvailable = [bool]$winget.Ready
     if (-not $wingetAvailable -and -not $WhatIf) {
         Write-ErrorMessage 'Winget is required for this script. Exiting.'
         return 2
     }
 
-    # Initialize winget sources and agreements for the account performing the installs. This is
-    # what prevents 0x80073d19 when the script is elevated as a different account than the
-    # logged-on user (issues #104/#150, #159).
-    [void](Initialize-WingetSourcesForUser -WhatIf:$WhatIf -AccountContext $account)
-
     if (-not (Test-AndInstallGraphicalTools -WhatIf:$WhatIf) -and -not $WhatIf) {
         Write-Warning 'Out-GridView will be unavailable; results will be displayed in text mode only.'
-    }
-
-    # Verify winget sources are accessible and auto-repair if broken
-    if (-not $wingetAvailable) {
-        # Only a dry run gets here without winget (a real run returned 2 above).
-        if ($account.IsSystem) {
-            Write-Info '[DRY-RUN] Skipping the winget source check: no machine-wide winget could be started, so a real run would already have stopped with exit code 2.'
-        }
-        else {
-            Write-Info '[DRY-RUN] Skipping the winget source check: winget is not available for this account yet. A real run checks the source once winget is bootstrapped, and repairs it if needed.'
-        }
-    }
-    elseif (-not (Test-WingetSources -WhatIf:$WhatIf -SystemContext:$account.IsSystem) -and -not $WhatIf) {
-        Write-WarningMessage 'Winget sources could not be repaired. Some installations may fail.'
     }
 
     # Migrate away from the old homegrown scheduled-update task if a prior version installed one;
@@ -345,8 +276,8 @@ function Invoke-WingetInstall {
     $deferredApps = @()
 
     # No separate source-trust pass here: only the winget community source is used (every install
-    # forces --source winget), and its health was already verified — and repaired if needed — by
-    # Test-WingetSources above (issues #172, #177).
+    # forces --source winget), and Initialize-Winget above already updated it, and repaired it if
+    # needed (issues #172, #177).
 
     # Run-level circuit breaker (review findings P2-8, P2-10). Set once an app could not launch
     # winget and a follow-up check (Invoke-WingetLaunchCircuitBreaker) found that winget still

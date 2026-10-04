@@ -25,6 +25,8 @@
       RestartRequired       The package installed, and a restart finishes it (MSI 3010 on winget
                             1.6 and older, which newer winget reports as exit 0 with a warning), or
                             the installer started a restart itself (MSI 1641).
+      SourceBroken          The winget source is missing or its data is corrupted.
+                            Initialize-Winget runs `winget source reset --force` for it.
       (empty)               Named for the reader only; no special handling.
 .PARAMETER ExitCode
     The exit code as winget reports it (a signed Int32), or $null.
@@ -86,17 +88,24 @@ function Get-WingetExitCodeInfo {
         '0x8A150001' = @('INTERNAL_ERROR', 'winget hit an internal error', '')
         '0x8A150002' = @('INVALID_CL_ARGUMENTS', 'winget rejected its command line', '')
         '0x8A150003' = @('COMMAND_FAILED', 'the winget command failed', '')
-        '0x8A15000F' = @('SOURCE_DATA_MISSING', 'the winget source data is missing', '')
+        '0x8A15000B' = @('SOURCES_INVALID', 'the configured winget sources are corrupted', 'SourceBroken')
+        '0x8A15000F' = @('SOURCE_DATA_MISSING', 'the winget source data is missing', 'SourceBroken')
+        '0x8A150012' = @('SOURCE_NAME_DOES_NOT_EXIST', 'the winget source is not configured', 'SourceBroken')
         '0x8A150014' = @('NO_APPLICATIONS_FOUND', 'winget found no package with that id', '')
+        '0x8A150015' = @('NO_SOURCES_DEFINED', 'no winget source is configured', 'SourceBroken')
         '0x8A150019' = @('COMMAND_REQUIRES_ADMIN', 'the winget command needs administrator rights', '')
         '0x8A15003A' = @('BLOCKED_BY_POLICY', 'winget is disabled by Group Policy on this PC', '')
-        '0x8A15003F' = @('SOURCE_DATA_INTEGRITY_FAILURE', 'the winget source data is corrupted', '')
+        '0x8A15003F' = @('SOURCE_DATA_INTEGRITY_FAILURE', 'the winget source data is corrupted', 'SourceBroken')
         '0x8A150045' = @('SOURCE_OPEN_FAILED', 'the winget source could not be opened', '')
         '0x8A15004B' = @('FAILED_TO_OPEN_ALL_SOURCES', 'one or more winget sources could not be opened', '')
         '0x8A150056' = @('INSTALLER_PROHIBITS_ELEVATION', 'the installer cannot run as administrator', '')
         '0x8A15007D' = @('ADMIN_CONTEXT_ACTION_PROHIBITED', 'not permitted as administrator on a package installed for one user', '')
         # Windows HRESULTs winget passes through as its exit code.
         '0x80073D19' = @('ERROR_DEPLOYMENT_BLOCKED_BY_USER_LOG_OFF', 'the installing account has no logon session, so Windows blocked the app package deployment', '')
+        # App package deployment errors seen when App Installer is registered or repaired (issues
+        # #265, #279).
+        '0x80073CF3' = @('ERROR_INSTALL_RESOLVE_DEPENDENCY_FAILED', 'a package it depends on, such as a framework, is missing', '')
+        '0x80073D06' = @('ERROR_INSTALL_PACKAGE_DOWNGRADE', 'a higher version of the package is already installed', '')
         # winget maps this to 0x8A150101 for MSIX installs, so it is named here but not retried.
         '0x80073D02' = @('ERROR_PACKAGES_IN_USE', 'the app is running - close it, then re-run the installer', '')
         '0x80004004' = @('E_ABORT', 'the operation was cancelled or stopped', '')
