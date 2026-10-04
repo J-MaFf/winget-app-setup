@@ -340,7 +340,8 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
             $result = Invoke-WingetInstall -Apps @(@{ name = 'Contoso.AppOne' })
 
             $result | Should -Be 4
-            $script:errorMessages | Should -Contain 'Elevation was declined or failed, so nothing was installed. Re-run the installer and approve the administrator (UAC) prompt.'
+            # Restart-WithElevation has already said why and what to do; this only adds the result.
+            $script:errorMessages | Should -Contain 'No elevated run was started, so nothing was installed.'
             # Nothing showed an outcome yet, so the entry script explains the exit.
             $script:InstallerPendingExitCode | Should -BeNullOrEmpty
             Should -Invoke Install-AppWithVerification -Times 0 -Exactly
@@ -350,6 +351,8 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
             Mock Restart-WithElevation { [pscustomobject]@{ Started = $false; ExitCode = 5 } }
 
             Invoke-WingetInstall -Apps @(@{ name = 'Contoso.AppOne' }) | Should -Be 5
+            # No prompt was shown, so there is none to approve.
+            ($script:errorMessages -join "`n") | Should -Not -Match 'approve|declined'
         }
 
         It 'Returns 4 with the remote elevation guidance under irm | iex, where it cannot relaunch (issues #226/#229)' {

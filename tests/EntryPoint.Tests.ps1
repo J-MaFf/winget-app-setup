@@ -650,6 +650,8 @@ function Invoke-WingetSourceProbe {
         $result.ExitCode | Should -Be 5
         $result.Output | Should -Match 'changed after this run started, so it is not run with administrator rights'
         $result.Output | Should -Not -Match 'ELEVATED:'
+        # No UAC prompt was shown, so the run does not say to approve one.
+        $result.Output | Should -Not -Match 'approve the administrator|declined'
     }
 
     It 'Exits 4 after one UAC prompt when the prompt is declined' {

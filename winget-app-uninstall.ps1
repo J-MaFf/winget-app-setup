@@ -21,7 +21,9 @@ If (-NOT (Test-IsAdmin)) {
     # every account has, never a per-user pwsh.exe or wt.exe alias), waits for it and returns its
     # exit code. A declined UAC prompt, or a non-interactive run (no prompt is shown), returns 4.
     # -InPlace: this script imports the module from its own folder, so the elevated window runs
-    # this file where it is rather than a checked copy elsewhere.
+    # this file where it is rather than a checked copy elsewhere. Nothing checks these files then
+    # (readme, "Administrator rights"): run from a folder the signed-in user can write to, they can
+    # be rewritten while the UAC prompt is up.
     $elevation = Restart-WithElevation -ScriptPath $PSCommandPath -InPlace
     exit $elevation.ExitCode
 }

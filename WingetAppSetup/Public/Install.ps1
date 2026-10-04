@@ -162,7 +162,9 @@ function Invoke-WingetInstall {
             # file's SHA256 taken by the entry script when this run started.
             $elevation = Restart-WithElevation -ScriptPath $PSCommandPath -AdditionalArguments $elevationArgs -ExpectedSha256 $script:InstallerScriptSha256
             if (-not $elevation.Started) {
-                Write-ErrorMessage 'Elevation was declined or failed, so nothing was installed. Re-run the installer and approve the administrator (UAC) prompt.'
+                # Restart-WithElevation has said why and what to do: a declined prompt, a file that
+                # changed (5) or a command line too long all differ, and only the first had a prompt.
+                Write-ErrorMessage 'No elevated run was started, so nothing was installed.'
                 return [int]$elevation.ExitCode
             }
             # The elevated window showed the run's summary, or why it stopped, and waited for a key

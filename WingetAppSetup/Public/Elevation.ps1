@@ -68,7 +68,9 @@ function Test-IsAdmin {
     bootstrap's copy in %TEMP%, a clone in Downloads, the staged copy) while the UAC prompt is up is
     not run with administrator rights. The staged copy is removed once the elevated run has ended.
     -InPlace runs ScriptPath directly, for a script that needs the files next to it
-    (winget-app-uninstall.ps1 imports the module from its own folder).
+    (winget-app-uninstall.ps1 imports the module from its own folder). Nothing is checked then: the
+    elevated run runs whatever ScriptPath and the files it loads hold when it starts, so a file in a
+    folder the signed-in user can write to is exposed while the UAC prompt is up.
 
     Never asks when nobody is at the console (Test-EffectiveNonInteractive): an unattended run would
     leave a UAC prompt on someone's desktop and report nothing. A declined UAC prompt (Win32 error
@@ -83,7 +85,7 @@ function Test-IsAdmin {
     The script's SHA256 when this run started (the generated installer computes it at startup). When
     the file no longer has it, nothing is started. Empty: the hash is taken now.
 .PARAMETER InPlace
-    Run ScriptPath itself instead of a checked copy.
+    Run ScriptPath itself, unchecked, instead of a checked copy.
 .PARAMETER NonInteractive
     The caller's -NonInteractive switch.
 .RETURNS
@@ -161,7 +163,14 @@ function Restart-WithElevation {
         # ShellExecuteEx, which starts an elevated process, accepts a command line of about 2048
         # characters; a longer one would not start or would arrive cut off.
         if ($argumentString.Length -gt 2000) {
-            Write-ErrorMessage "The path $ScriptPath is too long to start it elevated. Move it to a shorter path, or start it from an elevated session."
+            if ($InPlace) {
+                Write-ErrorMessage "The path $ScriptPath is too long to start it elevated. Move it to a shorter path, or start it from an elevated session."
+            }
+            else {
+                # The command line holds the staged copy's path and the file name, not the folder
+                # ScriptPath is in, so moving the file would not help.
+                Write-ErrorMessage "The command that starts $ScriptPath elevated is too long, because the file name or this account's %TEMP% path ($([System.IO.Path]::GetTempPath())) is long. Give the file a shorter name, or start it from an elevated session."
+            }
             return [pscustomobject]@{ Started = $false; ExitCode = 4 }
         }
 
@@ -179,7 +188,7 @@ function Restart-WithElevation {
         catch {
             if ((Get-NativeErrorCode -Exception $_.Exception) -eq 1223) {
                 # ERROR_CANCELLED: the UAC prompt was declined. Reported once; no second prompt.
-                Write-ErrorMessage 'The administrator (UAC) prompt was declined, so no elevated run was started.'
+                Write-ErrorMessage 'The administrator (UAC) prompt was declined, so no elevated run was started. Run it again and approve the prompt, or start it from an elevated session.'
             }
             else {
                 Write-ErrorMessage "Could not start an elevated Windows PowerShell ($powerShellPath): $($_.Exception.Message)"

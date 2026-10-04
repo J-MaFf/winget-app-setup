@@ -210,15 +210,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     them once the elevated run has ended. The elevated process runs a short command given on its own
     command line (`New-ElevationVerifierCommand`) that reads the staged file once, compares its
     SHA256, writes those bytes into a new folder under `%SystemRoot%\Temp` with its own access list
-    (SYSTEM, Administrators and the elevating account, nothing inherited) and runs that copy. A file
-    that changed since startup is not run (exit code 5). The check cannot live in the
-    file itself, since a replaced file would not contain it, and the copy has to be made by the
-    elevated process: a non-elevated process cannot create a folder that it cannot change itself.
-    Same-account elevation (Admin Approval Mode) is not a security boundary, so this protects the
-    cross-user case.
+    (SYSTEM and Administrators only, nothing inherited) and runs that copy. A file that changed
+    since startup is not run (exit code 5). The check cannot live in the file itself, since a
+    replaced file would not contain it, and the copy has to be made by the elevated process: a
+    non-elevated process cannot create a folder that it cannot change itself. The access list
+    leaves out the elevating account's own entry, which in same-account elevation (Admin Approval
+    Mode) would let that account's non-elevated processes rewrite the copy until the elevated
+    PowerShell 7 reads it. Same-account elevation is not a security boundary all the same (the
+    non-elevated processes build the elevated command line), so this protects the cross-user case.
+    The paths in that command are quoted with `CodeGeneration.EscapeSingleQuotedStringContent`, so
+    a typographic apostrophe in a profile folder name (U+2019, as in a curly `O'Brien`) cannot
+    break it.
   - **Uninstaller.** `winget-app-uninstall.ps1` gets the same relaunch (System32 Windows PowerShell,
     waits, exits with the elevated run's code, 4 when declined or non-interactive). It runs its own
-    file in place (`Restart-WithElevation -InPlace`), because it imports the module from its folder.
+    file in place (`Restart-WithElevation -InPlace`), because it imports the module from its folder,
+    so it gets no checked copy: the elevated window runs whatever the script and the
+    `WingetAppSetup` folder next to it hold when it starts. Run it from a folder only
+    administrators can change, or from an elevated session, when another account approves the
+    prompt.
   - The readme's exit-code table also gains code 7 (the PowerShell 7 bootstrap failed), which the
     installer has returned since the bootstrap hardening but the table still listed under 1.
 

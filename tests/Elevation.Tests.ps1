@@ -118,7 +118,7 @@ Describe 'Restart-WithElevation (review findings P2-11, P2-12, P3-11)' {
         $result.Started | Should -BeFalse
         $result.ExitCode | Should -Be 4
         Should -Invoke Start-ElevatedProcess -Times 1 -Exactly
-        $script:errorMessages | Should -Contain 'The administrator (UAC) prompt was declined, so no elevated run was started.'
+        $script:errorMessages | Should -Contain 'The administrator (UAC) prompt was declined, so no elevated run was started. Run it again and approve the prompt, or start it from an elevated session.'
     }
 
     It 'Returns 4 and says why when the elevated process cannot be started for another reason' {
@@ -232,6 +232,28 @@ Describe 'Restart-WithElevation (review findings P2-11, P2-12, P3-11)' {
         $result.Started | Should -BeFalse
         $result.ExitCode | Should -Be 4
         Should -Invoke Start-ElevatedProcess -Times 0 -Exactly
+        # -InPlace puts the path itself on the command line, so a shorter path is the fix.
+        ($script:errorMessages -join "`n") | Should -Match 'is too long to start it elevated\. Move it to a shorter path'
+    }
+
+    It 'Points at the file name and %TEMP%, not the folder, when the checked-copy command would be too long' {
+        # In the default mode the command holds the staged copy's path (under %TEMP%) and the file
+        # name, not the folder the script is in, so moving the script would not help.
+        Mock New-ElevationVerifierCommand { 'x' * 2100 }
+        $tempRoot = [System.IO.Path]::GetTempPath()
+        $stagingBefore = @(Get-ChildItem -LiteralPath $tempRoot -Filter 'winget-app-setup-elevate-*' -ErrorAction SilentlyContinue).Count
+
+        $result = Restart-WithElevation -ScriptPath $script:scriptPath
+
+        $result.Started | Should -BeFalse
+        $result.ExitCode | Should -Be 4
+        Should -Invoke Start-ElevatedProcess -Times 0 -Exactly
+        $message = $script:errorMessages -join "`n"
+        $message | Should -Match ([regex]::Escape("%TEMP% path ($tempRoot)"))
+        $message | Should -Match 'Give the file a shorter name, or start it from an elevated session\.'
+        $message | Should -Not -Match 'Move it to a shorter path'
+        # The staged copy is removed on this path too.
+        @(Get-ChildItem -LiteralPath $tempRoot -Filter 'winget-app-setup-elevate-*' -ErrorAction SilentlyContinue).Count | Should -Be $stagingBefore
     }
 
     It 'Clears the PowerShell 7 bootstrap''s relaunch-loop guard before starting the elevated Windows PowerShell' {
@@ -303,6 +325,14 @@ Describe 'Get-WindowsPowerShellPath and Get-ElevatedCopyRoot' {
 }
 
 Describe 'New-ElevationVerifierCommand (review finding P3-11)' {
+    BeforeDiscovery {
+        # Discovery-time, because -Skip is bound during discovery. Off Windows, GetCurrent() throws.
+        $script:isElevatedWindows = $false
+        if ($IsWindows) {
+            $script:isElevatedWindows = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+        }
+    }
+
     BeforeAll {
         $script:sampleSha256 = 'ab' * 32
         $script:currentPowerShell = (Get-Process -Id $PID).Path
@@ -319,6 +349,27 @@ Describe 'New-ElevationVerifierCommand (review finding P3-11)' {
         $command | Should -Match ([regex]::Escape("ReadAllBytes('C:\Users\o''brien\AppData\Local\Temp\winget-app-setup-1\winget-app-install.ps1')"))
         $command | Should -Match ([regex]::Escape("-ne '$($script:sampleSha256.ToUpperInvariant())'"))
         $command | Should -Match ([regex]::Escape('-File $copy -SkipSystemCheck;'))
+    }
+
+    It 'Escapes the typographic single quote <Name> in a path, which PowerShell reads as a quote too' -ForEach @(
+        @{ Name = 'U+2018'; Code = 0x2018 }
+        @{ Name = 'U+2019'; Code = 0x2019 }
+        @{ Name = 'U+201A'; Code = 0x201A }
+        @{ Name = 'U+201B'; Code = 0x201B }
+    ) {
+        # A profile folder such as O'Brien typed with a curly apostrophe: left as it is, the quote
+        # ends the literal, the elevated command does not parse, and powershell.exe exits 1 at once.
+        $quoteCharacter = [string][char]$Code
+        $path = 'C:\Users\O' + $quoteCharacter + 'Brien\AppData\Local\Temp\winget-app-setup-elevate-1\o' + $quoteCharacter + 's.ps1'
+        $command = New-ElevationVerifierCommand -ScriptPath $path -Sha256 $script:sampleSha256 -PowerShellPath 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe' -CopyRoot 'C:\Windows\Temp'
+
+        $parseErrors = $null
+        $ast = [System.Management.Automation.Language.Parser]::ParseInput($command, [ref]$null, [ref]$parseErrors)
+        $parseErrors | Should -BeNullOrEmpty
+        # The literals still hold the exact path and file name.
+        $constants = @($ast.FindAll({ param ($node) $node -is [System.Management.Automation.Language.StringConstantExpressionAst] }, $true) | ForEach-Object { $_.Value })
+        $constants | Should -Contain $path
+        $constants | Should -Contain ('o' + $quoteCharacter + 's.ps1')
     }
 
     It 'Replaces each placeholder once, so placeholder-like text in a path stays as it is' {
@@ -353,10 +404,35 @@ Describe 'New-ElevationVerifierCommand (review finding P3-11)' {
         @(Get-ChildItem -LiteralPath $copyRoot).Count | Should -Be 0
     }
 
-    It 'Under Windows PowerShell, runs a copy in a new folder only SYSTEM, Administrators and the elevating account can change, forwards the switches, exits with its code and removes the copy' -Skip:(-not $IsWindows) {
+    It 'Runs its check, rather than failing to parse, when the path holds a typographic apostrophe (U+2019)' {
+        # Real execution in a child PowerShell, as above. Before the quotes were escaped, the
+        # command did not parse and exited 1 with nothing run or explained.
+        $apostrophe = [string][char]0x2019
+        $folder = Join-Path $TestDrive ('o' + $apostrophe + 'brien')
+        [void](New-Item -ItemType Directory -Path $folder)
+        $markerPath = Join-Path $TestDrive 'ran-apostrophe.txt'
+        $sourcePath = Join-Path $folder ('tampered' + $apostrophe + 's.ps1')
+        Set-Content -LiteralPath $sourcePath -Value "Set-Content -LiteralPath '$markerPath' -Value 'ran'; exit 0" -Encoding UTF8
+        $copyRoot = Join-Path $TestDrive 'copies-apostrophe'
+        [void](New-Item -ItemType Directory -Path $copyRoot)
+        $command = New-ElevationVerifierCommand -ScriptPath $sourcePath -Sha256 ('0' * 64) -PowerShellPath $script:currentPowerShell -CopyRoot $copyRoot
+
+        $output = & $script:currentPowerShell -NoLogo -NoProfile -NonInteractive -Command $command 2>&1 | Out-String
+        $exitCode = $LASTEXITCODE
+
+        $exitCode | Should -Be 5
+        Test-Path -LiteralPath $markerPath | Should -BeFalse
+        # The console may not render U+2019, so the name is matched around it.
+        $output | Should -Match 'Did not run tampered.{1,3}s\.ps1: the file changed after administrator rights were requested'
+        @(Get-ChildItem -LiteralPath $copyRoot).Count | Should -Be 0
+    }
+
+    It 'Under elevated Windows PowerShell, runs a copy in a new folder only SYSTEM and Administrators can change, forwards the switches, exits with its code and removes the copy' -Skip:(-not $script:isElevatedWindows) {
         # Windows only: creating a folder with its access list is .NET Framework only, and the
-        # elevated process is always Windows PowerShell. Not elevated here: the check does not
-        # depend on it, and the access list includes the account that runs it.
+        # elevated process is always Windows PowerShell. Elevated only: the access list names no
+        # other account, so only an administrator can write the copy (the Windows CI runners run
+        # elevated). The elevating account's own entry is left out on purpose: in same-account
+        # elevation it would let that account's non-elevated processes rewrite the copy.
         $windowsPowerShell = Get-WindowsPowerShellPath
         $resultPath = Join-Path $TestDrive 'result.json'
         $sourcePath = Join-Path $TestDrive 'source.ps1'
@@ -383,10 +459,7 @@ exit 42
         $result.SkipSystemCheck | Should -BeTrue
         $result.Protected | Should -BeTrue
         $result.Inherited | Should -Be 0
-        $allowed = @('S-1-5-18', 'S-1-5-32-544', [Security.Principal.WindowsIdentity]::GetCurrent().User.Value)
-        foreach ($identity in @($result.Identities)) {
-            $allowed | Should -Contain $identity
-        }
+        (@($result.Identities | Sort-Object -Unique) -join ',') | Should -BeExactly 'S-1-5-18,S-1-5-32-544'
         @(Get-ChildItem -LiteralPath $copyRoot).Count | Should -Be 0
     }
 }

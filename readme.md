@@ -73,10 +73,9 @@ that started the installer gets the real result rather than a 0 for having opene
   file still has the SHA256 it had when the run started and copies it into its own `%TEMP%`, which
   administrators can read even when the elevating account cannot see the original (a mapped drive
   or a share). The elevated window compares that copy with the same SHA256, copies it into a new
-  folder under `%SystemRoot%\Temp` that only SYSTEM, administrators and the elevating account can
-  change, and runs that copy. A file rewritten while the prompt was up (the bootstrap's copy in
-  `%TEMP%`, or a clone in Downloads, are writable by the signed-in user) is not run: the run stops
-  with exit code 5.
+  folder under `%SystemRoot%\Temp` that only SYSTEM and administrators can change, and runs that
+  copy. A file rewritten while the prompt was up (the bootstrap's copy in `%TEMP%`, or a clone in
+  Downloads, are writable by the signed-in user) is not run: the run stops with exit code 5.
 - Declining the prompt ends the run with exit code 4, with no second prompt.
 - A non-interactive run that is not elevated (`-NonInteractive`, a scheduled task, an RMM agent
   running as the signed-in user) shows no prompt and exits 4 at once: nobody would be there to
@@ -84,6 +83,11 @@ that started the installer gets the real result rather than a 0 for having opene
 - Under `irm | iex` in PowerShell 7 there is no file to relaunch, so a run that is not elevated exits
   4 and asks you to open an elevated session. The Windows PowerShell 5.1 one-liner relaunches from
   the copy it downloads.
+- `winget-app-uninstall.ps1` elevates the same way, but runs its own file in place, without the
+  checked copy, because it imports the module from the `WingetAppSetup` folder next to it. The
+  elevated window runs whatever those files hold when it starts, so when another account approves
+  the prompt, run the uninstaller from a folder only administrators can change, or from an elevated
+  session.
 
 ## App catalog
 

@@ -59,12 +59,12 @@ param (
 # This script is assembled from the WingetAppSetup module by build/Build-WingetInstallScript.ps1.
 # Edit the function source under WingetAppSetup/Public and WingetAppSetup/Private, then re-run the
 # build to regenerate this file. See readme.md ("Project layout") for details.
-# Build id: 1.0.0+909ddc8c (module version + SHA256 fragment of this whole script; issue #189).
+# Build id: 1.0.0+6d4bb238 (module version + SHA256 fragment of this whole script; issue #189).
 # ------------------------------------------------------------------------------------------------
 
 # Content-derived build identity, logged at startup so a transcript from a remote machine
 # identifies exactly which installer build produced it (issue #189).
-$script:InstallerBuildId = '1.0.0+909ddc8c'
+$script:InstallerBuildId = '1.0.0+6d4bb238'
 
 # ------------------------------------------------Functions------------------------------------------------
 
@@ -282,15 +282,21 @@ function Get-ElevatedCopyRoot {
     cannot change. It:
       1. reads the file's bytes once and compares their SHA256 with the one the non-elevated run
          computed, and stops (exit code 5) when they differ;
-      2. creates a new folder under -CopyRoot with an access list of its own (SYSTEM,
-         Administrators and the elevating account, no inherited entries) and writes those same
-         bytes into it;
+      2. creates a new folder under -CopyRoot with an access list of its own (SYSTEM and
+         Administrators, no inherited entries) and writes those same bytes into it;
       3. runs that copy with Windows PowerShell -File, in the same window, forwarding the
          arguments, and exits with its exit code;
       4. deletes the folder.
     The copy has to be made by the elevated process: a non-elevated process cannot create a folder
     that it cannot change itself, because it would own the folder and keep the right to change its
     access list.
+
+    The access list does not name the elevating account itself: its elevated token always has
+    Administrators enabled, and Windows normally makes Administrators the owner of what it creates.
+    When a user elevates their own account (Admin Approval Mode), that account's own entry would
+    let any of its processes that are not elevated rewrite the copy until the elevated PowerShell 7
+    reads it, which can be minutes later while PowerShell 7 installs (review of finding P3-11). A
+    process that is not an administrator cannot write the copy, so it stops with exit code 5.
 
     On failure it prints why and waits for Enter, since this window closes when it exits; the
     elevated relaunch only happens when someone is at the console.
@@ -342,7 +348,7 @@ try {
     if ($hash -ne @SHA256@) { throw 'the file changed after administrator rights were requested'; }
     $security = New-Object Security.AccessControl.DirectorySecurity;
     $security.SetAccessRuleProtection($true, $false);
-    foreach ($sid in @('S-1-5-18', 'S-1-5-32-544', [Security.Principal.WindowsIdentity]::GetCurrent().User.Value)) { $security.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule((New-Object Security.Principal.SecurityIdentifier($sid)), 'FullControl', 'ContainerInherit, ObjectInherit', 'None', 'Allow'))); }
+    foreach ($sid in @('S-1-5-18', 'S-1-5-32-544')) { $security.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule((New-Object Security.Principal.SecurityIdentifier($sid)), 'FullControl', 'ContainerInherit, ObjectInherit', 'None', 'Allow'))); }
     $copyDirectory = Join-Path @COPYROOT@ ('winget-app-setup-' + [Guid]::NewGuid().ToString('N'));
     [void][IO.Directory]::CreateDirectory($copyDirectory, $security);
     $copy = Join-Path $copyDirectory @NAME@;
@@ -358,9 +364,12 @@ try {
 exit $exitCode
 '@
 
-    # Single-quoted PowerShell literals: only ' needs escaping, by doubling it. Windows paths
-    # cannot contain the double quote that would end the command-line argument.
-    $quote = { param ([string]$Text) "'" + $Text.Replace("'", "''") + "'" }
+    # Single-quoted PowerShell literals. EscapeSingleQuotedStringContent doubles every character the
+    # tokenizer reads as a single quote: the ASCII apostrophe and the typographic U+2018 to U+201B,
+    # which a profile folder name can hold (an O'Brien account typed with a curly apostrophe) and
+    # which would otherwise end the literal and break the whole command. Windows paths cannot
+    # contain the double quote that would end the command-line argument.
+    $quote = { param ([string]$Text) "'" + [System.Management.Automation.Language.CodeGeneration]::EscapeSingleQuotedStringContent($Text) + "'" }
     $forwardedArguments = ''
     if ($AdditionalArguments.Count -gt 0) {
         $forwardedArguments = ' ' + ($AdditionalArguments -join ' ')
@@ -5377,7 +5386,9 @@ function Test-IsAdmin {
     bootstrap's copy in %TEMP%, a clone in Downloads, the staged copy) while the UAC prompt is up is
     not run with administrator rights. The staged copy is removed once the elevated run has ended.
     -InPlace runs ScriptPath directly, for a script that needs the files next to it
-    (winget-app-uninstall.ps1 imports the module from its own folder).
+    (winget-app-uninstall.ps1 imports the module from its own folder). Nothing is checked then: the
+    elevated run runs whatever ScriptPath and the files it loads hold when it starts, so a file in a
+    folder the signed-in user can write to is exposed while the UAC prompt is up.
 
     Never asks when nobody is at the console (Test-EffectiveNonInteractive): an unattended run would
     leave a UAC prompt on someone's desktop and report nothing. A declined UAC prompt (Win32 error
@@ -5392,7 +5403,7 @@ function Test-IsAdmin {
     The script's SHA256 when this run started (the generated installer computes it at startup). When
     the file no longer has it, nothing is started. Empty: the hash is taken now.
 .PARAMETER InPlace
-    Run ScriptPath itself instead of a checked copy.
+    Run ScriptPath itself, unchecked, instead of a checked copy.
 .PARAMETER NonInteractive
     The caller's -NonInteractive switch.
 .RETURNS
@@ -5470,7 +5481,14 @@ function Restart-WithElevation {
         # ShellExecuteEx, which starts an elevated process, accepts a command line of about 2048
         # characters; a longer one would not start or would arrive cut off.
         if ($argumentString.Length -gt 2000) {
-            Write-ErrorMessage "The path $ScriptPath is too long to start it elevated. Move it to a shorter path, or start it from an elevated session."
+            if ($InPlace) {
+                Write-ErrorMessage "The path $ScriptPath is too long to start it elevated. Move it to a shorter path, or start it from an elevated session."
+            }
+            else {
+                # The command line holds the staged copy's path and the file name, not the folder
+                # ScriptPath is in, so moving the file would not help.
+                Write-ErrorMessage "The command that starts $ScriptPath elevated is too long, because the file name or this account's %TEMP% path ($([System.IO.Path]::GetTempPath())) is long. Give the file a shorter name, or start it from an elevated session."
+            }
             return [pscustomobject]@{ Started = $false; ExitCode = 4 }
         }
 
@@ -5488,7 +5506,7 @@ function Restart-WithElevation {
         catch {
             if ((Get-NativeErrorCode -Exception $_.Exception) -eq 1223) {
                 # ERROR_CANCELLED: the UAC prompt was declined. Reported once; no second prompt.
-                Write-ErrorMessage 'The administrator (UAC) prompt was declined, so no elevated run was started.'
+                Write-ErrorMessage 'The administrator (UAC) prompt was declined, so no elevated run was started. Run it again and approve the prompt, or start it from an elevated session.'
             }
             else {
                 Write-ErrorMessage "Could not start an elevated Windows PowerShell ($powerShellPath): $($_.Exception.Message)"
@@ -5681,7 +5699,9 @@ function Invoke-WingetInstall {
             # file's SHA256 taken by the entry script when this run started.
             $elevation = Restart-WithElevation -ScriptPath $PSCommandPath -AdditionalArguments $elevationArgs -ExpectedSha256 $script:InstallerScriptSha256
             if (-not $elevation.Started) {
-                Write-ErrorMessage 'Elevation was declined or failed, so nothing was installed. Re-run the installer and approve the administrator (UAC) prompt.'
+                # Restart-WithElevation has said why and what to do: a declined prompt, a file that
+                # changed (5) or a command line too long all differ, and only the first had a prompt.
+                Write-ErrorMessage 'No elevated run was started, so nothing was installed.'
                 return [int]$elevation.ExitCode
             }
             # The elevated window showed the run's summary, or why it stopped, and waited for a key

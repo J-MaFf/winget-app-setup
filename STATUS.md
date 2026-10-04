@@ -80,7 +80,8 @@ aliases), waits for the elevated run and exits with its code, where it used to e
 had asked; the elevated window runs a copy of the installer that it checks against the SHA256 taken
 at startup and keeps in a folder only administrators can change; a declined UAC prompt exits 4 after
 one prompt, and a non-interactive run that is not elevated exits 4 without showing one. The
-uninstaller relaunches the same way.
+uninstaller relaunches the same way but runs its own files in place, without the checked copy,
+because it imports the module from its folder.
 
 The same branch changes CI. Fork pull requests that leave `windows-tests.yml` alone no longer run
 on the self-hosted win-test runner, and `claude.yml` calls the shared Claude workflow at a pinned

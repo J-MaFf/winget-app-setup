@@ -211,15 +211,21 @@ function Get-ElevatedCopyRoot {
     cannot change. It:
       1. reads the file's bytes once and compares their SHA256 with the one the non-elevated run
          computed, and stops (exit code 5) when they differ;
-      2. creates a new folder under -CopyRoot with an access list of its own (SYSTEM,
-         Administrators and the elevating account, no inherited entries) and writes those same
-         bytes into it;
+      2. creates a new folder under -CopyRoot with an access list of its own (SYSTEM and
+         Administrators, no inherited entries) and writes those same bytes into it;
       3. runs that copy with Windows PowerShell -File, in the same window, forwarding the
          arguments, and exits with its exit code;
       4. deletes the folder.
     The copy has to be made by the elevated process: a non-elevated process cannot create a folder
     that it cannot change itself, because it would own the folder and keep the right to change its
     access list.
+
+    The access list does not name the elevating account itself: its elevated token always has
+    Administrators enabled, and Windows normally makes Administrators the owner of what it creates.
+    When a user elevates their own account (Admin Approval Mode), that account's own entry would
+    let any of its processes that are not elevated rewrite the copy until the elevated PowerShell 7
+    reads it, which can be minutes later while PowerShell 7 installs (review of finding P3-11). A
+    process that is not an administrator cannot write the copy, so it stops with exit code 5.
 
     On failure it prints why and waits for Enter, since this window closes when it exits; the
     elevated relaunch only happens when someone is at the console.
@@ -271,7 +277,7 @@ try {
     if ($hash -ne @SHA256@) { throw 'the file changed after administrator rights were requested'; }
     $security = New-Object Security.AccessControl.DirectorySecurity;
     $security.SetAccessRuleProtection($true, $false);
-    foreach ($sid in @('S-1-5-18', 'S-1-5-32-544', [Security.Principal.WindowsIdentity]::GetCurrent().User.Value)) { $security.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule((New-Object Security.Principal.SecurityIdentifier($sid)), 'FullControl', 'ContainerInherit, ObjectInherit', 'None', 'Allow'))); }
+    foreach ($sid in @('S-1-5-18', 'S-1-5-32-544')) { $security.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule((New-Object Security.Principal.SecurityIdentifier($sid)), 'FullControl', 'ContainerInherit, ObjectInherit', 'None', 'Allow'))); }
     $copyDirectory = Join-Path @COPYROOT@ ('winget-app-setup-' + [Guid]::NewGuid().ToString('N'));
     [void][IO.Directory]::CreateDirectory($copyDirectory, $security);
     $copy = Join-Path $copyDirectory @NAME@;
@@ -287,9 +293,12 @@ try {
 exit $exitCode
 '@
 
-    # Single-quoted PowerShell literals: only ' needs escaping, by doubling it. Windows paths
-    # cannot contain the double quote that would end the command-line argument.
-    $quote = { param ([string]$Text) "'" + $Text.Replace("'", "''") + "'" }
+    # Single-quoted PowerShell literals. EscapeSingleQuotedStringContent doubles every character the
+    # tokenizer reads as a single quote: the ASCII apostrophe and the typographic U+2018 to U+201B,
+    # which a profile folder name can hold (an O'Brien account typed with a curly apostrophe) and
+    # which would otherwise end the literal and break the whole command. Windows paths cannot
+    # contain the double quote that would end the command-line argument.
+    $quote = { param ([string]$Text) "'" + [System.Management.Automation.Language.CodeGeneration]::EscapeSingleQuotedStringContent($Text) + "'" }
     $forwardedArguments = ''
     if ($AdditionalArguments.Count -gt 0) {
         $forwardedArguments = ' ' + ($AdditionalArguments -join ' ')
