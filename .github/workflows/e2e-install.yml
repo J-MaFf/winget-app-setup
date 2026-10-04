@@ -15,6 +15,16 @@ name: E2E Install
 # The install runs TWICE: the second pass proves idempotence (must exit 0 with every app
 # Skipped), verified by e2e/Assert-Install.ps1 -ExpectAllSkippedOnSecondRun - the shared
 # assertion script that tier 2 (issue #215, snapshot-rollback Proxmox VM) will reuse.
+#
+# Evidence: e2e/Collect-Diagnostics.ps1 snapshots the pwsh version, the all-users AppX state of
+# App Installer and WindowsAppRuntime, and the WAU tasks before and after the first pass and at
+# the end of the job, where it also collects MsiInstaller, RestartManager and AppX deployment
+# events and WAU's logs. It is uploaded as the e2e-diagnostics artifact next to the transcripts:
+# red runs that kept only transcripts were misdiagnosed twice (#279, #283).
+#
+# Failure reporting lives in its own ubuntu-latest job (report-failure) that reads the uploaded
+# artifacts, so it still files the issue when the Windows job lost PowerShell 7, timed out or was
+# cancelled. The old in-job step needed pwsh and failure(), and missed all three.
 
 on:
   schedule:
@@ -26,8 +36,7 @@ on:
       - 'e2e/**'
 
 permissions:
-  contents: read
-  issues: write # failure reporting: create-or-comment 'E2E install run failed'
+  contents: read # report-failure adds what it needs at job level
 
 # Never cancel a real install mid-flight (a half-provisioned runner produces misleading
 # failures); later runs queue behind the active one instead.
@@ -64,13 +73,28 @@ jobs:
     # #279's slow partial one (issue #282). Staying on windows-latest until either GitHub
     # ships a corrected Server 2025 image, or a viable pinned alternative is found.
     runs-on: windows-latest
+    # Backstop. The long steps have their own timeout-minutes, which add up to less than this, so a
+    # hung pass fails at its own limit and the diagnostics and upload steps still run. A job that
+    # reaches this limit is cancelled instead; report-failure still files the issue.
     timeout-minutes: 90
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
 
+      # The diagnostics steps run in Windows PowerShell 5.1, which a broken or removed PowerShell 7
+      # cannot take down, and never fail the job: the script exits 0 whatever source is missing,
+      # and continue-on-error covers anything else.
+      - name: Diagnostics before the first install pass
+        shell: powershell
+        continue-on-error: true
+        timeout-minutes: 3
+        run: |
+          & .\e2e\Collect-Diagnostics.ps1 -OutputDirectory (Join-Path $env:RUNNER_TEMP 'e2e-diagnostics') -Label '1-before-first-pass'
+
       - name: First install pass (real install)
+        id: first-pass
         shell: pwsh
+        timeout-minutes: 35
         env:
           EVENT_NAME: ${{ github.event_name }}
         run: |
@@ -107,8 +131,18 @@ jobs:
             exit $exitCode
           }
 
+      - name: Diagnostics after the first install pass
+        if: always()
+        shell: powershell
+        continue-on-error: true
+        timeout-minutes: 3
+        run: |
+          & .\e2e\Collect-Diagnostics.ps1 -OutputDirectory (Join-Path $env:RUNNER_TEMP 'e2e-diagnostics') -Label '2-after-first-pass'
+
       - name: Second install pass (idempotence leg)
+        id: second-pass
         shell: pwsh
+        timeout-minutes: 25
         env:
           EVENT_NAME: ${{ github.event_name }}
         run: |
@@ -140,7 +174,12 @@ jobs:
           }
 
       - name: Run assertions (e2e/Assert-Install.ps1, shared with tier 2)
+        # Also after a failed pass, so a red run still gets its per-app PASS/FAIL table.
+        if: ${{ !cancelled() }}
         shell: pwsh
+        timeout-minutes: 12
+        env:
+          SECOND_PASS_OUTCOME: ${{ steps.second-pass.outcome }}
         run: |
           # Verifies from the checkout: every APPLICABLE Get-DefaultAppCatalog app resolves via
           # `winget list` (exit-code classified) - the script evaluates each app's catalog
@@ -153,8 +192,30 @@ jobs:
           # incompatibilities ONLY - each entry is justified at the KNOWN_PLATFORM_INCOMPATIBLE
           # definition at the top of this file (currently empty). The script also asserts
           # CONTAINMENT: no app outside the skip list failed in either install pass.
-          & pwsh -NoProfile -ExecutionPolicy Bypass -File ./e2e/Assert-Install.ps1 -ExpectAllSkippedOnSecondRun -SkipApps "$env:KNOWN_PLATFORM_INCOMPATIBLE"
+          #
+          # The idempotence assertions read the latest transcript as the second pass's. When that
+          # pass never ran (the first one failed), they would only add noise, so leave them out.
+          $assertArgs = @('-SkipApps', "$env:KNOWN_PLATFORM_INCOMPATIBLE")
+          if ($env:SECOND_PASS_OUTCOME -eq 'success' -or $env:SECOND_PASS_OUTCOME -eq 'failure') {
+            $assertArgs = @('-ExpectAllSkippedOnSecondRun') + $assertArgs
+          }
+          else {
+            Write-Host "The second install pass did not run (outcome: '$env:SECOND_PASS_OUTCOME'); skipping the idempotence assertions." -ForegroundColor Yellow
+          }
+          # Also saved with the diagnostics, so report-failure can put the table in the issue.
+          $diagnosticsDir = Join-Path $env:RUNNER_TEMP 'e2e-diagnostics'
+          $null = New-Item -ItemType Directory -Path $diagnosticsDir -Force
+          & pwsh -NoProfile -ExecutionPolicy Bypass -File ./e2e/Assert-Install.ps1 @assertArgs 2>&1 |
+            Tee-Object -FilePath (Join-Path $diagnosticsDir 'assertions.txt')
           exit $LASTEXITCODE
+
+      - name: Diagnostics at the end of the job (with event logs and WAU logs)
+        if: always()
+        shell: powershell
+        continue-on-error: true
+        timeout-minutes: 5
+        run: |
+          & .\e2e\Collect-Diagnostics.ps1 -OutputDirectory (Join-Path $env:RUNNER_TEMP 'e2e-diagnostics') -Label '3-end-of-job' -IncludeLogs
 
       - name: Upload install transcripts
         if: always()
@@ -164,47 +225,172 @@ jobs:
           path: C:\ProgramData\winget-app-setup\logs\*.log
           if-no-files-found: warn
 
-      - name: Create or update failure issue (scheduled/dispatch runs only)
-        # Never for pull_request runs: a PR failure is visible on the PR itself; the issue
-        # channel exists so unattended scheduled runs cannot fail silently.
-        if: failure() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
-        shell: pwsh
+      - name: Upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: e2e-diagnostics
+          path: ${{ runner.temp }}\e2e-diagnostics
+          if-no-files-found: warn
+
+  report-failure:
+    # Creates, or comments on, the 'E2E install run failed' issue when a scheduled or dispatched
+    # run does not succeed: failed, timed out or cancelled. Never for pull_request runs, whose
+    # result shows on the PR; the issue channel exists so unattended runs cannot fail silently.
+    #
+    # A separate ubuntu-latest job, so it needs nothing from the Windows runner but the uploaded
+    # artifacts. The old step inside e2e-install ran with 'shell: pwsh' and 'if: failure()': run
+    # 35566866223 removed PowerShell 7 and the step died with 'pwsh: command not found', and a
+    # job that hits timeout-minutes is cancelled, which failure() does not match.
+    needs: e2e-install
+    if: ${{ always() && needs.e2e-install.result != 'success' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: read # list the e2e-install steps that did not succeed
+      issues: write # create-or-comment 'E2E install run failed'
+    steps:
+      # Either artifact can be missing (the job stopped before uploading); the issue says so.
+      - name: Download install transcripts
+        continue-on-error: true
+        uses: actions/download-artifact@v8
+        with:
+          name: e2e-install-transcripts
+          path: artifacts/transcripts
+
+      - name: Download diagnostics
+        continue-on-error: true
+        uses: actions/download-artifact@v8
+        with:
+          name: e2e-diagnostics
+          path: artifacts/diagnostics
+
+      - name: Create or update the failure issue
+        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          EVENT_NAME: ${{ github.event_name }}
+          E2E_RESULT: ${{ needs.e2e-install.result }}
         run: |
-          $title = 'E2E install run failed'
+          set -uo pipefail
+          title='E2E install run failed'
+          transcripts=artifacts/transcripts
+          diagnostics=artifacts/diagnostics
+          body="$RUNNER_TEMP/e2e-failure-body.md"
 
-          $logDir = Join-Path $env:ProgramData 'winget-app-setup\logs'
-          $latest = Get-ChildItem -Path $logDir -Filter '*.log' -ErrorAction SilentlyContinue |
-            Sort-Object LastWriteTime | Select-Object -Last 1
+          # Print stdin inside a code fence: BOM and CRs stripped, very long lines cut, and any
+          # UTF-8 sequence the cut split dropped.
+          fence() {
+            echo '````text'
+            sed -e '1s/^\xEF\xBB\xBF//' -e 's/\r$//' | cut -c1-1000 | iconv -f UTF-8 -t UTF-8 -c
+            echo '````'
+          }
 
-          $lines = @()
-          $lines += 'A scheduled/dispatched end-to-end install run failed.'
-          $lines += ''
-          $lines += "Run: $env:RUN_URL"
-          $lines += ''
-          if ($latest) {
-            $lines += "Last 50 lines of the most recent transcript ($($latest.Name); full logs are attached to the run as the e2e-install-transcripts artifact):"
-            $lines += ''
-            $lines += '```'
-            $lines += @(Get-Content -Path $latest.FullName -Tail 50)
-            $lines += '```'
-          }
-          else {
-            $lines += 'No install transcript was found on the runner (the run may have failed before the installer started); see the run log.'
-          }
-          $bodyFile = Join-Path $env:RUNNER_TEMP 'e2e-failure-body.md'
-          Set-Content -Path $bodyFile -Value ($lines -join "`n") -Encoding utf8
+          # The e2e-install steps that did not succeed, with how long each ran: a pass that ran for
+          # its whole timeout-minutes hung rather than failed. ($s is a jq variable.)
+          # shellcheck disable=SC2016
+          steps_jq='.jobs[] | select(.name == "e2e-install") | .steps[]
+            | select(.conclusion != null and .conclusion != "success" and .conclusion != "skipped")
+            | "  - \(.name): \(.conclusion)" + (if .started_at and .completed_at then
+                ((.completed_at | fromdateiso8601) - (.started_at | fromdateiso8601)) as $s
+                | if $s < 120 then " after \($s) s" else " after \($s / 60 | floor) min" end
+              else "" end)'
 
-          # Dedup: comment on an existing open issue with this exact title instead of piling
-          # up a new issue per failed weekly run.
-          $existing = gh issue list --repo $env:REPO --state open --search "in:title `"$title`"" --json number,title |
-            ConvertFrom-Json | Where-Object { $_.title -eq $title } | Select-Object -First 1
-          if ($existing) {
-            gh issue comment $existing.number --repo $env:REPO --body-file $bodyFile
-          }
-          else {
-            gh issue create --repo $env:REPO --title $title --body-file $bodyFile --label bug --assignee J-MaFf
-          }
+          {
+            echo 'A scheduled or dispatched end-to-end install run did not succeed.'
+            echo
+            echo "- Run: $RUN_URL (attempt $RUN_ATTEMPT)"
+            echo "- Trigger: \`$EVENT_NAME\`"
+            echo "- \`e2e-install\` job result: \`$E2E_RESULT\`"
+            if [ "$E2E_RESULT" = 'cancelled' ]; then
+              echo "- The job was cancelled: it reached its job-level \`timeout-minutes\`, or someone cancelled the run. Steps after that point did not run, so some evidence below may be missing."
+            fi
+            if steps=$(gh api "repos/$REPO/actions/runs/$RUN_ID/attempts/$RUN_ATTEMPT/jobs" --jq "$steps_jq") && [ -n "$steps" ]; then
+              echo '- Steps that did not succeed:'
+              echo "$steps"
+            fi
+            echo
+
+            echo '### Assertion results'
+            echo
+            assertions="$diagnostics/assertions.txt"
+            if [ -s "$assertions" ] && grep -q '=== E2E assertion results ===' "$assertions"; then
+              sed -n '/=== E2E assertion results ===/,$p' "$assertions" | head -n 150 | fence
+            elif [ -s "$assertions" ]; then
+              echo 'The assertions did not finish. The last 40 lines of their output:'
+              echo
+              tail -n 40 "$assertions" | fence
+            else
+              echo 'The assertions did not run, or left no output. See the run log.'
+            fi
+            echo
+
+            # Transcripts are install-yyyyMMdd-HHmmss.log, so name order is run order. The earliest
+            # is shown too: a red second pass often starts from damage done in the first.
+            mapfile -t logs < <(find "$transcripts" -maxdepth 1 -type f -name 'install-*.log' ! -name '*-whatif.log' -printf '%f\n' 2>/dev/null | sort)
+            if [ "${#logs[@]}" -eq 0 ]; then
+              echo '### Install transcripts'
+              echo
+              echo 'No install transcript was uploaded: the run stopped before the installer started, or before the upload step. See the run log.'
+            else
+              earliest=${logs[0]}
+              latest=${logs[${#logs[@]}-1]}
+              if [ "$earliest" != "$latest" ]; then
+                echo "### Earliest install transcript, last 50 lines (\`$earliest\`)"
+                echo
+                tail -n 50 "$transcripts/$earliest" | fence
+                echo
+              fi
+              echo "### Latest install transcript, last 50 lines (\`$latest\`)"
+              echo
+              tail -n 50 "$transcripts/$latest" | fence
+            fi
+            echo
+
+            echo '### Diagnostics snapshots'
+            echo
+            found=0
+            for snapshot in "$diagnostics"/*/snapshot.txt; do
+              [ -f "$snapshot" ] || continue
+              found=1
+              echo "<details><summary>$(basename "$(dirname "$snapshot")")</summary>"
+              echo
+              head -n 150 "$snapshot" | fence
+              echo
+              echo '</details>'
+              echo
+            done
+            if [ "$found" -eq 0 ]; then
+              echo 'No diagnostics were uploaded. See the run log.'
+              echo
+            fi
+            echo "Full transcripts, event logs, Winget-AutoUpdate logs and assertion output, as far as the job got, are in the run's \`e2e-install-transcripts\` and \`e2e-diagnostics\` artifacts."
+          } > "$body"
+
+          # GitHub rejects an issue or comment body over 65536 characters.
+          limit=60000
+          if [ "$(wc -c < "$body")" -gt "$limit" ]; then
+            { head -c "$limit" "$body" | iconv -f UTF-8 -t UTF-8 -c
+              printf '\n\n(Cut to fit the GitHub size limit; the artifacts have everything.)\n'
+            } > "$body.cut"
+            mv "$body.cut" "$body"
+          fi
+          # Also on the run's summary page, in case filing the issue fails.
+          cat "$body" >> "$GITHUB_STEP_SUMMARY"
+
+          # Dedup: comment on an open issue with this exact title instead of piling up a new issue
+          # per failed weekly run. If the search itself fails, a duplicate beats no issue.
+          if ! existing=$(gh issue list --repo "$REPO" --state open --search "in:title \"$title\"" --json number,title \
+              --jq "map(select(.title == \"$title\")) | .[0].number // empty"); then
+            echo "::warning::Could not search for an open '$title' issue; creating a new one."
+            existing=''
+          fi
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --repo "$REPO" --body-file "$body"
+          else
+            gh issue create --repo "$REPO" --title "$title" --body-file "$body" --label bug --assignee J-MaFf
+          fi
