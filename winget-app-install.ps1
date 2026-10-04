@@ -59,12 +59,12 @@ param (
 # This script is assembled from the WingetAppSetup module by build/Build-WingetInstallScript.ps1.
 # Edit the function source under WingetAppSetup/Public and WingetAppSetup/Private, then re-run the
 # build to regenerate this file. See readme.md ("Project layout") for details.
-# Build id: 1.0.0+0f2197e7 (module version + SHA256 fragment of this whole script; issue #189).
+# Build id: 1.0.0+25135dbd (module version + SHA256 fragment of this whole script; issue #189).
 # ------------------------------------------------------------------------------------------------
 
 # Content-derived build identity, logged at startup so a transcript from a remote machine
 # identifies exactly which installer build produced it (issue #189).
-$script:InstallerBuildId = '1.0.0+0f2197e7'
+$script:InstallerBuildId = '1.0.0+25135dbd'
 
 # ------------------------------------------------Functions------------------------------------------------
 
@@ -5396,8 +5396,9 @@ function Get-WindowsTerminalSettingsPaths {
     original file is then copied to settings.json.winget-app-setup.bak next to it, and the new
     content is written to a temporary file in the same folder that replaces settings.json in one
     step ([System.IO.File]::Replace), so the file is never left truncated or half-written and keeps
-    its attributes and ACL. A UTF-8 byte-order mark is kept when the file has one; a file that is
-    not valid UTF-8 is left alone.
+    its attributes and ACL. A settings.json that is a symbolic or hard link is instead written in
+    place, through the link, so the link survives and the linked file gets the change. A UTF-8
+    byte-order mark is kept when the file has one; a file that is not valid UTF-8 is left alone.
 .PARAMETER SettingsPath
     Full path to the Windows Terminal settings file.
 .PARAMETER ProfileGuid
@@ -5471,9 +5472,21 @@ function Set-WindowsTerminalDefaultProfile {
     $tempPath = "$fullPath.winget-app-setup.tmp"
     try {
         Copy-Item -LiteralPath $fullPath -Destination $backupPath -Force -ErrorAction Stop
-        [System.IO.File]::WriteAllText($tempPath, $updatedContent, $encoding)
-        # [NullString]::Value: PowerShell would pass $null to the string parameter as '' (rejected).
-        [System.IO.File]::Replace($tempPath, $fullPath, [NullString]::Value)
+        # A settings.json that is a symbolic or hard link (a dotfiles setup) is written in place,
+        # through the link: replacing the name with the temp file would turn it into a separate
+        # plain file and leave the linked file unedited (Windows Terminal's own save had this bug,
+        # microsoft/terminal#10787). Other reparse points are written in place too.
+        $settingsItem = Get-Item -LiteralPath $fullPath -Force -ErrorAction Stop
+        $isLinked = [bool]$settingsItem.LinkType -or
+            (($settingsItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0)
+        if ($isLinked) {
+            [System.IO.File]::WriteAllText($fullPath, $updatedContent, $encoding)
+        }
+        else {
+            [System.IO.File]::WriteAllText($tempPath, $updatedContent, $encoding)
+            # [NullString]::Value: PowerShell would pass $null to the string parameter as '' (rejected).
+            [System.IO.File]::Replace($tempPath, $fullPath, [NullString]::Value)
+        }
     }
     catch {
         # Replace can fail after settings.json was moved aside (ERROR_UNABLE_TO_MOVE_REPLACEMENT);

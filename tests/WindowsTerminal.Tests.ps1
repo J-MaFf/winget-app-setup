@@ -168,6 +168,50 @@ Describe 'Windows Terminal configuration' {
             [System.IO.File]::ReadAllBytes($backupPath) | Should -Be $firstEditBytes
         }
 
+        It 'Writes through a symbolic link: the link stays and the linked file gets the change' {
+            $originalBytes = Get-Utf8Bytes $handEditedSettings
+            $dotfilesFolder = Join-Path $TestDrive 'dotfiles'
+            $linkFolder = Join-Path $TestDrive 'symlink'
+            New-Item -ItemType Directory -Path $dotfilesFolder, $linkFolder | Out-Null
+            $targetPath = Join-Path $dotfilesFolder 'settings.json'
+            [System.IO.File]::WriteAllBytes($targetPath, $originalBytes)
+            $settingsPath = Join-Path $linkFolder 'settings.json'
+            try {
+                New-Item -ItemType SymbolicLink -Path $settingsPath -Target $targetPath -ErrorAction Stop | Out-Null
+            }
+            catch {
+                # Windows allows it only to an administrator or with Developer Mode on.
+                Set-ItResult -Skipped -Because "this account cannot create symbolic links: $_"
+                return
+            }
+
+            Set-WindowsTerminalDefaultProfile -SettingsPath $settingsPath -ProfileGuid $pwsh7Guid | Should -BeTrue
+
+            (Get-Item -LiteralPath $settingsPath -Force).LinkType | Should -Be 'SymbolicLink'
+            [System.IO.File]::ReadAllText($targetPath) | Should -BeExactly $handEditedSettings.Replace($oldDefaultLine, $newDefaultLine)
+            $backupPath = "$settingsPath.winget-app-setup.bak"
+            [System.IO.File]::ReadAllBytes($backupPath) | Should -Be $originalBytes
+            (Get-Item -LiteralPath $backupPath -Force).LinkType | Should -BeNullOrEmpty
+            @(Get-ChildItem -LiteralPath $linkFolder -Name | Sort-Object) | Should -Be @('settings.json', 'settings.json.winget-app-setup.bak')
+        }
+
+        It 'Writes through a hard link: both names still share one file, which has the change' {
+            $originalBytes = Get-Utf8Bytes $handEditedSettings
+            $folder = Join-Path $TestDrive 'hardlink'
+            New-Item -ItemType Directory -Path $folder | Out-Null
+            $otherNamePath = Join-Path $folder 'dotfiles-settings.json'
+            [System.IO.File]::WriteAllBytes($otherNamePath, $originalBytes)
+            $settingsPath = Join-Path $folder 'settings.json'
+            New-Item -ItemType HardLink -Path $settingsPath -Target $otherNamePath -ErrorAction Stop | Out-Null
+
+            Set-WindowsTerminalDefaultProfile -SettingsPath $settingsPath -ProfileGuid $pwsh7Guid | Should -BeTrue
+
+            (Get-Item -LiteralPath $settingsPath -Force).LinkType | Should -Be 'HardLink'
+            [System.IO.File]::ReadAllText($otherNamePath) | Should -BeExactly $handEditedSettings.Replace($oldDefaultLine, $newDefaultLine)
+            [System.IO.File]::ReadAllBytes("$settingsPath.winget-app-setup.bak") | Should -Be $originalBytes
+            Test-Path -LiteralPath "$settingsPath.winget-app-setup.tmp" | Should -BeFalse
+        }
+
         It 'Keeps CRLF line endings and a UTF-8 byte-order mark' {
             $crlfText = $settingsWithoutDefault.Replace("`n", "`r`n")
             $bom = [byte[]](0xEF, 0xBB, 0xBF)
