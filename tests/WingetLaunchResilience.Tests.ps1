@@ -37,6 +37,46 @@ Describe 'Test-TransientWingetLaunchError' {
         Test-TransientWingetLaunchError -Message 'StandardOutputEncoding is only supported when standard output is redirected.' |
             Should -Be $true
     }
+
+    Context 'In any display language (review finding P3-6)' {
+        It 'Classifies Win32 error <Code> as transient by its code, whatever the message says' -ForEach @(
+            @{ Code = 32 }
+            @{ Code = 1920 }
+        ) {
+            Test-TransientWingetLaunchError -NativeErrorCode $Code -Message 'Das System kann auf die Datei nicht zugreifen.' | Should -Be $true
+            Test-TransientWingetLaunchError -NativeErrorCode $Code | Should -Be $true
+        }
+
+        It 'Does not classify Win32 error <Code> as transient' -ForEach @(
+            @{ Code = 2 }
+            @{ Code = 5 }
+        ) {
+            Test-TransientWingetLaunchError -NativeErrorCode $Code -Message 'Le fichier specifie est introuvable.' | Should -Be $false
+        }
+
+        It 'Matches a Start-Process message in the machine''s own language when no code is known' {
+            # What Windows returns for these codes on a German display language.
+            Mock Get-Win32ErrorMessage {
+                switch ($Code) {
+                    32 { 'Der Prozess kann nicht auf die Datei zugreifen, da sie von einem anderen Prozess verwendet wird.' }
+                    1920 { 'Das System kann auf die Datei nicht zugreifen.' }
+                }
+            }
+
+            Test-TransientWingetLaunchError -Message 'This command cannot be run due to the error: Das System kann auf die Datei nicht zugreifen.' | Should -Be $true
+            Test-TransientWingetLaunchError -Message 'This command cannot be run due to the error: Der Prozess kann nicht auf die Datei zugreifen, da sie von einem anderen Prozess verwendet wird.' | Should -Be $true
+            Test-TransientWingetLaunchError -Message 'This command cannot be run due to the error: Das System kann die angegebene Datei nicht finden.' | Should -Be $false
+        }
+
+        It 'Reads the Windows message for a code, and returns none off Windows, where the runtime words codes as errno values' {
+            if ([System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Win32NT) {
+                Get-Win32ErrorMessage -Code 1920 | Should -Be ([System.ComponentModel.Win32Exception]::new(1920).Message)
+            }
+            else {
+                Get-Win32ErrorMessage -Code 1920 | Should -Be $null
+            }
+        }
+    }
 }
 
 Describe 'Get-ConflictingDesktopAppInstallerVersions (issue #279)' {

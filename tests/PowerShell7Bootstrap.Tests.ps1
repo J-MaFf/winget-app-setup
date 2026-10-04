@@ -481,6 +481,9 @@ Describe 'Invoke-PowerShell7Bootstrap' {
         # exercising the upstream-script fallback deterministically, with no real network reachable
         # from any of them. The direct path has its own context further down.
         Mock Install-PowerShell7FromMsi { $false }
+        # The winget install runs through Invoke-WingetProcess (review findings P2-5, P2-6): no test
+        # starts a real winget. The winget-path contexts below override this.
+        Mock Invoke-WingetProcess { New-TestProcessResult -ExitCode 0 }
         # The function sets this relaunch-loop sentinel before relaunching; clear it so no test
         # inherits another test's (or an outer process's) bootstrap state.
         $env:WINGET_APP_SETUP_PS7_BOOTSTRAP = ''
@@ -535,7 +538,7 @@ Describe 'Invoke-PowerShell7Bootstrap' {
         It 'Never attempts an install or a download' {
             Invoke-PowerShell7Bootstrap -CommandPath 'C:\repo\winget-app-install.ps1' | Out-Null
 
-            Should -Invoke Start-Process -Times 0 -ParameterFilter { $FilePath -eq 'winget' }
+            Should -Invoke Invoke-WingetProcess -Times 0
             Should -Invoke Invoke-RestMethod -Times 0
         }
 
@@ -590,6 +593,7 @@ Describe 'Invoke-PowerShell7Bootstrap' {
 
             $result | Should -Be 0
             Should -Invoke Start-Process -Times 0
+            Should -Invoke Invoke-WingetProcess -Times 0
             Should -Invoke Read-Host -Times 0
             Should -Invoke Write-Info -Times 1 -ParameterFilter { $Message -match '\[DRY-RUN\] PowerShell 7 is not installed' }
         }
@@ -637,7 +641,7 @@ Describe 'Invoke-PowerShell7Bootstrap' {
             Mock Test-EffectiveNonInteractive { $true }
             Mock Read-Host { '' }
             Mock Get-Command { [pscustomobject]@{ Source = 'C:\winget.exe' } } -ParameterFilter { $Name -eq 'winget' }
-            Mock Start-Process { [pscustomobject]@{ ExitCode = 0 } } -ParameterFilter { $FilePath -eq 'winget' }
+            Mock Invoke-WingetProcess { New-TestProcessResult -ExitCode 0 }
             Mock Start-Process { [pscustomobject]@{ ExitCode = 0 } } -ParameterFilter { $FilePath -eq 'C:\pf7\pwsh.exe' }
         }
 
@@ -645,8 +649,8 @@ Describe 'Invoke-PowerShell7Bootstrap' {
             $result = Invoke-PowerShell7Bootstrap -CommandPath 'C:\repo\winget-app-install.ps1'
 
             $result | Should -Be 0
-            Should -Invoke Start-Process -Times 1 -Exactly -ParameterFilter {
-                $FilePath -eq 'winget' -and
+            Should -Invoke Invoke-WingetProcess -Times 1 -Exactly -ParameterFilter {
+                $ArgumentList[0] -eq 'install' -and
                 $ArgumentList -contains 'Microsoft.PowerShell' -and
                 $ArgumentList -contains '--accept-source-agreements' -and
                 $ArgumentList -contains '--accept-package-agreements' -and
@@ -659,9 +663,44 @@ Describe 'Invoke-PowerShell7Bootstrap' {
             Invoke-PowerShell7Bootstrap -CommandPath 'C:\repo\winget-app-install.ps1' | Out-Null
 
             Should -Invoke Read-Host -Times 0
-            Should -Invoke Start-Process -Times 1 -Exactly -ParameterFilter {
-                $FilePath -eq 'winget' -and $ArgumentList -contains '--disable-interactivity'
+            Should -Invoke Invoke-WingetProcess -Times 1 -Exactly -ParameterFilter {
+                $ArgumentList -contains '--disable-interactivity'
             }
+        }
+
+        It 'Runs the winget install under the install time limit, logging the installer next to the bootstrap transcript (review findings P2-5, P2-6)' {
+            Invoke-PowerShell7Bootstrap -CommandPath 'C:\repo\winget-app-install.ps1' -LogDirectory 'C:\ProgramData\winget-app-setup\logs' | Out-Null
+
+            Should -Invoke Invoke-WingetProcess -Times 1 -Exactly -ParameterFilter {
+                $TimeoutSeconds -eq (Get-ProcessTimeoutSeconds -Operation WingetInstall) -and
+                $LogDirectory -eq 'C:\ProgramData\winget-app-setup\logs'
+            }
+        }
+
+        It 'Passes --silent when the run is unattended, so the MSI installs with /quiet' {
+            Invoke-PowerShell7Bootstrap -CommandPath 'C:\repo\winget-app-install.ps1' | Out-Null
+
+            Should -Invoke Invoke-WingetProcess -Times 1 -Exactly -ParameterFilter { $ArgumentList -contains '--silent' }
+        }
+
+        It 'Falls back to the MSI when the winget install runs past its time limit' {
+            Mock Invoke-WingetProcess { New-TestProcessResult -TimedOut }
+            Mock Find-PowerShell7 { $null }
+
+            Invoke-PowerShell7Bootstrap -CommandPath 'C:\repo\winget-app-install.ps1' | Out-Null
+
+            Should -Invoke Write-WarningMessage -Times 1 -Exactly -ParameterFilter { $Message -match 'did not finish installing PowerShell 7 in time' }
+            Should -Invoke Install-PowerShell7FromMsi -Times 1 -Exactly
+        }
+
+        It 'Falls back to the MSI when winget cannot be started' {
+            Mock Invoke-WingetProcess { New-TestProcessResult -LaunchFailed -LaunchErrorCode 1920 -LaunchError 'The file cannot be accessed by the system.' }
+            Mock Find-PowerShell7 { $null }
+
+            Invoke-PowerShell7Bootstrap -CommandPath 'C:\repo\winget-app-install.ps1' | Out-Null
+
+            Should -Invoke Write-WarningMessage -Times 1 -Exactly -ParameterFilter { $Message -match 'winget could not be started: The file cannot be accessed by the system' }
+            Should -Invoke Install-PowerShell7FromMsi -Times 1 -Exactly
         }
 
         It 'Does not reach the MSI fallback when winget succeeds' {
@@ -685,9 +724,11 @@ Describe 'Invoke-PowerShell7Bootstrap' {
 
             Invoke-PowerShell7Bootstrap -CommandPath 'C:\repo\winget-app-install.ps1' | Out-Null
 
-            Should -Invoke Start-Process -Times 1 -Exactly -ParameterFilter {
-                $FilePath -eq 'winget' -and $ArgumentList -contains '--disable-interactivity'
+            Should -Invoke Invoke-WingetProcess -Times 1 -Exactly -ParameterFilter {
+                $ArgumentList -contains '--disable-interactivity'
             }
+            # Someone is at the console: the MSI may show its progress window (/passive).
+            Should -Invoke Invoke-WingetProcess -Times 1 -Exactly -ParameterFilter { $ArgumentList -notcontains '--silent' }
         }
     }
 
@@ -760,7 +801,7 @@ Describe 'Invoke-PowerShell7Bootstrap' {
         BeforeEach {
             Mock Test-EffectiveNonInteractive { $true }
             Mock Read-Host { '' }
-            Mock Start-Process { [pscustomobject]@{ ExitCode = 1 } } -ParameterFilter { $FilePath -eq 'winget' }
+            Mock Invoke-WingetProcess { New-TestProcessResult -ExitCode 1 }
             Mock Start-Process { [pscustomobject]@{ ExitCode = 0 } } -ParameterFilter { $FilePath -eq 'C:\pf7\pwsh.exe' }
             # A parameter-bound no-op stands in for the downloaded aka.ms install script. The
             # params MUST be [switch]: production invokes it as `-UseMSI -Quiet`, and non-switch
@@ -784,7 +825,7 @@ Describe 'Invoke-PowerShell7Bootstrap' {
 
             $result | Should -Be 0
             Should -Invoke Invoke-RestMethod -Times 1 -Exactly -ParameterFilter { $Uri -like '*install-powershell*' }
-            Should -Invoke Start-Process -Times 0 -ParameterFilter { $FilePath -eq 'winget' }
+            Should -Invoke Invoke-WingetProcess -Times 0
             # The stand-in script must have executed cleanly - a binding/runtime throw would be
             # swallowed by production's try/catch and this test would pass vacuously.
             Should -Invoke Write-WarningMessage -Times 0 -ParameterFilter { $Message -match 'MSI fallback failed' }
@@ -805,7 +846,8 @@ Describe 'Invoke-PowerShell7Bootstrap' {
             $result = Invoke-PowerShell7Bootstrap -CommandPath 'C:\repo\winget-app-install.ps1'
 
             $result | Should -Be 0
-            Should -Invoke Start-Process -Times 1 -Exactly -ParameterFilter { $FilePath -eq 'winget' }
+            Should -Invoke Invoke-WingetProcess -Times 1 -Exactly
+            Should -Invoke Write-WarningMessage -Times 1 -Exactly -ParameterFilter { $Message -eq 'winget could not install PowerShell 7 (exit code 1).' }
             Should -Invoke Invoke-RestMethod -Times 1 -Exactly -ParameterFilter { $Uri -like '*install-powershell*' }
             Should -Invoke Write-WarningMessage -Times 0 -ParameterFilter { $Message -match 'MSI fallback failed' }
         }

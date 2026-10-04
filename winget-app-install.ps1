@@ -59,12 +59,12 @@ param (
 # This script is assembled from the WingetAppSetup module by build/Build-WingetInstallScript.ps1.
 # Edit the function source under WingetAppSetup/Public and WingetAppSetup/Private, then re-run the
 # build to regenerate this file. See readme.md ("Project layout") for details.
-# Build id: 1.0.0+f2f663f3 (module version + SHA256 fragment of this whole script; issue #189).
+# Build id: 1.0.0+11d140f1 (module version + SHA256 fragment of this whole script; issue #189).
 # ------------------------------------------------------------------------------------------------
 
 # Content-derived build identity, logged at startup so a transcript from a remote machine
 # identifies exactly which installer build produced it (issue #189).
-$script:InstallerBuildId = '1.0.0+f2f663f3'
+$script:InstallerBuildId = '1.0.0+11d140f1'
 
 # ------------------------------------------------Functions------------------------------------------------
 
@@ -369,8 +369,9 @@ function Get-InstallerExitCode {
 .DESCRIPTION
     Combines the shared install pipeline's FailureReason bucket with the diagnostic detail the
     installer result carries: the winget exit code (hex), the attempt count, whether the
-    machine-scope preference fell back to winget's default scope, and whether the 0x80073D19
-    session-error retries were exhausted (issue #189). Used both for the console failure message
+    machine-scope preference fell back to winget's default scope, whether the 0x80073D19
+    session-error retries were exhausted (issue #189), whether the install ran out of time (review
+    finding P2-5), and where the installer's log is (P2-6). Used both for the console failure message
     and for the Reason column in the failed-apps summary table.
 .PARAMETER FailureReason
     The FailureReason string from the shared install pipeline ('PreCheckTimeout', 'VerifyTimeout',
@@ -423,9 +424,22 @@ function Format-InstallFailureReason {
             $detailParts += 'session error 0x80073D19 persisted through every retry'
         }
         if ($InstallResult.ContainsKey('LaunchErrorExhausted') -and $InstallResult.LaunchErrorExhausted) {
-            # issue #253: Start-Process could not launch winget.exe (transient file lock) on every
-            # attempt, so no install ever actually ran.
+            # issue #253: winget.exe could not be launched (transient file lock) on every attempt,
+            # so no install ever actually ran.
             $detailParts += 'winget executable was transiently inaccessible through every retry'
+        }
+        if ($InstallResult.ContainsKey('TimedOut') -and $InstallResult.TimedOut) {
+            # Review finding P2-5: the install ran out of time and was stopped, so there is no exit
+            # code to show.
+            $limit = 'its time limit'
+            if ($InstallResult.ContainsKey('TimeoutSeconds') -and $InstallResult.TimeoutSeconds) {
+                $limit = '{0} minutes' -f [Math]::Round([int]$InstallResult.TimeoutSeconds / 60)
+            }
+            $detailParts += ('winget install stopped after {0}' -f $limit)
+        }
+        if ($InstallResult.ContainsKey('InstallerLogPath') -and $InstallResult.InstallerLogPath) {
+            # Review finding P2-6: the installer's own log, next to the transcript.
+            $detailParts += ('installer log: {0}' -f $InstallResult.InstallerLogPath)
         }
     }
 
@@ -586,6 +600,10 @@ function Test-AndInstallGraphicalTools {
     --installer-type override forwarded to Install-WingetPackage), 'condition' (applicability
     scriptblock, issue #217), and 'conditionDescription' (human reason for the skip message)
     entries.
+.PARAMETER Silent
+    Forwarded to Install-WingetPackage (winget --silent): Invoke-WingetInstall passes its effective
+    non-interactive state. Not given: Install-WingetPackage decides. A package-specific installer
+    ($App.install) is called without it and decides the same way.
 .PARAMETER WhatIf
     Dry run: the applicability condition and the read-only pre-check still run, but no installer
     is dispatched. An app that is not yet installed reports Status 'Installed' so the caller's
@@ -610,6 +628,9 @@ function Install-AppWithVerification {
     param (
         [Parameter(Mandatory = $true)]
         [hashtable]$App,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$Silent,
 
         [Parameter(Mandatory = $false)]
         [switch]$WhatIf
@@ -637,7 +658,7 @@ function Install-AppWithVerification {
 
     # Same 15-second guard the inlined blocks used: `winget list` can hang indefinitely on broken
     # sources or first-use prompts, and a hung check must not stall the whole install loop.
-    $checkTimeoutSeconds = 15
+    $checkTimeoutSeconds = Get-ProcessTimeoutSeconds -Operation WingetListCheck
 
     $preCheck = Test-WingetPackageInstalled -PackageId $App.name -TimeoutSeconds $checkTimeoutSeconds
     if ($preCheck.TimedOut) {
@@ -676,7 +697,11 @@ function Install-AppWithVerification {
 
     # Install through the helper so the transient 0x80073d19 session error is retried with
     # backoff (issue #150) instead of failing on the first hit.
-    $installResult = Install-WingetPackage -PackageId $App.name -InstallerType $App.installerType
+    $installParameters = @{ PackageId = $App.name; InstallerType = $App.installerType }
+    if ($PSBoundParameters.ContainsKey('Silent')) {
+        $installParameters['Silent'] = $Silent
+    }
+    $installResult = Install-WingetPackage @installParameters
 
     $verify = Test-WingetPackageInstalled -PackageId $App.name -TimeoutSeconds $checkTimeoutSeconds
     if ($verify.TimedOut) {
@@ -1165,7 +1190,11 @@ function Test-WingetListOutputContainsPackageId {
 # try/catch and a type cast, issue #239), Get-WingetAgreementArgs (a literal array,
 # Private/WingetAgreementArgs.ps1, issue #240), and this file's own
 # Get-PowerShell7MsiInfo/Save-WebFileWithTimeout/Install-PowerShell7FromMsi (issue #263) and
-# Test-GitHubRateLimitError (issue #274). The tail's 5.1 branch also calls, around this file:
+# Test-GitHubRateLimitError (issue #274), and Invoke-WingetProcess with what it calls
+# (Private/ProcessInvocation.ps1: Invoke-ExternalProcess, Get-ProcessTimeoutSeconds and their
+# helpers, written against .NET Framework 4.5; Resolve-WingetExecutable without -BypassAlias, a
+# literal string) for the winget install (review findings P2-5/P2-6). The tail's 5.1 branch also
+# calls, around this file:
 # Test-EffectiveNonInteractive and Test-IsContinuousIntegration (Private/Interactivity.ps1),
 # Start-InstallerTranscript, Grant-InstallLogReadAccess and Write-Prompt (Private/LoggingInternal.ps1),
 # and Exit-Installer and Write-InstallerExitNotice (Private/FailureReporting.ps1) - review findings
@@ -1647,7 +1676,8 @@ function Install-PowerShell7FromMsi {
     one-liner URL; parameterized for tests.
 .PARAMETER LogDirectory
     The folder of the bootstrap transcript the tail started, or empty when it could not start one.
-    Forwarded to Install-PowerShell7FromMsi for msiexec's verbose log (review finding P2-13).
+    Forwarded to Install-PowerShell7FromMsi for msiexec's verbose log (review finding P2-13), and to
+    the winget install for the installer's log (--log, review finding P2-6).
 .RETURNS
     [int] Exit code for the tail dispatch to propagate: the relaunched run's exit code, 0 for a
     -WhatIf preview of a would-be install, or 1 when PowerShell 7 could not be provisioned. Sets
@@ -1734,18 +1764,25 @@ function Invoke-PowerShell7Bootstrap {
             # flag, and a failure falls through to the MSI fallback below. The shared flags come
             # from Get-WingetAgreementArgs so this call site cannot drift from the others again.
             $wingetArguments = @('install', '--id', 'Microsoft.PowerShell', '--exact', '--source', 'winget') + (Get-WingetAgreementArgs)
-            # A Start-Process launch failure is non-terminating under 5.1's default
-            # $ErrorActionPreference and would leave $wingetProcess $null - catch it explicitly
-            # so a broken winget shim degrades to the MSI fallback with a real message.
-            $wingetProcess = $null
-            try {
-                $wingetProcess = Start-Process -FilePath 'winget' -ArgumentList $wingetArguments -NoNewWindow -Wait -PassThru -ErrorAction Stop
+            if (Test-EffectiveNonInteractive -NonInteractive:$NonInteractive) {
+                # Unattended: the MSI installs with /quiet instead of /passive.
+                $wingetArguments += '--silent'
             }
-            catch {
-                Write-WarningMessage "winget could not be started: $_"
+            # Invoke-WingetProcess (review findings P2-5, P2-6): time-limited, winget's output goes
+            # into the bootstrap transcript, the MSI's log into the logs folder, and a winget that
+            # cannot start is reported instead of thrown, so it degrades to the MSI fallback below.
+            $wingetRun = Invoke-WingetProcess -ArgumentList $wingetArguments -TimeoutSeconds (Get-ProcessTimeoutSeconds -Operation WingetInstall) -LogDirectory $LogDirectory
+            if ($wingetRun.LaunchFailed) {
+                Write-WarningMessage "winget could not be started: $($wingetRun.LaunchError)"
             }
-            if ($wingetProcess -and $wingetProcess.ExitCode -ne 0) {
-                Write-WarningMessage ('winget could not install PowerShell 7 (exit code {0}).' -f $wingetProcess.ExitCode)
+            elseif ($wingetRun.TimedOut) {
+                Write-WarningMessage 'winget did not finish installing PowerShell 7 in time and was stopped.'
+            }
+            elseif ($wingetRun.ExitCode -ne 0) {
+                Write-WarningMessage ('winget could not install PowerShell 7 (exit code {0}).' -f $wingetRun.ExitCode)
+                if ($wingetRun.LogPath -and (Test-Path -LiteralPath $wingetRun.LogPath)) {
+                    Write-Info "Installer log: $($wingetRun.LogPath)"
+                }
             }
             $pwshPath = Find-PowerShell7
         }
@@ -1855,6 +1892,705 @@ function Invoke-PowerShell7Bootstrap {
     # transcript (pwsh rejecting the arguments, a crash on load) leaves only this line behind.
     Write-Info ('The PowerShell 7 run ended with exit code {0}.' -f $relaunchProcess.ExitCode)
     return $relaunchProcess.ExitCode
+}
+
+# --- ProcessInvocation ---
+# One way to run winget and msiexec (review findings P2-5, P2-6 and P3-6). Every call site used to
+# launch its process its own way: Start-Process -Wait with no time limit (the install itself),
+# Start-Process with temp files and WaitForExit, or an inline native call. So the installs had no
+# time limit, winget's own output never reached the transcript, and a failed launch was classified
+# by English error text. Invoke-ExternalProcess does all three in one place, and
+# Invoke-WingetProcess adds what is specific to winget. Both run under Windows PowerShell 5.1 too
+# (the PowerShell 7 bootstrap installs pwsh with winget), so they use only .NET Framework 4.5 APIs:
+# ProcessStartInfo.Arguments rather than ArgumentList, and taskkill rather than Kill($true).
+
+<#
+.SYNOPSIS
+    Returns the time limit, in seconds, for one kind of external process call.
+.DESCRIPTION
+    The single place the time limits live. Each limit bounds one process (and every process it
+    starts): when it runs out, the process tree is stopped and the call reports TimedOut. The
+    limits are generous on purpose. They exist so that a hung installer, a winget waiting on its
+    own cross-process install lock or a stalled download cannot stop an unattended run forever
+    with no summary and no exit code (P2-5), not to cut a slow machine short.
+.PARAMETER Operation
+    WingetInstall     one `winget install`: the download, the installer itself, and winget's wait
+                      for another winget install on the machine (30 minutes).
+    WingetDownload    one `winget download` (30 minutes).
+    WingetListCheck   the per-app `winget list` check before and after an install (15 seconds, the
+                      limit those checks have always had).
+    WingetList        any other `winget list` (2 minutes).
+    WingetSourceList  `winget source list` (2 minutes).
+    WingetSearch      the `winget search` source health check (2 minutes).
+    WingetSourceReset `winget source reset`, which downloads the source again (5 minutes).
+    MsiExec           one msiexec install or uninstall (15 minutes, as for the PowerShell 7 MSI).
+    WebDownload       a small file download, such as the Winget-AutoUpdate MSI: the whole request
+                      on PowerShell 7.3 and older, the connection on 7.4 and newer (5 minutes).
+    WebDownloadStall  how long a download may receive nothing, on PowerShell 7.4 and newer
+                      (2 minutes).
+.RETURNS
+    [int] Seconds.
+#>
+function Get-ProcessTimeoutSeconds {
+    param (
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('WingetInstall', 'WingetDownload', 'WingetListCheck', 'WingetList', 'WingetSourceList', 'WingetSearch', 'WingetSourceReset', 'MsiExec', 'WebDownload', 'WebDownloadStall')]
+        [string]$Operation
+    )
+
+    switch ($Operation) {
+        'WingetInstall' { return 1800 }
+        'WingetDownload' { return 1800 }
+        'WingetListCheck' { return 15 }
+        'WingetList' { return 120 }
+        'WingetSourceList' { return 120 }
+        'WingetSearch' { return 120 }
+        'WingetSourceReset' { return 300 }
+        'MsiExec' { return 900 }
+        'WebDownload' { return 300 }
+        'WebDownloadStall' { return 120 }
+    }
+}
+
+<#
+.SYNOPSIS
+    Returns the time-limit parameters for an Invoke-WebRequest download, for splatting.
+.DESCRIPTION
+    Invoke-WebRequest has no time limit by default, so a download that connects and then stops
+    receiving waits for ever (review finding P2-5). -TimeoutSec bounds the whole request on
+    PowerShell 7.3 and older, and only the connection on 7.4 and newer, where
+    -OperationTimeoutSeconds bounds a stall instead; both are passed where they exist.
+.RETURNS
+    [hashtable] TimeoutSec, plus OperationTimeoutSeconds when Invoke-WebRequest has it.
+#>
+function Get-WebDownloadTimeoutParameters {
+    $parameters = @{ TimeoutSec = (Get-ProcessTimeoutSeconds -Operation WebDownload) }
+    $command = Get-Command -Name 'Invoke-WebRequest' -ErrorAction SilentlyContinue
+    if ($command -and $command.Parameters -and $command.Parameters.ContainsKey('OperationTimeoutSeconds')) {
+        $parameters['OperationTimeoutSeconds'] = (Get-ProcessTimeoutSeconds -Operation WebDownloadStall)
+    }
+    return $parameters
+}
+
+<#
+.SYNOPSIS
+    Joins arguments into one command line, quoted the way Windows programs split it again.
+.DESCRIPTION
+    ProcessStartInfo.ArgumentList does not exist on .NET Framework (Windows PowerShell 5.1), so the
+    arguments go into ProcessStartInfo.Arguments as one string. An argument that is empty or holds
+    white space or a double quote is wrapped in double quotes, with backslashes before a quote
+    doubled, which is how CommandLineToArgvW and the C runtime read a command line back (the rules
+    .NET's own ArgumentList quoting follows). Other arguments pass through unchanged.
+.PARAMETER ArgumentList
+    The arguments, one per element.
+.RETURNS
+    [string] The command line, without the program name.
+#>
+function ConvertTo-ProcessArgumentString {
+    param (
+        [Parameter(Mandatory = $false)]
+        [AllowEmptyCollection()]
+        [AllowNull()]
+        [string[]]$ArgumentList
+    )
+
+    if ($null -eq $ArgumentList) {
+        return ''
+    }
+    $parts = foreach ($argument in $ArgumentList) {
+        $text = [string]$argument
+        if ($text.Length -gt 0 -and $text -notmatch '[\s"]') {
+            $text
+            continue
+        }
+        $builder = New-Object System.Text.StringBuilder
+        [void]$builder.Append('"')
+        $backslashes = 0
+        foreach ($character in $text.ToCharArray()) {
+            if ($character -eq [char]'\') {
+                $backslashes++
+                continue
+            }
+            if ($character -eq [char]'"') {
+                [void]$builder.Append([char]'\', (2 * $backslashes) + 1)
+            }
+            elseif ($backslashes -gt 0) {
+                [void]$builder.Append([char]'\', $backslashes)
+            }
+            [void]$builder.Append($character)
+            $backslashes = 0
+        }
+        [void]$builder.Append([char]'\', 2 * $backslashes)
+        [void]$builder.Append('"')
+        $builder.ToString()
+    }
+    return (@($parts) -join ' ')
+}
+
+<#
+.SYNOPSIS
+    Returns the Win32 error code behind a failed process launch, or $null.
+.DESCRIPTION
+    Process.Start throws a Win32Exception whose NativeErrorCode says why the launch failed, and
+    PowerShell wraps it (MethodInvocationException). This walks the InnerException chain to it, so
+    callers classify a launch failure by its code (P3-6), which is the same in every display
+    language, instead of by its message, which Windows translates.
+.PARAMETER Exception
+    The caught exception.
+.RETURNS
+    [int] The NativeErrorCode, or $null when no Win32Exception is in the chain.
+#>
+function Get-NativeErrorCode {
+    param (
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [System.Exception]$Exception
+    )
+
+    $current = $Exception
+    while ($null -ne $current) {
+        if ($current -is [System.ComponentModel.Win32Exception]) {
+            return $current.NativeErrorCode
+        }
+        $current = $current.InnerException
+    }
+    return $null
+}
+
+<#
+.SYNOPSIS
+    Removes terminal control sequences and trailing white space from a line of process output.
+.PARAMETER Line
+    One line as the process wrote it.
+.RETURNS
+    [string]
+#>
+function ConvertTo-PlainProcessLine {
+    param (
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [AllowEmptyString()]
+        [string]$Line
+    )
+
+    if ($null -eq $Line) {
+        return ''
+    }
+    # CSI sequences (colors, cursor moves) and OSC sequences (window title, taskbar progress).
+    $plain = $Line -replace '\x1b\[[0-?]*[ -/]*[@-~]', '' -replace '\x1b\][^\x07\x1b]*(\x07|\x1b\\)', ''
+    return $plain.TrimEnd()
+}
+
+<#
+.SYNOPSIS
+    Classifies one line of winget output for echoing: real text, a progress update or noise.
+.DESCRIPTION
+    With its output redirected, winget still draws its spinner (- \ | /) and its download progress
+    bar, one carriage-return-separated update at a time, and each update arrives as a line of its
+    own. Echoing every one of them would bury the lines that matter. 'Spinner' and 'Blank' lines
+    are dropped, and of a run of 'Progress' lines only the last is shown.
+.PARAMETER Line
+    A line already passed through ConvertTo-PlainProcessLine.
+.RETURNS
+    [string] 'Blank', 'Spinner', 'Progress' or 'Text'.
+#>
+function Get-ProcessOutputLineKind {
+    param (
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [AllowEmptyString()]
+        [string]$Line
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Line)) {
+        return 'Blank'
+    }
+    if ($Line -match '^\s*[-\\|/]\s*$') {
+        return 'Spinner'
+    }
+    # Progress bar cells (full block, light, medium and dark shade), or a bare percentage or byte
+    # count such as '45%' or '1.50 MB / 3.00 MB'.
+    if ($Line -match '[\u2588\u2591\u2592\u2593]' -or $Line -match '^\s*\d+(\.\d+)?\s*%\s*$' -or $Line -match '^\s*[\d.]+\s*[KMGT]?B\s*/\s*[\d.]+\s*[KMGT]?B\s*$') {
+        return 'Progress'
+    }
+    return 'Text'
+}
+
+<#
+.SYNOPSIS
+    Writes process output to the console, and so into the transcript, without the progress noise.
+.DESCRIPTION
+    Start-Transcript records what PowerShell writes to the host, never what a child process writes
+    straight to the console, which is why the transcript used to hold none of winget's own lines
+    (P2-6). Lines go out through Write-Host, indented, with spinner and blank lines dropped and a run
+    of progress updates collapsed to its last one. Invoke-ExternalProcess calls this as lines
+    arrive; callers that capture quietly call it afterwards, for example only when a command failed.
+.PARAMETER Line
+    The lines to write.
+.PARAMETER Tail
+    Write only the last this-many lines that survive the filter. 0 writes all of them.
+#>
+function Write-ProcessOutput {
+    param (
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [AllowEmptyCollection()]
+        [string[]]$Line,
+
+        [Parameter(Mandatory = $false)]
+        [int]$Tail = 0
+    )
+
+    $shown = New-Object System.Collections.Generic.List[string]
+    $pendingProgress = $null
+    foreach ($rawLine in @($Line)) {
+        $plain = ConvertTo-PlainProcessLine -Line $rawLine
+        switch (Get-ProcessOutputLineKind -Line $plain) {
+            'Progress' {
+                $pendingProgress = $plain
+            }
+            'Text' {
+                if ($null -ne $pendingProgress) {
+                    $shown.Add($pendingProgress)
+                    $pendingProgress = $null
+                }
+                $shown.Add($plain)
+            }
+        }
+    }
+    if ($null -ne $pendingProgress) {
+        $shown.Add($pendingProgress)
+    }
+
+    $start = 0
+    if ($Tail -gt 0 -and $shown.Count -gt $Tail) {
+        $start = $shown.Count - $Tail
+    }
+    for ($index = $start; $index -lt $shown.Count; $index++) {
+        Write-Host ('    ' + $shown[$index]) -ForegroundColor DarkGray
+    }
+}
+
+<#
+.SYNOPSIS
+    Stops a process and every process it started.
+.DESCRIPTION
+    A timed-out winget is usually waiting on the installer it started, so stopping winget alone
+    would leave the installer running, holding the Windows Installer mutex and the output pipes.
+    On Windows this runs `taskkill /PID <id> /T /F`, which stops the whole tree and works under
+    Windows PowerShell 5.1. Elsewhere, or when taskkill fails, it uses Process.Kill(true) (.NET
+    Core 3.0 and newer), then Process.Kill().
+.PARAMETER Process
+    The process to stop.
+#>
+function Stop-ProcessTree {
+    param (
+        [Parameter(Mandatory = $true)]
+        [System.Diagnostics.Process]$Process
+    )
+
+    if ([System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Win32NT) {
+        try {
+            $taskkillPath = Join-Path ([System.Environment]::SystemDirectory) 'taskkill.exe'
+            $killerInfo = New-Object System.Diagnostics.ProcessStartInfo
+            $killerInfo.FileName = $taskkillPath
+            $killerInfo.Arguments = '/PID {0} /T /F' -f $Process.Id
+            $killerInfo.UseShellExecute = $false
+            $killerInfo.CreateNoWindow = $true
+            $killerInfo.RedirectStandardOutput = $true
+            $killerInfo.RedirectStandardError = $true
+            $killer = [System.Diagnostics.Process]::Start($killerInfo)
+            $null = $killer.StandardOutput.ReadToEndAsync()
+            $null = $killer.StandardError.ReadToEndAsync()
+            if ($killer.WaitForExit(30000) -and $Process.WaitForExit(10000)) {
+                return
+            }
+        }
+        catch {
+            # Fall through to Kill below.
+        }
+    }
+
+    try {
+        $Process.Kill($true)
+    }
+    catch {
+        # Kill(bool) does not exist on .NET Framework; the process may also be gone already.
+        try {
+            $Process.Kill()
+        }
+        catch {
+        }
+    }
+    try {
+        [void]$Process.WaitForExit(10000)
+    }
+    catch {
+    }
+}
+
+<#
+.SYNOPSIS
+    Runs a program with a time limit, captures its output and echoes it into the transcript.
+.DESCRIPTION
+    The process primitive behind every winget and msiexec call (P2-5, P2-6, P3-6):
+      - A bare program name is resolved on PATH with Get-Command, as Start-Process did, so the
+        current directory is never searched for it.
+      - Standard output and standard error are redirected, read line by line as they arrive, and
+        with -Echo Live written to the host through Write-Host (Write-ProcessOutput's filter), so
+        they reach the transcript and the console both. Standard input is closed: nothing may wait
+        for a key press.
+      - When TimeoutSeconds runs out, the process and everything it started are stopped
+        (Stop-ProcessTree) and the result says TimedOut; the caller says so in its own words.
+        Output that keeps a pipe open after the process itself exited (a child it left running) is
+        read for a few seconds more, then left.
+      - A launch failure never throws: the result says LaunchFailed, with the Win32 error code
+        (LaunchErrorCode: 2 not found, 5 access denied, 32 sharing violation, 1920 the file cannot
+        be accessed by the system), so callers classify it by code rather than by translated text.
+    The exit code comes from the process object, so it cannot go stale the way $LASTEXITCODE does.
+.PARAMETER FilePath
+    The program: a full path, or a name to find on PATH.
+.PARAMETER ArgumentList
+    The arguments, quoted for the command line by ConvertTo-ProcessArgumentString.
+.PARAMETER ArgumentString
+    The whole command line after the program name, passed exactly as given. Used instead of
+    ArgumentList for msiexec, which reads PROPERTY="value" pairs its own way.
+.PARAMETER TimeoutSeconds
+    The time limit (see Get-ProcessTimeoutSeconds).
+.PARAMETER Echo
+    Live (default): print the command line, then each output line as it arrives. None: print
+    nothing; the caller can pass the captured Output to Write-ProcessOutput later.
+.RETURNS
+    [pscustomobject] with FilePath, Arguments, ExitCode ($null when the process timed out or did
+    not start), TimedOut, LaunchFailed, LaunchErrorCode, LaunchError (message), LaunchException,
+    Output (standard output and standard error lines in arrival order, control sequences removed),
+    StandardOutput, StandardError, DurationSeconds and LogPath ($null; Invoke-WingetProcess sets it).
+#>
+function Invoke-ExternalProcess {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$FilePath,
+
+        [Parameter(Mandatory = $false)]
+        [AllowEmptyCollection()]
+        [string[]]$ArgumentList = @(),
+
+        [Parameter(Mandatory = $false)]
+        [string]$ArgumentString,
+
+        [Parameter(Mandatory = $true)]
+        [int]$TimeoutSeconds,
+
+        [Parameter(Mandatory = $false)]
+        [ValidateSet('Live', 'None')]
+        [string]$Echo = 'Live'
+    )
+
+    $arguments = $ArgumentString
+    if (-not $PSBoundParameters.ContainsKey('ArgumentString')) {
+        $arguments = ConvertTo-ProcessArgumentString -ArgumentList $ArgumentList
+    }
+    $displayName = [System.IO.Path]::GetFileNameWithoutExtension($FilePath)
+    $output = New-Object System.Collections.Generic.List[string]
+    $standardOutput = New-Object System.Collections.Generic.List[string]
+    $standardError = New-Object System.Collections.Generic.List[string]
+    $result = [pscustomobject]@{
+        FilePath        = $FilePath
+        Arguments       = $arguments
+        ExitCode        = $null
+        TimedOut        = $false
+        LaunchFailed    = $false
+        LaunchErrorCode = $null
+        LaunchError     = $null
+        LaunchException = $null
+        Output          = @()
+        StandardOutput  = @()
+        StandardError   = @()
+        DurationSeconds = 0
+        LogPath         = $null
+    }
+
+    # A bare name is looked up on PATH the way Start-Process did. Process.Start would hand it to
+    # CreateProcess, which searches the current directory first.
+    $resolvedPath = $FilePath
+    if (-not [System.IO.Path]::IsPathRooted($FilePath) -and $FilePath -notmatch '[\\/]') {
+        $command = Get-Command -Name $FilePath -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+        if (-not $command) {
+            $result.LaunchFailed = $true
+            $result.LaunchErrorCode = 2
+            $result.LaunchException = New-Object System.ComponentModel.Win32Exception(2, "'$FilePath' was not found on PATH.")
+            $result.LaunchError = $result.LaunchException.Message
+            return $result
+        }
+        $resolvedPath = $command.Source
+    }
+
+    $startInfo = New-Object System.Diagnostics.ProcessStartInfo
+    $startInfo.FileName = $resolvedPath
+    $startInfo.Arguments = $arguments
+    $startInfo.UseShellExecute = $false
+    $startInfo.RedirectStandardInput = $true
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    # winget writes UTF-8 whatever the console code page is; msiexec writes nothing.
+    $startInfo.StandardOutputEncoding = New-Object System.Text.UTF8Encoding($false)
+    $startInfo.StandardErrorEncoding = New-Object System.Text.UTF8Encoding($false)
+
+    if ($Echo -eq 'Live') {
+        Write-Host ('  > {0} {1}' -f $displayName, $arguments).TrimEnd() -ForegroundColor DarkGray
+    }
+
+    $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+    try {
+        $process = [System.Diagnostics.Process]::Start($startInfo)
+    }
+    catch {
+        $exception = $_.Exception
+        $nativeErrorCode = Get-NativeErrorCode -Exception $exception
+        $message = $exception.Message
+        $inner = $exception
+        while ($null -ne $inner) {
+            if ($inner -is [System.ComponentModel.Win32Exception]) {
+                $message = $inner.Message
+                $exception = $inner
+                break
+            }
+            $inner = $inner.InnerException
+        }
+        $result.LaunchFailed = $true
+        $result.LaunchErrorCode = $nativeErrorCode
+        $result.LaunchError = $message
+        $result.LaunchException = $exception
+        return $result
+    }
+
+    try {
+        $process.StandardInput.Close()
+    }
+    catch {
+    }
+
+    $pendingProgress = $null
+    $readers = @($process.StandardOutput, $process.StandardError)
+    $targets = @($standardOutput, $standardError)
+    $pending = @($readers[0].ReadLineAsync(), $readers[1].ReadLineAsync())
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    $exitSeenAt = $null
+    $timedOut = $false
+
+    while ($true) {
+        for ($stream = 0; $stream -lt 2; $stream++) {
+            while ($null -ne $pending[$stream] -and $pending[$stream].IsCompleted) {
+                $line = $null
+                if (-not $pending[$stream].IsFaulted -and -not $pending[$stream].IsCanceled) {
+                    $line = $pending[$stream].Result
+                }
+                if ($null -eq $line) {
+                    $pending[$stream] = $null
+                    break
+                }
+                $plain = ConvertTo-PlainProcessLine -Line $line
+                $output.Add($plain)
+                $targets[$stream].Add($plain)
+                if ($Echo -eq 'Live') {
+                    switch (Get-ProcessOutputLineKind -Line $plain) {
+                        'Progress' {
+                            $pendingProgress = $plain
+                        }
+                        'Text' {
+                            if ($null -ne $pendingProgress) {
+                                Write-Host ('    ' + $pendingProgress) -ForegroundColor DarkGray
+                                $pendingProgress = $null
+                            }
+                            Write-Host ('    ' + $plain) -ForegroundColor DarkGray
+                        }
+                    }
+                }
+                $pending[$stream] = $readers[$stream].ReadLineAsync()
+            }
+        }
+
+        if ($null -eq $pending[0] -and $null -eq $pending[1]) {
+            break
+        }
+        if ($process.HasExited) {
+            # Both pipes normally close with the process. A child it left running can hold them
+            # open; give its last lines a moment, then stop reading.
+            if ($null -eq $exitSeenAt) {
+                $exitSeenAt = [DateTime]::UtcNow
+            }
+            elseif (([DateTime]::UtcNow - $exitSeenAt).TotalSeconds -ge 5) {
+                break
+            }
+        }
+        elseif ([DateTime]::UtcNow -ge $deadline) {
+            $timedOut = $true
+            break
+        }
+
+        $waitFor = @($pending | Where-Object { $null -ne $_ })
+        [void][System.Threading.Tasks.Task]::WaitAny([System.Threading.Tasks.Task[]]$waitFor, 200)
+    }
+
+    if (-not $timedOut) {
+        $remainingMilliseconds = [int][Math]::Max(0, [Math]::Min([int]::MaxValue, ($deadline - [DateTime]::UtcNow).TotalMilliseconds))
+        if (-not $process.WaitForExit($remainingMilliseconds)) {
+            $timedOut = $true
+        }
+    }
+
+    if ($timedOut) {
+        Stop-ProcessTree -Process $process
+        # Collect what the stopped processes had already written.
+        for ($stream = 0; $stream -lt 2; $stream++) {
+            try {
+                if ($null -ne $pending[$stream] -and $pending[$stream].Wait(2000)) {
+                    $line = $pending[$stream].Result
+                    if ($null -ne $line) {
+                        $plain = ConvertTo-PlainProcessLine -Line $line
+                        $output.Add($plain)
+                        $targets[$stream].Add($plain)
+                    }
+                }
+            }
+            catch {
+                # The pipe broke when the process was stopped: nothing more to read.
+            }
+        }
+    }
+
+    if ($Echo -eq 'Live' -and $null -ne $pendingProgress) {
+        Write-Host ('    ' + $pendingProgress) -ForegroundColor DarkGray
+    }
+
+    $stopwatch.Stop()
+    $result.DurationSeconds = [Math]::Round($stopwatch.Elapsed.TotalSeconds, 1)
+    $result.Output = $output.ToArray()
+    $result.StandardOutput = $standardOutput.ToArray()
+    $result.StandardError = $standardError.ToArray()
+    if ($timedOut) {
+        $result.TimedOut = $true
+    }
+    else {
+        $result.ExitCode = $process.ExitCode
+    }
+    try {
+        $process.Dispose()
+    }
+    catch {
+    }
+    return $result
+}
+
+<#
+.SYNOPSIS
+    Returns the folder this run's logs go to, or $null.
+.DESCRIPTION
+    The folder of the run's transcript ($script:InstallLogPath, set by the generated installer's
+    entry script before it calls anything else). $null when the transcript did not start, or
+    outside the installer (the imported module, tests), and then no installer log is requested.
+.RETURNS
+    [string] or $null.
+#>
+function Get-InstallerLogDirectory {
+    if ($script:InstallLogPath) {
+        return (Split-Path -Parent $script:InstallLogPath)
+    }
+    return $null
+}
+
+<#
+.SYNOPSIS
+    Runs winget through Invoke-ExternalProcess, with its installer log in the run's logs folder.
+.DESCRIPTION
+    Resolves winget with Resolve-WingetExecutable unless the caller already has a path (a launch
+    retry past the alias), then runs it through Invoke-ExternalProcess with the caller's time
+    limit. For the subcommands that run an installer (install, upgrade, uninstall, repair), winget
+    is also passed `--log <file>` in the run's logs folder (Get-InstallerLogDirectory), named after
+    the subcommand, the package id and the time, so the MSI or Inno log of a failed install is next
+    to the transcript instead of in the elevating account's winget state folder. The folder is
+    created first: msiexec fails the whole install (1622) when it cannot open its log. Nothing is
+    added when the caller already passes --log or -o, or when there is no logs folder.
+.PARAMETER ArgumentList
+    winget's arguments, subcommand first.
+.PARAMETER TimeoutSeconds
+    The time limit (see Get-ProcessTimeoutSeconds).
+.PARAMETER WingetPath
+    The winget executable to run. Default: Resolve-WingetExecutable.
+.PARAMETER Echo
+    Passed to Invoke-ExternalProcess. Default Live.
+.PARAMETER LogDirectory
+    Where to put the installer log. Default: Get-InstallerLogDirectory. Empty: no --log.
+.RETURNS
+    Invoke-ExternalProcess's result, with LogPath set to the installer log path when --log was
+    passed (the file exists only if the installer wrote one).
+#>
+function Invoke-WingetProcess {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string[]]$ArgumentList,
+
+        [Parameter(Mandatory = $true)]
+        [int]$TimeoutSeconds,
+
+        [Parameter(Mandatory = $false)]
+        [string]$WingetPath,
+
+        [Parameter(Mandatory = $false)]
+        [ValidateSet('Live', 'None')]
+        [string]$Echo = 'Live',
+
+        [Parameter(Mandatory = $false)]
+        [AllowEmptyString()]
+        [AllowNull()]
+        [string]$LogDirectory
+    )
+
+    if ([string]::IsNullOrWhiteSpace($WingetPath)) {
+        $WingetPath = Resolve-WingetExecutable
+    }
+
+    $arguments = @($ArgumentList)
+    $logPath = $null
+    $subcommand = ''
+    if ($arguments.Count -gt 0) {
+        $subcommand = [string]$arguments[0]
+    }
+    if (@('install', 'upgrade', 'uninstall', 'repair') -contains $subcommand -and -not ($arguments -contains '--log' -or $arguments -contains '-o')) {
+        $directory = $LogDirectory
+        if (-not $PSBoundParameters.ContainsKey('LogDirectory')) {
+            $directory = Get-InstallerLogDirectory
+        }
+        if (-not [string]::IsNullOrWhiteSpace($directory)) {
+            $label = 'winget'
+            $idIndex = [array]::IndexOf($arguments, '--id')
+            if ($idIndex -ge 0 -and $idIndex + 1 -lt $arguments.Count) {
+                $label = [string]$arguments[$idIndex + 1] -replace '[^\w.\-]', '_'
+            }
+            try {
+                if (-not (Test-Path -LiteralPath $directory)) {
+                    [void](New-Item -Path $directory -ItemType Directory -Force -ErrorAction Stop)
+                }
+                $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+                $candidate = Join-Path $directory ('winget-{0}-{1}-{2}.log' -f $subcommand, $label, $stamp)
+                $suffix = 2
+                while (Test-Path -LiteralPath $candidate) {
+                    $candidate = Join-Path $directory ('winget-{0}-{1}-{2}-{3}.log' -f $subcommand, $label, $stamp, $suffix)
+                    $suffix++
+                }
+                $logPath = $candidate
+                $arguments += @('--log', $logPath)
+            }
+            catch {
+                # No installer log is better than an install that fails over its log file.
+                $logPath = $null
+            }
+        }
+    }
+
+    $result = Invoke-ExternalProcess -FilePath $WingetPath -ArgumentList $arguments -TimeoutSeconds $TimeoutSeconds -Echo $Echo
+    $result.LogPath = $logPath
+    return $result
 }
 
 # --- SystemInfo ---
@@ -2305,8 +3041,9 @@ function Test-WindowsTerminalInstalled {
     bug structurally impossible - there is only one place left to forget the flag.
 
     This is deliberately scoped to the install/download flag combination, not a generic wrapper for
-    every winget subcommand: `winget source update` cannot take `--accept-source-agreements` at all
-    (issues #174/#175), and `source list` / `search` / `source reset` each pass their own different
+    every winget subcommand: none of the `winget source` subcommands except `source add` accepts
+    `--accept-source-agreements` (`source update`, issues #174/#175; `source list` and
+    `source reset` reject it the same way, with 0x8A150002), and `search` and `list` pass their own
     subset. Callers with those different needs keep building their own argument lists.
 .RETURNS
     [string[]] @('--accept-source-agreements', '--accept-package-agreements', '--disable-interactivity')
@@ -2340,7 +3077,7 @@ function Get-WingetAgreementArgs {
     (microsoft/winget-cli#5398/#6334), and probing it would report a false failure for the only
     source that matters here.
 .PARAMETER TimeoutSeconds
-    Maximum seconds to wait for winget before killing the process. Default 120.
+    Maximum seconds to wait for winget before stopping it. Default 120.
 .RETURNS
     [hashtable] @{ Succeeded = <bool>; ExitCode = <int or $null>; TimedOut = <bool> }
     ExitCode is $null when the process timed out or failed to start.
@@ -2351,39 +3088,26 @@ function Invoke-WingetSourceProbe {
         [int]$TimeoutSeconds = 120
     )
 
-    # Unique per-run temp files: fixed names made concurrent runs (or a stale locked file from a
-    # killed run) fail Start-Process, which read as a false probe failure (issue #177).
-    $tempSuffix = [System.IO.Path]::GetRandomFileName()
-    $stdoutFile = Join-Path $env:TEMP "winget_source_probe_output_$tempSuffix.txt"
-    $stderrFile = Join-Path $env:TEMP "winget_source_probe_error_$tempSuffix.txt"
-
-    try {
-        $probeProcess = Start-Process -FilePath 'winget' `
-            -ArgumentList 'source', 'update', '--name', 'winget', '--disable-interactivity' `
-            -NoNewWindow `
-            -PassThru `
-            -RedirectStandardOutput $stdoutFile `
-            -RedirectStandardError $stderrFile
-
-        if (-not $probeProcess.WaitForExit($TimeoutSeconds * 1000)) {
-            Write-WarningMessage "Winget source update timed out after $TimeoutSeconds seconds. Terminating process..."
-            try { $probeProcess.Kill() } catch { }
-            return @{ Succeeded = $false; ExitCode = $null; TimedOut = $true }
-        }
-
-        return @{
-            Succeeded = ($probeProcess.ExitCode -eq 0)
-            ExitCode  = $probeProcess.ExitCode
-            TimedOut  = $false
-        }
-    }
-    catch {
-        Write-WarningMessage "Winget source update failed to run: $_"
+    # Through Invoke-WingetProcess (review finding P2-6): quiet when the probe succeeds, and winget's
+    # own explanation is echoed into the transcript when it does not.
+    $probe = Invoke-WingetProcess -ArgumentList @('source', 'update', '--name', 'winget', '--disable-interactivity') -TimeoutSeconds $TimeoutSeconds -Echo None
+    if ($probe.LaunchFailed) {
+        Write-WarningMessage "Winget source update failed to run: $($probe.LaunchError)"
         return @{ Succeeded = $false; ExitCode = $null; TimedOut = $false }
     }
-    finally {
-        Remove-Item $stdoutFile -ErrorAction SilentlyContinue
-        Remove-Item $stderrFile -ErrorAction SilentlyContinue
+    if ($probe.TimedOut) {
+        Write-WarningMessage "Winget source update timed out after $TimeoutSeconds seconds and was stopped."
+        Write-ProcessOutput -Line $probe.Output -Tail 20
+        return @{ Succeeded = $false; ExitCode = $null; TimedOut = $true }
+    }
+    if ($probe.ExitCode -ne 0) {
+        Write-ProcessOutput -Line $probe.Output -Tail 20
+    }
+
+    return @{
+        Succeeded = ($probe.ExitCode -eq 0)
+        ExitCode  = $probe.ExitCode
+        TimedOut  = $false
     }
 }
 
@@ -2415,14 +3139,22 @@ function Test-WingetSourceHealth {
         [switch]$Quiet
     )
 
-    # First check: verify source is listed
-    try {
-        $output = winget source list --disable-interactivity --accept-source-agreements 2>&1
-        $sourceIsListed = [bool]($output -match 'winget')
+    # First check: verify source is listed. No --accept-source-agreements: `winget source list`
+    # does not accept it and rejects the whole command with 0x8A150002 (INVALID_CL_ARGUMENTS),
+    # whose usage text happened to contain 'winget', so a missing source still read as listed.
+    $sourceIsListed = $false
+    $list = Invoke-WingetProcess -ArgumentList @('source', 'list', '--disable-interactivity') -TimeoutSeconds (Get-ProcessTimeoutSeconds -Operation WingetSourceList) -Echo None
+    if ($list.LaunchFailed) {
+        Write-WarningMessage "Winget source list failed: $($list.LaunchError)"
     }
-    catch {
-        Write-WarningMessage "Winget source list failed: $_"
-        $sourceIsListed = $false
+    elseif ($list.TimedOut) {
+        Write-WarningMessage 'Winget source list failed: it did not finish in time and was stopped.'
+    }
+    else {
+        $sourceIsListed = [bool](@($list.Output) -match 'winget')
+        if (-not $sourceIsListed -and -not $Quiet) {
+            Write-ProcessOutput -Line $list.Output -Tail 20
+        }
     }
 
     # Second check: verify source is functional (not corrupted) by attempting a search
@@ -2430,9 +3162,17 @@ function Test-WingetSourceHealth {
     if ($sourceIsListed) {
         try {
             # Actually test if the source works by attempting a search.
-            # Use '7zip' as a known package that always exists.
-            $searchOutput = winget search 7zip --source winget --disable-interactivity --accept-source-agreements 2>&1
-            $searchExitCode = $LASTEXITCODE
+            # Use '7zip' as a known package that always exists. The exit code comes from the
+            # process object, so it cannot be a stale $LASTEXITCODE.
+            $search = Invoke-WingetProcess -ArgumentList @('search', '7zip', '--source', 'winget', '--disable-interactivity', '--accept-source-agreements') -TimeoutSeconds (Get-ProcessTimeoutSeconds -Operation WingetSearch) -Echo None
+            if ($search.LaunchFailed) {
+                throw $search.LaunchError
+            }
+            if ($search.TimedOut) {
+                throw 'winget search did not finish in time and was stopped.'
+            }
+            $searchOutput = @($search.Output)
+            $searchExitCode = $search.ExitCode
 
             # Any nonzero exit code fails the check — that includes the known 0x8A15000F
             # corruption signature (APPINSTALLER_CLI_ERROR_SOURCE_DATA_MISSING, -1978335217 as a
@@ -2450,6 +3190,7 @@ function Test-WingetSourceHealth {
             if ($searchExitCode -ne 0 -or $searchOutput -match '0x8a150|failed when opening|data required') {
                 if (-not $Quiet) {
                     Write-WarningMessage 'Winget source is listed but contains corrupted or missing data.'
+                    Write-ProcessOutput -Line $searchOutput -Tail 20
                 }
                 $sourceIsFunctional = $false
             }
@@ -2733,20 +3474,24 @@ function Invoke-WingetPackageManagerRepair {
 
 <#
 .SYNOPSIS
-    Returns true when a winget-launch exception message indicates a transient failure.
+    Returns true when a winget launch failed for a transient reason.
 .DESCRIPTION
-    Matches the Win32 errors Start-Process surfaces as a terminating exception when winget.exe's own
-    file is transiently inaccessible (issues #253/#258): ERROR_CANT_ACCESS_FILE (1920, "The file
-    cannot be accessed by the system.") and the sibling ERROR_SHARING_VIOLATION ("...being used by
-    another process."). Also matches the message PowerShell's native-command invocation throws for
-    the same underlying condition when a caller captures output directly (e.g. `$out = @(winget list
-    ... 2>&1)`) instead of going through Start-Process: "StandardOutputEncoding is only supported
-    when standard output is redirected." (issue #277) — a .NET Process-class symptom of resolving the
-    same broken/mid-registration app-execution alias, just surfaced through a different code path.
-    Matched case-insensitively; anything else (e.g. winget genuinely missing from PATH) is a real
-    failure the caller should not retry.
+    The transient class is winget.exe's own file being briefly inaccessible (issues #253/#258):
+    ERROR_CANT_ACCESS_FILE (1920, "The file cannot be accessed by the system.") and
+    ERROR_SHARING_VIOLATION (32, "...being used by another process."). Anything else (e.g. winget
+    genuinely missing from PATH) is a real failure the caller should not retry.
+
+    Invoke-ExternalProcess reports the Win32 error code of a failed launch, and -NativeErrorCode
+    classifies by that code, which is the same in every display language (review finding P3-6).
+    Without a code, -Message is matched instead: against the English texts, against the
+    "StandardOutputEncoding is only supported when standard output is redirected." message
+    PowerShell's native-command invocation throws for the same broken alias (issue #277), and
+    against the two Win32 messages as this machine words them (Get-Win32ErrorMessage), so a German
+    "Das System kann auf die Datei nicht zugreifen" matches too. All matching ignores case.
 .PARAMETER Message
     The exception message to classify.
+.PARAMETER NativeErrorCode
+    The Win32 error code of the failed launch, when known.
 .RETURNS
     [bool]
 #>
@@ -2755,10 +3500,56 @@ function Test-TransientWingetLaunchError {
         [Parameter(Mandatory = $false)]
         [AllowNull()]
         [AllowEmptyString()]
-        [string]$Message
+        [string]$Message,
+
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [Nullable[int]]$NativeErrorCode
     )
 
-    return $Message -match 'cannot be accessed by the system|being used by another process|StandardOutputEncoding is only supported when standard output is redirected'
+    # ERROR_SHARING_VIOLATION and ERROR_CANT_ACCESS_FILE.
+    $transientCodes = @(32, 1920)
+    if ($null -ne $NativeErrorCode -and $transientCodes -contains $NativeErrorCode) {
+        return $true
+    }
+    if ([string]::IsNullOrWhiteSpace($Message)) {
+        return $false
+    }
+    if ($Message -match 'cannot be accessed by the system|being used by another process|StandardOutputEncoding is only supported when standard output is redirected') {
+        return $true
+    }
+    foreach ($code in $transientCodes) {
+        $localized = "$(Get-Win32ErrorMessage -Code $code)".Trim().TrimEnd('.')
+        if ($localized.Length -gt 0 -and $Message.IndexOf($localized, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+            return $true
+        }
+    }
+    return $false
+}
+
+<#
+.SYNOPSIS
+    Returns the text Windows gives a Win32 error code, in this machine's display language.
+.DESCRIPTION
+    The message Start-Process embeds when it cannot launch a program comes from the same Windows
+    message table (FormatMessage), so matching against it works in any display language (review
+    finding P3-6). Off Windows the .NET runtime words error codes as errno values, which mean
+    something else, so nothing is returned there.
+.PARAMETER Code
+    The Win32 error code.
+.RETURNS
+    [string] The message, or $null off Windows.
+#>
+function Get-Win32ErrorMessage {
+    param (
+        [Parameter(Mandatory = $true)]
+        [int]$Code
+    )
+
+    if ([System.Environment]::OSVersion.Platform -ne [System.PlatformID]::Win32NT) {
+        return $null
+    }
+    return (New-Object System.ComponentModel.Win32Exception($Code)).Message
 }
 
 <#
@@ -2807,8 +3598,8 @@ function Get-ConflictingDesktopAppInstallerVersions {
 .SYNOPSIS
     Resolves the winget executable to launch, optionally bypassing the app-execution alias.
 .DESCRIPTION
-    By default returns the bare command name 'winget', which Start-Process resolves through PATH to
-    the per-user app-execution alias - the fast path that works whenever winget is healthy.
+    By default returns the bare command name 'winget', which Invoke-ExternalProcess resolves through
+    PATH to the per-user app-execution alias - the fast path that works whenever winget is healthy.
 
     With -BypassAlias, resolves the real winget.exe inside the registered
     Microsoft.DesktopAppInstaller package's install location instead (the documented workaround for
@@ -3541,7 +4332,8 @@ function Invoke-WingetInstall {
         try {
             # Shared per-app pipeline — pre-check, dispatch, post-verify (issue #188). Messages,
             # summary bucketing, and exit-code policy stay here in the orchestrator.
-            $outcome = Install-AppWithVerification -App $app -WhatIf:$WhatIf
+            # -Silent: an unattended run installs MSI packages with /quiet, not /passive.
+            $outcome = Install-AppWithVerification -App $app -Silent:$effectiveNonInteractive -WhatIf:$WhatIf
 
             switch ($outcome.Status) {
                 'Skipped' {
@@ -3631,7 +4423,7 @@ function Invoke-WingetInstall {
 
                     # Same shared pipeline as the first pass (issue #188), so a lingering
                     # 0x80073d19 session error gets its backoff retries here too (issue #150).
-                    $outcome = Install-AppWithVerification -App $appDef
+                    $outcome = Install-AppWithVerification -App $appDef -Silent:$effectiveNonInteractive
 
                     if ($outcome.Status -eq 'Failed') {
                         $failureReason = Format-InstallFailureReason -FailureReason $outcome.FailureReason -InstallResult $outcome.InstallResult
@@ -4485,7 +5277,10 @@ function Install-WingetAutoUpdate {
         # predictable %TEMP% path a same-user non-elevated process could tamper with (issue #186).
         $stagingDir = New-WauStagingDirectory
         $msiPath = Join-Path $stagingDir "WAU-$($pin.Version).msi"
-        Invoke-WebRequest -Uri $pin.MsiUrl -OutFile $msiPath -UseBasicParsing -ErrorAction Stop
+        # Time-limited (review finding P2-5): without a limit, a download that connects and then
+        # stalls waits for ever.
+        $downloadTimeouts = Get-WebDownloadTimeoutParameters
+        Invoke-WebRequest @downloadTimeouts -Uri $pin.MsiUrl -OutFile $msiPath -UseBasicParsing -ErrorAction Stop
 
         $actualHash = (Get-FileHash -Path $msiPath -Algorithm SHA256).Hash
         if ($actualHash -ne $pin.Sha256) {
@@ -4502,15 +5297,25 @@ function Install-WingetAutoUpdate {
         # UPDATESATLOGON=0: no at-logon run (see the function help); WAU stores it as
         # WAU_UpdatesAtLogon, which later MSI upgrades read back.
         $msiArgs = "/i `"$msiPath`" /qn /norestart UPDATESATLOGON=0 USERCONTEXT=1 DISABLEWAUAUTOUPDATE=1 UPDATESINTERVAL=Weekly UPDATESATTIME=02:00:00 NOTIFICATIONLEVEL=Full DONOTRUNONMETERED=1"
-        $proc = Start-Process -FilePath 'msiexec.exe' -ArgumentList $msiArgs -Wait -PassThru
+        # Time-limited (review finding P2-5): Start-Process -Wait used to wait for ever.
+        $msiTimeoutSeconds = Get-ProcessTimeoutSeconds -Operation MsiExec
+        $msiexec = Invoke-ExternalProcess -FilePath 'msiexec.exe' -ArgumentString $msiArgs -TimeoutSeconds $msiTimeoutSeconds -Echo None
+        if ($msiexec.LaunchFailed) {
+            Write-ErrorMessage "Failed to install Winget-AutoUpdate: msiexec could not be started ($($msiexec.LaunchError))."
+            return [pscustomobject]@{ Status = 'Failed'; Version = $pin.Version; FrameworkMissing = $false }
+        }
+        if ($msiexec.TimedOut) {
+            Write-ErrorMessage ('Winget-AutoUpdate install failed: msiexec did not finish within {0} minutes and was stopped.' -f [Math]::Round($msiTimeoutSeconds / 60))
+            return [pscustomobject]@{ Status = 'Failed'; Version = $pin.Version; FrameworkMissing = $false }
+        }
 
         # 3010 = ERROR_SUCCESS_REBOOT_REQUIRED — still a success.
-        if ($proc.ExitCode -eq 0 -or $proc.ExitCode -eq 3010) {
+        if ($msiexec.ExitCode -eq 0 -or $msiexec.ExitCode -eq 3010) {
             Write-Success "Winget-AutoUpdate $($pin.Version) installed. Apps will update weekly, on Tuesdays at 02:00 (or soon after the next start if the machine was off)."
             return [pscustomobject]@{ Status = 'Configured'; Version = $pin.Version; FrameworkMissing = $false }
         }
 
-        Write-ErrorMessage "Winget-AutoUpdate install failed (msiexec exit code $($proc.ExitCode))."
+        Write-ErrorMessage "Winget-AutoUpdate install failed (msiexec exit code $($msiexec.ExitCode))."
         return [pscustomobject]@{ Status = 'Failed'; Version = $pin.Version; FrameworkMissing = $false }
     }
     catch {
@@ -4558,14 +5363,22 @@ function Uninstall-WingetAutoUpdate {
         $productCode = (Get-WauPin).ProductCode
     }
     Write-Info 'Uninstalling Winget-AutoUpdate...'
-    $proc = Start-Process -FilePath 'msiexec.exe' -ArgumentList "/x $productCode /qn /norestart" -Wait -PassThru
+    $msiexec = Invoke-ExternalProcess -FilePath 'msiexec.exe' -ArgumentString "/x $productCode /qn /norestart" -TimeoutSeconds (Get-ProcessTimeoutSeconds -Operation MsiExec) -Echo None
+    if ($msiexec.LaunchFailed) {
+        Write-ErrorMessage "Winget-AutoUpdate uninstall failed: msiexec could not be started ($($msiexec.LaunchError))."
+        return $false
+    }
+    if ($msiexec.TimedOut) {
+        Write-ErrorMessage 'Winget-AutoUpdate uninstall failed: msiexec did not finish in time and was stopped.'
+        return $false
+    }
 
-    if ($proc.ExitCode -eq 0 -or $proc.ExitCode -eq 3010) {
+    if ($msiexec.ExitCode -eq 0 -or $msiexec.ExitCode -eq 3010) {
         Write-Success 'Winget-AutoUpdate uninstalled.'
         return $true
     }
 
-    Write-ErrorMessage "Winget-AutoUpdate uninstall failed (msiexec exit code $($proc.ExitCode))."
+    Write-ErrorMessage "Winget-AutoUpdate uninstall failed (msiexec exit code $($msiexec.ExitCode))."
     return $false
 }
 
@@ -4820,14 +5633,22 @@ function Test-WingetSources {
     # Missing or corrupted: attempt repair
     Write-WarningMessage "$sourceProblem Attempting to repair..."
 
-    # Attempt repair: first try source reset, then re-register package
-    try {
-        Write-Info 'Running winget source reset...'
-        $resetOutput = winget source reset --force --disable-interactivity --accept-source-agreements 2>&1
-        Write-Info 'Source reset completed.'
+    # Attempt repair: first try source reset, then re-register package. No
+    # --accept-source-agreements: `winget source reset` does not accept it and rejects the whole
+    # command with 0x8A150002 (INVALID_CL_ARGUMENTS), so the reset never ran (the #174/#175 class).
+    Write-Info 'Running winget source reset...'
+    $reset = Invoke-WingetProcess -ArgumentList @('source', 'reset', '--force', '--disable-interactivity') -TimeoutSeconds (Get-ProcessTimeoutSeconds -Operation WingetSourceReset)
+    if ($reset.LaunchFailed) {
+        Write-WarningMessage "Winget source reset failed: $($reset.LaunchError)"
     }
-    catch {
-        Write-WarningMessage "Winget source reset failed: $_"
+    elseif ($reset.TimedOut) {
+        Write-WarningMessage 'Winget source reset failed: it did not finish in time and was stopped.'
+    }
+    elseif ($reset.ExitCode -ne 0) {
+        Write-WarningMessage ('Winget source reset failed with exit code 0x{0:X8}.' -f [int]$reset.ExitCode)
+    }
+    else {
+        Write-Info 'Source reset completed.'
     }
 
     try {
@@ -4982,31 +5803,34 @@ function Initialize-WingetSourcesForUser {
 .SYNOPSIS
     Installs a single winget package, retrying the transient 0x80073d19 session error with backoff.
 .DESCRIPTION
-    Runs `winget install` for one package id and captures winget's real process exit code via
-    Start-Process -PassThru -Wait. Exit code 0x80073d19 (ERROR_INSTALL_USER_LOGOFF — "an error
+    Runs `winget install` for one package id through Invoke-WingetProcess and reads winget's real
+    process exit code from the result. Exit code 0x80073d19 (ERROR_INSTALL_USER_LOGOFF — "an error
     occurred because a user was logged off") is a transient MSIX/session-deployment race: an
     immediate retry simply hits the same race, which is why issues #81/#100/#102 left it unresolved.
     When that specific code is seen, this function waits with an increasing backoff and retries, up
     to MaxAttempts. Any other exit code (success or a real failure) is returned immediately so the
     caller can verify the result with `winget list` as before.
 
-    winget's output is intentionally left unredirected so its native progress is still shown to the
-    user; the session error is identified purely from the exit code, which winget reports as
-    0x80073d19 for this failure.
+    Each install has a time limit (Get-ProcessTimeoutSeconds WingetInstall, review finding P2-5):
+    when it runs out, winget and the installer it started are stopped, and the result says TimedOut
+    with no exit code; a timed-out install is not retried here. winget's output is echoed into the
+    console and the transcript as it arrives (P2-6), so the installer's own error text ("Installer
+    failed with exit code: 1603") is in the log the teammate attaches, and winget writes the
+    installer's log (--log) to the run's logs folder; InstallerLogPath points at it when the
+    installer wrote one. When the run is unattended (-Silent), winget gets --silent, so MSI and
+    WiX packages install with /quiet instead of /passive.
 
-    Start-Process can also fail to launch winget.exe at all, throwing a terminating exception
-    ("This command cannot be run due to the error: The file cannot be accessed by the system.",
-    Win32 ERROR_CANT_ACCESS_FILE / 1920, or the sibling ERROR_SHARING_VIOLATION "being used by
-    another process") instead of returning a process object with an exit code. This happens when
-    winget.exe's own file is transiently locked — e.g. Windows Defender real-time scanning it, or
-    an AppX package-registration race right after Repair-WinGetPackageManager runs. Because that
-    exception is thrown before a process object ever exists, it used to bypass the exit-code-based
-    retry loop below entirely: on a GitHub-hosted E2E runner this was observed to fail every
-    install in a run, surviving even the caller's separate one-shot retry pass, because neither
-    layer paused before retrying (issue #253). The Start-Process call is now wrapped so this
-    specific class of launch exception is retried, instead of propagating out of the function on
-    the first attempt. Any other exception (e.g. winget genuinely missing) is re-thrown unchanged
-    so it is not silently swallowed.
+    winget can also fail to launch at all, with Win32 ERROR_CANT_ACCESS_FILE (1920, "The file cannot
+    be accessed by the system.") or the sibling ERROR_SHARING_VIOLATION (32, "being used by another
+    process"), instead of producing an exit code. This happens when winget.exe's own file is
+    transiently locked — e.g. Windows Defender real-time scanning it, or an AppX
+    package-registration race right after Repair-WinGetPackageManager runs. A failed launch used to
+    bypass the exit-code-based retry loop below entirely: on a GitHub-hosted E2E runner this was
+    observed to fail every install in a run, surviving even the caller's separate one-shot retry
+    pass, because neither layer paused before retrying (issue #253). This class of launch failure is
+    now retried, recognized by its Win32 error code rather than by its translated message (P3-6).
+    Any other launch failure (e.g. winget genuinely missing) is re-thrown so it is not silently
+    swallowed.
 
     Launch failures have their own retry budget, longer than the session-error one (issue #258):
     the dominant real-world cause is a Microsoft.DesktopAppInstaller (App Installer) upgrade or
@@ -5039,12 +5863,16 @@ function Initialize-WingetSourcesForUser {
 .PARAMETER InitialDelaySeconds
     Seconds to wait before the first retry; the wait doubles on each subsequent retry. Default 5.
 .PARAMETER MaxLaunchAttempts
-    Maximum number of times to attempt launching winget.exe while Start-Process keeps throwing the
-    transient file-lock exception (issue #258). Separate from MaxAttempts because a failed launch
-    never ran an install; the wait starts at InitialDelaySeconds and doubles on each launch retry.
+    Maximum number of times to attempt launching winget.exe while the launch keeps failing with the
+    transient file-lock error (issue #258). Separate from MaxAttempts because a failed launch never
+    ran an install; the wait starts at InitialDelaySeconds and doubles on each launch retry.
     Default 5 (75s of total backoff at the default InitialDelaySeconds).
+.PARAMETER Silent
+    Pass --silent to winget. Invoke-WingetInstall passes its effective non-interactive state. When
+    the parameter is not given, Test-EffectiveNonInteractive decides (e.g. for
+    Install-PowerShellLatest, which the catalog calls without arguments).
 .RETURNS
-    [hashtable] @{ ExitCode = <int|$null>; Attempts = <int>; SessionErrorExhausted = <bool>; MachineScopeFellBack = <bool>; LaunchErrorExhausted = <bool>; LaunchAttempts = <int> }
+    [hashtable] @{ ExitCode = <int|$null>; Attempts = <int>; SessionErrorExhausted = <bool>; MachineScopeFellBack = <bool>; LaunchErrorExhausted = <bool>; LaunchAttempts = <int>; TimedOut = <bool>; TimeoutSeconds = <int>; InstallerLogPath = <string|$null> }
     SessionErrorExhausted is True only when every attempt failed with the session error.
     MachineScopeFellBack is True when the package had no machine-scope installer and the install
     was retried at winget's default scope. Attempts counts install attempts at the finally
@@ -5052,7 +5880,9 @@ function Initialize-WingetSourcesForUser {
     neither does a failed launch (no process ran). LaunchAttempts counts failed winget launches.
     LaunchErrorExhausted is True only when winget.exe could not be launched at all through every
     launch attempt (issues #253/#258); ExitCode is $null and Attempts is 0 in that case, since no
-    process ever ran to report an exit code.
+    process ever ran to report an exit code. TimedOut is True when the last attempt ran out of time
+    and was stopped (ExitCode is then $null); TimeoutSeconds is the limit it had. InstallerLogPath
+    is the installer log winget wrote for the last attempt, or $null when there is none.
 #>
 function Install-WingetPackage {
     param (
@@ -5069,7 +5899,10 @@ function Install-WingetPackage {
         [int]$InitialDelaySeconds = 5,
 
         [Parameter(Mandatory = $false)]
-        [int]$MaxLaunchAttempts = 5
+        [int]$MaxLaunchAttempts = 5,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$Silent
     )
 
     # 0x80073D19 (ERROR_DEPLOYMENT_BLOCKED_BY_USER_LOG_OFF) as a signed Int32, which is how winget
@@ -5079,6 +5912,12 @@ function Install-WingetPackage {
     # the --scope machine requirement filters out every installer in the package's manifest.
     $noApplicableInstallerExitCode = -1978335216
 
+    $useSilent = [bool]$Silent
+    if (-not $PSBoundParameters.ContainsKey('Silent')) {
+        $useSilent = [bool](Test-EffectiveNonInteractive)
+    }
+    $timeoutSeconds = Get-ProcessTimeoutSeconds -Operation WingetInstall
+
     $attempt = 0
     $delay = $InitialDelaySeconds
     $exitCode = 0
@@ -5087,6 +5926,8 @@ function Install-WingetPackage {
     $launchErrorExhausted = $false
     $launchAttempt = 0
     $launchDelay = $InitialDelaySeconds
+    $timedOut = $false
+    $installerLogPath = $null
     $wingetExecutable = Resolve-WingetExecutable
 
     while ($attempt -lt $MaxAttempts) {
@@ -5109,13 +5950,19 @@ function Install-WingetPackage {
         if (-not [string]::IsNullOrWhiteSpace($InstallerType)) {
             $installArgs += @('--installer-type', $InstallerType)
         }
-
-        try {
-            $proc = Start-Process -FilePath $wingetExecutable -ArgumentList $installArgs -NoNewWindow -Wait -PassThru
-            $exitCode = $proc.ExitCode
+        if ($useSilent) {
+            # Without --silent winget runs MSI and WiX installers with /passive (a progress window)
+            # rather than /quiet.
+            $installArgs += '--silent'
         }
-        catch {
-            if (-not (Test-TransientWingetLaunchError -Message $_.Exception.Message) -and $wingetExecutable -eq 'winget') {
+
+        $run = Invoke-WingetProcess -ArgumentList $installArgs -TimeoutSeconds $timeoutSeconds -WingetPath $wingetExecutable
+        $installerLogPath = $null
+        if ($run.LogPath -and (Test-Path -LiteralPath $run.LogPath)) {
+            $installerLogPath = $run.LogPath
+        }
+        if ($run.LaunchFailed) {
+            if (-not (Test-TransientWingetLaunchError -NativeErrorCode $run.LaunchErrorCode -Message $run.LaunchError) -and $wingetExecutable -eq 'winget') {
                 # Not a known-transient launch failure of the alias (e.g. winget genuinely
                 # missing) — preserve the prior behavior of letting it propagate instead of
                 # masking a real problem as an ordinary install failure. A concrete bypass path
@@ -5123,7 +5970,10 @@ function Install-WingetPackage {
                 # mid-backoff by the very App Installer upgrade being ridden out (surfacing as
                 # ERROR_FILE_NOT_FOUND, not the file-lock errors), and the right response is to
                 # re-resolve on the next launch retry, not to abort the install loop.
-                throw
+                if ($run.LaunchException) {
+                    throw $run.LaunchException
+                }
+                throw "winget could not be started: $($run.LaunchError)"
             }
 
             # A failed launch never ran winget, so it must not consume an install attempt; launch
@@ -5137,7 +5987,7 @@ function Install-WingetPackage {
                 # registered package's own winget.exe over the alias: as soon as the new package
                 # version lands, this converges on a launchable executable.
                 $wingetExecutable = Resolve-WingetExecutable -BypassAlias
-                Write-WarningMessage "Could not launch winget for $PackageId - its executable appears transiently locked ($($_.Exception.Message)). Waiting ${launchDelay}s before launch retry $($launchAttempt + 1) of ${MaxLaunchAttempts} (next attempt uses '$wingetExecutable')..."
+                Write-WarningMessage "Could not launch winget for $PackageId - its executable appears transiently locked ($($run.LaunchError)). Waiting ${launchDelay}s before launch retry $($launchAttempt + 1) of ${MaxLaunchAttempts} (next attempt uses '$wingetExecutable')..."
                 Start-Sleep -Seconds $launchDelay
                 $launchDelay = $launchDelay * 2
                 continue
@@ -5147,6 +5997,21 @@ function Install-WingetPackage {
             $launchErrorExhausted = $true
             $exitCode = $null
             break
+        }
+
+        if ($run.TimedOut) {
+            # Invoke-ExternalProcess stopped winget and the installer it was running. A hung
+            # installer would most likely hang again, so this is final; the caller's verification
+            # and the run's retry pass decide what happens next.
+            Write-ErrorMessage ("Install of {0} did not finish within {1} minutes and was stopped." -f $PackageId, [Math]::Round($timeoutSeconds / 60))
+            $timedOut = $true
+            $exitCode = $null
+            break
+        }
+
+        $exitCode = $run.ExitCode
+        if ($exitCode -ne 0 -and $installerLogPath) {
+            Write-Info "Installer log for ${PackageId}: $installerLogPath"
         }
 
         # No installer matched the machine-scope requirement (e.g. MSIX-only packages such as
@@ -5184,6 +6049,9 @@ function Install-WingetPackage {
         MachineScopeFellBack  = $machineScopeFellBack
         LaunchErrorExhausted  = $launchErrorExhausted
         LaunchAttempts        = $launchAttempt
+        TimedOut              = $timedOut
+        TimeoutSeconds        = $timeoutSeconds
+        InstallerLogPath      = $installerLogPath
     }
 }
 
@@ -5191,32 +6059,31 @@ function Install-WingetPackage {
 .SYNOPSIS
     Returns whether winget reports the given package id as installed for the current account.
 .DESCRIPTION
-    Without -TimeoutSeconds the check calls winget inline and returns a plain [bool], keeping the
-    original contract for existing callers (e.g. Install-PowerShellLatest).
+    Runs `winget list --exact --id <id>` through Invoke-WingetProcess, quietly (the per-app checks
+    would otherwise print a table twice for every app), and always under a time limit, killing a
+    hung winget instead of blocking the install loop (issues #176, #188).
 
-    With -TimeoutSeconds the check runs `winget list` via Start-Process with redirected output and
-    a hard timeout, killing a hung winget instead of blocking the install loop — the pattern
-    Invoke-WingetInstall used to inline three times before issue #188 centralized it here. Temp
-    file names are unique per run so concurrent checks (or a stale locked file left by a killed
-    run) cannot collide on fixed names (issue #177). In this mode a hashtable is returned so the
-    caller can tell a timeout apart from "not installed": a timeout must count as a failure rather
-    than being silently dropped (issue #176).
+    Without -TimeoutSeconds the check uses the general `winget list` limit (Get-ProcessTimeoutSeconds
+    WingetList) and returns a plain [bool], keeping the original contract for existing callers; any
+    failure to get an answer reads as not installed. With -TimeoutSeconds a hashtable is returned so
+    the caller can tell a timeout apart from "not installed": a timeout must count as a failure
+    rather than being silently dropped (issue #176).
 
     Both modes determine "installed" via Test-WingetListOutputContainsPackageId rather than a plain
     substring .Contains check, so an unrelated listed id that merely contains $PackageId as a
     substring (e.g. target 'Foo.Bar' inside listed id 'Foo.BarBaz') cannot false-positive.
 
-    In timeout mode, a Start-Process launch failure of the transient file-lock class (the winget
-    app-execution alias breaking during a DesktopAppInstaller upgrade, issue #258) is retried once
-    via Resolve-WingetExecutable -BypassAlias — launching the registered package's own winget.exe
+    In timeout mode, a launch failure of the transient file-lock class (the winget app-execution
+    alias breaking during a DesktopAppInstaller upgrade, issue #258) is retried once via
+    Resolve-WingetExecutable -BypassAlias — launching the registered package's own winget.exe
     directly — before the check gives up. Without this, the outage made this check silently report
     an actually-installed package as missing, which is how run 30253761253 marked the already
     installed Microsoft.WindowsTerminal as a failed install.
 .PARAMETER PackageId
     The winget package id to check.
 .PARAMETER TimeoutSeconds
-    Maximum seconds to wait for `winget list` before killing it. When omitted (or 0), the original
-    inline call without a timeout guard is used and a [bool] is returned.
+    Maximum seconds to wait for `winget list` before killing it. When omitted (or 0), the general
+    `winget list` limit applies and a [bool] is returned.
 .RETURNS
     [bool] when -TimeoutSeconds is not supplied.
     [hashtable] @{ Installed = <bool>; TimedOut = <bool>; ExitCode = <int or $null> } when it is;
@@ -5232,74 +6099,45 @@ function Test-WingetPackageInstalled {
         [int]$TimeoutSeconds = 0
     )
 
+    $listArgs = @('list', '--exact', '--id', $PackageId, '--accept-source-agreements', '--disable-interactivity')
+
     if ($TimeoutSeconds -gt 0) {
-        # Unique per-run temp files (issue #177): fixed names made concurrent runs (or a stale
-        # locked file from a killed run) fail Start-Process.
-        $tempSuffix = [System.IO.Path]::GetRandomFileName()
-        $stdoutFile = Join-Path $env:TEMP "winget_list_output_$tempSuffix.txt"
-        $stderrFile = Join-Path $env:TEMP "winget_list_error_$tempSuffix.txt"
-
-        try {
-            $listArgs = @('list', '--exact', '--id', $PackageId, '--accept-source-agreements', '--disable-interactivity')
-            try {
-                $listProcess = Start-Process -FilePath 'winget' `
-                    -ArgumentList $listArgs `
-                    -NoNewWindow `
-                    -PassThru `
-                    -RedirectStandardOutput $stdoutFile `
-                    -RedirectStandardError $stderrFile
+        $run = Invoke-WingetProcess -ArgumentList $listArgs -TimeoutSeconds $TimeoutSeconds -Echo None
+        if ($run.LaunchFailed) {
+            if (-not (Test-TransientWingetLaunchError -NativeErrorCode $run.LaunchErrorCode -Message $run.LaunchError)) {
+                return @{ Installed = $false; TimedOut = $false; ExitCode = $null }
             }
-            catch {
-                if (-not (Test-TransientWingetLaunchError -Message $_.Exception.Message)) {
-                    throw
-                }
-                # The winget alias is transiently inaccessible (issue #258) — retry once through
-                # the DesktopAppInstaller package's own winget.exe so an installed package is not
-                # misreported as missing. A failure here falls through to the outer catch, which
-                # keeps the original no-throw contract.
-                $bypassExecutable = Resolve-WingetExecutable -BypassAlias
-                Write-WarningMessage "Could not launch winget to check $PackageId ($($_.Exception.Message)). Retrying once via '$bypassExecutable'..."
-                $listProcess = Start-Process -FilePath $bypassExecutable `
-                    -ArgumentList $listArgs `
-                    -NoNewWindow `
-                    -PassThru `
-                    -RedirectStandardOutput $stdoutFile `
-                    -RedirectStandardError $stderrFile
-            }
-
-            if (-not $listProcess.WaitForExit($TimeoutSeconds * 1000)) {
-                try { $listProcess.Kill() } catch { }
-                return @{ Installed = $false; TimedOut = $true; ExitCode = $null }
-            }
-
-            # Capture the exit code from the process object immediately; the output files are
-            # only read after a confirmed non-timeout exit.
-            $output = @(Get-Content $stdoutFile -ErrorAction SilentlyContinue)
-            # Join with a newline, not '': Test-WingetListOutputContainsPackageId's boundary regex
-            # treats anything outside [\w.\-] as a token edge, so an empty separator would let the
-            # end of one line abut the start of the next and could hide a real match at that seam.
-            return @{
-                Installed = Test-WingetListOutputContainsPackageId -Output ([String]::Join("`n", $output)) -PackageId $PackageId
-                TimedOut  = $false
-                ExitCode  = $listProcess.ExitCode
+            # The winget alias is transiently inaccessible (issue #258) — retry once through the
+            # DesktopAppInstaller package's own winget.exe so an installed package is not
+            # misreported as missing.
+            $bypassExecutable = Resolve-WingetExecutable -BypassAlias
+            Write-WarningMessage "Could not launch winget to check $PackageId ($($run.LaunchError)). Retrying once via '$bypassExecutable'..."
+            $run = Invoke-WingetProcess -ArgumentList $listArgs -TimeoutSeconds $TimeoutSeconds -Echo None -WingetPath $bypassExecutable
+            if ($run.LaunchFailed) {
+                return @{ Installed = $false; TimedOut = $false; ExitCode = $null }
             }
         }
-        catch {
-            return @{ Installed = $false; TimedOut = $false; ExitCode = $null }
+
+        if ($run.TimedOut) {
+            return @{ Installed = $false; TimedOut = $true; ExitCode = $null }
         }
-        finally {
-            Remove-Item $stdoutFile -ErrorAction SilentlyContinue
-            Remove-Item $stderrFile -ErrorAction SilentlyContinue
+
+        # Standard output only, as before: an error message on standard error can name the id too.
+        # Join with a newline, not '': Test-WingetListOutputContainsPackageId's boundary regex
+        # treats anything outside [\w.\-] as a token edge, so an empty separator would let the
+        # end of one line abut the start of the next and could hide a real match at that seam.
+        return @{
+            Installed = Test-WingetListOutputContainsPackageId -Output ([String]::Join("`n", @($run.StandardOutput))) -PackageId $PackageId
+            TimedOut  = $false
+            ExitCode  = $run.ExitCode
         }
     }
 
-    try {
-        $output = winget list --exact --id $PackageId --accept-source-agreements --disable-interactivity 2>&1
-        return Test-WingetListOutputContainsPackageId -Output ([String]::Join("`n", $output)) -PackageId $PackageId
-    }
-    catch {
+    $run = Invoke-WingetProcess -ArgumentList $listArgs -TimeoutSeconds (Get-ProcessTimeoutSeconds -Operation WingetList) -Echo None
+    if ($run.LaunchFailed -or $run.TimedOut) {
         return $false
     }
+    return Test-WingetListOutputContainsPackageId -Output ([String]::Join("`n", @($run.Output))) -PackageId $PackageId
 }
 
 <#
@@ -5432,7 +6270,15 @@ function Install-MsixProvisionedPackage {
         ) + (Get-WingetAgreementArgs) + @(
             '--download-directory', $downloadDir
         )
-        $download = Start-Process -FilePath 'winget' -ArgumentList $downloadArgs -NoNewWindow -Wait -PassThru
+        $download = Invoke-WingetProcess -ArgumentList $downloadArgs -TimeoutSeconds (Get-ProcessTimeoutSeconds -Operation WingetDownload)
+        if ($download.LaunchFailed) {
+            # As before, a winget that cannot start at all propagates to the caller.
+            throw $download.LaunchException
+        }
+        if ($download.TimedOut) {
+            Write-ErrorMessage "winget download for $PackageId did not finish in time and was stopped."
+            return @{ ExitCode = $null; Installed = $false }
+        }
         if ($download.ExitCode -ne 0) {
             Write-ErrorMessage "winget download failed for $PackageId (exit code $($download.ExitCode))."
             return @{ ExitCode = $download.ExitCode; Installed = $false }
@@ -5500,10 +6346,10 @@ function Install-PowerShellLatest {
     # returns for `--installer-type wix` once the manifest no longer ships an MSI.
     $noApplicableInstallerExitCode = -1978335216
 
-    # Matches Install-AppWithVerification's $checkTimeoutSeconds (Private/InstallVerification.ps1)
-    # so a hung `winget list` during PowerShell's own self-verification fails into the retry pass
-    # like every other catalog app's verification does, instead of blocking the run forever.
-    $checkTimeoutSeconds = 15
+    # The same limit as Install-AppWithVerification's checks (Private/InstallVerification.ps1), so a
+    # hung `winget list` during PowerShell's own self-verification fails into the retry pass like
+    # every other catalog app's verification does, instead of blocking the run forever.
+    $checkTimeoutSeconds = Get-ProcessTimeoutSeconds -Operation WingetListCheck
 
     # 1. Prefer the MSI while the latest version still ships one.
     $result = Install-WingetPackage -PackageId $PackageId -InstallerType 'wix'

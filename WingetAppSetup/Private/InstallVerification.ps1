@@ -30,6 +30,10 @@
     --installer-type override forwarded to Install-WingetPackage), 'condition' (applicability
     scriptblock, issue #217), and 'conditionDescription' (human reason for the skip message)
     entries.
+.PARAMETER Silent
+    Forwarded to Install-WingetPackage (winget --silent): Invoke-WingetInstall passes its effective
+    non-interactive state. Not given: Install-WingetPackage decides. A package-specific installer
+    ($App.install) is called without it and decides the same way.
 .PARAMETER WhatIf
     Dry run: the applicability condition and the read-only pre-check still run, but no installer
     is dispatched. An app that is not yet installed reports Status 'Installed' so the caller's
@@ -54,6 +58,9 @@ function Install-AppWithVerification {
     param (
         [Parameter(Mandatory = $true)]
         [hashtable]$App,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$Silent,
 
         [Parameter(Mandatory = $false)]
         [switch]$WhatIf
@@ -81,7 +88,7 @@ function Install-AppWithVerification {
 
     # Same 15-second guard the inlined blocks used: `winget list` can hang indefinitely on broken
     # sources or first-use prompts, and a hung check must not stall the whole install loop.
-    $checkTimeoutSeconds = 15
+    $checkTimeoutSeconds = Get-ProcessTimeoutSeconds -Operation WingetListCheck
 
     $preCheck = Test-WingetPackageInstalled -PackageId $App.name -TimeoutSeconds $checkTimeoutSeconds
     if ($preCheck.TimedOut) {
@@ -120,7 +127,11 @@ function Install-AppWithVerification {
 
     # Install through the helper so the transient 0x80073d19 session error is retried with
     # backoff (issue #150) instead of failing on the first hit.
-    $installResult = Install-WingetPackage -PackageId $App.name -InstallerType $App.installerType
+    $installParameters = @{ PackageId = $App.name; InstallerType = $App.installerType }
+    if ($PSBoundParameters.ContainsKey('Silent')) {
+        $installParameters['Silent'] = $Silent
+    }
+    $installResult = Install-WingetPackage @installParameters
 
     $verify = Test-WingetPackageInstalled -PackageId $App.name -TimeoutSeconds $checkTimeoutSeconds
     if ($verify.TimedOut) {

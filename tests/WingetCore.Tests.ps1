@@ -338,8 +338,9 @@ Describe 'Test-WingetSources' {
     BeforeAll {
         Mock Write-Host { }
         Mock Write-Warning { }
-
-        # Dot-source the main script to import Test-WingetSources
+        # Every winget call goes through Invoke-WingetProcess (review findings P2-5, P2-6); the
+        # tests below script winget itself, with Mock winget.
+        Mock Invoke-WingetProcess { Invoke-TestWingetMock -ArgumentList $ArgumentList }
     }
 
     Context 'When winget sources are listed and functional' {
@@ -522,6 +523,63 @@ Describe 'Test-WingetSources' {
         }
     }
 
+    Context 'Source reset (review findings P2-5, P2-6)' {
+        It 'Runs winget source reset without --accept-source-agreements, which source reset rejects, under its time limit' {
+            Mock winget {
+                if ($args[0] -eq 'source' -and $args[1] -eq 'list') {
+                    $global:LASTEXITCODE = 0
+                    return 'winget      https://cdn.winget.microsoft.com/cache'
+                }
+                if ($args[0] -eq 'search') {
+                    $global:LASTEXITCODE = -1978335217
+                    return '0x8a15000f Data required by the source is missing'
+                }
+                if ($args -contains '--accept-source-agreements') {
+                    $global:LASTEXITCODE = -1978335230
+                    return 'usage: winget source reset [[-n] <name>] [--force]'
+                }
+                $global:LASTEXITCODE = 0
+            }
+            Mock Add-AppxPackage { }
+
+            [void](Test-WingetSources)
+
+            Should -Invoke winget -Times 1 -Exactly -ParameterFilter {
+                $args[0] -eq 'source' -and $args[1] -eq 'reset' -and $args -contains '--force' -and $args -notcontains '--accept-source-agreements'
+            }
+            Should -Invoke Invoke-WingetProcess -Times 1 -Exactly -ParameterFilter {
+                $ArgumentList[1] -eq 'reset' -and $TimeoutSeconds -eq (Get-ProcessTimeoutSeconds -Operation WingetSourceReset)
+            }
+        }
+
+        It 'Says when the reset failed, with its exit code, instead of reporting it completed' {
+            $script:resetWarnings = @()
+            Mock Write-WarningMessage { $script:resetWarnings += $Message }
+            $script:resetInfos = @()
+            Mock Write-Info { $script:resetInfos += $Message }
+            Mock winget {
+                if ($args[0] -eq 'source' -and $args[1] -eq 'list') {
+                    $global:LASTEXITCODE = 0
+                    return 'winget      https://cdn.winget.microsoft.com/cache'
+                }
+                if ($args[0] -eq 'search') {
+                    $global:LASTEXITCODE = -1978335217
+                    return '0x8a15000f Data required by the source is missing'
+                }
+                if ($args[1] -eq 'reset') {
+                    $global:LASTEXITCODE = -1978335230
+                    return 'An unexpected error occurred'
+                }
+            }
+            Mock Add-AppxPackage { }
+
+            [void](Test-WingetSources)
+
+            $script:resetWarnings | Should -Contain 'Winget source reset failed with exit code 0x8A150002.'
+            $script:resetInfos | Should -Not -Contain 'Source reset completed.'
+        }
+    }
+
     Context 'Functional probe arguments (issue #177)' {
         It 'Should pass --accept-source-agreements to the winget search probe' {
             $script:searchArgs = $null
@@ -644,13 +702,16 @@ Describe 'Install-WingetPackage (0x80073d19 session-error backoff)' {
         # Never actually wait during tests; the backoff is verified via Should -Invoke.
         Mock Start-Sleep { }
 
-        # Each Start-Process call returns the next exit code from the queue, simulating winget.
+        # An attended run unless a test says otherwise (no --silent).
+        Mock Test-EffectiveNonInteractive { $false }
+
+        # Each winget run returns the next exit code from the queue, simulating winget.
         $script:exitCodeQueue = @()
         $script:procCallIndex = 0
-        Mock Start-Process {
+        Mock Invoke-WingetProcess {
             $code = $script:exitCodeQueue[$script:procCallIndex]
             $script:procCallIndex++
-            [pscustomobject]@{ ExitCode = $code }
+            New-TestProcessResult -ExitCode $code
         }
     }
 
@@ -662,7 +723,7 @@ Describe 'Install-WingetPackage (0x80073d19 session-error backoff)' {
         $result.ExitCode | Should -Be 0
         $result.Attempts | Should -Be 1
         $result.SessionErrorExhausted | Should -Be $false
-        Should -Invoke Start-Process -Times 1 -Exactly
+        Should -Invoke Invoke-WingetProcess -Times 1 -Exactly
         Should -Invoke Start-Sleep -Times 0 -Exactly
     }
 
@@ -674,7 +735,7 @@ Describe 'Install-WingetPackage (0x80073d19 session-error backoff)' {
         $result.ExitCode | Should -Be 0
         $result.Attempts | Should -Be 2
         $result.SessionErrorExhausted | Should -Be $false
-        Should -Invoke Start-Process -Times 2 -Exactly
+        Should -Invoke Invoke-WingetProcess -Times 2 -Exactly
         # One backoff wait between the failed first attempt and the successful second.
         Should -Invoke Start-Sleep -Times 1 -Exactly
     }
@@ -687,7 +748,7 @@ Describe 'Install-WingetPackage (0x80073d19 session-error backoff)' {
         $result.ExitCode | Should -Be $script:SessionLogoffExitCode
         $result.Attempts | Should -Be 3
         $result.SessionErrorExhausted | Should -Be $true
-        Should -Invoke Start-Process -Times 3 -Exactly
+        Should -Invoke Invoke-WingetProcess -Times 3 -Exactly
         # Sleeps between attempts only (1->2 and 2->3), never after the final attempt.
         Should -Invoke Start-Sleep -Times 2 -Exactly
     }
@@ -701,7 +762,7 @@ Describe 'Install-WingetPackage (0x80073d19 session-error backoff)' {
         $result.ExitCode | Should -Be -1978335189
         $result.Attempts | Should -Be 1
         $result.SessionErrorExhausted | Should -Be $false
-        Should -Invoke Start-Process -Times 1 -Exactly
+        Should -Invoke Invoke-WingetProcess -Times 1 -Exactly
         Should -Invoke Start-Sleep -Times 0 -Exactly
     }
 
@@ -711,7 +772,7 @@ Describe 'Install-WingetPackage (0x80073d19 session-error backoff)' {
         $result = Install-WingetPackage -PackageId 'Microsoft.PowerShell' -MaxAttempts 3 -InitialDelaySeconds 1
 
         $result.MachineScopeFellBack | Should -Be $false
-        Should -Invoke Start-Process -Times 1 -Exactly -ParameterFilter {
+        Should -Invoke Invoke-WingetProcess -Times 1 -Exactly -ParameterFilter {
             ($ArgumentList -contains '--scope') -and ($ArgumentList -contains 'machine')
         }
     }
@@ -726,8 +787,8 @@ Describe 'Install-WingetPackage (0x80073d19 session-error backoff)' {
         $result.MachineScopeFellBack | Should -Be $true
         # The scope fallback is not a session-error retry: it must not consume an attempt or sleep.
         $result.Attempts | Should -Be 1
-        Should -Invoke Start-Process -Times 2 -Exactly
-        Should -Invoke Start-Process -Times 1 -Exactly -ParameterFilter { $ArgumentList -notcontains '--scope' }
+        Should -Invoke Invoke-WingetProcess -Times 2 -Exactly
+        Should -Invoke Invoke-WingetProcess -Times 1 -Exactly -ParameterFilter { $ArgumentList -notcontains '--scope' }
         Should -Invoke Start-Sleep -Times 0 -Exactly
     }
 
@@ -739,7 +800,7 @@ Describe 'Install-WingetPackage (0x80073d19 session-error backoff)' {
 
         $result.ExitCode | Should -Be -1978335216
         $result.MachineScopeFellBack | Should -Be $true
-        Should -Invoke Start-Process -Times 2 -Exactly
+        Should -Invoke Invoke-WingetProcess -Times 2 -Exactly
         Should -Invoke Start-Sleep -Times 0 -Exactly
     }
 
@@ -752,7 +813,7 @@ Describe 'Install-WingetPackage (0x80073d19 session-error backoff)' {
         $result.MachineScopeFellBack | Should -Be $true
         $result.Attempts | Should -Be 2
         $result.SessionErrorExhausted | Should -Be $false
-        Should -Invoke Start-Process -Times 3 -Exactly
+        Should -Invoke Invoke-WingetProcess -Times 3 -Exactly
         Should -Invoke Start-Sleep -Times 1 -Exactly
     }
 
@@ -761,7 +822,7 @@ Describe 'Install-WingetPackage (0x80073d19 session-error backoff)' {
 
         Install-WingetPackage -PackageId 'Microsoft.PowerShell' -InstallerType 'wix' -MaxAttempts 1 | Out-Null
 
-        Should -Invoke Start-Process -Times 1 -Exactly -ParameterFilter {
+        Should -Invoke Invoke-WingetProcess -Times 1 -Exactly -ParameterFilter {
             ($ArgumentList -join ' ') -match '--installer-type\s+wix'
         }
     }
@@ -771,7 +832,7 @@ Describe 'Install-WingetPackage (0x80073d19 session-error backoff)' {
 
         Install-WingetPackage -PackageId 'Test.App' -MaxAttempts 1 | Out-Null
 
-        Should -Invoke Start-Process -Times 1 -Exactly -ParameterFilter {
+        Should -Invoke Invoke-WingetProcess -Times 1 -Exactly -ParameterFilter {
             $ArgumentList -notcontains '--installer-type'
         }
     }
@@ -781,7 +842,7 @@ Describe 'Install-WingetPackage (0x80073d19 session-error backoff)' {
 
         Install-WingetPackage -PackageId 'Test.App' -MaxAttempts 1 | Out-Null
 
-        Should -Invoke Start-Process -Times 1 -Exactly -ParameterFilter {
+        Should -Invoke Invoke-WingetProcess -Times 1 -Exactly -ParameterFilter {
             (($ArgumentList -join ' ') -match '--source winget') -and
             ($ArgumentList -contains '--accept-source-agreements') -and
             ($ArgumentList -contains '--accept-package-agreements')
@@ -799,16 +860,17 @@ Describe 'Install-WingetPackage (transient launch-exception backoff, issue #253)
         # A launch retry re-resolves winget.exe through Get-AppxPackage. With no package found it
         # falls back to 'winget'; unmocked, it would read the real machine's AppX packages.
         Mock Get-AppxPackage { }
+        Mock Test-EffectiveNonInteractive { $false }
     }
 
-    It 'Retries with backoff and recovers when Start-Process throws a transient file-lock exception' {
+    It 'Retries with backoff and recovers when winget fails to launch with a transient file-lock error' {
         $script:callIndex = 0
-        Mock Start-Process {
+        Mock Invoke-WingetProcess {
             $script:callIndex++
             if ($script:callIndex -eq 1) {
-                throw 'This command cannot be run due to the error: The file cannot be accessed by the system.'
+                return New-TestProcessResult -LaunchFailed -LaunchErrorCode 1920 -LaunchError 'The file cannot be accessed by the system.'
             }
-            [pscustomobject]@{ ExitCode = 0 }
+            New-TestProcessResult -ExitCode 0
         }
 
         $result = Install-WingetPackage -PackageId 'Klocman.BulkCrapUninstaller' -MaxAttempts 3 -InitialDelaySeconds 1
@@ -818,7 +880,7 @@ Describe 'Install-WingetPackage (transient launch-exception backoff, issue #253)
         $result.Attempts | Should -Be 1
         $result.LaunchAttempts | Should -Be 1
         $result.LaunchErrorExhausted | Should -Be $false
-        Should -Invoke Start-Process -Times 2 -Exactly
+        Should -Invoke Invoke-WingetProcess -Times 2 -Exactly
         Should -Invoke Start-Sleep -Times 1 -Exactly
     }
 
@@ -827,13 +889,13 @@ Describe 'Install-WingetPackage (transient launch-exception backoff, issue #253)
         Mock Resolve-WingetExecutable {
             if ($BypassAlias) { $script:packageWinget } else { 'winget' }
         }
-        Mock Start-Process {
-            if ($FilePath -eq 'winget') {
+        Mock Invoke-WingetProcess {
+            if ($WingetPath -eq 'winget') {
                 # The app-execution alias stays broken for the whole test: only the concrete
                 # package-location winget.exe can launch.
-                throw 'This command cannot be run due to the error: The file cannot be accessed by the system.'
+                return New-TestProcessResult -LaunchFailed -LaunchErrorCode 1920 -LaunchError 'The file cannot be accessed by the system.'
             }
-            [pscustomobject]@{ ExitCode = 0 }
+            New-TestProcessResult -ExitCode 0
         }
 
         $result = Install-WingetPackage -PackageId 'Microsoft.WindowsTerminal' -MaxAttempts 3 -InitialDelaySeconds 1
@@ -843,29 +905,29 @@ Describe 'Install-WingetPackage (transient launch-exception backoff, issue #253)
         $result.LaunchAttempts | Should -Be 1
         $result.LaunchErrorExhausted | Should -Be $false
         Should -Invoke Resolve-WingetExecutable -Times 1 -Exactly -ParameterFilter { [bool]$BypassAlias }
-        Should -Invoke Start-Process -Times 1 -Exactly -ParameterFilter { $FilePath -eq $packageWinget }
+        Should -Invoke Invoke-WingetProcess -Times 1 -Exactly -ParameterFilter { $WingetPath -eq $script:packageWinget }
     }
 
     It 'Also retries the sibling sharing-violation launch exception' {
         $script:callIndex = 0
-        Mock Start-Process {
+        Mock Invoke-WingetProcess {
             $script:callIndex++
             if ($script:callIndex -eq 1) {
-                throw 'This command cannot be run due to the error: The process cannot access the file because it is being used by another process.'
+                return New-TestProcessResult -LaunchFailed -LaunchErrorCode 32 -LaunchError 'The process cannot access the file because it is being used by another process.'
             }
-            [pscustomobject]@{ ExitCode = 0 }
+            New-TestProcessResult -ExitCode 0
         }
 
         $result = Install-WingetPackage -PackageId 'Microsoft.WindowsTerminal' -MaxAttempts 3 -InitialDelaySeconds 1
 
         $result.ExitCode | Should -Be 0
         $result.LaunchErrorExhausted | Should -Be $false
-        Should -Invoke Start-Process -Times 2 -Exactly
+        Should -Invoke Invoke-WingetProcess -Times 2 -Exactly
     }
 
     It 'Exhausts MaxLaunchAttempts when winget.exe stays transiently inaccessible, returning a null ExitCode' {
-        Mock Start-Process {
-            throw 'This command cannot be run due to the error: The file cannot be accessed by the system.'
+        Mock Invoke-WingetProcess {
+            New-TestProcessResult -LaunchFailed -LaunchErrorCode 1920 -LaunchError 'The file cannot be accessed by the system.'
         }
 
         $result = Install-WingetPackage -PackageId 'Microsoft.PowerShell' -MaxAttempts 3 -InitialDelaySeconds 1 -MaxLaunchAttempts 3
@@ -875,14 +937,14 @@ Describe 'Install-WingetPackage (transient launch-exception backoff, issue #253)
         $result.Attempts | Should -Be 0
         $result.LaunchAttempts | Should -Be 3
         $result.LaunchErrorExhausted | Should -Be $true
-        Should -Invoke Start-Process -Times 3 -Exactly
+        Should -Invoke Invoke-WingetProcess -Times 3 -Exactly
         # Sleeps between launch attempts only (1->2 and 2->3), never after the final attempt.
         Should -Invoke Start-Sleep -Times 2 -Exactly
     }
 
     It 'Gives launch failures a larger default budget than install attempts (75s window, issue #258)' {
-        Mock Start-Process {
-            throw 'This command cannot be run due to the error: The file cannot be accessed by the system.'
+        Mock Invoke-WingetProcess {
+            New-TestProcessResult -LaunchFailed -LaunchErrorCode 1920 -LaunchError 'The file cannot be accessed by the system.'
         }
         $script:launchWaits = @()
         Mock Start-Sleep { $script:launchWaits += $Seconds }
@@ -891,19 +953,19 @@ Describe 'Install-WingetPackage (transient launch-exception backoff, issue #253)
 
         $result.LaunchErrorExhausted | Should -Be $true
         $result.LaunchAttempts | Should -Be 5
-        Should -Invoke Start-Process -Times 5 -Exactly
+        Should -Invoke Invoke-WingetProcess -Times 5 -Exactly
         # Doubling backoff sized to outlast an App Installer re-registration window.
         $script:launchWaits | Should -Be @(5, 10, 20, 40)
     }
 
-    It 'Re-throws an unrelated Start-Process exception instead of retrying it' {
-        Mock Start-Process {
-            throw 'The system cannot find the file specified.'
+    It 'Re-throws an unrelated launch failure instead of retrying it' {
+        Mock Invoke-WingetProcess {
+            New-TestProcessResult -LaunchFailed -LaunchErrorCode 2 -LaunchError 'The system cannot find the file specified.'
         }
 
         { Install-WingetPackage -PackageId 'Test.App' -MaxAttempts 3 -InitialDelaySeconds 1 } | Should -Throw '*cannot find the file specified*'
 
-        Should -Invoke Start-Process -Times 1 -Exactly
+        Should -Invoke Invoke-WingetProcess -Times 1 -Exactly
         Should -Invoke Start-Sleep -Times 0 -Exactly
     }
 
@@ -918,14 +980,14 @@ Describe 'Install-WingetPackage (transient launch-exception backoff, issue #253)
             $script:resolveCount++
             "C:\WindowsApps\DAI_v$script:resolveCount\winget.exe"
         }
-        Mock Start-Process {
-            if ($FilePath -eq 'winget') {
-                throw 'This command cannot be run due to the error: The file cannot be accessed by the system.'
+        Mock Invoke-WingetProcess {
+            if ($WingetPath -eq 'winget') {
+                return New-TestProcessResult -LaunchFailed -LaunchErrorCode 1920 -LaunchError 'The file cannot be accessed by the system.'
             }
-            if ($FilePath -eq 'C:\WindowsApps\DAI_v1\winget.exe') {
-                throw 'This command cannot be run due to the error: The system cannot find the file specified.'
+            if ($WingetPath -eq 'C:\WindowsApps\DAI_v1\winget.exe') {
+                return New-TestProcessResult -LaunchFailed -LaunchErrorCode 2 -LaunchError 'The system cannot find the file specified.'
             }
-            [pscustomobject]@{ ExitCode = 0 }
+            New-TestProcessResult -ExitCode 0
         }
 
         $result = Install-WingetPackage -PackageId 'Microsoft.WindowsTerminal' -MaxAttempts 3 -InitialDelaySeconds 1
@@ -934,19 +996,158 @@ Describe 'Install-WingetPackage (transient launch-exception backoff, issue #253)
         $result.Attempts | Should -Be 1
         $result.LaunchAttempts | Should -Be 2
         $result.LaunchErrorExhausted | Should -Be $false
-        Should -Invoke Start-Process -Times 1 -Exactly -ParameterFilter { $FilePath -eq 'C:\WindowsApps\DAI_v2\winget.exe' }
+        Should -Invoke Invoke-WingetProcess -Times 1 -Exactly -ParameterFilter { $WingetPath -eq 'C:\WindowsApps\DAI_v2\winget.exe' }
+    }
+}
+
+Describe 'Install-WingetPackage (time limit, installer log, --silent and launch codes; review findings P2-5, P2-6, P3-6)' {
+    BeforeEach {
+        Mock Write-Host { }
+        Mock Write-Info { }
+        Mock Write-WarningMessage { }
+        Mock Write-ErrorMessage { }
+        Mock Start-Sleep { }
+        Mock Get-AppxPackage { }
+        Mock Test-EffectiveNonInteractive { $false }
+        Mock Invoke-WingetProcess { New-TestProcessResult -ExitCode 0 }
+    }
+
+    It 'Runs winget install through Invoke-WingetProcess under the install time limit' {
+        [void](Install-WingetPackage -PackageId 'Test.App' -MaxAttempts 1)
+
+        Should -Invoke Invoke-WingetProcess -Times 1 -Exactly -ParameterFilter {
+            $ArgumentList[0] -eq 'install' -and $TimeoutSeconds -eq (Get-ProcessTimeoutSeconds -Operation WingetInstall) -and $WingetPath -eq 'winget'
+        }
+    }
+
+    It 'Passes --silent when the run is unattended' {
+        Mock Test-EffectiveNonInteractive { $true }
+
+        [void](Install-WingetPackage -PackageId 'Test.App' -MaxAttempts 1)
+
+        Should -Invoke Invoke-WingetProcess -Times 1 -Exactly -ParameterFilter { $ArgumentList -contains '--silent' }
+    }
+
+    It 'Leaves --silent out when someone is at the console' {
+        [void](Install-WingetPackage -PackageId 'Test.App' -MaxAttempts 1)
+
+        Should -Invoke Invoke-WingetProcess -Times 1 -Exactly -ParameterFilter { $ArgumentList -notcontains '--silent' }
+    }
+
+    It 'Follows an explicit -Silent over the detection (<Case>)' -ForEach @(
+        @{ Case = '-Silent on an attended console'; Detected = $false; Silent = $true; Expected = $true }
+        @{ Case = '-Silent:$false in an unattended run'; Detected = $true; Silent = $false; Expected = $false }
+    ) {
+        $script:detected = $Detected
+        Mock Test-EffectiveNonInteractive { $script:detected }
+
+        [void](Install-WingetPackage -PackageId 'Test.App' -MaxAttempts 1 -Silent:$Silent)
+
+        $script:expected = $Expected
+        Should -Invoke Invoke-WingetProcess -Times 1 -Exactly -ParameterFilter { ($ArgumentList -contains '--silent') -eq $script:expected }
+    }
+
+    It 'Reports a timed-out install with no exit code and does not retry it' {
+        Mock Invoke-WingetProcess { New-TestProcessResult -TimedOut }
+
+        $result = Install-WingetPackage -PackageId 'Test.App' -MaxAttempts 3
+
+        $result.TimedOut | Should -Be $true
+        $result.TimeoutSeconds | Should -Be (Get-ProcessTimeoutSeconds -Operation WingetInstall)
+        $result.ExitCode | Should -Be $null
+        $result.Attempts | Should -Be 1
+        $result.SessionErrorExhausted | Should -Be $false
+        Should -Invoke Invoke-WingetProcess -Times 1 -Exactly
+        Should -Invoke Write-ErrorMessage -Times 1 -Exactly -ParameterFilter { $Message -eq 'Install of Test.App did not finish within 30 minutes and was stopped.' }
+    }
+
+    It 'Returns the installer log winget wrote, and names it when the install failed' {
+        $script:installerLog = Join-Path $TestDrive 'winget-install-Test.App-20261004-101500.log'
+        Set-Content -LiteralPath $script:installerLog -Value 'MSI (s) Return value 3.'
+        Mock Invoke-WingetProcess { New-TestProcessResult -ExitCode -1978335226 -LogPath $script:installerLog }
+
+        $result = Install-WingetPackage -PackageId 'Test.App' -MaxAttempts 1
+
+        $result.InstallerLogPath | Should -Be $script:installerLog
+        $result.TimedOut | Should -Be $false
+        Should -Invoke Write-Info -Times 1 -Exactly -ParameterFilter { $Message -eq "Installer log for Test.App: $script:installerLog" }
+    }
+
+    It 'Returns no installer log when the installer wrote none' {
+        Mock Invoke-WingetProcess { New-TestProcessResult -ExitCode 0 -LogPath (Join-Path $TestDrive 'never-written.log') }
+
+        (Install-WingetPackage -PackageId 'Test.App' -MaxAttempts 1).InstallerLogPath | Should -Be $null
+    }
+
+    It 'Retries a launch failure recognized by its Win32 code, whatever language the message is in' {
+        $script:callIndex = 0
+        Mock Invoke-WingetProcess {
+            $script:callIndex++
+            if ($script:callIndex -eq 1) {
+                return New-TestProcessResult -LaunchFailed -LaunchErrorCode 1920 -LaunchError 'Das System kann auf die Datei nicht zugreifen.'
+            }
+            New-TestProcessResult -ExitCode 0
+        }
+
+        $result = Install-WingetPackage -PackageId 'Test.App' -MaxAttempts 3 -InitialDelaySeconds 1
+
+        $result.ExitCode | Should -Be 0
+        $result.LaunchAttempts | Should -Be 1
+        Should -Invoke Invoke-WingetProcess -Times 2 -Exactly
+    }
+}
+
+Describe 'Install-WingetPackage with a real process (review findings P2-5, P2-6)' {
+    # The fake winget below really runs: Resolve-WingetExecutable hands its path to the install.
+    BeforeEach {
+        Mock Start-Sleep { }
+        Mock Test-EffectiveNonInteractive { $false }
+        Mock Write-Info { }
+        Mock Write-ErrorMessage { }
+    }
+
+    It 'Writes winget''s own output, including the installer''s exit code, into the transcript' {
+        $script:fakeWinget = New-FakeExecutable -Directory $TestDrive -Name 'fake-winget' -StandardOutput 'Found Test App [Test.App] Version 1.0', 'Starting package install...', 'Installer failed with exit code: 1603' -ExitCode 1
+        Mock Resolve-WingetExecutable { $script:fakeWinget }
+        $transcript = Join-Path $TestDrive 'install-transcript.log'
+
+        Start-Transcript -LiteralPath $transcript | Out-Null
+        try {
+            $result = Install-WingetPackage -PackageId 'Test.App' -MaxAttempts 1
+        }
+        finally {
+            Stop-Transcript | Out-Null
+        }
+
+        $result.ExitCode | Should -Be 1
+        $logged = Get-Content -LiteralPath $transcript -Raw
+        $logged | Should -Match ([regex]::Escape('Found Test App [Test.App] Version 1.0'))
+        $logged | Should -Match ([regex]::Escape('Installer failed with exit code: 1603'))
+    }
+
+    It 'Stops an install that runs past its time limit instead of waiting for ever' {
+        $script:fakeWinget = New-FakeExecutable -Directory $TestDrive -Name 'fake-winget-hang' -StandardOutput 'Starting package install...' -SleepSeconds 30
+        Mock Resolve-WingetExecutable { $script:fakeWinget }
+        Mock Get-ProcessTimeoutSeconds { 3 }
+        $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+
+        $result = Install-WingetPackage -PackageId 'Test.App' -MaxAttempts 3
+
+        $stopwatch.Stop()
+        $result.TimedOut | Should -Be $true
+        $result.ExitCode | Should -Be $null
+        $stopwatch.Elapsed.TotalSeconds | Should -BeLessThan 25
     }
 }
 
 Describe 'Test-WingetPackageInstalled (timeout support, issue #188)' {
     BeforeEach {
         Mock Write-Host { }
-        Mock Remove-Item { }
     }
 
-    Context 'Without -TimeoutSeconds (backward-compatible inline call)' {
+    Context 'Without -TimeoutSeconds (backward-compatible [bool] call)' {
         It 'Returns $true when winget lists the package' {
-            Mock winget { "Name    Id       Version`n7-Zip   Test.App 24.09" }
+            Mock Invoke-WingetProcess { New-TestProcessResult -Output @('Name    Id       Version', '7-Zip   Test.App 24.09') }
 
             $result = Test-WingetPackageInstalled -PackageId 'Test.App'
 
@@ -955,62 +1156,69 @@ Describe 'Test-WingetPackageInstalled (timeout support, issue #188)' {
         }
 
         It 'Returns $false when winget does not list the package' {
-            Mock winget { 'No installed package found matching input criteria.' }
+            Mock Invoke-WingetProcess { New-TestProcessResult -ExitCode -1978335212 -Output @('No installed package found matching input criteria.') }
 
             Test-WingetPackageInstalled -PackageId 'Test.App' | Should -Be $false
         }
 
-        It 'Returns $false when winget throws' {
-            Mock winget { throw 'winget not found' }
+        It 'Returns $false when winget cannot be started' {
+            Mock Invoke-WingetProcess { New-TestProcessResult -LaunchFailed -LaunchErrorCode 2 -LaunchError 'winget not found' }
 
             Test-WingetPackageInstalled -PackageId 'Test.App' | Should -Be $false
+        }
+
+        It 'Returns $false when winget list times out' {
+            Mock Invoke-WingetProcess { New-TestProcessResult -TimedOut -Output @('Test.App  1.0') }
+
+            Test-WingetPackageInstalled -PackageId 'Test.App' | Should -Be $false
+        }
+
+        It 'Is time-limited too (review finding P2-5): it used to call winget inline with no limit' {
+            Mock Invoke-WingetProcess { New-TestProcessResult -Output @('Test.App  1.0') }
+
+            Test-WingetPackageInstalled -PackageId 'Test.App' | Should -Be $true
+
+            Should -Invoke Invoke-WingetProcess -Times 1 -Exactly -ParameterFilter {
+                $TimeoutSeconds -eq (Get-ProcessTimeoutSeconds -Operation WingetList) -and $Echo -eq 'None' -and $ArgumentList[0] -eq 'list'
+            }
         }
 
         It 'Returns $false when the output only contains a different id that has the target as a substring (CLAUDE.md regex enforcement)' {
-            Mock winget { "Name       Id           Version`nFoo BarBaz Foo.BarBaz  1.0" }
+            Mock Invoke-WingetProcess { New-TestProcessResult -Output @('Name       Id           Version', 'Foo BarBaz Foo.BarBaz  1.0') }
 
             Test-WingetPackageInstalled -PackageId 'Foo.Bar' | Should -Be $false
         }
 
         It 'Still returns $true for a real matching line when a substring-only lookalike is also present' {
-            Mock winget { "Name       Id           Version`nFoo Bar    Foo.Bar      1.0`nFoo BarBaz Foo.BarBaz  1.0" }
+            Mock Invoke-WingetProcess { New-TestProcessResult -Output @('Name       Id           Version', 'Foo Bar    Foo.Bar      1.0', 'Foo BarBaz Foo.BarBaz  1.0') }
 
             Test-WingetPackageInstalled -PackageId 'Foo.Bar' | Should -Be $true
         }
     }
 
-    Context 'With -TimeoutSeconds (Start-Process guard, the pattern Invoke-WingetInstall inlined pre-#188)' {
+    Context 'With -TimeoutSeconds' {
         It 'Reports installed with the process exit code when the id appears in the output' {
-            Mock Start-Process {
-                $p = [pscustomobject]@{ ExitCode = 0 }
-                $p | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value { param($ms) $true }
-                $p | Add-Member -MemberType ScriptMethod -Name Kill -Value { }
-                $p
-            }
-            Mock Get-Content { 'Test.App  1.2.3  winget' }
+            Mock Invoke-WingetProcess { New-TestProcessResult -ExitCode 0 -Output @('Test.App  1.2.3  winget') }
 
             $result = Test-WingetPackageInstalled -PackageId 'Test.App' -TimeoutSeconds 15
 
             $result.Installed | Should -Be $true
             $result.TimedOut | Should -Be $false
             $result.ExitCode | Should -Be 0
-            Should -Invoke Start-Process -Times 1 -Exactly -ParameterFilter {
+            Should -Invoke Invoke-WingetProcess -Times 1 -Exactly -ParameterFilter {
                 ($ArgumentList -contains 'list') -and
                 ($ArgumentList -contains '--exact') -and
                 ($ArgumentList -contains '--id') -and
                 ($ArgumentList -contains 'Test.App') -and
-                ($ArgumentList -contains '--accept-source-agreements')
+                ($ArgumentList -contains '--accept-source-agreements') -and
+                $TimeoutSeconds -eq 15 -and
+                # Quiet: the per-app checks would otherwise print winget's table twice per app.
+                $Echo -eq 'None'
             }
         }
 
         It 'Reports not-installed when the output only contains a different id that has the target as a substring' {
-            Mock Start-Process {
-                $p = [pscustomobject]@{ ExitCode = -1978335212 }
-                $p | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value { param($ms) $true }
-                $p | Add-Member -MemberType ScriptMethod -Name Kill -Value { }
-                $p
-            }
-            Mock Get-Content { 'Foo.BarBaz  1.0.0  winget' }
+            Mock Invoke-WingetProcess { New-TestProcessResult -ExitCode -1978335212 -Output @('Foo.BarBaz  1.0.0  winget') }
 
             $result = Test-WingetPackageInstalled -PackageId 'Foo.Bar' -TimeoutSeconds 15
 
@@ -1018,13 +1226,7 @@ Describe 'Test-WingetPackageInstalled (timeout support, issue #188)' {
         }
 
         It 'Reports not-installed when the output does not mention the id' {
-            Mock Start-Process {
-                $p = [pscustomobject]@{ ExitCode = -1978335212 }
-                $p | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value { param($ms) $true }
-                $p | Add-Member -MemberType ScriptMethod -Name Kill -Value { }
-                $p
-            }
-            Mock Get-Content { 'No installed package found matching input criteria.' }
+            Mock Invoke-WingetProcess { New-TestProcessResult -ExitCode -1978335212 -Output @('No installed package found matching input criteria.') }
 
             $result = Test-WingetPackageInstalled -PackageId 'Test.App' -TimeoutSeconds 15
 
@@ -1033,48 +1235,43 @@ Describe 'Test-WingetPackageInstalled (timeout support, issue #188)' {
             $result.ExitCode | Should -Be -1978335212
         }
 
-        It 'Kills a hung winget list and reports the timeout distinctly from not-installed (issue #176)' {
-            $script:listKillCalled = $false
-            Mock Start-Process {
-                $p = [pscustomobject]@{ ExitCode = 0 }
-                $p | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value { param($ms) $false }
-                $p | Add-Member -MemberType ScriptMethod -Name Kill -Value { Set-Variable -Name listKillCalled -Value $true -Scope script }
-                $p
-            }
-            Mock Get-Content { throw 'output must not be read after a timeout' }
+        It 'Looks for the id in standard output only, as before' {
+            Mock Invoke-WingetProcess { New-TestProcessResult -ExitCode -1978335212 -StandardError @('Test.App could not be listed') }
+
+            (Test-WingetPackageInstalled -PackageId 'Test.App' -TimeoutSeconds 15).Installed | Should -Be $false
+        }
+
+        It 'Reports a timed-out winget list distinctly from not-installed (issue #176)' {
+            Mock Invoke-WingetProcess { New-TestProcessResult -TimedOut -Output @('Test.App  1.2.3  winget') }
 
             $result = Test-WingetPackageInstalled -PackageId 'Test.App' -TimeoutSeconds 1
 
             $result.Installed | Should -Be $false
             $result.TimedOut | Should -Be $true
             $result.ExitCode | Should -Be $null
-            $script:listKillCalled | Should -Be $true
         }
 
         It 'Reports a failure without throwing when winget cannot start' {
-            Mock Start-Process { throw 'winget not found' }
+            Mock Invoke-WingetProcess { New-TestProcessResult -LaunchFailed -LaunchErrorCode 2 -LaunchError 'winget not found' }
 
             $result = Test-WingetPackageInstalled -PackageId 'Test.App' -TimeoutSeconds 15
 
             $result.Installed | Should -Be $false
             $result.TimedOut | Should -Be $false
             $result.ExitCode | Should -Be $null
+            Should -Invoke Invoke-WingetProcess -Times 1 -Exactly
         }
 
         It 'Retries once past a broken winget alias via the package location so an installed app is not misreported (issue #258)' {
             Mock Write-WarningMessage { }
             $script:packageWinget = 'C:\Program Files\WindowsApps\Microsoft.DesktopAppInstaller_1.26.0.0_x64__8wekyb3d8bbwe\winget.exe'
             Mock Resolve-WingetExecutable { $script:packageWinget }
-            Mock Start-Process {
-                if ($FilePath -eq 'winget') {
-                    throw 'This command cannot be run due to the error: The file cannot be accessed by the system.'
+            Mock Invoke-WingetProcess {
+                if ($WingetPath -ne $script:packageWinget) {
+                    return New-TestProcessResult -LaunchFailed -LaunchErrorCode 1920 -LaunchError 'The file cannot be accessed by the system.'
                 }
-                $p = [pscustomobject]@{ ExitCode = 0 }
-                $p | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value { param($ms) $true }
-                $p | Add-Member -MemberType ScriptMethod -Name Kill -Value { }
-                $p
+                New-TestProcessResult -ExitCode 0 -Output @('Microsoft.WindowsTerminal  1.22.0  winget')
             }
-            Mock Get-Content { 'Microsoft.WindowsTerminal  1.22.0  winget' }
 
             $result = Test-WingetPackageInstalled -PackageId 'Microsoft.WindowsTerminal' -TimeoutSeconds 15
 
@@ -1082,43 +1279,36 @@ Describe 'Test-WingetPackageInstalled (timeout support, issue #188)' {
             $result.TimedOut | Should -Be $false
             $result.ExitCode | Should -Be 0
             Should -Invoke Resolve-WingetExecutable -Times 1 -Exactly -ParameterFilter { [bool]$BypassAlias }
-            Should -Invoke Start-Process -Times 1 -Exactly -ParameterFilter { $FilePath -eq $script:packageWinget }
+            Should -Invoke Invoke-WingetProcess -Times 1 -Exactly -ParameterFilter { $WingetPath -eq $script:packageWinget }
+        }
+
+        It 'Recognizes the transient launch failure by its Win32 code in any display language (review finding P3-6)' {
+            Mock Write-WarningMessage { }
+            Mock Resolve-WingetExecutable { 'C:\pf\winget.exe' }
+            $script:launchCount = 0
+            Mock Invoke-WingetProcess {
+                $script:launchCount++
+                if ($script:launchCount -eq 1) {
+                    return New-TestProcessResult -LaunchFailed -LaunchErrorCode 1920 -LaunchError 'Das System kann auf die Datei nicht zugreifen.'
+                }
+                New-TestProcessResult -ExitCode 0 -Output @('Test.App  1.0  winget')
+            }
+
+            (Test-WingetPackageInstalled -PackageId 'Test.App' -TimeoutSeconds 15).Installed | Should -Be $true
+            Should -Invoke Invoke-WingetProcess -Times 2 -Exactly
         }
 
         It 'Still reports a no-throw failure when both the alias and the package-location launch fail (issue #258)' {
             Mock Write-WarningMessage { }
             Mock Resolve-WingetExecutable { 'C:\pf\winget.exe' }
-            Mock Start-Process {
-                throw 'This command cannot be run due to the error: The file cannot be accessed by the system.'
-            }
+            Mock Invoke-WingetProcess { New-TestProcessResult -LaunchFailed -LaunchErrorCode 1920 -LaunchError 'The file cannot be accessed by the system.' }
 
             $result = Test-WingetPackageInstalled -PackageId 'Test.App' -TimeoutSeconds 15
 
             $result.Installed | Should -Be $false
             $result.TimedOut | Should -Be $false
             $result.ExitCode | Should -Be $null
-            Should -Invoke Start-Process -Times 2 -Exactly
-        }
-
-        It 'Uses unique temp file names on every run and cleans them up (issue #177)' {
-            $script:listRedirectPaths = @()
-            Mock Start-Process {
-                $script:listRedirectPaths += @($RedirectStandardOutput, $RedirectStandardError)
-                $p = [pscustomobject]@{ ExitCode = 0 }
-                $p | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value { param($ms) $true }
-                $p | Add-Member -MemberType ScriptMethod -Name Kill -Value { }
-                $p
-            }
-            Mock Get-Content { '' }
-
-            [void](Test-WingetPackageInstalled -PackageId 'Test.App' -TimeoutSeconds 15)
-            [void](Test-WingetPackageInstalled -PackageId 'Test.App' -TimeoutSeconds 15)
-
-            $script:listRedirectPaths.Count | Should -Be 4
-            # stdout and stderr differ within one run, and neither repeats across runs.
-            ($script:listRedirectPaths | Select-Object -Unique).Count | Should -Be 4
-            # Both temp files are removed after each of the two runs.
-            Should -Invoke Remove-Item -Times 4 -Exactly
+            Should -Invoke Invoke-WingetProcess -Times 2 -Exactly
         }
     }
 }
@@ -1361,7 +1551,7 @@ Describe 'Install-MsixProvisionedPackage (DISM provisioning, issue #166)' {
     }
 
     It 'downloads, provisions, and verifies the MSIX for all users' {
-        Mock Start-Process { [pscustomobject]@{ ExitCode = 0 } }
+        Mock Invoke-WingetProcess { New-TestProcessResult -ExitCode 0 }
         Mock Get-ChildItem {
             @(
                 [pscustomobject]@{ Name = 'PowerShell-7.7.0-win.msixbundle'; Extension = '.msixbundle'; FullName = 'C:\dl\PowerShell-7.7.0-win.msixbundle' },
@@ -1378,20 +1568,37 @@ Describe 'Install-MsixProvisionedPackage (DISM provisioning, issue #166)' {
         Should -Invoke Invoke-AppxProvisioning -Times 1 -Exactly -ParameterFilter {
             $PackagePath -like '*PowerShell-7.7.0-win.msixbundle' -and (($DependencyPackagePath -join '') -like '*WindowsAppRuntime*')
         }
+        # Time-limited (review finding P2-5): it used to wait with no limit.
+        Should -Invoke Invoke-WingetProcess -Times 1 -Exactly -ParameterFilter {
+            $ArgumentList[0] -eq 'download' -and $TimeoutSeconds -eq (Get-ProcessTimeoutSeconds -Operation WingetDownload)
+        }
     }
 
     It 'returns not-installed when winget download fails' {
-        Mock Start-Process { [pscustomobject]@{ ExitCode = 1 } }
+        Mock Invoke-WingetProcess { New-TestProcessResult -ExitCode 1 }
         Mock Invoke-AppxProvisioning { throw 'provisioning should not run after a failed download' }
 
         $result = Install-MsixProvisionedPackage -PackageId 'Microsoft.PowerShell'
 
         $result.Installed | Should -Be $false
+        $result.ExitCode | Should -Be 1
         Should -Invoke Invoke-AppxProvisioning -Times 0 -Exactly
     }
 
+    It 'returns not-installed without provisioning when winget download times out' {
+        Mock Invoke-WingetProcess { New-TestProcessResult -TimedOut }
+        Mock Invoke-AppxProvisioning { throw 'provisioning should not run after a timed-out download' }
+
+        $result = Install-MsixProvisionedPackage -PackageId 'Microsoft.PowerShell'
+
+        $result.Installed | Should -Be $false
+        $result.ExitCode | Should -Be $null
+        Should -Invoke Invoke-AppxProvisioning -Times 0 -Exactly
+        Should -Invoke Write-ErrorMessage -Times 1 -Exactly -ParameterFilter { $Message -match 'did not finish in time' }
+    }
+
     It 'returns not-installed when no MSIX is found in the download' {
-        Mock Start-Process { [pscustomobject]@{ ExitCode = 0 } }
+        Mock Invoke-WingetProcess { New-TestProcessResult -ExitCode 0 }
         Mock Get-ChildItem { @() }
         Mock Invoke-AppxProvisioning { throw 'provisioning should not run when no package was found' }
 

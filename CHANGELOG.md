@@ -164,6 +164,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- winget and `msiexec` now run through one helper, `Invoke-ExternalProcess` with
+  `Invoke-WingetProcess` on top (`WingetAppSetup/Private/ProcessInvocation.ps1`), so every call
+  has a time limit, its output reaches the log, and a failed launch is recognized in any display
+  language (review findings P2-5, P2-6 and P3-6):
+  - **Time limits.** The app installs (`Start-Process -Wait`), `winget download`,
+    `winget source list`, `winget search`, `winget source reset`, the `winget list` check called
+    without a timeout, and the Winget-AutoUpdate `msiexec` install and uninstall had no time limit,
+    so one stuck installer hung an unattended run with no summary and no exit code. Each call now
+    has a limit, set in one place (`Get-ProcessTimeoutSeconds`: 30 minutes per install or
+    download, 2 minutes for queries, 5 for `source reset`, 15 for `msiexec`). When it runs out, the
+    process and every process it started are stopped (`taskkill /T /F`), and an install that did
+    not land is reported as failed with `winget install stopped after 30 minutes`. The WAU MSI
+    download gets `-TimeoutSec`, plus `-OperationTimeoutSeconds` on PowerShell 7.4 and newer. The
+    per-app 15-second `winget list` check is unchanged.
+  - **winget's output in the transcript.** winget wrote straight to the console, which
+    Start-Transcript does not record, so the log a teammate attached never showed lines such as
+    `Installer failed with exit code: 1603`. Output is now captured and echoed into the transcript
+    as it arrives, under a `> winget ...` line with the full command line, without the spinner and
+    with only the last line of each progress bar. Each `winget install` also passes `--log`, so the
+    installer's own log is written to the logs folder as
+    `winget-install-<package id>-<timestamp>.log`, and a failed app's reason names it. The source
+    probes print winget's output when they fail. Exit codes come from the process object, never
+    from `$LASTEXITCODE`.
+  - **Launch failures in any language.** The transient "file cannot be accessed by the system" and
+    "being used by another process" launch failures were recognized by their English text, so on a
+    German or French Windows every launch retry gave up on the first failure. The helper reports
+    the Win32 error code of a failed launch (32 and 1920 for these two, 2 not found, 5 access
+    denied), `Test-TransientWingetLaunchError` classifies by that code, and a message without a
+    code is also matched against the texts Windows gives those codes in its own display language.
+  - **Unattended installs pass `--silent`.** In a non-interactive run (`-NonInteractive`, a
+    service, a scheduled task, redirected stdin) winget gets `--silent`, so MSI and WiX packages
+    install with `/quiet` instead of `/passive` and Inno installers run `/VERYSILENT`. The same
+    applies to the PowerShell 7 bootstrap's winget install.
+  - **`winget source list` and `winget source reset` no longer pass `--accept-source-agreements`.**
+    Neither subcommand accepts it, so winget rejected both with 0x8A150002: the reset never ran,
+    and the usage text the rejected `source list` printed contains the word winget, so a missing
+    source still read as listed. A failed reset is now reported with its exit code instead of
+    `Source reset completed.`
+
+  Covered by `tests/ProcessInvocation.Tests.ps1`, which runs the helper against real programs on
+  Linux and Windows (time limit, stopping a process tree, a child that keeps the output pipe open,
+  closed stdin, transcript capture), and by seam tests that every winget and `msiexec` call site
+  goes through it. Still to confirm on real Windows: that the winget app-execution alias launches
+  this way with redirected output, and how winget's output reads when it is piped.
 - The E2E install workflow now reports every failed scheduled run and every failed run dispatched
   on `main`, with the evidence needed to diagnose it (review findings P2-4, P3-1). The failure issue
   used to be filed by a step inside the Windows job that ran under PowerShell 7 with

@@ -81,6 +81,98 @@ foreach ($commandName in $script:WindowsOnlyCommandNames) {
     $script:WindowsOnlyCommandStandIns += $commandName
 }
 
+# Test doubles for the process helpers (WingetAppSetup/Private/ProcessInvocation.ps1, review
+# findings P2-5, P2-6 and P3-6). Call-site tests mock Invoke-WingetProcess or
+# Invoke-ExternalProcess and return New-TestProcessResult, which has the same shape as the real
+# result. New-FakeExecutable writes a small program the real helper can run on either platform.
+function New-TestProcessResult {
+    param (
+        [AllowNull()]$ExitCode = 0,
+        [string[]]$Output = @(),
+        [string[]]$StandardError = @(),
+        [switch]$TimedOut,
+        [switch]$LaunchFailed,
+        [AllowNull()]$LaunchErrorCode = $null,
+        [string]$LaunchError = 'The file cannot be accessed by the system.',
+        [string]$LogPath = $null
+    )
+
+    $exception = $null
+    if ($LaunchFailed) {
+        $code = 0
+        if ($null -ne $LaunchErrorCode) { $code = [int]$LaunchErrorCode }
+        $exception = [System.ComponentModel.Win32Exception]::new($code, $LaunchError)
+    }
+    [pscustomobject]@{
+        FilePath        = 'winget'
+        Arguments       = ''
+        ExitCode        = $(if ($TimedOut -or $LaunchFailed) { $null } else { $ExitCode })
+        TimedOut        = [bool]$TimedOut
+        LaunchFailed    = [bool]$LaunchFailed
+        LaunchErrorCode = $(if ($LaunchFailed) { $LaunchErrorCode } else { $null })
+        LaunchError     = $(if ($LaunchFailed) { $LaunchError } else { $null })
+        LaunchException = $exception
+        Output          = @($Output) + @($StandardError)
+        StandardOutput  = @($Output)
+        StandardError   = @($StandardError)
+        DurationSeconds = 0
+        LogPath         = $(if ($LogPath) { $LogPath } else { $null })
+    }
+}
+
+# For tests that script winget's behaviour with `Mock winget { ... }` (reading $args, setting
+# $global:LASTEXITCODE, throwing when winget cannot run): code that now runs winget through
+# Invoke-WingetProcess reaches that mock through
+#     Mock Invoke-WingetProcess { Invoke-TestWingetMock -ArgumentList $ArgumentList }
+# which turns the mock's output, exit code or exception into a process result.
+function Invoke-TestWingetMock {
+    param ([string[]]$ArgumentList = @())
+
+    $global:LASTEXITCODE = 0
+    try {
+        $lines = @(winget @ArgumentList 2>&1 | ForEach-Object { "$_" })
+    }
+    catch {
+        return New-TestProcessResult -LaunchFailed -LaunchErrorCode 0 -LaunchError "$($_.Exception.Message)"
+    }
+    New-TestProcessResult -ExitCode $global:LASTEXITCODE -Output $lines
+}
+
+# A program that prints the given lines, optionally waits, and exits with the given code: a .cmd
+# file on Windows, a /bin/sh script elsewhere. Keep the lines to letters, digits, spaces and
+# ':.[]-' so cmd's echo prints them unchanged.
+function New-FakeExecutable {
+    param (
+        [Parameter(Mandatory = $true)][string]$Directory,
+        [Parameter(Mandatory = $true)][string]$Name,
+        [string[]]$StandardOutput = @(),
+        [string[]]$StandardError = @(),
+        [int]$ExitCode = 0,
+        [int]$SleepSeconds = 0
+    )
+
+    if ([System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Win32NT) {
+        $path = Join-Path $Directory "$Name.cmd"
+        $lines = @('@echo off')
+        $lines += @($StandardOutput | ForEach-Object { "echo $_" })
+        $lines += @($StandardError | ForEach-Object { "echo $_ 1>&2" })
+        if ($SleepSeconds -gt 0) { $lines += "ping -n $($SleepSeconds + 1) 127.0.0.1 >nul" }
+        $lines += "exit /b $ExitCode"
+        Set-Content -LiteralPath $path -Value $lines -Encoding ascii
+        return $path
+    }
+
+    $path = Join-Path $Directory $Name
+    $lines = @('#!/bin/sh')
+    $lines += @($StandardOutput | ForEach-Object { "printf '%s\n' '$($_ -replace "'", "'\''")'" })
+    $lines += @($StandardError | ForEach-Object { "printf '%s\n' '$($_ -replace "'", "'\''")' >&2" })
+    if ($SleepSeconds -gt 0) { $lines += "sleep $SleepSeconds" }
+    $lines += "exit $ExitCode"
+    Set-Content -LiteralPath $path -Value ($lines -join "`n") -NoNewline -Encoding ascii
+    [System.IO.File]::SetUnixFileMode($path, [System.IO.UnixFileMode]'UserRead, UserWrite, UserExecute, GroupRead, GroupExecute, OtherRead, OtherExecute')
+    return $path
+}
+
 # Off Windows: the Windows folders the code under test joins paths onto. Unset, Join-Path fails
 # on a null path before the code reaches what a test checks. Each is set only when missing
 # (Windows always has them) and is not created here; tests mock the file system or use TestDrive.

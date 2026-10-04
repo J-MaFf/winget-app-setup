@@ -675,6 +675,23 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
 
     # Elevated through the Test-IsAdmin mock in BeforeEach; these were skipped on any runner that
     # was not itself elevated (wgt-gq8.6).
+    Context 'Unattended installs (winget --silent)' {
+        It 'Asks both install passes for --silent when the run is non-interactive' {
+            $script:passCalls = 0
+            Mock Install-AppWithVerification {
+                $script:passCalls++
+                if ($script:passCalls -eq 1) {
+                    return @{ Status = 'Failed'; InstallResult = @{ ExitCode = 1 }; FailureReason = 'VerifyNotFound' }
+                }
+                @{ Status = 'Installed'; InstallResult = @{ ExitCode = 0 }; FailureReason = $null }
+            }
+
+            Invoke-WingetInstall -Apps @(@{ name = 'Contoso.AppOne' }) -NonInteractive | Should -Be 0
+
+            Should -Invoke Install-AppWithVerification -Times 2 -Exactly -ParameterFilter { [bool]$Silent }
+        }
+    }
+
     Context 'Retry pass' {
         It 'Sends a first-pass failure back through the helper and buckets a recovered app as installed' {
             $script:sevenZipCalls = 0
@@ -816,6 +833,19 @@ Describe 'Install-AppWithVerification (shared install-and-verify pipeline, issue
         [void](Install-AppWithVerification -App @{ name = 'Test.App'; installerType = 'wix' })
 
         Should -Invoke Install-WingetPackage -Times 1 -Exactly -ParameterFilter { $InstallerType -eq 'wix' }
+    }
+
+    It 'Forwards -Silent (<Value>) to Install-WingetPackage, for winget --silent, and leaves it out when not given' -ForEach @(
+        @{ Value = $true }
+        @{ Value = $false }
+    ) {
+        [void](Install-AppWithVerification -App @{ name = 'Given.App' } -Silent:$Value)
+        # Not given: Install-WingetPackage decides itself (Test-EffectiveNonInteractive).
+        [void](Install-AppWithVerification -App @{ name = 'NotGiven.App' })
+
+        $script:expectedSilent = $Value
+        Should -Invoke Install-WingetPackage -Times 1 -Exactly -ParameterFilter { $PackageId -eq 'Given.App' -and $PesterBoundParameters.ContainsKey('Silent') -and [bool]$Silent -eq $script:expectedSilent }
+        Should -Invoke Install-WingetPackage -Times 1 -Exactly -ParameterFilter { $PackageId -eq 'NotGiven.App' -and -not $PesterBoundParameters.ContainsKey('Silent') }
     }
 
     It 'Reports Failed with the install result intact when the install ran but verification cannot find the app' {
@@ -1088,13 +1118,11 @@ Describe 'Dry run leaves the machine unchanged (P2-16)' {
         Mock Get-ScheduledTask { [pscustomobject]@{ TaskName = 'present' } }
         Mock Test-Path { $false }
         Mock Test-Path { $true } -ParameterFilter { "$Path" -like '*winget-app-setup' }
-        # The per-app `winget list` check: exits 0 without listing anything (not installed).
-        Mock Start-Process {
-            $process = [pscustomobject]@{ ExitCode = 0 }
-            $process | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value { param($milliseconds) $true }
-            $process | Add-Member -MemberType ScriptMethod -Name Kill -Value { }
-            $process
-        }
+        # Every winget or msiexec process goes through Invoke-ExternalProcess (review findings
+        # P2-5, P2-6). The per-app `winget list` check exits 0 without listing anything (not
+        # installed). Start-Process stays mocked so any other process start is visible.
+        Mock Invoke-ExternalProcess { New-TestProcessResult -ExitCode 0 }
+        Mock Start-Process { }
 
         # Commands that change the machine: none of these may run in a dry run.
         Mock Install-PackageProvider { }
@@ -1145,8 +1173,9 @@ Describe 'Dry run leaves the machine unchanged (P2-16)' {
         Should -Invoke winget -Times 0 -Exactly
         # The only process a dry run starts is the per-app `winget list` check: no installer, no
         # msiexec, no `winget source update/reset`.
-        Should -Invoke Start-Process -Times 0 -Exactly -ParameterFilter { $FilePath -notmatch 'winget' -or $ArgumentList[0] -ne 'list' }
-        Should -Invoke Start-Process -Times 1 -Exactly -ParameterFilter { $ArgumentList[0] -eq 'list' -and $ArgumentList -contains 'Contoso.AppOne' }
+        Should -Invoke Start-Process -Times 0 -Exactly
+        Should -Invoke Invoke-ExternalProcess -Times 0 -Exactly -ParameterFilter { $FilePath -notmatch 'winget' -or $ArgumentList[0] -ne 'list' }
+        Should -Invoke Invoke-ExternalProcess -Times 1 -Exactly -ParameterFilter { $ArgumentList[0] -eq 'list' -and $ArgumentList -contains 'Contoso.AppOne' }
 
         # The preview carried on to the summary and says what a real run would have done.
         $result | Should -Be 0
@@ -1165,6 +1194,8 @@ Describe 'Dry run leaves the machine unchanged (P2-16)' {
     It 'Reports a broken winget source instead of resetting it when winget is present' {
         Mock Test-IsAdmin { $true }
         Mock Get-Command { [pscustomobject]@{ Name = 'winget.exe' } } -ParameterFilter { $Name -eq 'winget' }
+        # The winget mock below scripts each winget command.
+        Mock Invoke-WingetProcess { Invoke-TestWingetMock -ArgumentList $ArgumentList }
         Mock winget {
             if ($args[0] -eq 'source' -and $args[1] -eq 'list') {
                 $global:LASTEXITCODE = 0
@@ -1184,7 +1215,8 @@ Describe 'Dry run leaves the machine unchanged (P2-16)' {
         Should -Invoke winget -Times 1 -Exactly -ParameterFilter { $args[0] -eq 'search' }
         Should -Invoke Add-AppxPackage -Times 0 -Exactly
         Should -Invoke Repair-WinGetPackageManager -Times 0 -Exactly
-        Should -Invoke Start-Process -Times 0 -Exactly -ParameterFilter { $FilePath -notmatch 'winget' -or $ArgumentList[0] -ne 'list' }
+        Should -Invoke Start-Process -Times 0 -Exactly
+        Should -Invoke Invoke-ExternalProcess -Times 0 -Exactly
 
         $result | Should -Be 0
         ($script:infoMessages -join "`n") | Should -Match '\[DRY-RUN\] Winget source data is corrupted\. A real run would repair it: winget source reset --force'
@@ -1329,6 +1361,22 @@ Describe 'Format-InstallFailureReason (issue #189)' {
 
             $reason | Should -Match 'winget exit 0x80073D19'
             $reason | Should -Match 'session error 0x80073D19 persisted through every retry'
+        }
+
+        It 'Says the install ran out of time, without a fabricated exit code (review finding P2-5)' {
+            $installResult = @{ ExitCode = $null; Attempts = 1; SessionErrorExhausted = $false; MachineScopeFellBack = $false; TimedOut = $true; TimeoutSeconds = 1800 }
+
+            $reason = Format-InstallFailureReason -FailureReason 'VerifyNotFound' -InstallResult $installResult
+
+            $reason | Should -Be 'package not found after install; 1 attempt, machine-scope fallback: no, winget install stopped after 30 minutes'
+        }
+
+        It 'Names the installer''s log (review finding P2-6)' {
+            $installResult = @{ ExitCode = -1978335226; Attempts = 1; SessionErrorExhausted = $false; MachineScopeFellBack = $false; TimedOut = $false; InstallerLogPath = 'C:\ProgramData\winget-app-setup\logs\winget-install-Test.App-20261004-101500.log' }
+
+            $reason = Format-InstallFailureReason -FailureReason 'VerifyNotFound' -InstallResult $installResult
+
+            $reason | Should -Be 'package not found after install; winget exit 0x8A150006, 1 attempt, machine-scope fallback: no, installer log: C:\ProgramData\winget-app-setup\logs\winget-install-Test.App-20261004-101500.log'
         }
 
         It 'Calls out an exhausted transient launch failure without a fabricated exit code (issue #253)' {

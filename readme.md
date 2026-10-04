@@ -100,14 +100,33 @@ pwsh -ExecutionPolicy Unrestricted -File .\winget-app-install.ps1 -NonInteractiv
 Non-interactive mode is also auto-detected when the session is non-interactive (e.g.
 `pwsh -NonInteractive`, services, scheduled tasks) or stdin is redirected. Under CI (the `CI`,
 `GITHUB_ACTIONS` or `TF_BUILD` variable is set) an early failure never waits for a key press
-either.
+either. In non-interactive mode winget also gets `--silent`, so MSI packages install with `/quiet`
+instead of showing a progress window (`/passive`).
+
+No step can hang a run for good. Every winget and `msiexec` call has a time limit, and when it runs
+out the installer stops that process and every process it started, then carries on:
+
+| Call | Time limit |
+|------|------------|
+| One `winget install` (download, installer, and waiting for another winget install) | 30 minutes |
+| `winget download` (the PowerShell MSIX fallback) | 30 minutes |
+| The per-app `winget list` check before and after each install | 15 seconds |
+| `winget source update`, `source list`, `search` and other `winget list` calls | 2 minutes |
+| `winget source reset` | 5 minutes |
+| `msiexec` for Winget-AutoUpdate | 15 minutes |
+| The Winget-AutoUpdate MSI download | 5 minutes in all on PowerShell 7.3 and older; on 7.4 and newer, 5 minutes to connect and 2 minutes without data |
+
+A stopped install is checked like any other: unless the app turns out to be installed anyway, it
+fails, gets its one retry in the retry pass, and counts toward exit code 1, with
+`winget install stopped after 30 minutes` in its failure reason. The limits are set in one place,
+`Get-ProcessTimeoutSeconds` (`WingetAppSetup/Private/ProcessInvocation.ps1`).
 
 ### Exit codes
 
 | Code | Meaning |
 |------|---------|
 | 0 | Success — all apps installed or already present |
-| 1 | One or more apps failed to install (also: the PowerShell 7 bootstrap could not provision `pwsh` from a pre-7 session, pre-flight system checks failed, or elevation was declined or is unavailable under remote execution) |
+| 1 | One or more apps failed to install, including an install stopped at its time limit (also: the PowerShell 7 bootstrap could not provision `pwsh` from a pre-7 session, pre-flight system checks failed, or elevation was declined or is unavailable under remote execution) |
 | 2 | Winget is unavailable and could not be installed, or winget could no longer be launched at the end of the run (no app failed, but automatic updates and the next run would) |
 | 3 | App-definition validation failed, or no valid app definitions remain |
 | 5 | The run was aborted before it finished: an unexpected error (the message and stack trace are in the log), or the run was stopped from outside (Ctrl+C, the console closing, an installer stopping the console) when run from a file or non-interactively |
@@ -128,6 +147,13 @@ the log survives cross-user elevation and can be collected after a failed instal
 machine. If the transcript cannot be started, the installer warns and continues: logging never
 blocks an install.
 
+The transcript includes winget's own output. Each `winget install`, `winget download` and
+`winget source reset` is logged as a `> winget ...` line with its full command line, followed by
+what winget printed, indented: for example
+`Installer failed with exit code: 1603` or a hash mismatch. The spinner and the download progress
+bar are left out, apart from the last progress line of each download. The per-app `winget list`
+checks print nothing; the source checks print winget's output only when they fail.
+
 The same folder also holds:
 
 - `install-<yyyyMMdd-HHmmss>-bootstrap.log` — the Windows PowerShell 5.1 phase of a run started
@@ -135,6 +161,10 @@ The same folder also holds:
   with the exit code the relaunched run returned.
 - `pwsh-msi-<yyyyMMdd-HHmmss>-<attempt>.log` — `msiexec`'s verbose log when the bootstrap installs
   PowerShell 7 from the MSI.
+- `winget-install-<package id>-<yyyyMMdd-HHmmss>.log` — the installer's own log for each
+  `winget install` attempt (winget's `--log`), when the installer writes one: MSI, WiX, Burn and
+  Inno installers do, most other EXE installers do not. A failed app's reason in the summary names
+  this file.
 
 An elevated run gives standard users read access to the `logs` folder, so the log can be opened
 from the end user's own session after a cross-user elevated run. Installing Winget-AutoUpdate
@@ -284,6 +314,15 @@ The suite also runs on Linux and macOS (PowerShell 7 with Pester 6): `tests/Test
 stands in for the Windows-only commands the tests mock, so no test is known to fail there and any
 failure is new. No test depends on whether the runner is elevated: the tests mock `Test-IsAdmin`.
 The Windows CI run stays the verdict.
+
+Start winget through `Invoke-WingetProcess` and `msiexec` through `Invoke-ExternalProcess`
+(`WingetAppSetup/Private/ProcessInvocation.ps1`) rather than with `Start-Process` or a bare
+`winget` call, so every call gets a time limit, its output in the transcript and an exit code read
+from the process. Two older callers still use `Start-Process`, each with its own time limit:
+`Wait-WingetLaunchable`'s `winget --version` probe and the PowerShell 7 bootstrap's `msiexec`.
+Tests mock the two functions and build their results with `New-TestProcessResult` from
+`tests/TestHelpers.ps1`; a test that scripts winget with `Mock winget` routes it through
+`Invoke-TestWingetMock`.
 
 ### One-time setup: local pre-commit drift check
 

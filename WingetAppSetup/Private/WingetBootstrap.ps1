@@ -19,7 +19,7 @@
     (microsoft/winget-cli#5398/#6334), and probing it would report a false failure for the only
     source that matters here.
 .PARAMETER TimeoutSeconds
-    Maximum seconds to wait for winget before killing the process. Default 120.
+    Maximum seconds to wait for winget before stopping it. Default 120.
 .RETURNS
     [hashtable] @{ Succeeded = <bool>; ExitCode = <int or $null>; TimedOut = <bool> }
     ExitCode is $null when the process timed out or failed to start.
@@ -30,39 +30,26 @@ function Invoke-WingetSourceProbe {
         [int]$TimeoutSeconds = 120
     )
 
-    # Unique per-run temp files: fixed names made concurrent runs (or a stale locked file from a
-    # killed run) fail Start-Process, which read as a false probe failure (issue #177).
-    $tempSuffix = [System.IO.Path]::GetRandomFileName()
-    $stdoutFile = Join-Path $env:TEMP "winget_source_probe_output_$tempSuffix.txt"
-    $stderrFile = Join-Path $env:TEMP "winget_source_probe_error_$tempSuffix.txt"
-
-    try {
-        $probeProcess = Start-Process -FilePath 'winget' `
-            -ArgumentList 'source', 'update', '--name', 'winget', '--disable-interactivity' `
-            -NoNewWindow `
-            -PassThru `
-            -RedirectStandardOutput $stdoutFile `
-            -RedirectStandardError $stderrFile
-
-        if (-not $probeProcess.WaitForExit($TimeoutSeconds * 1000)) {
-            Write-WarningMessage "Winget source update timed out after $TimeoutSeconds seconds. Terminating process..."
-            try { $probeProcess.Kill() } catch { }
-            return @{ Succeeded = $false; ExitCode = $null; TimedOut = $true }
-        }
-
-        return @{
-            Succeeded = ($probeProcess.ExitCode -eq 0)
-            ExitCode  = $probeProcess.ExitCode
-            TimedOut  = $false
-        }
-    }
-    catch {
-        Write-WarningMessage "Winget source update failed to run: $_"
+    # Through Invoke-WingetProcess (review finding P2-6): quiet when the probe succeeds, and winget's
+    # own explanation is echoed into the transcript when it does not.
+    $probe = Invoke-WingetProcess -ArgumentList @('source', 'update', '--name', 'winget', '--disable-interactivity') -TimeoutSeconds $TimeoutSeconds -Echo None
+    if ($probe.LaunchFailed) {
+        Write-WarningMessage "Winget source update failed to run: $($probe.LaunchError)"
         return @{ Succeeded = $false; ExitCode = $null; TimedOut = $false }
     }
-    finally {
-        Remove-Item $stdoutFile -ErrorAction SilentlyContinue
-        Remove-Item $stderrFile -ErrorAction SilentlyContinue
+    if ($probe.TimedOut) {
+        Write-WarningMessage "Winget source update timed out after $TimeoutSeconds seconds and was stopped."
+        Write-ProcessOutput -Line $probe.Output -Tail 20
+        return @{ Succeeded = $false; ExitCode = $null; TimedOut = $true }
+    }
+    if ($probe.ExitCode -ne 0) {
+        Write-ProcessOutput -Line $probe.Output -Tail 20
+    }
+
+    return @{
+        Succeeded = ($probe.ExitCode -eq 0)
+        ExitCode  = $probe.ExitCode
+        TimedOut  = $false
     }
 }
 
@@ -94,14 +81,22 @@ function Test-WingetSourceHealth {
         [switch]$Quiet
     )
 
-    # First check: verify source is listed
-    try {
-        $output = winget source list --disable-interactivity --accept-source-agreements 2>&1
-        $sourceIsListed = [bool]($output -match 'winget')
+    # First check: verify source is listed. No --accept-source-agreements: `winget source list`
+    # does not accept it and rejects the whole command with 0x8A150002 (INVALID_CL_ARGUMENTS),
+    # whose usage text happened to contain 'winget', so a missing source still read as listed.
+    $sourceIsListed = $false
+    $list = Invoke-WingetProcess -ArgumentList @('source', 'list', '--disable-interactivity') -TimeoutSeconds (Get-ProcessTimeoutSeconds -Operation WingetSourceList) -Echo None
+    if ($list.LaunchFailed) {
+        Write-WarningMessage "Winget source list failed: $($list.LaunchError)"
     }
-    catch {
-        Write-WarningMessage "Winget source list failed: $_"
-        $sourceIsListed = $false
+    elseif ($list.TimedOut) {
+        Write-WarningMessage 'Winget source list failed: it did not finish in time and was stopped.'
+    }
+    else {
+        $sourceIsListed = [bool](@($list.Output) -match 'winget')
+        if (-not $sourceIsListed -and -not $Quiet) {
+            Write-ProcessOutput -Line $list.Output -Tail 20
+        }
     }
 
     # Second check: verify source is functional (not corrupted) by attempting a search
@@ -109,9 +104,17 @@ function Test-WingetSourceHealth {
     if ($sourceIsListed) {
         try {
             # Actually test if the source works by attempting a search.
-            # Use '7zip' as a known package that always exists.
-            $searchOutput = winget search 7zip --source winget --disable-interactivity --accept-source-agreements 2>&1
-            $searchExitCode = $LASTEXITCODE
+            # Use '7zip' as a known package that always exists. The exit code comes from the
+            # process object, so it cannot be a stale $LASTEXITCODE.
+            $search = Invoke-WingetProcess -ArgumentList @('search', '7zip', '--source', 'winget', '--disable-interactivity', '--accept-source-agreements') -TimeoutSeconds (Get-ProcessTimeoutSeconds -Operation WingetSearch) -Echo None
+            if ($search.LaunchFailed) {
+                throw $search.LaunchError
+            }
+            if ($search.TimedOut) {
+                throw 'winget search did not finish in time and was stopped.'
+            }
+            $searchOutput = @($search.Output)
+            $searchExitCode = $search.ExitCode
 
             # Any nonzero exit code fails the check — that includes the known 0x8A15000F
             # corruption signature (APPINSTALLER_CLI_ERROR_SOURCE_DATA_MISSING, -1978335217 as a
@@ -129,6 +132,7 @@ function Test-WingetSourceHealth {
             if ($searchExitCode -ne 0 -or $searchOutput -match '0x8a150|failed when opening|data required') {
                 if (-not $Quiet) {
                     Write-WarningMessage 'Winget source is listed but contains corrupted or missing data.'
+                    Write-ProcessOutput -Line $searchOutput -Tail 20
                 }
                 $sourceIsFunctional = $false
             }

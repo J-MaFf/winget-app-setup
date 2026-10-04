@@ -149,7 +149,7 @@ Describe 'Winget-AutoUpdate integration (issue #168)' {
             Mock New-WauStagingDirectory { Join-Path $TestDrive 'wau-msi-test' }
             Mock Invoke-WebRequest { }
             Mock Get-FileHash { @{ Hash = (Get-WauPin).Sha256 } }
-            Mock Start-Process { [pscustomobject]@{ ExitCode = 0 } }
+            Mock Invoke-ExternalProcess { New-TestProcessResult -ExitCode 0 }
             Mock Remove-Item { }
 
             $result = Install-WingetAutoUpdate
@@ -158,13 +158,15 @@ Describe 'Winget-AutoUpdate integration (issue #168)' {
             $result.Version | Should -Be (Get-WauPin).Version
             Should -Invoke New-WauStagingDirectory -Times 1 -Exactly
             Should -Invoke Invoke-WebRequest -Times 1 -Exactly -ParameterFilter { $OutFile -like '*wau-msi-test*' }
-            Should -Invoke Start-Process -Times 1 -Exactly -ParameterFilter {
+            Should -Invoke Invoke-ExternalProcess -Times 1 -Exactly -ParameterFilter {
                 $FilePath -eq 'msiexec.exe' -and
                 # No RUN_WAU=YES: an immediate WAU run re-provisions App Installer while the
                 # installer is still running (issues #279/#283/#284).
-                $ArgumentList -notmatch 'RUN_WAU' -and $ArgumentList -match 'UPDATESATLOGON=0' -and $ArgumentList -match 'USERCONTEXT=1' -and
-                $ArgumentList -match 'DISABLEWAUAUTOUPDATE=1' -and $ArgumentList -match 'UPDATESINTERVAL=Weekly' -and
-                $ArgumentList -match 'NOTIFICATIONLEVEL=Full'
+                $ArgumentString -notmatch 'RUN_WAU' -and $ArgumentString -match 'UPDATESATLOGON=0' -and $ArgumentString -match 'USERCONTEXT=1' -and
+                $ArgumentString -match 'DISABLEWAUAUTOUPDATE=1' -and $ArgumentString -match 'UPDATESINTERVAL=Weekly' -and
+                $ArgumentString -match 'NOTIFICATIONLEVEL=Full' -and
+                # Time-limited (review finding P2-5): Start-Process -Wait used to wait for ever.
+                $TimeoutSeconds -eq (Get-ProcessTimeoutSeconds -Operation MsiExec)
             }
             Should -Invoke Remove-Item -Times 1 -Exactly -ParameterFilter {
                 $Path -eq (Join-Path $TestDrive 'wau-msi-test') -and $Recurse
@@ -173,18 +175,60 @@ Describe 'Winget-AutoUpdate integration (issue #168)' {
             Should -Invoke Disable-WauLogonTrigger -Times 0 -Exactly
         }
 
+        It 'downloads the MSI with a time limit (review finding P2-5)' {
+            Mock Test-WauInstalled { $false }
+            Mock New-WauStagingDirectory { Join-Path $TestDrive 'wau-msi-test' }
+            Mock Get-WebDownloadTimeoutParameters { @{ TimeoutSec = 7 } }
+            Mock Invoke-WebRequest { }
+            Mock Get-FileHash { @{ Hash = (Get-WauPin).Sha256 } }
+            Mock Invoke-ExternalProcess { New-TestProcessResult -ExitCode 0 }
+            Mock Remove-Item { }
+
+            (Install-WingetAutoUpdate).Status | Should -Be 'Configured'
+
+            # -TimeoutSec is an alias of -ConnectionTimeoutSeconds on PowerShell 7.4 and newer.
+            Should -Invoke Invoke-WebRequest -Times 1 -Exactly -ParameterFilter { ($ConnectionTimeoutSeconds -eq 7) -or ($TimeoutSec -eq 7) }
+        }
+
+        It 'reports Failed, and cleans up, when msiexec runs past its time limit' {
+            Mock Test-WauInstalled { $false }
+            Mock New-WauStagingDirectory { Join-Path $TestDrive 'wau-msi-test' }
+            Mock Invoke-WebRequest { }
+            Mock Get-FileHash { @{ Hash = (Get-WauPin).Sha256 } }
+            Mock Invoke-ExternalProcess { New-TestProcessResult -TimedOut }
+            Mock Remove-Item { }
+
+            $result = Install-WingetAutoUpdate
+
+            $result.Status | Should -Be 'Failed'
+            Should -Invoke Write-ErrorMessage -Times 1 -Exactly -ParameterFilter { $Message -match 'msiexec did not finish within 15 minutes' }
+            Should -Invoke Remove-Item -Times 1 -Exactly -ParameterFilter { $Path -eq (Join-Path $TestDrive 'wau-msi-test') -and $Recurse }
+        }
+
+        It 'reports Failed when msiexec cannot be started' {
+            Mock Test-WauInstalled { $false }
+            Mock New-WauStagingDirectory { Join-Path $TestDrive 'wau-msi-test' }
+            Mock Invoke-WebRequest { }
+            Mock Get-FileHash { @{ Hash = (Get-WauPin).Sha256 } }
+            Mock Invoke-ExternalProcess { New-TestProcessResult -LaunchFailed -LaunchErrorCode 2 -LaunchError 'The system cannot find the file specified.' }
+            Mock Remove-Item { }
+
+            (Install-WingetAutoUpdate).Status | Should -Be 'Failed'
+            Should -Invoke Write-ErrorMessage -Times 1 -Exactly -ParameterFilter { $Message -match 'msiexec could not be started' }
+        }
+
         It 'reports AlreadyPresent (with the installed version) when WAU is at the pinned version' {
             Mock Test-WauInstalled { $true }
             Mock Get-InstalledWauInfo { [pscustomobject]@{ Version = [version](Get-WauPin).Version; ProductCode = (Get-WauPin).ProductCode } }
             Mock Invoke-WebRequest { throw 'should not download when WAU is current' }
-            Mock Start-Process { throw 'should not run msiexec when WAU is current' }
+            Mock Invoke-ExternalProcess { throw 'should not run msiexec when WAU is current' }
 
             $result = Install-WingetAutoUpdate
 
             $result.Status | Should -Be 'AlreadyPresent'
             $result.Version | Should -Be ([version](Get-WauPin).Version)
             Should -Invoke Invoke-WebRequest -Times 0 -Exactly
-            Should -Invoke Start-Process -Times 0 -Exactly
+            Should -Invoke Invoke-ExternalProcess -Times 0 -Exactly
             Should -Invoke Disable-WauLogonTrigger -Times 1 -Exactly
         }
 
@@ -194,14 +238,14 @@ Describe 'Winget-AutoUpdate integration (issue #168)' {
             Mock New-WauStagingDirectory { Join-Path $TestDrive 'wau-msi-test' }
             Mock Invoke-WebRequest { }
             Mock Get-FileHash { @{ Hash = (Get-WauPin).Sha256 } }
-            Mock Start-Process { [pscustomobject]@{ ExitCode = 0 } }
+            Mock Invoke-ExternalProcess { New-TestProcessResult -ExitCode 0 }
             Mock Remove-Item { }
 
             $result = Install-WingetAutoUpdate
 
             $result.Status | Should -Be 'Configured'
-            Should -Invoke Start-Process -Times 1 -Exactly -ParameterFilter {
-                $FilePath -eq 'msiexec.exe' -and $ArgumentList -match '/i'
+            Should -Invoke Invoke-ExternalProcess -Times 1 -Exactly -ParameterFilter {
+                $FilePath -eq 'msiexec.exe' -and $ArgumentString -match '/i'
             }
         }
 
@@ -209,26 +253,26 @@ Describe 'Winget-AutoUpdate integration (issue #168)' {
             Mock Test-WauInstalled { $true }
             Mock Get-InstalledWauInfo { [pscustomobject]@{ Version = [version]'99.0.0'; ProductCode = '{11111111-2222-3333-4444-555555555555}' } }
             Mock Invoke-WebRequest { throw 'should not download for a newer install' }
-            Mock Start-Process { throw 'should not run msiexec for a newer install' }
+            Mock Invoke-ExternalProcess { throw 'should not run msiexec for a newer install' }
 
             $result = Install-WingetAutoUpdate
 
             $result.Status | Should -Be 'AlreadyPresent'
             $result.Version | Should -Be ([version]'99.0.0')
-            Should -Invoke Start-Process -Times 0 -Exactly
+            Should -Invoke Invoke-ExternalProcess -Times 0 -Exactly
         }
 
         It 'leaves an installed WAU with an unreadable version untouched' {
             Mock Test-WauInstalled { $true }
             Mock Get-InstalledWauInfo { [pscustomobject]@{ Version = $null; ProductCode = $null } }
             Mock Invoke-WebRequest { throw 'should not download when the version is unknown' }
-            Mock Start-Process { throw 'should not run msiexec when the version is unknown' }
+            Mock Invoke-ExternalProcess { throw 'should not run msiexec when the version is unknown' }
 
             $result = Install-WingetAutoUpdate
 
             $result.Status | Should -Be 'AlreadyPresent'
             $result.Version | Should -BeNullOrEmpty
-            Should -Invoke Start-Process -Times 0 -Exactly
+            Should -Invoke Invoke-ExternalProcess -Times 0 -Exactly
             Should -Invoke Disable-WauLogonTrigger -Times 1 -Exactly
         }
 
@@ -237,13 +281,13 @@ Describe 'Winget-AutoUpdate integration (issue #168)' {
             Mock New-WauStagingDirectory { Join-Path $TestDrive 'wau-msi-test' }
             Mock Invoke-WebRequest { }
             Mock Get-FileHash { @{ Hash = 'DEADBEEF' } }
-            Mock Start-Process { throw 'must not run msiexec on a hash mismatch' }
+            Mock Invoke-ExternalProcess { throw 'must not run msiexec on a hash mismatch' }
             Mock Remove-Item { }
 
             $result = Install-WingetAutoUpdate
 
             $result.Status | Should -Be 'Failed'
-            Should -Invoke Start-Process -Times 0 -Exactly
+            Should -Invoke Invoke-ExternalProcess -Times 0 -Exactly
             Should -Invoke Remove-Item -Times 1 -Exactly -ParameterFilter {
                 $Path -eq (Join-Path $TestDrive 'wau-msi-test') -and $Recurse
             }
@@ -267,7 +311,7 @@ Describe 'Winget-AutoUpdate integration (issue #168)' {
             Mock New-WauStagingDirectory { Join-Path $TestDrive 'wau-msi-test' }
             Mock Invoke-WebRequest { }
             Mock Get-FileHash { @{ Hash = (Get-WauPin).Sha256 } }
-            Mock Start-Process { [pscustomobject]@{ ExitCode = 3010 } }
+            Mock Invoke-ExternalProcess { New-TestProcessResult -ExitCode 3010 }
             Mock Remove-Item { }
 
             (Install-WingetAutoUpdate).Status | Should -Be 'Configured'
@@ -277,7 +321,7 @@ Describe 'Winget-AutoUpdate integration (issue #168)' {
             Mock Get-WindowsAppRuntimeStatus { [pscustomobject]@{ Present = $false; Detail = 'none registered' } }
             Mock Test-WauInstalled { $false }
             Mock Invoke-WebRequest { throw 'should not download WAU without the framework' }
-            Mock Start-Process { throw 'should not run msiexec without the framework' }
+            Mock Invoke-ExternalProcess { throw 'should not run msiexec without the framework' }
 
             $result = Install-WingetAutoUpdate
 
@@ -293,7 +337,7 @@ Describe 'Winget-AutoUpdate integration (issue #168)' {
             Mock New-WauStagingDirectory { Join-Path $TestDrive 'wau-msi-unknown' }
             Mock Invoke-WebRequest { }
             Mock Get-FileHash { @{ Hash = (Get-WauPin).Sha256 } }
-            Mock Start-Process { [pscustomobject]@{ ExitCode = 0 } }
+            Mock Invoke-ExternalProcess { New-TestProcessResult -ExitCode 0 }
             Mock Remove-Item { }
 
             $result = Install-WingetAutoUpdate
@@ -357,37 +401,47 @@ Describe 'Winget-AutoUpdate integration (issue #168)' {
         It 'uninstalls via the ProductCode of the actually-installed WAU (issue #186)' {
             Mock Test-WauInstalled { $true }
             Mock Get-InstalledWauInfo { [pscustomobject]@{ Version = [version]'2.9.0'; ProductCode = '{11111111-2222-3333-4444-555555555555}' } }
-            Mock Start-Process { [pscustomobject]@{ ExitCode = 0 } }
+            Mock Invoke-ExternalProcess { New-TestProcessResult -ExitCode 0 }
 
             $result = Uninstall-WingetAutoUpdate
 
             $result | Should -Be $true
-            Should -Invoke Start-Process -Times 1 -Exactly -ParameterFilter {
-                $FilePath -eq 'msiexec.exe' -and $ArgumentList -match '/x' -and
-                $ArgumentList -match ([regex]::Escape('{11111111-2222-3333-4444-555555555555}'))
+            Should -Invoke Invoke-ExternalProcess -Times 1 -Exactly -ParameterFilter {
+                $FilePath -eq 'msiexec.exe' -and $ArgumentString -match '/x' -and
+                $ArgumentString -match ([regex]::Escape('{11111111-2222-3333-4444-555555555555}')) -and
+                $TimeoutSeconds -eq (Get-ProcessTimeoutSeconds -Operation MsiExec)
             }
         }
 
         It 'falls back to the pinned ProductCode when the registry lookup finds none' {
             Mock Test-WauInstalled { $true }
             Mock Get-InstalledWauInfo { [pscustomobject]@{ Version = $null; ProductCode = $null } }
-            Mock Start-Process { [pscustomobject]@{ ExitCode = 0 } }
+            Mock Invoke-ExternalProcess { New-TestProcessResult -ExitCode 0 }
 
             $result = Uninstall-WingetAutoUpdate
 
             $result | Should -Be $true
-            Should -Invoke Start-Process -Times 1 -Exactly -ParameterFilter {
-                $FilePath -eq 'msiexec.exe' -and $ArgumentList -match '/x' -and
-                $ArgumentList -match ([regex]::Escape((Get-WauPin).ProductCode))
+            Should -Invoke Invoke-ExternalProcess -Times 1 -Exactly -ParameterFilter {
+                $FilePath -eq 'msiexec.exe' -and $ArgumentString -match '/x' -and
+                $ArgumentString -match ([regex]::Escape((Get-WauPin).ProductCode))
             }
+        }
+
+        It 'returns false when msiexec runs past its time limit (review finding P2-5)' {
+            Mock Test-WauInstalled { $true }
+            Mock Get-InstalledWauInfo { [pscustomobject]@{ Version = [version]'2.9.0'; ProductCode = '{11111111-2222-3333-4444-555555555555}' } }
+            Mock Invoke-ExternalProcess { New-TestProcessResult -TimedOut }
+
+            Uninstall-WingetAutoUpdate | Should -Be $false
+            Should -Invoke Write-ErrorMessage -Times 1 -Exactly -ParameterFilter { $Message -match 'did not finish in time' }
         }
 
         It 'is a no-op when WAU is not installed' {
             Mock Test-WauInstalled { $false }
-            Mock Start-Process { throw 'should not run msiexec when WAU is absent' }
+            Mock Invoke-ExternalProcess { throw 'should not run msiexec when WAU is absent' }
 
             (Uninstall-WingetAutoUpdate) | Should -Be $true
-            Should -Invoke Start-Process -Times 0 -Exactly
+            Should -Invoke Invoke-ExternalProcess -Times 0 -Exactly
         }
     }
 

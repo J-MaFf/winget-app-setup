@@ -135,7 +135,10 @@ function Install-WingetAutoUpdate {
         # predictable %TEMP% path a same-user non-elevated process could tamper with (issue #186).
         $stagingDir = New-WauStagingDirectory
         $msiPath = Join-Path $stagingDir "WAU-$($pin.Version).msi"
-        Invoke-WebRequest -Uri $pin.MsiUrl -OutFile $msiPath -UseBasicParsing -ErrorAction Stop
+        # Time-limited (review finding P2-5): without a limit, a download that connects and then
+        # stalls waits for ever.
+        $downloadTimeouts = Get-WebDownloadTimeoutParameters
+        Invoke-WebRequest @downloadTimeouts -Uri $pin.MsiUrl -OutFile $msiPath -UseBasicParsing -ErrorAction Stop
 
         $actualHash = (Get-FileHash -Path $msiPath -Algorithm SHA256).Hash
         if ($actualHash -ne $pin.Sha256) {
@@ -152,15 +155,25 @@ function Install-WingetAutoUpdate {
         # UPDATESATLOGON=0: no at-logon run (see the function help); WAU stores it as
         # WAU_UpdatesAtLogon, which later MSI upgrades read back.
         $msiArgs = "/i `"$msiPath`" /qn /norestart UPDATESATLOGON=0 USERCONTEXT=1 DISABLEWAUAUTOUPDATE=1 UPDATESINTERVAL=Weekly UPDATESATTIME=02:00:00 NOTIFICATIONLEVEL=Full DONOTRUNONMETERED=1"
-        $proc = Start-Process -FilePath 'msiexec.exe' -ArgumentList $msiArgs -Wait -PassThru
+        # Time-limited (review finding P2-5): Start-Process -Wait used to wait for ever.
+        $msiTimeoutSeconds = Get-ProcessTimeoutSeconds -Operation MsiExec
+        $msiexec = Invoke-ExternalProcess -FilePath 'msiexec.exe' -ArgumentString $msiArgs -TimeoutSeconds $msiTimeoutSeconds -Echo None
+        if ($msiexec.LaunchFailed) {
+            Write-ErrorMessage "Failed to install Winget-AutoUpdate: msiexec could not be started ($($msiexec.LaunchError))."
+            return [pscustomobject]@{ Status = 'Failed'; Version = $pin.Version; FrameworkMissing = $false }
+        }
+        if ($msiexec.TimedOut) {
+            Write-ErrorMessage ('Winget-AutoUpdate install failed: msiexec did not finish within {0} minutes and was stopped.' -f [Math]::Round($msiTimeoutSeconds / 60))
+            return [pscustomobject]@{ Status = 'Failed'; Version = $pin.Version; FrameworkMissing = $false }
+        }
 
         # 3010 = ERROR_SUCCESS_REBOOT_REQUIRED — still a success.
-        if ($proc.ExitCode -eq 0 -or $proc.ExitCode -eq 3010) {
+        if ($msiexec.ExitCode -eq 0 -or $msiexec.ExitCode -eq 3010) {
             Write-Success "Winget-AutoUpdate $($pin.Version) installed. Apps will update weekly, on Tuesdays at 02:00 (or soon after the next start if the machine was off)."
             return [pscustomobject]@{ Status = 'Configured'; Version = $pin.Version; FrameworkMissing = $false }
         }
 
-        Write-ErrorMessage "Winget-AutoUpdate install failed (msiexec exit code $($proc.ExitCode))."
+        Write-ErrorMessage "Winget-AutoUpdate install failed (msiexec exit code $($msiexec.ExitCode))."
         return [pscustomobject]@{ Status = 'Failed'; Version = $pin.Version; FrameworkMissing = $false }
     }
     catch {
@@ -208,14 +221,22 @@ function Uninstall-WingetAutoUpdate {
         $productCode = (Get-WauPin).ProductCode
     }
     Write-Info 'Uninstalling Winget-AutoUpdate...'
-    $proc = Start-Process -FilePath 'msiexec.exe' -ArgumentList "/x $productCode /qn /norestart" -Wait -PassThru
+    $msiexec = Invoke-ExternalProcess -FilePath 'msiexec.exe' -ArgumentString "/x $productCode /qn /norestart" -TimeoutSeconds (Get-ProcessTimeoutSeconds -Operation MsiExec) -Echo None
+    if ($msiexec.LaunchFailed) {
+        Write-ErrorMessage "Winget-AutoUpdate uninstall failed: msiexec could not be started ($($msiexec.LaunchError))."
+        return $false
+    }
+    if ($msiexec.TimedOut) {
+        Write-ErrorMessage 'Winget-AutoUpdate uninstall failed: msiexec did not finish in time and was stopped.'
+        return $false
+    }
 
-    if ($proc.ExitCode -eq 0 -or $proc.ExitCode -eq 3010) {
+    if ($msiexec.ExitCode -eq 0 -or $msiexec.ExitCode -eq 3010) {
         Write-Success 'Winget-AutoUpdate uninstalled.'
         return $true
     }
 
-    Write-ErrorMessage "Winget-AutoUpdate uninstall failed (msiexec exit code $($proc.ExitCode))."
+    Write-ErrorMessage "Winget-AutoUpdate uninstall failed (msiexec exit code $($msiexec.ExitCode))."
     return $false
 }
 

@@ -301,7 +301,8 @@ function Invoke-WingetInstall {
         try {
             # Shared per-app pipeline — pre-check, dispatch, post-verify (issue #188). Messages,
             # summary bucketing, and exit-code policy stay here in the orchestrator.
-            $outcome = Install-AppWithVerification -App $app -WhatIf:$WhatIf
+            # -Silent: an unattended run installs MSI packages with /quiet, not /passive.
+            $outcome = Install-AppWithVerification -App $app -Silent:$effectiveNonInteractive -WhatIf:$WhatIf
 
             switch ($outcome.Status) {
                 'Skipped' {
@@ -391,7 +392,7 @@ function Invoke-WingetInstall {
 
                     # Same shared pipeline as the first pass (issue #188), so a lingering
                     # 0x80073d19 session error gets its backoff retries here too (issue #150).
-                    $outcome = Install-AppWithVerification -App $appDef
+                    $outcome = Install-AppWithVerification -App $appDef -Silent:$effectiveNonInteractive
 
                     if ($outcome.Status -eq 'Failed') {
                         $failureReason = Format-InstallFailureReason -FailureReason $outcome.FailureReason -InstallResult $outcome.InstallResult

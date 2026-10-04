@@ -181,8 +181,9 @@ function Get-InstallerExitCode {
 .DESCRIPTION
     Combines the shared install pipeline's FailureReason bucket with the diagnostic detail the
     installer result carries: the winget exit code (hex), the attempt count, whether the
-    machine-scope preference fell back to winget's default scope, and whether the 0x80073D19
-    session-error retries were exhausted (issue #189). Used both for the console failure message
+    machine-scope preference fell back to winget's default scope, whether the 0x80073D19
+    session-error retries were exhausted (issue #189), whether the install ran out of time (review
+    finding P2-5), and where the installer's log is (P2-6). Used both for the console failure message
     and for the Reason column in the failed-apps summary table.
 .PARAMETER FailureReason
     The FailureReason string from the shared install pipeline ('PreCheckTimeout', 'VerifyTimeout',
@@ -235,9 +236,22 @@ function Format-InstallFailureReason {
             $detailParts += 'session error 0x80073D19 persisted through every retry'
         }
         if ($InstallResult.ContainsKey('LaunchErrorExhausted') -and $InstallResult.LaunchErrorExhausted) {
-            # issue #253: Start-Process could not launch winget.exe (transient file lock) on every
-            # attempt, so no install ever actually ran.
+            # issue #253: winget.exe could not be launched (transient file lock) on every attempt,
+            # so no install ever actually ran.
             $detailParts += 'winget executable was transiently inaccessible through every retry'
+        }
+        if ($InstallResult.ContainsKey('TimedOut') -and $InstallResult.TimedOut) {
+            # Review finding P2-5: the install ran out of time and was stopped, so there is no exit
+            # code to show.
+            $limit = 'its time limit'
+            if ($InstallResult.ContainsKey('TimeoutSeconds') -and $InstallResult.TimeoutSeconds) {
+                $limit = '{0} minutes' -f [Math]::Round([int]$InstallResult.TimeoutSeconds / 60)
+            }
+            $detailParts += ('winget install stopped after {0}' -f $limit)
+        }
+        if ($InstallResult.ContainsKey('InstallerLogPath') -and $InstallResult.InstallerLogPath) {
+            # Review finding P2-6: the installer's own log, next to the transcript.
+            $detailParts += ('installer log: {0}' -f $InstallResult.InstallerLogPath)
         }
     }
 

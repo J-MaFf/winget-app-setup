@@ -8,7 +8,11 @@
 # try/catch and a type cast, issue #239), Get-WingetAgreementArgs (a literal array,
 # Private/WingetAgreementArgs.ps1, issue #240), and this file's own
 # Get-PowerShell7MsiInfo/Save-WebFileWithTimeout/Install-PowerShell7FromMsi (issue #263) and
-# Test-GitHubRateLimitError (issue #274). The tail's 5.1 branch also calls, around this file:
+# Test-GitHubRateLimitError (issue #274), and Invoke-WingetProcess with what it calls
+# (Private/ProcessInvocation.ps1: Invoke-ExternalProcess, Get-ProcessTimeoutSeconds and their
+# helpers, written against .NET Framework 4.5; Resolve-WingetExecutable without -BypassAlias, a
+# literal string) for the winget install (review findings P2-5/P2-6). The tail's 5.1 branch also
+# calls, around this file:
 # Test-EffectiveNonInteractive and Test-IsContinuousIntegration (Private/Interactivity.ps1),
 # Start-InstallerTranscript, Grant-InstallLogReadAccess and Write-Prompt (Private/LoggingInternal.ps1),
 # and Exit-Installer and Write-InstallerExitNotice (Private/FailureReporting.ps1) - review findings
@@ -490,7 +494,8 @@ function Install-PowerShell7FromMsi {
     one-liner URL; parameterized for tests.
 .PARAMETER LogDirectory
     The folder of the bootstrap transcript the tail started, or empty when it could not start one.
-    Forwarded to Install-PowerShell7FromMsi for msiexec's verbose log (review finding P2-13).
+    Forwarded to Install-PowerShell7FromMsi for msiexec's verbose log (review finding P2-13), and to
+    the winget install for the installer's log (--log, review finding P2-6).
 .RETURNS
     [int] Exit code for the tail dispatch to propagate: the relaunched run's exit code, 0 for a
     -WhatIf preview of a would-be install, or 1 when PowerShell 7 could not be provisioned. Sets
@@ -577,18 +582,25 @@ function Invoke-PowerShell7Bootstrap {
             # flag, and a failure falls through to the MSI fallback below. The shared flags come
             # from Get-WingetAgreementArgs so this call site cannot drift from the others again.
             $wingetArguments = @('install', '--id', 'Microsoft.PowerShell', '--exact', '--source', 'winget') + (Get-WingetAgreementArgs)
-            # A Start-Process launch failure is non-terminating under 5.1's default
-            # $ErrorActionPreference and would leave $wingetProcess $null - catch it explicitly
-            # so a broken winget shim degrades to the MSI fallback with a real message.
-            $wingetProcess = $null
-            try {
-                $wingetProcess = Start-Process -FilePath 'winget' -ArgumentList $wingetArguments -NoNewWindow -Wait -PassThru -ErrorAction Stop
+            if (Test-EffectiveNonInteractive -NonInteractive:$NonInteractive) {
+                # Unattended: the MSI installs with /quiet instead of /passive.
+                $wingetArguments += '--silent'
             }
-            catch {
-                Write-WarningMessage "winget could not be started: $_"
+            # Invoke-WingetProcess (review findings P2-5, P2-6): time-limited, winget's output goes
+            # into the bootstrap transcript, the MSI's log into the logs folder, and a winget that
+            # cannot start is reported instead of thrown, so it degrades to the MSI fallback below.
+            $wingetRun = Invoke-WingetProcess -ArgumentList $wingetArguments -TimeoutSeconds (Get-ProcessTimeoutSeconds -Operation WingetInstall) -LogDirectory $LogDirectory
+            if ($wingetRun.LaunchFailed) {
+                Write-WarningMessage "winget could not be started: $($wingetRun.LaunchError)"
             }
-            if ($wingetProcess -and $wingetProcess.ExitCode -ne 0) {
-                Write-WarningMessage ('winget could not install PowerShell 7 (exit code {0}).' -f $wingetProcess.ExitCode)
+            elseif ($wingetRun.TimedOut) {
+                Write-WarningMessage 'winget did not finish installing PowerShell 7 in time and was stopped.'
+            }
+            elseif ($wingetRun.ExitCode -ne 0) {
+                Write-WarningMessage ('winget could not install PowerShell 7 (exit code {0}).' -f $wingetRun.ExitCode)
+                if ($wingetRun.LogPath -and (Test-Path -LiteralPath $wingetRun.LogPath)) {
+                    Write-Info "Installer log: $($wingetRun.LogPath)"
+                }
             }
             $pwshPath = Find-PowerShell7
         }

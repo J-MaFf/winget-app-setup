@@ -45,7 +45,15 @@ the `irm | iex` window at once; the Windows PowerShell 5.1 bootstrap writes its 
 `-bootstrap.log` (plus an `msiexec` log, with a retry when another installation holds Windows
 Installer); the `logs` folder stays readable for standard users after the WAU install; tables are
 no longer cut off at 120 columns; the build id covers the whole script; and an issue form asks for
-the exit code, the build and the log, with a privacy note because the repository is public.
+the exit code, the build and the log, with a privacy note because the repository is public. Every
+winget and `msiexec` call now goes through one helper (`Invoke-ExternalProcess` /
+`Invoke-WingetProcess`): each has a time limit (30 minutes per install), after which the process
+and everything it started are stopped, so a stuck installer can no longer hang an unattended run;
+winget's own output goes into the transcript and the installer's log into the logs folder; a
+failed launch is classified by its Win32 error code, so the launch retries also work on a
+non-English Windows; unattended runs pass `--silent`; and `winget source list` and
+`winget source reset` no longer pass `--accept-source-agreements`, which winget rejects and which
+had kept the source reset from ever running.
 
 The same branch changes CI. Fork pull requests that leave `windows-tests.yml` alone no longer run
 on the self-hosted win-test runner, and `claude.yml` calls the shared Claude workflow at a pinned

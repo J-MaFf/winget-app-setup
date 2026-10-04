@@ -9,20 +9,24 @@
 
 <#
 .SYNOPSIS
-    Returns true when a winget-launch exception message indicates a transient failure.
+    Returns true when a winget launch failed for a transient reason.
 .DESCRIPTION
-    Matches the Win32 errors Start-Process surfaces as a terminating exception when winget.exe's own
-    file is transiently inaccessible (issues #253/#258): ERROR_CANT_ACCESS_FILE (1920, "The file
-    cannot be accessed by the system.") and the sibling ERROR_SHARING_VIOLATION ("...being used by
-    another process."). Also matches the message PowerShell's native-command invocation throws for
-    the same underlying condition when a caller captures output directly (e.g. `$out = @(winget list
-    ... 2>&1)`) instead of going through Start-Process: "StandardOutputEncoding is only supported
-    when standard output is redirected." (issue #277) — a .NET Process-class symptom of resolving the
-    same broken/mid-registration app-execution alias, just surfaced through a different code path.
-    Matched case-insensitively; anything else (e.g. winget genuinely missing from PATH) is a real
-    failure the caller should not retry.
+    The transient class is winget.exe's own file being briefly inaccessible (issues #253/#258):
+    ERROR_CANT_ACCESS_FILE (1920, "The file cannot be accessed by the system.") and
+    ERROR_SHARING_VIOLATION (32, "...being used by another process."). Anything else (e.g. winget
+    genuinely missing from PATH) is a real failure the caller should not retry.
+
+    Invoke-ExternalProcess reports the Win32 error code of a failed launch, and -NativeErrorCode
+    classifies by that code, which is the same in every display language (review finding P3-6).
+    Without a code, -Message is matched instead: against the English texts, against the
+    "StandardOutputEncoding is only supported when standard output is redirected." message
+    PowerShell's native-command invocation throws for the same broken alias (issue #277), and
+    against the two Win32 messages as this machine words them (Get-Win32ErrorMessage), so a German
+    "Das System kann auf die Datei nicht zugreifen" matches too. All matching ignores case.
 .PARAMETER Message
     The exception message to classify.
+.PARAMETER NativeErrorCode
+    The Win32 error code of the failed launch, when known.
 .RETURNS
     [bool]
 #>
@@ -31,10 +35,56 @@ function Test-TransientWingetLaunchError {
         [Parameter(Mandatory = $false)]
         [AllowNull()]
         [AllowEmptyString()]
-        [string]$Message
+        [string]$Message,
+
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [Nullable[int]]$NativeErrorCode
     )
 
-    return $Message -match 'cannot be accessed by the system|being used by another process|StandardOutputEncoding is only supported when standard output is redirected'
+    # ERROR_SHARING_VIOLATION and ERROR_CANT_ACCESS_FILE.
+    $transientCodes = @(32, 1920)
+    if ($null -ne $NativeErrorCode -and $transientCodes -contains $NativeErrorCode) {
+        return $true
+    }
+    if ([string]::IsNullOrWhiteSpace($Message)) {
+        return $false
+    }
+    if ($Message -match 'cannot be accessed by the system|being used by another process|StandardOutputEncoding is only supported when standard output is redirected') {
+        return $true
+    }
+    foreach ($code in $transientCodes) {
+        $localized = "$(Get-Win32ErrorMessage -Code $code)".Trim().TrimEnd('.')
+        if ($localized.Length -gt 0 -and $Message.IndexOf($localized, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+            return $true
+        }
+    }
+    return $false
+}
+
+<#
+.SYNOPSIS
+    Returns the text Windows gives a Win32 error code, in this machine's display language.
+.DESCRIPTION
+    The message Start-Process embeds when it cannot launch a program comes from the same Windows
+    message table (FormatMessage), so matching against it works in any display language (review
+    finding P3-6). Off Windows the .NET runtime words error codes as errno values, which mean
+    something else, so nothing is returned there.
+.PARAMETER Code
+    The Win32 error code.
+.RETURNS
+    [string] The message, or $null off Windows.
+#>
+function Get-Win32ErrorMessage {
+    param (
+        [Parameter(Mandatory = $true)]
+        [int]$Code
+    )
+
+    if ([System.Environment]::OSVersion.Platform -ne [System.PlatformID]::Win32NT) {
+        return $null
+    }
+    return (New-Object System.ComponentModel.Win32Exception($Code)).Message
 }
 
 <#
@@ -83,8 +133,8 @@ function Get-ConflictingDesktopAppInstallerVersions {
 .SYNOPSIS
     Resolves the winget executable to launch, optionally bypassing the app-execution alias.
 .DESCRIPTION
-    By default returns the bare command name 'winget', which Start-Process resolves through PATH to
-    the per-user app-execution alias - the fast path that works whenever winget is healthy.
+    By default returns the bare command name 'winget', which Invoke-ExternalProcess resolves through
+    PATH to the per-user app-execution alias - the fast path that works whenever winget is healthy.
 
     With -BypassAlias, resolves the real winget.exe inside the registered
     Microsoft.DesktopAppInstaller package's install location instead (the documented workaround for
