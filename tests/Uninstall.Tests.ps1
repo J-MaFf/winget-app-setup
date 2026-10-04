@@ -143,6 +143,20 @@ Describe 'Invoke-WingetUninstall' {
             ($script:errorMessages -join "`n") | Should -Match 'Winget-AutoUpdate was left in place'
         }
 
+        It 'Returns 2, removes nothing and keeps Winget-AutoUpdate, naming Group Policy, when the policy turns winget off (review finding P3-30)' {
+            # Initialize-Winget names the policy; another account or a fresh App Installer cannot
+            # help, so the uninstaller must not send the user there.
+            Mock Initialize-Winget { [pscustomobject]@{ Ready = $false; Diagnosis = 'PolicyBlocked' } }
+
+            $result = Invoke-WingetUninstall -Apps $script:apps -NonInteractive
+
+            $result | Should -Be 2
+            Should -Invoke Invoke-WingetProcess -Times 0 -Exactly
+            Should -Invoke Remove-LegacyScheduledUpdates -Times 0 -Exactly
+            Should -Invoke Uninstall-WingetAutoUpdate -Times 0 -Exactly
+            $script:errorMessages | Should -Be @('Group Policy on this PC blocks winget (see above), so nothing was uninstalled: without winget the uninstaller cannot tell which apps are installed. Winget-AutoUpdate was left in place, so the apps keep getting updates. Run the uninstaller again once the policy allows winget.')
+        }
+
         It 'Does not claim Winget-AutoUpdate was left in place when it is not installed (winget unusable)' {
             Mock Initialize-Winget { [pscustomobject]@{ Ready = $false; Diagnosis = 'NotLaunchable' } }
             Mock Test-WauInstalled { $false }
@@ -162,6 +176,23 @@ Describe 'Invoke-WingetUninstall' {
             $script:sequence[0..1] | Should -Be @('winget setup', 'list Contoso.AppOne')
             Should -Invoke Get-InstallAccountContext -Times 1 -Exactly
             Should -Invoke Initialize-Winget -Times 1 -Exactly -ParameterFilter { -not $WhatIf -and $null -ne $AccountContext -and -not $AccountContext.IsSystem }
+        }
+
+        It 'Drops a machine-wide winget path left by an earlier run in this session before it sets winget up (review finding P2-24)' {
+            # Resolve-WingetExecutable returns $script:MachineWingetPath once a SYSTEM run has found
+            # it; a path from an earlier run in the same session may no longer exist.
+            $script:MachineWingetPath = 'C:\stale\from\an\earlier\run\winget.exe'
+            $script:pathAtSetup = 'not called'
+            Mock Initialize-Winget { $script:pathAtSetup = $script:MachineWingetPath; [pscustomobject]@{ Ready = $true; Diagnosis = 'Ok' } }
+
+            try {
+                $null = Invoke-WingetUninstall -Apps $script:apps -NonInteractive
+            }
+            finally {
+                $script:MachineWingetPath = $null
+            }
+
+            $script:pathAtSetup | Should -BeNullOrEmpty
         }
 
         It 'Sets winget up as a SYSTEM run of the installer does: the account it decided, so the machine-wide winget and no account fix (review findings P2-24, P3-23)' {
@@ -545,6 +576,16 @@ Describe 'Invoke-WingetUninstall' {
             Should -Invoke Uninstall-WingetAutoUpdate -Times 0 -Exactly
             ($script:infoMessages -join "`n") | Should -Match 'A real run would try to set it up \(see above\) and, if winget still could not start, stop with exit code 2 before removing anything'
         }
+
+        It 'Stops the preview with 0, naming Group Policy, when the policy turns winget off' {
+            Mock Initialize-Winget { [pscustomobject]@{ Ready = $false; Diagnosis = 'PolicyBlocked' } }
+
+            $result = Invoke-WingetUninstall -Apps $script:apps -NonInteractive -WhatIf
+
+            $result | Should -Be 0
+            Should -Invoke Invoke-WingetProcess -Times 0 -Exactly
+            $script:infoMessages | Should -Contain '[DRY-RUN] Group Policy on this PC blocks winget (see above). A real run would stop with exit code 2 before removing anything. Without winget this preview cannot tell which apps are installed, so it stops here.'
+        }
     }
 
     Context 'Summary' {
@@ -658,7 +699,12 @@ Describe 'winget-app-uninstall.ps1 with the real module (P2-19)' {
 # Loaded after every module file, so these replace the module's own functions in the child run.
 function Test-IsAdmin { $true }
 function Get-DefaultAppCatalog { @(@{ name = 'Contoso.AppOne' }, @{ name = 'Contoso.AppTwo' }) }
-function Get-WingetPolicyBlock { $null }
+function Get-WingetPolicyBlock {
+    if ($env:UNINSTALL_TEST_SCENARIO -eq 'PolicyBlocked') {
+        return [pscustomobject]@{ Name = 'EnableAppInstaller'; Policy = 'Enable App Installer' }
+    }
+    $null
+}
 function Test-AndInstallWingetModule { $false }
 function Register-WingetAppInstallerForUser { [pscustomobject]@{ Registered = $false; ErrorCodes = @() } }
 function Get-WindowsAppRuntimeStatus { [pscustomobject]@{ Present = $true; Detail = 'present (test)' } }
@@ -711,6 +757,18 @@ function Invoke-WingetProcess {
         $run.Output | Should -Not -Match 'Skipping:'
         $run.Output | Should -Not -Match 'FAKE: winget (list|uninstall)'
         $run.Output | Should -Match 'winget cannot be started for this account, so nothing was uninstalled'
+    }
+
+    It 'Exits 2, runs no winget and keeps Winget-AutoUpdate when Group Policy turns winget off (review finding P3-30)' {
+        # The real Initialize-Winget reads the policy before it starts winget at all.
+        $run = Invoke-TestUninstallerScript -Root (Join-Path $TestDrive 'policy-blocked') -ModuleSource $script:moduleSource -Overrides $script:moduleOverrides -Environment @{ UNINSTALL_TEST_SCENARIO = 'PolicyBlocked'; WINGET_APP_SETUP_NONINTERACTIVE = '1' }
+
+        $run.ExitCode | Should -Be 2
+        $run.Output | Should -Not -Match 'FAKE: winget'
+        $run.Output | Should -Not -Match 'FAKE: Winget-AutoUpdate removed'
+        $run.Output | Should -Not -Match 'Skipping:'
+        $run.Output | Should -Match "Group Policy on this PC blocks winget: 'Enable App Installer' is Disabled"
+        $run.Output | Should -Match ([regex]::Escape('Group Policy on this PC blocks winget (see above), so nothing was uninstalled'))
     }
 
     It 'Exits 1 and keeps Winget-AutoUpdate when winget starts but cannot check the apps' {

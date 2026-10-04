@@ -45,11 +45,11 @@
     Winget-AutoUpdate was removed or was not installed; 3010 = the same, and a restart finishes
     removing an app or Winget-AutoUpdate (its uninstaller returned 3010 or 1641); 1 = an app could
     not be removed or checked (Winget-AutoUpdate is then kept), or Winget-AutoUpdate could not be
-    removed; 2 = winget cannot be started for this account, so nothing was removed; 3 = the app list
-    has invalid entries or is empty. 1 ranks above 3010. A dry run returns 0 when winget cannot be
-    started, and never 3010. winget-app-uninstall.ps1 adds 4 (not elevated and the UAC prompt was
-    declined or could not be shown) and 5 (an unexpected error, or the module could not be
-    loaded).
+    removed; 2 = winget cannot be started for this account, or Group Policy turns it off, so
+    nothing was removed (Winget-AutoUpdate included); 3 = the app list has invalid entries or is
+    empty. 1 ranks above 3010. A dry run returns 0 when winget cannot be started, and never 3010.
+    winget-app-uninstall.ps1 adds 4 (not elevated and the UAC prompt was declined or could not be
+    shown) and 5 (an unexpected error, or the module could not be loaded).
 #>
 function Invoke-WingetUninstall {
     [OutputType([int])]
@@ -102,15 +102,33 @@ function Invoke-WingetUninstall {
     $winget = Initialize-Winget -WhatIf:$WhatIf -AccountContext $account
     $wingetAvailable = [bool]$winget.Ready
     if (-not $wingetAvailable) {
+        # Group Policy (review finding P3-30) is not fixed by another account or by installing App
+        # Installer: Initialize-Winget has named the policy, and this says what that means here.
+        $policyBlocked = $winget.Diagnosis -eq 'PolicyBlocked'
         if ($WhatIf) {
-            Write-Info '[DRY-RUN] winget cannot be started for this account yet. A real run would try to set it up (see above) and, if winget still could not start, stop with exit code 2 before removing anything. Without winget this preview cannot tell which apps are installed, so it stops here.'
+            if ($policyBlocked) {
+                Write-Info '[DRY-RUN] Group Policy on this PC blocks winget (see above). A real run would stop with exit code 2 before removing anything. Without winget this preview cannot tell which apps are installed, so it stops here.'
+            }
+            else {
+                Write-Info '[DRY-RUN] winget cannot be started for this account yet. A real run would try to set it up (see above) and, if winget still could not start, stop with exit code 2 before removing anything. Without winget this preview cannot tell which apps are installed, so it stops here.'
+            }
             return 0
         }
-        $message = 'winget cannot be started for this account, so nothing was uninstalled: without winget the uninstaller cannot tell which apps are installed.'
+        if ($policyBlocked) {
+            $message = 'Group Policy on this PC blocks winget (see above), so nothing was uninstalled: without winget the uninstaller cannot tell which apps are installed.'
+        }
+        else {
+            $message = 'winget cannot be started for this account, so nothing was uninstalled: without winget the uninstaller cannot tell which apps are installed.'
+        }
         if (Test-WauInstalled) {
             $message += ' Winget-AutoUpdate was left in place, so the apps keep getting updates.'
         }
-        $message += ' Run the uninstaller from an account where winget works (for example the signed-in user, elevated), or install App Installer from https://aka.ms/getwinget, then run it again.'
+        if ($policyBlocked) {
+            $message += ' Run the uninstaller again once the policy allows winget.'
+        }
+        else {
+            $message += ' Run the uninstaller from an account where winget works (for example the signed-in user, elevated), or install App Installer from https://aka.ms/getwinget, then run it again.'
+        }
         Write-ErrorMessage $message
         return 2
     }

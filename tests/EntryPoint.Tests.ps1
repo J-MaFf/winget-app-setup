@@ -752,6 +752,32 @@ Describe 'One run at a time, and the RESULT line and last-run.json of every run 
         $result.Output | Should -Not -Match 'stopped early'
     }
 
+    It 'Ends a run Group Policy stops at the winget setup (exit code 2) with its RESULT line and last-run.json (review findings P3-30, P3-41)' {
+        # The real Invoke-WingetInstall: Initialize-Winget finds the policy before any winget call,
+        # the run returns 2 before its summary, and the entry script's early-exit route reports it.
+        $overrides = $script:elevated + "`n" +
+            "function Get-InstallAccountContext { [pscustomobject]@{ IsSystem = `$false; ProcessUser = 'CONTOSO\admin-tech'; SessionUser = 'CONTOSO\admin-tech'; IsCrossUserElevation = `$false } }`n" +
+            "function Get-PendingRestartState { `$null }`n" +
+            "function Wait-WauIdle { `$true }`n" +
+            "function Get-WingetPolicyBlock { [pscustomobject]@{ Name = 'EnableAppInstaller'; Policy = 'Enable App Installer' } }`n" +
+            "function Invoke-WingetProcess { throw 'winget must not run when Group Policy blocks it' }"
+        $path = New-FaultInjectedInstaller -Name 'policy-blocked.ps1' -Overrides $overrides
+
+        $result = Invoke-ChildInstaller -Arguments @('-File', $path, '-SkipSystemCheck', '-NonInteractive')
+
+        $result.ExitCode | Should -Be 2
+        $result.Output | Should -Match "Group Policy on this PC blocks winget: 'Enable App Installer' is Disabled"
+        $result.Output | Should -Not -Match 'UNEXPECTED ERROR|winget must not run'
+        $result.Output | Should -Match 'The installer stopped early with exit code 2: winget is not available or could not be started \(see above\)\.'
+        $transcript = (Get-ChildTranscript)[0].FullName
+        Get-ChildResultLine -Output $result.Output | Should -Be @("RESULT: exit=2 installed=0 skipped=0 deferred=0 failed=0 autoupdates=NotRun restart=no build=$($script:runBuildId) log=$transcript")
+        $result.Output.IndexOf('stopped early with exit code 2') | Should -BeLessThan $result.Output.IndexOf('RESULT: exit=2')
+        $record = Get-ChildRunRecord
+        $record.exitCode | Should -Be 2
+        $record.summaryReached | Should -BeFalse
+        @($record.apps).Count | Should -Be 0
+    }
+
     It 'Records a run stopped from outside as exit code 5' {
         $path = New-FaultInjectedInstaller -Name 'stopped-record.ps1' -Body 'throw [System.Management.Automation.PipelineStoppedException]::new()' -Overrides $script:elevated
 

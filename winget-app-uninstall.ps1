@@ -26,10 +26,11 @@
     Exit codes: 0 = done (every app removed, not installed, or kept on purpose, and Winget-AutoUpdate
     removed or not installed); 3010 = done, and a restart finishes removing an app or
     Winget-AutoUpdate; 1 = an app could not be removed or checked (Winget-AutoUpdate is then kept),
-    or Winget-AutoUpdate could not be removed; 2 = winget cannot be started for this account, so
-    nothing was removed; 3 = the app list has invalid entries; 4 = not elevated, and the UAC prompt
-    was declined or could not be shown (a non-interactive run shows none); 5 = stopped by an
-    unexpected error, or the WingetAppSetup module folder next to this script could not be loaded.
+    or Winget-AutoUpdate could not be removed; 2 = winget cannot be started for this account, or
+    Group Policy turns it off, so nothing was removed (Winget-AutoUpdate included); 3 = the app list
+    has invalid entries; 4 = not elevated, and the UAC prompt was declined or could not be shown (a
+    non-interactive run shows none); 5 = stopped by an unexpected error, or the WingetAppSetup
+    module folder next to this script could not be loaded.
 #>
 param (
     [switch]$WhatIf,
