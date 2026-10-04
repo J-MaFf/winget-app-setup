@@ -66,6 +66,9 @@ Describe 'Invoke-WingetUninstall' {
         Mock Reset-WindowsTerminalDelegation { $false }
         Mock Test-WindowsTerminalHostsCurrentSession { $false }
         Mock Get-PowerShellEdition { 'Desktop' }
+        # Never read the runner's real account or console session: a same-user run unless a test
+        # says otherwise (review findings P2-24, P3-23).
+        Mock Get-InstallAccountContext { New-TestAccountContext }
 
         $script:capturedTables = @{}
         $script:gridView = @{}
@@ -157,7 +160,21 @@ Describe 'Invoke-WingetUninstall' {
             $null = Invoke-WingetUninstall -Apps $script:apps -NonInteractive
 
             $script:sequence[0..1] | Should -Be @('winget setup', 'list Contoso.AppOne')
-            Should -Invoke Initialize-Winget -Times 1 -Exactly -ParameterFilter { -not $WhatIf }
+            Should -Invoke Get-InstallAccountContext -Times 1 -Exactly
+            Should -Invoke Initialize-Winget -Times 1 -Exactly -ParameterFilter { -not $WhatIf -and $null -ne $AccountContext -and -not $AccountContext.IsSystem }
+        }
+
+        It 'Sets winget up as a SYSTEM run of the installer does: the account it decided, so the machine-wide winget and no account fix (review findings P2-24, P3-23)' {
+            # An RMM agent runs the uninstaller as SYSTEM too. Initialize-Winget then uses the
+            # machine-wide winget.exe and never installs Microsoft.WinGet.Client.
+            Mock Get-InstallAccountContext { New-TestAccountContext -System }
+
+            $result = Invoke-WingetUninstall -Apps $script:apps -NonInteractive
+
+            $result | Should -Be 0
+            Should -Invoke Get-InstallAccountContext -Times 1 -Exactly
+            Should -Invoke Initialize-Winget -Times 1 -Exactly -ParameterFilter { $AccountContext.IsSystem }
+            $script:successMessages | Should -Contain 'Successfully uninstalled: Contoso.AppTwo'
         }
 
         It 'Returns 1 and keeps Winget-AutoUpdate when an app could not be removed' {
@@ -275,8 +292,32 @@ Describe 'Invoke-WingetUninstall' {
             $result = Invoke-WingetUninstall -Apps $apps -NonInteractive
 
             $result | Should -Be 0
-            $script:warningMessages | Should -Contain 'Condition for Contoso.AppOne failed to evaluate (probe broke); treating as applicable.'
+            $script:warningMessages | Should -Contain 'Condition for Contoso.AppOne failed to evaluate (probe broke); treating as applicable and attempting the uninstall.'
             $script:successMessages | Should -Contain 'Successfully uninstalled: Contoso.AppOne'
+        }
+
+        It 'Removes the app when its condition writes an error and gives no answer (fail-open, the installer''s rule, review finding P3-33)' {
+            # A probe that writes an error and returns nothing (a CIM query without -ErrorAction
+            # Stop) has no answer; it used to read as "does not apply", so the app was kept.
+            $apps = @(@{ name = 'Contoso.AppOne'; condition = { Write-Error 'RPC server is unavailable' } })
+
+            $result = Invoke-WingetUninstall -Apps $apps -NonInteractive
+
+            $result | Should -Be 0
+            ($script:warningMessages -join "`n") | Should -Match 'Condition for Contoso\.AppOne failed to evaluate \(RPC server is unavailable\); treating as applicable and attempting the uninstall\.'
+            $script:successMessages | Should -Contain 'Successfully uninstalled: Contoso.AppOne'
+        }
+
+        It 'Decides applicability with the installer''s Test-AppApplicability, after the installed check' {
+            Mock Test-AppApplicability { $false } -ParameterFilter { $App.name -eq 'Contoso.AppTwo' -and $Purpose -eq 'Uninstall' }
+            Mock Test-AppApplicability { $true }
+
+            $result = Invoke-WingetUninstall -Apps $script:apps -NonInteractive
+
+            $result | Should -Be 0
+            $script:warningMessages | Should -Contain 'Skipping: Contoso.AppTwo (not applicable: condition not met)'
+            $script:sequence | Should -Be @('list Contoso.AppOne', 'uninstall Contoso.AppOne', 'list Contoso.AppTwo')
+            Should -Invoke Test-AppApplicability -Times 2 -Exactly -ParameterFilter { $Purpose -eq 'Uninstall' }
         }
 
         It 'Keeps PowerShell 7 when it runs this uninstaller, and removes it from Windows PowerShell (<Edition>)' -ForEach @(

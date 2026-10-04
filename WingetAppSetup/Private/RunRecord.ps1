@@ -9,7 +9,8 @@
 .PARAMETER Id
     The winget package id.
 .PARAMETER Status
-    'Installed', 'Skipped' or 'Failed'.
+    'Installed', 'Skipped', 'Deferred' (a run for the whole PC found no machine-wide installer for
+    it: neither installed nor failed, review finding P3-22) or 'Failed'.
 .PARAMETER Reason
     Why the app was skipped or failed (the text the summary shows). Empty: none.
 .PARAMETER InstallResult
@@ -69,9 +70,20 @@ function New-AppRunRecord {
 .PARAMETER WauResult
     Install-WingetAutoUpdate's result, or $null when the run did not get that far.
 .RETURNS
-    [string] Install-WingetAutoUpdate's Status ('Configured', 'AlreadyPresent', 'FrameworkMissing',
-    'Failed'), 'AtRisk' for an existing install on a machine without its framework (what the
-    summary prints as 'AT RISK'), or 'NotRun'.
+    [string] One word for the run's 'Auto-updates:' line, for every Status Install-WingetAutoUpdate
+    returns (the summary's wording in parentheses):
+      'Configured'        (Configured)
+      'AlreadyPresent'    (Already present)
+      'AtRisk'            (AT RISK): AlreadyPresent on a machine without its framework
+      'Unhealthy'         (UNHEALTHY): installed, but its scheduled task is missing, disabled, has
+                          no enabled trigger or could not be checked (review finding P3-36),
+                          whether or not the framework is missing too
+      'FrameworkMissing'  (NOT CONFIGURED): Microsoft.WindowsAppRuntime.1.8 is missing
+      'Failed'            (FAILED)
+      'DryRun'            a dry run, which reports no record
+      'NotRun'            the run did not get that far
+    AtRisk, Unhealthy, FrameworkMissing and Failed make a run exit 8 when no app failed and winget
+    still works (Get-InstallerExitCode). A Status this list does not know is returned as it is.
 #>
 function Get-AutoUpdateResultStatus {
     param (
@@ -83,8 +95,15 @@ function Get-AutoUpdateResultStatus {
     if ($null -eq $WauResult -or [string]::IsNullOrWhiteSpace([string]$WauResult.Status)) {
         return 'NotRun'
     }
-    if ($WauResult.Status -eq 'AlreadyPresent' -and $WauResult.FrameworkMissing) {
-        return 'AtRisk'
+    switch ([string]$WauResult.Status) {
+        'AlreadyPresent' {
+            if ($WauResult.FrameworkMissing) {
+                return 'AtRisk'
+            }
+            return 'AlreadyPresent'
+        }
+        # Not AtRisk when its framework is missing too: the summary prints UNHEALTHY for it.
+        'Unhealthy' { return 'Unhealthy' }
     }
     return [string]$WauResult.Status
 }
@@ -189,6 +208,7 @@ function New-InstallerRunRecord {
         counts          = [ordered]@{
             installed = @($appList | Where-Object { $_.status -eq 'Installed' }).Count
             skipped   = @($appList | Where-Object { $_.status -eq 'Skipped' }).Count
+            deferred  = @($appList | Where-Object { $_.status -eq 'Deferred' }).Count
             failed    = @($appList | Where-Object { $_.status -eq 'Failed' }).Count
         }
         apps            = $appList
@@ -208,11 +228,16 @@ function New-InstallerRunRecord {
 .DESCRIPTION
     One line of space-separated key=value pairs, in a fixed order:
 
-        RESULT: exit=1 installed=12 skipped=2 failed=1 autoupdates=Configured restart=no build=1.0.0+1a2b3c4d log=C:\ProgramData\winget-app-setup\logs\install-20261004-143000.log
+        RESULT: exit=1 installed=12 skipped=2 deferred=0 failed=1 autoupdates=Configured restart=no build=1.0.0+1a2b3c4d log=C:\ProgramData\winget-app-setup\logs\install-20261004-143000.log
 
     Values hold no spaces, except log, which comes last so that everything after 'log=' is the path.
-    autoupdates is Get-AutoUpdateResultStatus's word, restart is yes or no, and build and log are
-    'unknown' and 'none' when there is no build id or transcript.
+    The counts are always there, in the summary's order: deferred counts the apps a run as SYSTEM
+    or under cross-user elevation left for the signed-in user's own account (no machine-wide
+    installer, review finding P3-22), which count neither as installed nor as failed. autoupdates
+    is Get-AutoUpdateResultStatus's word, restart is yes or no, and build and log are 'unknown' and
+    'none' when there is no build id or transcript. exit is the code the run ends with: after the
+    summary, Get-InstallerExitCode's (1 > 2 > 8 > 3010 > 0, so 8 when auto-updates are not set up
+    or unhealthy and nothing ranks above it).
 .PARAMETER Record
     A record from New-InstallerRunRecord.
 .RETURNS
@@ -236,7 +261,7 @@ function Format-InstallerResultLine {
     if ($Record.transcriptPath) {
         $log = $Record.transcriptPath
     }
-    return ('RESULT: exit={0} installed={1} skipped={2} failed={3} autoupdates={4} restart={5} build={6} log={7}' -f $Record.exitCode, $Record.counts.installed, $Record.counts.skipped, $Record.counts.failed, $Record.autoUpdates.status, $restart, $build, $log)
+    return ('RESULT: exit={0} installed={1} skipped={2} deferred={3} failed={4} autoupdates={5} restart={6} build={7} log={8}' -f $Record.exitCode, $Record.counts.installed, $Record.counts.skipped, $Record.counts.deferred, $Record.counts.failed, $Record.autoUpdates.status, $restart, $build, $log)
 }
 
 <#

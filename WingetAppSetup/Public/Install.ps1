@@ -353,6 +353,7 @@ function Invoke-WingetInstall {
                     elseif ($outcome.SkipReason -eq 'Provisioned') {
                         # A run for the whole PC read it from the machine (review finding P3-24).
                         Write-WarningMessage "Skipping: $($app.name) (already provisioned for every user on this PC)"
+                        $skipReason = 'already provisioned for every user on this PC'
                     }
                     else {
                         Write-WarningMessage "Skipping: $($app.name) (already installed)"
@@ -366,6 +367,7 @@ function Invoke-WingetInstall {
                     # (review finding P3-22). Write-DeferredAppsSummary says what can install it.
                     Write-WarningMessage "Deferred: $($app.name) (winget found no machine-wide installer for it)"
                     $deferredApps += $app.name
+                    $appRecords[$app.name] = New-AppRunRecord -Id $app.name -Status 'Deferred' -Reason 'winget found no machine-wide installer for it' -InstallResult $outcome.InstallResult
                 }
                 'Installed' {
                     if ($WhatIf) {
@@ -491,6 +493,7 @@ function Invoke-WingetInstall {
                         # installer (review finding P3-22): deferred, not failed.
                         Write-WarningMessage "Deferred: $appName (winget found no machine-wide installer for it)"
                         $deferredApps += $appName
+                        $appRecords[$appName] = New-AppRunRecord -Id $appName -Status 'Deferred' -Reason 'winget found no machine-wide installer for it' -InstallResult $outcome.InstallResult
                     }
                     elseif ($outcome.SkipReason -eq 'NotApplicable') {
                         # Same bucket and message as the first pass (review finding P3-34): an app
@@ -498,6 +501,7 @@ function Invoke-WingetInstall {
                         $conditionText = if ($appDef.conditionDescription) { $appDef.conditionDescription } else { 'condition not met' }
                         Write-WarningMessage "Skipping: $appName (not applicable: $conditionText)"
                         $skippedApps += $appName
+                        $appRecords[$appName] = New-AppRunRecord -Id $appName -Status 'Skipped' -Reason "not applicable: $conditionText"
                     }
                     else {
                         # 'Installed', or 'Skipped' when the first-pass install actually landed

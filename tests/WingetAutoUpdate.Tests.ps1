@@ -1222,6 +1222,24 @@ Describe 'Winget-AutoUpdate integration (issue #168)' {
             $script:msiexecRuns | Should -Be 2
             Should -Invoke Wait-WindowsInstallerIdle -Times 1 -Exactly -ParameterFilter { $MaximumSeconds -eq 600 }
         }
+
+        It 'reports the uninstall as failed, with the reason and the log, when Windows Installer stays busy past the wait budget' {
+            # The uninstaller keeps reading Succeeded (review finding P3-18): a removal msiexec never
+            # ran must not count as done.
+            Mock Test-WauInstalled { $true }
+            Mock Get-InstalledWauInfo { [pscustomobject]@{ Version = [version]'2.12.0'; ProductCode = '{11111111-2222-3333-4444-555555555555}' } }
+            Mock Invoke-ExternalProcess { New-TestProcessResult -ExitCode 1618 }
+            Mock Wait-WindowsInstallerIdle { [pscustomobject]@{ WaitedSeconds = $MaximumSeconds; Busy = $true } }
+            $logPath = Join-Path $TestDrive 'wau-msi-uninstall-2.log'
+
+            $result = Uninstall-WingetAutoUpdate -InstallInProgressWaitSeconds 120
+
+            $result.Succeeded | Should -BeFalse
+            $result.RestartRequired | Should -BeFalse
+            Should -Invoke Write-ErrorMessage -Times 1 -Exactly -ParameterFilter {
+                $Message -eq "Winget-AutoUpdate uninstall failed: Windows Installer was still busy with another installation after 1 retries and 120 seconds of waiting (msiexec exit code 1618). Run the uninstaller again once that installation has finished. msiexec log: $logPath"
+            }
+        }
     }
 
     Context 'Invoke-WingetInstall surfaces the WAU outcome (issue #186)' {

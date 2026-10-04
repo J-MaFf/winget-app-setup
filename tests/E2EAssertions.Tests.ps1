@@ -178,6 +178,25 @@ Describe 'ConvertFrom-InstallTranscript' {
         $transcript.SummaryFailed | Should -Be @('Google.Chrome', 'Google.GoogleDrive')
         $transcript.AutoUpdatesStatus | Should -Be 'NOT CONFIGURED'
     }
+
+    It 'Reads a Deferred row, and the Failed row after it, then ignores the RESULT line (review findings P3-22, P3-41)' {
+        # A run as SYSTEM or under cross-user elevation prints a Deferred row between Skipped and
+        # Failed; it used to end the table there, so the Failed row was never read. The RESULT line
+        # after the summary is for RMM tools, not for this parser.
+        $rows = @(@('Installed', '7zip.7zip'), @('Skipped', 'Git.Git'), @('Deferred', 'Microsoft.WindowsTerminal, Zoom.Zoom'), @('Failed', 'Google.Chrome'))
+        $table = Write-Table -Headers @('Status', 'Apps') -Rows $rows 6>&1 | Out-String
+        $result = 'RESULT: exit=1 installed=1 skipped=1 deferred=2 failed=1 autoupdates=Configured restart=no build=1.0.0+5ea1f00d log=C:\ProgramData\winget-app-setup\logs\install-20261005-060000.log'
+
+        $transcript = ConvertFrom-InstallTranscript -Content ("Summary:`n" + $table + "`nAuto-updates: Configured (Winget-AutoUpdate v2.12.0).`n" + $result)
+
+        $transcript.SummaryInstalled | Should -Be @('7zip.7zip')
+        $transcript.SummarySkipped | Should -Be @('Git.Git')
+        $transcript.SummaryDeferred | Should -Be @('Microsoft.WindowsTerminal', 'Zoom.Zoom')
+        $transcript.SummaryFailed | Should -Be @('Google.Chrome')
+        $transcript.FinalFailed | Should -Be @('Google.Chrome')
+        $transcript.AutoUpdatesStatus | Should -Be 'Configured'
+        $transcript.AutoUpdatesLine | Should -Be 'Configured (Winget-AutoUpdate v2.12.0).'
+    }
 }
 
 Describe 'ConvertFrom-BootstrapTranscript' {
@@ -376,6 +395,7 @@ Describe 'Installer messages the transcript parser keys on' {
         @{ File = 'WingetAppSetup/Public/Install.ps1'; Text = "`$headers = @('Status', 'Apps')" }
         @{ File = 'WingetAppSetup/Public/Install.ps1'; Text = "`$rows += , @('Installed', `$appList)" }
         @{ File = 'WingetAppSetup/Public/Install.ps1'; Text = "`$rows += , @('Skipped', `$appList)" }
+        @{ File = 'WingetAppSetup/Public/Install.ps1'; Text = "`$rows += , @('Deferred', `$appList)" }
         @{ File = 'WingetAppSetup/Public/Install.ps1'; Text = "`$rows += , @('Failed', `$appList)" }
         @{ File = 'WingetAppSetup/Public/Install.ps1'; Text = "Write-ErrorMessage 'Auto-updates: NOT CONFIGURED - Microsoft.WindowsAppRuntime.1.8 is missing, " }
         @{ File = 'WingetAppSetup/Public/Install.ps1'; Text = 'Write-ErrorMessage "Auto-updates: UNHEALTHY - ' }

@@ -15,16 +15,25 @@
     value.
 
     Invoke-WingetInstall calls this once per app per run, before the first pass, and carries the
-    verdict into the retry pass (Install-AppWithVerification -Applicable).
+    verdict into the retry pass (Install-AppWithVerification -Applicable). The uninstaller decides
+    with it too (Uninstall-CatalogApp, -Purpose Uninstall): an app that does not apply is not this
+    tool's to remove, and one whose condition has no answer is removed, the same rule failing open.
 .PARAMETER App
     A validated app-definition hashtable with an optional 'condition' scriptblock.
+.PARAMETER Purpose
+    What the caller does with an app that applies, for the fail-open warning only: 'Install'
+    (default) or 'Uninstall'. The rule is the same.
 .RETURNS
     [bool] True when the app applies to this machine (or its condition could not be evaluated).
 #>
 function Test-AppApplicability {
     param (
         [Parameter(Mandatory = $true)]
-        [hashtable]$App
+        [hashtable]$App,
+
+        [Parameter(Mandatory = $false)]
+        [ValidateSet('Install', 'Uninstall')]
+        [string]$Purpose = 'Install'
     )
 
     if (-not $App.condition) {
@@ -38,7 +47,11 @@ function Test-AppApplicability {
         return [bool](& $App.condition)
     }
     catch {
-        Write-WarningMessage "Condition for $($App.name) failed to evaluate ($($_.Exception.Message)); treating as applicable and attempting the install."
+        $attempt = 'attempting the install'
+        if ($Purpose -eq 'Uninstall') {
+            $attempt = 'attempting the uninstall'
+        }
+        Write-WarningMessage "Condition for $($App.name) failed to evaluate ($($_.Exception.Message)); treating as applicable and $attempt."
         return $true
     }
 }

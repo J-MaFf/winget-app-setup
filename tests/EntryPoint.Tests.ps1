@@ -622,8 +622,26 @@ Describe 'One run at a time, and the RESULT line and last-run.json of every run 
         $result.Output | Should -Not -Match 'HOUSEKEEPING RAN'
         $result.Output | Should -Not -Match 'UNEXPECTED ERROR|stopped before it finished'
         # It reports its exit code, but the record belongs to the run in progress.
-        Get-ChildResultLine -Output $result.Output | Should -Be @("RESULT: exit=6 installed=0 skipped=0 failed=0 autoupdates=NotRun restart=no build=$($script:runBuildId) log=$((Get-ChildTranscript)[0].FullName)")
+        Get-ChildResultLine -Output $result.Output | Should -Be @("RESULT: exit=6 installed=0 skipped=0 deferred=0 failed=0 autoupdates=NotRun restart=no build=$($script:runBuildId) log=$((Get-ChildTranscript)[0].FullName)")
         Get-ChildRunRecord | Should -BeNullOrEmpty
+    }
+
+    It 'Takes the run lock and housekeeps as SYSTEM too (an RMM run), and exits 6 while another run holds the lock (review finding P3-23)' {
+        # SYSTEM's token holds the Administrators group, so Test-IsAdmin is true for it and an RMM
+        # run as SYSTEM is the run that takes the lock and prunes; it must never be left out.
+        $systemRun = $script:elevated + "`nfunction Test-IsSystemAccount { `$true }"
+        $path = New-FaultInjectedInstaller -Name 'system-run.ps1' -Body "Write-Host 'install ran'; return 0" -Overrides $systemRun
+
+        $free = Invoke-ChildInstaller -Arguments @('-File', $path, '-SkipSystemCheck')
+        Lock-InstallerRun -Name $script:testRunLockName | Should -Be 'Acquired'
+        $busy = Invoke-ChildInstaller -Arguments @('-File', $path, '-SkipSystemCheck')
+
+        $free.ExitCode | Should -Be 0
+        $free.Output | Should -Match 'HOUSEKEEPING RAN'
+        (Get-Content -Raw -LiteralPath (Get-ChildItem -Path (Join-Path $TestDrive 'ProgramData') -Recurse -Filter 'last-run.json' | Select-Object -First 1).FullName) | Should -Match '"exitCode":\s*0'
+        $busy.ExitCode | Should -Be 6
+        $busy.Output | Should -Not -Match 'install ran|HOUSEKEEPING RAN'
+        $busy.Output | Should -Not -Match 'Press any key'
     }
 
     It 'Lets the next run start once the first one has ended, whatever its exit code' {
@@ -657,7 +675,7 @@ Describe 'One run at a time, and the RESULT line and last-run.json of every run 
         $result.ExitCode | Should -Be 2
         $transcript = (Get-ChildTranscript)[0].FullName
         $resultLines = Get-ChildResultLine -Output $result.Output
-        $resultLines | Should -Be @("RESULT: exit=2 installed=0 skipped=0 failed=0 autoupdates=NotRun restart=no build=$($script:runBuildId) log=$transcript")
+        $resultLines | Should -Be @("RESULT: exit=2 installed=0 skipped=0 deferred=0 failed=0 autoupdates=NotRun restart=no build=$($script:runBuildId) log=$transcript")
         $result.Output.IndexOf('stopped early with exit code 2') | Should -BeLessThan $result.Output.IndexOf('RESULT: exit=2')
         $record = Get-ChildRunRecord
         $record.exitCode | Should -Be 2
@@ -679,10 +697,59 @@ Describe 'One run at a time, and the RESULT line and last-run.json of every run 
 
         $result.ExitCode | Should -Be 5
         Get-ChildResultLine -Output $result.Output | Should -HaveCount 1
-        @(Get-ChildResultLine -Output $result.Output)[0] | Should -Match '^RESULT: exit=5 installed=1 skipped=0 failed=0 autoupdates=NotRun restart=no '
+        @(Get-ChildResultLine -Output $result.Output)[0] | Should -Match '^RESULT: exit=5 installed=1 skipped=0 deferred=0 failed=0 autoupdates=NotRun restart=no '
         $record = Get-ChildRunRecord
         $record.exitCode | Should -Be 5
         $record.apps[0].id | Should -Be 'Git.Git'
+    }
+
+    It 'Records the apps a SYSTEM run deferred, and its auto-update state, in last-run.json and the RESULT line of a run that stops early' {
+        # Review findings P3-22 and P3-36 meet P3-41: a run as SYSTEM leaves an app with no
+        # machine-wide installer for the signed-in user (Deferred), which the record must count on
+        # its own, and Winget-AutoUpdate's task may be unhealthy; both must reach the record of a
+        # run that is aborted after its app loop.
+        $body = "`$records = [ordered]@{}; " +
+            "`$records['Git.Git'] = New-AppRunRecord -Id 'Git.Git' -Status 'Installed' -InstallResult @{ ExitCode = 0 }; " +
+            "`$records['Contoso.UserOnly'] = New-AppRunRecord -Id 'Contoso.UserOnly' -Status 'Deferred' -Reason 'winget found no machine-wide installer for it' -InstallResult @{ ExitCode = -1978335216; NoMachineScopeInstaller = `$true }; " +
+            "`$script:InstallerAppRecords = `$records; " +
+            "`$script:InstallerAutoUpdateResult = [pscustomobject]@{ Status = 'Unhealthy'; Version = [version]'2.12.0'; FrameworkMissing = `$false; RestartRequired = `$false; Problem = 'its scheduled task is missing'; CheckFailed = `$false }; " +
+            "[int]::Parse('not-a-number')"
+        $path = New-FaultInjectedInstaller -Name 'aborted-deferred.ps1' -Body $body -Overrides $script:elevated
+
+        $result = Invoke-ChildInstaller -Arguments @('-File', $path, '-SkipSystemCheck', '-NonInteractive')
+
+        $result.ExitCode | Should -Be 5
+        Get-ChildResultLine -Output $result.Output | Should -HaveCount 1
+        @(Get-ChildResultLine -Output $result.Output)[0] | Should -Match '^RESULT: exit=5 installed=1 skipped=0 deferred=1 failed=0 autoupdates=Unhealthy restart=no '
+        $record = Get-ChildRunRecord
+        $record.counts.installed | Should -Be 1
+        $record.counts.deferred | Should -Be 1
+        $record.counts.failed | Should -Be 0
+        $record.apps[1].id | Should -Be 'Contoso.UserOnly'
+        $record.apps[1].status | Should -Be 'Deferred'
+        $record.apps[1].codeHex | Should -Be '0x8A150010'
+        $record.autoUpdates.status | Should -Be 'Unhealthy'
+    }
+
+    It 'Exits 8 with exit=8 in the RESULT line and last-run.json when auto-updates are unhealthy (review finding P3-36)' {
+        # The record Invoke-WingetInstall writes at its summary, with the code Get-InstallerExitCode
+        # gives it, and the process exit code the entry script passes on, must agree.
+        $body = "`$wau = [pscustomobject]@{ Status = 'Unhealthy'; Version = [version]'2.12.0'; FrameworkMissing = `$false; RestartRequired = `$false; Problem = 'its scheduled task is disabled'; CheckFailed = `$false }; " +
+            "`$code = Get-InstallerExitCode -FailedAppCount 0 -WingetUsable `$true -AutoUpdatesHealthy `$false; " +
+            "`$script:InstallerPendingExitCode = `$code; " +
+            "[void](Write-InstallerRunResult -Record (New-InstallerRunRecord -ExitCode `$code -Apps @(New-AppRunRecord -Id 'Git.Git' -Status 'Installed' -InstallResult @{ ExitCode = 0 }) -AutoUpdates (Get-AutoUpdateResultStatus -WauResult `$wau) -AutoUpdatesVersion `$wau.Version -WingetUsable `$true -SummaryReached)); " +
+            "`$script:InstallerRunReportPending = `$false; return `$code"
+        $path = New-FaultInjectedInstaller -Name 'unhealthy-wau.ps1' -Body $body -Overrides $script:elevated
+
+        $result = Invoke-ChildInstaller -Arguments @('-File', $path, '-SkipSystemCheck', '-NonInteractive')
+
+        $result.ExitCode | Should -Be 8
+        Get-ChildResultLine -Output $result.Output | Should -Be @("RESULT: exit=8 installed=1 skipped=0 deferred=0 failed=0 autoupdates=Unhealthy restart=no build=$($script:runBuildId) log=$((Get-ChildTranscript)[0].FullName)")
+        $record = Get-ChildRunRecord
+        $record.exitCode | Should -Be 8
+        $record.summaryReached | Should -BeTrue
+        $record.autoUpdates.status | Should -Be 'Unhealthy'
+        $result.Output | Should -Not -Match 'stopped early'
     }
 
     It 'Records a run stopped from outside as exit code 5' {

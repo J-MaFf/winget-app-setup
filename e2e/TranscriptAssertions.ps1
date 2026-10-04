@@ -83,8 +83,10 @@ function ConvertTo-TranscriptAppId {
         'Verification timed out for: <id>. ...';
       - retry pass: 'Retry succeeded: <id>', and 'Retry failed: <id> ...',
         'Winget list timed out for retry: <id>. ...' and 'Verification timed out for retry: <id>. ...'.
-    The summary table under 'Summary:' ('Status  Apps', then one 'Installed', 'Skipped' and
-    'Failed' row each) lists the final outcome. When winget cannot be launched, the circuit
+    The summary table under 'Summary:' ('Status  Apps', then one 'Installed', 'Skipped',
+    'Deferred' and 'Failed' row each; a run as SYSTEM or under cross-user elevation lists the apps
+    it left for the signed-in user as Deferred) lists the final outcome. A 'RESULT: ' line after
+    it (the machine-readable outcome) is not read here. When winget cannot be launched, the circuit
     breaker logs 'winget cannot be launched on this machine (...)' once and every remaining app
     fails with its own 'Failed to install: <id> (not attempted: ...)' line. The table is printed at
     full width since review finding P3-13; an older transcript can still cut a long row off with an
@@ -101,7 +103,7 @@ function ConvertTo-TranscriptAppId {
       RetrySucceeded     ids with 'Retry succeeded'.
       RetryFailed        ids with a retry-pass failure line (any of the three forms).
       HasSummary         whether the run reached its 'Summary:' line.
-      SummaryInstalled, SummarySkipped, SummaryFailed   the summary table's rows.
+      SummaryInstalled, SummarySkipped, SummaryDeferred, SummaryFailed   the summary table's rows.
       SummaryTruncated   whether a summary row was cut off.
       FinalFailed        the apps still failed at the end of the run: first-pass failures that
                          did not succeed on retry, retry-pass failures and the summary's Failed row.
@@ -133,7 +135,7 @@ function ConvertFrom-InstallTranscript {
     $firstPassFailed = [System.Collections.Generic.List[string]]::new()
     $retrySucceeded = [System.Collections.Generic.List[string]]::new()
     $retryFailed = [System.Collections.Generic.List[string]]::new()
-    $summaryRows = @{ Installed = @(); Skipped = @(); Failed = @() }
+    $summaryRows = @{ Installed = @(); Skipped = @(); Deferred = @(); Failed = @() }
     $hasSummary = $false
     $summaryTruncated = $false
     $wingetNotLaunchable = $false
@@ -160,7 +162,7 @@ function ConvertFrom-InstallTranscript {
             $tableState = 'done'
         }
         elseif ($tableState -eq 'rows') {
-            if ($line -match '^(?<status>Installed|Skipped|Failed)\s+(?<apps>\S.*)$') {
+            if ($line -match '^(?<status>Installed|Skipped|Deferred|Failed)\s+(?<apps>\S.*)$') {
                 $summaryRows[$Matches.status] += @($Matches.apps)
                 continue
             }
@@ -225,7 +227,7 @@ function ConvertFrom-InstallTranscript {
     }
 
     $summary = @{}
-    foreach ($status in @('Installed', 'Skipped', 'Failed')) {
+    foreach ($status in @('Installed', 'Skipped', 'Deferred', 'Failed')) {
         $ids = [System.Collections.Generic.List[string]]::new()
         foreach ($cell in $summaryRows[$status]) {
             foreach ($item in ($cell -split ',')) {
@@ -266,6 +268,7 @@ function ConvertFrom-InstallTranscript {
         HasSummary          = $hasSummary
         SummaryInstalled    = $summary['Installed']
         SummarySkipped      = $summary['Skipped']
+        SummaryDeferred     = $summary['Deferred']
         SummaryFailed       = $summary['Failed']
         SummaryTruncated    = $summaryTruncated
         FinalFailed         = $finalFailed

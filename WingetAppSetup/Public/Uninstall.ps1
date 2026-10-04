@@ -6,10 +6,12 @@
     The body of winget-app-uninstall.ps1 (review findings P2-19 and P3-18), which runs it after it
     has made sure it is elevated. It reuses the installer's pieces rather than its own copies:
       1. The app list is validated with Test-AppDefinitions, as the installer does (exit code 3).
-      2. winget is set up the way Invoke-WingetInstall does it, with Initialize-Winget (review
-         finding P3-25): App Installer's Group Policy, `winget --version`, the account fixes
-         (registering App Installer, then Repair-WinGetPackageManager, whose module is installed
-         only then) and the winget source. When winget still cannot be used, nothing is removed
+      2. winget is set up the way Invoke-WingetInstall does it, for the account it decides once
+         (Get-InstallAccountContext, review findings P2-24, P3-23), with Initialize-Winget (review
+         finding P3-25): App Installer's Group Policy, `winget --version` (as SYSTEM: the
+         machine-wide winget.exe, and no account fix), the account fixes (registering App
+         Installer, then Repair-WinGetPackageManager, whose module is installed only then) and the
+         winget source. When winget still cannot be used, nothing is removed
          and the run returns 2: without winget the uninstaller cannot tell which apps are installed,
          and removing Winget-AutoUpdate anyway would leave every app on the machine without
          updates. It used to report every app as "not installed", remove Winget-AutoUpdate and exit
@@ -87,11 +89,17 @@ function Invoke-WingetUninstall {
     }
     $apps = @($validationResult.ValidApps)
 
-    # winget first, set up as the installer does it (review finding P2-19): Initialize-Winget, the
-    # installer's one probe, classify and fix step (review finding P3-25). It says why when winget
+    # winget first, set up as the installer does it (review finding P2-19), for the account the
+    # run decides once, as Invoke-WingetInstall does (review findings P2-24, P3-23):
+    # Initialize-Winget, the installer's one probe, classify and fix step (review finding P3-25).
+    # As SYSTEM it uses the machine-wide winget.exe, which Resolve-WingetExecutable returns from
+    # then on (a stale path from an earlier run in this session is dropped first), and runs no
+    # account fix, so nothing installs Microsoft.WinGet.Client for SYSTEM. It says why when winget
     # cannot be used (not startable, or turned off by Group Policy); this run then removes nothing.
     # A dry run only probes (-WhatIf).
-    $winget = Initialize-Winget -WhatIf:$WhatIf
+    $script:MachineWingetPath = $null
+    $account = Get-InstallAccountContext
+    $winget = Initialize-Winget -WhatIf:$WhatIf -AccountContext $account
     $wingetAvailable = [bool]$winget.Ready
     if (-not $wingetAvailable) {
         if ($WhatIf) {

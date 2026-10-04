@@ -15,7 +15,7 @@ body:
     id: exit-code
     attributes:
       label: Exit code
-      description: From "The installer stopped early with exit code N", or `$LASTEXITCODE` after the run. 1 = an app failed or a pre-flight check failed; 2 = winget unavailable or broken; 3 = app catalog invalid; 4 = administrator rights required (the UAC prompt was declined, or the run was non-interactive and not elevated); 5 = the run was aborted; 7 = the PowerShell 7 setup failed; 8 = the apps installed, but automatic updates (Winget-AutoUpdate) are not set up, will not run, or could not be checked (see the "Auto-updates:" line in the summary).
+      description: From "The installer stopped early with exit code N", the `RESULT: exit=N` line near the end of the run, or `$LASTEXITCODE` after the run. 1 = an app failed or a pre-flight check failed; 2 = winget unavailable or broken; 3 = app catalog invalid; 4 = administrator rights required (the UAC prompt was declined, or the run was non-interactive and not elevated); 5 = the run was aborted; 6 = another run of the installer was in progress on this PC, so this run changed nothing; 7 = the PowerShell 7 setup failed; 8 = the apps installed, but automatic updates (Winget-AutoUpdate) are not set up, will not run, or could not be checked (see the "Auto-updates:" line in the summary); 3010 = success, but a restart is required to finish.
       placeholder: "2"
     validations:
       required: true

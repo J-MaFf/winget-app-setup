@@ -1171,6 +1171,85 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
             $script:InstallerRunReportPending | Should -BeFalse -Because 'the entry script must not add a second RESULT line'
         }
 
+        It 'Records each Deferred app and each not-applicable skip of a run for the whole PC, once per app, whichever pass decided it (review findings P3-22, P3-24, P3-34)' {
+            # A run as SYSTEM defers an app with no machine-wide installer, in the first pass or in
+            # the retry pass, skips an MSIX app provisioned for every user, and a retried app can
+            # come back not applicable. Each app gets one entry, with its final outcome.
+            Mock Get-InstallAccountContext { New-TestAccountContext -System }
+            $script:attempts = @{}
+            Mock Install-AppWithVerification {
+                $script:attempts[$App.name] = 1 + [int]$script:attempts[$App.name]
+                $noMachineScope = @{ ExitCode = -1978335216; Attempts = 1; NoMachineScopeInstaller = $true }
+                switch ($App.name) {
+                    'Contoso.UserOnly' { @{ Status = 'Deferred'; InstallResult = $noMachineScope; FailureReason = $null; DeferReason = 'NoMachineScopeInstaller' } }
+                    'Contoso.DellOnly' { @{ Status = 'Skipped'; SkipReason = 'NotApplicable'; InstallResult = $null; FailureReason = $null } }
+                    'Contoso.Terminal' { @{ Status = 'Skipped'; SkipReason = 'Provisioned'; InstallResult = $null; FailureReason = $null } }
+                    'Contoso.LateDeferred' {
+                        if ($script:attempts[$App.name] -eq 1) {
+                            return @{ Status = 'Failed'; InstallResult = @{ ExitCode = -1978335226; Attempts = 1 }; FailureReason = 'VerifyNotFound' }
+                        }
+                        @{ Status = 'Deferred'; InstallResult = $noMachineScope; FailureReason = $null; DeferReason = 'NoMachineScopeInstaller' }
+                    }
+                    'Contoso.LateNotApplicable' {
+                        if ($script:attempts[$App.name] -eq 1) {
+                            return @{ Status = 'Failed'; InstallResult = @{ ExitCode = -1978335226; Attempts = 1 }; FailureReason = 'VerifyNotFound' }
+                        }
+                        @{ Status = 'Skipped'; SkipReason = 'NotApplicable'; InstallResult = $null; FailureReason = $null }
+                    }
+                }
+            }
+            # The provisioned app comes right after a not-applicable one, so a reason left over
+            # from the app before it would show.
+            $apps = @(
+                @{ name = 'Contoso.UserOnly' },
+                @{ name = 'Contoso.DellOnly'; conditionDescription = 'Dell hardware only' },
+                @{ name = 'Contoso.Terminal'; msixName = 'Contoso.Terminal' },
+                @{ name = 'Contoso.LateDeferred' },
+                @{ name = 'Contoso.LateNotApplicable'; conditionDescription = 'ARM64 only' }
+            )
+
+            Invoke-WingetInstall -Apps $apps -NonInteractive | Should -Be 0
+
+            $script:reportedRecords.Count | Should -Be 1
+            $record = $script:reportedRecords[0]
+            @($record.apps | ForEach-Object { $_.id }) | Should -Be @('Contoso.UserOnly', 'Contoso.DellOnly', 'Contoso.Terminal', 'Contoso.LateDeferred', 'Contoso.LateNotApplicable')
+            @($script:InstallerAppRecords.Keys).Count | Should -Be 5
+            $byId = @{}
+            foreach ($app in $record.apps) { $byId[$app.id] = $app }
+            $byId['Contoso.UserOnly'].status | Should -Be 'Deferred'
+            $byId['Contoso.UserOnly'].reason | Should -Be 'winget found no machine-wide installer for it'
+            $byId['Contoso.UserOnly'].codeHex | Should -Be '0x8A150010'
+            $byId['Contoso.DellOnly'].status | Should -Be 'Skipped'
+            $byId['Contoso.DellOnly'].reason | Should -Be 'not applicable: Dell hardware only'
+            $byId['Contoso.Terminal'].status | Should -Be 'Skipped'
+            $byId['Contoso.Terminal'].reason | Should -Be 'already provisioned for every user on this PC'
+            # The retry pass replaced the first-pass failures with the final outcome.
+            $byId['Contoso.LateDeferred'].status | Should -Be 'Deferred'
+            $byId['Contoso.LateDeferred'].codeHex | Should -Be '0x8A150010'
+            $byId['Contoso.LateNotApplicable'].status | Should -Be 'Skipped'
+            $byId['Contoso.LateNotApplicable'].reason | Should -Be 'not applicable: ARM64 only'
+            $record.counts.installed | Should -Be 0
+            $record.counts.skipped | Should -Be 3
+            $record.counts.deferred | Should -Be 2
+            $record.counts.failed | Should -Be 0
+            $record.exitCode | Should -Be 0
+            Format-InstallerResultLine -Record $record | Should -Match '^RESULT: exit=0 installed=0 skipped=3 deferred=2 failed=0 '
+            # The summary agrees with the record.
+            @($script:capturedRows | Where-Object { $_[0] -eq 'Deferred' })[0][1] | Should -Be 'Contoso.UserOnly, Contoso.LateDeferred'
+        }
+
+        It 'Records exit code 8 and an unhealthy Winget-AutoUpdate when its task will not run (review finding P3-36)' {
+            Mock Install-WingetAutoUpdate { [pscustomobject]@{ Status = 'Unhealthy'; Version = [version]'2.12.0'; FrameworkMissing = $false; RestartRequired = $false; Problem = 'its scheduled task \WAU\Winget-AutoUpdate is disabled'; CheckFailed = $false } }
+
+            Invoke-WingetInstall -Apps @(@{ name = 'Contoso.New' }) -NonInteractive | Should -Be 8
+
+            $record = $script:reportedRecords[0]
+            $record.exitCode | Should -Be 8
+            $record.autoUpdates.status | Should -Be 'Unhealthy'
+            $record.autoUpdates.version | Should -Be '2.12.0'
+            Format-InstallerResultLine -Record $record | Should -Match '^RESULT: exit=8 installed=1 skipped=0 deferred=0 failed=0 autoupdates=Unhealthy restart=no '
+        }
+
         It 'Releases the run lock once it has reported, before the final prompt' {
             # A window left open at 'Press any key to exit...' must not make the next run (an RMM
             # schedule) exit 6.
@@ -1287,7 +1366,31 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
             $json.exitCode | Should -Be 0
             $json.apps[0].id | Should -Be 'Contoso.New'
             $json.transcriptPath | Should -Be $script:InstallLogPath
-            $script:hostLines[$script:hostLines.Count - 1] | Should -Match '^RESULT: exit=0 installed=1 skipped=0 failed=0 autoupdates=DryRun restart=no build=\S+ log=.*install-20261004-163005\.log$'
+            $script:hostLines[$script:hostLines.Count - 1] | Should -Match '^RESULT: exit=0 installed=1 skipped=0 deferred=0 failed=0 autoupdates=DryRun restart=no build=\S+ log=.*install-20261004-163005\.log$'
+        }
+
+        It 'Writes a Deferred app and the exit code 8 of an unhealthy Winget-AutoUpdate to last-run.json (review findings P3-22, P3-36)' {
+            $script:InstallerRunRecordEnabled = $true
+            Mock Get-InstallAccountContext { New-TestAccountContext -System }
+            Mock Install-AppWithVerification {
+                if ($App.name -eq 'Contoso.UserOnly') {
+                    return @{ Status = 'Deferred'; InstallResult = @{ ExitCode = -1978335216; Attempts = 1; NoMachineScopeInstaller = $true }; FailureReason = $null; DeferReason = 'NoMachineScopeInstaller' }
+                }
+                @{ Status = 'Installed'; InstallResult = @{ ExitCode = 0; Attempts = 1 }; FailureReason = $null }
+            }
+            Mock Install-WingetAutoUpdate { [pscustomobject]@{ Status = 'Unhealthy'; Version = [version]'2.12.0'; FrameworkMissing = $false; RestartRequired = $false; Problem = 'its scheduled task could not be checked'; CheckFailed = $true } }
+
+            Invoke-WingetInstall -Apps @(@{ name = 'Contoso.New' }, @{ name = 'Contoso.UserOnly' }) -NonInteractive | Should -Be 8
+
+            $json = Get-Content -Raw -LiteralPath (Join-Path $script:logDirectory 'last-run.json') | ConvertFrom-Json
+            $json.exitCode | Should -Be 8
+            $json.counts.installed | Should -Be 1
+            $json.counts.deferred | Should -Be 1
+            $json.counts.failed | Should -Be 0
+            $json.apps[1].id | Should -Be 'Contoso.UserOnly'
+            $json.apps[1].status | Should -Be 'Deferred'
+            $json.autoUpdates.status | Should -Be 'Unhealthy'
+            $script:hostLines[$script:hostLines.Count - 1] | Should -Match '^RESULT: exit=8 installed=1 skipped=0 deferred=1 failed=0 autoupdates=Unhealthy restart=no '
         }
 
         It 'Only prints the RESULT line when the entry script did not allow the record (or outside it)' {
@@ -2496,6 +2599,24 @@ Describe 'Test-AppApplicability (issue #217; review findings P3-33, P3-34)' {
 
         ($script:conditionWarnings -join "`n") | Should -Match 'Condition for Contoso\.App failed to evaluate \(Access denied\)'
     }
+
+    It 'Applies the same rule for the uninstaller, and says what failing open does there (review finding P3-18)' {
+        Test-AppApplicability -App @{ name = 'Contoso.App'; condition = { $false } } -Purpose Uninstall | Should -Be $false
+        Test-AppApplicability -App @{ name = 'Contoso.App'; condition = { throw 'probe broke' } } -Purpose Uninstall | Should -Be $true
+
+        $script:conditionWarnings | Should -Be @('Condition for Contoso.App failed to evaluate (probe broke); treating as applicable and attempting the uninstall.')
+    }
+}
+
+# The issue form a teammate fills in after a failed run (review findings P3-15, P3-36, P3-41): its
+# exit-code hint must explain every code the installer can exit with, including the codes added
+# since (6: another run in progress; 8: auto-updates not working) and 3010.
+Describe 'The install-failure issue form explains every exit code' {
+    It 'Explains exit code <_>' -ForEach @('1', '2', '3', '4', '5', '6', '7', '8', '3010') {
+        $form = Get-Content -Raw -LiteralPath (Join-Path $script:RepoRoot '.github/ISSUE_TEMPLATE/install-failure.yml')
+        $form -match '(?m)^\s+id: exit-code\s*\r?\n(?:.*\r?\n)*?\s+description: (?<description>.+)$' | Should -BeTrue
+        $Matches.description | Should -Match ('(?<![\d])' + $_ + ' = ')
+    }
 }
 
 # Review findings P2-8, P2-9 and P2-10: with winget.exe unable to start (E2E run 36384683838, second
@@ -2837,6 +2958,7 @@ Describe 'Write-InstallerExitNotice (review findings P2-14 and P3-15)' {
         @{ Code = 3; Meaning = 'the app catalog failed validation (see above)' }
         @{ Code = 4; Meaning = 'administrator rights are required, and this run was not elevated (see above)' }
         @{ Code = 5; Meaning = 'the run was aborted before it finished (see above)' }
+        @{ Code = 6; Meaning = 'another run of the installer is in progress on this PC' }
         @{ Code = 7; Meaning = 'PowerShell 7 could not be installed, or the installer could not be relaunched under it (see above)' }
     ) {
         Write-InstallerExitNotice -Code $Code

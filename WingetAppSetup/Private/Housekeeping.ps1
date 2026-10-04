@@ -22,8 +22,11 @@
     writes up to four, so 30 keeps the logs of at least the last 7 runs.
 .PARAMETER TempRoot
     The folders to look for leftover copies in. Default: the elevated relaunch's copy folder
-    (Get-ElevatedCopyRoot, %SystemRoot%\Temp), plus this account's temp folder when the run is
-    SYSTEM (an RMM run, whose temp folder is a system folder). Any other account's temp folder is
+    (Get-ElevatedCopyRoot, %SystemRoot%\Temp), plus, when the run is SYSTEM (an RMM run, whose temp
+    folders are system folders), this process's temp folder and SYSTEM's profile temp folder
+    (Get-SystemProfileTempRoot): the Windows PowerShell 5.1 bootstrap of a SYSTEM run saves its
+    copies in whichever of %SystemRoot%\Temp and that profile folder its environment names, which
+    need not be the folder the PowerShell 7 run calls its own. Any other account's temp folder is
     in a user profile, where that account's processes that are not elevated can rename and replace
     entries, so an elevated run leaves it alone (review of finding P3-42).
 .PARAMETER TempCopyMaxAgeHours
@@ -70,7 +73,7 @@ function Invoke-InstallerHousekeeping {
         if (-not $PSBoundParameters.ContainsKey('TempRoot')) {
             $TempRoot = @(Get-ElevatedCopyRoot)
             if (Test-IsSystemAccount) {
-                $TempRoot = @([System.IO.Path]::GetTempPath()) + $TempRoot
+                $TempRoot = @([System.IO.Path]::GetTempPath(), (Get-SystemProfileTempRoot)) + $TempRoot
             }
         }
         $copiesRemoved = Remove-StaleInstallerCopy -Root $TempRoot -MaxAgeHours $TempCopyMaxAgeHours -CurrentScriptPath $CurrentScriptPath
@@ -82,6 +85,26 @@ function Invoke-InstallerHousekeeping {
         Write-WarningMessage "Could not remove the installer's old logs and temporary copies: $($_.Exception.Message.Trim().TrimEnd('.')). Continuing."
     }
     return [pscustomobject]@{ LogsRemoved = $logsRemoved; CopiesRemoved = $copiesRemoved }
+}
+
+<#
+.SYNOPSIS
+    Returns SYSTEM's own temp folder: %SystemRoot%\System32\config\systemprofile\AppData\Local\Temp.
+.DESCRIPTION
+    Where the Windows PowerShell 5.1 bootstrap of a run as SYSTEM saves the installer's copy and the
+    PowerShell 7 MSI download when it was started with SYSTEM's profile environment, as a scheduled
+    task running as SYSTEM is (a service such as an RMM agent usually has %SystemRoot%\Temp,
+    Get-ElevatedCopyRoot, instead). The PowerShell 7 run that cleans up need not call this folder
+    its own: .NET 7 and later ask Windows' GetTempPath2, which names C:\Windows\SystemTemp for
+    SYSTEM where Windows has it. Only SYSTEM and Administrators can change entries in this folder,
+    which Remove-StaleInstallerCopy requires of a root. Built by string concatenation, as
+    Get-ElevatedCopyRoot is (Join-Path rejects a C: path off Windows); a function so tests can
+    point it elsewhere.
+.RETURNS
+    [string]
+#>
+function Get-SystemProfileTempRoot {
+    return (Get-WindowsDirectoryPath) + '\System32\config\systemprofile\AppData\Local\Temp'
 }
 
 <#

@@ -61,12 +61,12 @@ param (
 # This script is assembled from the WingetAppSetup module by build/Build-WingetInstallScript.ps1.
 # Edit the function source under WingetAppSetup/Public and WingetAppSetup/Private, then re-run the
 # build to regenerate this file. See readme.md ("Project layout") for details.
-# Build id: 1.0.0+daecfe38 (module version + SHA256 fragment of this whole script; issue #189).
+# Build id: 1.0.0+c1642e6f (module version + SHA256 fragment of this whole script; issue #189).
 # ------------------------------------------------------------------------------------------------
 
 # Content-derived build identity, logged at startup so a transcript from a remote machine
 # identifies exactly which installer build produced it (issue #189).
-$script:InstallerBuildId = '1.0.0+daecfe38'
+$script:InstallerBuildId = '1.0.0+c1642e6f'
 
 # ------------------------------------------------Functions------------------------------------------------
 
@@ -180,10 +180,11 @@ function Test-WingetUninstallRestartRequiredResult {
          not installed while all of them stayed on the machine.
       2. Not installed: Skipped, NotInstalled.
       3. A shell this run depends on (Get-HostingShellSkipReason): Skipped, HostsThisRun.
-      4. The app's catalog condition, with the installer's rule (review finding P3-18): falsy means
-         this tool does not manage the app on this machine (Dell Command Update on other hardware),
-         so it is Skipped, NotApplicable, and left alone. A condition that throws is warned about
-         and treated as applicable, as in the installer.
+      4. The app's catalog condition, decided by the installer's own rule, Test-AppApplicability
+         (review findings P3-18, P3-33): falsy means this tool does not manage the app on this
+         machine (Dell Command Update on other hardware), so it is Skipped, NotApplicable, and left
+         alone. A condition that throws or writes an error has no answer: it is warned about and
+         treated as applicable, as in the installer.
       5. `winget uninstall --exact --id <id> --silent --accept-source-agreements
          --disable-interactivity` through Invoke-WingetProcess, under the WingetUninstall time limit
          (review finding P3-18): output echoed into the console and the transcript, the installer's
@@ -258,24 +259,17 @@ function Uninstall-CatalogApp {
         return $result
     }
 
-    if ($App.condition) {
-        $conditionMet = $true
-        try {
-            $conditionMet = [bool](& $App.condition)
+    # The installer's single applicability rule (review finding P3-34), so a condition with no
+    # answer - one that throws, or writes an error and returns nothing - fails open here as well.
+    if (-not (Test-AppApplicability -App $App -Purpose Uninstall)) {
+        $conditionText = 'condition not met'
+        if ($App.conditionDescription) {
+            $conditionText = $App.conditionDescription
         }
-        catch {
-            Write-WarningMessage "Condition for $id failed to evaluate ($($_.Exception.Message)); treating as applicable."
-        }
-        if (-not $conditionMet) {
-            $conditionText = 'condition not met'
-            if ($App.conditionDescription) {
-                $conditionText = $App.conditionDescription
-            }
-            $result.Status = 'Skipped'
-            $result.SkipReason = 'NotApplicable'
-            $result.Reason = "not applicable: $conditionText"
-            return $result
-        }
+        $result.Status = 'Skipped'
+        $result.SkipReason = 'NotApplicable'
+        $result.Reason = "not applicable: $conditionText"
+        return $result
     }
 
     if ($WhatIf) {
@@ -1360,8 +1354,11 @@ function Test-AndInstallGraphicalTools {
     writes up to four, so 30 keeps the logs of at least the last 7 runs.
 .PARAMETER TempRoot
     The folders to look for leftover copies in. Default: the elevated relaunch's copy folder
-    (Get-ElevatedCopyRoot, %SystemRoot%\Temp), plus this account's temp folder when the run is
-    SYSTEM (an RMM run, whose temp folder is a system folder). Any other account's temp folder is
+    (Get-ElevatedCopyRoot, %SystemRoot%\Temp), plus, when the run is SYSTEM (an RMM run, whose temp
+    folders are system folders), this process's temp folder and SYSTEM's profile temp folder
+    (Get-SystemProfileTempRoot): the Windows PowerShell 5.1 bootstrap of a SYSTEM run saves its
+    copies in whichever of %SystemRoot%\Temp and that profile folder its environment names, which
+    need not be the folder the PowerShell 7 run calls its own. Any other account's temp folder is
     in a user profile, where that account's processes that are not elevated can rename and replace
     entries, so an elevated run leaves it alone (review of finding P3-42).
 .PARAMETER TempCopyMaxAgeHours
@@ -1408,7 +1405,7 @@ function Invoke-InstallerHousekeeping {
         if (-not $PSBoundParameters.ContainsKey('TempRoot')) {
             $TempRoot = @(Get-ElevatedCopyRoot)
             if (Test-IsSystemAccount) {
-                $TempRoot = @([System.IO.Path]::GetTempPath()) + $TempRoot
+                $TempRoot = @([System.IO.Path]::GetTempPath(), (Get-SystemProfileTempRoot)) + $TempRoot
             }
         }
         $copiesRemoved = Remove-StaleInstallerCopy -Root $TempRoot -MaxAgeHours $TempCopyMaxAgeHours -CurrentScriptPath $CurrentScriptPath
@@ -1420,6 +1417,26 @@ function Invoke-InstallerHousekeeping {
         Write-WarningMessage "Could not remove the installer's old logs and temporary copies: $($_.Exception.Message.Trim().TrimEnd('.')). Continuing."
     }
     return [pscustomobject]@{ LogsRemoved = $logsRemoved; CopiesRemoved = $copiesRemoved }
+}
+
+<#
+.SYNOPSIS
+    Returns SYSTEM's own temp folder: %SystemRoot%\System32\config\systemprofile\AppData\Local\Temp.
+.DESCRIPTION
+    Where the Windows PowerShell 5.1 bootstrap of a run as SYSTEM saves the installer's copy and the
+    PowerShell 7 MSI download when it was started with SYSTEM's profile environment, as a scheduled
+    task running as SYSTEM is (a service such as an RMM agent usually has %SystemRoot%\Temp,
+    Get-ElevatedCopyRoot, instead). The PowerShell 7 run that cleans up need not call this folder
+    its own: .NET 7 and later ask Windows' GetTempPath2, which names C:\Windows\SystemTemp for
+    SYSTEM where Windows has it. Only SYSTEM and Administrators can change entries in this folder,
+    which Remove-StaleInstallerCopy requires of a root. Built by string concatenation, as
+    Get-ElevatedCopyRoot is (Join-Path rejects a C: path off Windows); a function so tests can
+    point it elsewhere.
+.RETURNS
+    [string]
+#>
+function Get-SystemProfileTempRoot {
+    return (Get-WindowsDirectoryPath) + '\System32\config\systemprofile\AppData\Local\Temp'
 }
 
 <#
@@ -1633,16 +1650,25 @@ function Remove-StaleInstallerCopy {
     value.
 
     Invoke-WingetInstall calls this once per app per run, before the first pass, and carries the
-    verdict into the retry pass (Install-AppWithVerification -Applicable).
+    verdict into the retry pass (Install-AppWithVerification -Applicable). The uninstaller decides
+    with it too (Uninstall-CatalogApp, -Purpose Uninstall): an app that does not apply is not this
+    tool's to remove, and one whose condition has no answer is removed, the same rule failing open.
 .PARAMETER App
     A validated app-definition hashtable with an optional 'condition' scriptblock.
+.PARAMETER Purpose
+    What the caller does with an app that applies, for the fail-open warning only: 'Install'
+    (default) or 'Uninstall'. The rule is the same.
 .RETURNS
     [bool] True when the app applies to this machine (or its condition could not be evaluated).
 #>
 function Test-AppApplicability {
     param (
         [Parameter(Mandatory = $true)]
-        [hashtable]$App
+        [hashtable]$App,
+
+        [Parameter(Mandatory = $false)]
+        [ValidateSet('Install', 'Uninstall')]
+        [string]$Purpose = 'Install'
     )
 
     if (-not $App.condition) {
@@ -1656,7 +1682,11 @@ function Test-AppApplicability {
         return [bool](& $App.condition)
     }
     catch {
-        Write-WarningMessage "Condition for $($App.name) failed to evaluate ($($_.Exception.Message)); treating as applicable and attempting the install."
+        $attempt = 'attempting the install'
+        if ($Purpose -eq 'Uninstall') {
+            $attempt = 'attempting the uninstall'
+        }
+        Write-WarningMessage "Condition for $($App.name) failed to evaluate ($($_.Exception.Message)); treating as applicable and $attempt."
         return $true
     }
 }
@@ -4987,7 +5017,8 @@ function Unlock-InstallerRun {
 .PARAMETER Id
     The winget package id.
 .PARAMETER Status
-    'Installed', 'Skipped' or 'Failed'.
+    'Installed', 'Skipped', 'Deferred' (a run for the whole PC found no machine-wide installer for
+    it: neither installed nor failed, review finding P3-22) or 'Failed'.
 .PARAMETER Reason
     Why the app was skipped or failed (the text the summary shows). Empty: none.
 .PARAMETER InstallResult
@@ -5047,9 +5078,20 @@ function New-AppRunRecord {
 .PARAMETER WauResult
     Install-WingetAutoUpdate's result, or $null when the run did not get that far.
 .RETURNS
-    [string] Install-WingetAutoUpdate's Status ('Configured', 'AlreadyPresent', 'FrameworkMissing',
-    'Failed'), 'AtRisk' for an existing install on a machine without its framework (what the
-    summary prints as 'AT RISK'), or 'NotRun'.
+    [string] One word for the run's 'Auto-updates:' line, for every Status Install-WingetAutoUpdate
+    returns (the summary's wording in parentheses):
+      'Configured'        (Configured)
+      'AlreadyPresent'    (Already present)
+      'AtRisk'            (AT RISK): AlreadyPresent on a machine without its framework
+      'Unhealthy'         (UNHEALTHY): installed, but its scheduled task is missing, disabled, has
+                          no enabled trigger or could not be checked (review finding P3-36),
+                          whether or not the framework is missing too
+      'FrameworkMissing'  (NOT CONFIGURED): Microsoft.WindowsAppRuntime.1.8 is missing
+      'Failed'            (FAILED)
+      'DryRun'            a dry run, which reports no record
+      'NotRun'            the run did not get that far
+    AtRisk, Unhealthy, FrameworkMissing and Failed make a run exit 8 when no app failed and winget
+    still works (Get-InstallerExitCode). A Status this list does not know is returned as it is.
 #>
 function Get-AutoUpdateResultStatus {
     param (
@@ -5061,8 +5103,15 @@ function Get-AutoUpdateResultStatus {
     if ($null -eq $WauResult -or [string]::IsNullOrWhiteSpace([string]$WauResult.Status)) {
         return 'NotRun'
     }
-    if ($WauResult.Status -eq 'AlreadyPresent' -and $WauResult.FrameworkMissing) {
-        return 'AtRisk'
+    switch ([string]$WauResult.Status) {
+        'AlreadyPresent' {
+            if ($WauResult.FrameworkMissing) {
+                return 'AtRisk'
+            }
+            return 'AlreadyPresent'
+        }
+        # Not AtRisk when its framework is missing too: the summary prints UNHEALTHY for it.
+        'Unhealthy' { return 'Unhealthy' }
     }
     return [string]$WauResult.Status
 }
@@ -5167,6 +5216,7 @@ function New-InstallerRunRecord {
         counts          = [ordered]@{
             installed = @($appList | Where-Object { $_.status -eq 'Installed' }).Count
             skipped   = @($appList | Where-Object { $_.status -eq 'Skipped' }).Count
+            deferred  = @($appList | Where-Object { $_.status -eq 'Deferred' }).Count
             failed    = @($appList | Where-Object { $_.status -eq 'Failed' }).Count
         }
         apps            = $appList
@@ -5186,11 +5236,16 @@ function New-InstallerRunRecord {
 .DESCRIPTION
     One line of space-separated key=value pairs, in a fixed order:
 
-        RESULT: exit=1 installed=12 skipped=2 failed=1 autoupdates=Configured restart=no build=1.0.0+1a2b3c4d log=C:\ProgramData\winget-app-setup\logs\install-20261004-143000.log
+        RESULT: exit=1 installed=12 skipped=2 deferred=0 failed=1 autoupdates=Configured restart=no build=1.0.0+1a2b3c4d log=C:\ProgramData\winget-app-setup\logs\install-20261004-143000.log
 
     Values hold no spaces, except log, which comes last so that everything after 'log=' is the path.
-    autoupdates is Get-AutoUpdateResultStatus's word, restart is yes or no, and build and log are
-    'unknown' and 'none' when there is no build id or transcript.
+    The counts are always there, in the summary's order: deferred counts the apps a run as SYSTEM
+    or under cross-user elevation left for the signed-in user's own account (no machine-wide
+    installer, review finding P3-22), which count neither as installed nor as failed. autoupdates
+    is Get-AutoUpdateResultStatus's word, restart is yes or no, and build and log are 'unknown' and
+    'none' when there is no build id or transcript. exit is the code the run ends with: after the
+    summary, Get-InstallerExitCode's (1 > 2 > 8 > 3010 > 0, so 8 when auto-updates are not set up
+    or unhealthy and nothing ranks above it).
 .PARAMETER Record
     A record from New-InstallerRunRecord.
 .RETURNS
@@ -5214,7 +5269,7 @@ function Format-InstallerResultLine {
     if ($Record.transcriptPath) {
         $log = $Record.transcriptPath
     }
-    return ('RESULT: exit={0} installed={1} skipped={2} failed={3} autoupdates={4} restart={5} build={6} log={7}' -f $Record.exitCode, $Record.counts.installed, $Record.counts.skipped, $Record.counts.failed, $Record.autoUpdates.status, $restart, $build, $log)
+    return ('RESULT: exit={0} installed={1} skipped={2} deferred={3} failed={4} autoupdates={5} restart={6} build={7} log={8}' -f $Record.exitCode, $Record.counts.installed, $Record.counts.skipped, $Record.counts.deferred, $Record.counts.failed, $Record.autoUpdates.status, $restart, $build, $log)
 }
 
 <#
@@ -6709,15 +6764,17 @@ function Test-WindowsTerminalInstalled {
 .DESCRIPTION
     Set-WindowsTerminalAsDefaultTerminalApplication writes DelegationConsole and DelegationTerminal
     under HKCU:\Console\%%Startup. Removing Windows Terminal leaves them behind (review finding
-    P3-18). Windows then falls back to the console host, but Test-WindowsTerminalHostsCurrentSession
-    still reads the values as "this session is hosted by Windows Terminal", so the installer would
-    skip Microsoft.WindowsTerminal as not applicable on every later run. The uninstaller calls this
-    after its app loop once winget no longer lists Windows Terminal: when both values still name
-    Windows Terminal (the values the installer writes) and Test-WindowsTerminalInstalled finds no
-    Windows Terminal either, both are removed, which is Windows' own default ("Let Windows
-    decide"). Values naming another terminal (Windows Terminal
-    Preview, the console host) are left alone, and so is everything while a Windows Terminal is
-    installed. The values are per-user: this changes only the account running it.
+    P3-18). Windows then falls back to the console host. Test-WindowsTerminalHostsCurrentSession
+    counts the values only while Windows Terminal is installed (review finding P3-35), so they no
+    longer make the installer skip Microsoft.WindowsTerminal as not applicable, but they are still
+    the installer's setting, and would make Windows Terminal the default terminal again if it came
+    back by any other route: an uninstall takes back what the installer set. The uninstaller calls
+    this after its app loop once winget no longer lists Windows Terminal: when both values still
+    name Windows Terminal (the values the installer writes) and Test-WindowsTerminalInstalled finds
+    no Windows Terminal either, both are removed, which is Windows' own default ("Let Windows
+    decide"). Values naming another terminal (Windows Terminal Preview, the console host) are left
+    alone, and so is everything while a Windows Terminal is installed. The values are per-user:
+    this changes only the account running it.
 .PARAMETER WhatIf
     Dry run: says what would be removed and changes nothing.
 .RETURNS
@@ -8454,6 +8511,7 @@ function Invoke-WingetInstall {
                     elseif ($outcome.SkipReason -eq 'Provisioned') {
                         # A run for the whole PC read it from the machine (review finding P3-24).
                         Write-WarningMessage "Skipping: $($app.name) (already provisioned for every user on this PC)"
+                        $skipReason = 'already provisioned for every user on this PC'
                     }
                     else {
                         Write-WarningMessage "Skipping: $($app.name) (already installed)"
@@ -8467,6 +8525,7 @@ function Invoke-WingetInstall {
                     # (review finding P3-22). Write-DeferredAppsSummary says what can install it.
                     Write-WarningMessage "Deferred: $($app.name) (winget found no machine-wide installer for it)"
                     $deferredApps += $app.name
+                    $appRecords[$app.name] = New-AppRunRecord -Id $app.name -Status 'Deferred' -Reason 'winget found no machine-wide installer for it' -InstallResult $outcome.InstallResult
                 }
                 'Installed' {
                     if ($WhatIf) {
@@ -8592,6 +8651,7 @@ function Invoke-WingetInstall {
                         # installer (review finding P3-22): deferred, not failed.
                         Write-WarningMessage "Deferred: $appName (winget found no machine-wide installer for it)"
                         $deferredApps += $appName
+                        $appRecords[$appName] = New-AppRunRecord -Id $appName -Status 'Deferred' -Reason 'winget found no machine-wide installer for it' -InstallResult $outcome.InstallResult
                     }
                     elseif ($outcome.SkipReason -eq 'NotApplicable') {
                         # Same bucket and message as the first pass (review finding P3-34): an app
@@ -8599,6 +8659,7 @@ function Invoke-WingetInstall {
                         $conditionText = if ($appDef.conditionDescription) { $appDef.conditionDescription } else { 'condition not met' }
                         Write-WarningMessage "Skipping: $appName (not applicable: $conditionText)"
                         $skippedApps += $appName
+                        $appRecords[$appName] = New-AppRunRecord -Id $appName -Status 'Skipped' -Reason "not applicable: $conditionText"
                     }
                     else {
                         # 'Installed', or 'Skipped' when the first-pass install actually landed
@@ -9162,10 +9223,12 @@ function Test-SystemRequirements {
     The body of winget-app-uninstall.ps1 (review findings P2-19 and P3-18), which runs it after it
     has made sure it is elevated. It reuses the installer's pieces rather than its own copies:
       1. The app list is validated with Test-AppDefinitions, as the installer does (exit code 3).
-      2. winget is set up the way Invoke-WingetInstall does it, with Initialize-Winget (review
-         finding P3-25): App Installer's Group Policy, `winget --version`, the account fixes
-         (registering App Installer, then Repair-WinGetPackageManager, whose module is installed
-         only then) and the winget source. When winget still cannot be used, nothing is removed
+      2. winget is set up the way Invoke-WingetInstall does it, for the account it decides once
+         (Get-InstallAccountContext, review findings P2-24, P3-23), with Initialize-Winget (review
+         finding P3-25): App Installer's Group Policy, `winget --version` (as SYSTEM: the
+         machine-wide winget.exe, and no account fix), the account fixes (registering App
+         Installer, then Repair-WinGetPackageManager, whose module is installed only then) and the
+         winget source. When winget still cannot be used, nothing is removed
          and the run returns 2: without winget the uninstaller cannot tell which apps are installed,
          and removing Winget-AutoUpdate anyway would leave every app on the machine without
          updates. It used to report every app as "not installed", remove Winget-AutoUpdate and exit
@@ -9243,11 +9306,17 @@ function Invoke-WingetUninstall {
     }
     $apps = @($validationResult.ValidApps)
 
-    # winget first, set up as the installer does it (review finding P2-19): Initialize-Winget, the
-    # installer's one probe, classify and fix step (review finding P3-25). It says why when winget
+    # winget first, set up as the installer does it (review finding P2-19), for the account the
+    # run decides once, as Invoke-WingetInstall does (review findings P2-24, P3-23):
+    # Initialize-Winget, the installer's one probe, classify and fix step (review finding P3-25).
+    # As SYSTEM it uses the machine-wide winget.exe, which Resolve-WingetExecutable returns from
+    # then on (a stale path from an earlier run in this session is dropped first), and runs no
+    # account fix, so nothing installs Microsoft.WinGet.Client for SYSTEM. It says why when winget
     # cannot be used (not startable, or turned off by Group Policy); this run then removes nothing.
     # A dry run only probes (-WhatIf).
-    $winget = Initialize-Winget -WhatIf:$WhatIf
+    $script:MachineWingetPath = $null
+    $account = Get-InstallAccountContext
+    $winget = Initialize-Winget -WhatIf:$WhatIf -AccountContext $account
     $wingetAvailable = [bool]$winget.Ready
     if (-not $wingetAvailable) {
         if ($WhatIf) {

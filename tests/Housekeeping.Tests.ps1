@@ -285,17 +285,29 @@ Describe 'Invoke-InstallerHousekeeping (review finding P3-42)' {
         Should -Invoke Remove-OldInstallerLog -Times 1 -Exactly -ParameterFilter { $LogDirectory -eq $script:logDirectory -and $KeepTranscripts -eq 30 }
     }
 
-    It 'Also looks in its own temp folder when the run is SYSTEM (an RMM run)' {
+    It 'Also looks in its own temp folder and SYSTEM''s profile temp folder when the run is SYSTEM (an RMM run)' {
+        # The Windows PowerShell 5.1 bootstrap of a SYSTEM run started with SYSTEM's profile
+        # environment (a scheduled task) saves its copies in systemprofile\AppData\Local\Temp,
+        # which the PowerShell 7 run need not call its own temp folder (.NET's GetTempPath2 names
+        # C:\Windows\SystemTemp for SYSTEM).
         Mock Test-IsSystemAccount { $true }
         Mock Remove-OldInstallerLog { 0 }
         Mock Remove-StaleInstallerCopy { 0 }
         Mock Get-ElevatedCopyRoot { 'X:\Windows\Temp' }
+        Mock Get-SystemProfileTempRoot { 'X:\Windows\System32\config\systemprofile\AppData\Local\Temp' }
 
         [void](Invoke-InstallerHousekeeping -LogDirectory $script:logDirectory -CurrentScriptPath 'X:\copy\winget-app-install.ps1')
 
         Should -Invoke Remove-StaleInstallerCopy -Times 1 -Exactly -ParameterFilter {
-            $Root.Count -eq 2 -and $Root[0] -eq [System.IO.Path]::GetTempPath() -and $Root[1] -eq 'X:\Windows\Temp'
+            $Root.Count -eq 3 -and $Root[0] -eq [System.IO.Path]::GetTempPath() -and
+            $Root[1] -eq 'X:\Windows\System32\config\systemprofile\AppData\Local\Temp' -and $Root[2] -eq 'X:\Windows\Temp'
         }
+    }
+
+    It 'Names SYSTEM''s profile temp folder under the Windows folder' {
+        Mock Get-WindowsDirectoryPath { 'X:\Windows' }
+
+        Get-SystemProfileTempRoot | Should -Be 'X:\Windows\System32\config\systemprofile\AppData\Local\Temp'
     }
 
     It 'Prunes no logs when the run has no transcript' {

@@ -128,15 +128,17 @@ function Test-WindowsTerminalInstalled {
 .DESCRIPTION
     Set-WindowsTerminalAsDefaultTerminalApplication writes DelegationConsole and DelegationTerminal
     under HKCU:\Console\%%Startup. Removing Windows Terminal leaves them behind (review finding
-    P3-18). Windows then falls back to the console host, but Test-WindowsTerminalHostsCurrentSession
-    still reads the values as "this session is hosted by Windows Terminal", so the installer would
-    skip Microsoft.WindowsTerminal as not applicable on every later run. The uninstaller calls this
-    after its app loop once winget no longer lists Windows Terminal: when both values still name
-    Windows Terminal (the values the installer writes) and Test-WindowsTerminalInstalled finds no
-    Windows Terminal either, both are removed, which is Windows' own default ("Let Windows
-    decide"). Values naming another terminal (Windows Terminal
-    Preview, the console host) are left alone, and so is everything while a Windows Terminal is
-    installed. The values are per-user: this changes only the account running it.
+    P3-18). Windows then falls back to the console host. Test-WindowsTerminalHostsCurrentSession
+    counts the values only while Windows Terminal is installed (review finding P3-35), so they no
+    longer make the installer skip Microsoft.WindowsTerminal as not applicable, but they are still
+    the installer's setting, and would make Windows Terminal the default terminal again if it came
+    back by any other route: an uninstall takes back what the installer set. The uninstaller calls
+    this after its app loop once winget no longer lists Windows Terminal: when both values still
+    name Windows Terminal (the values the installer writes) and Test-WindowsTerminalInstalled finds
+    no Windows Terminal either, both are removed, which is Windows' own default ("Let Windows
+    decide"). Values naming another terminal (Windows Terminal Preview, the console host) are left
+    alone, and so is everything while a Windows Terminal is installed. The values are per-user:
+    this changes only the account running it.
 .PARAMETER WhatIf
     Dry run: says what would be removed and changes nothing.
 .RETURNS
