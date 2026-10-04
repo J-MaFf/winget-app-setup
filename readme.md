@@ -198,9 +198,11 @@ git config core.hooksPath .githooks
 The hook is fast and forgiving by design: it only runs when the staged files touch
 `WingetAppSetup/`, `build/`, a `.psd1` manifest, or `winget-app-install.ps1` itself, and if
 `pwsh` is not on `PATH` it prints a warning and lets the commit through — CI enforces the same
-check on every push and pull request, so nothing ships unverified either way. On failure it
-prints how to fix it: re-run the build and stage the regenerated installer together with your
-module change.
+check on every push and pull request, so nothing ships unverified either way. It checks the
+staged files (exported to a temporary directory with `git checkout-index`), not the working tree,
+so a module change staged without its regenerated installer is blocked even when the working tree
+was rebuilt. On failure it prints how to fix it: re-run the build and stage the regenerated
+installer together with your module change.
 
 > **If you also use the beads hooks:** `bd hooks install` (opt-in — the shims under
 > `.beads/hooks/` are inert by default) writes its hooks into `.git/hooks/`, and setting
@@ -227,17 +229,25 @@ guards, most of which run in both build and `-Check` modes of
    cannot silently resolve to an external cmdlet that differs only by case) or an external
    command; catches functions dropped from the module while still being called — the drift
    class that broke the one-liner in
-   [#154](https://github.com/J-MaFf/winget-app-setup/issues/154). Runs on Windows, where the
-   installer's Windows-only cmdlets are resolvable.
+   [#154](https://github.com/J-MaFf/winget-app-setup/issues/154). Runs on every platform. On
+   Linux and macOS the Windows-only cmdlets the installer calls, listed in
+   `build/windows-only-commands.txt`, count as resolvable and every other name is checked as on
+   Windows; when an off-Windows build fails on a genuine Windows-only cmdlet, add it to that list.
+   On Windows each listed name must resolve, so the list cannot hide a missing module function, and
+   a listed name the installer no longer calls draws a warning.
 4. **psd1 export assertion** — `WingetAppSetup.psd1`'s `FunctionsToExport` must exactly
    (case-sensitively) match the functions defined under `WingetAppSetup/Public/*.ps1`, so a
    new public function cannot be silently filtered on manifest imports
    ([#191](https://github.com/J-MaFf/winget-app-setup/issues/191)).
-5. **Non-ASCII token guard (Windows PowerShell 5.1 parse safety)** — every non-comment token
-   of the assembled script must be pure ASCII. The installer ships as BOM-less UTF-8, which
-   5.1 decodes as ANSI: a multi-byte character inside a string literal misdecodes (an em
-   dash's 0x94 byte becomes a string-terminating curly quote) and cascades into parser
-   errors before the version dispatch can run. Keeping code tokens ASCII keeps the file
+5. **Windows PowerShell 5.1 parse-safety guards** — 5.1 parses the whole installer before it
+   runs any of it, so the file must stay 5.1-parseable even though the install itself runs under
+   PowerShell 7. Syntax that only PowerShell 7 parses (`??`, `??=`, `?.`, `?[`, the ternary `?:`,
+   the `&&` / `||` pipeline chains and `clean { }` blocks) fails the build; the guard reads token
+   kinds and the AST, so the same characters inside strings, comments and regexes are fine. And
+   every non-comment token of the assembled script must be pure ASCII. The installer ships as
+   BOM-less UTF-8, which 5.1 decodes as ANSI: a multi-byte character inside a string literal
+   misdecodes (an em dash's 0x94 byte becomes a string-terminating curly quote) and cascades
+   into parser errors before the version dispatch can run. Keeping code tokens ASCII keeps the file
    5.1-parseable so 5.1 reaches the version check and runs the PowerShell 7 bootstrap
    (find-or-install `pwsh`, then relaunch — [#225](https://github.com/J-MaFf/winget-app-setup/issues/225));
    comments are exempt because misdecoded bytes there cannot change tokenization
@@ -250,6 +260,7 @@ guards, most of which run in both build and `-Check` modes of
 7. **CI enforcement** — `.github/workflows/windows-tests.yml` runs `-Check` on every push to
    `main` and on every pull request, so drift fails CI instead of shipping
    ([#156](https://github.com/J-MaFf/winget-app-setup/issues/156)).
-8. **Local pre-commit hook** — `.githooks/pre-commit` (above) runs the same `-Check` before a
-   commit that touches the module, the build, a manifest, or the installer, catching drift
-   before it is even committed ([#211](https://github.com/J-MaFf/winget-app-setup/issues/211)).
+8. **Local pre-commit hook** — `.githooks/pre-commit` (above) runs the same `-Check`, against
+   the staged files, before a commit that touches the module, the build, a manifest, or the
+   installer, catching drift before it is even committed
+   ([#211](https://github.com/J-MaFf/winget-app-setup/issues/211)).

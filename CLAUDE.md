@@ -33,7 +33,8 @@ This repo targets **Windows only**. All scripts are PowerShell.
 - All install logic lives in `WingetAppSetup/Public/*.ps1` and `WingetAppSetup/Private/*.ps1`.
 - `winget-app-install.ps1` is assembled from those files plus `build/fragments/{head,tail}.ps1`. Never hand-edit it.
 - After changing the module, run `pwsh -File ./build/Build-WingetInstallScript.ps1` to regenerate, and commit both.
-- Drift is enforced end-to-end: `-Check` (byte-compare + BOM guard, parse guard, undefined-reference guard, psd1 export assertion, non-ASCII/PS 5.1 token guard, content-derived build id) runs in CI on every push/PR **and** locally via the tracked `.githooks/pre-commit` hook. Full guard-stack description: readme.md, "Why `winget-app-install.ps1` cannot drift from the module".
+- Drift is enforced end-to-end: `-Check` (byte-compare + BOM guard, parse guard, undefined-reference guard, psd1 export assertion, PS 5.1 parse-safety guards for non-ASCII tokens and PowerShell-7-only syntax, content-derived build id) runs in CI on every push/PR **and** locally via the tracked `.githooks/pre-commit` hook, which checks the staged files rather than the working tree. Full guard-stack description: readme.md, "Why `winget-app-install.ps1` cannot drift from the module".
+- The undefined-reference guard also runs on Linux/macOS, where it counts the Windows-only cmdlets listed in `build/windows-only-commands.txt` as resolvable. When module code starts calling another Windows-only cmdlet, add it to that list (a Windows build fails if an entry does not resolve there).
 - One-time per clone, enable the local hook: `git config core.hooksPath .githooks`. Caveat: `core.hooksPath` makes git ignore `.git/hooks/`, so anyone who ran the opt-in `bd hooks install` (beads shims) should instead leave it unset and invoke `.githooks/pre-commit` from `.git/hooks/pre-commit` — details in readme.md.
 
 ---
@@ -55,7 +56,7 @@ This repo targets **Windows only**. All scripts are PowerShell.
 
 - Exit code `0x80073d19` (`ERROR_DEPLOYMENT_BLOCKED_BY_USER_LOG_OFF`) is an AppX deployment error: per-user MSIX registration is blocked when the invoking account has no interactive logon session — the classic case is elevating as a different admin account on a user's machine. Mitigations (issue #159): `Initialize-WingetSourcesForUser` probes with `winget source update --name winget --disable-interactivity` — deliberately **without** `--accept-source-agreements`, which is invalid for `winget source update` and made the probe false-fail every run (issues #174/#175; agreements are accepted by the install commands instead) — and bootstraps the account via `Repair-WinGetPackageManager` on failure; `Install-WingetPackage` prefers `--scope machine` (auto-falls back for MSIX-only packages) and retries a still-transient `0x80073d19` with backoff (issue #150).
 - Always capture `$LASTEXITCODE` immediately after a winget call — it goes stale fast
-- Validate package IDs with regex before trusting winget output: `^[\w][\w.\-]+\.[\w][\w.\-]+`
+- Validate package IDs with regex before trusting winget output: `^[\w][\w.\-]+\.[\w][\w.\-]+$` (anchored at both ends: it validates a whole id; to find an id inside a longer `winget list` line, use the boundary match in `Test-WingetListOutputContainsPackageId`)
 
 
 <!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:7510c1e2 -->

@@ -54,6 +54,116 @@ function Get-DefinedFunctionLookup {
     return , @($definedExact, $definedFolded)
 }
 
+function Get-InvokedCommandName {
+    <#
+    .SYNOPSIS
+        Returns the distinct hyphenated (Verb-Noun) command names the assembled script invokes
+        directly, for the direct-dispatch reference guard and the Windows-only allowlist check.
+    .DESCRIPTION
+        Only hyphenated names: this is how the module's own functions and PowerShell cmdlets are
+        named, and it excludes native commands (winget), keywords, and operators that
+        GetCommandName also returns.
+    .PARAMETER Ast
+        The parsed AST of the fully assembled installer.
+    #>
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.Management.Automation.Language.Ast]$Ast
+    )
+
+    $Ast.FindAll({ param($node) $node -is [System.Management.Automation.Language.CommandAst] }, $true) |
+        ForEach-Object { $_.GetCommandName() } |
+        Where-Object { $_ -and $_.Contains('-') } |
+        Sort-Object -Unique
+}
+
+function Get-WindowsOnlyCommandName {
+    <#
+    .SYNOPSIS
+        Reads build/windows-only-commands.txt: the Windows-only commands the installer invokes,
+        which the undefined-reference guards treat as resolvable off Windows.
+    .PARAMETER Path
+        Path to the list. One command name per line; blank lines and lines starting with # are
+        ignored.
+    #>
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    Get-Content -Path $Path -Encoding UTF8 |
+        ForEach-Object { $_.Trim() } |
+        Where-Object { $_ -and -not $_.StartsWith('#') }
+}
+
+function Get-PowerShell7OnlySyntax {
+    <#
+    .SYNOPSIS
+        Returns the places where the assembled script uses syntax that PowerShell 7 parses and
+        Windows PowerShell 5.1 does not.
+    .DESCRIPTION
+        Windows PowerShell 5.1 parses the whole installer before it runs any of it, so a single
+        PowerShell-7-only construct anywhere in the file (even inside a function that only ever
+        runs under pwsh) stops the irm | iex one-liner before the PowerShell 7 bootstrap in the tail
+        can run (review finding P3-46). The parse guard cannot see this, because it uses the
+        PowerShell 7 parser that the build itself runs on.
+
+        Operators are found by token kind: ?? and ??= (QuestionQuestion, QuestionQuestionEquals),
+        ?. and ?[ (QuestionDot, QuestionLBracket), the ternary ? (QuestionMark) and the && / ||
+        pipeline-chain operators (AndAnd, OrOr). The tokenizer only emits these kinds for the
+        operators themselves: the same characters inside a string, a comment or a regex are part
+        of that string or comment token, and the Where-Object alias ? is a command-name token.
+        Expandable strings carry the tokens of their $( ) subexpressions as nested tokens, so
+        those are searched too. Kinds are compared by name because Windows PowerShell 5.1's
+        TokenKind enum lacks most of them.
+
+        clean { } blocks (PowerShell 7.3) are found in the AST instead: the Clean token kind also
+        marks a class method named clean, which 5.1 accepts. ScriptBlockAst.CleanBlock does not
+        exist under 5.1 and reads as $null there.
+    .PARAMETER Ast
+        The parsed AST of the fully assembled installer.
+    .PARAMETER Tokens
+        The tokens the parser returned for the assembled installer.
+    .RETURNS
+        One object per offending construct, with Line, Column, Text and Kind.
+    #>
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.Management.Automation.Language.Ast]$Ast,
+        [Parameter(Mandatory = $true)]
+        [System.Management.Automation.Language.Token[]]$Tokens
+    )
+
+    $ps7OnlyTokenKinds = @('QuestionQuestion', 'QuestionQuestionEquals', 'QuestionDot', 'QuestionLBracket', 'QuestionMark', 'AndAnd', 'OrOr')
+
+    $pending = [System.Collections.Generic.Queue[System.Management.Automation.Language.Token]]::new()
+    foreach ($token in $Tokens) { $pending.Enqueue($token) }
+    while ($pending.Count -gt 0) {
+        $token = $pending.Dequeue()
+        if ($token -is [System.Management.Automation.Language.StringExpandableToken] -and $token.NestedTokens) {
+            foreach ($nestedToken in $token.NestedTokens) { $pending.Enqueue($nestedToken) }
+        }
+        if ($ps7OnlyTokenKinds -contains $token.Kind.ToString()) {
+            [pscustomobject]@{
+                Line   = $token.Extent.StartLineNumber
+                Column = $token.Extent.StartColumnNumber
+                Text   = $token.Text
+                Kind   = $token.Kind.ToString()
+            }
+        }
+    }
+
+    $cleanBlocks = $Ast.FindAll({ param($node) $node -is [System.Management.Automation.Language.ScriptBlockAst] -and $node.CleanBlock }, $true)
+    foreach ($scriptBlock in $cleanBlocks) {
+        [pscustomobject]@{
+            Line   = $scriptBlock.CleanBlock.Extent.StartLineNumber
+            Column = $scriptBlock.CleanBlock.Extent.StartColumnNumber
+            Text   = 'clean { }'
+            Kind   = 'CleanBlock'
+        }
+    }
+}
+
 function Get-UndefinedName {
     <#
     .SYNOPSIS
@@ -77,6 +187,11 @@ function Get-UndefinedName {
     .PARAMETER CollisionFixHint
         Short phrase naming where a case-insensitive collision should be fixed, used only in the
         reported collision message (e.g. "the definition's casing at the call site").
+    .PARAMETER AssumeResolvable
+        Case-insensitive set of command names to treat as resolvable without asking Get-Command:
+        off Windows, the Windows-only commands from build/windows-only-commands.txt. Checked after
+        the module lookups, so a case-insensitive collision with a module function is still
+        reported. Empty on Windows.
     #>
     param(
         [Parameter(Mandatory = $true)]
@@ -86,7 +201,8 @@ function Get-UndefinedName {
         [Parameter(Mandatory = $true)]
         [System.Collections.Generic.Dictionary[string, string]]$DefinedFolded,
         [Parameter(Mandatory = $true)]
-        [string]$CollisionFixHint
+        [string]$CollisionFixHint,
+        [System.Collections.Generic.HashSet[string]]$AssumeResolvable
     )
 
     foreach ($name in $Names) {
@@ -95,6 +211,7 @@ function Get-UndefinedName {
             "$name (case-insensitive collision with module function '$($DefinedFolded[$name])'; match $CollisionFixHint)"
             continue
         }
+        if ($AssumeResolvable -and $AssumeResolvable.Contains($name)) { continue }
         if (Get-Command -Name $name -ErrorAction SilentlyContinue) { continue }
         $name
     }
@@ -127,6 +244,9 @@ function Get-UndefinedCommandReference {
     .PARAMETER DefinedFolded
         Case-insensitive Dictionary[string,string] of folded name -> defined name, from
         Get-DefinedFunctionLookup.
+    .PARAMETER AssumeResolvable
+        Passed through to Get-UndefinedName: the Windows-only command names to treat as
+        resolvable off Windows.
     #>
     param(
         [Parameter(Mandatory = $true)]
@@ -134,19 +254,14 @@ function Get-UndefinedCommandReference {
         [Parameter(Mandatory = $true)]
         [System.Collections.Generic.HashSet[string]]$DefinedExact,
         [Parameter(Mandatory = $true)]
-        [System.Collections.Generic.Dictionary[string, string]]$DefinedFolded
+        [System.Collections.Generic.Dictionary[string, string]]$DefinedFolded,
+        [System.Collections.Generic.HashSet[string]]$AssumeResolvable
     )
 
-    # Only hyphenated (Verb-Noun) names — this is how the module's own functions and PowerShell
-    # cmdlets are named, and it excludes native commands (winget), keywords, and operators that
-    # GetCommandName also returns.
-    $invoked = $Ast.FindAll({ param($node) $node -is [System.Management.Automation.Language.CommandAst] }, $true) |
-        ForEach-Object { $_.GetCommandName() } |
-        Where-Object { $_ -and $_.Contains('-') } |
-        Sort-Object -Unique
+    $invoked = Get-InvokedCommandName -Ast $Ast
 
     Get-UndefinedName -Names $invoked -DefinedExact $DefinedExact -DefinedFolded $DefinedFolded `
-        -CollisionFixHint "the definition's casing at the call site"
+        -CollisionFixHint "the definition's casing at the call site" -AssumeResolvable $AssumeResolvable
 }
 
 function Get-UndefinedCatalogInstallReference {
@@ -182,6 +297,9 @@ function Get-UndefinedCatalogInstallReference {
     .PARAMETER DefinedFolded
         Case-insensitive Dictionary[string,string] of folded name -> defined name, from
         Get-DefinedFunctionLookup.
+    .PARAMETER AssumeResolvable
+        Passed through to Get-UndefinedName: the Windows-only command names to treat as
+        resolvable off Windows.
     #>
     param(
         [Parameter(Mandatory = $true)]
@@ -189,7 +307,8 @@ function Get-UndefinedCatalogInstallReference {
         [Parameter(Mandatory = $true)]
         [System.Collections.Generic.HashSet[string]]$DefinedExact,
         [Parameter(Mandatory = $true)]
-        [System.Collections.Generic.Dictionary[string, string]]$DefinedFolded
+        [System.Collections.Generic.Dictionary[string, string]]$DefinedFolded,
+        [System.Collections.Generic.HashSet[string]]$AssumeResolvable
     )
 
     $hashtables = $Ast.FindAll({ param($node) $node -is [System.Management.Automation.Language.HashtableAst] }, $true)
@@ -220,7 +339,7 @@ function Get-UndefinedCatalogInstallReference {
     $installNames = @($installNames | Sort-Object -Unique)
 
     Get-UndefinedName -Names $installNames -DefinedExact $DefinedExact -DefinedFolded $DefinedFolded `
-        -CollisionFixHint "the catalog entry's casing to the definition"
+        -CollisionFixHint "the catalog entry's casing to the definition" -AssumeResolvable $AssumeResolvable
 }
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
@@ -351,6 +470,21 @@ if ($nonAsciiTokens.Count -gt 0) {
     exit 1
 }
 
+# Fail fast on PowerShell-7-only syntax (review finding P3-46). The parse guard above uses the
+# parser of the PowerShell 7 running this build, so ??, ?., the ternary ?:, && / || and clean { }
+# all pass it, yet Windows PowerShell 5.1 rejects the whole file over any one of them and the
+# one-liner dies before the tail's PowerShell 7 bootstrap runs. Only Windows CI's real 5.1 parse
+# test used to catch this. Token- and AST-based, so the same characters inside strings, comments
+# and regexes do not trip it; runs in both build and -Check modes on every platform.
+$ps7OnlySyntax = @(Get-PowerShell7OnlySyntax -Ast $assembledAst -Tokens $assembledTokens | Sort-Object -Property Line, Column)
+if ($ps7OnlySyntax.Count -gt 0) {
+    $details = foreach ($finding in $ps7OnlySyntax) {
+        "line $($finding.Line), column $($finding.Column): '$($finding.Text)' ($($finding.Kind))"
+    }
+    Write-Error ("PowerShell 5.1 syntax check failed: $($ps7OnlySyntax.Count) place(s) in the assembled script use syntax only PowerShell 7 parses. Windows PowerShell 5.1 parses the whole installer before running any of it, so one of these anywhere breaks the irm | iex one-liner before the PowerShell 7 bootstrap can run. Rewrite them in 5.1 syntax (if/else instead of ?? and ?:, an explicit `$null check instead of ?. and ?[, separate statements that test `$? or `$LASTEXITCODE instead of && and ||, end { } or try/finally instead of clean { }) in the offending source under WingetAppSetup/ or build/fragments/, then re-run the build.`n" + ($details -join "`n"))
+    exit 1
+}
+
 # Fail fast on export drift (issue #191). The manifest's FunctionsToExport is the single export
 # authority: winget-app-uninstall.ps1 imports the module via the psd1, so a Public function
 # missing from that list is silently filtered at import time while Pester (which dot-sources the
@@ -377,31 +511,56 @@ if ($missingFromManifest.Count -gt 0 -or $extraInManifest.Count -gt 0) {
     exit 1
 }
 
-# Fail fast on reference drift (issue #154). Enforced on Windows only: the installer relies on
-# Windows-only cmdlets (Test-NetConnection, Get-ScheduledTask, the WinGet client module) that do
-# not resolve via Get-Command on Linux/macOS and would false-positive there. The dev machine and CI
-# are Windows, so this runs where it matters. Windows PowerShell 5.1 leaves $IsWindows unset but is
-# always Windows, so treat pre-6 as Windows too.
-if ($IsWindows -or $PSVersionTable.PSVersion.Major -lt 6) {
-    $lookup = Get-DefinedFunctionLookup -Ast $assembledAst
-    $definedExact, $definedFolded = $lookup[0], $lookup[1]
+# Fail fast on reference drift (issue #154), on every platform. The installer calls Windows-only
+# cmdlets (Get-AppxPackage, Get-ScheduledTask, the WinGet client module, ...) that Get-Command
+# cannot resolve on Linux/macOS, so off Windows the names in build/windows-only-commands.txt count
+# as resolvable and every other name is checked exactly as on Windows. The guard used to be skipped
+# off Windows entirely, which let the #154 regression pass a Linux build, -Check and the pre-commit
+# hook (review finding P3-48). On Windows the list is not used to resolve anything, and every entry
+# must resolve there, so the list cannot hide a missing module function. Windows PowerShell 5.1
+# leaves $IsWindows unset but is always Windows, so treat pre-6 as Windows too.
+$onWindows = $IsWindows -or $PSVersionTable.PSVersion.Major -lt 6
+$windowsOnlyCommandsPath = Join-Path $PSScriptRoot 'windows-only-commands.txt'
+$windowsOnlyCommands = @(Get-WindowsOnlyCommandName -Path $windowsOnlyCommandsPath)
+$assumeResolvable = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+$allowlistHint = ''
+if (-not $onWindows) {
+    foreach ($commandName in $windowsOnlyCommands) { [void]$assumeResolvable.Add($commandName) }
+    $allowlistHint = ' If a name is a Windows-only cmdlet that cannot resolve on this platform, add it to build/windows-only-commands.txt; a Windows build then checks that it resolves there.'
+}
 
-    $undefinedReferences = Get-UndefinedCommandReference -Ast $assembledAst -DefinedExact $definedExact -DefinedFolded $definedFolded
-    if ($undefinedReferences) {
-        Write-Error ("Reference check failed: the generated script invokes command(s) that are not defined in the module and do not resolve as external cmdlets: $($undefinedReferences -join ', '). Add the missing function under WingetAppSetup/Public or WingetAppSetup/Private (or fix the calling fragment), then re-run the build.")
-        exit 1
-    }
+$lookup = Get-DefinedFunctionLookup -Ast $assembledAst
+$definedExact, $definedFolded = $lookup[0], $lookup[1]
 
-    # Fail fast on catalog-carried indirect-dispatch drift (full-repo review finding, 2026-07-16).
-    # See Get-UndefinedCatalogInstallReference's help for why GetCommandName() alone misses this.
-    $undefinedCatalogInstallReferences = Get-UndefinedCatalogInstallReference -Ast $assembledAst -DefinedExact $definedExact -DefinedFolded $definedFolded
-    if ($undefinedCatalogInstallReferences) {
-        Write-Error ("Reference check failed: a catalog entry's 'install' field names function(s) that are not defined in the module and do not resolve as external cmdlets: $($undefinedCatalogInstallReferences -join ', '). Fix the 'install' string in WingetAppSetup/Public/AppCatalog.ps1 (or add the missing function), then re-run the build.")
+$undefinedReferences = Get-UndefinedCommandReference -Ast $assembledAst -DefinedExact $definedExact -DefinedFolded $definedFolded -AssumeResolvable $assumeResolvable
+if ($undefinedReferences) {
+    Write-Error ("Reference check failed: the generated script invokes command(s) that are not defined in the module and do not resolve as external cmdlets: $($undefinedReferences -join ', '). Add the missing function under WingetAppSetup/Public or WingetAppSetup/Private (or fix the calling fragment), then re-run the build." + $allowlistHint)
+    exit 1
+}
+
+# Fail fast on catalog-carried indirect-dispatch drift (full-repo review finding, 2026-07-16).
+# See Get-UndefinedCatalogInstallReference's help for why GetCommandName() alone misses this.
+$undefinedCatalogInstallReferences = Get-UndefinedCatalogInstallReference -Ast $assembledAst -DefinedExact $definedExact -DefinedFolded $definedFolded -AssumeResolvable $assumeResolvable
+if ($undefinedCatalogInstallReferences) {
+    Write-Error ("Reference check failed: a catalog entry's 'install' field names function(s) that are not defined in the module and do not resolve as external cmdlets: $($undefinedCatalogInstallReferences -join ', '). Fix the 'install' string in WingetAppSetup/Public/AppCatalog.ps1 (or add the missing function), then re-run the build.")
+    exit 1
+}
+
+# Keep build/windows-only-commands.txt honest. On Windows every entry must resolve, so a name
+# cannot be listed to silence the guard off Windows; Windows CI runs this on every push and pull
+# request. On every platform, an entry the installer no longer invokes only widens what an
+# off-Windows build assumes, so it is reported but does not fail the build.
+if ($onWindows) {
+    $unresolvableEntries = @($windowsOnlyCommands | Where-Object { -not (Get-Command -Name $_ -ErrorAction SilentlyContinue) })
+    if ($unresolvableEntries.Count -gt 0) {
+        Write-Error ("Allowlist check failed: build/windows-only-commands.txt lists name(s) that do not resolve as commands on Windows: $($unresolvableEntries -join ', '). The list may only hold real Windows-only cmdlets that the installer calls. Fix the spelling or remove the entry (a missing module function belongs under WingetAppSetup/), then re-run the build.")
         exit 1
     }
 }
-else {
-    Write-Host 'Skipping undefined-reference check: Windows-only cmdlets are unavailable on this platform.'
+$invokedCommandNames = @(Get-InvokedCommandName -Ast $assembledAst)
+$staleEntries = @($windowsOnlyCommands | Where-Object { $invokedCommandNames -notcontains $_ })
+if ($staleEntries.Count -gt 0) {
+    Write-Warning "build/windows-only-commands.txt lists command(s) the generated script no longer invokes: $($staleEntries -join ', '). Remove them so the list stays accurate."
 }
 
 if ($Check) {

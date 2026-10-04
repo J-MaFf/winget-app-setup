@@ -59,6 +59,36 @@ Describe 'Test-AppDefinitions' {
             $result.Errors[0] | Should -Match 'invalid package id'
         }
 
+        It 'Should reject a valid id followed by trailing text: <Name>' -ForEach @(
+            # Review finding P3-49: the unanchored pattern accepted any valid prefix, and
+            # Start-Process -ArgumentList would have handed the rest to winget as extra switches.
+            @{ Name = 'Google.Chrome --override "/S"' }
+            @{ Name = 'Google.Chrome --scope user' }
+            @{ Name = 'Foo.Bar;rm' }
+            @{ Name = 'Foo.Bar extra' }
+        ) {
+            $result = Test-AppDefinitions -Apps @(@{ name = $Name })
+
+            $result.ValidApps.Count | Should -Be 0
+            $result.Errors.Count | Should -Be 1
+            $result.Errors[0] | Should -Match 'invalid package id'
+        }
+
+        It 'Should still accept a valid id with surrounding whitespace, trimmed' {
+            $result = Test-AppDefinitions -Apps @(@{ name = "  Google.Chrome `t" })
+
+            $result.Errors | Should -BeNullOrEmpty
+            $result.ValidApps.Count | Should -Be 1
+            $result.ValidApps[0].name | Should -Be 'Google.Chrome'
+        }
+
+        It 'Test-WingetPackageIdFormat matches a whole id only' {
+            Test-WingetPackageIdFormat -PackageId 'Microsoft.DotNet.DesktopRuntime.8' | Should -BeTrue
+            Test-WingetPackageIdFormat -PackageId '7zip.7zip' | Should -BeTrue
+            Test-WingetPackageIdFormat -PackageId 'Google.Chrome --override /S' | Should -BeFalse
+            Test-WingetPackageIdFormat -PackageId ' Google.Chrome' | Should -BeFalse
+        }
+
         It 'Should accept every entry from the real, curated app catalog' {
             $catalog = Get-DefaultAppCatalog
 

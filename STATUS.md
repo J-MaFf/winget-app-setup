@@ -28,7 +28,10 @@ unusable exit 2, and makes an aborted run exit 5 instead of 0. #279, #283 and #2
 an E2E run on this branch confirms it. The Pester suite now also runs on Linux, with 2 known failures
 instead of 113, and no test dot-sources the generated installer any more, so the unit tests exercise
 the module source being edited (EntryPoint, AppCatalog and Interactivity tests still read or run the
-generated file itself, on purpose).
+generated file itself, on purpose). The build's `-Check` now also rejects syntax that only
+PowerShell 7 parses and runs the undefined-reference guards on Linux and macOS, the pre-commit hook
+checks the staged files instead of the working tree, and a catalog name must match the whole
+package-id pattern, so trailing text such as `--override` can no longer reach winget.
 
 In progress: **E2E: App Installer 1.29.290.0 vs 1.26.510.0 AppX conflict, missing
 WindowsAppRuntime.1.8** ([#279](https://github.com/J-MaFf/winget-app-setup/issues/279)) — two

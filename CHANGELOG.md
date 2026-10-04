@@ -37,6 +37,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The build guards now catch three more mistakes locally instead of leaving them to Windows CI
+  (review findings P3-46, P3-47, P3-48). `build/Build-WingetInstallScript.ps1` (build and `-Check`)
+  rejects syntax that only PowerShell 7 parses: `??`, `??=`, `?.`, `?[`, the ternary `?:`, `&&` /
+  `||` and `clean { }` blocks. Windows PowerShell 5.1 parses the whole installer before it runs
+  any of it, so one such token anywhere broke the one-liner before the PowerShell 7 bootstrap, and
+  only Windows CI's real 5.1 parse test noticed. The guard reads token kinds and the AST, so the
+  same characters inside strings, comments and regexes still pass. The undefined-reference guards
+  (#154, and the catalog `install` names) now also run on Linux and macOS instead of being skipped:
+  the Windows-only cmdlets the installer calls are listed in the new
+  `build/windows-only-commands.txt` and count as resolvable there, every entry must resolve on
+  Windows, and an entry the installer no longer calls draws a warning. The pre-commit hook runs
+  `-Check` against the staged files (exported with `git checkout-index`) instead of the working
+  tree, so a module change committed without its regenerated installer is blocked even when the
+  working tree was rebuilt. Covered by the new `tests/BuildGuards.Tests.ps1`.
 - The Pester suite now runs on Linux and macOS, so a local run there shows a new failure instead of
   hiding it among about 100 environment failures (wgt-gq8.5). `tests/TestHelpers.ps1` defines a
   stand-in for each Windows-only command the tests mock (`Get-AppxPackage`, `Add-AppxPackage`,
@@ -89,6 +103,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `Test-AppDefinitions` now rejects a catalog name that has text after a valid package id, such as
+  `Google.Chrome --override "/S"` (review finding P3-49). The package-id pattern had no end anchor,
+  so any valid prefix passed, and `Start-Process -ArgumentList` would have handed the rest to
+  winget as extra switches. The pattern in `WingetAppSetup/Private/PackageIdValidation.ps1` and
+  CLAUDE.md is now `^[\w][\w.\-]+\.[\w][\w.\-]+$`. Surrounding whitespace is still trimmed first,
+  and the curated catalog is unaffected.
 - Kept Winget-AutoUpdate from breaking winget after the installer has finished. Dropping
   `RUN_WAU=YES` only moved WAU's `Install-Prerequisites` (newest winget, provisioned without
   `Microsoft.WindowsAppRuntime.1.8`) to WAU's own runs, and WAU 2.12.0 also defaulted to a run at
