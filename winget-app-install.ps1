@@ -59,12 +59,12 @@ param (
 # This script is assembled from the WingetAppSetup module by build/Build-WingetInstallScript.ps1.
 # Edit the function source under WingetAppSetup/Public and WingetAppSetup/Private, then re-run the
 # build to regenerate this file. See readme.md ("Project layout") for details.
-# Build id: 1.0.0+6c7bdc7f (module version + SHA256 fragment of this whole script; issue #189).
+# Build id: 1.0.0+1b230a41 (module version + SHA256 fragment of this whole script; issue #189).
 # ------------------------------------------------------------------------------------------------
 
 # Content-derived build identity, logged at startup so a transcript from a remote machine
 # identifies exactly which installer build produced it (issue #189).
-$script:InstallerBuildId = '1.0.0+6c7bdc7f'
+$script:InstallerBuildId = '1.0.0+1b230a41'
 
 # ------------------------------------------------Functions------------------------------------------------
 
@@ -1038,17 +1038,65 @@ function Test-AndInstallGraphicalTools {
 # --- InstallVerification ---
 <#
 .SYNOPSIS
+    Decides whether a catalog app applies to this machine by evaluating its condition.
+.DESCRIPTION
+    The one place the catalog's applicability rule lives (issue #217; review findings P3-33,
+    P3-34): an app with no 'condition' applies; otherwise the condition scriptblock decides, and
+    a falsy result means the app does not apply (Skipped, 'not applicable').
+
+    Fail open: a condition that throws or writes an error - a probe that has no answer, such as a
+    CIM query that failed (Get-ComputerManufacturer) - is warned about and the app is treated as
+    applicable, so the installer attempts the install. A broken probe must never silently drop
+    an app: the worst case of failing open is an install attempt that fails loudly and shows in
+    the summary and the exit code, while failing closed would skip the app and still exit 0.
+    Probes must therefore throw when they cannot answer rather than return an empty or default
+    value.
+
+    Invoke-WingetInstall calls this once per app per run, before the first pass, and carries the
+    verdict into the retry pass (Install-AppWithVerification -Applicable).
+.PARAMETER App
+    A validated app-definition hashtable with an optional 'condition' scriptblock.
+.RETURNS
+    [bool] True when the app applies to this machine (or its condition could not be evaluated).
+#>
+function Test-AppApplicability {
+    param (
+        [Parameter(Mandatory = $true)]
+        [hashtable]$App
+    )
+
+    if (-not $App.condition) {
+        return $true
+    }
+    # A non-terminating error inside the condition (a probe that wrote an error and returned
+    # nothing, as Get-CimInstance does without -ErrorAction Stop) counts as no answer too, not as
+    # "does not apply": the preference reaches the condition and the probes it calls.
+    $ErrorActionPreference = 'Stop'
+    try {
+        return [bool](& $App.condition)
+    }
+    catch {
+        Write-WarningMessage "Condition for $($App.name) failed to evaluate ($($_.Exception.Message)); treating as applicable and attempting the install."
+        return $true
+    }
+}
+
+<#
+.SYNOPSIS
     Installs a single curated app with pre-check and post-install verification, without prompting.
 .DESCRIPTION
     Shared per-app install pipeline used by both the first pass and the retry pass of
     Invoke-WingetInstall (issue #188). It replaces the three drifted inline Start-Process
     `winget list` verify blocks with a single implementation:
 
-      1. Applicability: if the app declares a condition scriptblock and it evaluates falsy, the
-         app is Skipped with SkipReason 'NotApplicable' BEFORE any winget probe runs — e.g.
-         Dell Command Update on non-Dell hardware (issue #217). Evaluated once per call (so once
-         per pass). Fail-open: a condition that throws is warned about and treated as applicable,
-         because a broken probe must never silently drop an app.
+      1. Applicability: if the app does not apply to this machine, it is Skipped with SkipReason
+         'NotApplicable' BEFORE any winget probe runs - e.g. Dell Command Update on non-Dell
+         hardware (issue #217). Invoke-WingetInstall evaluates each app's condition once per run
+         and passes the verdict in -Applicable, so both passes use the same answer (review
+         finding P3-34); without -Applicable the condition is evaluated here, by
+         Test-AppApplicability, which fails open: a condition that throws or writes an error is
+         warned about and the app is treated as applicable, so a broken probe never silently
+         drops an app.
       2. Pre-check: Test-WingetPackageInstalled under a timeout guard. Already installed maps to
          Skipped; a hung `winget list` maps to Failed so the app flows into the retry pass and
          the non-zero exit code instead of being silently dropped (issue #176). A winget that
@@ -1087,12 +1135,17 @@ function Test-AndInstallGraphicalTools {
     --installer-type override forwarded to Install-WingetPackage), 'condition' (applicability
     scriptblock, issue #217), and 'conditionDescription' (human reason for the skip message)
     entries.
+.PARAMETER Applicable
+    The run's applicability verdict for this app (Test-AppApplicability), evaluated once per run by
+    Invoke-WingetInstall before anything is installed (review finding P3-34). $false skips the app
+    as NotApplicable; $true installs it whatever its condition would say now. Not given: the
+    condition is evaluated here.
 .PARAMETER Silent
     Forwarded to Install-WingetPackage (winget --silent): Invoke-WingetInstall passes its effective
     non-interactive state. Not given: Install-WingetPackage decides. A package-specific installer
     ($App.install) gets it too when it has a -Silent parameter, as Install-PowerShellLatest does.
 .PARAMETER WhatIf
-    Dry run: the applicability condition and the read-only pre-check still run, but no installer
+    Dry run: the applicability gate and the read-only pre-check still run, but no installer
     is dispatched. An app that is not yet installed reports Status 'Installed' so the caller's
     dry-run summary shows what would change, matching the pre-#188 dry-run bucket semantics; a
     not-applicable app reports the same Skipped/'NotApplicable' result as a real run. A pre-check
@@ -1100,7 +1153,7 @@ function Test-AndInstallGraphicalTools {
     already said that winget is unavailable, and a real run would bootstrap it first.
 .PARAMETER WingetNotLaunchable
     Invoke-WingetInstall's circuit breaker found that winget cannot be started on this machine.
-    The applicability condition still runs, so a not-applicable app is still Skipped; an
+    The applicability gate still applies, so a not-applicable app is still Skipped; an
     applicable app is Failed ('WingetNotLaunchable') without running winget at all.
 .PARAMETER MachineWide
     The run installs for the whole PC only (see the description). Invoke-WingetInstall passes it for
@@ -1143,6 +1196,9 @@ function Install-AppWithVerification {
         [hashtable]$App,
 
         [Parameter(Mandatory = $false)]
+        [bool]$Applicable,
+
+        [Parameter(Mandatory = $false)]
         [switch]$Silent,
 
         [Parameter(Mandatory = $false)]
@@ -1158,24 +1214,20 @@ function Install-AppWithVerification {
         [int]$InstallInProgressWaitSeconds
     )
 
-    # Applicability gate (issue #217): evaluated BEFORE any winget probe so a not-applicable app
+    # Applicability gate (issue #217): checked BEFORE any winget probe so a not-applicable app
     # (e.g. Dell Command Update on non-Dell hardware) costs nothing and cannot fail. Both the
     # first pass and the retry pass call this helper, so the gate holds everywhere -- including
-    # dry runs. Fail-open on a throwing condition: warn and proceed with the install, because a
-    # broken probe must never silently drop an app.
-    if ($App.condition) {
-        $conditionMet = $true
-        $conditionEvaluated = $true
-        try {
-            $conditionMet = [bool](& $App.condition)
-        }
-        catch {
-            Write-WarningMessage "Condition for $($App.name) failed to evaluate ($($_.Exception.Message)); treating as applicable."
-            $conditionEvaluated = $false
-        }
-        if ($conditionEvaluated -and -not $conditionMet) {
-            return @{ Status = 'Skipped'; InstallResult = $null; FailureReason = $null; SkipReason = 'NotApplicable' }
-        }
+    # dry runs. The verdict comes from the caller when it has one: Invoke-WingetInstall evaluates
+    # every condition once per run, before Set-WindowsTerminalDefaults changes HKCU, so the retry
+    # pass cannot re-decide an app the first pass attempted (review finding P3-34).
+    if ($PSBoundParameters.ContainsKey('Applicable')) {
+        $isApplicable = $Applicable
+    }
+    else {
+        $isApplicable = Test-AppApplicability -App $App
+    }
+    if (-not $isApplicable) {
+        return @{ Status = 'Skipped'; InstallResult = $null; FailureReason = $null; SkipReason = 'NotApplicable' }
     }
 
     # An MSIX app in a run for the whole PC (review finding P3-24): whether its package is
@@ -4171,8 +4223,52 @@ function Get-ComputerManufacturer {
         conditions (issue #217) — e.g. gating Dell Command Update on Dell hardware — can be unit
         tested without touching real system state. Private on purpose: it is a seam for the
         catalog's condition scriptblocks, not part of the module's public surface.
+
+        Throws when it has no answer (review finding P3-33): a CIM failure (access denied, RPC
+        unavailable, a corrupt WMI repository) and an empty or missing Manufacturer. CIM reports
+        those as non-terminating errors, so without -ErrorAction Stop this returned '' and the Dell
+        condition read "not Dell": Dell Command Update was skipped as not applicable on a Dell PC
+        and the run exited 0. A condition that throws fails open instead (Test-AppApplicability):
+        the installer warns and attempts the install.
+    .RETURNS
+        [string] The manufacturer, never empty.
     #>
-    return [string](Get-CimInstance -ClassName Win32_ComputerSystem).Manufacturer
+    $computerSystem = Get-CimInstance -ClassName Win32_ComputerSystem -ErrorAction Stop
+    $manufacturer = [string]($computerSystem | Select-Object -First 1).Manufacturer
+    if ([string]::IsNullOrWhiteSpace($manufacturer)) {
+        throw 'Win32_ComputerSystem reported no manufacturer.'
+    }
+    return $manufacturer.Trim()
+}
+
+function Get-OSArchitecture {
+    <#
+    .SYNOPSIS
+        Returns the operating system's processor architecture: 'X64', 'Arm64', 'X86' or 'Arm'.
+    .DESCRIPTION
+        Mockable seam for catalog applicability conditions (review finding P3-32): for example,
+        Adobe.Acrobat.Reader.64-bit ships only an x64 installer, which Adobe does not support on
+        ARM64 Windows, so the catalog keeps it off ARM64 PCs.
+
+        Answers for the OS, not for this process. RuntimeInformation.OSArchitecture asks Windows'
+        IsWow64Process2 for the native machine (.NET 7 and later, so PowerShell 7.3 and later;
+        the bootstrap installs 7.6), which reads Arm64 on an ARM64 PC even from an x64 PowerShell
+        running under emulation, and X64 from a 32-bit PowerShell on x64 Windows. The environment
+        variables do not: an x64 process under emulation on ARM64 sees PROCESSOR_ARCHITECTURE=AMD64
+        and no PROCESSOR_ARCHITEW6432 (Microsoft Learn, "How emulation works on Arm": emulated
+        apps are told about the emulated processor). Older .NET reads GetNativeSystemInfo instead,
+        which is still right for a 32-bit process but says X64 for an x64 one under emulation.
+
+        Throws when the architecture cannot be read, so a condition built on it fails open
+        (Test-AppApplicability): the installer warns and attempts the install.
+    .RETURNS
+        [string] A System.Runtime.InteropServices.Architecture name, e.g. 'X64' or 'Arm64'.
+    #>
+    $architecture = [string][System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture
+    if ([string]::IsNullOrWhiteSpace($architecture)) {
+        throw 'The OS architecture could not be read.'
+    }
+    return $architecture
 }
 
 # --- WauSupport ---
@@ -4925,7 +5021,11 @@ function Get-PendingRestartReason {
          console (e.g. a new top-level pwsh.exe process - exactly what each step of a CI job
          spawns) is delegated to Windows Terminal's console host even though nothing launched
          wt.exe directly. The GUIDs here must stay in sync with
-         Set-WindowsTerminalAsDefaultTerminalApplication.
+         Set-WindowsTerminalAsDefaultTerminalApplication. Counted only while Windows Terminal is
+         installed (Test-WindowsTerminalInstalled, review finding P3-35): nothing clears these
+         values when Windows Terminal is removed, and a delegation to a Windows Terminal that is
+         not there cannot host anything (the console falls back to conhost), so on its own it
+         made the catalog skip the Windows Terminal install as 'not applicable' on every run.
       3. Process ancestry - walks parent processes (bounded to 10 hops) looking for
          WindowsTerminal.exe or OpenConsole.exe, covering direct wt.exe hosting that neither of
          the above catches.
@@ -4950,7 +5050,8 @@ function Test-WindowsTerminalHostsCurrentSession {
         $delegationTerminal = '{E12CFF52-A866-4C77-9A90-F570A7AA2C6B}'
         $existingValues = Get-ItemProperty -Path $registryPath -ErrorAction Stop
         if ($existingValues.DelegationConsole -eq $delegationConsole -and
-            $existingValues.DelegationTerminal -eq $delegationTerminal) {
+            $existingValues.DelegationTerminal -eq $delegationTerminal -and
+            (Test-WindowsTerminalInstalled)) {
             return $true
         }
     }
@@ -4981,14 +5082,21 @@ function Test-WindowsTerminalHostsCurrentSession {
 
 <#
 .SYNOPSIS
-    Returns whether Windows Terminal is registered/installed for the current user.
+    Returns whether Windows Terminal (the stable Microsoft.WindowsTerminal package) is registered
+    for the current user.
 .DESCRIPTION
-    Prefers Get-AppxPackage (the authoritative package-registration check) and falls back to
-    Get-WindowsTerminalSettingsPaths when Get-AppxPackage is unavailable (e.g. PowerShell 7
-    without the Appx compatibility session). Used to gate Set-WindowsTerminalDefaults so it never
-    configures Windows Terminal as the default terminal application when Windows Terminal is not
-    actually present (issue #271) - doing so unconditionally is what let a single failed install
-    attempt poison every subsequent console session on the machine.
+    Asks Get-AppxPackage for exactly 'Microsoft.WindowsTerminal', and its answer is final (review
+    findings P3-34, P3-35): Windows Terminal Preview is a different package with different
+    default-terminal GUIDs, and a settings.json left behind by a removed or unpackaged Windows
+    Terminal is not an installed one. Only when Get-AppxPackage itself fails (PowerShell 7 on
+    builds where the Appx module cannot load, 0x80131539) does the stable package's own
+    settings.json stand in for it.
+
+    Used to gate Set-WindowsTerminalDefaults so it never configures Windows Terminal as the
+    default terminal application when Windows Terminal is not actually present (issue #271) -
+    doing so unconditionally is what let a single failed install attempt poison every subsequent
+    console session on the machine - and by Test-WindowsTerminalHostsCurrentSession, which counts
+    those default-terminal values only while Windows Terminal is installed.
 .RETURNS
     [bool]
 #>
@@ -4997,17 +5105,15 @@ function Test-WindowsTerminalInstalled {
     param ()
 
     try {
-        $package = Get-AppxPackage -Name 'Microsoft.WindowsTerminal*' -ErrorAction Stop
-        if ($package) {
-            return $true
-        }
+        return [bool](Get-AppxPackage -Name 'Microsoft.WindowsTerminal' -ErrorAction Stop)
     }
     catch {
-        # Get-AppxPackage can fail under PowerShell 7 when the Appx compatibility session is
-        # unavailable; the settings.json presence check below keeps this function functional.
+        # Get-AppxPackage can fail under PowerShell 7 when the Appx module cannot load; the stable
+        # package's settings.json (its LocalState folder goes when the package is removed) is the
+        # next best sign.
     }
 
-    return (Get-WindowsTerminalSettingsPaths).Count -gt 0
+    return @(Get-WindowsTerminalSettingsPaths | Where-Object { $_ -match '\\Packages\\Microsoft\.WindowsTerminal_8wekyb3d8bbwe\\' }).Count -gt 0
 }
 
 # --- WingetAgreementArgs ---
@@ -5997,11 +6103,15 @@ function Test-WingetRestartRequiredResult {
         'uninstall', 'verify'), extend that guard to cover it too, or a stale/renamed function
         will pass every build check and only fail at runtime.
       - installerType: forwarded to Install-WingetPackage for machine-scope handling.
-      - condition: scriptblock returning a boolean — evaluated by Install-AppWithVerification
-        BEFORE any winget probe. Falsy means the app does not apply to this machine and is
-        reported as Skipped (not applicable) instead of installed (issue #217). Fail-open: a
-        condition that throws is warned about and treated as applicable, so a broken probe can
-        never silently drop an app.
+      - condition: scriptblock returning a boolean, evaluated once per run by Invoke-WingetInstall
+        (Test-AppApplicability) before anything is installed, and the verdict used by both passes
+        (review finding P3-34). Falsy means the app does not apply to this machine and is
+        reported as Skipped (not applicable) instead of installed (issue #217). Fail open = attempt
+        the install: a condition that throws or writes an error is warned about and treated as
+        applicable, so a broken probe can never silently drop an app. A probe a condition calls
+        must therefore throw when it has no answer, never return an empty or default value that
+        reads as "does not apply" (Get-ComputerManufacturer, Get-OSArchitecture; review finding
+        P3-33).
       - conditionDescription: short human-readable reason shown in the skip message, e.g.
         "Skipping: <id> (not applicable: <conditionDescription>)".
       - msixName: the app's MSIX package name. In a run for the whole PC (SYSTEM, or cross-user
@@ -6017,7 +6127,11 @@ function Get-DefaultAppCatalog {
     return @(
         @{name = '7zip.7zip' },
         @{name = 'GlavSoft.TightVNC' },
-        @{name = 'Adobe.Acrobat.Reader.64-bit' },
+        # The manifest's only installer is x64, and Adobe supports only the 32-bit (x86) Reader on
+        # Windows on ARM: on an ARM64 PC winget runs the x64 installer under emulation and it
+        # fails, in both passes, on every run (review finding P3-32). Architecture-gated so an
+        # ARM64 PC reports it Skipped (not applicable) with the reason instead.
+        @{name = 'Adobe.Acrobat.Reader.64-bit'; condition = { (Get-OSArchitecture) -ne 'Arm64' }; conditionDescription = 'its only installer is x64, and Adobe supports only the 32-bit Reader on ARM64 Windows' },
         @{name = 'Google.Chrome' },
         @{name = 'Google.GoogleDrive' },
         @{name = 'Git.Git' },
@@ -6631,13 +6745,24 @@ function Invoke-WingetInstall {
     # installer cannot run until Windows restarts (0x8A15010A) are failed apps marked RestartFirst.
     $restartRequiredApps = @()
 
+    # Each app's catalog condition is evaluated once per run, here, before this run changes the
+    # machine, and both passes use that verdict (review finding P3-34). The two passes used to
+    # evaluate it separately, and Set-WindowsTerminalDefaults (between them) writes the
+    # default-terminal values the Windows Terminal condition reads, so an app the first pass
+    # attempted could come back 'not applicable' in the retry pass and be counted as installed.
+    # Fail open: a condition with no answer counts as applicable (Test-AppApplicability).
+    $applicableByName = @{}
+    foreach ($app in $apps) {
+        $applicableByName[$app.name] = Test-AppApplicability -App $app
+    }
+
     Foreach ($app in $apps) {
         $outcome = $null
         try {
             # Shared per-app pipeline — pre-check, dispatch, post-verify (issue #188). Messages,
             # summary bucketing, and exit-code policy stay here in the orchestrator.
             # -Silent: an unattended run installs MSI packages with /quiet, not /passive.
-            $outcome = Install-AppWithVerification -App $app -Silent:$effectiveNonInteractive -WhatIf:$WhatIf -WingetNotLaunchable:$wingetNotLaunchable -MachineWide:$machineWide -InstallInProgressWaitSeconds $installerBusyWaitSecondsLeft
+            $outcome = Install-AppWithVerification -App $app -Applicable $applicableByName[$app.name] -Silent:$effectiveNonInteractive -WhatIf:$WhatIf -WingetNotLaunchable:$wingetNotLaunchable -MachineWide:$machineWide -InstallInProgressWaitSeconds $installerBusyWaitSecondsLeft
             if ($outcome.InstallResult -and $outcome.InstallResult.InstallInProgressWaitedSeconds) {
                 $installerBusyWaitSecondsLeft = [Math]::Max(0, $installerBusyWaitSecondsLeft - [int]$outcome.InstallResult.InstallInProgressWaitedSeconds)
             }
@@ -6761,7 +6886,8 @@ function Invoke-WingetInstall {
                     # 0x80073d19 session error gets its backoff retries here too (issue #150), and
                     # a busy Windows Installer gets what is left of the run's wait budget.
                     # The circuit breaker holds here too: once it trips, the rest fail at once.
-                    $outcome = Install-AppWithVerification -App $appDef -Silent:$effectiveNonInteractive -WingetNotLaunchable:$wingetNotLaunchable -MachineWide:$machineWide -InstallInProgressWaitSeconds $installerBusyWaitSecondsLeft
+                    # -Applicable: the run's verdict from before the first pass, not a new one.
+                    $outcome = Install-AppWithVerification -App $appDef -Applicable $applicableByName[$appName] -Silent:$effectiveNonInteractive -WingetNotLaunchable:$wingetNotLaunchable -MachineWide:$machineWide -InstallInProgressWaitSeconds $installerBusyWaitSecondsLeft
                     if ($outcome.InstallResult -and $outcome.InstallResult.InstallInProgressWaitedSeconds) {
                         $installerBusyWaitSecondsLeft = [Math]::Max(0, $installerBusyWaitSecondsLeft - [int]$outcome.InstallResult.InstallInProgressWaitedSeconds)
                     }
@@ -6786,6 +6912,13 @@ function Invoke-WingetInstall {
                         # installer (review finding P3-22): deferred, not failed.
                         Write-WarningMessage "Deferred: $appName (winget found no machine-wide installer for it)"
                         $deferredApps += $appName
+                    }
+                    elseif ($outcome.SkipReason -eq 'NotApplicable') {
+                        # Same bucket and message as the first pass (review finding P3-34): an app
+                        # that does not apply was not installed, so it is never 'Retry succeeded'.
+                        $conditionText = if ($appDef.conditionDescription) { $appDef.conditionDescription } else { 'condition not met' }
+                        Write-WarningMessage "Skipping: $appName (not applicable: $conditionText)"
+                        $skippedApps += $appName
                     }
                     else {
                         # 'Installed', or 'Skipped' when the first-pass install actually landed

@@ -1,16 +1,64 @@
 <#
 .SYNOPSIS
+    Decides whether a catalog app applies to this machine by evaluating its condition.
+.DESCRIPTION
+    The one place the catalog's applicability rule lives (issue #217; review findings P3-33,
+    P3-34): an app with no 'condition' applies; otherwise the condition scriptblock decides, and
+    a falsy result means the app does not apply (Skipped, 'not applicable').
+
+    Fail open: a condition that throws or writes an error - a probe that has no answer, such as a
+    CIM query that failed (Get-ComputerManufacturer) - is warned about and the app is treated as
+    applicable, so the installer attempts the install. A broken probe must never silently drop
+    an app: the worst case of failing open is an install attempt that fails loudly and shows in
+    the summary and the exit code, while failing closed would skip the app and still exit 0.
+    Probes must therefore throw when they cannot answer rather than return an empty or default
+    value.
+
+    Invoke-WingetInstall calls this once per app per run, before the first pass, and carries the
+    verdict into the retry pass (Install-AppWithVerification -Applicable).
+.PARAMETER App
+    A validated app-definition hashtable with an optional 'condition' scriptblock.
+.RETURNS
+    [bool] True when the app applies to this machine (or its condition could not be evaluated).
+#>
+function Test-AppApplicability {
+    param (
+        [Parameter(Mandatory = $true)]
+        [hashtable]$App
+    )
+
+    if (-not $App.condition) {
+        return $true
+    }
+    # A non-terminating error inside the condition (a probe that wrote an error and returned
+    # nothing, as Get-CimInstance does without -ErrorAction Stop) counts as no answer too, not as
+    # "does not apply": the preference reaches the condition and the probes it calls.
+    $ErrorActionPreference = 'Stop'
+    try {
+        return [bool](& $App.condition)
+    }
+    catch {
+        Write-WarningMessage "Condition for $($App.name) failed to evaluate ($($_.Exception.Message)); treating as applicable and attempting the install."
+        return $true
+    }
+}
+
+<#
+.SYNOPSIS
     Installs a single curated app with pre-check and post-install verification, without prompting.
 .DESCRIPTION
     Shared per-app install pipeline used by both the first pass and the retry pass of
     Invoke-WingetInstall (issue #188). It replaces the three drifted inline Start-Process
     `winget list` verify blocks with a single implementation:
 
-      1. Applicability: if the app declares a condition scriptblock and it evaluates falsy, the
-         app is Skipped with SkipReason 'NotApplicable' BEFORE any winget probe runs — e.g.
-         Dell Command Update on non-Dell hardware (issue #217). Evaluated once per call (so once
-         per pass). Fail-open: a condition that throws is warned about and treated as applicable,
-         because a broken probe must never silently drop an app.
+      1. Applicability: if the app does not apply to this machine, it is Skipped with SkipReason
+         'NotApplicable' BEFORE any winget probe runs - e.g. Dell Command Update on non-Dell
+         hardware (issue #217). Invoke-WingetInstall evaluates each app's condition once per run
+         and passes the verdict in -Applicable, so both passes use the same answer (review
+         finding P3-34); without -Applicable the condition is evaluated here, by
+         Test-AppApplicability, which fails open: a condition that throws or writes an error is
+         warned about and the app is treated as applicable, so a broken probe never silently
+         drops an app.
       2. Pre-check: Test-WingetPackageInstalled under a timeout guard. Already installed maps to
          Skipped; a hung `winget list` maps to Failed so the app flows into the retry pass and
          the non-zero exit code instead of being silently dropped (issue #176). A winget that
@@ -49,12 +97,17 @@
     --installer-type override forwarded to Install-WingetPackage), 'condition' (applicability
     scriptblock, issue #217), and 'conditionDescription' (human reason for the skip message)
     entries.
+.PARAMETER Applicable
+    The run's applicability verdict for this app (Test-AppApplicability), evaluated once per run by
+    Invoke-WingetInstall before anything is installed (review finding P3-34). $false skips the app
+    as NotApplicable; $true installs it whatever its condition would say now. Not given: the
+    condition is evaluated here.
 .PARAMETER Silent
     Forwarded to Install-WingetPackage (winget --silent): Invoke-WingetInstall passes its effective
     non-interactive state. Not given: Install-WingetPackage decides. A package-specific installer
     ($App.install) gets it too when it has a -Silent parameter, as Install-PowerShellLatest does.
 .PARAMETER WhatIf
-    Dry run: the applicability condition and the read-only pre-check still run, but no installer
+    Dry run: the applicability gate and the read-only pre-check still run, but no installer
     is dispatched. An app that is not yet installed reports Status 'Installed' so the caller's
     dry-run summary shows what would change, matching the pre-#188 dry-run bucket semantics; a
     not-applicable app reports the same Skipped/'NotApplicable' result as a real run. A pre-check
@@ -62,7 +115,7 @@
     already said that winget is unavailable, and a real run would bootstrap it first.
 .PARAMETER WingetNotLaunchable
     Invoke-WingetInstall's circuit breaker found that winget cannot be started on this machine.
-    The applicability condition still runs, so a not-applicable app is still Skipped; an
+    The applicability gate still applies, so a not-applicable app is still Skipped; an
     applicable app is Failed ('WingetNotLaunchable') without running winget at all.
 .PARAMETER MachineWide
     The run installs for the whole PC only (see the description). Invoke-WingetInstall passes it for
@@ -105,6 +158,9 @@ function Install-AppWithVerification {
         [hashtable]$App,
 
         [Parameter(Mandatory = $false)]
+        [bool]$Applicable,
+
+        [Parameter(Mandatory = $false)]
         [switch]$Silent,
 
         [Parameter(Mandatory = $false)]
@@ -120,24 +176,20 @@ function Install-AppWithVerification {
         [int]$InstallInProgressWaitSeconds
     )
 
-    # Applicability gate (issue #217): evaluated BEFORE any winget probe so a not-applicable app
+    # Applicability gate (issue #217): checked BEFORE any winget probe so a not-applicable app
     # (e.g. Dell Command Update on non-Dell hardware) costs nothing and cannot fail. Both the
     # first pass and the retry pass call this helper, so the gate holds everywhere -- including
-    # dry runs. Fail-open on a throwing condition: warn and proceed with the install, because a
-    # broken probe must never silently drop an app.
-    if ($App.condition) {
-        $conditionMet = $true
-        $conditionEvaluated = $true
-        try {
-            $conditionMet = [bool](& $App.condition)
-        }
-        catch {
-            Write-WarningMessage "Condition for $($App.name) failed to evaluate ($($_.Exception.Message)); treating as applicable."
-            $conditionEvaluated = $false
-        }
-        if ($conditionEvaluated -and -not $conditionMet) {
-            return @{ Status = 'Skipped'; InstallResult = $null; FailureReason = $null; SkipReason = 'NotApplicable' }
-        }
+    # dry runs. The verdict comes from the caller when it has one: Invoke-WingetInstall evaluates
+    # every condition once per run, before Set-WindowsTerminalDefaults changes HKCU, so the retry
+    # pass cannot re-decide an app the first pass attempted (review finding P3-34).
+    if ($PSBoundParameters.ContainsKey('Applicable')) {
+        $isApplicable = $Applicable
+    }
+    else {
+        $isApplicable = Test-AppApplicability -App $App
+    }
+    if (-not $isApplicable) {
+        return @{ Status = 'Skipped'; InstallResult = $null; FailureReason = $null; SkipReason = 'NotApplicable' }
     }
 
     # An MSIX app in a run for the whole PC (review finding P3-24): whether its package is

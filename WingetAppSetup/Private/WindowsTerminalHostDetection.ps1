@@ -26,7 +26,11 @@
          console (e.g. a new top-level pwsh.exe process - exactly what each step of a CI job
          spawns) is delegated to Windows Terminal's console host even though nothing launched
          wt.exe directly. The GUIDs here must stay in sync with
-         Set-WindowsTerminalAsDefaultTerminalApplication.
+         Set-WindowsTerminalAsDefaultTerminalApplication. Counted only while Windows Terminal is
+         installed (Test-WindowsTerminalInstalled, review finding P3-35): nothing clears these
+         values when Windows Terminal is removed, and a delegation to a Windows Terminal that is
+         not there cannot host anything (the console falls back to conhost), so on its own it
+         made the catalog skip the Windows Terminal install as 'not applicable' on every run.
       3. Process ancestry - walks parent processes (bounded to 10 hops) looking for
          WindowsTerminal.exe or OpenConsole.exe, covering direct wt.exe hosting that neither of
          the above catches.
@@ -51,7 +55,8 @@ function Test-WindowsTerminalHostsCurrentSession {
         $delegationTerminal = '{E12CFF52-A866-4C77-9A90-F570A7AA2C6B}'
         $existingValues = Get-ItemProperty -Path $registryPath -ErrorAction Stop
         if ($existingValues.DelegationConsole -eq $delegationConsole -and
-            $existingValues.DelegationTerminal -eq $delegationTerminal) {
+            $existingValues.DelegationTerminal -eq $delegationTerminal -and
+            (Test-WindowsTerminalInstalled)) {
             return $true
         }
     }
@@ -82,14 +87,21 @@ function Test-WindowsTerminalHostsCurrentSession {
 
 <#
 .SYNOPSIS
-    Returns whether Windows Terminal is registered/installed for the current user.
+    Returns whether Windows Terminal (the stable Microsoft.WindowsTerminal package) is registered
+    for the current user.
 .DESCRIPTION
-    Prefers Get-AppxPackage (the authoritative package-registration check) and falls back to
-    Get-WindowsTerminalSettingsPaths when Get-AppxPackage is unavailable (e.g. PowerShell 7
-    without the Appx compatibility session). Used to gate Set-WindowsTerminalDefaults so it never
-    configures Windows Terminal as the default terminal application when Windows Terminal is not
-    actually present (issue #271) - doing so unconditionally is what let a single failed install
-    attempt poison every subsequent console session on the machine.
+    Asks Get-AppxPackage for exactly 'Microsoft.WindowsTerminal', and its answer is final (review
+    findings P3-34, P3-35): Windows Terminal Preview is a different package with different
+    default-terminal GUIDs, and a settings.json left behind by a removed or unpackaged Windows
+    Terminal is not an installed one. Only when Get-AppxPackage itself fails (PowerShell 7 on
+    builds where the Appx module cannot load, 0x80131539) does the stable package's own
+    settings.json stand in for it.
+
+    Used to gate Set-WindowsTerminalDefaults so it never configures Windows Terminal as the
+    default terminal application when Windows Terminal is not actually present (issue #271) -
+    doing so unconditionally is what let a single failed install attempt poison every subsequent
+    console session on the machine - and by Test-WindowsTerminalHostsCurrentSession, which counts
+    those default-terminal values only while Windows Terminal is installed.
 .RETURNS
     [bool]
 #>
@@ -98,15 +110,13 @@ function Test-WindowsTerminalInstalled {
     param ()
 
     try {
-        $package = Get-AppxPackage -Name 'Microsoft.WindowsTerminal*' -ErrorAction Stop
-        if ($package) {
-            return $true
-        }
+        return [bool](Get-AppxPackage -Name 'Microsoft.WindowsTerminal' -ErrorAction Stop)
     }
     catch {
-        # Get-AppxPackage can fail under PowerShell 7 when the Appx compatibility session is
-        # unavailable; the settings.json presence check below keeps this function functional.
+        # Get-AppxPackage can fail under PowerShell 7 when the Appx module cannot load; the stable
+        # package's settings.json (its LocalState folder goes when the package is removed) is the
+        # next best sign.
     }
 
-    return (Get-WindowsTerminalSettingsPaths).Count -gt 0
+    return @(Get-WindowsTerminalSettingsPaths | Where-Object { $_ -match '\\Packages\\Microsoft\.WindowsTerminal_8wekyb3d8bbwe\\' }).Count -gt 0
 }

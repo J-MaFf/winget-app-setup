@@ -297,13 +297,24 @@ function Invoke-WingetInstall {
     # installer cannot run until Windows restarts (0x8A15010A) are failed apps marked RestartFirst.
     $restartRequiredApps = @()
 
+    # Each app's catalog condition is evaluated once per run, here, before this run changes the
+    # machine, and both passes use that verdict (review finding P3-34). The two passes used to
+    # evaluate it separately, and Set-WindowsTerminalDefaults (between them) writes the
+    # default-terminal values the Windows Terminal condition reads, so an app the first pass
+    # attempted could come back 'not applicable' in the retry pass and be counted as installed.
+    # Fail open: a condition with no answer counts as applicable (Test-AppApplicability).
+    $applicableByName = @{}
+    foreach ($app in $apps) {
+        $applicableByName[$app.name] = Test-AppApplicability -App $app
+    }
+
     Foreach ($app in $apps) {
         $outcome = $null
         try {
             # Shared per-app pipeline — pre-check, dispatch, post-verify (issue #188). Messages,
             # summary bucketing, and exit-code policy stay here in the orchestrator.
             # -Silent: an unattended run installs MSI packages with /quiet, not /passive.
-            $outcome = Install-AppWithVerification -App $app -Silent:$effectiveNonInteractive -WhatIf:$WhatIf -WingetNotLaunchable:$wingetNotLaunchable -MachineWide:$machineWide -InstallInProgressWaitSeconds $installerBusyWaitSecondsLeft
+            $outcome = Install-AppWithVerification -App $app -Applicable $applicableByName[$app.name] -Silent:$effectiveNonInteractive -WhatIf:$WhatIf -WingetNotLaunchable:$wingetNotLaunchable -MachineWide:$machineWide -InstallInProgressWaitSeconds $installerBusyWaitSecondsLeft
             if ($outcome.InstallResult -and $outcome.InstallResult.InstallInProgressWaitedSeconds) {
                 $installerBusyWaitSecondsLeft = [Math]::Max(0, $installerBusyWaitSecondsLeft - [int]$outcome.InstallResult.InstallInProgressWaitedSeconds)
             }
@@ -427,7 +438,8 @@ function Invoke-WingetInstall {
                     # 0x80073d19 session error gets its backoff retries here too (issue #150), and
                     # a busy Windows Installer gets what is left of the run's wait budget.
                     # The circuit breaker holds here too: once it trips, the rest fail at once.
-                    $outcome = Install-AppWithVerification -App $appDef -Silent:$effectiveNonInteractive -WingetNotLaunchable:$wingetNotLaunchable -MachineWide:$machineWide -InstallInProgressWaitSeconds $installerBusyWaitSecondsLeft
+                    # -Applicable: the run's verdict from before the first pass, not a new one.
+                    $outcome = Install-AppWithVerification -App $appDef -Applicable $applicableByName[$appName] -Silent:$effectiveNonInteractive -WingetNotLaunchable:$wingetNotLaunchable -MachineWide:$machineWide -InstallInProgressWaitSeconds $installerBusyWaitSecondsLeft
                     if ($outcome.InstallResult -and $outcome.InstallResult.InstallInProgressWaitedSeconds) {
                         $installerBusyWaitSecondsLeft = [Math]::Max(0, $installerBusyWaitSecondsLeft - [int]$outcome.InstallResult.InstallInProgressWaitedSeconds)
                     }
@@ -452,6 +464,13 @@ function Invoke-WingetInstall {
                         # installer (review finding P3-22): deferred, not failed.
                         Write-WarningMessage "Deferred: $appName (winget found no machine-wide installer for it)"
                         $deferredApps += $appName
+                    }
+                    elseif ($outcome.SkipReason -eq 'NotApplicable') {
+                        # Same bucket and message as the first pass (review finding P3-34): an app
+                        # that does not apply was not installed, so it is never 'Retry succeeded'.
+                        $conditionText = if ($appDef.conditionDescription) { $appDef.conditionDescription } else { 'condition not met' }
+                        Write-WarningMessage "Skipping: $appName (not applicable: $conditionText)"
+                        $skippedApps += $appName
                     }
                     else {
                         # 'Installed', or 'Skipped' when the first-pass install actually landed

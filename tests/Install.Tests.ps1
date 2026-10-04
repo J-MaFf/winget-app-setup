@@ -1121,6 +1121,31 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
             $script:errorMessages | Should -Contain 'Retry failed: Contoso.AppOne (winget install failed; winget exit 0x00000001, 1 attempt).'
         }
 
+        # Review finding P3-34: every outcome other than Failed used to be 'Retry succeeded' and
+        # counted as installed, a not-applicable skip included (exit 0 with the app missing).
+        It 'Buckets a not-applicable retry outcome as Skipped with its reason, never as Retry succeeded or Installed' {
+            $script:appCalls = 0
+            Mock Install-AppWithVerification {
+                $script:appCalls++
+                if ($script:appCalls -eq 1) {
+                    return @{ Status = 'Failed'; InstallResult = @{ ExitCode = 1 }; FailureReason = 'VerifyNotFound' }
+                }
+                @{ Status = 'Skipped'; InstallResult = $null; FailureReason = $null; SkipReason = 'NotApplicable' }
+            }
+            $script:successMessages = @()
+            Mock Write-Success { $script:successMessages += $Message }
+
+            $result = Invoke-WingetInstall -Apps @(@{ name = 'Contoso.GatedApp'; condition = { $true }; conditionDescription = 'Contoso hardware only' }) -NonInteractive
+
+            $script:appCalls | Should -Be 2
+            $script:warningMessages | Should -Contain 'Skipping: Contoso.GatedApp (not applicable: Contoso hardware only)'
+            $script:successMessages | Should -Not -Contain 'Retry succeeded: Contoso.GatedApp'
+            @($script:capturedRows | Where-Object { $_[0] -eq 'Installed' }).Count | Should -Be 0
+            @($script:capturedRows | Where-Object { $_[0] -eq 'Skipped' })[0][1] | Should -Match 'Contoso\.GatedApp'
+            @($script:capturedRows | Where-Object { $_[0] -eq 'Failed' }).Count | Should -Be 0
+            $result | Should -Be 0
+        }
+
         It 'Counts an unexpected error in the retry pass as a failure instead of aborting the run' {
             $script:appCalls = 0
             Mock Install-AppWithVerification {
@@ -1317,6 +1342,34 @@ Describe 'Install-AppWithVerification (shared install-and-verify pipeline, issue
             $failOpenWarning | Should -Match 'Dell\.CommandUpdate\.Universal'
             $failOpenWarning | Should -Match 'CIM unavailable'
             $failOpenWarning | Should -Match 'treating as applicable'
+        }
+
+        # Review finding P3-34: the caller's once-per-run verdict wins over the condition.
+        It 'Skips the app as NotApplicable on -Applicable $false without evaluating its condition' {
+            $script:conditionCalls = 0
+
+            $result = Install-AppWithVerification -App @{ name = 'Contoso.GatedApp'; condition = { $script:conditionCalls++; $true } } -Applicable $false
+
+            $result.Status | Should -Be 'Skipped'
+            $result.SkipReason | Should -Be 'NotApplicable'
+            $script:conditionCalls | Should -Be 0
+            Should -Invoke Test-WingetPackageInstalled -Times 0 -Exactly
+            Should -Invoke Install-WingetPackage -Times 0 -Exactly
+        }
+
+        It 'Installs the app on -Applicable $true even when its condition would now say it does not apply' {
+            $script:conditionCalls = 0
+            $script:checkCount = 0
+            Mock Test-WingetPackageInstalled {
+                $script:checkCount++
+                @{ Installed = ($script:checkCount -gt 1); TimedOut = $false; ExitCode = 0 }
+            }
+
+            $result = Install-AppWithVerification -App @{ name = 'Contoso.GatedApp'; condition = { $script:conditionCalls++; $false } } -Applicable $true
+
+            $result.Status | Should -Be 'Installed'
+            $script:conditionCalls | Should -Be 0
+            Should -Invoke Install-WingetPackage -Times 1 -Exactly
         }
 
         It 'Leaves SkipReason unset for an already-installed skip so the two skips stay distinguishable' {
@@ -2061,6 +2114,109 @@ Describe 'Invoke-WingetInstall with the real winget setup ladder (review finding
         $diagnosis.Count | Should -Be 1
         $diagnosis[0] | Should -Match '0x80073CF3 ERROR_INSTALL_RESOLVE_DEPENDENCY_FAILED.*Fix: install the Microsoft\.WindowsAppRuntime\.1\.8 framework'
         ($script:messages -join "`n") | Should -Not -Match 'Installations may fail with 0x80073D19|appears to be missing|source\.msix|install winget manually'
+    }
+}
+
+# Review finding P3-34: the first pass and the retry pass each evaluated an app's condition, and
+# Set-WindowsTerminalDefaults (between them) writes the default-terminal values the Windows Terminal
+# condition reads. An app that failed in the first pass could then come back 'not applicable' in
+# the retry pass and be counted as installed (exit 0, app missing). Here the real per-app pipeline
+# runs; only winget and the steps around the installs are mocked.
+Describe 'Applicability is decided once per run (review finding P3-34)' {
+    BeforeEach {
+        Mock Write-Host { }
+        Mock Start-Process { }
+        Mock Start-Sleep { }
+        Mock Test-IsAdmin { $true }
+        Mock Restart-WithElevation { [pscustomobject]@{ Started = $true; ExitCode = 0 } }
+        Mock Test-IsRunningLocally { $true }
+        Mock Initialize-Winget { [pscustomobject]@{ Ready = $true; Diagnosis = 'Ok' } }
+        Mock Test-AndInstallGraphicalTools { $true }
+        Mock Remove-LegacyScheduledUpdates { $true }
+        Mock Install-WingetAutoUpdate { @{ Status = 'DryRun'; Version = '2.12.0' } }
+        Mock Test-WingetLaunchable { [pscustomobject]@{ Launchable = $true; Version = 'v1.12.350'; Reason = $null; Attempts = 1 } }
+        Mock Wait-WauIdle { $true }
+        Mock Get-PendingRestartState { New-TestRestartState }
+        Mock Get-InstallAccountContext { New-TestAccountContext }
+        # The app never installs: both passes attempt it and it stays failed.
+        Mock Install-WingetPackage { @{ ExitCode = 1; Attempts = 1; SessionErrorExhausted = $false; MachineScopeFellBack = $false } }
+        Mock Test-WingetPackageInstalled { @{ Installed = $false; TimedOut = $false; LaunchFailed = $false; LaunchError = $null; ExitCode = 0 } }
+
+        # Stands in for the real Windows Terminal step: it changes what the condition reads.
+        $script:terminalConfigured = $false
+        Mock Set-WindowsTerminalDefaults { $script:terminalConfigured = $true }
+
+        $script:capturedRows = $null
+        Mock Write-Table { if ($Title -eq 'Installation Summary') { $script:capturedRows = $Rows } }
+        $script:warningMessages = @()
+        Mock Write-WarningMessage { $script:warningMessages += $Message }
+        $script:successMessages = @()
+        Mock Write-Success { $script:successMessages += $Message }
+        Mock Write-ErrorMessage { }
+        Mock Write-Info { }
+    }
+
+    It 'Evaluates the condition once, before Set-WindowsTerminalDefaults, and retries the app the first pass attempted' {
+        $script:conditionCalls = 0
+        $apps = @(@{ name = 'Contoso.Terminal'; condition = { $script:conditionCalls++; -not $script:terminalConfigured }; conditionDescription = 'not hosted by itself' })
+
+        $result = Invoke-WingetInstall -Apps $apps -NonInteractive
+
+        $script:conditionCalls | Should -Be 1
+        # Attempted in both passes, and still failed: never 'not applicable', never installed.
+        Should -Invoke Install-WingetPackage -Times 2 -Exactly -ParameterFilter { $PackageId -eq 'Contoso.Terminal' }
+        $script:successMessages | Should -Not -Contain 'Retry succeeded: Contoso.Terminal'
+        ($script:warningMessages -join "`n") | Should -Not -Match 'not applicable'
+        @($script:capturedRows | Where-Object { $_[0] -eq 'Installed' }).Count | Should -Be 0
+        @($script:capturedRows | Where-Object { $_[0] -eq 'Failed' })[0][1] | Should -Match 'Contoso\.Terminal'
+        $result | Should -Be 1
+    }
+
+    It 'Keeps a condition that failed open in the first pass applicable in the retry pass' {
+        # A CIM error in the first pass (fail open, so the install was attempted), a clean answer
+        # in the second: the retry pass used to report that as 'Retry succeeded'.
+        $script:conditionCalls = 0
+        $apps = @(@{ name = 'Contoso.VendorTool'; condition = { $script:conditionCalls++; if ($script:conditionCalls -eq 1) { throw 'RPC server is unavailable' }; $false }; conditionDescription = 'Contoso hardware only' })
+
+        $result = Invoke-WingetInstall -Apps $apps -NonInteractive
+
+        $script:conditionCalls | Should -Be 1
+        Should -Invoke Install-WingetPackage -Times 2 -Exactly -ParameterFilter { $PackageId -eq 'Contoso.VendorTool' }
+        ($script:warningMessages -join "`n") | Should -Match 'Condition for Contoso\.VendorTool failed to evaluate \(RPC server is unavailable\); treating as applicable'
+        $script:successMessages | Should -Not -Contain 'Retry succeeded: Contoso.VendorTool'
+        @($script:capturedRows | Where-Object { $_[0] -eq 'Installed' }).Count | Should -Be 0
+        $result | Should -Be 1
+    }
+}
+
+Describe 'Test-AppApplicability (issue #217; review findings P3-33, P3-34)' {
+    BeforeEach {
+        $script:conditionWarnings = @()
+        Mock Write-WarningMessage { $script:conditionWarnings += $Message }
+    }
+
+    It 'Treats an app without a condition as applicable' {
+        Test-AppApplicability -App @{ name = 'Contoso.App' } | Should -Be $true
+        $script:conditionWarnings.Count | Should -Be 0
+    }
+
+    It 'Returns the condition''s verdict' {
+        Test-AppApplicability -App @{ name = 'Contoso.App'; condition = { $true } } | Should -Be $true
+        Test-AppApplicability -App @{ name = 'Contoso.App'; condition = { $false } } | Should -Be $false
+        $script:conditionWarnings.Count | Should -Be 0
+    }
+
+    It 'Fails open when the condition throws: warns and treats the app as applicable' {
+        Test-AppApplicability -App @{ name = 'Contoso.App'; condition = { throw 'probe broke' } } | Should -Be $true
+
+        $script:conditionWarnings | Should -Contain 'Condition for Contoso.App failed to evaluate (probe broke); treating as applicable and attempting the install.'
+    }
+
+    It 'Fails open when the condition writes a non-terminating error instead of answering' {
+        # A probe that writes an error and returns nothing used to read as "does not apply".
+        Test-AppApplicability -App @{ name = 'Contoso.App'; condition = { Write-Error 'Access denied'; $false } } | Should -Be $true
+
+        ($script:conditionWarnings -join "`n") | Should -Match 'Condition for Contoso\.App failed to evaluate \(Access denied\)'
     }
 }
 

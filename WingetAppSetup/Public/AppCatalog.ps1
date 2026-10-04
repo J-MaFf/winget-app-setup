@@ -15,11 +15,15 @@
         'uninstall', 'verify'), extend that guard to cover it too, or a stale/renamed function
         will pass every build check and only fail at runtime.
       - installerType: forwarded to Install-WingetPackage for machine-scope handling.
-      - condition: scriptblock returning a boolean — evaluated by Install-AppWithVerification
-        BEFORE any winget probe. Falsy means the app does not apply to this machine and is
-        reported as Skipped (not applicable) instead of installed (issue #217). Fail-open: a
-        condition that throws is warned about and treated as applicable, so a broken probe can
-        never silently drop an app.
+      - condition: scriptblock returning a boolean, evaluated once per run by Invoke-WingetInstall
+        (Test-AppApplicability) before anything is installed, and the verdict used by both passes
+        (review finding P3-34). Falsy means the app does not apply to this machine and is
+        reported as Skipped (not applicable) instead of installed (issue #217). Fail open = attempt
+        the install: a condition that throws or writes an error is warned about and treated as
+        applicable, so a broken probe can never silently drop an app. A probe a condition calls
+        must therefore throw when it has no answer, never return an empty or default value that
+        reads as "does not apply" (Get-ComputerManufacturer, Get-OSArchitecture; review finding
+        P3-33).
       - conditionDescription: short human-readable reason shown in the skip message, e.g.
         "Skipping: <id> (not applicable: <conditionDescription>)".
       - msixName: the app's MSIX package name. In a run for the whole PC (SYSTEM, or cross-user
@@ -35,7 +39,11 @@ function Get-DefaultAppCatalog {
     return @(
         @{name = '7zip.7zip' },
         @{name = 'GlavSoft.TightVNC' },
-        @{name = 'Adobe.Acrobat.Reader.64-bit' },
+        # The manifest's only installer is x64, and Adobe supports only the 32-bit (x86) Reader on
+        # Windows on ARM: on an ARM64 PC winget runs the x64 installer under emulation and it
+        # fails, in both passes, on every run (review finding P3-32). Architecture-gated so an
+        # ARM64 PC reports it Skipped (not applicable) with the reason instead.
+        @{name = 'Adobe.Acrobat.Reader.64-bit'; condition = { (Get-OSArchitecture) -ne 'Arm64' }; conditionDescription = 'its only installer is x64, and Adobe supports only the 32-bit Reader on ARM64 Windows' },
         @{name = 'Google.Chrome' },
         @{name = 'Google.GoogleDrive' },
         @{name = 'Git.Git' },
