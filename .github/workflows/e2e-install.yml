@@ -18,9 +18,10 @@ name: E2E Install
 #
 # Evidence: e2e/Collect-Diagnostics.ps1 snapshots the pwsh version, the all-users AppX state of
 # App Installer and WindowsAppRuntime, and the WAU tasks before and after the first pass and at
-# the end of the job, where it also collects MsiInstaller, RestartManager and AppX deployment
-# events and WAU's logs. It is uploaded as the e2e-diagnostics artifact next to the transcripts:
-# red runs that kept only transcripts were misdiagnosed twice (#279, #283).
+# the end of the job, where it also collects MsiInstaller and RestartManager events, AppX
+# deployment errors and warnings, and WAU's logs. It is uploaded as the e2e-diagnostics artifact
+# next to the transcripts, together with the assertion output: red runs that kept only
+# transcripts were misdiagnosed twice (#279, #283).
 #
 # Failure reporting lives in its own ubuntu-latest job (report-failure) that reads the uploaded
 # artifacts, so it still files the issue when the Windows job lost PowerShell 7, timed out or was
@@ -73,10 +74,20 @@ jobs:
     # #279's slow partial one (issue #282). Staying on windows-latest until either GitHub
     # ships a corrected Server 2025 image, or a viable pinned alternative is found.
     runs-on: windows-latest
-    # Backstop. The long steps have their own timeout-minutes, which add up to less than this, so a
-    # hung pass fails at its own limit and the diagnostics and upload steps still run. A job that
-    # reaches this limit is cancelled instead; report-failure still files the issue.
-    timeout-minutes: 90
+    # Backstop. The long steps have their own timeout-minutes, which add up to less than this
+    # (3 + 35 + 3 + 35 + 40 + 5 = 121, plus checkout and uploads), so a hung pass fails at its own
+    # limit and the diagnostics and upload steps still run. A job that reaches this limit is
+    # cancelled instead; report-failure still files the issue. Each step limit sits above that
+    # step's slow red-run path, so it ends with its own summary instead of being cut off:
+    #   - install passes, 35 each: first passes have taken 3-11 min and passing second passes
+    #     under 1 min, but a pass where winget cannot launch costs about 1.4 min per applicable app
+    #     on each of its two loops (run 36384683838's second pass took 23.9 min, before the
+    #     end-of-run launch check added up to 1.5 min more).
+    #   - assertions, 40: Assert-Install.ps1 waits up to about 6.5 min for winget to launch, then
+    #     spends up to 3.25 min per applicable app when winget hangs (3 probes of 60 s plus 15 s
+    #     of pauses), about 36 min for the 9 apps that apply on this runner. Raise it if the
+    #     catalog grows.
+    timeout-minutes: 130
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
@@ -142,7 +153,7 @@ jobs:
       - name: Second install pass (idempotence leg)
         id: second-pass
         shell: pwsh
-        timeout-minutes: 25
+        timeout-minutes: 35
         env:
           EVENT_NAME: ${{ github.event_name }}
         run: |
@@ -177,7 +188,7 @@ jobs:
         # Also after a failed pass, so a red run still gets its per-app PASS/FAIL table.
         if: ${{ !cancelled() }}
         shell: pwsh
-        timeout-minutes: 12
+        timeout-minutes: 40
         env:
           SECOND_PASS_OUTCOME: ${{ steps.second-pass.outcome }}
         run: |
