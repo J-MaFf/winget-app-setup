@@ -191,7 +191,7 @@ function Invoke-WingetInstall {
     $account = Get-InstallAccountContext
     $machineWide = [bool]($account.IsSystem -or $account.IsCrossUserElevation)
     if ($account.IsSystem) {
-        Write-Info 'Running as SYSTEM (for example from an RMM agent): installing for the whole PC only, with the winget.exe that App Installer installed for this PC. An app with no machine-wide installer is reported as Deferred, for a run as the signed-in user to install. Microsoft does not support the winget command line as SYSTEM, so a SYSTEM run can fail where a run as a user would not.'
+        Write-Info 'Running as SYSTEM (for example from an RMM agent): installing for the whole PC only, with the winget.exe that App Installer installed for this PC. An app with no machine-wide installer is not installed: it is reported as Deferred, with how it can still be installed for the user. Microsoft does not support the winget command line as SYSTEM, so a SYSTEM run can fail where a run as a user would not.'
     }
 
     # Pending restart before the run (review finding P3-16), read before this run changes the
@@ -341,7 +341,7 @@ function Invoke-WingetInstall {
     $skippedApps = @()
     $failedApps = @()
     # Apps with no machine-wide installer in a run for the whole PC (review finding P3-22): neither
-    # installed nor failed, and left for a run as the signed-in user.
+    # installed nor failed, and left for the signed-in user's own account (Write-DeferredAppsSummary).
     $deferredApps = @()
 
     # No separate source-trust pass here: only the winget community source is used (every install
@@ -398,8 +398,8 @@ function Invoke-WingetInstall {
                 }
                 'Deferred' {
                     # No machine-wide installer, and this run installs for the whole PC only
-                    # (review finding P3-22). Write-DeferredAppsSummary says who can install it.
-                    Write-WarningMessage "Deferred: $($app.name) (it has no machine-wide installer)"
+                    # (review finding P3-22). Write-DeferredAppsSummary says what can install it.
+                    Write-WarningMessage "Deferred: $($app.name) (winget found no machine-wide installer for it)"
                     $deferredApps += $app.name
                 }
                 'Installed' {
@@ -519,7 +519,7 @@ function Invoke-WingetInstall {
                     elseif ($outcome.Status -eq 'Deferred') {
                         # The retry got as far as the install, which found no machine-wide
                         # installer (review finding P3-22): deferred, not failed.
-                        Write-WarningMessage "Deferred: $appName (it has no machine-wide installer)"
+                        Write-WarningMessage "Deferred: $appName (winget found no machine-wide installer for it)"
                         $deferredApps += $appName
                     }
                     else {

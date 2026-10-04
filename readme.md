@@ -256,11 +256,13 @@ differently:
   winget call: the newest one whose package `Get-AppxPackage -AllUsers` lists with status `Ok`, or,
   when that query fails or finds none, the newest
   `%ProgramFiles%\WindowsApps\Microsoft.DesktopAppInstaller_<version>_<architecture>__8wekyb3d8bbwe\winget.exe`
-  (versions compared as numbers, the PC's own architecture first). It checks that it starts
-  (`winget --version`) and tries the next one if it does not. When none starts, the run stops with
-  exit code 2 and says why: no App Installer for the PC, or the `winget.exe` found could not be
-  started. `0xC0000135 STATUS_DLL_NOT_FOUND` is reported for a `winget.exe` started outside its
-  package when a DLL it needs, reportedly the Microsoft Visual C++ 2015-2022 runtime, is missing.
+  that the query did not list with another status (versions compared as numbers, the PC's own
+  architecture first). It checks that it starts (`winget --version`) and tries the next one if it
+  does not. When none starts, the run stops with exit code 2 and says why: no App Installer for the
+  PC, or the `winget.exe` found could not be started. `0xC0000135 STATUS_DLL_NOT_FOUND` is reported
+  for a `winget.exe` started outside its package when a DLL it needs, reportedly the Microsoft
+  Visual C++ 2015-2022 runtime, is missing; that `winget.exe` is not checked again, since it fails
+  the same way until the runtime is installed.
 - It skips every step that sets winget up for one account, since SYSTEM cannot have one:
   registering App Installer, `Repair-WinGetPackageManager` (and installing the
   `Microsoft.WinGet.Client` module it comes from), the aka.ms/getwinget download, and registering
@@ -268,9 +270,14 @@ differently:
   broken.
 - Every app is installed with `--scope machine` only. An app that has no machine-wide installer is
   not installed at winget's default scope, which as SYSTEM is SYSTEM's own profile: it is reported
-  as `Deferred` in the summary, with a line saying to run the installer as the signed-in user to
-  install it. A deferred app counts neither as installed nor as failed and does not change the exit
-  code.
+  as `Deferred` in the summary. A deferred app counts neither as installed nor as failed and does
+  not change the exit code. A per-user app can only be installed in the signed-in user's own
+  account: by this installer run as that user when the account is an administrator, otherwise by a
+  per-user deployment, such as an RMM script that runs as the user or the Microsoft Store (on a
+  standard user's PC, the UAC prompt elevates as an administrator account, which defers the app
+  again). winget answers `--scope machine` with the same `0x8A150010 NO_APPLICABLE_INSTALLER` when
+  no installer applies to the PC at all, so a deferred app can also be one winget cannot install
+  on this PC at any scope.
 - Windows Terminal is decided from the PC: when its package is provisioned for every user, as
   Windows 11 does, it is `Skipped (already provisioned for every user on this PC)`. `winget list`
   run as SYSTEM does not see the MSIX apps registered for the users, so Terminal would read as
@@ -279,6 +286,10 @@ differently:
   is skipped (see [Windows Terminal defaults](#windows-terminal-defaults)).
 - Its messages are written for SYSTEM: no "cross-user elevation" banner and no advice to sign in
   to Windows as `NT AUTHORITY\SYSTEM`.
+- Started from Windows PowerShell 5.1 on a PC without PowerShell 7, it installs PowerShell 7 from
+  the MSI download, not with winget, since SYSTEM has no `winget` command; the bootstrap says so
+  instead of saying winget is missing. The MSI path reads its release list from GitHub, which can
+  answer `429 Too Many Requests` when many PCs on one network ask at once (exit code 7).
 
 A run elevated as a different account than the signed-in user (cross-user elevation) installs for
 the whole PC the same way: an app with no machine-wide installer is `Deferred` instead of being
@@ -288,8 +299,8 @@ the admin account as before.
 
 Not there yet: a single-run lock and a time budget for the whole run, a machine-readable result
 line, and per-user setup after a SYSTEM run (the deferred apps and the Windows Terminal defaults
-wait for a run as the signed-in user). RMM tools read success from the exit code: list any other
-code you accept, such as 3010, as a success code for the script.
+need the signed-in user's own account, see above). RMM tools read success from the exit code: list
+any other code you accept, such as 3010, as a success code for the script.
 
 ### Exit codes
 

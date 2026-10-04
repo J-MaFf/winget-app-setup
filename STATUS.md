@@ -389,7 +389,11 @@ every repository secret.
   `psexec -s` from a 32-bit PowerShell) before relying on it from the RMM: the machine-wide
   `winget.exe` lookup and launch, `--scope machine` installs of the catalog, the `Deferred` report,
   the Windows Terminal provisioning check, and whether a clean PC without the Visual C++ runtime
-  fails with `0xC0000135`. Then decide whether to move SYSTEM runs to `Microsoft.WinGet.Client`.
+  fails with `0xC0000135`. Then decide whether to move SYSTEM runs to `Microsoft.WinGet.Client`,
+  whether the Windows PowerShell 5.1 bootstrap should install PowerShell 7 as SYSTEM with the
+  machine-wide `winget.exe` instead of the MSI download (whose GitHub release list can answer 429
+  when many PCs ask at once), and how deferred apps reach a standard user's PC, where only a
+  per-user deployment can install them.
 - Validate the dormant DISM MSIX-provisioning path in `Install-PowerShellLatest` end-to-end on a real Windows 10 machine before PowerShell 7.7 GA makes it load-bearing (as of [#166](https://github.com/J-MaFf/winget-app-setup/issues/166)).
 - Cut a tagged release and move the `[Unreleased]` CHANGELOG entries under a versioned heading.
 

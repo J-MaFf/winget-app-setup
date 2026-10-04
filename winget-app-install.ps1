@@ -59,12 +59,12 @@ param (
 # This script is assembled from the WingetAppSetup module by build/Build-WingetInstallScript.ps1.
 # Edit the function source under WingetAppSetup/Public and WingetAppSetup/Private, then re-run the
 # build to regenerate this file. See readme.md ("Project layout") for details.
-# Build id: 1.0.0+07fb3589 (module version + SHA256 fragment of this whole script; issue #189).
+# Build id: 1.0.0+bd4c7efd (module version + SHA256 fragment of this whole script; issue #189).
 # ------------------------------------------------------------------------------------------------
 
 # Content-derived build identity, logged at startup so a transcript from a remote machine
 # identifies exactly which installer build produced it (issue #189).
-$script:InstallerBuildId = '1.0.0+07fb3589'
+$script:InstallerBuildId = '1.0.0+bd4c7efd'
 
 # ------------------------------------------------Functions------------------------------------------------
 
@@ -869,8 +869,13 @@ function Write-InstalledAppNote {
     Review findings P3-22, P3-23. A run as SYSTEM or under cross-user elevation installs for the whole
     PC only, so an app whose package has no machine-wide installer is not installed by it: it is
     reported as Deferred, neither installed nor failed, and does not change the exit code. This
-    says so once, for all of them, with what to do: run the installer as the signed-in user, named
-    when it is known. No-op when nothing was deferred.
+    says so once, for all of them, with what can still install them. That is only the signed-in
+    user's own account (named under cross-user elevation): this installer run as that user works
+    only when the account is an administrator, since the installer needs administrator rights and
+    a standard user's UAC prompt elevates as another account, which defers the app again; on a
+    standard user's PC it takes a per-user deployment. The line does not claim a per-user installer
+    exists: winget answers 0x8A150010 at --scope machine also when no installer applies to the PC
+    at all. No-op when nothing was deferred.
 .PARAMETER DeferredApps
     The package ids of the deferred apps.
 .PARAMETER AccountContext
@@ -897,15 +902,17 @@ function Write-DeferredAppsSummary {
         $pronoun = 'it'
     }
     $why = 'this run installs for the whole PC only'
+    $account = "the signed-in user's own account"
     $who = 'the signed-in user'
     if ($AccountContext -and $AccountContext.IsSystem) {
         $why = 'a run as SYSTEM installs for the whole PC only'
     }
     elseif ($AccountContext -and $AccountContext.IsCrossUserElevation) {
         $why = "installing per-user here would install for '$($AccountContext.ProcessUser)' instead of '$($AccountContext.SessionUser)'"
+        $account = "the account '$($AccountContext.SessionUser)'"
         $who = "'$($AccountContext.SessionUser)'"
     }
-    Write-WarningMessage ('Deferred: {0} - no machine-wide installer, and {1}. Not installed and not counted as failed; run the installer as {2} to install {3}.' -f ($DeferredApps -join ', '), $why, $who, $pronoun)
+    Write-WarningMessage ('Deferred: {0} - winget found no machine-wide installer for {1} that applies to this PC ({2} with --scope machine), and {3}. Not installed and not counted as failed. A per-user app can only be installed in {4}: by this installer run as {5} when that account is an administrator, otherwise by a per-user deployment (an RMM script that runs as the user, or the Microsoft Store).' -f ($DeferredApps -join ', '), $pronoun, (Format-WingetExitCode -ExitCode -1978335216), $why, $account, $who)
 }
 
 <#
@@ -1064,7 +1071,7 @@ function Test-AndInstallGraphicalTools {
 
     With -MachineWide (a run as SYSTEM or under cross-user elevation; review findings P3-22, P3-24)
     the app is installed for the whole PC or not at all: a package with no machine-scope installer
-    comes back Deferred, for a run as the signed-in user to install, instead of being installed at
+    comes back Deferred, left for the signed-in user's own account, instead of being installed at
     winget's default scope for the account running this. An app that names its MSIX package
     (msixName, e.g. Windows Terminal) is also checked, before and after the install, by whether that
     package is provisioned for every user on this PC (Test-AppxPackageProvisionedForMachine) instead
@@ -2088,7 +2095,9 @@ function Get-WindowsAppsDirectory {
       2. When that query fails or finds none: the
          Microsoft.DesktopAppInstaller_<version>_<architecture>__8wekyb3d8bbwe folders under
          Get-WindowsAppsDirectory that hold a winget.exe. SYSTEM can list that folder; an
-         administrator account normally cannot.
+         administrator account normally cannot. A folder whose package the query listed with a
+         Status other than Ok (Tampered, Modified, NeedsRemediation, ...) is left out here too, so
+         the folder scan never brings back a package the query turned down.
     Candidates for this PC's architecture come first (x64 on an x64 PC; arm64, then x64, then x86
     on an ARM64 PC), and within an architecture the highest version first. Versions are compared as
     [version], never as text: as text, 1.9.25200.0 sorts after 1.27.460.0.
@@ -2120,9 +2129,15 @@ function Get-MachineWingetCandidate {
     }
 
     $found = @()
+    # Version_architecture of every package the query listed with a status other than Ok.
+    $rejected = @()
     try {
         foreach ($package in @(Get-DesktopAppInstallerPackageInfo)) {
-            if ("$($package.Status)" -ne 'Ok' -or [string]::IsNullOrWhiteSpace($package.InstallLocation)) {
+            if ("$($package.Status)" -ne 'Ok') {
+                $rejected += ('{0}_{1}' -f $package.Version, "$($package.Architecture)".ToLowerInvariant())
+                continue
+            }
+            if ([string]::IsNullOrWhiteSpace($package.InstallLocation)) {
                 continue
             }
             $path = Join-Path $package.InstallLocation 'winget.exe'
@@ -2142,6 +2157,9 @@ function Get-MachineWingetCandidate {
                 $folders = @(Get-ChildItem -LiteralPath $windowsApps -Directory -Filter 'Microsoft.DesktopAppInstaller_*' -ErrorAction Stop)
                 foreach ($folder in $folders) {
                     if ($folder.Name -notmatch '^Microsoft\.DesktopAppInstaller_(?<version>\d+(\.\d+){1,3})_(?<architecture>x64|arm64|x86)__8wekyb3d8bbwe$') {
+                        continue
+                    }
+                    if ($rejected -contains ('{0}_{1}' -f ([version]$Matches['version']), $Matches['architecture'].ToLowerInvariant())) {
                         continue
                     }
                     $path = Join-Path $folder.FullName 'winget.exe'
@@ -2178,9 +2196,10 @@ function Get-MachineWingetCandidate {
 
     Instead, each winget.exe from Get-MachineWingetCandidate is tried, best first, with
     Test-WingetLaunchable: the first is checked for up to 75 seconds (for a lock or an App Installer
-    update that clears on its own), the others twice. The first that starts and prints a version is
-    kept for the rest of the run ($script:MachineWingetPath, which Resolve-WingetExecutable returns
-    to every winget call). When none starts, the run cannot install anything, and the message says
+    update that clears on its own), the others twice, and a winget.exe that cannot load a DLL it
+    needs (0xC0000135) only once, since that does not clear on its own. The first that starts and
+    prints a version is kept for the rest of the run ($script:MachineWingetPath, which
+    Resolve-WingetExecutable returns to every winget call). When none starts, the run cannot install anything, and the message says
     why: no App Installer for the machine, or the winget.exe found could not be started.
 
     Read-only, so a dry run runs it too.
@@ -2399,9 +2418,10 @@ function Test-WingetListOutputContainsPackageId {
 # Get-ProcessTimeoutSeconds and their helpers, written against .NET Framework 4.5;
 # Resolve-WingetExecutable, which returns 'winget' unless a SYSTEM run has resolved the machine-wide
 # winget.exe, and the 5.1-safe Private/MachineContext.ps1 helpers it can reach) for the winget
-# install (review findings P2-5/P2-6, P2-24). Get-AuthenticodeSignature, which
-# Test-PowerShell7MsiSignature calls, is a Windows PowerShell 5.1 cmdlet too. The tail's 5.1 branch
-# also calls, around this file:
+# install (review findings P2-5/P2-6, P2-24), and Test-IsSystemAccount (Private/Elevation.ps1: a
+# try/catch around WindowsIdentity.GetCurrent()) when there is no winget command.
+# Get-AuthenticodeSignature, which Test-PowerShell7MsiSignature calls, is a Windows PowerShell 5.1
+# cmdlet too. The tail's 5.1 branch also calls, around this file:
 # Test-EffectiveNonInteractive (with Test-IsSystemAccount, Private/Elevation.ps1: a try/catch around
 # WindowsIdentity.GetCurrent(), review finding P3-23) and Test-IsContinuousIntegration
 # (Private/Interactivity.ps1),
@@ -3231,6 +3251,13 @@ function Invoke-PowerShell7Bootstrap {
                 }
             }
             $pwshPath = Find-PowerShell7
+        }
+        elseif (Test-IsSystemAccount) {
+            # SYSTEM, as under an RMM agent, has no `winget` command even where App Installer is
+            # installed for the PC: winget is set up per user account (review of finding P2-24).
+            # Saying winget is not on the machine contradicted the main run, which goes on to find
+            # the machine-wide winget.exe. Using that winget.exe here too is a follow-up.
+            Write-Info 'Running as SYSTEM, which has no winget command of its own (winget is set up for each user account), so PowerShell 7 is installed without winget.'
         }
         else {
             Write-WarningMessage 'winget is not available on this machine.'
@@ -5562,7 +5589,11 @@ function Resolve-WingetExecutable {
     can clear on their own: a transient launch failure (Test-TransientWingetLaunchError: winget.exe
     locked by an antivirus scan or an App Installer update in progress), a timeout, a non-zero exit
     or no version in the output. Any other launch failure (winget not on PATH, 'Access is denied')
-    is final at once: waiting does not change it.
+    is final at once: waiting does not change it. So is exit code 0xC0000135
+    (STATUS_DLL_NOT_FOUND): the Windows loader could not find a DLL winget.exe needs, which stays
+    so until that DLL is installed. A machine-wide winget.exe started as SYSTEM fails this way on a
+    PC without the Visual C++ runtime, and checking it again only made every such run wait 75
+    seconds before trying the next one (review of finding P2-24).
 
     Used by Test-AndInstallWinget (is winget usable before the run), by Invoke-WingetInstall's
     circuit breaker (after an app could not launch winget) and end-of-run check, and by
@@ -5591,6 +5622,8 @@ function Test-WingetLaunchable {
     )
 
     $timeoutSeconds = Get-ProcessTimeoutSeconds -Operation WingetVersion
+    # 0xC0000135 STATUS_DLL_NOT_FOUND, as the signed Int32 a process exit code is.
+    $dllNotFoundExitCode = -1073741515
     $reason = $null
     $run = $null
     for ($attempt = 1; $attempt -le $Attempts; $attempt++) {
@@ -5605,6 +5638,9 @@ function Test-WingetLaunchable {
         }
         elseif ($run.ExitCode -ne 0) {
             $reason = "'winget --version' exited with {0}" -f (Format-WingetExitCode -ExitCode $run.ExitCode)
+            if ($run.ExitCode -eq $dllNotFoundExitCode) {
+                $retryable = $false
+            }
         }
         else {
             $versionLine = @($run.StandardOutput | ForEach-Object { "$_".Trim() } | Where-Object { $_ -match '^v\d' }) | Select-Object -First 1
@@ -6397,7 +6433,7 @@ function Invoke-WingetInstall {
     $account = Get-InstallAccountContext
     $machineWide = [bool]($account.IsSystem -or $account.IsCrossUserElevation)
     if ($account.IsSystem) {
-        Write-Info 'Running as SYSTEM (for example from an RMM agent): installing for the whole PC only, with the winget.exe that App Installer installed for this PC. An app with no machine-wide installer is reported as Deferred, for a run as the signed-in user to install. Microsoft does not support the winget command line as SYSTEM, so a SYSTEM run can fail where a run as a user would not.'
+        Write-Info 'Running as SYSTEM (for example from an RMM agent): installing for the whole PC only, with the winget.exe that App Installer installed for this PC. An app with no machine-wide installer is not installed: it is reported as Deferred, with how it can still be installed for the user. Microsoft does not support the winget command line as SYSTEM, so a SYSTEM run can fail where a run as a user would not.'
     }
 
     # Pending restart before the run (review finding P3-16), read before this run changes the
@@ -6547,7 +6583,7 @@ function Invoke-WingetInstall {
     $skippedApps = @()
     $failedApps = @()
     # Apps with no machine-wide installer in a run for the whole PC (review finding P3-22): neither
-    # installed nor failed, and left for a run as the signed-in user.
+    # installed nor failed, and left for the signed-in user's own account (Write-DeferredAppsSummary).
     $deferredApps = @()
 
     # No separate source-trust pass here: only the winget community source is used (every install
@@ -6604,8 +6640,8 @@ function Invoke-WingetInstall {
                 }
                 'Deferred' {
                     # No machine-wide installer, and this run installs for the whole PC only
-                    # (review finding P3-22). Write-DeferredAppsSummary says who can install it.
-                    Write-WarningMessage "Deferred: $($app.name) (it has no machine-wide installer)"
+                    # (review finding P3-22). Write-DeferredAppsSummary says what can install it.
+                    Write-WarningMessage "Deferred: $($app.name) (winget found no machine-wide installer for it)"
                     $deferredApps += $app.name
                 }
                 'Installed' {
@@ -6725,7 +6761,7 @@ function Invoke-WingetInstall {
                     elseif ($outcome.Status -eq 'Deferred') {
                         # The retry got as far as the install, which found no machine-wide
                         # installer (review finding P3-22): deferred, not failed.
-                        Write-WarningMessage "Deferred: $appName (it has no machine-wide installer)"
+                        Write-WarningMessage "Deferred: $appName (winget found no machine-wide installer for it)"
                         $deferredApps += $appName
                     }
                     else {
@@ -8495,7 +8531,7 @@ function Initialize-WingetSourcesForUser {
     wrong profile: SYSTEM's own, or the elevating admin's instead of the signed-in user's, and the
     verification, run as that same account, then reported it installed. A package with no
     machine-scope installer then ends at once with NoMachineScopeInstaller, and the caller defers
-    it to a run as the signed-in user.
+    it (leaves it for the signed-in user's own account).
 .RETURNS
     [hashtable] @{ ExitCode = <int|$null>; Attempts = <int>; SessionErrorExhausted = <bool>; MachineScopeFellBack = <bool>; NoMachineScopeInstaller = <bool>; LaunchErrorExhausted = <bool>; LaunchAttempts = <int>; LaunchError = <string|$null>; TimedOut = <bool>; TimeoutSeconds = <int>; InstallerLogPath = <string|$null>; InstallInProgressWaitedSeconds = <int>; RestartRequired = <bool> }
     SessionErrorExhausted is True only when every attempt failed with the session error.
@@ -8664,7 +8700,7 @@ function Install-WingetPackage {
             if ($MachineScopeOnly) {
                 # A run as SYSTEM or under cross-user elevation (review finding P3-22): the default
                 # scope would install the app for the account running this, not for the user.
-                Write-Info "$PackageId has no machine-scope installer, and this run installs for the whole PC only, so it is not installed at winget's default (per-user) scope."
+                Write-Info "winget found no machine-scope installer for $PackageId that applies to this PC, and this run installs for the whole PC only, so it is not installed at winget's default (per-user) scope."
                 $noMachineScopeInstaller = $true
                 break
             }

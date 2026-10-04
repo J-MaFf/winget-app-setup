@@ -33,7 +33,7 @@
 
     With -MachineWide (a run as SYSTEM or under cross-user elevation; review findings P3-22, P3-24)
     the app is installed for the whole PC or not at all: a package with no machine-scope installer
-    comes back Deferred, for a run as the signed-in user to install, instead of being installed at
+    comes back Deferred, left for the signed-in user's own account, instead of being installed at
     winget's default scope for the account running this. An app that names its MSIX package
     (msixName, e.g. Windows Terminal) is also checked, before and after the install, by whether that
     package is provisioned for every user on this PC (Test-AppxPackageProvisionedForMachine) instead

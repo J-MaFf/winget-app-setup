@@ -665,8 +665,8 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
             @($script:capturedRows | Where-Object { $_[0] -eq 'Failed' }).Count | Should -Be 0
             # Not retried: a deferred app is not a failure.
             Should -Invoke Install-AppWithVerification -Times 2 -Exactly
-            $script:warningMessages | Should -Contain 'Deferred: Contoso.UserOnly (it has no machine-wide installer)'
-            $script:warningMessages | Should -Contain 'Deferred: Contoso.UserOnly - no machine-wide installer, and a run as SYSTEM installs for the whole PC only. Not installed and not counted as failed; run the installer as the signed-in user to install it.'
+            $script:warningMessages | Should -Contain 'Deferred: Contoso.UserOnly (winget found no machine-wide installer for it)'
+            $script:warningMessages | Should -Contain "Deferred: Contoso.UserOnly - winget found no machine-wide installer for it that applies to this PC (0x8A150010 NO_APPLICABLE_INSTALLER with --scope machine), and a run as SYSTEM installs for the whole PC only. Not installed and not counted as failed. A per-user app can only be installed in the signed-in user's own account: by this installer run as the signed-in user when that account is an administrator, otherwise by a per-user deployment (an RMM script that runs as the user, or the Microsoft Store)."
         }
 
         It 'Names the signed-in user under cross-user elevation' {
@@ -675,7 +675,7 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
 
             Invoke-WingetInstall -Apps @(@{ name = 'Contoso.UserOnly' }) -NonInteractive | Should -Be 0
 
-            $script:warningMessages | Should -Contain "Deferred: Contoso.UserOnly - no machine-wide installer, and installing per-user here would install for 'CONTOSO\admin-tech' instead of 'CONTOSO\jdoe'. Not installed and not counted as failed; run the installer as 'CONTOSO\jdoe' to install it."
+            $script:warningMessages | Should -Contain "Deferred: Contoso.UserOnly - winget found no machine-wide installer for it that applies to this PC (0x8A150010 NO_APPLICABLE_INSTALLER with --scope machine), and installing per-user here would install for 'CONTOSO\admin-tech' instead of 'CONTOSO\jdoe'. Not installed and not counted as failed. A per-user app can only be installed in the account 'CONTOSO\jdoe': by this installer run as 'CONTOSO\jdoe' when that account is an administrator, otherwise by a per-user deployment (an RMM script that runs as the user, or the Microsoft Store)."
         }
 
         It 'Defers an app that the retry pass finds has no machine-wide installer, instead of counting it as installed' {
@@ -696,7 +696,10 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
             @($script:capturedRows | Where-Object { $_[0] -eq 'Deferred' })[0][1] | Should -Be 'Contoso.UserOnly'
             @($script:capturedRows | Where-Object { $_[0] -eq 'Installed' }).Count | Should -Be 0
             $script:successMessages | Should -Not -Contain 'Retry succeeded: Contoso.UserOnly'
-            $script:warningMessages | Should -Contain 'Deferred: Contoso.UserOnly (it has no machine-wide installer)'
+            $script:warningMessages | Should -Contain 'Deferred: Contoso.UserOnly (winget found no machine-wide installer for it)'
+            # The retry pass installs for the whole PC too: at winget's default scope it would
+            # install into SYSTEM's own profile (review finding P3-22).
+            Should -Invoke Install-AppWithVerification -Times 2 -Exactly -ParameterFilter { $MachineWide }
         }
 
         It 'Says a provisioned app is skipped because every user has it' {
@@ -1939,7 +1942,7 @@ Describe 'A run as SYSTEM from an RMM agent (review findings P2-24, P3-22, P3-23
 
         $text = $script:messages -join "`n"
         $text | Should -Match 'Skipping: Microsoft\.WindowsTerminal \(already provisioned for every user on this PC\)'
-        $text | Should -Match 'Deferred: Contoso\.UserOnlyApp - no machine-wide installer, and a run as SYSTEM installs for the whole PC only'
+        $text | Should -Match 'Deferred: Contoso\.UserOnlyApp - winget found no machine-wide installer for it that applies to this PC \(0x8A150010 NO_APPLICABLE_INSTALLER with --scope machine\), and a run as SYSTEM installs for the whole PC only'
         $text | Should -Not -Match 'Cross-user elevation|log on to Windows|ADMIN account|NT AUTHORITY'
         Should -Invoke Test-AndInstallWingetModule -Times 0 -Exactly
         Should -Invoke Register-WingetAppInstallerForUser -Times 0 -Exactly
@@ -2551,7 +2554,7 @@ Describe 'Write-DeferredAppsSummary (review findings P3-22, P3-23)' {
     It 'Names every deferred app in one line, for SYSTEM' {
         Write-DeferredAppsSummary -DeferredApps @('Contoso.One', 'Contoso.Two') -AccountContext (New-TestAccountContext -System -SessionUser 'CONTOSO\jdoe')
 
-        $script:warningMessages | Should -Be @('Deferred: Contoso.One, Contoso.Two - no machine-wide installer, and a run as SYSTEM installs for the whole PC only. Not installed and not counted as failed; run the installer as the signed-in user to install them.')
+        $script:warningMessages | Should -Be @("Deferred: Contoso.One, Contoso.Two - winget found no machine-wide installer for them that applies to this PC (0x8A150010 NO_APPLICABLE_INSTALLER with --scope machine), and a run as SYSTEM installs for the whole PC only. Not installed and not counted as failed. A per-user app can only be installed in the signed-in user's own account: by this installer run as the signed-in user when that account is an administrator, otherwise by a per-user deployment (an RMM script that runs as the user, or the Microsoft Store).")
     }
 }
 

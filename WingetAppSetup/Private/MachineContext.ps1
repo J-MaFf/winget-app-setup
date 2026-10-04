@@ -82,7 +82,9 @@ function Get-WindowsAppsDirectory {
       2. When that query fails or finds none: the
          Microsoft.DesktopAppInstaller_<version>_<architecture>__8wekyb3d8bbwe folders under
          Get-WindowsAppsDirectory that hold a winget.exe. SYSTEM can list that folder; an
-         administrator account normally cannot.
+         administrator account normally cannot. A folder whose package the query listed with a
+         Status other than Ok (Tampered, Modified, NeedsRemediation, ...) is left out here too, so
+         the folder scan never brings back a package the query turned down.
     Candidates for this PC's architecture come first (x64 on an x64 PC; arm64, then x64, then x86
     on an ARM64 PC), and within an architecture the highest version first. Versions are compared as
     [version], never as text: as text, 1.9.25200.0 sorts after 1.27.460.0.
@@ -114,9 +116,15 @@ function Get-MachineWingetCandidate {
     }
 
     $found = @()
+    # Version_architecture of every package the query listed with a status other than Ok.
+    $rejected = @()
     try {
         foreach ($package in @(Get-DesktopAppInstallerPackageInfo)) {
-            if ("$($package.Status)" -ne 'Ok' -or [string]::IsNullOrWhiteSpace($package.InstallLocation)) {
+            if ("$($package.Status)" -ne 'Ok') {
+                $rejected += ('{0}_{1}' -f $package.Version, "$($package.Architecture)".ToLowerInvariant())
+                continue
+            }
+            if ([string]::IsNullOrWhiteSpace($package.InstallLocation)) {
                 continue
             }
             $path = Join-Path $package.InstallLocation 'winget.exe'
@@ -136,6 +144,9 @@ function Get-MachineWingetCandidate {
                 $folders = @(Get-ChildItem -LiteralPath $windowsApps -Directory -Filter 'Microsoft.DesktopAppInstaller_*' -ErrorAction Stop)
                 foreach ($folder in $folders) {
                     if ($folder.Name -notmatch '^Microsoft\.DesktopAppInstaller_(?<version>\d+(\.\d+){1,3})_(?<architecture>x64|arm64|x86)__8wekyb3d8bbwe$') {
+                        continue
+                    }
+                    if ($rejected -contains ('{0}_{1}' -f ([version]$Matches['version']), $Matches['architecture'].ToLowerInvariant())) {
                         continue
                     }
                     $path = Join-Path $folder.FullName 'winget.exe'
@@ -172,9 +183,10 @@ function Get-MachineWingetCandidate {
 
     Instead, each winget.exe from Get-MachineWingetCandidate is tried, best first, with
     Test-WingetLaunchable: the first is checked for up to 75 seconds (for a lock or an App Installer
-    update that clears on its own), the others twice. The first that starts and prints a version is
-    kept for the rest of the run ($script:MachineWingetPath, which Resolve-WingetExecutable returns
-    to every winget call). When none starts, the run cannot install anything, and the message says
+    update that clears on its own), the others twice, and a winget.exe that cannot load a DLL it
+    needs (0xC0000135) only once, since that does not clear on its own. The first that starts and
+    prints a version is kept for the rest of the run ($script:MachineWingetPath, which
+    Resolve-WingetExecutable returns to every winget call). When none starts, the run cannot install anything, and the message says
     why: no App Installer for the machine, or the winget.exe found could not be started.
 
     Read-only, so a dry run runs it too.

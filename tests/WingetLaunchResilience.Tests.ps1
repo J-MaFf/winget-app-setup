@@ -185,6 +185,21 @@ Describe 'Test-WingetLaunchable (review findings P2-8, P3-9)' {
         Should -Invoke Start-Sleep -Times 0 -Exactly
     }
 
+    It 'Stops at once when winget.exe cannot load a DLL it needs (0xC0000135), whatever -Attempts says' {
+        # Deterministic until the DLL is installed: a machine-wide winget.exe started as SYSTEM on a
+        # PC without the Visual C++ runtime. Checking it again only made the run wait 75 seconds
+        # (review of finding P2-24).
+        Mock Invoke-WingetProcess { New-TestProcessResult -ExitCode -1073741515 }
+
+        $result = Test-WingetLaunchable -Attempts 6 -RetryDelaySeconds 15
+
+        $result.Launchable | Should -BeFalse
+        $result.Reason | Should -Be "'winget --version' exited with 0xC0000135 STATUS_DLL_NOT_FOUND"
+        $result.Attempts | Should -Be 1
+        Should -Invoke Invoke-WingetProcess -Times 1 -Exactly
+        Should -Invoke Start-Sleep -Times 0 -Exactly
+    }
+
     It 'Checks again after RetryDelaySeconds when the launch failure can clear on its own, and passes once it does' {
         $script:calls = 0
         Mock Invoke-WingetProcess {

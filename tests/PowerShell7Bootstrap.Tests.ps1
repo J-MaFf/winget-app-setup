@@ -983,6 +983,31 @@ Describe 'Invoke-PowerShell7Bootstrap' {
             Should -Invoke Install-PowerShell7FromMsi -Times 1 -Exactly
             Should -Invoke Invoke-RestMethod -Times 0
         }
+
+        It 'Says that SYSTEM has no winget command, not that winget is missing from the PC (review of finding P2-24)' {
+            # An RMM agent runs the installer as SYSTEM from Windows PowerShell 5.1. App Installer can
+            # be installed for the PC, and the main run then finds its winget.exe, but SYSTEM has no
+            # `winget` command.
+            Mock Test-IsSystemAccount { $true }
+            Mock Install-PowerShell7FromMsi { $true }
+
+            Invoke-PowerShell7Bootstrap -CommandPath 'C:\repo\winget-app-install.ps1' | Should -Be 0
+
+            Should -Invoke Write-Info -Times 1 -Exactly -ParameterFilter { $Message -match '^Running as SYSTEM, which has no winget command of its own' }
+            Should -Invoke Write-WarningMessage -Times 0 -Exactly -ParameterFilter { $Message -match 'winget is not available' }
+            Should -Invoke Install-PowerShell7FromMsi -Times 1 -Exactly
+            Should -Invoke Invoke-WingetProcess -Times 0 -Exactly
+        }
+
+        It 'Still says winget is not available for any other account' {
+            Mock Test-IsSystemAccount { $false }
+            Mock Install-PowerShell7FromMsi { $true }
+
+            Invoke-PowerShell7Bootstrap -CommandPath 'C:\repo\winget-app-install.ps1' | Should -Be 0
+
+            Should -Invoke Write-WarningMessage -Times 1 -Exactly -ParameterFilter { $Message -eq 'winget is not available on this machine.' }
+            Should -Invoke Write-Info -Times 0 -Exactly -ParameterFilter { $Message -match 'Running as SYSTEM' }
+        }
     }
 
     Context 'PowerShell 7 missing, MSI fallback' {

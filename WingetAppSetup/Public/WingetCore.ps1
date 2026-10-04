@@ -583,7 +583,7 @@ function Initialize-WingetSourcesForUser {
     wrong profile: SYSTEM's own, or the elevating admin's instead of the signed-in user's, and the
     verification, run as that same account, then reported it installed. A package with no
     machine-scope installer then ends at once with NoMachineScopeInstaller, and the caller defers
-    it to a run as the signed-in user.
+    it (leaves it for the signed-in user's own account).
 .RETURNS
     [hashtable] @{ ExitCode = <int|$null>; Attempts = <int>; SessionErrorExhausted = <bool>; MachineScopeFellBack = <bool>; NoMachineScopeInstaller = <bool>; LaunchErrorExhausted = <bool>; LaunchAttempts = <int>; LaunchError = <string|$null>; TimedOut = <bool>; TimeoutSeconds = <int>; InstallerLogPath = <string|$null>; InstallInProgressWaitedSeconds = <int>; RestartRequired = <bool> }
     SessionErrorExhausted is True only when every attempt failed with the session error.
@@ -752,7 +752,7 @@ function Install-WingetPackage {
             if ($MachineScopeOnly) {
                 # A run as SYSTEM or under cross-user elevation (review finding P3-22): the default
                 # scope would install the app for the account running this, not for the user.
-                Write-Info "$PackageId has no machine-scope installer, and this run installs for the whole PC only, so it is not installed at winget's default (per-user) scope."
+                Write-Info "winget found no machine-scope installer for $PackageId that applies to this PC, and this run installs for the whole PC only, so it is not installed at winget's default (per-user) scope."
                 $noMachineScopeInstaller = $true
                 break
             }

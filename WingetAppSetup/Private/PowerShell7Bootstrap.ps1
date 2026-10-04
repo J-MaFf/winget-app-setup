@@ -14,9 +14,10 @@
 # Get-ProcessTimeoutSeconds and their helpers, written against .NET Framework 4.5;
 # Resolve-WingetExecutable, which returns 'winget' unless a SYSTEM run has resolved the machine-wide
 # winget.exe, and the 5.1-safe Private/MachineContext.ps1 helpers it can reach) for the winget
-# install (review findings P2-5/P2-6, P2-24). Get-AuthenticodeSignature, which
-# Test-PowerShell7MsiSignature calls, is a Windows PowerShell 5.1 cmdlet too. The tail's 5.1 branch
-# also calls, around this file:
+# install (review findings P2-5/P2-6, P2-24), and Test-IsSystemAccount (Private/Elevation.ps1: a
+# try/catch around WindowsIdentity.GetCurrent()) when there is no winget command.
+# Get-AuthenticodeSignature, which Test-PowerShell7MsiSignature calls, is a Windows PowerShell 5.1
+# cmdlet too. The tail's 5.1 branch also calls, around this file:
 # Test-EffectiveNonInteractive (with Test-IsSystemAccount, Private/Elevation.ps1: a try/catch around
 # WindowsIdentity.GetCurrent(), review finding P3-23) and Test-IsContinuousIntegration
 # (Private/Interactivity.ps1),
@@ -846,6 +847,13 @@ function Invoke-PowerShell7Bootstrap {
                 }
             }
             $pwshPath = Find-PowerShell7
+        }
+        elseif (Test-IsSystemAccount) {
+            # SYSTEM, as under an RMM agent, has no `winget` command even where App Installer is
+            # installed for the PC: winget is set up per user account (review of finding P2-24).
+            # Saying winget is not on the machine contradicted the main run, which goes on to find
+            # the machine-wide winget.exe. Using that winget.exe here too is a follow-up.
+            Write-Info 'Running as SYSTEM, which has no winget command of its own (winget is set up for each user account), so PowerShell 7 is installed without winget.'
         }
         else {
             Write-WarningMessage 'winget is not available on this machine.'

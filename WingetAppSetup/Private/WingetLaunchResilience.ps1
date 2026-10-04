@@ -139,7 +139,11 @@ function Resolve-WingetExecutable {
     can clear on their own: a transient launch failure (Test-TransientWingetLaunchError: winget.exe
     locked by an antivirus scan or an App Installer update in progress), a timeout, a non-zero exit
     or no version in the output. Any other launch failure (winget not on PATH, 'Access is denied')
-    is final at once: waiting does not change it.
+    is final at once: waiting does not change it. So is exit code 0xC0000135
+    (STATUS_DLL_NOT_FOUND): the Windows loader could not find a DLL winget.exe needs, which stays
+    so until that DLL is installed. A machine-wide winget.exe started as SYSTEM fails this way on a
+    PC without the Visual C++ runtime, and checking it again only made every such run wait 75
+    seconds before trying the next one (review of finding P2-24).
 
     Used by Test-AndInstallWinget (is winget usable before the run), by Invoke-WingetInstall's
     circuit breaker (after an app could not launch winget) and end-of-run check, and by
@@ -168,6 +172,8 @@ function Test-WingetLaunchable {
     )
 
     $timeoutSeconds = Get-ProcessTimeoutSeconds -Operation WingetVersion
+    # 0xC0000135 STATUS_DLL_NOT_FOUND, as the signed Int32 a process exit code is.
+    $dllNotFoundExitCode = -1073741515
     $reason = $null
     $run = $null
     for ($attempt = 1; $attempt -le $Attempts; $attempt++) {
@@ -182,6 +188,9 @@ function Test-WingetLaunchable {
         }
         elseif ($run.ExitCode -ne 0) {
             $reason = "'winget --version' exited with {0}" -f (Format-WingetExitCode -ExitCode $run.ExitCode)
+            if ($run.ExitCode -eq $dllNotFoundExitCode) {
+                $retryable = $false
+            }
         }
         else {
             $versionLine = @($run.StandardOutput | ForEach-Object { "$_".Trim() } | Where-Object { $_ -match '^v\d' }) | Select-Object -First 1

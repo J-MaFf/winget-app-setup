@@ -17,18 +17,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`Get-InstallAccountContext`, built on `Test-IsSystemAccount`), and as SYSTEM:
   `Test-AndInstallWinget` finds the `winget.exe` that App Installer installed for the PC
   (`Get-AppxPackage -AllUsers`, status `Ok`, newest version as a version, the PC's architecture
-  first; the `WindowsApps` folder when that query fails or finds none) and checks that it starts,
-  trying the next one if not, and `Resolve-WingetExecutable` hands its full path to every winget
-  call; every step that sets winget up for one account is skipped (registering App Installer,
-  `Repair-WinGetPackageManager` and the `Microsoft.WinGet.Client` install, the aka.ms/getwinget
-  download, registering the winget source package); the run is always non-interactive
+  first; the `WindowsApps` folder when that query fails or finds none, leaving out any package the
+  query listed with another status) and checks that it starts, trying the next one if not (at once
+  after `0xC0000135`, which `Test-WingetLaunchable` no longer checks again), and
+  `Resolve-WingetExecutable` hands its full path to every winget call; every step that sets winget
+  up for one account is skipped (registering App Installer, `Repair-WinGetPackageManager` and the
+  `Microsoft.WinGet.Client` install, the aka.ms/getwinget download, registering the winget source
+  package); the run is always non-interactive
   (`Test-EffectiveNonInteractive`); Windows Terminal's #271 console check does not apply, and
   Terminal counts as installed when it is provisioned for every user (`msixName` in the catalog,
   `Test-AppxPackageProvisionedForMachine`), where `winget list`, which sees no user's MSIX apps as
   SYSTEM, made it fail on every run; and the messages no longer call SYSTEM a cross-user elevation
-  or advise signing in to Windows as `NT AUTHORITY\SYSTEM`. When no machine-wide `winget.exe`
-  starts, the run exits 2 and says why. `0xC0000135 STATUS_DLL_NOT_FOUND` now has a name in the
-  exit-code table, with a hint about the Visual C++ runtime for SYSTEM. Microsoft does not support
+  or advise signing in to Windows as `NT AUTHORITY\SYSTEM`, and the Windows PowerShell 5.1
+  bootstrap says SYSTEM has no winget command instead of that winget is not on the PC. When no
+  machine-wide `winget.exe` starts, the run exits 2 and says why. `0xC0000135 STATUS_DLL_NOT_FOUND`
+  now has a name in the exit-code table, with a hint about the Visual C++ runtime for SYSTEM. Microsoft does not support
   the winget command line as SYSTEM; moving SYSTEM runs to its `Microsoft.WinGet.Client` module is
   a follow-up. Not yet checked on a real Windows PC as SYSTEM.
 
@@ -84,11 +87,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   retried at the default scope, which put it into SYSTEM's own profile or the elevating admin's
   instead of the signed-in user's, and the check, run as that same account, reported it installed.
   `Install-WingetPackage -MachineScopeOnly` now stops there, and the app is reported as `Deferred`:
-  a new summary row, a line saying who can install it, and no effect on the exit code (it counts
-  neither as installed nor as failed). Under cross-user elevation, Windows Terminal is decided from
-  whether it is provisioned for every user too, not from the admin's `winget list`. In a signed-in
-  user's own run the fallback stays, and a successful one now says the app was installed for that
-  account only.
+  a new summary row, a line saying what can still install it (only the signed-in user's own
+  account: this installer run as that user when the account is an administrator, otherwise a
+  per-user deployment), and no effect on the exit code (it counts neither as installed nor as
+  failed). Under cross-user elevation, Windows Terminal is decided from whether it is provisioned
+  for every user too, not from the admin's `winget list`. In a signed-in user's own run the
+  fallback stays, and a successful one now says the app was installed for that account only.
 
 - The Windows Terminal step no longer configures the elevating admin account (review finding
   P3-21). Under cross-user elevation it wrote the admin's `settings.json` and

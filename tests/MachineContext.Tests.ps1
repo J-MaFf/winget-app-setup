@@ -94,6 +94,31 @@ Describe 'Get-MachineWingetCandidate (review finding P2-24)' {
         @($candidates | ForEach-Object { $_.Path }) | Should -Be @((Join-Path $good 'winget.exe'))
     }
 
+    It 'Does not bring a package the query turned down back through the WindowsApps folder' {
+        # The query works but lists App Installer only with a status other than Ok, so it yields no
+        # candidate and the folder scan runs. That package's folder, winget.exe and all, must stay
+        # out (review of finding P2-24).
+        $tampered = New-TestAppInstallerFolder -Root $script:windowsApps -Version '1.28.0.0'
+        $remediation = New-TestAppInstallerFolder -Root $script:windowsApps -Version '1.27.460.0' -Architecture 'arm64'
+        Mock Get-DesktopAppInstallerPackageInfo {
+            [pscustomobject]@{ Version = [version]'1.28.0.0'; Architecture = 'X64'; Status = 'Tampered'; InstallLocation = $tampered }
+            [pscustomobject]@{ Version = [version]'1.27.460.0'; Architecture = 'Arm64'; Status = 'NeedsRemediation'; InstallLocation = $remediation }
+        }
+
+        @(Get-MachineWingetCandidate -ProcessorArchitecture 'AMD64').Count | Should -Be 0
+        @(Get-MachineWingetCandidate -ProcessorArchitecture 'ARM64').Count | Should -Be 0
+    }
+
+    It 'Still scans WindowsApps for the folders the query did not turn down' {
+        [void](New-TestAppInstallerFolder -Root $script:windowsApps -Version '1.28.0.0')
+        $other = New-TestAppInstallerFolder -Root $script:windowsApps -Version '1.27.460.0'
+        Mock Get-DesktopAppInstallerPackageInfo {
+            [pscustomobject]@{ Version = [version]'1.28.0.0'; Architecture = 'X64'; Status = 'Modified'; InstallLocation = '' }
+        }
+
+        @(Get-MachineWingetCandidate -ProcessorArchitecture 'AMD64' | ForEach-Object { $_.Path }) | Should -Be @((Join-Path $other 'winget.exe'))
+    }
+
     It 'Puts the PC''s own architecture first on ARM64, and leaves arm64 out on an x64 PC' {
         $arm = New-TestAppInstallerFolder -Root $script:windowsApps -Version '1.26.0.0' -Architecture 'arm64'
         $x64 = New-TestAppInstallerFolder -Root $script:windowsApps -Version '1.27.0.0' -Architecture 'x64'

@@ -413,8 +413,13 @@ function Write-InstalledAppNote {
     Review findings P3-22, P3-23. A run as SYSTEM or under cross-user elevation installs for the whole
     PC only, so an app whose package has no machine-wide installer is not installed by it: it is
     reported as Deferred, neither installed nor failed, and does not change the exit code. This
-    says so once, for all of them, with what to do: run the installer as the signed-in user, named
-    when it is known. No-op when nothing was deferred.
+    says so once, for all of them, with what can still install them. That is only the signed-in
+    user's own account (named under cross-user elevation): this installer run as that user works
+    only when the account is an administrator, since the installer needs administrator rights and
+    a standard user's UAC prompt elevates as another account, which defers the app again; on a
+    standard user's PC it takes a per-user deployment. The line does not claim a per-user installer
+    exists: winget answers 0x8A150010 at --scope machine also when no installer applies to the PC
+    at all. No-op when nothing was deferred.
 .PARAMETER DeferredApps
     The package ids of the deferred apps.
 .PARAMETER AccountContext
@@ -441,15 +446,17 @@ function Write-DeferredAppsSummary {
         $pronoun = 'it'
     }
     $why = 'this run installs for the whole PC only'
+    $account = "the signed-in user's own account"
     $who = 'the signed-in user'
     if ($AccountContext -and $AccountContext.IsSystem) {
         $why = 'a run as SYSTEM installs for the whole PC only'
     }
     elseif ($AccountContext -and $AccountContext.IsCrossUserElevation) {
         $why = "installing per-user here would install for '$($AccountContext.ProcessUser)' instead of '$($AccountContext.SessionUser)'"
+        $account = "the account '$($AccountContext.SessionUser)'"
         $who = "'$($AccountContext.SessionUser)'"
     }
-    Write-WarningMessage ('Deferred: {0} - no machine-wide installer, and {1}. Not installed and not counted as failed; run the installer as {2} to install {3}.' -f ($DeferredApps -join ', '), $why, $who, $pronoun)
+    Write-WarningMessage ('Deferred: {0} - winget found no machine-wide installer for {1} that applies to this PC ({2} with --scope machine), and {3}. Not installed and not counted as failed. A per-user app can only be installed in {4}: by this installer run as {5} when that account is an administrator, otherwise by a per-user deployment (an RMM script that runs as the user, or the Microsoft Store).' -f ($DeferredApps -join ', '), $pronoun, (Format-WingetExitCode -ExitCode -1978335216), $why, $account, $who)
 }
 
 <#
