@@ -87,6 +87,12 @@ Non-interactive mode is also auto-detected when the session is non-interactive (
 | 3 | App-definition validation failed, or no valid app definitions remain |
 | 5 | The run was aborted before it finished: an unexpected error (the message and stack trace are in the log), or the run was stopped from outside (Ctrl+C, the console closing, an installer stopping the console) when run from a file or non-interactively |
 
+A script that imports the `WingetAppSetup` module and calls `Invoke-WingetInstall` itself gets
+codes 0-3 back as the function's return value; the function never exits. Pass the code on with
+`exit (Invoke-WingetInstall -NonInteractive)`, or the wrapper exits 0 even after a failed run.
+Code 5, and code 1 for a failed pre-flight check or PowerShell 7 bootstrap, come from
+`winget-app-install.ps1` itself, not from the function.
+
 ## Logs
 
 Every run writes a full transcript to

@@ -308,6 +308,22 @@ Describe 'The entry block exits with the code Invoke-WingetInstall returns (wgt-
         $result.Output | Should -Not -Match 'UNEXPECTED ERROR|stopped before it finished'
     }
 
+    It 'Does not exit after a successful irm | iex run, so the caller''s console stays open' {
+        # Someone who typed the one-liner in a console must keep that console after a success:
+        # under Invoke-Expression an exit ends the caller's host, closing the window. The exit
+        # code alone cannot show this (a -File run ends with 0 either way), so the caller runs a
+        # command after the iex and the test checks that it still ran.
+        $path = New-FaultInjectedInstaller -Name 'returns-0-iex.ps1' -Body "Write-Host 'run finished'; return 0"
+        $escapedPath = $path.Replace("'", "''")
+
+        $result = Invoke-ChildInstaller -Arguments @('-Command', "Get-Content -Raw -LiteralPath '$escapedPath' | Invoke-Expression; Write-Host 'caller session continues'")
+
+        $result.ExitCode | Should -Be 0
+        $result.Output | Should -Match 'run finished'
+        $result.Output | Should -Match 'caller session continues'
+        $result.Output | Should -Not -Match 'UNEXPECTED ERROR|stopped before it finished'
+    }
+
     It 'Exits with the returned code, not a value a helper leaked into the output stream before it' {
         $path = New-FaultInjectedInstaller -Name 'leaks-then-returns.ps1' -Body "Write-Output 'stray value'; Write-Output 7; return 3"
 
