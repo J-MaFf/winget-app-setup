@@ -12,7 +12,15 @@ name: E2E Install
 #     'shell: powershell', and PowerShell 7 is removed first, so the first pass has to install it
 #     through the installer's 5.1 bootstrap and relaunch under it, and the second pass finds it and
 #     relaunches. Assert-Install.ps1 -ExpectPowerShell7Bootstrap checks both bootstraps.
-# Both legs first uninstall the catalog apps the runner image ships with (Google Chrome, 7-Zip and
+# A third leg, e2e-install-system (work-order item 34), runs one pass the way ManageEngine Endpoint
+# Central does: as SYSTEM, from a one-shot scheduled task that starts the RMM wrapper
+# (rmm/Invoke-WingetAppSetup.ps1) with the 32-bit SysWOW64 powershell.exe, as Endpoint Central's
+# 32-bit agent would. The wrapper runs the checkout's installer (-InstallerPath, SHA256-checked),
+# never its pinned commit, so the leg tests the code under review on every trigger, the weekly run
+# included. e2e/Invoke-SystemInstallPass.ps1 checks the task's exit code (same policy as every
+# pass), the wrapper's 64-bit relaunch and exit-code pass-through, last-run.json, and that nothing
+# was installed per-user into SYSTEM's own profile.
+# All legs first uninstall the catalog apps the runner image ships with (Google Chrome, 7-Zip and
 # Git; e2e/Remove-PreinstalledApps.ps1), so the first pass really installs them instead of
 # skipping them as already installed. PowerShell 7 and Windows Terminal stay preinstalled in the
 # PowerShell 7 leg, which runs in them.
@@ -44,12 +52,12 @@ name: E2E Install
 # still not exercised: a WAU leg (start the task, wait for it, check that winget still starts) is
 # left for a follow-up.
 #
-# Pull requests: every PR starts this workflow, and the changes job lets both legs run only when
-# the PR touches the product (WingetAppSetup/**, build/**, winget-app-install.ps1) or the e2e
-# machinery (this file, e2e/**). The filter is a job rather than pull_request.paths so that
-# e2e-install can be a required check: a workflow that a paths filter skips reports no status, and
-# a required check left without one blocks the PR from merging, while a job skipped by its if:
-# reports success. For the same reason the 5.1 leg is its own job and not a matrix entry of
+# Pull requests: every PR starts this workflow, and the changes job lets the legs run only when
+# the PR touches the product (WingetAppSetup/**, build/**, winget-app-install.ps1, the RMM
+# wrappers in rmm/**) or the e2e machinery (this file, e2e/**). The filter is a job rather than
+# pull_request.paths so that e2e-install can be a required check: a workflow that a paths filter
+# skips reports no status, and a required check left without one blocks the PR from merging, while
+# a job skipped by its if: reports success. For the same reason the 5.1 leg is its own job and not a matrix entry of
 # e2e-install: a skipped matrix job reports its check under the unexpanded matrix name, and the
 # matrix would rename the e2e-install check.
 #
@@ -108,8 +116,8 @@ env:
 jobs:
   changes:
     # Pull requests only: does this PR need the real install? Yes when it changes the product
-    # (WingetAppSetup/**, build/**, winget-app-install.ps1) or the e2e machinery (this file,
-    # e2e/**). Scheduled and dispatched runs skip this job and always install.
+    # (WingetAppSetup/**, build/**, winget-app-install.ps1, rmm/**) or the e2e machinery (this
+    # file, e2e/**). Scheduled and dispatched runs skip this job and always install.
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -136,7 +144,7 @@ jobs:
             echo 'e2e=true' >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          pattern='^(WingetAppSetup/|build/|e2e/)|^(winget-app-install\.ps1|\.github/workflows/e2e-install\.yml)$'
+          pattern='^(WingetAppSetup/|build/|e2e/|rmm/)|^(winget-app-install\.ps1|\.github/workflows/e2e-install\.yml)$'
           if matched=$(grep -E "$pattern" <<< "$changed"); then
             echo 'Changed files that need the real install:'
             echo "$matched"
@@ -475,9 +483,83 @@ jobs:
           path: ${{ runner.temp }}\e2e-diagnostics
           if-no-files-found: warn
 
+  e2e-install-system:
+    # The SYSTEM leg (work-order item 34; see the header comment): one install pass as SYSTEM,
+    # through the RMM wrapper started by a 32-bit Windows PowerShell, on a third throwaway VM. Same
+    # if: as e2e-install.
+    needs: changes
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.changes.result != 'success' || needs.changes.outputs.e2e == 'true') }}
+    runs-on: windows-latest
+    # Backstop: 15 + 3 + 45 + 5 = 68, plus checkout and uploads. The pass step's 45 minutes cover the
+    # task's own 40-minute limit and the two minutes the script waits past it before stopping it.
+    timeout-minutes: 80
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      # As in e2e-install: Chrome, 7-Zip and Git come with the image, so the SYSTEM run would only
+      # skip them. PowerShell 7 stays: the SYSTEM run finds it, as on a PC the bootstrap set up.
+      - name: Remove the catalog apps the runner image ships with
+        shell: powershell
+        continue-on-error: true
+        timeout-minutes: 15
+        run: |
+          & .\e2e\Remove-PreinstalledApps.ps1
+
+      - name: Diagnostics before the SYSTEM install pass
+        shell: powershell
+        continue-on-error: true
+        timeout-minutes: 3
+        run: |
+          & .\e2e\Collect-Diagnostics.ps1 -OutputDirectory (Join-Path $env:RUNNER_TEMP 'e2e-diagnostics') -Label '1-before-system-pass'
+
+      - name: Install as SYSTEM through the RMM wrapper (scheduled task, 32-bit Windows PowerShell)
+        id: system-pass
+        shell: pwsh
+        timeout-minutes: 45
+        run: |
+          # Registers and starts a one-shot SYSTEM task running SysWOW64 powershell.exe -File
+          # rmm/Invoke-WingetAppSetup.ps1 -InstallerPath <checkout's installer>, waits for it and
+          # checks the run (e2e/Invoke-SystemInstallPass.ps1). Exit codes 0 and 3010 pass; 8 only
+          # when the run's transcript gives the missing Microsoft.WindowsAppRuntime.1.8 as the
+          # reason, as on every windows-latest pass. The output is also saved with the diagnostics,
+          # so report-failure can put the table in the issue.
+          $diagnosticsDir = Join-Path $env:RUNNER_TEMP 'e2e-diagnostics'
+          $null = New-Item -ItemType Directory -Path $diagnosticsDir -Force
+          & pwsh -NoProfile -ExecutionPolicy Bypass -File ./e2e/Invoke-SystemInstallPass.ps1 2>&1 |
+            Tee-Object -FilePath (Join-Path $diagnosticsDir 'assertions.txt')
+          exit $LASTEXITCODE
+
+      - name: Diagnostics at the end of the job (with event logs and WAU logs)
+        if: always()
+        shell: powershell
+        continue-on-error: true
+        timeout-minutes: 5
+        run: |
+          & .\e2e\Collect-Diagnostics.ps1 -OutputDirectory (Join-Path $env:RUNNER_TEMP 'e2e-diagnostics') -Label '3-end-of-job' -IncludeLogs
+
+      # The wrapper's install-*-rmm.log and the run's last-run.json are in the same folder.
+      - name: Upload install transcripts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: e2e-install-transcripts-system
+          path: |
+            C:\ProgramData\winget-app-setup\logs\*.log
+            C:\ProgramData\winget-app-setup\logs\last-run.json
+          if-no-files-found: warn
+
+      - name: Upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: e2e-diagnostics-system
+          path: ${{ runner.temp }}\e2e-diagnostics
+          if-no-files-found: warn
+
   report-failure:
     # Creates, or comments on, the 'E2E install run failed' issue when a scheduled run, or a run
-    # dispatched on main, does not succeed in either leg: failed, timed out or cancelled. Those
+    # dispatched on main, does not succeed in any leg: failed, timed out or cancelled. Those
     # runs test what users get. Never for pull_request runs, whose result shows on the PR, nor for
     # a run dispatched on another branch, which tests unmerged code and reports to whoever started
     # it; the issue channel exists so production failures cannot go unnoticed.
@@ -486,8 +568,8 @@ jobs:
     # artifacts. The old step inside e2e-install ran with 'shell: pwsh' and 'if: failure()': run
     # 35566866223 removed PowerShell 7 and the step died with 'pwsh: command not found', and a
     # job that hits timeout-minutes is cancelled, which failure() does not match.
-    needs: [e2e-install, e2e-install-windows-powershell]
-    if: ${{ always() && (needs.e2e-install.result != 'success' || needs.e2e-install-windows-powershell.result != 'success') && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) }}
+    needs: [e2e-install, e2e-install-windows-powershell, e2e-install-system]
+    if: ${{ always() && (needs.e2e-install.result != 'success' || needs.e2e-install-windows-powershell.result != 'success' || needs.e2e-install-system.result != 'success') && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -515,6 +597,7 @@ jobs:
           TESTED_SHA: ${{ github.sha }}
           PWSH_LEG_RESULT: ${{ needs.e2e-install.result }}
           WINDOWS_POWERSHELL_LEG_RESULT: ${{ needs.e2e-install-windows-powershell.result }}
+          SYSTEM_LEG_RESULT: ${{ needs.e2e-install-system.result }}
         run: |
           set -uo pipefail
           title='E2E install run failed'
@@ -583,9 +666,11 @@ jobs:
             # is shown too: a red second pass often starts from damage done in the first. The
             # Windows PowerShell 5.1 phase of a pass writes its own install-*-bootstrap.log, which
             # holds no install and is named before the PowerShell 7 run it starts, so it is kept
-            # out of that pair and its latest one gets a section of its own.
-            mapfile -t logs < <(find "$transcripts" -maxdepth 1 -type f -name 'install-*.log' ! -name '*-whatif.log' ! -name '*-bootstrap.log' -printf '%f\n' 2>/dev/null | sort)
+            # out of that pair and its latest one gets a section of its own. So does the RMM
+            # wrapper's install-*-rmm.log (the SYSTEM leg), which repeats the run's output.
+            mapfile -t logs < <(find "$transcripts" -maxdepth 1 -type f -name 'install-*.log' ! -name '*-whatif.log' ! -name '*-bootstrap.log' ! -name '*-rmm.log' -printf '%f\n' 2>/dev/null | sort)
             mapfile -t bootstraps < <(find "$transcripts" -maxdepth 1 -type f -name 'install-*-bootstrap.log' -printf '%f\n' 2>/dev/null | sort)
+            mapfile -t wrappers < <(find "$transcripts" -maxdepth 1 -type f -name 'install-*-rmm.log' -printf '%f\n' 2>/dev/null | sort)
             if [ "${#logs[@]}" -eq 0 ]; then
               echo '### Install transcripts'
               echo
@@ -613,6 +698,13 @@ jobs:
               echo "### Latest Windows PowerShell 5.1 bootstrap transcript, last 50 lines (\`$bootstrap\`)"
               echo
               tail -n 50 "$transcripts/$bootstrap" | fence
+              echo
+            fi
+            if [ "${#wrappers[@]}" -gt 0 ]; then
+              wrapper=${wrappers[${#wrappers[@]}-1]}
+              echo "### Latest RMM wrapper log, last 30 lines (\`$wrapper\`)"
+              echo
+              tail -n 30 "$transcripts/$wrapper" | fence
               echo
             fi
 
@@ -650,7 +742,9 @@ jobs:
               artifacts/e2e-install-transcripts artifacts/e2e-diagnostics
             leg_section e2e-install-windows-powershell 'started from Windows PowerShell 5.1' "$WINDOWS_POWERSHELL_LEG_RESULT" \
               artifacts/e2e-install-transcripts-windows-powershell artifacts/e2e-diagnostics-windows-powershell
-            echo "Full transcripts, event logs, Winget-AutoUpdate logs and assertion output, as far as each job got, are in the run's artifacts: \`e2e-install-transcripts\` and \`e2e-diagnostics\` for \`e2e-install\`, the same names with \`-windows-powershell\` for the Windows PowerShell 5.1 leg."
+            leg_section e2e-install-system 'run as SYSTEM through the RMM wrapper' "$SYSTEM_LEG_RESULT" \
+              artifacts/e2e-install-transcripts-system artifacts/e2e-diagnostics-system
+            echo "Full transcripts, event logs, Winget-AutoUpdate logs and assertion output, as far as each job got, are in the run's artifacts: \`e2e-install-transcripts\` and \`e2e-diagnostics\` for \`e2e-install\`, the same names with \`-windows-powershell\` for the Windows PowerShell 5.1 leg and \`-system\` for the SYSTEM leg."
           } > "$body"
 
           # GitHub rejects an issue or comment body over 65536 characters.

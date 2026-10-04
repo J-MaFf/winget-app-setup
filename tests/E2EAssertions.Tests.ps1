@@ -50,6 +50,31 @@ BeforeAll {
     $script:NotApplicable = [ordered]@{ 'Dell.CommandUpdate.Universal' = 'Dell hardware only' }
 }
 
+# Work-order item 34: the RMM wrapper's log (install-<time>-rmm.log) repeats the run's output and
+# brackets it in time, so it must never be read as the run's own transcript, which would make the
+# latest real run one with no summary.
+Describe 'Get-InstallTranscriptFile' {
+    It 'Keeps the bootstrap and RMM wrapper logs apart from the real-run transcripts, and leaves dry runs out' {
+        $logs = Join-Path $TestDrive ([guid]::NewGuid().ToString('N'))
+        $null = New-Item -ItemType Directory -Path $logs
+        $time = [datetime]'2026-10-05T06:00:00'
+        $names = @('install-20261005-060000-rmm.log', 'install-20261005-060005-bootstrap.log', 'install-20261005-060010.log', 'install-20261005-060500-whatif.log')
+        for ($i = 0; $i -lt $names.Count; $i++) {
+            $path = Join-Path $logs $names[$i]
+            Set-Content -LiteralPath $path -Value 'Summary:'
+            (Get-Item -LiteralPath $path).LastWriteTime = $time.AddMinutes($i)
+        }
+        # The wrapper's log is written last: it ends after the run it started.
+        (Get-Item -LiteralPath (Join-Path $logs 'install-20261005-060000-rmm.log')).LastWriteTime = $time.AddMinutes(10)
+
+        $files = Get-InstallTranscriptFile -LogDirectory $logs
+
+        @($files.RealRun | ForEach-Object Name) | Should -Be @('install-20261005-060010.log')
+        @($files.Bootstrap | ForEach-Object Name) | Should -Be @('install-20261005-060005-bootstrap.log')
+        @($files.Rmm | ForEach-Object Name) | Should -Be @('install-20261005-060000-rmm.log')
+    }
+}
+
 Describe 'ConvertFrom-InstallTranscript' {
     It 'Reads the installs, skips, not-applicable apps, build id and auto-update status of a first pass' {
         $transcript = ConvertFrom-InstallTranscript -Content (Get-Fixture -Name 'first-pass')
@@ -263,6 +288,15 @@ Describe 'ConvertFrom-InstallTranscript' {
         $transcript.FinalFailed | Should -Be @('Google.Chrome')
         $transcript.AutoUpdatesStatus | Should -Be 'Configured'
         $transcript.AutoUpdatesLine | Should -Be 'Configured (Winget-AutoUpdate v2.12.0).'
+    }
+
+    # Work-order item 34: the SYSTEM leg checks that the run really ran as SYSTEM.
+    It 'Says whether the run ran as SYSTEM' {
+        $system = ConvertFrom-InstallTranscript -Content "Installer build: 1.0.0+5ea1f00d`nRunning as SYSTEM (for example from an RMM agent): installing for the whole PC only.`nSummary:"
+        $user = Get-Fixture -Name 'first-pass'
+
+        $system.RanAsSystem | Should -BeTrue
+        (ConvertFrom-InstallTranscript -Content $user).RanAsSystem | Should -BeFalse
     }
 }
 
@@ -525,6 +559,8 @@ Describe 'Installer messages the transcript parser keys on' {
         @{ File = 'WingetAppSetup/Private/LoggingInternal.ps1'; Text = "`$phaseSuffix = '-bootstrap'" }
         @{ File = 'WingetAppSetup/Private/LoggingInternal.ps1'; Text = "`$whatIfSuffix = '-whatif'" }
         @{ File = 'WingetAppSetup/Private/LoggingInternal.ps1'; Text = "'install-{0:yyyyMMdd-HHmmss}{1}{2}.log'" }
+        @{ File = 'WingetAppSetup/Public/Install.ps1'; Text = "Write-Info 'Running as SYSTEM (for example from an RMM agent): " }
+        @{ File = 'rmm/Invoke-WingetAppSetup.ps1'; Text = "'install-{0:yyyyMMdd-HHmmss}-rmm.log'" }
     ) {
         $source = Get-Content -Raw -LiteralPath (Join-Path $script:RepoRoot $File)
         $source.Contains($Text) | Should -BeTrue -Because "e2e/TranscriptAssertions.ps1 matches this line; update both together"

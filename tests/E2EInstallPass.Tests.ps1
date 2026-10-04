@@ -322,6 +322,7 @@ Describe 'e2e scripts run by Windows PowerShell 5.1' {
         @{ Name = 'e2e/Invoke-InstallPass.ps1' }
         @{ Name = 'e2e/Remove-PreinstalledApps.ps1' }
         @{ Name = 'e2e/TranscriptAssertions.ps1' }
+        @{ Name = 'e2e/Invoke-SystemInstallPass.ps1' }
     ) {
         $path = Join-Path $script:RepoRoot $Name
         $bytes = [System.IO.File]::ReadAllBytes($path)

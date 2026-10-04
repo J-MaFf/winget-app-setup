@@ -268,8 +268,9 @@ function Get-InstallerExitCode {
     The FailureReason string from the shared install pipeline ('PreCheckTimeout',
     'PreCheckLaunchFailed', 'PreCheckFailed', 'InstallLaunchFailed', 'VerifyTimeout',
     'VerifyLaunchFailed', 'VerifyFailed', 'VerifyNotFound', 'CustomInstallFailed',
-    'WingetNotLaunchable', 'MachineCheckFailed', 'NoMachineScopeInstaller', 'PostInstallFailed').
-    Unknown or empty values fall back to a generic 'install failed'.
+    'WingetNotLaunchable', 'MachineCheckFailed', 'NoMachineScopeInstaller', 'PostInstallFailed', and
+    the user phase's 'NoUserScopeInstaller'). Unknown or empty values fall back to a generic 'install
+    failed'.
 .PARAMETER InstallResult
     The InstallResult hashtable from the shared install pipeline: Install-WingetPackage's
     ExitCode/Attempts/SessionErrorExhausted/MachineScopeFellBack shape, a custom installer's
@@ -336,6 +337,7 @@ function Format-InstallFailureReason {
         'WingetNotLaunchable' { 'not attempted: winget cannot be launched on this machine (see above)' }
         'MachineCheckFailed' { 'could not check whether it is provisioned for every user on this PC (see the warning above)' }
         'NoMachineScopeInstaller' { "no machine-scope installer applies to this PC, and its catalog entry allows only a machine-wide install (scope 'machine')" }
+        'NoUserScopeInstaller' { 'winget found no per-user installer for it that applies to this PC (0x8A150010 NO_APPLICABLE_INSTALLER with --scope user)' }
         default { 'install failed' }
     }
     if ($null -ne $CheckExitCode -and @('PreCheckFailed', 'VerifyFailed') -contains $FailureReason) {
@@ -517,7 +519,9 @@ function Get-AppDeferReasonText {
     user's own account (named under cross-user elevation): this installer run as that user works
     only when the account is an administrator, since the installer needs administrator rights and
     a standard user's UAC prompt elevates as another account, which defers the app again; on a
-    standard user's PC it takes a per-user deployment. The line does not claim a per-user installer
+    standard user's PC it takes a per-user deployment, which the user phase is
+    (Invoke-WingetUserPhase, from rmm/Invoke-WingetAppSetupUserPhase.ps1: it reads the Deferred
+    entries of last-run.json at each user's sign-in). The line does not claim a per-user installer
     exists: winget answers 0x8A150010 at --scope machine also when no installer applies to the PC
     at all. Apps the catalog marks per-user (scope 'user' or userPhase, work-order item 38) get a
     line of their own, since winget was never asked about them. No-op when nothing was deferred.
@@ -567,7 +571,7 @@ function Write-DeferredAppsSummary {
         if ($noInstallerApps.Count -eq 1) {
             $pronoun = 'it'
         }
-        Write-WarningMessage ('Deferred: {0} - winget found no machine-wide installer for {1} that applies to this PC ({2} with --scope machine), and {3}. Not installed and not counted as failed. A per-user app can only be installed in {4}: by this installer run as {5} when that account is an administrator, otherwise by a per-user deployment (an RMM script that runs as the user, or the Microsoft Store).' -f ($noInstallerApps -join ', '), $pronoun, (Format-WingetExitCode -ExitCode -1978335216), $why, $account, $who)
+        Write-WarningMessage ('Deferred: {0} - winget found no machine-wide installer for {1} that applies to this PC ({2} with --scope machine), and {3}. Not installed and not counted as failed. A per-user app can only be installed in {4}: by this installer run as {5} when that account is an administrator, otherwise by a per-user deployment: the user phase (rmm/Invoke-WingetAppSetupUserPhase.ps1, run as the user at sign-in, for example by an Endpoint Central User Configuration script) installs the apps a run deferred, or the Microsoft Store.' -f ($noInstallerApps -join ', '), $pronoun, (Format-WingetExitCode -ExitCode -1978335216), $why, $account, $who)
     }
     if ($perUserAppIds.Count -gt 0) {
         $subject = 'they'
@@ -576,7 +580,7 @@ function Write-DeferredAppsSummary {
             $subject = 'it'
             $object = 'it'
         }
-        Write-WarningMessage ("Deferred: {0} - the catalog marks {1} per-user (scope 'user' or userPhase), so {2} can be installed or set up only in {3}, and {4}. Not installed and not counted as failed. This installer run as {5} installs {1} when that account is an administrator; otherwise a per-user deployment does (an RMM script that runs as the user, or the Microsoft Store)." -f ($perUserAppIds -join ', '), $object, $subject, $account, $why, $who)
+        Write-WarningMessage ("Deferred: {0} - the catalog marks {1} per-user (scope 'user' or userPhase), so {2} can be installed or set up only in {3}, and {4}. Not installed and not counted as failed. This installer run as {5} installs {1} when that account is an administrator; otherwise a per-user deployment does: the user phase (rmm/Invoke-WingetAppSetupUserPhase.ps1, run as the user at sign-in, for example by an Endpoint Central User Configuration script) installs and sets up the apps a run deferred, or the Microsoft Store." -f ($perUserAppIds -join ', '), $object, $subject, $account, $why, $who)
     }
 }
 

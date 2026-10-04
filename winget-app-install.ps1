@@ -80,12 +80,12 @@ param (
 # This script is assembled from the WingetAppSetup module by build/Build-WingetInstallScript.ps1.
 # Edit the function source under WingetAppSetup/Public and WingetAppSetup/Private, then re-run the
 # build to regenerate this file. See readme.md ("Project layout") for details.
-# Build id: 1.0.0+1e7e19d3 (module version + SHA256 fragment of this whole script; issue #189).
+# Build id: 1.0.0+b23b4852 (module version + SHA256 fragment of this whole script; issue #189).
 # ------------------------------------------------------------------------------------------------
 
 # Content-derived build identity, logged at startup so a transcript from a remote machine
 # identifies exactly which installer build produced it (issue #189).
-$script:InstallerBuildId = '1.0.0+1e7e19d3'
+$script:InstallerBuildId = '1.0.0+b23b4852'
 
 # ------------------------------------------------Functions------------------------------------------------
 
@@ -3481,8 +3481,9 @@ function Get-InstallerExitCode {
     The FailureReason string from the shared install pipeline ('PreCheckTimeout',
     'PreCheckLaunchFailed', 'PreCheckFailed', 'InstallLaunchFailed', 'VerifyTimeout',
     'VerifyLaunchFailed', 'VerifyFailed', 'VerifyNotFound', 'CustomInstallFailed',
-    'WingetNotLaunchable', 'MachineCheckFailed', 'NoMachineScopeInstaller', 'PostInstallFailed').
-    Unknown or empty values fall back to a generic 'install failed'.
+    'WingetNotLaunchable', 'MachineCheckFailed', 'NoMachineScopeInstaller', 'PostInstallFailed', and
+    the user phase's 'NoUserScopeInstaller'). Unknown or empty values fall back to a generic 'install
+    failed'.
 .PARAMETER InstallResult
     The InstallResult hashtable from the shared install pipeline: Install-WingetPackage's
     ExitCode/Attempts/SessionErrorExhausted/MachineScopeFellBack shape, a custom installer's
@@ -3549,6 +3550,7 @@ function Format-InstallFailureReason {
         'WingetNotLaunchable' { 'not attempted: winget cannot be launched on this machine (see above)' }
         'MachineCheckFailed' { 'could not check whether it is provisioned for every user on this PC (see the warning above)' }
         'NoMachineScopeInstaller' { "no machine-scope installer applies to this PC, and its catalog entry allows only a machine-wide install (scope 'machine')" }
+        'NoUserScopeInstaller' { 'winget found no per-user installer for it that applies to this PC (0x8A150010 NO_APPLICABLE_INSTALLER with --scope user)' }
         default { 'install failed' }
     }
     if ($null -ne $CheckExitCode -and @('PreCheckFailed', 'VerifyFailed') -contains $FailureReason) {
@@ -3730,7 +3732,9 @@ function Get-AppDeferReasonText {
     user's own account (named under cross-user elevation): this installer run as that user works
     only when the account is an administrator, since the installer needs administrator rights and
     a standard user's UAC prompt elevates as another account, which defers the app again; on a
-    standard user's PC it takes a per-user deployment. The line does not claim a per-user installer
+    standard user's PC it takes a per-user deployment, which the user phase is
+    (Invoke-WingetUserPhase, from rmm/Invoke-WingetAppSetupUserPhase.ps1: it reads the Deferred
+    entries of last-run.json at each user's sign-in). The line does not claim a per-user installer
     exists: winget answers 0x8A150010 at --scope machine also when no installer applies to the PC
     at all. Apps the catalog marks per-user (scope 'user' or userPhase, work-order item 38) get a
     line of their own, since winget was never asked about them. No-op when nothing was deferred.
@@ -3780,7 +3784,7 @@ function Write-DeferredAppsSummary {
         if ($noInstallerApps.Count -eq 1) {
             $pronoun = 'it'
         }
-        Write-WarningMessage ('Deferred: {0} - winget found no machine-wide installer for {1} that applies to this PC ({2} with --scope machine), and {3}. Not installed and not counted as failed. A per-user app can only be installed in {4}: by this installer run as {5} when that account is an administrator, otherwise by a per-user deployment (an RMM script that runs as the user, or the Microsoft Store).' -f ($noInstallerApps -join ', '), $pronoun, (Format-WingetExitCode -ExitCode -1978335216), $why, $account, $who)
+        Write-WarningMessage ('Deferred: {0} - winget found no machine-wide installer for {1} that applies to this PC ({2} with --scope machine), and {3}. Not installed and not counted as failed. A per-user app can only be installed in {4}: by this installer run as {5} when that account is an administrator, otherwise by a per-user deployment: the user phase (rmm/Invoke-WingetAppSetupUserPhase.ps1, run as the user at sign-in, for example by an Endpoint Central User Configuration script) installs the apps a run deferred, or the Microsoft Store.' -f ($noInstallerApps -join ', '), $pronoun, (Format-WingetExitCode -ExitCode -1978335216), $why, $account, $who)
     }
     if ($perUserAppIds.Count -gt 0) {
         $subject = 'they'
@@ -3789,7 +3793,7 @@ function Write-DeferredAppsSummary {
             $subject = 'it'
             $object = 'it'
         }
-        Write-WarningMessage ("Deferred: {0} - the catalog marks {1} per-user (scope 'user' or userPhase), so {2} can be installed or set up only in {3}, and {4}. Not installed and not counted as failed. This installer run as {5} installs {1} when that account is an administrator; otherwise a per-user deployment does (an RMM script that runs as the user, or the Microsoft Store)." -f ($perUserAppIds -join ', '), $object, $subject, $account, $why, $who)
+        Write-WarningMessage ("Deferred: {0} - the catalog marks {1} per-user (scope 'user' or userPhase), so {2} can be installed or set up only in {3}, and {4}. Not installed and not counted as failed. This installer run as {5} installs {1} when that account is an administrator; otherwise a per-user deployment does: the user phase (rmm/Invoke-WingetAppSetupUserPhase.ps1, run as the user at sign-in, for example by an Endpoint Central User Configuration script) installs and sets up the apps a run deferred, or the Microsoft Store." -f ($perUserAppIds -join ', '), $object, $subject, $account, $why, $who)
     }
 }
 
@@ -4006,8 +4010,9 @@ function Test-AndInstallGraphicalTools {
     nothing is pruned there when there is none.
 .PARAMETER KeepTranscripts
     How many install-*.log transcripts to keep, newest first. A run started from Windows PowerShell
-    writes two (the bootstrap's and the PowerShell 7 run's), and one that relaunches itself elevated
-    writes up to four, so 30 keeps the logs of at least the last 7 runs.
+    writes two (the bootstrap's and the PowerShell 7 run's), one started by the RMM wrapper three
+    (the wrapper's own as well), and one that relaunches itself elevated up to four, so 30 keeps
+    the logs of at least the last 7 runs.
 .PARAMETER TempRoot
     The folders to look for leftover copies in. Default: the elevated relaunch's copy folder
     (Get-ElevatedCopyRoot, %SystemRoot%\Temp), plus, when the run is SYSTEM (an RMM run, whose temp
@@ -4102,7 +4107,9 @@ function Get-SystemProfileTempRoot {
 .DESCRIPTION
     Works on the file names the installer gives its logs, each of which carries the local time it
     was started at (yyyyMMdd-HHmmss):
-      - transcripts: install-<time>.log, with -bootstrap and/or -whatif before .log;
+      - transcripts: install-<time>.log, with -bootstrap, -rmm (rmm/Invoke-WingetAppSetup.ps1, the
+        RMM wrapper) or -userphase (Invoke-WingetUserPhase, in the user's own logs folder), and/or
+        -whatif, before .log;
       - installer logs: winget-<install|upgrade|uninstall|repair>-<package id>-<time>[-<n>].log
         (winget's --log, Invoke-WingetProcess) and pwsh-msi-<time>-<attempt>.log (msiexec's log of
         the PowerShell 7 MSI, Install-PowerShell7FromMsi).
@@ -4144,7 +4151,7 @@ function Remove-OldInstallerLog {
     $transcripts = @()
     $installerLogs = @()
     foreach ($file in @(Get-ChildItem -LiteralPath $LogDirectory -File -Force -ErrorAction Stop)) {
-        if ($file.Name -match '^install-(\d{8}-\d{6})(?:-bootstrap)?(?:-whatif)?\.log$') {
+        if ($file.Name -match '^install-(\d{8}-\d{6})(?:-bootstrap|-rmm|-userphase)?(?:-whatif)?\.log$') {
             $transcripts += [pscustomobject]@{ File = $file; Stamp = $Matches[1] }
         }
         elseif ($file.Name -match '^(?:winget-(?:install|upgrade|uninstall|repair)-.+|pwsh-msi)-(\d{8}-\d{6})(?:-\d+)?\.log$') {
@@ -5433,6 +5440,11 @@ function Write-Prompt {
 .PARAMETER Bootstrap
     The Windows PowerShell 5.1 bootstrap phase: the file name gets a -bootstrap suffix. The
     PowerShell 7 run it relaunches writes its own transcript next to it.
+.PARAMETER UserPhase
+    The user phase (Invoke-WingetUserPhase), which runs as the signed-in user, not elevated: the
+    transcript goes to that user's %LOCALAPPDATA%\winget-app-setup\logs, since a standard user
+    cannot write to the machine's logs folder, and the file name gets a -userphase suffix. The
+    folder's access list is left as it is.
 .RETURNS
     [string] The transcript path, or $null when the transcript could not be started.
 #>
@@ -5441,19 +5453,29 @@ function Start-InstallerTranscript {
         [Parameter(Mandatory = $false)]
         [switch]$WhatIf,
         [Parameter(Mandatory = $false)]
-        [switch]$Bootstrap
+        [switch]$Bootstrap,
+        [Parameter(Mandatory = $false)]
+        [switch]$UserPhase
     )
 
     $phaseSuffix = ''
     if ($Bootstrap) {
         $phaseSuffix = '-bootstrap'
     }
+    elseif ($UserPhase) {
+        $phaseSuffix = '-userphase'
+    }
     $whatIfSuffix = ''
     if ($WhatIf) {
         $whatIfSuffix = '-whatif'
     }
     try {
-        $logDirectory = Join-Path $env:ProgramData 'winget-app-setup\logs'
+        if ($UserPhase) {
+            $logDirectory = Join-Path $env:LOCALAPPDATA 'winget-app-setup\logs'
+        }
+        else {
+            $logDirectory = Join-Path $env:ProgramData 'winget-app-setup\logs'
+        }
         if (-not (Test-Path -LiteralPath $logDirectory)) {
             [void](New-Item -Path $logDirectory -ItemType Directory -Force -ErrorAction Stop)
         }
@@ -5466,8 +5488,11 @@ function Start-InstallerTranscript {
     }
 
     # After Start-Transcript, so a failure to change the folder's ACL is in the log too; the grant
-    # is inheritable, so the transcript file already created inside the folder picks it up.
-    [void](Grant-InstallLogReadAccess -Path $logDirectory)
+    # is inheritable, so the transcript file already created inside the folder picks it up. A user's
+    # own folder needs none.
+    if (-not $UserPhase) {
+        [void](Grant-InstallLogReadAccess -Path $logDirectory)
+    }
     return $logPath
 }
 
@@ -9728,6 +9753,388 @@ function Set-TightVncServerPassword {
             }
         }
     }
+}
+
+# --- UserPhaseSupport ---
+# The user phase's state (work-order item 34). A run for the whole PC (as SYSTEM, from an RMM agent
+# such as ManageEngine Endpoint Central) records in last-run.json the apps it deferred to the
+# signed-in user's own account. Invoke-WingetUserPhase, run as each user at sign-in, installs those
+# for that user and sets the user's Windows Terminal defaults, once per machine run: it keeps what
+# it did in the user's own user-phase.json. rmm/Invoke-WingetAppSetupUserPhase.ps1 makes the same
+# decision before it downloads anything (Test-RmmUserPhasePending), so the rule in
+# Get-UserPhaseDecision and that function must stay the same.
+
+<#
+.SYNOPSIS
+    Returns the path of the machine's run record: %ProgramData%\winget-app-setup\logs\last-run.json.
+.RETURNS
+    [string]
+#>
+function Get-InstallerRunRecordPath {
+    return (Join-Path $env:ProgramData 'winget-app-setup\logs\last-run.json')
+}
+
+<#
+.SYNOPSIS
+    Returns the path of this account's user-phase state: %LOCALAPPDATA%\winget-app-setup\user-phase.json.
+.RETURNS
+    [string]
+#>
+function Get-UserPhaseStatePath {
+    return (Join-Path $env:LOCALAPPDATA 'winget-app-setup\user-phase.json')
+}
+
+<#
+.SYNOPSIS
+    Returns the SHA256 of some bytes as upper-case hex, the form Get-FileHash prints.
+.PARAMETER Bytes
+    The bytes.
+.RETURNS
+    [string]
+#>
+function Get-Sha256Hex {
+    param (
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [byte[]]$Bytes
+    )
+
+    $algorithm = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        return ([System.BitConverter]::ToString($algorithm.ComputeHash($Bytes))).Replace('-', '')
+    }
+    finally {
+        $algorithm.Dispose()
+    }
+}
+
+<#
+.SYNOPSIS
+    Reads the machine's run record (last-run.json) for the user phase.
+.DESCRIPTION
+    The file is read once, and its SHA256 identifies the machine run: a run replaces the file when it
+    starts (exitCode null, Save-InstallerRunStartRecord) and once more when it reports
+    (Write-InstallerRunResult), and nothing else writes it, so the hash of a finished run's record
+    changes only when another run replaces it.
+
+    The deferred apps are the entries with status 'Deferred', whatever deferred them: a run for the
+    whole PC that found no machine-wide installer, or a catalog entry that says the app is per-user.
+    The record is the contract, not the catalog. An id that is not a valid winget package id
+    (Test-WingetPackageIdFormat) is left out and listed in InvalidDeferredIds: the file is only
+    writable by administrators and SYSTEM, but its ids end up on a winget command line.
+
+    Returns $null, with a warning, when the file cannot be read or is not a run record (no apps
+    list), and $null, silently, when there is no file. Never throws.
+.PARAMETER Path
+    The record's path (Get-InstallerRunRecordPath).
+.RETURNS
+    [pscustomobject] with Path, Sha256, BuildId, StartedUtc, ExitCode ([int], or $null while the run
+    has not reported), DeferredApps ([string[]], in record order, each once) and InvalidDeferredIds
+    ([string[]]); or $null.
+#>
+function Read-InstallerRunRecord {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        return $null
+    }
+    try {
+        $bytes = [System.IO.File]::ReadAllBytes($Path)
+        $text = (New-Object System.Text.UTF8Encoding($false, $true)).GetString($bytes).TrimStart([char]0xFEFF)
+        $record = ConvertFrom-Json -InputObject $text -ErrorAction Stop
+    }
+    catch {
+        Write-WarningMessage "Could not read the run record ${Path}: $($_.Exception.Message)"
+        return $null
+    }
+    if ($null -eq $record -or $null -eq $record.PSObject.Properties['apps']) {
+        Write-WarningMessage "The run record $Path has no apps list; ignoring it."
+        return $null
+    }
+
+    $deferred = @()
+    $invalid = @()
+    foreach ($app in @($record.apps)) {
+        if ($null -eq $app -or [string]$app.status -ne 'Deferred') {
+            continue
+        }
+        $id = [string]$app.id
+        if (-not (Test-WingetPackageIdFormat -PackageId $id)) {
+            $invalid += $id
+        }
+        elseif ($deferred -notcontains $id) {
+            $deferred += $id
+        }
+    }
+
+    $exitCode = $null
+    if ($null -ne $record.exitCode) {
+        $exitCode = [int]$record.exitCode
+    }
+    # ConvertFrom-Json in PowerShell 7 turns an ISO 8601 string into a DateTime; the record's own
+    # form is kept for messages.
+    $startedUtc = $null
+    if ($record.startedUtc -is [DateTime]) {
+        $startedUtc = Format-RunRecordTime -Time $record.startedUtc
+    }
+    elseif ($null -ne $record.startedUtc) {
+        $startedUtc = [string]$record.startedUtc
+    }
+    $buildId = $null
+    if ($record.buildId) {
+        $buildId = [string]$record.buildId
+    }
+
+    return [pscustomobject]@{
+        Path               = $Path
+        Sha256             = Get-Sha256Hex -Bytes $bytes
+        BuildId            = $buildId
+        StartedUtc         = $startedUtc
+        ExitCode           = $exitCode
+        DeferredApps       = [string[]]$deferred
+        InvalidDeferredIds = [string[]]$invalid
+    }
+}
+
+<#
+.SYNOPSIS
+    Reads this account's user-phase state, or $null when there is none or it cannot be read.
+.PARAMETER Path
+    The state file (Get-UserPhaseStatePath).
+.RETURNS
+    [pscustomobject] with RecordSha256 ([string]), Complete ([bool]) and Attempts ([int]); or $null.
+    Never throws: a state that cannot be read counts as none, so the user phase runs again.
+#>
+function Read-UserPhaseState {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        return $null
+    }
+    try {
+        $state = ConvertFrom-Json -InputObject ([System.IO.File]::ReadAllText($Path)) -ErrorAction Stop
+    }
+    catch {
+        Write-WarningMessage "Could not read the user-phase state ${Path}: $($_.Exception.Message)"
+        return $null
+    }
+    if ($null -eq $state) {
+        return $null
+    }
+    $attempts = 0
+    if ($null -ne $state.attempts) {
+        $attempts = [int]$state.attempts
+    }
+    return [pscustomobject]@{
+        RecordSha256 = [string]$state.recordSha256
+        Complete     = ($state.complete -eq $true)
+        Attempts     = $attempts
+    }
+}
+
+<#
+.SYNOPSIS
+    Decides whether the user phase has work for this account.
+.DESCRIPTION
+    No work (Run false), so the user phase ends at once and prints nothing, when:
+      - NoRecord: there is no run record (no run for the whole PC happened, or it cannot be read);
+      - RunNotFinished: the run has not reported yet (exitCode null): it is still going, or it was
+        killed, and a later run replaces the record;
+      - Done: this account's state is for this run (same record SHA256) and says it is complete;
+      - GaveUp: this account already tried MaxAttempts times for this run.
+    Otherwise there is work: New (first time for this run) or Pending (an earlier attempt left
+    something), and Attempt is this attempt's number. A run with nothing deferred still has work
+    once per account: the Windows Terminal defaults, which a run as SYSTEM never sets for anyone.
+
+    rmm/Invoke-WingetAppSetupUserPhase.ps1 (Test-RmmUserPhasePending) applies the same rule before
+    it downloads the installer; tests/RmmWrapper.Tests.ps1 checks that the two agree.
+.PARAMETER Record
+    Read-InstallerRunRecord's result, or $null.
+.PARAMETER State
+    Read-UserPhaseState's result, or $null.
+.PARAMETER MaxAttempts
+    How many times to try for one run before giving up.
+.RETURNS
+    [pscustomobject] with Run ([bool]), Reason and Attempt ([int], 0 when there is no work).
+#>
+function Get-UserPhaseDecision {
+    param (
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [object]$Record,
+
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [object]$State,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateRange(1, 100)]
+        [int]$MaxAttempts
+    )
+
+    if ($null -eq $Record) {
+        return [pscustomobject]@{ Run = $false; Reason = 'NoRecord'; Attempt = 0 }
+    }
+    if ($null -eq $Record.ExitCode) {
+        return [pscustomobject]@{ Run = $false; Reason = 'RunNotFinished'; Attempt = 0 }
+    }
+    if ($null -ne $State -and [string]::Equals([string]$State.RecordSha256, [string]$Record.Sha256, [System.StringComparison]::OrdinalIgnoreCase)) {
+        if ($State.Complete) {
+            return [pscustomobject]@{ Run = $false; Reason = 'Done'; Attempt = 0 }
+        }
+        if ([int]$State.Attempts -ge $MaxAttempts) {
+            return [pscustomobject]@{ Run = $false; Reason = 'GaveUp'; Attempt = 0 }
+        }
+        return [pscustomobject]@{ Run = $true; Reason = 'Pending'; Attempt = [int]$State.Attempts + 1 }
+    }
+    return [pscustomobject]@{ Run = $true; Reason = 'New'; Attempt = 1 }
+}
+
+<#
+.SYNOPSIS
+    Writes this account's user-phase state, replacing the previous one in one step.
+.DESCRIPTION
+    Written to a temporary file in the same folder first, then moved over the state file, so a
+    sign-in that reads it never sees half a file. The folder is created when needed. A failure warns;
+    the user phase then runs again at the next sign-in. Runs under PowerShell 7 (File.Move with
+    overwrite), as the user phase does.
+.PARAMETER Path
+    The state file (Get-UserPhaseStatePath).
+.PARAMETER State
+    What to write.
+.RETURNS
+    [string] The path written, or $null.
+#>
+function Save-UserPhaseState {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+
+        [Parameter(Mandatory = $true)]
+        [System.Collections.IDictionary]$State
+    )
+
+    $directory = Split-Path -Parent $Path
+    $temporaryPath = Join-Path $directory ('user-phase.{0}.tmp' -f [System.Guid]::NewGuid().ToString('N'))
+    try {
+        if (-not (Test-Path -LiteralPath $directory -PathType Container)) {
+            [void](New-Item -Path $directory -ItemType Directory -Force -ErrorAction Stop)
+        }
+        $json = ConvertTo-Json -InputObject $State -Depth 6
+        [System.IO.File]::WriteAllText($temporaryPath, $json, (New-Object System.Text.UTF8Encoding($false)))
+        [System.IO.File]::Move($temporaryPath, $Path, $true)
+        return $Path
+    }
+    catch {
+        Write-WarningMessage "Could not write the user-phase state ${Path}: $($_.Exception.Message)"
+        try {
+            if (Test-Path -LiteralPath $temporaryPath) {
+                Remove-Item -LiteralPath $temporaryPath -Force -ErrorAction Stop
+            }
+        }
+        catch {
+        }
+        return $null
+    }
+}
+
+<#
+.SYNOPSIS
+    Installs one deferred app for the signed-in user: per-user scope only, checked before and after.
+.DESCRIPTION
+    The user phase's form of Install-AppWithVerification. `winget list` run as the user sees both the
+    user's own apps and the PC's, so an app already there either way is Skipped. Otherwise it is
+    installed with Install-WingetPackage -UserScopeOnly -Silent (`--scope user`, never another
+    scope: a machine-wide installer would ask for administrator rights) and checked again. A check
+    that could not answer fails the app rather than installing it blind.
+.PARAMETER PackageId
+    The winget package id.
+.PARAMETER TimeoutSeconds
+    The install's time limit (what is left of the user phase's time budget, at most 30 minutes).
+.RETURNS
+    New-AppRunRecord's entry: status Installed, Skipped (already installed) or Failed, with the
+    reason and winget's exit code.
+#>
+function Install-UserPhaseApp {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$PackageId,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateRange(1, 86400)]
+        [int]$TimeoutSeconds
+    )
+
+    $checkTimeoutSeconds = Get-ProcessTimeoutSeconds -Operation WingetListCheck
+    $preCheck = Test-WingetPackageInstalled -PackageId $PackageId -TimeoutSeconds $checkTimeoutSeconds
+    if ($preCheck.Installed) {
+        Write-WarningMessage "Skipping: $PackageId (already installed)"
+        return (New-AppRunRecord -Id $PackageId -Status 'Skipped' -Reason 'already installed')
+    }
+    $preCheckReason = $null
+    if ($preCheck.TimedOut) {
+        $preCheckReason = 'PreCheckTimeout'
+    }
+    elseif ($preCheck.LaunchFailed) {
+        $preCheckReason = 'PreCheckLaunchFailed'
+    }
+    elseif ($preCheck.CheckFailed) {
+        $preCheckReason = 'PreCheckFailed'
+    }
+    if ($preCheckReason) {
+        $reason = Format-InstallFailureReason -FailureReason $preCheckReason -LaunchError $preCheck.LaunchError -CheckExitCode $preCheck.ExitCode
+        Write-ErrorMessage "Failed to install: $PackageId ($reason)."
+        return (New-AppRunRecord -Id $PackageId -Status 'Failed' -Reason $reason)
+    }
+
+    Write-Info "Installing for this account: $PackageId"
+    $installResult = Install-WingetPackage -PackageId $PackageId -UserScopeOnly -Silent -TimeoutSeconds $TimeoutSeconds -InstallInProgressRetries 1 -InstallInProgressWaitSeconds ([Math]::Min(120, $TimeoutSeconds))
+    # The user phase never falls back to another scope, so the machine-scope detail would only mislead.
+    $reportedResult = $installResult.Clone()
+    $reportedResult.Remove('MachineScopeFellBack')
+
+    $failureReason = $null
+    $launchError = $null
+    $checkExitCode = $null
+    $restartRequired = $false
+    if ($installResult.LaunchErrorExhausted) {
+        $failureReason = 'InstallLaunchFailed'
+        $launchError = $installResult.LaunchError
+    }
+    elseif ($installResult.NoUserScopeInstaller) {
+        $failureReason = 'NoUserScopeInstaller'
+    }
+    else {
+        $verify = Test-WingetPackageInstalled -PackageId $PackageId -TimeoutSeconds $checkTimeoutSeconds
+        if ($verify.Installed) {
+            Write-Success "Successfully installed for this account: $PackageId"
+            $restartRequired = [bool](Write-InstalledAppNote -AppName $PackageId -InstallResult $installResult)
+            return (New-AppRunRecord -Id $PackageId -Status 'Installed' -InstallResult $installResult -RestartRequired $restartRequired)
+        }
+        if ($verify.TimedOut) {
+            $failureReason = 'VerifyTimeout'
+        }
+        elseif ($verify.LaunchFailed) {
+            $failureReason = 'VerifyLaunchFailed'
+            $launchError = $verify.LaunchError
+        }
+        elseif ($verify.CheckFailed) {
+            $failureReason = 'VerifyFailed'
+            $checkExitCode = $verify.ExitCode
+        }
+        else {
+            $failureReason = 'VerifyNotFound'
+        }
+    }
+    $reason = Format-InstallFailureReason -FailureReason $failureReason -InstallResult $reportedResult -LaunchError $launchError -CheckExitCode $checkExitCode
+    Write-ErrorMessage "Failed to install: $PackageId ($reason)."
+    return (New-AppRunRecord -Id $PackageId -Status 'Failed' -Reason $reason -InstallResult $installResult)
 }
 
 # --- WauSupport ---
@@ -14674,6 +15081,241 @@ function Invoke-WingetUninstall {
     return 0
 }
 
+# --- UserPhase ---
+<#
+.SYNOPSIS
+    The user phase: installs, for the signed-in user, the apps a run for the whole PC deferred, and
+    sets that user's Windows Terminal defaults. Run as the user, at sign-in, never elevated.
+.DESCRIPTION
+    Work-order item 34. A run as SYSTEM (an RMM agent such as ManageEngine Endpoint Central) installs
+    only what installs for the whole PC: an app with no machine-wide installer is reported Deferred
+    in last-run.json, and the per-user Windows Terminal defaults are skipped. Neither can be done for
+    a user from SYSTEM. This finishes the job in each user's own account; it is what
+    rmm/Invoke-WingetAppSetupUserPhase.ps1 runs (an Endpoint Central User Configuration script,
+    Every Logon), after it has dot-sourced a checked copy of winget-app-install.ps1.
+
+    It ends at once, printing nothing, when there is nothing to do for this account
+    (Get-UserPhaseDecision): no run record, a run that has not reported yet, or this account has
+    already finished this run, or tried MaxAttempts times. Otherwise, once per machine run:
+      1. It records the attempt first (user-phase.json, Save-UserPhaseState), so an attempt that is
+         killed still counts toward MaxAttempts.
+      2. It starts a transcript in the user's %LOCALAPPDATA%\winget-app-setup\logs
+         (Start-InstallerTranscript -UserPhase), keeping the newest 10.
+      3. When the record lists deferred apps: it checks that winget starts for this account (up to
+         four checks 15 seconds apart: Windows registers App Installer for an account shortly after
+         its first sign-in) and installs each app with `--scope user` (Install-UserPhaseApp), while
+         the time budget lasts. An app the budget no longer covers is NotAttempted.
+      4. It sets the Windows Terminal defaults (Set-WindowsTerminalDefaults: the targeted
+         defaultProfile edit and the default terminal application). When this account has no
+         Terminal settings.json yet (Terminal was never opened), the step counts as not done, and a
+         later sign-in tries again.
+      5. It records the outcome (complete when every deferred app is installed or was already there
+         and the Terminal step is done), prints one 'USER PHASE RESULT:' line and returns the exit
+         code.
+    It never prompts (winget runs with --disable-interactivity and --silent) and never asks for
+    elevation itself: it installs with --scope user only, and a per-user installer needs no
+    administrator rights. One that elevates itself anyway would still show a UAC prompt, which is
+    why an app the user phase installs is worth one check on a pilot PC.
+.PARAMETER RunRecordPath
+    The machine's run record. Default: Get-InstallerRunRecordPath.
+.PARAMETER StatePath
+    This account's state. Default: Get-UserPhaseStatePath.
+.PARAMETER MaxMinutes
+    The time budget for the installs. No install starts once less than a minute of it is left, and
+    each install's time limit is what is left (at most 30 minutes), so the whole phase takes about
+    this long at most, plus the winget check and the Terminal step. Default 15.
+.PARAMETER MaxAttempts
+    How many sign-ins may try for one machine run before the user phase gives up on it. Default 3.
+.OUTPUTS
+    [int] 0 = done, or nothing to do; 1 = a deferred app failed to install or was not attempted in
+    the time budget; 2 = winget cannot be started for this account (nothing was installed); 3010 = done,
+    but an install needs a restart to finish; 5 = an unexpected error (in the transcript). A later
+    sign-in tries again after 1, 2 or 5 while attempts are left.
+#>
+function Invoke-WingetUserPhase {
+    [OutputType([int])]
+    param (
+        [Parameter(Mandatory = $false)]
+        [string]$RunRecordPath = (Get-InstallerRunRecordPath),
+
+        [Parameter(Mandatory = $false)]
+        [string]$StatePath = (Get-UserPhaseStatePath),
+
+        [Parameter(Mandatory = $false)]
+        [ValidateRange(1, 240)]
+        [int]$MaxMinutes = 15,
+
+        [Parameter(Mandatory = $false)]
+        [ValidateRange(1, 100)]
+        [int]$MaxAttempts = 3
+    )
+
+    if (Test-IsSystemAccount) {
+        Write-Info 'The user phase installs for the signed-in user, so it has nothing to do as SYSTEM: run it as the user (for example as an Endpoint Central User Configuration script).'
+        return 0
+    }
+
+    $record = Read-InstallerRunRecord -Path $RunRecordPath
+    $state = Read-UserPhaseState -Path $StatePath
+    $decision = Get-UserPhaseDecision -Record $record -State $state -MaxAttempts $MaxAttempts
+    if (-not $decision.Run) {
+        return 0
+    }
+
+    $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+    $budgetSeconds = $MaxMinutes * 60
+    $appRecords = [ordered]@{}
+    $terminalStatus = 'NotRun'
+    $exitCode = 5
+    $newState = [ordered]@{
+        schemaVersion        = 1
+        recordSha256         = $record.Sha256
+        machineRunStartedUtc = $record.StartedUtc
+        machineRunBuildId    = $record.BuildId
+        attempts             = $decision.Attempt
+        complete             = $false
+        exitCode             = $null
+        updatedUtc           = Format-RunRecordTime -Time ([DateTime]::UtcNow)
+        apps                 = @()
+        terminalDefaults     = $terminalStatus
+        transcriptPath       = $null
+    }
+    # Counted before any work, so an attempt that is killed (sign-out, the RMM's time limit) still
+    # counts toward MaxAttempts.
+    [void](Save-UserPhaseState -Path $StatePath -State $newState)
+
+    $previousLogPath = $script:InstallLogPath
+    $script:InstallLogPath = Start-InstallerTranscript -UserPhase
+    $transcriptStarted = [bool]$script:InstallLogPath
+    try {
+        if ($script:InstallLogPath) {
+            Write-Info "Logging the user phase to: $script:InstallLogPath"
+            try {
+                [void](Remove-OldInstallerLog -LogDirectory (Split-Path -Parent $script:InstallLogPath) -KeepTranscripts 10 -CurrentTranscriptPath $script:InstallLogPath)
+            }
+            catch {
+                Write-WarningMessage "Could not remove old user-phase logs: $($_.Exception.Message)"
+            }
+        }
+        if ($script:InstallerBuildId) {
+            Write-Info "Installer build: $script:InstallerBuildId"
+        }
+        $buildText = 'unknown build'
+        if ($record.BuildId) {
+            $buildText = "build $($record.BuildId)"
+        }
+        Write-Info ('User phase for {0}, attempt {1} of {2}: following up the run for the whole PC that started {3} ({4}, exit code {5}).' -f (Get-ProcessUserName), $decision.Attempt, $MaxAttempts, $record.StartedUtc, $buildText, $record.ExitCode)
+        foreach ($invalidId in $record.InvalidDeferredIds) {
+            Write-WarningMessage "Ignoring a deferred entry in $($record.Path) that is not a winget package id: '$invalidId'."
+        }
+
+        $deferredApps = @($record.DeferredApps)
+        $wingetUsable = $true
+        if ($deferredApps.Count -eq 0) {
+            Write-Info 'The run for the whole PC deferred no apps to this account.'
+        }
+        else {
+            Write-Info ('Apps the run for the whole PC left for each account (installed per-user, with --scope user): {0}' -f ($deferredApps -join ', '))
+            $probe = Test-WingetLaunchable -Attempts 4 -RetryDelaySeconds 15
+            if (-not $probe.Launchable) {
+                $wingetUsable = $false
+                $reason = "winget could not be started for this account: $($probe.Reason)"
+                Write-ErrorMessage "$reason. Windows sets winget up for an account shortly after its first sign-in; the user phase tries again at the next sign-in."
+                foreach ($id in $deferredApps) {
+                    $appRecords[$id] = New-AppRunRecord -Id $id -Status 'NotAttempted' -Reason $reason
+                }
+            }
+            else {
+                foreach ($id in $deferredApps) {
+                    $remainingSeconds = $budgetSeconds - [int]$stopwatch.Elapsed.TotalSeconds
+                    if ($remainingSeconds -lt 60) {
+                        Write-WarningMessage "Not installing $id now: the user phase's $MaxMinutes-minute time budget is spent. The next sign-in tries again."
+                        $appRecords[$id] = New-AppRunRecord -Id $id -Status 'NotAttempted' -Reason "the user phase's $MaxMinutes-minute time budget was spent"
+                        continue
+                    }
+                    try {
+                        $appRecords[$id] = Install-UserPhaseApp -PackageId $id -TimeoutSeconds ([Math]::Min(1800, $remainingSeconds))
+                    }
+                    catch {
+                        Write-ErrorMessage "Failed to install: $id. Error: $_"
+                        $appRecords[$id] = New-AppRunRecord -Id $id -Status 'Failed' -Reason "Unexpected error: $_"
+                    }
+                }
+            }
+        }
+
+        # The Windows Terminal defaults are per-user, and a run as SYSTEM sets them for nobody. A
+        # settings.json appears only once Terminal has been opened, so until then the step is not
+        # done and a later sign-in tries again.
+        try {
+            $hadSettings = @(Get-WindowsTerminalSettingsPaths).Count -gt 0
+            Set-WindowsTerminalDefaults
+            if ($hadSettings) {
+                $terminalStatus = 'Applied'
+            }
+            else {
+                $terminalStatus = 'SettingsNotFound'
+                Write-Info 'Windows Terminal has no settings.json for this account yet (it creates one when it is first opened); the next sign-in sets its default profile.'
+            }
+        }
+        catch {
+            $terminalStatus = 'Failed'
+            Write-WarningMessage "Windows Terminal configuration failed unexpectedly: $_"
+        }
+
+        $records = @($appRecords.Values)
+        $unfinished = @($records | Where-Object { @('Installed', 'Skipped') -notcontains $_.status })
+        $restartApps = @($records | Where-Object { $_.restartRequired } | ForEach-Object { $_.id })
+        if (-not $wingetUsable) {
+            $exitCode = 2
+        }
+        elseif ($unfinished.Count -gt 0) {
+            $exitCode = 1
+        }
+        elseif ($restartApps.Count -gt 0) {
+            $exitCode = 3010
+            Write-WarningMessage ('Restart: REQUIRED to finish installing {0}.' -f ($restartApps -join ', '))
+        }
+        else {
+            $exitCode = 0
+        }
+        $newState.complete = ($unfinished.Count -eq 0) -and (@('SettingsNotFound', 'Failed') -notcontains $terminalStatus)
+        if (-not $newState.complete -and $decision.Attempt -ge $MaxAttempts) {
+            Write-WarningMessage "This was the last of $MaxAttempts attempts for this run for the whole PC; the user phase does not try again until the next one."
+        }
+    }
+    catch {
+        Write-ErrorMessage "UNEXPECTED ERROR - the user phase stopped before it finished: $($_.Exception.Message)"
+        if ($_.ScriptStackTrace) {
+            Write-ErrorMessage "Stack trace:`n$($_.ScriptStackTrace)"
+        }
+        $exitCode = 5
+    }
+    finally {
+        $records = @($appRecords.Values)
+        $newState.exitCode = $exitCode
+        $newState.updatedUtc = Format-RunRecordTime -Time ([DateTime]::UtcNow)
+        $newState.apps = $records
+        $newState.terminalDefaults = $terminalStatus
+        $newState.transcriptPath = $script:InstallLogPath
+        [void](Save-UserPhaseState -Path $StatePath -State $newState)
+        $log = 'none'
+        if ($script:InstallLogPath) {
+            $log = $script:InstallLogPath
+        }
+        Write-Host ('USER PHASE RESULT: exit={0} installed={1} skipped={2} failed={3} terminal={4} attempt={5}/{6} complete={7} log={8}' -f $exitCode, @($records | Where-Object { $_.status -eq 'Installed' }).Count, @($records | Where-Object { $_.status -eq 'Skipped' }).Count, @($records | Where-Object { @('Installed', 'Skipped') -notcontains $_.status }).Count, $terminalStatus, $decision.Attempt, $MaxAttempts, ([string]$newState.complete).ToLowerInvariant(), $log)
+        if ($transcriptStarted) {
+            try {
+                [void](Stop-Transcript)
+            }
+            catch {
+            }
+        }
+        $script:InstallLogPath = $previousLogPath
+    }
+    return $exitCode
+}
+
 # --- WindowsTerminal ---
 <#
 .SYNOPSIS
@@ -15729,6 +16371,10 @@ function Initialize-Winget {
     0x8A150010 (NO_APPLICABLE_INSTALLER) and the install is retried once at winget's default scope,
     unless -MachineScopeOnly says the run must not install for one account (review finding P3-22),
     or -Scope says the catalog entry allows only one scope (work-order item 38).
+    -UserScopeOnly is the other way round: `--scope user` only, for the user phase
+    (Invoke-WingetUserPhase), which installs as the signed-in user, not elevated, the apps a run for
+    the whole PC deferred. It never falls back either: winget's default scope could pick a
+    machine-wide installer, which needs administrator rights and would ask for them.
 .PARAMETER PackageId
     The winget package id to install (e.g. 'Microsoft.PowerShell').
 .PARAMETER InstallerType
@@ -15771,8 +16417,16 @@ function Initialize-Winget {
     with NoMachineScopeInstaller. 'user': `--scope user` from the first attempt, no fallback; it
     cannot be combined with -MachineScopeOnly (Install-AppWithVerification defers such an app in a
     run for the whole PC instead of calling this).
+.PARAMETER UserScopeOnly
+    Install with `--scope user` and nothing else (the user phase, Invoke-WingetUserPhase). A
+    package with no per-user installer that applies (0x8A150010) ends at once with
+    NoUserScopeInstaller, without a retry at another scope. Cannot be combined with
+    -MachineScopeOnly or -Scope machine.
+.PARAMETER TimeoutSeconds
+    The time limit of each winget install, in seconds. Default (or 0): Get-ProcessTimeoutSeconds
+    WingetInstall. The user phase passes what is left of its time budget.
 .RETURNS
-    [hashtable] @{ ExitCode = <int|$null>; Attempts = <int>; SessionErrorExhausted = <bool>; MachineScopeFellBack = <bool>; NoMachineScopeInstaller = <bool>; LaunchErrorExhausted = <bool>; LaunchAttempts = <int>; LaunchError = <string|$null>; TimedOut = <bool>; TimeoutSeconds = <int>; InstallerLogPath = <string|$null>; InstallInProgressWaitedSeconds = <int>; RestartRequired = <bool> }
+    [hashtable] @{ ExitCode = <int|$null>; Attempts = <int>; SessionErrorExhausted = <bool>; MachineScopeFellBack = <bool>; NoMachineScopeInstaller = <bool>; NoUserScopeInstaller = <bool>; LaunchErrorExhausted = <bool>; LaunchAttempts = <int>; LaunchError = <string|$null>; TimedOut = <bool>; TimeoutSeconds = <int>; InstallerLogPath = <string|$null>; InstallInProgressWaitedSeconds = <int>; RestartRequired = <bool> }
     SessionErrorExhausted is True only when every attempt failed with the session error.
     InstallInProgressWaitedSeconds is how long this call waited for another installation to finish.
     RestartRequired is True when the last attempt's result says a restart finishes the installation
@@ -15780,7 +16434,7 @@ function Initialize-Winget {
     MachineScopeFellBack is True when the package had no machine-scope installer and the install
     was retried at winget's default scope. NoMachineScopeInstaller is True when it had none and
     -MachineScopeOnly or -Scope machine kept it from being installed at all (ExitCode is then
-    0x8A150010). Attempts
+    0x8A150010); NoUserScopeInstaller is the same for -UserScopeOnly (`--scope user` only). Attempts
     counts install attempts at the finally selected scope, the retries after another installation
     in progress or an in-use result included; the one-time scope fallback does not consume a
     session-error attempt, and neither does a failed launch (no process ran). LaunchAttempts counts failed winget launches.
@@ -15825,25 +16479,41 @@ function Install-WingetPackage {
 
         [Parameter(Mandatory = $false)]
         [ValidateSet('any', 'machine', 'user')]
-        [string]$Scope = 'any'
+        [string]$Scope = 'any',
+
+        [Parameter(Mandatory = $false)]
+        [switch]$UserScopeOnly,
+
+        [Parameter(Mandatory = $false)]
+        [ValidateRange(0, 86400)]
+        [int]$TimeoutSeconds = 0
     )
 
     if ($Scope -eq 'user' -and $MachineScopeOnly) {
         throw [System.ArgumentException]::new("Install-WingetPackage: -Scope user installs $PackageId for the account running this, which -MachineScopeOnly rules out.")
+    }
+    if ($MachineScopeOnly -and $UserScopeOnly) {
+        throw 'Install-WingetPackage: -MachineScopeOnly and -UserScopeOnly cannot be used together.'
+    }
+    if ($UserScopeOnly -and $Scope -eq 'machine') {
+        throw [System.ArgumentException]::new("Install-WingetPackage: -UserScopeOnly installs $PackageId for the account running this only, which -Scope machine rules out.")
     }
 
     # 0x80073D19 (ERROR_DEPLOYMENT_BLOCKED_BY_USER_LOG_OFF) as a signed Int32, which is how winget
     # reports it through Process.ExitCode.
     $sessionLogoffExitCode = -2147009255
     # 0x8A150010 (APPINSTALLER_CLI_ERROR_NO_APPLICABLE_INSTALLER) as a signed Int32: returned when
-    # the --scope machine requirement filters out every installer in the package's manifest.
+    # the --scope requirement filters out every installer in the package's manifest.
     $noApplicableInstallerExitCode = -1978335216
 
     $useSilent = [bool]$Silent
     if (-not $PSBoundParameters.ContainsKey('Silent')) {
         $useSilent = [bool](Test-EffectiveNonInteractive)
     }
-    $timeoutSeconds = Get-ProcessTimeoutSeconds -Operation WingetInstall
+    $timeoutSeconds = $TimeoutSeconds
+    if ($timeoutSeconds -le 0) {
+        $timeoutSeconds = Get-ProcessTimeoutSeconds -Operation WingetInstall
+    }
 
     $attempt = 0
     $sessionErrors = 0
@@ -15856,6 +16526,7 @@ function Install-WingetPackage {
     $useMachineScope = $Scope -ne 'user'
     $machineScopeFellBack = $false
     $noMachineScopeInstaller = $false
+    $noUserScopeInstaller = $false
     $launchErrorExhausted = $false
     $launchAttempt = 0
     $launchDelay = $InitialDelaySeconds
@@ -15878,7 +16549,10 @@ function Install-WingetPackage {
             '--source', 'winget',
             '--id', $PackageId
         )
-        if ($useMachineScope) {
+        if ($UserScopeOnly) {
+            $installArgs += @('--scope', 'user')
+        }
+        elseif ($useMachineScope) {
             $installArgs += @('--scope', 'machine')
         }
         elseif ($Scope -eq 'user') {
@@ -15943,11 +16617,19 @@ function Install-WingetPackage {
             Write-Info "Installer log for ${PackageId}: $installerLogPath"
         }
 
+        # No per-user installer applies (the user phase): never another scope, which could pick a
+        # machine-wide installer that asks for administrator rights.
+        if ($UserScopeOnly -and $exitCode -eq $noApplicableInstallerExitCode) {
+            Write-Info "winget found no per-user installer for $PackageId that applies to this PC, so it is not installed for this account."
+            $noUserScopeInstaller = $true
+            break
+        }
+
         # No installer matched the machine-scope requirement (e.g. MSIX-only packages such as
         # Microsoft.WindowsTerminal, which only install per-user). Fall back to winget's default
         # scope once; this is a manifest property, not a transient error, so it does not consume
         # one of the session-error attempts.
-        if ($useMachineScope -and $exitCode -eq $noApplicableInstallerExitCode) {
+        if (-not $UserScopeOnly -and $useMachineScope -and $exitCode -eq $noApplicableInstallerExitCode) {
             if ($MachineScopeOnly) {
                 # A run as SYSTEM or under cross-user elevation (review finding P3-22): the default
                 # scope would install the app for the account running this, not for the user.
@@ -16023,6 +16705,7 @@ function Install-WingetPackage {
         SessionErrorExhausted          = ($exitCode -eq $sessionLogoffExitCode)
         MachineScopeFellBack           = $machineScopeFellBack
         NoMachineScopeInstaller        = $noMachineScopeInstaller
+        NoUserScopeInstaller           = $noUserScopeInstaller
         LaunchErrorExhausted           = $launchErrorExhausted
         LaunchAttempts                 = $launchAttempt
         LaunchError                    = $(if ($launchErrorExhausted) { $launchError } else { $null })

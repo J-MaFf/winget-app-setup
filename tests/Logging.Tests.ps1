@@ -397,6 +397,26 @@ Describe 'Start-InstallerTranscript (issue #189, review findings P2-13 and P3-14
         Should -Invoke Grant-InstallLogReadAccess -Times 1 -Exactly -ParameterFilter { $Path -eq $script:logDirectory }
     }
 
+    # Work-order item 34: the user phase runs as a standard user, who cannot write to the machine's
+    # logs folder, so it logs to its own %LOCALAPPDATA% and leaves the access list alone.
+    It 'Logs the user phase to the user''s own LOCALAPPDATA, as an install-(time)-userphase.log, without changing any access list' {
+        $savedLocalAppData = $env:LOCALAPPDATA
+        try {
+            $env:LOCALAPPDATA = Join-Path $TestDrive 'LocalAppData'
+            $userLogDirectory = Join-Path $env:LOCALAPPDATA 'winget-app-setup\logs'
+
+            $script:userTranscriptPath = Start-InstallerTranscript -UserPhase
+
+            $script:userTranscriptPath | Should -Match ('^' + [regex]::Escape($userLogDirectory) + '[\\/]install-\d{8}-\d{6}-userphase\.log$')
+            Test-Path -LiteralPath $userLogDirectory | Should -BeTrue
+            Should -Invoke Start-Transcript -Times 1 -Exactly -ParameterFilter { $Path -eq $script:userTranscriptPath }
+            Should -Invoke Grant-InstallLogReadAccess -Times 0 -Exactly
+        }
+        finally {
+            $env:LOCALAPPDATA = $savedLocalAppData
+        }
+    }
+
     It 'Warns and returns $null instead of failing the run when the transcript cannot start' {
         Mock Start-Transcript { throw 'Access to the path is denied.' }
 

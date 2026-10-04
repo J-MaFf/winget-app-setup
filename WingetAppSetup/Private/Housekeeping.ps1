@@ -18,8 +18,9 @@
     nothing is pruned there when there is none.
 .PARAMETER KeepTranscripts
     How many install-*.log transcripts to keep, newest first. A run started from Windows PowerShell
-    writes two (the bootstrap's and the PowerShell 7 run's), and one that relaunches itself elevated
-    writes up to four, so 30 keeps the logs of at least the last 7 runs.
+    writes two (the bootstrap's and the PowerShell 7 run's), one started by the RMM wrapper three
+    (the wrapper's own as well), and one that relaunches itself elevated up to four, so 30 keeps
+    the logs of at least the last 7 runs.
 .PARAMETER TempRoot
     The folders to look for leftover copies in. Default: the elevated relaunch's copy folder
     (Get-ElevatedCopyRoot, %SystemRoot%\Temp), plus, when the run is SYSTEM (an RMM run, whose temp
@@ -114,7 +115,9 @@ function Get-SystemProfileTempRoot {
 .DESCRIPTION
     Works on the file names the installer gives its logs, each of which carries the local time it
     was started at (yyyyMMdd-HHmmss):
-      - transcripts: install-<time>.log, with -bootstrap and/or -whatif before .log;
+      - transcripts: install-<time>.log, with -bootstrap, -rmm (rmm/Invoke-WingetAppSetup.ps1, the
+        RMM wrapper) or -userphase (Invoke-WingetUserPhase, in the user's own logs folder), and/or
+        -whatif, before .log;
       - installer logs: winget-<install|upgrade|uninstall|repair>-<package id>-<time>[-<n>].log
         (winget's --log, Invoke-WingetProcess) and pwsh-msi-<time>-<attempt>.log (msiexec's log of
         the PowerShell 7 MSI, Install-PowerShell7FromMsi).
@@ -156,7 +159,7 @@ function Remove-OldInstallerLog {
     $transcripts = @()
     $installerLogs = @()
     foreach ($file in @(Get-ChildItem -LiteralPath $LogDirectory -File -Force -ErrorAction Stop)) {
-        if ($file.Name -match '^install-(\d{8}-\d{6})(?:-bootstrap)?(?:-whatif)?\.log$') {
+        if ($file.Name -match '^install-(\d{8}-\d{6})(?:-bootstrap|-rmm|-userphase)?(?:-whatif)?\.log$') {
             $transcripts += [pscustomobject]@{ File = $file; Stamp = $Matches[1] }
         }
         elseif ($file.Name -match '^(?:winget-(?:install|upgrade|uninstall|repair)-.+|pwsh-msi)-(\d{8}-\d{6})(?:-\d+)?\.log$') {

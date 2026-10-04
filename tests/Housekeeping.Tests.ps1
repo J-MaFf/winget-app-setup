@@ -68,6 +68,19 @@ Describe 'Remove-OldInstallerLog (review finding P3-42)' {
         Get-TestFileName -Directory $script:logDirectory | Should -Be @('install-20261001-110000-whatif.log', 'install-20261001-120000-bootstrap-whatif.log')
     }
 
+    # Work-order item 34: the RMM wrapper's log and the user phase's are transcripts too, so they
+    # are kept and pruned with the rest instead of piling up.
+    It 'Counts the RMM wrapper''s and the user phase''s transcripts with the rest' {
+        [void](New-TestFile -Directory $script:logDirectory -Name 'install-20261001-100000-rmm.log')
+        [void](New-TestFile -Directory $script:logDirectory -Name 'install-20261001-100001-userphase.log')
+        [void](New-TestFile -Directory $script:logDirectory -Name 'install-20261001-110000-bootstrap.log')
+        [void](New-TestFile -Directory $script:logDirectory -Name 'install-20261001-110001.log')
+
+        Remove-OldInstallerLog -LogDirectory $script:logDirectory -KeepTranscripts 2 | Should -Be 2
+
+        Get-TestFileName -Directory $script:logDirectory | Should -Be @('install-20261001-110000-bootstrap.log', 'install-20261001-110001.log')
+    }
+
     It 'Deletes the installer logs of the runs whose transcripts it deleted, and keeps the rest' {
         New-TestTranscriptSet -Directory $script:logDirectory -Count 3
         # Written during the 10:00 run (deleted below) and during the 10:01 and 10:02 runs (kept).

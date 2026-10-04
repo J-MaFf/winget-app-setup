@@ -877,7 +877,7 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
             # Not retried: a deferred app is not a failure.
             Should -Invoke Install-AppWithVerification -Times 2 -Exactly
             $script:warningMessages | Should -Contain 'Deferred: Contoso.UserOnly (winget found no machine-wide installer for it)'
-            $script:warningMessages | Should -Contain "Deferred: Contoso.UserOnly - winget found no machine-wide installer for it that applies to this PC (0x8A150010 NO_APPLICABLE_INSTALLER with --scope machine), and a run as SYSTEM installs for the whole PC only. Not installed and not counted as failed. A per-user app can only be installed in the signed-in user's own account: by this installer run as the signed-in user when that account is an administrator, otherwise by a per-user deployment (an RMM script that runs as the user, or the Microsoft Store)."
+            $script:warningMessages | Should -Contain "Deferred: Contoso.UserOnly - winget found no machine-wide installer for it that applies to this PC (0x8A150010 NO_APPLICABLE_INSTALLER with --scope machine), and a run as SYSTEM installs for the whole PC only. Not installed and not counted as failed. A per-user app can only be installed in the signed-in user's own account: by this installer run as the signed-in user when that account is an administrator, otherwise by a per-user deployment: the user phase (rmm/Invoke-WingetAppSetupUserPhase.ps1, run as the user at sign-in, for example by an Endpoint Central User Configuration script) installs the apps a run deferred, or the Microsoft Store."
         }
 
         It 'Names the signed-in user under cross-user elevation' {
@@ -886,7 +886,7 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
 
             Invoke-WingetInstall -Apps @(@{ name = 'Contoso.UserOnly' }) -NonInteractive | Should -Be 0
 
-            $script:warningMessages | Should -Contain "Deferred: Contoso.UserOnly - winget found no machine-wide installer for it that applies to this PC (0x8A150010 NO_APPLICABLE_INSTALLER with --scope machine), and installing per-user here would install for 'CONTOSO\admin-tech' instead of 'CONTOSO\jdoe'. Not installed and not counted as failed. A per-user app can only be installed in the account 'CONTOSO\jdoe': by this installer run as 'CONTOSO\jdoe' when that account is an administrator, otherwise by a per-user deployment (an RMM script that runs as the user, or the Microsoft Store)."
+            $script:warningMessages | Should -Contain "Deferred: Contoso.UserOnly - winget found no machine-wide installer for it that applies to this PC (0x8A150010 NO_APPLICABLE_INSTALLER with --scope machine), and installing per-user here would install for 'CONTOSO\admin-tech' instead of 'CONTOSO\jdoe'. Not installed and not counted as failed. A per-user app can only be installed in the account 'CONTOSO\jdoe': by this installer run as 'CONTOSO\jdoe' when that account is an administrator, otherwise by a per-user deployment: the user phase (rmm/Invoke-WingetAppSetupUserPhase.ps1, run as the user at sign-in, for example by an Endpoint Central User Configuration script) installs the apps a run deferred, or the Microsoft Store."
         }
 
         It 'Defers an app that the retry pass finds has no machine-wide installer, instead of counting it as installed' {
@@ -3505,7 +3505,7 @@ Describe 'Write-DeferredAppsSummary (review findings P3-22, P3-23)' {
     It 'Names every deferred app in one line, for SYSTEM' {
         Write-DeferredAppsSummary -DeferredApps @('Contoso.One', 'Contoso.Two') -AccountContext (New-TestAccountContext -System -SessionUser 'CONTOSO\jdoe')
 
-        $script:warningMessages | Should -Be @("Deferred: Contoso.One, Contoso.Two - winget found no machine-wide installer for them that applies to this PC (0x8A150010 NO_APPLICABLE_INSTALLER with --scope machine), and a run as SYSTEM installs for the whole PC only. Not installed and not counted as failed. A per-user app can only be installed in the signed-in user's own account: by this installer run as the signed-in user when that account is an administrator, otherwise by a per-user deployment (an RMM script that runs as the user, or the Microsoft Store).")
+        $script:warningMessages | Should -Be @("Deferred: Contoso.One, Contoso.Two - winget found no machine-wide installer for them that applies to this PC (0x8A150010 NO_APPLICABLE_INSTALLER with --scope machine), and a run as SYSTEM installs for the whole PC only. Not installed and not counted as failed. A per-user app can only be installed in the signed-in user's own account: by this installer run as the signed-in user when that account is an administrator, otherwise by a per-user deployment: the user phase (rmm/Invoke-WingetAppSetupUserPhase.ps1, run as the user at sign-in, for example by an Endpoint Central User Configuration script) installs the apps a run deferred, or the Microsoft Store.")
     }
 }
 
@@ -4065,7 +4065,7 @@ Describe 'Invoke-WingetInstall: declarative catalog fields (work-order item 38)'
 
         $script:messages | Should -Contain "Deferred: Contoso.UserApp (per-user app (catalog scope 'user'): it installs only into the signed-in user's own account)"
         $script:messages | Should -Contain "Deferred: Contoso.UserSetting (per-user setup (catalog userPhase): it needs the signed-in user's own account)"
-        $script:messages | Should -Contain "Deferred: Contoso.UserApp, Contoso.UserSetting - the catalog marks them per-user (scope 'user' or userPhase), so they can be installed or set up only in the account 'CONTOSO\jdoe', and installing per-user here would install for 'CONTOSO\admin-tech' instead of 'CONTOSO\jdoe'. Not installed and not counted as failed. This installer run as 'CONTOSO\jdoe' installs them when that account is an administrator; otherwise a per-user deployment does (an RMM script that runs as the user, or the Microsoft Store)."
+        $script:messages | Should -Contain "Deferred: Contoso.UserApp, Contoso.UserSetting - the catalog marks them per-user (scope 'user' or userPhase), so they can be installed or set up only in the account 'CONTOSO\jdoe', and installing per-user here would install for 'CONTOSO\admin-tech' instead of 'CONTOSO\jdoe'. Not installed and not counted as failed. This installer run as 'CONTOSO\jdoe' installs them when that account is an administrator; otherwise a per-user deployment does: the user phase (rmm/Invoke-WingetAppSetupUserPhase.ps1, run as the user at sign-in, for example by an Endpoint Central User Configuration script) installs and sets up the apps a run deferred, or the Microsoft Store."
         # Not the 0x8A150010 explanation: winget was never asked about them.
         ($script:messages -join "`n") | Should -Not -Match 'NO_APPLICABLE_INSTALLER'
 
@@ -4129,7 +4129,7 @@ Describe 'Reporting the declarative catalog fields (work-order item 38)' {
 
         $script:warningMessages.Count | Should -Be 2
         $script:warningMessages[0] | Should -Match '^Deferred: Contoso\.NoMachine - winget found no machine-wide installer for it'
-        $script:warningMessages[1] | Should -Be "Deferred: Contoso.UserApp - the catalog marks it per-user (scope 'user' or userPhase), so it can be installed or set up only in the signed-in user's own account, and a run as SYSTEM installs for the whole PC only. Not installed and not counted as failed. This installer run as the signed-in user installs it when that account is an administrator; otherwise a per-user deployment does (an RMM script that runs as the user, or the Microsoft Store)."
+        $script:warningMessages[1] | Should -Be "Deferred: Contoso.UserApp - the catalog marks it per-user (scope 'user' or userPhase), so it can be installed or set up only in the signed-in user's own account, and a run as SYSTEM installs for the whole PC only. Not installed and not counted as failed. This installer run as the signed-in user installs it when that account is an administrator; otherwise a per-user deployment does: the user phase (rmm/Invoke-WingetAppSetupUserPhase.ps1, run as the user at sign-in, for example by an Endpoint Central User Configuration script) installs and sets up the apps a run deferred, or the Microsoft Store."
     }
 
     It 'Write-DeferredAppsSummary says nothing about per-user apps when there are none' {

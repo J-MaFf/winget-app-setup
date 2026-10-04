@@ -28,11 +28,13 @@
     (finding or installing PowerShell 7, then relaunching) adds '-bootstrap'. The 5.1 bootstrap
     transcripts are returned separately: they hold no install, and the 5.1 parent keeps its
     transcript open until the PowerShell 7 run it started has ended, so a bootstrap transcript is
-    always written after the run it belongs to and would otherwise pass for the latest run.
+    always written after the run it belongs to and would otherwise pass for the latest run. So are
+    the RMM wrapper's ('-rmm', rmm/Invoke-WingetAppSetup.ps1), for the same reason: the wrapper
+    starts before the installer and ends after it, and its log repeats the installer's output.
 .PARAMETER LogDirectory
     The installer's log folder (%ProgramData%\winget-app-setup\logs on a real machine).
 .RETURNS
-    [pscustomobject] with RealRun and Bootstrap, each an array of FileInfo sorted by
+    [pscustomobject] with RealRun, Bootstrap and Rmm, each an array of FileInfo sorted by
     LastWriteTime (then name).
 #>
 function Get-InstallTranscriptFile {
@@ -45,8 +47,9 @@ function Get-InstallTranscriptFile {
             Where-Object { $_.Name -notmatch '-whatif\.log$' } |
             Sort-Object -Property LastWriteTime, Name)
     return [pscustomobject]@{
-        RealRun   = @($files | Where-Object { $_.Name -notmatch '-bootstrap\.log$' })
+        RealRun   = @($files | Where-Object { $_.Name -notmatch '-(bootstrap|rmm)\.log$' })
         Bootstrap = @($files | Where-Object { $_.Name -match '-bootstrap\.log$' })
+        Rmm       = @($files | Where-Object { $_.Name -match '-rmm\.log$' })
     }
 }
 
@@ -136,6 +139,8 @@ function ConvertTo-TranscriptAppId {
                          INSTALLED - the latest winget release needs ...', work-order item 32), for
                          a newer 1.8 build or another family alike: the pin has to move.
       WingetNotUsable    the end-of-run check printed 'winget: NOT USABLE'.
+      RanAsSystem        the run said it runs as SYSTEM ('Running as SYSTEM (for example from an
+                         RMM agent): ...').
 #>
 function ConvertFrom-InstallTranscript {
     param (
@@ -163,6 +168,7 @@ function ConvertFrom-InstallTranscript {
     $windowsAppRuntimeAttempted = $false
     $windowsAppRuntimePinStale = $false
     $wingetNotUsable = $false
+    $ranAsSystem = $false
 
     # Summary table state: 'none' until 'Summary:', 'header' until the dashes under the column
     # names, then 'rows' until the first line that is not a row. A line that ends the table is
@@ -258,6 +264,10 @@ function ConvertFrom-InstallTranscript {
             $wingetNotUsable = $true
             continue
         }
+        if ($line -match '^Running as SYSTEM \(for example from an RMM agent\)') {
+            $ranAsSystem = $true
+            continue
+        }
     }
 
     $summary = @{}
@@ -318,6 +328,7 @@ function ConvertFrom-InstallTranscript {
         WindowsAppRuntimeAttempted = $windowsAppRuntimeAttempted
         WindowsAppRuntimePinStale = $windowsAppRuntimePinStale
         WingetNotUsable     = $wingetNotUsable
+        RanAsSystem         = $ranAsSystem
     }
 }
 

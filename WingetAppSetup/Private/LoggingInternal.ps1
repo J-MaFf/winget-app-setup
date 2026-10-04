@@ -42,6 +42,11 @@ function Write-Prompt {
 .PARAMETER Bootstrap
     The Windows PowerShell 5.1 bootstrap phase: the file name gets a -bootstrap suffix. The
     PowerShell 7 run it relaunches writes its own transcript next to it.
+.PARAMETER UserPhase
+    The user phase (Invoke-WingetUserPhase), which runs as the signed-in user, not elevated: the
+    transcript goes to that user's %LOCALAPPDATA%\winget-app-setup\logs, since a standard user
+    cannot write to the machine's logs folder, and the file name gets a -userphase suffix. The
+    folder's access list is left as it is.
 .RETURNS
     [string] The transcript path, or $null when the transcript could not be started.
 #>
@@ -50,19 +55,29 @@ function Start-InstallerTranscript {
         [Parameter(Mandatory = $false)]
         [switch]$WhatIf,
         [Parameter(Mandatory = $false)]
-        [switch]$Bootstrap
+        [switch]$Bootstrap,
+        [Parameter(Mandatory = $false)]
+        [switch]$UserPhase
     )
 
     $phaseSuffix = ''
     if ($Bootstrap) {
         $phaseSuffix = '-bootstrap'
     }
+    elseif ($UserPhase) {
+        $phaseSuffix = '-userphase'
+    }
     $whatIfSuffix = ''
     if ($WhatIf) {
         $whatIfSuffix = '-whatif'
     }
     try {
-        $logDirectory = Join-Path $env:ProgramData 'winget-app-setup\logs'
+        if ($UserPhase) {
+            $logDirectory = Join-Path $env:LOCALAPPDATA 'winget-app-setup\logs'
+        }
+        else {
+            $logDirectory = Join-Path $env:ProgramData 'winget-app-setup\logs'
+        }
         if (-not (Test-Path -LiteralPath $logDirectory)) {
             [void](New-Item -Path $logDirectory -ItemType Directory -Force -ErrorAction Stop)
         }
@@ -75,8 +90,11 @@ function Start-InstallerTranscript {
     }
 
     # After Start-Transcript, so a failure to change the folder's ACL is in the log too; the grant
-    # is inheritable, so the transcript file already created inside the folder picks it up.
-    [void](Grant-InstallLogReadAccess -Path $logDirectory)
+    # is inheritable, so the transcript file already created inside the folder picks it up. A user's
+    # own folder needs none.
+    if (-not $UserPhase) {
+        [void](Grant-InstallLogReadAccess -Path $logDirectory)
+    }
     return $logPath
 }
 

@@ -773,6 +773,65 @@ Describe 'Install-WingetPackage (0x80073d19 session-error backoff)' {
         Should -Invoke Invoke-WingetProcess -Times 0 -Exactly
     }
 
+    # Work-order item 34: the user phase installs, as the signed-in user and not elevated, what a run
+    # for the whole PC deferred. It must never land on a machine-wide installer, which would ask for
+    # administrator rights.
+    It 'Installs with --scope user only, and never at another scope, with -UserScopeOnly' {
+        $script:exitCodeQueue = @(-1978335216, 0)
+
+        $result = Install-WingetPackage -PackageId 'Contoso.UserOnly' -MaxAttempts 3 -InitialDelaySeconds 1 -UserScopeOnly
+
+        Should -Invoke Invoke-WingetProcess -Times 1 -Exactly
+        Should -Invoke Invoke-WingetProcess -Times 1 -Exactly -ParameterFilter { ($ArgumentList -join ' ') -match '--scope user' -and ($ArgumentList -join ' ') -notmatch '--scope machine' }
+        $result.NoUserScopeInstaller | Should -Be $true
+        $result.NoMachineScopeInstaller | Should -Be $false
+        $result.MachineScopeFellBack | Should -Be $false
+        $result.ExitCode | Should -Be -1978335216
+        Should -Invoke Start-Sleep -Times 0 -Exactly
+    }
+
+    It 'Installs at user scope as usual with -UserScopeOnly when the package has a per-user installer' {
+        $script:exitCodeQueue = @(0)
+
+        $result = Install-WingetPackage -PackageId 'Contoso.UserOnly' -MaxAttempts 3 -InitialDelaySeconds 1 -UserScopeOnly
+
+        $result.ExitCode | Should -Be 0
+        $result.NoUserScopeInstaller | Should -Be $false
+        Should -Invoke Invoke-WingetProcess -Times 1 -Exactly -ParameterFilter { ($ArgumentList -join ' ') -match '--scope user' }
+    }
+
+    It 'Refuses -MachineScopeOnly together with -UserScopeOnly' {
+        { Install-WingetPackage -PackageId 'Contoso.App' -MachineScopeOnly -UserScopeOnly } | Should -Throw '*cannot be used together*'
+        Should -Invoke Invoke-WingetProcess -Times 0 -Exactly
+    }
+
+    It 'Uses the caller''s time limit when one is given, and the WingetInstall limit otherwise' {
+        $script:exitCodeQueue = @(0, 0)
+
+        $limited = Install-WingetPackage -PackageId 'Contoso.App' -MaxAttempts 1 -TimeoutSeconds 90
+        $default = Install-WingetPackage -PackageId 'Contoso.App' -MaxAttempts 1
+
+        $limited.TimeoutSeconds | Should -Be 90
+        $default.TimeoutSeconds | Should -Be (Get-ProcessTimeoutSeconds -Operation WingetInstall)
+        Should -Invoke Invoke-WingetProcess -Times 1 -Exactly -ParameterFilter { $TimeoutSeconds -eq 90 }
+        Should -Invoke Invoke-WingetProcess -Times 1 -Exactly -ParameterFilter { $TimeoutSeconds -eq (Get-ProcessTimeoutSeconds -Operation WingetInstall) }
+    }
+
+    It 'Refuses -UserScopeOnly together with -Scope machine, without running winget' {
+        { Install-WingetPackage -PackageId 'Contoso.MachineOnly' -Scope machine -UserScopeOnly } | Should -Throw '*-Scope machine rules out*'
+        Should -Invoke Invoke-WingetProcess -Times 0 -Exactly
+    }
+
+    It 'Installs with --scope user only with -UserScopeOnly and -Scope user together' {
+        $script:exitCodeQueue = @(0)
+
+        $result = Install-WingetPackage -PackageId 'Contoso.UserApp' -MaxAttempts 3 -InitialDelaySeconds 1 -Scope user -UserScopeOnly
+
+        $result.ExitCode | Should -Be 0
+        Should -Invoke Invoke-WingetProcess -Times 1 -Exactly
+        Should -Invoke Invoke-WingetProcess -Times 1 -Exactly -ParameterFilter { (($ArgumentList -join ' ') -split '--scope').Count -eq 2 -and ($ArgumentList -join ' ') -match '--scope user' }
+    }
+
     It 'Still retries the session error with backoff after a scope fallback' {
         $script:exitCodeQueue = @(-1978335216, $script:SessionLogoffExitCode, 0)
 

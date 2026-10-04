@@ -32,7 +32,9 @@
         # Install orchestration
         'Invoke-WingetInstall',
         # Uninstall orchestration (the body of winget-app-uninstall.ps1)
-        'Invoke-WingetUninstall'
+        'Invoke-WingetUninstall',
+        # User phase after a run for the whole PC (run by rmm/Invoke-WingetAppSetupUserPhase.ps1)
+        'Invoke-WingetUserPhase'
     )
 
     CmdletsToExport   = @()
