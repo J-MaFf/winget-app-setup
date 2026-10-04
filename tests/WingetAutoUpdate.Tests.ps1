@@ -146,7 +146,7 @@ Describe 'Winget-AutoUpdate integration (issue #168)' {
 
         It 'downloads into the ACL-restricted staging directory, verifies the hash, and installs silently with the pinned config' {
             Mock Test-WauInstalled { $false }
-            Mock New-WauStagingDirectory { 'C:\ProgramData\winget-app-setup\wau-msi-test' }
+            Mock New-WauStagingDirectory { Join-Path $TestDrive 'wau-msi-test' }
             Mock Invoke-WebRequest { }
             Mock Get-FileHash { @{ Hash = (Get-WauPin).Sha256 } }
             Mock Start-Process { [pscustomobject]@{ ExitCode = 0 } }
@@ -167,7 +167,7 @@ Describe 'Winget-AutoUpdate integration (issue #168)' {
                 $ArgumentList -match 'NOTIFICATIONLEVEL=Full'
             }
             Should -Invoke Remove-Item -Times 1 -Exactly -ParameterFilter {
-                $Path -eq 'C:\ProgramData\winget-app-setup\wau-msi-test' -and $Recurse
+                $Path -eq (Join-Path $TestDrive 'wau-msi-test') -and $Recurse
             }
             # A fresh install gets UPDATESATLOGON=0 from the MSI; no task edit needed.
             Should -Invoke Disable-WauLogonTrigger -Times 0 -Exactly
@@ -191,7 +191,7 @@ Describe 'Winget-AutoUpdate integration (issue #168)' {
         It 'upgrades in place when the installed version is older than the pin (issue #186)' {
             Mock Test-WauInstalled { $true }
             Mock Get-InstalledWauInfo { [pscustomobject]@{ Version = [version]'2.11.0'; ProductCode = '{11111111-2222-3333-4444-555555555555}' } }
-            Mock New-WauStagingDirectory { 'C:\ProgramData\winget-app-setup\wau-msi-test' }
+            Mock New-WauStagingDirectory { Join-Path $TestDrive 'wau-msi-test' }
             Mock Invoke-WebRequest { }
             Mock Get-FileHash { @{ Hash = (Get-WauPin).Sha256 } }
             Mock Start-Process { [pscustomobject]@{ ExitCode = 0 } }
@@ -234,7 +234,7 @@ Describe 'Winget-AutoUpdate integration (issue #168)' {
 
         It 'aborts without installing when the MSI hash does not match, and still cleans the staging directory' {
             Mock Test-WauInstalled { $false }
-            Mock New-WauStagingDirectory { 'C:\ProgramData\winget-app-setup\wau-msi-test' }
+            Mock New-WauStagingDirectory { Join-Path $TestDrive 'wau-msi-test' }
             Mock Invoke-WebRequest { }
             Mock Get-FileHash { @{ Hash = 'DEADBEEF' } }
             Mock Start-Process { throw 'must not run msiexec on a hash mismatch' }
@@ -245,7 +245,7 @@ Describe 'Winget-AutoUpdate integration (issue #168)' {
             $result.Status | Should -Be 'Failed'
             Should -Invoke Start-Process -Times 0 -Exactly
             Should -Invoke Remove-Item -Times 1 -Exactly -ParameterFilter {
-                $Path -eq 'C:\ProgramData\winget-app-setup\wau-msi-test' -and $Recurse
+                $Path -eq (Join-Path $TestDrive 'wau-msi-test') -and $Recurse
             }
         }
 
@@ -264,7 +264,7 @@ Describe 'Winget-AutoUpdate integration (issue #168)' {
 
         It 'treats msiexec exit code 3010 (reboot required) as success' {
             Mock Test-WauInstalled { $false }
-            Mock New-WauStagingDirectory { 'C:\ProgramData\winget-app-setup\wau-msi-test' }
+            Mock New-WauStagingDirectory { Join-Path $TestDrive 'wau-msi-test' }
             Mock Invoke-WebRequest { }
             Mock Get-FileHash { @{ Hash = (Get-WauPin).Sha256 } }
             Mock Start-Process { [pscustomobject]@{ ExitCode = 3010 } }

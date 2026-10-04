@@ -12,9 +12,6 @@ BeforeAll {
 
 Describe 'Write-Table' {
     BeforeAll {
-        # Dot-source the script under test so these tests exercise the real implementation (#135).
-        . $script:InstallerScriptPath
-
         Mock Write-Host { }
         # Read-Host is mocked only so the "never prompts" assertions have a command to count.
         # Write-Table has not called it since issue #230; a real call would block the suite.

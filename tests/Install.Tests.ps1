@@ -22,9 +22,6 @@ BeforeAll {
 
 Describe 'Main Script Logic' {
     BeforeAll {
-        # Dot-source the script under test so these tests exercise the real implementation (#135).
-        . $script:InstallerScriptPath
-
         # Capture Invoke-WingetInstall's source now, BEFORE Get-Command is mocked below. The
         # structural tests inspect this definition; routing their `Get-Command Invoke-WingetInstall`
         # through the filtered mock throws under Pester 6, which (unlike Pester 5) no longer falls

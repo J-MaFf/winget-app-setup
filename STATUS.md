@@ -25,7 +25,9 @@ servicing" explanation below is superseded. The branch drops `RUN_WAU=YES`, inst
 only when the framework is present (the runner now reports `Auto-updates: NOT CONFIGURED`), removes
 WAU's at-logon run, waits for a running WAU before using winget, makes a run that leaves winget
 unusable exit 2, and makes an aborted run exit 5 instead of 0. #279, #283 and #284 stay open until
-an E2E run on this branch confirms it.
+an E2E run on this branch confirms it. The Pester suite now also runs on Linux, with 2 known failures
+instead of 113, and no test loads the generated installer any more, so the tests always exercise the
+module source being edited.
 
 In progress: **E2E: App Installer 1.29.290.0 vs 1.26.510.0 AppX conflict, missing
 WindowsAppRuntime.1.8** ([#279](https://github.com/J-MaFf/winget-app-setup/issues/279)) — two
@@ -194,7 +196,7 @@ Pester installs persist across runs there ([#161](https://github.com/J-MaFf/wing
 | `build/fragments/` | `head.ps1` (PSScriptInfo, help, `param`) and `tail.ps1` (entry-point dispatch) |
 | `winget-app-install.ps1` | **Generated** single-file installer for local and `irm \| iex` use — do not edit by hand |
 | `winget-app-uninstall.ps1` | Uninstall helper; imports the module from the repo |
-| `tests/` | Pester suite, one `<Area>.Tests.ps1` per module file plus `EntryPoint.Tests.ps1`; `TestHelpers.ps1` loads the module once per file |
+| `tests/` | Pester suite, one `<Area>.Tests.ps1` per module file plus `EntryPoint.Tests.ps1` and `TestHarness.Tests.ps1`; `TestHelpers.ps1` loads the module once per file and stands in for Windows-only commands, so the suite also runs on Linux/macOS |
 | `e2e/Assert-Install.ps1` | Shared post-install assertions for end-to-end runs (tier 1 workflow below; tier 2 [#215](https://github.com/J-MaFf/winget-app-setup/issues/215) reuses it) |
 | `.github/workflows/e2e-install.yml` | E2E tier 1: weekly real install run on GitHub-hosted `windows-latest` (issues #279/#282/#283; schedule + dispatch + self-validating PRs; failure auto-files an issue) |
 | `Test-WindowsTerminalConfiguration.ps1` | Smoke-test validation for the Windows Terminal default-shell configuration. |

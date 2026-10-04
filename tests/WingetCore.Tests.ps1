@@ -13,9 +13,6 @@ BeforeAll {
 
 Describe 'Test-AndInstallWingetModule' {
     BeforeAll {
-        # Dot-source the script under test so these tests exercise the real implementation (#135).
-        . $script:InstallerScriptPath
-
         Mock Write-Host { }
         Mock Write-Warning { }
 

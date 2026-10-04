@@ -96,8 +96,15 @@ Describe 'Resolve-WingetExecutable' {
     }
 
     Context 'With -BypassAlias' {
+        BeforeEach {
+            # TestDrive paths, not 'C:\...' literals: Join-Path checks the drive exists, so off
+            # Windows a C: InstallLocation never produced a candidate path (wgt-gq8.5). Test-Path
+            # is mocked, so nothing touches the disk.
+            $script:windowsAppsRoot = Join-Path $TestDrive 'WindowsApps'
+        }
+
         It 'Returns winget.exe under the registered DesktopAppInstaller package install location' {
-            $script:installLocation = 'C:\Program Files\WindowsApps\Microsoft.DesktopAppInstaller_1.26.0.0_x64__8wekyb3d8bbwe'
+            $script:installLocation = Join-Path $script:windowsAppsRoot 'Microsoft.DesktopAppInstaller_1.26.0.0_x64__8wekyb3d8bbwe'
             Mock Get-AppxPackage { [pscustomobject]@{ Version = '1.26.0.0'; InstallLocation = $script:installLocation } }
             Mock Test-Path { $true }
 
@@ -109,17 +116,17 @@ Describe 'Resolve-WingetExecutable' {
         It 'Prefers the newest registered version when several are visible mid-upgrade' {
             Mock Get-AppxPackage {
                 @(
-                    [pscustomobject]@{ Version = '1.9.25200.0'; InstallLocation = 'C:\WindowsApps\DAI_old' }
-                    [pscustomobject]@{ Version = '1.26.0.0'; InstallLocation = 'C:\WindowsApps\DAI_new' }
+                    [pscustomobject]@{ Version = '1.9.25200.0'; InstallLocation = (Join-Path $script:windowsAppsRoot 'DAI_old') }
+                    [pscustomobject]@{ Version = '1.26.0.0'; InstallLocation = (Join-Path $script:windowsAppsRoot 'DAI_new') }
                 )
             }
             Mock Test-Path { $true }
 
-            Resolve-WingetExecutable -BypassAlias | Should -Be (Join-Path 'C:\WindowsApps\DAI_new' 'winget.exe')
+            Resolve-WingetExecutable -BypassAlias | Should -Be (Join-Path (Join-Path $script:windowsAppsRoot 'DAI_new') 'winget.exe')
         }
 
         It 'Falls back to the alias when the package has no winget.exe on disk' {
-            Mock Get-AppxPackage { [pscustomobject]@{ Version = '1.26.0.0'; InstallLocation = 'C:\WindowsApps\DAI' } }
+            Mock Get-AppxPackage { [pscustomobject]@{ Version = '1.26.0.0'; InstallLocation = (Join-Path $script:windowsAppsRoot 'DAI') } }
             Mock Test-Path { $false }
 
             Resolve-WingetExecutable -BypassAlias | Should -Be 'winget'

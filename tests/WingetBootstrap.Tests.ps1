@@ -333,10 +333,15 @@ Describe 'Register-WingetAppInstallerForUser (issue #265)' {
         Mock Write-Info { }
         Mock Write-Success { }
         Mock Write-WarningMessage { }
+        # A TestDrive path, not a 'C:\Program Files\WindowsApps\...' literal: the manifest
+        # fallback joins onto InstallLocation, and Join-Path checks the drive exists, so off
+        # Windows a C: path never reached the Add-AppxPackage -Register call (wgt-gq8.5).
+        # Test-Path is mocked wherever the path is probed, so nothing touches the disk.
+        $script:installLocation = Join-Path $TestDrive 'WindowsApps\Microsoft.DesktopAppInstaller_1.26.0.0_x64__8wekyb3d8bbwe'
     }
 
     It 'Registers the staged package by family name and reports success' {
-        Mock Get-AppxPackage { [pscustomobject]@{ InstallLocation = 'C:\Program Files\WindowsApps\Microsoft.DesktopAppInstaller_1.26.0.0_x64__8wekyb3d8bbwe' } }
+        Mock Get-AppxPackage { [pscustomobject]@{ InstallLocation = $script:installLocation } }
         Mock Add-AppxPackage { }
 
         Register-WingetAppInstallerForUser | Should -Be $true
@@ -349,7 +354,7 @@ Describe 'Register-WingetAppInstallerForUser (issue #265)' {
     It 'Enumerates packages staged for other accounts, not just this one' {
         # -AllUsers is what surfaces a package staged on the machine but never registered for the
         # elevating account - the whole case this helper exists for.
-        Mock Get-AppxPackage { [pscustomobject]@{ InstallLocation = 'C:\Program Files\WindowsApps\Microsoft.DesktopAppInstaller_1.26.0.0_x64__8wekyb3d8bbwe' } }
+        Mock Get-AppxPackage { [pscustomobject]@{ InstallLocation = $script:installLocation } }
         Mock Add-AppxPackage { }
 
         [void](Register-WingetAppInstallerForUser)
@@ -358,8 +363,7 @@ Describe 'Register-WingetAppInstallerForUser (issue #265)' {
     }
 
     It 'Falls back to registering from the package manifest when the family-name form fails' {
-        $installLocation = 'C:\Program Files\WindowsApps\Microsoft.DesktopAppInstaller_1.26.0.0_x64__8wekyb3d8bbwe'
-        Mock Get-AppxPackage { [pscustomobject]@{ InstallLocation = $installLocation } }
+        Mock Get-AppxPackage { [pscustomobject]@{ InstallLocation = $script:installLocation } }
         Mock Test-Path { $true }
         Mock Add-AppxPackage { throw 'family name registration failed' } -ParameterFilter { $RegisterByFamilyName }
         Mock Add-AppxPackage { } -ParameterFilter { $Register }
@@ -367,7 +371,7 @@ Describe 'Register-WingetAppInstallerForUser (issue #265)' {
         Register-WingetAppInstallerForUser | Should -Be $true
 
         Should -Invoke Add-AppxPackage -Times 1 -Exactly -ParameterFilter {
-            $Register -and $Path -eq (Join-Path $installLocation 'AppXManifest.xml')
+            $Register -and $Path -eq (Join-Path $script:installLocation 'AppXManifest.xml')
         }
     }
 
@@ -381,7 +385,7 @@ Describe 'Register-WingetAppInstallerForUser (issue #265)' {
     }
 
     It 'Returns false when every registration form fails' {
-        Mock Get-AppxPackage { [pscustomobject]@{ InstallLocation = 'C:\Program Files\WindowsApps\Microsoft.DesktopAppInstaller_1.26.0.0_x64__8wekyb3d8bbwe' } }
+        Mock Get-AppxPackage { [pscustomobject]@{ InstallLocation = $script:installLocation } }
         Mock Test-Path { $true }
         Mock Add-AppxPackage { throw 'registration failed' }
 
@@ -390,7 +394,7 @@ Describe 'Register-WingetAppInstallerForUser (issue #265)' {
 
     It 'Falls back to the current-user view when the all-users enumeration is refused' {
         Mock Get-AppxPackage { throw 'access denied' } -ParameterFilter { $AllUsers }
-        Mock Get-AppxPackage { [pscustomobject]@{ InstallLocation = 'C:\Program Files\WindowsApps\Microsoft.DesktopAppInstaller_1.26.0.0_x64__8wekyb3d8bbwe' } } -ParameterFilter { -not $AllUsers }
+        Mock Get-AppxPackage { [pscustomobject]@{ InstallLocation = $script:installLocation } } -ParameterFilter { -not $AllUsers }
         Mock Add-AppxPackage { }
 
         Register-WingetAppInstallerForUser | Should -Be $true

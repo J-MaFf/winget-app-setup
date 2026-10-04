@@ -65,13 +65,19 @@ Describe 'Find-PowerShell7' {
     Context 'pwsh.exe not on PATH (stale PATH, 32-bit host, or MSIX install)' {
         BeforeEach {
             Mock Get-Command { $null } -ParameterFilter { $Name -eq 'pwsh.exe' }
-            # Pin the candidate roots so assertions are deterministic on any host.
+            # Pin the candidate roots so assertions are deterministic on any host. TestDrive roots,
+            # not 'C:\...' literals: Join-Path checks the drive exists, so off Windows a C: root
+            # turned every candidate and every expected path into $null and these tests passed
+            # without checking anything (Test-Path is mocked, so nothing touches the disk).
             $script:savedProgramFiles = $env:ProgramFiles
             $script:savedProgramW6432 = $env:ProgramW6432
             $script:savedLocalAppData = $env:LOCALAPPDATA
-            $env:ProgramFiles = 'C:\TestProgramFiles'
-            $env:ProgramW6432 = 'C:\TestProgramW6432'
-            $env:LOCALAPPDATA = 'C:\TestLocalAppData'
+            $script:testProgramFiles = Join-Path $TestDrive 'TestProgramFiles'
+            $script:testProgramW6432 = Join-Path $TestDrive 'TestProgramW6432'
+            $script:testLocalAppData = Join-Path $TestDrive 'TestLocalAppData'
+            $env:ProgramFiles = $script:testProgramFiles
+            $env:ProgramW6432 = $script:testProgramW6432
+            $env:LOCALAPPDATA = $script:testLocalAppData
         }
         AfterEach {
             $env:ProgramFiles = $script:savedProgramFiles
@@ -80,27 +86,27 @@ Describe 'Find-PowerShell7' {
         }
 
         It 'Falls back to the Program Files install location' {
-            Mock Test-Path { $LiteralPath -like 'C:\TestProgramFiles*' } -ParameterFilter { $LiteralPath -like '*pwsh.exe' }
+            Mock Test-Path { $LiteralPath -like "$script:testProgramFiles*" } -ParameterFilter { $LiteralPath -like '*pwsh.exe' }
 
-            Find-PowerShell7 | Should -Be (Join-Path 'C:\TestProgramFiles' 'PowerShell\7\pwsh.exe')
+            Find-PowerShell7 | Should -Be (Join-Path $script:testProgramFiles 'PowerShell\7\pwsh.exe')
         }
 
         It 'Probes the 64-bit Program Files from a 32-bit host (ProgramW6432)' {
-            Mock Test-Path { $LiteralPath -like 'C:\TestProgramW6432*' } -ParameterFilter { $LiteralPath -like '*pwsh.exe' }
+            Mock Test-Path { $LiteralPath -like "$script:testProgramW6432*" } -ParameterFilter { $LiteralPath -like '*pwsh.exe' }
 
-            Find-PowerShell7 | Should -Be (Join-Path 'C:\TestProgramW6432' 'PowerShell\7\pwsh.exe')
+            Find-PowerShell7 | Should -Be (Join-Path $script:testProgramW6432 'PowerShell\7\pwsh.exe')
         }
 
         It 'Probes the WindowsApps execution alias (MSIX install on Windows 11 24H2+)' {
-            Mock Test-Path { $LiteralPath -like 'C:\TestLocalAppData*' } -ParameterFilter { $LiteralPath -like '*pwsh.exe' }
+            Mock Test-Path { $LiteralPath -like "$script:testLocalAppData*" } -ParameterFilter { $LiteralPath -like '*pwsh.exe' }
 
-            Find-PowerShell7 | Should -Be (Join-Path 'C:\TestLocalAppData' 'Microsoft\WindowsApps\pwsh.exe')
+            Find-PowerShell7 | Should -Be (Join-Path $script:testLocalAppData 'Microsoft\WindowsApps\pwsh.exe')
         }
 
         It 'Prefers the Program Files install over the WindowsApps alias when both exist' {
             Mock Test-Path { $true } -ParameterFilter { $LiteralPath -like '*pwsh.exe' }
 
-            Find-PowerShell7 | Should -Be (Join-Path 'C:\TestProgramFiles' 'PowerShell\7\pwsh.exe')
+            Find-PowerShell7 | Should -Be (Join-Path $script:testProgramFiles 'PowerShell\7\pwsh.exe')
         }
 
         It 'Returns $null when no candidate exists' {
@@ -113,9 +119,9 @@ Describe 'Find-PowerShell7' {
             # PATH-less; ProgramFiles and WindowsApps candidates both exist on disk, but the
             # ProgramFiles one fails the execution probe - the WindowsApps one must win.
             Mock Test-Path { $true } -ParameterFilter { $LiteralPath -like '*pwsh.exe' }
-            Mock Test-PowerShell7Executable { $Path -like 'C:\TestLocalAppData*' }
+            Mock Test-PowerShell7Executable { $Path -like "$script:testLocalAppData*" }
 
-            Find-PowerShell7 | Should -Be (Join-Path 'C:\TestLocalAppData' 'Microsoft\WindowsApps\pwsh.exe')
+            Find-PowerShell7 | Should -Be (Join-Path $script:testLocalAppData 'Microsoft\WindowsApps\pwsh.exe')
         }
 
         It 'Returns $null when every existing candidate fails validation' {

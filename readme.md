@@ -182,6 +182,10 @@ module directly via `tests/TestHelpers.ps1`):
 Invoke-Pester .\tests
 ```
 
+The suite also runs on Linux and macOS (PowerShell 7 with Pester 6): `tests/TestHelpers.ps1`
+stands in for the Windows-only commands the tests mock, so only two known tests fail there (see
+CLAUDE.md, Testing). The Windows CI run stays the verdict.
+
 ### One-time setup: local pre-commit drift check
 
 The repo tracks a pre-commit hook (`.githooks/pre-commit`) that runs the same `-Check`
