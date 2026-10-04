@@ -15,6 +15,15 @@ Describe 'Test-EffectiveNonInteractive (issue #214)' {
         Test-EffectiveNonInteractive -NonInteractive | Should -BeTrue
     }
 
+    It 'Returns $true for a run as SYSTEM, which is never a person at a console (review finding P3-23)' {
+        # [Environment]::UserInteractive and the stdin probe are not mockable, so the SYSTEM check
+        # is pinned by its seam being consulted, and answering for itself.
+        Mock Test-IsSystemAccount { $true }
+
+        Test-EffectiveNonInteractive | Should -BeTrue
+        Should -Invoke Test-IsSystemAccount -Times 1 -Exactly
+    }
+
     It 'Returns a boolean either way (auto-detection path)' {
         # The switchless result depends on the host environment ([Environment]::UserInteractive
         # and Console.IsInputRedirected are not mockable statics), so pin the contract: the

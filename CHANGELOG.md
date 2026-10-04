@@ -9,6 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Runs as SYSTEM are supported for the apps that install for the whole PC (review findings P2-24,
+  P3-23, P3-24). An RMM agent such as ManageEngine Endpoint Central runs scripts as SYSTEM, which
+  has no winget of its own (winget is a per-user packaged app that cannot be registered for
+  SYSTEM), so such a run registered, repaired and downloaded App Installer for minutes and then
+  stopped with exit code 2. `Invoke-WingetInstall` now reads once who it installs as
+  (`Get-InstallAccountContext`, built on `Test-IsSystemAccount`), and as SYSTEM:
+  `Test-AndInstallWinget` finds the `winget.exe` that App Installer installed for the PC
+  (`Get-AppxPackage -AllUsers`, status `Ok`, newest version as a version, the PC's architecture
+  first; the `WindowsApps` folder when that query fails or finds none) and checks that it starts,
+  trying the next one if not, and `Resolve-WingetExecutable` hands its full path to every winget
+  call; every step that sets winget up for one account is skipped (registering App Installer,
+  `Repair-WinGetPackageManager` and the `Microsoft.WinGet.Client` install, the aka.ms/getwinget
+  download, registering the winget source package); the run is always non-interactive
+  (`Test-EffectiveNonInteractive`); Windows Terminal's #271 console check does not apply, and
+  Terminal counts as installed when it is provisioned for every user (`msixName` in the catalog,
+  `Test-AppxPackageProvisionedForMachine`), where `winget list`, which sees no user's MSIX apps as
+  SYSTEM, made it fail on every run; and the messages no longer call SYSTEM a cross-user elevation
+  or advise signing in to Windows as `NT AUTHORITY\SYSTEM`. When no machine-wide `winget.exe`
+  starts, the run exits 2 and says why. `0xC0000135 STATUS_DLL_NOT_FOUND` now has a name in the
+  exit-code table, with a hint about the Visual C++ runtime for SYSTEM. Microsoft does not support
+  the winget command line as SYSTEM; moving SYSTEM runs to its `Microsoft.WinGet.Client` module is
+  a follow-up. Not yet checked on a real Windows PC as SYSTEM.
+
 - The E2E install also runs from Windows PowerShell 5.1, in a second job,
   `e2e-install-windows-powershell` (review finding P3-40). Every step there uses
   `shell: powershell`, and PowerShell 7 is removed first, so the first pass goes through the
@@ -55,6 +78,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Adopted **beads** (`bd`) as a dependency-graph task/memory layer beneath GitHub Issues for AI-driven work. `bd init` (embedded Dolt) scaffolds `.beads/` with the issue graph; a Dolt remote is wired to `origin` for cross-machine sync via `refs/dolt/data`; Claude Code hooks run `bd prime` on SessionStart/PreCompact; and an `AGENTS.md` is generated. The CLAUDE.md beads section is reconciled with the `git-policies` skill so durability/sync stay automatic while merges to `main` remain human-gated via PR ([#147](https://github.com/J-MaFf/winget-app-setup/issues/147), [#148](https://github.com/J-MaFf/winget-app-setup/pull/148)).
 
 ### Changed
+
+- A run as SYSTEM or under cross-user elevation no longer installs an app at winget's default
+  (per-user) scope (review finding P3-22). An app with no machine-scope installer used to be
+  retried at the default scope, which put it into SYSTEM's own profile or the elevating admin's
+  instead of the signed-in user's, and the check, run as that same account, reported it installed.
+  `Install-WingetPackage -MachineScopeOnly` now stops there, and the app is reported as `Deferred`:
+  a new summary row, a line saying who can install it, and no effect on the exit code (it counts
+  neither as installed nor as failed). Under cross-user elevation, Windows Terminal is decided from
+  whether it is provisioned for every user too, not from the admin's `winget list`. In a signed-in
+  user's own run the fallback stays, and a successful one now says the app was installed for that
+  account only.
 
 - The Windows Terminal step no longer configures the elevating admin account (review finding
   P3-21). Under cross-user elevation it wrote the admin's `settings.json` and

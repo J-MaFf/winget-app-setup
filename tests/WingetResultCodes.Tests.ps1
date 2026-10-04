@@ -23,6 +23,9 @@ Describe 'Get-WingetExitCodeInfo' {
         @{ Hex = '8A15002B'; Name = 'UPDATE_NOT_APPLICABLE'; Class = '' }
         @{ Hex = '80004004'; Name = 'E_ABORT'; Class = '' }
         @{ Hex = '80073D19'; Name = 'ERROR_DEPLOYMENT_BLOCKED_BY_USER_LOG_OFF'; Class = '' }
+        # winget.exe not starting at all, reported for winget run outside its package as SYSTEM
+        # (review finding P2-24).
+        @{ Hex = 'C0000135'; Name = 'STATUS_DLL_NOT_FOUND'; Class = '' }
     ) {
         $code = [Convert]::ToInt32($Hex, 16)
 

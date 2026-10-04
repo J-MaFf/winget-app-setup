@@ -214,7 +214,8 @@ function Get-InstallerExitCode {
     The FailureReason string from the shared install pipeline ('PreCheckTimeout',
     'PreCheckLaunchFailed', 'PreCheckFailed', 'InstallLaunchFailed', 'VerifyTimeout',
     'VerifyLaunchFailed', 'VerifyFailed', 'VerifyNotFound', 'CustomInstallFailed',
-    'WingetNotLaunchable'). Unknown or empty values fall back to a generic 'install failed'.
+    'WingetNotLaunchable', 'MachineCheckFailed'). Unknown or empty values fall back to a generic
+    'install failed'.
 .PARAMETER InstallResult
     The InstallResult hashtable from the shared install pipeline: Install-WingetPackage's
     ExitCode/Attempts/SessionErrorExhausted/MachineScopeFellBack shape, a custom installer's
@@ -263,6 +264,7 @@ function Format-InstallFailureReason {
         'VerifyNotFound' { 'package not found after install' }
         'CustomInstallFailed' { 'installer reported failure' }
         'WingetNotLaunchable' { 'not attempted: winget cannot be launched on this machine (see above)' }
+        'MachineCheckFailed' { 'could not check whether it is provisioned for every user on this PC (see the warning above)' }
         default { 'install failed' }
     }
     if ($null -ne $CheckExitCode -and @('PreCheckFailed', 'VerifyFailed') -contains $FailureReason) {
@@ -347,6 +349,9 @@ function Format-InstallFailureReason {
 .DESCRIPTION
     Review finding P3-16. An app counts as installed when `winget list` finds it, whatever winget's
     exit code was, and the success line used to drop that code. This prints, after it:
+      - '<app> has no machine-wide installer, so it was installed for this account only.' when the
+        install fell back to winget's default scope (MachineScopeFellBack; review finding P3-22:
+        that was shown only when the install failed);
       - '<app> needs a restart to finish installing (<why>).' when the result's RestartRequired is
         set (winget 0x8A150109 or 0x8A15010B, or winget's 'Restart your PC to finish installation.'
         warning; see Install-WingetPackage);
@@ -378,6 +383,10 @@ function Write-InstalledAppNote {
         $exitCode = [int]$InstallResult.ExitCode
     }
 
+    if ($InstallResult.MachineScopeFellBack) {
+        Write-Info ('{0} has no machine-wide installer, so it was installed for this account only.' -f $AppName)
+    }
+
     if ($InstallResult.RestartRequired) {
         $why = "winget printed 'Restart your PC to finish installation.'"
         if ($null -ne $exitCode -and $exitCode -ne 0) {
@@ -395,6 +404,52 @@ function Write-InstalledAppNote {
         Write-WarningMessage ('winget reported {0} for {1}, but it is installed{2}.' -f (Format-WingetExitCode -ExitCode $exitCode), $AppName, $logNote)
     }
     return $false
+}
+
+<#
+.SYNOPSIS
+    Explains, under the installation summary, why apps were deferred and who can install them.
+.DESCRIPTION
+    Review findings P3-22, P3-23. A run as SYSTEM or under cross-user elevation installs for the whole
+    PC only, so an app whose package has no machine-wide installer is not installed by it: it is
+    reported as Deferred, neither installed nor failed, and does not change the exit code. This
+    says so once, for all of them, with what to do: run the installer as the signed-in user, named
+    when it is known. No-op when nothing was deferred.
+.PARAMETER DeferredApps
+    The package ids of the deferred apps.
+.PARAMETER AccountContext
+    Get-InstallAccountContext's result for the run.
+#>
+function Write-DeferredAppsSummary {
+    param (
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [AllowEmptyCollection()]
+        [string[]]$DeferredApps,
+
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [object]$AccountContext
+    )
+
+    if (-not $DeferredApps -or $DeferredApps.Count -eq 0) {
+        return
+    }
+
+    $pronoun = 'them'
+    if ($DeferredApps.Count -eq 1) {
+        $pronoun = 'it'
+    }
+    $why = 'this run installs for the whole PC only'
+    $who = 'the signed-in user'
+    if ($AccountContext -and $AccountContext.IsSystem) {
+        $why = 'a run as SYSTEM installs for the whole PC only'
+    }
+    elseif ($AccountContext -and $AccountContext.IsCrossUserElevation) {
+        $why = "installing per-user here would install for '$($AccountContext.ProcessUser)' instead of '$($AccountContext.SessionUser)'"
+        $who = "'$($AccountContext.SessionUser)'"
+    }
+    Write-WarningMessage ('Deferred: {0} - no machine-wide installer, and {1}. Not installed and not counted as failed; run the installer as {2} to install {3}.' -f ($DeferredApps -join ', '), $why, $who, $pronoun)
 }
 
 <#

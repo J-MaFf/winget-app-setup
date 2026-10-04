@@ -91,20 +91,38 @@ function Get-Win32ErrorMessage {
 .SYNOPSIS
     Returns the winget executable to launch.
 .DESCRIPTION
-    The bare command name 'winget', which Invoke-ExternalProcess resolves on PATH to the per-user
-    app-execution alias. Every winget call goes through Invoke-WingetProcess, which calls this, so
-    it is the one place to change how winget is found (for example machine-wide for a SYSTEM run).
+    Every winget call goes through Invoke-WingetProcess, which calls this, so it is the one place
+    that decides how winget is found:
+      - Normally the bare command name 'winget', which Invoke-ExternalProcess resolves on PATH to
+        the account's app-execution alias.
+      - In a run as SYSTEM, the full path of the machine-wide winget.exe that
+        Test-MachineWingetAvailable found and checked at the start of the run
+        ($script:MachineWingetPath; review finding P2-24). SYSTEM has no alias: winget cannot be
+        registered for it. When that file is gone, because App Installer was updated during the
+        run and its old folder removed, the newest machine-wide winget.exe is looked up again.
 
     There used to be a -BypassAlias switch that launched winget.exe from the DesktopAppInstaller
     package folder under C:\Program Files\WindowsApps when the alias failed (issue #258). It never
-    recovered a launch in any E2E run: every direct launch failed with 'Access is denied', even
-    against a healthy registered package, so it only added retries and misleading 'next attempt
-    uses ...' lines (review finding P3-7). It was removed.
+    recovered a launch in any E2E run: every direct launch by an administrator account failed with
+    'Access is denied', even against a healthy registered package, so it only added retries and
+    misleading 'next attempt uses ...' lines (review finding P3-7). It was removed. SYSTEM, unlike
+    an administrator account, may start that winget.exe.
 .RETURNS
-    [string] 'winget'.
+    [string] 'winget', or a full path to winget.exe in a SYSTEM run.
 #>
 function Resolve-WingetExecutable {
-    return 'winget'
+    $machinePath = $script:MachineWingetPath
+    if ([string]::IsNullOrWhiteSpace($machinePath)) {
+        return 'winget'
+    }
+    if (-not (Test-Path -LiteralPath $machinePath -PathType Leaf)) {
+        $candidate = @(Get-MachineWingetCandidate) | Select-Object -First 1
+        if ($candidate) {
+            $script:MachineWingetPath = $candidate.Path
+            return $candidate.Path
+        }
+    }
+    return $machinePath
 }
 
 <#

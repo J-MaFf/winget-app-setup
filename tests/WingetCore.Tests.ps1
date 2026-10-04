@@ -132,6 +132,9 @@ Describe 'Test-AndInstallWinget' {
         # Mocked as a seam rather than mocking Get-AppxPackage/Add-AppxPackage directly, so an
         # accidental miss can never reach the real AppX deployment cmdlets.
         Mock Register-WingetAppInstallerForUser { $false }
+        # A signed-in account's run, not SYSTEM's, whatever account runs the suite (review finding
+        # P2-24: a SYSTEM run takes Test-MachineWingetAvailable instead of these rungs).
+        Mock Test-IsSystemAccount { $false }
         # Whether winget can be started (review finding P3-9: a real `winget --version`, not
         # Get-Command). Tests flip $script:wingetLaunchable from the rung that fixes winget.
         $script:wingetLaunchable = $false
@@ -345,6 +348,7 @@ Describe 'Test-AndInstallWinget with winget on PATH but unable to run (review fi
         Mock Get-Command { return $true } -ParameterFilter { $Name -eq 'Repair-WinGetPackageManager' }
         Mock Invoke-WingetProcess { New-TestProcessResult -ExitCode -1978335230 -Output @('No applicable app licenses found.') } -ParameterFilter { $ArgumentList[0] -eq '--version' }
         Mock Invoke-WingetPackageManagerRepair { @{ Available = $true; Succeeded = $false; DowngradeRejected = $false; MissingFrameworkDependency = $false; Message = 'Repair-WinGetPackageManager failed' } }
+        Mock Test-IsSystemAccount { $false }
     }
 
     It 'Does not report success after the repair attempts failed, and says that winget cannot run' {
@@ -382,6 +386,7 @@ Describe 'Test-AndInstallWinget with winget locked at the start of the run' {
         Mock Get-Command { return $true } -ParameterFilter { $Name -eq 'Repair-WinGetPackageManager' }
         Mock Invoke-WebRequest { throw 'Network error' }
         Mock Add-AppxPackage { }
+        Mock Test-IsSystemAccount { $false }
         $script:clock = 0
         Mock Start-Sleep { $script:clock += $Seconds }
     }
@@ -423,10 +428,132 @@ Describe 'Test-AndInstallWinget with winget locked at the start of the run' {
     }
 }
 
+# Review finding P2-24: as SYSTEM, every rung of the ladder above sets winget up for one account, which
+# SYSTEM cannot have. A run from an RMM agent used to register, repair and download App Installer for
+# minutes, then stop with exit code 2 on a PC whose users all had a working winget. A SYSTEM run now
+# finds and checks the machine-wide winget.exe instead (Test-MachineWingetAvailable, tested in
+# MachineContext.Tests.ps1).
+Describe 'Test-AndInstallWinget as SYSTEM (review finding P2-24)' {
+    BeforeEach {
+        Mock Write-Host { }
+        Mock Register-WingetAppInstallerForUser { throw 'must not register App Installer for SYSTEM' }
+        Mock Invoke-WingetPackageManagerRepair { throw 'must not repair winget for SYSTEM' }
+        Mock Repair-WinGetPackageManager { throw 'must not repair winget for SYSTEM' }
+        Mock Invoke-WebRequest { throw 'must not download App Installer for SYSTEM' }
+        Mock Add-AppxPackage { throw 'must not register a package for SYSTEM' }
+        Mock Test-WingetLaunchable { throw 'the per-account check must not run for SYSTEM' }
+        Mock Test-MachineWingetAvailable { $true }
+    }
+
+    It 'Checks the machine-wide winget.exe and runs none of the per-account rungs when <Case>' -ForEach @(
+        @{ Case = 'the run says it is SYSTEM'; Explicit = $true }
+        @{ Case = 'it finds that out itself'; Explicit = $false }
+    ) {
+        if ($Explicit) {
+            Mock Test-IsSystemAccount { throw 'the caller already said' }
+            $result = Test-AndInstallWinget -SystemContext
+        }
+        else {
+            Mock Test-IsSystemAccount { $true }
+            $result = Test-AndInstallWinget
+        }
+
+        $result | Should -Be $true
+        Should -Invoke Test-MachineWingetAvailable -Times 1 -Exactly
+        Should -Invoke Register-WingetAppInstallerForUser -Times 0 -Exactly
+        Should -Invoke Invoke-WingetPackageManagerRepair -Times 0 -Exactly
+        Should -Invoke Invoke-WebRequest -Times 0 -Exactly
+        Should -Invoke Add-AppxPackage -Times 0 -Exactly
+    }
+
+    It 'Returns false, so the run stops with exit code 2, when no machine-wide winget starts, still without any per-account rung' {
+        Mock Test-IsSystemAccount { $true }
+        Mock Test-MachineWingetAvailable { $false }
+
+        Test-AndInstallWinget | Should -Be $false
+
+        Should -Invoke Register-WingetAppInstallerForUser -Times 0 -Exactly
+        Should -Invoke Invoke-WingetPackageManagerRepair -Times 0 -Exactly
+        Should -Invoke Invoke-WebRequest -Times 0 -Exactly
+    }
+
+    It 'Passes a dry run on' {
+        Test-AndInstallWinget -SystemContext -WhatIf | Should -Be $true
+
+        Should -Invoke Test-MachineWingetAvailable -Times 1 -Exactly -ParameterFilter { $WhatIf }
+    }
+
+    It 'Takes the per-account ladder when the run says it is not SYSTEM' {
+        Mock Test-IsSystemAccount { $true }
+        Mock Test-WingetLaunchable { [pscustomobject]@{ Launchable = $true; Version = 'v1.12.350'; Reason = $null; Attempts = 1 } }
+
+        Test-AndInstallWinget -SystemContext:$false | Should -Be $true
+
+        Should -Invoke Test-MachineWingetAvailable -Times 0 -Exactly
+    }
+}
+
+# Review finding P2-24: Add-AppxPackage registers the source package for one account, which SYSTEM
+# cannot have, and the advice to run it as the local user does not apply to SYSTEM either.
+Describe 'Test-WingetSources as SYSTEM (review finding P2-24)' {
+    BeforeEach {
+        Mock Write-Host { }
+        Mock Write-Success { }
+        Mock Write-WarningMessage { }
+        $script:errorMessages = @()
+        Mock Write-ErrorMessage { $script:errorMessages += $Message }
+        $script:infoMessages = @()
+        Mock Write-Info { $script:infoMessages += $Message }
+        Mock Add-AppxPackage { throw 'must not register the source package for SYSTEM' }
+        Mock Invoke-WingetProcess { throw "unexpected winget call: $($ArgumentList -join ' ')" }
+        Mock Invoke-WingetProcess { New-TestProcessResult -ExitCode 0 } -ParameterFilter { $ArgumentList[0] -eq 'source' -and $ArgumentList[1] -eq 'reset' }
+        $script:healthChecks = 0
+        $script:healthyAfterReset = $true
+        Mock Test-WingetSourceHealth {
+            $script:healthChecks++
+            if ($script:healthChecks -gt 1 -and $script:healthyAfterReset) {
+                return @{ Listed = $true; Functional = $true; Healthy = $true }
+            }
+            @{ Listed = $true; Functional = $false; Healthy = $false }
+        }
+    }
+
+    It 'Resets the source and checks it again, without registering the source package' {
+        Mock Test-IsSystemAccount { $true }
+
+        Test-WingetSources | Should -Be $true
+
+        Should -Invoke Invoke-WingetProcess -Times 1 -Exactly -ParameterFilter { $ArgumentList[0] -eq 'source' -and $ArgumentList[1] -eq 'reset' }
+        Should -Invoke Test-WingetSourceHealth -Times 2 -Exactly
+        Should -Invoke Add-AppxPackage -Times 0 -Exactly
+    }
+
+    It 'Gives advice that works for SYSTEM when the source is still broken after the reset' {
+        $script:healthyAfterReset = $false
+
+        Test-WingetSources -SystemContext | Should -Be $false
+
+        $text = $script:errorMessages -join "`n"
+        $text | Should -Match 'still not accessible after winget source reset'
+        $text | Should -Not -Match 'Run as local user|Add-AppxPackage'
+        Should -Invoke Add-AppxPackage -Times 0 -Exactly
+    }
+
+    It 'Leaves the source package out of the repair a dry run describes' {
+        Test-WingetSources -SystemContext -WhatIf | Should -Be $false
+
+        ($script:infoMessages -join "`n") | Should -Match '\[DRY-RUN\].*winget source reset --force.*does not apply to SYSTEM'
+        ($script:infoMessages -join "`n") | Should -Not -Match 'source\.msix'
+        Should -Invoke Invoke-WingetProcess -Times 0 -Exactly
+    }
+}
+
 Describe 'Test-WingetSources' {
     BeforeAll {
         Mock Write-Host { }
         Mock Write-Warning { }
+        # A signed-in account's run (the SYSTEM form is tested below).
+        Mock Test-IsSystemAccount { $false }
         # Every winget call goes through Invoke-WingetProcess (review findings P2-5, P2-6); the
         # tests below script winget itself, with Mock winget.
         Mock Invoke-WingetProcess { Invoke-TestWingetMock -ArgumentList $ArgumentList }
@@ -891,6 +1018,31 @@ Describe 'Install-WingetPackage (0x80073d19 session-error backoff)' {
         $result.MachineScopeFellBack | Should -Be $true
         Should -Invoke Invoke-WingetProcess -Times 2 -Exactly
         Should -Invoke Start-Sleep -Times 0 -Exactly
+    }
+
+    It 'Never falls back to the default (per-user) scope with -MachineScopeOnly, and says why it stopped (review finding P3-22)' {
+        $script:exitCodeQueue = @(-1978335216, 0)
+
+        $result = Install-WingetPackage -PackageId 'Microsoft.WindowsTerminal' -MaxAttempts 3 -InitialDelaySeconds 1 -MachineScopeOnly
+
+        # One install, at machine scope; none at winget's default scope, which as SYSTEM or under
+        # cross-user elevation installs for the wrong account.
+        Should -Invoke Invoke-WingetProcess -Times 1 -Exactly
+        Should -Invoke Invoke-WingetProcess -Times 0 -Exactly -ParameterFilter { $ArgumentList -notcontains '--scope' }
+        $result.NoMachineScopeInstaller | Should -Be $true
+        $result.MachineScopeFellBack | Should -Be $false
+        $result.ExitCode | Should -Be -1978335216
+        Should -Invoke Start-Sleep -Times 0 -Exactly
+    }
+
+    It 'Installs at machine scope as usual with -MachineScopeOnly when the package has a machine-scope installer' {
+        $script:exitCodeQueue = @(0)
+
+        $result = Install-WingetPackage -PackageId '7zip.7zip' -MaxAttempts 3 -InitialDelaySeconds 1 -MachineScopeOnly
+
+        $result.ExitCode | Should -Be 0
+        $result.NoMachineScopeInstaller | Should -Be $false
+        Should -Invoke Invoke-WingetProcess -Times 1 -Exactly -ParameterFilter { ($ArgumentList -contains '--scope') -and ($ArgumentList -contains 'machine') }
     }
 
     It 'Still retries the session error with backoff after a scope fallback' {
@@ -1547,6 +1699,7 @@ Describe 'Initialize-WingetSourcesForUser (cross-user bootstrap, issue #159)' {
         Mock Repair-WinGetPackageManager { }
         Mock Get-ProcessUserName { 'CONTOSO\admin-jmaffiola' }
         Mock Get-InteractiveSessionUserName { 'CONTOSO\admin-jmaffiola' }
+        Mock Test-IsSystemAccount { $false }
         # Repair-WinGetPackageManager resolves as available unless a test overrides this.
         Mock Get-Command { [pscustomobject]@{ Name = 'Repair-WinGetPackageManager' } } -ParameterFilter { $Name -eq 'Repair-WinGetPackageManager' }
         # Default: nothing staged to register for this account, so the ladder's first rung
@@ -1675,6 +1828,42 @@ Describe 'Initialize-WingetSourcesForUser (cross-user bootstrap, issue #159)' {
 
         Should -Invoke Write-WarningMessage -Times 0 -ParameterFilter { $Message -match 'Cross-user elevation detected' }
     }
+
+    # Review findings P2-24, P3-23: a SYSTEM run with someone signed in compared like an admin
+    # elevating on their PC, so it said 'Cross-user elevation detected', ran the per-account rungs
+    # and advised signing in to Windows as NT AUTHORITY\SYSTEM.
+    It 'As SYSTEM with a user signed in, updates the source with no cross-user banner, per-account rung or advice to sign in as SYSTEM' {
+        Mock Test-IsSystemAccount { $true }
+        Mock Get-ProcessUserName { 'NT AUTHORITY\SYSTEM' }
+        Mock Get-InteractiveSessionUserName { 'CONTOSO\jdoe' }
+        Mock Invoke-WingetSourceProbe { @{ Succeeded = $false; ExitCode = -2147009255; TimedOut = $false } }
+
+        $result = Initialize-WingetSourcesForUser
+
+        $result | Should -Be $false
+        Should -Invoke Invoke-WingetSourceProbe -Times 1 -Exactly
+        Should -Invoke Register-WingetAppInstallerForUser -Times 0 -Exactly
+        Should -Invoke Repair-WinGetPackageManager -Times 0 -Exactly
+        Should -Invoke Write-WarningMessage -Times 0 -Exactly -ParameterFilter { $Message -match 'Cross-user elevation|log on to Windows|NT AUTHORITY' }
+        Should -Invoke Write-WarningMessage -Times 1 -Exactly -ParameterFilter { $Message -match 'could not be updated for SYSTEM \(exit code 0x80073D19 ERROR_DEPLOYMENT_BLOCKED_BY_USER_LOG_OFF\)' }
+    }
+
+    It 'As SYSTEM, returns true when the source update works' {
+        Mock Invoke-WingetSourceProbe { @{ Succeeded = $true; ExitCode = 0; TimedOut = $false } }
+
+        Initialize-WingetSourcesForUser -AccountContext (New-TestAccountContext -System -SessionUser 'CONTOSO\jdoe') | Should -Be $true
+
+        Should -Invoke Register-WingetAppInstallerForUser -Times 0 -Exactly
+    }
+
+    It 'Uses the account context the run passes instead of reading it again' {
+        Mock Get-InstallAccountContext { throw 'the run already decided' }
+        Mock Invoke-WingetSourceProbe { @{ Succeeded = $true; ExitCode = 0; TimedOut = $false } }
+
+        Initialize-WingetSourcesForUser -AccountContext (New-TestAccountContext -CrossUser -ProcessUser 'CONTOSO\admin-tech' -SessionUser 'CONTOSO\jdoe') | Should -Be $true
+
+        Should -Invoke Write-WarningMessage -Times 1 -Exactly -ParameterFilter { $Message -eq "Cross-user elevation detected: running as 'CONTOSO\admin-tech' while 'CONTOSO\jdoe' owns the interactive session." }
+    }
 }
 
 Describe 'Install-PowerShellLatest (always-latest strategy, issue #166)' {
@@ -1780,6 +1969,31 @@ Describe 'Install-PowerShellLatest (always-latest strategy, issue #166)' {
 
         # Not given: Install-WingetPackage decides itself (Test-EffectiveNonInteractive).
         Should -Invoke Install-WingetPackage -Times 2 -Exactly -ParameterFilter { -not $PesterBoundParameters.ContainsKey('Silent') }
+    }
+
+    It 'never installs at winget''s default scope with -MachineScopeOnly, and reports a package with no machine-scope installer without checking it (review finding P3-22)' {
+        Mock Install-WingetPackage { @{ ExitCode = -1978335216; NoMachineScopeInstaller = [bool]$MachineScopeOnly } }
+        Mock Get-WindowsBuildNumber { 26100 }
+        Mock Test-WingetPackageInstalled { throw 'nothing was installed, so nothing to check' }
+        Mock Install-MsixProvisionedPackage { throw 'DISM provisioning should not run on 24H2+' }
+
+        $result = Install-PowerShellLatest -MachineScopeOnly
+
+        Should -Invoke Install-WingetPackage -Times 2 -Exactly
+        Should -Invoke Install-WingetPackage -Times 2 -Exactly -ParameterFilter { $MachineScopeOnly }
+        $result.Method | Should -Be 'msix-native'
+        $result.Installed | Should -Be $false
+        $result.NoMachineScopeInstaller | Should -Be $true
+        Should -Invoke Test-WingetPackageInstalled -Times 0 -Exactly
+    }
+
+    It 'leaves -MachineScopeOnly off both installs when it is not given' {
+        Mock Install-WingetPackage { @{ ExitCode = 0 } }
+        Mock Test-WingetPackageInstalled { @{ Installed = $true; TimedOut = $false; ExitCode = 0 } }
+
+        [void](Install-PowerShellLatest)
+
+        Should -Invoke Install-WingetPackage -Times 0 -Exactly -ParameterFilter { $MachineScopeOnly }
     }
 
     It 'shares the run''s wait budget for another installation between its MSI and MSIX attempts (review finding P2-15)' {

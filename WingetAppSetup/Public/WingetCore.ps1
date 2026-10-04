@@ -90,10 +90,17 @@ function Test-AndInstallWingetModule {
     no rung makes it start. A failure that can clear on its own (a locked winget.exe, a timeout, a
     non-zero exit) is checked for up to 75 seconds before the first rung, so an App Installer
     update in progress is not repaired underneath.
+
+    As SYSTEM none of the rungs can help, because all three set winget up for one account and SYSTEM
+    cannot have one (review finding P2-24). Test-MachineWingetAvailable runs instead: it finds the
+    winget.exe that App Installer installed for the machine and checks that it starts.
 .PARAMETER WhatIf
     Dry run: only checks whether winget can be started (a read-only `winget --version`) and, when
     it cannot, prints the bootstrap ladder a real run would work through. No rung runs (P2-16: the
     dry run used to register or repair App Installer, or download and install it).
+.PARAMETER SystemContext
+    The run is SYSTEM. Invoke-WingetInstall passes what Get-InstallAccountContext found; when not
+    given, Test-IsSystemAccount decides.
 .RETURNS
     [bool] True if winget can be started, at once or after a bootstrap rung, otherwise False.
     Under -WhatIf, True only when winget can already be started.
@@ -101,8 +108,19 @@ function Test-AndInstallWingetModule {
 function Test-AndInstallWinget {
     param (
         [Parameter(Mandatory = $false)]
-        [switch]$WhatIf
+        [switch]$WhatIf,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$SystemContext
     )
+
+    $isSystem = [bool]$SystemContext
+    if (-not $PSBoundParameters.ContainsKey('SystemContext')) {
+        $isSystem = [bool](Test-IsSystemAccount)
+    }
+    if ($isSystem) {
+        return (Test-MachineWingetAvailable -WhatIf:$WhatIf)
+    }
 
     # Before the first rung: up to six checks 15 seconds apart when the failure can clear on its
     # own (winget.exe locked by an antivirus scan or by an App Installer update in progress, issues
@@ -186,10 +204,17 @@ function Test-AndInstallWinget {
     account), the function attempts to re-register it using Add-AppxPackage from the
     Microsoft CDN. After repair, it retries the source check once. If still failing, a
     clear error message with manual remediation guidance is displayed.
+
+    As SYSTEM the source package is not re-registered (review finding P2-24): Add-AppxPackage
+    registers it for one account, which SYSTEM cannot have, so only the reset and the re-check run,
+    and the advice to run Add-AppxPackage as the local user is left out.
 .PARAMETER WhatIf
     Dry run: runs only the health probe and, when the source is unhealthy, prints the repair a real
     run would make. Nothing is reset or registered (P2-16: the dry run used to run
     `winget source reset --force`, which also removes any source added beyond the defaults).
+.PARAMETER SystemContext
+    The run is SYSTEM. Invoke-WingetInstall passes what Get-InstallAccountContext found; when not
+    given, Test-IsSystemAccount decides.
 .RETURNS
     [bool] True if winget sources are accessible (or successfully repaired), otherwise False.
     Under -WhatIf, True only when the source is already healthy.
@@ -197,8 +222,16 @@ function Test-AndInstallWinget {
 function Test-WingetSources {
     param (
         [Parameter(Mandatory = $false)]
-        [switch]$WhatIf
+        [switch]$WhatIf,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$SystemContext
     )
+
+    $isSystem = [bool]$SystemContext
+    if (-not $PSBoundParameters.ContainsKey('SystemContext')) {
+        $isSystem = [bool](Test-IsSystemAccount)
+    }
 
     Write-Info 'Checking winget sources...'
 
@@ -213,7 +246,12 @@ function Test-WingetSources {
 
     $sourceProblem = if (-not $health.Listed) { 'Winget source "winget" appears to be missing.' } else { 'Winget source data is corrupted.' }
     if ($WhatIf) {
-        Write-Info "[DRY-RUN] $sourceProblem A real run would repair it: winget source reset --force (which also removes any source added beyond the defaults), then re-register the source package from https://cdn.winget.microsoft.com/cache/source.msix."
+        if ($isSystem) {
+            Write-Info "[DRY-RUN] $sourceProblem A real run would repair it: winget source reset --force (which also removes any source added beyond the defaults), then check the source again. (Re-registering the source package is a per-account step that does not apply to SYSTEM.)"
+        }
+        else {
+            Write-Info "[DRY-RUN] $sourceProblem A real run would repair it: winget source reset --force (which also removes any source added beyond the defaults), then re-register the source package from https://cdn.winget.microsoft.com/cache/source.msix."
+        }
         return $false
     }
 
@@ -236,6 +274,18 @@ function Test-WingetSources {
     }
     else {
         Write-Info 'Source reset completed.'
+    }
+
+    if ($isSystem) {
+        # Add-AppxPackage registers the source package for one account, and SYSTEM cannot have
+        # one (review finding P2-24), so the reset is the whole repair: check the source again.
+        $health = Test-WingetSourceHealth -Quiet
+        if ($health.Healthy) {
+            Write-Success 'Winget sources are now accessible and functional.'
+            return $true
+        }
+        Write-ErrorMessage 'Winget sources are still not accessible after winget source reset. Check that this PC can reach https://cdn.winget.microsoft.com, then re-run the installer.'
+        return $false
     }
 
     try {
@@ -292,8 +342,16 @@ function Test-WingetSources {
          It can also fail with a 0x80073CF3 missing-framework-dependency rejection (issue #279,
          seen on GitHub-hosted E2E runners) when the machine/image lacks a framework App Installer
          depends on; that case is diagnosed the same way and is equally not retryable.
+
+    As SYSTEM only the probe runs (review findings P2-24, P3-23). Both rungs set winget up for one
+    account, which SYSTEM cannot have, and a SYSTEM run with someone signed in is not a cross-user
+    elevation: it used to be reported as one, with advice to sign in to Windows as
+    NT AUTHORITY\SYSTEM.
 .PARAMETER WhatIf
     When specified, only reports intended actions without executing.
+.PARAMETER AccountContext
+    Get-InstallAccountContext's result, which Invoke-WingetInstall passes so the run decides who it
+    installs as once. When not given, Get-InstallAccountContext is called here.
 .RETURNS
     [bool] True when sources are initialized and agreements accepted for the current account,
     otherwise False.
@@ -301,11 +359,24 @@ function Test-WingetSources {
 function Initialize-WingetSourcesForUser {
     param (
         [Parameter(Mandatory = $false)]
-        [switch]$WhatIf
+        [switch]$WhatIf,
+
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [object]$AccountContext
     )
 
+    if ($null -eq $AccountContext) {
+        $AccountContext = Get-InstallAccountContext
+    }
+
     if ($WhatIf) {
-        Write-Info '[DRY-RUN] Would initialize winget sources and agreements for the current account'
+        if ($AccountContext.IsSystem) {
+            Write-Info '[DRY-RUN] Would update the winget source for SYSTEM'
+        }
+        else {
+            Write-Info '[DRY-RUN] Would initialize winget sources and agreements for the current account'
+        }
         return $true
     }
 
@@ -314,9 +385,27 @@ function Initialize-WingetSourcesForUser {
     # 0x8A150046 (APPINSTALLER_CLI_ERROR_SOURCE_AGREEMENTS_NOT_ACCEPTED) as a signed Int32.
     $agreementsNotAcceptedExitCode = -1978335162
 
-    $processUser = Get-ProcessUserName
-    $sessionUser = Get-InteractiveSessionUserName
-    $isCrossUserElevation = ($processUser -and $sessionUser -and ($processUser -ne $sessionUser))
+    if ($AccountContext.IsSystem) {
+        Write-Info 'Updating the winget source for SYSTEM (this may take a moment)...'
+        $probe = Invoke-WingetSourceProbe
+        if ($probe.Succeeded) {
+            Write-Success 'The winget source is up to date for SYSTEM.'
+            return $true
+        }
+        $probeDetail = ''
+        if ($probe.TimedOut) {
+            $probeDetail = ' (it did not finish in time)'
+        }
+        elseif ($null -ne $probe.ExitCode) {
+            $probeDetail = ' (exit code {0})' -f (Format-WingetExitCode -ExitCode $probe.ExitCode)
+        }
+        Write-WarningMessage "The winget source could not be updated for SYSTEM$probeDetail. The steps that set winget up for a signed-in account (registering App Installer, Repair-WinGetPackageManager) do not apply to SYSTEM and were skipped; the source check that follows repairs the source if it can."
+        return $false
+    }
+
+    $processUser = $AccountContext.ProcessUser
+    $sessionUser = $AccountContext.SessionUser
+    $isCrossUserElevation = [bool]$AccountContext.IsCrossUserElevation
     if ($isCrossUserElevation) {
         Write-WarningMessage "Cross-user elevation detected: running as '$processUser' while '$sessionUser' owns the interactive session."
         Write-WarningMessage "Winget sources and agreements are per-user; initializing them for '$processUser'."
@@ -458,7 +547,8 @@ function Initialize-WingetSourcesForUser {
     installers (e.g. Microsoft.PowerShell) resolve at user scope to the MSIX — whose per-user AppX
     deployment is exactly what 0x80073D19 blocks under cross-user elevation. When a package has no
     machine-scope installer (e.g. the MSIX-only Microsoft.WindowsTerminal), winget returns
-    0x8A150010 (NO_APPLICABLE_INSTALLER) and the install is retried once at winget's default scope.
+    0x8A150010 (NO_APPLICABLE_INSTALLER) and the install is retried once at winget's default scope,
+    unless -MachineScopeOnly says the run must not install for one account (review finding P3-22).
 .PARAMETER PackageId
     The winget package id to install (e.g. 'Microsoft.PowerShell').
 .PARAMETER InstallerType
@@ -487,17 +577,25 @@ function Initialize-WingetSourcesForUser {
     Default 600 (10 minutes). 0: no wait, so 0x8A150102 is final at once.
 .PARAMETER InUseRetryDelaySeconds
     Seconds to wait before the one retry after an in-use result. Default 60.
+.PARAMETER MachineScopeOnly
+    Never fall back to winget's default scope (review finding P3-22). Invoke-WingetInstall passes it
+    for a run as SYSTEM or under cross-user elevation, where the default scope installs into the
+    wrong profile: SYSTEM's own, or the elevating admin's instead of the signed-in user's, and the
+    verification, run as that same account, then reported it installed. A package with no
+    machine-scope installer then ends at once with NoMachineScopeInstaller, and the caller defers
+    it to a run as the signed-in user.
 .RETURNS
-    [hashtable] @{ ExitCode = <int|$null>; Attempts = <int>; SessionErrorExhausted = <bool>; MachineScopeFellBack = <bool>; LaunchErrorExhausted = <bool>; LaunchAttempts = <int>; LaunchError = <string|$null>; TimedOut = <bool>; TimeoutSeconds = <int>; InstallerLogPath = <string|$null>; InstallInProgressWaitedSeconds = <int>; RestartRequired = <bool> }
+    [hashtable] @{ ExitCode = <int|$null>; Attempts = <int>; SessionErrorExhausted = <bool>; MachineScopeFellBack = <bool>; NoMachineScopeInstaller = <bool>; LaunchErrorExhausted = <bool>; LaunchAttempts = <int>; LaunchError = <string|$null>; TimedOut = <bool>; TimeoutSeconds = <int>; InstallerLogPath = <string|$null>; InstallInProgressWaitedSeconds = <int>; RestartRequired = <bool> }
     SessionErrorExhausted is True only when every attempt failed with the session error.
     InstallInProgressWaitedSeconds is how long this call waited for another installation to finish.
     RestartRequired is True when the last attempt's result says a restart finishes the installation
     (see the description); the caller decides from `winget list` whether the package installed.
     MachineScopeFellBack is True when the package had no machine-scope installer and the install
-    was retried at winget's default scope. Attempts counts install attempts at the finally
-    selected scope, the retries after another installation in progress or an in-use result
-    included; the one-time scope fallback does not consume a session-error attempt, and neither
-    does a failed launch (no process ran). LaunchAttempts counts failed winget launches.
+    was retried at winget's default scope. NoMachineScopeInstaller is True when it had none and
+    -MachineScopeOnly kept it from being installed at all (ExitCode is then 0x8A150010). Attempts
+    counts install attempts at the finally selected scope, the retries after another installation
+    in progress or an in-use result included; the one-time scope fallback does not consume a
+    session-error attempt, and neither does a failed launch (no process ran). LaunchAttempts counts failed winget launches.
     LaunchErrorExhausted is True when winget.exe could not be launched: a transient launch failure
     through every launch attempt (issues #253/#258), or any other launch failure at once; ExitCode
     is $null in that case, since no process ran to report an exit code, and LaunchError is the last
@@ -532,7 +630,10 @@ function Install-WingetPackage {
         [int]$InstallInProgressWaitSeconds = 600,
 
         [Parameter(Mandatory = $false)]
-        [int]$InUseRetryDelaySeconds = 60
+        [int]$InUseRetryDelaySeconds = 60,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$MachineScopeOnly
     )
 
     # 0x80073D19 (ERROR_DEPLOYMENT_BLOCKED_BY_USER_LOG_OFF) as a signed Int32, which is how winget
@@ -558,6 +659,7 @@ function Install-WingetPackage {
     $restartRequired = $false
     $useMachineScope = $true
     $machineScopeFellBack = $false
+    $noMachineScopeInstaller = $false
     $launchErrorExhausted = $false
     $launchAttempt = 0
     $launchDelay = $InitialDelaySeconds
@@ -647,6 +749,13 @@ function Install-WingetPackage {
         # scope once; this is a manifest property, not a transient error, so it does not consume
         # one of the session-error attempts.
         if ($useMachineScope -and $exitCode -eq $noApplicableInstallerExitCode) {
+            if ($MachineScopeOnly) {
+                # A run as SYSTEM or under cross-user elevation (review finding P3-22): the default
+                # scope would install the app for the account running this, not for the user.
+                Write-Info "$PackageId has no machine-scope installer, and this run installs for the whole PC only, so it is not installed at winget's default (per-user) scope."
+                $noMachineScopeInstaller = $true
+                break
+            }
             Write-Info "$PackageId has no machine-scope installer. Retrying with winget's default scope..."
             $useMachineScope = $false
             $machineScopeFellBack = $true
@@ -708,6 +817,7 @@ function Install-WingetPackage {
         Attempts                       = $attempt
         SessionErrorExhausted          = ($exitCode -eq $sessionLogoffExitCode)
         MachineScopeFellBack           = $machineScopeFellBack
+        NoMachineScopeInstaller        = $noMachineScopeInstaller
         LaunchErrorExhausted           = $launchErrorExhausted
         LaunchAttempts                 = $launchAttempt
         LaunchError                    = $(if ($launchErrorExhausted) { $launchError } else { $null })
@@ -1012,6 +1122,11 @@ function Install-MsixProvisionedPackage {
     The most to wait, in all, for another installation to finish (Install-WingetPackage's parameter
     of the same name), shared by the MSI and MSIX attempts. Install-AppWithVerification passes what
     is left of the run's budget. Not given: Install-WingetPackage's default.
+.PARAMETER MachineScopeOnly
+    Forwarded to Install-WingetPackage (review finding P3-22): a run as SYSTEM or under cross-user
+    elevation never installs PowerShell at winget's default (per-user) scope. When the MSIX has no
+    machine-scope installer either, the result says NoMachineScopeInstaller, with no `winget list`
+    check, and Install-AppWithVerification defers PowerShell.
 .RETURNS
     [hashtable] @{ ExitCode = <int>; Installed = <bool>; Method = 'msi' | 'msix-native' | 'msix-provisioned' }
     The winget paths (msi, msix-native) return Install-WingetPackage's whole result with Installed
@@ -1031,7 +1146,10 @@ function Install-PowerShellLatest {
         [switch]$Silent,
 
         [Parameter(Mandatory = $false)]
-        [int]$InstallInProgressWaitSeconds
+        [int]$InstallInProgressWaitSeconds,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$MachineScopeOnly
     )
 
     # 0x8A150010 (APPINSTALLER_CLI_ERROR_NO_APPLICABLE_INSTALLER) as a signed Int32 — what winget
@@ -1046,6 +1164,9 @@ function Install-PowerShellLatest {
     $installParameters = @{ PackageId = $PackageId }
     if ($PSBoundParameters.ContainsKey('Silent')) {
         $installParameters['Silent'] = $Silent
+    }
+    if ($MachineScopeOnly) {
+        $installParameters['MachineScopeOnly'] = $true
     }
 
     # The wait for another installation to finish (review finding P2-15) is one budget for both
@@ -1093,9 +1214,9 @@ function Install-PowerShellLatest {
     $outcome['VerifyCheckFailed'] = $false
     $outcome['VerifyExitCode'] = $null
 
-    if ($outcome['LaunchErrorExhausted']) {
-        # winget never started, so nothing was installed, and the check would only fail to launch
-        # again.
+    if ($outcome['LaunchErrorExhausted'] -or $outcome['NoMachineScopeInstaller']) {
+        # winget never started, or found no installer this run may use, so nothing was installed,
+        # and the check would only fail to launch again or say so.
         $outcome['Installed'] = $false
         return $outcome
     }

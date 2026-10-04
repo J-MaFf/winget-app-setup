@@ -31,6 +31,15 @@
     The three launch-failure reasons are what Invoke-WingetInstall's circuit breaker
     (Invoke-WingetLaunchCircuitBreaker) watches for.
 
+    With -MachineWide (a run as SYSTEM or under cross-user elevation; review findings P3-22, P3-24)
+    the app is installed for the whole PC or not at all: a package with no machine-scope installer
+    comes back Deferred, for a run as the signed-in user to install, instead of being installed at
+    winget's default scope for the account running this. An app that names its MSIX package
+    (msixName, e.g. Windows Terminal) is also checked, before and after the install, by whether that
+    package is provisioned for every user on this PC (Test-AppxPackageProvisionedForMachine) instead
+    of with `winget list`, which only sees what is registered for the account running it: as SYSTEM,
+    nothing, so Windows Terminal, built into Windows 11, failed on every run.
+
     The helper contains no prompts, no Exit, and no ReadKey — user-facing messages, summary
     bucketing, and exit-code policy stay in Invoke-WingetInstall — which is what makes the install
     pipeline unit-testable (issue #188).
@@ -55,6 +64,10 @@
     Invoke-WingetInstall's circuit breaker found that winget cannot be started on this machine.
     The applicability condition still runs, so a not-applicable app is still Skipped; an
     applicable app is Failed ('WingetNotLaunchable') without running winget at all.
+.PARAMETER MachineWide
+    The run installs for the whole PC only (see the description). Invoke-WingetInstall passes it for
+    a run as SYSTEM or under cross-user elevation. Forwarded to Install-WingetPackage, and to a
+    package-specific installer that has it, as -MachineScopeOnly.
 .PARAMETER InstallInProgressWaitSeconds
     The most the install may wait for another installation to finish (review finding P2-15):
     Invoke-WingetInstall passes what is left of the run's budget. Forwarded to Install-WingetPackage,
@@ -63,7 +76,7 @@
     InstallResult's InstallInProgressWaitedSeconds.
 .RETURNS
     [hashtable] @{
-        Status        = 'Installed' | 'Failed' | 'Skipped'
+        Status        = 'Installed' | 'Failed' | 'Skipped' | 'Deferred'
         InstallResult = the Install-WingetPackage result hashtable — or the $App.install command's
                         result — returned intact so exit codes can be surfaced without
                         restructuring (issue #189); $null when no installer ran (skip, dry run,
@@ -71,15 +84,19 @@
         FailureReason = $null when Status is not 'Failed'; otherwise 'PreCheckTimeout',
                         'PreCheckLaunchFailed', 'PreCheckFailed', 'InstallLaunchFailed',
                         'CustomInstallFailed', 'VerifyTimeout', 'VerifyLaunchFailed',
-                        'VerifyFailed', 'VerifyNotFound' or 'WingetNotLaunchable', so the caller
-                        can keep its per-situation message texts
+                        'VerifyFailed', 'VerifyNotFound', 'WingetNotLaunchable' or
+                        'MachineCheckFailed' (with -MachineWide, the provisioned packages could not
+                        be read), so the caller can keep its per-situation message texts
         LaunchError   = for the three *LaunchFailed reasons, why winget could not be started;
                         otherwise $null
         CheckExitCode = for PreCheckFailed and VerifyFailed, the exit code of the `winget list`
                         that failed; otherwise $null
         SkipReason    = 'NotApplicable' when Status is 'Skipped' because the app's condition
-                        evaluated falsy (issue #217); absent/$null for an already-installed skip,
-                        so the caller can distinguish the two skip messages
+                        evaluated falsy (issue #217); 'Provisioned' when, with -MachineWide, its
+                        MSIX package is already provisioned for every user; absent/$null for an
+                        already-installed skip, so the caller can tell the skip messages apart
+        DeferReason   = 'NoMachineScopeInstaller' when Status is 'Deferred': with -MachineWide,
+                        the package has no installer for the whole PC (review finding P3-22)
     }
 #>
 function Install-AppWithVerification {
@@ -95,6 +112,9 @@ function Install-AppWithVerification {
 
         [Parameter(Mandatory = $false)]
         [switch]$WingetNotLaunchable,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$MachineWide,
 
         [Parameter(Mandatory = $false)]
         [int]$InstallInProgressWaitSeconds
@@ -120,6 +140,21 @@ function Install-AppWithVerification {
         }
     }
 
+    # An MSIX app in a run for the whole PC (review finding P3-24): whether its package is
+    # provisioned for every user answers "is it installed", where `winget list` would only see the
+    # account running this. Read without winget, so it is answered even when winget cannot start.
+    $checkProvisioning = $MachineWide -and -not [string]::IsNullOrWhiteSpace([string]$App.msixName)
+    if ($checkProvisioning) {
+        $provisioned = Test-AppxPackageProvisionedForMachine -Name $App.msixName
+        if ($provisioned -eq $true) {
+            return @{ Status = 'Skipped'; InstallResult = $null; FailureReason = $null; SkipReason = 'Provisioned' }
+        }
+        if ($null -eq $provisioned -and -not $WhatIf) {
+            # No answer is not "not installed" (as for `winget list`, P2-9): fail into the retry pass.
+            return @{ Status = 'Failed'; InstallResult = $null; FailureReason = 'MachineCheckFailed' }
+        }
+    }
+
     if ($WingetNotLaunchable) {
         # The run already found that winget cannot be started (Invoke-WingetInstall's circuit
         # breaker): another launch attempt per app is what made a wedged winget cost 24 minutes.
@@ -130,7 +165,10 @@ function Install-AppWithVerification {
     # sources or first-use prompts, and a hung check must not stall the whole install loop.
     $checkTimeoutSeconds = Get-ProcessTimeoutSeconds -Operation WingetListCheck
 
-    $preCheck = Test-WingetPackageInstalled -PackageId $App.name -TimeoutSeconds $checkTimeoutSeconds
+    $preCheck = @{ Installed = $false; TimedOut = $false; LaunchFailed = $false; LaunchError = $null; CheckFailed = $false; ExitCode = $null }
+    if (-not $checkProvisioning) {
+        $preCheck = Test-WingetPackageInstalled -PackageId $App.name -TimeoutSeconds $checkTimeoutSeconds
+    }
     if ($preCheck.TimedOut) {
         # Failed, not skipped: the app then flows through the retry pass, appears in the summary,
         # and drives the non-zero exit code (issue #176).
@@ -172,24 +210,31 @@ function Install-AppWithVerification {
         # -Silent goes to the custom installer when it takes one (Install-PowerShellLatest does), so
         # an explicit -NonInteractive installs PowerShell's MSI with /quiet like every other app. So
         # does the run's remaining wait budget for another installation (review finding P2-15).
+        # A run for the whole PC passes -MachineScopeOnly the same way (review finding P3-22).
         $customParameters = @{}
-        $forwardedParameters = @()
+        $forwardedValues = @{}
         foreach ($parameterName in @('Silent', 'InstallInProgressWaitSeconds')) {
             if ($PSBoundParameters.ContainsKey($parameterName)) {
-                $forwardedParameters += $parameterName
+                $forwardedValues[$parameterName] = $PSBoundParameters[$parameterName]
             }
         }
-        if ($forwardedParameters.Count -gt 0 -and $App.install -is [string]) {
+        if ($MachineWide) {
+            $forwardedValues['MachineScopeOnly'] = $true
+        }
+        if ($forwardedValues.Count -gt 0 -and $App.install -is [string]) {
             $customCommand = Get-Command -Name $App.install -ErrorAction SilentlyContinue | Select-Object -First 1
-            foreach ($parameterName in $forwardedParameters) {
+            foreach ($parameterName in $forwardedValues.Keys) {
                 if ($customCommand -and $customCommand.Parameters -and $customCommand.Parameters.ContainsKey($parameterName)) {
-                    $customParameters[$parameterName] = $PSBoundParameters[$parameterName]
+                    $customParameters[$parameterName] = $forwardedValues[$parameterName]
                 }
             }
         }
         $customResult = & $App.install @customParameters
         if ($customResult.Installed) {
             return @{ Status = 'Installed'; InstallResult = $customResult; FailureReason = $null }
+        }
+        if ($customResult.NoMachineScopeInstaller) {
+            return @{ Status = 'Deferred'; InstallResult = $customResult; FailureReason = $null; DeferReason = 'NoMachineScopeInstaller' }
         }
         # Install-PowerShellLatest says why its own check failed (review finding P3-8), so a
         # launch failure or a timeout reads the same as for every other app.
@@ -223,10 +268,28 @@ function Install-AppWithVerification {
     if ($PSBoundParameters.ContainsKey('InstallInProgressWaitSeconds')) {
         $installParameters['InstallInProgressWaitSeconds'] = $InstallInProgressWaitSeconds
     }
+    if ($MachineWide) {
+        $installParameters['MachineScopeOnly'] = $true
+    }
     $installResult = Install-WingetPackage @installParameters
     if ($installResult.LaunchErrorExhausted) {
         # winget never started, so nothing was installed; a verify would only fail to launch too.
         return @{ Status = 'Failed'; InstallResult = $installResult; FailureReason = 'InstallLaunchFailed'; LaunchError = $installResult.LaunchError }
+    }
+    if ($installResult.NoMachineScopeInstaller) {
+        # Nothing was installed: the package has no installer for the whole PC (review finding P3-22).
+        return @{ Status = 'Deferred'; InstallResult = $installResult; FailureReason = $null; DeferReason = 'NoMachineScopeInstaller' }
+    }
+
+    if ($checkProvisioning) {
+        $provisioned = Test-AppxPackageProvisionedForMachine -Name $App.msixName
+        if ($provisioned -eq $true) {
+            return @{ Status = 'Installed'; InstallResult = $installResult; FailureReason = $null }
+        }
+        if ($null -eq $provisioned) {
+            return @{ Status = 'Failed'; InstallResult = $installResult; FailureReason = 'MachineCheckFailed' }
+        }
+        return @{ Status = 'Failed'; InstallResult = $installResult; FailureReason = 'VerifyNotFound' }
     }
 
     $verify = Test-WingetPackageInstalled -PackageId $App.name -TimeoutSeconds $checkTimeoutSeconds

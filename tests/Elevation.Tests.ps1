@@ -1,7 +1,8 @@
 # Elevation.Tests.ps1
 # Tests for WingetAppSetup/Public/Elevation.ps1 and Private/Elevation.ps1:
 # Restart-WithElevation and its parts (the elevated relaunch, review findings P2-11, P2-12, P3-11),
-# the uninstaller's use of it, the module-context invocation detection and Test-IsSystemAccount.
+# the uninstaller's use of it, the module-context invocation detection, Test-IsSystemAccount and
+# Get-InstallAccountContext.
 # Split from the old single-file suite Test-WingetAppInstall.Tests.ps1 (issue #192).
 
 # Load the module's functions once for this file. TestHelpers.ps1 resolves the repo paths
@@ -540,5 +541,46 @@ Describe 'Test-IsSystemAccount' {
 
         $result | Should -BeOfType [bool]
         $result | Should -Be $expected
+    }
+}
+
+Describe 'Get-InstallAccountContext (review findings P2-24, P3-22, P3-23)' {
+    It 'Says SYSTEM, and not cross-user elevation, for a run as SYSTEM while a user is signed in' {
+        Mock Test-IsSystemAccount { $true }
+        Mock Get-ProcessUserName { 'NT AUTHORITY\SYSTEM' }
+        Mock Get-InteractiveSessionUserName { 'CONTOSO\jdoe' }
+
+        $context = Get-InstallAccountContext
+
+        $context.IsSystem | Should -BeTrue
+        $context.IsCrossUserElevation | Should -BeFalse
+        $context.ProcessUser | Should -Be 'NT AUTHORITY\SYSTEM'
+        $context.SessionUser | Should -Be 'CONTOSO\jdoe'
+    }
+
+    It 'Says cross-user elevation for an admin account elevating on a signed-in user''s PC' {
+        Mock Test-IsSystemAccount { $false }
+        Mock Get-ProcessUserName { 'CONTOSO\admin-tech' }
+        Mock Get-InteractiveSessionUserName { 'CONTOSO\jdoe' }
+
+        $context = Get-InstallAccountContext
+
+        $context.IsSystem | Should -BeFalse
+        $context.IsCrossUserElevation | Should -BeTrue
+    }
+
+    It 'Says neither for <Case>' -ForEach @(
+        @{ Case = 'the signed-in user''s own run'; Session = 'CONTOSO\jdoe' }
+        @{ Case = 'the same account in other letter case'; Session = 'contoso\JDOE' }
+        @{ Case = 'no console user reported'; Session = $null }
+    ) {
+        Mock Test-IsSystemAccount { $false }
+        Mock Get-ProcessUserName { 'CONTOSO\jdoe' }
+        Mock Get-InteractiveSessionUserName { $Session }
+
+        $context = Get-InstallAccountContext
+
+        $context.IsSystem | Should -BeFalse
+        $context.IsCrossUserElevation | Should -BeFalse
     }
 }

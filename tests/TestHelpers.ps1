@@ -140,6 +140,30 @@ function New-TestRestartState {
     }
 }
 
+# A Get-InstallAccountContext result (review findings P2-24, P3-22, P3-23), for
+# `Mock Get-InstallAccountContext`. Every test that drives Invoke-WingetInstall past its admin check
+# mocks that read: on Windows it reads the real process token and the console session (CIM), and a
+# runner that runs as SYSTEM, or one with another account signed in at the console, would turn the
+# run into one for the whole PC. The default is a same-user run.
+function New-TestAccountContext {
+    param (
+        [switch]$System,
+        [switch]$CrossUser,
+        [string]$ProcessUser = 'CONTOSO\admin-tech',
+        [string]$SessionUser = 'CONTOSO\admin-tech'
+    )
+
+    if ($System) {
+        $ProcessUser = 'NT AUTHORITY\SYSTEM'
+    }
+    [pscustomobject]@{
+        IsSystem             = [bool]$System
+        ProcessUser          = $ProcessUser
+        SessionUser          = $SessionUser
+        IsCrossUserElevation = [bool]$CrossUser
+    }
+}
+
 # For tests that script winget's behaviour with `Mock winget { ... }` (reading $args, setting
 # $global:LASTEXITCODE, throwing when winget cannot run): code that now runs winget through
 # Invoke-WingetProcess reaches that mock through

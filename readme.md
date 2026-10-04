@@ -111,6 +111,10 @@ Skipped in the summary instead of being pointlessly installed. A condition that 
 open — a warning, then a normal install — so a broken probe can never silently drop an app.
 `Dell.CommandUpdate.Universal` is gated this way (`Dell hardware only`): it installs only when
 `Win32_ComputerSystem` reports a Dell manufacturer ([#217](https://github.com/J-MaFf/winget-app-setup/issues/217)).
+An entry may also name its MSIX package (`msixName`, set for `Microsoft.WindowsTerminal`): a run
+as SYSTEM or under cross-user elevation then decides whether the app is installed from whether that
+package is provisioned for every user, not from `winget list` (see
+[Running as SYSTEM](#running-as-system-rmm-tools-such-as-endpoint-central)).
 
 ## Preview a run (`-WhatIf`)
 
@@ -135,10 +139,12 @@ own per-user cache and source-agreement state.
 The installer never asks a yes/no question on any path — the PowerShell 7 bootstrap and low disk
 space proceed without prompting. The one prompt left is Windows' own UAC prompt when the run is not
 elevated (see [Administrator rights](#administrator-rights)), so an unattended run must already be
-elevated or run as SYSTEM: a non-interactive run that is not elevated exits 4 without showing a
-prompt. Pass `-NonInteractive` for RMM, CI, or scheduled-task use to also suppress the
-interactive-only extras: the summary grid-view window and the "press any key to exit" that holds
-the window at the end of a run or after an early failure (see [Logs](#logs)):
+elevated or run as SYSTEM (see
+[Running as SYSTEM](#running-as-system-rmm-tools-such-as-endpoint-central)): a non-interactive run
+that is not elevated exits 4 without showing a prompt. A run as SYSTEM is always non-interactive.
+Pass `-NonInteractive` for RMM, CI, or scheduled-task use to also suppress the interactive-only
+extras: the summary grid-view window and the "press any key to exit" that holds the window at the
+end of a run or after an early failure (see [Logs](#logs)):
 
 ```powershell
 pwsh -ExecutionPolicy Unrestricted -File .\winget-app-install.ps1 -NonInteractive
@@ -180,8 +186,10 @@ has to run and print a version; being on PATH is not enough. A failure that can 
 (`winget.exe` locked, for example while App Installer updates) is checked again for up to 75
 seconds first. If winget still cannot run, the installer tries to set it up for the account
 (register App Installer, `Repair-WinGetPackageManager`, the aka.ms/getwinget download) and exits
-with code 2 when winget still does not start. If winget stops starting partway through the
-installs, the app that hit it fails with `winget could not be launched ...` and the installer
+with code 2 when winget still does not start. A run as SYSTEM skips those steps, which cannot work
+for SYSTEM (see [Running as SYSTEM](#running-as-system-rmm-tools-such-as-endpoint-central)). If
+winget stops starting partway through the installs, the app that hit it fails with
+`winget could not be launched ...` and the installer
 checks, for up to 75 seconds (six tries 15 seconds apart), whether winget can be started again. If
 it can, the run carries on and the app gets its retry. If it cannot, every remaining app is marked
 failed with `not attempted: winget cannot be launched on this machine (see above)` without running
@@ -231,13 +239,65 @@ that run's 0 into 3010. A restart that was already pending before the run is rep
 and next to the summary (`Restart: already pending before this run (...)`), but does not make the
 run 3010 by itself. The installer never restarts the PC.
 
+### Running as SYSTEM (RMM tools such as Endpoint Central)
+
+A run as SYSTEM, which is how an RMM agent such as ManageEngine Endpoint Central runs a computer
+script, is supported for the apps that install for the whole PC. Microsoft does not support the
+winget command line as SYSTEM: winget is a per-user packaged app that cannot be registered for
+SYSTEM ([WinGet troubleshooting, System
+Context](https://learn.microsoft.com/windows/package-manager/winget/troubleshooting#system-context)),
+and Microsoft's supported route there is the `Microsoft.WinGet.Client` PowerShell module on
+PowerShell 7, which this installer does not use yet. So a SYSTEM run can fail where a run as a
+signed-in user would not; test it on a pilot PC before rolling it out. What a SYSTEM run does
+differently:
+
+- It is never interactive: no grid view, no "press any key", and winget installs with `--silent`.
+- It runs the `winget.exe` that App Installer installed for the PC, by its full path, for every
+  winget call: the newest one whose package `Get-AppxPackage -AllUsers` lists with status `Ok`, or,
+  when that query fails or finds none, the newest
+  `%ProgramFiles%\WindowsApps\Microsoft.DesktopAppInstaller_<version>_<architecture>__8wekyb3d8bbwe\winget.exe`
+  (versions compared as numbers, the PC's own architecture first). It checks that it starts
+  (`winget --version`) and tries the next one if it does not. When none starts, the run stops with
+  exit code 2 and says why: no App Installer for the PC, or the `winget.exe` found could not be
+  started. `0xC0000135 STATUS_DLL_NOT_FOUND` is reported for a `winget.exe` started outside its
+  package when a DLL it needs, reportedly the Microsoft Visual C++ 2015-2022 runtime, is missing.
+- It skips every step that sets winget up for one account, since SYSTEM cannot have one:
+  registering App Installer, `Repair-WinGetPackageManager` (and installing the
+  `Microsoft.WinGet.Client` module it comes from), the aka.ms/getwinget download, and registering
+  the winget source package. It still updates and checks the winget source, and resets it if it is
+  broken.
+- Every app is installed with `--scope machine` only. An app that has no machine-wide installer is
+  not installed at winget's default scope, which as SYSTEM is SYSTEM's own profile: it is reported
+  as `Deferred` in the summary, with a line saying to run the installer as the signed-in user to
+  install it. A deferred app counts neither as installed nor as failed and does not change the exit
+  code.
+- Windows Terminal is decided from the PC: when its package is provisioned for every user, as
+  Windows 11 does, it is `Skipped (already provisioned for every user on this PC)`. `winget list`
+  run as SYSTEM does not see the MSIX apps registered for the users, so Terminal would read as
+  missing on every run, and its install would then fail the same check. The check for a
+  Terminal-hosted console (#271) does not apply to SYSTEM, and the Windows Terminal defaults step
+  is skipped (see [Windows Terminal defaults](#windows-terminal-defaults)).
+- Its messages are written for SYSTEM: no "cross-user elevation" banner and no advice to sign in
+  to Windows as `NT AUTHORITY\SYSTEM`.
+
+A run elevated as a different account than the signed-in user (cross-user elevation) installs for
+the whole PC the same way: an app with no machine-wide installer is `Deferred` instead of being
+installed into the admin account's profile and reported as installed, and Windows Terminal is
+decided from provisioning, not from the admin's `winget list`. That run still sets winget up for
+the admin account as before.
+
+Not there yet: a single-run lock and a time budget for the whole run, a machine-readable result
+line, and per-user setup after a SYSTEM run (the deferred apps and the Windows Terminal defaults
+wait for a run as the signed-in user). RMM tools read success from the exit code: list any other
+code you accept, such as 3010, as a success code for the script.
+
 ### Exit codes
 
 | Code | Meaning |
 |------|---------|
-| 0 | Success — all apps installed or already present |
+| 0 | Success — all apps installed or already present (apps reported as `Deferred` do not count against it) |
 | 1 | One or more apps failed to install, including an install stopped at its time limit and the apps not attempted because winget could no longer be started partway through the run (also: a blocking pre-flight system check failed) |
-| 2 | Winget is unavailable or cannot be started (`winget --version` must run and print a version) and could not be set up, or winget could no longer be launched at the end of the run (no app failed, but automatic updates and the next run would) |
+| 2 | Winget is unavailable or cannot be started (`winget --version` must run and print a version) and could not be set up (as SYSTEM: no machine-wide `winget.exe` was found, or none could be started), or winget could no longer be launched at the end of the run (no app failed, but automatic updates and the next run would) |
 | 3 | App-definition validation failed, or no valid app definitions remain |
 | 4 | Administrator rights are required and the run was not elevated: the UAC prompt was declined or the elevated window could not be started, the run is non-interactive (no prompt is shown), it runs through `irm \| iex` in PowerShell 7, or `Invoke-WingetInstall` was called from the imported module (see [Administrator rights](#administrator-rights)) |
 | 5 | The run was aborted before it finished: an unexpected error (the message and stack trace are in the log), the run was stopped from outside (Ctrl+C, the console closing, an installer stopping the console) when run from a file or non-interactively, or the installer file changed before its elevated copy could run (see [Administrator rights](#administrator-rights)) |
@@ -245,7 +305,9 @@ run 3010 by itself. The installer never restarts the PC.
 | 3010 | Success, but a restart is required to finish: an install said so, the Winget-AutoUpdate MSI returned 3010, Windows gained a pending restart during the run, or installing PowerShell 7 from Windows PowerShell needed a restart (see **Restart required** above). RMM tools and Intune treat 3010 as "succeeded, restart required". A restart that was already pending before the run does not cause it |
 
 At the end of a run, when more than one applies, the code is the first of 1, 2, 3010 and 0. A run
-that relaunched itself elevated exits with the elevated run's code.
+that relaunched itself elevated exits with the elevated run's code. Apps reported as `Deferred` (a
+run as SYSTEM or under cross-user elevation found no machine-wide installer for them) do not change
+the code.
 
 A script that imports the `WingetAppSetup` module and calls `Invoke-WingetInstall` itself gets
 codes 0-4 and 3010 back as the function's return value; the function never exits. Pass the code on

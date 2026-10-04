@@ -22,6 +22,10 @@
         never silently drop an app.
       - conditionDescription: short human-readable reason shown in the skip message, e.g.
         "Skipping: <id> (not applicable: <conditionDescription>)".
+      - msixName: the app's MSIX package name. In a run for the whole PC (SYSTEM, or cross-user
+        elevation), whether that package is provisioned for every user decides whether the app is
+        installed, before and after the install, instead of `winget list`, which only sees the
+        packages registered for the account running it (review finding P3-24).
     Add or remove apps HERE — never inline a copy of this list at a call site (the previous
     duplicates in Invoke-WingetInstall and winget-app-uninstall.ps1 had already drifted).
 .RETURNS
@@ -57,7 +61,10 @@ function Get-DefaultAppCatalog {
         # retry pass all failed identically in the reported E2E run, while every other catalog app
         # installed fine in the same run). Gated with the same condition mechanism as Dell Command
         # Update above (issue #217): evaluated before any winget probe runs, so the
-        # structurally-doomed attempt is skipped instead of retried.
-        @{name = 'Microsoft.WindowsTerminal'; condition = { -not (Test-WindowsTerminalHostsCurrentSession) }; conditionDescription = 'winget cannot self-update Windows Terminal from a session Windows Terminal itself is hosting (issue #271)' }
+        # structurally-doomed attempt is skipped instead of retried. A run as SYSTEM has no
+        # Terminal session, so the check does not apply to it (review finding P3-24); a run for
+        # the whole PC decides from msixName whether Terminal is provisioned for every user, as
+        # Windows 11 provisions it, and defers it where winget has no machine-wide installer.
+        @{name = 'Microsoft.WindowsTerminal'; msixName = 'Microsoft.WindowsTerminal'; condition = { (Test-IsSystemAccount) -or -not (Test-WindowsTerminalHostsCurrentSession) }; conditionDescription = 'winget cannot self-update Windows Terminal from a session Windows Terminal itself is hosting (issue #271)' }
     )
 }

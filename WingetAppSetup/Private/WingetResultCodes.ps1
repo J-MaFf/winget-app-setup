@@ -104,6 +104,9 @@ function Get-WingetExitCodeInfo {
         '0x80072EE7' = @('WININET_E_NAME_NOT_RESOLVED', 'the download server name could not be resolved', '')
         '0x80072EFD' = @('WININET_E_CANNOT_CONNECT', 'could not connect to the download server', '')
         '0x80190194' = @('HTTP_E_STATUS_NOT_FOUND', 'the download returned HTTP 404 (not found)', '')
+        # The Windows loader's code when winget.exe cannot even start (review finding P2-24), reported
+        # where winget.exe runs outside its package, as it does for SYSTEM.
+        '0xC0000135' = @('STATUS_DLL_NOT_FOUND', 'winget.exe could not start because a DLL it needs was not found', '')
     }
 
     $hex = '0x{0:X8}' -f [int]$ExitCode

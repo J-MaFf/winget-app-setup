@@ -33,7 +33,10 @@
     non-interactive run (nobody to approve a prompt, so none is shown), irm | iex, or the imported
     module (review finding P2-12), 3010 = success, but a restart is required to finish (an install
     said so, or Windows gained a pending restart during the run; review finding P3-16). At the end
-    of a run the precedence is 1 > 2 > 3010 > 0 (Get-InstallerExitCode). A run that relaunched
+    of a run the precedence is 1 > 2 > 3010 > 0 (Get-InstallerExitCode). Apps reported as Deferred
+    (a run as SYSTEM or under cross-user elevation found no machine-wide installer for them) count
+    neither as installed nor as failed and do not change the code. A run as SYSTEM returns 2 at the
+    start when no machine-wide winget.exe can be started. A run that relaunched
     itself elevated returns the elevated run's exit code (Restart-WithElevation waits for it). The
     generated entry script also exits 1 when a blocking pre-flight check fails (before this
     function runs) and 5 when the run was aborted by an unexpected error or stopped from outside.
@@ -178,6 +181,19 @@ function Invoke-WingetInstall {
         Write-Success 'Starting...'
     }
 
+    # Who this run installs as (review findings P2-24, P3-22, P3-23), decided once: SYSTEM, as under
+    # an RMM agent such as Endpoint Central, or an admin account elevating on a signed-in user's PC.
+    # Either way the run installs for the whole PC only, so an app whose package has no machine-wide
+    # installer is deferred instead of being installed for the wrong account. A SYSTEM run uses the
+    # machine-wide winget.exe (Test-AndInstallWinget finds it), which Resolve-WingetExecutable
+    # returns from then on; a stale path from an earlier run in this session is dropped first.
+    $script:MachineWingetPath = $null
+    $account = Get-InstallAccountContext
+    $machineWide = [bool]($account.IsSystem -or $account.IsCrossUserElevation)
+    if ($account.IsSystem) {
+        Write-Info 'Running as SYSTEM (for example from an RMM agent): installing for the whole PC only, with the winget.exe that App Installer installed for this PC. An app with no machine-wide installer is reported as Deferred, for a run as the signed-in user to install. Microsoft does not support the winget command line as SYSTEM, so a SYSTEM run can fail where a run as a user would not.'
+    }
+
     # Pending restart before the run (review finding P3-16), read before this run changes the
     # machine: the end of the run compares against it, so a restart that this run's installs need
     # (exit code 3010) is told apart from one that was already pending, which is reported but does
@@ -203,20 +219,29 @@ function Invoke-WingetInstall {
     # carries on with the preview whatever they find (P2-16: these used to install modules for all
     # users, register or repair App Installer and reset winget's sources during a dry run). Their
     # real-run warnings are skipped in a dry run, which never attempted the fix they report on.
-    $wingetModuleAvailable = Test-AndInstallWingetModule -WhatIf:$WhatIf
-    if (-not $wingetModuleAvailable -and -not $WhatIf) {
-        Write-Warning 'Microsoft.WinGet.Client module is not available. Update functionality will use fallback CLI methods.'
+    #
+    # Not as SYSTEM (review finding P2-24): the module is only used for Repair-WinGetPackageManager,
+    # which sets winget up for one account. As SYSTEM it does nothing (and throws with -AllUsers),
+    # so installing the module from the PowerShell Gallery would be a download for nothing.
+    if ($account.IsSystem) {
+        Write-Info 'Skipping the Microsoft.WinGet.Client module: it only repairs winget for a signed-in account, which does not apply to SYSTEM.'
     }
-
-    # Import required modules (a dry run imports it only when it is already installed)
-    if ($wingetModuleAvailable -or -not $WhatIf) {
-        try {
-            Import-Module Microsoft.WinGet.Client -ErrorAction Stop
-            Write-Success 'Successfully imported Microsoft.WinGet.Client module'
+    else {
+        $wingetModuleAvailable = Test-AndInstallWingetModule -WhatIf:$WhatIf
+        if (-not $wingetModuleAvailable -and -not $WhatIf) {
+            Write-Warning 'Microsoft.WinGet.Client module is not available. Update functionality will use fallback CLI methods.'
         }
-        catch {
-            Write-Warning "Failed to import Microsoft.WinGet.Client module: $_"
-            Write-Warning 'Update functionality will use fallback CLI methods'
+
+        # Import required modules (a dry run imports it only when it is already installed)
+        if ($wingetModuleAvailable -or -not $WhatIf) {
+            try {
+                Import-Module Microsoft.WinGet.Client -ErrorAction Stop
+                Write-Success 'Successfully imported Microsoft.WinGet.Client module'
+            }
+            catch {
+                Write-Warning "Failed to import Microsoft.WinGet.Client module: $_"
+                Write-Warning 'Update functionality will use fallback CLI methods'
+            }
         }
     }
 
@@ -231,7 +256,9 @@ function Invoke-WingetInstall {
     # Check if winget is available and install if necessary. A dry run without winget carries on:
     # a real run would bootstrap it first (Test-AndInstallWinget says how), so stopping here would
     # misreport the very machine a dry run is used to preview (cross-user elevation, issue #265).
-    $wingetAvailable = Test-AndInstallWinget -WhatIf:$WhatIf
+    # As SYSTEM this finds and checks the machine-wide winget.exe instead of setting winget up for
+    # an account (review finding P2-24).
+    $wingetAvailable = Test-AndInstallWinget -WhatIf:$WhatIf -SystemContext:$account.IsSystem
     if (-not $wingetAvailable -and -not $WhatIf) {
         Write-ErrorMessage 'Winget is required for this script. Exiting.'
         return 2
@@ -240,7 +267,7 @@ function Invoke-WingetInstall {
     # Initialize winget sources and agreements for the account performing the installs. This is
     # what prevents 0x80073d19 when the script is elevated as a different account than the
     # logged-on user (issues #104/#150, #159).
-    [void](Initialize-WingetSourcesForUser -WhatIf:$WhatIf)
+    [void](Initialize-WingetSourcesForUser -WhatIf:$WhatIf -AccountContext $account)
 
     if (-not (Test-AndInstallGraphicalTools -WhatIf:$WhatIf) -and -not $WhatIf) {
         Write-Warning 'Out-GridView will be unavailable; results will be displayed in text mode only.'
@@ -249,9 +276,14 @@ function Invoke-WingetInstall {
     # Verify winget sources are accessible and auto-repair if broken
     if (-not $wingetAvailable) {
         # Only a dry run gets here without winget (a real run returned 2 above).
-        Write-Info '[DRY-RUN] Skipping the winget source check: winget is not available for this account yet. A real run checks the source once winget is bootstrapped, and repairs it if needed.'
+        if ($account.IsSystem) {
+            Write-Info '[DRY-RUN] Skipping the winget source check: no machine-wide winget could be started, so a real run would already have stopped with exit code 2.'
+        }
+        else {
+            Write-Info '[DRY-RUN] Skipping the winget source check: winget is not available for this account yet. A real run checks the source once winget is bootstrapped, and repairs it if needed.'
+        }
     }
-    elseif (-not (Test-WingetSources -WhatIf:$WhatIf) -and -not $WhatIf) {
+    elseif (-not (Test-WingetSources -WhatIf:$WhatIf -SystemContext:$account.IsSystem) -and -not $WhatIf) {
         Write-WarningMessage 'Winget sources could not be repaired. Some installations may fail.'
     }
 
@@ -298,12 +330,19 @@ function Invoke-WingetInstall {
     if (-not $wingetAvailable) {
         # Only a dry run gets here without winget: its per-app `winget list` checks cannot run, so
         # each one reports the app as not installed.
-        Write-Info '[DRY-RUN] winget is not available for this account, so this preview cannot tell which apps are already installed: every app that applies to this machine is listed as one a real run would install.'
+        $wingetScope = 'for this account'
+        if ($account.IsSystem) {
+            $wingetScope = 'machine-wide'
+        }
+        Write-Info "[DRY-RUN] winget is not available $wingetScope, so this preview cannot tell which apps are already installed: every app that applies to this machine is listed as one a real run would install."
     }
 
     $installedApps = @()
     $skippedApps = @()
     $failedApps = @()
+    # Apps with no machine-wide installer in a run for the whole PC (review finding P3-22): neither
+    # installed nor failed, and left for a run as the signed-in user.
+    $deferredApps = @()
 
     # No separate source-trust pass here: only the winget community source is used (every install
     # forces --source winget), and its health was already verified — and repaired if needed — by
@@ -333,7 +372,7 @@ function Invoke-WingetInstall {
             # Shared per-app pipeline — pre-check, dispatch, post-verify (issue #188). Messages,
             # summary bucketing, and exit-code policy stay here in the orchestrator.
             # -Silent: an unattended run installs MSI packages with /quiet, not /passive.
-            $outcome = Install-AppWithVerification -App $app -Silent:$effectiveNonInteractive -WhatIf:$WhatIf -WingetNotLaunchable:$wingetNotLaunchable -InstallInProgressWaitSeconds $installerBusyWaitSecondsLeft
+            $outcome = Install-AppWithVerification -App $app -Silent:$effectiveNonInteractive -WhatIf:$WhatIf -WingetNotLaunchable:$wingetNotLaunchable -MachineWide:$machineWide -InstallInProgressWaitSeconds $installerBusyWaitSecondsLeft
             if ($outcome.InstallResult -and $outcome.InstallResult.InstallInProgressWaitedSeconds) {
                 $installerBusyWaitSecondsLeft = [Math]::Max(0, $installerBusyWaitSecondsLeft - [int]$outcome.InstallResult.InstallInProgressWaitedSeconds)
             }
@@ -348,10 +387,20 @@ function Invoke-WingetInstall {
                         $conditionText = if ($app.conditionDescription) { $app.conditionDescription } else { 'condition not met' }
                         Write-WarningMessage "Skipping: $($app.name) (not applicable: $conditionText)"
                     }
+                    elseif ($outcome.SkipReason -eq 'Provisioned') {
+                        # A run for the whole PC read it from the machine (review finding P3-24).
+                        Write-WarningMessage "Skipping: $($app.name) (already provisioned for every user on this PC)"
+                    }
                     else {
                         Write-WarningMessage "Skipping: $($app.name) (already installed)"
                     }
                     $skippedApps += $app.name
+                }
+                'Deferred' {
+                    # No machine-wide installer, and this run installs for the whole PC only
+                    # (review finding P3-22). Write-DeferredAppsSummary says who can install it.
+                    Write-WarningMessage "Deferred: $($app.name) (it has no machine-wide installer)"
+                    $deferredApps += $app.name
                 }
                 'Installed' {
                     if ($WhatIf) {
@@ -447,7 +496,7 @@ function Invoke-WingetInstall {
                     # 0x80073d19 session error gets its backoff retries here too (issue #150), and
                     # a busy Windows Installer gets what is left of the run's wait budget.
                     # The circuit breaker holds here too: once it trips, the rest fail at once.
-                    $outcome = Install-AppWithVerification -App $appDef -Silent:$effectiveNonInteractive -WingetNotLaunchable:$wingetNotLaunchable -InstallInProgressWaitSeconds $installerBusyWaitSecondsLeft
+                    $outcome = Install-AppWithVerification -App $appDef -Silent:$effectiveNonInteractive -WingetNotLaunchable:$wingetNotLaunchable -MachineWide:$machineWide -InstallInProgressWaitSeconds $installerBusyWaitSecondsLeft
                     if ($outcome.InstallResult -and $outcome.InstallResult.InstallInProgressWaitedSeconds) {
                         $installerBusyWaitSecondsLeft = [Math]::Max(0, $installerBusyWaitSecondsLeft - [int]$outcome.InstallResult.InstallInProgressWaitedSeconds)
                     }
@@ -466,6 +515,12 @@ function Invoke-WingetInstall {
                             }
                         }
                         $failedApps += @{ Name = $appName; Reason = $failureReason; RestartFirst = (Test-RestartRequiredFirst -InstallResult $outcome.InstallResult) }
+                    }
+                    elseif ($outcome.Status -eq 'Deferred') {
+                        # The retry got as far as the install, which found no machine-wide
+                        # installer (review finding P3-22): deferred, not failed.
+                        Write-WarningMessage "Deferred: $appName (it has no machine-wide installer)"
+                        $deferredApps += $appName
                     }
                     else {
                         # 'Installed', or 'Skipped' when the first-pass install actually landed
@@ -585,6 +640,11 @@ function Invoke-WingetInstall {
         $rows += , @('Skipped', $appList)
     }
 
+    $appList = Format-AppList -AppArray $deferredApps
+    if ($appList) {
+        $rows += , @('Deferred', $appList)
+    }
+
     $failedAppNames = @($failedApps | ForEach-Object { $_.Name })
     $appList = Format-AppList -AppArray $failedAppNames
     if ($appList) {
@@ -600,6 +660,10 @@ function Invoke-WingetInstall {
     # detail, so a failure is diagnosable from the summary (and the transcript) instead of a
     # generic message. No-ops when nothing failed.
     Write-FailedAppsSummary -FailedApps $failedApps
+
+    # Why apps were deferred, and who can install them (review findings P3-22, P3-23). They do not
+    # change the exit code.
+    Write-DeferredAppsSummary -DeferredApps $deferredApps -AccountContext $account
 
     # Surface the auto-update outcome with the summary so a machine that finished without an update
     # mechanism is visible at the end of the run (issue #186). Deliberately does not affect the exit

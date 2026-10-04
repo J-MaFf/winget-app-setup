@@ -17,6 +17,9 @@
 
     A run is effectively non-interactive when ANY of the following holds:
       - the caller passed the explicit -NonInteractive switch;
+      - the process runs as SYSTEM (Test-IsSystemAccount; review finding P3-23): an RMM agent or a
+        scheduled task, never a person at a console, whatever its session reports. Nobody would
+        answer a key press, so none is waited for;
       - the session is non-interactive ([Environment]::UserInteractive is false — services,
         scheduled tasks, pwsh -NonInteractive);
       - stdin is redirected (piped input, irm | iex wrappers, CI runners). A console probe
@@ -33,6 +36,9 @@ function Test-EffectiveNonInteractive {
     )
 
     if ($NonInteractive) {
+        return $true
+    }
+    if (Test-IsSystemAccount) {
         return $true
     }
     if (-not [Environment]::UserInteractive) {

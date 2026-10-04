@@ -86,6 +86,38 @@ function Get-InteractiveSessionUserName {
 
 <#
 .SYNOPSIS
+    Says which account this run installs as, and whether that account is the signed-in user.
+.DESCRIPTION
+    Invoke-WingetInstall reads this once and passes the answer to the steps that depend on it
+    (review findings P2-24, P3-22, P3-23):
+      - IsSystem: the process runs as SYSTEM (Test-IsSystemAccount), as under an RMM agent such as
+        ManageEngine Endpoint Central. SYSTEM is not a person: it has no per-user winget, and its
+        per-user installs would land in its own profile.
+      - IsCrossUserElevation: the process runs as a different account than the user signed in at
+        the console (the #159 detection), such as a technician elevating as an admin-* account on a
+        user's PC. Per-user state then belongs to the admin, not to the user. Always False for
+        SYSTEM, which is not "elevating as another person" and gets its own messages.
+    In both cases the run installs machine-wide only: an app that has no machine-wide installer is
+    deferred instead of being installed for the wrong account.
+.RETURNS
+    [pscustomobject] with IsSystem, ProcessUser, SessionUser (either may be $null when unknown) and
+    IsCrossUserElevation.
+#>
+function Get-InstallAccountContext {
+    $isSystem = [bool](Test-IsSystemAccount)
+    $processUser = Get-ProcessUserName
+    $sessionUser = Get-InteractiveSessionUserName
+    $isCrossUser = (-not $isSystem) -and (-not [string]::IsNullOrWhiteSpace($processUser)) -and (-not [string]::IsNullOrWhiteSpace($sessionUser)) -and ($processUser -ne $sessionUser)
+    return [pscustomobject]@{
+        IsSystem             = $isSystem
+        ProcessUser          = $processUser
+        SessionUser          = $sessionUser
+        IsCrossUserElevation = [bool]$isCrossUser
+    }
+}
+
+<#
+.SYNOPSIS
     Detects whether Invoke-WingetInstall is executing from the WingetAppSetup module rather than
     the generated single-file installer.
 .DESCRIPTION

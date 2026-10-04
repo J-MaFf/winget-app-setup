@@ -116,12 +116,27 @@ Describe 'Get-DefaultAppCatalog (issue #190)' {
 
         It 'Condition is false when the current session is hosted by Windows Terminal, true otherwise' {
             $wtApp = @(Get-DefaultAppCatalog) | Where-Object { $_.name -eq 'Microsoft.WindowsTerminal' }
+            Mock Test-IsSystemAccount { $false }
 
             Mock Test-WindowsTerminalHostsCurrentSession { $true }
             [bool](& $wtApp.condition) | Should -Be $false
 
             Mock Test-WindowsTerminalHostsCurrentSession { $false }
             [bool](& $wtApp.condition) | Should -Be $true
+        }
+
+        It 'Condition is true for a run as SYSTEM, which has no Terminal session to lock (review finding P3-24)' {
+            $wtApp = @(Get-DefaultAppCatalog) | Where-Object { $_.name -eq 'Microsoft.WindowsTerminal' }
+            Mock Test-IsSystemAccount { $true }
+            Mock Test-WindowsTerminalHostsCurrentSession { $true }
+
+            [bool](& $wtApp.condition) | Should -Be $true
+        }
+
+        It 'Names its MSIX package, so a run for the whole PC decides it from provisioning (review finding P3-24)' {
+            $wtApp = @(Get-DefaultAppCatalog) | Where-Object { $_.name -eq 'Microsoft.WindowsTerminal' }
+
+            $wtApp.msixName | Should -Be 'Microsoft.WindowsTerminal'
         }
     }
 

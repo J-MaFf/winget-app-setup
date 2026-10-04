@@ -118,6 +118,9 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
         Mock Wait-WauIdle { $true }
         # Never read the machine's pending-restart state (review finding P3-16): nothing pending.
         Mock Get-PendingRestartState { New-TestRestartState }
+        # Never read the runner's real account or console session: a same-user run unless a test
+        # says otherwise (review findings P2-24, P3-22).
+        Mock Get-InstallAccountContext { New-TestAccountContext }
 
         # Rows of every table the run prints, keyed by title; capturedRows is the main summary.
         $script:capturedRows = $null
@@ -596,6 +599,114 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
             # message issue #189 replaced.
             $failedRows[0][1] | Should -Be 'the installing account has no logon session, so Windows blocked the app package deployment; winget exit 0x80073D19 ERROR_DEPLOYMENT_BLOCKED_BY_USER_LOG_OFF, 3 attempts, machine-scope fallback: yes'
             ($script:errorMessages -join "`n") | Should -Not -Match 'No package found matching input criteria'
+        }
+    }
+
+    # Review findings P2-24, P3-22, P3-23: who the run installs as is decided once, and a run as
+    # SYSTEM or under cross-user elevation installs for the whole PC only.
+    Context 'A run for the whole PC: SYSTEM or cross-user elevation' {
+        It 'Tells the winget setup steps it is SYSTEM, installs every app for the whole PC and leaves the WinGet.Client module out' {
+            Mock Get-InstallAccountContext { New-TestAccountContext -System -SessionUser 'CONTOSO\jdoe' }
+
+            Invoke-WingetInstall -Apps @(@{ name = 'Contoso.App' }) -NonInteractive | Should -Be 0
+
+            Should -Invoke Test-AndInstallWinget -Times 1 -Exactly -ParameterFilter { $SystemContext }
+            Should -Invoke Test-WingetSources -Times 1 -Exactly -ParameterFilter { $SystemContext }
+            Should -Invoke Initialize-WingetSourcesForUser -Times 1 -Exactly -ParameterFilter { $AccountContext.IsSystem }
+            Should -Invoke Install-AppWithVerification -Times 1 -Exactly -ParameterFilter { $MachineWide }
+            # Only Repair-WinGetPackageManager uses it, and that does nothing for SYSTEM.
+            Should -Invoke Test-AndInstallWingetModule -Times 0 -Exactly
+            Should -Invoke Import-Module -Times 0 -Exactly
+            $info = $script:infoMessages -join "`n"
+            $info | Should -Match 'Running as SYSTEM'
+            $info | Should -Match 'Microsoft does not support the winget command line as SYSTEM'
+        }
+
+        It 'Stops with exit code 2 when a run as SYSTEM finds no machine-wide winget it can start' {
+            Mock Get-InstallAccountContext { New-TestAccountContext -System }
+            Mock Test-AndInstallWinget { $false }
+
+            Invoke-WingetInstall -Apps @(@{ name = 'Contoso.App' }) -NonInteractive | Should -Be 2
+
+            Should -Invoke Install-AppWithVerification -Times 0 -Exactly
+        }
+
+        It 'Installs every app for the whole PC under cross-user elevation, and still sets winget up for the account' {
+            Mock Get-InstallAccountContext { New-TestAccountContext -CrossUser -ProcessUser 'CONTOSO\admin-tech' -SessionUser 'CONTOSO\jdoe' }
+
+            Invoke-WingetInstall -Apps @(@{ name = 'Contoso.App' }) -NonInteractive | Should -Be 0
+
+            Should -Invoke Install-AppWithVerification -Times 1 -Exactly -ParameterFilter { $MachineWide }
+            Should -Invoke Test-AndInstallWinget -Times 1 -Exactly -ParameterFilter { -not $SystemContext }
+            Should -Invoke Test-AndInstallWingetModule -Times 1 -Exactly
+            ($script:infoMessages -join "`n") | Should -Not -Match 'Running as SYSTEM'
+        }
+
+        It 'Leaves a signed-in user''s own run as it was: per-user fallback allowed' {
+            Invoke-WingetInstall -Apps @(@{ name = 'Contoso.App' }) -NonInteractive | Should -Be 0
+
+            Should -Invoke Install-AppWithVerification -Times 1 -Exactly -ParameterFilter { -not $MachineWide }
+        }
+
+        It 'Reports a deferred app in its own summary row, as neither installed nor failed, says who can install it, and exits 0' {
+            Mock Get-InstallAccountContext { New-TestAccountContext -System -SessionUser 'CONTOSO\jdoe' }
+            Mock Install-AppWithVerification {
+                if ($App.name -eq 'Contoso.UserOnly') {
+                    return @{ Status = 'Deferred'; InstallResult = @{ ExitCode = -1978335216; NoMachineScopeInstaller = $true }; FailureReason = $null; DeferReason = 'NoMachineScopeInstaller' }
+                }
+                @{ Status = 'Installed'; InstallResult = @{ ExitCode = 0 }; FailureReason = $null }
+            }
+
+            $result = Invoke-WingetInstall -Apps @(@{ name = 'Contoso.MachineApp' }, @{ name = 'Contoso.UserOnly' }) -NonInteractive
+
+            $result | Should -Be 0
+            @($script:capturedRows | Where-Object { $_[0] -eq 'Installed' })[0][1] | Should -Be 'Contoso.MachineApp'
+            @($script:capturedRows | Where-Object { $_[0] -eq 'Deferred' })[0][1] | Should -Be 'Contoso.UserOnly'
+            @($script:capturedRows | Where-Object { $_[0] -eq 'Failed' }).Count | Should -Be 0
+            # Not retried: a deferred app is not a failure.
+            Should -Invoke Install-AppWithVerification -Times 2 -Exactly
+            $script:warningMessages | Should -Contain 'Deferred: Contoso.UserOnly (it has no machine-wide installer)'
+            $script:warningMessages | Should -Contain 'Deferred: Contoso.UserOnly - no machine-wide installer, and a run as SYSTEM installs for the whole PC only. Not installed and not counted as failed; run the installer as the signed-in user to install it.'
+        }
+
+        It 'Names the signed-in user under cross-user elevation' {
+            Mock Get-InstallAccountContext { New-TestAccountContext -CrossUser -ProcessUser 'CONTOSO\admin-tech' -SessionUser 'CONTOSO\jdoe' }
+            Mock Install-AppWithVerification { @{ Status = 'Deferred'; InstallResult = $null; FailureReason = $null; DeferReason = 'NoMachineScopeInstaller' } }
+
+            Invoke-WingetInstall -Apps @(@{ name = 'Contoso.UserOnly' }) -NonInteractive | Should -Be 0
+
+            $script:warningMessages | Should -Contain "Deferred: Contoso.UserOnly - no machine-wide installer, and installing per-user here would install for 'CONTOSO\admin-tech' instead of 'CONTOSO\jdoe'. Not installed and not counted as failed; run the installer as 'CONTOSO\jdoe' to install it."
+        }
+
+        It 'Defers an app that the retry pass finds has no machine-wide installer, instead of counting it as installed' {
+            Mock Get-InstallAccountContext { New-TestAccountContext -System }
+            $script:successMessages = @()
+            Mock Write-Success { $script:successMessages += $Message }
+            $script:userOnlyCalls = 0
+            Mock Install-AppWithVerification {
+                $script:userOnlyCalls++
+                if ($script:userOnlyCalls -eq 1) {
+                    return @{ Status = 'Failed'; InstallResult = $null; FailureReason = 'PreCheckTimeout' }
+                }
+                @{ Status = 'Deferred'; InstallResult = $null; FailureReason = $null; DeferReason = 'NoMachineScopeInstaller' }
+            }
+
+            Invoke-WingetInstall -Apps @(@{ name = 'Contoso.UserOnly' }) -NonInteractive | Should -Be 0
+
+            @($script:capturedRows | Where-Object { $_[0] -eq 'Deferred' })[0][1] | Should -Be 'Contoso.UserOnly'
+            @($script:capturedRows | Where-Object { $_[0] -eq 'Installed' }).Count | Should -Be 0
+            $script:successMessages | Should -Not -Contain 'Retry succeeded: Contoso.UserOnly'
+            $script:warningMessages | Should -Contain 'Deferred: Contoso.UserOnly (it has no machine-wide installer)'
+        }
+
+        It 'Says a provisioned app is skipped because every user has it' {
+            Mock Get-InstallAccountContext { New-TestAccountContext -System }
+            Mock Install-AppWithVerification { @{ Status = 'Skipped'; InstallResult = $null; FailureReason = $null; SkipReason = 'Provisioned' } }
+
+            Invoke-WingetInstall -Apps @(@{ name = 'Microsoft.WindowsTerminal'; msixName = 'Microsoft.WindowsTerminal' }) -NonInteractive | Should -Be 0
+
+            $script:warningMessages | Should -Contain 'Skipping: Microsoft.WindowsTerminal (already provisioned for every user on this PC)'
+            @($script:capturedRows | Where-Object { $_[0] -eq 'Skipped' })[0][1] | Should -Be 'Microsoft.WindowsTerminal'
         }
     }
 
@@ -1369,6 +1480,119 @@ Describe 'Install-AppWithVerification (shared install-and-verify pipeline, issue
 # the pipeline installed apps that were already there and reported them as 'package not found
 # after install'. Only the winget process is mocked: the real Test-WingetPackageInstalled and
 # Install-WingetPackage run.
+# Review findings P3-22 and P3-24. A run as SYSTEM or under cross-user elevation installs for the
+# whole PC: a package with no machine-scope installer used to be installed at winget's default
+# scope, which is SYSTEM's own profile or the elevating admin's, and the verification, run as that
+# same account, reported it installed. And an MSIX app was checked with `winget list`, which as
+# SYSTEM sees no account's apps, so Windows Terminal, built into Windows 11, read as missing on every
+# run and failed its verification.
+Describe 'Install-AppWithVerification for the whole PC (-MachineWide; review findings P3-22, P3-24)' {
+    BeforeEach {
+        Mock Write-Host { }
+        Mock Write-Info { }
+        Mock Install-WingetPackage { @{ ExitCode = 0; Attempts = 1; SessionErrorExhausted = $false; MachineScopeFellBack = $false; NoMachineScopeInstaller = $false } }
+        Mock Test-WingetPackageInstalled { @{ Installed = $false; TimedOut = $false; LaunchFailed = $false; LaunchError = $null; CheckFailed = $false; ExitCode = 0 } }
+        Mock Test-AppxPackageProvisionedForMachine { $false }
+    }
+
+    It 'Asks Install-WingetPackage for machine scope only, and only for a run for the whole PC' {
+        [void](Install-AppWithVerification -App @{ name = 'Contoso.App' } -MachineWide)
+        [void](Install-AppWithVerification -App @{ name = 'Contoso.App' })
+
+        Should -Invoke Install-WingetPackage -Times 1 -Exactly -ParameterFilter { $MachineScopeOnly }
+        Should -Invoke Install-WingetPackage -Times 1 -Exactly -ParameterFilter { -not $MachineScopeOnly }
+    }
+
+    It 'Defers an app with no machine-scope installer instead of installing it for the account running this, without a post-install check' {
+        Mock Install-WingetPackage { @{ ExitCode = -1978335216; Attempts = 1; SessionErrorExhausted = $false; MachineScopeFellBack = $false; NoMachineScopeInstaller = $true } }
+
+        $result = Install-AppWithVerification -App @{ name = 'Contoso.UserOnlyApp' } -MachineWide
+
+        $result.Status | Should -Be 'Deferred'
+        $result.DeferReason | Should -Be 'NoMachineScopeInstaller'
+        $result.FailureReason | Should -BeNullOrEmpty
+        # The pre-check only: nothing was installed, so there is nothing to verify.
+        Should -Invoke Test-WingetPackageInstalled -Times 1 -Exactly
+    }
+
+    It 'Defers PowerShell the same way when its own installer finds no machine-scope installer, and passes it -MachineScopeOnly' {
+        Mock Install-PowerShellLatest { @{ ExitCode = -1978335216; Installed = $false; Method = 'msix-native'; NoMachineScopeInstaller = [bool]$MachineScopeOnly } }
+
+        $result = Install-AppWithVerification -App @{ name = 'Microsoft.PowerShell'; install = 'Install-PowerShellLatest' } -MachineWide
+
+        $result.Status | Should -Be 'Deferred'
+        Should -Invoke Install-PowerShellLatest -Times 1 -Exactly -ParameterFilter { $MachineScopeOnly }
+    }
+
+    It 'Skips an MSIX app that is provisioned for every user, without winget' {
+        Mock Test-AppxPackageProvisionedForMachine { $true }
+
+        $result = Install-AppWithVerification -App @{ name = 'Microsoft.WindowsTerminal'; msixName = 'Microsoft.WindowsTerminal' } -MachineWide
+
+        $result.Status | Should -Be 'Skipped'
+        $result.SkipReason | Should -Be 'Provisioned'
+        Should -Invoke Test-AppxPackageProvisionedForMachine -Times 1 -Exactly -ParameterFilter { $Name -eq 'Microsoft.WindowsTerminal' }
+        Should -Invoke Test-WingetPackageInstalled -Times 0 -Exactly
+        Should -Invoke Install-WingetPackage -Times 0 -Exactly
+    }
+
+    It 'Skips a provisioned MSIX app even when winget cannot be started' {
+        Mock Test-AppxPackageProvisionedForMachine { $true }
+
+        $result = Install-AppWithVerification -App @{ name = 'Microsoft.WindowsTerminal'; msixName = 'Microsoft.WindowsTerminal' } -MachineWide -WingetNotLaunchable
+
+        $result.Status | Should -Be 'Skipped'
+    }
+
+    It 'Installs a missing MSIX app at machine scope and verifies it by provisioning, not with winget list (<Case>)' -ForEach @(
+        @{ Case = 'provisioned after the install'; After = $true; Status = 'Installed'; Reason = $null }
+        @{ Case = 'still not provisioned'; After = $false; Status = 'Failed'; Reason = 'VerifyNotFound' }
+    ) {
+        $script:provisionChecks = 0
+        $script:provisionedAfter = $After
+        Mock Test-AppxPackageProvisionedForMachine {
+            $script:provisionChecks++
+            ($script:provisionChecks -gt 1) -and $script:provisionedAfter
+        }
+
+        $result = Install-AppWithVerification -App @{ name = 'Microsoft.WindowsTerminal'; msixName = 'Microsoft.WindowsTerminal' } -MachineWide
+
+        $result.Status | Should -Be $Status
+        $result.FailureReason | Should -Be $Reason
+        Should -Invoke Install-WingetPackage -Times 1 -Exactly -ParameterFilter { $MachineScopeOnly }
+        Should -Invoke Test-AppxPackageProvisionedForMachine -Times 2 -Exactly
+        Should -Invoke Test-WingetPackageInstalled -Times 0 -Exactly
+    }
+
+    It 'Fails an MSIX app into the retry pass when the provisioned packages cannot be read, without installing it' {
+        Mock Test-AppxPackageProvisionedForMachine { $null }
+
+        $result = Install-AppWithVerification -App @{ name = 'Microsoft.WindowsTerminal'; msixName = 'Microsoft.WindowsTerminal' } -MachineWide
+
+        $result.Status | Should -Be 'Failed'
+        $result.FailureReason | Should -Be 'MachineCheckFailed'
+        Should -Invoke Install-WingetPackage -Times 0 -Exactly
+    }
+
+    It 'Lists a missing MSIX app as one a dry run would install' {
+        $result = Install-AppWithVerification -App @{ name = 'Microsoft.WindowsTerminal'; msixName = 'Microsoft.WindowsTerminal' } -MachineWide -WhatIf
+
+        $result.Status | Should -Be 'Installed'
+        Should -Invoke Install-WingetPackage -Times 0 -Exactly
+        Should -Invoke Test-WingetPackageInstalled -Times 0 -Exactly
+    }
+
+    It 'Checks an MSIX app with winget list as before in a signed-in user''s own run' {
+        Mock Test-WingetPackageInstalled { @{ Installed = $true; TimedOut = $false; LaunchFailed = $false; LaunchError = $null; CheckFailed = $false; ExitCode = 0 } }
+
+        $result = Install-AppWithVerification -App @{ name = 'Microsoft.WindowsTerminal'; msixName = 'Microsoft.WindowsTerminal' }
+
+        $result.Status | Should -Be 'Skipped'
+        $result.SkipReason | Should -BeNullOrEmpty
+        Should -Invoke Test-AppxPackageProvisionedForMachine -Times 0 -Exactly
+    }
+}
+
 Describe 'Install-AppWithVerification when winget cannot be launched (review finding P2-9)' {
     BeforeEach {
         Mock Write-Host { }
@@ -1562,6 +1786,7 @@ Describe 'Not-applicable gating end-to-end (issue #217)' {
         Mock Set-WindowsTerminalDefaults { }
         Mock Install-WingetAutoUpdate { @{ Status = 'DryRun'; Version = '2.12.0' } }
         Mock Get-PendingRestartState { New-TestRestartState }
+        Mock Get-InstallAccountContext { New-TestAccountContext }
         Mock Install-WingetPackage { @{ ExitCode = 0; Attempts = 1; SessionErrorExhausted = $false; MachineScopeFellBack = $false } }
         Mock Test-WingetPackageInstalled { @{ Installed = $false; TimedOut = $false; LaunchFailed = $false; LaunchError = $null; ExitCode = 0 } }
 
@@ -1593,6 +1818,151 @@ Describe 'Not-applicable gating end-to-end (issue #217)' {
     }
 }
 
+# Review findings P2-24, P3-22, P3-23 and P3-24, through the real orchestrator and the real
+# per-app pipeline as an RMM agent runs it: as SYSTEM, with a user signed in at the console. Only
+# the account, the AppX queries and the winget process are mocked. Before, such a run found no
+# winget (SYSTEM has no alias), registered, repaired and downloaded App Installer for minutes and
+# stopped with exit code 2; with a winget, it would have installed user-only apps into SYSTEM's own
+# profile, failed Windows Terminal on every run and told the technician to sign in as SYSTEM.
+Describe 'A run as SYSTEM from an RMM agent (review findings P2-24, P3-22, P3-23, P3-24)' {
+    BeforeEach {
+        Mock Write-Host { }
+        Mock Test-IsAdmin { $true }
+        Mock Test-IsRunningLocally { $true }
+        Mock Test-IsSystemAccount { $true }
+        Mock Get-ProcessUserName { 'NT AUTHORITY\SYSTEM' }
+        Mock Get-InteractiveSessionUserName { 'CONTOSO\jdoe' }
+        Mock Get-PendingRestartState { New-TestRestartState }
+        Mock Wait-WauIdle { $true }
+        Mock Test-AndInstallGraphicalTools { $true }
+        Mock Remove-LegacyScheduledUpdates { $false }
+        Mock Install-WingetAutoUpdate { [pscustomobject]@{ Status = 'AlreadyPresent'; Version = '2.12.0' } }
+        Mock Start-Sleep { }
+        Mock Import-Module { }
+        # Steps that set winget up for one account: none may run as SYSTEM.
+        Mock Test-AndInstallWingetModule { throw 'must not install Microsoft.WinGet.Client for SYSTEM' }
+        Mock Register-WingetAppInstallerForUser { throw 'must not register App Installer for SYSTEM' }
+        Mock Invoke-WingetPackageManagerRepair { throw 'must not repair winget for SYSTEM' }
+        Mock Repair-WinGetPackageManager { throw 'must not repair winget for SYSTEM' }
+        Mock Invoke-WebRequest { throw 'must not download App Installer for SYSTEM' }
+        Mock Add-AppxPackage { throw 'must not register a package for SYSTEM' }
+        # The console is hosted by Windows Terminal as far as the #271 check can tell; it must not
+        # matter to SYSTEM.
+        Mock Test-WindowsTerminalHostsCurrentSession { $true }
+
+        # App Installer, installed for the machine.
+        $script:appInstallerFolder = Join-Path $TestDrive 'WindowsApps\Microsoft.DesktopAppInstaller_1.27.460.0_x64__8wekyb3d8bbwe'
+        [void](New-Item -ItemType Directory -Path $script:appInstallerFolder -Force)
+        $script:machineWinget = Join-Path $script:appInstallerFolder 'winget.exe'
+        Set-Content -LiteralPath $script:machineWinget -Value 'stand-in' -Encoding ascii
+        Mock Get-DesktopAppInstallerPackageInfo { [pscustomobject]@{ Version = [version]'1.27.460.0'; Architecture = 'X64'; Status = 'Ok'; InstallLocation = $script:appInstallerFolder } }
+        # Windows 11 provisions Windows Terminal for every user.
+        Mock Get-ProvisionedAppxPackageName { 'Microsoft.WindowsStore'; 'Microsoft.WindowsTerminal' }
+
+        # winget, as the machine-wide winget.exe answers: Contoso.MachineApp has a machine-scope
+        # installer, Contoso.UserOnlyApp only a per-user one (0x8A150010 at --scope machine).
+        $script:launches = @()
+        $script:installedIds = @()
+        Mock Invoke-ExternalProcess {
+            $arguments = @($ArgumentList)
+            $script:launches += [pscustomobject]@{ FilePath = $FilePath; Arguments = ($arguments -join ' ') }
+            $id = $null
+            $idIndex = [array]::IndexOf($arguments, '--id')
+            if ($idIndex -ge 0) {
+                $id = $arguments[$idIndex + 1]
+            }
+            switch ($arguments[0]) {
+                '--version' { return New-TestProcessResult -ExitCode 0 -Output @('v1.12.350') }
+                'source' {
+                    if ($arguments[1] -eq 'list') {
+                        return New-TestProcessResult -ExitCode 0 -Output @('Name   Argument', 'winget https://cdn.winget.microsoft.com/cache')
+                    }
+                    return New-TestProcessResult -ExitCode 0
+                }
+                'list' {
+                    if ($script:installedIds -contains $id) {
+                        return New-TestProcessResult -ExitCode 0 -Output @('Name Id Version', "App $id 1.0")
+                    }
+                    return New-TestProcessResult -ExitCode -1978335212 -Output @('No installed package found matching input criteria.')
+                }
+                'install' {
+                    if ($arguments -contains '--scope' -and $id -eq 'Contoso.UserOnlyApp') {
+                        return New-TestProcessResult -ExitCode -1978335216 -Output @('No applicable installer found; see logs for more details.')
+                    }
+                    $script:installedIds += $id
+                    return New-TestProcessResult -ExitCode 0 -Output @('Successfully installed')
+                }
+            }
+            New-TestProcessResult -ExitCode 0
+        }
+
+        $script:capturedRows = $null
+        Mock Write-Table { if ($Title -eq 'Installation Summary') { $script:capturedRows = $Rows } }
+        $script:messages = @()
+        Mock Write-Info { $script:messages += $Message }
+        Mock Write-Success { $script:messages += $Message }
+        Mock Write-WarningMessage { $script:messages += $Message }
+        Mock Write-ErrorMessage { $script:messages += $Message }
+
+        $script:savedProgramW6432 = $env:ProgramW6432
+        $env:ProgramW6432 = Join-Path $TestDrive 'no-program-files'
+        # No transcript, so winget gets no --log folder to create.
+        $script:InstallLogPath = $null
+        $script:catalogTerminal = @(Get-DefaultAppCatalog | Where-Object { $_.name -eq 'Microsoft.WindowsTerminal' })[0]
+    }
+
+    AfterEach {
+        $env:ProgramW6432 = $script:savedProgramW6432
+        $script:MachineWingetPath = $null
+    }
+
+    It 'Installs the machine-wide apps with the machine-wide winget.exe, defers the user-only app and skips the provisioned Terminal' {
+        $apps = @(@{ name = 'Contoso.MachineApp' }, @{ name = 'Contoso.UserOnlyApp' }, $script:catalogTerminal)
+
+        $result = Invoke-WingetInstall -Apps $apps
+
+        $result | Should -Be 0
+        @($script:capturedRows | Where-Object { $_[0] -eq 'Installed' })[0][1] | Should -Be 'Contoso.MachineApp'
+        @($script:capturedRows | Where-Object { $_[0] -eq 'Deferred' })[0][1] | Should -Be 'Contoso.UserOnlyApp'
+        @($script:capturedRows | Where-Object { $_[0] -eq 'Skipped' })[0][1] | Should -Be 'Microsoft.WindowsTerminal'
+        @($script:capturedRows | Where-Object { $_[0] -eq 'Failed' }).Count | Should -Be 0
+
+        # Every winget call ran the machine-wide winget.exe: SYSTEM has no 'winget' on its PATH.
+        $script:launches.Count | Should -BeGreaterThan 0
+        @($script:launches | Where-Object { $_.FilePath -ne $script:machineWinget }).Count | Should -Be 0
+        # Nothing at winget's default (per-user) scope, which for SYSTEM is its own profile.
+        @($script:launches | Where-Object { $_.Arguments -match '^install ' -and $_.Arguments -notmatch '--scope machine' }).Count | Should -Be 0
+        # Windows Terminal was decided from the machine, and never installed or listed with winget.
+        @($script:launches | Where-Object { $_.Arguments -match 'Microsoft\.WindowsTerminal' }).Count | Should -Be 0
+        # Unattended: winget installs silently.
+        @($script:launches | Where-Object { $_.Arguments -match '^install ' -and $_.Arguments -notmatch '--silent' }).Count | Should -Be 0
+
+        $text = $script:messages -join "`n"
+        $text | Should -Match 'Skipping: Microsoft\.WindowsTerminal \(already provisioned for every user on this PC\)'
+        $text | Should -Match 'Deferred: Contoso\.UserOnlyApp - no machine-wide installer, and a run as SYSTEM installs for the whole PC only'
+        $text | Should -Not -Match 'Cross-user elevation|log on to Windows|ADMIN account|NT AUTHORITY'
+        Should -Invoke Test-AndInstallWingetModule -Times 0 -Exactly
+        Should -Invoke Register-WingetAppInstallerForUser -Times 0 -Exactly
+        Should -Invoke Invoke-WingetPackageManagerRepair -Times 0 -Exactly
+        Should -Invoke Invoke-WebRequest -Times 0 -Exactly
+        Should -Invoke Add-AppxPackage -Times 0 -Exactly
+    }
+
+    It 'Stops with exit code 2, saying so for SYSTEM, without any per-account step, when App Installer is not installed for the machine' {
+        Mock Get-DesktopAppInstallerPackageInfo { }
+
+        $result = Invoke-WingetInstall -Apps @(@{ name = 'Contoso.MachineApp' })
+
+        $result | Should -Be 2
+        ($script:messages -join "`n") | Should -Match 'No machine-wide winget was found'
+        @($script:launches).Count | Should -Be 0
+        Should -Invoke Register-WingetAppInstallerForUser -Times 0 -Exactly
+        Should -Invoke Invoke-WingetPackageManagerRepair -Times 0 -Exactly
+        Should -Invoke Invoke-WebRequest -Times 0 -Exactly
+        Should -Invoke Test-AndInstallWingetModule -Times 0 -Exactly
+    }
+}
+
 # Review findings P2-8, P2-9 and P2-10: with winget.exe unable to start (E2E run 36384683838, second
 # pass, every app already installed), each app spent 9 launches and 75 seconds of backoff, twice:
 # about 24 minutes, then every app reported as 'package not found after install'. Here the real
@@ -1615,6 +1985,7 @@ Describe 'Wedged winget: the run fails fast (review findings P2-8, P2-9, P2-10)'
         Mock Set-WindowsTerminalDefaults { }
         Mock Install-WingetAutoUpdate { [pscustomobject]@{ Status = 'FrameworkMissing'; Version = '2.12.0'; FrameworkMissing = $true } }
         Mock Get-PendingRestartState { New-TestRestartState }
+        Mock Get-InstallAccountContext { New-TestAccountContext }
         # Never read the machine's App Installer packages, and never start a real process: the
         # removed deadlock detector and Wait-WingetLaunchable did both.
         Mock Get-AppxPackage { }
@@ -1816,6 +2187,8 @@ Describe 'Dry run leaves the machine unchanged (P2-16)' {
         Mock Unregister-ScheduledTask { }
         Mock Set-ScheduledTask { }
         Mock winget { $global:LASTEXITCODE = 0 }
+        # A same-user run, whatever account runs the suite.
+        Mock Get-InstallAccountContext { New-TestAccountContext }
 
         # Last: mocking Get-Command breaks the command lookup that Mock itself relies on for the
         # targets above (see TestHelpers.ps1). Nothing is available by default: no winget, no
@@ -2116,6 +2489,13 @@ Describe 'Format-InstallFailureReason (issue #189)' {
         }
     }
 
+    Context 'When a run for the whole PC could not read the provisioned packages (review finding P3-24)' {
+        It 'Says what could not be checked' {
+            Format-InstallFailureReason -FailureReason 'MachineCheckFailed' -InstallResult $null |
+                Should -Be 'could not check whether it is provisioned for every user on this PC (see the warning above)'
+        }
+    }
+
     Context 'When winget list ran but failed (review finding P2-9)' {
         It 'Names the check <Reason> and the list''s own exit code, apart from the install''s' -ForEach @(
             @{ Reason = 'PreCheckFailed'; InstallResult = $null; Expected = 'winget list failed during the pre-install check with exit 0x8A15004B FAILED_TO_OPEN_ALL_SOURCES' }
@@ -2152,6 +2532,46 @@ Describe 'Format-InstallFailureReason (issue #189)' {
         It 'Falls back to a generic reason for unknown failure kinds' {
             Format-InstallFailureReason -FailureReason $null -InstallResult $null | Should -Be 'install failed'
         }
+    }
+}
+
+Describe 'Write-DeferredAppsSummary (review findings P3-22, P3-23)' {
+    BeforeEach {
+        $script:warningMessages = @()
+        Mock Write-WarningMessage { $script:warningMessages += $Message }
+    }
+
+    It 'Says nothing when no app was deferred' {
+        Write-DeferredAppsSummary -DeferredApps @() -AccountContext (New-TestAccountContext -System)
+        Write-DeferredAppsSummary -DeferredApps $null -AccountContext (New-TestAccountContext -System)
+
+        Should -Invoke Write-WarningMessage -Times 0 -Exactly
+    }
+
+    It 'Names every deferred app in one line, for SYSTEM' {
+        Write-DeferredAppsSummary -DeferredApps @('Contoso.One', 'Contoso.Two') -AccountContext (New-TestAccountContext -System -SessionUser 'CONTOSO\jdoe')
+
+        $script:warningMessages | Should -Be @('Deferred: Contoso.One, Contoso.Two - no machine-wide installer, and a run as SYSTEM installs for the whole PC only. Not installed and not counted as failed; run the installer as the signed-in user to install them.')
+    }
+}
+
+Describe 'Write-InstalledAppNote: per-user installs (review finding P3-22)' {
+    BeforeEach {
+        $script:infoMessages = @()
+        Mock Write-Info { $script:infoMessages += $Message }
+        Mock Write-WarningMessage { }
+    }
+
+    It 'Says an app that fell back to winget''s default scope was installed for this account only' {
+        Write-InstalledAppNote -AppName 'Microsoft.WindowsTerminal' -InstallResult @{ ExitCode = 0; MachineScopeFellBack = $true; RestartRequired = $false } | Should -Be $false
+
+        $script:infoMessages | Should -Be @('Microsoft.WindowsTerminal has no machine-wide installer, so it was installed for this account only.')
+    }
+
+    It 'Says nothing more for a machine-wide install' {
+        Write-InstalledAppNote -AppName '7zip.7zip' -InstallResult @{ ExitCode = 0; MachineScopeFellBack = $false; RestartRequired = $false } | Should -Be $false
+
+        $script:infoMessages | Should -BeNullOrEmpty
     }
 }
 

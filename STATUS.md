@@ -96,7 +96,19 @@ downloads the installer from raw or jsDelivr and runs only a copy of the same bu
 bootstrap exits 7 instead of 1. The Windows Terminal step now changes only `defaultProfile` in
 `settings.json` (comments and formatting are kept, and a `.bak` copy is saved first), and it is
 skipped for SYSTEM and under cross-user elevation, where it used to configure the admin account
-instead of the user.
+instead of the user. A run as SYSTEM, as an RMM agent such as Endpoint Central runs it, now installs
+the apps that install for the whole PC instead of stopping with exit code 2 after minutes of
+per-account downloads: it runs the `winget.exe` that App Installer installed for the PC, by its full path
+(found with `Get-AppxPackage -AllUsers`, or under `WindowsApps`, and checked with `winget --version`),
+skips every step that sets winget up for one account, is always non-interactive, and its messages no
+longer call it a cross-user elevation or advise signing in as SYSTEM. It exits 2, saying why, when
+no machine-wide `winget.exe` starts. As SYSTEM and under cross-user elevation, every install is
+`--scope machine` only: an app with no machine-wide installer is reported as `Deferred` (its own
+summary row, neither installed nor failed, exit code unchanged) instead of being installed into
+SYSTEM's or the admin's profile and reported as installed, and Windows Terminal is decided from
+whether it is provisioned for every user, which Windows 11 does. Microsoft does not support the
+winget command line as SYSTEM; its `Microsoft.WinGet.Client` module on PowerShell 7 is the supported
+route and a follow-up.
 
 The same branch changes CI. Fork pull requests that leave `windows-tests.yml` alone no longer run
 on the self-hosted win-test runner, and `claude.yml` calls the shared Claude workflow at a pinned
@@ -286,7 +298,7 @@ every repository secret.
 |------|-------------|
 | `WingetAppSetup/` | Source-of-truth PowerShell module (`.psd1` manifest + `.psm1` loader) |
 | `WingetAppSetup/Public/` | Exported functions: logging, winget core, app validation, Windows Terminal config, install orchestration (updates are outsourced to WAU) |
-| `WingetAppSetup/Private/` | Internal helpers: environment/PATH, elevation, graphical tools, the Windows PowerShell 5.1 → PowerShell 7 bootstrap |
+| `WingetAppSetup/Private/` | Internal helpers: environment/PATH, elevation, graphical tools, the Windows PowerShell 5.1 → PowerShell 7 bootstrap, the machine-wide winget and provisioning lookups a run as SYSTEM uses (`MachineContext.ps1`) |
 | `build/Build-WingetInstallScript.ps1` | Concatenates the module + entry fragments into `winget-app-install.ps1` |
 | `build/fragments/` | `head.ps1` (PSScriptInfo, help, `param`) and `tail.ps1` (entry-point dispatch) |
 | `winget-app-install.ps1` | **Generated** single-file installer for local and `irm \| iex` use — do not edit by hand |
@@ -373,6 +385,11 @@ every repository secret.
 - In [J-MaFf/.github](https://github.com/J-MaFf/.github): pin `anthropics/claude-code-action` and `actions/checkout` in the shared `claude.yml` to commit SHAs, fetch git-policies at a pinned ref, and declare `CLAUDE_CODE_OAUTH_TOKEN` under `on.workflow_call.secrets`. Then move this repository's `claude.yml` pin to that SHA and replace `secrets: inherit` with that one secret.
 - **E2E tier 2** ([#215](https://github.com/J-MaFf/winget-app-setup/issues/215)): cross-user elevation end-to-end run on a snapshot-rollback Proxmox VM, reusing `e2e/Assert-Install.ps1` (the shared assertion script from tier 1).
 - Watch the first Windows CI runs on the self-hosted win-test runner for environment drift — module versions now persist across runs instead of starting from a fresh `windows-latest` image (as of [#161](https://github.com/J-MaFf/winget-app-setup/issues/161)).
+- Run the installer as SYSTEM on real Windows 11 and Windows 10 PCs (from Endpoint Central, or
+  `psexec -s` from a 32-bit PowerShell) before relying on it from the RMM: the machine-wide
+  `winget.exe` lookup and launch, `--scope machine` installs of the catalog, the `Deferred` report,
+  the Windows Terminal provisioning check, and whether a clean PC without the Visual C++ runtime
+  fails with `0xC0000135`. Then decide whether to move SYSTEM runs to `Microsoft.WinGet.Client`.
 - Validate the dormant DISM MSIX-provisioning path in `Install-PowerShellLatest` end-to-end on a real Windows 10 machine before PowerShell 7.7 GA makes it load-bearing (as of [#166](https://github.com/J-MaFf/winget-app-setup/issues/166)).
 - Cut a tagged release and move the `[Unreleased]` CHANGELOG entries under a versioned heading.
 

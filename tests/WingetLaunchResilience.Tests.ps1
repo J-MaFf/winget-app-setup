@@ -80,12 +80,44 @@ Describe 'Test-TransientWingetLaunchError' {
 }
 
 Describe 'Resolve-WingetExecutable' {
+    BeforeEach {
+        $script:MachineWingetPath = $null
+    }
+
+    AfterEach {
+        $script:MachineWingetPath = $null
+    }
+
     It 'Returns the bare command name, resolved on PATH, and never queries the package database (review finding P3-7)' {
         Mock Get-AppxPackage { throw 'must not be called' }
+        Mock Get-MachineWingetCandidate { throw 'must not be called' }
 
         Resolve-WingetExecutable | Should -Be 'winget'
 
         Should -Invoke Get-AppxPackage -Times 0 -Exactly
+        Should -Invoke Get-MachineWingetCandidate -Times 0 -Exactly
+    }
+
+    It 'Returns the machine-wide winget.exe a SYSTEM run found, for every winget call (review finding P2-24)' {
+        $machineWinget = Join-Path $TestDrive 'Microsoft.DesktopAppInstaller_1.27.460.0_x64__8wekyb3d8bbwe\winget.exe'
+        [void](New-Item -ItemType Directory -Path (Split-Path -Parent $machineWinget) -Force)
+        Set-Content -LiteralPath $machineWinget -Value 'stand-in' -Encoding ascii
+        Mock Get-MachineWingetCandidate { throw 'must not look again while the file is there' }
+        $script:MachineWingetPath = $machineWinget
+
+        Resolve-WingetExecutable | Should -Be $machineWinget
+
+        Should -Invoke Get-MachineWingetCandidate -Times 0 -Exactly
+    }
+
+    It 'Looks up the newest machine-wide winget.exe again when App Installer was updated during the run and the old folder is gone' {
+        $newer = Join-Path $TestDrive 'Microsoft.DesktopAppInstaller_1.28.0.0_x64__8wekyb3d8bbwe\winget.exe'
+        Mock Get-MachineWingetCandidate { [pscustomobject]@{ Path = $newer; Version = [version]'1.28.0.0'; Architecture = 'x64'; Source = 'WindowsApps' } }
+        $script:MachineWingetPath = Join-Path $TestDrive 'Microsoft.DesktopAppInstaller_1.27.460.0_x64__8wekyb3d8bbwe\gone\winget.exe'
+
+        Resolve-WingetExecutable | Should -Be $newer
+
+        $script:MachineWingetPath | Should -Be $newer
     }
 }
 
