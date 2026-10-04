@@ -172,6 +172,31 @@ Describe 'Winget-AutoUpdate integration (issue #168)' {
             { Set-RestrictedDirectoryAcl -Path 'C:\ProgramData\winget-app-setup' } |
                 Should -Throw "*'C:\ProgramData\winget-app-setup' is not limited to SYSTEM and Administrators: it is owned by PC01\enduser (S-1-5-21-1111111111-2222222222-3333333333-1001).*"
         }
+
+        # The caller suggests resetting the folder's owner and access list only for these failures,
+        # so they carry an error id it can tell apart from any other.
+        It 'tags an icacls failure with the error id RestrictedDirectoryAclFailed' {
+            Mock Start-Process { [pscustomobject]@{ ExitCode = 5 } } -ParameterFilter { $FilePath -eq 'icacls.exe' }
+
+            { Set-RestrictedDirectoryAcl -Path 'C:\ProgramData\winget-app-setup' } |
+                Should -Throw -ErrorId 'RestrictedDirectoryAclFailed' -ExpectedMessage "icacls failed to make Administrators the owner of 'C:\ProgramData\winget-app-setup' (exit code 5)."
+        }
+
+        It 'tags a failed check of the result with the error id RestrictedDirectoryAclFailed' {
+            Mock Start-Process { [pscustomobject]@{ ExitCode = 0 } } -ParameterFilter { $FilePath -eq 'icacls.exe' }
+            Mock Assert-RestrictedDirectoryAcl { throw "'C:\ProgramData\winget-app-setup' is not limited to SYSTEM and Administrators: it is owned by PC01\enduser (S-1-5-21-1-2-3-1001)." }
+
+            { Set-RestrictedDirectoryAcl -Path 'C:\ProgramData\winget-app-setup' } |
+                Should -Throw -ErrorId 'RestrictedDirectoryAclFailed' -ExpectedMessage "'C:\ProgramData\winget-app-setup' is not limited to SYSTEM and Administrators: it is owned by PC01\enduser (S-1-5-21-1-2-3-1001)."
+        }
+
+        It 'tags an access list that cannot be read with the error id RestrictedDirectoryAclFailed' {
+            Mock Start-Process { [pscustomobject]@{ ExitCode = 0 } } -ParameterFilter { $FilePath -eq 'icacls.exe' }
+            Mock Get-DirectoryAccessSummary { throw 'Attempted to perform an unauthorized operation.' }
+
+            { Set-RestrictedDirectoryAcl -Path 'C:\ProgramData\winget-app-setup' } |
+                Should -Throw -ErrorId 'RestrictedDirectoryAclFailed' -ExpectedMessage '*unauthorized operation*'
+        }
     }
 
     Context 'Assert-RestrictedDirectoryAcl (review finding P2-21)' {
@@ -570,6 +595,58 @@ Describe 'Winget-AutoUpdate integration (issue #168)' {
                 $message | Should -BeLike '*Winget-AutoUpdate was NOT installed: its download folder could not be limited to SYSTEM and Administrators*'
                 $message | Should -BeLike "*it is owned by PC01\enduser (S-1-5-21-1-2-3-1001)*"
                 $message | Should -BeLike "*takeown /f `"$baseDir`" /a, then icacls `"$baseDir`" /reset*"
+            }
+            finally {
+                $env:ProgramData = $savedProgramData
+            }
+        }
+
+        # Review of item 17: taking ownership and resetting the access list fixes only an
+        # access-list failure. For anything else that stops the folder being set up, that advice
+        # and the 'could have been swapped' wording would send the teammate the wrong way.
+        It 'reports a download folder that cannot be created without the ownership wording or the reset hint' {
+            $savedProgramData = $env:ProgramData
+            $env:ProgramData = Join-Path $TestDrive 'ProgramData'
+            try {
+                Mock Test-WauInstalled { $false }
+                Mock New-Item { throw 'There is not enough space on the disk.' }
+                Mock Start-Process { throw 'must not run icacls on a folder that was not created' } -ParameterFilter { $FilePath -eq 'icacls.exe' }
+                Mock Invoke-WebRequest { throw 'must not download without a download folder' }
+                $script:errors = @()
+                Mock Write-ErrorMessage { $script:errors += $Message }
+
+                $result = Install-WingetAutoUpdate
+
+                $result.Status | Should -Be 'Failed'
+                Should -Invoke Invoke-WebRequest -Times 0 -Exactly
+                Should -Invoke Start-Process -Times 0 -Exactly -ParameterFilter { $FilePath -eq 'icacls.exe' }
+                $baseDir = Join-Path $env:ProgramData 'winget-app-setup'
+                $message = $script:errors -join "`n"
+                $message | Should -Be "Winget-AutoUpdate was NOT installed: its download folder in '$baseDir' could not be set up: There is not enough space on the disk."
+            }
+            finally {
+                $env:ProgramData = $savedProgramData
+            }
+        }
+
+        It 'reports icacls.exe failing to start without the ownership wording or the reset hint' {
+            $savedProgramData = $env:ProgramData
+            $env:ProgramData = Join-Path $TestDrive 'ProgramData'
+            try {
+                Mock Test-WauInstalled { $false }
+                Mock Start-Process { throw "An error occurred trying to start process 'icacls.exe'." } -ParameterFilter { $FilePath -eq 'icacls.exe' }
+                Mock Invoke-WebRequest { throw 'must not download without a secured download folder' }
+                $script:errors = @()
+                Mock Write-ErrorMessage { $script:errors += $Message }
+
+                $result = Install-WingetAutoUpdate
+
+                $result.Status | Should -Be 'Failed'
+                Should -Invoke Invoke-WebRequest -Times 0 -Exactly
+                $message = $script:errors -join "`n"
+                $message | Should -BeLike "*could not be set up: An error occurred trying to start process 'icacls.exe'.*"
+                $message | Should -Not -BeLike '*takeown*'
+                $message | Should -Not -BeLike '*limited to SYSTEM and Administrators*'
             }
             finally {
                 $env:ProgramData = $savedProgramData

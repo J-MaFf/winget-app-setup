@@ -152,7 +152,14 @@ function Install-WingetAutoUpdate {
         }
         catch {
             $baseDir = Join-Path $env:ProgramData 'winget-app-setup'
-            Write-ErrorMessage "Winget-AutoUpdate was NOT installed: its download folder could not be limited to SYSTEM and Administrators, so its installer could have been swapped before it ran. $_ To reset the folder, run in an elevated prompt: takeown /f `"$baseDir`" /a, then icacls `"$baseDir`" /reset, and re-run this installer."
+            if ($_.FullyQualifiedErrorId -eq 'RestrictedDirectoryAclFailed') {
+                Write-ErrorMessage "Winget-AutoUpdate was NOT installed: its download folder could not be limited to SYSTEM and Administrators, so its installer could have been swapped before it ran. $_ To reset the folder, run in an elevated prompt: takeown /f `"$baseDir`" /a, then icacls `"$baseDir`" /reset, and re-run this installer."
+            }
+            else {
+                # Not an access-list problem (a file already named winget-app-setup, a full disk,
+                # icacls.exe not starting): resetting the folder's owner would not help.
+                Write-ErrorMessage "Winget-AutoUpdate was NOT installed: its download folder in '$baseDir' could not be set up: $_"
+            }
             return [pscustomobject]@{ Status = 'Failed'; Version = $pin.Version; FrameworkMissing = $false; RestartRequired = $false }
         }
         $msiPath = Join-Path $stagingDir "WAU-$($pin.Version).msi"

@@ -323,9 +323,10 @@ need that framework and would otherwise leave winget unusable; the summary then 
 The WAU MSI is downloaded into a new folder inside `%ProgramData%\winget-app-setup`. The installer
 first makes Administrators the owner of both folders, limits them to SYSTEM and Administrators, and
 reads the result back; if a folder still has another owner or access entry, WAU is not downloaded,
-the run says why and how to reset the folder, and the summary shows `Auto-updates: FAILED`. The MSI
-is hashed from a handle that stays open until `msiexec` has finished, so nothing can replace it in
-between.
+the run says why and how to reset the folder, and the summary shows `Auto-updates: FAILED`. When a
+folder cannot be set up for another reason (it cannot be created, or `icacls` does not start), the
+run gives that reason without the reset advice, which would not help. The MSI is hashed from a
+handle that stays open until `msiexec` has finished, so nothing can replace it in between.
 WAU's own self-update is disabled so the version stays pinned; bump it via `Get-WauPin` in
 `WingetAppSetup/Public/WingetAutoUpdate.ps1`. `winget-app-uninstall.ps1` removes WAU (and any legacy
 scheduled-update task from older versions).

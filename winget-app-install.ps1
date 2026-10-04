@@ -59,12 +59,12 @@ param (
 # This script is assembled from the WingetAppSetup module by build/Build-WingetInstallScript.ps1.
 # Edit the function source under WingetAppSetup/Public and WingetAppSetup/Private, then re-run the
 # build to regenerate this file. See readme.md ("Project layout") for details.
-# Build id: 1.0.0+06175f6b (module version + SHA256 fragment of this whole script; issue #189).
+# Build id: 1.0.0+49b25a7e (module version + SHA256 fragment of this whole script; issue #189).
 # ------------------------------------------------------------------------------------------------
 
 # Content-derived build identity, logged at startup so a transcript from a remote machine
 # identifies exactly which installer build produced it (issue #189).
-$script:InstallerBuildId = '1.0.0+06175f6b'
+$script:InstallerBuildId = '1.0.0+49b25a7e'
 
 # ------------------------------------------------Functions------------------------------------------------
 
@@ -3864,6 +3864,9 @@ function Assert-RestrictedDirectoryAcl {
     off the console; its errors still show.
 
     Throws when icacls fails or the check does: callers must treat the directory as unsafe to use.
+    Those two failures carry the error id 'RestrictedDirectoryAclFailed', so a caller can tell them
+    from any other (icacls.exe not starting, say) and suggest resetting the folder's owner and
+    access list only when that is what went wrong.
 .PARAMETER Path
     The directory whose ACL should be replaced.
 #>
@@ -3873,6 +3876,7 @@ function Set-RestrictedDirectoryAcl {
         [string]$Path
     )
 
+    $failure = $null
     $steps = @(
         @{
             Arguments   = "`"$Path`" /setowner *S-1-5-32-544 /q"
@@ -3889,10 +3893,22 @@ function Set-RestrictedDirectoryAcl {
     foreach ($step in $steps) {
         $proc = Start-Process -FilePath 'icacls.exe' -ArgumentList $step.Arguments -Wait -PassThru -NoNewWindow
         if ($proc.ExitCode -ne 0) {
-            throw "icacls failed to $($step.Description) '$Path' (exit code $($proc.ExitCode))."
+            $failure = "icacls failed to $($step.Description) '$Path' (exit code $($proc.ExitCode))."
+            break
         }
     }
-    Assert-RestrictedDirectoryAcl -Path $Path
+    if (-not $failure) {
+        try {
+            Assert-RestrictedDirectoryAcl -Path $Path
+        }
+        catch {
+            $failure = "$_"
+        }
+    }
+    if ($failure) {
+        $exception = [System.InvalidOperationException]::new($failure)
+        throw [System.Management.Automation.ErrorRecord]::new($exception, 'RestrictedDirectoryAclFailed', [System.Management.Automation.ErrorCategory]::SecurityError, $Path)
+    }
 }
 
 <#
@@ -3930,8 +3946,9 @@ function Open-ReadLockedFile {
     installer's non-elevated first launch creates it, owned by the signed-in user: review finding
     P2-21), so an unprivileged process cannot observe the per-run name or delete-and-recreate the
     staging directory through rights on the parent. Both are checked after the change
-    (Set-RestrictedDirectoryAcl). Throws when the directory cannot be created or secured. Callers
-    own cleanup (Remove-Item -Recurse).
+    (Set-RestrictedDirectoryAcl). Throws when the directory cannot be created or secured; only a
+    failure to secure it carries the error id 'RestrictedDirectoryAclFailed'. Callers own cleanup
+    (Remove-Item -Recurse).
 .RETURNS
     [string] The full path of the created staging directory.
 #>
@@ -7126,7 +7143,14 @@ function Install-WingetAutoUpdate {
         }
         catch {
             $baseDir = Join-Path $env:ProgramData 'winget-app-setup'
-            Write-ErrorMessage "Winget-AutoUpdate was NOT installed: its download folder could not be limited to SYSTEM and Administrators, so its installer could have been swapped before it ran. $_ To reset the folder, run in an elevated prompt: takeown /f `"$baseDir`" /a, then icacls `"$baseDir`" /reset, and re-run this installer."
+            if ($_.FullyQualifiedErrorId -eq 'RestrictedDirectoryAclFailed') {
+                Write-ErrorMessage "Winget-AutoUpdate was NOT installed: its download folder could not be limited to SYSTEM and Administrators, so its installer could have been swapped before it ran. $_ To reset the folder, run in an elevated prompt: takeown /f `"$baseDir`" /a, then icacls `"$baseDir`" /reset, and re-run this installer."
+            }
+            else {
+                # Not an access-list problem (a file already named winget-app-setup, a full disk,
+                # icacls.exe not starting): resetting the folder's owner would not help.
+                Write-ErrorMessage "Winget-AutoUpdate was NOT installed: its download folder in '$baseDir' could not be set up: $_"
+            }
             return [pscustomobject]@{ Status = 'Failed'; Version = $pin.Version; FrameworkMissing = $false; RestartRequired = $false }
         }
         $msiPath = Join-Path $stagingDir "WAU-$($pin.Version).msi"

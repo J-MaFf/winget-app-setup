@@ -189,7 +189,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     is off and every entry belongs to SYSTEM or Administrators (an explicit entry another account
     added survives `/grant:r`). When it fails nothing is downloaded: the run says `Winget-AutoUpdate
     was NOT installed`, names the owner or entry at fault and how to reset the folder (`takeown /f
-    ... /a`, then `icacls ... /reset`), and the summary shows `Auto-updates: FAILED`.
+    ... /a`, then `icacls ... /reset`), and the summary shows `Auto-updates: FAILED`. Only these
+    failures carry that advice (`Set-RestrictedDirectoryAcl` tags them with the error id
+    `RestrictedDirectoryAclFailed`); when the folder cannot be created or `icacls` does not start,
+    the run gives that reason without it.
   - **MSI held open.** After the download the MSI is opened once with read-only sharing
     (`Open-ReadLockedFile`), hashed from that open stream and kept open until `msiexec` has
     finished, so it cannot be overwritten, renamed or deleted in between. It is closed before the

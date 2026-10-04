@@ -181,6 +181,9 @@ function Assert-RestrictedDirectoryAcl {
     off the console; its errors still show.
 
     Throws when icacls fails or the check does: callers must treat the directory as unsafe to use.
+    Those two failures carry the error id 'RestrictedDirectoryAclFailed', so a caller can tell them
+    from any other (icacls.exe not starting, say) and suggest resetting the folder's owner and
+    access list only when that is what went wrong.
 .PARAMETER Path
     The directory whose ACL should be replaced.
 #>
@@ -190,6 +193,7 @@ function Set-RestrictedDirectoryAcl {
         [string]$Path
     )
 
+    $failure = $null
     $steps = @(
         @{
             Arguments   = "`"$Path`" /setowner *S-1-5-32-544 /q"
@@ -206,10 +210,22 @@ function Set-RestrictedDirectoryAcl {
     foreach ($step in $steps) {
         $proc = Start-Process -FilePath 'icacls.exe' -ArgumentList $step.Arguments -Wait -PassThru -NoNewWindow
         if ($proc.ExitCode -ne 0) {
-            throw "icacls failed to $($step.Description) '$Path' (exit code $($proc.ExitCode))."
+            $failure = "icacls failed to $($step.Description) '$Path' (exit code $($proc.ExitCode))."
+            break
         }
     }
-    Assert-RestrictedDirectoryAcl -Path $Path
+    if (-not $failure) {
+        try {
+            Assert-RestrictedDirectoryAcl -Path $Path
+        }
+        catch {
+            $failure = "$_"
+        }
+    }
+    if ($failure) {
+        $exception = [System.InvalidOperationException]::new($failure)
+        throw [System.Management.Automation.ErrorRecord]::new($exception, 'RestrictedDirectoryAclFailed', [System.Management.Automation.ErrorCategory]::SecurityError, $Path)
+    }
 }
 
 <#
@@ -247,8 +263,9 @@ function Open-ReadLockedFile {
     installer's non-elevated first launch creates it, owned by the signed-in user: review finding
     P2-21), so an unprivileged process cannot observe the per-run name or delete-and-recreate the
     staging directory through rights on the parent. Both are checked after the change
-    (Set-RestrictedDirectoryAcl). Throws when the directory cannot be created or secured. Callers
-    own cleanup (Remove-Item -Recurse).
+    (Set-RestrictedDirectoryAcl). Throws when the directory cannot be created or secured; only a
+    failure to secure it carries the error id 'RestrictedDirectoryAclFailed'. Callers own cleanup
+    (Remove-Item -Recurse).
 .RETURNS
     [string] The full path of the created staging directory.
 #>
