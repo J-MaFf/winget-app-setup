@@ -27,10 +27,11 @@
     WingetSearch      the `winget search` source health check (2 minutes).
     WingetSourceReset `winget source reset`, which downloads the source again (5 minutes).
     MsiExec           one msiexec install or uninstall (15 minutes, as for the PowerShell 7 MSI).
-    WebDownload       a small file download, such as the Winget-AutoUpdate MSI: the whole request
-                      on PowerShell 7.3 and older, the connection on 7.4 and newer (5 minutes).
-    WebDownloadStall  how long a download may receive nothing, on PowerShell 7.4 and newer
-                      (2 minutes).
+    WebDownload       a small file download, such as the Winget-AutoUpdate MSI: the connection
+                      and the wait for the response headers (5 minutes). Invoke-WebRequest's
+                      -TimeoutSec does not cover the body.
+    WebDownloadStall  how long a download may receive nothing once the file is arriving, on
+                      PowerShell 7.4 and newer (2 minutes). 7.3 and older have no such limit.
 .RETURNS
     [int] Seconds.
 #>
@@ -60,9 +61,11 @@ function Get-ProcessTimeoutSeconds {
     Returns the time-limit parameters for an Invoke-WebRequest download, for splatting.
 .DESCRIPTION
     Invoke-WebRequest has no time limit by default, so a download that connects and then stops
-    receiving waits for ever (review finding P2-5). -TimeoutSec bounds the whole request on
-    PowerShell 7.3 and older, and only the connection on 7.4 and newer, where
-    -OperationTimeoutSeconds bounds a stall instead; both are passed where they exist.
+    receiving waits for ever (review finding P2-5). -TimeoutSec bounds the connection and the wait
+    for the response headers only (PowerShell sends the request with ResponseHeadersRead and reads
+    the body after HttpClient's timeout has ended). PowerShell 7.4 and newer add
+    -OperationTimeoutSeconds, which bounds a stall while the body arrives; both are passed where
+    they exist. On 7.3 and older a download that stops mid-file still waits for ever.
 .RETURNS
     [hashtable] TimeoutSec, plus OperationTimeoutSeconds when Invoke-WebRequest has it.
 #>
@@ -191,11 +194,14 @@ function ConvertTo-PlainProcessLine {
     With its output redirected, winget still draws its spinner (- \ | /) and its download progress
     bar, one carriage-return-separated update at a time, and each update arrives as a line of its
     own. Echoing every one of them would bury the lines that matter. 'Spinner' and 'Blank' lines
-    are dropped, and of a run of 'Progress' lines only the last is shown.
+    are dropped, and of a run of 'Progress' lines only the last is shown. A 'Status' line is the
+    spinner with a message after it, which winget redraws every 250 ms for as long as it waits,
+    for example '   - Waiting for another install/uninstall to complete...' while another install
+    holds its lock; Select-ProcessOutputLine shows it once per run of the same message.
 .PARAMETER Line
     A line already passed through ConvertTo-PlainProcessLine.
 .RETURNS
-    [string] 'Blank', 'Spinner', 'Progress' or 'Text'.
+    [string] 'Blank', 'Spinner', 'Status', 'Progress' or 'Text'.
 #>
 function Get-ProcessOutputLineKind {
     param (
@@ -211,12 +217,90 @@ function Get-ProcessOutputLineKind {
     if ($Line -match '^\s*[-\\|/]\s*$') {
         return 'Spinner'
     }
+    if ($Line -match '^\s*[-\\|/]\s+\S') {
+        return 'Status'
+    }
     # Progress bar cells (full block, light, medium and dark shade), or a bare percentage or byte
-    # count such as '45%' or '1.50 MB / 3.00 MB'.
-    if ($Line -match '[\u2588\u2591\u2592\u2593]' -or $Line -match '^\s*\d+(\.\d+)?\s*%\s*$' -or $Line -match '^\s*[\d.]+\s*[KMGT]?B\s*/\s*[\d.]+\s*[KMGT]?B\s*$') {
+    # count such as '45%', '1.50 MB / 3.00 MB' or, for a download of unknown size, '12.3 MB'.
+    if ($Line -match '[\u2588\u2591\u2592\u2593]' -or $Line -match '^\s*\d+(\.\d+)?\s*%\s*$' -or $Line -match '^\s*[\d.]+\s*[KMGT]?B(\s*/\s*[\d.]+\s*[KMGT]?B)?\s*$') {
         return 'Progress'
     }
     return 'Text'
+}
+
+<#
+.SYNOPSIS
+    Decides which lines of process output to show, one line at a time.
+.DESCRIPTION
+    The filter Write-ProcessOutput and Invoke-ExternalProcess's live echo share, so both show the
+    same lines (Get-ProcessOutputLineKind classifies them):
+      - 'Blank' and 'Spinner' lines are dropped.
+      - Of a run of 'Progress' updates only the last is shown, just before the next line that is
+        shown, or at the end through -Flush.
+      - A 'Status' line is shown once per run of the same message (the spinner character in front
+        of it changes on every redraw, so only the message is compared). Without this, winget's
+        wait for another install, the case a run queued behind Winget-AutoUpdate hits, wrote four
+        lines a second for up to the 30-minute install limit.
+      - 'Text' lines are always shown.
+.PARAMETER State
+    A hashtable the caller keeps for one run of output, empty to begin with.
+.PARAMETER Line
+    The next line, already passed through ConvertTo-PlainProcessLine.
+.PARAMETER Flush
+    End of the output: return the progress update still held back, if any.
+.RETURNS
+    [string[]] The lines to show now, in order. Often none.
+#>
+function Select-ProcessOutputLine {
+    param (
+        [Parameter(Mandatory = $true)]
+        [hashtable]$State,
+
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [AllowEmptyString()]
+        [string]$Line,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$Flush
+    )
+
+    $show = New-Object System.Collections.Generic.List[string]
+    $kind = 'Flush'
+    if (-not $Flush) {
+        $kind = Get-ProcessOutputLineKind -Line $Line
+    }
+    switch ($kind) {
+        'Progress' {
+            $State['PendingProgress'] = $Line
+        }
+        'Status' {
+            $message = $Line -replace '^\s*[-\\|/]\s+', ''
+            if ($message -cne $State['LastStatus']) {
+                if ($null -ne $State['PendingProgress']) {
+                    $show.Add($State['PendingProgress'])
+                    $State['PendingProgress'] = $null
+                }
+                $show.Add($Line)
+                $State['LastStatus'] = $message
+            }
+        }
+        'Text' {
+            if ($null -ne $State['PendingProgress']) {
+                $show.Add($State['PendingProgress'])
+                $State['PendingProgress'] = $null
+            }
+            $show.Add($Line)
+            $State['LastStatus'] = $null
+        }
+        'Flush' {
+            if ($null -ne $State['PendingProgress']) {
+                $show.Add($State['PendingProgress'])
+                $State['PendingProgress'] = $null
+            }
+        }
+    }
+    return $show.ToArray()
 }
 
 <#
@@ -225,9 +309,11 @@ function Get-ProcessOutputLineKind {
 .DESCRIPTION
     Start-Transcript records what PowerShell writes to the host, never what a child process writes
     straight to the console, which is why the transcript used to hold none of winget's own lines
-    (P2-6). Lines go out through Write-Host, indented, with spinner and blank lines dropped and a run
-    of progress updates collapsed to its last one. Invoke-ExternalProcess calls this as lines
-    arrive; callers that capture quietly call it afterwards, for example only when a command failed.
+    (P2-6). Lines go out through Write-Host, indented, filtered by Select-ProcessOutputLine: spinner
+    and blank lines dropped, a run of progress updates collapsed to its last one, and a status
+    message winget redraws shown once. Invoke-ExternalProcess applies the same filter as lines
+    arrive; callers that capture quietly call this afterwards, for example only when a command
+    failed.
 .PARAMETER Line
     The lines to write.
 .PARAMETER Tail
@@ -245,24 +331,15 @@ function Write-ProcessOutput {
     )
 
     $shown = New-Object System.Collections.Generic.List[string]
-    $pendingProgress = $null
+    $filterState = @{}
     foreach ($rawLine in @($Line)) {
         $plain = ConvertTo-PlainProcessLine -Line $rawLine
-        switch (Get-ProcessOutputLineKind -Line $plain) {
-            'Progress' {
-                $pendingProgress = $plain
-            }
-            'Text' {
-                if ($null -ne $pendingProgress) {
-                    $shown.Add($pendingProgress)
-                    $pendingProgress = $null
-                }
-                $shown.Add($plain)
-            }
+        foreach ($shownLine in @(Select-ProcessOutputLine -State $filterState -Line $plain)) {
+            $shown.Add($shownLine)
         }
     }
-    if ($null -ne $pendingProgress) {
-        $shown.Add($pendingProgress)
+    foreach ($shownLine in @(Select-ProcessOutputLine -State $filterState -Flush)) {
+        $shown.Add($shownLine)
     }
 
     $start = 0
@@ -473,17 +550,22 @@ function Invoke-ExternalProcess {
     catch {
     }
 
-    $pendingProgress = $null
+    $echoState = @{}
     $readers = @($process.StandardOutput, $process.StandardError)
     $targets = @($standardOutput, $standardError)
     $pending = @($readers[0].ReadLineAsync(), $readers[1].ReadLineAsync())
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     $exitSeenAt = $null
     $timedOut = $false
+    # Lines read from one stream before the exit and time-limit checks below run again. Without a
+    # cap, a program that writes faster than this loop reads keeps every ReadLineAsync completed
+    # at once, and the loop never reaches the time limit.
+    $maximumLinesPerPass = 500
 
     while ($true) {
         for ($stream = 0; $stream -lt 2; $stream++) {
-            while ($null -ne $pending[$stream] -and $pending[$stream].IsCompleted) {
+            $linesThisPass = 0
+            while ($linesThisPass -lt $maximumLinesPerPass -and $null -ne $pending[$stream] -and $pending[$stream].IsCompleted) {
                 $line = $null
                 if (-not $pending[$stream].IsFaulted -and -not $pending[$stream].IsCanceled) {
                     $line = $pending[$stream].Result
@@ -492,21 +574,13 @@ function Invoke-ExternalProcess {
                     $pending[$stream] = $null
                     break
                 }
+                $linesThisPass++
                 $plain = ConvertTo-PlainProcessLine -Line $line
                 $output.Add($plain)
                 $targets[$stream].Add($plain)
                 if ($Echo -eq 'Live') {
-                    switch (Get-ProcessOutputLineKind -Line $plain) {
-                        'Progress' {
-                            $pendingProgress = $plain
-                        }
-                        'Text' {
-                            if ($null -ne $pendingProgress) {
-                                Write-Host ('    ' + $pendingProgress) -ForegroundColor DarkGray
-                                $pendingProgress = $null
-                            }
-                            Write-Host ('    ' + $plain) -ForegroundColor DarkGray
-                        }
+                    foreach ($shownLine in @(Select-ProcessOutputLine -State $echoState -Line $plain)) {
+                        Write-Host ('    ' + $shownLine) -ForegroundColor DarkGray
                     }
                 }
                 $pending[$stream] = $readers[$stream].ReadLineAsync()
@@ -562,8 +636,10 @@ function Invoke-ExternalProcess {
         }
     }
 
-    if ($Echo -eq 'Live' -and $null -ne $pendingProgress) {
-        Write-Host ('    ' + $pendingProgress) -ForegroundColor DarkGray
+    if ($Echo -eq 'Live') {
+        foreach ($shownLine in @(Select-ProcessOutputLine -State $echoState -Flush)) {
+            Write-Host ('    ' + $shownLine) -ForegroundColor DarkGray
+        }
     }
 
     $stopwatch.Stop()

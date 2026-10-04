@@ -1538,6 +1538,55 @@ Describe 'Install-PowerShellLatest (always-latest strategy, issue #166)' {
         $result.Method | Should -Be 'msi'
         $result.Installed | Should -Be $false
     }
+
+    It 'forwards -Silent:<Value> to both winget installs, and leaves it out when not given' -ForEach @(
+        @{ Value = $true }
+        @{ Value = $false }
+    ) {
+        Mock Install-WingetPackage { @{ ExitCode = -1978335216 } } -ParameterFilter { $InstallerType -eq 'wix' }
+        Mock Install-WingetPackage { @{ ExitCode = 0 } } -ParameterFilter { -not $InstallerType }
+        Mock Get-WindowsBuildNumber { 26100 }
+        Mock Test-WingetPackageInstalled { @{ Installed = $true; TimedOut = $false; ExitCode = 0 } }
+        Mock Install-MsixProvisionedPackage { throw 'DISM provisioning should not run on 24H2+' }
+
+        [void](Install-PowerShellLatest -Silent:$Value)
+
+        $script:expectedSilent = $Value
+        Should -Invoke Install-WingetPackage -Times 2 -Exactly -ParameterFilter { $PesterBoundParameters.ContainsKey('Silent') -and [bool]$Silent -eq $script:expectedSilent }
+
+        [void](Install-PowerShellLatest)
+
+        # Not given: Install-WingetPackage decides itself (Test-EffectiveNonInteractive).
+        Should -Invoke Install-WingetPackage -Times 2 -Exactly -ParameterFilter { -not $PesterBoundParameters.ContainsKey('Silent') }
+    }
+
+    It 'returns a stopped install''s time limit and installer log, so the failure reason names them (review of P2-5/P2-6, <Method>)' -ForEach @(
+        @{ Method = 'msi'; WixExitCode = $null }
+        @{ Method = 'msix-native'; WixExitCode = -1978335216 }
+    ) {
+        $script:wixExitCode = $WixExitCode
+        $script:logPath = Join-Path $TestDrive 'winget-install-Microsoft.PowerShell-20261004-101500.log'
+        Mock Install-WingetPackage {
+            if ($InstallerType -eq 'wix' -and $null -ne $script:wixExitCode) {
+                return @{ ExitCode = $script:wixExitCode; TimedOut = $false; TimeoutSeconds = 1800; InstallerLogPath = $null }
+            }
+            @{ ExitCode = $null; Attempts = 1; TimedOut = $true; TimeoutSeconds = 1800; InstallerLogPath = $script:logPath }
+        }
+        Mock Get-WindowsBuildNumber { 26100 }
+        Mock Test-WingetPackageInstalled { @{ Installed = $false; TimedOut = $false; ExitCode = 0 } }
+        Mock Install-MsixProvisionedPackage { throw 'DISM provisioning should not run here' }
+
+        $result = Install-PowerShellLatest
+
+        $result.Method | Should -Be $Method
+        $result.Installed | Should -Be $false
+        $result.TimedOut | Should -Be $true
+        $result.TimeoutSeconds | Should -Be 1800
+        $result.InstallerLogPath | Should -Be $script:logPath
+        $reason = Format-InstallFailureReason -FailureReason 'CustomInstallFailed' -InstallResult $result
+        $reason | Should -Match 'winget install stopped after 30 minutes'
+        $reason | Should -Match ([regex]::Escape("installer log: $($script:logPath)"))
+    }
 }
 
 Describe 'Install-MsixProvisionedPackage (DISM provisioning, issue #166)' {

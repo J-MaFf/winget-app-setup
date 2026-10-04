@@ -33,7 +33,7 @@
 .PARAMETER Silent
     Forwarded to Install-WingetPackage (winget --silent): Invoke-WingetInstall passes its effective
     non-interactive state. Not given: Install-WingetPackage decides. A package-specific installer
-    ($App.install) is called without it and decides the same way.
+    ($App.install) gets it too when it has a -Silent parameter, as Install-PowerShellLatest does.
 .PARAMETER WhatIf
     Dry run: the applicability condition and the read-only pre-check still run, but no installer
     is dispatched. An app that is not yet installed reports Status 'Installed' so the caller's
@@ -118,7 +118,17 @@ function Install-AppWithVerification {
         # exists specifically to validate this 'install' field against the module's defined
         # functions. If AppCatalog.ps1 ever gains another string-carried function-name field
         # (e.g. 'uninstall' or 'verify') dispatched the same way, extend that guard to cover it too.
-        $customResult = & $App.install
+        #
+        # -Silent goes to the custom installer when it takes one (Install-PowerShellLatest does), so
+        # an explicit -NonInteractive installs PowerShell's MSI with /quiet like every other app.
+        $customParameters = @{}
+        if ($PSBoundParameters.ContainsKey('Silent') -and $App.install -is [string]) {
+            $customCommand = Get-Command -Name $App.install -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($customCommand -and $customCommand.Parameters -and $customCommand.Parameters.ContainsKey('Silent')) {
+                $customParameters['Silent'] = $Silent
+            }
+        }
+        $customResult = & $App.install @customParameters
         if ($customResult.Installed) {
             return @{ Status = 'Installed'; InstallResult = $customResult; FailureReason = $null }
         }

@@ -165,9 +165,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - winget and `msiexec` now run through one helper, `Invoke-ExternalProcess` with
-  `Invoke-WingetProcess` on top (`WingetAppSetup/Private/ProcessInvocation.ps1`), so every call
-  has a time limit, its output reaches the log, and a failed launch is recognized in any display
-  language (review findings P2-5, P2-6 and P3-6):
+  `Invoke-WingetProcess` on top (`WingetAppSetup/Private/ProcessInvocation.ps1`), so every winget
+  and `msiexec` call has a time limit, its output reaches the log, and a failed launch is recognized
+  in any display language (review findings P2-5, P2-6 and P3-6):
   - **Time limits.** The app installs (`Start-Process -Wait`), `winget download`,
     `winget source list`, `winget search`, `winget source reset`, the `winget list` check called
     without a timeout, and the Winget-AutoUpdate `msiexec` install and uninstall had no time limit,
@@ -175,16 +175,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     has a limit, set in one place (`Get-ProcessTimeoutSeconds`: 30 minutes per install or
     download, 2 minutes for queries, 5 for `source reset`, 15 for `msiexec`). When it runs out, the
     process and every process it started are stopped (`taskkill /T /F`), and an install that did
-    not land is reported as failed with `winget install stopped after 30 minutes`. The WAU MSI
-    download gets `-TimeoutSec`, plus `-OperationTimeoutSeconds` on PowerShell 7.4 and newer. The
-    per-app 15-second `winget list` check is unchanged.
+    not land is reported as failed with `winget install stopped after 30 minutes`. The limit also
+    holds for a program that writes output faster than it is read. The WAU MSI download gets
+    `-TimeoutSec`, which bounds the connection and the response headers, plus
+    `-OperationTimeoutSeconds`, which bounds a stall while the file arrives, on PowerShell 7.4 and
+    newer. The per-app 15-second `winget list` check is unchanged. Still without a time limit of
+    their own: the cmdlets that set up winget and the summary grid (`Install-Module`,
+    `Repair-WinGetPackageManager`, `Add-AppxPackage`, the App Installer download) and, on
+    PowerShell 7.3 and older, the rest of the WAU MSI download once the file has started to arrive.
   - **winget's output in the transcript.** winget wrote straight to the console, which
     Start-Transcript does not record, so the log a teammate attached never showed lines such as
     `Installer failed with exit code: 1603`. Output is now captured and echoed into the transcript
     as it arrives, under a `> winget ...` line with the full command line, without the spinner and
-    with only the last line of each progress bar. Each `winget install` also passes `--log`, so the
-    installer's own log is written to the logs folder as
-    `winget-install-<package id>-<timestamp>.log`, and a failed app's reason names it. The source
+    with only the last line of each progress bar. A message winget shows next to its spinner, such
+    as `Waiting for another install/uninstall to complete...`, is logged once, not at each of its
+    four redraws a second. Each `winget install` also passes `--log`, so the installer's own log
+    is written to the logs folder as `winget-install-<package id>-<timestamp>.log`, and a failed
+    app's reason names it. The source
     probes print winget's output when they fail. Exit codes come from the process object, never
     from `$LASTEXITCODE`.
   - **Launch failures in any language.** The transient "file cannot be accessed by the system" and
@@ -196,7 +203,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Unattended installs pass `--silent`.** In a non-interactive run (`-NonInteractive`, a
     service, a scheduled task, redirected stdin) winget gets `--silent`, so MSI and WiX packages
     install with `/quiet` instead of `/passive` and Inno installers run `/VERYSILENT`. The same
-    applies to the PowerShell 7 bootstrap's winget install.
+    applies to the PowerShell 7 bootstrap's winget install and to the catalog's PowerShell install
+    (`Install-PowerShellLatest`), whose failure reason also names a stopped install and its
+    installer log.
   - **`winget source list` and `winget source reset` no longer pass `--accept-source-agreements`.**
     Neither subcommand accepts it, so winget rejected both with 0x8A150002: the reset never ran,
     and the usage text the rejected `source list` printed contains the word winget, so a missing

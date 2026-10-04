@@ -137,9 +137,14 @@ Describe 'Output filtering (ConvertTo-PlainProcessLine, Get-ProcessOutputLineKin
         @{ Line = '   \'; Kind = 'Spinner' }
         @{ Line = '   |'; Kind = 'Spinner' }
         @{ Line = '   /'; Kind = 'Spinner' }
+        @{ Line = '   - Waiting for another install/uninstall to complete...'; Kind = 'Status' }
+        @{ Line = '   | Waiting for another install/uninstall to complete...'; Kind = 'Status' }
         @{ Line = '  45%'; Kind = 'Progress' }
         @{ Line = '  1.50 MB / 3.00 MB'; Kind = 'Progress' }
+        @{ Line = '  12.3 MB'; Kind = 'Progress' }
+        @{ Line = '   512 KB'; Kind = 'Progress' }
         @{ Line = 'Found Google Chrome [Google.Chrome] Version 1.0'; Kind = 'Text' }
+        @{ Line = 'Downloading https://example.com/setup-1.2.msi'; Kind = 'Text' }
         @{ Line = 'Installer failed with exit code: 1603'; Kind = 'Text' }
     ) {
         Get-ProcessOutputLineKind -Line $Line | Should -Be $Kind
@@ -167,6 +172,49 @@ Describe 'Output filtering (ConvertTo-PlainProcessLine, Get-ProcessOutputLineKin
         Write-ProcessOutput -Line @('one', 'two', '   -', 'three') -Tail 2
 
         $script:written | Should -Be @('    two', '    three')
+    }
+
+    It 'Writes a status message winget redraws next to its spinner once, not once per redraw' {
+        # winget redraws the spinner and its message every 250 ms while another install holds its
+        # lock, which used to put four lines a second into the transcript for the whole wait.
+        $script:written = @()
+        Mock Write-Host { $script:written += [string]$Object }
+        $waiting = 'Waiting for another install/uninstall to complete...'
+        $redraws = foreach ($index in 0..39) { '   ' + @('-', '\', '|', '/')[$index % 4] + ' ' + $waiting }
+
+        Write-ProcessOutput -Line (@('Found Test App [Test.App]') + @($redraws) + @('', '  12.3 MB', 'Successfully installed'))
+
+        $script:written | Should -Be @('    Found Test App [Test.App]', "       - $waiting", '      12.3 MB', '    Successfully installed')
+    }
+
+    It 'Writes a status message again after other text, and each different message once' {
+        $script:written = @()
+        Mock Write-Host { $script:written += [string]$Object }
+
+        Write-ProcessOutput -Line @('   - First wait', '   \ First wait', '   | Second wait', '   / Second wait', 'Text between', '   - Second wait')
+
+        $script:written | Should -Be @('       - First wait', '       | Second wait', '    Text between', '       - Second wait')
+    }
+}
+
+Describe 'Select-ProcessOutputLine' {
+    It 'Holds a progress update back until the next line it shows, or until -Flush' {
+        $state = @{}
+
+        @(Select-ProcessOutputLine -State $state -Line '  1.00 MB / 3.00 MB').Count | Should -Be 0
+        @(Select-ProcessOutputLine -State $state -Line '  3.00 MB / 3.00 MB').Count | Should -Be 0
+        @(Select-ProcessOutputLine -State $state -Line 'Successfully verified installer hash') | Should -Be @('  3.00 MB / 3.00 MB', 'Successfully verified installer hash')
+        @(Select-ProcessOutputLine -State $state -Line '  50%').Count | Should -Be 0
+        @(Select-ProcessOutputLine -State $state -Flush) | Should -Be @('  50%')
+        @(Select-ProcessOutputLine -State $state -Flush).Count | Should -Be 0
+    }
+
+    It 'Drops spinner and blank lines' {
+        $state = @{}
+
+        @(Select-ProcessOutputLine -State $state -Line '   -').Count | Should -Be 0
+        @(Select-ProcessOutputLine -State $state -Line '').Count | Should -Be 0
+        @(Select-ProcessOutputLine -State $state -Flush).Count | Should -Be 0
     }
 }
 
@@ -251,6 +299,57 @@ Describe 'Invoke-ExternalProcess (real processes)' {
         $result.LaunchFailed | Should -Be $false
         $result.StandardOutput | Should -Contain 'started'
         $stopwatch.Elapsed.TotalSeconds | Should -BeLessThan 30
+    }
+
+    It 'Stops a process at its time limit even while it writes faster than its output is read' {
+        # A writer that never pauses kept every ReadLineAsync completed at once, so the read loop
+        # never got back to its time-limit check. This one stops by itself after 30 seconds, so
+        # without the fix the test fails instead of hanging.
+        $flood = New-PwshScript -Name 'flood' -Body @'
+$chunk = "flood line`n" * 2000
+$stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+while ($stopwatch.Elapsed.TotalSeconds -lt 30) { [Console]::Out.Write($chunk) }
+'@
+        $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+
+        $result = Invoke-ExternalProcess -FilePath $script:PwshPath -ArgumentList @('-NoProfile', '-NonInteractive', '-File', $flood) -TimeoutSeconds 3 -Echo None
+
+        $stopwatch.Stop()
+        $result.TimedOut | Should -Be $true
+        $result.ExitCode | Should -Be $null
+        $result.StandardOutput | Should -Contain 'flood line'
+        $stopwatch.Elapsed.TotalSeconds | Should -BeLessThan 20
+    }
+
+    It 'Writes the message winget shows next to its spinner into the transcript once, however often it is redrawn' {
+        # winget's wait for another install: '\r   - Waiting for another install/uninstall to
+        # complete...' every 250 ms, each redraw a line of its own once the output is redirected.
+        $spinner = New-PwshScript -Name 'spinner-wait' -Body @'
+[Console]::Out.Write("Found Test App [Test.App] Version 1.0`n")
+$characters = '-', '\', '|', '/'
+for ($index = 0; $index -lt 12; $index++) {
+    [Console]::Out.Write("`r   " + $characters[$index % 4] + " Waiting for another install/uninstall to complete...")
+    [Console]::Out.Flush()
+    Start-Sleep -Milliseconds 50
+}
+[Console]::Out.Write("`r" + (' ' * 60) + "`rSuccessfully installed`n")
+'@
+        $transcript = Join-Path $TestDrive 'spinner-transcript.log'
+
+        Start-Transcript -LiteralPath $transcript | Out-Null
+        try {
+            $result = Invoke-ExternalProcess -FilePath $script:PwshPath -ArgumentList @('-NoProfile', '-NonInteractive', '-File', $spinner) -TimeoutSeconds 60
+        }
+        finally {
+            Stop-Transcript | Out-Null
+        }
+
+        $result.ExitCode | Should -Be 0
+        @($result.Output | Where-Object { $_ -match 'Waiting for another install' }).Count | Should -Be 12
+        $logged = Get-Content -LiteralPath $transcript -Raw
+        [regex]::Matches($logged, 'Waiting for another install/uninstall to complete').Count | Should -Be 1
+        $logged | Should -Match ([regex]::Escape('    Found Test App [Test.App] Version 1.0'))
+        $logged | Should -Match ([regex]::Escape('    Successfully installed'))
     }
 
     It 'Stops every process the timed-out process started, not just the process itself' {

@@ -103,8 +103,8 @@ Non-interactive mode is also auto-detected when the session is non-interactive (
 either. In non-interactive mode winget also gets `--silent`, so MSI packages install with `/quiet`
 instead of showing a progress window (`/passive`).
 
-No step can hang a run for good. Every winget and `msiexec` call has a time limit, and when it runs
-out the installer stops that process and every process it started, then carries on:
+No winget or `msiexec` call can hang a run for good. Each has a time limit, and when it runs out
+the installer stops that process and every process it started, then carries on:
 
 | Call | Time limit |
 |------|------------|
@@ -114,12 +114,18 @@ out the installer stops that process and every process it started, then carries 
 | `winget source update`, `source list`, `search` and other `winget list` calls | 2 minutes |
 | `winget source reset` | 5 minutes |
 | `msiexec` for Winget-AutoUpdate | 15 minutes |
-| The Winget-AutoUpdate MSI download | 5 minutes in all on PowerShell 7.3 and older; on 7.4 and newer, 5 minutes to connect and 2 minutes without data |
+| The Winget-AutoUpdate MSI download | 5 minutes until the server starts sending the file; on PowerShell 7.4 and newer, also 2 minutes without data while it arrives |
 
 A stopped install is checked like any other: unless the app turns out to be installed anyway, it
 fails, gets its one retry in the retry pass, and counts toward exit code 1, with
 `winget install stopped after 30 minutes` in its failure reason. The limits are set in one place,
 `Get-ProcessTimeoutSeconds` (`WingetAppSetup/Private/ProcessInvocation.ps1`).
+
+Some steps still have no time limit of their own: the PowerShell cmdlets that set up winget and the
+summary grid (`Install-Module` for Microsoft.WinGet.Client and Microsoft.PowerShell.GraphicalTools,
+`Repair-WinGetPackageManager`, `Add-AppxPackage` of App Installer or of the winget source, and the
+App Installer download from aka.ms/getwinget), and, on PowerShell 7.3 and older, the
+Winget-AutoUpdate MSI download once the file has started to arrive.
 
 ### Exit codes
 
@@ -151,8 +157,10 @@ The transcript includes winget's own output. Each `winget install`, `winget down
 `winget source reset` is logged as a `> winget ...` line with its full command line, followed by
 what winget printed, indented: for example
 `Installer failed with exit code: 1603` or a hash mismatch. The spinner and the download progress
-bar are left out, apart from the last progress line of each download. The per-app `winget list`
-checks print nothing; the source checks print winget's output only when they fail.
+bar are left out, apart from the last progress line of each download, and a message winget shows
+next to its spinner, such as `Waiting for another install/uninstall to complete...`, is logged once
+rather than at every redraw. The per-app `winget list` checks print nothing; the source checks
+print winget's output only when they fail.
 
 The same folder also holds:
 

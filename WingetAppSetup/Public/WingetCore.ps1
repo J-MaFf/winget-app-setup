@@ -429,8 +429,8 @@ function Initialize-WingetSourcesForUser {
     Default 5 (75s of total backoff at the default InitialDelaySeconds).
 .PARAMETER Silent
     Pass --silent to winget. Invoke-WingetInstall passes its effective non-interactive state. When
-    the parameter is not given, Test-EffectiveNonInteractive decides (e.g. for
-    Install-PowerShellLatest, which the catalog calls without arguments).
+    the parameter is not given, Test-EffectiveNonInteractive decides (e.g. for a script that calls
+    the function on its own).
 .RETURNS
     [hashtable] @{ ExitCode = <int|$null>; Attempts = <int>; SessionErrorExhausted = <bool>; MachineScopeFellBack = <bool>; LaunchErrorExhausted = <bool>; LaunchAttempts = <int>; TimedOut = <bool>; TimeoutSeconds = <int>; InstallerLogPath = <string|$null> }
     SessionErrorExhausted is True only when every attempt failed with the session error.
@@ -893,13 +893,26 @@ function Install-MsixProvisionedPackage {
 
     The result's Installed flag is authoritative — the DISM-provisioned path does not appear under
     `winget list` for the elevating account, so the caller must not re-verify PowerShell with winget.
+.PARAMETER PackageId
+    The winget package id. Default 'Microsoft.PowerShell'.
+.PARAMETER Silent
+    Forwarded to Install-WingetPackage (winget --silent, so the MSI installs with /quiet rather than
+    /passive). Install-AppWithVerification passes the run's effective non-interactive state, so an
+    explicit -NonInteractive reaches PowerShell's install too. Not given: Install-WingetPackage
+    decides.
 .RETURNS
     [hashtable] @{ ExitCode = <int>; Installed = <bool>; Method = 'msi' | 'msix-native' | 'msix-provisioned' }
+    The winget paths (msi, msix-native) also carry Install-WingetPackage's TimedOut, TimeoutSeconds
+    and InstallerLogPath, so a failure reason can say that the install was stopped at its time limit
+    and where the installer's log is.
 #>
 function Install-PowerShellLatest {
     param (
         [Parameter(Mandatory = $false)]
-        [string]$PackageId = 'Microsoft.PowerShell'
+        [string]$PackageId = 'Microsoft.PowerShell',
+
+        [Parameter(Mandatory = $false)]
+        [switch]$Silent
     )
 
     # 0x8A150010 (APPINSTALLER_CLI_ERROR_NO_APPLICABLE_INSTALLER) as a signed Int32 — what winget
@@ -911,22 +924,37 @@ function Install-PowerShellLatest {
     # every other catalog app's verification does, instead of blocking the run forever.
     $checkTimeoutSeconds = Get-ProcessTimeoutSeconds -Operation WingetListCheck
 
+    $installParameters = @{ PackageId = $PackageId }
+    if ($PSBoundParameters.ContainsKey('Silent')) {
+        $installParameters['Silent'] = $Silent
+    }
+
     # 1. Prefer the MSI while the latest version still ships one.
-    $result = Install-WingetPackage -PackageId $PackageId -InstallerType 'wix'
-    if ($result.ExitCode -ne $noApplicableInstallerExitCode) {
-        $installed = (Test-WingetPackageInstalled -PackageId $PackageId -TimeoutSeconds $checkTimeoutSeconds).Installed
-        return @{ ExitCode = $result.ExitCode; Installed = $installed; Method = 'msi' }
+    $method = 'msi'
+    $result = Install-WingetPackage @installParameters -InstallerType 'wix'
+    if ($result.ExitCode -eq $noApplicableInstallerExitCode) {
+        # 2. No MSI for the latest version (7.7+): install the latest MSIX machine-wide.
+        Write-Info "No MSI is available for the latest $PackageId; installing the MSIX package instead."
+        if ((Get-WindowsBuildNumber) -lt 26100) {
+            $provision = Install-MsixProvisionedPackage -PackageId $PackageId
+            return @{ ExitCode = $provision.ExitCode; Installed = $provision.Installed; Method = 'msix-provisioned' }
+        }
+        $method = 'msix-native'
+        $result = Install-WingetPackage @installParameters
     }
 
-    # 2. No MSI for the latest version (7.7+): install the latest MSIX machine-wide.
-    Write-Info "No MSI is available for the latest $PackageId; installing the MSIX package instead."
-    if ((Get-WindowsBuildNumber) -ge 26100) {
-        $result = Install-WingetPackage -PackageId $PackageId
-        $installed = (Test-WingetPackageInstalled -PackageId $PackageId -TimeoutSeconds $checkTimeoutSeconds).Installed
-        return @{ ExitCode = $result.ExitCode; Installed = $installed; Method = 'msix-native' }
+    $installed = (Test-WingetPackageInstalled -PackageId $PackageId -TimeoutSeconds $checkTimeoutSeconds).Installed
+    $outcome = @{ ExitCode = $result.ExitCode; Installed = $installed; Method = $method }
+    # Format-InstallFailureReason reads these to say that the install was stopped at its time limit
+    # (review finding P2-5) and where the installer's log is (P2-6). Without them PowerShell's
+    # failure reason read only 'installer reported failure'.
+    if ($result -is [hashtable]) {
+        foreach ($key in @('TimedOut', 'TimeoutSeconds', 'InstallerLogPath')) {
+            if ($result.ContainsKey($key)) {
+                $outcome[$key] = $result[$key]
+            }
+        }
     }
-
-    $provision = Install-MsixProvisionedPackage -PackageId $PackageId
-    return @{ ExitCode = $provision.ExitCode; Installed = $provision.Installed; Method = 'msix-provisioned' }
+    return $outcome
 }
 

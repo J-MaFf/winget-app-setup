@@ -994,6 +994,35 @@ Describe 'Install-AppWithVerification (shared install-and-verify pipeline, issue
             $result.InstallResult.ExitCode | Should -Be -1
             Should -Invoke Install-WingetPackage -Times 0 -Exactly
         }
+
+        It 'Passes -Silent:<Value> to an installer that takes -Silent, and leaves it out when not given' -ForEach @(
+            @{ Value = $true }
+            @{ Value = $false }
+        ) {
+            $script:silentCalls = @()
+            function Install-FakeSilentPowerShell {
+                param ([switch]$Silent)
+                $script:silentCalls += , @($PSBoundParameters.ContainsKey('Silent'), [bool]$Silent)
+                @{ ExitCode = 0; Installed = $true; Method = 'msi' }
+            }
+            $app = @{ name = 'Microsoft.PowerShell'; install = 'Install-FakeSilentPowerShell' }
+
+            [void](Install-AppWithVerification -App $app -Silent:$Value)
+            [void](Install-AppWithVerification -App $app)
+
+            $script:silentCalls.Count | Should -Be 2
+            $script:silentCalls[0][0] | Should -Be $true
+            $script:silentCalls[0][1] | Should -Be $Value
+            $script:silentCalls[1][0] | Should -Be $false
+        }
+
+        It 'Still calls an installer that has no -Silent parameter when -Silent is given' {
+            function Install-FakePlainPowerShell { @{ ExitCode = 0; Installed = $true; Method = 'msi' } }
+
+            $result = Install-AppWithVerification -App @{ name = 'Microsoft.PowerShell'; install = 'Install-FakePlainPowerShell' } -Silent
+
+            $result.Status | Should -Be 'Installed'
+        }
     }
 
     Context 'Dry run (-WhatIf)' {
@@ -1026,6 +1055,41 @@ Describe 'Install-AppWithVerification (shared install-and-verify pipeline, issue
 
             $result.Status | Should -Be 'Installed'
         }
+    }
+}
+
+Describe 'PowerShell''s own installer in the install pipeline (review of findings P2-5 and P2-6)' {
+    # Install-AppWithVerification -> Install-PowerShellLatest -> Install-WingetPackage, with only the
+    # winget process mocked: the path the catalog's Microsoft.PowerShell entry takes.
+    BeforeEach {
+        Mock Write-Host { }
+        Mock Write-Info { }
+        Mock Write-Success { }
+        Mock Write-WarningMessage { }
+        Mock Write-ErrorMessage { }
+        # An attended console: only an explicit -Silent may add --silent.
+        Mock Test-EffectiveNonInteractive { $false }
+        Mock Test-WingetPackageInstalled { @{ Installed = $false; TimedOut = $false; ExitCode = 0 } }
+        Mock Install-MsixProvisionedPackage { throw 'the MSI path must not fall through to DISM provisioning' }
+        $script:installerLog = Join-Path $TestDrive 'winget-install-Microsoft.PowerShell-20261004-101500.log'
+        Set-Content -LiteralPath $script:installerLog -Value 'MSI (s) (A0:B4) [10:15:00:000]: Product: PowerShell 7-x64 -- Installation failed.'
+        Mock Invoke-WingetProcess { New-TestProcessResult -TimedOut -LogPath $script:installerLog }
+    }
+
+    It 'Installs the MSI with --silent when the run asked for -Silent (an explicit -NonInteractive)' {
+        [void](Install-AppWithVerification -App @{ name = 'Microsoft.PowerShell'; install = 'Install-PowerShellLatest' } -Silent)
+
+        Should -Invoke Invoke-WingetProcess -Times 1 -Exactly -ParameterFilter { $ArgumentList[0] -eq 'install' -and $ArgumentList -contains '--silent' }
+    }
+
+    It 'Names the time limit and the installer log in a stopped install''s failure reason' {
+        $result = Install-AppWithVerification -App @{ name = 'Microsoft.PowerShell'; install = 'Install-PowerShellLatest' } -Silent
+
+        $result.Status | Should -Be 'Failed'
+        $result.FailureReason | Should -Be 'CustomInstallFailed'
+        $reason = Format-InstallFailureReason -FailureReason $result.FailureReason -InstallResult $result.InstallResult
+        $reason | Should -Match 'winget install stopped after 30 minutes'
+        $reason | Should -Match ([regex]::Escape("installer log: $($script:installerLog)"))
     }
 }
 

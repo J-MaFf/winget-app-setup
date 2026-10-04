@@ -48,8 +48,10 @@ no longer cut off at 120 columns; the build id covers the whole script; and an i
 the exit code, the build and the log, with a privacy note because the repository is public. Every
 winget and `msiexec` call now goes through one helper (`Invoke-ExternalProcess` /
 `Invoke-WingetProcess`): each has a time limit (30 minutes per install), after which the process
-and everything it started are stopped, so a stuck installer can no longer hang an unattended run;
-winget's own output goes into the transcript and the installer's log into the logs folder; a
+and everything it started are stopped, so a stuck installer can no longer hang an unattended run
+(the cmdlets that set up winget itself, such as `Install-Module` and
+`Repair-WinGetPackageManager`, still have no limit of their own); winget's own output goes into
+the transcript and the installer's log into the logs folder; a
 failed launch is classified by its Win32 error code, so the launch retries also work on a
 non-English Windows; unattended runs pass `--silent`; and `winget source list` and
 `winget source reset` no longer pass `--accept-source-agreements`, which winget rejects and which
