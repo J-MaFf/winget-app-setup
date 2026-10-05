@@ -1,14 +1,12 @@
 if ($MyInvocation.InvocationName -ne '.') {
-    # Constrained Language Mode before anything else (wgt-gq8.39): an application control policy
-    # (App Control for Business/WDAC, AppLocker) runs an untrusted script in it, and it refuses the
-    # .NET calls the lines below already make, so the run used to print PowerShell's errors and die
-    # further on (under PowerShell 7, in its pre-flight checks with an 'UNEXPECTED ERROR'). Nothing
-    # can work around it, so the run stops at once with exit code 5, saying why in one line, and
-    # touches nothing. Only what every language mode allows runs on this path, under Windows
-    # PowerShell 5.1 too. A run from a file, or with nobody at the console, exits 5; an interactive
-    # irm | iex console keeps its window open (exiting there would close the window with the
-    # message) and gets $LASTEXITCODE 5. A real run still ends with its RESULT line (review finding
-    # P3-41), under Windows PowerShell 5.1 too, since no PowerShell 7 run follows to report.
+    # Constrained Language Mode first: an application control policy (App Control for
+    # Business/WDAC, AppLocker) runs an untrusted script in it, and it refuses the .NET calls the
+    # lines below make. Nothing can work around it, so the run stops at once with exit code 5,
+    # saying why in one line, and touches nothing. Only what every language mode allows runs on
+    # this path, under Windows PowerShell 5.1 too. A run from a file, or with nobody at the
+    # console, exits 5; an interactive irm | iex console keeps its window open (exiting would close
+    # it with the message) and gets $LASTEXITCODE 5. A real run still ends with its RESULT line
+    # (review finding P3-41), since no PowerShell 7 run follows to report.
     if (-not (Test-FullLanguageMode)) {
         $global:LASTEXITCODE = 5
         if (-not $WhatIf) {
@@ -35,13 +33,13 @@ if ($MyInvocation.InvocationName -ne '.') {
         return
     }
 
-    # The diagnostics bundle (-CollectDiagnostics, wgt-gq8.35) for a GitHub issue about a failed
-    # run: it only reads, and writes nothing but its .zip, so it comes before everything that
-    # changes the PC: no transcript, no run lock, no last-run.json and no RESULT line, and no
-    # PowerShell 7 bootstrap (it runs under Windows PowerShell 5.1 as it is). Exit code 0 when the
-    # bundle was saved, 5 when it could not be. Like the language-mode stop above, an interactive
-    # console that ran it as a script block (the command the failure notices print) keeps its
-    # window and gets the code in $LASTEXITCODE.
+    # The diagnostics bundle (-CollectDiagnostics) for a GitHub issue about a failed run: it only
+    # reads, and writes nothing but its .zip, so it comes before everything that changes the PC: no
+    # transcript, no run lock, no last-run.json and no RESULT line, and no PowerShell 7 bootstrap (it
+    # runs under Windows PowerShell 5.1 as it is). Exit code 0 when the bundle was saved, 5 when it
+    # could not be. Like the language-mode stop above, an interactive console that ran it as a
+    # script block (the command the failure notices print) keeps its window and gets the code in
+    # $LASTEXITCODE.
     if ($CollectDiagnostics) {
         $diagnosticsExitCode = 5
         try {
@@ -120,10 +118,10 @@ if ($MyInvocation.InvocationName -ne '.') {
 
     if ($PSVersionTable.PSVersion.Major -lt 7) {
         # The bootstrap phase gets its own transcript, install-<timestamp>-bootstrap.log, next to the
-        # PowerShell 7 run's (review finding P2-13): the PowerShell 7 install (winget, the MSI and
-        # its msiexec log), GitHub throttling and relaunch errors used to leave no log at all. It
-        # stays open while the relaunched run works, so it also records the exit code that run
-        # ended with. A bootstrap that fails before it can relaunch exits 7.
+        # PowerShell 7 run's (review finding P2-13), for the PowerShell 7 install (winget, the MSI and
+        # its msiexec log), GitHub throttling and relaunch errors. It stays open while the relaunched
+        # run works, so it also records the exit code that run ended with. A bootstrap that fails
+        # before it can relaunch exits 7.
         $script:PowerShell7BootstrapRelaunched = $false
         $script:InstallLogPath = Start-InstallerTranscript -Bootstrap -WhatIf:$WhatIf
         $bootstrapLogDirectory = ''
@@ -322,8 +320,8 @@ if ($MyInvocation.InvocationName -ne '.') {
         catch {
             # Best-effort: nothing may change the exit code decided above.
         }
-        # TightVNC's passwords (work-order item 18) must not outlive the run: under irm | iex its
-        # $script: scope is the console's global scope, which stays open after an abort too.
+        # TightVNC's passwords must not outlive the run: under irm | iex its $script: scope is the
+        # console's global scope, which stays open after an abort too.
         try {
             Clear-TightVncSecret
         }

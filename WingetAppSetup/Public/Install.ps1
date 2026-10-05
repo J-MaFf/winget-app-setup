@@ -517,8 +517,8 @@ function Invoke-WingetInstall {
                         if ($outcome.Status -eq 'Installed' -and (Write-InstalledAppNote -AppName $appName -InstallResult $outcome.InstallResult) -and $restartRequiredApps -notcontains $appName) {
                             $restartRequiredApps += $appName
                         }
-                        # A first-pass hook failure ends here once the hook succeeds (work-order
-                        # item 38): the retry finds the app installed and runs its hook again.
+                        # A first-pass hook failure ends here once the hook succeeds: the retry
+                        # finds the app installed and runs its hook again.
                         if (Write-AppPostInstallResult -AppName $appName -Configuration $outcome.Configuration) {
                             $notConfiguredApps += @{ Name = $appName; Reason = [string]$outcome.Configuration.Reason }
                         }
@@ -664,8 +664,8 @@ function Invoke-WingetInstall {
     # generic message. No-ops when nothing failed.
     Write-FailedAppsSummary -FailedApps $failedApps
 
-    # Why apps were deferred, and who can install them (review findings P3-22, P3-23; work-order
-    # item 38 for the per-user ones). They do not change the exit code.
+    # Why apps were deferred, and who can install them (review findings P3-22, P3-23). They do not
+    # change the exit code.
     Write-DeferredAppsSummary -DeferredApps $noInstallerDeferredApps -PerUserApps $perUserDeferredApps -AccountContext $account
 
     # Installed apps their post-install hook could not configure. They do not

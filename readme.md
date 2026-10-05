@@ -1428,9 +1428,9 @@ The installer's logic lives in the **`WingetAppSetup` PowerShell module** under 
 (`Public/` for the entry points and the run's main steps, `Private/` for their helpers; the
 module exports every function, so moving one between the two folders changes nothing else). The
 single-file `winget-app-install.ps1` is **generated** from that module so the `irm | iex`
-one-liner keeps working — do not edit it by hand. It leaves out the module's comments, which are
-about half of the module, so read them in `WingetAppSetup/`; a change to a module comment alone
-leaves the installer, and its build id, unchanged.
+one-liner keeps working — do not edit it by hand. It leaves out the comments of the module, which
+are about half of it, and of its entry block (`build/fragments/tail.ps1`), so read them in the
+source; a change to one of those comments alone leaves the installer, and its build id, unchanged.
 
 `rmm/` holds the Endpoint Central scripts (see
 [Endpoint Central and other RMM tools](#endpoint-central-and-other-rmm-tools)). They are not
@@ -1526,12 +1526,13 @@ guards, most of which run in both build and `-Check` modes of
    This guard and the 5.1 guards below also name the source file and line behind each line they
    report, such as `[WingetAppSetup/Private/Jsonc.ps1:120]`, because the assembled script's line
    numbers match no file.
-3. **Comment removal check** — the build leaves the module's comments out of the installer (they
-   are about half of the module, and every `irm | iex` run downloads the file; review finding
-   P3-53). It removes only the tokenizer's comment tokens that end their line, so a `#` inside a
-   string or regex stays, and it keeps `build/fragments/head.ps1` (the script's help) and `tail.ps1`
-   as they are. It then compares each module file's code tokens before and after and fails the
-   build if removing the comments changed any of them.
+3. **Comment removal check** — the build leaves the comments of the module and of
+   `build/fragments/tail.ps1` (the entry block) out of the installer (they are about half of the
+   module, and every `irm | iex` run downloads the file; review finding P3-53). It removes only the
+   tokenizer's comment tokens that end their line, so a `#` inside a string or regex stays, and it
+   keeps `build/fragments/head.ps1` (the script's help) as it is. It then compares the code tokens
+   of each module file and of `tail.ps1` before and after, case-sensitively, and fails the build if
+   removing the comments changed any of them.
 4. **AST undefined-reference guard** — every hyphenated command the assembled script invokes
    must resolve to a module-defined function (matched case-sensitively, so a stale call site
    cannot silently resolve to an external cmdlet that differs only by case) or an external
@@ -1559,10 +1560,10 @@ guards, most of which run in both build and `-Check` modes of
    ([#210](https://github.com/J-MaFf/winget-app-setup/issues/210)).
 6. **Content-derived build id** — the banner and `$script:InstallerBuildId` are stamped with
    `<module version>+<8-hex SHA256 fragment of the whole generated script>` (hashed with the id
-   slots blanked, so a change to `build/fragments/head.ps1` or `tail.ps1` changes the id too),
-   derived from content only (never git metadata or timestamps) so rebuilding the same tree is
-   byte-identical and the `-Check` byte-compare stays deterministic; transcripts log the id at
-   startup so a log identifies the exact installer build
+   slots blanked, so a change to `build/fragments/head.ps1` or to the code of `tail.ps1` changes
+   the id too), derived from content only (never git metadata or timestamps) so rebuilding the
+   same tree is byte-identical and the `-Check` byte-compare stays deterministic; transcripts log
+   the id at startup so a log identifies the exact installer build
    ([#189](https://github.com/J-MaFf/winget-app-setup/issues/189)).
 7. **CI enforcement** — `.github/workflows/windows-tests.yml` runs `-Check` on every push to
    `main` and on every pull request, so drift fails CI instead of shipping

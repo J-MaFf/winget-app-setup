@@ -251,12 +251,13 @@ grid view was what kept the uninstaller's elevated window open, so the uninstall
 window closed with the summary as soon as the run ended.
 
 The generated installer leaves out the module's comments (work-order item 30, review finding
-P3-53), so it is about half the size it was (450 KB instead of 867 KB, which every `irm | iex` run
-downloads). The build removes only comments that end their line, keeps `build/fragments/head.ps1`
-and `tail.ps1` as they are, checks that each module file's code is unchanged token for token, and
-names the source file and line behind every line its guards report. Every function in the new
-installer has the same syntax tree as before. A change to a module comment alone no longer changes
-the installer or its build id. The module's own comments are shorter too: incident narratives became a
+P3-53), so it is about half the size it was (439 KB instead of 867 KB, which every `irm | iex` run
+downloads). The build removes only comments that end their line, from the module and from
+`build/fragments/tail.ps1`, keeps `build/fragments/head.ps1` (the script's help) as it is, checks
+that the code of each module file and of `tail.ps1` is unchanged token for token, and names the
+source file and line behind every line its guards report. Every function in the new installer has
+the same syntax tree as before. A change to a comment in the module or `tail.ps1` alone no longer
+changes the installer or its build id. The module's own comments are shorter too: incident narratives became a
 few lines on what the code does and why, and every function's help uses `.OUTPUTS`, so `Get-Help`
 reads all of it (the `.RETURNS` keyword had made it ignore 202 of the 258 help blocks).
 

@@ -11,12 +11,13 @@
                                         content-derived $script:InstallerBuildId (issue #189)
         3. WingetAppSetup/Private/*.ps1 then WingetAppSetup/Public/*.ps1 - every function, with
                                         its comments removed (Remove-PowerShellComment)
-        4. build/fragments/tail.ps1   - the `if ($MyInvocation.InvocationName -ne '.')` dispatch block
+        4. build/fragments/tail.ps1   - the `if ($MyInvocation.InvocationName -ne '.')` dispatch block,
+                                        its comments removed too
 
-    The module's comments are left out because about half of the module is comments, which every
-    irm | iex run would download (review finding P3-53); they stay in the source. The fragments
-    are kept as they are: head.ps1 holds the script's help. A change to a module comment alone
-    therefore leaves the installer, and its build id, unchanged.
+    The comments are left out because about half of the module is comments, which every
+    irm | iex run would download (review finding P3-53); they stay in the source. head.ps1 is
+    kept as it is: it holds the script's help. A change to a comment in the module or in tail.ps1
+    alone therefore leaves the installer, and its build id, unchanged.
 .PARAMETER OutputPath
     Where to write the generated script. Defaults to winget-app-install.ps1 at the repository root.
 .PARAMETER Check
@@ -596,6 +597,28 @@ function Read-SourceText {
     ((Get-Content -Path $Path -Raw -Encoding UTF8) -replace "`r`n", "`n").TrimEnd()
 }
 
+# Appends a source file without its comments, -Path naming it in the guards' reports. Removing the
+# comments must leave the code as it was, token for token (compared case-sensitively), or the build
+# fails. A file that does not parse goes in as it is, and the parse guard below reports where.
+function Add-SourceWithoutComment {
+    param (
+        [Parameter(Mandatory = $true)][string]$FullName,
+        [Parameter(Mandatory = $true)][string]$Path
+    )
+
+    $source = Read-SourceText -Path $FullName
+    $stripped = Remove-PowerShellComment -Source $source
+    if ($null -eq $stripped) {
+        Add-AssembledText -Text $source -Path $Path
+        return
+    }
+    if ((Get-CodeTokenSignature -Source $source) -cne (Get-CodeTokenSignature -Source $stripped.Text)) {
+        Write-Error "Comment check failed: removing the comments from $Path would change its code. Move the comment that sits inside a statement in an unusual place (for example after a line continuation) onto a line of its own, then re-run the build."
+        exit 1
+    }
+    Add-AssembledText -Text $stripped.Text -Path $Path -SourceLine $stripped.SourceLine
+}
+
 # The build id slot. The banner below carries this placeholder while the whole script is hashed,
 # and the id replaces it afterwards (see step 5).
 $buildIdPlaceholder = '{{BUILD_ID}}'
@@ -609,8 +632,9 @@ $banner = @'
 # ------------------------------------------------------------------------------------------------
 # GENERATED FILE - DO NOT EDIT BY HAND.
 # This script is assembled from the WingetAppSetup module by build/Build-WingetInstallScript.ps1,
-# without the module's comments: read them in the source. Edit the function source under
-# WingetAppSetup/Public and WingetAppSetup/Private, then re-run the build to regenerate this file.
+# without the comments of the module and of the entry block below: read them in the source. Edit
+# the function source under WingetAppSetup/Public and WingetAppSetup/Private, or the entry block in
+# build/fragments/tail.ps1, then re-run the build to regenerate this file.
 # See readme.md ("Project layout") for details.
 # Build id: {{BUILD_ID}} (module version + SHA256 fragment of this whole script; issue #189).
 # ------------------------------------------------------------------------------------------------
@@ -636,29 +660,15 @@ Add-AssembledText -Text '# ------------------------------------------------Funct
 Add-AssembledText -Text ''
 
 foreach ($file in $functionFiles) {
-    $relativePath = 'WingetAppSetup/{0}/{1}' -f $file.Directory.Name, $file.Name
-    $source = Read-SourceText -Path $file.FullName
     Add-AssembledText -Text "# --- $($file.BaseName) ---"
-    $stripped = Remove-PowerShellComment -Source $source
-    if ($null -eq $stripped) {
-        # The file does not parse: it goes in as it is, and the parse guard below reports where.
-        Add-AssembledText -Text $source -Path $relativePath
-    }
-    else {
-        # Removing comments must leave the code as it was, token for token.
-        if ((Get-CodeTokenSignature -Source $source) -ne (Get-CodeTokenSignature -Source $stripped.Text)) {
-            Write-Error "Comment check failed: removing the comments from $relativePath would change its code. Move the comment that sits inside a statement in an unusual place (for example after a line continuation) onto a line of its own, then re-run the build."
-            exit 1
-        }
-        Add-AssembledText -Text $stripped.Text -Path $relativePath -SourceLine $stripped.SourceLine
-    }
+    Add-SourceWithoutComment -FullName $file.FullName -Path ('WingetAppSetup/{0}/{1}' -f $file.Directory.Name, $file.Name)
     Add-AssembledText -Text ''
 }
 
-# 4. Tail (entry-point dispatch), as it is.
+# 4. Tail (entry-point dispatch), without its comments too.
 Add-AssembledText -Text '# ------------------------------------------------Main Script------------------------------------------------'
 Add-AssembledText -Text ''
-Add-AssembledText -Text (Read-SourceText -Path (Join-Path $fragmentsRoot 'tail.ps1')) -Path 'build/fragments/tail.ps1'
+Add-SourceWithoutComment -FullName (Join-Path $fragmentsRoot 'tail.ps1') -Path 'build/fragments/tail.ps1'
 
 # LF line endings with a single trailing newline, so the output is byte-identical across platforms.
 # The installer is stored with LF (see .gitattributes), keeping the -Check round-trip deterministic

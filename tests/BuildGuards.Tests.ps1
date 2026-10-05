@@ -281,7 +281,8 @@ Describe 'Build id covers the whole generated script (review finding P3-12)' {
 
     It 'changes the id when only build/fragments/<_> changes' -ForEach @('tail.ps1', 'head.ps1') {
         # Before P3-12 only the functions were hashed, so a fix to the entry dispatch shipped under
-        # the same 'Installer build:' id as the code it fixed.
+        # the same 'Installer build:' id as the code it fixed. The build keeps head.ps1's comments
+        # (the script's help) and removes tail.ps1's, so tail.ps1 gets a code change.
         $root = New-BuildFixture -Name "build-id-$($_ -replace '\.ps1$', '')"
         $fragmentPath = Join-Path $root "build/fragments/$_"
         $fragment = Get-Content -Raw -Encoding UTF8 -Path $fragmentPath
@@ -289,7 +290,7 @@ Describe 'Build id covers the whole generated script (review finding P3-12)' {
             $fragment = $fragment.Replace('param (', "# build id probe`nparam (")
         }
         else {
-            $fragment = $fragment.TrimEnd() + "`n# build id probe`n"
+            $fragment = $fragment.TrimEnd() + "`n`$script:ZzBuildIdProbe = 1`n"
         }
         [System.IO.File]::WriteAllText($fragmentPath, $fragment)
 
@@ -318,7 +319,7 @@ Describe 'Build id covers the whole generated script (review finding P3-12)' {
     }
 }
 
-Describe 'The generated installer leaves out the module comments (review finding P3-53)' {
+Describe 'The generated installer leaves out the comments of the module and tail.ps1 (review finding P3-53)' {
     BeforeAll {
         . ([scriptblock]::Create((Import-BuildScriptFunction -Name 'Remove-PowerShellComment')))
         . ([scriptblock]::Create((Import-BuildScriptFunction -Name 'Get-CodeTokenSignature')))
@@ -428,6 +429,25 @@ Describe 'The generated installer leaves out the module comments (review finding
             $moduleComments.Count | Should -Be @(Get-ModuleFileInBuildOrder).Count
         }
 
+        It 'has no comment in the entry block from build/fragments/tail.ps1' {
+            $tokens = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile($script:InstallerScriptPath, [ref]$tokens, [ref]$null)
+            $comments = @($tokens | Where-Object { $_.Kind -eq [System.Management.Automation.Language.TokenKind]::Comment })
+            $end = @($comments | Where-Object { $_.Text -match '^# -+Main Script-+$' })
+            $end.Count | Should -Be 1
+
+            @($comments | Where-Object { $_.Extent.StartOffset -gt $end[0].Extent.StartOffset } | ForEach-Object { "line $($_.Extent.StartLineNumber): $($_.Text)" }) | Should -BeNullOrEmpty
+        }
+
+        It 'carries the code of build/fragments/tail.ps1, token for token' {
+            $installer = (Get-Content -Raw -Encoding UTF8 -Path $script:InstallerScriptPath) -replace "`r`n", "`n"
+            $marker = [regex]::Match($installer, '(?m)^# -+Main Script-+$')
+            $marker.Success | Should -BeTrue
+            $tail = (Get-Content -Raw -Encoding UTF8 -Path (Join-Path $script:RepoRoot 'build/fragments/tail.ps1')) -replace "`r`n", "`n"
+
+            Get-CodeTokenSignature -Source $installer.Substring($marker.Index + $marker.Length) | Should -BeExactly (Get-CodeTokenSignature -Source $tail)
+        }
+
         It 'carries the code of every module file, token for token' {
             $installer = (Get-Content -Raw -Encoding UTF8 -Path $script:InstallerScriptPath) -replace "`r`n", "`n"
             $end = $installer.IndexOf("`n# ------------------------------------------------Main Script")
@@ -477,6 +497,18 @@ Describe 'The generated installer leaves out the module comments (review finding
             $result.ExitCode | Should -Be 0 -Because $result.Output
         }
 
+        It 'leaves the installer unchanged when only build/fragments/tail.ps1 comments change' {
+            $root = New-BuildFixture -Name 'tail-comment-only-change'
+            $tailPath = Join-Path $root 'build/fragments/tail.ps1'
+            $tail = Get-Content -Raw -Encoding UTF8 -Path $tailPath
+            $tail = $tail.Insert($tail.IndexOf('{') + 1, "`n    # A comment in the entry block.`n")
+            [System.IO.File]::WriteAllText($tailPath, "# A new file comment.`n" + $tail.TrimEnd() + " # A trailing comment.`n")
+
+            $result = Invoke-FixtureBuild -Root $root -Check
+
+            $result.ExitCode | Should -Be 0 -Because $result.Output
+        }
+
         It 'fails the build when removing the comments would change the code' {
             # A stripper broken on purpose: it drops the code before an end-of-line comment too.
             $root = New-BuildFixture -Name 'comment-check' -ProbeSource "function Get-ZzProbeValue {`n    'kept' # note`n}`n"
@@ -490,6 +522,37 @@ Describe 'The generated installer leaves out the module comments (review finding
 
             $result.ExitCode | Should -Not -Be 0
             $result.Output | Should -Match 'Comment check failed: removing the comments from WingetAppSetup/Private/\w+\.ps1 would change its code'
+        }
+
+        It 'compares the code tokens before and after removing the comments case-sensitively' {
+            # A stripper broken on purpose: it changes the case of a string, which PowerShell's
+            # -ne would not notice.
+            $root = New-BuildFixture -Name 'comment-check-case' -ProbeSource "function Get-ZzProbeValue {`n    'zzprobe' # note`n}`n"
+            $buildPath = Join-Path $root 'build/Build-WingetInstallScript.ps1'
+            $build = Get-Content -Raw -Encoding UTF8 -Path $buildPath
+            $join = 'Text       = $kept -join "`n"'
+            $build.Contains($join) | Should -BeTrue
+            [System.IO.File]::WriteAllText($buildPath, $build.Replace($join, 'Text       = ($kept -join "`n").Replace(''zzprobe'', ''ZZPROBE'')'))
+
+            $result = Invoke-FixtureBuild -Root $root
+
+            $result.ExitCode | Should -Not -Be 0
+            $result.Output | Should -Match 'Comment check failed: removing the comments from WingetAppSetup/Private/ZzBuildGuardProbe\.ps1 would change its code'
+        }
+
+        It 'names the tail.ps1 line behind a 5.1 syntax finding in the entry block' {
+            $root = New-BuildFixture -Name 'origin-tail-ps7-syntax'
+            $tailPath = Join-Path $root 'build/fragments/tail.ps1'
+            $tailLines = @((Get-Content -Raw -Encoding UTF8 -Path $tailPath) -replace "`r`n", "`n" -split "`n")
+            $index = [Array]::FindIndex($tailLines, [Predicate[string]] { param($line) $line -match '^\s*if \(-not \(Test-FullLanguageMode\)\) \{$' })
+            $index | Should -BeGreaterThan 1 -Because 'comment lines come before it in tail.ps1'
+            $tailLines[$index] = "    `$zzProbe = `$env:ZZ_PROBE ?? 'fallback'`n" + $tailLines[$index]
+            [System.IO.File]::WriteAllText($tailPath, ($tailLines -join "`n"))
+
+            $result = Invoke-FixtureBuild -Root $root -Check
+
+            $result.ExitCode | Should -Not -Be 0
+            $result.Output | Should -Match ("'\?\?' \(QuestionQuestion\) \[build/fragments/tail\.ps1:{0}\]" -f ($index + 1))
         }
 
         It 'names the module file and line behind a 5.1 syntax finding' {

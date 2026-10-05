@@ -314,16 +314,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- The generated `winget-app-install.ps1` leaves out the module's comments (work-order item 30,
-  review finding P3-53): 450 KB and 11,233 lines instead of 867 KB and 17,766, so every `irm | iex`
-  run downloads about half as much. `build/Build-WingetInstallScript.ps1` removes the comments
-  with the PowerShell tokenizer (`Remove-PowerShellComment`), and only those that end their line,
-  so a `#` inside a string, here-string or regex stays, as would a `#Requires`;
-  `build/fragments/head.ps1` (the script's help) and `tail.ps1` are kept as they are. A new build
-  check fails the build when removing the comments changed a module file's code tokens, and the
-  parse, ASCII and PowerShell-7-syntax guards now name the source file and line behind each line
-  they report. Every function in the installer has the same syntax tree as before. A change to a
-  module comment alone no longer changes the installer or its build id.
+- The generated `winget-app-install.ps1` leaves out the comments of the module and of the entry
+  block, `build/fragments/tail.ps1` (work-order item 30, review finding P3-53): 439 KB and 11,111
+  lines instead of 867 KB and 17,766, so every `irm | iex` run downloads about half as much.
+  `build/Build-WingetInstallScript.ps1` removes the comments with the PowerShell tokenizer
+  (`Remove-PowerShellComment`), and only those that end their line, so a `#` inside a string,
+  here-string or regex stays, as would a `#Requires`; `build/fragments/head.ps1` (the script's
+  help) is kept as it is. A new build check fails the build when removing the comments changed the
+  code tokens of a module file or of `tail.ps1` (compared case-sensitively), and the parse, ASCII
+  and PowerShell-7-syntax guards now name the source file and line behind each line they report.
+  Every function in the installer has the same syntax tree as before. A change to a comment in the
+  module or `tail.ps1` alone no longer changes the installer or its build id.
 - The module's comments are shorter (work-order item 30, review finding P3-53): the incident
   narratives in its help and inline comments now say what the code does and why in a few lines,
   with the history left to the commit messages and this changelog (6,508 comment lines and 408 KB
@@ -1083,7 +1084,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     without a console. This also fixes the known Linux test failure in `Logging.Tests.ps1`.
   - **The build id covers the whole installer.** It is now the SHA256 of the whole generated
     script with the id slots blanked, not only of the functions, so a change to
-    `build/fragments/head.ps1` or `tail.ps1` gets a new `Installer build:` id.
+    `build/fragments/head.ps1` or to the code of `tail.ps1` gets a new `Installer build:` id.
   - **An issue form for install failures** (`.github/ISSUE_TEMPLATE/install-failure.yml`) asks for
     the exit code, the installer build, the target (cross-user, fresh 5.1 machine, SYSTEM) and the
     log file, and tells the reporter to remove the transcript header (it names the computer and

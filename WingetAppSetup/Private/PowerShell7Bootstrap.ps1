@@ -5,14 +5,17 @@
 # Write-ErrorMessage, Write-Success, Test-IsAdmin, Get-CurrentWindowsPrincipal, Test-IsSystemAccount,
 # Get-WingetAgreementArgs, Invoke-WingetProcess with Private/ProcessInvocation.ps1,
 # Resolve-WingetExecutable and the Private/MachineContext.ps1 helpers it reaches,
-# Get-ScriptExecutionPolicyBlock, Test-LaunchedByGroupPolicyScript, Test-FullLanguageMode,
-# Write-InstallerNotStartedResult, Test-EffectiveNonInteractive, Test-NonInteractiveRequested,
-# Test-IsContinuousIntegration, Start-InstallerTranscript, Grant-InstallLogReadAccess, Write-Prompt,
-# Exit-Installer, Write-InstallerExitNotice, Wait-InstallerExitKeyPress, Write-InstallerReportHint,
-# Get-DiagnosticsCommandLine, Complete-InstallerRun and Unlock-InstallerRun; and, for
-# -CollectDiagnostics, Invoke-DiagnosticsCollection and what Private/Diagnostics.ps1 lists. Check a
-# function against these constraints before calling it from here: the build's guards keep the file
-# 5.1-parseable, not 5.1-runnable. tests/PowerShell7Bootstrap.Tests.ps1 pins this file's behaviour.
+# Get-WingetExitCodeInfo, Format-WingetExitCode and Test-WingetRestartRequiredResult
+# (Private/WingetResultCodes.ps1), Get-ScriptExecutionPolicyBlock, Test-LaunchedByGroupPolicyScript,
+# Test-FullLanguageMode, Get-PowerShellLanguageMode, Test-EffectiveNonInteractive,
+# Test-NonInteractiveRequested, Test-IsContinuousIntegration, Start-InstallerTranscript,
+# Grant-InstallLogReadAccess, Write-Prompt, Exit-Installer, Write-InstallerExitNotice,
+# Wait-InstallerExitKeyPress, Write-InstallerReportHint, Get-DiagnosticsCommandLine,
+# Write-InstallerNotStartedResult, Complete-InstallerRun and the Private/RunRecord.ps1 functions
+# they reach, and Unlock-InstallerRun; and, for -CollectDiagnostics, Invoke-DiagnosticsCollection
+# and what Private/Diagnostics.ps1 lists. Check a function against these constraints before calling
+# it from here: the build's guards keep the file 5.1-parseable, not 5.1-runnable.
+# tests/PowerShell7Bootstrap.Tests.ps1 pins this file's behaviour.
 
 <#
 .SYNOPSIS
