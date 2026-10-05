@@ -287,16 +287,15 @@ pwsh -ExecutionPolicy Unrestricted -File .\winget-app-install.ps1 -WhatIf
 
 A dry run changes nothing on the machine and does not ask for elevation. It runs the checks a real
 run starts with (the App Installer Group Policy and `winget --version`) and prints a `[DRY-RUN]`
-line for each change a real run would make: installing the `Microsoft.PowerShell.GraphicalTools`
-module (and the NuGet provider), setting up winget for the account (registering App Installer, then
-`Repair-WinGetPackageManager`, after installing its `Microsoft.WinGet.Client` module), updating
-the winget source and repairing it if needed (a real repair runs `winget source reset --force`,
-which also removes any source added beyond the defaults), relaunching elevated, and each app it
-would install. When the account has no winget yet, for example an admin account used only to
-elevate, or winget is there but cannot be started, the preview lists every app as one a real run
-would install, because it cannot check which are already there. A dry run still writes its
-transcript (see [Logs](#logs)), and its `winget list` checks update winget's own per-user cache
-and source-agreement state.
+line for each change a real run would make: setting up winget for the account (registering App
+Installer, then `Repair-WinGetPackageManager`, after installing its `Microsoft.WinGet.Client`
+module), updating the winget source and repairing it if needed (a real repair runs
+`winget source reset --force`, which also removes any source added beyond the defaults),
+relaunching elevated, and each app it would install. When the account has no winget yet, for
+example an admin account used only to elevate, or winget is there but cannot be started, the
+preview lists every app as one a real run would install, because it cannot check which are already
+there. A dry run still writes its transcript (see [Logs](#logs)), and its `winget list` checks
+update winget's own per-user cache and source-agreement state.
 
 ## Unattended runs
 
@@ -310,8 +309,8 @@ elevated or run as SYSTEM (see
 [Running as SYSTEM](#running-as-system-rmm-tools-such-as-endpoint-central)): a non-interactive run
 that is not elevated exits 4 without showing a prompt. A run as SYSTEM is always non-interactive.
 Pass `-NonInteractive` for RMM, CI, or scheduled-task use to also suppress the interactive-only
-extras: the summary grid-view window and the "press any key to exit" that holds the window at the
-end of a run or after an early failure (see [Logs](#logs)):
+extra: the "press any key to exit" that holds the window at the end of a run or after an early
+failure (see [Logs](#logs)). The summary is a text table in the console and the log either way:
 
 ```powershell
 pwsh -ExecutionPolicy Unrestricted -File .\winget-app-install.ps1 -NonInteractive
@@ -345,7 +344,7 @@ the installer stops that process and every process it started, then carries on:
 | `winget download` (the PowerShell MSIX fallback) | 30 minutes |
 | The per-app `winget list` check before and after each install | 15 seconds |
 | The `winget --version` check that winget can be started | 30 seconds |
-| `winget source update` and other `winget list` calls | 2 minutes |
+| `winget source update` | 2 minutes |
 | `winget source reset` | 5 minutes |
 | One `winget uninstall` (`winget-app-uninstall.ps1`), the app's own uninstaller included | 15 minutes |
 | `msiexec` for Winget-AutoUpdate (install and uninstall) | 15 minutes |
@@ -357,10 +356,10 @@ fails, gets its one retry in the retry pass, and counts toward exit code 1, with
 `winget install stopped after 30 minutes` in its failure reason. The limits are set in one place,
 `Get-ProcessTimeoutSeconds` (`WingetAppSetup/Private/ProcessInvocation.ps1`).
 
-Some steps still have no time limit of their own: the PowerShell cmdlets that set up winget and the
-summary grid (`Install-Module` for Microsoft.WinGet.Client and Microsoft.PowerShell.GraphicalTools,
-`Repair-WinGetPackageManager`, and `Add-AppxPackage` registering App Installer), and, on
-PowerShell 7.3 and older, the Winget-AutoUpdate MSI download once the file has started to arrive.
+Some steps still have no time limit of their own: the PowerShell cmdlets that set up winget
+(`Install-Module` for Microsoft.WinGet.Client, `Repair-WinGetPackageManager`, and
+`Add-AppxPackage` registering App Installer), and, on PowerShell 7.3 and older, the
+Winget-AutoUpdate MSI download once the file has started to arrive.
 
 **Setting winget up.** Before the installs, one step (`Initialize-Winget`) checks winget, works out
 what is wrong from exit codes and HRESULTs, applies the fix for that, and runs each fix at most once
@@ -467,7 +466,7 @@ PowerShell 7, which this installer does not use yet. So a SYSTEM run can fail wh
 signed-in user would not; test it on a pilot PC before rolling it out. What a SYSTEM run does
 differently:
 
-- It is never interactive: no grid view, no "press any key", and winget installs with `--silent`.
+- It is never interactive: no "press any key", and winget installs with `--silent`.
 - It runs the `winget.exe` that App Installer installed for the PC, by its full path, for every
   winget call: the newest one whose package `Get-AppxPackage -AllUsers` lists with status `Ok`, or,
   when that query fails or finds none, the newest
@@ -873,8 +872,7 @@ powershell -ExecutionPolicy Unrestricted -File .\winget-app-uninstall.ps1 -WhatI
   keeps its updates. When WAU is installed, the run says it was kept; fix the failure and run the
   uninstaller again.
 - `-NonInteractive` (or `WINGET_APP_SETUP_NONINTERACTIVE`, see
-  [Unattended runs](#unattended-runs)) never shows a UAC prompt (it exits 4 when not elevated) and
-  opens no summary window.
+  [Unattended runs](#unattended-runs)) never shows a UAC prompt (it exits 4 when not elevated).
 
 | Code | Meaning |
 |------|---------|
@@ -1011,9 +1009,10 @@ Tier 2 ([#215](https://github.com/J-MaFf/winget-app-setup/issues/215)) will reus
 ## Project layout (for contributors)
 
 The installer's logic lives in the **`WingetAppSetup` PowerShell module** under `WingetAppSetup/`
-(`Public/` for exported functions, `Private/` for internal helpers). The single-file
-`winget-app-install.ps1` is **generated** from that module so the `irm | iex` one-liner keeps
-working — do not edit it by hand.
+(`Public/` for the entry points and the run's main steps, `Private/` for their helpers; the
+module exports every function, so moving one between the two folders changes nothing else). The
+single-file `winget-app-install.ps1` is **generated** from that module so the `irm | iex`
+one-liner keeps working — do not edit it by hand.
 
 After changing anything under `WingetAppSetup/`, regenerate the installer:
 
@@ -1102,11 +1101,7 @@ guards, most of which run in both build and `-Check` modes of
    Windows; when an off-Windows build fails on a genuine Windows-only cmdlet, add it to that list.
    On Windows each listed name must resolve, so the list cannot hide a missing module function. On
    every platform a listed name the installer no longer calls draws a warning.
-4. **psd1 export assertion** — `WingetAppSetup.psd1`'s `FunctionsToExport` must exactly
-   (case-sensitively) match the functions defined under `WingetAppSetup/Public/*.ps1`, so a
-   new public function cannot be silently filtered on manifest imports
-   ([#191](https://github.com/J-MaFf/winget-app-setup/issues/191)).
-5. **Windows PowerShell 5.1 parse-safety guards** — 5.1 parses the whole installer before it
+4. **Windows PowerShell 5.1 parse-safety guards** — 5.1 parses the whole installer before it
    runs any of it, so the file must stay 5.1-parseable even though the install itself runs under
    PowerShell 7. Syntax that only PowerShell 7 parses (`??`, `??=`, `?.`, `?[`, the ternary `?:`,
    the `&&` / `||` pipeline chains, the background operator `&` as in `Get-Process &`, and
@@ -1120,17 +1115,24 @@ guards, most of which run in both build and `-Check` modes of
    (find-or-install `pwsh`, then relaunch — [#225](https://github.com/J-MaFf/winget-app-setup/issues/225));
    comments are exempt because misdecoded bytes there cannot change tokenization
    ([#210](https://github.com/J-MaFf/winget-app-setup/issues/210)).
-6. **Content-derived build id** — the banner and `$script:InstallerBuildId` are stamped with
+5. **Content-derived build id** — the banner and `$script:InstallerBuildId` are stamped with
    `<module version>+<8-hex SHA256 fragment of the whole generated script>` (hashed with the id
    slots blanked, so a change to `build/fragments/head.ps1` or `tail.ps1` changes the id too),
    derived from content only (never git metadata or timestamps) so rebuilding the same tree is
    byte-identical and the `-Check` byte-compare stays deterministic; transcripts log the id at
    startup so a log identifies the exact installer build
    ([#189](https://github.com/J-MaFf/winget-app-setup/issues/189)).
-7. **CI enforcement** — `.github/workflows/windows-tests.yml` runs `-Check` on every push to
+6. **CI enforcement** — `.github/workflows/windows-tests.yml` runs `-Check` on every push to
    `main` and on every pull request, so drift fails CI instead of shipping
    ([#156](https://github.com/J-MaFf/winget-app-setup/issues/156)).
-8. **Local pre-commit hook** — `.githooks/pre-commit` (above) runs the same `-Check`, against
+7. **Local pre-commit hook** — `.githooks/pre-commit` (above) runs the same `-Check`, against
    the staged files, before a commit that touches the module, the build, a manifest, or the
    installer, catching drift before it is even committed
    ([#211](https://github.com/J-MaFf/winget-app-setup/issues/211)).
+
+The module manifest has no export list to drift: `FunctionsToExport` is `'*'`, so
+`winget-app-uninstall.ps1` and `e2e/Assert-Install.ps1`, which import the module through it, get
+every function. There used to be an explicit list that the build checked against `Public/*.ps1`
+([#191](https://github.com/J-MaFf/winget-app-setup/issues/191): a function missing from it failed
+only at the uninstaller's prompt); `tests/EntryPoint.Tests.ps1` now checks that a manifest import
+exports every function the module defines.

@@ -30,10 +30,6 @@
 .PARAMETER WhatIf
     Dry run: the read-only checks run and the summary shows what a real run would remove. Nothing is
     uninstalled or changed, and nothing is installed (the winget setup only checks).
-.PARAMETER NonInteractive
-    For unattended runs: no summary grid-view window. Also turned on by
-    $env:WINGET_APP_SETUP_NONINTERACTIVE and when the session is not interactive
-    (Test-EffectiveNonInteractive).
 .PARAMETER Apps
     The app definitions to remove. Default: Get-DefaultAppCatalog, the installer's list.
 .OUTPUTS
@@ -58,13 +54,8 @@ function Invoke-WingetUninstall {
         [switch]$WhatIf,
 
         [Parameter(Mandatory = $false)]
-        [switch]$NonInteractive,
-
-        [Parameter(Mandatory = $false)]
         [array]$Apps = (Get-DefaultAppCatalog)
     )
-
-    $effectiveNonInteractive = Test-EffectiveNonInteractive -NonInteractive:$NonInteractive
 
     if ($WhatIf) {
         Write-Info '=== DRY-RUN MODE ENABLED ==='
@@ -249,8 +240,7 @@ function Invoke-WingetUninstall {
     if ($appList) {
         $rows += , @('Failed', $appList)
     }
-    # The grid view only when someone is there to close it; the text table prints either way.
-    Write-Table -Headers $headers -Rows $rows -AutoGridView (-not $effectiveNonInteractive) -Title 'Uninstallation Summary'
+    Write-Table -Headers $headers -Rows $rows -Title 'Uninstallation Summary'
     Write-FailedAppsSummary -FailedApps $failedApps -Title 'Failed Uninstalls'
 
     if ($autoUpdatesKept) {

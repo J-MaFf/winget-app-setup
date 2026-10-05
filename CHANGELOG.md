@@ -402,6 +402,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
+- Removed the summary grid view and the module that provided it (work-order item 26, review
+  findings P3-43, P3-45). An interactive run opened the installation and uninstall summaries in an
+  `Out-GridView` window as well as the text table, and the window held the run until it was closed;
+  it only repeated the table, which is in the console and the transcript either way, and never
+  reached the log. To provide it, `Test-AndInstallGraphicalTools` (`WingetAppSetup/Private/GraphicalTools.ps1`)
+  installed the NuGet provider and `Microsoft.PowerShell.GraphicalTools` for all users from the
+  PowerShell Gallery wherever `Out-GridView` was missing (in-box in PowerShell 7 on Windows, so on
+  the target PCs that branch never ran). Gone with it: `Test-CanUseGridView`, `Write-Table`'s
+  `-UseGridView` and `-AutoGridView`, `Invoke-WingetUninstall`'s `-NonInteractive` (it gated only
+  the grid view; `winget-app-uninstall.ps1 -NonInteractive` still keeps the UAC prompt away), the
+  dry run's `Out-GridView is not available` line, and `Out-GridView` in
+  `build/windows-only-commands.txt`. The installer's `-NonInteractive` still skips the final key
+  press, the TightVNC question and the UAC prompt, and still adds `--silent`.
+- Removed dead helpers and modes (review finding P3-43): `Get-WindowsTerminalSettingsPath`, which
+  nothing called, and `Test-WingetPackageInstalled`'s mode without `-TimeoutSeconds`, which returned
+  a plain `[bool]` under a 2-minute limit and read a winget that could not start, or that ran out
+  of time, as "not installed". No caller used it; `-TimeoutSeconds` is now required, the result is
+  always the hashtable, and the `WingetList` time limit went with it (the readme's time-limit table
+  no longer lists "other `winget list` calls"). Also removed the Pester tests that only asserted
+  that already-removed functions stayed removed (the old winget-setup ladders, the msstore-era
+  source-trust helpers, `ConvertTo-CommandArguments`). `Write-Prompt` stays: it is the seam the tests
+  use to stop a run at its final key press. `Convert-JsoncToJson` stays (PowerShell 7.6's
+  `ConvertFrom-Json` rejects a comment between a key and its colon), and so does the dormant
+  MSIX/DISM provisioning path.
+- Removed the module's export list and its build check (review finding P3-44).
+  `WingetAppSetup.psd1` exports every function (`FunctionsToExport = '*'`, and the psm1 exports
+  `'*'` instead of reading the manifest), so `winget-app-uninstall.ps1` and `e2e/Assert-Install.ps1`
+  get every function, `Private/` ones included, and moving a function between `Public/` and
+  `Private/` changes nothing else. The explicit list had to match `Public/*.ps1` exactly, which
+  `build/Build-WingetInstallScript.ps1` asserted in build and `-Check` modes (#191: a function
+  missing from it failed only at the uninstaller's prompt); with `'*'` there is nothing to drift,
+  and `tests/EntryPoint.Tests.ps1` checks that a manifest import exports every function the module
+  defines.
 - Removed the aka.ms/getwinget download rung and the source.msix registration rung (review findings
   P3-25, P3-31), with `Test-AndInstallWinget`, `Initialize-WingetSourcesForUser`,
   `Test-WingetSources`, `Test-WingetSourceHealth` (the `winget source list` and `winget search 7zip`

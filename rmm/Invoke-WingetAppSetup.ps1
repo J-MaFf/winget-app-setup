@@ -23,8 +23,8 @@
          -NonInteractive. The installer finds or installs PowerShell 7 and relaunches under it.
       5. Exits with the installer's exit code, unchanged.
 
-    No -Unattended switch is needed: as SYSTEM the installer is non-interactive by itself (no grid
-    view, no key press, --silent), it is elevated, and it installs for the whole PC only, reporting
+    No -Unattended switch is needed: as SYSTEM the installer is non-interactive by itself (no key
+    press, --silent), it is elevated, and it installs for the whole PC only, reporting
     an app with no machine-wide installer as Deferred in last-run.json. -NonInteractive is passed
     anyway, for an RMM that runs the wrapper as an administrator account instead of SYSTEM.
     The deferred apps and the per-user Windows Terminal defaults are left to the user phase,

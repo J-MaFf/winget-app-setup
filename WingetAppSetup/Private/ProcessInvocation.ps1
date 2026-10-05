@@ -25,7 +25,6 @@
                       limit those checks have always had).
     WingetVersion     the `winget --version` launch check (30 seconds; it does no network or
                       source I/O).
-    WingetList        any other `winget list` (2 minutes).
     WingetSourceUpdate `winget source update`, the source check before the installs (2 minutes).
     WingetSourceReset `winget source reset`, which downloads the source again (5 minutes).
     MsiExec           one msiexec install or uninstall (15 minutes, as for the PowerShell 7 MSI).
@@ -46,7 +45,7 @@
 function Get-ProcessTimeoutSeconds {
     param (
         [Parameter(Mandatory = $true)]
-        [ValidateSet('WingetInstall', 'WingetDownload', 'WingetUninstall', 'WingetListCheck', 'WingetVersion', 'WingetList', 'WingetSourceUpdate', 'WingetSourceReset', 'MsiExec', 'AppxProvisioning', 'WebDownload', 'WebDownloadStall', 'WebLookup')]
+        [ValidateSet('WingetInstall', 'WingetDownload', 'WingetUninstall', 'WingetListCheck', 'WingetVersion', 'WingetSourceUpdate', 'WingetSourceReset', 'MsiExec', 'AppxProvisioning', 'WebDownload', 'WebDownloadStall', 'WebLookup')]
         [string]$Operation
     )
 
@@ -56,7 +55,6 @@ function Get-ProcessTimeoutSeconds {
         'WingetUninstall' { return 900 }
         'WingetListCheck' { return 15 }
         'WingetVersion' { return 30 }
-        'WingetList' { return 120 }
         'WingetSourceUpdate' { return 120 }
         'WingetSourceReset' { return 300 }
         'MsiExec' { return 900 }

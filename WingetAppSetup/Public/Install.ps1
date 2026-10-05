@@ -6,17 +6,16 @@
 .PARAMETER WhatIf
     When specified, the script performs all pre-flight checks and displays planned actions without making any system changes.
 .PARAMETER NonInteractive
-    Suppresses the interactive extras for unattended runs (RMM, CI, scheduled tasks): the summary
-    grid-view window and the final "press any key to exit". Also turned on by
-    $env:WINGET_APP_SETUP_NONINTERACTIVE (Test-NonInteractiveRequested), and auto-detected when the
-    session is non-interactive or stdin is redirected. No path asks a yes/no question anymore
-    (issue #230). The one question left is TightVNC's server password, asked at the start of an
-    interactive run when WINGET_APP_SETUP_TIGHTVNC_PASSWORD is not set and TightVNC Server has no
-    password yet (work-order item 18), and skipped when nobody starts typing within 5 minutes; a
+    Suppresses the interactive extra for unattended runs (RMM, CI, scheduled tasks): the final
+    "press any key to exit". Also turned on by $env:WINGET_APP_SETUP_NONINTERACTIVE
+    (Test-NonInteractiveRequested), and auto-detected when the session is non-interactive or stdin
+    is redirected. No path asks a yes/no question anymore (issue #230). The one question left is
+    TightVNC's server password, asked at the start of an interactive run when
+    WINGET_APP_SETUP_TIGHTVNC_PASSWORD is not set and TightVNC Server has no password yet
+    (work-order item 18), and skipped when nobody starts typing within 5 minutes; a
     non-interactive run never asks it and reports TightVNC as not configured instead. A
-    non-interactive run that is
-    not elevated returns 4 instead of raising a UAC prompt that nobody would answer (review finding
-    P2-12).
+    non-interactive run that is not elevated returns 4 instead of raising a UAC prompt that nobody
+    would answer (review finding P2-12).
 .PARAMETER SkipSystemCheck
     Pass-through of the entry script's -SkipSystemCheck switch. Used only so an elevated relaunch
     inherits the caller's intent to bypass the pre-flight system checks (issue #185); the checks
@@ -268,10 +267,6 @@ function Invoke-WingetInstall {
         Write-ErrorMessage 'Winget is required for this script. Exiting.'
         Clear-TightVncSecret
         return 2
-    }
-
-    if (-not (Test-AndInstallGraphicalTools -WhatIf:$WhatIf) -and -not $WhatIf) {
-        Write-Warning 'Out-GridView will be unavailable; results will be displayed in text mode only.'
     }
 
     # Migrate away from the old homegrown scheduled-update task if a prior version installed one;
@@ -765,10 +760,7 @@ function Invoke-WingetInstall {
         $rows += , @('Failed', $appList)
     }
 
-    # -AutoGridView opens the grid view without asking (issue #230), gated on the session actually
-    # being interactive so an unattended run never leaves a window open with nobody to close it.
-    # The text table prints either way, so the transcript keeps the summary regardless.
-    Write-Table -Headers $headers -Rows $rows -AutoGridView (-not $effectiveNonInteractive) -Title 'Installation Summary'
+    Write-Table -Headers $headers -Rows $rows -Title 'Installation Summary'
 
     # Per-app failure reasons (issue #189): winget exit code, attempt count, and scope-fallback
     # detail, so a failure is diagnosable from the summary (and the transcript) instead of a

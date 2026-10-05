@@ -71,10 +71,10 @@ Describe 'Invoke-WingetUninstall' {
         Mock Get-InstallAccountContext { New-TestAccountContext }
 
         $script:capturedTables = @{}
-        $script:gridView = @{}
+        $script:tableParameters = @{}
         Mock Write-Table {
             $script:capturedTables[$Title] = $Rows
-            $script:gridView[$Title] = $AutoGridView
+            $script:tableParameters[$Title] = @($PesterBoundParameters.Keys | Sort-Object)
         }
         $script:errorMessages = @()
         Mock Write-ErrorMessage { $script:errorMessages += $Message }
@@ -116,7 +116,7 @@ Describe 'Invoke-WingetUninstall' {
 
     Context 'Exit codes' {
         It 'Returns 0, and nothing else, when every app and Winget-AutoUpdate are removed' {
-            $result = Invoke-WingetUninstall -Apps $script:apps -NonInteractive
+            $result = Invoke-WingetUninstall -Apps $script:apps
 
             @($result).Count | Should -Be 1
             $result | Should -BeOfType [int]
@@ -131,7 +131,7 @@ Describe 'Invoke-WingetUninstall' {
         It 'Returns 2 and removes nothing, Winget-AutoUpdate included, when winget cannot be started (P2-19)' {
             Mock Initialize-Winget { [pscustomobject]@{ Ready = $false; Diagnosis = 'NotLaunchable' } }
 
-            $result = Invoke-WingetUninstall -Apps $script:apps -NonInteractive
+            $result = Invoke-WingetUninstall -Apps $script:apps
 
             $result | Should -Be 2
             Should -Invoke Initialize-Winget -Times 1 -Exactly
@@ -148,7 +148,7 @@ Describe 'Invoke-WingetUninstall' {
             # help, so the uninstaller must not send the user there.
             Mock Initialize-Winget { [pscustomobject]@{ Ready = $false; Diagnosis = 'PolicyBlocked' } }
 
-            $result = Invoke-WingetUninstall -Apps $script:apps -NonInteractive
+            $result = Invoke-WingetUninstall -Apps $script:apps
 
             $result | Should -Be 2
             Should -Invoke Invoke-WingetProcess -Times 0 -Exactly
@@ -161,7 +161,7 @@ Describe 'Invoke-WingetUninstall' {
             Mock Initialize-Winget { [pscustomobject]@{ Ready = $false; Diagnosis = 'NotLaunchable' } }
             Mock Test-WauInstalled { $false }
 
-            $result = Invoke-WingetUninstall -Apps $script:apps -NonInteractive
+            $result = Invoke-WingetUninstall -Apps $script:apps
 
             $result | Should -Be 2
             ($script:errorMessages -join "`n") | Should -Match 'winget cannot be started for this account, so nothing was uninstalled: without winget the uninstaller cannot tell which apps are installed\. Run the uninstaller from an account where winget works'
@@ -171,7 +171,7 @@ Describe 'Invoke-WingetUninstall' {
         It 'Sets winget up the way the installer does before the first app' {
             Mock Initialize-Winget { $script:sequence += 'winget setup'; [pscustomobject]@{ Ready = $true; Diagnosis = 'Ok' } }
 
-            $null = Invoke-WingetUninstall -Apps $script:apps -NonInteractive
+            $null = Invoke-WingetUninstall -Apps $script:apps
 
             $script:sequence[0..1] | Should -Be @('winget setup', 'list Contoso.AppOne')
             Should -Invoke Get-InstallAccountContext -Times 1 -Exactly
@@ -186,7 +186,7 @@ Describe 'Invoke-WingetUninstall' {
             Mock Initialize-Winget { $script:pathAtSetup = $script:MachineWingetPath; [pscustomobject]@{ Ready = $true; Diagnosis = 'Ok' } }
 
             try {
-                $null = Invoke-WingetUninstall -Apps $script:apps -NonInteractive
+                $null = Invoke-WingetUninstall -Apps $script:apps
             }
             finally {
                 $script:MachineWingetPath = $null
@@ -200,7 +200,7 @@ Describe 'Invoke-WingetUninstall' {
             # machine-wide winget.exe and never installs Microsoft.WinGet.Client.
             Mock Get-InstallAccountContext { New-TestAccountContext -System }
 
-            $result = Invoke-WingetUninstall -Apps $script:apps -NonInteractive
+            $result = Invoke-WingetUninstall -Apps $script:apps
 
             $result | Should -Be 0
             Should -Invoke Get-InstallAccountContext -Times 1 -Exactly
@@ -211,7 +211,7 @@ Describe 'Invoke-WingetUninstall' {
         It 'Returns 1 and keeps Winget-AutoUpdate when an app could not be removed' {
             $script:uninstallResults['Contoso.AppTwo'] = { New-TestProcessResult -ExitCode -1978335226 }
 
-            $result = Invoke-WingetUninstall -Apps $script:apps -NonInteractive
+            $result = Invoke-WingetUninstall -Apps $script:apps
 
             $result | Should -Be 1
             Should -Invoke Uninstall-WingetAutoUpdate -Times 0 -Exactly
@@ -228,7 +228,7 @@ Describe 'Invoke-WingetUninstall' {
             Mock Test-WauInstalled { $false }
             $script:uninstallResults['Contoso.AppTwo'] = { New-TestProcessResult -ExitCode -1978335226 }
 
-            $result = Invoke-WingetUninstall -Apps $script:apps -NonInteractive
+            $result = Invoke-WingetUninstall -Apps $script:apps
 
             $result | Should -Be 1
             Should -Invoke Uninstall-WingetAutoUpdate -Times 0 -Exactly
@@ -242,7 +242,7 @@ Describe 'Invoke-WingetUninstall' {
         ) {
             Mock Uninstall-WingetAutoUpdate $Behaviour
 
-            $result = Invoke-WingetUninstall -Apps $script:apps -NonInteractive
+            $result = Invoke-WingetUninstall -Apps $script:apps
 
             $result | Should -Be 1
             $script:errorMessages | Should -Contain 'Auto-updates: FAILED - Winget-AutoUpdate could not be removed (see above). Run the uninstaller again.'
@@ -252,7 +252,7 @@ Describe 'Invoke-WingetUninstall' {
             Mock Uninstall-CatalogApp { throw 'boom' } -ParameterFilter { $App.name -eq 'Contoso.AppOne' }
             Mock Uninstall-CatalogApp { @{ Status = 'Uninstalled'; Reason = $null; RestartRequired = $false } }
 
-            $result = Invoke-WingetUninstall -Apps $script:apps -NonInteractive
+            $result = Invoke-WingetUninstall -Apps $script:apps
 
             $result | Should -Be 1
             $script:capturedTables['Failed Uninstalls'][0] | Should -Be @('Contoso.AppOne', 'Unexpected error: boom')
@@ -263,7 +263,7 @@ Describe 'Invoke-WingetUninstall' {
             @{ Case = 'invalid'; Apps = @(@{ name = 'not-a-package-id' }) }
             @{ Case = 'empty'; Apps = @() }
         ) {
-            $result = Invoke-WingetUninstall -Apps $Apps -NonInteractive
+            $result = Invoke-WingetUninstall -Apps $Apps
 
             $result | Should -Be 3
             Should -Invoke Initialize-Winget -Times 0 -Exactly
@@ -281,7 +281,7 @@ Describe 'Invoke-WingetUninstall' {
             $script:listResult = $Result
             Mock Invoke-WingetProcess { & $script:listResult } -ParameterFilter { $ArgumentList[0] -eq 'list' }
 
-            $result = Invoke-WingetUninstall -Apps $script:apps -NonInteractive
+            $result = Invoke-WingetUninstall -Apps $script:apps
 
             $result | Should -Be 1
             Should -Invoke Invoke-WingetProcess -Times 0 -Exactly -ParameterFilter { $ArgumentList[0] -eq 'uninstall' }
@@ -295,7 +295,7 @@ Describe 'Invoke-WingetUninstall' {
         It 'Reports an app winget does not list as not installed, and still removes Winget-AutoUpdate' {
             $script:installed['Contoso.AppTwo'] = $false
 
-            $result = Invoke-WingetUninstall -Apps $script:apps -NonInteractive
+            $result = Invoke-WingetUninstall -Apps $script:apps
 
             $result | Should -Be 0
             $script:warningMessages | Should -Contain 'Skipping: Contoso.AppTwo (not installed)'
@@ -310,7 +310,7 @@ Describe 'Invoke-WingetUninstall' {
             $apps = @(@{ name = 'Dell.CommandUpdate.Universal'; condition = { $false }; conditionDescription = 'Dell hardware only' })
             $script:installed['Dell.CommandUpdate.Universal'] = $true
 
-            $result = Invoke-WingetUninstall -Apps $apps -NonInteractive
+            $result = Invoke-WingetUninstall -Apps $apps
 
             $result | Should -Be 0
             $script:warningMessages | Should -Contain 'Skipping: Dell.CommandUpdate.Universal (not applicable: Dell hardware only)'
@@ -324,7 +324,7 @@ Describe 'Invoke-WingetUninstall' {
             $apps = @(@{ name = 'Contoso.X64Only'; arch = 'X64' })
             $script:installed['Contoso.X64Only'] = $true
 
-            $result = Invoke-WingetUninstall -Apps $apps -NonInteractive
+            $result = Invoke-WingetUninstall -Apps $apps
 
             $result | Should -Be 0
             $script:warningMessages | Should -Contain 'Skipping: Contoso.X64Only (not applicable: for X64 Windows only; this PC is Arm64)'
@@ -332,7 +332,7 @@ Describe 'Invoke-WingetUninstall' {
         }
 
         It 'Returns 3, removing nothing, for an app list with an invalid declarative field' {
-            $result = Invoke-WingetUninstall -Apps @(@{ name = 'Contoso.AppOne'; arch = 'amd64' }) -NonInteractive
+            $result = Invoke-WingetUninstall -Apps @(@{ name = 'Contoso.AppOne'; arch = 'amd64' })
 
             $result | Should -Be 3
             Should -Invoke Invoke-WingetProcess -Times 0 -Exactly -ParameterFilter { $ArgumentList[0] -eq 'uninstall' }
@@ -341,7 +341,7 @@ Describe 'Invoke-WingetUninstall' {
         It 'Removes the app when its condition throws (fail-open, as in the installer)' {
             $apps = @(@{ name = 'Contoso.AppOne'; condition = { throw 'probe broke' } })
 
-            $result = Invoke-WingetUninstall -Apps $apps -NonInteractive
+            $result = Invoke-WingetUninstall -Apps $apps
 
             $result | Should -Be 0
             $script:warningMessages | Should -Contain 'Condition for Contoso.AppOne failed to evaluate (probe broke); treating as applicable and attempting the uninstall.'
@@ -353,7 +353,7 @@ Describe 'Invoke-WingetUninstall' {
             # Stop) has no answer; it used to read as "does not apply", so the app was kept.
             $apps = @(@{ name = 'Contoso.AppOne'; condition = { Write-Error 'RPC server is unavailable' } })
 
-            $result = Invoke-WingetUninstall -Apps $apps -NonInteractive
+            $result = Invoke-WingetUninstall -Apps $apps
 
             $result | Should -Be 0
             ($script:warningMessages -join "`n") | Should -Match 'Condition for Contoso\.AppOne failed to evaluate \(RPC server is unavailable\); treating as applicable and attempting the uninstall\.'
@@ -364,7 +364,7 @@ Describe 'Invoke-WingetUninstall' {
             Mock Test-AppApplicability { $false } -ParameterFilter { $App.name -eq 'Contoso.AppTwo' -and $Purpose -eq 'Uninstall' }
             Mock Test-AppApplicability { $true }
 
-            $result = Invoke-WingetUninstall -Apps $script:apps -NonInteractive
+            $result = Invoke-WingetUninstall -Apps $script:apps
 
             $result | Should -Be 0
             $script:warningMessages | Should -Contain 'Skipping: Contoso.AppTwo (not applicable: condition not met)'
@@ -380,7 +380,7 @@ Describe 'Invoke-WingetUninstall' {
             Mock Get-PowerShellEdition { $script:edition }
             $script:installed['Microsoft.PowerShell'] = $true
 
-            $result = Invoke-WingetUninstall -Apps @(@{ name = 'Microsoft.PowerShell'; install = 'Install-PowerShellLatest' }) -NonInteractive
+            $result = Invoke-WingetUninstall -Apps @(@{ name = 'Microsoft.PowerShell'; install = 'Install-PowerShellLatest' })
 
             $result | Should -Be 0
             Should -Invoke Invoke-WingetProcess -Times ([int]$Removed) -Exactly -ParameterFilter { $ArgumentList[0] -eq 'uninstall' }
@@ -401,7 +401,7 @@ Describe 'Invoke-WingetUninstall' {
             # The catalog's own entry: its condition is the same host check.
             $terminal = @(Get-DefaultAppCatalog) | Where-Object { $_.name -eq 'Microsoft.WindowsTerminal' }
 
-            $result = Invoke-WingetUninstall -Apps @($terminal) -NonInteractive
+            $result = Invoke-WingetUninstall -Apps @($terminal)
 
             $result | Should -Be 0
             Should -Invoke Invoke-WingetProcess -Times ([int](-not $Hosted)) -Exactly -ParameterFilter { $ArgumentList[0] -eq 'uninstall' }
@@ -414,7 +414,7 @@ Describe 'Invoke-WingetUninstall' {
             Mock Test-WindowsTerminalHostsCurrentSession { $true }
             $terminal = @(Get-DefaultAppCatalog) | Where-Object { $_.name -eq 'Microsoft.WindowsTerminal' }
 
-            $null = Invoke-WingetUninstall -Apps @($terminal) -NonInteractive
+            $null = Invoke-WingetUninstall -Apps @($terminal)
 
             $script:warningMessages | Should -Contain 'Skipping: Microsoft.WindowsTerminal (not installed)'
             Should -Invoke Test-WindowsTerminalHostsCurrentSession -Times 0 -Exactly
@@ -428,7 +428,7 @@ Describe 'Invoke-WingetUninstall' {
             Mock Reset-WindowsTerminalDelegation { $script:sequence += 'reset delegation'; $true }
             $apps = @(@(Get-DefaultAppCatalog) | Where-Object { $_.name -eq 'Microsoft.WindowsTerminal' }) + @($script:apps)
 
-            $result = Invoke-WingetUninstall -Apps $apps -NonInteractive
+            $result = Invoke-WingetUninstall -Apps $apps
 
             $result | Should -Be 0
             Should -Invoke Reset-WindowsTerminalDelegation -Times 1 -Exactly -ParameterFilter { -not $WhatIf }
@@ -452,13 +452,13 @@ Describe 'Invoke-WingetUninstall' {
             }
             $terminal = @(Get-DefaultAppCatalog) | Where-Object { $_.name -eq 'Microsoft.WindowsTerminal' }
 
-            $null = Invoke-WingetUninstall -Apps @($terminal) -NonInteractive
+            $null = Invoke-WingetUninstall -Apps @($terminal)
 
             Should -Invoke Reset-WindowsTerminalDelegation -Times 0 -Exactly
         }
 
         It 'Leaves the default-terminal setting alone when the list has no Windows Terminal' {
-            $null = Invoke-WingetUninstall -Apps $script:apps -NonInteractive
+            $null = Invoke-WingetUninstall -Apps $script:apps
 
             Should -Invoke Reset-WindowsTerminalDelegation -Times 0 -Exactly
         }
@@ -486,7 +486,7 @@ Describe 'Invoke-WingetUninstall' {
         ) {
             $script:uninstallResults['Contoso.AppOne'] = $Result
 
-            $result = Invoke-WingetUninstall -Apps @(@{ name = 'Contoso.AppOne' }) -NonInteractive
+            $result = Invoke-WingetUninstall -Apps @(@{ name = 'Contoso.AppOne' })
 
             $result | Should -Be 1
             $script:capturedTables['Failed Uninstalls'][0] | Should -Be @('Contoso.AppOne', $Reason)
@@ -498,7 +498,7 @@ Describe 'Invoke-WingetUninstall' {
             $script:logPath = $logPath
             $script:uninstallResults['Contoso.AppOne'] = { New-TestProcessResult -ExitCode -1978335159 -LogPath $script:logPath }
 
-            $null = Invoke-WingetUninstall -Apps @(@{ name = 'Contoso.AppOne' }) -NonInteractive
+            $null = Invoke-WingetUninstall -Apps @(@{ name = 'Contoso.AppOne' })
 
             $script:capturedTables['Failed Uninstalls'][0][1] | Should -Be "'winget uninstall' exited with 0x8A150049 MSI_INSTALL_FAILED; uninstaller log: $logPath"
         }
@@ -513,7 +513,7 @@ Describe 'Invoke-WingetUninstall' {
             $script:code = $Code
             $script:uninstallResults['Contoso.AppOne'] = { New-TestProcessResult -ExitCode -1978335184 -Output @('Found Contoso App One [Contoso.AppOne]', 'Starting package uninstall...', "Uninstall failed with exit code: $script:code") }
 
-            $result = Invoke-WingetUninstall -Apps $script:apps -NonInteractive
+            $result = Invoke-WingetUninstall -Apps $script:apps
 
             $result | Should -Be 3010
             $script:successMessages | Should -Contain 'Successfully uninstalled: Contoso.AppOne (a restart finishes removing it)'
@@ -530,7 +530,7 @@ Describe 'Invoke-WingetUninstall' {
             $script:output = $Output
             $script:uninstallResults['Contoso.AppOne'] = { New-TestProcessResult -ExitCode -1978335184 -Output $script:output }
 
-            $result = Invoke-WingetUninstall -Apps @(@{ name = 'Contoso.AppOne' }) -NonInteractive
+            $result = Invoke-WingetUninstall -Apps @(@{ name = 'Contoso.AppOne' })
 
             $result | Should -Be 1
             $script:capturedTables['Failed Uninstalls'][0] | Should -Be @('Contoso.AppOne', "'winget uninstall' exited with 0x8A150030")
@@ -541,7 +541,7 @@ Describe 'Invoke-WingetUninstall' {
             $script:uninstallResults['Contoso.AppOne'] = { New-TestProcessResult -ExitCode -1978335184 -Output @('Uninstall failed with exit code: 3010') }
             $script:uninstallResults['Contoso.AppTwo'] = { New-TestProcessResult -ExitCode -1978335226 }
 
-            $result = Invoke-WingetUninstall -Apps $script:apps -NonInteractive
+            $result = Invoke-WingetUninstall -Apps $script:apps
 
             $result | Should -Be 1
             $script:warningMessages | Should -Contain 'Restart: REQUIRED to finish removing Contoso.AppOne.'
@@ -550,7 +550,7 @@ Describe 'Invoke-WingetUninstall' {
         It 'Returns 3010 when removing Winget-AutoUpdate needs a restart to finish' {
             Mock Uninstall-WingetAutoUpdate { @{ Succeeded = $true; RestartRequired = $true } }
 
-            $result = Invoke-WingetUninstall -Apps $script:apps -NonInteractive
+            $result = Invoke-WingetUninstall -Apps $script:apps
 
             $result | Should -Be 3010
             $script:warningMessages | Should -Contain 'Restart: REQUIRED to finish removing Winget-AutoUpdate.'
@@ -559,7 +559,7 @@ Describe 'Invoke-WingetUninstall' {
 
     Context 'Dry run' {
         It 'Runs only the read-only checks, removes nothing and returns 0' {
-            $result = Invoke-WingetUninstall -Apps $script:apps -NonInteractive -WhatIf
+            $result = Invoke-WingetUninstall -Apps $script:apps -WhatIf
 
             $result | Should -Be 0
             Should -Invoke Invoke-WingetProcess -Times 0 -Exactly -ParameterFilter { $ArgumentList[0] -ne 'list' }
@@ -573,7 +573,7 @@ Describe 'Invoke-WingetUninstall' {
         It 'Forwards the dry run to the default-terminal reset when Windows Terminal is not installed' {
             $terminal = @(Get-DefaultAppCatalog) | Where-Object { $_.name -eq 'Microsoft.WindowsTerminal' }
 
-            $null = Invoke-WingetUninstall -Apps @($terminal) -NonInteractive -WhatIf
+            $null = Invoke-WingetUninstall -Apps @($terminal) -WhatIf
 
             Should -Invoke Reset-WindowsTerminalDelegation -Times 1 -Exactly -ParameterFilter { $WhatIf }
         }
@@ -582,7 +582,7 @@ Describe 'Invoke-WingetUninstall' {
             $script:installed['Microsoft.WindowsTerminal'] = $true
             $terminal = @(Get-DefaultAppCatalog) | Where-Object { $_.name -eq 'Microsoft.WindowsTerminal' }
 
-            $null = Invoke-WingetUninstall -Apps @($terminal) -NonInteractive -WhatIf
+            $null = Invoke-WingetUninstall -Apps @($terminal) -WhatIf
 
             Should -Invoke Reset-WindowsTerminalDelegation -Times 0 -Exactly
         }
@@ -590,7 +590,7 @@ Describe 'Invoke-WingetUninstall' {
         It 'Stops the preview with 0 when winget cannot be started yet' {
             Mock Initialize-Winget { [pscustomobject]@{ Ready = $false; Diagnosis = 'NotLaunchable' } }
 
-            $result = Invoke-WingetUninstall -Apps $script:apps -NonInteractive -WhatIf
+            $result = Invoke-WingetUninstall -Apps $script:apps -WhatIf
 
             $result | Should -Be 0
             Should -Invoke Invoke-WingetProcess -Times 0 -Exactly
@@ -601,7 +601,7 @@ Describe 'Invoke-WingetUninstall' {
         It 'Stops the preview with 0, naming Group Policy, when the policy turns winget off' {
             Mock Initialize-Winget { [pscustomobject]@{ Ready = $false; Diagnosis = 'PolicyBlocked' } }
 
-            $result = Invoke-WingetUninstall -Apps $script:apps -NonInteractive -WhatIf
+            $result = Invoke-WingetUninstall -Apps $script:apps -WhatIf
 
             $result | Should -Be 0
             Should -Invoke Invoke-WingetProcess -Times 0 -Exactly
@@ -610,16 +610,15 @@ Describe 'Invoke-WingetUninstall' {
     }
 
     Context 'Summary' {
-        It 'Opens the grid view only when someone is at the console (non-interactive: <NonInteractive>)' -ForEach @(
-            @{ NonInteractive = $true }
-            @{ NonInteractive = $false }
-        ) {
-            $script:nonInteractive = $NonInteractive
-            Mock Test-EffectiveNonInteractive { $script:nonInteractive }
+        It 'Writes the summary as text only, with someone at the console too (work-order item 26)' {
+            # The summary used to open an Out-GridView window as well when someone was at the
+            # console (-AutoGridView); the window only repeated the text table.
+            Mock Test-EffectiveNonInteractive { $false }
 
             $null = Invoke-WingetUninstall -Apps $script:apps
 
-            $script:gridView['Uninstallation Summary'] | Should -Be (-not $NonInteractive)
+            $script:capturedTables['Uninstallation Summary'][0] | Should -Be @('Uninstalled', 'Contoso.AppOne, Contoso.AppTwo')
+            $script:tableParameters['Uninstallation Summary'] | Should -Be @('Headers', 'Rows', 'Title')
         }
     }
 }
@@ -638,8 +637,10 @@ function Restart-WithElevation {
     [pscustomobject]@{ Started = $false; ExitCode = 4 }
 }
 function Invoke-WingetUninstall {
-    param ([switch]$WhatIf, [switch]$NonInteractive)
-    Write-Host "UNINSTALL WhatIf=$([bool]$WhatIf) NonInteractive=$([bool]$NonInteractive)"
+    # Advanced, as the real one is: a switch it does not have stops the call (and the run, exit 5).
+    [CmdletBinding()]
+    param ([switch]$WhatIf)
+    Write-Host "UNINSTALL WhatIf=$([bool]$WhatIf)"
     if ($env:UNINSTALL_TEST_THROW -eq '1') { throw 'unexpected (test)' }
     [int]$env:UNINSTALL_TEST_CODE
 }
@@ -660,7 +661,7 @@ function Invoke-WingetUninstall {
             $expected = $Code -band 0xFF
         }
         $run.ExitCode | Should -Be $expected
-        $run.Output | Should -Match 'UNINSTALL WhatIf=False NonInteractive=True'
+        $run.Output | Should -Match 'UNINSTALL WhatIf=False'
         $run.Output | Should -Not -Match 'RELAUNCH'
     }
 
@@ -705,7 +706,7 @@ function Invoke-WingetUninstall {
 
         $run.ExitCode | Should -Be 0
         $run.Output | Should -Not -Match 'RELAUNCH'
-        $run.Output | Should -Match 'UNINSTALL WhatIf=True NonInteractive=False'
+        $run.Output | Should -Match 'UNINSTALL WhatIf=True'
         $run.Output | Should -Match 'INFO: \[DRY-RUN\] A real run needs administrator rights'
     }
 }
@@ -735,7 +736,6 @@ function Add-AppxPackage { throw 'no App Installer in this test' }
 function Get-ProcessUserName { 'CONTOSO\admin-tech' }
 function Get-InteractiveSessionUserName { $null }
 function Start-Sleep { param ([int]$Seconds) }
-function Test-CanUseGridView { $false }
 function Remove-LegacyScheduledUpdates { param ([switch]$WhatIf) $false }
 function Test-WauInstalled { $true }
 function Uninstall-WingetAutoUpdate { param ([switch]$WhatIf) Write-Host 'FAKE: Winget-AutoUpdate removed'; @{ Succeeded = $true; RestartRequired = $false } }

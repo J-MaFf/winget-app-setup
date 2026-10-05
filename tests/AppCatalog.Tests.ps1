@@ -30,7 +30,7 @@ Describe 'App list consistency (issue #190)' {
         # The script runs Invoke-WingetUninstall (review findings P2-19, P3-18), whose -Apps defaults
         # to the module catalog, as Invoke-WingetInstall's does.
         $uninstallScript = Get-Content $script:UninstallerScriptPath -Raw
-        $uninstallScript | Should -Match 'Invoke-WingetUninstall -WhatIf:\$WhatIf -NonInteractive:\$NonInteractive'
+        $uninstallScript | Should -Match '(?m)Invoke-WingetUninstall -WhatIf:\$WhatIf\s*$'
         $appsParameter = ${function:Invoke-WingetUninstall}.Ast.Body.ParamBlock.Parameters | Where-Object { $_.Name.VariablePath.UserPath -eq 'Apps' }
         $appsParameter.DefaultValue.Extent.Text | Should -Be '(Get-DefaultAppCatalog)'
         # The previously duplicated inline list (which had already drifted in metadata) is gone.
@@ -54,10 +54,10 @@ Describe 'App list consistency (issue #190)' {
         }
     }
 
-    It 'Exports every module function the uninstaller calls from the manifest (psd1 gates module imports)' {
-        # winget-app-uninstall.ps1 imports the module via the psd1, so a helper missing from
-        # FunctionsToExport fails at the user's prompt while dot-sourcing tests stay green (#191).
-        $manifest = Import-PowerShellDataFile $script:ModuleManifestPath
+    It 'Gets every module function the uninstaller calls from its manifest import' {
+        # winget-app-uninstall.ps1 imports the module via the psd1, so a function the import does
+        # not export fails at the user's prompt while dot-sourcing tests stay green (#191).
+        $exported = @(Get-ManifestExportedFunctionName)
         $scriptAst = [System.Management.Automation.Language.Parser]::ParseFile($script:UninstallerScriptPath, [ref]$null, [ref]$null)
         $calledFunctions = @($scriptAst.FindAll({ param($node) $node -is [System.Management.Automation.Language.CommandAst] }, $true) |
                 ForEach-Object { $_.GetCommandName() } |
@@ -66,7 +66,7 @@ Describe 'App list consistency (issue #190)' {
         $calledFunctions | Should -Contain 'Invoke-WingetUninstall'
         $calledFunctions | Should -Contain 'Restart-WithElevation'
         foreach ($helper in $calledFunctions) {
-            $manifest.FunctionsToExport | Should -Contain $helper
+            $exported | Should -Contain $helper
         }
     }
 }

@@ -6,8 +6,7 @@
 # module manifest (*.psd1), or the installer itself - run
 # build/Build-WingetInstallScript.ps1 -Check and block the commit if the installer
 # is out of sync with the module or any other -Check assertion fails (parse errors,
-# non-ASCII code tokens, PowerShell-7-only syntax, undefined references, export-list
-# drift, UTF-8 BOM).
+# non-ASCII code tokens, PowerShell-7-only syntax, undefined references, UTF-8 BOM).
 #
 # The check runs against the STAGED files - exactly what the commit will contain - not
 # the working tree: they are exported with git checkout-index into a temporary
@@ -72,7 +71,7 @@ if ! (cd "$snapshot" && pwsh -NoProfile -File ./build/Build-WingetInstallScript.
     echo "    git add winget-app-install.ps1    # stage it together with your module change" >&2
     echo "" >&2
     echo "If -Check failed on an assertion instead (parse error, undefined reference," >&2
-    echo "non-ASCII code token, PowerShell-7-only syntax, export-list drift), fix the" >&2
+    echo "non-ASCII code token, PowerShell-7-only syntax), fix the" >&2
     echo "offending source under WingetAppSetup/ or build/fragments/, re-run the build," >&2
     echo "and stage both." >&2
     exit 1

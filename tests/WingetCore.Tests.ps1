@@ -560,39 +560,6 @@ Describe 'Initialize-Winget on the #279 wedge (review findings P3-25, P3-27, P3-
     }
 }
 
-Describe 'The ladders Initialize-Winget replaced are gone (review finding P3-25)' {
-    It 'No longer defines <_>' -ForEach @('Test-AndInstallWinget', 'Test-WingetSources', 'Initialize-WingetSourcesForUser', 'Test-WingetSourceHealth', 'Test-AppxDowngradeRejection', 'Test-AppxMissingFrameworkDependency') {
-        Test-Path "Function:\$_" | Should -Be $false
-    }
-
-    It 'Exports Initialize-Winget and none of the old ladder functions' {
-        $manifest = Import-PowerShellDataFile $script:ModuleManifestPath
-        $manifest.FunctionsToExport | Should -Contain 'Initialize-Winget'
-        foreach ($name in 'Test-AndInstallWinget', 'Test-WingetSources', 'Initialize-WingetSourcesForUser', 'Test-AndInstallWingetModule') {
-            $manifest.FunctionsToExport | Should -Not -Contain $name
-        }
-    }
-}
-
-Describe 'msstore-era source-trust helpers removed (issue #177)' {
-    # Test-WingetSourceTrusted trusted error output (no $LASTEXITCODE check on merged stderr) and
-    # Set-Sources was only reachable from the removed Install.ps1 trusted-sources loop; source
-    # health is verified (and repaired) solely by Initialize-Winget now.
-    It 'No longer defines Test-WingetSourceTrusted' {
-        Test-Path Function:\Test-WingetSourceTrusted | Should -Be $false
-    }
-
-    It 'No longer defines Set-Sources' {
-        Test-Path Function:\Set-Sources | Should -Be $false
-    }
-
-    It 'No longer exports either helper from the module manifest' {
-        $manifest = Import-PowerShellDataFile $script:ModuleManifestPath
-        $manifest.FunctionsToExport | Should -Not -Contain 'Test-WingetSourceTrusted'
-        $manifest.FunctionsToExport | Should -Not -Contain 'Set-Sources'
-    }
-}
-
 Describe 'Install-WingetPackage (0x80073d19 session-error backoff)' {
     BeforeAll {
         # 0x80073D19 (ERROR_INSTALL_USER_LOGOFF) as the signed Int32 winget reports.
@@ -1295,55 +1262,12 @@ Describe 'Test-WingetPackageInstalled (timeout support, issue #188)' {
         Mock Write-Host { }
     }
 
-    Context 'Without -TimeoutSeconds (backward-compatible [bool] call)' {
-        It 'Returns $true when winget lists the package' {
-            Mock Invoke-WingetProcess { New-TestProcessResult -Output @('Name    Id       Version', '7-Zip   Test.App 24.09') }
-
-            $result = Test-WingetPackageInstalled -PackageId 'Test.App'
-
-            $result | Should -BeOfType [bool]
-            $result | Should -Be $true
-        }
-
-        It 'Returns $false when winget does not list the package' {
-            Mock Invoke-WingetProcess { New-TestProcessResult -ExitCode -1978335212 -Output @('No installed package found matching input criteria.') }
-
-            Test-WingetPackageInstalled -PackageId 'Test.App' | Should -Be $false
-        }
-
-        It 'Returns $false when winget cannot be started' {
-            Mock Invoke-WingetProcess { New-TestProcessResult -LaunchFailed -LaunchErrorCode 2 -LaunchError 'winget not found' }
-
-            Test-WingetPackageInstalled -PackageId 'Test.App' | Should -Be $false
-        }
-
-        It 'Returns $false when winget list times out' {
-            Mock Invoke-WingetProcess { New-TestProcessResult -TimedOut -Output @('Test.App  1.0') }
-
-            Test-WingetPackageInstalled -PackageId 'Test.App' | Should -Be $false
-        }
-
-        It 'Is time-limited too (review finding P2-5): it used to call winget inline with no limit' {
-            Mock Invoke-WingetProcess { New-TestProcessResult -Output @('Test.App  1.0') }
-
-            Test-WingetPackageInstalled -PackageId 'Test.App' | Should -Be $true
-
-            Should -Invoke Invoke-WingetProcess -Times 1 -Exactly -ParameterFilter {
-                $TimeoutSeconds -eq (Get-ProcessTimeoutSeconds -Operation WingetList) -and $Echo -eq 'None' -and $ArgumentList[0] -eq 'list'
-            }
-        }
-
-        It 'Returns $false when the output only contains a different id that has the target as a substring (CLAUDE.md regex enforcement)' {
-            Mock Invoke-WingetProcess { New-TestProcessResult -Output @('Name       Id           Version', 'Foo BarBaz Foo.BarBaz  1.0') }
-
-            Test-WingetPackageInstalled -PackageId 'Foo.Bar' | Should -Be $false
-        }
-
-        It 'Still returns $true for a real matching line when a substring-only lookalike is also present' {
-            Mock Invoke-WingetProcess { New-TestProcessResult -Output @('Name       Id           Version', 'Foo Bar    Foo.Bar      1.0', 'Foo BarBaz Foo.BarBaz  1.0') }
-
-            Test-WingetPackageInstalled -PackageId 'Foo.Bar' | Should -Be $true
-        }
+    It 'Requires -TimeoutSeconds, so every call gets the three-way answer (work-order item 26, review finding P3-43)' {
+        # Without -TimeoutSeconds the check used to return a plain [bool] under a 2-minute limit,
+        # reading a winget it could not start, or one that ran out of time, as "not installed". No
+        # caller used that mode; every caller passes the per-app limit (WingetListCheck).
+        $timeoutParameter = (Get-Command Test-WingetPackageInstalled).Parameters['TimeoutSeconds']
+        @($timeoutParameter.Attributes | Where-Object { $_ -is [System.Management.Automation.ParameterAttribute] -and $_.Mandatory }).Count | Should -Be 1
     }
 
     Context 'With -TimeoutSeconds' {
@@ -1373,6 +1297,12 @@ Describe 'Test-WingetPackageInstalled (timeout support, issue #188)' {
             $result = Test-WingetPackageInstalled -PackageId 'Foo.Bar' -TimeoutSeconds 15
 
             $result.Installed | Should -Be $false
+        }
+
+        It 'Still reports installed for a real matching line when a substring-only lookalike is also listed' {
+            Mock Invoke-WingetProcess { New-TestProcessResult -Output @('Name       Id           Version', 'Foo Bar    Foo.Bar      1.0', 'Foo BarBaz Foo.BarBaz  1.0') }
+
+            (Test-WingetPackageInstalled -PackageId 'Foo.Bar' -TimeoutSeconds 15).Installed | Should -Be $true
         }
 
         It 'Reports not-installed when the output does not mention the id' {

@@ -102,7 +102,6 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
         Mock Restart-WithElevation { [pscustomobject]@{ Started = $true; ExitCode = 0 } }
         Mock Test-IsRunningLocally { $true }
         Mock Initialize-Winget { [pscustomobject]@{ Ready = $true; Diagnosis = 'Ok' } }
-        Mock Test-AndInstallGraphicalTools { $true }
         Mock Remove-LegacyScheduledUpdates { $true }
         Mock Set-WindowsTerminalDefaults { }
         Mock Install-WingetAutoUpdate { @{ Status = 'DryRun'; Version = '2.12.0' } }
@@ -755,6 +754,30 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
             @($script:capturedRows | Where-Object { $_[0] -eq 'Installed' })[0][1] | Should -Be 'Contoso.New'
             @($script:capturedRows | Where-Object { $_[0] -eq 'Skipped' })[0][1] | Should -Be 'Contoso.Present'
             @($script:capturedRows | Where-Object { $_[0] -eq 'Failed' })[0][1] | Should -Be 'Contoso.Broken'
+        }
+
+        It 'Writes the summary as text only, and installs no module for a grid view, with someone at the console (work-order item 26)' {
+            # An interactive run used to open the summary in an Out-GridView window as well
+            # (-AutoGridView), after installing Microsoft.PowerShell.GraphicalTools and the NuGet
+            # provider for all users from the PowerShell Gallery wherever Out-GridView was missing.
+            Mock Test-EffectiveNonInteractive { $false }
+            # Throws so the run never reaches [Console]::ReadKey after its final prompt.
+            Mock Write-Prompt { throw 'reached the final prompt' }
+            Mock Get-PackageProvider { $null }
+            Mock Install-PackageProvider { }
+            Mock Install-Module { }
+            $script:summaryParameters = $null
+            Mock Write-Table {
+                if ($Title -eq 'Installation Summary') {
+                    $script:summaryParameters = @($PesterBoundParameters.Keys | Sort-Object)
+                }
+            }
+
+            { Invoke-WingetInstall -Apps @(@{ name = 'Contoso.New' }) } | Should -Throw 'reached the final prompt'
+
+            $script:summaryParameters | Should -Be @('Headers', 'Rows', 'Title')
+            Should -Invoke Install-Module -Times 0 -Exactly
+            Should -Invoke Install-PackageProvider -Times 0 -Exactly
         }
 
         It 'Leaves out the rows of empty buckets' {
@@ -2438,7 +2461,6 @@ Describe 'Not-applicable gating end-to-end (issue #217)' {
         Mock Restart-WithElevation { [pscustomobject]@{ Started = $true; ExitCode = 0 } }
         Mock Test-IsRunningLocally { $true }
         Mock Initialize-Winget { [pscustomobject]@{ Ready = $true; Diagnosis = 'Ok' } }
-        Mock Test-AndInstallGraphicalTools { $true }
         Mock Remove-LegacyScheduledUpdates { $true }
         Mock Set-WindowsTerminalDefaults { }
         Mock Install-WingetAutoUpdate { @{ Status = 'DryRun'; Version = '2.12.0' } }
@@ -2517,7 +2539,6 @@ Describe 'A run as SYSTEM from an RMM agent (review findings P2-24, P3-22, P3-23
         Mock Get-ProxyInheritanceWarning { $null }
         Mock Get-ScriptExecutionPolicyBlock { $null }
         Mock Wait-WauIdle { $true }
-        Mock Test-AndInstallGraphicalTools { $true }
         Mock Remove-LegacyScheduledUpdates { $false }
         Mock Install-WingetAutoUpdate { [pscustomobject]@{ Status = 'AlreadyPresent'; Version = '2.12.0' } }
         Mock Start-Sleep { }
@@ -2699,7 +2720,6 @@ Describe 'Invoke-WingetInstall with the real winget setup ladder (review finding
         Mock Get-ProxyInheritanceWarning { $null }
         Mock Get-ScriptExecutionPolicyBlock { $null }
         Mock Wait-WauIdle { $true }
-        Mock Test-AndInstallGraphicalTools { $true }
         Mock Remove-LegacyScheduledUpdates { $false }
         Mock Set-WindowsTerminalDefaults { }
         Mock Install-WingetAutoUpdate { [pscustomobject]@{ Status = 'AlreadyPresent'; Version = '2.12.0' } }
@@ -2825,7 +2845,6 @@ Describe 'Applicability is decided once per run (review finding P3-34)' {
         Mock Restart-WithElevation { [pscustomobject]@{ Started = $true; ExitCode = 0 } }
         Mock Test-IsRunningLocally { $true }
         Mock Initialize-Winget { [pscustomobject]@{ Ready = $true; Diagnosis = 'Ok' } }
-        Mock Test-AndInstallGraphicalTools { $true }
         Mock Remove-LegacyScheduledUpdates { $true }
         Mock Install-WingetAutoUpdate { @{ Status = 'DryRun'; Version = '2.12.0' } }
         Mock Test-WingetLaunchable { [pscustomobject]@{ Launchable = $true; Version = 'v1.12.350'; Reason = $null; Attempts = 1 } }
@@ -3010,7 +3029,6 @@ Describe 'Wedged winget: the run fails fast (review findings P2-8, P2-9, P2-10)'
         Mock Test-IsRunningLocally { $true }
         Mock Wait-WauIdle { $true }
         Mock Initialize-Winget { [pscustomobject]@{ Ready = $true; Diagnosis = 'Ok' } }
-        Mock Test-AndInstallGraphicalTools { $true }
         Mock Remove-LegacyScheduledUpdates { $true }
         Mock Set-WindowsTerminalDefaults { }
         # Auto-updates set up, so the exit code here is about the apps and winget only (a run whose
@@ -3165,8 +3183,7 @@ Describe 'Wedged winget: the run fails fast (review findings P2-8, P2-9, P2-10)'
 # registered, repaired or downloaded, and `winget source reset --force` - because every dry-run test
 # mocked those helpers away. Here they all run for real (Initialize-Winget with
 # Register-WingetAppInstallerForUser and Invoke-WingetPackageManagerRepair behind it,
-# Test-AndInstallGraphicalTools, Install-AppWithVerification and the rest), on a machine where each
-# of them has something to fix.
+# Install-AppWithVerification and the rest), on a machine where each of them has something to fix.
 # Only the commands that read or change the machine are mocked: the read-only probes describe that
 # machine, and every command that would change it is asserted never to run.
 Describe 'Dry run leaves the machine unchanged (P2-16)' {
@@ -3231,7 +3248,7 @@ Describe 'Dry run leaves the machine unchanged (P2-16)' {
 
         # Last: mocking Get-Command breaks the command lookup that Mock itself relies on for the
         # targets above (see TestHelpers.ps1). Nothing is available by default: no winget, no
-        # Out-GridView, no Repair-WinGetPackageManager.
+        # Repair-WinGetPackageManager.
         Mock Get-Command { $null }
     }
 
@@ -3272,7 +3289,6 @@ Describe 'Dry run leaves the machine unchanged (P2-16)' {
         Should -Invoke Write-Table -Times 1 -Exactly -ParameterFilter { $Title -eq 'Installation Summary' }
         $dryRunLines = ($script:infoMessages | Where-Object { $_ -match '^\[DRY-RUN\]' }) -join "`n"
         $dryRunLines | Should -Match 'Winget is not available for this account \(winget could not be started: .winget. was not found on PATH\)\. A real run would set it up: .*Repair-WinGetPackageManager \(installing its Microsoft\.WinGet\.Client module from the PowerShell Gallery first if it is missing\)'
-        $dryRunLines | Should -Match 'Out-GridView is not available\. A real run would install Microsoft\.PowerShell\.GraphicalTools'
         $dryRunLines | Should -Match 'this preview cannot tell which apps are already installed'
         $dryRunLines | Should -Match 'Would install: Contoso\.AppOne'
         $script:errorMessages | Should -Not -Contain 'Winget is required for this script. Exiting.'
@@ -3983,7 +3999,6 @@ Describe 'Invoke-WingetInstall: declarative catalog fields (work-order item 38)'
         Mock Restart-WithElevation { [pscustomobject]@{ Started = $true; ExitCode = 0 } }
         Mock Test-IsRunningLocally { $true }
         Mock Initialize-Winget { [pscustomobject]@{ Ready = $true; Diagnosis = 'Ok' } }
-        Mock Test-AndInstallGraphicalTools { $true }
         Mock Remove-LegacyScheduledUpdates { $true }
         Mock Set-WindowsTerminalDefaults { }
         Mock Install-WingetAutoUpdate { [pscustomobject]@{ Status = 'AlreadyPresent'; Version = '2.12.0' } }

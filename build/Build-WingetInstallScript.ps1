@@ -304,8 +304,8 @@ function Get-UndefinedCatalogInstallReference {
         than a literal command name. InstallVerification.ps1's Install-AppWithVerification does
         exactly this: `& $App.install`. The invoked name is carried as DATA in AppCatalog.ps1 (e.g.
         `install = 'Install-PowerShellLatest'`), not as code, so it is invisible to the AST-walk of
-        CommandAst nodes above and a rename of the target function (updating its definition and the
-        psd1's FunctionsToExport, but leaving the catalog string stale) passes every other guard and
+        CommandAst nodes above and a rename of the target function (updating its definition and its
+        direct callers, but leaving the catalog string stale) passes every other guard and
         only breaks at runtime with a CommandNotFoundException the moment that one app is installed.
 
         This guard closes that blind spot by walking the assembled AST for HashtableAst key-value
@@ -524,32 +524,6 @@ if ($ps7OnlySyntax.Count -gt 0) {
         "line $($finding.Line), column $($finding.Column): '$($finding.Text)' ($($finding.Kind))"
     }
     Write-Error ("PowerShell 5.1 syntax check failed: $($ps7OnlySyntax.Count) place(s) in the assembled script use syntax only PowerShell 7 parses. Windows PowerShell 5.1 parses the whole installer before running any of it, so one of these anywhere breaks the irm | iex one-liner before the PowerShell 7 bootstrap can run. Rewrite them in 5.1 syntax (if/else instead of ?? and ?:, an explicit `$null check instead of ?. and ?[, separate statements that test `$? or `$LASTEXITCODE instead of && and ||, end { } or try/finally instead of clean { }, Start-Job instead of a trailing &) in the offending source under WingetAppSetup/ or build/fragments/, then re-run the build.`n" + ($details -join "`n"))
-    exit 1
-}
-
-# Fail fast on export drift (issue #191). The manifest's FunctionsToExport is the single export
-# authority: winget-app-uninstall.ps1 imports the module via the psd1, so a Public function
-# missing from that list is silently filtered at import time while Pester (which dot-sources the
-# files) stays green. Assert the psd1 list EXACTLY equals the set of functions defined under
-# WingetAppSetup/Public/*.ps1 so the mismatch fails the build (and -Check) instead.
-$declaredExports = @($manifest.FunctionsToExport)
-$publicFunctionNames = @(foreach ($file in $publicFiles) {
-        $fileAst = [System.Management.Automation.Language.Parser]::ParseFile($file.FullName, [ref]$null, [ref]$null)
-        $fileAst.FindAll({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $false) |
-            ForEach-Object { $_.Name }
-    })
-# Case-sensitive on purpose: a casing mismatch between the manifest and the definition is drift too.
-$missingFromManifest = @($publicFunctionNames | Where-Object { $declaredExports -cnotcontains $_ })
-$extraInManifest = @($declaredExports | Where-Object { $publicFunctionNames -cnotcontains $_ })
-if ($missingFromManifest.Count -gt 0 -or $extraInManifest.Count -gt 0) {
-    $details = @()
-    if ($missingFromManifest.Count -gt 0) {
-        $details += "defined under WingetAppSetup/Public but missing from FunctionsToExport: $($missingFromManifest -join ', ')"
-    }
-    if ($extraInManifest.Count -gt 0) {
-        $details += "listed in FunctionsToExport but not defined under WingetAppSetup/Public: $($extraInManifest -join ', ')"
-    }
-    Write-Error ("Export check failed: WingetAppSetup.psd1 FunctionsToExport must exactly match the functions defined under WingetAppSetup/Public/*.ps1. " + ($details -join '; ') + '. Update the manifest (or move the function between Public/ and Private/), then re-run the build.')
     exit 1
 }
 

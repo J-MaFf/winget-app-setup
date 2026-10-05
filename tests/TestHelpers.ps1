@@ -32,8 +32,8 @@ Get-ChildItem -Path (Join-Path $script:WingetAppSetupRoot 'Private'), (Join-Path
 
 # Force PowerShellGet/PackageManagement autoload while the real Get-Command is still in
 # effect. Pester resolves every Mock target through command discovery, and a test that
-# mocks Get-Command first (e.g. the grid-view tests) breaks autoload for later mock
-# targets like Install-Module. The old single-file suite got this resolution for free
+# mocks Get-Command first (e.g. the dry-run test in Install.Tests.ps1) breaks autoload for later
+# mock targets like Install-Module. The old single-file suite got this resolution for free
 # from Describe ordering; the split files must not depend on run order.
 $null = Get-Command Install-Module, Install-PackageProvider, Get-PackageProvider -ErrorAction SilentlyContinue
 
@@ -85,6 +85,24 @@ foreach ($commandName in $script:WindowsOnlyCommandNames) {
     $body = "throw [System.Management.Automation.CommandNotFoundException]::new('$commandName is a Windows-only command. tests/TestHelpers.ps1 defines this stand-in only so tests can mock it; this test called it without a Mock.')"
     Set-Item -Path "function:$commandName" -Value ([scriptblock]::Create("$signature`n$body"))
     $script:WindowsOnlyCommandStandIns += $commandName
+}
+
+# The functions a manifest import of the module exports, which is how winget-app-uninstall.ps1 and
+# e2e/Assert-Install.ps1 load it (review finding P3-44). Imported in a runspace of its own, so the
+# test file's own definitions and mocks are left alone.
+function Get-ManifestExportedFunctionName {
+    $powerShell = [powershell]::Create()
+    try {
+        [void]$powerShell.AddScript('param ($Path) @((Import-Module -Name $Path -PassThru -Force -ErrorAction Stop).ExportedFunctions.Keys)').AddArgument($script:ModuleManifestPath)
+        $names = @($powerShell.Invoke())
+        if ($powerShell.HadErrors) {
+            throw "Importing $($script:ModuleManifestPath) failed: $(@($powerShell.Streams.Error) -join '; ')"
+        }
+        return $names
+    }
+    finally {
+        $powerShell.Dispose()
+    }
 }
 
 # Test doubles for the process helpers (WingetAppSetup/Private/ProcessInvocation.ps1, review

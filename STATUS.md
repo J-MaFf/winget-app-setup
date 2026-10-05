@@ -36,8 +36,8 @@ still read or run the generated file itself, on purpose). The build's `-Check` n
 syntax that only PowerShell 7 parses and runs the undefined-reference guards on Linux and macOS,
 the pre-commit hook checks the staged files instead of the working tree, and a catalog name must
 match the whole package-id pattern, so trailing text such as `--override` can no longer reach
-winget. A `-WhatIf` dry run no longer changes the machine: its module, winget,
-Out-GridView and source setup steps only check and print what a real run would fix, where they used
+winget. A `-WhatIf` dry run no longer changes the machine: its module, winget
+and source setup steps only check and print what a real run would fix, where they used
 to install modules for all users, set up App Installer and reset winget's sources. A failed run is
 now debuggable from what the teammate attaches: an early exit prints the exit code and why, the log
 path and the build id, and waits for a key press when someone is at the console instead of closing
@@ -196,6 +196,16 @@ loud line that says what the server lets through, and the exit code does not cha
 is checked against published TightVNC values; the registry, ACL and service steps are tested at
 their seams on Linux, the ACL and value seams also against throwaway HKCU keys on the elevated
 Windows CI runners, and the whole hook needs a real Windows check (below).
+
+Dead and dormant code is gone (work-order item 26, review findings P3-43 to P3-45). The summary is a
+text table only: an interactive run no longer opens it in an `Out-GridView` window as well (the
+window repeated the table, never reached the log and held the run until it was closed), and no run
+installs `Microsoft.PowerShell.GraphicalTools` or the NuGet provider to provide one. The unused
+`Get-WindowsTerminalSettingsPath`, `Test-WingetPackageInstalled`'s `[bool]` mode without a time
+limit, the uninstall function's `-NonInteractive` (it only gated the grid view; the script keeps
+its own) and the tests that only checked that removed functions stayed removed are gone too. The
+module manifest exports every function (`FunctionsToExport = '*'`), so the build no longer checks an
+export list against `Public/`. `Convert-JsoncToJson` and the MSIX/DISM provisioning path stay.
 
 The same branch changes CI. Fork pull requests that leave `windows-tests.yml` alone no longer run
 on the self-hosted win-test runner, and `claude.yml` calls the shared Claude workflow at a pinned
@@ -387,8 +397,8 @@ every repository secret.
 | Path | Description |
 |------|-------------|
 | `WingetAppSetup/` | Source-of-truth PowerShell module (`.psd1` manifest + `.psm1` loader) |
-| `WingetAppSetup/Public/` | Exported functions: logging, winget core, app validation, Windows Terminal config, install orchestration (updates are outsourced to WAU), uninstall orchestration (`Invoke-WingetUninstall`) |
-| `WingetAppSetup/Private/` | Internal helpers: system info, elevation, graphical tools, the Windows PowerShell 5.1 → PowerShell 7 bootstrap, the machine-wide winget and provisioning lookups a run as SYSTEM uses (`MachineContext.ps1`), the run lock (`RunLock.ps1`), the `RESULT` line and `last-run.json` (`RunRecord.ps1`), the catalog entry fields and post-install hooks (`CatalogSchema.ps1`), TightVNC's password hook (`TightVnc.ps1`), log retention (`Housekeeping.ps1`), the uninstaller's per-app step (`AppUninstall.ps1`) and the pinned `Microsoft.WindowsAppRuntime.1.8` install before Winget-AutoUpdate (`WindowsAppRuntime.ps1`) |
+| `WingetAppSetup/Public/` | Entry points and main steps (the module exports every function, `Public/` and `Private/` alike): logging, winget core, app validation, Windows Terminal config, install orchestration (updates are outsourced to WAU), uninstall orchestration (`Invoke-WingetUninstall`) |
+| `WingetAppSetup/Private/` | Helpers: system info, elevation, the Windows PowerShell 5.1 → PowerShell 7 bootstrap, the machine-wide winget and provisioning lookups a run as SYSTEM uses (`MachineContext.ps1`), the run lock (`RunLock.ps1`), the `RESULT` line and `last-run.json` (`RunRecord.ps1`), the catalog entry fields and post-install hooks (`CatalogSchema.ps1`), TightVNC's password hook (`TightVnc.ps1`), log retention (`Housekeeping.ps1`), the uninstaller's per-app step (`AppUninstall.ps1`) and the pinned `Microsoft.WindowsAppRuntime.1.8` install before Winget-AutoUpdate (`WindowsAppRuntime.ps1`) |
 | `build/Build-WingetInstallScript.ps1` | Concatenates the module + entry fragments into `winget-app-install.ps1` |
 | `build/fragments/` | `head.ps1` (PSScriptInfo, help, `param`) and `tail.ps1` (entry-point dispatch) |
 | `winget-app-install.ps1` | **Generated** single-file installer for local and `irm \| iex` use — do not edit by hand |

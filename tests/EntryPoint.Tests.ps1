@@ -86,36 +86,21 @@ BeforeAll {
     }
 }
 
-Describe 'Module export surface (issue #191)' {
-    # The psd1 FunctionsToExport list is the single export authority; the psm1 reads it and the
-    # build asserts it matches Public/*.ps1. These tests pin the reconciled surface.
-    It 'No longer defines the dead ConvertTo-CommandArguments helper' {
-        # Remnant of the removed homegrown updater; it had no production callers.
-        Test-Path Function:\ConvertTo-CommandArguments | Should -Be $false
-    }
-
-    It 'No longer exports module-internal helpers moved to Private/' {
-        $manifest = Import-PowerShellDataFile $script:ModuleManifestPath
-        $manifest.FunctionsToExport | Should -Not -Contain 'Write-Prompt'
-        $manifest.FunctionsToExport | Should -Not -Contain 'ConvertFrom-TerminalSettingsJson'
-    }
-
-    It 'Still exports the logging helpers consumed by winget-app-uninstall.ps1' {
-        $manifest = Import-PowerShellDataFile $script:ModuleManifestPath
-        foreach ($helper in @('Write-Info', 'Write-Success', 'Write-WarningMessage', 'Write-ErrorMessage', 'Format-AppList', 'Write-Table')) {
-            $manifest.FunctionsToExport | Should -Contain $helper
-        }
-    }
-
-    It 'FunctionsToExport exactly matches the functions defined under Public/*.ps1' {
-        # Cross-platform mirror of the Build-WingetInstallScript.ps1 export assertion.
-        $manifest = Import-PowerShellDataFile $script:ModuleManifestPath
-        $publicFunctionNames = Get-ChildItem -Path (Join-Path $script:WingetAppSetupRoot 'Public') -Filter '*.ps1' | ForEach-Object {
+Describe 'Module export surface (review finding P3-44)' {
+    It 'Exports every function the module defines, Public/ and Private/ alike, to a manifest import' {
+        # FunctionsToExport is '*': an explicit list had to match Public/*.ps1, which a build check
+        # enforced, and a function missing from it was filtered out of the uninstaller's import
+        # without a word (#191).
+        $definedFunctionNames = Get-ChildItem -Path (Join-Path $script:WingetAppSetupRoot 'Public'), (Join-Path $script:WingetAppSetupRoot 'Private') -Filter '*.ps1' | ForEach-Object {
             $ast = [System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$null, [ref]$null)
             $ast.FindAll({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $false) |
                 ForEach-Object { $_.Name }
         }
-        ($manifest.FunctionsToExport | Sort-Object) | Should -Be ($publicFunctionNames | Sort-Object)
+
+        $exported = @(Get-ManifestExportedFunctionName)
+
+        $exported | Should -Contain 'Test-EffectiveNonInteractive'
+        ($exported | Sort-Object) | Should -Be ($definedFunctionNames | Sort-Object)
     }
 }
 

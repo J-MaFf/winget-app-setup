@@ -20,8 +20,7 @@
 .PARAMETER WhatIf
     Preview: shows what a real run would remove and changes nothing. Needs no administrator rights.
 .PARAMETER NonInteractive
-    For unattended runs: never asks for elevation (exits 4 when not elevated) and opens no summary
-    window.
+    For unattended runs: never asks for elevation (exits 4 when not elevated).
 .NOTES
     Exit codes: 0 = done (every app removed, not installed, or kept on purpose, and Winget-AutoUpdate
     removed or not installed); 3010 = done, and a restart finishes removing an app or
@@ -82,7 +81,7 @@ else {
 # every run. An unexpected error is 5, as in the installer, rather than the 1 PowerShell would exit
 # with, which means an app could not be removed.
 try {
-    $exitCode = Invoke-WingetUninstall -WhatIf:$WhatIf -NonInteractive:$NonInteractive
+    $exitCode = Invoke-WingetUninstall -WhatIf:$WhatIf
 }
 catch {
     $exitCode = 5

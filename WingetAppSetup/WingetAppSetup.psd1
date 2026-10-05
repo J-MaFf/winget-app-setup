@@ -6,36 +6,12 @@
     Description       = 'Shared functions for installing and updating curated apps via winget (issue #106 refactor of winget-app-install.ps1).'
     PowerShellVersion = '5.1'
 
-    # Single export authority (issue #191): this list must exactly match the functions defined
-    # under Public/*.ps1 — build/Build-WingetInstallScript.ps1 asserts that in build and -Check
-    # modes, and the psm1 exports this same list.
-    FunctionsToExport = @(
-        # Logging (consumed by winget-app-uninstall.ps1)
-        'Write-Info', 'Write-Success', 'Write-WarningMessage', 'Write-ErrorMessage', 'Format-AppList', 'Write-Table',
-        # App catalog — single source of truth for the curated list (issue #190; consumed by
-        # winget-app-uninstall.ps1 too)
-        'Get-DefaultAppCatalog',
-        # App validation
-        'Test-AppDefinitions',
-        # Elevation (consumed by winget-app-uninstall.ps1)
-        'Test-IsAdmin', 'Restart-WithElevation',
-        # Winget core
-        'Initialize-Winget', 'Install-WingetPackage',
-        'Test-WingetPackageInstalled', 'Test-AppxPackageProvisioned', 'Invoke-AppxProvisioning', 'Install-MsixProvisionedPackage', 'Install-PowerShellLatest',
-        # Automatic updates (Winget-AutoUpdate)
-        'Get-WauPin', 'Test-WauInstalled', 'Install-WingetAutoUpdate', 'Uninstall-WingetAutoUpdate', 'Remove-LegacyScheduledUpdates',
-        # Windows Terminal configuration
-        'Get-WindowsTerminalSettingsPath', 'Get-WindowsTerminalSettingsPaths',
-        'Set-WindowsTerminalDefaultProfile', 'Set-WindowsTerminalAsDefaultTerminalApplication', 'Set-WindowsTerminalDefaults',
-        # System pre-flight checks
-        'Test-SystemRequirements',
-        # Install orchestration
-        'Invoke-WingetInstall',
-        # Uninstall orchestration (the body of winget-app-uninstall.ps1)
-        'Invoke-WingetUninstall',
-        # User phase after a run for the whole PC (run by rmm/Invoke-WingetAppSetupUserPhase.ps1)
-        'Invoke-WingetUserPhase'
-    )
+    # Every function the module defines, Public/ and Private/ alike (review finding P3-44). The
+    # module's only consumers are this repository's entry scripts (winget-app-uninstall.ps1,
+    # e2e/Assert-Install.ps1); the installer itself is the generated single file, which does not
+    # read this manifest. An explicit list had to be kept equal to Public/*.ps1 by a build check,
+    # and a function missing from it was filtered out of manifest imports without a word (#191).
+    FunctionsToExport = '*'
 
     CmdletsToExport   = @()
     VariablesToExport = @()

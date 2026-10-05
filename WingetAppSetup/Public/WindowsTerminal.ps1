@@ -1,22 +1,5 @@
 <#
 .SYNOPSIS
-    Resolves the most likely Windows Terminal settings file path.
-.DESCRIPTION
-    Prefers the stable packaged path, then preview, then unpackaged path.
-.RETURNS
-    [string] Existing settings path when found; otherwise $null.
-#>
-function Get-WindowsTerminalSettingsPath {
-    $settingsPaths = Get-WindowsTerminalSettingsPaths
-    if ($settingsPaths.Count -gt 0) {
-        return $settingsPaths[0]
-    }
-
-    return $null
-}
-
-<#
-.SYNOPSIS
     Resolves all discovered Windows Terminal settings file paths.
 .DESCRIPTION
     Includes packaged channels (stable/preview/dev/canary-style package names)

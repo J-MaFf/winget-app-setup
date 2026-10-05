@@ -602,10 +602,7 @@ function Install-WingetPackage {
     would otherwise print a table twice for every app), and always under a time limit, killing a
     hung winget instead of blocking the install loop (issues #176, #188).
 
-    Without -TimeoutSeconds the check uses the general `winget list` limit (Get-ProcessTimeoutSeconds
-    WingetList) and returns a plain [bool], keeping the original contract for existing callers; any
-    failure to get an answer reads as not installed. With -TimeoutSeconds a hashtable is returned so
-    the caller can tell the three outcomes apart: installed, not installed, and no answer. A
+    The result tells the three outcomes apart: installed, not installed, and no answer. A
     timeout must count as a failure rather than being silently dropped (issue #176), and so must a
     winget that could not be started (LaunchFailed, review finding P2-9): reading that as "not
     installed" made Install-AppWithVerification install apps that were already there and then
@@ -616,18 +613,19 @@ function Install-WingetPackage {
     and it only warns about a source it could not search. Any other exit code with no match (for
     example 0x8A15004B, every source failed to open) means the check itself failed.
 
-    Both modes determine "installed" via Test-WingetListOutputContainsPackageId rather than a plain
+    "Installed" is determined via Test-WingetListOutputContainsPackageId rather than a plain
     substring .Contains check, so an unrelated listed id that merely contains $PackageId as a
     substring (e.g. target 'Foo.Bar' inside listed id 'Foo.BarBaz') cannot false-positive.
 .PARAMETER PackageId
     The winget package id to check.
 .PARAMETER TimeoutSeconds
-    Maximum seconds to wait for `winget list` before killing it. When omitted (or 0), the general
-    `winget list` limit applies and a [bool] is returned.
+    Maximum seconds to wait for `winget list` before killing it. Required: every caller passes the
+    per-app check's limit (Get-ProcessTimeoutSeconds WingetListCheck) or its own. There used to be
+    a mode without it that returned a plain [bool] and read a winget that could not be started, or
+    one that ran out of time, as "not installed"; no caller used it (review finding P3-43).
 .RETURNS
-    [bool] when -TimeoutSeconds is not supplied.
     [hashtable] @{ Installed = <bool>; TimedOut = <bool>; LaunchFailed = <bool>;
-    LaunchError = <string or $null>; CheckFailed = <bool>; ExitCode = <int or $null> } when it is.
+    LaunchError = <string or $null>; CheckFailed = <bool>; ExitCode = <int or $null> }.
     Installed is True only when winget answered and listed the id. TimedOut, LaunchFailed and
     CheckFailed mean there was no answer: winget ran out of time, could not be started (LaunchError
     says why), or ran and failed without listing the id (ExitCode says how). ExitCode is the winget
@@ -638,49 +636,40 @@ function Test-WingetPackageInstalled {
         [Parameter(Mandatory = $true)]
         [string]$PackageId,
 
-        [Parameter(Mandatory = $false)]
-        [int]$TimeoutSeconds = 0
+        [Parameter(Mandatory = $true)]
+        [int]$TimeoutSeconds
     )
 
     $listArgs = @('list', '--exact', '--id', $PackageId, '--accept-source-agreements', '--disable-interactivity')
-
-    if ($TimeoutSeconds -gt 0) {
-        $run = Invoke-WingetProcess -ArgumentList $listArgs -TimeoutSeconds $TimeoutSeconds -Echo None
-        if ($run.LaunchFailed) {
-            return @{ Installed = $false; TimedOut = $false; LaunchFailed = $true; LaunchError = $run.LaunchError; CheckFailed = $false; ExitCode = $null }
-        }
-
-        if ($run.TimedOut) {
-            return @{ Installed = $false; TimedOut = $true; LaunchFailed = $false; LaunchError = $null; CheckFailed = $false; ExitCode = $null }
-        }
-
-        # Standard output only, as before: an error message on standard error can name the id too.
-        # Join with a newline, not '': Test-WingetListOutputContainsPackageId's boundary regex
-        # treats anything outside [\w.\-] as a token edge, so an empty separator would let the
-        # end of one line abut the start of the next and could hide a real match at that seam.
-        $installed = Test-WingetListOutputContainsPackageId -Output ([String]::Join("`n", @($run.StandardOutput))) -PackageId $PackageId
-
-        # 0 (listed) and 0x8A150014 (APPINSTALLER_CLI_ERROR_NO_APPLICATIONS_FOUND, as a signed
-        # Int32) are the answers; any other exit code without a match is a failed check, not "not
-        # installed" (review finding P2-9).
-        $noApplicationsFoundExitCode = -1978335212
-        $checkFailed = (-not $installed) -and ($null -ne $run.ExitCode) -and (@(0, $noApplicationsFoundExitCode) -notcontains [int]$run.ExitCode)
-
-        return @{
-            Installed    = $installed
-            TimedOut     = $false
-            LaunchFailed = $false
-            LaunchError  = $null
-            CheckFailed  = $checkFailed
-            ExitCode     = $run.ExitCode
-        }
+    $run = Invoke-WingetProcess -ArgumentList $listArgs -TimeoutSeconds $TimeoutSeconds -Echo None
+    if ($run.LaunchFailed) {
+        return @{ Installed = $false; TimedOut = $false; LaunchFailed = $true; LaunchError = $run.LaunchError; CheckFailed = $false; ExitCode = $null }
     }
 
-    $run = Invoke-WingetProcess -ArgumentList $listArgs -TimeoutSeconds (Get-ProcessTimeoutSeconds -Operation WingetList) -Echo None
-    if ($run.LaunchFailed -or $run.TimedOut) {
-        return $false
+    if ($run.TimedOut) {
+        return @{ Installed = $false; TimedOut = $true; LaunchFailed = $false; LaunchError = $null; CheckFailed = $false; ExitCode = $null }
     }
-    return Test-WingetListOutputContainsPackageId -Output ([String]::Join("`n", @($run.Output))) -PackageId $PackageId
+
+    # Standard output only, as before: an error message on standard error can name the id too.
+    # Join with a newline, not '': Test-WingetListOutputContainsPackageId's boundary regex
+    # treats anything outside [\w.\-] as a token edge, so an empty separator would let the
+    # end of one line abut the start of the next and could hide a real match at that seam.
+    $installed = Test-WingetListOutputContainsPackageId -Output ([String]::Join("`n", @($run.StandardOutput))) -PackageId $PackageId
+
+    # 0 (listed) and 0x8A150014 (APPINSTALLER_CLI_ERROR_NO_APPLICATIONS_FOUND, as a signed
+    # Int32) are the answers; any other exit code without a match is a failed check, not "not
+    # installed" (review finding P2-9).
+    $noApplicationsFoundExitCode = -1978335212
+    $checkFailed = (-not $installed) -and ($null -ne $run.ExitCode) -and (@(0, $noApplicationsFoundExitCode) -notcontains [int]$run.ExitCode)
+
+    return @{
+        Installed    = $installed
+        TimedOut     = $false
+        LaunchFailed = $false
+        LaunchError  = $null
+        CheckFailed  = $checkFailed
+        ExitCode     = $run.ExitCode
+    }
 }
 
 <#

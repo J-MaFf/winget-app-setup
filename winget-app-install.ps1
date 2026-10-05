@@ -37,16 +37,16 @@
  Bypasses the pre-flight system checks (OS version, disk space, network) for headless or automated use.
 
 .PARAMETER NonInteractive
- Suppresses the interactive extras for unattended runs (RMM, CI, scheduled tasks): the summary
- grid-view window and the "press any key to exit" that holds the window at the end of a run or
- after an early failure. Also turned on by the environment variable
- WINGET_APP_SETUP_NONINTERACTIVE=1 (or true, or yes), for the irm | iex one-liner, which cannot pass
- a switch, and auto-detected when the session is non-interactive or stdin is redirected; under CI
- the early-failure key press is skipped too. The installer asks no yes/no
- questions on any path (issue #230). It asks one question: TightVNC's server password, at the
- start of an interactive run when WINGET_APP_SETUP_TIGHTVNC_PASSWORD is not set and TightVNC Server
- has no password yet (skipped when nobody starts typing within 5 minutes). This switch suppresses
- that question too: TightVNC is then reported as installed but not configured.
+ Suppresses the interactive extra for unattended runs (RMM, CI, scheduled tasks): the "press any
+ key to exit" that holds the window at the end of a run or after an early failure. Also turned on
+ by the environment variable WINGET_APP_SETUP_NONINTERACTIVE=1 (or true, or yes), for the
+ irm | iex one-liner, which cannot pass a switch, and auto-detected when the session is
+ non-interactive or stdin is redirected; under CI the early-failure key press is skipped too. The
+ installer asks no yes/no questions on any path (issue #230). It asks one question: TightVNC's
+ server password, at the start of an interactive run when WINGET_APP_SETUP_TIGHTVNC_PASSWORD is not
+ set and TightVNC Server has no password yet (skipped when nobody starts typing within 5 minutes).
+ This switch suppresses that question too: TightVNC is then reported as installed but not
+ configured.
 
 .PARAMETER CollectDiagnostics
  Installs nothing: makes a diagnostics bundle to attach to a GitHub issue after a failed run, and
@@ -81,12 +81,12 @@ param (
 # This script is assembled from the WingetAppSetup module by build/Build-WingetInstallScript.ps1.
 # Edit the function source under WingetAppSetup/Public and WingetAppSetup/Private, then re-run the
 # build to regenerate this file. See readme.md ("Project layout") for details.
-# Build id: 1.0.0+9b193604 (module version + SHA256 fragment of this whole script; issue #189).
+# Build id: 1.0.0+c83fb7e5 (module version + SHA256 fragment of this whole script; issue #189).
 # ------------------------------------------------------------------------------------------------
 
 # Content-derived build identity, logged at startup so a transcript from a remote machine
 # identifies exactly which installer build produced it (issue #189).
-$script:InstallerBuildId = '1.0.0+9b193604'
+$script:InstallerBuildId = '1.0.0+c83fb7e5'
 
 # ------------------------------------------------Functions------------------------------------------------
 
@@ -4030,96 +4030,6 @@ function Write-FailedAppsSummary {
     Write-Table -Headers @('App', 'Reason') -Rows $failedRows -Title $Title
 }
 
-# --- GraphicalTools ---
-<#
-.SYNOPSIS
-    Checks if Out-GridView is available in the current session.
-.DESCRIPTION
-    Determines whether Out-GridView can be used by checking if the session is
-    interactive and if the Out-GridView command is available. This is used to
-    decide whether to offer or use the interactive grid view functionality.
-.OUTPUTS
-    Returns $true if Out-GridView is available, $false otherwise.
-#>
-function Test-CanUseGridView {
-    # Check if we're in an interactive session
-    if (-not [Environment]::UserInteractive) {
-        return $false
-    }
-
-    # Check if Out-GridView is available
-    try {
-        Get-Command Out-GridView -ErrorAction Stop | Out-Null
-        return $true
-    }
-    catch {
-        return $false
-    }
-}
-
-<#
-.SYNOPSIS
-    Ensures Out-GridView is available by installing Microsoft.PowerShell.GraphicalTools when required.
-.DESCRIPTION
-    Checks for the Out-GridView cmdlet and, when missing, installs the Microsoft.PowerShell.GraphicalTools module including NuGet provider remediation.
-.PARAMETER WhatIf
-    Dry run: only checks whether Out-GridView is available and, when it is not, prints what a real
-    run would install. Nothing is installed (P2-16: the dry run used to install the NuGet provider
-    and the module for all users).
-.RETURNS
-    [bool] True when Out-GridView can be invoked, otherwise False.
-    Under -WhatIf, True only when Out-GridView is already available.
-#>
-function Test-AndInstallGraphicalTools {
-    param (
-        [Parameter(Mandatory = $false)]
-        [switch]$WhatIf
-    )
-
-    try {
-        if (Get-Command Out-GridView -ErrorAction SilentlyContinue) {
-            return $true
-        }
-
-        if ($WhatIf) {
-            Write-Info '[DRY-RUN] Out-GridView is not available. A real run would install Microsoft.PowerShell.GraphicalTools for all users from the PowerShell Gallery (and the NuGet package provider if it is missing) to show the summary in a grid view.'
-            return $false
-        }
-
-        $graphicalModule = Get-Module -ListAvailable -Name 'Microsoft.PowerShell.GraphicalTools'
-        if (-not $graphicalModule) {
-            Write-WarningMessage 'Microsoft.PowerShell.GraphicalTools module is missing. Installing to enable Out-GridView...'
-        }
-        else {
-            Write-WarningMessage 'Microsoft.PowerShell.GraphicalTools module found but Out-GridView is unavailable. Importing module...'
-        }
-
-        $nugetProvider = Get-PackageProvider -Name NuGet -ErrorAction SilentlyContinue
-        if (-not $nugetProvider) {
-            Write-WarningMessage 'NuGet package provider not found. Installing...'
-            Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force -Scope AllUsers | Out-Null
-        }
-
-        # -Repository PSGallery: elevated, for all users, so never from another registered
-        # repository (review finding P3-20; see Test-AndInstallWingetModule).
-        Install-Module -Name Microsoft.PowerShell.GraphicalTools -Repository PSGallery -Scope AllUsers -Force -AllowClobber -ErrorAction Stop
-        Import-Module Microsoft.PowerShell.GraphicalTools -ErrorAction Stop
-        Write-Success 'Microsoft.PowerShell.GraphicalTools is loaded for this session.'
-
-        if (Get-Command Out-GridView -ErrorAction SilentlyContinue) {
-            Write-Success 'Out-GridView is available for interactive summaries.'
-            return $true
-        }
-
-        Write-Warning 'Microsoft.PowerShell.GraphicalTools installation completed, but Out-GridView is still unavailable.'
-    }
-    catch {
-        Write-Warning "Failed to install Microsoft.PowerShell.GraphicalTools module: $_"
-    }
-
-    return $false
-}
-
 # --- Housekeeping ---
 # Retention for what the installer leaves on disk (review finding P3-42). Every run used to add a
 # transcript, per-app installer logs and, on the Windows PowerShell 5.1 irm | iex path, a full copy
@@ -4981,11 +4891,11 @@ function Invoke-WingetLaunchCircuitBreaker {
     issue #230 this gates no yes/no question — there are none left. It gates one prompt, TightVNC's
     server password at the start of a run that has no WINGET_APP_SETUP_TIGHTVNC_PASSWORD
     (Initialize-TightVncSecretForRun, work-order item 18), and the things that still depend on a
-    human being present: whether Invoke-WingetInstall opens the summary grid view and holds the
-    window with "press any key to exit", whether Write-InstallerExitNotice holds it the same way
-    before an early exit (review finding P2-14), whether the entry script forces an exit code
-    after an abort, and whether a run that is not elevated may show a UAC prompt at all
-    (Invoke-WingetInstall and Restart-WithElevation return 4 instead; review finding P2-12).
+    human being present: whether Invoke-WingetInstall holds the window with "press any key to
+    exit", whether Write-InstallerExitNotice holds it the same way before an early exit (review
+    finding P2-14), whether the entry script forces an exit code after an abort, and whether a run
+    that is not elevated may show a UAC prompt at all (Invoke-WingetInstall and
+    Restart-WithElevation return 4 instead; review finding P2-12).
 
     Note what it deliberately does NOT catch: an interactive `irm <url> | iex` reports INTERACTIVE
     here, because the pipe is a PowerShell-internal pipeline and leaves the process's stdin alone.
@@ -7114,7 +7024,6 @@ function Invoke-PowerShell7Bootstrap {
                       limit those checks have always had).
     WingetVersion     the `winget --version` launch check (30 seconds; it does no network or
                       source I/O).
-    WingetList        any other `winget list` (2 minutes).
     WingetSourceUpdate `winget source update`, the source check before the installs (2 minutes).
     WingetSourceReset `winget source reset`, which downloads the source again (5 minutes).
     MsiExec           one msiexec install or uninstall (15 minutes, as for the PowerShell 7 MSI).
@@ -7135,7 +7044,7 @@ function Invoke-PowerShell7Bootstrap {
 function Get-ProcessTimeoutSeconds {
     param (
         [Parameter(Mandatory = $true)]
-        [ValidateSet('WingetInstall', 'WingetDownload', 'WingetUninstall', 'WingetListCheck', 'WingetVersion', 'WingetList', 'WingetSourceUpdate', 'WingetSourceReset', 'MsiExec', 'AppxProvisioning', 'WebDownload', 'WebDownloadStall', 'WebLookup')]
+        [ValidateSet('WingetInstall', 'WingetDownload', 'WingetUninstall', 'WingetListCheck', 'WingetVersion', 'WingetSourceUpdate', 'WingetSourceReset', 'MsiExec', 'AppxProvisioning', 'WebDownload', 'WebDownloadStall', 'WebLookup')]
         [string]$Operation
     )
 
@@ -7145,7 +7054,6 @@ function Get-ProcessTimeoutSeconds {
         'WingetUninstall' { return 900 }
         'WingetListCheck' { return 15 }
         'WingetVersion' { return 30 }
-        'WingetList' { return 120 }
         'WingetSourceUpdate' { return 120 }
         'WingetSourceReset' { return 300 }
         'MsiExec' { return 900 }
@@ -13967,17 +13875,16 @@ function Restart-WithElevation {
 .PARAMETER WhatIf
     When specified, the script performs all pre-flight checks and displays planned actions without making any system changes.
 .PARAMETER NonInteractive
-    Suppresses the interactive extras for unattended runs (RMM, CI, scheduled tasks): the summary
-    grid-view window and the final "press any key to exit". Also turned on by
-    $env:WINGET_APP_SETUP_NONINTERACTIVE (Test-NonInteractiveRequested), and auto-detected when the
-    session is non-interactive or stdin is redirected. No path asks a yes/no question anymore
-    (issue #230). The one question left is TightVNC's server password, asked at the start of an
-    interactive run when WINGET_APP_SETUP_TIGHTVNC_PASSWORD is not set and TightVNC Server has no
-    password yet (work-order item 18), and skipped when nobody starts typing within 5 minutes; a
+    Suppresses the interactive extra for unattended runs (RMM, CI, scheduled tasks): the final
+    "press any key to exit". Also turned on by $env:WINGET_APP_SETUP_NONINTERACTIVE
+    (Test-NonInteractiveRequested), and auto-detected when the session is non-interactive or stdin
+    is redirected. No path asks a yes/no question anymore (issue #230). The one question left is
+    TightVNC's server password, asked at the start of an interactive run when
+    WINGET_APP_SETUP_TIGHTVNC_PASSWORD is not set and TightVNC Server has no password yet
+    (work-order item 18), and skipped when nobody starts typing within 5 minutes; a
     non-interactive run never asks it and reports TightVNC as not configured instead. A
-    non-interactive run that is
-    not elevated returns 4 instead of raising a UAC prompt that nobody would answer (review finding
-    P2-12).
+    non-interactive run that is not elevated returns 4 instead of raising a UAC prompt that nobody
+    would answer (review finding P2-12).
 .PARAMETER SkipSystemCheck
     Pass-through of the entry script's -SkipSystemCheck switch. Used only so an elevated relaunch
     inherits the caller's intent to bypass the pre-flight system checks (issue #185); the checks
@@ -14229,10 +14136,6 @@ function Invoke-WingetInstall {
         Write-ErrorMessage 'Winget is required for this script. Exiting.'
         Clear-TightVncSecret
         return 2
-    }
-
-    if (-not (Test-AndInstallGraphicalTools -WhatIf:$WhatIf) -and -not $WhatIf) {
-        Write-Warning 'Out-GridView will be unavailable; results will be displayed in text mode only.'
     }
 
     # Migrate away from the old homegrown scheduled-update task if a prior version installed one;
@@ -14726,10 +14629,7 @@ function Invoke-WingetInstall {
         $rows += , @('Failed', $appList)
     }
 
-    # -AutoGridView opens the grid view without asking (issue #230), gated on the session actually
-    # being interactive so an unattended run never leaves a window open with nobody to close it.
-    # The text table prints either way, so the transcript keeps the summary regardless.
-    Write-Table -Headers $headers -Rows $rows -AutoGridView (-not $effectiveNonInteractive) -Title 'Installation Summary'
+    Write-Table -Headers $headers -Rows $rows -Title 'Installation Summary'
 
     # Per-app failure reasons (issue #189): winget exit code, attempt count, and scope-fallback
     # detail, so a failure is diagnosable from the summary (and the transcript) instead of a
@@ -14959,26 +14859,22 @@ function Format-AppList {
 
 <#
 .SYNOPSIS
-    Displays a formatted table of results, and optionally also in an interactive GUI view.
+    Displays a formatted table of results.
 .DESCRIPTION
-    Always renders the summary as text via PowerShell's built-in Format-Table, then additionally
-    opens Out-GridView when a caller asked for it and the session can show one.
+    Renders the rows as text via PowerShell's built-in Format-Table, so the table is in the console
+    and in the run's transcript.
 
-    The grid view is never offered as a question (issue #230): it used to be a Read-Host that
-    stalled the documented one-liner, so -AutoGridView now just opens it. Text output is
-    unconditional for the same reason — the grid view renders in its own window and is never
-    captured by Start-Transcript, so returning early once it opened would drop the summary from
-    the log of every interactive run.
+    Text only, on purpose (review findings P3-43, P3-45): the Out-GridView window this used to open
+    as well only repeated the table, never reached the transcript, and needed a PowerShell Gallery
+    module installed for all users wherever Out-GridView was missing.
 .PARAMETER Headers
     Array of column header names
 .PARAMETER Rows
     Array of row data (each row is an array matching the header count)
-.PARAMETER UseGridView
-    Caller explicitly wants the grid view. Warns when Out-GridView is unavailable.
-.PARAMETER AutoGridView
-    Open the grid view whenever the session can show one, silently doing nothing when it cannot.
-    Callers pass the session's effective interactivity here, so an unattended run never opens a
-    window that nothing is around to close. (Formerly -PromptForGridView, which asked first.)
+.PARAMETER Title
+    The table's name: 'Installation Summary', 'Failed Installations' and so on. It is not printed
+    (it used to title the grid view window); it tells the run's tables apart for a caller or a test
+    that captures them.
 #>
 function Write-Table {
     param (
@@ -14987,10 +14883,6 @@ function Write-Table {
         [Parameter(Mandatory = $true)]
         [AllowEmptyCollection()]
         [string[][]]$Rows,
-        [Parameter(Mandatory = $false)]
-        [bool]$UseGridView = $false,
-        [Parameter(Mandatory = $false)]
-        [bool]$AutoGridView = $false,
         [Parameter(Mandatory = $false)]
         [string]$Title = 'Summary'
     )
@@ -15005,35 +14897,12 @@ function Write-Table {
         $tableData += $obj
     }
 
-    # Text output first, unconditionally: Out-GridView is a window, not console output, so it is
-    # never transcribed (issue #230).
     # An explicit width (review finding P3-13): without one, Out-String uses the console width, so a
     # transcript or captured output (120 columns on a runner or an RMM agent) cut long rows off with
     # an ellipsis - the failed-app list and its reasons, the very text a failure report needs - and a
     # process with no console at all rendered an empty table. Lines are not padded to this width.
     $output = $tableData | Format-Table -AutoSize -Wrap | Out-String -Width 4096
     Write-Host $output.TrimEnd()
-
-    if (-not ($UseGridView -or $AutoGridView)) {
-        return
-    }
-
-    if (-not (Test-CanUseGridView)) {
-        # Only an explicit -UseGridView deserves a warning. -AutoGridView is an offer, not a
-        # request: on a session that cannot show a window, having no window is the right outcome
-        # and not worth a line of noise.
-        if ($UseGridView) {
-            Write-WarningMessage 'Out-GridView is not available. The results are in the text summary above.'
-        }
-        return
-    }
-
-    try {
-        $tableData | Out-GridView -Title $Title -Wait
-    }
-    catch {
-        Write-WarningMessage "Failed to display grid view: $_. The results are in the text summary above."
-    }
 }
 
 # --- SystemChecks ---
@@ -15218,10 +15087,6 @@ function Test-SystemRequirements {
 .PARAMETER WhatIf
     Dry run: the read-only checks run and the summary shows what a real run would remove. Nothing is
     uninstalled or changed, and nothing is installed (the winget setup only checks).
-.PARAMETER NonInteractive
-    For unattended runs: no summary grid-view window. Also turned on by
-    $env:WINGET_APP_SETUP_NONINTERACTIVE and when the session is not interactive
-    (Test-EffectiveNonInteractive).
 .PARAMETER Apps
     The app definitions to remove. Default: Get-DefaultAppCatalog, the installer's list.
 .OUTPUTS
@@ -15246,13 +15111,8 @@ function Invoke-WingetUninstall {
         [switch]$WhatIf,
 
         [Parameter(Mandatory = $false)]
-        [switch]$NonInteractive,
-
-        [Parameter(Mandatory = $false)]
         [array]$Apps = (Get-DefaultAppCatalog)
     )
-
-    $effectiveNonInteractive = Test-EffectiveNonInteractive -NonInteractive:$NonInteractive
 
     if ($WhatIf) {
         Write-Info '=== DRY-RUN MODE ENABLED ==='
@@ -15437,8 +15297,7 @@ function Invoke-WingetUninstall {
     if ($appList) {
         $rows += , @('Failed', $appList)
     }
-    # The grid view only when someone is there to close it; the text table prints either way.
-    Write-Table -Headers $headers -Rows $rows -AutoGridView (-not $effectiveNonInteractive) -Title 'Uninstallation Summary'
+    Write-Table -Headers $headers -Rows $rows -Title 'Uninstallation Summary'
     Write-FailedAppsSummary -FailedApps $failedApps -Title 'Failed Uninstalls'
 
     if ($autoUpdatesKept) {
@@ -15720,23 +15579,6 @@ function Invoke-WingetUserPhase {
 }
 
 # --- WindowsTerminal ---
-<#
-.SYNOPSIS
-    Resolves the most likely Windows Terminal settings file path.
-.DESCRIPTION
-    Prefers the stable packaged path, then preview, then unpackaged path.
-.RETURNS
-    [string] Existing settings path when found; otherwise $null.
-#>
-function Get-WindowsTerminalSettingsPath {
-    $settingsPaths = Get-WindowsTerminalSettingsPaths
-    if ($settingsPaths.Count -gt 0) {
-        return $settingsPaths[0]
-    }
-
-    return $null
-}
-
 <#
 .SYNOPSIS
     Resolves all discovered Windows Terminal settings file paths.
@@ -17158,10 +17000,7 @@ function Install-WingetPackage {
     would otherwise print a table twice for every app), and always under a time limit, killing a
     hung winget instead of blocking the install loop (issues #176, #188).
 
-    Without -TimeoutSeconds the check uses the general `winget list` limit (Get-ProcessTimeoutSeconds
-    WingetList) and returns a plain [bool], keeping the original contract for existing callers; any
-    failure to get an answer reads as not installed. With -TimeoutSeconds a hashtable is returned so
-    the caller can tell the three outcomes apart: installed, not installed, and no answer. A
+    The result tells the three outcomes apart: installed, not installed, and no answer. A
     timeout must count as a failure rather than being silently dropped (issue #176), and so must a
     winget that could not be started (LaunchFailed, review finding P2-9): reading that as "not
     installed" made Install-AppWithVerification install apps that were already there and then
@@ -17172,18 +17011,19 @@ function Install-WingetPackage {
     and it only warns about a source it could not search. Any other exit code with no match (for
     example 0x8A15004B, every source failed to open) means the check itself failed.
 
-    Both modes determine "installed" via Test-WingetListOutputContainsPackageId rather than a plain
+    "Installed" is determined via Test-WingetListOutputContainsPackageId rather than a plain
     substring .Contains check, so an unrelated listed id that merely contains $PackageId as a
     substring (e.g. target 'Foo.Bar' inside listed id 'Foo.BarBaz') cannot false-positive.
 .PARAMETER PackageId
     The winget package id to check.
 .PARAMETER TimeoutSeconds
-    Maximum seconds to wait for `winget list` before killing it. When omitted (or 0), the general
-    `winget list` limit applies and a [bool] is returned.
+    Maximum seconds to wait for `winget list` before killing it. Required: every caller passes the
+    per-app check's limit (Get-ProcessTimeoutSeconds WingetListCheck) or its own. There used to be
+    a mode without it that returned a plain [bool] and read a winget that could not be started, or
+    one that ran out of time, as "not installed"; no caller used it (review finding P3-43).
 .RETURNS
-    [bool] when -TimeoutSeconds is not supplied.
     [hashtable] @{ Installed = <bool>; TimedOut = <bool>; LaunchFailed = <bool>;
-    LaunchError = <string or $null>; CheckFailed = <bool>; ExitCode = <int or $null> } when it is.
+    LaunchError = <string or $null>; CheckFailed = <bool>; ExitCode = <int or $null> }.
     Installed is True only when winget answered and listed the id. TimedOut, LaunchFailed and
     CheckFailed mean there was no answer: winget ran out of time, could not be started (LaunchError
     says why), or ran and failed without listing the id (ExitCode says how). ExitCode is the winget
@@ -17194,49 +17034,40 @@ function Test-WingetPackageInstalled {
         [Parameter(Mandatory = $true)]
         [string]$PackageId,
 
-        [Parameter(Mandatory = $false)]
-        [int]$TimeoutSeconds = 0
+        [Parameter(Mandatory = $true)]
+        [int]$TimeoutSeconds
     )
 
     $listArgs = @('list', '--exact', '--id', $PackageId, '--accept-source-agreements', '--disable-interactivity')
-
-    if ($TimeoutSeconds -gt 0) {
-        $run = Invoke-WingetProcess -ArgumentList $listArgs -TimeoutSeconds $TimeoutSeconds -Echo None
-        if ($run.LaunchFailed) {
-            return @{ Installed = $false; TimedOut = $false; LaunchFailed = $true; LaunchError = $run.LaunchError; CheckFailed = $false; ExitCode = $null }
-        }
-
-        if ($run.TimedOut) {
-            return @{ Installed = $false; TimedOut = $true; LaunchFailed = $false; LaunchError = $null; CheckFailed = $false; ExitCode = $null }
-        }
-
-        # Standard output only, as before: an error message on standard error can name the id too.
-        # Join with a newline, not '': Test-WingetListOutputContainsPackageId's boundary regex
-        # treats anything outside [\w.\-] as a token edge, so an empty separator would let the
-        # end of one line abut the start of the next and could hide a real match at that seam.
-        $installed = Test-WingetListOutputContainsPackageId -Output ([String]::Join("`n", @($run.StandardOutput))) -PackageId $PackageId
-
-        # 0 (listed) and 0x8A150014 (APPINSTALLER_CLI_ERROR_NO_APPLICATIONS_FOUND, as a signed
-        # Int32) are the answers; any other exit code without a match is a failed check, not "not
-        # installed" (review finding P2-9).
-        $noApplicationsFoundExitCode = -1978335212
-        $checkFailed = (-not $installed) -and ($null -ne $run.ExitCode) -and (@(0, $noApplicationsFoundExitCode) -notcontains [int]$run.ExitCode)
-
-        return @{
-            Installed    = $installed
-            TimedOut     = $false
-            LaunchFailed = $false
-            LaunchError  = $null
-            CheckFailed  = $checkFailed
-            ExitCode     = $run.ExitCode
-        }
+    $run = Invoke-WingetProcess -ArgumentList $listArgs -TimeoutSeconds $TimeoutSeconds -Echo None
+    if ($run.LaunchFailed) {
+        return @{ Installed = $false; TimedOut = $false; LaunchFailed = $true; LaunchError = $run.LaunchError; CheckFailed = $false; ExitCode = $null }
     }
 
-    $run = Invoke-WingetProcess -ArgumentList $listArgs -TimeoutSeconds (Get-ProcessTimeoutSeconds -Operation WingetList) -Echo None
-    if ($run.LaunchFailed -or $run.TimedOut) {
-        return $false
+    if ($run.TimedOut) {
+        return @{ Installed = $false; TimedOut = $true; LaunchFailed = $false; LaunchError = $null; CheckFailed = $false; ExitCode = $null }
     }
-    return Test-WingetListOutputContainsPackageId -Output ([String]::Join("`n", @($run.Output))) -PackageId $PackageId
+
+    # Standard output only, as before: an error message on standard error can name the id too.
+    # Join with a newline, not '': Test-WingetListOutputContainsPackageId's boundary regex
+    # treats anything outside [\w.\-] as a token edge, so an empty separator would let the
+    # end of one line abut the start of the next and could hide a real match at that seam.
+    $installed = Test-WingetListOutputContainsPackageId -Output ([String]::Join("`n", @($run.StandardOutput))) -PackageId $PackageId
+
+    # 0 (listed) and 0x8A150014 (APPINSTALLER_CLI_ERROR_NO_APPLICATIONS_FOUND, as a signed
+    # Int32) are the answers; any other exit code without a match is a failed check, not "not
+    # installed" (review finding P2-9).
+    $noApplicationsFoundExitCode = -1978335212
+    $checkFailed = (-not $installed) -and ($null -ne $run.ExitCode) -and (@(0, $noApplicationsFoundExitCode) -notcontains [int]$run.ExitCode)
+
+    return @{
+        Installed    = $installed
+        TimedOut     = $false
+        LaunchFailed = $false
+        LaunchError  = $null
+        CheckFailed  = $checkFailed
+        ExitCode     = $run.ExitCode
+    }
 }
 
 <#

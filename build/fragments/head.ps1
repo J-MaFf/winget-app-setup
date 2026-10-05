@@ -37,16 +37,16 @@
  Bypasses the pre-flight system checks (OS version, disk space, network) for headless or automated use.
 
 .PARAMETER NonInteractive
- Suppresses the interactive extras for unattended runs (RMM, CI, scheduled tasks): the summary
- grid-view window and the "press any key to exit" that holds the window at the end of a run or
- after an early failure. Also turned on by the environment variable
- WINGET_APP_SETUP_NONINTERACTIVE=1 (or true, or yes), for the irm | iex one-liner, which cannot pass
- a switch, and auto-detected when the session is non-interactive or stdin is redirected; under CI
- the early-failure key press is skipped too. The installer asks no yes/no
- questions on any path (issue #230). It asks one question: TightVNC's server password, at the
- start of an interactive run when WINGET_APP_SETUP_TIGHTVNC_PASSWORD is not set and TightVNC Server
- has no password yet (skipped when nobody starts typing within 5 minutes). This switch suppresses
- that question too: TightVNC is then reported as installed but not configured.
+ Suppresses the interactive extra for unattended runs (RMM, CI, scheduled tasks): the "press any
+ key to exit" that holds the window at the end of a run or after an early failure. Also turned on
+ by the environment variable WINGET_APP_SETUP_NONINTERACTIVE=1 (or true, or yes), for the
+ irm | iex one-liner, which cannot pass a switch, and auto-detected when the session is
+ non-interactive or stdin is redirected; under CI the early-failure key press is skipped too. The
+ installer asks no yes/no questions on any path (issue #230). It asks one question: TightVNC's
+ server password, at the start of an interactive run when WINGET_APP_SETUP_TIGHTVNC_PASSWORD is not
+ set and TightVNC Server has no password yet (skipped when nobody starts typing within 5 minutes).
+ This switch suppresses that question too: TightVNC is then reported as installed but not
+ configured.
 
 .PARAMETER CollectDiagnostics
  Installs nothing: makes a diagnostics bundle to attach to a GitHub issue after a failed run, and
