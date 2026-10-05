@@ -317,6 +317,27 @@ Describe 'Invoke-WingetUninstall' {
             Should -Invoke Invoke-WingetProcess -Times 0 -Exactly -ParameterFilter { $ArgumentList[0] -eq 'uninstall' }
         }
 
+        # Work-order item 38: the arch list is part of the installer's applicability rule, so the
+        # uninstaller honours it too, with the same skip text.
+        It 'Leaves an installed app alone when its arch list does not include this PC, naming the architectures' {
+            Mock Get-OSArchitecture { 'Arm64' }
+            $apps = @(@{ name = 'Contoso.X64Only'; arch = 'X64' })
+            $script:installed['Contoso.X64Only'] = $true
+
+            $result = Invoke-WingetUninstall -Apps $apps -NonInteractive
+
+            $result | Should -Be 0
+            $script:warningMessages | Should -Contain 'Skipping: Contoso.X64Only (not applicable: for X64 Windows only; this PC is Arm64)'
+            Should -Invoke Invoke-WingetProcess -Times 0 -Exactly -ParameterFilter { $ArgumentList[0] -eq 'uninstall' }
+        }
+
+        It 'Returns 3, removing nothing, for an app list with an invalid declarative field' {
+            $result = Invoke-WingetUninstall -Apps @(@{ name = 'Contoso.AppOne'; arch = 'amd64' }) -NonInteractive
+
+            $result | Should -Be 3
+            Should -Invoke Invoke-WingetProcess -Times 0 -Exactly -ParameterFilter { $ArgumentList[0] -eq 'uninstall' }
+        }
+
         It 'Removes the app when its condition throws (fail-open, as in the installer)' {
             $apps = @(@{ name = 'Contoso.AppOne'; condition = { throw 'probe broke' } })
 

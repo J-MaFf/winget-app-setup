@@ -41,8 +41,11 @@
     but a restart is required to finish (an install said so, or Windows gained a pending restart
     during the run; review finding P3-16). At the end of a run the precedence is
     1 > 2 > 8 > 3010 > 0 (Get-InstallerExitCode). Apps reported as Deferred (a run as SYSTEM or
-    under cross-user elevation found no machine-wide installer for them) count neither as
-    installed nor as failed and do not change the code. A run as SYSTEM returns 2 at the start
+    under cross-user elevation found no machine-wide installer for them, or the catalog marks them
+    per-user: scope 'user' or userPhase) count neither as installed nor as failed and do not change
+    the code. An app whose post-install hook failed counts as failed (1); one the hook could not
+    configure (NotConfigured) is installed, gets its own 'Configuration: NOT DONE' line and does not
+    change the code (work-order item 38). A run as SYSTEM returns 2 at the start
     when no machine-wide winget.exe can be started. A run that relaunched
     itself elevated returns the elevated run's exit code (Restart-WithElevation waits for it). The
     generated entry script also exits 1 when a blocking pre-flight check fails (before this
@@ -286,9 +289,16 @@ function Invoke-WingetInstall {
     $installedApps = @()
     $skippedApps = @()
     $failedApps = @()
-    # Apps with no machine-wide installer in a run for the whole PC (review finding P3-22): neither
-    # installed nor failed, and left for the signed-in user's own account (Write-DeferredAppsSummary).
+    # Apps with no machine-wide installer in a run for the whole PC (review finding P3-22), or that
+    # the catalog marks per-user (scope 'user' or userPhase, work-order item 38): neither installed
+    # nor failed, and left for the signed-in user's own account (Write-DeferredAppsSummary). The
+    # two kinds are explained apart.
     $deferredApps = @()
+    $noInstallerDeferredApps = @()
+    $perUserDeferredApps = @()
+    # Installed apps whose post-install hook could not configure them (work-order item 38): they do
+    # not change the exit code, and the summary names them with the hook's reason.
+    $notConfiguredApps = @()
 
     # No separate source-trust pass here: only the winget community source is used (every install
     # forces --source winget), and Initialize-Winget above already updated it, and repaired it if
@@ -344,11 +354,11 @@ function Invoke-WingetInstall {
             switch ($outcome.Status) {
                 'Skipped' {
                     if ($outcome.SkipReason -eq 'NotApplicable') {
-                        # Applicability-gated skip (issue #217): the app's catalog condition
-                        # evaluated falsy on this machine (e.g. Dell Command Update on non-Dell
+                        # Applicability-gated skip (issue #217): the app's catalog condition or arch
+                        # list rules this machine out (e.g. Dell Command Update on non-Dell
                         # hardware). Same summary bucket as an already-installed skip, but the
-                        # message carries the condition's human-readable reason.
-                        $conditionText = if ($app.conditionDescription) { $app.conditionDescription } else { 'condition not met' }
+                        # message carries the human-readable reason.
+                        $conditionText = Get-AppNotApplicableReason -App $app
                         Write-WarningMessage "Skipping: $($app.name) (not applicable: $conditionText)"
                         $skipReason = "not applicable: $conditionText"
                     }
@@ -362,14 +372,26 @@ function Invoke-WingetInstall {
                         $skipReason = 'already installed'
                     }
                     $skippedApps += $app.name
-                    $appRecords[$app.name] = New-AppRunRecord -Id $app.name -Status 'Skipped' -Reason $skipReason
+                    # An installed app's post-install hook ran (work-order item 38).
+                    if (Write-AppPostInstallResult -AppName $app.name -Configuration $outcome.Configuration) {
+                        $notConfiguredApps += @{ Name = $app.name; Reason = [string]$outcome.Configuration.Reason }
+                    }
+                    $appRecords[$app.name] = New-AppRunRecord -Id $app.name -Status 'Skipped' -Reason $skipReason -PostInstall $outcome.Configuration
                 }
                 'Deferred' {
-                    # No machine-wide installer, and this run installs for the whole PC only
-                    # (review finding P3-22). Write-DeferredAppsSummary says what can install it.
-                    Write-WarningMessage "Deferred: $($app.name) (winget found no machine-wide installer for it)"
+                    # No machine-wide installer (review finding P3-22), or the catalog marks the app
+                    # per-user (work-order item 38), and this run installs for the whole PC only.
+                    # Write-DeferredAppsSummary says what can install it.
+                    $deferText = Get-AppDeferReasonText -DeferReason $outcome.DeferReason
+                    Write-WarningMessage "Deferred: $($app.name) ($deferText)"
                     $deferredApps += $app.name
-                    $appRecords[$app.name] = New-AppRunRecord -Id $app.name -Status 'Deferred' -Reason 'winget found no machine-wide installer for it' -InstallResult $outcome.InstallResult
+                    if (@('UserScope', 'UserPhase') -contains $outcome.DeferReason) {
+                        $perUserDeferredApps += $app.name
+                    }
+                    else {
+                        $noInstallerDeferredApps += $app.name
+                    }
+                    $appRecords[$app.name] = New-AppRunRecord -Id $app.name -Status 'Deferred' -Reason $deferText -InstallResult $outcome.InstallResult
                 }
                 'Installed' {
                     if ($WhatIf) {
@@ -382,14 +404,17 @@ function Invoke-WingetInstall {
                         if (Write-InstalledAppNote -AppName $app.name -InstallResult $outcome.InstallResult) {
                             $restartRequiredApps += $app.name
                         }
+                        if (Write-AppPostInstallResult -AppName $app.name -Configuration $outcome.Configuration) {
+                            $notConfiguredApps += @{ Name = $app.name; Reason = [string]$outcome.Configuration.Reason }
+                        }
                     }
                     $installedApps += $app.name
-                    $appRecords[$app.name] = New-AppRunRecord -Id $app.name -Status 'Installed' -InstallResult $outcome.InstallResult -RestartRequired ($restartRequiredApps -contains $app.name)
+                    $appRecords[$app.name] = New-AppRunRecord -Id $app.name -Status 'Installed' -InstallResult $outcome.InstallResult -RestartRequired ($restartRequiredApps -contains $app.name) -PostInstall $outcome.Configuration
                 }
                 default {
                     # Surface the diagnostic detail the install pipeline already returns (winget
                     # exit code, attempts, scope fallback) instead of discarding it (issue #189).
-                    $failureReason = Format-InstallFailureReason -FailureReason $outcome.FailureReason -InstallResult $outcome.InstallResult -LaunchError $outcome.LaunchError -CheckExitCode $outcome.CheckExitCode
+                    $failureReason = Format-InstallFailureReason -FailureReason $outcome.FailureReason -InstallResult $outcome.InstallResult -LaunchError $outcome.LaunchError -CheckExitCode $outcome.CheckExitCode -PostInstallReason $outcome.Configuration.Reason
                     switch ($outcome.FailureReason) {
                         'PreCheckTimeout' {
                             # Failed instead of silently dropped: the app then flows through the
@@ -408,7 +433,7 @@ function Invoke-WingetInstall {
                     # Reason column (issue #189). RestartFirst: the installer cannot run until
                     # Windows restarts (0x8A15010A), so the retry pass leaves it alone.
                     $failedApps += @{ Name = $app.name; Reason = $failureReason; RestartFirst = (Test-RestartRequiredFirst -InstallResult $outcome.InstallResult) }
-                    $appRecords[$app.name] = New-AppRunRecord -Id $app.name -Status 'Failed' -Reason $failureReason -InstallResult $outcome.InstallResult
+                    $appRecords[$app.name] = New-AppRunRecord -Id $app.name -Status 'Failed' -Reason $failureReason -InstallResult $outcome.InstallResult -PostInstall $outcome.Configuration
                 }
             }
         }
@@ -475,7 +500,7 @@ function Invoke-WingetInstall {
                     }
 
                     if ($outcome.Status -eq 'Failed') {
-                        $failureReason = Format-InstallFailureReason -FailureReason $outcome.FailureReason -InstallResult $outcome.InstallResult -LaunchError $outcome.LaunchError -CheckExitCode $outcome.CheckExitCode
+                        $failureReason = Format-InstallFailureReason -FailureReason $outcome.FailureReason -InstallResult $outcome.InstallResult -LaunchError $outcome.LaunchError -CheckExitCode $outcome.CheckExitCode -PostInstallReason $outcome.Configuration.Reason
                         switch ($outcome.FailureReason) {
                             'PreCheckTimeout' {
                                 Write-WarningMessage "Winget list timed out for retry: $appName. Assuming installation failed."
@@ -488,19 +513,26 @@ function Invoke-WingetInstall {
                             }
                         }
                         $failedApps += @{ Name = $appName; Reason = $failureReason; RestartFirst = (Test-RestartRequiredFirst -InstallResult $outcome.InstallResult) }
-                        $appRecords[$appName] = New-AppRunRecord -Id $appName -Status 'Failed' -Reason $failureReason -InstallResult $outcome.InstallResult
+                        $appRecords[$appName] = New-AppRunRecord -Id $appName -Status 'Failed' -Reason $failureReason -InstallResult $outcome.InstallResult -PostInstall $outcome.Configuration
                     }
                     elseif ($outcome.Status -eq 'Deferred') {
                         # The retry got as far as the install, which found no machine-wide
                         # installer (review finding P3-22): deferred, not failed.
-                        Write-WarningMessage "Deferred: $appName (winget found no machine-wide installer for it)"
+                        $deferText = Get-AppDeferReasonText -DeferReason $outcome.DeferReason
+                        Write-WarningMessage "Deferred: $appName ($deferText)"
                         $deferredApps += $appName
-                        $appRecords[$appName] = New-AppRunRecord -Id $appName -Status 'Deferred' -Reason 'winget found no machine-wide installer for it' -InstallResult $outcome.InstallResult
+                        if (@('UserScope', 'UserPhase') -contains $outcome.DeferReason) {
+                            $perUserDeferredApps += $appName
+                        }
+                        else {
+                            $noInstallerDeferredApps += $appName
+                        }
+                        $appRecords[$appName] = New-AppRunRecord -Id $appName -Status 'Deferred' -Reason $deferText -InstallResult $outcome.InstallResult
                     }
                     elseif ($outcome.SkipReason -eq 'NotApplicable') {
                         # Same bucket and message as the first pass (review finding P3-34): an app
                         # that does not apply was not installed, so it is never 'Retry succeeded'.
-                        $conditionText = if ($appDef.conditionDescription) { $appDef.conditionDescription } else { 'condition not met' }
+                        $conditionText = Get-AppNotApplicableReason -App $appDef
                         Write-WarningMessage "Skipping: $appName (not applicable: $conditionText)"
                         $skippedApps += $appName
                         $appRecords[$appName] = New-AppRunRecord -Id $appName -Status 'Skipped' -Reason "not applicable: $conditionText"
@@ -512,8 +544,13 @@ function Invoke-WingetInstall {
                         if ($outcome.Status -eq 'Installed' -and (Write-InstalledAppNote -AppName $appName -InstallResult $outcome.InstallResult)) {
                             $restartRequiredApps += $appName
                         }
+                        # A first-pass hook failure ends here once the hook succeeds (work-order
+                        # item 38): the retry finds the app installed and runs its hook again.
+                        if (Write-AppPostInstallResult -AppName $appName -Configuration $outcome.Configuration) {
+                            $notConfiguredApps += @{ Name = $appName; Reason = [string]$outcome.Configuration.Reason }
+                        }
                         $installedApps += $appName
-                        $appRecords[$appName] = New-AppRunRecord -Id $appName -Status 'Installed' -InstallResult $outcome.InstallResult -RestartRequired ($restartRequiredApps -contains $appName)
+                        $appRecords[$appName] = New-AppRunRecord -Id $appName -Status 'Installed' -InstallResult $outcome.InstallResult -RestartRequired ($restartRequiredApps -contains $appName) -PostInstall $outcome.Configuration
                     }
                 }
                 catch {
@@ -652,9 +689,13 @@ function Invoke-WingetInstall {
     # generic message. No-ops when nothing failed.
     Write-FailedAppsSummary -FailedApps $failedApps
 
-    # Why apps were deferred, and who can install them (review findings P3-22, P3-23). They do not
-    # change the exit code.
-    Write-DeferredAppsSummary -DeferredApps $deferredApps -AccountContext $account
+    # Why apps were deferred, and who can install them (review findings P3-22, P3-23; work-order
+    # item 38 for the per-user ones). They do not change the exit code.
+    Write-DeferredAppsSummary -DeferredApps $noInstallerDeferredApps -PerUserApps $perUserDeferredApps -AccountContext $account
+
+    # Installed apps their post-install hook could not configure (work-order item 38). They do not
+    # change the exit code either; a hook that failed made its app Failed above.
+    Write-NotConfiguredAppsSummary -NotConfiguredApps $notConfiguredApps
 
     # Surface the auto-update outcome with the summary so a machine that finished without an update
     # mechanism is visible at the end of the run (issue #186). Every outcome printed as an error

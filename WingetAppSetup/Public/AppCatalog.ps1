@@ -11,9 +11,9 @@
         (dispatched by Install-AppWithVerification instead of the generic winget path). This
         string is validated against the module's defined functions by
         build/Build-WingetInstallScript.ps1's Get-UndefinedCatalogInstallReference guard (issue
-        #236) - if you add another field carrying a function name the same way (e.g.
-        'uninstall', 'verify'), extend that guard to cover it too, or a stale/renamed function
-        will pass every build check and only fail at runtime.
+        #236), which covers postInstall too - if you add another field carrying a function name
+        the same way (e.g. 'uninstall', 'verify'), extend that guard to cover it too, or a
+        stale/renamed function will pass every build check and only fail at runtime.
       - installerType: forwarded to Install-WingetPackage for machine-scope handling.
       - condition: scriptblock returning a boolean, evaluated once per run by Invoke-WingetInstall
         (Test-AppApplicability) before anything is installed, and the verdict used by both passes
@@ -26,11 +26,50 @@
         P3-33). The uninstaller honours it too (Uninstall-CatalogApp, review finding P3-18): an
         installed app whose condition is falsy is not this tool's to remove.
       - conditionDescription: short human-readable reason shown in the skip message, e.g.
-        "Skipping: <id> (not applicable: <conditionDescription>)".
+        "Skipping: <id> (not applicable: <conditionDescription>)", for the condition and the arch
+        list alike (Get-AppNotApplicableReason). Without one, an arch skip says
+        "for <arch list> Windows only; this PC is <architecture>" and a condition skip
+        "condition not met".
       - msixName: the app's MSIX package name. In a run for the whole PC (SYSTEM, or cross-user
         elevation), whether that package is provisioned for every user decides whether the app is
         installed, before and after the install, instead of `winget list`, which only sees the
         packages registered for the account running it (review finding P3-24).
+    The declarative fields (work-order item 38), all optional, checked by Test-AppDefinitions
+    before a run uses them (a wrong value stops the run with exit code 3, and a field it does not
+    know is a warning):
+      - scope: 'machine', 'user' or 'any' (the default). 'any' is the behaviour of an entry without
+        a scope: winget installs at machine scope, and falls back to its default scope when the
+        package has no machine-scope installer, except in a run as SYSTEM or under cross-user
+        elevation, which defers the app instead (Deferred). 'machine' never falls back, in any
+        run: a package with no machine-scope installer fails (exit code 1) rather than being
+        installed for one account or deferred. 'user' installs with `--scope user` in a run as the
+        signed-in user, and is Deferred, before any winget call, in a run as SYSTEM or under
+        cross-user elevation. A package-specific installer (install) gets -MachineScopeOnly for
+        'machine', and -Scope when it declares that parameter.
+      - arch: the OS architectures the app is for, as Get-OSArchitecture names them ('X86', 'X64',
+        'Arm', 'Arm64'; one string or a list). Part of the applicability decision
+        (Test-AppApplicability), with the same fail-open rule: on another architecture the app is
+        Skipped (not applicable). Get-OSArchitecture throws when it has no answer, and the app
+        is then attempted. Note: e2e/Assert-Install.ps1 predicts the not-applicable skips from
+        'condition' alone, so the Reader entries below keep their conditions until it uses
+        Test-AppApplicability.
+      - postInstall: a scriptblock, or the name of a function of this installer, that configures
+        the app once it is installed (Invoke-AppPostInstall). It runs after the install is
+        verified and on every run that finds the app already installed, so it must be idempotent:
+        check the setting and change only what differs. It is called with the catalog entry as its
+        one argument and returns 'Configured', or @{ Status = 'NotConfigured' or 'Failed'; Reason =
+        '<why>' } (its last output is its result). Failed, a throw, an error it writes, or any other
+        result makes the app Failed (exit code 1) with the reason, and the retry pass runs the hook
+        again. NotConfigured leaves the app installed, prints its own line under the summary and
+        does not change the exit code. The result is in the app's run record (postInstall,
+        postInstallReason). It runs in the run's account (SYSTEM in an RMM run), never in a dry
+        run, and never for an app that was not installed.
+      - userPhase: $true marks an app or setting that needs the signed-in user's own account (for
+        example a hook that writes the user's settings). A run as SYSTEM or under cross-user
+        elevation defers it, before any winget call; any other run installs it as usual.
+    A deferred app counts neither as installed nor as failed. Its run record says why: no
+    machine-wide installer, catalog scope 'user', or catalog userPhase (Get-AppDeferReasonText), so
+    a later run as the signed-in user can pick it up from last-run.json.
     Add or remove apps HERE — never inline a copy of this list at a call site (the previous
     duplicates in Invoke-WingetInstall and winget-app-uninstall.ps1 had already drifted).
 .RETURNS

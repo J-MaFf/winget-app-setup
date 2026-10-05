@@ -1,25 +1,29 @@
 <#
 .SYNOPSIS
-    Decides whether a catalog app applies to this machine by evaluating its condition.
+    Decides whether a catalog app applies to this machine from its arch list and its condition.
 .DESCRIPTION
     The one place the catalog's applicability rule lives (issue #217; review findings P3-33,
-    P3-34): an app with no 'condition' applies; otherwise the condition scriptblock decides, and
-    a falsy result means the app does not apply (Skipped, 'not applicable').
+    P3-34; work-order item 38). An app applies when both of its gates allow it:
+      - arch: the list of OS architectures the entry is for (for example @('Arm64', 'X86')),
+        compared with Get-OSArchitecture without regard to case. No list: every architecture.
+      - condition: a scriptblock; a falsy result means the app does not apply. No condition: it
+        applies.
+    An app that does not apply is Skipped, 'not applicable' (Get-AppNotApplicableReason words it).
 
-    Fail open: a condition that throws or writes an error - a probe that has no answer, such as a
-    CIM query that failed (Get-ComputerManufacturer) - is warned about and the app is treated as
-    applicable, so the installer attempts the install. A broken probe must never silently drop
-    an app: the worst case of failing open is an install attempt that fails loudly and shows in
-    the summary and the exit code, while failing closed would skip the app and still exit 0.
-    Probes must therefore throw when they cannot answer rather than return an empty or default
-    value.
+    Fail open: a gate that throws or writes an error - a probe that has no answer, such as a
+    CIM query that failed (Get-ComputerManufacturer), or an architecture .NET cannot report - is
+    warned about and counts as met, so the installer attempts the install. A broken probe must
+    never silently drop an app: the worst case of failing open is an install attempt that fails
+    loudly and shows in the summary and the exit code, while failing closed would skip the app and
+    still exit 0. Probes must therefore throw when they cannot answer rather than return an empty
+    or default value.
 
     Invoke-WingetInstall calls this once per app per run, before the first pass, and carries the
     verdict into the retry pass (Install-AppWithVerification -Applicable). The uninstaller decides
     with it too (Uninstall-CatalogApp, -Purpose Uninstall): an app that does not apply is not this
     tool's to remove, and one whose condition has no answer is removed, the same rule failing open.
 .PARAMETER App
-    A validated app-definition hashtable with an optional 'condition' scriptblock.
+    A validated app-definition hashtable with an optional 'arch' list and 'condition' scriptblock.
 .PARAMETER Purpose
     What the caller does with an app that applies, for the fail-open warning only: 'Install'
     (default) or 'Uninstall'. The rule is the same.
@@ -36,21 +40,34 @@ function Test-AppApplicability {
         [string]$Purpose = 'Install'
     )
 
+    $attempt = 'attempting the install'
+    if ($Purpose -eq 'Uninstall') {
+        $attempt = 'attempting the uninstall'
+    }
+    # A non-terminating error inside a gate (a probe that wrote an error and returned nothing, as
+    # Get-CimInstance does without -ErrorAction Stop) counts as no answer too, not as "does not
+    # apply": the preference reaches the condition and the probes it calls.
+    $ErrorActionPreference = 'Stop'
+
+    if ($App.ContainsKey('arch') -and $null -ne $App['arch']) {
+        try {
+            $architecture = Get-OSArchitecture
+            if (@($App['arch']) -notcontains $architecture) {
+                return $false
+            }
+        }
+        catch {
+            Write-WarningMessage "Architecture check for $($App.name) failed ($($_.Exception.Message)); treating its arch list as met and $attempt."
+        }
+    }
+
     if (-not $App.condition) {
         return $true
     }
-    # A non-terminating error inside the condition (a probe that wrote an error and returned
-    # nothing, as Get-CimInstance does without -ErrorAction Stop) counts as no answer too, not as
-    # "does not apply": the preference reaches the condition and the probes it calls.
-    $ErrorActionPreference = 'Stop'
     try {
         return [bool](& $App.condition)
     }
     catch {
-        $attempt = 'attempting the install'
-        if ($Purpose -eq 'Uninstall') {
-            $attempt = 'attempting the uninstall'
-        }
         Write-WarningMessage "Condition for $($App.name) failed to evaluate ($($_.Exception.Message)); treating as applicable and $attempt."
         return $true
     }
@@ -92,6 +109,20 @@ function Test-AppApplicability {
     The three launch-failure reasons are what Invoke-WingetInstall's circuit breaker
     (Invoke-WingetLaunchCircuitBreaker) watches for.
 
+    The catalog entry's schema fields (work-order item 38, Get-DefaultAppCatalog):
+      - scope 'any' (no scope): winget installs at machine scope, falling back to its default
+        scope when the package has none, unless -MachineWide. 'machine': machine scope only,
+        in every run; a package with no machine-scope installer is Failed
+        (NoMachineScopeInstaller), never deferred, since installing it for one account later would
+        not meet the entry either. 'user': `--scope user` in a run as the signed-in user.
+      - scope 'user' or userPhase, with -MachineWide: Deferred before any winget call
+        (DeferReason 'UserScope' or 'UserPhase'), left for the signed-in user's own account.
+      - postInstall: once the app is installed (verified after the install, already installed,
+        or provisioned for every user), its hook runs (Invoke-AppPostInstall) and the outcome
+        carries the result as Configuration. A hook that fails makes the app Failed
+        (PostInstallFailed); NotConfigured leaves the status as it was. Not in a dry run, which
+        says that it would run the hook.
+
     With -MachineWide (a run as SYSTEM or under cross-user elevation; review findings P3-22, P3-24)
     the app is installed for the whole PC or not at all: a package with no machine-scope installer
     comes back Deferred, left for the signed-in user's own account, instead of being installed at
@@ -107,9 +138,9 @@ function Test-AppApplicability {
 .PARAMETER App
     A validated app-definition hashtable: @{ name = '<winget package id>' } with optional
     'install' (name of a self-verifying installer command), 'installerType' (winget
-    --installer-type override forwarded to Install-WingetPackage), 'condition' (applicability
-    scriptblock, issue #217), and 'conditionDescription' (human reason for the skip message)
-    entries.
+    --installer-type override forwarded to Install-WingetPackage), 'condition' and 'arch'
+    (applicability, issue #217), 'conditionDescription' (human reason for the skip message),
+    'msixName', 'scope', 'userPhase' and 'postInstall' entries (Get-DefaultAppCatalog).
 .PARAMETER Applicable
     The run's applicability verdict for this app (Test-AppApplicability), evaluated once per run by
     Invoke-WingetInstall before anything is installed (review finding P3-34). $false skips the app
@@ -150,9 +181,12 @@ function Test-AppApplicability {
         FailureReason = $null when Status is not 'Failed'; otherwise 'PreCheckTimeout',
                         'PreCheckLaunchFailed', 'PreCheckFailed', 'InstallLaunchFailed',
                         'CustomInstallFailed', 'VerifyTimeout', 'VerifyLaunchFailed',
-                        'VerifyFailed', 'VerifyNotFound', 'WingetNotLaunchable' or
+                        'VerifyFailed', 'VerifyNotFound', 'WingetNotLaunchable',
                         'MachineCheckFailed' (with -MachineWide, the provisioned packages could not
-                        be read), so the caller can keep its per-situation message texts
+                        be read), 'NoMachineScopeInstaller' (scope 'machine', and the package has
+                        no machine-scope installer) or 'PostInstallFailed' (installed, but its
+                        post-install hook failed), so the caller can keep its per-situation
+                        message texts
         LaunchError   = for the three *LaunchFailed reasons, why winget could not be started;
                         otherwise $null
         CheckExitCode = for PreCheckFailed and VerifyFailed, the exit code of the `winget list`
@@ -161,8 +195,11 @@ function Test-AppApplicability {
                         evaluated falsy (issue #217); 'Provisioned' when, with -MachineWide, its
                         MSIX package is already provisioned for every user; absent/$null for an
                         already-installed skip, so the caller can tell the skip messages apart
-        DeferReason   = 'NoMachineScopeInstaller' when Status is 'Deferred': with -MachineWide,
-                        the package has no installer for the whole PC (review finding P3-22)
+        DeferReason   = when Status is 'Deferred', with -MachineWide: 'NoMachineScopeInstaller'
+                        (the package has no installer for the whole PC, review finding P3-22),
+                        'UserScope' (catalog scope 'user') or 'UserPhase' (catalog userPhase)
+        Configuration = the post-install hook's result, @{ Status = 'Configured' |
+                        'NotConfigured' | 'Failed'; Reason }, when the hook ran; otherwise absent
     }
 #>
 function Install-AppWithVerification {
@@ -205,6 +242,18 @@ function Install-AppWithVerification {
         return @{ Status = 'Skipped'; InstallResult = $null; FailureReason = $null; SkipReason = 'NotApplicable' }
     }
 
+    # Per-user work in a run for the whole PC (work-order item 38): scope 'user' would install into
+    # SYSTEM's or the elevating admin's profile, and userPhase marks what needs the signed-in user's
+    # own account. Deferred before any winget call, as `winget list` in this account cannot see the
+    # user's per-user apps either; the run record names the reason, for a later run as the user.
+    $scope = Get-AppInstallScope -App $App
+    if ($MachineWide) {
+        $perUserReason = Get-AppPerUserDeferReason -App $App
+        if ($perUserReason) {
+            return @{ Status = 'Deferred'; InstallResult = $null; FailureReason = $null; DeferReason = $perUserReason }
+        }
+    }
+
     # An MSIX app in a run for the whole PC (review finding P3-24): whether its package is
     # provisioned for every user answers "is it installed", where `winget list` would only see the
     # account running this. Read without winget, so it is answered even when winget cannot start.
@@ -212,7 +261,7 @@ function Install-AppWithVerification {
     if ($checkProvisioning) {
         $provisioned = Test-AppxPackageProvisionedForMachine -Name $App.msixName
         if ($provisioned -eq $true) {
-            return @{ Status = 'Skipped'; InstallResult = $null; FailureReason = $null; SkipReason = 'Provisioned' }
+            return (Complete-AppPostInstallStep -App $App -Outcome @{ Status = 'Skipped'; InstallResult = $null; FailureReason = $null; SkipReason = 'Provisioned' } -WhatIf:$WhatIf)
         }
         if ($null -eq $provisioned -and -not $WhatIf) {
             # No answer is not "not installed" (as for `winget list`, P2-9): fail into the retry pass.
@@ -250,12 +299,12 @@ function Install-AppWithVerification {
         return @{ Status = 'Failed'; InstallResult = $null; FailureReason = 'PreCheckFailed'; CheckExitCode = $preCheck.ExitCode }
     }
     if ($preCheck.Installed) {
-        return @{ Status = 'Skipped'; InstallResult = $null; FailureReason = $null }
+        return (Complete-AppPostInstallStep -App $App -Outcome @{ Status = 'Skipped'; InstallResult = $null; FailureReason = $null } -WhatIf:$WhatIf)
     }
 
     if ($WhatIf) {
         # Not installed and this is a dry run: report it as the install that would happen.
-        return @{ Status = 'Installed'; InstallResult = $null; FailureReason = $null }
+        return (Complete-AppPostInstallStep -App $App -Outcome @{ Status = 'Installed'; InstallResult = $null; FailureReason = $null } -WhatIf)
     }
 
     Write-Info "Installing: $($App.name)"
@@ -275,7 +324,8 @@ function Install-AppWithVerification {
         # -Silent goes to the custom installer when it takes one (Install-PowerShellLatest does), so
         # an explicit -NonInteractive installs PowerShell's MSI with /quiet like every other app. So
         # does the run's remaining wait budget for another installation (review finding P2-15).
-        # A run for the whole PC passes -MachineScopeOnly the same way (review finding P3-22).
+        # A run for the whole PC passes -MachineScopeOnly the same way (review finding P3-22), and
+        # so does an entry with scope 'machine'; scope 'user' goes to one that has -Scope.
         $customParameters = @{}
         $forwardedValues = @{}
         foreach ($parameterName in @('Silent', 'InstallInProgressWaitSeconds')) {
@@ -283,8 +333,11 @@ function Install-AppWithVerification {
                 $forwardedValues[$parameterName] = $PSBoundParameters[$parameterName]
             }
         }
-        if ($MachineWide) {
+        if ($MachineWide -or $scope -eq 'machine') {
             $forwardedValues['MachineScopeOnly'] = $true
+        }
+        if ($scope -ne 'any') {
+            $forwardedValues['Scope'] = $scope
         }
         if ($forwardedValues.Count -gt 0 -and $App.install -is [string]) {
             $customCommand = Get-Command -Name $App.install -ErrorAction SilentlyContinue | Select-Object -First 1
@@ -296,9 +349,12 @@ function Install-AppWithVerification {
         }
         $customResult = & $App.install @customParameters
         if ($customResult.Installed) {
-            return @{ Status = 'Installed'; InstallResult = $customResult; FailureReason = $null }
+            return (Complete-AppPostInstallStep -App $App -Outcome @{ Status = 'Installed'; InstallResult = $customResult; FailureReason = $null })
         }
         if ($customResult.NoMachineScopeInstaller) {
+            if ($scope -eq 'machine') {
+                return @{ Status = 'Failed'; InstallResult = $customResult; FailureReason = 'NoMachineScopeInstaller' }
+            }
             return @{ Status = 'Deferred'; InstallResult = $customResult; FailureReason = $null; DeferReason = 'NoMachineScopeInstaller' }
         }
         # Install-PowerShellLatest says why its own check failed (review finding P3-8), so a
@@ -336,6 +392,9 @@ function Install-AppWithVerification {
     if ($MachineWide) {
         $installParameters['MachineScopeOnly'] = $true
     }
+    if ($scope -ne 'any') {
+        $installParameters['Scope'] = $scope
+    }
     $installResult = Install-WingetPackage @installParameters
     if ($installResult.LaunchErrorExhausted) {
         # winget never started, so nothing was installed; a verify would only fail to launch too.
@@ -343,13 +402,18 @@ function Install-AppWithVerification {
     }
     if ($installResult.NoMachineScopeInstaller) {
         # Nothing was installed: the package has no installer for the whole PC (review finding P3-22).
+        # An entry that allows only a machine-wide install fails: a later per-user install would
+        # not meet it either (work-order item 38).
+        if ($scope -eq 'machine') {
+            return @{ Status = 'Failed'; InstallResult = $installResult; FailureReason = 'NoMachineScopeInstaller' }
+        }
         return @{ Status = 'Deferred'; InstallResult = $installResult; FailureReason = $null; DeferReason = 'NoMachineScopeInstaller' }
     }
 
     if ($checkProvisioning) {
         $provisioned = Test-AppxPackageProvisionedForMachine -Name $App.msixName
         if ($provisioned -eq $true) {
-            return @{ Status = 'Installed'; InstallResult = $installResult; FailureReason = $null }
+            return (Complete-AppPostInstallStep -App $App -Outcome @{ Status = 'Installed'; InstallResult = $installResult; FailureReason = $null })
         }
         if ($null -eq $provisioned) {
             return @{ Status = 'Failed'; InstallResult = $installResult; FailureReason = 'MachineCheckFailed' }
@@ -368,9 +432,59 @@ function Install-AppWithVerification {
         return @{ Status = 'Failed'; InstallResult = $installResult; FailureReason = 'VerifyFailed'; CheckExitCode = $verify.ExitCode }
     }
     if ($verify.Installed) {
-        return @{ Status = 'Installed'; InstallResult = $installResult; FailureReason = $null }
+        return (Complete-AppPostInstallStep -App $App -Outcome @{ Status = 'Installed'; InstallResult = $installResult; FailureReason = $null })
     }
     return @{ Status = 'Failed'; InstallResult = $installResult; FailureReason = 'VerifyNotFound' }
+}
+
+<#
+.SYNOPSIS
+    Runs an installed app's post-install hook, if it has one, and folds the result into its outcome.
+.DESCRIPTION
+    Install-AppWithVerification calls this wherever it has found the app installed (work-order item
+    38). Without a postInstall hook the outcome is returned as it is. In a dry run the hook does not
+    run: '[DRY-RUN] Would run the post-install configuration of <id>.' is printed instead. Otherwise
+    Invoke-AppPostInstall runs it and the outcome gets its result as Configuration; a Failed result
+    turns the outcome into Status 'Failed', FailureReason 'PostInstallFailed', so the app goes into
+    the retry pass (which finds it installed and runs the hook again) and the exit code. NotConfigured
+    leaves the status as it was.
+.PARAMETER App
+    The validated catalog entry.
+.PARAMETER Outcome
+    The outcome Install-AppWithVerification is about to return: Installed, or Skipped because the
+    app is already installed or provisioned.
+.PARAMETER WhatIf
+    Dry run.
+.RETURNS
+    [hashtable] The outcome.
+#>
+function Complete-AppPostInstallStep {
+    param (
+        [Parameter(Mandatory = $true)]
+        [hashtable]$App,
+
+        [Parameter(Mandatory = $true)]
+        [hashtable]$Outcome,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$WhatIf
+    )
+
+    if ($null -eq $App['postInstall']) {
+        return $Outcome
+    }
+    if ($WhatIf) {
+        Write-Info "[DRY-RUN] Would run the post-install configuration of $($App.name)."
+        return $Outcome
+    }
+    $configuration = Invoke-AppPostInstall -App $App
+    $Outcome['Configuration'] = $configuration
+    if ($configuration.Status -eq 'Failed') {
+        $Outcome['Status'] = 'Failed'
+        $Outcome['FailureReason'] = 'PostInstallFailed'
+        $Outcome['SkipReason'] = $null
+    }
+    return $Outcome
 }
 
 <#

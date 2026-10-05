@@ -33,7 +33,32 @@ Describe 'New-AppRunRecord (review finding P3-41)' {
         $record.code | Should -BeNullOrEmpty
         $record.codeHex | Should -BeNullOrEmpty
         $record.reason | Should -BeNullOrEmpty
-        @($record.Keys) | Should -Be @('id', 'status', 'reason', 'code', 'codeHex', 'restartRequired')
+        @($record.Keys) | Should -Be @('id', 'status', 'reason', 'code', 'codeHex', 'restartRequired', 'postInstall', 'postInstallReason')
+        # No post-install hook ran (work-order item 38).
+        $record.postInstall | Should -BeNullOrEmpty
+        $record.postInstallReason | Should -BeNullOrEmpty
+    }
+
+    # Work-order item 38: what the app's post-install hook found, for an RMM tool reading
+    # last-run.json.
+    It 'Carries the post-install result <Status>, with its reason' -ForEach @(
+        @{ Status = 'Configured'; Reason = $null; RecordStatus = 'Installed' }
+        @{ Status = 'NotConfigured'; Reason = 'no TightVNC password supplied'; RecordStatus = 'Installed' }
+        @{ Status = 'Failed'; Reason = 'the service did not start'; RecordStatus = 'Failed' }
+    ) {
+        $record = New-AppRunRecord -Id 'Contoso.App' -Status $RecordStatus -PostInstall @{ Status = $Status; Reason = $Reason }
+
+        $record.postInstall | Should -Be $Status
+        $record.postInstallReason | Should -Be $Reason
+    }
+
+    It 'Writes the post-install result into last-run.json' {
+        $record = New-InstallerRunRecord -ExitCode 0 -Apps @(New-AppRunRecord -Id 'Contoso.App' -Status 'Installed' -PostInstall @{ Status = 'NotConfigured'; Reason = 'later' })
+
+        $json = ConvertTo-Json -InputObject $record -Depth 6 | ConvertFrom-Json
+
+        $json.apps[0].postInstall | Should -Be 'NotConfigured'
+        $json.apps[0].postInstallReason | Should -Be 'later'
     }
 }
 

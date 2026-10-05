@@ -2413,6 +2413,42 @@ Describe 'A run as SYSTEM from an RMM agent (review findings P2-24, P3-22, P3-23
         Should -Invoke Invoke-AppxRegistration -Times 0 -Exactly
     }
 
+    # Work-order item 38: the catalog's per-user apps never reach winget as SYSTEM; an app that
+    # allows only a machine-wide install fails instead of being deferred; and a machine app's hook
+    # runs once it is installed.
+    It 'Defers the catalog''s per-user apps without winget, fails a machine-only app with no machine-wide installer, and runs a hook' {
+        $apps = @(
+            @{ name = 'Contoso.MachineApp'; postInstall = { 'Configured' } },
+            @{ name = 'Contoso.PerUserApp'; scope = 'user' },
+            @{ name = 'Contoso.UserSetting'; userPhase = $true },
+            @{ name = 'Contoso.UserOnlyApp'; scope = 'machine' }
+        )
+        $script:runRecord = $null
+        Mock Write-InstallerRunResult { $script:runRecord = $Record }
+
+        $result = Invoke-WingetInstall -Apps $apps
+
+        $result | Should -Be 1
+        @($script:capturedRows | Where-Object { $_[0] -eq 'Installed' })[0][1] | Should -Be 'Contoso.MachineApp'
+        @($script:capturedRows | Where-Object { $_[0] -eq 'Deferred' })[0][1] | Should -Be 'Contoso.PerUserApp, Contoso.UserSetting'
+        @($script:capturedRows | Where-Object { $_[0] -eq 'Failed' })[0][1] | Should -Be 'Contoso.UserOnlyApp'
+        # winget was never asked about the per-user apps, and never at winget's default scope.
+        @($script:launches | Where-Object { $_.Arguments -match 'Contoso\.(PerUserApp|UserSetting)' }).Count | Should -Be 0
+        @($script:launches | Where-Object { $_.Arguments -match '^install ' -and $_.Arguments -notmatch '--scope machine' }).Count | Should -Be 0
+
+        $text = $script:messages -join "`n"
+        $text | Should -Match 'Configured: Contoso\.MachineApp'
+        $text | Should -Match "Deferred: Contoso\.PerUserApp, Contoso\.UserSetting - the catalog marks them per-user \(scope 'user' or userPhase\), so they can be installed or set up only in the signed-in user's own account, and a run as SYSTEM installs for the whole PC only"
+        $text | Should -Match "Failed to install: Contoso\.UserOnlyApp \(no machine-scope installer applies to this PC, and its catalog entry allows only a machine-wide install \(scope 'machine'\)"
+        $text | Should -Not -Match 'Deferred: Contoso\.UserOnlyApp'
+
+        $records = @($script:runRecord.apps)
+        ($records | Where-Object { $_.id -eq 'Contoso.MachineApp' }).postInstall | Should -Be 'Configured'
+        ($records | Where-Object { $_.id -eq 'Contoso.PerUserApp' }).status | Should -Be 'Deferred'
+        ($records | Where-Object { $_.id -eq 'Contoso.UserSetting' }).status | Should -Be 'Deferred'
+        ($records | Where-Object { $_.id -eq 'Contoso.UserOnlyApp' }).status | Should -Be 'Failed'
+    }
+
     It 'Stops with exit code 2, saying so for SYSTEM, without any per-account step, when App Installer is not installed for the machine' {
         Mock Get-DesktopAppInstallerPackageInfo { }
 
@@ -3343,4 +3379,489 @@ Describe 'WhatIf Mode - Unit Tests' {
     # dry-run branch with a re-inlined obsolete copy of the install loop. The dry-run behavior is
     # now tested for real against Install-AppWithVerification ('dry run (-WhatIf)' context) and
     # against the whole orchestrator in 'Invoke-WingetInstall wiring (issue #188)'.
+}
+
+# Work-order item 38: the declarative catalog fields (scope, arch, postInstall, userPhase) in the
+# per-app pipeline. Only the winget boundary (Install-WingetPackage, Test-WingetPackageInstalled)
+# and the provisioning check are mocked.
+Describe 'Install-AppWithVerification: declarative catalog fields (work-order item 38)' {
+    BeforeEach {
+        Mock Write-Host { }
+        $script:infoMessages = @()
+        Mock Write-Info { $script:infoMessages += $Message }
+        Mock Install-WingetPackage { @{ ExitCode = 0; Attempts = 1; SessionErrorExhausted = $false; MachineScopeFellBack = $false; NoMachineScopeInstaller = $false } }
+        # Not installed before the install, installed after it.
+        $script:checks = 0
+        Mock Test-WingetPackageInstalled {
+            $script:checks++
+            @{ Installed = ($script:checks -gt 1); TimedOut = $false; LaunchFailed = $false; LaunchError = $null; CheckFailed = $false; ExitCode = 0 }
+        }
+        Mock Test-AppxPackageProvisionedForMachine { $false }
+        $script:hookRuns = 0
+        $script:checksAtHook = $null
+    }
+
+    Context 'scope' {
+        It 'Leaves an entry without a scope to Install-WingetPackage''s default' {
+            [void](Install-AppWithVerification -App @{ name = 'Contoso.App' })
+
+            Should -Invoke Install-WingetPackage -Times 1 -Exactly -ParameterFilter { -not $PesterBoundParameters.ContainsKey('Scope') -and -not $MachineScopeOnly }
+        }
+
+        It 'Installs a scope user app with -Scope user in a run as the signed-in user' {
+            $result = Install-AppWithVerification -App @{ name = 'Contoso.UserApp'; scope = 'user' }
+
+            $result.Status | Should -Be 'Installed'
+            Should -Invoke Install-WingetPackage -Times 1 -Exactly -ParameterFilter { $Scope -eq 'user' -and -not $MachineScopeOnly }
+        }
+
+        It 'Fails, never defers, a scope machine app with no machine-scope installer in <Run>' -ForEach @(
+            @{ Run = 'a run as the signed-in user'; MachineWide = $false }
+            @{ Run = 'a run for the whole PC'; MachineWide = $true }
+        ) {
+            Mock Install-WingetPackage { @{ ExitCode = -1978335216; Attempts = 1; SessionErrorExhausted = $false; MachineScopeFellBack = $false; NoMachineScopeInstaller = $true } }
+
+            $result = Install-AppWithVerification -App @{ name = 'Contoso.MachineOnly'; scope = 'machine' } -MachineWide:$MachineWide
+
+            $result.Status | Should -Be 'Failed'
+            $result.FailureReason | Should -Be 'NoMachineScopeInstaller'
+            $result.InstallResult.ExitCode | Should -Be -1978335216
+            Should -Invoke Install-WingetPackage -Times 1 -Exactly -ParameterFilter { $Scope -eq 'machine' }
+        }
+
+        It 'Gives a package-specific installer -MachineScopeOnly for scope machine, and fails the app when it finds no machine-scope installer' {
+            Mock Install-PowerShellLatest { @{ ExitCode = -1978335216; Installed = $false; Method = 'msix-native'; NoMachineScopeInstaller = [bool]$MachineScopeOnly } }
+
+            $result = Install-AppWithVerification -App @{ name = 'Microsoft.PowerShell'; install = 'Install-PowerShellLatest'; scope = 'machine' }
+
+            $result.Status | Should -Be 'Failed'
+            $result.FailureReason | Should -Be 'NoMachineScopeInstaller'
+            Should -Invoke Install-PowerShellLatest -Times 1 -Exactly -ParameterFilter { $MachineScopeOnly }
+        }
+    }
+
+    Context 'scope user and userPhase in a run for the whole PC' {
+        It 'Defers <Case> before any winget call, with DeferReason <Reason>' -ForEach @(
+            @{ Case = 'a scope user app'; App = @{ name = 'Contoso.UserApp'; scope = 'user' }; Reason = 'UserScope' }
+            @{ Case = 'a userPhase app'; App = @{ name = 'Contoso.UserSetting'; userPhase = $true }; Reason = 'UserPhase' }
+            @{ Case = 'a userPhase MSIX app with a hook'; App = @{ name = 'Contoso.Msix'; msixName = 'Contoso.Msix'; userPhase = $true; postInstall = { $script:hookRuns++; 'Configured' } }; Reason = 'UserPhase' }
+        ) {
+            $result = Install-AppWithVerification -App $App -MachineWide
+
+            $result.Status | Should -Be 'Deferred'
+            $result.DeferReason | Should -Be $Reason
+            $result.FailureReason | Should -BeNullOrEmpty
+            $result.InstallResult | Should -BeNullOrEmpty
+            Should -Invoke Test-WingetPackageInstalled -Times 0 -Exactly
+            Should -Invoke Install-WingetPackage -Times 0 -Exactly
+            Should -Invoke Test-AppxPackageProvisionedForMachine -Times 0 -Exactly
+            $script:hookRuns | Should -Be 0
+        }
+
+        It 'Defers a per-user app even when winget cannot be started' {
+            $result = Install-AppWithVerification -App @{ name = 'Contoso.UserApp'; scope = 'user' } -MachineWide -WingetNotLaunchable
+
+            $result.Status | Should -Be 'Deferred'
+            $result.DeferReason | Should -Be 'UserScope'
+        }
+
+        It 'Still skips a per-user app that does not apply to this PC' {
+            $result = Install-AppWithVerification -App @{ name = 'Contoso.UserApp'; scope = 'user'; condition = { $false } } -MachineWide
+
+            $result.Status | Should -Be 'Skipped'
+            $result.SkipReason | Should -Be 'NotApplicable'
+        }
+
+        It 'Installs a userPhase app as usual in a run as the signed-in user' {
+            $result = Install-AppWithVerification -App @{ name = 'Contoso.UserSetting'; userPhase = $true }
+
+            $result.Status | Should -Be 'Installed'
+            Should -Invoke Install-WingetPackage -Times 1 -Exactly -ParameterFilter { -not $MachineScopeOnly }
+        }
+    }
+
+    Context 'postInstall' {
+        It 'Runs the hook once the install is verified, and carries its result' {
+            $result = Install-AppWithVerification -App @{ name = 'Contoso.App'; postInstall = { $script:hookRuns++; $script:checksAtHook = $script:checks; 'Configured' } }
+
+            $result.Status | Should -Be 'Installed'
+            $result.Configuration.Status | Should -Be 'Configured'
+            $script:hookRuns | Should -Be 1
+            # After the post-install check, not before it.
+            $script:checksAtHook | Should -Be 2
+            $script:infoMessages | Should -Contain 'Configuring: Contoso.App'
+        }
+
+        It 'Runs the hook for an app that is already installed' {
+            Mock Test-WingetPackageInstalled { @{ Installed = $true; TimedOut = $false; LaunchFailed = $false; LaunchError = $null; CheckFailed = $false; ExitCode = 0 } }
+
+            $result = Install-AppWithVerification -App @{ name = 'Contoso.App'; postInstall = { $script:hookRuns++; 'Configured' } }
+
+            $result.Status | Should -Be 'Skipped'
+            $result.Configuration.Status | Should -Be 'Configured'
+            $script:hookRuns | Should -Be 1
+            Should -Invoke Install-WingetPackage -Times 0 -Exactly
+        }
+
+        It 'Runs the hook for an MSIX app provisioned for every user, in a run for the whole PC' {
+            Mock Test-AppxPackageProvisionedForMachine { $true }
+
+            $result = Install-AppWithVerification -App @{ name = 'Contoso.Msix'; msixName = 'Contoso.Msix'; postInstall = { $script:hookRuns++; 'Configured' } } -MachineWide
+
+            $result.Status | Should -Be 'Skipped'
+            $result.SkipReason | Should -Be 'Provisioned'
+            $result.Configuration.Status | Should -Be 'Configured'
+        }
+
+        It 'Runs the hook after a package-specific installer reports Installed' {
+            Mock Install-PowerShellLatest { @{ ExitCode = 0; Installed = $true; Method = 'msi' } }
+
+            $result = Install-AppWithVerification -App @{ name = 'Microsoft.PowerShell'; install = 'Install-PowerShellLatest'; postInstall = { $script:hookRuns++; 'Configured' } }
+
+            $result.Status | Should -Be 'Installed'
+            $result.Configuration.Status | Should -Be 'Configured'
+        }
+
+        It 'Keeps an app its hook could not configure installed, with the reason' {
+            $result = Install-AppWithVerification -App @{ name = 'Contoso.App'; postInstall = { @{ Status = 'NotConfigured'; Reason = 'no password supplied' } } }
+
+            $result.Status | Should -Be 'Installed'
+            $result.FailureReason | Should -BeNullOrEmpty
+            $result.Configuration.Status | Should -Be 'NotConfigured'
+            $result.Configuration.Reason | Should -Be 'no password supplied'
+        }
+
+        It 'Fails an installed app whose hook <Case>' -ForEach @(
+            @{ Case = 'returns Failed'; Hook = { @{ Status = 'Failed'; Reason = 'the service did not start' } }; Reason = 'the service did not start' }
+            @{ Case = 'throws'; Hook = { throw 'Access to the registry key is denied.' }; Reason = 'Access to the registry key is denied.' }
+            @{ Case = 'returns nothing'; Hook = { }; Reason = 'the post-install hook returned no result (expected Configured, NotConfigured or Failed)' }
+        ) {
+            $result = Install-AppWithVerification -App @{ name = 'Contoso.App'; postInstall = $Hook }
+
+            $result.Status | Should -Be 'Failed'
+            $result.FailureReason | Should -Be 'PostInstallFailed'
+            $result.Configuration.Status | Should -Be 'Failed'
+            $result.Configuration.Reason | Should -Be $Reason
+            # The install itself succeeded; its result is kept.
+            $result.InstallResult.ExitCode | Should -Be 0
+        }
+
+        It 'Fails an already-installed app whose hook fails, so it is retried and counted' {
+            Mock Test-WingetPackageInstalled { @{ Installed = $true; TimedOut = $false; LaunchFailed = $false; LaunchError = $null; CheckFailed = $false; ExitCode = 0 } }
+
+            $result = Install-AppWithVerification -App @{ name = 'Contoso.App'; postInstall = { 'Failed' } }
+
+            $result.Status | Should -Be 'Failed'
+            $result.FailureReason | Should -Be 'PostInstallFailed'
+            $result.SkipReason | Should -BeNullOrEmpty
+        }
+
+        It 'Does not run the hook for an app that was not installed: <Case>' -ForEach @(
+            @{ Case = 'not applicable'; App = @{ condition = { $false } }; Parameters = @{}; Status = 'Skipped' }
+            @{ Case = 'deferred for want of a machine-scope installer'; App = @{}; Parameters = @{ MachineWide = $true }; Status = 'Deferred'; NoMachineScope = $true }
+            @{ Case = 'still missing after the install'; App = @{}; Parameters = @{}; Status = 'Failed'; NeverInstalled = $true }
+            @{ Case = 'winget cannot be started'; App = @{}; Parameters = @{ WingetNotLaunchable = $true }; Status = 'Failed' }
+        ) {
+            if ($NoMachineScope) {
+                Mock Install-WingetPackage { @{ ExitCode = -1978335216; Attempts = 1; SessionErrorExhausted = $false; MachineScopeFellBack = $false; NoMachineScopeInstaller = $true } }
+            }
+            if ($NeverInstalled) {
+                Mock Test-WingetPackageInstalled { @{ Installed = $false; TimedOut = $false; LaunchFailed = $false; LaunchError = $null; CheckFailed = $false; ExitCode = 0 } }
+            }
+            $entry = @{ name = 'Contoso.App'; postInstall = { $script:hookRuns++; 'Configured' } }
+            foreach ($key in $App.Keys) {
+                $entry[$key] = $App[$key]
+            }
+
+            $result = Install-AppWithVerification -App $entry @Parameters
+
+            $result.Status | Should -Be $Status
+            $result.FailureReason | Should -Not -Be 'PostInstallFailed'
+            $result.ContainsKey('Configuration') | Should -BeFalse
+            $script:hookRuns | Should -Be 0
+        }
+
+        It 'Does not run the hook in a dry run, and says it would (<Case>)' -ForEach @(
+            @{ Case = 'an app a real run would install'; Installed = $false; Status = 'Installed' }
+            @{ Case = 'an app already installed'; Installed = $true; Status = 'Skipped' }
+        ) {
+            $script:alreadyInstalled = $Installed
+            Mock Test-WingetPackageInstalled { @{ Installed = $script:alreadyInstalled; TimedOut = $false; LaunchFailed = $false; LaunchError = $null; CheckFailed = $false; ExitCode = 0 } }
+
+            $result = Install-AppWithVerification -App @{ name = 'Contoso.App'; postInstall = { $script:hookRuns++; 'Configured' } } -WhatIf
+
+            $result.Status | Should -Be $Status
+            $result.ContainsKey('Configuration') | Should -BeFalse
+            $script:hookRuns | Should -Be 0
+            $script:infoMessages | Should -Contain '[DRY-RUN] Would run the post-install configuration of Contoso.App.'
+        }
+    }
+}
+
+Describe 'Test-AppApplicability: the arch list (work-order item 38)' {
+    BeforeEach {
+        $script:warnings = @()
+        Mock Write-WarningMessage { $script:warnings += $Message }
+    }
+
+    It 'Applies on <Architecture> when the arch list is <Arch>: <Expected>' -ForEach @(
+        @{ Arch = 'X64'; Architecture = 'X64'; Expected = $true }
+        @{ Arch = 'x64'; Architecture = 'X64'; Expected = $true }
+        @{ Arch = 'X64'; Architecture = 'Arm64'; Expected = $false }
+        @{ Arch = @('Arm64', 'X86'); Architecture = 'Arm64'; Expected = $true }
+        @{ Arch = @('Arm64', 'X86'); Architecture = 'X64'; Expected = $false }
+    ) {
+        $script:mockedArchitecture = $Architecture
+        Mock Get-OSArchitecture { $script:mockedArchitecture }
+
+        Test-AppApplicability -App @{ name = 'Contoso.App'; arch = $Arch } | Should -Be $Expected
+        $script:warnings | Should -BeNullOrEmpty
+    }
+
+    It 'Needs both the arch list and the condition to allow the app' {
+        Mock Get-OSArchitecture { 'X64' }
+
+        Test-AppApplicability -App @{ name = 'Contoso.App'; arch = 'X64'; condition = { $false } } | Should -BeFalse
+        Test-AppApplicability -App @{ name = 'Contoso.App'; arch = 'Arm64'; condition = { $true } } | Should -BeFalse
+        Test-AppApplicability -App @{ name = 'Contoso.App'; arch = 'X64'; condition = { $true } } | Should -BeTrue
+    }
+
+    It 'Does not run the condition when the arch list rules the PC out' {
+        Mock Get-OSArchitecture { 'Arm64' }
+
+        Test-AppApplicability -App @{ name = 'Contoso.App'; arch = 'X64'; condition = { throw 'must not run' } } | Should -BeFalse
+        $script:warnings | Should -BeNullOrEmpty
+    }
+
+    It 'Fails open when the architecture cannot be read, warns, and lets the condition decide (<Purpose>)' -ForEach @(
+        @{ Purpose = 'Install'; Attempt = 'attempting the install' }
+        @{ Purpose = 'Uninstall'; Attempt = 'attempting the uninstall' }
+    ) {
+        Mock Get-OSArchitecture { throw 'The OS architecture could not be read.' }
+
+        Test-AppApplicability -App @{ name = 'Contoso.App'; arch = 'X64' } -Purpose $Purpose | Should -BeTrue
+        Test-AppApplicability -App @{ name = 'Contoso.App'; arch = 'X64'; condition = { $false } } -Purpose $Purpose | Should -BeFalse
+
+        $script:warnings[0] | Should -Be "Architecture check for Contoso.App failed (The OS architecture could not be read.); treating its arch list as met and $Attempt."
+    }
+
+    It 'Does not read the architecture for an entry without an arch list' {
+        Mock Get-OSArchitecture { throw 'must not be read' }
+
+        Test-AppApplicability -App @{ name = 'Contoso.App' } | Should -BeTrue
+        Should -Invoke Get-OSArchitecture -Times 0 -Exactly
+    }
+}
+
+# Work-order item 38 through the real orchestrator and the real per-app pipeline: only the winget
+# boundary, the account and the steps around the installs are mocked.
+Describe 'Invoke-WingetInstall: declarative catalog fields (work-order item 38)' {
+    BeforeEach {
+        Mock Write-Host { }
+        Mock Start-Process { }
+        Mock Start-Sleep { }
+        Mock Test-IsAdmin { $true }
+        Mock Restart-WithElevation { [pscustomobject]@{ Started = $true; ExitCode = 0 } }
+        Mock Test-IsRunningLocally { $true }
+        Mock Initialize-Winget { [pscustomobject]@{ Ready = $true; Diagnosis = 'Ok' } }
+        Mock Test-AndInstallGraphicalTools { $true }
+        Mock Remove-LegacyScheduledUpdates { $true }
+        Mock Set-WindowsTerminalDefaults { }
+        Mock Install-WingetAutoUpdate { [pscustomobject]@{ Status = 'AlreadyPresent'; Version = '2.12.0' } }
+        Mock Test-WingetLaunchable { [pscustomobject]@{ Launchable = $true; Version = 'v1.12.350'; Reason = $null; Attempts = 1 } }
+        Mock Wait-WauIdle { $true }
+        Mock Get-PendingRestartState { New-TestRestartState }
+        Mock Get-InstallAccountContext { New-TestAccountContext }
+        Mock Test-AppxPackageProvisionedForMachine { $false }
+
+        # winget: an app is installed once Install-WingetPackage ran for it.
+        $script:installedIds = @()
+        Mock Install-WingetPackage {
+            $script:installedIds += $PackageId
+            @{ ExitCode = 0; Attempts = 1; SessionErrorExhausted = $false; MachineScopeFellBack = $false; NoMachineScopeInstaller = $false }
+        }
+        Mock Test-WingetPackageInstalled { @{ Installed = ($script:installedIds -contains $PackageId); TimedOut = $false; LaunchFailed = $false; LaunchError = $null; CheckFailed = $false; ExitCode = 0 } }
+
+        $script:capturedTables = @{}
+        Mock Write-Table { $script:capturedTables[$Title] = $Rows }
+        $script:messages = @()
+        Mock Write-Info { $script:messages += $Message }
+        Mock Write-Success { $script:messages += $Message }
+        Mock Write-WarningMessage { $script:messages += $Message }
+        Mock Write-ErrorMessage { $script:messages += $Message }
+        $script:runRecord = $null
+        Mock Write-InstallerRunResult { $script:runRecord = $Record }
+        $script:hookCalls = 0
+    }
+
+    It 'Installs a scope user app with --scope user, runs the hooks and reports one the hook could not configure, as the signed-in user' {
+        $apps = @(
+            @{ name = 'Contoso.UserApp'; scope = 'user' },
+            @{ name = 'Contoso.Configured'; userPhase = $true; postInstall = { 'Configured' } },
+            @{ name = 'Contoso.Unconfigured'; postInstall = { @{ Status = 'NotConfigured'; Reason = 'no password supplied' } } }
+        )
+
+        $result = Invoke-WingetInstall -Apps $apps -NonInteractive
+
+        $result | Should -Be 0
+        Should -Invoke Install-WingetPackage -Times 1 -Exactly -ParameterFilter { $PackageId -eq 'Contoso.UserApp' -and $Scope -eq 'user' }
+        @($script:capturedTables['Installation Summary'] | Where-Object { $_[0] -eq 'Installed' })[0][1] | Should -Be 'Contoso.UserApp, Contoso.Configured, Contoso.Unconfigured'
+        $script:messages | Should -Contain 'Configured: Contoso.Configured'
+        $script:messages | Should -Contain 'Not configured: Contoso.Unconfigured (no password supplied)'
+        $script:messages | Should -Contain 'Configuration: NOT DONE for Contoso.Unconfigured (no password supplied) - installed, but the post-install configuration did not finish. Not counted as failed; re-run the installer once the reason is fixed.'
+
+        $records = @($script:runRecord.apps)
+        ($records | Where-Object { $_.id -eq 'Contoso.UserApp' }).postInstall | Should -BeNullOrEmpty
+        ($records | Where-Object { $_.id -eq 'Contoso.Configured' }).postInstall | Should -Be 'Configured'
+        $unconfigured = $records | Where-Object { $_.id -eq 'Contoso.Unconfigured' }
+        $unconfigured.status | Should -Be 'Installed'
+        $unconfigured.postInstall | Should -Be 'NotConfigured'
+        $unconfigured.postInstallReason | Should -Be 'no password supplied'
+    }
+
+    It 'Exits 1 when a hook fails in both passes, with the hook''s reason as the app''s failure reason' {
+        $apps = @(@{ name = 'Contoso.App'; postInstall = { $script:hookCalls++; @{ Status = 'Failed'; Reason = 'the service did not start' } } })
+
+        $result = Invoke-WingetInstall -Apps $apps -NonInteractive
+
+        $result | Should -Be 1
+        # The first pass and the retry pass, which finds the app installed and runs the hook again.
+        $script:hookCalls | Should -Be 2
+        Should -Invoke Install-WingetPackage -Times 1 -Exactly
+        $script:messages | Should -Contain 'Failed to install: Contoso.App (installed, but its post-install configuration failed (the service did not start)).'
+        $failedRows = $script:capturedTables['Failed Installations']
+        $failedRows[0][0] | Should -Be 'Contoso.App'
+        $failedRows[0][1] | Should -Be 'installed, but its post-install configuration failed (the service did not start)'
+        $record = @($script:runRecord.apps)[0]
+        $record.status | Should -Be 'Failed'
+        $record.postInstall | Should -Be 'Failed'
+        $record.postInstallReason | Should -Be 'the service did not start'
+        $script:runRecord.counts.failed | Should -Be 1
+    }
+
+    It 'Recovers in the retry pass when the hook succeeds the second time' {
+        $apps = @(@{ name = 'Contoso.App'; postInstall = { $script:hookCalls++; if ($script:hookCalls -eq 1) { throw 'locked' }; 'Configured' } })
+
+        $result = Invoke-WingetInstall -Apps $apps -NonInteractive
+
+        $result | Should -Be 0
+        $script:messages | Should -Contain 'Retry succeeded: Contoso.App'
+        $script:messages | Should -Contain 'Configured: Contoso.App'
+        $record = @($script:runRecord.apps)[0]
+        $record.status | Should -Be 'Installed'
+        $record.postInstall | Should -Be 'Configured'
+    }
+
+    It 'Defers the per-user apps under cross-user elevation, before any winget call, and says why in the line, the summary and the record' {
+        Mock Get-InstallAccountContext { New-TestAccountContext -CrossUser -ProcessUser 'CONTOSO\admin-tech' -SessionUser 'CONTOSO\jdoe' }
+        $apps = @(
+            @{ name = 'Contoso.MachineApp' },
+            @{ name = 'Contoso.UserApp'; scope = 'user' },
+            @{ name = 'Contoso.UserSetting'; userPhase = $true; postInstall = { $script:hookCalls++; 'Configured' } }
+        )
+
+        $result = Invoke-WingetInstall -Apps $apps -NonInteractive
+
+        $result | Should -Be 0
+        @($script:capturedTables['Installation Summary'] | Where-Object { $_[0] -eq 'Deferred' })[0][1] | Should -Be 'Contoso.UserApp, Contoso.UserSetting'
+        @($script:capturedTables['Installation Summary'] | Where-Object { $_[0] -eq 'Installed' })[0][1] | Should -Be 'Contoso.MachineApp'
+        Should -Invoke Test-WingetPackageInstalled -Times 0 -Exactly -ParameterFilter { $PackageId -ne 'Contoso.MachineApp' }
+        Should -Invoke Install-WingetPackage -Times 0 -Exactly -ParameterFilter { $PackageId -ne 'Contoso.MachineApp' }
+        $script:hookCalls | Should -Be 0
+
+        $script:messages | Should -Contain "Deferred: Contoso.UserApp (per-user app (catalog scope 'user'): it installs only into the signed-in user's own account)"
+        $script:messages | Should -Contain "Deferred: Contoso.UserSetting (per-user setup (catalog userPhase): it needs the signed-in user's own account)"
+        $script:messages | Should -Contain "Deferred: Contoso.UserApp, Contoso.UserSetting - the catalog marks them per-user (scope 'user' or userPhase), so they can be installed or set up only in the account 'CONTOSO\jdoe', and installing per-user here would install for 'CONTOSO\admin-tech' instead of 'CONTOSO\jdoe'. Not installed and not counted as failed. This installer run as 'CONTOSO\jdoe' installs them when that account is an administrator; otherwise a per-user deployment does (an RMM script that runs as the user, or the Microsoft Store)."
+        # Not the 0x8A150010 explanation: winget was never asked about them.
+        ($script:messages -join "`n") | Should -Not -Match 'NO_APPLICABLE_INSTALLER'
+
+        $records = @($script:runRecord.apps)
+        ($records | Where-Object { $_.id -eq 'Contoso.UserApp' }).status | Should -Be 'Deferred'
+        ($records | Where-Object { $_.id -eq 'Contoso.UserApp' }).reason | Should -Be "per-user app (catalog scope 'user'): it installs only into the signed-in user's own account"
+        ($records | Where-Object { $_.id -eq 'Contoso.UserSetting' }).reason | Should -Be "per-user setup (catalog userPhase): it needs the signed-in user's own account"
+        $script:runRecord.counts.deferred | Should -Be 2
+    }
+
+    It 'Returns 3, before installing anything, for a catalog entry with an invalid field' {
+        $result = Invoke-WingetInstall -Apps @(@{ name = 'Contoso.App' }, @{ name = 'Contoso.Bad'; scope = 'everyone' }) -NonInteractive
+
+        $result | Should -Be 3
+        Should -Invoke Install-WingetPackage -Times 0 -Exactly
+        ($script:messages -join "`n") | Should -Match "App entry at index 1 \('Contoso\.Bad'\) has an invalid 'scope' value 'everyone'"
+    }
+
+    It 'Skips an app whose arch list rules this PC out, naming the architectures' {
+        Mock Get-OSArchitecture { 'Arm64' }
+
+        $result = Invoke-WingetInstall -Apps @(@{ name = 'Contoso.X64Only'; arch = 'X64' }, @{ name = 'Contoso.Anywhere' }) -NonInteractive
+
+        $result | Should -Be 0
+        $script:messages | Should -Contain 'Skipping: Contoso.X64Only (not applicable: for X64 Windows only; this PC is Arm64)'
+        Should -Invoke Test-WingetPackageInstalled -Times 0 -Exactly -ParameterFilter { $PackageId -eq 'Contoso.X64Only' }
+        (@($script:runRecord.apps) | Where-Object { $_.id -eq 'Contoso.X64Only' }).reason | Should -Be 'not applicable: for X64 Windows only; this PC is Arm64'
+    }
+}
+
+Describe 'Reporting the declarative catalog fields (work-order item 38)' {
+    BeforeEach {
+        $script:warningMessages = @()
+        Mock Write-WarningMessage { $script:warningMessages += $Message }
+        $script:successMessages = @()
+        Mock Write-Success { $script:successMessages += $Message }
+    }
+
+    It 'Format-InstallFailureReason gives a failed hook''s reason, without the successful install''s details' {
+        $reason = Format-InstallFailureReason -FailureReason 'PostInstallFailed' -InstallResult @{ ExitCode = 0; Attempts = 1; MachineScopeFellBack = $false } -PostInstallReason ' the service did not start '
+
+        $reason | Should -Be 'installed, but its post-install configuration failed (the service did not start)'
+        Format-InstallFailureReason -FailureReason 'PostInstallFailed' | Should -Be 'installed, but its post-install configuration failed (no reason given)'
+    }
+
+    It 'Format-InstallFailureReason says a scope machine app has no machine-scope installer' {
+        $reason = Format-InstallFailureReason -FailureReason 'NoMachineScopeInstaller' -InstallResult @{ ExitCode = -1978335216; Attempts = 1; MachineScopeFellBack = $false }
+
+        $reason | Should -Be "no machine-scope installer applies to this PC, and its catalog entry allows only a machine-wide install (scope 'machine'); winget exit 0x8A150010 NO_APPLICABLE_INSTALLER, 1 attempt, machine-scope fallback: no"
+    }
+
+    It 'Get-AppDeferReasonText words each deferral' {
+        Get-AppDeferReasonText -DeferReason 'NoMachineScopeInstaller' | Should -Be 'winget found no machine-wide installer for it'
+        Get-AppDeferReasonText -DeferReason $null | Should -Be 'winget found no machine-wide installer for it'
+        Get-AppDeferReasonText -DeferReason 'UserScope' | Should -Match "catalog scope 'user'"
+        Get-AppDeferReasonText -DeferReason 'UserPhase' | Should -Match 'catalog userPhase'
+    }
+
+    It 'Write-DeferredAppsSummary explains the per-user apps on a line of their own, for SYSTEM' {
+        Write-DeferredAppsSummary -DeferredApps @('Contoso.NoMachine') -PerUserApps @('Contoso.UserApp') -AccountContext (New-TestAccountContext -System -SessionUser 'CONTOSO\jdoe')
+
+        $script:warningMessages.Count | Should -Be 2
+        $script:warningMessages[0] | Should -Match '^Deferred: Contoso\.NoMachine - winget found no machine-wide installer for it'
+        $script:warningMessages[1] | Should -Be "Deferred: Contoso.UserApp - the catalog marks it per-user (scope 'user' or userPhase), so it can be installed or set up only in the signed-in user's own account, and a run as SYSTEM installs for the whole PC only. Not installed and not counted as failed. This installer run as the signed-in user installs it when that account is an administrator; otherwise a per-user deployment does (an RMM script that runs as the user, or the Microsoft Store)."
+    }
+
+    It 'Write-DeferredAppsSummary says nothing about per-user apps when there are none' {
+        Write-DeferredAppsSummary -DeferredApps @() -PerUserApps @() -AccountContext (New-TestAccountContext -System)
+        Write-DeferredAppsSummary -PerUserApps $null -AccountContext (New-TestAccountContext -System)
+
+        Should -Invoke Write-WarningMessage -Times 0 -Exactly
+    }
+
+    It 'Write-AppPostInstallResult prints the result and returns whether the app is not configured' {
+        Write-AppPostInstallResult -AppName 'Contoso.App' -Configuration @{ Status = 'Configured'; Reason = $null } | Should -BeFalse
+        Write-AppPostInstallResult -AppName 'Contoso.Other' -Configuration @{ Status = 'NotConfigured'; Reason = 'later' } | Should -BeTrue
+        Write-AppPostInstallResult -AppName 'Contoso.Failed' -Configuration @{ Status = 'Failed'; Reason = 'x' } | Should -BeFalse
+        Write-AppPostInstallResult -AppName 'Contoso.None' -Configuration $null | Should -BeFalse
+
+        $script:successMessages | Should -Be @('Configured: Contoso.App')
+        $script:warningMessages | Should -Be @('Not configured: Contoso.Other (later)')
+    }
+
+    It 'Write-NotConfiguredAppsSummary names every app with its reason in one line, and nothing when there is none' {
+        Write-NotConfiguredAppsSummary -NotConfiguredApps @()
+        Write-NotConfiguredAppsSummary -NotConfiguredApps $null
+        Should -Invoke Write-WarningMessage -Times 0 -Exactly
+
+        Write-NotConfiguredAppsSummary -NotConfiguredApps @(@{ Name = 'Contoso.One'; Reason = 'a' }, @{ Name = 'Contoso.Two'; Reason = 'b' })
+
+        $script:warningMessages | Should -Be @('Configuration: NOT DONE for Contoso.One (a); Contoso.Two (b) - installed, but the post-install configuration did not finish. Not counted as failed; re-run the installer once the reason is fixed.')
+    }
 }

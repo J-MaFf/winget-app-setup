@@ -202,7 +202,26 @@ Describe 'Build guard: undefined references on every platform (review finding P3
         $result = Invoke-FixtureBuild -Root $root
 
         $result.ExitCode | Should -Not -Be 0
-        $result.Output | Should -Match "Reference check failed: a catalog entry's 'install' field names function\(s\) that are not defined in the module and do not resolve as external cmdlets: Install-ZzNoSuchApp\."
+        $result.Output | Should -Match "Reference check failed: a catalog entry's 'install' or 'postInstall' field names function\(s\) that are not defined in the module and do not resolve as external cmdlets: Install-ZzNoSuchApp\."
+    }
+
+    # Work-order item 38: a post-install hook named by a string is dispatched the same indirect way
+    # (& $App.postInstall), so a renamed hook function must fail the build, not the install.
+    It 'fails the build when a catalog postInstall field names a function the module does not define' {
+        $root = New-BuildFixture -Name 'undefined-postinstall' -ProbeSource "function Get-ZzProbeCatalog { @(@{ name = 'Zz.Probe'; postInstall = 'Set-ZzNoSuchConfiguration' }) }`n"
+
+        $result = Invoke-FixtureBuild -Root $root
+
+        $result.ExitCode | Should -Not -Be 0
+        $result.Output | Should -Match "Reference check failed: a catalog entry's 'install' or 'postInstall' field names function\(s\) that are not defined in the module and do not resolve as external cmdlets: Set-ZzNoSuchConfiguration\."
+    }
+
+    It 'accepts a catalog postInstall field that names a module function' {
+        $root = New-BuildFixture -Name 'defined-postinstall' -ProbeSource "function Set-ZzProbeConfiguration { 'Configured' }`nfunction Get-ZzProbeCatalog { @(@{ name = 'Zz.Probe'; postInstall = 'Set-ZzProbeConfiguration' }) }`n"
+
+        $result = Invoke-FixtureBuild -Root $root
+
+        $result.ExitCode | Should -Be 0 -Because $result.Output
     }
 
     It 'treats the names in build/windows-only-commands.txt as resolvable off Windows' -Skip:$IsWindows {

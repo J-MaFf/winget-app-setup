@@ -9,6 +9,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Declarative catalog entry fields (work-order item 38), checked by `Test-AppDefinitions` before a
+  run uses them (a wrong value stops the run with exit code 3 and names the entry; a field the
+  schema does not know is a warning), in `WingetAppSetup/Private/CatalogSchema.ps1`:
+  - `scope`: `any` (default, the behaviour so far), `machine` (machine scope only, in every run: a
+    package with no machine-wide installer fails with `no machine-scope installer applies to this
+    PC, and its catalog entry allows only a machine-wide install (scope 'machine')` instead of
+    being installed per-user or deferred) or `user` (`--scope user`;
+    `Install-WingetPackage -Scope`).
+  - `arch`: the OS architectures the app is for (`X86`, `X64`, `Arm`, `Arm64`), decided by
+    `Test-AppApplicability` with `Get-OSArchitecture` together with the condition, once per run and
+    fail open (`Architecture check for <id> failed (...); treating its arch list as met ...`). The
+    skip line uses `conditionDescription`, or says `for <list> Windows only; this PC is <arch>`
+    (`Get-AppNotApplicableReason`, now also used for condition skips and by the uninstaller).
+  - `userPhase`: per-user apps and settings. As SYSTEM and under cross-user elevation, `userPhase`
+    and `scope = 'user'` apps are `Deferred` before any winget call, with
+    `per-user setup (catalog userPhase): ...` or `per-user app (catalog scope 'user'): ...` as the
+    reason on the app's line and in `last-run.json`, and their own explanation under the summary
+    (`Write-DeferredAppsSummary -PerUserApps`); any other run installs them as usual.
+  - `postInstall`: a scriptblock or function name that configures the app once it is installed
+    (after the install is verified, and on every run that finds it installed; never in a dry run).
+    It returns `Configured`, or `NotConfigured` or `Failed` with a reason (`Invoke-AppPostInstall`,
+    `ConvertTo-AppPostInstallResult`). The run prints `Configured: <id>` or
+    `Not configured: <id> (<reason>)`; a failed or throwing hook makes the app `Failed`
+    (`installed, but its post-install configuration failed (<reason>)`, exit code 1, retried once),
+    while `NotConfigured` leaves the exit code alone and adds a
+    `Configuration: NOT DONE for <id> (<reason>) - ...` line under the summary. Each app's entry in
+    `last-run.json` gains `postInstall` and `postInstallReason`. The build's catalog reference guard
+    (`Get-UndefinedCatalogInstallReference`) now checks a `postInstall` function name as it checks
+    `install`. No catalog app uses the new fields yet.
 - The Winget-AutoUpdate gate now checks for the Windows App Runtime the winget release WAU installs
   actually needs, instead of only the constant `Microsoft.WindowsAppRuntime.1.8 >= 8000.616.304.0`
   (work-order item 32, product-F4). WAU's `Install-Prerequisites` installs the latest winget-cli

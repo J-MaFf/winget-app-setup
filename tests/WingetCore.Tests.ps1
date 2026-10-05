@@ -732,6 +732,47 @@ Describe 'Install-WingetPackage (0x80073d19 session-error backoff)' {
         Should -Invoke Invoke-WingetProcess -Times 1 -Exactly -ParameterFilter { ($ArgumentList -contains '--scope') -and ($ArgumentList -contains 'machine') }
     }
 
+    # Work-order item 38: the catalog entry's scope.
+    It 'Never falls back with -Scope machine, in a run as the signed-in user too, and says the catalog allows only machine scope' {
+        $script:exitCodeQueue = @(-1978335216, 0)
+        Mock Write-Info { }
+
+        $result = Install-WingetPackage -PackageId 'Contoso.MachineOnly' -MaxAttempts 3 -InitialDelaySeconds 1 -Scope machine
+
+        Should -Invoke Invoke-WingetProcess -Times 1 -Exactly
+        Should -Invoke Invoke-WingetProcess -Times 1 -Exactly -ParameterFilter { ($ArgumentList -join ' ') -match '--scope machine' }
+        $result.NoMachineScopeInstaller | Should -Be $true
+        $result.MachineScopeFellBack | Should -Be $false
+        Should -Invoke Write-Info -Times 1 -Exactly -ParameterFilter { $Message -match "its catalog entry allows only a machine-wide install \(scope 'machine'\)" }
+    }
+
+    It 'Installs with --scope user from the first attempt with -Scope user, and never asks for machine scope' {
+        $script:exitCodeQueue = @(0)
+
+        $result = Install-WingetPackage -PackageId 'Contoso.UserApp' -MaxAttempts 3 -InitialDelaySeconds 1 -Scope user
+
+        $result.ExitCode | Should -Be 0
+        Should -Invoke Invoke-WingetProcess -Times 1 -Exactly -ParameterFilter { ($ArgumentList -join ' ') -match '--scope user' }
+        Should -Invoke Invoke-WingetProcess -Times 0 -Exactly -ParameterFilter { $ArgumentList -contains 'machine' }
+    }
+
+    It 'Returns 0x8A150010 at once with -Scope user when the package has no per-user installer, without a scope fallback' {
+        $script:exitCodeQueue = @(-1978335216, 0)
+
+        $result = Install-WingetPackage -PackageId 'Contoso.MachineOnly' -MaxAttempts 3 -InitialDelaySeconds 1 -Scope user
+
+        $result.ExitCode | Should -Be -1978335216
+        $result.MachineScopeFellBack | Should -Be $false
+        $result.NoMachineScopeInstaller | Should -Be $false
+        Should -Invoke Invoke-WingetProcess -Times 1 -Exactly
+    }
+
+    It 'Refuses -Scope user together with -MachineScopeOnly, without running winget' {
+        { Install-WingetPackage -PackageId 'Contoso.UserApp' -Scope user -MachineScopeOnly } | Should -Throw '*-MachineScopeOnly rules out*'
+
+        Should -Invoke Invoke-WingetProcess -Times 0 -Exactly
+    }
+
     It 'Still retries the session error with backoff after a scope fallback' {
         $script:exitCodeQueue = @(-1978335216, $script:SessionLogoffExitCode, 0)
 

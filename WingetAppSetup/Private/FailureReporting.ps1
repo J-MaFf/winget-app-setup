@@ -260,12 +260,16 @@ function Get-InstallerExitCode {
     the installer once it has finished', or 'winget install failed' for a code the table does not
     know (review finding P2-15). 'package not found after install' is kept for an install that
     winget reported as successful.
+
+    An app whose post-install hook failed (PostInstallFailed, work-order item 38) is installed: the
+    reason is 'installed, but its post-install configuration failed (<the hook's reason>)', without
+    the install's details, which describe a successful install.
 .PARAMETER FailureReason
     The FailureReason string from the shared install pipeline ('PreCheckTimeout',
     'PreCheckLaunchFailed', 'PreCheckFailed', 'InstallLaunchFailed', 'VerifyTimeout',
     'VerifyLaunchFailed', 'VerifyFailed', 'VerifyNotFound', 'CustomInstallFailed',
-    'WingetNotLaunchable', 'MachineCheckFailed'). Unknown or empty values fall back to a generic
-    'install failed'.
+    'WingetNotLaunchable', 'MachineCheckFailed', 'NoMachineScopeInstaller', 'PostInstallFailed').
+    Unknown or empty values fall back to a generic 'install failed'.
 .PARAMETER InstallResult
     The InstallResult hashtable from the shared install pipeline: Install-WingetPackage's
     ExitCode/Attempts/SessionErrorExhausted/MachineScopeFellBack shape, a custom installer's
@@ -277,6 +281,8 @@ function Get-InstallerExitCode {
 .PARAMETER CheckExitCode
     The exit code of the `winget list` check that failed, for PreCheckFailed and VerifyFailed (the
     pipeline's CheckExitCode). Shown with the reason, apart from the install's own exit code.
+.PARAMETER PostInstallReason
+    Why the post-install hook failed, for PostInstallFailed (the pipeline's Configuration.Reason).
 .RETURNS
     [string] e.g. 'another installation was in progress (Windows Installer was busy) - re-run the
     installer once it has finished; winget exit 0x8A150102 INSTALL_INSTALL_IN_PROGRESS, 4 attempts,
@@ -300,8 +306,22 @@ function Format-InstallFailureReason {
 
         [Parameter(Mandatory = $false)]
         [AllowNull()]
-        [Nullable[int]]$CheckExitCode
+        [Nullable[int]]$CheckExitCode,
+
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [AllowEmptyString()]
+        [string]$PostInstallReason
     )
+
+    if ($FailureReason -eq 'PostInstallFailed') {
+        # The app is installed (work-order item 38): the install's details would describe a success.
+        $hookReason = 'no reason given'
+        if (-not [string]::IsNullOrWhiteSpace($PostInstallReason)) {
+            $hookReason = $PostInstallReason.Trim()
+        }
+        return ('installed, but its post-install configuration failed ({0})' -f $hookReason)
+    }
 
     $base = switch ($FailureReason) {
         'PreCheckTimeout' { 'winget list timed out during the pre-install check' }
@@ -315,6 +335,7 @@ function Format-InstallFailureReason {
         'CustomInstallFailed' { 'installer reported failure' }
         'WingetNotLaunchable' { 'not attempted: winget cannot be launched on this machine (see above)' }
         'MachineCheckFailed' { 'could not check whether it is provisioned for every user on this PC (see the warning above)' }
+        'NoMachineScopeInstaller' { "no machine-scope installer applies to this PC, and its catalog entry allows only a machine-wide install (scope 'machine')" }
         default { 'install failed' }
     }
     if ($null -ne $CheckExitCode -and @('PreCheckFailed', 'VerifyFailed') -contains $FailureReason) {
@@ -458,6 +479,35 @@ function Write-InstalledAppNote {
 
 <#
 .SYNOPSIS
+    Words why an app was deferred, for its 'Deferred: <id> (...)' line and its run record.
+.DESCRIPTION
+    The reason a later run as the signed-in user (work-order item 34) reads from last-run.json:
+      - 'NoMachineScopeInstaller' (and anything else): 'winget found no machine-wide installer for
+        it' (review finding P3-22);
+      - 'UserScope': the catalog entry has scope 'user' (work-order item 38);
+      - 'UserPhase': the catalog entry is marked userPhase (work-order item 38).
+.PARAMETER DeferReason
+    Install-AppWithVerification's DeferReason.
+.RETURNS
+    [string]
+#>
+function Get-AppDeferReasonText {
+    param (
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [AllowEmptyString()]
+        [string]$DeferReason
+    )
+
+    switch ($DeferReason) {
+        'UserScope' { return "per-user app (catalog scope 'user'): it installs only into the signed-in user's own account" }
+        'UserPhase' { return "per-user setup (catalog userPhase): it needs the signed-in user's own account" }
+    }
+    return 'winget found no machine-wide installer for it'
+}
+
+<#
+.SYNOPSIS
     Explains, under the installation summary, why apps were deferred and who can install them.
 .DESCRIPTION
     Review findings P3-22, P3-23. A run as SYSTEM or under cross-user elevation installs for the whole
@@ -469,9 +519,12 @@ function Write-InstalledAppNote {
     a standard user's UAC prompt elevates as another account, which defers the app again; on a
     standard user's PC it takes a per-user deployment. The line does not claim a per-user installer
     exists: winget answers 0x8A150010 at --scope machine also when no installer applies to the PC
-    at all. No-op when nothing was deferred.
+    at all. Apps the catalog marks per-user (scope 'user' or userPhase, work-order item 38) get a
+    line of their own, since winget was never asked about them. No-op when nothing was deferred.
 .PARAMETER DeferredApps
-    The package ids of the deferred apps.
+    The package ids of the apps deferred because winget found no machine-wide installer for them.
+.PARAMETER PerUserApps
+    The package ids of the apps deferred because the catalog marks them per-user.
 .PARAMETER AccountContext
     Get-InstallAccountContext's result for the run.
 #>
@@ -484,17 +537,20 @@ function Write-DeferredAppsSummary {
 
         [Parameter(Mandatory = $false)]
         [AllowNull()]
+        [AllowEmptyCollection()]
+        [string[]]$PerUserApps,
+
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
         [object]$AccountContext
     )
 
-    if (-not $DeferredApps -or $DeferredApps.Count -eq 0) {
+    $noInstallerApps = @($DeferredApps | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    $perUserAppIds = @($PerUserApps | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    if ($noInstallerApps.Count -eq 0 -and $perUserAppIds.Count -eq 0) {
         return
     }
 
-    $pronoun = 'them'
-    if ($DeferredApps.Count -eq 1) {
-        $pronoun = 'it'
-    }
     $why = 'this run installs for the whole PC only'
     $account = "the signed-in user's own account"
     $who = 'the signed-in user'
@@ -506,7 +562,89 @@ function Write-DeferredAppsSummary {
         $account = "the account '$($AccountContext.SessionUser)'"
         $who = "'$($AccountContext.SessionUser)'"
     }
-    Write-WarningMessage ('Deferred: {0} - winget found no machine-wide installer for {1} that applies to this PC ({2} with --scope machine), and {3}. Not installed and not counted as failed. A per-user app can only be installed in {4}: by this installer run as {5} when that account is an administrator, otherwise by a per-user deployment (an RMM script that runs as the user, or the Microsoft Store).' -f ($DeferredApps -join ', '), $pronoun, (Format-WingetExitCode -ExitCode -1978335216), $why, $account, $who)
+    if ($noInstallerApps.Count -gt 0) {
+        $pronoun = 'them'
+        if ($noInstallerApps.Count -eq 1) {
+            $pronoun = 'it'
+        }
+        Write-WarningMessage ('Deferred: {0} - winget found no machine-wide installer for {1} that applies to this PC ({2} with --scope machine), and {3}. Not installed and not counted as failed. A per-user app can only be installed in {4}: by this installer run as {5} when that account is an administrator, otherwise by a per-user deployment (an RMM script that runs as the user, or the Microsoft Store).' -f ($noInstallerApps -join ', '), $pronoun, (Format-WingetExitCode -ExitCode -1978335216), $why, $account, $who)
+    }
+    if ($perUserAppIds.Count -gt 0) {
+        $subject = 'they'
+        $object = 'them'
+        if ($perUserAppIds.Count -eq 1) {
+            $subject = 'it'
+            $object = 'it'
+        }
+        Write-WarningMessage ("Deferred: {0} - the catalog marks {1} per-user (scope 'user' or userPhase), so {2} can be installed or set up only in {3}, and {4}. Not installed and not counted as failed. This installer run as {5} installs {1} when that account is an administrator; otherwise a per-user deployment does (an RMM script that runs as the user, or the Microsoft Store)." -f ($perUserAppIds -join ', '), $object, $subject, $account, $why, $who)
+    }
+}
+
+<#
+.SYNOPSIS
+    Prints an installed app's post-install configuration result after its install line.
+.DESCRIPTION
+    Work-order item 38. 'Configured: <id>' for a hook that configured the app, and
+    'Not configured: <id> (<reason>)' for one that could not, which leaves the app installed and the
+    exit code as it was. Nothing for a hook that failed (the app's failure line says why) or when no
+    hook ran.
+.PARAMETER AppName
+    The winget package id.
+.PARAMETER Configuration
+    The app's Install-AppWithVerification Configuration, or $null.
+.RETURNS
+    [bool] True when the app is installed but not configured (NotConfigured), for the summary's
+    'Configuration: NOT DONE' line (Write-NotConfiguredAppsSummary).
+#>
+function Write-AppPostInstallResult {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$AppName,
+
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [object]$Configuration
+    )
+
+    if ($null -eq $Configuration) {
+        return $false
+    }
+    switch ([string]$Configuration.Status) {
+        'Configured' {
+            Write-Success "Configured: $AppName"
+        }
+        'NotConfigured' {
+            Write-WarningMessage "Not configured: $AppName ($($Configuration.Reason))"
+            return $true
+        }
+    }
+    return $false
+}
+
+<#
+.SYNOPSIS
+    Says, under the installation summary, which installed apps are not configured, and why.
+.DESCRIPTION
+    Work-order item 38. One line for every app whose post-install hook returned NotConfigured:
+    'Configuration: NOT DONE for <id> (<reason>); ... - ...'. Such an app is installed and does not
+    change the exit code; a hook that failed made its app Failed instead (exit code 1). No-op when
+    every hook configured its app.
+.PARAMETER NotConfiguredApps
+    @{ Name = <winget package id>; Reason = <string> } for each app.
+#>
+function Write-NotConfiguredAppsSummary {
+    param (
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [AllowEmptyCollection()]
+        [hashtable[]]$NotConfiguredApps
+    )
+
+    if (-not $NotConfiguredApps -or $NotConfiguredApps.Count -eq 0) {
+        return
+    }
+    $entries = @($NotConfiguredApps | ForEach-Object { '{0} ({1})' -f $_.Name, $_.Reason })
+    Write-WarningMessage ('Configuration: NOT DONE for {0} - installed, but the post-install configuration did not finish. Not counted as failed; re-run the installer once the reason is fixed.' -f ($entries -join '; '))
 }
 
 <#

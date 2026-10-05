@@ -107,10 +107,10 @@ function Test-WingetUninstallRestartRequiredResult {
          not installed while all of them stayed on the machine.
       2. Not installed: Skipped, NotInstalled.
       3. A shell this run depends on (Get-HostingShellSkipReason): Skipped, HostsThisRun.
-      4. The app's catalog condition, decided by the installer's own rule, Test-AppApplicability
-         (review findings P3-18, P3-33): falsy means this tool does not manage the app on this
-         machine (Dell Command Update on other hardware), so it is Skipped, NotApplicable, and left
-         alone. A condition that throws or writes an error has no answer: it is warned about and
+      4. The app's catalog condition and arch list, decided by the installer's own rule,
+         Test-AppApplicability (review findings P3-18, P3-33; work-order item 38): an app that does
+         not apply is not this tool's to manage on this machine (Dell Command Update on other
+         hardware), so it is Skipped, NotApplicable, and left alone. A condition that throws or writes an error has no answer: it is warned about and
          treated as applicable, as in the installer.
       5. `winget uninstall --exact --id <id> --silent --accept-source-agreements
          --disable-interactivity` through Invoke-WingetProcess, under the WingetUninstall time limit
@@ -189,10 +189,7 @@ function Uninstall-CatalogApp {
     # The installer's single applicability rule (review finding P3-34), so a condition with no
     # answer - one that throws, or writes an error and returns nothing - fails open here as well.
     if (-not (Test-AppApplicability -App $App -Purpose Uninstall)) {
-        $conditionText = 'condition not met'
-        if ($App.conditionDescription) {
-            $conditionText = $App.conditionDescription
-        }
+        $conditionText = Get-AppNotApplicableReason -App $App
         $result.Status = 'Skipped'
         $result.SkipReason = 'NotApplicable'
         $result.Reason = "not applicable: $conditionText"

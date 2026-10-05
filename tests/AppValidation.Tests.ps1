@@ -101,6 +101,45 @@ Describe 'Test-AppDefinitions' {
         }
     }
 
+    # Work-order item 38: the declarative fields are checked before a run uses them, so a wrong
+    # value stops the run with exit code 3 instead of misbehaving for one app halfway through it.
+    Context 'When an entry carries the declarative schema fields (work-order item 38)' {
+        It 'Keeps an entry whose scope, arch, postInstall and userPhase are valid' {
+            $apps = @(
+                @{ name = 'Contoso.UserApp'; scope = 'user'; userPhase = $true },
+                @{ name = 'Contoso.MachineApp'; scope = 'machine'; arch = @('X64', 'Arm64'); postInstall = { 'Configured' } }
+            )
+
+            $result = Test-AppDefinitions -Apps $apps
+
+            $result.Errors | Should -BeNullOrEmpty
+            $result.Warnings | Should -BeNullOrEmpty
+            @($result.ValidApps | ForEach-Object { $_.name }) | Should -Be @('Contoso.UserApp', 'Contoso.MachineApp')
+        }
+
+        It 'Reports an error and drops the entry for <Case>' -ForEach @(
+            @{ Case = 'an unknown scope'; Entry = @{ name = 'Contoso.Bad'; scope = 'everyone' }; Pattern = "App entry at index 1 \('Contoso\.Bad'\) has an invalid 'scope' value 'everyone'" }
+            @{ Case = 'a misspelt architecture'; Entry = @{ name = 'Contoso.Bad'; arch = 'ARM-64' }; Pattern = "App entry at index 1 \('Contoso\.Bad'\) has an invalid 'arch' value 'ARM-64'" }
+            @{ Case = 'a hook naming no command'; Entry = @{ name = 'Contoso.Bad'; postInstall = 'Set-ZzMissingHook' }; Pattern = "names no command of this installer" }
+            @{ Case = 'a userPhase string'; Entry = @{ name = 'Contoso.Bad'; userPhase = 'true' }; Pattern = "invalid 'userPhase' value 'true'" }
+        ) {
+            $result = Test-AppDefinitions -Apps @(@{ name = 'Contoso.Good' }, $Entry)
+
+            @($result.ValidApps | ForEach-Object { $_.name }) | Should -Be @('Contoso.Good')
+            $result.Errors.Count | Should -Be 1
+            $result.Errors[0] | Should -Match $Pattern
+        }
+
+        It 'Warns about an unknown field and keeps the entry' {
+            $result = Test-AppDefinitions -Apps @(@{ name = 'Contoso.App'; scopee = 'user' })
+
+            $result.Errors | Should -BeNullOrEmpty
+            $result.ValidApps.Count | Should -Be 1
+            $result.Warnings.Count | Should -Be 1
+            $result.Warnings[0] | Should -Match "App entry at index 0 \('Contoso\.App'\) has an unknown field 'scopee'"
+        }
+    }
+
     Context 'When duplicate entries are present' {
         It 'Should keep the first occurrence and warn about duplicates' {
             $apps = @(

@@ -248,7 +248,8 @@ function Initialize-Winget {
     deployment is exactly what 0x80073D19 blocks under cross-user elevation. When a package has no
     machine-scope installer (e.g. the MSIX-only Microsoft.WindowsTerminal), winget returns
     0x8A150010 (NO_APPLICABLE_INSTALLER) and the install is retried once at winget's default scope,
-    unless -MachineScopeOnly says the run must not install for one account (review finding P3-22).
+    unless -MachineScopeOnly says the run must not install for one account (review finding P3-22),
+    or -Scope says the catalog entry allows only one scope (work-order item 38).
 .PARAMETER PackageId
     The winget package id to install (e.g. 'Microsoft.PowerShell').
 .PARAMETER InstallerType
@@ -284,6 +285,13 @@ function Initialize-Winget {
     verification, run as that same account, then reported it installed. A package with no
     machine-scope installer then ends at once with NoMachineScopeInstaller, and the caller defers
     it (leaves it for the signed-in user's own account).
+.PARAMETER Scope
+    The catalog entry's scope (work-order item 38, Get-AppInstallScope). 'any' (default): machine
+    scope first, then winget's default scope as described above. 'machine': `--scope machine` and
+    never the fallback, as with -MachineScopeOnly; a package with no machine-scope installer ends
+    with NoMachineScopeInstaller. 'user': `--scope user` from the first attempt, no fallback; it
+    cannot be combined with -MachineScopeOnly (Install-AppWithVerification defers such an app in a
+    run for the whole PC instead of calling this).
 .RETURNS
     [hashtable] @{ ExitCode = <int|$null>; Attempts = <int>; SessionErrorExhausted = <bool>; MachineScopeFellBack = <bool>; NoMachineScopeInstaller = <bool>; LaunchErrorExhausted = <bool>; LaunchAttempts = <int>; LaunchError = <string|$null>; TimedOut = <bool>; TimeoutSeconds = <int>; InstallerLogPath = <string|$null>; InstallInProgressWaitedSeconds = <int>; RestartRequired = <bool> }
     SessionErrorExhausted is True only when every attempt failed with the session error.
@@ -292,7 +300,8 @@ function Initialize-Winget {
     (see the description); the caller decides from `winget list` whether the package installed.
     MachineScopeFellBack is True when the package had no machine-scope installer and the install
     was retried at winget's default scope. NoMachineScopeInstaller is True when it had none and
-    -MachineScopeOnly kept it from being installed at all (ExitCode is then 0x8A150010). Attempts
+    -MachineScopeOnly or -Scope machine kept it from being installed at all (ExitCode is then
+    0x8A150010). Attempts
     counts install attempts at the finally selected scope, the retries after another installation
     in progress or an in-use result included; the one-time scope fallback does not consume a
     session-error attempt, and neither does a failed launch (no process ran). LaunchAttempts counts failed winget launches.
@@ -333,8 +342,16 @@ function Install-WingetPackage {
         [int]$InUseRetryDelaySeconds = 60,
 
         [Parameter(Mandatory = $false)]
-        [switch]$MachineScopeOnly
+        [switch]$MachineScopeOnly,
+
+        [Parameter(Mandatory = $false)]
+        [ValidateSet('any', 'machine', 'user')]
+        [string]$Scope = 'any'
     )
+
+    if ($Scope -eq 'user' -and $MachineScopeOnly) {
+        throw [System.ArgumentException]::new("Install-WingetPackage: -Scope user installs $PackageId for the account running this, which -MachineScopeOnly rules out.")
+    }
 
     # 0x80073D19 (ERROR_DEPLOYMENT_BLOCKED_BY_USER_LOG_OFF) as a signed Int32, which is how winget
     # reports it through Process.ExitCode.
@@ -357,7 +374,7 @@ function Install-WingetPackage {
     $installInProgressWaited = 0
     $inUseRetried = $false
     $restartRequired = $false
-    $useMachineScope = $true
+    $useMachineScope = $Scope -ne 'user'
     $machineScopeFellBack = $false
     $noMachineScopeInstaller = $false
     $launchErrorExhausted = $false
@@ -384,6 +401,9 @@ function Install-WingetPackage {
         )
         if ($useMachineScope) {
             $installArgs += @('--scope', 'machine')
+        }
+        elseif ($Scope -eq 'user') {
+            $installArgs += @('--scope', 'user')
         }
         if (-not [string]::IsNullOrWhiteSpace($InstallerType)) {
             $installArgs += @('--installer-type', $InstallerType)
@@ -453,6 +473,12 @@ function Install-WingetPackage {
                 # A run as SYSTEM or under cross-user elevation (review finding P3-22): the default
                 # scope would install the app for the account running this, not for the user.
                 Write-Info "winget found no machine-scope installer for $PackageId that applies to this PC, and this run installs for the whole PC only, so it is not installed at winget's default (per-user) scope."
+                $noMachineScopeInstaller = $true
+                break
+            }
+            if ($Scope -eq 'machine') {
+                # The catalog entry allows only a machine-wide install (work-order item 38).
+                Write-Info "winget found no machine-scope installer for $PackageId that applies to this PC, and its catalog entry allows only a machine-wide install (scope 'machine'), so it is not installed at winget's default (per-user) scope."
                 $noMachineScopeInstaller = $true
                 break
             }

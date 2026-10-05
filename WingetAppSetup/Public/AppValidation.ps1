@@ -3,8 +3,11 @@
     Validates the list of application definitions before processing.
 .DESCRIPTION
     Ensures each entry in the apps array is a hashtable containing a non-empty string `name` value
-    matching the winget package-id shape CLAUDE.md documents (publisher.product), and removes
-    duplicates, warning about any issues.
+    matching the winget package-id shape CLAUDE.md documents (publisher.product), checks the
+    entry's optional schema fields (scope, arch, postInstall, userPhase; work-order item 38,
+    Get-AppDefinitionSchemaIssue), and removes duplicates, warning about any issues. An entry with
+    an error is left out and reported in Errors, which stops a run with exit code 3; a field the
+    schema does not know is a warning.
 .PARAMETER Apps
     The collection of application definition hash tables to validate.
 .RETURNS
@@ -39,6 +42,15 @@ function Test-AppDefinitions {
         # does not look like a winget publisher.product id before it is ever trusted downstream.
         if (-not (Test-WingetPackageIdFormat -PackageId $name)) {
             $errors += "App entry at index $i has an invalid package id '$name': does not match the required publisher.product shape."
+            continue
+        }
+
+        # The optional schema fields (work-order item 38): a wrong value stops the run here, before
+        # anything is installed, instead of misbehaving for this app halfway through it.
+        $schemaIssues = Get-AppDefinitionSchemaIssue -App $app -Label "App entry at index $i ('$name')"
+        $warnings += @($schemaIssues.Warnings)
+        if (@($schemaIssues.Errors).Count -gt 0) {
+            $errors += @($schemaIssues.Errors)
             continue
         }
 

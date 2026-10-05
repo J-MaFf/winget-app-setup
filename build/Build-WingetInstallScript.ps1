@@ -295,8 +295,9 @@ function Get-UndefinedCommandReference {
 function Get-UndefinedCatalogInstallReference {
     <#
     .SYNOPSIS
-        Returns catalog 'install' function names (from Get-DefaultAppCatalog) that are neither
-        defined as a function within the assembled script nor resolvable as an external command.
+        Returns catalog 'install' and 'postInstall' function names (from Get-DefaultAppCatalog)
+        that are neither defined as a function within the assembled script nor resolvable as an
+        external command.
     .DESCRIPTION
         Get-UndefinedCommandReference walks CommandAst.GetCommandName(), which returns $null for an
         indirect invocation - the call operator `&` applied to a variable/member-expression rather
@@ -308,9 +309,13 @@ function Get-UndefinedCatalogInstallReference {
         only breaks at runtime with a CommandNotFoundException the moment that one app is installed.
 
         This guard closes that blind spot by walking the assembled AST for HashtableAst key-value
-        pairs whose key is the literal 'install' and whose value is a string literal (exactly the
-        shape Get-DefaultAppCatalog's entries use), then validating each such string against the
-        same defined-function lookups the direct-dispatch guard above uses.
+        pairs whose key is the literal 'install' or 'postInstall' and whose value is a string
+        literal (exactly the shape Get-DefaultAppCatalog's entries use), then validating each such
+        string against the same defined-function lookups the direct-dispatch guard above uses.
+        'postInstall' (work-order item 38) is the post-install hook, invoked the same indirect way
+        by Invoke-AppPostInstall (`& $App.postInstall $App`); a scriptblock hook is code, which the
+        direct-dispatch guard already sees. So no other hashtable in the module may give either key
+        a string literal that is not a function name.
 
         Chosen over a Pester-only test (the spec's alternative) because it lives in the same
         AST-walking guard-stack as Get-UndefinedCommandReference right above it, runs on every build
@@ -350,7 +355,7 @@ function Get-UndefinedCatalogInstallReference {
             # so anything else is skipped.
             $keyAst = $pair.Item1
             if ($keyAst -isnot [System.Management.Automation.Language.StringConstantExpressionAst]) { continue }
-            if ($keyAst.Value -ne 'install') { continue }
+            if (@('install', 'postInstall') -notcontains $keyAst.Value) { continue }
 
             $valueAst = $pair.Item2
             if ($valueAst -is [System.Management.Automation.Language.PipelineAst] -and $valueAst.PipelineElements.Count -eq 1) {
@@ -579,7 +584,7 @@ if ($undefinedReferences) {
 # See Get-UndefinedCatalogInstallReference's help for why GetCommandName() alone misses this.
 $undefinedCatalogInstallReferences = Get-UndefinedCatalogInstallReference -Ast $assembledAst -DefinedExact $definedExact -DefinedFolded $definedFolded -AssumeResolvable $assumeResolvable
 if ($undefinedCatalogInstallReferences) {
-    Write-Error ("Reference check failed: a catalog entry's 'install' field names function(s) that are not defined in the module and do not resolve as external cmdlets: $($undefinedCatalogInstallReferences -join ', '). Fix the 'install' string in WingetAppSetup/Public/AppCatalog.ps1 (or add the missing function), then re-run the build.")
+    Write-Error ("Reference check failed: a catalog entry's 'install' or 'postInstall' field names function(s) that are not defined in the module and do not resolve as external cmdlets: $($undefinedCatalogInstallReferences -join ', '). Fix the string in WingetAppSetup/Public/AppCatalog.ps1 (or add the missing function), then re-run the build.")
     exit 1
 }
 

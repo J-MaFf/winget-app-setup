@@ -165,6 +165,21 @@ conditions, keeps the PowerShell 7 and Windows Terminal it runs in, removes Wing
 and only when no app failed, and exits 0, 3010, 1, 2, 3, 4 or 5 instead of always 0. None of this
 is checked on a real Windows PC yet.
 
+Catalog entries can now say declaratively what used to need code (work-order item 38): `scope`
+(`machine`, `user` or the default `any`; `machine` never falls back to a per-user install and fails
+instead, `user` installs with `--scope user`), `arch` (the OS architectures the app is for, part of
+the once-per-run applicability decision, fail open), `userPhase` (per-user work), and `postInstall`
+(an idempotent hook that configures the app once it is installed, on every run). As SYSTEM and
+under cross-user elevation, `scope = 'user'` and `userPhase` apps are `Deferred` before any winget
+call, with their own reason in the summary and in `last-run.json`, for a later run as the user. A
+hook's result is printed per app and recorded in `last-run.json` (`postInstall`,
+`postInstallReason`): a failed hook makes the app failed (exit 1, retried once), `NotConfigured`
+gets a `Configuration: NOT DONE` line under the summary and leaves the exit code alone. A wrong
+value in any of these fields stops the run with exit 3, and the build guard checks a hook named by
+a string like an `install` function. No catalog app uses the new fields yet: the Reader entries
+keep their `condition` until `e2e/Assert-Install.ps1` decides applicability with the module's
+`Test-AppApplicability` instead of reading `condition` itself.
+
 The same branch changes CI. Fork pull requests that leave `windows-tests.yml` alone no longer run
 on the self-hosted win-test runner, and `claude.yml` calls the shared Claude workflow at a pinned
 commit SHA instead of `@main`. The E2E workflow files its failure issue from a separate ubuntu job,
@@ -356,7 +371,7 @@ every repository secret.
 |------|-------------|
 | `WingetAppSetup/` | Source-of-truth PowerShell module (`.psd1` manifest + `.psm1` loader) |
 | `WingetAppSetup/Public/` | Exported functions: logging, winget core, app validation, Windows Terminal config, install orchestration (updates are outsourced to WAU), uninstall orchestration (`Invoke-WingetUninstall`) |
-| `WingetAppSetup/Private/` | Internal helpers: system info, elevation, graphical tools, the Windows PowerShell 5.1 → PowerShell 7 bootstrap, the machine-wide winget and provisioning lookups a run as SYSTEM uses (`MachineContext.ps1`), the run lock (`RunLock.ps1`), the `RESULT` line and `last-run.json` (`RunRecord.ps1`), log retention (`Housekeeping.ps1`), the uninstaller's per-app step (`AppUninstall.ps1`) and the pinned `Microsoft.WindowsAppRuntime.1.8` install before Winget-AutoUpdate (`WindowsAppRuntime.ps1`) |
+| `WingetAppSetup/Private/` | Internal helpers: system info, elevation, graphical tools, the Windows PowerShell 5.1 → PowerShell 7 bootstrap, the machine-wide winget and provisioning lookups a run as SYSTEM uses (`MachineContext.ps1`), the run lock (`RunLock.ps1`), the `RESULT` line and `last-run.json` (`RunRecord.ps1`), the catalog entry fields and post-install hooks (`CatalogSchema.ps1`), log retention (`Housekeeping.ps1`), the uninstaller's per-app step (`AppUninstall.ps1`) and the pinned `Microsoft.WindowsAppRuntime.1.8` install before Winget-AutoUpdate (`WindowsAppRuntime.ps1`) |
 | `build/Build-WingetInstallScript.ps1` | Concatenates the module + entry fragments into `winget-app-install.ps1` |
 | `build/fragments/` | `head.ps1` (PSScriptInfo, help, `param`) and `tail.ps1` (entry-point dispatch) |
 | `winget-app-install.ps1` | **Generated** single-file installer for local and `irm \| iex` use — do not edit by hand |

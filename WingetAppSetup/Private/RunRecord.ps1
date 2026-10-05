@@ -12,16 +12,23 @@
     'Installed', 'Skipped', 'Deferred' (a run for the whole PC found no machine-wide installer for
     it: neither installed nor failed, review finding P3-22) or 'Failed'.
 .PARAMETER Reason
-    Why the app was skipped or failed (the text the summary shows). Empty: none.
+    Why the app was skipped, deferred or failed (the text the summary shows). Empty: none. For a
+    deferred app it names why (Get-AppDeferReasonText): no machine-wide installer, or a catalog
+    entry marked per-user (scope 'user' or userPhase), which a later run as the signed-in user
+    installs.
 .PARAMETER InstallResult
     The app's install result (Install-AppWithVerification's InstallResult), for its exit code, or
     $null when no installer ran.
 .PARAMETER RestartRequired
     The install finished but needs a restart.
+.PARAMETER PostInstall
+    The result of the app's post-install hook (work-order item 38: Install-AppWithVerification's
+    Configuration, @{ Status; Reason }), or $null when no hook ran.
 .RETURNS
     [System.Collections.Specialized.OrderedDictionary] id, status, reason, code (the exit code of
-    the winget install or package-specific installer, or $null), codeHex (the same as 0x%08X) and
-    restartRequired.
+    the winget install or package-specific installer, or $null), codeHex (the same as 0x%08X),
+    restartRequired, postInstall ('Configured', 'NotConfigured' or 'Failed', or $null when no hook
+    ran) and postInstallReason (why it is not Configured, or $null).
 #>
 function New-AppRunRecord {
     param (
@@ -41,7 +48,11 @@ function New-AppRunRecord {
         [object]$InstallResult,
 
         [Parameter(Mandatory = $false)]
-        [bool]$RestartRequired = $false
+        [bool]$RestartRequired = $false,
+
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [object]$PostInstall
     )
 
     $code = $null
@@ -54,13 +65,23 @@ function New-AppRunRecord {
     if (-not [string]::IsNullOrWhiteSpace($Reason)) {
         $reasonText = $Reason
     }
+    $postInstallStatus = $null
+    $postInstallReason = $null
+    if ($null -ne $PostInstall -and -not [string]::IsNullOrWhiteSpace([string]$PostInstall.Status)) {
+        $postInstallStatus = [string]$PostInstall.Status
+        if (-not [string]::IsNullOrWhiteSpace([string]$PostInstall.Reason)) {
+            $postInstallReason = [string]$PostInstall.Reason
+        }
+    }
     return [ordered]@{
-        id              = $Id
-        status          = $Status
-        reason          = $reasonText
-        code            = $code
-        codeHex         = $codeHex
-        restartRequired = $RestartRequired
+        id                = $Id
+        status            = $Status
+        reason            = $reasonText
+        code              = $code
+        codeHex           = $codeHex
+        restartRequired   = $RestartRequired
+        postInstall       = $postInstallStatus
+        postInstallReason = $postInstallReason
     }
 }
 
