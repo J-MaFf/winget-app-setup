@@ -7,9 +7,18 @@ if ($MyInvocation.InvocationName -ne '.') {
     # touches nothing. Only what every language mode allows runs on this path, under Windows
     # PowerShell 5.1 too. A run from a file, or with nobody at the console, exits 5; an interactive
     # irm | iex console keeps its window open (exiting there would close the window with the
-    # message) and gets $LASTEXITCODE 5.
+    # message) and gets $LASTEXITCODE 5. A real run still ends with its RESULT line (review finding
+    # P3-41), under Windows PowerShell 5.1 too, since no PowerShell 7 run follows to report.
     if (-not (Test-FullLanguageMode)) {
         $global:LASTEXITCODE = 5
+        if (-not $WhatIf) {
+            try {
+                Write-InstallerNotStartedResult -ExitCode 5
+            }
+            catch {
+                # Best-effort: the run stops here with exit code 5 regardless.
+            }
+        }
         $exitForLanguageMode = [bool]$PSCommandPath
         if (-not $exitForLanguageMode) {
             try {

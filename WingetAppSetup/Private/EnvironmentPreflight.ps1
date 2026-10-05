@@ -5,7 +5,8 @@
 #     because the run breaks on its first .NET call, long before any later step (Test-FullLanguageMode).
 #   - An execution policy set by Group Policy that refuses this unsigned script: right before each
 #     relaunch with -File, the Windows PowerShell 5.1 bootstrap's under pwsh and the elevated
-#     relaunch (Get-ScriptExecutionPolicyBlock).
+#     relaunch (Get-ScriptExecutionPolicyBlock; the elevated window checks again for the account
+#     that approved the prompt, New-ElevationVerifierCommand).
 #   - For the account the run installs as, once it is elevated (Invoke-EnvironmentPreflight): a
 #     proxy the signed-in user has that SYSTEM or the elevating admin does not, a restart that is
 #     already pending, and App Installer's Group Policy turning winget off.
@@ -51,6 +52,50 @@ function Test-FullLanguageMode {
 
 <#
 .SYNOPSIS
+    Returns $true when Group Policy's script host (gpscript.exe) started this process, directly or
+    through its parents: a startup, shutdown, logon or logoff script.
+.DESCRIPTION
+    PowerShell applies no Group Policy execution policy (the MachinePolicy and UserPolicy scopes) in
+    such a process, so that a policy never blocks a Group Policy script: it looks for
+    %SystemRoot%\System32\gpscript.exe among the process's parents (HasGpScriptParent in its
+    SecuritySupport). Get-ScriptExecutionPolicyBlock follows it, so an installer deployed as a
+    Group Policy script is not stopped for a policy that does not apply to it. This walks
+    Win32_Process's ParentProcessId the same way, at most 32 steps, and stops at a parent that
+    started after its child (a process that got a parent's reused id). Windows PowerShell 5.1 safe
+    and best-effort: a query that fails ends the walk, as in PowerShell's own check, and counts as
+    no.
+.RETURNS
+    [bool]
+#>
+function Test-LaunchedByGroupPolicyScript {
+    try {
+        $gpScriptPath = [System.IO.Path]::Combine([Environment]::GetFolderPath([Environment+SpecialFolder]::System), 'gpscript.exe')
+        $processId = $PID
+        $childStarted = $null
+        for ($depth = 0; $depth -lt 32 -and $processId; $depth++) {
+            $process = Get-CimInstance -ClassName Win32_Process -Filter ('ProcessId = {0}' -f $processId) -ErrorAction Stop
+            if (-not $process) {
+                break
+            }
+            if ($null -ne $childStarted -and $null -ne $process.CreationDate -and $process.CreationDate -gt $childStarted) {
+                # Not the parent: a later process that got the parent's id.
+                break
+            }
+            if ("$($process.ExecutablePath)" -eq $gpScriptPath) {
+                return $true
+            }
+            $childStarted = $process.CreationDate
+            $processId = $process.ParentProcessId
+        }
+    }
+    catch {
+        # Best-effort: a process that cannot be read ends the walk.
+    }
+    return $false
+}
+
+<#
+.SYNOPSIS
     Returns the Group Policy execution policy that keeps PowerShell from running this unsigned
     script with -File, even with -ExecutionPolicy Bypass, or $null.
 .DESCRIPTION
@@ -63,7 +108,10 @@ function Test-FullLanguageMode {
     irm | iex one-liner itself is not a script file, so the policy does not stop it before then.
 
     Read from the registry the way PowerShell reads it, so it works for either engine from either
-    engine (and under Windows PowerShell 5.1):
+    engine (and under Windows PowerShell 5.1), including PowerShell's one exemption: no Group Policy
+    execution policy applies to a process that Group Policy's script host gpscript.exe started,
+    directly or through its children (a startup or logon script), so then there is no block
+    (Test-LaunchedByGroupPolicyScript, checked only once a policy would block):
       WindowsPowerShell  HKLM, then HKCU: SOFTWARE\Policies\Microsoft\Windows\PowerShell.
       PowerShell7        HKLM, then HKCU: SOFTWARE\Policies\Microsoft\PowerShellCore, or the Windows
                          PowerShell key above when that key sets UseWindowsPowerShellPolicySetting
@@ -155,6 +203,11 @@ function Get-ScriptExecutionPolicyBlock {
         }
         else {
             $policy = 'Restricted'
+        }
+        if (Test-LaunchedByGroupPolicyScript) {
+            # A Group Policy script: PowerShell applies neither policy scope to it or its children,
+            # so -ExecutionPolicy Bypass holds for the relaunch.
+            return $null
         }
         $key = '{0}\{1}' -f $scope.Hive, $keyPath
         return [pscustomobject]@{

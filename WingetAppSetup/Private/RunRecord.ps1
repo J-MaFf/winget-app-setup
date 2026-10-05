@@ -486,3 +486,37 @@ function Write-InstallerEarlyExitResult {
     $record = New-InstallerRunRecord -ExitCode $ExitCode -Apps $apps -AutoUpdates (Get-AutoUpdateResultStatus -WauResult $autoUpdateResult) -AutoUpdatesVersion $autoUpdateVersion -RestartRequired $restartRequired
     return (Write-InstallerRunResult -Record $record)
 }
+
+<#
+.SYNOPSIS
+    Prints the RESULT line of a run that stopped before it started: no app counted, no log.
+.DESCRIPTION
+    For the entry script's Constrained Language Mode stop (wgt-gq8.39), which comes before the
+    transcript, the run lock and the Windows PowerShell 5.1 bootstrap, so no other step reports for
+    it. Every real run reports a RESULT line (review finding P3-41), this one too:
+
+        RESULT: exit=5 installed=0 skipped=0 deferred=0 failed=0 autoupdates=NotRun restart=no build=1.0.0+1a2b3c4d log=none
+
+    Only what every language mode allows runs here, under Windows PowerShell 5.1 too: a hashtable,
+    string formatting and Write-Host. It reads $script:InstallerBuildId and none of the run's other
+    state, which an irm | iex console may still hold from an earlier run, and writes no
+    last-run.json (the run holds no run lock).
+.PARAMETER ExitCode
+    The exit code the run stops with.
+#>
+function Write-InstallerNotStartedResult {
+    param (
+        [Parameter(Mandatory = $true)]
+        [int]$ExitCode
+    )
+
+    $record = [ordered]@{
+        exitCode        = $ExitCode
+        counts          = [ordered]@{ installed = 0; skipped = 0; deferred = 0; failed = 0 }
+        autoUpdates     = [ordered]@{ status = 'NotRun' }
+        restartRequired = $false
+        buildId         = $script:InstallerBuildId
+        transcriptPath  = $null
+    }
+    Write-Host (Format-InstallerResultLine -Record $record)
+}

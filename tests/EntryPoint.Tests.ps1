@@ -332,6 +332,13 @@ Describe 'Aborted runs exit non-zero (review P1: tail.ps1 try/finally exited 0)'
 Describe 'Constrained Language Mode stops the run at once, in one line (wgt-gq8.39)' {
     BeforeAll {
         $script:clmLine = 'PowerShell runs this installer in ConstrainedLanguage mode on this PC, which an application control policy (App Control for Business/WDAC or AppLocker) sets for scripts it does not trust.'
+        # A real run stopped here still reports (review finding P3-41): nothing counted, no log.
+        $script:installerText -match "\`$script:InstallerBuildId = '([^']+)'" | Should -BeTrue
+        $script:clmResultLine = "RESULT: exit=5 installed=0 skipped=0 deferred=0 failed=0 autoupdates=NotRun restart=no build=$($Matches[1]) log=none"
+        function Get-ClmResultLine {
+            param ([string]$Output)
+            @([regex]::Matches($Output, 'RESULT: [^\r\n]*') | ForEach-Object { $_.Value })
+        }
 
         # Runs a command in a child pwsh whose session is put in Constrained Language Mode first, the
         # way an application control policy runs an untrusted script. A probe script reports the
@@ -354,8 +361,20 @@ Describe 'Constrained Language Mode stops the run at once, in one line (wgt-gq8.
 
         $result.ExitCode | Should -Be 5
         $result.Output | Should -Match ([regex]::Escape($script:clmLine))
-        $result.Output | Should -Not -Match 'install ran|Installer build:|Logging this run to:|UNEXPECTED ERROR|RESULT:'
+        $result.Output | Should -Not -Match 'install ran|Installer build:|Logging this run to:|UNEXPECTED ERROR'
+        Get-ClmResultLine -Output $result.Output | Should -Be @($script:clmResultLine)
+        $result.Output.IndexOf($script:clmLine) | Should -BeLessThan $result.Output.IndexOf('RESULT: ')
         Get-ChildTranscript | Should -HaveCount 0
+    }
+
+    It 'Prints no RESULT line for a dry run (-WhatIf), which reports nothing' {
+        $path = New-FaultInjectedInstaller -Name 'clm-seam-whatif.ps1' -Body "Write-Host 'install ran'; return 0" -Overrides "function Get-PowerShellLanguageMode { 'ConstrainedLanguage' }"
+
+        $result = Invoke-ChildInstaller -Arguments @('-File', $path, '-WhatIf', '-NonInteractive')
+
+        $result.ExitCode | Should -Be 5
+        $result.Output | Should -Match ([regex]::Escape($script:clmLine))
+        $result.Output | Should -Not -Match 'install ran|RESULT:'
     }
 
     It 'Stops before the Windows PowerShell 5.1 bootstrap too' {
@@ -368,6 +387,8 @@ Describe 'Constrained Language Mode stops the run at once, in one line (wgt-gq8.
         $result.ExitCode | Should -Be 5
         $result.Output | Should -Match ([regex]::Escape($script:clmLine))
         $result.Output | Should -Not -Match 'bootstrap ran|install ran|Logging the PowerShell 7 bootstrap'
+        # No PowerShell 7 run follows to report, so this one does.
+        Get-ClmResultLine -Output $result.Output | Should -Be @($script:clmResultLine)
     }
 
     It 'Says so in one line and exits 5 when the run really is in Constrained Language Mode, from a file' {
@@ -382,7 +403,7 @@ Describe 'Constrained Language Mode stops the run at once, in one line (wgt-gq8.
 
         $result.ExitCode | Should -Be 5
         $result.Output | Should -Match ([regex]::Escape($script:clmLine))
-        $result.Output | Should -Not -Match 'install ran|UNEXPECTED ERROR|Method invocation is supported only on core types'
+        $result.Output | Should -Not -Match 'install ran|UNEXPECTED ERROR|Method invocation is supported only on core types|RESULT:'
     }
 
     It 'Exits 5 under irm | iex when nobody is at the console (an RMM job)' {
@@ -397,13 +418,15 @@ Describe 'Constrained Language Mode stops the run at once, in one line (wgt-gq8.
 
         $result.ExitCode | Should -Be 5
         $result.Output | Should -Match ([regex]::Escape($script:clmLine))
-        $result.Output | Should -Not -Match 'install ran|console kept|UNEXPECTED ERROR'
+        $result.Output | Should -Not -Match 'install ran|console kept|UNEXPECTED ERROR|Method invocation is supported only on core types'
+        # A real run: its RESULT line, printed in Constrained Language Mode itself.
+        Get-ClmResultLine -Output $result.Output | Should -Be @($script:clmResultLine)
     }
 
     It 'Keeps an interactive irm | iex console open, with $LASTEXITCODE 5, instead of closing it with the message' {
         # The branch the tests above cannot reach in a child process (stdin is redirected there):
         # pinned on the generated installer's text.
-        $script:installerText | Should -Match '(?s)if \(-not \(Test-FullLanguageMode\)\) \{\s*\$global:LASTEXITCODE = 5\s*\$exitForLanguageMode = \[bool\]\$PSCommandPath'
+        $script:installerText | Should -Match '(?s)if \(-not \(Test-FullLanguageMode\)\) \{\s*\$global:LASTEXITCODE = 5\s*if \(-not \$WhatIf\) \{\s*try \{\s*Write-InstallerNotStartedResult -ExitCode 5\s*\}\s*catch \{[^{}]*\}\s*\}\s*\$exitForLanguageMode = \[bool\]\$PSCommandPath'
         $script:installerText | Should -Match '(?s)if \(\$exitForLanguageMode\) \{\s*exit 5\s*\}\s*return\s*\}'
         # Checked first: before the command-line probe, the first .NET call that Constrained Language
         # Mode refuses.
@@ -1034,8 +1057,10 @@ function Start-ElevatedProcess {
         $result = Invoke-ChildInstaller -Arguments @('-File', $path, '-SkipSystemCheck')
 
         $result.ExitCode | Should -Be 1
-        # System32's Windows PowerShell, running the check-and-copy command, not the file itself.
-        $result.Output | Should -Match 'ELEVATED: \S*\\System32\\WindowsPowerShell\\v1\.0\\powershell\.exe -NoProfile -Command "'
+        # System32's Windows PowerShell, running the check-and-copy command, not the file itself,
+        # with -ExecutionPolicy Bypass so the command's own check sees only a Group Policy one
+        # (wgt-gq8.39).
+        $result.Output | Should -Match 'ELEVATED: \S*\\System32\\WindowsPowerShell\\v1\.0\\powershell\.exe -NoProfile -ExecutionPolicy Bypass -Command "'
         # The SHA256 the entry block took at startup, and the forwarded switch.
         $result.Output | Should -Match ([regex]::Escape("-ne '$sha256'"))
         $result.Output | Should -Match ([regex]::Escape('-File $copy -SkipSystemCheck;'))

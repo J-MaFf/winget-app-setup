@@ -63,12 +63,12 @@ param (
 # This script is assembled from the WingetAppSetup module by build/Build-WingetInstallScript.ps1.
 # Edit the function source under WingetAppSetup/Public and WingetAppSetup/Private, then re-run the
 # build to regenerate this file. See readme.md ("Project layout") for details.
-# Build id: 1.0.0+a3f18b70 (module version + SHA256 fragment of this whole script; issue #189).
+# Build id: 1.0.0+3ffd8216 (module version + SHA256 fragment of this whole script; issue #189).
 # ------------------------------------------------------------------------------------------------
 
 # Content-derived build identity, logged at startup so a transcript from a remote machine
 # identifies exactly which installer build produced it (issue #189).
-$script:InstallerBuildId = '1.0.0+a3f18b70'
+$script:InstallerBuildId = '1.0.0+3ffd8216'
 
 # ------------------------------------------------Functions------------------------------------------------
 
@@ -869,13 +869,22 @@ function Get-ElevatedCopyRoot {
     it. The check has to run before any of the file does, so it is this command, given on the
     elevated process's command line (-Command), which the non-elevated run builds and the file
     cannot change. It:
-      1. reads the file's bytes once and compares their SHA256 with the one the non-elevated run
+      1. stops (exit code 4) when Group Policy's execution policy for the account that approved
+         the prompt is AllSigned or Restricted (wgt-gq8.39; 2 and 3 in the ExecutionPolicy enum,
+         compared as numbers because Restricted and Default share 3). The elevated process is
+         started with -ExecutionPolicy Bypass, so Get-ExecutionPolicy names any other policy only
+         when Group Policy sets it, and the copy run with -File in step 4 would be refused. Only
+         this window knows which account approved: the non-elevated run stops for the PC's policy
+         before any prompt, but only warns about its own account's, which another administrator
+         approving the prompt does not have. An administrator approving their own prompt used to
+         get PowerShell's refusal in a window that closed at once, and exit code 1;
+      2. reads the file's bytes once and compares their SHA256 with the one the non-elevated run
          computed, and stops (exit code 5) when they differ;
-      2. creates a new folder under -CopyRoot with an access list of its own (SYSTEM and
+      3. creates a new folder under -CopyRoot with an access list of its own (SYSTEM and
          Administrators, no inherited entries) and writes those same bytes into it;
-      3. runs that copy with Windows PowerShell -File, in the same window, forwarding the
+      4. runs that copy with Windows PowerShell -File, in the same window, forwarding the
          arguments, and exits with its exit code;
-      4. deletes the folder.
+      5. deletes the folder.
     The copy has to be made by the elevated process: a non-elevated process cannot create a folder
     that it cannot change itself, because it would own the folder and keep the right to change its
     access list.
@@ -932,6 +941,8 @@ $ErrorActionPreference = 'Stop';
 $exitCode = 5;
 $copyDirectory = $null;
 try {
+    $p = Get-ExecutionPolicy;
+    if ($p -in 2, 3) { $exitCode = 4; throw ('Group Policy sets the execution policy to ' + $p + ', which -ExecutionPolicy Bypass cannot override'); }
     $bytes = [IO.File]::ReadAllBytes(@SOURCE@);
     $hash = [BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash($bytes)).Replace('-', '');
     if ($hash -ne @SHA256@) { throw 'the file changed after administrator rights were requested'; }
@@ -1018,7 +1029,8 @@ function Start-ElevatedProcess {
 #     because the run breaks on its first .NET call, long before any later step (Test-FullLanguageMode).
 #   - An execution policy set by Group Policy that refuses this unsigned script: right before each
 #     relaunch with -File, the Windows PowerShell 5.1 bootstrap's under pwsh and the elevated
-#     relaunch (Get-ScriptExecutionPolicyBlock).
+#     relaunch (Get-ScriptExecutionPolicyBlock; the elevated window checks again for the account
+#     that approved the prompt, New-ElevationVerifierCommand).
 #   - For the account the run installs as, once it is elevated (Invoke-EnvironmentPreflight): a
 #     proxy the signed-in user has that SYSTEM or the elevating admin does not, a restart that is
 #     already pending, and App Installer's Group Policy turning winget off.
@@ -1064,6 +1076,50 @@ function Test-FullLanguageMode {
 
 <#
 .SYNOPSIS
+    Returns $true when Group Policy's script host (gpscript.exe) started this process, directly or
+    through its parents: a startup, shutdown, logon or logoff script.
+.DESCRIPTION
+    PowerShell applies no Group Policy execution policy (the MachinePolicy and UserPolicy scopes) in
+    such a process, so that a policy never blocks a Group Policy script: it looks for
+    %SystemRoot%\System32\gpscript.exe among the process's parents (HasGpScriptParent in its
+    SecuritySupport). Get-ScriptExecutionPolicyBlock follows it, so an installer deployed as a
+    Group Policy script is not stopped for a policy that does not apply to it. This walks
+    Win32_Process's ParentProcessId the same way, at most 32 steps, and stops at a parent that
+    started after its child (a process that got a parent's reused id). Windows PowerShell 5.1 safe
+    and best-effort: a query that fails ends the walk, as in PowerShell's own check, and counts as
+    no.
+.RETURNS
+    [bool]
+#>
+function Test-LaunchedByGroupPolicyScript {
+    try {
+        $gpScriptPath = [System.IO.Path]::Combine([Environment]::GetFolderPath([Environment+SpecialFolder]::System), 'gpscript.exe')
+        $processId = $PID
+        $childStarted = $null
+        for ($depth = 0; $depth -lt 32 -and $processId; $depth++) {
+            $process = Get-CimInstance -ClassName Win32_Process -Filter ('ProcessId = {0}' -f $processId) -ErrorAction Stop
+            if (-not $process) {
+                break
+            }
+            if ($null -ne $childStarted -and $null -ne $process.CreationDate -and $process.CreationDate -gt $childStarted) {
+                # Not the parent: a later process that got the parent's id.
+                break
+            }
+            if ("$($process.ExecutablePath)" -eq $gpScriptPath) {
+                return $true
+            }
+            $childStarted = $process.CreationDate
+            $processId = $process.ParentProcessId
+        }
+    }
+    catch {
+        # Best-effort: a process that cannot be read ends the walk.
+    }
+    return $false
+}
+
+<#
+.SYNOPSIS
     Returns the Group Policy execution policy that keeps PowerShell from running this unsigned
     script with -File, even with -ExecutionPolicy Bypass, or $null.
 .DESCRIPTION
@@ -1076,7 +1132,10 @@ function Test-FullLanguageMode {
     irm | iex one-liner itself is not a script file, so the policy does not stop it before then.
 
     Read from the registry the way PowerShell reads it, so it works for either engine from either
-    engine (and under Windows PowerShell 5.1):
+    engine (and under Windows PowerShell 5.1), including PowerShell's one exemption: no Group Policy
+    execution policy applies to a process that Group Policy's script host gpscript.exe started,
+    directly or through its children (a startup or logon script), so then there is no block
+    (Test-LaunchedByGroupPolicyScript, checked only once a policy would block):
       WindowsPowerShell  HKLM, then HKCU: SOFTWARE\Policies\Microsoft\Windows\PowerShell.
       PowerShell7        HKLM, then HKCU: SOFTWARE\Policies\Microsoft\PowerShellCore, or the Windows
                          PowerShell key above when that key sets UseWindowsPowerShellPolicySetting
@@ -1168,6 +1227,11 @@ function Get-ScriptExecutionPolicyBlock {
         }
         else {
             $policy = 'Restricted'
+        }
+        if (Test-LaunchedByGroupPolicyScript) {
+            # A Group Policy script: PowerShell applies neither policy scope to it or its children,
+            # so -ExecutionPolicy Bypass holds for the relaunch.
+            return $null
         }
         $key = '{0}\{1}' -f $scope.Hive, $keyPath
         return [pscustomobject]@{
@@ -6620,6 +6684,40 @@ function Write-InstallerEarlyExitResult {
     return (Write-InstallerRunResult -Record $record)
 }
 
+<#
+.SYNOPSIS
+    Prints the RESULT line of a run that stopped before it started: no app counted, no log.
+.DESCRIPTION
+    For the entry script's Constrained Language Mode stop (wgt-gq8.39), which comes before the
+    transcript, the run lock and the Windows PowerShell 5.1 bootstrap, so no other step reports for
+    it. Every real run reports a RESULT line (review finding P3-41), this one too:
+
+        RESULT: exit=5 installed=0 skipped=0 deferred=0 failed=0 autoupdates=NotRun restart=no build=1.0.0+1a2b3c4d log=none
+
+    Only what every language mode allows runs here, under Windows PowerShell 5.1 too: a hashtable,
+    string formatting and Write-Host. It reads $script:InstallerBuildId and none of the run's other
+    state, which an irm | iex console may still hold from an earlier run, and writes no
+    last-run.json (the run holds no run lock).
+.PARAMETER ExitCode
+    The exit code the run stops with.
+#>
+function Write-InstallerNotStartedResult {
+    param (
+        [Parameter(Mandatory = $true)]
+        [int]$ExitCode
+    )
+
+    $record = [ordered]@{
+        exitCode        = $ExitCode
+        counts          = [ordered]@{ installed = 0; skipped = 0; deferred = 0; failed = 0 }
+        autoUpdates     = [ordered]@{ status = 'NotRun' }
+        restartRequired = $false
+        buildId         = $script:InstallerBuildId
+        transcriptPath  = $null
+    }
+    Write-Host (Format-InstallerResultLine -Record $record)
+}
+
 # --- SystemInfo ---
 function Get-WindowsBuildNumber {
     <#
@@ -11209,6 +11307,9 @@ function Test-IsAdmin {
     or Restricted (Get-ScriptExecutionPolicyBlock, wgt-gq8.39): -ExecutionPolicy Bypass cannot
     override it, so the elevated window could not run the script. One line says so instead. Such a
     policy for this account only is a warning: it applies only if this account approves the prompt.
+    The checked copy's elevated window checks the policy of the account that approved it, says why
+    and exits 4 when it would refuse the script (New-ElevationVerifierCommand); -InPlace has no such
+    check.
 .PARAMETER ScriptPath
     The full path of the script to run elevated.
 .PARAMETER AdditionalArguments
@@ -11224,10 +11325,11 @@ function Test-IsAdmin {
     The caller's -NonInteractive switch.
 .RETURNS
     [pscustomobject] @{ Started; ExitCode }. Started is $true when an elevated run started, and
-    ExitCode is then its exit code. Otherwise ExitCode is 4 (no UAC prompt in a non-interactive run,
-    Group Policy's execution policy would refuse the script in the elevated window, the prompt was
-    declined, or the elevated process could not be started) or 5 (the script could not be read, or
-    changed since the run started).
+    ExitCode is then its exit code (4 when its window found that Group Policy's execution policy
+    would refuse the script, 5 when the file changed). Otherwise ExitCode is 4 (no UAC prompt in a
+    non-interactive run, Group Policy's execution policy would refuse the script in the elevated
+    window, the prompt was declined, or the elevated process could not be started) or 5 (the script
+    could not be read, or changed since the run started).
 #>
 function Restart-WithElevation {
     [OutputType([pscustomobject])]
@@ -11259,7 +11361,8 @@ function Restart-WithElevation {
     # Restricted the elevated window refused the file, printed PowerShell's own error and closed at
     # once, and this run passed on its non-zero exit code as the run's result; nothing is started
     # then. A user policy is this account's, and holds only if this same account approves the
-    # prompt: a warning.
+    # prompt: a warning here. The checked copy's elevated window then checks the policy of the
+    # account that did approve, and stops with exit code 4 (New-ElevationVerifierCommand).
     $policyBlock = Get-ScriptExecutionPolicyBlock -Engine WindowsPowerShell
     if ($policyBlock) {
         $policyMessage = Format-ElevationPolicyBlockMessage -Block $policyBlock
@@ -11307,7 +11410,9 @@ function Restart-WithElevation {
             return [pscustomobject]@{ Started = $false; ExitCode = 5 }
         }
         $verifierCommand = New-ElevationVerifierCommand -ScriptPath $stagedPath -Sha256 $sha256 -PowerShellPath $powerShellPath -CopyRoot (Get-ElevatedCopyRoot) -AdditionalArguments $AdditionalArguments
-        $argumentString = ConvertTo-ProcessArgumentString -ArgumentList @('-NoProfile', '-Command', $verifierCommand)
+        # -ExecutionPolicy Bypass as for the copy it runs, so the check's Get-ExecutionPolicy sees
+        # only a policy Group Policy sets (wgt-gq8.39).
+        $argumentString = ConvertTo-ProcessArgumentString -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', $verifierCommand)
     }
 
     try {
@@ -14661,9 +14766,18 @@ if ($MyInvocation.InvocationName -ne '.') {
     # touches nothing. Only what every language mode allows runs on this path, under Windows
     # PowerShell 5.1 too. A run from a file, or with nobody at the console, exits 5; an interactive
     # irm | iex console keeps its window open (exiting there would close the window with the
-    # message) and gets $LASTEXITCODE 5.
+    # message) and gets $LASTEXITCODE 5. A real run still ends with its RESULT line (review finding
+    # P3-41), under Windows PowerShell 5.1 too, since no PowerShell 7 run follows to report.
     if (-not (Test-FullLanguageMode)) {
         $global:LASTEXITCODE = 5
+        if (-not $WhatIf) {
+            try {
+                Write-InstallerNotStartedResult -ExitCode 5
+            }
+            catch {
+                # Best-effort: the run stops here with exit code 5 regardless.
+            }
+        }
         $exitForLanguageMode = [bool]$PSCommandPath
         if (-not $exitForLanguageMode) {
             try {

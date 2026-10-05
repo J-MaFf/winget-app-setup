@@ -423,3 +423,47 @@ Describe 'Save-InstallerRunStartRecord (review of finding P3-41)' {
         Test-Path -LiteralPath (Join-Path $script:logDirectory 'last-run.json') | Should -BeFalse
     }
 }
+
+Describe 'Write-InstallerNotStartedResult (review of wgt-gq8.39)' {
+    BeforeAll {
+        $script:savedBuildId = $script:InstallerBuildId
+        $script:savedLogPath = $script:InstallLogPath
+        $script:savedRecordEnabled = $script:InstallerRunRecordEnabled
+        $script:savedAppRecords = $script:InstallerAppRecords
+    }
+
+    AfterAll {
+        $script:InstallerBuildId = $script:savedBuildId
+        $script:InstallLogPath = $script:savedLogPath
+        $script:InstallerRunRecordEnabled = $script:savedRecordEnabled
+        $script:InstallerAppRecords = $script:savedAppRecords
+    }
+
+    BeforeEach {
+        $script:hostLines = @()
+        Mock Write-Host { $script:hostLines += [string]$Object }
+        Mock Save-InstallerRunRecord { throw 'must not write last-run.json' }
+    }
+
+    It 'Prints the RESULT line of a run that did nothing, ignoring what an earlier run in the same console left behind' {
+        # An irm | iex console keeps an earlier run's state until the entry script resets it, which
+        # it does only after the Constrained Language Mode check.
+        $script:InstallerBuildId = '1.0.0+1a2b3c4d'
+        $script:InstallLogPath = 'C:\ProgramData\winget-app-setup\logs\install-20261004-143000.log'
+        $script:InstallerRunRecordEnabled = $true
+        $script:InstallerAppRecords = [ordered]@{ 'Git.Git' = (New-AppRunRecord -Id 'Git.Git' -Status 'Installed') }
+
+        Write-InstallerNotStartedResult -ExitCode 5
+
+        $script:hostLines | Should -Be @('RESULT: exit=5 installed=0 skipped=0 deferred=0 failed=0 autoupdates=NotRun restart=no build=1.0.0+1a2b3c4d log=none')
+        Should -Invoke Save-InstallerRunRecord -Times 0 -Exactly
+    }
+
+    It 'Says build=unknown without a build id' {
+        $script:InstallerBuildId = $null
+
+        Write-InstallerNotStartedResult -ExitCode 5
+
+        $script:hostLines | Should -Be @('RESULT: exit=5 installed=0 skipped=0 deferred=0 failed=0 autoupdates=NotRun restart=no build=unknown log=none')
+    }
+}

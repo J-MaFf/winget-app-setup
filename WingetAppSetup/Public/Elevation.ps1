@@ -80,6 +80,9 @@ function Test-IsAdmin {
     or Restricted (Get-ScriptExecutionPolicyBlock, wgt-gq8.39): -ExecutionPolicy Bypass cannot
     override it, so the elevated window could not run the script. One line says so instead. Such a
     policy for this account only is a warning: it applies only if this account approves the prompt.
+    The checked copy's elevated window checks the policy of the account that approved it, says why
+    and exits 4 when it would refuse the script (New-ElevationVerifierCommand); -InPlace has no such
+    check.
 .PARAMETER ScriptPath
     The full path of the script to run elevated.
 .PARAMETER AdditionalArguments
@@ -95,10 +98,11 @@ function Test-IsAdmin {
     The caller's -NonInteractive switch.
 .RETURNS
     [pscustomobject] @{ Started; ExitCode }. Started is $true when an elevated run started, and
-    ExitCode is then its exit code. Otherwise ExitCode is 4 (no UAC prompt in a non-interactive run,
-    Group Policy's execution policy would refuse the script in the elevated window, the prompt was
-    declined, or the elevated process could not be started) or 5 (the script could not be read, or
-    changed since the run started).
+    ExitCode is then its exit code (4 when its window found that Group Policy's execution policy
+    would refuse the script, 5 when the file changed). Otherwise ExitCode is 4 (no UAC prompt in a
+    non-interactive run, Group Policy's execution policy would refuse the script in the elevated
+    window, the prompt was declined, or the elevated process could not be started) or 5 (the script
+    could not be read, or changed since the run started).
 #>
 function Restart-WithElevation {
     [OutputType([pscustomobject])]
@@ -130,7 +134,8 @@ function Restart-WithElevation {
     # Restricted the elevated window refused the file, printed PowerShell's own error and closed at
     # once, and this run passed on its non-zero exit code as the run's result; nothing is started
     # then. A user policy is this account's, and holds only if this same account approves the
-    # prompt: a warning.
+    # prompt: a warning here. The checked copy's elevated window then checks the policy of the
+    # account that did approve, and stops with exit code 4 (New-ElevationVerifierCommand).
     $policyBlock = Get-ScriptExecutionPolicyBlock -Engine WindowsPowerShell
     if ($policyBlock) {
         $policyMessage = Format-ElevationPolicyBlockMessage -Block $policyBlock
@@ -178,7 +183,9 @@ function Restart-WithElevation {
             return [pscustomobject]@{ Started = $false; ExitCode = 5 }
         }
         $verifierCommand = New-ElevationVerifierCommand -ScriptPath $stagedPath -Sha256 $sha256 -PowerShellPath $powerShellPath -CopyRoot (Get-ElevatedCopyRoot) -AdditionalArguments $AdditionalArguments
-        $argumentString = ConvertTo-ProcessArgumentString -ArgumentList @('-NoProfile', '-Command', $verifierCommand)
+        # -ExecutionPolicy Bypass as for the copy it runs, so the check's Get-ExecutionPolicy sees
+        # only a policy Group Policy sets (wgt-gq8.39).
+        $argumentString = ConvertTo-ProcessArgumentString -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', $verifierCommand)
     }
 
     try {

@@ -56,10 +56,94 @@ Describe 'Get-PowerShellLanguageMode and Test-FullLanguageMode' {
     }
 }
 
+Describe 'Test-LaunchedByGroupPolicyScript (review of wgt-gq8.39)' {
+    BeforeAll {
+        # Where PowerShell looks for Group Policy's script host: System32 (an empty folder off
+        # Windows, where the expected path is then the bare file name).
+        $script:gpScriptPath = [System.IO.Path]::Combine([Environment]::GetFolderPath([Environment+SpecialFolder]::System), 'gpscript.exe')
+        $script:gpScriptStarted = [datetime]'2026-10-05T08:00:00'
+
+        # A fake process table for Get-CimInstance Win32_Process -Filter 'ProcessId = <n>'.
+        function Set-TestProcessTable {
+            param ([object[]]$Processes)
+            $script:testProcesses = @{}
+            foreach ($process in $Processes) {
+                $script:testProcesses[[int]$process.ProcessId] = [pscustomobject]$process
+            }
+        }
+    }
+
+    BeforeEach {
+        $script:testProcesses = @{}
+        Mock Get-CimInstance {
+            if ($Filter -match '^ProcessId = (\d+)$') {
+                return $script:testProcesses[[int]$Matches[1]]
+            }
+            throw "unexpected query: $Filter"
+        }
+    }
+
+    It 'Returns $true when gpscript.exe in System32 started this process''s parent (a startup or logon script)' {
+        Set-TestProcessTable @(
+            @{ ProcessId = $PID; ParentProcessId = 2000; ExecutablePath = 'C:\Program Files\PowerShell\7\pwsh.exe'; CreationDate = $script:gpScriptStarted.AddMinutes(2) }
+            @{ ProcessId = 2000; ParentProcessId = 1000; ExecutablePath = 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe'; CreationDate = $script:gpScriptStarted.AddMinutes(1) }
+            @{ ProcessId = 1000; ParentProcessId = 600; ExecutablePath = $script:gpScriptPath.ToUpperInvariant(); CreationDate = $script:gpScriptStarted }
+        )
+
+        Test-LaunchedByGroupPolicyScript | Should -BeTrue
+        Should -Invoke Get-CimInstance -Times 3 -Exactly -ParameterFilter { $ClassName -eq 'Win32_Process' }
+    }
+
+    It 'Returns $false when no parent is gpscript.exe, ending the walk at a process with no parent' {
+        Set-TestProcessTable @(
+            @{ ProcessId = $PID; ParentProcessId = 2000; ExecutablePath = 'C:\Program Files\PowerShell\7\pwsh.exe'; CreationDate = $script:gpScriptStarted.AddMinutes(2) }
+            @{ ProcessId = 2000; ParentProcessId = 0; ExecutablePath = 'C:\Windows\explorer.exe'; CreationDate = $script:gpScriptStarted }
+        )
+
+        Test-LaunchedByGroupPolicyScript | Should -BeFalse
+    }
+
+    It 'Does not count a gpscript.exe outside System32' {
+        Set-TestProcessTable @(
+            @{ ProcessId = $PID; ParentProcessId = 1000; ExecutablePath = 'C:\Program Files\PowerShell\7\pwsh.exe'; CreationDate = $script:gpScriptStarted.AddMinutes(1) }
+            @{ ProcessId = 1000; ParentProcessId = 0; ExecutablePath = 'C:\Users\jdoe\Downloads\gpscript.exe'; CreationDate = $script:gpScriptStarted }
+        )
+
+        Test-LaunchedByGroupPolicyScript | Should -BeFalse
+    }
+
+    It 'Does not count a gpscript.exe that started after its supposed child: the parent''s process id was reused' {
+        Set-TestProcessTable @(
+            @{ ProcessId = $PID; ParentProcessId = 1000; ExecutablePath = 'C:\Program Files\PowerShell\7\pwsh.exe'; CreationDate = $script:gpScriptStarted }
+            @{ ProcessId = 1000; ParentProcessId = 600; ExecutablePath = $script:gpScriptPath; CreationDate = $script:gpScriptStarted.AddMinutes(5) }
+        )
+
+        Test-LaunchedByGroupPolicyScript | Should -BeFalse
+    }
+
+    It 'Returns $false when a process cannot be read' {
+        Mock Get-CimInstance { throw 'Access denied' }
+
+        Test-LaunchedByGroupPolicyScript | Should -BeFalse
+    }
+
+    It 'Stops after 32 steps on a parent chain that loops' {
+        Set-TestProcessTable @(
+            @{ ProcessId = $PID; ParentProcessId = 1000; ExecutablePath = 'C:\a.exe'; CreationDate = $script:gpScriptStarted }
+            @{ ProcessId = 1000; ParentProcessId = $PID; ExecutablePath = 'C:\b.exe'; CreationDate = $script:gpScriptStarted }
+        )
+
+        Test-LaunchedByGroupPolicyScript | Should -BeFalse
+        Should -Invoke Get-CimInstance -Times 32 -Exactly
+    }
+}
+
 Describe 'Get-ScriptExecutionPolicyBlock (wgt-gq8.39)' {
     BeforeEach {
         Set-TestRegistry
         Mock Get-ItemProperty { Get-TestRegistryValue -Path (@($LiteralPath)[0]) }
+        # Not a Group Policy script unless a test says so; never the runner's real process tree.
+        Mock Test-LaunchedByGroupPolicyScript { $false }
     }
 
     It 'Returns $null when Group Policy sets no execution policy for <_>' -ForEach @('WindowsPowerShell', 'PowerShell7') {
@@ -167,6 +251,29 @@ Describe 'Get-ScriptExecutionPolicyBlock (wgt-gq8.39)' {
         Set-TestRegistry @{ "HKLM:\$($script:corePolicyKey)" = @{ UseWindowsPowerShellPolicySetting = 1 } }
 
         Get-ScriptExecutionPolicyBlock -Engine PowerShell7 | Should -BeNullOrEmpty
+    }
+
+    It 'Returns $null for a <Scope> of AllSigned under a Group Policy script, which PowerShell exempts from both scopes' -ForEach @(
+        @{ Scope = 'machine policy'; Hive = 'HKLM' }
+        @{ Scope = 'user policy'; Hive = 'HKCU' }
+    ) {
+        Mock Test-LaunchedByGroupPolicyScript { $true }
+        Set-TestRegistry @{
+            "$($Hive):\$($script:windowsPolicyKey)" = @{ EnableScripts = 1; ExecutionPolicy = 'AllSigned' }
+            "$($Hive):\$($script:corePolicyKey)"    = @{ EnableScripts = 0 }
+        }
+
+        Get-ScriptExecutionPolicyBlock -Engine WindowsPowerShell | Should -BeNullOrEmpty
+        Get-ScriptExecutionPolicyBlock -Engine PowerShell7 | Should -BeNullOrEmpty
+        Should -Invoke Test-LaunchedByGroupPolicyScript -Times 2 -Exactly
+    }
+
+    It 'Looks at the parent processes only once a policy would block' {
+        Set-TestRegistry @{ "HKLM:\$($script:windowsPolicyKey)" = @{ EnableScripts = 1; ExecutionPolicy = 'RemoteSigned' } }
+
+        Get-ScriptExecutionPolicyBlock -Engine WindowsPowerShell | Should -BeNullOrEmpty
+        Get-ScriptExecutionPolicyBlock -Engine PowerShell7 | Should -BeNullOrEmpty
+        Should -Invoke Test-LaunchedByGroupPolicyScript -Times 0 -Exactly
     }
 }
 

@@ -210,7 +210,9 @@ Describe 'Restart-WithElevation (review findings P2-11, P2-12, P3-11)' {
         (Split-Path -Leaf $script:stagedPath) | Should -Be 'winget-app-install.ps1'
         $script:stagedSha256 | Should -Be $script:scriptSha256
         $expectedCommand = New-ElevationVerifierCommand -ScriptPath $script:stagedPath -Sha256 $script:scriptSha256 -PowerShellPath (Get-WindowsPowerShellPath) -CopyRoot (Get-ElevatedCopyRoot) -AdditionalArguments '-SkipSystemCheck'
-        $script:launch.ArgumentString | Should -BeExactly ('-NoProfile -Command "' + $expectedCommand + '"')
+        # -ExecutionPolicy Bypass on the elevated process too, so the command's own check sees only
+        # a policy Group Policy sets (wgt-gq8.39).
+        $script:launch.ArgumentString | Should -BeExactly ('-NoProfile -ExecutionPolicy Bypass -Command "' + $expectedCommand + '"')
         # The only -File in the command line is the one that runs the checked copy.
         ([regex]::Matches($script:launch.ArgumentString, '-File ')).Count | Should -Be 1
         $script:launch.ArgumentString | Should -Match ([regex]::Escape('-File $copy -SkipSystemCheck;'))
@@ -424,7 +426,7 @@ Describe 'New-ElevationVerifierCommand (review finding P3-11)' {
         $longPath = 'C:\' + ('p' * 240) + '\winget-app-install.ps1'
         $command = New-ElevationVerifierCommand -ScriptPath $longPath -Sha256 $script:sampleSha256 -PowerShellPath 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe' -CopyRoot 'C:\Windows\Temp' -AdditionalArguments '-WhatIf', '-SkipSystemCheck'
 
-        ('-NoProfile -Command "' + $command + '"').Length | Should -BeLessOrEqual 2000
+        ('-NoProfile -ExecutionPolicy Bypass -Command "' + $command + '"').Length | Should -BeLessOrEqual 2000
     }
 
     It 'Does not run the script, and exits 5, when the file no longer has the expected SHA256' {
@@ -436,7 +438,7 @@ Describe 'New-ElevationVerifierCommand (review finding P3-11)' {
         [void](New-Item -ItemType Directory -Path $copyRoot)
         $command = New-ElevationVerifierCommand -ScriptPath $sourcePath -Sha256 ('0' * 64) -PowerShellPath $script:currentPowerShell -CopyRoot $copyRoot
 
-        $output = & $script:currentPowerShell -NoLogo -NoProfile -NonInteractive -Command $command 2>&1 | Out-String
+        $output = & $script:currentPowerShell -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command $command 2>&1 | Out-String
         $exitCode = $LASTEXITCODE
 
         $exitCode | Should -Be 5
@@ -458,7 +460,7 @@ Describe 'New-ElevationVerifierCommand (review finding P3-11)' {
         [void](New-Item -ItemType Directory -Path $copyRoot)
         $command = New-ElevationVerifierCommand -ScriptPath $sourcePath -Sha256 ('0' * 64) -PowerShellPath $script:currentPowerShell -CopyRoot $copyRoot
 
-        $output = & $script:currentPowerShell -NoLogo -NoProfile -NonInteractive -Command $command 2>&1 | Out-String
+        $output = & $script:currentPowerShell -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command $command 2>&1 | Out-String
         $exitCode = $LASTEXITCODE
 
         $exitCode | Should -Be 5
@@ -466,6 +468,53 @@ Describe 'New-ElevationVerifierCommand (review finding P3-11)' {
         # The console may not render U+2019, so the name is matched around it.
         $output | Should -Match 'Did not run tampered.{1,3}s\.ps1: the file changed after administrator rights were requested'
         @(Get-ChildItem -LiteralPath $copyRoot).Count | Should -Be 0
+    }
+
+    It 'Copies and runs nothing, and exits 4 with the reason, when Group Policy sets the execution policy to <Policy> (wgt-gq8.39)' -ForEach @(
+        @{ Policy = 'AllSigned'; Named = 'AllSigned' }
+        @{ Policy = 'Restricted'; Named = 'Restricted' }
+        @{ Policy = 'Default'; Named = 'Restricted' }
+    ) {
+        # Real execution in a child PowerShell, started with -ExecutionPolicy Bypass as
+        # Restart-WithElevation starts it: Get-ExecutionPolicy then names a policy other than
+        # Bypass only when Group Policy sets it. Off Windows, and on a runner without such a policy,
+        # a function stands in for the cmdlet, as Group Policy for the account that approved the
+        # prompt would answer. The hash is right, so only the policy can stop it.
+        $markerPath = Join-Path $TestDrive "ran-policy-$Policy.txt"
+        $sourcePath = Join-Path $TestDrive "policy-$Policy.ps1"
+        Set-Content -LiteralPath $sourcePath -Value "Set-Content -LiteralPath '$markerPath' -Value 'ran'; exit 0" -Encoding UTF8
+        $sha256 = (Get-FileHash -LiteralPath $sourcePath -Algorithm SHA256).Hash
+        $copyRoot = Join-Path $TestDrive "copies-policy-$Policy"
+        [void](New-Item -ItemType Directory -Path $copyRoot)
+        $command = New-ElevationVerifierCommand -ScriptPath $sourcePath -Sha256 $sha256 -PowerShellPath $script:currentPowerShell -CopyRoot $copyRoot
+        $policyStandIn = "function Get-ExecutionPolicy { [Microsoft.PowerShell.ExecutionPolicy]::$Policy }; "
+
+        $output = & $script:currentPowerShell -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command ($policyStandIn + $command) 2>&1 | Out-String
+        $exitCode = $LASTEXITCODE
+
+        $exitCode | Should -Be 4
+        Test-Path -LiteralPath $markerPath | Should -BeFalse
+        $output | Should -Match ("Did not run policy-$Policy\.ps1: Group Policy sets the execution policy to $Named, which -ExecutionPolicy Bypass cannot override")
+        @(Get-ChildItem -LiteralPath $copyRoot).Count | Should -Be 0
+    }
+
+    It 'Goes on to its file check when Group Policy sets the execution policy to <_>, which lets the copy run' -ForEach @('RemoteSigned', 'Unrestricted', 'Bypass') {
+        # The wrong hash makes it stop at the next step (exit code 5), which shows the policy check
+        # let it through.
+        $markerPath = Join-Path $TestDrive "ran-allowed-$_.txt"
+        $sourcePath = Join-Path $TestDrive "allowed-$_.ps1"
+        Set-Content -LiteralPath $sourcePath -Value "Set-Content -LiteralPath '$markerPath' -Value 'ran'; exit 0" -Encoding UTF8
+        $copyRoot = Join-Path $TestDrive "copies-allowed-$_"
+        [void](New-Item -ItemType Directory -Path $copyRoot)
+        $command = New-ElevationVerifierCommand -ScriptPath $sourcePath -Sha256 ('0' * 64) -PowerShellPath $script:currentPowerShell -CopyRoot $copyRoot
+        $policyStandIn = "function Get-ExecutionPolicy { [Microsoft.PowerShell.ExecutionPolicy]::$_ }; "
+
+        $output = & $script:currentPowerShell -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command ($policyStandIn + $command) 2>&1 | Out-String
+        $exitCode = $LASTEXITCODE
+
+        $exitCode | Should -Be 5
+        $output | Should -Match 'the file changed after administrator rights were requested'
+        $output | Should -Not -Match 'Group Policy sets the execution policy'
     }
 
     It 'Under elevated Windows PowerShell, runs a copy in a new folder only SYSTEM and Administrators can change, forwards the switches, exits with its code and removes the copy' -Skip:(-not $script:isElevatedWindows) {
@@ -490,7 +539,7 @@ exit 42
         [void](New-Item -ItemType Directory -Path $copyRoot)
         $command = New-ElevationVerifierCommand -ScriptPath $sourcePath -Sha256 $sha256 -PowerShellPath $windowsPowerShell -CopyRoot $copyRoot -AdditionalArguments '-SkipSystemCheck'
 
-        & $windowsPowerShell -NoLogo -NoProfile -NonInteractive -Command $command | Out-Null
+        & $windowsPowerShell -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command $command | Out-Null
         $exitCode = $LASTEXITCODE
 
         $exitCode | Should -Be 42

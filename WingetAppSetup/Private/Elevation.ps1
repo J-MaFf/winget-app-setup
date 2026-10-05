@@ -241,13 +241,22 @@ function Get-ElevatedCopyRoot {
     it. The check has to run before any of the file does, so it is this command, given on the
     elevated process's command line (-Command), which the non-elevated run builds and the file
     cannot change. It:
-      1. reads the file's bytes once and compares their SHA256 with the one the non-elevated run
+      1. stops (exit code 4) when Group Policy's execution policy for the account that approved
+         the prompt is AllSigned or Restricted (wgt-gq8.39; 2 and 3 in the ExecutionPolicy enum,
+         compared as numbers because Restricted and Default share 3). The elevated process is
+         started with -ExecutionPolicy Bypass, so Get-ExecutionPolicy names any other policy only
+         when Group Policy sets it, and the copy run with -File in step 4 would be refused. Only
+         this window knows which account approved: the non-elevated run stops for the PC's policy
+         before any prompt, but only warns about its own account's, which another administrator
+         approving the prompt does not have. An administrator approving their own prompt used to
+         get PowerShell's refusal in a window that closed at once, and exit code 1;
+      2. reads the file's bytes once and compares their SHA256 with the one the non-elevated run
          computed, and stops (exit code 5) when they differ;
-      2. creates a new folder under -CopyRoot with an access list of its own (SYSTEM and
+      3. creates a new folder under -CopyRoot with an access list of its own (SYSTEM and
          Administrators, no inherited entries) and writes those same bytes into it;
-      3. runs that copy with Windows PowerShell -File, in the same window, forwarding the
+      4. runs that copy with Windows PowerShell -File, in the same window, forwarding the
          arguments, and exits with its exit code;
-      4. deletes the folder.
+      5. deletes the folder.
     The copy has to be made by the elevated process: a non-elevated process cannot create a folder
     that it cannot change itself, because it would own the folder and keep the right to change its
     access list.
@@ -304,6 +313,8 @@ $ErrorActionPreference = 'Stop';
 $exitCode = 5;
 $copyDirectory = $null;
 try {
+    $p = Get-ExecutionPolicy;
+    if ($p -in 2, 3) { $exitCode = 4; throw ('Group Policy sets the execution policy to ' + $p + ', which -ExecutionPolicy Bypass cannot override'); }
     $bytes = [IO.File]::ReadAllBytes(@SOURCE@);
     $hash = [BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash($bytes)).Replace('-', '');
     if ($hash -ne @SHA256@) { throw 'the file changed after administrator rights were requested'; }
