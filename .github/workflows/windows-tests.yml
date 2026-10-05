@@ -46,7 +46,9 @@ jobs:
       || (github.event_name == 'workflow_dispatch' && !inputs.hosted)
       || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository))
       && fromJSON('["self-hosted", "windows"]') || 'windows-latest' }}
-    timeout-minutes: 15
+    # The suite took about 9 minutes on the self-hosted runner before every build-guard fixture
+    # built the uninstaller too, which roughly doubled BuildGuards.Tests.ps1; windows-latest is slower.
+    timeout-minutes: 25
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6

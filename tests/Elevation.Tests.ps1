@@ -378,6 +378,35 @@ Describe 'New-ElevationVerifierCommand (review finding P3-11)' {
     BeforeAll {
         $script:sampleSha256 = 'ab' * 32
         $script:currentPowerShell = (Get-Process -Id $PID).Path
+
+        # Runs the command under -Engine with a copy that exits 42, stopped the way Ctrl+C at the
+        # copy's closing key prompt stops it: the console sends Ctrl+C to both processes, the copy
+        # ends with its own exit code ($host.SetShouldExit in the entry blocks), and then this
+        # command's pipeline stops, so no statement after the copy runs. A stand-in for the
+        # PowerShell that runs the copy does the same: it runs the copy, then throws the
+        # PipelineStoppedException no catch block sees. The access-list statements need Windows
+        # and elevation (the elevated test below checks them), so a plain folder replaces them.
+        function Invoke-VerifierStoppedAfterCopy {
+            param ([Parameter(Mandatory = $true)][string]$Engine, [Parameter(Mandatory = $true)][string]$Name)
+
+            $sourcePath = Join-Path $TestDrive "$Name.ps1"
+            Set-Content -LiteralPath $sourcePath -Value 'exit 42' -Encoding UTF8
+            $sha256 = (Get-FileHash -LiteralPath $sourcePath -Algorithm SHA256).Hash
+            $copyRoot = Join-Path $TestDrive "copies-$Name"
+            [void](New-Item -ItemType Directory -Path $copyRoot)
+            $command = New-ElevationVerifierCommand -ScriptPath $sourcePath -Sha256 $sha256 -PowerShellPath 'Invoke-StoppedCopy' -CopyRoot $copyRoot
+            $aclStart = $command.IndexOf('$security = New-Object')
+            $aclEnd = $command.IndexOf('$copyDirectory = Join-Path')
+            $createWithAcl = '[IO.Directory]::CreateDirectory($copyDirectory, $security)'
+            $aclStart | Should -BeGreaterThan 0
+            $aclEnd | Should -BeGreaterThan $aclStart
+            $command.Contains($createWithAcl) | Should -BeTrue
+            $command = $command.Remove($aclStart, $aclEnd - $aclStart).Replace($createWithAcl, '[IO.Directory]::CreateDirectory($copyDirectory)')
+            $standIn = "function Invoke-StoppedCopy { & '$($Engine.Replace("'", "''"))' @args; throw [System.Management.Automation.PipelineStoppedException]::new() }; "
+
+            $output = & $Engine -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command ($standIn + $command) 2>&1 | Out-String
+            [pscustomobject]@{ ExitCode = $LASTEXITCODE; Output = $output; Copies = @(Get-ChildItem -LiteralPath $copyRoot).Count }
+        }
     }
 
     It 'Is one line of PowerShell without double quotes, so it survives a quoted command-line argument' {
@@ -514,6 +543,22 @@ Describe 'New-ElevationVerifierCommand (review finding P3-11)' {
         $exitCode | Should -Be 5
         $output | Should -Match 'the file changed after administrator rights were requested'
         $output | Should -Not -Match 'Group Policy sets the execution policy'
+    }
+
+    It 'Exits with the copy''s exit code when Ctrl+C at the copy''s closing key prompt stops it too' {
+        # It used to exit 1 then, the code of a stopped command, which the window that asked for
+        # elevation reports as "an app could not be removed" (or installed).
+        $result = Invoke-VerifierStoppedAfterCopy -Engine $script:currentPowerShell -Name 'stopped-after-copy'
+
+        $result.ExitCode | Should -Be 42 -Because $result.Output
+        $result.Copies | Should -Be 0
+    }
+
+    It 'Exits with the copy''s exit code when Ctrl+C at the copy''s closing key prompt stops it too, under Windows PowerShell 5.1, which runs it in the elevated window' -Skip:(-not $IsWindows) {
+        $result = Invoke-VerifierStoppedAfterCopy -Engine (Get-WindowsPowerShellPath) -Name 'stopped-after-copy-5'
+
+        $result.ExitCode | Should -Be 42 -Because $result.Output
+        $result.Copies | Should -Be 0
     }
 
     It 'Under elevated Windows PowerShell, runs a copy in a new folder only SYSTEM and Administrators can change, forwards the switches, exits with its code and removes the copy' -Skip:(-not $script:isElevatedWindows) {

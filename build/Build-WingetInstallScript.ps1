@@ -911,7 +911,9 @@ if ($Check) {
         # Normalize the on-disk copy to LF before comparing; a Windows checkout with
         # core.autocrlf=true can present the file with CRLF even when it is in sync.
         $current = ((Get-Content -Path $path -Raw -Encoding UTF8) -replace "`r`n", "`n")
-        if ($current -ne $build.Content) {
+        # Ordinal: -ne ignores case, and culture comparison (with -cne too) ignores characters such
+        # as U+00AD or U+200B, so a hand edit that only adds one would pass.
+        if (-not [string]::Equals($current, $build.Content, [System.StringComparison]::Ordinal)) {
             Write-Error "Check failed: '$path' is out of date. Re-run build/Build-WingetInstallScript.ps1."
             exit 1
         }

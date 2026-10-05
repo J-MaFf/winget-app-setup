@@ -767,6 +767,10 @@ Describe 'The generated uninstaller gets every guard the installer gets (wgt-gq8
             @{ Case = 'is out of date'; Change = 'Stale'; Expected = "winget-app-uninstall\.ps1' is out of date" }
             @{ Case = 'starts with a UTF-8 BOM'; Change = 'Bom'; Expected = "winget-app-uninstall\.ps1' starts with a UTF-8 BOM" }
             @{ Case = 'is missing'; Change = 'Missing'; Expected = "winget-app-uninstall\.ps1' does not exist" }
+            # The compare is ordinal: -ne ignored case, and culture comparison ignores U+00AD, which
+            # breaks the command name it sits in.
+            @{ Case = 'differs from the build only in letter case'; Change = 'CaseOnly'; Find = '$global:LASTEXITCODE = 5'; Replace = '$GLOBAL:LASTEXITCODE = 5'; Expected = "winget-app-uninstall\.ps1' is out of date" }
+            @{ Case = 'has a soft hyphen (U+00AD) typed into a command name'; Change = 'SoftHyphen'; Find = '(Test-IsAdmin)'; Replace = "(Test-Is$([char]0x00AD)Admin)"; Expected = "winget-app-uninstall\.ps1' is out of date" }
         ) {
             $root = New-BuildFixture -Name "uninstaller-check-$Change"
             $uninstallerPath = Join-Path $root 'winget-app-uninstall.ps1'
@@ -774,6 +778,12 @@ Describe 'The generated uninstaller gets every guard the installer gets (wgt-gq8
                 'Stale' { Add-Content -LiteralPath $uninstallerPath -Value "Write-Output 'edited by hand'" }
                 'Bom' { [System.IO.File]::WriteAllBytes($uninstallerPath, [byte[]](0xEF, 0xBB, 0xBF) + [System.IO.File]::ReadAllBytes($uninstallerPath)) }
                 'Missing' { Remove-Item -LiteralPath $uninstallerPath }
+                default {
+                    # A hand edit: Find becomes Replace.
+                    $text = [System.IO.File]::ReadAllText($uninstallerPath)
+                    $text.Contains($Find) | Should -BeTrue
+                    [System.IO.File]::WriteAllText($uninstallerPath, $text.Replace($Find, $Replace), [System.Text.UTF8Encoding]::new($false))
+                }
             }
 
             $result = Invoke-FixtureBuild -Root $root -Check

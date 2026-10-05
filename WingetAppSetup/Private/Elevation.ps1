@@ -211,7 +211,8 @@ function Get-ElevatedCopyRoot {
       3. creates a new folder under -CopyRoot that only SYSTEM and Administrators can change and
          writes those bytes into it;
       4. runs that copy with -File in the same window, forwarding the arguments, and exits with its
-         exit code;
+         exit code, also when Ctrl+C at the copy's closing key prompt stops this command too (the
+         console sends it to both): the finally block sets it with $host.SetShouldExit;
       5. deletes the folder.
     The elevated process makes the copy because a non-elevated one would own the folder and could
     change its access list. The list does not name the elevating account, whose non-elevated
@@ -255,13 +256,15 @@ function New-ElevationVerifierCommand {
     )
 
     # Each statement ends with ';' or a closing brace, so joining the lines with spaces keeps it valid.
+    # $LASTEXITCODE holds the exit code throughout (-Command runs at the top level, so it is the
+    # global the copy's run sets): nothing has to run after the copy, which Ctrl+C would skip.
     $template = @'
 $ErrorActionPreference = 'Stop';
-$exitCode = 5;
+$LASTEXITCODE = 5;
 $copyDirectory = $null;
 try {
     $p = Get-ExecutionPolicy;
-    if ($p -in 2, 3) { $exitCode = 4; throw ('Group Policy sets the execution policy to ' + $p + ', which -ExecutionPolicy Bypass cannot override'); }
+    if ($p -in 2, 3) { $LASTEXITCODE = 4; throw ('Group Policy sets the execution policy to ' + $p + ', which -ExecutionPolicy Bypass cannot override'); }
     $bytes = [IO.File]::ReadAllBytes(@SOURCE@);
     $hash = [BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash($bytes)).Replace('-', '');
     if ($hash -ne @SHA256@) { throw 'the file changed after administrator rights were requested'; }
@@ -273,14 +276,13 @@ try {
     $copy = Join-Path $copyDirectory @NAME@;
     [IO.File]::WriteAllBytes($copy, $bytes);
     & @POWERSHELL@ -NoProfile -ExecutionPolicy Bypass -File $copy@ARGUMENTS@;
-    $exitCode = $LASTEXITCODE;
 } catch {
     Write-Host ('Did not run ' + @NAME@ + ': ' + $_) -ForegroundColor Red;
     try { [void](Read-Host 'Press Enter to close this window'); } catch { }
 } finally {
+    $host.SetShouldExit($LASTEXITCODE);
     if ($copyDirectory) { Remove-Item -LiteralPath $copyDirectory -Recurse -Force -ErrorAction SilentlyContinue; }
 }
-exit $exitCode
 '@
 
     # Single-quoted literals. EscapeSingleQuotedStringContent also doubles the typographic quotes

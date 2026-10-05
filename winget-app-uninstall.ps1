@@ -1847,11 +1847,11 @@ function New-ElevationVerifierCommand {
 
     $template = @'
 $ErrorActionPreference = 'Stop';
-$exitCode = 5;
+$LASTEXITCODE = 5;
 $copyDirectory = $null;
 try {
     $p = Get-ExecutionPolicy;
-    if ($p -in 2, 3) { $exitCode = 4; throw ('Group Policy sets the execution policy to ' + $p + ', which -ExecutionPolicy Bypass cannot override'); }
+    if ($p -in 2, 3) { $LASTEXITCODE = 4; throw ('Group Policy sets the execution policy to ' + $p + ', which -ExecutionPolicy Bypass cannot override'); }
     $bytes = [IO.File]::ReadAllBytes(@SOURCE@);
     $hash = [BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash($bytes)).Replace('-', '');
     if ($hash -ne @SHA256@) { throw 'the file changed after administrator rights were requested'; }
@@ -1863,14 +1863,13 @@ try {
     $copy = Join-Path $copyDirectory @NAME@;
     [IO.File]::WriteAllBytes($copy, $bytes);
     & @POWERSHELL@ -NoProfile -ExecutionPolicy Bypass -File $copy@ARGUMENTS@;
-    $exitCode = $LASTEXITCODE;
 } catch {
     Write-Host ('Did not run ' + @NAME@ + ': ' + $_) -ForegroundColor Red;
     try { [void](Read-Host 'Press Enter to close this window'); } catch { }
 } finally {
+    $host.SetShouldExit($LASTEXITCODE);
     if ($copyDirectory) { Remove-Item -LiteralPath $copyDirectory -Recurse -Force -ErrorAction SilentlyContinue; }
 }
-exit $exitCode
 '@
 
     $quote = { param ([string]$Text) "'" + [System.Management.Automation.Language.CodeGeneration]::EscapeSingleQuotedStringContent($Text) + "'" }

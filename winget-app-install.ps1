@@ -83,12 +83,12 @@ param (
 # the function source under WingetAppSetup/Public and WingetAppSetup/Private, or the entry block in
 # build/fragments/tail.ps1, then re-run the build to regenerate this file.
 # See readme.md ("Project layout") for details.
-# Build id: 1.0.0+74481c3e (module version + SHA256 fragment of this whole script; issue #189).
+# Build id: 1.0.0+9926f18f (module version + SHA256 fragment of this whole script; issue #189).
 # ------------------------------------------------------------------------------------------------
 
 # Content-derived build identity, logged at startup so a transcript from a remote machine
 # identifies exactly which installer build produced it (issue #189).
-$script:InstallerBuildId = '1.0.0+74481c3e'
+$script:InstallerBuildId = '1.0.0+9926f18f'
 
 # ------------------------------------------------Functions------------------------------------------------
 
@@ -1882,11 +1882,11 @@ function New-ElevationVerifierCommand {
 
     $template = @'
 $ErrorActionPreference = 'Stop';
-$exitCode = 5;
+$LASTEXITCODE = 5;
 $copyDirectory = $null;
 try {
     $p = Get-ExecutionPolicy;
-    if ($p -in 2, 3) { $exitCode = 4; throw ('Group Policy sets the execution policy to ' + $p + ', which -ExecutionPolicy Bypass cannot override'); }
+    if ($p -in 2, 3) { $LASTEXITCODE = 4; throw ('Group Policy sets the execution policy to ' + $p + ', which -ExecutionPolicy Bypass cannot override'); }
     $bytes = [IO.File]::ReadAllBytes(@SOURCE@);
     $hash = [BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash($bytes)).Replace('-', '');
     if ($hash -ne @SHA256@) { throw 'the file changed after administrator rights were requested'; }
@@ -1898,14 +1898,13 @@ try {
     $copy = Join-Path $copyDirectory @NAME@;
     [IO.File]::WriteAllBytes($copy, $bytes);
     & @POWERSHELL@ -NoProfile -ExecutionPolicy Bypass -File $copy@ARGUMENTS@;
-    $exitCode = $LASTEXITCODE;
 } catch {
     Write-Host ('Did not run ' + @NAME@ + ': ' + $_) -ForegroundColor Red;
     try { [void](Read-Host 'Press Enter to close this window'); } catch { }
 } finally {
+    $host.SetShouldExit($LASTEXITCODE);
     if ($copyDirectory) { Remove-Item -LiteralPath $copyDirectory -Recurse -Force -ErrorAction SilentlyContinue; }
 }
-exit $exitCode
 '@
 
     $quote = { param ([string]$Text) "'" + [System.Management.Automation.Language.CodeGeneration]::EscapeSingleQuotedStringContent($Text) + "'" }
