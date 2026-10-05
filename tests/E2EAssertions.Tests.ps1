@@ -477,7 +477,10 @@ Describe 'Installer messages the transcript parser keys on' {
         @{ File = 'WingetAppSetup/Public/Install.ps1'; Text = "`$rows += , @('Skipped', `$appList)" }
         @{ File = 'WingetAppSetup/Public/Install.ps1'; Text = "`$rows += , @('Deferred', `$appList)" }
         @{ File = 'WingetAppSetup/Public/Install.ps1'; Text = "`$rows += , @('Failed', `$appList)" }
-        @{ File = 'WingetAppSetup/Public/Install.ps1'; Text = "Write-ErrorMessage 'Auto-updates: NOT CONFIGURED - Microsoft.WindowsAppRuntime.1.8 is missing, " }
+        # The framework comes from Install-WingetAutoUpdate (work-order item 32) and is 1.8 unless
+        # the latest winget release needs another; Install.Tests.ps1 checks the line it prints.
+        @{ File = 'WingetAppSetup/Public/Install.ps1'; Text = "`$wauFrameworkName = 'Microsoft.WindowsAppRuntime.1.8'" }
+        @{ File = 'WingetAppSetup/Public/Install.ps1'; Text = 'Write-ErrorMessage "Auto-updates: NOT CONFIGURED - $wauFrameworkName is missing, ' }
         @{ File = 'WingetAppSetup/Public/Install.ps1'; Text = 'Write-ErrorMessage "Auto-updates: UNHEALTHY - ' }
         @{ File = 'WingetAppSetup/Public/Install.ps1'; Text = 'Write-ErrorMessage "winget: NOT USABLE - ' }
         @{ File = 'WingetAppSetup/Private/WindowsAppRuntime.ps1'; Text = 'Write-ErrorMessage "Windows App Runtime: NOT INSTALLED - $reason."' }

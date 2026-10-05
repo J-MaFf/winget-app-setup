@@ -268,6 +268,28 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
             @($script:errorMessages | Where-Object { $_.StartsWith($Line) }).Count | Should -Be 1
         }
 
+        # Work-order item 32: the framework the latest winget release needs, which may not be 1.8.
+        It 'Names the framework the latest winget release needs in the summary and returns 8: <Status>' -ForEach @(
+            @{ Status = 'FrameworkMissing'; Line = 'Auto-updates: NOT CONFIGURED - Microsoft.WindowsAppRuntime.2 is missing, and Winget-AutoUpdate would leave winget unusable without it. Install the Windows App Runtime 2 (or let the Microsoft Store update App Installer), then re-run the installer.' }
+            @{ Status = 'AlreadyPresent'; Line = 'Auto-updates: AT RISK - Winget-AutoUpdate is installed but Microsoft.WindowsAppRuntime.2 is missing; its next run may leave winget unusable (see above).' }
+        ) {
+            $script:wauResult = [pscustomobject]@{ Status = $Status; Version = [version]'2.12.0'; FrameworkMissing = $true; FrameworkName = 'Microsoft.WindowsAppRuntime.2'; FrameworkInstallError = 'the latest winget release needs Microsoft.WindowsAppRuntime.2 >= 2000.120.5.0, and the framework this installer installs, Microsoft.WindowsAppRuntime.1.8 8000.994.2142.0, does not meet that; a newer version of this installer is needed'; RestartRequired = $false }
+            Mock Install-WingetAutoUpdate { $script:wauResult }
+
+            Invoke-WingetInstall -Apps @(@{ name = 'Contoso.AppOne' }) -NonInteractive | Should -Be 8
+
+            $script:errorMessages | Should -Contain $Line
+            $script:errorMessages | Should -Contain "  The installer could not install it: $($script:wauResult.FrameworkInstallError)."
+        }
+
+        It 'Still names Microsoft.WindowsAppRuntime.1.8 for a result that names no framework' {
+            Mock Install-WingetAutoUpdate { [pscustomobject]@{ Status = 'FrameworkMissing'; Version = [version]'2.12.0'; FrameworkMissing = $true; RestartRequired = $false } }
+
+            Invoke-WingetInstall -Apps @(@{ name = 'Contoso.AppOne' }) -NonInteractive | Should -Be 8
+
+            $script:errorMessages | Should -Contain 'Auto-updates: NOT CONFIGURED - Microsoft.WindowsAppRuntime.1.8 is missing, and Winget-AutoUpdate would leave winget unusable without it. Install the Windows App Runtime 1.8 (or let the Microsoft Store update App Installer), then re-run the installer.'
+        }
+
         # Review of item 23: a task that could not be checked is an unknown state, not a known bad
         # one. Still 8 (auto-updates not verified), but the line must not claim apps will not update.
         It 'Returns 8 when the Winget-AutoUpdate task could not be checked, and says the outcome is unknown' {

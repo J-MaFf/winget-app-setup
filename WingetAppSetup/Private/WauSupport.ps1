@@ -291,16 +291,26 @@ function New-WauStagingDirectory {
 
 <#
 .SYNOPSIS
-    Lists the Microsoft.WindowsAppRuntime.1.8 framework packages registered for any user.
+    Lists the packages of one Windows App Runtime framework registered for any user.
 .DESCRIPTION
     Thin query seam for Get-WindowsAppRuntimeStatus (mocked in tests). `Get-AppxPackage -AllUsers`
     needs elevation; under PowerShell 7 it runs in Windows PowerShell 5.1, where the Appx module
     always loads - the same delegation Invoke-AppxProvisioning uses. Throws when the query fails.
+.PARAMETER Name
+    The framework's package name, Microsoft.WindowsAppRuntime.1.8 by default. It may come from a
+    file read from the web (Get-WindowsAppRuntimeRequirement), so only the characters a package
+    name can have are accepted: it goes into the Windows PowerShell command.
 .RETURNS
     [pscustomobject[]] with Version ([version]) and Architecture ([string], e.g. 'X64', 'Arm64').
 #>
 function Get-WindowsAppRuntimePackageInfo {
-    $query = "Get-AppxPackage -AllUsers -Name 'Microsoft.WindowsAppRuntime.1.8' -ErrorAction Stop | ForEach-Object { '{0}|{1}' -f `$_.Version, `$_.Architecture }"
+    param (
+        [Parameter(Mandatory = $false)]
+        [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9.\-]{2,49}\z')]
+        [string]$Name = 'Microsoft.WindowsAppRuntime.1.8'
+    )
+
+    $query = "Get-AppxPackage -AllUsers -Name '$Name' -ErrorAction Stop | ForEach-Object { '{0}|{1}' -f `$_.Version, `$_.Architecture }"
     if ($PSVersionTable.PSEdition -eq 'Core') {
         $lines = @(& powershell.exe -NoProfile -ExecutionPolicy Bypass -Command $query)
         if ($LASTEXITCODE -ne 0) {
@@ -308,7 +318,7 @@ function Get-WindowsAppRuntimePackageInfo {
         }
     }
     else {
-        $lines = @(Get-AppxPackage -AllUsers -Name 'Microsoft.WindowsAppRuntime.1.8' -ErrorAction Stop |
+        $lines = @(Get-AppxPackage -AllUsers -Name $Name -ErrorAction Stop |
                 ForEach-Object { '{0}|{1}' -f $_.Version, $_.Architecture })
     }
 
@@ -323,51 +333,292 @@ function Get-WindowsAppRuntimePackageInfo {
 
 <#
 .SYNOPSIS
-    Reports whether the WindowsAppRuntime framework that current winget releases need is present.
+    Returns the built-in Windows App Runtime requirement: Microsoft.WindowsAppRuntime.1.8
+    8000.616.304.0 or newer.
+.DESCRIPTION
+    What every winget release from 1.12.350 through 1.29.380 and the 1.30.140 preview lists in its
+    DesktopAppInstaller_Dependencies.json. Get-WindowsAppRuntimeStatus checks for it when it is
+    given no requirement, and Get-WindowsAppRuntimeRequirement falls back to it when it cannot read
+    the latest winget release's own list.
+.RETURNS
+    [pscustomobject] with Frameworks (one Name and MinimumVersion ([version]) per framework),
+    Source ('BuiltIn') and Detail (where the requirement comes from, for messages).
+#>
+function Get-DefaultWindowsAppRuntimeRequirement {
+    return [pscustomobject]@{
+        Frameworks = @([pscustomobject]@{ Name = 'Microsoft.WindowsAppRuntime.1.8'; MinimumVersion = [version]'8000.616.304.0' })
+        Source     = 'BuiltIn'
+        Detail     = 'the built-in requirement'
+    }
+}
+
+<#
+.SYNOPSIS
+    Formats a Windows App Runtime requirement for messages.
+.PARAMETER Frameworks
+    The requirement's Frameworks (or some of them).
+.RETURNS
+    [string] For example 'Microsoft.WindowsAppRuntime.1.8 >= 8000.616.304.0'; several are joined
+    with ' and '.
+#>
+function Format-WindowsAppRuntimeRequirement {
+    param (
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [object[]]$Frameworks
+    )
+
+    if ($Frameworks.Count -eq 0) {
+        return 'no Windows App Runtime'
+    }
+    return (($Frameworks | ForEach-Object { '{0} >= {1}' -f $_.Name, $_.MinimumVersion }) -join ' and ')
+}
+
+<#
+.SYNOPSIS
+    Reads the Windows App Runtime frameworks a winget release depends on from its
+    DesktopAppInstaller_Dependencies.json.
+.DESCRIPTION
+    That file is an asset of every winget-cli release since 1.11, and the list
+    Repair-WinGetPackageManager reads too (Microsoft.WinGet.Client's WingetDependencies class):
+    {"Dependencies": [{"Name": "...", "Version": "..."}, ...]}, one list for every architecture.
+    A list per architecture is read as well, for this PC's: an "x64", "x86" or "arm64" property
+    (any case) at the top or under "Dependencies", holding the list or an object with a
+    "Dependencies" list. Only the Microsoft.WindowsAppRuntime entries are returned; the others
+    (VCLibs, UI.Xaml) are ones Winget-AutoUpdate's Install-Prerequisites installs itself. A
+    framework listed more than once keeps its highest version.
+.PARAMETER Json
+    The file's text.
+.PARAMETER Architecture
+    This PC's OS architecture as Get-OSArchitecture names it (X64, X86, Arm64), for a list per
+    architecture; $null or empty when it is not known.
+.RETURNS
+    [pscustomobject[]] Name and MinimumVersion ([version]) for each Windows App Runtime framework
+    the release lists; nothing when it lists none. Throws when the text is not JSON, holds no such
+    list, an entry has no Name or no Version, or a Windows App Runtime entry's name or version is
+    not one a package can have.
+#>
+function ConvertFrom-WingetDependenciesJson {
+    param (
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
+        [string]$Json,
+
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [AllowEmptyString()]
+        [string]$Architecture
+    )
+
+    try {
+        $document = $Json.TrimStart([char]0xFEFF) | ConvertFrom-Json -ErrorAction Stop
+    }
+    catch {
+        throw "it is not valid JSON ($($_.Exception.Message))"
+    }
+    if ($null -eq $document -or $document -isnot [System.Management.Automation.PSCustomObject]) {
+        throw 'it is not a JSON object'
+    }
+
+    $dependencies = $null
+    $dependenciesProperty = $document.PSObject.Properties['Dependencies']
+    if ($dependenciesProperty -and $dependenciesProperty.Value -is [array]) {
+        $dependencies = $dependenciesProperty.Value
+    }
+    elseif (-not [string]::IsNullOrWhiteSpace($Architecture)) {
+        # A list per architecture: {"Dependencies": {"x64": ...}}, or {"x64": ...} at the top.
+        $byArchitecture = $document
+        if ($dependenciesProperty -and $dependenciesProperty.Value -is [System.Management.Automation.PSCustomObject]) {
+            $byArchitecture = $dependenciesProperty.Value
+        }
+        $architectureProperty = $byArchitecture.PSObject.Properties[$Architecture]
+        if ($architectureProperty) {
+            $value = $architectureProperty.Value
+            if ($value -is [array]) {
+                $dependencies = $value
+            }
+            elseif ($value -is [System.Management.Automation.PSCustomObject] -and $value.PSObject.Properties['Dependencies'] -and $value.Dependencies -is [array]) {
+                $dependencies = $value.Dependencies
+            }
+        }
+    }
+    if ($null -eq $dependencies) {
+        if ([string]::IsNullOrWhiteSpace($Architecture)) {
+            throw 'it holds no Dependencies list'
+        }
+        throw "it holds no Dependencies list, for all architectures or for $Architecture"
+    }
+
+    # PowerShell's hashtables compare keys without case, as package names are compared.
+    $frameworks = @{}
+    foreach ($entry in $dependencies) {
+        $name = $null
+        $versionText = $null
+        if ($entry -is [System.Management.Automation.PSCustomObject]) {
+            $name = [string]$entry.Name
+            $versionText = [string]$entry.Version
+        }
+        if ([string]::IsNullOrWhiteSpace($name) -or [string]::IsNullOrWhiteSpace($versionText)) {
+            throw 'one of its entries has no Name or no Version'
+        }
+        if ($name -notlike 'Microsoft.WindowsAppRuntime*') {
+            continue
+        }
+        if ($name -notmatch '^[A-Za-z0-9][A-Za-z0-9.\-]{2,49}\z') {
+            throw "'$name' is not a package name"
+        }
+        $version = $null
+        if (-not [version]::TryParse($versionText, [ref]$version)) {
+            throw "'$versionText' ($name) is not a version"
+        }
+        if (-not $frameworks.ContainsKey($name) -or $frameworks[$name] -lt $version) {
+            $frameworks[$name] = $version
+        }
+    }
+    foreach ($name in @($frameworks.Keys | Sort-Object)) {
+        [pscustomobject]@{ Name = $name; MinimumVersion = $frameworks[$name] }
+    }
+}
+
+<#
+.SYNOPSIS
+    Works out which Windows App Runtime the winget release Winget-AutoUpdate installs needs.
+.DESCRIPTION
+    Every WAU run as SYSTEM installs the newest winget release from GitHub (Install-Prerequisites
+    reads releases/latest) when the installed winget is older, without any framework it needs, and
+    a winget whose framework is missing leaves winget unusable (#279/#284). Which framework that is
+    comes from the release itself (product-F4, work-order item 32): its
+    DesktopAppInstaller_Dependencies.json, through the download link of the release GitHub marks
+    latest - the same release WAU's api.github.com query names - which the GitHub API's limit of 60
+    calls an hour per address does not apply to. So a winget that needs a newer build or another
+    framework family is checked for as such, rather than by the 1.8 constant, and
+    Install-WindowsAppRuntimeFramework does not install its pinned 1.8 framework where that would
+    not do. A newer framework family does not stand in for an older one.
+    The lookup never stops the run: it has a 30-second time limit (Get-WebDownloadTimeoutParameters
+    -Lookup), and when the file cannot be read (no network, a proxy, GitHub down, a format this
+    does not know) or lists no Windows App Runtime, the built-in requirement
+    (Get-DefaultWindowsAppRuntimeRequirement) is used, with a warning. Writes one line that names
+    the requirement and where it comes from.
+.RETURNS
+    [pscustomobject] as Get-DefaultWindowsAppRuntimeRequirement returns it, with Source
+    'LatestRelease' when it comes from the release, or 'BuiltIn'.
+#>
+function Get-WindowsAppRuntimeRequirement {
+    $url = 'https://github.com/microsoft/winget-cli/releases/latest/download/DesktopAppInstaller_Dependencies.json'
+    $fallback = Get-DefaultWindowsAppRuntimeRequirement
+    $fallbackText = Format-WindowsAppRuntimeRequirement -Frameworks @($fallback.Frameworks)
+
+    $frameworks = @()
+    try {
+        # Only a list per architecture needs it; the current file has one list for all.
+        $architecture = $null
+        try {
+            $architecture = Get-OSArchitecture
+        }
+        catch {
+            $architecture = $null
+        }
+        $timeouts = Get-WebDownloadTimeoutParameters -Lookup
+        $response = Invoke-WebRequest @timeouts -Uri $url -UseBasicParsing -ErrorAction Stop
+        # GitHub serves release assets as application/octet-stream, which PowerShell 7 returns as bytes.
+        $content = $response.Content
+        if ($content -is [byte[]]) {
+            $content = [System.Text.Encoding]::UTF8.GetString($content)
+        }
+        $content = [string]$content
+        if ($content.Length -gt 65536) {
+            throw ('it is {0} characters long, not a list of dependencies' -f $content.Length)
+        }
+        $frameworks = @(ConvertFrom-WingetDependenciesJson -Json $content -Architecture $architecture)
+    }
+    catch {
+        $problem = "$_".Trim().TrimEnd('.')
+        Write-WarningMessage "Could not read which Windows App Runtime the latest winget release needs ($url`: $problem); checking for the built-in requirement, $fallbackText."
+        $fallback.Detail = "the built-in requirement (the latest winget release's DesktopAppInstaller_Dependencies.json could not be read: $problem)"
+        return $fallback
+    }
+
+    if ($frameworks.Count -eq 0) {
+        Write-WarningMessage "The latest winget release lists no Microsoft.WindowsAppRuntime dependency in its DesktopAppInstaller_Dependencies.json; checking for the built-in requirement, $fallbackText, anyway."
+        $fallback.Detail = "the built-in requirement (the latest winget release lists no Windows App Runtime)"
+        return $fallback
+    }
+
+    $requirementText = Format-WindowsAppRuntimeRequirement -Frameworks $frameworks
+    Write-Info "The latest winget release needs $requirementText (its DesktopAppInstaller_Dependencies.json)."
+    return [pscustomobject]@{
+        Frameworks = $frameworks
+        Source     = 'LatestRelease'
+        Detail     = "what the latest winget release needs (its DesktopAppInstaller_Dependencies.json)"
+    }
+}
+
+<#
+.SYNOPSIS
+    Reports whether the WindowsAppRuntime framework that winget needs is present.
 .DESCRIPTION
     Every winget release from 1.12 through 1.29 (checked against DesktopAppInstaller_Dependencies.json)
-    depends on Microsoft.WindowsAppRuntime.1.8 >= 8000.616.304.0. WAU installs the newest release,
-    so re-check this requirement when winget moves to a newer framework (and when Get-WauPin is
-    bumped); a newer framework family does NOT satisfy a dependency on 1.8.
+    depends on Microsoft.WindowsAppRuntime.1.8 >= 8000.616.304.0, the default requirement. WAU
+    installs the newest release, so the WAU gate passes what that release needs
+    (Get-WindowsAppRuntimeRequirement); a newer framework family does NOT satisfy a dependency on 1.8.
     Winget-AutoUpdate's Install-Prerequisites runs on every WAU SYSTEM run and provisions the
     newest winget release from GitHub without that framework. On a machine that lacks it (no
     Microsoft Store updates, Server SKUs) the new App Installer cannot register and the old one is
     then rejected as a downgrade, which leaves winget unusable (the #279/#284 wedge). Callers use
     this to keep WAU off such machines; Install-WingetAutoUpdate first installs the pinned framework
     (Install-WindowsAppRuntimeFramework, WindowsAppRuntime.ps1) when this finds none.
-.PARAMETER MinimumVersion
-    The lowest framework version that satisfies current winget releases.
+.PARAMETER Requirement
+    The frameworks to look for (Get-WindowsAppRuntimeRequirement). Default: the built-in
+    requirement (Get-DefaultWindowsAppRuntimeRequirement).
 .RETURNS
     [pscustomobject] with:
-      - Present: $true when a package for this OS architecture at or above MinimumVersion is
-                 registered for any user; $false when none is; $null when the query failed.
+      - Present: $true when, for every framework the requirement names, a package for this OS
+                 architecture at or above its minimum is registered for any user; $false when one
+                 is missing; $null when the query failed.
       - Detail:  the versions found (or the query error), for messages.
 #>
 function Get-WindowsAppRuntimeStatus {
     param (
         [Parameter(Mandatory = $false)]
-        [version]$MinimumVersion = [version]'8000.616.304.0'
+        [AllowNull()]
+        [object]$Requirement
     )
 
-    try {
-        $packages = @(Get-WindowsAppRuntimePackageInfo)
+    if ($null -eq $Requirement) {
+        $Requirement = Get-DefaultWindowsAppRuntimeRequirement
     }
-    catch {
-        return [pscustomobject]@{ Present = $null; Detail = "could not query installed packages: $_" }
+    $frameworks = @($Requirement.Frameworks)
+    if ($frameworks.Count -eq 0) {
+        return [pscustomobject]@{ Present = $true; Detail = 'no Windows App Runtime required' }
     }
 
     $osArchitecture = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
-    $suitable = @($packages | Where-Object { $_.Architecture -eq $osArchitecture -and $_.Version -ge $MinimumVersion })
-    $found = if ($packages.Count -gt 0) {
-        ($packages | ForEach-Object { "$($_.Architecture) $($_.Version)" }) -join ', '
-    }
-    else {
-        'none registered'
+    $present = $true
+    $details = @()
+    foreach ($framework in $frameworks) {
+        try {
+            $packages = @(Get-WindowsAppRuntimePackageInfo -Name $framework.Name)
+        }
+        catch {
+            return [pscustomobject]@{ Present = $null; Detail = "could not query installed packages: $_" }
+        }
+
+        $suitable = @($packages | Where-Object { $_.Architecture -eq $osArchitecture -and $_.Version -ge [version]$framework.MinimumVersion })
+        if ($suitable.Count -eq 0) {
+            $present = $false
+        }
+        $found = if ($packages.Count -gt 0) {
+            ($packages | ForEach-Object { "$($_.Architecture) $($_.Version)" }) -join ', '
+        }
+        else {
+            'none registered'
+        }
+        $details += "$($framework.Name) >= $($framework.MinimumVersion) for $osArchitecture required; found: $found"
     }
 
     return [pscustomobject]@{
-        Present = ($suitable.Count -gt 0)
-        Detail  = "Microsoft.WindowsAppRuntime.1.8 >= $MinimumVersion for $osArchitecture required; found: $found"
+        Present = $present
+        Detail  = ($details -join '; ')
     }
 }
 

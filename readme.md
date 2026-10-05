@@ -206,6 +206,7 @@ the installer stops that process and every process it started, then carries on:
 | One `winget uninstall` (`winget-app-uninstall.ps1`), the app's own uninstaller included | 15 minutes |
 | `msiexec` for Winget-AutoUpdate (install and uninstall) | 15 minutes |
 | The Winget-AutoUpdate MSI download | 5 minutes until the server starts sending the file; on PowerShell 7.4 and newer, also 2 minutes without data while it arrives |
+| Reading which Windows App Runtime the latest winget release needs (`DesktopAppInstaller_Dependencies.json`) | 30 seconds, and on PowerShell 7.4 and newer also 30 seconds without data; when it runs out, the built-in requirement is used |
 
 A stopped install is checked like any other: unless the app turns out to be installed anyway, it
 fails, gets its one retry in the retry pass, and counts toward exit code 1, with
@@ -389,7 +390,7 @@ will not run; decide whether your RMM job should count it as a success.
 | 5 | The run was aborted before it finished: an unexpected error (the message and stack trace are in the log), the run was stopped from outside (Ctrl+C, the console closing, an installer stopping the console) when run from a file or non-interactively, or the installer file changed before its elevated copy could run (see [Administrator rights](#administrator-rights)) |
 | 6 | Another run of the installer is in progress on this PC (started by an RMM job, a scheduled task or someone else). This run stopped before its pre-flight checks and changed nothing. Run it again once the other run has finished (see [One run at a time](#one-run-at-a-time)) |
 | 7 | Started from Windows PowerShell 5.1, the installer could not install PowerShell 7 or could not relaunch itself under it |
-| 8 | The apps are fine and winget still works, but automatic updates will not work or could not be verified. The summary's `Auto-updates:` line says which: `FAILED` (Winget-AutoUpdate could not be installed), `NOT CONFIGURED` (skipped because `Microsoft.WindowsAppRuntime.1.8` is missing and the installer could not install it), `AT RISK` (installed while that framework is missing and could not be installed) or `UNHEALTHY` (installed, but its `\WAU\Winget-AutoUpdate` task is missing, disabled, has no enabled trigger or could not be checked; see [Automatic updates](#automatic-updates)) |
+| 8 | The apps are fine and winget still works, but automatic updates will not work or could not be verified. The summary's `Auto-updates:` line says which: `FAILED` (Winget-AutoUpdate could not be installed), `NOT CONFIGURED` (skipped because the Windows App Runtime the latest winget release needs, today `Microsoft.WindowsAppRuntime.1.8`, is missing and the installer could not install it, for example because that release needs a newer build or another family than the installer's pinned one), `AT RISK` (installed while that framework is missing and could not be installed) or `UNHEALTHY` (installed, but its `\WAU\Winget-AutoUpdate` task is missing, disabled, has no enabled trigger or could not be checked; see [Automatic updates](#automatic-updates)) |
 | 3010 | Success, but a restart is required to finish: an install said so, the Winget-AutoUpdate MSI returned 3010, Windows gained a pending restart during the run, or installing PowerShell 7 from Windows PowerShell needed a restart (see **Restart required** above). RMM tools and Intune treat 3010 as "succeeded, restart required". A restart that was already pending before the run does not cause it |
 
 At the end of a run, when more than one applies, the code is the first of 1, 2, 8, 3010 and 0. A
@@ -559,13 +560,33 @@ Every WAU run first updates winget itself, so the installer keeps WAU out of its
 up last, after the retry pass, it is not started immediately and not at user logon (machines deployed
 by older versions have their logon trigger removed on the next run), and if a WAU run is already in
 progress when the installer starts, the installer waits up to 15 minutes for it to finish. WAU is only
-installed when `Microsoft.WindowsAppRuntime.1.8` is present, because the winget releases it installs
-need that framework and would otherwise leave winget unusable (issues #279, #283, #284).
+installed when the Windows App Runtime framework the newest winget release needs is present, because
+WAU installs that release and it would otherwise leave winget unusable (issues #279, #283, #284).
+Today that is `Microsoft.WindowsAppRuntime.1.8` 8000.616.304.0 or newer.
+
+**Which framework.** The installer reads it from the release WAU installs: the
+`DesktopAppInstaller_Dependencies.json` of the latest winget release
+(`https://github.com/microsoft/winget-cli/releases/latest/download/DesktopAppInstaller_Dependencies.json`,
+the release GitHub marks latest, which is the one WAU's `api.github.com` query names; the download
+link is not subject to the API's limit of 60 calls an hour per address), with a 30-second limit
+(`Get-WindowsAppRuntimeRequirement`). The transcript says what it found:
+`The latest winget release needs Microsoft.WindowsAppRuntime.1.8 >= 8000.616.304.0 ...`. When the
+file cannot be read (no network, a proxy, GitHub down, a format the installer does not know) or lists
+no Windows App Runtime, the run warns and checks for the built-in requirement,
+`Microsoft.WindowsAppRuntime.1.8` 8000.616.304.0 or newer; the lookup never stops or fails a run.
+When a future winget needs a newer 1.8 build than the pinned framework below, or another framework
+family (a newer family does not stand in for 1.8, nor 1.8 for a newer one), a PC that already has it
+gets WAU as usual; on a PC that lacks it, the installer does not install its pinned 1.8 framework,
+skips WAU (or reports it `AT RISK`) with
+`Windows App Runtime: NOT INSTALLED - the latest winget release needs <framework>, and the framework
+this installer installs, ..., does not meet that; a newer version of this installer is needed`, and
+the run exits 8. That is the sign to move the pin.
 
 A freshly imaged PC, a PC whose Microsoft Store updates are blocked, and Windows Server often lack
-that framework, so when the all-users check finds it missing, the installer first installs a pinned
-copy for every user of the PC (`Install-WindowsAppRuntimeFramework`), on a first run and on a re-run
-that finds WAU already installed alike:
+that framework, so when the all-users check finds it missing (and the pinned copy meets what the
+latest winget release needs), the installer first installs a pinned copy for every user of the PC
+(`Install-WindowsAppRuntimeFramework`), on a first run and on a re-run that finds WAU already
+installed alike:
 
 - **What:** the framework file of Windows App Runtime 1.8.12 (`Microsoft.WindowsAppRuntime.1.8`
   8000.994.2142.0) for the PC's architecture (x64, x86 or ARM64), taken from Microsoft's
@@ -585,10 +606,11 @@ that finds WAU already installed alike:
   as done, with a warning, and WAU is set up, as on any run where the check cannot run.
   Microsoft's `WindowsAppRuntimeInstall` program is not used: it registers the framework only for
   the account that runs it, and as SYSTEM only stages it.
-- **Never:** on a run that is not elevated (a run as SYSTEM is), on 32-bit Arm Windows or a Windows
-  build older than 17763, over a framework of the same or a newer version that is already
-  provisioned, or when the all-users check itself could not run. It never uses
-  `Repair-WinGetPackageManager -AllUsers` (#265).
+- **Never:** when the latest winget release needs a newer build or another framework family than
+  the pinned one (see "Which framework" above), on a run that is not elevated (a run as SYSTEM
+  is), on 32-bit Arm Windows or a Windows build older than 17763, over a framework of the same or a
+  newer version that is already provisioned, or when the all-users check itself could not run. It
+  never uses `Repair-WinGetPackageManager -AllUsers` (#265).
 
 The transcript then has one `Windows App Runtime: installed ...` or
 `Windows App Runtime: NOT INSTALLED - <reason>` line. When the install is not possible or fails,
@@ -741,7 +763,8 @@ throwaway VMs by construction:
   Exit 8 passes only when that pass's own transcript says
   `Auto-updates: NOT CONFIGURED - Microsoft.WindowsAppRuntime.1.8 is missing` and the installer
   could not try to install the framework (the run was not elevated, Windows or its architecture is
-  not one the framework supports, or a framework was already provisioned); the verdict then quotes
+  not one the framework supports, a framework was already provisioned, or the latest winget release
+  needs a framework the installer's pinned one does not meet); the verdict then quotes
   the transcript's `Windows App Runtime:` line with the reason. An install of the framework that
   started and then failed (download, checks or provisioning) fails the pass, as does 8 for any
   other reason or with no transcript to check.

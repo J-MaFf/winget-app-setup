@@ -30,15 +30,20 @@
     (tools/MSIX/win10-<arch>/Microsoft.WindowsAppRuntime.1.8.msix). The framework version of a
     release is the Identity Version in that file's AppxManifest.xml. Moving to a newer framework
     family (Microsoft.WindowsAppRuntime.2) is a different change: winget's dependency names 1.8.
+    When the latest winget release needs a newer 1.8 build than FrameworkVersion, or another
+    family, Install-WindowsAppRuntimeFramework installs nothing and says so
+    (Get-WindowsAppRuntimeRequirement, work-order item 32): that is the sign to move the pin.
 .RETURNS
-    [hashtable] with Release, NuGetVersion, FrameworkVersion, PackageUrl, SignerCommonName and
-    Frameworks: one entry per OS architecture, keyed as Get-OSArchitecture names it (X64, X86,
-    Arm64), each with Entry (the file's path inside the package), Size (bytes) and Sha256.
+    [hashtable] with Release, NuGetVersion, FrameworkName (the framework's package name),
+    FrameworkVersion, PackageUrl, SignerCommonName and Frameworks: one entry per OS architecture,
+    keyed as Get-OSArchitecture names it (X64, X86, Arm64), each with Entry (the file's path inside
+    the package), Size (bytes) and Sha256.
 #>
 function Get-WindowsAppRuntimePin {
     return @{
         Release          = '1.8.12'
         NuGetVersion     = '1.8.260921001'
+        FrameworkName    = 'Microsoft.WindowsAppRuntime.1.8'
         FrameworkVersion = '8000.994.2142.0'
         PackageUrl       = 'https://api.nuget.org/v3-flatcontainer/microsoft.windowsappsdk.runtime/1.8.260921001/microsoft.windowsappsdk.runtime.1.8.260921001.nupkg'
         SignerCommonName = 'Microsoft Corporation'
@@ -203,7 +208,10 @@ function Test-WindowsAppRuntimeSignature {
 .DESCRIPTION
     Called by Install-WingetAutoUpdate when Get-WindowsAppRuntimeStatus finds no suitable
     framework (never when that check itself failed). Steps:
-      1. Preconditions: an elevated run (SYSTEM included), an OS architecture the pin has a file for
+      1. Preconditions: the pinned framework meets the requirement (what the latest winget release
+         needs, Get-WindowsAppRuntimeRequirement: the same family, at a version no higher than
+         the pinned one; a newer family does not stand in for an older one, nor the other way
+         round), an elevated run (SYSTEM included), an OS architecture the pin has a file for
          (X64, X86, Arm64), Windows build 17763 or later (the framework's minimum), and no
          provisioned framework for this architecture at or above the pinned version: a newer build
          is never replaced or downgraded.
@@ -221,7 +229,8 @@ function Test-WindowsAppRuntimeSignature {
          -SkipLicense (Invoke-AppxProvisioning, run in Windows PowerShell with a time limit). The
          handle stays open until provisioning has finished, so what is provisioned is what was
          hashed.
-      4. Check again: Get-WindowsAppRuntimeStatus must now find it; when it reports it missing,
+      4. Check again: Get-WindowsAppRuntimeStatus must now find what the requirement names; when
+         it reports it missing,
          the install failed. When that check cannot run, the install counts as done, with a
          warning: Add-AppxProvisionedPackage succeeded, and an unknown answer is not evidence that
          the framework is missing (Install-WingetAutoUpdate goes ahead with WAU on one too). The
@@ -230,6 +239,9 @@ function Test-WindowsAppRuntimeSignature {
     Writes one 'Windows App Runtime: installed ...' or 'Windows App Runtime: NOT INSTALLED - <reason>'
     line, which e2e/TranscriptAssertions.ps1 reads. Never uses Repair-WinGetPackageManager -AllUsers
     (issue #265). Never throws.
+.PARAMETER Requirement
+    What winget needs (Get-WindowsAppRuntimeRequirement). Default: the built-in requirement
+    (Get-DefaultWindowsAppRuntimeRequirement), which the pin meets.
 .RETURNS
     [pscustomobject] with Installed ([bool]: Add-AppxProvisionedPackage succeeded and the check
     afterwards found the framework, or could not run), Status (Get-WindowsAppRuntimeStatus's result
@@ -237,6 +249,12 @@ function Test-WindowsAppRuntimeSignature {
     provisioned) and Reason (why it was not installed, or $null).
 #>
 function Install-WindowsAppRuntimeFramework {
+    param (
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [object]$Requirement
+    )
+
     $pin = Get-WindowsAppRuntimePin
     $reason = $null
     $status = $null
@@ -245,15 +263,27 @@ function Install-WindowsAppRuntimeFramework {
     $unconfirmed = $false
 
     try {
-        try {
-            $architecture = Get-OSArchitecture
-            $framework = $pin.Frameworks[$architecture]
-            if (-not $framework) {
-                $reason = "Microsoft publishes no Windows App Runtime 1.8 framework for $architecture Windows"
-            }
+        if ($null -eq $Requirement) {
+            $Requirement = Get-DefaultWindowsAppRuntimeRequirement
         }
-        catch {
-            $reason = "the OS architecture could not be read ($_)"
+        # Work-order item 32: the pinned 1.8 framework does not help a winget that needs a newer
+        # 1.8 build or another family, so it is not installed for one (and WAU stays off).
+        $unmet = @(@($Requirement.Frameworks) | Where-Object { $_.Name -ne $pin.FrameworkName -or [version]$pin.FrameworkVersion -lt [version]$_.MinimumVersion })
+        if ($unmet.Count -gt 0) {
+            $reason = ('the latest winget release needs {0}, and the framework this installer installs, {1} {2}, does not meet that; a newer version of this installer is needed' -f (Format-WindowsAppRuntimeRequirement -Frameworks $unmet), $pin.FrameworkName, $pin.FrameworkVersion)
+        }
+
+        if (-not $reason) {
+            try {
+                $architecture = Get-OSArchitecture
+                $framework = $pin.Frameworks[$architecture]
+                if (-not $framework) {
+                    $reason = "Microsoft publishes no Windows App Runtime 1.8 framework for $architecture Windows"
+                }
+            }
+            catch {
+                $reason = "the OS architecture could not be read ($_)"
+            }
         }
 
         if (-not $reason -and -not (Test-IsAdmin)) {
@@ -343,7 +373,7 @@ function Install-WindowsAppRuntimeFramework {
 
         if (-not $reason) {
             # Add-AppxProvisionedPackage's success is not the answer: the check the WAU gate uses is.
-            $status = Get-WindowsAppRuntimeStatus
+            $status = Get-WindowsAppRuntimeStatus -Requirement $Requirement
             if ($status.Present -eq $false) {
                 $reason = "Add-AppxProvisionedPackage reported success, but the framework is still not there ($($status.Detail))"
             }

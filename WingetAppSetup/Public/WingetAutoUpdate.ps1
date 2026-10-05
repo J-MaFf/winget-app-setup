@@ -5,10 +5,11 @@
     We deploy a specific, SHA256-verified WAU release rather than tracking latest, and disable WAU's
     own self-update, so an upstream change can never roll out to managed machines unreviewed. Bump
     all fields together to move to a newer WAU (verify the new SHA256 against the winget-pkgs manifest
-    for that version). See issue #168. Also re-check the WindowsAppRuntime requirement in
-    Get-WindowsAppRuntimeStatus (WauSupport.ps1) and the framework pin in Get-WindowsAppRuntimePin
-    (WindowsAppRuntime.ps1): WAU installs the newest winget release, so the framework that release
-    needs is what decides whether WAU is safe to deploy.
+    for that version). See issue #168. Also re-check how WAU picks the winget it installs
+    (Get-WindowsAppRuntimeRequirement, WauSupport.ps1, reads the framework the latest winget
+    release needs) and the framework pin in Get-WindowsAppRuntimePin (WindowsAppRuntime.ps1): WAU
+    installs the newest winget release, so the framework that release needs is what decides whether
+    WAU is safe to deploy.
 #>
 function Get-WauPin {
     return @{
@@ -62,13 +63,17 @@ function Test-WauInstalled {
         installer. WAU runs as SYSTEM for machine-scope packages and spawns a user-context task in
         the logged-on session for user-scope packages, which avoids the cross-user 0x80073d19 class
         the homegrown updater fought.
-      - Only when Microsoft.WindowsAppRuntime.1.8 is present (Get-WindowsAppRuntimeStatus): every
-        WAU run provisions the newest winget, which needs that framework, and would otherwise leave
-        winget unusable. When the check finds it missing, the pinned, verified framework is
-        installed for all users first (Install-WindowsAppRuntimeFramework, work-order item 31), on
-        a fresh install and on a machine that already has WAU alike; WAU is skipped (or reported
-        AT RISK) only when that install is not possible or fails. A check that could not run at
-        all installs nothing and goes ahead with WAU, as before.
+      - Only when the Windows App Runtime framework the newest winget needs is present
+        (Get-WindowsAppRuntimeStatus): every WAU run provisions the newest winget, and without its
+        framework it would leave winget unusable. Which framework that is - today
+        Microsoft.WindowsAppRuntime.1.8 >= 8000.616.304.0 - is read from the latest winget
+        release (Get-WindowsAppRuntimeRequirement, work-order item 32), with that constant as the
+        fallback when the release cannot be read. When the check finds it missing, the pinned,
+        verified 1.8 framework is installed for all users first (Install-WindowsAppRuntimeFramework,
+        work-order item 31), on a fresh install and on a machine that already has WAU alike; WAU
+        is skipped (or reported AT RISK) only when that install is not possible or fails, which
+        includes a winget that needs a newer build or another family than the pin. A check that
+        could not run at all installs nothing and goes ahead with WAU, as before.
       - USERCONTEXT=1 so user-scope apps update in the real interactive session.
       - DISABLEWAUAUTOUPDATE=1 so WAU stays on this pinned version until we bump it deliberately.
       - Full notifications; skip on metered connections.
@@ -113,6 +118,9 @@ function Test-WauInstalled {
                  it (on AlreadyPresent this means the existing WAU may break winget on its next run).
       - FrameworkInstallError: with FrameworkMissing, why the pinned framework could not be
                  installed (Install-WindowsAppRuntimeFramework's Reason), or $null.
+      - FrameworkName: for AlreadyPresent, Unhealthy and FrameworkMissing, the framework winget
+                 needs (e.g. 'Microsoft.WindowsAppRuntime.1.8'; several are joined with ' and '),
+                 for the summary's messages.
       - RestartRequired: $true when msiexec returned 3010 (ERROR_SUCCESS_REBOOT_REQUIRED): WAU is
                  installed, and a restart finishes it (review finding P3-16).
 #>
@@ -140,18 +148,24 @@ function Install-WingetAutoUpdate {
         return [pscustomobject]@{ Status = 'DryRun'; Version = $pin.Version; FrameworkMissing = $false; RestartRequired = $false }
     }
 
-    $framework = Get-WindowsAppRuntimeStatus
+    # Work-order item 32: what the winget release WAU installs needs, read from that release
+    # (the built-in Microsoft.WindowsAppRuntime.1.8 >= 8000.616.304.0 when it cannot be read).
+    $requirement = Get-WindowsAppRuntimeRequirement
+    $frameworkName = (@($requirement.Frameworks) | ForEach-Object { $_.Name }) -join ' and '
+    # '1.8' for the advice below; '1.8 and 2' when winget needs two.
+    $frameworkRelease = $frameworkName -replace 'Microsoft\.WindowsAppRuntime\.', ''
+    $framework = Get-WindowsAppRuntimeStatus -Requirement $requirement
     $frameworkInstallError = $null
     if ($null -eq $framework.Present) {
         # A failed query is not evidence the framework is missing; keep the previous behavior, and
         # install nothing on an unknown answer.
-        Write-WarningMessage "Could not check for Microsoft.WindowsAppRuntime.1.8 ($($framework.Detail)); continuing with Winget-AutoUpdate."
+        Write-WarningMessage "Could not check for $frameworkName ($($framework.Detail)); continuing with Winget-AutoUpdate."
     }
     elseif (-not $framework.Present) {
         # Work-order item 31: install the pinned framework for all users, then go on with the
         # status it re-checked. Also on a machine that already has WAU, which is then no longer
-        # at risk.
-        $frameworkInstall = Install-WindowsAppRuntimeFramework
+        # at risk. It installs nothing when the pin does not meet the requirement (item 32).
+        $frameworkInstall = Install-WindowsAppRuntimeFramework -Requirement $requirement
         if ($frameworkInstall.Installed) {
             $framework = $frameworkInstall.Status
         }
@@ -177,7 +191,7 @@ function Install-WingetAutoUpdate {
             Write-Success "Winget-AutoUpdate is already installed ($versionLabel); leaving its configuration unchanged apart from the at-logon trigger."
             [void](Disable-WauLogonTrigger)
             if ($frameworkMissing) {
-                Write-ErrorMessage "Winget-AutoUpdate is installed, but Microsoft.WindowsAppRuntime.1.8 is missing ($($framework.Detail)).$frameworkInstallNote Its next update run may install a winget that cannot start and leave winget unusable. Install the Windows App Runtime 1.8 (update App Installer from the Microsoft Store, or install Microsoft's Windows App SDK 1.8 runtime), or uninstall Winget-AutoUpdate on this machine."
+                Write-ErrorMessage "Winget-AutoUpdate is installed, but $frameworkName is missing ($($framework.Detail)).$frameworkInstallNote Its next update run may install a winget that cannot start and leave winget unusable. Install the Windows App Runtime $frameworkRelease (update App Installer from the Microsoft Store, or install Microsoft's Windows App SDK $frameworkRelease runtime), or uninstall Winget-AutoUpdate on this machine."
             }
             # WAU's registry key says it is installed, not that it will run (review finding P3-36).
             $health = Get-WauTaskHealth
@@ -190,9 +204,9 @@ function Install-WingetAutoUpdate {
                 else {
                     Write-ErrorMessage "Winget-AutoUpdate is installed, but $($health.Problem), so apps will not update automatically. To set it up again, uninstall Winget-AutoUpdate (Settings > Apps) and re-run this installer."
                 }
-                return [pscustomobject]@{ Status = 'Unhealthy'; Version = $installed.Version; FrameworkMissing = $frameworkMissing; FrameworkInstallError = $frameworkInstallError; RestartRequired = $false; Problem = $health.Problem; CheckFailed = [bool]$health.CheckFailed }
+                return [pscustomobject]@{ Status = 'Unhealthy'; Version = $installed.Version; FrameworkMissing = $frameworkMissing; FrameworkInstallError = $frameworkInstallError; FrameworkName = $frameworkName; RestartRequired = $false; Problem = $health.Problem; CheckFailed = [bool]$health.CheckFailed }
             }
-            return [pscustomobject]@{ Status = 'AlreadyPresent'; Version = $installed.Version; FrameworkMissing = $frameworkMissing; FrameworkInstallError = $frameworkInstallError; RestartRequired = $false }
+            return [pscustomobject]@{ Status = 'AlreadyPresent'; Version = $installed.Version; FrameworkMissing = $frameworkMissing; FrameworkInstallError = $frameworkInstallError; FrameworkName = $frameworkName; RestartRequired = $false }
         }
     }
     elseif (-not $frameworkMissing) {
@@ -200,8 +214,8 @@ function Install-WingetAutoUpdate {
     }
 
     if ($frameworkMissing) {
-        Write-ErrorMessage "Winget-AutoUpdate was NOT installed: Microsoft.WindowsAppRuntime.1.8 is missing ($($framework.Detail)).$frameworkInstallNote Every WAU update run installs the newest winget, which needs that framework, so WAU would leave winget unusable here. Install the Windows App Runtime 1.8 (update App Installer from the Microsoft Store, or install Microsoft's Windows App SDK 1.8 runtime), then re-run this installer."
-        return [pscustomobject]@{ Status = 'FrameworkMissing'; Version = $pin.Version; FrameworkMissing = $true; FrameworkInstallError = $frameworkInstallError; RestartRequired = $false }
+        Write-ErrorMessage "Winget-AutoUpdate was NOT installed: $frameworkName is missing ($($framework.Detail)).$frameworkInstallNote Every WAU update run installs the newest winget, which needs that framework, so WAU would leave winget unusable here. Install the Windows App Runtime $frameworkRelease (update App Installer from the Microsoft Store, or install Microsoft's Windows App SDK $frameworkRelease runtime), then re-run this installer."
+        return [pscustomobject]@{ Status = 'FrameworkMissing'; Version = $pin.Version; FrameworkMissing = $true; FrameworkInstallError = $frameworkInstallError; FrameworkName = $frameworkName; RestartRequired = $false }
     }
 
     $stagingDir = $null

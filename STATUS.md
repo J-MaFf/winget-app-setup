@@ -140,7 +140,12 @@ user (Windows App Runtime 1.8.12, framework 8000.994.2142.0, the framework `.msi
 checked, provisioned with `Add-AppxProvisionedPackage -SkipLicense`, then checked again), so a
 freshly imaged PC, a Store-blocked PC or Windows Server gets WAU on the first run instead of
 `NOT CONFIGURED` and exit 8; it never replaces a newer framework and never uses
-`Repair-WinGetPackageManager -AllUsers`. The Server 2025 runner, which ships without the framework,
+`Repair-WinGetPackageManager -AllUsers`. Which framework the gate checks for is read from the
+latest winget release's `DesktopAppInstaller_Dependencies.json` (the release WAU installs, 30-second
+limit, falling back to `Microsoft.WindowsAppRuntime.1.8 >= 8000.616.304.0` with a warning when it
+cannot be read); when a future winget needs a newer 1.8 build or another family than the pin, a PC
+without it gets no framework install and no WAU, `NOT CONFIGURED` or `AT RISK` with the reason, and
+exit 8 - the sign to move the pin. The Server 2025 runner, which ships without the framework,
 is therefore expected to get it and WAU on the first pass and exit 0;
 `e2e/Invoke-InstallPass.ps1` still accepts exit 8 when the pass's transcript gives the missing
 framework as the reason and the installer could not try to install it (and quotes why), but fails a
@@ -460,7 +465,11 @@ every repository secret.
   installer holds it open, and then that WAU's own run keeps winget working. The E2E run already
   fails a pass whose framework install started and failed, so the first run of this branch on
   `windows-latest` shows whether the install works for the existing accounts on Server 2025. Owner: confirm that deploying the framework from
-  the developer NuGet package (Windows App SDK license terms) is acceptable for the fleet.
+  the developer NuGet package (Windows App SDK license terms) is acceptable for the fleet. Also
+  check on Windows that the transcript shows `The latest winget release needs ...` (the
+  `DesktopAppInstaller_Dependencies.json` download through GitHub's redirect works from the PCs and
+  as SYSTEM, behind the fleet's proxy) and, with GitHub blocked, the warning and the built-in
+  requirement.
 - Check the Adobe Reader split on a real ARM64 PC (32-bit Reader installed, 64-bit skipped), and
   whether `Google.GoogleDrive` and `Dell.CommandUpdate.Universal`, which ship only x64 installers,
   need the same gate there.

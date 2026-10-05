@@ -36,13 +36,17 @@
                       (5 minutes). Invoke-WebRequest's -TimeoutSec does not cover the body.
     WebDownloadStall  how long a download may receive nothing once the file is arriving, on
                       PowerShell 7.4 and newer (2 minutes). 7.3 and older have no such limit.
+    WebLookup         a small file read from the web that the run can do without, such as the
+                      latest winget release's DesktopAppInstaller_Dependencies.json (30 seconds,
+                      for the connection and response headers and, on PowerShell 7.4 and newer,
+                      for a stall while it arrives).
 .RETURNS
     [int] Seconds.
 #>
 function Get-ProcessTimeoutSeconds {
     param (
         [Parameter(Mandatory = $true)]
-        [ValidateSet('WingetInstall', 'WingetDownload', 'WingetUninstall', 'WingetListCheck', 'WingetVersion', 'WingetList', 'WingetSourceUpdate', 'WingetSourceReset', 'MsiExec', 'AppxProvisioning', 'WebDownload', 'WebDownloadStall')]
+        [ValidateSet('WingetInstall', 'WingetDownload', 'WingetUninstall', 'WingetListCheck', 'WingetVersion', 'WingetList', 'WingetSourceUpdate', 'WingetSourceReset', 'MsiExec', 'AppxProvisioning', 'WebDownload', 'WebDownloadStall', 'WebLookup')]
         [string]$Operation
     )
 
@@ -59,6 +63,7 @@ function Get-ProcessTimeoutSeconds {
         'AppxProvisioning' { return 600 }
         'WebDownload' { return 300 }
         'WebDownloadStall' { return 120 }
+        'WebLookup' { return 30 }
     }
 }
 
@@ -72,14 +77,28 @@ function Get-ProcessTimeoutSeconds {
     the body after HttpClient's timeout has ended). PowerShell 7.4 and newer add
     -OperationTimeoutSeconds, which bounds a stall while the body arrives; both are passed where
     they exist. On 7.3 and older a download that stops mid-file still waits for ever.
+.PARAMETER Lookup
+    For a small file the run can do without (WebLookup): both limits are 30 seconds instead of the
+    download limits.
 .RETURNS
     [hashtable] TimeoutSec, plus OperationTimeoutSeconds when Invoke-WebRequest has it.
 #>
 function Get-WebDownloadTimeoutParameters {
-    $parameters = @{ TimeoutSec = (Get-ProcessTimeoutSeconds -Operation WebDownload) }
+    param (
+        [Parameter(Mandatory = $false)]
+        [switch]$Lookup
+    )
+
+    $timeoutOperation = 'WebDownload'
+    $stallOperation = 'WebDownloadStall'
+    if ($Lookup) {
+        $timeoutOperation = 'WebLookup'
+        $stallOperation = 'WebLookup'
+    }
+    $parameters = @{ TimeoutSec = (Get-ProcessTimeoutSeconds -Operation $timeoutOperation) }
     $command = Get-Command -Name 'Invoke-WebRequest' -ErrorAction SilentlyContinue
     if ($command -and $command.Parameters -and $command.Parameters.ContainsKey('OperationTimeoutSeconds')) {
-        $parameters['OperationTimeoutSeconds'] = (Get-ProcessTimeoutSeconds -Operation WebDownloadStall)
+        $parameters['OperationTimeoutSeconds'] = (Get-ProcessTimeoutSeconds -Operation $stallOperation)
     }
     return $parameters
 }

@@ -438,6 +438,9 @@ Describe 'Winget-AutoUpdate integration (issue #168)' {
             # Framework present by default; the framework-gate tests below override it. Without
             # this mock the real query would run on the CI runner, which lacks the framework.
             Mock Get-WindowsAppRuntimeStatus { [pscustomobject]@{ Present = $true; Detail = 'X64 8000.921.1539.0' } }
+            # What the latest winget release needs (work-order item 32) is read from GitHub; here it
+            # is the built-in requirement, and nothing is downloaded for it.
+            Mock Get-WindowsAppRuntimeRequirement { Get-DefaultWindowsAppRuntimeRequirement }
             # Installing the framework (work-order item 31) has its own Describe below. Here it
             # fails by default, so the framework-missing tests keep their WAU skip and nothing is
             # downloaded or provisioned on the machine running the tests.
@@ -1158,6 +1161,7 @@ Describe 'Winget-AutoUpdate integration (issue #168)' {
     Context 'Install-WingetAutoUpdate holds the MSI open from the hash until msiexec has finished (review finding P2-21)' {
         BeforeEach {
             Mock Get-WindowsAppRuntimeStatus { [pscustomobject]@{ Present = $true; Detail = 'X64 8000.921.1539.0' } }
+            Mock Get-WindowsAppRuntimeRequirement { Get-DefaultWindowsAppRuntimeRequirement }
             Mock Disable-WauLogonTrigger { $false }
             Mock Test-WauInstalled { $false }
             Mock Get-WauTaskHealth { New-TestWauTaskHealth }
@@ -1447,6 +1451,415 @@ Describe 'WindowsAppRuntime framework gate for Winget-AutoUpdate (issues #279/#2
             Mock powershell.exe { $global:LASTEXITCODE = 1 }
 
             { Get-WindowsAppRuntimePackageInfo } | Should -Throw '*Get-AppxPackage -AllUsers failed*'
+        }
+    }
+}
+
+# Work-order item 32 (product-F4): every WAU run installs the newest winget release, so the gate
+# checks for what that release needs, read from its DesktopAppInstaller_Dependencies.json, instead
+# of only the Microsoft.WindowsAppRuntime.1.8 >= 8000.616.304.0 constant. tests/fixtures/
+# winget-dependencies holds the files of real releases (v1.29.380, the latest on 2026-10-04,
+# v1.12.350 and v1.11.510, byte for byte) and per-architecture.json, a made-up file with a list per
+# architecture (no release has one; it shows that such a file is read for this PC's architecture).
+Describe 'Windows App Runtime requirement from the latest winget release (work-order item 32)' {
+    BeforeAll {
+        $script:fixtureDir = Join-Path $PSScriptRoot 'fixtures/winget-dependencies'
+        $script:latestUrl = 'https://github.com/microsoft/winget-cli/releases/latest/download/DesktopAppInstaller_Dependencies.json'
+        function Get-DependenciesFixture {
+            param ([Parameter(Mandatory = $true)][string]$Name)
+            Get-Content -Raw -LiteralPath (Join-Path $script:fixtureDir $Name)
+        }
+        # Invoke-WebRequest's answer for a GitHub release asset: application/octet-stream, which
+        # PowerShell 7 returns as bytes.
+        function New-TestAssetResponse {
+            param ([Parameter(Mandatory = $true)][AllowEmptyString()][string]$Text)
+            [pscustomobject]@{ StatusCode = 200; Content = [System.Text.Encoding]::UTF8.GetBytes($Text) }
+        }
+    }
+
+    Context 'ConvertFrom-WingetDependenciesJson' {
+        It 'reads Microsoft.WindowsAppRuntime.1.8 >= 8000.616.304.0 from the current release (<File>), and nothing else' -ForEach @(
+            @{ File = 'v1.29.380.json' }
+            @{ File = 'v1.12.350.json' }
+        ) {
+            $frameworks = @(ConvertFrom-WingetDependenciesJson -Json (Get-DependenciesFixture -Name $File) -Architecture 'X64')
+
+            $frameworks.Count | Should -Be 1
+            $frameworks[0].Name | Should -Be 'Microsoft.WindowsAppRuntime.1.8'
+            $frameworks[0].MinimumVersion | Should -Be ([version]'8000.616.304.0')
+        }
+
+        It 'returns nothing for a release that needs no Windows App Runtime (v1.11.510: UI.Xaml and VCLibs)' {
+            @(ConvertFrom-WingetDependenciesJson -Json (Get-DependenciesFixture -Name 'v1.11.510.json') -Architecture 'X64').Count | Should -Be 0
+        }
+
+        It 'reads a list per architecture for this PC''s architecture: <Architecture>' -ForEach @(
+            @{ Architecture = 'X64'; Name = 'Microsoft.WindowsAppRuntime.2'; Version = '2000.120.5.0' }
+            @{ Architecture = 'X86'; Name = 'Microsoft.WindowsAppRuntime.2'; Version = '2000.120.5.0' }
+            @{ Architecture = 'Arm64'; Name = 'Microsoft.WindowsAppRuntime.1.8'; Version = '8000.1001.5.0' }
+        ) {
+            $frameworks = @(ConvertFrom-WingetDependenciesJson -Json (Get-DependenciesFixture -Name 'per-architecture.json') -Architecture $Architecture)
+
+            $frameworks.Count | Should -Be 1
+            $frameworks[0].Name | Should -Be $Name
+            $frameworks[0].MinimumVersion | Should -Be ([version]$Version)
+        }
+
+        It 'reads a list per architecture under Dependencies too' {
+            $json = '{"Dependencies":{"arm64":[{"Name":"Microsoft.WindowsAppRuntime.1.8","Version":"8000.700.0.0"}],"x64":[{"Name":"Microsoft.WindowsAppRuntime.1.8","Version":"8000.616.304.0"}]}}'
+
+            $frameworks = @(ConvertFrom-WingetDependenciesJson -Json $json -Architecture 'Arm64')
+
+            $frameworks.Count | Should -Be 1
+            $frameworks[0].MinimumVersion | Should -Be ([version]'8000.700.0.0')
+        }
+
+        It 'keeps the highest version of a framework listed twice, and every family listed' {
+            $json = '{"Dependencies":[{"Name":"Microsoft.WindowsAppRuntime.1.8","Version":"8000.616.304.0"},{"Name":"Microsoft.WindowsAppRuntime.1.8","Version":"8000.700.1.0"},{"Name":"Microsoft.WindowsAppRuntime.2","Version":"2000.1.0.0"}]}'
+
+            $frameworks = @(ConvertFrom-WingetDependenciesJson -Json $json)
+
+            $frameworks.Count | Should -Be 2
+            ($frameworks | Where-Object Name -EQ 'Microsoft.WindowsAppRuntime.1.8').MinimumVersion | Should -Be ([version]'8000.700.1.0')
+            ($frameworks | Where-Object Name -EQ 'Microsoft.WindowsAppRuntime.2').MinimumVersion | Should -Be ([version]'2000.1.0.0')
+        }
+
+        It 'reads a file that starts with a byte order mark' {
+            $json = [string][char]0xFEFF + (Get-DependenciesFixture -Name 'v1.29.380.json')
+
+            @(ConvertFrom-WingetDependenciesJson -Json $json).Count | Should -Be 1
+        }
+
+        It 'throws for <Case>' -ForEach @(
+            @{ Case = 'text that is not JSON (an HTML error page)'; Json = '<html><body>Not Found</body></html>'; Message = 'it is not valid JSON*' }
+            @{ Case = 'an empty file'; Json = ''; Message = 'it is not a JSON object' }
+            @{ Case = 'a JSON array'; Json = '[]'; Message = 'it is not a JSON object' }
+            @{ Case = 'no Dependencies list'; Json = '{"Packages":[]}'; Message = 'it holds no Dependencies list*' }
+            @{ Case = 'a list per architecture without this one'; Json = '{"x64":{"Dependencies":[]}}'; Message = 'it holds no Dependencies list, for all architectures or for Arm64' }
+            @{ Case = 'an entry with no Version'; Json = '{"Dependencies":[{"Name":"Microsoft.VCLibs.140.00"}]}'; Message = 'one of its entries has no Name or no Version' }
+            @{ Case = 'an entry that is not an object'; Json = '{"Dependencies":["Microsoft.WindowsAppRuntime.1.8"]}'; Message = 'one of its entries has no Name or no Version' }
+            @{ Case = 'a version that is not one'; Json = '{"Dependencies":[{"Name":"Microsoft.WindowsAppRuntime.1.8","Version":"latest"}]}'; Message = "'latest' (Microsoft.WindowsAppRuntime.1.8) is not a version" }
+            @{ Case = 'a name that is not a package name (it goes into a Windows PowerShell command)'; Json = '{"Dependencies":[{"Name":"Microsoft.WindowsAppRuntime.1.8''; Remove-Item C:\\x; ''","Version":"8000.616.304.0"}]}'; Message = '*is not a package name' }
+        ) {
+            { ConvertFrom-WingetDependenciesJson -Json $Json -Architecture 'Arm64' } | Should -Throw $Message
+        }
+    }
+
+    Context 'Get-WindowsAppRuntimeRequirement' {
+        BeforeEach {
+            $script:warnings = @()
+            $script:infos = @()
+            Mock Write-WarningMessage { $script:warnings += $Message }
+            Mock Write-Info { $script:infos += $Message }
+            Mock Get-OSArchitecture { 'X64' }
+            $script:responseText = Get-DependenciesFixture -Name 'v1.29.380.json'
+            Mock Invoke-WebRequest { New-TestAssetResponse -Text $script:responseText }
+        }
+
+        It 'reads the latest winget release''s DesktopAppInstaller_Dependencies.json, with the 30-second lookup limit' {
+            $requirement = Get-WindowsAppRuntimeRequirement
+
+            $requirement.Source | Should -Be 'LatestRelease'
+            @($requirement.Frameworks).Count | Should -Be 1
+            $requirement.Frameworks[0].Name | Should -Be 'Microsoft.WindowsAppRuntime.1.8'
+            $requirement.Frameworks[0].MinimumVersion | Should -Be ([version]'8000.616.304.0')
+            Should -Invoke Invoke-WebRequest -Times 1 -Exactly -ParameterFilter {
+                $Uri -eq $script:latestUrl -and $TimeoutSec -eq 30 -and $UseBasicParsing -and -not $OutFile
+            }
+            $script:infos | Should -Be @('The latest winget release needs Microsoft.WindowsAppRuntime.1.8 >= 8000.616.304.0 (its DesktopAppInstaller_Dependencies.json).')
+            $script:warnings | Should -BeNullOrEmpty
+        }
+
+        It 'bounds a stall while the file arrives too, where Invoke-WebRequest can (PowerShell 7.4 and newer)' -Skip:(-not (Get-Command Invoke-WebRequest).Parameters.ContainsKey('OperationTimeoutSeconds')) {
+            $null = Get-WindowsAppRuntimeRequirement
+
+            Should -Invoke Invoke-WebRequest -Times 1 -Exactly -ParameterFilter { $OperationTimeoutSeconds -eq 30 }
+        }
+
+        It 'reads a text answer as well as bytes' {
+            Mock Invoke-WebRequest { [pscustomobject]@{ StatusCode = 200; Content = $script:responseText } }
+
+            (Get-WindowsAppRuntimeRequirement).Source | Should -Be 'LatestRelease'
+        }
+
+        It 'finds a newer framework family the latest release needs' {
+            $script:responseText = '{"Dependencies":[{"Name":"Microsoft.VCLibs.140.00.UWPDesktop","Version":"14.0.33728.0"},{"Name":"Microsoft.WindowsAppRuntime.2","Version":"2000.120.5.0"}]}'
+
+            $requirement = Get-WindowsAppRuntimeRequirement
+
+            $requirement.Source | Should -Be 'LatestRelease'
+            $requirement.Frameworks[0].Name | Should -Be 'Microsoft.WindowsAppRuntime.2'
+            $requirement.Frameworks[0].MinimumVersion | Should -Be ([version]'2000.120.5.0')
+        }
+
+        It 'reads a list per architecture for the OS architecture' {
+            $script:responseText = Get-DependenciesFixture -Name 'per-architecture.json'
+            Mock Get-OSArchitecture { 'Arm64' }
+
+            $requirement = Get-WindowsAppRuntimeRequirement
+
+            $requirement.Frameworks[0].Name | Should -Be 'Microsoft.WindowsAppRuntime.1.8'
+            $requirement.Frameworks[0].MinimumVersion | Should -Be ([version]'8000.1001.5.0')
+        }
+
+        It 'falls back to the built-in requirement, with a warning and without throwing, when <Case>' -ForEach @(
+            @{ Case = 'there is no network'; Setup = { Mock Invoke-WebRequest { throw 'No such host is known. (github.com:443)' } }; Problem = 'No such host is known. (github.com:443)' }
+            @{ Case = 'the request times out'; Setup = { Mock Invoke-WebRequest { throw 'The request was canceled due to the configured HttpClient.Timeout of 30 seconds elapsing.' } }; Problem = 'The request was canceled due to the configured HttpClient.Timeout of 30 seconds elapsing' }
+            @{ Case = 'GitHub refuses it (rate limit, proxy)'; Setup = { Mock Invoke-WebRequest { throw 'Response status code does not indicate success: 403 (rate limit exceeded).' } }; Problem = 'Response status code does not indicate success: 403 (rate limit exceeded)' }
+            @{ Case = 'the file is not JSON (a captive portal page)'; Setup = { $script:responseText = '<html>Sign in to the network</html>' }; Problem = 'it is not valid JSON*' }
+            @{ Case = 'the file has a shape this does not know'; Setup = { $script:responseText = '{"Packages":[]}' }; Problem = 'it holds no Dependencies list*' }
+            @{ Case = 'the answer is far too large to be the file'; Setup = { $script:responseText = '{"Dependencies":[]}' + (' ' * 70000) }; Problem = 'it is 70019 characters long, not a list of dependencies' }
+            @{ Case = 'the answer is empty'; Setup = { Mock Invoke-WebRequest { [pscustomobject]@{ StatusCode = 200; Content = $null } } }; Problem = 'it is not a JSON object' }
+        ) {
+            . $Setup
+
+            $requirement = Get-WindowsAppRuntimeRequirement
+
+            $requirement.Source | Should -Be 'BuiltIn'
+            @($requirement.Frameworks).Count | Should -Be 1
+            $requirement.Frameworks[0].Name | Should -Be 'Microsoft.WindowsAppRuntime.1.8'
+            $requirement.Frameworks[0].MinimumVersion | Should -Be ([version]'8000.616.304.0')
+            $requirement.Detail | Should -BeLike "the built-in requirement (the latest winget release's DesktopAppInstaller_Dependencies.json could not be read: $Problem)"
+            $script:warnings.Count | Should -Be 1
+            $script:warnings[0] | Should -BeLike "Could not read which Windows App Runtime the latest winget release needs ($script:latestUrl`: $Problem); checking for the built-in requirement, Microsoft.WindowsAppRuntime.1.8 >= 8000.616.304.0."
+        }
+
+        It 'falls back to the built-in requirement, with a warning, when the latest release lists no Windows App Runtime' {
+            $script:responseText = Get-DependenciesFixture -Name 'v1.11.510.json'
+
+            $requirement = Get-WindowsAppRuntimeRequirement
+
+            $requirement.Source | Should -Be 'BuiltIn'
+            $requirement.Frameworks[0].Name | Should -Be 'Microsoft.WindowsAppRuntime.1.8'
+            $script:warnings | Should -Be @('The latest winget release lists no Microsoft.WindowsAppRuntime dependency in its DesktopAppInstaller_Dependencies.json; checking for the built-in requirement, Microsoft.WindowsAppRuntime.1.8 >= 8000.616.304.0, anyway.')
+        }
+
+        It 'still reads a file with one list for all architectures when the OS architecture cannot be read' {
+            Mock Get-OSArchitecture { throw 'The OS architecture could not be read.' }
+
+            (Get-WindowsAppRuntimeRequirement).Source | Should -Be 'LatestRelease'
+        }
+    }
+
+    Context 'Get-WindowsAppRuntimeStatus checks for what the requirement names' {
+        BeforeAll {
+            $script:osArch = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
+            function New-TestRequirement {
+                param ([string]$Name, [string]$MinimumVersion)
+                [pscustomobject]@{ Frameworks = @([pscustomobject]@{ Name = $Name; MinimumVersion = [version]$MinimumVersion }); Source = 'LatestRelease'; Detail = 'test' }
+            }
+        }
+
+        BeforeEach {
+            # This PC has the 1.8 framework the installer pins, and no other family.
+            Mock Get-WindowsAppRuntimePackageInfo { }
+            Mock Get-WindowsAppRuntimePackageInfo { [pscustomobject]@{ Version = [version]'8000.994.2142.0'; Architecture = $script:osArch } } -ParameterFilter { $Name -eq 'Microsoft.WindowsAppRuntime.1.8' }
+        }
+
+        It 'checks for Microsoft.WindowsAppRuntime.1.8 >= 8000.616.304.0 when given no requirement' {
+            $status = Get-WindowsAppRuntimeStatus
+
+            $status.Present | Should -BeTrue
+            Should -Invoke Get-WindowsAppRuntimePackageInfo -Times 1 -Exactly -ParameterFilter { $Name -eq 'Microsoft.WindowsAppRuntime.1.8' }
+        }
+
+        It 'is not satisfied by Microsoft.WindowsAppRuntime.1.8 when the latest winget needs another family' {
+            $status = Get-WindowsAppRuntimeStatus -Requirement (New-TestRequirement -Name 'Microsoft.WindowsAppRuntime.2' -MinimumVersion '2000.120.5.0')
+
+            $status.Present | Should -BeFalse
+            $status.Detail | Should -Be "Microsoft.WindowsAppRuntime.2 >= 2000.120.5.0 for $script:osArch required; found: none registered"
+            Should -Invoke Get-WindowsAppRuntimePackageInfo -Times 1 -Exactly -ParameterFilter { $Name -eq 'Microsoft.WindowsAppRuntime.2' }
+        }
+
+        It 'does not take a newer family for a dependency on Microsoft.WindowsAppRuntime.1.8' {
+            # This PC has only Microsoft.WindowsAppRuntime.2.
+            Mock Get-WindowsAppRuntimePackageInfo { } -ParameterFilter { $Name -eq 'Microsoft.WindowsAppRuntime.1.8' }
+            Mock Get-WindowsAppRuntimePackageInfo { [pscustomobject]@{ Version = [version]'2000.120.5.0'; Architecture = $script:osArch } } -ParameterFilter { $Name -eq 'Microsoft.WindowsAppRuntime.2' }
+
+            (Get-WindowsAppRuntimeStatus -Requirement (New-TestRequirement -Name 'Microsoft.WindowsAppRuntime.1.8' -MinimumVersion '8000.616.304.0')).Present | Should -BeFalse
+        }
+
+        It 'is not satisfied by a 1.8 build older than the latest winget needs' {
+            $status = Get-WindowsAppRuntimeStatus -Requirement (New-TestRequirement -Name 'Microsoft.WindowsAppRuntime.1.8' -MinimumVersion '8000.1200.0.0')
+
+            $status.Present | Should -BeFalse
+            $status.Detail | Should -Be "Microsoft.WindowsAppRuntime.1.8 >= 8000.1200.0.0 for $script:osArch required; found: $script:osArch 8000.994.2142.0"
+        }
+
+        It 'is satisfied by the other family when this PC has it' {
+            Mock Get-WindowsAppRuntimePackageInfo { [pscustomobject]@{ Version = [version]'2000.130.0.0'; Architecture = $script:osArch } } -ParameterFilter { $Name -eq 'Microsoft.WindowsAppRuntime.2' }
+
+            (Get-WindowsAppRuntimeStatus -Requirement (New-TestRequirement -Name 'Microsoft.WindowsAppRuntime.2' -MinimumVersion '2000.120.5.0')).Present | Should -BeTrue
+        }
+
+        It 'needs every framework the requirement names' {
+            $requirement = [pscustomobject]@{
+                Frameworks = @(
+                    [pscustomobject]@{ Name = 'Microsoft.WindowsAppRuntime.1.8'; MinimumVersion = [version]'8000.616.304.0' }
+                    [pscustomobject]@{ Name = 'Microsoft.WindowsAppRuntime.2'; MinimumVersion = [version]'2000.1.0.0' }
+                )
+                Source     = 'LatestRelease'
+                Detail     = 'test'
+            }
+
+            $status = Get-WindowsAppRuntimeStatus -Requirement $requirement
+
+            $status.Present | Should -BeFalse
+            $status.Detail | Should -Match '^Microsoft\.WindowsAppRuntime\.1\.8 >= 8000\.616\.304\.0 for \w+ required; found: \w+ 8000\.994\.2142\.0; Microsoft\.WindowsAppRuntime\.2 >= 2000\.1\.0\.0 for \w+ required; found: none registered$'
+        }
+    }
+
+    # The finding itself: Install-WingetAutoUpdate with the real gate and the real framework
+    # install, and only Windows (the AppX query, msiexec, the downloads) mocked. Before item 32 the
+    # gate checked for Microsoft.WindowsAppRuntime.1.8 >= 8000.616.304.0 whatever winget needed, so
+    # a PC with the 1.8 framework got WAU, whose next run installs a winget that cannot start there.
+    Context 'Install-WingetAutoUpdate checks for what the latest winget release needs' {
+        BeforeAll {
+            $script:osArch = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
+        }
+
+        BeforeEach {
+            Mock Write-Host { }
+            Mock Write-Success { }
+            $script:infos = @()
+            $script:warnings = @()
+            $script:errors = @()
+            Mock Write-Info { $script:infos += $Message }
+            Mock Write-WarningMessage { $script:warnings += $Message }
+            Mock Write-ErrorMessage { $script:errors += $Message }
+
+            # This PC: the 1.8 framework the installer pins, registered; no other family.
+            Mock Get-WindowsAppRuntimePackageInfo { }
+            Mock Get-WindowsAppRuntimePackageInfo { [pscustomobject]@{ Version = [version]'8000.994.2142.0'; Architecture = $script:osArch } } -ParameterFilter { $Name -eq 'Microsoft.WindowsAppRuntime.1.8' }
+            Mock Get-WindowsAppRuntimeProvisionedInfo { }
+            Mock Get-OSArchitecture { $script:osArch }
+            Mock Test-IsAdmin { $true }
+            Mock Get-WindowsBuildNumber { 26100 }
+            Mock Invoke-AppxProvisioning { throw 'must not provision a framework in this test' }
+
+            # The latest winget release's DesktopAppInstaller_Dependencies.json; the WAU MSI.
+            $script:dependenciesJson = Get-DependenciesFixture -Name 'v1.29.380.json'
+            Mock Invoke-WebRequest { New-TestAssetResponse -Text $script:dependenciesJson } -ParameterFilter { $Uri -eq $script:latestUrl }
+            Mock Invoke-WebRequest { throw "unexpected download: $Uri" }
+            Mock Invoke-WebRequest { } -ParameterFilter { $Uri -eq (Get-WauPin).MsiUrl }
+
+            Mock Test-WauInstalled { $false }
+            Mock Disable-WauLogonTrigger { $false }
+            Mock New-WauStagingDirectory { Join-Path $TestDrive 'wau-msi-item32' }
+            Mock Open-ReadLockedFile { [System.IO.MemoryStream]::new() }
+            Mock Get-FileHash { @{ Hash = (Get-WauPin).Sha256 } }
+            Mock Invoke-ExternalProcess { New-TestProcessResult -ExitCode 0 }
+            Mock New-WauMsiLogPath { Join-Path $TestDrive "wau-msi-$Action-$Attempt.log" }
+            Mock Get-WauTaskHealth { New-TestWauTaskHealth }
+            Mock Write-WauTaskHealth { }
+            Mock Remove-Item { }
+        }
+
+        It 'installs WAU when the PC has what the latest release needs (today: Microsoft.WindowsAppRuntime.1.8 >= 8000.616.304.0)' {
+            $result = Install-WingetAutoUpdate
+
+            $result.Status | Should -Be 'Configured'
+            Should -Invoke Invoke-WebRequest -Times 1 -Exactly -ParameterFilter { $Uri -eq $script:latestUrl }
+            Should -Invoke Invoke-ExternalProcess -Times 1 -Exactly
+            $script:errors | Should -BeNullOrEmpty
+        }
+
+        It 'skips WAU, without installing the pinned 1.8 framework, when the latest release needs another family' {
+            $script:dependenciesJson = '{"Dependencies":[{"Name":"Microsoft.VCLibs.140.00.UWPDesktop","Version":"14.0.33728.0"},{"Name":"Microsoft.WindowsAppRuntime.2","Version":"2000.120.5.0"}]}'
+
+            $result = Install-WingetAutoUpdate
+
+            $result.Status | Should -Be 'FrameworkMissing'
+            $result.FrameworkMissing | Should -BeTrue
+            $result.FrameworkName | Should -Be 'Microsoft.WindowsAppRuntime.2'
+            $result.FrameworkInstallError | Should -Be 'the latest winget release needs Microsoft.WindowsAppRuntime.2 >= 2000.120.5.0, and the framework this installer installs, Microsoft.WindowsAppRuntime.1.8 8000.994.2142.0, does not meet that; a newer version of this installer is needed'
+            Should -Invoke Invoke-WebRequest -Times 0 -Exactly -ParameterFilter { $Uri -eq (Get-WauPin).MsiUrl }
+            Should -Invoke Invoke-WebRequest -Times 0 -Exactly -ParameterFilter { $Uri -eq (Get-WindowsAppRuntimePin).PackageUrl }
+            Should -Invoke Invoke-ExternalProcess -Times 0 -Exactly
+            Should -Invoke New-WauStagingDirectory -Times 0 -Exactly
+            $script:errors | Should -Contain "Windows App Runtime: NOT INSTALLED - $($result.FrameworkInstallError)."
+            ($script:errors -join "`n") | Should -Match ([regex]::Escape("Winget-AutoUpdate was NOT installed: Microsoft.WindowsAppRuntime.2 is missing (Microsoft.WindowsAppRuntime.2 >= 2000.120.5.0 for $script:osArch required; found: none registered).") + '.* Install the Windows App Runtime 2 \(update App Installer from the Microsoft Store, or install Microsoft''s Windows App SDK 2 runtime\), then re-run this installer\.')
+        }
+
+        It 'skips WAU, without installing the pinned framework, when the latest release needs a newer 1.8 build than the pin' {
+            $script:dependenciesJson = '{"Dependencies":[{"Name":"Microsoft.WindowsAppRuntime.1.8","Version":"8000.1200.0.0"}]}'
+
+            $result = Install-WingetAutoUpdate
+
+            $result.Status | Should -Be 'FrameworkMissing'
+            $result.FrameworkName | Should -Be 'Microsoft.WindowsAppRuntime.1.8'
+            $result.FrameworkInstallError | Should -Be 'the latest winget release needs Microsoft.WindowsAppRuntime.1.8 >= 8000.1200.0.0, and the framework this installer installs, Microsoft.WindowsAppRuntime.1.8 8000.994.2142.0, does not meet that; a newer version of this installer is needed'
+            Should -Invoke Invoke-WebRequest -Times 0 -Exactly -ParameterFilter { $Uri -eq (Get-WindowsAppRuntimePin).PackageUrl }
+            Should -Invoke Invoke-ExternalProcess -Times 0 -Exactly
+        }
+
+        It 'reports an installed WAU at risk when the latest release needs a framework the PC lacks and the installer cannot install' {
+            $script:dependenciesJson = '{"Dependencies":[{"Name":"Microsoft.WindowsAppRuntime.2","Version":"2000.120.5.0"}]}'
+            Mock Test-WauInstalled { $true }
+            Mock Get-InstalledWauInfo { [pscustomobject]@{ Version = [version](Get-WauPin).Version; ProductCode = (Get-WauPin).ProductCode } }
+
+            $result = Install-WingetAutoUpdate
+
+            $result.Status | Should -Be 'AlreadyPresent'
+            $result.FrameworkMissing | Should -BeTrue
+            $result.FrameworkName | Should -Be 'Microsoft.WindowsAppRuntime.2'
+            ($script:errors -join "`n") | Should -Match 'Winget-AutoUpdate is installed, but Microsoft\.WindowsAppRuntime\.2 is missing'
+        }
+
+        It 'installs WAU when the PC already has the other family the latest release needs' {
+            $script:dependenciesJson = '{"Dependencies":[{"Name":"Microsoft.WindowsAppRuntime.2","Version":"2000.120.5.0"}]}'
+            Mock Get-WindowsAppRuntimePackageInfo { [pscustomobject]@{ Version = [version]'2000.130.0.0'; Architecture = $script:osArch } } -ParameterFilter { $Name -eq 'Microsoft.WindowsAppRuntime.2' }
+
+            $result = Install-WingetAutoUpdate
+
+            $result.Status | Should -Be 'Configured'
+            $script:errors | Should -BeNullOrEmpty
+        }
+
+        It 'passes the requirement it read to the check and to the framework install' {
+            Mock Get-WindowsAppRuntimeStatus { [pscustomobject]@{ Present = $false; Detail = 'none registered' } }
+            Mock Install-WindowsAppRuntimeFramework { [pscustomobject]@{ Installed = $true; Status = [pscustomobject]@{ Present = $true; Detail = 'installed' }; Reason = $null } }
+
+            $result = Install-WingetAutoUpdate
+
+            $result.Status | Should -Be 'Configured'
+            Should -Invoke Get-WindowsAppRuntimeStatus -Times 1 -Exactly -ParameterFilter { $Requirement.Source -eq 'LatestRelease' -and $Requirement.Frameworks[0].Name -eq 'Microsoft.WindowsAppRuntime.1.8' }
+            Should -Invoke Install-WindowsAppRuntimeFramework -Times 1 -Exactly -ParameterFilter { $Requirement.Source -eq 'LatestRelease' }
+        }
+
+        It 'never stops on the lookup: when GitHub cannot be reached it checks for the built-in requirement and goes on' {
+            Mock Invoke-WebRequest { throw 'No such host is known. (github.com:443)' } -ParameterFilter { $Uri -eq $script:latestUrl }
+
+            $result = Install-WingetAutoUpdate
+
+            $result.Status | Should -Be 'Configured'
+            Should -Invoke Get-WindowsAppRuntimePackageInfo -Times 1 -Exactly -ParameterFilter { $Name -eq 'Microsoft.WindowsAppRuntime.1.8' }
+            $script:warnings | Should -Contain "Could not read which Windows App Runtime the latest winget release needs ($script:latestUrl`: No such host is known. (github.com:443)); checking for the built-in requirement, Microsoft.WindowsAppRuntime.1.8 >= 8000.616.304.0."
+        }
+
+        It 'does not look anything up under -WhatIf' {
+            $result = Install-WingetAutoUpdate -WhatIf
+
+            $result.Status | Should -Be 'DryRun'
+            Should -Invoke Invoke-WebRequest -Times 0 -Exactly
+        }
+    }
+
+    Context 'Get-WindowsAppRuntimePackageInfo queries the framework it is given' {
+        It 'puts the name into the Windows PowerShell query' -Skip:($PSVersionTable.PSEdition -ne 'Core') {
+            Mock powershell.exe { $global:LASTEXITCODE = 0; '2000.120.5.0|X64' }
+
+            $packages = @(Get-WindowsAppRuntimePackageInfo -Name 'Microsoft.WindowsAppRuntime.2')
+
+            $packages[0].Version | Should -Be ([version]'2000.120.5.0')
+            Should -Invoke powershell.exe -Times 1 -Exactly -ParameterFilter { "$($args[-1])" -match "Get-AppxPackage -AllUsers -Name 'Microsoft\.WindowsAppRuntime\.2' " }
+        }
+
+        It 'refuses a name that is not a package name, before anything runs' {
+            Mock powershell.exe { $global:LASTEXITCODE = 0 }
+
+            { Get-WindowsAppRuntimePackageInfo -Name "Microsoft.WindowsAppRuntime.1.8'; Remove-Item C:\x; '" } | Should -Throw
+            Should -Invoke powershell.exe -Times 0 -Exactly
         }
     }
 }

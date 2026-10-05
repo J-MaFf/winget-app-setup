@@ -44,7 +44,7 @@ BeforeAll {
 
 Describe 'Get-ProcessTimeoutSeconds' {
     It 'Gives every operation a positive limit' {
-        foreach ($operation in 'WingetInstall', 'WingetDownload', 'WingetUninstall', 'WingetListCheck', 'WingetVersion', 'WingetList', 'WingetSourceUpdate', 'WingetSourceReset', 'MsiExec', 'WebDownload', 'WebDownloadStall') {
+        foreach ($operation in 'WingetInstall', 'WingetDownload', 'WingetUninstall', 'WingetListCheck', 'WingetVersion', 'WingetList', 'WingetSourceUpdate', 'WingetSourceReset', 'MsiExec', 'AppxProvisioning', 'WebDownload', 'WebDownloadStall', 'WebLookup') {
             Get-ProcessTimeoutSeconds -Operation $operation | Should -BeGreaterThan 0 -Because $operation
         }
     }
@@ -68,6 +68,10 @@ Describe 'Get-ProcessTimeoutSeconds' {
     It 'Gives the winget --version launch check 30 seconds, as Wait-WingetLaunchable''s probe had' {
         Get-ProcessTimeoutSeconds -Operation WingetVersion | Should -Be 30
     }
+
+    It 'Gives a lookup the run can do without 30 seconds (work-order item 32)' {
+        Get-ProcessTimeoutSeconds -Operation WebLookup | Should -Be 30
+    }
 }
 
 Describe 'Get-WebDownloadTimeoutParameters' {
@@ -79,6 +83,17 @@ Describe 'Get-WebDownloadTimeoutParameters' {
         $parameters = Get-WebDownloadTimeoutParameters
         if ((Get-Command Invoke-WebRequest).Parameters.ContainsKey('OperationTimeoutSeconds')) {
             $parameters.OperationTimeoutSeconds | Should -Be (Get-ProcessTimeoutSeconds -Operation WebDownloadStall)
+        }
+        else {
+            $parameters.ContainsKey('OperationTimeoutSeconds') | Should -Be $false
+        }
+    }
+
+    It 'Uses the lookup limit for both with -Lookup (work-order item 32)' {
+        $parameters = Get-WebDownloadTimeoutParameters -Lookup
+        $parameters.TimeoutSec | Should -Be (Get-ProcessTimeoutSeconds -Operation WebLookup)
+        if ((Get-Command Invoke-WebRequest).Parameters.ContainsKey('OperationTimeoutSeconds')) {
+            $parameters.OperationTimeoutSeconds | Should -Be (Get-ProcessTimeoutSeconds -Operation WebLookup)
         }
         else {
             $parameters.ContainsKey('OperationTimeoutSeconds') | Should -Be $false

@@ -434,6 +434,39 @@ Describe 'Install-WindowsAppRuntimeFramework (work-order item 31)' {
         $script:warnings | Should -Contain 'Microsoft.WindowsAppRuntime.1.8 is now on this PC, but Get-AppxProvisionedPackage does not list it as provisioned for all users; accounts that sign in for the first time may not get it.'
     }
 
+    # Work-order item 32: what the latest winget release needs decides whether the pinned 1.8
+    # framework is any use. A newer family does not stand in for 1.8, nor 1.8 for a newer family.
+    It 'installs nothing when the latest winget release needs <Case>' -ForEach @(
+        @{ Case = 'another framework family'; Name = 'Microsoft.WindowsAppRuntime.2'; MinimumVersion = '2000.120.5.0' }
+        @{ Case = 'a newer 1.8 build than the pinned one'; Name = 'Microsoft.WindowsAppRuntime.1.8'; MinimumVersion = '8000.1200.0.0' }
+    ) {
+        $latestRequirement = [pscustomobject]@{ Frameworks = @([pscustomobject]@{ Name = $Name; MinimumVersion = [version]$MinimumVersion }); Source = 'LatestRelease'; Detail = 'test' }
+
+        $result = Install-WindowsAppRuntimeFramework -Requirement $latestRequirement
+
+        $result.Installed | Should -BeFalse
+        $result.Reason | Should -Be "the latest winget release needs $Name >= $MinimumVersion, and the framework this installer installs, Microsoft.WindowsAppRuntime.1.8 8000.994.2142.0, does not meet that; a newer version of this installer is needed"
+        Should -Invoke New-WauStagingDirectory -Times 0 -Exactly
+        Should -Invoke Invoke-WebRequest -Times 0 -Exactly
+        Should -Invoke Invoke-AppxProvisioning -Times 0 -Exactly
+        $script:errors | Should -Be @("Windows App Runtime: NOT INSTALLED - $($result.Reason).")
+    }
+
+    It 'installs the pinned framework when it meets what the latest winget release needs, and checks for that afterwards' {
+        # Not named $requirement: the filter below must see only the parameter Get-WindowsAppRuntimeStatus got.
+        $latestRequirement = [pscustomobject]@{ Frameworks = @([pscustomobject]@{ Name = 'Microsoft.WindowsAppRuntime.1.8'; MinimumVersion = [version]'8000.994.2142.0' }); Source = 'LatestRelease'; Detail = 'test' }
+
+        $result = Install-WindowsAppRuntimeFramework -Requirement $latestRequirement
+
+        $result.Installed | Should -BeTrue
+        Should -Invoke Invoke-AppxProvisioning -Times 1 -Exactly
+        Should -Invoke Get-WindowsAppRuntimeStatus -Times 1 -Exactly -ParameterFilter { $Requirement.Source -eq 'LatestRelease' -and $Requirement.Frameworks[0].MinimumVersion -eq [version]'8000.994.2142.0' }
+    }
+
+    It 'names the framework family it installs in its pin' {
+        (Get-WindowsAppRuntimePin).FrameworkName | Should -Be 'Microsoft.WindowsAppRuntime.1.8'
+    }
+
     It 'never throws: an unexpected error becomes the reason' {
         Mock Get-WindowsBuildNumber { throw 'boom' }
 

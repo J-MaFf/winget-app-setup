@@ -9,6 +9,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- The Winget-AutoUpdate gate now checks for the Windows App Runtime the winget release WAU installs
+  actually needs, instead of only the constant `Microsoft.WindowsAppRuntime.1.8 >= 8000.616.304.0`
+  (work-order item 32, product-F4). WAU's `Install-Prerequisites` installs the latest winget-cli
+  release, so a winget that moved to a newer build or another framework family would have passed
+  the gate on a PC with the 1.8 framework and then left winget unusable after WAU's next run.
+  `Get-WindowsAppRuntimeRequirement` (`WingetAppSetup/Private/WauSupport.ps1`) reads the latest
+  release's `DesktopAppInstaller_Dependencies.json` through
+  `https://github.com/microsoft/winget-cli/releases/latest/download/DesktopAppInstaller_Dependencies.json`
+  (the release WAU's `api.github.com` query names, without the API's 60-calls-an-hour limit) with a
+  30-second limit (new operation `WebLookup` in `Get-ProcessTimeoutSeconds`,
+  `Get-WebDownloadTimeoutParameters -Lookup`), and `ConvertFrom-WingetDependenciesJson` takes its
+  `Microsoft.WindowsAppRuntime*` entries (a list per architecture is read too, for the PC's). When
+  the file cannot be read or lists no Windows App Runtime, the run warns and checks for the
+  built-in requirement (`Get-DefaultWindowsAppRuntimeRequirement`); the lookup never stops a run.
+  `Get-WindowsAppRuntimeStatus -Requirement` checks every framework the requirement names, by
+  package name (`Get-WindowsAppRuntimePackageInfo -Name`, which accepts only package-name
+  characters because the name goes into the Windows PowerShell query), so a newer family never
+  satisfies a dependency on 1.8. `Install-WindowsAppRuntimeFramework -Requirement` installs nothing
+  when the pinned framework (`Get-WindowsAppRuntimePin`, now with `FrameworkName`) does not meet
+  the requirement, with `Windows App Runtime: NOT INSTALLED - the latest winget release needs ...,
+  and the framework this installer installs, ..., does not meet that; a newer version of this
+  installer is needed`; WAU is then skipped (`NOT CONFIGURED`) or reported `AT RISK`, and the run
+  exits 8, unless the PC already has what winget needs. `Install-WingetAutoUpdate` returns the
+  needed framework as `FrameworkName`, and the summary's `NOT CONFIGURED` and `AT RISK` lines name
+  it (unchanged text for 1.8). `-WhatIf` does not look anything up. Fixtures:
+  `tests/fixtures/winget-dependencies` (the files of v1.29.380, v1.12.350 and v1.11.510, and a
+  made-up file with a list per architecture).
 - When `Microsoft.WindowsAppRuntime.1.8` is missing, the installer now installs a pinned, verified
   copy for every user of the PC before it sets up Winget-AutoUpdate (work-order item 31, finding
   R13-3). A freshly imaged PC, one whose Microsoft Store updates are blocked, and Windows Server lack
