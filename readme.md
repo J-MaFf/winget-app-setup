@@ -180,7 +180,80 @@ its result:
   `Skipped`, not `Installed`, when the retry pass configures it.
 
 The result is in the app's entry in [`last-run.json`](#run-result) (`postInstall`,
-`postInstallReason`). No catalog app has a hook yet.
+`postInstallReason`). `GlavSoft.TightVNC` has one (see below).
+
+### TightVNC server password
+
+winget installs TightVNC Server (`GlavSoft.TightVNC`, a machine-wide MSI) with its service running
+and the firewall open, but with no password: until it has one it refuses every viewer ("Server is
+not configured properly"), and with no control password any signed-in user can reconfigure or stop
+it from its tray icon. Its post-install hook, `Set-TightVncServerPassword`, sets both from a secret
+you supply at run time. The repository is public, so the password is never stored in it.
+
+Where the password comes from, in this order:
+
+1. `WINGET_APP_SETUP_TIGHTVNC_PASSWORD` in the run's environment, and optionally a different
+   `WINGET_APP_SETUP_TIGHTVNC_CONTROL_PASSWORD` for the control interface (recommended). The run
+   reads them at its start and removes them from its own environment before winget or any
+   installer starts, so no process it starts inherits them.
+2. Otherwise, in an interactive run, a prompt at the start of the run, before anything is installed:
+   `TightVNC server password`, typed twice and shown as `*`. Press Enter without typing to skip
+   it. It is asked only when TightVNC Server does not have its passwords yet, so a re-run does not
+   ask again.
+3. Otherwise (a run as SYSTEM, `-NonInteractive`, or a skipped prompt) TightVNC is installed but
+   **not configured**: the run prints `TightVNC installed but NOT configured: no server password was
+   supplied, ...` and the summary's `Configuration: NOT DONE for GlavSoft.TightVNC (...)` line. The
+   exit code does not change. Supply the password and run the installer again.
+
+From an RMM tool such as Endpoint Central, set the variables in the script that starts the
+installer (it runs as SYSTEM), so the password lives in the RMM's script store, not in this
+repository:
+
+```powershell
+$env:WINGET_APP_SETUP_TIGHTVNC_PASSWORD = '<server password, up to 8 characters>'
+$env:WINGET_APP_SETUP_TIGHTVNC_CONTROL_PASSWORD = '<a different control password>'
+$env:WINGET_APP_SETUP_NONINTERACTIVE = '1'
+Set-ExecutionPolicy Unrestricted -Scope Process -Force; irm "https://raw.githubusercontent.com/J-MaFf/winget-app-setup/refs/heads/main/winget-app-install.ps1" | iex
+```
+
+Anyone who can read that script, in the RMM console or on the PC while it runs, can read the
+password, so limit who can. Do not pass the password as a script argument: arguments are on the
+process command line, which Windows process auditing and EDR tools record. Do not set the variables machine-wide or for a user
+account either (`setx`, System Properties), where other processes can read them. At a console, set
+them in an elevated session: a UAC relaunch starts a new process without them, which then asks for
+the password instead. The installer removes them from the PowerShell 7 process that installs. A
+console that started that process (Windows PowerShell running the bootstrap, or a console that ran
+`pwsh -File ...`) keeps its own copy until you close it or remove them
+(`Remove-Item Env:\WINGET_APP_SETUP_TIGHTVNC_*`).
+
+What the hook does, on every run that finds TightVNC installed:
+
+- It limits `HKLM\SOFTWARE\TightVNC\Server` to SYSTEM and Administrators, with no permissions
+  inherited from `HKLM\SOFTWARE`, before it writes a password there: the stored value is
+  reversible, and standard users could otherwise read it.
+- It writes `Password` and `ControlPassword` (8-byte `REG_BINARY` values in VNC's DES encoding) and
+  sets `UseVncAuthentication` and `UseControlAuthentication` to 1, directly in the registry. It
+  never passes the password to the MSI or `tvnserver.exe`, whose command lines winget and MSI logs
+  record. Without `WINGET_APP_SETUP_TIGHTVNC_CONTROL_PASSWORD`, the server password also protects
+  the control interface, with a warning.
+- It writes only the values that differ and then restarts the `tvnserver` service (or starts it
+  when it was stopped), which must end up running. A run with the same password changes nothing;
+  a run with a different one updates it. A run without a password keeps the passwords a configured
+  server already has.
+- VNC uses only the first 8 characters of a password: a longer one is used with a warning. A
+  password with a character that is not printable ASCII is refused (`Not configured`, the value is
+  not shown).
+- A step that fails (the key cannot be locked, the values do not read back, the service does not
+  start) makes TightVNC `Failed` (exit code 1, retried once).
+- The password and its encoded bytes are never printed, written to the log or put on a command
+  line. A dry run (`-WhatIf`) leaves the variables in place and says only whether each is set and
+  whether a real run could use it (`[DRY-RUN] TightVNC: ... (value not shown)`).
+
+VNC authentication is weak: 8 characters at most, DES, and no encryption of the session in
+TightVNC 2.x. Use a different, unpredictable password per site or PC, keep port 5900 reachable only
+from the helpdesk network (firewall scope or TightVNC's IP access control) or through a VPN, and
+consider dropping TightVNC from the catalog once Endpoint Central's own remote control is rolled
+out.
 
 ## Preview a run (`-WhatIf`)
 
@@ -204,7 +277,10 @@ and source-agreement state.
 ## Unattended runs
 
 The installer never asks a yes/no question on any path — the PowerShell 7 bootstrap and low disk
-space proceed without prompting. The one prompt left is Windows' own UAC prompt when the run is not
+space proceed without prompting. One question is left: TightVNC's server password, asked at the
+start of an interactive run when `WINGET_APP_SETUP_TIGHTVNC_PASSWORD` is not set and TightVNC
+Server has no password yet (see [TightVNC server password](#tightvnc-server-password)); a
+non-interactive run never asks it. The one other prompt is Windows' own UAC prompt when the run is not
 elevated (see [Administrator rights](#administrator-rights)), so an unattended run must already be
 elevated or run as SYSTEM (see
 [Running as SYSTEM](#running-as-system-rmm-tools-such-as-endpoint-central)): a non-interactive run
@@ -402,6 +478,9 @@ differently:
   is skipped (see [Windows Terminal defaults](#windows-terminal-defaults)).
 - Its messages are written for SYSTEM: no "cross-user elevation" banner and no advice to sign in
   to Windows as `NT AUTHORITY\SYSTEM`.
+- TightVNC gets its password only from `WINGET_APP_SETUP_TIGHTVNC_PASSWORD` (set it in the RMM
+  script; see [TightVNC server password](#tightvnc-server-password)). Without it TightVNC is
+  installed but not configured.
 - Started from Windows PowerShell 5.1 on a PC without PowerShell 7, it installs PowerShell 7 from
   the MSI download, not with winget, since SYSTEM has no `winget` command; the bootstrap says so
   instead of saying winget is missing. The MSI path reads its release list from GitHub, which can

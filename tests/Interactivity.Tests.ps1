@@ -167,7 +167,28 @@ Describe 'No install path asks a yes/no question (issue #230)' {
     # that path (the iex pipe leaves stdin alone), so no interactivity check can be trusted to
     # suppress a prompt - the prompts have to not exist. Structural, because there is no way to
     # assert "nothing blocked" from inside a test that would itself hang if something did.
+    #
+    # One exception, by the owner's decision (2026-10-04, work-order item 18, review finding
+    # P2-22): TightVNC's server password, which must never come from this public repository.
+    # Read-TightVncPasswordFromHost asks for it masked (Read-Host -AsSecureString) at the START of
+    # an interactive run, before anything is installed, and only when
+    # WINGET_APP_SETUP_TIGHTVNC_PASSWORD is not set and TightVNC Server has no password yet; Enter
+    # skips it (TightVNC is then reported not configured). Its gating is tested in
+    # TightVnc.Tests.ps1 and its place in the run in Install.Tests.ps1. Every other Read-Host or
+    # Pause is still banned.
     BeforeAll {
+        $script:SanctionedPromptFunction = 'Read-TightVncPasswordFromHost'
+
+        function Test-IsSanctionedPrompt {
+            param([System.Management.Automation.Language.CommandAst]$Command)
+            $parent = $Command.Parent
+            while ($parent -and $parent -isnot [System.Management.Automation.Language.FunctionDefinitionAst]) {
+                $parent = $parent.Parent
+            }
+            $masked = @($Command.CommandElements | Where-Object { $_ -is [System.Management.Automation.Language.CommandParameterAst] -and $_.ParameterName -eq 'AsSecureString' }).Count -eq 1
+            return ($parent -and $parent.Name -eq $script:SanctionedPromptFunction -and $Command.GetCommandName() -eq 'Read-Host' -and $masked)
+        }
+
         # Parse rather than grep. These files explain at length, in comment-based help, WHY they no
         # longer prompt — so a regex for 'Read-Host' matches the documentation of its own removal.
         # The AST only ever reports a real invocation, which is the thing that can actually block.
@@ -177,21 +198,44 @@ Describe 'No install path asks a yes/no question (issue #230)' {
                 $ast = [System.Management.Automation.Language.Parser]::ParseFile($file, [ref]$null, [ref]$null)
                 $ast.FindAll({ param($node) $node -is [System.Management.Automation.Language.CommandAst] }, $true) |
                     Where-Object { $_.GetCommandName() -in 'Read-Host', 'Pause' } |
+                    Where-Object { -not (Test-IsSanctionedPrompt -Command $_) } |
                     ForEach-Object { '{0}:{1}: {2}' -f (Split-Path $file -Leaf), $_.Extent.StartLineNumber, $_.Extent.Text }
             }
         }
+
+        function Get-CommandCaller {
+            param([string]$Path, [string]$CommandName)
+            $ast = [System.Management.Automation.Language.Parser]::ParseFile($Path, [ref]$null, [ref]$null)
+            $ast.FindAll({ param($node) $node -is [System.Management.Automation.Language.CommandAst] -and $node.GetCommandName() -eq $CommandName }, $true) |
+                ForEach-Object {
+                    $parent = $_.Parent
+                    while ($parent -and $parent -isnot [System.Management.Automation.Language.FunctionDefinitionAst]) {
+                        $parent = $parent.Parent
+                    }
+                    if ($parent) { $parent.Name } else { '<script>' }
+                }
+        }
     }
 
-    It 'No module source file calls Read-Host or Pause' {
+    It 'No module source file calls Read-Host or Pause, except the masked TightVNC password prompt' {
         $sourceFiles = Get-ChildItem -Path (Join-Path $script:WingetAppSetupRoot 'Private'), (Join-Path $script:WingetAppSetupRoot 'Public') -Filter '*.ps1' |
             Select-Object -ExpandProperty FullName
         Get-PromptingCommand -Path $sourceFiles | Should -BeNullOrEmpty
     }
 
-    It 'Neither shipped entry point calls Read-Host or Pause' {
+    It 'Neither shipped entry point calls Read-Host or Pause, except the masked TightVNC password prompt' {
         # The generated installer and the uninstaller are what users actually run. The uninstaller
         # is checked here because it is not generated - it hand-calls into the module, so nothing
         # else would catch a prompt reappearing in it.
         Get-PromptingCommand -Path $script:InstallerScriptPath, $script:UninstallerScriptPath | Should -BeNullOrEmpty
+    }
+
+    It 'Reaches the TightVNC password prompt only through Get-TightVncSecret, and never from the uninstaller' {
+        # Get-TightVncSecret asks only in an interactive run outside CI, once per run, and only when
+        # neither the environment nor TightVNC Server has a password (TightVnc.Tests.ps1).
+        $tightVncFile = Join-Path $script:WingetAppSetupRoot 'Private/TightVnc.ps1'
+        @(Get-CommandCaller -Path $tightVncFile -CommandName 'Read-Host' | Sort-Object -Unique) | Should -Be @($script:SanctionedPromptFunction)
+        @(Get-CommandCaller -Path $script:InstallerScriptPath -CommandName $script:SanctionedPromptFunction | Sort-Object -Unique) | Should -Be @('Get-TightVncSecret')
+        Get-Content -Path $script:UninstallerScriptPath -Raw | Should -Not -Match 'TightVnc'
     }
 }

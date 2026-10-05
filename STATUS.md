@@ -176,9 +176,22 @@ as the user. A hook's result is printed per app and recorded in `last-run.json` 
 `postInstallReason`): a failed hook makes the app failed (exit 1, retried once), `NotConfigured`
 gets a `Configuration: NOT DONE` line under the summary and leaves the exit code alone. A wrong
 value in any of these fields stops the run with exit 3, and the build guard checks a hook named by a
-string like an `install` function. No catalog app uses the new fields yet: the Reader entries keep
-their `condition` until `e2e/Assert-Install.ps1` decides applicability with the module's
-`Test-AppApplicability` instead of reading `condition` itself.
+string like an `install` function. The Reader entries keep their `condition` until
+`e2e/Assert-Install.ps1` decides applicability with the module's `Test-AppApplicability` instead of
+reading `condition` itself.
+
+TightVNC is no longer reported as installed while its server refuses every viewer (review finding
+P2-22, work-order item 18). Its catalog entry is the first with a `postInstall` hook,
+`Set-TightVncServerPassword` (`WingetAppSetup/Private/TightVnc.ps1`): the server and control
+passwords come from `WINGET_APP_SETUP_TIGHTVNC_PASSWORD` and
+`WINGET_APP_SETUP_TIGHTVNC_CONTROL_PASSWORD` (taken out of the environment at the start of the run,
+before winget starts), or from a prompt at the start of an interactive run when TightVNC Server has
+none yet, never from the repository. They are written straight to `HKLM\SOFTWARE\TightVNC\Server`
+after that key is limited to SYSTEM and Administrators, read back, and the service is restarted;
+the same password again changes nothing. Without one, TightVNC is `Not configured` with a loud
+line, and the exit code does not change. The encoding is checked against published TightVNC
+values; the registry, ACL and service steps are tested at their seams on Linux and need a real
+Windows check (below).
 
 The same branch changes CI. Fork pull requests that leave `windows-tests.yml` alone no longer run
 on the self-hosted win-test runner, and `claude.yml` calls the shared Claude workflow at a pinned
@@ -371,7 +384,7 @@ every repository secret.
 |------|-------------|
 | `WingetAppSetup/` | Source-of-truth PowerShell module (`.psd1` manifest + `.psm1` loader) |
 | `WingetAppSetup/Public/` | Exported functions: logging, winget core, app validation, Windows Terminal config, install orchestration (updates are outsourced to WAU), uninstall orchestration (`Invoke-WingetUninstall`) |
-| `WingetAppSetup/Private/` | Internal helpers: system info, elevation, graphical tools, the Windows PowerShell 5.1 → PowerShell 7 bootstrap, the machine-wide winget and provisioning lookups a run as SYSTEM uses (`MachineContext.ps1`), the run lock (`RunLock.ps1`), the `RESULT` line and `last-run.json` (`RunRecord.ps1`), the catalog entry fields and post-install hooks (`CatalogSchema.ps1`), log retention (`Housekeeping.ps1`), the uninstaller's per-app step (`AppUninstall.ps1`) and the pinned `Microsoft.WindowsAppRuntime.1.8` install before Winget-AutoUpdate (`WindowsAppRuntime.ps1`) |
+| `WingetAppSetup/Private/` | Internal helpers: system info, elevation, graphical tools, the Windows PowerShell 5.1 → PowerShell 7 bootstrap, the machine-wide winget and provisioning lookups a run as SYSTEM uses (`MachineContext.ps1`), the run lock (`RunLock.ps1`), the `RESULT` line and `last-run.json` (`RunRecord.ps1`), the catalog entry fields and post-install hooks (`CatalogSchema.ps1`), TightVNC's password hook (`TightVnc.ps1`), log retention (`Housekeeping.ps1`), the uninstaller's per-app step (`AppUninstall.ps1`) and the pinned `Microsoft.WindowsAppRuntime.1.8` install before Winget-AutoUpdate (`WindowsAppRuntime.ps1`) |
 | `build/Build-WingetInstallScript.ps1` | Concatenates the module + entry fragments into `winget-app-install.ps1` |
 | `build/fragments/` | `head.ps1` (PSScriptInfo, help, `param`) and `tail.ps1` (entry-point dispatch) |
 | `winget-app-install.ps1` | **Generated** single-file installer for local and `irm \| iex` use — do not edit by hand |
@@ -490,6 +503,15 @@ every repository secret.
 - Check the Adobe Reader split on a real ARM64 PC (32-bit Reader installed, 64-bit skipped), and
   whether `Google.GoogleDrive` and `Dell.CommandUpdate.Universal`, which ship only x64 installers,
   need the same gate there.
+- Check the TightVNC password hook on real Windows with TightVNC 2.8.89, as SYSTEM from Endpoint
+  Central and interactively: a viewer can connect with the password, a standard user cannot change
+  the server from the tray icon without the control password, `Get-Acl
+  'HKLM:\SOFTWARE\TightVNC\Server'` lists only SYSTEM and Administrators (inheritance off) and the
+  tray icon still works with that, the service restarts cleanly, a second run changes nothing, the
+  transcript holds neither the password nor what was typed at the prompt, and whether an upgrade
+  (WAU) or an uninstall keeps or removes the key. Owner: decide how Endpoint Central delivers
+  `WINGET_APP_SETUP_TIGHTVNC_PASSWORD` (a variable set in the RMM script, not a script argument),
+  and whether to drop TightVNC once Endpoint Central's remote control is rolled out.
 - Run the reworked uninstaller on real Windows, cross-user elevated and as SYSTEM, where
   `winget list` does not see per-user MSIX apps such as Windows Terminal.
 - Add a whole-run time budget (`-MaxRuntimeMinutes`), deferred from the RMM work: the

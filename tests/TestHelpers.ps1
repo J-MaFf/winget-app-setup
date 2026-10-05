@@ -64,6 +64,9 @@ $windowsOnlyCommandParameters = [ordered]@{
     'Repair-WinGetPackageManager' = { [CmdletBinding()] param([string]$Version, [switch]$Latest, [switch]$IncludePrerelease, [switch]$AllUsers, [switch]$Force) }
     'Get-AuthenticodeSignature'   = { [CmdletBinding()] param([Parameter(Position = 0)][string[]]$FilePath, [string[]]$LiteralPath, [string[]]$SourcePathOrExtension, [byte[]]$Content) }
     'Get-Acl'                     = { [CmdletBinding()] param([Parameter(Position = 0)][string[]]$Path, [string[]]$LiteralPath, [psobject]$InputObject, [switch]$Audit, [string]$Filter, [string[]]$Include, [string[]]$Exclude) }
+    'Get-Service'                 = { [CmdletBinding()] param([Parameter(Position = 0)][string[]]$Name, [string[]]$DisplayName, [string[]]$Include, [string[]]$Exclude, [switch]$DependentServices, [switch]$RequiredServices, [object[]]$InputObject) }
+    'Restart-Service'             = { [CmdletBinding(SupportsShouldProcess = $true)] param([Parameter(Position = 0)][string[]]$Name, [string[]]$DisplayName, [string[]]$Include, [string[]]$Exclude, [switch]$Force, [switch]$PassThru, [object[]]$InputObject) }
+    'Start-Service'               = { [CmdletBinding(SupportsShouldProcess = $true)] param([Parameter(Position = 0)][string[]]$Name, [string[]]$DisplayName, [string[]]$Include, [string[]]$Exclude, [switch]$PassThru, [object[]]$InputObject) }
     'winget'                      = $null
     'powershell.exe'              = $null
 }

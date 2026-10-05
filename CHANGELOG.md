@@ -39,7 +39,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     alone and adds a `Configuration: NOT DONE for <id> (<reason>) - ...` line under the summary.
     Each app's entry in `last-run.json` gains `postInstall` and `postInstallReason`. The build's
     catalog reference guard (`Get-UndefinedCatalogInstallReference`) now checks a `postInstall`
-    function name as it checks `install`. No catalog app uses the new fields yet.
+    function name as it checks `install`. The first catalog app with a hook is `GlavSoft.TightVNC`
+    (see Fixed).
 - The Winget-AutoUpdate gate now checks for the Windows App Runtime the winget release WAU installs
   actually needs, instead of only the constant `Microsoft.WindowsAppRuntime.1.8 >= 8000.616.304.0`
   (work-order item 32, product-F4). WAU's `Install-Prerequisites` installs the latest winget-cli
@@ -432,6 +433,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- TightVNC is no longer reported as installed while its server refuses every viewer (review finding
+  P2-22, work-order item 18). winget installs `GlavSoft.TightVNC` with no password, so the server
+  answered every viewer with "Server is not configured properly", and with no control password any
+  signed-in user could reconfigure or stop it from its tray icon; the run said `Successfully
+  installed` and exited 0, and later runs skipped it as already installed. The catalog entry now has
+  a `postInstall` hook, `Set-TightVncServerPassword` (`WingetAppSetup/Private/TightVnc.ps1`):
+  - The password comes from `WINGET_APP_SETUP_TIGHTVNC_PASSWORD` (and the control password from
+    `WINGET_APP_SETUP_TIGHTVNC_CONTROL_PASSWORD`, optional) in the run's environment, read at the
+    start of the run and removed from the PowerShell 7 process's environment before winget or any
+    installer starts (`Initialize-TightVncSecretForRun`, `Import-TightVncSecretFromEnvironment`).
+    Without it, an interactive run asks for it at its start, before anything is installed
+    (`Read-Host -AsSecureString`, twice, Enter to skip), and only when TightVNC Server has no
+    password yet; a non-interactive run never asks. It is never taken from the repository.
+  - It is written straight to `HKLM\SOFTWARE\TightVNC\Server` (`Password` and `ControlPassword` as
+    8-byte `REG_BINARY` values in VNC's DES encoding, `ConvertTo-TightVncPasswordBytes`;
+    `UseVncAuthentication` and `UseControlAuthentication` set to 1), never through MSI properties or
+    `tvnserver -setservicevncpass`, whose command lines winget and MSI logs record. Without a control
+    password the server password protects the control interface too, with a warning. A password
+    longer than 8 characters is used with a warning that TightVNC reads only the first 8; one with a
+    character that is not printable ASCII is refused.
+  - Before a password goes in, the key is limited to SYSTEM and Administrators with no inherited
+    permissions (`Protect-TightVncServerKey`, checked by `Get-TightVncServerKeyAclProblem`), since
+    the stored value is reversible. The values are read back, then the `tvnserver` service is
+    restarted (`Restart-Service`, or started when it was stopped) and must be running.
+  - Idempotent: a run with the same password changes nothing and does not restart the service, one
+    with a different password updates it, and a run without one keeps the passwords a configured
+    server already has (and still locks the key).
+  - Without a password TightVNC is `Not configured` (`TightVNC installed but NOT configured: no
+    server password was supplied, ...`, and the summary's `Configuration: NOT DONE` line); the exit
+    code does not change. A step that fails (the key cannot be locked, the values do not read back,
+    the service does not start) makes the app `Failed` (exit code 1).
+  - The password, its encoded bytes and the bytes already stored are never printed, logged or put
+    on a command line, and the buffers holding them are cleared. A dry run says only whether each
+    variable is set and whether a real run could use it (`[DRY-RUN] TightVNC: ... (value not
+    shown)`) and leaves the variables in place.
+  - The module now calls `Get-Service`, `Restart-Service` and `Start-Service`, which are listed in
+    `build/windows-only-commands.txt` and have stand-ins in `tests/TestHelpers.ps1`.
 - The uninstaller no longer reports every app as not installed, removes Winget-AutoUpdate and exits
   0 when winget cannot be started (review findings P2-19, P3-18). `winget-app-uninstall.ps1` is now
   a thin entry script that runs `Invoke-WingetUninstall` (`WingetAppSetup/Public/Uninstall.ps1`),

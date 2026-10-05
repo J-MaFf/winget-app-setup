@@ -63,7 +63,9 @@ function Get-InstalledWauInfo {
 .SYNOPSIS
     Reads a directory's owner and access entries as SIDs.
 .DESCRIPTION
-    Thin seam over Get-Acl (Windows-only, mocked in tests) for Assert-RestrictedDirectoryAcl.
+    Thin seam over Get-Acl (Windows-only, mocked in tests) for Assert-RestrictedDirectoryAcl, and
+    for Get-TightVncServerKeyAclProblem, which passes a registry key (Get-Acl reads one the same
+    way).
     Every entry is read, explicit and inherited, by SID, so the result does not depend on the
     display language. Name is the account name when the SID resolves, for messages. Throws when
     the access list cannot be read.

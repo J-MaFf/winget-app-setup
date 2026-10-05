@@ -19,7 +19,10 @@ Get-AuthenticodeSignature
 Get-CimInstance
 Get-ScheduledTask
 Get-ScheduledTaskInfo
+Get-Service
 Out-GridView
 Repair-WinGetPackageManager
+Restart-Service
 Set-ScheduledTask
+Start-Service
 Unregister-ScheduledTask

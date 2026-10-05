@@ -65,7 +65,8 @@
         again. NotConfigured leaves the app installed, prints its own line under the summary and
         does not change the exit code. The result is in the app's run record (postInstall,
         postInstallReason). It runs in the run's account (SYSTEM in an RMM run), never in a dry
-        run, and never for an app that was not installed.
+        run, and never for an app that was not installed. GlavSoft.TightVNC's hook
+        (Set-TightVncServerPassword) sets the server and control passwords.
       - userPhase: $true marks an app or setting that needs the signed-in user's own account (for
         example a hook that writes the user's settings). A run as SYSTEM or under cross-user
         elevation defers it, before any winget call; any other run installs it as usual.
@@ -80,7 +81,13 @@
 function Get-DefaultAppCatalog {
     return @(
         @{name = '7zip.7zip' },
-        @{name = 'GlavSoft.TightVNC' },
+        # TightVNC Server installs with no password, so it refused every viewer, and with no control
+        # password any signed-in user could reconfigure it from its tray icon (review finding P2-22).
+        # The hook sets both from WINGET_APP_SETUP_TIGHTVNC_PASSWORD (and
+        # WINGET_APP_SETUP_TIGHTVNC_CONTROL_PASSWORD), or from a prompt at the start of an
+        # interactive run, never from this public repo (WingetAppSetup/Private/TightVnc.ps1).
+        # Without a password TightVNC is reported installed but NOT configured.
+        @{name = 'GlavSoft.TightVNC'; postInstall = 'Set-TightVncServerPassword' },
         # One Adobe Reader per PC, chosen by the OS architecture (review finding P3-32). The 64-bit
         # package's only installer is x64, and Adobe supports only the 32-bit (x86) Reader on
         # Windows on ARM: on an ARM64 PC winget ran the x64 installer under emulation and it

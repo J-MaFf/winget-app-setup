@@ -586,6 +586,79 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
         }
     }
 
+    Context 'TightVNC passwords (work-order item 18, review finding P2-22)' {
+        # TightVNC's post-install hook needs a password from the environment or the console. The
+        # run takes it before winget or any installer starts (a child process would inherit the
+        # variable), asks for it then and not mid-run, keeps it for both passes and drops it after.
+        BeforeEach {
+            $script:tightVncCatalog = @(@{ name = 'GlavSoft.TightVNC'; postInstall = 'Set-TightVncServerPassword' })
+            $script:TightVncSecret = $null
+            Remove-Item -LiteralPath 'Env:\WINGET_APP_SETUP_TIGHTVNC_PASSWORD' -ErrorAction SilentlyContinue
+            $script:events = [System.Collections.Generic.List[string]]::new()
+            Mock Initialize-Winget {
+                $script:events.Add(('winget setup; variable set: {0}' -f [bool][System.Environment]::GetEnvironmentVariable('WINGET_APP_SETUP_TIGHTVNC_PASSWORD')))
+                [pscustomobject]@{ Ready = $true; Diagnosis = 'Ok' }
+            }
+            Mock Install-AppWithVerification {
+                $script:events.Add(('install; password kept: {0}' -f [bool]($script:TightVncSecret -and $script:TightVncSecret.Password)))
+                @{ Status = 'Installed'; InstallResult = $null; FailureReason = $null }
+            }
+        }
+
+        AfterEach {
+            Remove-Item -LiteralPath 'Env:\WINGET_APP_SETUP_TIGHTVNC_PASSWORD' -ErrorAction SilentlyContinue
+            $script:TightVncSecret = $null
+        }
+
+        It 'Takes the password out of the environment before winget is set up, keeps it for the installs and drops it after' {
+            [System.Environment]::SetEnvironmentVariable('WINGET_APP_SETUP_TIGHTVNC_PASSWORD', 'Secure!')
+
+            Invoke-WingetInstall -Apps $script:tightVncCatalog -NonInteractive | Should -Be 0
+
+            @($script:events) | Should -Be @('winget setup; variable set: False', 'install; password kept: True')
+            [System.Environment]::GetEnvironmentVariable('WINGET_APP_SETUP_TIGHTVNC_PASSWORD') | Should -BeNullOrEmpty
+            $script:TightVncSecret | Should -BeNullOrEmpty
+        }
+
+        It 'Asks for the password at the start of an interactive run, before winget is set up' {
+            Mock Test-EffectiveNonInteractive { $false }
+            Mock Test-IsContinuousIntegration { $false }
+            Mock Get-TightVncServerSettings { @{ KeyExists = $false; Password = $null; UseVncAuthentication = $null; ControlPassword = $null; UseControlAuthentication = $null } }
+            Mock Read-Host {
+                $script:events.Add('prompt')
+                $secure = New-Object System.Security.SecureString
+                foreach ($character in 'Secure!'.ToCharArray()) {
+                    $secure.AppendChar($character)
+                }
+                $secure
+            }
+            # The final 'Press any key' would wait for a real key press.
+            Mock Write-Prompt { throw 'reached the final prompt' }
+
+            { Invoke-WingetInstall -Apps $script:tightVncCatalog } | Should -Throw 'reached the final prompt'
+
+            @($script:events) | Should -Be @('prompt', 'prompt', 'winget setup; variable set: False', 'install; password kept: True')
+        }
+
+        It 'Leaves the variable in place in a dry run and says only whether it is set' {
+            [System.Environment]::SetEnvironmentVariable('WINGET_APP_SETUP_TIGHTVNC_PASSWORD', 'Secure!')
+
+            Invoke-WingetInstall -Apps $script:tightVncCatalog -WhatIf -NonInteractive | Should -Be 0
+
+            [System.Environment]::GetEnvironmentVariable('WINGET_APP_SETUP_TIGHTVNC_PASSWORD') | Should -Be 'Secure!'
+            $script:infoMessages | Should -Contain '[DRY-RUN] TightVNC: a real run would set the server password from WINGET_APP_SETUP_TIGHTVNC_PASSWORD (value not shown).'
+            (($script:infoMessages + $script:warningMessages) -join "`n") | Should -Not -Match 'Secure!'
+        }
+
+        It 'Does nothing for a catalog without the TightVNC hook' {
+            [System.Environment]::SetEnvironmentVariable('WINGET_APP_SETUP_TIGHTVNC_PASSWORD', 'Secure!')
+
+            Invoke-WingetInstall -Apps @(@{ name = 'Contoso.OnlyApp' }) -NonInteractive | Should -Be 0
+
+            [System.Environment]::GetEnvironmentVariable('WINGET_APP_SETUP_TIGHTVNC_PASSWORD') | Should -Be 'Secure!'
+        }
+    }
+
     Context 'Not-applicable skip wiring (issue #217)' {
         It 'Logs the not-applicable skip line with the condition description and buckets the app as Skipped' {
             Mock Install-AppWithVerification { @{ Status = 'Skipped'; InstallResult = $null; FailureReason = $null; SkipReason = 'NotApplicable' } }

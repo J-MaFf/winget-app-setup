@@ -3,7 +3,9 @@
     Determines whether the current run has a human at the console.
 .DESCRIPTION
     Single source of truth for the effective non-interactive detection (issues #176, #214). Since
-    issue #230 this gates no prompt — there are none left — only the things that still depend on a
+    issue #230 this gates no yes/no question — there are none left. It gates one prompt, TightVNC's
+    server password at the start of a run that has no WINGET_APP_SETUP_TIGHTVNC_PASSWORD
+    (Initialize-TightVncSecretForRun, work-order item 18), and the things that still depend on a
     human being present: whether Invoke-WingetInstall opens the summary grid view and holds the
     window with "press any key to exit", whether Write-InstallerExitNotice holds it the same way
     before an early exit (review finding P2-14), whether the entry script forces an exit code

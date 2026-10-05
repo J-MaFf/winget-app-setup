@@ -10,7 +10,10 @@
     grid-view window and the final "press any key to exit". Also turned on by
     $env:WINGET_APP_SETUP_NONINTERACTIVE (Test-NonInteractiveRequested), and auto-detected when the
     session is non-interactive or stdin is redirected. No path asks a yes/no question anymore
-    (issue #230), so this switch is not needed to keep a run from blocking on a prompt. A non-interactive run that is
+    (issue #230). The one question left is TightVNC's server password, asked at the start of an
+    interactive run when WINGET_APP_SETUP_TIGHTVNC_PASSWORD is not set and TightVNC Server has no
+    password yet (work-order item 18); a non-interactive run never asks it and reports TightVNC as
+    not configured instead. A non-interactive run that is
     not elevated returns 4 instead of raising a UAC prompt that nobody would answer (review finding
     P2-12).
 .PARAMETER SkipSystemCheck
@@ -193,6 +196,19 @@ function Invoke-WingetInstall {
     $machineWide = [bool]($account.IsSystem -or $account.IsCrossUserElevation)
     if ($account.IsSystem) {
         Write-Info 'Running as SYSTEM (for example from an RMM agent): installing for the whole PC only, with the winget.exe that App Installer installed for this PC. An app with no machine-wide installer is not installed: it is reported as Deferred, with how it can still be installed for the user. Microsoft does not support the winget command line as SYSTEM, so a SYSTEM run can fail where a run as a user would not.'
+    }
+
+    # TightVNC's passwords for its post-install hook (work-order item 18, review finding P2-22),
+    # before winget or any installer starts: taken out of this process's environment so no child
+    # process inherits them, or asked for now when someone is at the console and TightVNC Server
+    # has none yet, so the rest of the run needs nobody. Only for a catalog with that hook. A dry
+    # run only says whether they were supplied. A failure here must not stop the installs: the
+    # hook then reports TightVNC as not configured.
+    try {
+        Initialize-TightVncSecretForRun -Apps $Apps -NonInteractive:$effectiveNonInteractive -WhatIf:$WhatIf
+    }
+    catch {
+        Write-WarningMessage "Could not read the TightVNC password for this run: $($_.Exception.Message)"
     }
 
     # Pending restart before the run (review finding P3-16), read before this run changes the
@@ -614,6 +630,10 @@ function Invoke-WingetInstall {
             }
         }
     }
+
+    # No post-install hook runs after the retry pass: the TightVNC passwords are not kept any longer
+    # (an irm | iex console stays open after the run).
+    Clear-TightVncSecret
 
     # Set up ongoing automatic updates via Winget-AutoUpdate (issue #168). Best-effort: a failure
     # here never stops the run; the outcome is captured, surfaced next to the final summary instead
