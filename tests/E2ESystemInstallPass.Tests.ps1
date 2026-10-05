@@ -309,3 +309,361 @@ Describe 'e2e/Invoke-SystemInstallPass.ps1 wiring' {
         $workflow | Should -Match 'needs: \[e2e-install, e2e-install-windows-powershell, e2e-install-system\]'
     }
 }
+
+# wgt-gq8.45: the other legs check each catalog app with winget list; the SYSTEM leg checks each
+# one's entry in last-run.json. tests/fixtures/e2e/system-last-run.json is a sample record of that
+# run on windows-latest, built with New-AppRunRecord and New-InstallerRunRecord and written as
+# Save-InstallerRunRecord writes it.
+Describe 'What the catalog expects of a run as SYSTEM' {
+    BeforeAll {
+        $script:RemovalScriptPath = Join-Path $script:RepoRoot 'e2e/Remove-PreinstalledApps.ps1'
+
+        function Get-ExpectationById {
+            param ([hashtable[]]$Catalog = @(Get-DefaultAppCatalog))
+            $verdicts = Get-SystemRunApplicability -Catalog $Catalog
+            $byId = @{}
+            foreach ($expectation in (Get-SystemPassAppExpectation -Catalog $Catalog -Applicability $verdicts -RemovedApps (Get-PreinstalledAppRemovalList -ScriptPath $script:RemovalScriptPath))) {
+                $byId[$expectation.Id] = $expectation
+            }
+            return $byId
+        }
+    }
+
+    BeforeEach {
+        # windows-latest: x64, not Dell. Windows Terminal hosting this session would make its entry
+        # not apply for an interactive run; a run as SYSTEM has no Terminal session.
+        Mock Get-OSArchitecture { 'X64' }
+        Mock Get-ComputerManufacturer { 'Microsoft Corporation' }
+        Mock Test-WindowsTerminalHostsCurrentSession { $true }
+    }
+
+    It 'Reads the apps the job uninstalls first from e2e/Remove-PreinstalledApps.ps1''s defaults' {
+        Get-PreinstalledAppRemovalList -ScriptPath $script:RemovalScriptPath | Should -Be @('Google.Chrome', '7zip.7zip', 'Git.Git')
+    }
+
+    It 'Throws when the removal script has no -PackageId default' {
+        $path = Join-Path $TestDrive 'NoDefault.ps1'
+        Set-Content -LiteralPath $path -Value 'param ([string[]]$PackageId)'
+
+        { Get-PreinstalledAppRemovalList -ScriptPath $path } | Should -Throw '*has no default value for -PackageId*'
+    }
+
+    It 'Evaluates Windows Terminal''s condition as SYSTEM, where it applies even when Windows Terminal hosts this session' {
+        $terminal = Get-DefaultAppCatalog | Where-Object { $_.name -eq 'Microsoft.WindowsTerminal' }
+        # A local stand-in, not a Mock: Pester's mock would take precedence over the one
+        # Get-SystemRunApplicability defines, which is the mechanism under test.
+        function Test-IsSystemAccount { return $false }
+
+        Test-AppApplicability -App $terminal | Should -BeFalse
+        (Get-SystemRunApplicability -Catalog @($terminal))['Microsoft.WindowsTerminal'] | Should -BeTrue
+        Test-AppApplicability -App $terminal | Should -BeFalse
+    }
+
+    It 'Evaluates the conditions in the imported module''s session state, where they are bound, without changing the module' {
+        $probe = Join-Path $TestDrive 'Probe-SystemRunApplicability.ps1'
+        $lines = @(
+            '$ErrorActionPreference = ''Stop'''
+            ('$module = Import-Module -Name ''{0}'' -Force -PassThru' -f (Join-Path $script:RepoRoot 'WingetAppSetup/WingetAppSetup.psd1').Replace("'", "''"))
+            ('. ''{0}''' -f (Join-Path $script:RepoRoot 'e2e/Invoke-SystemInstallPass.ps1').Replace("'", "''"))
+            '& $module { function script:Test-IsSystemAccount { $false }; function script:Test-WindowsTerminalHostsCurrentSession { $true }; function script:Get-OSArchitecture { ''X64'' }; function script:Get-ComputerManufacturer { ''Dell Inc.'' } }'
+            '$catalog = @(Get-DefaultAppCatalog)'
+            '$terminal = $catalog | Where-Object { $_.name -eq ''Microsoft.WindowsTerminal'' }'
+            '$before = Test-AppApplicability -App $terminal'
+            '$verdicts = Get-SystemRunApplicability -Catalog $catalog -Module $module'
+            '$after = Test-AppApplicability -App $terminal'
+            '[pscustomobject]@{ Before = $before; System = $verdicts[''Microsoft.WindowsTerminal'']; After = $after; Dell = $verdicts[''Dell.CommandUpdate.Universal'']; Reader32 = $verdicts[''Adobe.Acrobat.Reader.32-bit''] } | ConvertTo-Json -Compress'
+        )
+        Set-Content -LiteralPath $probe -Value $lines
+
+        $output = & (Get-Process -Id $PID).Path -NoProfile -NonInteractive -File $probe 2>&1
+        $LASTEXITCODE | Should -Be 0 -Because ($output | Out-String)
+        $verdict = ConvertFrom-Json -InputObject ([string]($output | Select-Object -Last 1))
+
+        $verdict.Before | Should -BeFalse
+        $verdict.System | Should -BeTrue
+        $verdict.After | Should -BeFalse
+        $verdict.Dell | Should -BeTrue
+        $verdict.Reader32 | Should -BeFalse
+    }
+
+    It 'Expects every app on windows-latest, as SYSTEM: Installed or already there, the removed apps Installed, the ARM64 Reader and Dell Command Update not applicable' {
+        $byId = Get-ExpectationById
+
+        @($byId.Keys).Count | Should -Be @(Get-DefaultAppCatalog).Count
+        @($byId.Values | Where-Object { $_.Expected -eq 'Installed' } | ForEach-Object { $_.Id } | Sort-Object) | Should -Be @('7zip.7zip', 'Adobe.Acrobat.Reader.64-bit', 'Git.Git', 'GlavSoft.TightVNC', 'Google.Chrome', 'Google.GoogleDrive', 'Klocman.BulkCrapUninstaller', 'Microsoft.PowerShell', 'Microsoft.WindowsTerminal')
+        @($byId.Values | Where-Object { $_.MustInstall } | ForEach-Object { $_.Id } | Sort-Object) | Should -Be @('7zip.7zip', 'Git.Git', 'Google.Chrome')
+        $byId['Dell.CommandUpdate.Universal'].Expected | Should -Be 'NotApplicable'
+        $byId['Dell.CommandUpdate.Universal'].Reason | Should -Be 'not applicable: Dell hardware only'
+        $byId['Adobe.Acrobat.Reader.32-bit'].Reason | Should -Be 'not applicable: ARM64 Windows only; other PCs get the 64-bit Reader'
+        # A run as SYSTEM checks an MSIX app by its provisioning, not with winget list.
+        $byId['Microsoft.WindowsTerminal'].AlreadyPresentReasons | Should -Be @('already provisioned for every user on this PC')
+        $byId['Microsoft.PowerShell'].AlreadyPresentReasons | Should -Be @('already installed')
+    }
+
+    It 'Follows the catalog''s conditions on another PC: ARM64 Dell' {
+        Mock Get-OSArchitecture { 'Arm64' }
+        Mock Get-ComputerManufacturer { 'Dell Inc.' }
+
+        $byId = Get-ExpectationById
+
+        $byId['Adobe.Acrobat.Reader.64-bit'].Expected | Should -Be 'NotApplicable'
+        $byId['Adobe.Acrobat.Reader.64-bit'].Reason | Should -Be 'not applicable: its only installer is x64, and Adobe supports only the 32-bit Reader on ARM64 Windows'
+        $byId['Adobe.Acrobat.Reader.32-bit'].Expected | Should -Be 'Installed'
+        $byId['Dell.CommandUpdate.Universal'].Expected | Should -Be 'Installed'
+    }
+
+    It 'Expects per-user work Deferred with its reason, an app that does not apply Skipped first, and fails open without a verdict' {
+        $catalog = @(
+            @{ name = 'Contoso.UserApp'; scope = 'user' }
+            @{ name = 'Contoso.UserSetting'; userPhase = $true }
+            @{ name = 'Contoso.Elsewhere'; userPhase = $true; condition = { $false }; conditionDescription = 'never here' }
+            @{ name = 'Contoso.NoVerdict' }
+        )
+        $verdicts = @{ 'Contoso.UserApp' = $true; 'Contoso.UserSetting' = $true; 'Contoso.Elsewhere' = $false }
+
+        $expectations = @(Get-SystemPassAppExpectation -Catalog $catalog -Applicability $verdicts)
+
+        $expectations[0].Expected | Should -Be 'Deferred'
+        $expectations[0].Reason | Should -Be (Get-AppDeferReasonText -DeferReason 'UserScope')
+        $expectations[1].Expected | Should -Be 'Deferred'
+        $expectations[1].Reason | Should -Be (Get-AppDeferReasonText -DeferReason 'UserPhase')
+        $expectations[2].Expected | Should -Be 'NotApplicable'
+        $expectations[2].Reason | Should -Be 'not applicable: never here'
+        $expectations[3].Expected | Should -Be 'Installed'
+        $expectations[3].MustInstall | Should -BeFalse
+    }
+
+    It 'Matches the reasons the installer records: <Text>' -ForEach @(
+        @{ Text = '$skipReason = ''already installed''' }
+        @{ Text = '$skipReason = ''already provisioned for every user on this PC''' }
+        @{ Text = 'New-AppRunRecord -Id $app.name -Status ''Skipped'' -Reason $skipReason' }
+        @{ Text = '$skipReason = "not applicable: $conditionText"' }
+        @{ Text = 'New-AppRunRecord -Id $app.name -Status ''Deferred'' -Reason $deferText' }
+    ) {
+        Get-Content -Raw -LiteralPath (Join-Path $script:RepoRoot 'WingetAppSetup/Public/Install.ps1') | Should -Match ([regex]::Escape($Text))
+    }
+}
+
+Describe 'Get-SystemInstallPassResult: each catalog app in last-run.json' {
+    BeforeAll {
+        $script:SystemRecordPath = Join-Path $script:RepoRoot 'tests/fixtures/e2e/system-last-run.json'
+
+        function Get-FixtureRecord {
+            return (Read-SystemPassRunRecord -Path $script:SystemRecordPath).Record
+        }
+
+        function Get-WindowsLatestExpectation {
+            $catalog = @(Get-DefaultAppCatalog)
+            return @(Get-SystemPassAppExpectation -Catalog $catalog -Applicability (Get-SystemRunApplicability -Catalog $catalog) -RemovedApps (Get-PreinstalledAppRemovalList -ScriptPath (Join-Path $script:RepoRoot 'e2e/Remove-PreinstalledApps.ps1')))
+        }
+
+        function Get-AppCheckResult {
+            param ($RunRecord, [string]$RunRecordProblem, [string]$KnownPlatformIncompatible = '', [switch]$NoExpectation, [string]$AppExpectationProblem)
+            # The summary's Deferred row agrees with the record, as in a real run.
+            $deferredIds = @()
+            if ($null -ne $RunRecord -and $null -ne $RunRecord.PSObject.Properties['apps']) {
+                $deferredIds = @($RunRecord.apps | Where-Object { $_.status -eq 'Deferred' } | ForEach-Object { $_.id })
+            }
+            $arguments = @{
+                TaskExitCode              = 0
+                Transcript                = (New-TestTranscript -Deferred $deferredIds)
+                WrapperLog                = $script:GoodWrapperLog
+                RunRecord                 = $RunRecord
+                RunRecordProblem          = $RunRecordProblem
+                KnownPlatformIncompatible = $KnownPlatformIncompatible
+            }
+            if ($AppExpectationProblem) {
+                $arguments.AppExpectationProblem = $AppExpectationProblem
+            }
+            elseif (-not $NoExpectation) {
+                $arguments.AppExpectation = Get-WindowsLatestExpectation
+            }
+            return (Get-SystemInstallPassResult @arguments)
+        }
+
+        function Get-FailedAssertion {
+            param ($Result)
+            return @($Result.Results | Where-Object Result -EQ 'FAIL' | ForEach-Object { $_.Assertion })
+        }
+    }
+
+    BeforeEach {
+        Mock Get-OSArchitecture { 'X64' }
+        Mock Get-ComputerManufacturer { 'Microsoft Corporation' }
+        Mock Test-WindowsTerminalHostsCurrentSession { $true }
+    }
+
+    It 'Has the shape New-InstallerRunRecord and New-AppRunRecord give last-run.json' {
+        $record = Get-FixtureRecord
+        $built = New-InstallerRunRecord -ExitCode 0 -Apps @(New-AppRunRecord -Id '7zip.7zip' -Status 'Installed')
+
+        @($record.PSObject.Properties.Name) | Should -Be @($built.Keys)
+        $record.schemaVersion | Should -Be $built.schemaVersion
+        foreach ($entry in $record.apps) {
+            @($entry.PSObject.Properties.Name) | Should -Be @($built.apps[0].Keys)
+        }
+        @($record.apps | ForEach-Object { $_.id }) | Should -Be @(Get-DefaultAppCatalog | ForEach-Object { $_.name })
+    }
+
+    It 'Passes the record of a SYSTEM run on windows-latest, with one row per catalog app' {
+        $result = Get-AppCheckResult -RunRecord (Get-FixtureRecord)
+
+        Get-FailedAssertion $result | Should -BeNullOrEmpty
+        $result.StepExitCode | Should -Be 0
+        @($result.Results).Count | Should -Be (10 + 1 + @(Get-DefaultAppCatalog).Count)
+        (Get-Row $result 'last-run.json lists the catalog''s apps').Detail | Should -Be 'schemaVersion 1, 11 entries for the catalog''s 11 apps'
+        (Get-Row $result 'App installed: Google.Chrome').Detail | Should -Be 'last-run.json: Installed'
+        (Get-Row $result 'App installed: GlavSoft.TightVNC').Detail | Should -Be 'last-run.json: Installed, post-install NotConfigured'
+        (Get-Row $result 'App installed: Microsoft.PowerShell').Detail | Should -Be 'last-run.json: Skipped (already installed)'
+        (Get-Row $result 'App installed: Microsoft.WindowsTerminal').Detail | Should -Be 'last-run.json: Skipped (already provisioned for every user on this PC)'
+        (Get-Row $result 'Not-applicable skip recorded: Dell.CommandUpdate.Universal').Detail | Should -Be 'last-run.json: Skipped (not applicable: Dell hardware only)'
+        (Get-Row $result 'Not-applicable skip recorded: Adobe.Acrobat.Reader.32-bit').Result | Should -Be 'PASS'
+    }
+
+    It 'Notes a restart and a non-zero install code on an installed app' {
+        $record = Get-FixtureRecord
+        $entry = $record.apps | Where-Object id -EQ 'Git.Git'
+        $entry.code = 3010
+        $entry.codeHex = '0x00000BC2'
+        $entry.restartRequired = $true
+
+        $result = Get-AppCheckResult -RunRecord $record
+
+        (Get-Row $result 'App installed: Git.Git').Detail | Should -Be 'last-run.json: Installed, code 0x00000BC2, restart required'
+        $result.StepExitCode | Should -Be 0
+    }
+
+    It 'Fails <Case>' -ForEach @(
+        @{ Case = 'an app with no entry'; Change = { param ($r) $r.apps = @($r.apps | Where-Object id -NE 'Google.GoogleDrive') }; Assertion = 'App installed: Google.GoogleDrive'; Detail = 'no entry in last-run.json' }
+        @{ Case = 'a Failed app'; Change = { param ($r) $e = $r.apps | Where-Object id -EQ 'Klocman.BulkCrapUninstaller'; $e.status = 'Failed'; $e.reason = 'winget install exited 0x8A15002B' }; Assertion = 'App installed: Klocman.BulkCrapUninstaller'; Detail = 'last-run.json: Failed (winget install exited 0x8A15002B)' }
+        @{ Case = 'a Deferred machine-wide app'; Change = { param ($r) $e = $r.apps | Where-Object id -EQ 'Adobe.Acrobat.Reader.64-bit'; $e.status = 'Deferred'; $e.reason = 'winget found no machine-wide installer for it' }; Assertion = 'App installed: Adobe.Acrobat.Reader.64-bit'; Detail = 'last-run.json: Deferred (winget found no machine-wide installer for it); its catalog entry is not per-user, so the run as SYSTEM had to install it for the whole PC' }
+        @{ Case = 'an app the job removed first that the run only skipped'; Change = { param ($r) $e = $r.apps | Where-Object id -EQ 'Google.Chrome'; $e.status = 'Skipped'; $e.reason = 'already installed' }; Assertion = 'App installed: Google.Chrome'; Detail = 'last-run.json: Skipped (already installed); the job uninstalled it before the run (e2e/Remove-PreinstalledApps.ps1), so the run had to install it: see that step''s warnings' }
+        @{ Case = 'Windows Terminal skipped as not applicable, although it applies as SYSTEM'; Change = { param ($r) $e = $r.apps | Where-Object id -EQ 'Microsoft.WindowsTerminal'; $e.reason = 'not applicable: winget cannot self-update Windows Terminal from a session Windows Terminal itself is hosting (issue #271)' }; Assertion = 'App installed: Microsoft.WindowsTerminal'; Detail = '; it applies to this PC as SYSTEM, so expected Installed, or Skipped (already provisioned for every user on this PC)' }
+        @{ Case = 'an MSIX app skipped by winget list, not by its provisioning'; Change = { param ($r) ($r.apps | Where-Object id -EQ 'Microsoft.WindowsTerminal').reason = 'already installed' }; Assertion = 'App installed: Microsoft.WindowsTerminal'; Detail = 'last-run.json: Skipped (already installed); it applies to this PC as SYSTEM' }
+        @{ Case = 'an app that does not apply but was installed'; Change = { param ($r) $e = $r.apps | Where-Object id -EQ 'Dell.CommandUpdate.Universal'; $e.status = 'Installed'; $e.reason = $null }; Assertion = 'Not-applicable skip recorded: Dell.CommandUpdate.Universal'; Detail = 'last-run.json: Installed; expected Skipped (not applicable: Dell hardware only)' }
+        @{ Case = 'an app that does not apply, skipped for another reason'; Change = { param ($r) ($r.apps | Where-Object id -EQ 'Adobe.Acrobat.Reader.32-bit').reason = 'already installed' }; Assertion = 'Not-applicable skip recorded: Adobe.Acrobat.Reader.32-bit'; Detail = 'last-run.json: Skipped (already installed); expected Skipped (not applicable: ARM64 Windows only; other PCs get the 64-bit Reader)' }
+        @{ Case = 'an app recorded twice'; Change = { param ($r) $r.apps = @($r.apps) + @($r.apps | Where-Object id -EQ '7zip.7zip') }; Assertion = 'App installed: 7zip.7zip'; Detail = '2 entries in last-run.json: Installed; Installed' }
+    ) {
+        $record = Get-FixtureRecord
+        & $Change $record
+
+        $result = Get-AppCheckResult -RunRecord $record
+
+        Get-FailedAssertion $result | Should -Be @($Assertion)
+        (Get-Row $result $Assertion).Detail | Should -BeLike "*$Detail*"
+        $result.StepExitCode | Should -Be 1
+    }
+
+    It 'Fails an entry for an app the catalog does not have, and checks every catalog app still' {
+        $record = Get-FixtureRecord
+        $record.apps = @($record.apps) + @([pscustomobject]@{ id = 'Contoso.Extra'; status = 'Installed'; reason = $null })
+
+        $result = Get-AppCheckResult -RunRecord $record
+
+        Get-FailedAssertion $result | Should -Be @('last-run.json lists the catalog''s apps')
+        (Get-Row $result 'last-run.json lists the catalog''s apps').Detail | Should -Be 'entries for apps the catalog does not have: Contoso.Extra'
+        $result.StepExitCode | Should -Be 1
+    }
+
+    It 'Fails with one row, and no per-app rows, when last-run.json <Case>' -ForEach @(
+        @{ Case = 'is another schema version'; Change = { param ($r) $r.schemaVersion = 2 }; Detail = 'schemaVersion ''2'', not 1, the record New-InstallerRunRecord writes and this check reads' }
+        @{ Case = 'has no apps list'; Change = { param ($r) $r.PSObject.Properties.Remove('apps') }; Detail = 'the record has no apps list' }
+    ) {
+        $record = Get-FixtureRecord
+        & $Change $record
+
+        $result = Get-AppCheckResult -RunRecord $record
+
+        Get-FailedAssertion $result | Should -Be @('last-run.json lists the catalog''s apps')
+        (Get-Row $result 'last-run.json lists the catalog''s apps').Detail | Should -Be $Detail
+        @($result.Results | Where-Object { $_.Assertion -like 'App installed: *' -or $_.Assertion -like 'Not-applicable skip recorded: *' }) | Should -BeNullOrEmpty
+        $result.StepExitCode | Should -Be 1
+    }
+
+    It 'Fails, saying why, when last-run.json <Case>' -ForEach @(
+        @{ Case = 'is cut off'; Content = '{ "schemaVersion": 1, "apps": [ { "id": "7zip.7zip"'; Detail = 'could not read *' }
+        @{ Case = 'is empty'; Content = ''; Detail = '* is empty' }
+        @{ Case = 'is missing'; Content = $null; Detail = 'no last-run.json at *' }
+    ) {
+        $path = Join-Path $TestDrive ('last-run-{0}.json' -f [guid]::NewGuid().ToString('N'))
+        if ($null -ne $Content) {
+            [System.IO.File]::WriteAllText($path, $Content)
+        }
+        $read = Read-SystemPassRunRecord -Path $path
+
+        $result = Get-AppCheckResult -RunRecord $read.Record -RunRecordProblem $read.Problem
+
+        $read.Record | Should -BeNullOrEmpty
+        $read.Problem | Should -BeLike $Detail
+        (Get-Row $result 'last-run.json lists the catalog''s apps').Detail | Should -Be $read.Problem
+        (Get-Row $result 'last-run.json records the run').Detail | Should -Be $read.Problem
+        $result.StepExitCode | Should -Be 1
+    }
+
+    It 'Reads the sample record' {
+        $read = Read-SystemPassRunRecord -Path $script:SystemRecordPath
+
+        $read.Problem | Should -BeNullOrEmpty
+        $read.Record.exitCode | Should -Be 0
+    }
+
+    It 'Fails when the catalog could not be read' {
+        $result = Get-AppCheckResult -RunRecord (Get-FixtureRecord) -AppExpectationProblem 'could not work out what the catalog expects: boom'
+
+        Get-FailedAssertion $result | Should -Be @('last-run.json lists the catalog''s apps')
+        (Get-Row $result 'last-run.json lists the catalog''s apps').Detail | Should -Be 'could not work out what the catalog expects: boom'
+        $result.StepExitCode | Should -Be 1
+    }
+
+    It 'Leaves out an app on KNOWN_PLATFORM_INCOMPATIBLE, and says so' {
+        $record = Get-FixtureRecord
+        ($record.apps | Where-Object id -EQ 'Google.GoogleDrive').status = 'Failed'
+
+        $result = Get-AppCheckResult -RunRecord $record -KnownPlatformIncompatible 'Google.GoogleDrive'
+
+        Get-FailedAssertion $result | Should -BeNullOrEmpty
+        Get-Row $result 'App installed: Google.GoogleDrive' | Should -BeNullOrEmpty
+        (Get-Row $result 'last-run.json lists the catalog''s apps').Detail | Should -Be 'schemaVersion 1, 11 entries for the catalog''s 11 apps; not checked (KNOWN_PLATFORM_INCOMPATIBLE): Google.GoogleDrive'
+    }
+
+    It 'Passes per-user work recorded as Deferred with its reason, and fails it installed' {
+        $catalog = @(@{ name = 'Contoso.UserSetting'; userPhase = $true })
+        $expectation = @(Get-SystemPassAppExpectation -Catalog $catalog -Applicability @{ 'Contoso.UserSetting' = $true })
+        $deferred = [pscustomobject]@{ schemaVersion = 1; apps = @([pscustomobject]@{ id = 'Contoso.UserSetting'; status = 'Deferred'; reason = (Get-AppDeferReasonText -DeferReason 'UserPhase') }) }
+        $installed = [pscustomobject]@{ schemaVersion = 1; apps = @([pscustomobject]@{ id = 'Contoso.UserSetting'; status = 'Installed'; reason = $null }) }
+
+        $pass = @(Get-SystemPassAppResult -RunRecord $deferred -AppExpectation $expectation)
+        $fail = @(Get-SystemPassAppResult -RunRecord $installed -AppExpectation $expectation)
+
+        $pass[1].Assertion | Should -Be 'Deferred to the user phase: Contoso.UserSetting'
+        $pass[1].Result | Should -Be 'PASS'
+        $fail[1].Result | Should -Be 'FAIL'
+        $fail[1].Detail | Should -Be ('last-run.json: Installed; expected Deferred ({0})' -f (Get-AppDeferReasonText -DeferReason 'UserPhase'))
+    }
+
+    It 'Adds no per-app rows when given no expectations (the other checks'' tests)' {
+        @((Get-AppCheckResult -RunRecord (Get-FixtureRecord) -NoExpectation).Results).Count | Should -Be 10
+    }
+}
+
+Describe 'e2e/Invoke-SystemInstallPass.ps1 per-app wiring' {
+    It 'Works out the expectations from the checkout''s module before the run, as SYSTEM, and passes them and the record''s problem on' {
+        $script = Get-Content -Raw -LiteralPath (Join-Path $script:RepoRoot 'e2e/Invoke-SystemInstallPass.ps1')
+        $main = $script.Substring($script.IndexOf('if ($MyInvocation.InvocationName -ne ''.'')'))
+
+        $main | Should -Match 'Import-Module \(Join-Path \$repositoryRoot ''WingetAppSetup\\WingetAppSetup\.psd1''\)[^\r\n]*-PassThru'
+        $main | Should -Match 'Get-SystemRunApplicability -Catalog \$catalog -Module \$wingetAppSetupModule'
+        $main | Should -Match 'Get-PreinstalledAppRemovalList -ScriptPath \(Join-Path \$PSScriptRoot ''Remove-PreinstalledApps\.ps1''\)'
+        $main | Should -Match 'Get-SystemInstallPassResult [^\r\n]*-RunRecordProblem \$runRecordRead\.Problem[^\r\n]*-AppExpectation \$appExpectation -AppExpectationProblem \$appExpectationProblem'
+        $main.IndexOf('Get-SystemPassAppExpectation') | Should -BeLessThan $main.IndexOf('Start-ScheduledTask')
+    }
+
+    It 'Runs e2e/Remove-PreinstalledApps.ps1 in the e2e-install-system job with its defaults, the list the checks read' {
+        $workflow = Get-Content -Raw -LiteralPath (Join-Path $script:RepoRoot '.github/workflows/e2e-install.yml')
+        $start = $workflow.IndexOf("`n  e2e-install-system:")
+        $job = $workflow.Substring($start, $workflow.IndexOf("`n  report-failure:") - $start)
+
+        $job | Should -Match '(?m)^\s+& \.\\e2e\\Remove-PreinstalledApps\.ps1\s*$'
+        $job | Should -Not -Match 'Remove-PreinstalledApps\.ps1 +-'
+    }
+}

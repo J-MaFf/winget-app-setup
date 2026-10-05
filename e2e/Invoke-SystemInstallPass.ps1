@@ -44,14 +44,22 @@
         HKEY_USERS\S-1-5-18\Software\Microsoft\Windows\CurrentVersion\Uninstall (or its
         WOW6432Node twin), and no new folder under SYSTEM's AppData\Local\Programs (System32's and
         SysWOW64's systemprofile). A run as SYSTEM installs for the whole PC only and defers the
-        rest; winget's default scope would have put a per-user app there.
+        rest; winget's default scope would have put a per-user app there;
+      - every catalog app, from last-run.json (the per-app checks the other legs make with
+        winget list): the catalog and its applicability come from the checkout's module
+        (Get-DefaultAppCatalog, Test-AppApplicability), decided before the run as the run as SYSTEM
+        decides them. An app that applies is Installed or Skipped as already there, and Installed
+        only for the apps the job uninstalled first (e2e/Remove-PreinstalledApps.ps1's defaults:
+        Chrome, 7-Zip, Git); one that does not apply is Skipped with its not-applicable reason;
+        per-user work is Deferred with its reason. Failed, Deferred otherwise, or no entry fails.
+        Apps on KNOWN_PLATFORM_INCOMPATIBLE are not checked.
 
     Prints an '=== E2E assertion results ===' table and exits 0 when every check passed; otherwise
     with the run's exit code when that is what failed, or 1.
 
     The checks are functions (Get-SystemInstallPassResult and the helpers it uses) that read only
-    what they are given, so tests/E2ESystemInstallPass.Tests.ps1 runs them on any OS; the task
-    handling needs Windows.
+    what they are given, so tests/E2ESystemInstallPass.Tests.ps1 runs them on any OS (the per-app
+    ones against tests/fixtures/e2e/system-last-run.json); the task handling needs Windows.
 
     Runs under Windows PowerShell 5.1 and PowerShell 7: ASCII only, no 7-only syntax.
 .PARAMETER RmmWrapperPath
@@ -199,6 +207,358 @@ function Compare-SystemProfileInstallEntry {
 
 <#
 .SYNOPSIS
+    Returns the package ids e2e/Remove-PreinstalledApps.ps1 uninstalls when it is run without
+    -PackageId, as the e2e-install-system job runs it.
+.DESCRIPTION
+    Read from the default of that script's -PackageId parameter without running it, so the list
+    is kept in one place.
+.PARAMETER ScriptPath
+    Default: Remove-PreinstalledApps.ps1 next to this script.
+.RETURNS
+    [string[]] The package ids. Throws when the script does not parse or has no such default.
+#>
+function Get-PreinstalledAppRemovalList {
+    param (
+        [Parameter(Mandatory = $false)]
+        [string]$ScriptPath = (Join-Path $PSScriptRoot 'Remove-PreinstalledApps.ps1')
+    )
+
+    $parseErrors = $null
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile($ScriptPath, [ref]$null, [ref]$parseErrors)
+    if (@($parseErrors).Count -gt 0) {
+        throw "$ScriptPath does not parse: $($parseErrors[0].Message)"
+    }
+    $parameter = $null
+    if ($ast.ParamBlock) {
+        $parameter = @($ast.ParamBlock.Parameters | Where-Object { $_.Name.VariablePath.UserPath -eq 'PackageId' }) | Select-Object -First 1
+    }
+    if (-not $parameter -or -not $parameter.DefaultValue) {
+        throw "$ScriptPath has no default value for -PackageId"
+    }
+    return [string[]]@($parameter.DefaultValue.SafeGetValue())
+}
+
+<#
+.SYNOPSIS
+    Decides which catalog apps apply to this PC as the run as SYSTEM decides it.
+.DESCRIPTION
+    The module's Test-AppApplicability (arch list and condition, failing open), with
+    Test-IsSystemAccount answering $true: this script runs as the runner's account, the run it
+    checks as SYSTEM, and a condition may ask which (Windows Terminal's does). What else a
+    condition reads, such as the manufacturer or the OS architecture, is the same PC's.
+.PARAMETER Catalog
+    The catalog (Get-DefaultAppCatalog).
+.PARAMETER Module
+    The imported WingetAppSetup module. Its catalog's conditions are bound to its session state,
+    so they are evaluated there. Without it, in this script's session state (the unit tests).
+.RETURNS
+    [hashtable] package id -> [bool], true when the app applies.
+#>
+function Get-SystemRunApplicability {
+    param (
+        [Parameter(Mandatory = $true)]
+        [hashtable[]]$Catalog,
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [System.Management.Automation.PSModuleInfo]$Module
+    )
+
+    $evaluate = {
+        param ($Catalog)
+        # Commands resolve through the calling scopes first, so the conditions find this one.
+        function Test-IsSystemAccount {
+            return $true
+        }
+        $verdicts = @{}
+        foreach ($app in $Catalog) {
+            $verdicts[$app.name] = [bool](Test-AppApplicability -App $app)
+        }
+        return $verdicts
+    }
+    if ($Module) {
+        return (& $Module $evaluate $Catalog)
+    }
+    return (& $evaluate $Catalog)
+}
+
+<#
+.SYNOPSIS
+    Says what last-run.json must record for each catalog app after the run as SYSTEM.
+.DESCRIPTION
+    In the order Install-AppWithVerification decides it with -MachineWide:
+      - an app that does not apply: Skipped, 'not applicable: <Get-AppNotApplicableReason>';
+      - per-user work (scope 'user' or userPhase): Deferred, with Get-AppDeferReasonText's reason;
+      - any other app: Installed, or Skipped as already there: 'already installed', or for an app
+        with msixName, which a run as SYSTEM checks by its provisioning, 'already provisioned for
+        every user on this PC'. Only Installed for an app the job uninstalled before the run.
+    Calls the module's catalog helpers, so the module must be loaded.
+.PARAMETER Catalog
+    The catalog (Get-DefaultAppCatalog).
+.PARAMETER Applicability
+    Get-SystemRunApplicability's verdicts. An app without one counts as applicable (fail open).
+.PARAMETER RemovedApps
+    The package ids the job uninstalled before the run (Get-PreinstalledAppRemovalList).
+.RETURNS
+    [pscustomobject[]] One per catalog app, in catalog order, with Id, Expected ('Installed',
+    'NotApplicable' or 'Deferred'), Reason (the record's reason for NotApplicable and Deferred,
+    otherwise $null), AlreadyPresentReasons (the skip reasons Installed accepts) and MustInstall.
+#>
+function Get-SystemPassAppExpectation {
+    param (
+        [Parameter(Mandatory = $true)]
+        [hashtable[]]$Catalog,
+        [Parameter(Mandatory = $false)]
+        [hashtable]$Applicability = @{},
+        [Parameter(Mandatory = $false)]
+        [AllowEmptyCollection()]
+        [string[]]$RemovedApps = @()
+    )
+
+    $expectations = @()
+    foreach ($app in $Catalog) {
+        $id = [string]$app.name
+        $applies = $true
+        if ($Applicability.ContainsKey($id)) {
+            $applies = [bool]$Applicability[$id]
+        }
+        $expected = 'Installed'
+        $reason = $null
+        $alreadyPresent = @('already installed')
+        if (-not [string]::IsNullOrWhiteSpace([string]$app['msixName'])) {
+            $alreadyPresent = @('already provisioned for every user on this PC')
+        }
+        if (-not $applies) {
+            $expected = 'NotApplicable'
+            $reason = 'not applicable: ' + (Get-AppNotApplicableReason -App $app)
+            $alreadyPresent = @()
+        }
+        else {
+            $perUserReason = Get-AppPerUserDeferReason -App $app
+            if ($perUserReason) {
+                $expected = 'Deferred'
+                $reason = Get-AppDeferReasonText -DeferReason $perUserReason
+                $alreadyPresent = @()
+            }
+        }
+        $expectations += [pscustomobject]@{
+            Id                    = $id
+            Expected              = $expected
+            Reason                = $reason
+            AlreadyPresentReasons = [string[]]$alreadyPresent
+            MustInstall           = ($expected -eq 'Installed' -and $RemovedApps -contains $id)
+        }
+    }
+    return $expectations
+}
+
+<#
+.SYNOPSIS
+    Reads last-run.json.
+.PARAMETER Path
+    The file.
+.RETURNS
+    [pscustomobject] with Record (the parsed file, or $null) and Problem (why there is no record,
+    or $null).
+#>
+function Read-SystemPassRunRecord {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        return [pscustomobject]@{ Record = $null; Problem = "no last-run.json at $Path" }
+    }
+    try {
+        $text = [System.IO.File]::ReadAllText($Path)
+        if ([string]::IsNullOrWhiteSpace($text)) {
+            return [pscustomobject]@{ Record = $null; Problem = "$Path is empty" }
+        }
+        $record = ConvertFrom-Json -InputObject $text -ErrorAction Stop
+    }
+    catch {
+        return [pscustomobject]@{ Record = $null; Problem = "could not read ${Path}: $($_.Exception.Message)" }
+    }
+    if ($null -eq $record) {
+        return [pscustomobject]@{ Record = $null; Problem = "$Path holds no record" }
+    }
+    return [pscustomobject]@{ Record = $record; Problem = $null }
+}
+
+# A run-record entry as the per-app details show it: 'Skipped (already installed)'.
+function Format-SystemPassAppEntry {
+    param (
+        [Parameter(Mandatory = $true)]
+        $Entry
+    )
+
+    $text = [string]$Entry.status
+    if (-not [string]::IsNullOrWhiteSpace([string]$Entry.reason)) {
+        $text += " ($($Entry.reason))"
+    }
+    return $text
+}
+
+<#
+.SYNOPSIS
+    Checks each catalog app's entry in last-run.json against what the run as SYSTEM had to do.
+.DESCRIPTION
+    One row for the record itself ('last-run.json lists the catalog''s apps': a schema 1 record
+    with an apps list and no app the catalog lacks). When the record can be read, one row per
+    catalog app that is not skip-listed (Get-SystemPassAppExpectation):
+      - 'App installed: <id>': Installed, or Skipped as already there unless the job removed the
+        app first; Failed, Deferred, another skip reason, or no entry or several fail;
+      - 'Not-applicable skip recorded: <id>': Skipped with the catalog's not-applicable reason;
+      - 'Deferred to the user phase: <id>': Deferred with the per-user reason.
+.PARAMETER RunRecord
+    last-run.json, parsed, or $null.
+.PARAMETER RunRecordProblem
+    Why there is no RunRecord (Read-SystemPassRunRecord), or $null.
+.PARAMETER AppExpectation
+    Get-SystemPassAppExpectation's result.
+.PARAMETER AppExpectationProblem
+    Why there is no AppExpectation (the catalog could not be read), or $null.
+.PARAMETER SkipApps
+    The KNOWN_PLATFORM_INCOMPATIBLE package ids, which are not checked.
+.RETURNS
+    Assertion rows ([pscustomobject] with Assertion, Result and Detail).
+#>
+function Get-SystemPassAppResult {
+    param (
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        $RunRecord,
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [AllowEmptyString()]
+        [string]$RunRecordProblem,
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [AllowEmptyCollection()]
+        [object[]]$AppExpectation,
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [AllowEmptyString()]
+        [string]$AppExpectationProblem,
+        [Parameter(Mandatory = $false)]
+        [AllowEmptyCollection()]
+        [string[]]$SkipApps = @()
+    )
+
+    $recordAssertion = 'last-run.json lists the catalog''s apps'
+    $problem = $null
+    if ($AppExpectationProblem) {
+        $problem = $AppExpectationProblem
+    }
+    elseif ($null -eq $AppExpectation) {
+        $problem = 'no catalog expectations to check last-run.json against'
+    }
+    elseif ($null -eq $RunRecord) {
+        $problem = 'no last-run.json'
+        if ($RunRecordProblem) {
+            $problem = $RunRecordProblem
+        }
+    }
+    elseif ("$($RunRecord.schemaVersion)" -ne '1') {
+        $problem = "schemaVersion '$($RunRecord.schemaVersion)', not 1, the record New-InstallerRunRecord writes and this check reads"
+    }
+    elseif ($null -eq $RunRecord.PSObject.Properties['apps']) {
+        $problem = 'the record has no apps list'
+    }
+    if ($problem) {
+        return @([pscustomobject]@{ Assertion = $recordAssertion; Result = 'FAIL'; Detail = $problem })
+    }
+
+    $entries = @($RunRecord.apps | Where-Object { $null -ne $_ })
+    $catalogIds = @($AppExpectation | ForEach-Object { $_.Id })
+    $extraIds = @($entries | ForEach-Object { [string]$_.id } | Where-Object { $catalogIds -notcontains $_ } | Select-Object -Unique)
+    $skipped = @($catalogIds | Where-Object { $SkipApps -contains $_ })
+    $recordDetail = 'schemaVersion 1, {0} entries for the catalog''s {1} apps' -f $entries.Count, $catalogIds.Count
+    if ($extraIds.Count -gt 0) {
+        $recordDetail = 'entries for apps the catalog does not have: ' + ($extraIds -join ', ')
+    }
+    if ($skipped.Count -gt 0) {
+        $recordDetail += '; not checked (KNOWN_PLATFORM_INCOMPATIBLE): ' + ($skipped -join ', ')
+    }
+    $rows = @([pscustomobject]@{ Assertion = $recordAssertion; Result = $(if ($extraIds.Count -eq 0) { 'PASS' } else { 'FAIL' }); Detail = $recordDetail })
+
+    foreach ($expectation in $AppExpectation) {
+        if ($SkipApps -contains $expectation.Id) {
+            continue
+        }
+        $assertion = "App installed: $($expectation.Id)"
+        if ($expectation.Expected -eq 'NotApplicable') {
+            $assertion = "Not-applicable skip recorded: $($expectation.Id)"
+        }
+        elseif ($expectation.Expected -eq 'Deferred') {
+            $assertion = "Deferred to the user phase: $($expectation.Id)"
+        }
+
+        $matching = @($entries | Where-Object { [string]$_.id -eq $expectation.Id })
+        $passed = $false
+        if ($matching.Count -eq 0) {
+            $detail = 'no entry in last-run.json'
+        }
+        elseif ($matching.Count -gt 1) {
+            $detail = "$($matching.Count) entries in last-run.json: " + (@($matching | ForEach-Object { Format-SystemPassAppEntry -Entry $_ }) -join '; ')
+        }
+        else {
+            $entry = $matching[0]
+            $status = [string]$entry.status
+            $reason = [string]$entry.reason
+            $detail = 'last-run.json: ' + (Format-SystemPassAppEntry -Entry $entry)
+            if ($expectation.Expected -eq 'Installed') {
+                if ($status -eq 'Installed') {
+                    $passed = $true
+                    if ($null -ne $entry.code -and [long]$entry.code -ne 0) {
+                        $detail += ", code $($entry.codeHex)"
+                    }
+                    if ($entry.restartRequired -eq $true) {
+                        $detail += ', restart required'
+                    }
+                    if ($entry.postInstall) {
+                        $detail += ", post-install $($entry.postInstall)"
+                    }
+                }
+                elseif ($status -eq 'Skipped' -and @($expectation.AlreadyPresentReasons) -contains $reason) {
+                    if ($expectation.MustInstall) {
+                        $detail += '; the job uninstalled it before the run (e2e/Remove-PreinstalledApps.ps1), so the run had to install it: see that step''s warnings'
+                    }
+                    else {
+                        $passed = $true
+                    }
+                }
+                elseif ($status -eq 'Deferred') {
+                    $detail += '; its catalog entry is not per-user, so the run as SYSTEM had to install it for the whole PC'
+                }
+                elseif ($status -eq 'Skipped') {
+                    $accepted = 'Installed'
+                    if (-not $expectation.MustInstall) {
+                        $accepted = 'Installed, or Skipped (' + (@($expectation.AlreadyPresentReasons) -join ' or ') + ')'
+                    }
+                    $detail += "; it applies to this PC as SYSTEM, so expected $accepted"
+                }
+            }
+            else {
+                $expectedStatus = 'Skipped'
+                if ($expectation.Expected -eq 'Deferred') {
+                    $expectedStatus = 'Deferred'
+                }
+                if ($status -eq $expectedStatus -and $reason -eq $expectation.Reason) {
+                    $passed = $true
+                }
+                else {
+                    $detail += "; expected $expectedStatus ($($expectation.Reason))"
+                }
+            }
+        }
+        $rows += [pscustomobject]@{ Assertion = $assertion; Result = $(if ($passed) { 'PASS' } else { 'FAIL' }); Detail = $detail }
+    }
+    return $rows
+}
+
+<#
+.SYNOPSIS
     Checks a SYSTEM run from what it left behind.
 .PARAMETER TaskExitCode
     The task's exit code (ConvertTo-TaskExitCode), or $null when the task never finished.
@@ -208,10 +568,17 @@ function Compare-SystemProfileInstallEntry {
     The text of the wrapper's log (install-<time>-rmm.log), or $null when there is none.
 .PARAMETER RunRecord
     last-run.json, parsed, or $null.
+.PARAMETER RunRecordProblem
+    Why there is no RunRecord (Read-SystemPassRunRecord), or $null.
 .PARAMETER NewSystemProfileEntries
     What appeared in SYSTEM's profile during the run (Compare-SystemProfileInstallEntry).
 .PARAMETER KnownPlatformIncompatible
     The KNOWN_PLATFORM_INCOMPATIBLE value (package ids, comma-separated); empty means strict.
+.PARAMETER AppExpectation
+    Get-SystemPassAppExpectation's result: adds the per-app rows (Get-SystemPassAppResult). Not
+    given and no AppExpectationProblem: no per-app rows (the tests of the other checks).
+.PARAMETER AppExpectationProblem
+    Why there is no AppExpectation (the catalog could not be read): one failed per-app row.
 .RETURNS
     [pscustomobject] with Results (Assertion, Result 'PASS' or 'FAIL', Detail) and StepExitCode.
 #>
@@ -231,18 +598,35 @@ function Get-SystemInstallPassResult {
         [AllowNull()]
         $RunRecord,
         [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [AllowEmptyString()]
+        [string]$RunRecordProblem,
+        [Parameter(Mandatory = $false)]
         [AllowEmptyCollection()]
         [string[]]$NewSystemProfileEntries = @(),
         [Parameter(Mandatory = $false)]
         [AllowNull()]
         [AllowEmptyString()]
-        [string]$KnownPlatformIncompatible = ''
+        [string]$KnownPlatformIncompatible = '',
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [AllowEmptyCollection()]
+        [object[]]$AppExpectation,
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [AllowEmptyString()]
+        [string]$AppExpectationProblem
     )
 
     $results = @()
     $stepExitCode = 0
     if ($null -eq $KnownPlatformIncompatible) {
         $KnownPlatformIncompatible = ''
+    }
+    $skipApps = @($KnownPlatformIncompatible -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    $noRecordDetail = 'no last-run.json'
+    if ($RunRecordProblem) {
+        $noRecordDetail = $RunRecordProblem
     }
 
     if ($null -eq $TaskExitCode) {
@@ -263,8 +647,7 @@ function Get-SystemInstallPassResult {
             $contained = $false
             $containedDetail = 'no transcript of the run, so its failures cannot be checked'
             if ($Transcript) {
-                $skipApps = @($KnownPlatformIncompatible -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
-                $containment = Test-InstallFailureContainment -Transcript $Transcript.Parsed -SkipApps $skipApps
+                $containment =Test-InstallFailureContainment -Transcript $Transcript.Parsed -SkipApps $skipApps
                 $contained = [bool]$containment.Passed
                 $containedDetail = "$($Transcript.Name): $($containment.Detail)"
             }
@@ -310,7 +693,7 @@ function Get-SystemInstallPassResult {
     $results += [pscustomobject]@{ Assertion = 'Installer ran as SYSTEM'; Result = $(if ($ranAsSystem) { 'PASS' } else { 'FAIL' }); Detail = $ranAsSystemDetail }
 
     $recordOk = $false
-    $recordDetail = 'no last-run.json'
+    $recordDetail = $noRecordDetail
     if ($null -ne $RunRecord) {
         $recordDetail = 'exitCode {0}, summaryReached {1}, deferred: {2}' -f $RunRecord.exitCode, $RunRecord.summaryReached, ((@($RunRecord.apps | Where-Object { $_.status -eq 'Deferred' } | ForEach-Object { $_.id }) -join ', '))
         $recordOk = ($null -ne $TaskExitCode -and $null -ne $RunRecord.exitCode -and [int]$RunRecord.exitCode -eq $TaskExitCode -and $RunRecord.summaryReached -eq $true)
@@ -367,7 +750,7 @@ function Get-SystemInstallPassResult {
     # Work-order items 34 and 38: the user phase installs what last-run.json defers, by id, so each
     # Deferred entry must carry a package id and why it was deferred, and the summary must agree.
     $deferredOk = $false
-    $deferredDetail = 'no last-run.json'
+    $deferredDetail = $noRecordDetail
     if ($null -ne $RunRecord) {
         $deferredEntries = @($RunRecord.apps | Where-Object { $null -ne $_ -and [string]$_.status -eq 'Deferred' })
         $deferredIds = @($deferredEntries | ForEach-Object { [string]$_.id })
@@ -408,6 +791,11 @@ function Get-SystemInstallPassResult {
     }
     $results += [pscustomobject]@{ Assertion = 'Nothing installed per-user into SYSTEM''s profile'; Result = $(if ($newEntries.Count -eq 0) { 'PASS' } else { 'FAIL' }); Detail = $profileDetail }
 
+    # wgt-gq8.45: each catalog app's outcome, which the other legs check with winget list.
+    if ($PSBoundParameters.ContainsKey('AppExpectation') -or $AppExpectationProblem) {
+        $results += @(Get-SystemPassAppResult -RunRecord $RunRecord -RunRecordProblem $noRecordDetail -AppExpectation $AppExpectation -AppExpectationProblem $AppExpectationProblem -SkipApps $skipApps)
+    }
+
     if ($stepExitCode -eq 0 -and @($results | Where-Object { $_.Result -eq 'FAIL' }).Count -gt 0) {
         $stepExitCode = 1
     }
@@ -441,6 +829,29 @@ if ($MyInvocation.InvocationName -ne '.') {
     $taskArgument = Get-SystemPassTaskArgument -WrapperPath $wrapperFilePath -InstallerPath $installerFilePath -InstallerSha256 $installerSha256
     Write-Host "Installer under test: $installerFilePath (SHA256 $installerSha256), through $wrapperFilePath ($env:GITHUB_REF at $env:GITHUB_SHA)."
     Write-Host "The task runs as SYSTEM: $powerShell32 $taskArgument"
+
+    # What last-run.json must say per app, from the checkout's catalog (the installer under test is
+    # built from it), decided before the run as the installer decides it.
+    $appExpectation = $null
+    $appExpectationProblem = $null
+    try {
+        $wingetAppSetupModule = Import-Module (Join-Path $repositoryRoot 'WingetAppSetup\WingetAppSetup.psd1') -Force -PassThru -ErrorAction Stop
+        $catalog = @(Get-DefaultAppCatalog)
+        $applicability = Get-SystemRunApplicability -Catalog $catalog -Module $wingetAppSetupModule
+        $removedApps = Get-PreinstalledAppRemovalList -ScriptPath (Join-Path $PSScriptRoot 'Remove-PreinstalledApps.ps1')
+        $appExpectation = @(Get-SystemPassAppExpectation -Catalog $catalog -Applicability $applicability -RemovedApps $removedApps)
+        foreach ($expected in @('Installed', 'NotApplicable', 'Deferred')) {
+            $ids = @($appExpectation | Where-Object { $_.Expected -eq $expected } | ForEach-Object { $_.Id })
+            if ($ids.Count -gt 0) {
+                Write-Host ('Expected in last-run.json, {0}: {1}' -f $expected, ($ids -join ', '))
+            }
+        }
+        Write-Host ('Removed before the run, so expected Installed: {0}' -f ((@($appExpectation | Where-Object { $_.MustInstall } | ForEach-Object { $_.Id })) -join ', '))
+    }
+    catch {
+        $appExpectationProblem = "could not work out what the catalog expects: $($_.Exception.Message)"
+        Write-Host $appExpectationProblem -ForegroundColor Red
+    }
 
     $profileBefore = Get-SystemProfileInstallEntry
     try {
@@ -494,18 +905,12 @@ if ($MyInvocation.InvocationName -ne '.') {
     if ($wrapperFile) {
         $wrapperLog = [string](Get-Content -LiteralPath $wrapperFile.FullName -Raw)
     }
-    $runRecord = $null
-    $runRecordPath = Join-Path $logFolder 'last-run.json'
-    if (Test-Path -LiteralPath $runRecordPath -PathType Leaf) {
-        try {
-            $runRecord = Get-Content -LiteralPath $runRecordPath -Raw | ConvertFrom-Json
-        }
-        catch {
-            Write-Host "Could not read ${runRecordPath}: $($_.Exception.Message)" -ForegroundColor Yellow
-        }
+    $runRecordRead = Read-SystemPassRunRecord -Path (Join-Path $logFolder 'last-run.json')
+    if ($runRecordRead.Problem) {
+        Write-Host $runRecordRead.Problem -ForegroundColor Yellow
     }
 
-    $check = Get-SystemInstallPassResult -TaskExitCode $taskExitCode -Transcript $transcript -WrapperLog $wrapperLog -RunRecord $runRecord -NewSystemProfileEntries $newProfileEntries -KnownPlatformIncompatible "$env:KNOWN_PLATFORM_INCOMPATIBLE"
+    $check = Get-SystemInstallPassResult -TaskExitCode $taskExitCode -Transcript $transcript -WrapperLog $wrapperLog -RunRecord $runRecordRead.Record -RunRecordProblem $runRecordRead.Problem -NewSystemProfileEntries $newProfileEntries -KnownPlatformIncompatible "$env:KNOWN_PLATFORM_INCOMPATIBLE" -AppExpectation $appExpectation -AppExpectationProblem $appExpectationProblem
     Write-Host ''
     Write-Host '=== E2E assertion results ==='
     Write-Host ($check.Results | Format-Table -AutoSize -Wrap | Out-String -Width 4096).TrimEnd()
