@@ -870,6 +870,14 @@ function Invoke-WingetInstall {
     # the entry script's abort guard then reports this code instead of an abort (5).
     $script:InstallerPendingExitCode = $exitCode
 
+    # A run that failed (1, 2 or 8) says where to report it and prints the command that makes the
+    # diagnostics bundle to attach (wgt-gq8.35), as a run that stops early does
+    # (Write-InstallerExitNotice). A restart-required run (3010) succeeded, and a dry run changed
+    # nothing.
+    if (-not $WhatIf -and @(1, 2, 8) -contains $exitCode) {
+        Write-InstallerReportHint
+    }
+
     # The run's outcome in machine-readable form (review finding P3-41): last-run.json next to the
     # transcript and one RESULT line, before the final prompt so someone at the console sees it too.
     # A dry run changes nothing and reports neither.

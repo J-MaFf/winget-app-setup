@@ -1,0 +1,34 @@
+**********************
+PowerShell transcript start
+Start time: 20261004143205
+Username: CONTOSO\jdoe
+RunAs User: CONTOSO\admin-tech
+Configuration Name: 
+Machine: PC-4711 (Microsoft Windows NT 10.0.26100.0)
+Host Application: C:\Program Files\PowerShell\7\pwsh.dll -NoProfile -ExecutionPolicy Bypass -File C:\Windows\Temp\winget-app-setup-0123456789abcdef0123456789abcdef\winget-app-install.ps1
+Process ID: 4242
+PSVersion: 7.5.3
+PSEdition: Core
+OS: Microsoft Windows 10.0.26100
+Platform: Win32NT
+**********************
+Transcript started, output file is C:\ProgramData\winget-app-setup\logs\install-20261004-143205.log
+Logging this run to: C:\ProgramData\winget-app-setup\logs\install-20261004-143205.log
+Installer build: 1.0.0+0badc0de
+Cross-user elevation: this run is elevated as 'CONTOSO\admin-tech' while 'CONTOSO\jdoe' is signed in at the console.
+Relaunched from C:\Users\jdoe\AppData\Local\Temp\winget-app-setup-fedcba9876543210fedcba9876543210\winget-app-install.ps1
+Registered App Installer for HKEY_USERS\S-1-5-21-1004336348-1177238915-682003330-1104 (pc-4711.corp.contoso.com)
+  > winget install -e --accept-source-agreements --accept-package-agreements --disable-interactivity --source winget --id Git.Git --scope machine --log C:\ProgramData\winget-app-setup\logs\winget-install-Git.Git-20261004-143300.log
+    Found Git [Git.Git] Version 2.51.0
+    Starting package install...
+    Installer failed with exit code: 1603
+Failed to install: Git.Git (the app is running - close it, then re-run the installer; winget exit 0x8A150101 INSTALL_PACKAGE_IN_USE, 1 attempt, machine-scope fallback: no, installer log: C:\ProgramData\winget-app-setup\logs\winget-install-Git.Git-20261004-143300.log)
+Well-known accounts stay: NT AUTHORITY\SYSTEM, BUILTIN\Administrators, S-1-5-18, S-1-5-32-544, S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464
+Another profile on this PC: C:\Users\Kim.Park\AppData\Local and the shared C:\Users\Public\Documents
+Contact for this PC: jdoe@contoso.com
+Full transcript of this run: C:\ProgramData\winget-app-setup\logs\install-20261004-143205.log
+RESULT: exit=1 installed=11 skipped=2 deferred=0 failed=1 autoupdates=Configured restart=no build=1.0.0+0badc0de log=C:\ProgramData\winget-app-setup\logs\install-20261004-143205.log
+**********************
+PowerShell transcript end
+End time: 20261004145012
+**********************

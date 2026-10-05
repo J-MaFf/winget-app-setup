@@ -1,0 +1,15 @@
+== Registered for any account (Get-AppxPackage -AllUsers) ==
+Microsoft.DesktopAppInstaller 1.26.510.0 X64 Status=Ok Framework=False
+  PackageFullName: Microsoft.DesktopAppInstaller_1.26.510.0_x64__8wekyb3d8bbwe
+  InstallLocation: C:\Program Files\WindowsApps\Microsoft.DesktopAppInstaller_1.26.510.0_x64__8wekyb3d8bbwe
+  User: S-1-5-21-1004336348-1177238915-682003330-1104 Installed
+  User: S-1-5-21-1004336348-1177238915-682003330-1105 Installed
+  User: S-1-5-18 Staged
+  User: S-1-12-1-1234567890-2345678901-3456789012-4567890123 Installed
+  User: S-1-5-21-1004336348-1177238915-682003330-1106 [CONTOSO\maria.lopez]: Installed
+Microsoft.WindowsAppRuntime.1.8 8000.616.304.0 X64 Status=Ok Framework=True
+  PackageFullName: Microsoft.WindowsAppRuntime.1.8_8000.616.304.0_x64__8wekyb3d8bbwe
+  InstallLocation: C:\Program Files\WindowsApps\Microsoft.WindowsAppRuntime.1.8_8000.616.304.0_x64__8wekyb3d8bbwe
+
+== Provisioned for new accounts (Get-AppxProvisionedPackage -Online) ==
+Microsoft.DesktopAppInstaller 2025.1009.1.0 (Microsoft.DesktopAppInstaller_2025.1009.1.0_neutral_~_8wekyb3d8bbwe)

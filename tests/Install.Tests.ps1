@@ -784,6 +784,39 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
             $failedRows[0][1] | Should -Be 'the installing account has no logon session, so Windows blocked the app package deployment; winget exit 0x80073D19 ERROR_DEPLOYMENT_BLOCKED_BY_USER_LOG_OFF, 3 attempts, machine-scope fallback: yes'
             ($script:errorMessages -join "`n") | Should -Not -Match 'No package found matching input criteria'
         }
+
+        # wgt-gq8.35: a failed run ends with where to report it and the command that makes the
+        # diagnostics bundle to attach, as a run that stops early does.
+        It 'Prints the diagnostics bundle command under the summary of a failed run (exit code <ExitCode>)' -ForEach @(
+            @{ ExitCode = 1; Failure = 'app' }
+            @{ ExitCode = 2; Failure = 'winget' }
+            @{ ExitCode = 8; Failure = 'autoupdates' }
+        ) {
+            switch ($Failure) {
+                'app' { Mock Install-AppWithVerification { @{ Status = 'Failed'; InstallResult = @{ ExitCode = 1603 }; FailureReason = 'VerifyNotFound' } } }
+                'winget' { Mock Test-WingetLaunchable { [pscustomobject]@{ Launchable = $false; Version = $null; Reason = 'the file cannot be accessed by the system'; Attempts = 1 } } }
+                'autoupdates' { Mock Install-WingetAutoUpdate { [pscustomobject]@{ Status = 'Failed'; Version = '2.12.0' } } }
+            }
+
+            Invoke-WingetInstall -Apps @(@{ name = 'Contoso.AppOne' }) -NonInteractive | Should -Be $ExitCode
+
+            $script:infoMessages | Should -Contain ('    ' + (Get-DiagnosticsCommandLine))
+            ($script:infoMessages -join "`n") | Should -Match ([regex]::Escape('issues/new?template=install-failure.yml'))
+        }
+
+        It 'Prints no bundle command after <Kind>' -ForEach @(
+            @{ Kind = 'a run that exits 0'; WhatIf = $false; Restart = $false; ExitCode = 0 }
+            @{ Kind = 'a run that exits 3010 (succeeded, restart required)'; WhatIf = $false; Restart = $true; ExitCode = 3010 }
+            @{ Kind = 'a dry run'; WhatIf = $true; Restart = $false; ExitCode = 0 }
+        ) {
+            if ($Restart) {
+                Mock Install-WingetAutoUpdate { [pscustomobject]@{ Status = 'Configured'; Version = '2.12.0'; RestartRequired = $true } }
+            }
+
+            Invoke-WingetInstall -Apps @(@{ name = 'Contoso.AppOne' }) -NonInteractive -WhatIf:$WhatIf | Should -Be $ExitCode
+
+            ($script:infoMessages -join "`n") | Should -Not -Match 'CollectDiagnostics'
+        }
     }
 
     # Review findings P2-24, P3-22, P3-23: who the run installs as is decided once, and a run as

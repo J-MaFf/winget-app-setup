@@ -24,10 +24,13 @@
 # (Private/Interactivity.ps1),
 # Start-InstallerTranscript, Grant-InstallLogReadAccess and Write-Prompt (Private/LoggingInternal.ps1),
 # Exit-Installer, Write-InstallerExitNotice and Wait-InstallerExitKeyPress
-# (Private/FailureReporting.ps1) - review findings P2-13/P2-14/P3-14 - and, through Exit-Installer,
-# Complete-InstallerRun (Private/RunRecord.ps1), which in this phase has nothing to report and only
-# calls Unlock-InstallerRun (Private/RunLock.ps1), which has no lock to release - review finding
-# P3-41.
+# (Private/FailureReporting.ps1) - review findings P2-13/P2-14/P3-14 - with the notice's
+# Write-InstallerReportHint and Get-DiagnosticsCommandLine (Private/Diagnostics.ps1, wgt-gq8.35),
+# and, through Exit-Installer, Complete-InstallerRun (Private/RunRecord.ps1), which in this phase has
+# nothing to report and only calls Unlock-InstallerRun (Private/RunLock.ps1), which has no lock to
+# release - review finding P3-41. Before this file, the tail's -CollectDiagnostics branch runs
+# Invoke-DiagnosticsCollection (Private/Diagnostics.ps1, wgt-gq8.35) under 5.1 as well; that file
+# lists the helpers it reaches and keeps to the same constraints.
 # Check any function added to this list - or any
 # future edit to one already on it - against the same constraints before calling it from here; the
 # build's parse + ASCII guards only catch a parse-breaking token, not a PS7-only runtime construct

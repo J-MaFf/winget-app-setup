@@ -89,7 +89,8 @@ function Exit-Installer {
     console files a GitHub issue when a run fails. Every early exit used to print one red line and
     close the window at once, so the issue said only that the window closed. This prints, in one
     block: the exit code with the caller's reason (or what the code means), the log file path, the
-    installer build id and where to report the failure, with a privacy note (the repository is
+    installer build id and where to report the failure, with the command that makes a diagnostics
+    bundle to attach (Write-InstallerReportHint, wgt-gq8.35) and a privacy note (the repository is
     public, and a transcript header names the computer and the accounts). Then it waits for a key
     press, unless the run is non-interactive (Test-EffectiveNonInteractive) or under CI
     (Test-IsContinuousIntegration), so an unattended or RMM run never blocks.
@@ -147,8 +148,7 @@ function Write-InstallerExitNotice {
     if ($script:InstallerBuildId) {
         Write-Info "Installer build: $script:InstallerBuildId"
     }
-    Write-Info 'To report this, open https://github.com/J-MaFf/winget-app-setup/issues/new?template=install-failure.yml and give the exit code, the installer build and the log file.'
-    Write-WarningMessage 'That repository is public, and the log names this computer and the accounts that ran the installer: remove or redact the log''s header before attaching it.'
+    Write-InstallerReportHint
 
     if ($NoPause) {
         return

@@ -47,6 +47,21 @@
  start of an interactive run when WINGET_APP_SETUP_TIGHTVNC_PASSWORD is not set and TightVNC Server
  has no password yet (skipped when nobody starts typing within 5 minutes). This switch suppresses
  that question too: TightVNC is then reported as installed but not configured.
+
+.PARAMETER CollectDiagnostics
+ Installs nothing: makes a diagnostics bundle to attach to a GitHub issue after a failed run, and
+ prints where it saved it. The .zip holds the latest run's transcripts, installer logs and
+ last-run.json, the end of Winget-AutoUpdate's updates.log, the App Installer and Windows App
+ Runtime packages for every account and provisioned for new ones, the execution policy, the App
+ Installer and Store Group Policy, the pending-restart state, the Winget-AutoUpdate task, winget
+ --version and --info, and the Windows build and architecture. Account and computer names, user
+ profile folders, the SIDs of real accounts and email addresses are replaced with placeholders,
+ because the repository's issues are public. It changes nothing on the PC (no log, no run lock, no
+ PowerShell 7 install, no elevation) and works without winget; run it from PowerShell started as
+ administrator to include everything. The irm | iex one-liner cannot pass a switch, so a failed run
+ prints this command instead:
+     & ([scriptblock]::Create((irm "https://raw.githubusercontent.com/J-MaFf/winget-app-setup/refs/heads/main/winget-app-install.ps1"))) -CollectDiagnostics
+ Exit code 0 when the bundle was saved, 5 when it could not be.
 #>
 
 param (
@@ -55,5 +70,7 @@ param (
     [Parameter(Mandatory = $false)]
     [switch]$SkipSystemCheck,
     [Parameter(Mandatory = $false)]
-    [switch]$NonInteractive
+    [switch]$NonInteractive,
+    [Parameter(Mandatory = $false)]
+    [switch]$CollectDiagnostics
 )

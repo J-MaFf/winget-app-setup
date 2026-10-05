@@ -1001,6 +1001,125 @@ Describe 'One run at a time, and the RESULT line and last-run.json of every run 
     }
 }
 
+# wgt-gq8.35, in a real child process: -CollectDiagnostics makes the bundle and does nothing a real
+# run does (no transcript, run lock, housekeeping, RESULT line or PowerShell 7 bootstrap), also as
+# the script block command the failure notices print. Diagnostics.Tests.ps1 tests the collector.
+Describe 'The diagnostics bundle from the entry block (-CollectDiagnostics, wgt-gq8.35)' {
+    BeforeAll {
+        # Elevated, so a real run would take the run lock and run housekeeping.
+        $script:collectorOverrides = (
+            "function Test-IsAdmin { `$true }`n" +
+            "function Invoke-PowerShell7Bootstrap { param([switch]`$WhatIf, [switch]`$NonInteractive, [switch]`$SkipSystemCheck, [string]`$CommandPath, [string]`$ExpectedBuildId, [string]`$LogDirectory) Write-Host 'BOOTSTRAP RAN'; return 0 }`n")
+        function Get-CollectorOverride {
+            param ([int]$ExitCode)
+            $script:collectorOverrides + "function Invoke-DiagnosticsCollection { param([string]`$LogDirectory, [string[]]`$OutputDirectory) Write-Host 'COLLECTED'; return $ExitCode }"
+        }
+    }
+
+    It 'Makes the bundle and nothing else, and exits with the collector''s code <_>' -ForEach @(0, 5) {
+        $path = New-FaultInjectedInstaller -Name "collect-$_.ps1" -Body "Write-Host 'install ran'; return 0" -Overrides (Get-CollectorOverride -ExitCode $_)
+
+        $result = Invoke-ChildInstaller -Arguments @('-File', $path, '-CollectDiagnostics', '-NonInteractive')
+
+        $result.ExitCode | Should -Be $_
+        $result.Output | Should -Match 'COLLECTED'
+        $result.Output | Should -Not -Match 'install ran|HOUSEKEEPING RAN|BOOTSTRAP RAN|RESULT:|Logging this run to:|Installer build:'
+        @(Get-ChildTranscript).Count | Should -Be 0
+        @(Get-ChildTranscript -Filter 'last-run.json').Count | Should -Be 0
+    }
+
+    It 'Runs as it is under Windows PowerShell 5.1: no PowerShell 7 bootstrap and no bootstrap log' {
+        $path = New-FaultInjectedInstaller -Name 'collect-desktop.ps1' -EmulateWindowsPowerShell -Body "Write-Host 'install ran'; return 0" -Overrides (Get-CollectorOverride -ExitCode 0)
+
+        $result = Invoke-ChildInstaller -Arguments @('-File', $path, '-CollectDiagnostics', '-NonInteractive')
+
+        $result.ExitCode | Should -Be 0
+        $result.Output | Should -Match 'COLLECTED'
+        $result.Output | Should -Not -Match 'BOOTSTRAP RAN|install ran|Logging the PowerShell 7 bootstrap'
+        @(Get-ChildTranscript).Count | Should -Be 0
+    }
+
+    It 'Exits 5 when the collector throws' {
+        $path = New-FaultInjectedInstaller -Name 'collect-throws.ps1' -Body "Write-Host 'install ran'; return 0" -Overrides (
+            $script:collectorOverrides + "function Invoke-DiagnosticsCollection { param([string]`$LogDirectory, [string[]]`$OutputDirectory) throw 'collector exploded' }")
+
+        $result = Invoke-ChildInstaller -Arguments @('-File', $path, '-CollectDiagnostics', '-NonInteractive')
+
+        $result.ExitCode | Should -Be 5
+        $result.Output | Should -Match 'The diagnostics bundle could not be made: collector exploded'
+        $result.Output | Should -Not -Match 'install ran'
+    }
+
+    It 'Works as the printed script block command, unattended: the process exits with the code' {
+        $path = New-FaultInjectedInstaller -Name 'collect-scriptblock.ps1' -Body "Write-Host 'install ran'; return 0" -Overrides (Get-CollectorOverride -ExitCode 5)
+        $escapedPath = $path.Replace("'", "''")
+
+        $result = Invoke-ChildInstaller -Arguments @('-Command', "& ([scriptblock]::Create((Get-Content -Raw -LiteralPath '$escapedPath'))) -CollectDiagnostics; Write-Host 'AFTER'")
+
+        $result.ExitCode | Should -Be 5
+        $result.Output | Should -Match 'COLLECTED'
+        $result.Output | Should -Not -Match 'AFTER|install ran'
+    }
+
+    It 'Works as the printed script block command in an interactive console, which it keeps open' {
+        $path = New-FaultInjectedInstaller -Name 'collect-scriptblock-interactive.ps1' -Body "Write-Host 'install ran'; return 0" -Overrides (
+            (Get-CollectorOverride -ExitCode 5) + "`nfunction Test-EffectiveNonInteractive { param([switch]`$NonInteractive) `$false }")
+        $escapedPath = $path.Replace("'", "''")
+
+        $result = Invoke-ChildInstaller -Arguments @('-Command', "& ([scriptblock]::Create((Get-Content -Raw -LiteralPath '$escapedPath'))) -CollectDiagnostics; Write-Host ('AFTER LASTEXITCODE=' + `$LASTEXITCODE)")
+
+        $result.Output | Should -Match 'COLLECTED'
+        $result.Output | Should -Match 'AFTER LASTEXITCODE=5'
+    }
+
+    Context 'The real collector in the generated installer' {
+        It 'Saves a bundle with the run''s transcript, its header redacted, and adds nothing to the logs folder' {
+            $logDirectory = Join-Path (Join-Path $TestDrive 'ProgramData') 'winget-app-setup\logs'
+            New-Item -ItemType Directory -Path $logDirectory -Force | Out-Null
+            $fixture = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot 'fixtures/diagnostics/transcript.txt')
+            Set-Content -LiteralPath (Join-Path $logDirectory 'install-20261004-143205.log') -Value $fixture -NoNewline
+            $outputDirectory = Join-Path $TestDrive 'bundle-out'
+            New-Item -ItemType Directory -Path $outputDirectory -Force | Out-Null
+            $escapedOutput = $outputDirectory.Replace("'", "''")
+            # Only the parts that would start winget or Windows PowerShell on the runner are replaced.
+            $path = New-FaultInjectedInstaller -Name 'collect-real.ps1' -Body "Write-Host 'install ran'; return 0" -Overrides (
+                "function Get-DiagnosticsBundleDirectory { param(`$AccountContext) '$escapedOutput' }`n" +
+                "function Get-DiagnosticsWingetReport { param(`$AccountContext) 'winget: not run in this test' }`n" +
+                "function Get-DiagnosticsAppxReport { 'appx: not run in this test' }")
+            $before = @(Get-ChildItem -LiteralPath $logDirectory | ForEach-Object { $_.Name })
+
+            $result = Invoke-ChildInstaller -Arguments @('-File', $path, '-CollectDiagnostics', '-NonInteractive')
+
+            $result.ExitCode | Should -Be 0
+            $result.Output | Should -Match 'Diagnostics bundle saved: '
+            @(Get-ChildItem -LiteralPath $logDirectory | ForEach-Object { $_.Name }) | Should -Be $before
+            $zip = @(Get-ChildItem -LiteralPath $outputDirectory -Filter 'winget-app-setup-diagnostics-*.zip')
+            $zip.Count | Should -Be 1
+            Add-Type -AssemblyName System.IO.Compression
+            $stream = [System.IO.File]::OpenRead($zip[0].FullName)
+            try {
+                $archive = [System.IO.Compression.ZipArchive]::new($stream, [System.IO.Compression.ZipArchiveMode]::Read)
+                $names = @($archive.Entries | ForEach-Object { $_.FullName })
+                $reader = [System.IO.StreamReader]::new($archive.GetEntry('logs/install-20261004-143205.log').Open())
+                $transcript = $reader.ReadToEnd()
+                $reader.Dispose()
+                $archive.Dispose()
+            }
+            finally {
+                $stream.Dispose()
+            }
+            $names | Should -Contain 'README.txt'
+            $names | Should -Contain 'system.txt'
+            $names | Should -Contain 'wau-updates-log-tail.txt'
+            $transcript | Should -Match '(?m)^Username: <domain\d+>\\<user\d+>\r?$'
+            $transcript | Should -Match 'Installer failed with exit code: 1603'
+            foreach ($token in @('jdoe', 'admin-tech', 'PC-4711', 'CONTOSO', 'Kim.Park')) {
+                $transcript | Should -Not -Match ([regex]::Escape($token))
+            }
+        }
+    }
+}
+
 Describe 'Build determinism (issue #189)' {
     BeforeAll {
         $script:buildScriptPath = Join-Path $script:RepoRoot 'build/Build-WingetInstallScript.ps1'

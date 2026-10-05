@@ -35,6 +35,38 @@ if ($MyInvocation.InvocationName -ne '.') {
         return
     }
 
+    # The diagnostics bundle (-CollectDiagnostics, wgt-gq8.35) for a GitHub issue about a failed
+    # run: it only reads, and writes nothing but its .zip, so it comes before everything that
+    # changes the PC: no transcript, no run lock, no last-run.json and no RESULT line, and no
+    # PowerShell 7 bootstrap (it runs under Windows PowerShell 5.1 as it is). Exit code 0 when the
+    # bundle was saved, 5 when it could not be. Like the language-mode stop above, an interactive
+    # console that ran it as a script block (the command the failure notices print) keeps its
+    # window and gets the code in $LASTEXITCODE.
+    if ($CollectDiagnostics) {
+        $diagnosticsExitCode = 5
+        try {
+            $diagnosticsExitCode = [int](@(Invoke-DiagnosticsCollection)[-1])
+        }
+        catch {
+            Write-ErrorMessage "The diagnostics bundle could not be made: $_"
+            $diagnosticsExitCode = 5
+        }
+        $global:LASTEXITCODE = $diagnosticsExitCode
+        $exitForDiagnostics = [bool]$PSCommandPath
+        if (-not $exitForDiagnostics) {
+            try {
+                $exitForDiagnostics = [bool](Test-EffectiveNonInteractive -NonInteractive:$NonInteractive)
+            }
+            catch {
+                $exitForDiagnostics = $false
+            }
+        }
+        if ($exitForDiagnostics) {
+            exit $diagnosticsExitCode
+        }
+        return
+    }
+
     # Windows PowerShell 5.1 bootstrap (issue #225; supersedes the #210 fail-fast). The
     # installer's logic requires PowerShell 7+, and 5.1 parses the WHOLE file before running any
     # of it - which is why this dispatch can exist at all: the build guards the assembled script

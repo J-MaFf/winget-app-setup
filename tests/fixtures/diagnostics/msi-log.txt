@@ -1,0 +1,17 @@
+=== Verbose logging started: 10/4/2026  14:33:02  Build type: SHIP UNICODE 5.00.10011.00  Calling process: C:\Windows\system32\msiexec.exe ===
+MSI (c) (A4:B8) [14:33:02:123]: Resetting cached policy values
+MSI (s) (C0:D4) [14:33:03:456]: PROPERTY CHANGE: Adding USERNAME property. Its value is 'Jane Q. Sample'.
+MSI (s) (C0:D4) [14:33:03:457]: PROPERTY CHANGE: Adding COMPANYNAME property. Its value is 'Fabrikam Widgets Ltd'.
+MSI (s) (C0:D4) [14:33:03:458]: PROPERTY CHANGE: Adding LogonUser property. Its value is 'admin-tech'.
+MSI (s) (C0:D4) [14:33:05:001]: Product: Git -- Installation failed.
+MSI (s) (C0:D4) [14:33:05:002]: Windows Installer installed the product. Product Name: Git. Product Version: 2.51.0. Product Language: 1033. Manufacturer: The Git Development Community. Installation success or error status: 1603.
+Property(S): UserSID = S-1-5-21-1004336348-1177238915-682003330-1105
+Property(S): LogonUser = admin-tech
+Property(S): USERNAME = Jane Q. Sample
+Property(S): COMPANYNAME = Fabrikam Widgets Ltd
+Property(S): ComputerName = PC-4711
+Property(S): ProfilesFolder = C:\Users\
+Property(S): AppDataFolder = C:\Users\admin-tech\AppData\Roaming\
+Property(S): TempFolder = C:\Users\ADMIN-~1\AppData\Local\Temp\
+Property(S): ProductCode = {11111111-2222-3333-4444-555555555555}
+=== Logging stopped: 10/4/2026  14:33:05 ===
