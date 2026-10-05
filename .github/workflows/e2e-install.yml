@@ -2,8 +2,8 @@ name: E2E Install
 
 # End-to-end tier 1 (issue #214): a REAL install run of the curated catalog on a GitHub-hosted
 # windows-latest runner - a throwaway VM by construction, so this is the only automated place
-# where the installer executes without mocks. The 259-test Pester suite (windows-tests.yml)
-# mocks every external call; this workflow is the top rung of the testing pyramid.
+# where the installer executes without mocks. The Pester suite (windows-tests.yml) mocks every
+# external call; this workflow is the top rung of the testing pyramid.
 #
 # Two legs, each on its own throwaway VM, run the same two passes:
 #   - e2e-install starts every pass from PowerShell 7 (pwsh).
@@ -76,7 +76,7 @@ name: E2E Install
 # transcripts were misdiagnosed twice (#279, #283).
 #
 # Failure reporting lives in its own ubuntu-latest job (report-failure) that reads the uploaded
-# artifacts of both legs, so it still files the issue when a Windows job lost PowerShell 7, timed
+# artifacts of every leg, so it still files the issue when a Windows job lost PowerShell 7, timed
 # out or was cancelled. The old in-job step needed pwsh and failure(), and missed all three.
 
 on:

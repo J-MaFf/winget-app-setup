@@ -72,6 +72,50 @@ Describe 'Get-WingetExitCodeInfo' {
             $info.Meaning | Should -Not -Match '[.;]$'
         }
     }
+
+    It 'Is the one source of the symbols the code, the tests and the docs give a known code' {
+        # A comment and a test once gave 0x80073D19 another name, ERROR_INSTALL_USER_LOGOFF, while
+        # this table, the readme and CLAUDE.md said ERROR_DEPLOYMENT_BLOCKED_BY_USER_LOG_OFF (review
+        # finding P3-51). Wherever a known code is written next to a symbol ("0x8A150102
+        # INSTALL_INSTALL_IN_PROGRESS", "0x80073D19 (ERROR_...)"), the symbol must be this table's
+        # name, or winget's full APPINSTALLER_CLI_ERROR_ form of it. The generated installer is left
+        # out: -Check keeps it equal to the module.
+        $repoRoot = Split-Path -Parent $PSScriptRoot
+        $files = @(
+            foreach ($folder in 'WingetAppSetup', 'build', 'rmm', 'e2e', 'tests') {
+                Get-ChildItem -LiteralPath (Join-Path $repoRoot $folder) -Recurse -File |
+                    Where-Object { $_.Extension -in '.ps1', '.psm1', '.psd1' }
+            }
+            Get-ChildItem -LiteralPath (Join-Path $repoRoot '.github') -Recurse -File |
+                Where-Object { $_.Extension -in '.yml', '.yaml', '.md' }
+            Get-ChildItem -LiteralPath $repoRoot -File |
+                Where-Object { ($_.Extension -in '.md', '.ps1') -and $_.Name -ne 'winget-app-install.ps1' }
+        )
+        $pairPattern = '0x(?<hex>[0-9A-Fa-f]{8})[\s(`''"]{1,3}(?<symbol>[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+)\b'
+
+        $checked = 0
+        $mismatches = foreach ($file in $files) {
+            $lineNumber = 0
+            foreach ($line in [System.IO.File]::ReadAllLines($file.FullName)) {
+                $lineNumber++
+                foreach ($match in [regex]::Matches($line, $pairPattern)) {
+                    $info = Get-WingetExitCodeInfo -ExitCode ([Convert]::ToInt32($match.Groups['hex'].Value, 16))
+                    if (-not $info) {
+                        continue
+                    }
+                    $checked++
+                    $symbol = $match.Groups['symbol'].Value
+                    if ($symbol -cne $info.Name -and $symbol -cne ('APPINSTALLER_CLI_ERROR_' + $info.Name)) {
+                        '{0}:{1}: {2} {3} (the table says {4})' -f $file.FullName.Substring($repoRoot.Length + 1), $lineNumber, $info.Hex, $symbol, $info.Name
+                    }
+                }
+            }
+        }
+
+        # The scan must keep finding the pairs, or it would pass on nothing.
+        $checked | Should -BeGreaterThan 20
+        (@($mismatches) -join [Environment]::NewLine) | Should -BeNullOrEmpty
+    }
 }
 
 Describe 'Format-WingetExitCode' {

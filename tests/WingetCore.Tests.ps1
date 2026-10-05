@@ -562,7 +562,7 @@ Describe 'Initialize-Winget on the #279 wedge (review findings P3-25, P3-27, P3-
 
 Describe 'Install-WingetPackage (0x80073d19 session-error backoff)' {
     BeforeAll {
-        # 0x80073D19 (ERROR_INSTALL_USER_LOGOFF) as the signed Int32 winget reports.
+        # 0x80073D19 (ERROR_DEPLOYMENT_BLOCKED_BY_USER_LOG_OFF) as the signed Int32 winget reports.
         $script:SessionLogoffExitCode = -2147009255
     }
 

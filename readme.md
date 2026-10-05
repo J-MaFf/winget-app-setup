@@ -1,6 +1,7 @@
 # Winget App Setup
 
-A one-line guide for running the installer.
+Installs a curated set of apps on a Windows PC with winget, from one PowerShell line, and sets up
+automatic updates for them.
 
 ## Run the installer
 
@@ -65,7 +66,11 @@ installed by then, so open `pwsh` as administrator and run the same one-liner th
 second download. Starting from a file (`-File .\winget-app-install.ps1`) relaunches the same file
 instead. The bootstrap deletes its downloaded copy once the `pwsh` run has ended.
 
-The script will trust the required Winget sources, elevate if necessary, and install or update the curated app list. Repeat step 1 anytime you open a new PowerShell window before running it.
+The installer asks for administrator rights when it needs them (see
+[Administrator rights](#administrator-rights)), sets winget up, and installs each app of the
+[curated list](#app-catalog) that is not there yet. It does not update an app that is already
+installed: it prints `Skipping: <id> (already installed)`. It sets up
+[Winget-AutoUpdate](#automatic-updates) last, which updates the apps from then on.
 
 ### Administrator rights
 
@@ -88,6 +93,16 @@ that started the installer gets the real result rather than a 0 for having opene
   copy. A file rewritten while the prompt was up (the bootstrap's copy in `%TEMP%`, or a clone in
   Downloads, are writable by the signed-in user) is not run: the run stops with exit code 5.
 - Declining the prompt ends the run with exit code 4, with no second prompt.
+- Group Policy can set the Windows PowerShell execution policy (`Turn on Script Execution`) to
+  `AllSigned` (only signed scripts) or `Restricted` (no scripts). `-ExecutionPolicy Bypass`, which
+  the elevated window is started with, does not override it, so that window could not run the
+  installer. When the policy is set for the PC, the run says so in one line and exits 4 without
+  showing the prompt. When it is set only for the signed-in account, the run warns and asks
+  anyway, because another administrator may approve the prompt. The elevated window then checks
+  the policy of the account that approved it. Under `AllSigned` or `Restricted` it prints
+  `Did not run winget-app-install.ps1: Group Policy sets the execution policy to AllSigned, which -ExecutionPolicy Bypass cannot override`,
+  waits for Enter, and the run exits 4. The uninstaller's elevated window runs its file in place
+  and does not make this last check.
 - A non-interactive run that is not elevated (`-NonInteractive`, a scheduled task, an RMM agent
   running as the signed-in user) shows no prompt and exits 4 at once: nobody would be there to
   approve it.
@@ -217,7 +232,9 @@ Where the password comes from, in this order:
 
 From an RMM tool such as Endpoint Central, set the variables in the script that starts the
 installer (it runs as SYSTEM), so the password lives in the RMM's script store, not in this
-repository:
+repository. With the Endpoint Central scripts in `rmm/`, that is your uploaded copy of the machine
+phase (see [TightVNC password from Endpoint Central](#tightvnc-password-from-endpoint-central)). An
+RMM script that runs the one-liner itself looks like this:
 
 ```powershell
 $env:WINGET_APP_SETUP_TIGHTVNC_PASSWORD = '<server password, up to 8 characters>'
@@ -286,7 +303,8 @@ pwsh -ExecutionPolicy Unrestricted -File .\winget-app-install.ps1 -WhatIf
 ```
 
 A dry run changes nothing on the machine and does not ask for elevation. It runs the checks a real
-run starts with (the App Installer Group Policy and `winget --version`) and prints a `[DRY-RUN]`
+run starts with (the **Environment checks** under [Unattended runs](#unattended-runs), App
+Installer's Group Policy among them, and `winget --version`) and prints a `[DRY-RUN]`
 line for each change a real run would make: setting up winget for the account (registering App
 Installer, then `Repair-WinGetPackageManager`, after installing its `Microsoft.WinGet.Client`
 module), updating the winget source and repairing it if needed (a real repair runs
@@ -335,8 +353,9 @@ reads it too.
 $env:WINGET_APP_SETUP_NONINTERACTIVE = '1'; Set-ExecutionPolicy Unrestricted -Scope Process -Force; irm "https://raw.githubusercontent.com/J-MaFf/winget-app-setup/refs/heads/main/winget-app-install.ps1" | iex
 ```
 
-No winget or `msiexec` call can hang a run for good. Each has a time limit, and when it runs out
-the installer stops that process and every process it started, then carries on:
+No winget or `msiexec` call, and no other step in this table, can hang a run for good. Each has a
+time limit, and when it runs out the installer stops that process and every process it started, then
+carries on:
 
 | Call | Time limit |
 |------|------------|
@@ -348,7 +367,8 @@ the installer stops that process and every process it started, then carries on:
 | `winget source reset` | 5 minutes |
 | One `winget uninstall` (`winget-app-uninstall.ps1`), the app's own uninstaller included | 15 minutes |
 | `msiexec` for Winget-AutoUpdate (install and uninstall) | 15 minutes |
-| The Winget-AutoUpdate MSI download | 5 minutes until the server starts sending the file; on PowerShell 7.4 and newer, also 2 minutes without data while it arrives |
+| The Winget-AutoUpdate MSI download, and the Windows App Runtime package download (see [Automatic updates](#automatic-updates)) | 5 minutes until the server starts sending the file; on PowerShell 7.4 and newer, also 2 minutes without data while it arrives |
+| `Add-AppxProvisionedPackage` for the Windows App Runtime framework | 10 minutes |
 | Reading which Windows App Runtime the latest winget release needs (`DesktopAppInstaller_Dependencies.json`) | 30 seconds, and on PowerShell 7.4 and newer also 30 seconds without data; when it runs out, the built-in requirement is used |
 
 A stopped install is checked like any other: unless the app turns out to be installed anyway, it
@@ -359,7 +379,35 @@ fails, gets its one retry in the retry pass, and counts toward exit code 1, with
 Some steps still have no time limit of their own: the PowerShell cmdlets that set up winget
 (`Install-Module` for Microsoft.WinGet.Client, `Repair-WinGetPackageManager`, and
 `Add-AppxPackage` registering App Installer), and, on PowerShell 7.3 and older, the
-Winget-AutoUpdate MSI download once the file has started to arrive.
+Winget-AutoUpdate MSI and Windows App Runtime downloads once the file has started to arrive.
+There is no time budget for the whole run either.
+
+**Environment checks.** Before it changes anything, the installer looks for what would make the run
+fail whatever it did, and prints one line for each problem it finds. These checks only read, so
+`-WhatIf` runs them too and says what a real run would do.
+
+- **Constrained Language Mode**, which an App Control for Business (WDAC) or AppLocker policy sets
+  for untrusted scripts, stops the run at once with exit code 5. The run prints one line and its
+  `RESULT` line, and writes no log. In an interactive `irm | iex` console the window stays open and
+  `$LASTEXITCODE` is 5.
+- **Group Policy's execution policy.** Group Policy can set PowerShell's execution policy
+  (`Turn on Script Execution`) to `AllSigned` or `Restricted`, and `-ExecutionPolicy Bypass`, which
+  the installer relaunches itself with, does not override that. So the Windows PowerShell 5.1
+  bootstrap stops with exit code 7, before it installs PowerShell 7, when PowerShell 7's policy
+  refuses scripts (`PowerShell Core` > `Turn on Script Execution`, or its setting to use the Windows
+  PowerShell policy). A run that is not elevated stops with exit code 4, without a UAC prompt, when
+  the PC's Windows PowerShell policy refuses them (see [Administrator rights](#administrator-rights)).
+  As in PowerShell itself, a Group Policy execution policy does not count for a run that a Group
+  Policy startup or logon script (`gpscript.exe`) started.
+- **Proxy.** Once elevated, or as SYSTEM, the run warns when the signed-in user has a proxy in
+  their Windows Internet settings that the account it runs as does not have, and shows both
+  settings: on a network that only lets traffic out through that proxy, downloads fail. The WinHTTP
+  proxy and a per-machine proxy policy apply to every account, so they are not reported. A failed
+  network check of a run as SYSTEM or as another admin account names that proxy too.
+- **Pending restart.** A restart Windows already wants is reported (see **Restart required**
+  below).
+- **App Installer's Group Policy** turning winget off stops the run with exit code 2, before it
+  waits for Winget-AutoUpdate or sets winget up (see step 1 below).
 
 **Setting winget up.** Before the installs, one step (`Initialize-Winget`) checks winget, works out
 what is wrong from exit codes and HRESULTs, applies the fix for that, and runs each fix at most once
@@ -370,7 +418,9 @@ a run. When something cannot be fixed it prints one line that says why and what 
    Default Source` set to Disabled, under
    `HKLM\SOFTWARE\Policies\Microsoft\Windows\AppInstaller`), or winget answers
    `0x8A15003A BLOCKED_BY_POLICY`, no repair can help: the run stops with exit code 2 and names
-   the policy, before any repair, source reset or Winget-AutoUpdate install.
+   the policy, before any repair, source reset or Winget-AutoUpdate install. The environment checks
+   above find the policy values first and stop the run there; this step still recognizes winget's
+   own `0x8A15003A`, and it is the check the uninstaller relies on.
 2. **Can winget start?** `winget --version` has to run and print a version; being on PATH is not
    enough. A failure that can clear on its own (`winget.exe` locked, for example while App Installer
    updates) is checked again for up to 75 seconds first. If winget still cannot run, the installer
@@ -490,8 +540,9 @@ differently:
   fails instead, without a retry. A deferred app counts neither as installed nor as failed and does
   not change the exit code. A per-user app can only be installed in the signed-in user's own
   account: by this installer run as that user when the account is an administrator, otherwise by a
-  per-user deployment, such as the user phase (`rmm/Invoke-WingetAppSetupUserPhase.ps1`, below) or
-  the Microsoft Store (on a standard user's PC, the UAC prompt elevates as an administrator account,
+  per-user deployment, such as the user phase (`rmm/Invoke-WingetAppSetupUserPhase.ps1`, see
+  [Endpoint Central and other RMM tools](#endpoint-central-and-other-rmm-tools)) or the Microsoft
+  Store (on a standard user's PC, the UAC prompt elevates as an administrator account,
   which defers the app again). winget answers `--scope machine` with the same
   `0x8A150010 NO_APPLICABLE_INSTALLER` when no installer applies to the PC at all, so a deferred app
   can also be one winget cannot install on this PC at any scope.
@@ -503,8 +554,13 @@ differently:
   is skipped (see [Windows Terminal defaults](#windows-terminal-defaults)).
 - Its messages are written for SYSTEM: no "cross-user elevation" banner and no advice to sign in
   to Windows as `NT AUTHORITY\SYSTEM`.
+- It does not use the signed-in user's own proxy settings. When that user has a proxy server or an
+  automatic configuration script that SYSTEM lacks, the run says so at its start (see
+  **Environment checks** above), because downloads fail on a network that only lets traffic out
+  through that proxy.
 - TightVNC gets its password only from `WINGET_APP_SETUP_TIGHTVNC_PASSWORD` (set it in the RMM
-  script; see [TightVNC server password](#tightvnc-server-password)). Without it TightVNC is
+  script; see [TightVNC password from Endpoint Central](#tightvnc-password-from-endpoint-central)
+  and [TightVNC server password](#tightvnc-server-password)). Without it TightVNC is
   installed but not configured, and the run still exits 0: look for
   `Configuration: NOT DONE for GlavSoft.TightVNC` in the output, or `"postInstall": "NotConfigured"`
   in `last-run.json`.
@@ -523,20 +579,272 @@ Only one run works on a PC at a time: a run started while another one is in prog
 once (see [One run at a time](#one-run-at-a-time)). A real run prints a machine-readable `RESULT`
 line, and the run that did the work also writes `last-run.json` (see [Run result](#run-result)).
 
-For Endpoint Central, `rmm/Invoke-WingetAppSetup.ps1` is the machine phase (a Computer
-Configuration script run as SYSTEM): it relaunches itself in 64-bit Windows PowerShell when the
-32-bit agent starts it, runs `winget-app-install.ps1` from a pinned commit after checking its
-SHA256, and exits with the installer's code (5 when it could not run it: pins not set, download
-failed, SHA256 mismatch). `rmm/Invoke-WingetAppSetupUserPhase.ps1` is the user phase (a User
-Configuration script, every logon, as the signed-in user, never elevated): it installs the apps
-`last-run.json` lists as `Deferred` with `--scope user`, runs the post-install hook of an app the
-catalog has one for, and sets the Windows Terminal defaults, once per machine run and within a few
-attempts. Each deferred app's entry in `last-run.json` says why it was deferred (`winget found no
-machine-wide installer for it`, catalog scope `user`, or catalog `userPhase`). Not there yet: a
-time budget for the whole run. RMM tools read success from the exit code: list any other code you
-accept, such as 3010, as a success code for the script. Exit code 8 means the apps are installed
-but automatic updates are not set up or will not run; decide whether your RMM job should count it
-as a success.
+Each deferred app's entry in `last-run.json` says why it was deferred (`winget found no
+machine-wide installer for it`, catalog scope `user`, or catalog `userPhase`). For Endpoint Central,
+use the scripts in `rmm/`: a machine phase that runs this installer as SYSTEM, and a user phase
+that installs the deferred apps for each user at sign-in (see the next section). RMM tools read
+success from the exit code: list any other code you accept, such as 3010, as a success code for the
+script. Exit code 8 means the apps are installed but automatic updates are not set up or will not
+run; decide whether your RMM job should count it as a success.
+
+### Endpoint Central and other RMM tools
+
+`rmm/` holds four scripts for ManageEngine Endpoint Central. Each is one file that needs nothing
+beside it and runs in Windows PowerShell 5.1, so you upload it to Endpoint Central's Script
+Repository as it is. Any RMM that can run a PowerShell script as SYSTEM (and, for the user phase,
+as the signed-in user) can use them the same way.
+
+| Script | Runs as | What it does |
+|--------|---------|--------------|
+| `rmm/Invoke-WingetAppSetup.ps1` (machine phase) | SYSTEM, once per PC | Runs this installer for the whole PC, from a pinned commit |
+| `rmm/Invoke-WingetAppSetupUserPhase.ps1` (user phase) | The signed-in user, at every sign-in, never elevated | Installs the apps the machine phase deferred, and sets the user's Windows Terminal defaults |
+| `rmm/Get-WingetFleetHealth.ps1` (health probe) | SYSTEM | Checks whether winget and Winget-AutoUpdate work, and changes nothing |
+| `rmm/Repair-WauLogonTrigger.ps1` (at-logon fix) | SYSTEM | Removes Winget-AutoUpdate's at-logon trigger from PCs set up by older versions |
+
+Endpoint Central's agent is 32-bit, and a 32-bit process sees a 32-bit System32, Program Files and
+registry. So the machine phase, the probe and the fix run themselves again in 64-bit Windows
+PowerShell (`%SystemRoot%\Sysnative\WindowsPowerShell\v1.0\powershell.exe`) when a 32-bit
+PowerShell starts them. The probe and the fix do the same when PowerShell 7 starts them. The user
+phase needs no relaunch: it reads only files a 32-bit process sees as they are, and it runs the
+64-bit PowerShell 7.
+
+The machine phase runs this installer as SYSTEM, so the caveat above applies: Microsoft does not
+support the winget command line as SYSTEM. None of this has run from Endpoint Central on a real PC
+yet. What this section says about Endpoint Central (its 32-bit agent, output in the Remarks only
+for frequency Once, User Configuration scripts running as the signed-in user) comes from search
+results quoting its documentation, not from a test, and its own time limit for a script has not
+been measured: check that it covers a first run, which installs every app. Check all of it on a
+pilot PC first. The E2E run's SYSTEM leg runs the machine phase the way the 32-bit agent would (see
+[End-to-end monitoring](#end-to-end-monitoring-e2e-tier-1)).
+
+#### Setting it up
+
+1. **Pin the installer.** The machine phase and the user phase download `winget-app-install.ps1`
+   from one pinned commit
+   (`https://raw.githubusercontent.com/J-MaFf/winget-app-setup/<commit>/winget-app-install.ps1`),
+   never from `main`, and run it only when its SHA256 matches the pinned one. A change on `main`
+   reaches the PCs only when you move the pin. Both scripts ship with empty pins
+   (`$PinnedInstallerCommit` and `$PinnedInstallerSha256`), because no commit on `main` had this
+   code when they were written, and they exit 5 without running anything until the pins are set.
+   Once the change has merged to `main` and its E2E run has passed, run:
+
+   ```powershell
+   pwsh -File build/Set-RmmInstallerPin.ps1 -Commit <commit on main>
+   ```
+
+   It reads `winget-app-install.ps1` from that commit with git, hashes it, and writes both pins
+   into both scripts. It writes nothing when either script does not have exactly one of each pin
+   line, or when the file has no `Invoke-WingetUserPhase` (a commit older than the user phase,
+   which would fail at every sign-in). It warns about a commit that is not on `origin/main`. Commit
+   the two scripts. To roll back, pin an older commit that has the user phase.
+2. **Script Repository** (Configurations > Settings > Script Repository): add the scripts you use.
+   Upload the two phases again after every pin change.
+3. **Machine phase:** Computer Configuration > Custom Script. Run As: System user. Script:
+   `Invoke-WingetAppSetup.ps1`, no arguments. Success exit codes: `0,3010`. Frequency: Once, with
+   **Enable logging for troubleshooting**, so the script's output shows in the configuration's
+   Remarks. A PC that runs it before its network is up fails the download with exit code 5: deploy
+   it again to those PCs.
+
+   Exit code 8 is left out of the success codes on purpose. It means the apps are installed but
+   automatic updates are not set up or will not run (for example, the Windows App Runtime that
+   winget needs could not be installed), and such a PC needs a look. Shown as failed, those PCs
+   stand out. Add 8 to the success codes if that is too noisy for you.
+4. **User phase:** User Configuration > Custom Script, run as the signed-in user. Script:
+   `Invoke-WingetAppSetupUserPhase.ps1`. Success exit codes: `0,3010`. Frequency: Every Logon. A
+   user who was signed in when the machine phase ran gets it at their next sign-in.
+5. **Health probe and at-logon fix** (optional): Computer Configuration > Custom Script. Run As:
+   System user. Success exit code: `0`, so the failed PCs are the unhealthy ones, or the ones the
+   fix could not fix. Frequency: Once, with **Enable logging for troubleshooting**, so the `HEALTH`
+   or `REPAIR` line shows in the Remarks. Deploy the probe again to check again later. Neither
+   needs arguments; see below for the optional ones.
+
+#### Machine phase
+
+`rmm/Invoke-WingetAppSetup.ps1`:
+
+1. relaunches itself in 64-bit Windows PowerShell when a 32-bit PowerShell started it;
+2. logs everything it does, the installer's console output included, to
+   `%ProgramData%\winget-app-setup\logs\install-<yyyyMMdd-HHmmss>-rmm.log`, next to the
+   installer's own logs;
+3. downloads the pinned `winget-app-install.ps1` into a new folder under `%SystemRoot%\Temp` that
+   only SYSTEM and Administrators can change, and checks its SHA256 before any of it runs;
+4. runs it with `-NonInteractive` in Windows PowerShell, which finds or installs PowerShell 7 and
+   relaunches under it;
+5. exits with the installer's exit code, unchanged (see [Exit codes](#exit-codes)). It exits 5
+   without running the installer when the pins are not set, the download failed, the SHA256 does
+   not match, or the 64-bit relaunch could not start.
+
+As SYSTEM the installer is non-interactive, elevated, and installs for the whole PC only (see
+[Running as SYSTEM](#running-as-system-rmm-tools-such-as-endpoint-central)). So the machine phase
+needs no other switch. It passes `-NonInteractive` for an RMM that runs it as an administrator
+account instead of SYSTEM. The apps the run defers and the per-user Windows Terminal defaults are
+left to the user phase.
+
+#### User phase
+
+`rmm/Invoke-WingetAppSetupUserPhase.ps1` does the per-user work of a machine run, once per machine
+run for each user. It keeps track in `%LOCALAPPDATA%\winget-app-setup\user-phase.json`, keyed to
+that run's `last-run.json`.
+
+- It decides from `last-run.json` and that file, before it downloads anything, whether there is
+  work. There is none when there is no record, the machine run has not finished, or this account
+  has already finished that run or tried it 3 times. Most sign-ins end there in under a second,
+  exit 0 and print nothing. Run as SYSTEM, it does nothing.
+- It uses `last-run.json` only when SYSTEM or Administrators own it and no other account can change
+  it (write or append to it, delete it, change its permissions or take ownership). It checks this
+  from the file's own access list while it holds the file open. The machine phase's record always
+  passes. Any other record is ignored with one line and the user phase does nothing, because the
+  apps it lists are installed in every account that signs in. A standard user who controls the
+  logs folder can still delete the record, which stops the user phase until the next machine run,
+  but cannot make it install other apps.
+- When there is work, it finds PowerShell 7 (the machine phase installs it), downloads the pinned
+  installer into the user's `%TEMP%`, checks its SHA256, and runs the installer's
+  `Invoke-WingetUserPhase` under PowerShell 7.
+- It checks that winget starts for this account (Windows sets winget up for an account shortly
+  after its first sign-in), then updates the winget source for it
+  (`winget source update --name winget`, with a 2-minute limit). At an account's first sign-in
+  this also registers the source. A source that cannot be updated is reported in one line, and the
+  installs go ahead. It runs no `winget source reset`, which needs administrator rights.
+- It installs each deferred app with `--scope user` only, checked with `winget list` before and
+  after. It never tries another scope, so it never picks a machine-wide installer that would ask
+  for administrator rights. A per-user installer that elevates itself would still show a UAC
+  prompt, so check each app the user phase installs once on a pilot PC. When the app's catalog
+  entry has an `installerType`, it is used, and a `postInstall` hook runs in the user's account
+  once the app is there.
+- It sets the user's Windows Terminal defaults (see
+  [Windows Terminal defaults](#windows-terminal-defaults)). Windows Terminal creates its
+  `settings.json` the first time it is opened, so until then the default profile waits for a later
+  sign-in.
+- Its installs share a 15-minute budget (`-MaxMinutes`), and its PowerShell 7 run is stopped 5
+  minutes after that.
+- It tries again at a later sign-in when an app failed or was not reached, winget could not be
+  started yet, a hook could not configure its app yet, or the Windows Terminal step did not finish:
+  up to 3 sign-ins per machine run (`-MaxAttempts`). It counts an attempt before it starts work, so
+  an attempt that is killed still counts.
+- It logs to `%LOCALAPPDATA%\winget-app-setup\logs\install-<yyyyMMdd-HHmmss>-userphase.log` (the
+  newest 10 are kept), with winget's per-app logs next to it, and ends with one
+  `USER PHASE RESULT:` line.
+
+The user phase exits with:
+
+- 0: done, or nothing to do;
+- 1: a deferred app failed, its post-install hook failed, or it was not reached within the time
+  budget;
+- 2: winget cannot be started for this account yet;
+- 3010: done, and an install needs a restart to finish;
+- 5: the installer could not be run (pins not set, download failed, SHA256 mismatch, or a pinned
+  commit older than the user phase), the run did not end in time, or an unexpected error;
+- 7: PowerShell 7 is not installed.
+
+#### TightVNC password from Endpoint Central
+
+The machine phase starts the installer as its own child process, so the installer gets the
+[TightVNC variables](#tightvnc-server-password) that the machine phase sets. Endpoint Central runs
+the file you uploaded as it is, so set them in your uploaded copy of `rmm/Invoke-WingetAppSetup.ps1`,
+right after its pin block:
+
+```powershell
+$env:WINGET_APP_SETUP_TIGHTVNC_PASSWORD = '<server password, up to 8 characters>'
+$env:WINGET_APP_SETUP_TIGHTVNC_CONTROL_PASSWORD = '<a different control password>'
+```
+
+- Never commit that copy: this repository is public. Add the lines again to each copy with new
+  pins that you upload.
+- Everyone who can read the script in the Endpoint Central console can read the password, and
+  Script Block Logging records it too (see [TightVNC server password](#tightvnc-server-password)).
+  Limit who can see the script.
+- Do not pass the password as a script argument: arguments are on the process command line, which
+  process auditing records.
+- The user phase does not need it: TightVNC installs for the whole PC, and the machine phase
+  configures it as SYSTEM.
+- Without the password, TightVNC is installed but not configured, and the machine phase still exits
+  0. Look for `"postInstall": "NotConfigured"` in `last-run.json`, or for the
+  `Configuration: NOT DONE for GlavSoft.TightVNC` line in the `-rmm.log`.
+
+This has not been tried on a real PC yet, and the E2E run sets no TightVNC password.
+
+#### Fleet health probe
+
+`rmm/Get-WingetFleetHealth.ps1` reports whether winget and Winget-AutoUpdate (WAU) work on a PC, and
+changes nothing. A PC whose winget WAU has broken looks fine everywhere else: WAU logs
+`No update found` and its task reports success, until the next installer run fails every app. The
+probe finds such PCs first. It writes one line per check:
+
+- each App Installer (`Microsoft.DesktopAppInstaller`) version, its status, and each account's
+  install state (`Get-AppxPackage -AllUsers`);
+- whether `Microsoft.WindowsAppRuntime.1.8` 8000.616.304.0 or newer is installed for the PC's
+  architecture (winget 1.12 and later need it). This is the installer's built-in requirement: the
+  probe makes no network call to read what the latest winget release needs;
+- whether the machine-wide `winget.exe` prints its version within 30 seconds
+  (`-WingetTimeoutSeconds`). That is the one a run as SYSTEM picks first: the newest App Installer
+  with status `Ok` for the PC's architecture. When it does not, the next ones are tried and
+  reported too. Only a run as SYSTEM makes this check. Run by an administrator, the probe starts no
+  `winget.exe` and reports `winget=skipped`, because Windows can refuse an administrator's start of
+  it (`Access is denied`) on a healthy PC;
+- whether WAU is installed, its `WAU_UpdatesAtLogon` setting and Group Policy, and its
+  `\WAU\Winget-AutoUpdate` task: state, triggers (and whether the at-logon one is still there),
+  last run and result, next run;
+- the last 20 (`-LogMatchCount`) entries of WAU's `updates.log` that tell what its runs did: each
+  run's header, the `WinGet MSIXBundle` install of WAU's prerequisite step, `No update found` with
+  the winget output after it, and errors.
+
+Its last line can be read by a machine, for example:
+
+```text
+HEALTH: status=unhealthy problems=wau-logon-trigger computer=PC01 appinstaller=1.29.380.0 runtime=present winget=ok wingetversion=1.29.380 wau=2.12.0 wautask=Ready wauresult=0x00000000 logontrigger=yes wauwingetinstalls=0
+```
+
+`winget` is `ok`, `fallback`, `failed`, `timedout`, `notfound` or `skipped`. The probe exits 1 when
+the PC is unhealthy and 0 otherwise. The `problems` codes:
+
+| Code | Meaning |
+|------|---------|
+| `winget-notfound` | There is no machine-wide `winget.exe` |
+| `winget-launch` | The machine-wide `winget.exe` does not print its version in time (`winget=failed` or `timedout`), or only an older one does (`winget=fallback`; WAU runs the newest) |
+| `runtime-missing`, `runtime-unknown` | WAU is installed, and the Windows App Runtime above is missing or could not be read: WAU's next run can install a winget that cannot start |
+| `wau-task-missing`, `wau-task-unknown`, `wau-task-disabled`, `wau-task-no-trigger` | WAU is installed, and its task does not exist, could not be read, is disabled, or has no enabled trigger: automatic updates never run |
+| `wau-logon-trigger` | WAU's task still runs at every sign-in. Fix it with `rmm/Repair-WauLogonTrigger.ps1` |
+| `not-elevated` | Not run as SYSTEM or elevated, so the probe could not read the machine |
+| `probe-error` | The probe itself could not run |
+
+A PC without WAU is not unhealthy for that reason alone: the installer leaves WAU off a PC that
+lacks the Windows App Runtime. To check one PC by hand, run the probe as SYSTEM, for example
+`psexec -s powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Get-WingetFleetHealth.ps1`.
+From an elevated PowerShell every other check runs, and the probe reports `winget=skipped`. A run
+that is not elevated at all reports `not-elevated`.
+
+#### Winget-AutoUpdate at-logon fix
+
+Installers from before the Winget-AutoUpdate fixes did not pass `UPDATESATLOGON` to WAU's MSI, so
+WAU 2.12.0 also runs at every sign-in. That run reinstalls App Installer and resets winget's
+sources exactly when a technician signs in to run the installer again. The installer removes the
+trigger whenever it runs. `rmm/Repair-WauLogonTrigger.ps1` does the same on PCs set up earlier,
+without a full installer run. The probe's `wau-logon-trigger` names the PCs that need it.
+
+It removes every at-logon trigger from `\WAU\Winget-AutoUpdate` and keeps the others (WAU's
+schedule). It sets `WAU_UpdatesAtLogon` to 0 (REG_DWORD) under
+`HKLM:\SOFTWARE\Romanitho\Winget-AutoUpdate`, which WAU's MSI reads back when WAU is upgraded or
+repaired, so the trigger does not come back. It reads both changes back. It changes nothing else,
+and nothing at all when there is nothing to change. `-WhatIf` shows what it would change. A task
+whose only trigger is the at-logon one is left alone, because WAU would otherwise never run again.
+Its last line:
+
+```text
+REPAIR: status=fixed problems=none computer=PC01 logontrigger=removed updatesatlogon=set-0 policy=none
+```
+
+It exits 0 when no at-logon trigger is left and none will come back, also when WAU is not
+installed, and with `-WhatIf` when the fix would succeed. It exits 1, with `-WhatIf` too, when:
+
+- the at-logon trigger is the task's only one (`logon-only-trigger`);
+- the trigger cannot be removed, or is still there afterwards (`trigger-not-removed`);
+- `WAU_UpdatesAtLogon` cannot be set to 0 (`setting-not-written`);
+- the task cannot be read (`task-unknown`);
+- Group Policy sets `WAU_UpdatesAtLogon` to 1 under
+  `HKLM:\SOFTWARE\Policies\Romanitho\Winget-AutoUpdate` (`policy-logon`): WAU's daily
+  `Winget-AutoUpdate-Policies` task puts the trigger back, so change the policy;
+- the script is not run as SYSTEM or elevated (`not-elevated`: nothing was read or changed);
+- the script itself could not run, a failed 64-bit relaunch included (`repair-error`).
 
 ### Exit codes
 
@@ -547,7 +855,7 @@ as a success.
 | 2 | Winget is unavailable or cannot be started (`winget --version` must run and print a version) and could not be set up (as SYSTEM: no machine-wide `winget.exe` was found, or none could be started), App Installer's Group Policy turns winget or its source off (the pre-flight checks it before the run waits for anything or sets winget up; see **Setting winget up** above), or winget could no longer be launched at the end of the run (no app failed, but automatic updates and the next run would) |
 | 3 | App-definition validation failed (for example an invalid `scope`, `arch`, `postInstall` or `userPhase` value, see [Catalog entry fields](#catalog-entry-fields)), or no valid app definitions remain |
 | 4 | Administrator rights are required and the run was not elevated: the UAC prompt was declined or the elevated window could not be started, the run is non-interactive (no prompt is shown), it runs through `irm \| iex` in PowerShell 7, `Invoke-WingetInstall` was called from the imported module, or Group Policy sets the Windows PowerShell execution policy to `AllSigned` or `Restricted`: for the PC, so no UAC prompt is shown, or for the account that approved the prompt, so the elevated window stops before it runs anything (see [Administrator rights](#administrator-rights)) |
-| 5 | The run was aborted before it finished: an unexpected error (the message and stack trace are in the log), the run was stopped from outside (Ctrl+C, the console closing, an installer stopping the console) when run from a file or non-interactively, the installer file changed before its elevated copy could run (see [Administrator rights](#administrator-rights)), or PowerShell runs the installer in Constrained Language Mode (an App Control for Business or AppLocker policy), which the installer checks before anything else. With `-CollectDiagnostics`, the installer installs nothing and exits 0 when it saved the diagnostics bundle, 5 when it could not |
+| 5 | The run was aborted before it finished: an unexpected error (the message and stack trace are in the log), the run was stopped from outside (Ctrl+C, the console closing, an installer stopping the console) when run from a file or non-interactively, the installer file changed before its elevated copy could run (see [Administrator rights](#administrator-rights)), or PowerShell runs the installer in Constrained Language Mode (an App Control for Business or AppLocker policy), which the installer checks before anything else. With `-CollectDiagnostics`, the installer installs nothing and exits 0 when it saved the diagnostics bundle, 5 when it could not (see [Diagnostics bundle](#diagnostics-bundle--collectdiagnostics)). The machine phase `rmm/Invoke-WingetAppSetup.ps1` also exits 5, without running the installer, when its pins are not set, the download failed or the SHA256 does not match; otherwise it passes the installer's code back unchanged |
 | 6 | Another run of the installer is in progress on this PC (started by an RMM job, a scheduled task or someone else). This run stopped before its pre-flight checks and changed nothing. Run it again once the other run has finished (see [One run at a time](#one-run-at-a-time)) |
 | 7 | Started from Windows PowerShell 5.1, the installer could not install PowerShell 7 or could not relaunch itself under it, including when Group Policy sets PowerShell 7's execution policy to `AllSigned` or `Restricted` (checked before PowerShell 7 is installed) |
 | 8 | The apps are fine and winget still works, but automatic updates will not work or could not be verified. The summary's `Auto-updates:` line says which: `FAILED` (Winget-AutoUpdate could not be installed), `NOT CONFIGURED` (skipped because the Windows App Runtime the latest winget release needs, today `Microsoft.WindowsAppRuntime.1.8`, is missing and the installer could not install it, for example because that release needs a newer build or another family than the installer's pinned one), `AT RISK` (installed while that framework is missing and could not be installed) or `UNHEALTHY` (installed, but its `\WAU\Winget-AutoUpdate` task is missing, disabled, has no enabled trigger or could not be checked; see [Automatic updates](#automatic-updates)) |
@@ -603,7 +911,11 @@ take the exit code from the process. A dry run prints no `RESULT` line, and neit
 of a run that relaunched itself elevated (the elevated window prints it). A run started from
 Windows PowerShell 5.1 prints the bootstrap's own lines after it; when installing PowerShell 7
 needs a restart, the process exits 3010 while the line says `exit=0` and `restart=no`. A bootstrap
-that fails with exit code 7 prints no `RESULT` line.
+that fails with exit code 7 prints no `RESULT` line. A run that stops at once because PowerShell
+runs it in Constrained Language Mode (exit code 5) prints
+`RESULT: exit=5 installed=0 skipped=0 deferred=0 failed=0 autoupdates=NotRun restart=no build=<id> log=none`,
+from Windows PowerShell 5.1 too: it starts no log and writes no `last-run.json`.
+`-CollectDiagnostics` prints no `RESULT` line.
 
 The run that did the work (a real, elevated run that holds the run lock) also writes
 `%ProgramData%\winget-app-setup\logs\last-run.json`, replacing the previous file in one step. It
@@ -665,11 +977,21 @@ The same folder also holds:
 - `wau-msi-<install|uninstall>-<yyyyMMdd-HHmmss>-<attempt>.log` — `msiexec`'s verbose log of the
   Winget-AutoUpdate install, or of its removal by `winget-app-uninstall.ps1` (which writes it here
   although it keeps no transcript), one per attempt. A failed install or removal names it.
+- `install-<yyyyMMdd-HHmmss>-rmm.log` — the log of the Endpoint Central machine phase
+  (`rmm/Invoke-WingetAppSetup.ps1`): how it was started (including its relaunch from a 32-bit
+  PowerShell), which installer it downloaded and its SHA256 check, the installer's console output,
+  and the exit code it passed back.
 - `last-run.json` — the outcome of the last real run (see [Run result](#run-result)).
 
+The user phase (`rmm/Invoke-WingetAppSetupUserPhase.ps1`) runs as the signed-in user, who cannot
+write here, so it logs to that user's own
+`%LOCALAPPDATA%\winget-app-setup\logs\install-<yyyyMMdd-HHmmss>-userphase.log`, with winget's
+per-app `--log` files next to it, and keeps its state in
+`%LOCALAPPDATA%\winget-app-setup\user-phase.json`.
+
 Old logs are removed automatically. The run that holds the run lock (a real, elevated run) keeps
-the newest 30 `install-*.log` transcripts (bootstrap and `-whatif` ones included) and deletes the
-older ones, together with the `winget-*` and `pwsh-msi-*` logs older than the oldest transcript it
+the newest 30 `install-*.log` transcripts (bootstrap, `-rmm` and `-whatif` ones included) and
+deletes the older ones, together with the `winget-*` and `pwsh-msi-*` logs older than the oldest transcript it
 keeps. Other files there, such as `last-run.json` and the `wau-msi-*` logs, are left alone. It also
 removes the installer's temporary copy folders (`winget-app-setup-<id>`,
 `winget-app-setup-elevate-<id>`, `winget-app-setup-pwsh-<id>`) that a stopped run left behind, once
@@ -695,20 +1017,79 @@ failure reasons are never cut off in the log.
 
 A run that stops early (a failed pre-flight check, winget missing, a declined elevation, a failed
 PowerShell 7 setup, an unexpected error) ends with one block: the exit code and why, the log file
-path, the installer build, and where to report it. The run's `RESULT` line follows (see
-[Run result](#run-result); a failed PowerShell 7 setup prints none). When someone is at the
-console, it then waits for a key press, so the window does not close before you can read it (under
-`irm | iex` the run ends the PowerShell window it runs in). Unattended runs never wait.
+path, the installer build, where to report it, and the command that makes a diagnostics bundle
+(below). The run's `RESULT` line follows (see [Run result](#run-result); a failed PowerShell 7
+setup prints none). When someone is at the console, it then waits for a key press, so the window
+does not close before you can read it (under `irm | iex` the run ends the PowerShell window it runs
+in). Unattended runs never wait. A run that reaches its summary and fails (exit code 1, 2 or 8)
+prints the same report hint after its `Full transcript of this run:` line.
 
 To report a failure, open an
 [install failure issue](https://github.com/J-MaFf/winget-app-setup/issues/new?template=install-failure.yml)
-with the exit code, the installer build and the log file.
+with the exit code, the installer build and a diagnostics bundle (or the log file). The form also
+asks how the installer was started, the elevation style and the Windows build.
+
+#### Diagnostics bundle (`-CollectDiagnostics`)
+
+On the PC where the run failed, run this in PowerShell, started as administrator so it can read
+everything. It works from Windows PowerShell 5.1 and PowerShell 7, and needs no execution policy
+change:
+
+```powershell
+& ([scriptblock]::Create((irm "https://raw.githubusercontent.com/J-MaFf/winget-app-setup/refs/heads/main/winget-app-install.ps1"))) -CollectDiagnostics
+```
+
+From a clone, `pwsh -File .\winget-app-install.ps1 -CollectDiagnostics` does the same. From a
+32-bit PowerShell on 64-bit Windows (some RMM agents), run it through
+`%SystemRoot%\Sysnative\WindowsPowerShell\v1.0\powershell.exe`: a 32-bit PowerShell reads the
+32-bit registry, where PowerShell 7, Winget-AutoUpdate and the pending-restart keys are not. The
+bundle says so in `system.txt` and `README.txt` when it was made that way.
+
+It installs nothing and changes nothing on the PC: no transcript, no run lock, no `last-run.json`,
+no `RESULT` line, no PowerShell 7 install and no elevation, and it works when winget does not. It
+saves `winget-app-setup-diagnostics-<yyyyMMdd-HHmmss>.zip` on the Desktop of the account that ran
+it. For a run as SYSTEM, or as another admin account than the signed-in user, it saves it in
+`C:\Users\Public\Documents`, which every account can open, and falls back to `%TEMP%`. It prints
+the path and exits 0, or 5 when no folder takes the file. The bundle holds:
+
+- `logs\`: the latest run's transcripts (up to six, started within an hour of the newest, so the
+  bootstrap and PowerShell 7 transcripts of the window that asked for elevation and of the elevated
+  one, and the machine phase's `-rmm.log`), the installer logs written since then
+  (`winget-install-*`, `pwsh-msi-*`, `wau-msi-*`), and `last-run.json`. A log longer than 4 MB
+  keeps its last 4 MB.
+- `user-phase\`: when the user phase has run in this account, its `user-phase.json` and its latest
+  transcript and winget logs.
+- `system.txt`: the Windows build and architecture, the account it ran as and the signed-in user,
+  the elevation style (same-user, cross-user or SYSTEM), the PowerShell 7 installs, the execution
+  policy and its Group Policy keys, the App Installer and Microsoft Store Group Policy keys, the
+  pending-restart state, the Windows App Runtime this build pins and its built-in requirement, and
+  the Winget-AutoUpdate version and task.
+- `winget.txt`: `winget --version` and `winget --info`, each with the 30-second time limit (as
+  SYSTEM, the machine-wide `winget.exe`).
+- `appx.txt`: `Get-AppxPackage -AllUsers` for `Microsoft.DesktopAppInstaller` and
+  `Microsoft.WindowsAppRuntime.*`, with each account's install state by SID, and
+  `Get-AppxProvisionedPackage -Online` for the same. These run in Windows PowerShell.
+- `wau-updates-log-tail.txt`: the last 400 lines of Winget-AutoUpdate's `updates.log`.
+- `README.txt`: what each source returned, or why it could not be read, and the list of files in
+  the logs folder.
+
+Without elevation, the other accounts' AppX packages, the provisioned packages and possibly some
+logs cannot be read. `README.txt` says which, and the command says so when it finishes.
+
+Every file is redacted before it is zipped. Account names, the computer name, domain and DNS
+domain names, user profile folder names, the identifying part of the SIDs of real accounts
+(`S-1-5-21-...` and Azure AD's `S-1-12-1-...`) and email addresses become placeholders such as
+`<user1>`, `<computer1>`, `<domain1>` and `S-1-5-21-<sid1>-1001`, with the same placeholder in
+every file. Built-in accounts and well-known SIDs (`SYSTEM`, `Administrators`, `S-1-5-18`,
+`S-1-5-32-544`) stay. IP addresses and the names of other machines (a proxy or a file server) are
+not redacted. Look through the bundle before you attach it anyway.
 
 > **Privacy: this repository and its issues are public.** Every PowerShell transcript starts with a
 > header that names the computer, the signed-in account and the account that ran the installer
 > (`Username`, `RunAs User`, `Machine`). Delete that header, or replace the names in it, before
 > you paste or attach a log, and check the rest for account or computer names. If a log cannot be
-> shared publicly, send it to the maintainer privately.
+> shared publicly, send it to the maintainer privately. The diagnostics bundle already has these
+> names replaced (see above); look through it before you attach it anyway.
 
 ## Automatic updates
 
@@ -720,11 +1101,13 @@ cross-user `0x80073d19` problems a per-user scheduled task hits.
 
 Every WAU run first updates winget itself, so the installer keeps WAU out of its own way: WAU is set
 up last, after the retry pass, it is not started immediately and not at user logon (machines deployed
-by older versions have their logon trigger removed on the next run), and if a WAU run is already in
-progress when the installer starts, the installer waits up to 15 minutes for it to finish. WAU is only
-installed when the Windows App Runtime framework the newest winget release needs is present, because
-WAU installs that release and it would otherwise leave winget unusable (issues #279, #283, #284).
-Today that is `Microsoft.WindowsAppRuntime.1.8` 8000.616.304.0 or newer.
+by older versions have their logon trigger removed on the next run, or by
+[`rmm/Repair-WauLogonTrigger.ps1`](#winget-autoupdate-at-logon-fix) without a run), and if a WAU
+run is already in progress when the installer starts, the installer waits up to 15 minutes for it
+to finish. WAU is only installed when the Windows App Runtime framework the newest winget release
+needs is present, because WAU installs that release and it would otherwise leave winget unusable
+(issues #279, #283, #284). Today that is `Microsoft.WindowsAppRuntime.1.8` 8000.616.304.0 or
+newer.
 
 **Which framework.** The installer reads it from the release WAU installs: the
 `DesktopAppInstaller_Dependencies.json` of the latest winget release
@@ -784,10 +1167,12 @@ The transcript then has one `Windows App Runtime: installed ...` or
 WAU is skipped as before: the summary shows `Auto-updates: NOT CONFIGURED` (or `AT RISK` when WAU
 was already installed) with the reason on the next line, and the run exits 8. A dry run
 (`-WhatIf`) says that it would install the framework first if it is missing, and installs nothing.
-Not yet checked on a real Windows PC: whether provisioning the framework on its own registers it
-for existing and new accounts on Windows 10, Windows 11 and Windows Server 2025, whether the
-signature check reads the `.msix` signature under PowerShell 7, and whether
-`Add-AppxProvisionedPackage` can read the file while the installer holds it open.
+On the E2E run's Windows Server 2025 runners (see
+[End-to-end monitoring](#end-to-end-monitoring-e2e-tier-1)) the install works in all three legs
+(started from PowerShell 7, from Windows PowerShell 5.1, and as SYSTEM): the signature check passes, `Add-AppxProvisionedPackage`
+reads the file the installer holds open, the all-users check then finds the framework, and WAU is
+set up. Not yet checked on a real PC: whether provisioning the framework on its own registers it
+for accounts that sign in later, and on Windows 10 and Windows 11.
 
 WAU counts as set up only when its scheduled task `\WAU\Winget-AutoUpdate` exists, is enabled and
 has an enabled trigger. The installer checks this after it installs WAU and on every run that finds
@@ -831,7 +1216,10 @@ Terminal is installed ([#271](https://github.com/J-MaFf/winget-app-setup/issues/
 
 Both settings are per-user, so the step is skipped, with one line in the log, when the run is
 SYSTEM (for example under an RMM agent) or is elevated as a different account than the logged-on
-user. It never writes to another user's profile.
+user. It never writes to another user's profile. After a run as SYSTEM, the Endpoint Central user
+phase (`rmm/Invoke-WingetAppSetupUserPhase.ps1`) sets them in each user's own account at sign-in.
+Until the user has opened Windows Terminal once (it creates `settings.json` then), it sets the
+default terminal application and leaves `defaultProfile` for a later sign-in.
 
 ## Uninstall
 
@@ -903,8 +1291,8 @@ The unit suite mocks every external call, so a real install is exercised by an e
 throwaway VMs by construction:
 
 - **When it runs:** weekly (Mondays 06:00 UTC), on manual dispatch, and on pull requests. Every
-  pull request starts the workflow. A `changes` job lets the two install jobs run only when the PR
-  touches the product (`WingetAppSetup/**`, `build/**`, `winget-app-install.ps1`) or the e2e
+  pull request starts the workflow. A `changes` job lets the three install jobs run only when the PR
+  touches the product (`WingetAppSetup/**`, `build/**`, `winget-app-install.ps1`, `rmm/**`) or the e2e
   machinery (`.github/workflows/e2e-install.yml`, `e2e/**`), and they install anyway if that job
   does not succeed. The filter is a job rather than a `paths:` filter so that `e2e-install` can be
   a required check: a job skipped by its `if:` reports success, while a workflow that `paths:`
@@ -921,6 +1309,23 @@ throwaway VMs by construction:
   a time limit (`winget list` 45 s, uninstall 150 s), each app's result prints as soon as it is
   done, and an app that cannot be removed gets a warning annotation and is skipped by the first
   pass as already installed.
+- **The SYSTEM leg:** `e2e-install-system`, on a third VM, runs one pass the way Endpoint Central
+  does. A one-shot scheduled task runs as SYSTEM and starts `rmm/Invoke-WingetAppSetup.ps1` with
+  the 32-bit `%SystemRoot%\SysWOW64\WindowsPowerShell\v1.0\powershell.exe`, so the machine phase
+  has to relaunch itself through Sysnative. It runs the checkout's installer (`-InstallerPath`,
+  still SHA256-checked), never its pinned commit, on every trigger, the weekly run included.
+  `e2e/Invoke-SystemInstallPass.ps1` checks the task's exit code: 0 and 3010 pass, 8 only for the
+  missing `Microsoft.WindowsAppRuntime.1.8` when the installer could not try to install it, and 1
+  only while `KNOWN_PLATFORM_INCOMPATIBLE` is non-empty and every app the run left failed is on that
+  list. It also checks that the transcript says `Auto-updates: Configured` (or `Already present`)
+  and that the run installed the framework once or did not need to; that the machine phase's
+  `-rmm.log` shows the 64-bit relaunch, the SHA256 check and the exit code passed back unchanged;
+  that the transcript says the run was SYSTEM; that `last-run.json` records the same exit code, a
+  run that reached its summary, and Deferred entries that each have a package id and a reason and
+  match the summary; and that nothing was installed per-user into SYSTEM's own profile (no new
+  uninstall entry under `HKEY_USERS\S-1-5-18` and no new folder under either systemprofile's
+  `AppData\Local\Programs`). The user phase is not run here: it would change the runner
+  account's Windows Terminal settings.
 - **What it does:** the weekly run uses the one-liner above, against raw `main`, in both passes.
   Pull-request and dispatched runs install the checkout (the PR's merge commit, or the dispatched
   branch). The first pass pipes it to `iex` like the one-liner, and the second runs it with
@@ -974,11 +1379,13 @@ throwaway VMs by construction:
   `Microsoft.WindowsAppRuntime.1.8` and WAU on `windows-latest`, but no step starts WAU's task and
   checks that winget still starts afterwards), the catalog's own
   PowerShell install (`Install-PowerShellLatest`: PowerShell 7 is preinstalled in one leg and
-  installed by the bootstrap in the other), and cross-user elevation (tier 2, below).
+  installed by the bootstrap in the other), the Endpoint Central user phase, the fleet health probe
+  and the at-logon fix, a TightVNC password, and cross-user elevation (tier 2, below).
 - **Where the evidence lands:** transcripts are written on the runner under
   `%ProgramData%\winget-app-setup\logs` (the same place as production runs) and always uploaded
   as the `e2e-install-transcripts` artifact (`e2e-install-transcripts-windows-powershell` for the
-  5.1 leg, which also holds its `-bootstrap` transcripts). `e2e/Collect-Diagnostics.ps1` runs in
+  5.1 leg, which also holds its `-bootstrap` transcripts, and `e2e-install-transcripts-system` for
+  the SYSTEM leg, with the machine phase's `-rmm.log` and `last-run.json`). `e2e/Collect-Diagnostics.ps1` runs in
   Windows PowerShell 5.1 before the first pass, after it and at the end of the job. It records the
   pwsh versions, the App Installer and `Microsoft.WindowsAppRuntime*` AppX packages registered for
   any user or provisioned, and the `\WAU\` tasks with their last run. The end-of-job snapshot adds
@@ -986,22 +1393,24 @@ throwaway VMs by construction:
   Winget-AutoUpdate's logs. A missing source is noted and the script still exits 0, so it never
   fails the job. The snapshots, plus the assertion output saved by the assertions step, are
   always uploaded as the `e2e-diagnostics` artifact (`e2e-diagnostics-windows-powershell` for the
-  5.1 leg).
+  5.1 leg, `e2e-diagnostics-system` for the SYSTEM leg).
 - **On failure:** when a scheduled run or a run dispatched on `main` fails, times out or is
-  cancelled in either leg, a separate `report-failure` job on `ubuntu-latest` downloads the
+  cancelled in any leg, a separate `report-failure` job on `ubuntu-latest` downloads the
   artifacts. It creates a GitHub issue titled `E2E install run failed`, or comments on an existing
   open one. The issue lists the run URL and which installer ran, then has one section per leg; a
   leg that passed says so. For a leg that did not succeed it shows the steps that did not succeed
   and how long each ran, the assertion PASS/FAIL table, the last 50 lines of the earliest and
   latest install transcripts, the last 50 lines of the latest Windows PowerShell 5.1 bootstrap
-  transcript (5.1 leg), and the diagnostics snapshots. The same text goes to the run's summary
+  transcript (5.1 leg), the last 30 lines of the latest machine phase log (SYSTEM leg), and the
+  diagnostics snapshots. The same text goes to the run's summary
   page. The job runs outside the Windows jobs, so it still reports a run that lost PowerShell 7 or
   hit its time limit. Pull-request runs and runs dispatched on another branch never file the
   issue: they test unmerged code, and their result shows on the PR or the run. The assertions also
   run after a failed install pass (the idempotence checks only when the second pass ran). Removing
   the preinstalled apps has a 15-minute limit (20 in the 5.1 leg, which also removes PowerShell 7),
-  each install pass 35 minutes and the assertions 40, under the job's 145 (150 in the 5.1 leg), so
-  a hung step fails at its own limit while the diagnostics and uploads still run.
+  each install pass 35 minutes and the assertions 40, under the job's 145 (150 in the 5.1 leg);
+  the SYSTEM leg's pass has 45 minutes under its job's 80. So a hung step fails at its own limit
+  while the diagnostics and uploads still run.
 - **Trigger manually:** `gh workflow run e2e-install.yml` tests `main`.
   `gh workflow run e2e-install.yml --ref <branch>` installs that branch's checkout, so a change
   can be tested before it merges. The branch must already contain this version of the workflow,
@@ -1019,6 +1428,19 @@ module exports every function, so moving one between the two folders changes not
 single-file `winget-app-install.ps1` is **generated** from that module so the `irm | iex`
 one-liner keeps working — do not edit it by hand.
 
+`rmm/` holds the Endpoint Central scripts (see
+[Endpoint Central and other RMM tools](#endpoint-central-and-other-rmm-tools)). They are not
+generated and load nothing from the module or from beside them, because Endpoint Central pushes one
+file. So they repeat the few parts of the installer's logic they need: the machine-wide
+`winget.exe` order, the Windows App Runtime requirement, the at-logon trigger rule and the
+run-record trust check. `tests/RmmFleetHealth.Tests.ps1` and `tests/RmmWrapper.Tests.ps1` check
+those parts against the module's own functions (`Get-MachineWingetCandidate`,
+`Get-WindowsAppRuntimeStatus`, `Format-ScheduledTaskTrigger`, `Disable-WauLogonTrigger`,
+`Get-RunRecordTrustProblem`), so a change to one of them fails there until the scripts follow.
+They also keep the helpers the scripts share identical, keep the two phases' pins equal, and check
+that every script stays ASCII-only Windows PowerShell 5.1 code. `build/Set-RmmInstallerPin.ps1`
+sets the pins.
+
 After changing anything under `WingetAppSetup/`, regenerate the installer:
 
 ```powershell
@@ -1032,10 +1454,12 @@ pwsh -File .\build\Build-WingetInstallScript.ps1 -Check
 ```
 
 Run the test suite (one `<Area>.Tests.ps1` per module file under `tests/`, plus
-`EntryPoint.Tests.ps1`, `TestHarness.Tests.ps1`, `BuildGuards.Tests.ps1` and the `E2E*.Tests.ps1`
-files for the entry point, the suite's own loading rules, the build guards and pre-commit hook,
-and the `e2e/` scripts, with sample transcripts in `tests/fixtures/e2e`; each loads the module
-directly via `tests/TestHelpers.ps1`):
+`EntryPoint.Tests.ps1`, `TestHarness.Tests.ps1`, `BuildGuards.Tests.ps1`, the `Rmm*.Tests.ps1`
+files and the `E2E*.Tests.ps1` files for the entry point, the suite's own loading rules, the build
+guards and pre-commit hook, the `rmm/` scripts and the pin helper, and the `e2e/` scripts, with
+sample transcripts in `tests/fixtures/e2e` and the sample logs the diagnostics bundle's redaction
+is tested on in `tests/fixtures/diagnostics`; each loads the module directly via
+`tests/TestHelpers.ps1`):
 
 ```powershell
 Invoke-Pester .\tests

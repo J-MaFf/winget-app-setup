@@ -81,12 +81,12 @@ param (
 # This script is assembled from the WingetAppSetup module by build/Build-WingetInstallScript.ps1.
 # Edit the function source under WingetAppSetup/Public and WingetAppSetup/Private, then re-run the
 # build to regenerate this file. See readme.md ("Project layout") for details.
-# Build id: 1.0.0+0b39872b (module version + SHA256 fragment of this whole script; issue #189).
+# Build id: 1.0.0+92caefcf (module version + SHA256 fragment of this whole script; issue #189).
 # ------------------------------------------------------------------------------------------------
 
 # Content-derived build identity, logged at startup so a transcript from a remote machine
 # identifies exactly which installer build produced it (issue #189).
-$script:InstallerBuildId = '1.0.0+0b39872b'
+$script:InstallerBuildId = '1.0.0+92caefcf'
 
 # ------------------------------------------------Functions------------------------------------------------
 
@@ -16578,9 +16578,12 @@ function Initialize-Winget {
     session error, another installation in progress, and an app or file in use.
 .DESCRIPTION
     Runs `winget install` for one package id through Invoke-WingetProcess and reads winget's real
-    process exit code from the result. Exit code 0x80073d19 (ERROR_INSTALL_USER_LOGOFF — "an error
-    occurred because a user was logged off") is a transient MSIX/session-deployment race: an
-    immediate retry simply hits the same race, which is why issues #81/#100/#102 left it unresolved.
+    process exit code from the result. Exit code 0x80073d19
+    (ERROR_DEPLOYMENT_BLOCKED_BY_USER_LOG_OFF, "An error occurred because a user was logged off")
+    means Windows blocked an app package deployment because the installing account has no
+    interactive logon session (issue #159; Initialize-Winget sets such an account up first). What
+    is left of it can clear on its own, but an immediate retry hits the same state, which is why
+    issues #81/#100/#102 left it unresolved.
     When that specific code is seen, this function waits with an increasing backoff and retries, up
     to MaxAttempts.
 
