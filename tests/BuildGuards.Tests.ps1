@@ -318,6 +318,185 @@ Describe 'Build id covers the whole generated script (review finding P3-12)' {
     }
 }
 
+Describe 'The generated installer leaves out the module comments (review finding P3-53)' {
+    BeforeAll {
+        . ([scriptblock]::Create((Import-BuildScriptFunction -Name 'Remove-PowerShellComment')))
+        . ([scriptblock]::Create((Import-BuildScriptFunction -Name 'Get-CodeTokenSignature')))
+
+        # The lines Remove-PowerShellComment keeps of -Source.
+        function Get-StrippedLine {
+            param ([Parameter(Mandatory = $true)][string]$Source)
+
+            $result = Remove-PowerShellComment -Source $Source
+            if ($null -eq $result) { throw 'The test snippet does not parse.' }
+            $result.Text -split "`n"
+        }
+
+        # The module files in the order the build assembles them.
+        function Get-ModuleFileInBuildOrder {
+            foreach ($folder in 'Private', 'Public') {
+                $files = @(Get-ChildItem -Path (Join-Path $script:WingetAppSetupRoot $folder) -Filter '*.ps1')
+                [Array]::Sort($files, [System.Comparison[object]] { param($a, $b) [System.StringComparer]::Ordinal.Compare($a.Name, $b.Name) })
+                $files
+            }
+        }
+    }
+
+    Context 'Remove-PowerShellComment' {
+        It 'removes help blocks, whole-line comments and end-of-line comments with the spaces before them' {
+            $source = "<#`n.SYNOPSIS`n    Help.`n#>`nfunction Get-ZzValue {`n    # Why.`n    `$a = 1   # trailing`n    <# block #>`n    return `$a`n}"
+
+            Get-StrippedLine -Source $source | Should -Be @('function Get-ZzValue {', '    $a = 1', '    return $a', '}')
+        }
+
+        It 'keeps a # inside strings and regexes, and keeps #Requires' {
+            $source = "#Requires -Version 5.1`n`$a = 'x # y'`n`$b = `"#{0}`" -f 1`n`$c = `$d -match '^#'"
+
+            Get-StrippedLine -Source $source | Should -Be ($source -split "`n")
+        }
+
+        It 'keeps the lines of a here-string exactly, blank and comment-like ones included' {
+            $source = "`$text = @'`n# not a comment`n`n`n<# nor this #>`n  `n'@`n`$next = 1"
+
+            Get-StrippedLine -Source $source | Should -Be ($source -split "`n")
+        }
+
+        It 'collapses blank lines to one and drops them at the edges of a block' {
+            $source = "function Get-ZzValue {`n`n    `$a = 1`n`n`n    # gone`n`n    `$b = 2`n`n}`n`n"
+
+            Get-StrippedLine -Source $source | Should -Be @('function Get-ZzValue {', '    $a = 1', '', '    $b = 2', '}')
+        }
+
+        It 'removes only the comments that end their line' {
+            # PowerShell reads $a<#c#>.Length as $a.Length, but $a .Length is an error.
+            Get-StrippedLine -Source '$a<#c#>.Length' | Should -Be @('$a<#c#>.Length')
+            Get-StrippedLine -Source '$x = 1 <#a#> <#b#>' | Should -Be @('$x = 1')
+            Get-StrippedLine -Source "`$x = <#a#> 1 # b`n<# c`n#> `$y = 2" | Should -Be @('$x = <#a#> 1', '<# c', '#> $y = 2')
+        }
+
+        It 'keeps the line after a line continuation, so the continued command still ends there' {
+            $source = "Write-Output 1 ```n    # ends the command`nWrite-Output 2"
+
+            $lines = Get-StrippedLine -Source $source
+
+            $lines | Should -Be @('Write-Output 1 `', '', 'Write-Output 2')
+            Get-CodeTokenSignature -Source ($lines -join "`n") | Should -BeExactly (Get-CodeTokenSignature -Source $source)
+        }
+
+        It 'maps each line it keeps to the source line it came from' {
+            $result = Remove-PowerShellComment -Source "# a`n# b`n`$x = 1`n`n# c`n`$y = 2"
+
+            $result.Text | Should -BeExactly "`$x = 1`n`n`$y = 2"
+            $result.SourceLine | Should -Be @(3, 4, 6)
+        }
+
+        It 'returns nothing for source that does not parse' {
+            Remove-PowerShellComment -Source "function Get-ZzValue {`n    'x'" | Should -BeNullOrEmpty
+        }
+    }
+
+    Context 'Get-CodeTokenSignature' {
+        It 'is the same for code that differs only in comments, blank lines and indentation' {
+            $a = "function Get-ZzValue {`n    # why`n    `$a = 1 # note`n`n`n    `$a`n}"
+            $b = "function Get-ZzValue {`n`$a = 1`n`$a`n}"
+
+            Get-CodeTokenSignature -Source $a | Should -BeExactly (Get-CodeTokenSignature -Source $b)
+        }
+
+        It 'differs when <Case>' -ForEach @(
+            @{ Case = 'a token changes'; A = '$a = 1'; B = '$a = 2' }
+            @{ Case = 'two lines are joined'; A = "Write-Output 1`nWrite-Output 2"; B = 'Write-Output 1 Write-Output 2' }
+            @{ Case = 'a space comes between a variable and its index'; A = 'Write-Output $a[0]'; B = 'Write-Output $a [0]' }
+        ) {
+            Get-CodeTokenSignature -Source $B | Should -Not -BeExactly (Get-CodeTokenSignature -Source $A)
+        }
+    }
+
+    Context 'The committed installer' {
+        It 'has no comment between the start of the module functions and the entry block but the file markers' {
+            $tokens = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile($script:InstallerScriptPath, [ref]$tokens, [ref]$null)
+            $comments = @($tokens | Where-Object { $_.Kind -eq [System.Management.Automation.Language.TokenKind]::Comment })
+            $start = @($comments | Where-Object { $_.Text -match '^# -+Functions-+$' })
+            $end = @($comments | Where-Object { $_.Text -match '^# -+Main Script-+$' })
+            $start.Count | Should -Be 1
+            $end.Count | Should -Be 1
+
+            $moduleComments = @($comments | Where-Object { $_.Extent.StartOffset -gt $start[0].Extent.StartOffset -and $_.Extent.StartOffset -lt $end[0].Extent.StartOffset })
+
+            @($moduleComments | Where-Object { $_.Text -notmatch '^# --- \w+ ---$' } | ForEach-Object { "line $($_.Extent.StartLineNumber): $($_.Text)" }) | Should -BeNullOrEmpty
+            $moduleComments.Count | Should -Be @(Get-ModuleFileInBuildOrder).Count
+        }
+
+        It 'carries the code of every module file, token for token' {
+            $installer = (Get-Content -Raw -Encoding UTF8 -Path $script:InstallerScriptPath) -replace "`r`n", "`n"
+            $end = $installer.IndexOf("`n# ------------------------------------------------Main Script")
+            $markers = @([regex]::Matches($installer.Substring(0, $end), '(?m)^# --- (\w+) ---$'))
+            $files = @(Get-ModuleFileInBuildOrder)
+            @($markers | ForEach-Object { $_.Groups[1].Value }) | Should -Be @($files | ForEach-Object { $_.BaseName })
+
+            $mismatched = for ($index = 0; $index -lt $files.Count; $index++) {
+                $sectionStart = $markers[$index].Index + $markers[$index].Length
+                $sectionEnd = if ($index + 1 -lt $markers.Count) { $markers[$index + 1].Index } else { $end }
+                $source = (Get-Content -Raw -Encoding UTF8 -Path $files[$index].FullName) -replace "`r`n", "`n"
+                if ((Get-CodeTokenSignature -Source $installer.Substring($sectionStart, $sectionEnd - $sectionStart)) -cne (Get-CodeTokenSignature -Source $source)) {
+                    $files[$index].FullName
+                }
+            }
+            @($mismatched) | Should -BeNullOrEmpty
+        }
+    }
+
+    Context 'Build and -Check' {
+        It 'leaves the installer unchanged when only module comments change' {
+            $root = New-BuildFixture -Name 'comment-only-change'
+            $modulePath = Join-Path $root 'WingetAppSetup/Private/SystemInfo.ps1'
+            $module = Get-Content -Raw -Encoding UTF8 -Path $modulePath
+            $function = $module.IndexOf('function ')
+            $module = $module.Insert($module.IndexOf('{', $function) + 1, "`n    # A comment inside a function.`n")
+            [System.IO.File]::WriteAllText($modulePath, "# A new file comment.`n" + $module + "`n<# A trailing block comment. #>`n")
+
+            $result = Invoke-FixtureBuild -Root $root -Check
+
+            $result.ExitCode | Should -Be 0 -Because $result.Output
+        }
+
+        It 'fails the build when removing the comments would change the code' {
+            # A stripper broken on purpose: it drops the code before an end-of-line comment too.
+            $root = New-BuildFixture -Name 'comment-check' -ProbeSource "function Get-ZzProbeValue {`n    'kept' # note`n}`n"
+            $buildPath = Join-Path $root 'build/Build-WingetInstallScript.ps1'
+            $build = Get-Content -Raw -Encoding UTF8 -Path $buildPath
+            $cut = '$text = $text.Substring(0, $cutAt[$line])'
+            $build.Contains($cut) | Should -BeTrue
+            [System.IO.File]::WriteAllText($buildPath, $build.Replace($cut, '$text = '''''))
+
+            $result = Invoke-FixtureBuild -Root $root
+
+            $result.ExitCode | Should -Not -Be 0
+            $result.Output | Should -Match 'Comment check failed: removing the comments from WingetAppSetup/Private/\w+\.ps1 would change its code'
+        }
+
+        It 'names the module file and line behind a 5.1 syntax finding' {
+            $root = New-BuildFixture -Name 'origin-ps7-syntax' -ProbeSource "# One.`n# Two.`nfunction Get-ZzProbeValue { `$env:ZZ_PROBE ?? 'fallback' }`n"
+
+            $result = Invoke-FixtureBuild -Root $root -Check
+
+            $result.ExitCode | Should -Not -Be 0
+            $result.Output | Should -Match "'\?\?' \(QuestionQuestion\) \[WingetAppSetup/Private/ZzBuildGuardProbe\.ps1:3\]"
+        }
+
+        It 'names the module file and line behind a syntax error' {
+            $root = New-BuildFixture -Name 'origin-parse-error' -ProbeSource "# One.`nfunction Get-ZzProbeValue {`n    'x'`n"
+
+            $result = Invoke-FixtureBuild -Root $root
+
+            $result.ExitCode | Should -Not -Be 0
+            $result.Output | Should -Match 'Parse check failed'
+            $result.Output | Should -Match '\[WingetAppSetup/Private/ZzBuildGuardProbe\.ps1:2\]'
+        }
+    }
+}
+
 Describe 'pre-commit hook checks the staged files (review finding P3-47)' {
     BeforeAll {
         # Git for Windows' sh.exe lives next to git; elsewhere sh is on PATH. Resolved here so a
@@ -363,10 +542,11 @@ Describe 'pre-commit hook checks the staged files (review finding P3-47)' {
             [pscustomobject]@{ ExitCode = $exitCode; Output = (ConvertTo-PlainOutput -Output $output) }
         }
 
+        # A code change: the installer leaves out module comments, so a comment would not change it.
         function Add-ModuleEdit {
             param ([Parameter(Mandatory = $true)][string]$Root)
 
-            Add-Content -Path (Join-Path $Root 'WingetAppSetup/Private/SystemInfo.ps1') -Value '# pre-commit hook test edit'
+            Add-Content -Path (Join-Path $Root 'WingetAppSetup/Private/SystemInfo.ps1') -Value "function Get-ZzPreCommitProbe { 'pre-commit hook test edit' }"
         }
     }
 

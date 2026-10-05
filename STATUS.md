@@ -250,6 +250,14 @@ grid view was what kept the uninstaller's elevated window open, so the uninstall
 "press any key to exit" when someone is at the console, as the installer does; without it the
 window closed with the summary as soon as the run ended.
 
+The generated installer leaves out the module's comments (work-order item 30, review finding
+P3-53), so it is about half the size it was (450 KB instead of 867 KB, which every `irm | iex` run
+downloads). The build removes only comments that end their line, keeps `build/fragments/head.ps1`
+and `tail.ps1` as they are, checks that each module file's code is unchanged token for token, and
+names the source file and line behind every line its guards report. Every function in the new
+installer has the same syntax tree as before. A change to a module comment alone no longer changes
+the installer or its build id.
+
 The same branch changes CI. Fork pull requests that leave `windows-tests.yml` alone no longer run
 on the self-hosted win-test runner, and `claude.yml` calls the shared Claude workflow at a pinned
 commit SHA instead of `@main`. The E2E workflow files its failure issue from a separate ubuntu job,
@@ -434,7 +442,7 @@ every repository secret.
 | `WingetAppSetup/` | Source-of-truth PowerShell module (`.psd1` manifest + `.psm1` loader) |
 | `WingetAppSetup/Public/` | Entry points and main steps (the module exports every function, `Public/` and `Private/` alike): logging, winget core, app validation, Windows Terminal config, install orchestration (updates are outsourced to WAU), uninstall orchestration (`Invoke-WingetUninstall`), the Endpoint Central user phase (`Invoke-WingetUserPhase`) |
 | `WingetAppSetup/Private/` | Helpers: system info, elevation, the Windows PowerShell 5.1 → PowerShell 7 bootstrap, the environment checks (`EnvironmentPreflight.ps1`), the machine-wide winget and provisioning lookups a run as SYSTEM uses (`MachineContext.ps1`), the run lock (`RunLock.ps1`), the `RESULT` line and `last-run.json` (`RunRecord.ps1`), the catalog entry fields and post-install hooks (`CatalogSchema.ps1`), TightVNC's password hook (`TightVnc.ps1`), log retention (`Housekeeping.ps1`), the diagnostics bundle (`Diagnostics.ps1`), the user phase's helpers (`UserPhaseSupport.ps1`), the uninstaller's per-app step (`AppUninstall.ps1`), Winget-AutoUpdate's checks (`WauSupport.ps1`) and the pinned `Microsoft.WindowsAppRuntime.1.8` install before Winget-AutoUpdate (`WindowsAppRuntime.ps1`) |
-| `build/Build-WingetInstallScript.ps1` | Concatenates the module + entry fragments into `winget-app-install.ps1` |
+| `build/Build-WingetInstallScript.ps1` | Assembles the module, without its comments, and the entry fragments into `winget-app-install.ps1` |
 | `build/Set-RmmInstallerPin.ps1` | Sets the pinned installer commit and SHA256 in both Endpoint Central phases |
 | `rmm/` | Standalone Endpoint Central scripts, not generated: the machine phase (`Invoke-WingetAppSetup.ps1`, as SYSTEM), the user phase (`Invoke-WingetAppSetupUserPhase.ps1`, at each sign-in), the fleet health probe (`Get-WingetFleetHealth.ps1`) and the WAU at-logon fix (`Repair-WauLogonTrigger.ps1`); see readme "Endpoint Central and other RMM tools" |
 | `build/fragments/` | `head.ps1` (PSScriptInfo, help, `param`) and `tail.ps1` (entry-point dispatch) |

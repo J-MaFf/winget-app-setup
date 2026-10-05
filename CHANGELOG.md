@@ -314,6 +314,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The generated `winget-app-install.ps1` leaves out the module's comments (work-order item 30,
+  review finding P3-53): 450 KB and 11,233 lines instead of 867 KB and 17,766, so every `irm | iex`
+  run downloads about half as much. `build/Build-WingetInstallScript.ps1` removes the comments
+  with the PowerShell tokenizer (`Remove-PowerShellComment`), and only those that end their line,
+  so a `#` inside a string, here-string or regex stays, as would a `#Requires`;
+  `build/fragments/head.ps1` (the script's help) and `tail.ps1` are kept as they are. A new build
+  check fails the build when removing the comments changed a module file's code tokens, and the
+  parse, ASCII and PowerShell-7-syntax guards now name the source file and line behind each line
+  they report. Every function in the installer has the same syntax tree as before. A change to a
+  module comment alone no longer changes the installer or its build id.
 - Auto-updates now count as set up only when Winget-AutoUpdate's `\WAU\Winget-AutoUpdate` task
   exists, is enabled and has an enabled trigger (`Get-WauTaskHealth`), checked after installing WAU
   and on every run that finds it already installed (review finding P3-36). WAU's registry key, or

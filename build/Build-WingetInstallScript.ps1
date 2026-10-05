@@ -9,12 +9,14 @@
         1. build/fragments/head.ps1   - PSScriptInfo, comment-based help, and the param() block
         2. an auto-generated banner   - warns against hand-editing the output and stamps the
                                         content-derived $script:InstallerBuildId (issue #189)
-        3. WingetAppSetup/Private/*.ps1 then WingetAppSetup/Public/*.ps1 - every function, verbatim
+        3. WingetAppSetup/Private/*.ps1 then WingetAppSetup/Public/*.ps1 - every function, with
+                                        its comments removed (Remove-PowerShellComment)
         4. build/fragments/tail.ps1   - the `if ($MyInvocation.InvocationName -ne '.')` dispatch block
 
-    The result is byte-for-byte behaviour-equivalent to the pre-refactor monolith: it keeps the
-    correct $PSScriptRoot / $PSCommandPath / IEX-detection semantics that the module form cannot
-    provide on its own.
+    The module's comments are left out because about half of the module is comments, which every
+    irm | iex run would download (review finding P3-53); they stay in the source. The fragments
+    are kept as they are: head.ps1 holds the script's help. A change to a module comment alone
+    therefore leaves the installer, and its build id, unchanged.
 .PARAMETER OutputPath
     Where to write the generated script. Defaults to winget-app-install.ps1 at the repository root.
 .PARAMETER Check
@@ -375,6 +377,164 @@ function Get-UndefinedCatalogInstallReference {
         -CollisionFixHint "the catalog entry's casing to the definition" -AssumeResolvable $AssumeResolvable
 }
 
+function Remove-PowerShellComment {
+    <#
+    .SYNOPSIS
+        Removes the comments from PowerShell source, for the generated installer (review finding
+        P3-53).
+    .DESCRIPTION
+        Comments are the tokenizer's Comment tokens, so a # inside a string, a here-string or a
+        regex stays, and so does #Requires, which is a statement. Only a comment that ends its line
+        goes, with the spaces before it: PowerShell does not always read a comment that has code
+        after it as a space (a block comment between $a and .Length still reads as $a.Length, and
+        $a .Length is an error).
+
+        A line the removal leaves empty is dropped. Outside strings, blank lines collapse to one,
+        and none is kept at either end or just inside a { } or ( ) block. A line after a backtick
+        line continuation is kept as it is, because dropping it would join the next line to the
+        continued command.
+    .PARAMETER Source
+        The source text, with LF line endings.
+    .OUTPUTS
+        [pscustomobject] with Text (the source without comments) and SourceLine ([int[]]: for each
+        line of Text, the line of Source it comes from), or $null when Source does not parse.
+    #>
+    param (
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
+        [string]$Source
+    )
+
+    $tokens = $null
+    $parseErrors = $null
+    [void][System.Management.Automation.Language.Parser]::ParseInput($Source, [ref]$tokens, [ref]$parseErrors)
+    if ($parseErrors.Count -gt 0) {
+        return $null
+    }
+
+    $lines = $Source -split "`n"
+    $lineStarts = [int[]]::new($lines.Count)
+    for ($index = 1; $index -lt $lines.Count; $index++) {
+        $lineStarts[$index] = $lineStarts[$index - 1] + $lines[$index - 1].Length + 1
+    }
+
+    # By line number: whether the line is string content (after the first line of a multi-line
+    # string), and the column from which a removed comment takes the rest of the line.
+    $inString = [bool[]]::new($lines.Count + 1)
+    $cutAt = @{}
+    $commentKind = [System.Management.Automation.Language.TokenKind]::Comment
+    for ($index = 0; $index -lt $tokens.Count; $index++) {
+        $token = $tokens[$index]
+        $extent = $token.Extent
+        if ($token -is [System.Management.Automation.Language.StringToken]) {
+            for ($line = $extent.StartLineNumber + 1; $line -le $extent.EndLineNumber; $line++) { $inString[$line] = $true }
+        }
+        if ($token.Kind -ne $commentKind -or $token.Text -match '^#requires\s') {
+            continue
+        }
+        $next = $index + 1
+        while ($tokens[$next].Kind -eq $commentKind) { $next++ }
+        if (@('NewLine', 'EndOfInput') -notcontains $tokens[$next].Kind.ToString()) {
+            continue
+        }
+
+        $from = $extent.StartOffset
+        $floor = $lineStarts[$extent.StartLineNumber - 1]
+        if ($index -gt 0 -and $tokens[$index - 1].Extent.EndOffset -gt $floor) { $floor = $tokens[$index - 1].Extent.EndOffset }
+        while ($from -gt $floor -and ($Source[$from - 1] -eq ' ' -or $Source[$from - 1] -eq "`t")) { $from-- }
+        for ($line = $extent.StartLineNumber; $line -le $extent.EndLineNumber; $line++) {
+            if (-not $cutAt.ContainsKey($line)) { $cutAt[$line] = [Math]::Max(0, $from - $lineStarts[$line - 1]) }
+        }
+    }
+
+    $kept = [System.Collections.Generic.List[string]]::new()
+    $keptLine = [System.Collections.Generic.List[int]]::new()
+    # A kept line that must stay as it is: string content, or the line after a line continuation.
+    $keptFixed = [System.Collections.Generic.List[bool]]::new()
+    for ($line = 1; $line -le $lines.Count; $line++) {
+        $text = $lines[$line - 1]
+        if ($cutAt.ContainsKey($line)) {
+            $text = $text.Substring(0, $cutAt[$line])
+        }
+
+        $last = $kept.Count - 1
+        if ($inString[$line] -or ($last -ge 0 -and $kept[$last].EndsWith('`'))) {
+            $kept.Add($text)
+            $keptLine.Add($line)
+            $keptFixed.Add($true)
+            continue
+        }
+        if ($text.Trim().Length -eq 0) {
+            if ($cutAt.ContainsKey($line) -or $last -lt 0) { continue }
+            if (-not $keptFixed[$last] -and ($kept[$last].Length -eq 0 -or $kept[$last] -match '[{(]\s*$')) { continue }
+            $text = ''
+        }
+        elseif ($text -match '^\s*[})]' -and $last -ge 0 -and $kept[$last].Length -eq 0 -and -not $keptFixed[$last]) {
+            $kept.RemoveAt($last)
+            $keptLine.RemoveAt($last)
+            $keptFixed.RemoveAt($last)
+        }
+        $kept.Add($text)
+        $keptLine.Add($line)
+        $keptFixed.Add($false)
+    }
+    while ($kept.Count -gt 0 -and $kept[$kept.Count - 1].Length -eq 0 -and -not $keptFixed[$kept.Count - 1]) {
+        $kept.RemoveAt($kept.Count - 1)
+        $keptLine.RemoveAt($keptLine.Count - 1)
+        $keptFixed.RemoveAt($keptFixed.Count - 1)
+    }
+
+    [pscustomobject]@{
+        Text       = $kept -join "`n"
+        SourceLine = $keptLine.ToArray()
+    }
+}
+
+function Get-CodeTokenSignature {
+    <#
+    .SYNOPSIS
+        Returns the code of PowerShell source as one string of its tokens, to check that removing
+        the comments changed nothing else.
+    .DESCRIPTION
+        Comments are left out and a run of line breaks counts as one. Each token records whether it
+        touches the code token before it, since PowerShell reads $a[0] and $a [0], or $a.b and
+        $a .b, differently. So two sources get the same signature only when they differ in nothing
+        but comments, indentation, blank lines and the spaces around comments.
+    .PARAMETER Source
+        The source text.
+    #>
+    param (
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
+        [string]$Source
+    )
+
+    $tokens = $null
+    $parseErrors = $null
+    [void][System.Management.Automation.Language.Parser]::ParseInput($Source, [ref]$tokens, [ref]$parseErrors)
+    $signature = [System.Text.StringBuilder]::new()
+    $previous = $null
+    $atLineBreak = $true
+    foreach ($token in $tokens) {
+        $kind = $token.Kind.ToString()
+        if ($kind -eq 'Comment') {
+            $previous = $token
+            continue
+        }
+        if ($kind -eq 'NewLine' -or $kind -eq 'EndOfInput') {
+            if (-not $atLineBreak) { [void]$signature.Append("`n") }
+            $atLineBreak = $true
+        }
+        else {
+            $atLineBreak = $false
+            $touches = $previous -and $previous.Kind.ToString() -notin @('NewLine', 'LineContinuation', 'Comment') -and $previous.Extent.EndOffset -eq $token.Extent.StartOffset
+            [void]$signature.AppendFormat('{0}{1}:{2}:{3} ', $(if ($touches) { '+' } else { '' }), $kind, $token.Text.Length, $token.Text)
+        }
+        $previous = $token
+    }
+    return $signature.ToString()
+}
+
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $moduleRoot = Join-Path $repoRoot 'WingetAppSetup'
 $fragmentsRoot = Join-Path $PSScriptRoot 'fragments'
@@ -388,23 +548,70 @@ elseif (-not [System.IO.Path]::IsPathRooted($OutputPath)) {
     $OutputPath = Join-Path (Get-Location).ProviderPath $OutputPath
 }
 
-$builder = [System.Text.StringBuilder]::new()
+# The assembled script, one entry per line, with where each line comes from ('<path>:<line>', or
+# '' for the build's own lines), so the guards below can name the source line behind a problem:
+# the line numbers of the assembled script match no file once the module's comments are removed.
+$assembledLines = [System.Collections.Generic.List[string]]::new()
+$lineOrigins = [System.Collections.Generic.List[string]]::new()
+
+# Appends LF-separated text. -SourceLine maps each line to its line in -Path; without it the text
+# is -Path's from line 1.
+function Add-AssembledText {
+    param (
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
+        [string]$Text,
+        [string]$Path,
+        [int[]]$SourceLine
+    )
+
+    $textLines = $Text.Split("`n")
+    for ($index = 0; $index -lt $textLines.Count; $index++) {
+        $assembledLines.Add($textLines[$index])
+        $origin = ''
+        if ($Path) {
+            $line = $index + 1
+            if ($SourceLine) { $line = $SourceLine[$index] }
+            $origin = '{0}:{1}' -f $Path, $line
+        }
+        $lineOrigins.Add($origin)
+    }
+}
+
+# ' [<path>:<line>]': the source of a line of the assembled script, for a guard's report; '' for a
+# line the build itself adds.
+function Get-LineOrigin {
+    param ([Parameter(Mandatory = $true)][int]$Line)
+
+    if ($Line -ge 1 -and $Line -le $lineOrigins.Count -and $lineOrigins[$Line - 1]) {
+        return ' [{0}]' -f $lineOrigins[$Line - 1]
+    }
+    return ''
+}
+
+# Source text with LF line endings (a checkout under core.autocrlf has CRLF) and no trailing space.
+function Read-SourceText {
+    param ([Parameter(Mandatory = $true)][string]$Path)
+
+    ((Get-Content -Path $Path -Raw -Encoding UTF8) -replace "`r`n", "`n").TrimEnd()
+}
 
 # The build id slot. The banner below carries this placeholder while the whole script is hashed,
 # and the id replaces it afterwards (see step 5).
 $buildIdPlaceholder = '{{BUILD_ID}}'
 
-# 1. Header (PSScriptInfo + help + param)
-[void]$builder.AppendLine((Get-Content -Path (Join-Path $fragmentsRoot 'head.ps1') -Raw -Encoding UTF8).TrimEnd())
+# 1. Header (PSScriptInfo + help + param), as it is.
+Add-AssembledText -Text (Read-SourceText -Path (Join-Path $fragmentsRoot 'head.ps1')) -Path 'build/fragments/head.ps1'
 
 # 2. Generated banner, with the build id slot left as the placeholder.
 $banner = @'
 
 # ------------------------------------------------------------------------------------------------
 # GENERATED FILE - DO NOT EDIT BY HAND.
-# This script is assembled from the WingetAppSetup module by build/Build-WingetInstallScript.ps1.
-# Edit the function source under WingetAppSetup/Public and WingetAppSetup/Private, then re-run the
-# build to regenerate this file. See readme.md ("Project layout") for details.
+# This script is assembled from the WingetAppSetup module by build/Build-WingetInstallScript.ps1,
+# without the module's comments: read them in the source. Edit the function source under
+# WingetAppSetup/Public and WingetAppSetup/Private, then re-run the build to regenerate this file.
+# See readme.md ("Project layout") for details.
 # Build id: {{BUILD_ID}} (module version + SHA256 fragment of this whole script; issue #189).
 # ------------------------------------------------------------------------------------------------
 
@@ -412,7 +619,7 @@ $banner = @'
 # identifies exactly which installer build produced it (issue #189).
 $script:InstallerBuildId = '{{BUILD_ID}}'
 '@
-[void]$builder.AppendLine($banner)
+Add-AssembledText -Text ($banner -replace "`r`n", "`n")
 
 # 3. Function bodies: Private first, then Public, each glob ordered for stable output.
 #    Sort-Object compares linguistically, which varies across locales and ICU/NLS versions, so pin
@@ -424,27 +631,39 @@ $publicFiles = @(Get-ChildItem -Path (Join-Path $moduleRoot 'Public') -Filter '*
 [Array]::Sort($publicFiles, $ordinalByName)
 $functionFiles = $privateFiles + $publicFiles
 
-[void]$builder.AppendLine('')
-[void]$builder.AppendLine('# ------------------------------------------------Functions------------------------------------------------')
-[void]$builder.AppendLine('')
+Add-AssembledText -Text ''
+Add-AssembledText -Text '# ------------------------------------------------Functions------------------------------------------------'
+Add-AssembledText -Text ''
 
 foreach ($file in $functionFiles) {
-    [void]$builder.AppendLine("# --- $($file.BaseName) ---")
-    [void]$builder.AppendLine((Get-Content -Path $file.FullName -Raw -Encoding UTF8).TrimEnd())
-    [void]$builder.AppendLine('')
+    $relativePath = 'WingetAppSetup/{0}/{1}' -f $file.Directory.Name, $file.Name
+    $source = Read-SourceText -Path $file.FullName
+    Add-AssembledText -Text "# --- $($file.BaseName) ---"
+    $stripped = Remove-PowerShellComment -Source $source
+    if ($null -eq $stripped) {
+        # The file does not parse: it goes in as it is, and the parse guard below reports where.
+        Add-AssembledText -Text $source -Path $relativePath
+    }
+    else {
+        # Removing comments must leave the code as it was, token for token.
+        if ((Get-CodeTokenSignature -Source $source) -ne (Get-CodeTokenSignature -Source $stripped.Text)) {
+            Write-Error "Comment check failed: removing the comments from $relativePath would change its code. Move the comment that sits inside a statement in an unusual place (for example after a line continuation) onto a line of its own, then re-run the build."
+            exit 1
+        }
+        Add-AssembledText -Text $stripped.Text -Path $relativePath -SourceLine $stripped.SourceLine
+    }
+    Add-AssembledText -Text ''
 }
 
-# 4. Tail (entry-point dispatch)
-[void]$builder.AppendLine('# ------------------------------------------------Main Script------------------------------------------------')
-[void]$builder.AppendLine('')
-[void]$builder.AppendLine((Get-Content -Path (Join-Path $fragmentsRoot 'tail.ps1') -Raw -Encoding UTF8).TrimEnd())
+# 4. Tail (entry-point dispatch), as it is.
+Add-AssembledText -Text '# ------------------------------------------------Main Script------------------------------------------------'
+Add-AssembledText -Text ''
+Add-AssembledText -Text (Read-SourceText -Path (Join-Path $fragmentsRoot 'tail.ps1')) -Path 'build/fragments/tail.ps1'
 
-# Normalize to LF line endings with a single trailing newline so the output is
-# byte-identical across platforms. StringBuilder.AppendLine emits [Environment]::NewLine
-# (CRLF on Windows, LF on Linux), and the source files may be checked out with CRLF under
-# core.autocrlf, so collapse everything to LF here. The installer is stored with LF (see
-# .gitattributes), keeping the -Check round-trip deterministic on Windows and Linux alike.
-$contentTemplate = (($builder.ToString() -replace "`r`n", "`n").TrimEnd()) + "`n"
+# LF line endings with a single trailing newline, so the output is byte-identical across platforms.
+# The installer is stored with LF (see .gitattributes), keeping the -Check round-trip deterministic
+# on Windows and Linux alike.
+$contentTemplate = (($assembledLines -join "`n").TrimEnd()) + "`n"
 
 # The placeholder may appear only in the banner's two slots: anywhere else in the sources, the
 # substitution below would rewrite that code too.
@@ -486,7 +705,7 @@ $assembledTokens = $null
 $assembledAst = [System.Management.Automation.Language.Parser]::ParseInput($content, [ref]$assembledTokens, [ref]$parseErrors)
 if ($parseErrors -and $parseErrors.Count -gt 0) {
     $details = foreach ($parseError in $parseErrors) {
-        "line $($parseError.Extent.StartLineNumber), column $($parseError.Extent.StartColumnNumber): $($parseError.Message)"
+        "line $($parseError.Extent.StartLineNumber), column $($parseError.Extent.StartColumnNumber): $($parseError.Message)$(Get-LineOrigin -Line $parseError.Extent.StartLineNumber)"
     }
     Write-Error ("Parse check failed: the assembled script has $($parseErrors.Count) syntax error(s). Fix the offending source file under WingetAppSetup/ or build/fragments/, then re-run the build.`n" + ($details -join "`n"))
     exit 1
@@ -506,7 +725,7 @@ $nonAsciiTokens = @($assembledTokens | Where-Object {
 if ($nonAsciiTokens.Count -gt 0) {
     $details = foreach ($token in $nonAsciiTokens) {
         $chars = ([regex]::Matches($token.Text, '[^\x00-\x7F]') | ForEach-Object { 'U+{0:X4}' -f [int][char]$_.Value } | Select-Object -Unique) -join ', '
-        "line $($token.Extent.StartLineNumber), column $($token.Extent.StartColumnNumber): $($token.Kind) token contains $chars"
+        "line $($token.Extent.StartLineNumber), column $($token.Extent.StartColumnNumber): $($token.Kind) token contains $chars$(Get-LineOrigin -Line $token.Extent.StartLineNumber)"
     }
     Write-Error ("ASCII check failed: $($nonAsciiTokens.Count) non-comment token(s) in the assembled script contain non-ASCII characters, which break Windows PowerShell 5.1 parsing of the BOM-less UTF-8 installer (issue #210). Replace them with ASCII equivalents (em/en dash -> '-', curly quotes -> straight, ellipsis -> '...') in the offending source under WingetAppSetup/ or build/fragments/, then re-run the build.`n" + ($details -join "`n"))
     exit 1
@@ -521,7 +740,7 @@ if ($nonAsciiTokens.Count -gt 0) {
 $ps7OnlySyntax = @(Get-PowerShell7OnlySyntax -Ast $assembledAst -Tokens $assembledTokens | Sort-Object -Property Line, Column)
 if ($ps7OnlySyntax.Count -gt 0) {
     $details = foreach ($finding in $ps7OnlySyntax) {
-        "line $($finding.Line), column $($finding.Column): '$($finding.Text)' ($($finding.Kind))"
+        "line $($finding.Line), column $($finding.Column): '$($finding.Text)' ($($finding.Kind))$(Get-LineOrigin -Line $finding.Line)"
     }
     Write-Error ("PowerShell 5.1 syntax check failed: $($ps7OnlySyntax.Count) place(s) in the assembled script use syntax only PowerShell 7 parses. Windows PowerShell 5.1 parses the whole installer before running any of it, so one of these anywhere breaks the irm | iex one-liner before the PowerShell 7 bootstrap can run. Rewrite them in 5.1 syntax (if/else instead of ?? and ?:, an explicit `$null check instead of ?. and ?[, separate statements that test `$? or `$LASTEXITCODE instead of && and ||, end { } or try/finally instead of clean { }, Start-Job instead of a trailing &) in the offending source under WingetAppSetup/ or build/fragments/, then re-run the build.`n" + ($details -join "`n"))
     exit 1

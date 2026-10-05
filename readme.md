@@ -1428,7 +1428,9 @@ The installer's logic lives in the **`WingetAppSetup` PowerShell module** under 
 (`Public/` for the entry points and the run's main steps, `Private/` for their helpers; the
 module exports every function, so moving one between the two folders changes nothing else). The
 single-file `winget-app-install.ps1` is **generated** from that module so the `irm | iex`
-one-liner keeps working — do not edit it by hand.
+one-liner keeps working — do not edit it by hand. It leaves out the module's comments, which are
+about half of the module, so read them in `WingetAppSetup/`; a change to a module comment alone
+leaves the installer, and its build id, unchanged.
 
 `rmm/` holds the Endpoint Central scripts (see
 [Endpoint Central and other RMM tools](#endpoint-central-and-other-rmm-tools)). They are not
@@ -1521,7 +1523,16 @@ guards, most of which run in both build and `-Check` modes of
 2. **Assembled-script parse guard** — the assembled script is parsed and any syntax error
    fails the build with line/column details, so an unbalanced brace in a module file can no
    longer ship a broken installer ([#183](https://github.com/J-MaFf/winget-app-setup/issues/183)).
-3. **AST undefined-reference guard** — every hyphenated command the assembled script invokes
+   This guard and the 5.1 guards below also name the source file and line behind each line they
+   report, such as `[WingetAppSetup/Private/Jsonc.ps1:120]`, because the assembled script's line
+   numbers match no file.
+3. **Comment removal check** — the build leaves the module's comments out of the installer (they
+   are about half of the module, and every `irm | iex` run downloads the file; review finding
+   P3-53). It removes only the tokenizer's comment tokens that end their line, so a `#` inside a
+   string or regex stays, and it keeps `build/fragments/head.ps1` (the script's help) and `tail.ps1`
+   as they are. It then compares each module file's code tokens before and after and fails the
+   build if removing the comments changed any of them.
+4. **AST undefined-reference guard** — every hyphenated command the assembled script invokes
    must resolve to a module-defined function (matched case-sensitively, so a stale call site
    cannot silently resolve to an external cmdlet that differs only by case) or an external
    command; catches functions dropped from the module while still being called — the drift
@@ -1532,7 +1543,7 @@ guards, most of which run in both build and `-Check` modes of
    Windows; when an off-Windows build fails on a genuine Windows-only cmdlet, add it to that list.
    On Windows each listed name must resolve, so the list cannot hide a missing module function. On
    every platform a listed name the installer no longer calls draws a warning.
-4. **Windows PowerShell 5.1 parse-safety guards** — 5.1 parses the whole installer before it
+5. **Windows PowerShell 5.1 parse-safety guards** — 5.1 parses the whole installer before it
    runs any of it, so the file must stay 5.1-parseable even though the install itself runs under
    PowerShell 7. Syntax that only PowerShell 7 parses (`??`, `??=`, `?.`, `?[`, the ternary `?:`,
    the `&&` / `||` pipeline chains, the background operator `&` as in `Get-Process &`, and
@@ -1546,17 +1557,17 @@ guards, most of which run in both build and `-Check` modes of
    (find-or-install `pwsh`, then relaunch — [#225](https://github.com/J-MaFf/winget-app-setup/issues/225));
    comments are exempt because misdecoded bytes there cannot change tokenization
    ([#210](https://github.com/J-MaFf/winget-app-setup/issues/210)).
-5. **Content-derived build id** — the banner and `$script:InstallerBuildId` are stamped with
+6. **Content-derived build id** — the banner and `$script:InstallerBuildId` are stamped with
    `<module version>+<8-hex SHA256 fragment of the whole generated script>` (hashed with the id
    slots blanked, so a change to `build/fragments/head.ps1` or `tail.ps1` changes the id too),
    derived from content only (never git metadata or timestamps) so rebuilding the same tree is
    byte-identical and the `-Check` byte-compare stays deterministic; transcripts log the id at
    startup so a log identifies the exact installer build
    ([#189](https://github.com/J-MaFf/winget-app-setup/issues/189)).
-6. **CI enforcement** — `.github/workflows/windows-tests.yml` runs `-Check` on every push to
+7. **CI enforcement** — `.github/workflows/windows-tests.yml` runs `-Check` on every push to
    `main` and on every pull request, so drift fails CI instead of shipping
    ([#156](https://github.com/J-MaFf/winget-app-setup/issues/156)).
-7. **Local pre-commit hook** — `.githooks/pre-commit` (above) runs the same `-Check`, against
+8. **Local pre-commit hook** — `.githooks/pre-commit` (above) runs the same `-Check`, against
    the staged files, before a commit that touches the module, the build, a manifest, or the
    installer, catching drift before it is even committed
    ([#211](https://github.com/J-MaFf/winget-app-setup/issues/211)).
