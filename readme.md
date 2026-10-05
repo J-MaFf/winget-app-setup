@@ -871,8 +871,13 @@ powershell -ExecutionPolicy Unrestricted -File .\winget-app-uninstall.ps1 -WhatI
 - Winget-AutoUpdate is removed last, and only when no app failed: an app that could not be removed
   keeps its updates. When WAU is installed, the run says it was kept; fix the failure and run the
   uninstaller again.
+- When someone is at the console, the run ends with `Press any key to exit...`, as the installer
+  does, so the summary and the failure reasons stay on screen: the elevated window closes as soon
+  as the run ends, and the uninstaller keeps no transcript. A run as SYSTEM or under CI does not
+  wait.
 - `-NonInteractive` (or `WINGET_APP_SETUP_NONINTERACTIVE`, see
-  [Unattended runs](#unattended-runs)) never shows a UAC prompt (it exits 4 when not elevated).
+  [Unattended runs](#unattended-runs)) never shows a UAC prompt (it exits 4 when not elevated) and
+  does not wait for a key press at the end.
 
 | Code | Meaning |
 |------|---------|

@@ -205,7 +205,10 @@ installs `Microsoft.PowerShell.GraphicalTools` or the NuGet provider to provide 
 limit, the uninstall function's `-NonInteractive` (it only gated the grid view; the script keeps
 its own) and the tests that only checked that removed functions stayed removed are gone too. The
 module manifest exports every function (`FunctionsToExport = '*'`), so the build no longer checks an
-export list against `Public/`. `Convert-JsoncToJson` and the MSIX/DISM provisioning path stay.
+export list against `Public/`. `Convert-JsoncToJson` and the MSIX/DISM provisioning path stay. The
+grid view was what kept the uninstaller's elevated window open, so the uninstaller now ends with
+"press any key to exit" when someone is at the console, as the installer does; without it the
+window closed with the summary as soon as the run ended.
 
 The same branch changes CI. Fork pull requests that leave `windows-tests.yml` alone no longer run
 on the self-hosted win-test runner, and `claude.yml` calls the shared Claude workflow at a pinned
@@ -530,7 +533,10 @@ every repository secret.
   control is rolled out. The E2E run does not set a TightVNC password, so it never takes the
   configured path.
 - Run the reworked uninstaller on real Windows, cross-user elevated and as SYSTEM, where
-  `winget list` does not see per-user MSIX apps such as Windows Terminal.
+  `winget list` does not see per-user MSIX apps such as Windows Terminal. Started from a window
+  that is not elevated, its elevated Windows PowerShell window should stay open at `Press any key
+  to exit...` with the summary on screen, and Ctrl+C there should still hand the run's exit code
+  back to the window that asked.
 - Add a whole-run time budget (`-MaxRuntimeMinutes`), deferred from the RMM work: the
   per-process time limits are the only limits today.
 - Validate the dormant DISM MSIX-provisioning path in `Install-PowerShellLatest` end-to-end on a real Windows 10 machine before PowerShell 7.7 GA makes it load-bearing (as of [#166](https://github.com/J-MaFf/winget-app-setup/issues/166)).

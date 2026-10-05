@@ -81,12 +81,12 @@ param (
 # This script is assembled from the WingetAppSetup module by build/Build-WingetInstallScript.ps1.
 # Edit the function source under WingetAppSetup/Public and WingetAppSetup/Private, then re-run the
 # build to regenerate this file. See readme.md ("Project layout") for details.
-# Build id: 1.0.0+c83fb7e5 (module version + SHA256 fragment of this whole script; issue #189).
+# Build id: 1.0.0+0b39872b (module version + SHA256 fragment of this whole script; issue #189).
 # ------------------------------------------------------------------------------------------------
 
 # Content-derived build identity, logged at startup so a transcript from a remote machine
 # identifies exactly which installer build produced it (issue #189).
-$script:InstallerBuildId = '1.0.0+c83fb7e5'
+$script:InstallerBuildId = '1.0.0+0b39872b'
 
 # ------------------------------------------------Functions------------------------------------------------
 
@@ -5437,10 +5437,11 @@ function Set-JsoncTopLevelStringProperty {
 }
 
 # --- LoggingInternal ---
-# Logging helpers used only by module functions and the generated entry script (issue #191). The
-# externally consumed logging primitives (Write-Info/Success/WarningMessage/ErrorMessage,
-# Format-AppList, Write-Table) live in Public/Logging.ps1 because winget-app-uninstall.ps1 imports
-# them through the manifest.
+# The run's own logging: the key-press prompt and the transcript. The message primitives
+# (Write-Info/Success/WarningMessage/ErrorMessage, Format-AppList, Write-Table) live in
+# Public/Logging.ps1. The split is for readers only: the module exports every function, Private/
+# ones included (review finding P3-44), so winget-app-uninstall.ps1, which imports the module
+# through its manifest, can call either.
 
 <#
 .SYNOPSIS

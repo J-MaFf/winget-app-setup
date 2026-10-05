@@ -21,7 +21,7 @@
          expected to be there), that WAU was NOT installed and the latest transcript says
          'Auto-updates: NOT CONFIGURED'.
       4. The installed WAU version matches the pin in Get-WauPin (read from the registry via the
-         module's private Get-InstalledWauInfo helper, dot-sourced from the checkout).
+         module's Get-InstalledWauInfo helper, from the checkout's module).
     The transcript assertions (5-9) live in e2e/TranscriptAssertions.ps1, fixture-tested in
     tests/E2EAssertions.Tests.ps1. They read the real-run transcripts under
     %ProgramData%\winget-app-setup\logs (dry-run '-whatif' transcripts left out) and keep the
@@ -101,15 +101,13 @@ $ErrorActionPreference = 'Stop'
 # comma-separated single token too: -SkipApps 'App.One,App.Two' == -SkipApps @('App.One','App.Two').
 $SkipApps = @($SkipApps | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
 
-# Import the module from the checkout: Get-DefaultAppCatalog (the app list under test) and
-# Get-WauPin (the pinned WAU version) are exported; Get-InstalledWauInfo is private, so
-# dot-source its file directly - same source of truth, no reimplementation drift.
+# Import the module from the checkout - same source of truth, no reimplementation drift. The
+# manifest exports every function (FunctionsToExport = '*', review finding P3-44), Private/ ones
+# included: Get-DefaultAppCatalog (the app list under test), Get-WauPin (the pinned WAU version),
+# Get-InstalledWauInfo, Test-WingetLaunchable and Test-WingetPackageInstalled all run as the
+# module's own code.
 $repoRoot = Split-Path -Parent $PSScriptRoot
 Import-Module (Join-Path $repoRoot 'WingetAppSetup\WingetAppSetup.psd1') -Force
-. (Join-Path $repoRoot 'WingetAppSetup\Private\WauSupport.ps1')
-# Test-WingetLaunchable (private) and the process helpers it runs winget through.
-. (Join-Path $repoRoot 'WingetAppSetup\Private\ProcessInvocation.ps1')
-. (Join-Path $repoRoot 'WingetAppSetup\Private\WingetLaunchResilience.ps1')
 # Transcript parsing and the transcript assertions (sections 5-9).
 . (Join-Path $PSScriptRoot 'TranscriptAssertions.ps1')
 

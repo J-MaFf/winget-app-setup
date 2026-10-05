@@ -17,10 +17,16 @@
     place there, unchecked, because it imports the module from its folder: when another account
     approves the prompt, run it from a folder only administrators can change, or from an elevated
     session.
+
+    When someone is at the console, the run ends with 'Press any key to exit...', as the installer
+    does, so the summary stays on screen: the elevated window closes as soon as the run ends, and
+    the uninstaller keeps no transcript. A non-interactive run, a run as SYSTEM and a run under CI
+    do not wait.
 .PARAMETER WhatIf
     Preview: shows what a real run would remove and changes nothing. Needs no administrator rights.
 .PARAMETER NonInteractive
-    For unattended runs: never asks for elevation (exits 4 when not elevated).
+    For unattended runs: never asks for elevation (exits 4 when not elevated) and does not wait for
+    a key press at the end.
 .NOTES
     Exit codes: 0 = done (every app removed, not installed, or kept on purpose, and Winget-AutoUpdate
     removed or not installed); 3010 = done, and a restart finishes removing an app or
@@ -86,5 +92,29 @@ try {
 catch {
     $exitCode = 5
     Write-ErrorMessage "The uninstaller stopped on an unexpected error before it finished: $_"
+}
+
+# Hold the window until a key is pressed when someone is at the console, as the installer does. The
+# elevated window Restart-WithElevation opens runs this script with -File and closes as soon as it
+# exits, and the uninstaller keeps no transcript, so the summary and the failure reasons above
+# would be gone before anyone read them (the Out-GridView window the summary used to open held it;
+# review of work-order item 26). Wait-InstallerExitKeyPress never waits in a non-interactive run,
+# as SYSTEM or under CI.
+$stoppedAtPrompt = $true
+try {
+    Wait-InstallerExitKeyPress -NonInteractive:$NonInteractive
+    $stoppedAtPrompt = $false
+}
+catch {
+    # The key press is a courtesy: nothing here may change the exit code.
+    $stoppedAtPrompt = $false
+}
+finally {
+    # Ctrl+C at the prompt stops the script here, past the catch (a PipelineStoppedException cannot
+    # be caught), and a script stopped that way exits 0: report the run's own code instead, as the
+    # installer's entry script does.
+    if ($stoppedAtPrompt) {
+        $host.SetShouldExit($exitCode)
+    }
 }
 exit $exitCode

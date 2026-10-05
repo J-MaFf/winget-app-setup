@@ -414,7 +414,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the grid view; `winget-app-uninstall.ps1 -NonInteractive` still keeps the UAC prompt away), the
   dry run's `Out-GridView is not available` line, and `Out-GridView` in
   `build/windows-only-commands.txt`. The installer's `-NonInteractive` still skips the final key
-  press, the TightVNC question and the UAC prompt, and still adds `--silent`.
+  press, the TightVNC question and the UAC prompt, and still adds `--silent`. The grid view was
+  what held the uninstaller's elevated window open, so `winget-app-uninstall.ps1` now ends with
+  `Press any key to exit...` when someone is at the console, as the installer does: that window
+  closes as soon as the run ends, and the uninstaller keeps no transcript, so the summary used to
+  vanish with it. Its `-NonInteractive`, a run as SYSTEM and a CI run do not wait, and Ctrl+C at the
+  prompt keeps the run's exit code instead of exiting 0.
 - Removed dead helpers and modes (review finding P3-43): `Get-WindowsTerminalSettingsPath`, which
   nothing called, and `Test-WingetPackageInstalled`'s mode without `-TimeoutSeconds`, which returned
   a plain `[bool]` under a 2-minute limit and read a winget that could not start, or that ran out

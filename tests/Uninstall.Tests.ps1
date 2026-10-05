@@ -644,6 +644,12 @@ function Invoke-WingetUninstall {
     if ($env:UNINSTALL_TEST_THROW -eq '1') { throw 'unexpected (test)' }
     [int]$env:UNINSTALL_TEST_CODE
 }
+function Wait-InstallerExitKeyPress {
+    param ([switch]$NonInteractive)
+    Write-Host "WAIT NonInteractive=$([bool]$NonInteractive)"
+    # Ctrl+C at the prompt: PowerShell stops the script with an exception no catch block sees.
+    if ($env:UNINSTALL_TEST_STOP_AT_PROMPT -eq '1') { throw [System.Management.Automation.PipelineStoppedException]::new() }
+}
 '@
     }
 
@@ -699,6 +705,41 @@ function Invoke-WingetUninstall {
         $run.ExitCode | Should -Be 4
         $run.Output | Should -Match 'RELAUNCH InPlace=True NonInteractive=True'
         $run.Output | Should -Not -Match 'UNINSTALL '
+        # The elevated window holds itself open; the window that asked only reports its code.
+        $run.Output | Should -Not -Match 'WAIT '
+    }
+
+    It 'Waits for a key press after the summary, passing on -NonInteractive (<Case>; review of work-order item 26)' -ForEach @(
+        @{ Case = 'someone at the console'; Arguments = @(); Expected = 'False' }
+        @{ Case = '-NonInteractive'; Arguments = @('-NonInteractive'); Expected = 'True' }
+    ) {
+        # The elevated window this script relaunches in closes when the script exits, and the
+        # uninstaller keeps no transcript: the summary grid view used to hold that window open.
+        $run = Invoke-TestUninstallerScript -Root (Join-Path $TestDrive "wait-$Expected") -Overrides $script:standInModule -ScriptArguments $Arguments -Environment @{ UNINSTALL_TEST_ADMIN = '1'; UNINSTALL_TEST_CODE = '1'; UNINSTALL_TEST_THROW = $null; UNINSTALL_TEST_STOP_AT_PROMPT = $null }
+
+        $run.ExitCode | Should -Be 1
+        $run.Output | Should -Match "WAIT NonInteractive=$Expected"
+        $run.Output.IndexOf('UNINSTALL WhatIf=False') | Should -BeLessThan $run.Output.IndexOf('WAIT ')
+    }
+
+    It 'Waits for a key press after an unexpected error too, and still exits 5' {
+        $run = Invoke-TestUninstallerScript -Root (Join-Path $TestDrive 'wait-after-error') -Overrides $script:standInModule -Environment @{ UNINSTALL_TEST_ADMIN = '1'; UNINSTALL_TEST_CODE = '0'; UNINSTALL_TEST_THROW = '1'; UNINSTALL_TEST_STOP_AT_PROMPT = $null }
+
+        $run.ExitCode | Should -Be 5
+        $run.Output.IndexOf('ERROR: The uninstaller stopped on an unexpected error') | Should -BeGreaterThan -1
+        $run.Output.IndexOf('ERROR: The uninstaller stopped on an unexpected error') | Should -BeLessThan $run.Output.IndexOf('WAIT NonInteractive=False')
+    }
+
+    It 'Keeps the run''s exit code (<Code>) when it is stopped at the key press' -ForEach @(
+        @{ Code = 1 }
+        @{ Code = 2 }
+    ) {
+        # A -File script stopped by Ctrl+C exits 0, which the window that asked for elevation would
+        # then report as the uninstall's result.
+        $run = Invoke-TestUninstallerScript -Root (Join-Path $TestDrive "stopped-at-prompt-$Code") -Overrides $script:standInModule -Environment @{ UNINSTALL_TEST_ADMIN = '1'; UNINSTALL_TEST_CODE = "$Code"; UNINSTALL_TEST_THROW = $null; UNINSTALL_TEST_STOP_AT_PROMPT = '1' }
+
+        $run.Output | Should -Match 'WAIT NonInteractive=False'
+        $run.ExitCode | Should -Be $Code
     }
 
     It 'Previews in place, without elevating, when not elevated and -WhatIf is given' {
@@ -737,6 +778,17 @@ function Get-ProcessUserName { 'CONTOSO\admin-tech' }
 function Get-InteractiveSessionUserName { $null }
 function Start-Sleep { param ([int]$Seconds) }
 function Remove-LegacyScheduledUpdates { param ([switch]$WhatIf) $false }
+# Whether someone is at the console is the test's choice, never the console this child inherits.
+function Test-EffectiveNonInteractive {
+    param ([switch]$NonInteractive)
+    ($env:UNINSTALL_TEST_INTERACTIVE -ne '1') -or (Test-NonInteractiveRequested -NonInteractive:$NonInteractive)
+}
+function Write-Prompt {
+    param ([string]$Message)
+    Write-Host "PROMPT: $Message"
+    # Ctrl+C at the prompt, instead of a wait for a key nobody presses.
+    throw [System.Management.Automation.PipelineStoppedException]::new()
+}
 function Test-WauInstalled { $true }
 function Uninstall-WingetAutoUpdate { param ([switch]$WhatIf) Write-Host 'FAKE: Winget-AutoUpdate removed'; @{ Succeeded = $true; RestartRequired = $false } }
 function Invoke-WingetProcess {
@@ -822,5 +874,24 @@ function Invoke-WingetProcess {
         $run.Output | Should -Match 'FAKE: Winget-AutoUpdate removed'
         $run.Output | Should -Match ([regex]::Escape('Restart: REQUIRED to finish removing Contoso.AppOne, Contoso.AppTwo.'))
         $run.Output | Should -Not -Match 'Failed to uninstall'
+    }
+
+    It 'Holds the window at ''Press any key to exit...'' after the failure summary when someone is at the console, and keeps exit code 1 when stopped there (review of work-order item 26)' {
+        # The elevated window the script relaunches in closes when the script exits, and the
+        # uninstaller keeps no transcript. No CI variables: a CI run never waits.
+        $run = Invoke-TestUninstallerScript -Root (Join-Path $TestDrive 'interactive') -ModuleSource $script:moduleSource -Overrides $script:moduleOverrides -Environment @{ UNINSTALL_TEST_SCENARIO = 'ListCannotLaunch'; UNINSTALL_TEST_INTERACTIVE = '1'; WINGET_APP_SETUP_NONINTERACTIVE = $null; CI = $null; GITHUB_ACTIONS = $null; TF_BUILD = $null }
+
+        $run.ExitCode | Should -Be 1
+        $failureAt = $run.Output.IndexOf('Failed to uninstall: Contoso.AppOne')
+        $failureAt | Should -BeGreaterThan -1
+        $failureAt | Should -BeLessThan $run.Output.IndexOf('PROMPT: Press any key to exit...')
+    }
+
+    It 'Does not wait for a key press with -NonInteractive' {
+        $run = Invoke-TestUninstallerScript -Root (Join-Path $TestDrive 'interactive-console-noninteractive-run') -ModuleSource $script:moduleSource -Overrides $script:moduleOverrides -ScriptArguments @('-NonInteractive') -Environment @{ UNINSTALL_TEST_SCENARIO = 'ListCannotLaunch'; UNINSTALL_TEST_INTERACTIVE = '1'; WINGET_APP_SETUP_NONINTERACTIVE = $null; CI = $null; GITHUB_ACTIONS = $null; TF_BUILD = $null }
+
+        $run.ExitCode | Should -Be 1
+        $run.Output | Should -Match 'Failed to uninstall: Contoso\.AppOne'
+        $run.Output | Should -Not -Match 'PROMPT:'
     }
 }

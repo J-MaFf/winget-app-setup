@@ -1,7 +1,8 @@
-# Logging helpers used only by module functions and the generated entry script (issue #191). The
-# externally consumed logging primitives (Write-Info/Success/WarningMessage/ErrorMessage,
-# Format-AppList, Write-Table) live in Public/Logging.ps1 because winget-app-uninstall.ps1 imports
-# them through the manifest.
+# The run's own logging: the key-press prompt and the transcript. The message primitives
+# (Write-Info/Success/WarningMessage/ErrorMessage, Format-AppList, Write-Table) live in
+# Public/Logging.ps1. The split is for readers only: the module exports every function, Private/
+# ones included (review finding P3-44), so winget-app-uninstall.ps1, which imports the module
+# through its manifest, can call either.
 
 <#
 .SYNOPSIS
