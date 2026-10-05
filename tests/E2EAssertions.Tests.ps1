@@ -569,6 +569,36 @@ Describe 'Get-CatalogAppApplicability' {
         @($script:warnings).Count | Should -Be 2
     }
 
+    It 'Keeps expecting an app with no arch list and no condition installed when the module says it does not apply' {
+        # The e2e's one check that does not come from the code under test: such an app applies
+        # everywhere, so a module that skipped it must not be matched by the run's skip line.
+        Mock Get-OSArchitecture { 'X64' }
+        Mock Test-AppApplicability { $false }
+
+        $split = Get-CatalogAppApplicability -Apps @(
+            @{ name = 'Contoso.Anywhere' },
+            @{ name = 'Contoso.Arm64Only'; arch = 'Arm64' },
+            @{ name = 'Contoso.Conditioned'; condition = { $true }; conditionDescription = 'Contoso hardware only' },
+            @{ name = 'Contoso.NullArch'; arch = $null }
+        )
+
+        @($split.Applicable | ForEach-Object { $_.name }) | Should -Be @('Contoso.Anywhere', 'Contoso.NullArch')
+        @($split.UngatedNotApplicable) | Should -Be @('Contoso.Anywhere', 'Contoso.NullArch')
+        @($split.NotApplicable.Keys) | Should -Be @('Contoso.Arm64Only', 'Contoso.Conditioned')
+        $split.NotApplicable['Contoso.Arm64Only'] | Should -Be 'for Arm64 Windows only; this PC is X64'
+        $split.NotApplicable['Contoso.Conditioned'] | Should -Be 'Contoso hardware only'
+    }
+
+    It 'Lists no ungated app when the module agrees' {
+        Mock Get-OSArchitecture { 'Arm64' }
+
+        $split = Get-CatalogAppApplicability -Apps @(@{ name = 'Contoso.X64Only'; arch = 'X64' }, @{ name = 'Contoso.Anywhere' })
+
+        @($split.Applicable | ForEach-Object { $_.name }) | Should -Be @('Contoso.Anywhere')
+        $split.PSObject.Properties.Name | Should -Contain 'UngatedNotApplicable'
+        @($split.UngatedNotApplicable).Count | Should -Be 0
+    }
+
     It 'Splits the real catalog on <Architecture>: expects <Installed>, skip lines for <Skipped>' -ForEach @(
         @{ Architecture = 'X64'; Installed = 'Adobe.Acrobat.Reader.64-bit'; Skipped = @('Adobe.Acrobat.Reader.32-bit', 'Dell.CommandUpdate.Universal') }
         @{ Architecture = 'Arm64'; Installed = 'Adobe.Acrobat.Reader.32-bit'; Skipped = @('Adobe.Acrobat.Reader.64-bit', 'Dell.CommandUpdate.Universal') }
@@ -588,6 +618,7 @@ Describe 'Get-CatalogAppApplicability' {
             $split.NotApplicable[$id] | Should -Be $app.conditionDescription
         }
         ($applicableIds.Count + $split.NotApplicable.Count) | Should -Be $catalog.Count
+        @($split.UngatedNotApplicable).Count | Should -Be 0
         $script:warnings | Should -BeNullOrEmpty
     }
 
@@ -596,6 +627,7 @@ Describe 'Get-CatalogAppApplicability' {
 
         @($split.Applicable).Count | Should -Be 0
         $split.NotApplicable.Count | Should -Be 0
+        @($split.UngatedNotApplicable).Count | Should -Be 0
     }
 }
 
@@ -685,6 +717,15 @@ Describe 'e2e/Assert-Install.ps1 wiring' {
         $called | Should -Contain 'Get-CatalogAppApplicability'
         $definedHere | Should -Not -Contain 'Test-AppApplicable'
         $conditionCalls | Should -BeNullOrEmpty
+    }
+
+    It 'Fails an assertion when the module finds an app with no arch list or condition not applicable' {
+        # The ungated check is only worth something if the script reports it.
+        $ungatedReads = @($script:AssertInstallAst.FindAll({ param($node) $node -is [System.Management.Automation.Language.MemberExpressionAst] -and $node.Member.Extent.Text -eq 'UngatedNotApplicable' }, $true))
+        $ungatedRows = @($script:AssertInstallAst.FindAll({ param($node) $node -is [System.Management.Automation.Language.CommandAst] -and $node.GetCommandName() -eq 'Add-AssertionResult' -and $node.Extent.Text -match 'no arch list or condition' }, $true))
+
+        $ungatedReads | Should -Not -BeNullOrEmpty
+        @($ungatedRows | Where-Object { $_.Extent.Text -match '-Passed \$false' }) | Should -Not -BeNullOrEmpty
     }
 
     It 'Passes Get-TranscriptAssertionResult only parameters it declares' {

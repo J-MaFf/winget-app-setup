@@ -54,7 +54,8 @@ function Get-DefaultAppCatalog {
         @{name = 'Adobe.Acrobat.Reader.32-bit'; arch = @('Arm64', 'X86'); conditionDescription = 'ARM64 and 32-bit Windows only; x64 PCs get the 64-bit Reader' },
         @{name = 'Google.Chrome' },
         # No arch list: winget's only installer is labelled x64, but Google serves the same file to
-        # ARM64 PCs, and Drive runs natively on Windows 11 ARM64.
+        # ARM64 PCs, and Drive runs natively on Windows 11 ARM64. Windows 10 ARM64 emulates only x86,
+        # so winget finds no installer there (0x8A150010); an arch list cannot tell the two apart.
         @{name = 'Google.GoogleDrive' },
         @{name = 'Git.Git' },
         @{name = 'Klocman.BulkCrapUninstaller' },

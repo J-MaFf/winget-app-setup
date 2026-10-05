@@ -279,16 +279,18 @@ jobs:
           SECOND_PASS_OUTCOME: ${{ steps.second-pass.outcome }}
         run: |
           # Verifies from the checkout: every APPLICABLE Get-DefaultAppCatalog app resolves via
-          # `winget list` (exit-code classified) - the script evaluates each app's catalog
-          # condition on this machine, and not-applicable apps (e.g. Dell Command Update on
-          # these non-Dell runners, issue #217) must instead show their 'not applicable' skip
-          # line in the latest transcript. Also: the WAU scheduled task exists, the installed
-          # WAU version matches Get-WauPin, a transcript with the 'Installer build' stamp
-          # exists under %ProgramData%, and (idempotence) the latest transcript shows every
-          # applicable app Skipped. -SkipApps is the documented escape hatch for runner-platform
-          # incompatibilities ONLY - each entry is justified at the KNOWN_PLATFORM_INCOMPATIBLE
-          # definition at the top of this file (currently empty). The script also asserts
-          # CONTAINMENT: no app outside the skip list failed in either install pass.
+          # `winget list` (exit-code classified) - the script decides each app's applicability on
+          # this machine with the installer's own rule (Test-AppApplicability: the arch list and
+          # the condition; an app with neither must apply), and not-applicable apps (e.g. Dell
+          # Command Update on these non-Dell runners, issue #217) must instead show their
+          # 'not applicable' skip line in the latest transcript. Also: the WAU scheduled task
+          # exists, the installed WAU version matches Get-WauPin, a transcript with the
+          # 'Installer build' stamp exists under %ProgramData%, and (idempotence) the latest
+          # transcript shows every applicable app Skipped. -SkipApps is the documented escape
+          # hatch for runner-platform incompatibilities ONLY - each entry is justified at the
+          # KNOWN_PLATFORM_INCOMPATIBLE definition at the top of this file (currently empty). The
+          # script also asserts CONTAINMENT: no app outside the skip list failed in either install
+          # pass.
           #
           # The idempotence assertions read the latest transcript as the second pass's. When that
           # pass never ran (the first one failed), they would only add noise, so leave them out.

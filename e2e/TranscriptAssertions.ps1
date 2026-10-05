@@ -497,11 +497,16 @@ function New-TranscriptAssertionResult {
     Asks the module's Test-AppApplicability and Get-AppNotApplicableReason (Assert-Install.ps1
     imports the module), so the arch list and the condition decide here as they did in the run,
     and a gate that cannot answer leaves the app expected installed (fail open).
+
+    One check does not ask the module: an entry with neither an arch list nor a condition applies
+    everywhere, so it stays expected installed even if the module says otherwise, and is listed in
+    UngatedNotApplicable for Assert-Install.ps1 to fail on.
 .PARAMETER Apps
     Catalog entries (Get-DefaultAppCatalog, less the skip-listed ones).
 .RETURNS
-    [pscustomobject] with Applicable (the entries expected installed, in catalog order) and
-    NotApplicable (an ordered dictionary of package id -> the reason its skip line gives).
+    [pscustomobject] with Applicable (the entries expected installed, in catalog order),
+    NotApplicable (an ordered dictionary of package id -> the reason its skip line gives) and
+    UngatedNotApplicable (the ids of entries with no gate that the module found not applicable).
 #>
 function Get-CatalogAppApplicability {
     param (
@@ -512,17 +517,24 @@ function Get-CatalogAppApplicability {
 
     $applicable = @()
     $notApplicable = [ordered]@{}
+    $ungatedNotApplicable = @()
     foreach ($app in $Apps) {
+        $ungated = ($null -eq $app['arch']) -and -not $app['condition']
         if (Test-AppApplicability -App $app) {
             $applicable += $app
+        }
+        elseif ($ungated) {
+            $applicable += $app
+            $ungatedNotApplicable += [string]$app.name
         }
         else {
             $notApplicable[$app.name] = Get-AppNotApplicableReason -App $app
         }
     }
     return [pscustomobject]@{
-        Applicable    = $applicable
-        NotApplicable = $notApplicable
+        Applicable           = $applicable
+        NotApplicable        = $notApplicable
+        UngatedNotApplicable = $ungatedNotApplicable
     }
 }
 

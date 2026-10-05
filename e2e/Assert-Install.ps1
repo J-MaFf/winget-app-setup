@@ -12,7 +12,9 @@
          Test-AppApplicability, fail open included: a gate that cannot answer is warned about and
          the app is treated as applicable. Apps that do not apply (e.g.
          Dell.CommandUpdate.Universal on non-Dell hardware, or the 64-bit Reader on ARM64) are
-         asserted differently below instead of being expected as installed.
+         asserted differently below instead of being expected as installed. An app with neither
+         an arch list nor a condition must apply whatever the module says: it stays expected
+         installed, and the module finding it not applicable fails an assertion of its own.
       2. Every APPLICABLE app in Get-DefaultAppCatalog (minus -SkipApps) resolves via
          `winget list --exact --id <id>`, classified by $LASTEXITCODE captured immediately
          after the call (exit 0 = installed; nonzero = missing).
@@ -143,6 +145,15 @@ $applicability = Get-CatalogAppApplicability -Apps $candidateApps
 $appsToAssert = @($applicability.Applicable)
 foreach ($id in $applicability.NotApplicable.Keys) {
     Write-Host "NOT APPLICABLE on this machine: $id ($($applicability.NotApplicable[$id])) - asserting its skip line instead of an install." -ForegroundColor Yellow
+}
+# The one check that does not ask the module: an app with no gate applies everywhere, so a module
+# that skipped one would otherwise leave the run's matching skip line looking correct.
+$ungatedNotApplicable = @($applicability.UngatedNotApplicable)
+if ($ungatedNotApplicable.Count -gt 0) {
+    Add-AssertionResult -Name 'Apps with no arch list or condition apply' -Passed $false -Detail "Test-AppApplicability found $($ungatedNotApplicable -join ', ') not applicable; still expected installed"
+}
+else {
+    Add-AssertionResult -Name 'Apps with no arch list or condition apply' -Passed $true -Detail 'Test-AppApplicability found every one applicable'
 }
 
 # --- 2. Per-app: winget list resolves each applicable catalog app ---------------------------

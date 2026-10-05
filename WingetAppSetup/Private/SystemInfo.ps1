@@ -29,12 +29,14 @@ function Get-OSArchitecture {
     <#
     .SYNOPSIS
         Returns the operating system's processor architecture, 'X64', 'Arm64', 'X86' or 'Arm': a
-        mockable seam for catalog conditions (ARM64 PCs get the 32-bit Adobe Reader, P3-32).
+        mockable seam for the catalog's arch lists (Test-AppApplicability: the Adobe Reader split,
+        Dell Command Update's x64-only gate), the Windows App Runtime framework's per-architecture
+        choice and the diagnostics report.
     .DESCRIPTION
         RuntimeInformation.OSArchitecture answers for the OS, not for this process, from .NET 7
         (PowerShell 7.3): Arm64 even in an emulated x64 PowerShell, whose PROCESSOR_ARCHITECTURE says
         AMD64. PowerShell 7.0-7.2 under emulation reads X64. Throws when the architecture cannot be
-        read, so a condition built on it fails open.
+        read, so an arch list counts as met (fail open).
     .OUTPUTS
         [string] A System.Runtime.InteropServices.Architecture name.
     #>
