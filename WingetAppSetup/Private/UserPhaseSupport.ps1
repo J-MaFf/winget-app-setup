@@ -376,18 +376,30 @@ function Save-UserPhaseState {
     installed with Install-WingetPackage -UserScopeOnly -Silent (`--scope user`, never another
     scope: a machine-wide installer would ask for administrator rights) and checked again. A check
     that could not answer fails the app rather than installing it blind.
+
+    With the app's catalog entry (work-order item 38), the install uses its installerType, and once
+    the app is there (installed now or already) its postInstall hook runs in this account
+    (Complete-UserPhaseAppConfiguration): a userPhase entry's hook is what a run for the whole PC
+    deferred along with the app.
 .PARAMETER PackageId
     The winget package id.
+.PARAMETER App
+    The app's catalog entry (Get-UserPhaseCatalogEntry), or $null when this installer's catalog has
+    none for the id: the app is then installed by its id alone, with no post-install hook.
 .PARAMETER TimeoutSeconds
     The install's time limit (what is left of the user phase's time budget, at most 30 minutes).
 .RETURNS
     New-AppRunRecord's entry: status Installed, Skipped (already installed) or Failed, with the
-    reason and winget's exit code.
+    reason and winget's exit code, and postInstall and postInstallReason when a hook ran.
 #>
 function Install-UserPhaseApp {
     param (
         [Parameter(Mandatory = $true)]
         [string]$PackageId,
+
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [hashtable]$App,
 
         [Parameter(Mandatory = $true)]
         [ValidateRange(1, 86400)]
@@ -398,7 +410,7 @@ function Install-UserPhaseApp {
     $preCheck = Test-WingetPackageInstalled -PackageId $PackageId -TimeoutSeconds $checkTimeoutSeconds
     if ($preCheck.Installed) {
         Write-WarningMessage "Skipping: $PackageId (already installed)"
-        return (New-AppRunRecord -Id $PackageId -Status 'Skipped' -Reason 'already installed')
+        return (Complete-UserPhaseAppConfiguration -App $App -Record (New-AppRunRecord -Id $PackageId -Status 'Skipped' -Reason 'already installed'))
     }
     $preCheckReason = $null
     if ($preCheck.TimedOut) {
@@ -417,7 +429,18 @@ function Install-UserPhaseApp {
     }
 
     Write-Info "Installing for this account: $PackageId"
-    $installResult = Install-WingetPackage -PackageId $PackageId -UserScopeOnly -Silent -TimeoutSeconds $TimeoutSeconds -InstallInProgressRetries 1 -InstallInProgressWaitSeconds ([Math]::Min(120, $TimeoutSeconds))
+    $installParameters = @{
+        PackageId                    = $PackageId
+        UserScopeOnly                = $true
+        Silent                       = $true
+        TimeoutSeconds               = $TimeoutSeconds
+        InstallInProgressRetries     = 1
+        InstallInProgressWaitSeconds = [Math]::Min(120, $TimeoutSeconds)
+    }
+    if ($null -ne $App -and -not [string]::IsNullOrWhiteSpace([string]$App['installerType'])) {
+        $installParameters['InstallerType'] = [string]$App['installerType']
+    }
+    $installResult = Install-WingetPackage @installParameters
     # The user phase never falls back to another scope, so the machine-scope detail would only mislead.
     $reportedResult = $installResult.Clone()
     $reportedResult.Remove('MachineScopeFellBack')
@@ -438,7 +461,7 @@ function Install-UserPhaseApp {
         if ($verify.Installed) {
             Write-Success "Successfully installed for this account: $PackageId"
             $restartRequired = [bool](Write-InstalledAppNote -AppName $PackageId -InstallResult $installResult)
-            return (New-AppRunRecord -Id $PackageId -Status 'Installed' -InstallResult $installResult -RestartRequired $restartRequired)
+            return (Complete-UserPhaseAppConfiguration -App $App -Record (New-AppRunRecord -Id $PackageId -Status 'Installed' -InstallResult $installResult -RestartRequired $restartRequired))
         }
         if ($verify.TimedOut) {
             $failureReason = 'VerifyTimeout'
@@ -458,6 +481,90 @@ function Install-UserPhaseApp {
     $reason = Format-InstallFailureReason -FailureReason $failureReason -InstallResult $reportedResult -LaunchError $launchError -CheckExitCode $checkExitCode
     Write-ErrorMessage "Failed to install: $PackageId ($reason)."
     return (New-AppRunRecord -Id $PackageId -Status 'Failed' -Reason $reason -InstallResult $installResult)
+}
+
+<#
+.SYNOPSIS
+    Returns this installer's catalog entries by package id, for the user phase.
+.DESCRIPTION
+    The run record is the user phase's contract: it lists the deferred ids, whatever deferred them
+    (Read-InstallerRunRecord). The catalog adds what a record cannot carry (work-order item 38): the
+    postInstall hook of an entry marked userPhase, which a run for the whole PC deferred along with
+    the app because it configures the signed-in user's own account, and the entry's installerType.
+    The catalog is this installer copy's (Get-DefaultAppCatalog). An id it does not have (the run
+    for the whole PC was another build's) is installed by its id alone. A catalog that cannot be
+    read is reported in one line, and the apps are installed without their catalog settings.
+.RETURNS
+    [hashtable] Package id (compared without regard to case) to catalog entry.
+#>
+function Get-UserPhaseCatalogEntry {
+    $entries = @{}
+    try {
+        foreach ($app in @(Get-DefaultAppCatalog)) {
+            if ($app -is [hashtable] -and -not [string]::IsNullOrWhiteSpace([string]$app['name']) -and -not $entries.ContainsKey([string]$app['name'])) {
+                $entries[[string]$app['name']] = $app
+            }
+        }
+    }
+    catch {
+        Write-WarningMessage "Could not read this installer's app catalog, so the deferred apps are installed without their catalog settings (post-install configuration, installer type): $($_.Exception.Message)"
+    }
+    return $entries
+}
+
+<#
+.SYNOPSIS
+    Runs a deferred app's post-install hook in the user phase, once the app is there, and records the
+    result.
+.DESCRIPTION
+    Work-order items 34 and 38. A catalog entry marked userPhase can carry a postInstall hook that
+    sets the app up in the signed-in user's own account; a run as SYSTEM or under cross-user
+    elevation defers such an app before any winget call, so its hook never ran there. The user
+    phase runs it in the user's account as Install-AppWithVerification does (Invoke-AppPostInstall):
+    after the app was installed for this account, or found already installed. Without a catalog
+    entry or a hook, the record is returned as it is.
+      - Configured: 'Configured: <id>'. The record keeps its status.
+      - NotConfigured: 'Not configured: <id> (<reason>)'. The record keeps its status (the app is
+        installed) and the exit code does not change, but this account's user phase is not complete,
+        so a later sign-in runs the hook again (Invoke-WingetUserPhase).
+      - Failed, or a hook that throws: the app is Failed with 'installed, but its post-install
+        configuration failed (<reason>)', so the user phase exits 1 and a later sign-in tries again.
+        The install's restart and exit code stay in the record.
+.PARAMETER App
+    The app's catalog entry, or $null.
+.PARAMETER Record
+    The app's record (New-AppRunRecord), status Installed or Skipped.
+.RETURNS
+    The record, with postInstall and postInstallReason set when the hook ran.
+#>
+function Complete-UserPhaseAppConfiguration {
+    param (
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [hashtable]$App,
+
+        [Parameter(Mandatory = $true)]
+        [System.Collections.IDictionary]$Record
+    )
+
+    if ($null -eq $App -or $null -eq $App['postInstall']) {
+        return $Record
+    }
+    $configuration = Invoke-AppPostInstall -App $App
+    $Record['postInstall'] = [string]$configuration.Status
+    $Record['postInstallReason'] = $null
+    if (-not [string]::IsNullOrWhiteSpace([string]$configuration.Reason)) {
+        $Record['postInstallReason'] = [string]$configuration.Reason
+    }
+    if ($configuration.Status -eq 'Failed') {
+        $reason = Format-InstallFailureReason -FailureReason 'PostInstallFailed' -PostInstallReason $configuration.Reason
+        Write-ErrorMessage "Failed to install: $($Record['id']) ($reason)."
+        $Record['status'] = 'Failed'
+        $Record['reason'] = $reason
+        return $Record
+    }
+    [void](Write-AppPostInstallResult -AppName ([string]$Record['id']) -Configuration $configuration)
+    return $Record
 }
 
 <#

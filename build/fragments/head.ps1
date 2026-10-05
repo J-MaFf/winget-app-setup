@@ -50,11 +50,12 @@
 
 .PARAMETER CollectDiagnostics
  Installs nothing: makes a diagnostics bundle to attach to a GitHub issue after a failed run, and
- prints where it saved it. The .zip holds the latest run's transcripts, installer logs and
- last-run.json, the end of Winget-AutoUpdate's updates.log, the App Installer and Windows App
- Runtime packages for every account and provisioned for new ones, the execution policy, the App
- Installer and Store Group Policy, the pending-restart state, the Winget-AutoUpdate task, winget
- --version and --info, and the Windows build and architecture. Account and computer names, user
+ prints where it saved it. The .zip holds the latest run's transcripts (the RMM wrapper's log
+ too), installer logs and last-run.json, this account's user-phase state and logs when the user
+ phase ran in it, the end of Winget-AutoUpdate's updates.log, the App Installer and Windows App
+ Runtime packages for every account and provisioned for new ones (and the framework this build
+ pins), the execution policy, the App Installer and Store Group Policy, the pending-restart state,
+ the Winget-AutoUpdate task, winget --version and --info, and the Windows build and architecture. Account and computer names, user
  profile folders, the SIDs of real accounts and email addresses are replaced with placeholders,
  because the repository's issues are public. It changes nothing on the PC (no log, no run lock, no
  PowerShell 7 install, no elevation) and works without winget; run it from PowerShell started as

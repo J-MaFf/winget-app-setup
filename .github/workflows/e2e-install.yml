@@ -18,8 +18,10 @@ name: E2E Install
 # 32-bit agent would. The wrapper runs the checkout's installer (-InstallerPath, SHA256-checked),
 # never its pinned commit, so the leg tests the code under review on every trigger, the weekly run
 # included. e2e/Invoke-SystemInstallPass.ps1 checks the task's exit code (same policy as every
-# pass), the wrapper's 64-bit relaunch and exit-code pass-through, last-run.json, and that nothing
-# was installed per-user into SYSTEM's own profile.
+# pass: on windows-latest the SYSTEM run installs the framework and WAU and is expected to exit 0),
+# the wrapper's 64-bit relaunch and exit-code pass-through, 'Auto-updates: Configured' and the
+# framework installed once, last-run.json and its Deferred entries (each with an id and a reason,
+# as the user phase reads them), and that nothing was installed per-user into SYSTEM's own profile.
 # All legs first uninstall the catalog apps the runner image ships with (Google Chrome, 7-Zip and
 # Git; e2e/Remove-PreinstalledApps.ps1), so the first pass really installs them instead of
 # skipping them as already installed. PowerShell 7 and Windows Terminal stay preinstalled in the
@@ -522,7 +524,9 @@ jobs:
           # rmm/Invoke-WingetAppSetup.ps1 -InstallerPath <checkout's installer>, waits for it and
           # checks the run (e2e/Invoke-SystemInstallPass.ps1). Exit codes 0 and 3010 pass; 8 only
           # when the run's transcript gives the missing Microsoft.WindowsAppRuntime.1.8 as the
-          # reason, as on every windows-latest pass; 1 only while KNOWN_PLATFORM_INCOMPATIBLE is
+          # reason and the installer could not try to install it (on windows-latest it can, so the
+          # SYSTEM run is expected to install the framework and WAU and exit 0; a framework install
+          # that started and failed fails the step); 1 only while KNOWN_PLATFORM_INCOMPATIBLE is
           # non-empty and every app the run left failed is on it (the containment check the other
           # legs get from Assert-Install.ps1). The output is also saved with the diagnostics, so
           # report-failure can put the table in the issue.

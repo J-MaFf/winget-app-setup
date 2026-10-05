@@ -50,11 +50,12 @@
 
 .PARAMETER CollectDiagnostics
  Installs nothing: makes a diagnostics bundle to attach to a GitHub issue after a failed run, and
- prints where it saved it. The .zip holds the latest run's transcripts, installer logs and
- last-run.json, the end of Winget-AutoUpdate's updates.log, the App Installer and Windows App
- Runtime packages for every account and provisioned for new ones, the execution policy, the App
- Installer and Store Group Policy, the pending-restart state, the Winget-AutoUpdate task, winget
- --version and --info, and the Windows build and architecture. Account and computer names, user
+ prints where it saved it. The .zip holds the latest run's transcripts (the RMM wrapper's log
+ too), installer logs and last-run.json, this account's user-phase state and logs when the user
+ phase ran in it, the end of Winget-AutoUpdate's updates.log, the App Installer and Windows App
+ Runtime packages for every account and provisioned for new ones (and the framework this build
+ pins), the execution policy, the App Installer and Store Group Policy, the pending-restart state,
+ the Winget-AutoUpdate task, winget --version and --info, and the Windows build and architecture. Account and computer names, user
  profile folders, the SIDs of real accounts and email addresses are replaced with placeholders,
  because the repository's issues are public. It changes nothing on the PC (no log, no run lock, no
  PowerShell 7 install, no elevation) and works without winget; run it from PowerShell started as
@@ -80,12 +81,12 @@ param (
 # This script is assembled from the WingetAppSetup module by build/Build-WingetInstallScript.ps1.
 # Edit the function source under WingetAppSetup/Public and WingetAppSetup/Private, then re-run the
 # build to regenerate this file. See readme.md ("Project layout") for details.
-# Build id: 1.0.0+6f0b22b6 (module version + SHA256 fragment of this whole script; issue #189).
+# Build id: 1.0.0+9b193604 (module version + SHA256 fragment of this whole script; issue #189).
 # ------------------------------------------------------------------------------------------------
 
 # Content-derived build identity, logged at startup so a transcript from a remote machine
 # identifies exactly which installer build produced it (issue #189).
-$script:InstallerBuildId = '1.0.0+6f0b22b6'
+$script:InstallerBuildId = '1.0.0+9b193604'
 
 # ------------------------------------------------Functions------------------------------------------------
 
@@ -663,7 +664,9 @@ function Invoke-AppPostInstall {
 # Format-ScheduledTaskTrigger and Get-WauUpdatesLogPath (WauSupport.ps1), Get-MachineWingetCandidate
 # (MachineContext.ps1), Invoke-WingetProcess, Invoke-ExternalProcess and Get-ProcessTimeoutSeconds
 # (ProcessInvocation.ps1), Format-WingetExitCode (WingetResultCodes.ps1), Format-RunRecordTime
-# (RunRecord.ps1) and the Write-* logging helpers. Check a change to any of them against that too.
+# (RunRecord.ps1), Get-DefaultWindowsAppRuntimeRequirement and Format-WindowsAppRuntimeRequirement
+# (WauSupport.ps1), Get-WindowsAppRuntimePin (WindowsAppRuntime.ps1) and the Write-* logging
+# helpers. Check a change to any of them against that too.
 
 <#
 .SYNOPSIS
@@ -824,12 +827,16 @@ function ConvertFrom-DiagnosticsLogStamp {
 .DESCRIPTION
     Works on the names the installer gives its logs (see Remove-OldInstallerLog), each with the
     local time it was started at:
-      - Transcripts: install-<time>.log and install-<time>-bootstrap.log. Dry-run transcripts
-        (-whatif) are left out. The newest transcript and every other one started up to
-        WindowMinutes before it are kept, at most MaximumTranscripts, newest first: one run can
-        write four (the Windows PowerShell 5.1 bootstrap and the PowerShell 7 run, of the window
-        that asked for elevation and of the elevated one). The transcript last-run.json names is
-        kept too, when it is not among them.
+      - Transcripts: install-<time>.log, install-<time>-bootstrap.log, the RMM wrapper's
+        install-<time>-rmm.log (rmm/Invoke-WingetAppSetup.ps1, work-order item 34: it starts before
+        the installer and also says why the installer did not run, such as a SHA256 mismatch) and,
+        in a user's own logs folder, the user phase's install-<time>-userphase.log: the names
+        Remove-OldInstallerLog counts as transcripts. Dry-run transcripts (-whatif) are left out.
+        The newest transcript and every other one started up to WindowMinutes before it are kept,
+        at most MaximumTranscripts, newest first: one run can write four (the Windows PowerShell
+        5.1 bootstrap and the PowerShell 7 run, of the window that asked for elevation and of the
+        elevated one), and a run from the RMM wrapper three. The transcript last-run.json names
+        is kept too, when it is not among them.
       - Installer logs: winget-<install|upgrade|uninstall|repair>-<package id>-<time>.log (winget's
         --log), pwsh-msi-<time>-<n>.log and wau-msi-<install|uninstall>-<time>-<n>.log, from the
         start of the oldest transcript kept on, at most MaximumInstallerLogs, newest first.
@@ -868,7 +875,7 @@ function Select-DiagnosticsLogFile {
     $installerLogs = @()
     $runRecord = $null
     foreach ($file in $files) {
-        if ($file.Name -match '^install-(?<stamp>\d{8}-\d{6})(?:-bootstrap)?\.log$') {
+        if ($file.Name -match '^install-(?<stamp>\d{8}-\d{6})(?:-bootstrap|-rmm|-userphase)?\.log$') {
             $time = ConvertFrom-DiagnosticsLogStamp -Stamp $Matches['stamp']
             if ($null -ne $time) {
                 $transcripts += [pscustomobject]@{ File = $file; Stamp = $Matches['stamp']; Time = $time }
@@ -1715,6 +1722,22 @@ function Get-DiagnosticsSystemReport {
         $lines.Add("Not read: $($_.Exception.Message)")
     }
 
+    # Work-order items 31 and 32: what this installer installs when the framework is missing, and
+    # what it checks for when it cannot read what the latest winget release needs. The packages
+    # themselves, registered and provisioned, are in appx.txt; the run's own 'Windows App Runtime:'
+    # line is in its transcript.
+    $lines.Add('')
+    $lines.Add('== Windows App Runtime ==')
+    try {
+        $runtimePin = Get-WindowsAppRuntimePin
+        $lines.Add(('Pinned by this installer build: Windows App Runtime {0}, {1} {2} (installed for all users when a run finds the framework missing)' -f $runtimePin.Release, $runtimePin.FrameworkName, $runtimePin.FrameworkVersion))
+        $lines.Add(('Built-in requirement (used when the latest winget release''s cannot be read): {0}' -f (Format-WindowsAppRuntimeRequirement -Frameworks @((Get-DefaultWindowsAppRuntimeRequirement).Frameworks))))
+    }
+    catch {
+        $lines.Add("Not read: $($_.Exception.Message)")
+    }
+    $lines.Add('Packages registered and provisioned on this PC: appx.txt. The run''s ''Windows App Runtime:'' and ''Auto-updates:'' lines: its transcript in logs\.')
+
     $lines.Add('')
     $lines.Add('== Winget-AutoUpdate ==')
     try {
@@ -2099,6 +2122,82 @@ function Save-DiagnosticsBundle {
 
 <#
 .SYNOPSIS
+    Returns the user phase's folder of the account making the bundle:
+    %LOCALAPPDATA%\winget-app-setup, or $null when there is no LOCALAPPDATA.
+.DESCRIPTION
+    A seam (mocked in tests). The user phase (Invoke-WingetUserPhase, work-order item 34) keeps its
+    state (user-phase.json) and its logs there, in the signed-in user's own profile.
+.RETURNS
+    [string] or $null.
+#>
+function Get-DiagnosticsUserPhaseDirectory {
+    if ([string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) {
+        return $null
+    }
+    return (Join-Path $env:LOCALAPPDATA 'winget-app-setup')
+}
+
+<#
+.SYNOPSIS
+    Reads log files into the bundle, within what is left of its size budget.
+.PARAMETER Files
+    The files to read.
+.PARAMETER Prefix
+    The folder they go in inside the .zip, such as 'logs/'.
+.PARAMETER Entries
+    The bundle's entries (path inside the .zip to text): the files are added to it.
+.PARAMETER Sources
+    README.txt's list of sources: a file that cannot be read is noted there.
+.PARAMETER BudgetBytes
+    What is left of the bundle's size budget.
+.RETURNS
+    [pscustomobject] with BudgetBytes (what is left after these files) and Skipped (the names of the
+    files left out because the budget was spent).
+#>
+function Add-DiagnosticsLogEntry {
+    param (
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [AllowEmptyCollection()]
+        [object[]]$Files,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Prefix,
+
+        [Parameter(Mandatory = $true)]
+        [System.Collections.IDictionary]$Entries,
+
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [System.Collections.Generic.List[string]]$Sources,
+
+        [Parameter(Mandatory = $true)]
+        [long]$BudgetBytes
+    )
+
+    $skipped = @()
+    foreach ($file in @($Files)) {
+        if ($null -eq $file) {
+            continue
+        }
+        if ($BudgetBytes -le 0) {
+            $skipped += $file.Name
+            continue
+        }
+        try {
+            $content = Read-DiagnosticsTextFile -Path $file.FullName -MaxBytes ([Math]::Min([long]4MB, $BudgetBytes))
+            $BudgetBytes -= [Math]::Min([long]$file.Length, [long]4MB)
+            $Entries[$Prefix + $file.Name] = $content
+        }
+        catch {
+            $Sources.Add(('Log {0}: not read: {1}' -f $file.Name, $_.Exception.Message))
+        }
+    }
+    return [pscustomobject]@{ BudgetBytes = $BudgetBytes; Skipped = $skipped }
+}
+
+<#
+.SYNOPSIS
     Makes the diagnostics bundle (-CollectDiagnostics) and says where it is.
 .DESCRIPTION
     Collects, then redacts and zips:
@@ -2107,8 +2206,11 @@ function Save-DiagnosticsBundle {
       winget.txt                  Get-DiagnosticsWingetReport
       appx.txt                    Get-DiagnosticsAppxReport
       wau-updates-log-tail.txt    Get-DiagnosticsWauLogTail
-      logs\                       the latest run's transcripts, its installer logs and last-run.json
-                                  (Select-DiagnosticsLogFile)
+      logs\                       the latest run's transcripts (the RMM wrapper's included), its
+                                  installer logs and last-run.json (Select-DiagnosticsLogFile)
+      user-phase\                 this account's user phase (work-order item 34), when it has run
+                                  here: user-phase.json and its latest transcript and winget logs
+                                  from %LOCALAPPDATA%\winget-app-setup
     Every text file goes through ConvertTo-RedactedDiagnosticText with one map for the whole bundle
     (New-DiagnosticsRedactionMap). No environment variables are collected wholesale, and no secret
     is read.
@@ -2158,7 +2260,7 @@ function Invoke-DiagnosticsCollection {
     $entries = [ordered]@{}
     $entries['README.txt'] = ''
 
-    $logNames = @()
+    $budget = [long]64MB
     if ($LogDirectory -and (Test-Path -LiteralPath $LogDirectory -PathType Container)) {
         try {
             $selection = Select-DiagnosticsLogFile -LogDirectory $LogDirectory
@@ -2166,26 +2268,11 @@ function Invoke-DiagnosticsCollection {
             if ($selection.RunRecord) {
                 $files += $selection.RunRecord
             }
-            $budget = [long]64MB
-            $skipped = @()
-            foreach ($file in $files) {
-                if ($budget -le 0) {
-                    $skipped += $file.Name
-                    continue
-                }
-                try {
-                    $content = Read-DiagnosticsTextFile -Path $file.FullName -MaxBytes ([Math]::Min([long]4MB, $budget))
-                    $budget -= [Math]::Min([long]$file.Length, [long]4MB)
-                    $entries['logs/' + $file.Name] = $content
-                    $logNames += $file.Name
-                }
-                catch {
-                    $sources.Add(('Log {0}: not read: {1}' -f $file.Name, $_.Exception.Message))
-                }
-            }
+            $added = Add-DiagnosticsLogEntry -Files $files -Prefix 'logs/' -Entries $entries -Sources $sources -BudgetBytes $budget
+            $budget = $added.BudgetBytes
             $sources.Add(('Installer logs ({0}): {1} transcript(s), {2} installer log(s), last-run.json {3}' -f $LogDirectory, @($selection.Transcripts).Count, @($selection.InstallerLogs).Count, $(if ($selection.RunRecord) { 'included' } else { 'not found' })))
-            if ($skipped.Count -gt 0) {
-                $sources.Add(('Left out to keep the bundle small: {0}' -f ($skipped -join ', ')))
+            if (@($added.Skipped).Count -gt 0) {
+                $sources.Add(('Left out to keep the bundle small: {0}' -f (@($added.Skipped) -join ', ')))
             }
             $listing = @($selection.Files | Sort-Object -Property Name | ForEach-Object { '  {0}  {1} bytes  {2}' -f $_.Name, $_.Length, $_.LastWriteTime.ToString('yyyy-MM-dd HH:mm', [System.Globalization.CultureInfo]::InvariantCulture) })
             if ($listing.Count -gt 0) {
@@ -2201,6 +2288,49 @@ function Invoke-DiagnosticsCollection {
     }
     else {
         $sources.Add(('Installer logs ({0}): the folder does not exist or cannot be opened' -f $LogDirectory))
+    }
+
+    # The user phase (work-order item 34) of the account making the bundle: its state and its latest
+    # attempt's transcript and winget logs, read-only like the rest.
+    $userPhaseDirectory = $null
+    try {
+        $userPhaseDirectory = Get-DiagnosticsUserPhaseDirectory
+    }
+    catch {
+        $userPhaseDirectory = $null
+    }
+    if ($userPhaseDirectory -and (Test-Path -LiteralPath $userPhaseDirectory -PathType Container)) {
+        try {
+            $userPhaseFiles = @()
+            $statePath = Join-Path $userPhaseDirectory 'user-phase.json'
+            $stateFound = Test-Path -LiteralPath $statePath -PathType Leaf
+            if ($stateFound) {
+                $userPhaseFiles += Get-Item -LiteralPath $statePath -Force -ErrorAction Stop
+            }
+            $userLogDirectory = Join-Path $userPhaseDirectory 'logs'
+            $userTranscripts = @()
+            $userInstallerLogs = @()
+            if (Test-Path -LiteralPath $userLogDirectory -PathType Container) {
+                $userSelection = Select-DiagnosticsLogFile -LogDirectory $userLogDirectory -MaximumTranscripts 2
+                $userTranscripts = @($userSelection.Transcripts)
+                $userInstallerLogs = @($userSelection.InstallerLogs)
+            }
+            $added = Add-DiagnosticsLogEntry -Files @($userPhaseFiles) -Prefix 'user-phase/' -Entries $entries -Sources $sources -BudgetBytes $budget
+            $budget = $added.BudgetBytes
+            $addedLogs = Add-DiagnosticsLogEntry -Files (@($userTranscripts) + @($userInstallerLogs)) -Prefix 'user-phase/logs/' -Entries $entries -Sources $sources -BudgetBytes $budget
+            $budget = $addedLogs.BudgetBytes
+            $sources.Add(('User phase of this account ({0}): user-phase.json {1}, {2} transcript(s), {3} installer log(s)' -f $userPhaseDirectory, $(if ($stateFound) { 'included' } else { 'not found' }), $userTranscripts.Count, $userInstallerLogs.Count))
+            $userSkipped = @($added.Skipped) + @($addedLogs.Skipped)
+            if ($userSkipped.Count -gt 0) {
+                $sources.Add(('Left out to keep the bundle small: {0}' -f ($userSkipped -join ', ')))
+            }
+        }
+        catch {
+            $sources.Add(('User phase of this account ({0}): not read: {1}' -f $userPhaseDirectory, $_.Exception.Message))
+        }
+    }
+    else {
+        $sources.Add('User phase of this account: it has not run here (no %LOCALAPPDATA%\winget-app-setup)')
     }
 
     try {
@@ -2247,7 +2377,8 @@ function Invoke-DiagnosticsCollection {
         '  winget.txt                winget --version and winget --info',
         '  appx.txt                  App Installer and Windows App Runtime packages, registered and provisioned',
         '  wau-updates-log-tail.txt  the end of Winget-AutoUpdate''s updates.log',
-        '  logs\                     the latest run''s transcripts and installer logs, and last-run.json'
+        '  logs\                     the latest run''s transcripts (the RMM wrapper''s install-<time>-rmm.log too) and installer logs, and last-run.json',
+        '  user-phase\               this account''s user phase, when it has run here: user-phase.json, its latest transcripts and winget logs'
     )
     if (-not $isAdmin) {
         $readme += ''
@@ -3336,9 +3467,9 @@ function Write-InstallerExitNotice {
     if (-not $why) {
         switch ($Code) {
             1 { $why = 'a pre-flight check failed (see above)' }
-            2 { $why = 'winget is not available or could not be started (see above)' }
+            2 { $why = 'winget is not available, could not be started, or is turned off by Group Policy (see above)' }
             3 { $why = 'the app catalog failed validation (see above)' }
-            4 { $why = 'administrator rights are required, and this run was not elevated (see above)' }
+            4 { $why = 'administrator rights are required, and this run was not elevated, or Group Policy''s execution policy keeps the elevated window from running the installer (see above)' }
             5 { $why = 'the run was aborted before it finished (see above)' }
             6 { $why = 'another run of the installer is in progress on this PC' }
             7 { $why = 'PowerShell 7 could not be installed, or the installer could not be relaunched under it (see above)' }
@@ -10135,18 +10266,30 @@ function Save-UserPhaseState {
     installed with Install-WingetPackage -UserScopeOnly -Silent (`--scope user`, never another
     scope: a machine-wide installer would ask for administrator rights) and checked again. A check
     that could not answer fails the app rather than installing it blind.
+
+    With the app's catalog entry (work-order item 38), the install uses its installerType, and once
+    the app is there (installed now or already) its postInstall hook runs in this account
+    (Complete-UserPhaseAppConfiguration): a userPhase entry's hook is what a run for the whole PC
+    deferred along with the app.
 .PARAMETER PackageId
     The winget package id.
+.PARAMETER App
+    The app's catalog entry (Get-UserPhaseCatalogEntry), or $null when this installer's catalog has
+    none for the id: the app is then installed by its id alone, with no post-install hook.
 .PARAMETER TimeoutSeconds
     The install's time limit (what is left of the user phase's time budget, at most 30 minutes).
 .RETURNS
     New-AppRunRecord's entry: status Installed, Skipped (already installed) or Failed, with the
-    reason and winget's exit code.
+    reason and winget's exit code, and postInstall and postInstallReason when a hook ran.
 #>
 function Install-UserPhaseApp {
     param (
         [Parameter(Mandatory = $true)]
         [string]$PackageId,
+
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [hashtable]$App,
 
         [Parameter(Mandatory = $true)]
         [ValidateRange(1, 86400)]
@@ -10157,7 +10300,7 @@ function Install-UserPhaseApp {
     $preCheck = Test-WingetPackageInstalled -PackageId $PackageId -TimeoutSeconds $checkTimeoutSeconds
     if ($preCheck.Installed) {
         Write-WarningMessage "Skipping: $PackageId (already installed)"
-        return (New-AppRunRecord -Id $PackageId -Status 'Skipped' -Reason 'already installed')
+        return (Complete-UserPhaseAppConfiguration -App $App -Record (New-AppRunRecord -Id $PackageId -Status 'Skipped' -Reason 'already installed'))
     }
     $preCheckReason = $null
     if ($preCheck.TimedOut) {
@@ -10176,7 +10319,18 @@ function Install-UserPhaseApp {
     }
 
     Write-Info "Installing for this account: $PackageId"
-    $installResult = Install-WingetPackage -PackageId $PackageId -UserScopeOnly -Silent -TimeoutSeconds $TimeoutSeconds -InstallInProgressRetries 1 -InstallInProgressWaitSeconds ([Math]::Min(120, $TimeoutSeconds))
+    $installParameters = @{
+        PackageId                    = $PackageId
+        UserScopeOnly                = $true
+        Silent                       = $true
+        TimeoutSeconds               = $TimeoutSeconds
+        InstallInProgressRetries     = 1
+        InstallInProgressWaitSeconds = [Math]::Min(120, $TimeoutSeconds)
+    }
+    if ($null -ne $App -and -not [string]::IsNullOrWhiteSpace([string]$App['installerType'])) {
+        $installParameters['InstallerType'] = [string]$App['installerType']
+    }
+    $installResult = Install-WingetPackage @installParameters
     # The user phase never falls back to another scope, so the machine-scope detail would only mislead.
     $reportedResult = $installResult.Clone()
     $reportedResult.Remove('MachineScopeFellBack')
@@ -10197,7 +10351,7 @@ function Install-UserPhaseApp {
         if ($verify.Installed) {
             Write-Success "Successfully installed for this account: $PackageId"
             $restartRequired = [bool](Write-InstalledAppNote -AppName $PackageId -InstallResult $installResult)
-            return (New-AppRunRecord -Id $PackageId -Status 'Installed' -InstallResult $installResult -RestartRequired $restartRequired)
+            return (Complete-UserPhaseAppConfiguration -App $App -Record (New-AppRunRecord -Id $PackageId -Status 'Installed' -InstallResult $installResult -RestartRequired $restartRequired))
         }
         if ($verify.TimedOut) {
             $failureReason = 'VerifyTimeout'
@@ -10217,6 +10371,90 @@ function Install-UserPhaseApp {
     $reason = Format-InstallFailureReason -FailureReason $failureReason -InstallResult $reportedResult -LaunchError $launchError -CheckExitCode $checkExitCode
     Write-ErrorMessage "Failed to install: $PackageId ($reason)."
     return (New-AppRunRecord -Id $PackageId -Status 'Failed' -Reason $reason -InstallResult $installResult)
+}
+
+<#
+.SYNOPSIS
+    Returns this installer's catalog entries by package id, for the user phase.
+.DESCRIPTION
+    The run record is the user phase's contract: it lists the deferred ids, whatever deferred them
+    (Read-InstallerRunRecord). The catalog adds what a record cannot carry (work-order item 38): the
+    postInstall hook of an entry marked userPhase, which a run for the whole PC deferred along with
+    the app because it configures the signed-in user's own account, and the entry's installerType.
+    The catalog is this installer copy's (Get-DefaultAppCatalog). An id it does not have (the run
+    for the whole PC was another build's) is installed by its id alone. A catalog that cannot be
+    read is reported in one line, and the apps are installed without their catalog settings.
+.RETURNS
+    [hashtable] Package id (compared without regard to case) to catalog entry.
+#>
+function Get-UserPhaseCatalogEntry {
+    $entries = @{}
+    try {
+        foreach ($app in @(Get-DefaultAppCatalog)) {
+            if ($app -is [hashtable] -and -not [string]::IsNullOrWhiteSpace([string]$app['name']) -and -not $entries.ContainsKey([string]$app['name'])) {
+                $entries[[string]$app['name']] = $app
+            }
+        }
+    }
+    catch {
+        Write-WarningMessage "Could not read this installer's app catalog, so the deferred apps are installed without their catalog settings (post-install configuration, installer type): $($_.Exception.Message)"
+    }
+    return $entries
+}
+
+<#
+.SYNOPSIS
+    Runs a deferred app's post-install hook in the user phase, once the app is there, and records the
+    result.
+.DESCRIPTION
+    Work-order items 34 and 38. A catalog entry marked userPhase can carry a postInstall hook that
+    sets the app up in the signed-in user's own account; a run as SYSTEM or under cross-user
+    elevation defers such an app before any winget call, so its hook never ran there. The user
+    phase runs it in the user's account as Install-AppWithVerification does (Invoke-AppPostInstall):
+    after the app was installed for this account, or found already installed. Without a catalog
+    entry or a hook, the record is returned as it is.
+      - Configured: 'Configured: <id>'. The record keeps its status.
+      - NotConfigured: 'Not configured: <id> (<reason>)'. The record keeps its status (the app is
+        installed) and the exit code does not change, but this account's user phase is not complete,
+        so a later sign-in runs the hook again (Invoke-WingetUserPhase).
+      - Failed, or a hook that throws: the app is Failed with 'installed, but its post-install
+        configuration failed (<reason>)', so the user phase exits 1 and a later sign-in tries again.
+        The install's restart and exit code stay in the record.
+.PARAMETER App
+    The app's catalog entry, or $null.
+.PARAMETER Record
+    The app's record (New-AppRunRecord), status Installed or Skipped.
+.RETURNS
+    The record, with postInstall and postInstallReason set when the hook ran.
+#>
+function Complete-UserPhaseAppConfiguration {
+    param (
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [hashtable]$App,
+
+        [Parameter(Mandatory = $true)]
+        [System.Collections.IDictionary]$Record
+    )
+
+    if ($null -eq $App -or $null -eq $App['postInstall']) {
+        return $Record
+    }
+    $configuration = Invoke-AppPostInstall -App $App
+    $Record['postInstall'] = [string]$configuration.Status
+    $Record['postInstallReason'] = $null
+    if (-not [string]::IsNullOrWhiteSpace([string]$configuration.Reason)) {
+        $Record['postInstallReason'] = [string]$configuration.Reason
+    }
+    if ($configuration.Status -eq 'Failed') {
+        $reason = Format-InstallFailureReason -FailureReason 'PostInstallFailed' -PostInstallReason $configuration.Reason
+        Write-ErrorMessage "Failed to install: $($Record['id']) ($reason)."
+        $Record['status'] = 'Failed'
+        $Record['reason'] = $reason
+        return $Record
+    }
+    [void](Write-AppPostInstallResult -AppName ([string]$Record['id']) -Configuration $configuration)
+    return $Record
 }
 
 <#
@@ -15250,15 +15488,20 @@ function Invoke-WingetUninstall {
          account's first use of winget that also registers the source, which the 15-second
          `winget list` check before each install has no time for) and installs each app with
          `--scope user` (Install-UserPhaseApp), while the time budget lasts. An app the budget no
-         longer covers is NotAttempted.
+         longer covers is NotAttempted. When this installer's catalog has the app
+         (Get-UserPhaseCatalogEntry), its installerType is used, and its postInstall hook runs in
+         this account once the app is there (work-order item 38: an entry marked userPhase is
+         deferred, hook and all, by a run for the whole PC). A hook that fails fails the app; one
+         that could not configure it yet (NotConfigured) leaves it installed and the exit code as
+         it is, and a later sign-in runs it again.
       4. It sets the Windows Terminal defaults (Set-WindowsTerminalDefaults -PassThru: the targeted
          defaultProfile edit and the default terminal application). Unless that reports Applied
          (this account has no Terminal settings.json yet because Terminal was never opened, an edit
          failed, or the step was skipped), the step counts as not done, and a later sign-in tries
          again.
-      5. It records the outcome (complete when every deferred app is installed or was already there
-         and the Terminal step is done), prints one 'USER PHASE RESULT:' line and returns the exit
-         code.
+      5. It records the outcome (complete when every deferred app is installed or was already there,
+         and configured when its catalog entry has a post-install hook, and the Terminal step is
+         done), prints one 'USER PHASE RESULT:' line and returns the exit code.
     It never prompts (winget runs with --disable-interactivity and --silent) and never asks for
     elevation itself: it installs with --scope user only, and a per-user installer needs no
     administrator rights. One that elevates itself anyway would still show a UAC prompt, which is
@@ -15275,10 +15518,11 @@ function Invoke-WingetUninstall {
 .PARAMETER MaxAttempts
     How many sign-ins may try for one machine run before the user phase gives up on it. Default 3.
 .OUTPUTS
-    [int] 0 = done, or nothing to do; 1 = a deferred app failed to install or was not attempted in
-    the time budget; 2 = winget cannot be started for this account (nothing was installed); 3010 = done,
-    but an install needs a restart to finish; 5 = an unexpected error (in the transcript). A later
-    sign-in tries again after 1, 2 or 5 while attempts are left.
+    [int] 0 = done, or nothing to do; 1 = a deferred app failed to install, its post-install hook
+    failed, or it was not attempted in the time budget; 2 = winget cannot be started for this
+    account (nothing was installed); 3010 = done, but an install needs a restart to finish; 5 = an
+    unexpected error (in the transcript). A later sign-in tries again after 1, 2 or 5 while
+    attempts are left.
 #>
 function Invoke-WingetUserPhase {
     [OutputType([int])]
@@ -15375,6 +15619,9 @@ function Invoke-WingetUserPhase {
             }
             else {
                 Update-UserPhaseWingetSource
+                # What the record cannot carry: a userPhase entry's post-install hook and the entry's
+                # installer type (work-order item 38).
+                $catalogEntries = Get-UserPhaseCatalogEntry
                 foreach ($id in $deferredApps) {
                     $remainingSeconds = $budgetSeconds - (Get-UserPhaseElapsedSeconds -Stopwatch $stopwatch)
                     if ($remainingSeconds -lt 60) {
@@ -15383,7 +15630,7 @@ function Invoke-WingetUserPhase {
                         continue
                     }
                     try {
-                        $appRecords[$id] = Install-UserPhaseApp -PackageId $id -TimeoutSeconds ([Math]::Min(1800, $remainingSeconds))
+                        $appRecords[$id] = Install-UserPhaseApp -PackageId $id -App $catalogEntries[$id] -TimeoutSeconds ([Math]::Min(1800, $remainingSeconds))
                     }
                     catch {
                         Write-ErrorMessage "Failed to install: $id. Error: $_"
@@ -15428,7 +15675,14 @@ function Invoke-WingetUserPhase {
         else {
             $exitCode = 0
         }
-        $newState.complete = ($unfinished.Count -eq 0) -and ($terminalStatus -eq 'Applied')
+        # An app whose post-install hook could not configure it yet (NotConfigured) is installed and
+        # does not change the exit code, but the user phase is not done: a later sign-in runs the
+        # hook again, as it sets the Terminal defaults again.
+        $notConfigured = @($records | Where-Object { $_.postInstall -eq 'NotConfigured' })
+        if ($notConfigured.Count -gt 0) {
+            Write-WarningMessage ('Configuration: NOT DONE for {0} - installed for this account, but the post-install configuration did not finish. Not counted as failed; the next sign-in tries again.' -f (@($notConfigured | ForEach-Object { '{0} ({1})' -f $_.id, $_.postInstallReason }) -join '; '))
+        }
+        $newState.complete = ($unfinished.Count -eq 0) -and ($notConfigured.Count -eq 0) -and ($terminalStatus -eq 'Applied')
         if (-not $newState.complete -and $decision.Attempt -ge $MaxAttempts) {
             Write-WarningMessage "This was the last of $MaxAttempts attempts for this run for the whole PC; the user phase does not try again until the next one."
         }
@@ -17027,7 +17281,11 @@ function Test-AppxPackageProvisioned {
     AppxProvisioning), which then runs through Invoke-ExternalProcess, its output echoed into the
     transcript, and is stopped when the limit runs out. Its output is read in the console's code
     page ([Console]::OutputEncoding), which Windows PowerShell writes redirected output in, so a
-    localized DISM error keeps its non-ASCII letters. 0 (the default): no limit, as before.
+    localized DISM error keeps its non-ASCII letters. The child starts without PSModulePath and
+    builds Windows PowerShell's own default: a process started through Process.Start inherits
+    PowerShell 7's, with its own module folders first, which Windows PowerShell cannot load
+    (Invoke-DiagnosticsWindowsPowerShell, work-order item 35, found that; only `& powershell.exe`
+    removes them). 0 (the default): no limit, as before.
 #>
 function Invoke-AppxProvisioning {
     param (
@@ -17066,8 +17324,9 @@ function Invoke-AppxProvisioning {
                 # No progress bar: on a redirected output Windows PowerShell writes it as CLIXML.
                 # Windows PowerShell writes redirected output in the console's code page, not in
                 # UTF-8 as winget does; [Console]::OutputEncoding is what PowerShell reads a native
-                # program's output with too.
-                $run = Invoke-ExternalProcess -FilePath 'powershell.exe' -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', "`$ProgressPreference = 'SilentlyContinue'; $command") -TimeoutSeconds $TimeoutSeconds -Encoding ([Console]::OutputEncoding)
+                # program's output with too. No PSModulePath: Windows PowerShell builds its own, as
+                # it does when `& powershell.exe` starts it (about_PSModulePath).
+                $run = Invoke-ExternalProcess -FilePath 'powershell.exe' -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', "`$ProgressPreference = 'SilentlyContinue'; $command") -TimeoutSeconds $TimeoutSeconds -Encoding ([Console]::OutputEncoding) -RemoveEnvironmentVariable @('PSModulePath')
                 if ($run.LaunchFailed) {
                     Write-ErrorMessage "Add-AppxProvisionedPackage failed for '$PackagePath': Windows PowerShell could not be started ($($run.LaunchError))."
                     return $false

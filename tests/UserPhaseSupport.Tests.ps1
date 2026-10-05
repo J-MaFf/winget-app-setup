@@ -371,4 +371,129 @@ Describe 'Install-UserPhaseApp' {
         $missing.status | Should -Be 'Failed'
         $missing.code | Should -Be 1603
     }
+
+    # Work-order item 38: a userPhase entry's post-install hook configures the signed-in user's own
+    # account, so a run for the whole PC defers it with the app. The user phase runs it.
+    Context 'With the app''s catalog entry (work-order item 38)' {
+        BeforeEach {
+            $script:hookCalls = @()
+            $script:hookAnswer = 'Configured'
+            $script:entry = @{
+                name          = 'Contoso.UserSetting'
+                userPhase     = $true
+                installerType = 'msi'
+                postInstall   = { param($App) $script:hookCalls += $App.name; $script:hookAnswer }
+            }
+        }
+
+        It 'Runs its post-install hook in this account once the app is installed, and records Configured' {
+            $script:checks = @($script:notInstalled, $script:installed)
+
+            $result = Install-UserPhaseApp -PackageId 'Contoso.UserSetting' -App $script:entry -TimeoutSeconds 600
+
+            $result.status | Should -Be 'Installed'
+            $result.postInstall | Should -Be 'Configured'
+            $result.postInstallReason | Should -BeNullOrEmpty
+            $script:hookCalls | Should -Be @('Contoso.UserSetting')
+            Should -Invoke Write-Success -Times 1 -Exactly -ParameterFilter { $Message -eq 'Configured: Contoso.UserSetting' }
+        }
+
+        It 'Runs its post-install hook for an app that is already there' {
+            $script:checks = @($script:installed)
+
+            $result = Install-UserPhaseApp -PackageId 'Contoso.UserSetting' -App $script:entry -TimeoutSeconds 600
+
+            $result.status | Should -Be 'Skipped'
+            $result.postInstall | Should -Be 'Configured'
+            $script:hookCalls | Should -Be @('Contoso.UserSetting')
+            Should -Invoke Install-WingetPackage -Times 0 -Exactly
+        }
+
+        It 'Installs with the entry''s installer type, per-user only' {
+            $script:checks = @($script:notInstalled, $script:installed)
+
+            $null = Install-UserPhaseApp -PackageId 'Contoso.UserSetting' -App $script:entry -TimeoutSeconds 600
+
+            Should -Invoke Install-WingetPackage -Times 1 -Exactly -ParameterFilter { $InstallerType -eq 'msi' -and $UserScopeOnly -and -not $MachineScopeOnly -and $Scope -ne 'machine' }
+        }
+
+        It 'Keeps an app the hook could not configure installed, with the hook''s reason' {
+            $script:checks = @($script:notInstalled, $script:installed)
+            $script:hookAnswer = @{ Status = 'NotConfigured'; Reason = 'the app has not been started in this account yet' }
+
+            $result = Install-UserPhaseApp -PackageId 'Contoso.UserSetting' -App $script:entry -TimeoutSeconds 600
+
+            $result.status | Should -Be 'Installed'
+            $result.postInstall | Should -Be 'NotConfigured'
+            $result.postInstallReason | Should -Be 'the app has not been started in this account yet'
+            Should -Invoke Write-WarningMessage -Times 1 -Exactly -ParameterFilter { $Message -eq 'Not configured: Contoso.UserSetting (the app has not been started in this account yet)' }
+        }
+
+        It 'Fails an app whose hook <Case>, and keeps the install''s restart and exit code' -ForEach @(
+            @{ Case = 'fails'; Hook = { @{ Status = 'Failed'; Reason = 'settings file is locked' } }; Reason = 'settings file is locked' }
+            @{ Case = 'throws'; Hook = { throw 'boom in the hook' }; Reason = 'boom in the hook' }
+        ) {
+            $script:checks = @($script:notInstalled, $script:installed)
+            $script:installResult.ExitCode = -1978334967
+            $script:installResult.RestartRequired = $true
+            $script:entry.postInstall = $Hook
+
+            $result = Install-UserPhaseApp -PackageId 'Contoso.UserSetting' -App $script:entry -TimeoutSeconds 600
+
+            $result.status | Should -Be 'Failed'
+            $result.reason | Should -Be "installed, but its post-install configuration failed ($Reason)"
+            $result.postInstall | Should -Be 'Failed'
+            $result.postInstallReason | Should -Be $Reason
+            $result.restartRequired | Should -BeTrue
+            $result.codeHex | Should -Be '0x8A150109'
+            Should -Invoke Write-ErrorMessage -Times 1 -Exactly -ParameterFilter { $Message -eq "Failed to install: Contoso.UserSetting (installed, but its post-install configuration failed ($Reason))." }
+        }
+
+        It 'Runs no hook for an app that failed to install' {
+            $script:checks = @($script:notInstalled, $script:notInstalled)
+            $script:installResult.ExitCode = 1603
+
+            $result = Install-UserPhaseApp -PackageId 'Contoso.UserSetting' -App $script:entry -TimeoutSeconds 600
+
+            $result.status | Should -Be 'Failed'
+            $result.postInstall | Should -BeNullOrEmpty
+            $script:hookCalls | Should -BeNullOrEmpty
+        }
+    }
+}
+
+Describe 'Get-UserPhaseCatalogEntry' {
+    BeforeEach {
+        Mock Write-WarningMessage { }
+    }
+
+    It 'Returns this installer''s catalog entries by package id, without regard to case' {
+        Mock Get-DefaultAppCatalog { @(@{ name = 'Contoso.UserSetting'; userPhase = $true }, @{ name = 'Contoso.Other' }) }
+
+        $entries = Get-UserPhaseCatalogEntry
+
+        $entries['contoso.usersetting'].userPhase | Should -BeTrue
+        $entries['Contoso.Other'].name | Should -Be 'Contoso.Other'
+        $entries.ContainsKey('Contoso.Missing') | Should -BeFalse
+    }
+
+    It 'Holds an entry for every app of the real catalog' {
+        $entries = Get-UserPhaseCatalogEntry
+
+        $catalog = @(Get-DefaultAppCatalog)
+        $entries.Count | Should -Be $catalog.Count
+        foreach ($app in $catalog) {
+            $entries[$app.name].name | Should -Be $app.name
+            @($entries[$app.name].Keys | Sort-Object) | Should -Be @($app.Keys | Sort-Object)
+        }
+    }
+
+    It 'Says so and returns no entries when the catalog cannot be read' {
+        Mock Get-DefaultAppCatalog { throw 'catalog broke' }
+
+        $entries = Get-UserPhaseCatalogEntry
+
+        $entries.Count | Should -Be 0
+        Should -Invoke Write-WarningMessage -Times 1 -Exactly -ParameterFilter { $Message -match 'installed without their catalog settings.*catalog broke' }
+    }
 }

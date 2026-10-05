@@ -491,11 +491,11 @@ differently:
   fails instead, without a retry. A deferred app counts neither as installed nor as failed and does
   not change the exit code. A per-user app can only be installed in the signed-in user's own
   account: by this installer run as that user when the account is an administrator, otherwise by a
-  per-user deployment, such as an RMM script that runs as the user or the Microsoft Store (on a
-  standard user's PC, the UAC prompt elevates as an administrator account, which defers the app
-  again). winget answers `--scope machine` with the same `0x8A150010 NO_APPLICABLE_INSTALLER` when
-  no installer applies to the PC at all, so a deferred app can also be one winget cannot install
-  on this PC at any scope.
+  per-user deployment, such as the user phase (`rmm/Invoke-WingetAppSetupUserPhase.ps1`, below) or
+  the Microsoft Store (on a standard user's PC, the UAC prompt elevates as an administrator account,
+  which defers the app again). winget answers `--scope machine` with the same
+  `0x8A150010 NO_APPLICABLE_INSTALLER` when no installer applies to the PC at all, so a deferred app
+  can also be one winget cannot install on this PC at any scope.
 - Windows Terminal is decided from the PC: when its package is provisioned for every user, as
   Windows 11 does, it is `Skipped (already provisioned for every user on this PC)`. `winget list`
   run as SYSTEM does not see the MSIX apps registered for the users, so Terminal would read as
@@ -524,13 +524,20 @@ Only one run works on a PC at a time: a run started while another one is in prog
 once (see [One run at a time](#one-run-at-a-time)). A real run prints a machine-readable `RESULT`
 line, and the run that did the work also writes `last-run.json` (see [Run result](#run-result)).
 
-Not there yet: a time budget for the whole run, and per-user setup after a SYSTEM run (the deferred
-apps and the Windows Terminal defaults need the signed-in user's own account, see above). Each
-deferred app's entry in `last-run.json` says why it was deferred (`winget found no machine-wide
-installer for it`, catalog scope `user`, or catalog `userPhase`). RMM tools
-read success from the exit code: list any other code you accept, such as 3010, as a success code
-for the script. Exit code 8 means the apps are installed but automatic updates are not set up or
-will not run; decide whether your RMM job should count it as a success.
+For Endpoint Central, `rmm/Invoke-WingetAppSetup.ps1` is the machine phase (a Computer
+Configuration script run as SYSTEM): it relaunches itself in 64-bit Windows PowerShell when the
+32-bit agent starts it, runs `winget-app-install.ps1` from a pinned commit after checking its
+SHA256, and exits with the installer's code (5 when it could not run it: pins not set, download
+failed, SHA256 mismatch). `rmm/Invoke-WingetAppSetupUserPhase.ps1` is the user phase (a User
+Configuration script, every logon, as the signed-in user, never elevated): it installs the apps
+`last-run.json` lists as `Deferred` with `--scope user`, runs the post-install hook of an app the
+catalog has one for, and sets the Windows Terminal defaults, once per machine run and within a few
+attempts. Each deferred app's entry in `last-run.json` says why it was deferred (`winget found no
+machine-wide installer for it`, catalog scope `user`, or catalog `userPhase`). Not there yet: a
+time budget for the whole run. RMM tools read success from the exit code: list any other code you
+accept, such as 3010, as a success code for the script. Exit code 8 means the apps are installed
+but automatic updates are not set up or will not run; decide whether your RMM job should count it
+as a success.
 
 ### Exit codes
 
@@ -538,12 +545,12 @@ will not run; decide whether your RMM job should count it as a success.
 |------|---------|
 | 0 | Success — every app is installed, already present, or does not apply to this machine (`not applicable`); apps reported as `Deferred` do not count against it, and neither do apps whose post-install hook could not configure them (`Configuration: NOT DONE`) |
 | 1 | One or more apps failed to install, including an install stopped at its time limit, the apps not attempted because winget could no longer be started partway through the run, an app with `scope = 'machine'` that has no machine-wide installer, and an installed app whose post-install hook failed (also: a blocking pre-flight system check failed). An app whose catalog condition could not be evaluated is attempted (fail open), so its failed install counts here too |
-| 2 | Winget is unavailable or cannot be started (`winget --version` must run and print a version) and could not be set up (as SYSTEM: no machine-wide `winget.exe` was found, or none could be started), App Installer's Group Policy turns winget or its source off (see **Setting winget up** above), or winget could no longer be launched at the end of the run (no app failed, but automatic updates and the next run would) |
+| 2 | Winget is unavailable or cannot be started (`winget --version` must run and print a version) and could not be set up (as SYSTEM: no machine-wide `winget.exe` was found, or none could be started), App Installer's Group Policy turns winget or its source off (the pre-flight checks it before the run waits for anything or sets winget up; see **Setting winget up** above), or winget could no longer be launched at the end of the run (no app failed, but automatic updates and the next run would) |
 | 3 | App-definition validation failed (for example an invalid `scope`, `arch`, `postInstall` or `userPhase` value, see [Catalog entry fields](#catalog-entry-fields)), or no valid app definitions remain |
-| 4 | Administrator rights are required and the run was not elevated: the UAC prompt was declined or the elevated window could not be started, the run is non-interactive (no prompt is shown), it runs through `irm \| iex` in PowerShell 7, or `Invoke-WingetInstall` was called from the imported module (see [Administrator rights](#administrator-rights)) |
-| 5 | The run was aborted before it finished: an unexpected error (the message and stack trace are in the log), the run was stopped from outside (Ctrl+C, the console closing, an installer stopping the console) when run from a file or non-interactively, or the installer file changed before its elevated copy could run (see [Administrator rights](#administrator-rights)) |
+| 4 | Administrator rights are required and the run was not elevated: the UAC prompt was declined or the elevated window could not be started, the run is non-interactive (no prompt is shown), it runs through `irm \| iex` in PowerShell 7, `Invoke-WingetInstall` was called from the imported module, or Group Policy sets the Windows PowerShell execution policy to `AllSigned` or `Restricted`: for the PC, so no UAC prompt is shown, or for the account that approved the prompt, so the elevated window stops before it runs anything (see [Administrator rights](#administrator-rights)) |
+| 5 | The run was aborted before it finished: an unexpected error (the message and stack trace are in the log), the run was stopped from outside (Ctrl+C, the console closing, an installer stopping the console) when run from a file or non-interactively, the installer file changed before its elevated copy could run (see [Administrator rights](#administrator-rights)), or PowerShell runs the installer in Constrained Language Mode (an App Control for Business or AppLocker policy), which the installer checks before anything else. With `-CollectDiagnostics`, the installer installs nothing and exits 0 when it saved the diagnostics bundle, 5 when it could not |
 | 6 | Another run of the installer is in progress on this PC (started by an RMM job, a scheduled task or someone else). This run stopped before its pre-flight checks and changed nothing. Run it again once the other run has finished (see [One run at a time](#one-run-at-a-time)) |
-| 7 | Started from Windows PowerShell 5.1, the installer could not install PowerShell 7 or could not relaunch itself under it |
+| 7 | Started from Windows PowerShell 5.1, the installer could not install PowerShell 7 or could not relaunch itself under it, including when Group Policy sets PowerShell 7's execution policy to `AllSigned` or `Restricted` (checked before PowerShell 7 is installed) |
 | 8 | The apps are fine and winget still works, but automatic updates will not work or could not be verified. The summary's `Auto-updates:` line says which: `FAILED` (Winget-AutoUpdate could not be installed), `NOT CONFIGURED` (skipped because the Windows App Runtime the latest winget release needs, today `Microsoft.WindowsAppRuntime.1.8`, is missing and the installer could not install it, for example because that release needs a newer build or another family than the installer's pinned one), `AT RISK` (installed while that framework is missing and could not be installed) or `UNHEALTHY` (installed, but its `\WAU\Winget-AutoUpdate` task is missing, disabled, has no enabled trigger or could not be checked; see [Automatic updates](#automatic-updates)) |
 | 3010 | Success, but a restart is required to finish: an install said so, the Winget-AutoUpdate MSI returned 3010, Windows gained a pending restart during the run, or installing PowerShell 7 from Windows PowerShell needed a restart (see **Restart required** above). RMM tools and Intune treat 3010 as "succeeded, restart required". A restart that was already pending before the run does not cause it |
 

@@ -19,10 +19,22 @@
 
       - the exit code, with the policy of every install pass (Get-InstallPassVerdict in
         e2e/Invoke-InstallPass.ps1): 0 and 3010 pass, and 8 passes only when the run's transcript
-        says auto-updates were not configured because Microsoft.WindowsAppRuntime.1.8 is missing,
-        as on windows-latest. 1 passes only while KNOWN_PLATFORM_INCOMPATIBLE lists apps, and only
-        when every app the run left failed is on that list (Test-InstallFailureContainment on the
-        run's transcript, the check e2e/Assert-Install.ps1 makes for the other legs);
+        says auto-updates were not configured because Microsoft.WindowsAppRuntime.1.8 is missing
+        and the installer could not try to install it (work-order item 31: on windows-latest it
+        can, so this run is expected to exit 0). 1 passes only while KNOWN_PLATFORM_INCOMPATIBLE
+        lists apps, and only when every app the run left failed is on that list
+        (Test-InstallFailureContainment on the run's transcript, the check e2e/Assert-Install.ps1
+        makes for the other legs);
+      - auto-updates: the transcript says 'Auto-updates: Configured' (or 'Already present'), as
+        e2e/Assert-Install.ps1 expects WAU at its pin on the other legs, or NOT CONFIGURED for the
+        missing framework when the installer could not try to install it (the case exit code 8 is
+        accepted for);
+      - the Windows App Runtime: the run installed it once ('Windows App Runtime: installed'), or
+        needed not to (no 'Windows App Runtime:' line); a 'NOT INSTALLED' line passes only in that
+        same case;
+      - the deferred apps (work-order items 34 and 38): every Deferred entry of last-run.json has a
+        winget package id and a reason, which the user phase installs from, and the summary's
+        Deferred row lists the same apps;
       - the wrapper's log (install-<time>-rmm.log): it was started by a 32-bit PowerShell and
         relaunched through Sysnative, it checked the installer, and it passed the installer's exit
         code back unchanged;
@@ -304,6 +316,90 @@ function Get-SystemInstallPassResult {
         $recordOk = ($null -ne $TaskExitCode -and $null -ne $RunRecord.exitCode -and [int]$RunRecord.exitCode -eq $TaskExitCode -and $RunRecord.summaryReached -eq $true)
     }
     $results += [pscustomobject]@{ Assertion = 'last-run.json records the run'; Result = $(if ($recordOk) { 'PASS' } else { 'FAIL' }); Detail = $recordDetail }
+
+    # Work-order item 31: the SYSTEM run installs the missing framework and then Winget-AutoUpdate,
+    # as the other legs' first pass does.
+    $autoUpdatesOk = $false
+    $autoUpdatesDetail = 'no transcript of the run'
+    $runtimeOk = $false
+    $runtimeDetail = 'no transcript of the run'
+    if ($Transcript) {
+        $parsed = $Transcript.Parsed
+        $autoUpdatesDetail = "$($Transcript.Name) has no 'Auto-updates:' line"
+        if ($parsed.AutoUpdatesLine) {
+            $autoUpdatesDetail = "$($Transcript.Name): Auto-updates: $($parsed.AutoUpdatesLine)"
+        }
+        # The one reason the pass policy accepts for auto-updates not being set up (exit code 8, or
+        # masked by a tolerated 1): the framework is missing and the installer could not try to
+        # install it. A framework install that started and failed, or a stale pin, is not it.
+        $frameworkMissingAccepted = [bool]$parsed.AutoUpdatesFrameworkMissing -and -not $parsed.WindowsAppRuntimePinStale -and -not ($parsed.WindowsAppRuntimeAttempted -and -not $parsed.WindowsAppRuntimeInstalled)
+        if (@('Configured', 'Already present') -contains $parsed.AutoUpdatesStatus) {
+            $autoUpdatesOk = $true
+        }
+        elseif ($frameworkMissingAccepted) {
+            $autoUpdatesOk = $true
+            $autoUpdatesDetail += ' (accepted: the framework is missing and the installer could not try to install it)'
+        }
+
+        $installCount = [int]$parsed.WindowsAppRuntimeInstallCount
+        if ($installCount -gt 1) {
+            $runtimeDetail = "$($Transcript.Name) installed it $installCount times in one run"
+        }
+        elseif ($installCount -eq 1) {
+            $runtimeOk = $true
+            $runtimeDetail = "$($Transcript.Name): Windows App Runtime: $($parsed.WindowsAppRuntimeLine)"
+        }
+        elseif (-not $parsed.WindowsAppRuntimeLine) {
+            $runtimeOk = $true
+            $runtimeDetail = "$($Transcript.Name) has no 'Windows App Runtime:' line: the run did not need to install it"
+        }
+        else {
+            $runtimeOk = $frameworkMissingAccepted
+            $runtimeDetail = "$($Transcript.Name): Windows App Runtime: $($parsed.WindowsAppRuntimeLine)"
+            if ($frameworkMissingAccepted) {
+                $runtimeDetail += ' (accepted: the installer could not try to install it)'
+            }
+        }
+    }
+    $results += [pscustomobject]@{ Assertion = 'Auto-updates configured by the SYSTEM run'; Result = $(if ($autoUpdatesOk) { 'PASS' } else { 'FAIL' }); Detail = $autoUpdatesDetail }
+    $results += [pscustomobject]@{ Assertion = 'Windows App Runtime installed once, or already there'; Result = $(if ($runtimeOk) { 'PASS' } else { 'FAIL' }); Detail = $runtimeDetail }
+
+    # Work-order items 34 and 38: the user phase installs what last-run.json defers, by id, so each
+    # Deferred entry must carry a package id and why it was deferred, and the summary must agree.
+    $deferredOk = $false
+    $deferredDetail = 'no last-run.json'
+    if ($null -ne $RunRecord) {
+        $deferredEntries = @($RunRecord.apps | Where-Object { $null -ne $_ -and [string]$_.status -eq 'Deferred' })
+        $deferredIds = @($deferredEntries | ForEach-Object { [string]$_.id })
+        $problems = @()
+        foreach ($entry in $deferredEntries) {
+            if ([string]$entry.id -notmatch '^[\w][\w.\-]+\.[\w][\w.\-]+\z') {
+                $problems += "'$($entry.id)' is not a winget package id"
+            }
+            if ([string]::IsNullOrWhiteSpace([string]$entry.reason)) {
+                $problems += "$($entry.id) has no reason"
+            }
+        }
+        if ($Transcript -and $Transcript.Parsed.HasSummary -and -not $Transcript.Parsed.SummaryTruncated) {
+            $summaryDeferred = @($Transcript.Parsed.SummaryDeferred | Where-Object { $_ })
+            $onlyInRecord = @($deferredIds | Where-Object { $summaryDeferred -notcontains $_ })
+            $onlyInSummary = @($summaryDeferred | Where-Object { $deferredIds -notcontains $_ })
+            if ($onlyInRecord.Count -gt 0 -or $onlyInSummary.Count -gt 0) {
+                $problems += ('the summary''s Deferred row ({0}) differs from last-run.json ({1})' -f ($summaryDeferred -join ', '), ($deferredIds -join ', '))
+            }
+        }
+        $deferredOk = ($problems.Count -eq 0)
+        if ($problems.Count -gt 0) {
+            $deferredDetail = $problems -join '; '
+        }
+        elseif ($deferredIds.Count -eq 0) {
+            $deferredDetail = 'nothing deferred'
+        }
+        else {
+            $deferredDetail = 'deferred, each with its reason: ' + (@($deferredEntries | ForEach-Object { '{0} ({1})' -f $_.id, $_.reason }) -join '; ')
+        }
+    }
+    $results += [pscustomobject]@{ Assertion = 'Deferred apps recorded for the user phase'; Result = $(if ($deferredOk) { 'PASS' } else { 'FAIL' }); Detail = $deferredDetail }
 
     $newEntries = @($NewSystemProfileEntries | Where-Object { $_ })
     $profileDetail = 'nothing new under SYSTEM''s uninstall keys or AppData\Local\Programs'

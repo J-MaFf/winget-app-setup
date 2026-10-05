@@ -276,6 +276,38 @@ exit 6
         Should -Invoke New-RmmRestrictedDirectory -Times 0 -Exactly
     }
 
+    It 'Adds no empty argument to the relaunch when the wrapper was started without parameters' {
+        # The wrapper's own call: ConvertTo-RmmForwardedArgument's empty result arrives as $null. An
+        # empty argument is one a 32-bit PowerShell 7.3 or later passes on to powershell.exe as "",
+        # the flaw item 36's review found in the other rmm/ scripts.
+        Mock Test-Rmm32BitHostOn64BitWindows { $true }
+        Mock Get-RmmSysnativePowerShellPath { 'C:\Windows\Sysnative\WindowsPowerShell\v1.0\powershell.exe' }
+        Mock Invoke-RmmProcess { 0 }
+
+        Invoke-RmmMachinePhase -ScriptPath 'C:\rmm\Invoke-WingetAppSetup.ps1' -ForwardedArguments (ConvertTo-RmmForwardedArgument -BoundParameters @{}) -LogDirectory $script:logs -CopyRoot $script:copyRoot | Should -Be 0
+        Invoke-RmmMachinePhase -ScriptPath 'C:\rmm\Invoke-WingetAppSetup.ps1' -ForwardedArguments $null -LogDirectory $script:logs -CopyRoot $script:copyRoot | Should -Be 0
+
+        Should -Invoke Invoke-RmmProcess -Times 2 -Exactly
+        Should -Invoke Invoke-RmmProcess -Times 2 -Exactly -ParameterFilter {
+            @($ArgumentList).Count -eq 7 -and ($ArgumentList -join ' ') -eq '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File C:\rmm\Invoke-WingetAppSetup.ps1 -From32BitHost'
+        }
+    }
+
+    It 'Relaunches itself, started without parameters, so that the relaunched wrapper binds only -From32BitHost' {
+        # A stand-in with the wrapper's own parameters, started by this PowerShell 7 the way the
+        # relaunch starts the 64-bit powershell.exe: an empty argument would bind to -InstallerPath.
+        Mock Test-Rmm32BitHostOn64BitWindows { $true }
+        Mock Get-RmmSysnativePowerShellPath { $script:Pwsh }
+        $ast = [System.Management.Automation.Language.Parser]::ParseFile($script:MachineWrapperPath, [ref]$null, [ref]$null)
+        $paramBlock = (@($ast.ParamBlock.Attributes | ForEach-Object { $_.Extent.Text }) + @($ast.ParamBlock.Extent.Text)) -join "`n"
+        $boundPath = Join-Path $TestDrive ([guid]::NewGuid().ToString('N') + '.txt')
+        $standIn = New-TestScript -Body (@($paramBlock, ('Set-Content -LiteralPath ''{0}'' -Value ((@($PSBoundParameters.Keys) | Sort-Object) -join '','')' -f $boundPath), 'exit 0') -join "`n")
+
+        Invoke-RmmMachinePhase -ScriptPath $standIn -ForwardedArguments (ConvertTo-RmmForwardedArgument -BoundParameters @{}) -LogDirectory $script:logs -CopyRoot $script:copyRoot | Should -Be 0
+
+        Get-Content -LiteralPath $boundPath | Should -Be 'From32BitHost'
+    }
+
     It 'Exits 5 from a 32-bit PowerShell when it cannot relaunch itself (not run from a file)' {
         Mock Test-Rmm32BitHostOn64BitWindows { $true }
 

@@ -725,7 +725,11 @@ function Test-AppxPackageProvisioned {
     AppxProvisioning), which then runs through Invoke-ExternalProcess, its output echoed into the
     transcript, and is stopped when the limit runs out. Its output is read in the console's code
     page ([Console]::OutputEncoding), which Windows PowerShell writes redirected output in, so a
-    localized DISM error keeps its non-ASCII letters. 0 (the default): no limit, as before.
+    localized DISM error keeps its non-ASCII letters. The child starts without PSModulePath and
+    builds Windows PowerShell's own default: a process started through Process.Start inherits
+    PowerShell 7's, with its own module folders first, which Windows PowerShell cannot load
+    (Invoke-DiagnosticsWindowsPowerShell, work-order item 35, found that; only `& powershell.exe`
+    removes them). 0 (the default): no limit, as before.
 #>
 function Invoke-AppxProvisioning {
     param (
@@ -764,8 +768,9 @@ function Invoke-AppxProvisioning {
                 # No progress bar: on a redirected output Windows PowerShell writes it as CLIXML.
                 # Windows PowerShell writes redirected output in the console's code page, not in
                 # UTF-8 as winget does; [Console]::OutputEncoding is what PowerShell reads a native
-                # program's output with too.
-                $run = Invoke-ExternalProcess -FilePath 'powershell.exe' -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', "`$ProgressPreference = 'SilentlyContinue'; $command") -TimeoutSeconds $TimeoutSeconds -Encoding ([Console]::OutputEncoding)
+                # program's output with too. No PSModulePath: Windows PowerShell builds its own, as
+                # it does when `& powershell.exe` starts it (about_PSModulePath).
+                $run = Invoke-ExternalProcess -FilePath 'powershell.exe' -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', "`$ProgressPreference = 'SilentlyContinue'; $command") -TimeoutSeconds $TimeoutSeconds -Encoding ([Console]::OutputEncoding) -RemoveEnvironmentVariable @('PSModulePath')
                 if ($run.LaunchFailed) {
                     Write-ErrorMessage "Add-AppxProvisionedPackage failed for '$PackagePath': Windows PowerShell could not be started ($($run.LaunchError))."
                     return $false

@@ -145,6 +145,15 @@ Describe 'ConvertFrom-InstallTranscript' {
         $transcript.WindowsAppRuntimeAttempted | Should -Be $Attempted
     }
 
+    # The SYSTEM leg (work-order item 34) checks that one run installs the framework at most once.
+    It 'Counts the Windows App Runtime installs of a run: <Fixture> -> <Count>' -ForEach @(
+        @{ Fixture = 'first-pass-runtime-installed'; Count = 1 }
+        @{ Fixture = 'second-pass-runtime-present'; Count = 0 }
+        @{ Fixture = 'first-pass'; Count = 0 }
+    ) {
+        (ConvertFrom-InstallTranscript -Content (Get-Fixture -Name $Fixture)).WindowsAppRuntimeInstallCount | Should -Be $Count
+    }
+
     # Review of item 32: the refusal that means the pinned framework has to move, for a newer 1.8
     # build and for another family alike. e2e/Invoke-InstallPass.ps1 fails a pass that shows it.
     It 'Reads a refusal because the pinned framework does not meet what the latest winget release needs: <Needs>' -ForEach @(

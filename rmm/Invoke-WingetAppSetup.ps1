@@ -432,7 +432,13 @@ function Invoke-RmmMachinePhase {
         }
         $nativePowerShell = Get-RmmSysnativePowerShellPath
         Write-RmmLine "This is a 32-bit PowerShell on 64-bit Windows (as Endpoint Central's 32-bit agent starts scripts): relaunching in 64-bit Windows PowerShell ($nativePowerShell)."
-        $relaunchArguments = @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $ScriptPath) + @($ForwardedArguments) + @('-From32BitHost')
+        # A wrapper started without parameters forwards none: ConvertTo-RmmForwardedArgument's empty
+        # array reaches here as $null, and @($null) would add one empty argument. Windows PowerShell
+        # drops an empty argument to a program; a 32-bit PowerShell 7.3 or later passes it on as "",
+        # which the relaunched wrapper binds to its first positional parameter, -InstallerPath (the
+        # same flaw rmm/Get-WingetFleetHealth.ps1 and rmm/Repair-WauLogonTrigger.ps1 had).
+        $forwarded = @($ForwardedArguments | Where-Object { -not [string]::IsNullOrEmpty($_) })
+        $relaunchArguments = @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $ScriptPath) + $forwarded + @('-From32BitHost')
         $relaunchExitCode = Invoke-RmmProcess -FilePath $nativePowerShell -ArgumentList $relaunchArguments
         if ($null -eq $relaunchExitCode) {
             Write-RmmLine 'The 64-bit relaunch could not be started. Nothing was installed.' 'Red'

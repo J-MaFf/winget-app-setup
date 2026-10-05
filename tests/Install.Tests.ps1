@@ -956,6 +956,22 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
             ($script:infoMessages -join "`n") | Should -Match '\[DRY-RUN\] winget is not available for this account, so this preview cannot tell which apps are already installed'
         }
 
+        # Work-order items 31 and 39: the Windows App Runtime install happens inside the
+        # Winget-AutoUpdate step, after the pre-flight, and adds no check of its own.
+        It 'Runs the pre-flight once, before winget is set up and before Winget-AutoUpdate and its runtime install, and compares the end of the run against its restart state' {
+            Mock Get-ProxyInheritanceWarning { $script:steps += 'Get-ProxyInheritanceWarning'; $null }
+            Mock Get-PendingRestartState { $script:steps += 'Get-PendingRestartState'; New-TestRestartState -WindowsUpdate }
+            Mock Install-WingetAutoUpdate { $script:steps += 'Install-WingetAutoUpdate'; [pscustomobject]@{ Status = 'Configured'; Version = '2.12.0'; FrameworkMissing = $false; RestartRequired = $false } }
+
+            $result = Invoke-WingetInstall -Apps @(@{ name = 'Contoso.AppOne' }) -NonInteractive
+
+            # The restart was pending before the run, so it does not make the run 3010.
+            $result | Should -Be 0
+            $script:steps | Should -Be @('Get-ProxyInheritanceWarning', 'Get-PendingRestartState', 'Wait-WauIdle', 'Initialize-Winget', 'Install-WingetAutoUpdate', 'Get-PendingRestartState')
+            Should -Invoke Get-WingetPolicyBlock -Times 1 -Exactly
+            @($script:warningMessages | Where-Object { $_ -like 'A restart is already pending on this PC*' }) | Should -HaveCount 1
+        }
+
         It 'Warns once about the signed-in user''s proxy for a run as SYSTEM, before it waits for Winget-AutoUpdate, and goes on' {
             Mock Get-InstallAccountContext { New-TestAccountContext -System -SessionUser 'CONTOSO\jdoe' }
             Mock Get-ProxyInheritanceWarning { 'PROXY LINE' }
@@ -2919,6 +2935,68 @@ Describe 'The install-failure issue form explains every exit code' {
     }
 }
 
+# Work-order items 35 and 39 added causes to exit codes 2, 4, 5 and 7 (Group Policy's App Installer
+# and execution policies, Constrained Language Mode). The early-exit notice, the issue form and the
+# readme's table must say the same.
+Describe 'The early-exit notice, the issue form and the readme agree on what an exit code means' {
+    BeforeAll {
+        $form = Get-Content -Raw -LiteralPath (Join-Path $script:RepoRoot '.github/ISSUE_TEMPLATE/install-failure.yml')
+        $null = $form -match '(?m)^\s+id: exit-code\s*\r?\n(?:.*\r?\n)*?\s+description: (?<description>.+)$'
+        $script:formDescription = $Matches.description
+        $script:readmeText = Get-Content -Raw -LiteralPath (Join-Path $script:RepoRoot 'readme.md')
+
+        function Get-FormMeaning {
+            param ([string]$Code)
+            $found = [regex]::Match($script:formDescription, ('(?<![\d]){0} = (?<text>[^;]+)' -f $Code))
+            return $found.Groups['text'].Value
+        }
+
+        function Get-ReadmeMeaning {
+            param ([string]$Code)
+            $found = [regex]::Match($script:readmeText, ('(?m)^\| {0} \| (?<text>.+) \|\s*$' -f $Code))
+            return $found.Groups['text'].Value
+        }
+
+        function Get-NoticeMeaning {
+            param ([int]$Code)
+            $script:noticeErrors = @()
+            Mock Write-ErrorMessage { $script:noticeErrors += $Message }
+            Mock Write-WarningMessage { }
+            Mock Write-Info { }
+            Mock Write-Host { }
+            Mock Write-InstallerReportHint { }
+            Write-InstallerExitNotice -Code $Code -NoPause
+            return (@($script:noticeErrors) -join ' ')
+        }
+    }
+
+    It 'Names Group Policy for exit code 2 in all three' {
+        Get-FormMeaning -Code 2 | Should -Match 'Group Policy'
+        Get-ReadmeMeaning -Code 2 | Should -Match 'Group Policy'
+        Get-NoticeMeaning -Code 2 | Should -Match 'Group Policy'
+    }
+
+    It 'Names Group Policy''s execution policy for exit code 4 in all three' {
+        Get-FormMeaning -Code 4 | Should -Match 'execution policy'
+        Get-ReadmeMeaning -Code 4 | Should -Match 'execution policy'
+        Get-NoticeMeaning -Code 4 | Should -Match 'execution policy'
+    }
+
+    It 'Names Constrained Language Mode for exit code 5 in the issue form and the readme' {
+        Get-FormMeaning -Code 5 | Should -Match 'Constrained Language Mode'
+        Get-ReadmeMeaning -Code 5 | Should -Match 'Constrained Language Mode'
+    }
+
+    It 'Names PowerShell 7''s execution policy for exit code 7 in the issue form and the readme' {
+        Get-FormMeaning -Code 7 | Should -Match 'execution policy'
+        Get-ReadmeMeaning -Code 7 | Should -Match 'execution policy'
+    }
+
+    It 'Says in the readme what -CollectDiagnostics exits with' {
+        Get-ReadmeMeaning -Code 5 | Should -Match '-CollectDiagnostics.*exits 0 when it saved the diagnostics bundle, 5 when it could not'
+    }
+}
+
 # Review findings P2-8, P2-9 and P2-10: with winget.exe unable to start (E2E run 36384683838, second
 # pass, every app already installed), each app spent 9 launches and 75 seconds of backoff, twice:
 # about 24 minutes, then every app reported as 'package not found after install'. Here the real
@@ -3200,6 +3278,28 @@ Describe 'Dry run leaves the machine unchanged (P2-16)' {
         $script:errorMessages | Should -Not -Contain 'Winget is required for this script. Exiting.'
     }
 
+    # Work-order items 31 and 39: the pre-flight runs once in a dry run too, and the preview of the
+    # Winget-AutoUpdate step still says that it would install the pinned Windows App Runtime first.
+    It 'Runs the pre-flight once and previews the Windows App Runtime install with Winget-AutoUpdate, installing neither' {
+        Mock Test-IsAdmin { $true }
+        $script:preflightCalls = @()
+        Mock Get-ProxyInheritanceWarning { $script:preflightCalls += 'proxy'; $null }
+        Mock Get-PendingRestartState { $script:preflightCalls += 'restart'; New-TestRestartState }
+        Mock Install-WindowsAppRuntimeFramework { throw 'a dry run installs no framework' }
+        Mock Invoke-AppxProvisioning { throw 'a dry run provisions nothing' }
+
+        $result = Invoke-WingetInstall -Apps @(@{ name = 'Contoso.AppOne' }) -WhatIf -NonInteractive
+
+        $result | Should -Be 0
+        $script:preflightCalls | Should -Be @('proxy', 'restart')
+        $pin = Get-WindowsAppRuntimePin
+        $preview = '*would first install the pinned Windows App Runtime {0} (framework {1}) for all users*' -f $pin.Release, $pin.FrameworkVersion
+        @($script:infoMessages | Where-Object { $_.StartsWith('[DRY-RUN]') -and $_ -like $preview }) | Should -HaveCount 1
+        Should -Invoke Install-WindowsAppRuntimeFramework -Times 0 -Exactly
+        Should -Invoke Invoke-AppxProvisioning -Times 0 -Exactly
+        Should -Invoke Invoke-WebRequest -Times 0 -Exactly
+    }
+
     It 'Neither updates nor resets the winget source when winget is present, and says what a real run would do' {
         Mock Test-IsAdmin { $true }
         Mock Invoke-ExternalProcess { New-TestProcessResult -ExitCode 0 -Output @('v1.12.350') } -ParameterFilter { $ArgumentList[0] -eq '--version' }
@@ -3259,9 +3359,9 @@ Describe 'Write-InstallerExitNotice (review findings P2-14 and P3-15)' {
 
     It 'Says what exit code <Code> means when the caller gives no reason' -ForEach @(
         @{ Code = 1; Meaning = 'a pre-flight check failed (see above)' }
-        @{ Code = 2; Meaning = 'winget is not available or could not be started (see above)' }
+        @{ Code = 2; Meaning = 'winget is not available, could not be started, or is turned off by Group Policy (see above)' }
         @{ Code = 3; Meaning = 'the app catalog failed validation (see above)' }
-        @{ Code = 4; Meaning = 'administrator rights are required, and this run was not elevated (see above)' }
+        @{ Code = 4; Meaning = 'administrator rights are required, and this run was not elevated, or Group Policy''s execution policy keeps the elevated window from running the installer (see above)' }
         @{ Code = 5; Meaning = 'the run was aborted before it finished (see above)' }
         @{ Code = 6; Meaning = 'another run of the installer is in progress on this PC' }
         @{ Code = 7; Meaning = 'PowerShell 7 could not be installed, or the installer could not be relaunched under it (see above)' }

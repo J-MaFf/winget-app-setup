@@ -62,6 +62,7 @@ Describe 'Invoke-WingetUserPhase (work-order item 34)' {
         Mock Test-WingetLaunchable { [pscustomobject]@{ Launchable = $true; Version = 'v1.12.350'; Reason = $null; ExitCode = 0; Attempts = 1 } }
         Mock Invoke-WingetSourceProbe { @{ Succeeded = $true; ExitCode = 0; TimedOut = $false; LaunchError = $null } }
         Mock Install-UserPhaseApp { New-AppRunRecord -Id $PackageId -Status 'Installed' -InstallResult @{ ExitCode = 0 } }
+        Mock Get-UserPhaseCatalogEntry { @{} }
         Mock Set-WindowsTerminalDefaults { 'Applied' }
         # The record as the installer's run as SYSTEM leaves it (Get-RunRecordTrustProblem).
         Mock Get-Acl { New-TestFileAcl }
@@ -296,6 +297,74 @@ Describe 'Invoke-WingetUserPhase (work-order item 34)' {
         $script:output | Should -Match 'nothing to do as SYSTEM'
         Test-Path -LiteralPath $script:statePath | Should -BeFalse
         Should -Invoke Install-UserPhaseApp -Times 0 -Exactly
+    }
+
+    # Work-order item 38 writes the records this reads: a run as SYSTEM defers a catalog entry marked
+    # userPhase or scope 'user' with its own reason, and records each app's post-install result.
+    It 'Installs the apps item 38 defers as per-user, and leaves alone the apps whose post-install hook did not configure them in the run for the whole PC' {
+        $directory = Split-Path -Parent $script:recordPath
+        $null = New-Item -ItemType Directory -Path $directory -Force
+        $apps = @(
+            (New-AppRunRecord -Id 'Contoso.UserSetting' -Status 'Deferred' -Reason (Get-AppDeferReasonText -DeferReason 'UserPhase'))
+            (New-AppRunRecord -Id 'Contoso.UserApp' -Status 'Deferred' -Reason (Get-AppDeferReasonText -DeferReason 'UserScope'))
+            (New-AppRunRecord -Id 'Contoso.MachineNotConfigured' -Status 'Installed' -InstallResult @{ ExitCode = 0 } -PostInstall @{ Status = 'NotConfigured'; Reason = 'no settings yet' })
+            (New-AppRunRecord -Id 'Contoso.MachineHookFailed' -Status 'Failed' -Reason (Format-InstallFailureReason -FailureReason 'PostInstallFailed' -PostInstallReason 'boom') -InstallResult @{ ExitCode = 0 } -PostInstall @{ Status = 'Failed'; Reason = 'boom' })
+        )
+        $script:InstallerRunStartedUtc = [DateTime]::new(2026, 10, 4, 14, 30, 0, [DateTimeKind]::Utc)
+        $script:InstallerBuildId = '1.0.0+5ea1f00d'
+        $record = New-InstallerRunRecord -ExitCode 1 -Apps $apps -SummaryReached
+        $script:recordPath = Save-InstallerRunRecord -Record $record -Directory $directory
+        $script:InstallerRunStartedUtc = $null
+        $script:InstallerBuildId = $null
+
+        Invoke-TestUserPhase | Should -Be 0
+
+        Should -Invoke Install-UserPhaseApp -Times 2 -Exactly
+        Should -Invoke Install-UserPhaseApp -Times 1 -Exactly -ParameterFilter { $PackageId -eq 'Contoso.UserSetting' }
+        Should -Invoke Install-UserPhaseApp -Times 1 -Exactly -ParameterFilter { $PackageId -eq 'Contoso.UserApp' }
+        (Get-TestState).complete | Should -BeTrue
+    }
+
+    It 'Passes each deferred app''s catalog entry to its install' {
+        $script:recordPath = New-TestRunRecordFile -Directory (Split-Path -Parent $script:recordPath) -Deferred @('Contoso.UserSetting', 'Contoso.NotInCatalog')
+        $script:userSettingEntry = @{ name = 'Contoso.UserSetting'; userPhase = $true; postInstall = { 'Configured' } }
+        Mock Get-UserPhaseCatalogEntry { @{ 'Contoso.UserSetting' = $script:userSettingEntry } }
+
+        Invoke-TestUserPhase | Should -Be 0
+
+        Should -Invoke Get-UserPhaseCatalogEntry -Times 1 -Exactly
+        Should -Invoke Install-UserPhaseApp -Times 1 -Exactly -ParameterFilter { $PackageId -eq 'Contoso.UserSetting' -and [object]::ReferenceEquals($App, $script:userSettingEntry) }
+        Should -Invoke Install-UserPhaseApp -Times 1 -Exactly -ParameterFilter { $PackageId -eq 'Contoso.NotInCatalog' -and $null -eq $App }
+    }
+
+    It 'Keeps the exit code but is not done while a post-install hook has not configured its app, and runs it again at the next sign-in' {
+        $script:recordPath = New-TestRunRecordFile -Directory (Split-Path -Parent $script:recordPath) -Deferred @('Contoso.UserSetting')
+        Mock Install-UserPhaseApp { New-AppRunRecord -Id $PackageId -Status 'Installed' -InstallResult @{ ExitCode = 0 } -PostInstall @{ Status = 'NotConfigured'; Reason = 'the app has not been started yet' } }
+
+        Invoke-TestUserPhase | Should -Be 0
+
+        $state = Get-TestState
+        $state.complete | Should -BeFalse
+        $state.exitCode | Should -Be 0
+        $state.apps[0].postInstall | Should -Be 'NotConfigured'
+        $script:output | Should -Contain 'WARN: Configuration: NOT DONE for Contoso.UserSetting (the app has not been started yet) - installed for this account, but the post-install configuration did not finish. Not counted as failed; the next sign-in tries again.'
+        $script:output | Should -Contain 'USER PHASE RESULT: exit=0 installed=1 skipped=0 failed=0 terminal=Applied attempt=1/3 complete=false log=none'
+
+        Mock Install-UserPhaseApp { New-AppRunRecord -Id $PackageId -Status 'Skipped' -Reason 'already installed' -PostInstall @{ Status = 'Configured' } }
+        Invoke-TestUserPhase | Should -Be 0
+        Should -Invoke Install-UserPhaseApp -Times 2 -Exactly
+        (Get-TestState).complete | Should -BeTrue
+    }
+
+    It 'Exits 1 and tries again later when a post-install hook failed' {
+        $script:recordPath = New-TestRunRecordFile -Directory (Split-Path -Parent $script:recordPath) -Deferred @('Contoso.UserSetting')
+        Mock Install-UserPhaseApp { New-AppRunRecord -Id $PackageId -Status 'Failed' -Reason 'installed, but its post-install configuration failed (boom)' -InstallResult @{ ExitCode = 0 } -PostInstall @{ Status = 'Failed'; Reason = 'boom' } }
+
+        Invoke-TestUserPhase | Should -Be 1
+
+        $state = Get-TestState
+        $state.complete | Should -BeFalse
+        $state.apps[0].postInstall | Should -Be 'Failed'
     }
 
     It 'Keeps the newest 10 of its own logs, and puts winget''s logs next to its transcript' {

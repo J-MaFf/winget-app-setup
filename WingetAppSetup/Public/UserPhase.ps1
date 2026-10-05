@@ -23,15 +23,20 @@
          account's first use of winget that also registers the source, which the 15-second
          `winget list` check before each install has no time for) and installs each app with
          `--scope user` (Install-UserPhaseApp), while the time budget lasts. An app the budget no
-         longer covers is NotAttempted.
+         longer covers is NotAttempted. When this installer's catalog has the app
+         (Get-UserPhaseCatalogEntry), its installerType is used, and its postInstall hook runs in
+         this account once the app is there (work-order item 38: an entry marked userPhase is
+         deferred, hook and all, by a run for the whole PC). A hook that fails fails the app; one
+         that could not configure it yet (NotConfigured) leaves it installed and the exit code as
+         it is, and a later sign-in runs it again.
       4. It sets the Windows Terminal defaults (Set-WindowsTerminalDefaults -PassThru: the targeted
          defaultProfile edit and the default terminal application). Unless that reports Applied
          (this account has no Terminal settings.json yet because Terminal was never opened, an edit
          failed, or the step was skipped), the step counts as not done, and a later sign-in tries
          again.
-      5. It records the outcome (complete when every deferred app is installed or was already there
-         and the Terminal step is done), prints one 'USER PHASE RESULT:' line and returns the exit
-         code.
+      5. It records the outcome (complete when every deferred app is installed or was already there,
+         and configured when its catalog entry has a post-install hook, and the Terminal step is
+         done), prints one 'USER PHASE RESULT:' line and returns the exit code.
     It never prompts (winget runs with --disable-interactivity and --silent) and never asks for
     elevation itself: it installs with --scope user only, and a per-user installer needs no
     administrator rights. One that elevates itself anyway would still show a UAC prompt, which is
@@ -48,10 +53,11 @@
 .PARAMETER MaxAttempts
     How many sign-ins may try for one machine run before the user phase gives up on it. Default 3.
 .OUTPUTS
-    [int] 0 = done, or nothing to do; 1 = a deferred app failed to install or was not attempted in
-    the time budget; 2 = winget cannot be started for this account (nothing was installed); 3010 = done,
-    but an install needs a restart to finish; 5 = an unexpected error (in the transcript). A later
-    sign-in tries again after 1, 2 or 5 while attempts are left.
+    [int] 0 = done, or nothing to do; 1 = a deferred app failed to install, its post-install hook
+    failed, or it was not attempted in the time budget; 2 = winget cannot be started for this
+    account (nothing was installed); 3010 = done, but an install needs a restart to finish; 5 = an
+    unexpected error (in the transcript). A later sign-in tries again after 1, 2 or 5 while
+    attempts are left.
 #>
 function Invoke-WingetUserPhase {
     [OutputType([int])]
@@ -148,6 +154,9 @@ function Invoke-WingetUserPhase {
             }
             else {
                 Update-UserPhaseWingetSource
+                # What the record cannot carry: a userPhase entry's post-install hook and the entry's
+                # installer type (work-order item 38).
+                $catalogEntries = Get-UserPhaseCatalogEntry
                 foreach ($id in $deferredApps) {
                     $remainingSeconds = $budgetSeconds - (Get-UserPhaseElapsedSeconds -Stopwatch $stopwatch)
                     if ($remainingSeconds -lt 60) {
@@ -156,7 +165,7 @@ function Invoke-WingetUserPhase {
                         continue
                     }
                     try {
-                        $appRecords[$id] = Install-UserPhaseApp -PackageId $id -TimeoutSeconds ([Math]::Min(1800, $remainingSeconds))
+                        $appRecords[$id] = Install-UserPhaseApp -PackageId $id -App $catalogEntries[$id] -TimeoutSeconds ([Math]::Min(1800, $remainingSeconds))
                     }
                     catch {
                         Write-ErrorMessage "Failed to install: $id. Error: $_"
@@ -201,7 +210,14 @@ function Invoke-WingetUserPhase {
         else {
             $exitCode = 0
         }
-        $newState.complete = ($unfinished.Count -eq 0) -and ($terminalStatus -eq 'Applied')
+        # An app whose post-install hook could not configure it yet (NotConfigured) is installed and
+        # does not change the exit code, but the user phase is not done: a later sign-in runs the
+        # hook again, as it sets the Terminal defaults again.
+        $notConfigured = @($records | Where-Object { $_.postInstall -eq 'NotConfigured' })
+        if ($notConfigured.Count -gt 0) {
+            Write-WarningMessage ('Configuration: NOT DONE for {0} - installed for this account, but the post-install configuration did not finish. Not counted as failed; the next sign-in tries again.' -f (@($notConfigured | ForEach-Object { '{0} ({1})' -f $_.id, $_.postInstallReason }) -join '; '))
+        }
+        $newState.complete = ($unfinished.Count -eq 0) -and ($notConfigured.Count -eq 0) -and ($terminalStatus -eq 'Applied')
         if (-not $newState.complete -and $decision.Attempt -ge $MaxAttempts) {
             Write-WarningMessage "This was the last of $MaxAttempts attempts for this run for the whole PC; the user phase does not try again until the next one."
         }

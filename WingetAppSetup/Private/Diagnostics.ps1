@@ -18,7 +18,9 @@
 # Format-ScheduledTaskTrigger and Get-WauUpdatesLogPath (WauSupport.ps1), Get-MachineWingetCandidate
 # (MachineContext.ps1), Invoke-WingetProcess, Invoke-ExternalProcess and Get-ProcessTimeoutSeconds
 # (ProcessInvocation.ps1), Format-WingetExitCode (WingetResultCodes.ps1), Format-RunRecordTime
-# (RunRecord.ps1) and the Write-* logging helpers. Check a change to any of them against that too.
+# (RunRecord.ps1), Get-DefaultWindowsAppRuntimeRequirement and Format-WindowsAppRuntimeRequirement
+# (WauSupport.ps1), Get-WindowsAppRuntimePin (WindowsAppRuntime.ps1) and the Write-* logging
+# helpers. Check a change to any of them against that too.
 
 <#
 .SYNOPSIS
@@ -179,12 +181,16 @@ function ConvertFrom-DiagnosticsLogStamp {
 .DESCRIPTION
     Works on the names the installer gives its logs (see Remove-OldInstallerLog), each with the
     local time it was started at:
-      - Transcripts: install-<time>.log and install-<time>-bootstrap.log. Dry-run transcripts
-        (-whatif) are left out. The newest transcript and every other one started up to
-        WindowMinutes before it are kept, at most MaximumTranscripts, newest first: one run can
-        write four (the Windows PowerShell 5.1 bootstrap and the PowerShell 7 run, of the window
-        that asked for elevation and of the elevated one). The transcript last-run.json names is
-        kept too, when it is not among them.
+      - Transcripts: install-<time>.log, install-<time>-bootstrap.log, the RMM wrapper's
+        install-<time>-rmm.log (rmm/Invoke-WingetAppSetup.ps1, work-order item 34: it starts before
+        the installer and also says why the installer did not run, such as a SHA256 mismatch) and,
+        in a user's own logs folder, the user phase's install-<time>-userphase.log: the names
+        Remove-OldInstallerLog counts as transcripts. Dry-run transcripts (-whatif) are left out.
+        The newest transcript and every other one started up to WindowMinutes before it are kept,
+        at most MaximumTranscripts, newest first: one run can write four (the Windows PowerShell
+        5.1 bootstrap and the PowerShell 7 run, of the window that asked for elevation and of the
+        elevated one), and a run from the RMM wrapper three. The transcript last-run.json names
+        is kept too, when it is not among them.
       - Installer logs: winget-<install|upgrade|uninstall|repair>-<package id>-<time>.log (winget's
         --log), pwsh-msi-<time>-<n>.log and wau-msi-<install|uninstall>-<time>-<n>.log, from the
         start of the oldest transcript kept on, at most MaximumInstallerLogs, newest first.
@@ -223,7 +229,7 @@ function Select-DiagnosticsLogFile {
     $installerLogs = @()
     $runRecord = $null
     foreach ($file in $files) {
-        if ($file.Name -match '^install-(?<stamp>\d{8}-\d{6})(?:-bootstrap)?\.log$') {
+        if ($file.Name -match '^install-(?<stamp>\d{8}-\d{6})(?:-bootstrap|-rmm|-userphase)?\.log$') {
             $time = ConvertFrom-DiagnosticsLogStamp -Stamp $Matches['stamp']
             if ($null -ne $time) {
                 $transcripts += [pscustomobject]@{ File = $file; Stamp = $Matches['stamp']; Time = $time }
@@ -1070,6 +1076,22 @@ function Get-DiagnosticsSystemReport {
         $lines.Add("Not read: $($_.Exception.Message)")
     }
 
+    # Work-order items 31 and 32: what this installer installs when the framework is missing, and
+    # what it checks for when it cannot read what the latest winget release needs. The packages
+    # themselves, registered and provisioned, are in appx.txt; the run's own 'Windows App Runtime:'
+    # line is in its transcript.
+    $lines.Add('')
+    $lines.Add('== Windows App Runtime ==')
+    try {
+        $runtimePin = Get-WindowsAppRuntimePin
+        $lines.Add(('Pinned by this installer build: Windows App Runtime {0}, {1} {2} (installed for all users when a run finds the framework missing)' -f $runtimePin.Release, $runtimePin.FrameworkName, $runtimePin.FrameworkVersion))
+        $lines.Add(('Built-in requirement (used when the latest winget release''s cannot be read): {0}' -f (Format-WindowsAppRuntimeRequirement -Frameworks @((Get-DefaultWindowsAppRuntimeRequirement).Frameworks))))
+    }
+    catch {
+        $lines.Add("Not read: $($_.Exception.Message)")
+    }
+    $lines.Add('Packages registered and provisioned on this PC: appx.txt. The run''s ''Windows App Runtime:'' and ''Auto-updates:'' lines: its transcript in logs\.')
+
     $lines.Add('')
     $lines.Add('== Winget-AutoUpdate ==')
     try {
@@ -1454,6 +1476,82 @@ function Save-DiagnosticsBundle {
 
 <#
 .SYNOPSIS
+    Returns the user phase's folder of the account making the bundle:
+    %LOCALAPPDATA%\winget-app-setup, or $null when there is no LOCALAPPDATA.
+.DESCRIPTION
+    A seam (mocked in tests). The user phase (Invoke-WingetUserPhase, work-order item 34) keeps its
+    state (user-phase.json) and its logs there, in the signed-in user's own profile.
+.RETURNS
+    [string] or $null.
+#>
+function Get-DiagnosticsUserPhaseDirectory {
+    if ([string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) {
+        return $null
+    }
+    return (Join-Path $env:LOCALAPPDATA 'winget-app-setup')
+}
+
+<#
+.SYNOPSIS
+    Reads log files into the bundle, within what is left of its size budget.
+.PARAMETER Files
+    The files to read.
+.PARAMETER Prefix
+    The folder they go in inside the .zip, such as 'logs/'.
+.PARAMETER Entries
+    The bundle's entries (path inside the .zip to text): the files are added to it.
+.PARAMETER Sources
+    README.txt's list of sources: a file that cannot be read is noted there.
+.PARAMETER BudgetBytes
+    What is left of the bundle's size budget.
+.RETURNS
+    [pscustomobject] with BudgetBytes (what is left after these files) and Skipped (the names of the
+    files left out because the budget was spent).
+#>
+function Add-DiagnosticsLogEntry {
+    param (
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [AllowEmptyCollection()]
+        [object[]]$Files,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Prefix,
+
+        [Parameter(Mandatory = $true)]
+        [System.Collections.IDictionary]$Entries,
+
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [System.Collections.Generic.List[string]]$Sources,
+
+        [Parameter(Mandatory = $true)]
+        [long]$BudgetBytes
+    )
+
+    $skipped = @()
+    foreach ($file in @($Files)) {
+        if ($null -eq $file) {
+            continue
+        }
+        if ($BudgetBytes -le 0) {
+            $skipped += $file.Name
+            continue
+        }
+        try {
+            $content = Read-DiagnosticsTextFile -Path $file.FullName -MaxBytes ([Math]::Min([long]4MB, $BudgetBytes))
+            $BudgetBytes -= [Math]::Min([long]$file.Length, [long]4MB)
+            $Entries[$Prefix + $file.Name] = $content
+        }
+        catch {
+            $Sources.Add(('Log {0}: not read: {1}' -f $file.Name, $_.Exception.Message))
+        }
+    }
+    return [pscustomobject]@{ BudgetBytes = $BudgetBytes; Skipped = $skipped }
+}
+
+<#
+.SYNOPSIS
     Makes the diagnostics bundle (-CollectDiagnostics) and says where it is.
 .DESCRIPTION
     Collects, then redacts and zips:
@@ -1462,8 +1560,11 @@ function Save-DiagnosticsBundle {
       winget.txt                  Get-DiagnosticsWingetReport
       appx.txt                    Get-DiagnosticsAppxReport
       wau-updates-log-tail.txt    Get-DiagnosticsWauLogTail
-      logs\                       the latest run's transcripts, its installer logs and last-run.json
-                                  (Select-DiagnosticsLogFile)
+      logs\                       the latest run's transcripts (the RMM wrapper's included), its
+                                  installer logs and last-run.json (Select-DiagnosticsLogFile)
+      user-phase\                 this account's user phase (work-order item 34), when it has run
+                                  here: user-phase.json and its latest transcript and winget logs
+                                  from %LOCALAPPDATA%\winget-app-setup
     Every text file goes through ConvertTo-RedactedDiagnosticText with one map for the whole bundle
     (New-DiagnosticsRedactionMap). No environment variables are collected wholesale, and no secret
     is read.
@@ -1513,7 +1614,7 @@ function Invoke-DiagnosticsCollection {
     $entries = [ordered]@{}
     $entries['README.txt'] = ''
 
-    $logNames = @()
+    $budget = [long]64MB
     if ($LogDirectory -and (Test-Path -LiteralPath $LogDirectory -PathType Container)) {
         try {
             $selection = Select-DiagnosticsLogFile -LogDirectory $LogDirectory
@@ -1521,26 +1622,11 @@ function Invoke-DiagnosticsCollection {
             if ($selection.RunRecord) {
                 $files += $selection.RunRecord
             }
-            $budget = [long]64MB
-            $skipped = @()
-            foreach ($file in $files) {
-                if ($budget -le 0) {
-                    $skipped += $file.Name
-                    continue
-                }
-                try {
-                    $content = Read-DiagnosticsTextFile -Path $file.FullName -MaxBytes ([Math]::Min([long]4MB, $budget))
-                    $budget -= [Math]::Min([long]$file.Length, [long]4MB)
-                    $entries['logs/' + $file.Name] = $content
-                    $logNames += $file.Name
-                }
-                catch {
-                    $sources.Add(('Log {0}: not read: {1}' -f $file.Name, $_.Exception.Message))
-                }
-            }
+            $added = Add-DiagnosticsLogEntry -Files $files -Prefix 'logs/' -Entries $entries -Sources $sources -BudgetBytes $budget
+            $budget = $added.BudgetBytes
             $sources.Add(('Installer logs ({0}): {1} transcript(s), {2} installer log(s), last-run.json {3}' -f $LogDirectory, @($selection.Transcripts).Count, @($selection.InstallerLogs).Count, $(if ($selection.RunRecord) { 'included' } else { 'not found' })))
-            if ($skipped.Count -gt 0) {
-                $sources.Add(('Left out to keep the bundle small: {0}' -f ($skipped -join ', ')))
+            if (@($added.Skipped).Count -gt 0) {
+                $sources.Add(('Left out to keep the bundle small: {0}' -f (@($added.Skipped) -join ', ')))
             }
             $listing = @($selection.Files | Sort-Object -Property Name | ForEach-Object { '  {0}  {1} bytes  {2}' -f $_.Name, $_.Length, $_.LastWriteTime.ToString('yyyy-MM-dd HH:mm', [System.Globalization.CultureInfo]::InvariantCulture) })
             if ($listing.Count -gt 0) {
@@ -1556,6 +1642,49 @@ function Invoke-DiagnosticsCollection {
     }
     else {
         $sources.Add(('Installer logs ({0}): the folder does not exist or cannot be opened' -f $LogDirectory))
+    }
+
+    # The user phase (work-order item 34) of the account making the bundle: its state and its latest
+    # attempt's transcript and winget logs, read-only like the rest.
+    $userPhaseDirectory = $null
+    try {
+        $userPhaseDirectory = Get-DiagnosticsUserPhaseDirectory
+    }
+    catch {
+        $userPhaseDirectory = $null
+    }
+    if ($userPhaseDirectory -and (Test-Path -LiteralPath $userPhaseDirectory -PathType Container)) {
+        try {
+            $userPhaseFiles = @()
+            $statePath = Join-Path $userPhaseDirectory 'user-phase.json'
+            $stateFound = Test-Path -LiteralPath $statePath -PathType Leaf
+            if ($stateFound) {
+                $userPhaseFiles += Get-Item -LiteralPath $statePath -Force -ErrorAction Stop
+            }
+            $userLogDirectory = Join-Path $userPhaseDirectory 'logs'
+            $userTranscripts = @()
+            $userInstallerLogs = @()
+            if (Test-Path -LiteralPath $userLogDirectory -PathType Container) {
+                $userSelection = Select-DiagnosticsLogFile -LogDirectory $userLogDirectory -MaximumTranscripts 2
+                $userTranscripts = @($userSelection.Transcripts)
+                $userInstallerLogs = @($userSelection.InstallerLogs)
+            }
+            $added = Add-DiagnosticsLogEntry -Files @($userPhaseFiles) -Prefix 'user-phase/' -Entries $entries -Sources $sources -BudgetBytes $budget
+            $budget = $added.BudgetBytes
+            $addedLogs = Add-DiagnosticsLogEntry -Files (@($userTranscripts) + @($userInstallerLogs)) -Prefix 'user-phase/logs/' -Entries $entries -Sources $sources -BudgetBytes $budget
+            $budget = $addedLogs.BudgetBytes
+            $sources.Add(('User phase of this account ({0}): user-phase.json {1}, {2} transcript(s), {3} installer log(s)' -f $userPhaseDirectory, $(if ($stateFound) { 'included' } else { 'not found' }), $userTranscripts.Count, $userInstallerLogs.Count))
+            $userSkipped = @($added.Skipped) + @($addedLogs.Skipped)
+            if ($userSkipped.Count -gt 0) {
+                $sources.Add(('Left out to keep the bundle small: {0}' -f ($userSkipped -join ', ')))
+            }
+        }
+        catch {
+            $sources.Add(('User phase of this account ({0}): not read: {1}' -f $userPhaseDirectory, $_.Exception.Message))
+        }
+    }
+    else {
+        $sources.Add('User phase of this account: it has not run here (no %LOCALAPPDATA%\winget-app-setup)')
     }
 
     try {
@@ -1602,7 +1731,8 @@ function Invoke-DiagnosticsCollection {
         '  winget.txt                winget --version and winget --info',
         '  appx.txt                  App Installer and Windows App Runtime packages, registered and provisioned',
         '  wau-updates-log-tail.txt  the end of Winget-AutoUpdate''s updates.log',
-        '  logs\                     the latest run''s transcripts and installer logs, and last-run.json'
+        '  logs\                     the latest run''s transcripts (the RMM wrapper''s install-<time>-rmm.log too) and installer logs, and last-run.json',
+        '  user-phase\               this account''s user phase, when it has run here: user-phase.json, its latest transcripts and winget logs'
     )
     if (-not $isAdmin) {
         $readme += ''

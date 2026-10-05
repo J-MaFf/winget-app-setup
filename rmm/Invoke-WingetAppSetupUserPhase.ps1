@@ -38,6 +38,12 @@
     A later sign-in tries again when an app failed, the time budget ran out, winget could not be
     started yet, or Windows Terminal had not been opened yet (it has no settings.json before), up to
     MaxAttempts sign-ins per machine run.
+
+    Unlike rmm/Invoke-WingetAppSetup.ps1, this script needs no relaunch through Sysnative when a
+    32-bit PowerShell (Endpoint Central's agent) starts it: its first part reads only files a 32-bit
+    process sees as they are (last-run.json under %ProgramData%, the user's own folders), and the
+    PowerShell 7 it runs itself under is the 64-bit one (%ProgramW6432% first). Every argument of
+    that run is set here, none forwarded, so it gets no empty argument either.
 .PARAMETER InstallerPath
     Use this local copy of winget-app-install.ps1 instead of downloading the pinned one (testing).
     Its SHA256 is still checked: against -InstallerSha256, or the pinned one.

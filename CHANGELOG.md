@@ -484,6 +484,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     (`[DRY-RUN] TightVNC: ... (value not shown)`) and leaves the variables in place.
   - The module now calls `Get-Service`, `Restart-Service` and `Start-Service`, which are listed in
     `build/windows-only-commands.txt` and have stand-ins in `tests/TestHelpers.ps1`.
+- Work-order items 31, 32, 34, 35, 36, 38 and 39 work together (integration of the pre-flight,
+  diagnostics, fleet probe and Endpoint Central phases with the runtime install and the catalog
+  schema):
+  - The user phase (`Invoke-WingetUserPhase`) runs the `postInstall` hook of a deferred app's
+    catalog entry in the signed-in user's account once the app is there, and installs it with the
+    entry's `installerType` (`Get-UserPhaseCatalogEntry`, `Complete-UserPhaseAppConfiguration`): a
+    `userPhase` entry is deferred with its hook by a run as SYSTEM, and the hook used to be dropped.
+    A hook that fails fails the app (exit 1, retried at a later sign-in); `NotConfigured` keeps the
+    app installed and the exit code, and the user phase stays not complete so a later sign-in runs
+    the hook again. The Deferred summary line for per-user catalog apps names the user phase.
+  - `rmm/Invoke-WingetAppSetup.ps1` adds no empty argument to its 64-bit relaunch when started
+    without parameters (the flaw item 36's review fixed in the other `rmm/` scripts: a 32-bit
+    PowerShell 7.3 or later passed it on as `""`, bound to `-InstallerPath`).
+  - The diagnostics bundle includes the RMM wrapper's `install-<time>-rmm.log`, the account's
+    user-phase state and latest user-phase transcript and winget logs (`user-phase\`), and in
+    `system.txt` the Windows App Runtime this build pins and the built-in requirement.
+  - The time-limited `Add-AppxProvisionedPackage` child of the Windows App Runtime install starts
+    without PowerShell 7's `PSModulePath`, as the diagnostics bundle's Windows PowerShell does.
+  - The SYSTEM E2E leg expects the framework installed once and `Auto-updates: Configured`, and
+    checks that every Deferred entry of `last-run.json` has a package id and a reason and matches
+    the summary; exit 8 stays accepted only when the installer could not try the framework install.
+  - Exit codes 2, 4, 5 and 7 read the same in the early-exit notice, the issue form and the readme
+    (Group Policy, execution policy, Constrained Language Mode, `-CollectDiagnostics`).
+
 - The uninstaller no longer reports every app as not installed, removes Winget-AutoUpdate and exits
   0 when winget cannot be started (review findings P2-19, P3-18). `winget-app-uninstall.ps1` is now
   a thin entry script that runs `Invoke-WingetUninstall` (`WingetAppSetup/Public/Uninstall.ps1`),

@@ -279,6 +279,36 @@ Describe 'Choosing the latest run''s logs (Select-DiagnosticsLogFile)' {
         @($selection.InstallerLogs | ForEach-Object { $_.Name }) | Should -Be @('wau-msi-install-20261004-150000-1.log')
     }
 
+    It 'Takes the RMM wrapper''s log of the latest run with its transcripts (work-order item 34), and not an older one' {
+        New-LogFile -Name @('install-20261001-095900-rmm.log', 'install-20261004-142855-rmm.log')
+
+        $selection = Select-DiagnosticsLogFile -LogDirectory $script:logDirectory
+
+        @($selection.Transcripts | ForEach-Object { $_.Name }) | Should -Be @(
+            'install-20261004-142855-rmm.log', 'install-20261004-142900-bootstrap.log', 'install-20261004-143000.log', 'install-20261004-143200-bootstrap.log', 'install-20261004-143205.log')
+    }
+
+    It 'Takes the RMM wrapper''s log of a run that stopped before the installer ran (a SHA256 mismatch writes no other log)' {
+        New-LogFile -Name @('install-20261005-090000-rmm.log')
+
+        $selection = Select-DiagnosticsLogFile -LogDirectory $script:logDirectory
+
+        @($selection.Transcripts | ForEach-Object { $_.Name }) | Should -Be @('install-20261005-090000-rmm.log')
+    }
+
+    It 'Takes the user phase''s transcripts from a user''s own logs folder' {
+        $userLogs = Join-Path $TestDrive ('userlogs-' + [Guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Path $userLogs | Out-Null
+        foreach ($name in @('install-20261004-080000-userphase.log', 'install-20261005-081500-userphase.log', 'winget-install-Contoso.UserApp-20261005-081600.log')) {
+            Set-Content -LiteralPath (Join-Path $userLogs $name) -Value $name
+        }
+
+        $selection = Select-DiagnosticsLogFile -LogDirectory $userLogs -MaximumTranscripts 2
+
+        @($selection.Transcripts | ForEach-Object { $_.Name }) | Should -Be @('install-20261005-081500-userphase.log')
+        @($selection.InstallerLogs | ForEach-Object { $_.Name }) | Should -Be @('winget-install-Contoso.UserApp-20261005-081600.log')
+    }
+
     It 'Takes nothing from an empty folder, and throws for a folder that cannot be listed' {
         $empty = Join-Path $TestDrive ('empty-' + [Guid]::NewGuid().ToString('N'))
         New-Item -ItemType Directory -Path $empty | Out-Null
@@ -536,6 +566,15 @@ Describe 'The machine''s state in the bundle (Get-DiagnosticsSystemReport)' {
         $script:InstallerBuildId = $script:savedBuildId
     }
 
+    It 'Has the Windows App Runtime this installer build pins and the built-in requirement (work-order items 31 and 32)' {
+        $lines = @(Get-DiagnosticsSystemReport -AccountContext (New-TestAccountContext) -IsAdmin $true)
+        $pin = Get-WindowsAppRuntimePin
+
+        $lines | Should -Contain '== Windows App Runtime =='
+        $lines | Should -Contain ('Pinned by this installer build: Windows App Runtime {0}, {1} {2} (installed for all users when a run finds the framework missing)' -f $pin.Release, $pin.FrameworkName, $pin.FrameworkVersion)
+        $lines | Should -Contain 'Built-in requirement (used when the latest winget release''s cannot be read): Microsoft.WindowsAppRuntime.1.8 >= 8000.616.304.0'
+    }
+
     It 'Has the Windows build, the architecture, the accounts and the elevation style' {
         $lines = @(Get-DiagnosticsSystemReport -AccountContext (New-TestAccountContext -CrossUser -SessionUser 'CONTOSO\jdoe') -IsAdmin $true)
 
@@ -700,6 +739,9 @@ Describe 'Making the bundle (Invoke-DiagnosticsCollection)' {
         Mock Get-DiagnosticsWingetReport { @('winget --version: exit 0x00000000 (0), 0.2 seconds', '  v1.26.510') }
         Mock Get-DiagnosticsAppxReport { $script:fixtures['appx.txt'] -split '\r?\n' }
         Mock Get-DiagnosticsWauLogTail { $script:fixtures['wau-updates.txt'] -split '\r?\n' }
+        # This account's user phase (work-order item 34): none, unless a test makes one.
+        $script:userPhaseDirectory = Join-Path $TestDrive ('userphase-' + [Guid]::NewGuid().ToString('N'))
+        Mock Get-DiagnosticsUserPhaseDirectory { $script:userPhaseDirectory }
 
         # What a real run does and a diagnostics run must not.
         Mock Start-Transcript { }
@@ -735,6 +777,40 @@ Describe 'Making the bundle (Invoke-DiagnosticsCollection)' {
         $entries['logs/install-20261004-143205.log'] | Should -Match 'Installer failed with exit code: 1603'
         $entries['winget.txt'] | Should -Match 'v1\.26\.510'
         $entries['README.txt'] | Should -Match 'Installer logs \(.+\): 1 transcript\(s\), 1 installer log\(s\), last-run\.json included'
+    }
+
+    It 'Adds this account''s user-phase state, latest transcript and winget log, redacted, and the RMM wrapper''s log (work-order item 34)' {
+        $userLogs = Join-Path $script:userPhaseDirectory 'logs'
+        New-Item -ItemType Directory -Path $userLogs -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $script:userPhaseDirectory 'user-phase.json') -Value '{"attempts":1,"complete":false,"exitCode":1,"transcriptPath":"C:\\Users\\jdoe\\AppData\\Local\\winget-app-setup\\logs\\install-20261005-081500-userphase.log"}'
+        Set-Content -LiteralPath (Join-Path $userLogs 'install-20261005-081500-userphase.log') -Value $script:fixtures['transcript.txt'] -NoNewline
+        Set-Content -LiteralPath (Join-Path $userLogs 'winget-install-Contoso.UserApp-20261005-081600.log') -Value $script:fixtures['msi-log.txt'] -NoNewline
+        Set-Content -LiteralPath (Join-Path $script:logDirectory 'install-20261004-143200-rmm.log') -Value 'winget-app-setup RMM wrapper (machine phase): running as NT AUTHORITY\SYSTEM' -NoNewline
+
+        [void](Invoke-DiagnosticsCollection -LogDirectory $script:logDirectory -OutputDirectory $script:outputDirectory)
+
+        $entries = Get-ZipEntryText -Path (@(Get-ChildItem -LiteralPath $script:outputDirectory -Filter '*.zip')[0]).FullName
+        @($entries.Keys) | Should -Contain 'logs/install-20261004-143200-rmm.log'
+        @($entries.Keys) | Should -Contain 'user-phase/user-phase.json'
+        @($entries.Keys) | Should -Contain 'user-phase/logs/install-20261005-081500-userphase.log'
+        @($entries.Keys) | Should -Contain 'user-phase/logs/winget-install-Contoso.UserApp-20261005-081600.log'
+        $entries['user-phase/user-phase.json'] | Should -Match '"complete":false'
+        $entries['README.txt'] | Should -Match 'User phase of this account \(.+\): user-phase\.json included, 1 transcript\(s\), 1 installer log\(s\)'
+        foreach ($name in @($entries.Keys | Where-Object { $_ -like 'user-phase/*' }) + @('README.txt')) {
+            foreach ($token in $script:sensitiveTokens) {
+                $entries[$name] | Should -Not -Match ([regex]::Escape($token)) -Because "$name must not name '$token'"
+            }
+        }
+        # Read-only: the user's files are as they were.
+        @(Get-ChildItem -LiteralPath $userLogs).Count | Should -Be 2
+    }
+
+    It 'Says in README.txt when the user phase has not run in this account' {
+        [void](Invoke-DiagnosticsCollection -LogDirectory $script:logDirectory -OutputDirectory $script:outputDirectory)
+
+        $entries = Get-ZipEntryText -Path (@(Get-ChildItem -LiteralPath $script:outputDirectory -Filter '*.zip')[0]).FullName
+        $entries['README.txt'] | Should -Match 'User phase of this account: it has not run here'
+        @($entries.Keys | Where-Object { $_ -like 'user-phase/*' }).Count | Should -Be 0
     }
 
     It 'Removes every name from every file in the .zip' {
@@ -937,6 +1013,23 @@ Describe 'The install-failure issue form asks for the bundle (wgt-gq8.35)' {
                 if ($value -match ': ' -or $value -match ' #') {
                     $offending += $line.Trim()
                 }
+            }
+        }
+        $offending | Should -BeNullOrEmpty
+    }
+
+    It 'Doubles every apostrophe inside a single-quoted value, which YAML would read as its end' {
+        # The exit-code description is one single-quoted scalar; "Group Policy's" in it must be
+        # written "Group Policy''s" (YAML), or the form is not valid YAML and GitHub shows none.
+        $offending = @()
+        foreach ($line in ($script:formText -split '\r?\n')) {
+            if ($line -match "^\s*(?:-\s+)?[\w-]+:\s+'(?<value>.*)'\s*$") {
+                if (($Matches['value'] -replace "''", '') -match "'") {
+                    $offending += $line.Trim()
+                }
+            }
+            elseif ($line -match "^\s*(?:-\s+)?[\w-]+:\s+'") {
+                $offending += $line.Trim()
             }
         }
         $offending | Should -BeNullOrEmpty

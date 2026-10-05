@@ -129,6 +129,8 @@ function ConvertTo-TranscriptAppId {
                          (<arch>) for all users.' or 'NOT INSTALLED - <reason>.'. A run that found
                          the framework writes none.
       WindowsAppRuntimeInstalled  the run installed the framework ('Windows App Runtime: installed').
+      WindowsAppRuntimeInstallCount  how many 'Windows App Runtime: installed' lines the run wrote:
+                         one run installs the framework at most once (the SYSTEM leg checks it).
       WindowsAppRuntimeAttempted  the run started that install ('Microsoft.WindowsAppRuntime.1.8 is
                          missing; installing the pinned Windows App Runtime ...'): every
                          precondition held (elevated, an architecture and Windows build the
@@ -165,6 +167,7 @@ function ConvertFrom-InstallTranscript {
     $autoUpdatesLine = $null
     $windowsAppRuntimeLine = $null
     $windowsAppRuntimeInstalled = $false
+    $windowsAppRuntimeInstallCount = 0
     $windowsAppRuntimeAttempted = $false
     $windowsAppRuntimePinStale = $false
     $wingetNotUsable = $false
@@ -254,6 +257,7 @@ function ConvertFrom-InstallTranscript {
             $windowsAppRuntimeLine = $Matches.text
             if ($windowsAppRuntimeLine -match '^installed\b') {
                 $windowsAppRuntimeInstalled = $true
+                $windowsAppRuntimeInstallCount++
             }
             if ($windowsAppRuntimeLine -match '^NOT INSTALLED - the latest winget release needs \S') {
                 $windowsAppRuntimePinStale = $true
@@ -325,6 +329,7 @@ function ConvertFrom-InstallTranscript {
         AutoUpdatesFrameworkMissing = $autoUpdatesFrameworkMissing
         WindowsAppRuntimeLine = $windowsAppRuntimeLine
         WindowsAppRuntimeInstalled = $windowsAppRuntimeInstalled
+        WindowsAppRuntimeInstallCount = $windowsAppRuntimeInstallCount
         WindowsAppRuntimeAttempted = $windowsAppRuntimeAttempted
         WindowsAppRuntimePinStale = $windowsAppRuntimePinStale
         WingetNotUsable     = $wingetNotUsable

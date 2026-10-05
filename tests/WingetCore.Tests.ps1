@@ -1852,6 +1852,18 @@ Describe 'Invoke-AppxProvisioning -TimeoutSeconds (work-order item 31)' {
         }
     }
 
+    # Work-order item 35's review: Windows PowerShell started through Process.Start from PowerShell 7
+    # inherits PowerShell 7's PSModulePath and then cannot load its own modules.
+    It 'starts Windows PowerShell without PowerShell 7''s PSModulePath' -Skip:($PSVersionTable.PSEdition -ne 'Core') {
+        Mock Invoke-ExternalProcess { New-TestProcessResult -ExitCode 0 }
+
+        Invoke-AppxProvisioning -PackagePath 'C:\dl\fw.msix' -TimeoutSeconds 600 | Should -BeTrue
+
+        Should -Invoke Invoke-ExternalProcess -Times 1 -Exactly -ParameterFilter {
+            @($RemoveEnvironmentVariable) -contains 'PSModulePath'
+        }
+    }
+
     It 'returns false, and says so, when <Case>' -Skip:($PSVersionTable.PSEdition -ne 'Core') -ForEach @(
         @{ Case = 'Add-AppxProvisionedPackage fails'; Result = { New-TestProcessResult -ExitCode 1 }; Message = $null }
         @{ Case = 'it runs past the time limit'; Result = { New-TestProcessResult -TimedOut }; Message = "Add-AppxProvisionedPackage did not finish within 10 minutes for 'C:\dl\fw.msix' and was stopped." }
