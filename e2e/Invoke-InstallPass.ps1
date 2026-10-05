@@ -40,8 +40,13 @@
         'Windows App Runtime:' line, which says why. A transcript that shows the install started
         ('installing the pinned Windows App Runtime') and then 'Windows App Runtime: NOT
         INSTALLED' fails the pass with 8: the download, the checks or the provisioning failed,
-        and that is what this run is there to catch. Any other reason for 8 (FAILED, UNHEALTHY,
-        AT RISK), or no transcript of the pass to check, fails the pass with 8 too.
+        and that is what this run is there to catch. So does 'Windows App Runtime: NOT INSTALLED
+        - the latest winget release needs ...' (work-order item 32): the pinned framework no
+        longer meets what the winget release WAU installs needs, a newer 1.8 build or another
+        family alike, so every PC without that framework now goes without WAU until the pin
+        (Get-WindowsAppRuntimePin) moves; the weekly run is how that is noticed. Any other reason
+        for 8 (FAILED, UNHEALTHY, AT RISK), or no transcript of the pass to check, fails the pass
+        with 8 too.
         Assert-Install.ps1 then checks that WAU is absent and the latest transcript says NOT
         CONFIGURED.
       - anything else: the pass failed, with the installer's code.
@@ -251,8 +256,9 @@ function Get-InstallPassTranscript {
     'first' or 'second'.
 .PARAMETER Transcript
     For exit code 8: the pass's transcript (Get-InstallPassTranscript), or $null when none was
-    found. 8 passes only when it says Winget-AutoUpdate was skipped for the missing framework and
-    the installer did not start an install of the framework that then failed.
+    found. 8 passes only when it says Winget-AutoUpdate was skipped for the missing framework, the
+    installer did not start an install of the framework that then failed, and its pinned framework
+    still meets what the latest winget release needs.
 .RETURNS
     [pscustomobject] with StepExitCode, Outcome ('passed', 'tolerated' or 'failed') and Message.
 #>
@@ -287,6 +293,11 @@ function Get-InstallPassVerdict {
         $what = "$passName install pass exited 8 (apps OK, auto-updates not configured or unhealthy)"
         if ($null -eq $Transcript) {
             return [pscustomobject]@{ StepExitCode = 8; Outcome = 'failed'; Message = "$what - FAILED: no transcript of this pass was found, so why cannot be checked" }
+        }
+        # Work-order item 32: the pin is stale. Accepting this would keep the weekly run green while
+        # every PC without the framework the latest winget needs loses Winget-AutoUpdate.
+        if ($Transcript.Parsed.WindowsAppRuntimePinStale) {
+            return [pscustomobject]@{ StepExitCode = 8; Outcome = 'failed'; Message = "$what - FAILED: $($Transcript.Name) shows that the installer's pinned Windows App Runtime no longer meets what the latest winget release needs ('Windows App Runtime: $($Transcript.Parsed.WindowsAppRuntimeLine)'), so Winget-AutoUpdate was skipped, as it will be on every PC without that framework. Move the pin (Get-WindowsAppRuntimePin, WingetAppSetup/Private/WindowsAppRuntime.ps1)" }
         }
         if ($Transcript.Parsed.AutoUpdatesFrameworkMissing) {
             $runtimeLine = 'no Windows App Runtime: line'

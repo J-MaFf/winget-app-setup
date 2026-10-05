@@ -23,17 +23,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Microsoft.WindowsAppRuntime*` entries (a list per architecture is read too, for the PC's). When
   the file cannot be read or lists no Windows App Runtime, the run warns and checks for the
   built-in requirement (`Get-DefaultWindowsAppRuntimeRequirement`); the lookup never stops a run.
-  `Get-WindowsAppRuntimeStatus -Requirement` checks every framework the requirement names, by
+  The warning gives the error's message on one line of at most 300 characters (for an HTTP error,
+  its status line, not the page a proxy or GitHub sent with it). `Get-WindowsAppRuntimeStatus
+  -Requirement` checks every framework the requirement names, by
   package name (`Get-WindowsAppRuntimePackageInfo -Name`, which accepts only package-name
   characters because the name goes into the Windows PowerShell query), so a newer family never
-  satisfies a dependency on 1.8. `Install-WindowsAppRuntimeFramework -Requirement` installs nothing
+  satisfies a dependency on 1.8, and returns the ones this PC lacks as `Missing`.
+  `Install-WindowsAppRuntimeFramework -Requirement -MissingFrameworks` installs nothing
   when the pinned framework (`Get-WindowsAppRuntimePin`, now with `FrameworkName`) does not meet
-  the requirement, with `Windows App Runtime: NOT INSTALLED - the latest winget release needs ...,
+  every framework the PC lacks (one it already has does not count), with
+  `Windows App Runtime: NOT INSTALLED - the latest winget release needs ...,
   and the framework this installer installs, ..., does not meet that; a newer version of this
   installer is needed`; WAU is then skipped (`NOT CONFIGURED`) or reported `AT RISK`, and the run
   exits 8, unless the PC already has what winget needs. `Install-WingetAutoUpdate` returns the
-  needed framework as `FrameworkName`, and the summary's `NOT CONFIGURED` and `AT RISK` lines name
-  it (unchanged text for 1.8). `-WhatIf` does not look anything up. Fixtures:
+  missing framework as `FrameworkName`, and the summary's `NOT CONFIGURED` and `AT RISK` lines name
+  it (unchanged text for 1.8). `-WhatIf` does not look anything up. `e2e/Invoke-InstallPass.ps1`
+  fails an exit 8 whose transcript shows that refusal, for a newer 1.8 build or another family
+  alike (`e2e/TranscriptAssertions.ps1` reads it as `WindowsAppRuntimePinStale`), so the weekly run
+  goes red when the pin has to move. Fixtures:
   `tests/fixtures/winget-dependencies` (the files of v1.29.380, v1.12.350 and v1.11.510, and a
   made-up file with a list per architecture).
 - When `Microsoft.WindowsAppRuntime.1.8` is missing, the installer now installs a pinned, verified

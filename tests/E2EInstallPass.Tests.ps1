@@ -105,6 +105,28 @@ Describe 'Get-InstallPassVerdict' {
         $verdict.Message | Should -Be "First install pass exited 8 (apps OK, auto-updates not configured or unhealthy) - FAILED: install-20261005-060000.log shows that the installer started its install of the pinned Microsoft.WindowsAppRuntime.1.8 and it failed ('Windows App Runtime: NOT INSTALLED - $Reason.'), so Winget-AutoUpdate was skipped"
     }
 
+    # Review of item 32: when the pinned framework no longer meets what the latest winget release
+    # needs, every PC without that framework goes without Winget-AutoUpdate until the pin moves.
+    # The weekly run has to go red for that, for a newer 1.8 build as for another family.
+    It 'Fails exit 8 when the pinned framework no longer meets what the latest winget release needs: <Needs>' -ForEach @(
+        @{ Needs = 'Microsoft.WindowsAppRuntime.1.8 >= 8000.1200.0.0'; Missing = 'Microsoft.WindowsAppRuntime.1.8' }
+        @{ Needs = 'Microsoft.WindowsAppRuntime.2 >= 2000.120.5.0'; Missing = 'Microsoft.WindowsAppRuntime.2' }
+    ) {
+        $runtimeLine = "NOT INSTALLED - the latest winget release needs $Needs, and the framework this installer installs, Microsoft.WindowsAppRuntime.1.8 8000.994.2142.0, does not meet that; a newer version of this installer is needed."
+        $content = @(
+            "Windows App Runtime: $runtimeLine"
+            'Summary:'
+            "Auto-updates: NOT CONFIGURED - $Missing is missing, and Winget-AutoUpdate would leave winget unusable without it."
+        ) -join "`n"
+        $transcript = [pscustomobject]@{ Name = 'install-20261005-060000.log'; Parsed = (ConvertFrom-InstallTranscript -Content $content) }
+
+        $verdict = Get-InstallPassVerdict -ExitCode 8 -KnownPlatformIncompatible '' -Pass 'first' -Transcript $transcript
+
+        $verdict.Outcome | Should -Be 'failed'
+        $verdict.StepExitCode | Should -Be 8
+        $verdict.Message | Should -Be "First install pass exited 8 (apps OK, auto-updates not configured or unhealthy) - FAILED: install-20261005-060000.log shows that the installer's pinned Windows App Runtime no longer meets what the latest winget release needs ('Windows App Runtime: $runtimeLine'), so Winget-AutoUpdate was skipped, as it will be on every PC without that framework. Move the pin (Get-WindowsAppRuntimePin, WingetAppSetup/Private/WindowsAppRuntime.ps1)"
+    }
+
     It 'Fails exit 8 when the pass''s transcript has no Auto-updates line, or there is no transcript' {
         $noLine = [pscustomobject]@{ Name = 'install-20261005-060000.log'; Parsed = (ConvertFrom-InstallTranscript -Content 'Summary:') }
 

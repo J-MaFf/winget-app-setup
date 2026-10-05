@@ -131,6 +131,10 @@ function ConvertTo-TranscriptAppId {
                          precondition held (elevated, an architecture and Windows build the
                          framework supports, no framework already provisioned), so a
                          'NOT INSTALLED' after it is a failed download, check or provisioning.
+      WindowsAppRuntimePinStale  the 'Windows App Runtime:' line says the installer's pinned
+                         framework does not meet what the latest winget release needs ('NOT
+                         INSTALLED - the latest winget release needs ...', work-order item 32), for
+                         a newer 1.8 build or another family alike: the pin has to move.
       WingetNotUsable    the end-of-run check printed 'winget: NOT USABLE'.
 #>
 function ConvertFrom-InstallTranscript {
@@ -157,6 +161,7 @@ function ConvertFrom-InstallTranscript {
     $windowsAppRuntimeLine = $null
     $windowsAppRuntimeInstalled = $false
     $windowsAppRuntimeAttempted = $false
+    $windowsAppRuntimePinStale = $false
     $wingetNotUsable = $false
 
     # Summary table state: 'none' until 'Summary:', 'header' until the dashes under the column
@@ -244,6 +249,9 @@ function ConvertFrom-InstallTranscript {
             if ($windowsAppRuntimeLine -match '^installed\b') {
                 $windowsAppRuntimeInstalled = $true
             }
+            if ($windowsAppRuntimeLine -match '^NOT INSTALLED - the latest winget release needs \S') {
+                $windowsAppRuntimePinStale = $true
+            }
             continue
         }
         if ($line -match '^winget: NOT USABLE') {
@@ -308,6 +316,7 @@ function ConvertFrom-InstallTranscript {
         WindowsAppRuntimeLine = $windowsAppRuntimeLine
         WindowsAppRuntimeInstalled = $windowsAppRuntimeInstalled
         WindowsAppRuntimeAttempted = $windowsAppRuntimeAttempted
+        WindowsAppRuntimePinStale = $windowsAppRuntimePinStale
         WingetNotUsable     = $wingetNotUsable
     }
 }

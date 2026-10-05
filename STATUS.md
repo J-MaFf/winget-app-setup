@@ -145,11 +145,13 @@ latest winget release's `DesktopAppInstaller_Dependencies.json` (the release WAU
 limit, falling back to `Microsoft.WindowsAppRuntime.1.8 >= 8000.616.304.0` with a warning when it
 cannot be read); when a future winget needs a newer 1.8 build or another family than the pin, a PC
 without it gets no framework install and no WAU, `NOT CONFIGURED` or `AT RISK` with the reason, and
-exit 8 - the sign to move the pin. The Server 2025 runner, which ships without the framework,
+exit 8 - the sign to move the pin; only the frameworks a PC lacks count, and only they are named.
+The Server 2025 runner, which ships without the framework,
 is therefore expected to get it and WAU on the first pass and exit 0;
 `e2e/Invoke-InstallPass.ps1` still accepts exit 8 when the pass's transcript gives the missing
 framework as the reason and the installer could not try to install it (and quotes why), but fails a
-pass whose framework install started and failed. The package is Microsoft's developer NuGet package
+pass whose framework install started and failed, and one whose pinned framework no longer meets
+what the latest winget release needs, so the weekly run goes red when the pin has to move. The package is Microsoft's developer NuGet package
 (Windows App SDK license terms for developers), not one of its end-user runtime installers, and a
 failed install is not remembered, so a PC where it keeps failing downloads the 150 MB again on
 every run. For RMM runs: `WINGET_APP_SETUP_NONINTERACTIVE=1` makes the one-liner non-interactive;
@@ -361,7 +363,7 @@ every repository secret.
 | `winget-app-uninstall.ps1` | Uninstall entry script; imports the module from the repo and runs `Invoke-WingetUninstall` (exit codes in readme "Uninstall") |
 | `tests/` | Pester suite, one `<Area>.Tests.ps1` per module file plus `EntryPoint.Tests.ps1`, `TestHarness.Tests.ps1`, `BuildGuards.Tests.ps1` (the build guards and the pre-commit hook) and the `E2E*.Tests.ps1` files (for the `e2e/` scripts, with sample transcripts in `tests/fixtures/e2e`); `TestHelpers.ps1` loads the module once per file and stands in for Windows-only commands, so the suite also runs on Linux/macOS |
 | `e2e/Assert-Install.ps1` | Shared post-install assertions for end-to-end runs (tier 1 workflow below; tier 2 [#215](https://github.com/J-MaFf/winget-app-setup/issues/215) reuses it); the transcript checks are in `e2e/TranscriptAssertions.ps1` and fixture-tested; `-InstallerPath` checks that every pass ran the checkout's build |
-| `e2e/Invoke-InstallPass.ps1` | Starts each E2E install pass (one-liner or `-File`, from PowerShell 7 or Windows PowerShell 5.1) and applies the exit-code policy: 0 and 3010 pass, 8 only when the pass's transcript says WAU was skipped for the missing `Microsoft.WindowsAppRuntime.1.8` and the installer could not try to install it (quoting its `Windows App Runtime:` line), 1 only while `KNOWN_PLATFORM_INCOMPATIBLE` is non-empty |
+| `e2e/Invoke-InstallPass.ps1` | Starts each E2E install pass (one-liner or `-File`, from PowerShell 7 or Windows PowerShell 5.1) and applies the exit-code policy: 0 and 3010 pass, 8 only when the pass's transcript says WAU was skipped for the missing `Microsoft.WindowsAppRuntime.1.8`, the installer could not try to install it (quoting its `Windows App Runtime:` line) and its pinned framework still meets what the latest winget release needs, 1 only while `KNOWN_PLATFORM_INCOMPATIBLE` is non-empty |
 | `e2e/Remove-PreinstalledApps.ps1` | Uninstalls the catalog apps the runner image ships with (Chrome, 7-Zip, Git; with `-IncludePowerShell7`, PowerShell 7 too) before the first E2E pass; every call time-limited, failures become warnings |
 | `e2e/Collect-Diagnostics.ps1` | Windows PowerShell 5.1 snapshots for the E2E run: pwsh versions, App Installer / WindowsAppRuntime AppX state, WAU tasks; at the end MsiInstaller and RestartManager events, AppX deployment errors and warnings, and WAU logs (`e2e-diagnostics` artifact); always exits 0 |
 | `.github/workflows/e2e-install.yml` | E2E tier 1: real install runs on GitHub-hosted `windows-latest` in two legs, `e2e-install` from PowerShell 7 and `e2e-install-windows-powershell` from Windows PowerShell 5.1 through the PowerShell 7 bootstrap, after removing the preinstalled Chrome, 7-Zip and Git (issues #279/#282/#283; weekly against raw `main`, plus dispatches and PRs that touch the product or e2e files against the checkout; uploads transcripts and diagnostics; a failed, timed-out or cancelled weekly or `main`-dispatched run files an issue from the ubuntu `report-failure` job) |

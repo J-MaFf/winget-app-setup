@@ -463,6 +463,43 @@ Describe 'Install-WindowsAppRuntimeFramework (work-order item 31)' {
         Should -Invoke Get-WindowsAppRuntimeStatus -Times 1 -Exactly -ParameterFilter { $Requirement.Source -eq 'LatestRelease' -and $Requirement.Frameworks[0].MinimumVersion -eq [version]'8000.994.2142.0' }
     }
 
+    # Review of item 32: only the frameworks this PC lacks must be ones the pin meets. A release
+    # that also needs another family the PC already has is no reason to refuse the pinned 1.8.
+    It 'installs the pinned framework when what this PC lacks is one it meets, though the latest release also needs another family' {
+        $latestRequirement = [pscustomobject]@{
+            Frameworks = @(
+                [pscustomobject]@{ Name = 'Microsoft.WindowsAppRuntime.1.8'; MinimumVersion = [version]'8000.616.304.0' }
+                [pscustomobject]@{ Name = 'Microsoft.WindowsAppRuntime.2'; MinimumVersion = [version]'2000.120.5.0' }
+            )
+            Source     = 'LatestRelease'
+            Detail     = 'test'
+        }
+
+        $result = Install-WindowsAppRuntimeFramework -Requirement $latestRequirement -MissingFrameworks @($latestRequirement.Frameworks[0])
+
+        $result.Installed | Should -BeTrue
+        $result.Reason | Should -BeNullOrEmpty
+        Should -Invoke Invoke-AppxProvisioning -Times 1 -Exactly
+        $script:errors | Should -BeNullOrEmpty
+    }
+
+    It 'still installs nothing when what this PC lacks is a family the pin does not meet' {
+        $latestRequirement = [pscustomobject]@{
+            Frameworks = @(
+                [pscustomobject]@{ Name = 'Microsoft.WindowsAppRuntime.1.8'; MinimumVersion = [version]'8000.616.304.0' }
+                [pscustomobject]@{ Name = 'Microsoft.WindowsAppRuntime.2'; MinimumVersion = [version]'2000.120.5.0' }
+            )
+            Source     = 'LatestRelease'
+            Detail     = 'test'
+        }
+
+        $result = Install-WindowsAppRuntimeFramework -Requirement $latestRequirement -MissingFrameworks @($latestRequirement.Frameworks[1])
+
+        $result.Installed | Should -BeFalse
+        $result.Reason | Should -Be 'the latest winget release needs Microsoft.WindowsAppRuntime.2 >= 2000.120.5.0, and the framework this installer installs, Microsoft.WindowsAppRuntime.1.8 8000.994.2142.0, does not meet that; a newer version of this installer is needed'
+        Should -Invoke Invoke-WebRequest -Times 0 -Exactly
+    }
+
     It 'names the framework family it installs in its pin' {
         (Get-WindowsAppRuntimePin).FrameworkName | Should -Be 'Microsoft.WindowsAppRuntime.1.8'
     }

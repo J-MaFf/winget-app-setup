@@ -572,15 +572,20 @@ link is not subject to the API's limit of 60 calls an hour per address), with a 
 (`Get-WindowsAppRuntimeRequirement`). The transcript says what it found:
 `The latest winget release needs Microsoft.WindowsAppRuntime.1.8 >= 8000.616.304.0 ...`. When the
 file cannot be read (no network, a proxy, GitHub down, a format the installer does not know) or lists
-no Windows App Runtime, the run warns and checks for the built-in requirement,
-`Microsoft.WindowsAppRuntime.1.8` 8000.616.304.0 or newer; the lookup never stops or fails a run.
+no Windows App Runtime, the run warns (one line, with the error's status line, such as
+`Response status code does not indicate success: 403 (Forbidden)`, not the page a proxy sent with
+it) and checks for the built-in requirement, `Microsoft.WindowsAppRuntime.1.8` 8000.616.304.0 or
+newer; the lookup never stops or fails a run.
 When a future winget needs a newer 1.8 build than the pinned framework below, or another framework
 family (a newer family does not stand in for 1.8, nor 1.8 for a newer one), a PC that already has it
 gets WAU as usual; on a PC that lacks it, the installer does not install its pinned 1.8 framework,
 skips WAU (or reports it `AT RISK`) with
 `Windows App Runtime: NOT INSTALLED - the latest winget release needs <framework>, and the framework
 this installer installs, ..., does not meet that; a newer version of this installer is needed`, and
-the run exits 8. That is the sign to move the pin.
+the run exits 8. That is the sign to move the pin, and the weekly E2E run fails on it (see
+[End-to-end monitoring](#end-to-end-monitoring-e2e-tier-1)). When the release needs several frameworks, only the
+ones the PC lacks count: a PC that has every other one and lacks only `Microsoft.WindowsAppRuntime.1.8`
+still gets the pinned framework, and the messages name only the frameworks that are missing.
 
 A freshly imaged PC, a PC whose Microsoft Store updates are blocked, and Windows Server often lack
 that framework, so when the all-users check finds it missing (and the pinned copy meets what the
@@ -763,11 +768,15 @@ throwaway VMs by construction:
   Exit 8 passes only when that pass's own transcript says
   `Auto-updates: NOT CONFIGURED - Microsoft.WindowsAppRuntime.1.8 is missing` and the installer
   could not try to install the framework (the run was not elevated, Windows or its architecture is
-  not one the framework supports, a framework was already provisioned, or the latest winget release
-  needs a framework the installer's pinned one does not meet); the verdict then quotes
+  not one the framework supports, or a framework was already provisioned); the verdict then quotes
   the transcript's `Windows App Runtime:` line with the reason. An install of the framework that
   started and then failed (download, checks or provisioning) fails the pass, as does 8 for any
-  other reason or with no transcript to check.
+  other reason or with no transcript to check. So does a `Windows App Runtime:` line that says the
+  latest winget release needs a framework the installer's pinned one does not meet, whether a newer
+  1.8 build or another family: every PC without that framework goes without Winget-AutoUpdate
+  until the pin (`Get-WindowsAppRuntimePin`) moves, so the weekly run goes red and files its issue.
+  The assertions check for the built-in framework requirement, not the one the run read from the
+  latest winget release; a pass whose pin no longer meets that release has already failed.
   Exit 1 is tolerated only while `KNOWN_PLATFORM_INCOMPATIBLE` is non-empty, and the assertions
   then check that nothing outside that list failed. Any other code fails the pass with the
   installer's code. The second pass proves idempotence.

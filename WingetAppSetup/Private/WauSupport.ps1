@@ -532,7 +532,18 @@ function Get-WindowsAppRuntimeRequirement {
         $frameworks = @(ConvertFrom-WingetDependenciesJson -Json $content -Architecture $architecture)
     }
     catch {
-        $problem = "$_".Trim().TrimEnd('.')
+        # The exception's message, not "$_": for an HTTP error, PowerShell 7 puts the response
+        # body (a proxy's block page, GitHub's error page) in the error record's text and the
+        # status line ('Response status code does not indicate success: 403 (Forbidden).') in the
+        # exception. One line, at most 300 characters, as this warning can come on every run.
+        $problem = [string]$_.Exception.Message
+        if ([string]::IsNullOrWhiteSpace($problem)) {
+            $problem = "$_"
+        }
+        $problem = ($problem -replace '\s+', ' ').Trim().TrimEnd('.')
+        if ($problem.Length -gt 300) {
+            $problem = $problem.Substring(0, 297).TrimEnd() + '...'
+        }
         Write-WarningMessage "Could not read which Windows App Runtime the latest winget release needs ($url`: $problem); checking for the built-in requirement, $fallbackText."
         $fallback.Detail = "the built-in requirement (the latest winget release's DesktopAppInstaller_Dependencies.json could not be read: $problem)"
         return $fallback
@@ -576,6 +587,9 @@ function Get-WindowsAppRuntimeRequirement {
                  architecture at or above its minimum is registered for any user; $false when one
                  is missing; $null when the query failed.
       - Detail:  the versions found (or the query error), for messages.
+      - Missing: the frameworks of the requirement (Name, MinimumVersion) this PC lacks; empty
+                 when Present is $true or $null. Install-WingetAutoUpdate passes them to
+                 Install-WindowsAppRuntimeFramework and names only them in its messages.
 #>
 function Get-WindowsAppRuntimeStatus {
     param (
@@ -589,23 +603,25 @@ function Get-WindowsAppRuntimeStatus {
     }
     $frameworks = @($Requirement.Frameworks)
     if ($frameworks.Count -eq 0) {
-        return [pscustomobject]@{ Present = $true; Detail = 'no Windows App Runtime required' }
+        return [pscustomobject]@{ Present = $true; Detail = 'no Windows App Runtime required'; Missing = @() }
     }
 
     $osArchitecture = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
     $present = $true
     $details = @()
+    $missing = @()
     foreach ($framework in $frameworks) {
         try {
             $packages = @(Get-WindowsAppRuntimePackageInfo -Name $framework.Name)
         }
         catch {
-            return [pscustomobject]@{ Present = $null; Detail = "could not query installed packages: $_" }
+            return [pscustomobject]@{ Present = $null; Detail = "could not query installed packages: $_"; Missing = @() }
         }
 
         $suitable = @($packages | Where-Object { $_.Architecture -eq $osArchitecture -and $_.Version -ge [version]$framework.MinimumVersion })
         if ($suitable.Count -eq 0) {
             $present = $false
+            $missing += $framework
         }
         $found = if ($packages.Count -gt 0) {
             ($packages | ForEach-Object { "$($_.Architecture) $($_.Version)" }) -join ', '
@@ -619,6 +635,7 @@ function Get-WindowsAppRuntimeStatus {
     return [pscustomobject]@{
         Present = $present
         Detail  = ($details -join '; ')
+        Missing = @($missing)
     }
 }
 

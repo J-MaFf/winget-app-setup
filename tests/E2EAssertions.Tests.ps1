@@ -120,6 +120,34 @@ Describe 'ConvertFrom-InstallTranscript' {
         $transcript.WindowsAppRuntimeAttempted | Should -Be $Attempted
     }
 
+    # Review of item 32: the refusal that means the pinned framework has to move, for a newer 1.8
+    # build and for another family alike. e2e/Invoke-InstallPass.ps1 fails a pass that shows it.
+    It 'Reads a refusal because the pinned framework does not meet what the latest winget release needs: <Needs>' -ForEach @(
+        @{ Needs = 'Microsoft.WindowsAppRuntime.1.8 >= 8000.1200.0.0'; Missing = 'Microsoft.WindowsAppRuntime.1.8' }
+        @{ Needs = 'Microsoft.WindowsAppRuntime.2 >= 2000.120.5.0'; Missing = 'Microsoft.WindowsAppRuntime.2' }
+    ) {
+        $content = @(
+            "Windows App Runtime: NOT INSTALLED - the latest winget release needs $Needs, and the framework this installer installs, Microsoft.WindowsAppRuntime.1.8 8000.994.2142.0, does not meet that; a newer version of this installer is needed."
+            'Summary:'
+            "Auto-updates: NOT CONFIGURED - $Missing is missing, and Winget-AutoUpdate would leave winget unusable without it."
+        ) -join "`n"
+
+        $transcript = ConvertFrom-InstallTranscript -Content $content
+
+        $transcript.WindowsAppRuntimePinStale | Should -BeTrue
+        $transcript.WindowsAppRuntimeAttempted | Should -BeFalse
+        $transcript.WindowsAppRuntimeInstalled | Should -BeFalse
+    }
+
+    It 'Does not read another Windows App Runtime outcome as a stale pin: <Line>' -ForEach @(
+        @{ Line = 'NOT INSTALLED - installing it for all users needs administrator rights.' }
+        @{ Line = 'NOT INSTALLED - Add-AppxProvisionedPackage failed (its error is above).' }
+        @{ Line = 'installed Microsoft.WindowsAppRuntime.1.8 8000.994.2142.0 (X64) for all users.' }
+    ) {
+        (ConvertFrom-InstallTranscript -Content "Windows App Runtime: $Line`nSummary:").WindowsAppRuntimePinStale | Should -BeFalse
+        (ConvertFrom-InstallTranscript -Content (Get-Fixture -Name 'first-pass')).WindowsAppRuntimePinStale | Should -BeFalse
+    }
+
     It 'Reads the timeout failures of both passes, which the old failure regex missed, and what the retry recovered' {
         $content = Get-Fixture -Name 'timeouts'
         # The regex Assert-Install.ps1 used before (P3-39) finds only the first-pass failure that
@@ -486,6 +514,7 @@ Describe 'Installer messages the transcript parser keys on' {
         @{ File = 'WingetAppSetup/Private/WindowsAppRuntime.ps1'; Text = 'Write-ErrorMessage "Windows App Runtime: NOT INSTALLED - $reason."' }
         @{ File = 'WingetAppSetup/Private/WindowsAppRuntime.ps1'; Text = "Write-Success ('Windows App Runtime: installed Microsoft.WindowsAppRuntime.1.8 {0} ({1}) for all users{2}.'" }
         @{ File = 'WingetAppSetup/Private/WindowsAppRuntime.ps1'; Text = "Write-Info ('Microsoft.WindowsAppRuntime.1.8 is missing; installing the pinned Windows App Runtime {0} (framework {1}, {2}) for all users first...'" }
+        @{ File = 'WingetAppSetup/Private/WindowsAppRuntime.ps1'; Text = "`$reason = ('the latest winget release needs {0}, and the framework this installer installs, {1} {2}, does not meet that; a newer version of this installer is needed'" }
         @{ File = 'build/fragments/tail.ps1'; Text = 'Write-Info "Installer build: $script:InstallerBuildId"' }
         @{ File = 'build/fragments/tail.ps1'; Text = "Write-ErrorMessage 'UNEXPECTED ERROR - the run was aborted before it finished." }
         @{ File = 'build/fragments/tail.ps1'; Text = "`$abortMessage = 'The run was stopped before it finished (exit code 5).'" }

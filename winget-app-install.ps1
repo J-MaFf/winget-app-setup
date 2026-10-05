@@ -61,12 +61,12 @@ param (
 # This script is assembled from the WingetAppSetup module by build/Build-WingetInstallScript.ps1.
 # Edit the function source under WingetAppSetup/Public and WingetAppSetup/Private, then re-run the
 # build to regenerate this file. See readme.md ("Project layout") for details.
-# Build id: 1.0.0+271fa379 (module version + SHA256 fragment of this whole script; issue #189).
+# Build id: 1.0.0+5b35b3d6 (module version + SHA256 fragment of this whole script; issue #189).
 # ------------------------------------------------------------------------------------------------
 
 # Content-derived build identity, logged at startup so a transcript from a remote machine
 # identifies exactly which installer build produced it (issue #189).
-$script:InstallerBuildId = '1.0.0+271fa379'
+$script:InstallerBuildId = '1.0.0+5b35b3d6'
 
 # ------------------------------------------------Functions------------------------------------------------
 
@@ -6129,7 +6129,18 @@ function Get-WindowsAppRuntimeRequirement {
         $frameworks = @(ConvertFrom-WingetDependenciesJson -Json $content -Architecture $architecture)
     }
     catch {
-        $problem = "$_".Trim().TrimEnd('.')
+        # The exception's message, not "$_": for an HTTP error, PowerShell 7 puts the response
+        # body (a proxy's block page, GitHub's error page) in the error record's text and the
+        # status line ('Response status code does not indicate success: 403 (Forbidden).') in the
+        # exception. One line, at most 300 characters, as this warning can come on every run.
+        $problem = [string]$_.Exception.Message
+        if ([string]::IsNullOrWhiteSpace($problem)) {
+            $problem = "$_"
+        }
+        $problem = ($problem -replace '\s+', ' ').Trim().TrimEnd('.')
+        if ($problem.Length -gt 300) {
+            $problem = $problem.Substring(0, 297).TrimEnd() + '...'
+        }
         Write-WarningMessage "Could not read which Windows App Runtime the latest winget release needs ($url`: $problem); checking for the built-in requirement, $fallbackText."
         $fallback.Detail = "the built-in requirement (the latest winget release's DesktopAppInstaller_Dependencies.json could not be read: $problem)"
         return $fallback
@@ -6173,6 +6184,9 @@ function Get-WindowsAppRuntimeRequirement {
                  architecture at or above its minimum is registered for any user; $false when one
                  is missing; $null when the query failed.
       - Detail:  the versions found (or the query error), for messages.
+      - Missing: the frameworks of the requirement (Name, MinimumVersion) this PC lacks; empty
+                 when Present is $true or $null. Install-WingetAutoUpdate passes them to
+                 Install-WindowsAppRuntimeFramework and names only them in its messages.
 #>
 function Get-WindowsAppRuntimeStatus {
     param (
@@ -6186,23 +6200,25 @@ function Get-WindowsAppRuntimeStatus {
     }
     $frameworks = @($Requirement.Frameworks)
     if ($frameworks.Count -eq 0) {
-        return [pscustomobject]@{ Present = $true; Detail = 'no Windows App Runtime required' }
+        return [pscustomobject]@{ Present = $true; Detail = 'no Windows App Runtime required'; Missing = @() }
     }
 
     $osArchitecture = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
     $present = $true
     $details = @()
+    $missing = @()
     foreach ($framework in $frameworks) {
         try {
             $packages = @(Get-WindowsAppRuntimePackageInfo -Name $framework.Name)
         }
         catch {
-            return [pscustomobject]@{ Present = $null; Detail = "could not query installed packages: $_" }
+            return [pscustomobject]@{ Present = $null; Detail = "could not query installed packages: $_"; Missing = @() }
         }
 
         $suitable = @($packages | Where-Object { $_.Architecture -eq $osArchitecture -and $_.Version -ge [version]$framework.MinimumVersion })
         if ($suitable.Count -eq 0) {
             $present = $false
+            $missing += $framework
         }
         $found = if ($packages.Count -gt 0) {
             ($packages | ForEach-Object { "$($_.Architecture) $($_.Version)" }) -join ', '
@@ -6216,6 +6232,7 @@ function Get-WindowsAppRuntimeStatus {
     return [pscustomobject]@{
         Present = $present
         Detail  = ($details -join '; ')
+        Missing = @($missing)
     }
 }
 
@@ -6880,10 +6897,11 @@ function Test-WindowsAppRuntimeSignature {
 .DESCRIPTION
     Called by Install-WingetAutoUpdate when Get-WindowsAppRuntimeStatus finds no suitable
     framework (never when that check itself failed). Steps:
-      1. Preconditions: the pinned framework meets the requirement (what the latest winget release
-         needs, Get-WindowsAppRuntimeRequirement: the same family, at a version no higher than
-         the pinned one; a newer family does not stand in for an older one, nor the other way
-         round), an elevated run (SYSTEM included), an OS architecture the pin has a file for
+      1. Preconditions: the pinned framework meets every framework of the requirement this PC
+         lacks (what the latest winget release needs, Get-WindowsAppRuntimeRequirement: the same
+         family, at a version no higher than the pinned one; a newer family does not stand in for
+         an older one, nor the other way round; one the PC already has does not matter), an
+         elevated run (SYSTEM included), an OS architecture the pin has a file for
          (X64, X86, Arm64), Windows build 17763 or later (the framework's minimum), and no
          provisioned framework for this architecture at or above the pinned version: a newer build
          is never replaced or downgraded.
@@ -6914,6 +6932,9 @@ function Test-WindowsAppRuntimeSignature {
 .PARAMETER Requirement
     What winget needs (Get-WindowsAppRuntimeRequirement). Default: the built-in requirement
     (Get-DefaultWindowsAppRuntimeRequirement), which the pin meets.
+.PARAMETER MissingFrameworks
+    The frameworks of the requirement this PC lacks (Get-WindowsAppRuntimeStatus's Missing); only
+    these must be ones the pin meets. Default (or empty): every framework of the requirement.
 .RETURNS
     [pscustomobject] with Installed ([bool]: Add-AppxProvisionedPackage succeeded and the check
     afterwards found the framework, or could not run), Status (Get-WindowsAppRuntimeStatus's result
@@ -6924,7 +6945,12 @@ function Install-WindowsAppRuntimeFramework {
     param (
         [Parameter(Mandatory = $false)]
         [AllowNull()]
-        [object]$Requirement
+        [object]$Requirement,
+
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [AllowEmptyCollection()]
+        [object[]]$MissingFrameworks
     )
 
     $pin = Get-WindowsAppRuntimePin
@@ -6939,8 +6965,13 @@ function Install-WindowsAppRuntimeFramework {
             $Requirement = Get-DefaultWindowsAppRuntimeRequirement
         }
         # Work-order item 32: the pinned 1.8 framework does not help a winget that needs a newer
-        # 1.8 build or another family, so it is not installed for one (and WAU stays off).
-        $unmet = @(@($Requirement.Frameworks) | Where-Object { $_.Name -ne $pin.FrameworkName -or [version]$pin.FrameworkVersion -lt [version]$_.MinimumVersion })
+        # 1.8 build or another family, so it is not installed for one (and WAU stays off). Only
+        # what this PC lacks counts: another family it already has is no reason to refuse.
+        $needed = @($Requirement.Frameworks)
+        if ($MissingFrameworks) {
+            $needed = @($MissingFrameworks)
+        }
+        $unmet = @($needed | Where-Object { $_.Name -ne $pin.FrameworkName -or [version]$pin.FrameworkVersion -lt [version]$_.MinimumVersion })
         if ($unmet.Count -gt 0) {
             $reason = ('the latest winget release needs {0}, and the framework this installer installs, {1} {2}, does not meet that; a newer version of this installer is needed' -f (Format-WindowsAppRuntimeRequirement -Frameworks $unmet), $pin.FrameworkName, $pin.FrameworkVersion)
         }
@@ -10657,7 +10688,7 @@ function Test-WauInstalled {
                  installed (Install-WindowsAppRuntimeFramework's Reason), or $null.
       - FrameworkName: for AlreadyPresent, Unhealthy and FrameworkMissing, the framework winget
                  needs (e.g. 'Microsoft.WindowsAppRuntime.1.8'; several are joined with ' and '),
-                 for the summary's messages.
+                 for the summary's messages. With FrameworkMissing, only the ones this PC lacks.
       - RestartRequired: $true when msiexec returned 3010 (ERROR_SUCCESS_REBOOT_REQUIRED): WAU is
                  installed, and a restart finishes it (review finding P3-16).
 #>
@@ -10701,8 +10732,12 @@ function Install-WingetAutoUpdate {
     elseif (-not $framework.Present) {
         # Work-order item 31: install the pinned framework for all users, then go on with the
         # status it re-checked. Also on a machine that already has WAU, which is then no longer
-        # at risk. It installs nothing when the pin does not meet the requirement (item 32).
-        $frameworkInstall = Install-WindowsAppRuntimeFramework -Requirement $requirement
+        # at risk. It installs nothing when the pin does not meet what this PC lacks (item 32).
+        $missingFrameworks = @($requirement.Frameworks)
+        if ($framework.Missing) {
+            $missingFrameworks = @($framework.Missing)
+        }
+        $frameworkInstall = Install-WindowsAppRuntimeFramework -Requirement $requirement -MissingFrameworks $missingFrameworks
         if ($frameworkInstall.Installed) {
             $framework = $frameworkInstall.Status
         }
@@ -10711,6 +10746,11 @@ function Install-WingetAutoUpdate {
         }
     }
     $frameworkMissing = $framework.Present -eq $false
+    if ($frameworkMissing -and $framework.Missing) {
+        # Name only what this PC lacks, not a framework of the requirement it already has.
+        $frameworkName = (@($framework.Missing) | ForEach-Object { $_.Name }) -join ' and '
+        $frameworkRelease = $frameworkName -replace 'Microsoft\.WindowsAppRuntime\.', ''
+    }
     # For the messages below. Install-WindowsAppRuntimeFramework has just printed why, and the
     # summary repeats it.
     $frameworkInstallNote = ''

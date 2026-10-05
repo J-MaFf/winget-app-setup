@@ -208,10 +208,11 @@ function Test-WindowsAppRuntimeSignature {
 .DESCRIPTION
     Called by Install-WingetAutoUpdate when Get-WindowsAppRuntimeStatus finds no suitable
     framework (never when that check itself failed). Steps:
-      1. Preconditions: the pinned framework meets the requirement (what the latest winget release
-         needs, Get-WindowsAppRuntimeRequirement: the same family, at a version no higher than
-         the pinned one; a newer family does not stand in for an older one, nor the other way
-         round), an elevated run (SYSTEM included), an OS architecture the pin has a file for
+      1. Preconditions: the pinned framework meets every framework of the requirement this PC
+         lacks (what the latest winget release needs, Get-WindowsAppRuntimeRequirement: the same
+         family, at a version no higher than the pinned one; a newer family does not stand in for
+         an older one, nor the other way round; one the PC already has does not matter), an
+         elevated run (SYSTEM included), an OS architecture the pin has a file for
          (X64, X86, Arm64), Windows build 17763 or later (the framework's minimum), and no
          provisioned framework for this architecture at or above the pinned version: a newer build
          is never replaced or downgraded.
@@ -242,6 +243,9 @@ function Test-WindowsAppRuntimeSignature {
 .PARAMETER Requirement
     What winget needs (Get-WindowsAppRuntimeRequirement). Default: the built-in requirement
     (Get-DefaultWindowsAppRuntimeRequirement), which the pin meets.
+.PARAMETER MissingFrameworks
+    The frameworks of the requirement this PC lacks (Get-WindowsAppRuntimeStatus's Missing); only
+    these must be ones the pin meets. Default (or empty): every framework of the requirement.
 .RETURNS
     [pscustomobject] with Installed ([bool]: Add-AppxProvisionedPackage succeeded and the check
     afterwards found the framework, or could not run), Status (Get-WindowsAppRuntimeStatus's result
@@ -252,7 +256,12 @@ function Install-WindowsAppRuntimeFramework {
     param (
         [Parameter(Mandatory = $false)]
         [AllowNull()]
-        [object]$Requirement
+        [object]$Requirement,
+
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [AllowEmptyCollection()]
+        [object[]]$MissingFrameworks
     )
 
     $pin = Get-WindowsAppRuntimePin
@@ -267,8 +276,13 @@ function Install-WindowsAppRuntimeFramework {
             $Requirement = Get-DefaultWindowsAppRuntimeRequirement
         }
         # Work-order item 32: the pinned 1.8 framework does not help a winget that needs a newer
-        # 1.8 build or another family, so it is not installed for one (and WAU stays off).
-        $unmet = @(@($Requirement.Frameworks) | Where-Object { $_.Name -ne $pin.FrameworkName -or [version]$pin.FrameworkVersion -lt [version]$_.MinimumVersion })
+        # 1.8 build or another family, so it is not installed for one (and WAU stays off). Only
+        # what this PC lacks counts: another family it already has is no reason to refuse.
+        $needed = @($Requirement.Frameworks)
+        if ($MissingFrameworks) {
+            $needed = @($MissingFrameworks)
+        }
+        $unmet = @($needed | Where-Object { $_.Name -ne $pin.FrameworkName -or [version]$pin.FrameworkVersion -lt [version]$_.MinimumVersion })
         if ($unmet.Count -gt 0) {
             $reason = ('the latest winget release needs {0}, and the framework this installer installs, {1} {2}, does not meet that; a newer version of this installer is needed' -f (Format-WindowsAppRuntimeRequirement -Frameworks $unmet), $pin.FrameworkName, $pin.FrameworkVersion)
         }

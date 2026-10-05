@@ -120,7 +120,7 @@ function Test-WauInstalled {
                  installed (Install-WindowsAppRuntimeFramework's Reason), or $null.
       - FrameworkName: for AlreadyPresent, Unhealthy and FrameworkMissing, the framework winget
                  needs (e.g. 'Microsoft.WindowsAppRuntime.1.8'; several are joined with ' and '),
-                 for the summary's messages.
+                 for the summary's messages. With FrameworkMissing, only the ones this PC lacks.
       - RestartRequired: $true when msiexec returned 3010 (ERROR_SUCCESS_REBOOT_REQUIRED): WAU is
                  installed, and a restart finishes it (review finding P3-16).
 #>
@@ -164,8 +164,12 @@ function Install-WingetAutoUpdate {
     elseif (-not $framework.Present) {
         # Work-order item 31: install the pinned framework for all users, then go on with the
         # status it re-checked. Also on a machine that already has WAU, which is then no longer
-        # at risk. It installs nothing when the pin does not meet the requirement (item 32).
-        $frameworkInstall = Install-WindowsAppRuntimeFramework -Requirement $requirement
+        # at risk. It installs nothing when the pin does not meet what this PC lacks (item 32).
+        $missingFrameworks = @($requirement.Frameworks)
+        if ($framework.Missing) {
+            $missingFrameworks = @($framework.Missing)
+        }
+        $frameworkInstall = Install-WindowsAppRuntimeFramework -Requirement $requirement -MissingFrameworks $missingFrameworks
         if ($frameworkInstall.Installed) {
             $framework = $frameworkInstall.Status
         }
@@ -174,6 +178,11 @@ function Install-WingetAutoUpdate {
         }
     }
     $frameworkMissing = $framework.Present -eq $false
+    if ($frameworkMissing -and $framework.Missing) {
+        # Name only what this PC lacks, not a framework of the requirement it already has.
+        $frameworkName = (@($framework.Missing) | ForEach-Object { $_.Name }) -join ' and '
+        $frameworkRelease = $frameworkName -replace 'Microsoft\.WindowsAppRuntime\.', ''
+    }
     # For the messages below. Install-WindowsAppRuntimeFramework has just printed why, and the
     # summary repeats it.
     $frameworkInstallNote = ''

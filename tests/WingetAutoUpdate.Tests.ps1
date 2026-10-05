@@ -1475,6 +1475,17 @@ Describe 'Windows App Runtime requirement from the latest winget release (work-o
             param ([Parameter(Mandatory = $true)][AllowEmptyString()][string]$Text)
             [pscustomobject]@{ StatusCode = 200; Content = [System.Text.Encoding]::UTF8.GetBytes($Text) }
         }
+        # What PowerShell 7's Invoke-WebRequest throws for an HTTP error that has a body: the
+        # status line in the exception, the body (a proxy's block page, GitHub's error page) in
+        # ErrorDetails, which is what "$_" prints.
+        function New-TestHttpErrorRecord {
+            param ([Parameter(Mandatory = $true)][int]$StatusCode, [Parameter(Mandatory = $true)][string]$Body)
+            $response = [System.Net.Http.HttpResponseMessage]::new([System.Net.HttpStatusCode]$StatusCode)
+            $exception = [Microsoft.PowerShell.Commands.HttpResponseException]::new(('Response status code does not indicate success: {0} ({1}).' -f $StatusCode, $response.ReasonPhrase), $response)
+            $record = [System.Management.Automation.ErrorRecord]::new($exception, 'WebCmdletWebResponseException,Microsoft.PowerShell.Commands.InvokeWebRequestCommand', [System.Management.Automation.ErrorCategory]::InvalidOperation, $null)
+            $record.ErrorDetails = [System.Management.Automation.ErrorDetails]::new($Body)
+            $record
+        }
     }
 
     Context 'ConvertFrom-WingetDependenciesJson' {
@@ -1605,7 +1616,10 @@ Describe 'Windows App Runtime requirement from the latest winget release (work-o
         It 'falls back to the built-in requirement, with a warning and without throwing, when <Case>' -ForEach @(
             @{ Case = 'there is no network'; Setup = { Mock Invoke-WebRequest { throw 'No such host is known. (github.com:443)' } }; Problem = 'No such host is known. (github.com:443)' }
             @{ Case = 'the request times out'; Setup = { Mock Invoke-WebRequest { throw 'The request was canceled due to the configured HttpClient.Timeout of 30 seconds elapsing.' } }; Problem = 'The request was canceled due to the configured HttpClient.Timeout of 30 seconds elapsing' }
-            @{ Case = 'GitHub refuses it (rate limit, proxy)'; Setup = { Mock Invoke-WebRequest { throw 'Response status code does not indicate success: 403 (rate limit exceeded).' } }; Problem = 'Response status code does not indicate success: 403 (rate limit exceeded)' }
+            # Review of item 32: the status line, not the block page the proxy sent with it.
+            @{ Case = 'a proxy refuses it with a block page'; Setup = { Mock Invoke-WebRequest { throw (New-TestHttpErrorRecord -StatusCode 403 -Body "<html><head><style>body{font-family:x}</style></head>`n<body>Access Denied`nYour organization's policy blocks github.com</body></html>") } }; Problem = 'Response status code does not indicate success: 403 (Forbidden)' }
+            @{ Case = 'GitHub refuses it (rate limit)'; Setup = { Mock Invoke-WebRequest { throw (New-TestHttpErrorRecord -StatusCode 429 -Body '{"message":"API rate limit exceeded"}') } }; Problem = 'Response status code does not indicate success: 429 (Too Many Requests)' }
+            @{ Case = 'the error is long and spans lines'; Setup = { Mock Invoke-WebRequest { throw ("first line`r`n   second line`n" + ('x' * 400)) } }; Problem = ('first line second line ' + ('x' * 274) + '...') }
             @{ Case = 'the file is not JSON (a captive portal page)'; Setup = { $script:responseText = '<html>Sign in to the network</html>' }; Problem = 'it is not valid JSON*' }
             @{ Case = 'the file has a shape this does not know'; Setup = { $script:responseText = '{"Packages":[]}' }; Problem = 'it holds no Dependencies list*' }
             @{ Case = 'the answer is far too large to be the file'; Setup = { $script:responseText = '{"Dependencies":[]}' + (' ' * 70000) }; Problem = 'it is 70019 characters long, not a list of dependencies' }
@@ -1622,6 +1636,7 @@ Describe 'Windows App Runtime requirement from the latest winget release (work-o
             $requirement.Detail | Should -BeLike "the built-in requirement (the latest winget release's DesktopAppInstaller_Dependencies.json could not be read: $Problem)"
             $script:warnings.Count | Should -Be 1
             $script:warnings[0] | Should -BeLike "Could not read which Windows App Runtime the latest winget release needs ($script:latestUrl`: $Problem); checking for the built-in requirement, Microsoft.WindowsAppRuntime.1.8 >= 8000.616.304.0."
+            $script:warnings[0] | Should -Not -Match '[\r\n]'
         }
 
         It 'falls back to the built-in requirement, with a warning, when the latest release lists no Windows App Runtime' {
@@ -1706,6 +1721,26 @@ Describe 'Windows App Runtime requirement from the latest winget release (work-o
 
             $status.Present | Should -BeFalse
             $status.Detail | Should -Match '^Microsoft\.WindowsAppRuntime\.1\.8 >= 8000\.616\.304\.0 for \w+ required; found: \w+ 8000\.994\.2142\.0; Microsoft\.WindowsAppRuntime\.2 >= 2000\.1\.0\.0 for \w+ required; found: none registered$'
+        }
+
+        # Review of item 32: Install-WingetAutoUpdate passes these to the framework install and
+        # names only them.
+        It 'lists only the frameworks this PC lacks as Missing' {
+            $requirement = [pscustomobject]@{
+                Frameworks = @(
+                    [pscustomobject]@{ Name = 'Microsoft.WindowsAppRuntime.1.8'; MinimumVersion = [version]'8000.616.304.0' }
+                    [pscustomobject]@{ Name = 'Microsoft.WindowsAppRuntime.2'; MinimumVersion = [version]'2000.1.0.0' }
+                )
+                Source     = 'LatestRelease'
+                Detail     = 'test'
+            }
+
+            $missing = @((Get-WindowsAppRuntimeStatus -Requirement $requirement).Missing)
+
+            $missing.Count | Should -Be 1
+            $missing[0].Name | Should -Be 'Microsoft.WindowsAppRuntime.2'
+            $missing[0].MinimumVersion | Should -Be ([version]'2000.1.0.0')
+            @((Get-WindowsAppRuntimeStatus).Missing).Count | Should -Be 0
         }
     }
 
@@ -1814,6 +1849,41 @@ Describe 'Windows App Runtime requirement from the latest winget release (work-o
 
             $result.Status | Should -Be 'Configured'
             $script:errors | Should -BeNullOrEmpty
+        }
+
+        # Review of item 32: the pinned 1.8 framework is what this PC lacks, so it is installed,
+        # and only it is named as missing.
+        It 'installs the pinned 1.8 framework, not refuses it, when the latest release also needs another family this PC has' {
+            $script:dependenciesJson = '{"Dependencies":[{"Name":"Microsoft.WindowsAppRuntime.1.8","Version":"8000.616.304.0"},{"Name":"Microsoft.WindowsAppRuntime.2","Version":"2000.120.5.0"}]}'
+            Mock Get-WindowsAppRuntimePackageInfo { } -ParameterFilter { $Name -eq 'Microsoft.WindowsAppRuntime.1.8' }
+            Mock Get-WindowsAppRuntimePackageInfo { [pscustomobject]@{ Version = [version]'2000.130.0.0'; Architecture = $script:osArch } } -ParameterFilter { $Name -eq 'Microsoft.WindowsAppRuntime.2' }
+            # The install starts, then stops at its download folder: what matters is that it started.
+            Mock New-WauStagingDirectory { throw 'the disk is full' } -ParameterFilter { $Prefix -eq 'appruntime' }
+
+            $result = Install-WingetAutoUpdate
+
+            ($script:infos -join "`n") | Should -Match 'Microsoft\.WindowsAppRuntime\.1\.8 is missing; installing the pinned Windows App Runtime '
+            Should -Invoke New-WauStagingDirectory -Times 1 -Exactly -ParameterFilter { $Prefix -eq 'appruntime' }
+            $result.Status | Should -Be 'FrameworkMissing'
+            $result.FrameworkName | Should -Be 'Microsoft.WindowsAppRuntime.1.8'
+            $result.FrameworkInstallError | Should -Be 'setting up its download folder failed: the disk is full'
+            ($script:errors -join "`n") | Should -Match 'Winget-AutoUpdate was NOT installed: Microsoft\.WindowsAppRuntime\.1\.8 is missing \('
+            ($script:errors -join "`n") | Should -Not -Match 'Microsoft\.WindowsAppRuntime\.1\.8 and Microsoft\.WindowsAppRuntime\.2'
+            ($script:errors -join "`n") | Should -Not -Match 'does not meet that'
+        }
+
+        It 'passes only the frameworks this PC lacks to the framework install' {
+            $script:dependenciesJson = '{"Dependencies":[{"Name":"Microsoft.WindowsAppRuntime.1.8","Version":"8000.616.304.0"},{"Name":"Microsoft.WindowsAppRuntime.2","Version":"2000.120.5.0"}]}'
+            Mock Get-WindowsAppRuntimePackageInfo { } -ParameterFilter { $Name -eq 'Microsoft.WindowsAppRuntime.1.8' }
+            Mock Get-WindowsAppRuntimePackageInfo { [pscustomobject]@{ Version = [version]'2000.130.0.0'; Architecture = $script:osArch } } -ParameterFilter { $Name -eq 'Microsoft.WindowsAppRuntime.2' }
+            Mock Install-WindowsAppRuntimeFramework { [pscustomobject]@{ Installed = $true; Status = [pscustomobject]@{ Present = $true; Detail = 'installed'; Missing = @() }; Reason = $null } }
+
+            $result = Install-WingetAutoUpdate
+
+            $result.Status | Should -Be 'Configured'
+            Should -Invoke Install-WindowsAppRuntimeFramework -Times 1 -Exactly -ParameterFilter {
+                @($MissingFrameworks).Count -eq 1 -and $MissingFrameworks[0].Name -eq 'Microsoft.WindowsAppRuntime.1.8' -and @($Requirement.Frameworks).Count -eq 2
+            }
         }
 
         It 'passes the requirement it read to the check and to the framework install' {

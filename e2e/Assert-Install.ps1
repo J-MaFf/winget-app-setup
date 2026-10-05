@@ -240,7 +240,10 @@ foreach ($app in $appsToAssert) {
 # still missing now and the correct outcome is NO WAU plus an 'Auto-updates: NOT CONFIGURED' line
 # in the latest real-run transcript (checked with the other transcript assertions below, whose
 # detail quotes the transcript's 'Windows App Runtime:' line with the reason). An unknown framework
-# status falls back to expecting WAU, matching the installer's own fallback.
+# status falls back to expecting WAU, matching the installer's own fallback. This checks for the
+# built-in requirement (Microsoft.WindowsAppRuntime.1.8 >= 8000.616.304.0), not for what the run
+# read from the latest winget release (work-order item 32): when the pinned framework no longer
+# meets that, e2e/Invoke-InstallPass.ps1 has already failed the pass.
 $frameworkStatus = Get-WindowsAppRuntimeStatus
 if ($frameworkStatus.Present -eq $false) {
     $wauTask = Get-ScheduledTask -TaskName 'Winget-AutoUpdate' -TaskPath '\WAU\' -ErrorAction SilentlyContinue
