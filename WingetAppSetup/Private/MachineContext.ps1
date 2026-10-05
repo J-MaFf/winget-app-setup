@@ -1,27 +1,18 @@
-# Machine-wide helpers for runs whose account is not the signed-in user (review findings P2-24,
-# P3-22, P3-24). A run as SYSTEM, which is how an RMM agent such as ManageEngine Endpoint Central
-# runs a script, has no winget of its own: winget is a packaged app registered per user, and
-# Microsoft documents that packages "can be registered for any user except NT AUTHORITY\SYSTEM",
-# so "the WinGet CLI is not supported in the system context"
-# (learn.microsoft.com/windows/package-manager/winget/troubleshooting#system-context). There is no
-# `winget` on SYSTEM's PATH, and `winget list` run as SYSTEM cannot see the MSIX apps registered for
-# the users. These helpers find the winget.exe that App Installer installed for the machine, so a
-# SYSTEM run can start it by its full path (as Winget-AutoUpdate's own SYSTEM runs do), and read
-# whether an MSIX app is provisioned for every user. Microsoft's supported way to use winget as
-# SYSTEM is the Microsoft.WinGet.Client module on PowerShell 7; moving to it is a follow-up.
-# Written for Windows PowerShell 5.1 too (.NET Framework 4.5 APIs and 5.1 syntax only), like the
-# other helpers Resolve-WingetExecutable leads to.
+# Machine-wide helpers for runs whose account is not the signed-in user. SYSTEM has no winget of its
+# own: winget cannot be registered for it, and `winget list` as SYSTEM sees none of the users' MSIX
+# apps. These find the winget.exe App Installer installed for the machine, which a SYSTEM run starts
+# by its full path as Winget-AutoUpdate does, and read whether an MSIX app is provisioned for every
+# user. Microsoft supports only the Microsoft.WinGet.Client module on PowerShell 7 as SYSTEM; moving
+# to it is a follow-up. Windows PowerShell 5.1-compatible (.NET Framework 4.5 APIs, 5.1 syntax).
 
 <#
 .SYNOPSIS
     Lists the App Installer (Microsoft.DesktopAppInstaller) packages installed for any account.
 .DESCRIPTION
-    Thin query seam for Get-MachineWingetCandidate (mocked in tests). `Get-AppxPackage -AllUsers`
-    needs administrator rights, which SYSTEM has, and lists a package staged on the machine even
-    when no account has it registered. Under PowerShell 7 the query runs in Windows PowerShell 5.1,
-    where the Appx module always loads, the same delegation Get-WindowsAppRuntimePackageInfo uses.
-    Throws when the query fails.
-.RETURNS
+    A query seam for Get-MachineWingetCandidate. `Get-AppxPackage -AllUsers` needs administrator
+    rights and also lists a package only staged on the machine. Under PowerShell 7 it runs in
+    Windows PowerShell 5.1, where the Appx module always loads. Throws when the query fails.
+.OUTPUTS
     [pscustomobject[]] with Version ([version]), Architecture ([string], e.g. 'X64'), Status
     ([string], e.g. 'Ok') and InstallLocation ([string]).
 #>
@@ -58,7 +49,7 @@ function Get-DesktopAppInstallerPackageInfo {
 .DESCRIPTION
     %ProgramFiles%\WindowsApps. ProgramW6432 comes first: in a 32-bit process ProgramFiles is
     'Program Files (x86)', which holds no WindowsApps folder.
-.RETURNS
+.OUTPUTS
     [string] or $null.
 #>
 function Get-WindowsAppsDirectory {
@@ -76,22 +67,18 @@ function Get-WindowsAppsDirectory {
 .SYNOPSIS
     Finds the winget.exe files App Installer installed for the machine, best first.
 .DESCRIPTION
-    Two sources, the first that yields a winget.exe wins:
-      1. Get-DesktopAppInstallerPackageInfo (`Get-AppxPackage -AllUsers`): packages whose Status
-         is Ok, with winget.exe under their InstallLocation.
-      2. When that query fails or finds none: the
-         Microsoft.DesktopAppInstaller_<version>_<architecture>__8wekyb3d8bbwe folders under
-         Get-WindowsAppsDirectory that hold a winget.exe. SYSTEM can list that folder; an
-         administrator account normally cannot. A folder whose package the query listed with a
-         Status other than Ok (Tampered, Modified, NeedsRemediation, ...) is left out here too, so
-         the folder scan never brings back a package the query turned down.
-    Candidates for this PC's architecture come first (x64 on an x64 PC; arm64, then x64, then x86
-    on an ARM64 PC), and within an architecture the highest version first. Versions are compared as
-    [version], never as text: as text, 1.9.25200.0 sorts after 1.27.460.0.
+    From the first source that yields one:
+      1. Get-DesktopAppInstallerPackageInfo: packages with Status Ok and a winget.exe under their
+         InstallLocation.
+      2. Otherwise the Microsoft.DesktopAppInstaller_*__8wekyb3d8bbwe folders with a winget.exe
+         under Get-WindowsAppsDirectory, which SYSTEM can list, leaving out any package the query
+         listed with another Status (Tampered, NeedsRemediation, ...).
+    This PC's architecture first (x64 on x64; arm64, x64, then x86 on ARM64), then the highest
+    version, compared as [version] (as text, 1.9.25200.0 sorts after 1.27.460.0).
 .PARAMETER ProcessorArchitecture
     The PC's architecture as Windows names it (AMD64, ARM64, x86). Default: PROCESSOR_ARCHITEW6432,
     which a 32-bit process on 64-bit Windows has, else PROCESSOR_ARCHITECTURE.
-.RETURNS
+.OUTPUTS
     [pscustomobject[]] with Path, Version ([version]), Architecture ('x64', 'arm64', 'x86') and
     Source; empty when there is none.
 #>
@@ -176,23 +163,16 @@ function Get-MachineWingetCandidate {
     The SYSTEM form of Initialize-Winget's launch check: finds the machine-wide winget.exe and
     checks it starts.
 .DESCRIPTION
-    Review finding P2-24. As SYSTEM the per-account steps Initialize-Winget otherwise works through
-    cannot help: SYSTEM has no `winget` alias, App Installer cannot be registered for it, and
-    Repair-WinGetPackageManager does nothing for it (and throws with -AllUsers). They used to run
-    anyway, with minutes of downloads, before the run stopped with exit code 2.
-
-    Instead, each winget.exe from Get-MachineWingetCandidate is tried, best first, with
-    Test-WingetLaunchable: the first is checked for up to 75 seconds (for a lock or an App Installer
-    update that clears on its own), the others twice, and a winget.exe that cannot load a DLL it
-    needs (0xC0000135) only once, since that does not clear on its own. The first that starts and
-    prints a version is kept for the rest of the run ($script:MachineWingetPath, which
-    Resolve-WingetExecutable returns to every winget call). When none starts, the run cannot install anything, and the message says
-    why: no App Installer for the machine, or the winget.exe found could not be started.
-
-    Read-only, so a dry run runs it too.
+    As SYSTEM the per-account setup steps cannot help (no alias, no registration, and
+    Repair-WinGetPackageManager does nothing; P2-24). Instead each candidate from
+    Get-MachineWingetCandidate is checked with Test-WingetLaunchable: the first for up to 75 seconds
+    (for a lock or an App Installer update), the others twice, and one missing a DLL (0xC0000135)
+    once. The first that prints a version is kept for the run ($script:MachineWingetPath, which
+    Resolve-WingetExecutable returns). When none starts, the message says why. Read-only, so a dry
+    run runs it too.
 .PARAMETER WhatIf
     Dry run: a failure is reported as what a real run would do (stop with exit code 2).
-.RETURNS
+.OUTPUTS
     [bool] True when a machine-wide winget.exe starts.
 #>
 function Test-MachineWingetAvailable {
@@ -259,13 +239,11 @@ function Test-MachineWingetAvailable {
 .SYNOPSIS
     Lists the display names of the app packages provisioned for every user on this PC.
 .DESCRIPTION
-    Thin query seam for Test-AppxPackageProvisionedForMachine (mocked in tests). A provisioned
-    package is registered for each account at its next sign-in, so it is installed for the PC as a
-    whole: Windows 11 provisions Windows Terminal this way. `Get-AppxProvisionedPackage -Online`
-    needs administrator rights. Under PowerShell 7 it runs in Windows PowerShell 5.1, where the DISM
-    module always loads (the same delegation Invoke-AppxProvisioning uses). Throws when the query
-    fails.
-.RETURNS
+    A query seam for Test-AppxPackageProvisionedForMachine. A provisioned package is registered for
+    each account at its next sign-in, as Windows 11 does with Windows Terminal. Needs administrator
+    rights. Under PowerShell 7 it runs in Windows PowerShell 5.1, where the DISM module always loads.
+    Throws when the query fails.
+.OUTPUTS
     [string[]]
 #>
 function Get-ProvisionedAppxPackageName {
@@ -292,15 +270,11 @@ function Get-ProvisionedAppxPackageName {
     Returns whether an app package is provisioned for every user on this PC: $true, $false, or $null
     when that could not be read.
 .DESCRIPTION
-    Review finding P3-24. A run as SYSTEM, or as an admin elevating on a user's PC, cannot decide
-    whether an MSIX app such as Windows Terminal is installed with `winget list`: that only sees the
-    packages registered for the account running it, which for SYSTEM is none. Windows Terminal,
-    built into Windows 11, then read as missing on every run, and its install was then verified the
-    same way and failed. Whether the package is provisioned for every user is the machine-wide
-    answer.
+    A run for the whole PC cannot ask `winget list`, which sees only the running account's packages
+    (none for SYSTEM), so Windows Terminal read as missing on every run (P3-24).
 .PARAMETER Name
     The package name (the provisioned package's DisplayName), e.g. 'Microsoft.WindowsTerminal'.
-.RETURNS
+.OUTPUTS
     [bool] or $null.
 #>
 function Test-AppxPackageProvisionedForMachine {

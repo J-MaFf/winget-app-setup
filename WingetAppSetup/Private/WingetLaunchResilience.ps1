@@ -1,33 +1,24 @@
-# Winget launch helpers (issues #258, #277, review findings P2-8, P3-7, P3-9, P3-10). winget.exe can
-# fail to start at all when the per-user app-execution alias under %LOCALAPPDATA%\Microsoft\WindowsApps
-# is broken or locked, most often while the Microsoft.DesktopAppInstaller package is being upgraded
-# or re-registered (for example by a Winget-AutoUpdate run, whose Install-Prerequisites re-provisions
-# App Installer). These helpers classify a failed launch and check, with one bounded
-# `winget --version`, whether winget can be started at all. Invoke-WingetInstall uses that check as a
-# circuit breaker: once winget cannot be started, the remaining apps fail at once with one reason
-# instead of each spending its own retry budget (about 24 minutes on a wedged machine before).
+# Winget launch helpers. winget.exe can fail to start when its per-user alias is broken or locked,
+# most often while App Installer is being upgraded or re-registered. These classify a failed launch
+# and check, with one bounded `winget --version`, whether winget can be started at all, which
+# Invoke-WingetInstall uses as a circuit breaker for the remaining apps.
 
 <#
 .SYNOPSIS
-    Returns true when a winget launch failed for a transient reason.
+    Returns true when a winget launch failed for a transient reason: winget.exe briefly
+    inaccessible (issues #253, #258).
 .DESCRIPTION
-    The transient class is winget.exe's own file being briefly inaccessible (issues #253/#258):
-    ERROR_CANT_ACCESS_FILE (1920, "The file cannot be accessed by the system.") and
-    ERROR_SHARING_VIOLATION (32, "...being used by another process."). Anything else (e.g. winget
-    genuinely missing from PATH) is a real failure the caller should not retry.
-
-    Invoke-ExternalProcess reports the Win32 error code of a failed launch, and -NativeErrorCode
-    classifies by that code, which is the same in every display language (review finding P3-6).
-    Without a code, -Message is matched instead: against the English texts, against the
-    "StandardOutputEncoding is only supported when standard output is redirected." message
-    PowerShell's native-command invocation throws for the same broken alias (issue #277), and
-    against the two Win32 messages as this machine words them (Get-Win32ErrorMessage), so a German
-    "Das System kann auf die Datei nicht zugreifen" matches too. All matching ignores case.
+    Transient: ERROR_CANT_ACCESS_FILE (1920) and ERROR_SHARING_VIOLATION (32). Anything else, such
+    as winget missing from PATH, is not worth a retry. -NativeErrorCode decides when known, since
+    it is the same in every display language (P3-6). Otherwise -Message is matched, ignoring case,
+    against the English texts, PowerShell's "StandardOutputEncoding is only supported when standard
+    output is redirected." for the same broken alias (issue #277), and the two messages as this
+    machine words them (Get-Win32ErrorMessage).
 .PARAMETER Message
     The exception message to classify.
 .PARAMETER NativeErrorCode
     The Win32 error code of the failed launch, when known.
-.RETURNS
+.OUTPUTS
     [bool]
 #>
 function Test-TransientWingetLaunchError {
@@ -64,15 +55,11 @@ function Test-TransientWingetLaunchError {
 
 <#
 .SYNOPSIS
-    Returns the text Windows gives a Win32 error code, in this machine's display language.
-.DESCRIPTION
-    The message Start-Process embeds when it cannot launch a program comes from the same Windows
-    message table (FormatMessage), so matching against it works in any display language (review
-    finding P3-6). Off Windows the .NET runtime words error codes as errno values, which mean
-    something else, so nothing is returned there.
+    Returns Windows' text for a Win32 error code in this machine's display language, as a failed
+    launch's message carries it; $null off Windows, where .NET words the codes as errno values.
 .PARAMETER Code
     The Win32 error code.
-.RETURNS
+.OUTPUTS
     [string] The message, or $null off Windows.
 #>
 function Get-Win32ErrorMessage {
@@ -89,25 +76,14 @@ function Get-Win32ErrorMessage {
 
 <#
 .SYNOPSIS
-    Returns the winget executable to launch.
+    Returns the winget executable to launch: the one place that decides how winget is found.
 .DESCRIPTION
-    Every winget call goes through Invoke-WingetProcess, which calls this, so it is the one place
-    that decides how winget is found:
-      - Normally the bare command name 'winget', which Invoke-ExternalProcess resolves on PATH to
-        the account's app-execution alias.
-      - In a run as SYSTEM, the full path of the machine-wide winget.exe that
-        Test-MachineWingetAvailable found and checked at the start of the run
-        ($script:MachineWingetPath; review finding P2-24). SYSTEM has no alias: winget cannot be
-        registered for it. When that file is gone, because App Installer was updated during the
-        run and its old folder removed, the newest machine-wide winget.exe is looked up again.
-
-    There used to be a -BypassAlias switch that launched winget.exe from the DesktopAppInstaller
-    package folder under C:\Program Files\WindowsApps when the alias failed (issue #258). It never
-    recovered a launch in any E2E run: every direct launch by an administrator account failed with
-    'Access is denied', even against a healthy registered package, so it only added retries and
-    misleading 'next attempt uses ...' lines (review finding P3-7). It was removed. SYSTEM, unlike
-    an administrator account, may start that winget.exe.
-.RETURNS
+    Normally the bare name 'winget', which resolves on PATH to the account's alias. As SYSTEM, which
+    has no alias, the machine-wide winget.exe Test-MachineWingetAvailable found
+    ($script:MachineWingetPath, P2-24), looked up again when an App Installer update removed it
+    during the run. Launching that winget.exe directly as an administrator fails with 'Access is
+    denied', which is why there is no alias bypass (P3-7).
+.OUTPUTS
     [string] 'winget', or a full path to winget.exe in a SYSTEM run.
 #>
 function Resolve-WingetExecutable {
@@ -129,36 +105,21 @@ function Resolve-WingetExecutable {
 .SYNOPSIS
     Checks that winget can be started and answers, with a bounded `winget --version`.
 .DESCRIPTION
-    Get-Command only proves that the app-execution alias is on PATH, not that winget can run: a
-    wedged App Installer, a missing framework or an unlicensed package all leave the alias in
-    place (review finding P3-9). This runs `winget --version` through Invoke-WingetProcess under
-    the WingetVersion time limit and counts it as launchable only when the process started,
-    exited 0 and printed a version (a line matching '^v\d', such as 'v1.12.350').
+    The alias being on PATH proves nothing (P3-9). Launchable means the process started under the
+    WingetVersion time limit, exited 0 and printed a version (a line matching '^v\d').
 
-    With -Attempts above 1, a failed check is repeated after RetryDelaySeconds, for failures that
-    can clear on their own: a transient launch failure (Test-TransientWingetLaunchError: winget.exe
-    locked by an antivirus scan or an App Installer update in progress), a timeout, a non-zero exit
-    or no version in the output. Any other launch failure (winget not on PATH, 'Access is denied')
-    is final at once: waiting does not change it. So is exit code 0xC0000135
-    (STATUS_DLL_NOT_FOUND): the Windows loader could not find a DLL winget.exe needs, which stays
-    so until that DLL is installed. A machine-wide winget.exe started as SYSTEM fails this way on a
-    PC without the Visual C++ runtime, and checking it again only made every such run wait 75
-    seconds before trying the next one (review of finding P2-24). And so is 0x8A15003A
-    (BLOCKED_BY_POLICY): Group Policy turned winget off, which no wait changes (review finding
-    P3-30).
+    With -Attempts above 1, a failure that can clear on its own is checked again after
+    RetryDelaySeconds: a transient launch failure, a timeout, a non-zero exit or no version. Final
+    at once: any other launch failure, 0xC0000135 (STATUS_DLL_NOT_FOUND: a DLL winget.exe needs,
+    such as the Visual C++ runtime, is missing) and 0x8A15003A (Group Policy turned winget off).
 
-    Used by Initialize-Winget (is winget usable before the run), by Invoke-WingetInstall's
-    circuit breaker (after an app could not launch winget) and end-of-run check, and by
-    e2e/Assert-Install.ps1. It replaced Wait-WingetLaunchable, whose multi-minute polling and
-    consecutive-success streaks existed only to survive the Winget-AutoUpdate run the installer
-    used to start mid-run (RUN_WAU=YES, removed; review finding P3-10).
-
-    Runs with nothing but read-only winget calls, so a dry run can use it.
+    Used by Initialize-Winget, by Invoke-WingetInstall's circuit breaker and end-of-run check, and
+    by e2e/Assert-Install.ps1. Read-only, so a dry run can use it.
 .PARAMETER Attempts
     How many times to check before giving up. Default 1.
 .PARAMETER RetryDelaySeconds
     Seconds to wait between checks. Default 10.
-.RETURNS
+.OUTPUTS
     [pscustomobject] with Launchable ([bool]), Version (the version winget printed, or $null),
     Reason (why it is not launchable, for a message; $null when it is), ExitCode (the last check's
     exit code; $null when winget did not start or did not finish) and Attempts (checks made).

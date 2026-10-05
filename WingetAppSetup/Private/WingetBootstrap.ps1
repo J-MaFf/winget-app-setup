@@ -1,25 +1,20 @@
-# Helpers for Initialize-Winget (Public/WingetCore.ps1), the one ladder that makes winget usable
-# for a run: probe, classify the failure, apply the fix for that class (review findings P3-25 to
-# P3-31). Each fix runs at most once per run, and the classification comes from exit codes and
-# HRESULTs, never from English text.
+# Helpers for Initialize-Winget (Public/WingetCore.ps1): probe, classify the failure, apply that
+# class's fix. Each fix runs at most once a run, and the class comes from exit codes and HRESULTs,
+# never from English text.
 
 <#
 .SYNOPSIS
     Returns the App Installer Group Policy value that turns off what this installer needs, or $null.
 .DESCRIPTION
-    Review finding P3-30. Under these policies the winget alias still runs, but every command it
-    is given ends with 0x8A15003A BLOCKED_BY_POLICY (or, for the source, finds no winget source),
-    and no repair can change that. The values live under
-    HKLM:\SOFTWARE\Policies\Microsoft\Windows\AppInstaller (Policy CSP DesktopAppInstaller,
-    Computer Configuration > Administrative Templates > Windows Components > Desktop App
-    Installer); 0 means Disabled:
+    Under these policies every winget command ends with 0x8A15003A BLOCKED_BY_POLICY (or finds no
+    source), and no repair changes that (P3-30). The values live under
+    HKLM:\SOFTWARE\Policies\Microsoft\Windows\AppInstaller; 0 means Disabled:
       EnableAppInstaller                                'Enable App Installer'
       EnableWindowsPackageManagerCommandLineInterfaces  'Enable Windows Package Manager command line
                                                         interfaces' (Windows 11 24H2 and later)
-      EnableDefaultSource                               'Enable App Installer Default Source': the
-                                                        winget source every install uses.
-    EnableAllowedSources is not checked: it governs only sources added beyond the defaults.
-.RETURNS
+      EnableDefaultSource                               'Enable App Installer Default Source'
+    EnableAllowedSources governs only sources added beyond the defaults, so it is not checked.
+.OUTPUTS
     [pscustomobject] with Name (the value name) and Policy (its Group Policy name), or $null.
 #>
 function Get-WingetPolicyBlock {
@@ -49,12 +44,8 @@ function Get-WingetPolicyBlock {
 .SYNOPSIS
     Prints the one line that says Group Policy blocks winget and what to do about it.
 .DESCRIPTION
-    Shared by the two places that find the block (wgt-gq8.39): the install run's pre-flight
-    (Invoke-EnvironmentPreflight), which checks the policy before any other winget step, and
-    Initialize-Winget, which checks it for the uninstaller and also recognizes winget's own
-    0x8A15003A BLOCKED_BY_POLICY answer. A run prints it once: the pre-flight's stop keeps a real run
-    from reaching Initialize-Winget, and a dry run skips Initialize-Winget after the pre-flight
-    reported it.
+    Shared by Invoke-EnvironmentPreflight and Initialize-Winget (which also recognizes winget's own
+    0x8A15003A answer); a run prints it once.
 .PARAMETER Block
     Get-WingetPolicyBlock's result: the line names the policy and its registry value.
 .PARAMETER Detail
@@ -91,16 +82,15 @@ function Write-WingetPolicyBlockMessage {
 .SYNOPSIS
     Returns the AppX deployment HRESULT (0x80073xxx) an Appx or WinGet cmdlet failed with, or $null.
 .DESCRIPTION
-    Review finding P3-27. Reads the HResult of the exception and of each inner exception first. When
-    none is an AppX deployment code, the hex form in the message ('HRESULT: 0x80073CF3', which
-    Windows prints the same in every display language) is used. The codes that matter here:
+    The HResult of the exception or an inner one first, then the hex form in the message, which
+    Windows prints the same in every display language (P3-27). The codes that matter:
       0x80073CF3 ERROR_INSTALL_RESOLVE_DEPENDENCY_FAILED  a framework App Installer needs is missing
-                                                          (issue #279: Microsoft.WindowsAppRuntime.1.8)
-      0x80073D06 ERROR_INSTALL_PACKAGE_DOWNGRADE          a newer version of a package is already
-                                                          installed (issue #265)
+                                                          (issue #279)
+      0x80073D06 ERROR_INSTALL_PACKAGE_DOWNGRADE          a newer version is already installed
+                                                          (issue #265)
 .PARAMETER ErrorRecord
     The ErrorRecord (or exception) the cmdlet failed with.
-.RETURNS
+.OUTPUTS
     [int] or $null.
 #>
 function Get-AppxErrorCode {
@@ -133,13 +123,10 @@ function Get-AppxErrorCode {
     Makes Repair-WinGetPackageManager available, installing the Microsoft.WinGet.Client module when
     it is missing.
 .DESCRIPTION
-    Called only by the repair rung, so a run whose winget works never installs the module (review
-    finding P3-26: every fresh PC used to install the NuGet provider and the module from the
-    PowerShell Gallery for a repair that rarely runs, and warned about an update feature that no
-    longer exists when the Gallery was blocked). The module is installed for all users from the
-    PowerShell Gallery only (review finding P3-20): this runs elevated, so no other repository
-    registered on the PC may serve it.
-.RETURNS
+    Only the repair step calls it, so a run whose winget works never installs the module (P3-26).
+    Installed for all users from the PowerShell Gallery only (-Repository PSGallery, P3-20): this
+    runs elevated, so no other registered repository may serve it.
+.OUTPUTS
     [bool] True when Repair-WinGetPackageManager can be called.
 #>
 function Test-AndInstallWingetModule {
@@ -167,18 +154,11 @@ function Test-AndInstallWingetModule {
     Registers an app package for the current account with Add-AppxPackage, by family name or from
     its AppXManifest.xml; throws when the registration fails.
 .DESCRIPTION
-    Thin seam for Register-WingetAppInstallerForUser (mocked in tests). Under PowerShell 7 the
-    registration runs in Windows PowerShell 5.1 (review finding P3-29). Add-AppxPackage comes from
-    the Appx module, which cannot load under PowerShell 7 on Windows builds before 10.0.22453
-    (Windows 10, Windows Server 2022): every Appx cmdlet then fails with 0x80131539 'Operation is not
-    supported on this platform' (PowerShell issue #13138; Microsoft.WinGet.Client imports Appx with
-    -UseWindowsPowerShell for the same reason). In Windows PowerShell it always loads. The same
-    delegation Get-DesktopAppInstallerPackageInfo and Invoke-AppxProvisioning use; the child runs
-    as the same account, so the package is registered for this account.
-
-    The child prints the HRESULT of the error it caught, which is thrown here as a COMException
-    carrying it, with the child's message, so Get-AppxErrorCode reads the code as it would from
-    Add-AppxPackage itself (review finding P3-27).
+    A seam for Register-WingetAppInstallerForUser. Under PowerShell 7 it runs in Windows PowerShell
+    5.1 as the same account: the Appx module cannot load under PowerShell 7 before Windows build
+    10.0.22453 (0x80131539, PowerShell issue #13138), and always loads in 5.1. The HRESULT the child
+    caught is rethrown as a COMException carrying it, so Get-AppxErrorCode reads it as it would from
+    Add-AppxPackage itself.
 .PARAMETER FamilyName
     Add-AppxPackage -RegisterByFamilyName -MainPackage <FamilyName>.
 .PARAMETER ManifestPath
@@ -233,23 +213,13 @@ function Invoke-AppxRegistration {
 .SYNOPSIS
     Registers the App Installer (winget) package already on this PC for the current account.
 .DESCRIPTION
-    winget comes with the Microsoft.DesktopAppInstaller package, which is registered per account. An
-    admin account elevating on a signed-in user's PC has none, although the PC has the package on
-    disk. Registering it needs no download and deploys no framework, so it cannot hit the 0x80073D06
-    rejection the repair cmdlet can (issue #265). Two forms are tried: -RegisterByFamilyName, then
-    -Register against each package's AppXManifest.xml.
-
-    Both the listing (Get-DesktopAppInstallerPackageInfo, `Get-AppxPackage -AllUsers`) and the
-    registrations (Invoke-AppxRegistration, Add-AppxPackage) run in Windows PowerShell under
-    PowerShell 7 (review finding P3-29). The Appx module they come from cannot load under PowerShell 7
-    on Windows Server 2022 and older Windows 10 builds (0x80131539), so this step used to fail there
-    at the listing and, had it got past it, at the registration; in E2E run 35406706712 it only
-    worked once Repair-WinGetPackageManager had loaded Appx into the session.
-
-    The AppX codes the registrations fail with (Get-AppxErrorCode) are returned, so the caller can
-    tell a missing framework (0x80073CF3) or a downgrade rejection (0x80073D06) from other failures
-    (review finding P3-27: these codes appear here, not in Repair-WinGetPackageManager's error).
-.RETURNS
+    App Installer is registered per account, so an admin account elevating on a user's PC has none
+    although the package is on disk. Registering it downloads nothing and deploys no framework, so
+    it cannot hit the 0x80073D06 rejection the repair can (issue #265). Tries -RegisterByFamilyName,
+    then -Register against each package's AppXManifest.xml. The listing and the registrations run in
+    Windows PowerShell under PowerShell 7 (P3-29). The AppX codes they fail with are returned, so
+    the caller can tell a missing framework (0x80073CF3) or a downgrade (0x80073D06) from the rest.
+.OUTPUTS
     [pscustomobject] Registered ([bool]: a registration call completed; winget is checked by the
     caller) and ErrorCodes ([int[]]).
 #>
@@ -297,25 +267,18 @@ function Register-WingetAppInstallerForUser {
     Runs Repair-WinGetPackageManager: for all users first when the framework App Installer needs is
     missing, then for this account, unforced and then, unless the cause is known, forced.
 .DESCRIPTION
-    -AllUsers (review finding P3-28) installs App Installer for the whole PC with the frameworks it
-    depends on, which is what the cmdlet itself asks for when Microsoft.WindowsAppRuntime.1.8 is
-    missing ('Try running with -AllUsers in administrator mode'). It runs only then: on a PC whose
-    framework is newer than the one the WinGet release pins, it aborts with 0x80073D06 (issue #265).
-
-    -Force adds only ForceTargetApplicationShutdown (it closes running App Installer processes;
-    Microsoft.WinGet.Client AppxModuleHelper.AddAppInstallerBundleAsync), and each attempt downloads
-    App Installer again. So it is tried only after a failure nothing has named (review finding
-    P3-27). It is skipped when a missing framework (0x80073CF3) or a downgrade rejection (0x80073D06)
-    was seen, by this repair or by the App Installer registration before it (KnownErrorCodes: the
-    #279 wedge shows them there, while the repair only says 'Failed to repair winget. Try running
-    with -AllUsers in administrator mode.'), and when the framework is known to be missing and the
-    all-users repair for it failed. The module is installed here, when it is first needed
-    (Test-AndInstallWingetModule).
+    -AllUsers installs App Installer for the whole PC with its frameworks, as the cmdlet asks for
+    when Microsoft.WindowsAppRuntime.1.8 is missing (P3-28); only then, because with a newer
+    framework than the release pins it aborts with 0x80073D06 (issue #265). -Force only closes
+    running App Installer processes and downloads it again, so it is tried only after a failure
+    nothing has named: not after a missing framework (0x80073CF3) or a downgrade (0x80073D06), seen
+    here or by the registration before it (KnownErrorCodes), nor when the all-users repair for a
+    missing framework failed (P3-27). The module is installed here, when first needed.
 .PARAMETER AllUsersFirst
     Microsoft.WindowsAppRuntime.1.8 is missing for this PC (Get-WindowsAppRuntimeStatus).
 .PARAMETER KnownErrorCodes
     The AppX codes this run has already seen, from the App Installer registration.
-.RETURNS
+.OUTPUTS
     [pscustomobject] Available ([bool]: the cmdlet could be called), Succeeded ([bool]: an attempt
     completed; the caller checks winget itself) and ErrorCodes ([int[]], the AppX codes this repair
     saw).
@@ -382,15 +345,12 @@ function Invoke-WingetPackageManagerRepair {
 .SYNOPSIS
     Runs the next fix that sets winget up for this account, if one is left; each runs once a run.
 .DESCRIPTION
-    Cheapest first: register the App Installer already on this PC (Register-WingetAppInstallerForUser),
-    then Repair-WinGetPackageManager (for all users first when the all-users check finds
-    Microsoft.WindowsAppRuntime.1.8 missing). A registration that fails moves straight on to the
-    repair, which is told the AppX codes the registration saw, so it does not force a retry those
-    codes say cannot help (review finding P3-27). Initialize-Winget calls this in a loop, checking
-    winget after each fix that ran.
+    Cheapest first: Register-WingetAppInstallerForUser, then Invoke-WingetPackageManagerRepair,
+    which is told the AppX codes the registration saw. Initialize-Winget calls this in a loop and
+    checks winget after each fix that ran.
 .PARAMETER State
     The run's ladder state, which this updates: Registered, Repair, Framework and ErrorCodes.
-.RETURNS
+.OUTPUTS
     [bool] True when a fix ran and winget should be checked again; False when none is left.
 #>
 function Invoke-NextWingetAccountFix {
@@ -428,7 +388,7 @@ function Invoke-NextWingetAccountFix {
     started.
 .PARAMETER SourceExitCode
     The source check's exit code, if it ran to the end.
-.RETURNS
+.OUTPUTS
     [string]
 #>
 function Get-WingetSetupAdvice {
@@ -472,14 +432,12 @@ function Get-WingetSetupAdvice {
 .SYNOPSIS
     Updates the winget source for the account running winget, which also registers it on first use.
 .DESCRIPTION
-    `winget source update --name winget --disable-interactivity`, the lightest command that makes
-    winget register its source package for an account that has never used it (on a cross-user
-    elevation that registration is what fails with 0x80073D19). Only the winget source: the
-    installs use no other, and msstore can fail for an account that never signed in while the winget
-    source is fine. No --accept-source-agreements: `source update` rejects it with 0x8A150002
-    (issues #174/#175); the installs accept the agreements. winget's output is echoed into the
-    transcript only when the update fails.
-.RETURNS
+    `winget source update --name winget --disable-interactivity`, the lightest command that
+    registers the source for a new account (under cross-user elevation that is what fails with
+    0x80073D19). Only the winget source, the one the installs use. No --accept-source-agreements:
+    `source update` rejects it with 0x8A150002 (issues #174/#175). winget's output is echoed into
+    the transcript only when the update fails.
+.OUTPUTS
     [hashtable] @{ Succeeded; ExitCode (or $null); TimedOut; LaunchError (or $null) }
 #>
 function Invoke-WingetSourceProbe {
@@ -500,12 +458,11 @@ function Invoke-WingetSourceProbe {
 
 <#
 .SYNOPSIS
-    Runs `winget source reset --force` and says whether it worked, with its exit code when not.
+    Runs `winget source reset --force`, the fix for a missing or corrupted winget source (it also
+    removes any source added beyond the defaults), and says whether it worked.
 .DESCRIPTION
-    The fix for a missing or corrupted winget source. It also removes any source added beyond the
-    defaults. No --accept-source-agreements: `source reset` rejects it with 0x8A150002, so the reset
-    used to never run.
-.RETURNS
+    No --accept-source-agreements: `source reset` rejects it with 0x8A150002.
+.OUTPUTS
     [bool]
 #>
 function Reset-WingetSource {

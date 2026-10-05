@@ -1,21 +1,9 @@
-<#
-.SYNOPSIS
-    Shared package-id shape validation, per CLAUDE.md's "Winget Notes" section.
-.DESCRIPTION
-    CLAUDE.md documents the exact regex a winget package id must satisfy before it is trusted (in
-    catalog entries or in `winget list` output matching). This file is the single place that regex
-    lives so Test-AppDefinitions (catalog load time) and Test-WingetPackageInstalled (runtime output
-    matching) cannot drift apart on the pattern.
-#>
+# The package-id pattern from CLAUDE.md ("Winget Notes"), in one place for the catalog check and the
+# `winget list` matching.
 
-# Exact pattern from CLAUDE.md ("Winget Notes"): publisher.product shape, each side starting with a
-# word character and allowing word characters, dots, and hyphens after that. Anchored at both
-# ends: it validates a WHOLE id, so trailing text such as 'Google.Chrome --override /S' must fail.
-# Without an end anchor any valid prefix passed, and Start-Process -ArgumentList (which joins its
-# array with spaces, unquoted) would hand the rest to winget as extra switches (review finding
-# P3-49). The end anchor is \z, not $: in .NET $ also matches before a final newline, so
-# "Google.Chrome`n" would pass. Matching an id inside longer winget output is
-# Test-WingetListOutputContainsPackageId's job below, not this pattern's.
+# publisher.product, each side starting with a word character. Anchored at both ends, with \z
+# rather than $ (which also matches before a final newline): it validates a whole id, so trailing
+# text such as 'Google.Chrome --override /S' never reaches winget as extra switches (P3-49).
 $script:WingetPackageIdPattern = '^[\w][\w.\-]+\.[\w][\w.\-]+\z'
 
 <#
@@ -36,20 +24,12 @@ function Test-WingetPackageIdFormat {
 
 <#
 .SYNOPSIS
-    Returns whether `winget list` output contains the given package id as a whole id token, not
-    merely as a substring of a different (longer) id.
-.DESCRIPTION
-    A plain .Contains($PackageId) check against raw `winget list` text is an unanchored substring
-    match: an installed id like 'Foo.BarBaz' contains 'Foo.Bar' as a pure substring, which would
-    false-positive a "Foo.Bar is installed" verdict. CLAUDE.md's "Winget Notes" section mandates
-    validating package ids with a regex before trusting winget output; this tightens the match by
-    requiring that neither side of the matched substring continue with an id-shape character
-    ([\w.\-], the same character class the CLAUDE.md pattern is built from), so a match can only
-    land on a complete id token.
+    Returns whether `winget list` output contains the package id as a whole id, not as part of a
+    longer one ('Foo.Bar' inside 'Foo.BarBaz' does not count).
 .PARAMETER Output
-    The raw `winget list` stdout text to search.
+    The `winget list` output.
 .PARAMETER PackageId
-    The winget package id being checked for.
+    The package id to look for.
 #>
 function Test-WingetListOutputContainsPackageId {
     param (

@@ -3,53 +3,36 @@
     The user phase: installs, for the signed-in user, the apps a run for the whole PC deferred, and
     sets that user's Windows Terminal defaults. Run as the user, at sign-in, never elevated.
 .DESCRIPTION
-    Work-order item 34. A run as SYSTEM (an RMM agent such as ManageEngine Endpoint Central) installs
-    only what installs for the whole PC: an app with no machine-wide installer is reported Deferred
-    in last-run.json, and the per-user Windows Terminal defaults are skipped. Neither can be done for
-    a user from SYSTEM. This finishes the job in each user's own account; it is what
-    rmm/Invoke-WingetAppSetupUserPhase.ps1 runs (an Endpoint Central User Configuration script,
-    Every Logon), after it has dot-sourced a checked copy of winget-app-install.ps1.
+    A run as SYSTEM installs only what installs for the whole PC: it records the other apps as
+    Deferred in last-run.json and skips the per-user Terminal defaults. This finishes the job in
+    each user's own account. rmm/Invoke-WingetAppSetupUserPhase.ps1 (an Endpoint Central User
+    Configuration script, Every Logon) runs it after dot-sourcing a checked copy of the installer.
 
-    It ends at once, printing nothing, when there is nothing to do for this account
-    (Get-UserPhaseDecision): no run record, a run that has not reported yet, or this account has
-    already finished this run, or tried MaxAttempts times. Otherwise, once per machine run:
-      1. It records the attempt first (user-phase.json, Save-UserPhaseState), so an attempt that is
-         killed still counts toward MaxAttempts.
-      2. It starts a transcript in the user's %LOCALAPPDATA%\winget-app-setup\logs
-         (Start-InstallerTranscript -UserPhase), keeping the newest 10.
-      3. When the record lists deferred apps: it checks that winget starts for this account (up to
-         four checks 15 seconds apart: Windows registers App Installer for an account shortly after
-         its first sign-in), updates the winget source for it (Update-UserPhaseWingetSource: on an
-         account's first use of winget that also registers the source, which the 15-second
-         `winget list` check before each install has no time for) and installs each app with
-         `--scope user` (Install-UserPhaseApp), while the time budget lasts. An app the budget no
-         longer covers is NotAttempted. When this installer's catalog has the app
-         (Get-UserPhaseCatalogEntry), its installerType is used, and its postInstall hook runs in
-         this account once the app is there (work-order item 38: an entry marked userPhase is
-         deferred, hook and all, by a run for the whole PC). A hook that fails fails the app; one
-         that could not configure it yet (NotConfigured) leaves it installed and the exit code as
-         it is, and a later sign-in runs it again.
-      4. It sets the Windows Terminal defaults (Set-WindowsTerminalDefaults -PassThru: the targeted
-         defaultProfile edit and the default terminal application). Unless that reports Applied
-         (this account has no Terminal settings.json yet because Terminal was never opened, an edit
-         failed, or the step was skipped), the step counts as not done, and a later sign-in tries
-         again.
-      5. It records the outcome (complete when every deferred app is installed or was already there,
-         and configured when its catalog entry has a post-install hook, and the Terminal step is
-         done), prints one 'USER PHASE RESULT:' line and returns the exit code.
-    It never prompts (winget runs with --disable-interactivity and --silent) and never asks for
-    elevation itself: it installs with --scope user only, and a per-user installer needs no
-    administrator rights. One that elevates itself anyway would still show a UAC prompt, which is
-    why an app the user phase installs is worth one check on a pilot PC.
+    It ends at once, silently, when there is nothing to do for this account (Get-UserPhaseDecision).
+    Otherwise, once per machine run:
+      1. It records the attempt first (Save-UserPhaseState), so a killed attempt still counts.
+      2. It starts a transcript in %LOCALAPPDATA%\winget-app-setup\logs, keeping the newest 10.
+      3. For the deferred apps: it checks that winget starts for this account (four checks 15
+         seconds apart, since App Installer registers shortly after a first sign-in), updates the
+         winget source (Update-UserPhaseWingetSource; a first use also registers it), and installs
+         each app with --scope user (Install-UserPhaseApp) while the time budget lasts; an app the
+         budget does not cover is NotAttempted. The catalog entry, when there is one, gives the
+         installerType and a postInstall hook, which runs here once the app is there: a failed hook
+         fails the app, and NotConfigured leaves it to a later sign-in.
+      4. It sets the Windows Terminal defaults (Set-WindowsTerminalDefaults -PassThru); anything but
+         Applied is tried again at a later sign-in.
+      5. It records the outcome, prints one 'USER PHASE RESULT:' line and returns the exit code.
+    It never prompts and never asks for elevation: --scope user installers need no administrator
+    rights. One that elevates itself anyway would show a UAC prompt, so check each app the user
+    phase installs on a pilot PC.
 .PARAMETER RunRecordPath
     The machine's run record. Default: Get-InstallerRunRecordPath.
 .PARAMETER StatePath
     This account's state. Default: Get-UserPhaseStatePath.
 .PARAMETER MaxMinutes
-    The time budget, counted from the start of the attempt, so the winget check and the source
-    update count toward it. No install starts once less than a minute of it is left, and each
-    install's time limit is what is left (at most 30 minutes), so the whole phase takes about this
-    long at most, plus the Terminal step. Default 15.
+    The time budget, from the start of the attempt. No install starts with less than a minute left,
+    and each install's limit is what is left (at most 30 minutes), so the phase takes about this long
+    at most, plus the Terminal step. Default 15.
 .PARAMETER MaxAttempts
     How many sign-ins may try for one machine run before the user phase gives up on it. Default 3.
 .OUTPUTS
@@ -155,7 +138,7 @@ function Invoke-WingetUserPhase {
             else {
                 Update-UserPhaseWingetSource
                 # What the record cannot carry: a userPhase entry's post-install hook and the entry's
-                # installer type (work-order item 38).
+                # installer type.
                 $catalogEntries = Get-UserPhaseCatalogEntry
                 foreach ($id in $deferredApps) {
                     $remainingSeconds = $budgetSeconds - (Get-UserPhaseElapsedSeconds -Stopwatch $stopwatch)

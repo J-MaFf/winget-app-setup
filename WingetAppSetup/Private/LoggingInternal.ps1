@@ -1,8 +1,5 @@
-# The run's own logging: the key-press prompt and the transcript. The message primitives
-# (Write-Info/Success/WarningMessage/ErrorMessage, Format-AppList, Write-Table) live in
-# Public/Logging.ps1. The split is for readers only: the module exports every function, Private/
-# ones included (review finding P3-44), so winget-app-uninstall.ps1, which imports the module
-# through its manifest, can call either.
+# The run's own logging: the key-press prompt and the transcript. The message primitives live in
+# Public/Logging.ps1; the module exports both folders' functions, so the split is for readers only.
 
 <#
 .SYNOPSIS
@@ -24,32 +21,19 @@ function Write-Prompt {
 .SYNOPSIS
     Starts the run's transcript under %ProgramData%\winget-app-setup\logs and returns its path.
 .DESCRIPTION
-    Persistent transcript (issue #189): a failed install on a remote user's machine used to leave
-    zero artifacts. The log lands under ProgramData - not the elevating account's TEMP - so it
-    survives cross-user elevation and stays findable afterwards. Logging must never block an
-    install: any failure here downgrades to a warning and the run continues untranscribed.
-
-    Called by the generated entry script for both phases of a run: the Windows PowerShell 5.1
-    bootstrap (-Bootstrap, review finding P2-13), whose PowerShell 7 install used to leave no log
-    at all, and the PowerShell 7 run itself. Runs under Windows PowerShell 5.1, so it must stay
-    5.1-runtime compatible (see WingetAppSetup/Private/PowerShell7Bootstrap.ps1).
-
-    Once the transcript is running, the log folder is made readable for standard users
-    (Grant-InstallLogReadAccess, review finding P3-14), so the log can be opened from the end
-    user's own session after a cross-user elevated run.
+    ProgramData, not the elevating account's TEMP, so the log survives cross-user elevation. Never
+    blocks an install: a failure warns and the run goes on without a transcript. Once it runs, the
+    log folder is made readable for standard users (Grant-InstallLogReadAccess). Runs under Windows
+    PowerShell 5.1 too (the bootstrap phase), so it must stay 5.1-compatible.
 .PARAMETER WhatIf
-    A dry run: the file name gets a -whatif suffix, so dry-run transcripts are never mistaken for
-    real install logs.
+    A dry run: the file name gets a -whatif suffix.
 .PARAMETER Bootstrap
-    The Windows PowerShell 5.1 bootstrap phase: the file name gets a -bootstrap suffix. The
-    PowerShell 7 run it relaunches writes its own transcript next to it.
+    The Windows PowerShell 5.1 bootstrap phase: the file name gets a -bootstrap suffix.
 .PARAMETER UserPhase
-    The user phase (Invoke-WingetUserPhase), which runs as the signed-in user, not elevated: the
-    transcript goes to that user's %LOCALAPPDATA%\winget-app-setup\logs, and the file name gets a
-    -userphase suffix. The machine's logs folder is for the runs that install for the whole PC, and
-    a standard user often cannot write to it (installing Winget-AutoUpdate limits it to SYSTEM and
-    Administrators). The folder's access list is left as it is.
-.RETURNS
+    The user phase (Invoke-WingetUserPhase), run as the signed-in user: the transcript goes to that
+    user's %LOCALAPPDATA%\winget-app-setup\logs with a -userphase suffix, because a standard user
+    often cannot write to the machine's logs folder. That folder's access list is left alone.
+.OUTPUTS
     [string] The transcript path, or $null when the transcript could not be started.
 #>
 function Start-InstallerTranscript {
@@ -102,28 +86,19 @@ function Start-InstallerTranscript {
 
 <#
 .SYNOPSIS
-    Lets standard users read the installer's log folder (and the logs inside it).
+    Lets standard users read the installer's log folder and the logs in it.
 .DESCRIPTION
-    Review finding P3-14. Installing Winget-AutoUpdate restricts %ProgramData%\winget-app-setup to
-    SYSTEM and Administrators (New-WauStagingDirectory, issue #186), and that inheritance-removing
-    ACL reaches the logs folder beneath it. From then on the teammate who elevated as an admin on
-    the end user's machine got Access Denied opening the log from the end user's own session, which
-    is where they file the GitHub issue from.
-
-    This adds an explicit, inheritable read-and-execute grant for BUILTIN\Users (well-known SID
-    S-1-5-32-545, so it works on non-English Windows) on the logs folder only. Explicit entries are
-    kept when the parent's inheritable entries change, so the grant survives that restriction, and
-    every elevated run re-applies it, which also repairs machines restricted by an earlier run. The
-    WAU staging directory's lockdown is untouched: it is a sibling folder with its own ACL, and the
-    grant gives no write access. The parent stays unlistable for standard users, so they open the
-    log by its full path, which the installer prints.
-
-    Only an elevated process changes the ACL: a non-elevated first launch could not change an admin-
-    created folder, and the elevated run it starts does it instead. Best-effort: a failure warns and
-    the run continues. Runs under Windows PowerShell 5.1 too (the bootstrap transcript).
+    Installing Winget-AutoUpdate limits %ProgramData%\winget-app-setup to SYSTEM and Administrators,
+    and that reaches the logs folder, so a user could not open the log from their own session after
+    a cross-user elevated run (review finding P3-14). This adds an explicit, inheritable
+    read-and-execute entry for BUILTIN\Users (by SID S-1-5-32-545, for non-English Windows) on the
+    logs folder only; explicit entries survive the parent's change, and every elevated run applies
+    it again. No write access, and the parent stays unlistable, so users open the log by its full
+    path. Only an elevated process changes the ACL. Best-effort: a failure warns. Runs under Windows
+    PowerShell 5.1 too.
 .PARAMETER Path
     The log folder.
-.RETURNS
+.OUTPUTS
     [bool] True when the grant was applied.
 #>
 function Grant-InstallLogReadAccess {

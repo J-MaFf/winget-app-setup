@@ -324,6 +324,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   parse, ASCII and PowerShell-7-syntax guards now name the source file and line behind each line
   they report. Every function in the installer has the same syntax tree as before. A change to a
   module comment alone no longer changes the installer or its build id.
+- The module's comments are shorter (work-order item 30, review finding P3-53): the incident
+  narratives in its help and inline comments now say what the code does and why in a few lines,
+  with the history left to the commit messages and this changelog (6,508 comment lines and 408 KB
+  down to 4,763 and 264 KB). The comment-based help of every module function uses `.OUTPUTS`
+  instead of `.RETURNS`, an unknown keyword that made `Get-Help` ignore the whole help block, so
+  `Get-Help` now reads the help of all 258 functions instead of 56; a test keeps it that way. No
+  code changed: the generated installer is byte-identical.
 - Auto-updates now count as set up only when Winget-AutoUpdate's `\WAU\Winget-AutoUpdate` task
   exists, is enabled and has an enabled trigger (`Get-WauTaskHealth`), checked after installing WAU
   and on every run that finds it already installed (review finding P3-36). WAU's registry key, or

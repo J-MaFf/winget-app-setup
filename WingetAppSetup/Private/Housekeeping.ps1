@@ -1,41 +1,31 @@
-# Retention for what the installer leaves on disk (review finding P3-42). Every run used to add a
-# transcript, per-app installer logs and, on the Windows PowerShell 5.1 irm | iex path, a full copy
-# of the installer in a temp folder, and nothing ever removed them: an RMM schedule that starts the
-# installer every 90 minutes grew them without bound.
+# Retention for what the installer leaves on disk (P3-42): without it an RMM schedule's runs grew the
+# transcripts, installer logs and temporary installer copies without bound.
 
 <#
 .SYNOPSIS
     Deletes the installer's old logs and its leftover temporary copies, never the current run's.
 .DESCRIPTION
-    Called by the generated entry script once a real (not -WhatIf) elevated run holds the run lock
-    (Lock-InstallerRun), so two runs never prune at the same time and a dry run changes nothing.
-    It keeps the logs of the newest KeepTranscripts transcripts (Remove-OldInstallerLog) and removes
-    the installer's temporary copy folders older than TempCopyMaxAgeHours
-    (Remove-StaleInstallerCopy). The retention numbers are this function's parameter defaults, the
-    one place they are set. Housekeeping never stops a run: any failure warns and the run goes on.
+    The entry script calls it once a real elevated run holds the run lock, so two runs never prune
+    at once and a dry run changes nothing. It keeps the logs of the newest KeepTranscripts
+    transcripts (Remove-OldInstallerLog) and removes copy folders older than TempCopyMaxAgeHours
+    (Remove-StaleInstallerCopy). The defaults here are the one place the numbers are set. Never
+    stops a run: a failure warns.
 .PARAMETER LogDirectory
     The logs folder. Default: the folder of this run's transcript (Get-InstallerLogDirectory);
     nothing is pruned there when there is none.
 .PARAMETER KeepTranscripts
-    How many install-*.log transcripts to keep, newest first. A run started from Windows PowerShell
-    writes two (the bootstrap's and the PowerShell 7 run's), one started by the RMM wrapper three
-    (the wrapper's own as well), and one that relaunches itself elevated up to four, so 30 keeps
-    the logs of at least the last 7 runs.
+    How many install-*.log transcripts to keep, newest first. A run writes up to four (bootstrap,
+    RMM wrapper, PowerShell 7 run, elevated relaunch), so 30 keeps at least the last 7 runs.
 .PARAMETER TempRoot
-    The folders to look for leftover copies in. Default: the elevated relaunch's copy folder
-    (Get-ElevatedCopyRoot, %SystemRoot%\Temp), plus, when the run is SYSTEM (an RMM run, whose temp
-    folders are system folders), this process's temp folder and SYSTEM's profile temp folder
-    (Get-SystemProfileTempRoot): the Windows PowerShell 5.1 bootstrap of a SYSTEM run saves its
-    copies in whichever of %SystemRoot%\Temp and that profile folder its environment names, which
-    need not be the folder the PowerShell 7 run calls its own. Any other account's temp folder is
-    in a user profile, where that account's processes that are not elevated can rename and replace
-    entries, so an elevated run leaves it alone (review of finding P3-42).
+    The folders to look for leftover copies in. Default: Get-ElevatedCopyRoot (%SystemRoot%\Temp),
+    plus, as SYSTEM, this process's temp folder and Get-SystemProfileTempRoot, since a SYSTEM
+    bootstrap saves its copies in whichever its environment names. Never another account's temp
+    folder, whose entries that account's non-elevated processes can replace.
 .PARAMETER TempCopyMaxAgeHours
-    A copy folder at least this old is removed. No run lasts this long, so a folder this old does
-    not belong to a run still in progress.
+    A copy folder at least this old is removed; no run lasts this long.
 .PARAMETER CurrentScriptPath
     The path of the running installer ($PSCommandPath). Its folder is never removed.
-.RETURNS
+.OUTPUTS
     [pscustomobject] @{ LogsRemoved; CopiesRemoved }.
 #>
 function Invoke-InstallerHousekeeping {
@@ -92,16 +82,12 @@ function Invoke-InstallerHousekeeping {
 .SYNOPSIS
     Returns SYSTEM's own temp folder: %SystemRoot%\System32\config\systemprofile\AppData\Local\Temp.
 .DESCRIPTION
-    Where the Windows PowerShell 5.1 bootstrap of a run as SYSTEM saves the installer's copy and the
-    PowerShell 7 MSI download when it was started with SYSTEM's profile environment, as a scheduled
-    task running as SYSTEM is (a service such as an RMM agent usually has %SystemRoot%\Temp,
-    Get-ElevatedCopyRoot, instead). The PowerShell 7 run that cleans up need not call this folder
-    its own: .NET 7 and later ask Windows' GetTempPath2, which names C:\Windows\SystemTemp for
-    SYSTEM where Windows has it. Only SYSTEM and Administrators can change entries in this folder,
-    which Remove-StaleInstallerCopy requires of a root. Built by string concatenation, as
-    Get-ElevatedCopyRoot is (Join-Path rejects a C: path off Windows); a function so tests can
-    point it elsewhere.
-.RETURNS
+    Where a SYSTEM run's 5.1 bootstrap saves its copies when started with SYSTEM's profile
+    environment, as a scheduled task is; the PowerShell 7 run that cleans up may see another temp
+    folder (.NET 7+ asks GetTempPath2, which names C:\Windows\SystemTemp). Only SYSTEM and
+    Administrators can change entries there. Built by string concatenation (Join-Path rejects a C:
+    path off Windows); a function so tests can point it elsewhere.
+.OUTPUTS
     [string]
 #>
 function Get-SystemProfileTempRoot {
@@ -113,28 +99,21 @@ function Get-SystemProfileTempRoot {
     Keeps the newest transcripts in the logs folder and the installer logs of their runs, and
     deletes the rest.
 .DESCRIPTION
-    Works on the file names the installer gives its logs, each of which carries the local time it
-    was started at (yyyyMMdd-HHmmss):
-      - transcripts: install-<time>.log, with -bootstrap, -rmm (rmm/Invoke-WingetAppSetup.ps1, the
-        RMM wrapper) or -userphase (Invoke-WingetUserPhase, in the user's own logs folder), and/or
-        -whatif, before .log;
-      - installer logs: winget-<install|upgrade|uninstall|repair>-<package id>-<time>[-<n>].log
-        (winget's --log, Invoke-WingetProcess) and pwsh-msi-<time>-<attempt>.log (msiexec's log of
-        the PowerShell 7 MSI, Install-PowerShell7FromMsi).
-    The newest KeepTranscripts transcripts are kept. When there are more, the older ones are
-    deleted, and so is every installer log older than the oldest transcript kept: a run writes its
-    installer logs after its transcript starts, so the logs of every run whose transcript is kept
-    stay. The order comes from the time in the names, not from file timestamps, which copying or
-    touching a file changes. Other files (last-run.json, anything a person put there) are
-    never touched, nor is the current run's transcript. A file that cannot be deleted (open in
-    another process) is left for the next run.
+    Reads the start time (yyyyMMdd-HHmmss) in the names the installer gives its logs:
+      - transcripts: install-<time>[-bootstrap|-rmm|-userphase][-whatif].log;
+      - installer logs: winget-<install|upgrade|uninstall|repair>-<package id>-<time>[-<n>].log and
+        pwsh-msi-<time>-<attempt>.log.
+    When there are more than KeepTranscripts transcripts, the older ones go, and so does every
+    installer log older than the oldest transcript kept (a run writes its installer logs after its
+    transcript starts). Names decide the order, not file timestamps. Other files (last-run.json) and
+    the current transcript are never touched; a file that cannot be deleted is left for the next run.
 .PARAMETER LogDirectory
     The logs folder.
 .PARAMETER KeepTranscripts
     How many transcripts to keep.
 .PARAMETER CurrentTranscriptPath
     This run's transcript, never deleted.
-.RETURNS
+.OUTPUTS
     [int] The number of files deleted.
 #>
 function Remove-OldInstallerLog {
@@ -196,33 +175,23 @@ function Remove-OldInstallerLog {
 .SYNOPSIS
     Deletes the installer's leftover temporary copy folders.
 .DESCRIPTION
-    The installer makes folders named winget-app-setup-<32 hex digits> (the Windows PowerShell 5.1
-    bootstrap's downloaded copy for an irm | iex run, and the elevated relaunch's checked copy under
-    %SystemRoot%\Temp), winget-app-setup-elevate-<32 hex digits> (the copy staged for the elevated
-    window) and winget-app-setup-pwsh-<32 hex digits> (the PowerShell 7 MSI download). Each is
-    removed by the run that made it, but a run that is killed, or whose window is closed, leaves its
-    folder behind.
+    winget-app-setup-<32 hex> (the bootstrap's copy, the elevated relaunch's checked copy),
+    winget-app-setup-elevate-<32 hex> and winget-app-setup-pwsh-<32 hex> folders are removed by the
+    run that made them, unless it was killed. This removes those at least MaxAgeHours old. Any
+    account can create such names in %SystemRoot%\Temp, so a folder goes only when SYSTEM or
+    Administrators own it and it is a flat folder of files: links, subfolders and unreadable owners
+    are left alone, as is the running installer's folder. It deletes the files it listed, then the
+    folder without recursing, so a file added meanwhile keeps the folder.
 
-    This removes such folders once they are MaxAgeHours old. The name and the age alone do not show
-    who made a folder: any account can create entries in %SystemRoot%\Temp and choose their names
-    (review of finding P3-42). So a folder is removed only when it is owned by SYSTEM (S-1-5-18)
-    or Administrators (S-1-5-32-544), which an account that is not an administrator cannot make
-    it, and only when it is a flat folder of files: a folder that is a link, or holds a folder or
-    a link, is left alone, as is a folder whose owner cannot be read. It also skips the running
-    installer's own folder. Within a folder it removes, it deletes the files it listed, one by one,
-    then the folder itself without recursing; a file added meanwhile makes that last step fail and
-    the folder stays.
-
-    Root must be a folder in which an account that is not an administrator cannot rename or
-    replace what SYSTEM or Administrators own, such as %SystemRoot%\Temp or SYSTEM's own temp
-    folder (see Invoke-InstallerHousekeeping), never a user profile's temp folder.
+    Root must be a folder where a non-administrator cannot rename or replace what SYSTEM or
+    Administrators own (%SystemRoot%\Temp, SYSTEM's temp folder), never a user profile's.
 .PARAMETER Root
     The folders to look in. Duplicates and folders that do not exist are skipped.
 .PARAMETER MaxAgeHours
     The age (last write time) from which a folder is removed.
 .PARAMETER CurrentScriptPath
     The running installer's path; its folder is kept.
-.RETURNS
+.OUTPUTS
     [int] The number of folders deleted.
 #>
 function Remove-StaleInstallerCopy {

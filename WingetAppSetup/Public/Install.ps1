@@ -1,67 +1,40 @@
 <#
 .SYNOPSIS
-    Executes the winget installation workflow when the script runs directly.
-.DESCRIPTION
-    Performs prerequisite checks, validates application definitions, installs requested apps, processes updates, and displays a summary when invoked.
+    Runs the installation: elevation, pre-flight, winget setup, the apps, auto-updates and the
+    summary, and returns the exit code.
 .PARAMETER WhatIf
     When specified, the script performs all pre-flight checks and displays planned actions without making any system changes.
 .PARAMETER NonInteractive
-    Suppresses the interactive extra for unattended runs (RMM, CI, scheduled tasks): the final
-    "press any key to exit". Also turned on by $env:WINGET_APP_SETUP_NONINTERACTIVE
-    (Test-NonInteractiveRequested), and auto-detected when the session is non-interactive or stdin
-    is redirected. No path asks a yes/no question anymore (issue #230). The one question left is
-    TightVNC's server password, asked at the start of an interactive run when
-    WINGET_APP_SETUP_TIGHTVNC_PASSWORD is not set and TightVNC Server has no password yet
-    (work-order item 18), and skipped when nobody starts typing within 5 minutes; a
-    non-interactive run never asks it and reports TightVNC as not configured instead. A
-    non-interactive run that is not elevated returns 4 instead of raising a UAC prompt that nobody
-    would answer (review finding P2-12).
+    For unattended runs (RMM, CI, scheduled tasks): no final "press any key to exit". Also set by
+    WINGET_APP_SETUP_NONINTERACTIVE, and detected when the session is non-interactive or stdin is
+    redirected. Nothing asks a yes/no question (issue #230); the one prompt, TightVNC's server
+    password, is never shown then, and a run that is not elevated returns 4 instead of raising a UAC
+    prompt nobody would answer.
 .PARAMETER SkipSystemCheck
-    Pass-through of the entry script's -SkipSystemCheck switch. Used only so an elevated relaunch
-    inherits the caller's intent to bypass the pre-flight system checks (issue #185); the checks
-    themselves run in the entry script before this function is called.
+    The entry script's -SkipSystemCheck, forwarded only to an elevated relaunch (issue #185); the
+    checks themselves run in the entry script.
 .PARAMETER Apps
-    App-definition hashtables to install. Defaults to the curated catalog returned by
-    Get-DefaultAppCatalog — the single source of truth shared with winget-app-uninstall.ps1
-    (issue #190). Overridable so tests (and callers) can inject a custom catalog.
+    App-definition hashtables to install. Default: Get-DefaultAppCatalog, which the uninstaller
+    shares (issue #190).
 .OUTPUTS
-    [int] The run's exit code. The function never ends the process itself: the generated entry
-    script (build/fragments/tail.ps1) exits with the returned code, so every path here can be
-    driven from a test and asserted on its result.
+    [int] The run's exit code. It never ends the process: the entry script exits with it, so every
+    path here can be tested.
 .NOTES
-    Exit codes: 0 = success, 1 = one or more apps failed to install (including the apps marked
-    failed when winget could no longer be launched mid-run), 2 = winget unavailable (at the start,
-    where `winget --version` must run and print a version, or Group Policy turns winget or its
-    source off, which the pre-flight checks before anything else; or no longer launchable at the
-    end of the run), 3 = app-definition validation failed or no valid apps remain, 4 = administrator
-    rights are required and the run was not elevated: the UAC prompt was declined or could not be
-    shown, a non-interactive run (nobody to approve a prompt, so none is shown), Group Policy's
-    Windows PowerShell execution policy for the PC is AllSigned or Restricted, so the elevated window
-    could not run the script (no prompt is shown; wgt-gq8.39), irm | iex, or the imported module
-    (review finding P2-12), 8 = the apps are installed, but automatic updates are not
-    configured or unhealthy: the run's 'Auto-updates:' line is FAILED, NOT CONFIGURED (no
-    Microsoft.WindowsAppRuntime.1.8, or whatever the latest winget release needs, and the installer
-    could not install it), AT RISK
-    or UNHEALTHY (review finding P3-36), 3010 = success,
-    but a restart is required to finish (an install said so, or Windows gained a pending restart
-    during the run; review finding P3-16). At the end of a run the precedence is
-    1 > 2 > 8 > 3010 > 0 (Get-InstallerExitCode). Apps reported as Deferred (a run as SYSTEM or
-    under cross-user elevation found no machine-wide installer for them, or the catalog marks them
-    per-user: scope 'user' or userPhase) count neither as installed nor as failed and do not change
-    the code. An app whose post-install hook failed counts as failed (1); one the hook could not
-    configure (NotConfigured) is installed, gets its own 'Configuration: NOT DONE' line and does not
-    change the code (work-order item 38). A run as SYSTEM returns 2 at the start
-    when no machine-wide winget.exe can be started. A run that relaunched
-    itself elevated returns the elevated run's exit code (Restart-WithElevation waits for it). The
-    generated entry script also exits 1 when a blocking pre-flight check fails (before this
-    function runs), 5 when the run was aborted by an unexpected error or stopped from outside, or
-    PowerShell runs it in Constrained Language Mode (wgt-gq8.39), and 6 when another run of the
-    installer is in progress on the machine (review finding P3-41).
+    Exit codes: 0 = success; 1 = an app failed (including those failed once winget could no longer
+    start mid-run, and a failed post-install hook); 2 = winget unavailable (at the start, including
+    Group Policy turning it off and, as SYSTEM, no machine-wide winget.exe that starts; or no longer
+    launchable at the end); 3 = the catalog failed validation or no valid apps remain; 4 =
+    administrator rights are required and the run was not elevated (the prompt was declined or could
+    not be shown, a non-interactive run, an execution policy that would refuse the elevated script,
+    irm | iex, or the imported module); 8 = apps installed, but automatic updates are FAILED, NOT
+    CONFIGURED, AT RISK or UNHEALTHY; 3010 = success, but a restart finishes it. At the end of a run
+    the precedence is 1 > 2 > 8 > 3010 > 0 (Get-InstallerExitCode). Deferred apps and NotConfigured
+    hooks do not change the code. A run that relaunched itself elevated returns the elevated run's
+    code. The entry script also exits 1 for a failed blocking pre-flight check, 5 for an abort or
+    Constrained Language Mode, and 6 when another run is in progress.
 
-    After the summary of a real run, the run's outcome is reported in machine-readable form
-    (Write-InstallerRunResult): one RESULT line, and last-run.json next to the transcript when the
-    entry script allows it ($script:InstallerRunRecordEnabled). Then the run lock is released, before
-    the final prompt. A dry run reports neither.
+    After the summary, a real run reports in machine-readable form (Write-InstallerRunResult: the
+    RESULT line and last-run.json) and releases the run lock before the final prompt.
 #>
 function Invoke-WingetInstall {
     [OutputType([int])]
@@ -78,11 +51,8 @@ function Invoke-WingetInstall {
         [array]$Apps = (Get-DefaultAppCatalog)
     )
 
-    # Effective non-interactive mode: explicit switch, a non-interactive session (e.g. service,
-    # scheduled task; not PowerShell's own -NonInteractive switch), or redirected stdin
-    # (piped/irm|iex wrappers).
-    # Shared private helper (issue #214) — Test-SystemRequirements gates its disk-space prompt
-    # on the same detection.
+    # Non-interactive: the switch, the environment variable, a non-interactive session, SYSTEM, or
+    # redirected stdin (Test-EffectiveNonInteractive).
     $effectiveNonInteractive = Test-EffectiveNonInteractive -NonInteractive:$NonInteractive
 
     if ($WhatIf) {
@@ -91,18 +61,11 @@ function Invoke-WingetInstall {
         Write-Host ''
     }
 
-    # Test-IsAdmin (Public/Elevation.ps1, issue #239) wraps the WindowsPrincipal/IsInRole check
-    # behind a mockable command, so tests can drive the non-admin branch below deterministically
-    # instead of only when Pester itself happens to run non-elevated. It also fails safe (assumes
-    # elevated) if the underlying check throws — see its own docstring for why that direction is
-    # the right one for this call site specifically.
+    # Mockable, and assumes elevated when the check itself throws (see Test-IsAdmin).
     $isAdmin = Test-IsAdmin
 
-    # Check if the script is run as administrator. The $WhatIf gate is checked once here, for
-    # both execution contexts below, rather than duplicated per-branch: a dry run makes no system
-    # changes, so it never needs elevation or an elevation-required exit — only which preview
-    # message to print depends on how this script is being run. Every run that cannot go on without
-    # administrator rights returns 4 (review finding P2-12).
+    # Not elevated: a dry run only previews and never needs elevation; any other run that cannot go
+    # on without administrator rights returns 4 (P2-12).
     If (-NOT $isAdmin) {
         if ($WhatIf) {
             if (-not (Test-IsRunningLocally)) {
@@ -115,11 +78,8 @@ function Invoke-WingetInstall {
                 Write-Info '[DRY-RUN] A real run would stop here with exit code 4: it needs administrator privileges, and a non-interactive run shows no UAC prompt. Continuing the preview in the current (non-elevated) session; no system changes will be made.'
             }
             else {
-                # Relaunching elevated here would (a) be a surprising side effect for a preview
-                # and (b) — if the flag were ever dropped across the elevation boundary —
-                # silently turn a dry run into a real install. Stay in the current session and
-                # continue the preview. Restart-WithElevation's execution-policy check (wgt-gq8.39) is
-                # read-only, so the preview says what it would find.
+                # A preview never relaunches elevated, which could turn it into a real install. The
+                # execution-policy check is read-only, so the preview says what it would find.
                 $elevationPolicyBlock = Get-ScriptExecutionPolicyBlock -Engine WindowsPowerShell
                 if ($elevationPolicyBlock -and $elevationPolicyBlock.Scope -eq 'MachinePolicy') {
                     Write-Info ('[DRY-RUN] A real run would stop here with exit code 4, without a UAC prompt: {0} Continuing the preview in the current (non-elevated) session; no system changes will be made.' -f (Format-ElevationPolicyBlockMessage -Block $elevationPolicyBlock))
@@ -137,41 +97,28 @@ function Invoke-WingetInstall {
             Write-ErrorMessage 'This script requires administrator privileges.'
             Write-ErrorMessage 'Auto-elevation is unavailable when running through IEX/remote execution.'
             Write-Info 'Open an elevated PowerShell or Windows Terminal session and run the IEX command again.'
-            # No 'Exiting in 5 seconds' sleep any more: the entry script's Exit-Installer prints the
-            # log path and build id and, when someone is at the console, waits for a key press
-            # before the window closes (review finding P2-14).
+            # No sleep: the entry script's Exit-Installer prints the log path and build id and waits
+            # for a key press when someone is at the console (P2-14).
             return 4
         }
         elseif (Test-InvokedFromModuleContext -InvocationModule $MyInvocation.MyCommand.Module -CommandPath $PSCommandPath) {
-            # Elevation relaunches $PSCommandPath. When Invoke-WingetInstall comes from the
-            # imported (or dot-sourced) module, that path is WingetAppSetup/Public/Install.ps1 —
-            # a functions-only file — so the elevated window would define a function and exit
-            # without installing anything (issue #185). Fail fast with guidance instead.
+            # From the imported module, $PSCommandPath is the functions-only Public/Install.ps1, so an
+            # elevated relaunch would install nothing (issue #185).
             Write-ErrorMessage 'Invoke-WingetInstall was invoked from the imported module without elevation; auto-elevation cannot relaunch a module function. Run winget-app-install.ps1, or start from an already-elevated session.'
             return 4
         }
         elseif ($effectiveNonInteractive) {
-            # Nobody is there to approve a UAC prompt (review finding P2-12): an RMM job or a
-            # scheduled task running as a standard user used to raise one on the user's desktop and
-            # exit 0 within seconds, with nothing installed.
+            # Nobody is there to approve a UAC prompt (P2-12), and one on the user's desktop would
+            # leave the run with nothing installed.
             Write-ErrorMessage 'This script requires administrator privileges, and this run is non-interactive, so there is nobody to approve a UAC prompt and none was shown. Run it from an elevated session, or as SYSTEM (for example from an RMM tool).'
             return 4
         }
         else {
-            # No winget call before elevating: the elevated run sets winget up for the account it
-            # runs as (Initialize-Winget). A source update here set up the signed-in user's source,
-            # which under cross-user elevation is not the account that installs, and was a fourth
-            # source probe in the run (review finding P3-25).
-            #
-            # No "press Enter to elevate" pause (issue #230): the UAC dialog the relaunch raises is
-            # the actual consent gate.
+            # No winget call before elevating: the elevated run sets winget up for its own account
+            # (P3-25). No "press Enter to elevate" pause (issue #230): the UAC dialog is the consent.
             Write-ErrorMessage 'This script requires administrator privileges. Restarting with elevated privileges...'
-            # Forward the caller's switches so the elevated run inherits the same intent:
-            # -SkipSystemCheck so the pre-flight checks the caller explicitly bypassed are not re-run
-            # (issue #185); -WhatIf as a safety net so a dry run could never escalate into changes
-            # (unreachable today — a dry run never relaunches — but kept so the forwarding stays
-            # correct if that ever changes). -NonInteractive is never forwarded: a non-interactive
-            # run returned 4 above.
+            # Forward -SkipSystemCheck (issue #185) and -WhatIf (a safety net; a dry run never gets
+            # here). -NonInteractive never: a non-interactive run returned 4 above.
             $elevationArgs = @()
             if ($WhatIf) { $elevationArgs += '-WhatIf' }
             if ($SkipSystemCheck) { $elevationArgs += '-SkipSystemCheck' }
@@ -199,12 +146,9 @@ function Invoke-WingetInstall {
         Write-Success 'Starting...'
     }
 
-    # Who this run installs as (review findings P2-24, P3-22, P3-23), decided once: SYSTEM, as under
-    # an RMM agent such as Endpoint Central, or an admin account elevating on a signed-in user's PC.
-    # Either way the run installs for the whole PC only, so an app whose package has no machine-wide
-    # installer is deferred instead of being installed for the wrong account. A SYSTEM run uses the
-    # machine-wide winget.exe (Initialize-Winget finds it), which Resolve-WingetExecutable
-    # returns from then on; a stale path from an earlier run in this session is dropped first.
+    # Who this run installs as, decided once: as SYSTEM or under cross-user elevation the run
+    # installs for the whole PC only. A stale machine-wide winget path from an earlier run in this
+    # session is dropped first.
     $script:MachineWingetPath = $null
     $account = Get-InstallAccountContext
     $machineWide = [bool]($account.IsSystem -or $account.IsCrossUserElevation)
@@ -212,13 +156,9 @@ function Invoke-WingetInstall {
         Write-Info 'Running as SYSTEM (for example from an RMM agent): installing for the whole PC only, with the winget.exe that App Installer installed for this PC. An app with no machine-wide installer is not installed: it is reported as Deferred, with how it can still be installed for the user. Microsoft does not support the winget command line as SYSTEM, so a SYSTEM run can fail where a run as a user would not.'
     }
 
-    # Pre-flight for the account this run installs as (wgt-gq8.39), before this run changes or waits
-    # for anything: one line for each problem it finds. A proxy the signed-in user has that this
-    # account does not and a restart that is already pending are warnings; App Installer's Group
-    # Policy turning winget off stops a real run with exit code 2. Read-only, so a dry run runs it
-    # too. The pending-restart state it read is the one the end of the run compares against (review
-    # finding P3-16), so a restart this run's installs need (exit code 3010) is told apart from one
-    # that was already pending, which is reported but does not make the run 3010 by itself.
+    # Pre-flight for the account this run installs as, before it changes or waits for anything:
+    # proxy and pending-restart warnings, and App Installer's Group Policy stopping a real run with 2.
+    # The restart state it read lets the end of the run tell its own restart (3010) from an old one.
     $preflight = Invoke-EnvironmentPreflight -WhatIf:$WhatIf -AccountContext $account
     if ($preflight.ExitCode -ne 0) {
         return [int]$preflight.ExitCode
@@ -226,14 +166,10 @@ function Invoke-WingetInstall {
     $restartStateBefore = $preflight.RestartState
     $restartPendingBefore = @($preflight.RestartPendingReasons)
 
-    # TightVNC's passwords for its post-install hook (work-order item 18, review finding P2-22),
-    # before winget or any installer starts: taken out of this process's environment so no child
-    # process it starts from here on inherits them, or asked for now when someone is at the console
-    # and TightVNC Server has none yet, so the rest of the run needs nobody (the prompt waits at
-    # most 5 minutes, since this run holds the run lock). Only for a catalog with that hook. A dry
-    # run only says whether they were supplied. A failure here must not stop the installs: the
-    # hook then reports TightVNC as not configured. Every return below this point drops them
-    # (Clear-TightVncSecret), and so does the entry script's finally block.
+    # TightVNC's passwords for its hook (P2-22), before winget or any installer starts: taken out of
+    # the environment so no child process inherits them, or asked for now when someone is at the
+    # console (at most 5 minutes, since the run holds the lock). A failure only leaves TightVNC not
+    # configured. Every return below drops them (Clear-TightVncSecret), as does the entry script.
     try {
         Initialize-TightVncSecretForRun -Apps $Apps -NonInteractive:$effectiveNonInteractive -WhatIf:$WhatIf
     }
@@ -241,21 +177,15 @@ function Invoke-WingetInstall {
         Write-WarningMessage "Could not read the TightVNC password for this run: $($_.Exception.Message)"
     }
 
-    # Let a Winget-AutoUpdate run that is already in progress finish first (bounded): it
-    # re-provisions App Installer, resets winget's sources and runs MSI upgrades, and racing it makes
-    # healthy apps fail with launch errors or 'another installation is in progress'. Read-only, but
-    # skipped in a dry run so a preview never waits.
+    # Let a Winget-AutoUpdate run already in progress finish first (bounded): racing its App
+    # Installer re-provisioning and MSI upgrades fails healthy installs. Not in a dry run.
     if (-not $WhatIf) {
         [void](Wait-WauIdle)
     }
 
-    # Make winget usable for the account this run installs as: one probe, classify, fix ladder
-    # (review finding P3-25; as SYSTEM it finds the machine-wide winget.exe, P2-24). It stops the run
-    # with exit code 2 when winget cannot be started or Group Policy turns it off. A dry run only
-    # probes (P2-16) and carries on whatever it finds: a real run would set winget up first, so
-    # stopping here would misreport the very machine a dry run previews (cross-user elevation,
-    # issue #265). A dry run whose pre-flight already reported the Group Policy block skips it:
-    # its first step would report the same policy again, and winget cannot run either way.
+    # Make winget usable for this account (Initialize-Winget); a real run stops with 2 when it cannot
+    # be started or Group Policy turns it off. A dry run only probes and carries on (P2-16), and skips
+    # it when the pre-flight already reported the policy block.
     if ($preflight.WingetPolicyBlocked) {
         $winget = [pscustomobject]@{ Ready = $false; Diagnosis = 'PolicyBlocked' }
     }
@@ -273,10 +203,8 @@ function Invoke-WingetInstall {
     # ongoing updates are now handled by Winget-AutoUpdate, set up after the app installs (issue #168).
     [void](Remove-LegacyScheduledUpdates -WhatIf:$WhatIf)
 
-    # Note: earlier versions added the script's own directory (often Downloads/) to the persistent
-    # User PATH here for the homegrown updater. The updater is gone (#168) and a user-writable
-    # directory on the PATH of an elevating account is a hijack surface, so no PATH changes are
-    # made anymore (issue #179).
+    # No PATH changes: a user-writable folder on an elevating account's PATH is a hijack surface
+    # (issue #179).
 
     # The curated app list lives in Get-DefaultAppCatalog (issue #190) — the single source of
     # truth shared with winget-app-uninstall.ps1. It arrives here through the -Apps parameter,
@@ -324,14 +252,12 @@ function Invoke-WingetInstall {
     $installedApps = @()
     $skippedApps = @()
     $failedApps = @()
-    # Apps with no machine-wide installer in a run for the whole PC (review finding P3-22), or that
-    # the catalog marks per-user (scope 'user' or userPhase, work-order item 38): neither installed
-    # nor failed, and left for the signed-in user's own account (Write-DeferredAppsSummary). The
-    # two kinds are explained apart.
+    # Deferred apps: no machine-wide installer in a run for the whole PC, or marked per-user in the
+    # catalog. Neither installed nor failed; explained apart (Write-DeferredAppsSummary).
     $deferredApps = @()
     $noInstallerDeferredApps = @()
     $perUserDeferredApps = @()
-    # Installed apps whose post-install hook could not configure them (work-order item 38): they do
+    # Installed apps whose post-install hook could not configure them: they do
     # not change the exit code, and the summary names them with the hook's reason.
     $notConfiguredApps = @()
 
@@ -339,39 +265,27 @@ function Invoke-WingetInstall {
     # forces --source winget), and Initialize-Winget above already updated it, and repaired it if
     # needed (issues #172, #177).
 
-    # Run-level circuit breaker (review findings P2-8, P2-10). Set once an app could not launch
-    # winget and a follow-up check (Invoke-WingetLaunchCircuitBreaker) found that winget still
-    # cannot be started: every remaining app then fails at once with one reason, and the retry
-    # pass is skipped. Without it, each app spent its own launch retries, twice, on a winget that
-    # was not coming back (about 24 minutes before the run reported failure).
+    # Run-level circuit breaker (P2-8, P2-10): once winget cannot be started, every remaining app
+    # fails at once with one reason and the retry pass is skipped.
     $wingetNotLaunchable = $false
 
-    # Run-level budget for waiting on another installation (review finding P2-15): an app whose
-    # install finds Windows Installer busy (0x8A150102, msiexec 1618) waits for it and retries, and
-    # every wait comes out of these 10 minutes, the Winget-AutoUpdate msiexec's included. Once it
-    # is spent, a busy result fails at once with its reason, so a machine that stays busy costs the
-    # run 10 minutes at most rather than 10 minutes per app.
+    # Run-level budget for waiting on a busy Windows Installer (0x8A150102, msiexec 1618; P2-15):
+    # every wait, the Winget-AutoUpdate msiexec's included, comes out of these 10 minutes.
     $installerBusyWaitSecondsLeft = 600
 
     # Apps whose install finished but needs a restart to complete (review finding P3-16). Apps whose
     # installer cannot run until Windows restarts (0x8A15010A) are failed apps marked RestartFirst.
     $restartRequiredApps = @()
 
-    # Each app's catalog condition is evaluated once per run, here, before this run changes the
-    # machine, and both passes use that verdict (review finding P3-34). The two passes used to
-    # evaluate it separately, and Set-WindowsTerminalDefaults (between them) writes the
-    # default-terminal values the Windows Terminal condition reads, so an app the first pass
-    # attempted could come back 'not applicable' in the retry pass and be counted as installed.
-    # Fail open: a condition with no answer counts as applicable (Test-AppApplicability).
+    # Applicability decided once per run, before this run changes the machine, for both passes
+    # (P3-34): the Terminal step between them changes what the Terminal condition reads. Fail open.
     $applicableByName = @{}
     foreach ($app in $apps) {
         $applicableByName[$app.name] = Test-AppApplicability -App $app
     }
 
-    # One entry per app for the run's record (last-run.json and the RESULT line, review finding
-    # P3-41), in catalog order; the retry pass replaces an app's entry with its final outcome. Kept
-    # in $script: scope too, so a run that stops before its summary still reports the apps it had
-    # finished (build/fragments/tail.ps1).
+    # One run-record entry per app, in catalog order; the retry pass replaces an app's entry. Kept
+    # in $script: scope too, so a run that stops before its summary still reports them.
     $appRecords = [ordered]@{}
     $script:InstallerAppRecords = $appRecords
 
@@ -389,10 +303,8 @@ function Invoke-WingetInstall {
             switch ($outcome.Status) {
                 'Skipped' {
                     if ($outcome.SkipReason -eq 'NotApplicable') {
-                        # Applicability-gated skip (issue #217): the app's catalog condition or arch
-                        # list rules this machine out (e.g. Dell Command Update on non-Dell
-                        # hardware). Same summary bucket as an already-installed skip, but the
-                        # message carries the human-readable reason.
+                        # Not applicable (issue #217): the same summary bucket as an installed skip,
+                        # with the reason in the message.
                         $conditionText = Get-AppNotApplicableReason -App $app
                         Write-WarningMessage "Skipping: $($app.name) (not applicable: $conditionText)"
                         $skipReason = "not applicable: $conditionText"
@@ -407,7 +319,7 @@ function Invoke-WingetInstall {
                         $skipReason = 'already installed'
                     }
                     $skippedApps += $app.name
-                    # An installed app's post-install hook ran (work-order item 38).
+                    # An installed app's post-install hook ran.
                     if (Write-AppPostInstallResult -AppName $app.name -Configuration $outcome.Configuration) {
                         $notConfiguredApps += @{ Name = $app.name; Reason = [string]$outcome.Configuration.Reason }
                     }
@@ -415,7 +327,7 @@ function Invoke-WingetInstall {
                 }
                 'Deferred' {
                     # No machine-wide installer (review finding P3-22), or the catalog marks the app
-                    # per-user (work-order item 38), and this run installs for the whole PC only.
+                    # per-user, and this run installs for the whole PC only.
                     # Write-DeferredAppsSummary says what can install it.
                     $deferText = Get-AppDeferReasonText -DeferReason $outcome.DeferReason
                     Write-WarningMessage "Deferred: $($app.name) ($deferText)"
@@ -464,16 +376,14 @@ function Invoke-WingetInstall {
                             Write-ErrorMessage "Failed to install: $($app.name) ($failureReason)."
                         }
                     }
-                    # Only the post-install hook failed (work-order item 38): the install itself
+                    # Only the post-install hook failed: the install itself
                     # finished, so its restart and scope notes belong to this run whatever the hook
                     # does in the retry pass.
                     if ($outcome.FailureReason -eq 'PostInstallFailed' -and $outcome.StatusBeforeHook -eq 'Installed' -and (Write-InstalledAppNote -AppName $app.name -InstallResult $outcome.InstallResult)) {
                         $restartRequiredApps += $app.name
                     }
-                    # Tracked as objects, not bare names, so the failed-apps summary can render a
-                    # Reason column (issue #189). RestartFirst: the installer cannot run until
-                    # Windows restarts (0x8A15010A), so the retry pass leaves it alone. The rest is
-                    # what the retry pass needs to know about this attempt (work-order item 38).
+                    # Objects, for the summary's Reason column (issue #189). RestartFirst
+                    # (0x8A15010A): the retry pass leaves it alone until Windows restarts.
                     $failedApps += @{
                         Name             = $app.name
                         Reason           = $failureReason
@@ -534,7 +444,7 @@ function Invoke-WingetInstall {
                     continue
                 }
                 if ($failedApp.FailureReason -eq 'NoMachineScopeInstaller') {
-                    # A scope 'machine' app (work-order item 38): the package's manifest decides
+                    # A scope 'machine' app: the package's manifest decides
                     # this, so another try in this run would get the same answer from winget.
                     Write-WarningMessage "Not retrying ${appName}: no machine-scope installer applies to this PC, and its catalog entry allows only a machine-wide install (scope 'machine')."
                     $failedApps += $failedApp
@@ -545,17 +455,14 @@ function Invoke-WingetInstall {
                     Write-Info "Retrying: $appName"
                     $appDef = $apps | Where-Object { $_.name -eq $appName } | Select-Object -First 1
 
-                    # Same shared pipeline as the first pass (issue #188), so a lingering
-                    # 0x80073d19 session error gets its backoff retries here too (issue #150), and
-                    # a busy Windows Installer gets what is left of the run's wait budget.
-                    # The circuit breaker holds here too: once it trips, the rest fail at once.
-                    # -Applicable: the run's verdict from before the first pass, not a new one.
+                    # The same pipeline as the first pass, with what is left of the wait budget,
+                    # the circuit breaker, and the run's applicability verdict.
                     $outcome = Install-AppWithVerification -App $appDef -Applicable $applicableByName[$appName] -Silent:$effectiveNonInteractive -WingetNotLaunchable:$wingetNotLaunchable -MachineWide:$machineWide -InstallInProgressWaitSeconds $installerBusyWaitSecondsLeft
                     if ($outcome.InstallResult -and $outcome.InstallResult.InstallInProgressWaitedSeconds) {
                         $installerBusyWaitSecondsLeft = [Math]::Max(0, $installerBusyWaitSecondsLeft - [int]$outcome.InstallResult.InstallInProgressWaitedSeconds)
                     }
 
-                    # Only its post-install hook failed in the first pass (work-order item 38): the
+                    # Only its post-install hook failed in the first pass: the
                     # retry finds the app installed and runs no installer, so the first pass's
                     # install (its exit code; its restart was counted then) is the one to record.
                     $hookRetry = $failedApp.FailureReason -eq 'PostInstallFailed'
@@ -654,15 +561,10 @@ function Invoke-WingetInstall {
     # (an irm | iex console stays open after the run).
     Clear-TightVncSecret
 
-    # Set up ongoing automatic updates via Winget-AutoUpdate (issue #168). Best-effort: a failure
-    # here never stops the run; the outcome is captured, surfaced next to the final summary instead
-    # of being a scrolled-past warning (issue #186), and decides exit code 8 (review finding P3-36).
-    #
-    # Runs only after every winget call this run makes (the retry pass included), and WAU is no
-    # longer told to start an update pass immediately (RUN_WAU=YES was removed). Every WAU SYSTEM
-    # run first calls its own Install-Prerequisites, which can re-provision App Installer and reset
-    # winget's sources; letting that start mid-run is what wedged winget in the #279/#284 E2E runs
-    # and what killed the console in #283. WAU's own schedule takes it from here.
+    # Automatic updates via Winget-AutoUpdate (issue #168), best-effort; the outcome is shown with
+    # the summary and decides exit code 8 (P3-36). After every winget call this run makes, and WAU
+    # is not told to run now: a WAU run re-provisions App Installer and resets winget's sources,
+    # which mid-run wedged winget (#279, #284) and killed the console (#283).
     try {
         $wauResult = Install-WingetAutoUpdate -WhatIf:$WhatIf -InstallInProgressWaitSeconds $installerBusyWaitSecondsLeft
     }
@@ -673,12 +575,9 @@ function Invoke-WingetInstall {
     # For the record of a run that stops after this point but before its summary.
     $script:InstallerAutoUpdateResult = $wauResult
 
-    # A run must never report success while leaving winget unusable (whatever broke it, the next
-    # run of this installer and every WAU update would fail). One bounded launch check, after the
-    # last thing this run does to the machine; a healthy winget answers on the first try. Up to
-    # five tries 15 seconds apart (about a minute) for a failure that may clear on its own, and a
-    # single one when the circuit breaker already found winget unusable. Skipped in a dry run,
-    # which never touched winget's state.
+    # Never report success with winget unusable: one bounded launch check after the last change this
+    # run makes (up to five tries 15 seconds apart, one when the breaker already tripped). Not in a
+    # dry run.
     $wingetUsableAtEnd = $true
     # For the run record: $null unless the check ran and answered (a check that threw is not
     # evidence either way, although the exit code treats winget as usable then).
@@ -703,11 +602,9 @@ function Invoke-WingetInstall {
         }
     }
 
-    # Does this run need a restart to finish (review finding P3-16)? An install said so, the
-    # Winget-AutoUpdate MSI returned 3010, or Windows gained a pending restart during the run (for
-    # example an Inno or MSI installer queued a file replacement for the next restart, which winget
-    # does not report). A restart that was already pending before the run is not this run's.
-    # Skipped in a dry run, which installed nothing.
+    # Does this run need a restart (P3-16)? An install said so, the WAU MSI returned 3010, or a
+    # restart became pending during the run (a queued file replacement winget does not report).
+    # One pending before the run is not this run's. Not in a dry run.
     $restartReasons = @()
     if ($restartRequiredApps.Count -gt 0) {
         $restartReasons += ('{0} reported that a restart finishes the installation' -f ($restartRequiredApps -join ', '))
@@ -771,17 +668,14 @@ function Invoke-WingetInstall {
     # item 38 for the per-user ones). They do not change the exit code.
     Write-DeferredAppsSummary -DeferredApps $noInstallerDeferredApps -PerUserApps $perUserDeferredApps -AccountContext $account
 
-    # Installed apps their post-install hook could not configure (work-order item 38). They do not
+    # Installed apps their post-install hook could not configure. They do not
     # change the exit code either; a hook that failed made its app Failed above.
     Write-NotConfiguredAppsSummary -NotConfiguredApps $notConfiguredApps
 
-    # Surface the auto-update outcome with the summary so a machine that finished without an update
-    # mechanism is visible at the end of the run (issue #186). Every outcome printed as an error
-    # makes the run exit 8 when no app failed and winget still works (review finding P3-36): an RMM
-    # job reads only the exit code, and used to report success for a machine that would never
-    # update. Configured and Already present mean the WAU task was found ready to run.
+    # The auto-update outcome with the summary (issue #186). Every outcome printed as an error makes
+    # the run exit 8 when nothing ranks above it (P3-36).
     $autoUpdatesHealthy = $true
-    # The framework winget needs (work-order item 32: read from the latest winget release).
+    # The framework winget needs (read from the latest winget release).
     $wauFrameworkName = 'Microsoft.WindowsAppRuntime.1.8'
     if ($wauResult -and $wauResult.FrameworkName) {
         $wauFrameworkName = [string]$wauResult.FrameworkName
@@ -849,10 +743,7 @@ function Invoke-WingetInstall {
         Write-WarningMessage ('Restart: already pending before this run ({0}) - restart this PC when you can.' -f ($restartPendingBefore -join '; '))
     }
 
-    # Repeat the persistent transcript path next to the summary (issue #189). The variable is set
-    # by the generated installer's entry script before dispatch; it is unset (and this is skipped)
-    # when the function runs outside that context (module import, tests) or the transcript could
-    # not be started.
+    # The transcript path again, next to the summary (issue #189); unset outside the entry script.
     if ($script:InstallLogPath) {
         Write-Info "Full transcript of this run: $script:InstallLogPath"
     }
@@ -862,10 +753,8 @@ function Invoke-WingetInstall {
     # the entry script's abort guard then reports this code instead of an abort (5).
     $script:InstallerPendingExitCode = $exitCode
 
-    # A run that failed (1, 2 or 8) says where to report it and prints the command that makes the
-    # diagnostics bundle to attach (wgt-gq8.35), as a run that stops early does
-    # (Write-InstallerExitNotice). A restart-required run (3010) succeeded, and a dry run changed
-    # nothing.
+    # A failed run (1, 2 or 8) says where to report it and how to make the diagnostics bundle, as an
+    # early exit does.
     if (-not $WhatIf -and @(1, 2, 8) -contains $exitCode) {
         Write-InstallerReportHint
     }

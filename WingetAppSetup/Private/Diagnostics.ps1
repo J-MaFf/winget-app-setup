@@ -1,36 +1,22 @@
-# The diagnostics bundle (wgt-gq8.35): one .zip the helpdesk teammate attaches to a GitHub issue
-# after a failed run, made with `-CollectDiagnostics` (the installer's failure notices print the
-# one-liner that runs it). It holds the logs of the latest run and the state of the things that
-# decide whether winget works on this PC, with account names, the computer name, user profile
-# folders and the SIDs of real accounts replaced by placeholders, because the repository and its
-# issues are public.
-#
-# Collecting changes nothing on the PC: no transcript, no run lock, no last-run.json, no winget
-# setup, no elevation, no PowerShell 7 install. The only thing written is the .zip. Every source is
-# optional: one that cannot be read (not elevated, winget broken, no Winget-AutoUpdate) is noted in
-# the bundle's README.txt and the rest is still collected. The entry script runs it before the
-# Windows PowerShell 5.1 bootstrap, so everything here runs under Windows PowerShell 5.1 too: 5.1
-# syntax and .NET Framework 4.5 APIs only. The same holds for the helpers of other files it reaches,
-# which are 5.1-safe today: Get-InstallAccountContext, Test-IsSystemAccount, Get-AccountSid,
-# Test-IsAdmin, Get-WindowsPowerShellPath and Get-WindowsDirectoryPath (Elevation.ps1,
-# EnvironmentPreflight.ps1), Get-OSArchitecture (SystemInfo.ps1; its failure is caught),
-# Get-PendingRestartState (WindowsInstallerState.ps1), Get-InstalledWauInfo, Get-WauTaskHealth,
-# Format-ScheduledTaskTrigger and Get-WauUpdatesLogPath (WauSupport.ps1), Get-MachineWingetCandidate
-# (MachineContext.ps1), Invoke-WingetProcess, Invoke-ExternalProcess and Get-ProcessTimeoutSeconds
-# (ProcessInvocation.ps1), Format-WingetExitCode (WingetResultCodes.ps1), Format-RunRecordTime
-# (RunRecord.ps1), Get-DefaultWindowsAppRuntimeRequirement and Format-WindowsAppRuntimeRequirement
-# (WauSupport.ps1), Get-WindowsAppRuntimePin (WindowsAppRuntime.ps1) and the Write-* logging
-# helpers. Check a change to any of them against that too.
+# The diagnostics bundle (-CollectDiagnostics): one .zip a teammate attaches to a GitHub issue after a
+# failed run, with the latest run's logs and the state that decides whether winget works, and with
+# account, computer and profile names and real accounts' SIDs replaced, since the issues are public.
+# It changes nothing on the PC (no transcript, run lock, last-run.json, setup or elevation) and writes
+# only the .zip; a source it cannot read is noted in README.txt. It runs before the 5.1 bootstrap, so
+# this file and the helpers it reaches must stay Windows PowerShell 5.1-compatible: the account and
+# elevation helpers (Elevation.ps1, EnvironmentPreflight.ps1), Get-OSArchitecture,
+# Get-PendingRestartState, the WAU readers and Get-DefaultWindowsAppRuntimeRequirement
+# (WauSupport.ps1), Get-MachineWingetCandidate, ProcessInvocation.ps1, Format-WingetExitCode,
+# Format-RunRecordTime, Get-WindowsAppRuntimePin and the Write-* helpers.
 
 <#
 .SYNOPSIS
     Returns the command that makes a diagnostics bundle, for the failure notices to print.
 .DESCRIPTION
-    The irm | iex one-liner cannot pass a switch to the script it downloads, so this downloads the
-    installer from main into a script block and runs that with -CollectDiagnostics. It works from
-    any PowerShell console, Windows PowerShell 5.1 or PowerShell 7, elevated or not, and needs no
-    execution policy change (a script block made from text is not a script file).
-.RETURNS
+    irm | iex cannot pass a switch, so the command downloads the installer from main into a script
+    block and runs it with -CollectDiagnostics: any console, 5.1 or 7, elevated or not, and no
+    execution policy change (a script block is not a script file).
+.OUTPUTS
     [string]
 #>
 function Get-DiagnosticsCommandLine {
@@ -39,11 +25,8 @@ function Get-DiagnosticsCommandLine {
 
 <#
 .SYNOPSIS
-    Says where to report a failed run and how to make the diagnostics bundle for the report.
-.DESCRIPTION
-    Printed by Write-InstallerExitNotice for a run that stopped early and by Invoke-WingetInstall
-    under the summary of a run that failed (exit code 1, 2 or 8), so every failed run ends with the
-    exact command to run. Runs under Windows PowerShell 5.1 too (the bootstrap phase's notice).
+    Says where to report a failed run and how to make the diagnostics bundle for it, after an early
+    exit's notice and under the summary of a run that failed (1, 2 or 8). Runs under 5.1 too.
 #>
 function Write-InstallerReportHint {
     Write-Info 'To report this, open https://github.com/J-MaFf/winget-app-setup/issues/new?template=install-failure.yml and give the exit code, the installer build and a diagnostics bundle (or the log file).'
@@ -56,16 +39,15 @@ function Write-InstallerReportHint {
 .SYNOPSIS
     Reads a text file that another process may still be writing, at most its last MaxBytes.
 .DESCRIPTION
-    Opened with read, write and delete sharing, so a log a running installer or Winget-AutoUpdate
-    holds open can still be read. The encoding comes from the byte order mark (UTF-8, UTF-16 LE or
-    BE), else UTF-16 LE when the first characters have zero high bytes (an msiexec log written
-    without a mark), else UTF-8. A file longer than MaxBytes is read from the end, where an
-    installer log has its result, and starts with a line that says how much was left out.
+    Read, write and delete sharing, so a log still held open can be read. The encoding comes from the
+    BOM (UTF-8, UTF-16 LE or BE), else UTF-16 LE when the first characters have zero high bytes (an
+    msiexec log), else UTF-8. A longer file is read from the end, where an installer log has its
+    result, after a line saying how much was left out.
 .PARAMETER Path
     The file.
 .PARAMETER MaxBytes
     The most bytes to read. Default 4 MB.
-.RETURNS
+.OUTPUTS
     [string]
 #>
 function Read-DiagnosticsTextFile {
@@ -179,21 +161,12 @@ function ConvertFrom-DiagnosticsLogStamp {
 .SYNOPSIS
     Picks the logs of the latest run from the installer's logs folder.
 .DESCRIPTION
-    Works on the names the installer gives its logs (see Remove-OldInstallerLog), each with the
-    local time it was started at:
-      - Transcripts: install-<time>.log, install-<time>-bootstrap.log, the RMM wrapper's
-        install-<time>-rmm.log (rmm/Invoke-WingetAppSetup.ps1, work-order item 34: it starts before
-        the installer and also says why the installer did not run, such as a SHA256 mismatch) and,
-        in a user's own logs folder, the user phase's install-<time>-userphase.log: the names
-        Remove-OldInstallerLog counts as transcripts. Dry-run transcripts (-whatif) are left out.
-        The newest transcript and every other one started up to WindowMinutes before it are kept,
-        at most MaximumTranscripts, newest first: one run can write four (the Windows PowerShell
-        5.1 bootstrap and the PowerShell 7 run, of the window that asked for elevation and of the
-        elevated one), and a run from the RMM wrapper three. The transcript last-run.json names
-        is kept too, when it is not among them.
-      - Installer logs: winget-<install|upgrade|uninstall|repair>-<package id>-<time>.log (winget's
-        --log), pwsh-msi-<time>-<n>.log and wau-msi-<install|uninstall>-<time>-<n>.log, from the
-        start of the oldest transcript kept on, at most MaximumInstallerLogs, newest first.
+    By the names the installer gives its logs (see Remove-OldInstallerLog):
+      - Transcripts (install-<time>[-bootstrap|-rmm|-userphase].log; -whatif ones left out): the
+        newest and every other started up to WindowMinutes before it, at most MaximumTranscripts,
+        since one run can write four. The one last-run.json names is kept too.
+      - Installer logs (winget-*, pwsh-msi-*, wau-msi-*), from the oldest transcript kept on, at
+        most MaximumInstallerLogs, newest first.
       - last-run.json.
 .PARAMETER LogDirectory
     The logs folder.
@@ -204,7 +177,7 @@ function ConvertFrom-DiagnosticsLogStamp {
     Default 6.
 .PARAMETER MaximumInstallerLogs
     Default 40.
-.RETURNS
+.OUTPUTS
     [pscustomobject] Transcripts and InstallerLogs ([System.IO.FileInfo[]], oldest first), RunRecord
     (last-run.json, or $null) and Files (every file in the folder). Throws when the folder cannot be
     listed.
@@ -294,7 +267,7 @@ function Select-DiagnosticsLogFile {
     be read.
 .PARAMETER Path
     A registry provider path, such as 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\AppInstaller'.
-.RETURNS
+.OUTPUTS
     [System.Collections.Specialized.OrderedDictionary] or $null.
 #>
 function Get-DiagnosticsRegistryValue {
@@ -319,12 +292,9 @@ function Get-DiagnosticsRegistryValue {
 
 <#
 .SYNOPSIS
-    Lists the user profiles on this PC: each profile's SID and folder.
-.DESCRIPTION
-    A seam (mocked in tests) over HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList,
-    which every account can read. The bundle's redaction uses it to know the names of the accounts
-    and profile folders on the PC. Best-effort: nothing when it cannot be read.
-.RETURNS
+    Lists the user profiles on this PC, each one's SID and folder, from ProfileList (which every
+    account can read), so the redaction knows the account and folder names. Best-effort.
+.OUTPUTS
     [pscustomobject[]] Sid and ProfilePath.
 #>
 function Get-DiagnosticsProfileList {
@@ -372,16 +342,13 @@ function Get-DiagnosticsSidAccountName {
 .SYNOPSIS
     Collects the names on this PC that identify it or a person: what the bundle's redaction removes.
 .DESCRIPTION
-    From the environment (COMPUTERNAME, USERNAME, USERDOMAIN, USERDNSDOMAIN), the host name and DNS
-    domain, the accounts of this run (Get-InstallAccountContext's ProcessUser and SessionUser), the
-    accounts with a profile on the PC (Get-DiagnosticsProfileList: each profile folder's name and
-    the SID's account name, for the SIDs of real accounts, S-1-5-21-... and Azure AD's
-    S-1-12-1-...), and the registered owner and organization Windows was set up with (installers
-    copy them into their logs, an MSI log as USERNAME and COMPANYNAME). Best-effort: a source that
-    cannot be read adds nothing.
+    The environment (COMPUTERNAME, USERNAME, USERDOMAIN, USERDNSDOMAIN), the host name and DNS
+    domain, this run's accounts, the accounts with a profile (folder names, and account names for
+    real accounts' SIDs: S-1-5-21-... and S-1-12-1-...), and the registered owner and organization,
+    which installers copy into their logs. Best-effort.
 .PARAMETER AccountContext
     Get-InstallAccountContext's result, or $null.
-.RETURNS
+.OUTPUTS
     [pscustomobject] ComputerNames, DnsDomains, Domains, Users and Organizations ([string[]]; not
     yet filtered, see New-DiagnosticsRedactionMap).
 #>
@@ -458,26 +425,18 @@ function Get-DiagnosticsIdentityHint {
 .SYNOPSIS
     Builds the replacements that remove names from the bundle's text files.
 .DESCRIPTION
-    Starts from Get-DiagnosticsIdentityHint's names and adds the ones the files themselves carry:
-      - a PowerShell transcript header's Username and RunAs User (DOMAIN\user) and Machine lines,
-        which also name accounts and computers of earlier runs;
-      - an msiexec log's LogonUser, USERNAME, COMPANYNAME and ComputerName properties, from its
-        property list and its 'PROPERTY CHANGE' lines;
-      - the accounts Get-AppxPackage names next to a SID ('S-1-5-21-... [CONTOSO\jdoe]').
-    Names that identify nobody are kept as they are: built-in accounts and groups (SYSTEM,
-    Administrator, NT AUTHORITY, BUILTIN, ...), the default profile folders (Public, Default), and
-    generic owner names (User, Admin, Owner); so are names shorter than two characters, which would
-    take letters out of every word. A computer account name (PC$) counts as a computer name.
-    Every other name gets one numbered placeholder for all the files, <computer1>, <dns-domain1>,
-    <domain1>, <user1> or <organization1>, so the same account reads the same everywhere. The
-    security identifiers of real accounts, S-1-5-21-<domain>-<RID> and Azure AD's S-1-12-1-...,
-    get <sid1>, <sid2>... for their identifying part (the RID stays: 500 is the built-in
-    Administrator); well-known SIDs such as S-1-5-18 or S-1-5-32-544 stay.
+    Get-DiagnosticsIdentityHint's names, plus those the files carry: a transcript header's Username,
+    RunAs User and Machine; an msiexec log's LogonUser, USERNAME, COMPANYNAME and ComputerName; the
+    accounts Get-AppxPackage names next to a SID. Built-in accounts and groups, the default profile
+    folders, generic owner names and names under two characters stay. Every other name gets one
+    numbered placeholder for all files (<computer1>, <dns-domain1>, <domain1>, <user1>,
+    <organization1>); a computer account (PC$) counts as a computer. Real accounts' SIDs get
+    <sid1>... for their identifying part (the RID stays); well-known SIDs stay.
 .PARAMETER IdentityHint
     Get-DiagnosticsIdentityHint's result, or $null.
 .PARAMETER Text
     The text of every file in the bundle.
-.RETURNS
+.OUTPUTS
     [pscustomobject] Names (Value and Placeholder, longest value first) and Sids (Value, the
     identifying part of a SID such as 'S-1-5-21-1-2-3', and Placeholder).
 #>
@@ -650,7 +609,7 @@ function New-DiagnosticsRedactionMap {
     The text.
 .PARAMETER Map
     New-DiagnosticsRedactionMap's result.
-.RETURNS
+.OUTPUTS
     [string]
 #>
 function ConvertTo-RedactedDiagnosticText {
@@ -752,14 +711,12 @@ function Get-DiagnosticsSpecialFolder {
 .SYNOPSIS
     Lists the folders to save the bundle in, best first: ones the signed-in user can open.
 .DESCRIPTION
-    A run as the signed-in user saves it on that user's Desktop. A run as SYSTEM (an RMM agent) or
-    as another account (an administrator elevating on the user's PC) would put it on a Desktop the
-    user cannot open, so it goes to the Public Documents folder (C:\Users\Public\Documents), which
-    every account on the PC can read. The temp folder of this process is the last resort. Folders
-    that do not exist are left out.
+    The user's Desktop for a run as that user; Public Documents for a run as SYSTEM or another
+    account, whose Desktop the user cannot open; this process's temp folder last. Folders that do
+    not exist are left out.
 .PARAMETER AccountContext
     Get-InstallAccountContext's result, or $null.
-.RETURNS
+.OUTPUTS
     [string[]]
 #>
 function Get-DiagnosticsBundleDirectory {
@@ -795,7 +752,7 @@ function Get-DiagnosticsBundleDirectory {
     Get-InstallAccountContext's result, or $null.
 .PARAMETER IsAdmin
     Whether this process is elevated.
-.RETURNS
+.OUTPUTS
     [string] 'SYSTEM', 'cross-user (...)', 'same-user, elevated' or 'same-user, not elevated'.
 #>
 function Get-DiagnosticsElevationStyle {
@@ -858,7 +815,7 @@ function Format-DiagnosticsRegistryKey {
 .DESCRIPTION
     A seam (mocked in tests). In such a process, HKLM\SOFTWARE reads go to its 32-bit view
     (WOW6432Node) and System32 to SysWOW64.
-.RETURNS
+.OUTPUTS
     [bool]
 #>
 function Test-DiagnosticsWow64Process {
@@ -870,12 +827,10 @@ function Test-DiagnosticsWow64Process {
     Says what a bundle made from a 32-bit PowerShell on 64-bit Windows gets wrong, and how to make
     a correct one.
 .DESCRIPTION
-    -CollectDiagnostics runs in the PowerShell it was started from, with no relaunch. The 64-bit
-    registrations it reads under HKLM\SOFTWARE (PowerShell 7's InstalledVersions, Winget-AutoUpdate's
-    uninstall entry and settings, the Component Based Servicing and Windows Update restart keys) are
-    not in the 32-bit view, so they read as missing. Group Policy keys and the AppX queries (run in
-    64-bit Windows PowerShell through Sysnative) are not affected.
-.RETURNS
+    -CollectDiagnostics does not relaunch, so the 64-bit HKLM\SOFTWARE entries (PowerShell 7's
+    InstalledVersions, WAU's entries, the restart keys) read as missing. Group Policy keys and the
+    AppX queries (run through Sysnative) are not affected.
+.OUTPUTS
     [string]
 #>
 function Get-DiagnosticsWow64Note {
@@ -889,7 +844,7 @@ function Get-DiagnosticsWow64Note {
     A seam (mocked in tests) over HKLM\SOFTWARE\Microsoft\PowerShellCore\InstalledVersions, where the
     PowerShell 7 MSI registers each install. Nothing when the key does not exist; throws when it
     cannot be read.
-.RETURNS
+.OUTPUTS
     [pscustomobject[]] SemanticVersion and InstallLocation.
 #>
 function Get-DiagnosticsPowerShellInstall {
@@ -917,7 +872,7 @@ function Get-DiagnosticsPowerShellInstall {
     Get-InstallAccountContext's result, or $null.
 .PARAMETER IsAdmin
     Whether this process is elevated.
-.RETURNS
+.OUTPUTS
     [string[]] The lines.
 #>
 function Get-DiagnosticsSystemReport {
@@ -1076,10 +1031,8 @@ function Get-DiagnosticsSystemReport {
         $lines.Add("Not read: $($_.Exception.Message)")
     }
 
-    # Work-order items 31 and 32: what this installer installs when the framework is missing, and
-    # what it checks for when it cannot read what the latest winget release needs. The packages
-    # themselves, registered and provisioned, are in appx.txt; the run's own 'Windows App Runtime:'
-    # line is in its transcript.
+    # What this installer installs when the framework is missing, and its fallback requirement; the
+    # packages are in appx.txt, the run's 'Windows App Runtime:' line in its transcript.
     $lines.Add('')
     $lines.Add('== Windows App Runtime ==')
     try {
@@ -1147,7 +1100,7 @@ function Get-DiagnosticsSystemReport {
     The command as it should read, such as 'winget --version'.
 .PARAMETER Result
     Invoke-ExternalProcess's (or Invoke-WingetProcess's) result.
-.RETURNS
+.OUTPUTS
     [string[]]
 #>
 function Format-DiagnosticsProcessResult {
@@ -1187,13 +1140,12 @@ function Format-DiagnosticsProcessResult {
 .SYNOPSIS
     Builds winget.txt: `winget --version` and `winget --info`, each with a time limit.
 .DESCRIPTION
-    Runs winget through Invoke-WingetProcess with the WingetVersion time limit and no live echo.
-    Neither command changes anything or needs the network. As SYSTEM, which has no `winget` alias,
-    the machine-wide winget.exe is run (the first of Get-MachineWingetCandidate). winget that
-    cannot be found or started is reported, not fatal: that is often why the bundle is made.
+    Neither changes anything or needs the network. As SYSTEM the first machine-wide winget.exe runs.
+    A winget that cannot be found or started is reported, not fatal: that is often why the bundle
+    is made.
 .PARAMETER AccountContext
     Get-InstallAccountContext's result, or $null.
-.RETURNS
+.OUTPUTS
     [string[]]
 #>
 function Get-DiagnosticsWingetReport {
@@ -1241,7 +1193,7 @@ function Get-DiagnosticsWingetReport {
     Get-WindowsPowerShellPath, except in a 32-bit process on 64-bit Windows (an RMM agent's
     PowerShell), where System32 is redirected to the 32-bit SysWOW64 and the Appx cmdlets may not
     load: there the 64-bit one through %SystemRoot%\Sysnative.
-.RETURNS
+.OUTPUTS
     [string]
 #>
 function Get-DiagnosticsWindowsPowerShellPath {
@@ -1258,24 +1210,16 @@ function Get-DiagnosticsWindowsPowerShellPath {
 .SYNOPSIS
     Runs a script in Windows PowerShell, with a time limit, and returns the process result.
 .DESCRIPTION
-    The script goes in as -EncodedCommand, so no quoting can change it on the way, and writes UTF-8,
-    so names with letters outside the console's code page arrive intact (and can be redacted). The
-    Appx and DISM cmdlets always load in Windows PowerShell, which is why the AppX queries run there
-    (as Get-DesktopAppInstallerPackageInfo does) also when the bundle is made from PowerShell 7.
-
-    Windows PowerShell starts without the PSModulePath environment variable and builds its own
-    default. PowerShell 7 puts its own module folders first in that variable, and a process started
-    through Process.Start (Invoke-ExternalProcess) inherits it as it is: only `& powershell.exe`
-    removes them. Windows PowerShell would then find PowerShell 7's Microsoft.PowerShell.Utility
-    and Microsoft.PowerShell.Security first, which it cannot load, so Sort-Object, New-Object and
-    Get-ExecutionPolicy in the queries would fail (about_PSModulePath, "Starting Windows PowerShell
-    from PowerShell 7"). From Windows PowerShell 5.1 the queries need nothing outside that default
-    either: the Appx, DISM and built-in modules are in its System32 module folder.
+    As -EncodedCommand, so no quoting changes it, writing UTF-8, so non-ANSI names arrive intact
+    (and can be redacted). The Appx and DISM cmdlets always load there. It starts without
+    PSModulePath, so it builds its own default: inherited through Process.Start, PowerShell 7's
+    module folders come first and their Utility and Security modules cannot load in 5.1
+    (about_PSModulePath).
 .PARAMETER Script
     The script.
 .PARAMETER TimeoutSeconds
     The time limit. Default 120.
-.RETURNS
+.OUTPUTS
     Invoke-ExternalProcess's result.
 #>
 function Invoke-DiagnosticsWindowsPowerShell {
@@ -1296,15 +1240,11 @@ function Invoke-DiagnosticsWindowsPowerShell {
 .SYNOPSIS
     Builds appx.txt: App Installer and the Windows App Runtime packages, registered and provisioned.
 .DESCRIPTION
-    In Windows PowerShell (Invoke-DiagnosticsWindowsPowerShell):
-      - Get-AppxPackage -AllUsers for Microsoft.DesktopAppInstaller and Microsoft.WindowsAppRuntime.*,
-        each with its version, architecture, status, folder, and the install state for each account
-        (PackageUserInformation, by SID). It needs administrator rights; without them the packages
-        registered for this account are listed instead.
-      - Get-AppxProvisionedPackage -Online for the same packages (administrator rights).
-      - Under PowerShell 7, Windows PowerShell's own execution policy (Get-ExecutionPolicy -List),
-        which decides whether the installer's elevated relaunch can run.
-.RETURNS
+    In Windows PowerShell: Get-AppxPackage -AllUsers (with each account's install state; without
+    administrator rights, this account's packages) and Get-AppxProvisionedPackage -Online for
+    Microsoft.DesktopAppInstaller and Microsoft.WindowsAppRuntime.*; under PowerShell 7 also Windows
+    PowerShell's execution policy, which decides whether the elevated relaunch can run.
+.OUTPUTS
     [string[]]
 #>
 function Get-DiagnosticsAppxReport {
@@ -1382,7 +1322,7 @@ catch {
     none.
 .PARAMETER MaximumLines
     Default 400.
-.RETURNS
+.OUTPUTS
     [string[]]
 #>
 function Get-DiagnosticsWauLogTail {
@@ -1476,12 +1416,9 @@ function Save-DiagnosticsBundle {
 
 <#
 .SYNOPSIS
-    Returns the user phase's folder of the account making the bundle:
-    %LOCALAPPDATA%\winget-app-setup, or $null when there is no LOCALAPPDATA.
-.DESCRIPTION
-    A seam (mocked in tests). The user phase (Invoke-WingetUserPhase, work-order item 34) keeps its
-    state (user-phase.json) and its logs there, in the signed-in user's own profile.
-.RETURNS
+    Returns the user phase's folder of the account making the bundle, %LOCALAPPDATA%\winget-app-setup
+    (user-phase.json and its logs), or $null without LOCALAPPDATA. A seam for tests.
+.OUTPUTS
     [string] or $null.
 #>
 function Get-DiagnosticsUserPhaseDirectory {
@@ -1504,7 +1441,7 @@ function Get-DiagnosticsUserPhaseDirectory {
     README.txt's list of sources: a file that cannot be read is noted there.
 .PARAMETER BudgetBytes
     What is left of the bundle's size budget.
-.RETURNS
+.OUTPUTS
     [pscustomobject] with BudgetBytes (what is left after these files) and Skipped (the names of the
     files left out because the budget was spent).
 #>
@@ -1562,22 +1499,17 @@ function Add-DiagnosticsLogEntry {
       wau-updates-log-tail.txt    Get-DiagnosticsWauLogTail
       logs\                       the latest run's transcripts (the RMM wrapper's included), its
                                   installer logs and last-run.json (Select-DiagnosticsLogFile)
-      user-phase\                 this account's user phase (work-order item 34), when it has run
-                                  here: user-phase.json and its latest transcript and winget logs
-                                  from %LOCALAPPDATA%\winget-app-setup
-    Every text file goes through ConvertTo-RedactedDiagnosticText with one map for the whole bundle
-    (New-DiagnosticsRedactionMap). No environment variables are collected wholesale, and no secret
-    is read.
-
-    Read-only: it starts no transcript, takes no run lock, writes no last-run.json, sets nothing up
-    and changes no setting; the only file it writes is the .zip, in the first folder of
-    Get-DiagnosticsBundleDirectory that takes it. It needs neither winget nor administrator rights:
-    what cannot be read without them is noted in README.txt.
+      user-phase\                 this account's user-phase.json and latest user phase logs, when
+                                  the user phase has run here
+    Every text file goes through ConvertTo-RedactedDiagnosticText with one map for the bundle. No
+    environment variables are collected wholesale, and no secret is read. Read-only apart from the
+    .zip, in the first folder of Get-DiagnosticsBundleDirectory that takes it. Needs neither winget
+    nor administrator rights: what cannot be read is noted in README.txt.
 .PARAMETER LogDirectory
     The installer's logs folder. Default %ProgramData%\winget-app-setup\logs.
 .PARAMETER OutputDirectory
     The folders to try for the .zip, in order. Default: Get-DiagnosticsBundleDirectory.
-.RETURNS
+.OUTPUTS
     [int] 0 when the bundle was saved, 5 when it could not be.
 #>
 function Invoke-DiagnosticsCollection {
@@ -1644,7 +1576,7 @@ function Invoke-DiagnosticsCollection {
         $sources.Add(('Installer logs ({0}): the folder does not exist or cannot be opened' -f $LogDirectory))
     }
 
-    # The user phase (work-order item 34) of the account making the bundle: its state and its latest
+    # The user phase of the account making the bundle: its state and its latest
     # attempt's transcript and winget logs, read-only like the rest.
     $userPhaseDirectory = $null
     try {

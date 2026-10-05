@@ -1,15 +1,9 @@
-# winget result codes (review findings P2-15 and P3-16). winget reports its result as a signed Int32
-# HRESULT, and every place that printed one showed only the hex value, so a failure such as
-# 0x8A150102 (another installation in progress) read as 'package not found after install' plus a
-# number. This file is the one table of the codes the installer knows: their winget symbol, what
-# they mean in a sentence the summary can show, and how the install should treat them. Every place
-# that prints a winget exit code goes through Format-WingetExitCode, and Install-WingetPackage
-# decides its retries from the class below, so the name, the message and the behaviour cannot drift
-# apart. Values come from winget's own table (doc/windows/package-manager/winget/returnCodes.md,
-# "winget error --output"); the classes from how winget maps installer exit codes
-# (AppInstallerCLICore Workflows/InstallFlow.cpp ReportInstallerResult and Manifest/ManifestCommon.cpp
-# GetDefaultKnownReturnCodes). Runs under Windows PowerShell 5.1 too (the PowerShell 7 bootstrap
-# prints the exit code of winget's PowerShell install), so it uses nothing newer than .NET 4.5.
+# The one table of the winget result codes the installer knows: their symbol, a sentence the summary
+# can show, and how an install treats them. Every printed winget exit code goes through
+# Format-WingetExitCode, and Install-WingetPackage retries by the class, so the three cannot drift
+# apart. Values from winget's returnCodes.md; classes from how winget maps installer exit codes
+# (InstallFlow.cpp, ManifestCommon.cpp). Runs under Windows PowerShell 5.1 too (the PowerShell 7
+# bootstrap prints winget's exit code), so it uses nothing newer than .NET 4.5.
 
 <#
 .SYNOPSIS
@@ -30,7 +24,7 @@
       (empty)               Named for the reader only; no special handling.
 .PARAMETER ExitCode
     The exit code as winget reports it (a signed Int32), or $null.
-.RETURNS
+.OUTPUTS
     [pscustomobject] @{ ExitCode; Hex; Name; Meaning; Class }, or $null when the code is $null, 0 or
     not in the table.
 #>
@@ -134,15 +128,11 @@ function Get-WingetExitCodeInfo {
 
 <#
 .SYNOPSIS
-    Formats a winget exit code for a message: its hex form, followed by its name when known.
-.DESCRIPTION
-    The one way a winget exit code is printed (review findings P2-15, P3-16), for example
-    '0x8A150102 INSTALL_INSTALL_IN_PROGRESS', or '0x00000001' for a code the table does not name.
-    Winget reports HRESULT-style codes as signed Int32 (e.g. -2147009255); the X8 format renders the
-    familiar hex form (0x80073D19) winget's documentation and issues use.
+    Formats a winget exit code for a message: its hex form, then its name when known, for example
+    '0x8A150102 INSTALL_INSTALL_IN_PROGRESS', or '0x00000001'.
 .PARAMETER ExitCode
-    The exit code as winget reports it.
-.RETURNS
+    The exit code as winget reports it (a signed Int32, e.g. -2147009255 for 0x80073D19).
+.OUTPUTS
     [string]
 #>
 function Format-WingetExitCode {
@@ -162,13 +152,11 @@ function Format-WingetExitCode {
 .SYNOPSIS
     Returns whether an install result says the installer cannot run until Windows restarts.
 .DESCRIPTION
-    True for 0x8A15010A (INSTALL_REBOOT_REQUIRED_FOR_INSTALL; Inno setup exit 8, for example Git's
-    installer while a Windows Update restart is pending). Invoke-WingetInstall's retry pass leaves
-    such an app alone, because retrying before a restart fails the same way (review finding P3-16).
+    True for 0x8A15010A (INSTALL_REBOOT_REQUIRED_FOR_INSTALL, e.g. Inno setup exit 8 while a Windows
+    Update restart is pending). The retry pass leaves such an app alone: it would fail the same way.
 .PARAMETER InstallResult
-    An Install-AppWithVerification InstallResult (Install-WingetPackage's result, or a package-specific
-    installer's), or $null.
-.RETURNS
+    An Install-AppWithVerification InstallResult, or $null.
+.OUTPUTS
     [bool]
 #>
 function Test-RestartRequiredFirst {
@@ -189,18 +177,16 @@ function Test-RestartRequiredFirst {
 .SYNOPSIS
     Returns whether a winget install says the package installed and a restart finishes it.
 .DESCRIPTION
-    winget 1.7 and later report an MSI, WiX or Burn installer's 3010 as exit 0 and print 'Restart
-    your PC to finish installation.'; winget 1.6 and older exit 0x8A150109, and an installer that
-    started a restart itself (MSI 1641) gives 0x8A15010B (review finding P3-16). True for any of the
-    three. The printed warning is matched in English only; on other display languages
-    Invoke-WingetInstall's pending-restart registry check is what notices it. Used by
-    Install-WingetPackage for every app and by the PowerShell 7 bootstrap for its winget install of
-    PowerShell, so both read winget's result the same way. Runs under Windows PowerShell 5.1 too.
+    True for exit 0 with winget 1.7+'s 'Restart your PC to finish installation.' (an installer's
+    3010), for 0x8A150109 (the same on winget 1.6 and older) and for 0x8A15010B (the installer
+    started a restart, MSI 1641). The warning is matched in English only; on other display
+    languages the pending-restart registry check notices it. Shared by Install-WingetPackage and the
+    PowerShell 7 bootstrap. Runs under Windows PowerShell 5.1 too.
 .PARAMETER ExitCode
     winget's exit code, or $null when it did not run to the end.
 .PARAMETER Output
     What winget printed (Invoke-WingetProcess's Output).
-.RETURNS
+.OUTPUTS
     [bool]
 #>
 function Test-WingetRestartRequiredResult {

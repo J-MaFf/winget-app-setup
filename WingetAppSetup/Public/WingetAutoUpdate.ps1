@@ -2,14 +2,11 @@
 .SYNOPSIS
     Returns the pinned Winget-AutoUpdate (WAU) release metadata.
 .DESCRIPTION
-    We deploy a specific, SHA256-verified WAU release rather than tracking latest, and disable WAU's
-    own self-update, so an upstream change can never roll out to managed machines unreviewed. Bump
-    all fields together to move to a newer WAU (verify the new SHA256 against the winget-pkgs manifest
-    for that version). See issue #168. Also re-check how WAU picks the winget it installs
-    (Get-WindowsAppRuntimeRequirement, WauSupport.ps1, reads the framework the latest winget
-    release needs) and the framework pin in Get-WindowsAppRuntimePin (WindowsAppRuntime.ps1): WAU
-    installs the newest winget release, so the framework that release needs is what decides whether
-    WAU is safe to deploy.
+    A pinned, SHA256-checked release with WAU's self-update off, so no upstream change reaches
+    managed PCs unreviewed (issue #168). Change all fields together (check the SHA256 against the
+    winget-pkgs manifest), and re-check the framework the newest winget needs
+    (Get-WindowsAppRuntimeRequirement) against Get-WindowsAppRuntimePin: WAU installs the newest
+    winget, so that framework decides whether WAU is safe.
 #>
 function Get-WauPin {
     return @{
@@ -24,15 +21,10 @@ function Get-WauPin {
 .SYNOPSIS
     Returns true when Winget-AutoUpdate appears to be installed on this machine.
 .DESCRIPTION
-    WAU records its configuration under HKLM and registers a scheduled task 'Winget-AutoUpdate' under
-    the '\WAU\' task path. Either is a reliable indicator that WAU is already set up, so the installer
-    can leave an existing (possibly customized) WAU configuration untouched. Whether that WAU will
-    actually run is a separate question (Get-WauTaskHealth).
-
-    The task is probed with -ErrorAction SilentlyContinue (review finding P3-38): no task is the
-    normal answer on a machine without WAU, and with -ErrorAction Stop the transcript recorded it as
-    'PS>TerminatingError(Get-ScheduledTask)' even though it was caught, which #283's triage read as
-    part of the crash.
+    Its HKLM configuration key or its '\WAU\Winget-AutoUpdate' task, so an existing (possibly
+    customized) WAU is left alone. Whether it will run is Get-WauTaskHealth's question. The task is
+    read with -ErrorAction SilentlyContinue: no task is the normal answer, and a caught terminating
+    error still shows in the transcript (P3-38).
 #>
 function Test-WauInstalled {
     if (Test-Path 'HKLM:\SOFTWARE\Romanitho\Winget-AutoUpdate') {
@@ -53,53 +45,35 @@ function Test-WauInstalled {
 .SYNOPSIS
     Installs (or upgrades) and configures Winget-AutoUpdate (WAU) to keep installed apps current.
 .DESCRIPTION
-    Downloads the pinned WAU MSI into an ACL-restricted staging directory (owned by Administrators,
-    SYSTEM + Administrators only, checked before the download, so a non-elevated process cannot
-    swap the file between hash verification and msiexec: issue #186, review finding P2-21),
-    verifies its SHA256 from a handle it keeps open until msiexec has finished, and installs it
-    silently with the configuration this project standardizes on (issue #168):
-      - Weekly updates on Tuesdays at 02:00 (WAU's "Weekly" schedule), and not at user logon
-        (UPDATESATLOGON=0): a logon run collides with a technician signing in to re-run this
-        installer. WAU runs as SYSTEM for machine-scope packages and spawns a user-context task in
-        the logged-on session for user-scope packages, which avoids the cross-user 0x80073d19 class
-        the homegrown updater fought.
+    Downloads the pinned WAU MSI into a staging folder only SYSTEM and Administrators can change,
+    checked before the download (issue #186, P2-21), checks its SHA256 from a handle it keeps open
+    until msiexec has finished, and installs it silently with this configuration (issue #168):
+      - Weekly, Tuesdays at 02:00, and not at logon (UPDATESATLOGON=0), where a run collides with a
+        technician signing in to run this installer again. WAU runs as SYSTEM for machine-scope
+        packages and in the user's session (USERCONTEXT=1) for user-scope ones.
+      - DISABLEWAUAUTOUPDATE=1, so WAU stays on the pin; full notifications; not on metered
+        connections.
       - Only when the Windows App Runtime framework the newest winget needs is present
-        (Get-WindowsAppRuntimeStatus): every WAU run provisions the newest winget, and without its
-        framework it would leave winget unusable. Which framework that is - today
-        Microsoft.WindowsAppRuntime.1.8 >= 8000.616.304.0 - is read from the latest winget
-        release (Get-WindowsAppRuntimeRequirement, work-order item 32), with that constant as the
-        fallback when the release cannot be read. When the check finds it missing, the pinned,
-        verified 1.8 framework is installed for all users first (Install-WindowsAppRuntimeFramework,
-        work-order item 31), on a fresh install and on a machine that already has WAU alike; WAU
-        is skipped (or reported AT RISK) only when that install is not possible or fails, which
-        includes a winget that needs a newer build or another family than the pin. A check that
-        could not run at all installs nothing and goes ahead with WAU, as before.
-      - USERCONTEXT=1 so user-scope apps update in the real interactive session.
-      - DISABLEWAUAUTOUPDATE=1 so WAU stays on this pinned version until we bump it deliberately.
-      - Full notifications; skip on metered connections.
-    Version-aware (issue #186): because DISABLEWAUAUTOUPDATE=1 pins deployed machines, a bumped
-    Get-WauPin would otherwise only ever reach brand-new installs. When WAU is present but older
-    than the pin, the pinned MSI is run anyway — msiexec upgrades in place and re-applies this
-    project's standard configuration — making installer re-runs the WAU upgrade vehicle. An
-    equal/newer installed version, or one whose version cannot be read, is left untouched
-    (configuration included).
-    On a machine that already has WAU, its at-logon trigger is removed (Disable-WauLogonTrigger)
-    and a missing framework is reported, but the installation is otherwise left alone.
-    WAU counts as set up only when its scheduled task \WAU\Winget-AutoUpdate exists, is enabled
-    and has an enabled trigger (Get-WauTaskHealth, review finding P3-36): WAU's registry key, or
-    msiexec exit code 0, used to be enough, so a machine whose task was gone still showed a green
-    'Auto-updates' line and never updated. The task's state, last run and result, and the end of
-    WAU's own log, go to the transcript either way (Write-WauTaskHealth).
-    msiexec writes a verbose log to the run's logs folder, named on failure (review finding P3-37).
-    Best-effort: any failure warns and returns a Failed result rather than aborting the install.
+        (Get-WindowsAppRuntimeStatus, with the requirement read from the latest winget release):
+        every WAU run provisions the newest winget, which is unusable without it. When it is
+        missing, the pinned framework is installed for all users first
+        (Install-WindowsAppRuntimeFramework); WAU is skipped (or reported AT RISK) only when that
+        is not possible or fails. A check that could not run installs nothing and goes ahead.
+    A WAU older than the pin is upgraded in place by the pinned MSI, which also re-applies this
+    configuration (issue #186); an equal, newer or unreadable version is left alone, apart from
+    removing its at-logon trigger (Disable-WauLogonTrigger) and reporting a missing framework.
+
+    WAU counts as set up only when its \WAU\Winget-AutoUpdate task exists, is enabled and has an
+    enabled trigger (Get-WauTaskHealth, P3-36). The task's state and the end of WAU's log go to the
+    transcript (Write-WauTaskHealth), and msiexec's verbose log to the logs folder. Best-effort: a
+    failure warns and returns Failed.
 .PARAMETER WhatIf
     When specified, only reports intended actions.
 .PARAMETER InstallInProgressWaitSeconds
-    The most to wait, in all, when msiexec exits 1618 because Windows Installer is busy with another
-    installation (review finding P2-15): it waits for that installation (Wait-WindowsInstallerIdle)
-    and retries, up to 3 times. Invoke-WingetInstall passes what is left of the run's budget.
-    Default 600. 0: 1618 fails at once.
-.RETURNS
+    The most to wait, in all, when msiexec exits 1618 (Windows Installer busy): it waits for that
+    installation (Wait-WindowsInstallerIdle) and retries, up to 3 times. Invoke-WingetInstall passes
+    what is left of the run's budget. Default 600. 0: 1618 fails at once.
+.OUTPUTS
     [pscustomobject] with:
       - Status:  'Configured' (installed or upgraded this run), 'AlreadyPresent' (left as-is),
                  'Unhealthy' (installed, this run or before, but its scheduled task is missing,
@@ -110,10 +84,8 @@ function Test-WauInstalled {
                  Unhealthy after an install this run; the installed version (or $null when
                  unreadable) for AlreadyPresent, and for Unhealthy when WAU was already there.
       - Problem: for Unhealthy, what is wrong with the task (Get-WauTaskHealth's Problem).
-      - CheckFailed: for Unhealthy, $true when the task could not be checked at all (the task
-                 scheduler query failed), so whether WAU will run is unknown rather than known
-                 to be broken; the messages then send the user to Task Scheduler instead of
-                 telling them to reinstall.
+      - CheckFailed: for Unhealthy, $true when the task could not be checked at all, so whether WAU
+                 will run is unknown; the messages then point to Task Scheduler, not a reinstall.
       - FrameworkMissing: $true when no suitable framework is there, even after trying to install
                  it (on AlreadyPresent this means the existing WAU may break winget on its next run).
       - FrameworkInstallError: with FrameworkMissing, why the pinned framework could not be
@@ -121,8 +93,8 @@ function Test-WauInstalled {
       - FrameworkName: for AlreadyPresent, Unhealthy and FrameworkMissing, the framework winget
                  needs (e.g. 'Microsoft.WindowsAppRuntime.1.8'; several are joined with ' and '),
                  for the summary's messages. With FrameworkMissing, only the ones this PC lacks.
-      - RestartRequired: $true when msiexec returned 3010 (ERROR_SUCCESS_REBOOT_REQUIRED): WAU is
-                 installed, and a restart finishes it (review finding P3-16).
+      - RestartRequired: $true when msiexec returned 3010: WAU is installed, and a restart finishes
+                 it.
 #>
 function Install-WingetAutoUpdate {
     param (
@@ -148,7 +120,7 @@ function Install-WingetAutoUpdate {
         return [pscustomobject]@{ Status = 'DryRun'; Version = $pin.Version; FrameworkMissing = $false; RestartRequired = $false }
     }
 
-    # Work-order item 32: what the winget release WAU installs needs, read from that release
+    # What the winget release WAU installs needs, read from that release
     # (the built-in Microsoft.WindowsAppRuntime.1.8 >= 8000.616.304.0 when it cannot be read).
     $requirement = Get-WindowsAppRuntimeRequirement
     $frameworkName = (@($requirement.Frameworks) | ForEach-Object { $_.Name }) -join ' and '
@@ -162,7 +134,7 @@ function Install-WingetAutoUpdate {
         Write-WarningMessage "Could not check for $frameworkName ($($framework.Detail)); continuing with Winget-AutoUpdate."
     }
     elseif (-not $framework.Present) {
-        # Work-order item 31: install the pinned framework for all users, then go on with the
+        # Install the pinned framework for all users, then go on with the
         # status it re-checked. Also on a machine that already has WAU, which is then no longer
         # at risk. It installs nothing when the pin does not meet what this PC lacks (item 32).
         $missingFrameworks = @($requirement.Frameworks)
@@ -230,10 +202,8 @@ function Install-WingetAutoUpdate {
     $stagingDir = $null
     $msiStream = $null
     try {
-        # Download, verify, and install from a locked-down per-run directory instead of the
-        # predictable %TEMP% path a same-user non-elevated process could tamper with (issue #186).
-        # Nothing is downloaded unless the folder is verifiably limited to SYSTEM and
-        # Administrators (review finding P2-21).
+        # A per-run folder only SYSTEM and Administrators can change, not a predictable %TEMP% path
+        # (issue #186); nothing is downloaded unless that is verified (P2-21).
         try {
             $stagingDir = New-WauStagingDirectory
         }
@@ -265,14 +235,10 @@ function Install-WingetAutoUpdate {
             return [pscustomobject]@{ Status = 'Failed'; Version = $pin.Version; FrameworkMissing = $false; RestartRequired = $false }
         }
 
-        # Bake the configuration in via MSI properties (the winget-package install path allows no
-        # install-time customization). Single quoted-path argument string for reliable msiexec parsing.
-        # No RUN_WAU=YES: an immediate WAU run starts WAU's Install-Prerequisites (App Installer
-        # re-provisioning plus `winget source reset --force`) and app upgrades while this installer
-        # is still running - the cause of the #279/#284 winget wedge and the #283 console stop.
-        # WAU's own schedule runs the first pass instead.
-        # UPDATESATLOGON=0: no at-logon run (see the function help); WAU stores it as
-        # WAU_UpdatesAtLogon, which later MSI upgrades read back.
+        # The configuration as MSI properties. No RUN_WAU=YES: an immediate WAU run re-provisions App
+        # Installer, resets winget's source and upgrades apps while this installer is still running
+        # (the #279/#284 winget wedge and the #283 console stop); WAU's schedule runs the first pass.
+        # UPDATESATLOGON=0 is stored as WAU_UpdatesAtLogon, which later MSI upgrades read back.
         $msiArgs = "/i `"$msiPath`" /qn /norestart UPDATESATLOGON=0 USERCONTEXT=1 DISABLEWAUAUTOUPDATE=1 UPDATESINTERVAL=Weekly UPDATESATTIME=02:00:00 NOTIFICATIONLEVEL=Full DONOTRUNONMETERED=1"
         # Time-limited (review finding P2-5), waits for an installation that holds Windows Installer
         # (msiexec 1618, review finding P2-15), and writes msiexec's verbose log to the run's logs
@@ -294,10 +260,8 @@ function Install-WingetAutoUpdate {
         # 3010 = ERROR_SUCCESS_REBOOT_REQUIRED: installed, and a restart finishes it (P3-16).
         if ($msiexec.ExitCode -eq 0 -or $msiexec.ExitCode -eq 3010) {
             $restartRequired = $msiexec.ExitCode -eq 3010
-            # msiexec 0 or 3010 does not prove the task exists: WAU's MSI registers its tasks from
-            # a post-install script (WAU-MSI_Actions.ps1, a deferred custom action) that catches
-            # its errors, writes them and still exits 0, so the install can succeed with no task -
-            # and without the task nothing updates (P3-36). Hence the check.
+            # msiexec success does not prove the task exists: WAU registers it from a post-install
+            # script that swallows its errors (P3-36).
             $health = Get-WauTaskHealth
             if ($health.Healthy) {
                 Write-Success "Winget-AutoUpdate $($pin.Version) installed. Apps will update weekly, on Tuesdays at 02:00 (or soon after the next start if the machine was off)."
@@ -346,21 +310,16 @@ function Install-WingetAutoUpdate {
 .SYNOPSIS
     Uninstalls Winget-AutoUpdate (WAU) via the MSI product code of the installed version.
 .DESCRIPTION
-    Resolves the ProductCode of the WAU actually installed from its uninstall registry entry
-    (issue #186): every MSI version of WAU has its own ProductCode, so uninstalling with only the
-    pinned code makes msiexec exit 1605 ('unknown product') against any other installed version and
-    leaves WAU in place. Falls back to the pinned ProductCode when the registry lookup finds none.
-    msiexec runs through Invoke-WauMsiexec, like the install: a time limit, a wait for another
-    installation that holds Windows Installer (exit code 1618), and a verbose log in the logs
-    folder, named when the uninstall fails (review finding P3-37).
-    msiexec 3010 (ERROR_SUCCESS_REBOOT_REQUIRED) is a removal that a restart finishes: files still in
-    use go at the next restart. The uninstaller exits 3010 then.
+    Each WAU version has its own ProductCode, so it is read from the uninstall registry entry; the
+    pinned one would make msiexec exit 1605 against any other version (issue #186). Falls back to
+    the pinned code when none is found. msiexec runs through Invoke-WauMsiexec, as for the install.
+    3010 is a removal a restart finishes, and the uninstaller then exits 3010.
 .PARAMETER WhatIf
     When specified, only reports intended actions.
 .PARAMETER InstallInProgressWaitSeconds
     The most to wait, in all, when msiexec exits 1618 because another installation is running.
     Default 600.
-.RETURNS
+.OUTPUTS
     [hashtable] @{
         Succeeded       = True when WAU was removed (or was not installed), otherwise False
         RestartRequired = True when msiexec returned 3010
@@ -430,16 +389,13 @@ function Uninstall-WingetAutoUpdate {
 
 <#
 .SYNOPSIS
-    Removes the legacy homegrown scheduled-update task and its %APPDATA% data.
+    Removes the legacy scheduled-update task ('\winget-app-setup\WingetAppSetup-ScheduledUpdates')
+    and its %APPDATA%\winget-app-setup data, which older versions set up before WAU (issue #168).
 .DESCRIPTION
-    Auto-updates are now handled by Winget-AutoUpdate (issue #168). Earlier versions registered a
-    Windows scheduled task 'WingetAppSetup-ScheduledUpdates' (under '\winget-app-setup\') that ran a
-    helper deployed to %APPDATA%\winget-app-setup — a helper that self-downloads from the repo and
-    would break once removed. This migration unregisters that task and deletes the data directory so
-    already-deployed machines transition cleanly. Safe to call when nothing is present (no-op).
+    Safe to call when nothing is there.
 .PARAMETER WhatIf
     When specified, only reports intended actions.
-.RETURNS
+.OUTPUTS
     [bool] True when something was removed, otherwise False.
 #>
 function Remove-LegacyScheduledUpdates {

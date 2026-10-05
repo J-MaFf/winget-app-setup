@@ -1,24 +1,13 @@
-# Environment pre-flight checks (wgt-gq8.39): find what about this PC keeps a run from working,
-# and say it in one line before the run starts down a path that cannot succeed, instead of a
-# cascade of failures and wrong repairs. Each check sits where it can still act:
-#   - Constrained Language Mode: first thing in the entry script (build/fragments/tail.ps1),
-#     because the run breaks on its first .NET call, long before any later step (Test-FullLanguageMode).
-#   - An execution policy set by Group Policy that refuses this unsigned script: right before each
-#     relaunch with -File, the Windows PowerShell 5.1 bootstrap's under pwsh and the elevated
-#     relaunch (Get-ScriptExecutionPolicyBlock; the elevated window checks again for the account
-#     that approved the prompt, New-ElevationVerifierCommand).
-#   - For the account the run installs as, once it is elevated (Invoke-EnvironmentPreflight): a
-#     proxy the signed-in user has that SYSTEM or the elevating admin does not, a restart that is
-#     already pending, and App Installer's Group Policy turning winget off.
-# Every check is read-only, so a dry run (-WhatIf) runs them too.
+# Environment pre-flight checks: say in one line what keeps a run from working, before it starts
+# down a path that cannot succeed. Each check sits where it can still act: Constrained Language Mode
+# first in the entry script; a Group Policy execution policy right before each -File relaunch; and,
+# once elevated, the proxy, a pending restart and App Installer's Group Policy for the account the
+# run installs as (Invoke-EnvironmentPreflight). All read-only, so a dry run runs them too.
 
 <#
 .SYNOPSIS
     Returns the language mode PowerShell runs this code in ('FullLanguage', 'ConstrainedLanguage',
-    'RestrictedLanguage' or 'NoLanguage').
-.DESCRIPTION
-    A separate function so tests can mock it. Constrained Language Mode safe and Windows PowerShell
-    5.1 safe: it reads one property and converts it to a string, which every language mode allows.
+    'RestrictedLanguage' or 'NoLanguage'). A seam for tests; safe in every language mode and 5.1.
 #>
 function Get-PowerShellLanguageMode {
     return [string]$ExecutionContext.SessionState.LanguageMode
@@ -28,17 +17,11 @@ function Get-PowerShellLanguageMode {
 .SYNOPSIS
     Says in one line, and returns $false, when PowerShell does not run in Full Language Mode.
 .DESCRIPTION
-    An application control policy (App Control for Business, formerly WDAC, or AppLocker) runs the
-    scripts it does not trust in Constrained Language Mode, and this installer is not signed. That
-    mode refuses .NET method calls and most .NET types, which the installer uses from its first
-    lines on: before this check, such a run printed PowerShell's errors and then died further on,
-    under PowerShell 7 in its pre-flight system checks with 'UNEXPECTED ERROR' and exit code 5. No
-    step can work around it.
-
-    The entry script calls this before anything else and stops with exit code 5 (the run is aborted
-    before it starts; no other code in the table fits). Only constructs every language mode allows,
-    under Windows PowerShell 5.1 too: Write-Host and string formatting.
-.RETURNS
+    An application control policy (App Control for Business or AppLocker) runs untrusted scripts,
+    such as this unsigned one, in Constrained Language Mode, which refuses the .NET calls the
+    installer makes from its first lines; nothing can work around it. The entry script calls this
+    first and stops with exit code 5. Uses only what every language mode allows, under 5.1 too.
+.OUTPUTS
     [bool] True in Full Language Mode.
 #>
 function Test-FullLanguageMode {
@@ -55,16 +38,11 @@ function Test-FullLanguageMode {
     Returns $true when Group Policy's script host (gpscript.exe) started this process, directly or
     through its parents: a startup, shutdown, logon or logoff script.
 .DESCRIPTION
-    PowerShell applies no Group Policy execution policy (the MachinePolicy and UserPolicy scopes) in
-    such a process, so that a policy never blocks a Group Policy script: it looks for
-    %SystemRoot%\System32\gpscript.exe among the process's parents (HasGpScriptParent in its
-    SecuritySupport). Get-ScriptExecutionPolicyBlock follows it, so an installer deployed as a
-    Group Policy script is not stopped for a policy that does not apply to it. This walks
-    Win32_Process's ParentProcessId the same way, at most 32 steps, and stops at a parent that
-    started after its child (a process that got a parent's reused id). Windows PowerShell 5.1 safe
-    and best-effort: a query that fails ends the walk, as in PowerShell's own check, and counts as
-    no.
-.RETURNS
+    PowerShell applies no Group Policy execution policy in such a process (HasGpScriptParent in its
+    SecuritySupport), and Get-ScriptExecutionPolicyBlock follows it. Walks Win32_Process's
+    ParentProcessId as PowerShell does, at most 32 steps, stopping at a parent that started after
+    its child (a reused id). Best-effort and 5.1-safe: a failed query ends the walk and counts as no.
+.OUTPUTS
     [bool]
 #>
 function Test-LaunchedByGroupPolicyScript {
@@ -99,34 +77,23 @@ function Test-LaunchedByGroupPolicyScript {
     Returns the Group Policy execution policy that keeps PowerShell from running this unsigned
     script with -File, even with -ExecutionPolicy Bypass, or $null.
 .DESCRIPTION
-    The installer relaunches itself with `-ExecutionPolicy Bypass -File <copy>` twice: the Windows
-    PowerShell 5.1 bootstrap under pwsh (Invoke-PowerShell7Bootstrap), and the elevated Windows
-    PowerShell (Restart-WithElevation). -ExecutionPolicy sets the Process scope, and Group Policy's
-    'Turn on Script Execution' (the MachinePolicy and UserPolicy scopes) overrides every other
-    scope, so under 'Allow only signed scripts' (AllSigned) or with the setting Disabled
-    (Restricted) the relaunch refuses the file and the run ended with a misleading exit code 1. The
-    irm | iex one-liner itself is not a script file, so the policy does not stop it before then.
-
-    Read from the registry the way PowerShell reads it, so it works for either engine from either
-    engine (and under Windows PowerShell 5.1), including PowerShell's one exemption: no Group Policy
-    execution policy applies to a process that Group Policy's script host gpscript.exe started,
-    directly or through its children (a startup or logon script), so then there is no block
-    (Test-LaunchedByGroupPolicyScript, checked only once a policy would block):
+    The installer relaunches itself with `-ExecutionPolicy Bypass -File <copy>` from the 5.1
+    bootstrap (under pwsh) and for elevation (under Windows PowerShell). Group Policy's 'Turn on
+    Script Execution' overrides the Process scope, so AllSigned or Restricted refuses the relaunch;
+    the irm | iex one-liner itself is not a file and gets that far. Read from the registry as
+    PowerShell reads it, from either engine:
       WindowsPowerShell  HKLM, then HKCU: SOFTWARE\Policies\Microsoft\Windows\PowerShell.
-      PowerShell7        HKLM, then HKCU: SOFTWARE\Policies\Microsoft\PowerShellCore, or the Windows
-                         PowerShell key above when that key sets UseWindowsPowerShellPolicySetting
-                         ('Use Windows PowerShell Policy setting'). Windows PowerShell's policy alone
-                         does not apply to pwsh.
-    In a key, EnableScripts 0 means Restricted, and EnableScripts 1 means the ExecutionPolicy value
-    (a value PowerShell does not know counts as its default, Restricted); without EnableScripts the
-    key sets nothing. The first scope that sets a policy decides: a machine policy of RemoteSigned
-    wins over a user policy of AllSigned. Only AllSigned and Restricted refuse the script; the
-    relaunched copies are written by the installer itself, so they carry no internet zone mark that
-    RemoteSigned would refuse. PowerShell 7's powershell.config.json policies are not read.
+      PowerShell7        HKLM, then HKCU: SOFTWARE\Policies\Microsoft\PowerShellCore, or the key
+                         above when that key sets UseWindowsPowerShellPolicySetting.
+    EnableScripts 0 is Restricted; 1 takes ExecutionPolicy (an unknown value counts as Restricted);
+    without EnableScripts the key sets nothing. The first scope that sets a policy decides. Only
+    AllSigned and Restricted block: the relaunched copies carry no internet zone mark for
+    RemoteSigned to refuse. No block in a process gpscript.exe started
+    (Test-LaunchedByGroupPolicyScript). powershell.config.json policies are not read.
 .PARAMETER Engine
     'WindowsPowerShell' (powershell.exe) or 'PowerShell7' (pwsh.exe): the program that will run the
     script.
-.RETURNS
+.OUTPUTS
     [pscustomobject] Engine, Scope ('MachinePolicy' or 'UserPolicy'), Policy ('AllSigned' or
     'Restricted'), Key (the registry key that set it), GroupPolicyPath (where to change it) and
     Description (one sentence for a message), or $null.
@@ -226,13 +193,11 @@ function Get-ScriptExecutionPolicyBlock {
 .SYNOPSIS
     Says what a Windows PowerShell execution policy set by Group Policy does to the elevated relaunch.
 .DESCRIPTION
-    For Restart-WithElevation and Invoke-WingetInstall's dry run. The elevated program is always
-    Windows PowerShell (powershell.exe), so only its policy matters here. A machine policy refuses
-    the elevated run whoever approves the UAC prompt. A user policy is this account's: it refuses
-    the elevated run only when this same account approves the prompt, which cannot be known before.
+    A machine policy refuses the elevated run whoever approves the UAC prompt; a user policy only
+    when this same account approves it, which cannot be known before.
 .PARAMETER Block
     Get-ScriptExecutionPolicyBlock -Engine WindowsPowerShell's result.
-.RETURNS
+.OUTPUTS
     [string]
 #>
 function Format-ElevationPolicyBlockMessage {
@@ -273,14 +238,12 @@ function Get-AccountSid {
 .SYNOPSIS
     Reads an account's Windows Internet (WinINet) proxy settings, or $null when they cannot be read.
 .DESCRIPTION
-    The per-user settings under Software\Microsoft\Windows\CurrentVersion\Internet Settings, which
-    Settings > Network & Internet > Proxy, Internet Options and the Internet Explorer Group Policy
-    settings write: ProxyServer (only while ProxyEnable is 1), with its bypass list ProxyOverride,
-    and AutoConfigURL (a proxy auto-configuration script). A separate function so tests can mock it.
+    The per-user values under Software\Microsoft\Windows\CurrentVersion\Internet Settings:
+    ProxyServer (only while ProxyEnable is 1), ProxyOverride and AutoConfigURL. A seam for tests.
 .PARAMETER UserSid
-    The account's SID: its hive is read under HKEY_USERS, where Windows loads it while the user is
-    signed in. Empty: the account this process runs as (HKCU).
-.RETURNS
+    The account's SID, read under HKEY_USERS, where Windows loads a signed-in user's hive. Empty:
+    this process's account (HKCU).
+.OUTPUTS
     [pscustomobject] ProxyServer, ProxyOverride and AutoConfigUrl (each '' when not set), or $null.
 #>
 function Get-WinInetProxySetting {
@@ -317,12 +280,8 @@ function Get-WinInetProxySetting {
 
 <#
 .SYNOPSIS
-    Returns $true when Group Policy makes the Windows Internet proxy settings one setting for the
-    whole PC ('Make proxy settings per-machine (rather than per-user)').
-.DESCRIPTION
-    HKLM\SOFTWARE\Policies\Microsoft\Windows\CurrentVersion\Internet Settings, ProxySettingsPerUser
-    0 (NetworkProxy CSP ProxySettingsPerUser). Every account, SYSTEM included, then uses the same
-    proxy. A separate function so tests can mock it.
+    Returns $true when Group Policy makes the WinINet proxy one setting for the whole PC
+    (ProxySettingsPerUser 0), which every account, SYSTEM included, then uses. A seam for tests.
 #>
 function Test-ProxySettingsPerMachine {
     try {
@@ -368,19 +327,14 @@ function Format-WinInetProxySetting {
     Returns a one-line warning when the signed-in user has a Windows Internet proxy that the account
     this run installs as does not have, or $null.
 .DESCRIPTION
-    The Windows Internet (WinINet) proxy settings belong to each account. A run as SYSTEM (an RMM
-    agent) or as another admin account (cross-user elevation) reads its own, not the signed-in
-    user's, so on a network that only lets traffic out through the proxy the user has, its downloads
-    fail (winget's downloads and source update, the PowerShell 7 and Winget-AutoUpdate MSIs, the
-    network pre-flight check). The WinHTTP proxy (netsh winhttp) is one setting for the whole PC, so
-    every account already shares it, and so does a WinINet proxy that Group Policy makes per-machine
-    (Test-ProxySettingsPerMachine): neither is reported.
-
-    Quiet (returns $null) for a run as the signed-in user, when nobody is signed in, when the user's
-    settings cannot be read, when the user has no proxy, and when this account has the same one.
+    WinINet proxy settings are per account, so a run as SYSTEM or as another admin account does not
+    use the user's, and on a network that only lets traffic out through it every download fails.
+    The WinHTTP proxy and a per-machine WinINet proxy are shared by every account, so neither is
+    reported. Quiet for a run as the signed-in user, when nobody is signed in, when the user's
+    settings cannot be read or hold no proxy, and when this account has the same one.
 .PARAMETER AccountContext
     Get-InstallAccountContext's result.
-.RETURNS
+.OUTPUTS
     [string] e.g. "The signed-in user 'CONTOSO\jdoe' has a proxy in their Windows Internet settings
     (proxy server proxy.contoso.com:8080 (bypass: <local>)) that this run as SYSTEM does not use
     (SYSTEM has no proxy). ...", or $null.
@@ -427,26 +381,21 @@ function Get-ProxyInheritanceWarning {
     The pre-flight checks for the account a run installs as: one line per problem, and the exit code
     when the run cannot go on.
 .DESCRIPTION
-    Invoke-WingetInstall runs this once it is elevated (or runs as SYSTEM), before it waits for
-    Winget-AutoUpdate or sets winget up (wgt-gq8.39). Read-only, so a dry run runs it too. In this
-    order:
-      1. Proxy (warning): the signed-in user's proxy that this account does not have
-         (Get-ProxyInheritanceWarning).
-      2. Pending restart (warning, review finding P3-16): a restart Windows already wants before
-         the run. Its state is returned, and the end of the run compares against it, so a restart
-         this run's installs need (exit code 3010) is told apart from this one.
-      3. App Installer's Group Policy (stop, review finding P3-30): winget, its command line or its
-         default source turned off (Get-WingetPolicyBlock). No repair can help, so a real run stops
-         with exit code 2. Initialize-Winget checks the same policy first; a run that this check
-         stops never gets there, and a dry run does not call it once this check has reported the
-         policy, so the line appears once.
+    Invoke-WingetInstall runs it once elevated (or as SYSTEM), before the WAU wait and the winget
+    setup. Read-only, so a dry run runs it too. In this order:
+      1. Proxy (warning): Get-ProxyInheritanceWarning.
+      2. Pending restart (warning): returned, so the end of the run can tell a restart its own
+         installs need (exit code 3010) from this one.
+      3. App Installer's Group Policy (stop): Get-WingetPolicyBlock; a real run stops with exit code
+         2, since no repair can help. Initialize-Winget checks the same policy, so the line appears
+         once.
     The warnings come first, so the line that stops the run is the last one.
 .PARAMETER WhatIf
     Dry run: a policy block is reported with [DRY-RUN] and the exit code a real run would stop with,
     and the run goes on.
 .PARAMETER AccountContext
     Get-InstallAccountContext's result; read here when not given.
-.RETURNS
+.OUTPUTS
     [pscustomobject] ExitCode (0, or 2 when a real run must stop), RestartState
     (Get-PendingRestartState's result, or $null), RestartPendingReasons ([string[]]) and
     WingetPolicyBlocked ([bool]).

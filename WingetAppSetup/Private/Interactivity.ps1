@@ -2,39 +2,25 @@
 .SYNOPSIS
     Determines whether the current run has a human at the console.
 .DESCRIPTION
-    Single source of truth for the effective non-interactive detection (issues #176, #214). Since
-    issue #230 this gates no yes/no question — there are none left. It gates one prompt, TightVNC's
-    server password at the start of a run that has no WINGET_APP_SETUP_TIGHTVNC_PASSWORD
-    (Initialize-TightVncSecretForRun, work-order item 18), and the things that still depend on a
-    human being present: whether Invoke-WingetInstall holds the window with "press any key to
-    exit", whether Write-InstallerExitNotice holds it the same way before an early exit (review
-    finding P2-14), whether the entry script forces an exit code after an abort, and whether a run
-    that is not elevated may show a UAC prompt at all (Invoke-WingetInstall and
-    Restart-WithElevation return 4 instead; review finding P2-12).
+    The one place that decides it (issues #176, #214). The installer asks no yes/no question
+    (issue #230); this gates the TightVNC password prompt, the "press any key to exit" holds at the
+    end of a run and before an early exit, the exit code forced after an abort, and whether a run
+    that is not elevated may show a UAC prompt (it returns 4 instead).
 
-    Note what it deliberately does NOT catch: an interactive `irm <url> | iex` reports INTERACTIVE
-    here, because the pipe is a PowerShell-internal pipeline and leaves the process's stdin alone.
-    That is correct — there really is a human there — but it is why prompts could never be the
-    mechanism that kept the documented one-liner unattended (issue #230).
-
-    A run is effectively non-interactive when ANY of the following holds:
-      - the caller asked for an unattended run (Test-NonInteractiveRequested): the explicit
-        -NonInteractive switch, or $env:WINGET_APP_SETUP_NONINTERACTIVE, which the irm | iex
-        one-liner needs because it cannot pass a switch (review finding P3-41);
-      - the process runs as SYSTEM (Test-IsSystemAccount; review finding P3-23): an RMM agent or a
-        scheduled task, never a person at a console, whatever its session reports. Nobody would
-        answer a key press, so none is waited for;
-      - the session is non-interactive ([Environment]::UserInteractive is false — services,
-        scheduled tasks). PowerShell's own -NonInteractive switch (`pwsh -NonInteractive -File
-        ...`) does not change that and is not detected here: with a console attached, such a run
-        counts as interactive. Only the TightVNC password prompt checks for it
+    A run is non-interactive when ANY of these holds:
+      - the caller asked for it (Test-NonInteractiveRequested: -NonInteractive or
+        WINGET_APP_SETUP_NONINTERACTIVE);
+      - the process runs as SYSTEM (Test-IsSystemAccount): an RMM agent or a scheduled task;
+      - [Environment]::UserInteractive is false (services, scheduled tasks). PowerShell's own
+        -NonInteractive switch is not detected here; only the TightVNC prompt checks for it
         (Test-PowerShellHostNonInteractive), because Read-Host throws in that mode;
-      - stdin is redirected (piped input, irm | iex wrappers, CI runners). A console probe
-        failure means there is no usable console, so that counts as non-interactive too.
+      - stdin is redirected, or the console cannot be probed.
+    An interactive `irm <url> | iex` counts as interactive: the pipe leaves the process's stdin
+    alone, which is why prompts could never have kept the one-liner unattended.
 .PARAMETER NonInteractive
-    The caller's explicit -NonInteractive switch, forwarded as -NonInteractive:$switch.
-.RETURNS
-    [bool] True when there is no human to interact with; otherwise false.
+    The caller's explicit -NonInteractive switch.
+.OUTPUTS
+    [bool] True when there is no human to interact with.
 #>
 function Test-EffectiveNonInteractive {
     param (
@@ -62,18 +48,16 @@ function Test-EffectiveNonInteractive {
 
 <#
 .SYNOPSIS
-    Determines whether PowerShell itself was started with its -NonInteractive switch.
+    Determines whether PowerShell itself was started with its -NonInteractive switch, in which
+    Read-Host throws whatever the console looks like.
 .DESCRIPTION
-    In that mode Read-Host throws ("PowerShell is in NonInteractive mode"), whatever the console
-    looks like, and nothing in .NET or the host's public API says so, so the process command line
-    is read: an argument that is -NonInteractive or one of its abbreviations down to -noni, after
-    '-', '--' or '/', as pwsh and Windows PowerShell accept it. The script's own -NonInteractive
-    switch on the same command line matches too, and asks for the same thing. Used by the TightVNC
-    password prompt (Get-TightVncSecret); Test-EffectiveNonInteractive does not use it. Runs under
-    Windows PowerShell 5.1 too.
+    Nothing in .NET or the host's public API says so, so the process command line is read: an
+    argument that is -NonInteractive or an abbreviation down to -noni, after '-', '--' or '/'. The
+    script's own -NonInteractive matches too, and means the same. Used by the TightVNC password
+    prompt. Runs under Windows PowerShell 5.1 too.
 .PARAMETER CommandLineArgs
     The process command line, for tests. Default: [Environment]::GetCommandLineArgs().
-.RETURNS
+.OUTPUTS
     [bool]
 #>
 function Test-PowerShellHostNonInteractive {
@@ -100,18 +84,12 @@ function Test-PowerShellHostNonInteractive {
 .SYNOPSIS
     Determines whether the caller asked for an unattended run.
 .DESCRIPTION
-    True for the explicit -NonInteractive switch, or when the environment variable
-    WINGET_APP_SETUP_NONINTERACTIVE is 1, true or yes (any case, surrounding spaces ignored). The
-    documented irm | iex one-liner cannot pass a switch to the script it downloads (review finding
-    P3-41), so an RMM job or a wrapper that runs it as the logged-on user, with a console nobody
-    watches, sets the variable instead, and the run then never waits for a key press. Any other
-    value, or none, leaves the decision to Test-EffectiveNonInteractive's auto-detection. The
-    variable is inherited by the PowerShell 7 run the Windows PowerShell 5.1 bootstrap starts, so
-    it holds for the whole run. Runs under Windows PowerShell 5.1 too (the tail's bootstrap branch
-    calls Test-EffectiveNonInteractive).
+    True for the -NonInteractive switch, or when WINGET_APP_SETUP_NONINTERACTIVE is 1, true or yes
+    (any case, spaces ignored): the irm | iex one-liner cannot pass a switch. The PowerShell 7 run
+    the 5.1 bootstrap starts inherits the variable. Runs under Windows PowerShell 5.1 too.
 .PARAMETER NonInteractive
     The caller's explicit -NonInteractive switch.
-.RETURNS
+.OUTPUTS
     [bool]
 #>
 function Test-NonInteractiveRequested {
@@ -129,14 +107,12 @@ function Test-NonInteractiveRequested {
 
 <#
 .SYNOPSIS
-    Determines whether the run is under a CI system.
+    Determines whether the run is under a CI system, so a failed early exit never waits for a key
+    press on a CI runner whose console looks interactive.
 .DESCRIPTION
-    Used by Write-InstallerExitNotice so a failed early exit never waits for a key press on a CI
-    runner, even where the runner's console looks interactive. Checks the variables CI systems set:
-    CI (GitHub Actions, GitLab, Azure Pipelines' agents and most others), GITHUB_ACTIONS and TF_BUILD
-    (Azure Pipelines). A CI value of 'false' or '0' does not count. Runs under Windows PowerShell 5.1
-    too.
-.RETURNS
+    Checks CI (most CI systems), GITHUB_ACTIONS and TF_BUILD (Azure Pipelines); CI set to 'false'
+    or '0' does not count. Runs under Windows PowerShell 5.1 too.
+.OUTPUTS
     [bool] True under CI.
 #>
 function Test-IsContinuousIntegration {

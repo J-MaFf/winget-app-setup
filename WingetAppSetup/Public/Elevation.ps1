@@ -4,32 +4,16 @@
 
 <#
 .SYNOPSIS
-    Detects whether the current process is running with administrator privileges.
+    Returns whether the current process runs with administrator rights.
 .DESCRIPTION
-    The single shared implementation of the
-    "[Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(...)"
-    check, previously copy-pasted (and already behaviorally diverged) across
-    WingetAppSetup/Public/Install.ps1, winget-app-uninstall.ps1, and
-    WingetAppSetup/Private/PowerShell7Bootstrap.ps1 (full-repo review finding, 2026-07-16).
-    Fails safe: if the underlying identity/role check throws for any reason (an exotic restricted
-    token, a non-interactive service context, or a mocked failure in tests), this warns and
-    returns $true rather than letting the exception propagate and abort the caller - matching the
-    PowerShell7Bootstrap.ps1 behavior that is now applied at every call site.
-
-    At the two call sites that gate elevation (Invoke-WingetInstall, winget-app-uninstall.ps1),
-    "assume elevated" on failure means a broken check SKIPS Restart-WithElevation and proceeds
-    unelevated rather than retrying elevation. This is a deliberate tradeoff, not an oversight
-    (full-repo mega-review, 2026-07-17): the trigger is vanishingly rare on a real Windows
-    session, the caller still warns loudly before proceeding, any operation that genuinely needed
-    elevation then fails just as loudly with an access-denied error, and the alternative
-    (fail-closed: assume non-admin, always attempt Restart-WithElevation) risks a relaunch loop if
-    the same check throws deterministically in the relaunched process too - a worse failure mode
-    than a noisy unelevated run. If a future caller's failure consequence is instead silent/unsafe
-    rather than loud, that caller should check the exception itself rather than rely on this
-    shared default.
-.RETURNS
-    [bool] $true when the current process is elevated (or when the check itself failed and could
-    not determine elevation), $false when it is confirmed non-elevated.
+    The one implementation for the installer, the uninstaller and the PowerShell 7 bootstrap. When
+    the check itself throws, it warns and returns $true: a broken check then skips the elevated
+    relaunch and the run goes on unelevated, where anything that needed elevation fails loudly.
+    Assuming non-admin instead could relaunch forever if the check fails the same way in the
+    relaunched process. A caller for which proceeding unelevated would be silent or unsafe should
+    check the identity itself.
+.OUTPUTS
+    [bool] $true when elevated, or when the check failed; $false when confirmed not elevated.
 #>
 function Test-IsAdmin {
     try {
@@ -47,62 +31,45 @@ function Test-IsAdmin {
     Runs the script again in an elevated Windows PowerShell window, waits for it, and returns its
     exit code.
 .DESCRIPTION
-    Review findings P2-11, P2-12 and P3-11. Asks for administrator rights (the UAC prompt) and starts
-    Windows PowerShell (Get-WindowsPowerShellPath) elevated in a new window, waits for it to finish
-    and returns its exit code, so the run that asked reports what the elevated run did.
+    Starts System32's powershell.exe (Get-WindowsPowerShellPath), which every account has, after the
+    UAC prompt; the installer's 5.1 dispatch then finds or installs PowerShell 7 as the elevating
+    account in the same window (review finding P2-11). Waiting for it lets the run that asked
+    report what the elevated run did.
 
-    The elevated program is always System32's powershell.exe, which every account has. A bare
-    pwsh.exe or wt.exe resolved through the invoking user's PATH and per-user app aliases, which a
-    separate admin account that elevates does not have, so the elevated window could fail to start
-    while the run that asked had already exited 0. The installer's Windows PowerShell 5.1 dispatch
-    then finds or installs PowerShell 7 as the elevating account and runs under it in the same
-    elevated window. There is no Windows Terminal relaunch any more: it could not report an exit
-    code either.
+    By default the elevated process does not run ScriptPath itself (review finding P3-11). This
+    function reads the file once, checks it against -ExpectedSha256 and stages the bytes in this
+    account's %TEMP%, which the elevating account can read even when it cannot see ScriptPath (a
+    mapped drive, a share). The elevated process checks the staged file against the hash, copies it
+    into a folder only administrators can change and runs the copy (New-ElevationVerifierCommand),
+    so a file rewritten while the UAC prompt is up is not run. The staged copy is removed once the
+    elevated run ends. -InPlace runs ScriptPath itself, unchecked, for a script that needs the files
+    beside it (the uninstaller imports the module from its folder): a file in a folder the signed-in
+    user can write to is then exposed while the UAC prompt is up.
 
-    By default the elevated process does not run ScriptPath itself. This function reads the file
-    once, checks it against -ExpectedSha256 and stages those bytes in this account's %TEMP%, which
-    the elevating account can read even when it cannot see ScriptPath (a mapped drive, a share).
-    The elevated process runs a short check given on its command line (New-ElevationVerifierCommand)
-    that compares the staged file with the SHA256 computed here, copies it into a folder only
-    administrators can change and runs that copy, so a file rewritten in a user-writable folder (the
-    bootstrap's copy in %TEMP%, a clone in Downloads, the staged copy) while the UAC prompt is up is
-    not run with administrator rights. The staged copy is removed once the elevated run has ended.
-    -InPlace runs ScriptPath directly, for a script that needs the files next to it
-    (winget-app-uninstall.ps1 imports the module from its own folder). Nothing is checked then: the
-    elevated run runs whatever ScriptPath and the files it loads hold when it starts, so a file in a
-    folder the signed-in user can write to is exposed while the UAC prompt is up.
-
-    Never asks when nobody is at the console (Test-EffectiveNonInteractive): an unattended run would
-    leave a UAC prompt on someone's desktop and report nothing. A declined UAC prompt (Win32 error
-    1223, ERROR_CANCELLED) is reported once, with no second prompt.
-
-    Never asks either when Group Policy's Windows PowerShell execution policy for the PC is AllSigned
-    or Restricted (Get-ScriptExecutionPolicyBlock, wgt-gq8.39): -ExecutionPolicy Bypass cannot
-    override it, so the elevated window could not run the script. One line says so instead. Such a
-    policy for this account only is a warning: it applies only if this account approves the prompt.
-    The checked copy's elevated window checks the policy of the account that approved it, says why
-    and exits 4 when it would refuse the script (New-ElevationVerifierCommand); -InPlace has no such
-    check.
+    Never shows a UAC prompt when nobody is at the console (Test-EffectiveNonInteractive), and asks
+    once: a declined prompt (1223, ERROR_CANCELLED) is reported, not asked again. Never asks either
+    when Group Policy sets the PC's execution policy to AllSigned or Restricted
+    (Get-ScriptExecutionPolicyBlock), which -ExecutionPolicy Bypass cannot override; such a policy
+    for this account only is a warning, and the checked copy's window checks the approving
+    account's.
 .PARAMETER ScriptPath
     The full path of the script to run elevated.
 .PARAMETER AdditionalArguments
-    Switches forwarded to the elevated run (for example '-SkipSystemCheck'), appended after the
-    script path so the elevated run inherits the caller's intent. Only switch names are accepted:
-    they become part of a command line.
+    Switch names forwarded to the elevated run (for example '-SkipSystemCheck'). Only switch names
+    are accepted: they become part of a command line.
 .PARAMETER ExpectedSha256
-    The script's SHA256 when this run started (the generated installer computes it at startup). When
-    the file no longer has it, nothing is started. Empty: the hash is taken now.
+    The script's SHA256 when this run started; nothing is started when the file no longer has it.
+    Empty: the hash is taken now.
 .PARAMETER InPlace
     Run ScriptPath itself, unchecked, instead of a checked copy.
 .PARAMETER NonInteractive
     The caller's -NonInteractive switch.
-.RETURNS
+.OUTPUTS
     [pscustomobject] @{ Started; ExitCode }. Started is $true when an elevated run started, and
-    ExitCode is then its exit code (4 when its window found that Group Policy's execution policy
-    would refuse the script, 5 when the file changed). Otherwise ExitCode is 4 (no UAC prompt in a
-    non-interactive run, Group Policy's execution policy would refuse the script in the elevated
-    window, the prompt was declined, or the elevated process could not be started) or 5 (the script
-    could not be read, or changed since the run started).
+    ExitCode is then its exit code (4 when its window found the execution policy would refuse the
+    script, 5 when the file changed). Otherwise ExitCode is 4 (no prompt in a non-interactive run,
+    an execution policy that would refuse the script, a declined prompt, or a process that could
+    not start) or 5 (the script could not be read, or changed since the run started).
 #>
 function Restart-WithElevation {
     [OutputType([pscustomobject])]
@@ -129,13 +96,9 @@ function Restart-WithElevation {
         return [pscustomobject]@{ Started = $false; ExitCode = 4 }
     }
 
-    # The elevated Windows PowerShell runs the script with -File, and Group Policy's execution policy
-    # overrides -ExecutionPolicy Bypass (wgt-gq8.39). Under a machine policy of AllSigned or
-    # Restricted the elevated window refused the file, printed PowerShell's own error and closed at
-    # once, and this run passed on its non-zero exit code as the run's result; nothing is started
-    # then. A user policy is this account's, and holds only if this same account approves the
-    # prompt: a warning here. The checked copy's elevated window then checks the policy of the
-    # account that did approve, and stops with exit code 4 (New-ElevationVerifierCommand).
+    # Group Policy's execution policy overrides the elevated window's -ExecutionPolicy Bypass, so
+    # the PC's AllSigned or Restricted stops here. This account's own policy holds only if this
+    # account approves the prompt: a warning, and the checked copy's window checks the approver's.
     $policyBlock = Get-ScriptExecutionPolicyBlock -Engine WindowsPowerShell
     if ($policyBlock) {
         $policyMessage = Format-ElevationPolicyBlockMessage -Block $policyBlock
@@ -165,10 +128,9 @@ function Restart-WithElevation {
             Write-ErrorMessage "$ScriptPath changed after this run started, so it is not run with administrator rights. Start it again."
             return [pscustomobject]@{ Started = $false; ExitCode = 5 }
         }
-        # Staged in this account's %TEMP%, which administrators can read (review finding P2-11): the
-        # elevated account may not see ScriptPath itself, for example on a mapped drive (drive
-        # mappings belong to the signed-in session) or a share it has no access to. The elevated
-        # process checks the staged copy against the hash all the same.
+        # Staged in this account's %TEMP%, which administrators can read: the elevated account may
+        # not see ScriptPath (a mapped drive belongs to the signed-in session). The elevated process
+        # checks the staged copy against the hash all the same.
         try {
             $stagingDirectory = Join-Path ([System.IO.Path]::GetTempPath()) ('winget-app-setup-elevate-' + [System.Guid]::NewGuid().ToString('N'))
             [void](New-Item -ItemType Directory -Path $stagingDirectory -Force -ErrorAction Stop)
@@ -184,7 +146,7 @@ function Restart-WithElevation {
         }
         $verifierCommand = New-ElevationVerifierCommand -ScriptPath $stagedPath -Sha256 $sha256 -PowerShellPath $powerShellPath -CopyRoot (Get-ElevatedCopyRoot) -AdditionalArguments $AdditionalArguments
         # -ExecutionPolicy Bypass as for the copy it runs, so the check's Get-ExecutionPolicy sees
-        # only a policy Group Policy sets (wgt-gq8.39).
+        # only a policy Group Policy sets.
         $argumentString = ConvertTo-ProcessArgumentString -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', $verifierCommand)
     }
 
@@ -203,10 +165,8 @@ function Restart-WithElevation {
             return [pscustomobject]@{ Started = $false; ExitCode = 4 }
         }
 
-        # The PowerShell 7 bootstrap's relaunch-loop guard (Invoke-PowerShell7Bootstrap) is set in
-        # this process's environment. The elevated Windows PowerShell legitimately enters that
-        # bootstrap, so it must not inherit the guard, however Windows builds an elevated process's
-        # environment.
+        # The elevated Windows PowerShell legitimately enters the PowerShell 7 bootstrap, so it must
+        # not inherit this process's relaunch-loop guard.
         Remove-Item -Path Env:\WINGET_APP_SETUP_PS7_BOOTSTRAP -ErrorAction SilentlyContinue
 
         Write-Info 'Approve the administrator (UAC) prompt. The run continues in a new, elevated Windows PowerShell window, and this window waits for it to finish.'

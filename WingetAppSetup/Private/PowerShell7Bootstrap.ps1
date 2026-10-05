@@ -1,58 +1,29 @@
-# Windows PowerShell 5.1 bootstrap (issue #225). EVERYTHING in this file runs under Windows
-# PowerShell 5.1 - the one engine the rest of the module explicitly does not support - because the
-# tail dispatch calls it BEFORE handing off to PowerShell 7. Keep every statement 5.1-runtime
-# compatible: no ternary, no null-coalescing, no 3-argument Join-Path, only .NET Framework 4.x
-# APIs, and only helpers that are themselves 5.1-safe. Currently that is: Write-Info/
-# Write-WarningMessage/Write-ErrorMessage/Write-Success (plain Write-Host wrappers), Test-IsAdmin
-# and its Get-CurrentWindowsPrincipal seam (Public/Elevation.ps1, Private/Elevation.ps1 - a
-# try/catch and a type cast, issue #239), Get-WingetAgreementArgs (a literal array,
-# Private/WingetAgreementArgs.ps1, issue #240), and this file's own
-# Get-PowerShell7MsiInfo/Save-WebFileWithTimeout/Install-PowerShell7FromMsi (issue #263),
-# Test-GitHubRateLimitError (issue #274), Test-PowerShell7MsiSignature/
-# Get-InstallerBuildIdFromText/Get-PowerShell7RelaunchInstaller (review findings P3-17, P2-18),
-# and Invoke-WingetProcess with what it calls (Private/ProcessInvocation.ps1: Invoke-ExternalProcess,
-# Get-ProcessTimeoutSeconds and their helpers, written against .NET Framework 4.5;
-# Resolve-WingetExecutable, which returns 'winget' unless a SYSTEM run has resolved the machine-wide
-# winget.exe, and the 5.1-safe Private/MachineContext.ps1 helpers it can reach) for the winget
-# install (review findings P2-5/P2-6, P2-24), and Test-IsSystemAccount (Private/Elevation.ps1: a
-# try/catch around WindowsIdentity.GetCurrent()) when there is no winget command.
-# Get-AuthenticodeSignature, which Test-PowerShell7MsiSignature calls, is a Windows PowerShell 5.1
-# cmdlet too. The tail's 5.1 branch also calls, around this file:
-# Test-EffectiveNonInteractive (with Test-IsSystemAccount, Private/Elevation.ps1: a try/catch around
-# WindowsIdentity.GetCurrent(), review finding P3-23), Test-NonInteractiveRequested and
-# Test-IsContinuousIntegration
-# (Private/Interactivity.ps1),
-# Start-InstallerTranscript, Grant-InstallLogReadAccess and Write-Prompt (Private/LoggingInternal.ps1),
-# Exit-Installer, Write-InstallerExitNotice and Wait-InstallerExitKeyPress
-# (Private/FailureReporting.ps1) - review findings P2-13/P2-14/P3-14 - with the notice's
-# Write-InstallerReportHint and Get-DiagnosticsCommandLine (Private/Diagnostics.ps1, wgt-gq8.35),
-# and, through Exit-Installer, Complete-InstallerRun (Private/RunRecord.ps1), which in this phase has
-# nothing to report and only calls Unlock-InstallerRun (Private/RunLock.ps1), which has no lock to
-# release - review finding P3-41. Before this file, the tail's -CollectDiagnostics branch runs
-# Invoke-DiagnosticsCollection (Private/Diagnostics.ps1, wgt-gq8.35) under 5.1 as well; that file
-# lists the helpers it reaches and keeps to the same constraints.
-# Check any function added to this list - or any
-# future edit to one already on it - against the same constraints before calling it from here; the
-# build's parse + ASCII guards only catch a parse-breaking token, not a PS7-only runtime construct
-# that still parses under 5.1 but behaves differently or throws. The build's parse + ASCII guards
-# keep the assembled installer 5.1-PARSEABLE (issue #210); runtime compatibility of this file is
-# pinned by the unit tests in
-# tests/PowerShell7Bootstrap.Tests.ps1.
+# Windows PowerShell 5.1 bootstrap (issue #225). Everything in this file, and everything it and the
+# tail's 5.1 branch call, runs under Windows PowerShell 5.1 before the hand-off to PowerShell 7, so it
+# must stay 5.1-runtime compatible: no ternary or null-coalescing, no 3-argument Join-Path, .NET
+# Framework 4.x APIs only. That covers this file's functions and: Write-Info, Write-WarningMessage,
+# Write-ErrorMessage, Write-Success, Test-IsAdmin, Get-CurrentWindowsPrincipal, Test-IsSystemAccount,
+# Get-WingetAgreementArgs, Invoke-WingetProcess with Private/ProcessInvocation.ps1,
+# Resolve-WingetExecutable and the Private/MachineContext.ps1 helpers it reaches,
+# Get-ScriptExecutionPolicyBlock, Test-LaunchedByGroupPolicyScript, Test-FullLanguageMode,
+# Write-InstallerNotStartedResult, Test-EffectiveNonInteractive, Test-NonInteractiveRequested,
+# Test-IsContinuousIntegration, Start-InstallerTranscript, Grant-InstallLogReadAccess, Write-Prompt,
+# Exit-Installer, Write-InstallerExitNotice, Wait-InstallerExitKeyPress, Write-InstallerReportHint,
+# Get-DiagnosticsCommandLine, Complete-InstallerRun and Unlock-InstallerRun; and, for
+# -CollectDiagnostics, Invoke-DiagnosticsCollection and what Private/Diagnostics.ps1 lists. Check a
+# function against these constraints before calling it from here: the build's guards keep the file
+# 5.1-parseable, not 5.1-runnable. tests/PowerShell7Bootstrap.Tests.ps1 pins this file's behaviour.
 
 <#
 .SYNOPSIS
     Verifies a candidate pwsh executable actually launches and is version 7 or newer.
 .DESCRIPTION
-    Existence checks are not enough for either failure mode this guards (issue #225 review):
-    a PATH-resolved pwsh.exe can be PowerShell 6.x (EOL, but present on old golden images) -
-    relaunching under it would re-enter the version dispatch and loop forever - and the
-    WindowsApps execution alias is a 0-byte reparse file that passes Test-Path even when its
-    backing MSIX package is broken or removed. Running the candidate with a version query
-    validates launchability and version in one probe (a couple of seconds, only ever paid on
-    the 5.1 bootstrap path).
+    Existence is not enough: a pwsh.exe on PATH can be PowerShell 6 (relaunching under it would loop
+    through the version dispatch), and a WindowsApps alias passes Test-Path even when its package is
+    broken. One version query checks both.
 .PARAMETER Path
     Candidate executable path.
-.RETURNS
+.OUTPUTS
     [bool] True when the executable runs and reports PSVersion.Major 7 or newer.
 #>
 function Test-PowerShell7Executable {
@@ -74,15 +45,11 @@ function Test-PowerShell7Executable {
 .SYNOPSIS
     Locates a working PowerShell 7+ executable, or returns $null.
 .DESCRIPTION
-    Probes PATH first, then the well-known install locations. The explicit paths matter because
-    the current process's PATH is stale immediately after an install (a new PowerShell 7 install
-    updates the machine PATH, but running processes never see that), because a 32-bit host (some
-    RMM agents) has $env:ProgramFiles pointing at 'Program Files (x86)' while pwsh is 64-bit
-    (ProgramW6432 covers that), and because winget installs the MSIX build on Windows 11 24H2+,
-    which lands an execution alias under the user's WindowsApps instead of Program Files.
-    Every candidate must pass Test-PowerShell7Executable - existence alone proves neither
-    launchability nor version (see that function's help).
-.RETURNS
+    PATH first, then the known install locations: this process's PATH is stale right after an
+    install, a 32-bit host (some RMM agents) sees 'Program Files (x86)' as ProgramFiles (hence
+    ProgramW6432), and the MSIX build lands an alias under the user's WindowsApps. Every candidate
+    must pass Test-PowerShell7Executable.
+.OUTPUTS
     [string] Full path to a validated pwsh.exe, or $null when PowerShell 7 is not available.
 #>
 function Find-PowerShell7 {
@@ -113,16 +80,11 @@ function Find-PowerShell7 {
 
 <#
 .SYNOPSIS
-    Tests whether an error looks like a GitHub rate-limit / throttling response.
-.DESCRIPTION
-    The MSI fallback's metadata.json read below surfaces the underlying exception text verbatim via
-    Write-WarningMessage, which is where a throttled machine actually sees
-    "429: Too Many Requests" or "(429) Too Many Requests" (issue #274). Matching that text is
-    how the caller distinguishes "GitHub is throttling this network" from any other network
-    failure without parsing a structured status code out of a caught ErrorRecord.
+    Tests whether an error looks like GitHub's rate limiting ("429" / "Too Many Requests" in its
+    text, issue #274), to tell throttling apart from any other network failure.
 .PARAMETER ErrorRecord
     The $_ caught from a failed Invoke-RestMethod call.
-.RETURNS
+.OUTPUTS
     [bool] True when the error text mentions HTTP 429 / "Too Many Requests".
 #>
 function Test-GitHubRateLimitError {
@@ -137,31 +99,18 @@ function Test-GitHubRateLimitError {
 .SYNOPSIS
     Resolves a PowerShell 7 release that ships an MSI into an MSI download URL for this machine.
 .DESCRIPTION
-    Reads the same tools/metadata.json the official aka.ms/install-powershell.ps1 script reads
-    (issue #263), so the direct-download path below tracks whatever Microsoft currently ships
-    without this repo pinning a version that would go stale. That endpoint is a raw.githubusercontent
-    file rather than the GitHub releases API on purpose: the API's unauthenticated 60-requests-per-
-    hour budget is per source IP, which an office behind one NAT can exhaust for everyone.
-
-    Which release (review finding P2-17): the current one (ReleaseTag) while it still ships an MSI,
-    otherwise the newest LTS release (LTSReleaseTag) that does. PowerShell 7.7 and later ship no MSI,
-    only the MSIX bundle and ZIP files (the PowerShell team's "PowerShell MSI package deprecation"
-    post; 7.7.0-preview.5 has no .msi asset), while 7.6, an LTS release, keeps its MSI for its
-    support life. Building the URL from ReleaseTag alone would 404 as soon as ReleaseTag moves to
-    7.7, and when the elevating admin account has no winget this MSI is the only way the bootstrap
-    can install PowerShell 7. Any PowerShell 7 can run the installer. LTSReleaseTag is a list
-    (["v7.4.20", "v7.6.6"] in October 2026), so the newest entry is picked by version, not position.
-
-    Architecture comes from the environment rather than Get-ComputerInfo (which the upstream script
-    uses): Get-ComputerInfo takes seconds to populate every property just to read one, and it does
-    not exist before PowerShell 5.1. PROCESSOR_ARCHITEW6432 is checked first because a 32-bit host
-    process (some RMM agents) reports PROCESSOR_ARCHITECTURE as x86 on a 64-bit OS - the same
-    stale-view problem Find-PowerShell7 handles with ProgramW6432.
+    Reads tools/metadata.json, as aka.ms/install-powershell.ps1 does (issue #263), so no version is
+    pinned here; a raw.githubusercontent.com file, not the releases API, whose 60 requests an hour
+    per IP an office NAT can use up. The current release (ReleaseTag) while it ships an MSI,
+    otherwise the newest LTS release that does (P2-17): 7.7 and later ship no MSI, while 7.6 LTS
+    keeps one. LTSReleaseTag is a list, so the newest is picked by version. The architecture comes
+    from PROCESSOR_ARCHITEW6432, then PROCESSOR_ARCHITECTURE (a 32-bit host sees x86 on 64-bit
+    Windows), not the slow Get-ComputerInfo.
 .PARAMETER MetadataUrl
     Release metadata endpoint. Parameterized for tests.
 .PARAMETER TimeoutSeconds
     Maximum seconds to wait for the metadata request.
-.RETURNS
+.OUTPUTS
     [hashtable] @{ Version; FileName; Url }, or $null when the metadata could not be read, lists no
     release that ships an MSI, or the architecture is unknown.
 #>
@@ -241,16 +190,10 @@ function Get-PowerShell7MsiInfo {
 .SYNOPSIS
     Downloads a URL to a file with a stall timeout, an overall time limit, and progress output.
 .DESCRIPTION
-    The reason this exists instead of Invoke-WebRequest -OutFile (issue #263). Under Windows
-    PowerShell 5.1 - the only engine this file ever runs on - Invoke-WebRequest has no read timeout,
-    so a proxy or link that accepts the connection and then stops sending blocks the pipeline
-    forever with no output and no error. That is exactly how the old MSI fallback failed: a 110 MB
-    download behind a suppressed progress bar was indistinguishable from a dead one.
-
-    HttpWebRequest's ReadWriteTimeout bounds every individual read on the response stream, which is
-    the guarantee Invoke-WebRequest cannot give. -MaximumSeconds additionally bounds a link that
-    trickles just fast enough to never trip the stall timeout, and the periodic progress line makes
-    a healthy slow download visibly different from a hung one.
+    Under Windows PowerShell 5.1, Invoke-WebRequest has no read timeout, so a link that stops
+    sending blocks forever with no output (issue #263). HttpWebRequest's ReadWriteTimeout bounds
+    each read, -MaximumSeconds bounds a trickle that never stalls, and a progress line tells a slow
+    download from a hung one.
 .PARAMETER Uri
     Source URL.
 .PARAMETER DestinationPath
@@ -262,7 +205,7 @@ function Get-PowerShell7MsiInfo {
     Maximum total seconds for the whole download.
 .PARAMETER ProgressIntervalSeconds
     How often to print a progress line.
-.RETURNS
+.OUTPUTS
     [bool] True when the file was written completely.
 #>
 function Save-WebFileWithTimeout {
@@ -359,21 +302,12 @@ function Save-WebFileWithTimeout {
 .SYNOPSIS
     Tests that a downloaded PowerShell MSI carries a valid Authenticode signature from Microsoft.
 .DESCRIPTION
-    Review finding P3-17. The MSI goes to msiexec, usually elevated, and msiexec installs an
-    unsigned or altered package without complaint. Checking the signature first keeps a substituted
-    file (from a TLS-inspecting proxy, or a swapped release asset) off the machine, and turns a
-    download that is not an MSI at all, such as an error or sign-in page a proxy answered with,
-    into a clear message instead of msiexec's exit code 1620 ("This installation package could not
-    be opened").
-
-    Status 'Valid' means Windows checked the signature against the file's content and chained the
-    signing certificate to a trusted root. The signer must also be Microsoft: the certificate
-    subject's common name must be exactly 'Microsoft Corporation', the name PowerShell's release
-    packages are signed with. Get-AuthenticodeSignature exists in Windows PowerShell 5.1, the
-    engine this runs on.
+    msiexec, usually elevated, installs an altered package without complaint (P3-17), and a proxy's
+    error page would only give msiexec's 1620. Status 'Valid' (matches the content, chains to a
+    trusted root) and a certificate common name of exactly 'Microsoft Corporation'.
 .PARAMETER Path
     The downloaded MSI.
-.RETURNS
+.OUTPUTS
     [bool] True when the signature is valid and Microsoft's.
 #>
 function Test-PowerShell7MsiSignature {
@@ -412,34 +346,16 @@ function Test-PowerShell7MsiSignature {
 .SYNOPSIS
     Installs PowerShell 7 by downloading the official MSI and running msiexec, all time-bounded.
 .DESCRIPTION
-    Replaces blind delegation to aka.ms/install-powershell.ps1 -UseMSI -Quiet as the fallback when
-    winget is unavailable (issue #263). That script is opaque and unbounded: it suppresses the
-    progress bar on Windows PowerShell, downloads with an untimed Invoke-WebRequest, logs its install
-    step through a Write-Verbose that never prints, and waits on msiexec forever. Doing the same two
-    steps here buys the three things this bootstrap needs to stay honest on an unattended run -
-    visible progress, a bounded download, and a bounded install - plus a check that the download is
-    Microsoft's signed MSI before msiexec sees it (Test-PowerShell7MsiSignature, review finding
-    P3-17).
-
-    Exit code 3010 (ERROR_SUCCESS_REBOOT_REQUIRED) counts as success: pwsh.exe is on disk and
-    launchable at that point, and the relaunch does not need the pending reboot. It still sets
-    $script:PowerShell7BootstrapRestartRequired, so Invoke-PowerShell7Bootstrap ends a run that
-    otherwise succeeded with 3010 (review finding P3-16): the relaunched run checks Windows'
-    pending-restart state only after this install, so it cannot see the restart this install needs.
-
-    Exit code 1618 (ERROR_INSTALL_ALREADY_RUNNING) is retried after a wait (review finding P2-13).
-    msiexec returns it at once, without waiting, whenever another installation holds the Windows
-    Installer - common on a freshly enrolled machine whose management agent, OEM tools or Teams are
-    still installing. It used to fail the bootstrap on the spot.
-
-    With -MsiLogDirectory, msiexec writes a verbose log (/l*v) there, one file per attempt, so a
-    failed install can be diagnosed from the logs folder the teammate attaches.
-
-    Nothing runs after this path any more: the aka.ms/install-powershell.ps1 tier is gone (see
-    Invoke-PowerShell7Bootstrap). That script had no time limits at all, so on a slow but working
-    link it could finish a download this path had given up on. The download limit here is
-    therefore generous (-DownloadTimeoutSeconds, 60 minutes, about 30 KB/s for the 110 MB MSI); the
-    60-second stall timeout in Save-WebFileWithTimeout is what catches a dead or hung link.
+    The fallback when winget is unavailable (issue #263): visible progress, a bounded download, a
+    bounded install, and Microsoft's signature checked before msiexec sees the file
+    (Test-PowerShell7MsiSignature).
+      - 3010 counts as success (pwsh.exe is there) and sets $script:PowerShell7BootstrapRestartRequired,
+        so the bootstrap ends a successful run with 3010: the relaunched run cannot see this restart.
+      - 1618 (another installation holds Windows Installer, common on a new PC) is retried after a
+        wait (P2-13).
+      - -MsiLogDirectory gets msiexec's verbose log (/l*v), one file per attempt.
+    Nothing runs after this path, so its download limit is generous (60 minutes, about 30 KB/s for
+    110 MB); the 60-second stall timeout catches a dead link.
 .PARAMETER MetadataUrl
     Forwarded to Get-PowerShell7MsiInfo. Parameterized for tests.
 .PARAMETER DownloadTimeoutSeconds
@@ -447,18 +363,16 @@ function Test-PowerShell7MsiSignature {
     -MaximumSeconds. A link that is slow but still delivering data gets this long; one that stops
     delivering data fails after the 60-second stall timeout instead.
 .PARAMETER InstallTimeoutSeconds
-    Maximum seconds to wait for one msiexec attempt before killing it. Another installation in
-    progress does not make msiexec wait (it returns 1618, see above), so reaching this limit means
-    msiexec itself hung.
+    Maximum seconds for one msiexec attempt before it is killed. msiexec does not wait for another
+    installation (it returns 1618), so reaching this means it hung.
 .PARAMETER MsiLogDirectory
     Folder for msiexec's verbose logs, named pwsh-msi-<timestamp>-<attempt>.log. Empty: no msiexec
-    log. The caller passes the folder its own transcript is in, which this account can write to;
-    msiexec fails the whole install (1622) when it cannot open its log.
+    log. msiexec fails the whole install (1622) when it cannot open its log.
 .PARAMETER BusyRetryCount
     How many times to retry after msiexec exit code 1618.
 .PARAMETER BusyRetryDelaySeconds
     Seconds to wait before each of those retries.
-.RETURNS
+.OUTPUTS
     [bool] True when msiexec reported success (0 or 3010).
 #>
 function Install-PowerShell7FromMsi {
@@ -573,15 +487,12 @@ function Install-PowerShell7FromMsi {
 
 <#
 .SYNOPSIS
-    Reads the build id stamped into a copy of the generated installer.
-.DESCRIPTION
-    build/Build-WingetInstallScript.ps1 stamps the content-derived id into the installer as a line
-    of its own that assigns it to $script:InstallerBuildId (issue #189). Only a line that starts
-    with that assignment counts, so this file's own code, which mentions the variable indented,
-    never reads as one.
+    Reads the build id stamped into a copy of the generated installer: a line of its own that starts
+    with the $script:InstallerBuildId assignment (issue #189), so indented code mentioning the
+    variable never counts.
 .PARAMETER Text
     The installer text.
-.RETURNS
+.OUTPUTS
     [string] The build id, or $null when the text carries none (it is not the installer).
 #>
 function Get-InstallerBuildIdFromText {
@@ -604,25 +515,17 @@ function Get-InstallerBuildIdFromText {
 .SYNOPSIS
     Downloads the running installer build again, for the PowerShell 7 relaunch of an irm | iex run.
 .DESCRIPTION
-    Review finding P2-18. An irm | iex run has no file to relaunch under pwsh, so the bootstrap
-    downloads the installer again. It used to fetch raw main only, whatever URL the run started
-    from, and run whatever came back. Three things went wrong with that:
-      - The jsDelivr mirror the readme offers for raw.githubusercontent.com's 429 throttling only
-        served the first copy: the relaunch went back to the throttled host and failed.
-      - A run started from a branch URL silently relaunched main's code.
-      - Nothing checked that the second copy was the installer at all.
-
-    Each URL is tried in order, and a copy is used only when it is the build that is already
-    running. The installer itself cannot say which URL it came from, so the build id is what ties
-    the two copies together: a branch build, or a main that changed since the run started, is
-    refused instead of run.
+    An irm | iex run has no file to relaunch, so it downloads the installer again (P2-18). Each URL
+    is tried in order (raw.githubusercontent.com, then the jsDelivr mirror for its throttling), and a
+    copy is used only when its build id is the running build's, so a branch run never relaunches
+    main's code and an error page is never run.
 .PARAMETER Url
     URLs to try, in order.
 .PARAMETER ExpectedBuildId
     The running installer's build id. Empty: any copy that carries a build id is accepted.
 .PARAMETER TimeoutSeconds
     Maximum seconds to wait for each download.
-.RETURNS
+.OUTPUTS
     [string] The installer text, or $null when no URL served the expected build.
 #>
 function Get-PowerShell7RelaunchInstaller {
@@ -663,59 +566,31 @@ function Get-PowerShell7RelaunchInstaller {
 .SYNOPSIS
     Finds or installs PowerShell 7, then relaunches the installer under pwsh in the same console.
 .DESCRIPTION
-    The generated installer requires PowerShell 7+, but new machines ship with only Windows
-    PowerShell 5.1 (issue #225). Instead of failing fast with manual instructions (the pre-#225
-    behavior from issue #210), this bootstrap makes the documented one-liner work from any
-    PowerShell prompt:
+    New PCs have only Windows PowerShell 5.1, so the one-liner bootstraps from it (issue #225):
+      1. An existing pwsh.exe (Find-PowerShell7) is used at once.
+      2. Otherwise it is installed, without asking (issue #230): winget first; when winget is absent
+         or fails, the signed MSI (Install-PowerShell7FromMsi). -WhatIf previews instead.
+      3. The installer is relaunched under pwsh -NoProfile -ExecutionPolicy Bypass in the same
+         console, with the caller's switches, and the child's exit code is returned.
+    A file-based run relaunches its own $PSCommandPath (so a PR's e2e run tests the PR's bytes). An
+    irm | iex run has no file, and under iex $MyInvocation holds the outer command line, not the
+    script, so the installer is downloaded again and only the same build is used
+    (Get-PowerShell7RelaunchInstaller). Its temp folder is removed once the relaunched run ends
+    (P3-42); an elevated relaunch runs a checked copy (P3-11).
 
-        1. Find an existing pwsh.exe (Find-PowerShell7). Present -> relaunch immediately; this
-           alone fixes the "opened the built-in Windows PowerShell out of habit" case.
-        2. Missing -> install it, no consent prompt (issue #230): winget first (an exe,
-           version-agnostic, preinstalled on consumer Windows 11); when winget is absent or fails,
-           the official MSI, downloaded, signature-checked and run directly by
-           Install-PowerShell7FromMsi (issue #263). -WhatIf never installs anything and previews
-           the plan instead.
-        3. Relaunch the installer under pwsh with -NoProfile -ExecutionPolicy Bypass in the SAME
-           console (output and prompts stay in the caller's window), forwarding the caller's
-           switches, and return the child's exit code for the tail dispatch to propagate.
-
-    Relaunch source: a file-based run relaunches the caller's own $PSCommandPath (so a PR's e2e
-    run keeps testing the PR's bytes). An `irm | iex` run has no file on disk, and the in-memory
-    text is NOT recoverable - under iex, $MyInvocation.MyCommand.Definition/.ScriptBlock reflect
-    the OUTER command line, not the piped script body (verified empirically) - so the installer is
-    downloaded again to a temp file, from raw.githubusercontent.com or else its jsDelivr mirror, and
-    only a copy of the running build is used (Get-PowerShell7RelaunchInstaller, review finding
-    P2-18). A non-admin relaunch elevates from it: the elevated window checks it against the SHA256
-    the relaunched run took at startup and runs a copy kept in a folder only administrators can
-    change (Restart-WithElevation, review finding P3-11). The temp folder is removed once the
-    relaunched run has ended (review finding P3-42): nothing reads it after that, because the
-    relaunched run waits for an elevated run it starts, and that run reads the file once at its
-    start. A folder left behind by a bootstrap that was stopped is removed by a later run
-    (Invoke-InstallerHousekeeping).
-
-    There is no aka.ms/install-powershell.ps1 tier behind the MSI any more (review findings P2-17
-    and P3-17). That script reads the same metadata.json and downloads the same MSI with no
-    signature check, so it would install an MSI the signature check had just rejected, and it runs
-    a downloaded script with no check at all. Once the current release is 7.7 it 404s, because it
-    can only build the URL from ReleaseTag. The one thing it could do that the MSI path could not
-    was outlast a time limit, because it has none: its download and its msiexec run are unbounded.
-    So the MSI path's download limit is 60 minutes, not 15, with the 60-second stall timeout still
-    catching a dead link (Install-PowerShell7FromMsi -DownloadTimeoutSeconds). Its 15-minute msiexec
-    limit stays: the PowerShell MSI installs in about a minute, so an msiexec run still going after
-    15 minutes is treated as hung rather than given a second, unbounded attempt.
+    No aka.ms/install-powershell.ps1 fallback (P2-17, P3-17): it skips the signature check, runs an
+    unchecked script, has no time limits, and 404s once the current release is 7.7.
 .PARAMETER WhatIf
     Dry-run intent, forwarded to the relaunch. When PowerShell 7 is missing, the bootstrap prints
     what a real run would do and returns 0 without installing anything.
 .PARAMETER NonInteractive
-    Forwarded to the relaunch, and nothing else. Since issue #230 this function has no interactive
-    behavior of its own to gate: the install proceeds without asking, and its winget call always
+    Forwarded to the relaunch, and nothing else: the install never asks, and its winget call always
     passes --disable-interactivity.
 .PARAMETER SkipSystemCheck
     Forwarded to the relaunch untouched.
 .PARAMETER CommandPath
-    The caller's $PSCommandPath. Empty when running via `irm | iex`, which triggers the
-    re-download relaunch path. ($PSCommandPath cannot be read here directly - inside a function it
-    resolves to the file that defines the function, not the running script.)
+    The caller's $PSCommandPath (inside a function it would name this file). Empty under
+    `irm | iex`, which takes the download path.
 .PARAMETER InstallerUrl
     URLs the iex relaunch path downloads the installer from, tried in order: by default the
     one-liner's raw.githubusercontent.com URL, then the jsDelivr mirror the readme offers when raw
@@ -724,23 +599,16 @@ function Get-PowerShell7RelaunchInstaller {
     The running installer's build id ($script:InstallerBuildId). The iex relaunch path uses only a
     download of this same build.
 .PARAMETER LogDirectory
-    The folder of the bootstrap transcript the tail started, or empty when it could not start one.
-    Forwarded to Install-PowerShell7FromMsi for msiexec's verbose log (review finding P2-13), and to
-    the winget install for the installer's log (--log, review finding P2-6).
-.RETURNS
+    The bootstrap transcript's folder, or empty. Forwarded to Install-PowerShell7FromMsi for
+    msiexec's log, and to the winget install for its --log.
+.OUTPUTS
     [int] Exit code for the tail dispatch to propagate: the relaunched run's exit code, 0 for a
-    -WhatIf preview of a would-be install or of a relaunch Group Policy would refuse, or 7 when
-    PowerShell 7 could not be installed or the installer could not be relaunched under it, which
-    includes a Group Policy execution policy for PowerShell 7 of AllSigned or Restricted
-    (Get-ScriptExecutionPolicyBlock, checked before anything is installed; wgt-gq8.39). When
-    installing PowerShell 7 needs a restart to finish (msiexec 3010, or winget's restart result, see
-    Test-WingetRestartRequiredResult) and the relaunched run returned 0, the result is 3010 (review
-    finding P3-16): that run checks Windows' pending-restart state only after this install, so it
-    cannot see this restart itself. Any other code the relaunched run returned is kept: a failure at
-    the end of the run ranks above 3010, and an early exit stays what it is.
-    Sets
-    $script:PowerShell7BootstrapRelaunched to $true once a relaunched PowerShell 7 run has ended,
-    so the tail knows that run already reported its outcome to whoever is at the console.
+    -WhatIf preview, or 7 when PowerShell 7 could not be installed or relaunched (including a Group
+    Policy execution policy for PowerShell 7 of AllSigned or Restricted, checked before anything is
+    installed). When installing PowerShell 7 needs a restart and the relaunched run returned 0, the
+    result is 3010, since that run cannot see this restart; any other code it returned is kept.
+    Sets $script:PowerShell7BootstrapRelaunched once a relaunched run has ended, so the tail knows
+    that run already showed its outcome.
 #>
 function Invoke-PowerShell7Bootstrap {
     param (
@@ -767,20 +635,16 @@ function Invoke-PowerShell7Bootstrap {
 
     Write-WarningMessage 'This installer requires PowerShell 7+ (pwsh), but this session is Windows PowerShell. Handing off...'
 
-    # Relaunch-loop guard: this env var is set just before the relaunch below and is inherited by
-    # the child, so reaching this line with it already set means a bootstrapped child re-entered
-    # the version dispatch - Test-PowerShell7Executable should make that impossible, but if the
-    # machine's pwsh is that broken, fail fast instead of spawning processes forever.
+    # Relaunch-loop guard: set before the relaunch and inherited by the child, so seeing it here
+    # means a relaunched child came back to the version dispatch. Fail fast instead of looping.
     if ($env:WINGET_APP_SETUP_PS7_BOOTSTRAP -eq '1') {
         Write-ErrorMessage 'The PowerShell 7 bootstrap re-entered itself after a relaunch: the relaunched PowerShell still reports a version below 7. Install PowerShell 7 manually (winget install Microsoft.PowerShell) and re-run this installer from a pwsh prompt.'
         return 7
     }
 
-    # The relaunch below runs the installer with pwsh -ExecutionPolicy Bypass -File, and Group
-    # Policy's PowerShell 7 execution policy overrides -ExecutionPolicy (wgt-gq8.39). Under
-    # AllSigned or Restricted pwsh refuses the file and the run ended with pwsh's own error and a
-    # misleading exit code, after PowerShell 7 may have been installed for nothing. Checked first,
-    # before anything is installed; both scopes count, since the relaunch runs as this same account.
+    # Group Policy's PowerShell 7 execution policy overrides the relaunch's -ExecutionPolicy Bypass;
+    # under AllSigned or Restricted pwsh would refuse the file. Checked before anything is installed,
+    # both scopes, since the relaunch runs as this same account.
     $relaunchPolicyBlock = Get-ScriptExecutionPolicyBlock -Engine PowerShell7
     if ($relaunchPolicyBlock) {
         $policyMessage = '{0}, which -ExecutionPolicy Bypass on the command line cannot override, so PowerShell 7 cannot run this installer from a file, and the run cannot continue in PowerShell 7. Ask whoever manages this PC''s policies to allow scripts ({1}), then re-run the installer.' -f $relaunchPolicyBlock.Description, $relaunchPolicyBlock.GroupPolicyPath
@@ -792,10 +656,8 @@ function Invoke-PowerShell7Bootstrap {
         return 7
     }
 
-    # Reset per-call, not per-process: this flag is set deep in Get-PowerShell7MsiInfo and read
-    # back at the terminal failure message further down (issue #274). Without
-    # the reset here, a throttled call would leave a stale $true that a later, unrelated call in
-    # the same process (or Pester run) could inherit.
+    # Reset per call: set deep in Get-PowerShell7MsiInfo and read by the failure message below
+    # (issue #274), so a later call in the same process must not inherit it.
     $script:PowerShell7BootstrapGitHubThrottled = $false
     # Set by the PowerShell 7 install below when it needs a restart to finish; reset per call for
     # the same reason.
@@ -818,18 +680,11 @@ function Invoke-PowerShell7Bootstrap {
             return 0
         }
 
-        # No consent prompt (issue #230). PowerShell 7 is a hard requirement of everything below,
-        # so the question only ever had one useful answer - and asking it stalled the documented
-        # one-liner: an interactive `irm | iex` does not redirect stdin, so the session read as
-        # interactive and the prompt fired. This function no longer consults the interactivity
-        # detection at all; -NonInteractive survives here purely to be forwarded to the relaunch.
+        # No consent prompt (issue #230): PowerShell 7 is required, and the prompt stalled the
+        # one-liner. -NonInteractive is only forwarded to the relaunch.
         Write-Info 'PowerShell 7 (pwsh) is required but not installed. Installing it now...'
 
-        # The bootstrap runs before the module's elevation logic ever loads; a machine-wide
-        # PowerShell 7 install from a non-admin session may surface a UAC prompt or fail outright.
-        # Warn and let it ride - Test-IsAdmin (WingetAppSetup/Public/Elevation.ps1) already fails
-        # safe (assumes elevated) if the underlying check throws, which is what kept this call
-        # site's own try/catch runnable on non-Windows test hosts before consolidation.
+        # Not elevated, a machine-wide install may show a UAC prompt or fail: warn and go on.
         $isAdmin = Test-IsAdmin
         if (-not $isAdmin) {
             Write-WarningMessage 'Not running as administrator: the PowerShell 7 install may show a UAC prompt or fail. If it fails, re-run this installer from an elevated prompt.'
@@ -838,13 +693,9 @@ function Invoke-PowerShell7Bootstrap {
         $wingetCommand = Get-Command -Name 'winget' -CommandType Application -ErrorAction SilentlyContinue
         if ($wingetCommand) {
             Write-Info 'Installing PowerShell 7 via winget...'
-            # --disable-interactivity unconditionally (issue #230). It used to be added only when
-            # the session read as non-interactive, which is exactly backwards for the case that
-            # matters: the documented one-liner reports INTERACTIVE (an `irm | iex` pipe leaves
-            # stdin alone), so the run most likely to be walked away from was the one run that let
-            # winget stop and ask. Nothing here needs winget's UI - the agreements are accepted by
-            # flag, and a failure falls through to the MSI fallback below. The shared flags come
-            # from Get-WingetAgreementArgs so this call site cannot drift from the others again.
+            # --disable-interactivity always (issue #230): the one-liner reads as interactive, so it
+            # was the run most likely to let winget stop and ask. Get-WingetAgreementArgs keeps this
+            # call in line with the others.
             $wingetArguments = @('install', '--id', 'Microsoft.PowerShell', '--exact', '--source', 'winget') + (Get-WingetAgreementArgs)
             if (Test-EffectiveNonInteractive -NonInteractive:$NonInteractive) {
                 # Unattended: the MSI installs with /quiet instead of /passive.
@@ -879,10 +730,8 @@ function Invoke-PowerShell7Bootstrap {
             $pwshPath = Find-PowerShell7
         }
         elseif (Test-IsSystemAccount) {
-            # SYSTEM, as under an RMM agent, has no `winget` command even where App Installer is
-            # installed for the PC: winget is set up per user account (review of finding P2-24).
-            # Saying winget is not on the machine contradicted the main run, which goes on to find
-            # the machine-wide winget.exe. Using that winget.exe here too is a follow-up.
+            # SYSTEM has no `winget` command (winget is set up per user account). Using the
+            # machine-wide winget.exe here too is a follow-up.
             Write-Info 'Running as SYSTEM, which has no winget command of its own (winget is set up for each user account), so PowerShell 7 is installed without winget.'
         }
         else {
@@ -890,11 +739,8 @@ function Invoke-PowerShell7Bootstrap {
         }
 
         if (-not $pwshPath) {
-            # The direct MSI download, with progress, time limits and a signature check (issue
-            # #263, review finding P3-17). Nothing follows it: see the help above for why the
-            # aka.ms/install-powershell.ps1 tier is gone. PowerShell 7 is looked for again even
-            # when this reports failure, in case msiexec installed it before failing or being
-            # stopped.
+            # The signed MSI, with progress and time limits; nothing follows it. PowerShell 7 is
+            # looked for again even after a failure, in case msiexec installed it anyway.
             Write-Info 'Falling back to the official PowerShell MSI installer...'
             [void](Install-PowerShell7FromMsi -MsiLogDirectory $LogDirectory)
             $pwshPath = Find-PowerShell7
@@ -902,10 +748,8 @@ function Invoke-PowerShell7Bootstrap {
 
         if (-not $pwshPath) {
             if ($script:PowerShell7BootstrapGitHubThrottled) {
-                # winget already failed by construction (this branch is only reached after it did),
-                # so pointing at 'source reset' costs nothing even when that is not the actual root
-                # cause - unlike the MSI path above, it does not depend on the same throttled
-                # network path (issue #274).
+                # winget already failed, so pointing at 'source reset' costs nothing, and that path
+                # does not depend on GitHub (issue #274).
                 Write-ErrorMessage 'PowerShell 7 could not be installed automatically: GitHub is rate-limiting this network (429 Too Many Requests), and the MSI fallback reads its release list from GitHub. If winget failed above with a source error, try "winget source reset --force" and re-run - that path does not depend on GitHub. Otherwise wait a while for the throttle to clear, or install PowerShell 7 manually (winget install Microsoft.PowerShell, or see https://aka.ms/powershell) from a machine on a different network.'
             }
             else {
@@ -933,13 +777,9 @@ function Invoke-PowerShell7Bootstrap {
             return 7
         }
         try {
-            # Unique per-run directory (issue #225 review): a fixed temp filename could be
-            # pre-planted or swapped by another same-user process before the relaunch - which
-            # matters extra here because the relaunched run may self-elevate from this very path -
-            # and concurrent runs would overwrite each other. A fresh GUID-named directory removes
-            # predictability and cross-run collisions. The file stays writable by this user, so an
-            # elevated relaunch never runs it directly: it runs a copy checked against the SHA256
-            # the relaunched run took at startup (Restart-WithElevation, review finding P3-11).
+            # A fresh GUID-named folder, so the file cannot be planted in advance or collide with
+            # another run. It stays writable by this user, so an elevated relaunch runs a copy
+            # checked against the SHA256 the relaunched run takes at startup (P3-11).
             $relaunchDirectory = Join-Path ([System.IO.Path]::GetTempPath()) ('winget-app-setup-' + [System.Guid]::NewGuid().ToString('N'))
             [void](New-Item -Path $relaunchDirectory -ItemType Directory -Force -ErrorAction Stop)
             $relaunchPath = Join-Path $relaunchDirectory 'winget-app-install.ps1'
@@ -1000,10 +840,8 @@ function Invoke-PowerShell7Bootstrap {
     Write-Info ('The PowerShell 7 run ended with exit code {0}.' -f $relaunchProcess.ExitCode)
     $relaunchExitCode = $relaunchProcess.ExitCode
     if ($script:PowerShell7BootstrapRestartRequired) {
-        # The relaunched run read Windows' pending-restart state after the PowerShell 7 install
-        # above, so it took this restart as already pending and did not report it (review finding
-        # P3-16). Repeated here, after that run's summary, and turned into 3010 when nothing else
-        # went wrong.
+        # The relaunched run took this restart as already pending (it checked after the install),
+        # so it is reported here and made 3010 when nothing else went wrong (P3-16).
         Write-WarningMessage 'Restart: REQUIRED to finish the PowerShell 7 installation - restart this PC before it is used.'
         if ($relaunchExitCode -eq 0) {
             Write-Info 'Exit code 3010: the apps installed, and the PowerShell 7 installation needs a restart to finish.'

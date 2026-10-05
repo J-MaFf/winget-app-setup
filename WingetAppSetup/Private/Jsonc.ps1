@@ -1,28 +1,16 @@
 <#
 .SYNOPSIS
-    Converts JSONC (JSON with comments) text to strict JSON.
+    Converts JSONC (JSON with comments) text to strict JSON, for Windows Terminal's settings.json.
 .DESCRIPTION
-    Character-scanner sanitizer for Windows Terminal settings files, which commonly carry
-    // line comments (including trailing inline ones), /* */ block comments (possibly
-    spanning lines), and trailing commas. The previous regex approach (issue #187) missed
-    trailing inline comments and could corrupt string values containing comment-like
-    sequences such as "/*" or "//". Set-WindowsTerminalDefaultProfile parses settings.json
-    with it to read defaultProfile and to validate its own edit of the file.
-
-    The scanner tracks JSON string state (honoring backslash escapes like \" and \\), so
-    comment markers and commas inside string values are never touched. Outside strings it:
-      - drops // comments up to (not including) the end-of-line, and
-      - drops /* */ comments, spanning lines, replaced with a single space so adjacent
-        tokens cannot fuse, and
-      - drops a trailing comma whose next non-whitespace character is '}' or ']'
-        (whitespace between comma and closer is preserved).
-
-    Comment stripping and trailing-comma removal run as two passes so a comma separated
-    from its closing brace only by a comment ("1, /* c */ }") is still removed.
+    A character scanner that tracks JSON strings (with their backslash escapes), so comment
+    markers and commas inside a string are never touched (a regex could not, issue #187). Outside
+    strings it drops // comments up to the end of the line, drops /* */ comments (replaced by one
+    space so tokens cannot fuse), and then, in a second pass, drops a comma whose next
+    non-whitespace character is '}' or ']', so "1, /* c */ }" loses its comma too.
 .PARAMETER JsonText
     JSONC text to sanitize.
-.RETURNS
-    [string] Strict-JSON text suitable for ConvertFrom-Json on Windows PowerShell 5.1.
+.OUTPUTS
+    [string] Strict JSON that ConvertFrom-Json on Windows PowerShell 5.1 accepts.
 #>
 function Convert-JsoncToJson {
     param (
@@ -146,20 +134,14 @@ function Convert-JsoncToJson {
 
 <#
 .SYNOPSIS
-    Attempts to parse Windows Terminal settings content, including JSONC variants.
+    Parses Windows Terminal settings content, JSONC included.
 .DESCRIPTION
-    Tries ConvertFrom-Json first (PowerShell 7+ tolerates JSONC natively). If parsing
-    fails — Windows PowerShell 5.1 rejects comments and trailing commas — sanitizes the
-    text with the string-aware Convert-JsoncToJson scanner and retries. The previous
-    regex sanitizer missed trailing inline // comments and could corrupt string values
-    containing comment-like sequences (issue #187).
-
-    Private (issue #191): only the module's Windows Terminal configuration functions call
-    this; no standalone script consumes it.
+    ConvertFrom-Json first (PowerShell 7 accepts JSONC); when that fails, as on Windows PowerShell
+    5.1, the text is sanitized with Convert-JsoncToJson and parsed again.
 .PARAMETER JsonText
     Raw settings content.
-.RETURNS
-    Parsed settings object when successful; otherwise $null.
+.OUTPUTS
+    The parsed settings object, or $null.
 #>
 function ConvertFrom-TerminalSettingsJson {
     param (
@@ -194,17 +176,15 @@ function ConvertFrom-TerminalSettingsJson {
 .SYNOPSIS
     Splits JSONC text into its JSON tokens, skipping whitespace and comments.
 .DESCRIPTION
-    Each token records its kind ('{', '}', '[', ']', ':', ',', 'String' or 'Literal' for
-    true/false/null/numbers), where it starts, where it ends (exclusive) and its nesting depth:
-    the root object's braces are at depth 0 and its own keys and values at depth 1. String
-    tokens include their quotes and honor backslash escapes, so comment markers inside strings
-    are never mistaken for comments. Comments follow the same rules as Convert-JsoncToJson
-    (an unterminated /* runs to the end of the text). The tokens are positions in the original
-    text, which lets Set-JsoncTopLevelStringProperty edit one value and leave every other byte
-    alone. No validation is done: invalid JSON still yields tokens.
+    Each token has its kind ('{', '}', '[', ']', ':', ',', 'String', or 'Literal' for
+    true/false/null/numbers), its start and (exclusive) end in the original text, and its depth:
+    the root object's braces are at 0 and its keys and values at 1. Strings keep their quotes and
+    escapes; comments follow Convert-JsoncToJson's rules (an unterminated /* runs to the end).
+    Positions let Set-JsoncTopLevelStringProperty edit one value and leave every other byte alone.
+    Nothing is validated: invalid JSON still yields tokens.
 .PARAMETER JsonText
     JSONC text to scan.
-.RETURNS
+.OUTPUTS
     [pscustomobject[]] Tokens with Kind, Start, End and Depth, in text order.
 #>
 function Get-JsoncToken {
@@ -293,30 +273,23 @@ function Get-JsoncToken {
 .SYNOPSIS
     Sets one top-level string property in JSONC text by editing only that value.
 .DESCRIPTION
-    Windows Terminal's settings.json is hand-maintained JSONC: header comments, admin notes and
-    commented-out profiles kept for later. Parsing it and writing it back with ConvertTo-Json
-    deleted all of that, reindented the file and moved keys around. This edits the text in place
-    instead:
-      - When the root object already has the property, only its value is replaced (every
-        top-level occurrence, so a duplicated key cannot keep an old value).
-      - Otherwise "Name": "Value", is inserted before the root object's first key, on a line of
-        its own with that key's indentation (inline when the first key shares its line with
-        something else), or inside the braces of an empty root object.
-      - Text with no tokens at all (empty, whitespace or comments only) gets a new root object
-        holding just the property, appended after what is there.
-    Every other character - comments, whitespace, line endings, key order, trailing commas -
-    stays as it was. Keys are matched case-sensitively, as Windows Terminal reads them, and only
-    at the top level: a key inside a profile or inside a comment is never touched.
-
-    This function locates tokens; it does not check that the text is valid JSON(C). The caller
-    validates the result by parsing it (Set-WindowsTerminalDefaultProfile).
+    settings.json is hand-maintained JSONC, and writing it back with ConvertTo-Json would drop its
+    comments, indentation and key order. Instead:
+      - an existing top-level property gets its value replaced (every top-level occurrence, so a
+        duplicated key cannot keep an old value);
+      - otherwise "Name": "Value", goes before the root object's first key, on its own line with
+        that key's indentation (inline when that key shares its line), or inside an empty root;
+      - text with no tokens (empty, whitespace or comments only) gets a new root object with just
+        the property, appended.
+    Everything else stays as it was. Keys match case-sensitively, as Windows Terminal reads them,
+    and only at the top level. The caller validates the result by parsing it.
 .PARAMETER JsonText
     JSONC text whose root is an object.
 .PARAMETER Name
     Top-level property name, matched case-sensitively.
 .PARAMETER Value
     New string value. Backslashes and double quotes are escaped.
-.RETURNS
+.OUTPUTS
     [string] The edited text, or $null when the root is not an object or the property's current
     value is an object or an array (nothing is edited then).
 #>

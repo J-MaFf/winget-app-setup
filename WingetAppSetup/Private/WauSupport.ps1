@@ -2,14 +2,11 @@
 .SYNOPSIS
     Reads the installed Winget-AutoUpdate (WAU) version and MSI ProductCode from the registry.
 .DESCRIPTION
-    The MSI Uninstall entry (HKLM Uninstall key whose DisplayName matches Winget-AutoUpdate) is
-    authoritative for both the installed DisplayVersion and the ProductCode (the key's name); the
-    WOW6432Node hive is scanned too in case a WAU build registered 32-bit. WAU's own configuration
-    key (HKLM:\SOFTWARE\Romanitho\Winget-AutoUpdate) serves as a version fallback when the uninstall
-    entry is missing or unparsable. Callers use the version to decide whether the pinned MSI should
-    upgrade an older install, and the ProductCode to uninstall whatever WAU version is actually
-    present instead of only the pinned one (issue #186).
-.RETURNS
+    From its Uninstall entry (DisplayName matching Winget-AutoUpdate, WOW6432Node too), with WAU's
+    own HKLM:\SOFTWARE\Romanitho\Winget-AutoUpdate key as the version fallback. The version decides
+    whether the pinned MSI upgrades it; the ProductCode uninstalls whatever version is there
+    (issue #186).
+.OUTPUTS
     [pscustomobject] with:
       - Version:     [version] of the installed WAU, or $null when it cannot be determined.
       - ProductCode: '{GUID}' of the installed WAU MSI, or $null when no uninstall entry matches.
@@ -61,17 +58,14 @@ function Get-InstalledWauInfo {
 
 <#
 .SYNOPSIS
-    Reads a directory's (or a file's) owner and access entries as SIDs.
+    Reads a directory's (or a file's, or a registry key's) owner and access entries as SIDs.
 .DESCRIPTION
-    Thin seam over Get-Acl (Windows-only, mocked in tests) for Assert-RestrictedDirectoryAcl,
-    Get-RunRecordTrustProblem, and Get-TightVncServerKeyAclProblem, which passes a registry key
-    (Get-Acl reads one the same way).
-    Every entry is read, explicit and inherited, by SID, so the result does not depend on the
-    display language. Name is the account name when the SID resolves, for messages. Throws when
-    the access list cannot be read.
+    A seam over Get-Acl. Every entry, explicit and inherited, by SID, so the result does not depend
+    on the display language; Name is the account name when the SID resolves. Throws when the access
+    list cannot be read.
 .PARAMETER Path
     The directory or file to read.
-.RETURNS
+.OUTPUTS
     [pscustomobject] with OwnerSid, OwnerName, InheritanceProtected ([bool], true when the
     directory inherits nothing from its parent) and AccessRules (Sid, Name, AccessControlType
     'Allow'/'Deny', IsInherited, Rights ([long], the entry's FileSystemRights access mask) and
@@ -127,13 +121,9 @@ function Get-DirectoryAccessSummary {
     Throws unless a directory is owned by Administrators (or SYSTEM) and only SYSTEM and
     Administrators have access entries on it.
 .DESCRIPTION
-    Review finding P2-21. Checks what Set-RestrictedDirectoryAcl was meant to leave behind, from the
-    directory's own access list, so a failed or partial change is caught before anything is
-    downloaded into it. Fails on any of:
-      - an owner other than Administrators (S-1-5-32-544) or SYSTEM (S-1-5-18): an object's owner
-        can always change its access list, whatever the list says;
-      - an access entry, allow or deny, explicit or inherited, for any other account;
-      - inheritance from the parent folder still turned on.
+    Checks what Set-RestrictedDirectoryAcl was meant to leave, before anything is downloaded into it
+    (P2-21). Fails on another owner (an owner can always change the access list), on any entry for
+    another account (allow or deny, explicit or inherited), and on inheritance still turned on.
 .PARAMETER Path
     The directory to check.
 #>
@@ -167,29 +157,15 @@ function Assert-RestrictedDirectoryAcl {
     Locks a directory down to SYSTEM and Administrators (owner Administrators, full control,
     inheritance removed) and checks the result.
 .DESCRIPTION
-    Used to protect the WAU MSI staging directory so a same-user non-elevated process cannot swap
-    the file between hash verification and msiexec (TOCTOU, issue #186). Grants use well-known SIDs
-    (S-1-5-18 = SYSTEM, S-1-5-32-544 = Administrators) instead of account names so the ACL applies
-    on non-English Windows.
-
-    Ownership comes first (review finding P2-21): the installer's first, non-elevated launch
-    creates %ProgramData%\winget-app-setup for its log, so the signed-in user owns it, and an owner
-    can always rewrite the access list, whatever the list says. Removing the inherited entries
-    alone left that user able to give themselves full control again and swap the staging folder.
-    So icacls first makes Administrators the owner, then removes the inherited entries and replaces
-    (/grant:r) any explicit ones for SYSTEM and Administrators, and Assert-RestrictedDirectoryAcl
-    then reads the result back: any other owner or entry (an explicit entry another account added
-    survives /grant:r) fails the call instead of being used.
-
-    Changes only the directory itself (no /T and no /reset), so the explicit read grant that
-    Grant-InstallLogReadAccess puts on the logs folder inside %ProgramData%\winget-app-setup stays
-    in place: standard users can still open the logs. /q keeps icacls's per-folder success line
-    off the console; its errors still show.
-
-    Throws when icacls fails or the check does: callers must treat the directory as unsafe to use.
-    Those two failures carry the error id 'RestrictedDirectoryAclFailed', so a caller can tell them
-    from any other (icacls.exe not starting, say) and suggest resetting the folder's owner and
-    access list only when that is what went wrong.
+    Protects a staging folder, so a non-elevated process of the same user cannot swap a file between
+    its hash check and its use (issue #186). Well-known SIDs, so it works on non-English Windows.
+    Ownership comes first (P2-21): the installer's first, non-elevated launch creates
+    %ProgramData%\winget-app-setup, owned by the signed-in user, who could otherwise grant themselves
+    access again. icacls makes Administrators the owner, removes the inherited entries and replaces
+    (/grant:r) SYSTEM's and Administrators', and Assert-RestrictedDirectoryAcl reads the result back.
+    Only the directory itself changes (no /T, no /reset), so the logs folder's read grant
+    (Grant-InstallLogReadAccess) stays. Throws when icacls or the check fails, with the error id
+    'RestrictedDirectoryAclFailed', so a caller can suggest resetting the folder only then.
 .PARAMETER Path
     The directory whose ACL should be replaced.
 #>
@@ -238,14 +214,12 @@ function Set-RestrictedDirectoryAcl {
 .SYNOPSIS
     Opens a file for reading so that nobody can change, rename or delete it while it is open.
 .DESCRIPTION
-    Review finding P2-21. FileShare.Read lets other processes (msiexec) open the file for reading
-    only: while the returned stream is open, Windows refuses to open the file for writing or
-    deleting, so it cannot be overwritten, renamed or deleted, and the folder holding it cannot be
-    renamed. Hashing from this stream and keeping it open until msiexec has finished means msiexec
-    installs exactly the bytes that were hashed. The caller disposes the stream.
+    FileShare.Read: while the stream is open, others (msiexec) can only read the file, and its
+    folder cannot be renamed, so hashing from this stream and keeping it open until msiexec ends
+    installs exactly the bytes that were hashed (P2-21). The caller disposes the stream.
 .PARAMETER Path
     The file to open.
-.RETURNS
+.OUTPUTS
     [System.IO.FileStream]
 #>
 function Open-ReadLockedFile {
@@ -259,23 +233,18 @@ function Open-ReadLockedFile {
 
 <#
 .SYNOPSIS
-    Creates a fresh, ACL-restricted staging directory for a download that runs elevated: the WAU
-    MSI, or the Windows App Runtime framework (Install-WindowsAppRuntimeFramework).
+    Creates a fresh staging directory only SYSTEM and Administrators can change, for a download that
+    runs elevated: the WAU MSI, or the Windows App Runtime framework.
 .DESCRIPTION
-    %TEMP% is user-writable and the previous fixed path (%TEMP%\WAU-<version>.msi) was predictable,
-    so a non-elevated process running as the same user could swap the MSI between Get-FileHash and
-    msiexec (issue #186). The staging directory lives under %ProgramData%\winget-app-setup, is
-    uniquely named per run, and is locked to SYSTEM + Administrators BEFORE anything is downloaded
-    into it. The base directory is restricted first, and its owner changed to Administrators (the
-    installer's non-elevated first launch creates it, owned by the signed-in user: review finding
-    P2-21), so an unprivileged process cannot observe the per-run name or delete-and-recreate the
-    staging directory through rights on the parent. Both are checked after the change
-    (Set-RestrictedDirectoryAcl). Throws when the directory cannot be created or secured; only a
-    failure to secure it carries the error id 'RestrictedDirectoryAclFailed'. Callers own cleanup
-    (Remove-Item -Recurse).
+    Not %TEMP%, where a non-elevated process of the same user could swap the file (issue #186): a
+    uniquely named folder under %ProgramData%\winget-app-setup, locked down before anything is
+    downloaded. The base folder is locked down first, with Administrators as its owner (P2-21), so
+    nobody unprivileged can see the per-run name or recreate the folder through the parent. Throws
+    when the folder cannot be created or secured; only the latter has the error id
+    'RestrictedDirectoryAclFailed'. Callers remove it.
 .PARAMETER Prefix
     The start of the per-run folder's name, which ends with a new GUID. Default 'wau-msi'.
-.RETURNS
+.OUTPUTS
     [string] The full path of the created staging directory.
 #>
 function New-WauStagingDirectory {
@@ -299,14 +268,13 @@ function New-WauStagingDirectory {
 .SYNOPSIS
     Lists the packages of one Windows App Runtime framework registered for any user.
 .DESCRIPTION
-    Thin query seam for Get-WindowsAppRuntimeStatus (mocked in tests). `Get-AppxPackage -AllUsers`
-    needs elevation; under PowerShell 7 it runs in Windows PowerShell 5.1, where the Appx module
-    always loads - the same delegation Invoke-AppxProvisioning uses. Throws when the query fails.
+    A query seam for Get-WindowsAppRuntimeStatus. Needs elevation; under PowerShell 7 it runs in
+    Windows PowerShell 5.1, where the Appx module always loads. Throws when the query fails.
 .PARAMETER Name
-    The framework's package name, Microsoft.WindowsAppRuntime.1.8 by default. It may come from a
-    file read from the web (Get-WindowsAppRuntimeRequirement), so only the characters a package
-    name can have are accepted: it goes into the Windows PowerShell command.
-.RETURNS
+    The framework's package name, Microsoft.WindowsAppRuntime.1.8 by default. It may come from the
+    web (Get-WindowsAppRuntimeRequirement) and goes into a command, so only package-name characters
+    are accepted.
+.OUTPUTS
     [pscustomobject[]] with Version ([version]) and Architecture ([string], e.g. 'X64', 'Arm64').
 #>
 function Get-WindowsAppRuntimePackageInfo {
@@ -340,13 +308,10 @@ function Get-WindowsAppRuntimePackageInfo {
 <#
 .SYNOPSIS
     Returns the built-in Windows App Runtime requirement: Microsoft.WindowsAppRuntime.1.8
-    8000.616.304.0 or newer.
+    8000.616.304.0 or newer, what winget 1.12.350 to 1.29.380 and the 1.30.140 preview list.
 .DESCRIPTION
-    What every winget release from 1.12.350 through 1.29.380 and the 1.30.140 preview lists in its
-    DesktopAppInstaller_Dependencies.json. Get-WindowsAppRuntimeStatus checks for it when it is
-    given no requirement, and Get-WindowsAppRuntimeRequirement falls back to it when it cannot read
-    the latest winget release's own list.
-.RETURNS
+    Used when no requirement is given, and when the latest winget release's list cannot be read.
+.OUTPUTS
     [pscustomobject] with Frameworks (one Name and MinimumVersion ([version]) per framework),
     Source ('BuiltIn') and Detail (where the requirement comes from, for messages).
 #>
@@ -363,7 +328,7 @@ function Get-DefaultWindowsAppRuntimeRequirement {
     Formats a Windows App Runtime requirement for messages.
 .PARAMETER Frameworks
     The requirement's Frameworks (or some of them).
-.RETURNS
+.OUTPUTS
     [string] For example 'Microsoft.WindowsAppRuntime.1.8 >= 8000.616.304.0'; several are joined
     with ' and '.
 #>
@@ -385,20 +350,18 @@ function Format-WindowsAppRuntimeRequirement {
     Reads the Windows App Runtime frameworks a winget release depends on from its
     DesktopAppInstaller_Dependencies.json.
 .DESCRIPTION
-    That file is an asset of every winget-cli release since 1.11, and the list
-    Repair-WinGetPackageManager reads too (Microsoft.WinGet.Client's WingetDependencies class):
-    {"Dependencies": [{"Name": "...", "Version": "..."}, ...]}, one list for every architecture.
-    A list per architecture is read as well, for this PC's: an "x64", "x86" or "arm64" property
-    (any case) at the top or under "Dependencies", holding the list or an object with a
-    "Dependencies" list. Only the Microsoft.WindowsAppRuntime entries are returned; the others
-    (VCLibs, UI.Xaml) are ones Winget-AutoUpdate's Install-Prerequisites installs itself. A
-    framework listed more than once keeps its highest version.
+    A winget-cli release asset since 1.11, which Repair-WinGetPackageManager reads too:
+    {"Dependencies": [{"Name": "...", "Version": "..."}, ...]}. A list for this PC's architecture is
+    read as well: an "x64", "x86" or "arm64" property (any case), at the top or under
+    "Dependencies", holding the list or an object with one. Only Microsoft.WindowsAppRuntime entries
+    are returned (WAU installs VCLibs and UI.Xaml itself); a framework listed twice keeps its highest
+    version.
 .PARAMETER Json
     The file's text.
 .PARAMETER Architecture
     This PC's OS architecture as Get-OSArchitecture names it (X64, X86, Arm64), for a list per
     architecture; $null or empty when it is not known.
-.RETURNS
+.OUTPUTS
     [pscustomobject[]] Name and MinimumVersion ([version]) for each Windows App Runtime framework
     the release lists; nothing when it lists none. Throws when the text is not JSON, holds no such
     list, an entry has no Name or no Version, or a Windows App Runtime entry's name or version is
@@ -490,22 +453,14 @@ function ConvertFrom-WingetDependenciesJson {
 .SYNOPSIS
     Works out which Windows App Runtime the winget release Winget-AutoUpdate installs needs.
 .DESCRIPTION
-    Every WAU run as SYSTEM installs the newest winget release from GitHub (Install-Prerequisites
-    reads releases/latest) when the installed winget is older, without any framework it needs, and
-    a winget whose framework is missing leaves winget unusable (#279/#284). Which framework that is
-    comes from the release itself (product-F4, work-order item 32): its
-    DesktopAppInstaller_Dependencies.json, through the download link of the release GitHub marks
-    latest - the same release WAU's api.github.com query names - which the GitHub API's limit of 60
-    calls an hour per address does not apply to. So a winget that needs a newer build or another
-    framework family is checked for as such, rather than by the 1.8 constant, and
-    Install-WindowsAppRuntimeFramework does not install its pinned 1.8 framework where that would
-    not do. A newer framework family does not stand in for an older one.
-    The lookup never stops the run: it has a 30-second time limit (Get-WebDownloadTimeoutParameters
-    -Lookup), and when the file cannot be read (no network, a proxy, GitHub down, a format this
-    does not know) or lists no Windows App Runtime, the built-in requirement
-    (Get-DefaultWindowsAppRuntimeRequirement) is used, with a warning. Writes one line that names
-    the requirement and where it comes from.
-.RETURNS
+    Every WAU run as SYSTEM installs the newest winget from GitHub without its frameworks, and a
+    winget missing its framework is unusable (#279/#284). So the requirement comes from that release:
+    its DesktopAppInstaller_Dependencies.json, through the download link of the release GitHub marks
+    latest (no API rate limit). A newer build or another family is then checked for as such, and a
+    newer family does not stand in for an older one. Never stops the run: 30-second limit, and the
+    built-in requirement, with a warning, when the file cannot be read or lists no Windows App
+    Runtime. Writes one line naming the requirement and its source.
+.OUTPUTS
     [pscustomobject] as Get-DefaultWindowsAppRuntimeRequirement returns it, with Source
     'LatestRelease' when it comes from the release, or 'BuiltIn'.
 #>
@@ -538,10 +493,8 @@ function Get-WindowsAppRuntimeRequirement {
         $frameworks = @(ConvertFrom-WingetDependenciesJson -Json $content -Architecture $architecture)
     }
     catch {
-        # The exception's message, not "$_": for an HTTP error, PowerShell 7 puts the response
-        # body (a proxy's block page, GitHub's error page) in the error record's text and the
-        # status line ('Response status code does not indicate success: 403 (Forbidden).') in the
-        # exception. One line, at most 300 characters, as this warning can come on every run.
+        # The exception's message, not "$_", which for an HTTP error holds the response body (a
+        # block page). One line, at most 300 characters: it can come on every run.
         $problem = [string]$_.Exception.Message
         if ([string]::IsNullOrWhiteSpace($problem)) {
             $problem = "$_"
@@ -574,20 +527,14 @@ function Get-WindowsAppRuntimeRequirement {
 .SYNOPSIS
     Reports whether the WindowsAppRuntime framework that winget needs is present.
 .DESCRIPTION
-    Every winget release from 1.12 through 1.29 (checked against DesktopAppInstaller_Dependencies.json)
-    depends on Microsoft.WindowsAppRuntime.1.8 >= 8000.616.304.0, the default requirement. WAU
-    installs the newest release, so the WAU gate passes what that release needs
-    (Get-WindowsAppRuntimeRequirement); a newer framework family does NOT satisfy a dependency on 1.8.
-    Winget-AutoUpdate's Install-Prerequisites runs on every WAU SYSTEM run and provisions the
-    newest winget release from GitHub without that framework. On a machine that lacks it (no
-    Microsoft Store updates, Server SKUs) the new App Installer cannot register and the old one is
-    then rejected as a downgrade, which leaves winget unusable (the #279/#284 wedge). Callers use
-    this to keep WAU off such machines; Install-WingetAutoUpdate first installs the pinned framework
-    (Install-WindowsAppRuntimeFramework, WindowsAppRuntime.ps1) when this finds none.
+    Every WAU run as SYSTEM provisions the newest winget, which on a PC without its framework (no
+    Store updates, Server) cannot register, and the old one is then refused as a downgrade: winget is
+    left unusable (#279/#284). Callers keep WAU off such PCs, after Install-WingetAutoUpdate tried to
+    install the pinned framework. A newer family does not satisfy a dependency on 1.8.
 .PARAMETER Requirement
     The frameworks to look for (Get-WindowsAppRuntimeRequirement). Default: the built-in
     requirement (Get-DefaultWindowsAppRuntimeRequirement).
-.RETURNS
+.OUTPUTS
     [pscustomobject] with:
       - Present: $true when, for every framework the requirement names, a package for this OS
                  architecture at or above its minimum is registered for any user; $false when one
@@ -649,14 +596,11 @@ function Get-WindowsAppRuntimeStatus {
 .SYNOPSIS
     Removes the at-logon trigger from an already-deployed Winget-AutoUpdate task.
 .DESCRIPTION
-    Earlier installer versions did not pass UPDATESATLOGON, so WAU 2.12.0 defaulted it to 1 and its
-    SYSTEM task also runs at every user logon. That run re-provisions App Installer and resets
-    winget's sources, and it fires exactly when a technician signs in to re-run this installer, so
-    the two collide. New installs pass UPDATESATLOGON=0; this brings machines deployed before that
-    in line. It also writes WAU_UpdatesAtLogon = 0, which WAU's MSI reads back on later upgrades.
-    The weekly trigger is left alone, and a task whose only trigger is the logon one is not
-    touched (removing it would stop WAU from ever running). Best-effort: failures only warn.
-.RETURNS
+    Older installer versions left WAU 2.12.0's UPDATESATLOGON default of 1, so WAU also runs at
+    every logon, colliding with a technician signing in to run this installer. This removes that
+    trigger and writes WAU_UpdatesAtLogon = 0, which later WAU MSI upgrades read back. A task whose
+    only trigger is the logon one is left alone (WAU would never run). Best-effort: failures warn.
+.OUTPUTS
     [bool] True when a logon trigger was removed.
 #>
 function Disable-WauLogonTrigger {
@@ -689,16 +633,14 @@ function Disable-WauLogonTrigger {
 .SYNOPSIS
     Waits, with a time limit, for a running Winget-AutoUpdate task to finish.
 .DESCRIPTION
-    A WAU run (its weekly schedule catching up after boot, or a logon run on machines deployed
-    before Disable-WauLogonTrigger) re-provisions App Installer, resets winget's sources and runs
-    MSI upgrades. Starting this installer's own winget work in the middle of that produces launch
-    failures and 'another installation is in progress' errors that read like broken apps. Polls
+    A WAU run re-provisions App Installer, resets winget's sources and runs MSI upgrades; this
+    installer's winget work in the middle of that fails in ways that read like broken apps. Polls
     the \WAU\ tasks and returns as soon as none is running.
 .PARAMETER TimeoutSeconds
     Longest time to wait before continuing anyway. Default 900 (15 minutes).
 .PARAMETER PollIntervalSeconds
     Seconds between checks. Default 30.
-.RETURNS
+.OUTPUTS
     [bool] True when no WAU task is running (including when WAU is not installed); false when one
     was still running at the time limit.
 #>
@@ -745,14 +687,12 @@ function Wait-WauIdle {
 
 <#
 .SYNOPSIS
-    Describes one scheduled-task trigger in a few words, for the transcript.
-.DESCRIPTION
-    The trigger's kind from its CIM class (MSFT_TaskWeeklyTrigger reads 'Weekly',
-    MSFT_TaskLogonTrigger 'Logon'), the days of a weekly trigger (its DaysOfWeek bit mask: 1 Sunday,
-    2 Monday, 4 Tuesday ... 64 Saturday), when it starts, and '(disabled)' for a disabled trigger.
+    Describes one scheduled-task trigger in a few words, for the transcript: its kind from its CIM
+    class, a weekly trigger's days (DaysOfWeek: 1 Sunday, 2 Monday, 4 Tuesday ... 64 Saturday), its
+    start, and '(disabled)'.
 .PARAMETER Trigger
     A trigger from a scheduled task's Triggers.
-.RETURNS
+.OUTPUTS
     [string] For example 'Weekly on Tuesday from 2026-10-06T02:00:00'.
 #>
 function Format-ScheduledTaskTrigger {
@@ -787,23 +727,13 @@ function Format-ScheduledTaskTrigger {
 .SYNOPSIS
     Reads the Winget-AutoUpdate scheduled task and says whether it will run.
 .DESCRIPTION
-    Review finding P3-36. WAU's registry key alone used to count as 'already present', and msiexec
-    exit code 0 as 'configured', so a machine whose WAU task had been deleted or disabled, or never
-    registered, showed a green 'Auto-updates' line and never updated. This reads the task WAU's MSI
-    registers, \WAU\Winget-AutoUpdate, and (Get-ScheduledTaskInfo) when it last ran and with what
-    result.
-
-    Healthy: the task exists, is not disabled, and has at least one enabled trigger (a task with
-    none never runs on its own). The last run's result is reported, not judged: why a WAU run went
-    wrong is in WAU's own log, whose end Write-WauTaskHealth prints.
-
-    Queried with -ErrorAction SilentlyContinue (review finding P3-38): with -ErrorAction Stop, a
-    task that does not exist, the normal answer before WAU is installed, is written to the
-    transcript as 'PS>TerminatingError(Get-ScheduledTask)' even when it is caught, and #283's was
-    read as part of a crash. The error is still read, from -ErrorVariable: 'not found'
-    (CmdletizationQuery_NotFound) means there is no task, and any other error means the task could
-    not be checked (CheckFailed), which is not healthy either: whether WAU will run is unknown.
-.RETURNS
+    WAU's registry key or msiexec's exit code 0 do not show that WAU will run (P3-36). Healthy: the
+    \WAU\Winget-AutoUpdate task exists, is not disabled and has an enabled trigger. Its last run and
+    result are reported, not judged (Write-WauTaskHealth prints WAU's own log). Queried with
+    -ErrorAction SilentlyContinue, since a caught terminating error still lands in the transcript
+    (P3-38), and the error read from -ErrorVariable: 'not found' means no task; any other error is
+    CheckFailed, whether WAU will run is unknown.
+.OUTPUTS
     [pscustomobject] with Healthy ([bool]), Exists ([bool]), CheckFailed ([bool], $true when the
     task scheduler could not be queried, so the task's state is unknown rather than wrong), State,
     Triggers ([string[]], from Format-ScheduledTaskTrigger), LastRunTime ([datetime], $null when
@@ -887,13 +817,10 @@ function Get-WauTaskHealth {
 
 <#
 .SYNOPSIS
-    Returns the path of Winget-AutoUpdate's own log, updates.log, or $null.
-.DESCRIPTION
-    WAU writes each run to <InstallLocation>\logs\updates.log, where InstallLocation is the value
-    its MSI records under HKLM:\SOFTWARE\Romanitho\Winget-AutoUpdate (by default
-    %ProgramFiles%\Winget-AutoUpdate\). The default folder is used when the value cannot be read.
-    The file need not exist: WAU creates it on its first run.
-.RETURNS
+    Returns the path of Winget-AutoUpdate's own log, <InstallLocation>\logs\updates.log, from its
+    HKLM:\SOFTWARE\Romanitho\Winget-AutoUpdate key or the default folder; $null when no folder is
+    known. The file need not exist yet.
+.OUTPUTS
     [string] or $null when no folder is known.
 #>
 function Get-WauUpdatesLogPath {
@@ -917,11 +844,9 @@ function Get-WauUpdatesLogPath {
 .SYNOPSIS
     Writes the state of the Winget-AutoUpdate task, and the end of WAU's log, to the transcript.
 .DESCRIPTION
-    Review finding P3-36: whether auto-updates work used to be invisible in the log a teammate
-    attaches. One line gives the task's state, triggers, last run, last result and next run, from
-    Get-WauTaskHealth; then, when WAU's updates.log exists, its last lines follow, each indented
-    behind '| ' so the e2e transcript parser never reads one of WAU's lines as the installer's.
-    Best-effort: a log that cannot be read is noted and the run goes on.
+    One line with the task's state, triggers, last run, result and next run (Get-WauTaskHealth),
+    then the last lines of updates.log, each behind '| ' so the e2e transcript parser never reads
+    them as the installer's. Best-effort.
 .PARAMETER Health
     Get-WauTaskHealth's result.
 .PARAMETER LogTailLines
@@ -984,17 +909,14 @@ function Write-WauTaskHealth {
 .SYNOPSIS
     Returns a new path for one msiexec verbose log of a Winget-AutoUpdate install or uninstall.
 .DESCRIPTION
-    Review finding P3-37: a failed WAU msiexec used to leave only its exit code (1603, say) to debug
-    from. The log goes into the run's logs folder (Get-InstallerLogDirectory, next to the transcript
-    a teammate attaches) or, when there is no transcript (winget-app-uninstall.ps1, the imported
-    module), %ProgramData%\winget-app-setup\logs, where the installer's transcripts go. The folder
-    is created when missing; when it cannot be, there is no log: msiexec fails the whole operation
+    In the run's logs folder, or %ProgramData%\winget-app-setup\logs without a transcript (P3-37).
+    The folder is created when missing; when it cannot be, there is no log, since msiexec fails
     (1622) when it cannot open its log.
 .PARAMETER Action
     'install' or 'uninstall', for the file name.
 .PARAMETER Attempt
     The attempt number, for the file name: each retry after msiexec exit code 1618 gets its own log.
-.RETURNS
+.OUTPUTS
     [string] wau-msi-<action>-<yyyyMMdd-HHmmss>-<attempt>.log in that folder, or $null.
 #>
 function New-WauMsiLogPath {
@@ -1030,21 +952,17 @@ function New-WauMsiLogPath {
     Runs msiexec for Winget-AutoUpdate with a verbose log, a time limit and a wait for a busy
     Windows Installer.
 .DESCRIPTION
-    Shared by Install-WingetAutoUpdate and Uninstall-WingetAutoUpdate:
-      - each attempt writes msiexec's verbose log (/l*v) to New-WauMsiLogPath (review finding
-        P3-37), so a failure can be diagnosed from the logs folder;
-      - each attempt has msiexec's time limit (Get-ProcessTimeoutSeconds -Operation MsiExec, review
-        finding P2-5);
-      - exit code 1618 (ERROR_INSTALL_ALREADY_RUNNING: another installation holds Windows Installer)
-        waits for that installation (Wait-WindowsInstallerIdle) and tries again, up to 3 times and
-        within -InstallInProgressWaitSeconds in all (review finding P2-15).
+    For Install- and Uninstall-WingetAutoUpdate: each attempt logs verbosely (/l*v,
+    New-WauMsiLogPath) under msiexec's time limit, and 1618 (another installation holds Windows
+    Installer) waits for it (Wait-WindowsInstallerIdle) and tries again, up to 3 times within
+    -InstallInProgressWaitSeconds.
 .PARAMETER ArgumentString
     msiexec's arguments, without a log option.
 .PARAMETER Action
     'install' or 'uninstall': the log name and the wait message.
 .PARAMETER InstallInProgressWaitSeconds
     The most to wait, in all, for another installation. 0: 1618 is returned at once.
-.RETURNS
+.OUTPUTS
     Invoke-ExternalProcess's result of the last attempt, with LogPath set to that attempt's msiexec
     log ($null when there is none), plus BusyRetries and BusyWaitedSeconds.
 #>

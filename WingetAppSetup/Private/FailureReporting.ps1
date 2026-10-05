@@ -1,32 +1,20 @@
-# Failure-reporting helpers (issue #189). Install-WingetPackage returns a rich diagnostic
-# hashtable (ExitCode, Attempts, SessionErrorExhausted, MachineScopeFellBack) built precisely
-# because the 0x80073D19-era failures were only diagnosable by hex exit code — but both
-# Invoke-WingetInstall call sites used to discard it, reporting every failure as a generic
-# "No package found matching input criteria." These helpers turn that result into the failure
-# messages and the per-app Reason column of the failed-apps summary.
+# Failure reporting: turns an install result (exit code, attempts, fallbacks) into the failure
+# message and the Reason column of the failed-apps summary (issue #189), and decides the exit code.
 
 <#
 .SYNOPSIS
     Ends the installer run with the given exit code, marking the exit as intended.
 .DESCRIPTION
-    Used by the generated entry script (build/fragments/tail.ps1) for every deliberate exit, so its
-    abort guard can tell a run that chose its exit code from one stopped from outside: an outside
-    stop (Ctrl+C, a console-stop event) unwinds through the entry script's finally block without
-    this marker set, and is then reported as exit code 5 instead of 0. Like a bare `exit`, this ends
-    the whole script (and, under irm | iex, the host process), so module functions never call it:
-    Invoke-WingetInstall returns its exit code and the entry script exits with it.
+    The entry script's every deliberate exit, so its abort guard can tell a chosen exit from a stop
+    from outside (Ctrl+C, a console-stop event), which unwinds without the marker and exits 5. Like
+    a bare `exit` it ends the whole script (and the host process under irm | iex), so module
+    functions never call it.
 
-    A failed run that has not shown its outcome yet - an early exit, such as a failed pre-flight
-    check, another run in progress, winget missing, a declined elevation, a failed PowerShell 7
-    bootstrap or an aborted run - first prints Write-InstallerExitNotice: the reason, the log path
-    and the build id, then waits for a key press when someone is at the console (review finding
-    P2-14). Under irm | iex the exit closes the window, which used to take the error and the log
-    path with it before anyone could read them. Runs under Windows PowerShell 5.1 too (the bootstrap
-    phase), so it stays 5.1-runtime compatible.
-
-    Before that key press, Complete-InstallerRun prints the run's RESULT line, writes last-run.json
-    and releases the run lock (review finding P3-41), so the RESULT line follows the notice, and a
-    window left open at the prompt does not make the next run (an RMM schedule) exit 6.
+    A failed run that has not shown its outcome yet first prints Write-InstallerExitNotice (reason,
+    log path, build id), then Complete-InstallerRun reports the RESULT line and last-run.json and
+    releases the run lock, and only then does it wait for a key press when someone is at the
+    console (P2-14): under irm | iex the exit closes the window. Runs under Windows PowerShell 5.1
+    too, so it stays 5.1-compatible.
 .PARAMETER Code
     The process exit code. Default 0.
 .PARAMETER Reason
@@ -85,17 +73,10 @@ function Exit-Installer {
     Prints why the installer is stopping early, where its log is and which build ran, then waits for
     a key press when someone is at the console.
 .DESCRIPTION
-    Review findings P2-14 and P3-15. A teammate who runs the irm | iex one-liner in an elevated
-    console files a GitHub issue when a run fails. Every early exit used to print one red line and
-    close the window at once, so the issue said only that the window closed. This prints, in one
-    block: the exit code with the caller's reason (or what the code means), the log file path, the
-    installer build id and where to report the failure, with the command that makes a diagnostics
-    bundle to attach (Write-InstallerReportHint, wgt-gq8.35) and a privacy note (the repository is
-    public, and a transcript header names the computer and the accounts). Then it waits for a key
-    press, unless the run is non-interactive (Test-EffectiveNonInteractive) or under CI
-    (Test-IsContinuousIntegration), so an unattended or RMM run never blocks.
-
-    Runs under Windows PowerShell 5.1 too (the bootstrap phase): 5.1-runtime compatible only.
+    What a teammate's issue report needs (P2-14, P3-15): the exit code with the reason (or what the
+    code means), the log path, the build id, where to report it with the diagnostics bundle command
+    (Write-InstallerReportHint) and a privacy note, since the repository is public. Never waits in a
+    non-interactive run or under CI. Runs under Windows PowerShell 5.1 too.
 .PARAMETER Code
     The exit code the run is about to end with.
 .PARAMETER Reason
@@ -160,10 +141,8 @@ function Write-InstallerExitNotice {
 .SYNOPSIS
     Waits for a key press before an early exit closes the window, when someone is at the console.
 .DESCRIPTION
-    Write-InstallerExitNotice's wait (review finding P2-14), on its own so Exit-Installer can report
-    the run's outcome between the notice and the wait. Never waits in a non-interactive run
-    (Test-EffectiveNonInteractive) or under CI (Test-IsContinuousIntegration). Runs under Windows
-    PowerShell 5.1 too.
+    Write-InstallerExitNotice's wait, on its own so Exit-Installer can report the run between the
+    notice and the wait. Never waits in a non-interactive run or under CI. Runs under 5.1 too.
 .PARAMETER NonInteractive
     The caller's -NonInteractive switch.
 #>
@@ -189,27 +168,21 @@ function Wait-InstallerExitKeyPress {
 .SYNOPSIS
     Decides Invoke-WingetInstall's final exit code from the run's outcome.
 .DESCRIPTION
-    Invoke-WingetInstall returns this as its exit code at the end of a run. The precedence is
-    1 > 2 > 8 > 3010 > 0: failed apps first (1); then a winget that can no longer be launched at the
-    end of the run (2, the same code as "winget unavailable" at the start), so a run can never exit 0
-    while leaving winget broken; then apps installed, but automatic updates not configured or
-    unhealthy (8, review finding P3-36: an RMM job used to report success for a machine that would
-    never update); then a run that needs a restart to finish (3010, review finding P3-16: the code
-    RMM tools and Intune read as "succeeded, restart required").
+    Precedence 1 > 2 > 8 > 3010 > 0: failed apps (1); winget no longer launchable at the end (2, as
+    at the start), so a run never exits 0 leaving winget broken; apps installed but automatic
+    updates not configured or unhealthy (8, P3-36); a restart needed to finish (3010, which RMM tools
+    read as "succeeded, restart required", P3-16).
 .PARAMETER FailedAppCount
     Number of apps still failed after the retry pass.
 .PARAMETER WingetUsable
     Result of the end-of-run winget launch probe.
 .PARAMETER AutoUpdatesHealthy
-    False when the run's 'Auto-updates:' line is an error: Winget-AutoUpdate failed to install, was
-    skipped because Microsoft.WindowsAppRuntime.1.8 is missing (NOT CONFIGURED), is installed
-    without that framework (AT RISK), or is installed but its scheduled task will not run
-    (UNHEALTHY). Default True.
+    False when the run's 'Auto-updates:' line is FAILED, NOT CONFIGURED, AT RISK or UNHEALTHY.
+    Default True.
 .PARAMETER RestartRequired
     The run's installs finished but need a restart: an install reported it, or Windows gained a
-    pending restart during the run. A restart that was already pending before the run does not
-    count. Default False.
-.RETURNS
+    pending restart during the run (one pending before does not count). Default False.
+.OUTPUTS
     [int] 0, 1, 2, 8 or 3010.
 #>
 function Get-InstallerExitCode {
@@ -244,26 +217,18 @@ function Get-InstallerExitCode {
 
 <#
 .SYNOPSIS
-    Formats a one-line, human-readable reason for a failed app install.
+    Formats a one-line reason for a failed app install, for the failure message and the summary's
+    Reason column.
 .DESCRIPTION
-    Combines the shared install pipeline's FailureReason bucket with the diagnostic detail the
-    installer result carries: the winget exit code (hex, with its name from Get-WingetExitCodeInfo),
-    the attempt count, whether the machine-scope preference fell back to winget's default scope,
-    whether the 0x80073D19 session-error retries were exhausted (issue #189), how long the install
-    waited for another installation to finish, whether the install ran out of time (review finding
-    P2-5), and where the installer's log is (P2-6). Used both for the console failure message and
-    for the Reason column in the failed-apps summary table.
+    The pipeline's FailureReason plus what the install result carries: the winget exit code with
+    its name, the attempts, whether machine scope fell back, whether the 0x80073D19 retries ran out,
+    how long it waited for another installation, whether it timed out, and the installer log.
 
-    When the package is missing after an install that winget reported as failed (VerifyNotFound, or
-    a package-specific installer's CustomInstallFailed), the reason starts with what the exit code
-    means, for example 'another installation was in progress (Windows Installer was busy) - re-run
-    the installer once it has finished', or 'winget install failed' for a code the table does not
-    know (review finding P2-15). 'package not found after install' is kept for an install that
-    winget reported as successful.
-
-    An app whose post-install hook failed (PostInstallFailed, work-order item 38) is installed: the
-    reason is 'installed, but its post-install configuration failed (<the hook's reason>)', without
-    the install's details, which describe a successful install.
+    When the package is missing after an install winget reported as failed (VerifyNotFound,
+    CustomInstallFailed), the reason starts with what the exit code means, e.g. 'another
+    installation was in progress (Windows Installer was busy) - re-run the installer once it has
+    finished', or 'winget install failed' for an unknown code (P2-15). A PostInstallFailed app is
+    installed: 'installed, but its post-install configuration failed (<reason>)'.
 .PARAMETER FailureReason
     The FailureReason string from the shared install pipeline ('PreCheckTimeout',
     'PreCheckLaunchFailed', 'PreCheckFailed', 'InstallLaunchFailed', 'VerifyTimeout',
@@ -272,19 +237,15 @@ function Get-InstallerExitCode {
     the user phase's 'NoUserScopeInstaller'). Unknown or empty values fall back to a generic 'install
     failed'.
 .PARAMETER InstallResult
-    The InstallResult hashtable from the shared install pipeline: Install-WingetPackage's
-    ExitCode/Attempts/SessionErrorExhausted/MachineScopeFellBack shape, a custom installer's
-    ExitCode/Installed shape, or $null when no installer ran (timeouts, dry runs). Keys are probed
-    individually, so partial shapes format whatever detail they carry.
+    The pipeline's InstallResult (Install-WingetPackage's or a custom installer's), or $null when no
+    installer ran. Keys are read one by one, so a partial result shows what it carries.
 .PARAMETER LaunchError
-    Why winget could not be started, for the launch-failure reasons (the pipeline's LaunchError).
-    Shown last, so the table row says what Windows reported (review finding P2-9).
+    Why winget could not be started, shown last for the launch-failure reasons (P2-9).
 .PARAMETER CheckExitCode
-    The exit code of the `winget list` check that failed, for PreCheckFailed and VerifyFailed (the
-    pipeline's CheckExitCode). Shown with the reason, apart from the install's own exit code.
+    The exit code of the `winget list` check that failed, for PreCheckFailed and VerifyFailed.
 .PARAMETER PostInstallReason
     Why the post-install hook failed, for PostInstallFailed (the pipeline's Configuration.Reason).
-.RETURNS
+.OUTPUTS
     [string] e.g. 'another installation was in progress (Windows Installer was busy) - re-run the
     installer once it has finished; winget exit 0x8A150102 INSTALL_INSTALL_IN_PROGRESS, 4 attempts,
     machine-scope fallback: no, waited 600 seconds for another installation'. Never $null or empty.
@@ -316,7 +277,7 @@ function Format-InstallFailureReason {
     )
 
     if ($FailureReason -eq 'PostInstallFailed') {
-        # The app is installed (work-order item 38): the install's details would describe a success.
+        # The app is installed: the install's details would describe a success.
         $hookReason = 'no reason given'
         if (-not [string]::IsNullOrWhiteSpace($PostInstallReason)) {
             $hookReason = $PostInstallReason.Trim()
@@ -420,22 +381,19 @@ function Format-InstallFailureReason {
     Prints what an installed app's install result adds to 'Successfully installed', and returns
     whether the install needs a restart to finish.
 .DESCRIPTION
-    Review finding P3-16. An app counts as installed when `winget list` finds it, whatever winget's
-    exit code was, and the success line used to drop that code. This prints, after it:
-      - '<app> has no machine-wide installer, so it was installed for this account only.' when the
-        install fell back to winget's default scope (MachineScopeFellBack; review finding P3-22:
-        that was shown only when the install failed);
-      - '<app> needs a restart to finish installing (<why>).' when the result's RestartRequired is
-        set (winget 0x8A150109 or 0x8A15010B, or winget's 'Restart your PC to finish installation.'
-        warning; see Install-WingetPackage);
-      - 'winget reported <code> for <app>, but it is installed.' for any other non-zero exit code,
-        with the installer log when there is one, instead of dropping the code.
+    An app counts as installed when `winget list` finds it, whatever winget's exit code (P3-16), so
+    after the success line this prints:
+      - '<app> has no machine-wide installer, so it was installed for this account only.' after a
+        fallback to winget's default scope (MachineScopeFellBack);
+      - '<app> needs a restart to finish installing (<why>).' when RestartRequired is set;
+      - 'winget reported <code> for <app>, but it is installed.' for another non-zero exit code,
+        with the installer log when there is one.
     Nothing for a plain success, or when there is no install result.
 .PARAMETER AppName
     The winget package id.
 .PARAMETER InstallResult
     The app's Install-AppWithVerification InstallResult, or $null.
-.RETURNS
+.OUTPUTS
     [bool] True when the install needs a restart to finish.
 #>
 function Write-InstalledAppNote {
@@ -481,16 +439,12 @@ function Write-InstalledAppNote {
 
 <#
 .SYNOPSIS
-    Words why an app was deferred, for its 'Deferred: <id> (...)' line and its run record.
-.DESCRIPTION
-    The reason a later run as the signed-in user (work-order item 34) reads from last-run.json:
-      - 'NoMachineScopeInstaller' (and anything else): 'winget found no machine-wide installer for
-        it' (review finding P3-22);
-      - 'UserScope': the catalog entry has scope 'user' (work-order item 38);
-      - 'UserPhase': the catalog entry is marked userPhase (work-order item 38).
+    Words why an app was deferred, for its 'Deferred: <id> (...)' line and its run record:
+    'UserScope' (catalog scope 'user'), 'UserPhase' (catalog userPhase), or otherwise 'winget found
+    no machine-wide installer for it'.
 .PARAMETER DeferReason
     Install-AppWithVerification's DeferReason.
-.RETURNS
+.OUTPUTS
     [string]
 #>
 function Get-AppDeferReasonText {
@@ -512,19 +466,13 @@ function Get-AppDeferReasonText {
 .SYNOPSIS
     Explains, under the installation summary, why apps were deferred and who can install them.
 .DESCRIPTION
-    Review findings P3-22, P3-23. A run as SYSTEM or under cross-user elevation installs for the whole
-    PC only, so an app whose package has no machine-wide installer is not installed by it: it is
-    reported as Deferred, neither installed nor failed, and does not change the exit code. This
-    says so once, for all of them, with what can still install them. That is only the signed-in
-    user's own account (named under cross-user elevation): this installer run as that user works
-    only when the account is an administrator, since the installer needs administrator rights and
-    a standard user's UAC prompt elevates as another account, which defers the app again; on a
-    standard user's PC it takes a per-user deployment, which the user phase is
-    (Invoke-WingetUserPhase, from rmm/Invoke-WingetAppSetupUserPhase.ps1: it reads the Deferred
-    entries of last-run.json at each user's sign-in). The line does not claim a per-user installer
-    exists: winget answers 0x8A150010 at --scope machine also when no installer applies to the PC
-    at all. Apps the catalog marks per-user (scope 'user' or userPhase, work-order item 38) get a
-    line of their own, since winget was never asked about them. No-op when nothing was deferred.
+    A run as SYSTEM or under cross-user elevation installs for the whole PC only, so an app with no
+    machine-wide installer is Deferred: neither installed nor failed, exit code unchanged (P3-22,
+    P3-23). This says so once, and that only the signed-in user's own account can install them:
+    this installer run as that user works only for an administrator (a standard user's UAC prompt
+    elevates as another account), otherwise the user phase does it (Invoke-WingetUserPhase). It does
+    not claim a per-user installer exists: winget answers 0x8A150010 also when no installer applies.
+    Apps the catalog marks per-user get a line of their own. No-op when nothing was deferred.
 .PARAMETER DeferredApps
     The package ids of the apps deferred because winget found no machine-wide installer for them.
 .PARAMETER PerUserApps
@@ -588,15 +536,13 @@ function Write-DeferredAppsSummary {
 .SYNOPSIS
     Prints an installed app's post-install configuration result after its install line.
 .DESCRIPTION
-    Work-order item 38. 'Configured: <id>' for a hook that configured the app, and
-    'Not configured: <id> (<reason>)' for one that could not, which leaves the app installed and the
-    exit code as it was. Nothing for a hook that failed (the app's failure line says why) or when no
-    hook ran.
+    'Configured: <id>', or 'Not configured: <id> (<reason>)', which leaves the app installed and the
+    exit code as it was. Nothing for a failed hook (the failure line says why) or when none ran.
 .PARAMETER AppName
     The winget package id.
 .PARAMETER Configuration
     The app's Install-AppWithVerification Configuration, or $null.
-.RETURNS
+.OUTPUTS
     [bool] True when the app is installed but not configured (NotConfigured), for the summary's
     'Configuration: NOT DONE' line (Write-NotConfiguredAppsSummary).
 #>
@@ -627,12 +573,8 @@ function Write-AppPostInstallResult {
 
 <#
 .SYNOPSIS
-    Says, under the installation summary, which installed apps are not configured, and why.
-.DESCRIPTION
-    Work-order item 38. One line for every app whose post-install hook returned NotConfigured:
-    'Configuration: NOT DONE for <id> (<reason>); ... - ...'. Such an app is installed and does not
-    change the exit code; a hook that failed made its app Failed instead (exit code 1). No-op when
-    every hook configured its app.
+    Says, under the installation summary, which installed apps are not configured, and why:
+    'Configuration: NOT DONE for <id> (<reason>); ... - ...'. No-op when every hook configured its app.
 .PARAMETER NotConfiguredApps
     @{ Name = <winget package id>; Reason = <string> } for each app.
 #>
@@ -653,12 +595,8 @@ function Write-NotConfiguredAppsSummary {
 
 <#
 .SYNOPSIS
-    Renders the per-app failure-reason table shown under the installation summary.
-.DESCRIPTION
-    Prints one row per failed app with its Format-InstallFailureReason diagnostic (issue #189), so
-    the summary — and the persistent transcript — carry the winget exit code and retry detail
-    instead of just a list of failed names. No-ops when nothing failed. Kept separate from
-    Invoke-WingetInstall so the rendering is unit-testable without driving the whole orchestrator.
+    Prints the failure-reason table under the installation summary: one row per failed app with its
+    Format-InstallFailureReason text. No-op when nothing failed.
 .PARAMETER FailedApps
     Array of @{ Name = <winget package id>; Reason = <string> } hashtables tracked by
     Invoke-WingetInstall (or Invoke-WingetUninstall).

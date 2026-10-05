@@ -1,34 +1,21 @@
-# Machine state that decides whether an install can run now or needs a restart (review findings
-# P2-15 and P3-16): whether Windows Installer is busy with another installation, and whether Windows
-# has a restart pending. Read-only: nothing here changes the registry, and the Windows Installer
-# mutex is only ever held for the instant it takes to test it (Test-WindowsInstallerBusy). Runs under
-# Windows PowerShell 5.1 too: .NET Framework 4.5 APIs only.
+# Whether Windows Installer is busy and whether a restart is pending. Read-only: the Windows
+# Installer mutex is held only for the instant it takes to test it. Runs under Windows PowerShell 5.1
+# too: .NET Framework 4.5 APIs only.
 
 <#
 .SYNOPSIS
     Returns whether Windows Installer is busy with another installation right now.
 .DESCRIPTION
-    Windows Installer owns the Global\_MSIExecute mutex while an installation runs its execute
-    sequence, and any other MSI install started meanwhile fails at once with 1618
-    (ERROR_INSTALL_ALREADY_RUNNING), which winget reports as 0x8A150102. The busy signal is that
-    the mutex is owned, not that it exists: the mutex object lives as long as any process holds a
-    handle to it, released or not, so a check for existence alone could read busy for as long as
-    that handle stays open and run every wait to its time limit.
-
-    So the check opens the mutex (Mutex.TryOpenExisting; none of that name: idle) and tries to take
-    it without waiting (WaitOne(0)), the same test PSAppDeployToolkit's Test-ADTMutexAvailability
-    makes. Taken: nobody owned it, so Windows Installer is idle, and the mutex is released again at
-    once, on the same thread. A mutex whose owner ended without releasing it (abandoned) is taken
-    the same way and counts as idle. Not taken: an installation owns it, busy. For that instant an
-    MSI starting its execute sequence on another process could get 1618 itself; the window is a few
-    microseconds once per poll interval, the trade PSAppDeployToolkit makes before every MSI it
-    runs. A mutex that this account may not open (TryOpenExisting asks for the rights to wait on
-    and release it) counts as busy, without ever taking it; callers bound how long they wait and
-    then try the install anyway. The handle is always closed, so this check never keeps the mutex
-    alive.
+    While an installation runs, Windows Installer owns Global\_MSIExecute, and another MSI install
+    fails at once with 1618 (winget's 0x8A150102). Busy means the mutex is owned, not that it
+    exists: an idle mutex lives as long as any handle to it. So this opens it (none: idle) and tries
+    to take it without waiting, as PSAppDeployToolkit does: taken (or abandoned) means idle, and it
+    is released at once on the same thread; not taken means busy. For those microseconds another
+    MSI could get 1618 itself, the same trade PSAppDeployToolkit makes. A mutex this account may not
+    open counts as busy; callers bound their wait and then try anyway. The handle is always closed.
 .PARAMETER Name
     The mutex name. Default 'Global\_MSIExecute'; tests pass a name of their own.
-.RETURNS
+.OUTPUTS
     [bool]
 #>
 function Test-WindowsInstallerBusy {
@@ -81,20 +68,18 @@ function Test-WindowsInstallerBusy {
 .SYNOPSIS
     Waits, within a time limit, until Windows Installer is no longer busy with another installation.
 .DESCRIPTION
-    Used after winget reported 0x8A150102 (another installation in progress, msiexec 1618) and
-    before the Winget-AutoUpdate msiexec is retried after 1618. Sleeps one poll interval, then
-    checks Test-WindowsInstallerBusy every poll interval until it reports idle or MaximumSeconds is
-    reached, printing a progress line every minute so a long wait shows in the transcript. Always
-    waits at least one poll interval (or MaximumSeconds, if shorter): 1618 means the installer was
-    busy a moment ago, and a chained installation (a bundle installing several MSIs in turn) takes
-    the mutex again right after releasing it.
+    Used after winget's 0x8A150102 and before retrying the Winget-AutoUpdate msiexec after 1618.
+    Checks Test-WindowsInstallerBusy every poll interval until it is idle or MaximumSeconds is
+    reached, with a progress line every minute. Always waits at least one interval (or
+    MaximumSeconds, if shorter): a chained installation takes the mutex again right after releasing
+    it.
 .PARAMETER MaximumSeconds
     The longest this call may wait. 0 or less: return at once without waiting.
 .PARAMETER PollSeconds
     Seconds between checks. Default 15.
 .PARAMETER Name
     The mutex name, passed to Test-WindowsInstallerBusy.
-.RETURNS
+.OUTPUTS
     [pscustomobject] @{ WaitedSeconds = <int>; Busy = <bool> }. Busy is the last check: True when
     the time limit ran out with Windows Installer still busy.
 #>
@@ -136,25 +121,15 @@ function Wait-WindowsInstallerIdle {
 .SYNOPSIS
     Reads whether Windows has a restart pending, and why.
 .DESCRIPTION
-    Reads the indicators Configuration Manager's pending-restart prerequisite check and Microsoft's
-    DSC RebootPending resource use:
-
-      ComponentServicing  HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based
-                          Servicing\RebootPending exists (Windows servicing, features, updates).
-      WindowsUpdate       HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto
-                          Update\RebootRequired exists.
-      FileRenames         HKLM\SYSTEM\CurrentControlSet\Control\Session Manager
-                          PendingFileRenameOperations: the file replacements queued for the next
-                          restart (MoveFileEx MOVEFILE_DELAY_UNTIL_REBOOT), which is how an MSI or
-                          Inno installer finishes replacing a file that was in use.
-
-    The value holds pairs of entries: a source, then a destination that is empty for a delete. Only
-    replacements (a non-empty destination) are kept. Queued deletes are left out: many programs
-    queue them to clean up temporary or rollback files (Edge Update, for example), and an install is
-    complete without them, so they would report a restart that nothing needs.
-
-    Best-effort and read-only: an indicator that cannot be read counts as absent.
-.RETURNS
+    The indicators Configuration Manager and the DSC RebootPending resource read:
+      ComponentServicing  ...\Component Based Servicing\RebootPending exists.
+      WindowsUpdate       ...\WindowsUpdate\Auto Update\RebootRequired exists.
+      FileRenames         Session Manager's PendingFileRenameOperations: file replacements queued
+                          for the next restart, which is how an installer replaces a file in use.
+    The value holds source and destination pairs; only replacements (a non-empty destination) are
+    kept, because many programs queue deletes of temporary files that no install needs. An
+    indicator that cannot be read counts as absent.
+.OUTPUTS
     [pscustomobject] @{ ComponentServicing = <bool>; WindowsUpdate = <bool>; FileRenames = <string[]>
     ('<source> -> <destination>' per queued replacement) }
 #>
@@ -207,16 +182,13 @@ function Get-PendingRestartState {
 .SYNOPSIS
     Lists why a restart is pending, or with -Since, the reasons that appeared since an earlier state.
 .DESCRIPTION
-    Turns a Get-PendingRestartState result into short reasons for the summary. With -Since (the state
-    read at the start of the run), only what appeared during the run counts: an indicator that was
-    already present, or a file replacement that was already queued, is left out, so a restart that
-    was pending before the run is reported as such and does not make the run's own result 'restart
-    required' (exit code 3010).
+    With -Since (the state at the start of the run), what was already pending is left out, so a
+    restart pending before the run does not make the run's own result 3010.
 .PARAMETER State
     A Get-PendingRestartState result.
 .PARAMETER Since
     An earlier Get-PendingRestartState result. Optional.
-.RETURNS
+.OUTPUTS
     [string[]] Nothing when nothing is pending (or nothing new); call it inside @().
 #>
 function Get-PendingRestartReason {

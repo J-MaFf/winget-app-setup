@@ -447,6 +447,22 @@ Describe 'The generated installer leaves out the module comments (review finding
         }
     }
 
+    Context 'The module source' {
+        It 'gives every function comment-based help that Get-Help can read' {
+            # An unknown keyword (.RETURNS, or a line that starts with .NET) makes PowerShell ignore
+            # the whole help block.
+            $unreadable = foreach ($file in Get-ModuleFileInBuildOrder) {
+                $ast = [System.Management.Automation.Language.Parser]::ParseFile($file.FullName, [ref]$null, [ref]$null)
+                foreach ($function in $ast.FindAll({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $false)) {
+                    $help = $function.GetHelpContent()
+                    if (-not $help -or -not $help.Synopsis) { '{0}: {1}' -f $file.Name, $function.Name }
+                }
+            }
+
+            @($unreadable) | Should -BeNullOrEmpty
+        }
+    }
+
     Context 'Build and -Check' {
         It 'leaves the installer unchanged when only module comments change' {
             $root = New-BuildFixture -Name 'comment-only-change'

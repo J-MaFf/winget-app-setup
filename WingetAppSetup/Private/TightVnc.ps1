@@ -1,49 +1,30 @@
-# TightVNC Server configuration (work-order item 18, review finding P2-22). winget installs
-# GlavSoft.TightVNC (a machine-scope MSI) with no MSI properties, which registers and starts the
-# tvnserver service and opens the firewall, but sets no password: the server then refuses every
-# viewer ("Server is not configured properly"), and with no control password any signed-in user can
-# reconfigure the service from its tray icon, including turning authentication off. The catalog's
-# post-install hook (Set-TightVncServerPassword) sets both passwords from a secret supplied at run
-# time, never from this public repository:
-#   - WINGET_APP_SETUP_TIGHTVNC_PASSWORD and, optionally, WINGET_APP_SETUP_TIGHTVNC_CONTROL_PASSWORD
-#     in the run's environment (an RMM script, or a tech's elevated console), read once at the start
-#     of the PowerShell 7 run and removed from its environment before it starts winget or any
-#     installer (processes started before that keep a copy: the Windows PowerShell 5.1 bootstrap
-#     and what it starts to install PowerShell 7, and the icacls run on the log folder);
-#   - otherwise, in an interactive run, a masked prompt at the start of the run, which waits at most
-#     5 minutes for someone to start typing;
-#   - otherwise TightVNC is reported installed but NOT configured, loudly.
-# The passwords go straight into HKLM\SOFTWARE\TightVNC\Server, which the service reads, through the
-# .NET registry API: never onto a command line (winget logs its whole command line, and MSI logs
-# dump their properties), never as a cmdlet argument (PowerShell module logging records those),
-# never to the console, the transcript or the run record. The stored value is reversible (VNC's
-# fixed-key DES), so the key is limited to SYSTEM and Administrators before a password is written
-# into it.
-# Research notes: TightVNC 2.8.81 source (Configurator.cpp, VncPassCrypt.cpp, DesCrypt.cpp,
-# ControlApplication.cpp), Microsoft's registry security docs; verified test vectors in
-# tests/TightVnc.Tests.ps1.
+# TightVNC Server configuration (P2-22). winget installs TightVNC with no password, so the server
+# refuses every viewer, and with no control password any signed-in user can reconfigure it. The
+# post-install hook (Set-TightVncServerPassword) sets both from a secret supplied at run time, never
+# from this public repository: WINGET_APP_SETUP_TIGHTVNC_PASSWORD (and _CONTROL_PASSWORD), taken out
+# of the environment at the start of the PowerShell 7 run before winget starts; otherwise a masked
+# prompt at the start of an interactive run (5 minutes at most); otherwise TightVNC is reported NOT
+# configured. The passwords go into HKLM\SOFTWARE\TightVNC\Server through the .NET registry API:
+# never on a command line or as a cmdlet argument (module logging records those), never in the
+# console, transcript or run record. The stored value is reversible (VNC's fixed-key DES), so the key
+# is limited to SYSTEM and Administrators first. Sources: TightVNC 2.8.81 (Configurator.cpp,
+# VncPassCrypt.cpp, DesCrypt.cpp, ControlApplication.cpp); test vectors in tests/TightVnc.Tests.ps1.
 
 <#
 .SYNOPSIS
     Encodes a TightVNC password the way TightVNC stores it in the registry.
 .DESCRIPTION
-    VNC's password obfuscation, as TightVNC's ControlApplication::getCryptedPassword and
-    VncPassCrypt do it: the first 8 characters, zero-padded to 8 bytes, encrypted with single DES
-    in ECB mode under VNC's fixed key. TightVNC's d3des reads each key byte least significant bit
-    first, so a standard DES implementation needs the bit-reversed key, E8 4A D6 60 C4 72 1A E0
-    (TightVNC's own key is 17 52 6B 06 23 4E 58 07). Anyone who can read the 8 bytes can reverse
-    them, so treat the result as the password itself: never print or log it, and clear it after
-    use.
-
-    Characters after the 8th are ignored, as TightVNC ignores them (the caller warns about it). The
-    characters used must be printable ASCII: TightVNC converts them to the ANSI code page, where
-    anything else may encode differently from what a viewer sends. The plaintext is read from the
-    SecureString through a BSTR that is zeroed and freed before this returns; it is never a
-    managed string. Uses only APIs that Windows PowerShell 5.1 has too.
+    The first 8 characters, zero-padded to 8 bytes, encrypted with single DES (ECB) under VNC's
+    fixed key. TightVNC's d3des reads key bytes least significant bit first, so standard DES needs
+    the bit-reversed key E8 4A D6 60 C4 72 1A E0 (TightVNC's is 17 52 6B 06 23 4E 58 07). The result
+    is as good as the password: never print or log it, and clear it after use. Characters past the
+    8th are ignored, as TightVNC does. Only printable ASCII, since TightVNC converts to the ANSI code
+    page. The plaintext goes through a BSTR that is zeroed and freed, never a managed string.
+    Windows PowerShell 5.1 APIs only.
 .PARAMETER Password
     The password. Throws when it is empty or a character it uses is not printable ASCII; the
     message never contains the password.
-.RETURNS
+.OUTPUTS
     [byte[]] 8 bytes.
 #>
 function ConvertTo-TightVncPasswordBytes {
@@ -98,7 +79,7 @@ function ConvertTo-TightVncPasswordBytes {
     The first value.
 .PARAMETER Second
     The second value.
-.RETURNS
+.OUTPUTS
     [bool] False when either is $null or they differ.
 #>
 function Test-SecureStringEqual {
@@ -145,7 +126,7 @@ function Test-SecureStringEqual {
     The first array, or $null.
 .PARAMETER Second
     The second array, or $null.
-.RETURNS
+.OUTPUTS
     [bool] False when either is $null or they differ.
 #>
 function Test-TightVncBytesEqual {
@@ -174,13 +155,10 @@ function Test-TightVncBytesEqual {
 .SYNOPSIS
     Moves the TightVNC passwords from this process's environment into the run's secret store.
 .DESCRIPTION
-    Reads WINGET_APP_SETUP_TIGHTVNC_PASSWORD and WINGET_APP_SETUP_TIGHTVNC_CONTROL_PASSWORD, keeps
-    each one that is set and not empty as a read-only SecureString in $script:TightVncSecret, and
-    removes both variables from this process's environment, so winget, msiexec and every other
-    process this run starts afterwards does not inherit them. The process that started this one (an
-    RMM agent, the Windows PowerShell 5.1 bootstrap) keeps its own copy for as long as it runs, and
-    so do the processes started before this call (the bootstrap's PowerShell 7 install, the icacls
-    run on the log folder). Replaces any secret an earlier call stored.
+    Keeps WINGET_APP_SETUP_TIGHTVNC_PASSWORD and WINGET_APP_SETUP_TIGHTVNC_CONTROL_PASSWORD, when set
+    and not empty, as read-only SecureStrings in $script:TightVncSecret and removes both variables,
+    so no process this run starts afterwards inherits them. The parent process, and processes
+    started before this call, keep their copies. Replaces any earlier secret.
 #>
 function Import-TightVncSecretFromEnvironment {
     $secret = @{
@@ -225,13 +203,11 @@ function Import-TightVncSecretFromEnvironment {
 
 <#
 .SYNOPSIS
-    Forgets the run's TightVNC passwords.
+    Forgets the run's TightVNC passwords, so they do not outlive the run in a console that stays open
+    (under irm | iex $script: is the console's global scope).
 .DESCRIPTION
-    Disposes the SecureStrings Import-TightVncSecretFromEnvironment or the prompt stored, so they do
-    not outlive the run in a console that stays open (irm | iex, where $script: is the console's
-    global scope). Invoke-WingetInstall calls it once no post-install hook can run any more, before
-    it returns early (exit codes 2 and 3), and before it reads them for a new run; the entry
-    script's finally block calls it again, so an aborted run drops them too.
+    Invoke-WingetInstall calls it once no hook can run, before its early returns, and before a new
+    run reads them; the entry script's finally block calls it again for an aborted run.
 #>
 function Clear-TightVncSecret {
     $secret = $script:TightVncSecret
@@ -249,15 +225,12 @@ function Clear-TightVncSecret {
 .SYNOPSIS
     Waits until someone at the console starts typing, for at most a time limit.
 .DESCRIPTION
-    Thin seam over [Console]::KeyAvailable (mocked in tests), polled a few times a second. It reads
-    no key: the key that ended the wait stays in the console's input for Read-Host. The TightVNC
-    password prompt waits here first, so a console nobody watches does not hold the run (and the
-    machine-wide run lock, which makes every other run exit 6) for longer than the limit. When
-    the console cannot be watched (no console, or its input is redirected) it returns $true at
-    once and Read-Host decides.
+    A seam over [Console]::KeyAvailable, polled a few times a second; no key is read, so it stays
+    for Read-Host. Keeps an unwatched console from holding the run, and the run lock (exit 6 for
+    every other run), past the limit. Returns $true at once when the console cannot be watched.
 .PARAMETER TimeoutSeconds
     How long to wait.
-.RETURNS
+.OUTPUTS
     [bool] $true when a key is waiting (or the console cannot be watched), $false when the time
     ran out.
 #>
@@ -286,20 +259,14 @@ function Wait-TightVncPromptAnswer {
 .SYNOPSIS
     Asks the person at the console for the TightVNC server password, twice.
 .DESCRIPTION
-    Read-Host -AsSecureString shows '*' for each character and returns a SecureString (never
-    -MaskInput, which returns plain text). An empty answer skips the password. A password TightVNC
-    cannot use, or a confirmation that does not match, is asked for again, three times at most. A
-    transcript records the prompt text but not what is typed.
-
-    Each time it asks for the password it first waits for someone to start typing, for at most
-    -TimeoutSeconds (Wait-TightVncPromptAnswer): the prompt is shown while the run holds the
-    machine-wide run lock, and a run that nobody answers carries on without the password (TightVNC
-    is then reported not configured) instead of blocking every other run with exit code 6. A host
-    that cannot prompt (PowerShell started with -NonInteractive) makes Read-Host throw; that is
-    reported as the reason, never as an error.
+    Read-Host -AsSecureString (never -MaskInput, which returns plain text); a transcript records the
+    prompt, not what is typed. Empty skips it; an unusable password or a mismatch is asked again,
+    three times at most. Each time it first waits for typing to start (Wait-TightVncPromptAnswer,
+    -TimeoutSeconds), so an unanswered prompt does not block other runs. A host started with
+    -NonInteractive makes Read-Host throw, which is reported as the reason, not as an error.
 .PARAMETER TimeoutSeconds
     How long to wait for someone to start typing. Default 300 (5 minutes).
-.RETURNS
+.OUTPUTS
     [hashtable] @{ Password = <read-only SecureString, or $null>; Reason = <why there is none, or $null> }
 #>
 function Read-TightVncPasswordFromHost {
@@ -364,18 +331,15 @@ function Read-TightVncPasswordFromHost {
     Returns the run's TightVNC passwords, reading them from the environment, or asking for the
     server password, when that has not happened yet.
 .DESCRIPTION
-    Reads the environment first (Import-TightVncSecretFromEnvironment) when nothing has been read
-    in this run. Without a server password from there, asks for one (Read-TightVncPasswordFromHost)
-    only when all of these hold: no prompt has been offered in this run yet, someone is at the
-    console (-NonInteractive not set), the run is not under CI, TightVNC Server does not already
-    have its passwords (-ServerSecured not set), and PowerShell was not started with its own
-    -NonInteractive switch (Test-PowerShellHostNonInteractive), which makes Read-Host throw. The
-    answer is kept for the rest of the run, so a retry of the post-install hook does not ask again.
+    Reads the environment first, once per run. Without a server password from there it asks only
+    when no prompt was offered in this run yet, someone is at the console, the run is not under CI,
+    TightVNC Server lacks its passwords and PowerShell was not started with -NonInteractive. The
+    answer is kept for the run, so a retry of the hook does not ask again.
 .PARAMETER NonInteractive
     The run is non-interactive: never prompt.
 .PARAMETER ServerSecured
     TightVNC Server already has a server password and a control password: no prompt is needed.
-.RETURNS
+.OUTPUTS
     [hashtable] $script:TightVncSecret: Password, PasswordSource, ControlPassword,
     ControlPasswordSource, PromptDone and PromptReason.
 #>
@@ -415,13 +379,10 @@ function Get-TightVncSecret {
 .SYNOPSIS
     Returns the name of the registry value that marks a TightVNC Server restart still owed.
 .DESCRIPTION
-    Set-TightVncServerPassword writes this REG_DWORD (1) into HKLM\SOFTWARE\TightVNC\Server before
-    it changes a password value, and removes it once the tvnserver service has restarted. tvnserver
-    reads its passwords only when it starts, so a run whose restart failed, or that stopped between
-    the write and the restart, leaves the marker, and the next attempt (the retry pass, or the next
-    run) restarts the service even though the values are already right. TightVNC reads its values by
-    name and ignores this one.
-.RETURNS
+    A REG_DWORD 1 written before a password value changes and removed once tvnserver has restarted,
+    which is when it reads its passwords. Left behind by a failed or interrupted restart, it makes
+    the next attempt restart the service although the values are already right. TightVNC ignores it.
+.OUTPUTS
     [string]
 #>
 function Get-TightVncRestartMarkerName {
@@ -430,15 +391,15 @@ function Get-TightVncRestartMarkerName {
 
 <#
 .SYNOPSIS
-    Reads TightVNC Server's password settings from the registry.
+    Reads TightVNC Server's password settings from HKLM\SOFTWARE\TightVNC\Server, which the
+    tvnserver service reads.
 .DESCRIPTION
-    HKLM\SOFTWARE\TightVNC\Server, which the tvnserver service reads (application mode uses HKCU
-    instead). Password and ControlPassword are REG_BINARY values of 8 bytes; UseVncAuthentication
-    and UseControlAuthentication are REG_DWORD, 1 for on. A value of another type, or missing,
-    reads as $null. The password bytes are reversible: never print them.
+    Password and ControlPassword are 8-byte REG_BINARY; UseVncAuthentication and
+    UseControlAuthentication are REG_DWORD, 1 for on. Another type, or none, reads as $null. The
+    password bytes are reversible: never print them.
 .PARAMETER Path
     The key, for tests.
-.RETURNS
+.OUTPUTS
     [hashtable] KeyExists, Password ([byte[]] or $null), UseVncAuthentication ([int] or $null),
     ControlPassword, UseControlAuthentication, and RestartPending ([bool]: the restart marker,
     Get-TightVncRestartMarkerName, is 1). Throws when the key exists but cannot be read.
@@ -490,7 +451,7 @@ function Get-TightVncServerSettings {
     Tells whether TightVNC Server has a server password and a password-protected control interface.
 .PARAMETER Settings
     Get-TightVncServerSettings's result.
-.RETURNS
+.OUTPUTS
     [bool] True when Password and ControlPassword are 8-byte values and UseVncAuthentication and
     UseControlAuthentication are both 1.
 #>
@@ -515,21 +476,17 @@ function Test-TightVncServerSecured {
 
 <#
 .SYNOPSIS
-    Says, in words, what a TightVNC Server that is not fully secured lets through.
+    Says, in words, what a TightVNC Server that is not fully secured lets through, from the settings
+    read, so the message never claims more than they show.
 .DESCRIPTION
-    For the 'NOT configured' message, from the settings that were read, so it never claims that a
-    server refuses viewers when it actually lets them in:
-      - UseVncAuthentication set to anything but 1 (TightVNC reads it as 'value == 1'; missing
-        means on, its default): the server offers no authentication and accepts every viewer
-        without a password;
-      - otherwise no 8-byte Password: the server refuses every viewer;
+      - UseVncAuthentication not 1 (missing means on): it accepts every viewer without a password;
+      - otherwise no 8-byte Password: it refuses every viewer;
       - no 8-byte ControlPassword, or UseControlAuthentication not 1: any signed-in user can
-        reconfigure or stop the server from its tray icon.
-    A server with a password, a protected control interface and UseVncAuthentication missing gets
-    'UseVncAuthentication is not set to 1'.
+        reconfigure or stop it from its tray icon.
+    A secured server with UseVncAuthentication missing gets 'UseVncAuthentication is not set to 1'.
 .PARAMETER Settings
     Get-TightVncServerSettings's result.
-.RETURNS
+.OUTPUTS
     [string[]] One clause per gap, each starting with a word that may begin a sentence or follow a
     semicolon; empty when Test-TightVncServerSecured holds.
 #>
@@ -564,14 +521,12 @@ function Get-TightVncServerSecurityGap {
 .SYNOPSIS
     Says why TightVNC Server's registry key is not limited to SYSTEM and Administrators.
 .DESCRIPTION
-    Reads the key's owner and access entries through Get-DirectoryAccessSummary (Get-Acl, which
-    reads a registry key as it reads a folder). The key holds the reversible passwords, so any of
-    these is a problem: an owner other than SYSTEM (S-1-5-18) or Administrators (S-1-5-32-544), who
-    could rewrite the access list; permissions still inherited from HKLM\SOFTWARE, which usually
-    let every user read it; an access entry for any other account.
+    Read with Get-DirectoryAccessSummary. Problems: an owner other than SYSTEM or Administrators
+    (it could rewrite the access list); entries still inherited from HKLM\SOFTWARE (which usually let
+    every user read the reversible passwords); an entry for any other account.
 .PARAMETER Path
     The key.
-.RETURNS
+.OUTPUTS
     [string[]] One line per problem; empty when the key is limited as it should be. Throws when the
     access list cannot be read.
 #>
@@ -603,19 +558,12 @@ function Get-TightVncServerKeyAclProblem {
     Creates TightVNC Server's registry key if it is missing and limits it to SYSTEM and
     Administrators.
 .DESCRIPTION
-    Thin seam over the .NET registry API (Windows-only, mocked in tests). The access list gets
-    full control for SYSTEM (S-1-5-18; the tvnserver service runs as LocalSystem) and
-    Administrators (S-1-5-32-544), by SID so it applies on any display language, and no entries
-    inherited from HKLM\SOFTWARE, which otherwise let standard users read the reversible
-    passwords. TightVNC's own service creates the key with SYSTEM and Administrators entries but
-    does not block inheritance, and a key the MSI or this installer creates inherits the parent's
-    entries, so neither is enough on its own.
-
-    A missing key is created with that access list, so it is never readable by others, even
-    briefly; its parent (HKLM\SOFTWARE\TightVNC) is created with the default one. An existing key
-    is opened with the right to change its permissions only, and its access list replaced (the
-    owner is left alone). The key is in the registry view of this process, which for 64-bit
-    PowerShell is the one the 64-bit tvnserver reads.
+    A seam over the .NET registry API. Full control for SYSTEM (tvnserver runs as LocalSystem) and
+    Administrators, by SID, and nothing inherited from HKLM\SOFTWARE; neither TightVNC's own key nor
+    one the MSI creates blocks inheritance. A missing key is created with that list, so it is never
+    readable by others even briefly (its parent with the default one); an existing key is opened
+    with the right to change permissions only and its list replaced, owner untouched. In this
+    process's registry view, which for 64-bit PowerShell is the 64-bit tvnserver's.
 .PARAMETER SubKey
     The key under the hive.
 .PARAMETER Hive
@@ -674,11 +622,9 @@ function Protect-TightVncServerKey {
 .SYNOPSIS
     Writes one value into TightVNC Server's registry key.
 .DESCRIPTION
-    Thin seam over the .NET registry API (Windows-only, mocked in tests): opens the key for writing
-    and calls RegistryKey.SetValue. Not New-ItemProperty: with PowerShell module logging on, a
-    cmdlet's parameter values (here the reversible password bytes) are written to the PowerShell
-    event log, and a .NET method call is not. The key must exist (Protect-TightVncServerKey creates
-    it), in the registry view of this process, as Protect-TightVncServerKey uses.
+    A seam over RegistryKey.SetValue, not New-ItemProperty: module logging writes a cmdlet's
+    parameter values (the reversible password bytes) to the event log, a .NET call it does not. The
+    key must exist (Protect-TightVncServerKey), in this process's registry view.
 .PARAMETER Name
     The value name.
 .PARAMETER Value
@@ -729,10 +675,8 @@ function Set-TightVncServerValue {
 
 <#
 .SYNOPSIS
-    Removes one value from TightVNC Server's registry key, if it is there.
-.DESCRIPTION
-    Thin seam over the .NET registry API (Windows-only, mocked in tests), the counterpart of
-    Set-TightVncServerValue. A missing key or value is not an error.
+    Removes one value from TightVNC Server's registry key, if it is there: a seam over the .NET
+    registry API. A missing key or value is not an error.
 .PARAMETER Name
     The value name.
 .PARAMETER SubKey
@@ -771,16 +715,13 @@ function Remove-TightVncServerValue {
 
 <#
 .SYNOPSIS
-    Makes sure TightVNC Server's registry key is limited to SYSTEM and Administrators.
-.DESCRIPTION
-    Reads the key's access list (Get-TightVncServerKeyAclProblem) when the key exists; when it is
-    missing, or other accounts could read it, limits it (Protect-TightVncServerKey, which creates a
-    missing key already limited) and reads the access list again.
+    Makes sure TightVNC Server's registry key is limited to SYSTEM and Administrators: when it is
+    missing or others could read it, Protect-TightVncServerKey, then a second check.
 .PARAMETER Path
     The key, as Get-TightVncServerSettings and Get-TightVncServerKeyAclProblem take it.
 .PARAMETER KeyExists
     Get-TightVncServerSettings's KeyExists.
-.RETURNS
+.OUTPUTS
     [string] $null when the key is limited as it should be, otherwise the reason it could not be
     (for a Failed result).
 #>
@@ -818,20 +759,12 @@ function Set-TightVncServerKeyProtection {
     Reads the TightVNC passwords for a run from the environment, or asks for the server password,
     before anything is installed.
 .DESCRIPTION
-    Invoke-WingetInstall calls this once, after the elevation check and before winget or any
-    installer starts, when the run's catalog has TightVNC's post-install hook
-    (postInstall = 'Set-TightVncServerPassword'); otherwise it does nothing. It drops whatever an
-    earlier run in this console kept, then:
-      - moves WINGET_APP_SETUP_TIGHTVNC_PASSWORD and WINGET_APP_SETUP_TIGHTVNC_CONTROL_PASSWORD
-        out of this process's environment (Import-TightVncSecretFromEnvironment), so no process
-        this run starts from here on (winget, the installers) inherits them;
-      - without a server password from there, and when someone is at the console and TightVNC
-        Server does not already have its passwords, asks for it now, so the rest of the run needs
-        nobody (the post-install hook then never asks). The prompt waits at most 5 minutes for
-        someone to start typing (Read-TightVncPasswordFromHost), since the run holds the
-        machine-wide run lock meanwhile.
-    A dry run changes nothing and asks nothing: it only says whether the variables are set and
-    whether a real run could use them, never their values.
+    Invoke-WingetInstall calls it once, after the elevation check and before winget starts, when the
+    catalog has TightVNC's hook. It drops what an earlier run in this console kept, moves the
+    variables out of the environment so no installer inherits them, and, without a server password,
+    asks now when someone is at the console and the server lacks its passwords, so the rest of the
+    run needs nobody (5 minutes at most, since the run holds the lock). A dry run changes and asks
+    nothing: it says whether the variables are set and usable, never their values.
 .PARAMETER Apps
     The run's catalog.
 .PARAMETER NonInteractive
@@ -882,11 +815,9 @@ function Initialize-TightVncSecretForRun {
 
 <#
 .SYNOPSIS
-    Says, in a dry run, where a real run would get the TightVNC passwords, without their values.
-.DESCRIPTION
-    Reads the two variables without removing them, checks that TightVNC could use the server and
-    control passwords, and prints one '[DRY-RUN] TightVNC: ...' line for each. Values are never
-    shown: only whether each is set and, when it is not usable, why.
+    Says, in a dry run, where a real run would get the TightVNC passwords: one '[DRY-RUN] TightVNC:
+    ...' line for each variable, set or not and usable or why not, never its value. Reads them
+    without removing them.
 .PARAMETER NonInteractive
     The run's effective non-interactive state, for what a real run would do without a password.
 #>
@@ -952,50 +883,30 @@ function Write-TightVncSecretPreview {
     TightVNC's post-install hook: sets the TightVNC Server password and control password from the
     run's secret, limits their registry key to SYSTEM and Administrators, and restarts the service.
 .DESCRIPTION
-    Work-order item 18 (review finding P2-22), run by Invoke-AppPostInstall once GlavSoft.TightVNC
-    is installed, on every run that finds it (idempotent). Returns 'Configured', or NotConfigured or
-    Failed with a reason, per the catalog's postInstall contract:
+    Runs on every run that finds GlavSoft.TightVNC installed, so it is idempotent. Per the catalog's
+    postInstall contract:
+      - No tvnserver service (a viewer-only install): NotConfigured.
+      - A server password from the run's secret (Get-TightVncSecret): Password and
+        UseVncAuthentication 1; ControlPassword from WINGET_APP_SETUP_TIGHTVNC_CONTROL_PASSWORD and
+        UseControlAuthentication 1. Without that variable, a separate control password the server
+        already has is kept; otherwise the server password protects control too, with a warning.
+        Only differing values are written. Over 8 characters warns that TightVNC ignores the rest;
+        an unusable password is NotConfigured, never shown.
+      - No password supplied, and the server already secured: kept.
+      - No password supplied, and the server not secured: NotConfigured, with a loud line that says
+        what it lets through (Get-TightVncServerSecurityGap) and how to supply a password.
+    The key is limited to SYSTEM and Administrators before a password is written and whenever it
+    holds one. Values are written with Set-TightVncServerValue, read back and compared in memory.
 
-      - No tvnserver service (a viewer-only install): NotConfigured; there is no server to
-        configure.
-      - A server password from the run's secret (Get-TightVncSecret:
-        WINGET_APP_SETUP_TIGHTVNC_PASSWORD, or the prompt at the start of an interactive run):
-        Password is set to it and UseVncAuthentication to 1; ControlPassword to
-        WINGET_APP_SETUP_TIGHTVNC_CONTROL_PASSWORD, and UseControlAuthentication to 1, so a
-        signed-in user cannot reconfigure or stop the service without it. Without that variable a
-        separate control password the server already has (one that differs from its server
-        password) is kept; otherwise the server password protects the control interface too, with
-        a warning (a separate one is better). Only values that differ are written, so a re-run
-        with the same secret changes nothing and one with a new secret updates it. A password of
-        more than 8 characters is used, with a warning that TightVNC ignores the rest; one TightVNC
-        cannot use (empty, not printable ASCII) is NotConfigured, and its value is never shown.
-      - No server password supplied, and TightVNC Server already has both passwords with both
-        authentication values on (an earlier run, or someone, set them): they are kept.
-      - No server password supplied, and TightVNC Server lacks them: NotConfigured, with a loud
-        'TightVNC installed but NOT configured' line that says what the server lets through
-        (Get-TightVncServerSecurityGap: it refuses every viewer, it accepts viewers without a
-        password, or its control interface is unprotected) and how to supply a password.
-
-    Before a password is written, and whenever the key already holds one (kept, or left as it is
-    by a NotConfigured result), the key is limited to SYSTEM and Administrators
-    (Set-TightVncServerKeyProtection): the stored value is reversible. Values are written through
-    the .NET registry API (Set-TightVncServerValue), never as cmdlet arguments, which module
-    logging records, read back and compared in memory.
-
-    tvnserver reads its passwords only when it starts, so the service is restarted (Restart-Service,
-    or Start-Service when it is stopped) whenever this call changed a value, and also when the
-    restart marker (Get-TightVncRestartMarkerName) says an earlier attempt changed values without a
-    restart that finished: the marker is written before the first value and removed only once the
-    service is Running again. A restart that fails therefore makes the result Failed, and the retry
-    pass, or the next run, restarts the service instead of reporting the unchanged values as
-    Configured. Not 'tvnserver -controlservice -reload': it needs the control pipe, and when it
-    cannot connect it shows a message box that nobody can close in a SYSTEM run.
-
-    Never on a command line, never printed: the passwords, their encoded bytes, or the bytes already
-    in the registry. Every buffer holding them is cleared before this returns.
+    tvnserver reads its passwords only when it starts, so the service is restarted (or started when
+    stopped) after a change, or when the restart marker says an earlier change never got its
+    restart; the marker goes only once the service is Running again, so a failed restart is Failed
+    and retried. Not 'tvnserver -controlservice -reload', which shows a message box nobody can close
+    as SYSTEM. The passwords and their bytes are never on a command line or printed, and every
+    buffer is cleared before this returns.
 .PARAMETER App
     The catalog entry (unused: the hook's contract passes it).
-.RETURNS
+.OUTPUTS
     'Configured', or [hashtable] @{ Status = 'NotConfigured' | 'Failed'; Reason = <string> }.
 #>
 function Set-TightVncServerPassword {
@@ -1061,10 +972,8 @@ function Set-TightVncServerPassword {
                 }
             }
             else {
-                # A separate control password the server already has (set by an earlier run with
-                # WINGET_APP_SETUP_TIGHTVNC_CONTROL_PASSWORD, or by an administrator) is kept: putting
-                # the server password there would hand control of the server to every viewer. One
-                # that equals the current server password was derived from it, and follows it.
+                # A separate control password the server already has is kept: the server password
+                # there would give every viewer control. One equal to the server password follows it.
                 $existingControl = $settings.ControlPassword
                 $keepsControl = $existingControl -is [byte[]] -and $existingControl.Length -eq 8 -and
                     $settings.UseControlAuthentication -eq 1 -and
@@ -1159,10 +1068,8 @@ function Set-TightVncServerPassword {
             Write-WarningMessage 'TightVNC: the control password is the same as the server password. A different one (WINGET_APP_SETUP_TIGHTVNC_CONTROL_PASSWORD) is better: anyone who knows the server password can change the server settings from the TightVNC tray icon.'
         }
 
-        # The service reads the key only when it starts: restart it when this call changed a value,
-        # or when an earlier attempt did and its restart never finished (the marker), and start it
-        # when it is stopped. Only a stopped service is merely started: one in any other state may
-        # already have read the old values.
+        # Restart when this call changed a value or an earlier restart never finished (the marker);
+        # only a stopped service is merely started, since any other may have read the old values.
         $restartNeeded = $changed.Count -gt 0 -or [bool]$settings.RestartPending
         try {
             if ($restartNeeded) {

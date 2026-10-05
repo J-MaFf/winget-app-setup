@@ -1,45 +1,35 @@
-# One way to run winget and msiexec (review findings P2-5, P2-6 and P3-6). Every call site used to
-# launch its process its own way: Start-Process -Wait with no time limit (the install itself),
-# Start-Process with temp files and WaitForExit, or an inline native call. So the installs had no
-# time limit, winget's own output never reached the transcript, and a failed launch was classified
-# by English error text. Invoke-ExternalProcess does all three in one place, and
-# Invoke-WingetProcess adds what is specific to winget. Both run under Windows PowerShell 5.1 too
-# (the PowerShell 7 bootstrap installs pwsh with winget), so they use only .NET Framework 4.5 APIs:
-# ProcessStartInfo.Arguments rather than ArgumentList, and taskkill rather than Kill($true).
+# One way to run winget and msiexec: a time limit, the output in the transcript, and a failed launch
+# classified by its Win32 code (P2-5, P2-6, P3-6). Invoke-WingetProcess adds what is specific to
+# winget. Both run under Windows PowerShell 5.1 too (the PowerShell 7 bootstrap installs pwsh with
+# winget), so .NET Framework 4.5 APIs only: ProcessStartInfo.Arguments, not ArgumentList, and
+# taskkill, not Kill($true).
 
 <#
 .SYNOPSIS
-    Returns the time limit, in seconds, for one kind of external process call.
+    Returns the time limit, in seconds, for one kind of external process call: the one place the
+    limits live.
 .DESCRIPTION
-    The single place the time limits live. Each limit bounds one process (and every process it
-    starts): when it runs out, the process tree is stopped and the call reports TimedOut. The
-    limits are generous on purpose. They exist so that a hung installer, a winget waiting on its
-    own cross-process install lock or a stalled download cannot stop an unattended run forever
-    with no summary and no exit code (P2-5), not to cut a slow machine short.
+    When a limit runs out, the process tree is stopped and the call reports TimedOut. The limits are
+    generous: they keep a hung installer or a stalled download from stopping an unattended run
+    forever, not a slow machine from finishing.
 .PARAMETER Operation
-    WingetInstall     one `winget install`: the download, the installer itself, and winget's wait
-                      for another winget install on the machine (30 minutes).
+    WingetInstall     one `winget install`, its download, installer and wait for another winget
+                      install included (30 minutes).
     WingetDownload    one `winget download` (30 minutes).
     WingetUninstall   one `winget uninstall`, the app's own uninstaller included (15 minutes).
-    WingetListCheck   the per-app `winget list` check before and after an install (15 seconds, the
-                      limit those checks have always had).
-    WingetVersion     the `winget --version` launch check (30 seconds; it does no network or
-                      source I/O).
+    WingetListCheck   the per-app `winget list` check before and after an install (15 seconds).
+    WingetVersion     the `winget --version` launch check (30 seconds; no network or source I/O).
     WingetSourceUpdate `winget source update`, the source check before the installs (2 minutes).
     WingetSourceReset `winget source reset`, which downloads the source again (5 minutes).
-    MsiExec           one msiexec install or uninstall (15 minutes, as for the PowerShell 7 MSI).
-    AppxProvisioning  one Add-AppxProvisionedPackage, run in Windows PowerShell, such as the Windows
-                      App Runtime framework's (10 minutes).
-    WebDownload       a file download, such as the Winget-AutoUpdate MSI or the Windows App
-                      Runtime package: the connection and the wait for the response headers
-                      (5 minutes). Invoke-WebRequest's -TimeoutSec does not cover the body.
+    MsiExec           one msiexec install or uninstall (15 minutes).
+    AppxProvisioning  one Add-AppxProvisionedPackage, run in Windows PowerShell (10 minutes).
+    WebDownload       a file download's connection and wait for the response headers (5 minutes);
+                      Invoke-WebRequest's -TimeoutSec does not cover the body.
     WebDownloadStall  how long a download may receive nothing once the file is arriving, on
-                      PowerShell 7.4 and newer (2 minutes). 7.3 and older have no such limit.
-    WebLookup         a small file read from the web that the run can do without, such as the
-                      latest winget release's DesktopAppInstaller_Dependencies.json (30 seconds,
-                      for the connection and response headers and, on PowerShell 7.4 and newer,
-                      for a stall while it arrives).
-.RETURNS
+                      PowerShell 7.4 and newer (2 minutes).
+    WebLookup         a small file the run can do without, such as the latest winget release's
+                      DesktopAppInstaller_Dependencies.json (30 seconds, for both of the above).
+.OUTPUTS
     [int] Seconds.
 #>
 function Get-ProcessTimeoutSeconds {
@@ -69,16 +59,13 @@ function Get-ProcessTimeoutSeconds {
 .SYNOPSIS
     Returns the time-limit parameters for an Invoke-WebRequest download, for splatting.
 .DESCRIPTION
-    Invoke-WebRequest has no time limit by default, so a download that connects and then stops
-    receiving waits for ever (review finding P2-5). -TimeoutSec bounds the connection and the wait
-    for the response headers only (PowerShell sends the request with ResponseHeadersRead and reads
-    the body after HttpClient's timeout has ended). PowerShell 7.4 and newer add
-    -OperationTimeoutSeconds, which bounds a stall while the body arrives; both are passed where
-    they exist. On 7.3 and older a download that stops mid-file still waits for ever.
+    -TimeoutSec bounds only the connection and the response headers; PowerShell 7.4+ adds
+    -OperationTimeoutSeconds, which bounds a stall while the body arrives. Both are passed where they
+    exist; on 7.3 and older a download that stops mid-file still waits for ever.
 .PARAMETER Lookup
     For a small file the run can do without (WebLookup): both limits are 30 seconds instead of the
     download limits.
-.RETURNS
+.OUTPUTS
     [hashtable] TimeoutSec, plus OperationTimeoutSeconds when Invoke-WebRequest has it.
 #>
 function Get-WebDownloadTimeoutParameters {
@@ -105,14 +92,12 @@ function Get-WebDownloadTimeoutParameters {
 .SYNOPSIS
     Joins arguments into one command line, quoted the way Windows programs split it again.
 .DESCRIPTION
-    ProcessStartInfo.ArgumentList does not exist on .NET Framework (Windows PowerShell 5.1), so the
-    arguments go into ProcessStartInfo.Arguments as one string. An argument that is empty or holds
-    white space or a double quote is wrapped in double quotes, with backslashes before a quote
-    doubled, which is how CommandLineToArgvW and the C runtime read a command line back (the rules
-    .NET's own ArgumentList quoting follows). Other arguments pass through unchanged.
+    For ProcessStartInfo.Arguments, since ArgumentList does not exist on .NET Framework (5.1). An
+    argument that is empty or holds white space or a double quote is wrapped in double quotes, with
+    backslashes before a quote doubled, as CommandLineToArgvW reads it back. Others pass unchanged.
 .PARAMETER ArgumentList
     The arguments, one per element.
-.RETURNS
+.OUTPUTS
     [string] The command line, without the program name.
 #>
 function ConvertTo-ProcessArgumentString {
@@ -160,13 +145,11 @@ function ConvertTo-ProcessArgumentString {
 .SYNOPSIS
     Returns the Win32 error code behind a failed process launch, or $null.
 .DESCRIPTION
-    Process.Start throws a Win32Exception whose NativeErrorCode says why the launch failed, and
-    PowerShell wraps it (MethodInvocationException). This walks the InnerException chain to it, so
-    callers classify a launch failure by its code (P3-6), which is the same in every display
-    language, instead of by its message, which Windows translates.
+    Walks the InnerException chain to the Win32Exception Process.Start threw, so a launch failure is
+    classified by its code, the same in every display language, not by its translated message.
 .PARAMETER Exception
     The caught exception.
-.RETURNS
+.OUTPUTS
     [int] The NativeErrorCode, or $null when no Win32Exception is in the chain.
 #>
 function Get-NativeErrorCode {
@@ -191,7 +174,7 @@ function Get-NativeErrorCode {
     Removes terminal control sequences and trailing white space from a line of process output.
 .PARAMETER Line
     One line as the process wrote it.
-.RETURNS
+.OUTPUTS
     [string]
 #>
 function ConvertTo-PlainProcessLine {
@@ -214,16 +197,12 @@ function ConvertTo-PlainProcessLine {
 .SYNOPSIS
     Classifies one line of winget output for echoing: real text, a progress update or noise.
 .DESCRIPTION
-    With its output redirected, winget still draws its spinner (- \ | /) and its download progress
-    bar, one carriage-return-separated update at a time, and each update arrives as a line of its
-    own. Echoing every one of them would bury the lines that matter. 'Spinner' and 'Blank' lines
-    are dropped, and of a run of 'Progress' lines only the last is shown. A 'Status' line is the
-    spinner with a message after it, which winget redraws every 250 ms for as long as it waits,
-    for example '   - Waiting for another install/uninstall to complete...' while another install
-    holds its lock; Select-ProcessOutputLine shows it once per run of the same message.
+    Redirected, winget still draws its spinner (- \ | /) and progress bar, each update a line of
+    its own. 'Status' is the spinner with a message, redrawn every 250 ms while winget waits, such
+    as '   - Waiting for another install/uninstall to complete...'.
 .PARAMETER Line
     A line already passed through ConvertTo-PlainProcessLine.
-.RETURNS
+.OUTPUTS
     [string] 'Blank', 'Spinner', 'Status', 'Progress' or 'Text'.
 #>
 function Get-ProcessOutputLineKind {
@@ -255,15 +234,12 @@ function Get-ProcessOutputLineKind {
 .SYNOPSIS
     Decides which lines of process output to show, one line at a time.
 .DESCRIPTION
-    The filter Write-ProcessOutput and Invoke-ExternalProcess's live echo share, so both show the
-    same lines (Get-ProcessOutputLineKind classifies them):
-      - 'Blank' and 'Spinner' lines are dropped.
-      - Of a run of 'Progress' updates only the last is shown, just before the next line that is
-        shown, or at the end through -Flush.
-      - A 'Status' line is shown once per run of the same message (the spinner character in front
-        of it changes on every redraw, so only the message is compared). Without this, winget's
-        wait for another install, the case a run queued behind Winget-AutoUpdate hits, wrote four
-        lines a second for up to the 30-minute install limit.
+    The filter Write-ProcessOutput and Invoke-ExternalProcess's live echo share:
+      - 'Blank' and 'Spinner' lines are dropped;
+      - of a run of 'Progress' updates only the last is shown, before the next shown line or at
+        -Flush;
+      - a 'Status' line is shown once per run of the same message (the spinner character is not
+        compared), or a wait for another install would print four lines a second for 30 minutes;
       - 'Text' lines are always shown.
 .PARAMETER State
     A hashtable the caller keeps for one run of output, empty to begin with.
@@ -271,7 +247,7 @@ function Get-ProcessOutputLineKind {
     The next line, already passed through ConvertTo-PlainProcessLine.
 .PARAMETER Flush
     End of the output: return the progress update still held back, if any.
-.RETURNS
+.OUTPUTS
     [string[]] The lines to show now, in order. Often none.
 #>
 function Select-ProcessOutputLine {
@@ -330,13 +306,10 @@ function Select-ProcessOutputLine {
 .SYNOPSIS
     Writes process output to the console, and so into the transcript, without the progress noise.
 .DESCRIPTION
-    Start-Transcript records what PowerShell writes to the host, never what a child process writes
-    straight to the console, which is why the transcript used to hold none of winget's own lines
-    (P2-6). Lines go out through Write-Host, indented, filtered by Select-ProcessOutputLine: spinner
-    and blank lines dropped, a run of progress updates collapsed to its last one, and a status
-    message winget redraws shown once. Invoke-ExternalProcess applies the same filter as lines
-    arrive; callers that capture quietly call this afterwards, for example only when a command
-    failed.
+    A transcript records only what PowerShell writes to the host, never a child process's own
+    console output (P2-6), so the lines go out through Write-Host, indented and filtered by
+    Select-ProcessOutputLine. For callers that capture quietly, for example to show the output only
+    when a command failed.
 .PARAMETER Line
     The lines to write.
 .PARAMETER Tail
@@ -378,11 +351,9 @@ function Write-ProcessOutput {
 .SYNOPSIS
     Stops a process and every process it started.
 .DESCRIPTION
-    A timed-out winget is usually waiting on the installer it started, so stopping winget alone
-    would leave the installer running, holding the Windows Installer mutex and the output pipes.
-    On Windows this runs `taskkill /PID <id> /T /F`, which stops the whole tree and works under
-    Windows PowerShell 5.1. Elsewhere, or when taskkill fails, it uses Process.Kill(true) (.NET
-    Core 3.0 and newer), then Process.Kill().
+    A timed-out winget usually waits on its installer, which would otherwise keep running and hold
+    the Windows Installer mutex and the output pipes. On Windows `taskkill /PID <id> /T /F` (works
+    under 5.1); elsewhere, or when taskkill fails, Process.Kill(true), then Process.Kill().
 .PARAMETER Process
     The process to stop.
 #>
@@ -436,21 +407,17 @@ function Stop-ProcessTree {
 .SYNOPSIS
     Runs a program with a time limit, captures its output and echoes it into the transcript.
 .DESCRIPTION
-    The process primitive behind every winget and msiexec call (P2-5, P2-6, P3-6):
-      - A bare program name is resolved on PATH with Get-Command, as Start-Process did, so the
-        current directory is never searched for it.
-      - Standard output and standard error are redirected, read line by line as they arrive, and
-        with -Echo Live written to the host through Write-Host (Write-ProcessOutput's filter), so
-        they reach the transcript and the console both. Standard input is closed: nothing may wait
-        for a key press.
-      - When TimeoutSeconds runs out, the process and everything it started are stopped
-        (Stop-ProcessTree) and the result says TimedOut; the caller says so in its own words.
-        Output that keeps a pipe open after the process itself exited (a child it left running) is
-        read for a few seconds more, then left.
-      - A launch failure never throws: the result says LaunchFailed, with the Win32 error code
-        (LaunchErrorCode: 2 not found, 5 access denied, 32 sharing violation, 1920 the file cannot
-        be accessed by the system), so callers classify it by code rather than by translated text.
-    The exit code comes from the process object, so it cannot go stale the way $LASTEXITCODE does.
+    The process primitive behind every winget and msiexec call:
+      - A bare program name is resolved on PATH with Get-Command, so the current directory is never
+        searched.
+      - Standard output and error are read line by line as they arrive and, with -Echo Live, written
+        to the host (Write-ProcessOutput's filter), so they reach the transcript. Standard input is
+        closed: nothing may wait for a key press.
+      - When TimeoutSeconds runs out, the process tree is stopped (Stop-ProcessTree) and the result
+        says TimedOut. Output a leftover child keeps open is read for a few seconds more, then left.
+      - A launch failure never throws: the result says LaunchFailed, with LaunchErrorCode (2 not
+        found, 5 access denied, 32 sharing violation, 1920 the file cannot be accessed).
+    The exit code comes from the process object, so it cannot go stale as $LASTEXITCODE does.
 .PARAMETER FilePath
     The program: a full path, or a name to find on PATH.
 .PARAMETER ArgumentList
@@ -464,16 +431,14 @@ function Stop-ProcessTree {
     Live (default): print the command line, then each output line as it arrives. None: print
     nothing; the caller can pass the captured Output to Write-ProcessOutput later.
 .PARAMETER Encoding
-    The encoding the program writes its output in. Default UTF-8, which winget writes whatever the
-    console code page is. Windows PowerShell writes redirected output in the console's code page
-    instead, so Invoke-AppxProvisioning passes [Console]::OutputEncoding, the encoding PowerShell
-    itself reads a native program's output with; read as UTF-8, a localized error message would
-    lose its non-ASCII letters.
+    The encoding the program writes its output in. Default UTF-8, which winget always writes.
+    Windows PowerShell writes redirected output in the console's code page, so
+    Invoke-AppxProvisioning passes [Console]::OutputEncoding.
 .PARAMETER RemoveEnvironmentVariable
     Environment variables the program starts without; the rest of this process's environment is
-    passed on as it is, and this process's own environment does not change. PSModulePath, for
-    Windows PowerShell started from PowerShell 7 (see Invoke-DiagnosticsWindowsPowerShell).
-.RETURNS
+    passed on, and this process's own environment does not change (PSModulePath, for Windows
+    PowerShell started from PowerShell 7).
+.OUTPUTS
     [pscustomobject] with FilePath, Arguments, ExitCode ($null when the process timed out or did
     not start), TimedOut, LaunchFailed, LaunchErrorCode, LaunchError (message), LaunchException,
     Output (standard output and standard error lines in arrival order, control sequences removed),
@@ -713,12 +678,10 @@ function Invoke-ExternalProcess {
 
 <#
 .SYNOPSIS
-    Returns the folder this run's logs go to, or $null.
-.DESCRIPTION
-    The folder of the run's transcript ($script:InstallLogPath, set by the generated installer's
-    entry script before it calls anything else). $null when the transcript did not start, or
-    outside the installer (the imported module, tests), and then no installer log is requested.
-.RETURNS
+    Returns the folder this run's logs go to: that of $script:InstallLogPath, which the entry script
+    sets first. $null without a transcript or outside the installer, and then no installer log is
+    requested.
+.OUTPUTS
     [string] or $null.
 #>
 function Get-InstallerLogDirectory {
@@ -732,14 +695,11 @@ function Get-InstallerLogDirectory {
 .SYNOPSIS
     Runs winget through Invoke-ExternalProcess, with its installer log in the run's logs folder.
 .DESCRIPTION
-    Resolves winget with Resolve-WingetExecutable unless the caller already has a path, then runs
-    it through Invoke-ExternalProcess with the caller's time
-    limit. For the subcommands that run an installer (install, upgrade, uninstall, repair), winget
-    is also passed `--log <file>` in the run's logs folder (Get-InstallerLogDirectory), named after
-    the subcommand, the package id and the time, so the MSI or Inno log of a failed install is next
-    to the transcript instead of in the elevating account's winget state folder. The folder is
-    created first: msiexec fails the whole install (1622) when it cannot open its log. Nothing is
-    added when the caller already passes --log or -o, or when there is no logs folder.
+    Resolves winget with Resolve-WingetExecutable unless a path is given. For install, upgrade,
+    uninstall and repair it adds `--log <file>` in the logs folder, named after the subcommand, the
+    package id and the time, so a failed installer's log sits next to the transcript. The folder is
+    created first: msiexec fails the install (1622) when it cannot open its log. Nothing is added
+    when the caller passes --log or -o, or there is no logs folder.
 .PARAMETER ArgumentList
     winget's arguments, subcommand first.
 .PARAMETER TimeoutSeconds
@@ -750,7 +710,7 @@ function Get-InstallerLogDirectory {
     Passed to Invoke-ExternalProcess. Default Live.
 .PARAMETER LogDirectory
     Where to put the installer log. Default: Get-InstallerLogDirectory. Empty: no --log.
-.RETURNS
+.OUTPUTS
     Invoke-ExternalProcess's result, with LogPath set to the installer log path when --log was
     passed (the file exists only if the installer wrote one).
 #>

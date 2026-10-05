@@ -71,7 +71,7 @@ function Write-ErrorMessage {
     This function checks if an array has content and formats it as a comma-separated string.
 .PARAMETER AppArray
     The array of app names to format
-.RETURNS
+.OUTPUTS
     A formatted string of app names, or $null if the array is empty
 #>
 function Format-AppList {
@@ -90,22 +90,14 @@ function Format-AppList {
 
 <#
 .SYNOPSIS
-    Displays a formatted table of results.
-.DESCRIPTION
-    Renders the rows as text via PowerShell's built-in Format-Table, so the table is in the console
-    and in the run's transcript.
-
-    Text only, on purpose (review findings P3-43, P3-45): the Out-GridView window this used to open
-    as well only repeated the table, never reached the transcript, and needed a PowerShell Gallery
-    module installed for all users wherever Out-GridView was missing.
+    Writes a table of results as text, so it reaches both the console and the transcript.
 .PARAMETER Headers
-    Array of column header names
+    The column names.
 .PARAMETER Rows
-    Array of row data (each row is an array matching the header count)
+    The rows, each an array with one value per header.
 .PARAMETER Title
-    The table's name: 'Installation Summary', 'Failed Installations' and so on. It is not printed
-    (it used to title the grid view window); it tells the run's tables apart for a caller or a test
-    that captures them.
+    The table's name ('Installation Summary', 'Failed Installations', ...). Not printed: it tells
+    a caller or a test which table it captured.
 #>
 function Write-Table {
     param (
@@ -128,10 +120,8 @@ function Write-Table {
         $tableData += $obj
     }
 
-    # An explicit width (review finding P3-13): without one, Out-String uses the console width, so a
-    # transcript or captured output (120 columns on a runner or an RMM agent) cut long rows off with
-    # an ellipsis - the failed-app list and its reasons, the very text a failure report needs - and a
-    # process with no console at all rendered an empty table. Lines are not padded to this width.
+    # An explicit width: the console's (120 columns on a runner or an RMM agent, none without a
+    # console) cut failure reasons off or emptied the table. Lines are not padded to it.
     $output = $tableData | Format-Table -AutoSize -Wrap | Out-String -Width 4096
     Write-Host $output.TrimEnd()
 }

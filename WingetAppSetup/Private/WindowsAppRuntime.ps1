@@ -1,39 +1,23 @@
 # Installs the Microsoft.WindowsAppRuntime.1.8 framework, pinned and verified, for every user of the
-# PC (work-order item 31, finding R13-3). Every winget release since 1.12 needs that framework, and
-# every Winget-AutoUpdate run provisions the newest winget, so WAU is only set up where the
-# framework is present (Get-WindowsAppRuntimeStatus, WauSupport.ps1). A freshly imaged PC, a PC
-# whose Microsoft Store updates are blocked and Windows Server lack it until something installs it,
-# and the run then ended with 'Auto-updates: NOT CONFIGURED' and exit code 8. Install-WingetAutoUpdate
-# now installs it first. Runs under PowerShell 7 only (Invoke-WingetInstall's WAU step).
+# PC. Every winget since 1.12 needs it and every Winget-AutoUpdate run provisions the newest winget,
+# so WAU is set up only where it is present; freshly imaged, Store-blocked and Server PCs lack it.
+# Runs under PowerShell 7 only (Invoke-WingetInstall's WAU step).
 
 <#
 .SYNOPSIS
-    Returns the pinned Windows App Runtime 1.8 framework release.
+    Returns the pinned Windows App Runtime 1.8 framework release: the one place the pin lives.
 .DESCRIPTION
-    The single place the pin lives. The framework files come from the NuGet package
-    Microsoft.WindowsAppSDK.Runtime, where Microsoft publishes them from 1.8 on (the
-    Microsoft.WindowsAppSDK package itself no longer holds them). A NuGet version cannot be
-    overwritten once published.
+    The files come from the NuGet package Microsoft.WindowsAppSDK.Runtime (a published NuGet version
+    cannot change). The SHA256 of each framework .msix is the pin that matters; the .nupkg is not
+    pinned, because NuGet re-signs packages. Each file's Authenticode signer is checked too.
+    Microsoft's WindowsAppRuntimeInstall-<arch>.exe is not used: it never provisions for all users.
 
-    The SHA256 of each framework .msix is the pin that matters. The .nupkg itself is not pinned:
-    NuGet re-signs a package when a signing certificate is revoked, which changes the .nupkg's bytes
-    but not the files inside it. Each file is also checked for a valid Authenticode signature by
-    SignerCommonName before it is provisioned.
-
-    Microsoft's WindowsAppRuntimeInstall-<arch>.exe is not used: it never provisions the framework
-    for all users (it registers it for the elevating account only, or, as SYSTEM, only stages it),
-    and it also deploys packages winget does not need, which can fail after the framework itself is
-    in place.
-
-    To move to a newer 1.8 servicing release, change every field together: the version numbers, the
-    URL, and each architecture's Entry, Size and Sha256, read from the new .nupkg
-    (tools/MSIX/win10-<arch>/Microsoft.WindowsAppRuntime.1.8.msix). The framework version of a
-    release is the Identity Version in that file's AppxManifest.xml. Moving to a newer framework
-    family (Microsoft.WindowsAppRuntime.2) is a different change: winget's dependency names 1.8.
-    When the latest winget release needs a newer 1.8 build than FrameworkVersion, or another
-    family, Install-WindowsAppRuntimeFramework installs nothing and says so
-    (Get-WindowsAppRuntimeRequirement, work-order item 32): that is the sign to move the pin.
-.RETURNS
+    To move to a newer 1.8 release, change every field together, reading Entry, Size and Sha256 from
+    the new .nupkg (tools/MSIX/win10-<arch>/Microsoft.WindowsAppRuntime.1.8.msix) and the framework
+    version from its AppxManifest.xml Identity. When the latest winget needs a newer 1.8 build or
+    another family, Install-WindowsAppRuntimeFramework installs nothing and says so: the sign to move
+    the pin.
+.OUTPUTS
     [hashtable] with Release, NuGetVersion, FrameworkName (the framework's package name),
     FrameworkVersion, PackageUrl, SignerCommonName and Frameworks: one entry per OS architecture,
     keyed as Get-OSArchitecture names it (X64, X86, Arm64), each with Entry (the file's path inside
@@ -71,13 +55,11 @@ function Get-WindowsAppRuntimePin {
 .SYNOPSIS
     Lists the Microsoft.WindowsAppRuntime.1.8 framework packages provisioned for every user.
 .DESCRIPTION
-    Thin query seam (mocked in tests), the provisioned-package counterpart of
-    Get-WindowsAppRuntimePackageInfo. The version and architecture come from each package's
-    PackageName, for example Microsoft.WindowsAppRuntime.1.8_8000.994.2142.0_x64__8wekyb3d8bbwe.
-    `Get-AppxProvisionedPackage -Online` needs administrator rights; under PowerShell 7 it runs in
-    Windows PowerShell 5.1, where the DISM module always loads (as Get-ProvisionedAppxPackageName
-    does). Throws when the query fails.
-.RETURNS
+    A query seam. Version and architecture come from each PackageName, e.g.
+    Microsoft.WindowsAppRuntime.1.8_8000.994.2142.0_x64__8wekyb3d8bbwe. Needs administrator rights;
+    under PowerShell 7 it runs in Windows PowerShell 5.1, where the DISM module always loads. Throws
+    when the query fails.
+.OUTPUTS
     [pscustomobject[]] with Version ([version]) and Architecture ('X64', 'X86', 'Arm64', 'Arm' or
     'Neutral').
 #>
@@ -108,12 +90,11 @@ function Get-WindowsAppRuntimeProvisionedInfo {
 
 <#
 .SYNOPSIS
-    Writes one framework .msix out of the downloaded Microsoft.WindowsAppSDK.Runtime package.
+    Writes one framework .msix out of the downloaded Microsoft.WindowsAppSDK.Runtime package (a zip).
 .DESCRIPTION
-    A .nupkg is a zip file. The file's size inside the package is compared with the pin before
-    anything is written, so another package can neither be extracted under the pinned name nor fill
-    the disk; the caller checks the hash. Throws when the package cannot be read, has no such file,
-    or the file's size differs.
+    The file's size in the package is compared with the pin before anything is written, so another
+    file can neither take the pinned name nor fill the disk; the caller checks the hash. Throws when
+    the package cannot be read, lacks the file, or the size differs.
 .PARAMETER PackagePath
     The downloaded .nupkg.
 .PARAMETER EntryName
@@ -158,15 +139,14 @@ function Expand-WindowsAppRuntimeMsix {
 .SYNOPSIS
     Checks that a file carries a valid Authenticode signature from the given signer.
 .DESCRIPTION
-    Status 'Valid' means Windows checked the signature against the file's content and chained the
-    signing certificate to a trusted root (an .msix is checked through Windows' own package
-    signature provider). The certificate subject's common name must also be exactly
-    SignerCommonName. The same rule Test-PowerShell7MsiSignature applies to the PowerShell MSI.
+    Status 'Valid' (the signature matches the content and chains to a trusted root) and a
+    certificate common name of exactly SignerCommonName, the rule Test-PowerShell7MsiSignature
+    applies to the PowerShell MSI.
 .PARAMETER Path
     The file to check.
 .PARAMETER SignerCommonName
     The common name (CN) the signing certificate must have.
-.RETURNS
+.OUTPUTS
     [pscustomobject] with Valid ([bool]) and Detail (the signer, or why the check failed).
 #>
 function Test-WindowsAppRuntimeSignature {
@@ -206,37 +186,24 @@ function Test-WindowsAppRuntimeSignature {
 .SYNOPSIS
     Installs the pinned Microsoft.WindowsAppRuntime.1.8 framework for every user of this PC.
 .DESCRIPTION
-    Called by Install-WingetAutoUpdate when Get-WindowsAppRuntimeStatus finds no suitable
-    framework (never when that check itself failed). Steps:
-      1. Preconditions: the pinned framework meets every framework of the requirement this PC
-         lacks (what the latest winget release needs, Get-WindowsAppRuntimeRequirement: the same
-         family, at a version no higher than the pinned one; a newer family does not stand in for
-         an older one, nor the other way round; one the PC already has does not matter), an
-         elevated run (SYSTEM included), an OS architecture the pin has a file for
-         (X64, X86, Arm64), Windows build 17763 or later (the framework's minimum), and no
-         provisioned framework for this architecture at or above the pinned version: a newer build
-         is never replaced or downgraded.
-      2. Download Microsoft.WindowsAppSDK.Runtime (about 150 MB) from NuGet.org into a new folder
-         limited to SYSTEM and Administrators (New-WauStagingDirectory, checked before anything is
-         downloaded), with the download time limits Get-WebDownloadTimeoutParameters gives. The
-         whole package rather than a byte range of it: the file's offset inside the package moves
-         when NuGet re-signs it, and a proxy may ignore a range request, so a ranged read would
-         need this path as its fallback anyway. Only a PC without the framework downloads it, but
-         nothing remembers a failed attempt: until an install succeeds, every run there downloads
-         the package again.
-      3. Extract this architecture's framework .msix (size checked against the pin first), open it
-         with read-only sharing (Open-ReadLockedFile), hash it from that handle, check its
-         Authenticode signature, and provision it with Add-AppxProvisionedPackage -Online
-         -SkipLicense (Invoke-AppxProvisioning, run in Windows PowerShell with a time limit). The
-         handle stays open until provisioning has finished, so what is provisioned is what was
-         hashed.
-      4. Check again: Get-WindowsAppRuntimeStatus must now find what the requirement names; when
-         it reports it missing,
-         the install failed. When that check cannot run, the install counts as done, with a
-         warning: Add-AppxProvisionedPackage succeeded, and an unknown answer is not evidence that
-         the framework is missing (Install-WingetAutoUpdate goes ahead with WAU on one too). The
-         provisioned packages are read too, and a framework that is not listed as provisioned for
-         all users gets a warning.
+    Install-WingetAutoUpdate calls it when Get-WindowsAppRuntimeStatus finds no suitable framework
+    (not when that check failed). Steps:
+      1. Preconditions: the pin meets every framework of the requirement this PC lacks (same family,
+         version no higher than the pin's), the run is elevated, the pin has a file for this OS
+         architecture, Windows is build 17763 or later, and no framework at or above the pin is
+         provisioned for this architecture (a newer one is never replaced).
+      2. Download the package (about 150 MB) from NuGet.org into a new folder only SYSTEM and
+         Administrators can change (New-WauStagingDirectory), with the limits
+         Get-WebDownloadTimeoutParameters gives. Whole, not a byte range: the file's offset moves
+         when NuGet re-signs, and a proxy may ignore ranges. A failure is not remembered, so every
+         run downloads it again until an install succeeds.
+      3. Extract this architecture's .msix (size checked first), hold it open with read-only
+         sharing (Open-ReadLockedFile), hash it from that handle, check its signature, and provision
+         it with Add-AppxProvisionedPackage -Online -SkipLicense (Invoke-AppxProvisioning), so what
+         is provisioned is what was hashed.
+      4. Check again: Get-WindowsAppRuntimeStatus must find what the requirement names. When that
+         check cannot run, the install counts as done with a warning. A framework not listed as
+         provisioned for all users gets a warning.
     Writes one 'Windows App Runtime: installed ...' or 'Windows App Runtime: NOT INSTALLED - <reason>'
     line, which e2e/TranscriptAssertions.ps1 reads. Never uses Repair-WinGetPackageManager -AllUsers
     (issue #265). Never throws.
@@ -246,7 +213,7 @@ function Test-WindowsAppRuntimeSignature {
 .PARAMETER MissingFrameworks
     The frameworks of the requirement this PC lacks (Get-WindowsAppRuntimeStatus's Missing); only
     these must be ones the pin meets. Default (or empty): every framework of the requirement.
-.RETURNS
+.OUTPUTS
     [pscustomobject] with Installed ([bool]: Add-AppxProvisionedPackage succeeded and the check
     afterwards found the framework, or could not run), Status (Get-WindowsAppRuntimeStatus's result
     after provisioning, Present $null when that check could not run, or $null when nothing was
@@ -275,7 +242,7 @@ function Install-WindowsAppRuntimeFramework {
         if ($null -eq $Requirement) {
             $Requirement = Get-DefaultWindowsAppRuntimeRequirement
         }
-        # Work-order item 32: the pinned 1.8 framework does not help a winget that needs a newer
+        # The pinned 1.8 framework does not help a winget that needs a newer
         # 1.8 build or another family, so it is not installed for one (and WAU stays off). Only
         # what this PC lacks counts: another family it already has is no reason to refuse.
         $needed = @($Requirement.Frameworks)

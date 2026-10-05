@@ -3,30 +3,19 @@
     Uninstalls the curated apps and the automatic updates the installer set up, and returns an exit
     code.
 .DESCRIPTION
-    The body of winget-app-uninstall.ps1 (review findings P2-19 and P3-18), which runs it after it
-    has made sure it is elevated. It reuses the installer's pieces rather than its own copies:
-      1. The app list is validated with Test-AppDefinitions, as the installer does (exit code 3).
-      2. winget is set up the way Invoke-WingetInstall does it, for the account it decides once
-         (Get-InstallAccountContext, review findings P2-24, P3-23), with Initialize-Winget (review
-         finding P3-25): App Installer's Group Policy, `winget --version` (as SYSTEM: the
-         machine-wide winget.exe, and no account fix), the account fixes (registering App
-         Installer, then Repair-WinGetPackageManager, whose module is installed only then) and the
-         winget source. When winget still cannot be used, nothing is removed
-         and the run returns 2: without winget the uninstaller cannot tell which apps are installed,
-         and removing Winget-AutoUpdate anyway would leave every app on the machine without
-         updates. It used to report every app as "not installed", remove Winget-AutoUpdate and exit
-         0, which is what an admin account with no winget of its own (cross-user elevation) or
-         SYSTEM got.
-      3. Each app goes through Uninstall-CatalogApp: a check winget could not answer is a failure,
-         not "not installed"; the shells this run depends on are kept (Get-HostingShellSkipReason);
-         the catalog conditions are honoured; winget uninstall runs with --silent under a time
-         limit.
-      4. Once winget no longer lists Windows Terminal (removed now, or not installed), the
-         default-terminal setting that still names it is removed (Reset-WindowsTerminalDelegation).
-      5. Winget-AutoUpdate (and the legacy scheduled-update task) is removed last, and only when no
-         app failed: an app that could not be removed is still on the machine and keeps its
-         updates until a later run removes it. The messages that say Winget-AutoUpdate is kept
-         appear only when it is installed (Test-WauInstalled).
+    The body of winget-app-uninstall.ps1, which runs it once elevated. It reuses the installer's
+    pieces:
+      1. The app list is validated with Test-AppDefinitions (exit code 3).
+      2. winget is set up as Invoke-WingetInstall does it, with Initialize-Winget for the account
+         Get-InstallAccountContext decides. When winget still cannot be used, nothing is removed
+         and the run returns 2: without winget the uninstaller cannot tell what is installed, and
+         removing Winget-AutoUpdate anyway would leave every app without updates.
+      3. Each app goes through Uninstall-CatalogApp.
+      4. Once winget no longer lists Windows Terminal, the default terminal setting that still names
+         it is removed (Reset-WindowsTerminalDelegation).
+      5. Winget-AutoUpdate (and the legacy scheduled-update task) goes last, and only when no app
+         failed: an app still on the machine keeps its updates. That is said only when
+         Winget-AutoUpdate is installed.
 .PARAMETER WhatIf
     Dry run: the read-only checks run and the summary shows what a real run would remove. Nothing is
     uninstalled or changed, and nothing is installed (the winget setup only checks).
@@ -36,16 +25,14 @@
     [int] The exit code. The function never ends the process; winget-app-uninstall.ps1 exits with
     the returned code.
 .NOTES
-    Exit codes: 0 = every app was removed, was not installed, or was left alone on purpose (a shell
-    this run depends on, or an app whose catalog condition does not hold here), and
-    Winget-AutoUpdate was removed or was not installed; 3010 = the same, and a restart finishes
-    removing an app or Winget-AutoUpdate (its uninstaller returned 3010 or 1641); 1 = an app could
-    not be removed or checked (Winget-AutoUpdate is then kept), or Winget-AutoUpdate could not be
-    removed; 2 = winget cannot be started for this account, or Group Policy turns it off, so
-    nothing was removed (Winget-AutoUpdate included); 3 = the app list has invalid entries or is
-    empty. 1 ranks above 3010. A dry run returns 0 when winget cannot be started, and never 3010.
-    winget-app-uninstall.ps1 adds 4 (not elevated and the UAC prompt was declined or could not be
-    shown) and 5 (an unexpected error, or the module could not be loaded).
+    Exit codes: 0 = every app was removed, was not installed, or was left alone on purpose, and
+    Winget-AutoUpdate was removed or was not installed; 3010 = the same, and a restart finishes a
+    removal (an uninstaller returned 3010 or 1641); 1 = an app could not be removed or checked
+    (Winget-AutoUpdate is then kept), or Winget-AutoUpdate could not be removed; 2 = winget cannot be
+    started for this account, or Group Policy turns it off, so nothing was removed; 3 = the app list
+    has invalid entries or is empty. 1 ranks above 3010. A dry run returns 0 when winget cannot be
+    started, and never 3010. winget-app-uninstall.ps1 adds 4 (not elevated, and the UAC prompt was
+    declined or could not be shown) and 5 (an unexpected error, or the module could not be loaded).
 #>
 function Invoke-WingetUninstall {
     [OutputType([int])]
@@ -80,14 +67,10 @@ function Invoke-WingetUninstall {
     }
     $apps = @($validationResult.ValidApps)
 
-    # winget first, set up as the installer does it (review finding P2-19), for the account the
-    # run decides once, as Invoke-WingetInstall does (review findings P2-24, P3-23):
-    # Initialize-Winget, the installer's one probe, classify and fix step (review finding P3-25).
-    # As SYSTEM it uses the machine-wide winget.exe, which Resolve-WingetExecutable returns from
-    # then on (a stale path from an earlier run in this session is dropped first), and runs no
-    # account fix, so nothing installs Microsoft.WinGet.Client for SYSTEM. It says why when winget
-    # cannot be used (not startable, or turned off by Group Policy); this run then removes nothing.
-    # A dry run only probes (-WhatIf).
+    # winget first, set up as the installer does it, for the account the run decides once. As SYSTEM
+    # Initialize-Winget uses the machine-wide winget.exe (a stale path from an earlier run in this
+    # session is dropped first) and runs no account fix. When winget cannot be used, nothing is
+    # removed. A dry run only probes.
     $script:MachineWingetPath = $null
     $account = Get-InstallAccountContext
     $winget = Initialize-Winget -WhatIf:$WhatIf -AccountContext $account
@@ -184,9 +167,7 @@ function Invoke-WingetUninstall {
     }
 
     # Automatic updates last, and only when every app is gone or was left alone on purpose: an app
-    # that could not be removed (or checked) is still on the machine, and removing its updater would
-    # leave it without updates (review finding P2-19). Said only when Winget-AutoUpdate is there:
-    # the installer sets it up only where its runtime is present, so many machines have none.
+    # still on the machine keeps its updater (P2-19). Said only when Winget-AutoUpdate is there.
     $autoUpdatesKept = $false
     $autoUpdatesRemovalFailed = $false
     if ($failedApps.Count -gt 0) {

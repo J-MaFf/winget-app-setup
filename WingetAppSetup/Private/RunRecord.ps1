@@ -1,7 +1,5 @@
-# The machine-readable outcome of a run (review finding P3-41): one RESULT line near the end of the
-# output and %ProgramData%\winget-app-setup\logs\last-run.json. The exit code used to be the only
-# signal an RMM tool could read, and per-app results existed only as console text, which RMM
-# consoles cut to their last lines.
+# The machine-readable outcome of a run (P3-41): one RESULT line near the end of the output and
+# %ProgramData%\winget-app-setup\logs\last-run.json, since RMM consoles cut console text to its end.
 
 <#
 .SYNOPSIS
@@ -9,22 +7,19 @@
 .PARAMETER Id
     The winget package id.
 .PARAMETER Status
-    'Installed', 'Skipped', 'Deferred' (a run for the whole PC found no machine-wide installer for
-    it: neither installed nor failed, review finding P3-22) or 'Failed'.
+    'Installed', 'Skipped', 'Deferred' (left for the signed-in user's own account: neither installed
+    nor failed) or 'Failed'.
 .PARAMETER Reason
     Why the app was skipped, deferred or failed (the text the summary shows). Empty: none. For a
-    deferred app it names why (Get-AppDeferReasonText): no machine-wide installer, or a catalog
-    entry marked per-user (scope 'user' or userPhase), which a later run as the signed-in user
-    installs.
+    deferred app, Get-AppDeferReasonText's: no machine-wide installer, or a per-user catalog entry.
 .PARAMETER InstallResult
     The app's install result (Install-AppWithVerification's InstallResult), for its exit code, or
     $null when no installer ran.
 .PARAMETER RestartRequired
     The install finished but needs a restart.
 .PARAMETER PostInstall
-    The result of the app's post-install hook (work-order item 38: Install-AppWithVerification's
-    Configuration, @{ Status; Reason }), or $null when no hook ran.
-.RETURNS
+    The result of the app's post-install hook (@{ Status; Reason }), or $null when no hook ran.
+.OUTPUTS
     [System.Collections.Specialized.OrderedDictionary] id, status, reason, code (the exit code of
     the winget install or package-specific installer, or $null), codeHex (the same as 0x%08X),
     restartRequired, postInstall ('Configured', 'NotConfigured' or 'Failed', or $null when no hook
@@ -90,21 +85,19 @@ function New-AppRunRecord {
     Names the auto-update outcome of a run in one word, for the run record.
 .PARAMETER WauResult
     Install-WingetAutoUpdate's result, or $null when the run did not get that far.
-.RETURNS
-    [string] One word for the run's 'Auto-updates:' line, for every Status Install-WingetAutoUpdate
-    returns (the summary's wording in parentheses):
+.OUTPUTS
+    [string] One word per Install-WingetAutoUpdate Status (the summary's wording in parentheses):
       'Configured'        (Configured)
       'AlreadyPresent'    (Already present)
       'AtRisk'            (AT RISK): AlreadyPresent on a machine without its framework
       'Unhealthy'         (UNHEALTHY): installed, but its scheduled task is missing, disabled, has
-                          no enabled trigger or could not be checked (review finding P3-36),
-                          whether or not the framework is missing too
+                          no enabled trigger or could not be checked, framework or not
       'FrameworkMissing'  (NOT CONFIGURED): Microsoft.WindowsAppRuntime.1.8 is missing
       'Failed'            (FAILED)
       'DryRun'            a dry run, which reports no record
       'NotRun'            the run did not get that far
     AtRisk, Unhealthy, FrameworkMissing and Failed make a run exit 8 when no app failed and winget
-    still works (Get-InstallerExitCode). A Status this list does not know is returned as it is.
+    still works (Get-InstallerExitCode). An unknown Status is returned as it is.
 #>
 function Get-AutoUpdateResultStatus {
     param (
@@ -134,7 +127,7 @@ function Get-AutoUpdateResultStatus {
     Formats a time for the run record: UTC, ISO 8601, to the second.
 .PARAMETER Time
     The time.
-.RETURNS
+.OUTPUTS
     [string] For example '2026-10-04T14:30:00Z'.
 #>
 function Format-RunRecordTime {
@@ -150,12 +143,9 @@ function Format-RunRecordTime {
 .SYNOPSIS
     Builds the record of a run: what last-run.json holds and the RESULT line shows.
 .DESCRIPTION
-    Invoke-WingetInstall builds it after its summary. The entry script builds it for a run that
-    ended before its summary (an early exit, an abort, another run in progress), from what the run
-    had recorded by then: the apps it had finished and the auto-update outcome, if it got that far.
-    The build id, the start time and the transcript path come from the entry script
-    ($script:InstallerBuildId, $script:InstallerRunStartedUtc, $script:InstallLogPath), and are
-    $null outside it.
+    Invoke-WingetInstall builds it after its summary; the entry script builds it for a run that ended
+    before, from what the run had recorded. The build id, start time and transcript path come from
+    the entry script's $script: variables, and are $null outside it.
 .PARAMETER ExitCode
     The exit code the run ends with.
 .PARAMETER Apps
@@ -170,7 +160,7 @@ function Format-RunRecordTime {
     The end-of-run winget check's result, or $null when it did not run.
 .PARAMETER SummaryReached
     The run reached its summary.
-.RETURNS
+.OUTPUTS
     [System.Collections.Specialized.OrderedDictionary]
 #>
 function New-InstallerRunRecord {
@@ -247,21 +237,16 @@ function New-InstallerRunRecord {
 .SYNOPSIS
     Formats the RESULT line of a run record.
 .DESCRIPTION
-    One line of space-separated key=value pairs, in a fixed order:
+    Space-separated key=value pairs in a fixed order:
 
         RESULT: exit=1 installed=12 skipped=2 deferred=0 failed=1 autoupdates=Configured restart=no build=1.0.0+1a2b3c4d log=C:\ProgramData\winget-app-setup\logs\install-20261004-143000.log
 
-    Values hold no spaces, except log, which comes last so that everything after 'log=' is the path.
-    The counts are always there, in the summary's order: deferred counts the apps a run as SYSTEM
-    or under cross-user elevation left for the signed-in user's own account (no machine-wide
-    installer, review finding P3-22), which count neither as installed nor as failed. autoupdates
-    is Get-AutoUpdateResultStatus's word, restart is yes or no, and build and log are 'unknown' and
-    'none' when there is no build id or transcript. exit is the code the run ends with: after the
-    summary, Get-InstallerExitCode's (1 > 2 > 8 > 3010 > 0, so 8 when auto-updates are not set up
-    or unhealthy and nothing ranks above it).
+    No value holds a space but log, which comes last. The counts are always there; autoupdates is
+    Get-AutoUpdateResultStatus's word; restart is yes or no; build and log are 'unknown' and 'none'
+    without a build id or transcript; exit is the code the run ends with.
 .PARAMETER Record
     A record from New-InstallerRunRecord.
-.RETURNS
+.OUTPUTS
     [string]
 #>
 function Format-InstallerResultLine {
@@ -289,15 +274,14 @@ function Format-InstallerResultLine {
 .SYNOPSIS
     Writes a run record to <folder>\last-run.json, replacing the previous one in one step.
 .DESCRIPTION
-    The JSON goes to a temporary file in the same folder first, which is then moved over
-    last-run.json, so a reader (an RMM tool collecting it, the teammate opening it) never sees a
-    half-written file. A failure warns and leaves the previous file as it was. Runs only under
-    PowerShell 7 (File.Move with overwrite).
+    Written to a temporary file in the same folder and moved over last-run.json, so no reader sees
+    a half-written file. A failure warns and leaves the previous file. PowerShell 7 only (File.Move
+    with overwrite).
 .PARAMETER Record
     A record from New-InstallerRunRecord.
 .PARAMETER Directory
     The logs folder.
-.RETURNS
+.OUTPUTS
     [string] The path written, or $null.
 #>
 function Save-InstallerRunRecord {
@@ -334,26 +318,19 @@ function Save-InstallerRunRecord {
 .SYNOPSIS
     Reports a run's outcome: writes last-run.json, then prints the RESULT line.
 .DESCRIPTION
-    last-run.json is written only by the run that did the work: the entry script sets
-    $script:InstallerRunRecordEnabled for a real, elevated run once it holds the run lock
-    (Lock-InstallerRun). So a dry run, a run that is not elevated (which stops with exit code 4, or
-    whose elevated run writes its own record), a run that found another one in progress (exit code
-    6) and a script that calls Invoke-WingetInstall from the imported module never replace the
-    record of the run that installed. The file is written next to the run's transcript
-    (Get-InstallerLogDirectory), and not at all without one.
+    last-run.json is written only by the run that did the work: one with
+    $script:InstallerRunRecordEnabled, which the entry script sets for a real elevated run holding
+    the run lock. It goes next to the run's transcript, and nowhere without one.
 
     The RESULT line is printed in every case, after the summary or the early-exit notice and before
-    any 'Press any key' prompt. It is printed by the run that did the work: a run that relaunched
-    itself elevated prints none of its own (the elevated window prints it). It is not always the
-    last line of the output either: a run started from Windows PowerShell 5.1 (the irm | iex
-    one-liner) prints the bootstrap's own lines after it, such as the PowerShell 7 run's exit code
-    and any restart notice; when that bootstrap installed PowerShell 7 and the install needs a
-    restart, the process exits 3010 where the line says exit=0. So a reader looks for the line that
-    starts with 'RESULT: ' rather than reading the last line, and takes the exit code from the
-    process. Never throws.
+    any 'Press any key' prompt, by the run that did the work (an elevated relaunch prints it, not
+    the run that asked). It need not be the last line: after a run started from Windows PowerShell
+    5.1, the bootstrap prints its own lines, and exits 3010 where the line says exit=0 when its
+    PowerShell 7 install needs a restart. So look for the line starting 'RESULT: ' and take the
+    exit code from the process. Never throws.
 .PARAMETER Record
     A record from New-InstallerRunRecord.
-.RETURNS
+.OUTPUTS
     [string] The last-run.json path written, or $null.
 #>
 function Write-InstallerRunResult {
@@ -382,17 +359,12 @@ function Write-InstallerRunResult {
 .SYNOPSIS
     Replaces last-run.json with the record of a run that has started and not ended yet.
 .DESCRIPTION
-    Review of finding P3-41. The entry script calls this once a real, elevated run holds the run
-    lock, before the run changes anything. last-run.json is otherwise written only when a run
-    reports (Write-InstallerRunResult), and a run that is killed (an RMM time limit, taskkill /F)
-    never reports, so without this the file would go on describing the run before it, which may
-    have exited 0. This record has the new run's startedUtc, exitCode and endedUtc $null,
-    summaryReached false and no apps; the run's report replaces it. A record whose exitCode is
-    null therefore describes a run that is still going or was killed before it could report.
-
-    Prints nothing (no RESULT line). Writes nothing unless $script:InstallerRunRecordEnabled is
-    set and the run has a logs folder (Get-InstallerLogDirectory). Never throws.
-.RETURNS
+    The entry script calls it once a real, elevated run holds the run lock, before the run changes
+    anything, so a run that is killed and never reports does not leave the previous run's record in
+    place. The record has startedUtc, exitCode and endedUtc $null, summaryReached false and no apps:
+    a null exitCode means a run still going or killed. Prints nothing; writes only with
+    $script:InstallerRunRecordEnabled and a logs folder. Never throws.
+.OUTPUTS
     [string] The last-run.json path written, or $null.
 #>
 function Save-InstallerRunStartRecord {
@@ -421,15 +393,10 @@ function Save-InstallerRunStartRecord {
     run lock.
 .DESCRIPTION
     Called by Exit-Installer before it waits for a key press, and from the entry script's finally
-    block for every other way out of a run, so a run reports once whichever way it ends and releases
-    the run lock before a window waits at a prompt (review finding P3-41). Reports only while
-    $script:InstallerRunReportPending is set: the entry script sets it at the start of a real
-    (not -WhatIf) PowerShell 7 run, and Invoke-WingetInstall clears it once it has reported after its
-    summary, or when the elevated run it relaunched reported for it. A second call does nothing but
-    release the lock again, which is harmless.
-
-    Runs under Windows PowerShell 5.1 too (Exit-Installer in the bootstrap phase), where nothing is
-    pending, so only Unlock-InstallerRun runs, and it has no lock to release.
+    block, so a run reports once however it ends and releases the lock before any prompt. Reports
+    only while $script:InstallerRunReportPending is set (set at the start of a real PowerShell 7
+    run, cleared once Invoke-WingetInstall has reported). A second call only releases the lock
+    again. Under Windows PowerShell 5.1 nothing is pending and there is no lock.
 .PARAMETER ExitCode
     The exit code the run ends with.
 #>
@@ -455,16 +422,13 @@ function Complete-InstallerRun {
 .SYNOPSIS
     Reports the outcome of a run that ended before its summary.
 .DESCRIPTION
-    Called by Complete-InstallerRun for an early exit (a failed pre-flight check, another run in
-    progress, winget unavailable, a catalog that failed validation, no elevation) and for an aborted
-    run. The record holds what the run had recorded by then: the apps it had finished
-    (Invoke-WingetInstall keeps them in $script:InstallerAppRecords) and the auto-update outcome if
-    it got that far ($script:InstallerAutoUpdateResult); restartRequired is set when one of those
-    apps needs a restart. summaryReached is false and wingetUsable is $null (the end-of-run
-    check did not run).
+    For an early exit or an aborted run. The record holds the apps finished by then
+    ($script:InstallerAppRecords) and the auto-update outcome if it got that far
+    ($script:InstallerAutoUpdateResult); restartRequired is set when one of those apps needs a
+    restart, summaryReached is false and wingetUsable $null.
 .PARAMETER ExitCode
     The exit code the run ends with.
-.RETURNS
+.OUTPUTS
     [string] The last-run.json path written, or $null (see Write-InstallerRunResult).
 #>
 function Write-InstallerEarlyExitResult {
@@ -491,16 +455,13 @@ function Write-InstallerEarlyExitResult {
 .SYNOPSIS
     Prints the RESULT line of a run that stopped before it started: no app counted, no log.
 .DESCRIPTION
-    For the entry script's Constrained Language Mode stop (wgt-gq8.39), which comes before the
-    transcript, the run lock and the Windows PowerShell 5.1 bootstrap, so no other step reports for
-    it. Every real run reports a RESULT line (review finding P3-41), this one too:
+    For the Constrained Language Mode stop, which comes before the transcript, the run lock and the
+    5.1 bootstrap:
 
         RESULT: exit=5 installed=0 skipped=0 deferred=0 failed=0 autoupdates=NotRun restart=no build=1.0.0+1a2b3c4d log=none
 
-    Only what every language mode allows runs here, under Windows PowerShell 5.1 too: a hashtable,
-    string formatting and Write-Host. It reads $script:InstallerBuildId and none of the run's other
-    state, which an irm | iex console may still hold from an earlier run, and writes no
-    last-run.json (the run holds no run lock).
+    Uses only what every language mode allows, under 5.1 too, reads only $script:InstallerBuildId
+    (an irm | iex console may hold an earlier run's state) and writes no last-run.json.
 .PARAMETER ExitCode
     The exit code the run stops with.
 #>

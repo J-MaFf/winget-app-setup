@@ -1,11 +1,8 @@
 function Get-WindowsBuildNumber {
     <#
     .SYNOPSIS
-        Returns the current Windows OS build number as an integer (e.g. 19045, 26100).
-    .DESCRIPTION
-        Wrapped in a function so callers (and tests) can reason about the build gate used to decide
-        how to install the latest PowerShell: winget's machine-scope MSIX provisioning only works on
-        build 26100 (Windows 11 24H2) and later (issue #166).
+        Returns the Windows build number (e.g. 19045, 26100): a seam for the 24H2 (26100) gate on
+        winget's machine-scope MSIX provisioning (issue #166).
     #>
     return [int][System.Environment]::OSVersion.Version.Build
 }
@@ -13,20 +10,11 @@ function Get-WindowsBuildNumber {
 function Get-ComputerManufacturer {
     <#
     .SYNOPSIS
-        Returns the machine's manufacturer string (e.g. 'Dell Inc.', 'Microsoft Corporation').
+        Returns the PC's manufacturer (e.g. 'Dell Inc.'): a mockable seam for catalog conditions.
     .DESCRIPTION
-        Thin, mockable wrapper around the Win32_ComputerSystem CIM class so catalog applicability
-        conditions (issue #217) — e.g. gating Dell Command Update on Dell hardware — can be unit
-        tested without touching real system state. Private on purpose: it is a seam for the
-        catalog's condition scriptblocks, not part of the module's public surface.
-
-        Throws when it has no answer (review finding P3-33): a CIM failure (access denied, RPC
-        unavailable, a corrupt WMI repository) and an empty or missing Manufacturer. CIM reports
-        those as non-terminating errors, so without -ErrorAction Stop this returned '' and the Dell
-        condition read "not Dell": Dell Command Update was skipped as not applicable on a Dell PC
-        and the run exited 0. A condition that throws fails open instead (Test-AppApplicability):
-        the installer warns and attempts the install.
-    .RETURNS
+        Throws when CIM fails or the manufacturer is empty, so a condition built on it fails open
+        (Test-AppApplicability) instead of reading "not Dell" (review finding P3-33).
+    .OUTPUTS
         [string] The manufacturer, never empty.
     #>
     $computerSystem = Get-CimInstance -ClassName Win32_ComputerSystem -ErrorAction Stop
@@ -40,28 +28,15 @@ function Get-ComputerManufacturer {
 function Get-OSArchitecture {
     <#
     .SYNOPSIS
-        Returns the operating system's processor architecture: 'X64', 'Arm64', 'X86' or 'Arm'.
+        Returns the operating system's processor architecture, 'X64', 'Arm64', 'X86' or 'Arm': a
+        mockable seam for catalog conditions (ARM64 PCs get the 32-bit Adobe Reader, P3-32).
     .DESCRIPTION
-        Mockable seam for catalog applicability conditions (review finding P3-32): for example,
-        Adobe.Acrobat.Reader.64-bit ships only an x64 installer, which Adobe does not support on
-        ARM64 Windows, so the catalog installs it everywhere but ARM64 and gives ARM64 PCs
-        Adobe.Acrobat.Reader.32-bit, the build Adobe supports there.
-
-        Answers for the OS, not for this process. RuntimeInformation.OSArchitecture asks Windows'
-        IsWow64Process2 for the native machine (.NET 7 and later, so PowerShell 7.3 and later;
-        the bootstrap installs 7.6), which reads Arm64 on an ARM64 PC even from an x64 PowerShell
-        running under emulation, and X64 from a 32-bit PowerShell on x64 Windows. The environment
-        variables do not: an x64 process under emulation on ARM64 sees PROCESSOR_ARCHITECTURE=AMD64
-        and no PROCESSOR_ARCHITEW6432 (Microsoft Learn, "How emulation works on Arm": emulated
-        apps are told about the emulated processor). Older .NET reads GetNativeSystemInfo instead,
-        which is still right for a 32-bit process but says X64 for an x64 one under emulation: an
-        x64 PowerShell 7.0-7.2 (out of support) on an ARM64 PC reads X64, so that PC is offered the
-        64-bit Reader, as it was before the gate.
-
-        Throws when the architecture cannot be read, so a condition built on it fails open
-        (Test-AppApplicability): the installer warns and attempts the install.
-    .RETURNS
-        [string] A System.Runtime.InteropServices.Architecture name, e.g. 'X64' or 'Arm64'.
+        RuntimeInformation.OSArchitecture answers for the OS, not for this process, from .NET 7
+        (PowerShell 7.3): Arm64 even in an emulated x64 PowerShell, whose PROCESSOR_ARCHITECTURE says
+        AMD64. PowerShell 7.0-7.2 under emulation reads X64. Throws when the architecture cannot be
+        read, so a condition built on it fails open.
+    .OUTPUTS
+        [string] A System.Runtime.InteropServices.Architecture name.
     #>
     $architecture = [string][System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture
     if ([string]::IsNullOrWhiteSpace($architecture)) {
@@ -73,12 +48,8 @@ function Get-OSArchitecture {
 function Get-PowerShellEdition {
     <#
     .SYNOPSIS
-        Returns the edition of the PowerShell running this code: 'Core' (PowerShell 7) or 'Desktop'
-        (Windows PowerShell 5.1).
-    .DESCRIPTION
-        A mockable seam for $PSVersionTable.PSEdition, which tests cannot change. The uninstaller
-        keeps PowerShell 7 when it is running in it (Get-HostingShellSkipReason, review finding
-        P3-18).
+        Returns the running PowerShell's edition, 'Core' or 'Desktop': a mockable seam for
+        $PSVersionTable.PSEdition (the uninstaller keeps the PowerShell 7 it runs in).
     #>
     return [string]$PSVersionTable.PSEdition
 }

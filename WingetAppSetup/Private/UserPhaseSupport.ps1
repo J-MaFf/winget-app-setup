@@ -1,15 +1,13 @@
-# The user phase's state (work-order item 34). A run for the whole PC (as SYSTEM, from an RMM agent
-# such as ManageEngine Endpoint Central) records in last-run.json the apps it deferred to the
-# signed-in user's own account. Invoke-WingetUserPhase, run as each user at sign-in, installs those
-# for that user and sets the user's Windows Terminal defaults, once per machine run: it keeps what
-# it did in the user's own user-phase.json. rmm/Invoke-WingetAppSetupUserPhase.ps1 makes the same
-# decision before it downloads anything (Test-RmmUserPhasePending), so the rule in
-# Get-UserPhaseDecision and that function must stay the same.
+# The user phase's state. A run as SYSTEM records in last-run.json the apps it deferred to the
+# signed-in user; Invoke-WingetUserPhase installs them for each user at sign-in, once per machine run,
+# keeping what it did in the user's user-phase.json. rmm/Invoke-WingetAppSetupUserPhase.ps1 makes the
+# same decision before it downloads anything, so Get-UserPhaseDecision and Test-RmmUserPhasePending
+# must stay the same.
 
 <#
 .SYNOPSIS
     Returns the path of the machine's run record: %ProgramData%\winget-app-setup\logs\last-run.json.
-.RETURNS
+.OUTPUTS
     [string]
 #>
 function Get-InstallerRunRecordPath {
@@ -19,7 +17,7 @@ function Get-InstallerRunRecordPath {
 <#
 .SYNOPSIS
     Returns the path of this account's user-phase state: %LOCALAPPDATA%\winget-app-setup\user-phase.json.
-.RETURNS
+.OUTPUTS
     [string]
 #>
 function Get-UserPhaseStatePath {
@@ -31,7 +29,7 @@ function Get-UserPhaseStatePath {
     Returns the SHA256 of some bytes as upper-case hex, the form Get-FileHash prints.
 .PARAMETER Bytes
     The bytes.
-.RETURNS
+.OUTPUTS
     [string]
 #>
 function Get-Sha256Hex {
@@ -55,24 +53,19 @@ function Get-Sha256Hex {
     Says why the run record may have been written by someone other than SYSTEM or an administrator,
     or returns $null when it cannot have been.
 .DESCRIPTION
-    The user phase installs what last-run.json lists as Deferred in every account that signs in,
-    so a record a standard user could write would let that user choose what runs in other users'
-    accounts. Its folder does not rule that out: the installer's first, non-elevated launch creates
-    %ProgramData%\winget-app-setup\logs for its own log, owned by the signed-in user, who can then
-    change the folder's access list; and ProgramData's default access list lets any user create
-    files in a folder below it. So the file itself is checked, from its own access list:
-      - its owner must be SYSTEM (S-1-5-18) or Administrators (S-1-5-32-544). A standard user
-        cannot make either of them the owner of a file, and an owner can always change the file's
-        access list;
-      - no entry that applies to the file may let another account change it: write or append data,
-        delete it, change its access list or take ownership (or the generic write and all rights).
-    The installer's own runs pass: SYSTEM or an elevated administrator writes the file, and it
-    inherits entries for SYSTEM and Administrators (full control) and read access for others. An
-    account that controls the folder can still delete or rename the record, which stops the user
-    phase or repeats an earlier run's list, but it cannot make one that lists other apps.
+    The user phase installs what the record lists in every account, so a record a standard user
+    could write would let them choose what runs in other users' accounts. Its folder does not rule
+    that out (the installer's first, non-elevated launch may have created it, and ProgramData lets
+    any user create files), so the file is checked:
+      - its owner must be SYSTEM (S-1-5-18) or Administrators (S-1-5-32-544), which a standard user
+        cannot make the owner;
+      - no entry may let another account write, append, delete, change permissions or take
+        ownership (or hold generic write or all rights).
+    The installer's own records pass. An account that controls the folder can still delete or
+    rename the record, but cannot make one that lists other apps.
 .PARAMETER Path
     The record's path.
-.RETURNS
+.OUTPUTS
     [string] What is wrong (for a warning), or $null when the record can be trusted. Never throws:
     an access list that cannot be read is a problem too.
 #>
@@ -115,28 +108,18 @@ function Get-RunRecordTrustProblem {
 .SYNOPSIS
     Reads the machine's run record (last-run.json) for the user phase.
 .DESCRIPTION
-    The file is read once, and its SHA256 identifies the machine run: a run replaces the file when it
-    starts (exitCode null, Save-InstallerRunStartRecord) and once more when it reports
-    (Write-InstallerRunResult), and nothing else writes it, so the hash of a finished run's record
-    changes only when another run replaces it.
+    Read once; its SHA256 identifies the machine run, since only a run replaces the file (when it
+    starts and when it reports). The file is held open against changes while its owner and access
+    list are checked (Get-RunRecordTrustProblem), so the bytes checked are the bytes read. The
+    deferred apps are the entries with status 'Deferred', whatever deferred them: the record is the
+    contract, not the catalog. An id that is not a valid package id is left out and listed in
+    InvalidDeferredIds, because the ids reach a winget command line.
 
-    Only a record that SYSTEM or an administrator wrote is used (Get-RunRecordTrustProblem): its
-    deferred apps are installed in every account that signs in. The file is opened first so that
-    nobody can replace, change or delete it until it has been read (Open-ReadLockedFile), its
-    owner and access list are checked while it is open, and the bytes checked are the bytes read.
-
-    The deferred apps are the entries with status 'Deferred', whatever deferred them: a run for the
-    whole PC that found no machine-wide installer, or a catalog entry that says the app is per-user.
-    The record is the contract, not the catalog. An id that is not a valid winget package id
-    (Test-WingetPackageIdFormat) is left out and listed in InvalidDeferredIds: its ids end up on a
-    winget command line.
-
-    Returns $null, with a warning, when the file cannot be read, someone other than SYSTEM or an
-    administrator owns it or can change it, or it is not a run record (no apps list), and $null,
-    silently, when there is no file. Never throws.
+    $null with a warning when the file cannot be read, is not trusted or is not a run record; $null
+    silently when there is no file. Never throws.
 .PARAMETER Path
     The record's path (Get-InstallerRunRecordPath).
-.RETURNS
+.OUTPUTS
     [pscustomobject] with Path, Sha256, BuildId, StartedUtc, ExitCode ([int], or $null while the run
     has not reported), DeferredApps ([string[]], in record order, each once) and InvalidDeferredIds
     ([string[]]); or $null.
@@ -227,7 +210,7 @@ function Read-InstallerRunRecord {
     Reads this account's user-phase state, or $null when there is none or it cannot be read.
 .PARAMETER Path
     The state file (Get-UserPhaseStatePath).
-.RETURNS
+.OUTPUTS
     [pscustomobject] with RecordSha256 ([string]), Complete ([bool]) and Attempts ([int]); or $null.
     Never throws: a state that cannot be read counts as none, so the user phase runs again.
 #>
@@ -265,25 +248,21 @@ function Read-UserPhaseState {
 .SYNOPSIS
     Decides whether the user phase has work for this account.
 .DESCRIPTION
-    No work (Run false), so the user phase ends at once and prints nothing, when:
-      - NoRecord: there is no run record (no run for the whole PC happened, or it cannot be read);
-      - RunNotFinished: the run has not reported yet (exitCode null): it is still going, or it was
-        killed, and a later run replaces the record;
-      - Done: this account's state is for this run (same record SHA256) and says it is complete;
+    No work (Run false, and the user phase ends silently) when:
+      - NoRecord: there is no run record, or it cannot be read;
+      - RunNotFinished: the run has not reported yet (exitCode null);
+      - Done: this account's state is for this run (same record SHA256) and complete;
       - GaveUp: this account already tried MaxAttempts times for this run.
-    Otherwise there is work: New (first time for this run) or Pending (an earlier attempt left
-    something), and Attempt is this attempt's number. A run with nothing deferred still has work
-    once per account: the Windows Terminal defaults, which a run as SYSTEM never sets for anyone.
-
-    rmm/Invoke-WingetAppSetupUserPhase.ps1 (Test-RmmUserPhasePending) applies the same rule before
-    it downloads the installer; tests/RmmWrapper.Tests.ps1 checks that the two agree.
+    Otherwise New or Pending, with this attempt's number. A run with nothing deferred still has work
+    once per account: the Windows Terminal defaults, which a SYSTEM run never sets. Must match
+    rmm/Invoke-WingetAppSetupUserPhase.ps1's Test-RmmUserPhasePending (tests/RmmWrapper.Tests.ps1).
 .PARAMETER Record
     Read-InstallerRunRecord's result, or $null.
 .PARAMETER State
     Read-UserPhaseState's result, or $null.
 .PARAMETER MaxAttempts
     How many times to try for one run before giving up.
-.RETURNS
+.OUTPUTS
     [pscustomobject] with Run ([bool]), Reason and Attempt ([int], 0 when there is no work).
 #>
 function Get-UserPhaseDecision {
@@ -323,15 +302,14 @@ function Get-UserPhaseDecision {
 .SYNOPSIS
     Writes this account's user-phase state, replacing the previous one in one step.
 .DESCRIPTION
-    Written to a temporary file in the same folder first, then moved over the state file, so a
-    sign-in that reads it never sees half a file. The folder is created when needed. A failure warns;
-    the user phase then runs again at the next sign-in. Runs under PowerShell 7 (File.Move with
-    overwrite), as the user phase does.
+    Written to a temporary file in the same folder and moved over the state file, creating the folder
+    when needed. A failure warns, and the user phase runs again at the next sign-in. PowerShell 7
+    only (File.Move with overwrite).
 .PARAMETER Path
     The state file (Get-UserPhaseStatePath).
 .PARAMETER State
     What to write.
-.RETURNS
+.OUTPUTS
     [string] The path written, or $null.
 #>
 function Save-UserPhaseState {
@@ -371,16 +349,11 @@ function Save-UserPhaseState {
 .SYNOPSIS
     Installs one deferred app for the signed-in user: per-user scope only, checked before and after.
 .DESCRIPTION
-    The user phase's form of Install-AppWithVerification. `winget list` run as the user sees both the
-    user's own apps and the PC's, so an app already there either way is Skipped. Otherwise it is
-    installed with Install-WingetPackage -UserScopeOnly -Silent (`--scope user`, never another
-    scope: a machine-wide installer would ask for administrator rights) and checked again. A check
-    that could not answer fails the app rather than installing it blind.
-
-    With the app's catalog entry (work-order item 38), the install uses its installerType, and once
-    the app is there (installed now or already) its postInstall hook runs in this account
-    (Complete-UserPhaseAppConfiguration): a userPhase entry's hook is what a run for the whole PC
-    deferred along with the app.
+    The user phase's Install-AppWithVerification. `winget list` as the user sees the user's apps and
+    the PC's, so an app there either way is Skipped. Otherwise Install-WingetPackage -UserScopeOnly
+    -Silent (a machine-wide installer would ask for administrator rights), then checked again. A
+    check that could not answer fails the app. With a catalog entry, its installerType is used and
+    its postInstall hook runs once the app is there (Complete-UserPhaseAppConfiguration).
 .PARAMETER PackageId
     The winget package id.
 .PARAMETER App
@@ -388,7 +361,7 @@ function Save-UserPhaseState {
     none for the id: the app is then installed by its id alone, with no post-install hook.
 .PARAMETER TimeoutSeconds
     The install's time limit (what is left of the user phase's time budget, at most 30 minutes).
-.RETURNS
+.OUTPUTS
     New-AppRunRecord's entry: status Installed, Skipped (already installed) or Failed, with the
     reason and winget's exit code, and postInstall and postInstallReason when a hook ran.
 #>
@@ -487,14 +460,10 @@ function Install-UserPhaseApp {
 .SYNOPSIS
     Returns this installer's catalog entries by package id, for the user phase.
 .DESCRIPTION
-    The run record is the user phase's contract: it lists the deferred ids, whatever deferred them
-    (Read-InstallerRunRecord). The catalog adds what a record cannot carry (work-order item 38): the
-    postInstall hook of an entry marked userPhase, which a run for the whole PC deferred along with
-    the app because it configures the signed-in user's own account, and the entry's installerType.
-    The catalog is this installer copy's (Get-DefaultAppCatalog). An id it does not have (the run
-    for the whole PC was another build's) is installed by its id alone. A catalog that cannot be
-    read is reported in one line, and the apps are installed without their catalog settings.
-.RETURNS
+    The record lists the deferred ids; the catalog adds what it cannot carry: installerType and the
+    postInstall hook of a userPhase entry. An id this copy's catalog lacks (another build's run) is
+    installed by its id alone; a catalog that cannot be read is reported in one line.
+.OUTPUTS
     [hashtable] Package id (compared without regard to case) to catalog entry.
 #>
 function Get-UserPhaseCatalogEntry {
@@ -517,24 +486,19 @@ function Get-UserPhaseCatalogEntry {
     Runs a deferred app's post-install hook in the user phase, once the app is there, and records the
     result.
 .DESCRIPTION
-    Work-order items 34 and 38. A catalog entry marked userPhase can carry a postInstall hook that
-    sets the app up in the signed-in user's own account; a run as SYSTEM or under cross-user
-    elevation defers such an app before any winget call, so its hook never ran there. The user
-    phase runs it in the user's account as Install-AppWithVerification does (Invoke-AppPostInstall):
-    after the app was installed for this account, or found already installed. Without a catalog
-    entry or a hook, the record is returned as it is.
-      - Configured: 'Configured: <id>'. The record keeps its status.
-      - NotConfigured: 'Not configured: <id> (<reason>)'. The record keeps its status (the app is
-        installed) and the exit code does not change, but this account's user phase is not complete,
-        so a later sign-in runs the hook again (Invoke-WingetUserPhase).
-      - Failed, or a hook that throws: the app is Failed with 'installed, but its post-install
-        configuration failed (<reason>)', so the user phase exits 1 and a later sign-in tries again.
-        The install's restart and exit code stay in the record.
+    A run for the whole PC defers a userPhase entry, hook and all; this runs the hook in the user's
+    account, as Install-AppWithVerification would (Invoke-AppPostInstall). Without an entry or a hook
+    the record is returned as it is.
+      - Configured: 'Configured: <id>'; the record keeps its status.
+      - NotConfigured: 'Not configured: <id> (<reason>)'; the record keeps its status and the exit
+        code, but the user phase is not complete, so a later sign-in runs the hook again.
+      - Failed, or a hook that throws: the app is Failed ('installed, but its post-install
+        configuration failed (<reason>)'), so the user phase exits 1 and tries again later.
 .PARAMETER App
     The app's catalog entry, or $null.
 .PARAMETER Record
     The app's record (New-AppRunRecord), status Installed or Skipped.
-.RETURNS
+.OUTPUTS
     The record, with postInstall and postInstallReason set when the hook ran.
 #>
 function Complete-UserPhaseAppConfiguration {
@@ -571,17 +535,11 @@ function Complete-UserPhaseAppConfiguration {
 .SYNOPSIS
     Updates the winget source for the signed-in user before the user phase's installs.
 .DESCRIPTION
-    The user phase's form of Initialize-Winget's source step. It runs at an account's first sign-in,
-    when winget has never been used in it: `winget source update --name winget`
-    (Invoke-WingetSourceProbe, a 2-minute limit) then downloads and registers the source for the
-    account. Without it, the first command that needs the source would be the 15-second
-    `winget list` check before the first install (Install-UserPhaseApp), which that work does not
-    fit in, so the app would fail with PreCheckTimeout at every sign-in.
-
-    There is no `winget source reset` here: it needs administrator rights, which the user phase does
-    not have. A source that cannot be updated is reported in one line and the installs go ahead:
-    each one then says why it failed, and a later sign-in tries again. Agreements that are not
-    accepted yet (0x8A150046) are not a failure: each install accepts them.
+    At an account's first sign-in winget has never been used there, and the source update
+    (Invoke-WingetSourceProbe, 2-minute limit) registers it; otherwise the 15-second `winget list`
+    check before the first install would do that work and time out at every sign-in. No `source
+    reset`: it needs administrator rights. A failure is one line and the installs go ahead.
+    Agreements not accepted yet (0x8A150046) are not a failure: each install accepts them.
 #>
 function Update-UserPhaseWingetSource {
     Write-Info 'Updating the winget source for this account (this may take a moment)...'
@@ -607,12 +565,10 @@ function Update-UserPhaseWingetSource {
 
 <#
 .SYNOPSIS
-    Returns how many whole seconds the user phase has run (the time budget's clock).
-.DESCRIPTION
-    A seam, so tests can move the clock without waiting for it.
+    Returns how many whole seconds the user phase has run: a seam for the time budget's clock.
 .PARAMETER Stopwatch
     The user phase's stopwatch.
-.RETURNS
+.OUTPUTS
     [int]
 #>
 function Get-UserPhaseElapsedSeconds {

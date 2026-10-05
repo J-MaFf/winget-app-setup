@@ -1,17 +1,13 @@
-# One installer run at a time on a machine (review finding P3-41, exit code 6). An RMM tool that
-# starts the installer on a schedule, a teammate who starts it again while the first window is still
-# working, or both at once, would otherwise run two installs side by side: winget and msiexec then
-# fail each other's installs with 'another installation is in progress', and both runs report
-# failures that neither caused.
+# One installer run at a time on a machine (exit code 6): two runs side by side would fail each
+# other's winget and msiexec installs with 'another installation is in progress'.
 
 <#
 .SYNOPSIS
     Returns the name of the machine-wide mutex that marks an installer run in progress.
 .DESCRIPTION
-    Global\ puts it in the namespace every Windows session shares, so a run as SYSTEM from an RMM
-    agent (session 0) and a run in someone's desktop session see the same mutex. A function so tests
-    can give a run a name of its own and never collide with a real run on the same machine.
-.RETURNS
+    Global\ is shared by every session, so a run as SYSTEM (session 0) and a run on the desktop see
+    the same mutex. A function so tests can use a name of their own.
+.OUTPUTS
     [string]
 #>
 function Get-InstallerRunLockName {
@@ -23,7 +19,7 @@ function Get-InstallerRunLockName {
     Creates or opens a named mutex. A seam, so tests can make the open fail.
 .PARAMETER Name
     The mutex name.
-.RETURNS
+.OUTPUTS
     [System.Threading.Mutex]
 #>
 function New-InstallerRunMutex {
@@ -39,31 +35,16 @@ function New-InstallerRunMutex {
 .SYNOPSIS
     Takes the machine-wide installer run lock, without waiting for it.
 .DESCRIPTION
-    Review finding P3-41. The generated entry script calls this at the start of every real
-    (not -WhatIf) run that is elevated, before the pre-flight checks, and exits 6 when another run
-    holds the lock: it neither waits for that run nor stops it. A run that is not elevated takes no
-    lock, because it either stops with exit code 4 or relaunches itself elevated, and the elevated
-    run takes the lock.
-
-    The lock is a named mutex (Get-InstallerRunLockName) owned by the thread that runs the
-    installer, and Unlock-InstallerRun releases it in the entry script's finally block. A run that is
-    killed releases it with its process: the next run then finds the mutex abandoned, which Windows
-    reports with AbandonedMutexException, and takes it over.
-
-    Opening a mutex that another account created can fail with UnauthorizedAccessException when its
-    access list does not let this account open it (a run as SYSTEM, then one by an administrator),
-    and that counts as busy too. Any other failure warns and returns 'Unavailable': the run goes on
-    without the check rather than being blocked by it.
-
-    The lock does not check who holds the mutex. Windows lets any account create a mutex in the
-    Global namespace, so 'Busy' means that some process on the machine holds this name, normally
-    another run of the installer. A process that is not the installer and holds the name makes
-    every run exit 6 until that process ends.
+    The entry script takes it at the start of every elevated run that is not -WhatIf and exits 6
+    when it is busy; Unlock-InstallerRun releases it in the entry script's finally block. The
+    mutex of a run that was killed is abandoned, and the next run takes it over. Another account's
+    mutex that this account may not open (UnauthorizedAccessException) counts as busy; any other
+    failure warns and returns 'Unavailable', so the run goes on without the check. Any process
+    holding the name counts as another run.
 .PARAMETER Name
     The mutex name. Default: Get-InstallerRunLockName.
-.RETURNS
-    [string] 'Acquired' (the mutex is stored in $script:InstallerRunLock), 'Busy' (another run holds
-    it) or 'Unavailable' (the check itself failed).
+.OUTPUTS
+    [string] 'Acquired' (the mutex is kept in $script:InstallerRunLock), 'Busy' or 'Unavailable'.
 #>
 function Lock-InstallerRun {
     [OutputType([string])]

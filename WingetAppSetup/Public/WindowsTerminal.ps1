@@ -1,11 +1,9 @@
 <#
 .SYNOPSIS
-    Resolves all discovered Windows Terminal settings file paths.
-.DESCRIPTION
-    Includes packaged channels (stable/preview/dev/canary-style package names)
-    and unpackaged path when present.
-.RETURNS
-    [string[]] Existing settings paths when found; otherwise an empty array.
+    Returns the Windows Terminal settings.json paths that exist: every packaged channel's and the
+    unpackaged one.
+.OUTPUTS
+    [string[]] The existing settings paths, or an empty array.
 #>
 function Get-WindowsTerminalSettingsPaths {
     $candidatePaths = @(
@@ -42,27 +40,21 @@ function Get-WindowsTerminalSettingsPaths {
 
 <#
 .SYNOPSIS
-    Sets Windows Terminal default profile to a provided GUID.
+    Sets Windows Terminal's default profile to a GUID.
 .DESCRIPTION
-    Changes only the value of the top-level "defaultProfile" in settings.json, or inserts that
-    key when it is missing (Set-JsoncTopLevelStringProperty). Comments, commented-out profiles,
-    formatting and key order are kept: the file used to be parsed and rewritten with
-    ConvertTo-Json, which deleted all of them.
-
-    Before anything is written, the edited text is parsed again and must have defaultProfile set
-    to the new GUID and every other setting unchanged; otherwise the file is left alone. The
-    original file is then copied to settings.json.winget-app-setup.bak next to it, and the new
-    content is written to a temporary file in the same folder that replaces settings.json in one
-    step ([System.IO.File]::Replace), so the file is never left truncated or half-written and keeps
-    its attributes and ACL. A settings.json that is a symbolic or hard link is instead written in
-    place, through the link, so the link survives and the linked file gets the change. A UTF-8
-    byte-order mark is kept when the file has one; a file that is not valid UTF-8 is left alone.
+    Changes only the top-level "defaultProfile" value, or inserts the key
+    (Set-JsoncTopLevelStringProperty), so comments, formatting and key order are kept. The edited
+    text must parse with the new GUID and every other setting unchanged, or nothing is written.
+    Then the original is copied to settings.json.winget-app-setup.bak and the new text replaces
+    settings.json in one step ([System.IO.File]::Replace), so the file is never half-written and
+    keeps its attributes and ACL. A settings.json that is a link is written through the link
+    instead. A UTF-8 BOM is kept; a file that is not valid UTF-8 is left alone.
 .PARAMETER SettingsPath
     Full path to the Windows Terminal settings file.
 .PARAMETER ProfileGuid
     Profile GUID to set as default. Braces are added when missing.
-.RETURNS
-    [bool] True when configuration is applied or already in desired state; otherwise False.
+.OUTPUTS
+    [bool] True when the profile is set (or already was); otherwise False.
 #>
 function Set-WindowsTerminalDefaultProfile {
     param (
@@ -130,10 +122,9 @@ function Set-WindowsTerminalDefaultProfile {
     $tempPath = "$fullPath.winget-app-setup.tmp"
     try {
         Copy-Item -LiteralPath $fullPath -Destination $backupPath -Force -ErrorAction Stop
-        # A settings.json that is a symbolic or hard link (a dotfiles setup) is written in place,
-        # through the link: replacing the name with the temp file would turn it into a separate
-        # plain file and leave the linked file unedited (Windows Terminal's own save had this bug,
-        # microsoft/terminal#10787). Other reparse points are written in place too.
+        # A link (a dotfiles setup) is written in place, through the link: replacing the name would
+        # leave a plain file and the linked one unedited (microsoft/terminal#10787). Other reparse
+        # points are written in place too.
         $settingsItem = Get-Item -LiteralPath $fullPath -Force -ErrorAction Stop
         $isLinked = [bool]$settingsItem.LinkType -or
             (($settingsItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0)
@@ -170,7 +161,7 @@ function Set-WindowsTerminalDefaultProfile {
     Sets Windows Terminal as the default terminal application via registry.
 .DESCRIPTION
     Writes DelegationConsole and DelegationTerminal values under HKCU:\Console\%%Startup.
-.RETURNS
+.OUTPUTS
     [bool] True when configuration is applied or already in desired state; otherwise False.
 #>
 function Set-WindowsTerminalAsDefaultTerminalApplication {
@@ -204,36 +195,18 @@ function Set-WindowsTerminalAsDefaultTerminalApplication {
 
 <#
 .SYNOPSIS
-    Configures Windows Terminal defaults for shell profile and terminal delegation.
+    Makes PowerShell 7 Windows Terminal's default profile and Windows Terminal the default terminal
+    application (issue #74).
 .DESCRIPTION
-    Applies both issue #74 requirements: PowerShell 7 default profile and Windows Terminal
-    default terminal application setting.
+    Both settings are per-user (settings.json under %LOCALAPPDATA%, the delegation values in HKCU),
+    so the step is skipped, with one line, when the process runs as SYSTEM or as another account
+    than the interactive session's user (cross-user elevation, issue #159): it would configure the
+    wrong account. When the session user is unknown, it runs. It never writes to another user's
+    profile or hive.
 
-    Both writes are strictly per-user: settings.json lives under the process account's
-    %LOCALAPPDATA% and the delegation values under its HKCU hive. They are only made when that
-    account is the logged-on user. The whole step is skipped, with one line, when:
-      - the process runs as SYSTEM (Test-IsSystemAccount), as under an RMM agent: SYSTEM is not
-        a person and has no Terminal of its own; or
-      - the process account differs from the interactive session's user (the #159 detection,
-        Get-ProcessUserName vs Get-InteractiveSessionUserName): a tech elevating as an admin-*
-        account on a user's machine. Applying the settings there would configure the ADMIN
-        account, never the user, and the delegation values in the admin's HKCU would make later
-        admin sessions look Terminal-hosted to Test-WindowsTerminalHostsCurrentSession.
-    When the session user is unknown (no console user reported), the step runs as before. It
-    deliberately does NOT write to another user's profile or registry hive - impersonation/HKU
-    writes are out of scope.
-
-    The "default terminal application" registry write is gated on Windows Terminal actually
-    being installed (Test-WindowsTerminalInstalled, issue #271). This function used to run
-    unconditionally after the app-install loop regardless of whether the Microsoft.WindowsTerminal
-    install had just failed, which could point HKCU:\Console\%%Startup at Windows Terminal even
-    though it was never actually deployed. Once set, that delegation makes every subsequently
-    created console (including a fresh top-level process such as the next CI job step) hosted by
-    Windows Terminal's console component - self-locking every later attempt to install/verify
-    Microsoft.WindowsTerminal via winget, since doing so would require replacing files belonging
-    to the very console host rendering the session. Skipping the write when Windows Terminal is
-    not installed keeps a failed install from poisoning the rest of the run (and later runs) this
-    way.
+    The default terminal application is set only when Windows Terminal is installed
+    (Test-WindowsTerminalInstalled, issue #271): pointing it at a Terminal that failed to install
+    made every later console Terminal-hosted, which locks winget out of installing Terminal.
 .PARAMETER WhatIf
     When provided, only reports intended actions.
 .PARAMETER PassThru

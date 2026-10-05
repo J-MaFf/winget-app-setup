@@ -1,25 +1,17 @@
 <#
 .SYNOPSIS
-    Runs pre-flight system checks (OS version, disk space, network) before installation.
+    Runs the pre-flight system checks (OS version, disk space, network) before installation.
 .DESCRIPTION
-    Warns on Windows older than 10 21H2 (build 19044, non-blocking), warns when C: has less than
-    50 GB free (measured only — an unreadable drive reports UNKNOWN and stays quiet), and blocks
-    when cdn.winget.microsoft.com is unreachable over HTTPS (network is required for winget). The
-    network probe uses Invoke-WebRequest, which honors system proxy settings; any HTTP response —
-    including 4xx/5xx — counts as reachable, and only a transport-level failure (no response at
-    all) blocks. When it blocks a run as SYSTEM or as another admin account, a 'Proxy' warning
-    names the proxy the signed-in user has and this account does not (Get-ProxyInheritanceWarning,
-    wgt-gq8.39), a likely cause.
-
-    Nothing here prompts (issue #230): the only blocking check is the network probe, whose verdict
-    is not a matter of opinion, so the sole return-$false path is a genuine failure rather than a
-    declined question. Low disk warns and proceeds. That is also why this function has no
-    -NonInteractive parameter — with the prompt gone there is no interactive behavior left to
-    suppress (it previously gated the low-disk Read-Host, per issues #214/#176).
+    Warns on Windows older than 10 21H2 (build 19044) and when C: has less than 50 GB free (an
+    unreadable drive stays quiet). Blocks only when cdn.winget.microsoft.com is unreachable over
+    HTTPS: Invoke-WebRequest honours the system proxy, and any HTTP response, 4xx and 5xx included,
+    counts as reachable. When it blocks a run as SYSTEM or as another admin account, a 'Proxy' line
+    names the proxy the signed-in user has and this account lacks (Get-ProxyInheritanceWarning).
+    Nothing here prompts (issue #230).
 .PARAMETER WhatIf
     When specified, reports intended checks and skips the low-disk warning (a dry run makes no
     changes that could run the disk out).
-.RETURNS
+.OUTPUTS
     [bool] True when it is safe to proceed; False when a blocking check fails.
 #>
 function Test-SystemRequirements {
@@ -35,15 +27,11 @@ function Test-SystemRequirements {
     try {
         $cv = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' -ErrorAction Stop
         $osName = $cv.ProductName
-        # Prefer the registry's CurrentBuildNumber over [Environment]::OSVersion: it is the
-        # ground-truth build (never capped by the host's compatibility manifest under Windows
-        # PowerShell 5.1) and, unlike the static .NET call, it is mockable in Pester. Fall back
-        # to OSVersion only when the value is somehow absent.
+        # The registry's CurrentBuildNumber, not OSVersion: never capped by the host's compatibility
+        # manifest under 5.1, and mockable. OSVersion only when the value is absent.
         $build = if ($cv.CurrentBuildNumber) { [int]$cv.CurrentBuildNumber } else { [System.Environment]::OSVersion.Version.Build }
-        # Windows 11 still reports ProductName "Windows 10 ..." - Microsoft never updated the
-        # string, so build >= 22000 is what actually distinguishes it. Relabel so the report
-        # isn't misleading (issue #221). The "Windows 10" guard leaves Windows Server (e.g.
-        # "Windows Server 2025", build 26100) and an already-correct "Windows 11" untouched.
+        # Windows 11 still says "Windows 10" in ProductName; build 22000+ tells it apart (issue #221).
+        # Windows Server and a correct "Windows 11" are left alone.
         if ($build -ge 22000 -and $osName -match 'Windows 10') {
             $osName = $osName -replace 'Windows 10', 'Windows 11'
         }
@@ -76,11 +64,9 @@ function Test-SystemRequirements {
         $results += [PSCustomObject]@{ Check = 'Disk Space'; Status = 'UNKNOWN'; Detail = "Could not read C: drive: $_" }
     }
 
-    # --- Network (blocking — required for winget) ---
-    # Proxy-aware HTTPS probe: Invoke-WebRequest honors system proxy settings, unlike a raw
-    # TCP test (Test-NetConnection), which false-fails on proxy-only networks (#184). Any HTTP
-    # response — even 4xx/5xx — proves the CDN is reachable; only a transport-level failure
-    # (no response at all) blocks.
+    # --- Network (blocking: required for winget) ---
+    # Invoke-WebRequest honours the system proxy, unlike Test-NetConnection (#184). Any HTTP response
+    # proves the CDN is reachable; only no response at all blocks.
     try {
         # -UseBasicParsing is a no-op on PowerShell 7 but prevents a false FAIL on Windows
         # PowerShell 5.1 (README launch path) when the IE parsing engine is unavailable.
@@ -95,10 +81,9 @@ function Test-SystemRequirements {
         else {
             $results += [PSCustomObject]@{ Check = 'Network'; Status = 'FAIL'; Detail = "Cannot reach cdn.winget.microsoft.com over HTTPS - network is required: $($_.Exception.Message)" }
             $proceed = $false
-            # A likely cause the run would otherwise never get to name (wgt-gq8.39): as SYSTEM or an
-            # elevating admin account, this run lacks the proxy the signed-in user has. A real run
-            # stops here, so the line is added here; a dry run goes on, and the environment
-            # pre-flight in Invoke-WingetInstall reports it once.
+            # As SYSTEM or another admin account, this run may lack the signed-in user's proxy. A
+            # real run stops here, so the line is added here; a dry run goes on, and the environment
+            # pre-flight reports it once.
             if (-not $WhatIf) {
                 $proxyWarning = $null
                 try {
@@ -133,12 +118,8 @@ function Test-SystemRequirements {
         return $false
     }
 
-    # Measured-low disk warns and continues; it never asks (issue #230). Low disk is a
-    # recommendation, not a blocker, so "continue anyway?" only ever had one useful answer, and
-    # asking it stalled the documented one-liner — an interactive `irm | iex` does not redirect
-    # stdin, so the interactivity detection this used to branch on reported interactive and the
-    # prompt fired. Silent when free space could not be measured ($freeGB stays $null) or under
-    # -WhatIf, which makes no changes that could run the disk out.
+    # Low disk warns and goes on; it never asks (issue #230). Quiet when free space could not be
+    # measured, or under -WhatIf.
     if ($null -ne $freeGB -and $freeGB -lt 50 -and -not $WhatIf) {
         Write-WarningMessage 'Disk space is below the 50 GB recommendation. Continuing anyway.'
     }

@@ -256,7 +256,9 @@ downloads). The build removes only comments that end their line, keeps `build/fr
 and `tail.ps1` as they are, checks that each module file's code is unchanged token for token, and
 names the source file and line behind every line its guards report. Every function in the new
 installer has the same syntax tree as before. A change to a module comment alone no longer changes
-the installer or its build id.
+the installer or its build id. The module's own comments are shorter too: incident narratives became a
+few lines on what the code does and why, and every function's help uses `.OUTPUTS`, so `Get-Help`
+reads all of it (the `.RETURNS` keyword had made it ignore 202 of the 258 help blocks).
 
 The same branch changes CI. Fork pull requests that leave `windows-tests.yml` alone no longer run
 on the self-hosted win-test runner, and `claude.yml` calls the shared Claude workflow at a pinned

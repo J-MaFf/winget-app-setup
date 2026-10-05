@@ -38,7 +38,7 @@ function Get-DefinedFunctionLookup {
         assembled script's AST, shared by the direct- and indirect-dispatch reference guards below.
     .PARAMETER Ast
         The parsed AST of the fully assembled installer.
-    .RETURNS
+    .OUTPUTS
         A two-element array: [0] a case-sensitive (ordinal) HashSet[string] of defined names,
         [1] a case-insensitive Dictionary[string,string] mapping folded name -> defined name.
     #>
@@ -132,7 +132,7 @@ function Get-PowerShell7OnlySyntax {
         The parsed AST of the fully assembled installer.
     .PARAMETER Tokens
         The tokens the parser returned for the assembled installer.
-    .RETURNS
+    .OUTPUTS
         One object per offending construct, with Line, Column, Text and Kind.
     #>
     param(

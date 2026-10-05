@@ -1,14 +1,11 @@
-# The catalog entry schema (work-order item 38): the fields an app definition may carry beyond its
-# package id, and the helpers that read them. Get-DefaultAppCatalog (Public/AppCatalog.ps1)
-# documents every field for catalog authors; Test-AppDefinitions checks them with
-# Get-AppDefinitionSchemaIssue before a run uses any of them, so a mistyped value stops the run
-# with exit code 3 instead of misbehaving halfway through it. Runs under Windows PowerShell 5.1
-# too: the uninstaller validates the catalog and decides applicability there.
+# The catalog entry schema: the fields an entry may carry beyond its package id, and the helpers that
+# read them (Get-DefaultAppCatalog documents the fields). Runs under Windows PowerShell 5.1 too: the
+# uninstaller validates the catalog and decides applicability there.
 
 <#
 .SYNOPSIS
     Returns the names of the fields a catalog entry may carry.
-.RETURNS
+.OUTPUTS
     [string[]]
 #>
 function Get-AppDefinitionFieldName {
@@ -21,7 +18,7 @@ function Get-AppDefinitionFieldName {
 .DESCRIPTION
     Windows' processor architectures, spelled as Get-OSArchitecture returns them
     (System.Runtime.InteropServices.Architecture names). Compared without regard to case.
-.RETURNS
+.OUTPUTS
     [string[]]
 #>
 function Get-AppDefinitionArchitectureName {
@@ -30,24 +27,21 @@ function Get-AppDefinitionArchitectureName {
 
 <#
 .SYNOPSIS
-    Checks a catalog entry's optional schema fields: scope, arch, postInstall and userPhase.
+    Checks a catalog entry's optional fields: scope, arch, postInstall and userPhase.
 .DESCRIPTION
-    Test-AppDefinitions calls this for every entry whose package id is valid. An error makes the
-    entry invalid, and the run then stops with exit code 3 before it installs anything:
-      - scope: 'machine', 'user' or 'any'.
-      - arch: one architecture name or a list of them, each one of Get-AppDefinitionArchitectureName,
-        and at least one. A misspelt name would otherwise match no PC and skip the app everywhere.
-      - postInstall: a scriptblock, or the name of a command that exists (a function of this
-        installer). A name that resolves to nothing would otherwise fail the app on every run
-        after it installed.
-      - userPhase: $true or $false.
-    A field the schema does not know (Get-AppDefinitionFieldName) is a warning, not an error: the
-    installer ignores it, so a misspelt optional field is reported instead of silently dropped.
+    An error makes the entry invalid, and the run stops with exit code 3 before it installs anything:
+      - scope: not 'machine', 'user' or 'any'.
+      - arch: empty, or a name Get-AppDefinitionArchitectureName does not list (a misspelt name
+        would match no PC and skip the app everywhere).
+      - postInstall: neither a scriptblock nor the name of a command that exists.
+      - userPhase: not $true or $false.
+    A field the schema does not know (Get-AppDefinitionFieldName) is a warning: the installer
+    ignores it.
 .PARAMETER App
     The catalog entry.
 .PARAMETER Label
     How messages name the entry, e.g. "App entry at index 3 ('Contoso.App')".
-.RETURNS
+.OUTPUTS
     [pscustomobject] @{ Errors = [string[]]; Warnings = [string[]] }
 #>
 function Get-AppDefinitionSchemaIssue {
@@ -117,14 +111,10 @@ function Get-AppDefinitionSchemaIssue {
 
 <#
 .SYNOPSIS
-    Returns a catalog entry's install scope: 'machine', 'user' or 'any'.
-.DESCRIPTION
-    'any' when the entry has no scope (today's behaviour: prefer a machine-wide install, and fall
-    back to winget's default scope unless the run installs for the whole PC only). Lower case, so
-    callers can compare it as they like.
+    Returns a catalog entry's install scope in lower case: 'machine', 'user' or 'any' (no scope).
 .PARAMETER App
     A validated catalog entry.
-.RETURNS
+.OUTPUTS
     [string]
 #>
 function Get-AppInstallScope {
@@ -142,16 +132,11 @@ function Get-AppInstallScope {
 
 <#
 .SYNOPSIS
-    Returns whether a catalog entry marks the app as per-user work, and why: 'UserScope', 'UserPhase'
-    or $null.
-.DESCRIPTION
-    A run as SYSTEM or under cross-user elevation installs for the whole PC only, so it defers such
-    an app before any winget call (Install-AppWithVerification): scope 'user' installs into one
-    account's profile, and userPhase marks an app or setting that needs the signed-in user's own
-    account. Any other run installs it as usual.
+    Returns whether a catalog entry is per-user work, which a run as SYSTEM or under cross-user
+    elevation defers before any winget call: 'UserScope', 'UserPhase' or $null.
 .PARAMETER App
     A validated catalog entry.
-.RETURNS
+.OUTPUTS
     [string] 'UserScope' (scope 'user', which wins when both are set), 'UserPhase', or $null.
 #>
 function Get-AppPerUserDeferReason {
@@ -171,16 +156,15 @@ function Get-AppPerUserDeferReason {
 
 <#
 .SYNOPSIS
-    Returns the text of a not-applicable skip for a catalog entry: what follows 'not applicable: '.
+    Returns the text of a not-applicable skip, what follows 'not applicable: ', for both passes and
+    the uninstaller.
 .DESCRIPTION
-    The one place the skip reason is worded, for the installer's two passes and the uninstaller.
-    The entry's conditionDescription when it has one: it describes the entry's applicability gates,
-    its arch list and its condition alike. Otherwise, when the entry's arch list does not include
-    this PC's architecture, 'for <list> Windows only; this PC is <architecture>'. Otherwise
-    'condition not met'. Call it only for an entry Test-AppApplicability found not applicable.
+    The entry's conditionDescription when it has one; otherwise, when its arch list does not
+    include this PC's architecture, 'for <list> Windows only; this PC is <architecture>'; otherwise
+    'condition not met'. Only for an entry Test-AppApplicability found not applicable.
 .PARAMETER App
     A validated catalog entry.
-.RETURNS
+.OUTPUTS
     [string]
 #>
 function Get-AppNotApplicableReason {
@@ -212,15 +196,13 @@ function Get-AppNotApplicableReason {
 .SYNOPSIS
     Turns what a post-install hook returned into its result: Configured, NotConfigured or Failed.
 .DESCRIPTION
-    The last object the hook wrote is its result, so stray output from the commands it runs does not
-    count. It is either the status as a string, or an object with a Status and a Reason (a hashtable
-    or any object with those properties). The status is matched without regard to case.
-    NotConfigured and Failed without a reason get 'no reason given'. Anything else, including no
-    output at all or $true, is a hook that did not say whether the app is configured: Failed, with
-    what it returned, so 'installed' never means 'configured' by default.
+    The hook's last output is its result, either the status as a string or an object with Status
+    and Reason (case-insensitive). NotConfigured and Failed without a reason get 'no reason given'.
+    Anything else, no output or $true included, is Failed: 'installed' never means 'configured' by
+    default.
 .PARAMETER Output
     Everything the hook wrote to the pipeline.
-.RETURNS
+.OUTPUTS
     [hashtable] @{ Status = 'Configured' | 'NotConfigured' | 'Failed'; Reason = <string|$null> }
 #>
 function ConvertTo-AppPostInstallResult {
@@ -277,22 +259,16 @@ function ConvertTo-AppPostInstallResult {
 .SYNOPSIS
     Runs a catalog app's post-install hook and returns whether the app is configured.
 .DESCRIPTION
-    Install-AppWithVerification calls this once the app is installed: verified after its install,
-    already installed, or already provisioned for every user, never for an app that was skipped as
-    not applicable, deferred or failed, and never in a dry run. So a hook runs on every run that
-    finds its app, and must be idempotent: it checks the setting and changes only what differs.
-
-    The hook ($App.postInstall) is a scriptblock or the name of a function, called with the app's
-    catalog entry as its one positional argument (param($App), or $args[0]). It runs in this run's
-    account: SYSTEM in an RMM run, or the elevating admin under cross-user elevation, so a hook that
-    configures the signed-in user's own settings belongs on an entry marked userPhase, which such a
-    run defers. What it returns is read by ConvertTo-AppPostInstallResult. A hook that throws, or
-    writes an error (the preference is Stop here, as for catalog conditions), is Failed with the
-    error's message. It has no time limit of its own: a hook that starts a process should use
-    Invoke-ExternalProcess.
+    Install-AppWithVerification calls it once the app is installed, on every run that finds it (so
+    a hook must be idempotent), never for an app skipped, deferred or failed, and never in a dry
+    run. The hook ($App.postInstall, a scriptblock or a function name) gets the catalog entry as
+    its one argument and runs in this run's account (SYSTEM in an RMM run), so a hook for the
+    signed-in user's own settings belongs on a userPhase entry. A throw or a written error (the
+    preference is Stop here) is Failed with its message. No time limit of its own: a hook that
+    starts a process should use Invoke-ExternalProcess.
 .PARAMETER App
     A validated catalog entry with a postInstall hook.
-.RETURNS
+.OUTPUTS
     [hashtable] @{ Status = 'Configured' | 'NotConfigured' | 'Failed'; Reason = <string|$null> }
 #>
 function Invoke-AppPostInstall {

@@ -3,50 +3,26 @@
     Makes winget usable for this run: checks it, works out what is wrong, applies the fix for that,
     and says in one line what could not be fixed.
 .DESCRIPTION
-    One ladder (review finding P3-25) in place of three that ran back to back and gave one cause
-    three diagnoses (Test-AndInstallWinget, Initialize-WingetSourcesForUser, Test-WingetSources),
-    plus a source update before elevation that only ever set up the signed-in user's source. Each
-    fix runs at most once per run.
-
-      1. Group Policy (Get-WingetPolicyBlock, review finding P3-30). When App Installer's policy
-         turns winget or its source off, no fix can help: the run stops with exit code 2 and names
-         the policy. So does a winget that answers 0x8A15003A BLOCKED_BY_POLICY. The install run
-         checks the policy values in its pre-flight (Invoke-EnvironmentPreflight, wgt-gq8.39),
-         before it waits for Winget-AutoUpdate, and does not get here when they block winget; the
-         uninstaller relies on this check.
-      2. Can winget start? `winget --version` must run and print a version (Test-WingetLaunchable).
-         A failure that can clear on its own (winget.exe locked during an App Installer update,
-         issues #253/#258) is checked for up to 75 seconds first, so an update in progress is not
-         repaired underneath. Then the account fixes run (Invoke-NextWingetAccountFix), each
-         followed by two checks 5 seconds apart: register the App Installer already on this PC for
-         this account (the cross-user elevation fix), then Repair-WinGetPackageManager. When winget
-         still cannot start, one line says why and what to do, and the run stops with exit code 2.
-      3. The winget source: `winget source update --name winget` (Invoke-WingetSourceProbe). Its
-         exit code picks the fix: 0x80073D19 (the account has no logon session, so Windows blocked
-         registering the source for it, issue #159) gets the account fixes that have not run; a
-         missing or corrupted source (class SourceBroken in Get-WingetExitCodeInfo) gets
-         `winget source reset --force`. A timeout, a network error or any other code gets none: no
-         repair fixes a network, and a slow proxy used to get App Installer replaced (review finding
-         P3-28). A source that still fails is reported in one line, and the run carries on: each
-         install then says why it failed.
-
-    As SYSTEM (review finding P2-24) step 2 is Test-MachineWingetAvailable, which finds and checks
-    the winget.exe App Installer installed for the PC, and no account fix runs: each sets winget up
-    for one account, which SYSTEM cannot have.
-
-    Two rungs were dropped. The aka.ms/getwinget download (review findings P3-25, P3-31: it also
-    used a fixed file name in %TEMP%) installed the bundle Repair-WinGetPackageManager -Latest
-    installs, but without the frameworks the bundle needs, and through the per-account deployment
-    that 0x80073D19 blocks under cross-user elevation; the run it once rescued (issue #265) is now
-    rescued by the registration rung. Registering cdn.winget.microsoft.com/cache/source.msix with
-    Add-AppxPackage was that same per-account deployment, which `winget source update` and
-    `winget source reset` make themselves.
+    One ladder (P3-25); each fix runs at most once a run:
+      1. Group Policy (Get-WingetPolicyBlock): App Installer's policy turning winget or its source
+         off, or winget answering 0x8A15003A, stops the run with exit code 2; no fix can help. The
+         install run's pre-flight checks the policy first; the uninstaller relies on this check.
+      2. Can winget start (Test-WingetLaunchable)? A failure that can clear on its own (an App
+         Installer update, issues #253/#258) is checked for up to 75 seconds before any repair.
+         Then the account fixes (Invoke-NextWingetAccountFix), each followed by two checks 5 seconds
+         apart: register the App Installer already on the PC, then Repair-WinGetPackageManager. Still
+         not startable: one line says why and what to do, and the run stops with exit code 2.
+      3. The winget source (Invoke-WingetSourceProbe). 0x80073D19 (no logon session, issue #159)
+         gets the account fixes not yet run; a missing or corrupted source (SourceBroken) gets
+         `winget source reset --force`. A timeout, a network error or another code gets no repair
+         (P3-28). A source that still fails is one line, and the run goes on.
+    As SYSTEM, step 2 is Test-MachineWingetAvailable and no account fix runs.
 .PARAMETER WhatIf
     Dry run (P2-16): only the policy and `winget --version` checks run. Nothing is registered,
     repaired, updated or reset; [DRY-RUN] lines say what a real run would do.
 .PARAMETER AccountContext
     Get-InstallAccountContext's result, which Invoke-WingetInstall passes; read here when not given.
-.RETURNS
+.OUTPUTS
     [pscustomobject] Ready ([bool]: winget starts and no policy blocks it; a real run stops with exit
     code 2 when it is $false) and Diagnosis: 'Ok', 'SourceFailed' (ready, but the winget source
     could not be set up), 'PolicyBlocked' or 'NotLaunchable'.
@@ -178,100 +154,47 @@ function Initialize-Winget {
     Installs a single winget package, retrying the results that clear on their own: the 0x80073d19
     session error, another installation in progress, and an app or file in use.
 .DESCRIPTION
-    Runs `winget install` for one package id through Invoke-WingetProcess and reads winget's real
-    process exit code from the result. Exit code 0x80073d19
-    (ERROR_DEPLOYMENT_BLOCKED_BY_USER_LOG_OFF, "An error occurred because a user was logged off")
-    means Windows blocked an app package deployment because the installing account has no
-    interactive logon session (issue #159; Initialize-Winget sets such an account up first). What
-    is left of it can clear on its own, but an immediate retry hits the same state, which is why
-    issues #81/#100/#102 left it unresolved.
-    When that specific code is seen, this function waits with an increasing backoff and retries, up
-    to MaxAttempts.
+    Runs `winget install` for one package through Invoke-WingetProcess and reads winget's exit code
+    from the process. Retries, by the code's class (Get-WingetExitCodeInfo):
+      - 0x80073D19 (ERROR_DEPLOYMENT_BLOCKED_BY_USER_LOG_OFF, an account with no logon session,
+        issue #159): with an increasing backoff, up to MaxAttempts; an immediate retry hits the
+        same state.
+      - 0x8A150102 (Windows Installer busy with another installation, msiexec 1618): waits until it
+        is idle (Wait-WindowsInstallerIdle) and retries, up to InstallInProgressRetries, within
+        InstallInProgressWaitSeconds (the run's remaining budget) (P2-15).
+      - 0x8A150101, 0x8A150103 and 0x8A150111 (in use): one retry after InUseRetryDelaySeconds.
+    0x8A15010A (restart required first) and every other result are final; the caller verifies with
+    `winget list`. RestartRequired comes from Test-WingetRestartRequiredResult.
 
-    Two more results are retried (review finding P2-15), decided by their class in
-    Get-WingetExitCodeInfo:
-      - 0x8A150102 (INSTALL_INSTALL_IN_PROGRESS): Windows Installer was busy with another
-        installation (msiexec 1618), which it reports at once instead of waiting. Common on a fresh
-        PC whose management agent, OEM tools or Teams are still installing. This function waits
-        until Windows Installer is idle (Wait-WindowsInstallerIdle, checking every 15 seconds) and
-        retries, up to InstallInProgressRetries times, waiting at most InstallInProgressWaitSeconds
-        in all. Invoke-WingetInstall passes what is left of the run's 10-minute budget, so a machine
-        that stays busy costs the run 10 minutes at most, not 10 minutes per app.
-      - 0x8A150101, 0x8A150103 and 0x8A150111 (the app or its files are in use): one retry after
-        InUseRetryDelaySeconds.
-    0x8A15010A (a restart is required before the installer can run) is never retried: only a restart
-    changes it. Any other exit code (success or a real failure) is returned at once so the caller
-    can verify the result with `winget list` as before.
+    Each install has a time limit (WingetInstall, P2-5): when it runs out winget and its installer
+    are stopped and TimedOut is set; that is not retried. winget's output goes into the transcript
+    as it arrives, and its --log to the logs folder (InstallerLogPath). -Silent passes --silent, so
+    MSI and WiX packages install with /quiet instead of /passive.
 
-    Restart required to finish (review finding P3-16): winget 1.7 and later report an MSI, WiX or
-    Burn installer's 3010 as exit 0 and print 'Restart your PC to finish installation.'; winget 1.6
-    and older exit 0x8A150109, and an installer that started a restart itself (MSI 1641) gives
-    0x8A15010B. RestartRequired says so for any of the three. The printed warning is matched in
-    English only; on other display languages the caller's pending-restart registry check is what
-    notices it.
+    A launch that fails with 1920 or 32 (winget.exe locked by an antivirus scan or an App Installer
+    update, issues #253/#258) is retried with its own doubling backoff, MaxLaunchAttempts times (75
+    seconds by default), and costs no install attempt. Any other launch failure ends at once with
+    LaunchErrorExhausted, for the caller's circuit breaker.
 
-    Each install has a time limit (Get-ProcessTimeoutSeconds WingetInstall, review finding P2-5):
-    when it runs out, winget and the installer it started are stopped, and the result says TimedOut
-    with no exit code; a timed-out install is not retried here. winget's output is echoed into the
-    console and the transcript as it arrives (P2-6), so the installer's own error text ("Installer
-    failed with exit code: 1603") is in the log the teammate attaches, and winget writes the
-    installer's log (--log) to the run's logs folder; InstallerLogPath points at it when the
-    installer wrote one. When the run is unattended (-Silent), winget gets --silent, so MSI and
-    WiX packages install with /quiet instead of /passive.
-
-    winget can also fail to launch at all, with Win32 ERROR_CANT_ACCESS_FILE (1920, "The file cannot
-    be accessed by the system.") or the sibling ERROR_SHARING_VIOLATION (32, "being used by another
-    process"), instead of producing an exit code. This happens when winget.exe's own file is
-    transiently locked — e.g. Windows Defender real-time scanning it, or an AppX
-    package-registration race right after Repair-WinGetPackageManager runs. A failed launch used to
-    bypass the exit-code-based retry loop below entirely: on a GitHub-hosted E2E runner this was
-    observed to fail every install in a run, surviving even the caller's separate one-shot retry
-    pass, because neither layer paused before retrying (issue #253). This class of launch failure is
-    now retried, recognized by its Win32 error code rather than by its translated message (P3-6).
-    Any other launch failure (e.g. winget genuinely missing, or 'Access is denied') is not retried:
-    it ends the install at once with LaunchErrorExhausted and the launch error in the result, so
-    the caller reports that winget could not be launched (and Invoke-WingetInstall's circuit
-    breaker can stop the run) instead of an unexpected error.
-
-    Launch failures have their own retry budget, longer than the session-error one (issue #258):
-    the dominant real-world cause is a Microsoft.DesktopAppInstaller (App Installer) upgrade or
-    re-registration in flight - e.g. a background Winget-AutoUpdate run - which breaks the per-user
-    winget.exe app-execution alias for the whole registration window, far longer than the 15s the
-    #253 backoff covered. The launch backoff doubles across MaxLaunchAttempts (default 5:
-    5s+10s+20s+40s = 75s of coverage) so the retry window outlasts a typical App Installer
-    registration. A failed launch never ran winget, so it does not consume one of the MaxAttempts
-    install attempts. (Each retry used to launch the package's own winget.exe past the alias,
-    Resolve-WingetExecutable -BypassAlias; that never worked and was removed, review finding P3-7.)
-
-    Installs prefer `--scope machine` (issue #159): user-scope installs land in the elevated
-    account's profile rather than the logged-on user's, and packages that ship both MSIX and MSI
-    installers (e.g. Microsoft.PowerShell) resolve at user scope to the MSIX — whose per-user AppX
-    deployment is exactly what 0x80073D19 blocks under cross-user elevation. When a package has no
-    machine-scope installer (e.g. the MSIX-only Microsoft.WindowsTerminal), winget returns
-    0x8A150010 (NO_APPLICABLE_INSTALLER) and the install is retried once at winget's default scope,
-    unless -MachineScopeOnly says the run must not install for one account (review finding P3-22),
-    or -Scope says the catalog entry allows only one scope (work-order item 38).
-    -UserScopeOnly is the other way round: `--scope user` only, for the user phase
-    (Invoke-WingetUserPhase), which installs as the signed-in user, not elevated, the apps a run for
-    the whole PC deferred. It never falls back either: winget's default scope could pick a
-    machine-wide installer, which needs administrator rights and would ask for them.
+    Installs prefer --scope machine (issue #159): at user scope a package lands in the elevating
+    account's profile, and one with both MSIX and MSI resolves to the per-user MSIX that 0x80073D19
+    blocks. A package with no machine-scope installer (0x8A150010) is retried once at winget's
+    default scope, unless -MachineScopeOnly or -Scope machine forbid it (NoMachineScopeInstaller).
+    -UserScopeOnly (the user phase) is --scope user only, never falling back: the default scope
+    could pick a machine-wide installer that asks for administrator rights.
 .PARAMETER PackageId
     The winget package id to install (e.g. 'Microsoft.PowerShell').
 .PARAMETER InstallerType
-    Optional winget installer-type override (e.g. 'wix' to force the MSI), passed as
-    `--installer-type <value>`. Needed for PowerShell: even with --scope machine, winget's
-    installer-type precedence still selects the default MSIX, whose machine-scope provisioning fails
-    as a packaged app on Windows < build 26100 with 0x8A150113 ("system configuration does not
-    support"). Forcing 'wix' installs the machine-wide MSI instead (issue #163).
+    Optional `--installer-type <value>`. PowerShell needs 'wix': even with --scope machine winget
+    picks the MSIX, whose machine-scope provisioning fails before build 26100 with 0x8A150113
+    (issue #163).
 .PARAMETER MaxAttempts
     Maximum number of install attempts while the session error keeps recurring. Default 3.
 .PARAMETER InitialDelaySeconds
     Seconds to wait before the first retry; the wait doubles on each subsequent retry. Default 5.
 .PARAMETER MaxLaunchAttempts
-    Maximum number of times to attempt launching winget.exe while the launch keeps failing with the
-    transient file-lock error (issue #258). Separate from MaxAttempts because a failed launch never
-    ran an install; the wait starts at InitialDelaySeconds and doubles on each launch retry.
-    Default 5 (75s of total backoff at the default InitialDelaySeconds).
+    Maximum number of launches while winget.exe stays locked (1920, 32). The wait starts at
+    InitialDelaySeconds and doubles. Default 5 (75 seconds in all).
 .PARAMETER Silent
     Pass --silent to winget. Invoke-WingetInstall passes its effective non-interactive state. When
     the parameter is not given, Test-EffectiveNonInteractive decides (e.g. for a script that calls
@@ -284,19 +207,13 @@ function Initialize-Winget {
 .PARAMETER InUseRetryDelaySeconds
     Seconds to wait before the one retry after an in-use result. Default 60.
 .PARAMETER MachineScopeOnly
-    Never fall back to winget's default scope (review finding P3-22). Invoke-WingetInstall passes it
-    for a run as SYSTEM or under cross-user elevation, where the default scope installs into the
-    wrong profile: SYSTEM's own, or the elevating admin's instead of the signed-in user's, and the
-    verification, run as that same account, then reported it installed. A package with no
-    machine-scope installer then ends at once with NoMachineScopeInstaller, and the caller defers
-    it (leaves it for the signed-in user's own account).
+    Never fall back to winget's default scope (a run as SYSTEM or under cross-user elevation, where
+    it would install into the wrong profile, P3-22). A package with no machine-scope installer ends
+    at once with NoMachineScopeInstaller, and the caller defers it.
 .PARAMETER Scope
-    The catalog entry's scope (work-order item 38, Get-AppInstallScope). 'any' (default): machine
-    scope first, then winget's default scope as described above. 'machine': `--scope machine` and
-    never the fallback, as with -MachineScopeOnly; a package with no machine-scope installer ends
-    with NoMachineScopeInstaller. 'user': `--scope user` from the first attempt, no fallback; it
-    cannot be combined with -MachineScopeOnly (Install-AppWithVerification defers such an app in a
-    run for the whole PC instead of calling this).
+    The catalog entry's scope (Get-AppInstallScope). 'any' (default): machine scope, then the
+    fallback. 'machine': as -MachineScopeOnly. 'user': --scope user from the first attempt, no
+    fallback; not with -MachineScopeOnly (Install-AppWithVerification defers such an app instead).
 .PARAMETER UserScopeOnly
     Install with `--scope user` and nothing else (the user phase, Invoke-WingetUserPhase). A
     package with no per-user installer that applies (0x8A150010) ends at once with
@@ -305,25 +222,16 @@ function Initialize-Winget {
 .PARAMETER TimeoutSeconds
     The time limit of each winget install, in seconds. Default (or 0): Get-ProcessTimeoutSeconds
     WingetInstall. The user phase passes what is left of its time budget.
-.RETURNS
+.OUTPUTS
     [hashtable] @{ ExitCode = <int|$null>; Attempts = <int>; SessionErrorExhausted = <bool>; MachineScopeFellBack = <bool>; NoMachineScopeInstaller = <bool>; NoUserScopeInstaller = <bool>; LaunchErrorExhausted = <bool>; LaunchAttempts = <int>; LaunchError = <string|$null>; TimedOut = <bool>; TimeoutSeconds = <int>; InstallerLogPath = <string|$null>; InstallInProgressWaitedSeconds = <int>; RestartRequired = <bool> }
-    SessionErrorExhausted is True only when every attempt failed with the session error.
-    InstallInProgressWaitedSeconds is how long this call waited for another installation to finish.
-    RestartRequired is True when the last attempt's result says a restart finishes the installation
-    (see the description); the caller decides from `winget list` whether the package installed.
-    MachineScopeFellBack is True when the package had no machine-scope installer and the install
-    was retried at winget's default scope. NoMachineScopeInstaller is True when it had none and
-    -MachineScopeOnly or -Scope machine kept it from being installed at all (ExitCode is then
-    0x8A150010); NoUserScopeInstaller is the same for -UserScopeOnly (`--scope user` only). Attempts
-    counts install attempts at the finally selected scope, the retries after another installation
-    in progress or an in-use result included; the one-time scope fallback does not consume a
-    session-error attempt, and neither does a failed launch (no process ran). LaunchAttempts counts failed winget launches.
-    LaunchErrorExhausted is True when winget.exe could not be launched: a transient launch failure
-    through every launch attempt (issues #253/#258), or any other launch failure at once; ExitCode
-    is $null in that case, since no process ran to report an exit code, and LaunchError is the last
-    launch error. TimedOut is True when the last attempt ran out of time
-    and was stopped (ExitCode is then $null); TimeoutSeconds is the limit it had. InstallerLogPath
-    is the installer log winget wrote for the last attempt, or $null when there is none.
+    SessionErrorExhausted: every attempt failed with the session error. MachineScopeFellBack: the
+    install was retried at winget's default scope. NoMachineScopeInstaller / NoUserScopeInstaller:
+    no installer for the only scope allowed (ExitCode 0x8A150010). Attempts counts installs at the
+    final scope, busy and in-use retries included; neither the scope fallback nor a failed launch
+    counts. LaunchErrorExhausted: winget.exe could not be launched (ExitCode $null, LaunchError the
+    last error). TimedOut: the last attempt was stopped at its limit (ExitCode $null).
+    InstallerLogPath: the last attempt's installer log, or $null. RestartRequired: the last result
+    says a restart finishes the install; the caller decides from `winget list` whether it installed.
 #>
 function Install-WingetPackage {
     param (
@@ -418,11 +326,8 @@ function Install-WingetPackage {
         $attempt++
         $restartRequired = $false
 
-        # The shared agreement/interactivity flags come from Get-WingetAgreementArgs (issue #230
-        # follow-up): every other winget call in the module already passed them, but this one -
-        # the path every app install takes - did not, because each call site hand-duplicated the
-        # literal array. Routing through the shared helper makes that omission structurally
-        # impossible instead of relying on manual re-auditing.
+        # The shared agreement and interactivity flags (Get-WingetAgreementArgs), so this call can
+        # never miss --disable-interactivity again (issue #230).
         $installArgs = @(
             'install', '-e'
         ) + (Get-WingetAgreementArgs) + @(
@@ -505,10 +410,9 @@ function Install-WingetPackage {
             break
         }
 
-        # No installer matched the machine-scope requirement (e.g. MSIX-only packages such as
-        # Microsoft.WindowsTerminal, which only install per-user). Fall back to winget's default
-        # scope once; this is a manifest property, not a transient error, so it does not consume
-        # one of the session-error attempts.
+        # No machine-scope installer (an MSIX-only package such as Windows Terminal): fall back to
+        # winget's default scope once. A manifest property, not a transient error, so no attempt
+        # is spent.
         if (-not $UserScopeOnly -and $useMachineScope -and $exitCode -eq $noApplicableInstallerExitCode) {
             if ($MachineScopeOnly) {
                 # A run as SYSTEM or under cross-user elevation (review finding P3-22): the default
@@ -518,7 +422,7 @@ function Install-WingetPackage {
                 break
             }
             if ($Scope -eq 'machine') {
-                # The catalog entry allows only a machine-wide install (work-order item 38).
+                # The catalog entry allows only a machine-wide install.
                 Write-Info "winget found no machine-scope installer for $PackageId that applies to this PC, and its catalog entry allows only a machine-wide install (scope 'machine'), so it is not installed at winget's default (per-user) scope."
                 $noMachineScopeInstaller = $true
                 break
@@ -570,11 +474,8 @@ function Install-WingetPackage {
             continue
         }
 
-        # Success, a restart-required result (0x8A15010A is never retried: only a restart changes
-        # it) or another failure: final here. The caller verifies the actual install state with
-        # `winget list`.
-        # winget 1.7+ turns an installer's 3010 into exit 0 and says so only in its output
-        # ('Restart your PC to finish installation.', English display language only).
+        # Success, restart-required-first (only a restart changes it) or another failure: final.
+        # The caller verifies with `winget list`.
         $restartRequired = Test-WingetRestartRequiredResult -ExitCode $exitCode -Output $run.Output
         break
     }
@@ -601,32 +502,19 @@ function Install-WingetPackage {
 .SYNOPSIS
     Returns whether winget reports the given package id as installed for the current account.
 .DESCRIPTION
-    Runs `winget list --exact --id <id>` through Invoke-WingetProcess, quietly (the per-app checks
-    would otherwise print a table twice for every app), and always under a time limit, killing a
-    hung winget instead of blocking the install loop (issues #176, #188).
-
-    The result tells the three outcomes apart: installed, not installed, and no answer. A
-    timeout must count as a failure rather than being silently dropped (issue #176), and so must a
-    winget that could not be started (LaunchFailed, review finding P2-9): reading that as "not
-    installed" made Install-AppWithVerification install apps that were already there and then
-    report them as 'package not found after install'. A failed launch is not retried here; the
-    caller decides (Invoke-WingetInstall's circuit breaker checks whether winget can still start).
-    The same goes for a `winget list` that ran but failed (CheckFailed): it exits 0 when it lists
-    the package and 0x8A150014 (APPINSTALLER_CLI_ERROR_NO_APPLICATIONS_FOUND) when nothing matches,
-    and it only warns about a source it could not search. Any other exit code with no match (for
-    example 0x8A15004B, every source failed to open) means the check itself failed.
-
-    "Installed" is determined via Test-WingetListOutputContainsPackageId rather than a plain
-    substring .Contains check, so an unrelated listed id that merely contains $PackageId as a
-    substring (e.g. target 'Foo.Bar' inside listed id 'Foo.BarBaz') cannot false-positive.
+    `winget list --exact --id <id>` through Invoke-WingetProcess, quietly and always under a time
+    limit (issues #176, #188). It tells installed, not installed and no answer apart: a timeout, a
+    winget that could not start (P2-9) or a `winget list` that failed is no answer, never "not
+    installed". `winget list` exits 0 when it lists the package and 0x8A150014 when nothing matches;
+    any other code without a match (e.g. 0x8A15004B, no source opened) is CheckFailed. A failed
+    launch is not retried here; the caller's circuit breaker decides. The id is matched as a whole
+    id (Test-WingetListOutputContainsPackageId), so 'Foo.Bar' does not match 'Foo.BarBaz'.
 .PARAMETER PackageId
     The winget package id to check.
 .PARAMETER TimeoutSeconds
     Maximum seconds to wait for `winget list` before killing it. Required: every caller passes the
-    per-app check's limit (Get-ProcessTimeoutSeconds WingetListCheck) or its own. There used to be
-    a mode without it that returned a plain [bool] and read a winget that could not be started, or
-    one that ran out of time, as "not installed"; no caller used it (review finding P3-43).
-.RETURNS
+    per-app check's limit (Get-ProcessTimeoutSeconds WingetListCheck) or its own.
+.OUTPUTS
     [hashtable] @{ Installed = <bool>; TimedOut = <bool>; LaunchFailed = <bool>;
     LaunchError = <string or $null>; CheckFailed = <bool>; ExitCode = <int or $null> }.
     Installed is True only when winget answered and listed the id. TimedOut, LaunchFailed and
@@ -653,10 +541,8 @@ function Test-WingetPackageInstalled {
         return @{ Installed = $false; TimedOut = $true; LaunchFailed = $false; LaunchError = $null; CheckFailed = $false; ExitCode = $null }
     }
 
-    # Standard output only, as before: an error message on standard error can name the id too.
-    # Join with a newline, not '': Test-WingetListOutputContainsPackageId's boundary regex
-    # treats anything outside [\w.\-] as a token edge, so an empty separator would let the
-    # end of one line abut the start of the next and could hide a real match at that seam.
+    # Standard output only: an error message can name the id too. Joined with a newline, so the
+    # boundary match cannot join the end of one line to the start of the next.
     $installed = Test-WingetListOutputContainsPackageId -Output ([String]::Join("`n", @($run.StandardOutput))) -PackageId $PackageId
 
     # 0 (listed) and 0x8A150014 (APPINSTALLER_CLI_ERROR_NO_APPLICATIONS_FOUND, as a signed
@@ -701,11 +587,9 @@ function Test-AppxPackageProvisioned {
 .SYNOPSIS
     Provisions a downloaded MSIX package (and its dependencies) for all users via DISM.
 .DESCRIPTION
-    Thin, mockable wrapper around Add-AppxProvisionedPackage. The Appx/DISM provider is unreliable
-    under PowerShell 7 (it throws 0x80131539 "Operation is not supported on this platform"), so when
-    running under pwsh the provisioning is delegated to Windows PowerShell 5.1. Returns True on
-    success. A winget-source MSIX has no Store license, so -SkipLicense is used when no license file
-    was downloaded alongside it.
+    A mockable wrapper around Add-AppxProvisionedPackage. Under PowerShell 7 the Appx/DISM provider
+    throws 0x80131539, so it runs in Windows PowerShell 5.1. A winget-source MSIX has no Store
+    license, so -SkipLicense is used when no license file was downloaded. Returns True on success.
 .PARAMETER PackagePath
     Full path to the .msixbundle/.msix to provision.
 .PARAMETER DependencyPackagePath
@@ -713,15 +597,11 @@ function Test-AppxPackageProvisioned {
 .PARAMETER LicensePath
     Optional path to a downloaded license .xml.
 .PARAMETER TimeoutSeconds
-    Under pwsh: a time limit for the Windows PowerShell child (Get-ProcessTimeoutSeconds -Operation
-    AppxProvisioning), which then runs through Invoke-ExternalProcess, its output echoed into the
-    transcript, and is stopped when the limit runs out. Its output is read in the console's code
-    page ([Console]::OutputEncoding), which Windows PowerShell writes redirected output in, so a
-    localized DISM error keeps its non-ASCII letters. The child starts without PSModulePath and
-    builds Windows PowerShell's own default: a process started through Process.Start inherits
-    PowerShell 7's, with its own module folders first, which Windows PowerShell cannot load
-    (Invoke-DiagnosticsWindowsPowerShell, work-order item 35, found that; only `& powershell.exe`
-    removes them). 0 (the default): no limit, as before.
+    Under pwsh: a time limit for the Windows PowerShell child, run through Invoke-ExternalProcess
+    (output in the transcript, read in the console's code page so a localized DISM error keeps its
+    letters) and stopped at the limit. The child starts without PSModulePath, so Windows PowerShell
+    builds its own instead of inheriting PowerShell 7's module folders, which it cannot load.
+    0 (the default): no limit.
 #>
 function Invoke-AppxProvisioning {
     param (
@@ -742,12 +622,10 @@ function Invoke-AppxProvisioning {
 
     try {
         if ($PSVersionTable.PSEdition -eq 'Core') {
-            # Delegate to Windows PowerShell 5.1, where the Appx/DISM provider works.
-            # Every path is interpolated into a single-quoted literal inside the delegated
-            # -Command string, so escape embedded single quotes by doubling them (issue #178).
-            # Otherwise an apostrophe in a path (e.g. C:\Users\O'Brien\...) unbalances the
-            # quoting — breaking provisioning at best, and at worst letting a crafted filename
-            # break out of the literal inside an elevated powershell.exe -Command.
+            # Run in Windows PowerShell 5.1, where the Appx/DISM provider works. Each path goes into a
+            # single-quoted literal in the -Command string, so its quotes are doubled (issue #178): an
+            # apostrophe (C:\Users\O'Brien) would otherwise break out of the literal in an elevated
+            # powershell.exe.
             $escapedPackagePath = $PackagePath.Replace("'", "''")
             $depClause = if ($DependencyPackagePath.Count -gt 0) {
                 $escapedDependencyPaths = @($DependencyPackagePath | ForEach-Object { $_.Replace("'", "''") })
@@ -757,11 +635,9 @@ function Invoke-AppxProvisioning {
             $licClause = if ($hasLicense) { "-LicensePath '$($LicensePath.Replace("'", "''"))'" } else { '-SkipLicense' }
             $command = "Add-AppxProvisionedPackage -Online -PackagePath '$escapedPackagePath' $depClause $licClause -ErrorAction Stop | Out-Null"
             if ($TimeoutSeconds -gt 0) {
-                # No progress bar: on a redirected output Windows PowerShell writes it as CLIXML.
-                # Windows PowerShell writes redirected output in the console's code page, not in
-                # UTF-8 as winget does; [Console]::OutputEncoding is what PowerShell reads a native
-                # program's output with too. No PSModulePath: Windows PowerShell builds its own, as
-                # it does when `& powershell.exe` starts it (about_PSModulePath).
+                # No progress bar: redirected, Windows PowerShell writes it as CLIXML. Its redirected
+                # output is in the console's code page, not UTF-8. No PSModulePath, as when
+                # `& powershell.exe` starts it.
                 $run = Invoke-ExternalProcess -FilePath 'powershell.exe' -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', "`$ProgressPreference = 'SilentlyContinue'; $command") -TimeoutSeconds $TimeoutSeconds -Encoding ([Console]::OutputEncoding) -RemoveEnvironmentVariable @('PSModulePath')
                 if ($run.LaunchFailed) {
                     Write-ErrorMessage "Add-AppxProvisionedPackage failed for '$PackagePath': Windows PowerShell could not be started ($($run.LaunchError))."
@@ -793,23 +669,17 @@ function Invoke-AppxProvisioning {
 .SYNOPSIS
     Installs the latest MSIX build of a winget package machine-wide by provisioning it via DISM.
 .DESCRIPTION
-    Used for the holdout case where a package is MSIX-only (e.g. PowerShell 7.7+) AND the machine is
-    Windows older than build 26100, where winget cannot machine-scope-provision an MSIX because it
-    calls the provisioning API from a packaged process. This function instead downloads the latest
-    MSIX (plus dependencies and license) with `winget download`, then provisions it for all users
-    with Add-AppxProvisionedPackage from a NON-packaged process, which is not subject to that bug
-    (issue #166).
-
-    VALIDATION NOTE: the DISM path is dormant until a package's winget default becomes MSIX-only
-    (PowerShell 7.7 GA). It is covered by unit tests with mocked external calls, but the end-to-end
-    behavior (winget download layout, license handling, all-users provisioning under cross-user
-    elevation) should be validated on a real Windows 10 machine before it is relied upon.
+    For an MSIX-only package (PowerShell 7.7+) on Windows before build 26100, where winget cannot
+    provision an MSIX machine-wide because it calls the API from a packaged process: `winget
+    download` fetches the MSIX, its dependencies and license, and Add-AppxProvisionedPackage
+    provisions it for all users from a non-packaged process (issue #166). Dormant until PowerShell
+    7.7; covered by unit tests only, so check it on a real Windows 10 PC before relying on it.
 .PARAMETER PackageId
     The winget package id to provision (e.g. 'Microsoft.PowerShell').
 .PARAMETER VerifyNameLike
     Wildcard matched against provisioned package names to confirm success. Defaults to *<last id
     segment>* (e.g. '*PowerShell*').
-.RETURNS
+.OUTPUTS
     [hashtable] @{ ExitCode = <int>; Installed = <bool> }
 #>
 function Install-MsixProvisionedPackage {
@@ -884,45 +754,31 @@ function Install-MsixProvisionedPackage {
     Installs the newest available PowerShell, choosing a delivery that works in an elevated
     cross-user / machine-scope context (no version pinning).
 .DESCRIPTION
-    winget's default already tracks the latest PowerShell, so this never pins a version. It only
-    chooses HOW to deliver the latest so the install works machine-wide when the script is elevated
-    as a different account than the logged-on user (issues #163/#166):
-
-      1. Prefer the MSI while the current line still ships one (<= 7.6). The MSI installs machine-wide,
-         works on any Windows build, and is runnable under Task Scheduler.
-      2. Once the MSI is gone (7.7+), winget offers only the MSIX:
-         - Windows 24H2+ (build >= 26100): winget can machine-scope-provision the MSIX, so install the
-           default package directly.
-         - Older Windows: winget's machine-scope MSIX provisioning is broken (it calls the provisioning
-           API from a packaged process), so provision the MSIX for all users via DISM instead.
-
-    The result's Installed flag is authoritative — the DISM-provisioned path does not appear under
-    `winget list` for the elevating account, so the caller must not re-verify PowerShell with winget.
+    winget's default tracks the latest PowerShell; this only chooses how to deliver it machine-wide
+    (issues #163, #166):
+      1. The MSI while the current line ships one (7.6 and older): machine-wide on any build.
+      2. Then the MSIX: installed directly on build 26100 and later; provisioned for all users via
+         DISM (Install-MsixProvisionedPackage) before, where winget's machine-scope MSIX is broken.
+    The result's Installed is authoritative: a DISM-provisioned PowerShell does not show in
+    `winget list` for the elevating account, so the caller must not check again with winget.
 .PARAMETER PackageId
     The winget package id. Default 'Microsoft.PowerShell'.
 .PARAMETER Silent
-    Forwarded to Install-WingetPackage (winget --silent, so the MSI installs with /quiet rather than
-    /passive). Install-AppWithVerification passes the run's effective non-interactive state, so an
-    explicit -NonInteractive reaches PowerShell's install too. Not given: Install-WingetPackage
-    decides.
+    Forwarded to Install-WingetPackage (--silent: the MSI installs with /quiet). Not given:
+    Install-WingetPackage decides.
 .PARAMETER InstallInProgressWaitSeconds
-    The most to wait, in all, for another installation to finish (Install-WingetPackage's parameter
-    of the same name), shared by the MSI and MSIX attempts. Install-AppWithVerification passes what
-    is left of the run's budget. Not given: Install-WingetPackage's default.
+    The most to wait, in all, for another installation, shared by the MSI and MSIX attempts (what
+    is left of the run's budget). Not given: Install-WingetPackage's default.
 .PARAMETER MachineScopeOnly
-    Forwarded to Install-WingetPackage (review finding P3-22): a run as SYSTEM or under cross-user
-    elevation never installs PowerShell at winget's default (per-user) scope. When the MSIX has no
-    machine-scope installer either, the result says NoMachineScopeInstaller, with no `winget list`
-    check, and Install-AppWithVerification defers PowerShell.
-.RETURNS
+    Forwarded to Install-WingetPackage: as SYSTEM or under cross-user elevation PowerShell is never
+    installed per user. An MSIX with no machine-scope installer gives NoMachineScopeInstaller, with
+    no `winget list` check, and the caller defers it.
+.OUTPUTS
     [hashtable] @{ ExitCode = <int>; Installed = <bool>; Method = 'msi' | 'msix-native' | 'msix-provisioned' }
-    The winget paths (msi, msix-native) return Install-WingetPackage's whole result with Installed
-    and Method added (review finding P3-8: only ExitCode survived, so PowerShell's failure reason
-    read just 'installer reported failure' while every other app's said why), plus the outcome of
-    the `winget list` check: VerifyTimedOut, VerifyLaunchFailed, VerifyLaunchError, VerifyCheckFailed
-    (`winget list` ran and failed) and VerifyExitCode (its exit code). When winget could not be
-    launched for the install (LaunchErrorExhausted), the check is skipped: it would only fail to
-    launch again.
+    The winget paths (msi, msix-native) return Install-WingetPackage's whole result (P3-8) with
+    Installed and Method added, and the `winget list` check's outcome: VerifyTimedOut,
+    VerifyLaunchFailed, VerifyLaunchError, VerifyCheckFailed and VerifyExitCode. When winget could
+    not be launched for the install (LaunchErrorExhausted), the check is skipped.
 #>
 function Install-PowerShellLatest {
     param (
