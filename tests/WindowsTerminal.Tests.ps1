@@ -637,6 +637,59 @@ Describe 'Windows Terminal configuration' {
             Should -Invoke Write-WarningMessage -ParameterFilter { $Message -match 'Windows Terminal is not installed' }
         }
 
+        It 'Returns nothing without -PassThru, even when a step fails' {
+            Mock Get-WindowsTerminalSettingsPaths { return @('C:\temp\settings.json') }
+            Mock Set-WindowsTerminalDefaultProfile { return $false }
+            Mock Set-WindowsTerminalAsDefaultTerminalApplication { return $false }
+
+            Set-WindowsTerminalDefaults | Should -BeNullOrEmpty
+        }
+
+        It 'With -PassThru, reports <Expected> when <Case>' -ForEach @(
+            @{ Case = 'every settings.json and the default terminal application were set'; Paths = @('C:\temp\a.json', 'C:\temp\b.json'); Profile = @($true, $true); Delegation = $true; Installed = $true; Expected = 'Applied' }
+            @{ Case = 'Windows Terminal is not installed, so only settings.json was set'; Paths = @('C:\temp\a.json'); Profile = @($true); Delegation = $true; Installed = $false; Expected = 'Applied' }
+            @{ Case = 'one of two settings.json could not be edited'; Paths = @('C:\temp\a.json', 'C:\temp\b.json'); Profile = @($true, $false); Delegation = $true; Installed = $true; Expected = 'Failed' }
+            @{ Case = 'the default terminal application could not be set'; Paths = @('C:\temp\a.json'); Profile = @($true); Delegation = $false; Installed = $true; Expected = 'Failed' }
+            @{ Case = 'there is no settings.json yet'; Paths = @(); Profile = @(); Delegation = $true; Installed = $true; Expected = 'SettingsNotFound' }
+        ) {
+            $paths = $Paths
+            $script:profileAnswers = @($Profile)
+            $delegation = $Delegation
+            $installed = $Installed
+            Mock Get-WindowsTerminalSettingsPaths { return $paths }
+            Mock Set-WindowsTerminalDefaultProfile {
+                $answer = $script:profileAnswers[0]
+                $script:profileAnswers = @($script:profileAnswers | Select-Object -Skip 1)
+                return $answer
+            }
+            Mock Set-WindowsTerminalAsDefaultTerminalApplication { return $delegation }
+            Mock Test-WindowsTerminalInstalled { $installed }
+
+            Set-WindowsTerminalDefaults -PassThru | Should -Be $Expected
+        }
+
+        It 'With -PassThru, reports Skipped for <Case>, and WhatIf for a dry run' -ForEach @(
+            @{ Case = 'SYSTEM'; System = $true; ProcessUser = 'NT AUTHORITY\SYSTEM' }
+            @{ Case = 'another account than the logged-on user'; System = $false; ProcessUser = 'CONTOSO\admin-tech' }
+        ) {
+            $system = $System
+            $processUser = $ProcessUser
+            Mock Test-IsSystemAccount { $system }
+            Mock Get-ProcessUserName { $processUser }
+            Mock Write-Info { }
+            Mock Get-WindowsTerminalSettingsPaths { return @('C:\temp\settings.json') }
+            Mock Set-WindowsTerminalDefaultProfile { return $true }
+            Mock Set-WindowsTerminalAsDefaultTerminalApplication { return $true }
+
+            Set-WindowsTerminalDefaults -PassThru | Should -Be 'Skipped'
+            Should -Invoke Set-WindowsTerminalDefaultProfile -Times 0 -Exactly
+
+            Mock Test-IsSystemAccount { $false }
+            Mock Get-ProcessUserName { 'CONTOSO\jdoe' }
+            Set-WindowsTerminalDefaults -WhatIf -PassThru | Should -Be 'WhatIf'
+            Should -Invoke Set-WindowsTerminalDefaultProfile -Times 0 -Exactly
+        }
+
         It 'Previews skipping the default-terminal-application write in WhatIf mode when Windows Terminal is not installed' {
             Mock Get-WindowsTerminalSettingsPaths { return @() }
             Mock Test-WindowsTerminalInstalled { $false }

@@ -168,6 +168,46 @@ function New-TestAccountContext {
     }
 }
 
+# What Get-Acl returns for a file, for `Mock Get-Acl { New-TestFileAcl }`: the owner and the access
+# entries by SID (GetOwner, GetAccessRules), with each entry's FileSystemRights and PropagationFlags.
+# The default is what an installer run as SYSTEM leaves on last-run.json: owned by SYSTEM, full
+# control for SYSTEM and Administrators, read and execute for Users. Each rule is a hashtable with
+# Sid and Rights, and optionally Type ('Allow' or 'Deny') and InheritOnly. Every test that reads a
+# run record mocks Get-Acl, or Get-DirectoryAccessSummary above it: on Windows the real call reads
+# the test file's own access list, which the runner's account owns (work-order item 34's review).
+function New-TestFileAcl {
+    param (
+        [string]$OwnerSid = 'S-1-5-18',
+        [object[]]$Rules = @(
+            @{ Sid = 'S-1-5-18'; Rights = 2032127 },
+            @{ Sid = 'S-1-5-32-544'; Rights = 2032127 },
+            @{ Sid = 'S-1-5-32-545'; Rights = 1179817 }
+        )
+    )
+
+    $testRules = @(foreach ($rule in $Rules) {
+            $type = 'Allow'
+            if ($rule.Type) { $type = $rule.Type }
+            $propagation = 0
+            if ($rule.InheritOnly) { $propagation = 2 }
+            [pscustomobject]@{
+                IdentityReference = [pscustomobject]@{ Value = $rule.Sid }
+                FileSystemRights  = [long]$rule.Rights
+                AccessControlType = $type
+                IsInherited       = $true
+                PropagationFlags  = $propagation
+            }
+        })
+    $acl = [pscustomobject]@{
+        AreAccessRulesProtected = $false
+        TestOwner               = [pscustomobject]@{ Value = $OwnerSid }
+        TestRules               = $testRules
+    }
+    $acl | Add-Member -MemberType ScriptMethod -Name GetOwner -Value { param ($Type) $this.TestOwner }
+    $acl | Add-Member -MemberType ScriptMethod -Name GetAccessRules -Value { param ($Explicit, $Inherited, $Type) $this.TestRules }
+    return $acl
+}
+
 # For tests that script winget's behaviour with `Mock winget { ... }` (reading $args, setting
 # $global:LASTEXITCODE, throwing when winget cannot run): code that now runs winget through
 # Invoke-WingetProcess reaches that mock through

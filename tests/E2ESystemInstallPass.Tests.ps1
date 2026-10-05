@@ -75,6 +75,35 @@ Describe 'Get-SystemInstallPassResult' {
         (Get-Row $result 'SYSTEM run exit code').Result | Should -Be 'FAIL'
     }
 
+    It 'Tolerates exit 1 only while KNOWN_PLATFORM_INCOMPATIBLE lists apps, and only when every app the run left failed is on it' {
+        # Two apps failed for good (Google.GoogleDrive, Klocman.BulkCrapUninstaller) in a run as SYSTEM.
+        $content = "Running as SYSTEM (for example from an RMM agent): installing for the whole PC only.`n" + [string](Get-Content -Raw -LiteralPath (Join-Path $script:RepoRoot 'tests/fixtures/e2e/timeouts.txt'))
+        $transcript = [pscustomobject]@{ Name = 'install-20261005-060010.log'; Parsed = (ConvertFrom-InstallTranscript -Content $content) }
+        $wrapper = $script:GoodWrapperLog -replace 'exited with 8', 'exited with 1'
+        $arguments = @{ TaskExitCode = 1; Transcript = $transcript; WrapperLog = $wrapper; RunRecord = (New-TestRunRecord -ExitCode 1) }
+
+        $strict = Get-SystemInstallPassResult @arguments
+        (Get-Row $strict 'SYSTEM run exit code').Result | Should -Be 'FAIL'
+        $strict.StepExitCode | Should -Be 1
+
+        $contained = Get-SystemInstallPassResult @arguments -KnownPlatformIncompatible 'Google.GoogleDrive, Klocman.BulkCrapUninstaller'
+        (Get-Row $contained 'SYSTEM run exit code').Result | Should -Be 'PASS'
+        $row = Get-Row $contained 'Failures are all known platform-incompatible apps'
+        $row.Result | Should -Be 'PASS'
+        $row.Detail | Should -BeLike 'install-20261005-060010.log: failed apps all skip-listed: Google.GoogleDrive, Klocman.BulkCrapUninstaller*'
+        $contained.StepExitCode | Should -Be 0
+
+        $leaked = Get-SystemInstallPassResult @arguments -KnownPlatformIncompatible 'Google.GoogleDrive'
+        $row = Get-Row $leaked 'Failures are all known platform-incompatible apps'
+        $row.Result | Should -Be 'FAIL'
+        $row.Detail | Should -Be 'install-20261005-060010.log: apps outside -SkipApps failed: Klocman.BulkCrapUninstaller'
+        $leaked.StepExitCode | Should -Be 1
+
+        $noTranscript = Get-SystemInstallPassResult -TaskExitCode 1 -Transcript $null -WrapperLog $wrapper -RunRecord (New-TestRunRecord -ExitCode 1) -KnownPlatformIncompatible 'Google.GoogleDrive'
+        (Get-Row $noTranscript 'Failures are all known platform-incompatible apps').Detail | Should -Be 'no transcript of the run, so its failures cannot be checked'
+        $noTranscript.StepExitCode | Should -Be 1
+    }
+
     It 'Fails, naming what landed there, when something was installed per-user into SYSTEM''s profile' {
         $entry = 'HKEY_USERS\S-1-5-18\Software\Microsoft\Windows\CurrentVersion\Uninstall\Contoso.UserOnly [Contoso User Only]'
 
@@ -165,6 +194,12 @@ Describe 'e2e/Invoke-SystemInstallPass.ps1 wiring' {
 
         $own | Should -Contain 'CheckoutInstallerPath'
         @($own | Where-Object { $dotSourced -contains $_ }) | Should -BeNullOrEmpty
+    }
+
+    It 'Applies the workflow''s KNOWN_PLATFORM_INCOMPATIBLE, as the other legs do' {
+        $script = Get-Content -Raw -LiteralPath (Join-Path $script:RepoRoot 'e2e/Invoke-SystemInstallPass.ps1')
+
+        $script | Should -Match 'Get-SystemInstallPassResult [^\r\n]*-KnownPlatformIncompatible "\$env:KNOWN_PLATFORM_INCOMPATIBLE"'
     }
 
     It 'Is run by the e2e-install-system job, which also watches rmm/ for pull requests' {

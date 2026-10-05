@@ -522,8 +522,10 @@ jobs:
           # rmm/Invoke-WingetAppSetup.ps1 -InstallerPath <checkout's installer>, waits for it and
           # checks the run (e2e/Invoke-SystemInstallPass.ps1). Exit codes 0 and 3010 pass; 8 only
           # when the run's transcript gives the missing Microsoft.WindowsAppRuntime.1.8 as the
-          # reason, as on every windows-latest pass. The output is also saved with the diagnostics,
-          # so report-failure can put the table in the issue.
+          # reason, as on every windows-latest pass; 1 only while KNOWN_PLATFORM_INCOMPATIBLE is
+          # non-empty and every app the run left failed is on it (the containment check the other
+          # legs get from Assert-Install.ps1). The output is also saved with the diagnostics, so
+          # report-failure can put the table in the issue.
           $diagnosticsDir = Join-Path $env:RUNNER_TEMP 'e2e-diagnostics'
           $null = New-Item -ItemType Directory -Path $diagnosticsDir -Force
           & pwsh -NoProfile -ExecutionPolicy Bypass -File ./e2e/Invoke-SystemInstallPass.ps1 2>&1 |

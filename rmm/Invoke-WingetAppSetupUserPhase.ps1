@@ -19,7 +19,10 @@
          machine run: none when there is no last-run.json, when that run has not finished, or when
          this account's %LOCALAPPDATA%\winget-app-setup\user-phase.json says it already finished
          that run, or tried it MaxAttempts times. Then it exits 0 and prints nothing: this is what
-         almost every sign-in does, in well under a second.
+         almost every sign-in does, in well under a second. A last-run.json that someone other
+         than SYSTEM or Administrators owns, or can change, is not used either (it says so and
+         exits 0): the apps it defers are installed in every account that signs in, so only one
+         the machine phase wrote counts.
       3. Otherwise it finds PowerShell 7 (the machine phase installs it), downloads
          winget-app-install.ps1 from the pinned commit below into the user's %TEMP%, checks its
          SHA256 against the pinned one, and runs itself under PowerShell 7 with that copy, which it
@@ -225,16 +228,73 @@ function Test-RmmIsSystem {
 
 <#
 .SYNOPSIS
+    Says why the run record may have been written by someone other than SYSTEM or an administrator,
+    or returns $null when it cannot have been.
+.DESCRIPTION
+    The same check as the module's Get-RunRecordTrustProblem (WingetAppSetup/Private/
+    UserPhaseSupport.ps1): the file's owner must be SYSTEM or Administrators, and no access entry
+    that applies to it may let another account write or append to it, delete it, change its access
+    list or take ownership of it. tests/RmmWrapper.Tests.ps1 checks that the two agree.
+.RETURNS
+    [string] What is wrong, or $null.
+#>
+function Get-RmmRunRecordTrustProblem {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    $trustedSids = @('S-1-5-18', 'S-1-5-32-544')
+    # WriteData, AppendData, Delete, ChangePermissions, TakeOwnership, GENERIC_ALL, GENERIC_WRITE.
+    $changeRights = 0x2 -bor 0x4 -bor 0x10000 -bor 0x40000 -bor 0x80000 -bor 0x10000000 -bor 0x40000000
+    $sidType = [System.Security.Principal.SecurityIdentifier]
+    try {
+        $acl = Get-Acl -LiteralPath $Path -ErrorAction Stop
+        $owner = $acl.GetOwner($sidType)
+        $rules = @($acl.GetAccessRules($true, $true, $sidType))
+    }
+    catch {
+        return "its owner and access list could not be read ($($_.Exception.Message))"
+    }
+
+    $problems = @()
+    $ownerSid = ''
+    if ($owner) {
+        $ownerSid = [string]$owner.Value
+    }
+    if ($trustedSids -notcontains $ownerSid) {
+        $problems += "it is owned by $ownerSid, not by SYSTEM or Administrators"
+    }
+    foreach ($rule in $rules) {
+        $sid = [string]$rule.IdentityReference.Value
+        $inheritOnly = (([int]$rule.PropagationFlags) -band 2) -ne 0
+        if ([string]$rule.AccessControlType -ne 'Allow' -or $inheritOnly -or $trustedSids -contains $sid) {
+            continue
+        }
+        if (([long]$rule.FileSystemRights -band $changeRights) -ne 0) {
+            $problems += "$sid can change it"
+        }
+    }
+    if ($problems.Count -eq 0) {
+        return $null
+    }
+    return ($problems -join '; ')
+}
+
+<#
+.SYNOPSIS
     Decides, before anything is downloaded, whether this account has user-phase work.
 .DESCRIPTION
     The same rule as the module's Get-UserPhaseDecision (WingetAppSetup/Private/UserPhaseSupport.ps1),
-    read the same way: no work without a readable run record with an apps list, while that run has
-    not reported (exitCode null), or when this account's state is for the same record (same SHA256)
-    and is complete or has used MaxAttempts attempts. tests/RmmWrapper.Tests.ps1 checks that the two
+    read the same way: no work without a readable run record with an apps list that only SYSTEM or
+    an administrator can have written (Get-RmmRunRecordTrustProblem), while that run has not
+    reported (exitCode null), or when this account's state is for the same record (same SHA256) and
+    is complete or has used MaxAttempts attempts. tests/RmmWrapper.Tests.ps1 checks that the two
     agree.
 .RETURNS
-    [pscustomobject] with Pending ([bool]) and Reason ('NoRecord', 'RunNotFinished', 'Done',
-    'GaveUp', 'Pending' or 'New').
+    [pscustomobject] with Pending ([bool]), Reason ('NoRecord', 'RunNotFinished', 'Done',
+    'GaveUp', 'Pending' or 'New') and Detail (a line to print, for a record that is not used
+    because someone else could have written it; otherwise $null).
 #>
 function Test-RmmUserPhasePending {
     param (
@@ -249,20 +309,24 @@ function Test-RmmUserPhasePending {
     )
 
     if (-not (Test-Path -LiteralPath $RunRecordPath -PathType Leaf)) {
-        return [pscustomobject]@{ Pending = $false; Reason = 'NoRecord' }
+        return [pscustomobject]@{ Pending = $false; Reason = 'NoRecord'; Detail = $null }
+    }
+    $trustProblem = Get-RmmRunRecordTrustProblem -Path $RunRecordPath
+    if ($trustProblem) {
+        return [pscustomobject]@{ Pending = $false; Reason = 'NoRecord'; Detail = "winget-app-setup user phase: ignoring $RunRecordPath, which SYSTEM or an administrator must have written: $trustProblem. The next run of the machine phase replaces it." }
     }
     try {
         $bytes = [System.IO.File]::ReadAllBytes($RunRecordPath)
         $record = ConvertFrom-Json -InputObject ([System.Text.Encoding]::UTF8.GetString($bytes).TrimStart([char]0xFEFF)) -ErrorAction Stop
     }
     catch {
-        return [pscustomobject]@{ Pending = $false; Reason = 'NoRecord' }
+        return [pscustomobject]@{ Pending = $false; Reason = 'NoRecord'; Detail = $null }
     }
     if ($null -eq $record -or $null -eq $record.PSObject.Properties['apps']) {
-        return [pscustomobject]@{ Pending = $false; Reason = 'NoRecord' }
+        return [pscustomobject]@{ Pending = $false; Reason = 'NoRecord'; Detail = $null }
     }
     if ($null -eq $record.exitCode) {
-        return [pscustomobject]@{ Pending = $false; Reason = 'RunNotFinished' }
+        return [pscustomobject]@{ Pending = $false; Reason = 'RunNotFinished'; Detail = $null }
     }
 
     $algorithm = [System.Security.Cryptography.SHA256]::Create()
@@ -284,18 +348,18 @@ function Test-RmmUserPhasePending {
     }
     if ($null -ne $state -and [string]::Equals([string]$state.recordSha256, $recordSha256, [System.StringComparison]::OrdinalIgnoreCase)) {
         if ($state.complete -eq $true) {
-            return [pscustomobject]@{ Pending = $false; Reason = 'Done' }
+            return [pscustomobject]@{ Pending = $false; Reason = 'Done'; Detail = $null }
         }
         $attempts = 0
         if ($null -ne $state.attempts) {
             $attempts = [int]$state.attempts
         }
         if ($attempts -ge $MaxAttempts) {
-            return [pscustomobject]@{ Pending = $false; Reason = 'GaveUp' }
+            return [pscustomobject]@{ Pending = $false; Reason = 'GaveUp'; Detail = $null }
         }
-        return [pscustomobject]@{ Pending = $true; Reason = 'Pending' }
+        return [pscustomobject]@{ Pending = $true; Reason = 'Pending'; Detail = $null }
     }
-    return [pscustomobject]@{ Pending = $true; Reason = 'New' }
+    return [pscustomobject]@{ Pending = $true; Reason = 'New'; Detail = $null }
 }
 
 <#
@@ -466,6 +530,9 @@ function Invoke-RmmUserPhaseLauncher {
 
     $pending = Test-RmmUserPhasePending -RunRecordPath $RunRecordPath -StatePath $StatePath -MaxAttempts $MaxAttempts
     if (-not $pending.Pending) {
+        if ($pending.Detail) {
+            Write-RmmLine $pending.Detail 'Yellow'
+        }
         return 0
     }
 
@@ -574,6 +641,10 @@ function Invoke-RmmUserPhaseRunner {
         # Dot-sourced, the installer only defines its functions: its own run starts only when it is
         # run (if ($MyInvocation.InvocationName -ne '.') in build/fragments/tail.ps1).
         . $InstallerCopyPath
+        if (-not (Get-Command -Name 'Invoke-WingetUserPhase' -CommandType Function -ErrorAction SilentlyContinue)) {
+            Write-RmmLine 'The pinned winget-app-install.ps1 has no user phase (Invoke-WingetUserPhase): it is from a commit older than the user phase. Pin a newer commit (build/Set-RmmInstallerPin.ps1 refuses one without it). Nothing was installed.' 'Red'
+            return 5
+        }
         return [int](@(Invoke-WingetUserPhase -MaxMinutes $MaxMinutes -MaxAttempts $MaxAttempts)[-1])
     }
     catch {

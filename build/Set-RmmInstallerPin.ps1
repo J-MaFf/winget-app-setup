@@ -12,7 +12,10 @@
          bytes raw.githubusercontent.com serves (the repository keeps .ps1 files LF, see
          .gitattributes), and hashes them. A file read back through a shell redirect would not do:
          Windows PowerShell 5.1 writes a redirect as UTF-16;
-      3. rewrites the two pin lines in both scripts, and nothing else; when either script does not
+      3. refuses a file that does not define Invoke-WingetUserPhase: the user phase wrapper
+         dot-sources the pinned file and calls it, so a file from a commit older than the user phase
+         would fail at every sign-in of every user, without ever counting as an attempt;
+      4. rewrites the two pin lines in both scripts, and nothing else; when either script does not
          have exactly one of each, it stops before writing anything.
 
     The commit has to be one GitHub serves: pushed, normally a commit on main that has passed the
@@ -104,6 +107,11 @@ if ($fullCommit -notmatch '^[0-9a-f]{40}$') {
     throw "git rev-parse returned '$fullCommit' for '$Commit', not a full commit id."
 }
 $installerBytes = Invoke-GitBytes -Repository $RepositoryRoot -ArgumentList @('cat-file', 'blob', "${fullCommit}:winget-app-install.ps1")
+# The user phase wrapper calls this function after it dot-sources the pinned file. Every build that
+# has it also has the machine phase's SYSTEM mode, which came first.
+if ([System.Text.Encoding]::UTF8.GetString($installerBytes) -notmatch '(?im)^\s*function\s+Invoke-WingetUserPhase\b') {
+    throw "winget-app-install.ps1 at $fullCommit has no user phase (function Invoke-WingetUserPhase): it is from a commit older than the user phase, which rmm/Invoke-WingetAppSetupUserPhase.ps1 needs. Pin a newer commit."
+}
 $algorithm = [System.Security.Cryptography.SHA256]::Create()
 try {
     $sha256 = [System.Convert]::ToHexString($algorithm.ComputeHash($installerBytes))

@@ -44,9 +44,10 @@ function Write-Prompt {
     PowerShell 7 run it relaunches writes its own transcript next to it.
 .PARAMETER UserPhase
     The user phase (Invoke-WingetUserPhase), which runs as the signed-in user, not elevated: the
-    transcript goes to that user's %LOCALAPPDATA%\winget-app-setup\logs, since a standard user
-    cannot write to the machine's logs folder, and the file name gets a -userphase suffix. The
-    folder's access list is left as it is.
+    transcript goes to that user's %LOCALAPPDATA%\winget-app-setup\logs, and the file name gets a
+    -userphase suffix. The machine's logs folder is for the runs that install for the whole PC, and
+    a standard user often cannot write to it (installing Winget-AutoUpdate limits it to SYSTEM and
+    Administrators). The folder's access list is left as it is.
 .RETURNS
     [string] The transcript path, or $null when the transcript could not be started.
 #>

@@ -19,12 +19,16 @@
          (Start-InstallerTranscript -UserPhase), keeping the newest 10.
       3. When the record lists deferred apps: it checks that winget starts for this account (up to
          four checks 15 seconds apart: Windows registers App Installer for an account shortly after
-         its first sign-in) and installs each app with `--scope user` (Install-UserPhaseApp), while
-         the time budget lasts. An app the budget no longer covers is NotAttempted.
-      4. It sets the Windows Terminal defaults (Set-WindowsTerminalDefaults: the targeted
-         defaultProfile edit and the default terminal application). When this account has no
-         Terminal settings.json yet (Terminal was never opened), the step counts as not done, and a
-         later sign-in tries again.
+         its first sign-in), updates the winget source for it (Update-UserPhaseWingetSource: on an
+         account's first use of winget that also registers the source, which the 15-second
+         `winget list` check before each install has no time for) and installs each app with
+         `--scope user` (Install-UserPhaseApp), while the time budget lasts. An app the budget no
+         longer covers is NotAttempted.
+      4. It sets the Windows Terminal defaults (Set-WindowsTerminalDefaults -PassThru: the targeted
+         defaultProfile edit and the default terminal application). Unless that reports Applied
+         (this account has no Terminal settings.json yet because Terminal was never opened, an edit
+         failed, or the step was skipped), the step counts as not done, and a later sign-in tries
+         again.
       5. It records the outcome (complete when every deferred app is installed or was already there
          and the Terminal step is done), prints one 'USER PHASE RESULT:' line and returns the exit
          code.
@@ -37,9 +41,10 @@
 .PARAMETER StatePath
     This account's state. Default: Get-UserPhaseStatePath.
 .PARAMETER MaxMinutes
-    The time budget for the installs. No install starts once less than a minute of it is left, and
-    each install's time limit is what is left (at most 30 minutes), so the whole phase takes about
-    this long at most, plus the winget check and the Terminal step. Default 15.
+    The time budget, counted from the start of the attempt, so the winget check and the source
+    update count toward it. No install starts once less than a minute of it is left, and each
+    install's time limit is what is left (at most 30 minutes), so the whole phase takes about this
+    long at most, plus the Terminal step. Default 15.
 .PARAMETER MaxAttempts
     How many sign-ins may try for one machine run before the user phase gives up on it. Default 3.
 .OUTPUTS
@@ -142,8 +147,9 @@ function Invoke-WingetUserPhase {
                 }
             }
             else {
+                Update-UserPhaseWingetSource
                 foreach ($id in $deferredApps) {
-                    $remainingSeconds = $budgetSeconds - [int]$stopwatch.Elapsed.TotalSeconds
+                    $remainingSeconds = $budgetSeconds - (Get-UserPhaseElapsedSeconds -Stopwatch $stopwatch)
                     if ($remainingSeconds -lt 60) {
                         Write-WarningMessage "Not installing $id now: the user phase's $MaxMinutes-minute time budget is spent. The next sign-in tries again."
                         $appRecords[$id] = New-AppRunRecord -Id $id -Status 'NotAttempted' -Reason "the user phase's $MaxMinutes-minute time budget was spent"
@@ -162,16 +168,16 @@ function Invoke-WingetUserPhase {
 
         # The Windows Terminal defaults are per-user, and a run as SYSTEM sets them for nobody. A
         # settings.json appears only once Terminal has been opened, so until then the step is not
-        # done and a later sign-in tries again.
+        # done and a later sign-in tries again; so does one that failed or was skipped.
         try {
-            $hadSettings = @(Get-WindowsTerminalSettingsPaths).Count -gt 0
-            Set-WindowsTerminalDefaults
-            if ($hadSettings) {
-                $terminalStatus = 'Applied'
+            $terminalStatus = [string](@(Set-WindowsTerminalDefaults -PassThru)[-1])
+            if (@('Applied', 'SettingsNotFound', 'Failed', 'Skipped') -notcontains $terminalStatus) {
+                $terminalStatus = 'Failed'
             }
-            else {
-                $terminalStatus = 'SettingsNotFound'
-                Write-Info 'Windows Terminal has no settings.json for this account yet (it creates one when it is first opened); the next sign-in sets its default profile.'
+            switch ($terminalStatus) {
+                'SettingsNotFound' { Write-Info 'Windows Terminal has no settings.json for this account yet (it creates one when it is first opened); the next sign-in sets its default profile.' }
+                'Failed' { Write-WarningMessage 'The Windows Terminal defaults could not all be set (see above); the next sign-in tries again.' }
+                'Skipped' { Write-WarningMessage 'The Windows Terminal defaults were not set for this account (see above); the next sign-in tries again.' }
             }
         }
         catch {
@@ -195,7 +201,7 @@ function Invoke-WingetUserPhase {
         else {
             $exitCode = 0
         }
-        $newState.complete = ($unfinished.Count -eq 0) -and (@('SettingsNotFound', 'Failed') -notcontains $terminalStatus)
+        $newState.complete = ($unfinished.Count -eq 0) -and ($terminalStatus -eq 'Applied')
         if (-not $newState.complete -and $decision.Attempt -ge $MaxAttempts) {
             Write-WarningMessage "This was the last of $MaxAttempts attempts for this run for the whole PC; the user phase does not try again until the next one."
         }

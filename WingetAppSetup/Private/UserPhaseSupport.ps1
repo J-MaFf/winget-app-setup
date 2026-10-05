@@ -52,6 +52,67 @@ function Get-Sha256Hex {
 
 <#
 .SYNOPSIS
+    Says why the run record may have been written by someone other than SYSTEM or an administrator,
+    or returns $null when it cannot have been.
+.DESCRIPTION
+    The user phase installs what last-run.json lists as Deferred in every account that signs in,
+    so a record a standard user could write would let that user choose what runs in other users'
+    accounts. Its folder does not rule that out: the installer's first, non-elevated launch creates
+    %ProgramData%\winget-app-setup\logs for its own log, owned by the signed-in user, who can then
+    change the folder's access list; and ProgramData's default access list lets any user create
+    files in a folder below it. So the file itself is checked, from its own access list:
+      - its owner must be SYSTEM (S-1-5-18) or Administrators (S-1-5-32-544). A standard user
+        cannot make either of them the owner of a file, and an owner can always change the file's
+        access list;
+      - no entry that applies to the file may let another account change it: write or append data,
+        delete it, change its access list or take ownership (or the generic write and all rights).
+    The installer's own runs pass: SYSTEM or an elevated administrator writes the file, and it
+    inherits entries for SYSTEM and Administrators (full control) and read access for others. An
+    account that controls the folder can still delete or rename the record, which stops the user
+    phase or repeats an earlier run's list, but it cannot make one that lists other apps.
+.PARAMETER Path
+    The record's path.
+.RETURNS
+    [string] What is wrong (for a warning), or $null when the record can be trusted. Never throws:
+    an access list that cannot be read is a problem too.
+#>
+function Get-RunRecordTrustProblem {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    $trustedSids = @('S-1-5-18', 'S-1-5-32-544')
+    # WriteData, AppendData, Delete, ChangePermissions (WRITE_DAC), TakeOwnership (WRITE_OWNER),
+    # GENERIC_ALL and GENERIC_WRITE.
+    $changeRights = 0x2 -bor 0x4 -bor 0x10000 -bor 0x40000 -bor 0x80000 -bor 0x10000000 -bor 0x40000000
+    try {
+        $security = Get-DirectoryAccessSummary -Path $Path
+    }
+    catch {
+        return "its owner and access list could not be read ($($_.Exception.Message))"
+    }
+
+    $problems = @()
+    if ($trustedSids -notcontains [string]$security.OwnerSid) {
+        $problems += "it is owned by $($security.OwnerName) ($($security.OwnerSid)), not by SYSTEM or Administrators"
+    }
+    foreach ($rule in @($security.AccessRules)) {
+        if ($null -eq $rule -or [string]$rule.AccessControlType -ne 'Allow' -or $rule.InheritOnly -or $trustedSids -contains [string]$rule.Sid) {
+            continue
+        }
+        if (([long]$rule.Rights -band $changeRights) -ne 0) {
+            $problems += "$($rule.Name) ($($rule.Sid)) can change it"
+        }
+    }
+    if ($problems.Count -eq 0) {
+        return $null
+    }
+    return ($problems -join '; ')
+}
+
+<#
+.SYNOPSIS
     Reads the machine's run record (last-run.json) for the user phase.
 .DESCRIPTION
     The file is read once, and its SHA256 identifies the machine run: a run replaces the file when it
@@ -59,14 +120,20 @@ function Get-Sha256Hex {
     (Write-InstallerRunResult), and nothing else writes it, so the hash of a finished run's record
     changes only when another run replaces it.
 
+    Only a record that SYSTEM or an administrator wrote is used (Get-RunRecordTrustProblem): its
+    deferred apps are installed in every account that signs in. The file is opened first so that
+    nobody can replace, change or delete it until it has been read (Open-ReadLockedFile), its
+    owner and access list are checked while it is open, and the bytes checked are the bytes read.
+
     The deferred apps are the entries with status 'Deferred', whatever deferred them: a run for the
     whole PC that found no machine-wide installer, or a catalog entry that says the app is per-user.
     The record is the contract, not the catalog. An id that is not a valid winget package id
-    (Test-WingetPackageIdFormat) is left out and listed in InvalidDeferredIds: the file is only
-    writable by administrators and SYSTEM, but its ids end up on a winget command line.
+    (Test-WingetPackageIdFormat) is left out and listed in InvalidDeferredIds: its ids end up on a
+    winget command line.
 
-    Returns $null, with a warning, when the file cannot be read or is not a run record (no apps
-    list), and $null, silently, when there is no file. Never throws.
+    Returns $null, with a warning, when the file cannot be read, someone other than SYSTEM or an
+    administrator owns it or can change it, or it is not a run record (no apps list), and $null,
+    silently, when there is no file. Never throws.
 .PARAMETER Path
     The record's path (Get-InstallerRunRecordPath).
 .RETURNS
@@ -83,14 +150,28 @@ function Read-InstallerRunRecord {
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
         return $null
     }
+    $stream = $null
     try {
-        $bytes = [System.IO.File]::ReadAllBytes($Path)
+        $stream = Open-ReadLockedFile -Path $Path
+        $trustProblem = Get-RunRecordTrustProblem -Path $Path
+        if ($trustProblem) {
+            Write-WarningMessage "Ignoring the run record ${Path}: $trustProblem. Only a record that SYSTEM or an administrator wrote is used, since the apps it defers are installed in every account that signs in. The next run of the installer for the whole PC replaces it."
+            return $null
+        }
+        $buffer = New-Object System.IO.MemoryStream
+        $stream.CopyTo($buffer)
+        $bytes = $buffer.ToArray()
         $text = (New-Object System.Text.UTF8Encoding($false, $true)).GetString($bytes).TrimStart([char]0xFEFF)
         $record = ConvertFrom-Json -InputObject $text -ErrorAction Stop
     }
     catch {
         Write-WarningMessage "Could not read the run record ${Path}: $($_.Exception.Message)"
         return $null
+    }
+    finally {
+        if ($stream) {
+            $stream.Dispose()
+        }
     }
     if ($null -eq $record -or $null -eq $record.PSObject.Properties['apps']) {
         Write-WarningMessage "The run record $Path has no apps list; ignoring it."
@@ -377,4 +458,61 @@ function Install-UserPhaseApp {
     $reason = Format-InstallFailureReason -FailureReason $failureReason -InstallResult $reportedResult -LaunchError $launchError -CheckExitCode $checkExitCode
     Write-ErrorMessage "Failed to install: $PackageId ($reason)."
     return (New-AppRunRecord -Id $PackageId -Status 'Failed' -Reason $reason -InstallResult $installResult)
+}
+
+<#
+.SYNOPSIS
+    Updates the winget source for the signed-in user before the user phase's installs.
+.DESCRIPTION
+    The user phase's form of Initialize-Winget's source step. It runs at an account's first sign-in,
+    when winget has never been used in it: `winget source update --name winget`
+    (Invoke-WingetSourceProbe, a 2-minute limit) then downloads and registers the source for the
+    account. Without it, the first command that needs the source would be the 15-second
+    `winget list` check before the first install (Install-UserPhaseApp), which that work does not
+    fit in, so the app would fail with PreCheckTimeout at every sign-in.
+
+    There is no `winget source reset` here: it needs administrator rights, which the user phase does
+    not have. A source that cannot be updated is reported in one line and the installs go ahead:
+    each one then says why it failed, and a later sign-in tries again. Agreements that are not
+    accepted yet (0x8A150046) are not a failure: each install accepts them.
+#>
+function Update-UserPhaseWingetSource {
+    Write-Info 'Updating the winget source for this account (this may take a moment)...'
+    $source = Invoke-WingetSourceProbe
+    if ($source.Succeeded) {
+        Write-Success 'The winget source is up to date for this account.'
+        return
+    }
+    # 0x8A150046 SOURCE_AGREEMENTS_NOT_ACCEPTED, as the signed Int32 winget exits with.
+    if ($source.ExitCode -eq -1978335162) {
+        Write-Info 'The winget source agreements are not accepted for this account yet (0x8A150046); each install accepts them.'
+        return
+    }
+    $detail = 'it did not finish in time and was stopped'
+    if ($source.LaunchError) {
+        $detail = "winget could not be started: $($source.LaunchError)"
+    }
+    elseif (-not $source.TimedOut) {
+        $detail = 'exit code {0}' -f (Format-WingetExitCode -ExitCode $source.ExitCode)
+    }
+    Write-WarningMessage "The winget source could not be updated for this account ($detail). The installs may fail; a later sign-in tries again."
+}
+
+<#
+.SYNOPSIS
+    Returns how many whole seconds the user phase has run (the time budget's clock).
+.DESCRIPTION
+    A seam, so tests can move the clock without waiting for it.
+.PARAMETER Stopwatch
+    The user phase's stopwatch.
+.RETURNS
+    [int]
+#>
+function Get-UserPhaseElapsedSeconds {
+    param (
+        [Parameter(Mandatory = $true)]
+        [System.Diagnostics.Stopwatch]$Stopwatch
+    )
+
+    return [int]$Stopwatch.Elapsed.TotalSeconds
 }

@@ -80,12 +80,12 @@ param (
 # This script is assembled from the WingetAppSetup module by build/Build-WingetInstallScript.ps1.
 # Edit the function source under WingetAppSetup/Public and WingetAppSetup/Private, then re-run the
 # build to regenerate this file. See readme.md ("Project layout") for details.
-# Build id: 1.0.0+b23b4852 (module version + SHA256 fragment of this whole script; issue #189).
+# Build id: 1.0.0+6f0b22b6 (module version + SHA256 fragment of this whole script; issue #189).
 # ------------------------------------------------------------------------------------------------
 
 # Content-derived build identity, logged at startup so a transcript from a remote machine
 # identifies exactly which installer build produced it (issue #189).
-$script:InstallerBuildId = '1.0.0+b23b4852'
+$script:InstallerBuildId = '1.0.0+6f0b22b6'
 
 # ------------------------------------------------Functions------------------------------------------------
 
@@ -5442,9 +5442,10 @@ function Write-Prompt {
     PowerShell 7 run it relaunches writes its own transcript next to it.
 .PARAMETER UserPhase
     The user phase (Invoke-WingetUserPhase), which runs as the signed-in user, not elevated: the
-    transcript goes to that user's %LOCALAPPDATA%\winget-app-setup\logs, since a standard user
-    cannot write to the machine's logs folder, and the file name gets a -userphase suffix. The
-    folder's access list is left as it is.
+    transcript goes to that user's %LOCALAPPDATA%\winget-app-setup\logs, and the file name gets a
+    -userphase suffix. The machine's logs folder is for the runs that install for the whole PC, and
+    a standard user often cannot write to it (installing Winget-AutoUpdate limits it to SYSTEM and
+    Administrators). The folder's access list is left as it is.
 .RETURNS
     [string] The transcript path, or $null when the transcript could not be started.
 #>
@@ -9810,6 +9811,67 @@ function Get-Sha256Hex {
 
 <#
 .SYNOPSIS
+    Says why the run record may have been written by someone other than SYSTEM or an administrator,
+    or returns $null when it cannot have been.
+.DESCRIPTION
+    The user phase installs what last-run.json lists as Deferred in every account that signs in,
+    so a record a standard user could write would let that user choose what runs in other users'
+    accounts. Its folder does not rule that out: the installer's first, non-elevated launch creates
+    %ProgramData%\winget-app-setup\logs for its own log, owned by the signed-in user, who can then
+    change the folder's access list; and ProgramData's default access list lets any user create
+    files in a folder below it. So the file itself is checked, from its own access list:
+      - its owner must be SYSTEM (S-1-5-18) or Administrators (S-1-5-32-544). A standard user
+        cannot make either of them the owner of a file, and an owner can always change the file's
+        access list;
+      - no entry that applies to the file may let another account change it: write or append data,
+        delete it, change its access list or take ownership (or the generic write and all rights).
+    The installer's own runs pass: SYSTEM or an elevated administrator writes the file, and it
+    inherits entries for SYSTEM and Administrators (full control) and read access for others. An
+    account that controls the folder can still delete or rename the record, which stops the user
+    phase or repeats an earlier run's list, but it cannot make one that lists other apps.
+.PARAMETER Path
+    The record's path.
+.RETURNS
+    [string] What is wrong (for a warning), or $null when the record can be trusted. Never throws:
+    an access list that cannot be read is a problem too.
+#>
+function Get-RunRecordTrustProblem {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    $trustedSids = @('S-1-5-18', 'S-1-5-32-544')
+    # WriteData, AppendData, Delete, ChangePermissions (WRITE_DAC), TakeOwnership (WRITE_OWNER),
+    # GENERIC_ALL and GENERIC_WRITE.
+    $changeRights = 0x2 -bor 0x4 -bor 0x10000 -bor 0x40000 -bor 0x80000 -bor 0x10000000 -bor 0x40000000
+    try {
+        $security = Get-DirectoryAccessSummary -Path $Path
+    }
+    catch {
+        return "its owner and access list could not be read ($($_.Exception.Message))"
+    }
+
+    $problems = @()
+    if ($trustedSids -notcontains [string]$security.OwnerSid) {
+        $problems += "it is owned by $($security.OwnerName) ($($security.OwnerSid)), not by SYSTEM or Administrators"
+    }
+    foreach ($rule in @($security.AccessRules)) {
+        if ($null -eq $rule -or [string]$rule.AccessControlType -ne 'Allow' -or $rule.InheritOnly -or $trustedSids -contains [string]$rule.Sid) {
+            continue
+        }
+        if (([long]$rule.Rights -band $changeRights) -ne 0) {
+            $problems += "$($rule.Name) ($($rule.Sid)) can change it"
+        }
+    }
+    if ($problems.Count -eq 0) {
+        return $null
+    }
+    return ($problems -join '; ')
+}
+
+<#
+.SYNOPSIS
     Reads the machine's run record (last-run.json) for the user phase.
 .DESCRIPTION
     The file is read once, and its SHA256 identifies the machine run: a run replaces the file when it
@@ -9817,14 +9879,20 @@ function Get-Sha256Hex {
     (Write-InstallerRunResult), and nothing else writes it, so the hash of a finished run's record
     changes only when another run replaces it.
 
+    Only a record that SYSTEM or an administrator wrote is used (Get-RunRecordTrustProblem): its
+    deferred apps are installed in every account that signs in. The file is opened first so that
+    nobody can replace, change or delete it until it has been read (Open-ReadLockedFile), its
+    owner and access list are checked while it is open, and the bytes checked are the bytes read.
+
     The deferred apps are the entries with status 'Deferred', whatever deferred them: a run for the
     whole PC that found no machine-wide installer, or a catalog entry that says the app is per-user.
     The record is the contract, not the catalog. An id that is not a valid winget package id
-    (Test-WingetPackageIdFormat) is left out and listed in InvalidDeferredIds: the file is only
-    writable by administrators and SYSTEM, but its ids end up on a winget command line.
+    (Test-WingetPackageIdFormat) is left out and listed in InvalidDeferredIds: its ids end up on a
+    winget command line.
 
-    Returns $null, with a warning, when the file cannot be read or is not a run record (no apps
-    list), and $null, silently, when there is no file. Never throws.
+    Returns $null, with a warning, when the file cannot be read, someone other than SYSTEM or an
+    administrator owns it or can change it, or it is not a run record (no apps list), and $null,
+    silently, when there is no file. Never throws.
 .PARAMETER Path
     The record's path (Get-InstallerRunRecordPath).
 .RETURNS
@@ -9841,14 +9909,28 @@ function Read-InstallerRunRecord {
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
         return $null
     }
+    $stream = $null
     try {
-        $bytes = [System.IO.File]::ReadAllBytes($Path)
+        $stream = Open-ReadLockedFile -Path $Path
+        $trustProblem = Get-RunRecordTrustProblem -Path $Path
+        if ($trustProblem) {
+            Write-WarningMessage "Ignoring the run record ${Path}: $trustProblem. Only a record that SYSTEM or an administrator wrote is used, since the apps it defers are installed in every account that signs in. The next run of the installer for the whole PC replaces it."
+            return $null
+        }
+        $buffer = New-Object System.IO.MemoryStream
+        $stream.CopyTo($buffer)
+        $bytes = $buffer.ToArray()
         $text = (New-Object System.Text.UTF8Encoding($false, $true)).GetString($bytes).TrimStart([char]0xFEFF)
         $record = ConvertFrom-Json -InputObject $text -ErrorAction Stop
     }
     catch {
         Write-WarningMessage "Could not read the run record ${Path}: $($_.Exception.Message)"
         return $null
+    }
+    finally {
+        if ($stream) {
+            $stream.Dispose()
+        }
     }
     if ($null -eq $record -or $null -eq $record.PSObject.Properties['apps']) {
         Write-WarningMessage "The run record $Path has no apps list; ignoring it."
@@ -10137,6 +10219,63 @@ function Install-UserPhaseApp {
     return (New-AppRunRecord -Id $PackageId -Status 'Failed' -Reason $reason -InstallResult $installResult)
 }
 
+<#
+.SYNOPSIS
+    Updates the winget source for the signed-in user before the user phase's installs.
+.DESCRIPTION
+    The user phase's form of Initialize-Winget's source step. It runs at an account's first sign-in,
+    when winget has never been used in it: `winget source update --name winget`
+    (Invoke-WingetSourceProbe, a 2-minute limit) then downloads and registers the source for the
+    account. Without it, the first command that needs the source would be the 15-second
+    `winget list` check before the first install (Install-UserPhaseApp), which that work does not
+    fit in, so the app would fail with PreCheckTimeout at every sign-in.
+
+    There is no `winget source reset` here: it needs administrator rights, which the user phase does
+    not have. A source that cannot be updated is reported in one line and the installs go ahead:
+    each one then says why it failed, and a later sign-in tries again. Agreements that are not
+    accepted yet (0x8A150046) are not a failure: each install accepts them.
+#>
+function Update-UserPhaseWingetSource {
+    Write-Info 'Updating the winget source for this account (this may take a moment)...'
+    $source = Invoke-WingetSourceProbe
+    if ($source.Succeeded) {
+        Write-Success 'The winget source is up to date for this account.'
+        return
+    }
+    # 0x8A150046 SOURCE_AGREEMENTS_NOT_ACCEPTED, as the signed Int32 winget exits with.
+    if ($source.ExitCode -eq -1978335162) {
+        Write-Info 'The winget source agreements are not accepted for this account yet (0x8A150046); each install accepts them.'
+        return
+    }
+    $detail = 'it did not finish in time and was stopped'
+    if ($source.LaunchError) {
+        $detail = "winget could not be started: $($source.LaunchError)"
+    }
+    elseif (-not $source.TimedOut) {
+        $detail = 'exit code {0}' -f (Format-WingetExitCode -ExitCode $source.ExitCode)
+    }
+    Write-WarningMessage "The winget source could not be updated for this account ($detail). The installs may fail; a later sign-in tries again."
+}
+
+<#
+.SYNOPSIS
+    Returns how many whole seconds the user phase has run (the time budget's clock).
+.DESCRIPTION
+    A seam, so tests can move the clock without waiting for it.
+.PARAMETER Stopwatch
+    The user phase's stopwatch.
+.RETURNS
+    [int]
+#>
+function Get-UserPhaseElapsedSeconds {
+    param (
+        [Parameter(Mandatory = $true)]
+        [System.Diagnostics.Stopwatch]$Stopwatch
+    )
+
+    return [int]$Stopwatch.Elapsed.TotalSeconds
+}
+
 # --- WauSupport ---
 <#
 .SYNOPSIS
@@ -10201,20 +10340,22 @@ function Get-InstalledWauInfo {
 
 <#
 .SYNOPSIS
-    Reads a directory's owner and access entries as SIDs.
+    Reads a directory's (or a file's) owner and access entries as SIDs.
 .DESCRIPTION
-    Thin seam over Get-Acl (Windows-only, mocked in tests) for Assert-RestrictedDirectoryAcl, and
-    for Get-TightVncServerKeyAclProblem, which passes a registry key (Get-Acl reads one the same
-    way).
+    Thin seam over Get-Acl (Windows-only, mocked in tests) for Assert-RestrictedDirectoryAcl,
+    Get-RunRecordTrustProblem, and Get-TightVncServerKeyAclProblem, which passes a registry key
+    (Get-Acl reads one the same way).
     Every entry is read, explicit and inherited, by SID, so the result does not depend on the
     display language. Name is the account name when the SID resolves, for messages. Throws when
     the access list cannot be read.
 .PARAMETER Path
-    The directory to read.
+    The directory or file to read.
 .RETURNS
     [pscustomobject] with OwnerSid, OwnerName, InheritanceProtected ([bool], true when the
     directory inherits nothing from its parent) and AccessRules (Sid, Name, AccessControlType
-    'Allow'/'Deny', IsInherited).
+    'Allow'/'Deny', IsInherited, Rights ([long], the entry's FileSystemRights access mask) and
+    InheritOnly ([bool], true for an entry that only passes down to the items inside a folder and
+    does not apply to the folder itself)).
 #>
 function Get-DirectoryAccessSummary {
     param (
@@ -10241,6 +10382,8 @@ function Get-DirectoryAccessSummary {
                 Name              = (& $nameOf $rule.IdentityReference)
                 AccessControlType = [string]$rule.AccessControlType
                 IsInherited       = [bool]$rule.IsInherited
+                Rights            = [long]$rule.FileSystemRights
+                InheritOnly       = (([int]$rule.PropagationFlags) -band 2) -ne 0
             }
         })
 
@@ -15103,12 +15246,16 @@ function Invoke-WingetUninstall {
          (Start-InstallerTranscript -UserPhase), keeping the newest 10.
       3. When the record lists deferred apps: it checks that winget starts for this account (up to
          four checks 15 seconds apart: Windows registers App Installer for an account shortly after
-         its first sign-in) and installs each app with `--scope user` (Install-UserPhaseApp), while
-         the time budget lasts. An app the budget no longer covers is NotAttempted.
-      4. It sets the Windows Terminal defaults (Set-WindowsTerminalDefaults: the targeted
-         defaultProfile edit and the default terminal application). When this account has no
-         Terminal settings.json yet (Terminal was never opened), the step counts as not done, and a
-         later sign-in tries again.
+         its first sign-in), updates the winget source for it (Update-UserPhaseWingetSource: on an
+         account's first use of winget that also registers the source, which the 15-second
+         `winget list` check before each install has no time for) and installs each app with
+         `--scope user` (Install-UserPhaseApp), while the time budget lasts. An app the budget no
+         longer covers is NotAttempted.
+      4. It sets the Windows Terminal defaults (Set-WindowsTerminalDefaults -PassThru: the targeted
+         defaultProfile edit and the default terminal application). Unless that reports Applied
+         (this account has no Terminal settings.json yet because Terminal was never opened, an edit
+         failed, or the step was skipped), the step counts as not done, and a later sign-in tries
+         again.
       5. It records the outcome (complete when every deferred app is installed or was already there
          and the Terminal step is done), prints one 'USER PHASE RESULT:' line and returns the exit
          code.
@@ -15121,9 +15268,10 @@ function Invoke-WingetUninstall {
 .PARAMETER StatePath
     This account's state. Default: Get-UserPhaseStatePath.
 .PARAMETER MaxMinutes
-    The time budget for the installs. No install starts once less than a minute of it is left, and
-    each install's time limit is what is left (at most 30 minutes), so the whole phase takes about
-    this long at most, plus the winget check and the Terminal step. Default 15.
+    The time budget, counted from the start of the attempt, so the winget check and the source
+    update count toward it. No install starts once less than a minute of it is left, and each
+    install's time limit is what is left (at most 30 minutes), so the whole phase takes about this
+    long at most, plus the Terminal step. Default 15.
 .PARAMETER MaxAttempts
     How many sign-ins may try for one machine run before the user phase gives up on it. Default 3.
 .OUTPUTS
@@ -15226,8 +15374,9 @@ function Invoke-WingetUserPhase {
                 }
             }
             else {
+                Update-UserPhaseWingetSource
                 foreach ($id in $deferredApps) {
-                    $remainingSeconds = $budgetSeconds - [int]$stopwatch.Elapsed.TotalSeconds
+                    $remainingSeconds = $budgetSeconds - (Get-UserPhaseElapsedSeconds -Stopwatch $stopwatch)
                     if ($remainingSeconds -lt 60) {
                         Write-WarningMessage "Not installing $id now: the user phase's $MaxMinutes-minute time budget is spent. The next sign-in tries again."
                         $appRecords[$id] = New-AppRunRecord -Id $id -Status 'NotAttempted' -Reason "the user phase's $MaxMinutes-minute time budget was spent"
@@ -15246,16 +15395,16 @@ function Invoke-WingetUserPhase {
 
         # The Windows Terminal defaults are per-user, and a run as SYSTEM sets them for nobody. A
         # settings.json appears only once Terminal has been opened, so until then the step is not
-        # done and a later sign-in tries again.
+        # done and a later sign-in tries again; so does one that failed or was skipped.
         try {
-            $hadSettings = @(Get-WindowsTerminalSettingsPaths).Count -gt 0
-            Set-WindowsTerminalDefaults
-            if ($hadSettings) {
-                $terminalStatus = 'Applied'
+            $terminalStatus = [string](@(Set-WindowsTerminalDefaults -PassThru)[-1])
+            if (@('Applied', 'SettingsNotFound', 'Failed', 'Skipped') -notcontains $terminalStatus) {
+                $terminalStatus = 'Failed'
             }
-            else {
-                $terminalStatus = 'SettingsNotFound'
-                Write-Info 'Windows Terminal has no settings.json for this account yet (it creates one when it is first opened); the next sign-in sets its default profile.'
+            switch ($terminalStatus) {
+                'SettingsNotFound' { Write-Info 'Windows Terminal has no settings.json for this account yet (it creates one when it is first opened); the next sign-in sets its default profile.' }
+                'Failed' { Write-WarningMessage 'The Windows Terminal defaults could not all be set (see above); the next sign-in tries again.' }
+                'Skipped' { Write-WarningMessage 'The Windows Terminal defaults were not set for this account (see above); the next sign-in tries again.' }
             }
         }
         catch {
@@ -15279,7 +15428,7 @@ function Invoke-WingetUserPhase {
         else {
             $exitCode = 0
         }
-        $newState.complete = ($unfinished.Count -eq 0) -and (@('SettingsNotFound', 'Failed') -notcontains $terminalStatus)
+        $newState.complete = ($unfinished.Count -eq 0) -and ($terminalStatus -eq 'Applied')
         if (-not $newState.complete -and $decision.Attempt -ge $MaxAttempts) {
             Write-WarningMessage "This was the last of $MaxAttempts attempts for this run for the whole PC; the user phase does not try again until the next one."
         }
@@ -15572,22 +15721,40 @@ function Set-WindowsTerminalAsDefaultTerminalApplication {
     way.
 .PARAMETER WhatIf
     When provided, only reports intended actions.
+.PARAMETER PassThru
+    Return what happened (the user phase records it, and tries again at a later sign-in unless it is
+    Applied). Without it, nothing is returned.
+.OUTPUTS
+    With -PassThru, [string]: 'Applied' (defaultProfile is set in every settings.json found and, when
+    Windows Terminal is installed, the default terminal application too), 'SettingsNotFound' (no
+    settings.json yet: Terminal was never opened), 'Failed' (a settings.json or the default terminal
+    application could not be set), 'Skipped' (SYSTEM, or another account than the logged-on user)
+    or 'WhatIf'.
 #>
 function Set-WindowsTerminalDefaults {
     param (
         [Parameter(Mandatory = $false)]
-        [switch]$WhatIf
+        [switch]$WhatIf,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$PassThru
     )
 
     # Per-user settings: only write them for the logged-on user (see the description above).
     if (Test-IsSystemAccount) {
         Write-Info 'Skipping Windows Terminal defaults: they are per-user settings, and this run is SYSTEM, not a logged-on user.'
+        if ($PassThru) {
+            return 'Skipped'
+        }
         return
     }
     $processUser = Get-ProcessUserName
     $sessionUser = Get-InteractiveSessionUserName
     if ($processUser -and $sessionUser -and ($processUser -ne $sessionUser)) {
         Write-Info "Skipping Windows Terminal defaults: they are per-user settings, and this run is elevated as '$processUser' while '$sessionUser' is logged on."
+        if ($PassThru) {
+            return 'Skipped'
+        }
         return
     }
 
@@ -15607,25 +15774,37 @@ function Set-WindowsTerminalDefaults {
         else {
             Write-Info '[DRY-RUN] Windows Terminal is not installed; would skip default terminal application configuration'
         }
+        if ($PassThru) {
+            return 'WhatIf'
+        }
         return
     }
 
+    $status = 'Applied'
     if ($settingsPaths.Count -gt 0) {
         foreach ($settingsPath in $settingsPaths) {
-            [void](Set-WindowsTerminalDefaultProfile -SettingsPath $settingsPath -ProfileGuid $powerShell7ProfileGuid)
+            if (-not (Set-WindowsTerminalDefaultProfile -SettingsPath $settingsPath -ProfileGuid $powerShell7ProfileGuid)) {
+                $status = 'Failed'
+            }
         }
     }
     else {
         Write-WarningMessage 'Windows Terminal settings.json was not found. Skipping default profile configuration.'
+        $status = 'SettingsNotFound'
     }
 
     # Only claim Windows Terminal as the default terminal application when it is actually
     # installed (issue #271) - see the function-level remark above for why this gate exists.
     if (Test-WindowsTerminalInstalled) {
-        [void](Set-WindowsTerminalAsDefaultTerminalApplication)
+        if (-not (Set-WindowsTerminalAsDefaultTerminalApplication)) {
+            $status = 'Failed'
+        }
     }
     else {
         Write-WarningMessage 'Windows Terminal is not installed. Skipping default terminal application configuration.'
+    }
+    if ($PassThru) {
+        return $status
     }
 }
 

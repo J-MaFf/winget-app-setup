@@ -253,22 +253,40 @@ function Set-WindowsTerminalAsDefaultTerminalApplication {
     way.
 .PARAMETER WhatIf
     When provided, only reports intended actions.
+.PARAMETER PassThru
+    Return what happened (the user phase records it, and tries again at a later sign-in unless it is
+    Applied). Without it, nothing is returned.
+.OUTPUTS
+    With -PassThru, [string]: 'Applied' (defaultProfile is set in every settings.json found and, when
+    Windows Terminal is installed, the default terminal application too), 'SettingsNotFound' (no
+    settings.json yet: Terminal was never opened), 'Failed' (a settings.json or the default terminal
+    application could not be set), 'Skipped' (SYSTEM, or another account than the logged-on user)
+    or 'WhatIf'.
 #>
 function Set-WindowsTerminalDefaults {
     param (
         [Parameter(Mandatory = $false)]
-        [switch]$WhatIf
+        [switch]$WhatIf,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$PassThru
     )
 
     # Per-user settings: only write them for the logged-on user (see the description above).
     if (Test-IsSystemAccount) {
         Write-Info 'Skipping Windows Terminal defaults: they are per-user settings, and this run is SYSTEM, not a logged-on user.'
+        if ($PassThru) {
+            return 'Skipped'
+        }
         return
     }
     $processUser = Get-ProcessUserName
     $sessionUser = Get-InteractiveSessionUserName
     if ($processUser -and $sessionUser -and ($processUser -ne $sessionUser)) {
         Write-Info "Skipping Windows Terminal defaults: they are per-user settings, and this run is elevated as '$processUser' while '$sessionUser' is logged on."
+        if ($PassThru) {
+            return 'Skipped'
+        }
         return
     }
 
@@ -288,25 +306,37 @@ function Set-WindowsTerminalDefaults {
         else {
             Write-Info '[DRY-RUN] Windows Terminal is not installed; would skip default terminal application configuration'
         }
+        if ($PassThru) {
+            return 'WhatIf'
+        }
         return
     }
 
+    $status = 'Applied'
     if ($settingsPaths.Count -gt 0) {
         foreach ($settingsPath in $settingsPaths) {
-            [void](Set-WindowsTerminalDefaultProfile -SettingsPath $settingsPath -ProfileGuid $powerShell7ProfileGuid)
+            if (-not (Set-WindowsTerminalDefaultProfile -SettingsPath $settingsPath -ProfileGuid $powerShell7ProfileGuid)) {
+                $status = 'Failed'
+            }
         }
     }
     else {
         Write-WarningMessage 'Windows Terminal settings.json was not found. Skipping default profile configuration.'
+        $status = 'SettingsNotFound'
     }
 
     # Only claim Windows Terminal as the default terminal application when it is actually
     # installed (issue #271) - see the function-level remark above for why this gate exists.
     if (Test-WindowsTerminalInstalled) {
-        [void](Set-WindowsTerminalAsDefaultTerminalApplication)
+        if (-not (Set-WindowsTerminalAsDefaultTerminalApplication)) {
+            $status = 'Failed'
+        }
     }
     else {
         Write-WarningMessage 'Windows Terminal is not installed. Skipping default terminal application configuration.'
+    }
+    if ($PassThru) {
+        return $status
     }
 }
 

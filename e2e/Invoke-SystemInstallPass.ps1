@@ -20,7 +20,9 @@
       - the exit code, with the policy of every install pass (Get-InstallPassVerdict in
         e2e/Invoke-InstallPass.ps1): 0 and 3010 pass, and 8 passes only when the run's transcript
         says auto-updates were not configured because Microsoft.WindowsAppRuntime.1.8 is missing,
-        as on windows-latest;
+        as on windows-latest. 1 passes only while KNOWN_PLATFORM_INCOMPATIBLE lists apps, and only
+        when every app the run left failed is on that list (Test-InstallFailureContainment on the
+        run's transcript, the check e2e/Assert-Install.ps1 makes for the other legs);
       - the wrapper's log (install-<time>-rmm.log): it was started by a 32-bit PowerShell and
         relaunched through Sysnative, it checked the installer, and it passed the installer's exit
         code back unchanged;
@@ -196,6 +198,8 @@ function Compare-SystemProfileInstallEntry {
     last-run.json, parsed, or $null.
 .PARAMETER NewSystemProfileEntries
     What appeared in SYSTEM's profile during the run (Compare-SystemProfileInstallEntry).
+.PARAMETER KnownPlatformIncompatible
+    The KNOWN_PLATFORM_INCOMPATIBLE value (package ids, comma-separated); empty means strict.
 .RETURNS
     [pscustomobject] with Results (Assertion, Result 'PASS' or 'FAIL', Detail) and StepExitCode.
 #>
@@ -216,24 +220,44 @@ function Get-SystemInstallPassResult {
         $RunRecord,
         [Parameter(Mandatory = $false)]
         [AllowEmptyCollection()]
-        [string[]]$NewSystemProfileEntries = @()
+        [string[]]$NewSystemProfileEntries = @(),
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [AllowEmptyString()]
+        [string]$KnownPlatformIncompatible = ''
     )
 
     $results = @()
     $stepExitCode = 0
+    if ($null -eq $KnownPlatformIncompatible) {
+        $KnownPlatformIncompatible = ''
+    }
 
     if ($null -eq $TaskExitCode) {
         $results += [pscustomobject]@{ Assertion = 'SYSTEM run exit code'; Result = 'FAIL'; Detail = 'the scheduled task did not finish' }
         $stepExitCode = 1
     }
     else {
-        $verdict = Get-InstallPassVerdict -ExitCode $TaskExitCode -KnownPlatformIncompatible '' -Pass 'system' -Transcript $Transcript
+        $verdict = Get-InstallPassVerdict -ExitCode $TaskExitCode -KnownPlatformIncompatible $KnownPlatformIncompatible -Pass 'system' -Transcript $Transcript
         $result = 'PASS'
         if ($verdict.Outcome -eq 'failed') {
             $result = 'FAIL'
             $stepExitCode = $verdict.StepExitCode
         }
         $results += [pscustomobject]@{ Assertion = 'SYSTEM run exit code'; Result = $result; Detail = $verdict.Message }
+        # Exit 1 is tolerated only on the promise that every failure is a known platform
+        # incompatibility; the other legs check it in e2e/Assert-Install.ps1.
+        if ($verdict.Outcome -eq 'tolerated') {
+            $contained = $false
+            $containedDetail = 'no transcript of the run, so its failures cannot be checked'
+            if ($Transcript) {
+                $skipApps = @($KnownPlatformIncompatible -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+                $containment = Test-InstallFailureContainment -Transcript $Transcript.Parsed -SkipApps $skipApps
+                $contained = [bool]$containment.Passed
+                $containedDetail = "$($Transcript.Name): $($containment.Detail)"
+            }
+            $results += [pscustomobject]@{ Assertion = 'Failures are all known platform-incompatible apps'; Result = $(if ($contained) { 'PASS' } else { 'FAIL' }); Detail = $containedDetail }
+        }
     }
 
     $wrapperText = ''
@@ -385,7 +409,7 @@ if ($MyInvocation.InvocationName -ne '.') {
         }
     }
 
-    $check = Get-SystemInstallPassResult -TaskExitCode $taskExitCode -Transcript $transcript -WrapperLog $wrapperLog -RunRecord $runRecord -NewSystemProfileEntries $newProfileEntries
+    $check = Get-SystemInstallPassResult -TaskExitCode $taskExitCode -Transcript $transcript -WrapperLog $wrapperLog -RunRecord $runRecord -NewSystemProfileEntries $newProfileEntries -KnownPlatformIncompatible "$env:KNOWN_PLATFORM_INCOMPATIBLE"
     Write-Host ''
     Write-Host '=== E2E assertion results ==='
     Write-Host ($check.Results | Format-Table -AutoSize -Wrap | Out-String -Width 4096).TrimEnd()

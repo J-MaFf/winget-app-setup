@@ -61,20 +61,22 @@ function Get-InstalledWauInfo {
 
 <#
 .SYNOPSIS
-    Reads a directory's owner and access entries as SIDs.
+    Reads a directory's (or a file's) owner and access entries as SIDs.
 .DESCRIPTION
-    Thin seam over Get-Acl (Windows-only, mocked in tests) for Assert-RestrictedDirectoryAcl, and
-    for Get-TightVncServerKeyAclProblem, which passes a registry key (Get-Acl reads one the same
-    way).
+    Thin seam over Get-Acl (Windows-only, mocked in tests) for Assert-RestrictedDirectoryAcl,
+    Get-RunRecordTrustProblem, and Get-TightVncServerKeyAclProblem, which passes a registry key
+    (Get-Acl reads one the same way).
     Every entry is read, explicit and inherited, by SID, so the result does not depend on the
     display language. Name is the account name when the SID resolves, for messages. Throws when
     the access list cannot be read.
 .PARAMETER Path
-    The directory to read.
+    The directory or file to read.
 .RETURNS
     [pscustomobject] with OwnerSid, OwnerName, InheritanceProtected ([bool], true when the
     directory inherits nothing from its parent) and AccessRules (Sid, Name, AccessControlType
-    'Allow'/'Deny', IsInherited).
+    'Allow'/'Deny', IsInherited, Rights ([long], the entry's FileSystemRights access mask) and
+    InheritOnly ([bool], true for an entry that only passes down to the items inside a folder and
+    does not apply to the folder itself)).
 #>
 function Get-DirectoryAccessSummary {
     param (
@@ -101,6 +103,8 @@ function Get-DirectoryAccessSummary {
                 Name              = (& $nameOf $rule.IdentityReference)
                 AccessControlType = [string]$rule.AccessControlType
                 IsInherited       = [bool]$rule.IsInherited
+                Rights            = [long]$rule.FileSystemRights
+                InheritOnly       = (([int]$rule.PropagationFlags) -band 2) -ne 0
             }
         })
 

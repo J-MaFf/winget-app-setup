@@ -30,6 +30,8 @@ Describe 'Read-InstallerRunRecord' {
     BeforeEach {
         Mock Write-WarningMessage { }
         $script:recordDirectory = Join-Path $TestDrive ([guid]::NewGuid().ToString('N'))
+        # The record as the installer's run as SYSTEM leaves it (Get-RunRecordTrustProblem).
+        Mock Get-Acl { New-TestFileAcl }
     }
 
     It 'Returns nothing, without a warning, when there is no record' {
@@ -83,6 +85,88 @@ Describe 'Read-InstallerRunRecord' {
 
         Read-InstallerRunRecord -Path $path | Should -BeNullOrEmpty
         Should -Invoke Write-WarningMessage -Times 1 -Exactly
+    }
+
+    It 'Ignores, with a warning, a record that someone other than SYSTEM or an administrator could have written' {
+        $path = New-TestRunRecordFile -Directory $script:recordDirectory -Apps @((New-AppRunRecord -Id 'Contoso.Chosen' -Status 'Deferred'))
+        Mock Get-Acl { New-TestFileAcl -OwnerSid 'S-1-5-21-1-2-3-1001' }
+
+        Read-InstallerRunRecord -Path $path | Should -BeNullOrEmpty
+
+        Should -Invoke Get-Acl -Times 1 -Exactly -ParameterFilter { $LiteralPath -eq $path }
+        Should -Invoke Write-WarningMessage -Times 1 -Exactly -ParameterFilter {
+            $Message -like "Ignoring the run record ${path}: it is owned by S-1-5-21-1-2-3-1001 (S-1-5-21-1-2-3-1001), not by SYSTEM or Administrators. Only a record that SYSTEM or an administrator wrote is used*"
+        }
+    }
+
+    It 'Checks the owner and access list while it holds the file open, so it reads the bytes it checked' {
+        $path = New-TestRunRecordFile -Directory $script:recordDirectory -Apps @((New-AppRunRecord -Id 'Contoso.UserOnly' -Status 'Deferred'))
+        $script:events = @()
+        Mock Open-ReadLockedFile { $script:events += 'open'; [System.IO.File]::Open($Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read) }
+        Mock Get-RunRecordTrustProblem { $script:events += 'check'; $null }
+
+        (Read-InstallerRunRecord -Path $path).DeferredApps | Should -Be @('Contoso.UserOnly')
+
+        $script:events | Should -Be @('open', 'check')
+        # Closed again: the installer's next run can replace it.
+        { [System.IO.File]::Open($path, 'Open', 'ReadWrite', 'None').Dispose() } | Should -Not -Throw
+    }
+}
+
+Describe 'Get-RunRecordTrustProblem' {
+    It 'Trusts <Case>' -ForEach @(
+        @{ Case = 'a record the installer wrote as SYSTEM'; Owner = 'S-1-5-18'; Rules = $null }
+        @{ Case = 'one an elevated administrator wrote, with read for Users and a deny entry'; Owner = 'S-1-5-32-544'; Rules = @(@{ Sid = 'S-1-5-32-544'; Rights = 2032127 }, @{ Sid = 'S-1-5-32-545'; Rights = 1179817 }, @{ Sid = 'S-1-1-0'; Rights = 2032127; Type = 'Deny' }) }
+        @{ Case = 'one whose only other write entry passes to child items without applying to it'; Owner = 'S-1-5-18'; Rules = @(@{ Sid = 'S-1-5-18'; Rights = 2032127 }, @{ Sid = 'S-1-3-0'; Rights = 268435456; InheritOnly = $true }) }
+    ) {
+        $owner = $Owner
+        $rules = $Rules
+        if ($null -eq $rules) {
+            Mock Get-Acl { New-TestFileAcl -OwnerSid $owner }
+        }
+        else {
+            Mock Get-Acl { New-TestFileAcl -OwnerSid $owner -Rules $rules }
+        }
+
+        Get-RunRecordTrustProblem -Path 'C:\ProgramData\winget-app-setup\logs\last-run.json' | Should -BeNullOrEmpty
+    }
+
+    It 'Does not trust one that <Case>' -ForEach @(
+        @{ Case = 'a user owns'; Owner = 'S-1-5-21-1-2-3-1001'; Rules = @(@{ Sid = 'S-1-5-18'; Rights = 2032127 }); Expected = 'it is owned by S-1-5-21-1-2-3-1001 (S-1-5-21-1-2-3-1001), not by SYSTEM or Administrators' }
+        @{ Case = 'Users may write to'; Owner = 'S-1-5-18'; Rules = @(@{ Sid = 'S-1-5-32-545'; Rights = 0x2 }); Expected = 'S-1-5-32-545 (S-1-5-32-545) can change it' }
+        @{ Case = 'a user may append to'; Owner = 'S-1-5-18'; Rules = @(@{ Sid = 'S-1-5-21-1-2-3-1001'; Rights = 0x4 }); Expected = 'S-1-5-21-1-2-3-1001 (S-1-5-21-1-2-3-1001) can change it' }
+        @{ Case = 'a user may delete'; Owner = 'S-1-5-18'; Rules = @(@{ Sid = 'S-1-5-21-1-2-3-1001'; Rights = 0x10000 }); Expected = 'S-1-5-21-1-2-3-1001 (S-1-5-21-1-2-3-1001) can change it' }
+        @{ Case = 'a user may change the access list of'; Owner = 'S-1-5-18'; Rules = @(@{ Sid = 'S-1-5-21-1-2-3-1001'; Rights = 0x40000 }); Expected = 'S-1-5-21-1-2-3-1001 (S-1-5-21-1-2-3-1001) can change it' }
+        @{ Case = 'a user may take ownership of'; Owner = 'S-1-5-18'; Rules = @(@{ Sid = 'S-1-5-21-1-2-3-1001'; Rights = 0x80000 }); Expected = 'S-1-5-21-1-2-3-1001 (S-1-5-21-1-2-3-1001) can change it' }
+        @{ Case = 'Everyone has generic write on'; Owner = 'S-1-5-18'; Rules = @(@{ Sid = 'S-1-1-0'; Rights = 0x40000000 }); Expected = 'S-1-1-0 (S-1-1-0) can change it' }
+        @{ Case = 'Authenticated Users have full control of'; Owner = 'S-1-5-32-544'; Rules = @(@{ Sid = 'S-1-5-11'; Rights = 2032127 }); Expected = 'S-1-5-11 (S-1-5-11) can change it' }
+    ) {
+        $owner = $Owner
+        $rules = $Rules
+        Mock Get-Acl { New-TestFileAcl -OwnerSid $owner -Rules $rules }
+
+        Get-RunRecordTrustProblem -Path 'C:\ProgramData\winget-app-setup\logs\last-run.json' | Should -Be $Expected
+    }
+
+    It 'Does not trust one whose access list cannot be read' {
+        Mock Get-Acl { throw 'Attempted to perform an unauthorized operation.' }
+
+        Get-RunRecordTrustProblem -Path 'C:\ProgramData\winget-app-setup\logs\last-run.json' | Should -Be 'its owner and access list could not be read (Attempted to perform an unauthorized operation.)'
+    }
+
+    # The real Get-Acl, on Windows only: the seam's property names (FileSystemRights,
+    # PropagationFlags) are what the checks above rely on.
+    It 'Reads a real file''s owner and entries, and names an account that was given write access' -Skip:(-not $IsWindows) {
+        $path = Join-Path $TestDrive ('trust-' + [guid]::NewGuid().ToString('N') + '.json')
+        Set-Content -LiteralPath $path -Value '{}'
+        $grant = Start-Process -FilePath 'icacls.exe' -ArgumentList "`"$path`" /grant *S-1-5-32-545:(W) /q" -Wait -PassThru -WindowStyle Hidden
+        $grant.ExitCode | Should -Be 0
+
+        $summary = Get-DirectoryAccessSummary -Path $path
+        $summary.OwnerSid | Should -Be ((Get-Acl -LiteralPath $path).GetOwner([System.Security.Principal.SecurityIdentifier]).Value)
+        $usersWrite = @($summary.AccessRules | Where-Object { $_.Sid -eq 'S-1-5-32-545' -and $_.AccessControlType -eq 'Allow' -and -not $_.InheritOnly -and ($_.Rights -band 0x2) -ne 0 })
+        $usersWrite.Count | Should -BeGreaterThan 0
+        Get-RunRecordTrustProblem -Path $path | Should -Match 'S-1-5-32-545\) can change it'
     }
 }
 
@@ -154,6 +238,40 @@ Describe 'Get-UserPhaseDecision' {
         $decision.Run | Should -Be $Run
         $decision.Reason | Should -Be $Reason
         $decision.Attempt | Should -Be $Attempt
+    }
+}
+
+Describe 'Update-UserPhaseWingetSource' {
+    BeforeEach {
+        $script:output = @()
+        Mock Write-Info { $script:output += "INFO: $Message" }
+        Mock Write-Success { $script:output += "OK: $Message" }
+        Mock Write-WarningMessage { $script:output += "WARN: $Message" }
+    }
+
+    It 'Updates only the winget source, without the agreements flag source update rejects, within its time limit' {
+        Mock Invoke-WingetProcess { New-TestProcessResult -ExitCode 0 }
+
+        Update-UserPhaseWingetSource
+
+        Should -Invoke Invoke-WingetProcess -Times 1 -Exactly -ParameterFilter {
+            ($ArgumentList -join ' ') -eq 'source update --name winget --disable-interactivity' -and $TimeoutSeconds -eq 120
+        }
+        $script:output | Should -Contain 'OK: The winget source is up to date for this account.'
+    }
+
+    It 'Says why the source could not be updated (<Case>), and never resets it' -ForEach @(
+        @{ Case = 'an exit code'; Result = @{ ExitCode = -1978335221 }; Expected = 'WARN: The winget source could not be updated for this account (exit code 0x8A15000B*). The installs may fail; a later sign-in tries again.' }
+        @{ Case = 'winget could not start'; Result = @{ LaunchFailed = $true; LaunchError = 'Access is denied.' }; Expected = 'WARN: The winget source could not be updated for this account (winget could not be started: Access is denied.). The installs may fail; a later sign-in tries again.' }
+    ) {
+        $result = $Result
+        Mock Invoke-WingetProcess { New-TestProcessResult @result }
+        Mock Write-ProcessOutput { }
+
+        Update-UserPhaseWingetSource
+
+        @($script:output | Where-Object { $_ -like $Expected }).Count | Should -Be 1
+        Should -Invoke Invoke-WingetProcess -Times 1 -Exactly
     }
 }
 

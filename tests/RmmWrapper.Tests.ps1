@@ -394,6 +394,9 @@ Describe 'rmm/Invoke-WingetAppSetupUserPhase.ps1: the user phase' {
         Mock Test-RmmIsSystem { $false }
         Mock Save-RmmInstallerDownload { throw 'no download in this test' }
         Mock Find-RmmPowerShell7 { $script:Pwsh }
+        # The record as the machine phase leaves it: owned by SYSTEM, which the wrapper and the
+        # module both check (Get-RmmRunRecordTrustProblem, Get-RunRecordTrustProblem).
+        Mock Get-Acl { New-TestFileAcl }
         $script:root = New-TestFolder
         $script:recordPath = Join-Path $script:root 'logs/last-run.json'
         $script:statePath = Join-Path $script:root 'state/user-phase.json'
@@ -426,8 +429,18 @@ if (`$MyInvocation.InvocationName -ne '.') { Set-Content -LiteralPath '$($script
         @{ Case = 'this run, attempts left'; Record = 'done'; State = @{ complete = $false; attempts = 2 } }
         @{ Case = 'this run, attempts used up'; Record = 'done'; State = @{ complete = $false; attempts = 3 } }
         @{ Case = 'an older run, complete'; Record = 'done'; State = @{ complete = $true; attempts = 1; other = $true } }
+        @{ Case = 'a record a user owns'; Record = 'done'; State = $null; Acl = @{ OwnerSid = 'S-1-5-21-1-2-3-1001' } }
+        @{ Case = 'a record Users can write to'; Record = 'done'; State = $null; Acl = @{ Rules = @(@{ Sid = 'S-1-5-18'; Rights = 2032127 }, @{ Sid = 'S-1-5-32-545'; Rights = 0x116 }) } }
+        @{ Case = 'a record whose access list cannot be read'; Record = 'done'; State = $null; Acl = 'unreadable' }
     ) {
         Mock Write-WarningMessage { }
+        $acl = $Acl
+        if ($acl -eq 'unreadable') {
+            Mock Get-Acl { throw 'Attempted to perform an unauthorized operation.' }
+        }
+        elseif ($acl) {
+            Mock Get-Acl { New-TestFileAcl @acl }
+        }
         $recordDirectory = Split-Path -Parent $script:recordPath
         switch ($Record) {
             'broken' { $null = New-Item -ItemType Directory -Path $recordDirectory -Force; Set-Content -LiteralPath $script:recordPath -Value '{ not json' }
@@ -450,6 +463,26 @@ if (`$MyInvocation.InvocationName -ne '.') { Set-Content -LiteralPath '$($script
 
         $wrapper.Pending | Should -Be $module.Run
         $wrapper.Reason | Should -Be $module.Reason
+        if ($acl) {
+            $wrapper.Reason | Should -Be 'NoRecord'
+            $wrapper.Detail | Should -Match '^winget-app-setup user phase: ignoring .*last-run\.json, which SYSTEM or an administrator must have written: '
+            Should -Invoke Write-WarningMessage -Times 1 -Exactly -ParameterFilter { $Message -like 'Ignoring the run record *' }
+        }
+        else {
+            $wrapper.Detail | Should -BeNullOrEmpty
+        }
+    }
+
+    It 'Says so, exits 0 and starts nothing, for a record someone other than SYSTEM or an administrator could have written' {
+        $null = New-TestRecord -Directory (Split-Path -Parent $script:recordPath) -Deferred @('Contoso.Chosen')
+        Mock Get-Acl { New-TestFileAcl -OwnerSid 'S-1-5-21-1-2-3-1001' }
+
+        Invoke-RmmUserPhaseLauncher -ScriptPath $script:UserPhaseWrapperPath -InstallerPath $script:installer -InstallerSha256 $script:installerSha256 -RunRecordPath $script:recordPath -StatePath $script:statePath -TempRoot $script:tempRoot | Should -Be 0
+
+        Should -Invoke Find-RmmPowerShell7 -Times 0 -Exactly
+        Test-Path -LiteralPath $script:resultPath | Should -BeFalse
+        $script:lines.Count | Should -Be 1
+        $script:lines[0] | Should -BeLike "winget-app-setup user phase: ignoring $($script:recordPath), which SYSTEM or an administrator must have written: it is owned by S-1-5-21-1-2-3-1001, not by SYSTEM or Administrators. The next run of the machine phase replaces it."
     }
 
     It 'Ends at once, printing nothing and starting nothing, when there is no work' {
@@ -533,6 +566,18 @@ if (`$MyInvocation.InvocationName -ne '.') { Set-Content -LiteralPath '$($script
         Test-Path -LiteralPath $script:resultPath | Should -BeFalse
     }
 
+    It 'Exits 5, saying why, when the checked installer has no user phase (a commit older than it)' {
+        # In a process of its own: this one has the module's Invoke-WingetUserPhase loaded.
+        $old = New-TestScript -Name 'winget-app-install.ps1' -Body "param ([switch]`$WhatIf)`nfunction Invoke-WingetInstall { return 0 }`n"
+        $oldSha256 = (Get-FileHash -LiteralPath $old -Algorithm SHA256).Hash
+        $copy = New-UnpinnedWrapperCopy -Path $script:UserPhaseWrapperPath
+
+        $output = & $script:Pwsh -NoProfile -NonInteractive -File $copy -RunUserPhaseWith $old -InstallerSha256 $oldSha256 2>&1
+
+        $LASTEXITCODE | Should -Be 5
+        ($output -join "`n") | Should -Match 'has no user phase \(Invoke-WingetUserPhase\): it is from a commit older than the user phase'
+    }
+
     It 'Returns a child''s exit code, and stops a child that outlives its time limit' {
         Invoke-RmmProcessWithTimeout -FilePath $script:Pwsh -ArgumentList @('-NoProfile', '-Command', 'exit 3') -TimeoutSeconds 60 | Should -Be 3
 
@@ -570,6 +615,23 @@ if (`$MyInvocation.InvocationName -ne '.') { Set-Content -LiteralPath '$($script
     }
 }
 
+# The real Get-Acl, on Windows only, where Windows PowerShell 5.1 runs the same code: the property
+# names the check reads (FileSystemRights, PropagationFlags) and a real owner.
+Describe 'rmm/Invoke-WingetAppSetupUserPhase.ps1: the run record''s access list on real Windows' -Skip:(-not $IsWindows) {
+    BeforeAll {
+        . $script:UserPhaseWrapperPath
+    }
+
+    It 'Names an account that was given write access to the record' {
+        $path = Join-Path $TestDrive ('trust-' + [guid]::NewGuid().ToString('N') + '.json')
+        Set-Content -LiteralPath $path -Value '{}'
+        $grant = Start-Process -FilePath 'icacls.exe' -ArgumentList "`"$path`" /grant *S-1-5-32-545:(W) /q" -Wait -PassThru -WindowStyle Hidden
+        $grant.ExitCode | Should -Be 0
+
+        Get-RmmRunRecordTrustProblem -Path $path | Should -Match '(^|; )S-1-5-32-545 can change it'
+    }
+}
+
 Describe 'build/Set-RmmInstallerPin.ps1' -Skip:(-not $script:GitAvailable) {
     BeforeEach {
         $script:repository = New-TestFolder
@@ -577,7 +639,9 @@ Describe 'build/Set-RmmInstallerPin.ps1' -Skip:(-not $script:GitAvailable) {
         foreach ($wrapper in @($script:MachineWrapperPath, $script:UserPhaseWrapperPath)) {
             Copy-Item -LiteralPath (New-UnpinnedWrapperCopy -Path $wrapper) -Destination (Join-Path $script:repository 'rmm')
         }
-        $script:committed = [byte[]](0x23, 0x20, 0x69, 0x6E, 0x73, 0x74, 0x61, 0x6C, 0x6C, 0x65, 0x72, 0x0D, 0x0A, 0x65, 0x78, 0x69, 0x74, 0x0A)
+        # '# installer' CRLF 'function Invoke-WingetUserPhase { }' LF: raw bytes, so the hash
+        # checks that git's bytes are used as they are.
+        $script:committed = [byte[]](@(0x23, 0x20, 0x69, 0x6E, 0x73, 0x74, 0x61, 0x6C, 0x6C, 0x65, 0x72, 0x0D, 0x0A) + [System.Text.Encoding]::ASCII.GetBytes('function Invoke-WingetUserPhase { }') + @(0x0A))
         [System.IO.File]::WriteAllBytes((Join-Path $script:repository 'winget-app-install.ps1'), $script:committed)
         foreach ($command in @(
                 @('init', '-q'), @('config', 'user.email', 'test@example.com'), @('config', 'user.name', 'test'), @('config', 'commit.gpgsign', 'false'),
@@ -602,6 +666,17 @@ Describe 'build/Set-RmmInstallerPin.ps1' -Skip:(-not $script:GitAvailable) {
             $diff = @(& git -C $script:repository diff --numstat -- "rmm/$name")
             $diff | Should -Be @("2`t2`trmm/$name")
         }
+    }
+
+    It 'Refuses, changing nothing, an installer without the user phase' {
+        Set-Content -LiteralPath (Join-Path $script:repository 'winget-app-install.ps1') -Value 'function Invoke-WingetInstall { }'
+        $null = & git -C $script:repository commit -q -am 'an installer from before the user phase' 2>&1
+
+        $output = & $script:Pwsh -NoProfile -NonInteractive -File $script:PinScriptPath -Commit HEAD -RepositoryRoot $script:repository 2>&1
+
+        $LASTEXITCODE | Should -Not -Be 0
+        ($output -join "`n") | Should -Match 'has no user phase \(function Invoke-WingetUserPhase\)'
+        @(& git -C $script:repository status --porcelain) | Should -BeNullOrEmpty
     }
 
     It 'Fails, changing nothing, when a wrapper has no pin line' {

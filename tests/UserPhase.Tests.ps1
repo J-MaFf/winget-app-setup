@@ -60,9 +60,11 @@ Describe 'Invoke-WingetUserPhase (work-order item 34)' {
         Mock Start-InstallerTranscript { $null }
         Mock Remove-OldInstallerLog { 0 }
         Mock Test-WingetLaunchable { [pscustomobject]@{ Launchable = $true; Version = 'v1.12.350'; Reason = $null; ExitCode = 0; Attempts = 1 } }
+        Mock Invoke-WingetSourceProbe { @{ Succeeded = $true; ExitCode = 0; TimedOut = $false; LaunchError = $null } }
         Mock Install-UserPhaseApp { New-AppRunRecord -Id $PackageId -Status 'Installed' -InstallResult @{ ExitCode = 0 } }
-        Mock Get-WindowsTerminalSettingsPaths { @('C:\Users\jdoe\AppData\Local\Packages\Microsoft.WindowsTerminal_8wekyb3d8bbwe\LocalState\settings.json') }
-        Mock Set-WindowsTerminalDefaults { }
+        Mock Set-WindowsTerminalDefaults { 'Applied' }
+        # The record as the installer's run as SYSTEM leaves it (Get-RunRecordTrustProblem).
+        Mock Get-Acl { New-TestFileAcl }
     }
 
     It 'Ends at once, printing nothing, when <Case>' -ForEach @(
@@ -90,7 +92,7 @@ Describe 'Invoke-WingetUserPhase (work-order item 34)' {
         Should -Invoke Start-InstallerTranscript -Times 1 -Exactly -ParameterFilter { $UserPhase }
         Should -Invoke Install-UserPhaseApp -Times 1 -Exactly -ParameterFilter { $PackageId -eq 'Microsoft.WindowsTerminal' }
         Should -Invoke Install-UserPhaseApp -Times 1 -Exactly -ParameterFilter { $PackageId -eq 'Contoso.UserOnly' }
-        Should -Invoke Set-WindowsTerminalDefaults -Times 1 -Exactly
+        Should -Invoke Set-WindowsTerminalDefaults -Times 1 -Exactly -ParameterFilter { $PassThru }
         $state = Get-TestState
         $state.complete | Should -BeTrue
         $state.attempts | Should -Be 1
@@ -160,19 +162,49 @@ Describe 'Invoke-WingetUserPhase (work-order item 34)' {
         $state.exitCode | Should -Be 2
     }
 
-    It 'Sets only the Terminal defaults, without a winget check, when nothing was deferred' {
+    It 'Sets only the Terminal defaults, without a winget check or a source update, when nothing was deferred' {
         $script:recordPath = New-TestRunRecordFile -Directory (Split-Path -Parent $script:recordPath)
 
         Invoke-TestUserPhase | Should -Be 0
 
         Should -Invoke Test-WingetLaunchable -Times 0 -Exactly
+        Should -Invoke Invoke-WingetSourceProbe -Times 0 -Exactly
         Should -Invoke Set-WindowsTerminalDefaults -Times 1 -Exactly
         (Get-TestState).complete | Should -BeTrue
     }
 
+    It 'Updates the winget source for this account after the winget check and before the first install' {
+        $script:recordPath = New-TestRunRecordFile -Directory (Split-Path -Parent $script:recordPath) -Deferred @('Contoso.UserOnly', 'Contoso.Other')
+        $script:calls = @()
+        Mock Test-WingetLaunchable { $script:calls += 'launch'; [pscustomobject]@{ Launchable = $true; Version = 'v1.12.350'; Reason = $null; ExitCode = 0; Attempts = 1 } }
+        Mock Invoke-WingetSourceProbe { $script:calls += 'source'; @{ Succeeded = $true; ExitCode = 0; TimedOut = $false; LaunchError = $null } }
+        Mock Install-UserPhaseApp { $script:calls += "install $PackageId"; New-AppRunRecord -Id $PackageId -Status 'Installed' }
+
+        Invoke-TestUserPhase | Should -Be 0
+
+        $script:calls | Should -Be @('launch', 'source', 'install Contoso.UserOnly', 'install Contoso.Other')
+        $script:output | Should -Contain 'OK: The winget source is up to date for this account.'
+    }
+
+    It 'Still installs, and says so, when the winget source cannot be updated (<Case>)' -ForEach @(
+        @{ Case = 'timed out'; SourceResult = @{ Succeeded = $false; ExitCode = $null; TimedOut = $true; LaunchError = $null }; Expected = 'WARN: The winget source could not be updated for this account (it did not finish in time and was stopped). The installs may fail; a later sign-in tries again.' }
+        @{ Case = 'agreements not accepted yet'; SourceResult = @{ Succeeded = $false; ExitCode = -1978335162; TimedOut = $false; LaunchError = $null }; Expected = 'INFO: The winget source agreements are not accepted for this account yet (0x8A150046); each install accepts them.' }
+    ) {
+        $script:recordPath = New-TestRunRecordFile -Directory (Split-Path -Parent $script:recordPath) -Deferred @('Contoso.UserOnly')
+        # Not $probe: a mock body sees the caller's variables first, and Invoke-WingetUserPhase has
+        # its own $probe.
+        $sourceAnswer = $SourceResult
+        Mock Invoke-WingetSourceProbe { $sourceAnswer }
+
+        Invoke-TestUserPhase | Should -Be 0
+
+        $script:output | Should -Contain $Expected
+        Should -Invoke Install-UserPhaseApp -Times 1 -Exactly
+    }
+
     It 'Leaves the Terminal step for a later sign-in while Terminal has no settings.json for this account' {
         $script:recordPath = New-TestRunRecordFile -Directory (Split-Path -Parent $script:recordPath)
-        Mock Get-WindowsTerminalSettingsPaths { @() }
+        Mock Set-WindowsTerminalDefaults { 'SettingsNotFound' }
 
         Invoke-TestUserPhase | Should -Be 0
 
@@ -183,19 +215,55 @@ Describe 'Invoke-WingetUserPhase (work-order item 34)' {
         Should -Invoke Set-WindowsTerminalDefaults -Times 2 -Exactly
     }
 
+    It 'Records a Terminal step that reported <Status> as not done, and tries it again at the next sign-in' -ForEach @(
+        @{ Status = 'Failed'; Expected = 'Failed' }
+        @{ Status = 'Skipped'; Expected = 'Skipped' }
+        @{ Status = $null; Expected = 'Failed' }
+    ) {
+        $script:recordPath = New-TestRunRecordFile -Directory (Split-Path -Parent $script:recordPath)
+        $status = $Status
+        Mock Set-WindowsTerminalDefaults { $status }
+
+        Invoke-TestUserPhase | Should -Be 0
+
+        $state = Get-TestState
+        $state.complete | Should -BeFalse
+        $state.terminalDefaults | Should -Be $Expected
+        $script:output | Should -Contain "USER PHASE RESULT: exit=0 installed=0 skipped=0 failed=0 terminal=$Expected attempt=1/3 complete=false log=none"
+        Invoke-TestUserPhase | Should -Be 0
+        Should -Invoke Set-WindowsTerminalDefaults -Times 2 -Exactly
+    }
+
     It 'Starts no install once its time budget is spent, and exits 1' {
         $script:recordPath = New-TestRunRecordFile -Directory (Split-Path -Parent $script:recordPath) -Deferred @('Contoso.Slow', 'Contoso.Next')
+        # The budget's clock, moved by the install: 0 seconds before the first one, 90 after it.
+        $script:elapsedSeconds = 0
+        Mock Get-UserPhaseElapsedSeconds { $script:elapsedSeconds }
         Mock Install-UserPhaseApp {
-            Start-Sleep -Milliseconds 1600
+            $script:elapsedSeconds = 90
             New-AppRunRecord -Id $PackageId -Status 'Installed'
         }
 
-        Invoke-TestUserPhase -MaxMinutes 1 | Should -Be 1
+        Invoke-TestUserPhase -MaxMinutes 2 | Should -Be 1
 
-        Should -Invoke Install-UserPhaseApp -Times 1 -Exactly -ParameterFilter { $PackageId -eq 'Contoso.Slow' -and $TimeoutSeconds -le 60 }
+        Should -Invoke Install-UserPhaseApp -Times 1 -Exactly
+        Should -Invoke Install-UserPhaseApp -Times 1 -Exactly -ParameterFilter { $PackageId -eq 'Contoso.Slow' -and $TimeoutSeconds -eq 120 }
         $state = Get-TestState
         ($state.apps | Where-Object id -EQ 'Contoso.Next').status | Should -Be 'NotAttempted'
         $state.complete | Should -BeFalse
+        $script:output | Should -Contain "WARN: Not installing Contoso.Next now: the user phase's 2-minute time budget is spent. The next sign-in tries again."
+    }
+
+    It 'Ignores, with a warning, a run record that someone other than SYSTEM or an administrator could have written' {
+        $script:recordPath = New-TestRunRecordFile -Directory (Split-Path -Parent $script:recordPath) -Deferred @('Contoso.Chosen')
+        Mock Get-Acl { New-TestFileAcl -OwnerSid 'S-1-5-21-1-2-3-1001' -Rules @(@{ Sid = 'S-1-5-21-1-2-3-1001'; Rights = 2032127 }) }
+
+        Invoke-TestUserPhase | Should -Be 0
+
+        Should -Invoke Install-UserPhaseApp -Times 0 -Exactly
+        Should -Invoke Set-WindowsTerminalDefaults -Times 0 -Exactly
+        Test-Path -LiteralPath $script:statePath | Should -BeFalse
+        @($script:output | Where-Object { $_ -like 'WARN: Ignoring the run record *' }).Count | Should -Be 1
     }
 
     It 'Exits 3010 when an install needs a restart to finish' {
