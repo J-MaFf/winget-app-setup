@@ -43,8 +43,10 @@
  WINGET_APP_SETUP_NONINTERACTIVE=1 (or true, or yes), for the irm | iex one-liner, which cannot pass
  a switch, and auto-detected when the session is non-interactive or stdin is redirected; under CI
  the early-failure key press is skipped too. The installer asks no yes/no
- questions on any path (issue #230), so this switch is only about those extras - it is not needed
- to keep a run from blocking on a prompt.
+ questions on any path (issue #230). It asks one question: TightVNC's server password, at the
+ start of an interactive run when WINGET_APP_SETUP_TIGHTVNC_PASSWORD is not set and TightVNC Server
+ has no password yet (skipped when nobody starts typing within 5 minutes). This switch suppresses
+ that question too: TightVNC is then reported as installed but not configured.
 #>
 
 param (

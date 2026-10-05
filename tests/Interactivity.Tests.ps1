@@ -95,6 +95,30 @@ Describe 'Test-NonInteractiveRequested: the -NonInteractive switch or WINGET_APP
     }
 }
 
+Describe 'Test-PowerShellHostNonInteractive: PowerShell started with -NonInteractive (work-order item 18 review)' {
+    # `pwsh -NonInteractive` with a console attached looks interactive to
+    # Test-EffectiveNonInteractive, but Read-Host throws there; the TightVNC password prompt checks
+    # this so it never prints its 'type the password' text for a prompt that cannot come.
+    It 'Is <Expected> for <Case>' -ForEach @(
+        @{ Case = 'pwsh -NonInteractive -File'; Arguments = @('C:\Program Files\PowerShell\7\pwsh.dll', '-NoProfile', '-NonInteractive', '-File', 'C:\x\winget-app-install.ps1'); Expected = $true }
+        @{ Case = 'the shortest abbreviation, any case'; Arguments = @('pwsh', '-NONI', '-c', 'irm x | iex'); Expected = $true }
+        @{ Case = 'a slash or a double dash'; Arguments = @('powershell.exe', '/NonInter', '-File', 'x.ps1'); Expected = $true }
+        @{ Case = 'the double dash form'; Arguments = @('pwsh', '--noninteractive'); Expected = $true }
+        @{ Case = 'the script''s own -NonInteractive switch'; Arguments = @('pwsh', '-File', 'x.ps1', '-NonInteractive'); Expected = $true }
+        @{ Case = 'an ordinary console'; Arguments = @('pwsh', '-NoProfile', '-NoLogo', '-ExecutionPolicy', 'Bypass', '-File', 'x.ps1'); Expected = $false }
+        @{ Case = 'an abbreviation too short to be unambiguous'; Arguments = @('pwsh', '-non'); Expected = $false }
+        @{ Case = 'the program name alone'; Arguments = @('-NonInteractive'); Expected = $false }
+        @{ Case = 'a word that only starts the same'; Arguments = @('pwsh', '-NoninteractiveX'); Expected = $false }
+    ) {
+        Test-PowerShellHostNonInteractive -CommandLineArgs $Arguments | Should -Be $Expected
+    }
+
+    It 'Reads this process''s own command line by default' {
+        { Test-PowerShellHostNonInteractive } | Should -Not -Throw
+        (Test-PowerShellHostNonInteractive) | Should -BeOfType [bool]
+    }
+}
+
 Describe 'Test-IsContinuousIntegration (review finding P2-14)' {
     # The early-exit notice waits for a key press only outside CI, so these pin which variables
     # count. Every variable is saved and restored, because the suite itself may run under CI.
@@ -173,7 +197,9 @@ Describe 'No install path asks a yes/no question (issue #230)' {
     # Read-TightVncPasswordFromHost asks for it masked (Read-Host -AsSecureString) at the START of
     # an interactive run, before anything is installed, and only when
     # WINGET_APP_SETUP_TIGHTVNC_PASSWORD is not set and TightVNC Server has no password yet; Enter
-    # skips it (TightVNC is then reported not configured). Its gating is tested in
+    # skips it (TightVNC is then reported not configured), and so does nobody typing for 5 minutes
+    # (Wait-TightVncPromptAnswer), so a console nobody watches cannot hold the run, or the run
+    # lock, for longer than that. Its gating is tested in
     # TightVnc.Tests.ps1 and its place in the run in Install.Tests.ps1. Every other Read-Host or
     # Pause is still banned.
     BeforeAll {

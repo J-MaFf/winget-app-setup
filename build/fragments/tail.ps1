@@ -254,6 +254,14 @@ if ($MyInvocation.InvocationName -ne '.') {
         catch {
             # Best-effort: nothing may change the exit code decided above.
         }
+        # TightVNC's passwords (work-order item 18) must not outlive the run: under irm | iex its
+        # $script: scope is the console's global scope, which stays open after an abort too.
+        try {
+            Clear-TightVncSecret
+        }
+        catch {
+            # Best-effort, as above.
+        }
         # The exit statements above unwind through here (PowerShell runs finally blocks for the
         # exit statement), so the transcript closes on every path.
         if ($transcriptStarted) {

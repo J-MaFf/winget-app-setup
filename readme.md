@@ -193,17 +193,27 @@ you supply at run time. The repository is public, so the password is never store
 Where the password comes from, in this order:
 
 1. `WINGET_APP_SETUP_TIGHTVNC_PASSWORD` in the run's environment, and optionally a different
-   `WINGET_APP_SETUP_TIGHTVNC_CONTROL_PASSWORD` for the control interface (recommended). The run
-   reads them at its start and removes them from its own environment before winget or any
-   installer starts, so no process it starts inherits them.
+   `WINGET_APP_SETUP_TIGHTVNC_CONTROL_PASSWORD` for the control interface (recommended). The
+   PowerShell 7 run reads them at its start and removes them from its own environment before it
+   starts winget or any installer, so those do not inherit them. Processes started before that
+   keep a copy in their environment: on a PC without PowerShell 7, the Windows PowerShell 5.1
+   bootstrap and the winget or `msiexec` it runs to install PowerShell 7, and the `icacls` run that
+   sets up the log folder.
 2. Otherwise, in an interactive run, a prompt at the start of the run, before anything is installed:
    `TightVNC server password`, typed twice and shown as `*`. Press Enter without typing to skip
    it. It is asked only when TightVNC Server does not have its passwords yet, so a re-run does not
-   ask again.
+   ask again. The prompt waits at most 5 minutes for you to start typing, then counts as skipped:
+   the run holds the [run lock](#one-run-at-a-time) meanwhile, so a window left at the prompt
+   would otherwise make every other run exit 6. It is not asked when PowerShell itself was started
+   with `-NonInteractive` (`pwsh -NonInteractive -File ...`), where it cannot read input.
 3. Otherwise (a run as SYSTEM, `-NonInteractive`, or a skipped prompt) TightVNC is installed but
    **not configured**: the run prints `TightVNC installed but NOT configured: no server password was
-   supplied, ...` and the summary's `Configuration: NOT DONE for GlavSoft.TightVNC (...)` line. The
-   exit code does not change. Supply the password and run the installer again.
+   supplied. ...`, which says what the server lets through (it refuses every viewer, it accepts
+   viewers without a password, or any signed-in user can reconfigure it), and the summary's
+   `Configuration: NOT DONE for GlavSoft.TightVNC (...)` line. The exit code does not change: a
+   run that exits 0 can still leave TightVNC unusable, so an RMM tool should check for that line,
+   or for `"postInstall": "NotConfigured"` in [`last-run.json`](#run-result). Supply the password
+   and run the installer again.
 
 From an RMM tool such as Endpoint Central, set the variables in the script that starts the
 installer (it runs as SYSTEM), so the password lives in the RMM's script store, not in this
@@ -217,7 +227,10 @@ Set-ExecutionPolicy Unrestricted -Scope Process -Force; irm "https://raw.githubu
 ```
 
 Anyone who can read that script, in the RMM console or on the PC while it runs, can read the
-password, so limit who can. Do not pass the password as a script argument: arguments are on the
+password, so limit who can. With PowerShell Script Block Logging turned on (Group Policy), Windows
+also records the script's text, password included, in the PowerShell event log (event 4104): turn
+on Protected Event Logging there, or use an RMM feature that sets the variable without putting the
+password in the script text. Do not pass the password as a script argument: arguments are on the
 process command line, which Windows process auditing and EDR tools record. Do not set the variables machine-wide or for a user
 account either (`setx`, System Properties), where other processes can read them. At a console, set
 them in an elevated session: a UAC relaunch starts a new process without them, which then asks for
@@ -234,20 +247,31 @@ What the hook does, on every run that finds TightVNC installed:
 - It writes `Password` and `ControlPassword` (8-byte `REG_BINARY` values in VNC's DES encoding) and
   sets `UseVncAuthentication` and `UseControlAuthentication` to 1, directly in the registry. It
   never passes the password to the MSI or `tvnserver.exe`, whose command lines winget and MSI logs
-  record. Without `WINGET_APP_SETUP_TIGHTVNC_CONTROL_PASSWORD`, the server password also protects
-  the control interface, with a warning.
+  record. Without `WINGET_APP_SETUP_TIGHTVNC_CONTROL_PASSWORD`, a separate control password the
+  server already has is kept; otherwise the server password also protects the control interface,
+  with a warning.
 - It writes only the values that differ and then restarts the `tvnserver` service (or starts it
   when it was stopped), which must end up running. A run with the same password changes nothing;
   a run with a different one updates it. A run without a password keeps the passwords a configured
-  server already has.
+  server already has. The service reads its passwords only when it starts, so before it changes a
+  value the hook also writes a `WingetAppSetupRestartPending` value into the key, and removes it
+  once the service has restarted: when the restart fails, or the run stops before it, the retry
+  pass or the next run restarts the service instead of reporting the server as configured.
+- It also limits the key of a server it leaves not configured when the key already holds a
+  password.
 - VNC uses only the first 8 characters of a password: a longer one is used with a warning. A
   password with a character that is not printable ASCII is refused (`Not configured`, the value is
   not shown).
 - A step that fails (the key cannot be locked, the values do not read back, the service does not
   start) makes TightVNC `Failed` (exit code 1, retried once).
-- The password and its encoded bytes are never printed, written to the log or put on a command
-  line. A dry run (`-WhatIf`) leaves the variables in place and says only whether each is set and
-  whether a real run could use it (`[DRY-RUN] TightVNC: ... (value not shown)`).
+- The installer never prints the password or its encoded bytes, never writes them to its
+  transcript or `last-run.json`, and never puts them on a command line or passes them to a
+  cmdlet: it writes the registry through the .NET API, so PowerShell module logging does not
+  record them either. (Module logging does record the parameters of a module's own functions:
+  when a script imports the `WingetAppSetup` module and calls `Invoke-WingetInstall` with module
+  logging on for that module, the encoded bytes can reach the event log. The generated installer
+  is not a module.) A dry run (`-WhatIf`) leaves the variables in place and says only whether each
+  is set and whether a real run could use it (`[DRY-RUN] TightVNC: ... (value not shown)`).
 
 VNC authentication is weak: 8 characters at most, DES, and no encryption of the session in
 TightVNC 2.x. Use a different, unpredictable password per site or PC, keep port 5900 reachable only
@@ -280,7 +304,7 @@ The installer never asks a yes/no question on any path — the PowerShell 7 boot
 space proceed without prompting. One question is left: TightVNC's server password, asked at the
 start of an interactive run when `WINGET_APP_SETUP_TIGHTVNC_PASSWORD` is not set and TightVNC
 Server has no password yet (see [TightVNC server password](#tightvnc-server-password)); a
-non-interactive run never asks it. The one other prompt is Windows' own UAC prompt when the run is not
+non-interactive run never asks it, and nobody typing for 5 minutes skips it. The one other prompt is Windows' own UAC prompt when the run is not
 elevated (see [Administrator rights](#administrator-rights)), so an unattended run must already be
 elevated or run as SYSTEM (see
 [Running as SYSTEM](#running-as-system-rmm-tools-such-as-endpoint-central)): a non-interactive run
@@ -293,8 +317,10 @@ end of a run or after an early failure (see [Logs](#logs)):
 pwsh -ExecutionPolicy Unrestricted -File .\winget-app-install.ps1 -NonInteractive
 ```
 
-Non-interactive mode is also auto-detected when the session is non-interactive (e.g.
-`pwsh -NonInteractive`, services, scheduled tasks) or stdin is redirected. Under CI (the `CI`,
+Non-interactive mode is also auto-detected when the session is non-interactive (services,
+scheduled tasks) or stdin is redirected. PowerShell's own `-NonInteractive` switch is not detected:
+`pwsh -NonInteractive -File .\winget-app-install.ps1` in a console is treated as interactive (only the
+TightVNC prompt is skipped there), so pass the script's `-NonInteractive` as well. Under CI (the `CI`,
 `GITHUB_ACTIONS` or `TF_BUILD` variable is set) an early failure never waits for a key press
 either. In non-interactive mode winget also gets `--silent`, so MSI packages install with `/quiet`
 instead of showing a progress window (`/passive`).
@@ -480,7 +506,9 @@ differently:
   to Windows as `NT AUTHORITY\SYSTEM`.
 - TightVNC gets its password only from `WINGET_APP_SETUP_TIGHTVNC_PASSWORD` (set it in the RMM
   script; see [TightVNC server password](#tightvnc-server-password)). Without it TightVNC is
-  installed but not configured.
+  installed but not configured, and the run still exits 0: look for
+  `Configuration: NOT DONE for GlavSoft.TightVNC` in the output, or `"postInstall": "NotConfigured"`
+  in `last-run.json`.
 - Started from Windows PowerShell 5.1 on a PC without PowerShell 7, it installs PowerShell 7 from
   the MSI download, not with winget, since SYSTEM has no `winget` command; the bootstrap says so
   instead of saying winget is missing. The MSI path reads its release list from GitHub, which can
@@ -538,7 +566,9 @@ another one holds it stops at once with exit code 6
 (`Another run of this installer is in progress on this PC ...`): it neither waits for that run nor
 stops it. A dry run takes no lock, and neither does a run that is not elevated: the elevated run it
 starts takes the lock. The lock is released as soon as the run's outcome is decided, before any
-`Press any key to exit...`, so a window left open does not block the next scheduled run. A run that
+`Press any key to exit...`, so a window left open does not block the next scheduled run. The
+[TightVNC password prompt](#tightvnc-server-password) at the start of an interactive run is asked
+while the lock is held, so it waits at most 5 minutes for someone to start typing. A run that
 is killed releases it too. Any process that holds the mutex's name makes a run exit 6, not only
 another run of the installer.
 

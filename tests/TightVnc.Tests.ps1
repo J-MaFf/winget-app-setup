@@ -110,7 +110,11 @@ Describe 'Where a run gets the TightVNC passwords (Import-TightVncSecretFromEnvi
         Remove-Item -LiteralPath "Env:\$($script:ControlVariable)" -ErrorAction SilentlyContinue
         $script:answers = [System.Collections.Generic.Queue[string]]::new()
         Mock Read-Host { New-TestSecureString $script:answers.Dequeue() }
+        # Someone starts typing at once, and PowerShell was not started with -NonInteractive.
+        Mock Wait-TightVncPromptAnswer { $true }
+        Mock Test-PowerShellHostNonInteractive { $false }
         Mock Test-IsContinuousIntegration { $false }
+        Mock Write-Host { }
         $script:infoMessages = @()
         Mock Write-Info { $script:infoMessages += $Message }
         $script:warningMessages = @()
@@ -151,6 +155,40 @@ Describe 'Where a run gets the TightVNC passwords (Import-TightVncSecretFromEnvi
         ConvertTo-TestHex (ConvertTo-TightVncPasswordBytes -Password $secret.Password) | Should -Be 'D7A514D8C556AADE'
         $secret.PasswordSource | Should -Be 'the password entered at the prompt'
         Should -Invoke Read-Host -Times 2 -Exactly -ParameterFilter { $AsSecureString -and -not $MaskInput }
+        # It waited (5 minutes at most) for someone to start typing before reading the password.
+        Should -Invoke Wait-TightVncPromptAnswer -Times 1 -Exactly -ParameterFilter { $TimeoutSeconds -eq 300 }
+    }
+
+    It 'Skips the prompt when nobody starts typing within 5 minutes, so an unwatched console does not hold the run lock' {
+        Mock Wait-TightVncPromptAnswer { $false }
+
+        $secret = Get-TightVncSecret
+
+        $secret.Password | Should -BeNullOrEmpty
+        $secret.PromptReason | Should -Be 'nobody answered the TightVNC password prompt within 5 minutes'
+        Should -Invoke Read-Host -Times 0 -Exactly
+    }
+
+    It 'Never asks when PowerShell was started with -NonInteractive, where Read-Host throws' {
+        Mock Test-PowerShellHostNonInteractive { $true }
+
+        $secret = Get-TightVncSecret
+
+        $secret.Password | Should -BeNullOrEmpty
+        $secret.PromptReason | Should -Be 'no server password was supplied, and PowerShell was started with -NonInteractive, so none could be asked for'
+        Should -Invoke Read-Host -Times 0 -Exactly
+        Should -Invoke Wait-TightVncPromptAnswer -Times 0 -Exactly
+        # No 'type the password' text for a prompt that never comes.
+        $script:infoMessages | Should -BeNullOrEmpty
+    }
+
+    It 'Takes a host that refuses to prompt as no password, without an error' {
+        Mock Read-Host { throw [System.Management.Automation.PSInvalidOperationException]::new('PowerShell is in NonInteractive mode. Read and Prompt functionality is not available.') }
+
+        $secret = Get-TightVncSecret
+
+        $secret.Password | Should -BeNullOrEmpty
+        $secret.PromptReason | Should -Be 'the password could not be asked for (PowerShell is in NonInteractive mode. Read and Prompt functionality is not available.)'
     }
 
     It 'Asks again when the two entries differ or TightVNC cannot use the first one' {
@@ -233,6 +271,9 @@ Describe 'Initialize-TightVncSecretForRun (the start of an install run)' {
         Remove-Item -LiteralPath "Env:\$($script:ControlVariable)" -ErrorAction SilentlyContinue
         $script:answers = [System.Collections.Generic.Queue[string]]::new()
         Mock Read-Host { New-TestSecureString $script:answers.Dequeue() }
+        Mock Wait-TightVncPromptAnswer { $true }
+        Mock Test-PowerShellHostNonInteractive { $false }
+        Mock Write-Host { }
         Mock Test-IsContinuousIntegration { $false }
         Mock Get-TightVncServerSettings { @{ KeyExists = $false; Password = $null; UseVncAuthentication = $null; ControlPassword = $null; UseControlAuthentication = $null } }
         $script:infoMessages = @()
@@ -336,7 +377,16 @@ Describe 'Get-TightVncServerSettings' {
         $settings.ControlPassword | Should -Be ([byte[]](11..18))
         $settings.UseVncAuthentication | Should -Be 1
         $settings.UseControlAuthentication | Should -Be 0
+        $settings.RestartPending | Should -BeFalse
         Should -Invoke Get-ItemProperty -Times 1 -Exactly -ParameterFilter { $LiteralPath -eq 'HKLM:\SOFTWARE\TightVNC\Server' }
+    }
+
+    It 'Reads the marker of a restart an earlier attempt still owes' {
+        Mock Test-Path { $true }
+        Mock Get-ItemProperty { [pscustomobject]@{ Password = [byte[]](1..8); WingetAppSetupRestartPending = 1 } }
+
+        (Get-TightVncServerSettings).RestartPending | Should -BeTrue
+        Get-TightVncRestartMarkerName | Should -Be 'WingetAppSetupRestartPending'
     }
 
     It 'Reads a value of the wrong type as missing' {
@@ -380,6 +430,22 @@ Describe 'Test-TightVncServerSecured' {
         @{ Case = 'the password is not 8 bytes'; Expected = $false; Settings = @{ Password = [byte[]](1..9); UseVncAuthentication = 1; ControlPassword = [byte[]](11..18); UseControlAuthentication = 1 } }
     ) {
         Test-TightVncServerSecured -Settings $Settings | Should -Be $Expected
+    }
+}
+
+Describe 'Get-TightVncServerSecurityGap (what a server that is not fully secured lets through)' {
+    It 'Says <Expected> when <Case>' -ForEach @(
+        @{ Case = 'the server has nothing (a fresh install)'; Settings = @{ Password = $null; UseVncAuthentication = $null; ControlPassword = $null; UseControlAuthentication = $null }; Expected = @('TightVNC Server has no password, so it refuses every viewer', 'its control interface has no password, so any signed-in user can reconfigure or stop it from the TightVNC tray icon') }
+        @{ Case = 'VNC authentication is off'; Settings = @{ Password = [byte[]](1..8); UseVncAuthentication = 0; ControlPassword = [byte[]](11..18); UseControlAuthentication = 1 }; Expected = @('VNC authentication is turned off (UseVncAuthentication), so TightVNC Server accepts every viewer WITHOUT a password') }
+        @{ Case = 'VNC authentication is off and there is no password'; Settings = @{ Password = $null; UseVncAuthentication = 0; ControlPassword = [byte[]](11..18); UseControlAuthentication = 1 }; Expected = @('VNC authentication is turned off (UseVncAuthentication), so TightVNC Server accepts every viewer WITHOUT a password') }
+        @{ Case = 'only the control interface is unprotected'; Settings = @{ Password = [byte[]](1..8); UseVncAuthentication = 1; ControlPassword = $null; UseControlAuthentication = $null }; Expected = @('its control interface has no password, so any signed-in user can reconfigure or stop it from the TightVNC tray icon') }
+        @{ Case = 'UseVncAuthentication is missing'; Settings = @{ Password = [byte[]](1..8); UseVncAuthentication = $null; ControlPassword = [byte[]](11..18); UseControlAuthentication = 1 }; Expected = @('UseVncAuthentication is not set to 1') }
+    ) {
+        @(Get-TightVncServerSecurityGap -Settings $Settings) | Should -Be $Expected
+    }
+
+    It 'Says nothing for a fully secured server' {
+        @(Get-TightVncServerSecurityGap -Settings @{ Password = [byte[]](1..8); UseVncAuthentication = 1; ControlPassword = [byte[]](11..18); UseControlAuthentication = 1 }) | Should -BeNullOrEmpty
     }
 }
 
@@ -440,15 +506,18 @@ Describe 'Set-TightVncServerPassword (the GlavSoft.TightVNC post-install hook, r
             }
             [pscustomobject]$copy
         }
-        Mock New-ItemProperty {
+        Mock Set-TightVncServerValue {
             $stored = $Value
             if ($stored -is [byte[]]) {
                 $stored = [byte[]]$stored.Clone()
             }
             $script:registry[$Name] = $stored
-            $script:writes += [pscustomobject]@{ Path = $LiteralPath; Name = $Name; Type = $PropertyType; Force = [bool]$Force }
-            [pscustomobject]@{ $Name = $stored }
+            $script:writes += [pscustomobject]@{ Name = $Name; Type = $Kind }
         }
+        Mock Remove-TightVncServerValue { $script:registry.Remove($Name) }
+        # Module logging records a cmdlet's parameter values: the hook must never hand the
+        # password bytes to New-ItemProperty (or any other cmdlet).
+        Mock New-ItemProperty { }
         $script:aclProblems = @('it inherits permissions from its parent key')
         Mock Get-TightVncServerKeyAclProblem { $script:aclProblems }
         Mock Protect-TightVncServerKey { $script:keyExists = $true; $script:aclProblems = @() }
@@ -460,6 +529,8 @@ Describe 'Set-TightVncServerPassword (the GlavSoft.TightVNC post-install hook, r
 
         Mock Test-EffectiveNonInteractive { $true }
         Mock Test-IsContinuousIntegration { $false }
+        Mock Test-PowerShellHostNonInteractive { $false }
+        Mock Wait-TightVncPromptAnswer { $true }
         $script:answers = [System.Collections.Generic.Queue[string]]::new()
         Mock Read-Host { New-TestSecureString $script:answers.Dequeue() }
 
@@ -487,8 +558,8 @@ Describe 'Set-TightVncServerPassword (the GlavSoft.TightVNC post-install hook, r
         $result = Invoke-AppPostInstall -App $script:CatalogEntry
 
         $result.Status | Should -Be 'NotConfigured'
-        $result.Reason | Should -Be 'no server password was supplied; set WINGET_APP_SETUP_TIGHTVNC_PASSWORD or run the installer interactively, then run it again. TightVNC Server refuses every viewer until then'
-        ($script:messages -join "`n") | Should -Match 'TightVNC installed but NOT configured: no server password was supplied, and TightVNC Server refuses every viewer until it has one\. To fix it, set WINGET_APP_SETUP_TIGHTVNC_PASSWORD'
+        $result.Reason | Should -Be 'no server password was supplied; TightVNC Server has no password, so it refuses every viewer; its control interface has no password, so any signed-in user can reconfigure or stop it from the TightVNC tray icon; set WINGET_APP_SETUP_TIGHTVNC_PASSWORD or run the installer interactively, then run it again'
+        ($script:messages -join "`n") | Should -Match 'TightVNC installed but NOT configured: no server password was supplied\. TightVNC Server has no password, so it refuses every viewer\. Its control interface has no password, so any signed-in user can reconfigure or stop it from the TightVNC tray icon\. To fix it, set WINGET_APP_SETUP_TIGHTVNC_PASSWORD'
         $script:writes | Should -BeNullOrEmpty
         Should -Invoke Protect-TightVncServerKey -Times 0 -Exactly
         Should -Invoke Restart-Service -Times 0 -Exactly
@@ -512,8 +583,11 @@ Describe 'Set-TightVncServerPassword (the GlavSoft.TightVNC post-install hook, r
         ConvertTo-TestHex $script:registry['ControlPassword'] | Should -Be '9CA3F3686574F277'
         $script:registry['UseVncAuthentication'] | Should -Be 1
         $script:registry['UseControlAuthentication'] | Should -Be 1
-        @($script:writes | ForEach-Object { '{0}:{1}' -f $_.Name, $_.Type }) | Should -Be @('Password:Binary', 'UseVncAuthentication:DWord', 'ControlPassword:Binary', 'UseControlAuthentication:DWord')
-        @($script:writes | Where-Object { $_.Path -ne 'HKLM:\SOFTWARE\TightVNC\Server' }) | Should -BeNullOrEmpty
+        # The restart marker goes in before the first password value and is gone once the service
+        # restarted.
+        @($script:writes | ForEach-Object { '{0}:{1}' -f $_.Name, $_.Type }) | Should -Be @('WingetAppSetupRestartPending:DWord', 'Password:Binary', 'UseVncAuthentication:DWord', 'ControlPassword:Binary', 'UseControlAuthentication:DWord')
+        $script:registry.ContainsKey('WingetAppSetupRestartPending') | Should -BeFalse
+        Should -Invoke New-ItemProperty -Times 0 -Exactly
         Should -Invoke Protect-TightVncServerKey -Times 1 -Exactly
         Should -Invoke Restart-Service -Times 1 -Exactly -ParameterFilter { $Name -eq 'tvnserver' }
         Should -Invoke Start-Service -Times 0 -Exactly
@@ -554,7 +628,7 @@ Describe 'Set-TightVncServerPassword (the GlavSoft.TightVNC post-install hook, r
         $result = Set-TightVncServerPassword -App $script:CatalogEntry
 
         $result | Should -Be 'Configured'
-        @($script:writes.Name) | Should -Be @('Password', 'ControlPassword')
+        @($script:writes.Name) | Should -Be @('WingetAppSetupRestartPending', 'Password', 'ControlPassword')
         ConvertTo-TestHex $script:registry['Password'] | Should -Be 'DBD83CFD727A1458'
         ConvertTo-TestHex $script:registry['ControlPassword'] | Should -Be 'F0E43164F6C2E373'
         Should -Invoke Restart-Service -Times 1 -Exactly
@@ -613,7 +687,7 @@ Describe 'Set-TightVncServerPassword (the GlavSoft.TightVNC post-install hook, r
         $result = Set-TightVncServerPassword -App $script:CatalogEntry
 
         $result.Status | Should -Be 'NotConfigured'
-        $result.Reason | Should -Match '^no server password was entered at the prompt; set WINGET_APP_SETUP_TIGHTVNC_PASSWORD'
+        $result.Reason | Should -Match '^no server password was entered at the prompt; TightVNC Server has no password, so it refuses every viewer; .*; set WINGET_APP_SETUP_TIGHTVNC_PASSWORD'
         $script:writes | Should -BeNullOrEmpty
     }
 
@@ -645,18 +719,115 @@ Describe 'Set-TightVncServerPassword (the GlavSoft.TightVNC post-install hook, r
         ($script:messages -join "`n") | Should -Match 'the control password is the same as the server password'
     }
 
-    It 'Does not take a server without both protections as configured: <Case>' -ForEach @(
-        @{ Case = 'no control password'; Registry = @{ Password = [byte[]](1..8); UseVncAuthentication = 1 } }
-        @{ Case = 'authentication off'; Registry = @{ Password = [byte[]](1..8); UseVncAuthentication = 0; ControlPassword = [byte[]](11..18); UseControlAuthentication = 1 } }
+    It 'Does not take a server without both protections as configured, says what it lets through and locks the key holding its password: <Case>' -ForEach @(
+        @{ Case = 'no control password'; Registry = @{ Password = [byte[]](1..8); UseVncAuthentication = 1 }; Says = 'its control interface has no password, so any signed-in user can reconfigure or stop it from the TightVNC tray icon' }
+        @{ Case = 'authentication off'; Registry = @{ Password = [byte[]](1..8); UseVncAuthentication = 0; ControlPassword = [byte[]](11..18); UseControlAuthentication = 1 }; Says = 'VNC authentication is turned off (UseVncAuthentication), so TightVNC Server accepts every viewer WITHOUT a password' }
     ) {
         $script:keyExists = $true
-        $script:aclProblems = @()
+        $script:aclProblems = @('BUILTIN\Users (S-1-5-32-545) has an access entry (allow)')
         $script:registry = $Registry
 
         $result = Set-TightVncServerPassword -App $script:CatalogEntry
 
         $result.Status | Should -Be 'NotConfigured'
+        $result.Reason | Should -Be "no server password was supplied; $Says; set WINGET_APP_SETUP_TIGHTVNC_PASSWORD or run the installer interactively, then run it again"
+        $result.Reason | Should -Not -Match 'refuses every viewer'
         $script:writes | Should -BeNullOrEmpty
+        # The reversible password already in the key is locked away from other accounts.
+        Should -Invoke Protect-TightVncServerKey -Times 1 -Exactly
+    }
+
+    It 'Fails a partly configured server whose key cannot be locked, since its password stays readable' {
+        $script:keyExists = $true
+        $script:registry = @{ Password = [byte[]](1..8); UseVncAuthentication = 1 }
+        Mock Protect-TightVncServerKey { throw 'Requested registry access is not allowed.' }
+
+        $result = Set-TightVncServerPassword -App $script:CatalogEntry
+
+        $result.Status | Should -Be 'Failed'
+        $result.Reason | Should -Be 'could not limit HKLM:\SOFTWARE\TightVNC\Server to SYSTEM and Administrators (Requested registry access is not allowed.)'
+    }
+
+    It 'Keeps a separate control password the server already has when only the server password is supplied' {
+        $script:keyExists = $true
+        $script:aclProblems = @()
+        $script:registry = @{ Password = (ConvertFrom-TestHex 'D7A514D8C556AADE'); UseVncAuthentication = 1; ControlPassword = (ConvertFrom-TestHex '9CA3F3686574F277'); UseControlAuthentication = 1 }
+        [System.Environment]::SetEnvironmentVariable($script:PasswordVariable, 'Secure!')
+
+        $result = Set-TightVncServerPassword -App $script:CatalogEntry
+
+        $result | Should -Be 'Configured'
+        $script:writes | Should -BeNullOrEmpty
+        ConvertTo-TestHex $script:registry['ControlPassword'] | Should -Be '9CA3F3686574F277'
+        Should -Invoke Restart-Service -Times 0 -Exactly
+        $all = $script:messages -join "`n"
+        $all | Should -Match 'keeping the separate control password TightVNC Server already has'
+        $all | Should -Not -Match 'so the server password also protects the control interface'
+    }
+
+    It 'Moves a control password that was the old server password along with a new server password' {
+        $script:keyExists = $true
+        $script:aclProblems = @()
+        $script:registry = @{ Password = (ConvertFrom-TestHex 'D7A514D8C556AADE'); UseVncAuthentication = 1; ControlPassword = (ConvertFrom-TestHex 'D7A514D8C556AADE'); UseControlAuthentication = 1 }
+        [System.Environment]::SetEnvironmentVariable($script:PasswordVariable, 'password')
+
+        $result = Set-TightVncServerPassword -App $script:CatalogEntry
+
+        $result | Should -Be 'Configured'
+        ConvertTo-TestHex $script:registry['Password'] | Should -Be 'DBD83CFD727A1458'
+        ConvertTo-TestHex $script:registry['ControlPassword'] | Should -Be 'DBD83CFD727A1458'
+        ($script:messages -join "`n") | Should -Match 'so the server password also protects the control interface'
+    }
+
+    It 'Restarts the service on the retry when the first restart failed, instead of reporting the unchanged values as Configured' {
+        [System.Environment]::SetEnvironmentVariable($script:PasswordVariable, 'Secure!')
+        [System.Environment]::SetEnvironmentVariable($script:ControlVariable, 'bar')
+        # The service is hung: it cannot be stopped, and keeps running with the old configuration.
+        Mock Restart-Service { throw 'Service ''TightVNC Server (tvnserver)'' cannot be stopped due to the following error: Cannot stop tvnserver service on computer ''.''.' }
+
+        $first = Invoke-AppPostInstall -App $script:CatalogEntry
+
+        $first.Status | Should -Be 'Failed'
+        $first.Reason | Should -Match '^could not restart the TightVNC Server service'
+        $script:registry['WingetAppSetupRestartPending'] | Should -Be 1
+
+        # The retry pass runs the hook again: the values are right now, but the service has not
+        # loaded them.
+        Mock Restart-Service { $script:serviceStatus = 'Running' }
+        $script:writes = @()
+
+        $second = Invoke-AppPostInstall -App $script:CatalogEntry
+
+        $second.Status | Should -Be 'Configured'
+        @($script:writes | Where-Object { $_.Name -ne 'WingetAppSetupRestartPending' }) | Should -BeNullOrEmpty
+        # Once in each attempt: the second restart is what makes the result Configured.
+        Should -Invoke Restart-Service -Times 2 -Exactly -ParameterFilter { $Name -eq 'tvnserver' }
+        $script:registry.ContainsKey('WingetAppSetupRestartPending') | Should -BeFalse
+        ($script:messages -join "`n") | Should -Match 'restarted the TightVNC Server service, which had not loaded the passwords written to it earlier'
+    }
+
+    It 'Restarts the service when an earlier run wrote the passwords but stopped before restarting it, even without a password this time' {
+        $script:keyExists = $true
+        $script:aclProblems = @()
+        $script:registry = @{ Password = (ConvertFrom-TestHex 'D7A514D8C556AADE'); UseVncAuthentication = 1; ControlPassword = (ConvertFrom-TestHex '9CA3F3686574F277'); UseControlAuthentication = 1; WingetAppSetupRestartPending = 1 }
+
+        $result = Set-TightVncServerPassword -App $script:CatalogEntry
+
+        $result | Should -Be 'Configured'
+        Should -Invoke Restart-Service -Times 1 -Exactly
+        Should -Invoke Remove-TightVncServerValue -Times 1 -Exactly -ParameterFilter { $Name -eq 'WingetAppSetupRestartPending' }
+        $script:writes | Should -BeNullOrEmpty
+    }
+
+    It 'Restarts a service that is still starting, which may already have read the old values, instead of only starting it' {
+        [System.Environment]::SetEnvironmentVariable($script:PasswordVariable, 'Secure!')
+        $script:serviceStatus = 'StartPending'
+
+        $result = Set-TightVncServerPassword -App $script:CatalogEntry
+
+        $result | Should -Be 'Configured'
+        Should -Invoke Restart-Service -Times 1 -Exactly
+        Should -Invoke Start-Service -Times 0 -Exactly
     }
 
     It 'Reports a PC without the TightVNC Server service as NotConfigured, without touching the registry' {
@@ -696,7 +867,7 @@ Describe 'Set-TightVncServerPassword (the GlavSoft.TightVNC post-install hook, r
 
     It 'Fails when the values read back are not the ones written' {
         [System.Environment]::SetEnvironmentVariable($script:PasswordVariable, 'Secure!')
-        Mock New-ItemProperty { $script:writes += [pscustomobject]@{ Name = $Name } }
+        Mock Set-TightVncServerValue { $script:writes += [pscustomobject]@{ Name = $Name } }
 
         $result = Set-TightVncServerPassword -App $script:CatalogEntry
 
@@ -770,24 +941,33 @@ Describe 'Install-AppWithVerification runs the TightVNC hook once TightVNC is in
     }
 }
 
-Describe 'Protect-TightVncServerKey on Windows (real registry, a throwaway HKCU key)' -Skip:(-not $IsWindows) {
+# Elevated only, like the real-ACL tests in WingetAutoUpdate.Tests.ps1: a key limited to SYSTEM and
+# Administrators cannot be read (Get-Acl opens it for reading) by a filtered, non-elevated token.
+# Both CI runners run elevated.
+Describe 'Protect-TightVncServerKey and the value seams on Windows (real registry, throwaway HKCU keys)' -Skip:(-not ($IsWindows -and ([System.Security.Principal.WindowsPrincipal][System.Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator))) {
     BeforeAll {
         $script:testRoot = "Software\winget-app-setup-tests\$([guid]::NewGuid().ToString('N'))"
         $script:testSubKey = "$($script:testRoot)\Server"
         $script:testPath = "HKCU:\$($script:testSubKey)"
+        $script:existingSubKey = "$($script:testRoot)\Existing"
+        $script:existingPath = "HKCU:\$($script:existingSubKey)"
+        $script:valuesSubKey = "$($script:testRoot)\Values"
+        $script:valuesPath = "HKCU:\$($script:valuesSubKey)"
     }
 
     AfterAll {
-        # The key now grants only SYSTEM and Administrators: give this account its access back (as
-        # its owner it may change the access list), then remove the test keys.
+        # The keys now grant only SYSTEM and Administrators: give this account its access back (as
+        # their owner it may change the access list), then remove the test keys.
         try {
             $hive = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::CurrentUser, [Microsoft.Win32.RegistryView]::Default)
-            $key = $hive.OpenSubKey($script:testSubKey, [Microsoft.Win32.RegistryKeyPermissionCheck]::ReadWriteSubTree, [System.Security.AccessControl.RegistryRights]'ReadPermissions, ChangePermissions')
-            if ($key) {
-                $security = New-Object System.Security.AccessControl.RegistrySecurity
-                $security.AddAccessRule((New-Object System.Security.AccessControl.RegistryAccessRule -ArgumentList @([System.Security.Principal.WindowsIdentity]::GetCurrent().User, 'FullControl', 'ContainerInherit', 'None', 'Allow')))
-                $key.SetAccessControl($security)
-                $key.Dispose()
+            foreach ($subKey in @($script:testSubKey, $script:existingSubKey, $script:valuesSubKey)) {
+                $key = $hive.OpenSubKey($subKey, [Microsoft.Win32.RegistryKeyPermissionCheck]::ReadWriteSubTree, [System.Security.AccessControl.RegistryRights]'ReadPermissions, ChangePermissions')
+                if ($key) {
+                    $security = New-Object System.Security.AccessControl.RegistrySecurity
+                    $security.AddAccessRule((New-Object System.Security.AccessControl.RegistryAccessRule -ArgumentList @([System.Security.Principal.WindowsIdentity]::GetCurrent().User, 'FullControl', 'ContainerInherit', 'None', 'Allow')))
+                    $key.SetAccessControl($security)
+                    $key.Dispose()
+                }
             }
             $hive.DeleteSubKeyTree($script:testRoot, $false)
             $testsKey = $hive.OpenSubKey('Software\winget-app-setup-tests')
@@ -818,5 +998,52 @@ Describe 'Protect-TightVncServerKey on Windows (real registry, a throwaway HKCU 
         $again = Get-DirectoryAccessSummary -Path $script:testPath
         @($again.AccessRules | ForEach-Object { $_.Sid } | Sort-Object) | Should -Be @('S-1-5-18', 'S-1-5-32-544')
         $again.InheritanceProtected | Should -BeTrue
+    }
+
+    It 'Takes away the permissions a key that already exists inherited from its parent, as the MSI leaves HKLM\SOFTWARE\TightVNC\Server' {
+        # Created with no security of its own: it inherits its parent's entries, as a key the MSI
+        # (or anything but tvnserver itself) creates does.
+        $hive = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::CurrentUser, [Microsoft.Win32.RegistryView]::Default)
+        $hive.CreateSubKey($script:existingSubKey).Dispose()
+        $hive.Dispose()
+        $before = Get-DirectoryAccessSummary -Path $script:existingPath
+        $before.InheritanceProtected | Should -BeFalse
+        @(Get-TightVncServerKeyAclProblem -Path $script:existingPath) | Should -Contain 'it inherits permissions from its parent key'
+
+        Protect-TightVncServerKey -SubKey $script:existingSubKey -Hive CurrentUser
+
+        $after = Get-DirectoryAccessSummary -Path $script:existingPath
+        $after.InheritanceProtected | Should -BeTrue
+        @($after.AccessRules | ForEach-Object { $_.Sid } | Sort-Object) | Should -Be @('S-1-5-18', 'S-1-5-32-544')
+        @($after.AccessRules | Where-Object { $_.AccessControlType -ne 'Allow' -or $_.IsInherited }) | Should -BeNullOrEmpty
+        @(Get-TightVncServerKeyAclProblem -Path $script:existingPath) | Should -BeNullOrEmpty
+    }
+
+    It 'Writes binary and DWORD values through the .NET registry API, which Get-TightVncServerSettings reads back, and removes them' {
+        Protect-TightVncServerKey -SubKey $script:valuesSubKey -Hive CurrentUser
+
+        Set-TightVncServerValue -SubKey $script:valuesSubKey -Hive CurrentUser -Name 'Password' -Value ([byte[]](1..8)) -Kind 'Binary'
+        Set-TightVncServerValue -SubKey $script:valuesSubKey -Hive CurrentUser -Name 'UseVncAuthentication' -Value 1 -Kind 'DWord'
+        Set-TightVncServerValue -SubKey $script:valuesSubKey -Hive CurrentUser -Name (Get-TightVncRestartMarkerName) -Value 1 -Kind 'DWord'
+
+        $hive = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::CurrentUser, [Microsoft.Win32.RegistryView]::Default)
+        $key = $hive.OpenSubKey($script:valuesSubKey)
+        try {
+            "$($key.GetValueKind('Password'))" | Should -Be 'Binary'
+            "$($key.GetValueKind('UseVncAuthentication'))" | Should -Be 'DWord'
+        }
+        finally {
+            $key.Dispose()
+            $hive.Dispose()
+        }
+        $settings = Get-TightVncServerSettings -Path $script:valuesPath
+        $settings.Password | Should -Be ([byte[]](1..8))
+        $settings.UseVncAuthentication | Should -Be 1
+        $settings.RestartPending | Should -BeTrue
+
+        Remove-TightVncServerValue -SubKey $script:valuesSubKey -Hive CurrentUser -Name (Get-TightVncRestartMarkerName)
+        { Remove-TightVncServerValue -SubKey $script:valuesSubKey -Hive CurrentUser -Name (Get-TightVncRestartMarkerName) } | Should -Not -Throw
+        (Get-TightVncServerSettings -Path $script:valuesPath).RestartPending | Should -BeFalse
+        { Set-TightVncServerValue -SubKey "$($script:testRoot)\Missing" -Hive CurrentUser -Name 'Password' -Value ([byte[]](1..8)) -Kind 'Binary' } | Should -Throw '*does not exist*'
     }
 }

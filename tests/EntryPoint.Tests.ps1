@@ -374,6 +374,21 @@ Describe 'The entry block exits with the code Invoke-WingetInstall returns (wgt-
         $result.Output | Should -Not -Match 'UNEXPECTED ERROR|stopped before it finished'
     }
 
+    It 'Leaves no TightVNC password in the caller''s console after an irm | iex run, whatever Invoke-WingetInstall left (work-order item 18)' {
+        # Under Invoke-Expression the run's $script: scope is the console's global scope, which
+        # stays open after the run, an abort included: the entry script's finally block drops the
+        # passwords Initialize-TightVncSecretForRun kept, on every way out.
+        $body = "`$secure = New-Object System.Security.SecureString; `$secure.AppendChar('x'); `$script:TightVncSecret = @{ Password = `$secure }; Write-Host 'secret kept'; return 0"
+        $path = New-FaultInjectedInstaller -Name 'keeps-secret-iex.ps1' -Body $body
+        $escapedPath = $path.Replace("'", "''")
+
+        $result = Invoke-ChildInstaller -Arguments @('-Command', "Get-Content -Raw -LiteralPath '$escapedPath' | Invoke-Expression; Write-Host ('secret left in the console: ' + [bool](Get-Variable -Name TightVncSecret -Scope Global -ValueOnly -ErrorAction SilentlyContinue))")
+
+        $result.ExitCode | Should -Be 0
+        $result.Output | Should -Match 'secret kept'
+        $result.Output | Should -Match 'secret left in the console: False'
+    }
+
     It 'Exits with the returned code, not a value a helper leaked into the output stream before it' {
         $path = New-FaultInjectedInstaller -Name 'leaks-then-returns.ps1' -Body "Write-Output 'stray value'; Write-Output 7; return 3"
 

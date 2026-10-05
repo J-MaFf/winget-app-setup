@@ -441,33 +441,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a `postInstall` hook, `Set-TightVncServerPassword` (`WingetAppSetup/Private/TightVnc.ps1`):
   - The password comes from `WINGET_APP_SETUP_TIGHTVNC_PASSWORD` (and the control password from
     `WINGET_APP_SETUP_TIGHTVNC_CONTROL_PASSWORD`, optional) in the run's environment, read at the
-    start of the run and removed from the PowerShell 7 process's environment before winget or any
-    installer starts (`Initialize-TightVncSecretForRun`, `Import-TightVncSecretFromEnvironment`).
-    Without it, an interactive run asks for it at its start, before anything is installed
-    (`Read-Host -AsSecureString`, twice, Enter to skip), and only when TightVNC Server has no
-    password yet; a non-interactive run never asks. It is never taken from the repository.
+    start of the PowerShell 7 run and removed from its environment before it starts winget or any
+    installer (`Initialize-TightVncSecretForRun`, `Import-TightVncSecretFromEnvironment`); processes
+    started before that, such as the Windows PowerShell 5.1 bootstrap and its PowerShell 7 install,
+    keep a copy. Without it, an interactive run asks for it at its start, before anything is
+    installed (`Read-Host -AsSecureString`, twice, Enter to skip), and only when TightVNC Server has
+    no password yet; the prompt waits at most 5 minutes for someone to start typing
+    (`Wait-TightVncPromptAnswer`), since the run holds the run lock meanwhile, and is not shown when
+    PowerShell was started with `-NonInteractive` (`Test-PowerShellHostNonInteractive`), where
+    `Read-Host` throws. A non-interactive run never asks. It is never taken from the repository.
+    The passwords are dropped on every way out of the run, early exits (2, 3) and aborts included,
+    so an `irm | iex` console does not keep them.
   - It is written straight to `HKLM\SOFTWARE\TightVNC\Server` (`Password` and `ControlPassword` as
     8-byte `REG_BINARY` values in VNC's DES encoding, `ConvertTo-TightVncPasswordBytes`;
     `UseVncAuthentication` and `UseControlAuthentication` set to 1), never through MSI properties or
-    `tvnserver -setservicevncpass`, whose command lines winget and MSI logs record. Without a control
-    password the server password protects the control interface too, with a warning. A password
-    longer than 8 characters is used with a warning that TightVNC reads only the first 8; one with a
-    character that is not printable ASCII is refused.
-  - Before a password goes in, the key is limited to SYSTEM and Administrators with no inherited
-    permissions (`Protect-TightVncServerKey`, checked by `Get-TightVncServerKeyAclProblem`), since
-    the stored value is reversible. The values are read back, then the `tvnserver` service is
-    restarted (`Restart-Service`, or started when it was stopped) and must be running.
+    `tvnserver -setservicevncpass`, whose command lines winget and MSI logs record, and through the
+    .NET registry API (`Set-TightVncServerValue`), not `New-ItemProperty`, whose parameter values
+    PowerShell module logging records. Without a control password, a separate control password the
+    server already has is kept; otherwise the server password protects the control interface too,
+    with a warning. A password longer than 8 characters is used with a warning that TightVNC reads
+    only the first 8; one with a character that is not printable ASCII is refused.
+  - Before a password goes in, and whenever the key already holds one, the key is limited to
+    SYSTEM and Administrators with no inherited permissions (`Protect-TightVncServerKey`, checked by
+    `Get-TightVncServerKeyAclProblem`), since the stored value is reversible. The values are read
+    back, then the `tvnserver` service is restarted (`Restart-Service`, or started when it was
+    stopped) and must be running. A `WingetAppSetupRestartPending` value written before the first
+    change and removed after the restart makes the retry pass, or the next run, restart a service
+    whose restart failed or never happened, instead of reporting the unchanged values as
+    configured.
   - Idempotent: a run with the same password changes nothing and does not restart the service, one
     with a different password updates it, and a run without one keeps the passwords a configured
     server already has (and still locks the key).
   - Without a password TightVNC is `Not configured` (`TightVNC installed but NOT configured: no
-    server password was supplied, ...`, and the summary's `Configuration: NOT DONE` line); the exit
-    code does not change. A step that fails (the key cannot be locked, the values do not read back,
-    the service does not start) makes the app `Failed` (exit code 1).
-  - The password, its encoded bytes and the bytes already stored are never printed, logged or put
-    on a command line, and the buffers holding them are cleared. A dry run says only whether each
-    variable is set and whether a real run could use it (`[DRY-RUN] TightVNC: ... (value not
-    shown)`) and leaves the variables in place.
+    server password was supplied. ...`, saying what the server lets through: it refuses every
+    viewer, it accepts viewers without a password, or its control interface is unprotected; and the
+    summary's `Configuration: NOT DONE` line); the exit code does not change. A step that fails (the
+    key cannot be locked, the values do not read back, the service does not restart) makes the app
+    `Failed` (exit code 1).
+  - The password, its encoded bytes and the bytes already stored are never printed, written to the
+    transcript, passed to a cmdlet or put on a command line, and the buffers holding them are
+    cleared. A dry run says only whether each variable is set and whether a real run could use it
+    (`[DRY-RUN] TightVNC: ... (value not shown)`) and leaves the variables in place.
   - The module now calls `Get-Service`, `Restart-Service` and `Start-Service`, which are listed in
     `build/windows-only-commands.txt` and have stand-ins in `tests/TestHelpers.ps1`.
 - The uninstaller no longer reports every app as not installed, removes Winget-AutoUpdate and exits

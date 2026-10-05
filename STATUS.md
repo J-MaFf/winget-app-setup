@@ -186,12 +186,16 @@ P2-22, work-order item 18). Its catalog entry is the first with a `postInstall` 
 passwords come from `WINGET_APP_SETUP_TIGHTVNC_PASSWORD` and
 `WINGET_APP_SETUP_TIGHTVNC_CONTROL_PASSWORD` (taken out of the environment at the start of the run,
 before winget starts), or from a prompt at the start of an interactive run when TightVNC Server has
-none yet, never from the repository. They are written straight to `HKLM\SOFTWARE\TightVNC\Server`
-after that key is limited to SYSTEM and Administrators, read back, and the service is restarted;
-the same password again changes nothing. Without one, TightVNC is `Not configured` with a loud
-line, and the exit code does not change. The encoding is checked against published TightVNC
-values; the registry, ACL and service steps are tested at their seams on Linux and need a real
-Windows check (below).
+none yet (it waits at most 5 minutes, since the run holds the run lock), never from the repository.
+They are written straight to `HKLM\SOFTWARE\TightVNC\Server` through the .NET registry API (not a
+cmdlet, which module logging would record) after that key is limited to SYSTEM and Administrators,
+read back, and the service is restarted; the same password again changes nothing, and a restart
+that failed or never happened is made up by the retry pass or the next run (a
+`WingetAppSetupRestartPending` marker in the key). Without one, TightVNC is `Not configured` with a
+loud line that says what the server lets through, and the exit code does not change. The encoding
+is checked against published TightVNC values; the registry, ACL and service steps are tested at
+their seams on Linux, the ACL and value seams also against throwaway HKCU keys on the elevated
+Windows CI runners, and the whole hook needs a real Windows check (below).
 
 The same branch changes CI. Fork pull requests that leave `windows-tests.yml` alone no longer run
 on the self-hosted win-test runner, and `claude.yml` calls the shared Claude workflow at a pinned
@@ -511,7 +515,10 @@ every repository secret.
   transcript holds neither the password nor what was typed at the prompt, and whether an upgrade
   (WAU) or an uninstall keeps or removes the key. Owner: decide how Endpoint Central delivers
   `WINGET_APP_SETUP_TIGHTVNC_PASSWORD` (a variable set in the RMM script, not a script argument),
-  and whether to drop TightVNC once Endpoint Central's remote control is rolled out.
+  whether a run without it should stay `Not configured` with exit code 0 (today) or fail (exit 1)
+  or add a count to the `RESULT` line, and whether to drop TightVNC once Endpoint Central's remote
+  control is rolled out. The E2E run does not set a TightVNC password, so it never takes the
+  configured path.
 - Run the reworked uninstaller on real Windows, cross-user elevated and as SYSTEM, where
   `winget list` does not see per-user MSIX apps such as Windows Terminal.
 - Add a whole-run time budget (`-MaxRuntimeMinutes`), deferred from the RMM work: the

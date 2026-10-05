@@ -25,7 +25,10 @@
         scheduled task, never a person at a console, whatever its session reports. Nobody would
         answer a key press, so none is waited for;
       - the session is non-interactive ([Environment]::UserInteractive is false — services,
-        scheduled tasks, pwsh -NonInteractive);
+        scheduled tasks). PowerShell's own -NonInteractive switch (`pwsh -NonInteractive -File
+        ...`) does not change that and is not detected here: with a console attached, such a run
+        counts as interactive. Only the TightVNC password prompt checks for it
+        (Test-PowerShellHostNonInteractive), because Read-Host throws in that mode;
       - stdin is redirected (piped input, irm | iex wrappers, CI runners). A console probe
         failure means there is no usable console, so that counts as non-interactive too.
 .PARAMETER NonInteractive
@@ -55,6 +58,42 @@ function Test-EffectiveNonInteractive {
         # No usable console to probe: treat as non-interactive rather than risk a blocked prompt.
         return $true
     }
+}
+
+<#
+.SYNOPSIS
+    Determines whether PowerShell itself was started with its -NonInteractive switch.
+.DESCRIPTION
+    In that mode Read-Host throws ("PowerShell is in NonInteractive mode"), whatever the console
+    looks like, and nothing in .NET or the host's public API says so, so the process command line
+    is read: an argument that is -NonInteractive or one of its abbreviations down to -noni, after
+    '-', '--' or '/', as pwsh and Windows PowerShell accept it. The script's own -NonInteractive
+    switch on the same command line matches too, and asks for the same thing. Used by the TightVNC
+    password prompt (Get-TightVncSecret); Test-EffectiveNonInteractive does not use it. Runs under
+    Windows PowerShell 5.1 too.
+.PARAMETER CommandLineArgs
+    The process command line, for tests. Default: [Environment]::GetCommandLineArgs().
+.RETURNS
+    [bool]
+#>
+function Test-PowerShellHostNonInteractive {
+    param (
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [AllowEmptyCollection()]
+        [string[]]$CommandLineArgs = [Environment]::GetCommandLineArgs()
+    )
+
+    # The first element is the program itself.
+    foreach ($argument in @($CommandLineArgs | Select-Object -Skip 1)) {
+        if ($argument -match '^(?:--?|/)(?<name>[A-Za-z]+)$') {
+            $name = $Matches['name']
+            if ($name.Length -ge 4 -and 'noninteractive'.StartsWith($name, [System.StringComparison]::OrdinalIgnoreCase)) {
+                return $true
+            }
+        }
+    }
+    return $false
 }
 
 <#

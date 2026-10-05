@@ -623,6 +623,8 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
         It 'Asks for the password at the start of an interactive run, before winget is set up' {
             Mock Test-EffectiveNonInteractive { $false }
             Mock Test-IsContinuousIntegration { $false }
+            Mock Test-PowerShellHostNonInteractive { $false }
+            Mock Wait-TightVncPromptAnswer { $true }
             Mock Get-TightVncServerSettings { @{ KeyExists = $false; Password = $null; UseVncAuthentication = $null; ControlPassword = $null; UseControlAuthentication = $null } }
             Mock Read-Host {
                 $script:events.Add('prompt')
@@ -648,6 +650,24 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
             [System.Environment]::GetEnvironmentVariable('WINGET_APP_SETUP_TIGHTVNC_PASSWORD') | Should -Be 'Secure!'
             $script:infoMessages | Should -Contain '[DRY-RUN] TightVNC: a real run would set the server password from WINGET_APP_SETUP_TIGHTVNC_PASSWORD (value not shown).'
             (($script:infoMessages + $script:warningMessages) -join "`n") | Should -Not -Match 'Secure!'
+        }
+
+        It 'Drops the password when the run stops early with exit code <Code>, so a console that stays open (irm | iex) does not keep it' -ForEach @(
+            @{ Code = 2; Case = 'winget unusable' }
+            @{ Code = 3; Case = 'catalog invalid' }
+        ) {
+            [System.Environment]::SetEnvironmentVariable('WINGET_APP_SETUP_TIGHTVNC_PASSWORD', 'Secure!')
+            if ($Code -eq 2) {
+                Mock Initialize-Winget { [pscustomobject]@{ Ready = $false; Diagnosis = 'NotLaunchable' } }
+            }
+            else {
+                Mock Test-AppDefinitions { @{ Errors = @('a broken entry'); Warnings = @(); ValidApps = @() } }
+            }
+
+            Invoke-WingetInstall -Apps $script:tightVncCatalog -NonInteractive | Should -Be $Code
+
+            [System.Environment]::GetEnvironmentVariable('WINGET_APP_SETUP_TIGHTVNC_PASSWORD') | Should -BeNullOrEmpty
+            $script:TightVncSecret | Should -BeNullOrEmpty
         }
 
         It 'Does nothing for a catalog without the TightVNC hook' {

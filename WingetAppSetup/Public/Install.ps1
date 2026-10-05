@@ -12,8 +12,9 @@
     session is non-interactive or stdin is redirected. No path asks a yes/no question anymore
     (issue #230). The one question left is TightVNC's server password, asked at the start of an
     interactive run when WINGET_APP_SETUP_TIGHTVNC_PASSWORD is not set and TightVNC Server has no
-    password yet (work-order item 18); a non-interactive run never asks it and reports TightVNC as
-    not configured instead. A non-interactive run that is
+    password yet (work-order item 18), and skipped when nobody starts typing within 5 minutes; a
+    non-interactive run never asks it and reports TightVNC as not configured instead. A
+    non-interactive run that is
     not elevated returns 4 instead of raising a UAC prompt that nobody would answer (review finding
     P2-12).
 .PARAMETER SkipSystemCheck
@@ -76,7 +77,8 @@ function Invoke-WingetInstall {
     )
 
     # Effective non-interactive mode: explicit switch, a non-interactive session (e.g. service,
-    # scheduled task, pwsh -NonInteractive), or redirected stdin (piped/irm|iex wrappers).
+    # scheduled task; not PowerShell's own -NonInteractive switch), or redirected stdin
+    # (piped/irm|iex wrappers).
     # Shared private helper (issue #214) — Test-SystemRequirements gates its disk-space prompt
     # on the same detection.
     $effectiveNonInteractive = Test-EffectiveNonInteractive -NonInteractive:$NonInteractive
@@ -200,10 +202,12 @@ function Invoke-WingetInstall {
 
     # TightVNC's passwords for its post-install hook (work-order item 18, review finding P2-22),
     # before winget or any installer starts: taken out of this process's environment so no child
-    # process inherits them, or asked for now when someone is at the console and TightVNC Server
-    # has none yet, so the rest of the run needs nobody. Only for a catalog with that hook. A dry
+    # process it starts from here on inherits them, or asked for now when someone is at the console
+    # and TightVNC Server has none yet, so the rest of the run needs nobody (the prompt waits at
+    # most 5 minutes, since this run holds the run lock). Only for a catalog with that hook. A dry
     # run only says whether they were supplied. A failure here must not stop the installs: the
-    # hook then reports TightVNC as not configured.
+    # hook then reports TightVNC as not configured. Every return below this point drops them
+    # (Clear-TightVncSecret), and so does the entry script's finally block.
     try {
         Initialize-TightVncSecretForRun -Apps $Apps -NonInteractive:$effectiveNonInteractive -WhatIf:$WhatIf
     }
@@ -245,6 +249,7 @@ function Invoke-WingetInstall {
     $wingetAvailable = [bool]$winget.Ready
     if (-not $wingetAvailable -and -not $WhatIf) {
         Write-ErrorMessage 'Winget is required for this script. Exiting.'
+        Clear-TightVncSecret
         return 2
     }
 
@@ -277,6 +282,7 @@ function Invoke-WingetInstall {
             Write-ErrorMessage $validationError
         }
         Write-ErrorMessage 'No valid application definitions found. Resolve the errors and re-run the script.'
+        Clear-TightVncSecret
         return 3
     }
 
@@ -284,6 +290,7 @@ function Invoke-WingetInstall {
 
     if ($apps.Count -eq 0) {
         Write-ErrorMessage 'No application definitions remain after validation. Add at least one valid entry and re-run the script.'
+        Clear-TightVncSecret
         return 3
     }
 
