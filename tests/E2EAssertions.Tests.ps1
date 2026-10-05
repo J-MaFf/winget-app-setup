@@ -524,6 +524,81 @@ Describe 'Get-TranscriptAssertionResult' {
     }
 }
 
+# Assert-Install.ps1 used to decide applicability from 'condition' alone, so an app gated only by
+# its arch list was expected installed where the run skipped it as not applicable.
+Describe 'Get-CatalogAppApplicability' {
+    BeforeEach {
+        $script:warnings = @()
+        Mock Write-WarningMessage { $script:warnings += $Message }
+        Mock Get-ComputerManufacturer { 'Microsoft Corporation' }
+        Mock Test-IsSystemAccount { $false }
+        Mock Test-WindowsTerminalHostsCurrentSession { $false }
+    }
+
+    It 'Leaves out an app whose arch list rules this PC out, with the reason the run printed' {
+        Mock Get-OSArchitecture { 'Arm64' }
+
+        $split = Get-CatalogAppApplicability -Apps @(@{ name = 'Contoso.X64Only'; arch = 'X64' }, @{ name = 'Contoso.Anywhere' })
+
+        @($split.Applicable | ForEach-Object { $_.name }) | Should -Be @('Contoso.Anywhere')
+        @($split.NotApplicable.Keys) | Should -Be @('Contoso.X64Only')
+        $split.NotApplicable['Contoso.X64Only'] | Should -Be 'for X64 Windows only; this PC is Arm64'
+    }
+
+    It 'Leaves out an app whose condition is false, with its description or condition not met' {
+        Mock Get-OSArchitecture { 'X64' }
+
+        $split = Get-CatalogAppApplicability -Apps @(
+            @{ name = 'Contoso.Described'; condition = { $false }; conditionDescription = 'Contoso hardware only' },
+            @{ name = 'Contoso.Bare'; condition = { $false } },
+            @{ name = 'Contoso.Yes'; condition = { $true } }
+        )
+
+        @($split.Applicable | ForEach-Object { $_.name }) | Should -Be @('Contoso.Yes')
+        $split.NotApplicable['Contoso.Described'] | Should -Be 'Contoso hardware only'
+        $split.NotApplicable['Contoso.Bare'] | Should -Be 'condition not met'
+    }
+
+    It 'Expects an app installed when its gate cannot answer (fail open, as in the run)' {
+        Mock Get-OSArchitecture { throw 'The OS architecture could not be read.' }
+
+        $split = Get-CatalogAppApplicability -Apps @(@{ name = 'Contoso.X64Only'; arch = 'X64' }, @{ name = 'Contoso.Throws'; condition = { throw 'CIM unavailable' } })
+
+        @($split.Applicable | ForEach-Object { $_.name }) | Should -Be @('Contoso.X64Only', 'Contoso.Throws')
+        $split.NotApplicable.Count | Should -Be 0
+        @($script:warnings).Count | Should -Be 2
+    }
+
+    It 'Splits the real catalog on <Architecture>: expects <Installed>, skip lines for <Skipped>' -ForEach @(
+        @{ Architecture = 'X64'; Installed = 'Adobe.Acrobat.Reader.64-bit'; Skipped = @('Adobe.Acrobat.Reader.32-bit', 'Dell.CommandUpdate.Universal') }
+        @{ Architecture = 'Arm64'; Installed = 'Adobe.Acrobat.Reader.32-bit'; Skipped = @('Adobe.Acrobat.Reader.64-bit', 'Dell.CommandUpdate.Universal') }
+    ) {
+        $script:mockedArchitecture = $Architecture
+        Mock Get-OSArchitecture { $script:mockedArchitecture }
+        $catalog = @(Get-DefaultAppCatalog)
+
+        $split = Get-CatalogAppApplicability -Apps $catalog
+
+        $applicableIds = @($split.Applicable | ForEach-Object { $_.name })
+        $applicableIds | Should -Contain $Installed
+        $applicableIds | Should -Contain 'Google.GoogleDrive'
+        @($split.NotApplicable.Keys) | Should -Be $Skipped
+        foreach ($id in $Skipped) {
+            $app = $catalog | Where-Object { $_.name -eq $id }
+            $split.NotApplicable[$id] | Should -Be $app.conditionDescription
+        }
+        ($applicableIds.Count + $split.NotApplicable.Count) | Should -Be $catalog.Count
+        $script:warnings | Should -BeNullOrEmpty
+    }
+
+    It 'Takes an empty list (every app skip-listed)' {
+        $split = Get-CatalogAppApplicability -Apps @()
+
+        @($split.Applicable).Count | Should -Be 0
+        $split.NotApplicable.Count | Should -Be 0
+    }
+}
+
 Describe 'Installer messages the transcript parser keys on' {
     # A reworded message would make the parser match nothing, and the e2e assertions would then
     # pass a failed run (for containment) or fail a good one. Each line below is copied from what
@@ -599,6 +674,17 @@ Describe 'e2e/Assert-Install.ps1 wiring' {
 
         $called | Should -Contain 'Get-TranscriptAssertionResult'
         $unresolved | Should -BeNullOrEmpty
+    }
+
+    It 'Decides applicability with the module''s rule, not a copy that reads only the condition' {
+        $definedHere = @($script:AssertInstallAst.FindAll({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true) | ForEach-Object Name)
+        $called = @($script:AssertInstallAst.FindAll({ param($node) $node -is [System.Management.Automation.Language.CommandAst] }, $true) |
+                ForEach-Object { $_.GetCommandName() } | Where-Object { $_ } | Sort-Object -Unique)
+        $conditionCalls = @($script:AssertInstallAst.FindAll({ param($node) $node -is [System.Management.Automation.Language.MemberExpressionAst] -and $node.Member.Extent.Text -eq 'condition' }, $true))
+
+        $called | Should -Contain 'Get-CatalogAppApplicability'
+        $definedHere | Should -Not -Contain 'Test-AppApplicable'
+        $conditionCalls | Should -BeNullOrEmpty
     }
 
     It 'Passes Get-TranscriptAssertionResult only parameters it declares' {

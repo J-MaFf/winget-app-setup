@@ -7,10 +7,11 @@
     this script on a snapshot-rollback Proxmox VM). It verifies the observable outcomes the unit
     suite can only mock:
 
-      1. Each catalog app's applicability condition (optional 'condition' scriptblock, issue
-         #217) is evaluated ON THIS MACHINE, with the same fail-open rule as the installer: a
-         condition that throws is warned about and the app is treated as applicable. Apps whose
-         condition is falsy (e.g. Dell.CommandUpdate.Universal on non-Dell hardware) are
+      1. Each catalog app's applicability (its 'arch' list and its 'condition' scriptblock, issue
+         #217) is decided ON THIS MACHINE by the installer's own rule, the module's
+         Test-AppApplicability, fail open included: a gate that cannot answer is warned about and
+         the app is treated as applicable. Apps that do not apply (e.g.
+         Dell.CommandUpdate.Universal on non-Dell hardware, or the 64-bit Reader on ARM64) are
          asserted differently below instead of being expected as installed.
       2. Every APPLICABLE app in Get-DefaultAppCatalog (minus -SkipApps) resolves via
          `winget list --exact --id <id>`, classified by $LASTEXITCODE captured immediately
@@ -103,12 +104,12 @@ $SkipApps = @($SkipApps | ForEach-Object { $_ -split ',' } | ForEach-Object { $_
 
 # Import the module from the checkout - same source of truth, no reimplementation drift. The
 # manifest exports every function (FunctionsToExport = '*', review finding P3-44), Private/ ones
-# included: Get-DefaultAppCatalog (the app list under test), Get-WauPin (the pinned WAU version),
-# Get-InstalledWauInfo, Test-WingetLaunchable and Test-WingetPackageInstalled all run as the
-# module's own code.
+# included: Get-DefaultAppCatalog (the app list under test), Test-AppApplicability (which apps
+# apply here), Get-WauPin (the pinned WAU version), Get-InstalledWauInfo, Test-WingetLaunchable and
+# Test-WingetPackageInstalled all run as the module's own code.
 $repoRoot = Split-Path -Parent $PSScriptRoot
 Import-Module (Join-Path $repoRoot 'WingetAppSetup\WingetAppSetup.psd1') -Force
-# Transcript parsing and the transcript assertions (sections 5-9).
+# Transcript parsing, the transcript assertions (sections 5-9) and the applicability split (1).
 . (Join-Path $PSScriptRoot 'TranscriptAssertions.ps1')
 
 $logDirectory = Join-Path $env:ProgramData 'winget-app-setup\logs'
@@ -135,33 +136,13 @@ foreach ($app in $skipped) {
     Write-Host "SKIPPED (per -SkipApps): $($app.name) - must be justified by a referenced issue at the call site." -ForegroundColor Yellow
 }
 
-# --- 1. Applicability: evaluate each app's catalog condition on THIS machine ----------------
-# Same fail-open rule as Install-AppWithVerification (issue #217): a throwing condition is
-# warned about and the app is treated as applicable, so a broken probe can never silently
-# drop an app from the assertions.
-function Test-AppApplicable {
-    param ([Parameter(Mandatory = $true)][hashtable]$App)
-    if (-not $App.condition) { return $true }
-    try {
-        return [bool](& $App.condition)
-    }
-    catch {
-        Write-Host "Condition for $($App.name) failed to evaluate ($($_.Exception.Message)); treating as applicable." -ForegroundColor Yellow
-        return $true
-    }
-}
-
-$appsToAssert = @()
-$notApplicableApps = @()
-foreach ($app in $candidateApps) {
-    if (Test-AppApplicable -App $app) {
-        $appsToAssert += $app
-    }
-    else {
-        $notApplicableApps += $app
-        $reason = if ($app.conditionDescription) { $app.conditionDescription } else { 'condition not met' }
-        Write-Host "NOT APPLICABLE on this machine: $($app.name) ($reason) - asserting its skip line instead of an install." -ForegroundColor Yellow
-    }
+# --- 1. Applicability: the installer's own rule, on THIS machine -----------------------------
+# Get-CatalogAppApplicability asks the module (Test-AppApplicability, Get-AppNotApplicableReason),
+# so an arch list counts as in the run and the expected skip reason is the one the run printed.
+$applicability = Get-CatalogAppApplicability -Apps $candidateApps
+$appsToAssert = @($applicability.Applicable)
+foreach ($id in $applicability.NotApplicable.Keys) {
+    Write-Host "NOT APPLICABLE on this machine: $id ($($applicability.NotApplicable[$id])) - asserting its skip line instead of an install." -ForegroundColor Yellow
 }
 
 # --- 2. Per-app: winget list resolves each applicable catalog app ---------------------------
@@ -289,14 +270,10 @@ else {
 # transcripts are left out, and the Windows PowerShell 5.1 bootstrap transcripts are kept apart
 # from the PowerShell 7 runs: the 5.1 parent writes its transcript last, so it would otherwise pass
 # for the latest run.
-$notApplicableReasons = [ordered]@{}
-foreach ($app in $notApplicableApps) {
-    $notApplicableReasons[$app.name] = if ($app.conditionDescription) { $app.conditionDescription } else { 'condition not met' }
-}
 $transcriptAssertionArgs = @{
     LogDirectory                = $logDirectory
     ExpectedAppIds              = @($appsToAssert | ForEach-Object { $_.name })
-    NotApplicableApps           = $notApplicableReasons
+    NotApplicableApps           = $applicability.NotApplicable
     SkipApps                    = $SkipApps
     ExpectAllSkippedOnSecondRun = $ExpectAllSkippedOnSecondRun
     ExpectPowerShell7Bootstrap  = $ExpectPowerShell7Bootstrap

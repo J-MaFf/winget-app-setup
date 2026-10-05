@@ -2,11 +2,12 @@
 .SYNOPSIS
     Reads installer transcripts and turns them into end-to-end assertion results.
 .DESCRIPTION
-    Dot-sourced by e2e/Assert-Install.ps1. Everything here reads files and text only and calls
-    nothing Windows-specific, so tests/E2EAssertions.Tests.ps1 checks it against the sample
-    transcripts in tests/fixtures/e2e on any OS (review finding P3-39: the parsing used to live
-    inline in Assert-Install.ps1 with no tests, and its failure regex missed the timeout lines and
-    the #279 bulk failure).
+    Dot-sourced by e2e/Assert-Install.ps1. Everything here reads files and text, or asks the
+    module's applicability rule (Get-CatalogAppApplicability), and calls nothing Windows-specific
+    itself, so tests/E2EAssertions.Tests.ps1 checks it against the sample transcripts in
+    tests/fixtures/e2e on any OS (review finding P3-39: the parsing used to live inline in
+    Assert-Install.ps1 with no tests, and its failure regex missed the timeout lines and the #279
+    bulk failure).
 
     The functions key on lines the installer writes with Write-Host, which a transcript records
     verbatim, one per line: Invoke-WingetInstall (WingetAppSetup/Public/Install.ps1), the entry
@@ -490,6 +491,43 @@ function New-TranscriptAssertionResult {
 
 <#
 .SYNOPSIS
+    Splits catalog apps into the ones the assertions expect installed and the ones whose
+    not-applicable skip line they expect, by the installer's own rule.
+.DESCRIPTION
+    Asks the module's Test-AppApplicability and Get-AppNotApplicableReason (Assert-Install.ps1
+    imports the module), so the arch list and the condition decide here as they did in the run,
+    and a gate that cannot answer leaves the app expected installed (fail open).
+.PARAMETER Apps
+    Catalog entries (Get-DefaultAppCatalog, less the skip-listed ones).
+.RETURNS
+    [pscustomobject] with Applicable (the entries expected installed, in catalog order) and
+    NotApplicable (an ordered dictionary of package id -> the reason its skip line gives).
+#>
+function Get-CatalogAppApplicability {
+    param (
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [hashtable[]]$Apps
+    )
+
+    $applicable = @()
+    $notApplicable = [ordered]@{}
+    foreach ($app in $Apps) {
+        if (Test-AppApplicability -App $app) {
+            $applicable += $app
+        }
+        else {
+            $notApplicable[$app.name] = Get-AppNotApplicableReason -App $app
+        }
+    }
+    return [pscustomobject]@{
+        Applicable    = $applicable
+        NotApplicable = $notApplicable
+    }
+}
+
+<#
+.SYNOPSIS
     Runs every assertion that reads the installer's transcripts.
 .DESCRIPTION
     The transcript half of e2e/Assert-Install.ps1 (the other half asks the machine: winget list
@@ -517,7 +555,8 @@ function New-TranscriptAssertionResult {
 .PARAMETER ExpectedAppIds
     The applicable, not skip-listed catalog apps (the idempotence assertions).
 .PARAMETER NotApplicableApps
-    Ordered dictionary of id -> reason for the apps whose catalog condition is false here.
+    Ordered dictionary of id -> reason for the apps that do not apply here
+    (Get-CatalogAppApplicability).
 .PARAMETER SkipApps
     Skip-listed package ids (containment).
 .PARAMETER ExpectAllSkippedOnSecondRun
