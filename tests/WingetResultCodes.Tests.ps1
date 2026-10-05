@@ -80,6 +80,9 @@ Describe 'Get-WingetExitCodeInfo' {
         # INSTALL_INSTALL_IN_PROGRESS", "0x80073D19 (ERROR_...)"), the symbol must be this table's
         # name, or winget's full APPINSTALLER_CLI_ERROR_ form of it. The generated installer is left
         # out: -Check keeps it equal to the module.
+        # Each file is read whole, so a pair that a line break splits, with the next line's comment
+        # leader and indentation between the two ("0x80073d19" at the end of one help line and
+        # "(ERROR_..." on the next, as in Install-WingetPackage's help), is checked too.
         $repoRoot = Split-Path -Parent $PSScriptRoot
         $files = @(
             foreach ($folder in 'WingetAppSetup', 'build', 'rmm', 'e2e', 'tests') {
@@ -91,23 +94,22 @@ Describe 'Get-WingetExitCodeInfo' {
             Get-ChildItem -LiteralPath $repoRoot -File |
                 Where-Object { ($_.Extension -in '.md', '.ps1') -and $_.Name -ne 'winget-app-install.ps1' }
         )
-        $pairPattern = '0x(?<hex>[0-9A-Fa-f]{8})[\s(`''"]{1,3}(?<symbol>[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+)\b'
+        $pairPattern = '0x(?<hex>[0-9A-Fa-f]{8})[\s(`''"#*>]{1,12}(?<symbol>[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+)\b'
 
         $checked = 0
         $mismatches = foreach ($file in $files) {
-            $lineNumber = 0
-            foreach ($line in [System.IO.File]::ReadAllLines($file.FullName)) {
-                $lineNumber++
-                foreach ($match in [regex]::Matches($line, $pairPattern)) {
-                    $info = Get-WingetExitCodeInfo -ExitCode ([Convert]::ToInt32($match.Groups['hex'].Value, 16))
-                    if (-not $info) {
-                        continue
-                    }
-                    $checked++
-                    $symbol = $match.Groups['symbol'].Value
-                    if ($symbol -cne $info.Name -and $symbol -cne ('APPINSTALLER_CLI_ERROR_' + $info.Name)) {
-                        '{0}:{1}: {2} {3} (the table says {4})' -f $file.FullName.Substring($repoRoot.Length + 1), $lineNumber, $info.Hex, $symbol, $info.Name
-                    }
+            $text = [System.IO.File]::ReadAllText($file.FullName)
+            foreach ($match in [regex]::Matches($text, $pairPattern)) {
+                $info = Get-WingetExitCodeInfo -ExitCode ([Convert]::ToInt32($match.Groups['hex'].Value, 16))
+                if (-not $info) {
+                    continue
+                }
+                $checked++
+                $symbol = $match.Groups['symbol'].Value
+                if ($symbol -cne $info.Name -and $symbol -cne ('APPINSTALLER_CLI_ERROR_' + $info.Name)) {
+                    # The line the code is on.
+                    $lineNumber = 1 + [regex]::Matches($text.Substring(0, $match.Index), "`n").Count
+                    '{0}:{1}: {2} {3} (the table says {4})' -f $file.FullName.Substring($repoRoot.Length + 1), $lineNumber, $info.Hex, $symbol, $info.Name
                 }
             }
         }

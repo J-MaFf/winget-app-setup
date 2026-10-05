@@ -227,9 +227,10 @@ Describe 'The time limits of runner preparation' {
         Get-RunnerPreparationWorstCase -PackageCount 3 -IncludePowerShell7 -ListTimeoutSeconds 45 -UninstallTimeoutSeconds 150 | Should -Be 1110
     }
 
-    It 'Fits the defaults into the timeout-minutes of the workflow step <Step>, with a minute to spare' -ForEach @(
-        @{ Step = 'Remove the catalog apps the runner image ships with'; IncludePowerShell7 = $false }
-        @{ Step = 'Remove the catalog apps the runner image ships with, and PowerShell 7'; IncludePowerShell7 = $true }
+    It 'Fits the defaults into the timeout-minutes of every workflow step <Step> (<Count>), with a minute to spare' -ForEach @(
+        # The PowerShell 7 leg and the SYSTEM leg have a step each with the first name.
+        @{ Step = 'Remove the catalog apps the runner image ships with'; IncludePowerShell7 = $false; Count = 2 }
+        @{ Step = 'Remove the catalog apps the runner image ships with, and PowerShell 7'; IncludePowerShell7 = $true; Count = 1 }
     ) {
         # Over the limit, the runner stops the step part-way, and a killed winget's uninstaller
         # can still be running when the first pass starts.
@@ -244,14 +245,23 @@ Describe 'The time limits of runner preparation' {
 
         $workflow = Get-Content -Raw -LiteralPath (Join-Path $script:RepoRoot '.github/workflows/e2e-install.yml')
         $stepPattern = '(?ms)^\s+- name: ' + [regex]::Escape($Step) + '\r?\n(?<body>.*?)(?=^\s+- name: |\z)'
-        $match = [regex]::Match($workflow, $stepPattern)
-        $match.Success | Should -BeTrue
-        $match.Groups['body'].Value | Should -Match 'Remove-PreinstalledApps\.ps1'
-        ($match.Groups['body'].Value -match '-IncludePowerShell7') | Should -Be $IncludePowerShell7
-        $limit = [regex]::Match($match.Groups['body'].Value, 'timeout-minutes: (?<minutes>\d+)')
-        $limit.Success | Should -BeTrue
-        $limitSeconds = 60 * [int]$limit.Groups['minutes'].Value
+        $steps = [regex]::Matches($workflow, $stepPattern)
+        $steps.Count | Should -Be $Count
+        foreach ($match in $steps) {
+            $match.Groups['body'].Value | Should -Match 'Remove-PreinstalledApps\.ps1'
+            ($match.Groups['body'].Value -match '-IncludePowerShell7') | Should -Be $IncludePowerShell7
+            $limit = [regex]::Match($match.Groups['body'].Value, 'timeout-minutes: (?<minutes>\d+)')
+            $limit.Success | Should -BeTrue
+            $limitSeconds = 60 * [int]$limit.Groups['minutes'].Value
 
-        $worstCase + 60 | Should -BeLessOrEqual $limitSeconds
+            $worstCase + 60 | Should -BeLessOrEqual $limitSeconds
+        }
+    }
+
+    It 'Is run only by the steps whose time limit the test above checks' {
+        # A step under another name would escape that check: 2 + 1 steps above.
+        $workflow = Get-Content -Raw -LiteralPath (Join-Path $script:RepoRoot '.github/workflows/e2e-install.yml')
+        $calls = [regex]::Matches($workflow, '(?m)^\s+&?\s*\.[\\/]e2e[\\/]Remove-PreinstalledApps\.ps1\b')
+        $calls.Count | Should -Be 3
     }
 }

@@ -378,9 +378,10 @@ fails, gets its one retry in the retry pass, and counts toward exit code 1, with
 
 Some steps still have no time limit of their own: the PowerShell cmdlets that set up winget
 (`Install-Module` for Microsoft.WinGet.Client, `Repair-WinGetPackageManager`, and
-`Add-AppxPackage` registering App Installer), and, on PowerShell 7.3 and older, the
-Winget-AutoUpdate MSI and Windows App Runtime downloads once the file has started to arrive.
-There is no time budget for the whole run either.
+`Add-AppxPackage` registering App Installer); the `Add-AppxProvisionedPackage` of the PowerShell
+MSIX fallback (PowerShell 7.7 and later, which ship no MSI, on Windows builds before 26100);
+and, on PowerShell 7.3 and older, the Winget-AutoUpdate MSI and Windows App Runtime downloads
+once the file has started to arrive. There is no time budget for the whole run either.
 
 **Environment checks.** Before it changes anything, the installer looks for what would make the run
 fail whatever it did, and prints one line for each problem it finds. These checks only read, so
@@ -1303,14 +1304,15 @@ throwaway VMs by construction:
   starts every pass from PowerShell 7. `e2e-install-windows-powershell` starts every pass from
   Windows PowerShell 5.1, the way a fresh PC runs the one-liner. It removes PowerShell 7 first, so
   its first pass goes through the bootstrap that installs PowerShell 7 and relaunches the
-  installer, and its second pass finds PowerShell 7 and relaunches. Before the first pass, both
-  legs uninstall the catalog apps the runner image ships with (Google Chrome, 7-Zip and Git;
-  `e2e/Remove-PreinstalledApps.ps1`), so the first pass really installs them. Every call there has
-  a time limit (`winget list` 45 s, uninstall 150 s), each app's result prints as soon as it is
-  done, and an app that cannot be removed gets a warning annotation and is skipped by the first
-  pass as already installed.
+  installer, and its second pass finds PowerShell 7 and relaunches. Before the first pass, every
+  leg, the SYSTEM leg below included, uninstalls the catalog apps the runner image ships with
+  (Google Chrome, 7-Zip and Git; `e2e/Remove-PreinstalledApps.ps1`), so the first pass really
+  installs them. Every call there has a time limit (`winget list` 45 s, uninstall 150 s), each
+  app's result prints as soon as it is done, and an app that cannot be removed gets a warning
+  annotation and is skipped by the first pass as already installed.
 - **The SYSTEM leg:** `e2e-install-system`, on a third VM, runs one pass the way Endpoint Central
-  does. A one-shot scheduled task runs as SYSTEM and starts `rmm/Invoke-WingetAppSetup.ps1` with
+  does, after the same removal of the preinstalled catalog apps. A one-shot scheduled task runs as
+  SYSTEM and starts `rmm/Invoke-WingetAppSetup.ps1` with
   the 32-bit `%SystemRoot%\SysWOW64\WindowsPowerShell\v1.0\powershell.exe`, so the machine phase
   has to relaunch itself through Sysnative. It runs the checkout's installer (`-InstallerPath`,
   still SHA256-checked), never its pinned commit, on every trigger, the weekly run included.

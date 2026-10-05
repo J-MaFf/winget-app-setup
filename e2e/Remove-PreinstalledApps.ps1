@@ -5,9 +5,10 @@
 .DESCRIPTION
     Review finding P3-40: windows-latest already has Google Chrome, 7-Zip and Git, so every first
     pass logged 'Skipping: <id> (already installed)' for them and their install paths never ran.
-    .github/workflows/e2e-install.yml runs this before the first pass in both legs. With
-    -IncludePowerShell7 (the Windows PowerShell 5.1 leg) it also removes PowerShell 7, so the
-    first pass starts from what a fresh box has and the bootstrap has to install it.
+    .github/workflows/e2e-install.yml runs this before the first pass in every leg (PowerShell 7,
+    Windows PowerShell 5.1 and SYSTEM). With -IncludePowerShell7 (the Windows PowerShell 5.1 leg)
+    it also removes PowerShell 7, so the first pass starts from what a fresh box has and the
+    bootstrap has to install it.
 
     Tolerant: an app that is not installed is fine, and an app that cannot be removed is reported
     as a GitHub warning annotation and left in place (the pass then skips it, as before), so
@@ -16,9 +17,10 @@
 
     Every winget and msiexec call is bounded, and the limits add up to less than the step's
     timeout-minutes (Get-RunnerPreparationWorstCase; tests/E2EPreinstalledApps.Tests.ps1 checks
-    both steps in .github/workflows/e2e-install.yml): with the defaults an app costs at most
-    45 + 150 + 45 s = 4 min (winget list, uninstall, list again), so 12 min for the three apps,
-    and PowerShell 7 at most 150 s (its MSI) + 4 min (the winget fallback), 18.5 min in all.
+    every step in .github/workflows/e2e-install.yml that runs this): with the defaults an app
+    costs at most 45 + 150 + 45 s = 4 min (winget list, uninstall, list again), so 12 min for the
+    three apps, and PowerShell 7 at most 150 s (its MSI) + 4 min (the winget fallback), 18.5 min
+    in all.
 
     The catalog apps are checked the way the installer checks them, with
     'winget list --id <id> --exact': absent there means the first pass installs it. PowerShell 7 is
