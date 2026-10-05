@@ -50,7 +50,8 @@
     Set by the script itself when it runs itself again in 64-bit Windows PowerShell.
 .NOTES
     Exit codes: 0 when no at-logon trigger is left and none will come back (also when WAU is not
-    installed, and for -WhatIf), 1 otherwise (the REPAIR line's problems say why).
+    installed), and with -WhatIf when the fix would succeed; 1 otherwise, not-elevated and
+    repair-error included, with -WhatIf too (the REPAIR line's problems say why).
     Runs under Windows PowerShell 5.1: ASCII only, no PowerShell-7-only syntax.
 #>
 [CmdletBinding(SupportsShouldProcess = $true)]
@@ -342,7 +343,12 @@ function Invoke-RmmRelaunchWhenNeeded {
     if ([string]::IsNullOrWhiteSpace($ScriptPath)) {
         return (New-RmmFailureResult -Message 'This is a 32-bit PowerShell on 64-bit Windows, or PowerShell 7, and the script cannot run itself again in 64-bit Windows PowerShell because it was not started from a file: run it with -File.' -ResultPrefix $ResultPrefix -FailureStatus $FailureStatus -FailureProblem $FailureProblem)
     }
-    $arguments = @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $ScriptPath) + @($ForwardedArguments) + @('-Relaunched')
+    # A script started without parameters forwards none: ConvertTo-RmmForwardedArgument's empty
+    # array reaches here as $null, and @($null) would add one empty argument. Windows PowerShell
+    # drops an empty argument to a program; PowerShell 7.3 and later pass it on as "", and the
+    # relaunched script binds that as a positional argument and stops with an error.
+    $forwarded = @($ForwardedArguments | Where-Object { -not [string]::IsNullOrEmpty($_) })
+    $arguments = @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $ScriptPath) + $forwarded + @('-Relaunched')
     $relaunch = Invoke-RmmNativeRelaunch -FilePath $relaunchPath -ArgumentList $arguments
     if ($relaunch.LaunchError) {
         return (New-RmmFailureResult -Message "Could not run this script again in 64-bit Windows PowerShell ($relaunchPath): $($relaunch.LaunchError)" -ResultPrefix $ResultPrefix -FailureStatus $FailureStatus -FailureProblem $FailureProblem)

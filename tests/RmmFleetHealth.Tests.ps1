@@ -167,6 +167,40 @@ Describe 'The fleet health scripts: Windows PowerShell 5.1, one file each, share
             }
         }
 
+        It 'Adds no empty argument when the script was started without parameters' {
+            # The scripts' own call: ConvertTo-RmmForwardedArgument's empty result arrives as $null.
+            # An empty argument is one PowerShell 7.3 and later pass on to powershell.exe as "".
+            Mock Get-RmmNativePowerShellRelaunchPath { 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe' }
+            Mock Invoke-RmmNativeRelaunch { [pscustomobject]@{ Lines = @('HEALTH: status=healthy problems=none'); ExitCode = 0; LaunchError = $null } }
+
+            $null = Invoke-RmmRelaunchWhenNeeded -ScriptPath 'C:\probe.ps1' -ForwardedArguments (ConvertTo-RmmForwardedArgument -BoundParameters @{}) -ResultPrefix 'HEALTH' -FailureStatus 'unhealthy' -FailureProblem 'probe-error'
+            $null = Invoke-RmmRelaunchWhenNeeded -ScriptPath 'C:\probe.ps1' -ForwardedArguments $null -ResultPrefix 'HEALTH' -FailureStatus 'unhealthy' -FailureProblem 'probe-error'
+
+            Should -Invoke Invoke-RmmNativeRelaunch -Times 2 -Exactly
+            Should -Invoke Invoke-RmmNativeRelaunch -Times 2 -Exactly -ParameterFilter {
+                @($ArgumentList).Count -eq 7 -and ($ArgumentList -join ' ') -eq '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File C:\probe.ps1 -Relaunched'
+            }
+        }
+
+        It 'Runs <Script> again, started from PowerShell 7 without parameters, with arguments it accepts' -ForEach @(
+            @{ Script = 'rmm/Get-WingetFleetHealth.ps1'; Prefix = 'HEALTH' }
+            @{ Script = 'rmm/Repair-WauLogonTrigger.ps1'; Prefix = 'REPAIR' }
+        ) {
+            # A stand-in with the script's own parameters, started by this PowerShell 7 the way the
+            # relaunch starts powershell.exe: an argument it cannot bind stops it before its result
+            # line. The relaunch helper is the same in both scripts (tested above).
+            $ast = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $script:RepoRoot $Script), [ref]$null, [ref]$null)
+            $paramBlock = (@($ast.ParamBlock.Attributes | ForEach-Object { $_.Extent.Text }) + @($ast.ParamBlock.Extent.Text)) -join "`n"
+            $standIn = Join-Path $TestDrive ([guid]::NewGuid().ToString('N') + '.ps1')
+            Set-Content -LiteralPath $standIn -Value @($paramBlock, ('Write-Output ("' + $Prefix + ': status=ok relaunched=" + [bool]$Relaunched)'), 'exit 0')
+            Mock Get-RmmNativePowerShellRelaunchPath { $script:Pwsh }
+
+            $result = Invoke-RmmRelaunchWhenNeeded -ScriptPath $standIn -ForwardedArguments (ConvertTo-RmmForwardedArgument -BoundParameters @{}) -ResultPrefix $Prefix -FailureStatus 'failed' -FailureProblem 'relaunch-error'
+
+            $result.ExitCode | Should -Be 0 -Because ($result.Lines -join ' | ')
+            $result.Lines[-1] | Should -BeExactly "${Prefix}: status=ok relaunched=True"
+        }
+
         It 'Returns nothing when no relaunch is needed' {
             Mock Get-RmmNativePowerShellRelaunchPath { $null }
             Mock Invoke-RmmNativeRelaunch { throw 'must not run' }
@@ -226,6 +260,7 @@ Describe 'rmm/Get-WingetFleetHealth.ps1: the probe' {
         $script:taskTriggers = @(New-TestTaskTrigger -ClassName 'MSFT_TaskWeeklyTrigger' -DaysOfWeek 4 -StartBoundary '2026-10-06T02:00:00')
 
         Mock Test-RmmElevated { $true }
+        Mock Test-RmmSystemAccount { $true }
         Mock Get-RmmOSArchitecture { 'X64' }
         Mock Get-RmmWindowsAppsDirectory { $script:windowsApps }
         Mock Get-AppxPackage { }
@@ -347,6 +382,32 @@ Describe 'rmm/Get-WingetFleetHealth.ps1: the probe' {
         $lines.Count | Should -Be 2
         $lines[0] | Should -BeLike '*1.29.380.0*could not be started*'
         $lines[1] | Should -BeLike '*1.26.510.0*printed v1.29.380*'
+    }
+
+    It 'Starts no winget.exe when it does not run as SYSTEM, and does not count that against the PC' {
+        # An administrator's start of the machine-wide winget.exe is not SYSTEM's, and Windows can
+        # refuse it ('Access is denied') on a healthy PC.
+        Mock Test-RmmSystemAccount { $false }
+
+        $result = Invoke-RmmFleetHealthProbe
+
+        $result.ExitCode | Should -Be 0
+        $result.Problems | Should -BeNullOrEmpty
+        $result.Lines[-1] | Should -BeLike 'HEALTH: status=healthy problems=none * winget=skipped wingetversion=- *'
+        $wingetLines = @($result.Lines | Where-Object { $_ -like 'winget: *' })
+        $wingetLines.Count | Should -Be 1
+        $wingetLines[0] | Should -BeLike ('winget: {0} (App Installer 1.29.380.0, x64) was not started: this probe runs as *, not SYSTEM, *Run the probe as SYSTEM (Endpoint Central, or psexec -s) to check it.' -f (Join-Path $script:newestFolder 'winget.exe'))
+        Should -Invoke Invoke-RmmTimedProcess -Times 0 -Exactly
+    }
+
+    It 'Still says when there is no machine-wide winget.exe when it does not run as SYSTEM' {
+        Mock Test-RmmSystemAccount { $false }
+        $script:appInstallerPackages = @()
+
+        $result = Invoke-RmmFleetHealthProbe
+
+        $result.Problems | Should -Be @('winget-notfound')
+        $result.Lines[-1] | Should -BeLike '* winget=notfound wingetversion=- *'
     }
 
     It 'Is unhealthy when there is no machine-wide winget.exe' {

@@ -13,7 +13,7 @@
     It writes one line per check and ends with one machine-parsable line:
 
       HEALTH: status=<healthy|unhealthy> problems=<codes|none> computer=<name> appinstaller=<version>
-              runtime=<present|missing|unknown> winget=<ok|fallback|failed|timedout|notfound>
+              runtime=<present|missing|unknown> winget=<ok|fallback|failed|timedout|notfound|skipped>
               wingetversion=<version> wau=<version|installed|none> wautask=<state|missing|unknown|->
               wauresult=<0xHEX|-> logontrigger=<yes|no|-> wauwingetinstalls=<count|->
 
@@ -28,7 +28,9 @@
         this PC's architecture first, else the newest under %ProgramFiles%\WindowsApps) prints its
         version within a time limit. When it does not, the next ones are tried too, so the output
         says whether an older one still runs. As SYSTEM winget runs only by this full path, and
-        WAU's SYSTEM run uses the newest one.
+        WAU's SYSTEM run uses the newest one. Only a run as SYSTEM checks this: run by an
+        administrator, the probe starts no winget.exe and reports winget=skipped, because that
+        start would not be SYSTEM's and Windows can refuse it ('Access is denied') on a healthy PC.
       - Winget-AutoUpdate: whether it is installed (its MSI's uninstall entry or its settings key),
         its WAU_UpdatesAtLogon setting and Group Policy, and its \WAU\Winget-AutoUpdate task: state,
         triggers, last run and result, next run.
@@ -37,7 +39,8 @@
         winget output that follows it, and errors and failures.
 
     Unhealthy (exit code 1) when any of these holds:
-      not-elevated         the probe could not read the machine: run it as SYSTEM or elevated.
+      not-elevated         the probe could not read the machine: run it as SYSTEM or elevated
+                           (SYSTEM for the winget check).
       winget-notfound      no machine-wide winget.exe exists.
       winget-launch        the newest machine-wide winget.exe did not print its version in time
                            (status 'fallback' when an older one still did).
@@ -372,7 +375,12 @@ function Invoke-RmmRelaunchWhenNeeded {
     if ([string]::IsNullOrWhiteSpace($ScriptPath)) {
         return (New-RmmFailureResult -Message 'This is a 32-bit PowerShell on 64-bit Windows, or PowerShell 7, and the script cannot run itself again in 64-bit Windows PowerShell because it was not started from a file: run it with -File.' -ResultPrefix $ResultPrefix -FailureStatus $FailureStatus -FailureProblem $FailureProblem)
     }
-    $arguments = @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $ScriptPath) + @($ForwardedArguments) + @('-Relaunched')
+    # A script started without parameters forwards none: ConvertTo-RmmForwardedArgument's empty
+    # array reaches here as $null, and @($null) would add one empty argument. Windows PowerShell
+    # drops an empty argument to a program; PowerShell 7.3 and later pass it on as "", and the
+    # relaunched script binds that as a positional argument and stops with an error.
+    $forwarded = @($ForwardedArguments | Where-Object { -not [string]::IsNullOrEmpty($_) })
+    $arguments = @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $ScriptPath) + $forwarded + @('-Relaunched')
     $relaunch = Invoke-RmmNativeRelaunch -FilePath $relaunchPath -ArgumentList $arguments
     if ($relaunch.LaunchError) {
         return (New-RmmFailureResult -Message "Could not run this script again in 64-bit Windows PowerShell ($relaunchPath): $($relaunch.LaunchError)" -ResultPrefix $ResultPrefix -FailureStatus $FailureStatus -FailureProblem $FailureProblem)
@@ -389,6 +397,20 @@ function Invoke-RmmRelaunchWhenNeeded {
 }
 
 # ---- The probe ------------------------------------------------------------------------------------
+
+<#
+.SYNOPSIS
+    Returns whether this process runs as SYSTEM (LocalSystem, S-1-5-18).
+#>
+function Test-RmmSystemAccount {
+    try {
+        $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+        return ([bool]$identity.IsSystem -or "$($identity.User.Value)" -eq 'S-1-5-18')
+    }
+    catch {
+        return $false
+    }
+}
 
 <#
 .SYNOPSIS
@@ -1305,7 +1327,21 @@ function Invoke-RmmFleetHealthProbe {
 
     # winget.
     $candidates = @(Get-RmmWingetCandidate -AppInstaller $appInstaller -OSArchitecture $osArchitecture)
-    $winget = Test-RmmWingetLaunch -Candidate $candidates -TimeoutSeconds $WingetTimeoutSeconds
+    if ($candidates.Count -gt 0 -and -not (Test-RmmSystemAccount)) {
+        # The installer as SYSTEM and WAU start the machine-wide winget.exe by its path as SYSTEM.
+        # Another account's start of it says nothing about theirs, and Windows can refuse it
+        # ('Access is denied') on a healthy PC, so only a run as SYSTEM checks it.
+        $first = $candidates[0]
+        $winget = [pscustomobject]@{
+            State   = 'skipped'
+            Version = $null
+            Path    = $first.Path
+            Lines   = @(('winget: {0} (App Installer {1}, {2}) was not started: this probe runs as {3}, not SYSTEM, and only a run as SYSTEM checks the machine-wide winget.exe the way the installer as SYSTEM and Winget-AutoUpdate start it. Run the probe as SYSTEM (Endpoint Central, or psexec -s) to check it.' -f $first.Path, $first.Version, $first.Architecture, (Get-RmmAccountName)))
+        }
+    }
+    else {
+        $winget = Test-RmmWingetLaunch -Candidate $candidates -TimeoutSeconds $WingetTimeoutSeconds
+    }
     foreach ($line in @($winget.Lines)) {
         $lines.Add($line)
     }
@@ -1313,7 +1349,7 @@ function Invoke-RmmFleetHealthProbe {
         $problems.Add('winget-notfound')
         $reasons.Add('no machine-wide winget.exe was found')
     }
-    elseif ($winget.State -ne 'ok') {
+    elseif ($winget.State -ne 'ok' -and $winget.State -ne 'skipped') {
         $problems.Add('winget-launch')
         if ($winget.State -eq 'fallback') {
             $reasons.Add("the newest machine-wide winget.exe does not run; an older one does ($($winget.Path)), which the installer as SYSTEM falls back to and Winget-AutoUpdate does not")
