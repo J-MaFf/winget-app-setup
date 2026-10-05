@@ -1,6 +1,6 @@
 # AppCatalog.Tests.ps1
 # Tests for WingetAppSetup/Public/AppCatalog.ps1: the curated Get-DefaultAppCatalog list
-# and its consistent consumption by the generated installer and the uninstaller.
+# and its consistent consumption by the generated installer and uninstaller.
 # Split from the old single-file suite Test-WingetAppInstall.Tests.ps1 (issue #192).
 
 # Load the module's functions once for this file. TestHelpers.ps1 resolves the repo paths
@@ -12,9 +12,10 @@ BeforeAll {
 
 Describe 'App list consistency (issue #190)' {
     # The old form of this test parsed the duplicated inline lists in winget-app-install.ps1 and
-    # winget-app-uninstall.ps1 and compared them. Both scripts now consume Get-DefaultAppCatalog,
-    # so sync is structural; what remains worth guarding is (a) the generated installer actually
-    # carries the module's catalog and (b) the uninstaller never regrows an inline copy.
+    # winget-app-uninstall.ps1 and compared them. Both scripts are now generated from the module and
+    # consume Get-DefaultAppCatalog, so sync is structural; what remains worth guarding is (a) the
+    # generated scripts actually carry the module's catalog and (b) the uninstaller's entry block
+    # never regrows an inline copy.
     It 'Ships the module catalog inside the generated installer' {
         $installApps = Get-Content $script:InstallerScriptPath |
         ForEach-Object {
@@ -26,47 +27,62 @@ Describe 'App list consistency (issue #190)' {
         $installApps | Should -Be $catalogNames
     }
 
+    It 'Ships the module catalog inside the generated uninstaller too' {
+        # winget-app-uninstall.ps1 is generated from the module as the installer is (wgt-gq8.43), so
+        # it carries the same Get-DefaultAppCatalog.
+        $uninstallApps = Get-Content $script:UninstallerScriptPath |
+        ForEach-Object {
+            if ($_ -match "@{name = '([^']+)'") { $matches[1] }
+        } |
+        Where-Object { $_ }
+
+        $catalogNames = @(Get-DefaultAppCatalog) | ForEach-Object { $_.name }
+        $uninstallApps | Should -Be $catalogNames
+    }
+
     It 'Uninstaller removes the Get-DefaultAppCatalog apps instead of an inline copy of the list' {
-        # The script runs Invoke-WingetUninstall (review findings P2-19, P3-18), whose -Apps defaults
-        # to the module catalog, as Invoke-WingetInstall's does.
-        $uninstallScript = Get-Content $script:UninstallerScriptPath -Raw
-        $uninstallScript | Should -Match '(?m)Invoke-WingetUninstall -WhatIf:\$WhatIf\s*$'
+        # Its entry block runs Invoke-WingetUninstall (review findings P2-19, P3-18), whose -Apps
+        # defaults to the module catalog, as Invoke-WingetInstall's does.
+        $entryBlock = Get-Content (Join-Path $script:RepoRoot 'build/fragments/uninstall-tail.ps1') -Raw
+        $entryBlock | Should -Match '(?m)Invoke-WingetUninstall -WhatIf:\$WhatIf\s*$'
         $appsParameter = ${function:Invoke-WingetUninstall}.Ast.Body.ParamBlock.Parameters | Where-Object { $_.Name.VariablePath.UserPath -eq 'Apps' }
         $appsParameter.DefaultValue.Extent.Text | Should -Be '(Get-DefaultAppCatalog)'
         # The previously duplicated inline list (which had already drifted in metadata) is gone.
-        $uninstallScript | Should -Not -Match "@\{name = '"
+        $entryBlock | Should -Not -Match "@\{name = '"
     }
 
     It 'Uninstaller reuses the module installed-check, process and elevation helpers (issue #190)' {
-        $uninstallScript = Get-Content $script:UninstallerScriptPath -Raw
-        # Relaunched in place: the uninstaller imports the module from its own folder (its relaunch
-        # is tested in Elevation.Tests.ps1 and Uninstall.Tests.ps1).
-        $uninstallScript | Should -Match 'Restart-WithElevation -ScriptPath \$PSCommandPath -InPlace'
-        $uninstallScript | Should -Not -Match 'Start-Process powershell\.exe'
+        $entryBlock = Get-Content (Join-Path $script:RepoRoot 'build/fragments/uninstall-tail.ps1') -Raw
+        # Relaunched as a checked copy, as the installer is (wgt-gq8.43; its relaunch is tested in
+        # Uninstall.Tests.ps1 and EntryPoint.Tests.ps1).
+        $entryBlock | Should -Match 'Restart-WithElevation -ScriptPath \$PSCommandPath -ExpectedSha256 \$uninstallerSha256 -NonInteractive:\$NonInteractive'
+        $entryBlock | Should -Not -Match 'Start-Process powershell\.exe|Import-Module'
         $appStep = ${function:Uninstall-CatalogApp}.ToString()
         $appStep | Should -Match 'Test-WingetPackageInstalled -PackageId'
         $appStep | Should -Match 'Invoke-WingetProcess -ArgumentList'
-        # No bare winget call anywhere on the uninstall path (review finding P3-18): it had no time
-        # limit and its output never reached the log.
+        # No bare winget call anywhere in the uninstaller (review finding P3-18): it had no time limit
+        # and its output never reached the log.
         foreach ($ast in @([System.Management.Automation.Language.Parser]::ParseFile($script:UninstallerScriptPath, [ref]$null, [ref]$null), ${function:Invoke-WingetUninstall}.Ast, ${function:Uninstall-CatalogApp}.Ast)) {
             $bareWinget = $ast.FindAll({ param($node) $node -is [System.Management.Automation.Language.CommandAst] -and $node.GetCommandName() -eq 'winget' }, $true)
             @($bareWinget).Count | Should -Be 0
         }
     }
 
-    It 'Gets every module function the uninstaller calls from its manifest import' {
-        # winget-app-uninstall.ps1 imports the module via the psd1, so a function the import does
-        # not export fails at the user's prompt while dot-sourcing tests stay green (#191).
-        $exported = @(Get-ManifestExportedFunctionName)
+    It 'Defines in the generated uninstaller every module function its entry block calls' {
+        # Nothing is imported from beside it any more (wgt-gq8.43): a function the entry block calls
+        # must be in the file itself. The build's reference guard checks every call; this pins the
+        # ones the entry block makes.
         $scriptAst = [System.Management.Automation.Language.Parser]::ParseFile($script:UninstallerScriptPath, [ref]$null, [ref]$null)
-        $calledFunctions = @($scriptAst.FindAll({ param($node) $node -is [System.Management.Automation.Language.CommandAst] }, $true) |
+        $defined = @($scriptAst.FindAll({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $false) | ForEach-Object { $_.Name })
+        $entryAst = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $script:RepoRoot 'build/fragments/uninstall-tail.ps1'), [ref]$null, [ref]$null)
+        $calledFunctions = @($entryAst.FindAll({ param($node) $node -is [System.Management.Automation.Language.CommandAst] }, $true) |
                 ForEach-Object { $_.GetCommandName() } |
                 Where-Object { $_ -and (Get-Command -Name $_ -CommandType Function -ErrorAction SilentlyContinue) } |
                 Sort-Object -Unique)
         $calledFunctions | Should -Contain 'Invoke-WingetUninstall'
         $calledFunctions | Should -Contain 'Restart-WithElevation'
         foreach ($helper in $calledFunctions) {
-            $exported | Should -Contain $helper
+            $defined | Should -Contain $helper
         }
     }
 }

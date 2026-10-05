@@ -32,7 +32,8 @@
     started for this account, or Group Policy turns it off, so nothing was removed; 3 = the app list
     has invalid entries or is empty. 1 ranks above 3010. A dry run returns 0 when winget cannot be
     started, and never 3010. winget-app-uninstall.ps1 adds 4 (not elevated, and the UAC prompt was
-    declined or could not be shown) and 5 (an unexpected error, or the module could not be loaded).
+    declined or could not be shown) and 5 (an unexpected error, a run without a script file, or a
+    file that changed before its elevated run).
 #>
 function Invoke-WingetUninstall {
     [OutputType([int])]

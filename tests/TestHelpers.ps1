@@ -87,9 +87,9 @@ foreach ($commandName in $script:WindowsOnlyCommandNames) {
     $script:WindowsOnlyCommandStandIns += $commandName
 }
 
-# The functions a manifest import of the module exports, which is how winget-app-uninstall.ps1 and
-# e2e/Assert-Install.ps1 load it (review finding P3-44). Imported in a runspace of its own, so the
-# test file's own definitions and mocks are left alone.
+# The functions a manifest import of the module exports, which is how e2e/Assert-Install.ps1 loads
+# it (review finding P3-44). Imported in a runspace of its own, so the test file's own definitions
+# and mocks are left alone.
 function Get-ManifestExportedFunctionName {
     $powerShell = [powershell]::Create()
     try {
@@ -103,6 +103,62 @@ function Get-ManifestExportedFunctionName {
     finally {
         $powerShell.Dispose()
     }
+}
+
+# A copy of the generated winget-app-uninstall.ps1 at -Path, with -Overrides inserted just before its
+# entry block: defined after the module's functions, they replace those of the same name, while the
+# real entry block runs unchanged (EntryPoint.Tests.ps1 does the same for the installer). Never
+# dot-source the result (tests/TestHarness.Tests.ps1): run it in a child process.
+function New-TestUninstallerScript {
+    param (
+        [Parameter(Mandatory = $true)][string]$Path,
+        [string]$Overrides = ''
+    )
+
+    $text = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:UninstallerScriptPath
+    $entry = [regex]::Match($text, '(?m)^# -+Main Script-+\r?$')
+    if (-not $entry.Success) {
+        throw "$($script:UninstallerScriptPath) has no Main Script marker; regenerate it with build/Build-WingetInstallScript.ps1."
+    }
+    [void](New-Item -ItemType Directory -Path (Split-Path -Parent $Path) -Force)
+    Set-Content -LiteralPath $Path -Value $text.Insert($entry.Index, "$Overrides`n") -Encoding UTF8
+    return $Path
+}
+
+# Runs New-TestUninstallerScript's copy (under -Root, as winget-app-uninstall.ps1) in a child
+# PowerShell, so its exit ends the child, not the test run: with -File, or with -ViaInvokeExpression
+# the way irm | iex runs it (no script file), followed by -AfterInvokeExpression.
+function Invoke-TestUninstallerScript {
+    param (
+        [Parameter(Mandatory = $true)][string]$Root,
+        [string]$Overrides = '',
+        [string[]]$ScriptArguments = @(),
+        [hashtable]$Environment = @{},
+        [switch]$ViaInvokeExpression,
+        [string]$AfterInvokeExpression = ''
+    )
+
+    $scriptPath = New-TestUninstallerScript -Path (Join-Path $Root 'winget-app-uninstall.ps1') -Overrides $Overrides
+    $arguments = @('-File', $scriptPath) + $ScriptArguments
+    if ($ViaInvokeExpression) {
+        $arguments = @('-Command', ("Get-Content -Raw -LiteralPath '{0}' | Invoke-Expression; {1}" -f $scriptPath.Replace("'", "''"), $AfterInvokeExpression))
+    }
+
+    $saved = @{}
+    foreach ($name in $Environment.Keys) {
+        $saved[$name] = [System.Environment]::GetEnvironmentVariable($name)
+        [System.Environment]::SetEnvironmentVariable($name, $Environment[$name])
+    }
+    try {
+        $output = & (Get-Process -Id $PID).Path -NoLogo -NoProfile -NonInteractive @arguments 2>&1 | Out-String
+        $exitCode = $LASTEXITCODE
+    }
+    finally {
+        foreach ($name in $saved.Keys) {
+            [System.Environment]::SetEnvironmentVariable($name, $saved[$name])
+        }
+    }
+    return [pscustomobject]@{ ExitCode = $exitCode; Output = $output; Path = $scriptPath }
 }
 
 # Test doubles for the process helpers (WingetAppSetup/Private/ProcessInvocation.ps1, review

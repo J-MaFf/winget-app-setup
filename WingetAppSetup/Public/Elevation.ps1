@@ -1,6 +1,6 @@
-# Public (exported) elevation helpers. The rest of the elevation detection helpers live in
-# Private/Elevation.ps1; these are exported (issue #190) so winget-app-uninstall.ps1 can reuse
-# them instead of hand-rolling its own admin check / Start-Process relaunch.
+# The elevation helpers the entry blocks call: the installer and the uninstaller share them
+# instead of each hand-rolling its own admin check and relaunch (issue #190). The rest live in
+# Private/Elevation.ps1.
 
 <#
 .SYNOPSIS
@@ -32,19 +32,18 @@ function Test-IsAdmin {
     exit code.
 .DESCRIPTION
     Starts System32's powershell.exe (Get-WindowsPowerShellPath), which every account has, after the
-    UAC prompt; the installer's 5.1 dispatch then finds or installs PowerShell 7 as the elevating
-    account in the same window (review finding P2-11). Waiting for it lets the run that asked
-    report what the elevated run did.
+    UAC prompt (review finding P2-11): the installer's 5.1 dispatch then finds or installs
+    PowerShell 7 as the elevating account in the same window, and the uninstaller runs there as it
+    is. Waiting for it lets the run that asked report what the elevated run did.
 
-    By default the elevated process does not run ScriptPath itself (review finding P3-11). This
-    function reads the file once, checks it against -ExpectedSha256 and stages the bytes in this
-    account's %TEMP%, which the elevating account can read even when it cannot see ScriptPath (a
-    mapped drive, a share). The elevated process checks the staged file against the hash, copies it
-    into a folder only administrators can change and runs the copy (New-ElevationVerifierCommand),
-    so a file rewritten while the UAC prompt is up is not run. The staged copy is removed once the
-    elevated run ends. -InPlace runs ScriptPath itself, unchecked, for a script that needs the files
-    beside it (the uninstaller imports the module from its folder): a file in a folder the signed-in
-    user can write to is then exposed while the UAC prompt is up.
+    The elevated process never runs ScriptPath itself (review finding P3-11), so ScriptPath must be
+    a self-contained script: the generated installer or uninstaller. This function reads the file
+    once, checks it against -ExpectedSha256 and stages the bytes in this account's %TEMP%, which the
+    elevating account can read even when it cannot see ScriptPath (a mapped drive, a share). The
+    elevated process checks the staged file against the hash, copies it into a folder only
+    administrators can change and runs the copy (New-ElevationVerifierCommand), so a file rewritten
+    while the UAC prompt is up is not run. Each run stages and copies into folders of its own, under
+    the file's own name. The staged copy is removed once the elevated run ends.
 
     Never shows a UAC prompt when nobody is at the console (Test-EffectiveNonInteractive), and asks
     once: a declined prompt (1223, ERROR_CANCELLED) is reported, not asked again. Never asks either
@@ -60,8 +59,6 @@ function Test-IsAdmin {
 .PARAMETER ExpectedSha256
     The script's SHA256 when this run started; nothing is started when the file no longer has it.
     Empty: the hash is taken now.
-.PARAMETER InPlace
-    Run ScriptPath itself, unchecked, instead of a checked copy.
 .PARAMETER NonInteractive
     The caller's -NonInteractive switch.
 .OUTPUTS
@@ -83,9 +80,6 @@ function Restart-WithElevation {
 
         [Parameter(Mandatory = $false)]
         [string]$ExpectedSha256,
-
-        [Parameter(Mandatory = $false)]
-        [switch]$InPlace,
 
         [Parameter(Mandatory = $false)]
         [switch]$NonInteractive
@@ -110,58 +104,48 @@ function Restart-WithElevation {
     }
 
     $powerShellPath = Get-WindowsPowerShellPath
+    # Read once: the hash and the staged copy below are both of these bytes.
+    try {
+        $bytes = [System.IO.File]::ReadAllBytes($ScriptPath)
+    }
+    catch {
+        Write-ErrorMessage "Could not read $ScriptPath to run it elevated: $($_.Exception.Message)"
+        return [pscustomobject]@{ Started = $false; ExitCode = 5 }
+    }
+    $sha256 = [System.BitConverter]::ToString([System.Security.Cryptography.SHA256]::Create().ComputeHash($bytes)).Replace('-', '')
+    if ($ExpectedSha256 -and $sha256 -ne $ExpectedSha256) {
+        Write-ErrorMessage "$ScriptPath changed after this run started, so it is not run with administrator rights. Start it again."
+        return [pscustomobject]@{ Started = $false; ExitCode = 5 }
+    }
+    # Staged in this account's %TEMP%, which administrators can read: the elevated account may not
+    # see ScriptPath (a mapped drive belongs to the signed-in session). The elevated process checks
+    # the staged copy against the hash all the same.
     $stagingDirectory = $null
-    if ($InPlace) {
-        $argumentString = ConvertTo-ProcessArgumentString -ArgumentList (@('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $ScriptPath) + $AdditionalArguments)
+    try {
+        $stagingDirectory = Join-Path ([System.IO.Path]::GetTempPath()) ('winget-app-setup-elevate-' + [System.Guid]::NewGuid().ToString('N'))
+        [void](New-Item -ItemType Directory -Path $stagingDirectory -Force -ErrorAction Stop)
+        $stagedPath = Join-Path $stagingDirectory (($ScriptPath -split '[\\/]')[-1])
+        [System.IO.File]::WriteAllBytes($stagedPath, $bytes)
     }
-    else {
-        # Read once: the hash and the staged copy below are both of these bytes.
-        try {
-            $bytes = [System.IO.File]::ReadAllBytes($ScriptPath)
+    catch {
+        Write-ErrorMessage "Could not copy $ScriptPath to run it elevated: $($_.Exception.Message)"
+        if ($stagingDirectory) {
+            Remove-Item -LiteralPath $stagingDirectory -Recurse -Force -ErrorAction SilentlyContinue
         }
-        catch {
-            Write-ErrorMessage "Could not read $ScriptPath to run it elevated: $($_.Exception.Message)"
-            return [pscustomobject]@{ Started = $false; ExitCode = 5 }
-        }
-        $sha256 = [System.BitConverter]::ToString([System.Security.Cryptography.SHA256]::Create().ComputeHash($bytes)).Replace('-', '')
-        if ($ExpectedSha256 -and $sha256 -ne $ExpectedSha256) {
-            Write-ErrorMessage "$ScriptPath changed after this run started, so it is not run with administrator rights. Start it again."
-            return [pscustomobject]@{ Started = $false; ExitCode = 5 }
-        }
-        # Staged in this account's %TEMP%, which administrators can read: the elevated account may
-        # not see ScriptPath (a mapped drive belongs to the signed-in session). The elevated process
-        # checks the staged copy against the hash all the same.
-        try {
-            $stagingDirectory = Join-Path ([System.IO.Path]::GetTempPath()) ('winget-app-setup-elevate-' + [System.Guid]::NewGuid().ToString('N'))
-            [void](New-Item -ItemType Directory -Path $stagingDirectory -Force -ErrorAction Stop)
-            $stagedPath = Join-Path $stagingDirectory (($ScriptPath -split '[\\/]')[-1])
-            [System.IO.File]::WriteAllBytes($stagedPath, $bytes)
-        }
-        catch {
-            Write-ErrorMessage "Could not copy $ScriptPath to run it elevated: $($_.Exception.Message)"
-            if ($stagingDirectory) {
-                Remove-Item -LiteralPath $stagingDirectory -Recurse -Force -ErrorAction SilentlyContinue
-            }
-            return [pscustomobject]@{ Started = $false; ExitCode = 5 }
-        }
-        $verifierCommand = New-ElevationVerifierCommand -ScriptPath $stagedPath -Sha256 $sha256 -PowerShellPath $powerShellPath -CopyRoot (Get-ElevatedCopyRoot) -AdditionalArguments $AdditionalArguments
-        # -ExecutionPolicy Bypass as for the copy it runs, so the check's Get-ExecutionPolicy sees
-        # only a policy Group Policy sets.
-        $argumentString = ConvertTo-ProcessArgumentString -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', $verifierCommand)
+        return [pscustomobject]@{ Started = $false; ExitCode = 5 }
     }
+    $verifierCommand = New-ElevationVerifierCommand -ScriptPath $stagedPath -Sha256 $sha256 -PowerShellPath $powerShellPath -CopyRoot (Get-ElevatedCopyRoot) -AdditionalArguments $AdditionalArguments
+    # -ExecutionPolicy Bypass as for the copy it runs, so the check's Get-ExecutionPolicy sees only a
+    # policy Group Policy sets.
+    $argumentString = ConvertTo-ProcessArgumentString -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', $verifierCommand)
 
     try {
         # ShellExecuteEx, which starts an elevated process, accepts a command line of about 2048
-        # characters; a longer one would not start or would arrive cut off.
+        # characters; a longer one would not start or would arrive cut off. It holds the staged
+        # copy's path and the file name, not the folder ScriptPath is in, so moving the file would
+        # not help.
         if ($argumentString.Length -gt 2000) {
-            if ($InPlace) {
-                Write-ErrorMessage "The path $ScriptPath is too long to start it elevated. Move it to a shorter path, or start it from an elevated session."
-            }
-            else {
-                # The command line holds the staged copy's path and the file name, not the folder
-                # ScriptPath is in, so moving the file would not help.
-                Write-ErrorMessage "The command that starts $ScriptPath elevated is too long, because the file name or this account's %TEMP% path ($([System.IO.Path]::GetTempPath())) is long. Give the file a shorter name, or start it from an elevated session."
-            }
+            Write-ErrorMessage "The command that starts $ScriptPath elevated is too long, because the file name or this account's %TEMP% path ($([System.IO.Path]::GetTempPath())) is long. Give the file a shorter name, or start it from an elevated session."
             return [pscustomobject]@{ Started = $false; ExitCode = 4 }
         }
 

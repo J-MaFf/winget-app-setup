@@ -1,6 +1,7 @@
 # BuildGuards.Tests.ps1
 # Tests for the guards in build/Build-WingetInstallScript.ps1 and for the .githooks/pre-commit
-# drift check (review findings P3-46, P3-47 and P3-48):
+# drift check (review findings P3-46, P3-47 and P3-48), for both generated scripts, the installer and
+# the uninstaller (wgt-gq8.43):
 #   - -Check rejects syntax that only PowerShell 7 parses, because Windows PowerShell 5.1 parses
 #     the whole installer before it runs any of it;
 #   - the undefined-reference guards run off Windows too, with build/windows-only-commands.txt
@@ -41,8 +42,8 @@ BeforeAll {
         @(Get-PowerShell7OnlySyntax -Ast $ast -Tokens $tokens)
     }
 
-    # Copies what the build reads (build/, WingetAppSetup/, the committed installer) into
-    # TestDrive and optionally plants an extra Private/ module file.
+    # Copies what the build reads (build/, WingetAppSetup/, the committed installer and uninstaller)
+    # into TestDrive and optionally plants an extra Private/ module file.
     function New-BuildFixture {
         param (
             [Parameter(Mandatory = $true)][string]$Name,
@@ -53,7 +54,7 @@ BeforeAll {
 
         $root = Join-Path $TestDrive $Name
         New-Item -ItemType Directory -Path $root | Out-Null
-        foreach ($item in @('build', 'WingetAppSetup', 'winget-app-install.ps1') + $ExtraItem) {
+        foreach ($item in @('build', 'WingetAppSetup', 'winget-app-install.ps1', 'winget-app-uninstall.ps1') + $ExtraItem) {
             if ($item) { Copy-Item -Path (Join-Path $script:RepoRoot $item) -Destination $root -Recurse }
         }
         if ($ProbeSource) {
@@ -629,7 +630,7 @@ Describe 'pre-commit hook checks the staged files (review finding P3-47)' {
         }
     }
 
-    It 'blocks a module change staged without its rebuilt installer, then passes once the installer is staged' {
+    It 'blocks a module change staged without its rebuilt scripts, then passes once both are staged' {
         if ($script:hookPrerequisitesMissing) { Set-ItResult -Skipped -Because 'git and a POSIX sh are required to run the hook'; return }
         $root = New-HookFixture -Name 'hook-unstaged-installer'
         Add-ModuleEdit -Root $root
@@ -644,7 +645,7 @@ Describe 'pre-commit hook checks the staged files (review finding P3-47)' {
         $blocked.Output | Should -Match 'pre-commit: drift check FAILED'
         $blocked.Output | Should -Match 'The check ran against the STAGED files'
 
-        & git -C $root add -- winget-app-install.ps1 2>&1 | Out-Null
+        & git -C $root add -- winget-app-install.ps1 winget-app-uninstall.ps1 2>&1 | Out-Null
         $passed = Invoke-PreCommitHook -Root $root
         $passed.ExitCode | Should -Be 0 -Because $passed.Output
     }
@@ -658,5 +659,204 @@ Describe 'pre-commit hook checks the staged files (review finding P3-47)' {
 
         $result.ExitCode | Should -Be 0 -Because $result.Output
         $result.Output | Should -Match 'Check passed'
+    }
+
+    It 'blocks a module change staged with the rebuilt installer but not the rebuilt uninstaller (wgt-gq8.43)' {
+        if ($script:hookPrerequisitesMissing) { Set-ItResult -Skipped -Because 'git and a POSIX sh are required to run the hook'; return }
+        $root = New-HookFixture -Name 'hook-unstaged-uninstaller'
+        Add-ModuleEdit -Root $root
+        $build = Invoke-FixtureBuild -Root $root
+        $build.ExitCode | Should -Be 0 -Because $build.Output
+        & git -C $root add -- WingetAppSetup/Private/SystemInfo.ps1 winget-app-install.ps1 2>&1 | Out-Null
+
+        $blocked = Invoke-PreCommitHook -Root $root
+        $blocked.ExitCode | Should -Not -Be 0 -Because $blocked.Output
+        $blocked.Output | Should -Match 'pre-commit: drift check FAILED'
+
+        & git -C $root add -- winget-app-uninstall.ps1 2>&1 | Out-Null
+        $passed = Invoke-PreCommitHook -Root $root
+        $passed.ExitCode | Should -Be 0 -Because $passed.Output
+        $passed.Output | Should -Match 'Check passed: .*winget-app-uninstall\.ps1'
+    }
+
+    It 'checks a staged edit of the generated uninstaller alone (wgt-gq8.43)' {
+        if ($script:hookPrerequisitesMissing) { Set-ItResult -Skipped -Because 'git and a POSIX sh are required to run the hook'; return }
+        $root = New-HookFixture -Name 'hook-hand-edited-uninstaller'
+        Add-Content -Path (Join-Path $root 'winget-app-uninstall.ps1') -Value "Write-Output 'edited by hand'"
+        & git -C $root add -- winget-app-uninstall.ps1 2>&1 | Out-Null
+
+        $blocked = Invoke-PreCommitHook -Root $root
+
+        $blocked.ExitCode | Should -Not -Be 0 -Because $blocked.Output
+        $blocked.Output | Should -Match 'pre-commit: drift check FAILED'
+    }
+}
+
+Describe 'The generated uninstaller gets every guard the installer gets (wgt-gq8.43)' {
+    BeforeAll {
+        . ([scriptblock]::Create((Import-BuildScriptFunction -Name 'Get-CodeTokenSignature')))
+
+        # A fixture whose build/fragments/uninstall-tail.ps1 has -Probe inserted before its first
+        # statement, after the comment lines that open it; returns the root and the probe's line.
+        function New-UninstallerTailFixture {
+            param ([Parameter(Mandatory = $true)][string]$Name, [Parameter(Mandatory = $true)][string]$Probe)
+
+            $root = New-BuildFixture -Name $Name
+            $tailPath = Join-Path $root 'build/fragments/uninstall-tail.ps1'
+            $tailLines = @((Get-Content -Raw -Encoding UTF8 -Path $tailPath) -replace "`r`n", "`n" -split "`n")
+            $index = [Array]::FindIndex($tailLines, [Predicate[string]] { param($line) $line -match '^\$exitCode = 5$' })
+            $index | Should -BeGreaterThan 0 -Because 'comment lines come before it in uninstall-tail.ps1'
+            $tailLines[$index] = "$Probe`n" + $tailLines[$index]
+            [System.IO.File]::WriteAllText($tailPath, ($tailLines -join "`n"), [System.Text.UTF8Encoding]::new($false))
+            [pscustomobject]@{ Root = $root; Line = $index + 1 }
+        }
+
+        $script:committedUninstaller = (Get-Content -Raw -Encoding UTF8 -Path $script:UninstallerScriptPath) -replace "`r`n", "`n"
+    }
+
+    Context 'Build and -Check' {
+        It 'fails on <Case> in build/fragments/uninstall-tail.ps1, naming the uninstaller and the tail line' -ForEach @(
+            @{ Case = 'a syntax error'; Probe = 'function Get-ZzProbeValue {'; Expected = 'winget-app-uninstall\.ps1: Parse check failed'; NamesLine = $true }
+            @{ Case = 'a non-ASCII code token'; Probe = "`$zzProbe = 'caf$([char]0x00E9)'"; Expected = 'winget-app-uninstall\.ps1: ASCII check failed: 1 non-comment token'; NamesLine = $true }
+            @{ Case = 'PowerShell-7-only syntax'; Probe = "`$zzProbe = `$env:ZZ_PROBE ?? 'fallback'"; Expected = 'winget-app-uninstall\.ps1: PowerShell 5\.1 syntax check failed: 1 place'; NamesLine = $true }
+            @{ Case = 'a call to a function the module does not define'; Probe = 'Invoke-ZzNoSuchHelper'; Expected = 'winget-app-uninstall\.ps1: Reference check failed: the generated script invokes command\(s\) that are not defined in the module and do not resolve as external cmdlets: Invoke-ZzNoSuchHelper\.'; NamesLine = $false }
+            @{ Case = 'the reserved build id placeholder'; Probe = "`$zzProbe = '{{BUILD_ID}}'"; Expected = 'winget-app-uninstall\.ps1: Build id check failed'; NamesLine = $false }
+        ) {
+            $fixture = New-UninstallerTailFixture -Name ('uninstaller-tail-' + ($Case -replace '\W', '-')) -Probe $Probe
+
+            $result = Invoke-FixtureBuild -Root $fixture.Root -Check
+
+            $result.ExitCode | Should -Not -Be 0
+            $result.Output | Should -Match $Expected
+            if ($NamesLine) {
+                $result.Output | Should -Match ('\[build/fragments/uninstall-tail\.ps1:{0}\]' -f $fixture.Line)
+            }
+        }
+
+        It 'checks that removing the comments from build/fragments/uninstall-tail.ps1 leaves its code as it was' {
+            # A stripper broken on purpose: it changes the case of a string only the uninstaller's
+            # tail holds.
+            $fixture = New-UninstallerTailFixture -Name 'uninstaller-tail-comment-check' -Probe "`$zzProbe = 'zzprobe' # note"
+            $buildPath = Join-Path $fixture.Root 'build/Build-WingetInstallScript.ps1'
+            $build = Get-Content -Raw -Encoding UTF8 -Path $buildPath
+            $join = 'Text       = $kept -join "`n"'
+            $build.Contains($join) | Should -BeTrue
+            [System.IO.File]::WriteAllText($buildPath, $build.Replace($join, 'Text       = ($kept -join "`n").Replace(''zzprobe'', ''ZZPROBE'')'))
+
+            $result = Invoke-FixtureBuild -Root $fixture.Root
+
+            $result.ExitCode | Should -Not -Be 0
+            $result.Output | Should -Match 'Comment check failed: removing the comments from build/fragments/uninstall-tail\.ps1 would change its code'
+        }
+
+        It 'writes neither script when the uninstaller fails a guard' {
+            $fixture = New-UninstallerTailFixture -Name 'uninstaller-tail-writes-nothing' -Probe 'Invoke-ZzNoSuchHelper'
+            $installerPath = Join-Path $fixture.Root 'winget-app-install.ps1'
+            $uninstallerPath = Join-Path $fixture.Root 'winget-app-uninstall.ps1'
+            Set-Content -LiteralPath $installerPath -Value '# stale installer' -Encoding UTF8
+            Set-Content -LiteralPath $uninstallerPath -Value '# stale uninstaller' -Encoding UTF8
+
+            $result = Invoke-FixtureBuild -Root $fixture.Root
+
+            $result.ExitCode | Should -Not -Be 0
+            (Get-Content -Raw -LiteralPath $installerPath).Trim() | Should -Be '# stale installer'
+            (Get-Content -Raw -LiteralPath $uninstallerPath).Trim() | Should -Be '# stale uninstaller'
+        }
+
+        It 'fails -Check when winget-app-uninstall.ps1 <Case>' -ForEach @(
+            @{ Case = 'is out of date'; Change = 'Stale'; Expected = "winget-app-uninstall\.ps1' is out of date" }
+            @{ Case = 'starts with a UTF-8 BOM'; Change = 'Bom'; Expected = "winget-app-uninstall\.ps1' starts with a UTF-8 BOM" }
+            @{ Case = 'is missing'; Change = 'Missing'; Expected = "winget-app-uninstall\.ps1' does not exist" }
+        ) {
+            $root = New-BuildFixture -Name "uninstaller-check-$Change"
+            $uninstallerPath = Join-Path $root 'winget-app-uninstall.ps1'
+            switch ($Change) {
+                'Stale' { Add-Content -LiteralPath $uninstallerPath -Value "Write-Output 'edited by hand'" }
+                'Bom' { [System.IO.File]::WriteAllBytes($uninstallerPath, [byte[]](0xEF, 0xBB, 0xBF) + [System.IO.File]::ReadAllBytes($uninstallerPath)) }
+                'Missing' { Remove-Item -LiteralPath $uninstallerPath }
+            }
+
+            $result = Invoke-FixtureBuild -Root $root -Check
+
+            $result.ExitCode | Should -Not -Be 0
+            $result.Output | Should -Match $Expected
+            # The installer is still checked first, and is in sync.
+            $result.Output | Should -Match "Check passed: '.*winget-app-install\.ps1' is up to date"
+        }
+
+        It 'leaves the uninstaller unchanged when only build/fragments/uninstall-tail.ps1 comments change' {
+            $root = New-BuildFixture -Name 'uninstaller-tail-comment-only-change'
+            $tailPath = Join-Path $root 'build/fragments/uninstall-tail.ps1'
+            $tail = Get-Content -Raw -Encoding UTF8 -Path $tailPath
+            $tail = $tail.Insert($tail.IndexOf('{') + 1, "`n    # A comment in the entry block.`n")
+            [System.IO.File]::WriteAllText($tailPath, "# A new file comment.`n" + $tail.TrimEnd() + " # A trailing comment.`n")
+
+            $result = Invoke-FixtureBuild -Root $root -Check
+
+            $result.ExitCode | Should -Be 0 -Because $result.Output
+            $result.Output | Should -Match "Check passed: '.*winget-app-uninstall\.ps1' is up to date"
+        }
+
+        It 'refuses one path for both scripts' {
+            $root = New-BuildFixture -Name 'same-output-path'
+            $buildScript = (Join-Path $root 'build/Build-WingetInstallScript.ps1').Replace("'", "''")
+            $target = (Join-Path $root 'both.ps1').Replace("'", "''")
+            $command = "try { & '$buildScript' -OutputPath '$target' -UninstallerOutputPath '$target'; exit `$LASTEXITCODE } catch { [Console]::Out.WriteLine('BUILD ERROR: ' + `$_.Exception.Message); exit 1 }"
+
+            $output = & $script:currentPowerShell -NoProfile -NonInteractive -Command $command 2>&1
+            $exitCode = $LASTEXITCODE
+
+            $exitCode | Should -Not -Be 0
+            (ConvertTo-PlainOutput -Output $output) | Should -Match 'OutputPath and UninstallerOutputPath both name'
+            Test-Path -LiteralPath (Join-Path $root 'both.ps1') | Should -BeFalse
+        }
+    }
+
+    Context 'The committed uninstaller' {
+        It 'starts with build/fragments/uninstall-head.ps1 as it is, and carries no build id' {
+            $head = ((Get-Content -Raw -Encoding UTF8 -Path (Join-Path $script:RepoRoot 'build/fragments/uninstall-head.ps1')) -replace "`r`n", "`n").TrimEnd()
+
+            $script:committedUninstaller.StartsWith($head + "`n") | Should -BeTrue
+            # The module functions read $script:InstallerBuildId; only the installer's banner sets it.
+            $script:committedUninstaller | Should -Not -Match '(?m)^\$script:InstallerBuildId = |^# Build id: |\{\{BUILD_ID\}\}'
+            $script:committedUninstaller | Should -Match '(?m)^# GENERATED FILE - DO NOT EDIT BY HAND\.$'
+            $script:committedUninstaller | Should -Match '(?m)^# build/fragments/uninstall-tail\.ps1, then re-run the build to regenerate this file\.$'
+        }
+
+        It 'carries the code of build/fragments/uninstall-tail.ps1, token for token, with no comment' {
+            $marker = [regex]::Match($script:committedUninstaller, '(?m)^# -+Main Script-+$')
+            $marker.Success | Should -BeTrue
+            $entryBlock = $script:committedUninstaller.Substring($marker.Index + $marker.Length)
+            $tail = (Get-Content -Raw -Encoding UTF8 -Path (Join-Path $script:RepoRoot 'build/fragments/uninstall-tail.ps1')) -replace "`r`n", "`n"
+
+            Get-CodeTokenSignature -Source $entryBlock | Should -BeExactly (Get-CodeTokenSignature -Source $tail)
+            $tokens = $null
+            [void][System.Management.Automation.Language.Parser]::ParseInput($entryBlock, [ref]$tokens, [ref]$null)
+            @($tokens | Where-Object { $_.Kind -eq [System.Management.Automation.Language.TokenKind]::Comment }) | Should -BeNullOrEmpty
+        }
+
+        It 'carries the same module functions as the installer, between the same markers' {
+            $installer = (Get-Content -Raw -Encoding UTF8 -Path $script:InstallerScriptPath) -replace "`r`n", "`n"
+            $functionsOf = {
+                param ([string]$Text)
+                $start = $Text.IndexOf("`n# ------------------------------------------------Functions")
+                $end = $Text.IndexOf("`n# ------------------------------------------------Main Script")
+                $start | Should -BeGreaterThan 0
+                $end | Should -BeGreaterThan $start
+                $Text.Substring($start, $end - $start)
+            }
+
+            & $functionsOf $script:committedUninstaller | Should -BeExactly (& $functionsOf $installer)
+        }
+
+        It 'has no syntax only PowerShell 7 parses' {
+            . ([scriptblock]::Create((Import-BuildScriptFunction -Name 'Get-PowerShell7OnlySyntax')))
+            $tokens = $null
+            $parseErrors = $null
+            $ast = [System.Management.Automation.Language.Parser]::ParseFile($script:UninstallerScriptPath, [ref]$tokens, [ref]$parseErrors)
+
+            $parseErrors | Should -BeNullOrEmpty
+            Get-PowerShell7OnlySyntax -Ast $ast -Tokens $tokens | Should -BeNullOrEmpty
+        }
     }
 }

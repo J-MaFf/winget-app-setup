@@ -67,13 +67,14 @@ jobs:
       - name: Verify generated installer is in sync with the module
         shell: pwsh
         run: |
-          # Verify winget-app-install.ps1 has not drifted from the WingetAppSetup module, and
-          # that the installer invokes no hyphenated command that resolves to neither a module
-          # function nor an external cmdlet. Both checks live in the build script's -Check mode,
-          # which exits non-zero on failure; that propagates through $LASTEXITCODE and fails the job.
+          # Verify winget-app-install.ps1 and winget-app-uninstall.ps1 have not drifted from the
+          # WingetAppSetup module, and that neither invokes a hyphenated command that resolves to
+          # neither a module function nor an external cmdlet. Both checks live in the build
+          # script's -Check mode, which exits non-zero on failure; that propagates through
+          # $LASTEXITCODE and fails the job.
           #
           # This runs AFTER the Microsoft.WinGet.Client install: the undefined-reference guard
-          # resolves external cmdlets via Get-Command, so the WinGet client cmdlet the installer
+          # resolves external cmdlets via Get-Command, so the WinGet client cmdlet the module
           # calls (Repair-WinGetPackageManager) must already be discoverable on the runner or the
           # guard false-positives on it.
           pwsh -File ./build/Build-WingetInstallScript.ps1 -Check

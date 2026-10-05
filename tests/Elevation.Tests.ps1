@@ -1,8 +1,8 @@
 # Elevation.Tests.ps1
 # Tests for WingetAppSetup/Public/Elevation.ps1 and Private/Elevation.ps1:
 # Restart-WithElevation and its parts (the elevated relaunch, review findings P2-11, P2-12, P3-11),
-# the uninstaller's use of it, the module-context invocation detection, Test-IsSystemAccount and
-# Get-InstallAccountContext.
+# the module-context invocation detection, Test-IsSystemAccount and Get-InstallAccountContext. The
+# entry blocks' use of it is tested through the generated scripts in EntryPoint.Tests.ps1.
 # Split from the old single-file suite Test-WingetAppInstall.Tests.ps1 (issue #192).
 
 # Load the module's functions once for this file. TestHelpers.ps1 resolves the repo paths
@@ -155,16 +155,13 @@ Describe 'Restart-WithElevation (review findings P2-11, P2-12, P3-11)' {
         BeforeEach {
             $script:warningMessages = @()
             Mock Write-WarningMessage { $script:warningMessages += $Message }
-            Mock New-Item { throw 'must not stage a copy' }
         }
 
-        It 'Shows no UAC prompt, stages nothing and returns 4 when the machine policy refuses the script (<Case>)' -ForEach @(
-            @{ Case = 'checked copy'; InPlace = $false }
-            @{ Case = 'in place'; InPlace = $true }
-        ) {
+        It 'Shows no UAC prompt, stages nothing and returns 4 when the machine policy refuses the script' {
+            Mock New-Item { throw 'must not stage a copy' }
             Mock Get-ScriptExecutionPolicyBlock { [pscustomobject]@{ Engine = 'WindowsPowerShell'; Scope = 'MachinePolicy'; Policy = 'AllSigned'; Key = 'HKLM\K'; GroupPolicyPath = 'Computer Configuration > P'; Description = 'Group Policy sets the Windows PowerShell execution policy for this PC to AllSigned (MachinePolicy, HKLM\K)' } }
 
-            $result = Restart-WithElevation -ScriptPath $script:scriptPath -InPlace:$InPlace
+            $result = Restart-WithElevation -ScriptPath $script:scriptPath
 
             $result.Started | Should -BeFalse
             $result.ExitCode | Should -Be 4
@@ -176,10 +173,9 @@ Describe 'Restart-WithElevation (review findings P2-11, P2-12, P3-11)' {
         }
 
         It 'Warns about this account''s user policy and still asks: another administrator may approve the prompt' {
-            Mock New-Item { [pscustomobject]@{ FullName = $Path } }
             Mock Get-ScriptExecutionPolicyBlock { [pscustomobject]@{ Engine = 'WindowsPowerShell'; Scope = 'UserPolicy'; Policy = 'Restricted'; Key = 'HKCU\K'; GroupPolicyPath = 'User Configuration > P'; Description = 'Group Policy sets the Windows PowerShell execution policy for this account to Restricted (UserPolicy, HKCU\K)' } }
 
-            $result = Restart-WithElevation -ScriptPath $script:scriptPath -InPlace
+            $result = Restart-WithElevation -ScriptPath $script:scriptPath
 
             $result.Started | Should -BeTrue
             Should -Invoke Start-ElevatedProcess -Times 1 -Exactly
@@ -258,25 +254,28 @@ Describe 'Restart-WithElevation (review findings P2-11, P2-12, P3-11)' {
         Should -Invoke Start-ElevatedProcess -Times 0 -Exactly
     }
 
-    It '-InPlace runs the script itself with -File, quoted, followed by the forwarded switches' {
-        Restart-WithElevation -ScriptPath 'C:\Repo Clone\winget-app-uninstall.ps1' -InPlace -AdditionalArguments '-WhatIf', '-SkipSystemCheck'
+    It 'Has no way to run the script itself, unchecked (wgt-gq8.43)' {
+        # -InPlace did, for the uninstaller while it imported the module from its folder.
+        (Get-Command Restart-WithElevation).Parameters.Keys | Should -Not -Contain 'InPlace'
+    }
 
-        $script:launch.ArgumentString | Should -BeExactly '-NoProfile -ExecutionPolicy Bypass -File "C:\Repo Clone\winget-app-uninstall.ps1" -WhatIf -SkipSystemCheck'
+    It 'Stages and copies the uninstaller under its own name, never the installer''s' {
+        $uninstallerPath = Join-Path $TestDrive 'winget-app-uninstall.ps1'
+        Set-Content -LiteralPath $uninstallerPath -Value "Write-Output 'uninstaller'" -Encoding UTF8
+        $uninstallerSha256 = (Get-FileHash -LiteralPath $uninstallerPath -Algorithm SHA256).Hash
+
+        $result = Restart-WithElevation -ScriptPath $uninstallerPath -ExpectedSha256 $uninstallerSha256
+
+        $result.Started | Should -BeTrue
+        $script:launch.ArgumentString | Should -Match "ReadAllBytes\('[^']*[\\/]winget-app-setup-elevate-[0-9a-f]{32}[\\/]winget-app-uninstall\.ps1'\)"
+        $script:launch.ArgumentString | Should -Match ([regex]::Escape("Join-Path `$copyDirectory 'winget-app-uninstall.ps1';"))
+        $script:launch.ArgumentString | Should -Match ([regex]::Escape("-ne '$uninstallerSha256'"))
+        $script:launch.ArgumentString | Should -Not -Match 'winget-app-install\.ps1'
     }
 
     It 'Accepts only switch names as forwarded arguments, since they become part of a command line' {
         { Restart-WithElevation -ScriptPath $script:scriptPath -AdditionalArguments '-SkipSystemCheck; Remove-Item C:\' } | Should -Throw
         Should -Invoke Start-ElevatedProcess -Times 0 -Exactly
-    }
-
-    It 'Returns 4 without starting anything when the command line would be too long for ShellExecuteEx' {
-        $result = Restart-WithElevation -ScriptPath ('C:\' + ('d' * 2100) + '\x.ps1') -InPlace
-
-        $result.Started | Should -BeFalse
-        $result.ExitCode | Should -Be 4
-        Should -Invoke Start-ElevatedProcess -Times 0 -Exactly
-        # -InPlace puts the path itself on the command line, so a shorter path is the fix.
-        ($script:errorMessages -join "`n") | Should -Match 'is too long to start it elevated\. Move it to a shorter path'
     }
 
     It 'Points at the file name and %TEMP%, not the folder, when the checked-copy command would be too long' {
@@ -551,38 +550,6 @@ exit 42
         $result.Inherited | Should -Be 0
         (@($result.Identities | Sort-Object -Unique) -join ',') | Should -BeExactly 'S-1-5-18,S-1-5-32-544'
         @(Get-ChildItem -LiteralPath $copyRoot).Count | Should -Be 0
-    }
-}
-
-Describe 'winget-app-uninstall.ps1 elevation (review findings P2-11, P2-12)' {
-    It 'Relaunches itself in place through Restart-WithElevation and exits with the elevated run''s exit code' {
-        # The real uninstaller, next to a stand-in module (it imports the module from its own
-        # folder), run in a child PowerShell so its exit ends that child.
-        $root = Join-Path $TestDrive 'uninstaller'
-        $moduleRoot = Join-Path $root 'WingetAppSetup'
-        [void](New-Item -ItemType Directory -Path $moduleRoot -Force)
-        Copy-Item -LiteralPath $script:UninstallerScriptPath -Destination $root
-        Set-Content -LiteralPath (Join-Path $moduleRoot 'WingetAppSetup.psd1') -Value "@{ RootModule = 'WingetAppSetup.psm1'; ModuleVersion = '1.0.0'; FunctionsToExport = '*' }"
-        Set-Content -LiteralPath (Join-Path $moduleRoot 'WingetAppSetup.psm1') -Value @'
-function Test-IsAdmin { $false }
-function Write-ErrorMessage { param ([string]$Message) Write-Host "ERROR: $Message" }
-function Write-Success { param ([string]$Message) Write-Host "SUCCESS: $Message" }
-function Write-Info { param ([string]$Message) Write-Host "INFO: $Message" }
-function Get-DefaultAppCatalog { Write-Host 'UNINSTALL RAN'; @() }
-function Restart-WithElevation {
-    param ([string]$ScriptPath, [string[]]$AdditionalArguments, [string]$ExpectedSha256, [switch]$InPlace, [switch]$NonInteractive)
-    Write-Host "RELAUNCH InPlace=$([bool]$InPlace) Path=$ScriptPath"
-    [pscustomobject]@{ Started = $true; ExitCode = 42 }
-}
-'@
-        $uninstallerCopy = Join-Path $root 'winget-app-uninstall.ps1'
-
-        $output = & (Get-Process -Id $PID).Path -NoLogo -NoProfile -NonInteractive -File $uninstallerCopy 2>&1 | Out-String
-        $exitCode = $LASTEXITCODE
-
-        $exitCode | Should -Be 42
-        $output | Should -Match ([regex]::Escape("RELAUNCH InPlace=True Path=$uninstallerCopy"))
-        $output | Should -Not -Match 'UNINSTALL RAN'
     }
 }
 

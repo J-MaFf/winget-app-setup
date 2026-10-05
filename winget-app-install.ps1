@@ -83,12 +83,12 @@ param (
 # the function source under WingetAppSetup/Public and WingetAppSetup/Private, or the entry block in
 # build/fragments/tail.ps1, then re-run the build to regenerate this file.
 # See readme.md ("Project layout") for details.
-# Build id: 1.0.0+df2b831a (module version + SHA256 fragment of this whole script; issue #189).
+# Build id: 1.0.0+74481c3e (module version + SHA256 fragment of this whole script; issue #189).
 # ------------------------------------------------------------------------------------------------
 
 # Content-derived build identity, logged at startup so a transcript from a remote machine
 # identifies exactly which installer build produced it (issue #189).
-$script:InstallerBuildId = '1.0.0+df2b831a'
+$script:InstallerBuildId = '1.0.0+74481c3e'
 
 # ------------------------------------------------Functions------------------------------------------------
 
@@ -8517,9 +8517,6 @@ function Restart-WithElevation {
         [string]$ExpectedSha256,
 
         [Parameter(Mandatory = $false)]
-        [switch]$InPlace,
-
-        [Parameter(Mandatory = $false)]
         [switch]$NonInteractive
     )
 
@@ -8539,48 +8536,38 @@ function Restart-WithElevation {
     }
 
     $powerShellPath = Get-WindowsPowerShellPath
+    try {
+        $bytes = [System.IO.File]::ReadAllBytes($ScriptPath)
+    }
+    catch {
+        Write-ErrorMessage "Could not read $ScriptPath to run it elevated: $($_.Exception.Message)"
+        return [pscustomobject]@{ Started = $false; ExitCode = 5 }
+    }
+    $sha256 = [System.BitConverter]::ToString([System.Security.Cryptography.SHA256]::Create().ComputeHash($bytes)).Replace('-', '')
+    if ($ExpectedSha256 -and $sha256 -ne $ExpectedSha256) {
+        Write-ErrorMessage "$ScriptPath changed after this run started, so it is not run with administrator rights. Start it again."
+        return [pscustomobject]@{ Started = $false; ExitCode = 5 }
+    }
     $stagingDirectory = $null
-    if ($InPlace) {
-        $argumentString = ConvertTo-ProcessArgumentString -ArgumentList (@('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $ScriptPath) + $AdditionalArguments)
+    try {
+        $stagingDirectory = Join-Path ([System.IO.Path]::GetTempPath()) ('winget-app-setup-elevate-' + [System.Guid]::NewGuid().ToString('N'))
+        [void](New-Item -ItemType Directory -Path $stagingDirectory -Force -ErrorAction Stop)
+        $stagedPath = Join-Path $stagingDirectory (($ScriptPath -split '[\\/]')[-1])
+        [System.IO.File]::WriteAllBytes($stagedPath, $bytes)
     }
-    else {
-        try {
-            $bytes = [System.IO.File]::ReadAllBytes($ScriptPath)
+    catch {
+        Write-ErrorMessage "Could not copy $ScriptPath to run it elevated: $($_.Exception.Message)"
+        if ($stagingDirectory) {
+            Remove-Item -LiteralPath $stagingDirectory -Recurse -Force -ErrorAction SilentlyContinue
         }
-        catch {
-            Write-ErrorMessage "Could not read $ScriptPath to run it elevated: $($_.Exception.Message)"
-            return [pscustomobject]@{ Started = $false; ExitCode = 5 }
-        }
-        $sha256 = [System.BitConverter]::ToString([System.Security.Cryptography.SHA256]::Create().ComputeHash($bytes)).Replace('-', '')
-        if ($ExpectedSha256 -and $sha256 -ne $ExpectedSha256) {
-            Write-ErrorMessage "$ScriptPath changed after this run started, so it is not run with administrator rights. Start it again."
-            return [pscustomobject]@{ Started = $false; ExitCode = 5 }
-        }
-        try {
-            $stagingDirectory = Join-Path ([System.IO.Path]::GetTempPath()) ('winget-app-setup-elevate-' + [System.Guid]::NewGuid().ToString('N'))
-            [void](New-Item -ItemType Directory -Path $stagingDirectory -Force -ErrorAction Stop)
-            $stagedPath = Join-Path $stagingDirectory (($ScriptPath -split '[\\/]')[-1])
-            [System.IO.File]::WriteAllBytes($stagedPath, $bytes)
-        }
-        catch {
-            Write-ErrorMessage "Could not copy $ScriptPath to run it elevated: $($_.Exception.Message)"
-            if ($stagingDirectory) {
-                Remove-Item -LiteralPath $stagingDirectory -Recurse -Force -ErrorAction SilentlyContinue
-            }
-            return [pscustomobject]@{ Started = $false; ExitCode = 5 }
-        }
-        $verifierCommand = New-ElevationVerifierCommand -ScriptPath $stagedPath -Sha256 $sha256 -PowerShellPath $powerShellPath -CopyRoot (Get-ElevatedCopyRoot) -AdditionalArguments $AdditionalArguments
-        $argumentString = ConvertTo-ProcessArgumentString -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', $verifierCommand)
+        return [pscustomobject]@{ Started = $false; ExitCode = 5 }
     }
+    $verifierCommand = New-ElevationVerifierCommand -ScriptPath $stagedPath -Sha256 $sha256 -PowerShellPath $powerShellPath -CopyRoot (Get-ElevatedCopyRoot) -AdditionalArguments $AdditionalArguments
+    $argumentString = ConvertTo-ProcessArgumentString -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', $verifierCommand)
 
     try {
         if ($argumentString.Length -gt 2000) {
-            if ($InPlace) {
-                Write-ErrorMessage "The path $ScriptPath is too long to start it elevated. Move it to a shorter path, or start it from an elevated session."
-            }
-            else {
-                Write-ErrorMessage "The command that starts $ScriptPath elevated is too long, because the file name or this account's %TEMP% path ($([System.IO.Path]::GetTempPath())) is long. Give the file a shorter name, or start it from an elevated session."
-            }
+            Write-ErrorMessage "The command that starts $ScriptPath elevated is too long, because the file name or this account's %TEMP% path ($([System.IO.Path]::GetTempPath())) is long. Give the file a shorter name, or start it from an elevated session."
             return [pscustomobject]@{ Started = $false; ExitCode = 4 }
         }
 

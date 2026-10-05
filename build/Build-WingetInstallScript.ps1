@@ -1,32 +1,43 @@
 <#
 .SYNOPSIS
-    Generates the distributable single-file winget-app-install.ps1 from the WingetAppSetup module.
+    Generates the distributable single-file winget-app-install.ps1 and winget-app-uninstall.ps1
+    from the WingetAppSetup module.
 .DESCRIPTION
     The WingetAppSetup module (under WingetAppSetup/) is the source of truth. End users, however,
-    run the installer either locally or via the documented `irm <url> | iex` one-liner, both of
-    which need a single self-contained script. This build concatenates, in order:
+    run the installer either locally or via the documented `irm <url> | iex` one-liner, and both
+    scripts relaunch themselves elevated as a checked copy of one file (review finding P3-11), so
+    each needs a single self-contained script. For each, this build concatenates, in order:
 
-        1. build/fragments/head.ps1   - PSScriptInfo, comment-based help, and the param() block
-        2. an auto-generated banner   - warns against hand-editing the output and stamps the
-                                        content-derived $script:InstallerBuildId (issue #189)
+        1. its head fragment          - the comment-based help and the param() block
+        2. an auto-generated banner   - warns against hand-editing the output; the installer's also
+                                        stamps the content-derived $script:InstallerBuildId (issue #189)
         3. WingetAppSetup/Private/*.ps1 then WingetAppSetup/Public/*.ps1 - every function, with
                                         its comments removed (Remove-PowerShellComment)
-        4. build/fragments/tail.ps1   - the `if ($MyInvocation.InvocationName -ne '.')` dispatch block,
-                                        its comments removed too
+        4. its tail fragment          - the entry block, its comments removed too
+
+    winget-app-install.ps1 is build/fragments/head.ps1 (with PSScriptInfo) and tail.ps1 around the
+    module; winget-app-uninstall.ps1 is build/fragments/uninstall-head.ps1 and uninstall-tail.ps1
+    around it. Every guard runs on both, and nothing is written unless both pass.
 
     The comments are left out because about half of the module is comments, which every
-    irm | iex run would download (review finding P3-53); they stay in the source. head.ps1 is
-    kept as it is: it holds the script's help. A change to a comment in the module or in tail.ps1
-    alone therefore leaves the installer, and its build id, unchanged.
+    irm | iex run would download (review finding P3-53); they stay in the source. The head
+    fragments are kept as they are: they hold the scripts' help. A change to a comment in the
+    module or in a tail fragment alone therefore leaves both scripts, and the installer's build id,
+    unchanged.
 .PARAMETER OutputPath
-    Where to write the generated script. Defaults to winget-app-install.ps1 at the repository root.
+    Where to write the generated installer. Defaults to winget-app-install.ps1 at the repository root.
+.PARAMETER UninstallerOutputPath
+    Where to write the generated uninstaller. Defaults to winget-app-uninstall.ps1 in the folder of
+    OutputPath (the repository root by default).
 .PARAMETER Check
-    When set, the script is generated to a temporary file and compared against OutputPath instead of
-    overwriting it. Exits non-zero if they differ. Intended for CI / pre-commit verification.
+    When set, the scripts are generated in memory and compared against OutputPath and
+    UninstallerOutputPath instead of overwriting them. Exits non-zero if either differs. Intended for
+    CI / pre-commit verification.
 #>
 [CmdletBinding()]
 param(
     [string]$OutputPath,
+    [string]$UninstallerOutputPath,
     [switch]$Check
 )
 
@@ -38,7 +49,7 @@ function Get-DefinedFunctionLookup {
         Builds the case-sensitive and case-insensitive lookups of every function defined in the
         assembled script's AST, shared by the direct- and indirect-dispatch reference guards below.
     .PARAMETER Ast
-        The parsed AST of the fully assembled installer.
+        The parsed AST of a fully assembled script.
     .OUTPUTS
         A two-element array: [0] a case-sensitive (ordinal) HashSet[string] of defined names,
         [1] a case-insensitive Dictionary[string,string] mapping folded name -> defined name.
@@ -67,7 +78,7 @@ function Get-InvokedCommandName {
         named, and it excludes native commands (winget), keywords, and operators that
         GetCommandName also returns.
     .PARAMETER Ast
-        The parsed AST of the fully assembled installer.
+        The parsed AST of a fully assembled script.
     #>
     param(
         [Parameter(Mandatory = $true)]
@@ -83,7 +94,7 @@ function Get-InvokedCommandName {
 function Get-WindowsOnlyCommandName {
     <#
     .SYNOPSIS
-        Reads build/windows-only-commands.txt: the Windows-only commands the installer invokes,
+        Reads build/windows-only-commands.txt: the Windows-only commands the module invokes,
         which the undefined-reference guards treat as resolvable off Windows.
     .PARAMETER Path
         Path to the list. One command name per line; blank lines and lines starting with # are
@@ -130,9 +141,9 @@ function Get-PowerShell7OnlySyntax {
         under 5.1, where it reads as $null. The pipeline's extent stops before the &, so the
         report points at the first & token after it.
     .PARAMETER Ast
-        The parsed AST of the fully assembled installer.
+        The parsed AST of a fully assembled script.
     .PARAMETER Tokens
-        The tokens the parser returned for the assembled installer.
+        The tokens the parser returned for the assembled script.
     .OUTPUTS
         One object per offending construct, with Line, Column, Text and Kind.
     #>
@@ -268,7 +279,7 @@ function Get-UndefinedCommandReference {
         Get-Command could otherwise resolve the external cmdlet and mask a dropped or renamed module
         function behind a stale call site (issue #183).
     .PARAMETER Ast
-        The parsed AST of the fully assembled installer.
+        The parsed AST of a fully assembled script.
     .PARAMETER DefinedExact
         Case-sensitive (ordinal) HashSet[string] of function names defined in the assembled script,
         from Get-DefinedFunctionLookup.
@@ -326,7 +337,7 @@ function Get-UndefinedCatalogInstallReference {
         defined-function lookup - one guard family, one place to look when a reference-drift bug
         report comes in, per this repo's existing convention (issue #154 / #183).
     .PARAMETER Ast
-        The parsed AST of the fully assembled installer.
+        The parsed AST of a fully assembled script.
     .PARAMETER DefinedExact
         Case-sensitive (ordinal) HashSet[string] of function names defined in the assembled script,
         from Get-DefinedFunctionLookup.
@@ -538,20 +549,30 @@ function Get-CodeTokenSignature {
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $moduleRoot = Join-Path $repoRoot 'WingetAppSetup'
-$fragmentsRoot = Join-Path $PSScriptRoot 'fragments'
 
+# The .NET file APIs used below resolve relative paths against the process working directory,
+# which can differ from the PowerShell location; root the paths explicitly so both agree.
 if (-not $OutputPath) {
     $OutputPath = Join-Path $repoRoot 'winget-app-install.ps1'
 }
 elseif (-not [System.IO.Path]::IsPathRooted($OutputPath)) {
-    # The .NET file APIs used below resolve relative paths against the process working directory,
-    # which can differ from the PowerShell location; root the path explicitly so both agree.
     $OutputPath = Join-Path (Get-Location).ProviderPath $OutputPath
+}
+if (-not $UninstallerOutputPath) {
+    $UninstallerOutputPath = Join-Path (Split-Path -Parent $OutputPath) 'winget-app-uninstall.ps1'
+}
+elseif (-not [System.IO.Path]::IsPathRooted($UninstallerOutputPath)) {
+    $UninstallerOutputPath = Join-Path (Get-Location).ProviderPath $UninstallerOutputPath
+}
+if ([System.IO.Path]::GetFullPath($OutputPath) -eq [System.IO.Path]::GetFullPath($UninstallerOutputPath)) {
+    Write-Error "OutputPath and UninstallerOutputPath both name '$OutputPath'; give the installer and the uninstaller different paths."
+    exit 1
 }
 
 # The assembled script, one entry per line, with where each line comes from ('<path>:<line>', or
 # '' for the build's own lines), so the guards below can name the source line behind a problem:
 # the line numbers of the assembled script match no file once the module's comments are removed.
+# Emptied for each generated script.
 $assembledLines = [System.Collections.Generic.List[string]]::new()
 $lineOrigins = [System.Collections.Generic.List[string]]::new()
 
@@ -597,6 +618,10 @@ function Read-SourceText {
     ((Get-Content -Path $Path -Raw -Encoding UTF8) -replace "`r`n", "`n").TrimEnd()
 }
 
+# Each source file without its comments, by -Path, so a module file both scripts carry is
+# stripped and checked once.
+$strippedSources = @{}
+
 # Appends a source file without its comments, -Path naming it in the guards' reports. Removing the
 # comments must leave the code as it was, token for token (compared case-sensitively), or the build
 # fails. A file that does not parse goes in as it is, and the parse guard below reports where.
@@ -606,28 +631,28 @@ function Add-SourceWithoutComment {
         [Parameter(Mandatory = $true)][string]$Path
     )
 
-    $source = Read-SourceText -Path $FullName
-    $stripped = Remove-PowerShellComment -Source $source
-    if ($null -eq $stripped) {
-        Add-AssembledText -Text $source -Path $Path
-        return
+    if (-not $strippedSources.ContainsKey($Path)) {
+        $source = Read-SourceText -Path $FullName
+        $stripped = Remove-PowerShellComment -Source $source
+        if ($null -eq $stripped) {
+            $strippedSources[$Path] = [pscustomobject]@{ Text = $source; SourceLine = $null }
+        }
+        else {
+            if ((Get-CodeTokenSignature -Source $source) -cne (Get-CodeTokenSignature -Source $stripped.Text)) {
+                Write-Error "Comment check failed: removing the comments from $Path would change its code. Move the comment that sits inside a statement in an unusual place (for example after a line continuation) onto a line of its own, then re-run the build."
+                exit 1
+            }
+            $strippedSources[$Path] = $stripped
+        }
     }
-    if ((Get-CodeTokenSignature -Source $source) -cne (Get-CodeTokenSignature -Source $stripped.Text)) {
-        Write-Error "Comment check failed: removing the comments from $Path would change its code. Move the comment that sits inside a statement in an unusual place (for example after a line continuation) onto a line of its own, then re-run the build."
-        exit 1
-    }
-    Add-AssembledText -Text $stripped.Text -Path $Path -SourceLine $stripped.SourceLine
+    Add-AssembledText -Text $strippedSources[$Path].Text -Path $Path -SourceLine $strippedSources[$Path].SourceLine
 }
 
-# The build id slot. The banner below carries this placeholder while the whole script is hashed,
-# and the id replaces it afterwards (see step 5).
+# The build id slot. The installer's banner carries this placeholder while the whole script is
+# hashed, and the id replaces it afterwards (see New-GeneratedScriptContent, step 5).
 $buildIdPlaceholder = '{{BUILD_ID}}'
 
-# 1. Header (PSScriptInfo + help + param), as it is.
-Add-AssembledText -Text (Read-SourceText -Path (Join-Path $fragmentsRoot 'head.ps1')) -Path 'build/fragments/head.ps1'
-
-# 2. Generated banner, with the build id slot left as the placeholder.
-$banner = @'
+$installerBanner = @'
 
 # ------------------------------------------------------------------------------------------------
 # GENERATED FILE - DO NOT EDIT BY HAND.
@@ -643,127 +668,30 @@ $banner = @'
 # identifies exactly which installer build produced it (issue #189).
 $script:InstallerBuildId = '{{BUILD_ID}}'
 '@
-Add-AssembledText -Text ($banner -replace "`r`n", "`n")
 
-# 3. Function bodies: Private first, then Public, each glob ordered for stable output.
-#    Sort-Object compares linguistically, which varies across locales and ICU/NLS versions, so pin
-#    the concatenation order with an ordinal (byte-wise) comparison that is identical everywhere.
-$ordinalByName = [System.Comparison[object]] { param($a, $b) [System.StringComparer]::Ordinal.Compare($a.Name, $b.Name) }
-$privateFiles = @(Get-ChildItem -Path (Join-Path $moduleRoot 'Private') -Filter '*.ps1')
-$publicFiles = @(Get-ChildItem -Path (Join-Path $moduleRoot 'Public') -Filter '*.ps1')
-[Array]::Sort($privateFiles, $ordinalByName)
-[Array]::Sort($publicFiles, $ordinalByName)
-$functionFiles = $privateFiles + $publicFiles
+# No build id: the uninstaller keeps no transcript to log one in, and its elevated relaunch checks
+# the file's SHA256 instead.
+$uninstallerBanner = @'
 
-Add-AssembledText -Text ''
-Add-AssembledText -Text '# ------------------------------------------------Functions------------------------------------------------'
-Add-AssembledText -Text ''
+# ------------------------------------------------------------------------------------------------
+# GENERATED FILE - DO NOT EDIT BY HAND.
+# This script is assembled from the WingetAppSetup module by build/Build-WingetInstallScript.ps1,
+# without the comments of the module and of the entry block below: read them in the source. Edit
+# the function source under WingetAppSetup/Public and WingetAppSetup/Private, or the entry block in
+# build/fragments/uninstall-tail.ps1, then re-run the build to regenerate this file.
+# See readme.md ("Project layout") for details.
+# ------------------------------------------------------------------------------------------------
+'@
 
-foreach ($file in $functionFiles) {
-    Add-AssembledText -Text "# --- $($file.BaseName) ---"
-    Add-SourceWithoutComment -FullName $file.FullName -Path ('WingetAppSetup/{0}/{1}' -f $file.Directory.Name, $file.Name)
-    Add-AssembledText -Text ''
-}
+# The generated scripts. BuildIdSlots is how often the banner holds the placeholder.
+$targets = @(
+    [pscustomobject]@{ Name = 'winget-app-install.ps1'; Head = 'build/fragments/head.ps1'; Tail = 'build/fragments/tail.ps1'; Banner = $installerBanner; BuildIdSlots = 2; OutputPath = $OutputPath }
+    [pscustomobject]@{ Name = 'winget-app-uninstall.ps1'; Head = 'build/fragments/uninstall-head.ps1'; Tail = 'build/fragments/uninstall-tail.ps1'; Banner = $uninstallerBanner; BuildIdSlots = 0; OutputPath = $UninstallerOutputPath }
+)
 
-# 4. Tail (entry-point dispatch), without its comments too.
-Add-AssembledText -Text '# ------------------------------------------------Main Script------------------------------------------------'
-Add-AssembledText -Text ''
-Add-SourceWithoutComment -FullName (Join-Path $fragmentsRoot 'tail.ps1') -Path 'build/fragments/tail.ps1'
-
-# LF line endings with a single trailing newline, so the output is byte-identical across platforms.
-# The installer is stored with LF (see .gitattributes), keeping the -Check round-trip deterministic
-# on Windows and Linux alike.
-$contentTemplate = (($assembledLines -join "`n").TrimEnd()) + "`n"
-
-# The placeholder may appear only in the banner's two slots: anywhere else in the sources, the
-# substitution below would rewrite that code too.
-$placeholderCount = ([regex]::Matches($contentTemplate, [regex]::Escape($buildIdPlaceholder))).Count
-if ($placeholderCount -ne 2) {
-    Write-Error "Build id check failed: '$buildIdPlaceholder' is reserved for the generated banner, but the sources under WingetAppSetup/ or build/fragments/ contain it too ($placeholderCount occurrences in total, expected 2). Remove it from the source, then re-run the build."
-    exit 1
-}
-
-# 5. Content-derived build id (issue #189): <module version from the psd1>+<first 8 hex chars of the
-#    SHA256 of the whole assembled script, LF-normalized, with the id slots still holding the
-#    placeholder>. The whole script, not only the functions (review finding P3-12): a change to
-#    the param block, the help, or the entry dispatch in build/fragments/tail.ps1 (transcript,
-#    PowerShell 7 bootstrap, exit handling) must change the id too, or two different installers
-#    log the same 'Installer build:' line.
-#    Deterministic on purpose: rebuilding the same tree MUST produce a byte-identical installer or
-#    the -Check verification in CI would always fail. Do NOT switch this to git describe, a commit
-#    SHA, or a timestamp - those change without the content changing (or vice versa) and would
-#    break the byte-compare. The tail logs the id at startup so a transcript from a remote machine
-#    identifies exactly which installer build produced it.
-$manifestPath = Join-Path $moduleRoot 'WingetAppSetup.psd1'
-$manifest = Import-PowerShellDataFile -Path $manifestPath
-$sha256 = [System.Security.Cryptography.SHA256]::Create()
-try {
-    $contentHash = $sha256.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($contentTemplate))
-}
-finally {
-    $sha256.Dispose()
-}
-$hashFragment = [System.BitConverter]::ToString($contentHash, 0, 4).Replace('-', '').ToLowerInvariant()
-$buildId = '{0}+{1}' -f $manifest.ModuleVersion, $hashFragment
-$content = $contentTemplate.Replace($buildIdPlaceholder, $buildId)
-
-# Fail fast on syntax errors (issue #183). Without this, a module file with an unbalanced brace
-# would ship a broken installer: the reference guard would walk the truncated AST and pass, and
-# -Check would pass because the on-disk file faithfully reproduces the same broken concatenation.
-$parseErrors = $null
-$assembledTokens = $null
-$assembledAst = [System.Management.Automation.Language.Parser]::ParseInput($content, [ref]$assembledTokens, [ref]$parseErrors)
-if ($parseErrors -and $parseErrors.Count -gt 0) {
-    $details = foreach ($parseError in $parseErrors) {
-        "line $($parseError.Extent.StartLineNumber), column $($parseError.Extent.StartColumnNumber): $($parseError.Message)$(Get-LineOrigin -Line $parseError.Extent.StartLineNumber)"
-    }
-    Write-Error ("Parse check failed: the assembled script has $($parseErrors.Count) syntax error(s). Fix the offending source file under WingetAppSetup/ or build/fragments/, then re-run the build.`n" + ($details -join "`n"))
-    exit 1
-}
-
-# Fail fast on non-ASCII in code tokens (issue #210). The installer ships as BOM-less UTF-8, which
-# Windows PowerShell 5.1 decodes as ANSI: a multi-byte character inside a string literal misdecodes
-# into garbage, and some byte sequences terminate the string early (an em dash's 0x94 byte becomes
-# a closing curly quote), cascading into dozens of parser errors before the tail's PowerShell-7
-# fail-fast can run. Keeping every NON-COMMENT token pure ASCII keeps the file 5.1-PARSEABLE, so
-# 5.1 reaches the version check and prints a real message. Comment tokens are exempt: misdecoded
-# bytes inside a comment cannot change tokenization, so doc comments may keep typographic
-# characters. Token-based and platform-independent, so it runs in both build and -Check modes.
-$nonAsciiTokens = @($assembledTokens | Where-Object {
-        $_.Kind -ne [System.Management.Automation.Language.TokenKind]::Comment -and $_.Text -match '[^\x00-\x7F]'
-    })
-if ($nonAsciiTokens.Count -gt 0) {
-    $details = foreach ($token in $nonAsciiTokens) {
-        $chars = ([regex]::Matches($token.Text, '[^\x00-\x7F]') | ForEach-Object { 'U+{0:X4}' -f [int][char]$_.Value } | Select-Object -Unique) -join ', '
-        "line $($token.Extent.StartLineNumber), column $($token.Extent.StartColumnNumber): $($token.Kind) token contains $chars$(Get-LineOrigin -Line $token.Extent.StartLineNumber)"
-    }
-    Write-Error ("ASCII check failed: $($nonAsciiTokens.Count) non-comment token(s) in the assembled script contain non-ASCII characters, which break Windows PowerShell 5.1 parsing of the BOM-less UTF-8 installer (issue #210). Replace them with ASCII equivalents (em/en dash -> '-', curly quotes -> straight, ellipsis -> '...') in the offending source under WingetAppSetup/ or build/fragments/, then re-run the build.`n" + ($details -join "`n"))
-    exit 1
-}
-
-# Fail fast on PowerShell-7-only syntax (review finding P3-46). The parse guard above uses the
-# parser of the PowerShell 7 running this build, so ??, ?., the ternary ?:, && / || and clean { }
-# all pass it, yet Windows PowerShell 5.1 rejects the whole file over any one of them and the
-# one-liner dies before the tail's PowerShell 7 bootstrap runs. Only Windows CI's real 5.1 parse
-# test used to catch this. Token- and AST-based, so the same characters inside strings, comments
-# and regexes do not trip it; runs in both build and -Check modes on every platform.
-$ps7OnlySyntax = @(Get-PowerShell7OnlySyntax -Ast $assembledAst -Tokens $assembledTokens | Sort-Object -Property Line, Column)
-if ($ps7OnlySyntax.Count -gt 0) {
-    $details = foreach ($finding in $ps7OnlySyntax) {
-        "line $($finding.Line), column $($finding.Column): '$($finding.Text)' ($($finding.Kind))$(Get-LineOrigin -Line $finding.Line)"
-    }
-    Write-Error ("PowerShell 5.1 syntax check failed: $($ps7OnlySyntax.Count) place(s) in the assembled script use syntax only PowerShell 7 parses. Windows PowerShell 5.1 parses the whole installer before running any of it, so one of these anywhere breaks the irm | iex one-liner before the PowerShell 7 bootstrap can run. Rewrite them in 5.1 syntax (if/else instead of ?? and ?:, an explicit `$null check instead of ?. and ?[, separate statements that test `$? or `$LASTEXITCODE instead of && and ||, end { } or try/finally instead of clean { }, Start-Job instead of a trailing &) in the offending source under WingetAppSetup/ or build/fragments/, then re-run the build.`n" + ($details -join "`n"))
-    exit 1
-}
-
-# Fail fast on reference drift (issue #154), on every platform. The installer calls Windows-only
-# cmdlets (Get-AppxPackage, Get-ScheduledTask, the WinGet client module, ...) that Get-Command
-# cannot resolve on Linux/macOS, so off Windows the names in build/windows-only-commands.txt count
-# as resolvable and every other name is checked exactly as on Windows. The guard used to be skipped
-# off Windows entirely, which let the #154 regression pass a Linux build, -Check and the pre-commit
-# hook (review finding P3-48). On Windows the list is not used to resolve anything, and every entry
-# must resolve there, so the list cannot hide a missing module function. Windows PowerShell 5.1
-# leaves $IsWindows unset but is always Windows, so treat pre-6 as Windows too.
+# Off Windows the Windows-only commands the module calls count as resolvable (see the reference
+# guards in New-GeneratedScriptContent). Windows PowerShell 5.1 leaves $IsWindows unset but is
+# always Windows, so treat pre-6 as Windows too.
 $onWindows = $IsWindows -or $PSVersionTable.PSVersion.Major -lt 6
 $windowsOnlyCommandsPath = Join-Path $PSScriptRoot 'windows-only-commands.txt'
 $windowsOnlyCommands = @(Get-WindowsOnlyCommandName -Path $windowsOnlyCommandsPath)
@@ -774,65 +702,227 @@ if (-not $onWindows) {
     $allowlistHint = ' If a name is a Windows-only cmdlet that cannot resolve on this platform, add it to build/windows-only-commands.txt; a Windows build then checks that it resolves there.'
 }
 
-$lookup = Get-DefinedFunctionLookup -Ast $assembledAst
-$definedExact, $definedFolded = $lookup[0], $lookup[1]
+function New-GeneratedScriptContent {
+    <#
+    .SYNOPSIS
+        Assembles one generated script and runs the guards on it; a guard that fails ends the build.
+    .PARAMETER Target
+        An entry of $targets: Name, Head, Tail, Banner, BuildIdSlots.
+    .OUTPUTS
+        [pscustomobject] with Content (the script text, LF line endings) and InvokedCommandNames.
+    #>
+    param ([Parameter(Mandatory = $true)][pscustomobject]$Target)
 
-$undefinedReferences = Get-UndefinedCommandReference -Ast $assembledAst -DefinedExact $definedExact -DefinedFolded $definedFolded -AssumeResolvable $assumeResolvable
-if ($undefinedReferences) {
-    Write-Error ("Reference check failed: the generated script invokes command(s) that are not defined in the module and do not resolve as external cmdlets: $($undefinedReferences -join ', '). Add the missing function under WingetAppSetup/Public or WingetAppSetup/Private (or fix the calling fragment), then re-run the build." + $allowlistHint)
-    exit 1
+    $assembledLines.Clear()
+    $lineOrigins.Clear()
+    # Every guard report names the script it is about.
+    $label = "$($Target.Name): "
+
+    # 1. Header (help + param), as it is.
+    Add-AssembledText -Text (Read-SourceText -Path (Join-Path $repoRoot $Target.Head)) -Path $Target.Head
+
+    # 2. Generated banner, with any build id slot left as the placeholder.
+    Add-AssembledText -Text ($Target.Banner -replace "`r`n", "`n")
+
+    # 3. Function bodies: Private first, then Public, each glob ordered for stable output.
+    #    Sort-Object compares linguistically, which varies across locales and ICU/NLS versions, so pin
+    #    the concatenation order with an ordinal (byte-wise) comparison that is identical everywhere.
+    $ordinalByName = [System.Comparison[object]] { param($a, $b) [System.StringComparer]::Ordinal.Compare($a.Name, $b.Name) }
+    $privateFiles = @(Get-ChildItem -Path (Join-Path $moduleRoot 'Private') -Filter '*.ps1')
+    $publicFiles = @(Get-ChildItem -Path (Join-Path $moduleRoot 'Public') -Filter '*.ps1')
+    [Array]::Sort($privateFiles, $ordinalByName)
+    [Array]::Sort($publicFiles, $ordinalByName)
+    $functionFiles = $privateFiles + $publicFiles
+
+    Add-AssembledText -Text ''
+    Add-AssembledText -Text '# ------------------------------------------------Functions------------------------------------------------'
+    Add-AssembledText -Text ''
+
+    foreach ($file in $functionFiles) {
+        Add-AssembledText -Text "# --- $($file.BaseName) ---"
+        Add-SourceWithoutComment -FullName $file.FullName -Path ('WingetAppSetup/{0}/{1}' -f $file.Directory.Name, $file.Name)
+        Add-AssembledText -Text ''
+    }
+
+    # 4. Tail (the entry block), without its comments too.
+    Add-AssembledText -Text '# ------------------------------------------------Main Script------------------------------------------------'
+    Add-AssembledText -Text ''
+    Add-SourceWithoutComment -FullName (Join-Path $repoRoot $Target.Tail) -Path $Target.Tail
+
+    # LF line endings with a single trailing newline, so the output is byte-identical across
+    # platforms. The scripts are stored with LF (see .gitattributes), keeping the -Check round-trip
+    # deterministic on Windows and Linux alike.
+    $contentTemplate = (($assembledLines -join "`n").TrimEnd()) + "`n"
+
+    # The placeholder may appear only in the banner's slots: anywhere else in the sources, the
+    # substitution below would rewrite that code too.
+    $placeholderCount = ([regex]::Matches($contentTemplate, [regex]::Escape($buildIdPlaceholder))).Count
+    if ($placeholderCount -ne $Target.BuildIdSlots) {
+        Write-Error "$($label)Build id check failed: '$buildIdPlaceholder' is reserved for the installer's generated banner, but the sources under WingetAppSetup/ or build/fragments/ contain it too ($placeholderCount occurrences in total, expected $($Target.BuildIdSlots)). Remove it from the source, then re-run the build."
+        exit 1
+    }
+
+    # 5. Content-derived build id (issue #189), for a banner with slots: <module version from the
+    #    psd1>+<first 8 hex chars of the SHA256 of the whole assembled script, LF-normalized, with
+    #    the id slots still holding the placeholder>. The whole script, not only the functions
+    #    (review finding P3-12): a change to the param block, the help, or the entry dispatch in
+    #    build/fragments/tail.ps1 (transcript, PowerShell 7 bootstrap, exit handling) must change
+    #    the id too, or two different installers log the same 'Installer build:' line.
+    #    Deterministic on purpose: rebuilding the same tree MUST produce a byte-identical script or
+    #    the -Check verification in CI would always fail. Do NOT switch this to git describe, a
+    #    commit SHA, or a timestamp - those change without the content changing (or vice versa) and
+    #    would break the byte-compare. The tail logs the id at startup so a transcript from a remote
+    #    machine identifies exactly which installer build produced it.
+    $content = $contentTemplate
+    if ($Target.BuildIdSlots -gt 0) {
+        $manifest = Import-PowerShellDataFile -Path (Join-Path $moduleRoot 'WingetAppSetup.psd1')
+        $sha256 = [System.Security.Cryptography.SHA256]::Create()
+        try {
+            $contentHash = $sha256.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($contentTemplate))
+        }
+        finally {
+            $sha256.Dispose()
+        }
+        $hashFragment = [System.BitConverter]::ToString($contentHash, 0, 4).Replace('-', '').ToLowerInvariant()
+        $buildId = '{0}+{1}' -f $manifest.ModuleVersion, $hashFragment
+        $content = $contentTemplate.Replace($buildIdPlaceholder, $buildId)
+    }
+
+    # Fail fast on syntax errors (issue #183). Without this, a module file with an unbalanced brace
+    # would ship a broken script: the reference guard would walk the truncated AST and pass, and
+    # -Check would pass because the on-disk file faithfully reproduces the same broken concatenation.
+    $parseErrors = $null
+    $assembledTokens = $null
+    $assembledAst = [System.Management.Automation.Language.Parser]::ParseInput($content, [ref]$assembledTokens, [ref]$parseErrors)
+    if ($parseErrors -and $parseErrors.Count -gt 0) {
+        $details = foreach ($parseError in $parseErrors) {
+            "line $($parseError.Extent.StartLineNumber), column $($parseError.Extent.StartColumnNumber): $($parseError.Message)$(Get-LineOrigin -Line $parseError.Extent.StartLineNumber)"
+        }
+        Write-Error ("$($label)Parse check failed: the assembled script has $($parseErrors.Count) syntax error(s). Fix the offending source file under WingetAppSetup/ or build/fragments/, then re-run the build.`n" + ($details -join "`n"))
+        exit 1
+    }
+
+    # Fail fast on non-ASCII in code tokens (issue #210). Both scripts ship as BOM-less UTF-8, which
+    # Windows PowerShell 5.1 decodes as ANSI: a multi-byte character inside a string literal
+    # misdecodes into garbage, and some byte sequences terminate the string early (an em dash's 0x94
+    # byte becomes a closing curly quote), cascading into dozens of parser errors before the
+    # installer's PowerShell-7 bootstrap can run, or before the uninstaller (which runs under 5.1 in
+    # its elevated window) runs at all. Keeping every NON-COMMENT token pure ASCII keeps the files
+    # 5.1-PARSEABLE. Comment tokens are exempt: misdecoded bytes inside a comment cannot change
+    # tokenization, so doc comments may keep typographic characters. Token-based and
+    # platform-independent, so it runs in both build and -Check modes.
+    $nonAsciiTokens = @($assembledTokens | Where-Object {
+            $_.Kind -ne [System.Management.Automation.Language.TokenKind]::Comment -and $_.Text -match '[^\x00-\x7F]'
+        })
+    if ($nonAsciiTokens.Count -gt 0) {
+        $details = foreach ($token in $nonAsciiTokens) {
+            $chars = ([regex]::Matches($token.Text, '[^\x00-\x7F]') | ForEach-Object { 'U+{0:X4}' -f [int][char]$_.Value } | Select-Object -Unique) -join ', '
+            "line $($token.Extent.StartLineNumber), column $($token.Extent.StartColumnNumber): $($token.Kind) token contains $chars$(Get-LineOrigin -Line $token.Extent.StartLineNumber)"
+        }
+        Write-Error ("$($label)ASCII check failed: $($nonAsciiTokens.Count) non-comment token(s) in the assembled script contain non-ASCII characters, which break Windows PowerShell 5.1 parsing of the BOM-less UTF-8 script (issue #210). Replace them with ASCII equivalents (em/en dash -> '-', curly quotes -> straight, ellipsis -> '...') in the offending source under WingetAppSetup/ or build/fragments/, then re-run the build.`n" + ($details -join "`n"))
+        exit 1
+    }
+
+    # Fail fast on PowerShell-7-only syntax (review finding P3-46). The parse guard above uses the
+    # parser of the PowerShell 7 running this build, so ??, ?., the ternary ?:, && / || and clean { }
+    # all pass it, yet Windows PowerShell 5.1 rejects the whole file over any one of them: the
+    # one-liner dies before the installer's PowerShell 7 bootstrap runs, and the uninstaller's
+    # elevated Windows PowerShell window runs nothing. Token- and AST-based, so the same characters
+    # inside strings, comments and regexes do not trip it; runs in both build and -Check modes on
+    # every platform.
+    $ps7OnlySyntax = @(Get-PowerShell7OnlySyntax -Ast $assembledAst -Tokens $assembledTokens | Sort-Object -Property Line, Column)
+    if ($ps7OnlySyntax.Count -gt 0) {
+        $details = foreach ($finding in $ps7OnlySyntax) {
+            "line $($finding.Line), column $($finding.Column): '$($finding.Text)' ($($finding.Kind))$(Get-LineOrigin -Line $finding.Line)"
+        }
+        Write-Error ("$($label)PowerShell 5.1 syntax check failed: $($ps7OnlySyntax.Count) place(s) in the assembled script use syntax only PowerShell 7 parses. Windows PowerShell 5.1 parses the whole script before running any of it, so one of these anywhere breaks the irm | iex one-liner before the PowerShell 7 bootstrap can run, and the uninstaller's elevated run. Rewrite them in 5.1 syntax (if/else instead of ?? and ?:, an explicit `$null check instead of ?. and ?[, separate statements that test `$? or `$LASTEXITCODE instead of && and ||, end { } or try/finally instead of clean { }, Start-Job instead of a trailing &) in the offending source under WingetAppSetup/ or build/fragments/, then re-run the build.`n" + ($details -join "`n"))
+        exit 1
+    }
+
+    # Fail fast on reference drift (issue #154), on every platform. The module calls Windows-only
+    # cmdlets (Get-AppxPackage, Get-ScheduledTask, the WinGet client module, ...) that Get-Command
+    # cannot resolve on Linux/macOS, so off Windows the names in build/windows-only-commands.txt
+    # count as resolvable and every other name is checked exactly as on Windows. The guard used to be
+    # skipped off Windows entirely, which let the #154 regression pass a Linux build, -Check and the
+    # pre-commit hook (review finding P3-48). On Windows the list is not used to resolve anything,
+    # and every entry must resolve there, so the list cannot hide a missing module function.
+    $lookup = Get-DefinedFunctionLookup -Ast $assembledAst
+    $definedExact, $definedFolded = $lookup[0], $lookup[1]
+
+    $undefinedReferences = Get-UndefinedCommandReference -Ast $assembledAst -DefinedExact $definedExact -DefinedFolded $definedFolded -AssumeResolvable $assumeResolvable
+    if ($undefinedReferences) {
+        Write-Error ("$($label)Reference check failed: the generated script invokes command(s) that are not defined in the module and do not resolve as external cmdlets: $($undefinedReferences -join ', '). Add the missing function under WingetAppSetup/Public or WingetAppSetup/Private (or fix the calling fragment), then re-run the build." + $allowlistHint)
+        exit 1
+    }
+
+    # Fail fast on catalog-carried indirect-dispatch drift (full-repo review finding, 2026-07-16).
+    # See Get-UndefinedCatalogInstallReference's help for why GetCommandName() alone misses this.
+    $undefinedCatalogInstallReferences = Get-UndefinedCatalogInstallReference -Ast $assembledAst -DefinedExact $definedExact -DefinedFolded $definedFolded -AssumeResolvable $assumeResolvable
+    if ($undefinedCatalogInstallReferences) {
+        Write-Error ("$($label)Reference check failed: a catalog entry's 'install' or 'postInstall' field names function(s) that are not defined in the module and do not resolve as external cmdlets: $($undefinedCatalogInstallReferences -join ', '). Fix the string in WingetAppSetup/Public/AppCatalog.ps1 (or add the missing function), then re-run the build.")
+        exit 1
+    }
+
+    [pscustomobject]@{
+        Content             = $content
+        InvokedCommandNames = @(Get-InvokedCommandName -Ast $assembledAst)
+    }
 }
 
-# Fail fast on catalog-carried indirect-dispatch drift (full-repo review finding, 2026-07-16).
-# See Get-UndefinedCatalogInstallReference's help for why GetCommandName() alone misses this.
-$undefinedCatalogInstallReferences = Get-UndefinedCatalogInstallReference -Ast $assembledAst -DefinedExact $definedExact -DefinedFolded $definedFolded -AssumeResolvable $assumeResolvable
-if ($undefinedCatalogInstallReferences) {
-    Write-Error ("Reference check failed: a catalog entry's 'install' or 'postInstall' field names function(s) that are not defined in the module and do not resolve as external cmdlets: $($undefinedCatalogInstallReferences -join ', '). Fix the string in WingetAppSetup/Public/AppCatalog.ps1 (or add the missing function), then re-run the build.")
-    exit 1
+# Both scripts are assembled and checked before either is written or compared, so a guard that
+# fails on one leaves both files as they were.
+$builds = foreach ($target in $targets) {
+    $generated = New-GeneratedScriptContent -Target $target
+    [pscustomobject]@{ Target = $target; Content = $generated.Content; InvokedCommandNames = $generated.InvokedCommandNames }
 }
 
 # Keep build/windows-only-commands.txt honest. On Windows every entry must resolve, so a name
 # cannot be listed to silence the guard off Windows; Windows CI runs this on every push and pull
-# request. On every platform, an entry the installer no longer invokes only widens what an
-# off-Windows build assumes, so it is reported but does not fail the build.
+# request. On every platform, an entry neither generated script invokes any more only widens what
+# an off-Windows build assumes, so it is reported but does not fail the build.
 if ($onWindows) {
     $unresolvableEntries = @($windowsOnlyCommands | Where-Object { -not (Get-Command -Name $_ -ErrorAction SilentlyContinue) })
     if ($unresolvableEntries.Count -gt 0) {
-        Write-Error ("Allowlist check failed: build/windows-only-commands.txt lists name(s) that do not resolve as commands on Windows: $($unresolvableEntries -join ', '). The list may only hold real Windows-only cmdlets that the installer calls. Fix the spelling or remove the entry (a missing module function belongs under WingetAppSetup/), then re-run the build.")
+        Write-Error ("Allowlist check failed: build/windows-only-commands.txt lists name(s) that do not resolve as commands on Windows: $($unresolvableEntries -join ', '). The list may only hold real Windows-only cmdlets that the module calls. Fix the spelling or remove the entry (a missing module function belongs under WingetAppSetup/), then re-run the build.")
         exit 1
     }
 }
-$invokedCommandNames = @(Get-InvokedCommandName -Ast $assembledAst)
+$invokedCommandNames = @($builds | ForEach-Object { $_.InvokedCommandNames })
 $staleEntries = @($windowsOnlyCommands | Where-Object { $invokedCommandNames -notcontains $_ })
 if ($staleEntries.Count -gt 0) {
-    Write-Warning "build/windows-only-commands.txt lists command(s) the generated script no longer invokes: $($staleEntries -join ', '). Remove them so the list stays accurate."
+    Write-Warning "build/windows-only-commands.txt lists command(s) that the code of the generated scripts no longer invokes: $($staleEntries -join ', '). Remove them so the list stays accurate."
 }
 
 if ($Check) {
-    if (-not (Test-Path $OutputPath)) {
-        Write-Error "Check failed: '$OutputPath' does not exist. Run the build to generate it."
-        exit 1
+    foreach ($build in $builds) {
+        $path = $build.Target.OutputPath
+        if (-not (Test-Path $path)) {
+            Write-Error "Check failed: '$path' does not exist. Run the build to generate it."
+            exit 1
+        }
+        # Get-Content -Raw silently strips a UTF-8 BOM, so a re-saved-with-BOM copy would pass a
+        # text comparison while not being what the build produces. Reject a BOM explicitly; the
+        # build always writes BOM-less UTF-8.
+        $onDiskBytes = [System.IO.File]::ReadAllBytes($path)
+        if ($onDiskBytes.Length -ge 3 -and $onDiskBytes[0] -eq 0xEF -and $onDiskBytes[1] -eq 0xBB -and $onDiskBytes[2] -eq 0xBF) {
+            Write-Error "Check failed: '$path' starts with a UTF-8 BOM; the build writes BOM-less UTF-8. Re-run build/Build-WingetInstallScript.ps1 to regenerate it."
+            exit 1
+        }
+        # Normalize the on-disk copy to LF before comparing; a Windows checkout with
+        # core.autocrlf=true can present the file with CRLF even when it is in sync.
+        $current = ((Get-Content -Path $path -Raw -Encoding UTF8) -replace "`r`n", "`n")
+        if ($current -ne $build.Content) {
+            Write-Error "Check failed: '$path' is out of date. Re-run build/Build-WingetInstallScript.ps1."
+            exit 1
+        }
+        Write-Host "Check passed: '$path' is up to date."
     }
-    # Get-Content -Raw silently strips a UTF-8 BOM, so a re-saved-with-BOM copy would pass a text
-    # comparison while not being what the build produces. Reject a BOM explicitly; the build always
-    # writes BOM-less UTF-8.
-    $onDiskBytes = [System.IO.File]::ReadAllBytes($OutputPath)
-    if ($onDiskBytes.Length -ge 3 -and $onDiskBytes[0] -eq 0xEF -and $onDiskBytes[1] -eq 0xBB -and $onDiskBytes[2] -eq 0xBF) {
-        Write-Error "Check failed: '$OutputPath' starts with a UTF-8 BOM; the build writes BOM-less UTF-8. Re-run build/Build-WingetInstallScript.ps1 to regenerate it."
-        exit 1
-    }
-    # Normalize the on-disk copy to LF before comparing; a Windows checkout with
-    # core.autocrlf=true can present the file with CRLF even when it is in sync.
-    $current = ((Get-Content -Path $OutputPath -Raw -Encoding UTF8) -replace "`r`n", "`n")
-    if ($current -ne $content) {
-        Write-Error "Check failed: '$OutputPath' is out of date. Re-run build/Build-WingetInstallScript.ps1."
-        exit 1
-    }
-    Write-Host "Check passed: '$OutputPath' is up to date."
     exit 0
 }
 
 # Write BOM-less UTF-8 explicitly: under Windows PowerShell 5.1, Set-Content -Encoding UTF8 would
 # prepend a BOM, which the -Check BOM guard above rejects on the next verification.
-[System.IO.File]::WriteAllText($OutputPath, $content, [System.Text.UTF8Encoding]::new($false))
-Write-Host "Generated '$OutputPath' from the WingetAppSetup module."
+foreach ($build in $builds) {
+    [System.IO.File]::WriteAllText($build.Target.OutputPath, $build.Content, [System.Text.UTF8Encoding]::new($false))
+    Write-Host "Generated '$($build.Target.OutputPath)' from the WingetAppSetup module."
+}

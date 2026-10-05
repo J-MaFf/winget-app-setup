@@ -7,10 +7,10 @@
     PowerShellVersion = '5.1'
 
     # Every function the module defines, Public/ and Private/ alike (review finding P3-44). The
-    # module's only consumers are this repository's entry scripts (winget-app-uninstall.ps1,
-    # e2e/Assert-Install.ps1); the installer itself is the generated single file, which does not
-    # read this manifest. An explicit list had to be kept equal to Public/*.ps1 by a build check,
-    # and a function missing from it was filtered out of manifest imports without a word (#191).
+    # module's only consumer is e2e/Assert-Install.ps1; the installer and the uninstaller are
+    # generated single files, which do not read this manifest. An explicit list had to be kept
+    # equal to Public/*.ps1 by a build check, and a function missing from it was filtered out of
+    # manifest imports without a word (#191).
     FunctionsToExport = '*'
 
     CmdletsToExport   = @()

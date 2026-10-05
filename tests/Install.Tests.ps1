@@ -384,7 +384,7 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
             $result | Should -Be $_
             Should -Invoke Restart-WithElevation -Times 1 -Exactly -ParameterFilter {
                 ($AdditionalArguments -contains '-SkipSystemCheck') -and -not ($AdditionalArguments -contains '-WhatIf') -and
-                -not ($AdditionalArguments -contains '-NonInteractive') -and -not $InPlace -and
+                -not ($AdditionalArguments -contains '-NonInteractive') -and
                 # The SHA256 the entry script took at startup, so a file changed since then is not run.
                 ($ExpectedSha256 -eq $script:InstallerScriptSha256)
             }

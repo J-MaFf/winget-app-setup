@@ -144,8 +144,8 @@ function Get-CurrentWindowsPrincipal {
     [Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()
 }
 
-# The parts of Restart-WithElevation (Public/Elevation.ps1, exported for the uninstaller). It runs
-# under Windows PowerShell 5.1 too, so they stay 5.1-compatible.
+# The parts of Restart-WithElevation (Public/Elevation.ps1), which the installer and the uninstaller
+# call. It runs under Windows PowerShell 5.1 too, so they stay 5.1-compatible.
 
 <#
 .SYNOPSIS
@@ -182,7 +182,8 @@ function Get-WindowsPowerShellPath {
 
 <#
 .SYNOPSIS
-    Returns the folder the elevated relaunch copies the installer under: %SystemRoot%\Temp.
+    Returns the folder the elevated relaunch copies the installer or the uninstaller under:
+    %SystemRoot%\Temp.
 .DESCRIPTION
     Standard users can create entries there but cannot list, rename or delete another account's,
     unlike the end user's %TEMP% (review finding P3-11). A function so tests can point it elsewhere.

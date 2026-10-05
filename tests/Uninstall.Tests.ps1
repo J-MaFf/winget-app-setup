@@ -1,58 +1,13 @@
 # Uninstall.Tests.ps1
 # Tests for WingetAppSetup/Public/Uninstall.ps1 (Invoke-WingetUninstall) and its private per-app
 # step (Private/AppUninstall.ps1: Uninstall-CatalogApp, Get-HostingShellSkipReason), plus the
-# winget-app-uninstall.ps1 entry script that runs them (review findings P2-19 and P3-18).
+# generated winget-app-uninstall.ps1, whose entry block (build/fragments/uninstall-tail.ps1) runs
+# them (review findings P2-19 and P3-18).
 
 BeforeAll {
     . (Join-Path $PSScriptRoot 'TestHelpers.ps1')
-
-    # A copy of winget-app-uninstall.ps1 next to a module folder, run in a child PowerShell so its
-    # `exit` ends the child, not the test run. -ModuleSource copies the real module and adds
-    # -Overrides as one more Public file, loaded last, so it replaces the functions that would touch
-    # the machine; without it the module is just -Overrides (a stand-in).
-    function Invoke-TestUninstallerScript {
-        param (
-            [Parameter(Mandatory = $true)][string]$Root,
-            [Parameter(Mandatory = $true)][string]$Overrides,
-            [string]$ModuleSource,
-            [string[]]$ScriptArguments = @(),
-            [hashtable]$Environment = @{},
-            [switch]$NoModule
-        )
-
-        $moduleRoot = Join-Path $Root 'WingetAppSetup'
-        if ($NoModule) {
-            # The script copied on its own, without the module folder next to it.
-            [void](New-Item -ItemType Directory -Path $Root -Force)
-        }
-        elseif ($ModuleSource) {
-            Copy-Item -LiteralPath $ModuleSource -Destination $moduleRoot -Recurse
-            Set-Content -LiteralPath (Join-Path $moduleRoot 'Public/zz-TestOverrides.ps1') -Value $Overrides
-        }
-        else {
-            [void](New-Item -ItemType Directory -Path $moduleRoot -Force)
-            Set-Content -LiteralPath (Join-Path $moduleRoot 'WingetAppSetup.psd1') -Value "@{ RootModule = 'WingetAppSetup.psm1'; ModuleVersion = '1.0.0'; FunctionsToExport = '*' }"
-            Set-Content -LiteralPath (Join-Path $moduleRoot 'WingetAppSetup.psm1') -Value $Overrides
-        }
-        Copy-Item -LiteralPath $script:UninstallerScriptPath -Destination $Root
-        $scriptCopy = Join-Path $Root 'winget-app-uninstall.ps1'
-
-        $saved = @{}
-        foreach ($name in $Environment.Keys) {
-            $saved[$name] = [System.Environment]::GetEnvironmentVariable($name)
-            [System.Environment]::SetEnvironmentVariable($name, $Environment[$name])
-        }
-        try {
-            $output = & (Get-Process -Id $PID).Path -NoLogo -NoProfile -NonInteractive -File $scriptCopy @ScriptArguments 2>&1 | Out-String
-            $exitCode = $LASTEXITCODE
-        }
-        finally {
-            foreach ($name in $saved.Keys) {
-                [System.Environment]::SetEnvironmentVariable($name, $saved[$name])
-            }
-        }
-        return [pscustomobject]@{ ExitCode = $exitCode; Output = $output }
-    }
+    # The generated winget-app-uninstall.ps1 runs in child processes below, through
+    # Invoke-TestUninstallerScript (tests/TestHelpers.ps1).
 }
 
 Describe 'Invoke-WingetUninstall' {
@@ -625,15 +580,18 @@ Describe 'Invoke-WingetUninstall' {
 
 Describe 'winget-app-uninstall.ps1' {
     BeforeAll {
-        # A stand-in module: the entry script's own logic is what is under test here.
-        $script:standInModule = @'
+        # Stand-ins for the module functions the entry block calls, inserted into the generated
+        # uninstaller before its entry block: the entry block's own logic is what is under test.
+        $script:standIns = @'
 function Test-IsAdmin { $env:UNINSTALL_TEST_ADMIN -eq '1' }
 function Write-ErrorMessage { param ([string]$Message) Write-Host "ERROR: $Message" }
 function Write-Success { param ([string]$Message) Write-Host "SUCCESS: $Message" }
 function Write-Info { param ([string]$Message) Write-Host "INFO: $Message" }
 function Restart-WithElevation {
-    param ([string]$ScriptPath, [string[]]$AdditionalArguments, [string]$ExpectedSha256, [switch]$InPlace, [switch]$NonInteractive)
-    Write-Host "RELAUNCH InPlace=$([bool]$InPlace) NonInteractive=$([bool]$NonInteractive)"
+    # Advanced, with the real parameters: a parameter the real one does not have stops the call.
+    [CmdletBinding()]
+    param ([string]$ScriptPath, [string[]]$AdditionalArguments, [string]$ExpectedSha256, [switch]$NonInteractive)
+    Write-Host "RELAUNCH Path=$ScriptPath ExpectedSha256=$ExpectedSha256 NonInteractive=$([bool]$NonInteractive)"
     [pscustomobject]@{ Started = $false; ExitCode = 4 }
 }
 function Invoke-WingetUninstall {
@@ -651,6 +609,7 @@ function Wait-InstallerExitKeyPress {
     if ($env:UNINSTALL_TEST_STOP_AT_PROMPT -eq '1') { throw [System.Management.Automation.PipelineStoppedException]::new() }
 }
 '@
+        $script:noFileMessage = 'ERROR: The uninstaller runs only from a file, and this run has none (irm | iex). Nothing was changed.'
     }
 
     It 'Exits with Invoke-WingetUninstall''s code (<Code>) and passes its switches on' -ForEach @(
@@ -659,7 +618,7 @@ function Wait-InstallerExitKeyPress {
         @{ Code = 2 }
         @{ Code = 3010 }
     ) {
-        $run = Invoke-TestUninstallerScript -Root (Join-Path $TestDrive "code-$Code") -Overrides $script:standInModule -ScriptArguments @('-NonInteractive') -Environment @{ UNINSTALL_TEST_ADMIN = '1'; UNINSTALL_TEST_CODE = "$Code"; UNINSTALL_TEST_THROW = $null }
+        $run = Invoke-TestUninstallerScript -Root (Join-Path $TestDrive "code-$Code") -Overrides $script:standIns -ScriptArguments @('-NonInteractive') -Environment @{ UNINSTALL_TEST_ADMIN = '1'; UNINSTALL_TEST_CODE = "$Code"; UNINSTALL_TEST_THROW = $null }
 
         # Off Windows a process exit code keeps only its low 8 bits (3010 arrives as 194).
         $expected = $Code
@@ -672,38 +631,31 @@ function Wait-InstallerExitKeyPress {
     }
 
     It 'Exits 5 when the uninstall stops on an unexpected error' {
-        $run = Invoke-TestUninstallerScript -Root (Join-Path $TestDrive 'throws') -Overrides $script:standInModule -Environment @{ UNINSTALL_TEST_ADMIN = '1'; UNINSTALL_TEST_CODE = '0'; UNINSTALL_TEST_THROW = '1' }
+        $run = Invoke-TestUninstallerScript -Root (Join-Path $TestDrive 'throws') -Overrides $script:standIns -Environment @{ UNINSTALL_TEST_ADMIN = '1'; UNINSTALL_TEST_CODE = '0'; UNINSTALL_TEST_THROW = '1' }
 
         $run.ExitCode | Should -Be 5
         $run.Output | Should -Match 'ERROR: The uninstaller stopped on an unexpected error before it finished: unexpected \(test\)'
     }
 
-    It 'Exits 5, not 0, when the module next to it cannot be loaded (<Case>)' -ForEach @(
-        @{ Case = 'no module folder'; NoModule = $true; Module = '# not written' }
-        @{ Case = 'a module file that fails to load'; NoModule = $false; Module = "throw 'module file broken (test)'" }
-    ) {
-        $run = Invoke-TestUninstallerScript -Root (Join-Path $TestDrive "no-module-$NoModule") -Overrides $Module -NoModule:$NoModule -ScriptArguments @('-NonInteractive') -Environment @{ UNINSTALL_TEST_ADMIN = '1'; UNINSTALL_TEST_CODE = '0'; UNINSTALL_TEST_THROW = $null }
-
-        $run.ExitCode | Should -Be 5
-        $run.Output | Should -Match 'The uninstaller cannot run: the WingetAppSetup module folder next to it could not be loaded'
-        $run.Output | Should -Not -Match 'UNINSTALL '
-    }
-
     It 'Exits 5 when the unexpected-error report itself fails' {
-        # A module without Write-ErrorMessage: the catch block's report fails, which used to leave
-        # the exit code unset, and `exit $null` is 0.
-        $module = $script:standInModule -replace '(?m)^function Write-ErrorMessage .*$', ''
-        $run = Invoke-TestUninstallerScript -Root (Join-Path $TestDrive 'report-fails') -Overrides $module -Environment @{ UNINSTALL_TEST_ADMIN = '1'; UNINSTALL_TEST_CODE = '0'; UNINSTALL_TEST_THROW = '1' }
+        # Without Write-ErrorMessage the catch block's report fails, which used to leave the exit
+        # code unset, and `exit $null` is 0.
+        $overrides = $script:standIns + "`nRemove-Item -Path Function:\Write-ErrorMessage"
+        $run = Invoke-TestUninstallerScript -Root (Join-Path $TestDrive 'report-fails') -Overrides $overrides -Environment @{ UNINSTALL_TEST_ADMIN = '1'; UNINSTALL_TEST_CODE = '0'; UNINSTALL_TEST_THROW = '1' }
 
         $run.Output | Should -Match 'UNINSTALL WhatIf=False'
+        $run.Output | Should -Not -Match 'ERROR: The uninstaller stopped'
         $run.ExitCode | Should -Be 5
     }
 
-    It 'Asks for elevation with the caller''s -NonInteractive and exits with its code when not elevated' {
-        $run = Invoke-TestUninstallerScript -Root (Join-Path $TestDrive 'not-admin') -Overrides $script:standInModule -ScriptArguments @('-NonInteractive') -Environment @{ UNINSTALL_TEST_ADMIN = '0'; UNINSTALL_TEST_CODE = '0'; UNINSTALL_TEST_THROW = $null }
+    It 'Asks for elevation with the caller''s -NonInteractive and the file''s SHA256 at startup, and exits with its code when not elevated (review finding P3-11)' {
+        $run = Invoke-TestUninstallerScript -Root (Join-Path $TestDrive 'not-admin') -Overrides $script:standIns -ScriptArguments @('-NonInteractive') -Environment @{ UNINSTALL_TEST_ADMIN = '0'; UNINSTALL_TEST_CODE = '0'; UNINSTALL_TEST_THROW = $null }
 
         $run.ExitCode | Should -Be 4
-        $run.Output | Should -Match 'RELAUNCH InPlace=True NonInteractive=True'
+        # The file itself, checked against the hash it had when the run started: the elevated
+        # window runs a checked copy of it, never the file in place.
+        $sha256 = (Get-FileHash -LiteralPath $run.Path -Algorithm SHA256).Hash
+        $run.Output | Should -Match ([regex]::Escape("RELAUNCH Path=$($run.Path) ExpectedSha256=$sha256 NonInteractive=True"))
         $run.Output | Should -Not -Match 'UNINSTALL '
         # The elevated window holds itself open; the window that asked only reports its code.
         $run.Output | Should -Not -Match 'WAIT '
@@ -715,7 +667,7 @@ function Wait-InstallerExitKeyPress {
     ) {
         # The elevated window this script relaunches in closes when the script exits, and the
         # uninstaller keeps no transcript: the summary grid view used to hold that window open.
-        $run = Invoke-TestUninstallerScript -Root (Join-Path $TestDrive "wait-$Expected") -Overrides $script:standInModule -ScriptArguments $Arguments -Environment @{ UNINSTALL_TEST_ADMIN = '1'; UNINSTALL_TEST_CODE = '1'; UNINSTALL_TEST_THROW = $null; UNINSTALL_TEST_STOP_AT_PROMPT = $null }
+        $run = Invoke-TestUninstallerScript -Root (Join-Path $TestDrive "wait-$Expected") -Overrides $script:standIns -ScriptArguments $Arguments -Environment @{ UNINSTALL_TEST_ADMIN = '1'; UNINSTALL_TEST_CODE = '1'; UNINSTALL_TEST_THROW = $null; UNINSTALL_TEST_STOP_AT_PROMPT = $null }
 
         $run.ExitCode | Should -Be 1
         $run.Output | Should -Match "WAIT NonInteractive=$Expected"
@@ -723,7 +675,7 @@ function Wait-InstallerExitKeyPress {
     }
 
     It 'Waits for a key press after an unexpected error too, and still exits 5' {
-        $run = Invoke-TestUninstallerScript -Root (Join-Path $TestDrive 'wait-after-error') -Overrides $script:standInModule -Environment @{ UNINSTALL_TEST_ADMIN = '1'; UNINSTALL_TEST_CODE = '0'; UNINSTALL_TEST_THROW = '1'; UNINSTALL_TEST_STOP_AT_PROMPT = $null }
+        $run = Invoke-TestUninstallerScript -Root (Join-Path $TestDrive 'wait-after-error') -Overrides $script:standIns -Environment @{ UNINSTALL_TEST_ADMIN = '1'; UNINSTALL_TEST_CODE = '0'; UNINSTALL_TEST_THROW = '1'; UNINSTALL_TEST_STOP_AT_PROMPT = $null }
 
         $run.ExitCode | Should -Be 5
         $run.Output.IndexOf('ERROR: The uninstaller stopped on an unexpected error') | Should -BeGreaterThan -1
@@ -736,30 +688,49 @@ function Wait-InstallerExitKeyPress {
     ) {
         # A -File script stopped by Ctrl+C exits 0, which the window that asked for elevation would
         # then report as the uninstall's result.
-        $run = Invoke-TestUninstallerScript -Root (Join-Path $TestDrive "stopped-at-prompt-$Code") -Overrides $script:standInModule -Environment @{ UNINSTALL_TEST_ADMIN = '1'; UNINSTALL_TEST_CODE = "$Code"; UNINSTALL_TEST_THROW = $null; UNINSTALL_TEST_STOP_AT_PROMPT = '1' }
+        $run = Invoke-TestUninstallerScript -Root (Join-Path $TestDrive "stopped-at-prompt-$Code") -Overrides $script:standIns -Environment @{ UNINSTALL_TEST_ADMIN = '1'; UNINSTALL_TEST_CODE = "$Code"; UNINSTALL_TEST_THROW = $null; UNINSTALL_TEST_STOP_AT_PROMPT = '1' }
 
         $run.Output | Should -Match 'WAIT NonInteractive=False'
         $run.ExitCode | Should -Be $Code
     }
 
     It 'Previews in place, without elevating, when not elevated and -WhatIf is given' {
-        $run = Invoke-TestUninstallerScript -Root (Join-Path $TestDrive 'preview') -Overrides $script:standInModule -ScriptArguments @('-WhatIf') -Environment @{ UNINSTALL_TEST_ADMIN = '0'; UNINSTALL_TEST_CODE = '0'; UNINSTALL_TEST_THROW = $null }
+        $run = Invoke-TestUninstallerScript -Root (Join-Path $TestDrive 'preview') -Overrides $script:standIns -ScriptArguments @('-WhatIf') -Environment @{ UNINSTALL_TEST_ADMIN = '0'; UNINSTALL_TEST_CODE = '0'; UNINSTALL_TEST_THROW = $null }
 
         $run.ExitCode | Should -Be 0
         $run.Output | Should -Not -Match 'RELAUNCH'
         $run.Output | Should -Match 'UNINSTALL WhatIf=True'
         $run.Output | Should -Match 'INFO: \[DRY-RUN\] A real run needs administrator rights'
     }
+
+    It 'Changes nothing and exits 5 under irm | iex when nobody is at the console: it runs only from a file' {
+        # Elevated or not: a run without a file can neither relaunch nor be checked.
+        $run = Invoke-TestUninstallerScript -Root (Join-Path $TestDrive 'iex-unattended') -Overrides $script:standIns -ViaInvokeExpression -AfterInvokeExpression "Write-Host 'console kept'" -Environment @{ UNINSTALL_TEST_ADMIN = '1'; UNINSTALL_TEST_CODE = '0'; UNINSTALL_TEST_THROW = $null; WINGET_APP_SETUP_NONINTERACTIVE = '1' }
+
+        $run.ExitCode | Should -Be 5
+        $run.Output | Should -Match ([regex]::Escape($script:noFileMessage))
+        $run.Output | Should -Not -Match 'UNINSTALL |RELAUNCH|WAIT |SUCCESS:|console kept'
+    }
+
+    It 'Keeps an interactive irm | iex console open, with $LASTEXITCODE 5, instead of closing it with the message' {
+        $overrides = $script:standIns + "`nfunction Test-EffectiveNonInteractive { param ([switch]`$NonInteractive) [bool]`$NonInteractive }"
+        $run = Invoke-TestUninstallerScript -Root (Join-Path $TestDrive 'iex-interactive') -Overrides $overrides -ViaInvokeExpression -AfterInvokeExpression 'Write-Host "console kept LASTEXITCODE=$LASTEXITCODE"; exit 0' -Environment @{ UNINSTALL_TEST_ADMIN = '0'; UNINSTALL_TEST_CODE = '0'; UNINSTALL_TEST_THROW = $null; WINGET_APP_SETUP_NONINTERACTIVE = $null }
+
+        $run.ExitCode | Should -Be 0
+        $run.Output | Should -Match ([regex]::Escape($script:noFileMessage))
+        $run.Output | Should -Match 'console kept LASTEXITCODE=5'
+        $run.Output | Should -Not -Match 'UNINSTALL |RELAUNCH|WAIT '
+    }
 }
 
-# The P2-19 scenario end to end: the real winget-app-uninstall.ps1 and the real module, with only
-# what would touch the machine replaced. Before this change the script printed 'Skipping: <id>
+# The P2-19 scenario end to end: the generated winget-app-uninstall.ps1 with every module function,
+# with only what would touch the machine replaced. Before P2-19 the script printed 'Skipping: <id>
 # (not installed; winget list exit code unavailable)' for every app, removed Winget-AutoUpdate and
 # exited 0 when winget could not be started.
-Describe 'winget-app-uninstall.ps1 with the real module (P2-19)' {
+Describe 'winget-app-uninstall.ps1 with the real module functions (P2-19)' {
     BeforeAll {
         $script:moduleOverrides = @'
-# Loaded after every module file, so these replace the module's own functions in the child run.
+# Inserted after every module function, so these replace the module's own in the child run.
 function Test-IsAdmin { $true }
 function Get-DefaultAppCatalog { @(@{ name = 'Contoso.AppOne' }, @{ name = 'Contoso.AppTwo' }) }
 function Get-WingetPolicyBlock {
@@ -819,11 +790,11 @@ function Invoke-WingetProcess {
     return $result
 }
 '@
-        $script:moduleSource = Join-Path $script:RepoRoot 'WingetAppSetup'
+
     }
 
     It 'Exits 2 and removes nothing when winget cannot be started for the account' {
-        $run = Invoke-TestUninstallerScript -Root (Join-Path $TestDrive 'no-winget') -ModuleSource $script:moduleSource -Overrides $script:moduleOverrides -Environment @{ UNINSTALL_TEST_SCENARIO = 'NoWinget'; WINGET_APP_SETUP_NONINTERACTIVE = '1' }
+        $run = Invoke-TestUninstallerScript -Root (Join-Path $TestDrive 'no-winget') -Overrides $script:moduleOverrides -Environment @{ UNINSTALL_TEST_SCENARIO = 'NoWinget'; WINGET_APP_SETUP_NONINTERACTIVE = '1' }
 
         $run.ExitCode | Should -Be 2
         $run.Output | Should -Not -Match 'FAKE: Winget-AutoUpdate removed'
@@ -834,7 +805,7 @@ function Invoke-WingetProcess {
 
     It 'Exits 2, runs no winget and keeps Winget-AutoUpdate when Group Policy turns winget off (review finding P3-30)' {
         # The real Initialize-Winget reads the policy before it starts winget at all.
-        $run = Invoke-TestUninstallerScript -Root (Join-Path $TestDrive 'policy-blocked') -ModuleSource $script:moduleSource -Overrides $script:moduleOverrides -Environment @{ UNINSTALL_TEST_SCENARIO = 'PolicyBlocked'; WINGET_APP_SETUP_NONINTERACTIVE = '1' }
+        $run = Invoke-TestUninstallerScript -Root (Join-Path $TestDrive 'policy-blocked') -Overrides $script:moduleOverrides -Environment @{ UNINSTALL_TEST_SCENARIO = 'PolicyBlocked'; WINGET_APP_SETUP_NONINTERACTIVE = '1' }
 
         $run.ExitCode | Should -Be 2
         $run.Output | Should -Not -Match 'FAKE: winget'
@@ -845,7 +816,7 @@ function Invoke-WingetProcess {
     }
 
     It 'Exits 1 and keeps Winget-AutoUpdate when winget starts but cannot check the apps' {
-        $run = Invoke-TestUninstallerScript -Root (Join-Path $TestDrive 'list-cannot-launch') -ModuleSource $script:moduleSource -Overrides $script:moduleOverrides -Environment @{ UNINSTALL_TEST_SCENARIO = 'ListCannotLaunch'; WINGET_APP_SETUP_NONINTERACTIVE = '1' }
+        $run = Invoke-TestUninstallerScript -Root (Join-Path $TestDrive 'list-cannot-launch') -Overrides $script:moduleOverrides -Environment @{ UNINSTALL_TEST_SCENARIO = 'ListCannotLaunch'; WINGET_APP_SETUP_NONINTERACTIVE = '1' }
 
         $run.ExitCode | Should -Be 1
         $run.Output | Should -Not -Match 'FAKE: Winget-AutoUpdate removed'
@@ -853,17 +824,19 @@ function Invoke-WingetProcess {
         $run.Output | Should -Match ([regex]::Escape('Failed to uninstall: Contoso.AppOne (could not check whether it is installed: winget could not be started (The system cannot find the file specified)).'))
     }
 
-    It 'Exits 0 after removing every app and then Winget-AutoUpdate when winget works' {
-        $run = Invoke-TestUninstallerScript -Root (Join-Path $TestDrive 'healthy') -ModuleSource $script:moduleSource -Overrides $script:moduleOverrides -Environment @{ UNINSTALL_TEST_SCENARIO = 'Healthy'; WINGET_APP_SETUP_NONINTERACTIVE = '1' }
+    It 'Exits 0 after removing every app and then Winget-AutoUpdate when winget works, from a folder that holds nothing but the file' {
+        $run = Invoke-TestUninstallerScript -Root (Join-Path $TestDrive 'healthy') -Overrides $script:moduleOverrides -Environment @{ UNINSTALL_TEST_SCENARIO = 'Healthy'; WINGET_APP_SETUP_NONINTERACTIVE = '1' }
 
         $run.ExitCode | Should -Be 0
         $run.Output | Should -Match 'FAKE: winget uninstall --exact --id Contoso\.AppOne --silent --accept-source-agreements --disable-interactivity'
         $run.Output | Should -Match 'FAKE: winget uninstall --exact --id Contoso\.AppTwo'
         $run.Output.IndexOf('FAKE: winget uninstall --exact --id Contoso.AppTwo') | Should -BeLessThan $run.Output.IndexOf('FAKE: Winget-AutoUpdate removed')
+        # One self-contained file: no WingetAppSetup folder next to it.
+        @(Get-ChildItem -LiteralPath (Split-Path -Parent $run.Path) -Force | ForEach-Object { $_.Name }) | Should -Be @('winget-app-uninstall.ps1')
     }
 
     It 'Exits 3010 when the apps are removed and a restart finishes removing them' {
-        $run = Invoke-TestUninstallerScript -Root (Join-Path $TestDrive 'restart') -ModuleSource $script:moduleSource -Overrides $script:moduleOverrides -Environment @{ UNINSTALL_TEST_SCENARIO = 'RestartToFinish'; WINGET_APP_SETUP_NONINTERACTIVE = '1' }
+        $run = Invoke-TestUninstallerScript -Root (Join-Path $TestDrive 'restart') -Overrides $script:moduleOverrides -Environment @{ UNINSTALL_TEST_SCENARIO = 'RestartToFinish'; WINGET_APP_SETUP_NONINTERACTIVE = '1' }
 
         # Off Windows a process exit code keeps only its low 8 bits (3010 arrives as 194).
         $expected = 3010
@@ -879,7 +852,7 @@ function Invoke-WingetProcess {
     It 'Holds the window at ''Press any key to exit...'' after the failure summary when someone is at the console, and keeps exit code 1 when stopped there (review of work-order item 26)' {
         # The elevated window the script relaunches in closes when the script exits, and the
         # uninstaller keeps no transcript. No CI variables: a CI run never waits.
-        $run = Invoke-TestUninstallerScript -Root (Join-Path $TestDrive 'interactive') -ModuleSource $script:moduleSource -Overrides $script:moduleOverrides -Environment @{ UNINSTALL_TEST_SCENARIO = 'ListCannotLaunch'; UNINSTALL_TEST_INTERACTIVE = '1'; WINGET_APP_SETUP_NONINTERACTIVE = $null; CI = $null; GITHUB_ACTIONS = $null; TF_BUILD = $null }
+        $run = Invoke-TestUninstallerScript -Root (Join-Path $TestDrive 'interactive') -Overrides $script:moduleOverrides -Environment @{ UNINSTALL_TEST_SCENARIO = 'ListCannotLaunch'; UNINSTALL_TEST_INTERACTIVE = '1'; WINGET_APP_SETUP_NONINTERACTIVE = $null; CI = $null; GITHUB_ACTIONS = $null; TF_BUILD = $null }
 
         $run.ExitCode | Should -Be 1
         $failureAt = $run.Output.IndexOf('Failed to uninstall: Contoso.AppOne')
@@ -888,7 +861,7 @@ function Invoke-WingetProcess {
     }
 
     It 'Does not wait for a key press with -NonInteractive' {
-        $run = Invoke-TestUninstallerScript -Root (Join-Path $TestDrive 'interactive-console-noninteractive-run') -ModuleSource $script:moduleSource -Overrides $script:moduleOverrides -ScriptArguments @('-NonInteractive') -Environment @{ UNINSTALL_TEST_SCENARIO = 'ListCannotLaunch'; UNINSTALL_TEST_INTERACTIVE = '1'; WINGET_APP_SETUP_NONINTERACTIVE = $null; CI = $null; GITHUB_ACTIONS = $null; TF_BUILD = $null }
+        $run = Invoke-TestUninstallerScript -Root (Join-Path $TestDrive 'interactive-console-noninteractive-run') -Overrides $script:moduleOverrides -ScriptArguments @('-NonInteractive') -Environment @{ UNINSTALL_TEST_SCENARIO = 'ListCannotLaunch'; UNINSTALL_TEST_INTERACTIVE = '1'; WINGET_APP_SETUP_NONINTERACTIVE = $null; CI = $null; GITHUB_ACTIONS = $null; TF_BUILD = $null }
 
         $run.ExitCode | Should -Be 1
         $run.Output | Should -Match 'Failed to uninstall: Contoso\.AppOne'

@@ -250,9 +250,8 @@ Describe 'No install path asks a yes/no question (issue #230)' {
     }
 
     It 'Neither shipped entry point calls Read-Host or Pause, except the masked TightVNC password prompt' {
-        # The generated installer and the uninstaller are what users actually run. The uninstaller
-        # is checked here because it is not generated - it hand-calls into the module, so nothing
-        # else would catch a prompt reappearing in it.
+        # The generated installer and uninstaller are what users actually run. Their entry blocks
+        # come from build/fragments, which the module scan above does not cover.
         Get-PromptingCommand -Path $script:InstallerScriptPath, $script:UninstallerScriptPath | Should -BeNullOrEmpty
     }
 
@@ -262,6 +261,28 @@ Describe 'No install path asks a yes/no question (issue #230)' {
         $tightVncFile = Join-Path $script:WingetAppSetupRoot 'Private/TightVnc.ps1'
         @(Get-CommandCaller -Path $tightVncFile -CommandName 'Read-Host' | Sort-Object -Unique) | Should -Be @($script:SanctionedPromptFunction)
         @(Get-CommandCaller -Path $script:InstallerScriptPath -CommandName $script:SanctionedPromptFunction | Sort-Object -Unique) | Should -Be @('Get-TightVncSecret')
-        Get-Content -Path $script:UninstallerScriptPath -Raw | Should -Not -Match 'TightVnc'
+
+        # The generated uninstaller carries every module function (wgt-gq8.43), the TightVNC ones
+        # included, so what matters is that nothing its entry block calls, directly or through other
+        # functions, reaches them, or the post-install hooks that configure TightVNC.
+        $uninstallerAst = [System.Management.Automation.Language.Parser]::ParseFile($script:UninstallerScriptPath, [ref]$null, [ref]$null)
+        $calls = @{}
+        foreach ($function in $uninstallerAst.FindAll({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $false)) {
+            $calls[$function.Name] = @($function.Body.FindAll({ param($node) $node -is [System.Management.Automation.Language.CommandAst] }, $true) | ForEach-Object { $_.GetCommandName() } | Where-Object { $_ } | Sort-Object -Unique)
+        }
+        $entryCalls = @($uninstallerAst.EndBlock.Statements | Where-Object { $_ -isnot [System.Management.Automation.Language.FunctionDefinitionAst] } | ForEach-Object {
+                $_.FindAll({ param($node) $node -is [System.Management.Automation.Language.CommandAst] }, $true) | ForEach-Object { $_.GetCommandName() }
+            } | Where-Object { $_ } | Sort-Object -Unique)
+        $entryCalls | Should -Contain 'Invoke-WingetUninstall'
+        $reached = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+        $pending = [System.Collections.Generic.Queue[string]]::new([string[]]$entryCalls)
+        while ($pending.Count -gt 0) {
+            $name = $pending.Dequeue()
+            if (-not $reached.Add($name) -or -not $calls.ContainsKey($name)) { continue }
+            foreach ($callee in $calls[$name]) { $pending.Enqueue($callee) }
+        }
+
+        $reached | Should -Contain 'Uninstall-CatalogApp' -Because 'the walk must follow the uninstall path'
+        @($reached | Where-Object { $_ -match 'TightVnc' -or $_ -in @($script:SanctionedPromptFunction, 'Read-Host', 'Invoke-AppPostInstall') }) | Should -BeNullOrEmpty
     }
 }

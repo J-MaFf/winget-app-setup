@@ -69,6 +69,21 @@ BeforeAll {
         }
     }
 
+    # Where a parsed file dot-sources a generated script (the installer or the uninstaller), by the
+    # path variable TestHelpers.ps1 sets or by file name, as '<file>:<line>'.
+    function Find-GeneratedScriptDotSource {
+        param ([Parameter(Mandatory = $true)][object[]]$File)
+
+        foreach ($item in $File) {
+            foreach ($command in Get-CommandAst -Ast $item.Ast) {
+                if ($command.InvocationOperator -eq [System.Management.Automation.Language.TokenKind]::Dot -and
+                    $command.CommandElements[0].Extent.Text -match 'InstallerScriptPath|UninstallerScriptPath|winget-app-install|winget-app-uninstall') {
+                    '{0}:{1}' -f $item.Name, $command.Extent.StartLineNumber
+                }
+            }
+        }
+    }
+
     # A native executable (winget, powershell.exe), real or stand-in, takes its arguments as $args.
     function Test-TakesArgsOnly {
         param ([Parameter(Mandatory = $true)][System.Management.Automation.CommandInfo]$Command)
@@ -85,20 +100,27 @@ BeforeAll {
 }
 
 Describe 'Test harness (tests/TestHelpers.ps1, wgt-gq8.5)' {
-    It 'never dot-sources the generated installer into a test file' {
-        # Dot-sourcing winget-app-install.ps1 re-declares every function from the GENERATED copy
-        # over the module source TestHelpers.ps1 loaded, so the tests exercise whatever was last
-        # built instead of the code being edited (CLAUDE.md, Testing).
-        $offenders = foreach ($file in $script:TestFiles) {
-            foreach ($command in Get-CommandAst -Ast $file.Ast) {
-                if ($command.InvocationOperator -eq [System.Management.Automation.Language.TokenKind]::Dot -and
-                    $command.CommandElements[0].Extent.Text -match 'InstallerScriptPath|winget-app-install') {
-                    '{0}:{1}' -f $file.Name, $command.Extent.StartLineNumber
-                }
-            }
-        }
+    It 'never dot-sources a generated script (the installer or the uninstaller) into a test file' {
+        # Dot-sourcing winget-app-install.ps1 or winget-app-uninstall.ps1 re-declares every function
+        # from the GENERATED copy over the module source TestHelpers.ps1 loaded, so the tests
+        # exercise whatever was last built instead of the code being edited (CLAUDE.md, Testing).
+        $offenders = Find-GeneratedScriptDotSource -File $script:TestFiles
 
-        $offenders | Should -BeNullOrEmpty -Because 'test files load the module through TestHelpers.ps1, never the generated installer'
+        $offenders | Should -BeNullOrEmpty -Because 'test files load the module through TestHelpers.ps1, never a generated script'
+    }
+
+    It 'recognizes a dot-sourced generated script, the uninstaller included (wgt-gq8.43)' {
+        $source = @(
+            '. $script:InstallerScriptPath'
+            '. $script:UninstallerScriptPath'
+            ". (Join-Path `$root 'winget-app-uninstall.ps1')"
+            ". (Join-Path `$root 'winget-app-install.ps1')"
+            ". (Join-Path `$PSScriptRoot 'TestHelpers.ps1')"
+            '& $script:UninstallerScriptPath'
+        ) -join "`n"
+        $parsed = [pscustomobject]@{ Name = 'probe.ps1'; Ast = [System.Management.Automation.Language.Parser]::ParseInput($source, [ref]$null, [ref]$null) }
+
+        Find-GeneratedScriptDotSource -File $parsed | Should -Be @('probe.ps1:1', 'probe.ps1:2', 'probe.ps1:3', 'probe.ps1:4')
     }
 
     It 'can resolve every command the suite mocks, on this platform' {

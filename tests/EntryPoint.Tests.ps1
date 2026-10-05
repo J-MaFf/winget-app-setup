@@ -1,7 +1,8 @@
 # EntryPoint.Tests.ps1
 # Tests for the distribution surface around the module: the generated winget-app-install.ps1
 # entry script (head/tail fragments, build stamp, transcript wiring, switch forwarding, IEX
-# behavior), build determinism, and the psd1 module export surface.
+# behavior), the generated winget-app-uninstall.ps1's parse safety and elevated relaunch, build
+# determinism, and the psd1 module export surface.
 # Split from the old single-file suite Test-WingetAppInstall.Tests.ps1 (issue #192).
 
 # Load the module's functions once for this file. TestHelpers.ps1 resolves the repo paths
@@ -251,6 +252,56 @@ Describe 'Generated installer: Windows PowerShell 5.1 parse safety (issue #210)'
         $installer | Should -Match ([regex]::Escape('if ($PSVersionTable.PSVersion.Major -lt 7)'))
         $installer | Should -Match ([regex]::Escape('$bootstrapExitCode = Invoke-PowerShell7Bootstrap -WhatIf:$WhatIf -NonInteractive:$NonInteractive -SkipSystemCheck:$SkipSystemCheck -CommandPath $PSCommandPath -ExpectedBuildId $script:InstallerBuildId -LogDirectory $bootstrapLogDirectory'))
         $installer | Should -Match 'This installer requires PowerShell 7\+ \(pwsh\)'
+    }
+}
+
+# The uninstaller is a generated single file too (wgt-gq8.43), and it runs under Windows PowerShell
+# 5.1 itself: its elevated window is System32's powershell.exe, with no PowerShell 7 bootstrap. So
+# 5.1 must parse the whole file: ASCII-only code tokens and no PowerShell-7-only syntax.
+Describe 'Generated uninstaller: Windows PowerShell 5.1 parse safety (wgt-gq8.43)' {
+    BeforeDiscovery {
+        $script:winPowerShellAvailable = [bool](Get-Command -Name 'powershell.exe' -CommandType Application -ErrorAction SilentlyContinue)
+    }
+
+    It 'Contains no non-ASCII characters outside comment tokens (same rule the build enforces)' {
+        $content = Get-Content -Raw -Encoding UTF8 -Path $script:UninstallerScriptPath
+        $tokens = $null
+        $parseErrors = $null
+        [System.Management.Automation.Language.Parser]::ParseInput($content, [ref]$tokens, [ref]$parseErrors) | Out-Null
+        $parseErrors | Should -BeNullOrEmpty
+
+        $offending = @($tokens |
+                Where-Object { $_.Kind -ne [System.Management.Automation.Language.TokenKind]::Comment -and $_.Text -match '[^\x00-\x7F]' } |
+                ForEach-Object { "line $($_.Extent.StartLineNumber): $($_.Kind) token" })
+        $offending | Should -BeNullOrEmpty
+    }
+
+    It 'Parses with zero errors under real Windows PowerShell 5.1' -Skip:(-not $script:winPowerShellAvailable) {
+        $escapedPath = $script:UninstallerScriptPath.Replace("'", "''")
+        $probe = "`$t=`$null;`$e=`$null;[System.Management.Automation.Language.Parser]::ParseFile('$escapedPath',[ref]`$t,[ref]`$e)|Out-Null;`$e.Count;`$e|ForEach-Object{`$_.Extent.StartLineNumber.ToString()+': '+`$_.Message}"
+        $output = @(& powershell.exe -NoProfile -NonInteractive -Command $probe)
+        $exitCode = $LASTEXITCODE
+
+        $exitCode | Should -Be 0
+        # First output line is the parse-error count; any further lines describe the errors.
+        $output[0] | Should -Be '0' -Because ($output -join "`n")
+    }
+
+    It 'Previews the uninstall under real Windows PowerShell 5.1, from the file alone' -Skip:(-not $script:winPowerShellAvailable) {
+        # The generated file with everything that would read the machine replaced: 5.1 runs the
+        # whole entry block, as the elevated window does, with nothing next to the file.
+        $overrides = @'
+function Test-IsAdmin { $false }
+function Invoke-WingetUninstall { param ([switch]$WhatIf) Write-Host "UNINSTALL WhatIf=$([bool]$WhatIf) PS=$($PSVersionTable.PSVersion.Major)"; 0 }
+function Wait-InstallerExitKeyPress { param ([switch]$NonInteractive) }
+'@
+        $path = New-TestUninstallerScript -Path (Join-Path $TestDrive 'uninstaller-51/winget-app-uninstall.ps1') -Overrides $overrides
+
+        $output = & powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $path -WhatIf -NonInteractive 2>&1 | Out-String
+        $exitCode = $LASTEXITCODE
+
+        $exitCode | Should -Be 0 -Because $output
+        $output | Should -Match 'UNINSTALL WhatIf=True PS=5'
     }
 }
 
@@ -1114,17 +1165,36 @@ Describe 'Build determinism (issue #189)' {
     It 'Produces byte-identical output when the same tree is built twice' {
         # The build id must derive from CONTENT only (module version + functions hash) — anything
         # time- or git-based would make every rebuild differ and permanently break the CI -Check
-        # byte-compare. Verified the way CI would notice: build twice, compare bytes.
-        $firstOutput = Join-Path $TestDrive 'installer-build-one.ps1'
-        $secondOutput = Join-Path $TestDrive 'installer-build-two.ps1'
+        # byte-compare. Verified the way CI would notice: build twice, compare bytes, for both the
+        # installer and the uninstaller (wgt-gq8.43).
+        $first = @{ Installer = Join-Path $TestDrive 'installer-build-one.ps1'; Uninstaller = Join-Path $TestDrive 'uninstaller-build-one.ps1' }
+        $second = @{ Installer = Join-Path $TestDrive 'installer-build-two.ps1'; Uninstaller = Join-Path $TestDrive 'uninstaller-build-two.ps1' }
 
-        & $script:currentPowerShell -NoProfile -File $script:buildScriptPath -OutputPath $firstOutput | Out-Null
-        $LASTEXITCODE | Should -Be 0
-        & $script:currentPowerShell -NoProfile -File $script:buildScriptPath -OutputPath $secondOutput | Out-Null
-        $LASTEXITCODE | Should -Be 0
+        foreach ($output in @($first, $second)) {
+            & $script:currentPowerShell -NoProfile -File $script:buildScriptPath -OutputPath $output.Installer -UninstallerOutputPath $output.Uninstaller | Out-Null
+            $LASTEXITCODE | Should -Be 0
+        }
 
-        (Get-FileHash -Path $firstOutput -Algorithm SHA256).Hash |
-            Should -Be (Get-FileHash -Path $secondOutput -Algorithm SHA256).Hash
+        foreach ($name in 'Installer', 'Uninstaller') {
+            (Get-FileHash -Path $first[$name] -Algorithm SHA256).Hash |
+                Should -Be (Get-FileHash -Path $second[$name] -Algorithm SHA256).Hash
+        }
+        # Each is its own script: the uninstaller is not a copy of the installer.
+        (Get-FileHash -Path $first.Uninstaller -Algorithm SHA256).Hash | Should -Not -Be (Get-FileHash -Path $first.Installer -Algorithm SHA256).Hash
+    }
+
+    It 'Writes the uninstaller next to -OutputPath when only -OutputPath is given, never over the repository''s copy' {
+        $folder = Join-Path $TestDrive 'only-output-path'
+        [void](New-Item -ItemType Directory -Path $folder)
+        $repositoryCopy = (Get-FileHash -Path $script:UninstallerScriptPath -Algorithm SHA256).Hash
+        $repositoryCopyTime = (Get-Item -LiteralPath $script:UninstallerScriptPath).LastWriteTimeUtc
+
+        & $script:currentPowerShell -NoProfile -File $script:buildScriptPath -OutputPath (Join-Path $folder 'installer.ps1') | Out-Null
+
+        $LASTEXITCODE | Should -Be 0
+        @(Get-ChildItem -LiteralPath $folder | ForEach-Object { $_.Name } | Sort-Object) | Should -Be @('installer.ps1', 'winget-app-uninstall.ps1')
+        (Get-FileHash -Path (Join-Path $folder 'winget-app-uninstall.ps1') -Algorithm SHA256).Hash | Should -Be $repositoryCopy
+        (Get-Item -LiteralPath $script:UninstallerScriptPath).LastWriteTimeUtc | Should -Be $repositoryCopyTime
     }
 }
 
@@ -1235,5 +1305,107 @@ function Start-ElevatedProcess {
         $result.Output | Should -Not -Match 'ELEVATED:'
         $result.Output | Should -Match 'Group Policy sets the Windows PowerShell execution policy for this PC to AllSigned .*cannot run this script from a file.* No UAC prompt was shown\.'
         $result.Output | Should -Match 'stopped early with exit code 4: administrator rights are required'
+    }
+}
+
+# wgt-gq8.43: the uninstaller's elevated run is a checked copy, as the installer's is (review finding
+# P3-11), through the generated uninstaller's real entry block and the real Restart-WithElevation:
+# only the admin check, the console's interactivity and the elevated launch itself (which would raise
+# a real UAC prompt) are overridden. It used to run its own file in place, unchecked, because it
+# imported the module from the folder next to it.
+Describe 'Elevated relaunch through the uninstaller''s entry block (wgt-gq8.43, review finding P3-11)' {
+    BeforeAll {
+        # A run from a file, not elevated, with someone at the console unless -NonInteractive is
+        # passed, and no Group Policy execution policy. Write-Prompt throws, so a key press the run
+        # would wait for shows up as PROMPT:.
+        $script:uninstallerNotElevated = @'
+function Test-IsAdmin { $false }
+function Test-EffectiveNonInteractive { param ([switch]$NonInteractive) [bool]$NonInteractive }
+function Test-IsContinuousIntegration { $false }
+function Write-Prompt { param ([string]$Message) Write-Host "PROMPT: $Message"; throw 'no key press in tests' }
+function Get-ScriptExecutionPolicyBlock { param([string]$Engine) $null }
+function Invoke-WingetUninstall { param ([switch]$WhatIf) Write-Host 'UNINSTALL RAN'; 0 }
+'@
+        # The elevated Windows PowerShell, standing in: prints what it was asked to start and "ends"
+        # with exit code 3 at once.
+        $script:uninstallerElevatedRun = @'
+function Start-ElevatedProcess {
+    param ([string]$FilePath, [string]$ArgumentString)
+    Write-Host "ELEVATED: $FilePath $ArgumentString"
+    $process = [pscustomobject]@{ ExitCode = 3 }
+    $process | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value { param ($Milliseconds) $true }
+    $process
+}
+'@
+    }
+
+    It 'Runs a copy checked against the file''s SHA256, never the file itself, waits for it and exits with its exit code' {
+        $run = Invoke-TestUninstallerScript -Root (Join-Path $TestDrive 'uninstaller-relaunch') -Overrides ($script:uninstallerNotElevated + "`n" + $script:uninstallerElevatedRun)
+        $sha256 = (Get-FileHash -LiteralPath $run.Path -Algorithm SHA256).Hash
+
+        $run.ExitCode | Should -Be 3
+        # System32's Windows PowerShell, running the check-and-copy command, not the file itself.
+        $run.Output | Should -Match 'ELEVATED: \S*\\System32\\WindowsPowerShell\\v1\.0\\powershell\.exe -NoProfile -ExecutionPolicy Bypass -Command "'
+        $run.Output | Should -Not -Match ([regex]::Escape("-File `"$($run.Path)`""))
+        $run.Output | Should -Not -Match ([regex]::Escape("-File $($run.Path)"))
+        # The SHA256 the entry block took at startup; the copy keeps the uninstaller's own name and is
+        # run with no switches forwarded.
+        $run.Output | Should -Match ([regex]::Escape("-ne '$sha256'"))
+        $run.Output | Should -Match ([regex]::Escape("Join-Path `$copyDirectory 'winget-app-uninstall.ps1';"))
+        $run.Output | Should -Match ([regex]::Escape('-File $copy;'))
+        $run.Output | Should -Match 'The elevated run ended with exit code 3\.'
+        # The elevated window showed the outcome and waited for its own key press.
+        $run.Output | Should -Not -Match 'UNINSTALL RAN|PROMPT:'
+    }
+
+    It 'Does not relaunch a file that changed after the run started, and exits 5' {
+        # The file is rewritten while the run is still going, before it asks for elevation: here, in
+        # the admin check, the last thing the run does before it relaunches.
+        $tamperOverride = @'
+function Test-IsAdmin {
+    Add-Content -LiteralPath $PSCommandPath -Value '# rewritten before the UAC prompt'
+    $false
+}
+'@
+        $run = Invoke-TestUninstallerScript -Root (Join-Path $TestDrive 'uninstaller-tampered') -Overrides ($script:uninstallerNotElevated + "`n" + $script:uninstallerElevatedRun + "`n" + $tamperOverride)
+
+        $run.ExitCode | Should -Be 5
+        $run.Output | Should -Match 'changed after this run started, so it is not run with administrator rights'
+        $run.Output | Should -Not -Match 'ELEVATED:|UNINSTALL RAN'
+        # No UAC prompt was shown, so the run does not say to approve one.
+        $run.Output | Should -Not -Match 'approve the administrator|declined'
+    }
+
+    It 'Exits 4 after one UAC prompt when the prompt is declined' {
+        $declinedOverride = @'
+function Start-ElevatedProcess {
+    param ([string]$FilePath, [string]$ArgumentString)
+    Write-Host 'UAC PROMPT SHOWN'
+    throw [System.Management.Automation.MethodInvocationException]::new('Exception calling "Start"', [System.ComponentModel.Win32Exception]::new(1223))
+}
+'@
+        $run = Invoke-TestUninstallerScript -Root (Join-Path $TestDrive 'uninstaller-declined') -Overrides ($script:uninstallerNotElevated + "`n" + $declinedOverride)
+
+        $run.ExitCode | Should -Be 4
+        ([regex]::Matches($run.Output, 'UAC PROMPT SHOWN')).Count | Should -Be 1
+        $run.Output | Should -Match 'The administrator \(UAC\) prompt was declined'
+        $run.Output | Should -Not -Match 'UNINSTALL RAN'
+    }
+
+    It 'Exits 4 without a UAC prompt when the run is non-interactive' {
+        $run = Invoke-TestUninstallerScript -Root (Join-Path $TestDrive 'uninstaller-unattended') -Overrides ($script:uninstallerNotElevated + "`n" + $script:uninstallerElevatedRun) -ScriptArguments @('-NonInteractive')
+
+        $run.ExitCode | Should -Be 4
+        $run.Output | Should -Not -Match 'ELEVATED:|UNINSTALL RAN|PROMPT:'
+        $run.Output | Should -Match 'this run is non-interactive, so there is nobody to approve a UAC prompt'
+    }
+
+    It 'Exits 4 without a UAC prompt when Group Policy''s machine execution policy would refuse the elevated run' {
+        $policyOverride = "function Get-ScriptExecutionPolicyBlock { param([string]`$Engine) if (`$Engine -eq 'WindowsPowerShell') { [pscustomobject]@{ Engine = `$Engine; Scope = 'MachinePolicy'; Policy = 'AllSigned'; Key = 'HKLM\K'; GroupPolicyPath = 'Computer Configuration > P'; Description = 'Group Policy sets the Windows PowerShell execution policy for this PC to AllSigned (MachinePolicy, HKLM\K)' } } }"
+        $run = Invoke-TestUninstallerScript -Root (Join-Path $TestDrive 'uninstaller-policy') -Overrides ($script:uninstallerNotElevated + "`n" + $script:uninstallerElevatedRun + "`n" + $policyOverride)
+
+        $run.ExitCode | Should -Be 4
+        $run.Output | Should -Not -Match 'ELEVATED:|UNINSTALL RAN'
+        $run.Output | Should -Match 'Group Policy sets the Windows PowerShell execution policy for this PC to AllSigned .*cannot run this script from a file.* No UAC prompt was shown\.'
     }
 }
