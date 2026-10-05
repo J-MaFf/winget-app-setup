@@ -39,12 +39,11 @@ body:
     id: target
     attributes:
       label: Target
-      description: How the installer ran on this machine.
+      description: Where the installer was started. Which account ran it goes in "Elevation style" below.
       options:
-        - Cross-user elevation (an admin account elevated on another user's session)
-        - Same account, elevated
-        - Fresh machine, started from Windows PowerShell 5.1
-        - Unattended as SYSTEM (RMM, for example Endpoint Central)
+        - By hand, from Windows PowerShell 5.1 (a fresh machine without PowerShell 7)
+        - By hand, from PowerShell 7
+        - Unattended, from an RMM tool (for example Endpoint Central)
         - Other (describe below)
     validations:
       required: true

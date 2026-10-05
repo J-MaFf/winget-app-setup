@@ -471,6 +471,10 @@ function Stop-ProcessTree {
     instead, so Invoke-AppxProvisioning passes [Console]::OutputEncoding, the encoding PowerShell
     itself reads a native program's output with; read as UTF-8, a localized error message would
     lose its non-ASCII letters.
+.PARAMETER RemoveEnvironmentVariable
+    Environment variables the program starts without; the rest of this process's environment is
+    passed on as it is, and this process's own environment does not change. PSModulePath, for
+    Windows PowerShell started from PowerShell 7 (see Invoke-DiagnosticsWindowsPowerShell).
 .RETURNS
     [pscustomobject] with FilePath, Arguments, ExitCode ($null when the process timed out or did
     not start), TimedOut, LaunchFailed, LaunchErrorCode, LaunchError (message), LaunchException,
@@ -497,7 +501,11 @@ function Invoke-ExternalProcess {
         [string]$Echo = 'Live',
 
         [Parameter(Mandatory = $false)]
-        [System.Text.Encoding]$Encoding
+        [System.Text.Encoding]$Encoding,
+
+        [Parameter(Mandatory = $false)]
+        [AllowEmptyCollection()]
+        [string[]]$RemoveEnvironmentVariable = @()
     )
 
     $arguments = $ArgumentString
@@ -552,6 +560,13 @@ function Invoke-ExternalProcess {
     }
     $startInfo.StandardOutputEncoding = $Encoding
     $startInfo.StandardErrorEncoding = $Encoding
+    # EnvironmentVariables starts as a copy of this process's environment (.NET Framework and .NET
+    # alike); removing a name there leaves this process's own environment as it is.
+    foreach ($name in @($RemoveEnvironmentVariable)) {
+        if (-not [string]::IsNullOrEmpty($name)) {
+            [void]$startInfo.EnvironmentVariables.Remove($name)
+        }
+    }
 
     if ($Echo -eq 'Live') {
         Write-Host ('  > {0} {1}' -f $displayName, $arguments).TrimEnd() -ForegroundColor DarkGray

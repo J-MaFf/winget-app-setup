@@ -478,6 +478,32 @@ exit 0
         $result.ExitCode | Should -Be 0
         $result.StandardOutput | Should -Contain 'found-on-path'
     }
+
+    # Windows PowerShell started from PowerShell 7 through Process.Start inherits PowerShell 7's
+    # PSModulePath and then cannot load its own Utility and Security modules (review of
+    # wgt-gq8.35): the diagnostics bundle's AppX queries start it without the variable.
+    It 'Starts the program without the environment variables it is told to remove, and leaves this process''s own' {
+        $env:PSModulePath | Should -Not -BeNullOrEmpty -Because 'PowerShell sets it for itself at startup'
+        $before = $env:PSModulePath
+        # Both print [<the value>], or [%PSModulePath%] when the variable is not set.
+        if ($script:OnWindows) {
+            $program = 'cmd.exe'
+            $arguments = @('/c', 'echo', '[%PSModulePath%]')
+        }
+        else {
+            $program = 'sh'
+            $arguments = @('-c', 'echo "[${PSModulePath-%PSModulePath%}]"')
+        }
+
+        $inherited = Invoke-ExternalProcess -FilePath $program -ArgumentList $arguments -TimeoutSeconds 60 -Echo None
+        $removed = Invoke-ExternalProcess -FilePath $program -ArgumentList $arguments -TimeoutSeconds 60 -Echo None -RemoveEnvironmentVariable @('PSModulePath')
+
+        $inherited.ExitCode | Should -Be 0
+        $inherited.StandardOutput | Should -Be @("[$before]")
+        $removed.ExitCode | Should -Be 0
+        $removed.StandardOutput | Should -Be @('[%PSModulePath%]')
+        $env:PSModulePath | Should -BeExactly $before
+    }
 }
 
 Describe 'Invoke-WingetProcess' {

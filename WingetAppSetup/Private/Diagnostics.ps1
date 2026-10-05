@@ -502,7 +502,9 @@ function New-DiagnosticsRedactionMap {
 
     $accounts = New-Object System.Collections.Generic.List[string]
     $sidAuthorities = New-Object System.Collections.Generic.List[string]
-    $multiline = [System.Text.RegularExpressions.RegexOptions]::Multiline -bor [System.Text.RegularExpressions.RegexOptions]::IgnoreCase
+    # CultureInvariant: without it, ignoring case follows the current culture, and on a Turkish or
+    # Azerbaijani Windows 'i' and 'I' are not the same letter (see ConvertTo-RedactedDiagnosticText).
+    $multiline = [System.Text.RegularExpressions.RegexOptions]::Multiline -bor [System.Text.RegularExpressions.RegexOptions]::IgnoreCase -bor [System.Text.RegularExpressions.RegexOptions]::CultureInvariant
     foreach ($content in @($Text)) {
         if ([string]::IsNullOrEmpty($content)) {
             continue
@@ -633,7 +635,7 @@ function New-DiagnosticsRedactionMap {
          keep the name and lose the value ('<redacted>').
       2. Email addresses (user principal names) become <email>.
       3. Every name in the map (New-DiagnosticsRedactionMap) becomes its placeholder, wherever it
-         stands on its own (not inside a longer word), in any letter case.
+         stands on its own (not inside a longer word), in any letter case, whatever the culture.
       4. The identifying part of every S-1-5-21-... and S-1-12-1-... SID becomes its placeholder,
          or <sid> when the map does not know it. Well-known SIDs stay.
       5. The folder name after X:\Users\ (or X:\Documents and Settings\) that is still there
@@ -659,7 +661,10 @@ function ConvertTo-RedactedDiagnosticText {
     if ([string]::IsNullOrEmpty($Text)) {
         return ''
     }
-    $ignoreCase = [System.Text.RegularExpressions.RegexOptions]::IgnoreCase
+    # CultureInvariant: without it, ignoring case follows the current culture, and on a Turkish or
+    # Azerbaijani Windows 'MIKE' would not match 'mike' (dotted and dotless i), so a name would stay
+    # in the bundle in every letter case but the one the map has.
+    $ignoreCase = [System.Text.RegularExpressions.RegexOptions]::IgnoreCase -bor [System.Text.RegularExpressions.RegexOptions]::CultureInvariant
     $multiline = [System.Text.RegularExpressions.RegexOptions]::Multiline -bor $ignoreCase
 
     $result = [regex]::Replace($Text, '^(?<prefix>.*?Property\([A-Z]\):[ \t]*(?:LogonUser|USERNAME|COMPANYNAME|ComputerName|UserSID)[ \t]*=[ \t]*)\S[^\r\n]*?(?<end>\r?)$', '${prefix}<redacted>${end}', $multiline)
@@ -843,6 +848,60 @@ function Format-DiagnosticsRegistryKey {
 
 <#
 .SYNOPSIS
+    Whether this is a 32-bit process on 64-bit Windows (WOW64), such as an RMM agent's PowerShell.
+.DESCRIPTION
+    A seam (mocked in tests). In such a process, HKLM\SOFTWARE reads go to its 32-bit view
+    (WOW6432Node) and System32 to SysWOW64.
+.RETURNS
+    [bool]
+#>
+function Test-DiagnosticsWow64Process {
+    return ([Environment]::Is64BitOperatingSystem -and -not [Environment]::Is64BitProcess)
+}
+
+<#
+.SYNOPSIS
+    Says what a bundle made from a 32-bit PowerShell on 64-bit Windows gets wrong, and how to make
+    a correct one.
+.DESCRIPTION
+    -CollectDiagnostics runs in the PowerShell it was started from, with no relaunch. The 64-bit
+    registrations it reads under HKLM\SOFTWARE (PowerShell 7's InstalledVersions, Winget-AutoUpdate's
+    uninstall entry and settings, the Component Based Servicing and Windows Update restart keys) are
+    not in the 32-bit view, so they read as missing. Group Policy keys and the AppX queries (run in
+    64-bit Windows PowerShell through Sysnative) are not affected.
+.RETURNS
+    [string]
+#>
+function Get-DiagnosticsWow64Note {
+    return 'This PowerShell is 32-bit on 64-bit Windows, so registry values under HKLM\SOFTWARE were read from its 32-bit view (WOW6432Node): in system.txt, PowerShell 7, Winget-AutoUpdate and the pending restart can read as missing when they are there. For a correct report, run the command again from 64-bit PowerShell (from a 32-bit RMM agent, %SystemRoot%\Sysnative\WindowsPowerShell\v1.0\powershell.exe).'
+}
+
+<#
+.SYNOPSIS
+    Lists the PowerShell 7 installs Windows has registered: each one's version and folder.
+.DESCRIPTION
+    A seam (mocked in tests) over HKLM\SOFTWARE\Microsoft\PowerShellCore\InstalledVersions, where the
+    PowerShell 7 MSI registers each install. Nothing when the key does not exist; throws when it
+    cannot be read.
+.RETURNS
+    [pscustomobject[]] SemanticVersion and InstallLocation.
+#>
+function Get-DiagnosticsPowerShellInstall {
+    $root = 'HKLM:\SOFTWARE\Microsoft\PowerShellCore\InstalledVersions'
+    if (-not (Test-Path -LiteralPath $root)) {
+        return
+    }
+    foreach ($key in @(Get-ChildItem -LiteralPath $root -ErrorAction Stop)) {
+        $entry = Get-ItemProperty -LiteralPath $key.PSPath -ErrorAction SilentlyContinue
+        [pscustomobject]@{
+            SemanticVersion = [string]$entry.SemanticVersion
+            InstallLocation = [string]$entry.InstallLocation
+        }
+    }
+}
+
+<#
+.SYNOPSIS
     Builds system.txt: Windows, the account that ran the collection, PowerShell and its execution
     policy, App Installer's and the Microsoft Store's Group Policy, a pending restart, and
     Winget-AutoUpdate.
@@ -882,6 +941,9 @@ function Get-DiagnosticsSystemReport {
         $osBits = '64-bit'
     }
     $lines.Add(('PowerShell: {0} ({1}), {2} process on {3} Windows' -f $PSVersionTable.PSVersion, $PSVersionTable.PSEdition, $processBits, $osBits))
+    if (Test-DiagnosticsWow64Process) {
+        $lines.Add(('Note: ' + (Get-DiagnosticsWow64Note)))
+    }
 
     $lines.Add('')
     $lines.Add('== Windows ==')
@@ -953,17 +1015,16 @@ function Get-DiagnosticsSystemReport {
     $lines.Add('')
     $lines.Add('== PowerShell ==')
     try {
-        $installed = @(Get-ChildItem -LiteralPath 'HKLM:\SOFTWARE\Microsoft\PowerShellCore\InstalledVersions' -ErrorAction Stop)
-        foreach ($key in $installed) {
-            $entry = Get-ItemProperty -LiteralPath $key.PSPath -ErrorAction SilentlyContinue
-            $lines.Add(('PowerShell 7 installed: {0} at {1}' -f $entry.SemanticVersion, $entry.InstallLocation))
+        $installed = @(Get-DiagnosticsPowerShellInstall)
+        foreach ($install in $installed) {
+            $lines.Add(('PowerShell 7 installed: {0} at {1}' -f $install.SemanticVersion, $install.InstallLocation))
         }
         if ($installed.Count -eq 0) {
             $lines.Add('PowerShell 7 installed: none registered')
         }
     }
     catch {
-        $lines.Add('PowerShell 7 installed: none registered (or not readable)')
+        $lines.Add("PowerShell 7 installed: not read: $($_.Exception.Message)")
     }
     $lines.Add(('Execution policy, this PowerShell ({0}):' -f $PSVersionTable.PSEdition))
     try {
@@ -1162,7 +1223,7 @@ function Get-DiagnosticsWingetReport {
     [string]
 #>
 function Get-DiagnosticsWindowsPowerShellPath {
-    if ([Environment]::Is64BitOperatingSystem -and -not [Environment]::Is64BitProcess) {
+    if (Test-DiagnosticsWow64Process) {
         $sysnative = (Get-WindowsDirectoryPath) + '\Sysnative\WindowsPowerShell\v1.0\powershell.exe'
         if (Test-Path -LiteralPath $sysnative -PathType Leaf) {
             return $sysnative
@@ -1179,6 +1240,15 @@ function Get-DiagnosticsWindowsPowerShellPath {
     so names with letters outside the console's code page arrive intact (and can be redacted). The
     Appx and DISM cmdlets always load in Windows PowerShell, which is why the AppX queries run there
     (as Get-DesktopAppInstallerPackageInfo does) also when the bundle is made from PowerShell 7.
+
+    Windows PowerShell starts without the PSModulePath environment variable and builds its own
+    default. PowerShell 7 puts its own module folders first in that variable, and a process started
+    through Process.Start (Invoke-ExternalProcess) inherits it as it is: only `& powershell.exe`
+    removes them. Windows PowerShell would then find PowerShell 7's Microsoft.PowerShell.Utility
+    and Microsoft.PowerShell.Security first, which it cannot load, so Sort-Object, New-Object and
+    Get-ExecutionPolicy in the queries would fail (about_PSModulePath, "Starting Windows PowerShell
+    from PowerShell 7"). From Windows PowerShell 5.1 the queries need nothing outside that default
+    either: the Appx, DISM and built-in modules are in its System32 module folder.
 .PARAMETER Script
     The script.
 .PARAMETER TimeoutSeconds
@@ -1197,7 +1267,7 @@ function Invoke-DiagnosticsWindowsPowerShell {
 
     $prologue = '[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false); $ProgressPreference = ''SilentlyContinue''; '
     $encoded = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($prologue + $Script))
-    return (Invoke-ExternalProcess -FilePath (Get-DiagnosticsWindowsPowerShellPath) -ArgumentList @('-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', $encoded) -TimeoutSeconds $TimeoutSeconds -Echo None)
+    return (Invoke-ExternalProcess -FilePath (Get-DiagnosticsWindowsPowerShellPath) -ArgumentList @('-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', $encoded) -TimeoutSeconds $TimeoutSeconds -Echo None -RemoveEnvironmentVariable @('PSModulePath'))
 }
 
 <#
@@ -1431,6 +1501,13 @@ function Invoke-DiagnosticsCollection {
         $account = $null
     }
     $isAdmin = [bool](Test-IsAdmin)
+    $isWow64 = $false
+    try {
+        $isWow64 = [bool](Test-DiagnosticsWow64Process)
+    }
+    catch {
+        $isWow64 = $false
+    }
 
     $sources = New-Object System.Collections.Generic.List[string]
     $entries = [ordered]@{}
@@ -1531,6 +1608,10 @@ function Invoke-DiagnosticsCollection {
         $readme += ''
         $readme += 'This PowerShell was not elevated, so the AppX packages of other accounts, the provisioned packages and maybe some logs could not be read. Run the command again from PowerShell started as administrator for those.'
     }
+    if ($isWow64) {
+        $readme += ''
+        $readme += (Get-DiagnosticsWow64Note)
+    }
     $readme += ''
     $readme += 'Sources:'
     foreach ($line in $sources) {
@@ -1565,6 +1646,9 @@ function Invoke-DiagnosticsCollection {
             Write-Info 'Attach it to the GitHub issue: https://github.com/J-MaFf/winget-app-setup/issues/new?template=install-failure.yml. Account and computer names were removed from it; look through it before you attach it anyway.'
             if (-not $isAdmin) {
                 Write-WarningMessage 'This PowerShell is not elevated, so some of the PC''s state could not be read (see README.txt in the bundle). For a complete bundle, run the same command from PowerShell started as administrator.'
+            }
+            if ($isWow64) {
+                Write-WarningMessage (Get-DiagnosticsWow64Note)
             }
             return 0
         }

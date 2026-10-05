@@ -174,6 +174,29 @@ Describe 'Redacting the bundle for a public issue (wgt-gq8.35)' {
         $redacted | Should -Be '<user1> and <user1> and Jorg'
     }
 
+    It 'Redacts a name in every letter case on a Turkish Windows, where i and I are different letters' {
+        # Ignoring case by the current culture, tr-TR's 'MIKE' is not 'mike' (dotted and dotless i),
+        # and the name stayed in the bundle (review of wgt-gq8.35).
+        $turkish = [System.Globalization.CultureInfo]::GetCultureInfo('tr-TR')
+        if ('i'.ToUpper($turkish) -ne [string][char]0x0130) {
+            Set-ItResult -Skipped -Because 'this .NET has no Turkish casing rules (invariant globalization mode)'
+            return
+        }
+        $hint = New-TestIdentityHint -ComputerNames @('MIKE-PC') -Domains @('CONTOSO') -Users @('mike') -DnsDomains @()
+        $text = 'Machine: MIKE-PC / host mike-pc.corp / Username: CONTOSO\Mike / RunAs User: contoso\MIKE / mail mike@contoso.com'
+        $saved = [System.Threading.Thread]::CurrentThread.CurrentCulture
+        try {
+            [System.Threading.Thread]::CurrentThread.CurrentCulture = $turkish
+            $map = New-DiagnosticsRedactionMap -IdentityHint $hint -Text @($text)
+            $redacted = ConvertTo-RedactedDiagnosticText -Text $text -Map $map
+        }
+        finally {
+            [System.Threading.Thread]::CurrentThread.CurrentCulture = $saved
+        }
+
+        $redacted | Should -BeExactly 'Machine: <computer1> / host <computer1>.corp / Username: <domain1>\<user1> / RunAs User: <domain1>\<user1> / mail <email>'
+    }
+
     It 'Replaces whole names only, the longest first' {
         $map = New-DiagnosticsRedactionMap -IdentityHint (New-TestIdentityHint -Users @('ann', 'ann-marie')) -Text @()
 
@@ -437,6 +460,7 @@ Describe 'AppX packages in the bundle (Get-DiagnosticsAppxReport)' {
                 Script    = [System.Text.Encoding]::Unicode.GetString([Convert]::FromBase64String($ArgumentList[$encodedIndex + 1]))
                 Timeout   = $TimeoutSeconds
                 Echo      = $Echo
+                Removed   = @($RemoveEnvironmentVariable)
             }
             New-TestProcessResult -ExitCode 0 -Output @('== Registered for any account (Get-AppxPackage -AllUsers) ==', 'Microsoft.DesktopAppInstaller 1.26.510.0 X64 Status=Ok Framework=False')
         }
@@ -459,6 +483,15 @@ Describe 'AppX packages in the bundle (Get-DiagnosticsAppxReport)' {
         # The query changes nothing.
         $call.Script | Should -Not -Match '(?i)\b(Add|Remove|Reset|Set|Register)-Appx'
         $lines | Should -Be @('== Registered for any account (Get-AppxPackage -AllUsers) ==', 'Microsoft.DesktopAppInstaller 1.26.510.0 X64 Status=Ok Framework=False')
+    }
+
+    It 'Starts Windows PowerShell without PowerShell 7''s module path, which would break its own modules' {
+        # From PowerShell 7, a Windows PowerShell started through Process.Start inherits PSModulePath
+        # with PowerShell 7's module folders first, cannot load Microsoft.PowerShell.Utility from
+        # there, and every Sort-Object in the query fails (review of wgt-gq8.35).
+        [void](Get-DiagnosticsAppxReport)
+
+        $script:appxCalls[0].Removed | Should -Contain 'PSModulePath'
     }
 
     It 'The query script parses' {
@@ -493,6 +526,8 @@ Describe 'The machine''s state in the bundle (Get-DiagnosticsSystemReport)' {
         Mock Get-AccountSid { 'S-1-5-21-1004336348-1177238915-682003330-1104' }
         Mock Get-OSArchitecture { 'Arm64' }
         Mock Get-ExecutionPolicy { @([pscustomobject]@{ Scope = 'MachinePolicy'; ExecutionPolicy = 'AllSigned' }, [pscustomobject]@{ Scope = 'Process'; ExecutionPolicy = 'Bypass' }) }
+        Mock Get-DiagnosticsPowerShellInstall { [pscustomobject]@{ SemanticVersion = '7.5.3'; InstallLocation = 'C:\Program Files\PowerShell\7\' } }
+        Mock Test-DiagnosticsWow64Process { $false }
         $script:savedBuildId = $script:InstallerBuildId
         $script:InstallerBuildId = '1.0.0+0badc0de'
     }
@@ -529,6 +564,49 @@ Describe 'The machine''s state in the bundle (Get-DiagnosticsSystemReport)' {
         $lines | Should -Contain 'Elevation style: same-user, not elevated'
     }
 
+    It 'Lists the PowerShell 7 installs Windows has registered, through its seam (not the real registry)' {
+        $lines = @(Get-DiagnosticsSystemReport -AccountContext (New-TestAccountContext) -IsAdmin $true)
+
+        $lines | Should -Contain 'PowerShell 7 installed: 7.5.3 at C:\Program Files\PowerShell\7\'
+        Should -Invoke Get-DiagnosticsPowerShellInstall -Times 1 -Exactly
+    }
+
+    It 'Says <Expected> when the PowerShell 7 installs are <Case>' -ForEach @(
+        @{ Case = 'none'; Expected = 'PowerShell 7 installed: none registered' }
+        @{ Case = 'not readable'; Expected = 'PowerShell 7 installed: not read: Access is denied' }
+    ) {
+        if ($Case -eq 'none') {
+            Mock Get-DiagnosticsPowerShellInstall { }
+        }
+        else {
+            Mock Get-DiagnosticsPowerShellInstall { throw 'Access is denied' }
+        }
+
+        $lines = @(Get-DiagnosticsSystemReport -AccountContext (New-TestAccountContext) -IsAdmin $true)
+
+        $lines | Should -Contain $Expected
+        $lines | Should -Contain 'Build: 26100.4061'
+    }
+
+    It 'Says that a 32-bit PowerShell on 64-bit Windows read the 32-bit registry, and how to make a correct report' {
+        # From a 32-bit RMM agent's PowerShell, HKLM\SOFTWARE reads go to WOW6432Node, where the
+        # 64-bit PowerShell 7, Winget-AutoUpdate and restart keys are not (review of wgt-gq8.35).
+        Mock Test-DiagnosticsWow64Process { $true }
+
+        $lines = @(Get-DiagnosticsSystemReport -AccountContext (New-TestAccountContext) -IsAdmin $true)
+
+        $note = @($lines | Where-Object { $_ -like 'Note: *' })
+        $note.Count | Should -Be 1
+        $note[0] | Should -Match 'WOW6432Node'
+        $note[0] | Should -Match ([regex]::Escape('%SystemRoot%\Sysnative\WindowsPowerShell\v1.0\powershell.exe'))
+    }
+
+    It 'Has no such note in a 64-bit PowerShell' {
+        $lines = @(Get-DiagnosticsSystemReport -AccountContext (New-TestAccountContext) -IsAdmin $true)
+
+        @($lines | Where-Object { $_ -like 'Note: *' }).Count | Should -Be 0
+    }
+
     It 'Still reports the rest when the restart state and Winget-AutoUpdate cannot be read' {
         Mock Get-PendingRestartState { throw 'registry unavailable' }
         Mock Get-WauTaskHealth { throw 'task scheduler unavailable' }
@@ -538,6 +616,28 @@ Describe 'The machine''s state in the bundle (Get-DiagnosticsSystemReport)' {
         $lines | Should -Contain 'Not read: registry unavailable'
         $lines | Should -Contain 'Task not read: task scheduler unavailable'
         $lines | Should -Contain 'Build: 26100.4061'
+    }
+}
+
+Describe 'The PowerShell 7 installs Windows has registered (Get-DiagnosticsPowerShellInstall)' {
+    It 'Gives each registered install''s version and folder' {
+        Mock Test-Path { $true }
+        Mock Get-ChildItem { [pscustomobject]@{ PSPath = 'InstalledVersions\31ab5147-9a97-4452-8443-d9709f0516e1' } }
+        Mock Get-ItemProperty { [pscustomobject]@{ SemanticVersion = '7.5.3'; InstallLocation = 'C:\Program Files\PowerShell\7\' } }
+
+        $installs = @(Get-DiagnosticsPowerShellInstall)
+
+        $installs.Count | Should -Be 1
+        $installs[0].SemanticVersion | Should -Be '7.5.3'
+        $installs[0].InstallLocation | Should -Be 'C:\Program Files\PowerShell\7\'
+        Should -Invoke Get-ChildItem -Times 1 -Exactly -ParameterFilter { $LiteralPath -eq 'HKLM:\SOFTWARE\Microsoft\PowerShellCore\InstalledVersions' }
+    }
+
+    It 'Gives nothing when no PowerShell 7 was ever registered' {
+        Mock Test-Path { $false }
+        Mock Get-ChildItem { throw 'must not be listed' }
+
+        @(Get-DiagnosticsPowerShellInstall).Count | Should -Be 0
     }
 }
 
@@ -715,6 +815,26 @@ Describe 'Making the bundle (Invoke-DiagnosticsCollection)' {
         ($script:messages -join "`n") | Should -Match 'WARN: This PowerShell is not elevated'
     }
 
+    It 'Says in README.txt and on screen when a 32-bit PowerShell made it, whose registry reads are not the 64-bit ones' {
+        Mock Test-DiagnosticsWow64Process { $true }
+
+        [void](Invoke-DiagnosticsCollection -LogDirectory $script:logDirectory -OutputDirectory $script:outputDirectory)
+
+        $entries = Get-ZipEntryText -Path (@(Get-ChildItem -LiteralPath $script:outputDirectory -Filter '*.zip')[0]).FullName
+        $entries['README.txt'] | Should -Match ([regex]::Escape((Get-DiagnosticsWow64Note)))
+        $script:messages | Should -Contain ('WARN: ' + (Get-DiagnosticsWow64Note))
+    }
+
+    It 'Says nothing of the kind from a 64-bit PowerShell' {
+        Mock Test-DiagnosticsWow64Process { $false }
+
+        [void](Invoke-DiagnosticsCollection -LogDirectory $script:logDirectory -OutputDirectory $script:outputDirectory)
+
+        $entries = Get-ZipEntryText -Path (@(Get-ChildItem -LiteralPath $script:outputDirectory -Filter '*.zip')[0]).FullName
+        $entries['README.txt'] | Should -Not -Match 'WOW6432Node'
+        ($script:messages -join "`n") | Should -Not -Match 'WOW6432Node'
+    }
+
     It 'Reads no environment variables wholesale' {
         $source = Get-Content -Raw -LiteralPath (Join-Path $script:WingetAppSetupRoot 'Private/Diagnostics.ps1')
 
@@ -786,6 +906,17 @@ Describe 'The install-failure issue form asks for the bundle (wgt-gq8.35)' {
         $elevation | Should -Match '- Same-user'
         $elevation | Should -Match '- Cross-user'
         $elevation | Should -Match '- SYSTEM'
+    }
+
+    It 'Asks the elevation style once: the target field offers no account to choose' {
+        # The target dropdown offered cross-user, same-account and SYSTEM as well, two required
+        # answers to one question that could disagree (review of wgt-gq8.35).
+        $target = [regex]::Match($script:formText, '(?ms)^\s+id: target\s*$(?<body>.*?)(?=^\s+- type:|\z)').Groups['body'].Value
+        $options = @([regex]::Matches($target, '(?m)^\s+- (?<option>.+)$') | ForEach-Object { $_.Groups['option'].Value })
+        $options.Count | Should -BeGreaterThan 1
+        foreach ($option in $options) {
+            $option | Should -Not -Match '(?i)cross-user|same account|same-user|elevat|\bSYSTEM\b'
+        }
     }
 
     It 'Keeps its earlier fields' -ForEach @('exit-code', 'build-id', 'target', 'start', 'windows', 'what-happened', 'log', 'privacy') {
