@@ -79,6 +79,9 @@ BeforeAll {
 
     $script:TestFiles = @(Get-ParsedScript -File (Get-ChildItem -Path $PSScriptRoot -Filter '*.ps1'))
     $script:ModuleFiles = @(Get-ParsedScript -File (Get-ChildItem -Path (Join-Path $script:WingetAppSetupRoot 'Private'), (Join-Path $script:WingetAppSetupRoot 'Public') -Filter '*.ps1'))
+    # The standalone scripts the tests dot-source and mock parts of: the e2e scripts and the RMM
+    # wrappers (work-order item 34).
+    $script:DotSourcedScriptFiles = @(Get-ParsedScript -File (Get-ChildItem -Path (Join-Path $script:RepoRoot 'e2e'), (Join-Path $script:RepoRoot 'rmm') -Filter '*.ps1'))
 }
 
 Describe 'Test harness (tests/TestHelpers.ps1, wgt-gq8.5)' {
@@ -101,7 +104,7 @@ Describe 'Test harness (tests/TestHelpers.ps1, wgt-gq8.5)' {
     It 'can resolve every command the suite mocks, on this platform' {
         # Pester refuses to mock a command that does not exist. A Windows-only command mocked
         # without a stand-in in TestHelpers.ps1 fails every test that mocks it on Linux/macOS.
-        $definedInTests = @(foreach ($file in $script:TestFiles) {
+        $definedInTests = @(foreach ($file in @($script:TestFiles) + @($script:DotSourcedScriptFiles)) {
                 $file.Ast.FindAll({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true) |
                     ForEach-Object { $_.Name -replace '^(global|script|local|private):', '' }
             })
