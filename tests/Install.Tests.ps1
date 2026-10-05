@@ -3542,8 +3542,9 @@ Describe 'Install-AppWithVerification: declarative catalog fields (work-order it
             $result.FailureReason | Should -Be 'PostInstallFailed'
             $result.Configuration.Status | Should -Be 'Failed'
             $result.Configuration.Reason | Should -Be $Reason
-            # The install itself succeeded; its result is kept.
+            # The install itself succeeded; its result is kept, and so is what this call did.
             $result.InstallResult.ExitCode | Should -Be 0
+            $result.StatusBeforeHook | Should -Be 'Installed'
         }
 
         It 'Fails an already-installed app whose hook fails, so it is retried and counted' {
@@ -3554,6 +3555,8 @@ Describe 'Install-AppWithVerification: declarative catalog fields (work-order it
             $result.Status | Should -Be 'Failed'
             $result.FailureReason | Should -Be 'PostInstallFailed'
             $result.SkipReason | Should -BeNullOrEmpty
+            $result.StatusBeforeHook | Should -Be 'Skipped'
+            $result.InstallResult | Should -BeNullOrEmpty
         }
 
         It 'Does not run the hook for an app that was not installed: <Case>' -ForEach @(
@@ -3750,6 +3753,81 @@ Describe 'Invoke-WingetInstall: declarative catalog fields (work-order item 38)'
         $record = @($script:runRecord.apps)[0]
         $record.status | Should -Be 'Installed'
         $record.postInstall | Should -Be 'Configured'
+    }
+
+    It 'Keeps the install''s restart and exit code when its hook fails in the first pass and succeeds in the retry pass' {
+        Mock Install-WingetPackage {
+            $script:installedIds += $PackageId
+            @{ ExitCode = -1978334967; Attempts = 1; SessionErrorExhausted = $false; MachineScopeFellBack = $false; NoMachineScopeInstaller = $false; RestartRequired = $true }
+        }
+        $apps = @(@{ name = 'Contoso.App'; postInstall = { $script:hookCalls++; if ($script:hookCalls -eq 1) { throw 'locked' }; 'Configured' } })
+
+        $result = Invoke-WingetInstall -Apps $apps -NonInteractive
+
+        $result | Should -Be 3010
+        Should -Invoke Install-WingetPackage -Times 1 -Exactly
+        $script:hookCalls | Should -Be 2
+        # Printed once, with the first pass's install, which is the only one.
+        @($script:messages | Where-Object { $_ -eq 'Contoso.App needs a restart to finish installing (winget exit 0x8A150109 INSTALL_REBOOT_REQUIRED_TO_FINISH).' }).Count | Should -Be 1
+        $script:messages | Should -Contain 'Retry succeeded: Contoso.App'
+        @($script:capturedTables['Installation Summary'] | Where-Object { $_[0] -eq 'Installed' })[0][1] | Should -Be 'Contoso.App'
+        $record = @($script:runRecord.apps)[0]
+        $record.status | Should -Be 'Installed'
+        $record.restartRequired | Should -BeTrue
+        $record.codeHex | Should -Be '0x8A150109'
+        $record.postInstall | Should -Be 'Configured'
+    }
+
+    It 'Counts the install''s restart, and keeps its exit code in the record, when its hook fails in both passes' {
+        Mock Install-WingetPackage {
+            $script:installedIds += $PackageId
+            @{ ExitCode = -1978334967; Attempts = 1; SessionErrorExhausted = $false; MachineScopeFellBack = $true; NoMachineScopeInstaller = $false; RestartRequired = $true }
+        }
+        $apps = @(@{ name = 'Contoso.App'; postInstall = { $script:hookCalls++; 'Failed' } })
+
+        $result = Invoke-WingetInstall -Apps $apps -NonInteractive
+
+        $result | Should -Be 1
+        $script:messages | Should -Contain 'Contoso.App has no machine-wide installer, so it was installed for this account only.'
+        @($script:messages | Where-Object { $_ -eq 'Contoso.App needs a restart to finish installing (winget exit 0x8A150109 INSTALL_REBOOT_REQUIRED_TO_FINISH).' }).Count | Should -Be 1
+        $record = @($script:runRecord.apps)[0]
+        $record.status | Should -Be 'Failed'
+        $record.restartRequired | Should -BeTrue
+        $record.codeHex | Should -Be '0x8A150109'
+        $script:runRecord.restartRequired | Should -BeTrue
+    }
+
+    It 'Reports an app that was already installed as skipped when only its hook needed the retry pass' {
+        $script:installedIds = @('Contoso.App')
+        $apps = @(@{ name = 'Contoso.App'; postInstall = { $script:hookCalls++; if ($script:hookCalls -eq 1) { throw 'locked' }; 'Configured' } })
+
+        $result = Invoke-WingetInstall -Apps $apps -NonInteractive
+
+        $result | Should -Be 0
+        Should -Invoke Install-WingetPackage -Times 0 -Exactly
+        $script:messages | Should -Contain 'Configured: Contoso.App'
+        @($script:capturedTables['Installation Summary'] | Where-Object { $_[0] -eq 'Skipped' })[0][1] | Should -Be 'Contoso.App'
+        @($script:capturedTables['Installation Summary'] | Where-Object { $_[0] -eq 'Installed' }).Count | Should -Be 0
+        $record = @($script:runRecord.apps)[0]
+        $record.status | Should -Be 'Skipped'
+        $record.reason | Should -Be 'already installed'
+        $record.postInstall | Should -Be 'Configured'
+        $script:runRecord.counts.installed | Should -Be 0
+        $script:runRecord.counts.skipped | Should -Be 1
+    }
+
+    It 'Does not retry a scope machine app that has no machine-scope installer' {
+        Mock Install-WingetPackage { @{ ExitCode = -1978335216; Attempts = 1; SessionErrorExhausted = $false; MachineScopeFellBack = $false; NoMachineScopeInstaller = $true } }
+
+        $result = Invoke-WingetInstall -Apps @(@{ name = 'Contoso.MachineOnly'; scope = 'machine' }) -NonInteractive
+
+        $result | Should -Be 1
+        Should -Invoke Install-WingetPackage -Times 1 -Exactly
+        Should -Invoke Test-WingetPackageInstalled -Times 1 -Exactly
+        $script:messages | Should -Contain "Not retrying Contoso.MachineOnly: no machine-scope installer applies to this PC, and its catalog entry allows only a machine-wide install (scope 'machine')."
+        $script:messages | Should -Not -Contain 'Retrying: Contoso.MachineOnly'
+        $script:capturedTables['Failed Installations'][0][0] | Should -Be 'Contoso.MachineOnly'
+        (@($script:runRecord.apps)[0]).status | Should -Be 'Failed'
     }
 
     It 'Defers the per-user apps under cross-user elevation, before any winget call, and says why in the line, the summary and the record' {

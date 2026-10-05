@@ -153,7 +153,7 @@ know is reported as a warning and ignored.
 | `name` | The winget package id (`publisher.product`) |
 | `condition`, `conditionDescription` | Applicability scriptblock and the reason shown when the app does not apply (see above). The description is shown for an `arch` skip too |
 | `arch` | The OS architectures the app is for: one or more of `X86`, `X64`, `Arm`, `Arm64` (as `RuntimeInformation.OSArchitecture` names them; case does not matter). On another architecture the app is `not applicable`; without a `conditionDescription` the skip line says `for <list> Windows only; this PC is <architecture>`. When the architecture cannot be read, the list counts as met (fail open, as for conditions). The uninstaller honours it too |
-| `scope` | `any` (default): install at machine scope, and fall back to winget's default scope when the package has no machine-wide installer, except as SYSTEM or under cross-user elevation, which reports the app `Deferred` instead. `machine`: machine scope only, in every run; a package with no machine-wide installer fails (exit code 1) rather than being installed for one account or deferred. `user`: `--scope user` in a run as the signed-in user; `Deferred` as SYSTEM or under cross-user elevation, without asking winget |
+| `scope` | `any` (default): install at machine scope, and fall back to winget's default scope when the package has no machine-wide installer, except as SYSTEM or under cross-user elevation, which reports the app `Deferred` instead. `machine`: machine scope only, in every run; a package with no machine-wide installer fails (exit code 1, and the retry pass leaves it alone: winget would give the same answer) rather than being installed for one account or deferred. `user`: `--scope user` in a run as the signed-in user; `Deferred` as SYSTEM or under cross-user elevation, without asking winget. The scope is how the installer installs an app, not a condition on an install that is already there: an app that `winget list` already shows for the account running the installer, at either scope, is `Skipped (already installed)` |
 | `userPhase` | `$true` marks an app or setting that needs the signed-in user's own account (for example a hook that writes the user's settings): `Deferred` as SYSTEM or under cross-user elevation, installed as usual in any other run |
 | `postInstall` | A scriptblock, or the name of a function of the installer, that configures the app once it is installed (see below) |
 | `install` | A package-specific installer function that verifies its own install (`Install-PowerShellLatest`) |
@@ -174,7 +174,10 @@ its result:
   `Configuration: NOT DONE for <id> (<why>) - ...`. The exit code does not change.
 - `@{ Status = 'Failed'; Reason = '<why>' }`, a hook that throws or writes an error, or any other
   result: the app is `Failed` with `installed, but its post-install configuration failed (<why>)`,
-  the retry pass runs the hook again, and the run exits 1 if it still fails.
+  the retry pass runs the hook again, and the run exits 1 if it still fails. The install stands
+  either way: a restart it needs is counted (exit code 3010 when nothing else decides it) and its
+  exit code stays in the app's entry, and an app that was already installed before the run is
+  `Skipped`, not `Installed`, when the retry pass configures it.
 
 The result is in the app's entry in [`last-run.json`](#run-result) (`postInstall`,
 `postInstallReason`). No catalog app has a hook yet.
@@ -383,7 +386,7 @@ differently:
   as `Deferred` in the summary. So is every app the catalog marks per-user (`scope = 'user'` or
   `userPhase = $true`, see [Catalog entry fields](#catalog-entry-fields)), before any winget call,
   with its own line saying so; an app marked `scope = 'machine'` that has no machine-wide installer
-  fails instead. A deferred app counts neither as installed nor as failed and does
+  fails instead, without a retry. A deferred app counts neither as installed nor as failed and does
   not change the exit code. A per-user app can only be installed in the signed-in user's own
   account: by this installer run as that user when the account is an administrator, otherwise by a
   per-user deployment, such as an RMM script that runs as the user or the Microsoft Store (on a

@@ -429,11 +429,25 @@ function Invoke-WingetInstall {
                             Write-ErrorMessage "Failed to install: $($app.name) ($failureReason)."
                         }
                     }
+                    # Only the post-install hook failed (work-order item 38): the install itself
+                    # finished, so its restart and scope notes belong to this run whatever the hook
+                    # does in the retry pass.
+                    if ($outcome.FailureReason -eq 'PostInstallFailed' -and $outcome.StatusBeforeHook -eq 'Installed' -and (Write-InstalledAppNote -AppName $app.name -InstallResult $outcome.InstallResult)) {
+                        $restartRequiredApps += $app.name
+                    }
                     # Tracked as objects, not bare names, so the failed-apps summary can render a
                     # Reason column (issue #189). RestartFirst: the installer cannot run until
-                    # Windows restarts (0x8A15010A), so the retry pass leaves it alone.
-                    $failedApps += @{ Name = $app.name; Reason = $failureReason; RestartFirst = (Test-RestartRequiredFirst -InstallResult $outcome.InstallResult) }
-                    $appRecords[$app.name] = New-AppRunRecord -Id $app.name -Status 'Failed' -Reason $failureReason -InstallResult $outcome.InstallResult -PostInstall $outcome.Configuration
+                    # Windows restarts (0x8A15010A), so the retry pass leaves it alone. The rest is
+                    # what the retry pass needs to know about this attempt (work-order item 38).
+                    $failedApps += @{
+                        Name             = $app.name
+                        Reason           = $failureReason
+                        RestartFirst     = (Test-RestartRequiredFirst -InstallResult $outcome.InstallResult)
+                        FailureReason    = $outcome.FailureReason
+                        StatusBeforeHook = $outcome.StatusBeforeHook
+                        InstallResult    = $outcome.InstallResult
+                    }
+                    $appRecords[$app.name] = New-AppRunRecord -Id $app.name -Status 'Failed' -Reason $failureReason -InstallResult $outcome.InstallResult -RestartRequired ($restartRequiredApps -contains $app.name) -PostInstall $outcome.Configuration
                 }
             }
         }
@@ -484,6 +498,13 @@ function Invoke-WingetInstall {
                     $failedApps += $failedApp
                     continue
                 }
+                if ($failedApp.FailureReason -eq 'NoMachineScopeInstaller') {
+                    # A scope 'machine' app (work-order item 38): the package's manifest decides
+                    # this, so another try in this run would get the same answer from winget.
+                    Write-WarningMessage "Not retrying ${appName}: no machine-scope installer applies to this PC, and its catalog entry allows only a machine-wide install (scope 'machine')."
+                    $failedApps += $failedApp
+                    continue
+                }
                 $outcome = $null
                 try {
                     Write-Info "Retrying: $appName"
@@ -499,6 +520,15 @@ function Invoke-WingetInstall {
                         $installerBusyWaitSecondsLeft = [Math]::Max(0, $installerBusyWaitSecondsLeft - [int]$outcome.InstallResult.InstallInProgressWaitedSeconds)
                     }
 
+                    # Only its post-install hook failed in the first pass (work-order item 38): the
+                    # retry finds the app installed and runs no installer, so the first pass's
+                    # install (its exit code; its restart was counted then) is the one to record.
+                    $hookRetry = $failedApp.FailureReason -eq 'PostInstallFailed'
+                    $recordInstallResult = $outcome.InstallResult
+                    if ($hookRetry -and $null -eq $recordInstallResult) {
+                        $recordInstallResult = $failedApp.InstallResult
+                    }
+
                     if ($outcome.Status -eq 'Failed') {
                         $failureReason = Format-InstallFailureReason -FailureReason $outcome.FailureReason -InstallResult $outcome.InstallResult -LaunchError $outcome.LaunchError -CheckExitCode $outcome.CheckExitCode -PostInstallReason $outcome.Configuration.Reason
                         switch ($outcome.FailureReason) {
@@ -512,8 +542,8 @@ function Invoke-WingetInstall {
                                 Write-ErrorMessage "Retry failed: $appName ($failureReason)."
                             }
                         }
-                        $failedApps += @{ Name = $appName; Reason = $failureReason; RestartFirst = (Test-RestartRequiredFirst -InstallResult $outcome.InstallResult) }
-                        $appRecords[$appName] = New-AppRunRecord -Id $appName -Status 'Failed' -Reason $failureReason -InstallResult $outcome.InstallResult -PostInstall $outcome.Configuration
+                        $failedApps += @{ Name = $appName; Reason = $failureReason; RestartFirst = (Test-RestartRequiredFirst -InstallResult $outcome.InstallResult); FailureReason = $outcome.FailureReason }
+                        $appRecords[$appName] = New-AppRunRecord -Id $appName -Status 'Failed' -Reason $failureReason -InstallResult $recordInstallResult -RestartRequired ($restartRequiredApps -contains $appName) -PostInstall $outcome.Configuration
                     }
                     elseif ($outcome.Status -eq 'Deferred') {
                         # The retry got as far as the install, which found no machine-wide
@@ -539,9 +569,10 @@ function Invoke-WingetInstall {
                     }
                     else {
                         # 'Installed', or 'Skipped' when the first-pass install actually landed
-                        # and only its verification failed — either way the app is present now.
+                        # and only its verification or post-install hook failed — either way the
+                        # app is present now.
                         Write-Success "Retry succeeded: $appName"
-                        if ($outcome.Status -eq 'Installed' -and (Write-InstalledAppNote -AppName $appName -InstallResult $outcome.InstallResult)) {
+                        if ($outcome.Status -eq 'Installed' -and (Write-InstalledAppNote -AppName $appName -InstallResult $outcome.InstallResult) -and $restartRequiredApps -notcontains $appName) {
                             $restartRequiredApps += $appName
                         }
                         # A first-pass hook failure ends here once the hook succeeds (work-order
@@ -549,8 +580,19 @@ function Invoke-WingetInstall {
                         if (Write-AppPostInstallResult -AppName $appName -Configuration $outcome.Configuration) {
                             $notConfiguredApps += @{ Name = $appName; Reason = [string]$outcome.Configuration.Reason }
                         }
-                        $installedApps += $appName
-                        $appRecords[$appName] = New-AppRunRecord -Id $appName -Status 'Installed' -InstallResult $outcome.InstallResult -RestartRequired ($restartRequiredApps -contains $appName) -PostInstall $outcome.Configuration
+                        if ($hookRetry -and $outcome.Status -eq 'Skipped' -and $failedApp.StatusBeforeHook -ne 'Installed') {
+                            # Installed before this run; only its hook needed the retry.
+                            $skipReason = 'already installed'
+                            if ($outcome.SkipReason -eq 'Provisioned') {
+                                $skipReason = 'already provisioned for every user on this PC'
+                            }
+                            $skippedApps += $appName
+                            $appRecords[$appName] = New-AppRunRecord -Id $appName -Status 'Skipped' -Reason $skipReason -PostInstall $outcome.Configuration
+                        }
+                        else {
+                            $installedApps += $appName
+                            $appRecords[$appName] = New-AppRunRecord -Id $appName -Status 'Installed' -InstallResult $recordInstallResult -RestartRequired ($restartRequiredApps -contains $appName) -PostInstall $outcome.Configuration
+                        }
                     }
                 }
                 catch {

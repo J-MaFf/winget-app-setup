@@ -15,8 +15,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `scope`: `any` (default, the behaviour so far), `machine` (machine scope only, in every run: a
     package with no machine-wide installer fails with `no machine-scope installer applies to this
     PC, and its catalog entry allows only a machine-wide install (scope 'machine')` instead of
-    being installed per-user or deferred) or `user` (`--scope user`;
-    `Install-WingetPackage -Scope`).
+    being installed per-user or deferred, and the retry pass does not try it again) or `user`
+    (`--scope user`; `Install-WingetPackage -Scope`). The scope is how the installer installs an
+    app: an app `winget list` already shows, at either scope, is skipped as already installed.
   - `arch`: the OS architectures the app is for (`X86`, `X64`, `Arm`, `Arm64`), decided by
     `Test-AppApplicability` with `Get-OSArchitecture` together with the condition, once per run and
     fail open (`Architecture check for <id> failed (...); treating its arch list as met ...`). The
@@ -32,12 +33,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     It returns `Configured`, or `NotConfigured` or `Failed` with a reason (`Invoke-AppPostInstall`,
     `ConvertTo-AppPostInstallResult`). The run prints `Configured: <id>` or
     `Not configured: <id> (<reason>)`; a failed or throwing hook makes the app `Failed`
-    (`installed, but its post-install configuration failed (<reason>)`, exit code 1, retried once),
-    while `NotConfigured` leaves the exit code alone and adds a
-    `Configuration: NOT DONE for <id> (<reason>) - ...` line under the summary. Each app's entry in
-    `last-run.json` gains `postInstall` and `postInstallReason`. The build's catalog reference guard
-    (`Get-UndefinedCatalogInstallReference`) now checks a `postInstall` function name as it checks
-    `install`. No catalog app uses the new fields yet.
+    (`installed, but its post-install configuration failed (<reason>)`, exit code 1, retried once;
+    the install's restart and exit code stay with the app, and an app that was already installed
+    stays `Skipped` when the retry pass configures it), while `NotConfigured` leaves the exit code
+    alone and adds a `Configuration: NOT DONE for <id> (<reason>) - ...` line under the summary.
+    Each app's entry in `last-run.json` gains `postInstall` and `postInstallReason`. The build's
+    catalog reference guard (`Get-UndefinedCatalogInstallReference`) now checks a `postInstall`
+    function name as it checks `install`. No catalog app uses the new fields yet.
 - The Winget-AutoUpdate gate now checks for the Windows App Runtime the winget release WAU installs
   actually needs, instead of only the constant `Microsoft.WindowsAppRuntime.1.8 >= 8000.616.304.0`
   (work-order item 32, product-F4). WAU's `Install-Prerequisites` installs the latest winget-cli

@@ -45,7 +45,9 @@
         installed for one account or deferred. 'user' installs with `--scope user` in a run as the
         signed-in user, and is Deferred, before any winget call, in a run as SYSTEM or under
         cross-user elevation. A package-specific installer (install) gets -MachineScopeOnly for
-        'machine', and -Scope when it declares that parameter.
+        'machine', and -Scope when it declares that parameter. The scope is how the app is
+        installed, not a condition on an install that is already there: an app `winget list`
+        already shows for the account running the installer, at either scope, is skipped.
       - arch: the OS architectures the app is for, as Get-OSArchitecture names them ('X86', 'X64',
         'Arm', 'Arm64'; one string or a list). Part of the applicability decision
         (Test-AppApplicability), with the same fail-open rule: on another architecture the app is

@@ -167,17 +167,17 @@ is checked on a real Windows PC yet.
 
 Catalog entries can now say declaratively what used to need code (work-order item 38): `scope`
 (`machine`, `user` or the default `any`; `machine` never falls back to a per-user install and fails
-instead, `user` installs with `--scope user`), `arch` (the OS architectures the app is for, part of
-the once-per-run applicability decision, fail open), `userPhase` (per-user work), and `postInstall`
-(an idempotent hook that configures the app once it is installed, on every run). As SYSTEM and
-under cross-user elevation, `scope = 'user'` and `userPhase` apps are `Deferred` before any winget
-call, with their own reason in the summary and in `last-run.json`, for a later run as the user. A
-hook's result is printed per app and recorded in `last-run.json` (`postInstall`,
+instead, without a retry, `user` installs with `--scope user`), `arch` (the OS architectures the app
+is for, part of the once-per-run applicability decision, fail open), `userPhase` (per-user work),
+and `postInstall` (an idempotent hook that configures the app once it is installed, on every run).
+As SYSTEM and under cross-user elevation, `scope = 'user'` and `userPhase` apps are `Deferred`
+before any winget call, with their own reason in the summary and in `last-run.json`, for a later run
+as the user. A hook's result is printed per app and recorded in `last-run.json` (`postInstall`,
 `postInstallReason`): a failed hook makes the app failed (exit 1, retried once), `NotConfigured`
 gets a `Configuration: NOT DONE` line under the summary and leaves the exit code alone. A wrong
-value in any of these fields stops the run with exit 3, and the build guard checks a hook named by
-a string like an `install` function. No catalog app uses the new fields yet: the Reader entries
-keep their `condition` until `e2e/Assert-Install.ps1` decides applicability with the module's
+value in any of these fields stops the run with exit 3, and the build guard checks a hook named by a
+string like an `install` function. No catalog app uses the new fields yet: the Reader entries keep
+their `condition` until `e2e/Assert-Install.ps1` decides applicability with the module's
 `Test-AppApplicability` instead of reading `condition` itself.
 
 The same branch changes CI. Fork pull requests that leave `windows-tests.yml` alone no longer run

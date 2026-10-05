@@ -200,6 +200,9 @@ function Test-AppApplicability {
                         'UserScope' (catalog scope 'user') or 'UserPhase' (catalog userPhase)
         Configuration = the post-install hook's result, @{ Status = 'Configured' |
                         'NotConfigured' | 'Failed'; Reason }, when the hook ran; otherwise absent
+        StatusBeforeHook = for PostInstallFailed, 'Installed' when this call installed the app
+                        (InstallResult is that install's, which stands) or 'Skipped' when it was
+                        already installed or provisioned; otherwise absent
     }
 #>
 function Install-AppWithVerification {
@@ -446,8 +449,8 @@ function Install-AppWithVerification {
     run: '[DRY-RUN] Would run the post-install configuration of <id>.' is printed instead. Otherwise
     Invoke-AppPostInstall runs it and the outcome gets its result as Configuration; a Failed result
     turns the outcome into Status 'Failed', FailureReason 'PostInstallFailed', so the app goes into
-    the retry pass (which finds it installed and runs the hook again) and the exit code. NotConfigured
-    leaves the status as it was.
+    the retry pass (which finds it installed and runs the hook again) and the exit code, and keeps
+    the status it had in StatusBeforeHook. NotConfigured leaves the status as it was.
 .PARAMETER App
     The validated catalog entry.
 .PARAMETER Outcome
@@ -480,6 +483,9 @@ function Complete-AppPostInstallStep {
     $configuration = Invoke-AppPostInstall -App $App
     $Outcome['Configuration'] = $configuration
     if ($configuration.Status -eq 'Failed') {
+        # What the install step found stays with the outcome: the retry pass reports the app
+        # installed by this run (with this InstallResult, its restart included) or already there.
+        $Outcome['StatusBeforeHook'] = $Outcome['Status']
         $Outcome['Status'] = 'Failed'
         $Outcome['FailureReason'] = 'PostInstallFailed'
         $Outcome['SkipReason'] = $null
