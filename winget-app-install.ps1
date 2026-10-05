@@ -83,12 +83,12 @@ param (
 # the function source under WingetAppSetup/Public and WingetAppSetup/Private, or the entry block in
 # build/fragments/tail.ps1, then re-run the build to regenerate this file.
 # See readme.md ("Project layout") for details.
-# Build id: 1.0.0+d322c351 (module version + SHA256 fragment of this whole script; issue #189).
+# Build id: 1.0.0+df2b831a (module version + SHA256 fragment of this whole script; issue #189).
 # ------------------------------------------------------------------------------------------------
 
 # Content-derived build identity, logged at startup so a transcript from a remote machine
 # identifies exactly which installer build produced it (issue #189).
-$script:InstallerBuildId = '1.0.0+d322c351'
+$script:InstallerBuildId = '1.0.0+df2b831a'
 
 # ------------------------------------------------Functions------------------------------------------------
 
@@ -8425,13 +8425,13 @@ function Get-DefaultAppCatalog {
     return @(
         @{name = '7zip.7zip' },
         @{name = 'GlavSoft.TightVNC'; postInstall = 'Set-TightVncServerPassword' },
-        @{name = 'Adobe.Acrobat.Reader.64-bit'; condition = { (Get-OSArchitecture) -ne 'Arm64' }; conditionDescription = 'its only installer is x64, and Adobe supports only the 32-bit Reader on ARM64 Windows' },
-        @{name = 'Adobe.Acrobat.Reader.32-bit'; condition = { (Get-OSArchitecture) -eq 'Arm64' }; conditionDescription = 'ARM64 Windows only; other PCs get the 64-bit Reader' },
+        @{name = 'Adobe.Acrobat.Reader.64-bit'; arch = 'X64'; conditionDescription = 'its only installer is x64, and Adobe supports only the 32-bit Reader on ARM64 Windows' },
+        @{name = 'Adobe.Acrobat.Reader.32-bit'; arch = @('Arm64', 'X86'); conditionDescription = 'ARM64 and 32-bit Windows only; x64 PCs get the 64-bit Reader' },
         @{name = 'Google.Chrome' },
         @{name = 'Google.GoogleDrive' },
         @{name = 'Git.Git' },
         @{name = 'Klocman.BulkCrapUninstaller' },
-        @{name = 'Dell.CommandUpdate.Universal'; condition = { (Get-ComputerManufacturer) -match 'Dell' }; conditionDescription = 'Dell hardware only' },
+        @{name = 'Dell.CommandUpdate.Universal'; arch = 'X64'; condition = { (Get-ComputerManufacturer) -match 'Dell' }; conditionDescription = 'Dell hardware with x64 Windows only; winget has no ARM64 installer for it' },
         @{name = 'Microsoft.PowerShell'; install = 'Install-PowerShellLatest' },
         @{name = 'Microsoft.WindowsTerminal'; msixName = 'Microsoft.WindowsTerminal'; condition = { (Test-IsSystemAccount) -or -not (Test-WindowsTerminalHostsCurrentSession) }; conditionDescription = 'winget cannot self-update Windows Terminal from a session Windows Terminal itself is hosting (issue #271)' }
     )

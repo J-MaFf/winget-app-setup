@@ -102,12 +102,17 @@ Describe 'Get-DefaultAppCatalog (issue #190)' {
     }
 
     Context 'Manufacturer-aware gating for Dell Command Update (issue #217)' {
+        BeforeEach {
+            # The manufacturer tests are about the condition; the arch list is tested below.
+            Mock Get-OSArchitecture { 'X64' }
+        }
+
         It 'Gates Dell.CommandUpdate.Universal behind a condition with a human-readable description' {
             $dellApp = @(Get-DefaultAppCatalog) | Where-Object { $_.name -eq 'Dell.CommandUpdate.Universal' }
 
             @($dellApp).Count | Should -Be 1
             $dellApp.condition | Should -BeOfType [scriptblock]
-            $dellApp.conditionDescription | Should -Be 'Dell hardware only'
+            $dellApp.conditionDescription | Should -Match '^Dell hardware'
         }
 
         It 'Condition is true on Dell hardware and false on non-Dell hardware' {
@@ -224,75 +229,64 @@ Describe 'Get-DefaultAppCatalog (issue #190)' {
     # not support on ARM64 Windows, so an ARM64 PC failed it in both passes on every run (exit 1).
     # ARM64 PCs get Adobe.Acrobat.Reader.32-bit (x86), the build Adobe supports there, instead.
     Context 'Architecture gating for Adobe Acrobat Reader (review finding P3-32)' {
-        It 'Gates Adobe.Acrobat.Reader.64-bit behind a condition whose description names ARM64' {
+        BeforeEach {
+            $script:warnings = @()
+            Mock Write-WarningMessage { $script:warnings += $Message }
+        }
+
+        It 'Gates Adobe.Acrobat.Reader.64-bit to x64 Windows with an arch list, and says why' {
             $readerApp = @(Get-DefaultAppCatalog) | Where-Object { $_.name -eq 'Adobe.Acrobat.Reader.64-bit' }
 
             @($readerApp).Count | Should -Be 1
-            $readerApp.condition | Should -BeOfType [scriptblock]
+            @($readerApp.arch) | Should -Be @('X64')
+            $readerApp.ContainsKey('condition') | Should -BeFalse
             $readerApp.conditionDescription | Should -Match 'ARM64'
         }
 
-        It 'Condition is false on ARM64 and true on x64 and x86' {
-            $readerApp = @(Get-DefaultAppCatalog) | Where-Object { $_.name -eq 'Adobe.Acrobat.Reader.64-bit' }
-
-            Mock Get-OSArchitecture { 'Arm64' }
-            [bool](& $readerApp.condition) | Should -Be $false
-
-            Mock Get-OSArchitecture { 'X64' }
-            [bool](& $readerApp.condition) | Should -Be $true
-
-            Mock Get-OSArchitecture { 'X86' }
-            [bool](& $readerApp.condition) | Should -Be $true
-        }
-
-        It 'Reports Reader as not applicable on ARM64 without any winget probe or install' {
-            $readerApp = @(Get-DefaultAppCatalog) | Where-Object { $_.name -eq 'Adobe.Acrobat.Reader.64-bit' }
-            Mock Get-OSArchitecture { 'Arm64' }
-            Mock Test-WingetPackageInstalled { throw 'must not probe a not-applicable app' }
-            Mock Install-WingetPackage { throw 'must not install a not-applicable app' }
-
-            $outcome = Install-AppWithVerification -App $readerApp
-
-            $outcome.Status | Should -Be 'Skipped'
-            $outcome.SkipReason | Should -Be 'NotApplicable'
-        }
-
-        It 'Fails open when the architecture cannot be read: the app applies' {
-            $readerApp = @(Get-DefaultAppCatalog) | Where-Object { $_.name -eq 'Adobe.Acrobat.Reader.64-bit' }
-            Mock Write-WarningMessage { }
-            Mock Get-OSArchitecture { throw 'The OS architecture could not be read.' }
-
-            Test-AppApplicability -App $readerApp | Should -Be $true
-        }
-
-        # Gating the 64-bit Reader alone left ARM64 PCs with no PDF reader at all.
-        It 'Gates Adobe.Acrobat.Reader.32-bit behind a condition whose description names ARM64' {
+        # Gating the 64-bit Reader alone left ARM64 PCs with no PDF reader at all. 32-bit Windows
+        # cannot run the 64-bit Reader's x64 installer either.
+        It 'Gates Adobe.Acrobat.Reader.32-bit to ARM64 and 32-bit Windows with an arch list, and says why' {
             $readerApp = @(Get-DefaultAppCatalog) | Where-Object { $_.name -eq 'Adobe.Acrobat.Reader.32-bit' }
 
             @($readerApp).Count | Should -Be 1
-            $readerApp.condition | Should -BeOfType [scriptblock]
+            @($readerApp.arch) | Should -Be @('Arm64', 'X86')
+            $readerApp.ContainsKey('condition') | Should -BeFalse
             $readerApp.conditionDescription | Should -Match 'ARM64'
         }
 
         It 'Offers exactly one Reader on <Architecture>: <Expected>' -ForEach @(
             @{ Architecture = 'Arm64'; Expected = 'Adobe.Acrobat.Reader.32-bit' }
             @{ Architecture = 'X64'; Expected = 'Adobe.Acrobat.Reader.64-bit' }
-            @{ Architecture = 'X86'; Expected = 'Adobe.Acrobat.Reader.64-bit' }
+            @{ Architecture = 'X86'; Expected = 'Adobe.Acrobat.Reader.32-bit' }
         ) {
             $readerApps = @(Get-DefaultAppCatalog | Where-Object { $_.name -like 'Adobe.Acrobat.Reader.*' })
             $script:mockedArchitecture = $Architecture
             Mock Get-OSArchitecture { $script:mockedArchitecture }
-            Mock Write-WarningMessage { }
 
             $applicable = @($readerApps | Where-Object { Test-AppApplicability -App $_ } | ForEach-Object { $_.name })
 
             $applicable | Should -Be @($Expected)
-            Should -Invoke Write-WarningMessage -Times 0 -Exactly
+            $script:warnings | Should -BeNullOrEmpty
         }
 
-        It 'Reports the 32-bit Reader as not applicable on x64 without any winget probe or install' {
-            $readerApp = @(Get-DefaultAppCatalog) | Where-Object { $_.name -eq 'Adobe.Acrobat.Reader.32-bit' }
-            Mock Get-OSArchitecture { 'X64' }
+        It 'Gives the skip line the description, not the bare architecture list, on <Architecture>' -ForEach @(
+            @{ Architecture = 'Arm64'; Name = 'Adobe.Acrobat.Reader.64-bit'; Reason = 'its only installer is x64, and Adobe supports only the 32-bit Reader on ARM64 Windows' }
+            @{ Architecture = 'X64'; Name = 'Adobe.Acrobat.Reader.32-bit'; Reason = 'ARM64 and 32-bit Windows only; x64 PCs get the 64-bit Reader' }
+        ) {
+            $readerApp = @(Get-DefaultAppCatalog) | Where-Object { $_.name -eq $Name }
+            $script:mockedArchitecture = $Architecture
+            Mock Get-OSArchitecture { $script:mockedArchitecture }
+
+            Get-AppNotApplicableReason -App $readerApp | Should -Be $Reason
+        }
+
+        It 'Reports the <Name> as not applicable on <Architecture> without any winget probe or install' -ForEach @(
+            @{ Architecture = 'Arm64'; Name = 'Adobe.Acrobat.Reader.64-bit' }
+            @{ Architecture = 'X64'; Name = 'Adobe.Acrobat.Reader.32-bit' }
+        ) {
+            $readerApp = @(Get-DefaultAppCatalog) | Where-Object { $_.name -eq $Name }
+            $script:mockedArchitecture = $Architecture
+            Mock Get-OSArchitecture { $script:mockedArchitecture }
             Mock Test-WingetPackageInstalled { throw 'must not probe a not-applicable app' }
             Mock Install-WingetPackage { throw 'must not install a not-applicable app' }
 
@@ -300,6 +294,87 @@ Describe 'Get-DefaultAppCatalog (issue #190)' {
 
             $outcome.Status | Should -Be 'Skipped'
             $outcome.SkipReason | Should -Be 'NotApplicable'
+        }
+
+        It 'Fails open when the architecture cannot be read: both Readers apply, with a warning each' {
+            $readerApps = @(Get-DefaultAppCatalog | Where-Object { $_.name -like 'Adobe.Acrobat.Reader.*' })
+            Mock Get-OSArchitecture { throw 'The OS architecture could not be read.' }
+
+            foreach ($readerApp in $readerApps) {
+                Test-AppApplicability -App $readerApp | Should -Be $true
+            }
+            @($script:warnings).Count | Should -Be 2
+        }
+    }
+
+    # winget's only Google Drive installer is labelled x64, but Google's update server sends ARM64
+    # PCs the same file and Drive runs natively on Windows 11 ARM64, so it is not gated off ARM64.
+    Context 'Google Drive on ARM64' {
+        It 'Applies on <Architecture> without a warning' -ForEach @(
+            @{ Architecture = 'X64' }
+            @{ Architecture = 'Arm64' }
+        ) {
+            $driveApp = @(Get-DefaultAppCatalog) | Where-Object { $_.name -eq 'Google.GoogleDrive' }
+            $script:mockedArchitecture = $Architecture
+            Mock Get-OSArchitecture { $script:mockedArchitecture }
+            Mock Write-WarningMessage { }
+
+            @($driveApp).Count | Should -Be 1
+            Test-AppApplicability -App $driveApp | Should -Be $true
+            Should -Invoke Write-WarningMessage -Times 0 -Exactly
+        }
+    }
+
+    # winget has only Dell's x64 build of Dell Command Update; on ARM64 it would install that with
+    # the Arm64 .NET Desktop Runtime its dependency resolves to. Dell ships its ARM64 build apart.
+    Context 'Architecture gating for Dell Command Update' {
+        BeforeEach {
+            $script:warnings = @()
+            Mock Write-WarningMessage { $script:warnings += $Message }
+            Mock Get-ComputerManufacturer { 'Dell Inc.' }
+        }
+
+        It 'Gates Dell.CommandUpdate.Universal to x64 Windows with an arch list' {
+            $dellApp = @(Get-DefaultAppCatalog) | Where-Object { $_.name -eq 'Dell.CommandUpdate.Universal' }
+
+            @($dellApp.arch) | Should -Be @('X64')
+        }
+
+        It 'Applies on a Dell PC with <Architecture> Windows: <Expected>' -ForEach @(
+            @{ Architecture = 'X64'; Expected = $true }
+            @{ Architecture = 'Arm64'; Expected = $false }
+            @{ Architecture = 'X86'; Expected = $false }
+        ) {
+            $dellApp = @(Get-DefaultAppCatalog) | Where-Object { $_.name -eq 'Dell.CommandUpdate.Universal' }
+            $script:mockedArchitecture = $Architecture
+            Mock Get-OSArchitecture { $script:mockedArchitecture }
+
+            Test-AppApplicability -App $dellApp | Should -Be $Expected
+            $script:warnings | Should -BeNullOrEmpty
+        }
+
+        It 'Names both gates in the reason an ARM64 Dell PC is given' {
+            $dellApp = @(Get-DefaultAppCatalog) | Where-Object { $_.name -eq 'Dell.CommandUpdate.Universal' }
+            Mock Get-OSArchitecture { 'Arm64' }
+
+            $reason = Get-AppNotApplicableReason -App $dellApp
+
+            $reason | Should -Match 'Dell hardware'
+            $reason | Should -Match 'x64 Windows only'
+            $reason | Should -Match 'ARM64'
+        }
+
+        It 'Skips it on an ARM64 Dell PC without asking for the manufacturer or calling winget' {
+            $dellApp = @(Get-DefaultAppCatalog) | Where-Object { $_.name -eq 'Dell.CommandUpdate.Universal' }
+            Mock Get-OSArchitecture { 'Arm64' }
+            Mock Test-WingetPackageInstalled { throw 'must not probe a not-applicable app' }
+            Mock Install-WingetPackage { throw 'must not install a not-applicable app' }
+
+            $outcome = Install-AppWithVerification -App $dellApp
+
+            $outcome.Status | Should -Be 'Skipped'
+            $outcome.SkipReason | Should -Be 'NotApplicable'
+            Should -Invoke Get-ComputerManufacturer -Times 0 -Exactly
         }
     }
 
@@ -307,7 +382,16 @@ Describe 'Get-DefaultAppCatalog (issue #190)' {
         It 'No catalog entry other than the reviewed exceptions carries a condition' {
             $conditioned = @(Get-DefaultAppCatalog) | Where-Object { $_.ContainsKey('condition') }
 
-            @($conditioned | ForEach-Object { $_.name }) | Should -Be @('Adobe.Acrobat.Reader.64-bit', 'Adobe.Acrobat.Reader.32-bit', 'Dell.CommandUpdate.Universal', 'Microsoft.WindowsTerminal')
+            @($conditioned | ForEach-Object { $_.name }) | Should -Be @('Dell.CommandUpdate.Universal', 'Microsoft.WindowsTerminal')
+        }
+
+        It 'No catalog entry other than the reviewed exceptions carries an arch list, and each says why' {
+            $gated = @(Get-DefaultAppCatalog) | Where-Object { $_.ContainsKey('arch') }
+
+            @($gated | ForEach-Object { $_.name }) | Should -Be @('Adobe.Acrobat.Reader.64-bit', 'Adobe.Acrobat.Reader.32-bit', 'Dell.CommandUpdate.Universal')
+            foreach ($app in $gated) {
+                $app.conditionDescription | Should -Not -BeNullOrEmpty -Because "$($app.name)'s skip line should say why it does not apply"
+            }
         }
     }
 }

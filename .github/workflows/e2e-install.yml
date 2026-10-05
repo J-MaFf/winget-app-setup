@@ -111,8 +111,9 @@ env:
   # for future runner-only incompatibilities.
   #   - Dell.CommandUpdate.Universal was retired from this list by issue #217: the product now
   #     gates it with a manufacturer condition in the catalog, so non-Dell machines (including
-  #     these runners) report it 'Skipped (not applicable: Dell hardware only)' instead of
-  #     failing its Server-incompatible Microsoft.DotNet.DesktopRuntime.8 dependency (0x8A150104).
+  #     these runners) report it 'Skipped (not applicable: Dell hardware with x64 Windows only; ...)'
+  #     instead of failing its Server-incompatible Microsoft.DotNet.DesktopRuntime.8 dependency
+  #     (0x8A150104).
   KNOWN_PLATFORM_INCOMPATIBLE: ''
 
 jobs:

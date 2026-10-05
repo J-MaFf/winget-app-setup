@@ -26,9 +26,9 @@
         'user' installs with --scope user, and is Deferred as SYSTEM or under cross-user elevation.
         An app already installed at either scope is skipped.
       - arch: the OS architectures the app is for ('X86', 'X64', 'Arm', 'Arm64'; one or a list),
-        part of the applicability decision with the same fail-open rule. e2e/Assert-Install.ps1
-        reads only 'condition', so the Reader entries keep theirs until it uses
-        Test-AppApplicability.
+        part of the applicability decision with the same fail-open rule. List them when winget
+        has no installer that works on some architecture; x64 emulation on ARM64 covers user-mode
+        code only, not drivers or shell extensions.
       - postInstall: a scriptblock, or the name of a module function, called with the entry once the
         app is installed and on every run that finds it installed, so it must be idempotent. It
         returns 'Configured', or @{ Status = 'NotConfigured' or 'Failed'; Reason = '<why>' }
@@ -47,18 +47,21 @@ function Get-DefaultAppCatalog {
         # TightVNC Server installs with no password: the hook sets the server and control passwords
         # from WINGET_APP_SETUP_TIGHTVNC_PASSWORD or a prompt, never from this public repo (P2-22).
         @{name = 'GlavSoft.TightVNC'; postInstall = 'Set-TightVncServerPassword' },
-        # One Adobe Reader per PC (P3-32): Adobe supports only the 32-bit Reader on ARM64 Windows,
-        # and the 64-bit package's only installer is x64. The conditions are opposites, so exactly
-        # one applies unless Get-OSArchitecture throws.
-        @{name = 'Adobe.Acrobat.Reader.64-bit'; condition = { (Get-OSArchitecture) -ne 'Arm64' }; conditionDescription = 'its only installer is x64, and Adobe supports only the 32-bit Reader on ARM64 Windows' },
-        @{name = 'Adobe.Acrobat.Reader.32-bit'; condition = { (Get-OSArchitecture) -eq 'Arm64' }; conditionDescription = 'ARM64 Windows only; other PCs get the 64-bit Reader' },
+        # One Adobe Reader per PC (P3-32): the 64-bit package's only installer is x64, and Adobe
+        # supports only the 32-bit Reader on ARM64 Windows. The arch lists do not overlap, so at
+        # most one applies unless Get-OSArchitecture throws.
+        @{name = 'Adobe.Acrobat.Reader.64-bit'; arch = 'X64'; conditionDescription = 'its only installer is x64, and Adobe supports only the 32-bit Reader on ARM64 Windows' },
+        @{name = 'Adobe.Acrobat.Reader.32-bit'; arch = @('Arm64', 'X86'); conditionDescription = 'ARM64 and 32-bit Windows only; x64 PCs get the 64-bit Reader' },
         @{name = 'Google.Chrome' },
+        # No arch list: winget's only installer is labelled x64, but Google serves the same file to
+        # ARM64 PCs, and Drive runs natively on Windows 11 ARM64.
         @{name = 'Google.GoogleDrive' },
         @{name = 'Git.Git' },
         @{name = 'Klocman.BulkCrapUninstaller' },
-        # Dell hardware only; its .NET Desktop Runtime dependency cannot even install on Server
-        # images (0x8A150104 on GitHub-hosted runners) (issue #217).
-        @{name = 'Dell.CommandUpdate.Universal'; condition = { (Get-ComputerManufacturer) -match 'Dell' }; conditionDescription = 'Dell hardware only' },
+        # Dell hardware only (issue #217): its .NET Desktop Runtime dependency cannot install on
+        # Server images (0x8A150104). x64 only: winget has only Dell's x64 build (Dell ships ARM64
+        # separately), and on ARM64 winget would pair it with the Arm64 .NET runtime.
+        @{name = 'Dell.CommandUpdate.Universal'; arch = 'X64'; condition = { (Get-ComputerManufacturer) -match 'Dell' }; conditionDescription = 'Dell hardware with x64 Windows only; winget has no ARM64 installer for it' },
         # Install-PowerShellLatest installs the MSI while one exists (7.6 and older), then the MSIX
         # machine-wide (natively on 24H2+, through DISM before): winget's default MSIX registers per
         # user (issues #163, #166). It verifies its own install.
