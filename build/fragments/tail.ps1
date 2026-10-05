@@ -139,10 +139,15 @@ if ($MyInvocation.InvocationName -ne '.') {
             # fall through into the PowerShell-7-only body below. The build id goes along so an
             # irm | iex run relaunches this same build and never another one (review finding P2-18).
             # So does the time budget's deadline (wgt-gq8.41), counted from this script's start,
-            # and only when there is something to pass on, so a run without one is unchanged.
+            # and only when there is something to pass on, so a run without one is unchanged. A
+            # -MaxRuntimeMinutes that was given, 0 included, wins over the inherited variable.
             try {
                 $bootstrapParameters = @{}
-                $budgetArguments = @(Get-InstallerRunBudgetArgument -Budget (Resolve-InstallerRunBudget -MaxRuntimeMinutes $MaxRuntimeMinutes -RunDeadlineUtc $RunDeadlineUtc -StartedUtc $script:InstallerRunStartedUtc))
+                $bootstrapBudgetParameters = @{ RunDeadlineUtc = $RunDeadlineUtc; StartedUtc = $script:InstallerRunStartedUtc }
+                if ($null -ne $PSBoundParameters -and $PSBoundParameters.ContainsKey('MaxRuntimeMinutes')) {
+                    $bootstrapBudgetParameters['MaxRuntimeMinutes'] = $MaxRuntimeMinutes
+                }
+                $budgetArguments = @(Get-InstallerRunBudgetArgument -Budget (Resolve-InstallerRunBudget @bootstrapBudgetParameters))
                 if ($budgetArguments.Count -gt 0) {
                     $bootstrapParameters['AdditionalArguments'] = $budgetArguments
                 }
@@ -252,9 +257,10 @@ if ($MyInvocation.InvocationName -ne '.') {
         # Invoke-WingetInstall returns its exit code instead of exiting, and its return value is the
         # last thing it writes to the output stream: taking the last element keeps the code right
         # even if a helper ever leaks a value into that stream.
-        # The time budget's values only when given (wgt-gq8.41); Invoke-WingetInstall decides it.
+        # The time budget's values only when given (wgt-gq8.41), so an explicit 0 still turns off
+        # the variable's budget; Invoke-WingetInstall decides it. irm | iex binds no parameter.
         $budgetParameters = @{}
-        if ($MaxRuntimeMinutes -gt 0) {
+        if ($null -ne $PSBoundParameters -and $PSBoundParameters.ContainsKey('MaxRuntimeMinutes')) {
             $budgetParameters['MaxRuntimeMinutes'] = $MaxRuntimeMinutes
         }
         if (-not [string]::IsNullOrWhiteSpace($RunDeadlineUtc)) {

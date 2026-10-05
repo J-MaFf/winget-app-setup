@@ -1916,6 +1916,38 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
             @($script:infoMessages | Where-Object { $_ -like 'Time budget: 45 minutes, until *' }) | Should -HaveCount 1
         }
 
+        # Review of wgt-gq8.41: a -MaxRuntimeMinutes 0 that was given wins over the variable too.
+        It 'Turns off the variable''s budget with a -MaxRuntimeMinutes 0 that was given' {
+            $env:WINGET_APP_SETUP_MAX_RUNTIME_MINUTES = '45'
+            $script:InstallerRunStartedUtc = [DateTime]::UtcNow.AddMinutes(-50)
+
+            Invoke-WingetInstall -Apps $script:apps -NonInteractive -MaxRuntimeMinutes 0 | Should -Be 0
+
+            Should -Invoke Install-AppWithVerification -Times 3 -Exactly -ParameterFilter { -not $TimeBudgetSpent }
+            Should -Invoke Install-WingetAutoUpdate -Times 1 -Exactly
+            ((@($script:infoMessages) + @($script:warningMessages)) -join "`n") | Should -Not -Match 'Time budget'
+        }
+
+        It 'Passes a -MaxRuntimeMinutes 0 that was given on to the elevated run, so it does not take the variable''s budget' {
+            $env:WINGET_APP_SETUP_MAX_RUNTIME_MINUTES = '45'
+            Mock Test-IsAdmin { $false }
+            Mock Test-InvokedFromModuleContext { $false }
+            Mock Test-EffectiveNonInteractive { $false }
+            $script:InstallerScriptSha256 = 'C0FFEE' + ('0' * 58)
+            $script:forwarded = $null
+            Mock Restart-WithElevation { $script:forwarded = @($AdditionalArguments); [pscustomobject]@{ Started = $true; ExitCode = 0 } }
+
+            try {
+                Invoke-WingetInstall -Apps $script:apps -SkipSystemCheck -MaxRuntimeMinutes 0 | Should -Be 0
+            }
+            finally {
+                $script:InstallerScriptSha256 = $null
+                $script:InstallerPendingExitCode = $null
+            }
+
+            $script:forwarded | Should -Be @('-SkipSystemCheck', '-MaxRuntimeMinutes', '0')
+        }
+
         It 'Lets an app finish whose install started before the deadline, and returns 0 when nothing was left' {
             # Used up only after the last app; the Winget-AutoUpdate check comes before that.
             $script:budgetChecks = 0
@@ -1973,6 +2005,31 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
             [void](Invoke-WingetInstall -Apps $script:apps -NonInteractive -MaxRuntimeMinutes 30)
 
             Should -Invoke Wait-WauIdle -Times 1 -Exactly -ParameterFilter { $TimeoutSeconds -eq $Expected }
+        }
+
+        # Review of wgt-gq8.41: an install that starts just before the deadline must not then wait
+        # up to 10 minutes for a busy Windows Installer.
+        It 'Lets an install or the Winget-AutoUpdate setup wait for a busy Windows Installer no longer than the budget has left (<Left> seconds left: <Expected>)' -ForEach @(
+            @{ Left = 120; Expected = 120 }
+            @{ Left = 5000; Expected = 600 }
+        ) {
+            $script:secondsLeft = $Left
+            Mock Get-InstallerRunBudgetSecondsLeft { $script:secondsLeft }
+            # Failed in the first pass, installed by the retry.
+            $script:installCalls = 0
+            Mock Install-AppWithVerification {
+                $script:installCalls++
+                if ($script:installCalls -eq 1) {
+                    return @{ Status = 'Failed'; InstallResult = @{ ExitCode = 1603; Attempts = 1 }; FailureReason = 'VerifyNotFound' }
+                }
+                @{ Status = 'Installed'; InstallResult = @{ ExitCode = 0; Attempts = 1 }; FailureReason = $null }
+            }
+
+            Invoke-WingetInstall -Apps @(@{ name = 'Contoso.First' }) -NonInteractive -MaxRuntimeMinutes 30 | Should -Be 0
+
+            Should -Invoke Install-AppWithVerification -Times 2 -Exactly
+            Should -Invoke Install-AppWithVerification -Times 2 -Exactly -ParameterFilter { $InstallInProgressWaitSeconds -eq $Expected }
+            Should -Invoke Install-WingetAutoUpdate -Times 1 -Exactly -ParameterFilter { $InstallInProgressWaitSeconds -eq $Expected }
         }
 
         It 'Does not cut a dry run short, and says what a real run would do' {
@@ -3715,7 +3772,7 @@ Describe 'Get-InstallerExitCode' {
     }
 
     # Review finding P3-16: 3010 is "succeeded, restart required" to RMM tools and Intune. The
-    # adopted precedence is 1 > 2 > 8 > 3010 > 0.
+    # adopted precedence is 1 > 2 > 9 > 8 > 3010 > 0.
     It 'Returns 3010 when nothing failed, winget works and the run needs a restart to finish' {
         Get-InstallerExitCode -FailedAppCount 0 -WingetUsable $true -RestartRequired $true | Should -Be 3010
     }

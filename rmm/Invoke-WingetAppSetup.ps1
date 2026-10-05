@@ -41,14 +41,18 @@
     Passed on to the installer (skips its OS, disk and network pre-flight checks).
 .PARAMETER MaxRuntimeMinutes
     A time budget for the whole job, in minutes (1 to 1440), counted from the start of this
-    wrapper: once it is used up the installer starts no further app install, retry or
-    Winget-AutoUpdate setup, reports the rest as not attempted and exits 9, and the next run
-    finishes the job. An install already running is not stopped and ends within its own time
-    limit, so set it well below the script time limit of the RMM tool. 0 (the default): none
-    passed on; the installer then reads WINGET_APP_SETUP_MAX_RUNTIME_MINUTES, if the job sets it.
-    Needs an installer pin that has -MaxRuntimeMinutes.
+    wrapper, before its 64-bit relaunch: once it is used up the installer starts no further app
+    install, retry or Winget-AutoUpdate setup, reports the rest as not attempted and exits 9, and
+    the next run finishes the job. An install or Winget-AutoUpdate setup already running is not
+    stopped and ends within its own time limits, so set it about 45 minutes below the script time
+    limit of the RMM tool. 0 (the default): none passed on; the installer then reads
+    WINGET_APP_SETUP_MAX_RUNTIME_MINUTES, if the job sets it. Needs an installer pin that has
+    -MaxRuntimeMinutes.
 .PARAMETER From32BitHost
     Set by the wrapper itself when it relaunches from a 32-bit PowerShell, so the log says so.
+.PARAMETER RunDeadlineUtc
+    Set by the wrapper itself when it relaunches from a 32-bit PowerShell: the time budget's
+    deadline (yyyy-MM-ddTHH:mm:ssZ), taken before the relaunch so that its start-up counts too.
 .NOTES
     Exit codes: the installer's own, unchanged (0 OK, 1 app failures, 2 winget unavailable, 3
     catalog validation failed, 4 elevation required, 5 aborted, 6 another run in progress, 7
@@ -78,7 +82,11 @@ param (
     [int]$MaxRuntimeMinutes = 0,
 
     [Parameter(Mandatory = $false)]
-    [switch]$From32BitHost
+    [switch]$From32BitHost,
+
+    [Parameter(Mandatory = $false)]
+    [ValidatePattern('^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z\z')]
+    [string]$RunDeadlineUtc
 )
 
 # ---- The pinned installer ------------------------------------------------------------------------
@@ -422,6 +430,8 @@ function Start-RmmTranscript {
     The pinned SHA256.
 .PARAMETER MaxRuntimeMinutes
     The time budget to pass on with its deadline, counted from here; 0: none.
+.PARAMETER RunDeadlineUtc
+    The deadline the 32-bit stage set, which the 64-bit stage keeps; empty: counted from here.
 .PARAMETER LogDirectory
     Where the transcript goes. Default: %ProgramData%\winget-app-setup\logs.
 .PARAMETER CopyRoot
@@ -457,6 +467,10 @@ function Invoke-RmmMachinePhase {
 
         [Parameter(Mandatory = $false)]
         [AllowEmptyString()]
+        [string]$RunDeadlineUtc,
+
+        [Parameter(Mandatory = $false)]
+        [AllowEmptyString()]
         [string]$PinnedCommit,
 
         [Parameter(Mandatory = $false)]
@@ -483,6 +497,10 @@ function Invoke-RmmMachinePhase {
         # which the relaunched wrapper binds to its first positional parameter, -InstallerPath (the
         # same flaw rmm/Get-WingetFleetHealth.ps1 and rmm/Repair-WauLogonTrigger.ps1 had).
         $forwarded = @($ForwardedArguments | Where-Object { -not [string]::IsNullOrEmpty($_) })
+        # The time budget's clock starts here, so the relaunch's start-up counts too.
+        if ($MaxRuntimeMinutes -gt 0 -and [string]::IsNullOrWhiteSpace($RunDeadlineUtc)) {
+            $forwarded += @('-RunDeadlineUtc', (Get-RmmRunDeadline -Minutes $MaxRuntimeMinutes))
+        }
         $relaunchArguments = @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $ScriptPath) + $forwarded + @('-From32BitHost')
         $relaunchExitCode = Invoke-RmmProcess -FilePath $nativePowerShell -ArgumentList $relaunchArguments
         if ($null -eq $relaunchExitCode) {
@@ -492,10 +510,14 @@ function Invoke-RmmMachinePhase {
         return [int]$relaunchExitCode
     }
 
-    # The time budget counts from here, before the download (the 32-bit stage above takes a moment).
-    $runDeadlineUtc = $null
+    # The time budget counts from the wrapper's start: the 32-bit stage's deadline, or from here,
+    # before the download.
+    $budgetDeadlineUtc = $null
     if ($MaxRuntimeMinutes -gt 0) {
-        $runDeadlineUtc = Get-RmmRunDeadline -Minutes $MaxRuntimeMinutes
+        $budgetDeadlineUtc = $RunDeadlineUtc
+        if ([string]::IsNullOrWhiteSpace($budgetDeadlineUtc)) {
+            $budgetDeadlineUtc = Get-RmmRunDeadline -Minutes $MaxRuntimeMinutes
+        }
     }
     $transcriptPath = Start-RmmTranscript -LogDirectory $LogDirectory
     $copyDirectory = $null
@@ -504,8 +526,8 @@ function Invoke-RmmMachinePhase {
         if ($From32BitHost) {
             Write-RmmLine 'Started by a 32-bit PowerShell on 64-bit Windows, and relaunched in 64-bit Windows PowerShell through Sysnative.'
         }
-        if ($runDeadlineUtc) {
-            Write-RmmLine ('Time budget: {0} minutes from now, until {1}: the installer starts no app install after that and exits 9 for the next run to finish.' -f $MaxRuntimeMinutes, $runDeadlineUtc)
+        if ($budgetDeadlineUtc) {
+            Write-RmmLine ('Time budget: {0} minutes, until {1}: the installer starts no app install after that and exits 9 for the next run to finish.' -f $MaxRuntimeMinutes, $budgetDeadlineUtc)
         }
 
         $expectedSha256 = $InstallerSha256
@@ -551,8 +573,8 @@ function Invoke-RmmMachinePhase {
         if ($SkipSystemCheck) {
             $installerArguments += '-SkipSystemCheck'
         }
-        if ($runDeadlineUtc) {
-            $installerArguments += @('-MaxRuntimeMinutes', [string]$MaxRuntimeMinutes, '-RunDeadlineUtc', $runDeadlineUtc)
+        if ($budgetDeadlineUtc) {
+            $installerArguments += @('-MaxRuntimeMinutes', [string]$MaxRuntimeMinutes, '-RunDeadlineUtc', $budgetDeadlineUtc)
         }
         $windowsPowerShell = Get-RmmWindowsPowerShellPath
         Write-RmmLine ('Running: {0} {1}' -f $windowsPowerShell, ($installerArguments -join ' '))
@@ -583,6 +605,6 @@ function Invoke-RmmMachinePhase {
 }
 
 if ($MyInvocation.InvocationName -ne '.') {
-    $machinePhaseExitCode = Invoke-RmmMachinePhase -ScriptPath $PSCommandPath -ForwardedArguments (ConvertTo-RmmForwardedArgument -BoundParameters $PSBoundParameters) -InstallerPath $InstallerPath -InstallerSha256 $InstallerSha256 -SkipSystemCheck:$SkipSystemCheck -From32BitHost:$From32BitHost -MaxRuntimeMinutes $MaxRuntimeMinutes -PinnedCommit $PinnedInstallerCommit -PinnedSha256 $PinnedInstallerSha256
+    $machinePhaseExitCode = Invoke-RmmMachinePhase -ScriptPath $PSCommandPath -ForwardedArguments (ConvertTo-RmmForwardedArgument -BoundParameters $PSBoundParameters) -InstallerPath $InstallerPath -InstallerSha256 $InstallerSha256 -SkipSystemCheck:$SkipSystemCheck -From32BitHost:$From32BitHost -MaxRuntimeMinutes $MaxRuntimeMinutes -RunDeadlineUtc $RunDeadlineUtc -PinnedCommit $PinnedInstallerCommit -PinnedSha256 $PinnedInstallerSha256
     exit ([int](@($machinePhaseExitCode)[-1]))
 }

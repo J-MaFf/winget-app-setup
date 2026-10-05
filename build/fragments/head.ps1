@@ -68,13 +68,14 @@
  A time budget for the whole run, in minutes (1 to 1440), for an RMM job that is stopped after a
  fixed time: once it is used up, the run starts no further app install, retry or Winget-AutoUpdate
  setup, reports what it did not reach as not attempted (in the summary, the RESULT line and
- last-run.json), and exits 9 so that the next run finishes the job. An install already running is
- not stopped: it ends within its own time limit, so set the budget well below the RMM's limit. The
- clock starts when this script starts, before the PowerShell 7 relaunch. Not given (or 0), the
- environment variable WINGET_APP_SETUP_MAX_RUNTIME_MINUTES decides, for the irm | iex one-liner,
- which cannot pass a parameter: unset, empty or 0 means no budget, and a value that is not a whole
- number from 0 to 1440 is ignored with a warning. A value given here wins over the variable. A dry
- run (-WhatIf) shows the budget but is not cut short.
+ last-run.json), and exits 9 so that the next run finishes the job. An install or Winget-AutoUpdate
+ setup already running is not stopped: it ends within its own time limits (30 minutes for one winget
+ install), and the end-of-run winget check takes up to about 4 minutes, so set the budget about 45
+ minutes below the RMM's limit. The clock starts when this script starts, before the PowerShell 7
+ relaunch. Not given, the environment variable WINGET_APP_SETUP_MAX_RUNTIME_MINUTES decides, for the
+ irm | iex one-liner, which cannot pass a parameter: unset, empty or 0 means no budget, and a value
+ that is not a whole number from 0 to 1440 is ignored with a warning. A value given here wins over
+ the variable, and 0 turns its budget off. A dry run (-WhatIf) shows the budget but is not cut short.
 
 .PARAMETER RunDeadlineUtc
  Internal: the deadline of the time budget (yyyy-MM-ddTHH:mm:ssZ), passed on by the installer's own

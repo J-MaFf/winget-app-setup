@@ -1037,9 +1037,6 @@ Describe 'One run at a time, and the RESULT line and last-run.json of every run 
     }
 }
 
-# wgt-gq8.35, in a real child process: -CollectDiagnostics makes the bundle and does nothing a real
-# run does (no transcript, run lock, housekeeping, RESULT line or PowerShell 7 bootstrap), also as
-# the script block command the failure notices print. Diagnostics.Tests.ps1 tests the collector.
 # wgt-gq8.41, in real child processes: the time budget's deadline is counted from the first start of
 # the run and crosses the Windows PowerShell 5.1 -> PowerShell 7 relaunch on the command line (the
 # elevated relaunch is tested in Install.Tests.ps1 and Elevation.Tests.ps1), a bad value fails
@@ -1126,8 +1123,20 @@ Describe 'The time budget from the entry script (-MaxRuntimeMinutes, wgt-gq8.41)
         }
     }
 
+    # Review of wgt-gq8.41: a -MaxRuntimeMinutes 0 that was given wins over the variable the
+    # PowerShell 7 run inherits, so it goes on as it is.
+    It 'Windows PowerShell 5.1 phase: passes a -MaxRuntimeMinutes 0 that was given on, and no budget from the variable' {
+        $env:WINGET_APP_SETUP_MAX_RUNTIME_MINUTES = '30'
+        $path = New-FaultInjectedInstaller -Name 'budget-bootstrap-zero.ps1' -EmulateWindowsPowerShell -Body "Write-Host 'install ran'; return 0" -Overrides $script:budgetBootstrap
+
+        $result = Invoke-ChildInstaller -Arguments @('-File', $path, '-NonInteractive', '-MaxRuntimeMinutes', '0')
+
+        $result.Output | Should -Match ([regex]::Escape('relaunch arguments: [-MaxRuntimeMinutes 0]'))
+    }
+
     It 'PowerShell 7 phase: passes -MaxRuntimeMinutes and -RunDeadlineUtc on to Invoke-WingetInstall only when given (<Case>)' -ForEach @(
         @{ Case = 'both given'; Arguments = @('-MaxRuntimeMinutes', '30', '-RunDeadlineUtc', '2026-10-05T12:00:00Z'); Expected = 'budget: [30] [2026-10-05T12:00:00Z]'; ViaIex = $false }
+        @{ Case = '-MaxRuntimeMinutes 0, which turns off the variable''s budget'; Arguments = @('-MaxRuntimeMinutes', '0'); Expected = 'budget: [0] [unset]'; ViaIex = $false }
         @{ Case = 'neither given'; Arguments = @(); Expected = 'budget: [unset] [unset]'; ViaIex = $false }
         @{ Case = 'irm | iex, which passes no parameter'; Arguments = @(); Expected = 'budget: [unset] [unset]'; ViaIex = $true }
     ) {
@@ -1195,6 +1204,9 @@ Describe 'The time budget from the entry script (-MaxRuntimeMinutes, wgt-gq8.41)
     }
 }
 
+# wgt-gq8.35, in a real child process: -CollectDiagnostics makes the bundle and does nothing a real
+# run does (no transcript, run lock, housekeeping, RESULT line or PowerShell 7 bootstrap), also as
+# the script block command the failure notices print. Diagnostics.Tests.ps1 tests the collector.
 Describe 'The diagnostics bundle from the entry block (-CollectDiagnostics, wgt-gq8.35)' {
     BeforeAll {
         # Elevated, so a real run would take the run lock and run housekeeping.

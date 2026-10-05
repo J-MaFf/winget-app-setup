@@ -4950,10 +4950,11 @@ function Resolve-InstallerRunBudget {
     )
 
     $minutes = 0
-    if ($MaxRuntimeMinutes -gt 0) {
+    $minutesGiven = $PSBoundParameters.ContainsKey('MaxRuntimeMinutes')
+    if ($minutesGiven) {
         $minutes = $MaxRuntimeMinutes
-        if ($minutes -gt 1440) {
-            Write-WarningMessage "Ignoring a time budget of $minutes minutes: it must be from 1 to 1440. This run has no time budget."
+        if ($minutes -lt 0 -or $minutes -gt 1440) {
+            Write-WarningMessage "Ignoring a time budget of $minutes minutes: it must be from 0 to 1440. This run has no time budget."
             $minutes = 0
         }
     }
@@ -4969,7 +4970,7 @@ function Resolve-InstallerRunBudget {
         }
     }
     if ($minutes -eq 0) {
-        return [pscustomobject]@{ Minutes = 0; DeadlineUtc = $null }
+        return [pscustomobject]@{ Minutes = 0; DeadlineUtc = $null; MinutesGiven = $minutesGiven }
     }
 
     $deadline = $StartedUtc.ToUniversalTime().AddMinutes($minutes)
@@ -4985,7 +4986,7 @@ function Resolve-InstallerRunBudget {
             Write-WarningMessage "Ignoring -RunDeadlineUtc '$RunDeadlineUtc': it is not a time in the form yyyy-MM-ddTHH:mm:ssZ. The time budget counts from the start of this part of the run."
         }
     }
-    return [pscustomobject]@{ Minutes = $minutes; DeadlineUtc = $deadline }
+    return [pscustomobject]@{ Minutes = $minutes; DeadlineUtc = $deadline; MinutesGiven = $minutesGiven }
 }
 
 function Get-InstallerRunBudgetArgument {
@@ -4996,6 +4997,9 @@ function Get-InstallerRunBudgetArgument {
     )
 
     if ($null -eq $Budget -or $null -eq $Budget.DeadlineUtc -or [int]$Budget.Minutes -le 0) {
+        if ($null -ne $Budget -and $Budget.MinutesGiven -eq $true) {
+            return @('-MaxRuntimeMinutes', '0')
+        }
         return @()
     }
     return @('-MaxRuntimeMinutes', ([string][int]$Budget.Minutes), '-RunDeadlineUtc', (Format-RunRecordTime -Time $Budget.DeadlineUtc))
@@ -5032,6 +5036,26 @@ function Get-InstallerRunBudgetSecondsLeft {
     }
     $seconds = [Math]::Floor((([DateTime]$Budget.DeadlineUtc) - $NowUtc.ToUniversalTime()).TotalSeconds)
     return [int][Math]::Max(0, $seconds)
+}
+
+function Get-InstallerRunBudgetWaitSeconds {
+    param (
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [object]$Budget,
+
+        [Parameter(Mandatory = $true)]
+        [int]$Seconds,
+
+        [Parameter(Mandatory = $false)]
+        [DateTime]$NowUtc = [DateTime]::UtcNow
+    )
+
+    $secondsLeft = Get-InstallerRunBudgetSecondsLeft -Budget $Budget -NowUtc $NowUtc
+    if ($null -eq $secondsLeft) {
+        return $Seconds
+    }
+    return [int][Math]::Min($Seconds, $secondsLeft)
 }
 
 # --- RunLock ---
@@ -8723,7 +8747,11 @@ function Invoke-WingetInstall {
     if ($script:InstallerRunStartedUtc -is [DateTime]) {
         $runStartedUtc = $script:InstallerRunStartedUtc
     }
-    $runBudget = Resolve-InstallerRunBudget -MaxRuntimeMinutes $MaxRuntimeMinutes -RunDeadlineUtc $RunDeadlineUtc -StartedUtc $runStartedUtc
+    $budgetParameters = @{ RunDeadlineUtc = $RunDeadlineUtc; StartedUtc = $runStartedUtc }
+    if ($PSBoundParameters.ContainsKey('MaxRuntimeMinutes')) {
+        $budgetParameters['MaxRuntimeMinutes'] = $MaxRuntimeMinutes
+    }
+    $runBudget = Resolve-InstallerRunBudget @budgetParameters
     $runBudgetSpent = $false
     $runBudgetReason = $null
     if ($runBudget.DeadlineUtc) {
@@ -8917,7 +8945,7 @@ function Invoke-WingetInstall {
             Write-WarningMessage "Time budget: $runBudgetReason, so no further app install starts. The apps left are reported as not attempted; run the installer again to install them."
         }
         try {
-            $outcome = Install-AppWithVerification -App $app -Applicable $applicableByName[$app.name] -Silent:$effectiveNonInteractive -WhatIf:$WhatIf -WingetNotLaunchable:$wingetNotLaunchable -MachineWide:$machineWide -TimeBudgetSpent:$runBudgetSpent -InstallInProgressWaitSeconds $installerBusyWaitSecondsLeft
+            $outcome = Install-AppWithVerification -App $app -Applicable $applicableByName[$app.name] -Silent:$effectiveNonInteractive -WhatIf:$WhatIf -WingetNotLaunchable:$wingetNotLaunchable -MachineWide:$machineWide -TimeBudgetSpent:$runBudgetSpent -InstallInProgressWaitSeconds (Get-InstallerRunBudgetWaitSeconds -Budget $runBudget -Seconds $installerBusyWaitSecondsLeft)
             if ($outcome.InstallResult -and $outcome.InstallResult.InstallInProgressWaitedSeconds) {
                 $installerBusyWaitSecondsLeft = [Math]::Max(0, $installerBusyWaitSecondsLeft - [int]$outcome.InstallResult.InstallInProgressWaitedSeconds)
             }
@@ -9059,7 +9087,7 @@ function Invoke-WingetInstall {
                     Write-Info "Retrying: $appName"
                     $appDef = $apps | Where-Object { $_.name -eq $appName } | Select-Object -First 1
 
-                    $outcome = Install-AppWithVerification -App $appDef -Applicable $applicableByName[$appName] -Silent:$effectiveNonInteractive -WingetNotLaunchable:$wingetNotLaunchable -MachineWide:$machineWide -InstallInProgressWaitSeconds $installerBusyWaitSecondsLeft
+                    $outcome = Install-AppWithVerification -App $appDef -Applicable $applicableByName[$appName] -Silent:$effectiveNonInteractive -WingetNotLaunchable:$wingetNotLaunchable -MachineWide:$machineWide -InstallInProgressWaitSeconds (Get-InstallerRunBudgetWaitSeconds -Budget $runBudget -Seconds $installerBusyWaitSecondsLeft)
                     if ($outcome.InstallResult -and $outcome.InstallResult.InstallInProgressWaitedSeconds) {
                         $installerBusyWaitSecondsLeft = [Math]::Max(0, $installerBusyWaitSecondsLeft - [int]$outcome.InstallResult.InstallInProgressWaitedSeconds)
                     }
@@ -9157,7 +9185,7 @@ function Invoke-WingetInstall {
     }
     else {
         try {
-            $wauResult = Install-WingetAutoUpdate -WhatIf:$WhatIf -InstallInProgressWaitSeconds $installerBusyWaitSecondsLeft
+            $wauResult = Install-WingetAutoUpdate -WhatIf:$WhatIf -InstallInProgressWaitSeconds (Get-InstallerRunBudgetWaitSeconds -Budget $runBudget -Seconds $installerBusyWaitSecondsLeft)
         }
         catch {
             Write-ErrorMessage "Winget-AutoUpdate setup failed unexpectedly: $_"

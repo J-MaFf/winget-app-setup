@@ -230,7 +230,41 @@ exit 9
             $budget.DeadlineUtc | Should -BeGreaterOrEqual $before.AddMinutes(45).AddSeconds(-1)
             $budget.DeadlineUtc | Should -BeLessOrEqual $after.AddMinutes(45)
             Format-RunRecordTime -Time $budget.DeadlineUtc | Should -Be $deadlineText
-            @($script:lines | Where-Object { $_ -like "Time budget: 45 minutes from now, until ${deadlineText}: *" }) | Should -HaveCount 1
+            @($script:lines | Where-Object { $_ -like "Time budget: 45 minutes, until ${deadlineText}: *" }) | Should -HaveCount 1
+        }
+
+        # Review of wgt-gq8.41: Endpoint Central's clock starts with the 32-bit PowerShell, so the
+        # deadline is taken there and survives the 64-bit relaunch.
+        It 'Takes the deadline in the 32-bit stage and passes it, with the budget, to the 64-bit relaunch' {
+            Mock Test-Rmm32BitHostOn64BitWindows { $true }
+            Mock Get-RmmSysnativePowerShellPath { $script:Pwsh }
+            # A stand-in with the wrapper's own parameters, so its checks of the values apply too.
+            $ast = [System.Management.Automation.Language.Parser]::ParseFile($script:MachineWrapperPath, [ref]$null, [ref]$null)
+            $paramBlock = (@($ast.ParamBlock.Attributes | ForEach-Object { $_.Extent.Text }) + @($ast.ParamBlock.Extent.Text)) -join "`n"
+            $boundPath = Join-Path $TestDrive ([guid]::NewGuid().ToString('N') + '.txt')
+            $standIn = New-TestScript -Body (@($paramBlock, ('Set-Content -LiteralPath ''{0}'' -Value (@($PSBoundParameters.Keys | Sort-Object | ForEach-Object {{ ''{{0}}={{1}}'' -f $_, $PSBoundParameters[$_] }}))' -f $boundPath), 'exit 9') -join "`n")
+            $before = [DateTime]::UtcNow
+
+            $exitCode = Invoke-RmmMachinePhase -ScriptPath $standIn -ForwardedArguments (ConvertTo-RmmForwardedArgument -BoundParameters @{ MaxRuntimeMinutes = 45 }) -MaxRuntimeMinutes 45 -LogDirectory $script:logs -CopyRoot $script:copyRoot
+
+            $after = [DateTime]::UtcNow
+            $exitCode | Should -Be 9
+            $bound = @(Get-Content -LiteralPath $boundPath)
+            $bound[0] | Should -Be 'From32BitHost=True'
+            $bound[1] | Should -Be 'MaxRuntimeMinutes=45'
+            $bound[2] -match '^RunDeadlineUtc=(?<deadline>.+)$' | Should -BeTrue
+            $bound | Should -HaveCount 3
+            $budget = Resolve-InstallerRunBudget -MaxRuntimeMinutes 45 -RunDeadlineUtc $Matches.deadline -StartedUtc $after
+            $budget.DeadlineUtc | Should -BeGreaterOrEqual $before.AddMinutes(45).AddSeconds(-1)
+            $budget.DeadlineUtc | Should -BeLessOrEqual $after.AddMinutes(45)
+        }
+
+        It 'Passes the 32-bit stage''s deadline on to the installer, not one counted from the 64-bit stage' {
+            $exitCode = Invoke-RmmMachinePhase -InstallerPath $script:budgetInstaller -InstallerSha256 $script:budgetInstallerSha256 -MaxRuntimeMinutes 45 -RunDeadlineUtc '2026-10-05T12:00:00Z' -From32BitHost -LogDirectory $script:logs -CopyRoot $script:copyRoot
+
+            $exitCode | Should -Be 9
+            Get-Content -LiteralPath $script:budgetResultPath | Should -Be @('MaxRuntimeMinutes=45', 'RunDeadlineUtc=2026-10-05T12:00:00Z', 'Unbound=0')
+            @($script:lines | Where-Object { $_ -like 'Time budget: 45 minutes, until 2026-10-05T12:00:00Z: *' }) | Should -HaveCount 1
         }
 
         It 'Passes no budget on without -MaxRuntimeMinutes, so an older pinned installer still runs' {
@@ -256,6 +290,14 @@ exit 9
             $LASTEXITCODE | Should -Not -Be 0
             # The parameter's own range check, not an unknown parameter.
             $output | Should -Match "validate argument[^\r\n]*on parameter 'MaxRuntimeMinutes'"
+            $output | Should -Not -Match 'winget-app-setup RMM wrapper'
+        }
+
+        It 'Refuses a -RunDeadlineUtc that is not a time in the form yyyy-MM-ddTHH:mm:ssZ before doing anything: <_>' -ForEach @('tomorrow', '2026-10-05 12:00:00', '2026-10-05T12:00:00Z x') {
+            $output = & $script:Pwsh -NoLogo -NoProfile -NonInteractive -File $script:MachineWrapperPath -MaxRuntimeMinutes 30 -RunDeadlineUtc $_ 2>&1 | Out-String
+
+            $LASTEXITCODE | Should -Not -Be 0
+            $output | Should -Match "validate argument[^\r\n]*on parameter 'RunDeadlineUtc'"
             $output | Should -Not -Match 'winget-app-setup RMM wrapper'
         }
     }

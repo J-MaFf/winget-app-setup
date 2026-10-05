@@ -64,7 +64,28 @@ Describe 'Resolve-InstallerRunBudget' {
     It 'Lets the parameter win over the variable' {
         $env:WINGET_APP_SETUP_MAX_RUNTIME_MINUTES = '45'
 
-        (Resolve-InstallerRunBudget -MaxRuntimeMinutes 20 -StartedUtc $script:started).Minutes | Should -Be 20
+        $budget = Resolve-InstallerRunBudget -MaxRuntimeMinutes 20 -StartedUtc $script:started
+
+        $budget.Minutes | Should -Be 20
+        $budget.MinutesGiven | Should -BeTrue
+    }
+
+    # Review of wgt-gq8.41: a given 0 is "no budget", not "not given".
+    It 'Turns off the variable''s budget with a -MaxRuntimeMinutes 0 that was given' {
+        $env:WINGET_APP_SETUP_MAX_RUNTIME_MINUTES = '45'
+
+        $budget = Resolve-InstallerRunBudget -MaxRuntimeMinutes 0 -RunDeadlineUtc '2026-10-05T12:30:00Z' -StartedUtc $script:started
+
+        $budget.Minutes | Should -Be 0
+        $budget.DeadlineUtc | Should -BeNullOrEmpty
+        $budget.MinutesGiven | Should -BeTrue
+        $script:warnings | Should -HaveCount 0
+    }
+
+    It 'Says the minutes were not given when they came from the variable or nowhere' {
+        (Resolve-InstallerRunBudget -StartedUtc $script:started).MinutesGiven | Should -BeFalse
+        $env:WINGET_APP_SETUP_MAX_RUNTIME_MINUTES = '45'
+        (Resolve-InstallerRunBudget -StartedUtc $script:started).MinutesGiven | Should -BeFalse
     }
 
     It 'Warns about a variable that is not a whole number from 0 to 1440, and runs without a budget: ''<_>''' -ForEach @('-5', 'abc', '1441', '12.5', '30m', '99999') {
@@ -119,6 +140,16 @@ Describe 'Get-InstallerRunBudgetArgument' {
         @(Get-InstallerRunBudgetArgument -Budget ([pscustomobject]@{ Minutes = 0; DeadlineUtc = $null })) | Should -HaveCount 0
     }
 
+    It 'Passes a -MaxRuntimeMinutes 0 that was given on, so a relaunch that inherits the variable does not take its budget' {
+        $arguments = @(Get-InstallerRunBudgetArgument -Budget ([pscustomobject]@{ Minutes = 0; DeadlineUtc = $null; MinutesGiven = $true }))
+
+        $arguments | Should -Be @('-MaxRuntimeMinutes', '0')
+        foreach ($argument in $arguments) {
+            $argument | Should -Match '^(?:-[A-Za-z][A-Za-z0-9]*|[0-9][0-9A-Za-z:.-]*)\z'
+        }
+        @(Get-InstallerRunBudgetArgument -Budget ([pscustomobject]@{ Minutes = 0; DeadlineUtc = $null; MinutesGiven = $false })) | Should -HaveCount 0
+    }
+
     It 'Passes the minutes and the deadline on, in a form the relaunched run reads back' {
         Mock Write-WarningMessage { throw "unexpected warning: $Message" }
         $budget = [pscustomobject]@{ Minutes = 60; DeadlineUtc = (New-UtcTime '2026-10-05T12:57:00Z') }
@@ -155,5 +186,26 @@ Describe 'Test-InstallerRunBudgetSpent and Get-InstallerRunBudgetSecondsLeft' {
     It 'Counts the whole seconds left, never fewer than 0' {
         Get-InstallerRunBudgetSecondsLeft -Budget $script:budget -NowUtc (New-UtcTime '2026-10-05T12:50:00Z') | Should -Be 600
         Get-InstallerRunBudgetSecondsLeft -Budget $script:budget -NowUtc (New-UtcTime '2026-10-05T13:10:00Z') | Should -Be 0
+    }
+}
+
+# Review of wgt-gq8.41: an install that starts just before the deadline must not then wait past it
+# for a busy Windows Installer.
+Describe 'Get-InstallerRunBudgetWaitSeconds' {
+    BeforeAll {
+        $script:budget = [pscustomobject]@{ Minutes = 60; DeadlineUtc = (New-UtcTime '2026-10-05T13:00:00Z') }
+    }
+
+    It 'Leaves the wait as it is without a budget' {
+        Get-InstallerRunBudgetWaitSeconds -Budget $null -Seconds 600 | Should -Be 600
+        Get-InstallerRunBudgetWaitSeconds -Budget ([pscustomobject]@{ Minutes = 0; DeadlineUtc = $null }) -Seconds 600 | Should -Be 600
+    }
+
+    It 'Caps the wait at the seconds the budget has left (<Now>: <Expected>)' -ForEach @(
+        @{ Now = '2026-10-05T12:58:00Z'; Expected = 120 }
+        @{ Now = '2026-10-05T12:00:00Z'; Expected = 600 }
+        @{ Now = '2026-10-05T13:05:00Z'; Expected = 0 }
+    ) {
+        Get-InstallerRunBudgetWaitSeconds -Budget $script:budget -Seconds 600 -NowUtc (New-UtcTime $Now) | Should -Be $Expected
     }
 }

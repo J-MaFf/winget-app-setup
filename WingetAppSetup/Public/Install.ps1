@@ -17,12 +17,12 @@
     App-definition hashtables to install. Default: Get-DefaultAppCatalog, which the uninstaller
     shares (issue #190).
 .PARAMETER MaxRuntimeMinutes
-    The run's time budget in minutes, 1 to 1440 (wgt-gq8.41). Not given (or 0): the
+    The run's time budget in minutes, 1 to 1440 (wgt-gq8.41); 0: no budget. Not given: the
     WINGET_APP_SETUP_MAX_RUNTIME_MINUTES environment variable decides (Resolve-InstallerRunBudget),
     and without it the run has no budget. Once the budget is used up, no app install, retry or
-    Winget-AutoUpdate setup starts (one already running finishes, within its own time limit), what
-    is left is reported NotAttempted, and the run returns 9. A dry run reports the budget and is not
-    cut short.
+    Winget-AutoUpdate setup starts (one already running finishes, within its own time limits, and
+    waits for a busy Windows Installer no longer than the budget had left), what is left is
+    reported NotAttempted, and the run returns 9. A dry run reports the budget and is not cut short.
 .PARAMETER RunDeadlineUtc
     Internal: the deadline an earlier phase of the same run passed on (yyyy-MM-ddTHH:mm:ssZ), so
     the budget counts from the first start of the run. Set by the installer's own relaunches and by
@@ -81,7 +81,11 @@ function Invoke-WingetInstall {
     if ($script:InstallerRunStartedUtc -is [DateTime]) {
         $runStartedUtc = $script:InstallerRunStartedUtc
     }
-    $runBudget = Resolve-InstallerRunBudget -MaxRuntimeMinutes $MaxRuntimeMinutes -RunDeadlineUtc $RunDeadlineUtc -StartedUtc $runStartedUtc
+    $budgetParameters = @{ RunDeadlineUtc = $RunDeadlineUtc; StartedUtc = $runStartedUtc }
+    if ($PSBoundParameters.ContainsKey('MaxRuntimeMinutes')) {
+        $budgetParameters['MaxRuntimeMinutes'] = $MaxRuntimeMinutes
+    }
+    $runBudget = Resolve-InstallerRunBudget @budgetParameters
     # Latched once seen: no app install, retry or Winget-AutoUpdate setup starts after that.
     $runBudgetSpent = $false
     $runBudgetReason = $null
@@ -325,7 +329,8 @@ function Invoke-WingetInstall {
     $wingetNotLaunchable = $false
 
     # Run-level budget for waiting on a busy Windows Installer (0x8A150102, msiexec 1618; P2-15):
-    # every wait, the Winget-AutoUpdate msiexec's included, comes out of these 10 minutes.
+    # every wait, the Winget-AutoUpdate msiexec's included, comes out of these 10 minutes, and none
+    # lasts past the time budget's deadline (Get-InstallerRunBudgetWaitSeconds).
     $installerBusyWaitSecondsLeft = 600
 
     # Apps whose install finished but needs a restart to complete (review finding P3-16). Apps whose
@@ -355,7 +360,7 @@ function Invoke-WingetInstall {
             # Shared per-app pipeline — pre-check, dispatch, post-verify (issue #188). Messages,
             # summary bucketing, and exit-code policy stay here in the orchestrator.
             # -Silent: an unattended run installs MSI packages with /quiet, not /passive.
-            $outcome = Install-AppWithVerification -App $app -Applicable $applicableByName[$app.name] -Silent:$effectiveNonInteractive -WhatIf:$WhatIf -WingetNotLaunchable:$wingetNotLaunchable -MachineWide:$machineWide -TimeBudgetSpent:$runBudgetSpent -InstallInProgressWaitSeconds $installerBusyWaitSecondsLeft
+            $outcome = Install-AppWithVerification -App $app -Applicable $applicableByName[$app.name] -Silent:$effectiveNonInteractive -WhatIf:$WhatIf -WingetNotLaunchable:$wingetNotLaunchable -MachineWide:$machineWide -TimeBudgetSpent:$runBudgetSpent -InstallInProgressWaitSeconds (Get-InstallerRunBudgetWaitSeconds -Budget $runBudget -Seconds $installerBusyWaitSecondsLeft)
             if ($outcome.InstallResult -and $outcome.InstallResult.InstallInProgressWaitedSeconds) {
                 $installerBusyWaitSecondsLeft = [Math]::Max(0, $installerBusyWaitSecondsLeft - [int]$outcome.InstallResult.InstallInProgressWaitedSeconds)
             }
@@ -532,7 +537,7 @@ function Invoke-WingetInstall {
 
                     # The same pipeline as the first pass, with what is left of the wait budget,
                     # the circuit breaker, and the run's applicability verdict.
-                    $outcome = Install-AppWithVerification -App $appDef -Applicable $applicableByName[$appName] -Silent:$effectiveNonInteractive -WingetNotLaunchable:$wingetNotLaunchable -MachineWide:$machineWide -InstallInProgressWaitSeconds $installerBusyWaitSecondsLeft
+                    $outcome = Install-AppWithVerification -App $appDef -Applicable $applicableByName[$appName] -Silent:$effectiveNonInteractive -WingetNotLaunchable:$wingetNotLaunchable -MachineWide:$machineWide -InstallInProgressWaitSeconds (Get-InstallerRunBudgetWaitSeconds -Budget $runBudget -Seconds $installerBusyWaitSecondsLeft)
                     if ($outcome.InstallResult -and $outcome.InstallResult.InstallInProgressWaitedSeconds) {
                         $installerBusyWaitSecondsLeft = [Math]::Max(0, $installerBusyWaitSecondsLeft - [int]$outcome.InstallResult.InstallInProgressWaitedSeconds)
                     }
@@ -651,7 +656,7 @@ function Invoke-WingetInstall {
     }
     else {
         try {
-            $wauResult = Install-WingetAutoUpdate -WhatIf:$WhatIf -InstallInProgressWaitSeconds $installerBusyWaitSecondsLeft
+            $wauResult = Install-WingetAutoUpdate -WhatIf:$WhatIf -InstallInProgressWaitSeconds (Get-InstallerRunBudgetWaitSeconds -Budget $runBudget -Seconds $installerBusyWaitSecondsLeft)
         }
         catch {
             Write-ErrorMessage "Winget-AutoUpdate setup failed unexpectedly: $_"
