@@ -112,11 +112,12 @@ Describe 'New-InstallerRunRecord and Format-InstallerResultLine (review finding 
         $record.endedUtc | Should -Match '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$'
         $record.exitCode | Should -Be 1
         $record.summaryReached | Should -BeTrue
-        @($record.counts.Keys) | Should -Be @('installed', 'skipped', 'deferred', 'failed')
+        @($record.counts.Keys) | Should -Be @('installed', 'skipped', 'deferred', 'failed', 'notAttempted')
         $record.counts.installed | Should -Be 2
         $record.counts.skipped | Should -Be 1
         $record.counts.deferred | Should -Be 0
         $record.counts.failed | Should -Be 1
+        $record.counts.notAttempted | Should -Be 0
         @($record.apps | ForEach-Object { $_.id }) | Should -Be @('Git.Git', 'Google.Chrome', '7zip.7zip', 'Zoom.Zoom')
         $record.autoUpdates.status | Should -Be 'Configured'
         $record.autoUpdates.version | Should -Be '2.12.0'
@@ -147,13 +148,13 @@ Describe 'New-InstallerRunRecord and Format-InstallerResultLine (review finding 
         $record.buildId | Should -BeNullOrEmpty
         $record.startedUtc | Should -BeNullOrEmpty
         $record.transcriptPath | Should -BeNullOrEmpty
-        Format-InstallerResultLine -Record $record | Should -Be 'RESULT: exit=0 installed=0 skipped=0 deferred=0 failed=0 autoupdates=NotRun restart=no build=unknown log=none'
+        Format-InstallerResultLine -Record $record | Should -Be 'RESULT: exit=0 installed=0 skipped=0 deferred=0 failed=0 notattempted=0 autoupdates=NotRun restart=no build=unknown log=none'
     }
 
     It 'Formats one line of key=value pairs in a fixed order, with the log path last' {
         $record = New-InstallerRunRecord -ExitCode 1 -Apps $script:apps -AutoUpdates 'Configured' -RestartRequired $true -SummaryReached
 
-        Format-InstallerResultLine -Record $record | Should -Be 'RESULT: exit=1 installed=2 skipped=1 deferred=0 failed=1 autoupdates=Configured restart=yes build=1.0.0+1a2b3c4d log=C:\ProgramData\winget-app-setup\logs\install-20261004-163005.log'
+        Format-InstallerResultLine -Record $record | Should -Be 'RESULT: exit=1 installed=2 skipped=1 deferred=0 failed=1 notattempted=0 autoupdates=Configured restart=yes build=1.0.0+1a2b3c4d log=C:\ProgramData\winget-app-setup\logs\install-20261004-163005.log'
     }
 
     It 'Counts deferred apps on their own, neither installed nor failed, in the record and the RESULT line (review finding P3-22)' {
@@ -171,7 +172,7 @@ Describe 'New-InstallerRunRecord and Format-InstallerResultLine (review finding 
         $record.counts.deferred | Should -Be 2
         $record.counts.failed | Should -Be 1
         @($record.apps | Where-Object { $_.status -eq 'Deferred' })[0].codeHex | Should -Be '0x8A150010'
-        Format-InstallerResultLine -Record $record | Should -Match '^RESULT: exit=1 installed=2 skipped=1 deferred=2 failed=1 autoupdates=Configured '
+        Format-InstallerResultLine -Record $record | Should -Match '^RESULT: exit=1 installed=2 skipped=1 deferred=2 failed=1 notattempted=0 autoupdates=Configured '
     }
 
     It 'Names an unhealthy Winget-AutoUpdate in the RESULT line of a run that exits 8 (review finding P3-36)' {
@@ -181,7 +182,35 @@ Describe 'New-InstallerRunRecord and Format-InstallerResultLine (review finding 
 
         $record.exitCode | Should -Be 8
         $record.autoUpdates.status | Should -Be 'Unhealthy'
-        Format-InstallerResultLine -Record $record | Should -Match '^RESULT: exit=8 installed=1 skipped=0 deferred=0 failed=0 autoupdates=Unhealthy restart=no '
+        Format-InstallerResultLine -Record $record | Should -Match '^RESULT: exit=8 installed=1 skipped=0 deferred=0 failed=0 notattempted=0 autoupdates=Unhealthy restart=no '
+    }
+
+    # wgt-gq8.41: apps the run's time budget did not reach are neither installed nor failed, and a
+    # Winget-AutoUpdate step it skipped is NotAttempted too; the run exits 9.
+    It 'Counts the apps the time budget did not reach on their own, and names a skipped auto-update setup, in the record and the RESULT line' {
+        $reason = "the run's 60-minute time budget was used up"
+        $apps = @($script:apps[0]) + @(
+            (New-AppRunRecord -Id 'Contoso.Later' -Status 'NotAttempted' -Reason $reason),
+            (New-AppRunRecord -Id 'Contoso.LaterToo' -Status 'NotAttempted' -Reason $reason)
+        )
+        $exitCode = Get-InstallerExitCode -FailedAppCount 0 -WingetUsable $true -WorkNotAttempted $true
+        $wauStatus = Get-AutoUpdateResultStatus -WauResult ([pscustomobject]@{ Status = 'NotAttempted'; Version = $null })
+
+        $record = New-InstallerRunRecord -ExitCode $exitCode -Apps $apps -AutoUpdates $wauStatus -SummaryReached
+
+        $record.exitCode | Should -Be 9
+        $record.counts.installed | Should -Be 1
+        $record.counts.failed | Should -Be 0
+        $record.counts.notAttempted | Should -Be 2
+        $record.autoUpdates.status | Should -Be 'NotAttempted'
+        @($record.apps | Where-Object { $_.status -eq 'NotAttempted' } | ForEach-Object { $_.reason }) | Should -Be @($reason, $reason)
+        Format-InstallerResultLine -Record $record | Should -Match '^RESULT: exit=9 installed=1 skipped=0 deferred=0 failed=0 notattempted=2 autoupdates=NotAttempted restart=no '
+    }
+
+    It 'Prints notattempted=0 for a record that has no such count' {
+        $record = [ordered]@{ exitCode = 0; counts = [ordered]@{ installed = 1; skipped = 0; deferred = 0; failed = 0 }; autoUpdates = [ordered]@{ status = 'Configured' }; restartRequired = $false; buildId = $null; transcriptPath = $null }
+
+        Format-InstallerResultLine -Record $record | Should -Be 'RESULT: exit=0 installed=1 skipped=0 deferred=0 failed=0 notattempted=0 autoupdates=Configured restart=no build=unknown log=none'
     }
 }
 
@@ -324,7 +353,7 @@ Describe 'Write-InstallerRunResult and Write-InstallerEarlyExitResult (review fi
 
         $path | Should -BeNullOrEmpty
         Should -Invoke Save-InstallerRunRecord -Times 0
-        $script:events | Should -Be @("host:RESULT: exit=6 installed=0 skipped=0 deferred=0 failed=0 autoupdates=NotRun restart=no build=$(if ($script:InstallerBuildId) { $script:InstallerBuildId } else { 'unknown' }) log=$($script:InstallLogPath)")
+        $script:events | Should -Be @("host:RESULT: exit=6 installed=0 skipped=0 deferred=0 failed=0 notattempted=0 autoupdates=NotRun restart=no build=$(if ($script:InstallerBuildId) { $script:InstallerBuildId } else { 'unknown' }) log=$($script:InstallLogPath)")
     }
 
     It 'Writes no record without a transcript to put it next to' {
@@ -455,7 +484,7 @@ Describe 'Write-InstallerNotStartedResult (review of wgt-gq8.39)' {
 
         Write-InstallerNotStartedResult -ExitCode 5
 
-        $script:hostLines | Should -Be @('RESULT: exit=5 installed=0 skipped=0 deferred=0 failed=0 autoupdates=NotRun restart=no build=1.0.0+1a2b3c4d log=none')
+        $script:hostLines | Should -Be @('RESULT: exit=5 installed=0 skipped=0 deferred=0 failed=0 notattempted=0 autoupdates=NotRun restart=no build=1.0.0+1a2b3c4d log=none')
         Should -Invoke Save-InstallerRunRecord -Times 0 -Exactly
     }
 
@@ -464,6 +493,6 @@ Describe 'Write-InstallerNotStartedResult (review of wgt-gq8.39)' {
 
         Write-InstallerNotStartedResult -ExitCode 5
 
-        $script:hostLines | Should -Be @('RESULT: exit=5 installed=0 skipped=0 deferred=0 failed=0 autoupdates=NotRun restart=no build=unknown log=none')
+        $script:hostLines | Should -Be @('RESULT: exit=5 installed=0 skipped=0 deferred=0 failed=0 notattempted=0 autoupdates=NotRun restart=no build=unknown log=none')
     }
 }

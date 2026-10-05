@@ -370,7 +370,7 @@ Describe 'Constrained Language Mode stops the run at once, in one line (wgt-gq8.
         $script:clmLine = 'PowerShell runs this installer in ConstrainedLanguage mode on this PC, which an application control policy (App Control for Business/WDAC or AppLocker) sets for scripts it does not trust.'
         # A real run stopped here still reports (review finding P3-41): nothing counted, no log.
         $script:installerText -match "\`$script:InstallerBuildId = '([^']+)'" | Should -BeTrue
-        $script:clmResultLine = "RESULT: exit=5 installed=0 skipped=0 deferred=0 failed=0 autoupdates=NotRun restart=no build=$($Matches[1]) log=none"
+        $script:clmResultLine = "RESULT: exit=5 installed=0 skipped=0 deferred=0 failed=0 notattempted=0 autoupdates=NotRun restart=no build=$($Matches[1]) log=none"
         function Get-ClmResultLine {
             param ([string]$Output)
             @([regex]::Matches($Output, 'RESULT: [^\r\n]*') | ForEach-Object { $_.Value })
@@ -785,7 +785,7 @@ Describe 'One run at a time, and the RESULT line and last-run.json of every run 
         $result.Output | Should -Not -Match 'HOUSEKEEPING RAN'
         $result.Output | Should -Not -Match 'UNEXPECTED ERROR|stopped before it finished'
         # It reports its exit code, but the record belongs to the run in progress.
-        Get-ChildResultLine -Output $result.Output | Should -Be @("RESULT: exit=6 installed=0 skipped=0 deferred=0 failed=0 autoupdates=NotRun restart=no build=$($script:runBuildId) log=$((Get-ChildTranscript)[0].FullName)")
+        Get-ChildResultLine -Output $result.Output | Should -Be @("RESULT: exit=6 installed=0 skipped=0 deferred=0 failed=0 notattempted=0 autoupdates=NotRun restart=no build=$($script:runBuildId) log=$((Get-ChildTranscript)[0].FullName)")
         Get-ChildRunRecord | Should -BeNullOrEmpty
     }
 
@@ -838,7 +838,7 @@ Describe 'One run at a time, and the RESULT line and last-run.json of every run 
         $result.ExitCode | Should -Be 2
         $transcript = (Get-ChildTranscript)[0].FullName
         $resultLines = Get-ChildResultLine -Output $result.Output
-        $resultLines | Should -Be @("RESULT: exit=2 installed=0 skipped=0 deferred=0 failed=0 autoupdates=NotRun restart=no build=$($script:runBuildId) log=$transcript")
+        $resultLines | Should -Be @("RESULT: exit=2 installed=0 skipped=0 deferred=0 failed=0 notattempted=0 autoupdates=NotRun restart=no build=$($script:runBuildId) log=$transcript")
         $result.Output.IndexOf('stopped early with exit code 2') | Should -BeLessThan $result.Output.IndexOf('RESULT: exit=2')
         $record = Get-ChildRunRecord
         $record.exitCode | Should -Be 2
@@ -860,7 +860,7 @@ Describe 'One run at a time, and the RESULT line and last-run.json of every run 
 
         $result.ExitCode | Should -Be 5
         Get-ChildResultLine -Output $result.Output | Should -HaveCount 1
-        @(Get-ChildResultLine -Output $result.Output)[0] | Should -Match '^RESULT: exit=5 installed=1 skipped=0 deferred=0 failed=0 autoupdates=NotRun restart=no '
+        @(Get-ChildResultLine -Output $result.Output)[0] | Should -Match '^RESULT: exit=5 installed=1 skipped=0 deferred=0 failed=0 notattempted=0 autoupdates=NotRun restart=no '
         $record = Get-ChildRunRecord
         $record.exitCode | Should -Be 5
         $record.apps[0].id | Should -Be 'Git.Git'
@@ -883,7 +883,7 @@ Describe 'One run at a time, and the RESULT line and last-run.json of every run 
 
         $result.ExitCode | Should -Be 5
         Get-ChildResultLine -Output $result.Output | Should -HaveCount 1
-        @(Get-ChildResultLine -Output $result.Output)[0] | Should -Match '^RESULT: exit=5 installed=1 skipped=0 deferred=1 failed=0 autoupdates=Unhealthy restart=no '
+        @(Get-ChildResultLine -Output $result.Output)[0] | Should -Match '^RESULT: exit=5 installed=1 skipped=0 deferred=1 failed=0 notattempted=0 autoupdates=Unhealthy restart=no '
         $record = Get-ChildRunRecord
         $record.counts.installed | Should -Be 1
         $record.counts.deferred | Should -Be 1
@@ -907,7 +907,7 @@ Describe 'One run at a time, and the RESULT line and last-run.json of every run 
         $result = Invoke-ChildInstaller -Arguments @('-File', $path, '-SkipSystemCheck', '-NonInteractive')
 
         $result.ExitCode | Should -Be 8
-        Get-ChildResultLine -Output $result.Output | Should -Be @("RESULT: exit=8 installed=1 skipped=0 deferred=0 failed=0 autoupdates=Unhealthy restart=no build=$($script:runBuildId) log=$((Get-ChildTranscript)[0].FullName)")
+        Get-ChildResultLine -Output $result.Output | Should -Be @("RESULT: exit=8 installed=1 skipped=0 deferred=0 failed=0 notattempted=0 autoupdates=Unhealthy restart=no build=$($script:runBuildId) log=$((Get-ChildTranscript)[0].FullName)")
         $record = Get-ChildRunRecord
         $record.exitCode | Should -Be 8
         $record.summaryReached | Should -BeTrue
@@ -934,7 +934,7 @@ Describe 'One run at a time, and the RESULT line and last-run.json of every run 
         $result.Output | Should -Not -Match 'UNEXPECTED ERROR|winget must not run'
         $result.Output | Should -Match 'The installer stopped early with exit code 2: winget is not available, could not be started, or is turned off by Group Policy \(see above\)\.'
         $transcript = (Get-ChildTranscript)[0].FullName
-        Get-ChildResultLine -Output $result.Output | Should -Be @("RESULT: exit=2 installed=0 skipped=0 deferred=0 failed=0 autoupdates=NotRun restart=no build=$($script:runBuildId) log=$transcript")
+        Get-ChildResultLine -Output $result.Output | Should -Be @("RESULT: exit=2 installed=0 skipped=0 deferred=0 failed=0 notattempted=0 autoupdates=NotRun restart=no build=$($script:runBuildId) log=$transcript")
         $result.Output.IndexOf('stopped early with exit code 2') | Should -BeLessThan $result.Output.IndexOf('RESULT: exit=2')
         $record = Get-ChildRunRecord
         $record.exitCode | Should -Be 2
@@ -1040,6 +1040,161 @@ Describe 'One run at a time, and the RESULT line and last-run.json of every run 
 # wgt-gq8.35, in a real child process: -CollectDiagnostics makes the bundle and does nothing a real
 # run does (no transcript, run lock, housekeeping, RESULT line or PowerShell 7 bootstrap), also as
 # the script block command the failure notices print. Diagnostics.Tests.ps1 tests the collector.
+# wgt-gq8.41, in real child processes: the time budget's deadline is counted from the first start of
+# the run and crosses the Windows PowerShell 5.1 -> PowerShell 7 relaunch on the command line (the
+# elevated relaunch is tested in Install.Tests.ps1 and Elevation.Tests.ps1), a bad value fails
+# parameter binding, and a run whose budget is used up exits 9 with what it did not attempt.
+Describe 'The time budget from the entry script (-MaxRuntimeMinutes, wgt-gq8.41)' {
+    BeforeAll {
+        $script:installerText -match "\`$script:InstallerBuildId = '([^']+)'" | Should -BeTrue
+        $script:budgetBuildId = $Matches[1]
+        $script:bootstrapBudgetSignature = 'param([switch]$WhatIf, [switch]$NonInteractive, [switch]$SkipSystemCheck, [string]$CommandPath, [string]$ExpectedBuildId, [string]$LogDirectory, [string[]]$AdditionalArguments)'
+        $script:budgetBootstrap = "function Invoke-PowerShell7Bootstrap { $($script:bootstrapBudgetSignature) Write-Host ""relaunch arguments: [`$(`$AdditionalArguments -join ' ')]""; `$script:PowerShell7BootstrapRelaunched = `$true; return 9 }"
+
+        function ConvertFrom-DeadlineText {
+            param ([string]$Text)
+            $styles = [System.Globalization.DateTimeStyles]::AdjustToUniversal -bor [System.Globalization.DateTimeStyles]::AssumeUniversal
+            [DateTime]::ParseExact($Text, "yyyy-MM-dd'T'HH:mm:ss'Z'", [System.Globalization.CultureInfo]::InvariantCulture, $styles)
+        }
+    }
+
+    BeforeEach {
+        Remove-Item -Path (Join-Path $TestDrive 'ProgramData') -Recurse -Force -ErrorAction SilentlyContinue
+        $script:InstallerRunLock = $null
+        $script:savedBudgetVariable = $env:WINGET_APP_SETUP_MAX_RUNTIME_MINUTES
+        Remove-Item -Path Env:\WINGET_APP_SETUP_MAX_RUNTIME_MINUTES -ErrorAction SilentlyContinue
+    }
+
+    AfterEach {
+        Unlock-InstallerRun
+        if ($null -eq $script:savedBudgetVariable) {
+            Remove-Item -Path Env:\WINGET_APP_SETUP_MAX_RUNTIME_MINUTES -ErrorAction SilentlyContinue
+        }
+        else {
+            $env:WINGET_APP_SETUP_MAX_RUNTIME_MINUTES = $script:savedBudgetVariable
+        }
+    }
+
+    It 'Windows PowerShell 5.1 phase: passes the PowerShell 7 run the deadline counted from its own start (<Case>)' -ForEach @(
+        @{ Case = '-MaxRuntimeMinutes'; Arguments = @('-MaxRuntimeMinutes', '30'); Variable = $null }
+        @{ Case = 'WINGET_APP_SETUP_MAX_RUNTIME_MINUTES, for irm | iex'; Arguments = @(); Variable = '30' }
+    ) {
+        if ($Variable) {
+            $env:WINGET_APP_SETUP_MAX_RUNTIME_MINUTES = $Variable
+        }
+        $path = New-FaultInjectedInstaller -Name 'budget-bootstrap.ps1' -EmulateWindowsPowerShell -Body "Write-Host 'install ran'; return 0" -Overrides $script:budgetBootstrap
+        $before = [DateTime]::UtcNow
+
+        $result = Invoke-ChildInstaller -Arguments (@('-File', $path, '-NonInteractive') + $Arguments)
+
+        $after = [DateTime]::UtcNow
+        $result.ExitCode | Should -Be 9
+        $result.Output | Should -Not -Match 'install ran'
+        $result.Output -match 'relaunch arguments: \[-MaxRuntimeMinutes 30 -RunDeadlineUtc (?<deadline>\S+)\]' | Should -BeTrue
+        $deadline = ConvertFrom-DeadlineText -Text $Matches.deadline
+        $deadline | Should -BeGreaterOrEqual $before.AddMinutes(30).AddSeconds(-1)
+        $deadline | Should -BeLessOrEqual $after.AddMinutes(30)
+    }
+
+    It 'Windows PowerShell 5.1 phase: keeps a deadline an earlier phase passed on (the elevated window)' {
+        $inherited = Format-RunRecordTime -Time ([DateTime]::UtcNow.AddMinutes(5))
+        $path = New-FaultInjectedInstaller -Name 'budget-bootstrap-inherited.ps1' -EmulateWindowsPowerShell -Body "Write-Host 'install ran'; return 0" -Overrides $script:budgetBootstrap
+
+        $result = Invoke-ChildInstaller -Arguments @('-File', $path, '-NonInteractive', '-MaxRuntimeMinutes', '30', '-RunDeadlineUtc', $inherited)
+
+        $result.Output | Should -Match ([regex]::Escape("relaunch arguments: [-MaxRuntimeMinutes 30 -RunDeadlineUtc $inherited]"))
+    }
+
+    It 'Windows PowerShell 5.1 phase: passes nothing on without a budget, or with a variable it cannot read (<Case>)' -ForEach @(
+        @{ Case = 'no budget'; Variable = $null; Warning = $null }
+        @{ Case = 'variable 0'; Variable = '0'; Warning = $null }
+        @{ Case = 'variable abc'; Variable = 'abc'; Warning = "Ignoring WINGET_APP_SETUP_MAX_RUNTIME_MINUTES='abc'" }
+    ) {
+        if ($Variable) {
+            $env:WINGET_APP_SETUP_MAX_RUNTIME_MINUTES = $Variable
+        }
+        $path = New-FaultInjectedInstaller -Name 'budget-bootstrap-none.ps1' -EmulateWindowsPowerShell -Body "Write-Host 'install ran'; return 0" -Overrides $script:budgetBootstrap
+
+        $result = Invoke-ChildInstaller -Arguments @('-File', $path, '-NonInteractive')
+
+        $result.Output | Should -Match ([regex]::Escape('relaunch arguments: []'))
+        if ($Warning) {
+            $result.Output | Should -Match ([regex]::Escape($Warning))
+        }
+        else {
+            $result.Output | Should -Not -Match 'Ignoring WINGET_APP_SETUP_MAX_RUNTIME_MINUTES'
+        }
+    }
+
+    It 'PowerShell 7 phase: passes -MaxRuntimeMinutes and -RunDeadlineUtc on to Invoke-WingetInstall only when given (<Case>)' -ForEach @(
+        @{ Case = 'both given'; Arguments = @('-MaxRuntimeMinutes', '30', '-RunDeadlineUtc', '2026-10-05T12:00:00Z'); Expected = 'budget: [30] [2026-10-05T12:00:00Z]'; ViaIex = $false }
+        @{ Case = 'neither given'; Arguments = @(); Expected = 'budget: [unset] [unset]'; ViaIex = $false }
+        @{ Case = 'irm | iex, which passes no parameter'; Arguments = @(); Expected = 'budget: [unset] [unset]'; ViaIex = $true }
+    ) {
+        $overrides = "function Test-IsAdmin { `$true }`n" +
+            "function Invoke-WingetInstall { param([switch]`$WhatIf, [switch]`$NonInteractive, [switch]`$SkipSystemCheck, [int]`$MaxRuntimeMinutes, [string]`$RunDeadlineUtc) `$minutes = 'unset'; if (`$PSBoundParameters.ContainsKey('MaxRuntimeMinutes')) { `$minutes = `$MaxRuntimeMinutes }; `$deadline = 'unset'; if (`$PSBoundParameters.ContainsKey('RunDeadlineUtc')) { `$deadline = `$RunDeadlineUtc }; Write-Host ""budget: [`$minutes] [`$deadline]""; return 0 }"
+        $path = New-FaultInjectedInstaller -Name 'budget-pwsh.ps1' -Overrides $overrides
+
+        if ($ViaIex) {
+            $result = Invoke-ChildInstallerViaIex -Path $path
+        }
+        else {
+            $result = Invoke-ChildInstaller -Arguments (@('-File', $path, '-SkipSystemCheck', '-NonInteractive') + $Arguments)
+        }
+
+        $result.ExitCode | Should -Be 0
+        $result.Output | Should -Match ([regex]::Escape($Expected))
+    }
+
+    It 'Fails parameter binding, running nothing, for a -MaxRuntimeMinutes that is not a whole number from 0 to 1440: <_>' -ForEach @('-1', '1441', 'abc') {
+        $path = New-FaultInjectedInstaller -Name 'budget-bad-value.ps1' -Body "Write-Host 'install ran'; return 0" -Overrides "function Test-IsAdmin { `$true }"
+
+        $result = Invoke-ChildInstaller -Arguments @('-File', $path, '-NonInteractive', '-MaxRuntimeMinutes', $_)
+
+        $result.ExitCode | Should -Not -Be 0
+        # The parameter's own check (range or type), not an unknown parameter.
+        $result.Output | Should -Match "(validate|process) argument[^\r\n]*on parameter 'MaxRuntimeMinutes'"
+        $result.Output | Should -Not -Match 'install ran|Logging this run to:'
+        Get-ChildTranscript | Should -HaveCount 0
+    }
+
+    It 'Exits 9 when the budget is used up, reporting what it did not attempt in the summary, the RESULT line and last-run.json' {
+        # The real Invoke-WingetInstall, with a deadline in the past: no app install, no
+        # Winget-AutoUpdate setup and no winget call starts; winget is still checked at the end.
+        $overrides = "function Test-IsAdmin { `$true }`n" +
+            "function Get-InstallAccountContext { [pscustomobject]@{ IsSystem = `$false; ProcessUser = 'CONTOSO\admin-tech'; SessionUser = 'CONTOSO\admin-tech'; IsCrossUserElevation = `$false } }`n" +
+            "function Get-PendingRestartState { `$null }`n" +
+            "function Get-WingetPolicyBlock { `$null }`n" +
+            "function Wait-WauIdle { throw 'no wait for Winget-AutoUpdate once the time budget is used up' }`n" +
+            "function Initialize-Winget { param([switch]`$WhatIf, `$AccountContext) [pscustomobject]@{ Ready = `$true; Diagnosis = 'Ok' } }`n" +
+            "function Remove-LegacyScheduledUpdates { param([switch]`$WhatIf) `$true }`n" +
+            "function Get-DefaultAppCatalog { @(@{ name = 'Contoso.AppOne' }, @{ name = 'Contoso.AppTwo' }) }`n" +
+            "function Test-AppApplicability { param(`$App, `$Purpose) `$true }`n" +
+            "function Set-WindowsTerminalDefaults { param([switch]`$WhatIf) }`n" +
+            "function Install-WingetAutoUpdate { throw 'no Winget-AutoUpdate setup once the time budget is used up' }`n" +
+            "function Invoke-WingetProcess { throw 'no winget call once the time budget is used up' }`n" +
+            "function Test-WingetLaunchable { param(`$Attempts, `$RetryDelaySeconds) [pscustomobject]@{ Launchable = `$true; Version = 'v1.12.350'; Reason = `$null; Attempts = 1 } }"
+        $path = New-FaultInjectedInstaller -Name 'budget-used-up.ps1' -Overrides $overrides
+
+        $result = Invoke-ChildInstaller -Arguments @('-File', $path, '-SkipSystemCheck', '-NonInteractive', '-MaxRuntimeMinutes', '1', '-RunDeadlineUtc', '2026-01-01T00:00:00Z')
+
+        $result.ExitCode | Should -Be 9
+        $result.Output | Should -Not -Match 'UNEXPECTED ERROR|stopped early|no wait for|no Winget-AutoUpdate setup once|no winget call'
+        $result.Output | Should -Match 'Not attempted: Contoso\.AppOne'
+        $result.Output | Should -Match 'Time budget: USED UP - .*so these were not attempted: Contoso\.AppOne, Contoso\.AppTwo, the Winget-AutoUpdate setup\. Run the installer again to finish\.'
+        $transcript = (Get-ChildTranscript)[0].FullName
+        @([regex]::Matches($result.Output, 'RESULT: [^\r\n]*') | ForEach-Object { $_.Value }) | Should -Be @("RESULT: exit=9 installed=0 skipped=0 deferred=0 failed=0 notattempted=2 autoupdates=NotAttempted restart=no build=$($script:budgetBuildId) log=$transcript")
+        $recordFile = Get-ChildItem -Path (Join-Path $TestDrive 'ProgramData') -Recurse -Filter 'last-run.json' | Select-Object -First 1
+        $record = Get-Content -Raw -LiteralPath $recordFile.FullName | ConvertFrom-Json
+        $record.exitCode | Should -Be 9
+        $record.summaryReached | Should -BeTrue
+        $record.counts.notAttempted | Should -Be 2
+        @($record.apps | ForEach-Object { $_.status } | Sort-Object -Unique) | Should -Be @('NotAttempted')
+        $record.autoUpdates.status | Should -Be 'NotAttempted'
+        $record.wingetUsable | Should -BeTrue
+    }
+}
+
 Describe 'The diagnostics bundle from the entry block (-CollectDiagnostics, wgt-gq8.35)' {
     BeforeAll {
         # Elevated, so a real run would take the run lock and run housekeeping.

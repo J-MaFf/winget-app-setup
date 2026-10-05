@@ -231,7 +231,8 @@ function Get-ElevatedCopyRoot {
 .PARAMETER CopyRoot
     The folder the per-run copy folder is created in (Get-ElevatedCopyRoot).
 .PARAMETER AdditionalArguments
-    Switches forwarded to the script, for example '-SkipSystemCheck'.
+    Arguments forwarded to the script: parameter names such as '-SkipSystemCheck', and values (the
+    pattern Restart-WithElevation accepts), which go in single quotes.
 .OUTPUTS
     [string] The PowerShell command text.
 #>
@@ -251,7 +252,7 @@ function New-ElevationVerifierCommand {
         [string]$CopyRoot,
 
         [Parameter(Mandatory = $false)]
-        [ValidatePattern('^-[A-Za-z][A-Za-z0-9]*$')]
+        [ValidatePattern('^(?:-[A-Za-z][A-Za-z0-9]*|[0-9][0-9A-Za-z:.-]*)\z')]
         [string[]]$AdditionalArguments = @()
     )
 
@@ -291,7 +292,10 @@ try {
     $quote = { param ([string]$Text) "'" + [System.Management.Automation.Language.CodeGeneration]::EscapeSingleQuotedStringContent($Text) + "'" }
     $forwardedArguments = ''
     if ($AdditionalArguments.Count -gt 0) {
-        $forwardedArguments = ' ' + ($AdditionalArguments -join ' ')
+        $forwardedTokens = @($AdditionalArguments | ForEach-Object {
+                if ($_.StartsWith('-')) { $_ } else { & $quote $_ }
+            })
+        $forwardedArguments = ' ' + ($forwardedTokens -join ' ')
     }
     $values = @{
         SOURCE     = (& $quote $ScriptPath)

@@ -1540,7 +1540,7 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
             $record.exitCode | Should -Be 8
             $record.autoUpdates.status | Should -Be 'Unhealthy'
             $record.autoUpdates.version | Should -Be '2.12.0'
-            Format-InstallerResultLine -Record $record | Should -Match '^RESULT: exit=8 installed=1 skipped=0 deferred=0 failed=0 autoupdates=Unhealthy restart=no '
+            Format-InstallerResultLine -Record $record | Should -Match '^RESULT: exit=8 installed=1 skipped=0 deferred=0 failed=0 notattempted=0 autoupdates=Unhealthy restart=no '
         }
 
         It 'Releases the run lock once it has reported, before the final prompt' {
@@ -1659,7 +1659,7 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
             $json.exitCode | Should -Be 0
             $json.apps[0].id | Should -Be 'Contoso.New'
             $json.transcriptPath | Should -Be $script:InstallLogPath
-            $script:hostLines[$script:hostLines.Count - 1] | Should -Match '^RESULT: exit=0 installed=1 skipped=0 deferred=0 failed=0 autoupdates=DryRun restart=no build=\S+ log=.*install-20261004-163005\.log$'
+            $script:hostLines[$script:hostLines.Count - 1] | Should -Match '^RESULT: exit=0 installed=1 skipped=0 deferred=0 failed=0 notattempted=0 autoupdates=DryRun restart=no build=\S+ log=.*install-20261004-163005\.log$'
         }
 
         It 'Writes a Deferred app and the exit code 8 of an unhealthy Winget-AutoUpdate to last-run.json (review findings P3-22, P3-36)' {
@@ -1683,7 +1683,7 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
             $json.apps[1].id | Should -Be 'Contoso.UserOnly'
             $json.apps[1].status | Should -Be 'Deferred'
             $json.autoUpdates.status | Should -Be 'Unhealthy'
-            $script:hostLines[$script:hostLines.Count - 1] | Should -Match '^RESULT: exit=8 installed=1 skipped=0 deferred=1 failed=0 autoupdates=Unhealthy restart=no '
+            $script:hostLines[$script:hostLines.Count - 1] | Should -Match '^RESULT: exit=8 installed=1 skipped=0 deferred=1 failed=0 notattempted=0 autoupdates=Unhealthy restart=no '
         }
 
         It 'Only prints the RESULT line when the entry script did not allow the record (or outside it)' {
@@ -1813,6 +1813,229 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
 
             ($script:errorMessages -join "`n") | Should -Match 'Retry failed: Contoso.AppOne. Error: boom in the retry'
             @($script:capturedTables['Failed Installations'])[0][1] | Should -Be 'Unexpected error: boom in the retry'
+        }
+    }
+
+    # wgt-gq8.41: a whole-run time budget for an RMM job with a hard time limit. Once it is used up,
+    # no app install, retry or Winget-AutoUpdate setup starts; what is left is NotAttempted and the
+    # run returns 9. Test-InstallerRunBudgetSpent is mocked where a test needs the budget to run out
+    # at a given point; RunBudget.Tests.ps1 tests the clock itself.
+    Context 'Time budget (-MaxRuntimeMinutes, wgt-gq8.41)' {
+        BeforeEach {
+            $script:savedBudgetVariable = $env:WINGET_APP_SETUP_MAX_RUNTIME_MINUTES
+            Remove-Item -Path Env:\WINGET_APP_SETUP_MAX_RUNTIME_MINUTES -ErrorAction SilentlyContinue
+            $script:savedRunStarted = $script:InstallerRunStartedUtc
+            $script:InstallerRunStartedUtc = [DateTime]::UtcNow
+            $script:reportedRecords = @()
+            Mock Write-InstallerRunResult { $script:reportedRecords += , $Record; $null }
+            Mock Unlock-InstallerRun { }
+            # The pipeline's own gate (tested in 'Install-AppWithVerification and the time budget').
+            Mock Install-AppWithVerification {
+                if ($TimeBudgetSpent) {
+                    return @{ Status = 'NotAttempted'; InstallResult = $null; FailureReason = $null }
+                }
+                @{ Status = 'Installed'; InstallResult = @{ ExitCode = 0; Attempts = 1 }; FailureReason = $null }
+            }
+            Mock Install-WingetAutoUpdate { [pscustomobject]@{ Status = 'Configured'; Version = [version]'2.12.0'; FrameworkMissing = $false; RestartRequired = $false } }
+            $script:apps = @(@{ name = 'Contoso.First' }, @{ name = 'Contoso.Second' }, @{ name = 'Contoso.Third' })
+        }
+
+        AfterEach {
+            $script:InstallerRunStartedUtc = $script:savedRunStarted
+            if ($null -eq $script:savedBudgetVariable) {
+                Remove-Item -Path Env:\WINGET_APP_SETUP_MAX_RUNTIME_MINUTES -ErrorAction SilentlyContinue
+            }
+            else {
+                $env:WINGET_APP_SETUP_MAX_RUNTIME_MINUTES = $script:savedBudgetVariable
+            }
+        }
+
+        It 'Changes nothing without a budget: every app and the auto-update setup run, and no time budget is mentioned' {
+            Invoke-WingetInstall -Apps $script:apps -NonInteractive | Should -Be 0
+
+            Should -Invoke Install-AppWithVerification -Times 3 -Exactly -ParameterFilter { -not $TimeBudgetSpent }
+            Should -Invoke Install-WingetAutoUpdate -Times 1 -Exactly
+            # Its own default wait, as before.
+            Should -Invoke Wait-WauIdle -Times 1 -Exactly -ParameterFilter { -not $PesterBoundParameters.ContainsKey('TimeoutSeconds') }
+            ((@($script:infoMessages) + @($script:warningMessages)) -join "`n") | Should -Not -Match 'Time budget'
+            @($script:capturedRows | Where-Object { $_[0] -eq 'Not attempted' }) | Should -HaveCount 0
+        }
+
+        It 'Starts no app install once the budget is used up: the apps left are not attempted, Winget-AutoUpdate is not set up, and it returns 9' {
+            # Used up after the first app.
+            $script:budgetChecks = 0
+            Mock Test-InstallerRunBudgetSpent { $script:budgetChecks++; $script:budgetChecks -gt 1 }
+
+            $result = Invoke-WingetInstall -Apps $script:apps -NonInteractive -MaxRuntimeMinutes 30
+
+            @($result).Count | Should -Be 1
+            $result | Should -Be 9
+            Should -Invoke Install-AppWithVerification -Times 1 -Exactly -ParameterFilter { $App.name -eq 'Contoso.First' -and -not $TimeBudgetSpent }
+            Should -Invoke Install-AppWithVerification -Times 2 -Exactly -ParameterFilter { $App.name -ne 'Contoso.First' -and $TimeBudgetSpent }
+            Should -Invoke Install-WingetAutoUpdate -Times 0 -Exactly
+            # winget is still checked at the end: an unusable winget (2) ranks above 9.
+            Should -Invoke Test-WingetLaunchable -Times 1 -Exactly
+            @($script:infoMessages | Where-Object { $_ -like 'Time budget: 30 minutes, until *' }) | Should -HaveCount 1
+            $script:warningMessages | Should -Contain "Time budget: the run's 30-minute time budget was used up, so no further app install starts. The apps left are reported as not attempted; run the installer again to install them."
+            $script:warningMessages | Should -Contain "Not attempted: Contoso.Second (the run's 30-minute time budget was used up)"
+            $script:warningMessages | Should -Contain "Auto-updates: NOT ATTEMPTED - the run's 30-minute time budget was used up before Winget-AutoUpdate was set up; run the installer again to set it up."
+            @($script:warningMessages | Where-Object { $_ -like "Time budget: USED UP - the run's 30-minute budget ran out at *Z, so these were not attempted: Contoso.Second, Contoso.Third, the Winget-AutoUpdate setup. Run the installer again to finish." }) | Should -HaveCount 1
+            # Last row, after the ones e2e/TranscriptAssertions.ps1 reads.
+            $script:capturedRows[-1][0] | Should -Be 'Not attempted'
+            $script:capturedRows[-1][1] | Should -Match 'Contoso\.Second.*Contoso\.Third'
+            ($script:errorMessages -join "`n") | Should -Not -Match 'Auto-updates:'
+
+            $record = $script:reportedRecords[0]
+            $record.exitCode | Should -Be 9
+            $record.counts.installed | Should -Be 1
+            $record.counts.notAttempted | Should -Be 2
+            @($record.apps | ForEach-Object { '{0}={1}' -f $_.id, $_.status }) | Should -Be @('Contoso.First=Installed', 'Contoso.Second=NotAttempted', 'Contoso.Third=NotAttempted')
+            @($record.apps)[1].reason | Should -Be "the run's 30-minute time budget was used up"
+            $record.autoUpdates.status | Should -Be 'NotAttempted'
+            Format-InstallerResultLine -Record $record | Should -Match '^RESULT: exit=9 installed=1 skipped=0 deferred=0 failed=0 notattempted=2 autoupdates=NotAttempted '
+        }
+
+        It 'Counts the budget from when the entry script started, so a run that started long ago attempts nothing' {
+            # The real clock: the run started two hours ago, with a 60-minute budget.
+            $script:InstallerRunStartedUtc = [DateTime]::UtcNow.AddHours(-2)
+
+            Invoke-WingetInstall -Apps $script:apps -NonInteractive -MaxRuntimeMinutes 60 | Should -Be 9
+
+            Should -Invoke Install-AppWithVerification -Times 3 -Exactly -ParameterFilter { $TimeBudgetSpent }
+            Should -Invoke Install-WingetAutoUpdate -Times 0 -Exactly
+            Should -Invoke Wait-WauIdle -Times 0 -Exactly
+            $script:reportedRecords[0].counts.notAttempted | Should -Be 3
+        }
+
+        It 'Takes the budget from WINGET_APP_SETUP_MAX_RUNTIME_MINUTES when -MaxRuntimeMinutes is not given' {
+            $env:WINGET_APP_SETUP_MAX_RUNTIME_MINUTES = '45'
+            $script:InstallerRunStartedUtc = [DateTime]::UtcNow.AddMinutes(-50)
+
+            Invoke-WingetInstall -Apps $script:apps -NonInteractive | Should -Be 9
+
+            @($script:infoMessages | Where-Object { $_ -like 'Time budget: 45 minutes, until *' }) | Should -HaveCount 1
+        }
+
+        It 'Lets an app finish whose install started before the deadline, and returns 0 when nothing was left' {
+            # Used up only after the last app; the Winget-AutoUpdate check comes before that.
+            $script:budgetChecks = 0
+            Mock Test-InstallerRunBudgetSpent { $script:budgetChecks++; $script:budgetChecks -gt 4 }
+
+            Invoke-WingetInstall -Apps $script:apps -NonInteractive -MaxRuntimeMinutes 30 | Should -Be 0
+
+            Should -Invoke Install-AppWithVerification -Times 3 -Exactly -ParameterFilter { -not $TimeBudgetSpent }
+            Should -Invoke Install-WingetAutoUpdate -Times 1 -Exactly
+            ($script:warningMessages -join "`n") | Should -Not -Match 'Time budget: USED UP'
+        }
+
+        It 'Skips only the Winget-AutoUpdate setup when the budget runs out after the last app, and returns 9' {
+            $script:budgetChecks = 0
+            Mock Test-InstallerRunBudgetSpent { $script:budgetChecks++; $script:budgetChecks -gt 3 }
+
+            Invoke-WingetInstall -Apps $script:apps -NonInteractive -MaxRuntimeMinutes 30 | Should -Be 9
+
+            Should -Invoke Install-WingetAutoUpdate -Times 0 -Exactly
+            $script:warningMessages | Should -Contain "Not setting up Winget-AutoUpdate (or the Windows App Runtime it needs): the run's 30-minute time budget was used up. The next run sets it up."
+            @($script:warningMessages | Where-Object { $_ -like 'Time budget: USED UP - * so these were not attempted: the Winget-AutoUpdate setup. Run the installer again to finish.' }) | Should -HaveCount 1
+            $script:reportedRecords[0].counts.notAttempted | Should -Be 0
+            $script:reportedRecords[0].autoUpdates.status | Should -Be 'NotAttempted'
+        }
+
+        It 'Starts no retry once the budget is used up: the app stays failed and the run returns 1, not 9' {
+            Mock Install-AppWithVerification { @{ Status = 'Failed'; InstallResult = @{ ExitCode = 1603; Attempts = 1 }; FailureReason = 'VerifyNotFound' } }
+            # Used up after the first pass.
+            $script:budgetChecks = 0
+            Mock Test-InstallerRunBudgetSpent { $script:budgetChecks++; $script:budgetChecks -gt 1 }
+
+            Invoke-WingetInstall -Apps @(@{ name = 'Contoso.First' }) -NonInteractive -MaxRuntimeMinutes 30 | Should -Be 1
+
+            Should -Invoke Install-AppWithVerification -Times 1 -Exactly
+            $script:warningMessages | Should -Contain "Time budget: the run's 30-minute time budget was used up, so no further retry starts."
+            $script:warningMessages | Should -Contain "Not retrying Contoso.First: the run's 30-minute time budget was used up."
+            $script:reportedRecords[0].apps[0].status | Should -Be 'Failed'
+            $script:reportedRecords[0].autoUpdates.status | Should -Be 'NotAttempted'
+        }
+
+        It 'Returns 2, not 9, when winget is no longer usable at the end' {
+            Mock Test-InstallerRunBudgetSpent { $true }
+            Mock Test-WingetLaunchable { [pscustomobject]@{ Launchable = $false; Version = $null; Reason = 'winget could not be started: Access is denied'; Attempts = 5 } }
+
+            Invoke-WingetInstall -Apps $script:apps -NonInteractive -MaxRuntimeMinutes 30 | Should -Be 2
+        }
+
+        It 'Waits for a running Winget-AutoUpdate no longer than the budget has left (<Left> seconds left: <Expected>)' -ForEach @(
+            @{ Left = 120; Expected = 120 }
+            @{ Left = 5000; Expected = 900 }
+        ) {
+            $script:secondsLeft = $Left
+            Mock Get-InstallerRunBudgetSecondsLeft { $script:secondsLeft }
+
+            [void](Invoke-WingetInstall -Apps $script:apps -NonInteractive -MaxRuntimeMinutes 30)
+
+            Should -Invoke Wait-WauIdle -Times 1 -Exactly -ParameterFilter { $TimeoutSeconds -eq $Expected }
+        }
+
+        It 'Does not cut a dry run short, and says what a real run would do' {
+            Mock Test-InstallerRunBudgetSpent { $true }
+
+            Invoke-WingetInstall -Apps $script:apps -NonInteractive -WhatIf -MaxRuntimeMinutes 30 | Should -Be 0
+
+            Should -Invoke Install-AppWithVerification -Times 3 -Exactly -ParameterFilter { -not $TimeBudgetSpent }
+            Should -Invoke Install-WingetAutoUpdate -Times 1 -Exactly
+            @($script:infoMessages | Where-Object { $_ -like '`[DRY-RUN`] Time budget: 30 minutes, until *. A real run starts no app install and no Winget-AutoUpdate setup after that, and exits 9; this preview is not cut short.' }) | Should -HaveCount 1
+        }
+
+        It 'Passes the budget, with the deadline it counts from, to the elevated run (<Case>)' -ForEach @(
+            @{ Case = 'its own deadline'; Inherited = $null; StartOffsetMinutes = -10 }
+            @{ Case = 'a deadline an earlier phase passed on'; Inherited = 'inherited'; StartOffsetMinutes = 0 }
+        ) {
+            Mock Test-IsAdmin { $false }
+            Mock Test-InvokedFromModuleContext { $false }
+            Mock Test-EffectiveNonInteractive { $false }
+            $script:InstallerScriptSha256 = 'C0FFEE' + ('0' * 58)
+            $start = [DateTime]::SpecifyKind([DateTime]::UtcNow.AddMinutes($StartOffsetMinutes), [DateTimeKind]::Utc)
+            $script:InstallerRunStartedUtc = $start
+            $expectedDeadline = Format-RunRecordTime -Time $start.AddMinutes(30)
+            $deadlineParameter = @{}
+            if ($Inherited) {
+                $expectedDeadline = Format-RunRecordTime -Time $start.AddMinutes(12)
+                $deadlineParameter['RunDeadlineUtc'] = $expectedDeadline
+            }
+            $script:forwarded = $null
+            Mock Restart-WithElevation { $script:forwarded = @($AdditionalArguments); [pscustomobject]@{ Started = $true; ExitCode = 9 } }
+
+            try {
+                Invoke-WingetInstall -Apps $script:apps -SkipSystemCheck -MaxRuntimeMinutes 30 @deadlineParameter | Should -Be 9
+            }
+            finally {
+                $script:InstallerScriptSha256 = $null
+                $script:InstallerPendingExitCode = $null
+            }
+
+            $script:forwarded | Should -Be @('-SkipSystemCheck', '-MaxRuntimeMinutes', '30', '-RunDeadlineUtc', $expectedDeadline)
+            Should -Invoke Install-AppWithVerification -Times 0 -Exactly
+        }
+
+        It 'Passes no budget to the elevated run without one' {
+            Mock Test-IsAdmin { $false }
+            Mock Test-InvokedFromModuleContext { $false }
+            Mock Test-EffectiveNonInteractive { $false }
+            $script:forwarded = $null
+            Mock Restart-WithElevation { $script:forwarded = @($AdditionalArguments); [pscustomobject]@{ Started = $true; ExitCode = 0 } }
+
+            try {
+                Invoke-WingetInstall -Apps $script:apps -SkipSystemCheck | Should -Be 0
+            }
+            finally {
+                $script:InstallerPendingExitCode = $null
+            }
+
+            $script:forwarded | Should -Be @('-SkipSystemCheck')
+        }
+
+        It 'Rejects a -MaxRuntimeMinutes outside 0 to 1440 when the parameter is bound (<_>)' -ForEach @(-1, 1441) {
+            { Invoke-WingetInstall -Apps $script:apps -NonInteractive -MaxRuntimeMinutes $_ } | Should -Throw -ErrorId 'ParameterArgumentValidationError,Invoke-WingetInstall'
+            Should -Invoke Install-AppWithVerification -Times 0 -Exactly
         }
     }
 }
@@ -2415,6 +2638,49 @@ Describe 'Install-AppWithVerification when winget cannot be launched (review fin
     }
 }
 
+# wgt-gq8.41: with the run's time budget used up, the pipeline starts nothing that takes time, but
+# still answers what needs no winget call: not applicable, and deferred to the user's own account.
+Describe 'Install-AppWithVerification and the time budget (-TimeBudgetSpent, wgt-gq8.41)' {
+    BeforeEach {
+        Mock Write-Host { }
+        Mock Write-Info { }
+        Mock Install-WingetPackage { throw 'no install once the time budget is used up' }
+        Mock Test-WingetPackageInstalled { throw 'no winget list once the time budget is used up' }
+        Mock Test-AppxPackageProvisionedForMachine { throw 'no provisioning query once the time budget is used up' }
+        Mock Install-PowerShellLatest { throw 'no package-specific installer once the time budget is used up' }
+    }
+
+    It 'Does not attempt an app that applies: no check, no install, no post-install hook (<Case>)' -ForEach @(
+        @{ Case = 'a winget app'; App = @{ name = 'Contoso.App' }; MachineWide = $false }
+        @{ Case = 'a package-specific installer'; App = @{ name = 'Microsoft.PowerShell'; install = 'Install-PowerShellLatest' }; MachineWide = $false }
+        @{ Case = 'an MSIX app in a run for the whole PC'; App = @{ name = 'Contoso.Msix'; msixName = 'Contoso.Msix' }; MachineWide = $true }
+    ) {
+        $result = Install-AppWithVerification -App $App -Applicable $true -MachineWide:$MachineWide -TimeBudgetSpent
+
+        $result.Status | Should -Be 'NotAttempted'
+        $result.FailureReason | Should -BeNullOrEmpty
+        $result.InstallResult | Should -BeNullOrEmpty
+        Should -Invoke Test-WingetPackageInstalled -Times 0 -Exactly
+        Should -Invoke Install-WingetPackage -Times 0 -Exactly
+        Should -Invoke Test-AppxPackageProvisionedForMachine -Times 0 -Exactly
+        Should -Invoke Install-PowerShellLatest -Times 0 -Exactly
+    }
+
+    It 'Still skips an app that does not apply' {
+        $result = Install-AppWithVerification -App @{ name = 'Contoso.App' } -Applicable $false -TimeBudgetSpent
+
+        $result.Status | Should -Be 'Skipped'
+        $result.SkipReason | Should -Be 'NotApplicable'
+    }
+
+    It 'Still defers a per-user app in a run for the whole PC, so the user phase installs it' {
+        $result = Install-AppWithVerification -App @{ name = 'Contoso.UserApp'; scope = 'user' } -Applicable $true -MachineWide -TimeBudgetSpent
+
+        $result.Status | Should -Be 'Deferred'
+        $result.DeferReason | Should -Be 'UserScope'
+    }
+}
+
 Describe 'PowerShell''s own installer in the install pipeline (review of findings P2-5 and P2-6)' {
     # Install-AppWithVerification -> Install-PowerShellLatest -> Install-WingetPackage, with only the
     # winget process mocked: the path the catalog's Microsoft.PowerShell entry takes.
@@ -2947,7 +3213,7 @@ Describe 'Test-AppApplicability (issue #217; review findings P3-33, P3-34)' {
 # exit-code hint must explain every code the installer can exit with, including the codes added
 # since (6: another run in progress; 8: auto-updates not working) and 3010.
 Describe 'The install-failure issue form explains every exit code' {
-    It 'Explains exit code <_>' -ForEach @('1', '2', '3', '4', '5', '6', '7', '8', '3010') {
+    It 'Explains exit code <_>' -ForEach @('1', '2', '3', '4', '5', '6', '7', '8', '9', '3010') {
         $form = Get-Content -Raw -LiteralPath (Join-Path $script:RepoRoot '.github/ISSUE_TEMPLATE/install-failure.yml')
         $form -match '(?m)^\s+id: exit-code\s*\r?\n(?:.*\r?\n)*?\s+description: (?<description>.+)$' | Should -BeTrue
         $Matches.description | Should -Match ('(?<![\d])' + $_ + ' = ')
@@ -3469,6 +3735,20 @@ Describe 'Get-InstallerExitCode' {
         Get-InstallerExitCode -FailedAppCount 0 -WingetUsable $false -AutoUpdatesHealthy $false | Should -Be 2
         Get-InstallerExitCode -FailedAppCount 0 -WingetUsable $true -AutoUpdatesHealthy $false -RestartRequired $true | Should -Be 8
         Get-InstallerExitCode -FailedAppCount 0 -WingetUsable $true -AutoUpdatesHealthy $true -RestartRequired $true | Should -Be 3010
+    }
+
+    # wgt-gq8.41: the time budget was used up before some apps or the auto-update setup. The adopted
+    # precedence is 1 > 2 > 9 > 8 > 3010 > 0.
+    It 'Returns 9 when nothing failed and winget works, but the time budget left work not attempted' {
+        Get-InstallerExitCode -FailedAppCount 0 -WingetUsable $true -WorkNotAttempted $true | Should -Be 9
+    }
+
+    It 'Ranks 9 below failed apps (1) and an unusable winget (2), and above auto-updates (8) and a needed restart (3010)' {
+        Get-InstallerExitCode -FailedAppCount 1 -WingetUsable $true -WorkNotAttempted $true | Should -Be 1
+        Get-InstallerExitCode -FailedAppCount 0 -WingetUsable $false -WorkNotAttempted $true | Should -Be 2
+        Get-InstallerExitCode -FailedAppCount 0 -WingetUsable $true -WorkNotAttempted $true -AutoUpdatesHealthy $false | Should -Be 9
+        Get-InstallerExitCode -FailedAppCount 0 -WingetUsable $true -WorkNotAttempted $true -RestartRequired $true | Should -Be 9
+        Get-InstallerExitCode -FailedAppCount 0 -WingetUsable $true -WorkNotAttempted $false -RestartRequired $true | Should -Be 3010
     }
 }
 

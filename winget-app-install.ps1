@@ -63,6 +63,23 @@
  prints this command instead:
      & ([scriptblock]::Create((irm "https://raw.githubusercontent.com/J-MaFf/winget-app-setup/refs/heads/main/winget-app-install.ps1"))) -CollectDiagnostics
  Exit code 0 when the bundle was saved, 5 when it could not be.
+
+.PARAMETER MaxRuntimeMinutes
+ A time budget for the whole run, in minutes (1 to 1440), for an RMM job that is stopped after a
+ fixed time: once it is used up, the run starts no further app install, retry or Winget-AutoUpdate
+ setup, reports what it did not reach as not attempted (in the summary, the RESULT line and
+ last-run.json), and exits 9 so that the next run finishes the job. An install already running is
+ not stopped: it ends within its own time limit, so set the budget well below the RMM's limit. The
+ clock starts when this script starts, before the PowerShell 7 relaunch. Not given (or 0), the
+ environment variable WINGET_APP_SETUP_MAX_RUNTIME_MINUTES decides, for the irm | iex one-liner,
+ which cannot pass a parameter: unset, empty or 0 means no budget, and a value that is not a whole
+ number from 0 to 1440 is ignored with a warning. A value given here wins over the variable. A dry
+ run (-WhatIf) shows the budget but is not cut short.
+
+.PARAMETER RunDeadlineUtc
+ Internal: the deadline of the time budget (yyyy-MM-ddTHH:mm:ssZ), passed on by the installer's own
+ relaunches (to PowerShell 7, and elevated) and by rmm/Invoke-WingetAppSetup.ps1, so the budget
+ counts from the first start of the run. It never extends the budget -MaxRuntimeMinutes sets.
 #>
 
 param (
@@ -73,7 +90,12 @@ param (
     [Parameter(Mandatory = $false)]
     [switch]$NonInteractive,
     [Parameter(Mandatory = $false)]
-    [switch]$CollectDiagnostics
+    [switch]$CollectDiagnostics,
+    [Parameter(Mandatory = $false)]
+    [ValidateRange(0, 1440)]
+    [int]$MaxRuntimeMinutes = 0,
+    [Parameter(Mandatory = $false)]
+    [string]$RunDeadlineUtc
 )
 
 # ------------------------------------------------------------------------------------------------
@@ -83,12 +105,12 @@ param (
 # the function source under WingetAppSetup/Public and WingetAppSetup/Private, or the entry block in
 # build/fragments/tail.ps1, then re-run the build to regenerate this file.
 # See readme.md ("Project layout") for details.
-# Build id: 1.0.0+9926f18f (module version + SHA256 fragment of this whole script; issue #189).
+# Build id: 1.0.0+4c7e9d17 (module version + SHA256 fragment of this whole script; issue #189).
 # ------------------------------------------------------------------------------------------------
 
 # Content-derived build identity, logged at startup so a transcript from a remote machine
 # identifies exactly which installer build produced it (issue #189).
-$script:InstallerBuildId = '1.0.0+9926f18f'
+$script:InstallerBuildId = '1.0.0+4c7e9d17'
 
 # ------------------------------------------------Functions------------------------------------------------
 
@@ -1876,7 +1898,7 @@ function New-ElevationVerifierCommand {
         [string]$CopyRoot,
 
         [Parameter(Mandatory = $false)]
-        [ValidatePattern('^-[A-Za-z][A-Za-z0-9]*$')]
+        [ValidatePattern('^(?:-[A-Za-z][A-Za-z0-9]*|[0-9][0-9A-Za-z:.-]*)\z')]
         [string[]]$AdditionalArguments = @()
     )
 
@@ -1910,7 +1932,10 @@ try {
     $quote = { param ([string]$Text) "'" + [System.Management.Automation.Language.CodeGeneration]::EscapeSingleQuotedStringContent($Text) + "'" }
     $forwardedArguments = ''
     if ($AdditionalArguments.Count -gt 0) {
-        $forwardedArguments = ' ' + ($AdditionalArguments -join ' ')
+        $forwardedTokens = @($AdditionalArguments | ForEach-Object {
+                if ($_.StartsWith('-')) { $_ } else { & $quote $_ }
+            })
+        $forwardedArguments = ' ' + ($forwardedTokens -join ' ')
     }
     $values = @{
         SOURCE     = (& $quote $ScriptPath)
@@ -2364,6 +2389,9 @@ function Get-InstallerExitCode {
         [bool]$WingetUsable,
 
         [Parameter(Mandatory = $false)]
+        [bool]$WorkNotAttempted = $false,
+
+        [Parameter(Mandatory = $false)]
         [bool]$AutoUpdatesHealthy = $true,
 
         [Parameter(Mandatory = $false)]
@@ -2375,6 +2403,9 @@ function Get-InstallerExitCode {
     }
     if (-not $WingetUsable) {
         return 2
+    }
+    if ($WorkNotAttempted) {
+        return 9
     }
     if (-not $AutoUpdatesHealthy) {
         return 8
@@ -2914,6 +2945,9 @@ function Install-AppWithVerification {
         [switch]$MachineWide,
 
         [Parameter(Mandatory = $false)]
+        [switch]$TimeBudgetSpent,
+
+        [Parameter(Mandatory = $false)]
         [int]$InstallInProgressWaitSeconds
     )
 
@@ -2933,6 +2967,10 @@ function Install-AppWithVerification {
         if ($perUserReason) {
             return @{ Status = 'Deferred'; InstallResult = $null; FailureReason = $null; DeferReason = $perUserReason }
         }
+    }
+
+    if ($TimeBudgetSpent) {
+        return @{ Status = 'NotAttempted'; InstallResult = $null; FailureReason = $null }
     }
 
     $checkProvisioning = $MachineWide -and -not [string]::IsNullOrWhiteSpace([string]$App.msixName)
@@ -4211,7 +4249,10 @@ function Invoke-PowerShell7Bootstrap {
         [Parameter(Mandatory = $false)]
         [string]$ExpectedBuildId,
         [Parameter(Mandatory = $false)]
-        [string]$LogDirectory
+        [string]$LogDirectory,
+        [Parameter(Mandatory = $false)]
+        [ValidatePattern('^(?:-[A-Za-z][A-Za-z0-9]*|[0-9][0-9A-Za-z:.-]*)\z')]
+        [string[]]$AdditionalArguments = @()
     )
 
     $script:PowerShell7BootstrapRelaunched = $false
@@ -4354,6 +4395,7 @@ function Invoke-PowerShell7Bootstrap {
     if ($SkipSystemCheck) {
         $relaunchArguments += '-SkipSystemCheck'
     }
+    $relaunchArguments += @($AdditionalArguments)
     $env:WINGET_APP_SETUP_PS7_BOOTSTRAP = '1'
     $relaunchProcess = $null
     $relaunchError = $null
@@ -4949,6 +4991,106 @@ function Invoke-WingetProcess {
     return $result
 }
 
+# --- RunBudget ---
+function Resolve-InstallerRunBudget {
+    param (
+        [Parameter(Mandatory = $false)]
+        [int]$MaxRuntimeMinutes = 0,
+
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [AllowEmptyString()]
+        [string]$RunDeadlineUtc,
+
+        [Parameter(Mandatory = $false)]
+        [DateTime]$StartedUtc = [DateTime]::UtcNow
+    )
+
+    $minutes = 0
+    if ($MaxRuntimeMinutes -gt 0) {
+        $minutes = $MaxRuntimeMinutes
+        if ($minutes -gt 1440) {
+            Write-WarningMessage "Ignoring a time budget of $minutes minutes: it must be from 1 to 1440. This run has no time budget."
+            $minutes = 0
+        }
+    }
+    else {
+        $environmentValue = ([string]$env:WINGET_APP_SETUP_MAX_RUNTIME_MINUTES).Trim()
+        if ($environmentValue) {
+            if ($environmentValue -match '^[0-9]{1,4}\z' -and [int]$environmentValue -le 1440) {
+                $minutes = [int]$environmentValue
+            }
+            else {
+                Write-WarningMessage "Ignoring WINGET_APP_SETUP_MAX_RUNTIME_MINUTES='$environmentValue': it must be a whole number of minutes from 0 to 1440. This run has no time budget."
+            }
+        }
+    }
+    if ($minutes -eq 0) {
+        return [pscustomobject]@{ Minutes = 0; DeadlineUtc = $null }
+    }
+
+    $deadline = $StartedUtc.ToUniversalTime().AddMinutes($minutes)
+    if (-not [string]::IsNullOrWhiteSpace($RunDeadlineUtc)) {
+        $inherited = [DateTime]::MinValue
+        $styles = [System.Globalization.DateTimeStyles]::AdjustToUniversal -bor [System.Globalization.DateTimeStyles]::AssumeUniversal
+        if ([DateTime]::TryParseExact($RunDeadlineUtc.Trim(), "yyyy-MM-dd'T'HH:mm:ss'Z'", [System.Globalization.CultureInfo]::InvariantCulture, $styles, [ref]$inherited)) {
+            if ($inherited -lt $deadline) {
+                $deadline = $inherited
+            }
+        }
+        else {
+            Write-WarningMessage "Ignoring -RunDeadlineUtc '$RunDeadlineUtc': it is not a time in the form yyyy-MM-ddTHH:mm:ssZ. The time budget counts from the start of this part of the run."
+        }
+    }
+    return [pscustomobject]@{ Minutes = $minutes; DeadlineUtc = $deadline }
+}
+
+function Get-InstallerRunBudgetArgument {
+    param (
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [object]$Budget
+    )
+
+    if ($null -eq $Budget -or $null -eq $Budget.DeadlineUtc -or [int]$Budget.Minutes -le 0) {
+        return @()
+    }
+    return @('-MaxRuntimeMinutes', ([string][int]$Budget.Minutes), '-RunDeadlineUtc', (Format-RunRecordTime -Time $Budget.DeadlineUtc))
+}
+
+function Test-InstallerRunBudgetSpent {
+    param (
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [object]$Budget,
+
+        [Parameter(Mandatory = $false)]
+        [DateTime]$NowUtc = [DateTime]::UtcNow
+    )
+
+    if ($null -eq $Budget -or $null -eq $Budget.DeadlineUtc) {
+        return $false
+    }
+    return ($NowUtc.ToUniversalTime() -ge ([DateTime]$Budget.DeadlineUtc))
+}
+
+function Get-InstallerRunBudgetSecondsLeft {
+    param (
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [object]$Budget,
+
+        [Parameter(Mandatory = $false)]
+        [DateTime]$NowUtc = [DateTime]::UtcNow
+    )
+
+    if ($null -eq $Budget -or $null -eq $Budget.DeadlineUtc) {
+        return $null
+    }
+    $seconds = [Math]::Floor((([DateTime]$Budget.DeadlineUtc) - $NowUtc.ToUniversalTime()).TotalSeconds)
+    return [int][Math]::Max(0, $seconds)
+}
+
 # --- RunLock ---
 function Get-InstallerRunLockName {
     return 'Global\winget-app-setup-run'
@@ -5162,10 +5304,11 @@ function New-InstallerRunRecord {
         exitCode        = $ExitCode
         summaryReached  = [bool]$SummaryReached
         counts          = [ordered]@{
-            installed = @($appList | Where-Object { $_.status -eq 'Installed' }).Count
-            skipped   = @($appList | Where-Object { $_.status -eq 'Skipped' }).Count
-            deferred  = @($appList | Where-Object { $_.status -eq 'Deferred' }).Count
-            failed    = @($appList | Where-Object { $_.status -eq 'Failed' }).Count
+            installed    = @($appList | Where-Object { $_.status -eq 'Installed' }).Count
+            skipped      = @($appList | Where-Object { $_.status -eq 'Skipped' }).Count
+            deferred     = @($appList | Where-Object { $_.status -eq 'Deferred' }).Count
+            failed       = @($appList | Where-Object { $_.status -eq 'Failed' }).Count
+            notAttempted = @($appList | Where-Object { $_.status -eq 'NotAttempted' }).Count
         }
         apps            = $appList
         autoUpdates     = [ordered]@{
@@ -5196,7 +5339,11 @@ function Format-InstallerResultLine {
     if ($Record.transcriptPath) {
         $log = $Record.transcriptPath
     }
-    return ('RESULT: exit={0} installed={1} skipped={2} deferred={3} failed={4} autoupdates={5} restart={6} build={7} log={8}' -f $Record.exitCode, $Record.counts.installed, $Record.counts.skipped, $Record.counts.deferred, $Record.counts.failed, $Record.autoUpdates.status, $restart, $build, $log)
+    $notAttempted = 0
+    if ($null -ne $Record.counts.notAttempted) {
+        $notAttempted = $Record.counts.notAttempted
+    }
+    return ('RESULT: exit={0} installed={1} skipped={2} deferred={3} failed={4} notattempted={5} autoupdates={6} restart={7} build={8} log={9}' -f $Record.exitCode, $Record.counts.installed, $Record.counts.skipped, $Record.counts.deferred, $Record.counts.failed, $notAttempted, $Record.autoUpdates.status, $restart, $build, $log)
 }
 
 function Save-InstallerRunRecord {
@@ -5316,7 +5463,7 @@ function Write-InstallerNotStartedResult {
 
     $record = [ordered]@{
         exitCode        = $ExitCode
-        counts          = [ordered]@{ installed = 0; skipped = 0; deferred = 0; failed = 0 }
+        counts          = [ordered]@{ installed = 0; skipped = 0; deferred = 0; failed = 0; notAttempted = 0 }
         autoUpdates     = [ordered]@{ status = 'NotRun' }
         restartRequired = $false
         buildId         = $script:InstallerBuildId
@@ -8509,7 +8656,7 @@ function Restart-WithElevation {
         [string]$ScriptPath,
 
         [Parameter(Mandatory = $false)]
-        [ValidatePattern('^-[A-Za-z][A-Za-z0-9]*$')]
+        [ValidatePattern('^(?:-[A-Za-z][A-Za-z0-9]*|[0-9][0-9A-Za-z:.-]*)\z')]
         [string[]]$AdditionalArguments = @(),
 
         [Parameter(Mandatory = $false)]
@@ -8617,10 +8764,28 @@ function Invoke-WingetInstall {
         [switch]$SkipSystemCheck,
 
         [Parameter(Mandatory = $false)]
-        [array]$Apps = (Get-DefaultAppCatalog)
+        [array]$Apps = (Get-DefaultAppCatalog),
+
+        [Parameter(Mandatory = $false)]
+        [ValidateRange(0, 1440)]
+        [int]$MaxRuntimeMinutes = 0,
+
+        [Parameter(Mandatory = $false)]
+        [string]$RunDeadlineUtc
     )
 
     $effectiveNonInteractive = Test-EffectiveNonInteractive -NonInteractive:$NonInteractive
+
+    $runStartedUtc = [DateTime]::UtcNow
+    if ($script:InstallerRunStartedUtc -is [DateTime]) {
+        $runStartedUtc = $script:InstallerRunStartedUtc
+    }
+    $runBudget = Resolve-InstallerRunBudget -MaxRuntimeMinutes $MaxRuntimeMinutes -RunDeadlineUtc $RunDeadlineUtc -StartedUtc $runStartedUtc
+    $runBudgetSpent = $false
+    $runBudgetReason = $null
+    if ($runBudget.DeadlineUtc) {
+        $runBudgetReason = "the run's $($runBudget.Minutes)-minute time budget was used up"
+    }
 
     if ($WhatIf) {
         Write-Info '=== DRY-RUN MODE ENABLED ==='
@@ -8670,6 +8835,7 @@ function Invoke-WingetInstall {
             $elevationArgs = @()
             if ($WhatIf) { $elevationArgs += '-WhatIf' }
             if ($SkipSystemCheck) { $elevationArgs += '-SkipSystemCheck' }
+            $elevationArgs += @(Get-InstallerRunBudgetArgument -Budget $runBudget)
             $elevation = Restart-WithElevation -ScriptPath $PSCommandPath -AdditionalArguments $elevationArgs -ExpectedSha256 $script:InstallerScriptSha256
             if (-not $elevation.Started) {
                 Write-ErrorMessage 'No elevated run was started, so nothing was installed.'
@@ -8682,6 +8848,16 @@ function Invoke-WingetInstall {
     }
     else {
         Write-Success 'Starting...'
+    }
+
+    if ($runBudget.DeadlineUtc) {
+        $deadlineText = Format-RunRecordTime -Time $runBudget.DeadlineUtc
+        if ($WhatIf) {
+            Write-Info "[DRY-RUN] Time budget: $($runBudget.Minutes) minutes, until $deadlineText. A real run starts no app install and no Winget-AutoUpdate setup after that, and exits 9; this preview is not cut short."
+        }
+        else {
+            Write-Info "Time budget: $($runBudget.Minutes) minutes, until $deadlineText. No app install, retry or Winget-AutoUpdate setup starts after that (one already running finishes); what is left is reported as not attempted, and the run exits 9 so that it can be run again."
+        }
     }
 
     $script:MachineWingetPath = $null
@@ -8706,7 +8882,13 @@ function Invoke-WingetInstall {
     }
 
     if (-not $WhatIf) {
-        [void](Wait-WauIdle)
+        $budgetSecondsLeft = Get-InstallerRunBudgetSecondsLeft -Budget $runBudget
+        if ($null -eq $budgetSecondsLeft) {
+            [void](Wait-WauIdle)
+        }
+        elseif ($budgetSecondsLeft -gt 0) {
+            [void](Wait-WauIdle -TimeoutSeconds ([Math]::Min(900, $budgetSecondsLeft)))
+        }
     }
 
     if ($preflight.WingetPolicyBlocked) {
@@ -8769,6 +8951,7 @@ function Invoke-WingetInstall {
     $noInstallerDeferredApps = @()
     $perUserDeferredApps = @()
     $notConfiguredApps = @()
+    $notAttemptedApps = @()
 
     $wingetNotLaunchable = $false
 
@@ -8786,8 +8969,12 @@ function Invoke-WingetInstall {
 
     Foreach ($app in $apps) {
         $outcome = $null
+        if (-not $WhatIf -and -not $runBudgetSpent -and (Test-InstallerRunBudgetSpent -Budget $runBudget)) {
+            $runBudgetSpent = $true
+            Write-WarningMessage "Time budget: $runBudgetReason, so no further app install starts. The apps left are reported as not attempted; run the installer again to install them."
+        }
         try {
-            $outcome = Install-AppWithVerification -App $app -Applicable $applicableByName[$app.name] -Silent:$effectiveNonInteractive -WhatIf:$WhatIf -WingetNotLaunchable:$wingetNotLaunchable -MachineWide:$machineWide -InstallInProgressWaitSeconds $installerBusyWaitSecondsLeft
+            $outcome = Install-AppWithVerification -App $app -Applicable $applicableByName[$app.name] -Silent:$effectiveNonInteractive -WhatIf:$WhatIf -WingetNotLaunchable:$wingetNotLaunchable -MachineWide:$machineWide -TimeBudgetSpent:$runBudgetSpent -InstallInProgressWaitSeconds $installerBusyWaitSecondsLeft
             if ($outcome.InstallResult -and $outcome.InstallResult.InstallInProgressWaitedSeconds) {
                 $installerBusyWaitSecondsLeft = [Math]::Max(0, $installerBusyWaitSecondsLeft - [int]$outcome.InstallResult.InstallInProgressWaitedSeconds)
             }
@@ -8824,6 +9011,11 @@ function Invoke-WingetInstall {
                         $noInstallerDeferredApps += $app.name
                     }
                     $appRecords[$app.name] = New-AppRunRecord -Id $app.name -Status 'Deferred' -Reason $deferText -InstallResult $outcome.InstallResult
+                }
+                'NotAttempted' {
+                    Write-WarningMessage "Not attempted: $($app.name) ($runBudgetReason)"
+                    $notAttemptedApps += $app.name
+                    $appRecords[$app.name] = New-AppRunRecord -Id $app.name -Status 'NotAttempted' -Reason $runBudgetReason
                 }
                 'Installed' {
                     if ($WhatIf) {
@@ -8907,6 +9099,15 @@ function Invoke-WingetInstall {
                 }
                 if ($failedApp.FailureReason -eq 'NoMachineScopeInstaller') {
                     Write-WarningMessage "Not retrying ${appName}: no machine-scope installer applies to this PC, and its catalog entry allows only a machine-wide install (scope 'machine')."
+                    $failedApps += $failedApp
+                    continue
+                }
+                if (-not $runBudgetSpent -and (Test-InstallerRunBudgetSpent -Budget $runBudget)) {
+                    $runBudgetSpent = $true
+                    Write-WarningMessage "Time budget: $runBudgetReason, so no further retry starts."
+                }
+                if ($runBudgetSpent) {
+                    Write-WarningMessage "Not retrying ${appName}: $runBudgetReason."
                     $failedApps += $failedApp
                     continue
                 }
@@ -9004,12 +9205,21 @@ function Invoke-WingetInstall {
 
     Clear-TightVncSecret
 
-    try {
-        $wauResult = Install-WingetAutoUpdate -WhatIf:$WhatIf -InstallInProgressWaitSeconds $installerBusyWaitSecondsLeft
+    if (-not $WhatIf -and -not $runBudgetSpent -and (Test-InstallerRunBudgetSpent -Budget $runBudget)) {
+        $runBudgetSpent = $true
     }
-    catch {
-        Write-ErrorMessage "Winget-AutoUpdate setup failed unexpectedly: $_"
-        $wauResult = [pscustomobject]@{ Status = 'Failed'; Version = $null }
+    if ($runBudgetSpent) {
+        Write-WarningMessage "Not setting up Winget-AutoUpdate (or the Windows App Runtime it needs): $runBudgetReason. The next run sets it up."
+        $wauResult = [pscustomobject]@{ Status = 'NotAttempted'; Version = $null; FrameworkMissing = $false; RestartRequired = $false }
+    }
+    else {
+        try {
+            $wauResult = Install-WingetAutoUpdate -WhatIf:$WhatIf -InstallInProgressWaitSeconds $installerBusyWaitSecondsLeft
+        }
+        catch {
+            Write-ErrorMessage "Winget-AutoUpdate setup failed unexpectedly: $_"
+            $wauResult = [pscustomobject]@{ Status = 'Failed'; Version = $null }
+        }
     }
     $script:InstallerAutoUpdateResult = $wauResult
 
@@ -9083,6 +9293,11 @@ function Invoke-WingetInstall {
         $rows += , @('Failed', $appList)
     }
 
+    $appList = Format-AppList -AppArray $notAttemptedApps
+    if ($appList) {
+        $rows += , @('Not attempted', $appList)
+    }
+
     Write-Table -Headers $headers -Rows $rows -Title 'Installation Summary'
 
     Write-FailedAppsSummary -FailedApps $failedApps
@@ -9122,6 +9337,7 @@ function Invoke-WingetInstall {
             $autoUpdatesHealthy = $false
         }
         'DryRun' { Write-Info "[DRY-RUN] Auto-updates: Would configure Winget-AutoUpdate v$($wauResult.Version)." }
+        'NotAttempted' { Write-WarningMessage "Auto-updates: NOT ATTEMPTED - $runBudgetReason before Winget-AutoUpdate was set up; run the installer again to set it up." }
         'FrameworkMissing' {
             $wauFrameworkRelease = $wauFrameworkName -replace 'Microsoft\.WindowsAppRuntime\.', ''
             Write-ErrorMessage "Auto-updates: NOT CONFIGURED - $wauFrameworkName is missing, and Winget-AutoUpdate would leave winget unusable without it. Install the Windows App Runtime $wauFrameworkRelease (or let the Microsoft Store update App Installer), then re-run the installer."
@@ -9154,11 +9370,19 @@ function Invoke-WingetInstall {
         Write-WarningMessage ('Restart: already pending before this run ({0}) - restart this PC when you can.' -f ($restartPendingBefore -join '; '))
     }
 
+    $notAttemptedSteps = @($notAttemptedApps)
+    if ($wauResult.Status -eq 'NotAttempted') {
+        $notAttemptedSteps += 'the Winget-AutoUpdate setup'
+    }
+    if ($notAttemptedSteps.Count -gt 0) {
+        Write-WarningMessage ("Time budget: USED UP - the run's {0}-minute budget ran out at {1}, so these were not attempted: {2}. Run the installer again to finish." -f $runBudget.Minutes, (Format-RunRecordTime -Time $runBudget.DeadlineUtc), ($notAttemptedSteps -join ', '))
+    }
+
     if ($script:InstallLogPath) {
         Write-Info "Full transcript of this run: $script:InstallLogPath"
     }
 
-    $exitCode = Get-InstallerExitCode -FailedAppCount $failedApps.Count -WingetUsable $wingetUsableAtEnd -AutoUpdatesHealthy $autoUpdatesHealthy -RestartRequired $restartRequired
+    $exitCode = Get-InstallerExitCode -FailedAppCount $failedApps.Count -WingetUsable $wingetUsableAtEnd -WorkNotAttempted ($notAttemptedSteps.Count -gt 0) -AutoUpdatesHealthy $autoUpdatesHealthy -RestartRequired $restartRequired
     $script:InstallerPendingExitCode = $exitCode
 
     if (-not $WhatIf -and @(1, 2, 8) -contains $exitCode) {
@@ -10963,7 +11187,12 @@ if ($MyInvocation.InvocationName -ne '.') {
             }
             Write-Info "Installer build: $script:InstallerBuildId"
             try {
-                $bootstrapExitCode = Invoke-PowerShell7Bootstrap -WhatIf:$WhatIf -NonInteractive:$NonInteractive -SkipSystemCheck:$SkipSystemCheck -CommandPath $PSCommandPath -ExpectedBuildId $script:InstallerBuildId -LogDirectory $bootstrapLogDirectory
+                $bootstrapParameters = @{}
+                $budgetArguments = @(Get-InstallerRunBudgetArgument -Budget (Resolve-InstallerRunBudget -MaxRuntimeMinutes $MaxRuntimeMinutes -RunDeadlineUtc $RunDeadlineUtc -StartedUtc $script:InstallerRunStartedUtc))
+                if ($budgetArguments.Count -gt 0) {
+                    $bootstrapParameters['AdditionalArguments'] = $budgetArguments
+                }
+                $bootstrapExitCode = Invoke-PowerShell7Bootstrap -WhatIf:$WhatIf -NonInteractive:$NonInteractive -SkipSystemCheck:$SkipSystemCheck -CommandPath $PSCommandPath -ExpectedBuildId $script:InstallerBuildId -LogDirectory $bootstrapLogDirectory @bootstrapParameters
             }
             catch {
                 Write-ErrorMessage "The PowerShell 7 bootstrap failed unexpectedly: $_"
@@ -11031,7 +11260,14 @@ if ($MyInvocation.InvocationName -ne '.') {
             }
         }
 
-        $installerExitCode = [int](@(Invoke-WingetInstall -WhatIf:$WhatIf -NonInteractive:$NonInteractive -SkipSystemCheck:$SkipSystemCheck)[-1])
+        $budgetParameters = @{}
+        if ($MaxRuntimeMinutes -gt 0) {
+            $budgetParameters['MaxRuntimeMinutes'] = $MaxRuntimeMinutes
+        }
+        if (-not [string]::IsNullOrWhiteSpace($RunDeadlineUtc)) {
+            $budgetParameters['RunDeadlineUtc'] = $RunDeadlineUtc
+        }
+        $installerExitCode = [int](@(Invoke-WingetInstall -WhatIf:$WhatIf -NonInteractive:$NonInteractive -SkipSystemCheck:$SkipSystemCheck @budgetParameters)[-1])
         if ($installerExitCode -ne 0) {
             Exit-Installer -Code $installerExitCode -NonInteractive:$NonInteractive -OutcomeShown:($null -ne $script:InstallerPendingExitCode)
         }

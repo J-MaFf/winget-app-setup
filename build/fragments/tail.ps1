@@ -138,8 +138,15 @@ if ($MyInvocation.InvocationName -ne '.') {
             # error inside the bootstrap would abort only that `exit` statement, and 5.1 would then
             # fall through into the PowerShell-7-only body below. The build id goes along so an
             # irm | iex run relaunches this same build and never another one (review finding P2-18).
+            # So does the time budget's deadline (wgt-gq8.41), counted from this script's start,
+            # and only when there is something to pass on, so a run without one is unchanged.
             try {
-                $bootstrapExitCode = Invoke-PowerShell7Bootstrap -WhatIf:$WhatIf -NonInteractive:$NonInteractive -SkipSystemCheck:$SkipSystemCheck -CommandPath $PSCommandPath -ExpectedBuildId $script:InstallerBuildId -LogDirectory $bootstrapLogDirectory
+                $bootstrapParameters = @{}
+                $budgetArguments = @(Get-InstallerRunBudgetArgument -Budget (Resolve-InstallerRunBudget -MaxRuntimeMinutes $MaxRuntimeMinutes -RunDeadlineUtc $RunDeadlineUtc -StartedUtc $script:InstallerRunStartedUtc))
+                if ($budgetArguments.Count -gt 0) {
+                    $bootstrapParameters['AdditionalArguments'] = $budgetArguments
+                }
+                $bootstrapExitCode = Invoke-PowerShell7Bootstrap -WhatIf:$WhatIf -NonInteractive:$NonInteractive -SkipSystemCheck:$SkipSystemCheck -CommandPath $PSCommandPath -ExpectedBuildId $script:InstallerBuildId -LogDirectory $bootstrapLogDirectory @bootstrapParameters
             }
             catch {
                 Write-ErrorMessage "The PowerShell 7 bootstrap failed unexpectedly: $_"
@@ -245,7 +252,15 @@ if ($MyInvocation.InvocationName -ne '.') {
         # Invoke-WingetInstall returns its exit code instead of exiting, and its return value is the
         # last thing it writes to the output stream: taking the last element keeps the code right
         # even if a helper ever leaks a value into that stream.
-        $installerExitCode = [int](@(Invoke-WingetInstall -WhatIf:$WhatIf -NonInteractive:$NonInteractive -SkipSystemCheck:$SkipSystemCheck)[-1])
+        # The time budget's values only when given (wgt-gq8.41); Invoke-WingetInstall decides it.
+        $budgetParameters = @{}
+        if ($MaxRuntimeMinutes -gt 0) {
+            $budgetParameters['MaxRuntimeMinutes'] = $MaxRuntimeMinutes
+        }
+        if (-not [string]::IsNullOrWhiteSpace($RunDeadlineUtc)) {
+            $budgetParameters['RunDeadlineUtc'] = $RunDeadlineUtc
+        }
+        $installerExitCode = [int](@(Invoke-WingetInstall -WhatIf:$WhatIf -NonInteractive:$NonInteractive -SkipSystemCheck:$SkipSystemCheck @budgetParameters)[-1])
         # Exit only for a non-zero code: a successful run ends normally (exit code 0 under -File), so
         # an interactive irm | iex console stays open afterwards. A run that reached its summary set
         # InstallerPendingExitCode before its final prompt and has shown its outcome; any other

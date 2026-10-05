@@ -168,14 +168,19 @@ function Wait-InstallerExitKeyPress {
 .SYNOPSIS
     Decides Invoke-WingetInstall's final exit code from the run's outcome.
 .DESCRIPTION
-    Precedence 1 > 2 > 8 > 3010 > 0: failed apps (1); winget no longer launchable at the end (2, as
-    at the start), so a run never exits 0 leaving winget broken; apps installed but automatic
-    updates not configured or unhealthy (8, P3-36); a restart needed to finish (3010, which RMM tools
-    read as "succeeded, restart required", P3-16).
+    Precedence 1 > 2 > 9 > 8 > 3010 > 0: failed apps (1); winget no longer launchable at the end (2,
+    as at the start), so a run never exits 0 leaving winget broken; apps or steps not attempted
+    because the run's time budget was used up (9: run it again to finish; wgt-gq8.41); apps
+    installed but automatic updates not configured or unhealthy (8, P3-36); a restart needed to
+    finish (3010, which RMM tools read as "succeeded, restart required", P3-16). A restart still
+    shows in the run record when another code wins.
 .PARAMETER FailedAppCount
     Number of apps still failed after the retry pass.
 .PARAMETER WingetUsable
     Result of the end-of-run winget launch probe.
+.PARAMETER WorkNotAttempted
+    The time budget was used up before an app install or the Winget-AutoUpdate setup could start.
+    Default False.
 .PARAMETER AutoUpdatesHealthy
     False when the run's 'Auto-updates:' line is FAILED, NOT CONFIGURED, AT RISK or UNHEALTHY.
     Default True.
@@ -183,7 +188,7 @@ function Wait-InstallerExitKeyPress {
     The run's installs finished but need a restart: an install reported it, or Windows gained a
     pending restart during the run (one pending before does not count). Default False.
 .OUTPUTS
-    [int] 0, 1, 2, 8 or 3010.
+    [int] 0, 1, 2, 8, 9 or 3010.
 #>
 function Get-InstallerExitCode {
     param (
@@ -192,6 +197,9 @@ function Get-InstallerExitCode {
 
         [Parameter(Mandatory = $true)]
         [bool]$WingetUsable,
+
+        [Parameter(Mandatory = $false)]
+        [bool]$WorkNotAttempted = $false,
 
         [Parameter(Mandatory = $false)]
         [bool]$AutoUpdatesHealthy = $true,
@@ -205,6 +213,9 @@ function Get-InstallerExitCode {
     }
     if (-not $WingetUsable) {
         return 2
+    }
+    if ($WorkNotAttempted) {
+        return 9
     }
     if (-not $AutoUpdatesHealthy) {
         return 8

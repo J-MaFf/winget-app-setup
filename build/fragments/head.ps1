@@ -63,6 +63,23 @@
  prints this command instead:
      & ([scriptblock]::Create((irm "https://raw.githubusercontent.com/J-MaFf/winget-app-setup/refs/heads/main/winget-app-install.ps1"))) -CollectDiagnostics
  Exit code 0 when the bundle was saved, 5 when it could not be.
+
+.PARAMETER MaxRuntimeMinutes
+ A time budget for the whole run, in minutes (1 to 1440), for an RMM job that is stopped after a
+ fixed time: once it is used up, the run starts no further app install, retry or Winget-AutoUpdate
+ setup, reports what it did not reach as not attempted (in the summary, the RESULT line and
+ last-run.json), and exits 9 so that the next run finishes the job. An install already running is
+ not stopped: it ends within its own time limit, so set the budget well below the RMM's limit. The
+ clock starts when this script starts, before the PowerShell 7 relaunch. Not given (or 0), the
+ environment variable WINGET_APP_SETUP_MAX_RUNTIME_MINUTES decides, for the irm | iex one-liner,
+ which cannot pass a parameter: unset, empty or 0 means no budget, and a value that is not a whole
+ number from 0 to 1440 is ignored with a warning. A value given here wins over the variable. A dry
+ run (-WhatIf) shows the budget but is not cut short.
+
+.PARAMETER RunDeadlineUtc
+ Internal: the deadline of the time budget (yyyy-MM-ddTHH:mm:ssZ), passed on by the installer's own
+ relaunches (to PowerShell 7, and elevated) and by rmm/Invoke-WingetAppSetup.ps1, so the budget
+ counts from the first start of the run. It never extends the budget -MaxRuntimeMinutes sets.
 #>
 
 param (
@@ -73,5 +90,10 @@ param (
     [Parameter(Mandatory = $false)]
     [switch]$NonInteractive,
     [Parameter(Mandatory = $false)]
-    [switch]$CollectDiagnostics
+    [switch]$CollectDiagnostics,
+    [Parameter(Mandatory = $false)]
+    [ValidateRange(0, 1440)]
+    [int]$MaxRuntimeMinutes = 0,
+    [Parameter(Mandatory = $false)]
+    [string]$RunDeadlineUtc
 )

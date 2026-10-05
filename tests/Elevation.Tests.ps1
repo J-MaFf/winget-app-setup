@@ -273,9 +273,37 @@ Describe 'Restart-WithElevation (review findings P2-11, P2-12, P3-11)' {
         $script:launch.ArgumentString | Should -Not -Match 'winget-app-install\.ps1'
     }
 
-    It 'Accepts only switch names as forwarded arguments, since they become part of a command line' {
-        { Restart-WithElevation -ScriptPath $script:scriptPath -AdditionalArguments '-SkipSystemCheck; Remove-Item C:\' } | Should -Throw
+    It 'Accepts only parameter names and plain values as forwarded arguments, since they become part of a command line: <_>' -ForEach @(
+        '-SkipSystemCheck; Remove-Item C:\'
+        '60; Remove-Item C:\'
+        '2026-10-05T12:00:00Z x'
+        "'60'"
+        '"60"'
+        '$env:TEMP'
+        '6`0'
+        'Bypass'
+        "60`n"
+        ''
+    ) {
+        { Restart-WithElevation -ScriptPath $script:scriptPath -AdditionalArguments '-SkipSystemCheck', $_ } | Should -Throw
         Should -Invoke Start-ElevatedProcess -Times 0 -Exactly
+    }
+
+    # wgt-gq8.41: the time budget's minutes and deadline cross to the elevated window on its command
+    # line, since that window does not reliably inherit this process's environment.
+    It 'Forwards the time budget''s values to the checked copy, each value in single quotes' {
+        Restart-WithElevation -ScriptPath $script:scriptPath -AdditionalArguments '-SkipSystemCheck', '-MaxRuntimeMinutes', '60', '-RunDeadlineUtc', '2026-10-05T12:00:00Z'
+
+        $script:launch.ArgumentString | Should -Match ([regex]::Escape("-File `$copy -SkipSystemCheck -MaxRuntimeMinutes '60' -RunDeadlineUtc '2026-10-05T12:00:00Z';"))
+    }
+
+    It 'Accepts on every relaunch the same arguments: Restart-WithElevation, New-ElevationVerifierCommand and Invoke-PowerShell7Bootstrap' {
+        $patterns = foreach ($name in @('Restart-WithElevation', 'New-ElevationVerifierCommand', 'Invoke-PowerShell7Bootstrap')) {
+            @((Get-Command $name).Parameters['AdditionalArguments'].Attributes | Where-Object { $_ -is [System.Management.Automation.ValidatePatternAttribute] })[0].RegexPattern
+        }
+
+        @($patterns | Sort-Object -Unique) | Should -HaveCount 1
+        $patterns[0] | Should -Be '^(?:-[A-Za-z][A-Za-z0-9]*|[0-9][0-9A-Za-z:.-]*)\z'
     }
 
     It 'Points at the file name and %TEMP%, not the folder, when the checked-copy command would be too long' {
@@ -450,6 +478,26 @@ Describe 'New-ElevationVerifierCommand (review finding P3-11)' {
         $command | Should -Not -Match '@(SOURCE|COPYROOT|POWERSHELL|ARGUMENTS)@'
     }
 
+    It 'Passes each forwarded value to the copy as one argument of its own (wgt-gq8.41)' {
+        $command = New-ElevationVerifierCommand -ScriptPath 'C:\t\winget-app-install.ps1' -Sha256 $script:sampleSha256 -PowerShellPath 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe' -CopyRoot 'C:\Windows\Temp' -AdditionalArguments '-SkipSystemCheck', '-MaxRuntimeMinutes', '60', '-RunDeadlineUtc', '2026-10-05T12:00:00Z'
+
+        $parseErrors = $null
+        $ast = [System.Management.Automation.Language.Parser]::ParseInput($command, [ref]$null, [ref]$parseErrors)
+        $parseErrors | Should -BeNullOrEmpty
+        $command | Should -Not -Match '["\r\n]'
+        $run = $ast.Find({ param ($node) $node -is [System.Management.Automation.Language.CommandAst] -and @($node.CommandElements | Where-Object { $_.Extent.Text -eq '-File' }).Count -gt 0 }, $true)
+        $elements = @($run.CommandElements | ForEach-Object { $_.Extent.Text })
+        $elements[-5..-1] | Should -Be @('-SkipSystemCheck', '-MaxRuntimeMinutes', "'60'", '-RunDeadlineUtc', "'2026-10-05T12:00:00Z'")
+    }
+
+    It 'Leaves room, with the time budget forwarded, for a staged copy under a %TEMP% path of 130 characters (wgt-gq8.41)' {
+        # The script path here is always the staged copy: %TEMP%, a 57-character folder, the file.
+        $stagedPath = 'C:\' + ('t' * 127) + '\winget-app-setup-elevate-' + ('0' * 32) + '\winget-app-install.ps1'
+        $command = New-ElevationVerifierCommand -ScriptPath $stagedPath -Sha256 $script:sampleSha256 -PowerShellPath 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe' -CopyRoot 'C:\Windows\Temp' -AdditionalArguments '-WhatIf', '-SkipSystemCheck', '-MaxRuntimeMinutes', '1440', '-RunDeadlineUtc', '2026-10-05T12:00:00Z'
+
+        ('-NoProfile -ExecutionPolicy Bypass -Command "' + $command + '"').Length | Should -BeLessOrEqual 2000
+    }
+
     It 'Leaves room for a MAX_PATH script path within ShellExecuteEx''s command-line limit' {
         $longPath = 'C:\' + ('p' * 240) + '\winget-app-install.ps1'
         $command = New-ElevationVerifierCommand -ScriptPath $longPath -Sha256 $script:sampleSha256 -PowerShellPath 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe' -CopyRoot 'C:\Windows\Temp' -AdditionalArguments '-WhatIf', '-SkipSystemCheck'
@@ -561,7 +609,7 @@ Describe 'New-ElevationVerifierCommand (review finding P3-11)' {
         $result.Copies | Should -Be 0
     }
 
-    It 'Under elevated Windows PowerShell, runs a copy in a new folder only SYSTEM and Administrators can change, forwards the switches, exits with its code and removes the copy' -Skip:(-not $script:isElevatedWindows) {
+    It 'Under elevated Windows PowerShell, runs a copy in a new folder only SYSTEM and Administrators can change, forwards the switches and the time budget, exits with its code and removes the copy' -Skip:(-not $script:isElevatedWindows) {
         # Windows only: creating a folder with its access list is .NET Framework only, and the
         # elevated process is always Windows PowerShell. Elevated only: the access list names no
         # other account, so only an administrator can write the copy (the Windows CI runners run
@@ -571,17 +619,17 @@ Describe 'New-ElevationVerifierCommand (review finding P3-11)' {
         $resultPath = Join-Path $TestDrive 'result.json'
         $sourcePath = Join-Path $TestDrive 'source.ps1'
         $fixture = @'
-param ([switch]$SkipSystemCheck)
+param ([switch]$SkipSystemCheck, [int]$MaxRuntimeMinutes = 0, [string]$RunDeadlineUtc)
 $acl = Get-Acl -LiteralPath (Split-Path -Parent $PSCommandPath)
 $identities = @($acl.Access | ForEach-Object { $_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value })
-@{ Path = $PSCommandPath; SkipSystemCheck = [bool]$SkipSystemCheck; Protected = $acl.AreAccessRulesProtected; Inherited = @($acl.Access | Where-Object { $_.IsInherited }).Count; Identities = $identities } | ConvertTo-Json | Set-Content -LiteralPath '@RESULT@'
+@{ Path = $PSCommandPath; SkipSystemCheck = [bool]$SkipSystemCheck; MaxRuntimeMinutes = $MaxRuntimeMinutes; RunDeadlineUtc = ('deadline=' + $RunDeadlineUtc); Protected = $acl.AreAccessRulesProtected; Inherited = @($acl.Access | Where-Object { $_.IsInherited }).Count; Identities = $identities } | ConvertTo-Json | Set-Content -LiteralPath '@RESULT@'
 exit 42
 '@
         Set-Content -LiteralPath $sourcePath -Value $fixture.Replace('@RESULT@', $resultPath) -Encoding UTF8
         $sha256 = (Get-FileHash -LiteralPath $sourcePath -Algorithm SHA256).Hash
         $copyRoot = Join-Path $TestDrive 'copies-elevated'
         [void](New-Item -ItemType Directory -Path $copyRoot)
-        $command = New-ElevationVerifierCommand -ScriptPath $sourcePath -Sha256 $sha256 -PowerShellPath $windowsPowerShell -CopyRoot $copyRoot -AdditionalArguments '-SkipSystemCheck'
+        $command = New-ElevationVerifierCommand -ScriptPath $sourcePath -Sha256 $sha256 -PowerShellPath $windowsPowerShell -CopyRoot $copyRoot -AdditionalArguments '-SkipSystemCheck', '-MaxRuntimeMinutes', '60', '-RunDeadlineUtc', '2026-10-05T12:00:00Z'
 
         & $windowsPowerShell -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command $command | Out-Null
         $exitCode = $LASTEXITCODE
@@ -591,6 +639,10 @@ exit 42
         $result.Path | Should -Not -Be $sourcePath
         $result.Path | Should -BeLike (Join-Path $copyRoot 'winget-app-setup-*\source.ps1')
         $result.SkipSystemCheck | Should -BeTrue
+        # wgt-gq8.41: the time budget arrives as the values it was sent as (prefixed in the JSON, which
+        # would otherwise read the deadline back as a local DateTime).
+        $result.MaxRuntimeMinutes | Should -Be 60
+        $result.RunDeadlineUtc | Should -Be 'deadline=2026-10-05T12:00:00Z'
         $result.Protected | Should -BeTrue
         $result.Inherited | Should -Be 0
         (@($result.Identities | Sort-Object -Unique) -join ',') | Should -BeExactly 'S-1-5-18,S-1-5-32-544'

@@ -753,6 +753,22 @@ Describe 'Invoke-PowerShell7Bootstrap' {
             }
         }
 
+        # wgt-gq8.41: the time budget's deadline, counted from the start of the 5.1 phase, so the
+        # PowerShell 7 run does not start the clock again.
+        It 'Forwards the time budget''s arguments after the switches, as they are' {
+            Invoke-PowerShell7Bootstrap -CommandPath 'C:\repo\winget-app-install.ps1' -NonInteractive -AdditionalArguments '-MaxRuntimeMinutes', '60', '-RunDeadlineUtc', '2026-10-05T12:00:00Z' | Out-Null
+
+            Should -Invoke Start-Process -Times 1 -Exactly -ParameterFilter {
+                ($ArgumentList -join ' ') -match '-File "C:\\repo\\winget-app-install\.ps1" -NonInteractive -MaxRuntimeMinutes 60 -RunDeadlineUtc 2026-10-05T12:00:00Z$'
+            }
+        }
+
+        It 'Refuses an argument that is not a parameter name or a plain value, relaunching nothing: <_>' -ForEach @('60; Remove-Item C:\', '"60"', 'x y', 'Bypass') {
+            { Invoke-PowerShell7Bootstrap -CommandPath 'C:\repo\winget-app-install.ps1' -AdditionalArguments '-MaxRuntimeMinutes', $_ } | Should -Throw -ErrorId 'ParameterArgumentValidationError,Invoke-PowerShell7Bootstrap'
+
+            Should -Invoke Start-Process -Times 0 -Exactly
+        }
+
         It 'Omits switches the caller did not pass' {
             Invoke-PowerShell7Bootstrap -CommandPath 'C:\repo\winget-app-install.ps1' | Out-Null
 

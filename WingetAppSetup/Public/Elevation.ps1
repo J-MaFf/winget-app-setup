@@ -54,8 +54,10 @@ function Test-IsAdmin {
 .PARAMETER ScriptPath
     The full path of the script to run elevated.
 .PARAMETER AdditionalArguments
-    Switch names forwarded to the elevated run (for example '-SkipSystemCheck'). Only switch names
-    are accepted: they become part of a command line.
+    Arguments forwarded to the elevated run: parameter names (for example '-SkipSystemCheck') and
+    values that start with a digit and hold only letters, digits, '.', ':' and '-' (the time
+    budget's '60' and '2026-10-05T12:00:00Z'). Nothing else is accepted: they become part of a
+    command line.
 .PARAMETER ExpectedSha256
     The script's SHA256 when this run started; nothing is started when the file no longer has it.
     Empty: the hash is taken now.
@@ -75,7 +77,7 @@ function Restart-WithElevation {
         [string]$ScriptPath,
 
         [Parameter(Mandatory = $false)]
-        [ValidatePattern('^-[A-Za-z][A-Za-z0-9]*$')]
+        [ValidatePattern('^(?:-[A-Za-z][A-Za-z0-9]*|[0-9][0-9A-Za-z:.-]*)\z')]
         [string[]]$AdditionalArguments = @(),
 
         [Parameter(Mandatory = $false)]

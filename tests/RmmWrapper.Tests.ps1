@@ -199,6 +199,67 @@ exit 8
         (Get-Content -LiteralPath $script:resultPath)[2] | Should -Be 'SkipSystemCheck=True'
     }
 
+    # wgt-gq8.41: Endpoint Central passes script arguments, not environment variables, and its time
+    # limit covers the download too, so the deadline counts from the wrapper's own start.
+    Context 'The time budget (-MaxRuntimeMinutes)' {
+        BeforeEach {
+            $script:budgetResultPath = Join-Path $TestDrive ([guid]::NewGuid().ToString('N') + '.txt')
+            $script:budgetInstaller = New-TestScript -Name 'winget-app-install.ps1' -Body @"
+param ([switch]`$NonInteractive, [switch]`$SkipSystemCheck, [int]`$MaxRuntimeMinutes = -1, [string]`$RunDeadlineUtc = 'unset')
+Set-Content -LiteralPath '$($script:budgetResultPath)' -Value @("MaxRuntimeMinutes=`$MaxRuntimeMinutes", "RunDeadlineUtc=`$RunDeadlineUtc", "Unbound=`$(`$args.Count)")
+exit 9
+"@
+            $script:budgetInstallerSha256 = (Get-FileHash -LiteralPath $script:budgetInstaller -Algorithm SHA256).Hash
+        }
+
+        It 'Passes the budget and its deadline, counted from the wrapper''s start, on to the installer, and its exit code 9 back' {
+            $before = [DateTime]::UtcNow
+
+            $exitCode = Invoke-RmmMachinePhase -InstallerPath $script:budgetInstaller -InstallerSha256 $script:budgetInstallerSha256 -MaxRuntimeMinutes 45 -LogDirectory $script:logs -CopyRoot $script:copyRoot
+
+            $after = [DateTime]::UtcNow
+            $exitCode | Should -Be 9
+            $result = Get-Content -LiteralPath $script:budgetResultPath
+            $result[0] | Should -Be 'MaxRuntimeMinutes=45'
+            $result[2] | Should -Be 'Unbound=0'
+            $result[1] -match '^RunDeadlineUtc=(?<deadline>.+)$' | Should -BeTrue
+            $deadlineText = $Matches.deadline
+            # The installer reads it back without a warning, as the deadline it keeps.
+            Mock Write-WarningMessage { throw "unexpected warning: $Message" }
+            $budget = Resolve-InstallerRunBudget -MaxRuntimeMinutes 45 -RunDeadlineUtc $deadlineText -StartedUtc $after
+            $budget.DeadlineUtc | Should -BeGreaterOrEqual $before.AddMinutes(45).AddSeconds(-1)
+            $budget.DeadlineUtc | Should -BeLessOrEqual $after.AddMinutes(45)
+            Format-RunRecordTime -Time $budget.DeadlineUtc | Should -Be $deadlineText
+            @($script:lines | Where-Object { $_ -like "Time budget: 45 minutes from now, until ${deadlineText}: *" }) | Should -HaveCount 1
+        }
+
+        It 'Passes no budget on without -MaxRuntimeMinutes, so an older pinned installer still runs' {
+            Invoke-RmmMachinePhase -InstallerPath $script:budgetInstaller -InstallerSha256 $script:budgetInstallerSha256 -LogDirectory $script:logs -CopyRoot $script:copyRoot | Should -Be 9
+
+            Get-Content -LiteralPath $script:budgetResultPath | Should -Be @('MaxRuntimeMinutes=-1', 'RunDeadlineUtc=unset', 'Unbound=0')
+            ($script:lines -join "`n") | Should -Not -Match 'Time budget'
+        }
+
+        It 'Writes the deadline the way the installer''s run record writes a time' {
+            $now = [DateTime]::new(2026, 10, 5, 11, 59, 30, 750, [DateTimeKind]::Utc)
+
+            Get-RmmRunDeadline -Minutes 30 -NowUtc $now | Should -Be (Format-RunRecordTime -Time $now.AddMinutes(30))
+        }
+
+        It 'Keeps -MaxRuntimeMinutes for the 64-bit relaunch' {
+            ConvertTo-RmmForwardedArgument -BoundParameters ([ordered]@{ MaxRuntimeMinutes = 45; SkipSystemCheck = [System.Management.Automation.SwitchParameter]::new($true) }) | Should -Be @('-MaxRuntimeMinutes', '45', '-SkipSystemCheck')
+        }
+
+        It 'Refuses a budget outside 0 to 1440 before doing anything: <_>' -ForEach @(-1, 1441) {
+            $output = & $script:Pwsh -NoLogo -NoProfile -NonInteractive -File $script:MachineWrapperPath -MaxRuntimeMinutes $_ 2>&1 | Out-String
+
+            $LASTEXITCODE | Should -Not -Be 0
+            # The parameter's own range check, not an unknown parameter.
+            $output | Should -Match "validate argument[^\r\n]*on parameter 'MaxRuntimeMinutes'"
+            $output | Should -Not -Match 'winget-app-setup RMM wrapper'
+        }
+    }
+
     It 'Logs to an install-(time)-rmm.log next to the installer''s logs, the installer''s output included' {
         Mock Write-RmmLine { Write-Host $Message }
 

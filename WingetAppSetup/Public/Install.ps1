@@ -16,6 +16,17 @@
 .PARAMETER Apps
     App-definition hashtables to install. Default: Get-DefaultAppCatalog, which the uninstaller
     shares (issue #190).
+.PARAMETER MaxRuntimeMinutes
+    The run's time budget in minutes, 1 to 1440 (wgt-gq8.41). Not given (or 0): the
+    WINGET_APP_SETUP_MAX_RUNTIME_MINUTES environment variable decides (Resolve-InstallerRunBudget),
+    and without it the run has no budget. Once the budget is used up, no app install, retry or
+    Winget-AutoUpdate setup starts (one already running finishes, within its own time limit), what
+    is left is reported NotAttempted, and the run returns 9. A dry run reports the budget and is not
+    cut short.
+.PARAMETER RunDeadlineUtc
+    Internal: the deadline an earlier phase of the same run passed on (yyyy-MM-ddTHH:mm:ssZ), so
+    the budget counts from the first start of the run. Set by the installer's own relaunches and by
+    rmm/Invoke-WingetAppSetup.ps1.
 .OUTPUTS
     [int] The run's exit code. It never ends the process: the entry script exits with it, so every
     path here can be tested.
@@ -27,11 +38,13 @@
     administrator rights are required and the run was not elevated (the prompt was declined or could
     not be shown, a non-interactive run, an execution policy that would refuse the elevated script,
     irm | iex, or the imported module); 8 = apps installed, but automatic updates are FAILED, NOT
-    CONFIGURED, AT RISK or UNHEALTHY; 3010 = success, but a restart finishes it. At the end of a run
-    the precedence is 1 > 2 > 8 > 3010 > 0 (Get-InstallerExitCode). Deferred apps and NotConfigured
-    hooks do not change the code. A run that relaunched itself elevated returns the elevated run's
-    code. The entry script also exits 1 for a failed blocking pre-flight check, 5 for an abort or
-    Constrained Language Mode, and 6 when another run is in progress.
+    CONFIGURED, AT RISK or UNHEALTHY; 9 = the time budget (-MaxRuntimeMinutes) was used up, so some
+    apps or the Winget-AutoUpdate setup were not attempted: run it again to finish; 3010 = success,
+    but a restart finishes it. At the end of a run the precedence is 1 > 2 > 9 > 8 > 3010 > 0
+    (Get-InstallerExitCode). Deferred apps and NotConfigured hooks do not change the code. A run
+    that relaunched itself elevated returns the elevated run's code. The entry script also exits 1
+    for a failed blocking pre-flight check, 5 for an abort or Constrained Language Mode, and 6 when
+    another run is in progress.
 
     After the summary, a real run reports in machine-readable form (Write-InstallerRunResult: the
     RESULT line and last-run.json) and releases the run lock before the final prompt.
@@ -48,12 +61,33 @@ function Invoke-WingetInstall {
         [switch]$SkipSystemCheck,
 
         [Parameter(Mandatory = $false)]
-        [array]$Apps = (Get-DefaultAppCatalog)
+        [array]$Apps = (Get-DefaultAppCatalog),
+
+        [Parameter(Mandatory = $false)]
+        [ValidateRange(0, 1440)]
+        [int]$MaxRuntimeMinutes = 0,
+
+        [Parameter(Mandatory = $false)]
+        [string]$RunDeadlineUtc
     )
 
     # Non-interactive: the switch, the environment variable, a non-interactive session, SYSTEM, or
     # redirected stdin (Test-EffectiveNonInteractive).
     $effectiveNonInteractive = Test-EffectiveNonInteractive -NonInteractive:$NonInteractive
+
+    # The whole run's time budget (wgt-gq8.41), counted from when the entry script started (or from
+    # the deadline an earlier phase passed on), and passed on to an elevated relaunch.
+    $runStartedUtc = [DateTime]::UtcNow
+    if ($script:InstallerRunStartedUtc -is [DateTime]) {
+        $runStartedUtc = $script:InstallerRunStartedUtc
+    }
+    $runBudget = Resolve-InstallerRunBudget -MaxRuntimeMinutes $MaxRuntimeMinutes -RunDeadlineUtc $RunDeadlineUtc -StartedUtc $runStartedUtc
+    # Latched once seen: no app install, retry or Winget-AutoUpdate setup starts after that.
+    $runBudgetSpent = $false
+    $runBudgetReason = $null
+    if ($runBudget.DeadlineUtc) {
+        $runBudgetReason = "the run's $($runBudget.Minutes)-minute time budget was used up"
+    }
 
     if ($WhatIf) {
         Write-Info '=== DRY-RUN MODE ENABLED ==='
@@ -122,6 +156,8 @@ function Invoke-WingetInstall {
             $elevationArgs = @()
             if ($WhatIf) { $elevationArgs += '-WhatIf' }
             if ($SkipSystemCheck) { $elevationArgs += '-SkipSystemCheck' }
+            # On the command line: the elevated window may not inherit this process's environment.
+            $elevationArgs += @(Get-InstallerRunBudgetArgument -Budget $runBudget)
             # Waits for the elevated window and returns its exit code (review finding P2-12), and
             # runs only a checked copy of this file (P3-11): $script:InstallerScriptSha256 is the
             # file's SHA256 taken by the entry script when this run started.
@@ -144,6 +180,16 @@ function Invoke-WingetInstall {
     }
     else {
         Write-Success 'Starting...'
+    }
+
+    if ($runBudget.DeadlineUtc) {
+        $deadlineText = Format-RunRecordTime -Time $runBudget.DeadlineUtc
+        if ($WhatIf) {
+            Write-Info "[DRY-RUN] Time budget: $($runBudget.Minutes) minutes, until $deadlineText. A real run starts no app install and no Winget-AutoUpdate setup after that, and exits 9; this preview is not cut short."
+        }
+        else {
+            Write-Info "Time budget: $($runBudget.Minutes) minutes, until $deadlineText. No app install, retry or Winget-AutoUpdate setup starts after that (one already running finishes); what is left is reported as not attempted, and the run exits 9 so that it can be run again."
+        }
     }
 
     # Who this run installs as, decided once: as SYSTEM or under cross-user elevation the run
@@ -179,8 +225,15 @@ function Invoke-WingetInstall {
 
     # Let a Winget-AutoUpdate run already in progress finish first (bounded): racing its App
     # Installer re-provisioning and MSI upgrades fails healthy installs. Not in a dry run.
+    # Never longer than the time budget has left: once it is used up nothing is installed anyway.
     if (-not $WhatIf) {
-        [void](Wait-WauIdle)
+        $budgetSecondsLeft = Get-InstallerRunBudgetSecondsLeft -Budget $runBudget
+        if ($null -eq $budgetSecondsLeft) {
+            [void](Wait-WauIdle)
+        }
+        elseif ($budgetSecondsLeft -gt 0) {
+            [void](Wait-WauIdle -TimeoutSeconds ([Math]::Min(900, $budgetSecondsLeft)))
+        }
     }
 
     # Make winget usable for this account (Initialize-Winget); a real run stops with 2 when it cannot
@@ -260,6 +313,8 @@ function Invoke-WingetInstall {
     # Installed apps whose post-install hook could not configure them: they do
     # not change the exit code, and the summary names them with the hook's reason.
     $notConfiguredApps = @()
+    # Apps the time budget did not reach (wgt-gq8.41): neither installed nor failed; the run exits 9.
+    $notAttemptedApps = @()
 
     # No separate source-trust pass here: only the winget community source is used (every install
     # forces --source winget), and Initialize-Winget above already updated it, and repaired it if
@@ -291,11 +346,16 @@ function Invoke-WingetInstall {
 
     Foreach ($app in $apps) {
         $outcome = $null
+        # Checked before each app; a dry run is never cut short.
+        if (-not $WhatIf -and -not $runBudgetSpent -and (Test-InstallerRunBudgetSpent -Budget $runBudget)) {
+            $runBudgetSpent = $true
+            Write-WarningMessage "Time budget: $runBudgetReason, so no further app install starts. The apps left are reported as not attempted; run the installer again to install them."
+        }
         try {
             # Shared per-app pipeline — pre-check, dispatch, post-verify (issue #188). Messages,
             # summary bucketing, and exit-code policy stay here in the orchestrator.
             # -Silent: an unattended run installs MSI packages with /quiet, not /passive.
-            $outcome = Install-AppWithVerification -App $app -Applicable $applicableByName[$app.name] -Silent:$effectiveNonInteractive -WhatIf:$WhatIf -WingetNotLaunchable:$wingetNotLaunchable -MachineWide:$machineWide -InstallInProgressWaitSeconds $installerBusyWaitSecondsLeft
+            $outcome = Install-AppWithVerification -App $app -Applicable $applicableByName[$app.name] -Silent:$effectiveNonInteractive -WhatIf:$WhatIf -WingetNotLaunchable:$wingetNotLaunchable -MachineWide:$machineWide -TimeBudgetSpent:$runBudgetSpent -InstallInProgressWaitSeconds $installerBusyWaitSecondsLeft
             if ($outcome.InstallResult -and $outcome.InstallResult.InstallInProgressWaitedSeconds) {
                 $installerBusyWaitSecondsLeft = [Math]::Max(0, $installerBusyWaitSecondsLeft - [int]$outcome.InstallResult.InstallInProgressWaitedSeconds)
             }
@@ -339,6 +399,11 @@ function Invoke-WingetInstall {
                         $noInstallerDeferredApps += $app.name
                     }
                     $appRecords[$app.name] = New-AppRunRecord -Id $app.name -Status 'Deferred' -Reason $deferText -InstallResult $outcome.InstallResult
+                }
+                'NotAttempted' {
+                    Write-WarningMessage "Not attempted: $($app.name) ($runBudgetReason)"
+                    $notAttemptedApps += $app.name
+                    $appRecords[$app.name] = New-AppRunRecord -Id $app.name -Status 'NotAttempted' -Reason $runBudgetReason
                 }
                 'Installed' {
                     if ($WhatIf) {
@@ -447,6 +512,16 @@ function Invoke-WingetInstall {
                     # A scope 'machine' app: the package's manifest decides
                     # this, so another try in this run would get the same answer from winget.
                     Write-WarningMessage "Not retrying ${appName}: no machine-scope installer applies to this PC, and its catalog entry allows only a machine-wide install (scope 'machine')."
+                    $failedApps += $failedApp
+                    continue
+                }
+                # A spent time budget leaves the app failed, as the first pass left it.
+                if (-not $runBudgetSpent -and (Test-InstallerRunBudgetSpent -Budget $runBudget)) {
+                    $runBudgetSpent = $true
+                    Write-WarningMessage "Time budget: $runBudgetReason, so no further retry starts."
+                }
+                if ($runBudgetSpent) {
+                    Write-WarningMessage "Not retrying ${appName}: $runBudgetReason."
                     $failedApps += $failedApp
                     continue
                 }
@@ -565,12 +640,23 @@ function Invoke-WingetInstall {
     # the summary and decides exit code 8 (P3-36). After every winget call this run makes, and WAU
     # is not told to run now: a WAU run re-provisions App Installer and resets winget's sources,
     # which mid-run wedged winget (#279, #284) and killed the console (#283).
-    try {
-        $wauResult = Install-WingetAutoUpdate -WhatIf:$WhatIf -InstallInProgressWaitSeconds $installerBusyWaitSecondsLeft
+    # A spent time budget skips the whole step, the Windows App Runtime install included: it can
+    # take many minutes, and the next run does it.
+    if (-not $WhatIf -and -not $runBudgetSpent -and (Test-InstallerRunBudgetSpent -Budget $runBudget)) {
+        $runBudgetSpent = $true
     }
-    catch {
-        Write-ErrorMessage "Winget-AutoUpdate setup failed unexpectedly: $_"
-        $wauResult = [pscustomobject]@{ Status = 'Failed'; Version = $null }
+    if ($runBudgetSpent) {
+        Write-WarningMessage "Not setting up Winget-AutoUpdate (or the Windows App Runtime it needs): $runBudgetReason. The next run sets it up."
+        $wauResult = [pscustomobject]@{ Status = 'NotAttempted'; Version = $null; FrameworkMissing = $false; RestartRequired = $false }
+    }
+    else {
+        try {
+            $wauResult = Install-WingetAutoUpdate -WhatIf:$WhatIf -InstallInProgressWaitSeconds $installerBusyWaitSecondsLeft
+        }
+        catch {
+            Write-ErrorMessage "Winget-AutoUpdate setup failed unexpectedly: $_"
+            $wauResult = [pscustomobject]@{ Status = 'Failed'; Version = $null }
+        }
     }
     # For the record of a run that stops after this point but before its summary.
     $script:InstallerAutoUpdateResult = $wauResult
@@ -657,6 +743,12 @@ function Invoke-WingetInstall {
         $rows += , @('Failed', $appList)
     }
 
+    # Last, so a reader of the rows above (e2e/TranscriptAssertions.ps1) is not cut short by it.
+    $appList = Format-AppList -AppArray $notAttemptedApps
+    if ($appList) {
+        $rows += , @('Not attempted', $appList)
+    }
+
     Write-Table -Headers $headers -Rows $rows -Title 'Installation Summary'
 
     # Per-app failure reasons (issue #189): winget exit code, attempt count, and scope-fallback
@@ -707,6 +799,8 @@ function Invoke-WingetInstall {
             $autoUpdatesHealthy = $false
         }
         'DryRun' { Write-Info "[DRY-RUN] Auto-updates: Would configure Winget-AutoUpdate v$($wauResult.Version)." }
+        # Exit code 9 already says the run is not finished; the next run sets it up.
+        'NotAttempted' { Write-WarningMessage "Auto-updates: NOT ATTEMPTED - $runBudgetReason before Winget-AutoUpdate was set up; run the installer again to set it up." }
         'FrameworkMissing' {
             $wauFrameworkRelease = $wauFrameworkName -replace 'Microsoft\.WindowsAppRuntime\.', ''
             Write-ErrorMessage "Auto-updates: NOT CONFIGURED - $wauFrameworkName is missing, and Winget-AutoUpdate would leave winget unusable without it. Install the Windows App Runtime $wauFrameworkRelease (or let the Microsoft Store update App Installer), then re-run the installer."
@@ -743,12 +837,21 @@ function Invoke-WingetInstall {
         Write-WarningMessage ('Restart: already pending before this run ({0}) - restart this PC when you can.' -f ($restartPendingBefore -join '; '))
     }
 
+    # What the time budget left undone (wgt-gq8.41), and that another run finishes it.
+    $notAttemptedSteps = @($notAttemptedApps)
+    if ($wauResult.Status -eq 'NotAttempted') {
+        $notAttemptedSteps += 'the Winget-AutoUpdate setup'
+    }
+    if ($notAttemptedSteps.Count -gt 0) {
+        Write-WarningMessage ("Time budget: USED UP - the run's {0}-minute budget ran out at {1}, so these were not attempted: {2}. Run the installer again to finish." -f $runBudget.Minutes, (Format-RunRecordTime -Time $runBudget.DeadlineUtc), ($notAttemptedSteps -join ', '))
+    }
+
     # The transcript path again, next to the summary (issue #189); unset outside the entry script.
     if ($script:InstallLogPath) {
         Write-Info "Full transcript of this run: $script:InstallLogPath"
     }
 
-    $exitCode = Get-InstallerExitCode -FailedAppCount $failedApps.Count -WingetUsable $wingetUsableAtEnd -AutoUpdatesHealthy $autoUpdatesHealthy -RestartRequired $restartRequired
+    $exitCode = Get-InstallerExitCode -FailedAppCount $failedApps.Count -WingetUsable $wingetUsableAtEnd -WorkNotAttempted ($notAttemptedSteps.Count -gt 0) -AutoUpdatesHealthy $autoUpdatesHealthy -RestartRequired $restartRequired
     # Recorded before the final prompt: Ctrl+C there stops a run that has already finished, and
     # the entry script's abort guard then reports this code instead of an abort (5).
     $script:InstallerPendingExitCode = $exitCode

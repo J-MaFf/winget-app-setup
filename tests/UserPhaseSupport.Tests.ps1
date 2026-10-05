@@ -59,6 +59,26 @@ Describe 'Read-InstallerRunRecord' {
         $record.Sha256 | Should -Be (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
     }
 
+    # wgt-gq8.41: an app the machine run's time budget did not reach is the next machine run's, not
+    # this account's; the run itself finished (exit code 9), so its deferred apps are this account's.
+    It 'Ignores the apps a run''s time budget did not reach, and counts that run (exit code 9) as finished' {
+        $apps = @(
+            (New-AppRunRecord -Id '7zip.7zip' -Status 'Installed'),
+            (New-AppRunRecord -Id 'Contoso.UserOnly' -Status 'Deferred'),
+            (New-AppRunRecord -Id 'Git.Git' -Status 'NotAttempted' -Reason "the run's 60-minute time budget was used up"),
+            (New-AppRunRecord -Id 'Zoom.Zoom' -Status 'NotAttempted' -Reason "the run's 60-minute time budget was used up")
+        )
+        $path = New-TestRunRecordFile -Directory $script:recordDirectory -Apps $apps -ExitCode 9
+
+        $record = Read-InstallerRunRecord -Path $path
+
+        $record.DeferredApps | Should -Be @('Contoso.UserOnly')
+        $record.InvalidDeferredIds | Should -BeNullOrEmpty
+        $record.ExitCode | Should -Be 9
+        (Get-UserPhaseDecision -Record $record -State $null -MaxAttempts 3).Reason | Should -Be 'New'
+        Should -Invoke Write-WarningMessage -Times 0 -Exactly
+    }
+
     It 'Leaves out a deferred id that is not a winget package id, and lists it' {
         $apps = @((New-AppRunRecord -Id 'Google.Chrome --override /S' -Status 'Deferred'), (New-AppRunRecord -Id 'Contoso.UserOnly' -Status 'Deferred'))
         $path = New-TestRunRecordFile -Directory $script:recordDirectory -Apps $apps

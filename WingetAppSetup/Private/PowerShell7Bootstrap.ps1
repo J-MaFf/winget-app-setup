@@ -8,7 +8,8 @@
 # Get-WingetExitCodeInfo, Format-WingetExitCode and Test-WingetRestartRequiredResult
 # (Private/WingetResultCodes.ps1), Get-ScriptExecutionPolicyBlock, Test-LaunchedByGroupPolicyScript,
 # Test-FullLanguageMode, Get-PowerShellLanguageMode, Test-EffectiveNonInteractive,
-# Test-NonInteractiveRequested, Test-IsContinuousIntegration, Start-InstallerTranscript,
+# Test-NonInteractiveRequested, Test-IsContinuousIntegration, Resolve-InstallerRunBudget and
+# Get-InstallerRunBudgetArgument (Private/RunBudget.ps1), Start-InstallerTranscript,
 # Grant-InstallLogReadAccess, Write-Prompt, Exit-Installer, Write-InstallerExitNotice,
 # Wait-InstallerExitKeyPress, Write-InstallerReportHint, Get-DiagnosticsCommandLine,
 # Write-InstallerNotStartedResult, Complete-InstallerRun and the Private/RunRecord.ps1 functions
@@ -604,6 +605,11 @@ function Get-PowerShell7RelaunchInstaller {
 .PARAMETER LogDirectory
     The bootstrap transcript's folder, or empty. Forwarded to Install-PowerShell7FromMsi for
     msiexec's log, and to the winget install for its --log.
+.PARAMETER AdditionalArguments
+    Further arguments for the relaunch, after the switches: the run's time budget
+    (Get-InstallerRunBudgetArgument), so the PowerShell 7 run keeps the deadline this run started
+    with. The pattern Restart-WithElevation accepts: parameter names, and values without spaces or
+    quotes.
 .OUTPUTS
     [int] Exit code for the tail dispatch to propagate: the relaunched run's exit code, 0 for a
     -WhatIf preview, or 7 when PowerShell 7 could not be installed or relaunched (including a Group
@@ -631,7 +637,10 @@ function Invoke-PowerShell7Bootstrap {
         [Parameter(Mandatory = $false)]
         [string]$ExpectedBuildId,
         [Parameter(Mandatory = $false)]
-        [string]$LogDirectory
+        [string]$LogDirectory,
+        [Parameter(Mandatory = $false)]
+        [ValidatePattern('^(?:-[A-Za-z][A-Za-z0-9]*|[0-9][0-9A-Za-z:.-]*)\z')]
+        [string[]]$AdditionalArguments = @()
     )
 
     $script:PowerShell7BootstrapRelaunched = $false
@@ -809,6 +818,7 @@ function Invoke-PowerShell7Bootstrap {
     if ($SkipSystemCheck) {
         $relaunchArguments += '-SkipSystemCheck'
     }
+    $relaunchArguments += @($AdditionalArguments)
     # Set the relaunch-loop sentinel (checked at the top of this function) so a child that
     # somehow re-enters the version dispatch fails fast instead of relaunching forever.
     $env:WINGET_APP_SETUP_PS7_BOOTSTRAP = '1'

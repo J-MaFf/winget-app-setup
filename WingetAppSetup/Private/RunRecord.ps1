@@ -8,10 +8,12 @@
     The winget package id.
 .PARAMETER Status
     'Installed', 'Skipped', 'Deferred' (left for the signed-in user's own account: neither installed
-    nor failed) or 'Failed'.
+    nor failed), 'NotAttempted' (the run's time budget was used up before it, so the next run does
+    it) or 'Failed'.
 .PARAMETER Reason
-    Why the app was skipped, deferred or failed (the text the summary shows). Empty: none. For a
-    deferred app, Get-AppDeferReasonText's: no machine-wide installer, or a per-user catalog entry.
+    Why the app was skipped, deferred, not attempted or failed (the text the summary shows). Empty:
+    none. For a deferred app, Get-AppDeferReasonText's: no machine-wide installer, or a per-user
+    catalog entry.
 .PARAMETER InstallResult
     The app's install result (Install-AppWithVerification's InstallResult), for its exit code, or
     $null when no installer ran.
@@ -94,10 +96,12 @@ function New-AppRunRecord {
                           no enabled trigger or could not be checked, framework or not
       'FrameworkMissing'  (NOT CONFIGURED): Microsoft.WindowsAppRuntime.1.8 is missing
       'Failed'            (FAILED)
+      'NotAttempted'      (NOT ATTEMPTED): the run's time budget was used up before this step
       'DryRun'            a dry run, which reports no record
       'NotRun'            the run did not get that far
-    AtRisk, Unhealthy, FrameworkMissing and Failed make a run exit 8 when no app failed and winget
-    still works (Get-InstallerExitCode). An unknown Status is returned as it is.
+    AtRisk, Unhealthy, FrameworkMissing and Failed make a run exit 8, and NotAttempted exit 9, when
+    no app failed and winget still works (Get-InstallerExitCode). An unknown Status is returned as
+    it is.
 #>
 function Get-AutoUpdateResultStatus {
     param (
@@ -217,10 +221,11 @@ function New-InstallerRunRecord {
         exitCode        = $ExitCode
         summaryReached  = [bool]$SummaryReached
         counts          = [ordered]@{
-            installed = @($appList | Where-Object { $_.status -eq 'Installed' }).Count
-            skipped   = @($appList | Where-Object { $_.status -eq 'Skipped' }).Count
-            deferred  = @($appList | Where-Object { $_.status -eq 'Deferred' }).Count
-            failed    = @($appList | Where-Object { $_.status -eq 'Failed' }).Count
+            installed    = @($appList | Where-Object { $_.status -eq 'Installed' }).Count
+            skipped      = @($appList | Where-Object { $_.status -eq 'Skipped' }).Count
+            deferred     = @($appList | Where-Object { $_.status -eq 'Deferred' }).Count
+            failed       = @($appList | Where-Object { $_.status -eq 'Failed' }).Count
+            notAttempted = @($appList | Where-Object { $_.status -eq 'NotAttempted' }).Count
         }
         apps            = $appList
         autoUpdates     = [ordered]@{
@@ -239,11 +244,12 @@ function New-InstallerRunRecord {
 .DESCRIPTION
     Space-separated key=value pairs in a fixed order:
 
-        RESULT: exit=1 installed=12 skipped=2 deferred=0 failed=1 autoupdates=Configured restart=no build=1.0.0+1a2b3c4d log=C:\ProgramData\winget-app-setup\logs\install-20261004-143000.log
+        RESULT: exit=1 installed=12 skipped=2 deferred=0 failed=1 notattempted=0 autoupdates=Configured restart=no build=1.0.0+1a2b3c4d log=C:\ProgramData\winget-app-setup\logs\install-20261004-143000.log
 
-    No value holds a space but log, which comes last. The counts are always there; autoupdates is
-    Get-AutoUpdateResultStatus's word; restart is yes or no; build and log are 'unknown' and 'none'
-    without a build id or transcript; exit is the code the run ends with.
+    No value holds a space but log, which comes last. The counts are always there (notattempted:
+    apps the run's time budget did not reach); autoupdates is Get-AutoUpdateResultStatus's word;
+    restart is yes or no; build and log are 'unknown' and 'none' without a build id or transcript;
+    exit is the code the run ends with.
 .PARAMETER Record
     A record from New-InstallerRunRecord.
 .OUTPUTS
@@ -267,7 +273,11 @@ function Format-InstallerResultLine {
     if ($Record.transcriptPath) {
         $log = $Record.transcriptPath
     }
-    return ('RESULT: exit={0} installed={1} skipped={2} deferred={3} failed={4} autoupdates={5} restart={6} build={7} log={8}' -f $Record.exitCode, $Record.counts.installed, $Record.counts.skipped, $Record.counts.deferred, $Record.counts.failed, $Record.autoUpdates.status, $restart, $build, $log)
+    $notAttempted = 0
+    if ($null -ne $Record.counts.notAttempted) {
+        $notAttempted = $Record.counts.notAttempted
+    }
+    return ('RESULT: exit={0} installed={1} skipped={2} deferred={3} failed={4} notattempted={5} autoupdates={6} restart={7} build={8} log={9}' -f $Record.exitCode, $Record.counts.installed, $Record.counts.skipped, $Record.counts.deferred, $Record.counts.failed, $notAttempted, $Record.autoUpdates.status, $restart, $build, $log)
 }
 
 <#
@@ -458,7 +468,7 @@ function Write-InstallerEarlyExitResult {
     For the Constrained Language Mode stop, which comes before the transcript, the run lock and the
     5.1 bootstrap:
 
-        RESULT: exit=5 installed=0 skipped=0 deferred=0 failed=0 autoupdates=NotRun restart=no build=1.0.0+1a2b3c4d log=none
+        RESULT: exit=5 installed=0 skipped=0 deferred=0 failed=0 notattempted=0 autoupdates=NotRun restart=no build=1.0.0+1a2b3c4d log=none
 
     Uses only what every language mode allows, under 5.1 too, reads only $script:InstallerBuildId
     (an irm | iex console may hold an earlier run's state) and writes no last-run.json.
@@ -473,7 +483,7 @@ function Write-InstallerNotStartedResult {
 
     $record = [ordered]@{
         exitCode        = $ExitCode
-        counts          = [ordered]@{ installed = 0; skipped = 0; deferred = 0; failed = 0 }
+        counts          = [ordered]@{ installed = 0; skipped = 0; deferred = 0; failed = 0; notAttempted = 0 }
         autoUpdates     = [ordered]@{ status = 'NotRun' }
         restartRequired = $false
         buildId         = $script:InstallerBuildId

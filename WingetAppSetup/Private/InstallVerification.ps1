@@ -112,13 +112,17 @@ function Test-AppApplicability {
     The run installs for the whole PC only (a run as SYSTEM or under cross-user elevation).
     Forwarded to Install-WingetPackage, and to a package-specific installer that has it, as
     -MachineScopeOnly.
+.PARAMETER TimeBudgetSpent
+    The run's time budget is used up (wgt-gq8.41): an app that applies, and that a run for the whole
+    PC does not defer, is NotAttempted without running winget or its installer.
 .PARAMETER InstallInProgressWaitSeconds
     The most the install may wait for another installation to finish (what is left of the run's
     budget). Forwarded to Install-WingetPackage, and to a package-specific installer with that
     parameter. The time waited comes back as InstallResult.InstallInProgressWaitedSeconds.
 .OUTPUTS
     [hashtable] @{
-        Status        = 'Installed' | 'Failed' | 'Skipped' | 'Deferred'
+        Status        = 'Installed' | 'Failed' | 'Skipped' | 'Deferred' | 'NotAttempted' (with
+                        -TimeBudgetSpent)
         InstallResult = the Install-WingetPackage result hashtable, or the $App.install command's,
                         intact; $null when no installer ran (skip, dry run, pre-check timeout or
                         launch failure)
@@ -167,6 +171,9 @@ function Install-AppWithVerification {
         [switch]$MachineWide,
 
         [Parameter(Mandatory = $false)]
+        [switch]$TimeBudgetSpent,
+
+        [Parameter(Mandatory = $false)]
         [int]$InstallInProgressWaitSeconds
     )
 
@@ -192,6 +199,12 @@ function Install-AppWithVerification {
         if ($perUserReason) {
             return @{ Status = 'Deferred'; InstallResult = $null; FailureReason = $null; DeferReason = $perUserReason }
         }
+    }
+
+    # The run's time budget is used up: nothing that takes time starts (no provisioning query, winget
+    # call or post-install hook), and the next run does the app.
+    if ($TimeBudgetSpent) {
+        return @{ Status = 'NotAttempted'; InstallResult = $null; FailureReason = $null }
     }
 
     # An MSIX app in a run for the whole PC (review finding P3-24): whether its package is
