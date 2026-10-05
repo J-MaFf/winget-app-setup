@@ -11,8 +11,10 @@
     bootstrap has to install it.
 
     Tolerant: an app that is not installed is fine, and an app that cannot be removed is reported
-    as a GitHub warning annotation and left in place (the pass then skips it, as before), so
-    runner preparation never fails the run on its own. Each app's result and warning are printed
+    as a GitHub warning annotation and left in place, so this step never fails on its own. The
+    PowerShell 7 and 5.1 legs' first pass then skips that app as already installed, as before; the
+    SYSTEM leg fails on it, because e2e/Invoke-SystemInstallPass.ps1 expects the apps this script
+    removes by default to be Installed in last-run.json. Each app's result and warning are printed
     as soon as that app is done, so a step stopped part-way still shows what it got through.
 
     Every winget and msiexec call is bounded, and the limits add up to less than the step's

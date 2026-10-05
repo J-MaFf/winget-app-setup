@@ -21,7 +21,9 @@ name: E2E Install
 # pass: on windows-latest the SYSTEM run installs the framework and WAU and is expected to exit 0),
 # the wrapper's 64-bit relaunch and exit-code pass-through, 'Auto-updates: Configured' and the
 # framework installed once, last-run.json and its Deferred entries (each with an id and a reason,
-# as the user phase reads them), and that nothing was installed per-user into SYSTEM's own profile.
+# as the user phase reads them), each catalog app's entry in last-run.json against the checkout's
+# catalog (Chrome, 7-Zip and Git must be Installed, so an app the removal step left in place fails
+# this leg), and that nothing was installed per-user into SYSTEM's own profile.
 # All legs first uninstall the catalog apps the runner image ships with (Google Chrome, 7-Zip and
 # Git; e2e/Remove-PreinstalledApps.ps1), so the first pass really installs them instead of
 # skipping them as already installed. PowerShell 7 and Windows Terminal stay preinstalled in the

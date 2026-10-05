@@ -647,7 +647,7 @@ function Get-SystemInstallPassResult {
             $contained = $false
             $containedDetail = 'no transcript of the run, so its failures cannot be checked'
             if ($Transcript) {
-                $containment =Test-InstallFailureContainment -Transcript $Transcript.Parsed -SkipApps $skipApps
+                $containment = Test-InstallFailureContainment -Transcript $Transcript.Parsed -SkipApps $skipApps
                 $contained = [bool]$containment.Passed
                 $containedDetail = "$($Transcript.Name): $($containment.Detail)"
             }
