@@ -9,7 +9,7 @@
     [string[]]
 #>
 function Get-AppDefinitionFieldName {
-    return @('name', 'install', 'installerType', 'condition', 'conditionDescription', 'msixName', 'scope', 'arch', 'postInstall', 'userPhase')
+    return @('name', 'install', 'installerType', 'condition', 'conditionDescription', 'msixName', 'scope', 'arch', 'postInstall', 'userPhase', 'quietUninstall')
 }
 
 <#
@@ -27,7 +27,8 @@ function Get-AppDefinitionArchitectureName {
 
 <#
 .SYNOPSIS
-    Checks a catalog entry's optional fields: scope, arch, postInstall and userPhase.
+    Checks a catalog entry's optional fields: scope, arch, postInstall, userPhase and
+    quietUninstall.
 .DESCRIPTION
     An error makes the entry invalid, and the run stops with exit code 3 before it installs anything:
       - scope: not 'machine', 'user' or 'any'.
@@ -35,6 +36,7 @@ function Get-AppDefinitionArchitectureName {
         would match no PC and skip the app everywhere).
       - postInstall: neither a scriptblock nor the name of a command that exists.
       - userPhase: not $true or $false.
+      - quietUninstall: anything Get-AppQuietUninstallSchemaIssue refuses.
     A field the schema does not know (Get-AppDefinitionFieldName) is a warning: the installer
     ignores it.
 .PARAMETER App
@@ -96,6 +98,10 @@ function Get-AppDefinitionSchemaIssue {
         $errors += "$Label has an invalid 'userPhase' value '$($App['userPhase'])': use `$true or `$false."
     }
 
+    if ($App.ContainsKey('quietUninstall')) {
+        $errors += @(Get-AppQuietUninstallSchemaIssue -Value $App['quietUninstall'] -Label $Label)
+    }
+
     $knownFields = Get-AppDefinitionFieldName
     foreach ($key in @($App.Keys)) {
         if ($knownFields -notcontains $key) {
@@ -107,6 +113,64 @@ function Get-AppDefinitionSchemaIssue {
         Errors   = $errors
         Warnings = $warnings
     }
+}
+
+<#
+.SYNOPSIS
+    Returns the errors in a catalog entry's quietUninstall value: none when it is valid.
+.DESCRIPTION
+    Valid is a hashtable with exactly these keys:
+      - productCode: a braced GUID, the name of the app's uninstall entry under HKLM.
+      - arguments: one or more non-empty strings without a double quote or a line break, each passed
+        to the uninstaller as one argument (Get-AppQuietUninstallCommand).
+    The uninstaller could not use any other value, so it is refused before any run.
+.PARAMETER Value
+    The entry's quietUninstall value.
+.PARAMETER Label
+    How messages name the entry, e.g. "App entry at index 3 ('Contoso.App')".
+.OUTPUTS
+    [string[]]
+#>
+function Get-AppQuietUninstallSchemaIssue {
+    param (
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [object]$Value,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Label
+    )
+
+    $usage = "use @{ productCode = '{<GUID>}'; arguments = @('<switch>', ...) }"
+    if (-not ($Value -is [System.Collections.IDictionary])) {
+        return @("$Label has an invalid 'quietUninstall' value: $usage.")
+    }
+
+    $errors = @()
+    foreach ($key in @($Value.Keys)) {
+        if (@('productCode', 'arguments') -notcontains [string]$key) {
+            $errors += "$Label has an unknown key '$key' in its 'quietUninstall' value: $usage."
+        }
+    }
+
+    $productCode = $Value['productCode']
+    if (-not ($productCode -is [string]) -or $productCode -notmatch '^\{[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}\}\z') {
+        $errors += "$Label has an invalid 'quietUninstall' productCode '$productCode': use the braced GUID its uninstall entry is named after, such as '{00000000-0000-0000-0000-000000000000}'."
+    }
+
+    $arguments = @()
+    if ($null -ne $Value['arguments']) {
+        $arguments = @($Value['arguments'])
+    }
+    if ($arguments.Count -eq 0) {
+        $errors += "$Label has no 'quietUninstall' arguments: name the switches that make its uninstaller run without asking."
+    }
+    foreach ($argument in $arguments) {
+        if (-not ($argument -is [string]) -or [string]::IsNullOrWhiteSpace($argument) -or $argument -match '["\r\n]') {
+            $errors += "$Label has an invalid 'quietUninstall' argument '$argument': use a non-empty string without a double quote or a line break."
+        }
+    }
+    return $errors
 }
 
 <#

@@ -127,7 +127,10 @@ function Invoke-WingetUninstall {
             }
             switch ($outcome.Status) {
                 'Uninstalled' {
-                    if ($WhatIf) {
+                    if ($WhatIf -and $outcome.Command) {
+                        Write-Info "[DRY-RUN] Would uninstall: $($app.name) (its own uninstaller: $($outcome.Command))"
+                    }
+                    elseif ($WhatIf) {
                         Write-Info "[DRY-RUN] Would uninstall: $($app.name)"
                     }
                     elseif ($outcome.RestartRequired) {

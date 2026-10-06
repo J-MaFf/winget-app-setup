@@ -191,8 +191,9 @@ package is provisioned for every user, not from `winget list` (see
 Every entry is a hashtable with the winget package id in `name`. The other fields are optional.
 The installer checks every entry before it installs anything: a wrong value (an unknown `scope`, an
 architecture name it does not know, a `postInstall` that names no function, a `userPhase` that is
-not `$true` or `$false`) stops the run with exit code 3 and names the entry, and a field it does not
-know is reported as a warning and ignored.
+not `$true` or `$false`, a `quietUninstall` without a braced-GUID `productCode` or with no
+`arguments`) stops the run with exit code 3 and names the entry, and a field it does not know is
+reported as a warning and ignored.
 
 | Field | Meaning |
 |-------|---------|
@@ -205,6 +206,7 @@ know is reported as a warning and ignored.
 | `install` | A package-specific installer function that verifies its own install (`Install-PowerShellLatest`) |
 | `installerType` | winget `--installer-type` override |
 | `msixName` | The app's MSIX package name (see above) |
+| `quietUninstall` | `@{ productCode = '{<GUID>}'; arguments = @('<switch>', ...) }`: for an exe app whose registered uninstall command waits for a click, the uninstaller runs the program the `productCode` uninstall entry names with these switches instead of `winget uninstall` (see [Uninstall](#uninstall)). `productCode` must be a braced GUID and `arguments` one or more strings without a double quote. Set for `Google.GoogleDrive` (`--silent --force_stop`) |
 
 **Post-install hooks.** A `postInstall` hook runs after the install is verified, and on every run
 that finds the app already installed (or provisioned for every user), so it must be idempotent:
@@ -400,7 +402,7 @@ carries on:
 | The `winget --version` check that winget can be started | 30 seconds |
 | `winget source update` | 2 minutes |
 | `winget source reset` | 5 minutes |
-| One `winget uninstall` (`winget-app-uninstall.ps1`), the app's own uninstaller included | 15 minutes |
+| One `winget uninstall` (`winget-app-uninstall.ps1`), the app's own uninstaller included; for an app with `quietUninstall`, its own uninstaller and the wait for its uninstall entry to go | 15 minutes |
 | One `Install-WinGetPackage` of the opt-in Microsoft.WinGet.Client engine (as SYSTEM, see [Microsoft.WinGet.Client engine (opt-in)](#microsoftwingetclient-engine-opt-in)), the installer included | 30 minutes |
 | The engine's per-app `Get-WinGetPackage` check before and after each install | 45 seconds |
 | The engine's check that it can be started (`Get-WinGetVersion`) | 60 seconds |
@@ -1529,6 +1531,21 @@ powershell -ExecutionPolicy Unrestricted -File .\winget-app-uninstall.ps1 -WhatI
 - Each app is removed with `winget uninstall --exact --id <id> --silent` under a 15-minute limit.
   An app whose own uninstaller returns 3010 or 1641 (a restart finishes the removal) counts as
   removed, although winget reports it as `0x8A150030`.
+- `--silent` only makes an MSI quiet. For an exe app, winget runs the command the app registered
+  for removal (its `QuietUninstallString`, else its `UninstallString`) exactly as written, and
+  `winget uninstall` has no way to add switches. Google Drive registers a bare `uninstall.exe`,
+  which asks "Uninstall Google Drive?" and waits for a click: the run used to hang there for 15
+  minutes and fail. Such an app carries `quietUninstall` in the catalog, and the uninstaller runs
+  the program its uninstall entry under
+  `HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall` (64-bit view, then `WOW6432Node`)
+  names, with the catalog's switches (for Drive, Google's `--silent --force_stop`, which also
+  closes a running Drive), under the same 15-minute limit. It runs it only when the entry names an
+  existing `.exe` under Program Files or Program Files (x86); otherwise the app fails at once
+  (`its own uninstaller was not found: ...`), and `winget uninstall` is not tried, since it would
+  hang. Drive's `uninstall.exe` hands its work to a copy of itself and exits, so the uninstaller
+  then waits, for what is left of the 15 minutes, until the uninstall entry is gone, and counts
+  the app removed only once `winget list` no longer shows it. A preview (`-WhatIf`) prints the
+  command line it would run.
 - An installed app whose catalog condition or `arch` list does not hold on this PC is left alone
   (Dell Command Update on other hardware or on ARM64 Windows, the 32-bit Reader on an x64 PC). A
   condition or architecture that cannot be read counts as holding, as in the installer.

@@ -341,6 +341,23 @@ Describe 'Get-DefaultAppCatalog (issue #190)' {
         }
     }
 
+    # wgt-gq8.61: `winget uninstall` ran Drive's bare uninstall.exe, which asked for a confirmation
+    # nobody could give until the 15-minute limit stopped it.
+    Context 'Google Drive removal' {
+        It 'Removes Google Drive with its own uninstaller and Google''s silent switches' {
+            $driveApp = @(Get-DefaultAppCatalog) | Where-Object { $_.name -eq 'Google.GoogleDrive' }
+
+            $driveApp.quietUninstall.productCode | Should -Be '{6BBAE539-2232-434A-A4E5-9A33560C6283}'
+            @($driveApp.quietUninstall.arguments) | Should -Be @('--silent', '--force_stop')
+        }
+
+        It 'No catalog entry other than the reviewed ones carries quietUninstall' {
+            $quiet = @(Get-DefaultAppCatalog) | Where-Object { $_.ContainsKey('quietUninstall') }
+
+            @($quiet | ForEach-Object { $_.name }) | Should -Be @('Google.GoogleDrive')
+        }
+    }
+
     # winget has only Dell's x64 build of Dell Command Update; on ARM64 it would install that with
     # the Arm64 .NET Desktop Runtime its dependency resolves to. Dell ships its ARM64 build apart.
     Context 'Architecture gating for Dell Command Update' {

@@ -725,6 +725,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The uninstaller no longer hangs for 15 minutes on Google Drive and then fails it (wgt-gq8.61).
+  Drive is an exe app, so `winget uninstall` ran the `UninstallString` Drive registers, a bare
+  `uninstall.exe` with no switches, exactly as written, and waited on it with no limit of its own:
+  `--silent` only makes an MSI quiet, and `winget uninstall` has no `--override`
+  (winget-cli#4700). That `uninstall.exe` asks "Uninstall Google Drive?" and waits for a click,
+  which nobody can give in an unattended or SYSTEM run. The 15-minute `WingetUninstall` limit then
+  stopped it, Drive stayed, Winget-AutoUpdate was kept and the run exited 1 (seen in the real-PC
+  test plan's self-test on `windows-latest`). Before this PR the uninstaller had no limit and
+  would have waited for ever.
+  - **New catalog field `quietUninstall`.** `@{ productCode = '{<GUID>}'; arguments = @(...) }`,
+    set for `Google.GoogleDrive` to `{6BBAE539-2232-434A-A4E5-9A33560C6283}` and Google's
+    documented `--silent --force_stop` (`--force_stop` closes a running Drive). The schema refuses
+    a value without a braced-GUID product code or with no arguments, an argument with a double
+    quote, or an unknown key (exit code 3).
+  - **Its own uninstaller, never `winget uninstall`.** For such an entry the uninstaller reads the
+    entry's `UninstallString` from HKLM (the 64-bit view, then `WOW6432Node`, also from a 32-bit
+    PowerShell), takes the quoted program (the entry's own arguments are dropped) and runs it with
+    the catalog's switches through `Invoke-ExternalProcess`, under the same 15-minute limit and tree
+    kill. It runs it only when the path is a full, normalised path to an existing `.exe` under
+    Program Files (`ProgramW6432`, or `ProgramFiles` on 32-bit Windows) or Program Files (x86).
+    Otherwise the app fails at once (`UninstallerNotFound`), with nothing run: falling back to
+    `winget uninstall` would hang again.
+  - **Then it checks.** Drive's `uninstall.exe` hands its work to a copy of itself and exits, so
+    the uninstaller waits, for what is left of the 15 minutes, until the uninstall entry is gone,
+    then asks `winget list`. Gone and not listed is `Uninstalled` (with a restart for 3010 or 1641);
+    anything else is the new `UninstallVerifyFailed`. Another exit code is `UninstallFailed`, and a
+    timeout or a failed start names `uninstall.exe`. A preview (`-WhatIf`) prints the exact command
+    line it would run.
+  - The help of `Uninstall-CatalogApp`, which said `--silent` keeps an interactive uninstaller from
+    waiting, and the `WingetUninstall` time-limit description are corrected. Entries without the
+    field keep `winget uninstall` as before. `winget uninstall` still gets no `--log`: the
+    uninstaller keeps no transcript, so it has no logs folder for one (`Invoke-WingetProcess` adds
+    `--log` whenever there is one).
 - The E2E assertions now check which apps apply as it stood just before the pass whose transcript
   they read: `e2e/Invoke-InstallPass.ps1 -ApplicabilityPath` records it before each pass, and
   `e2e/Assert-Install.ps1 -ApplicabilityPath` reads it. The installer decides applicability before

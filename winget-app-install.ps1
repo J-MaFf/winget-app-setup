@@ -106,12 +106,12 @@ param (
 # the function source under WingetAppSetup/Public and WingetAppSetup/Private, or the entry block in
 # build/fragments/tail.ps1, then re-run the build to regenerate this file.
 # See readme.md ("Project layout") for details.
-# Build id: 1.0.0+46fd3a22 (module version + SHA256 fragment of this whole script; issue #189).
+# Build id: 1.0.0+507e8f9e (module version + SHA256 fragment of this whole script; issue #189).
 # ------------------------------------------------------------------------------------------------
 
 # Content-derived build identity, logged at startup so a transcript from a remote machine
 # identifies exactly which installer build produced it (issue #189).
-$script:InstallerBuildId = '1.0.0+46fd3a22'
+$script:InstallerBuildId = '1.0.0+507e8f9e'
 
 # ------------------------------------------------Functions------------------------------------------------
 
@@ -157,6 +157,272 @@ function Test-WingetUninstallRestartRequiredResult {
     return $false
 }
 
+function Get-AppUninstallEntry {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$ProductCode,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('Registry64', 'Registry32')]
+        [string]$View
+    )
+
+    $baseKey = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine, [Microsoft.Win32.RegistryView]$View)
+    $key = $null
+    try {
+        $key = $baseKey.OpenSubKey("SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\$ProductCode", $false)
+        if ($null -eq $key) {
+            return $null
+        }
+        $value = $key.GetValue('UninstallString')
+        $uninstallString = $null
+        if ($null -ne $value) {
+            $uninstallString = [string]$value
+        }
+        return [pscustomobject]@{ View = $View; UninstallString = $uninstallString }
+    }
+    finally {
+        if ($key) {
+            $key.Dispose()
+        }
+        $baseKey.Dispose()
+    }
+}
+
+function Get-UninstallStringProgramPath {
+    param (
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [AllowEmptyString()]
+        [string]$UninstallString
+    )
+
+    if ([string]::IsNullOrWhiteSpace($UninstallString)) {
+        return $null
+    }
+    $text = $UninstallString.Trim()
+    if (-not $text.StartsWith('"')) {
+        return $text
+    }
+    $closingQuote = $text.IndexOf('"', 1)
+    if ($closingQuote -lt 2) {
+        return $null
+    }
+    return $text.Substring(1, $closingQuote - 1)
+}
+
+function Get-AppUninstallerRootDirectory {
+    $programFiles = $env:ProgramW6432
+    if ([string]::IsNullOrWhiteSpace($programFiles)) {
+        $programFiles = $env:ProgramFiles
+    }
+    $roots = @()
+    foreach ($candidate in @($programFiles, ${env:ProgramFiles(x86)})) {
+        if (-not [string]::IsNullOrWhiteSpace($candidate) -and $roots -notcontains $candidate) {
+            $roots += $candidate
+        }
+    }
+    return $roots
+}
+
+function Get-AppQuietUninstallCommand {
+    param (
+        [Parameter(Mandatory = $true)]
+        [hashtable]$App
+    )
+
+    $productCode = [string]$App['quietUninstall']['productCode']
+    $arguments = @(@($App['quietUninstall']['arguments']) | ForEach-Object { [string]$_ })
+    $command = [pscustomobject]@{ FilePath = $null; Arguments = $arguments; CommandLine = $null; Problem = $null }
+    $notFound = 'its own uninstaller was not found:'
+
+    $entry = $null
+    $entryExists = $false
+    foreach ($view in @('Registry64', 'Registry32')) {
+        try {
+            $candidate = Get-AppUninstallEntry -ProductCode $productCode -View $view
+        }
+        catch {
+            $command.Problem = '{0} its uninstall entry {1} could not be read ({2})' -f $notFound, $productCode, "$($_.Exception.Message)".Trim().TrimEnd('.')
+            return $command
+        }
+        if ($null -eq $candidate) {
+            continue
+        }
+        $entryExists = $true
+        if (-not [string]::IsNullOrWhiteSpace($candidate.UninstallString)) {
+            $entry = $candidate
+            break
+        }
+    }
+    if (-not $entryExists) {
+        $command.Problem = '{0} there is no uninstall entry {1} under HKLM' -f $notFound, $productCode
+        return $command
+    }
+    if ($null -eq $entry) {
+        $command.Problem = '{0} its uninstall entry {1} has no UninstallString' -f $notFound, $productCode
+        return $command
+    }
+
+    $path = Get-UninstallStringProgramPath -UninstallString $entry.UninstallString
+    $fullPath = $null
+    if ($path) {
+        try {
+            if ([System.IO.Path]::IsPathRooted($path)) {
+                $fullPath = [System.IO.Path]::GetFullPath($path)
+            }
+        }
+        catch {
+            $fullPath = $null
+        }
+    }
+    $named = "{0} its uninstall entry {1} names '{2}'," -f $notFound, $productCode, $entry.UninstallString.Trim()
+    if (-not $fullPath -or -not [string]::Equals($fullPath, $path, [System.StringComparison]::OrdinalIgnoreCase)) {
+        $command.Problem = '{0} which is not a full path to a program' -f $named
+        return $command
+    }
+    if ([System.IO.Path]::GetExtension($fullPath) -ne '.exe') {
+        $command.Problem = '{0} which is not an .exe file' -f $named
+        return $command
+    }
+    $underRoot = $false
+    foreach ($root in @(Get-AppUninstallerRootDirectory)) {
+        try {
+            $fullRoot = [System.IO.Path]::GetFullPath($root).TrimEnd([char[]]@('\', '/')) + [System.IO.Path]::DirectorySeparatorChar
+        }
+        catch {
+            continue
+        }
+        if ($fullPath.StartsWith($fullRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+            $underRoot = $true
+            break
+        }
+    }
+    if (-not $underRoot) {
+        $command.Problem = '{0} which is not under Program Files or Program Files (x86)' -f $named
+        return $command
+    }
+    if (-not (Test-Path -LiteralPath $fullPath -PathType Leaf)) {
+        $command.Problem = '{0} which does not exist' -f $named
+        return $command
+    }
+
+    $command.FilePath = $fullPath
+    $command.CommandLine = ('"{0}" {1}' -f $fullPath, (ConvertTo-ProcessArgumentString -ArgumentList $arguments)).TrimEnd()
+    return $command
+}
+
+function Wait-AppUninstallEntryRemoved {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$ProductCode,
+
+        [Parameter(Mandatory = $true)]
+        [int]$TimeoutSeconds,
+
+        [Parameter(Mandatory = $false)]
+        [int]$IntervalSeconds = 5
+    )
+
+    if ($IntervalSeconds -lt 1) {
+        $IntervalSeconds = 1
+    }
+    $pauses = [int][Math]::Floor([Math]::Max(0, $TimeoutSeconds) / $IntervalSeconds)
+    for ($check = 0; $check -le $pauses; $check++) {
+        if ($check -gt 0) {
+            Start-Sleep -Seconds $IntervalSeconds
+        }
+        $present = $false
+        foreach ($view in @('Registry64', 'Registry32')) {
+            try {
+                if ($null -ne (Get-AppUninstallEntry -ProductCode $ProductCode -View $view)) {
+                    $present = $true
+                }
+            }
+            catch {
+                $present = $true
+            }
+        }
+        if (-not $present) {
+            return $true
+        }
+    }
+    return $false
+}
+
+function Invoke-AppQuietUninstall {
+    param (
+        [Parameter(Mandatory = $true)]
+        [hashtable]$App,
+
+        [Parameter(Mandatory = $true)]
+        [object]$Command
+    )
+
+    $id = $App.name
+    $productCode = [string]$App['quietUninstall']['productCode']
+    $result = @{ Status = 'Failed'; SkipReason = $null; FailureReason = $null; Reason = $null; ExitCode = $null; RestartRequired = $false; Command = $Command.CommandLine }
+    $program = "its uninstaller '{0}'" -f [System.IO.Path]::GetFileName($Command.FilePath)
+    $timeoutSeconds = Get-ProcessTimeoutSeconds -Operation WingetUninstall
+
+    Write-Info ('Uninstalling: {0} (its own uninstaller: {1})' -f $id, $Command.CommandLine)
+    $run = Invoke-ExternalProcess -FilePath $Command.FilePath -ArgumentList @($Command.Arguments) -TimeoutSeconds $timeoutSeconds
+    if ($run.LaunchFailed) {
+        $result.FailureReason = 'UninstallLaunchFailed'
+        $result.Reason = '{0} could not be started ({1})' -f $program, "$($run.LaunchError)".Trim().TrimEnd('.')
+        return $result
+    }
+    if ($run.TimedOut) {
+        $result.FailureReason = 'UninstallTimeout'
+        $result.Reason = '{0} did not finish within {1} minutes and was stopped' -f $program, [Math]::Round($timeoutSeconds / 60)
+        return $result
+    }
+
+    $exitCode = [int]$run.ExitCode
+    $restartRequired = @(3010, 1641) -contains $exitCode
+    if ($exitCode -ne 0 -and -not $restartRequired) {
+        $result.FailureReason = 'UninstallFailed'
+        $result.ExitCode = $exitCode
+        $result.Reason = '{0} exited with {1} (0x{1:X8})' -f $program, $exitCode
+        return $result
+    }
+
+    $exited = '{0} exited with {1}' -f $program, $exitCode
+    $remainingSeconds = $timeoutSeconds - [int][Math]::Ceiling([double]$run.DurationSeconds)
+    if (-not (Wait-AppUninstallEntryRemoved -ProductCode $productCode -TimeoutSeconds $remainingSeconds)) {
+        $result.FailureReason = 'UninstallVerifyFailed'
+        $result.Reason = '{0}, but its uninstall entry {1} was still there when the {2}-minute limit ran out' -f $exited, $productCode, [Math]::Round($timeoutSeconds / 60)
+        return $result
+    }
+
+    $checkTimeoutSeconds = Get-ProcessTimeoutSeconds -Operation WingetListCheck
+    $check = Test-WingetPackageInstalled -PackageId $id -TimeoutSeconds $checkTimeoutSeconds
+    $noAnswer = $null
+    if ($check.TimedOut) {
+        $noAnswer = "'winget list' did not answer within $checkTimeoutSeconds seconds"
+    }
+    elseif ($check.LaunchFailed) {
+        $noAnswer = 'winget could not be started ({0})' -f "$($check.LaunchError)".Trim().TrimEnd('.')
+    }
+    elseif ($check.CheckFailed) {
+        $noAnswer = "'winget list' failed with {0}" -f (Format-WingetExitCode -ExitCode ([int]$check.ExitCode))
+    }
+    if ($noAnswer) {
+        $result.FailureReason = 'UninstallVerifyFailed'
+        $result.Reason = '{0} and its uninstall entry is gone, but whether winget still lists it could not be checked: {1}' -f $exited, $noAnswer
+        return $result
+    }
+    if ($check.Installed) {
+        $result.FailureReason = 'UninstallVerifyFailed'
+        $result.Reason = '{0} and its uninstall entry is gone, but winget still lists it' -f $exited
+        return $result
+    }
+
+    $result.Status = 'Uninstalled'
+    $result.RestartRequired = $restartRequired
+    return $result
+}
+
 function Uninstall-CatalogApp {
     param (
         [Parameter(Mandatory = $true)]
@@ -167,7 +433,7 @@ function Uninstall-CatalogApp {
     )
 
     $id = $App.name
-    $result = @{ Status = 'Failed'; SkipReason = $null; FailureReason = $null; Reason = $null; ExitCode = $null; RestartRequired = $false }
+    $result = @{ Status = 'Failed'; SkipReason = $null; FailureReason = $null; Reason = $null; ExitCode = $null; RestartRequired = $false; Command = $null }
 
     $checkTimeoutSeconds = Get-ProcessTimeoutSeconds -Operation WingetListCheck
     $check = Test-WingetPackageInstalled -PackageId $id -TimeoutSeconds $checkTimeoutSeconds
@@ -210,9 +476,24 @@ function Uninstall-CatalogApp {
         return $result
     }
 
+    $quietCommand = $null
+    if ($null -ne $App['quietUninstall']) {
+        $quietCommand = Get-AppQuietUninstallCommand -App $App
+        if ($quietCommand.Problem) {
+            $result.FailureReason = 'UninstallerNotFound'
+            $result.Reason = $quietCommand.Problem
+            return $result
+        }
+        $result.Command = $quietCommand.CommandLine
+    }
+
     if ($WhatIf) {
         $result.Status = 'Uninstalled'
         return $result
+    }
+
+    if ($quietCommand) {
+        return (Invoke-AppQuietUninstall -App $App -Command $quietCommand)
     }
 
     Write-Info "Uninstalling: $id"
@@ -247,7 +528,7 @@ function Uninstall-CatalogApp {
 
 # --- CatalogSchema ---
 function Get-AppDefinitionFieldName {
-    return @('name', 'install', 'installerType', 'condition', 'conditionDescription', 'msixName', 'scope', 'arch', 'postInstall', 'userPhase')
+    return @('name', 'install', 'installerType', 'condition', 'conditionDescription', 'msixName', 'scope', 'arch', 'postInstall', 'userPhase', 'quietUninstall')
 }
 
 function Get-AppDefinitionArchitectureName {
@@ -304,6 +585,10 @@ function Get-AppDefinitionSchemaIssue {
         $errors += "$Label has an invalid 'userPhase' value '$($App['userPhase'])': use `$true or `$false."
     }
 
+    if ($App.ContainsKey('quietUninstall')) {
+        $errors += @(Get-AppQuietUninstallSchemaIssue -Value $App['quietUninstall'] -Label $Label)
+    }
+
     $knownFields = Get-AppDefinitionFieldName
     foreach ($key in @($App.Keys)) {
         if ($knownFields -notcontains $key) {
@@ -315,6 +600,48 @@ function Get-AppDefinitionSchemaIssue {
         Errors   = $errors
         Warnings = $warnings
     }
+}
+
+function Get-AppQuietUninstallSchemaIssue {
+    param (
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [object]$Value,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Label
+    )
+
+    $usage = "use @{ productCode = '{<GUID>}'; arguments = @('<switch>', ...) }"
+    if (-not ($Value -is [System.Collections.IDictionary])) {
+        return @("$Label has an invalid 'quietUninstall' value: $usage.")
+    }
+
+    $errors = @()
+    foreach ($key in @($Value.Keys)) {
+        if (@('productCode', 'arguments') -notcontains [string]$key) {
+            $errors += "$Label has an unknown key '$key' in its 'quietUninstall' value: $usage."
+        }
+    }
+
+    $productCode = $Value['productCode']
+    if (-not ($productCode -is [string]) -or $productCode -notmatch '^\{[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}\}\z') {
+        $errors += "$Label has an invalid 'quietUninstall' productCode '$productCode': use the braced GUID its uninstall entry is named after, such as '{00000000-0000-0000-0000-000000000000}'."
+    }
+
+    $arguments = @()
+    if ($null -ne $Value['arguments']) {
+        $arguments = @($Value['arguments'])
+    }
+    if ($arguments.Count -eq 0) {
+        $errors += "$Label has no 'quietUninstall' arguments: name the switches that make its uninstaller run without asking."
+    }
+    foreach ($argument in $arguments) {
+        if (-not ($argument -is [string]) -or [string]::IsNullOrWhiteSpace($argument) -or $argument -match '["\r\n]') {
+            $errors += "$Label has an invalid 'quietUninstall' argument '$argument': use a non-empty string without a double quote or a line break."
+        }
+    }
+    return $errors
 }
 
 function Get-AppInstallScope {
@@ -10092,7 +10419,7 @@ function Get-DefaultAppCatalog {
         @{name = 'Adobe.Acrobat.Reader.64-bit'; arch = 'X64'; conditionDescription = 'its only installer is x64, and Adobe supports only the 32-bit Reader on ARM64 Windows' },
         @{name = 'Adobe.Acrobat.Reader.32-bit'; arch = @('Arm64', 'X86'); conditionDescription = 'ARM64 and 32-bit Windows only; x64 PCs get the 64-bit Reader' },
         @{name = 'Google.Chrome' },
-        @{name = 'Google.GoogleDrive' },
+        @{name = 'Google.GoogleDrive'; quietUninstall = @{ productCode = '{6BBAE539-2232-434A-A4E5-9A33560C6283}'; arguments = @('--silent', '--force_stop') } },
         @{name = 'Git.Git' },
         @{name = 'Klocman.BulkCrapUninstaller' },
         @{name = 'Dell.CommandUpdate.Universal'; arch = 'X64'; condition = { (Get-ComputerManufacturer) -match 'Dell' }; conditionDescription = 'Dell hardware with x64 Windows only; winget has no ARM64 installer for it' },
@@ -11211,7 +11538,10 @@ function Invoke-WingetUninstall {
             }
             switch ($outcome.Status) {
                 'Uninstalled' {
-                    if ($WhatIf) {
+                    if ($WhatIf -and $outcome.Command) {
+                        Write-Info "[DRY-RUN] Would uninstall: $($app.name) (its own uninstaller: $($outcome.Command))"
+                    }
+                    elseif ($WhatIf) {
                         Write-Info "[DRY-RUN] Would uninstall: $($app.name)"
                     }
                     elseif ($outcome.RestartRequired) {

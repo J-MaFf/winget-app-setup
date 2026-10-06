@@ -37,6 +37,10 @@
         and never in a dry run.
       - userPhase: $true for an app or setting that needs the signed-in user's own account; it is
         Deferred as SYSTEM or under cross-user elevation.
+      - quietUninstall: @{ productCode = '{<GUID>}'; arguments = @('<switch>', ...) }, for an exe
+        app whose registered uninstall command waits for a click. `winget uninstall` runs that
+        command exactly as written and cannot add switches, so the uninstaller runs the program
+        that HKLM uninstall entry names with these arguments instead (Uninstall-CatalogApp).
     A Deferred app is neither installed nor failed; last-run.json records why, for the user phase.
 .OUTPUTS
     [array] of app-definition hashtables.
@@ -56,7 +60,9 @@ function Get-DefaultAppCatalog {
         # No arch list: winget's only installer is labelled x64, but Google serves the same file to
         # ARM64 PCs, and Drive runs natively on Windows 11 ARM64. Windows 10 ARM64 emulates only x86,
         # so winget finds no installer there (0x8A150010); an arch list cannot tell the two apart.
-        @{name = 'Google.GoogleDrive' },
+        # Its uninstall entry names a bare uninstall.exe, which asks 'Uninstall Google Drive?' and
+        # waits (wgt-gq8.61). Google's silent removal: --silent skips that, --force_stop closes Drive.
+        @{name = 'Google.GoogleDrive'; quietUninstall = @{ productCode = '{6BBAE539-2232-434A-A4E5-9A33560C6283}'; arguments = @('--silent', '--force_stop') } },
         @{name = 'Git.Git' },
         @{name = 'Klocman.BulkCrapUninstaller' },
         # Dell hardware only (issue #217): its .NET Desktop Runtime dependency cannot install on

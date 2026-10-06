@@ -16,7 +16,9 @@
     WingetInstall     one `winget install`, its download, installer and wait for another winget
                       install included (30 minutes).
     WingetDownload    one `winget download` (30 minutes).
-    WingetUninstall   one `winget uninstall`, the app's own uninstaller included (15 minutes).
+    WingetUninstall   one `winget uninstall`, the app's own uninstaller included; or, for a catalog
+                      entry with quietUninstall, its own uninstaller run directly and the wait
+                      for its uninstall entry to go (15 minutes).
     WingetListCheck   the per-app `winget list` check before and after an install (15 seconds).
     WingetVersion     the `winget --version` launch check (30 seconds; no network or source I/O).
     WingetSourceUpdate `winget source update`, the source check before the installs (2 minutes).

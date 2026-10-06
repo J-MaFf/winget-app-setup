@@ -2,7 +2,8 @@
 # Tests for WingetAppSetup/Public/Uninstall.ps1 (Invoke-WingetUninstall) and its private per-app
 # step (Private/AppUninstall.ps1: Uninstall-CatalogApp, Get-HostingShellSkipReason), plus the
 # generated winget-app-uninstall.ps1, whose entry block (build/fragments/uninstall-tail.ps1) runs
-# them (review findings P2-19 and P3-18).
+# them (review findings P2-19 and P3-18). An entry with quietUninstall (wgt-gq8.61) is tested in
+# AppUninstall.Tests.ps1.
 
 BeforeAll {
     . (Join-Path $PSScriptRoot 'TestHelpers.ps1')
@@ -286,8 +287,11 @@ Describe 'Invoke-WingetUninstall' {
             Should -Invoke Invoke-WingetProcess -Times 0 -Exactly -ParameterFilter { $ArgumentList[0] -eq 'uninstall' }
         }
 
-        It 'Returns 3, removing nothing, for an app list with an invalid declarative field' {
-            $result = Invoke-WingetUninstall -Apps @(@{ name = 'Contoso.AppOne'; arch = 'amd64' })
+        It 'Returns 3, removing nothing, for an app list with an invalid declarative field (<Case>)' -ForEach @(
+            @{ Case = 'arch'; App = @{ name = 'Contoso.AppOne'; arch = 'amd64' } }
+            @{ Case = 'quietUninstall, wgt-gq8.61'; App = @{ name = 'Contoso.AppOne'; quietUninstall = @{ productCode = 'uninstall.exe'; arguments = @('--silent') } } }
+        ) {
+            $result = Invoke-WingetUninstall -Apps @($App)
 
             $result | Should -Be 3
             Should -Invoke Invoke-WingetProcess -Times 0 -Exactly -ParameterFilter { $ArgumentList[0] -eq 'uninstall' }

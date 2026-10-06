@@ -27,6 +27,8 @@ Describe 'Get-AppDefinitionSchemaIssue (work-order item 38)' {
         @{ Case = 'userPhase true'; App = @{ name = 'Contoso.App'; userPhase = $true } }
         @{ Case = 'userPhase false'; App = @{ name = 'Contoso.App'; userPhase = $false } }
         @{ Case = 'every existing field'; App = @{ name = 'Contoso.App'; install = 'Install-PowerShellLatest'; installerType = 'wix'; condition = { $true }; conditionDescription = 'x'; msixName = 'Contoso.App' } }
+        @{ Case = 'a quietUninstall with switches (wgt-gq8.61)'; App = @{ name = 'Contoso.App'; quietUninstall = @{ productCode = '{6BBAE539-2232-434A-A4E5-9A33560C6283}'; arguments = @('--silent', '--force_stop') } } }
+        @{ Case = 'a quietUninstall with one switch as a string, a lower-case GUID and keys in any case'; App = @{ name = 'Contoso.App'; quietUninstall = @{ ProductCode ='{6bbae539-2232-434a-a4e5-9a33560c6283}'; Arguments = '/S' } } }
     ) {
         $issues = Get-AppDefinitionSchemaIssue -App $App -Label 'App entry at index 0'
 
@@ -51,6 +53,30 @@ Describe 'Get-AppDefinitionSchemaIssue (work-order item 38)' {
         @($issues.Errors).Count | Should -Be 1
         @($issues.Errors)[0] | Should -Match ([regex]::Escape("App entry at index 2 ('Contoso.App')"))
         @($issues.Errors)[0] | Should -Match $Pattern
+    }
+
+    # wgt-gq8.61: the uninstaller runs the program this names, so a value it cannot use stops the
+    # run (exit code 3) instead of failing the app at uninstall time.
+    It 'Rejects a quietUninstall with <Case>' -ForEach @(
+        @{ Case = 'a string instead of a hashtable'; Value = 'uninstall.exe --silent'; Pattern = "invalid 'quietUninstall' value: use @\{ productCode" }
+        @{ Case = 'no value'; Value = $null; Pattern = "invalid 'quietUninstall' value" }
+        @{ Case = 'no productCode'; Value = @{ arguments = @('--silent') }; Pattern = "invalid 'quietUninstall' productCode ''" }
+        @{ Case = 'a productCode without braces'; Value = @{ productCode = '6BBAE539-2232-434A-A4E5-9A33560C6283'; arguments = @('--silent') }; Pattern = "invalid 'quietUninstall' productCode '6BBAE539-2232-434A-A4E5-9A33560C6283': use the braced GUID" }
+        @{ Case = 'a productCode that is a path'; Value = @{ productCode = '{6BBAE539-2232-434A-A4E5-9A33560C6283}\..\Other'; arguments = @('--silent') }; Pattern = "invalid 'quietUninstall' productCode" }
+        @{ Case = 'a productCode with a trailing line break'; Value = @{ productCode = "{6BBAE539-2232-434A-A4E5-9A33560C6283}`n"; arguments = @('--silent') }; Pattern = "invalid 'quietUninstall' productCode" }
+        @{ Case = 'no arguments'; Value = @{ productCode = '{6BBAE539-2232-434A-A4E5-9A33560C6283}' }; Pattern = "no 'quietUninstall' arguments" }
+        @{ Case = 'an empty argument list'; Value = @{ productCode = '{6BBAE539-2232-434A-A4E5-9A33560C6283}'; arguments = @() }; Pattern = "no 'quietUninstall' arguments" }
+        @{ Case = 'an argument that is not a string'; Value = @{ productCode = '{6BBAE539-2232-434A-A4E5-9A33560C6283}'; arguments = @('--silent', 5) }; Pattern = "invalid 'quietUninstall' argument '5'" }
+        @{ Case = 'an empty argument'; Value = @{ productCode = '{6BBAE539-2232-434A-A4E5-9A33560C6283}'; arguments = @('--silent', ' ') }; Pattern = "invalid 'quietUninstall' argument ' '" }
+        @{ Case = 'an argument with a double quote'; Value = @{ productCode = '{6BBAE539-2232-434A-A4E5-9A33560C6283}'; arguments = @('--log="C:\x"') }; Pattern = "invalid 'quietUninstall' argument '--log=`"C:\\x`"': use a non-empty string without a double quote or a line break" }
+        @{ Case = 'an unknown key'; Value = @{ productCode = '{6BBAE539-2232-434A-A4E5-9A33560C6283}'; arguments = @('--silent'); timeout = 60 }; Pattern = "unknown key 'timeout' in its 'quietUninstall' value" }
+    ) {
+        $issues = Get-AppDefinitionSchemaIssue -App @{ name = 'Contoso.App'; quietUninstall = $Value } -Label "App entry at index 2 ('Contoso.App')"
+
+        @($issues.Errors).Count | Should -Be 1
+        @($issues.Errors)[0] | Should -Match ([regex]::Escape("App entry at index 2 ('Contoso.App')"))
+        @($issues.Errors)[0] | Should -Match $Pattern
+        @($issues.Warnings).Count | Should -Be 0
     }
 
     It 'Warns about a field it does not know, without an error' {
