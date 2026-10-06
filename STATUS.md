@@ -736,16 +736,14 @@ every repository secret.
   does not expose a manifest's expected return codes (review finding F4); only the pending-restart
   check catches them.
 - ProgramData link guard (wgt-gq8.46). Check on Windows:
-  - Windows CI, as an administrator: the `ProgramData folders on real Windows (wgt-gq8.46)` tests in
-    `tests/ProgramDataFolder.Tests.ps1`. The key one checks that `icacls /L` leaves a junction's
-    target, and everything in it, alone when the folder is swapped for a junction after the check;
-    Microsoft documents `/L` only for symbolic links. If it fails, lock a folder that already
-    exists through a handle opened with `FILE_FLAG_OPEN_REPARSE_POINT` (P/Invoke, in Windows
-    PowerShell 5.1 and PowerShell 7), or rename an untrusted folder aside and create a new one. Also
-    the real-Windows staging tests in `tests/WingetAutoUpdate.Tests.ps1`, which now run `icacls`
-    with `/L`, and the Windows-only folder tests in `tests/RmmWrapper.Tests.ps1`
-    (`New-RmmSecuredFolder -ReadableByUsers`, `Get-RmmFolderTrustProblem`, and a machine phase
-    without pins that must still write its `-rmm.log`).
+  - Windows CI, as an administrator: done. On 2026-10-06 (`pester` job 112372360870, at `f596651`)
+    the `ProgramData folders on real Windows (wgt-gq8.46)` tests in
+    `tests/ProgramDataFolder.Tests.ps1` passed. The key one swaps the folder for a junction after
+    the check and confirms that `icacls /L` changed neither the owner nor the access list of the
+    junction's target or of anything in it, so `/L` holds for junctions as well as for the symbolic
+    links Microsoft documents it for, and no handle-based lock is needed. The real-Windows staging
+    tests in `tests/WingetAutoUpdate.Tests.ps1` (now with `/L`) and the Windows-only folder tests
+    in `tests/RmmWrapper.Tests.ps1` passed too.
   - E2E, all four legs: transcripts, `last-run.json` and the installer logs are still written; the
     base and `logs` folders end up owned by Administrators, with SYSTEM and Administrators full
     control and Users read on `logs`; and no new warnings appear. In the SYSTEM legs, the machine
