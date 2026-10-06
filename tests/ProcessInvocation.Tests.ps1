@@ -479,6 +479,44 @@ exit 0
         $stopwatch.Elapsed.TotalSeconds | Should -BeLessThan 60
     }
 
+    It 'Returns the process id and when it started and exited, so a caller can find the child it left running (wgt-gq8.61)' {
+        $pidFile = Join-Path $TestDrive 'left-child.pid'
+        $parentPidFile = Join-Path $TestDrive 'parent.pid'
+        $script:orphanPidFile = $pidFile
+        $parent = New-PwshScript -Name 'hand-off-parent' -Body @"
+Set-Content -LiteralPath '$parentPidFile' -Value `$PID
+`$child = Start-Process -FilePath '$($script:PwshPath)' -ArgumentList '-NoProfile', '-NonInteractive', '-Command', 'Start-Sleep -Seconds 120' -PassThru -NoNewWindow
+Set-Content -LiteralPath '$pidFile' -Value `$child.Id
+'parent done'
+exit 0
+"@
+
+        $result = Invoke-ExternalProcess -FilePath $script:PwshPath -ArgumentList @('-NoProfile', '-NonInteractive', '-File', $parent) -TimeoutSeconds 100 -Echo None
+
+        $result.ExitCode | Should -Be 0
+        $result.ProcessId | Should -Be ([int](Get-Content -LiteralPath $parentPidFile -Raw))
+        $result.StartedAtUtc | Should -BeOfType [DateTime]
+        $result.ExitedAtUtc | Should -BeOfType [DateTime]
+        $result.ExitedAtUtc | Should -BeGreaterThan $result.StartedAtUtc
+        $childStartUtc = (Get-Process -Id ([int](Get-Content -LiteralPath $pidFile -Raw))).StartTime.ToUniversalTime()
+        $childStartUtc | Should -BeGreaterOrEqual $result.StartedAtUtc.AddSeconds(-1)
+        $childStartUtc | Should -BeLessOrEqual $result.ExitedAtUtc.AddSeconds(1)
+    }
+
+    It 'Has no exit time for a process it stopped at the time limit, and no process id for one that did not start' {
+        $sleeper = New-PwshScript -Name 'sleeper' -Body 'Start-Sleep -Seconds 120'
+
+        $stopped = Invoke-ExternalProcess -FilePath $script:PwshPath -ArgumentList @('-NoProfile', '-NonInteractive', '-File', $sleeper) -TimeoutSeconds 2 -Echo None
+        $missing = Invoke-ExternalProcess -FilePath (Join-Path $TestDrive 'no-such-program.exe') -TimeoutSeconds 5 -Echo None
+
+        $stopped.TimedOut | Should -Be $true
+        $stopped.ProcessId | Should -Not -BeNullOrEmpty
+        $stopped.ExitedAtUtc | Should -BeNullOrEmpty
+        $missing.LaunchFailed | Should -Be $true
+        $missing.ProcessId | Should -BeNullOrEmpty
+        $missing.StartedAtUtc | Should -BeNullOrEmpty
+    }
+
     It 'Closes standard input, so a program that reads it cannot wait for a key press' {
         $reader = New-PwshScript -Name 'stdin-reader' -Body '$null = [Console]::In.ReadToEnd(); "read to the end"'
 

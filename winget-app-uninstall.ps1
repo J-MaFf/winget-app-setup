@@ -292,6 +292,70 @@ function Wait-AppUninstallEntryRemoved {
     return $false
 }
 
+function Get-AppUninstallHandOffProcess {
+    param (
+        [Parameter(Mandatory = $true)]
+        [object]$Run
+    )
+
+    if ($null -eq $Run.ProcessId -or $null -eq $Run.StartedAtUtc -or $null -eq $Run.ExitedAtUtc) {
+        return @()
+    }
+    $earliest = ([DateTime]$Run.StartedAtUtc).AddSeconds(-1)
+    $latest = ([DateTime]$Run.ExitedAtUtc).AddSeconds(1)
+    try {
+        $children = @(Get-CimInstance -ClassName Win32_Process -Filter ('ParentProcessId = {0}' -f [int]$Run.ProcessId) -ErrorAction Stop)
+    }
+    catch {
+        return @()
+    }
+
+    $found = @()
+    foreach ($child in $children) {
+        if ($null -eq $child -or $null -eq $child.CreationDate -or $null -eq $child.ProcessId) {
+            continue
+        }
+        $createdAtUtc = ([DateTime]$child.CreationDate).ToUniversalTime()
+        if ($createdAtUtc -lt $earliest -or $createdAtUtc -gt $latest) {
+            continue
+        }
+        $found += [pscustomobject]@{ ProcessId = [int]$child.ProcessId; Name = [string]$child.Name; CreatedAtUtc = $createdAtUtc }
+    }
+    return $found
+}
+
+function Stop-AppUninstallHandOffProcess {
+    param (
+        [Parameter(Mandatory = $false)]
+        [AllowEmptyCollection()]
+        [AllowNull()]
+        [object[]]$Process = @()
+    )
+
+    $stopped = @()
+    foreach ($entry in @($Process)) {
+        if ($null -eq $entry -or $null -eq $entry.ProcessId) {
+            continue
+        }
+        try {
+            $running = Get-Process -Id ([int]$entry.ProcessId) -ErrorAction Stop
+            if ($running.HasExited) {
+                continue
+            }
+            $startedAtUtc = $running.StartTime.ToUniversalTime()
+        }
+        catch {
+            continue
+        }
+        if ([Math]::Abs(($startedAtUtc - [DateTime]$entry.CreatedAtUtc).TotalSeconds) -ge 1) {
+            continue
+        }
+        Stop-ProcessTree -Process $running
+        $stopped += '{0} (process {1})' -f $entry.Name, $entry.ProcessId
+    }
+    return $stopped
+}
+
 function Invoke-AppQuietUninstall {
     param (
         [Parameter(Mandatory = $true)]
@@ -330,10 +394,15 @@ function Invoke-AppQuietUninstall {
     }
 
     $exited = '{0} exited with {1}' -f $program, $exitCode
+    $handOff = @(Get-AppUninstallHandOffProcess -Run $run)
     $remainingSeconds = $timeoutSeconds - [int][Math]::Ceiling([double]$run.DurationSeconds)
     if (-not (Wait-AppUninstallEntryRemoved -ProductCode $productCode -TimeoutSeconds $remainingSeconds)) {
         $result.FailureReason = 'UninstallVerifyFailed'
         $result.Reason = '{0}, but its uninstall entry {1} was still there when the {2}-minute limit ran out' -f $exited, $productCode, [Math]::Round($timeoutSeconds / 60)
+        $stopped = @(Stop-AppUninstallHandOffProcess -Process $handOff)
+        if ($stopped.Count -gt 0) {
+            $result.Reason += '; what it had left running was stopped: {0}' -f ($stopped -join ', ')
+        }
         return $result
     }
 
@@ -5138,6 +5207,9 @@ function Invoke-ExternalProcess {
         StandardError   = @()
         DurationSeconds = 0
         LogPath         = $null
+        ProcessId       = $null
+        StartedAtUtc    = $null
+        ExitedAtUtc     = $null
     }
 
     $resolvedPath = $FilePath
@@ -5176,6 +5248,7 @@ function Invoke-ExternalProcess {
     }
 
     $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+    $startedAtUtc = [DateTime]::UtcNow
     try {
         $process = [System.Diagnostics.Process]::Start($startInfo)
     }
@@ -5198,6 +5271,8 @@ function Invoke-ExternalProcess {
         $result.LaunchException = $exception
         return $result
     }
+    $result.ProcessId = $process.Id
+    $result.StartedAtUtc = $startedAtUtc
 
     try {
         $process.StandardInput.Close()
@@ -5300,6 +5375,12 @@ function Invoke-ExternalProcess {
     }
     else {
         $result.ExitCode = $process.ExitCode
+        try {
+            $result.ExitedAtUtc = $process.ExitTime.ToUniversalTime()
+        }
+        catch {
+            $result.ExitedAtUtc = [DateTime]::UtcNow
+        }
     }
     try {
         $process.Dispose()

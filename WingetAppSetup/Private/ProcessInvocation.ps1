@@ -452,7 +452,9 @@ function Stop-ProcessTree {
     [pscustomobject] with FilePath, Arguments, ExitCode ($null when the process timed out or did
     not start), TimedOut, LaunchFailed, LaunchErrorCode, LaunchError (message), LaunchException,
     Output (standard output and standard error lines in arrival order, control sequences removed),
-    StandardOutput, StandardError, DurationSeconds and LogPath ($null; Invoke-WingetProcess sets it).
+    StandardOutput, StandardError, DurationSeconds, LogPath ($null; Invoke-WingetProcess sets it),
+    ProcessId, StartedAtUtc (just before the start) and ExitedAtUtc (when it exited by itself), the
+    last three $null when they do not apply: a caller can find what the process left running.
 #>
 function Invoke-ExternalProcess {
     param (
@@ -503,6 +505,9 @@ function Invoke-ExternalProcess {
         StandardError   = @()
         DurationSeconds = 0
         LogPath         = $null
+        ProcessId       = $null
+        StartedAtUtc    = $null
+        ExitedAtUtc     = $null
     }
 
     # A bare name is looked up on PATH the way Start-Process did. Process.Start would hand it to
@@ -546,6 +551,7 @@ function Invoke-ExternalProcess {
     }
 
     $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+    $startedAtUtc = [DateTime]::UtcNow
     try {
         $process = [System.Diagnostics.Process]::Start($startInfo)
     }
@@ -568,6 +574,8 @@ function Invoke-ExternalProcess {
         $result.LaunchException = $exception
         return $result
     }
+    $result.ProcessId = $process.Id
+    $result.StartedAtUtc = $startedAtUtc
 
     try {
         $process.StandardInput.Close()
@@ -677,6 +685,12 @@ function Invoke-ExternalProcess {
     }
     else {
         $result.ExitCode = $process.ExitCode
+        try {
+            $result.ExitedAtUtc = $process.ExitTime.ToUniversalTime()
+        }
+        catch {
+            $result.ExitedAtUtc = [DateTime]::UtcNow
+        }
     }
     try {
         $process.Dispose()

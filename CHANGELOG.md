@@ -742,8 +742,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Its own uninstaller, never `winget uninstall`.** For such an entry the uninstaller reads the
     entry's `UninstallString` from HKLM (the 64-bit view, then `WOW6432Node`, also from a 32-bit
     PowerShell), takes the quoted program (the entry's own arguments are dropped) and runs it with
-    the catalog's switches through `Invoke-ExternalProcess`, under the same 15-minute limit and tree
-    kill. It runs it only when the path is a full, normalised path to an existing `.exe` under
+    the catalog's switches through `Invoke-ExternalProcess`, under the same 15-minute limit. It runs
+    it only when the path is a full, normalised path to an existing `.exe` under
     Program Files (`ProgramW6432`, or `ProgramFiles` on 32-bit Windows) or Program Files (x86).
     Otherwise the app fails at once (`UninstallerNotFound`), with nothing run: falling back to
     `winget uninstall` would hang again.
@@ -753,6 +753,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     anything else is the new `UninstallVerifyFailed`. Another exit code is `UninstallFailed`, and a
     timeout or a failed start names `uninstall.exe`. A preview (`-WhatIf`) prints the exact command
     line it would run.
+  - **The limit covers the copy too.** `Invoke-ExternalProcess`'s tree kill only reaches a process
+    still running at the limit, not one its exited parent left behind. So once `uninstall.exe` has
+    exited, the uninstaller records the processes it started while it ran (`Win32_Process` by
+    parent id and creation time; `Invoke-ExternalProcess` now returns `ProcessId`, `StartedAtUtc`
+    and `ExitedAtUtc`). When the entry is still there at the limit, it stops those still running,
+    with what they started, and names them in the reason; a process that reused the id is left
+    alone, and a process one of them hands off to in turn is not found. When the entry is gone,
+    they are left to finish.
   - The help of `Uninstall-CatalogApp`, which said `--silent` keeps an interactive uninstaller from
     waiting, and the `WingetUninstall` time-limit description are corrected. Entries without the
     field keep `winget uninstall` as before. `winget uninstall` still gets no `--log`: the

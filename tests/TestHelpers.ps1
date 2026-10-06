@@ -177,7 +177,10 @@ function New-TestProcessResult {
         [switch]$LaunchFailed,
         [AllowNull()]$LaunchErrorCode = $null,
         [string]$LaunchError = 'The file cannot be accessed by the system.',
-        [string]$LogPath = $null
+        [string]$LogPath = $null,
+        [AllowNull()]$ProcessId = $null,
+        [AllowNull()]$StartedAtUtc = $null,
+        [AllowNull()]$ExitedAtUtc = $null
     )
 
     $exception = $null
@@ -200,6 +203,9 @@ function New-TestProcessResult {
         StandardError   = @($StandardError)
         DurationSeconds = 0
         LogPath         = $(if ($LogPath) { $LogPath } else { $null })
+        ProcessId       = $ProcessId
+        StartedAtUtc    = $StartedAtUtc
+        ExitedAtUtc     = $ExitedAtUtc
     }
 }
 

@@ -1528,9 +1528,10 @@ powershell -ExecutionPolicy Unrestricted -File .\winget-app-uninstall.ps1 -WhatI
   it off, it removes nothing, Winget-AutoUpdate included, and exits 2.
 - An app counts as not installed only when `winget list` answered. A check that could not start
   winget, ran out of time or failed is a failure.
-- Each app is removed with `winget uninstall --exact --id <id> --silent` under a 15-minute limit.
-  An app whose own uninstaller returns 3010 or 1641 (a restart finishes the removal) counts as
-  removed, although winget reports it as `0x8A150030`.
+- Each app without `quietUninstall` (see the next point) is removed with
+  `winget uninstall --exact --id <id> --silent` under a 15-minute limit. An app whose own
+  uninstaller returns 3010 or 1641 (a restart finishes the removal) counts as removed, although
+  winget reports it as `0x8A150030`.
 - `--silent` only makes an MSI quiet. For an exe app, winget runs the command the app registered
   for removal (its `QuietUninstallString`, else its `UninstallString`) exactly as written, and
   `winget uninstall` has no way to add switches. Google Drive registers a bare `uninstall.exe`,
@@ -1544,8 +1545,11 @@ powershell -ExecutionPolicy Unrestricted -File .\winget-app-uninstall.ps1 -WhatI
   (`its own uninstaller was not found: ...`), and `winget uninstall` is not tried, since it would
   hang. Drive's `uninstall.exe` hands its work to a copy of itself and exits, so the uninstaller
   then waits, for what is left of the 15 minutes, until the uninstall entry is gone, and counts
-  the app removed only once `winget list` no longer shows it. A preview (`-WhatIf`) prints the
-  command line it would run.
+  the app removed only once `winget list` no longer shows it. The limit's tree kill reaches only
+  a process still running when the limit runs out, so the uninstaller also records what
+  `uninstall.exe` started before it exited; when the entry is still there at the limit, it stops
+  those processes that are still running, and the failure names them. A preview (`-WhatIf`) prints
+  the command line it would run.
 - An installed app whose catalog condition or `arch` list does not hold on this PC is left alone
   (Dell Command Update on other hardware or on ARM64 Windows, the 32-bit Reader on an x64 PC). A
   condition or architecture that cannot be read counts as holding, as in the installer.

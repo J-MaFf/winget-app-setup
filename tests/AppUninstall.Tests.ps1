@@ -55,6 +55,19 @@ BeforeAll {
         [pscustomobject]@{ View = $View; UninstallString = $UninstallString }
     }
 
+    # The uninstaller exits, leaving a copy of itself running: this test process stands in for that
+    # copy (Stop-ProcessTree must be mocked). Sets $script:handOff.
+    function Set-TestHandOff {
+        $script:handOff = [System.Diagnostics.Process]::GetCurrentProcess()
+        $script:handOffStartUtc = $script:handOff.StartTime.ToUniversalTime()
+        Mock Invoke-ExternalProcess {
+            $script:removed = $true
+            New-TestProcessResult -ExitCode 0 -ProcessId 4242 -StartedAtUtc $script:handOffStartUtc.AddSeconds(-2) -ExitedAtUtc $script:handOffStartUtc.AddSeconds(2)
+        }
+        Mock Get-CimInstance { [pscustomobject]@{ ProcessId = $script:handOff.Id; ParentProcessId = 4242; Name = 'uninstall.exe'; CreationDate = $script:handOff.StartTime } }
+        Mock Get-Process { $script:handOff }
+    }
+
     # A Test-WingetPackageInstalled answer.
     function New-TestCheckResult {
         param ([bool]$Installed)
@@ -292,6 +305,89 @@ Describe 'Wait-AppUninstallEntryRemoved (wgt-gq8.61)' {
     }
 }
 
+# Drive's uninstall.exe hands its work to a copy of itself and exits; once it has exited, the time
+# limit's tree kill no longer reaches that copy (wgt-gq8.61 review).
+Describe 'Get-AppUninstallHandOffProcess (wgt-gq8.61)' {
+    BeforeEach {
+        $script:started = [DateTime]::new(2026, 10, 6, 12, 0, 0, [DateTimeKind]::Utc)
+        $script:run = New-TestProcessResult -ExitCode 0 -ProcessId 4242 -StartedAtUtc $script:started -ExitedAtUtc $script:started.AddSeconds(3)
+        # Win32_Process gives local times.
+        $script:children = @(
+            [pscustomobject]@{ ProcessId = 5001; ParentProcessId = 4242; Name = 'uninstall.exe'; CreationDate = $script:started.AddSeconds(2).ToLocalTime() }
+            [pscustomobject]@{ ProcessId = 5002; ParentProcessId = 4242; Name = 'old-orphan.exe'; CreationDate = $script:started.AddMinutes(-30).ToLocalTime() }
+            [pscustomobject]@{ ProcessId = 5003; ParentProcessId = 4242; Name = 'later.exe'; CreationDate = $script:started.AddMinutes(5).ToLocalTime() }
+        )
+        Mock Get-CimInstance { $script:children }
+    }
+
+    It 'Returns the children the uninstaller started while it ran, not those of other processes that had or later took its id' {
+        $found = @(Get-AppUninstallHandOffProcess -Run $script:run)
+
+        $found.Count | Should -Be 1
+        $found[0].ProcessId | Should -Be 5001
+        $found[0].Name | Should -Be 'uninstall.exe'
+        $found[0].CreatedAtUtc | Should -Be $script:started.AddSeconds(2)
+        Should -Invoke Get-CimInstance -Times 1 -Exactly -ParameterFilter { $ClassName -eq 'Win32_Process' -and $Filter -eq 'ParentProcessId = 4242' }
+    }
+
+    It 'Returns nothing, without looking, for a run that has no process id or did not exit by itself' {
+        @(Get-AppUninstallHandOffProcess -Run (New-TestProcessResult -ExitCode 0)).Count | Should -Be 0
+        @(Get-AppUninstallHandOffProcess -Run (New-TestProcessResult -TimedOut -ProcessId 4242 -StartedAtUtc $script:started)).Count | Should -Be 0
+
+        Should -Invoke Get-CimInstance -Times 0 -Exactly
+    }
+
+    It 'Returns nothing when the processes cannot be read' {
+        Mock Get-CimInstance { throw 'Access denied' }
+
+        @(Get-AppUninstallHandOffProcess -Run $script:run).Count | Should -Be 0
+    }
+}
+
+Describe 'Stop-AppUninstallHandOffProcess (wgt-gq8.61)' {
+    BeforeEach {
+        # A real, running process to stand in for the handed-off copy; Stop-ProcessTree is mocked.
+        $script:runningProcess = [System.Diagnostics.Process]::GetCurrentProcess()
+        $script:runningStartUtc = $script:runningProcess.StartTime.ToUniversalTime()
+        Mock Get-Process { $script:runningProcess }
+        Mock Stop-ProcessTree { }
+    }
+
+    It 'Stops a recorded process that is still running, with what it started, and names it' {
+        $handOff = [pscustomobject]@{ ProcessId = $script:runningProcess.Id; Name = 'uninstall.exe'; CreatedAtUtc = $script:runningStartUtc }
+
+        $stopped = @(Stop-AppUninstallHandOffProcess -Process @($handOff))
+
+        $stopped | Should -Be @("uninstall.exe (process $($script:runningProcess.Id))")
+        Should -Invoke Get-Process -Times 1 -Exactly -ParameterFilter { $Id -eq $script:runningProcess.Id }
+        Should -Invoke Stop-ProcessTree -Times 1 -Exactly -ParameterFilter { $Process.Id -eq $script:runningProcess.Id }
+    }
+
+    It 'Leaves alone a process that took the id later: its start time is not the one recorded' {
+        $handOff = [pscustomobject]@{ ProcessId = $script:runningProcess.Id; Name = 'uninstall.exe'; CreatedAtUtc = $script:runningStartUtc.AddMinutes(-20) }
+
+        @(Stop-AppUninstallHandOffProcess -Process @($handOff)).Count | Should -Be 0
+
+        Should -Invoke Stop-ProcessTree -Times 0 -Exactly
+    }
+
+    It 'Skips a process that has already gone' {
+        Mock Get-Process { throw [Microsoft.PowerShell.Commands.ProcessCommandException]::new('Cannot find a process with the process identifier 5001.') }
+        $handOff = [pscustomobject]@{ ProcessId = 5001; Name = 'uninstall.exe'; CreatedAtUtc = $script:runningStartUtc }
+
+        @(Stop-AppUninstallHandOffProcess -Process @($handOff)).Count | Should -Be 0
+
+        Should -Invoke Stop-ProcessTree -Times 0 -Exactly
+    }
+
+    It 'Does nothing when there is nothing to stop' {
+        @(Stop-AppUninstallHandOffProcess -Process @()).Count | Should -Be 0
+
+        Should -Invoke Get-Process -Times 0 -Exactly
+        Should -Invoke Stop-ProcessTree -Times 0 -Exactly
+    }
+}
+
 Describe 'Uninstall-CatalogApp for an entry with quietUninstall (wgt-gq8.61)' {
     BeforeEach {
         $script:exe = Initialize-TestProgramFiles
@@ -320,10 +416,35 @@ Describe 'Uninstall-CatalogApp for an entry with quietUninstall (wgt-gq8.61)' {
         $script:exitCode = 0
         Mock Invoke-ExternalProcess { $script:removed = $true; New-TestProcessResult -ExitCode $script:exitCode }
         Mock Invoke-WingetProcess { New-TestProcessResult -ExitCode 0 }
+        # What the uninstaller left running: nothing, unless a test says otherwise. Nothing is stopped.
+        Mock Get-CimInstance { @() }
+        Mock Stop-ProcessTree { }
     }
 
     AfterEach {
         Restore-TestEnvironment
+    }
+
+    It 'Stops what the uninstaller left running, and says so, when the entry is still there once the limit has run out' {
+        Set-TestHandOff
+        Mock Wait-AppUninstallEntryRemoved { $false }
+
+        $result = Uninstall-CatalogApp -App $script:drive
+
+        $result.Status | Should -Be 'Failed'
+        $result.FailureReason | Should -Be 'UninstallVerifyFailed'
+        $result.Reason | Should -Be ("its uninstaller 'uninstall.exe' exited with 0, but its uninstall entry {{6BBAE539-2232-434A-A4E5-9A33560C6283}} was still there when the 15-minute limit ran out; what it had left running was stopped: uninstall.exe (process {0})" -f $script:handOff.Id)
+        Should -Invoke Get-CimInstance -Times 1 -Exactly -ParameterFilter { $ClassName -eq 'Win32_Process' -and $Filter -eq 'ParentProcessId = 4242' }
+        Should -Invoke Stop-ProcessTree -Times 1 -Exactly -ParameterFilter { $Process.Id -eq $script:handOff.Id }
+    }
+
+    It 'Leaves what the uninstaller left running to finish once the entry is gone' {
+        Set-TestHandOff
+
+        $result = Uninstall-CatalogApp -App $script:drive
+
+        $result.Status | Should -Be 'Uninstalled'
+        Should -Invoke Stop-ProcessTree -Times 0 -Exactly
     }
 
     It 'Runs the uninstaller its entry names with exactly the catalog''s switches, under the uninstall limit, and never winget uninstall' {
@@ -549,10 +670,25 @@ Describe 'Invoke-WingetUninstall with the catalog''s Google Drive entry (wgt-gq8
         }
         $script:exitCode = 0
         Mock Invoke-ExternalProcess { $script:removed = $true; New-TestProcessResult -ExitCode $script:exitCode }
+        Mock Get-CimInstance { @() }
+        Mock Stop-ProcessTree { }
     }
 
     AfterEach {
         Restore-TestEnvironment
+    }
+
+    It 'Stops the copy Google Drive''s uninstaller left running, fails Drive and keeps Winget-AutoUpdate when its uninstall entry stays for the whole limit' {
+        Set-TestHandOff
+        Mock Get-AppUninstallEntry { if ($View -eq 'Registry64') { New-TestUninstallEntry -UninstallString ('"{0}"' -f $script:exe) } }
+
+        $result = Invoke-WingetUninstall -Apps @($script:drive)
+
+        $result | Should -Be 1
+        $script:errorMessages | Should -Contain ("Failed to uninstall: Google.GoogleDrive (its uninstaller 'uninstall.exe' exited with 0, but its uninstall entry {{6BBAE539-2232-434A-A4E5-9A33560C6283}} was still there when the 15-minute limit ran out; what it had left running was stopped: uninstall.exe (process {0}))." -f $script:handOff.Id)
+        Should -Invoke Stop-ProcessTree -Times 1 -Exactly -ParameterFilter { $Process.Id -eq $script:handOff.Id }
+        Should -Invoke Uninstall-WingetAutoUpdate -Times 0 -Exactly
+        Should -Invoke Invoke-WingetProcess -Times 0 -Exactly -ParameterFilter { $ArgumentList[0] -eq 'uninstall' }
     }
 
     It 'Removes Google Drive with its own uninstaller and Google''s --silent --force_stop, never with winget uninstall, then removes Winget-AutoUpdate' {

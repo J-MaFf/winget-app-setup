@@ -340,16 +340,111 @@ function Wait-AppUninstallEntryRemoved {
 
 <#
 .SYNOPSIS
+    Returns the processes an uninstaller that has exited started and left running: those it may have
+    handed its work to.
+.DESCRIPTION
+    Once the uninstaller has exited, Invoke-ExternalProcess's time limit and tree kill no longer
+    reach them. Win32_Process entries whose ParentProcessId is the uninstaller's and that were
+    created while it ran, so a child of a later process that reused its id is not taken. Best
+    effort: when they cannot be read, none.
+.PARAMETER Run
+    Invoke-ExternalProcess's result for the uninstaller (ProcessId, StartedAtUtc, ExitedAtUtc).
+.OUTPUTS
+    [pscustomobject[]] @{ ProcessId; Name; CreatedAtUtc }
+#>
+function Get-AppUninstallHandOffProcess {
+    param (
+        [Parameter(Mandatory = $true)]
+        [object]$Run
+    )
+
+    if ($null -eq $Run.ProcessId -or $null -eq $Run.StartedAtUtc -or $null -eq $Run.ExitedAtUtc) {
+        return @()
+    }
+    # One second either way for the rounding of the two clocks' readings.
+    $earliest = ([DateTime]$Run.StartedAtUtc).AddSeconds(-1)
+    $latest = ([DateTime]$Run.ExitedAtUtc).AddSeconds(1)
+    try {
+        $children = @(Get-CimInstance -ClassName Win32_Process -Filter ('ParentProcessId = {0}' -f [int]$Run.ProcessId) -ErrorAction Stop)
+    }
+    catch {
+        return @()
+    }
+
+    $found = @()
+    foreach ($child in $children) {
+        if ($null -eq $child -or $null -eq $child.CreationDate -or $null -eq $child.ProcessId) {
+            continue
+        }
+        $createdAtUtc = ([DateTime]$child.CreationDate).ToUniversalTime()
+        if ($createdAtUtc -lt $earliest -or $createdAtUtc -gt $latest) {
+            continue
+        }
+        $found += [pscustomobject]@{ ProcessId = [int]$child.ProcessId; Name = [string]$child.Name; CreatedAtUtc = $createdAtUtc }
+    }
+    return $found
+}
+
+<#
+.SYNOPSIS
+    Stops each process Get-AppUninstallHandOffProcess found that is still running, with what it
+    started, and names the ones it stopped.
+.DESCRIPTION
+    A process is taken by its id only while its start time is still the one recorded, so one that
+    reused the id is left alone. Stop-ProcessTree stops it and the processes it started.
+.PARAMETER Process
+    Get-AppUninstallHandOffProcess's result.
+.OUTPUTS
+    [string[]] '<name> (process <id>)' for each process stopped.
+#>
+function Stop-AppUninstallHandOffProcess {
+    param (
+        [Parameter(Mandatory = $false)]
+        [AllowEmptyCollection()]
+        [AllowNull()]
+        [object[]]$Process = @()
+    )
+
+    $stopped = @()
+    foreach ($entry in @($Process)) {
+        if ($null -eq $entry -or $null -eq $entry.ProcessId) {
+            continue
+        }
+        try {
+            $running = Get-Process -Id ([int]$entry.ProcessId) -ErrorAction Stop
+            if ($running.HasExited) {
+                continue
+            }
+            $startedAtUtc = $running.StartTime.ToUniversalTime()
+        }
+        catch {
+            continue
+        }
+        if ([Math]::Abs(($startedAtUtc - [DateTime]$entry.CreatedAtUtc).TotalSeconds) -ge 1) {
+            continue
+        }
+        Stop-ProcessTree -Process $running
+        $stopped += '{0} (process {1})' -f $entry.Name, $entry.ProcessId
+    }
+    return $stopped
+}
+
+<#
+.SYNOPSIS
     Runs a catalog app's own uninstaller with the catalog's arguments, in place of
     `winget uninstall`, and says what happened.
 .DESCRIPTION
     Uninstall-CatalogApp's step for an entry with quietUninstall, once Get-AppQuietUninstallCommand
     has found the program:
-      1. Invoke-ExternalProcess under the WingetUninstall limit, so the limit and the tree kill
-         apply. Not started: UninstallLaunchFailed. Out of time: UninstallTimeout. An exit code
-         other than 0, 3010 or 1641: UninstallFailed.
-      2. For what is left of that limit, Wait-AppUninstallEntryRemoved. Still there:
-         UninstallVerifyFailed.
+      1. Invoke-ExternalProcess under the WingetUninstall limit: still running at the limit, it is
+         stopped with what it started. Not started: UninstallLaunchFailed. Out of time:
+         UninstallTimeout. An exit code other than 0, 3010 or 1641: UninstallFailed.
+      2. It exited, so the tree kill no longer reaches what it left running (Drive's uninstall.exe
+         hands its work to a copy of itself): Get-AppUninstallHandOffProcess records those
+         processes. For what is left of the limit, Wait-AppUninstallEntryRemoved. Still there:
+         UninstallVerifyFailed, and Stop-AppUninstallHandOffProcess stops those still running, with
+         what they started, naming them in the Reason. A process one of them hands off to in turn,
+         and then exits, is not found. When the entry is gone, they are left to finish.
       3. One Test-WingetPackageInstalled. Not listed: Uninstalled, with RestartRequired for 3010 or
          1641. Still listed, or no answer: UninstallVerifyFailed.
 .PARAMETER App
@@ -397,10 +492,16 @@ function Invoke-AppQuietUninstall {
     }
 
     $exited = '{0} exited with {1}' -f $program, $exitCode
+    $handOff = @(Get-AppUninstallHandOffProcess -Run $run)
     $remainingSeconds = $timeoutSeconds - [int][Math]::Ceiling([double]$run.DurationSeconds)
     if (-not (Wait-AppUninstallEntryRemoved -ProductCode $productCode -TimeoutSeconds $remainingSeconds)) {
         $result.FailureReason = 'UninstallVerifyFailed'
         $result.Reason = '{0}, but its uninstall entry {1} was still there when the {2}-minute limit ran out' -f $exited, $productCode, [Math]::Round($timeoutSeconds / 60)
+        # The limit covers what the uninstaller left running too: a hung copy would outlive the run.
+        $stopped = @(Stop-AppUninstallHandOffProcess -Process $handOff)
+        if ($stopped.Count -gt 0) {
+            $result.Reason += '; what it had left running was stopped: {0}' -f ($stopped -join ', ')
+        }
         return $result
     }
 
