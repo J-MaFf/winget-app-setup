@@ -18,8 +18,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a SYSTEM run through the Endpoint Central machine-phase wrapper (and, with `-IncludeWinGetClient`,
   the Microsoft.WinGet.Client engine); a time-budget run that exits 9 then finishes; the
   `-CollectDiagnostics` bundle (checked for secret leaks); and the uninstaller (preview then real).
-  The temporary standard user's password is never printed or stored; a throwaway TightVNC test
-  password is written only to the report folder, never to the diagnostics bundle.
+  A temporary standard user (random name and password, neither printed) plants the junction from a
+  one-shot S4U task. A throwaway TightVNC test password is written only to `manual-steps.txt` in
+  `<report folder>-local`, which is never zipped; the harness checks the diagnostics bundle, every
+  file going into the zip and the zip itself for it. The installer prints its `was a link` warning
+  before its transcript starts, so each run's console output is kept and searched.
   `tests/E2ERealPcTestPlan.Tests.ps1` tests the pure parts (stage/dependency logic, the change plan,
   the gate decision, each stage's check evaluation, the ACL/SDDL comparison, the secret scan, and
   the report and exit-code logic), and `.github/workflows/real-pc-test-plan.yml` self-tests the

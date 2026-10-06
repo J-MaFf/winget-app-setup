@@ -1582,9 +1582,11 @@ the owner test plan needs a real desktop PC: cross-user elevation, a TightVNC vi
 `%ProgramData%`).
 
 - **What it does:** a first unattended install and its re-run, a run as SYSTEM through the Endpoint
-  Central machine-phase wrapper, the `%ProgramData%` link guard, a time-budget run that exits 9 and
-  then finishes, the `-CollectDiagnostics` bundle, and the uninstaller (preview then real). Each
-  check is a PASS/FAIL/SKIP row with evidence.
+  Central machine-phase wrapper, the `%ProgramData%` link guard (a temporary standard user plants a
+  junction there), a time-budget run that exits 9 and then finishes, the `-CollectDiagnostics`
+  bundle, and the uninstaller (preview then real; it removes PowerShell 7 too). Each check is a
+  PASS/FAIL/SKIP row with evidence, and each stage keeps its console output, transcripts,
+  `last-run.json` and winget logs.
 - **How to run it:** from a checkout of the branch on the test machine, in an **administrator**
   window, starting under Windows PowerShell (a fresh PC has no PowerShell 7):
   `powershell -ExecutionPolicy Bypass -File .\e2e\Invoke-RealPcTestPlan.ps1`. It refuses unless
@@ -1592,14 +1594,17 @@ the owner test plan needs a real desktop PC: cross-user elevation, a TightVNC vi
   `-ConfirmDisposableMachine` for unattended use). `-WhatIf` (or `-Plan`) prints exactly what it
   would change and changes nothing. `-IncludeWinGetClient` adds the Microsoft.WinGet.Client SYSTEM
   pass; `-Stage` / `-SkipStage` run a subset (with dependencies); `-UseOneLiner -Branch <name>` runs
-  the production `irm | iex` one-liner instead of the checkout.
+  the production `irm | iex` one-liner instead of the checkout; `-TimeoutMinutes` (default 60) limits
+  each install run.
 - **How long:** about 30-60 minutes.
 - **What to send back:** it writes a report (`report.md` and `report.txt`) and a zip to
-  `%PUBLIC%\winget-app-setup-testplan-<timestamp>` (or `-ReportPath`), prints the zip path and the
-  overall result, and exits 0 when every non-skipped row passed, 1 otherwise, 2 if it refused. Send
-  the zip. A throwaway TightVNC test password for the manual viewer step is in the report folder's
-  `manual-steps.txt`, never in the diagnostics bundle (the harness checks that). The report's "Still
-  to do by hand" section lists the items the harness cannot automate. `.github/workflows/real-pc-test-plan.yml`
+  `%PUBLIC%\winget-app-setup-testplan-<timestamp>` (or a new or empty `-ReportPath`), prints the zip
+  path and the overall result, and exits 0 when every non-skipped row passed, 1 otherwise, 2 if it
+  refused. Send the zip. A throwaway TightVNC test password for the manual viewer step is in
+  `manual-steps.txt` in the folder next to it ending in `-local`: do not send that one. The harness
+  checks that neither the diagnostics bundle nor the zip holds the password. The uninstaller stage
+  removes TightVNC, so to try a viewer, run with `-SkipStage Uninstaller`. The report's "Still to do
+  by hand" section lists the items the harness cannot automate. `.github/workflows/real-pc-test-plan.yml`
   self-tests the harness end to end on a `windows-latest` runner.
 
 ## End-to-end monitoring (e2e tier 1)

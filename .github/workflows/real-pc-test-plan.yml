@@ -9,16 +9,24 @@ name: Real-PC test plan self-test
 # Runner facts this relies on (the same the E2E install jobs rely on, see e2e-install.yml):
 #   - windows-latest is Windows Server 2025, elevated by default (the harness's elevation gate
 #     passes, and the installer's SYSTEM scheduled task and the ProgramData link guard work as in
-#     e2e-install-system).
-#   - It ships winget and the catalog apps Chrome, 7-Zip and Git. The harness tolerates a
-#     preinstalled catalog app (its first-run app check accepts an 'already installed' skip), so no
-#     Remove-PreinstalledApps step is needed; the uninstaller stage then removes them.
-#   - It has no PowerShell 7 until the first install pass installs it, so the harness MUST start
-#     under Windows PowerShell 5.1 (shell: powershell); the pieces that need PowerShell 7 run in a
-#     child pwsh the first pass installed.
-#   - The temporary standard user cannot run its junction-planting scheduled task (no interactive
-#     session), so the link-guard stage falls back to planting the junction as the admin and marks
-#     that row a SKIP, which does not fail the run.
+#     e2e-install-system), and has no %ProgramData%\winget-app-setup, so the link-guard stage runs.
+#   - It ships winget, PowerShell 7, Windows Terminal and the catalog apps Chrome, 7-Zip and Git.
+#     The harness tolerates a preinstalled catalog app (preflight lists them as a warning, and the
+#     first run's app check accepts an 'already installed' skip), so no Remove-PreinstalledApps step
+#     is needed; the uninstaller stage then removes them, PowerShell 7 included.
+#   - The harness itself starts under Windows PowerShell 5.1 (shell: powershell), as on a fresh PC,
+#     and reads the catalog through the module in a child Windows PowerShell, so it needs no
+#     PowerShell 7 of its own.
+#   - The temporary standard user plants its junction from a scheduled task with an S4U logon (it is
+#     put in Performance Log Users for the batch-logon right). Where that task cannot run, the
+#     harness plants the junction as the admin and marks that row SKIP with the reason, which does
+#     not fail the run.
+#   - The step's shell sets $ErrorActionPreference to Stop; the harness sets Continue for itself,
+#     so a child's stderr line cannot stop it.
+#
+# What is uploaded: the report folder and its zip. The throwaway TightVNC test password is written
+# only to '<report folder>-local' (real-pc-report-local here), which is never zipped or uploaded,
+# and the harness checks that no file in the zip holds it.
 
 on:
   workflow_dispatch:
@@ -38,9 +46,11 @@ concurrency:
 jobs:
   real-pc-test-plan:
     runs-on: windows-latest
-    # Generous: the harness installs the catalog, PowerShell 7, the Windows App Runtime and WAU,
-    # then re-runs, runs the SYSTEM pass, a time-budget pair, diagnostics and the uninstaller.
-    timeout-minutes: 120
+    # Backstop above the harness step's own limit, so the upload still runs after that step times
+    # out. The harness installs the catalog, the Windows App Runtime and WAU, then re-runs, runs the
+    # SYSTEM pass, a time-budget pair, diagnostics and the uninstaller (about 45 minutes); every
+    # install run has its own 60-minute budget (-TimeoutMinutes).
+    timeout-minutes: 130
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
@@ -49,10 +59,13 @@ jobs:
       # exits non-zero if any check failed; the report zip is uploaded either way by the next step.
       - name: Run the real-PC test plan harness
         shell: powershell
+        timeout-minutes: 115
         run: |
           & .\e2e\Invoke-RealPcTestPlan.ps1 -ConfirmDisposableMachine -ReportPath "$env:RUNNER_TEMP\real-pc-report"
           exit $LASTEXITCODE
 
+      # Never the '-local' folder next to the report folder: that one holds the TightVNC test
+      # password.
       - name: Upload the report and zip
         if: always()
         uses: actions/upload-artifact@v7
