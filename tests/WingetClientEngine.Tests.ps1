@@ -134,7 +134,7 @@ Describe 'Get-WingetClientResultCode' {
     It 'Maps <Fixture> to exit code <ExitCode>' -ForEach @(
         @{ Fixture = 'install-ok'; ExitCode = 0; Status = 'Ok'; InstallerErrorCode = 0 }
         @{ Fixture = 'install-ok-3010'; ExitCode = 0; Status = 'Ok'; InstallerErrorCode = 3010 }
-        @{ Fixture = 'install-no-applicable-installers'; ExitCode = -1978335216; Status = 'NoApplicableInstallers'; InstallerErrorCode = 0 }
+        @{ Fixture = 'install-no-applicable-installers'; ExitCode = -1978335216; Status = 'NoApplicableInstallers'; InstallerErrorCode = $null }
         @{ Fixture = 'install-msi-failed'; ExitCode = -1978335159; Status = 'InstallError'; InstallerErrorCode = 1603 }
         @{ Fixture = 'install-no-package-found'; ExitCode = -1978335212; Status = 'NoPackageFoundException'; InstallerErrorCode = $null }
         @{ Fixture = 'install-vague-criteria'; ExitCode = -1978335210; Status = 'VagueCriteriaException'; InstallerErrorCode = $null }
@@ -150,6 +150,20 @@ Describe 'Get-WingetClientResultCode' {
         $result.InstallerErrorCode | Should -Be $InstallerErrorCode
         $result.LaunchFailed | Should -BeFalse
         $result.TimedOut | Should -BeFalse
+    }
+
+    It 'Reports the installer''s own exit code only when an installer ran: <Status> with <Code> -> <Expected>' -ForEach @(
+        @{ Status = 'Ok'; Code = 0; Expected = 0 }
+        @{ Status = 'Ok'; Code = 3010; Expected = 3010 }
+        @{ Status = 'InstallError'; Code = 1603; Expected = 1603 }
+        @{ Status = 'InstallError'; Code = 0; Expected = $null }
+        @{ Status = 'NoApplicableInstallers'; Code = 0; Expected = $null }
+        @{ Status = 'DownloadError'; Code = 0; Expected = $null }
+        @{ Status = 'BlockedByPolicy'; Code = 0; Expected = $null }
+    ) {
+        $json = '{"protocol":1,"operation":"Install","stage":"call","ok":true,"status":"' + $Status + '","hresult":0,"installerErrorCode":' + $Code + ',"rebootRequired":false,"id":"Contoso.App"}'
+
+        (Get-WingetClientResultCode -Request (New-ClientRequest -Json $json)).InstallerErrorCode | Should -Be $Expected
     }
 
     It 'Maps a failed Status without an HRESULT: <Status> to <Hex>' -ForEach @(
@@ -341,7 +355,8 @@ Describe 'Invoke-WingetClientInstall' {
 
         $result.ExitCode | Should -Be -1978335216
         $result.WingetClientStatus | Should -Be 'NoApplicableInstallers'
-        $script:hostLines | Should -Contain '    WinGet client result: NoApplicableInstallers, 0x8A150010 NO_APPLICABLE_INSTALLER, installer exit code 0 (0 s)'
+        $result.InstallerErrorCode | Should -BeNullOrEmpty
+        $script:hostLines | Should -Contain '    WinGet client result: NoApplicableInstallers, 0x8A150010 NO_APPLICABLE_INSTALLER, no installer exit code (0 s)'
     }
 
     It 'Keeps the installer''s own exit code' {
@@ -748,7 +763,7 @@ function Install-WinGetPackage {
     It 'Installs: <Mode> -> <Status>, exit code <ExitCode>, installer code <InstallerCode>' -ForEach @(
         @{ Mode = 'ok'; Status = 'Ok'; ExitCode = 0; InstallerCode = 0 }
         @{ Mode = 'restart'; Status = 'Ok'; ExitCode = 0; InstallerCode = 3010 }
-        @{ Mode = 'noinstaller'; Status = 'NoApplicableInstallers'; ExitCode = -1978335216; InstallerCode = 0 }
+        @{ Mode = 'noinstaller'; Status = 'NoApplicableInstallers'; ExitCode = -1978335216; InstallerCode = $null }
         @{ Mode = 'nopackage'; Status = 'NoPackageFoundException'; ExitCode = -1978335212; InstallerCode = $null }
     ) {
         $env:FAKE_WINGET_CLIENT_MODE = $Mode

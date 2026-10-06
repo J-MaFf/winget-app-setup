@@ -882,7 +882,11 @@ Describe 'The SYSTEM pass with the Microsoft.WinGet.Client engine' {
 
         $job | Should -Match 'Invoke-SystemInstallPass\.ps1 -SystemInstallEngine WinGetClient -PassCount 2'
         $job | Should -Match 'Set-WingetClientModulePin\.ps1 -Check'
-        $job | Should -Match 'timeout-minutes: 125'
+        # The job's backstop covers its steps' own limits, plus a few minutes for checkout and uploads.
+        $jobLimit = [int][regex]::Match($job, '(?m)^    timeout-minutes: (\d+)').Groups[1].Value
+        $stepLimits = @([regex]::Matches($job, '(?m)^        timeout-minutes: (\d+)') | ForEach-Object { [int]$_.Groups[1].Value })
+        $stepLimits.Count | Should -Be 5
+        $jobLimit | Should -BeGreaterOrEqual ((($stepLimits | Measure-Object -Sum).Sum) + 5)
         $job | Should -Match 'name: e2e-install-transcripts-system-winget-client'
         $job | Should -Match 'name: e2e-diagnostics-system-winget-client'
         $workflow | Should -Match "needs\.e2e-install-system-winget-client\.result != 'success'"

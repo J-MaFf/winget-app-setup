@@ -583,10 +583,10 @@ jobs:
     needs: changes
     if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.changes.result != 'success' || needs.changes.outputs.e2e == 'true') }}
     runs-on: windows-latest
-    # Backstop. The install step's 100 minutes cover two tasks of at most 42 minutes each (the
-    # second finds everything installed, so it is short); removal, pin check and diagnostics take
-    # a few minutes, well under their own limits.
-    timeout-minutes: 125
+    # Backstop: 15 + 10 + 3 + 100 + 5 = 133, plus checkout and uploads. The install step's 100
+    # minutes cover two tasks of at most 42 minutes each (the second finds everything installed,
+    # so it is short).
+    timeout-minutes: 145
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6

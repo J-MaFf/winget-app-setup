@@ -423,7 +423,9 @@ function Get-WingetClientExceptionCode {
                 PackageAgreementsNotAccepted 0x8A150041, NoApplicableUpgrade 0x8A15002B,
                 CatalogError 0x8A150045, InvalidOptions 0x8A150002, ManifestError and
                 InternalError 0x8A150001, any other 0x8A150003). Other operations: 0.
-    InstallerErrorCode is the installer's own exit code; RebootRequired is never set by the module.
+    InstallerErrorCode is the installer's own exit code, for Status Ok, and for InstallError when it
+    is not 0; any other Status means no installer ran, and the module's 0 is not one (so $null).
+    RebootRequired is never set by the module.
 .PARAMETER Request
     Invoke-WingetClientRequest's result.
 .OUTPUTS
@@ -522,7 +524,10 @@ function Get-WingetClientResultCode {
     $status = [string]$response.status
     $result.Status = $status
     if ($null -ne $response.installerErrorCode) {
-        $result.InstallerErrorCode = [long]$response.installerErrorCode
+        $installerCode = [long]$response.installerErrorCode
+        if ($status -eq 'Ok' -or ($status -eq 'InstallError' -and $installerCode -ne 0)) {
+            $result.InstallerErrorCode = $installerCode
+        }
     }
     if ($status -eq 'Ok') {
         $result.ExitCode = 0
@@ -647,11 +652,11 @@ function Invoke-WingetClientInstall {
         Write-Host ('    WinGet client result: {0} ({1} s)' -f "$($mapped.LaunchError)".TrimEnd('.'), $seconds) -ForegroundColor DarkGray
     }
     else {
-        $installerCode = 0
+        $installerText = 'no installer exit code'
         if ($null -ne $mapped.InstallerErrorCode) {
-            $installerCode = $mapped.InstallerErrorCode
+            $installerText = 'installer exit code {0}' -f $mapped.InstallerErrorCode
         }
-        Write-Host ('    WinGet client result: {0}, {1}, installer exit code {2} ({3} s)' -f $mapped.Status, (Format-WingetExitCode -ExitCode $mapped.ExitCode), $installerCode, $seconds) -ForegroundColor DarkGray
+        Write-Host ('    WinGet client result: {0}, {1}, {2} ({3} s)' -f $mapped.Status, (Format-WingetExitCode -ExitCode $mapped.ExitCode), $installerText, $seconds) -ForegroundColor DarkGray
     }
 
     $result = [ordered]@{}

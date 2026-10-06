@@ -106,12 +106,12 @@ param (
 # the function source under WingetAppSetup/Public and WingetAppSetup/Private, or the entry block in
 # build/fragments/tail.ps1, then re-run the build to regenerate this file.
 # See readme.md ("Project layout") for details.
-# Build id: 1.0.0+faf6afcb (module version + SHA256 fragment of this whole script; issue #189).
+# Build id: 1.0.0+c8da03a9 (module version + SHA256 fragment of this whole script; issue #189).
 # ------------------------------------------------------------------------------------------------
 
 # Content-derived build identity, logged at startup so a transcript from a remote machine
 # identifies exactly which installer build produced it (issue #189).
-$script:InstallerBuildId = '1.0.0+faf6afcb'
+$script:InstallerBuildId = '1.0.0+c8da03a9'
 
 # ------------------------------------------------Functions------------------------------------------------
 
@@ -2591,10 +2591,20 @@ function Write-InstalledAppNote {
         Write-Info ('{0} has no machine-wide installer, so it was installed for this account only.' -f $AppName)
     }
 
+    $clientEngine = $InstallResult.Engine -eq 'WinGetClient'
     if ($InstallResult.RestartRequired) {
         $why = "winget printed 'Restart your PC to finish installation.'"
         if ($null -ne $exitCode -and $exitCode -ne 0) {
             $why = 'winget exit {0}' -f (Format-WingetExitCode -ExitCode $exitCode)
+            if ($clientEngine) {
+                $why = 'WinGet client result {0}' -f (Format-WingetExitCode -ExitCode $exitCode)
+            }
+        }
+        elseif ($clientEngine -and $null -ne $InstallResult.InstallerErrorCode) {
+            $why = 'the installer exited {0}' -f $InstallResult.InstallerErrorCode
+            if ([long]$InstallResult.InstallerErrorCode -eq 3010) {
+                $why += ', ERROR_SUCCESS_REBOOT_REQUIRED'
+            }
         }
         Write-WarningMessage ('{0} needs a restart to finish installing ({1}).' -f $AppName, $why)
         return $true
@@ -2605,7 +2615,11 @@ function Write-InstalledAppNote {
         if ($InstallResult.InstallerLogPath) {
             $logNote = '; installer log: {0}' -f $InstallResult.InstallerLogPath
         }
-        Write-WarningMessage ('winget reported {0} for {1}, but it is installed{2}.' -f (Format-WingetExitCode -ExitCode $exitCode), $AppName, $logNote)
+        $reporter = 'winget'
+        if ($clientEngine) {
+            $reporter = 'Install-WinGetPackage'
+        }
+        Write-WarningMessage ('{0} reported {1} for {2}, but it is installed{3}.' -f $reporter, (Format-WingetExitCode -ExitCode $exitCode), $AppName, $logNote)
     }
     return $false
 }
@@ -8901,7 +8915,10 @@ function Get-WingetClientResultCode {
     $status = [string]$response.status
     $result.Status = $status
     if ($null -ne $response.installerErrorCode) {
-        $result.InstallerErrorCode = [long]$response.installerErrorCode
+        $installerCode = [long]$response.installerErrorCode
+        if ($status -eq 'Ok' -or ($status -eq 'InstallError' -and $installerCode -ne 0)) {
+            $result.InstallerErrorCode = $installerCode
+        }
     }
     if ($status -eq 'Ok') {
         $result.ExitCode = 0
@@ -8995,11 +9012,11 @@ function Invoke-WingetClientInstall {
         Write-Host ('    WinGet client result: {0} ({1} s)' -f "$($mapped.LaunchError)".TrimEnd('.'), $seconds) -ForegroundColor DarkGray
     }
     else {
-        $installerCode = 0
+        $installerText = 'no installer exit code'
         if ($null -ne $mapped.InstallerErrorCode) {
-            $installerCode = $mapped.InstallerErrorCode
+            $installerText = 'installer exit code {0}' -f $mapped.InstallerErrorCode
         }
-        Write-Host ('    WinGet client result: {0}, {1}, installer exit code {2} ({3} s)' -f $mapped.Status, (Format-WingetExitCode -ExitCode $mapped.ExitCode), $installerCode, $seconds) -ForegroundColor DarkGray
+        Write-Host ('    WinGet client result: {0}, {1}, {2} ({3} s)' -f $mapped.Status, (Format-WingetExitCode -ExitCode $mapped.ExitCode), $installerText, $seconds) -ForegroundColor DarkGray
     }
 
     $result = [ordered]@{}
@@ -9511,6 +9528,11 @@ function Initialize-WingetClientModule {
             $stage = 'setting up its folders'
             $directory = New-WauStagingDirectory -Prefix 'wingetclient'
             $cacheDirectory = Join-Path $env:ProgramData 'winget-app-setup\cache'
+            $cacheItem = Get-Item -LiteralPath $cacheDirectory -Force -ErrorAction SilentlyContinue
+            if ($cacheItem -and ($cacheItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
+                $cacheItem.Delete()
+                Write-WarningMessage "$cacheDirectory was a link, not a folder; it was removed and the cache folder is created again."
+            }
             [void](New-Item -ItemType Directory -Path $cacheDirectory -Force -ErrorAction Stop)
             Set-RestrictedDirectoryAcl -Path $cacheDirectory
             $cachePath = Join-Path $cacheDirectory $pin.FileName
@@ -10459,7 +10481,11 @@ function Invoke-WingetInstall {
 
     if ($failedApps.Count -gt 0) {
         if ($wingetNotLaunchable) {
-            Write-WarningMessage 'Skipping the retry pass: winget cannot be launched on this machine (see above); retrying would not help.'
+            $notLaunchable = 'winget cannot be launched on this machine'
+            if (Test-WingetClientEngineActive) {
+                $notLaunchable = 'the WinGet client engine cannot be started on this machine'
+            }
+            Write-WarningMessage "Skipping the retry pass: $notLaunchable (see above); retrying would not help."
         }
         elseif (-not $WhatIf) {
             Write-Host ''
@@ -12163,18 +12189,22 @@ function Install-WingetPackage {
             $launchAttempt++
             $launchError = $run.LaunchError
             $transient = Test-TransientWingetLaunchError -NativeErrorCode $run.LaunchErrorCode -Message $run.LaunchError
+            $launchVerb = 'launch winget'
+            if ($engine -eq 'WinGetClient') {
+                $launchVerb = 'start the WinGet client engine'
+            }
             if ($transient -and $launchAttempt -lt $MaxLaunchAttempts) {
-                Write-WarningMessage "Could not launch winget for $PackageId - its executable appears transiently locked ($($run.LaunchError)). Waiting ${launchDelay}s before launch retry $($launchAttempt + 1) of ${MaxLaunchAttempts}..."
+                Write-WarningMessage "Could not $launchVerb for $PackageId - its executable appears transiently locked ($($run.LaunchError)). Waiting ${launchDelay}s before launch retry $($launchAttempt + 1) of ${MaxLaunchAttempts}..."
                 Start-Sleep -Seconds $launchDelay
                 $launchDelay = $launchDelay * 2
                 continue
             }
 
             if ($transient) {
-                Write-WarningMessage "Still unable to launch winget for $PackageId after ${MaxLaunchAttempts} launch attempts ($($run.LaunchError))."
+                Write-WarningMessage "Still unable to $launchVerb for $PackageId after ${MaxLaunchAttempts} launch attempts ($($run.LaunchError))."
             }
             else {
-                Write-WarningMessage "Could not launch winget for ${PackageId}: $($run.LaunchError)"
+                Write-WarningMessage "Could not $launchVerb for ${PackageId}: $($run.LaunchError)"
             }
             $launchErrorExhausted = $true
             $exitCode = $null

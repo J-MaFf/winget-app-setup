@@ -24,9 +24,10 @@
 .OUTPUTS
     [System.Collections.Specialized.OrderedDictionary] id, status, reason, code (the exit code of
     the winget install or package-specific installer, or $null), codeHex (the same as 0x%08X),
-    installerCode (the installer's own exit code where the engine reports it, Microsoft.WinGet.Client;
-    otherwise $null), restartRequired, postInstall ('Configured', 'NotConfigured' or 'Failed', or
-    $null when no hook ran) and postInstallReason (why it is not Configured, or $null).
+    installerCode (the installer's own exit code where the engine reports it, Microsoft.WinGet.Client,
+    and an installer ran; otherwise $null), restartRequired, postInstall ('Configured',
+    'NotConfigured' or 'Failed', or $null when no hook ran) and postInstallReason (why it is not
+    Configured, or $null).
 #>
 function New-AppRunRecord {
     param (

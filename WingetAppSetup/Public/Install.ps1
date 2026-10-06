@@ -514,7 +514,12 @@ function Invoke-WingetInstall {
     # Retry any failed installations once before producing the final summary
     if ($failedApps.Count -gt 0) {
         if ($wingetNotLaunchable) {
-            Write-WarningMessage 'Skipping the retry pass: winget cannot be launched on this machine (see above); retrying would not help.'
+            # The breaker tripped on what installs: winget.exe, or the engine while it is active.
+            $notLaunchable = 'winget cannot be launched on this machine'
+            if (Test-WingetClientEngineActive) {
+                $notLaunchable = 'the WinGet client engine cannot be started on this machine'
+            }
+            Write-WarningMessage "Skipping the retry pass: $notLaunchable (see above); retrying would not help."
         }
         elseif (-not $WhatIf) {
             Write-Host ''

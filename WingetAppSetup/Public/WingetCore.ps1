@@ -427,23 +427,28 @@ function Install-WingetPackage {
             $launchAttempt++
             $launchError = $run.LaunchError
             $transient = Test-TransientWingetLaunchError -NativeErrorCode $run.LaunchErrorCode -Message $run.LaunchError
+            # The engine's launch is its child pwsh, not winget.exe.
+            $launchVerb = 'launch winget'
+            if ($engine -eq 'WinGetClient') {
+                $launchVerb = 'start the WinGet client engine'
+            }
             if ($transient -and $launchAttempt -lt $MaxLaunchAttempts) {
                 # The usual cause is the winget.exe app-execution alias breaking while the
                 # DesktopAppInstaller package is upgraded or re-registered underneath us (e.g. by
                 # a background Winget-AutoUpdate run), or an antivirus scan of winget.exe.
-                Write-WarningMessage "Could not launch winget for $PackageId - its executable appears transiently locked ($($run.LaunchError)). Waiting ${launchDelay}s before launch retry $($launchAttempt + 1) of ${MaxLaunchAttempts}..."
+                Write-WarningMessage "Could not $launchVerb for $PackageId - its executable appears transiently locked ($($run.LaunchError)). Waiting ${launchDelay}s before launch retry $($launchAttempt + 1) of ${MaxLaunchAttempts}..."
                 Start-Sleep -Seconds $launchDelay
                 $launchDelay = $launchDelay * 2
                 continue
             }
 
             if ($transient) {
-                Write-WarningMessage "Still unable to launch winget for $PackageId after ${MaxLaunchAttempts} launch attempts ($($run.LaunchError))."
+                Write-WarningMessage "Still unable to $launchVerb for $PackageId after ${MaxLaunchAttempts} launch attempts ($($run.LaunchError))."
             }
             else {
                 # Not a lock that clears on its own (e.g. winget missing, or 'Access is denied'):
                 # retrying would only wait.
-                Write-WarningMessage "Could not launch winget for ${PackageId}: $($run.LaunchError)"
+                Write-WarningMessage "Could not $launchVerb for ${PackageId}: $($run.LaunchError)"
             }
             $launchErrorExhausted = $true
             $exitCode = $null

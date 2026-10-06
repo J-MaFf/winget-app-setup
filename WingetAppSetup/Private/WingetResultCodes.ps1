@@ -182,8 +182,11 @@ function Test-RestartRequiredFirst {
     3010), for 0x8A150109 (the same on winget 1.6 and older) and for 0x8A15010B (the installer
     started a restart, MSI 1641). The warning is matched in English only; on other display
     languages the pending-restart registry check notices it. Microsoft.WinGet.Client prints no
-    warning and never sets RebootRequired, so its 0 with InstallerErrorCode 3010 counts too. Shared
-    by Install-WingetPackage and the PowerShell 7 bootstrap. Runs under Windows PowerShell 5.1 too.
+    warning and never sets RebootRequired, so its 0 with InstallerErrorCode 3010 counts too. Only
+    3010 (MSI, WiX and Burn's default) is recognised there: the module does not expose the
+    manifest's expected return codes, so another code a manifest maps to a restart reads as a plain
+    success, and only the pending-restart registry check can notice it. Shared by
+    Install-WingetPackage and the PowerShell 7 bootstrap. Runs under Windows PowerShell 5.1 too.
 .PARAMETER ExitCode
     winget's exit code, or $null when it did not run to the end.
 .PARAMETER Output

@@ -1823,7 +1823,8 @@ Describe 'Install-WingetPackage with the Microsoft.WinGet.Client engine (wgt-gq8
     BeforeEach {
         Mock Write-Host { }
         Mock Write-Info { }
-        Mock Write-WarningMessage { }
+        $script:clientWarnings = @()
+        Mock Write-WarningMessage { $script:clientWarnings += $Message }
         Mock Write-ErrorMessage { }
         Mock Start-Sleep { }
         Mock Wait-WindowsInstallerIdle { [pscustomobject]@{ WaitedSeconds = 30; Busy = $false } }
@@ -1834,7 +1835,11 @@ Describe 'Install-WingetPackage with the Microsoft.WinGet.Client engine (wgt-gq8
         Mock Invoke-WingetClientInstall {
             $next = $script:clientQueue[$script:clientIndex]
             $script:clientIndex++
-            $result = New-TestProcessResult -ExitCode $next.ExitCode -TimedOut:([bool]$next.TimedOut) -LaunchFailed:([bool]$next.LaunchFailed) -LaunchErrorCode $null -LaunchError 'the WinGet client engine could not start: FileLoadException: Could not load file or assembly'
+            $launchError = 'the WinGet client engine could not start: FileLoadException: Could not load file or assembly'
+            if ($next.LaunchError) {
+                $launchError = $next.LaunchError
+            }
+            $result = New-TestProcessResult -ExitCode $next.ExitCode -TimedOut:([bool]$next.TimedOut) -LaunchFailed:([bool]$next.LaunchFailed) -LaunchErrorCode $next.LaunchErrorCode -LaunchError $launchError
             $result | Add-Member -NotePropertyName InstallerErrorCode -NotePropertyValue $next.InstallerErrorCode
             $result | Add-Member -NotePropertyName WingetClientStatus -NotePropertyValue $next.Status
             $result | Add-Member -NotePropertyName Engine -NotePropertyValue 'WinGetClient'
@@ -1908,6 +1913,26 @@ Describe 'Install-WingetPackage with the Microsoft.WinGet.Client engine (wgt-gq8
         $result.ExitCode | Should -BeNullOrEmpty
         $result.LaunchError | Should -BeLike 'the WinGet client engine could not start:*'
         Should -Invoke Invoke-WingetClientInstall -Times 1 -Exactly
+    }
+
+    It 'Names the engine, not winget, in its launch-failure warnings' {
+        $script:clientQueue = @(@{ LaunchFailed = $true })
+
+        [void](Install-WingetPackage -PackageId 'Google.Chrome' -MachineScopeOnly -Silent)
+
+        $script:clientWarnings | Should -Be @('Could not start the WinGet client engine for Google.Chrome: the WinGet client engine could not start: FileLoadException: Could not load file or assembly')
+    }
+
+    It 'Names the engine, not winget, when its pwsh stays locked' {
+        $locked = @{ LaunchFailed = $true; LaunchErrorCode = 32; LaunchError = 'The process cannot access the file because it is being used by another process.' }
+        $script:clientQueue = @($locked, $locked)
+
+        $result = Install-WingetPackage -PackageId 'Google.Chrome' -MachineScopeOnly -Silent -MaxLaunchAttempts 2
+
+        $result.LaunchErrorExhausted | Should -BeTrue
+        $script:clientWarnings[0] | Should -BeLike 'Could not start the WinGet client engine for Google.Chrome - its executable appears transiently locked (The process cannot access the file*). Waiting *s before launch retry 2 of 2...'
+        $script:clientWarnings[1] | Should -Be 'Still unable to start the WinGet client engine for Google.Chrome after 2 launch attempts (The process cannot access the file because it is being used by another process.).'
+        ($script:clientWarnings -join "`n") | Should -Not -Match 'launch winget'
     }
 
     It 'Stops at its time limit' {

@@ -3117,6 +3117,39 @@ Describe 'A run as SYSTEM from an RMM agent (review findings P2-24, P3-22, P3-23
             Should -Invoke Test-AndInstallWingetModule -Times 0 -Exactly
         }
 
+        It 'Records no installer exit code for the deferred app, whose installer never ran' {
+            [void](Invoke-WingetInstall -Apps @(@{ name = 'Contoso.MachineApp' }, @{ name = 'Contoso.UserOnlyApp' }))
+
+            ($script:runRecord.apps | Where-Object { $_.id -eq 'Contoso.MachineApp' }).installerCode | Should -Be 0
+            $deferred = $script:runRecord.apps | Where-Object { $_.id -eq 'Contoso.UserOnlyApp' }
+            $deferred.status | Should -Be 'Deferred'
+            $deferred.installerCode | Should -BeNullOrEmpty
+        }
+
+        It 'Names the engine, not winget, when the engine stops starting mid-run, and skips the retry pass' {
+            Mock Invoke-WingetClientRequest {
+                $script:clientCalls += ('{0} {1}' -f $Operation, $PackageId).Trim()
+                $response = @{ protocol = 1; operation = $Operation; stage = 'call'; ok = $true; psVersion = '7.6.6'; architecture = 'X64'; moduleVersion = '1.29.380' }
+                switch ($Operation) {
+                    'Probe' { $response.version = 'v1.29.380'; $response.packages = @(); $response.installedChecked = $true }
+                    'Installed' { $response.packages = @() }
+                    default {
+                        $response = @{ protocol = 1; operation = $Operation; stage = 'load'; ok = $false; exceptions = @(@{ type = 'System.IO.FileLoadException'; name = 'FileLoadException'; hresult = -2146232799; message = 'Could not load file or assembly' }) }
+                    }
+                }
+                [pscustomobject]@{ Run = (New-TestProcessResult -ExitCode 0); Response = (ConvertFrom-Json -InputObject (ConvertTo-Json -InputObject $response -Depth 5)); ProtocolError = $null }
+            }
+
+            $result = Invoke-WingetInstall -Apps @(@{ name = 'Contoso.MachineApp' }, @{ name = 'Contoso.OtherApp' })
+
+            $result | Should -Be 1
+            $script:messages | Should -Contain 'Could not start the WinGet client engine for Contoso.MachineApp: the WinGet client engine could not start: FileLoadException: Could not load file or assembly'
+            $script:messages | Should -Contain 'Skipping the retry pass: the WinGet client engine cannot be started on this machine (see above); retrying would not help.'
+            $text = $script:messages -join "`n"
+            $text | Should -Match '(?m)^The WinGet client engine cannot be started on this machine \('
+            $text | Should -Not -Match 'Could not launch winget|winget cannot be launched'
+        }
+
         It 'Installs with winget.exe when the module is not ready, warns once more in the summary, and exits as it would have' {
             $script:moduleReady = $false
 
@@ -4150,6 +4183,40 @@ Describe 'Write-InstalledAppNote: per-user installs (review finding P3-22)' {
         Write-InstalledAppNote -AppName '7zip.7zip' -InstallResult @{ ExitCode = 0; MachineScopeFellBack = $false; RestartRequired = $false } | Should -Be $false
 
         $script:infoMessages | Should -BeNullOrEmpty
+    }
+}
+
+# wgt-gq8.42: Microsoft.WinGet.Client prints no restart warning, and it is not winget.exe.
+Describe 'Write-InstalledAppNote with the Microsoft.WinGet.Client engine' {
+    BeforeEach {
+        $script:noteWarnings = @()
+        Mock Write-WarningMessage { $script:noteWarnings += $Message }
+        Mock Write-Info { }
+    }
+
+    It 'Names the installer''s 3010 as the restart, not a winget warning' {
+        Write-InstalledAppNote -AppName 'Contoso.MsiApp' -InstallResult @{ ExitCode = 0; RestartRequired = $true; InstallerErrorCode = [long]3010; Engine = 'WinGetClient' } | Should -BeTrue
+
+        $script:noteWarnings | Should -Be @('Contoso.MsiApp needs a restart to finish installing (the installer exited 3010, ERROR_SUCCESS_REBOOT_REQUIRED).')
+    }
+
+    It 'Names the WinGet client result of a restart the installer started' {
+        Write-InstalledAppNote -AppName 'Contoso.MsiApp' -InstallResult @{ ExitCode = -1978334965; RestartRequired = $true; InstallerErrorCode = [long]1641; Engine = 'WinGetClient' } | Should -BeTrue
+
+        $script:noteWarnings | Should -Be @('Contoso.MsiApp needs a restart to finish installing (WinGet client result 0x8A15010B INSTALL_REBOOT_INITIATED).')
+    }
+
+    It 'Names Install-WinGetPackage for another code, when the app is installed anyway' {
+        Write-InstalledAppNote -AppName 'Contoso.MsiApp' -InstallResult @{ ExitCode = -1978335159; RestartRequired = $false; InstallerErrorCode = [long]1603; Engine = 'WinGetClient' } | Should -BeFalse
+
+        $script:noteWarnings | Should -Be @('Install-WinGetPackage reported 0x8A150049 MSI_INSTALL_FAILED for Contoso.MsiApp, but it is installed.')
+    }
+
+    It 'Keeps the winget.exe texts for winget.exe' {
+        Write-InstalledAppNote -AppName '7zip.7zip' -InstallResult @{ ExitCode = 0; RestartRequired = $true; InstallerErrorCode = $null; Engine = 'Cli' } | Should -BeTrue
+        Write-InstalledAppNote -AppName '7zip.7zip' -InstallResult @{ ExitCode = -1978335159; RestartRequired = $false; Engine = 'Cli' } | Should -BeFalse
+
+        $script:noteWarnings | Should -Be @("7zip.7zip needs a restart to finish installing (winget printed 'Restart your PC to finish installation.').", 'winget reported 0x8A150049 MSI_INSTALL_FAILED for 7zip.7zip, but it is installed.')
     }
 }
 

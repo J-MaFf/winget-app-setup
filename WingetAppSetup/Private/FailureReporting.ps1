@@ -439,7 +439,9 @@ function Format-InstallFailureReason {
       - '<app> needs a restart to finish installing (<why>).' when RestartRequired is set;
       - 'winget reported <code> for <app>, but it is installed.' for another non-zero exit code,
         with the installer log when there is one.
-    Nothing for a plain success, or when there is no install result.
+    Nothing for a plain success, or when there is no install result. With Engine 'WinGetClient'
+    the texts name Install-WinGetPackage's result, and a restart on success names the installer's
+    own exit code (3010), since the module prints no restart warning.
 .PARAMETER AppName
     The winget package id.
 .PARAMETER InstallResult
@@ -469,10 +471,21 @@ function Write-InstalledAppNote {
         Write-Info ('{0} has no machine-wide installer, so it was installed for this account only.' -f $AppName)
     }
 
+    # Microsoft.WinGet.Client prints no restart warning: its restart is the installer's own exit code.
+    $clientEngine = $InstallResult.Engine -eq 'WinGetClient'
     if ($InstallResult.RestartRequired) {
         $why = "winget printed 'Restart your PC to finish installation.'"
         if ($null -ne $exitCode -and $exitCode -ne 0) {
             $why = 'winget exit {0}' -f (Format-WingetExitCode -ExitCode $exitCode)
+            if ($clientEngine) {
+                $why = 'WinGet client result {0}' -f (Format-WingetExitCode -ExitCode $exitCode)
+            }
+        }
+        elseif ($clientEngine -and $null -ne $InstallResult.InstallerErrorCode) {
+            $why = 'the installer exited {0}' -f $InstallResult.InstallerErrorCode
+            if ([long]$InstallResult.InstallerErrorCode -eq 3010) {
+                $why += ', ERROR_SUCCESS_REBOOT_REQUIRED'
+            }
         }
         Write-WarningMessage ('{0} needs a restart to finish installing ({1}).' -f $AppName, $why)
         return $true
@@ -483,7 +496,11 @@ function Write-InstalledAppNote {
         if ($InstallResult.InstallerLogPath) {
             $logNote = '; installer log: {0}' -f $InstallResult.InstallerLogPath
         }
-        Write-WarningMessage ('winget reported {0} for {1}, but it is installed{2}.' -f (Format-WingetExitCode -ExitCode $exitCode), $AppName, $logNote)
+        $reporter = 'winget'
+        if ($clientEngine) {
+            $reporter = 'Install-WinGetPackage'
+        }
+        Write-WarningMessage ('{0} reported {1} for {2}, but it is installed{3}.' -f $reporter, (Format-WingetExitCode -ExitCode $exitCode), $AppName, $logNote)
     }
     return $false
 }

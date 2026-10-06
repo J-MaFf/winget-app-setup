@@ -89,15 +89,18 @@ BeforeAll {
 }
 
 Describe 'Get-WingetClientModulePin' {
-    It 'Pins an exact version of the PowerShell Gallery package by size and SHA256' {
+    It 'Pins an exact version of the PowerShell Gallery package, with a well-formed size and SHA256 when they are set' {
         $pin = Get-WingetClientModulePin
 
         $pin.Name | Should -Be 'Microsoft.WinGet.Client'
         $pin.Version | Should -Match '^\d+\.\d+\.\d+$'
         $pin.PackageUrl | Should -Be "https://www.powershellgallery.com/api/v2/package/Microsoft.WinGet.Client/$($pin.Version)"
         $pin.FileName | Should -Be "microsoft.winget.client.$($pin.Version).nupkg"
-        $pin.Size | Should -BeGreaterThan 0
-        $pin.Sha256 | Should -Match '^[0-9A-F]{64}$'
+        # An empty pin is allowed (the engine is then NOT READY and winget.exe installs); a set one
+        # has both values.
+        [long]$pin.Size | Should -BeGreaterOrEqual 0
+        "$($pin.Sha256)" | Should -Match '^([0-9A-F]{64})?$'
+        ([long]$pin.Size -gt 0) | Should -Be ("$($pin.Sha256)".Length -gt 0)
         $pin.SignerCommonName | Should -Be 'Microsoft Corporation'
         [version]$pin.MinimumPowerShell | Should -BeGreaterOrEqual ([version]'7.4')
     }
@@ -298,6 +301,36 @@ Describe 'Initialize-WingetClientModule' {
         $result.Source | Should -Be 'Cache'
         Should -Invoke Invoke-WebRequest -Times 0 -Exactly
         @($script:lines | Where-Object { $_ -match 'WinGet client module:' }) | Should -Be @("OK: WinGet client module: ready - Microsoft.WinGet.Client 1.29.380, SHA256 $($script:pin.Sha256), from the cache.")
+    }
+
+    It 'Removes a link planted as the cache folder, without touching or locking its target, and caches in a real folder' {
+        $target = Join-Path $TestDrive ([guid]::NewGuid().ToString('N'))
+        [void](New-Item -ItemType Directory -Path $target -Force)
+        Set-Content -LiteralPath (Join-Path $target 'keep.txt') -Value 'not the cache'
+        [void](New-Item -ItemType Directory -Path (Split-Path -Parent $script:cacheDirectory) -Force)
+        # A junction needs no privilege on Windows; elsewhere a symbolic link is the same kind of link.
+        $linkType = 'SymbolicLink'
+        if ($IsWindows) {
+            $linkType = 'Junction'
+        }
+        [void](New-Item -ItemType $linkType -Path $script:cacheDirectory -Target $target)
+        $script:lockedLinks = @()
+        Mock Set-RestrictedDirectoryAcl {
+            $item = Get-Item -LiteralPath $Path -Force
+            if ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+                $script:lockedLinks += $Path
+            }
+        }
+
+        $result = Initialize-WingetClientModule
+
+        $result.Ready | Should -BeTrue
+        $script:lockedLinks | Should -BeNullOrEmpty
+        Should -Invoke Set-RestrictedDirectoryAcl -Times 1 -Exactly -ParameterFilter { $Path -eq $script:cacheDirectory }
+        ((Get-Item -LiteralPath $script:cacheDirectory -Force).Attributes -band [System.IO.FileAttributes]::ReparsePoint) | Should -Be 0
+        (Get-FileHash -LiteralPath (Join-Path $script:cacheDirectory $script:pin.FileName) -Algorithm SHA256).Hash | Should -Be $script:pin.Sha256
+        @(Get-ChildItem -LiteralPath $target -Force | ForEach-Object { $_.Name }) | Should -Be @('keep.txt')
+        @($script:lines | Where-Object { $_ -like 'WARN: *cache was a link, not a folder; it was removed and the cache folder is created again.' }).Count | Should -Be 1
     }
 
     It 'Deletes a cached package that does not match the pin and downloads it again' {
