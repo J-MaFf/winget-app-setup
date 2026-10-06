@@ -1706,7 +1706,10 @@ throwaway VMs by construction:
   `Get-DefaultAppCatalog` app resolves via `winget list` (exit-code classified) — the script
   decides each app's applicability on the runner with the installer's own rule
   (`Test-AppApplicability`: the `arch` list and the condition, through
-  `Get-CatalogAppApplicability` in `e2e/TranscriptAssertions.ps1`), except that an app with neither
+  `Get-CatalogAppApplicability` in `e2e/TranscriptAssertions.ps1`), as it stood just before the
+  pass whose transcript it reads: `e2e/Invoke-InstallPass.ps1 -ApplicabilityPath` records it before
+  each pass, because the first pass's Windows Terminal step changes what Terminal's condition
+  reads, and a record that is missing fails an assertion. An app with neither
   an `arch` list nor a condition is always expected installed, and the module finding one not
   applicable fails the `Apps with no arch list or condition apply` assertion; not-applicable apps
   must instead show their `not applicable` skip line in the latest transcript — the WAU scheduled

@@ -701,6 +701,124 @@ Describe 'Get-CatalogAppApplicability' {
     }
 }
 
+# E2E run 37518954302: an app failed, so only the first pass ran, and applicability decided after
+# it, once its Windows Terminal step had made Terminal the default terminal, expected Terminal's
+# not-applicable skip line from a pass that had decided before that step.
+Describe 'Applicability recorded before a pass (Save-ApplicabilityRecord, Read-ApplicabilityRecord, Resolve-AssertionApplicability)' {
+    BeforeEach {
+        Mock Write-WarningMessage {}
+        Mock Get-OSArchitecture { 'X64' }
+        Mock Get-ComputerManufacturer { 'Microsoft Corporation' }
+        Mock Test-IsSystemAccount { $false }
+        # What the Windows Terminal step changes: its delegation values make Terminal's condition
+        # see a hosted session.
+        $script:terminalHostsSession = $false
+        Mock Test-WindowsTerminalHostsCurrentSession { $script:terminalHostsSession }
+        $script:catalog = @(Get-DefaultAppCatalog)
+        $script:terminalRow = 'Not-applicable skip logged: Microsoft.WindowsTerminal'
+    }
+
+    It 'Checks a first-pass-only run against what applied before that pass, not after its Windows Terminal step' {
+        $recordPath = Join-Path $TestDrive 'e2e-applicability-first.json'
+        $null = Save-ApplicabilityRecord -Path $recordPath -Apps $script:catalog -Label 'before the first pass'
+        $script:terminalHostsSession = $true
+        $logs = New-TestLogDirectory -Fixture @('first-pass-runtime-installed')
+
+        $decidedNow = Resolve-AssertionApplicability -Apps $script:catalog
+        $nowRows = @(Get-TranscriptAssertionResult -LogDirectory $logs -NotApplicableApps $decidedNow.Applicability.NotApplicable)
+        $recorded = Resolve-AssertionApplicability -Apps $script:catalog -ApplicabilityPath $recordPath
+        $rows = @(Get-TranscriptAssertionResult -LogDirectory $logs -ExpectedAppIds @($recorded.Applicability.Applicable | ForEach-Object { $_.name }) -NotApplicableApps $recorded.Applicability.NotApplicable)
+
+        # Deciding after the pass, as the assertions did: job 112459101710's failure.
+        ($nowRows | Where-Object Assertion -EQ $script:terminalRow).Result | Should -Be 'FAIL'
+        $decidedNow.Row | Should -BeNullOrEmpty
+        $recorded.Row.Result | Should -Be 'PASS'
+        $recorded.Row.Detail | Should -Be "$recordPath (before the first pass)"
+        @($recorded.Applicability.Applicable | ForEach-Object { $_.name }) | Should -Contain 'Microsoft.WindowsTerminal'
+        @($recorded.Applicability.NotApplicable.Keys) | Should -Be @('Adobe.Acrobat.Reader.32-bit', 'Dell.CommandUpdate.Universal')
+        $rows | Where-Object Assertion -EQ $script:terminalRow | Should -BeNullOrEmpty
+    }
+
+    It 'Still expects the not-applicable skip line of a second pass, which started with Terminal the default terminal' {
+        $script:terminalHostsSession = $true
+        $recordPath = Join-Path $TestDrive 'e2e-applicability-second.json'
+        $null = Save-ApplicabilityRecord -Path $recordPath -Apps $script:catalog -Label 'before the second pass'
+        $logs = New-TestLogDirectory -Fixture @('first-pass-runtime-installed', 'second-pass-runtime-present')
+        $second = Get-ChildItem -LiteralPath $logs -Filter '*.log' | Sort-Object Name | Select-Object -Last 1
+        $writtenAt = $second.LastWriteTime
+        $reason = ($script:catalog | Where-Object { $_.name -eq 'Microsoft.WindowsTerminal' }).conditionDescription
+        $content = (Get-Content -Raw -LiteralPath $second.FullName).Replace('Skipping: Microsoft.WindowsTerminal (already installed)', "Skipping: Microsoft.WindowsTerminal (not applicable: $reason)")
+        Set-Content -LiteralPath $second.FullName -Value $content -NoNewline
+        (Get-Item -LiteralPath $second.FullName).LastWriteTime = $writtenAt
+
+        $recorded = Resolve-AssertionApplicability -Apps $script:catalog -ApplicabilityPath $recordPath
+        $rows = @(Get-TranscriptAssertionResult -LogDirectory $logs -NotApplicableApps $recorded.Applicability.NotApplicable)
+
+        @($recorded.Applicability.Applicable | ForEach-Object { $_.name }) | Should -Not -Contain 'Microsoft.WindowsTerminal'
+        ($rows | Where-Object Assertion -EQ $script:terminalRow).Result | Should -Be 'PASS'
+    }
+
+    It 'Reads back the reasons in catalog order, the ungated list, and only the apps it is given' {
+        Mock Test-AppApplicability { $App.name -eq 'Contoso.Yes' }
+        $apps = @(
+            @{ name = 'Contoso.GatedB'; condition = { $false }; conditionDescription = 'B hardware only' },
+            @{ name = 'Contoso.Yes'; condition = { $true } },
+            @{ name = 'Contoso.Anywhere' },
+            @{ name = 'Contoso.GatedA'; condition = { $false }; conditionDescription = 'A hardware only' },
+            @{ name = 'Contoso.SkipListed'; arch = 'Arm64' }
+        )
+        $path = Join-Path $TestDrive 'record.json'
+
+        $saved = Save-ApplicabilityRecord -Path $path -Apps $apps -Label 'before the first pass'
+        $read = Read-ApplicabilityRecord -Path $path -Apps @($apps | Where-Object { $_.name -ne 'Contoso.SkipListed' })
+
+        @($saved.NotApplicable.Keys) | Should -Be @('Contoso.GatedB', 'Contoso.GatedA', 'Contoso.SkipListed')
+        $read.Problem | Should -BeNullOrEmpty
+        $read.Label | Should -Be 'before the first pass'
+        @($read.Applicability.NotApplicable.Keys) | Should -Be @('Contoso.GatedB', 'Contoso.GatedA')
+        $read.Applicability.NotApplicable['Contoso.GatedA'] | Should -Be 'A hardware only'
+        $read.Applicability.NotApplicable['Contoso.GatedB'] | Should -Be 'B hardware only'
+        @($read.Applicability.Applicable | ForEach-Object { $_.name }) | Should -Be @('Contoso.Yes', 'Contoso.Anywhere')
+        @($read.Applicability.UngatedNotApplicable) | Should -Be @('Contoso.Anywhere')
+    }
+
+    It 'Writes empty lists as JSON arrays when every app applies' {
+        $path = Join-Path $TestDrive 'record-empty.json'
+
+        $null = Save-ApplicabilityRecord -Path $path -Apps @(@{ name = 'Contoso.Anywhere' })
+        $json = Get-Content -Raw -LiteralPath $path | ConvertFrom-Json
+        $read = Read-ApplicabilityRecord -Path $path -Apps @(@{ name = 'Contoso.Anywhere' })
+
+        , $json.NotApplicable | Should -BeOfType [object[]]
+        , $json.UngatedNotApplicable | Should -BeOfType [object[]]
+        $read.Applicability.NotApplicable.Count | Should -Be 0
+        @($read.Applicability.Applicable | ForEach-Object { $_.name }) | Should -Be @('Contoso.Anywhere')
+    }
+
+    It 'Fails the row and decides now when the record <Case>' -ForEach @(
+        @{ Case = 'is missing'; Content = $null; Problem = 'no applicability record at *' }
+        @{ Case = 'is not JSON'; Content = 'not json {'; Problem = 'the applicability record * is not JSON: *' }
+        @{ Case = 'is empty'; Content = ''; Problem = 'the applicability record *' }
+        @{ Case = 'has no NotApplicable list'; Content = '{"Label": "before the first pass"}'; Problem = 'the applicability record * has no NotApplicable list' }
+    ) {
+        $path = Join-Path $TestDrive "$([guid]::NewGuid().ToString('N')).json"
+        if ($null -ne $Content) {
+            Set-Content -LiteralPath $path -Value $Content -NoNewline
+        }
+        $apps = @(@{ name = 'Contoso.Gated'; condition = { $false }; conditionDescription = 'Contoso hardware only' })
+
+        $read = Read-ApplicabilityRecord -Path $path -Apps $apps
+        $resolved = Resolve-AssertionApplicability -Apps $apps -ApplicabilityPath $path
+
+        $read.Applicability | Should -BeNullOrEmpty
+        $read.Problem | Should -BeLike $Problem
+        $resolved.Row.Assertion | Should -Be 'Applicability recorded before the latest pass'
+        $resolved.Row.Result | Should -Be 'FAIL'
+        $resolved.Row.Detail | Should -Be "$($read.Problem); decided after the install instead"
+        $resolved.Applicability.NotApplicable['Contoso.Gated'] | Should -Be 'Contoso hardware only'
+    }
+}
+
 Describe 'Installer messages the transcript parser keys on' {
     # A reworded message would make the parser match nothing, and the e2e assertions would then
     # pass a failed run (for containment) or fail a good one. Each line below is copied from what
@@ -796,9 +914,21 @@ Describe 'e2e/Assert-Install.ps1 wiring' {
                 ForEach-Object { $_.GetCommandName() } | Where-Object { $_ } | Sort-Object -Unique)
         $conditionCalls = @($script:AssertInstallAst.FindAll({ param($node) $node -is [System.Management.Automation.Language.MemberExpressionAst] -and $node.Member.Extent.Text -eq 'condition' }, $true))
 
-        $called | Should -Contain 'Get-CatalogAppApplicability'
+        # Resolve-AssertionApplicability asks Get-CatalogAppApplicability, now or before the pass.
+        $called | Should -Contain 'Resolve-AssertionApplicability'
         $definedHere | Should -Not -Contain 'Test-AppApplicable'
         $conditionCalls | Should -BeNullOrEmpty
+    }
+
+    It 'Takes applicability from -ApplicabilityPath, the record of the latest pass, and reports that row' {
+        $parameters = @($script:AssertInstallAst.ParamBlock.Parameters | ForEach-Object { $_.Name.VariablePath.UserPath })
+        $resolveCalls = @($script:AssertInstallAst.FindAll({ param($node) $node -is [System.Management.Automation.Language.CommandAst] -and $node.GetCommandName() -eq 'Resolve-AssertionApplicability' }, $true))
+        $rowAdds = @($script:AssertInstallAst.FindAll({ param($node) $node -is [System.Management.Automation.Language.InvokeMemberExpressionAst] -and $node.Expression.Extent.Text -eq '$results' -and $node.Arguments.Count -eq 1 -and $node.Arguments[0].Extent.Text -eq '$resolvedApplicability.Row' }, $true))
+
+        $parameters | Should -Contain 'ApplicabilityPath'
+        $resolveCalls.Count | Should -Be 1
+        $resolveCalls[0].Extent.Text | Should -Match '-ApplicabilityPath \$ApplicabilityPath\b'
+        $rowAdds.Count | Should -Be 1
     }
 
     It 'Fails an assertion when the module finds an app with no arch list or condition not applicable' {

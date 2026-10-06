@@ -52,7 +52,8 @@
       - anything else: the pass failed, with the installer's code.
 
     Runs under Windows PowerShell 5.1 and PowerShell 7: ASCII only, no 7-only syntax. Dot-sources
-    e2e/TranscriptAssertions.ps1 (same rules) to read a pass's transcript.
+    e2e/TranscriptAssertions.ps1 (same rules) to read a pass's transcript, and with
+    -ApplicabilityPath imports the checkout's module to record which apps apply before the pass.
 .PARAMETER Pass
     'first' or 'second'; used in the messages.
 .PARAMETER Shell
@@ -68,6 +69,10 @@
     The checkout's installer. Default: winget-app-install.ps1 at the repository root.
 .PARAMETER LogDirectory
     Where the installer writes its transcripts. Default: %ProgramData%\winget-app-setup\logs.
+.PARAMETER ApplicabilityPath
+    Where to record, just before the installer starts, which catalog apps apply here
+    (Save-ApplicabilityRecord, with the checkout's module), for Assert-Install.ps1
+    -ApplicabilityPath. Default: no record.
 .NOTES
     Exit codes: the policy above. 64 = bad arguments.
 #>
@@ -92,10 +97,14 @@ param (
     [string]$InstallerPath,
 
     [Parameter(Mandatory = $false)]
-    [string]$LogDirectory
+    [string]$LogDirectory,
+
+    [Parameter(Mandatory = $false)]
+    [string]$ApplicabilityPath
 )
 
-# Get-InstallTranscriptFile and ConvertFrom-InstallTranscript, to read a pass's transcript.
+# Get-InstallTranscriptFile and ConvertFrom-InstallTranscript, to read a pass's transcript, and
+# Save-ApplicabilityRecord.
 . (Join-Path $PSScriptRoot 'TranscriptAssertions.ps1')
 
 <#
@@ -350,6 +359,25 @@ if ($MyInvocation.InvocationName -ne '.') {
     if ($command.Script) {
         Write-Host 'The pass runs:'
         Write-Host $command.Script
+    }
+
+    # Recorded just before the installer starts, which decides applicability before it changes
+    # the machine: its Windows Terminal step changes what Terminal's condition reads.
+    if ($ApplicabilityPath) {
+        $ApplicabilityPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($ApplicabilityPath)
+        Remove-Item -LiteralPath $ApplicabilityPath -Force -ErrorAction SilentlyContinue
+        try {
+            Import-Module (Join-Path (Split-Path -Parent $PSScriptRoot) 'WingetAppSetup\WingetAppSetup.psd1') -Force -ErrorAction Stop
+            $recorded = Save-ApplicabilityRecord -Path $ApplicabilityPath -Apps @(Get-DefaultAppCatalog) -Label "before the $Pass pass"
+            $notApplicableIds = @($recorded.NotApplicable.Keys) -join ', '
+            if (-not $notApplicableIds) {
+                $notApplicableIds = 'none'
+            }
+            Write-Host "Recorded which apps apply before the $Pass pass in $ApplicabilityPath (not applicable: $notApplicableIds)."
+        }
+        catch {
+            Write-Host "Could not record which apps apply before the $Pass pass: $($_.Exception.Message). The assertion 'Applicability recorded before the latest pass' will fail." -ForegroundColor Yellow
+        }
     }
 
     # Native stderr must not stop this script: the step shells run with

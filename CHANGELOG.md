@@ -725,6 +725,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The E2E assertions now check which apps apply as it stood just before the pass whose transcript
+  they read: `e2e/Invoke-InstallPass.ps1 -ApplicabilityPath` records it before each pass, and
+  `e2e/Assert-Install.ps1 -ApplicabilityPath` reads it. The installer decides applicability before
+  it changes the machine, and its Windows Terminal step then makes Terminal the default terminal,
+  which Terminal's condition reads. Deciding after the install expected Terminal's `not applicable`
+  skip line from a first pass that had found Terminal applicable, so every run whose second pass
+  was skipped also failed that assertion. A record that is missing or cannot be read fails the new
+  `Applicability recorded before the latest pass` assertion.
 - **Security fix:** an elevated run, or a run as SYSTEM, no longer follows a junction or symbolic
   link planted at `%ProgramData%\winget-app-setup` or at its `logs` or `cache` folder
   (wgt-gq8.46). Any standard user can create these folders before the first elevated run, and can

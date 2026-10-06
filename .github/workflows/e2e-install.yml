@@ -257,7 +257,7 @@ jobs:
         # apps failed) is tolerated only while KNOWN_PLATFORM_INCOMPATIBLE is non-empty, pending
         # the assertion step's containment check; anything else (2 = winget unavailable,
         # 3 = validation failed, 5 = aborted, ...) fails the step with the installer's code.
-        run: ./e2e/Invoke-InstallPass.ps1 -Pass first -Shell pwsh -Entry OneLiner
+        run: ./e2e/Invoke-InstallPass.ps1 -Pass first -Shell pwsh -Entry OneLiner -ApplicabilityPath (Join-Path $env:RUNNER_TEMP 'e2e-applicability-first.json')
 
       - name: Diagnostics after the first install pass
         if: always()
@@ -279,7 +279,7 @@ jobs:
         # CI runs, so that path also gets an un-mocked run before it ships. Same exit-code policy
         # as the first pass: known-incompatible apps are still missing here, so the installer
         # retries and fails them again.
-        run: ./e2e/Invoke-InstallPass.ps1 -Pass second -Shell pwsh -Entry File
+        run: ./e2e/Invoke-InstallPass.ps1 -Pass second -Shell pwsh -Entry File -ApplicabilityPath (Join-Path $env:RUNNER_TEMP 'e2e-applicability-second.json')
 
       - name: Run assertions (e2e/Assert-Install.ps1, shared with tier 2)
         # Also after a failed pass, so a red run still gets its per-app PASS/FAIL table.
@@ -305,9 +305,13 @@ jobs:
           #
           # The idempotence assertions read the latest transcript as the second pass's. When that
           # pass never ran (the first one failed), they would only add noise, so leave them out.
+          # Applicability comes from the record Invoke-InstallPass.ps1 took just before the pass
+          # that wrote the latest transcript: the first pass changes what Terminal's condition reads.
           $assertArgs = @('-SkipApps', "$env:KNOWN_PLATFORM_INCOMPATIBLE")
+          $latestPass = 'first'
           if ($env:SECOND_PASS_OUTCOME -eq 'success' -or $env:SECOND_PASS_OUTCOME -eq 'failure') {
             $assertArgs = @('-ExpectAllSkippedOnSecondRun') + $assertArgs
+            $latestPass = 'second'
           }
           else {
             Write-Host "The second install pass did not run (outcome: '$env:SECOND_PASS_OUTCOME'); skipping the idempotence assertions." -ForegroundColor Yellow
@@ -318,6 +322,7 @@ jobs:
           if ($env:INSTALLER_SOURCE -ne 'raw-main') {
             $assertArgs += @('-InstallerPath', (Join-Path $env:GITHUB_WORKSPACE 'winget-app-install.ps1'))
           }
+          $assertArgs += @('-ApplicabilityPath', (Join-Path $env:RUNNER_TEMP "e2e-applicability-$latestPass.json"))
           # Also saved with the diagnostics, so report-failure can put the table in the issue.
           $diagnosticsDir = Join-Path $env:RUNNER_TEMP 'e2e-diagnostics'
           $null = New-Item -ItemType Directory -Path $diagnosticsDir -Force
@@ -395,7 +400,7 @@ jobs:
         # piped to iex otherwise. Same exit-code policy as e2e-install; the exit code is the one
         # the bootstrap passes on from the PowerShell 7 run.
         run: |
-          & .\e2e\Invoke-InstallPass.ps1 -Pass first -Shell powershell -Entry OneLiner
+          & .\e2e\Invoke-InstallPass.ps1 -Pass first -Shell powershell -Entry OneLiner -ApplicabilityPath (Join-Path $env:RUNNER_TEMP 'e2e-applicability-first.json')
 
       - name: Diagnostics after the first install pass
         if: always()
@@ -412,7 +417,7 @@ jobs:
         # Weekly: the one-liner again. Checkout runs: 'powershell -File', whose bootstrap relaunches
         # the file itself instead of downloading it.
         run: |
-          & .\e2e\Invoke-InstallPass.ps1 -Pass second -Shell powershell -Entry File
+          & .\e2e\Invoke-InstallPass.ps1 -Pass second -Shell powershell -Entry File -ApplicabilityPath (Join-Path $env:RUNNER_TEMP 'e2e-applicability-second.json')
 
       - name: Run assertions (e2e/Assert-Install.ps1, with the bootstrap checks)
         if: ${{ !cancelled() }}
@@ -432,8 +437,11 @@ jobs:
           if ($env:KNOWN_PLATFORM_INCOMPATIBLE) {
             $assertArgs += @('-SkipApps', $env:KNOWN_PLATFORM_INCOMPATIBLE)
           }
+          # As in e2e-install: applicability as recorded just before the pass of the latest transcript.
+          $latestPass = 'first'
           if ($env:SECOND_PASS_OUTCOME -eq 'success' -or $env:SECOND_PASS_OUTCOME -eq 'failure') {
             $assertArgs += '-ExpectAllSkippedOnSecondRun'
+            $latestPass = 'second'
           }
           else {
             Write-Host "The second install pass did not run (outcome: '$env:SECOND_PASS_OUTCOME'); skipping the idempotence assertions." -ForegroundColor Yellow
@@ -441,6 +449,7 @@ jobs:
           if ($env:INSTALLER_SOURCE -ne 'raw-main') {
             $assertArgs += @('-InstallerPath', (Join-Path $env:GITHUB_WORKSPACE 'winget-app-install.ps1'))
           }
+          $assertArgs += @('-ApplicabilityPath', (Join-Path $env:RUNNER_TEMP "e2e-applicability-$latestPass.json"))
           # Saved as UTF-8 with the diagnostics, line by line, for report-failure (Tee-Object in
           # Windows PowerShell writes UTF-16).
           $diagnosticsDir = Join-Path $env:RUNNER_TEMP 'e2e-diagnostics'

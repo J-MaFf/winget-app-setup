@@ -9,12 +9,13 @@
 
       1. Each catalog app's applicability (its 'arch' list and its 'condition' scriptblock, issue
          #217) is decided ON THIS MACHINE by the installer's own rule, the module's
-         Test-AppApplicability, fail open included: a gate that cannot answer is warned about and
-         the app is treated as applicable. Apps that do not apply (e.g.
-         Dell.CommandUpdate.Universal on non-Dell hardware, or the 64-bit Reader on ARM64) are
-         asserted differently below instead of being expected as installed. An app with neither
-         an arch list nor a condition must apply whatever the module says: it stays expected
-         installed, and the module finding it not applicable fails an assertion of its own.
+         Test-AppApplicability (with -ApplicabilityPath: as recorded just before the latest pass),
+         fail open included: a gate that cannot answer is warned about and the app is treated
+         as applicable. Apps that do not apply (e.g. Dell.CommandUpdate.Universal on non-Dell
+         hardware, or the 64-bit Reader on ARM64) are asserted differently below instead of
+         being expected as installed. An app with neither an arch list nor a condition must
+         apply whatever the module says: it stays expected installed, and the module finding it
+         not applicable fails an assertion of its own.
       2. Every APPLICABLE app in Get-DefaultAppCatalog (minus -SkipApps) resolves via
          `winget list --exact --id <id>`, classified by $LASTEXITCODE captured immediately
          after the call (exit 0 = installed; nonzero = missing).
@@ -70,6 +71,13 @@
     stamped into this file, which catches a run that tested some other copy - for example a
     workflow that fetched raw main while the branch under test changed the module. Default: no
     build check.
+.PARAMETER ApplicabilityPath
+    The record e2e/Invoke-InstallPass.ps1 -ApplicabilityPath wrote just before the pass whose
+    transcript is the latest; applicability (1) is taken from it. The installer decides it before
+    it changes the machine, and its Windows Terminal step changes what Terminal's condition reads.
+    A missing or unreadable record fails an assertion, and applicability is decided now instead.
+    Default: decided now, which is right only when the latest pass changed nothing a condition
+    reads (a second pass).
 .PARAMETER ExpectPowerShell7Bootstrap
     Enables the bootstrap assertions (9). Pass this when every pass was started from Windows
     PowerShell 5.1 (the e2e-install-windows-powershell leg).
@@ -90,6 +98,9 @@ param (
 
     [Parameter(Mandatory = $false)]
     [string]$InstallerPath,
+
+    [Parameter(Mandatory = $false)]
+    [string]$ApplicabilityPath,
 
     [Parameter(Mandatory = $false)]
     [switch]$ExpectPowerShell7Bootstrap,
@@ -141,7 +152,12 @@ foreach ($app in $skipped) {
 # --- 1. Applicability: the installer's own rule, on THIS machine -----------------------------
 # Get-CatalogAppApplicability asks the module (Test-AppApplicability, Get-AppNotApplicableReason),
 # so an arch list counts as in the run and the expected skip reason is the one the run printed.
-$applicability = Get-CatalogAppApplicability -Apps $candidateApps
+# With -ApplicabilityPath, its answer recorded just before the latest pass, as the run decided it.
+$resolvedApplicability = Resolve-AssertionApplicability -Apps $candidateApps -ApplicabilityPath $ApplicabilityPath
+if ($resolvedApplicability.Row) {
+    $results.Add($resolvedApplicability.Row)
+}
+$applicability = $resolvedApplicability.Applicability
 $appsToAssert = @($applicability.Applicable)
 foreach ($id in $applicability.NotApplicable.Keys) {
     Write-Host "NOT APPLICABLE on this machine: $id ($($applicability.NotApplicable[$id])) - asserting its skip line instead of an install." -ForegroundColor Yellow

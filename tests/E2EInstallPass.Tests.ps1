@@ -317,6 +317,69 @@ Describe 'e2e/Invoke-InstallPass.ps1 run as a step' {
     }
 }
 
+# E2E run 37518954302: Assert-Install.ps1 decided applicability after the install, but the run
+# decided it before its Windows Terminal step changed what Terminal's condition reads.
+Describe 'The applicability record taken before each pass' {
+    BeforeAll {
+        $tokens = $null
+        $parseErrors = $null
+        $script:InstallPassAst = [System.Management.Automation.Language.Parser]::ParseFile($script:InstallPassScript, [ref]$tokens, [ref]$parseErrors)
+        $script:Workflow = Get-Content -Raw -LiteralPath (Join-Path $script:RepoRoot '.github/workflows/e2e-install.yml')
+    }
+
+    It 'Is written before the installer starts' {
+        $save = @($script:InstallPassAst.FindAll({ param($node) $node -is [System.Management.Automation.Language.CommandAst] -and $node.GetCommandName() -eq 'Save-ApplicabilityRecord' }, $true))
+        $start = @($script:InstallPassAst.FindAll({ param($node) $node -is [System.Management.Automation.Language.CommandAst] -and $node.InvocationOperator -eq 'Ampersand' -and $node.CommandElements[0].Extent.Text -eq '$command.FilePath' }, $true))
+
+        $save.Count | Should -Be 1
+        $start.Count | Should -Be 1
+        $save[0].Extent.Text | Should -Match '-Path \$ApplicabilityPath\b'
+        $save[0].Extent.StartOffset | Should -BeLessThan $start[0].Extent.StartOffset
+    }
+
+    It 'Is there, with the module''s answer, when the installer starts' {
+        $record = Join-Path $TestDrive 'e2e-applicability-second.json'
+        Set-Content -LiteralPath $record -Value 'stale'
+        $quotedRecord = "'" + $record.Replace("'", "''") + "'"
+        $installer = New-StandInInstaller -Body "if ((Get-Content -Raw -LiteralPath $quotedRecord) -match 'NotApplicable') { Write-Host 'record present' }; exit 0"
+
+        $output = & $script:Pwsh -NoProfile -File $script:InstallPassScript -Pass second -Shell pwsh -Entry File -Source checkout -KnownPlatformIncompatible '' -InstallerPath $installer -ApplicabilityPath $record 2>&1
+        $exitCode = $LASTEXITCODE
+        $saved = Get-Content -Raw -LiteralPath $record | ConvertFrom-Json
+
+        $exitCode | Should -Be 0
+        ($output -join "`n") | Should -Match 'record present'
+        ($output -join "`n") | Should -Match 'Recorded which apps apply before the second pass in '
+        $saved.Label | Should -Be 'before the second pass'
+        $saved.PSObject.Properties.Name | Should -Contain 'NotApplicable'
+        $saved.PSObject.Properties.Name | Should -Contain 'UngatedNotApplicable'
+    }
+
+    It 'Is passed to every install pass of the workflow, one file per pass' {
+        $passCalls = [regex]::Matches($script:Workflow, '(?m)Invoke-InstallPass\.ps1 -Pass (?<pass>first|second)\b.*$')
+
+        $passCalls.Count | Should -Be 4
+        foreach ($call in $passCalls) {
+            $call.Value | Should -Match ([regex]::Escape(("-ApplicabilityPath (Join-Path `$env:RUNNER_TEMP 'e2e-applicability-{0}.json')" -f $call.Groups['pass'].Value)))
+        }
+    }
+
+    It 'Is read by <Step> from the second pass only when that pass ran' -ForEach @(
+        @{ Step = 'Run assertions (e2e/Assert-Install.ps1, shared with tier 2)' }
+        @{ Step = 'Run assertions (e2e/Assert-Install.ps1, with the bootstrap checks)' }
+    ) {
+        $stepPattern = '(?ms)^\s+- name: ' + [regex]::Escape($Step) + '\r?\n(?<body>.*?)(?=^\s+- name: |\z)'
+        $body = [regex]::Match($script:Workflow, $stepPattern).Groups['body'].Value
+        $secondPassRan = [regex]::Match($body, "(?ms)if \(\`$env:SECOND_PASS_OUTCOME -eq 'success' -or \`$env:SECOND_PASS_OUTCOME -eq 'failure'\) \{(?<then>[^}]*)\}")
+
+        $body | Should -Match "(?m)^\s+\`$latestPass = 'first'\s*$"
+        $secondPassRan.Success | Should -BeTrue
+        $secondPassRan.Groups['then'].Value | Should -Match 'ExpectAllSkippedOnSecondRun'
+        $secondPassRan.Groups['then'].Value | Should -Match "\`$latestPass = 'second'"
+        $body | Should -Match ([regex]::Escape('$assertArgs += @(''-ApplicabilityPath'', (Join-Path $env:RUNNER_TEMP "e2e-applicability-$latestPass.json"))'))
+    }
+}
+
 Describe 'e2e scripts run by Windows PowerShell 5.1' {
     It 'Stays runnable by Windows PowerShell 5.1: <Name> is ASCII only, parses cleanly, no PowerShell 7-only operators' -ForEach @(
         @{ Name = 'e2e/Invoke-InstallPass.ps1' }

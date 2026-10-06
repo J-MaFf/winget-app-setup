@@ -16,8 +16,8 @@
     the installer source still writes each of them, so a reworded message fails a unit test
     instead of quietly matching nothing here.
 
-    Runs under PowerShell 7 (Assert-Install.ps1) and stays ASCII with no 7-only syntax, like the
-    other e2e scripts.
+    Runs under PowerShell 7 (Assert-Install.ps1) and Windows PowerShell 5.1
+    (e2e/Invoke-InstallPass.ps1), so it stays ASCII with no 7-only syntax.
 #>
 
 <#
@@ -619,6 +619,161 @@ function Get-CatalogAppApplicability {
         NotApplicable        = $notApplicable
         UngatedNotApplicable = $ungatedNotApplicable
     }
+}
+
+<#
+.SYNOPSIS
+    Records in a JSON file which catalog apps apply here (Get-CatalogAppApplicability).
+.DESCRIPTION
+    e2e/Invoke-InstallPass.ps1 calls it just before a pass starts the installer, which decides
+    applicability before it changes the machine. Its Windows Terminal step then changes what
+    Terminal's condition reads, so Assert-Install.ps1 -ApplicabilityPath checks against this record.
+.PARAMETER Path
+    The file to write (replaced).
+.PARAMETER Apps
+    The catalog (Get-DefaultAppCatalog).
+.PARAMETER Label
+    When it was taken, for the assertion's detail (e.g. 'before the first pass').
+.RETURNS
+    Get-CatalogAppApplicability's result.
+#>
+function Save-ApplicabilityRecord {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [hashtable[]]$Apps,
+        [Parameter(Mandatory = $false)]
+        [string]$Label = ''
+    )
+
+    $applicability = Get-CatalogAppApplicability -Apps $Apps
+    $notApplicable = @(foreach ($id in $applicability.NotApplicable.Keys) {
+            [pscustomobject]@{ Id = [string]$id; Reason = [string]$applicability.NotApplicable[$id] }
+        })
+    # Plain arrays: Windows PowerShell 5.1 can write a wrapped one as {"value": [...], "Count": n}.
+    $record = [pscustomobject]@{
+        Label                = $Label
+        NotApplicable        = [object[]]$notApplicable
+        UngatedNotApplicable = [string[]]@($applicability.UngatedNotApplicable)
+    }
+    $fullPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path)
+    [System.IO.File]::WriteAllText($fullPath, (ConvertTo-Json -InputObject $record -Depth 4))
+    return $applicability
+}
+
+<#
+.SYNOPSIS
+    Reads a Save-ApplicabilityRecord file back as Get-CatalogAppApplicability's split of the apps.
+.PARAMETER Path
+    The record.
+.PARAMETER Apps
+    The catalog entries to split (Get-DefaultAppCatalog, less the skip-listed ones). An app the
+    record does not list as not applicable is expected installed.
+.RETURNS
+    [pscustomobject] with Applicability (Applicable, NotApplicable and UngatedNotApplicable, as
+    Get-CatalogAppApplicability returns them; $null when the record cannot be read), Label and
+    Problem (why it cannot be read, otherwise $null).
+#>
+function Read-ApplicabilityRecord {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [hashtable[]]$Apps
+    )
+
+    $record = $null
+    $problem = $null
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        $problem = "no applicability record at $Path"
+    }
+    else {
+        try {
+            $record = ConvertFrom-Json -InputObject ([string](Get-Content -LiteralPath $Path -Raw)) -ErrorAction Stop
+        }
+        catch {
+            $problem = "the applicability record $Path is not JSON: $($_.Exception.Message)"
+        }
+        if (-not $problem -and ($null -eq $record -or $null -eq $record.PSObject.Properties['NotApplicable'])) {
+            $problem = "the applicability record $Path has no NotApplicable list"
+        }
+    }
+    if ($problem) {
+        return [pscustomobject]@{ Applicability = $null; Label = $null; Problem = $problem }
+    }
+
+    $recordedReasons = @{}
+    foreach ($entry in @($record.NotApplicable)) {
+        if ($null -ne $entry -and $entry.Id) {
+            $recordedReasons[[string]$entry.Id] = [string]$entry.Reason
+        }
+    }
+    $recordedUngated = @(@($record.UngatedNotApplicable) | Where-Object { $_ } | ForEach-Object { [string]$_ })
+    $applicable = @()
+    $notApplicable = [ordered]@{}
+    $ungatedNotApplicable = @()
+    foreach ($app in $Apps) {
+        $id = [string]$app.name
+        if ($recordedReasons.ContainsKey($id)) {
+            $notApplicable[$id] = $recordedReasons[$id]
+        }
+        else {
+            $applicable += $app
+        }
+        if ($recordedUngated -contains $id) {
+            $ungatedNotApplicable += $id
+        }
+    }
+    return [pscustomobject]@{
+        Applicability = [pscustomobject]@{
+            Applicable           = $applicable
+            NotApplicable        = $notApplicable
+            UngatedNotApplicable = $ungatedNotApplicable
+        }
+        Label         = [string]$record.Label
+        Problem       = $null
+    }
+}
+
+<#
+.SYNOPSIS
+    Decides which apps Assert-Install.ps1 expects installed and which skip lines it expects.
+.DESCRIPTION
+    From the record taken just before the latest pass when there is one (Read-ApplicabilityRecord),
+    otherwise now (Get-CatalogAppApplicability). A record that cannot be read fails the
+    'Applicability recorded before the latest pass' row, and applicability is decided now.
+.PARAMETER Apps
+    The catalog entries (Get-DefaultAppCatalog, less the skip-listed ones).
+.PARAMETER ApplicabilityPath
+    The record (Save-ApplicabilityRecord); empty to decide now.
+.RETURNS
+    [pscustomobject] with Applicability (Get-CatalogAppApplicability's shape) and Row (the
+    'Applicability recorded before the latest pass' row; $null without -ApplicabilityPath).
+#>
+function Resolve-AssertionApplicability {
+    param (
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [hashtable[]]$Apps,
+        [Parameter(Mandatory = $false)]
+        [AllowEmptyString()]
+        [string]$ApplicabilityPath
+    )
+
+    $name = 'Applicability recorded before the latest pass'
+    $row = $null
+    if ($ApplicabilityPath) {
+        $record = Read-ApplicabilityRecord -Path $ApplicabilityPath -Apps $Apps
+        if ($record.Applicability) {
+            $row = New-TranscriptAssertionResult -Name $name -Passed $true -Detail "$ApplicabilityPath ($($record.Label))"
+            return [pscustomobject]@{ Applicability = $record.Applicability; Row = $row }
+        }
+        $row = New-TranscriptAssertionResult -Name $name -Passed $false -Detail "$($record.Problem); decided after the install instead"
+    }
+    return [pscustomobject]@{ Applicability = (Get-CatalogAppApplicability -Apps $Apps); Row = $row }
 }
 
 <#
