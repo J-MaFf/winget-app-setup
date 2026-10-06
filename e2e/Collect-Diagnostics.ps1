@@ -20,6 +20,9 @@
       events-AppXDeployment.txt  Microsoft-Windows-AppXDeploymentServer/Operational errors and
                                  warnings.
       wau-logs\                  A copy of Winget-AutoUpdate's logs folder.
+      winget-engine-logs\        The newest 10 WinGetCOM-*.log files of the WinGet engine that
+                                 Microsoft.WinGet.Client runs as SYSTEM (wgt-gq8.42), each named
+                                 after the temp folder it came from (Temp-, SystemTemp-).
 
     Every source is optional. A missing or failing source is recorded in snapshot.txt and the
     script still exits 0, so diagnostics never turn a run red or hide the real failure.
@@ -41,6 +44,9 @@
     Winget-AutoUpdate's logs folder. Default: the 'logs' folder under the InstallLocation that WAU
     records in HKLM:\SOFTWARE\Romanitho\Winget-AutoUpdate, else under
     %ProgramFiles%\Winget-AutoUpdate.
+.PARAMETER WingetEngineLogDirectory
+    Where the WinGet engine of a run as SYSTEM writes WinGetCOM-*.log. Default:
+    %SystemRoot%\Temp\WinGet\defaultState and %SystemRoot%\SystemTemp\WinGet\defaultState.
 .NOTES
     Exit code: always 0.
 #>
@@ -59,7 +65,10 @@ param (
     [datetime]$Since,
 
     [Parameter(Mandatory = $false)]
-    [string]$WauLogDirectory
+    [string]$WauLogDirectory,
+
+    [Parameter(Mandatory = $false)]
+    [string[]]$WingetEngineLogDirectory
 )
 
 $ErrorActionPreference = 'Stop'
@@ -311,6 +320,51 @@ if ($IncludeLogs) {
     }
     catch {
         Add-SourceStatus 'WAU logs' "ERROR: $($_.Exception.Message)"
+    }
+
+    # --- WinGet engine logs (Microsoft.WinGet.Client as SYSTEM) -------------------------------
+    try {
+        if (-not $WingetEngineLogDirectory) {
+            $WingetEngineLogDirectory = @()
+            if ($env:SystemRoot) {
+                $WingetEngineLogDirectory = @((Join-Path $env:SystemRoot 'Temp\WinGet\defaultState'), (Join-Path $env:SystemRoot 'SystemTemp\WinGet\defaultState'))
+            }
+        }
+        $engineLogs = @()
+        foreach ($engineLogDirectory in $WingetEngineLogDirectory) {
+            if ($engineLogDirectory -and (Test-Path -LiteralPath $engineLogDirectory -PathType Container)) {
+                # <SystemRoot>\<Temp or SystemTemp>\WinGet\defaultState: the copy is named after the temp folder.
+                $origin = Split-Path -Leaf (Split-Path -Parent (Split-Path -Parent $engineLogDirectory))
+                foreach ($file in @(Get-ChildItem -LiteralPath $engineLogDirectory -Filter 'WinGetCOM-*.log' -File -Force -ErrorAction SilentlyContinue)) {
+                    $engineLogs += New-Object PSObject -Property @{ File = $file; Origin = $origin }
+                }
+            }
+        }
+        if ($engineLogs.Count -gt 0) {
+            $destination = Join-Path $targetDirectory 'winget-engine-logs'
+            $null = New-Item -ItemType Directory -Path $destination -Force
+            $copyErrors = New-Object System.Collections.Generic.List[string]
+            $newest = @($engineLogs | Sort-Object -Property { $_.File.LastWriteTimeUtc } -Descending | Select-Object -First 10)
+            foreach ($engineLog in $newest) {
+                try {
+                    Copy-Item -LiteralPath $engineLog.File.FullName -Destination (Join-Path $destination ('{0}-{1}' -f $engineLog.Origin, $engineLog.File.Name)) -Force -ErrorAction Stop
+                }
+                catch {
+                    $copyErrors.Add("$($engineLog.File.Name): $($_.Exception.Message)")
+                }
+            }
+            $status = '{0} of {1} WinGetCOM log(s) -> winget-engine-logs' -f ($newest.Count - $copyErrors.Count), $engineLogs.Count
+            if ($copyErrors.Count -gt 0) {
+                $status += "; not copied: $($copyErrors -join '; ')"
+            }
+            Add-SourceStatus 'WinGet engine logs' $status
+        }
+        else {
+            Add-SourceStatus 'WinGet engine logs' "none ($($WingetEngineLogDirectory -join ', '))"
+        }
+    }
+    catch {
+        Add-SourceStatus 'WinGet engine logs' "ERROR: $($_.Exception.Message)"
     }
 }
 

@@ -302,6 +302,80 @@ exit 9
         }
     }
 
+    # wgt-gq8.42: Endpoint Central passes script arguments; the installer reads the engine request
+    # from WINGET_APP_SETUP_SYSTEM_ENGINE, which its PowerShell 7 relaunch inherits.
+    Context 'The install engine (-SystemInstallEngine)' {
+        BeforeEach {
+            $script:engineResultPath = Join-Path $TestDrive ([guid]::NewGuid().ToString('N') + '.txt')
+            $script:engineInstaller = New-TestScript -Name 'winget-app-install.ps1' -Body @"
+param ([switch]`$NonInteractive, [switch]`$SkipSystemCheck)
+Set-Content -LiteralPath '$($script:engineResultPath)' -Value @("Engine=`$env:WINGET_APP_SETUP_SYSTEM_ENGINE", "Unbound=`$(`$args.Count)")
+exit 0
+"@
+            $script:engineInstallerSha256 = (Get-FileHash -LiteralPath $script:engineInstaller -Algorithm SHA256).Hash
+            $script:savedEngineVariable = [Environment]::GetEnvironmentVariable('WINGET_APP_SETUP_SYSTEM_ENGINE')
+        }
+
+        AfterEach {
+            [Environment]::SetEnvironmentVariable('WINGET_APP_SETUP_SYSTEM_ENGINE', $script:savedEngineVariable)
+        }
+
+        It 'Sets WINGET_APP_SETUP_SYSTEM_ENGINE for the installer only, says so, and removes it afterwards' {
+            [Environment]::SetEnvironmentVariable('WINGET_APP_SETUP_SYSTEM_ENGINE', $null)
+
+            Invoke-RmmMachinePhase -InstallerPath $script:engineInstaller -InstallerSha256 $script:engineInstallerSha256 -SystemInstallEngine 'WinGetClient' -LogDirectory $script:logs -CopyRoot $script:copyRoot | Should -Be 0
+
+            Get-Content -LiteralPath $script:engineResultPath | Should -Be @('Engine=WinGetClient', 'Unbound=0')
+            [Environment]::GetEnvironmentVariable('WINGET_APP_SETUP_SYSTEM_ENGINE') | Should -BeNullOrEmpty
+            $script:lines | Should -Contain 'Install engine requested: WinGetClient (WINGET_APP_SETUP_SYSTEM_ENGINE, read by installer builds that support it).'
+            # The request is logged before the installer runs.
+            [array]::IndexOf($script:lines, 'Install engine requested: WinGetClient (WINGET_APP_SETUP_SYSTEM_ENGINE, read by installer builds that support it).') | Should -BeLessThan ([array]::IndexOf($script:lines, ($script:lines | Where-Object { $_ -like 'Running: *' } | Select-Object -First 1)))
+        }
+
+        It 'Restores the value the job had set, also when the installer could not run' {
+            [Environment]::SetEnvironmentVariable('WINGET_APP_SETUP_SYSTEM_ENGINE', 'Cli')
+            Mock Invoke-RmmProcess { $null }
+
+            Invoke-RmmMachinePhase -InstallerPath $script:engineInstaller -InstallerSha256 $script:engineInstallerSha256 -SystemInstallEngine 'WinGetClient' -LogDirectory $script:logs -CopyRoot $script:copyRoot | Should -Be 5
+
+            [Environment]::GetEnvironmentVariable('WINGET_APP_SETUP_SYSTEM_ENGINE') | Should -Be 'Cli'
+        }
+
+        It 'Leaves the variable as the job set it without -SystemInstallEngine' {
+            [Environment]::SetEnvironmentVariable('WINGET_APP_SETUP_SYSTEM_ENGINE', 'WinGetClient')
+
+            Invoke-RmmMachinePhase -InstallerPath $script:engineInstaller -InstallerSha256 $script:engineInstallerSha256 -LogDirectory $script:logs -CopyRoot $script:copyRoot | Should -Be 0
+
+            Get-Content -LiteralPath $script:engineResultPath | Should -Be @('Engine=WinGetClient', 'Unbound=0')
+            ($script:lines -join "`n") | Should -Not -Match 'Install engine requested'
+        }
+
+        It 'Keeps -SystemInstallEngine for the 64-bit relaunch' {
+            ConvertTo-RmmForwardedArgument -BoundParameters ([ordered]@{ SystemInstallEngine = 'WinGetClient'; SkipSystemCheck = [System.Management.Automation.SwitchParameter]::new($true) }) | Should -Be @('-SkipSystemCheck', '-SystemInstallEngine', 'WinGetClient')
+        }
+
+        It 'Passes -SystemInstallEngine through the 64-bit relaunch' {
+            Mock Test-Rmm32BitHostOn64BitWindows { $true }
+            Mock Get-RmmSysnativePowerShellPath { $script:Pwsh }
+            $ast = [System.Management.Automation.Language.Parser]::ParseFile($script:MachineWrapperPath, [ref]$null, [ref]$null)
+            $paramBlock = (@($ast.ParamBlock.Attributes | ForEach-Object { $_.Extent.Text }) + @($ast.ParamBlock.Extent.Text)) -join "`n"
+            $boundPath = Join-Path $TestDrive ([guid]::NewGuid().ToString('N') + '.txt')
+            $standIn = New-TestScript -Body (@($paramBlock, ('Set-Content -LiteralPath ''{0}'' -Value (@($PSBoundParameters.Keys | Sort-Object | ForEach-Object {{ ''{{0}}={{1}}'' -f $_, $PSBoundParameters[$_] }}))' -f $boundPath), 'exit 0') -join "`n")
+
+            Invoke-RmmMachinePhase -ScriptPath $standIn -ForwardedArguments (ConvertTo-RmmForwardedArgument -BoundParameters @{ SystemInstallEngine = 'WinGetClient' }) -SystemInstallEngine 'WinGetClient' -LogDirectory $script:logs -CopyRoot $script:copyRoot | Should -Be 0
+
+            Get-Content -LiteralPath $boundPath | Should -Be @('From32BitHost=True', 'SystemInstallEngine=WinGetClient')
+        }
+
+        It 'Refuses an engine it does not know before doing anything' {
+            $output = & $script:Pwsh -NoLogo -NoProfile -NonInteractive -File $script:MachineWrapperPath -SystemInstallEngine 'Module' 2>&1 | Out-String
+
+            $LASTEXITCODE | Should -Not -Be 0
+            $output | Should -Match "validate argument[^\r\n]*on parameter 'SystemInstallEngine'"
+            $output | Should -Not -Match 'winget-app-setup RMM wrapper'
+        }
+    }
+
     It 'Logs to an install-(time)-rmm.log next to the installer''s logs, the installer''s output included' {
         Mock Write-RmmLine { Write-Host $Message }
 

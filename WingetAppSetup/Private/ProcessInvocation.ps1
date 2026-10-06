@@ -21,6 +21,11 @@
     WingetVersion     the `winget --version` launch check (30 seconds; no network or source I/O).
     WingetSourceUpdate `winget source update`, the source check before the installs (2 minutes).
     WingetSourceReset `winget source reset`, which downloads the source again (5 minutes).
+    WingetClientProbe the Microsoft.WinGet.Client engine's start-of-run probe in a child pwsh: the
+                      module load, Get-WinGetVersion and one Get-WinGetPackage (3 minutes).
+    WingetClientVersion Get-WinGetVersion in a child pwsh, the engine's launch check (60 seconds).
+    WingetClientListCheck the engine's per-app Get-WinGetPackage check in a child pwsh, which
+                      starts pwsh and loads the module each time (45 seconds).
     MsiExec           one msiexec install or uninstall (15 minutes).
     AppxProvisioning  one Add-AppxProvisionedPackage, run in Windows PowerShell (10 minutes).
     WebDownload       a file download's connection and wait for the response headers (5 minutes);
@@ -35,7 +40,7 @@
 function Get-ProcessTimeoutSeconds {
     param (
         [Parameter(Mandatory = $true)]
-        [ValidateSet('WingetInstall', 'WingetDownload', 'WingetUninstall', 'WingetListCheck', 'WingetVersion', 'WingetSourceUpdate', 'WingetSourceReset', 'MsiExec', 'AppxProvisioning', 'WebDownload', 'WebDownloadStall', 'WebLookup')]
+        [ValidateSet('WingetInstall', 'WingetDownload', 'WingetUninstall', 'WingetListCheck', 'WingetVersion', 'WingetSourceUpdate', 'WingetSourceReset', 'WingetClientProbe', 'WingetClientVersion', 'WingetClientListCheck', 'MsiExec', 'AppxProvisioning', 'WebDownload', 'WebDownloadStall', 'WebLookup')]
         [string]$Operation
     )
 
@@ -47,6 +52,9 @@ function Get-ProcessTimeoutSeconds {
         'WingetVersion' { return 30 }
         'WingetSourceUpdate' { return 120 }
         'WingetSourceReset' { return 300 }
+        'WingetClientProbe' { return 180 }
+        'WingetClientVersion' { return 60 }
+        'WingetClientListCheck' { return 45 }
         'MsiExec' { return 900 }
         'AppxProvisioning' { return 600 }
         'WebDownload' { return 300 }
@@ -693,13 +701,77 @@ function Get-InstallerLogDirectory {
 
 <#
 .SYNOPSIS
+    Returns a new path for one installer log in the run's logs folder, or $null.
+.DESCRIPTION
+    winget-<subcommand>-<package id>-<yyyyMMdd-HHmmss>[-<n>].log, the name diagnostics and
+    housekeeping look for, with -<n> added when that file exists. The folder is created first:
+    msiexec fails the install (1622) when it cannot open its log. $null when there is no logs folder
+    or it cannot be created: no installer log is better than an install that fails over it. Used by
+    Invoke-WingetProcess (--log) and Invoke-WingetClientInstall (-Log).
+.PARAMETER Subcommand
+    install, upgrade, uninstall or repair.
+.PARAMETER PackageId
+    The package id; characters other than letters, digits, '.', '-' and '_' become '_'. Empty:
+    'winget'.
+.PARAMETER LogDirectory
+    The folder. Default: Get-InstallerLogDirectory. Empty: no log.
+.OUTPUTS
+    [string] or $null.
+#>
+function New-WingetInstallerLogPath {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$Subcommand,
+
+        [Parameter(Mandatory = $false)]
+        [AllowEmptyString()]
+        [AllowNull()]
+        [string]$PackageId,
+
+        [Parameter(Mandatory = $false)]
+        [AllowEmptyString()]
+        [AllowNull()]
+        [string]$LogDirectory
+    )
+
+    $directory = $LogDirectory
+    if (-not $PSBoundParameters.ContainsKey('LogDirectory')) {
+        $directory = Get-InstallerLogDirectory
+    }
+    if ([string]::IsNullOrWhiteSpace($directory)) {
+        return $null
+    }
+    $label = 'winget'
+    if (-not [string]::IsNullOrWhiteSpace($PackageId)) {
+        $label = $PackageId -replace '[^\w.\-]', '_'
+    }
+    try {
+        if (-not (Test-Path -LiteralPath $directory)) {
+            [void](New-Item -Path $directory -ItemType Directory -Force -ErrorAction Stop)
+        }
+        $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+        $candidate = Join-Path $directory ('winget-{0}-{1}-{2}.log' -f $Subcommand, $label, $stamp)
+        $suffix = 2
+        while (Test-Path -LiteralPath $candidate) {
+            $candidate = Join-Path $directory ('winget-{0}-{1}-{2}-{3}.log' -f $Subcommand, $label, $stamp, $suffix)
+            $suffix++
+        }
+        return $candidate
+    }
+    catch {
+        return $null
+    }
+}
+
+<#
+.SYNOPSIS
     Runs winget through Invoke-ExternalProcess, with its installer log in the run's logs folder.
 .DESCRIPTION
     Resolves winget with Resolve-WingetExecutable unless a path is given. For install, upgrade,
-    uninstall and repair it adds `--log <file>` in the logs folder, named after the subcommand, the
-    package id and the time, so a failed installer's log sits next to the transcript. The folder is
-    created first: msiexec fails the install (1622) when it cannot open its log. Nothing is added
-    when the caller passes --log or -o, or there is no logs folder.
+    uninstall and repair it adds `--log <file>` (New-WingetInstallerLogPath: named after the
+    subcommand, the package id and the time, in the logs folder), so a failed installer's log sits
+    next to the transcript. Nothing is added when the caller passes --log or -o, or there is no
+    logs folder.
 .PARAMETER ArgumentList
     winget's arguments, subcommand first.
 .PARAMETER TimeoutSeconds
@@ -746,34 +818,17 @@ function Invoke-WingetProcess {
         $subcommand = [string]$arguments[0]
     }
     if (@('install', 'upgrade', 'uninstall', 'repair') -contains $subcommand -and -not ($arguments -contains '--log' -or $arguments -contains '-o')) {
-        $directory = $LogDirectory
-        if (-not $PSBoundParameters.ContainsKey('LogDirectory')) {
-            $directory = Get-InstallerLogDirectory
+        $logParameters = @{ Subcommand = $subcommand }
+        $idIndex = [array]::IndexOf($arguments, '--id')
+        if ($idIndex -ge 0 -and $idIndex + 1 -lt $arguments.Count) {
+            $logParameters['PackageId'] = [string]$arguments[$idIndex + 1]
         }
-        if (-not [string]::IsNullOrWhiteSpace($directory)) {
-            $label = 'winget'
-            $idIndex = [array]::IndexOf($arguments, '--id')
-            if ($idIndex -ge 0 -and $idIndex + 1 -lt $arguments.Count) {
-                $label = [string]$arguments[$idIndex + 1] -replace '[^\w.\-]', '_'
-            }
-            try {
-                if (-not (Test-Path -LiteralPath $directory)) {
-                    [void](New-Item -Path $directory -ItemType Directory -Force -ErrorAction Stop)
-                }
-                $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
-                $candidate = Join-Path $directory ('winget-{0}-{1}-{2}.log' -f $subcommand, $label, $stamp)
-                $suffix = 2
-                while (Test-Path -LiteralPath $candidate) {
-                    $candidate = Join-Path $directory ('winget-{0}-{1}-{2}-{3}.log' -f $subcommand, $label, $stamp, $suffix)
-                    $suffix++
-                }
-                $logPath = $candidate
-                $arguments += @('--log', $logPath)
-            }
-            catch {
-                # No installer log is better than an install that fails over its log file.
-                $logPath = $null
-            }
+        if ($PSBoundParameters.ContainsKey('LogDirectory')) {
+            $logParameters['LogDirectory'] = $LogDirectory
+        }
+        $logPath = New-WingetInstallerLogPath @logParameters
+        if ($logPath) {
+            $arguments += @('--log', $logPath)
         }
     }
 

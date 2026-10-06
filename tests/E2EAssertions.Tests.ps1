@@ -300,6 +300,76 @@ Describe 'ConvertFrom-InstallTranscript' {
     }
 
     # Work-order item 34: the SYSTEM leg checks that the run really ran as SYSTEM.
+    # wgt-gq8.42: which engine installed, the module's own line, and how each app was installed.
+    It 'Reads a SYSTEM run that installed with Microsoft.WinGet.Client' {
+        $parsed = ConvertFrom-InstallTranscript -Content (Get-Fixture -Name 'system-winget-client-transcript')
+
+        $parsed.RanAsSystem | Should -BeTrue
+        $parsed.InstallEngine | Should -Be 'WinGetClient'
+        $parsed.InstallEngineVersion | Should -Be '1.29.380'
+        $parsed.InstallEngineLine | Should -BeLike 'Microsoft.WinGet.Client 1.29.380 (WinGet engine v1.29.380, PowerShell 7.6.6 x64; engine log folder *'
+        $parsed.WingetClientModuleReady | Should -BeTrue
+        $parsed.WingetClientModuleVersion | Should -Be '1.29.380'
+        $parsed.WingetClientModuleSha256 | Should -Be '3469E5747EB6B100E51FED3F2057386B5BA60BC8955A6669B5C2EB562E316619'
+        $parsed.WingetClientModuleFromCache | Should -BeFalse
+        $parsed.WingetClientModuleNotReadyReason | Should -BeNullOrEmpty
+        $parsed.WingetClientInstallIds | Should -Be @('7zip.7zip', 'Adobe.Acrobat.Reader.64-bit', 'Git.Git', 'GlavSoft.TightVNC', 'Google.Chrome', 'Google.GoogleDrive', 'Klocman.BulkCrapUninstaller')
+        $parsed.WingetExeInstallCount | Should -Be 0
+        $parsed.WingetClientEngineNotStartable | Should -BeFalse
+        $parsed.SummaryInstalled.Count | Should -Be 7
+    }
+
+    It 'Reads a second run that took the module from the cache and installed nothing' {
+        $parsed = ConvertFrom-InstallTranscript -Content (Get-Fixture -Name 'system-winget-client-second-pass')
+
+        $parsed.InstallEngine | Should -Be 'WinGetClient'
+        $parsed.WingetClientModuleFromCache | Should -BeTrue
+        $parsed.WingetClientInstallIds | Should -BeNullOrEmpty
+        $parsed.WingetExeInstallCount | Should -Be 0
+        $parsed.SummarySkipped.Count | Should -Be 11
+        $parsed.WindowsAppRuntimeInstallCount | Should -Be 0
+    }
+
+    It 'Reads a run that fell back to winget.exe: the first Install engine line, the reason, and the winget.exe installs' {
+        $parsed = ConvertFrom-InstallTranscript -Content (Get-Fixture -Name 'system-winget-client-fallback-transcript')
+
+        $parsed.InstallEngine | Should -Be 'Cli'
+        $parsed.InstallEngineVersion | Should -BeNullOrEmpty
+        $parsed.InstallEngineLine | Should -BeLike 'winget.exe (*), not the requested Microsoft.WinGet.Client: the module is not ready: *'
+        $parsed.WingetClientModuleReady | Should -BeFalse
+        $parsed.WingetClientModuleNotReadyReason | Should -Be 'downloading https://www.powershellgallery.com/api/v2/package/Microsoft.WinGet.Client/1.29.380 failed: No such host is known. (www.powershellgallery.com:443)'
+        $parsed.WingetClientInstallIds | Should -BeNullOrEmpty
+        $parsed.WingetExeInstallCount | Should -Be 7
+    }
+
+    It 'Reads the module''s last line, so a probe that failed after the module was ready counts' {
+        $text = @(
+            'WinGet client module: ready - Microsoft.WinGet.Client 1.29.380, SHA256 3469E5747EB6B100E51FED3F2057386B5BA60BC8955A6669B5C2EB562E316619, downloaded from the PowerShell Gallery.',
+            'WinGet client module: NOT READY - the module''s probe failed: Get-WinGetVersion returned no version.'
+        ) -join "`n"
+
+        $parsed = ConvertFrom-InstallTranscript -Content $text
+
+        $parsed.WingetClientModuleReady | Should -BeFalse
+        $parsed.WingetClientModuleNotReadyReason | Should -Be 'the module''s probe failed: Get-WinGetVersion returned no version'
+    }
+
+    It 'Reads the engine''s circuit breaker' {
+        $parsed = ConvertFrom-InstallTranscript -Content 'The WinGet client engine cannot be started on this machine (the WinGet client engine could not start: FileLoadException: x). The remaining apps are marked failed without an install attempt and are not retried.'
+
+        $parsed.WingetClientEngineNotStartable | Should -BeTrue
+        $parsed.WingetNotLaunchable | Should -BeFalse
+    }
+
+    It 'Leaves the engine fields empty for a run that is not SYSTEM' {
+        $parsed = ConvertFrom-InstallTranscript -Content (Get-Fixture -Name 'first-pass')
+
+        $parsed.InstallEngineLine | Should -BeNullOrEmpty
+        $parsed.InstallEngine | Should -BeNullOrEmpty
+        $parsed.WingetClientModuleLine | Should -BeNullOrEmpty
+        $parsed.WingetExeInstallCount | Should -Be 0
+    }
+
     It 'Says whether the run ran as SYSTEM' {
         $system = ConvertFrom-InstallTranscript -Content "Installer build: 1.0.0+5ea1f00d`nRunning as SYSTEM (for example from an RMM agent): installing for the whole PC only.`nSummary:"
         $user = Get-Fixture -Name 'first-pass'
@@ -677,6 +747,18 @@ Describe 'Installer messages the transcript parser keys on' {
         @{ File = 'WingetAppSetup/Private/LoggingInternal.ps1'; Text = "'install-{0:yyyyMMdd-HHmmss}{1}{2}.log'" }
         @{ File = 'WingetAppSetup/Public/Install.ps1'; Text = "Write-Info 'Running as SYSTEM (for example from an RMM agent): " }
         @{ File = 'rmm/Invoke-WingetAppSetup.ps1'; Text = "'install-{0:yyyyMMdd-HHmmss}-rmm.log'" }
+        # wgt-gq8.42: the Microsoft.WinGet.Client engine.
+        @{ File = 'WingetAppSetup/Private/WingetClientEngine.ps1'; Text = "Write-Info ('Install engine: Microsoft.WinGet.Client {0} (WinGet engine {1}, PowerShell {2} {3}; engine log folder {4}).'" }
+        @{ File = 'WingetAppSetup/Private/WingetClientEngine.ps1'; Text = "Write-Info ('Install engine: winget.exe ({0}), not the requested Microsoft.WinGet.Client: {1}.'" }
+        @{ File = 'WingetAppSetup/Private/WingetClientEngine.ps1'; Text = "Write-Info ('Install engine: winget.exe ({0}).'" }
+        @{ File = 'WingetAppSetup/Private/WingetClientModule.ps1'; Text = "Write-Success ('WinGet client module: ready - Microsoft.WinGet.Client {0}, SHA256 {1}, {2}.'" }
+        @{ File = 'WingetAppSetup/Private/WingetClientModule.ps1'; Text = "`$from = 'from the cache'" }
+        @{ File = 'WingetAppSetup/Private/WingetClientModule.ps1'; Text = 'Write-WarningMessage "WinGet client module: NOT READY - $reason."' }
+        @{ File = 'WingetAppSetup/Private/WingetClientEngine.ps1'; Text = 'Write-WarningMessage "WinGet client module: NOT READY - $reason."' }
+        @{ File = 'WingetAppSetup/Private/WingetClientEngine.ps1'; Text = "`$call = '  > Install-WinGetPackage -Id {0} -Source winget -MatchOption Equals -Scope System -Mode {1}'" }
+        @{ File = 'WingetAppSetup/Private/InstallVerification.ps1'; Text = 'Write-ErrorMessage "The WinGet client engine cannot be started on this machine (' }
+        @{ File = 'WingetAppSetup/Private/ProcessInvocation.ps1'; Text = "Write-Host ('  > {0} {1}' -f `$displayName, `$arguments)" }
+        @{ File = 'WingetAppSetup/Public/Install.ps1'; Text = "Write-WarningMessage ('Install engine: Microsoft.WinGet.Client was requested but not used ({0}); this run installed with winget.exe.'" }
     ) {
         $source = Get-Content -Raw -LiteralPath (Join-Path $script:RepoRoot $File)
         $source.Contains($Text) | Should -BeTrue -Because "e2e/TranscriptAssertions.ps1 matches this line; update both together"

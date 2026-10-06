@@ -258,10 +258,29 @@ Describe 'Invoke-InstallerHousekeeping (review finding P3-42)' {
         [void](New-Item -ItemType Directory -Path $script:logDirectory, $script:tempRoot -Force)
         Mock Get-DirectoryAccessSummary { [pscustomobject]@{ OwnerSid = 'S-1-5-32-544'; OwnerName = 'BUILTIN\Administrators'; InheritanceProtected = $true; AccessRules = @() } }
         Mock Test-IsSystemAccount { $false }
+        # Never this machine's %ProgramData%.
+        Mock Remove-StaleWingetClientFolder { 0 }
     }
 
     AfterEach {
         $script:InstallLogPath = $script:savedInstallLogPath
+    }
+
+    # wgt-gq8.42: the Microsoft.WinGet.Client engine's folders of runs that were killed.
+    It 'Removes the WinGet client engine''s leftover folders from %ProgramData%\winget-app-setup, and says so' {
+        Mock Remove-StaleWingetClientFolder { 2 }
+        $savedProgramData = $env:ProgramData
+        try {
+            $env:ProgramData = Join-Path $TestDrive 'ProgramData'
+            $result = Invoke-InstallerHousekeeping -LogDirectory $script:logDirectory -TempRoot @($script:tempRoot)
+        }
+        finally {
+            $env:ProgramData = $savedProgramData
+        }
+
+        $result.WingetClientFoldersRemoved | Should -Be 2
+        Should -Invoke Remove-StaleWingetClientFolder -Times 1 -Exactly -ParameterFilter { $Root -eq (Join-Path (Join-Path $TestDrive 'ProgramData') 'winget-app-setup') -and $MaxAgeHours -eq 24 }
+        Should -Invoke Write-Info -Times 1 -Exactly -ParameterFilter { $Message -like 'Removed 2 leftover Microsoft.WinGet.Client folder(s) from *winget-app-setup.' }
     }
 
     It 'Keeps the newest 30 transcripts in the run''s log folder and removes copy folders a day old' {
@@ -346,5 +365,69 @@ Describe 'Invoke-InstallerHousekeeping (review finding P3-42)' {
 
         $script:housekeepingResult.LogsRemoved | Should -Be 0
         Should -Invoke Write-WarningMessage -Times 1 -Exactly -ParameterFilter { $Message -match "Could not remove the installer's old logs and temporary copies: Access to the path is denied\. Continuing\." }
+    }
+}
+
+Describe 'Remove-StaleWingetClientFolder (wgt-gq8.42)' {
+    BeforeAll {
+        # An engine folder like Initialize-WingetClientModule's, with the module in a subfolder.
+        function New-TestWingetClientFolder {
+            param ([string]$Root, [string]$Name = ('wingetclient-' + [Guid]::NewGuid().ToString('N')), [double]$AgeHours)
+            $path = Join-Path $Root $Name
+            [void](New-TestFile -Directory (Join-Path $path 'Microsoft.WinGet.Client/net8.0-windows10.0.26100.0') -Name 'Microsoft.WinGet.Client.Cmdlets.dll')
+            [void](New-TestFile -Directory $path -Name 'Invoke-WingetClientRequest.ps1')
+            (Get-Item -LiteralPath $path).LastWriteTimeUtc = [DateTime]::UtcNow.AddHours(-$AgeHours)
+            $path
+        }
+    }
+
+    BeforeEach {
+        $script:stagingRoot = Join-Path $TestDrive ('staging-' + [Guid]::NewGuid().ToString('N'))
+        [void](New-Item -ItemType Directory -Path $script:stagingRoot -Force)
+        Mock Get-DirectoryAccessSummary { [pscustomobject]@{ OwnerSid = 'S-1-5-18'; OwnerName = 'NT AUTHORITY\SYSTEM'; InheritanceProtected = $true; AccessRules = @() } }
+    }
+
+    It 'Removes the engine folders a day old, with everything in them, and keeps newer ones and other folders' {
+        $old = New-TestWingetClientFolder -Root $script:stagingRoot -AgeHours 25
+        $recent = New-TestWingetClientFolder -Root $script:stagingRoot -AgeHours 2
+        $otherName = New-TestWingetClientFolder -Root $script:stagingRoot -Name 'wingetclient-keep' -AgeHours 48
+        $cache = Join-Path $script:stagingRoot 'cache'
+        [void](New-TestFile -Directory $cache -Name 'microsoft.winget.client.1.29.380.nupkg')
+        (Get-Item -LiteralPath $cache).LastWriteTimeUtc = [DateTime]::UtcNow.AddDays(-30)
+
+        Remove-StaleWingetClientFolder -Root $script:stagingRoot -MaxAgeHours 24 | Should -Be 1
+
+        Test-Path -LiteralPath $old | Should -BeFalse
+        Test-Path -LiteralPath $recent | Should -BeTrue
+        Test-Path -LiteralPath $otherName | Should -BeTrue
+        Test-Path -LiteralPath (Join-Path $cache 'microsoft.winget.client.1.29.380.nupkg') | Should -BeTrue
+    }
+
+    It 'Leaves a folder another account owns, or whose owner cannot be read' {
+        $folder = New-TestWingetClientFolder -Root $script:stagingRoot -AgeHours 30
+        Mock Get-DirectoryAccessSummary { [pscustomobject]@{ OwnerSid = 'S-1-5-21-1-2-3-1001'; OwnerName = 'CONTOSO\jdoe'; InheritanceProtected = $false; AccessRules = @() } }
+
+        Remove-StaleWingetClientFolder -Root $script:stagingRoot -MaxAgeHours 24 | Should -Be 0
+        Mock Get-DirectoryAccessSummary { throw 'Access is denied.' }
+        Remove-StaleWingetClientFolder -Root $script:stagingRoot -MaxAgeHours 24 | Should -Be 0
+
+        Test-Path -LiteralPath $folder | Should -BeTrue
+    }
+
+    It 'Leaves a link, and does nothing without the folder' {
+        $target = New-TestWingetClientFolder -Root (Join-Path $TestDrive 'link-target') -AgeHours 30
+        $link = Join-Path $script:stagingRoot ('wingetclient-' + [Guid]::NewGuid().ToString('N'))
+        try {
+            [void](New-Item -ItemType SymbolicLink -Path $link -Target $target -ErrorAction Stop)
+        }
+        catch {
+            Set-ItResult -Skipped -Because "this account cannot create a symbolic link ($($_.Exception.Message))"
+            return
+        }
+
+        Remove-StaleWingetClientFolder -Root $script:stagingRoot -MaxAgeHours 0 | Should -Be 0
+        Remove-StaleWingetClientFolder -Root (Join-Path $TestDrive 'missing') -MaxAgeHours 24 | Should -Be 0
+
+        Test-Path -LiteralPath (Join-Path $target 'Invoke-WingetClientRequest.ps1') | Should -BeTrue
     }
 }

@@ -281,6 +281,37 @@ Describe 'Test-MachineWingetAvailable (review finding P2-24)' {
         $script:errorMessages | Should -BeNullOrEmpty
         ($script:infoMessages -join "`n") | Should -Match '\[DRY-RUN\] No machine-wide winget was found.*A real run would stop here with exit code 2\.'
     }
+
+    # wgt-gq8.42: when Microsoft.WinGet.Client installs, winget.exe matters only to Winget-AutoUpdate.
+    Context 'Not required (-NotRequired: the WinGet client engine installs)' {
+        BeforeEach {
+            $script:warnings = @()
+            Mock Write-WarningMessage { $script:warnings += $Message }
+        }
+
+        It 'Checks the winget.exe files the same way and keeps the one that starts' {
+            Test-MachineWingetAvailable -NotRequired | Should -Be $true
+
+            Resolve-WingetExecutable | Should -Be $script:newest
+            Should -Invoke Test-WingetLaunchable -Times 1 -Exactly -ParameterFilter { $Attempts -eq 6 -and $RetryDelaySeconds -eq 15 }
+        }
+
+        It 'Warns, naming Winget-AutoUpdate and not exit code 2, when <Case>' -ForEach @(
+            @{ Case = 'none starts'; NoCandidate = $false; Expected = 'The machine-wide winget\.exe could not be started as SYSTEM \(tried 2 winget\.exe files above\)\..* Winget-AutoUpdate needs it; repair or update App Installer for this PC\.' }
+            @{ Case = 'there is none'; NoCandidate = $true; Expected = 'No machine-wide winget was found: .* Winget-AutoUpdate needs that winget\.exe; install or update App Installer for this PC\.' }
+        ) {
+            $script:launchable = @()
+            if ($NoCandidate) {
+                Mock Get-MachineWingetCandidate { }
+            }
+
+            Test-MachineWingetAvailable -NotRequired | Should -Be $false
+
+            $script:errorMessages | Should -BeNullOrEmpty
+            ($script:warnings -join "`n") | Should -Match $Expected
+            ($script:warnings -join "`n") | Should -Not -Match 'exit code 2'
+        }
+    }
 }
 
 Describe 'Get-ProvisionedAppxPackageName (the Get-AppxProvisionedPackage query seam)' {

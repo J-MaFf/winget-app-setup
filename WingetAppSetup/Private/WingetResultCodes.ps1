@@ -86,6 +86,7 @@ function Get-WingetExitCodeInfo {
         '0x8A15000F' = @('SOURCE_DATA_MISSING', 'the winget source data is missing', 'SourceBroken')
         '0x8A150012' = @('SOURCE_NAME_DOES_NOT_EXIST', 'the winget source is not configured', 'SourceBroken')
         '0x8A150014' = @('NO_APPLICATIONS_FOUND', 'winget found no package with that id', '')
+        '0x8A150016' = @('MULTIPLE_APPLICATIONS_FOUND', 'more than one package matched the id', '')
         '0x8A150015' = @('NO_SOURCES_DEFINED', 'no winget source is configured', 'SourceBroken')
         '0x8A150019' = @('COMMAND_REQUIRES_ADMIN', 'the winget command needs administrator rights', '')
         '0x8A15003A' = @('BLOCKED_BY_POLICY', 'winget is disabled by Group Policy on this PC', '')
@@ -180,12 +181,15 @@ function Test-RestartRequiredFirst {
     True for exit 0 with winget 1.7+'s 'Restart your PC to finish installation.' (an installer's
     3010), for 0x8A150109 (the same on winget 1.6 and older) and for 0x8A15010B (the installer
     started a restart, MSI 1641). The warning is matched in English only; on other display
-    languages the pending-restart registry check notices it. Shared by Install-WingetPackage and the
-    PowerShell 7 bootstrap. Runs under Windows PowerShell 5.1 too.
+    languages the pending-restart registry check notices it. Microsoft.WinGet.Client prints no
+    warning and never sets RebootRequired, so its 0 with InstallerErrorCode 3010 counts too. Shared
+    by Install-WingetPackage and the PowerShell 7 bootstrap. Runs under Windows PowerShell 5.1 too.
 .PARAMETER ExitCode
     winget's exit code, or $null when it did not run to the end.
 .PARAMETER Output
     What winget printed (Invoke-WingetProcess's Output).
+.PARAMETER InstallerErrorCode
+    The installer's own exit code, when the engine reports it (Microsoft.WinGet.Client).
 .OUTPUTS
     [bool]
 #>
@@ -197,7 +201,11 @@ function Test-WingetRestartRequiredResult {
 
         [Parameter(Mandatory = $false)]
         [AllowNull()]
-        [object[]]$Output
+        [object[]]$Output,
+
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [Nullable[long]]$InstallerErrorCode
     )
 
     if ($null -eq $ExitCode) {
@@ -206,6 +214,9 @@ function Test-WingetRestartRequiredResult {
     if ($ExitCode -ne 0) {
         $info = Get-WingetExitCodeInfo -ExitCode $ExitCode
         return [bool]($info -and $info.Class -eq 'RestartRequired')
+    }
+    if ($null -ne $InstallerErrorCode -and $InstallerErrorCode -eq 3010) {
+        return $true
     }
     foreach ($line in @($Output)) {
         if ([string]$line -match 'Restart your PC to finish installation') {

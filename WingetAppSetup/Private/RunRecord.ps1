@@ -24,8 +24,9 @@
 .OUTPUTS
     [System.Collections.Specialized.OrderedDictionary] id, status, reason, code (the exit code of
     the winget install or package-specific installer, or $null), codeHex (the same as 0x%08X),
-    restartRequired, postInstall ('Configured', 'NotConfigured' or 'Failed', or $null when no hook
-    ran) and postInstallReason (why it is not Configured, or $null).
+    installerCode (the installer's own exit code where the engine reports it, Microsoft.WinGet.Client;
+    otherwise $null), restartRequired, postInstall ('Configured', 'NotConfigured' or 'Failed', or
+    $null when no hook ran) and postInstallReason (why it is not Configured, or $null).
 #>
 function New-AppRunRecord {
     param (
@@ -58,6 +59,10 @@ function New-AppRunRecord {
         $code = [int]$InstallResult.ExitCode
         $codeHex = '0x{0:X8}' -f $code
     }
+    $installerCode = $null
+    if ($null -ne $InstallResult -and $null -ne $InstallResult.InstallerErrorCode) {
+        $installerCode = [long]$InstallResult.InstallerErrorCode
+    }
     $reasonText = $null
     if (-not [string]::IsNullOrWhiteSpace($Reason)) {
         $reasonText = $Reason
@@ -76,6 +81,7 @@ function New-AppRunRecord {
         reason            = $reasonText
         code              = $code
         codeHex           = $codeHex
+        installerCode     = $installerCode
         restartRequired   = $RestartRequired
         postInstall       = $postInstallStatus
         postInstallReason = $postInstallReason
@@ -164,6 +170,9 @@ function Format-RunRecordTime {
     The end-of-run winget check's result, or $null when it did not run.
 .PARAMETER SummaryReached
     The run reached its summary.
+.PARAMETER InstallEngine
+    Which engine was asked for and which installed (New-InstallEngineRecord). Default: this run's
+    (Get-InstallEngineRecord).
 .OUTPUTS
     [System.Collections.Specialized.OrderedDictionary]
 #>
@@ -192,9 +201,16 @@ function New-InstallerRunRecord {
         [Nullable[bool]]$WingetUsable = $null,
 
         [Parameter(Mandatory = $false)]
-        [switch]$SummaryReached
+        [switch]$SummaryReached,
+
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [System.Collections.IDictionary]$InstallEngine
     )
 
+    if ($null -eq $InstallEngine) {
+        $InstallEngine = Get-InstallEngineRecord
+    }
     $appList = @($Apps | Where-Object { $null -ne $_ })
     $autoUpdatesVersionText = $null
     if ($null -ne $AutoUpdatesVersion -and -not [string]::IsNullOrWhiteSpace([string]$AutoUpdatesVersion)) {
@@ -234,6 +250,7 @@ function New-InstallerRunRecord {
         }
         restartRequired = $RestartRequired
         wingetUsable    = $WingetUsable
+        installEngine   = $InstallEngine
         transcriptPath  = $transcriptPath
     }
 }

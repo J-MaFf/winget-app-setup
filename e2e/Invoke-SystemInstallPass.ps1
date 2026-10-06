@@ -54,6 +54,21 @@
         per-user work is Deferred with its reason. Failed, Deferred otherwise, or no entry fails.
         Apps on KNOWN_PLATFORM_INCOMPATIBLE are not checked.
 
+    With -SystemInstallEngine WinGetClient (the e2e-install-system-winget-client job, wgt-gq8.42)
+    the wrapper also gets -SystemInstallEngine WinGetClient, and these rows are added
+    (Get-SystemPassEngineResult): the wrapper passed the request on; the transcript says 'WinGet
+    client module: ready - ' with the pin's version and SHA256; the 'Install engine:' line names
+    Microsoft.WinGet.Client at the pin, no 'NOT READY' line and no '> winget install' line appear,
+    every app the job removed shows a '> Install-WinGetPackage -Id <id>' line, and last-run.json says
+    installEngine.used WinGetClient at the pin. After the first pass, the apps the job removed are
+    looked up with `winget list` as the runner account (Get-SystemPassIndependentInstallResult), a
+    check that does not trust the engine's own detection.
+
+    -PassCount 2 runs the task a second time, with every row prefixed 'Pass 1: ' or 'Pass 2: '. The
+    second pass is checked the same way, except that every app that applies must be Skipped as
+    already there ('App already present on the second run: <id>'), the framework must not be
+    installed again, and with the engine its module must come 'from the cache'.
+
     Prints an '=== E2E assertion results ===' table and exits 0 when every check passed; otherwise
     with the run's exit code when that is what failed, or 1.
 
@@ -69,7 +84,12 @@
 .PARAMETER InstallerLogDirectory
     Default: %ProgramData%\winget-app-setup\logs.
 .PARAMETER TimeoutMinutes
-    How long the task may run. Default 40.
+    How long the task may run, per pass. Default 40.
+.PARAMETER SystemInstallEngine
+    Passed to the wrapper as -SystemInstallEngine; WinGetClient also adds the engine's checks. Not
+    given: nothing is passed, as before.
+.PARAMETER PassCount
+    1 (default) or 2: run the task again, for the checks of a second run.
 .NOTES
     Exit codes: 0 = every check passed; the run's exit code or 1 = a check failed; 64 = bad
     arguments; 127 = the task could not be registered or started.
@@ -87,7 +107,15 @@ param (
 
     [Parameter(Mandatory = $false)]
     [ValidateRange(5, 120)]
-    [int]$TimeoutMinutes = 40
+    [int]$TimeoutMinutes = 40,
+
+    [Parameter(Mandatory = $false)]
+    [ValidateSet('Cli', 'WinGetClient')]
+    [string]$SystemInstallEngine,
+
+    [Parameter(Mandatory = $false)]
+    [ValidateRange(1, 2)]
+    [int]$PassCount = 1
 )
 
 # Get-InstallPassVerdict and Get-InstallPassTranscript (and, through it, TranscriptAssertions.ps1).
@@ -100,6 +128,8 @@ $script:SystemTaskName = 'winget-app-setup-e2e-system'
 <#
 .SYNOPSIS
     Returns the scheduled task's command line arguments for the wrapper.
+.PARAMETER SystemInstallEngine
+    Appended as -SystemInstallEngine <value> when given.
 #>
 function Get-SystemPassTaskArgument {
     param (
@@ -108,10 +138,17 @@ function Get-SystemPassTaskArgument {
         [Parameter(Mandatory = $true)]
         [string]$InstallerPath,
         [Parameter(Mandatory = $true)]
-        [string]$InstallerSha256
+        [string]$InstallerSha256,
+        [Parameter(Mandatory = $false)]
+        [AllowEmptyString()]
+        [string]$SystemInstallEngine
     )
 
-    return ('-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}" -InstallerPath "{1}" -InstallerSha256 {2}' -f $WrapperPath, $InstallerPath, $InstallerSha256)
+    $argument = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}" -InstallerPath "{1}" -InstallerSha256 {2}' -f $WrapperPath, $InstallerPath, $InstallerSha256
+    if (-not [string]::IsNullOrWhiteSpace($SystemInstallEngine)) {
+        $argument += " -SystemInstallEngine $SystemInstallEngine"
+    }
+    return $argument
 }
 
 <#
@@ -290,7 +327,8 @@ function Get-SystemRunApplicability {
       - per-user work (scope 'user' or userPhase): Deferred, with Get-AppDeferReasonText's reason;
       - any other app: Installed, or Skipped as already there: 'already installed', or for an app
         with msixName, which a run as SYSTEM checks by its provisioning, 'already provisioned for
-        every user on this PC'. Only Installed for an app the job uninstalled before the run.
+        every user on this PC'. Only Installed for an app the job uninstalled before the run. With
+        -AlreadyPresent (a second run): only Skipped as already there ('AlreadyPresent').
     Calls the module's catalog helpers, so the module must be loaded.
 .PARAMETER Catalog
     The catalog (Get-DefaultAppCatalog).
@@ -298,10 +336,13 @@ function Get-SystemRunApplicability {
     Get-SystemRunApplicability's verdicts. An app without one counts as applicable (fail open).
 .PARAMETER RemovedApps
     The package ids the job uninstalled before the run (Get-PreinstalledAppRemovalList).
+.PARAMETER AlreadyPresent
+    The run is a second one: every app the first one installed must be there already.
 .RETURNS
     [pscustomobject[]] One per catalog app, in catalog order, with Id, Expected ('Installed',
-    'NotApplicable' or 'Deferred'), Reason (the record's reason for NotApplicable and Deferred,
-    otherwise $null), AlreadyPresentReasons (the skip reasons Installed accepts) and MustInstall.
+    'AlreadyPresent', 'NotApplicable' or 'Deferred'), Reason (the record's reason for
+    NotApplicable and Deferred, otherwise $null), AlreadyPresentReasons (the skip reasons Installed
+    and AlreadyPresent accept) and MustInstall.
 #>
 function Get-SystemPassAppExpectation {
     param (
@@ -311,7 +352,9 @@ function Get-SystemPassAppExpectation {
         [hashtable]$Applicability = @{},
         [Parameter(Mandatory = $false)]
         [AllowEmptyCollection()]
-        [string[]]$RemovedApps = @()
+        [string[]]$RemovedApps = @(),
+        [Parameter(Mandatory = $false)]
+        [switch]$AlreadyPresent
     )
 
     $expectations = @()
@@ -323,29 +366,34 @@ function Get-SystemPassAppExpectation {
         }
         $expected = 'Installed'
         $reason = $null
-        $alreadyPresent = @('already installed')
+        $presentReasons = @('already installed')
         if (-not [string]::IsNullOrWhiteSpace([string]$app['msixName'])) {
-            $alreadyPresent = @('already provisioned for every user on this PC')
+            $presentReasons = @('already provisioned for every user on this PC')
         }
         if (-not $applies) {
             $expected = 'NotApplicable'
             $reason = 'not applicable: ' + (Get-AppNotApplicableReason -App $app)
-            $alreadyPresent = @()
+            $presentReasons = @()
         }
         else {
             $perUserReason = Get-AppPerUserDeferReason -App $app
             if ($perUserReason) {
                 $expected = 'Deferred'
                 $reason = Get-AppDeferReasonText -DeferReason $perUserReason
-                $alreadyPresent = @()
+                $presentReasons = @()
             }
+        }
+        $mustInstall = ($expected -eq 'Installed' -and $RemovedApps -contains $id)
+        if ($AlreadyPresent -and $expected -eq 'Installed') {
+            $expected = 'AlreadyPresent'
+            $mustInstall = $false
         }
         $expectations += [pscustomobject]@{
             Id                    = $id
             Expected              = $expected
             Reason                = $reason
-            AlreadyPresentReasons = [string[]]$alreadyPresent
-            MustInstall           = ($expected -eq 'Installed' -and $RemovedApps -contains $id)
+            AlreadyPresentReasons = [string[]]$presentReasons
+            MustInstall           = $mustInstall
         }
     }
     return $expectations
@@ -408,6 +456,7 @@ function Format-SystemPassAppEntry {
     catalog app that is not skip-listed (Get-SystemPassAppExpectation):
       - 'App installed: <id>': Installed, or Skipped as already there unless the job removed the
         app first; Failed, Deferred, another skip reason, or no entry or several fail;
+      - 'App already present on the second run: <id>': Skipped as already there, nothing else;
       - 'Not-applicable skip recorded: <id>': Skipped with the catalog's not-applicable reason;
       - 'Deferred to the user phase: <id>': Deferred with the per-user reason.
 .PARAMETER RunRecord
@@ -487,7 +536,10 @@ function Get-SystemPassAppResult {
             continue
         }
         $assertion = "App installed: $($expectation.Id)"
-        if ($expectation.Expected -eq 'NotApplicable') {
+        if ($expectation.Expected -eq 'AlreadyPresent') {
+            $assertion = "App already present on the second run: $($expectation.Id)"
+        }
+        elseif ($expectation.Expected -eq 'NotApplicable') {
             $assertion = "Not-applicable skip recorded: $($expectation.Id)"
         }
         elseif ($expectation.Expected -eq 'Deferred') {
@@ -507,7 +559,15 @@ function Get-SystemPassAppResult {
             $status = [string]$entry.status
             $reason = [string]$entry.reason
             $detail = 'last-run.json: ' + (Format-SystemPassAppEntry -Entry $entry)
-            if ($expectation.Expected -eq 'Installed') {
+            if ($expectation.Expected -eq 'AlreadyPresent') {
+                if ($status -eq 'Skipped' -and @($expectation.AlreadyPresentReasons) -contains $reason) {
+                    $passed = $true
+                }
+                else {
+                    $detail += '; the first run installed or found it, so the second run had to find it: expected Skipped (' + (@($expectation.AlreadyPresentReasons) -join ' or ') + ')'
+                }
+            }
+            elseif ($expectation.Expected -eq 'Installed') {
                 if ($status -eq 'Installed') {
                     $passed = $true
                     if ($null -ne $entry.code -and [long]$entry.code -ne 0) {
@@ -579,6 +639,9 @@ function Get-SystemPassAppResult {
     given and no AppExpectationProblem: no per-app rows (the tests of the other checks).
 .PARAMETER AppExpectationProblem
     Why there is no AppExpectation (the catalog could not be read): one failed per-app row.
+.PARAMETER SecondPass
+    The run is a second one: the framework must not be installed again ('Windows App Runtime not
+    installed again' instead of 'installed once, or already there').
 .RETURNS
     [pscustomobject] with Results (Assertion, Result 'PASS' or 'FAIL', Detail) and StepExitCode.
 #>
@@ -615,7 +678,9 @@ function Get-SystemInstallPassResult {
         [Parameter(Mandatory = $false)]
         [AllowNull()]
         [AllowEmptyString()]
-        [string]$AppExpectationProblem
+        [string]$AppExpectationProblem,
+        [Parameter(Mandatory = $false)]
+        [switch]$SecondPass
     )
 
     $results = @()
@@ -725,7 +790,14 @@ function Get-SystemInstallPassResult {
         }
 
         $installCount = [int]$parsed.WindowsAppRuntimeInstallCount
-        if ($installCount -gt 1) {
+        if ($SecondPass) {
+            $runtimeOk = ($installCount -eq 0)
+            $runtimeDetail = "$($Transcript.Name) has no 'Windows App Runtime: installed' line"
+            if ($installCount -gt 0) {
+                $runtimeDetail = "$($Transcript.Name) installed it again: Windows App Runtime: $($parsed.WindowsAppRuntimeLine)"
+            }
+        }
+        elseif ($installCount -gt 1) {
             $runtimeDetail = "$($Transcript.Name) installed it $installCount times in one run"
         }
         elseif ($installCount -eq 1) {
@@ -745,7 +817,11 @@ function Get-SystemInstallPassResult {
         }
     }
     $results += [pscustomobject]@{ Assertion = 'Auto-updates configured by the SYSTEM run'; Result = $(if ($autoUpdatesOk) { 'PASS' } else { 'FAIL' }); Detail = $autoUpdatesDetail }
-    $results += [pscustomobject]@{ Assertion = 'Windows App Runtime installed once, or already there'; Result = $(if ($runtimeOk) { 'PASS' } else { 'FAIL' }); Detail = $runtimeDetail }
+    $runtimeAssertion = 'Windows App Runtime installed once, or already there'
+    if ($SecondPass) {
+        $runtimeAssertion = 'Windows App Runtime not installed again'
+    }
+    $results += [pscustomobject]@{ Assertion = $runtimeAssertion; Result = $(if ($runtimeOk) { 'PASS' } else { 'FAIL' }); Detail = $runtimeDetail }
 
     # Work-order items 34 and 38: the user phase installs what last-run.json defers, by id, so each
     # Deferred entry must carry a package id and why it was deferred, and the summary must agree.
@@ -802,6 +878,351 @@ function Get-SystemInstallPassResult {
     return [pscustomobject]@{ Results = $results; StepExitCode = $stepExitCode }
 }
 
+<#
+.SYNOPSIS
+    Checks that a run that asked for Microsoft.WinGet.Client installed with it (wgt-gq8.42).
+.DESCRIPTION
+    Three rows:
+      - 'Wrapper passed the engine request': the wrapper log says 'Install engine requested:
+        WinGetClient';
+      - 'WinGet client module verified as SYSTEM': the transcript's last 'WinGet client module:'
+        line is 'ready - ' with the pin's version and SHA256, and on a second pass 'from the cache';
+      - 'Installs ran through Microsoft.WinGet.Client': the 'Install engine:' line names
+        Microsoft.WinGet.Client at the pin, no 'NOT READY' line, no '> winget install' line, a
+        '> Install-WinGetPackage -Id <id>' line for every app the job removed (MustInstall), and
+        last-run.json's installEngine says used WinGetClient with the module at the pin.
+    A silent fall back to winget.exe fails the last two.
+.PARAMETER WrapperLog
+    The wrapper log's text, or $null.
+.PARAMETER Transcript
+    The run's transcript (Get-InstallPassTranscript), or $null.
+.PARAMETER RunRecord
+    last-run.json, parsed, or $null.
+.PARAMETER Pin
+    The checkout's Get-WingetClientModulePin.
+.PARAMETER AppExpectation
+    Get-SystemPassAppExpectation's result, for the apps the job removed.
+.PARAMETER PassNumber
+    1 or 2.
+.RETURNS
+    Assertion rows ([pscustomobject] with Assertion, Result and Detail).
+#>
+function Get-SystemPassEngineResult {
+    param (
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [AllowEmptyString()]
+        [string]$WrapperLog,
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        $Transcript,
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        $RunRecord,
+        [Parameter(Mandatory = $true)]
+        [hashtable]$Pin,
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [AllowEmptyCollection()]
+        [object[]]$AppExpectation,
+        [Parameter(Mandatory = $false)]
+        [ValidateRange(1, 2)]
+        [int]$PassNumber = 1
+    )
+
+    $rows = @()
+    $pinSha256 = ([string]$Pin.Sha256).ToUpperInvariant()
+
+    $requested = ([string]$WrapperLog).Contains('Install engine requested: WinGetClient')
+    $requestDetail = 'the wrapper log has no ''Install engine requested: WinGetClient'' line'
+    if (-not $WrapperLog) {
+        $requestDetail = 'no wrapper log (install-<time>-rmm.log) from this run'
+    }
+    elseif ($requested) {
+        $requestDetail = 'Install engine requested: WinGetClient'
+    }
+    $rows += [pscustomobject]@{ Assertion = 'Wrapper passed the engine request'; Result = $(if ($requested) { 'PASS' } else { 'FAIL' }); Detail = $requestDetail }
+
+    $moduleOk = $false
+    $moduleDetail = 'no transcript of the run'
+    $engineProblems = @()
+    if ($Transcript) {
+        $parsed = $Transcript.Parsed
+        if (-not $parsed.WingetClientModuleLine) {
+            $moduleDetail = "$($Transcript.Name) has no 'WinGet client module:' line"
+        }
+        else {
+            $moduleDetail = "$($Transcript.Name): WinGet client module: $($parsed.WingetClientModuleLine)"
+            $moduleOk = [bool]$parsed.WingetClientModuleReady -and $parsed.WingetClientModuleVersion -eq $Pin.Version -and $parsed.WingetClientModuleSha256 -eq $pinSha256
+            if ($moduleOk -and $PassNumber -ge 2 -and -not $parsed.WingetClientModuleFromCache) {
+                $moduleOk = $false
+                $moduleDetail += ' (the second run must take it from the cache)'
+            }
+            elseif (-not $moduleOk -and $parsed.WingetClientModuleReady) {
+                $moduleDetail += " (expected Microsoft.WinGet.Client $($Pin.Version), SHA256 $pinSha256)"
+            }
+        }
+
+        if ($parsed.InstallEngine -ne 'WinGetClient') {
+            if ($parsed.InstallEngineLine) {
+                $engineProblems += "the run's 'Install engine:' line is '$($parsed.InstallEngineLine)'"
+            }
+            else {
+                $engineProblems += "the run has no 'Install engine:' line"
+            }
+        }
+        elseif ($parsed.InstallEngineVersion -ne $Pin.Version) {
+            $engineProblems += "the run used Microsoft.WinGet.Client $($parsed.InstallEngineVersion), not the pinned $($Pin.Version)"
+        }
+        if ($parsed.WingetClientModuleNotReadyReason) {
+            $engineProblems += "WinGet client module: NOT READY - $($parsed.WingetClientModuleNotReadyReason)"
+        }
+        if ([int]$parsed.WingetExeInstallCount -gt 0) {
+            $engineProblems += "$($parsed.WingetExeInstallCount) '> winget install' line(s): winget.exe installed apps"
+        }
+        $mustInstall = @($AppExpectation | Where-Object { $null -ne $_ -and $_.MustInstall } | ForEach-Object { [string]$_.Id })
+        $missing = @($mustInstall | Where-Object { @($parsed.WingetClientInstallIds) -notcontains $_ })
+        if ($missing.Count -gt 0) {
+            $engineProblems += 'no ''> Install-WinGetPackage -Id <id>'' line for ' + ($missing -join ', ')
+        }
+    }
+    else {
+        $engineProblems += 'no transcript of the run'
+    }
+    $rows += [pscustomobject]@{ Assertion = 'WinGet client module verified as SYSTEM'; Result = $(if ($moduleOk) { 'PASS' } else { 'FAIL' }); Detail = $moduleDetail }
+
+    if ($null -eq $RunRecord) {
+        $engineProblems += 'no last-run.json'
+    }
+    else {
+        $recordEngine = $null
+        if ($RunRecord.PSObject.Properties['installEngine']) {
+            $recordEngine = $RunRecord.installEngine
+        }
+        if ($null -eq $recordEngine) {
+            $engineProblems += 'last-run.json has no installEngine'
+        }
+        elseif ([string]$recordEngine.used -ne 'WinGetClient') {
+            $why = ''
+            if ($recordEngine.fallbackReason) {
+                $why = " ($($recordEngine.fallbackReason))"
+            }
+            $engineProblems += "last-run.json says installEngine.used '$($recordEngine.used)'$why"
+        }
+        elseif ($null -eq $recordEngine.module -or [string]$recordEngine.module.version -ne $Pin.Version) {
+            $engineProblems += "last-run.json's installEngine.module is not Microsoft.WinGet.Client $($Pin.Version)"
+        }
+    }
+    $engineDetail = $engineProblems -join '; '
+    if ($engineProblems.Count -eq 0) {
+        $installedIds = @($Transcript.Parsed.WingetClientInstallIds)
+        $engineDetail = 'Install engine: {0}; Install-WinGetPackage for: {1}; last-run.json installEngine.used WinGetClient' -f $Transcript.Parsed.InstallEngineLine, $(if ($installedIds.Count -gt 0) { $installedIds -join ', ' } else { 'none (nothing to install)' })
+    }
+    $rows += [pscustomobject]@{ Assertion = 'Installs ran through Microsoft.WinGet.Client'; Result = $(if ($engineProblems.Count -eq 0) { 'PASS' } else { 'FAIL' }); Detail = $engineDetail }
+    return $rows
+}
+
+<#
+.SYNOPSIS
+    Looks up, without the run's own engine, the apps the job removed: `winget list` as the runner
+    account, after the run as SYSTEM installed them.
+.DESCRIPTION
+    One row per MustInstall app, 'Installed per winget list as the runner account: <id>', from
+    -TestInstalled (the checkout module's Test-WingetPackageInstalled in the main script), tried
+    -Attempts times -RetryDelaySeconds apart. A machine-wide install is listed for every account.
+.PARAMETER AppExpectation
+    Get-SystemPassAppExpectation's result.
+.PARAMETER TestInstalled
+    A script block that takes a package id and returns Test-WingetPackageInstalled's result.
+.PARAMETER Attempts
+    Default 3.
+.PARAMETER RetryDelaySeconds
+    Default 20.
+.PARAMETER SkipApps
+    The KNOWN_PLATFORM_INCOMPATIBLE package ids, which are not checked.
+.RETURNS
+    Assertion rows ([pscustomobject] with Assertion, Result and Detail).
+#>
+function Get-SystemPassIndependentInstallResult {
+    param (
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [AllowEmptyCollection()]
+        [object[]]$AppExpectation,
+        [Parameter(Mandatory = $true)]
+        [scriptblock]$TestInstalled,
+        [Parameter(Mandatory = $false)]
+        [ValidateRange(1, 10)]
+        [int]$Attempts = 3,
+        [Parameter(Mandatory = $false)]
+        [ValidateRange(0, 600)]
+        [int]$RetryDelaySeconds = 20,
+        [Parameter(Mandatory = $false)]
+        [AllowEmptyCollection()]
+        [string[]]$SkipApps = @()
+    )
+
+    $rows = @()
+    foreach ($expectation in @($AppExpectation | Where-Object { $null -ne $_ -and $_.MustInstall })) {
+        $id = [string]$expectation.Id
+        if ($SkipApps -contains $id) {
+            continue
+        }
+        $passed = $false
+        $detail = 'not checked'
+        for ($attempt = 1; $attempt -le $Attempts; $attempt++) {
+            try {
+                $answer = & $TestInstalled $id
+                if ($answer.Installed) {
+                    $passed = $true
+                    $detail = "winget list --exact --id $id lists it"
+                    break
+                }
+                if ($answer.TimedOut) {
+                    $detail = 'winget list did not answer in time'
+                }
+                elseif ($answer.LaunchFailed) {
+                    $detail = "winget could not be started: $($answer.LaunchError)"
+                }
+                elseif ($answer.CheckFailed) {
+                    $detail = 'winget list failed with 0x{0:X8}' -f [int]$answer.ExitCode
+                }
+                else {
+                    $detail = 'winget list does not list it'
+                }
+            }
+            catch {
+                $detail = "the check failed: $($_.Exception.Message)"
+            }
+            if ($attempt -lt $Attempts) {
+                Start-Sleep -Seconds $RetryDelaySeconds
+            }
+        }
+        if (-not $passed) {
+            $detail += " ($Attempts checks)"
+        }
+        $rows += [pscustomobject]@{ Assertion = "Installed per winget list as the runner account: $id"; Result = $(if ($passed) { 'PASS' } else { 'FAIL' }); Detail = $detail }
+    }
+    return $rows
+}
+
+<#
+.SYNOPSIS
+    Prefixes each row's assertion with 'Pass <n>: ', for a job that runs the task twice.
+#>
+function Add-SystemPassPrefix {
+    param (
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [AllowEmptyCollection()]
+        [object[]]$Rows,
+        [Parameter(Mandatory = $true)]
+        [int]$PassNumber
+    )
+
+    return @($Rows | Where-Object { $null -ne $_ } | ForEach-Object {
+            [pscustomobject]@{ Assertion = ('Pass {0}: {1}' -f $PassNumber, $_.Assertion); Result = $_.Result; Detail = $_.Detail }
+        })
+}
+
+<#
+.SYNOPSIS
+    Runs the wrapper once as SYSTEM from a one-shot scheduled task, and reads what the run left.
+.DESCRIPTION
+    Registers the task (SYSTEM, highest run level, -TimeoutMinutes), starts it, waits for it
+    (printing the newest transcript line every minute) and stops it 2 minutes past its limit, then
+    removes it. Windows only.
+.PARAMETER PowerShellPath
+    The 32-bit powershell.exe the task runs.
+.PARAMETER TaskArgument
+    Get-SystemPassTaskArgument's result.
+.PARAMETER TimeoutMinutes
+    The task's time limit.
+.PARAMETER LogFolder
+    The installer's logs folder.
+.RETURNS
+    [pscustomobject] with StartError (why the task could not be registered or started, or $null),
+    TaskExitCode ($null when it did not finish), StartedAt, Transcript, WrapperLog, RunRecordRead
+    (Read-SystemPassRunRecord) and NewSystemProfileEntries.
+#>
+function Invoke-SystemPassTask {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$PowerShellPath,
+        [Parameter(Mandatory = $true)]
+        [string]$TaskArgument,
+        [Parameter(Mandatory = $true)]
+        [int]$TimeoutMinutes,
+        [Parameter(Mandatory = $true)]
+        [string]$LogFolder
+    )
+
+    $profileBefore = Get-SystemProfileInstallEntry
+    try {
+        $action = New-ScheduledTaskAction -Execute $PowerShellPath -Argument $TaskArgument
+        $principal = New-ScheduledTaskPrincipal -UserId 'NT AUTHORITY\SYSTEM' -LogonType ServiceAccount -RunLevel Highest
+        $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes $TimeoutMinutes) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+        $null = Register-ScheduledTask -TaskName $script:SystemTaskName -Action $action -Principal $principal -Settings $settings -Force -ErrorAction Stop
+        $startedAt = Get-Date
+        Start-ScheduledTask -TaskName $script:SystemTaskName -ErrorAction Stop
+    }
+    catch {
+        return [pscustomobject]@{ StartError = $_.Exception.Message; TaskExitCode = $null; StartedAt = $null; Transcript = $null; WrapperLog = $null; RunRecordRead = $null; NewSystemProfileEntries = @() }
+    }
+
+    # 267009 (0x41301) is 'the task is running', 267011 (0x41303) 'the task has not yet run'.
+    $deadline = $startedAt.AddMinutes($TimeoutMinutes + 2)
+    $taskExitCode = $null
+    $lastReport = Get-Date
+    while ((Get-Date) -lt $deadline) {
+        Start-Sleep -Seconds 15
+        $task = Get-ScheduledTask -TaskName $script:SystemTaskName -ErrorAction SilentlyContinue
+        $info = Get-ScheduledTaskInfo -TaskName $script:SystemTaskName -ErrorAction SilentlyContinue
+        if ($task -and $info -and "$($task.State)" -ne 'Running' -and $info.LastRunTime -ge $startedAt.AddMinutes(-1) -and @(267009, 267011) -notcontains $info.LastTaskResult) {
+            $taskExitCode = ConvertTo-TaskExitCode -LastTaskResult $info.LastTaskResult
+            break
+        }
+        if (((Get-Date) - $lastReport).TotalSeconds -ge 60) {
+            $lastReport = Get-Date
+            $newest = Get-ChildItem -LiteralPath $LogFolder -Filter 'install-*.log' -File -ErrorAction SilentlyContinue | Sort-Object -Property LastWriteTime | Select-Object -Last 1
+            $line = ''
+            if ($newest) {
+                $line = "$($newest.Name): " + (Get-Content -LiteralPath $newest.FullName -Tail 1 -ErrorAction SilentlyContinue)
+            }
+            Write-Host ('[{0:N0} min] the SYSTEM run is still going. {1}' -f ((Get-Date) - $startedAt).TotalMinutes, $line)
+        }
+    }
+    if ($null -eq $taskExitCode) {
+        Write-Host "The SYSTEM task did not finish within $($TimeoutMinutes + 2) minutes; stopping it." -ForegroundColor Red
+        Stop-ScheduledTask -TaskName $script:SystemTaskName -ErrorAction SilentlyContinue
+    }
+    else {
+        Write-Host "The SYSTEM task ended with exit code $taskExitCode."
+    }
+    Unregister-ScheduledTask -TaskName $script:SystemTaskName -Confirm:$false -ErrorAction SilentlyContinue
+
+    $newProfileEntries = Compare-SystemProfileInstallEntry -Before $profileBefore -After (Get-SystemProfileInstallEntry)
+    $transcript = Get-InstallPassTranscript -LogDirectory $LogFolder -Since $startedAt
+    $wrapperLog = $null
+    $wrapperFile = @((Get-InstallTranscriptFile -LogDirectory $LogFolder).Rmm | Where-Object { $_.LastWriteTime -ge $startedAt }) | Select-Object -Last 1
+    if ($wrapperFile) {
+        $wrapperLog = [string](Get-Content -LiteralPath $wrapperFile.FullName -Raw)
+    }
+    $runRecordRead = Read-SystemPassRunRecord -Path (Join-Path $LogFolder 'last-run.json')
+    if ($runRecordRead.Problem) {
+        Write-Host $runRecordRead.Problem -ForegroundColor Yellow
+    }
+    return [pscustomobject]@{
+        StartError              = $null
+        TaskExitCode            = $taskExitCode
+        StartedAt               = $startedAt
+        Transcript              = $transcript
+        WrapperLog              = $wrapperLog
+        RunRecordRead           = $runRecordRead
+        NewSystemProfileEntries = @($newProfileEntries)
+    }
+}
+
 if ($MyInvocation.InvocationName -ne '.') {
     $repositoryRoot = Split-Path -Parent $PSScriptRoot
     $wrapperFilePath = $RmmWrapperPath
@@ -826,95 +1247,92 @@ if ($MyInvocation.InvocationName -ne '.') {
 
     $installerSha256 = (Get-FileHash -LiteralPath $installerFilePath -Algorithm SHA256).Hash
     $powerShell32 = "$env:SystemRoot\SysWOW64\WindowsPowerShell\v1.0\powershell.exe"
-    $taskArgument = Get-SystemPassTaskArgument -WrapperPath $wrapperFilePath -InstallerPath $installerFilePath -InstallerSha256 $installerSha256
+    $taskArgument = Get-SystemPassTaskArgument -WrapperPath $wrapperFilePath -InstallerPath $installerFilePath -InstallerSha256 $installerSha256 -SystemInstallEngine $SystemInstallEngine
     Write-Host "Installer under test: $installerFilePath (SHA256 $installerSha256), through $wrapperFilePath ($env:GITHUB_REF at $env:GITHUB_SHA)."
     Write-Host "The task runs as SYSTEM: $powerShell32 $taskArgument"
 
     # What last-run.json must say per app, from the checkout's catalog (the installer under test is
     # built from it), decided before the run as the installer decides it.
-    $appExpectation = $null
+    $catalogExpectation = $null
     $appExpectationProblem = $null
+    $wingetClientPin = $null
     try {
         $wingetAppSetupModule = Import-Module (Join-Path $repositoryRoot 'WingetAppSetup\WingetAppSetup.psd1') -Force -PassThru -ErrorAction Stop
         $catalog = @(Get-DefaultAppCatalog)
         $applicability = Get-SystemRunApplicability -Catalog $catalog -Module $wingetAppSetupModule
         $removedApps = Get-PreinstalledAppRemovalList -ScriptPath (Join-Path $PSScriptRoot 'Remove-PreinstalledApps.ps1')
-        $appExpectation = @(Get-SystemPassAppExpectation -Catalog $catalog -Applicability $applicability -RemovedApps $removedApps)
+        $catalogExpectation = @(Get-SystemPassAppExpectation -Catalog $catalog -Applicability $applicability -RemovedApps $removedApps)
         foreach ($expected in @('Installed', 'NotApplicable', 'Deferred')) {
-            $ids = @($appExpectation | Where-Object { $_.Expected -eq $expected } | ForEach-Object { $_.Id })
+            $ids = @($catalogExpectation | Where-Object { $_.Expected -eq $expected } | ForEach-Object { $_.Id })
             if ($ids.Count -gt 0) {
                 Write-Host ('Expected in last-run.json, {0}: {1}' -f $expected, ($ids -join ', '))
             }
         }
-        Write-Host ('Removed before the run, so expected Installed: {0}' -f ((@($appExpectation | Where-Object { $_.MustInstall } | ForEach-Object { $_.Id })) -join ', '))
+        Write-Host ('Removed before the run, so expected Installed: {0}' -f ((@($catalogExpectation | Where-Object { $_.MustInstall } | ForEach-Object { $_.Id })) -join ', '))
+        if ($SystemInstallEngine -eq 'WinGetClient') {
+            $wingetClientPin = & $wingetAppSetupModule { Get-WingetClientModulePin }
+            Write-Host ('Expected install engine: Microsoft.WinGet.Client {0}, SHA256 {1}.' -f $wingetClientPin.Version, $wingetClientPin.Sha256)
+        }
     }
     catch {
         $appExpectationProblem = "could not work out what the catalog expects: $($_.Exception.Message)"
         Write-Host $appExpectationProblem -ForegroundColor Red
     }
+    $skipApps = @("$env:KNOWN_PLATFORM_INCOMPATIBLE" -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
 
-    $profileBefore = Get-SystemProfileInstallEntry
-    try {
-        $action = New-ScheduledTaskAction -Execute $powerShell32 -Argument $taskArgument
-        $principal = New-ScheduledTaskPrincipal -UserId 'NT AUTHORITY\SYSTEM' -LogonType ServiceAccount -RunLevel Highest
-        $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes $TimeoutMinutes) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
-        $null = Register-ScheduledTask -TaskName $script:SystemTaskName -Action $action -Principal $principal -Settings $settings -Force -ErrorAction Stop
-        $startedAt = Get-Date
-        Start-ScheduledTask -TaskName $script:SystemTaskName -ErrorAction Stop
-    }
-    catch {
-        Write-Host "Could not register or start the SYSTEM task: $($_.Exception.Message)" -ForegroundColor Red
-        exit 127
-    }
-
-    # 267009 (0x41301) is 'the task is running', 267011 (0x41303) 'the task has not yet run'.
-    $deadline = $startedAt.AddMinutes($TimeoutMinutes + 2)
-    $taskExitCode = $null
-    $lastReport = Get-Date
-    while ((Get-Date) -lt $deadline) {
-        Start-Sleep -Seconds 15
-        $task = Get-ScheduledTask -TaskName $script:SystemTaskName -ErrorAction SilentlyContinue
-        $info = Get-ScheduledTaskInfo -TaskName $script:SystemTaskName -ErrorAction SilentlyContinue
-        if ($task -and $info -and "$($task.State)" -ne 'Running' -and $info.LastRunTime -ge $startedAt.AddMinutes(-1) -and @(267009, 267011) -notcontains $info.LastTaskResult) {
-            $taskExitCode = ConvertTo-TaskExitCode -LastTaskResult $info.LastTaskResult
-            break
+    $allResults = @()
+    $stepExitCode = 0
+    for ($passNumber = 1; $passNumber -le $PassCount; $passNumber++) {
+        if ($PassCount -gt 1) {
+            Write-Host "=== SYSTEM pass $passNumber of $PassCount ==="
         }
-        if (((Get-Date) - $lastReport).TotalSeconds -ge 60) {
-            $lastReport = Get-Date
-            $newest = Get-ChildItem -LiteralPath $logFolder -Filter 'install-*.log' -File -ErrorAction SilentlyContinue | Sort-Object -Property LastWriteTime | Select-Object -Last 1
-            $line = ''
-            if ($newest) {
-                $line = "$($newest.Name): " + (Get-Content -LiteralPath $newest.FullName -Tail 1 -ErrorAction SilentlyContinue)
+        $taskRun = Invoke-SystemPassTask -PowerShellPath $powerShell32 -TaskArgument $taskArgument -TimeoutMinutes $TimeoutMinutes -LogFolder $logFolder
+        if ($taskRun.StartError) {
+            Write-Host "Could not register or start the SYSTEM task: $($taskRun.StartError)" -ForegroundColor Red
+            exit 127
+        }
+        $runRecordRead = $taskRun.RunRecordRead
+        # The second run must find every app the first one installed or found.
+        $appExpectation = $catalogExpectation
+        if ($passNumber -ge 2 -and $null -ne $catalogExpectation) {
+            $appExpectation = @(Get-SystemPassAppExpectation -Catalog $catalog -Applicability $applicability -RemovedApps $removedApps -AlreadyPresent)
+        }
+
+        $check = Get-SystemInstallPassResult -TaskExitCode $taskRun.TaskExitCode -Transcript $taskRun.Transcript -WrapperLog $taskRun.WrapperLog -RunRecord $runRecordRead.Record -RunRecordProblem $runRecordRead.Problem -NewSystemProfileEntries $taskRun.NewSystemProfileEntries -KnownPlatformIncompatible "$env:KNOWN_PLATFORM_INCOMPATIBLE" -AppExpectation $appExpectation -AppExpectationProblem $appExpectationProblem -SecondPass:($passNumber -ge 2)
+        $passResults = @($check.Results)
+        if ($check.StepExitCode -ne 0 -and $stepExitCode -eq 0) {
+            $stepExitCode = $check.StepExitCode
+        }
+        if ($SystemInstallEngine -eq 'WinGetClient') {
+            if ($null -eq $wingetClientPin) {
+                $passResults += [pscustomobject]@{ Assertion = 'Installs ran through Microsoft.WinGet.Client'; Result = 'FAIL'; Detail = 'the checkout''s Microsoft.WinGet.Client pin could not be read' }
             }
-            Write-Host ('[{0:N0} min] the SYSTEM run is still going. {1}' -f ((Get-Date) - $startedAt).TotalMinutes, $line)
+            else {
+                $passResults += @(Get-SystemPassEngineResult -WrapperLog $taskRun.WrapperLog -Transcript $taskRun.Transcript -RunRecord $runRecordRead.Record -Pin $wingetClientPin -AppExpectation $appExpectation -PassNumber $passNumber)
+            }
+            if ($passNumber -eq 1) {
+                # Not the engine's own detection: winget.exe as the runner account, through the
+                # checkout's module, where the engine is never active.
+                $testInstalled = {
+                    param ($Id)
+                    & $wingetAppSetupModule { param ($PackageId) Test-WingetPackageInstalled -PackageId $PackageId -TimeoutSeconds 60 } $Id
+                }
+                $passResults += @(Get-SystemPassIndependentInstallResult -AppExpectation $appExpectation -TestInstalled $testInstalled -SkipApps $skipApps)
+            }
         }
+        if ($PassCount -gt 1) {
+            $passResults = Add-SystemPassPrefix -Rows $passResults -PassNumber $passNumber
+        }
+        $allResults += $passResults
     }
-    if ($null -eq $taskExitCode) {
-        Write-Host "The SYSTEM task did not finish within $($TimeoutMinutes + 2) minutes; stopping it." -ForegroundColor Red
-        Stop-ScheduledTask -TaskName $script:SystemTaskName -ErrorAction SilentlyContinue
-    }
-    else {
-        Write-Host "The SYSTEM task ended with exit code $taskExitCode."
-    }
-    Unregister-ScheduledTask -TaskName $script:SystemTaskName -Confirm:$false -ErrorAction SilentlyContinue
-
-    $newProfileEntries = Compare-SystemProfileInstallEntry -Before $profileBefore -After (Get-SystemProfileInstallEntry)
-    $transcript = Get-InstallPassTranscript -LogDirectory $logFolder -Since $startedAt
-    $wrapperLog = $null
-    $wrapperFile = @((Get-InstallTranscriptFile -LogDirectory $logFolder).Rmm | Where-Object { $_.LastWriteTime -ge $startedAt }) | Select-Object -Last 1
-    if ($wrapperFile) {
-        $wrapperLog = [string](Get-Content -LiteralPath $wrapperFile.FullName -Raw)
-    }
-    $runRecordRead = Read-SystemPassRunRecord -Path (Join-Path $logFolder 'last-run.json')
-    if ($runRecordRead.Problem) {
-        Write-Host $runRecordRead.Problem -ForegroundColor Yellow
+    if ($stepExitCode -eq 0 -and @($allResults | Where-Object { $_.Result -eq 'FAIL' }).Count -gt 0) {
+        $stepExitCode = 1
     }
 
-    $check = Get-SystemInstallPassResult -TaskExitCode $taskExitCode -Transcript $transcript -WrapperLog $wrapperLog -RunRecord $runRecordRead.Record -RunRecordProblem $runRecordRead.Problem -NewSystemProfileEntries $newProfileEntries -KnownPlatformIncompatible "$env:KNOWN_PLATFORM_INCOMPATIBLE" -AppExpectation $appExpectation -AppExpectationProblem $appExpectationProblem
     Write-Host ''
     Write-Host '=== E2E assertion results ==='
-    Write-Host ($check.Results | Format-Table -AutoSize -Wrap | Out-String -Width 4096).TrimEnd()
-    $failures = @($check.Results | Where-Object { $_.Result -eq 'FAIL' })
+    Write-Host ($allResults | Format-Table -AutoSize -Wrap | Out-String -Width 4096).TrimEnd()
+    $failures = @($allResults | Where-Object { $_.Result -eq 'FAIL' })
     if ($failures.Count -gt 0) {
         Write-Host ''
         Write-Host "FAILED: $($failures.Count) assertion(s) failed:" -ForegroundColor Red
@@ -924,7 +1342,7 @@ if ($MyInvocation.InvocationName -ne '.') {
     }
     else {
         Write-Host ''
-        Write-Host "PASSED: all $(@($check.Results).Count) assertions passed." -ForegroundColor Green
+        Write-Host "PASSED: all $(@($allResults).Count) assertions passed." -ForegroundColor Green
     }
-    exit $check.StepExitCode
+    exit $stepExitCode
 }

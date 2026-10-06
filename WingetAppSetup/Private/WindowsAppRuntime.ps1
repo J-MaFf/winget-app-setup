@@ -137,11 +137,10 @@ function Expand-WindowsAppRuntimeMsix {
 
 <#
 .SYNOPSIS
-    Checks that a file carries a valid Authenticode signature from the given signer.
+    Checks that a framework .msix carries a valid Authenticode signature from the given signer.
 .DESCRIPTION
-    Status 'Valid' (the signature matches the content and chains to a trusted root) and a
-    certificate common name of exactly SignerCommonName, the rule Test-PowerShell7MsiSignature
-    applies to the PowerShell MSI.
+    Test-AuthenticodeSigner's rule (WauSupport.ps1): status 'Valid' and a certificate common name
+    of exactly SignerCommonName.
 .PARAMETER Path
     The file to check.
 .PARAMETER SignerCommonName
@@ -158,28 +157,7 @@ function Test-WindowsAppRuntimeSignature {
         [string]$SignerCommonName
     )
 
-    try {
-        $signature = Get-AuthenticodeSignature -LiteralPath $Path -ErrorAction Stop
-    }
-    catch {
-        return [pscustomobject]@{ Valid = $false; Detail = "its signature could not be checked: $_" }
-    }
-
-    $status = 'unknown'
-    $signer = 'none'
-    if ($signature) {
-        if ("$($signature.Status)") {
-            $status = "$($signature.Status)"
-        }
-        if ($signature.SignerCertificate -and $signature.SignerCertificate.Subject) {
-            $signer = [string]$signature.SignerCertificate.Subject
-        }
-    }
-    $signerPattern = '(^|,\s*)CN=' + [regex]::Escape($SignerCommonName) + '(\s*,|$)'
-    if ($status -eq 'Valid' -and $signer -match $signerPattern) {
-        return [pscustomobject]@{ Valid = $true; Detail = $signer }
-    }
-    return [pscustomobject]@{ Valid = $false; Detail = ('it is not signed by {0} (signature status: {1}; signer: {2})' -f $SignerCommonName, $status, $signer) }
+    return (Test-AuthenticodeSigner -Path $Path -SignerCommonName $SignerCommonName)
 }
 
 <#

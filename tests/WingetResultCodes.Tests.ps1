@@ -21,6 +21,8 @@ Describe 'Get-WingetExitCodeInfo' {
         @{ Hex = '8A15010F'; Name = 'INSTALL_BLOCKED_BY_POLICY'; Class = '' }
         @{ Hex = '8A150010'; Name = 'NO_APPLICABLE_INSTALLER'; Class = '' }
         @{ Hex = '8A15002B'; Name = 'UPDATE_NOT_APPLICABLE'; Class = '' }
+        # Install-WinGetPackage's VagueCriteriaException (wgt-gq8.42).
+        @{ Hex = '8A150016'; Name = 'MULTIPLE_APPLICATIONS_FOUND'; Class = '' }
         @{ Hex = '80004004'; Name = 'E_ABORT'; Class = '' }
         @{ Hex = '80073D19'; Name = 'ERROR_DEPLOYMENT_BLOCKED_BY_USER_LOG_OFF'; Class = '' }
         # A missing or corrupted source, which Initialize-Winget resets (review finding P3-25).
@@ -157,6 +159,21 @@ Describe 'Test-WingetRestartRequiredResult' {
         @{ Case = 'winget 1.7 and later (exit 0 with its restart warning)'; Code = 0; Output = @('Starting package install...', 'Restart your PC to finish installation.') }
     ) {
         Test-WingetRestartRequiredResult -ExitCode $Code -Output $Output | Should -BeTrue
+    }
+
+    # wgt-gq8.42: Microsoft.WinGet.Client prints no warning and never sets RebootRequired; an
+    # installer's 3010 arrives as Status Ok with InstallerErrorCode 3010.
+    It 'Is true for an install the WinGet client engine reports as 0 with installer exit code 3010' {
+        Test-WingetRestartRequiredResult -ExitCode 0 -Output @() -InstallerErrorCode 3010 | Should -BeTrue
+    }
+
+    It 'Is false for the WinGet client engine''s <Case>' -ForEach @(
+        @{ Case = 'plain success'; Code = 0; InstallerCode = 0 }
+        @{ Case = 'failure with installer exit code 3010'; Code = -1978335159; InstallerCode = 3010 }
+        @{ Case = 'success with another installer code'; Code = 0; InstallerCode = 1641 }
+        @{ Case = 'success with no installer code (winget.exe)'; Code = 0; InstallerCode = $null }
+    ) {
+        Test-WingetRestartRequiredResult -ExitCode $Code -Output @() -InstallerErrorCode $InstallerCode | Should -BeFalse
     }
 
     It 'Is false for <Case>' -ForEach @(

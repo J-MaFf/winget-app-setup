@@ -197,12 +197,27 @@ function Invoke-WingetInstall {
     }
 
     # Who this run installs as, decided once: as SYSTEM or under cross-user elevation the run
-    # installs for the whole PC only. A stale machine-wide winget path from an earlier run in this
-    # session is dropped first.
+    # installs for the whole PC only. A stale machine-wide winget path or engine from an earlier run
+    # in this session is dropped first.
     $script:MachineWingetPath = $null
+    $script:WingetClientEngine = $null
     $account = Get-InstallAccountContext
     $machineWide = [bool]($account.IsSystem -or $account.IsCrossUserElevation)
+    # The opt-in Microsoft.WinGet.Client engine (wgt-gq8.42) applies to runs as SYSTEM only, decided
+    # once for the whole run.
+    $engineRequest = Get-SystemInstallEngineRequest
+    $requestedEngine = 'Cli'
     if ($account.IsSystem) {
+        $requestedEngine = $engineRequest.Engine
+    }
+    $script:InstallEngineRecord = New-InstallEngineRecord -Requested $requestedEngine -Used 'Cli'
+    if (-not $account.IsSystem -and $engineRequest.Engine -eq 'WinGetClient') {
+        Write-Info 'WINGET_APP_SETUP_SYSTEM_ENGINE=WinGetClient applies only to runs as SYSTEM; this run uses winget.'
+    }
+    if ($account.IsSystem -and $requestedEngine -eq 'WinGetClient') {
+        Write-Info 'Running as SYSTEM (for example from an RMM agent): installing for the whole PC only, with the Microsoft.WinGet.Client module (requested by WINGET_APP_SETUP_SYSTEM_ENGINE), or the machine-wide winget.exe if the module is not ready. An app with no machine-wide installer is not installed: it is reported as Deferred, with how it can still be installed for the user.'
+    }
+    elseif ($account.IsSystem) {
         Write-Info 'Running as SYSTEM (for example from an RMM agent): installing for the whole PC only, with the winget.exe that App Installer installed for this PC. An app with no machine-wide installer is not installed: it is reported as Deferred, with how it can still be installed for the user. Microsoft does not support the winget command line as SYSTEM, so a SYSTEM run can fail where a run as a user would not.'
     }
 
@@ -247,7 +262,11 @@ function Invoke-WingetInstall {
         $winget = [pscustomobject]@{ Ready = $false; Diagnosis = 'PolicyBlocked' }
     }
     else {
-        $winget = Initialize-Winget -WhatIf:$WhatIf -AccountContext $account
+        $engineParameters = @{}
+        if ($account.IsSystem) {
+            $engineParameters['SystemInstallEngine'] = $requestedEngine
+        }
+        $winget = Initialize-Winget -WhatIf:$WhatIf -AccountContext $account @engineParameters
     }
     $wingetAvailable = [bool]$winget.Ready
     if (-not $wingetAvailable -and -not $WhatIf) {
@@ -637,6 +656,10 @@ function Invoke-WingetInstall {
         }
     }
 
+    # Every install and check this run makes is done: the Microsoft.WinGet.Client engine's folder
+    # goes, and Winget-AutoUpdate and the end-of-run check use winget.exe.
+    Remove-WingetClientEngine
+
     # No post-install hook runs after the retry pass: the TightVNC passwords are not kept any longer
     # (an irm | iex console stays open after the run).
     Clear-TightVncSecret
@@ -763,11 +786,18 @@ function Invoke-WingetInstall {
 
     # Why apps were deferred, and who can install them (review findings P3-22, P3-23). They do not
     # change the exit code.
-    Write-DeferredAppsSummary -DeferredApps $noInstallerDeferredApps -PerUserApps $perUserDeferredApps -AccountContext $account
+    $installEngineRecord = Get-InstallEngineRecord
+    Write-DeferredAppsSummary -DeferredApps $noInstallerDeferredApps -PerUserApps $perUserDeferredApps -AccountContext $account -InstallEngine $installEngineRecord.used
 
     # Installed apps their post-install hook could not configure. They do not
     # change the exit code either; a hook that failed made its app Failed above.
     Write-NotConfiguredAppsSummary -NotConfiguredApps $notConfiguredApps
+
+    # A requested engine that was not used does not change the exit code; it is said here and
+    # recorded in last-run.json (installEngine.fallbackReason).
+    if ($installEngineRecord.requested -eq 'WinGetClient' -and $installEngineRecord.used -eq 'Cli' -and -not $WhatIf) {
+        Write-WarningMessage ('Install engine: Microsoft.WinGet.Client was requested but not used ({0}); this run installed with winget.exe.' -f "$($installEngineRecord.fallbackReason)".TrimEnd('.'))
+    }
 
     # The auto-update outcome with the summary (issue #186). Every outcome printed as an error makes
     # the run exit 8 when nothing ranks above it (P3-36).
@@ -872,7 +902,7 @@ function Invoke-WingetInstall {
     # A dry run changes nothing and reports neither.
     if (-not $WhatIf) {
         try {
-            $runRecord = New-InstallerRunRecord -ExitCode $exitCode -Apps @($appRecords.Values) -AutoUpdates (Get-AutoUpdateResultStatus -WauResult $wauResult) -AutoUpdatesVersion $wauResult.Version -RestartRequired $restartRequired -WingetUsable $wingetUsableForRecord -SummaryReached
+            $runRecord = New-InstallerRunRecord -ExitCode $exitCode -Apps @($appRecords.Values) -AutoUpdates (Get-AutoUpdateResultStatus -WauResult $wauResult) -AutoUpdatesVersion $wauResult.Version -RestartRequired $restartRequired -WingetUsable $wingetUsableForRecord -InstallEngine $installEngineRecord -SummaryReached
             [void](Write-InstallerRunResult -Record $runRecord)
         }
         catch {

@@ -440,7 +440,8 @@ function Complete-AppPostInstallStep {
     it does not, the breaker trips, and the caller fails the remaining apps at once and skips the
     retry pass. A failure that can clear on its own gets six tries 15 seconds apart (75 seconds, for
     an App Installer update in progress, issues #253/#258); winget missing or 'Access is denied'
-    trips it after one.
+    trips it after one. While the Microsoft.WinGet.Client engine installs, the check is
+    Test-WingetClientEngineLaunchable instead, with the same tries.
 .PARAMETER Outcome
     The app's Install-AppWithVerification result.
 .OUTPUTS
@@ -454,6 +455,17 @@ function Invoke-WingetLaunchCircuitBreaker {
 
     if (@('PreCheckLaunchFailed', 'InstallLaunchFailed', 'VerifyLaunchFailed') -notcontains $Outcome.FailureReason) {
         return $false
+    }
+
+    if (Test-WingetClientEngineActive) {
+        Write-WarningMessage 'The WinGet client engine could not be started for that app. Checking whether it can still be started...'
+        $engineProbe = Test-WingetClientEngineLaunchable -Attempts 6 -RetryDelaySeconds 15
+        if ($engineProbe.Launchable) {
+            Write-Info "The WinGet client engine starts again ($($engineProbe.Version)); carrying on with the next app."
+            return $false
+        }
+        Write-ErrorMessage "The WinGet client engine cannot be started on this machine ($($engineProbe.Reason)). The remaining apps are marked failed without an install attempt and are not retried. Restart the machine and re-run the installer; if it persists, attach this transcript to a GitHub issue."
+        return $true
     }
 
     Write-WarningMessage 'winget could not be launched for that app. Checking whether winget can still be started...'

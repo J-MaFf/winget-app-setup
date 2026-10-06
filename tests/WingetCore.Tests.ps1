@@ -1809,3 +1809,252 @@ Describe 'Invoke-AppxProvisioning -TimeoutSeconds (work-order item 31)' {
         }
     }
 }
+
+# wgt-gq8.42: a run as SYSTEM that opted in installs with Microsoft.WinGet.Client. Each attempt is
+# Invoke-WingetClientInstall instead of `winget install`, and its results carry winget's own codes,
+# so the same retries, deferral and restart rules apply.
+Describe 'Install-WingetPackage with the Microsoft.WinGet.Client engine (wgt-gq8.42)' {
+    BeforeAll {
+        $script:InstallInProgress = -1978334974   # 0x8A150102 INSTALL_INSTALL_IN_PROGRESS
+        $script:PackageInUse = -1978334975        # 0x8A150101 INSTALL_PACKAGE_IN_USE
+        $script:NoApplicableInstaller = -1978335216
+    }
+
+    BeforeEach {
+        Mock Write-Host { }
+        Mock Write-Info { }
+        Mock Write-WarningMessage { }
+        Mock Write-ErrorMessage { }
+        Mock Start-Sleep { }
+        Mock Wait-WindowsInstallerIdle { [pscustomobject]@{ WaitedSeconds = 30; Busy = $false } }
+        Mock Test-WingetClientEngineActive { $true }
+        Mock Invoke-WingetProcess { throw 'winget.exe must not install while the engine is active' }
+        $script:clientQueue = @()
+        $script:clientIndex = 0
+        Mock Invoke-WingetClientInstall {
+            $next = $script:clientQueue[$script:clientIndex]
+            $script:clientIndex++
+            $result = New-TestProcessResult -ExitCode $next.ExitCode -TimedOut:([bool]$next.TimedOut) -LaunchFailed:([bool]$next.LaunchFailed) -LaunchErrorCode $null -LaunchError 'the WinGet client engine could not start: FileLoadException: Could not load file or assembly'
+            $result | Add-Member -NotePropertyName InstallerErrorCode -NotePropertyValue $next.InstallerErrorCode
+            $result | Add-Member -NotePropertyName WingetClientStatus -NotePropertyValue $next.Status
+            $result | Add-Member -NotePropertyName Engine -NotePropertyValue 'WinGetClient'
+            $result
+        }
+    }
+
+    It 'Installs through the engine for the whole PC, silently, and never runs winget.exe' {
+        $script:clientQueue = @(@{ ExitCode = 0; InstallerErrorCode = [long]0; Status = 'Ok' })
+
+        $result = Install-WingetPackage -PackageId 'Google.Chrome' -MachineScopeOnly -Silent -InstallerType 'wix'
+
+        $result.ExitCode | Should -Be 0
+        $result.Engine | Should -Be 'WinGetClient'
+        $result.InstallerErrorCode | Should -Be 0
+        $result.RestartRequired | Should -BeFalse
+        Should -Invoke Invoke-WingetProcess -Times 0 -Exactly
+        Should -Invoke Invoke-WingetClientInstall -Times 1 -Exactly -ParameterFilter {
+            $PackageId -eq 'Google.Chrome' -and $Scope -eq 'machine' -and $Silent -and $InstallerType -eq 'wix' -and $TimeoutSeconds -eq 1800
+        }
+    }
+
+    It 'Defers a package with no machine-scope installer after one call (item 20), never falling back to another scope' {
+        $script:clientQueue = @(@{ ExitCode = $script:NoApplicableInstaller; InstallerErrorCode = [long]0; Status = 'NoApplicableInstallers' }, @{ ExitCode = 0 })
+
+        $result = Install-WingetPackage -PackageId 'Spotify.Spotify' -MachineScopeOnly -Silent
+
+        $result.NoMachineScopeInstaller | Should -BeTrue
+        $result.MachineScopeFellBack | Should -BeFalse
+        $result.ExitCode | Should -Be $script:NoApplicableInstaller
+        Should -Invoke Invoke-WingetClientInstall -Times 1 -Exactly
+    }
+
+    It 'Waits for a busy Windows Installer and retries, as with winget.exe' {
+        $script:clientQueue = @(@{ ExitCode = $script:InstallInProgress; InstallerErrorCode = [long]1618; Status = 'InstallError' }, @{ ExitCode = 0; InstallerErrorCode = [long]0; Status = 'Ok' })
+
+        $result = Install-WingetPackage -PackageId 'Google.Chrome' -MachineScopeOnly -Silent
+
+        $result.ExitCode | Should -Be 0
+        $result.Attempts | Should -Be 2
+        $result.InstallInProgressWaitedSeconds | Should -Be 30
+        Should -Invoke Invoke-WingetClientInstall -Times 2 -Exactly
+    }
+
+    It 'Retries an app in use once' {
+        $script:clientQueue = @(@{ ExitCode = $script:PackageInUse; InstallerErrorCode = [long]1; Status = 'InstallError' }, @{ ExitCode = 0; InstallerErrorCode = [long]0; Status = 'Ok' })
+
+        $result = Install-WingetPackage -PackageId 'Google.Chrome' -MachineScopeOnly -Silent -InUseRetryDelaySeconds 60
+
+        $result.ExitCode | Should -Be 0
+        Should -Invoke Invoke-WingetClientInstall -Times 2 -Exactly
+        Should -Invoke Start-Sleep -Times 1 -Exactly -ParameterFilter { $Seconds -eq 60 }
+    }
+
+    It 'Reads the installer''s 3010 as a restart that finishes the install, since the module prints no warning' {
+        $script:clientQueue = @(@{ ExitCode = 0; InstallerErrorCode = [long]3010; Status = 'Ok' })
+
+        $result = Install-WingetPackage -PackageId 'Contoso.MsiApp' -MachineScopeOnly -Silent
+
+        $result.ExitCode | Should -Be 0
+        $result.InstallerErrorCode | Should -Be 3010
+        $result.RestartRequired | Should -BeTrue
+    }
+
+    It 'Ends at once, for the circuit breaker, when the engine cannot start' {
+        $script:clientQueue = @(@{ LaunchFailed = $true })
+
+        $result = Install-WingetPackage -PackageId 'Google.Chrome' -MachineScopeOnly -Silent
+
+        $result.LaunchErrorExhausted | Should -BeTrue
+        $result.ExitCode | Should -BeNullOrEmpty
+        $result.LaunchError | Should -BeLike 'the WinGet client engine could not start:*'
+        Should -Invoke Invoke-WingetClientInstall -Times 1 -Exactly
+    }
+
+    It 'Stops at its time limit' {
+        $script:clientQueue = @(@{ TimedOut = $true })
+
+        $result = Install-WingetPackage -PackageId 'Google.Chrome' -MachineScopeOnly -Silent -TimeoutSeconds 600
+
+        $result.TimedOut | Should -BeTrue
+        $result.TimeoutSeconds | Should -Be 600
+        $result.ExitCode | Should -BeNullOrEmpty
+        Should -Invoke Invoke-WingetClientInstall -Times 1 -Exactly -ParameterFilter { $TimeoutSeconds -eq 600 }
+    }
+
+    It 'Asks the engine for a per-user install only as the user phase would, which it refuses' {
+        Mock Invoke-WingetClientInstall { throw [System.ArgumentException]::new('the WinGet client engine installs for the whole PC only') } -ParameterFilter { $Scope -ne 'machine' }
+
+        { Install-WingetPackage -PackageId 'Contoso.App' -UserScopeOnly -Silent } | Should -Throw -ExceptionType ([System.ArgumentException])
+
+        Should -Invoke Invoke-WingetClientInstall -Times 1 -Exactly -ParameterFilter { $Scope -eq 'user' }
+    }
+
+    It 'Says which engine ran, and has no installer code, with winget.exe' {
+        Mock Test-WingetClientEngineActive { $false }
+        Mock Invoke-WingetProcess { New-TestProcessResult -ExitCode 0 }
+
+        $result = Install-WingetPackage -PackageId 'Google.Chrome' -MachineScopeOnly -Silent
+
+        $result.Engine | Should -Be 'Cli'
+        $result.InstallerErrorCode | Should -BeNullOrEmpty
+        Should -Invoke Invoke-WingetClientInstall -Times 0 -Exactly
+    }
+}
+
+Describe 'Test-WingetPackageInstalled with the Microsoft.WinGet.Client engine (wgt-gq8.42)' {
+    It 'Asks the engine, not winget list, while it is active' {
+        Mock Test-WingetClientEngineActive { $true }
+        Mock Invoke-WingetProcess { throw 'winget list must not run while the engine is active' }
+        Mock Invoke-WingetClientInstalledCheck { @{ Installed = $true; TimedOut = $false; LaunchFailed = $false; LaunchError = $null; CheckFailed = $false; ExitCode = 0 } }
+
+        (Test-WingetPackageInstalled -PackageId 'Git.Git' -TimeoutSeconds 15).Installed | Should -BeTrue
+
+        Should -Invoke Invoke-WingetClientInstalledCheck -Times 1 -Exactly -ParameterFilter { $PackageId -eq 'Git.Git' -and $TimeoutSeconds -eq 15 }
+        Should -Invoke Invoke-WingetProcess -Times 0 -Exactly
+    }
+
+    It 'Runs winget list otherwise' {
+        Mock Test-WingetClientEngineActive { $false }
+        Mock Invoke-WingetClientInstalledCheck { throw 'the engine must not answer' }
+        Mock Invoke-WingetProcess { New-TestProcessResult -ExitCode 0 -Output @('Git Git.Git 2.50.0 winget') }
+
+        (Test-WingetPackageInstalled -PackageId 'Git.Git' -TimeoutSeconds 15).Installed | Should -BeTrue
+
+        Should -Invoke Invoke-WingetClientInstalledCheck -Times 0 -Exactly
+    }
+}
+
+Describe 'Initialize-Winget as SYSTEM with the Microsoft.WinGet.Client engine (wgt-gq8.42)' {
+    BeforeEach {
+        Register-LadderMocks
+        Mock Test-WingetLaunchable { throw 'the per-account check must not run for SYSTEM' }
+        Mock Test-MachineWingetAvailable { $script:MachineWingetPath = 'X:\WindowsApps\winget.exe'; $true }
+        $script:engineReady = $true
+        Mock Initialize-WingetClientEngine {
+            if ($script:engineReady) {
+                $script:WingetClientEngine = [pscustomobject]@{ Module = [pscustomobject]@{ Version = '1.29.380'; Architecture = 'x64'; Directory = $null }; EngineVersion = 'v1.29.380'; PowerShellVersion = '7.6.6'; Architecture = 'X64' }
+                $script:InstallEngineRecord = New-InstallEngineRecord -Requested WinGetClient -Used WinGetClient
+                return [pscustomobject]@{ Ready = $true; Reason = $null }
+            }
+            $script:InstallEngineRecord = New-InstallEngineRecord -Requested WinGetClient -Used Cli -FallbackReason 'the module is not ready: blocked'
+            [pscustomobject]@{ Ready = $false; Reason = 'the module is not ready: blocked' }
+        }
+        $script:account = New-TestAccountContext -System
+    }
+
+    AfterEach {
+        $script:WingetClientEngine = $null
+        $script:InstallEngineRecord = $null
+        $script:MachineWingetPath = $null
+    }
+
+    It 'Is ready with the module, skips the winget source probe, still checks winget.exe for Winget-AutoUpdate, and names the engine' {
+        $result = Initialize-Winget -AccountContext $script:account -SystemInstallEngine WinGetClient
+
+        $result.Ready | Should -BeTrue
+        $result.Diagnosis | Should -Be 'Ok'
+        Should -Invoke Initialize-WingetClientEngine -Times 1 -Exactly
+        Should -Invoke Test-MachineWingetAvailable -Times 1 -Exactly -ParameterFilter { $NotRequired }
+        Should -Invoke Invoke-WingetSourceProbe -Times 0 -Exactly
+        @($script:log | Where-Object { $_ -like 'INFO: Install engine: *' }) | Should -HaveCount 1
+        ($script:log -join "`n") | Should -Match 'INFO: Install engine: Microsoft\.WinGet\.Client 1\.29\.380 \(WinGet engine v1\.29\.380, PowerShell 7\.6\.6 x64; engine log folder '
+    }
+
+    It 'Is ready with the module when no winget.exe starts, and warns that Winget-AutoUpdate needs one' {
+        Mock Test-MachineWingetAvailable { $false }
+
+        $result = Initialize-Winget -AccountContext $script:account -SystemInstallEngine WinGetClient
+
+        $result.Ready | Should -BeTrue
+        $script:log | Should -Contain 'WARN: No machine-wide winget.exe starts on this PC. This run installs with Microsoft.WinGet.Client, but Winget-AutoUpdate runs winget.exe, so automatic updates will not work until App Installer is repaired; the end-of-run check reports it.'
+        Should -Invoke Invoke-WingetSourceProbe -Times 0 -Exactly
+    }
+
+    It 'Goes on with winget.exe, the source probe included, when the module is not ready, and says why' {
+        $script:engineReady = $false
+
+        $result = Initialize-Winget -AccountContext $script:account -SystemInstallEngine WinGetClient
+
+        $result.Ready | Should -BeTrue
+        Should -Invoke Test-MachineWingetAvailable -Times 1 -Exactly -ParameterFilter { -not $NotRequired }
+        Should -Invoke Invoke-WingetSourceProbe -Times 1 -Exactly
+        $script:log | Should -Contain 'INFO: Install engine: winget.exe (X:\WindowsApps\winget.exe), not the requested Microsoft.WinGet.Client: the module is not ready: blocked.'
+    }
+
+    It 'Stops with NotLaunchable, as without the engine, when neither the module nor winget.exe works' {
+        $script:engineReady = $false
+        Mock Test-MachineWingetAvailable { $false }
+
+        $result = Initialize-Winget -AccountContext $script:account -SystemInstallEngine WinGetClient
+
+        $result.Ready | Should -BeFalse
+        $result.Diagnosis | Should -Be 'NotLaunchable'
+        Should -Invoke Invoke-WingetSourceProbe -Times 0 -Exactly
+    }
+
+    It 'Never readies the module without the request, and names winget.exe' {
+        $result = Initialize-Winget -AccountContext $script:account
+
+        $result.Ready | Should -BeTrue
+        Should -Invoke Initialize-WingetClientEngine -Times 0 -Exactly
+        Should -Invoke Invoke-WingetSourceProbe -Times 1 -Exactly
+        $script:log | Should -Contain 'INFO: Install engine: winget.exe (X:\WindowsApps\winget.exe).'
+    }
+
+    It 'Downloads nothing in a dry run, and says what a real run would do' {
+        [void](Initialize-Winget -AccountContext $script:account -SystemInstallEngine WinGetClient -WhatIf)
+
+        Should -Invoke Initialize-WingetClientEngine -Times 0 -Exactly
+        Should -Invoke Test-MachineWingetAvailable -Times 1 -Exactly -ParameterFilter { $WhatIf }
+        $script:log | Should -Contain 'INFO: [DRY-RUN] A real run would install the apps with Microsoft.WinGet.Client 1.29.380 (pinned), downloading it from the PowerShell Gallery unless it is cached, and would use winget.exe if it is not ready.'
+    }
+
+    It 'Ignores the request in a run that is not SYSTEM' {
+        Mock Test-WingetLaunchable { New-LaunchProbe -Launchable }
+
+        [void](Initialize-Winget -AccountContext (New-TestAccountContext) -SystemInstallEngine WinGetClient)
+
+        Should -Invoke Initialize-WingetClientEngine -Times 0 -Exactly
+        @($script:log | Where-Object { $_ -like 'INFO: Install engine: *' }) | Should -HaveCount 0
+    }
+}

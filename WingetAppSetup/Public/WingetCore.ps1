@@ -16,12 +16,20 @@
          gets the account fixes not yet run; a missing or corrupted source (SourceBroken) gets
          `winget source reset --force`. A timeout, a network error or another code gets no repair
          (P3-28). A source that still fails is one line, and the run goes on.
-    As SYSTEM, step 2 is Test-MachineWingetAvailable and no account fix runs.
+    As SYSTEM, step 2 is Test-MachineWingetAvailable and no account fix runs. With
+    -SystemInstallEngine WinGetClient a run as SYSTEM first readies Microsoft.WinGet.Client
+    (Initialize-WingetClientEngine): ready, it installs the apps, winget.exe is only checked for
+    Winget-AutoUpdate (a warning, not exit 2) and step 3 is skipped; not ready, the run goes on with
+    winget.exe as without it. Either way it prints the 'Install engine: ' line.
 .PARAMETER WhatIf
     Dry run (P2-16): only the policy and `winget --version` checks run. Nothing is registered,
-    repaired, updated or reset; [DRY-RUN] lines say what a real run would do.
+    repaired, updated or reset, and no module is downloaded; [DRY-RUN] lines say what a real run
+    would do.
 .PARAMETER AccountContext
     Get-InstallAccountContext's result, which Invoke-WingetInstall passes; read here when not given.
+.PARAMETER SystemInstallEngine
+    The engine a run as SYSTEM asked for (Get-SystemInstallEngineRequest): 'Cli' (default) or
+    'WinGetClient'. Ignored in any other run.
 .OUTPUTS
     [pscustomobject] Ready ([bool]: winget starts and no policy blocks it; a real run stops with exit
     code 2 when it is $false) and Diagnosis: 'Ok', 'SourceFailed' (ready, but the winget source
@@ -34,7 +42,11 @@ function Initialize-Winget {
 
         [Parameter(Mandatory = $false)]
         [AllowNull()]
-        [object]$AccountContext
+        [object]$AccountContext,
+
+        [Parameter(Mandatory = $false)]
+        [ValidateSet('Cli', 'WinGetClient')]
+        [string]$SystemInstallEngine = 'Cli'
     )
 
     if ($null -eq $AccountContext) {
@@ -71,9 +83,33 @@ function Initialize-Winget {
         Write-WarningMessage "winget is set up per account; setting it up for '$account'."
     }
 
-    if ($isSystem) {
+    if ($isSystem -and $SystemInstallEngine -eq 'WinGetClient' -and -not $WhatIf) {
+        $engine = Initialize-WingetClientEngine
+        # winget.exe still matters for Winget-AutoUpdate, but not for the installs once the module is
+        # ready.
+        $machineWingetOk = Test-MachineWingetAvailable -NotRequired:([bool]$engine.Ready)
+        if ($engine.Ready) {
+            if (-not $machineWingetOk) {
+                Write-WarningMessage 'No machine-wide winget.exe starts on this PC. This run installs with Microsoft.WinGet.Client, but Winget-AutoUpdate runs winget.exe, so automatic updates will not work until App Installer is repaired; the end-of-run check reports it.'
+            }
+            Write-InstallEngineLine
+            return [pscustomobject]@{ Ready = $true; Diagnosis = 'Ok' }
+        }
+        if (-not $machineWingetOk) {
+            return [pscustomobject]@{ Ready = $false; Diagnosis = 'NotLaunchable' }
+        }
+        Write-InstallEngineLine
+    }
+    elseif ($isSystem) {
+        if ($SystemInstallEngine -eq 'WinGetClient') {
+            $modulePin = Get-WingetClientModulePin
+            Write-Info "[DRY-RUN] A real run would install the apps with Microsoft.WinGet.Client $($modulePin.Version) (pinned), downloading it from the PowerShell Gallery unless it is cached, and would use winget.exe if it is not ready."
+        }
         if (-not (Test-MachineWingetAvailable -WhatIf:$WhatIf)) {
             return [pscustomobject]@{ Ready = $false; Diagnosis = 'NotLaunchable' }
+        }
+        if ($SystemInstallEngine -ne 'WinGetClient') {
+            Write-InstallEngineLine
         }
     }
     else {
@@ -171,6 +207,10 @@ function Initialize-Winget {
     as it arrives, and its --log to the logs folder (InstallerLogPath). -Silent passes --silent, so
     MSI and WiX packages install with /quiet instead of /passive.
 
+    While the Microsoft.WinGet.Client engine is active (a run as SYSTEM that opted in), each attempt
+    is Invoke-WingetClientInstall instead of `winget install`: the same exit codes, so the same
+    retries, deferral and restart rules apply.
+
     A launch that fails with 1920 or 32 (winget.exe locked by an antivirus scan or an App Installer
     update, issues #253/#258) is retried with its own doubling backoff, MaxLaunchAttempts times (75
     seconds by default), and costs no install attempt. Any other launch failure ends at once with
@@ -223,7 +263,7 @@ function Initialize-Winget {
     The time limit of each winget install, in seconds. Default (or 0): Get-ProcessTimeoutSeconds
     WingetInstall. The user phase passes what is left of its time budget.
 .OUTPUTS
-    [hashtable] @{ ExitCode = <int|$null>; Attempts = <int>; SessionErrorExhausted = <bool>; MachineScopeFellBack = <bool>; NoMachineScopeInstaller = <bool>; NoUserScopeInstaller = <bool>; LaunchErrorExhausted = <bool>; LaunchAttempts = <int>; LaunchError = <string|$null>; TimedOut = <bool>; TimeoutSeconds = <int>; InstallerLogPath = <string|$null>; InstallInProgressWaitedSeconds = <int>; RestartRequired = <bool> }
+    [hashtable] @{ ExitCode = <int|$null>; Attempts = <int>; SessionErrorExhausted = <bool>; MachineScopeFellBack = <bool>; NoMachineScopeInstaller = <bool>; NoUserScopeInstaller = <bool>; LaunchErrorExhausted = <bool>; LaunchAttempts = <int>; LaunchError = <string|$null>; TimedOut = <bool>; TimeoutSeconds = <int>; InstallerLogPath = <string|$null>; InstallInProgressWaitedSeconds = <int>; RestartRequired = <bool>; InstallerErrorCode = <long|$null>; Engine = 'Cli' | 'WinGetClient' }
     SessionErrorExhausted: every attempt failed with the session error. MachineScopeFellBack: the
     install was retried at winget's default scope. NoMachineScopeInstaller / NoUserScopeInstaller:
     no installer for the only scope allowed (ExitCode 0x8A150010). Attempts counts installs at the
@@ -232,6 +272,8 @@ function Initialize-Winget {
     last error). TimedOut: the last attempt was stopped at its limit (ExitCode $null).
     InstallerLogPath: the last attempt's installer log, or $null. RestartRequired: the last result
     says a restart finishes the install; the caller decides from `winget list` whether it installed.
+    InstallerErrorCode: the installer's own exit code, which only the WinGet client engine reports
+    ($null otherwise). Engine: which engine ran the install.
 #>
 function Install-WingetPackage {
     param (
@@ -321,6 +363,11 @@ function Install-WingetPackage {
     $launchError = $null
     $timedOut = $false
     $installerLogPath = $null
+    $installerErrorCode = $null
+    $engine = 'Cli'
+    if (Test-WingetClientEngineActive) {
+        $engine = 'WinGetClient'
+    }
 
     while ($true) {
         $attempt++
@@ -352,7 +399,23 @@ function Install-WingetPackage {
             $installArgs += '--silent'
         }
 
-        $run = Invoke-WingetProcess -ArgumentList $installArgs -TimeoutSeconds $timeoutSeconds
+        if ($engine -eq 'WinGetClient') {
+            $clientScope = 'default'
+            if ($UserScopeOnly -or $Scope -eq 'user') {
+                $clientScope = 'user'
+            }
+            elseif ($useMachineScope) {
+                $clientScope = 'machine'
+            }
+            $run = Invoke-WingetClientInstall -PackageId $PackageId -Scope $clientScope -InstallerType $InstallerType -Silent:$useSilent -TimeoutSeconds $timeoutSeconds
+        }
+        else {
+            $run = Invoke-WingetProcess -ArgumentList $installArgs -TimeoutSeconds $timeoutSeconds
+        }
+        $installerErrorCode = $null
+        if ($null -ne $run.InstallerErrorCode) {
+            $installerErrorCode = [long]$run.InstallerErrorCode
+        }
         $installerLogPath = $null
         if ($run.LogPath -and (Test-Path -LiteralPath $run.LogPath)) {
             $installerLogPath = $run.LogPath
@@ -476,7 +539,7 @@ function Install-WingetPackage {
 
         # Success, restart-required-first (only a restart changes it) or another failure: final.
         # The caller verifies with `winget list`.
-        $restartRequired = Test-WingetRestartRequiredResult -ExitCode $exitCode -Output $run.Output
+        $restartRequired = Test-WingetRestartRequiredResult -ExitCode $exitCode -Output $run.Output -InstallerErrorCode $installerErrorCode
         break
     }
 
@@ -495,6 +558,8 @@ function Install-WingetPackage {
         InstallerLogPath               = $installerLogPath
         InstallInProgressWaitedSeconds = $installInProgressWaited
         RestartRequired                = $restartRequired
+        InstallerErrorCode             = $installerErrorCode
+        Engine                         = $engine
     }
 }
 
@@ -508,7 +573,8 @@ function Install-WingetPackage {
     installed". `winget list` exits 0 when it lists the package and 0x8A150014 when nothing matches;
     any other code without a match (e.g. 0x8A15004B, no source opened) is CheckFailed. A failed
     launch is not retried here; the caller's circuit breaker decides. The id is matched as a whole
-    id (Test-WingetListOutputContainsPackageId), so 'Foo.Bar' does not match 'Foo.BarBaz'.
+    id (Test-WingetListOutputContainsPackageId), so 'Foo.Bar' does not match 'Foo.BarBaz'. While the
+    Microsoft.WinGet.Client engine is active, Invoke-WingetClientInstalledCheck answers instead.
 .PARAMETER PackageId
     The winget package id to check.
 .PARAMETER TimeoutSeconds
@@ -530,6 +596,10 @@ function Test-WingetPackageInstalled {
         [Parameter(Mandatory = $true)]
         [int]$TimeoutSeconds
     )
+
+    if (Test-WingetClientEngineActive) {
+        return (Invoke-WingetClientInstalledCheck -PackageId $PackageId -TimeoutSeconds $TimeoutSeconds)
+    }
 
     $listArgs = @('list', '--exact', '--id', $PackageId, '--accept-source-agreements', '--disable-interactivity')
     $run = Invoke-WingetProcess -ArgumentList $listArgs -TimeoutSeconds $TimeoutSeconds -Echo None

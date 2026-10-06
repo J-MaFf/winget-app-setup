@@ -7,9 +7,10 @@
 .DESCRIPTION
     The entry script calls it once a real elevated run holds the run lock, so two runs never prune
     at once and a dry run changes nothing. It keeps the logs of the newest KeepTranscripts
-    transcripts (Remove-OldInstallerLog) and removes copy folders older than TempCopyMaxAgeHours
-    (Remove-StaleInstallerCopy). The defaults here are the one place the numbers are set. Never
-    stops a run: a failure warns.
+    transcripts (Remove-OldInstallerLog), removes copy folders older than TempCopyMaxAgeHours
+    (Remove-StaleInstallerCopy) and Microsoft.WinGet.Client folders as old
+    (Remove-StaleWingetClientFolder). The defaults here are the one place the numbers are set.
+    Never stops a run: a failure warns.
 .PARAMETER LogDirectory
     The logs folder. Default: the folder of this run's transcript (Get-InstallerLogDirectory);
     nothing is pruned there when there is none.
@@ -25,8 +26,11 @@
     A copy folder at least this old is removed; no run lasts this long.
 .PARAMETER CurrentScriptPath
     The path of the running installer ($PSCommandPath). Its folder is never removed.
+.PARAMETER StagingRoot
+    Where the Microsoft.WinGet.Client engine's folders are. Default:
+    %ProgramData%\winget-app-setup.
 .OUTPUTS
-    [pscustomobject] @{ LogsRemoved; CopiesRemoved }.
+    [pscustomobject] @{ LogsRemoved; CopiesRemoved; WingetClientFoldersRemoved }.
 #>
 function Invoke-InstallerHousekeeping {
     param (
@@ -49,11 +53,17 @@ function Invoke-InstallerHousekeeping {
         [Parameter(Mandatory = $false)]
         [AllowEmptyString()]
         [AllowNull()]
-        [string]$CurrentScriptPath
+        [string]$CurrentScriptPath,
+
+        [Parameter(Mandatory = $false)]
+        [AllowEmptyString()]
+        [AllowNull()]
+        [string]$StagingRoot
     )
 
     $logsRemoved = 0
     $copiesRemoved = 0
+    $wingetClientFoldersRemoved = 0
     try {
         if (-not $PSBoundParameters.ContainsKey('LogDirectory')) {
             $LogDirectory = Get-InstallerLogDirectory
@@ -71,11 +81,20 @@ function Invoke-InstallerHousekeeping {
         if ($logsRemoved -gt 0 -or $copiesRemoved -gt 0) {
             Write-Info ('Removed {0} old log file(s), keeping the logs of the newest {1} transcripts, and {2} leftover temporary copy folder(s) of the installer.' -f $logsRemoved, $KeepTranscripts, $copiesRemoved)
         }
+        if (-not $PSBoundParameters.ContainsKey('StagingRoot') -and -not [string]::IsNullOrWhiteSpace($env:ProgramData)) {
+            $StagingRoot = Join-Path $env:ProgramData 'winget-app-setup'
+        }
+        if (-not [string]::IsNullOrWhiteSpace($StagingRoot)) {
+            $wingetClientFoldersRemoved = Remove-StaleWingetClientFolder -Root $StagingRoot -MaxAgeHours $TempCopyMaxAgeHours
+            if ($wingetClientFoldersRemoved -gt 0) {
+                Write-Info ('Removed {0} leftover Microsoft.WinGet.Client folder(s) from {1}.' -f $wingetClientFoldersRemoved, $StagingRoot)
+            }
+        }
     }
     catch {
         Write-WarningMessage "Could not remove the installer's old logs and temporary copies: $($_.Exception.Message.Trim().TrimEnd('.')). Continuing."
     }
-    return [pscustomobject]@{ LogsRemoved = $logsRemoved; CopiesRemoved = $copiesRemoved }
+    return [pscustomobject]@{ LogsRemoved = $logsRemoved; CopiesRemoved = $copiesRemoved; WingetClientFoldersRemoved = $wingetClientFoldersRemoved }
 }
 
 <#
@@ -267,6 +286,63 @@ function Remove-StaleInstallerCopy {
             catch {
                 # In use, not this account's to delete, or its owner could not be read: left alone.
             }
+        }
+    }
+    return $removed
+}
+
+<#
+.SYNOPSIS
+    Deletes the Microsoft.WinGet.Client engine's leftover folders.
+.DESCRIPTION
+    A run as SYSTEM that opted in to the engine extracts the module into
+    %ProgramData%\winget-app-setup\wingetclient-<32 hex> and removes it when it ends, unless it was
+    killed. This removes those at least MaxAgeHours old that SYSTEM or Administrators own and that
+    are not links, with everything in them (a link inside is removed, not followed).
+.PARAMETER Root
+    The folder to look in (%ProgramData%\winget-app-setup, which only SYSTEM and Administrators can
+    change). Missing: nothing to do.
+.PARAMETER MaxAgeHours
+    The age (last write time) from which a folder is removed.
+.OUTPUTS
+    [int] The number of folders deleted.
+#>
+function Remove-StaleWingetClientFolder {
+    [OutputType([int])]
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$Root,
+
+        [Parameter(Mandatory = $true)]
+        [int]$MaxAgeHours
+    )
+
+    if (-not (Test-Path -LiteralPath $Root -PathType Container)) {
+        return 0
+    }
+    $cutoffUtc = [DateTime]::UtcNow.AddHours(-$MaxAgeHours)
+    $allowedOwnerSids = @('S-1-5-18', 'S-1-5-32-544')
+    $removed = 0
+    $candidates = @(Get-ChildItem -LiteralPath $Root -Directory -Force -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -match '^wingetclient-[0-9a-fA-F]{32}$' })
+    foreach ($directory in $candidates) {
+        if ($directory.LastWriteTimeUtc -gt $cutoffUtc) {
+            continue
+        }
+        if ($directory.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+            continue
+        }
+        try {
+            $ownerSid = (Get-DirectoryAccessSummary -Path $directory.FullName).OwnerSid
+            if ($allowedOwnerSids -notcontains $ownerSid) {
+                continue
+            }
+            # .NET deletes a link inside the folder without following it.
+            [System.IO.Directory]::Delete($directory.FullName, $true)
+            $removed++
+        }
+        catch {
+            # In use, or its owner could not be read: left for a later run.
         }
     }
     return $removed

@@ -1,8 +1,8 @@
 {
   "schemaVersion": 1,
-  "buildId": "1.0.0+5ea1f00d",
-  "startedUtc": "2026-10-05T05:34:48Z",
-  "endedUtc": "2026-10-05T05:40:40Z",
+  "buildId": "1.0.0+7c2e91ab",
+  "startedUtc": "2026-10-06T06:14:30Z",
+  "endedUtc": "2026-10-06T06:31:02Z",
   "exitCode": 0,
   "summaryReached": true,
   "counts": {
@@ -19,7 +19,7 @@
       "reason": null,
       "code": 0,
       "codeHex": "0x00000000",
-      "installerCode": null,
+      "installerCode": 0,
       "restartRequired": false,
       "postInstall": null,
       "postInstallReason": null
@@ -30,7 +30,7 @@
       "reason": null,
       "code": 0,
       "codeHex": "0x00000000",
-      "installerCode": null,
+      "installerCode": 0,
       "restartRequired": false,
       "postInstall": "NotConfigured",
       "postInstallReason": "no server password was supplied, and PowerShell was started with -NonInteractive, so none could be asked for; TightVNC Server has no password, so it refuses every viewer; its control interface has no password, so any signed-in user can reconfigure or stop it from the TightVNC tray icon; set WINGET_APP_SETUP_TIGHTVNC_PASSWORD or run the installer interactively, then run it again"
@@ -41,7 +41,7 @@
       "reason": null,
       "code": 0,
       "codeHex": "0x00000000",
-      "installerCode": null,
+      "installerCode": 0,
       "restartRequired": false,
       "postInstall": null,
       "postInstallReason": null
@@ -63,7 +63,7 @@
       "reason": null,
       "code": 0,
       "codeHex": "0x00000000",
-      "installerCode": null,
+      "installerCode": 0,
       "restartRequired": false,
       "postInstall": null,
       "postInstallReason": null
@@ -74,7 +74,7 @@
       "reason": null,
       "code": 0,
       "codeHex": "0x00000000",
-      "installerCode": null,
+      "installerCode": 0,
       "restartRequired": false,
       "postInstall": null,
       "postInstallReason": null
@@ -85,7 +85,7 @@
       "reason": null,
       "code": 0,
       "codeHex": "0x00000000",
-      "installerCode": null,
+      "installerCode": 0,
       "restartRequired": false,
       "postInstall": null,
       "postInstallReason": null
@@ -96,7 +96,7 @@
       "reason": null,
       "code": 0,
       "codeHex": "0x00000000",
-      "installerCode": null,
+      "installerCode": 0,
       "restartRequired": false,
       "postInstall": null,
       "postInstallReason": null
@@ -142,10 +142,15 @@
   "restartRequired": false,
   "wingetUsable": true,
   "installEngine": {
-    "requested": "Cli",
-    "used": "Cli",
-    "module": null,
+    "requested": "WinGetClient",
+    "used": "WinGetClient",
+    "module": {
+      "name": "Microsoft.WinGet.Client",
+      "version": "1.29.380",
+      "sha256": "3469E5747EB6B100E51FED3F2057386B5BA60BC8955A6669B5C2EB562E316619",
+      "engineVersion": "v1.29.380"
+    },
     "fallbackReason": null
   },
-  "transcriptPath": "C:\\ProgramData\\winget-app-setup\\logs\\install-20261005-053448.log"
+  "transcriptPath": "C:\\ProgramData\\winget-app-setup\\logs\\install-20261006-061430.log"
 }

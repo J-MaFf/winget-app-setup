@@ -55,3 +55,34 @@ function Get-PowerShellEdition {
     #>
     return [string]$PSVersionTable.PSEdition
 }
+
+function Get-PowerShellVersion {
+    <#
+    .SYNOPSIS
+        Returns the running PowerShell's version as major.minor.build: a mockable seam for
+        $PSVersionTable.PSVersion (the Microsoft.WinGet.Client engine needs 7.4 or later).
+    .OUTPUTS
+        [version]
+    #>
+    $psVersion = $PSVersionTable.PSVersion
+    $patch = 0
+    if ($psVersion.PSObject.Properties['Patch']) {
+        $patch = [int]$psVersion.Patch
+    }
+    elseif ($psVersion.Build -ge 0) {
+        $patch = [int]$psVersion.Build
+    }
+    return [version]::new([int]$psVersion.Major, [int]$psVersion.Minor, $patch)
+}
+
+function Get-ProcessArchitecture {
+    <#
+    .SYNOPSIS
+        Returns this process's architecture, e.g. 'X64', 'X86' or 'Arm64': a mockable seam for
+        RuntimeInformation.ProcessArchitecture. An x64 PowerShell emulated on ARM64 Windows says X64,
+        the native DLLs it can load.
+    .OUTPUTS
+        [string] A System.Runtime.InteropServices.Architecture name.
+    #>
+    return [string][System.Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture
+}

@@ -72,6 +72,68 @@ Describe 'Get-ProcessTimeoutSeconds' {
     It 'Gives a lookup the run can do without 30 seconds (work-order item 32)' {
         Get-ProcessTimeoutSeconds -Operation WebLookup | Should -Be 30
     }
+
+    # wgt-gq8.42: each Microsoft.WinGet.Client call starts pwsh and loads the module.
+    It 'Gives the WinGet client engine''s calls in a child pwsh their own limits: <Operation> <Seconds> s' -ForEach @(
+        @{ Operation = 'WingetClientProbe'; Seconds = 180 }
+        @{ Operation = 'WingetClientVersion'; Seconds = 60 }
+        @{ Operation = 'WingetClientListCheck'; Seconds = 45 }
+    ) {
+        Get-ProcessTimeoutSeconds -Operation $Operation | Should -Be $Seconds
+    }
+}
+
+Describe 'New-WingetInstallerLogPath (wgt-gq8.42)' {
+    BeforeEach {
+        $script:savedInstallLogPath = $script:InstallLogPath
+        $script:InstallLogPath = $null
+    }
+    AfterEach {
+        $script:InstallLogPath = $script:savedInstallLogPath
+    }
+
+    It 'Names the log after the subcommand, the package id and the time, in the transcript''s folder, which it creates' {
+        $logs = Join-Path $TestDrive 'logs-new-path'
+        $script:InstallLogPath = Join-Path $logs 'install-20261006-010203.log'
+
+        $path = New-WingetInstallerLogPath -Subcommand install -PackageId 'Google.Chrome'
+
+        Test-Path -LiteralPath $logs | Should -BeTrue
+        Split-Path -Parent $path | Should -Be $logs
+        Split-Path -Leaf $path | Should -Match '^winget-install-Google\.Chrome-\d{8}-\d{6}\.log$'
+    }
+
+    It 'Gives the name Remove-OldInstallerLog keeps and prunes' {
+        $path = New-WingetInstallerLogPath -Subcommand install -PackageId 'Adobe.Acrobat.Reader.64-bit' -LogDirectory (Join-Path $TestDrive 'logs-pattern')
+
+        Split-Path -Leaf $path | Should -Match '^(?:winget-(?:install|upgrade|uninstall|repair)-.+|pwsh-msi)-(\d{8}-\d{6})(?:-\d+)?\.log$'
+    }
+
+    It 'Replaces characters a file name cannot hold, and names a log without an id after winget' {
+        $logs = Join-Path $TestDrive 'logs-label'
+
+        Split-Path -Leaf (New-WingetInstallerLogPath -Subcommand install -PackageId 'Contoso/App:1' -LogDirectory $logs) | Should -Match '^winget-install-Contoso_App_1-'
+        Split-Path -Leaf (New-WingetInstallerLogPath -Subcommand repair -LogDirectory $logs) | Should -Match '^winget-repair-winget-'
+    }
+
+    It 'Is $null without a logs folder, or when it cannot be created' {
+        New-WingetInstallerLogPath -Subcommand install -PackageId 'Test.App' | Should -BeNullOrEmpty
+        New-WingetInstallerLogPath -Subcommand install -PackageId 'Test.App' -LogDirectory '' | Should -BeNullOrEmpty
+        Mock New-Item { throw 'Access to the path is denied.' }
+        New-WingetInstallerLogPath -Subcommand install -PackageId 'Test.App' -LogDirectory (Join-Path $TestDrive 'logs-denied-new') | Should -BeNullOrEmpty
+    }
+
+    It 'Is what Invoke-WingetProcess passes as --log' {
+        Mock Resolve-WingetExecutable { 'winget' }
+        Mock Invoke-ExternalProcess { New-TestProcessResult -ExitCode 0 }
+        Mock New-WingetInstallerLogPath { 'X:\logs\winget-install-Test.App-20261006-010203.log' }
+
+        $result = Invoke-WingetProcess -ArgumentList @('install', '--id', 'Test.App') -TimeoutSeconds 5 -LogDirectory 'X:\logs'
+
+        $result.LogPath | Should -Be 'X:\logs\winget-install-Test.App-20261006-010203.log'
+        Should -Invoke New-WingetInstallerLogPath -Times 1 -Exactly -ParameterFilter { $Subcommand -eq 'install' -and $PackageId -eq 'Test.App' -and $LogDirectory -eq 'X:\logs' }
+        Should -Invoke Invoke-ExternalProcess -Times 1 -Exactly -ParameterFilter { ($ArgumentList -join ' ') -eq 'install --id Test.App --log X:\logs\winget-install-Test.App-20261006-010203.log' }
+    }
 }
 
 Describe 'Get-WebDownloadTimeoutParameters' {

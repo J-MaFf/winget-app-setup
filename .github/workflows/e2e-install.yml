@@ -24,6 +24,15 @@ name: E2E Install
 # as the user phase reads them), each catalog app's entry in last-run.json against the checkout's
 # catalog (Chrome, 7-Zip and Git must be Installed, so an app the removal step left in place fails
 # this leg), and that nothing was installed per-user into SYSTEM's own profile.
+# A fourth leg, e2e-install-system-winget-client (wgt-gq8.42), runs that SYSTEM pass twice with the
+# wrapper's -SystemInstallEngine WinGetClient: the installer installs with the pinned
+# Microsoft.WinGet.Client module, which Microsoft supports as SYSTEM, instead of winget.exe. On top
+# of the SYSTEM leg's checks it fails unless the module was downloaded and verified at its pin, the
+# 'Install engine:' line and last-run.json name it, no app went through winget.exe, the removed apps
+# show in `winget list` as the runner account afterwards, and the second pass takes the module from
+# its cache and finds every app already there. It also checks the pin against the PowerShell Gallery
+# (build/Set-WingetClientModulePin.ps1 -Check, which may not fail the job) and uploads the engine's
+# WinGetCOM logs with the diagnostics.
 # All legs first uninstall the catalog apps the runner image ships with (Google Chrome, 7-Zip and
 # Git; e2e/Remove-PreinstalledApps.ps1), so the first pass really installs them instead of
 # skipping them as already installed. PowerShell 7 and Windows Terminal stay preinstalled in the
@@ -568,6 +577,91 @@ jobs:
           path: ${{ runner.temp }}\e2e-diagnostics
           if-no-files-found: warn
 
+  e2e-install-system-winget-client:
+    # The SYSTEM leg with the opt-in Microsoft.WinGet.Client engine (wgt-gq8.42; see the header
+    # comment), two passes on a fourth throwaway VM. Same if: as e2e-install.
+    needs: changes
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.changes.result != 'success' || needs.changes.outputs.e2e == 'true') }}
+    runs-on: windows-latest
+    # Backstop. The install step's 100 minutes cover two tasks of at most 42 minutes each (the
+    # second finds everything installed, so it is short); removal, pin check and diagnostics take
+    # a few minutes, well under their own limits.
+    timeout-minutes: 125
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      # As in e2e-install-system: the run must install Chrome, 7-Zip and Git itself.
+      - name: Remove the catalog apps the runner image ships with
+        shell: powershell
+        continue-on-error: true
+        timeout-minutes: 15
+        run: |
+          & .\e2e\Remove-PreinstalledApps.ps1
+
+      # What the Gallery serves today against the committed pin. Its report (every file with its
+      # hash and signature) goes with the diagnostics as pin-check.txt; the downloads stay out of
+      # them. Informational: the install step's own checks decide the job.
+      - name: Check the WinGet client module pin
+        id: pin
+        shell: pwsh
+        continue-on-error: true
+        timeout-minutes: 10
+        run: |
+          $diagnosticsDir = Join-Path $env:RUNNER_TEMP 'e2e-diagnostics'
+          $null = New-Item -ItemType Directory -Path $diagnosticsDir -Force
+          & pwsh -NoProfile -File ./build/Set-WingetClientModulePin.ps1 -Check -OutputDirectory (Join-Path $env:RUNNER_TEMP 'wingetclient-pin') 2>&1 |
+            Tee-Object -FilePath (Join-Path $diagnosticsDir 'pin-check.txt')
+          exit $LASTEXITCODE
+
+      - name: Diagnostics before the SYSTEM install passes
+        shell: powershell
+        continue-on-error: true
+        timeout-minutes: 3
+        run: |
+          & .\e2e\Collect-Diagnostics.ps1 -OutputDirectory (Join-Path $env:RUNNER_TEMP 'e2e-diagnostics') -Label '1-before-system-winget-client'
+
+      - name: Install as SYSTEM with Microsoft.WinGet.Client, twice (scheduled task, 32-bit Windows PowerShell)
+        id: system-winget-client-pass
+        shell: pwsh
+        timeout-minutes: 100
+        run: |
+          # As the SYSTEM leg, with -SystemInstallEngine WinGetClient passed to the wrapper and the
+          # engine's checks added, then a second pass that must find every app already there
+          # (e2e/Invoke-SystemInstallPass.ps1). The output is saved with the diagnostics, for
+          # report-failure.
+          $diagnosticsDir = Join-Path $env:RUNNER_TEMP 'e2e-diagnostics'
+          $null = New-Item -ItemType Directory -Path $diagnosticsDir -Force
+          & pwsh -NoProfile -ExecutionPolicy Bypass -File ./e2e/Invoke-SystemInstallPass.ps1 -SystemInstallEngine WinGetClient -PassCount 2 2>&1 |
+            Tee-Object -FilePath (Join-Path $diagnosticsDir 'assertions.txt')
+          exit $LASTEXITCODE
+
+      - name: Diagnostics at the end of the job (with event logs, WAU logs and WinGet engine logs)
+        if: always()
+        shell: powershell
+        continue-on-error: true
+        timeout-minutes: 5
+        run: |
+          & .\e2e\Collect-Diagnostics.ps1 -OutputDirectory (Join-Path $env:RUNNER_TEMP 'e2e-diagnostics') -Label '3-end-of-job' -IncludeLogs
+
+      - name: Upload install transcripts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: e2e-install-transcripts-system-winget-client
+          path: |
+            C:\ProgramData\winget-app-setup\logs\*.log
+            C:\ProgramData\winget-app-setup\logs\last-run.json
+          if-no-files-found: warn
+
+      - name: Upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: e2e-diagnostics-system-winget-client
+          path: ${{ runner.temp }}\e2e-diagnostics
+          if-no-files-found: warn
+
   report-failure:
     # Creates, or comments on, the 'E2E install run failed' issue when a scheduled run, or a run
     # dispatched on main, does not succeed in any leg: failed, timed out or cancelled. Those
@@ -579,8 +673,8 @@ jobs:
     # artifacts. The old step inside e2e-install ran with 'shell: pwsh' and 'if: failure()': run
     # 35566866223 removed PowerShell 7 and the step died with 'pwsh: command not found', and a
     # job that hits timeout-minutes is cancelled, which failure() does not match.
-    needs: [e2e-install, e2e-install-windows-powershell, e2e-install-system]
-    if: ${{ always() && (needs.e2e-install.result != 'success' || needs.e2e-install-windows-powershell.result != 'success' || needs.e2e-install-system.result != 'success') && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) }}
+    needs: [e2e-install, e2e-install-windows-powershell, e2e-install-system, e2e-install-system-winget-client]
+    if: ${{ always() && (needs.e2e-install.result != 'success' || needs.e2e-install-windows-powershell.result != 'success' || needs.e2e-install-system.result != 'success' || needs.e2e-install-system-winget-client.result != 'success') && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -609,6 +703,7 @@ jobs:
           PWSH_LEG_RESULT: ${{ needs.e2e-install.result }}
           WINDOWS_POWERSHELL_LEG_RESULT: ${{ needs.e2e-install-windows-powershell.result }}
           SYSTEM_LEG_RESULT: ${{ needs.e2e-install-system.result }}
+          SYSTEM_WINGET_CLIENT_LEG_RESULT: ${{ needs.e2e-install-system-winget-client.result }}
         run: |
           set -uo pipefail
           title='E2E install run failed'
@@ -755,7 +850,9 @@ jobs:
               artifacts/e2e-install-transcripts-windows-powershell artifacts/e2e-diagnostics-windows-powershell
             leg_section e2e-install-system 'run as SYSTEM through the RMM wrapper' "$SYSTEM_LEG_RESULT" \
               artifacts/e2e-install-transcripts-system artifacts/e2e-diagnostics-system
-            echo "Full transcripts, event logs, Winget-AutoUpdate logs and assertion output, as far as each job got, are in the run's artifacts: \`e2e-install-transcripts\` and \`e2e-diagnostics\` for \`e2e-install\`, the same names with \`-windows-powershell\` for the Windows PowerShell 5.1 leg and \`-system\` for the SYSTEM leg."
+            leg_section e2e-install-system-winget-client 'run as SYSTEM with the Microsoft.WinGet.Client engine' "$SYSTEM_WINGET_CLIENT_LEG_RESULT" \
+              artifacts/e2e-install-transcripts-system-winget-client artifacts/e2e-diagnostics-system-winget-client
+            echo "Full transcripts, event logs, Winget-AutoUpdate logs and assertion output, as far as each job got, are in the run's artifacts: \`e2e-install-transcripts\` and \`e2e-diagnostics\` for \`e2e-install\`, the same names with \`-windows-powershell\` for the Windows PowerShell 5.1 leg, \`-system\` for the SYSTEM leg and \`-system-winget-client\` for the SYSTEM leg with the Microsoft.WinGet.Client engine (whose diagnostics also hold the pin check and the WinGet engine logs)."
           } > "$body"
 
           # GitHub rejects an issue or comment body over 65536 characters.

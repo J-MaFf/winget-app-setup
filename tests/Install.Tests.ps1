@@ -3028,6 +3028,177 @@ Describe 'A run as SYSTEM from an RMM agent (review findings P2-24, P3-22, P3-23
         Should -Invoke Invoke-WebRequest -Times 0 -Exactly
         Should -Invoke Test-AndInstallWingetModule -Times 0 -Exactly
     }
+
+    # wgt-gq8.42: the opt-in Microsoft.WinGet.Client engine. The engine's child pwsh is replaced
+    # by a stand-in for Invoke-WingetClientRequest that answers as the module does.
+    Context 'With WINGET_APP_SETUP_SYSTEM_ENGINE (the Microsoft.WinGet.Client engine)' {
+        BeforeEach {
+            $script:savedEngineVariable = $env:WINGET_APP_SETUP_SYSTEM_ENGINE
+            $env:WINGET_APP_SETUP_SYSTEM_ENGINE = 'WinGetClient'
+            $script:moduleReady = $true
+            Mock Initialize-WingetClientModule {
+                if (-not $script:moduleReady) {
+                    return [pscustomobject]@{ Ready = $false; Reason = 'downloading the package failed: No such host is known' }
+                }
+                [pscustomobject]@{ Ready = $true; Reason = $null; Version = '1.29.380'; Sha256 = ('AB' * 32); Source = 'Download'; Directory = $null; ManifestPath = 'X:\m\Microsoft.WinGet.Client.psd1'; ChildScriptPath = 'X:\m\Invoke-WingetClientRequest.ps1'; PowerShellPath = 'X:\pwsh.exe'; Architecture = 'x64' }
+            }
+            $script:clientCalls = @()
+            Mock Invoke-WingetClientRequest {
+                $script:clientCalls += ('{0} {1}' -f $Operation, $PackageId).Trim()
+                $response = @{ protocol = 1; operation = $Operation; stage = 'call'; ok = $true; psVersion = '7.6.6'; architecture = 'X64'; moduleVersion = '1.29.380' }
+                switch ($Operation) {
+                    'Probe' { $response.version = 'v1.29.380'; $response.packages = @(); $response.installedChecked = $true }
+                    'Version' { $response.version = 'v1.29.380' }
+                    'Installed' {
+                        $response.packages = @()
+                        if ($script:installedIds -contains $PackageId) {
+                            $response.packages = @(@{ id = $PackageId; installedVersion = '1.0'; source = 'winget' })
+                        }
+                    }
+                    'Install' {
+                        $response.id = $PackageId
+                        $response.installerErrorCode = 0
+                        $response.rebootRequired = $false
+                        if ($PackageId -eq 'Contoso.UserOnlyApp') {
+                            $response.status = 'NoApplicableInstallers'
+                            $response.hresult = -1978335216
+                        }
+                        else {
+                            $script:installedIds += $PackageId
+                            $response.status = 'Ok'
+                            $response.hresult = 0
+                        }
+                    }
+                }
+                [pscustomobject]@{ Run = (New-TestProcessResult -ExitCode 0); Response = (ConvertFrom-Json -InputObject (ConvertTo-Json -InputObject $response -Depth 5)); ProtocolError = $null }
+            }
+            $script:engineActiveAtAutoUpdates = $null
+            Mock Install-WingetAutoUpdate {
+                $script:engineActiveAtAutoUpdates = Test-WingetClientEngineActive
+                [pscustomobject]@{ Status = 'AlreadyPresent'; Version = '2.12.0' }
+            }
+            $script:runRecord = $null
+            Mock Write-InstallerRunResult { $script:runRecord = $Record }
+        }
+
+        AfterEach {
+            $env:WINGET_APP_SETUP_SYSTEM_ENGINE = $script:savedEngineVariable
+            $script:WingetClientEngine = $null
+            $script:InstallEngineRecord = $null
+        }
+
+        It 'Installs with Microsoft.WinGet.Client, defers the user-only app with -Scope System, and records the engine' {
+            $apps = @(@{ name = 'Contoso.MachineApp' }, @{ name = 'Contoso.UserOnlyApp' }, $script:catalogTerminal)
+
+            $result = Invoke-WingetInstall -Apps $apps
+
+            $result | Should -Be 0
+            @($script:capturedRows | Where-Object { $_[0] -eq 'Installed' })[0][1] | Should -Be 'Contoso.MachineApp'
+            @($script:capturedRows | Where-Object { $_[0] -eq 'Deferred' })[0][1] | Should -Be 'Contoso.UserOnlyApp'
+            @($script:capturedRows | Where-Object { $_[0] -eq 'Skipped' })[0][1] | Should -Be 'Microsoft.WindowsTerminal'
+            $script:clientCalls | Should -Be @('Probe', 'Installed Contoso.MachineApp', 'Install Contoso.MachineApp', 'Installed Contoso.MachineApp', 'Installed Contoso.UserOnlyApp', 'Install Contoso.UserOnlyApp')
+            # winget.exe installed and listed nothing; it was only checked, for Winget-AutoUpdate.
+            @($script:launches | Where-Object { $_.Arguments -match '^(install|list|source) ' }).Count | Should -Be 0
+            @($script:launches | Where-Object { $_.Arguments -eq '--version' -and $_.FilePath -eq $script:machineWinget }).Count | Should -BeGreaterThan 0
+            # The engine's folder is gone before Winget-AutoUpdate and the end-of-run check.
+            $script:engineActiveAtAutoUpdates | Should -BeFalse
+            Test-WingetClientEngineActive | Should -BeFalse
+
+            $text = $script:messages -join "`n"
+            $text | Should -Match 'Running as SYSTEM \(for example from an RMM agent\): installing for the whole PC only, with the Microsoft\.WinGet\.Client module \(requested by WINGET_APP_SETUP_SYSTEM_ENGINE\), or the machine-wide winget\.exe if the module is not ready\.'
+            $text | Should -Match 'Install engine: Microsoft\.WinGet\.Client 1\.29\.380 \(WinGet engine v1\.29\.380, PowerShell 7\.6\.6 x64; engine log folder '
+            $text | Should -Match 'Deferred: Contoso\.UserOnlyApp - winget found no machine-wide installer for it that applies to this PC \(0x8A150010 NO_APPLICABLE_INSTALLER with -Scope System\), and a run as SYSTEM installs for the whole PC only'
+            $text | Should -Not -Match 'was requested but not used'
+            $script:runRecord.installEngine.requested | Should -Be 'WinGetClient'
+            $script:runRecord.installEngine.used | Should -Be 'WinGetClient'
+            $script:runRecord.installEngine.module.version | Should -Be '1.29.380'
+            ($script:runRecord.apps | Where-Object { $_.id -eq 'Contoso.MachineApp' }).installerCode | Should -Be 0
+            ($script:runRecord.apps | Where-Object { $_.id -eq 'Contoso.UserOnlyApp' }).codeHex | Should -Be '0x8A150010'
+            Should -Invoke Test-AndInstallWingetModule -Times 0 -Exactly
+        }
+
+        It 'Installs with winget.exe when the module is not ready, warns once more in the summary, and exits as it would have' {
+            $script:moduleReady = $false
+
+            $result = Invoke-WingetInstall -Apps @(@{ name = 'Contoso.MachineApp' })
+
+            $result | Should -Be 0
+            $script:clientCalls | Should -BeNullOrEmpty
+            @($script:launches | Where-Object { $_.Arguments -match '^install ' -and $_.FilePath -eq $script:machineWinget }).Count | Should -Be 1
+            $text = $script:messages -join "`n"
+            $text | Should -Match 'Install engine: winget\.exe \(.+winget\.exe\), not the requested Microsoft\.WinGet\.Client: the module is not ready: downloading the package failed: No such host is known\.'
+            $script:messages | Should -Contain 'Install engine: Microsoft.WinGet.Client was requested but not used (the module is not ready: downloading the package failed: No such host is known); this run installed with winget.exe.'
+            $script:runRecord.installEngine.used | Should -Be 'Cli'
+            $script:runRecord.installEngine.fallbackReason | Should -Be 'the module is not ready: downloading the package failed: No such host is known'
+        }
+
+        It 'Only says so in a run that is not SYSTEM, and installs with winget' {
+            Mock Get-InstallAccountContext { New-TestAccountContext }
+
+            [void](Invoke-WingetInstall -Apps @(@{ name = 'Contoso.MachineApp' }))
+
+            $script:messages | Should -Contain 'WINGET_APP_SETUP_SYSTEM_ENGINE=WinGetClient applies only to runs as SYSTEM; this run uses winget.'
+            Should -Invoke Initialize-WingetClientModule -Times 0 -Exactly
+            $script:clientCalls | Should -BeNullOrEmpty
+            $script:runRecord.installEngine.requested | Should -Be 'Cli'
+        }
+
+        It 'Never readies the module when the variable is unset' {
+            $env:WINGET_APP_SETUP_SYSTEM_ENGINE = $null
+
+            Invoke-WingetInstall -Apps @(@{ name = 'Contoso.MachineApp' }) | Should -Be 0
+
+            Should -Invoke Initialize-WingetClientModule -Times 0 -Exactly
+            $script:clientCalls | Should -BeNullOrEmpty
+            ($script:messages -join "`n") | Should -Match 'Install engine: winget\.exe \('
+            $script:runRecord.installEngine.requested | Should -Be 'Cli'
+            $script:runRecord.installEngine.used | Should -Be 'Cli'
+        }
+    }
+}
+
+# wgt-gq8.42: with the engine active, the circuit breaker checks the engine, not winget.exe.
+Describe 'Invoke-WingetLaunchCircuitBreaker with the Microsoft.WinGet.Client engine' {
+    BeforeEach {
+        Mock Write-WarningMessage { }
+        Mock Write-Info { }
+        $script:breakerErrors = @()
+        Mock Write-ErrorMessage { $script:breakerErrors += $Message }
+        Mock Test-WingetClientEngineActive { $true }
+        Mock Test-WingetLaunchable { throw 'winget.exe is not what installs' }
+    }
+
+    It 'Trips when the engine cannot be started, saying so' {
+        Mock Test-WingetClientEngineLaunchable { [pscustomobject]@{ Launchable = $false; Version = $null; Reason = 'the WinGet client engine could not start: FileLoadException: Could not load file'; ExitCode = $null; Attempts = 1 } }
+
+        Invoke-WingetLaunchCircuitBreaker -Outcome @{ FailureReason = 'InstallLaunchFailed' } | Should -BeTrue
+
+        Should -Invoke Test-WingetClientEngineLaunchable -Times 1 -Exactly -ParameterFilter { $Attempts -eq 6 -and $RetryDelaySeconds -eq 15 }
+        $script:breakerErrors | Should -Be @('The WinGet client engine cannot be started on this machine (the WinGet client engine could not start: FileLoadException: Could not load file). The remaining apps are marked failed without an install attempt and are not retried. Restart the machine and re-run the installer; if it persists, attach this transcript to a GitHub issue.')
+    }
+
+    It 'Carries on when the engine starts again' {
+        Mock Test-WingetClientEngineLaunchable { [pscustomobject]@{ Launchable = $true; Version = 'v1.29.380'; Reason = $null; ExitCode = 0; Attempts = 2 } }
+
+        Invoke-WingetLaunchCircuitBreaker -Outcome @{ FailureReason = 'PreCheckLaunchFailed' } | Should -BeFalse
+
+        Should -Invoke Write-Info -Times 1 -Exactly -ParameterFilter { $Message -eq 'The WinGet client engine starts again (v1.29.380); carrying on with the next app.' }
+    }
+
+    It 'Words the failure reasons for the engine' {
+        Format-InstallFailureReason -FailureReason 'WingetNotLaunchable' | Should -Be 'not attempted: the WinGet client engine cannot be started on this machine (see above)'
+        Format-InstallFailureReason -FailureReason 'PreCheckFailed' -CheckExitCode -1978335217 | Should -Be 'Get-WinGetPackage failed during the pre-install check with exit 0x8A15000F SOURCE_DATA_MISSING'
+        Format-InstallFailureReason -FailureReason 'VerifyNotFound' -InstallResult @{ ExitCode = -1978335159; InstallerErrorCode = [long]1603; Attempts = 1; Engine = 'WinGetClient' } | Should -Be 'the MSI installer failed (its own exit code is in the log above, and in its installer log); WinGet client result 0x8A150049 MSI_INSTALL_FAILED, installer exit code 1603, 1 attempt'
+        Format-InstallFailureReason -FailureReason 'VerifyNotFound' -InstallResult @{ ExitCode = 1; Engine = 'WinGetClient' } | Should -Be 'Install-WinGetPackage failed; WinGet client result 0x00000001'
+        Format-InstallFailureReason -FailureReason 'InstallLaunchFailed' -InstallResult @{ ExitCode = $null; TimedOut = $true; TimeoutSeconds = 1800; Engine = 'WinGetClient' } | Should -Be 'the WinGet client engine could not be started to install it; the WinGet client install stopped after 30 minutes'
+    }
+
+    It 'Keeps the winget.exe wording otherwise' {
+        Mock Test-WingetClientEngineActive { $false }
+
+        Format-InstallFailureReason -FailureReason 'WingetNotLaunchable' | Should -Be 'not attempted: winget cannot be launched on this machine (see above)'
+        Format-InstallFailureReason -FailureReason 'VerifyNotFound' -InstallResult @{ ExitCode = -1978335159; InstallerErrorCode = $null; Attempts = 1; Engine = 'Cli' } | Should -Be 'the MSI installer failed (its own exit code is in the log above, and in its installer log); winget exit 0x8A150049 MSI_INSTALL_FAILED, 1 attempt'
+    }
 }
 
 # Review findings P3-25 to P3-30, through the real orchestrator and the real winget setup ladder

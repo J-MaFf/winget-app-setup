@@ -306,7 +306,7 @@ Describe 'e2e/Invoke-SystemInstallPass.ps1 wiring' {
         $workflow | Should -Match '(?m)^  e2e-install-system:'
         $workflow | Should -Match 'Invoke-SystemInstallPass\.ps1'
         $workflow | Should -Match "pattern='\^\(WingetAppSetup/\|build/\|e2e/\|rmm/\)"
-        $workflow | Should -Match 'needs: \[e2e-install, e2e-install-windows-powershell, e2e-install-system\]'
+        $workflow | Should -Match 'needs: \[e2e-install, e2e-install-windows-powershell, e2e-install-system, e2e-install-system-winget-client\]'
     }
 }
 
@@ -657,7 +657,8 @@ Describe 'e2e/Invoke-SystemInstallPass.ps1 per-app wiring' {
         $main | Should -Match 'Get-SystemRunApplicability -Catalog \$catalog -Module \$wingetAppSetupModule'
         $main | Should -Match 'Get-PreinstalledAppRemovalList -ScriptPath \(Join-Path \$PSScriptRoot ''Remove-PreinstalledApps\.ps1''\)'
         $main | Should -Match 'Get-SystemInstallPassResult [^\r\n]*-RunRecordProblem \$runRecordRead\.Problem[^\r\n]*-AppExpectation \$appExpectation -AppExpectationProblem \$appExpectationProblem'
-        $main.IndexOf('Get-SystemPassAppExpectation') | Should -BeLessThan $main.IndexOf('Start-ScheduledTask')
+        $main.IndexOf('Invoke-SystemPassTask') | Should -BeGreaterThan 0
+        $main.IndexOf('Get-SystemPassAppExpectation') | Should -BeLessThan $main.IndexOf('Invoke-SystemPassTask')
     }
 
     It 'Runs e2e/Remove-PreinstalledApps.ps1 in the e2e-install-system job with its defaults, the list the checks read' {
@@ -667,5 +668,235 @@ Describe 'e2e/Invoke-SystemInstallPass.ps1 per-app wiring' {
 
         $job | Should -Match '(?m)^\s+& \.\\e2e\\Remove-PreinstalledApps\.ps1\s*$'
         $job | Should -Not -Match 'Remove-PreinstalledApps\.ps1 +-'
+    }
+}
+
+# wgt-gq8.42: the e2e-install-system-winget-client job runs the SYSTEM pass twice with
+# -SystemInstallEngine WinGetClient, and fails unless the module did the installs.
+Describe 'The SYSTEM pass with the Microsoft.WinGet.Client engine' {
+    BeforeAll {
+        $script:Pin = Get-WingetClientModulePin
+        $script:EngineWrapperLog = $script:GoodWrapperLog + "`r`nInstall engine requested: WinGetClient (WINGET_APP_SETUP_SYSTEM_ENGINE, read by installer builds that support it)."
+
+        function Get-EngineFixtureTranscript {
+            param ([string]$Name = 'system-winget-client-transcript')
+            $text = [string](Get-Content -Raw -LiteralPath (Join-Path $script:RepoRoot "tests/fixtures/e2e/$Name.txt"))
+            [pscustomobject]@{ Name = 'install-20261006-061430.log'; Parsed = (ConvertFrom-InstallTranscript -Content $text) }
+        }
+
+        function Get-EngineFixtureRecord {
+            (Read-SystemPassRunRecord -Path (Join-Path $script:RepoRoot 'tests/fixtures/e2e/system-winget-client-last-run.json')).Record
+        }
+
+        function Get-EngineExpectation {
+            param ([switch]$AlreadyPresent)
+            $catalog = @(Get-DefaultAppCatalog)
+            @(Get-SystemPassAppExpectation -Catalog $catalog -Applicability (Get-SystemRunApplicability -Catalog $catalog) -RemovedApps (Get-PreinstalledAppRemovalList -ScriptPath (Join-Path $script:RepoRoot 'e2e/Remove-PreinstalledApps.ps1')) -AlreadyPresent:$AlreadyPresent)
+        }
+
+        function Get-EngineRows {
+            param ($WrapperLog = $script:EngineWrapperLog, $Transcript = (Get-EngineFixtureTranscript), $RunRecord = (Get-EngineFixtureRecord), [int]$PassNumber = 1, $Expectation = (Get-EngineExpectation))
+            @(Get-SystemPassEngineResult -WrapperLog $WrapperLog -Transcript $Transcript -RunRecord $RunRecord -Pin $script:Pin -AppExpectation $Expectation -PassNumber $PassNumber)
+        }
+    }
+
+    BeforeEach {
+        Mock Get-OSArchitecture { 'X64' }
+        Mock Get-ComputerManufacturer { 'Microsoft Corporation' }
+        Mock Test-WindowsTerminalHostsCurrentSession { $true }
+    }
+
+    It 'Builds the task''s arguments with the engine request, and without it as before' {
+        Get-SystemPassTaskArgument -WrapperPath 'D:\a\rmm\Invoke-WingetAppSetup.ps1' -InstallerPath 'D:\a\winget-app-install.ps1' -InstallerSha256 $script:Sha256 -SystemInstallEngine 'WinGetClient' |
+            Should -Be "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File ""D:\a\rmm\Invoke-WingetAppSetup.ps1"" -InstallerPath ""D:\a\winget-app-install.ps1"" -InstallerSha256 $($script:Sha256) -SystemInstallEngine WinGetClient"
+        Get-SystemPassTaskArgument -WrapperPath 'D:\a\rmm\Invoke-WingetAppSetup.ps1' -InstallerPath 'D:\a\winget-app-install.ps1' -InstallerSha256 $script:Sha256 -SystemInstallEngine '' |
+            Should -Not -Match 'SystemInstallEngine'
+    }
+
+    It 'Passes a run that installed with the pinned module, as the fixtures show it' {
+        $rows = Get-EngineRows
+
+        @($rows | ForEach-Object { $_.Assertion }) | Should -Be @('Wrapper passed the engine request', 'WinGet client module verified as SYSTEM', 'Installs ran through Microsoft.WinGet.Client')
+        @($rows | Where-Object Result -EQ 'FAIL') | Should -BeNullOrEmpty
+        $rows[2].Detail | Should -BeLike 'Install engine: Microsoft.WinGet.Client 1.29.380 (*; Install-WinGetPackage for: 7zip.7zip, *; last-run.json installEngine.used WinGetClient'
+    }
+
+    It 'Fails a run that fell back to winget.exe, saying why' {
+        $record = Get-EngineFixtureRecord
+        $record.installEngine.used = 'Cli'
+        $record.installEngine.module = $null
+        $record.installEngine.fallbackReason = 'the module is not ready: downloading failed'
+
+        $rows = Get-EngineRows -Transcript (Get-EngineFixtureTranscript -Name 'system-winget-client-fallback-transcript') -RunRecord $record
+
+        ($rows | Where-Object Assertion -EQ 'WinGet client module verified as SYSTEM').Result | Should -Be 'FAIL'
+        $engine = $rows | Where-Object Assertion -EQ 'Installs ran through Microsoft.WinGet.Client'
+        $engine.Result | Should -Be 'FAIL'
+        $engine.Detail | Should -Match "the run's 'Install engine:' line is 'winget\.exe \("
+        $engine.Detail | Should -Match 'WinGet client module: NOT READY - downloading'
+        $engine.Detail | Should -Match "7 '> winget install' line\(s\): winget\.exe installed apps"
+        $engine.Detail | Should -Match "no '> Install-WinGetPackage -Id <id>' line for 7zip\.7zip, Google\.Chrome, Git\.Git"
+        $engine.Detail | Should -Match "last-run\.json says installEngine\.used 'Cli' \(the module is not ready: downloading failed\)"
+    }
+
+    It 'Fails <Case>' -ForEach @(
+        @{ Case = 'a run where one app still went through winget.exe'; Edit = 'wingetexe'; Expected = "1 '> winget install' line(s)*" }
+        @{ Case = 'a last-run.json that says winget.exe installed'; Edit = 'record'; Expected = "*last-run.json says installEngine.used 'Cli'*" }
+        @{ Case = 'a last-run.json from an installer without the engine'; Edit = 'norecord'; Expected = '*last-run.json has no installEngine*' }
+        @{ Case = 'a module at another version'; Edit = 'version'; Expected = '*not the pinned 1.29.380*' }
+        @{ Case = 'a removed app the module did not install'; Edit = 'missing'; Expected = "*no '> Install-WinGetPackage -Id <id>' line for Git.Git*" }
+    ) {
+        $transcriptText = [string](Get-Content -Raw -LiteralPath (Join-Path $script:RepoRoot 'tests/fixtures/e2e/system-winget-client-transcript.txt'))
+        $record = Get-EngineFixtureRecord
+        switch ($Edit) {
+            'wingetexe' { $transcriptText = $transcriptText.Replace('  > Install-WinGetPackage -Id Git.Git -Source', '  > winget install -e --id Git.Git --scope machine -Source') }
+            'record' { $record.installEngine.used = 'Cli' }
+            'norecord' { $record.PSObject.Properties.Remove('installEngine') }
+            'version' { $transcriptText = $transcriptText.Replace('Install engine: Microsoft.WinGet.Client 1.29.380 (', 'Install engine: Microsoft.WinGet.Client 1.28.240 (') }
+            'missing' { $transcriptText = $transcriptText.Replace('  > Install-WinGetPackage -Id Git.Git -Source', '  installed Git.Git -Source') }
+        }
+        $transcript = [pscustomobject]@{ Name = 'install-20261006-061430.log'; Parsed = (ConvertFrom-InstallTranscript -Content $transcriptText) }
+
+        $engine = (Get-EngineRows -Transcript $transcript -RunRecord $record) | Where-Object Assertion -EQ 'Installs ran through Microsoft.WinGet.Client'
+
+        $engine.Result | Should -Be 'FAIL'
+        $engine.Detail | Should -BeLike $Expected
+    }
+
+    It 'Fails a wrapper that did not pass the request on' {
+        $row = (Get-EngineRows -WrapperLog $script:GoodWrapperLog) | Where-Object Assertion -EQ 'Wrapper passed the engine request'
+
+        $row.Result | Should -Be 'FAIL'
+        $row.Detail | Should -Be 'the wrapper log has no ''Install engine requested: WinGetClient'' line'
+    }
+
+    It 'Fails a module whose SHA256 is not the pin''s' {
+        $transcriptText = ([string](Get-Content -Raw -LiteralPath (Join-Path $script:RepoRoot 'tests/fixtures/e2e/system-winget-client-transcript.txt'))).Replace($script:Pin.Sha256, ('0' * 64))
+        $transcript = [pscustomobject]@{ Name = 'x.log'; Parsed = (ConvertFrom-InstallTranscript -Content $transcriptText) }
+
+        $row = (Get-EngineRows -Transcript $transcript) | Where-Object Assertion -EQ 'WinGet client module verified as SYSTEM'
+
+        $row.Result | Should -Be 'FAIL'
+        $row.Detail | Should -BeLike "*(expected Microsoft.WinGet.Client 1.29.380, SHA256 $($script:Pin.Sha256))"
+    }
+
+    It 'Passes a second run that took the module from the cache, and fails one that downloaded it again' {
+        $second = Get-EngineRows -Transcript (Get-EngineFixtureTranscript -Name 'system-winget-client-second-pass') -PassNumber 2 -Expectation (Get-EngineExpectation -AlreadyPresent)
+        $redownloaded = Get-EngineRows -Transcript (Get-EngineFixtureTranscript) -PassNumber 2 -Expectation (Get-EngineExpectation -AlreadyPresent)
+
+        @($second | Where-Object Result -EQ 'FAIL') | Should -BeNullOrEmpty
+        ($redownloaded | Where-Object Assertion -EQ 'WinGet client module verified as SYSTEM').Result | Should -Be 'FAIL'
+        ($redownloaded | Where-Object Assertion -EQ 'WinGet client module verified as SYSTEM').Detail | Should -BeLike '*(the second run must take it from the cache)'
+    }
+
+    It 'Expects every app that applies already there on the second run, and nothing the job must install' {
+        $byId = @{}
+        foreach ($expectation in Get-EngineExpectation -AlreadyPresent) {
+            $byId[$expectation.Id] = $expectation
+        }
+
+        $byId['Google.Chrome'].Expected | Should -Be 'AlreadyPresent'
+        $byId['Google.Chrome'].MustInstall | Should -BeFalse
+        $byId['Microsoft.WindowsTerminal'].AlreadyPresentReasons | Should -Be @('already provisioned for every user on this PC')
+        $byId['Dell.CommandUpdate.Universal'].Expected | Should -Be 'NotApplicable'
+        @($byId.Values | Where-Object { $_.MustInstall }) | Should -BeNullOrEmpty
+    }
+
+    It 'Passes a second run that skipped every app as already there, and fails one that installed one' {
+        $skippedRecord = Get-EngineFixtureRecord
+        foreach ($entry in $skippedRecord.apps) {
+            if ($entry.status -eq 'Installed') {
+                $entry.status = 'Skipped'
+                $entry.reason = 'already installed'
+            }
+        }
+        $installedAgain = Get-EngineFixtureRecord
+
+        $pass = @(Get-SystemPassAppResult -RunRecord $skippedRecord -AppExpectation (Get-EngineExpectation -AlreadyPresent))
+        $fail = @(Get-SystemPassAppResult -RunRecord $installedAgain -AppExpectation (Get-EngineExpectation -AlreadyPresent))
+
+        @($pass | Where-Object Result -EQ 'FAIL') | Should -BeNullOrEmpty
+        ($pass | Where-Object Assertion -EQ 'App already present on the second run: Google.Chrome').Detail | Should -Be 'last-run.json: Skipped (already installed)'
+        $chrome = $fail | Where-Object Assertion -EQ 'App already present on the second run: Google.Chrome'
+        $chrome.Result | Should -Be 'FAIL'
+        $chrome.Detail | Should -Be 'last-run.json: Installed; the first run installed or found it, so the second run had to find it: expected Skipped (already installed)'
+    }
+
+    It 'Checks the second run without accepting the framework installed again' {
+        $transcript = New-TestTranscript -RuntimeLines @()
+        $again = New-TestTranscript
+
+        $pass = Get-SystemInstallPassResult -TaskExitCode 0 -Transcript $transcript -WrapperLog $script:GoodWrapperLog -RunRecord (New-TestRunRecord) -SecondPass
+        $fail = Get-SystemInstallPassResult -TaskExitCode 0 -Transcript $again -WrapperLog $script:GoodWrapperLog -RunRecord (New-TestRunRecord) -SecondPass
+
+        ($pass.Results | Where-Object Assertion -EQ 'Windows App Runtime not installed again').Result | Should -Be 'PASS'
+        $row = $fail.Results | Where-Object Assertion -EQ 'Windows App Runtime not installed again'
+        $row.Result | Should -Be 'FAIL'
+        $row.Detail | Should -BeLike '*installed it again: Windows App Runtime: installed*'
+        $fail.StepExitCode | Should -Be 1
+    }
+
+    It 'Looks the removed apps up with winget list as the runner account, retrying before it fails' {
+        Mock Start-Sleep { }
+        $script:answers = @{ '7zip.7zip' = 0; 'Google.Chrome' = 0; 'Git.Git' = 0 }
+        $check = {
+            param ($Id)
+            $script:answers[$Id]++
+            if ($Id -eq 'Git.Git') {
+                return @{ Installed = $false; TimedOut = $false; LaunchFailed = $false; LaunchError = $null; CheckFailed = $false; ExitCode = -1978335212 }
+            }
+            if ($Id -eq 'Google.Chrome' -and $script:answers[$Id] -lt 2) {
+                return @{ Installed = $false; TimedOut = $true; LaunchFailed = $false; LaunchError = $null; CheckFailed = $false; ExitCode = $null }
+            }
+            @{ Installed = $true; TimedOut = $false; LaunchFailed = $false; LaunchError = $null; CheckFailed = $false; ExitCode = 0 }
+        }
+
+        $rows = @(Get-SystemPassIndependentInstallResult -AppExpectation (Get-EngineExpectation) -TestInstalled $check -RetryDelaySeconds 20)
+
+        @($rows | ForEach-Object { $_.Assertion }) | Should -Be @('Installed per winget list as the runner account: 7zip.7zip', 'Installed per winget list as the runner account: Google.Chrome', 'Installed per winget list as the runner account: Git.Git')
+        @($rows | ForEach-Object { $_.Result }) | Should -Be @('PASS', 'PASS', 'FAIL')
+        $rows[2].Detail | Should -Be 'winget list does not list it (3 checks)'
+        $script:answers['Git.Git'] | Should -Be 3
+        $script:answers['Google.Chrome'] | Should -Be 2
+        Should -Invoke Start-Sleep -Times 3 -Exactly -ParameterFilter { $Seconds -eq 20 }
+    }
+
+    It 'Leaves out a removed app on KNOWN_PLATFORM_INCOMPATIBLE from the independent check' {
+        $rows = @(Get-SystemPassIndependentInstallResult -AppExpectation (Get-EngineExpectation) -TestInstalled { @{ Installed = $true } } -SkipApps @('Git.Git'))
+
+        @($rows | ForEach-Object { $_.Assertion }) | Should -Not -Contain 'Installed per winget list as the runner account: Git.Git'
+        $rows.Count | Should -Be 2
+    }
+
+    It 'Prefixes every row with its pass when the job runs two' {
+        $rows = Add-SystemPassPrefix -Rows @([pscustomobject]@{ Assertion = 'SYSTEM run exit code'; Result = 'PASS'; Detail = 'x' }) -PassNumber 2
+
+        $rows[0].Assertion | Should -Be 'Pass 2: SYSTEM run exit code'
+        $rows[0].Result | Should -Be 'PASS'
+    }
+
+    It 'Is run by its own job, which passes the engine and two passes, checks the pin, and reports to report-failure' {
+        $workflow = Get-Content -Raw -LiteralPath (Join-Path $script:RepoRoot '.github/workflows/e2e-install.yml')
+        $start = $workflow.IndexOf("`n  e2e-install-system-winget-client:")
+        $job = $workflow.Substring($start, $workflow.IndexOf("`n  report-failure:") - $start)
+
+        $job | Should -Match 'Invoke-SystemInstallPass\.ps1 -SystemInstallEngine WinGetClient -PassCount 2'
+        $job | Should -Match 'Set-WingetClientModulePin\.ps1 -Check'
+        $job | Should -Match 'timeout-minutes: 125'
+        $job | Should -Match 'name: e2e-install-transcripts-system-winget-client'
+        $job | Should -Match 'name: e2e-diagnostics-system-winget-client'
+        $workflow | Should -Match "needs\.e2e-install-system-winget-client\.result != 'success'"
+        $workflow | Should -Match "leg_section e2e-install-system-winget-client 'run as SYSTEM with the Microsoft\.WinGet\.Client engine'"
+    }
+
+    It 'Behaves as before without the new parameters: no engine rows and one pass' {
+        $script = Get-Content -Raw -LiteralPath (Join-Path $script:RepoRoot 'e2e/Invoke-SystemInstallPass.ps1')
+        $main = $script.Substring($script.IndexOf('if ($MyInvocation.InvocationName -ne ''.'')'))
+
+        $main | Should -Match 'for \(\$passNumber = 1; \$passNumber -le \$PassCount; \$passNumber\+\+\)'
+        $main | Should -Match "if \(\`$SystemInstallEngine -eq 'WinGetClient'\) \{"
+        $main | Should -Match "& \`$wingetAppSetupModule \{ Get-WingetClientModulePin \}"
+        $main | Should -Match 'Test-WingetPackageInstalled -PackageId \$PackageId -TimeoutSeconds 60'
+        (Get-Command -Name (Join-Path $script:RepoRoot 'e2e/Invoke-SystemInstallPass.ps1')).Parameters['PassCount'].Attributes.Where({ $_ -is [System.Management.Automation.ValidateRangeAttribute] }).MaxRange | Should -Be 2
     }
 }

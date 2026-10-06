@@ -144,6 +144,24 @@ function ConvertTo-TranscriptAppId {
       WingetNotUsable    the end-of-run check printed 'winget: NOT USABLE'.
       RanAsSystem        the run said it runs as SYSTEM ('Running as SYSTEM (for example from an
                          RMM agent): ...').
+      InstallEngineLine  the text after the first 'Install engine: ' (a run as SYSTEM prints it
+                         once, from Initialize-Winget), or $null.
+      InstallEngine      'WinGetClient' when that text is 'Microsoft.WinGet.Client <version> (...',
+                         'Cli' when it starts with 'winget.exe', else $null.
+      InstallEngineVersion  the Microsoft.WinGet.Client version in that text, or $null.
+      WingetClientModuleLine  the text after the last 'WinGet client module: ', or $null.
+      WingetClientModuleReady  that text is 'ready - ...'.
+      WingetClientModuleVersion, WingetClientModuleSha256  the version and SHA256 the ready line
+                         names, or $null.
+      WingetClientModuleFromCache  the ready line says 'from the cache'.
+      WingetClientModuleNotReadyReason  the reason of the last 'WinGet client module: NOT READY - '
+                         line, or $null.
+      WingetClientInstallIds  ids from the engine's '> Install-WinGetPackage -Id <id> ...' lines.
+      WingetExeInstallCount  how many '> winget install ...' lines (installs by winget.exe) the run
+                         printed.
+      WingetClientEngineNotStartable  the circuit breaker found that the WinGet client engine
+                         cannot be started ('The WinGet client engine cannot be started on this
+                         machine ...').
 #>
 function ConvertFrom-InstallTranscript {
     param (
@@ -173,6 +191,12 @@ function ConvertFrom-InstallTranscript {
     $windowsAppRuntimePinStale = $false
     $wingetNotUsable = $false
     $ranAsSystem = $false
+    $installEngineLine = $null
+    $wingetClientModuleLine = $null
+    $wingetClientNotReadyReason = $null
+    $wingetClientInstallIds = [System.Collections.Generic.List[string]]::new()
+    $wingetExeInstallCount = 0
+    $wingetClientEngineNotStartable = $false
 
     # Summary table state: 'none' until 'Summary:', 'header' until the dashes under the column
     # names, then 'rows' until the first line that is not a row. A line that ends the table is
@@ -273,6 +297,33 @@ function ConvertFrom-InstallTranscript {
             $ranAsSystem = $true
             continue
         }
+        # The first one is Initialize-Winget's; the summary's 'Install engine: ...was requested but
+        # not used' warning comes later.
+        if ($line -match '^Install engine:\s+(?<text>.+)$') {
+            if ($null -eq $installEngineLine) {
+                $installEngineLine = $Matches.text
+            }
+            continue
+        }
+        if ($line -match '^WinGet client module:\s+(?<text>.+)$') {
+            $wingetClientModuleLine = $Matches.text
+            if ($wingetClientModuleLine -match '^NOT READY - (?<reason>.+?)\.?$') {
+                $wingetClientNotReadyReason = $Matches.reason
+            }
+            continue
+        }
+        if ($line -match '^> Install-WinGetPackage -Id (?<app>\S+)') {
+            $wingetClientInstallIds.Add($Matches.app)
+            continue
+        }
+        if ($line -match '^> winget install\b') {
+            $wingetExeInstallCount++
+            continue
+        }
+        if ($line -match '^The WinGet client engine cannot be started on this machine ') {
+            $wingetClientEngineNotStartable = $true
+            continue
+        }
     }
 
     $summary = @{}
@@ -306,6 +357,26 @@ function ConvertFrom-InstallTranscript {
     }
     $autoUpdatesFrameworkMissing = $autoUpdatesStatus -eq 'NOT CONFIGURED' -and $autoUpdatesLine -match '^NOT CONFIGURED - Microsoft\.WindowsAppRuntime\.1\.8 is missing\b'
 
+    $installEngine = $null
+    $installEngineVersion = $null
+    if ($installEngineLine -match '^Microsoft\.WinGet\.Client (?<version>\d+\.\d+\.\d+) \(') {
+        $installEngine = 'WinGetClient'
+        $installEngineVersion = $Matches.version
+    }
+    elseif ($installEngineLine -match '^winget\.exe\b') {
+        $installEngine = 'Cli'
+    }
+    $wingetClientModuleReady = $false
+    $wingetClientModuleVersion = $null
+    $wingetClientModuleSha256 = $null
+    $wingetClientModuleFromCache = $false
+    if ($wingetClientModuleLine -match '^ready - Microsoft\.WinGet\.Client (?<version>[^,\s]+), SHA256 (?<sha>[0-9A-Fa-f]{64}), (?<from>.+?)\.?$') {
+        $wingetClientModuleReady = $true
+        $wingetClientModuleVersion = $Matches.version
+        $wingetClientModuleSha256 = $Matches.sha.ToUpperInvariant()
+        $wingetClientModuleFromCache = $Matches.from -eq 'from the cache'
+    }
+
     return [pscustomobject]@{
         BuildId             = $buildId
         Installed           = @($installed | Sort-Object -Unique)
@@ -335,6 +406,18 @@ function ConvertFrom-InstallTranscript {
         WindowsAppRuntimePinStale = $windowsAppRuntimePinStale
         WingetNotUsable     = $wingetNotUsable
         RanAsSystem         = $ranAsSystem
+        InstallEngineLine   = $installEngineLine
+        InstallEngine       = $installEngine
+        InstallEngineVersion = $installEngineVersion
+        WingetClientModuleLine = $wingetClientModuleLine
+        WingetClientModuleReady = $wingetClientModuleReady
+        WingetClientModuleVersion = $wingetClientModuleVersion
+        WingetClientModuleSha256 = $wingetClientModuleSha256
+        WingetClientModuleFromCache = $wingetClientModuleFromCache
+        WingetClientModuleNotReadyReason = $wingetClientNotReadyReason
+        WingetClientInstallIds = @($wingetClientInstallIds | Sort-Object -Unique)
+        WingetExeInstallCount = $wingetExeInstallCount
+        WingetClientEngineNotStartable = $wingetClientEngineNotStartable
     }
 }
 

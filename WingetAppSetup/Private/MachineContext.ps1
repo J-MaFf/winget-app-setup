@@ -2,8 +2,9 @@
 # own: winget cannot be registered for it, and `winget list` as SYSTEM sees none of the users' MSIX
 # apps. These find the winget.exe App Installer installed for the machine, which a SYSTEM run starts
 # by its full path as Winget-AutoUpdate does, and read whether an MSIX app is provisioned for every
-# user. Microsoft supports only the Microsoft.WinGet.Client module on PowerShell 7 as SYSTEM; moving
-# to it is a follow-up. Windows PowerShell 5.1-compatible (.NET Framework 4.5 APIs, 5.1 syntax).
+# user. Microsoft supports only the Microsoft.WinGet.Client module on PowerShell 7 as SYSTEM: a run
+# can opt in to it (WingetClientEngine.ps1), and Winget-AutoUpdate still needs this winget.exe.
+# Windows PowerShell 5.1-compatible (.NET Framework 4.5 APIs, 5.1 syntax).
 
 <#
 .SYNOPSIS
@@ -172,13 +173,19 @@ function Get-MachineWingetCandidate {
     run runs it too.
 .PARAMETER WhatIf
     Dry run: a failure is reported as what a real run would do (stop with exit code 2).
+.PARAMETER NotRequired
+    The run installs with Microsoft.WinGet.Client, so it does not stop without winget.exe: the same
+    checks, and a failure is a warning that Winget-AutoUpdate needs winget.exe.
 .OUTPUTS
     [bool] True when a machine-wide winget.exe starts.
 #>
 function Test-MachineWingetAvailable {
     param (
         [Parameter(Mandatory = $false)]
-        [switch]$WhatIf
+        [switch]$WhatIf,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$NotRequired
     )
 
     $script:MachineWingetPath = $null
@@ -189,7 +196,10 @@ function Test-MachineWingetAvailable {
             $windowsApps = '%ProgramFiles%\WindowsApps'
         }
         $message = "No machine-wide winget was found: as SYSTEM the installer runs the winget.exe of the App Installer package (Microsoft.DesktopAppInstaller) installed for this PC, and Get-AppxPackage -AllUsers lists none with status Ok, nor is there one under $windowsApps. SYSTEM cannot set winget up for itself, so the per-account steps (registering App Installer, Repair-WinGetPackageManager) do not apply. Install or update App Installer for this PC, then re-run the installer."
-        if ($WhatIf) {
+        if ($NotRequired) {
+            Write-WarningMessage "No machine-wide winget was found: Get-AppxPackage -AllUsers lists no App Installer package (Microsoft.DesktopAppInstaller) for this PC with status Ok, nor is there one under $windowsApps. Winget-AutoUpdate needs that winget.exe; install or update App Installer for this PC."
+        }
+        elseif ($WhatIf) {
             Write-Info "[DRY-RUN] $message A real run would stop here with exit code 2."
         }
         else {
@@ -226,7 +236,10 @@ function Test-MachineWingetAvailable {
         $wingetWord = "$tried winget.exe files"
     }
     $message = "winget could not be started as SYSTEM (tried the machine-wide $wingetWord above).$hint The per-account steps a signed-in user's run would try (registering App Installer, Repair-WinGetPackageManager) do not apply to SYSTEM and were skipped."
-    if ($WhatIf) {
+    if ($NotRequired) {
+        Write-WarningMessage "The machine-wide winget.exe could not be started as SYSTEM (tried $wingetWord above).$hint Winget-AutoUpdate needs it; repair or update App Installer for this PC."
+    }
+    elseif ($WhatIf) {
         Write-Info "[DRY-RUN] $message A real run would stop here with exit code 2."
     }
     else {

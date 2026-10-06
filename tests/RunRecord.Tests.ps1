@@ -33,10 +33,22 @@ Describe 'New-AppRunRecord (review finding P3-41)' {
         $record.code | Should -BeNullOrEmpty
         $record.codeHex | Should -BeNullOrEmpty
         $record.reason | Should -BeNullOrEmpty
-        @($record.Keys) | Should -Be @('id', 'status', 'reason', 'code', 'codeHex', 'restartRequired', 'postInstall', 'postInstallReason')
+        @($record.Keys) | Should -Be @('id', 'status', 'reason', 'code', 'codeHex', 'installerCode', 'restartRequired', 'postInstall', 'postInstallReason')
+        $record.installerCode | Should -BeNullOrEmpty
         # No post-install hook ran (work-order item 38).
         $record.postInstall | Should -BeNullOrEmpty
         $record.postInstallReason | Should -BeNullOrEmpty
+    }
+
+    # wgt-gq8.42: the installer's own exit code, which only the Microsoft.WinGet.Client engine
+    # reports; a winget.exe install has none.
+    It 'Carries the installer''s own exit code when the engine reported it' {
+        $engine = New-AppRunRecord -Id 'Contoso.MsiApp' -Status 'Installed' -InstallResult @{ ExitCode = 0; InstallerErrorCode = [long]3010; Engine = 'WinGetClient' } -RestartRequired $true
+        $cli = New-AppRunRecord -Id 'Contoso.MsiApp' -Status 'Installed' -InstallResult @{ ExitCode = 0; InstallerErrorCode = $null; Engine = 'Cli' }
+
+        $engine.code | Should -Be 0
+        $engine.installerCode | Should -Be 3010
+        $cli.installerCode | Should -BeNullOrEmpty
     }
 
     # Work-order item 38: what the app's post-install hook found, for an RMM tool reading
@@ -105,7 +117,7 @@ Describe 'New-InstallerRunRecord and Format-InstallerResultLine (review finding 
     It 'Records the run: build, times, exit code, counts, apps, auto-updates, restart, winget and the log' {
         $record = New-InstallerRunRecord -ExitCode 1 -Apps $script:apps -AutoUpdates 'Configured' -AutoUpdatesVersion ([version]'2.12.0') -RestartRequired $true -WingetUsable $true -SummaryReached
 
-        @($record.Keys) | Should -Be @('schemaVersion', 'buildId', 'startedUtc', 'endedUtc', 'exitCode', 'summaryReached', 'counts', 'apps', 'autoUpdates', 'restartRequired', 'wingetUsable', 'transcriptPath')
+        @($record.Keys) | Should -Be @('schemaVersion', 'buildId', 'startedUtc', 'endedUtc', 'exitCode', 'summaryReached', 'counts', 'apps', 'autoUpdates', 'restartRequired', 'wingetUsable', 'installEngine', 'transcriptPath')
         $record.schemaVersion | Should -Be 1
         $record.buildId | Should -Be '1.0.0+1a2b3c4d'
         $record.startedUtc | Should -Be '2026-10-04T14:30:05Z'
@@ -124,6 +136,39 @@ Describe 'New-InstallerRunRecord and Format-InstallerResultLine (review finding 
         $record.restartRequired | Should -BeTrue
         $record.wingetUsable | Should -BeTrue
         $record.transcriptPath | Should -Be 'C:\ProgramData\winget-app-setup\logs\install-20261004-163005.log'
+    }
+
+    # wgt-gq8.42: which engine was asked for, which installed, and why a fallback happened.
+    It 'Records the install engine: <Case>' -ForEach @(
+        @{ Case = 'winget.exe, by default'; Record = $null; Requested = 'Cli'; Used = 'Cli'; ModuleVersion = $null; Fallback = $null }
+        @{ Case = 'the module'; Record = 'module'; Requested = 'WinGetClient'; Used = 'WinGetClient'; ModuleVersion = '1.29.380'; Fallback = $null }
+        @{ Case = 'a fall back to winget.exe'; Record = 'fallback'; Requested = 'WinGetClient'; Used = 'Cli'; ModuleVersion = $null; Fallback = 'the module is not ready: its SHA256 pin is not set in this build' }
+    ) {
+        $savedEngineRecord = $script:InstallEngineRecord
+        try {
+            $script:InstallEngineRecord = switch ($Record) {
+                'module' { New-InstallEngineRecord -Requested WinGetClient -Used WinGetClient -Module ([pscustomobject]@{ Version = '1.29.380'; Sha256 = 'AB' * 32 }) -EngineVersion 'v1.29.380' }
+                'fallback' { New-InstallEngineRecord -Requested WinGetClient -Used Cli -FallbackReason 'the module is not ready: its SHA256 pin is not set in this build' }
+                default { $null }
+            }
+
+            $json = ConvertTo-Json -InputObject (New-InstallerRunRecord -ExitCode 0) -Depth 6 | ConvertFrom-Json
+        }
+        finally {
+            $script:InstallEngineRecord = $savedEngineRecord
+        }
+
+        @($json.installEngine.PSObject.Properties.Name) | Should -Be @('requested', 'used', 'module', 'fallbackReason')
+        $json.installEngine.requested | Should -Be $Requested
+        $json.installEngine.used | Should -Be $Used
+        $json.installEngine.module.version | Should -Be $ModuleVersion
+        $json.installEngine.fallbackReason | Should -Be $Fallback
+        if ($ModuleVersion) {
+            @($json.installEngine.module.PSObject.Properties.Name) | Should -Be @('name', 'version', 'sha256', 'engineVersion')
+            $json.installEngine.module.name | Should -Be 'Microsoft.WinGet.Client'
+            $json.installEngine.module.engineVersion | Should -Be 'v1.29.380'
+        }
+        $json.schemaVersion | Should -Be 1
     }
 
     It 'Records a run that ended before anything was installed' {

@@ -22,7 +22,8 @@
       4. Runs it: powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File <copy>
          -NonInteractive. The installer finds or installs PowerShell 7 and relaunches under it.
          With -MaxRuntimeMinutes, it also passes the time budget and the deadline it counts from
-         the wrapper's own start, so the download counts too.
+         the wrapper's own start, so the download counts too. With -SystemInstallEngine, it sets
+         WINGET_APP_SETUP_SYSTEM_ENGINE for the installer, and restores it afterwards.
       5. Exits with the installer's exit code, unchanged.
 
     No -Unattended switch is needed: as SYSTEM the installer is non-interactive by itself (no key
@@ -48,6 +49,13 @@
     limit of the RMM tool. 0 (the default): none passed on; the installer then reads
     WINGET_APP_SETUP_MAX_RUNTIME_MINUTES, if the job sets it. Needs an installer pin that has
     -MaxRuntimeMinutes.
+.PARAMETER SystemInstallEngine
+    Which engine the installer installs the apps with as SYSTEM: 'WinGetClient' for the pinned
+    Microsoft.WinGet.Client module, which Microsoft supports as SYSTEM (the installer downloads it
+    from www.powershellgallery.com unless it is cached, checks it, and uses the machine-wide
+    winget.exe when it is not ready), or 'Cli' for winget.exe. Not given: the installer's default,
+    winget.exe, unless the job sets WINGET_APP_SETUP_SYSTEM_ENGINE itself. Passed on as that
+    variable, so an installer pin without this feature ignores it.
 .PARAMETER From32BitHost
     Set by the wrapper itself when it relaunches from a 32-bit PowerShell, so the log says so.
 .PARAMETER RunDeadlineUtc
@@ -80,6 +88,10 @@ param (
     [Parameter(Mandatory = $false)]
     [ValidateRange(0, 1440)]
     [int]$MaxRuntimeMinutes = 0,
+
+    [Parameter(Mandatory = $false)]
+    [ValidateSet('Cli', 'WinGetClient')]
+    [string]$SystemInstallEngine,
 
     [Parameter(Mandatory = $false)]
     [switch]$From32BitHost,
@@ -432,6 +444,9 @@ function Start-RmmTranscript {
     The time budget to pass on with its deadline, counted from here; 0: none.
 .PARAMETER RunDeadlineUtc
     The deadline the 32-bit stage set, which the 64-bit stage keeps; empty: counted from here.
+.PARAMETER SystemInstallEngine
+    'Cli' or 'WinGetClient', set as WINGET_APP_SETUP_SYSTEM_ENGINE while the installer runs; empty:
+    the variable is left as it is.
 .PARAMETER LogDirectory
     Where the transcript goes. Default: %ProgramData%\winget-app-setup\logs.
 .PARAMETER CopyRoot
@@ -468,6 +483,10 @@ function Invoke-RmmMachinePhase {
         [Parameter(Mandatory = $false)]
         [AllowEmptyString()]
         [string]$RunDeadlineUtc,
+
+        [Parameter(Mandatory = $false)]
+        [AllowEmptyString()]
+        [string]$SystemInstallEngine,
 
         [Parameter(Mandatory = $false)]
         [AllowEmptyString()]
@@ -521,6 +540,8 @@ function Invoke-RmmMachinePhase {
     }
     $transcriptPath = Start-RmmTranscript -LogDirectory $LogDirectory
     $copyDirectory = $null
+    $engineVariableSet = $false
+    $savedEngineVariable = $null
     try {
         Write-RmmLine ('winget-app-setup RMM wrapper (machine phase): running as {0}, 64-bit process: {1}, PowerShell {2}.' -f (Get-RmmAccountName), [Environment]::Is64BitProcess, $PSVersionTable.PSVersion)
         if ($From32BitHost) {
@@ -576,6 +597,14 @@ function Invoke-RmmMachinePhase {
         if ($budgetDeadlineUtc) {
             $installerArguments += @('-MaxRuntimeMinutes', [string]$MaxRuntimeMinutes, '-RunDeadlineUtc', $budgetDeadlineUtc)
         }
+        # An environment variable, not an argument: it reaches the installer's PowerShell 7 relaunch
+        # by inheritance, and an older pinned installer ignores it.
+        if (-not [string]::IsNullOrWhiteSpace($SystemInstallEngine)) {
+            $savedEngineVariable = [Environment]::GetEnvironmentVariable('WINGET_APP_SETUP_SYSTEM_ENGINE')
+            $engineVariableSet = $true
+            [Environment]::SetEnvironmentVariable('WINGET_APP_SETUP_SYSTEM_ENGINE', $SystemInstallEngine)
+            Write-RmmLine ('Install engine requested: {0} (WINGET_APP_SETUP_SYSTEM_ENGINE, read by installer builds that support it).' -f $SystemInstallEngine)
+        }
         $windowsPowerShell = Get-RmmWindowsPowerShellPath
         Write-RmmLine ('Running: {0} {1}' -f $windowsPowerShell, ($installerArguments -join ' '))
         $installerExitCode = Invoke-RmmProcess -FilePath $windowsPowerShell -ArgumentList $installerArguments
@@ -591,6 +620,9 @@ function Invoke-RmmMachinePhase {
         return 5
     }
     finally {
+        if ($engineVariableSet) {
+            [Environment]::SetEnvironmentVariable('WINGET_APP_SETUP_SYSTEM_ENGINE', $savedEngineVariable)
+        }
         if ($copyDirectory) {
             Remove-Item -LiteralPath $copyDirectory -Recurse -Force -ErrorAction SilentlyContinue
         }
@@ -605,6 +637,6 @@ function Invoke-RmmMachinePhase {
 }
 
 if ($MyInvocation.InvocationName -ne '.') {
-    $machinePhaseExitCode = Invoke-RmmMachinePhase -ScriptPath $PSCommandPath -ForwardedArguments (ConvertTo-RmmForwardedArgument -BoundParameters $PSBoundParameters) -InstallerPath $InstallerPath -InstallerSha256 $InstallerSha256 -SkipSystemCheck:$SkipSystemCheck -From32BitHost:$From32BitHost -MaxRuntimeMinutes $MaxRuntimeMinutes -RunDeadlineUtc $RunDeadlineUtc -PinnedCommit $PinnedInstallerCommit -PinnedSha256 $PinnedInstallerSha256
+    $machinePhaseExitCode = Invoke-RmmMachinePhase -ScriptPath $PSCommandPath -ForwardedArguments (ConvertTo-RmmForwardedArgument -BoundParameters $PSBoundParameters) -InstallerPath $InstallerPath -InstallerSha256 $InstallerSha256 -SkipSystemCheck:$SkipSystemCheck -From32BitHost:$From32BitHost -MaxRuntimeMinutes $MaxRuntimeMinutes -RunDeadlineUtc $RunDeadlineUtc -SystemInstallEngine $SystemInstallEngine -PinnedCommit $PinnedInstallerCommit -PinnedSha256 $PinnedInstallerSha256
     exit ([int](@($machinePhaseExitCode)[-1]))
 }

@@ -151,6 +151,37 @@ Describe 'e2e/Collect-Diagnostics.ps1' {
         Should -Invoke Get-WinEvent -Times 1 -Exactly -ParameterFilter { $FilterHashtable[0].StartTime -eq $script:Since -and $FilterHashtable[0].LogName -eq 'Microsoft-Windows-AppXDeploymentServer/Operational' }
     }
 
+    # wgt-gq8.42: the WinGet engine Microsoft.WinGet.Client runs as SYSTEM logs to its temp folder.
+    It 'Copies the newest 10 WinGet engine logs of both SYSTEM temp folders, named after the folder, and says when there are none' {
+        $windows = Join-Path $TestDrive 'Windows'
+        $temp = Join-Path $windows 'Temp/WinGet/defaultState'
+        $systemTemp = Join-Path $windows 'SystemTemp/WinGet/defaultState'
+        $null = New-Item -ItemType Directory -Path $temp, $systemTemp -Force
+        for ($i = 1; $i -le 8; $i++) {
+            foreach ($folder in $temp, $systemTemp) {
+                $file = Join-Path $folder ('WinGetCOM-2026-10-06-06-{0:D2}-00.000.log' -f $i)
+                Set-Content -LiteralPath $file -Value "log $i"
+                (Get-Item -LiteralPath $file).LastWriteTime = ([datetime]'2026-10-06T06:00:00').AddMinutes($i + $(if ($folder -eq $systemTemp) { 0.5 } else { 0 }))
+            }
+        }
+        Set-Content -LiteralPath (Join-Path $systemTemp 'WinGet-2026-10-06-06-09-00.000.log') -Value 'a winget.exe log'
+
+        $exitCode = Invoke-DiagnosticsScript @{ OutputDirectory = $script:OutputDirectory; Label = '3-end-of-job'; IncludeLogs = $true; Since = $script:Since; WauLogDirectory = $script:MissingWauLogs; WingetEngineLogDirectory = @($temp, $systemTemp) }
+        $none = Invoke-DiagnosticsScript @{ OutputDirectory = $script:OutputDirectory; Label = '4-none'; IncludeLogs = $true; Since = $script:Since; WauLogDirectory = $script:MissingWauLogs; WingetEngineLogDirectory = @((Join-Path $TestDrive 'no-engine-logs')) }
+
+        $exitCode | Should -Be 0
+        $none | Should -Be 0
+        $copied = @(Get-ChildItem -LiteralPath (Join-Path $script:OutputDirectory '3-end-of-job/winget-engine-logs') -Name | Sort-Object)
+        $copied.Count | Should -Be 10
+        $copied | Should -Contain 'SystemTemp-WinGetCOM-2026-10-06-06-08-00.000.log'
+        $copied | Should -Contain 'Temp-WinGetCOM-2026-10-06-06-08-00.000.log'
+        $copied | Should -Not -Contain 'Temp-WinGetCOM-2026-10-06-06-03-00.000.log'
+        $snapshot = Get-Content -Path (Join-Path $script:OutputDirectory '3-end-of-job/snapshot.txt')
+        $snapshot | Should -Contain 'WinGet engine logs: 10 of 16 WinGetCOM log(s) -> winget-engine-logs'
+        ($snapshot -join "`n") | Should -Not -Match 'a winget\.exe log'
+        (Get-Content -Path (Join-Path $script:OutputDirectory '4-none/snapshot.txt') | Where-Object { $_ -like 'WinGet engine logs: none (*' }) | Should -Not -BeNullOrEmpty
+    }
+
     It 'Leaves out the event logs and WAU log files without -IncludeLogs' {
         $exitCode = Invoke-DiagnosticsScript @{ OutputDirectory = $script:OutputDirectory; Label = '1-before-first-pass' }
 

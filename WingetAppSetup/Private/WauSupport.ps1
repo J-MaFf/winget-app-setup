@@ -212,6 +212,54 @@ function Set-RestrictedDirectoryAcl {
 
 <#
 .SYNOPSIS
+    Checks that a file carries a valid Authenticode signature from the given signer.
+.DESCRIPTION
+    Status 'Valid' (the signature matches the content and chains to a trusted root) and a
+    certificate common name of exactly SignerCommonName, the rule Test-PowerShell7MsiSignature
+    applies to the PowerShell MSI. Used for the Windows App Runtime framework and the
+    Microsoft.WinGet.Client module's files.
+.PARAMETER Path
+    The file to check.
+.PARAMETER SignerCommonName
+    The common name (CN) the signing certificate must have.
+.OUTPUTS
+    [pscustomobject] with Valid ([bool]) and Detail (the signer, or why the check failed).
+#>
+function Test-AuthenticodeSigner {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+
+        [Parameter(Mandatory = $true)]
+        [string]$SignerCommonName
+    )
+
+    try {
+        $signature = Get-AuthenticodeSignature -LiteralPath $Path -ErrorAction Stop
+    }
+    catch {
+        return [pscustomobject]@{ Valid = $false; Detail = "its signature could not be checked: $_" }
+    }
+
+    $status = 'unknown'
+    $signer = 'none'
+    if ($signature) {
+        if ("$($signature.Status)") {
+            $status = "$($signature.Status)"
+        }
+        if ($signature.SignerCertificate -and $signature.SignerCertificate.Subject) {
+            $signer = [string]$signature.SignerCertificate.Subject
+        }
+    }
+    $signerPattern = '(^|,\s*)CN=' + [regex]::Escape($SignerCommonName) + '(\s*,|$)'
+    if ($status -eq 'Valid' -and $signer -match $signerPattern) {
+        return [pscustomobject]@{ Valid = $true; Detail = $signer }
+    }
+    return [pscustomobject]@{ Valid = $false; Detail = ('it is not signed by {0} (signature status: {1}; signer: {2})' -f $SignerCommonName, $status, $signer) }
+}
+
+<#
+.SYNOPSIS
     Opens a file for reading so that nobody can change, rename or delete it while it is open.
 .DESCRIPTION
     FileShare.Read: while the stream is open, others (msiexec) can only read the file, and its

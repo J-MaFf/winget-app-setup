@@ -256,6 +256,11 @@ function Get-InstallerExitCode {
     The exit code of the `winget list` check that failed, for PreCheckFailed and VerifyFailed.
 .PARAMETER PostInstallReason
     Why the post-install hook failed, for PostInstallFailed (the pipeline's Configuration.Reason).
+.PARAMETER InstallEngine
+    'Cli' or 'WinGetClient': which engine the texts name. Default: InstallResult.Engine, else
+    WinGetClient while that engine is active (Test-WingetClientEngineActive), else Cli. With
+    WinGetClient the code reads 'WinGet client result ...', followed by the installer's own exit
+    code when it is not 0.
 .OUTPUTS
     [string] e.g. 'another installation was in progress (Windows Installer was busy) - re-run the
     installer once it has finished; winget exit 0x8A150102 INSTALL_INSTALL_IN_PROGRESS, 4 attempts,
@@ -284,7 +289,11 @@ function Format-InstallFailureReason {
         [Parameter(Mandatory = $false)]
         [AllowNull()]
         [AllowEmptyString()]
-        [string]$PostInstallReason
+        [string]$PostInstallReason,
+
+        [Parameter(Mandatory = $false)]
+        [ValidateSet('Cli', 'WinGetClient')]
+        [string]$InstallEngine
     )
 
     if ($FailureReason -eq 'PostInstallFailed') {
@@ -296,7 +305,25 @@ function Format-InstallFailureReason {
         return ('installed, but its post-install configuration failed ({0})' -f $hookReason)
     }
 
+    if (-not $InstallEngine) {
+        $InstallEngine = 'Cli'
+        if ($InstallResult -and $InstallResult.ContainsKey('Engine') -and $InstallResult.Engine -eq 'WinGetClient') {
+            $InstallEngine = 'WinGetClient'
+        }
+        elseif (-not ($InstallResult -and $InstallResult.ContainsKey('Engine')) -and (Test-WingetClientEngineActive)) {
+            $InstallEngine = 'WinGetClient'
+        }
+    }
+    $clientEngine = $InstallEngine -eq 'WinGetClient'
+
     $base = switch ($FailureReason) {
+        { $clientEngine -and $_ -eq 'PreCheckTimeout' } { 'Get-WinGetPackage timed out during the pre-install check'; break }
+        { $clientEngine -and $_ -eq 'PreCheckLaunchFailed' } { 'the WinGet client engine could not be started for the pre-install check'; break }
+        { $clientEngine -and $_ -eq 'PreCheckFailed' } { 'Get-WinGetPackage failed during the pre-install check'; break }
+        { $clientEngine -and $_ -eq 'InstallLaunchFailed' } { 'the WinGet client engine could not be started to install it'; break }
+        { $clientEngine -and $_ -eq 'VerifyLaunchFailed' } { 'the WinGet client engine could not be started to verify the install'; break }
+        { $clientEngine -and $_ -eq 'VerifyFailed' } { 'Get-WinGetPackage failed during the post-install check'; break }
+        { $clientEngine -and $_ -eq 'WingetNotLaunchable' } { 'not attempted: the WinGet client engine cannot be started on this machine (see above)'; break }
         'PreCheckTimeout' { 'winget list timed out during the pre-install check' }
         'PreCheckLaunchFailed' { 'winget could not be launched for the pre-install check' }
         'PreCheckFailed' { 'winget list failed during the pre-install check' }
@@ -330,12 +357,21 @@ function Format-InstallFailureReason {
         }
         elseif ($FailureReason -eq 'VerifyNotFound') {
             $base = 'winget install failed'
+            if ($clientEngine) {
+                $base = 'Install-WinGetPackage failed'
+            }
         }
     }
 
     $detailParts = @()
     if ($InstallResult) {
-        if ($null -ne $installExitCode) {
+        if ($null -ne $installExitCode -and $clientEngine) {
+            $detailParts += ('WinGet client result {0}' -f (Format-WingetExitCode -ExitCode $installExitCode))
+            if ($InstallResult.ContainsKey('InstallerErrorCode') -and $null -ne $InstallResult.InstallerErrorCode -and [long]$InstallResult.InstallerErrorCode -ne 0) {
+                $detailParts += ('installer exit code {0}' -f $InstallResult.InstallerErrorCode)
+            }
+        }
+        elseif ($null -ne $installExitCode) {
             $detailParts += ('winget exit {0}' -f (Format-WingetExitCode -ExitCode $installExitCode))
         }
         if ($InstallResult.ContainsKey('Attempts') -and $InstallResult.Attempts) {
@@ -370,7 +406,11 @@ function Format-InstallFailureReason {
             if ($InstallResult.ContainsKey('TimeoutSeconds') -and $InstallResult.TimeoutSeconds) {
                 $limit = '{0} minutes' -f [Math]::Round([int]$InstallResult.TimeoutSeconds / 60)
             }
-            $detailParts += ('winget install stopped after {0}' -f $limit)
+            $stoppedWhat = 'winget install'
+            if ($clientEngine) {
+                $stoppedWhat = 'the WinGet client install'
+            }
+            $detailParts += ('{0} stopped after {1}' -f $stoppedWhat, $limit)
         }
         if ($InstallResult.ContainsKey('InstallerLogPath') -and $InstallResult.InstallerLogPath) {
             # Review finding P2-6: the installer's own log, next to the transcript.
@@ -490,6 +530,9 @@ function Get-AppDeferReasonText {
     The package ids of the apps deferred because the catalog marks them per-user.
 .PARAMETER AccountContext
     Get-InstallAccountContext's result for the run.
+.PARAMETER InstallEngine
+    The engine that installed the apps: 'Cli' (default; '... with --scope machine') or
+    'WinGetClient' ('... with -Scope System').
 #>
 function Write-DeferredAppsSummary {
     param (
@@ -505,7 +548,11 @@ function Write-DeferredAppsSummary {
 
         [Parameter(Mandatory = $false)]
         [AllowNull()]
-        [object]$AccountContext
+        [object]$AccountContext,
+
+        [Parameter(Mandatory = $false)]
+        [ValidateSet('Cli', 'WinGetClient')]
+        [string]$InstallEngine = 'Cli'
     )
 
     $noInstallerApps = @($DeferredApps | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
@@ -530,7 +577,11 @@ function Write-DeferredAppsSummary {
         if ($noInstallerApps.Count -eq 1) {
             $pronoun = 'it'
         }
-        Write-WarningMessage ('Deferred: {0} - winget found no machine-wide installer for {1} that applies to this PC ({2} with --scope machine), and {3}. Not installed and not counted as failed. A per-user app can only be installed in {4}: by this installer run as {5} when that account is an administrator, otherwise by a per-user deployment: the user phase (rmm/Invoke-WingetAppSetupUserPhase.ps1, run as the user at sign-in, for example by an Endpoint Central User Configuration script) installs the apps a run deferred, or the Microsoft Store.' -f ($noInstallerApps -join ', '), $pronoun, (Format-WingetExitCode -ExitCode -1978335216), $why, $account, $who)
+        $scopeOption = '--scope machine'
+        if ($InstallEngine -eq 'WinGetClient') {
+            $scopeOption = '-Scope System'
+        }
+        Write-WarningMessage ('Deferred: {0} - winget found no machine-wide installer for {1} that applies to this PC ({2} with {6}), and {3}. Not installed and not counted as failed. A per-user app can only be installed in {4}: by this installer run as {5} when that account is an administrator, otherwise by a per-user deployment: the user phase (rmm/Invoke-WingetAppSetupUserPhase.ps1, run as the user at sign-in, for example by an Endpoint Central User Configuration script) installs the apps a run deferred, or the Microsoft Store.' -f ($noInstallerApps -join ', '), $pronoun, (Format-WingetExitCode -ExitCode -1978335216), $why, $account, $who, $scopeOption)
     }
     if ($perUserAppIds.Count -gt 0) {
         $subject = 'they'

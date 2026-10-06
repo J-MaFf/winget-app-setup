@@ -115,6 +115,10 @@ if ($MyInvocation.InvocationName -ne '.') {
     $script:InstallerRunReportPending = $false
     $script:InstallerAppRecords = $null
     $script:InstallerAutoUpdateResult = $null
+    # The opt-in Microsoft.WinGet.Client engine of a run as SYSTEM and its run-record entry: never an
+    # earlier run's in this console.
+    $script:WingetClientEngine = $null
+    $script:InstallEngineRecord = $null
 
     if ($PSVersionTable.PSVersion.Major -lt 7) {
         # The bootstrap phase gets its own transcript, install-<timestamp>-bootstrap.log, next to the
@@ -348,6 +352,15 @@ if ($MyInvocation.InvocationName -ne '.') {
         }
         catch {
             # Best-effort, as above.
+        }
+        # Nor may the Microsoft.WinGet.Client engine's folder (a run that stopped before its summary).
+        try {
+            if (Get-Command -Name 'Remove-WingetClientEngine' -CommandType Function -ErrorAction SilentlyContinue) {
+                Remove-WingetClientEngine
+            }
+        }
+        catch {
+            # Best-effort, as above; housekeeping removes a leftover folder a day later.
         }
         # The exit statements above unwind through here (PowerShell runs finally blocks for the
         # exit statement), so the transcript closes on every path.

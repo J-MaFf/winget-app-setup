@@ -1,0 +1,1 @@
+{"operation":"Probe","stage":"call","ok":true,"version":"v1.29.380","probePackageId":"Microsoft.PowerShell","packages":[{"id":"Microsoft.PowerShell","installedVersion":"7.6.6.0","source":"winget"}],"installedChecked":true,"protocol":1,"moduleVersion":"1.29.380","psVersion":"7.6.6","architecture":"X64"}
