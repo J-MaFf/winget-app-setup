@@ -334,9 +334,9 @@ out.
 pwsh -ExecutionPolicy Unrestricted -File .\winget-app-install.ps1 -WhatIf
 ```
 
-A dry run changes nothing on the machine and does not ask for elevation. It runs the checks a real
-run starts with (the **Environment checks** under [Unattended runs](#unattended-runs), App
-Installer's Group Policy among them, and `winget --version`) and prints a `[DRY-RUN]`
+A dry run installs, repairs and sets up nothing, and does not ask for elevation. It runs the
+checks a real run starts with (the **Environment checks** under [Unattended runs](#unattended-runs),
+App Installer's Group Policy among them, and `winget --version`) and prints a `[DRY-RUN]`
 line for each change a real run would make: setting up winget for the account (registering App
 Installer, then `Repair-WinGetPackageManager`, after installing its `Microsoft.WinGet.Client`
 module), updating the winget source and repairing it if needed (a real repair runs
@@ -345,7 +345,10 @@ relaunching elevated, and each app it would install. When the account has no win
 example an admin account used only to elevate, or winget is there but cannot be started, the
 preview lists every app as one a real run would install, because it cannot check which are already
 there. A dry run still writes its transcript (see [Logs](#logs)), and its `winget list` checks
-update winget's own per-user cache and source-agreement state.
+update winget's own per-user cache and source-agreement state. Started elevated or as SYSTEM, it
+also makes `%ProgramData%\winget-app-setup` and its `logs` folder safe before its transcript starts,
+as a real run does: it removes a link planted in place of either folder, creates a missing one, and
+locks both so that only SYSTEM and Administrators can change them.
 
 ## Unattended runs
 
@@ -1256,8 +1259,9 @@ alone. Nothing is deleted through a link: when the `logs` folder or
 `%ProgramData%\winget-app-setup` is one, that cleanup is skipped. These numbers are the defaults of
 `Invoke-InstallerHousekeeping` (`WingetAppSetup/Private/Housekeeping.ps1`).
 
-Every elevated run, and every run as SYSTEM, makes `%ProgramData%\winget-app-setup` and its `logs`
-folder safe before its transcript starts (see [Administrator rights](#administrator-rights)). A
+Every elevated run, and every run as SYSTEM (a `-WhatIf` dry run included), makes
+`%ProgramData%\winget-app-setup` and its `logs` folder safe before its transcript starts (see
+[Administrator rights](#administrator-rights)). A
 junction or symbolic link planted in place of either folder is removed without changing what it
 points to, and the run warns about it. The warning comes before the transcript starts, so it is on
 the console but not in that run's log. Both folders are then owned by Administrators, and only
@@ -1472,8 +1476,10 @@ creates a new folder that only SYSTEM and Administrators can change. It never su
 or `icacls /reset`, which would follow a link put in the folder's place. When a folder cannot be
 set up for another reason (a link that cannot be removed, a file in its place, a folder that
 cannot be created, or `icacls` does not start), the run gives that reason without the `ren`
-advice; for a link, the reason says how to remove it with `rmdir`. The MSI is hashed from a handle
-that stays open until `msiexec` has finished, so nothing can replace it in between.
+advice; for a link that could not be removed, the reason says how to remove it with `rmdir`. A
+folder replaced by a link while it was being locked is refused, and the next run removes that
+link. The MSI is hashed from a handle that stays open until `msiexec` has finished, so nothing can
+replace it in between.
 WAU's own self-update is disabled so the version stays pinned; bump it via `Get-WauPin` in
 `WingetAppSetup/Public/WingetAutoUpdate.ps1`. `winget-app-uninstall.ps1` removes WAU (and any legacy
 scheduled-update task from older versions) after the apps, and keeps it while an app could not be

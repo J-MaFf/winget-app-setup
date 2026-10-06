@@ -52,9 +52,11 @@ Uninstall, PowerShell7Bootstrap, RmmWrapper and BuildGuards tests still read, ru
 generated files themselves, on purpose). The build's `-Check` now also rejects syntax that only
 PowerShell 7 parses and runs the undefined-reference guards on Linux and macOS, the pre-commit hook checks the staged files instead of the working tree, and a catalog name
 must match the whole package-id pattern, so trailing text such as `--override` can no longer reach
-winget. A `-WhatIf` dry run no longer changes the machine: its module, winget
+winget. A `-WhatIf` dry run no longer sets anything up: its module, winget
 and source setup steps only check and print what a real run would fix, where they used
-to install modules for all users, set up App Installer and reset winget's sources. A failed run is
+to install modules for all users, set up App Installer and reset winget's sources (it still writes
+its transcript, and since wgt-gq8.46 an elevated or SYSTEM dry run first makes its
+`%ProgramData%` folders safe, as a real run does). A failed run is
 now debuggable from what the teammate attaches: an early exit prints the exit code and why, the log
 path and the build id, and waits for a key press when someone is at the console instead of closing
 the `irm | iex` window at once; the Windows PowerShell 5.1 bootstrap writes its own
@@ -771,8 +773,11 @@ every repository secret.
     run can replace a folder it does not trust instead of locking it in place (findings 2 and 7
     of the wgt-gq8.46 review). Today that launch keeps its transcript open in the `logs` folder
     while the elevated run works, so the folder cannot be renamed or replaced.
-  - Write the `was a link` warning into the transcript once it starts. It is printed before the
-    transcript starts, so today only the console (and the machine phase's `-rmm.log`) has it.
+  - Write the `was a link` warnings into a log. The installer prints its warning before its
+    transcript starts, and the Endpoint Central machine phase (`Initialize-RmmLogDirectory`)
+    prints its own before its `-rmm.log` starts, so today only the console has either. In an
+    Endpoint Central run the machine phase removes a base or `logs` link first, so the installer
+    finds none and prints nothing.
   - Have `-CollectDiagnostics` and `rmm/Get-WingetFleetHealth.ps1` refuse to read through a link
     at the base or `logs` folder, as the installer does. Both only read, so this is low risk.
 - Validate the dormant DISM MSIX-provisioning path in `Install-PowerShellLatest` end-to-end on a real Windows 10 machine before PowerShell 7.7 GA makes it load-bearing (as of [#166](https://github.com/J-MaFf/winget-app-setup/issues/166)).

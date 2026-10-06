@@ -727,12 +727,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     swapped for a link in the meantime has the link changed and not its target, and refuses the
     folder if it is a link afterwards. `icacls` runs in a hidden window. A folder that existed
     already is locked in place: what is in it stays.
-  - **Logs.** Every elevated or SYSTEM run, the Windows PowerShell 5.1 bootstrap's included, now
-    locks the base and `logs` folders before its transcript starts, not only when it downloads
-    Winget-AutoUpdate, the Windows App Runtime or the Microsoft.WinGet.Client module. The `logs`
-    folder is owned by Administrators, only SYSTEM and Administrators can change it, and standard
-    users can read it (`Set-RestrictedDirectoryAcl -ReadableByUsers`, which replaces
-    `Grant-InstallLogReadAccess`). When it cannot be made safe, the run continues without a
+  - **Logs.** Every elevated or SYSTEM run, a `-WhatIf` dry run and the Windows PowerShell 5.1
+    bootstrap included, now locks the base and `logs` folders before its transcript starts, not
+    only when it downloads Winget-AutoUpdate, the Windows App Runtime or the Microsoft.WinGet.Client
+    module. The `logs` folder is owned by Administrators, only SYSTEM and Administrators can change
+    it, and standard users can read it (`Set-RestrictedDirectoryAcl -ReadableByUsers`, which
+    replaces `Grant-InstallLogReadAccess`). When it cannot be made safe, the run continues without a
     transcript and without `last-run.json`, and says why. Once an elevated run has locked the
     folder, a window that is not elevated cannot write its transcript there, as after any
     Winget-AutoUpdate install before. The `wau-msi-*` log of a run without a transcript (the
