@@ -101,28 +101,30 @@ that started the installer gets the real result rather than a 0 for having opene
   anyway, because another administrator may approve the prompt. The elevated window then checks
   the policy of the account that approved it. Under `AllSigned` or `Restricted` it prints
   `Did not run winget-app-install.ps1: Group Policy sets the execution policy to AllSigned, which -ExecutionPolicy Bypass cannot override`,
-  waits for Enter, and the run exits 4. The uninstaller's elevated window runs its file in place
-  and does not make this last check.
+  waits for Enter, and the run exits 4. The uninstaller's elevated window makes the same check
+  (`Did not run winget-app-uninstall.ps1: ...`).
 - A non-interactive run that is not elevated (`-NonInteractive`, a scheduled task, an RMM agent
   running as the signed-in user) shows no prompt and exits 4 at once: nobody would be there to
   approve it.
 - Under `irm | iex` in PowerShell 7 there is no file to relaunch, so a run that is not elevated exits
   4 and asks you to open an elevated session. The Windows PowerShell 5.1 one-liner relaunches from
   the copy it downloads.
-- `winget-app-uninstall.ps1` elevates the same way, but runs its own file in place, without the
-  checked copy, because it imports the module from the `WingetAppSetup` folder next to it. The
-  elevated window runs whatever those files hold when it starts, so when another account approves
-  the prompt, run the uninstaller from a folder only administrators can change, or from an elevated
-  session.
+- `winget-app-uninstall.ps1` elevates the same way, checked copy included. It is one generated
+  file too, so its elevated window runs a copy checked against the SHA256 the file had when it
+  started, from its own new folder under `%SystemRoot%\Temp`. A file rewritten while the prompt was
+  up is not run (exit code 5). The copy runs under Windows PowerShell 5.1, with no PowerShell 7
+  bootstrap.
 
 ## App catalog
 
 The curated app list is `Get-DefaultAppCatalog` (`WingetAppSetup/Public/AppCatalog.ps1`) — the
 single source of truth shared by the installer and `winget-app-uninstall.ps1`. Entries may
-declare an optional applicability **condition** (a scriptblock, with a human-readable
-`conditionDescription`). The installer evaluates each condition once per run, before it installs
-anything or runs any winget call for the app, and both the first pass and the retry pass use that
-answer. An app whose condition is false on the current machine is reported as
+declare an optional applicability **condition** (a scriptblock) and an **`arch`** list (the OS
+architectures the app is for), with a human-readable `conditionDescription` that serves as the
+reason for both. The installer evaluates each entry's `arch` list, then its condition, once per
+run, before it installs anything or runs any winget call for the app, and both the first pass and
+the retry pass use that answer. An app whose `arch` list or condition does not hold on the current
+machine is reported as
 `Skipping: <id> (not applicable: <reason>)` and counted as Skipped in the summary instead of being
 pointlessly installed. A condition that cannot answer (it throws or writes an error, such as a
 failed CIM query) fails open: the run prints
@@ -130,25 +132,42 @@ failed CIM query) fails open: the run prints
 and installs the app as usual, so a broken probe can never silently drop an app. If that install
 fails, it counts toward exit code 1. Gated entries:
 
-- `Dell.CommandUpdate.Universal` (`Dell hardware only`): installs only when `Win32_ComputerSystem`
-  reports a Dell manufacturer ([#217](https://github.com/J-MaFf/winget-app-setup/issues/217)). A
-  failed CIM query or an empty manufacturer is no answer, so the install is attempted.
+- `Dell.CommandUpdate.Universal`
+  (`Dell hardware with x64 Windows only; winget has no ARM64 installer for it`): installs only
+  when `Win32_ComputerSystem` reports a Dell manufacturer
+  ([#217](https://github.com/J-MaFf/winget-app-setup/issues/217)) and Windows is x64
+  (`arch = 'X64'`). winget carries only Dell's x64 build; Dell publishes its ARM64 build for
+  Snapdragon PCs separately. On ARM64, winget would also pair the x64 build with the Arm64 .NET
+  Desktop Runtime its dependency resolves to. So an ARM64 Dell PC skips it, before any
+  manufacturer query, and needs Dell's ARM64 build from Dell. A failed CIM query or an empty
+  manufacturer is no answer, so the install is attempted on an x64 PC.
 - `Adobe.Acrobat.Reader.64-bit` and `Adobe.Acrobat.Reader.32-bit`: one Reader per PC, chosen by
-  the operating system's architecture. The 64-bit package's only installer is x64, and Adobe
-  supports only the 32-bit (x86) Reader on Windows on ARM, so ARM64 PCs get
-  `Adobe.Acrobat.Reader.32-bit` (run under emulation) and every other PC gets
-  `Adobe.Acrobat.Reader.64-bit`. The other entry shows its `not applicable` skip line on every
-  run. The architecture comes from .NET's `RuntimeInformation.OSArchitecture`. On PowerShell 7.3
-  and later (the bootstrap installs 7.6) it reports the real architecture, even in a 32-bit
-  PowerShell or in an x64 PowerShell running under emulation on an ARM64 PC. An x64 PowerShell
-  7.0-7.2 under emulation reads X64, so such a PC is offered the 64-bit Reader.
+  the operating system's architecture through each entry's `arch` list. The 64-bit package's only
+  installer is x64, and Adobe supports only the 32-bit (x86) Reader on Windows on ARM. So x64 PCs
+  get `Adobe.Acrobat.Reader.64-bit` (`arch = 'X64'`), and ARM64 and 32-bit (x86) PCs get
+  `Adobe.Acrobat.Reader.32-bit` (`arch = 'Arm64', 'X86'`; under emulation on ARM64). The other
+  entry shows its `not applicable` skip line on every run (32-bit Arm Windows gets neither). The
+  architecture comes from .NET's `RuntimeInformation.OSArchitecture`. On PowerShell 7.3 and later
+  (the bootstrap installs 7.6) it reports the real architecture, even in a 32-bit PowerShell or in
+  an x64 PowerShell running under emulation on an ARM64 PC. An x64 PowerShell 7.0-7.2 under
+  emulation reads X64, so such a PC is offered the 64-bit Reader (and, on a Dell, Dell Command
+  Update).
 - `Microsoft.WindowsTerminal`: skipped while Windows Terminal hosts the run, because winget cannot
   replace the terminal it is running in ([#271](https://github.com/J-MaFf/winget-app-setup/issues/271)).
   The default-terminal registry values count as hosting only while Windows Terminal is installed,
   so values left behind after Windows Terminal was removed no longer make every later run skip it.
 
-The uninstaller honours the same conditions: it leaves an installed app alone when its condition
-does not hold (see [Uninstall](#uninstall)).
+`Google.GoogleDrive` is deliberately not gated on ARM64. winget's only installer is labelled x64,
+but Google's update server sends ARM64 PCs the same `setup.exe`, and Drive for desktop runs
+natively on Windows 11 ARM64. Whether a winget install puts the native ARM64 file-system driver in
+place is not yet confirmed on ARM64 hardware. Windows 10 ARM64 (end of servicing since 2025-10-14)
+emulates only x86, so winget finds no applicable Drive installer there (`0x8A150010`): the app
+fails on every run (exit code 1), or, in a run as SYSTEM or under cross-user elevation, is
+`Deferred` as having no machine-wide installer. Google does not support Drive on Windows 10
+ARM64, and an `arch` list cannot tell it from Windows 11 ARM64.
+
+The uninstaller honours the same conditions and `arch` lists: it leaves an installed app alone when
+they do not hold (see [Uninstall](#uninstall)).
 
 An entry may also name its MSIX package (`msixName`, set for `Microsoft.WindowsTerminal`): a run
 as SYSTEM or under cross-user elevation then decides whether the app is installed from whether that
@@ -381,7 +400,8 @@ Some steps still have no time limit of their own: the PowerShell cmdlets that se
 `Add-AppxPackage` registering App Installer); the `Add-AppxProvisionedPackage` of the PowerShell
 MSIX fallback (PowerShell 7.7 and later, which ship no MSI, on Windows builds before 26100);
 and, on PowerShell 7.3 and older, the Winget-AutoUpdate MSI and Windows App Runtime downloads
-once the file has started to arrive. There is no time budget for the whole run either.
+once the file has started to arrive. For a time limit on the whole run, see
+[Time budget for RMM jobs](#time-budget-for-rmm-jobs--maxruntimeminutes).
 
 **Environment checks.** Before it changes anything, the installer looks for what would make the run
 fail whatever it did, and prints one line for each problem it finds. These checks only read, so
@@ -505,6 +525,45 @@ that run's 0 into 3010. A restart that was already pending before the run is rep
 and next to the summary (`Restart: already pending before this run (...)`), but does not make the
 run 3010 by itself. The installer never restarts the PC.
 
+### Time budget for RMM jobs (`-MaxRuntimeMinutes`)
+
+An RMM tool that stops a script after a fixed time would otherwise kill a long first run partway
+through. `-MaxRuntimeMinutes <minutes>` (1 to 1440) gives the whole run a budget instead:
+
+```powershell
+pwsh -ExecutionPolicy Unrestricted -File .\winget-app-install.ps1 -NonInteractive -MaxRuntimeMinutes 60
+```
+
+The `irm | iex` one-liner cannot pass a parameter, so it reads
+`WINGET_APP_SETUP_MAX_RUNTIME_MINUTES` (a whole number from 0 to 1440; unset, empty or 0 means no
+budget, and anything else is ignored with a warning). A value given on the parameter wins over the
+variable: `-MaxRuntimeMinutes 0` turns off a budget the variable sets. The Endpoint Central machine
+phase takes `-MaxRuntimeMinutes` too (see [Machine phase](#machine-phase)).
+
+The clock starts when the script starts, before the Windows PowerShell 5.1 hand-off to PowerShell
+7, and the deadline travels on the command line to the PowerShell 7 run and to an elevated window
+(`-RunDeadlineUtc`, internal). The run prints `Time budget: <n> minutes, until <time>` near its
+start. The deadline is a clock time (UTC), so a correction of the PC's clock during the run moves
+it.
+
+Once the budget is used up, the run starts no further app install, retry or Winget-AutoUpdate setup
+(the Windows App Runtime install included). Apps that do not apply are still skipped, and per-user
+apps in a run for the whole PC are still deferred, since neither needs winget. Every other app left
+is reported `Not attempted` (a summary row, `NotAttempted` in `last-run.json`, `notattempted=` in
+the `RESULT` line), and the Winget-AutoUpdate setup as `Auto-updates: NOT ATTEMPTED`. A retry that
+is not started leaves its app failed. The run ends with a `Time budget: USED UP` line and exit code
+9, unless an app failed (1) or winget no longer works (2). Run it again to finish.
+
+The budget does not stop a step that is already running. An app install ends within its own time
+limits (see the table under [Unattended runs](#unattended-runs): 30 minutes for one
+`winget install`), and waits for a busy Windows Installer no longer than the budget had left. An
+app the installer tries a second time within its install (when the app or its files were in use,
+for example) can take up to 30 minutes more. A Winget-AutoUpdate setup that started just before the deadline can take
+about as long, and the end-of-run winget check then takes up to about 4 minutes. So set the budget
+about 45 minutes below the RMM tool's limit. A run that is killed anyway leaves `last-run.json`
+with `exitCode` `null` (see [Run result](#run-result)). A dry run shows the budget but is not cut
+short.
+
 ### Running as SYSTEM (RMM tools such as Endpoint Central)
 
 A run as SYSTEM, which is how an RMM agent such as ManageEngine Endpoint Central runs a computer
@@ -586,7 +645,9 @@ use the scripts in `rmm/`: a machine phase that runs this installer as SYSTEM, a
 that installs the deferred apps for each user at sign-in (see the next section). RMM tools read
 success from the exit code: list any other code you accept, such as 3010, as a success code for the
 script. Exit code 8 means the apps are installed but automatic updates are not set up or will not
-run; decide whether your RMM job should count it as a success.
+run; decide whether your RMM job should count it as a success. Exit code 9 means the run's
+[time budget](#time-budget-for-rmm-jobs--maxruntimeminutes) ran out before every app was
+attempted. It is not a success: run the job again to finish.
 
 ### Endpoint Central and other RMM tools
 
@@ -614,9 +675,10 @@ support the winget command line as SYSTEM. None of this has run from Endpoint Ce
 yet. What this section says about Endpoint Central (its 32-bit agent, output in the Remarks only
 for frequency Once, User Configuration scripts running as the signed-in user) comes from search
 results quoting its documentation, not from a test, and its own time limit for a script has not
-been measured: check that it covers a first run, which installs every app. Check all of it on a
-pilot PC first. The E2E run's SYSTEM leg runs the machine phase the way the 32-bit agent would (see
-[End-to-end monitoring](#end-to-end-monitoring-e2e-tier-1)).
+been measured: check that it covers a first run, which installs every app, or give the machine
+phase a time budget below it (`-MaxRuntimeMinutes`, see [Setting it up](#setting-it-up)). Check all
+of it on a pilot PC first. The E2E run's SYSTEM leg runs the machine phase the way the 32-bit agent
+would (see [End-to-end monitoring](#end-to-end-monitoring-e2e-tier-1)).
 
 #### Setting it up
 
@@ -641,15 +703,21 @@ pilot PC first. The E2E run's SYSTEM leg runs the machine phase the way the 32-b
 2. **Script Repository** (Configurations > Settings > Script Repository): add the scripts you use.
    Upload the two phases again after every pin change.
 3. **Machine phase:** Computer Configuration > Custom Script. Run As: System user. Script:
-   `Invoke-WingetAppSetup.ps1`, no arguments. Success exit codes: `0,3010`. Frequency: Once, with
-   **Enable logging for troubleshooting**, so the script's output shows in the configuration's
+   `Invoke-WingetAppSetup.ps1`, no arguments needed. Success exit codes: `0,3010`. Frequency: Once,
+   with **Enable logging for troubleshooting**, so the script's output shows in the configuration's
    Remarks. A PC that runs it before its network is up fails the download with exit code 5: deploy
-   it again to those PCs.
+   it again to those PCs. To finish within Endpoint Central's script time limit (not measured yet),
+   add `-MaxRuntimeMinutes <n>` to the script's arguments, with n about 45 minutes below that limit
+   (see [Time budget for RMM jobs](#time-budget-for-rmm-jobs--maxruntimeminutes)). The machine
+   phase starts the clock as soon as it starts, before its 64-bit relaunch and the download, and a
+   run whose budget runs out exits 9 with the rest not attempted.
 
-   Exit code 8 is left out of the success codes on purpose. It means the apps are installed but
-   automatic updates are not set up or will not run (for example, the Windows App Runtime that
-   winget needs could not be installed), and such a PC needs a look. Shown as failed, those PCs
-   stand out. Add 8 to the success codes if that is too noisy for you.
+   Exit codes 8 and 9 are left out of the success codes on purpose. Exit code 8 means the apps are
+   installed but automatic updates are not set up or will not run (for example, the Windows App
+   Runtime that winget needs could not be installed), and such a PC needs a look. Shown as failed,
+   those PCs stand out. Add 8 to the success codes if that is too noisy for you. Exit code 9 means
+   the time budget ran out before every app was attempted. Shown as failed, those PCs stand out
+   too: deploy the configuration to them again, and that run continues where this one stopped.
 4. **User phase:** User Configuration > Custom Script, run as the signed-in user. Script:
    `Invoke-WingetAppSetupUserPhase.ps1`. Success exit codes: `0,3010`. Frequency: Every Logon. A
    user who was signed in when the machine phase ran gets it at their next sign-in.
@@ -663,14 +731,19 @@ pilot PC first. The E2E run's SYSTEM leg runs the machine phase the way the 32-b
 
 `rmm/Invoke-WingetAppSetup.ps1`:
 
-1. relaunches itself in 64-bit Windows PowerShell when a 32-bit PowerShell started it;
+1. relaunches itself in 64-bit Windows PowerShell when a 32-bit PowerShell started it (with
+   `-MaxRuntimeMinutes`, it first sets the budget's deadline and passes it on, so the relaunch
+   counts too);
 2. logs everything it does, the installer's console output included, to
    `%ProgramData%\winget-app-setup\logs\install-<yyyyMMdd-HHmmss>-rmm.log`, next to the
    installer's own logs;
 3. downloads the pinned `winget-app-install.ps1` into a new folder under `%SystemRoot%\Temp` that
    only SYSTEM and Administrators can change, and checks its SHA256 before any of it runs;
 4. runs it with `-NonInteractive` in Windows PowerShell, which finds or installs PowerShell 7 and
-   relaunches under it;
+   relaunches under it. With `-MaxRuntimeMinutes`, it also passes the budget and the deadline
+   counted from the machine phase's own start. Without it (0, the default), it passes no budget,
+   and the installer reads `WINGET_APP_SETUP_MAX_RUNTIME_MINUTES` if the job sets it. Use
+   `-MaxRuntimeMinutes` only with a pinned installer that has it;
 5. exits with the installer's exit code, unchanged (see [Exit codes](#exit-codes)). It exits 5
    without running the installer when the pins are not set, the download failed, the SHA256 does
    not match, or the 64-bit relaunch could not start.
@@ -860,17 +933,20 @@ installed, and with `-WhatIf` when the fix would succeed. It exits 1, with `-Wha
 | 6 | Another run of the installer is in progress on this PC (started by an RMM job, a scheduled task or someone else). This run stopped before its pre-flight checks and changed nothing. Run it again once the other run has finished (see [One run at a time](#one-run-at-a-time)) |
 | 7 | Started from Windows PowerShell 5.1, the installer could not install PowerShell 7 or could not relaunch itself under it, including when Group Policy sets PowerShell 7's execution policy to `AllSigned` or `Restricted` (checked before PowerShell 7 is installed) |
 | 8 | The apps are fine and winget still works, but automatic updates will not work or could not be verified. The summary's `Auto-updates:` line says which: `FAILED` (Winget-AutoUpdate could not be installed), `NOT CONFIGURED` (skipped because the Windows App Runtime the latest winget release needs, today `Microsoft.WindowsAppRuntime.1.8`, is missing and the installer could not install it, for example because that release needs a newer build or another family than the installer's pinned one), `AT RISK` (installed while that framework is missing and could not be installed) or `UNHEALTHY` (installed, but its `\WAU\Winget-AutoUpdate` task is missing, disabled, has no enabled trigger or could not be checked; see [Automatic updates](#automatic-updates)) |
+| 9 | The run's time budget ran out (`-MaxRuntimeMinutes`, or `WINGET_APP_SETUP_MAX_RUNTIME_MINUTES` for the one-liner; see [Time budget for RMM jobs](#time-budget-for-rmm-jobs--maxruntimeminutes)): from then on the run started no app install, retry or Winget-AutoUpdate setup, so some apps (`Not attempted` in the summary, `NotAttempted` in `last-run.json`) or the Winget-AutoUpdate setup (`Auto-updates: NOT ATTEMPTED`) were not attempted. No app failed and winget still works. Run the installer again to finish; 9 is not a success code |
 | 3010 | Success, but a restart is required to finish: an install said so, the Winget-AutoUpdate MSI returned 3010, Windows gained a pending restart during the run, or installing PowerShell 7 from Windows PowerShell needed a restart (see **Restart required** above). RMM tools and Intune treat 3010 as "succeeded, restart required". A restart that was already pending before the run does not cause it |
 
-At the end of a run, when more than one applies, the code is the first of 1, 2, 8, 3010 and 0. A
-run that relaunched itself elevated exits with the elevated run's code. Apps reported as `Deferred`
-(a run as SYSTEM or under cross-user elevation found no machine-wide installer for them, or the
-catalog marks them per-user) do not change the code.
+At the end of a run, when more than one applies, the code is the first of 1, 2, 9, 8, 3010 and 0.
+A restart the run needs is still recorded (`restart=yes` in the `RESULT` line, `restartRequired`
+in `last-run.json`) when another code wins. A run that relaunched itself elevated exits with the
+elevated run's code. Apps reported as `Deferred` (a run as SYSTEM or under cross-user elevation
+found no machine-wide installer for them, or the catalog marks them per-user) do not change the
+code.
 
 A script that imports the `WingetAppSetup` module and calls `Invoke-WingetInstall` itself gets
-codes 0-4, 8 and 3010 back as the function's return value; the function never exits. Pass the code
-on with `exit (Invoke-WingetInstall -NonInteractive)`, or the wrapper exits 0 even after a failed
-run. Codes 5, 6 and 7, and code 1 for a failed pre-flight check, come from
+codes 0-4, 8, 9 and 3010 back as the function's return value; the function never exits. Pass the
+code on with `exit (Invoke-WingetInstall -NonInteractive)`, or the wrapper exits 0 even after a
+failed run. Codes 5, 6 and 7, and code 1 for a failed pre-flight check, come from
 `winget-app-install.ps1` itself, not from the function.
 
 ### One run at a time
@@ -893,16 +969,18 @@ A real run prints one machine-readable line after its summary, or after the earl
 before any `Press any key to exit...`:
 
 ```text
-RESULT: exit=<code> installed=<n> skipped=<n> deferred=<n> failed=<n> autoupdates=<status> restart=<yes|no> build=<id> log=<path>
+RESULT: exit=<code> installed=<n> skipped=<n> deferred=<n> failed=<n> notattempted=<n> autoupdates=<status> restart=<yes|no> build=<id> log=<path>
 ```
 
 The fields are space-separated `key=value` pairs, always in this order:
 
 - `exit`: the exit code the run ends with.
-- `installed`, `skipped`, `deferred`, `failed`: app counts after the retry pass; for a run that
-  stopped early, the apps it had finished.
-- `autoupdates`: `Configured`, `AlreadyPresent`, `AtRisk`, `Unhealthy`, `FrameworkMissing` or
-  `Failed` (the summary's `Auto-updates:` line), or `NotRun` when the run stopped before that step.
+- `installed`, `skipped`, `deferred`, `failed`, `notattempted`: app counts after the retry pass
+  (`notattempted`: apps the [time budget](#time-budget-for-rmm-jobs--maxruntimeminutes) did not
+  reach); for a run that stopped early, the apps it had finished.
+- `autoupdates`: `Configured`, `AlreadyPresent`, `AtRisk`, `Unhealthy`, `FrameworkMissing`,
+  `Failed` or `NotAttempted` (the summary's `Auto-updates:` line; `NotAttempted`: skipped because
+  the time budget was used up), or `NotRun` when the run stopped before that step.
 - `restart`: `yes` when the run needs a restart to finish.
 - `build`: the installer build id, or `unknown`.
 - `log`: the transcript path, or `none`. It comes last, so everything after `log=` is the path.
@@ -914,7 +992,7 @@ Windows PowerShell 5.1 prints the bootstrap's own lines after it; when installin
 needs a restart, the process exits 3010 while the line says `exit=0` and `restart=no`. A bootstrap
 that fails with exit code 7 prints no `RESULT` line. A run that stops at once because PowerShell
 runs it in Constrained Language Mode (exit code 5) prints
-`RESULT: exit=5 installed=0 skipped=0 deferred=0 failed=0 autoupdates=NotRun restart=no build=<id> log=none`,
+`RESULT: exit=5 installed=0 skipped=0 deferred=0 failed=0 notattempted=0 autoupdates=NotRun restart=no build=<id> log=none`,
 from Windows PowerShell 5.1 too: it starts no log and writes no `last-run.json`.
 `-CollectDiagnostics` prints no `RESULT` line.
 
@@ -933,8 +1011,8 @@ that found another one in progress leave the file alone. Fields:
 | `startedUtc`, `endedUtc` | ISO 8601 UTC, e.g. `2026-10-04T14:30:05Z` (`endedUtc` is `null` until the run ends) |
 | `exitCode` | The exit code the run ends with, or `null` until it ends |
 | `summaryReached` | `false` for an early exit, an aborted run or a run still going |
-| `counts` | `installed`, `skipped`, `deferred`, `failed` |
-| `apps` | One entry per app processed, in catalog order: `id`; `status` (`Installed`, `Skipped`, `Deferred`, `Failed`); `reason` (why it was skipped, deferred or failed, as the run printed it, e.g. `already installed`, `not applicable: ...` or, for a deferred app, `winget found no machine-wide installer for it`, `per-user app (catalog scope 'user'): ...` or `per-user setup (catalog userPhase): ...`; `null` for an installed app); `code` (the winget or installer exit code, or `null`); `codeHex` (e.g. `0x8A150102`, or `null`); `restartRequired`; `postInstall` (`Configured`, `NotConfigured` or `Failed` when the app's post-install hook ran, otherwise `null`) and `postInstallReason` (why it is not `Configured`, or `null`) |
+| `counts` | `installed`, `skipped`, `deferred`, `failed`, `notAttempted` |
+| `apps` | One entry per app processed, in catalog order: `id`; `status` (`Installed`, `Skipped`, `Deferred`, `Failed`, `NotAttempted`); `reason` (why it was skipped, deferred, not attempted or failed, as the run printed it, e.g. `already installed`, `not applicable: ...`, for a deferred app `winget found no machine-wide installer for it`, `per-user app (catalog scope 'user'): ...` or `per-user setup (catalog userPhase): ...`, or, for an app the time budget did not reach, `the run's <n>-minute time budget was used up`; `null` for an installed app); `code` (the winget or installer exit code, or `null`); `codeHex` (e.g. `0x8A150102`, or `null`); `restartRequired`; `postInstall` (`Configured`, `NotConfigured` or `Failed` when the app's post-install hook ran, otherwise `null`) and `postInstallReason` (why it is not `Configured`, or `null`) |
 | `autoUpdates` | `status` (as in the `RESULT` line) and `version` (or `null`) |
 | `restartRequired` | The run needs a restart to finish |
 | `wingetUsable` | Result of the end-of-run winget check; `null` when it did not run or could not complete |
@@ -996,11 +1074,13 @@ deletes the older ones, together with the `winget-*` and `pwsh-msi-*` logs older
 keeps. Other files there, such as `last-run.json` and the `wau-msi-*` logs, are left alone. It also
 removes the installer's temporary copy folders (`winget-app-setup-<id>`,
 `winget-app-setup-elevate-<id>`, `winget-app-setup-pwsh-<id>`) that a stopped run left behind, once
-they are a day old: from `%SystemRoot%\Temp` and, for a run as SYSTEM, from SYSTEM's own temp
-folders. Only a folder of files owned by SYSTEM or Administrators is removed. An elevated run by an
-administrator does not clean that administrator's own `%TEMP%` (a user profile folder), so copies a
-killed interactive run left there can be deleted by hand. These numbers are the defaults of
-`Invoke-InstallerHousekeeping` (`WingetAppSetup/Private/Housekeeping.ps1`).
+they are a day old (the uninstaller's elevated copies use the same folders, and a later installer
+run removes the ones a stopped uninstall left behind): from `%SystemRoot%\Temp` and, for a run as
+SYSTEM, from SYSTEM's own temp folders. Only a folder of files owned by SYSTEM or Administrators is
+removed. An elevated run by an administrator does not clean that administrator's own `%TEMP%` (a
+user profile folder), so copies a killed interactive run left there can be deleted by hand. These
+numbers are the defaults of `Invoke-InstallerHousekeeping`
+(`WingetAppSetup/Private/Housekeeping.ps1`).
 
 An elevated run gives standard users read access to the `logs` folder, so the log can be opened
 from the end user's own session after a cross-user elevated run. Installing Winget-AutoUpdate
@@ -1225,9 +1305,11 @@ default terminal application and leaves `defaultProfile` for a later sign-in.
 ## Uninstall
 
 `winget-app-uninstall.ps1` removes what the installer set up: the catalog apps, then
-Winget-AutoUpdate and any legacy scheduled-update task. Run it from a clone of this repository: it
-imports the `WingetAppSetup` module next to it, and exits 5 when that folder is missing or cannot
-be loaded.
+Winget-AutoUpdate and any legacy scheduled-update task. It is one self-contained file, generated
+from the `WingetAppSetup` module like the installer, so it needs nothing next to it: download
+`winget-app-uninstall.ps1` on its own, or run it from a clone. It runs only from a file. Started
+through `irm | iex` it changes nothing and stops with exit code 5: an unattended run exits, and an
+interactive console stays open with `$LASTEXITCODE` 5.
 
 ```powershell
 powershell -ExecutionPolicy Unrestricted -File .\winget-app-uninstall.ps1           # asks for elevation
@@ -1242,9 +1324,9 @@ powershell -ExecutionPolicy Unrestricted -File .\winget-app-uninstall.ps1 -WhatI
 - Each app is removed with `winget uninstall --exact --id <id> --silent` under a 15-minute limit.
   An app whose own uninstaller returns 3010 or 1641 (a restart finishes the removal) counts as
   removed, although winget reports it as `0x8A150030`.
-- An installed app whose catalog condition does not hold on this PC is left alone (Dell Command
-  Update on other hardware, the 32-bit Reader on a PC that is not ARM64). A condition that cannot
-  be evaluated counts as holding, as in the installer.
+- An installed app whose catalog condition or `arch` list does not hold on this PC is left alone
+  (Dell Command Update on other hardware or on ARM64 Windows, the 32-bit Reader on an x64 PC). A
+  condition or architecture that cannot be read counts as holding, as in the installer.
 - The shells the run depends on are kept: PowerShell 7 when the uninstaller runs in it (started
   from a window that is not elevated, it relaunches in Windows PowerShell, which can remove
   PowerShell 7), and Windows Terminal when it hosts this window, or the default terminal
@@ -1270,18 +1352,18 @@ powershell -ExecutionPolicy Unrestricted -File .\winget-app-uninstall.ps1 -WhatI
 
 | Code | Meaning |
 |------|---------|
-| 0 | Done: every app was removed, was not installed, or was kept on purpose (a shell the run depends on, or an app whose condition does not hold), and Winget-AutoUpdate was removed or was not installed |
+| 0 | Done: every app was removed, was not installed, or was kept on purpose (a shell the run depends on, or an app whose condition or `arch` list does not hold), and Winget-AutoUpdate was removed or was not installed |
 | 1 | An app could not be removed or checked (Winget-AutoUpdate is then kept), or Winget-AutoUpdate could not be removed |
 | 2 | winget cannot be started for this account, or Group Policy turns it off, so nothing was removed |
 | 3 | The app list has invalid entries or is empty |
-| 4 | Not elevated, and the UAC prompt was declined or could not be shown (a non-interactive run shows none) |
-| 5 | Stopped by an unexpected error, or the `WingetAppSetup` folder next to the script could not be loaded |
+| 4 | Not elevated, and the UAC prompt was declined or could not be shown (a non-interactive run shows none), or the execution policy Group Policy sets would refuse the elevated run |
+| 5 | Stopped by an unexpected error; started without a script file (`irm \| iex`); or the file changed after the run started, or could not be read or copied, before its elevated run |
 | 3010 | Done, and a restart finishes removing an app (its uninstaller returned 3010 or 1641) or Winget-AutoUpdate (its `msiexec` returned 3010) |
 
 When more than one applies, 1 ranks above 3010. A preview (`-WhatIf`) needs no administrator
 rights, exits 0 when winget cannot be started yet, and never exits 3010. Started without
 administrator rights, the window you started it in waits for the elevated run and exits with its
-code. The elevated window runs the files in place, unchecked (see
+code. The elevated window runs a checked copy of the file, as the installer's does (see
 [Administrator rights](#administrator-rights)). The uninstaller keeps no transcript, prints no
 `RESULT` line and takes no run lock.
 
@@ -1309,7 +1391,8 @@ throwaway VMs by construction:
   (Google Chrome, 7-Zip and Git; `e2e/Remove-PreinstalledApps.ps1`), so the first pass really
   installs them. Every call there has a time limit (`winget list` 45 s, uninstall 150 s), each
   app's result prints as soon as it is done, and an app that cannot be removed gets a warning
-  annotation and is skipped by the first pass as already installed.
+  annotation and is skipped by the first pass as already installed (the SYSTEM leg fails on it
+  instead: see below).
 - **The SYSTEM leg:** `e2e-install-system`, on a third VM, runs one pass the way Endpoint Central
   does, after the same removal of the preinstalled catalog apps. A one-shot scheduled task runs as
   SYSTEM and starts `rmm/Invoke-WingetAppSetup.ps1` with
@@ -1326,8 +1409,18 @@ throwaway VMs by construction:
   run that reached its summary, and Deferred entries that each have a package id and a reason and
   match the summary; and that nothing was installed per-user into SYSTEM's own profile (no new
   uninstall entry under `HKEY_USERS\S-1-5-18` and no new folder under either systemprofile's
-  `AppData\Local\Programs`). The user phase is not run here: it would change the runner
-  account's Windows Terminal settings.
+  `AppData\Local\Programs`). It also checks every catalog app's entry in `last-run.json`, as the
+  other legs check each app with `winget list`. The catalog and which apps apply come from the
+  checkout's module, decided before the run the way the run as SYSTEM decides them: Windows
+  Terminal's condition holds as SYSTEM, and an app with `msixName` counts as already there only
+  when it is provisioned for every user. An app that applies must be `Installed` or `Skipped` as
+  already there, and `Installed` for Chrome, 7-Zip and Git, which the job removes first
+  (`e2e/Remove-PreinstalledApps.ps1`'s defaults). An app that does not apply must be `Skipped` with
+  its `not applicable:` reason, and per-user work must be `Deferred` with its reason. `Failed`, any
+  other `Deferred`, a missing entry, an entry for an app the catalog lacks, or a record that is not
+  schema 1 fails the step. Apps on `KNOWN_PLATFORM_INCOMPATIBLE` are not checked. Unlike the other
+  legs, an app the removal step could not remove fails this leg. The user phase is not run here: it
+  would change the runner account's Windows Terminal settings.
 - **What it does:** the weekly run uses the one-liner above, against raw `main`, in both passes.
   Pull-request and dispatched runs install the checkout (the PR's merge commit, or the dispatched
   branch). The first pass pipes it to `iex` like the one-liner, and the second runs it with
@@ -1356,11 +1449,16 @@ throwaway VMs by construction:
 - **What it checks:** the shared assertion script
   `e2e/Assert-Install.ps1 -ExpectAllSkippedOnSecondRun` checks that every **applicable**
   `Get-DefaultAppCatalog` app resolves via `winget list` (exit-code classified) — the script
-  evaluates each app's catalog condition on the runner, and not-applicable apps must instead show
-  their `not applicable` skip line in the latest transcript — the WAU scheduled task exists and its
-  version matches `Get-WauPin` (on a runner where `Microsoft.WindowsAppRuntime.1.8` is still missing
-  after the run, because the installer could not install it, WAU must instead be absent and the
-  transcript must say `Auto-updates: NOT CONFIGURED`), a transcript with the `Installer build` stamp
+  decides each app's applicability on the runner with the installer's own rule
+  (`Test-AppApplicability`: the `arch` list and the condition, through
+  `Get-CatalogAppApplicability` in `e2e/TranscriptAssertions.ps1`), except that an app with neither
+  an `arch` list nor a condition is always expected installed, and the module finding one not
+  applicable fails the `Apps with no arch list or condition apply` assertion; not-applicable apps
+  must instead show their `not applicable` skip line in the latest transcript — the WAU scheduled
+  task exists and its version matches `Get-WauPin` (on a runner where
+  `Microsoft.WindowsAppRuntime.1.8` is still missing after the run, because the installer could not
+  install it, WAU must instead be absent and the transcript must say
+  `Auto-updates: NOT CONFIGURED`), a transcript with the `Installer build` stamp
   exists, no app outside the skip list is still failed at the end of either pass (read from the
   summary's `Failed` row and every failure line the retry pass did not recover; a transcript with no
   summary fails), and every applicable app is Skipped on the second pass, which also must not
@@ -1375,14 +1473,17 @@ throwaway VMs by construction:
   against sample transcripts in `tests/fixtures/e2e`. The script's `-SkipApps` parameter is an
   escape hatch for runner-platform incompatibilities only; each use must reference a GitHub issue
   at the call site. Dell Command Update is **no longer skip-listed** there: the catalog's
-  manufacturer condition ([#217](https://github.com/J-MaFf/winget-app-setup/issues/217)) gates it
-  in the product itself, so the non-Dell runners exercise the gating for real on every run.
+  manufacturer condition ([#217](https://github.com/J-MaFf/winget-app-setup/issues/217)) and
+  `arch` list gate it in the product itself, so the non-Dell runners exercise the gating for real
+  on every run. The runners are x64, so the ARM64 side of the Reader split and of the Dell gate
+  is not exercised.
 - **Not covered yet:** Winget-AutoUpdate's own update run (the installer now installs
   `Microsoft.WindowsAppRuntime.1.8` and WAU on `windows-latest`, but no step starts WAU's task and
   checks that winget still starts afterwards), the catalog's own
   PowerShell install (`Install-PowerShellLatest`: PowerShell 7 is preinstalled in one leg and
   installed by the bootstrap in the other), the Endpoint Central user phase, the fleet health probe
-  and the at-logon fix, a TightVNC password, and cross-user elevation (tier 2, below).
+  and the at-logon fix, a TightVNC password, the uninstaller, a time budget that runs out (exit
+  code 9), an ARM64 PC, and cross-user elevation (tier 2, below).
 - **Where the evidence lands:** transcripts are written on the runner under
   `%ProgramData%\winget-app-setup\logs` (the same place as production runs) and always uploaded
   as the `e2e-install-transcripts` artifact (`e2e-install-transcripts-windows-powershell` for the
@@ -1431,6 +1532,9 @@ single-file `winget-app-install.ps1` is **generated** from that module so the `i
 one-liner keeps working — do not edit it by hand. It leaves out the comments of the module, which
 are about half of it, and of its entry block (`build/fragments/tail.ps1`), so read them in the
 source; a change to one of those comments alone leaves the installer, and its build id, unchanged.
+The uninstaller, `winget-app-uninstall.ps1`, is generated the same way from
+`build/fragments/uninstall-head.ps1`, the module and `build/fragments/uninstall-tail.ps1`, so that
+its elevated run can be a checked copy of one file. It has no build id.
 
 `rmm/` holds the Endpoint Central scripts (see
 [Endpoint Central and other RMM tools](#endpoint-central-and-other-rmm-tools)). They are not
@@ -1445,13 +1549,18 @@ They also keep the helpers the scripts share identical, keep the two phases' pin
 that every script stays ASCII-only Windows PowerShell 5.1 code. `build/Set-RmmInstallerPin.ps1`
 sets the pins.
 
-After changing anything under `WingetAppSetup/`, regenerate the installer:
+After changing anything under `WingetAppSetup/` or `build/fragments/`, regenerate both scripts and
+commit them with the change:
 
 ```powershell
 pwsh -File .\build\Build-WingetInstallScript.ps1
 ```
 
-Verify the committed script is in sync with the module (useful in CI / pre-commit):
+The build writes neither script unless every guard passes on both. `-OutputPath` and
+`-UninstallerOutputPath` write them elsewhere; the uninstaller defaults to the folder of
+`-OutputPath`.
+
+Verify the committed scripts are in sync with the module (useful in CI / pre-commit):
 
 ```powershell
 pwsh -File .\build\Build-WingetInstallScript.ps1 -Check
@@ -1461,9 +1570,10 @@ Run the test suite (one `<Area>.Tests.ps1` per module file under `tests/`, plus
 `EntryPoint.Tests.ps1`, `TestHarness.Tests.ps1`, `BuildGuards.Tests.ps1`, the `Rmm*.Tests.ps1`
 files and the `E2E*.Tests.ps1` files for the entry point, the suite's own loading rules, the build
 guards and pre-commit hook, the `rmm/` scripts and the pin helper, and the `e2e/` scripts, with
-sample transcripts in `tests/fixtures/e2e` and the sample logs the diagnostics bundle's redaction
-is tested on in `tests/fixtures/diagnostics`; each loads the module directly via
-`tests/TestHelpers.ps1`):
+sample transcripts and a sample `last-run.json` of the SYSTEM run (`system-last-run.json`, to
+update when the catalog changes) in `tests/fixtures/e2e` and the sample logs the diagnostics
+bundle's redaction is tested on in `tests/fixtures/diagnostics`; each loads the module directly via
+`tests/TestHelpers.ps1`, and none dot-sources a generated script):
 
 ```powershell
 Invoke-Pester .\tests
@@ -1495,13 +1605,14 @@ git config core.hooksPath .githooks
 ```
 
 The hook is fast and forgiving by design: it only runs when the staged files touch
-`WingetAppSetup/`, `build/`, a `.psd1` manifest, or `winget-app-install.ps1` itself, and if
+`WingetAppSetup/`, `build/`, a `.psd1` manifest, or either generated script
+(`winget-app-install.ps1`, `winget-app-uninstall.ps1`), and if
 `pwsh` is not on `PATH` it prints a warning and lets the commit through — CI enforces the same
 check on every push and pull request, so nothing ships unverified either way. It checks the
 staged files (exported to a temporary directory with `git checkout-index`), not the working tree,
-so a module change staged without its regenerated installer is blocked even when the working tree
-was rebuilt. On failure it prints how to fix it: re-run the build and stage the regenerated
-installer together with your module change.
+so a module change staged without its regenerated scripts is blocked even when the working tree
+was rebuilt. On failure it prints how to fix it: re-run the build and stage both regenerated
+scripts together with your module change.
 
 > **If you also use the beads hooks:** `bd hooks install` (opt-in — the shims under
 > `.beads/hooks/` are inert by default) writes its hooks into `.git/hooks/`, and setting
@@ -1512,14 +1623,18 @@ installer together with your module change.
 
 ### Why `winget-app-install.ps1` cannot drift from the module
 
-The generated installer is guaranteed to match the `WingetAppSetup` module by a stack of
-guards, most of which run in both build and `-Check` modes of
-`build/Build-WingetInstallScript.ps1`:
+The generated installer and uninstaller are guaranteed to match the `WingetAppSetup` module by a
+stack of guards, most of which run in both build and `-Check` modes of
+`build/Build-WingetInstallScript.ps1`. Every guard runs on both generated scripts,
+`winget-app-install.ps1` and `winget-app-uninstall.ps1`; the build writes neither unless both pass,
+and a guard's report names the file it is about: the generated script, or, for the comment check,
+the source file.
 
-1. **Byte-compare with BOM rejection** — `-Check` regenerates the installer in memory and
-   compares it (LF-normalized) against the committed file byte for byte; it also inspects the
-   raw bytes and rejects a leading UTF-8 BOM that a text comparison would silently strip
-   ([#183](https://github.com/J-MaFf/winget-app-setup/issues/183)).
+1. **Byte-compare with BOM rejection** — `-Check` regenerates each script in memory and compares
+   it (LF-normalized) against the committed file byte for byte (an ordinal comparison, so a hand
+   edit that changes only letter case, or adds an invisible character such as U+00AD, fails it
+   too); it also inspects the raw bytes and rejects a leading UTF-8 BOM that a text comparison
+   would silently strip ([#183](https://github.com/J-MaFf/winget-app-setup/issues/183)).
 2. **Assembled-script parse guard** — the assembled script is parsed and any syntax error
    fails the build with line/column details, so an unbalanced brace in a module file can no
    longer ship a broken installer ([#183](https://github.com/J-MaFf/winget-app-setup/issues/183)).
@@ -1527,12 +1642,14 @@ guards, most of which run in both build and `-Check` modes of
    report, such as `[WingetAppSetup/Private/Jsonc.ps1:120]`, because the assembled script's line
    numbers match no file.
 3. **Comment removal check** — the build leaves the comments of the module and of
-   `build/fragments/tail.ps1` (the entry block) out of the installer (they are about half of the
+   `build/fragments/tail.ps1` (the entry block; for the uninstaller,
+   `build/fragments/uninstall-tail.ps1`) out of the generated scripts (they are about half of the
    module, and every `irm | iex` run downloads the file; review finding P3-53). It removes only the
    tokenizer's comment tokens that end their line, so a `#` inside a string or regex stays, and it
-   keeps `build/fragments/head.ps1` (the script's help) as it is. It then compares the code tokens
-   of each module file and of `tail.ps1` before and after, case-sensitively, and fails the build if
-   removing the comments changed any of them.
+   keeps `build/fragments/head.ps1` and `build/fragments/uninstall-head.ps1` (the scripts' help)
+   as they are. It then compares the code tokens of each module file and of each tail fragment
+   before and after, case-sensitively, and fails the build if removing the comments changed any of
+   them.
 4. **AST undefined-reference guard** — every hyphenated command the assembled script invokes
    must resolve to a module-defined function (matched case-sensitively, so a stale call site
    cannot silently resolve to an external cmdlet that differs only by case) or an external
@@ -1546,9 +1663,10 @@ guards, most of which run in both build and `-Check` modes of
    every platform a listed name the installer no longer calls draws a warning.
 5. **Windows PowerShell 5.1 parse-safety guards** — 5.1 parses the whole installer before it
    runs any of it, so the file must stay 5.1-parseable even though the install itself runs under
-   PowerShell 7. Syntax that only PowerShell 7 parses (`??`, `??=`, `?.`, `?[`, the ternary `?:`,
-   the `&&` / `||` pipeline chains, the background operator `&` as in `Get-Process &`, and
-   `clean { }` blocks) fails the build; the guard reads token kinds and the AST, so the same
+   PowerShell 7, and the uninstaller's elevated window runs entirely under 5.1. Syntax that only
+   PowerShell 7 parses (`??`, `??=`, `?.`, `?[`, the ternary `?:`, the `&&` / `||` pipeline
+   chains, the background operator `&` as in `Get-Process &`, and `clean { }` blocks) fails the
+   build; the guard reads token kinds and the AST, so the same
    characters inside strings, comments and regexes are fine, and so is the call operator
    `& $cmd`. And every non-comment token of the assembled script must be pure ASCII. The
    installer ships as BOM-less UTF-8, which 5.1 decodes as ANSI: a multi-byte character inside a
@@ -1558,24 +1676,26 @@ guards, most of which run in both build and `-Check` modes of
    (find-or-install `pwsh`, then relaunch — [#225](https://github.com/J-MaFf/winget-app-setup/issues/225));
    comments are exempt because misdecoded bytes there cannot change tokenization
    ([#210](https://github.com/J-MaFf/winget-app-setup/issues/210)).
-6. **Content-derived build id** — the banner and `$script:InstallerBuildId` are stamped with
-   `<module version>+<8-hex SHA256 fragment of the whole generated script>` (hashed with the id
-   slots blanked, so a change to `build/fragments/head.ps1` or to the code of `tail.ps1` changes
-   the id too), derived from content only (never git metadata or timestamps) so rebuilding the
-   same tree is byte-identical and the `-Check` byte-compare stays deterministic; transcripts log
-   the id at startup so a log identifies the exact installer build
+6. **Content-derived build id** (the installer only: the uninstaller keeps no transcript, and its
+   elevated relaunch checks the file's SHA256) — the banner and `$script:InstallerBuildId` are
+   stamped with `<module version>+<8-hex SHA256 fragment of the whole generated script>` (hashed
+   with the id slots blanked, so a change to `build/fragments/head.ps1` or to the code of
+   `tail.ps1` changes the id too), derived from content only (never git metadata or timestamps) so
+   rebuilding the same tree is byte-identical and the `-Check` byte-compare stays deterministic;
+   transcripts log the id at startup so a log identifies the exact installer build
    ([#189](https://github.com/J-MaFf/winget-app-setup/issues/189)).
 7. **CI enforcement** — `.github/workflows/windows-tests.yml` runs `-Check` on every push to
    `main` and on every pull request, so drift fails CI instead of shipping
    ([#156](https://github.com/J-MaFf/winget-app-setup/issues/156)).
 8. **Local pre-commit hook** — `.githooks/pre-commit` (above) runs the same `-Check`, against
-   the staged files, before a commit that touches the module, the build, a manifest, or the
-   installer, catching drift before it is even committed
+   the staged files, before a commit that touches the module, the build, a manifest, or either
+   generated script, catching drift before it is even committed
    ([#211](https://github.com/J-MaFf/winget-app-setup/issues/211)).
 
 The module manifest has no export list to drift: `FunctionsToExport` is `'*'`, so
-`winget-app-uninstall.ps1` and `e2e/Assert-Install.ps1`, which import the module through it, get
-every function. There used to be an explicit list that the build checked against `Public/*.ps1`
+`e2e/Assert-Install.ps1` and `e2e/Invoke-SystemInstallPass.ps1`, which import the module through
+it, get every function (the installer and the uninstaller are generated files and do not read the
+manifest). There used to be an explicit list that the build checked against `Public/*.ps1`
 ([#191](https://github.com/J-MaFf/winget-app-setup/issues/191): a function missing from it failed
 only at the uninstaller's prompt); `tests/EntryPoint.Tests.ps1` now checks that a manifest import
 exports every function the module defines.
