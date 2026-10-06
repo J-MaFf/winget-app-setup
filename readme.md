@@ -92,6 +92,18 @@ that started the installer gets the real result rather than a 0 for having opene
   folder under `%SystemRoot%\Temp` that only SYSTEM and administrators can change, and runs that
   copy. A file rewritten while the prompt was up (the bootstrap's copy in `%TEMP%`, or a clone in
   Downloads, are writable by the signed-in user) is not run: the run stops with exit code 5.
+- The elevated run keeps its own files in `%ProgramData%\winget-app-setup`: its logs, the
+  Winget-AutoUpdate, Windows App Runtime and Microsoft.WinGet.Client downloads, and that module's
+  `cache` folder. Any user can create a folder in `%ProgramData%`, and turn an empty folder there
+  into a junction (a link to another folder). So before an elevated run, or a run as SYSTEM,
+  writes, locks or deletes anything there, it makes `%ProgramData%\winget-app-setup` and its
+  `logs` or `cache` folder safe. A junction or symbolic link in a folder's place is removed without
+  changing what it points to, and the run warns about it. A missing folder is created already
+  locked. Each folder is then locked, so that only SYSTEM and Administrators can change it, with
+  Administrators as its owner. A folder that a standard user created before the first elevated run,
+  such as the ones the installer's own first, non-elevated window creates for its log, is locked in
+  place: what is already in it stays. See [Logs](#logs) for what a run does when a folder cannot be
+  made safe.
 - Declining the prompt ends the run with exit code 4, with no second prompt.
 - Group Policy can set the Windows PowerShell execution policy (`Turn on Script Execution`) to
   `AllSigned` (only signed scripts) or `Restricted` (no scripts). `-ExecutionPolicy Bypass`, which
@@ -231,8 +243,9 @@ Where the password comes from, in this order:
    PowerShell 7 run reads them at its start and removes them from its own environment before it
    starts winget or any installer, so those do not inherit them. Processes started before that
    keep a copy in their environment: on a PC without PowerShell 7, the Windows PowerShell 5.1
-   bootstrap and the winget or `msiexec` it runs to install PowerShell 7, and the `icacls` run that
-   sets up the log folder.
+   bootstrap and the winget or `msiexec` it runs to install PowerShell 7, and, in every elevated
+   run, the `icacls` runs that lock the installer's folders under `%ProgramData%` before the
+   transcript starts.
 2. Otherwise, in an interactive run, a prompt at the start of the run, before anything is installed:
    `TightVNC server password`, typed twice and shown as `*`. Press Enter without typing to skip
    it. It is asked only when TightVNC Server does not have its passwords yet, so a re-run does not
@@ -704,9 +717,16 @@ warned about and means `Cli`. A run that is not SYSTEM ignores the variable and 
   signature on the module's manifest, its cmdlet and engine DLLs and the native engine files. It
   extracts into a new `%ProgramData%\winget-app-setup\wingetclient-<id>` folder that only SYSTEM
   and Administrators can change, and removes that folder when the run ends. A folder a killed run
-  left behind is removed by a later run once it is a day old. The checked package is kept in
-  `%ProgramData%\winget-app-setup\cache` and checked again on every use. A link found where the
-  cache folder should be is removed, never followed, and the folder is created again.
+  left behind is removed by a later run once it is a day old, and only while
+  `%ProgramData%\winget-app-setup` is locked to SYSTEM and Administrators. The checked package is
+  kept in `%ProgramData%\winget-app-setup\cache` and checked again on every use. A link found where
+  the cache folder should be is removed, never followed, and the folder is created again (see
+  [Administrator rights](#administrator-rights)). A new download is written there under a new,
+  random name, created only when nothing has that name yet, and then moved over the cached
+  package, so a file another account left in the folder is never opened for writing. When these
+  folders cannot be set up, the module is `NOT READY` and the reason says why: for a folder whose
+  access list cannot be set, it gives the `ren` command described under
+  [Automatic updates](#automatic-updates).
 - **How it installs.** Each module call runs in its own `pwsh` under a time limit (see the table
   under [Unattended runs](#unattended-runs)), so a hung call is stopped together with what it
   started. Before any app, a probe (`Get-WinGetVersion` and one `Get-WinGetPackage`) must answer.
@@ -865,7 +885,12 @@ run the machine phase the way the 32-bit agent would (see
    counts too);
 2. logs everything it does, the installer's console output included, to
    `%ProgramData%\winget-app-setup\logs\install-<yyyyMMdd-HHmmss>-rmm.log`, next to the
-   installer's own logs;
+   installer's own logs. It writes there as SYSTEM before the installer runs (see
+   [Administrator rights](#administrator-rights)), so it first removes a junction or symbolic
+   link in place of `%ProgramData%\winget-app-setup` or its `logs` folder, creates a missing one
+   with its access list already set, and logs only when both are real folders that no account
+   other than SYSTEM and Administrators can change. Otherwise it says why and runs without its own
+   log; the installer then locks the folders, so the next run logs;
 3. downloads the pinned `winget-app-install.ps1` into a new folder under `%SystemRoot%\Temp` that
    only SYSTEM and Administrators can change, and checks its SHA256 before any of it runs;
 4. runs it with `-NonInteractive` in Windows PowerShell, which finds or installs PowerShell 7 and
@@ -1137,8 +1162,9 @@ The run that did the work (a real, elevated run that holds the run lock) also wr
 does so as soon as it holds the lock, with `exitCode` and `endedUtc` set to `null`, and again with
 its outcome when it ends: at its summary, at an early exit or when aborted. A record whose
 `exitCode` is `null` therefore describes a run that is still going or was killed (an RMM time
-limit, `taskkill /F`); `startedUtc` says which run. A dry run, a run that is not elevated and a run
-that found another one in progress leave the file alone. Fields:
+limit, `taskkill /F`); `startedUtc` says which run. A dry run, a run that is not elevated, a run
+without a transcript (see [Logs](#logs)) and a run that found another one in progress leave the
+file alone. Fields:
 
 | Field | Meaning |
 |-------|---------|
@@ -1167,7 +1193,9 @@ with the final summary. ProgramData is used — rather than the elevating accoun
 the log survives cross-user elevation and can be collected after a failed install on a remote
 machine. If the transcript cannot be started, the installer warns and continues: logging never
 blocks an install. A run that relaunched itself elevated leaves the first window's log, which ends
-with `The elevated run ended with exit code N.`, next to the elevated run's own logs.
+with `The elevated run ended with exit code N.`, next to the elevated run's own logs. That first
+window is not elevated, so it can write there only until an elevated run has locked the folder
+(below): after that, it warns that it could not start its transcript and keeps no log.
 
 The transcript includes winget's own output. Each `winget install`, `winget download` and
 `winget source reset` is logged as a `> winget ...` line with its full command line, followed by
@@ -1196,7 +1224,8 @@ The same folder also holds:
   installers do not. A failed app's reason in the summary names this file.
 - `wau-msi-<install|uninstall>-<yyyyMMdd-HHmmss>-<attempt>.log` — `msiexec`'s verbose log of the
   Winget-AutoUpdate install, or of its removal by `winget-app-uninstall.ps1` (which writes it here
-  although it keeps no transcript), one per attempt. A failed install or removal names it.
+  although it keeps no transcript, after making the folder safe as below; when it cannot,
+  `msiexec` runs without a log), one per attempt. A failed install or removal names it.
 - `install-<yyyyMMdd-HHmmss>-rmm.log` — the log of the Endpoint Central machine phase
   (`rmm/Invoke-WingetAppSetup.ps1`): how it was started (including its relaunch from a 32-bit
   PowerShell), which installer it downloaded and its SHA256 check, the installer's console output,
@@ -1221,15 +1250,30 @@ SYSTEM, from SYSTEM's own temp folders. Only a folder of files owned by SYSTEM o
 removed. An elevated run by an administrator does not clean that administrator's own `%TEMP%` (a
 user profile folder), so copies a killed interactive run left there can be deleted by hand. It
 removes the Microsoft.WinGet.Client engine's `wingetclient-<id>` folders that a killed run left in
-`%ProgramData%\winget-app-setup` once they are a day old, under the same owner rule, and leaves
-the engine's `cache` folder alone. These numbers are the defaults of `Invoke-InstallerHousekeeping`
-(`WingetAppSetup/Private/Housekeeping.ps1`).
+`%ProgramData%\winget-app-setup` once they are a day old, under the same owner rule and only
+while that folder is locked to SYSTEM and Administrators, and leaves the engine's `cache` folder
+alone. Nothing is deleted through a link: when the `logs` folder or
+`%ProgramData%\winget-app-setup` is one, that cleanup is skipped. These numbers are the defaults of
+`Invoke-InstallerHousekeeping` (`WingetAppSetup/Private/Housekeeping.ps1`).
 
-An elevated run gives standard users read access to the `logs` folder, so the log can be opened
-from the end user's own session after a cross-user elevated run. Installing Winget-AutoUpdate
-makes the parent `%ProgramData%\winget-app-setup` folder admin-only, so open the logs by their full
-path (for example, paste `C:\ProgramData\winget-app-setup\logs` into File Explorer's address
-bar).
+Every elevated run, and every run as SYSTEM, makes `%ProgramData%\winget-app-setup` and its `logs`
+folder safe before its transcript starts (see [Administrator rights](#administrator-rights)). A
+junction or symbolic link planted in place of either folder is removed without changing what it
+points to, and the run warns about it. The warning comes before the transcript starts, so it is on
+the console but not in that run's log. Both folders are then owned by Administrators, and only
+SYSTEM and Administrators can change them. Standard users can read the `logs` folder and the logs
+in it, so a log can be opened from the end user's own session after a cross-user elevated run.
+They cannot list the parent folder, so open the logs by their full path (for example, paste
+`C:\ProgramData\winget-app-setup\logs` into File Explorer's address bar).
+
+If the `logs` folder cannot be made safe, the run continues without a transcript and without
+`last-run.json`, and the warning says why. When a link there cannot be removed, the warning says
+how to remove it with `rmdir`. When the folder's access list cannot be set (`icacls` failed, or
+another owner or access entry is still there), the warning ends with a `ren` command that renames
+the folder aside, to `<name>-old-<yyyyMMdd-HHmmss>`; the next elevated run then creates a new
+folder that only SYSTEM and Administrators can change. The run never suggests `takeown` or
+`icacls /reset`: another account may still be able to change the folder, and both commands would
+follow a link put in its place.
 
 Each transcript begins with an `Installer build:` line carrying the content-derived build id
 (`<module version>+<8-char SHA256 fragment of the whole generated script>`) stamped by
@@ -1371,9 +1415,12 @@ installed alike:
   not remembered: until one succeeds, every run on that PC downloads it again. The version, the URL
   and each file's size and SHA256 are pinned in `Get-WindowsAppRuntimePin`.
 - **Checks:** the package goes into a new folder inside `%ProgramData%\winget-app-setup` that is
-  limited to SYSTEM and Administrators first, like the WAU MSI's. The framework file must have the
-  pinned size and SHA256 and a valid Authenticode signature from `Microsoft Corporation`; it is
-  held open from the hash until it is provisioned, so what is provisioned is what was checked.
+  limited to SYSTEM and Administrators first, like the WAU MSI's (a link in place of
+  `%ProgramData%\winget-app-setup` is removed first; see below). When that folder cannot be set
+  up, nothing is downloaded and the `NOT INSTALLED` reason says why, with the same `ren` advice as
+  for WAU when an access list cannot be set. The framework file must have the pinned size and
+  SHA256 and a valid Authenticode signature from `Microsoft Corporation`; it is held open from the
+  hash until it is provisioned, so what is provisioned is what was checked.
 - **How:** `Add-AppxProvisionedPackage -Online -SkipLicense`, run in Windows PowerShell with a
   10-minute time limit, then the all-users check again (and `Get-AppxProvisionedPackage`, which
   only warns when it does not list the framework). When that check cannot run, the install counts
@@ -1414,12 +1461,19 @@ run exit 8 when no app failed and winget still works (see [Exit codes](#exit-cod
 sees it.
 
 The WAU MSI is downloaded into a new folder inside `%ProgramData%\winget-app-setup`. The installer
-first makes Administrators the owner of both folders, limits them to SYSTEM and Administrators, and
-reads the result back; if a folder still has another owner or access entry, WAU is not downloaded,
-the run says why and how to reset the folder, and the summary shows `Auto-updates: FAILED`. When a
-folder cannot be set up for another reason (it cannot be created, or `icacls` does not start), the
-run gives that reason without the reset advice, which would not help. The MSI is hashed from a
-handle that stays open until `msiexec` has finished, so nothing can replace it in between.
+first removes a junction or symbolic link in place of `%ProgramData%\winget-app-setup`, without
+changing what it points to (see [Administrator rights](#administrator-rights)). It then makes
+Administrators the owner of both folders, limits them to SYSTEM and Administrators, and reads the
+result back. `icacls` runs with `/L` (act on a link itself, not on its target), and a folder that
+is a link afterwards is refused. If `icacls` fails or a folder still has another owner or access
+entry, WAU is not downloaded and the summary shows `Auto-updates: FAILED`. The run says why and
+gives a `ren` command that renames `%ProgramData%\winget-app-setup` aside; the next run then
+creates a new folder that only SYSTEM and Administrators can change. It never suggests `takeown`
+or `icacls /reset`, which would follow a link put in the folder's place. When a folder cannot be
+set up for another reason (a link that cannot be removed, a file in its place, a folder that
+cannot be created, or `icacls` does not start), the run gives that reason without the `ren`
+advice; for a link, the reason says how to remove it with `rmdir`. The MSI is hashed from a handle
+that stays open until `msiexec` has finished, so nothing can replace it in between.
 WAU's own self-update is disabled so the version stays pinned; bump it via `Get-WauPin` in
 `WingetAppSetup/Public/WingetAutoUpdate.ps1`. `winget-app-uninstall.ps1` removes WAU (and any legacy
 scheduled-update task from older versions) after the apps, and keeps it while an app could not be

@@ -707,6 +707,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Security fix:** an elevated run, or a run as SYSTEM, no longer follows a junction or symbolic
+  link planted at `%ProgramData%\winget-app-setup` or at its `logs` or `cache` folder
+  (wgt-gq8.46). Any standard user can create these folders before the first elevated run, and can
+  turn an empty folder there into a junction. The installer's own first, non-elevated launch also
+  creates the base and `logs` folders, owned by the signed-in user. An elevated or SYSTEM run then
+  followed such a link: `icacls` changed the owner and access list of the folder it pointed to
+  (System32, for example), the `logs` folder's read grant let every user read it, and the run
+  wrote its transcripts, `last-run.json` and installer logs into it and deleted old logs and
+  engine folders there. Only the `cache` folder had a link check (wgt-gq8.42).
+  - **One way in.** `Initialize-ProgramDataFolder` (in the new
+    `WingetAppSetup/Private/ProgramDataFolder.ps1`) makes the base folder, then `logs` or `cache`,
+    safe before use. A link in a folder's place is removed without being followed, and the run
+    warns about it. A missing base folder is created with its access list already set, so it is
+    never an empty folder another account can turn into a junction; `logs` and `cache` are created
+    inside it. Each folder is then locked. A link that cannot be removed stops that use (error id
+    `DirectoryIsLink`), and the message says how to remove it with `rmdir`.
+  - **The lock.** `Set-RestrictedDirectoryAcl` refuses a link, runs `icacls` with `/L`, so a folder
+    swapped for a link in the meantime has the link changed and not its target, and refuses the
+    folder if it is a link afterwards. `icacls` runs in a hidden window. A folder that existed
+    already is locked in place: what is in it stays.
+  - **Logs.** Every elevated or SYSTEM run, the Windows PowerShell 5.1 bootstrap's included, now
+    locks the base and `logs` folders before its transcript starts, not only when it downloads
+    Winget-AutoUpdate, the Windows App Runtime or the Microsoft.WinGet.Client module. The `logs`
+    folder is owned by Administrators, only SYSTEM and Administrators can change it, and standard
+    users can read it (`Set-RestrictedDirectoryAcl -ReadableByUsers`, which replaces
+    `Grant-InstallLogReadAccess`). When it cannot be made safe, the run continues without a
+    transcript and without `last-run.json`, and says why. Once an elevated run has locked the
+    folder, a window that is not elevated cannot write its transcript there, as after any
+    Winget-AutoUpdate install before. The `wau-msi-*` log of a run without a transcript (the
+    uninstaller's) goes through the same check, and `msiexec` runs without a log when the folder
+    cannot be made safe.
+  - **Reset advice.** When a folder's access list cannot be set, the run now says to rename the
+    folder aside with `ren` (`Get-RestrictedDirectoryResetHint`); the next run then creates a new,
+    locked folder. It no longer suggests `takeown` and `icacls /reset`: another account may still
+    change the folder, and both commands would follow a link put in its place.
+  - **Housekeeping** deletes nothing through a link at the base or `logs` folder. It removes old
+    `wingetclient-<id>` folders only from a base folder that passes the access-list check, so
+    another account cannot swap a folder before it is removed.
+  - **WinGet client cache.** A new download is written under a new random name, created only when
+    nothing is there yet, and then moved over the cached package. Before, it was written to
+    `<package>.partial`, a name known from the public pin, which followed a file link a standard
+    user could leave in the cache folder before an elevated run first locked it.
+  - **Endpoint Central machine phase.** `rmm/Invoke-WingetAppSetup.ps1` writes its log as SYSTEM
+    before the installer runs. It now removes a link at the base or `logs` folder, creates a missing
+    one with its access list already set, and logs only into folders that no account other than
+    SYSTEM and Administrators can change (`Initialize-RmmLogDirectory`). Otherwise it continues
+    without its log, and the installer locks the folders for the next run.
+  - Not changed: a base or `logs` folder that a standard user created before the first elevated
+    run is locked in place, not replaced, so the files other accounts left in it stay.
+    `-CollectDiagnostics`, the fleet health probe and the user phase only read these folders and
+    do not check them for links yet.
 - Ctrl+C at the final `Press any key to exit...` prompt of an elevated run keeps the run's exit
   code again (review of wgt-gq8.43). The elevated window runs a command that checks the file and
   runs its copy in the same console, and Ctrl+C reaches both: the copy kept its code, but the
@@ -888,7 +939,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     is off and every entry belongs to SYSTEM or Administrators (an explicit entry another account
     added survives `/grant:r`). When it fails nothing is downloaded: the run says `Winget-AutoUpdate
     was NOT installed`, names the owner or entry at fault and how to reset the folder (`takeown /f
-    ... /a`, then `icacls ... /reset`), and the summary shows `Auto-updates: FAILED`. Only these
+    ... /a`, then `icacls ... /reset`; since replaced by renaming the folder aside with `ren`,
+    which follows no link, wgt-gq8.46), and the summary shows `Auto-updates: FAILED`. Only these
     failures carry that advice (`Set-RestrictedDirectoryAcl` tags them with the error id
     `RestrictedDirectoryAclFailed`); when the folder cannot be created or `icacls` does not start,
     the run gives that reason without it.
@@ -898,7 +950,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     staging folder is removed.
   - **Logs.** Only the folders themselves are changed (no `/T`, no `/reset`), so the read grant for
     standard users on the `logs` folder inside `%ProgramData%\winget-app-setup` stays, and the
-    logs still open by their full path.
+    logs still open by their full path. (Since wgt-gq8.46 that grant is part of the `logs`
+    folder's own lock.)
   - **PowerShell Gallery only.** `Install-Module` for Microsoft.WinGet.Client and
     Microsoft.PowerShell.GraphicalTools passes `-Repository PSGallery`: both run elevated and
     install for all users, so another repository registered on the machine can no longer serve
@@ -1218,7 +1271,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `%ProgramData%\winget-app-setup` admin-only, and that reached the `logs` folder, so a teammate
     who elevated as an admin got Access Denied opening the log from the end user's session. Every
     elevated run now grants `BUILTIN\Users` read access to the `logs` folder only
-    (`Grant-InstallLogReadAccess`); the WAU staging folder's lockdown is unchanged.
+    (`Grant-InstallLogReadAccess`, since replaced by the `logs` folder's own lock,
+    `Set-RestrictedDirectoryAcl -ReadableByUsers`, wgt-gq8.46); the WAU staging folder's lockdown
+    is unchanged.
   - **Tables are written at full width.** `Write-Table` renders with `Out-String -Width 4096`, so
     the summary and failed-apps tables are no longer cut off at 120 columns in transcripts and
     captured output (issue #284's failed list dropped `Microsoft.PowerShell` that way) or empty

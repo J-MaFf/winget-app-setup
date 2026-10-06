@@ -308,6 +308,26 @@ imports no Visual C++ runtime DLL, so it does not need that runtime. A fourth E2
 first run on 2026-10-06 (both passes, all 53 checks, and the informational pin check printed OK);
 no real PC has used the engine yet.
 
+A sixth follow-up, wgt-gq8.46, is a security fix. Any standard user can create
+`%ProgramData%\winget-app-setup`, or its `logs` or `cache` folder, before the first elevated run,
+and can turn an empty folder there into a junction. An elevated or SYSTEM run then followed the
+junction: `icacls` changed the owner and access list of its target, the `logs` folder's read grant
+let every user read it, and the run wrote its logs there and deleted old ones. Now
+`Initialize-ProgramDataFolder` (`WingetAppSetup/Private/ProgramDataFolder.ps1`) makes each folder
+safe before an elevated or SYSTEM run uses it: a link is removed without being followed, a missing
+base folder is created already locked, and each folder is locked with `icacls /L`, in a hidden
+window. Every elevated run now does this before its transcript starts, so the `logs` folder's read
+grant is part of its lock (`Grant-InstallLogReadAccess` is gone), and a window that is not elevated
+keeps no log once an elevated run has locked the folder. A folder whose access list cannot be set
+gets the advice to rename it aside with `ren`, never `takeown` or `icacls /reset`, which would
+follow a link. The WinGet client cache copy is written under a new random name, housekeeping
+deletes nothing through a link, and the Endpoint Central machine phase logs only into folders that
+only SYSTEM and Administrators can change. A folder a standard user created before the first
+elevated run is still locked in place rather than replaced. Microsoft documents `icacls /L` only
+for symbolic links; a Windows-only test in `tests/ProgramDataFolder.Tests.ps1`, which needs an
+administrator, checks that it also leaves a junction's target and what is in it alone. None of
+this has run on a real PC yet.
+
 The same branch changes CI. Fork pull requests that leave `windows-tests.yml` alone no longer run
 on the self-hosted win-test runner, and `claude.yml` calls the shared Claude workflow at a pinned
 commit SHA instead of `@main`. The E2E workflow files its failure issue from a separate ubuntu job,
@@ -493,7 +513,7 @@ every repository secret.
 |------|-------------|
 | `WingetAppSetup/` | Source-of-truth PowerShell module (`.psd1` manifest + `.psm1` loader) |
 | `WingetAppSetup/Public/` | Entry points and main steps (the module exports every function, `Public/` and `Private/` alike): logging, winget core, app validation, Windows Terminal config, install orchestration (updates are outsourced to WAU), uninstall orchestration (`Invoke-WingetUninstall`), the Endpoint Central user phase (`Invoke-WingetUserPhase`) |
-| `WingetAppSetup/Private/` | Helpers: system info, elevation, the Windows PowerShell 5.1 → PowerShell 7 bootstrap, the environment checks (`EnvironmentPreflight.ps1`), the machine-wide winget and provisioning lookups a run as SYSTEM uses (`MachineContext.ps1`), the run lock (`RunLock.ps1`), the `RESULT` line and `last-run.json` (`RunRecord.ps1`), the catalog entry fields and post-install hooks (`CatalogSchema.ps1`), TightVNC's password hook (`TightVnc.ps1`), log retention (`Housekeeping.ps1`), the diagnostics bundle (`Diagnostics.ps1`), the user phase's helpers (`UserPhaseSupport.ps1`), the uninstaller's per-app step (`AppUninstall.ps1`), Winget-AutoUpdate's checks (`WauSupport.ps1`), the pinned `Microsoft.WindowsAppRuntime.1.8` install before Winget-AutoUpdate (`WindowsAppRuntime.ps1`), and the opt-in Microsoft.WinGet.Client engine of runs as SYSTEM: its pin, download, checks and child script (`WingetClientModule.ps1`) and its requests and result mapping (`WingetClientEngine.ps1`) |
+| `WingetAppSetup/Private/` | Helpers: system info, elevation, the Windows PowerShell 5.1 → PowerShell 7 bootstrap, the environment checks (`EnvironmentPreflight.ps1`), the machine-wide winget and provisioning lookups a run as SYSTEM uses (`MachineContext.ps1`), the run lock (`RunLock.ps1`), the `RESULT` line and `last-run.json` (`RunRecord.ps1`), the catalog entry fields and post-install hooks (`CatalogSchema.ps1`), TightVNC's password hook (`TightVnc.ps1`), log retention (`Housekeeping.ps1`), the diagnostics bundle (`Diagnostics.ps1`), the user phase's helpers (`UserPhaseSupport.ps1`), the uninstaller's per-app step (`AppUninstall.ps1`), Winget-AutoUpdate's checks and the folder lock (`WauSupport.ps1`), the installer's folders under `%ProgramData%`, made safe from planted links before use (`ProgramDataFolder.ps1`), the pinned `Microsoft.WindowsAppRuntime.1.8` install before Winget-AutoUpdate (`WindowsAppRuntime.ps1`), and the opt-in Microsoft.WinGet.Client engine of runs as SYSTEM: its pin, download, checks and child script (`WingetClientModule.ps1`) and its requests and result mapping (`WingetClientEngine.ps1`) |
 | `build/Build-WingetInstallScript.ps1` | Assembles the module, without its comments, and the entry fragments into `winget-app-install.ps1` and `winget-app-uninstall.ps1`; every guard runs on both, and `-Check` verifies both |
 | `build/Set-RmmInstallerPin.ps1` | Sets the pinned installer commit and SHA256 in both Endpoint Central phases |
 | `build/Set-WingetClientModulePin.ps1` | Checks the Microsoft.WinGet.Client pin in `Get-WingetClientModulePin` against the PowerShell Gallery (`-Check`, exit 1 on a mismatch) or moves it (`-Write`); run the `e2e-install-system-winget-client` job after moving it |
@@ -708,12 +728,53 @@ every repository secret.
   Winget-AutoUpdate, the uninstaller (`Uninstall-WinGetPackage` would be the module's form) and the
   `winget download` path of `Install-PowerShellLatest` still use `winget.exe` as SYSTEM. The child
   script cannot run under a Group Policy `AllSigned` execution policy; running it through
-  `-Command`, or signing it, would avoid that fallback. A link at `%ProgramData%\winget-app-setup`
-  itself is not refused yet: `New-WauStagingDirectory`, which the Winget-AutoUpdate MSI staging
-  shares, should refuse or replace one, with a test (the part of review finding F6 left out of
-  wgt-gq8.42). Restart codes other than 3010 stay undetected under the engine, since the module
+  `-Command`, or signing it, would avoid that fallback. (A link at `%ProgramData%\winget-app-setup`
+  itself, the part of review finding F6 left out of wgt-gq8.42, is now removed before use:
+  wgt-gq8.46.) Restart codes other than 3010 stay undetected under the engine, since the module
   does not expose a manifest's expected return codes (review finding F4); only the pending-restart
   check catches them.
+- ProgramData link guard (wgt-gq8.46). Check on Windows:
+  - Windows CI, as an administrator: the `ProgramData folders on real Windows (wgt-gq8.46)` tests in
+    `tests/ProgramDataFolder.Tests.ps1`. The key one checks that `icacls /L` leaves a junction's
+    target, and everything in it, alone when the folder is swapped for a junction after the check;
+    Microsoft documents `/L` only for symbolic links. If it fails, lock a folder that already
+    exists through a handle opened with `FILE_FLAG_OPEN_REPARSE_POINT` (P/Invoke, in Windows
+    PowerShell 5.1 and PowerShell 7), or rename an untrusted folder aside and create a new one. Also
+    the real-Windows staging tests in `tests/WingetAutoUpdate.Tests.ps1`, which now run `icacls`
+    with `/L`, and the Windows-only folder tests in `tests/RmmWrapper.Tests.ps1`
+    (`New-RmmSecuredFolder -ReadableByUsers`, `Get-RmmFolderTrustProblem`, and a machine phase
+    without pins that must still write its `-rmm.log`).
+  - E2E, all four legs: transcripts, `last-run.json` and the installer logs are still written; the
+    base and `logs` folders end up owned by Administrators, with SYSTEM and Administrators full
+    control and Users read on `logs`; and no new warnings appear. In the SYSTEM legs, the machine
+    phase creates both folders on a fresh runner, with their access lists set at creation, and
+    logs; the installer then locks them.
+  - A real PC, as a standard user before the first run:
+    `mklink /J C:\ProgramData\winget-app-setup C:\Users\Public\victim`, and separately a junction
+    at `...\winget-app-setup\logs` inside a folder the user created. Then run the installer
+    elevated, cross-user and as SYSTEM from Endpoint Central. Expect one warning, the junction gone,
+    the target's owner, access list and files unchanged, and a normal log.
+  - A real PC: the first, non-elevated launch (which creates the base and `logs` folders, owned by
+    the user) and its elevated relaunch. The relaunch should take both folders over, its logs
+    should open from the user's session by their full path, and later launches that are not
+    elevated should warn that the transcript could not start.
+  - The Windows PowerShell 5.1 bootstrap, elevated and as SYSTEM (it creates the base folder with
+    `Directory.CreateDirectory` and an access list). Check that `icacls` prints nothing on the
+    console of an elevated, a SYSTEM or a 5.1 run.
+  - An Endpoint Central run where a user owns the base folder: the machine phase says why it keeps
+    no log, and the next run logs.
+  - Optional: a volume mount point planted as the base folder, if a standard user can make one.
+    Check whether it is removed or the run stops with `DirectoryIsLink`.
+- ProgramData follow-ups (wgt-gq8.46; file them as beads):
+  - Never reuse a base or `logs` folder that a standard user created. Have the first, non-elevated
+    launch log outside `%ProgramData%` (for example under `%LOCALAPPDATA%`), so that an elevated
+    run can replace a folder it does not trust instead of locking it in place (findings 2 and 7
+    of the wgt-gq8.46 review). Today that launch keeps its transcript open in the `logs` folder
+    while the elevated run works, so the folder cannot be renamed or replaced.
+  - Write the `was a link` warning into the transcript once it starts. It is printed before the
+    transcript starts, so today only the console (and the machine phase's `-rmm.log`) has it.
+  - Have `-CollectDiagnostics` and `rmm/Get-WingetFleetHealth.ps1` refuse to read through a link
+    at the base or `logs` folder, as the installer does. Both only read, so this is low risk.
 - Validate the dormant DISM MSIX-provisioning path in `Install-PowerShellLatest` end-to-end on a real Windows 10 machine before PowerShell 7.7 GA makes it load-bearing (as of [#166](https://github.com/J-MaFf/winget-app-setup/issues/166)).
 - Cut a tagged release and move the `[Unreleased]` CHANGELOG entries under a versioned heading.
 
