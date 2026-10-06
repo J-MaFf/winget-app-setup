@@ -1,0 +1,64 @@
+name: Real-PC test plan self-test
+
+# Self-test for e2e/Invoke-RealPcTestPlan.ps1 (bead wgt-gq8.60): the harness an owner runs on a
+# disposable Windows test machine to run PR #285's owner test plan. A GitHub-hosted windows-latest
+# runner is a throwaway VM by construction, so this runs the harness end to end there with
+# -ConfirmDisposableMachine and uploads the report zip, even on failure. It does NOT touch
+# e2e-install.yml's jobs; it runs only when the harness, its tests or this workflow change.
+#
+# Runner facts this relies on (the same the E2E install jobs rely on, see e2e-install.yml):
+#   - windows-latest is Windows Server 2025, elevated by default (the harness's elevation gate
+#     passes, and the installer's SYSTEM scheduled task and the ProgramData link guard work as in
+#     e2e-install-system).
+#   - It ships winget and the catalog apps Chrome, 7-Zip and Git. The harness tolerates a
+#     preinstalled catalog app (its first-run app check accepts an 'already installed' skip), so no
+#     Remove-PreinstalledApps step is needed; the uninstaller stage then removes them.
+#   - It has no PowerShell 7 until the first install pass installs it, so the harness MUST start
+#     under Windows PowerShell 5.1 (shell: powershell); the pieces that need PowerShell 7 run in a
+#     child pwsh the first pass installed.
+#   - The temporary standard user cannot run its junction-planting scheduled task (no interactive
+#     session), so the link-guard stage falls back to planting the junction as the admin and marks
+#     that row a SKIP, which does not fail the run.
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'e2e/Invoke-RealPcTestPlan.ps1'
+      - 'tests/E2ERealPcTestPlan.Tests.ps1'
+      - '.github/workflows/real-pc-test-plan.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: real-pc-test-plan-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  real-pc-test-plan:
+    runs-on: windows-latest
+    # Generous: the harness installs the catalog, PowerShell 7, the Windows App Runtime and WAU,
+    # then re-runs, runs the SYSTEM pass, a time-budget pair, diagnostics and the uninstaller.
+    timeout-minutes: 120
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      # Starts under Windows PowerShell 5.1 (shell: powershell), as a fresh PC does. The harness
+      # exits non-zero if any check failed; the report zip is uploaded either way by the next step.
+      - name: Run the real-PC test plan harness
+        shell: powershell
+        run: |
+          & .\e2e\Invoke-RealPcTestPlan.ps1 -ConfirmDisposableMachine -ReportPath "$env:RUNNER_TEMP\real-pc-report"
+          exit $LASTEXITCODE
+
+      - name: Upload the report and zip
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: real-pc-test-plan-report
+          path: |
+            ${{ runner.temp }}\real-pc-report.zip
+            ${{ runner.temp }}\real-pc-report
+          if-no-files-found: warn

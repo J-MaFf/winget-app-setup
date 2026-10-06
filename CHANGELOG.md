@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Real-PC owner-test-plan harness (bead wgt-gq8.60): `e2e/Invoke-RealPcTestPlan.ps1`, one command an
+  owner runs as an administrator on a disposable Windows 10 22H2+ or Windows 11 test machine to run
+  every automatable item of PR #285's owner test plan and get one PASS/FAIL report plus one zip to
+  send back. It starts under Windows PowerShell 5.1, refuses unless elevated and confirmed disposable
+  (`-ConfirmDisposableMachine` for unattended use), and `-WhatIf`/`-Plan` prints the plan and changes
+  nothing. Stages: preflight; the ProgramData link guard; a first unattended install and its re-run;
+  a SYSTEM run through the Endpoint Central machine-phase wrapper (and, with `-IncludeWinGetClient`,
+  the Microsoft.WinGet.Client engine); a time-budget run that exits 9 then finishes; the
+  `-CollectDiagnostics` bundle (checked for secret leaks); and the uninstaller (preview then real).
+  The temporary standard user's password is never printed or stored; a throwaway TightVNC test
+  password is written only to the report folder, never to the diagnostics bundle.
+  `tests/E2ERealPcTestPlan.Tests.ps1` tests the pure parts (stage/dependency logic, the change plan,
+  the gate decision, each stage's check evaluation, the ACL/SDDL comparison, the secret scan, and
+  the report and exit-code logic), and `.github/workflows/real-pc-test-plan.yml` self-tests the
+  harness end to end on a `windows-latest` runner.
 - Endpoint Central deployment in two phases (work-order item 34), in `rmm/`. Both are standalone
   Windows PowerShell 5.1 scripts that need nothing beside them.
   - **Machine phase.** `rmm/Invoke-WingetAppSetup.ps1` is a Computer Configuration script run as
