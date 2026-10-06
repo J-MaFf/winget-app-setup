@@ -393,8 +393,8 @@ Describe 'What the catalog expects of a run as SYSTEM' {
         @($byId.Values | Where-Object { $_.Expected -eq 'Installed' } | ForEach-Object { $_.Id } | Sort-Object) | Should -Be @('7zip.7zip', 'Adobe.Acrobat.Reader.64-bit', 'Git.Git', 'GlavSoft.TightVNC', 'Google.Chrome', 'Google.GoogleDrive', 'Klocman.BulkCrapUninstaller', 'Microsoft.PowerShell', 'Microsoft.WindowsTerminal')
         @($byId.Values | Where-Object { $_.MustInstall } | ForEach-Object { $_.Id } | Sort-Object) | Should -Be @('7zip.7zip', 'Git.Git', 'Google.Chrome')
         $byId['Dell.CommandUpdate.Universal'].Expected | Should -Be 'NotApplicable'
-        $byId['Dell.CommandUpdate.Universal'].Reason | Should -Be 'not applicable: Dell hardware only'
-        $byId['Adobe.Acrobat.Reader.32-bit'].Reason | Should -Be 'not applicable: ARM64 Windows only; other PCs get the 64-bit Reader'
+        $byId['Dell.CommandUpdate.Universal'].Reason | Should -Be 'not applicable: Dell hardware with x64 Windows only; winget has no ARM64 installer for it'
+        $byId['Adobe.Acrobat.Reader.32-bit'].Reason | Should -Be 'not applicable: ARM64 and 32-bit Windows only; x64 PCs get the 64-bit Reader'
         # A run as SYSTEM checks an MSIX app by its provisioning, not with winget list.
         $byId['Microsoft.WindowsTerminal'].AlreadyPresentReasons | Should -Be @('already provisioned for every user on this PC')
         $byId['Microsoft.PowerShell'].AlreadyPresentReasons | Should -Be @('already installed')
@@ -409,7 +409,9 @@ Describe 'What the catalog expects of a run as SYSTEM' {
         $byId['Adobe.Acrobat.Reader.64-bit'].Expected | Should -Be 'NotApplicable'
         $byId['Adobe.Acrobat.Reader.64-bit'].Reason | Should -Be 'not applicable: its only installer is x64, and Adobe supports only the 32-bit Reader on ARM64 Windows'
         $byId['Adobe.Acrobat.Reader.32-bit'].Expected | Should -Be 'Installed'
-        $byId['Dell.CommandUpdate.Universal'].Expected | Should -Be 'Installed'
+        # Dell Command Update is x64-only in winget (wgt-gq8.44), so even a Dell PC skips it on ARM64.
+        $byId['Dell.CommandUpdate.Universal'].Expected | Should -Be 'NotApplicable'
+        $byId['Dell.CommandUpdate.Universal'].Reason | Should -Be 'not applicable: Dell hardware with x64 Windows only; winget has no ARM64 installer for it'
     }
 
     It 'Expects per-user work Deferred with its reason, an app that does not apply Skipped first, and fails open without a verdict' {
@@ -516,7 +518,7 @@ Describe 'Get-SystemInstallPassResult: each catalog app in last-run.json' {
         (Get-Row $result 'App installed: GlavSoft.TightVNC').Detail | Should -Be 'last-run.json: Installed, post-install NotConfigured'
         (Get-Row $result 'App installed: Microsoft.PowerShell').Detail | Should -Be 'last-run.json: Skipped (already installed)'
         (Get-Row $result 'App installed: Microsoft.WindowsTerminal').Detail | Should -Be 'last-run.json: Skipped (already provisioned for every user on this PC)'
-        (Get-Row $result 'Not-applicable skip recorded: Dell.CommandUpdate.Universal').Detail | Should -Be 'last-run.json: Skipped (not applicable: Dell hardware only)'
+        (Get-Row $result 'Not-applicable skip recorded: Dell.CommandUpdate.Universal').Detail | Should -Be 'last-run.json: Skipped (not applicable: Dell hardware with x64 Windows only; winget has no ARM64 installer for it)'
         (Get-Row $result 'Not-applicable skip recorded: Adobe.Acrobat.Reader.32-bit').Result | Should -Be 'PASS'
     }
 
@@ -540,8 +542,8 @@ Describe 'Get-SystemInstallPassResult: each catalog app in last-run.json' {
         @{ Case = 'an app the job removed first that the run only skipped'; Change = { param ($r) $e = $r.apps | Where-Object id -EQ 'Google.Chrome'; $e.status = 'Skipped'; $e.reason = 'already installed' }; Assertion = 'App installed: Google.Chrome'; Detail = 'last-run.json: Skipped (already installed); the job uninstalled it before the run (e2e/Remove-PreinstalledApps.ps1), so the run had to install it: see that step''s warnings' }
         @{ Case = 'Windows Terminal skipped as not applicable, although it applies as SYSTEM'; Change = { param ($r) $e = $r.apps | Where-Object id -EQ 'Microsoft.WindowsTerminal'; $e.reason = 'not applicable: winget cannot self-update Windows Terminal from a session Windows Terminal itself is hosting (issue #271)' }; Assertion = 'App installed: Microsoft.WindowsTerminal'; Detail = '; it applies to this PC as SYSTEM, so expected Installed, or Skipped (already provisioned for every user on this PC)' }
         @{ Case = 'an MSIX app skipped by winget list, not by its provisioning'; Change = { param ($r) ($r.apps | Where-Object id -EQ 'Microsoft.WindowsTerminal').reason = 'already installed' }; Assertion = 'App installed: Microsoft.WindowsTerminal'; Detail = 'last-run.json: Skipped (already installed); it applies to this PC as SYSTEM' }
-        @{ Case = 'an app that does not apply but was installed'; Change = { param ($r) $e = $r.apps | Where-Object id -EQ 'Dell.CommandUpdate.Universal'; $e.status = 'Installed'; $e.reason = $null }; Assertion = 'Not-applicable skip recorded: Dell.CommandUpdate.Universal'; Detail = 'last-run.json: Installed; expected Skipped (not applicable: Dell hardware only)' }
-        @{ Case = 'an app that does not apply, skipped for another reason'; Change = { param ($r) ($r.apps | Where-Object id -EQ 'Adobe.Acrobat.Reader.32-bit').reason = 'already installed' }; Assertion = 'Not-applicable skip recorded: Adobe.Acrobat.Reader.32-bit'; Detail = 'last-run.json: Skipped (already installed); expected Skipped (not applicable: ARM64 Windows only; other PCs get the 64-bit Reader)' }
+        @{ Case = 'an app that does not apply but was installed'; Change = { param ($r) $e = $r.apps | Where-Object id -EQ 'Dell.CommandUpdate.Universal'; $e.status = 'Installed'; $e.reason = $null }; Assertion = 'Not-applicable skip recorded: Dell.CommandUpdate.Universal'; Detail = 'last-run.json: Installed; expected Skipped (not applicable: Dell hardware with x64 Windows only; winget has no ARM64 installer for it)' }
+        @{ Case = 'an app that does not apply, skipped for another reason'; Change = { param ($r) ($r.apps | Where-Object id -EQ 'Adobe.Acrobat.Reader.32-bit').reason = 'already installed' }; Assertion = 'Not-applicable skip recorded: Adobe.Acrobat.Reader.32-bit'; Detail = 'last-run.json: Skipped (already installed); expected Skipped (not applicable: ARM64 and 32-bit Windows only; x64 PCs get the 64-bit Reader)' }
         @{ Case = 'an app recorded twice'; Change = { param ($r) $r.apps = @($r.apps) + @($r.apps | Where-Object id -EQ '7zip.7zip') }; Assertion = 'App installed: 7zip.7zip'; Detail = '2 entries in last-run.json: Installed; Installed' }
     ) {
         $record = Get-FixtureRecord

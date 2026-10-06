@@ -9,7 +9,8 @@
     "installed": 7,
     "skipped": 4,
     "deferred": 0,
-    "failed": 0
+    "failed": 0,
+    "notAttempted": 0
   },
   "apps": [
     {
@@ -45,7 +46,7 @@
     {
       "id": "Adobe.Acrobat.Reader.32-bit",
       "status": "Skipped",
-      "reason": "not applicable: ARM64 Windows only; other PCs get the 64-bit Reader",
+      "reason": "not applicable: ARM64 and 32-bit Windows only; x64 PCs get the 64-bit Reader",
       "code": null,
       "codeHex": null,
       "restartRequired": false,
@@ -95,7 +96,7 @@
     {
       "id": "Dell.CommandUpdate.Universal",
       "status": "Skipped",
-      "reason": "not applicable: Dell hardware only",
+      "reason": "not applicable: Dell hardware with x64 Windows only; winget has no ARM64 installer for it",
       "code": null,
       "codeHex": null,
       "restartRequired": false,
