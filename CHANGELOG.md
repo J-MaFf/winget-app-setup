@@ -340,7 +340,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     module from the cache and finds every app present. It runs the pin check first, without
     failing on it, and collects the engine's `WinGetCOM-*.log` files with the diagnostics. A probe
     on the hosted runner (Windows Server 2025, PowerShell 7.6) loaded the module as SYSTEM, listed
-    and installed a package with it; the new leg has not run yet.
+    and installed a package with it; the new leg passed on its first run.
 
 - The E2E install also runs from Windows PowerShell 5.1, in a second job,
   `e2e-install-windows-powershell` (review finding P3-40). Every step there uses

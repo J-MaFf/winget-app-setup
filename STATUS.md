@@ -301,8 +301,9 @@ module, found each file the pin requires to be signed valid from Microsoft Corpo
 installed packages and installed one with `-Scope System`. So winget-cli bug 5991
 (`Get-WinGetPackage` failing as SYSTEM) did not reproduce there. The module's native engine
 imports no Visual C++ runtime DLL, so it does not need that runtime. A fourth E2E leg,
-`e2e-install-system-winget-client`, runs the SYSTEM pass twice with the engine. It has not run
-yet, and no real PC has used the engine.
+`e2e-install-system-winget-client`, runs the SYSTEM pass twice with the engine. It passed on its
+first run on 2026-10-06 (both passes, all 53 checks, and the informational pin check printed OK);
+no real PC has used the engine yet.
 
 The same branch changes CI. Fork pull requests that leave `windows-tests.yml` alone no longer run
 on the self-hosted win-test runner, and `claude.yml` calls the shared Claude workflow at a pinned
@@ -563,7 +564,7 @@ every repository secret.
 
 | Issue | Description | Status |
 |-------|-------------|--------|
-| [#279](https://github.com/J-MaFf/winget-app-setup/issues/279) | E2E: App Installer 1.29.290.0 vs 1.26.510.0 AppX wedge, missing WindowsAppRuntime.1.8 | Fixed on PR #285: the installer's own `RUN_WAU=YES` caused it (see Current State). E2E green on the PowerShell 7, Windows PowerShell 5.1 and SYSTEM legs (the Microsoft.WinGet.Client leg has not run yet); close when #285 merges |
+| [#279](https://github.com/J-MaFf/winget-app-setup/issues/279) | E2E: App Installer 1.29.290.0 vs 1.26.510.0 AppX wedge, missing WindowsAppRuntime.1.8 | Fixed on PR #285: the installer's own `RUN_WAU=YES` caused it (see Current State). E2E green on the PowerShell 7, Windows PowerShell 5.1 and SYSTEM legs and the Microsoft.WinGet.Client leg; close when #285 merges |
 | [#282](https://github.com/J-MaFf/winget-app-setup/issues/282) | E2E: `windows-2022` runner fails every install immediately with "No applicable app licenses found" | Open; E2E stays on `windows-latest`, which is green on #285 |
 | [#283](https://github.com/J-MaFf/winget-app-setup/issues/283) | E2E: uncaught `Start-Process` error crashes first install pass right after WAU install on `windows-latest` | Not seen since PR #285 dropped `RUN_WAU=YES` (most likely WAU's PowerShell upgrade under the running installer); close when #285 merges unless it comes back |
 | [#284](https://github.com/J-MaFf/winget-app-setup/issues/284) | E2E install run failed (filed by the weekly run on `main` of 2026-09-28, run 36384683838: the #279 wedge, with winget failing to launch with `Access is denied`) | Fixed on PR #285 with #279; close when #285 merges |
@@ -657,11 +658,12 @@ every repository secret.
   the elevated relaunch's command line fits only when `%TEMP%` is about 145 characters or shorter
   (a longer one exits 4).
 - Microsoft.WinGet.Client engine (wgt-gq8.42): the first run of `e2e-install-system-winget-client`
-  has not happened yet, and it must pass both passes before the engine is used anywhere. Still to
-  check on Windows:
+  passed both passes on 2026-10-06 (run 37409393527: the module ready at its pin, then from the
+  cache; seven apps installed through `Install-WinGetPackage`; all 53 checks; the pin check matched
+  the Gallery and found every signed file Valid on the runner). Still to check on Windows:
   - `pwsh -File build/Set-WingetClientModulePin.ps1 -Check` on a Windows PC of your own, and that its
-    list of signed files matches the pin's `SignedFiles` (the session that wrote the engine could
-    not reach the Gallery, and signatures read `n/a` off Windows);
+    list of signed files matches the pin's `SignedFiles` (it matched on the hosted runner; repeat it
+    from your own network, and whenever the pin moves);
   - the engine's security checks with the real cmdlets. The Windows CI Pester run
     (`windows-tests.yml`) does not prove them: it mocks `Get-AuthenticodeSignature`,
     `Set-RestrictedDirectoryAcl` and the owner read (`Get-DirectoryAccessSummary`), so it shows

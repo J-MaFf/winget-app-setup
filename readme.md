@@ -766,8 +766,10 @@ What has been checked so far: a probe on a GitHub-hosted Windows Server 2025 run
 loaded the pinned module as SYSTEM under PowerShell 7.6, found each file the pin requires to be
 signed valid from Microsoft Corporation, listed installed packages with `Get-WinGetPackage`, and
 installed a package with `Install-WinGetPackage -Scope System`. The
-`e2e-install-system-winget-client` job has not run yet, and no real PC has used the engine. Try it
-on a pilot PC first.
+`e2e-install-system-winget-client` job passed on its first run (2026-10-06): as SYSTEM the module
+was downloaded and verified at its pin, every app that applies was installed through
+`Install-WinGetPackage`, and the second pass took the module from the cache and found every app
+there. No real PC has used the engine yet. Try it on a pilot PC first.
 
 ### Endpoint Central and other RMM tools
 
@@ -1578,7 +1580,7 @@ throwaway VMs by construction:
   not trust the engine's own detection. The second pass must take the module from the cache, find
   every app that applies already there, and not install the framework again. Before the passes, a
   step runs `build/Set-WingetClientModulePin.ps1 -Check` against the Gallery and saves its report;
-  it cannot fail the job. This job has not run yet.
+  it cannot fail the job. The job passed on its first run, on 2026-10-06.
 - **What it does:** the weekly run uses the one-liner above, against raw `main`, in both passes.
   Pull-request and dispatched runs install the checkout (the PR's merge commit, or the dispatched
   branch). The first pass pipes it to `iex` like the one-liner, and the second runs it with
