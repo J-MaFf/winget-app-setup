@@ -427,13 +427,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `condition`. It still expects every app with neither an `arch` list nor a condition installed,
   whatever the module says, and fails a new `Apps with no arch list or condition apply` assertion
   when the module skips one.
-- Every run as SYSTEM now prints an `Install engine:` line near its start, with or without the
-  opt-in `Microsoft.WinGet.Client` engine (see Added): by default
-  `Install engine: winget.exe (<path>).` (wgt-gq8.42). `last-run.json` gains `installEngine`
-  (`requested`, `used`, `module`, `fallbackReason`; `requested` and `used` are `Cli` in a run that
-  did not ask for the engine) and,
-  for each app, `installerCode` (the installer's own exit code when the engine ran an installer,
-  otherwise `null`). Both are additions, so `schemaVersion` stays 1.
+- A run as SYSTEM now prints an `Install engine:` line near its start once `winget.exe` or the
+  module is ready, with or without the opt-in `Microsoft.WinGet.Client` engine (see Added): by
+  default `Install engine: winget.exe (<path>).` (wgt-gq8.42). A run that stops with exit code 2
+  before that prints none, and a dry run that asked for the module prints a `[DRY-RUN]` line
+  instead. `last-run.json` gains `installEngine` (`requested`, `used`, `module`,
+  `fallbackReason`; `requested` and `used` are `Cli` in a run that did not ask for the engine)
+  and, for each app, `installerCode` (the installer's own exit code when the engine ran an
+  installer, otherwise `null`). Both are additions, so `schemaVersion` stays 1.
 - The generated `winget-app-install.ps1` leaves out the comments of the module and of the entry
   block, `build/fragments/tail.ps1` (work-order item 30, review finding P3-53): 439 KB and 11,111
   lines instead of 867 KB and 17,766, so every `irm | iex` run downloads about half as much.

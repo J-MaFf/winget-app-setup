@@ -482,7 +482,8 @@ work for SYSTEM (see [Running as SYSTEM](#running-as-system-rmm-tools-such-as-en
 When a run as SYSTEM installs with the opt-in Microsoft.WinGet.Client engine, step 3 is skipped,
 and a `winget.exe` that does not start is a warning instead of exit code 2 (see
 [Microsoft.WinGet.Client engine (opt-in)](#microsoftwingetclient-engine-opt-in)). The checks below
-then run against the engine (`Get-WinGetPackage`, `Get-WinGetVersion`), with the same tries.
+then run against the engine (`Get-WinGetPackage`, `Get-WinGetVersion`), with the same tries; the
+end of the next paragraph says what differs.
 
 A winget that cannot be started is not retried app by app either. If winget stops starting partway
 through the installs, the app that hit it fails with
@@ -496,7 +497,14 @@ winget stops the checks at once. Before, each app spent its own retries, twice, 
 about 24 minutes to fail. A `winget list` check that runs but fails (any exit code other than 0 or
 `0x8A150014`, no packages found) is not read as "not installed" either: the app fails with
 `winget list failed during the pre-install check with exit 0x...` (or `post-install check`) and
-gets its retry.
+gets its retry. With the Microsoft.WinGet.Client engine the reasons name it instead:
+`the WinGet client engine could not be started ...`,
+`not attempted: the WinGet client engine cannot be started on this machine (see above)` and
+`Get-WinGetPackage failed during the pre-install check with exit 0x...`. Its launch checks
+(`Get-WinGetVersion`) have a 60-second limit, so a run whose checks all hang ends about 3 minutes
+later than with `winget.exe` (about 9 minutes), and a module that cannot load, a `pwsh` that
+cannot start for a reason that does not clear on its own, or Group Policy (`0x8A15003A`) stops
+the checks at once.
 
 Some install results clear on their own, and are waited out instead of failing at once:
 
@@ -705,18 +713,22 @@ warned about and means `Cli`. A run that is not SYSTEM ignores the variable and 
   Each app is checked with `Get-WinGetPackage`, as before, then installed with
   `Install-WinGetPackage -Id <id> -Source winget -MatchOption Equals -Scope System -Mode Silent`.
   Its installer log goes to the logs folder under the usual `winget-install-<id>-<time>.log` name.
-  The transcript shows each call as a `> Install-WinGetPackage ...` line and its outcome as a
-  `WinGet client result: ...` line. Results map onto winget's own result codes, so deferral,
-  retries, the circuit breaker, restarts and failure reasons work as with `winget.exe`. The module
-  prints no restart message, so a restart after a successful install is recognised from the
-  installer's exit code 3010 (the MSI, WiX and Burn default). The module does not expose a
-  manifest's other restart codes, so only the pending-restart check notices those.
+  The transcript shows each call as a `> Install-WinGetPackage ...` line, the child `pwsh`'s own
+  short output, and its outcome as a `WinGet client result: ...` line (see [Logs](#logs)). Results
+  map onto winget's own result codes, so deferral, retries, the circuit breaker, restarts and
+  failure reasons work as with `winget.exe`. The module prints no restart message, so a restart
+  after a successful install is recognised from the installer's exit code 3010 (the MSI, WiX and
+  Burn default). The module does not expose a manifest's other restart codes, so only the
+  pending-restart check notices those.
 - **What it reports.** Near its start the run prints
   `WinGet client module: ready - Microsoft.WinGet.Client 1.29.380, SHA256 <hash>, ...` (downloaded
-  or from the cache) and an `Install engine:` line. A run as SYSTEM prints that line once winget or
-  the module is ready, with or without the opt-in: it names the engine, the folder of the engine's
-  own logs (`WinGetCOM-*.log`, in `WinGet\defaultState` under `%SystemRoot%\SystemTemp` or the
-  run's temp folder) and, after a fallback, why.
+  or from the cache) and an `Install engine:` line. A run as SYSTEM prints that line once
+  `winget.exe` or the module is ready, with or without the opt-in: it names the engine, the folder
+  of the engine's own logs (`WinGetCOM-*.log`, in `WinGet\defaultState` under
+  `%SystemRoot%\SystemTemp` or the run's temp folder) and, after a fallback, why. A run that stops
+  with exit code 2 before that (no `winget.exe` that starts and no ready module, or Group Policy
+  turns winget off) prints none, and a dry run that asked for the module prints its `[DRY-RUN]`
+  line instead.
   `last-run.json` records `installEngine` and, for each app, the installer's own exit code as
   `installerCode` (see [Run result](#run-result)).
 - **When it is not ready.** The run prints `WinGet client module: NOT READY - <reason>.` and installs
@@ -739,13 +751,16 @@ warned about and means `Cli`. A run that is not SYSTEM ignores the variable and 
 - **Moving the pin.** On a Windows PC, run
   `pwsh -File build/Set-WingetClientModulePin.ps1 -Version <version>`. It downloads the Gallery
   package twice (and once more with `Save-PSResource` where that exists), checks it against the
-  Gallery's own hash, lists every file with its SHA256 and signature, compares the engine with
-  Microsoft's build of it on nuget.org, and prints the new `Size` and `Sha256`. Add `-Write` to
-  write them into `Get-WingetClientModulePin`. When the package's layout changed, it fails and
-  says so; then update the pin's `Framework` and `SignedFiles` by hand. Then rebuild the installer
-  (`build/Build-WingetInstallScript.ps1`) and let the `e2e-install-system-winget-client` job pass
-  (see [End-to-end monitoring](#end-to-end-monitoring-e2e-tier-1)) before you move the Endpoint
-  Central pin. `-Check` exits 1 when the Gallery's package no longer matches the pin.
+  Gallery's own hash, lists every file with its SHA256 and signature, and prints the new `Size`
+  and `Sha256`. Add `-Write` to write them into `Get-WingetClientModulePin`. When the package's
+  layout changed, it fails and says so; then update the pin's `Framework` and `SignedFiles` by
+  hand. Its report also compares each `WindowsPackageManager.dll` with nuget.org's
+  `Microsoft.WindowsPackageManager.InProcCom` 1.29.380 build, whose hashes the script keeps. That
+  comparison never fails it, and for another version it reports a difference until those hashes
+  are updated. Then rebuild the installer (`build/Build-WingetInstallScript.ps1`) and let the
+  `e2e-install-system-winget-client` job pass (see
+  [End-to-end monitoring](#end-to-end-monitoring-e2e-tier-1)) before you move the Endpoint Central
+  pin. `-Check` exits 1 when the Gallery's package no longer matches the pin.
 
 What has been checked so far: a probe on a GitHub-hosted Windows Server 2025 runner (2026-10-06)
 loaded the pinned module as SYSTEM under PowerShell 7.6, found each file the pin requires to be
@@ -1160,8 +1175,10 @@ bar are left out, apart from the last progress line of each download, and a mess
 next to its spinner, such as `Waiting for another install/uninstall to complete...`, is logged once
 rather than at every redraw. The per-app `winget list` checks print nothing; the source update
 prints winget's output only when it fails. With the opt-in
-[Microsoft.WinGet.Client engine](#microsoftwingetclient-engine-opt-in), each install is a
-`> Install-WinGetPackage ...` line followed by one `WinGet client result: ...` line instead.
+[Microsoft.WinGet.Client engine](#microsoftwingetclient-engine-opt-in), each install is instead a
+`> Install-WinGetPackage ...` line, then the child `pwsh`'s own output, indented (at most its last
+20 lines, usually just `Microsoft.WinGet.Client Install <id>: Ok`), then one
+`WinGet client result: ...` line.
 
 The same folder also holds:
 

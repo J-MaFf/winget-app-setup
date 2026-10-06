@@ -563,7 +563,7 @@ every repository secret.
 
 | Issue | Description | Status |
 |-------|-------------|--------|
-| [#279](https://github.com/J-MaFf/winget-app-setup/issues/279) | E2E: App Installer 1.29.290.0 vs 1.26.510.0 AppX wedge, missing WindowsAppRuntime.1.8 | Fixed on PR #285: the installer's own `RUN_WAU=YES` caused it (see Current State). E2E green on all legs; close when #285 merges |
+| [#279](https://github.com/J-MaFf/winget-app-setup/issues/279) | E2E: App Installer 1.29.290.0 vs 1.26.510.0 AppX wedge, missing WindowsAppRuntime.1.8 | Fixed on PR #285: the installer's own `RUN_WAU=YES` caused it (see Current State). E2E green on the PowerShell 7, Windows PowerShell 5.1 and SYSTEM legs (the Microsoft.WinGet.Client leg has not run yet); close when #285 merges |
 | [#282](https://github.com/J-MaFf/winget-app-setup/issues/282) | E2E: `windows-2022` runner fails every install immediately with "No applicable app licenses found" | Open; E2E stays on `windows-latest`, which is green on #285 |
 | [#283](https://github.com/J-MaFf/winget-app-setup/issues/283) | E2E: uncaught `Start-Process` error crashes first install pass right after WAU install on `windows-latest` | Not seen since PR #285 dropped `RUN_WAU=YES` (most likely WAU's PowerShell upgrade under the running installer); close when #285 merges unless it comes back |
 | [#284](https://github.com/J-MaFf/winget-app-setup/issues/284) | E2E install run failed (filed by the weekly run on `main` of 2026-09-28, run 36384683838: the #279 wedge, with winget failing to launch with `Access is denied`) | Fixed on PR #285 with #279; close when #285 merges |
@@ -662,9 +662,16 @@ every repository secret.
   - `pwsh -File build/Set-WingetClientModulePin.ps1 -Check` on a Windows PC of your own, and that its
     list of signed files matches the pin's `SignedFiles` (the session that wrote the engine could
     not reach the Gallery, and signatures read `n/a` off Windows);
-  - the Windows CI Pester run (`windows-tests.yml`) with the real cmdlets: `Test-AuthenticodeSigner`
-    against the real `Get-AuthenticodeSignature`, `Set-RestrictedDirectoryAcl` on the cache and
-    staging folders, and the link and owner checks of `Remove-StaleWingetClientFolder`;
+  - the engine's security checks with the real cmdlets. The Windows CI Pester run
+    (`windows-tests.yml`) does not prove them: it mocks `Get-AuthenticodeSignature`,
+    `Set-RestrictedDirectoryAcl` and the owner read (`Get-DirectoryAccessSummary`), so it shows
+    only that the `Get-AuthenticodeSignature` mock binds to the real cmdlet's parameters, and that
+    `Remove-StaleWingetClientFolder` leaves a link (its one unmocked check, skipped where the
+    account cannot create a symbolic link). `e2e-install-system-winget-client` is the first run of
+    the real signature check on the module's files (`Test-AuthenticodeSigner`) and of the ACL on
+    the engine's cache and staging folders, since `Initialize-WingetClientModule` runs unmocked
+    there. The owner check runs only on an engine folder at least a day old, which a fresh runner
+    never has: check it by hand on a Windows PC;
   - under the Endpoint Central agent, which has no console, that the child `pwsh`'s
     `WINGET-CLIENT-RESULT` line arrives;
   - where the engine writes `WinGetCOM-*.log` as SYSTEM (`WinGet\defaultState` under
