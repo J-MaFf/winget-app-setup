@@ -26,7 +26,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   SecureString, until it registers the task through the Task Scheduler COM API
   (`Register-RealPcPlantTask`; S4U stores no password, and it never goes on a command line), then
   disposes of it. When the task cannot be registered or run, the SKIP row names the failing step and
-  its HRESULT on one line (e.g. 'registering the S4U task: Access is denied. (0x80070005)'), and a
+  its HRESULT on one line (e.g. 'registering the S4U task: Access is denied. (0x80070005)'; a failed
+  COM call reaches PowerShell as the exception .NET maps the code to, such as an
+  UnauthorizedAccessException, so the code is read from the text or that exception's HResult), and a
   task result of 0x80070569 says the user lacks 'Log on as a batch job'. The report's machine facts
   and `batch-logon-rights.txt` in the stage's evidence list who holds and who is denied that right
   (`secedit /export`, read-only, temporary file deleted, the temporary user's name and SID hidden).

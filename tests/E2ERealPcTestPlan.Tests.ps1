@@ -74,6 +74,42 @@ BeforeAll {
         param ([bool]$Exists = $false, [bool]$IsDirectory = $false, [bool]$IsEmpty = $true, [bool]$IsReparsePoint = $false, [bool]$ZipExists = $false, [bool]$LocalFolderInUse = $false)
         return [pscustomobject]@{ Exists = $Exists; IsDirectory = $IsDirectory; IsEmpty = $IsEmpty; IsReparsePoint = $IsReparsePoint; ZipExists = $ZipExists; LocalFolderInUse = $LocalFolderInUse }
     }
+
+    # The error a failed COM call (RegisterTaskDefinition) gives a script, built as PowerShell builds
+    # it: a MethodInvocationException ('ComMethodTargetInvocation') around a TargetInvocationException
+    # around the exception .NET maps the HRESULT to (UnauthorizedAccessException for 0x80070005,
+    # ArgumentException for 0x80070057; a COMException only for a code with no type of its own).
+    # PowerShell 7 (ComInvoker.cs) puts the COM error's description on the TargetInvocationException;
+    # Windows PowerShell's CLR puts it on the mapped exception and leaves .NET's generic text outside.
+    function New-RealPcComMethodError {
+        param (
+            [Parameter(Mandatory = $true)][int]$HResult,
+            [string]$Description = $null,
+            [switch]$WindowsPowerShell
+        )
+        $mapped = [System.Runtime.InteropServices.Marshal]::GetExceptionForHR($HResult)
+        if ($WindowsPowerShell) {
+            $inner = $mapped
+            if ($Description) {
+                if ($mapped -is [System.Runtime.InteropServices.COMException]) {
+                    $inner = [System.Runtime.InteropServices.COMException]::new($Description, $HResult)
+                }
+                else {
+                    $inner = [System.Activator]::CreateInstance($mapped.GetType(), [object[]]@($Description))
+                }
+            }
+            $invocation = [System.Reflection.TargetInvocationException]::new($inner)
+        }
+        elseif ($Description) {
+            $invocation = [System.Reflection.TargetInvocationException]::new($Description, $mapped)
+        }
+        else {
+            $invocation = [System.Reflection.TargetInvocationException]::new($mapped)
+        }
+        $inner = $invocation.InnerException
+        $outer = [System.Management.Automation.MethodInvocationException]::new(('Exception calling "RegisterTaskDefinition" with "7" argument(s): "{0}"' -f $inner.Message), $invocation)
+        return [System.Management.Automation.ErrorRecord]::new($outer, 'ComMethodTargetInvocation', 'NotSpecified', $null)
+    }
 }
 
 Describe 'Resolve-RealPcTestPlanStage' {
@@ -781,20 +817,42 @@ Describe 'Get-RealPcJunctionPlantResult' {
             $plant.Note | Should -Match 'ended with 0x80070569: the temporary user lacks Log on as a batch job'
         }
         (Get-RealPcJunctionPlantResult -UserCreated $true -TaskResult 1 -JunctionAfterTask $false).Note | Should -Not -Match 'batch job'
-        # The same code from the registration itself (it may check the password with a batch logon).
-        $registered = Get-RealPcJunctionPlantResult -UserCreated $true -TaskStep 'Register' -TaskProblem 'Logon failure: the user has not been granted the requested logon type at this computer. (0x80070569)'
-        $registered.Note | Should -Match 'registering the S4U task: .*\(0x80070569\)\); the temporary user lacks Log on as a batch job'
+        # The same code from Start-ScheduledTask (at registration a missing right is only
+        # SCHED_S_BATCH_LOGON_PROBLEM, a success code PowerShell's COM call drops).
+        $started = Get-RealPcJunctionPlantResult -UserCreated $true -TaskStep 'Start' -TaskProblem 'Logon failure: the user has not been granted the requested logon type at this computer. (0x80070569)'
+        $started.Note | Should -Match 'starting the S4U task: .*\(0x80070569\)\); the temporary user lacks Log on as a batch job'
     }
 }
 
 Describe 'ConvertTo-RealPcTaskProblem (wgt-gq8.62)' {
-    It 'Gives a COM error''s text once, without the .NET suffix, and its HRESULT' {
-        # What the Task Scheduler COM API throws through PowerShell: a MethodInvocationException
-        # around a COMException.
-        $com = [System.Runtime.InteropServices.COMException]::new('Access is denied. (Exception from HRESULT: 0x80070005 (E_ACCESSDENIED))', -2147024891)
-        $outer = [System.Management.Automation.MethodInvocationException]::new('Exception calling "RegisterTaskDefinition" with "7" argument(s): "Access is denied."', $com)
-        $record = [System.Management.Automation.ErrorRecord]::new($outer, 'ComMethodTargetInvocation', 'NotSpecified', $null)
-        ConvertTo-RealPcTaskProblem -ErrorRecord $record | Should -BeExactly 'Access is denied. (0x80070005)'
+    It 'Gives a failed COM call''s description and its HRESULT (<Name>)' -ForEach @(
+        @{ Name = 'PowerShell 7, E_ACCESSDENIED'; HResult = -2147024891; Description = "Access is denied.`r`n"; WindowsPowerShell = $false; Expected = 'Access is denied. (0x80070005)' }
+        @{ Name = 'PowerShell 7, E_INVALIDARG'; HResult = -2147024809; Description = "The parameter is incorrect.`r`n"; WindowsPowerShell = $false; Expected = 'The parameter is incorrect. (0x80070057)' }
+        @{ Name = 'Windows PowerShell, E_ACCESSDENIED'; HResult = -2147024891; Description = "Access is denied.`r`n"; WindowsPowerShell = $true; Expected = 'Access is denied. (0x80070005)' }
+        @{ Name = 'Windows PowerShell, E_INVALIDARG'; HResult = -2147024809; Description = "The parameter is incorrect.`r`n"; WindowsPowerShell = $true; Expected = 'The parameter is incorrect. (0x80070057)' }
+        @{ Name = 'Windows PowerShell, no description'; HResult = -2147024891; Description = 'Access is denied. (Exception from HRESULT: 0x80070005 (E_ACCESSDENIED))'; WindowsPowerShell = $true; Expected = 'Access is denied. (0x80070005)' }
+        @{ Name = 'a code with no exception type of its own'; HResult = -2147023511; Description = "Logon failure: the user has not been granted the requested logon type at this computer.`r`n"; WindowsPowerShell = $false; Expected = 'Logon failure: the user has not been granted the requested logon type at this computer. (0x80070569)' }
+    ) {
+        # wgt-gq8.62 review: .NET maps 0x80070005 to an UnauthorizedAccessException, not a
+        # COMException, so the code has to come from the text's suffix or the HResult.
+        $record = New-RealPcComMethodError -HResult $HResult -Description $Description -WindowsPowerShell:$WindowsPowerShell
+        $record.Exception.InnerException.InnerException -is [System.Runtime.InteropServices.ExternalException] | Should -Be ($HResult -eq -2147023511)
+        ConvertTo-RealPcTaskProblem -ErrorRecord $record | Should -BeExactly $Expected
+    }
+
+    It 'Gives the code once, from the mapped exception, when the COM error has no description' {
+        $problem = ConvertTo-RealPcTaskProblem -ErrorRecord (New-RealPcComMethodError -HResult -2147024891)
+        $problem | Should -Match '^\S.* \(0x80070005\)$'
+        ([regex]::Matches($problem, '0x80070005')).Count | Should -Be 1
+        $problem | Should -Not -Match "[`r`n]"
+    }
+
+    It 'Adds no code to an ordinary .NET error, nor a CLR code to a COM call''s' {
+        $plain = [System.Management.Automation.ErrorRecord]::new([System.ArgumentException]::new('bad value'), 'ArgumentException', 'InvalidArgument', $null)
+        ConvertTo-RealPcTaskProblem -ErrorRecord $plain | Should -BeExactly 'bad value'
+        $invocation = [System.Reflection.TargetInvocationException]::new([System.InvalidOperationException]::new('not now'))
+        $clr = [System.Management.Automation.ErrorRecord]::new([System.Management.Automation.MethodInvocationException]::new('outer', $invocation), 'ComMethodTargetInvocation', 'NotSpecified', $null)
+        ConvertTo-RealPcTaskProblem -ErrorRecord $clr | Should -BeExactly 'not now'
     }
 
     It 'Reads the HRESULT from a ScheduledTasks cmdlet''s error id and drops the CR/LF its text ends in' {
@@ -833,8 +891,12 @@ Describe 'Get-RealPcBatchLogonRightLine (wgt-gq8.62)' {
 
     It 'Hides the temporary user''s name and SID, whatever the case' {
         $lines = @(Get-RealPcBatchLogonRightLine -Text $script:SeceditExport -HideName @('wgtAbcdefgh', 'S-1-5-21-1-2-3-1001', ''))
-        $lines[0] | Should -BeExactly 'SeBatchLogonRight = *S-1-5-32-544,*S-1-5-32-551,*S-1-5-32-559,<temporary user>,*<temporary user>'
+        $lines[0] | Should -BeExactly 'SeBatchLogonRight = *S-1-5-32-544,*S-1-5-32-551,*S-1-5-32-559,[temporary user],*[temporary user]'
         ($lines -join "`n") | Should -Not -Match '(?i)wgtabcdefgh|S-1-5-21-1-2-3-1001'
+        # report.md puts the line in a table unescaped, where '<...>' would be an HTML tag and vanish.
+        ($lines -join "`n") | Should -Not -Match '[<>]'
+        $markdown = Format-RealPcReport -MachineFacts ([ordered]@{ 'Log on as a batch job (secedit)' = ($lines -join '; ') }) -StageResult @() -Markdown
+        ($markdown -join "`n") | Should -Match '\| Log on as a batch job \(secedit\) \| SeBatchLogonRight = .*\[temporary user\]'
     }
 
     It 'Reads a deny line too' {
@@ -864,7 +926,7 @@ Describe 'Read-RealPcBatchLogonRight (secedit, read-only)' {
 
     It 'Exports only the user rights, keeps the batch-logon lines and deletes its temporary file' {
         $lines = @(Read-RealPcBatchLogonRight -HideName @('wgtAbcdefgh'))
-        $lines | Should -Be @('SeBatchLogonRight = *S-1-5-32-544,<temporary user>', 'SeDenyBatchLogonRight = (not assigned)')
+        $lines | Should -Be @('SeBatchLogonRight = *S-1-5-32-544,[temporary user]', 'SeDenyBatchLogonRight = (not assigned)')
         $script:SeceditArguments[0..2] | Should -Be @('/export', '/areas', 'USER_RIGHTS')
         Should -Invoke Invoke-RealPcProcess -Times 1 -Exactly -ParameterFilter { $FilePath -like '*\System32\secedit.exe' }
         $exportPath = $script:SeceditArguments[[array]::IndexOf($script:SeceditArguments, '/cfg') + 1]
@@ -925,9 +987,19 @@ Describe 'Register-RealPcPlantTask (the COM call, with a stand-in service)' {
         $script:FakeAction.Arguments | Should -Be '/c mklink /J "a" "b"'
     }
 
-    It 'Lets a refused registration through to the caller' {
-        $script:FakeService.Folder | Add-Member -MemberType ScriptMethod -Name RegisterTaskDefinition -Value { throw [System.Runtime.InteropServices.COMException]::new('Access is denied.', -2147024891) } -Force
+    It 'Lets a refused registration through to the caller, with its HRESULT' {
+        # As PowerShell 7 gives a refused RegisterTaskDefinition: no COMException in it.
+        $script:RefusedRecord = New-RealPcComMethodError -HResult -2147024891 -Description "Access is denied.`r`n"
+        $script:FakeService.Folder | Add-Member -MemberType ScriptMethod -Name RegisterTaskDefinition -Value { throw $script:RefusedRecord } -Force
         { Register-RealPcPlantTask -TaskName 't' -UserId 'PC\wgtAbcdefgh' -Password $script:PlantSecret -Execute 'cmd.exe' } | Should -Throw '*Access is denied*'
+        $problem = $null
+        try {
+            Register-RealPcPlantTask -TaskName 't' -UserId 'PC\wgtAbcdefgh' -Password $script:PlantSecret -Execute 'cmd.exe'
+        }
+        catch {
+            $problem = ConvertTo-RealPcTaskProblem -ErrorRecord $_
+        }
+        $problem | Should -BeExactly 'Access is denied. (0x80070005)'
     }
 }
 
@@ -1032,10 +1104,11 @@ Describe 'Invoke-RealPcLinkGuardSetupStage (wiring, with every outside call mock
     }
 
     It 'Falls back to the admin, names the registration step, and still unregisters, when registration is refused' {
+        # As Windows PowerShell 5.1, which the harness starts under, gives a refused COM call.
+        $script:RefusedRecord = New-RealPcComMethodError -HResult -2147024891 -Description "Access is denied.`r`n" -WindowsPowerShell
         Mock Register-RealPcPlantTask {
             $script:PlantPassword = $Password
-            $com = [System.Runtime.InteropServices.COMException]::new('Access is denied. (Exception from HRESULT: 0x80070005 (E_ACCESSDENIED))', -2147024891)
-            throw [System.Management.Automation.MethodInvocationException]::new('Exception calling "RegisterTaskDefinition" with "7" argument(s): "Access is denied."', $com)
+            throw $script:RefusedRecord
         }
         $rows = @(Invoke-RealPcLinkGuardSetupStage -EvidenceFolder $script:LinkGuardEvidence)
 

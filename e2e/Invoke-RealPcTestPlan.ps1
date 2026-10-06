@@ -1692,7 +1692,8 @@ function Get-RealPcJunctionPlantResult {
             'Start' { $stepText = 'starting the S4U task' }
             'Wait' { $stepText = 'waiting for the S4U task' }
         }
-        # Registration may check the password with a batch logon, so it can meet 0x80070569 too.
+        # 0x80070569 can come from any step (in practice the start). At registration a missing right
+        # is only a success code (SCHED_S_BATCH_LOGON_PROBLEM), which a COM call from PowerShell drops.
         $hint = ''
         if ($TaskProblem -match '0x80070569') {
             $hint = '; the temporary user lacks Log on as a batch job (SeBatchLogonRight; the machine facts list who holds it)'
@@ -1721,9 +1722,15 @@ function Get-RealPcJunctionPlantResult {
     Why a step of the planting task failed, on one line: the error's own text, then its HRESULT,
     e.g. 'Access is denied. (0x80070005)'.
 .DESCRIPTION
-    The HRESULT comes from the error id the ScheduledTasks cmdlets give ('HRESULT 0x80070005,...'),
-    else from the innermost exception when it is a COM error (the Task Scheduler COM API's). The
-    text loses its CR/LF and the '(Exception from HRESULT: ...)' suffix .NET adds to a COM error.
+    A failed COM call (the Task Scheduler COM API's) reaches PowerShell as a
+    MethodInvocationException around a TargetInvocationException around the exception .NET maps
+    the HRESULT to: an UnauthorizedAccessException for 0x80070005, an ArgumentException for
+    0x80070057, a COMException only for a code .NET has no type for. The HRESULT comes from the
+    error id the ScheduledTasks cmdlets give ('HRESULT 0x80070005,...'), else from a
+    '(0x80070005 ...)' or '(Exception from HRESULT: 0x80070005 ...)' suffix in the text, else from
+    a COMException's code, else, for a COM call, from the innermost exception's HResult. The text
+    is the COM error's own description where PowerShell 7 puts it (on the
+    TargetInvocationException), else the innermost exception's, without its CR/LF and that suffix.
 .PARAMETER ErrorRecord
     The error the step threw.
 .RETURNS
@@ -1735,21 +1742,55 @@ function ConvertTo-RealPcTaskProblem {
         [System.Management.Automation.ErrorRecord]$ErrorRecord
     )
 
+    $chain = @()
     $exception = $ErrorRecord.Exception
-    while ($null -ne $exception.InnerException) {
+    while ($null -ne $exception) {
+        $chain += $exception
         $exception = $exception.InnerException
     }
-    # Windows PowerShell's COM text ends in '(Exception from HRESULT: 0x80070005 (E_ACCESSDENIED))',
-    # PowerShell 7's in '(0x80070005 (E_ACCESSDENIED))'; the code is added back once, below.
-    $message = [string]$exception.Message -replace '\s*\((Exception from HRESULT: )?0x[0-9A-Fa-f]{8}( \([A-Za-z0-9_]+\))?\)', ''
-    $message = ($message -replace '\s*[\r\n]+\s*', ' ').Trim()
+    $innermost = $chain[$chain.Count - 1]
+    $invocation = $null
+    foreach ($item in $chain) {
+        if ($item -is [System.Reflection.TargetInvocationException]) {
+            $invocation = $item
+            break
+        }
+    }
+    $text = [string]$innermost.Message
+    # Windows PowerShell leaves .NET's generic (localized) text on the TargetInvocationException.
+    $genericText = ([System.Reflection.TargetInvocationException]::new([System.Exception]$null)).Message
+    if ($null -ne $invocation -and [string]$invocation.Message -and [string]$invocation.Message -ne $genericText) {
+        $text = [string]$invocation.Message
+    }
+    # Windows PowerShell's COM text ends in '(Exception from HRESULT: 0x80070005 (E_ACCESSDENIED))'
+    # (its prefix localized), PowerShell 7's in '(0x80070005 (E_ACCESSDENIED))'; the code is added
+    # back once, below.
+    $suffix = '\s*\((?:[^():\r\n]+: )?0x([0-9A-Fa-f]{8})(?: \([A-Za-z0-9_]+\))?\)'
     $hresult = $null
     if ("$($ErrorRecord.FullyQualifiedErrorId)" -match 'HRESULT 0x([0-9A-Fa-f]{8})') {
         $hresult = [Convert]::ToInt64($Matches[1], 16)
     }
-    elseif ($exception -is [System.Runtime.InteropServices.ExternalException]) {
-        $hresult = [long]$exception.ErrorCode -band 0xFFFFFFFFL
+    if ($null -eq $hresult) {
+        $texts = @($text) + @(for ($index = $chain.Count - 1; $index -ge 0; $index--) { [string]$chain[$index].Message })
+        foreach ($candidate in $texts) {
+            $match = [regex]::Match($candidate, $suffix)
+            if ($match.Success) {
+                $hresult = [Convert]::ToInt64($match.Groups[1].Value, 16)
+                break
+            }
+        }
     }
+    if ($null -eq $hresult -and $innermost -is [System.Runtime.InteropServices.ExternalException]) {
+        $hresult = [long]$innermost.ErrorCode -band 0xFFFFFFFFL
+    }
+    if ($null -eq $hresult -and ($null -ne $invocation -or "$($ErrorRecord.FullyQualifiedErrorId)" -like 'ComMethod*')) {
+        # A failure code, but not one of the CLR's own (facility 0x13), which no COM server returns.
+        $code = [long]$innermost.HResult -band 0xFFFFFFFFL
+        if (($code -band 0x80000000L) -ne 0 -and ($code -band 0xFFFF0000L) -ne 0x80130000L) {
+            $hresult = $code
+        }
+    }
+    $message = ($text -replace $suffix, '' -replace '\s*[\r\n]+\s*', ' ').Trim()
     if ($null -ne $hresult) {
         return ('{0} (0x{1:X8})' -f $message, $hresult).Trim()
     }
@@ -1763,7 +1804,7 @@ function ConvertTo-RealPcTaskProblem {
 .PARAMETER Text
     The exported file's text.
 .PARAMETER HideName
-    Names and SIDs to show as '<temporary user>' (the temporary user's are never printed).
+    Names and SIDs to show as '[temporary user]' (the temporary user's are never printed).
 .RETURNS
     [string[]] 'SeBatchLogonRight = <holders>' and 'SeDenyBatchLogonRight = <holders>', with
     '(not assigned)' for a right nobody holds.
@@ -1789,7 +1830,7 @@ function Get-RealPcBatchLogonRightLine {
             $value = $match.Groups[1].Value
         }
         foreach ($name in @($HideName | Where-Object { $_ })) {
-            $value = [regex]::Replace($value, [regex]::Escape($name), '<temporary user>', [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+            $value = [regex]::Replace($value, [regex]::Escape($name), '[temporary user]', [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
         }
         $lines += ('{0} = {1}' -f $right, $value)
     }
@@ -3044,8 +3085,9 @@ function Get-RealPcSystem32Path {
     password (Microsoft Learn, 'Security Contexts for Tasks'). Register-ScheduledTask's -Principal
     set takes no password, so Task Scheduler refused it with 'Access is denied' (wgt-gq8.62). With
     TASK_LOGON_S4U the password only authorizes the registration; Task Scheduler stores none. It is
-    made plain text only for the RegisterTaskDefinition call and never goes on a command line (as
-    schtasks /RP would put it).
+    handed to Task Scheduler as plain text only in the RegisterTaskDefinition call (a managed copy
+    of that text stays in memory until it is collected), and is never written, logged or put on a
+    command line (as schtasks /RP would put it).
 .PARAMETER TaskName
     The task's name, in the root folder; an existing task of that name is replaced.
 .PARAMETER UserId
@@ -3124,7 +3166,7 @@ function New-RealPcAdminJunction {
     disagree on whether a Windows client gives the right to Performance Log Users, so a run whose
     task ends with 0x80070569 shows which it is.
 .PARAMETER HideName
-    Names and SIDs to show as '<temporary user>'.
+    Names and SIDs to show as '[temporary user]'.
 .RETURNS
     [string[]] the two lines, or one line saying why they could not be read.
 #>
