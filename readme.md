@@ -556,13 +556,15 @@ is not started leaves its app failed. The run ends with a `Time budget: USED UP`
 
 The budget does not stop a step that is already running. An app install ends within its own time
 limits (see the table under [Unattended runs](#unattended-runs): 30 minutes for one
-`winget install`), and waits for a busy Windows Installer no longer than the budget had left. An
-app the installer tries a second time within its install (when the app or its files were in use,
-for example) can take up to 30 minutes more. A Winget-AutoUpdate setup that started just before the deadline can take
-about as long, and the end-of-run winget check then takes up to about 4 minutes. So set the budget
-about 45 minutes below the RMM tool's limit. A run that is killed anyway leaves `last-run.json`
-with `exitCode` `null` (see [Run result](#run-result)). A dry run shows the budget but is not cut
-short.
+`winget install`), and waits for a busy Windows Installer no longer than the budget had left when
+the install started. A Winget-AutoUpdate setup that started just before the deadline can take about
+as long, and the end-of-run winget check then takes up to about 4 minutes. So set the budget about
+45 minutes below the RMM tool's limit. That covers one `winget install` still running at the
+deadline and the end-of-run check. It does not cover an app the installer runs `winget install` for
+again within its install (after an in-use error, a busy Windows Installer or a logged-off session,
+for example): each of those runs has its own 30-minute limit, so such an app can run more than 30
+minutes past the deadline. A run that is killed anyway leaves `last-run.json` with `exitCode`
+`null` (see [Run result](#run-result)). A dry run shows the budget but is not cut short.
 
 ### Running as SYSTEM (RMM tools such as Endpoint Central)
 
@@ -646,8 +648,8 @@ that installs the deferred apps for each user at sign-in (see the next section).
 success from the exit code: list any other code you accept, such as 3010, as a success code for the
 script. Exit code 8 means the apps are installed but automatic updates are not set up or will not
 run; decide whether your RMM job should count it as a success. Exit code 9 means the run's
-[time budget](#time-budget-for-rmm-jobs--maxruntimeminutes) ran out before every app was
-attempted. It is not a success: run the job again to finish.
+[time budget](#time-budget-for-rmm-jobs--maxruntimeminutes) ran out before every app, or the
+Winget-AutoUpdate setup, was attempted. It is not a success: run the job again to finish.
 
 ### Endpoint Central and other RMM tools
 
@@ -716,8 +718,9 @@ would (see [End-to-end monitoring](#end-to-end-monitoring-e2e-tier-1)).
    installed but automatic updates are not set up or will not run (for example, the Windows App
    Runtime that winget needs could not be installed), and such a PC needs a look. Shown as failed,
    those PCs stand out. Add 8 to the success codes if that is too noisy for you. Exit code 9 means
-   the time budget ran out before every app was attempted. Shown as failed, those PCs stand out
-   too: deploy the configuration to them again, and that run continues where this one stopped.
+   the time budget ran out before every app, or the Winget-AutoUpdate setup, was attempted. Shown
+   as failed, those PCs stand out too: deploy the configuration to them again, and that run
+   continues where this one stopped.
 4. **User phase:** User Configuration > Custom Script, run as the signed-in user. Script:
    `Invoke-WingetAppSetupUserPhase.ps1`. Success exit codes: `0,3010`. Frequency: Every Logon. A
    user who was signed in when the machine phase ran gets it at their next sign-in.
@@ -1540,11 +1543,12 @@ its elevated run can be a checked copy of one file. It has no build id.
 [Endpoint Central and other RMM tools](#endpoint-central-and-other-rmm-tools)). They are not
 generated and load nothing from the module or from beside them, because Endpoint Central pushes one
 file. So they repeat the few parts of the installer's logic they need: the machine-wide
-`winget.exe` order, the Windows App Runtime requirement, the at-logon trigger rule and the
-run-record trust check. `tests/RmmFleetHealth.Tests.ps1` and `tests/RmmWrapper.Tests.ps1` check
-those parts against the module's own functions (`Get-MachineWingetCandidate`,
-`Get-WindowsAppRuntimeStatus`, `Format-ScheduledTaskTrigger`, `Disable-WauLogonTrigger`,
-`Get-RunRecordTrustProblem`), so a change to one of them fails there until the scripts follow.
+`winget.exe` order, the Windows App Runtime requirement, the at-logon trigger rule, the run-record
+trust check and the format of the time budget's `-RunDeadlineUtc`. `tests/RmmFleetHealth.Tests.ps1`
+and `tests/RmmWrapper.Tests.ps1` check those parts against the module's own functions
+(`Get-MachineWingetCandidate`, `Get-WindowsAppRuntimeStatus`, `Format-ScheduledTaskTrigger`,
+`Disable-WauLogonTrigger`, `Get-RunRecordTrustProblem`, `Format-RunRecordTime`,
+`Resolve-InstallerRunBudget`), so a change to one of them fails there until the scripts follow.
 They also keep the helpers the scripts share identical, keep the two phases' pins equal, and check
 that every script stays ASCII-only Windows PowerShell 5.1 code. `build/Set-RmmInstallerPin.ps1`
 sets the pins.

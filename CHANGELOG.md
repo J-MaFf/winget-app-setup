@@ -234,10 +234,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   prints `Time budget: USED UP ...`, and exits with the new code 9 (precedence
   1 > 2 > 9 > 8 > 3010 > 0). A retry it does not start leaves its app failed. Apps that do not
   apply are still skipped, and per-user apps in a run for the whole PC still deferred. The waits for
-  a busy Windows Installer and for a Winget-AutoUpdate run in progress never last past the deadline,
-  and a dry run shows the budget without being cut short. The issue form and the readme explain exit
-  code 9, which is not a success code: the readme says to set the budget about 45 minutes below the
-  RMM tool's limit.
+  a busy Windows Installer last no longer than the budget had left when the step started, the wait
+  for a Winget-AutoUpdate run in progress never lasts past the deadline, and a dry run shows the
+  budget without being cut short. The issue form and the readme explain exit code 9, which is not a
+  success code: the readme says to set the budget about 45 minutes below the RMM tool's limit.
 
 - RMM runs get a non-interactive switch for the one-liner, one run at a time, a machine-readable
   result and log retention (review findings P3-41, P3-42).
@@ -354,10 +354,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `build/Build-WingetInstallScript.ps1` builds both scripts through one code path
   (`build/fragments/uninstall-head.ps1` and `uninstall-tail.ps1` around the module); every guard and
   `-Check` (byte compare, BOM, parse, comment removal, references, 5.1 parse safety) covers both,
-  each guard's report names its script, and nothing is written unless both pass. The uninstaller has
-  no build id. The pre-commit hook checks both staged files, and `.gitattributes` marks the
-  uninstaller `linguist-generated`. New `-UninstallerOutputPath`, defaulting to the folder of
-  `-OutputPath`. The module's only manifest consumers are now the `e2e/` scripts. Tests run the
+  each guard's report names its script (the comment check names the source file), and nothing is
+  written unless both pass. The uninstaller has no build id. The pre-commit hook checks both staged
+  files, and `.gitattributes` marks the uninstaller `linguist-generated`. New
+  `-UninstallerOutputPath`, defaulting to the folder of `-OutputPath`. The module's only manifest consumers are now the `e2e/` scripts. Tests run the
   uninstaller's real entry block in a child process (`New-TestUninstallerScript`,
   `Invoke-TestUninstallerScript`), and `tests/TestHarness.Tests.ps1` refuses a dot-sourced
   uninstaller as it does the installer. The Windows CI job's timeout goes from 15 to 25 minutes,

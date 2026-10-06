@@ -47,10 +47,10 @@ elevated (they mock `Test-IsAdmin`;
 the #232 regression tests had never run on the elevated CI runner). The Pester suite now also runs
 on Linux with no known failures (there were 113; the last one, the `Write-Table` console test, went
 with the full-width table fix), and no test dot-sources a generated script any more, so the unit
-tests exercise the module source being edited (EntryPoint, AppCatalog, Interactivity and Uninstall
-tests still read or run the generated files themselves, on purpose). The build's `-Check` now also
-rejects syntax that only PowerShell 7 parses and runs the undefined-reference guards on Linux and
-macOS, the pre-commit hook checks the staged files instead of the working tree, and a catalog name
+tests exercise the module source being edited (the EntryPoint, AppCatalog, Interactivity,
+Uninstall, PowerShell7Bootstrap, RmmWrapper and BuildGuards tests still read, run or build the
+generated files themselves, on purpose). The build's `-Check` now also rejects syntax that only
+PowerShell 7 parses and runs the undefined-reference guards on Linux and macOS, the pre-commit hook checks the staged files instead of the working tree, and a catalog name
 must match the whole package-id pattern, so trailing text such as `--override` can no longer reach
 winget. A `-WhatIf` dry run no longer changes the machine: its module, winget
 and source setup steps only check and print what a real run would fix, where they used
@@ -268,9 +268,10 @@ reads all of it (the `.RETURNS` keyword had made it ignore 202 of the 258 help b
 Four follow-ups from the review landed too. The uninstaller is now generated from the module as one
 self-contained file, like the installer (wgt-gq8.43): it needs nothing next to it, its elevated
 window runs a copy checked against the file's SHA256 instead of the files in place, and started
-through `irm | iex` it changes nothing and exits 5. The build makes both scripts through one code
-path, every guard and `-Check` cover both, and `-Check` now compares ordinally. A whole-run time
-budget (`-MaxRuntimeMinutes`, `WINGET_APP_SETUP_MAX_RUNTIME_MINUTES`, and the machine phase's own
+through `irm | iex` it changes nothing and stops with exit code 5 (`$LASTEXITCODE` 5 in an
+interactive console, which stays open). The build makes both scripts through one code path, every
+guard and `-Check` cover both, and `-Check` now compares ordinally. A whole-run time budget
+(`-MaxRuntimeMinutes`, `WINGET_APP_SETUP_MAX_RUNTIME_MINUTES`, and the machine phase's own
 `-MaxRuntimeMinutes`; wgt-gq8.41) lets an RMM job end with a report instead of being killed: once
 it is used up, no app install, retry or Winget-AutoUpdate setup starts, the apps left are
 `NotAttempted` (summary, `RESULT` line, `last-run.json`), and the run exits with the new code 9.
@@ -545,7 +546,7 @@ every repository secret.
 ## Natural Next Steps
 
 - After #285 merges: close #279, #283 and #284, and watch the next weekly E2E run against raw `main` (Mondays 06:00 UTC). A failed, timed-out or cancelled run creates or comments on the `E2E install run failed` issue.
-- After #285 merges and that E2E run passes: pin the Endpoint Central phases with `pwsh -File build/Set-RmmInstallerPin.ps1 -Commit <commit on main>`, commit the two `rmm/` scripts, upload them to the Script Repository, and try both phases, the health probe and the at-logon fix on a pilot PC (readme "Endpoint Central and other RMM tools"). Until the pins are set, both phases exit 5 and run nothing. Measure Endpoint Central's script time limit, set the machine phase's `-MaxRuntimeMinutes` about 45 minutes below it, and check that its Remarks show the output.
+- After #285 merges and that E2E run passes: pin the Endpoint Central phases with `pwsh -File build/Set-RmmInstallerPin.ps1 -Commit <commit on main>`, commit the two `rmm/` scripts, upload them to the Script Repository, and try both phases, the health probe and the at-logon fix on a pilot PC (readme "Endpoint Central and other RMM tools"). Until the pins are set, both phases exit 5 and run nothing. Check that Endpoint Central's Remarks show the output; its script time limit and the time budget are the `-MaxRuntimeMinutes` item below.
 - Make `e2e-install` a required status check for `main` (next to `pester`); it is green on #285. Every PR now gets an `e2e-install` status, and a skip counts as passed, so requiring it does not block docs-only PRs. Keep the job id `e2e-install` and give it no `name:`, or the required check stops matching. The Windows PowerShell 5.1 leg, `e2e-install-windows-powershell`, and the SYSTEM leg, `e2e-install-system`, are separate checks with the same `if:`; decide whether to require them too (each adds hosted-runner minutes per run, not wall-clock time, since the legs run in parallel).
 - Dispatch Windows Tests once with `hosted` ticked (`gh workflow run windows-tests.yml -f hosted=true`) to confirm the suite passes on GitHub-hosted `windows-latest`, the runner fork pull requests now use.
 - Before the first fork PR, turn on "Require approval for all external contributors" (Settings > Actions > General) and add a job-started hook on win-test (`ACTIONS_RUNNER_HOOK_JOB_STARTED`) that refuses fork pull request jobs, since a fork PR can rewrite `runs-on` in its copy of `windows-tests.yml`.
@@ -618,14 +619,16 @@ every repository secret.
   the console open and leave `$LASTEXITCODE` 5. No E2E leg runs the uninstaller yet; consider an
   uninstall pass (at least `-WhatIf`) and adding `winget-app-uninstall.ps1` to the E2E `changes`
   job's product paths.
-- Run the machine phase with `-MaxRuntimeMinutes` on a real PC as SYSTEM from Endpoint Central (its
-  32-bit agent, so the deadline crosses the Sysnative relaunch), measure its script time limit, and
-  check that a run whose budget runs out exits 9, that deploying the configuration again runs it
-  again, and that the next run finishes the apps it did not attempt. Also check an interactive run
-  with `WINGET_APP_SETUP_MAX_RUNTIME_MINUTES` set: its elevated window should print the same
-  deadline. Exit 9 is covered only by Linux child-process tests today; an E2E dispatch input that
-  runs one SYSTEM pass with a small budget would cover it. With a budget, the elevated relaunch's
-  command line fits only when `%TEMP%` is about 145 characters or shorter (a longer one exits 4).
+- Measure Endpoint Central's script time limit, set the machine phase's `-MaxRuntimeMinutes` about
+  45 minutes below it, and run it on a real PC as SYSTEM from Endpoint Central (its 32-bit agent, so
+  the deadline crosses the Sysnative relaunch). Check that a run whose budget runs out exits 9, that
+  deploying the configuration again runs it again, and that the next run finishes the apps it did
+  not attempt. Also check an interactive run with `WINGET_APP_SETUP_MAX_RUNTIME_MINUTES` set: its
+  elevated window should print the same deadline. Exit 9 is covered only by the Pester suite today
+  (mocked and child-process tests, on Linux and in Windows CI), not by an E2E or real-PC run; an
+  E2E dispatch input that runs one SYSTEM pass with a small budget would cover it. With a budget,
+  the elevated relaunch's command line fits only when `%TEMP%` is about 145 characters or shorter
+  (a longer one exits 4).
 - Validate the dormant DISM MSIX-provisioning path in `Install-PowerShellLatest` end-to-end on a real Windows 10 machine before PowerShell 7.7 GA makes it load-bearing (as of [#166](https://github.com/J-MaFf/winget-app-setup/issues/166)).
 - Cut a tagged release and move the `[Unreleased]` CHANGELOG entries under a versioned heading.
 
