@@ -1604,7 +1604,10 @@ the owner test plan needs a real desktop PC: cross-user elevation, a TightVNC vi
 
 - **What it does:** a first unattended install and its re-run, a run as SYSTEM through the Endpoint
   Central machine-phase wrapper, the `%ProgramData%` link guard (a temporary standard user plants a
-  junction there), a time-budget run that exits 9 and then finishes, the `-CollectDiagnostics`
+  junction there from a one-shot S4U task, registered with the user's random password, which stays
+  in memory and which Task Scheduler does not store; if the task cannot be registered or run, the
+  admin plants it and that row is SKIP with the failing step, and the report lists who holds "Log
+  on as a batch job"), a time-budget run that exits 9 and then finishes, the `-CollectDiagnostics`
   bundle, and the uninstaller (preview then real; it removes PowerShell 7 too). Each check is a
   PASS/FAIL/SKIP row with evidence, and each stage keeps its console output, transcripts,
   `last-run.json` and winget logs.

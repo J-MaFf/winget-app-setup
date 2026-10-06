@@ -17,10 +17,15 @@ name: Real-PC test plan self-test
 #   - The harness itself starts under Windows PowerShell 5.1 (shell: powershell), as on a fresh PC,
 #     and reads the catalog through the module in a child Windows PowerShell, so it needs no
 #     PowerShell 7 of its own.
-#   - The temporary standard user plants its junction from a scheduled task with an S4U logon (it is
-#     put in Performance Log Users for the batch-logon right). Where that task cannot run, the
-#     harness plants the junction as the admin and marks that row SKIP with the reason, which does
-#     not fail the run.
+#   - The temporary standard user plants its junction from a scheduled task with an S4U logon. An
+#     administrator may register such a task for another account only with that account's
+#     password, so the harness registers it through the Task Scheduler COM API with the user's
+#     random password, kept in memory only (S4U stores none; wgt-gq8.62). The launch needs 'Log on
+#     as a batch job': the user is put in Performance Log Users, which holds it on Windows Server,
+#     and the report's machine facts list who holds the right (secedit /export, read-only). Where
+#     the task cannot be registered or run, the harness plants the junction as the admin and marks
+#     that row SKIP with the failing step and its HRESULT, or 'lacks Log on as a batch job' for
+#     0x80070569; that does not fail the run.
 #   - The step's shell sets $ErrorActionPreference to Stop; the harness sets Continue for itself,
 #     so a child's stderr line cannot stop it.
 #

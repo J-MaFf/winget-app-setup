@@ -5,8 +5,8 @@
 # plan, the gate decision and the -ReportPath check (the refusal paths), the evaluation of each
 # stage's checks from fixture last-run.json files, transcripts and console output, the ACL/SDDL
 # comparison, the secret scans, the one-liner and module-query scripts, and the report and
-# exit-code logic. The entry point and two stages also run here with every changing and
-# Windows-only command mocked. Dot-sourcing the harness defines its functions and runs nothing
+# exit-code logic. The entry point, three stages and the S4U planting task's COM registration
+# (against a stand-in service) also run here with every changing and Windows-only command mocked. Dot-sourcing the harness defines its functions and runs nothing
 # (its main block is guarded), as the other e2e scripts are loaded by their tests.
 
 BeforeAll {
@@ -242,7 +242,7 @@ Describe 'Invoke-RealPcTestPlanMain (plan only and refusals change nothing)' {
         $script:ChangingCommands = @(
             'New-Item', 'Rename-Item', 'Remove-Item', 'Set-Content', 'Copy-Item', 'Move-Item', 'Start-Transcript',
             'New-LocalUser', 'Register-ScheduledTask', 'Start-ScheduledTask', 'Unregister-ScheduledTask',
-            'Invoke-RealPcProcess', 'Invoke-RealPcInstaller', 'Invoke-RealPcModuleJson', 'Remove-RealPcHarnessLeftover',
+            'Register-RealPcPlantTask', 'New-RealPcAdminJunction', 'Invoke-RealPcProcess', 'Invoke-RealPcInstaller', 'Invoke-RealPcModuleJson', 'Remove-RealPcHarnessLeftover',
             'Invoke-RealPcPreflightStage', 'Invoke-RealPcLinkGuardSetupStage', 'Invoke-RealPcFirstRunStage', 'Invoke-RealPcReRunStage',
             'Invoke-RealPcSystemStage', 'Invoke-RealPcTimeBudgetStage', 'Invoke-RealPcDiagnosticsStage', 'Invoke-RealPcUninstallerStage'
         )
@@ -260,6 +260,8 @@ Describe 'Invoke-RealPcTestPlanMain (plan only and refusals change nothing)' {
         Mock Register-ScheduledTask { }
         Mock Start-ScheduledTask { }
         Mock Unregister-ScheduledTask { }
+        Mock Register-RealPcPlantTask { }
+        Mock New-RealPcAdminJunction { }
         Mock Invoke-RealPcProcess { }
         Mock Invoke-RealPcInstaller { }
         Mock Invoke-RealPcModuleJson { }
@@ -752,12 +754,369 @@ Describe 'Get-RealPcJunctionPlantResult' {
 
     It 'Gives the real reason for the admin fallback' {
         (Get-RealPcJunctionPlantResult -UserCreated $false -UserProblem 'blocked by policy').Note | Should -Match 'could not be created \(blocked by policy\)'
-        (Get-RealPcJunctionPlantResult -UserCreated $true -TaskProblem 'Access is denied').Note | Should -Match 'could not be started \(Access is denied\)'
+        (Get-RealPcJunctionPlantResult -UserCreated $true -TaskStep 'Start' -TaskProblem 'The service is not running. (0x80070426)').Note | Should -Match 'failed \(starting the S4U task: The service is not running\. \(0x80070426\)\)'
         (Get-RealPcJunctionPlantResult -UserCreated $true -TaskResult $null).Note | Should -Match 'did not finish in time'
         $failed = Get-RealPcJunctionPlantResult -UserCreated $true -TaskResult -2147023511 -JunctionAfterTask $false
         $failed.PlantedBy | Should -Be 'Admin'
         $failed.Note | Should -Match 'ended with 0x80070569'
         (Get-RealPcJunctionPlantResult -UserCreated $true -TaskResult 0 -JunctionAfterTask $false).Note | Should -Match 'no junction appeared'
+    }
+
+    It 'Names the registration step, on one line, when registering the task failed (wgt-gq8.62)' {
+        # The runner's report said 'could not be started (Access is denied.' and broke the line there:
+        # the error's text ends in CR/LF, and it was registration, not the start, that was refused.
+        $plant = Get-RealPcJunctionPlantResult -UserCreated $true -TaskStep 'Register' -TaskProblem "Access is denied.`r`n (0x80070005)"
+        $plant.PlantedBy | Should -Be 'Admin'
+        $plant.Note | Should -Match 'registering the S4U task: Access is denied\. \(0x80070005\)'
+        $plant.Note | Should -Not -Match 'could not be started'
+        $plant.Note | Should -Not -Match "[`r`n]"
+        (Get-RealPcJunctionPlantResult -UserCreated $false -UserProblem "blocked`r`nby policy").Note | Should -Not -Match "[`r`n]"
+    }
+
+    It 'Says the temporary user lacks the batch-logon right when the task ended with 0x80070569' {
+        # ERROR_LOGON_TYPE_NOT_GRANTED, as LastTaskResult (unsigned) and as the signed exit code.
+        foreach ($result in @(2147943785, -2147023511)) {
+            $plant = Get-RealPcJunctionPlantResult -UserCreated $true -TaskResult $result -JunctionAfterTask $false
+            $plant.PlantedBy | Should -Be 'Admin'
+            $plant.Note | Should -Match 'ended with 0x80070569: the temporary user lacks Log on as a batch job'
+        }
+        (Get-RealPcJunctionPlantResult -UserCreated $true -TaskResult 1 -JunctionAfterTask $false).Note | Should -Not -Match 'batch job'
+        # The same code from the registration itself (it may check the password with a batch logon).
+        $registered = Get-RealPcJunctionPlantResult -UserCreated $true -TaskStep 'Register' -TaskProblem 'Logon failure: the user has not been granted the requested logon type at this computer. (0x80070569)'
+        $registered.Note | Should -Match 'registering the S4U task: .*\(0x80070569\)\); the temporary user lacks Log on as a batch job'
+    }
+}
+
+Describe 'ConvertTo-RealPcTaskProblem (wgt-gq8.62)' {
+    It 'Gives a COM error''s text once, without the .NET suffix, and its HRESULT' {
+        # What the Task Scheduler COM API throws through PowerShell: a MethodInvocationException
+        # around a COMException.
+        $com = [System.Runtime.InteropServices.COMException]::new('Access is denied. (Exception from HRESULT: 0x80070005 (E_ACCESSDENIED))', -2147024891)
+        $outer = [System.Management.Automation.MethodInvocationException]::new('Exception calling "RegisterTaskDefinition" with "7" argument(s): "Access is denied."', $com)
+        $record = [System.Management.Automation.ErrorRecord]::new($outer, 'ComMethodTargetInvocation', 'NotSpecified', $null)
+        ConvertTo-RealPcTaskProblem -ErrorRecord $record | Should -BeExactly 'Access is denied. (0x80070005)'
+    }
+
+    It 'Reads the HRESULT from a ScheduledTasks cmdlet''s error id and drops the CR/LF its text ends in' {
+        $record = [System.Management.Automation.ErrorRecord]::new([System.Exception]::new("Access is denied.`r`n"), 'HRESULT 0x80070005,Register-ScheduledTask', 'PermissionDenied', $null)
+        ConvertTo-RealPcTaskProblem -ErrorRecord $record | Should -BeExactly 'Access is denied. (0x80070005)'
+    }
+
+    It 'Gives only the text when the error has no HRESULT' {
+        $record = [System.Management.Automation.ErrorRecord]::new([System.InvalidOperationException]::new('something else'), 'Other', 'InvalidOperation', $null)
+        ConvertTo-RealPcTaskProblem -ErrorRecord $record | Should -BeExactly 'something else'
+    }
+}
+
+Describe 'Get-RealPcBatchLogonRightLine (wgt-gq8.62)' {
+    BeforeAll {
+        $script:SeceditExport = @(
+            '[Unicode]'
+            'Unicode=yes'
+            '[Privilege Rights]'
+            'SeNetworkLogonRight = *S-1-1-0,*S-1-5-32-544,*S-1-5-32-545,*S-1-5-32-551'
+            'SeDenyBatchLogonRightX = not this one'
+            'SeBatchLogonRight = *S-1-5-32-544,*S-1-5-32-551,*S-1-5-32-559,WGTabcdefgh,*S-1-5-21-1-2-3-1001'
+            'SeDenyInteractiveLogonRight = Guest'
+            '[Version]'
+            'signature="$CHICAGO$"'
+        ) -join "`r`n"
+    }
+
+    It 'Keeps only the batch-logon lines, and says when a right is not assigned' {
+        $lines = @(Get-RealPcBatchLogonRightLine -Text $script:SeceditExport)
+        $lines.Count | Should -Be 2
+        $lines[0] | Should -BeExactly 'SeBatchLogonRight = *S-1-5-32-544,*S-1-5-32-551,*S-1-5-32-559,WGTabcdefgh,*S-1-5-21-1-2-3-1001'
+        $lines[1] | Should -BeExactly 'SeDenyBatchLogonRight = (not assigned)'
+        ($lines -join "`n") | Should -Not -Match 'SeNetworkLogonRight|Guest'
+    }
+
+    It 'Hides the temporary user''s name and SID, whatever the case' {
+        $lines = @(Get-RealPcBatchLogonRightLine -Text $script:SeceditExport -HideName @('wgtAbcdefgh', 'S-1-5-21-1-2-3-1001', ''))
+        $lines[0] | Should -BeExactly 'SeBatchLogonRight = *S-1-5-32-544,*S-1-5-32-551,*S-1-5-32-559,<temporary user>,*<temporary user>'
+        ($lines -join "`n") | Should -Not -Match '(?i)wgtabcdefgh|S-1-5-21-1-2-3-1001'
+    }
+
+    It 'Reads a deny line too' {
+        $lines = @(Get-RealPcBatchLogonRightLine -Text "SeDenyBatchLogonRight = *S-1-5-32-546`r`nSeBatchLogonRight = *S-1-5-32-544")
+        $lines | Should -Be @('SeBatchLogonRight = *S-1-5-32-544', 'SeDenyBatchLogonRight = *S-1-5-32-546')
+    }
+}
+
+Describe 'Read-RealPcBatchLogonRight (secedit, read-only)' {
+    BeforeEach {
+        $script:SavedTmpDir = $env:TMPDIR
+        $env:TMPDIR = Join-Path $TestDrive ('tmp-' + [guid]::NewGuid().ToString('N'))
+        $null = New-Item -ItemType Directory -Path $env:TMPDIR -Force
+        $script:SeceditArguments = @()
+        Mock Invoke-RealPcProcess {
+            $script:SeceditArguments = @($ArgumentList)
+            $exportPath = $ArgumentList[[array]::IndexOf($ArgumentList, '/cfg') + 1]
+            # secedit writes UTF-16 with a byte-order mark.
+            [System.IO.File]::WriteAllText($exportPath, "[Privilege Rights]`r`nSeBatchLogonRight = *S-1-5-32-544,wgtAbcdefgh`r`n", [System.Text.Encoding]::Unicode)
+            return [pscustomobject]@{ ExitCode = 0; Output = @() }
+        }
+    }
+
+    AfterEach {
+        $env:TMPDIR = $script:SavedTmpDir
+    }
+
+    It 'Exports only the user rights, keeps the batch-logon lines and deletes its temporary file' {
+        $lines = @(Read-RealPcBatchLogonRight -HideName @('wgtAbcdefgh'))
+        $lines | Should -Be @('SeBatchLogonRight = *S-1-5-32-544,<temporary user>', 'SeDenyBatchLogonRight = (not assigned)')
+        $script:SeceditArguments[0..2] | Should -Be @('/export', '/areas', 'USER_RIGHTS')
+        Should -Invoke Invoke-RealPcProcess -Times 1 -Exactly -ParameterFilter { $FilePath -like '*\System32\secedit.exe' }
+        $exportPath = $script:SeceditArguments[[array]::IndexOf($script:SeceditArguments, '/cfg') + 1]
+        Test-Path -LiteralPath (Split-Path -Parent $exportPath) | Should -BeFalse
+    }
+
+    It 'Says why when secedit fails, and still deletes the folder' {
+        Mock Invoke-RealPcProcess {
+            $script:SeceditArguments = @($ArgumentList)
+            return [pscustomobject]@{ ExitCode = 1; Output = @() }
+        }
+        @(Read-RealPcBatchLogonRight) | Should -Be @('secedit /export could not read the user rights (exit 1)')
+        $exportPath = $script:SeceditArguments[[array]::IndexOf($script:SeceditArguments, '/cfg') + 1]
+        Test-Path -LiteralPath (Split-Path -Parent $exportPath) | Should -BeFalse
+    }
+}
+
+Describe 'Register-RealPcPlantTask (the COM call, with a stand-in service)' {
+    BeforeEach {
+        $script:Registered = $null
+        $script:FakeAction = [pscustomobject]@{ Path = ''; Arguments = '' }
+        $actions = [pscustomobject]@{}
+        $actions | Add-Member -MemberType ScriptMethod -Name Create -Value { param($type) $script:FakeActionType = $type; return $script:FakeAction }
+        $script:FakeDefinition = [pscustomobject]@{
+            RegistrationInfo = [pscustomobject]@{ Description = '' }
+            Principal        = [pscustomobject]@{ LogonType = 3; RunLevel = 1 }
+            Settings         = [pscustomobject]@{ ExecutionTimeLimit = 'PT72H'; DisallowStartIfOnBatteries = $true; StopIfGoingOnBatteries = $true }
+            Actions          = $actions
+        }
+        $folder = [pscustomobject]@{}
+        $folder | Add-Member -MemberType ScriptMethod -Name RegisterTaskDefinition -Value {
+            param($Path, $Definition, $Flags, $UserId, $Password, $LogonType, $Sddl)
+            $script:Registered = [pscustomobject]@{ Path = $Path; Definition = $Definition; Flags = $Flags; UserId = $UserId; Password = $Password; LogonType = $LogonType; Sddl = $Sddl }
+        }
+        $script:FakeService = [pscustomobject]@{ Folder = $folder }
+        $script:FakeService | Add-Member -MemberType ScriptMethod -Name NewTask -Value { param($flags) return $script:FakeDefinition }
+        $script:FakeService | Add-Member -MemberType ScriptMethod -Name GetFolder -Value { param($path) $script:FolderPath = $path; return $this.Folder }
+        Mock New-RealPcTaskService { return $script:FakeService }
+        $script:PlantSecret = ConvertTo-SecureString -String 'Pw3456789abcdefghjkmAa9!' -AsPlainText -Force
+    }
+
+    It 'Registers an S4U, limited task for the user, with its password, in the root folder' {
+        Register-RealPcPlantTask -TaskName 'winget-app-setup-plantjunction' -UserId 'PC\wgtAbcdefgh' -Password $script:PlantSecret -Execute 'C:\Windows\System32\cmd.exe' -Argument '/c mklink /J "a" "b"'
+        $script:FolderPath | Should -Be '\'
+        $script:Registered.Path | Should -Be 'winget-app-setup-plantjunction'
+        $script:Registered.Flags | Should -Be 6
+        $script:Registered.UserId | Should -Be 'PC\wgtAbcdefgh'
+        $script:Registered.Password | Should -BeExactly 'Pw3456789abcdefghjkmAa9!'
+        $script:Registered.LogonType | Should -Be 2
+        $script:Registered.Sddl | Should -BeNullOrEmpty
+        $script:Registered.Definition.Principal.LogonType | Should -Be 2
+        $script:Registered.Definition.Principal.RunLevel | Should -Be 0
+        $script:Registered.Definition.Settings.ExecutionTimeLimit | Should -Be 'PT5M'
+        $script:Registered.Definition.Settings.DisallowStartIfOnBatteries | Should -BeFalse
+        $script:Registered.Definition.Settings.StopIfGoingOnBatteries | Should -BeFalse
+        $script:FakeActionType | Should -Be 0
+        $script:FakeAction.Path | Should -Be 'C:\Windows\System32\cmd.exe'
+        $script:FakeAction.Arguments | Should -Be '/c mklink /J "a" "b"'
+    }
+
+    It 'Lets a refused registration through to the caller' {
+        $script:FakeService.Folder | Add-Member -MemberType ScriptMethod -Name RegisterTaskDefinition -Value { throw [System.Runtime.InteropServices.COMException]::new('Access is denied.', -2147024891) } -Force
+        { Register-RealPcPlantTask -TaskName 't' -UserId 'PC\wgtAbcdefgh' -Password $script:PlantSecret -Execute 'cmd.exe' } | Should -Throw '*Access is denied*'
+    }
+}
+
+Describe 'Invoke-RealPcLinkGuardSetupStage (wiring, with every outside call mocked)' {
+    BeforeEach {
+        $script:SavedPublic = $env:PUBLIC
+        $script:SavedProgramData = $env:ProgramData
+        $env:PUBLIC = Join-Path $TestDrive ('public-' + [guid]::NewGuid().ToString('N'))
+        $env:ProgramData = Join-Path $TestDrive ('programdata-' + [guid]::NewGuid().ToString('N'))
+        $null = New-Item -ItemType Directory -Path $env:PUBLIC -Force
+        $null = New-Item -ItemType Directory -Path $env:ProgramData -Force
+        $script:LinkGuardEvidence = Join-Path $TestDrive ('evidence-' + [guid]::NewGuid().ToString('N'))
+        $null = New-Item -ItemType Directory -Path $script:LinkGuardEvidence -Force
+        $script:RealPcOptions = [pscustomobject]@{ UseOneLiner = $false; Branch = 'b'; ResetProgramData = $false }
+        $script:LinkGuard = [pscustomobject]@{ VictimFolder = $null; VictimBefore = @(); TempUser = $null; TempUserName = $null; PlantedBy = 'Admin'; PlantNote = ''; Planted = $false }
+        $script:MachineFacts = [ordered]@{ OS = 'Windows 11' }
+        $script:JunctionThere = $false
+        $script:UserPasswordText = $null
+        $script:PlantPasswordText = $null
+        $script:PlantPassword = $null
+
+        # A known name and password, so the test can look for them in everything the stage reports.
+        Mock New-RealPcRandomSecret {
+            if ($Length -eq 8) {
+                return 'Abcdefgh'
+            }
+            return 'Pw3456789abcdefghjkm'
+        }
+        Mock Get-RealPcAclSnapshotTree { return @([pscustomobject]@{ Path = $Path; Owner = 'S-1-5-32-544'; Sddl = 'D:X' }) }
+        Mock New-LocalUser {
+            $script:UserPasswordText = [System.Net.NetworkCredential]::new('', $Password).Password
+            return [pscustomobject]@{ Name = $Name; SID = [pscustomobject]@{ Value = 'S-1-5-21-1-2-3-1001' } }
+        }
+        Mock Add-RealPcUserToGroup { return $null }
+        Mock Register-RealPcPlantTask {
+            $script:PlantPassword = $Password
+            $script:PlantPasswordText = [System.Net.NetworkCredential]::new('', $Password).Password
+        }
+        Mock Start-ScheduledTask {
+            # Has the password been disposed of by the time the task starts?
+            $script:DisposedBeforeStart = $true
+            try {
+                $null = $script:PlantPassword.Copy()
+                $script:DisposedBeforeStart = $false
+            }
+            catch {
+            }
+            $script:JunctionThere = $true
+        }
+        Mock Wait-RealPcScheduledTask { return 0 }
+        Mock Unregister-ScheduledTask { }
+        Mock Test-RealPcReparsePoint { return $script:JunctionThere }
+        Mock New-RealPcAdminJunction { $script:JunctionThere = $true }
+        Mock Read-RealPcBatchLogonRight { return @('SeBatchLogonRight = *S-1-5-32-544,*S-1-5-32-551,*S-1-5-32-559', 'SeDenyBatchLogonRight = (not assigned)') }
+    }
+
+    AfterEach {
+        $env:PUBLIC = $script:SavedPublic
+        $env:ProgramData = $script:SavedProgramData
+    }
+
+    It 'Registers the S4U task with the user''s own password, kept until then, and credits the standard user' {
+        $script:DisposedBeforeStart = $null
+        $rows = @(Invoke-RealPcLinkGuardSetupStage -EvidenceFolder $script:LinkGuardEvidence)
+
+        Should -Invoke Register-RealPcPlantTask -Times 1 -Exactly -ParameterFilter {
+            $Password -is [securestring] -and $UserId -like '*\wgt*' -and $TaskName -eq 'winget-app-setup-plantjunction' -and $Argument -like '/c mklink /J *'
+        }
+        $script:PlantPasswordText | Should -BeExactly 'Pw3456789abcdefghjkmAa9!'
+        $script:PlantPasswordText | Should -BeExactly $script:UserPasswordText
+        # Disposed of once the task is registered, before it starts.
+        $script:DisposedBeforeStart | Should -BeTrue
+        { $null = $script:PlantPassword.Copy() } | Should -Throw '*disposed*'
+        Should -Invoke Start-ScheduledTask -Times 1 -Exactly
+        Should -Invoke Unregister-ScheduledTask -Times 1 -Exactly -ParameterFilter { $TaskName -eq 'winget-app-setup-plantjunction' }
+        Should -Invoke New-RealPcAdminJunction -Times 0 -Exactly
+        $script:LinkGuard.PlantedBy | Should -Be 'StandardUser'
+        $script:LinkGuard.Planted | Should -BeTrue
+        ($rows | Where-Object { $_.Check -eq 'Planted the junction at the ProgramData folder' }).Result | Should -Be 'PASS'
+    }
+
+    It 'Records who holds the batch-logon right, with the temporary user hidden, in the evidence and the machine facts' {
+        $null = Invoke-RealPcLinkGuardSetupStage -EvidenceFolder $script:LinkGuardEvidence
+        Should -Invoke Read-RealPcBatchLogonRight -Times 1 -Exactly -ParameterFilter { $HideName -contains 'wgtAbcdefgh' -and $HideName -contains 'S-1-5-21-1-2-3-1001' }
+        $script:MachineFacts['Log on as a batch job (secedit)'] | Should -Be 'SeBatchLogonRight = *S-1-5-32-544,*S-1-5-32-551,*S-1-5-32-559; SeDenyBatchLogonRight = (not assigned)'
+        [System.IO.File]::ReadAllText((Join-Path $script:LinkGuardEvidence 'batch-logon-rights.txt')) | Should -Match 'SeDenyBatchLogonRight = \(not assigned\)'
+    }
+
+    It 'Puts neither the password nor the user''s name in any row, the report or the evidence' {
+        $rows = @(Invoke-RealPcLinkGuardSetupStage -EvidenceFolder $script:LinkGuardEvidence)
+        $stage = [pscustomobject]@{ Name = 'LinkGuardSetup'; Number = 1; Item = '11'; DurationSeconds = 2; Rows = $rows }
+        $text = @(
+            @($rows | ForEach-Object { '{0} {1}' -f $_.Check, $_.Detail })
+            $script:LinkGuard.PlantNote
+            (Format-RealPcReport -MachineFacts $script:MachineFacts -StageResult @($stage) -Markdown)
+            (Format-RealPcReport -MachineFacts $script:MachineFacts -StageResult @($stage))
+            @(Get-ChildItem -LiteralPath $script:LinkGuardEvidence -File -Recurse | ForEach-Object { [System.IO.File]::ReadAllText($_.FullName) })
+        ) -join "`n"
+        $text | Should -Not -BeNullOrEmpty
+        $text | Should -Not -Match 'Pw3456789abcdefghjkm'
+        $text | Should -Not -Match '(?i)wgtAbcdefgh'
+    }
+
+    It 'Falls back to the admin, names the registration step, and still unregisters, when registration is refused' {
+        Mock Register-RealPcPlantTask {
+            $script:PlantPassword = $Password
+            $com = [System.Runtime.InteropServices.COMException]::new('Access is denied. (Exception from HRESULT: 0x80070005 (E_ACCESSDENIED))', -2147024891)
+            throw [System.Management.Automation.MethodInvocationException]::new('Exception calling "RegisterTaskDefinition" with "7" argument(s): "Access is denied."', $com)
+        }
+        $rows = @(Invoke-RealPcLinkGuardSetupStage -EvidenceFolder $script:LinkGuardEvidence)
+
+        Should -Invoke Start-ScheduledTask -Times 0 -Exactly
+        Should -Invoke Unregister-ScheduledTask -Times 1 -Exactly -ParameterFilter { $TaskName -eq 'winget-app-setup-plantjunction' }
+        Should -Invoke New-RealPcAdminJunction -Times 1 -Exactly
+        { $null = $script:PlantPassword.Copy() } | Should -Throw '*disposed*'
+        $script:LinkGuard.PlantedBy | Should -Be 'Admin'
+        $script:LinkGuard.PlantNote | Should -Match 'registering the S4U task: Access is denied\. \(0x80070005\)'
+        $script:LinkGuard.PlantNote | Should -Not -Match "[`r`n]"
+        $script:LinkGuard.PlantNote | Should -Not -Match 'could not be started'
+        # The user is still recorded, so the cleanup removes it.
+        $script:LinkGuard.TempUser | Should -Be 'wgtAbcdefgh'
+        $planted = $rows | Where-Object { $_.Check -eq 'Planted the junction at the ProgramData folder' }
+        $planted.Result | Should -Be 'PASS'
+        $planted.Detail | Should -Match 'registering the S4U task'
+    }
+
+    It 'Says the user lacks the batch-logon right when its task ends with 0x80070569' {
+        Mock Start-ScheduledTask { }
+        Mock Wait-RealPcScheduledTask { return -2147023511 }
+        $null = Invoke-RealPcLinkGuardSetupStage -EvidenceFolder $script:LinkGuardEvidence
+        $script:LinkGuard.PlantedBy | Should -Be 'Admin'
+        $script:LinkGuard.PlantNote | Should -Match 'lacks Log on as a batch job'
+        Should -Invoke New-RealPcAdminJunction -Times 1 -Exactly
+        Should -Invoke Unregister-ScheduledTask -Times 1 -Exactly
+    }
+
+    It 'Disposes of the password when the user cannot be created, and registers no task' {
+        Mock New-LocalUser {
+            $script:PlantPassword = $Password
+            throw 'blocked by policy'
+        }
+        $null = Invoke-RealPcLinkGuardSetupStage -EvidenceFolder $script:LinkGuardEvidence
+        { $null = $script:PlantPassword.Copy() } | Should -Throw '*disposed*'
+        Should -Invoke Register-RealPcPlantTask -Times 0 -Exactly
+        $script:LinkGuard.PlantNote | Should -Match 'could not be created \(blocked by policy\)'
+    }
+}
+
+Describe 'Remove-RealPcHarnessLeftover (the always-run cleanup)' {
+    BeforeEach {
+        $script:LinkGuard = [pscustomobject]@{ VictimFolder = $null; VictimBefore = @(); TempUser = $null; TempUserName = $null; PlantedBy = 'Admin'; PlantNote = ''; Planted = $false }
+        $script:PlantTaskRegistered = $true
+        Mock Get-ScheduledTask {
+            if ($script:PlantTaskRegistered -and $TaskName -contains 'winget-app-setup-plantjunction') {
+                return [pscustomobject]@{ TaskName = 'winget-app-setup-plantjunction' }
+            }
+        }
+        Mock Stop-ScheduledTask { }
+        Mock Unregister-ScheduledTask { $script:PlantTaskRegistered = $false }
+    }
+
+    It 'Unregisters a planting task the stage left registered' {
+        $rows = @(Remove-RealPcHarnessLeftover)
+        Should -Invoke Unregister-ScheduledTask -Times 1 -Exactly -ParameterFilter { $TaskName -contains 'winget-app-setup-plantjunction' }
+        ($rows | Where-Object { $_.Check -eq 'Removed the leftover scheduled task winget-app-setup-plantjunction' }).Result | Should -Be 'PASS'
+    }
+}
+
+Describe 'The password reaches only New-LocalUser and Register-RealPcPlantTask (static)' {
+    It 'Never hands it to anything else, and never runs schtasks or Register-ScheduledTask for the plant' {
+        $ast = [System.Management.Automation.Language.Parser]::ParseFile($script:HarnessPath, [ref]$null, [ref]$null)
+        $stage = $ast.Find({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Invoke-RealPcLinkGuardSetupStage' }, $true)
+        $stage | Should -Not -BeNullOrEmpty
+        $uses = @($stage.FindAll({ param($node) $node -is [System.Management.Automation.Language.VariableExpressionAst] -and $node.VariablePath.UserPath -eq 'secure' }, $true))
+        $uses.Count | Should -BeGreaterThan 2
+        $receivers = @(foreach ($use in $uses) {
+                $parent = $use.Parent
+                while ($null -ne $parent -and $parent -isnot [System.Management.Automation.Language.CommandAst] -and $parent -isnot [System.Management.Automation.Language.StatementAst]) {
+                    $parent = $parent.Parent
+                }
+                if ($parent -is [System.Management.Automation.Language.CommandAst]) {
+                    $parent.GetCommandName()
+                }
+            })
+        @($receivers | Sort-Object -Unique) | Should -Be @('New-LocalUser', 'Register-RealPcPlantTask')
+        $stageCommands = @($stage.FindAll({ param($node) $node -is [System.Management.Automation.Language.CommandAst] }, $true) | ForEach-Object { $_.GetCommandName() })
+        $stageCommands | Should -Not -Contain 'Register-ScheduledTask'
+        $allCommands = @($ast.FindAll({ param($node) $node -is [System.Management.Automation.Language.CommandAst] }, $true) | ForEach-Object { [string]$_.GetCommandName() })
+        @($allCommands | Where-Object { $_ -match '(?i)schtasks' }) | Should -BeNullOrEmpty
     }
 }
 

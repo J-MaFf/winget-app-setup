@@ -19,7 +19,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the Microsoft.WinGet.Client engine); a time-budget run that exits 9 then finishes; the
   `-CollectDiagnostics` bundle (checked for secret leaks); and the uninstaller (preview then real).
   A temporary standard user (random name and password, neither printed) plants the junction from a
-  one-shot S4U task. A throwaway TightVNC test password is written only to `manual-steps.txt` in
+  one-shot S4U task. An administrator may register an S4U task for another account only with that
+  account's password, which `Register-ScheduledTask -Principal` cannot take, so on the runner the
+  registration was refused ('Access is denied') and the 'Junction planted by a standard user' row
+  was SKIP on every machine (wgt-gq8.62). The harness now keeps the password in memory, as a
+  SecureString, until it registers the task through the Task Scheduler COM API
+  (`Register-RealPcPlantTask`; S4U stores no password, and it never goes on a command line), then
+  disposes of it. When the task cannot be registered or run, the SKIP row names the failing step and
+  its HRESULT on one line (e.g. 'registering the S4U task: Access is denied. (0x80070005)'), and a
+  task result of 0x80070569 says the user lacks 'Log on as a batch job'. The report's machine facts
+  and `batch-logon-rights.txt` in the stage's evidence list who holds and who is denied that right
+  (`secedit /export`, read-only, temporary file deleted, the temporary user's name and SID hidden).
+  A throwaway TightVNC test password is written only to `manual-steps.txt` in
   `<report folder>-local`, which is never zipped; the harness checks the diagnostics bundle, every
   file going into the zip and the zip itself for it. The installer prints its `was a link` warning
   before its transcript starts, so each run's console output is kept and searched.

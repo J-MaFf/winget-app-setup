@@ -35,8 +35,9 @@
     copied into that stage's evidence folder.
 
     Never prints or stores a real secret. The temporary standard user's name and password are random
-    and never printed, and the password is never written to disk. One exception: a random 8-character
-    TightVNC test password (TightVNC uses 8; item 5's configuration half) is written to
+    and never printed, and the password is never written to disk: it stays in memory until its
+    planting task is registered, and Task Scheduler stores none (S4U). One exception: a random
+    8-character TightVNC test password (TightVNC uses 8; item 5's configuration half) is written to
     manual-steps.txt in '<report folder>-local', next to the report folder and never zipped or
     uploaded, so the operator can connect a viewer. The Diagnostics stage checks that the bundle does
     not contain it or the temporary user's name, and the Report stage checks every file that goes
@@ -1638,15 +1639,17 @@ function Compare-RealPcAclSnapshot {
     The temporary user was created.
 .PARAMETER UserProblem
     Why it could not be created.
+.PARAMETER TaskStep
+    The step of the planting task that failed: 'Register', 'Start' or 'Wait' (empty when none did).
 .PARAMETER TaskProblem
-    Why the planting task could not be registered or started.
+    Why that step failed (ConvertTo-RealPcTaskProblem), e.g. 'Access is denied. (0x80070005)'.
 .PARAMETER TaskResult
     The task's LastTaskResult, or $null when it did not finish in time.
 .PARAMETER JunctionAfterTask
     A junction was at the folder once the task had ended.
 .RETURNS
-    [pscustomobject] with PlantedBy ('StandardUser' or 'Admin') and Note (what happened, for the
-    report).
+    [pscustomobject] with PlantedBy ('StandardUser' or 'Admin') and Note (what happened, on one line,
+    for the report).
 #>
 function Get-RealPcJunctionPlantResult {
     param (
@@ -1661,6 +1664,11 @@ function Get-RealPcJunctionPlantResult {
         [Parameter(Mandatory = $false)]
         [AllowNull()]
         [AllowEmptyString()]
+        [string]$TaskStep,
+
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [AllowEmptyString()]
         [string]$TaskProblem,
 
         [Parameter(Mandatory = $false)]
@@ -1671,22 +1679,121 @@ function Get-RealPcJunctionPlantResult {
         [bool]$JunctionAfterTask = $false
     )
 
+    # An error's text can end in CR/LF (a CimException's does), which would break the report's line.
+    $UserProblem = ([string]$UserProblem -replace '\s*[\r\n]+\s*', ' ').Trim()
+    $TaskProblem = ([string]$TaskProblem -replace '\s*[\r\n]+\s*', ' ').Trim()
     if (-not $UserCreated) {
         return [pscustomobject]@{ PlantedBy = 'Admin'; Note = "the temporary standard user could not be created ($UserProblem), so the admin planted the junction" }
     }
     if ($TaskProblem) {
-        return [pscustomobject]@{ PlantedBy = 'Admin'; Note = "the standard user's planting task could not be started ($TaskProblem), so the admin planted the junction" }
+        $stepText = 'registering or starting the S4U task'
+        switch ($TaskStep) {
+            'Register' { $stepText = 'registering the S4U task' }
+            'Start' { $stepText = 'starting the S4U task' }
+            'Wait' { $stepText = 'waiting for the S4U task' }
+        }
+        # Registration may check the password with a batch logon, so it can meet 0x80070569 too.
+        $hint = ''
+        if ($TaskProblem -match '0x80070569') {
+            $hint = '; the temporary user lacks Log on as a batch job (SeBatchLogonRight; the machine facts list who holds it)'
+        }
+        return [pscustomobject]@{ PlantedBy = 'Admin'; Note = ("the standard user's planting task failed ({0}: {1}){2}, so the admin planted the junction" -f $stepText, $TaskProblem, $hint) }
     }
     if ($null -eq $TaskResult) {
         return [pscustomobject]@{ PlantedBy = 'Admin'; Note = "the standard user's planting task did not finish in time, so the admin planted the junction" }
     }
     if ($TaskResult -ne 0) {
-        return [pscustomobject]@{ PlantedBy = 'Admin'; Note = ("the standard user's planting task ended with 0x{0:X8}, so the admin planted the junction" -f ([long]$TaskResult -band 0xFFFFFFFFL)) }
+        $code = [long]$TaskResult -band 0xFFFFFFFFL
+        # ERROR_LOGON_TYPE_NOT_GRANTED: an S4U task launches only for an account with the batch-logon right.
+        if ($code -eq 0x80070569L) {
+            return [pscustomobject]@{ PlantedBy = 'Admin'; Note = ("the standard user's planting task ended with 0x{0:X8}: the temporary user lacks Log on as a batch job (SeBatchLogonRight; the machine facts list who holds it), so the admin planted the junction" -f $code) }
+        }
+        return [pscustomobject]@{ PlantedBy = 'Admin'; Note = ("the standard user's planting task ended with 0x{0:X8}, so the admin planted the junction" -f $code) }
     }
     if (-not $JunctionAfterTask) {
         return [pscustomobject]@{ PlantedBy = 'Admin'; Note = "the standard user's planting task ended with 0 but no junction appeared, so the admin planted the junction" }
     }
     return [pscustomobject]@{ PlantedBy = 'StandardUser'; Note = 'planted by the temporary standard user (a scheduled task with an S4U logon, exit 0)' }
+}
+
+<#
+.SYNOPSIS
+    Why a step of the planting task failed, on one line: the error's own text, then its HRESULT,
+    e.g. 'Access is denied. (0x80070005)'.
+.DESCRIPTION
+    The HRESULT comes from the error id the ScheduledTasks cmdlets give ('HRESULT 0x80070005,...'),
+    else from the innermost exception when it is a COM error (the Task Scheduler COM API's). The
+    text loses its CR/LF and the '(Exception from HRESULT: ...)' suffix .NET adds to a COM error.
+.PARAMETER ErrorRecord
+    The error the step threw.
+.RETURNS
+    [string]
+#>
+function ConvertTo-RealPcTaskProblem {
+    param (
+        [Parameter(Mandatory = $true)]
+        [System.Management.Automation.ErrorRecord]$ErrorRecord
+    )
+
+    $exception = $ErrorRecord.Exception
+    while ($null -ne $exception.InnerException) {
+        $exception = $exception.InnerException
+    }
+    # Windows PowerShell's COM text ends in '(Exception from HRESULT: 0x80070005 (E_ACCESSDENIED))',
+    # PowerShell 7's in '(0x80070005 (E_ACCESSDENIED))'; the code is added back once, below.
+    $message = [string]$exception.Message -replace '\s*\((Exception from HRESULT: )?0x[0-9A-Fa-f]{8}( \([A-Za-z0-9_]+\))?\)', ''
+    $message = ($message -replace '\s*[\r\n]+\s*', ' ').Trim()
+    $hresult = $null
+    if ("$($ErrorRecord.FullyQualifiedErrorId)" -match 'HRESULT 0x([0-9A-Fa-f]{8})') {
+        $hresult = [Convert]::ToInt64($Matches[1], 16)
+    }
+    elseif ($exception -is [System.Runtime.InteropServices.ExternalException]) {
+        $hresult = [long]$exception.ErrorCode -band 0xFFFFFFFFL
+    }
+    if ($null -ne $hresult) {
+        return ('{0} (0x{1:X8})' -f $message, $hresult).Trim()
+    }
+    return $message
+}
+
+<#
+.SYNOPSIS
+    The 'Log on as a batch job' and 'Deny log on as a batch job' lines of a secedit /export of the
+    user rights: who may, and who may not, have the logon an S4U task runs with.
+.PARAMETER Text
+    The exported file's text.
+.PARAMETER HideName
+    Names and SIDs to show as '<temporary user>' (the temporary user's are never printed).
+.RETURNS
+    [string[]] 'SeBatchLogonRight = <holders>' and 'SeDenyBatchLogonRight = <holders>', with
+    '(not assigned)' for a right nobody holds.
+#>
+function Get-RealPcBatchLogonRightLine {
+    param (
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [AllowEmptyString()]
+        [string]$Text = '',
+
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [AllowEmptyCollection()]
+        [string[]]$HideName = @()
+    )
+
+    $lines = @()
+    foreach ($right in @('SeBatchLogonRight', 'SeDenyBatchLogonRight')) {
+        $value = '(not assigned)'
+        $match = [regex]::Match([string]$Text, '(?im)^[ \t]*' + $right + '[ \t]*=[ \t]*(.*?)\s*$')
+        if ($match.Success -and $match.Groups[1].Value) {
+            $value = $match.Groups[1].Value
+        }
+        foreach ($name in @($HideName | Where-Object { $_ })) {
+            $value = [regex]::Replace($value, [regex]::Escape($name), '<temporary user>', [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+        }
+        $lines += ('{0} = {1}' -f $right, $value)
+    }
+    return $lines
 }
 
 <#
@@ -1848,7 +1955,8 @@ function Get-RealPcChangePlan {
         $lines += '  - If %ProgramData%\winget-app-setup exists, rename it to winget-app-setup-old-<time> in the same folder (never delete it).'
     }
     if ($stageNames -contains 'LinkGuardSetup') {
-        $lines += "  - Create a temporary STANDARD local user (random name and password, never printed; member of Users and Performance Log Users, for the batch logon its one-shot task needs), a victim folder under $PublicVictimFolder, and a junction at %ProgramData%\winget-app-setup planted by that user; the user, its profile, its task and the victim folder are removed afterwards."
+        $lines += "  - Create a temporary STANDARD local user (random name and password, never printed or written down; member of Users and Performance Log Users, for the batch logon its one-shot task needs), a victim folder under $PublicVictimFolder, and a junction at %ProgramData%\winget-app-setup planted by that user from a one-shot S4U task (registered with the user's password, which Task Scheduler does not store); the user, its profile, its task and the victim folder are removed afterwards."
+        $lines += "  - Read who holds 'Log on as a batch job' (secedit /export, read-only, into a temporary file that is deleted) for the report."
     }
     if ($stageNames -contains 'System' -or $stageNames -contains 'WinGetClient') {
         $lines += '  - Register and run one-shot SYSTEM scheduled tasks (the Endpoint Central machine phase).'
@@ -2906,6 +3014,147 @@ function Wait-RealPcScheduledTask {
     return $null
 }
 
+# The Task Scheduler COM service, connected (tests give Register-RealPcPlantTask a stand-in).
+function New-RealPcTaskService {
+    $service = New-Object -ComObject 'Schedule.Service'
+    $service.Connect()
+    return $service
+}
+
+# A file in System32, joined as text: Join-Path would refuse a drive this PowerShell does not have.
+function Get-RealPcSystem32Path {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$ChildPath
+    )
+
+    $root = $env:SystemRoot
+    if (-not $root) {
+        $root = 'C:\Windows'
+    }
+    return ($root.TrimEnd('\') + '\System32\' + $ChildPath)
+}
+
+<#
+.SYNOPSIS
+    Registers the one-shot task that plants the junction as the temporary standard user: an S4U
+    logon, limited, through the Task Scheduler COM API.
+.DESCRIPTION
+    An administrator may register an S4U task for a different account only by giving that account's
+    password (Microsoft Learn, 'Security Contexts for Tasks'). Register-ScheduledTask's -Principal
+    set takes no password, so Task Scheduler refused it with 'Access is denied' (wgt-gq8.62). With
+    TASK_LOGON_S4U the password only authorizes the registration; Task Scheduler stores none. It is
+    made plain text only for the RegisterTaskDefinition call and never goes on a command line (as
+    schtasks /RP would put it).
+.PARAMETER TaskName
+    The task's name, in the root folder; an existing task of that name is replaced.
+.PARAMETER UserId
+    The account the task runs as, as COMPUTERNAME\name.
+.PARAMETER Password
+    That account's password.
+.PARAMETER Execute
+    The program the task runs.
+.PARAMETER Argument
+    Its arguments.
+.RETURNS
+    Nothing; throws when the task cannot be registered.
+#>
+function Register-RealPcPlantTask {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$TaskName,
+
+        [Parameter(Mandatory = $true)]
+        [string]$UserId,
+
+        [Parameter(Mandatory = $true)]
+        [securestring]$Password,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Execute,
+
+        [Parameter(Mandatory = $false)]
+        [string]$Argument = ''
+    )
+
+    $service = New-RealPcTaskService
+    $definition = $service.NewTask(0)
+    $definition.RegistrationInfo.Description = 'winget-app-setup real-PC test plan: plants a junction as a temporary standard user; removed when the run ends.'
+    # TASK_LOGON_S4U (2), TASK_RUNLEVEL_LUA (0): no stored password, no elevation.
+    $definition.Principal.LogonType = 2
+    $definition.Principal.RunLevel = 0
+    $definition.Settings.ExecutionTimeLimit = 'PT5M'
+    $definition.Settings.DisallowStartIfOnBatteries = $false
+    $definition.Settings.StopIfGoingOnBatteries = $false
+    # TASK_ACTION_EXEC (0).
+    $action = $definition.Actions.Create(0)
+    $action.Path = $Execute
+    $action.Arguments = $Argument
+    $bstr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($Password)
+    try {
+        # TASK_CREATE_OR_UPDATE (6), TASK_LOGON_S4U (2), no security descriptor.
+        $null = $service.GetFolder('\').RegisterTaskDefinition($TaskName, $definition, 6, $UserId, [System.Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr), 2, $null)
+    }
+    finally {
+        [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
+    }
+}
+
+# The admin fallback: plants the junction as this (administrator) account. A junction needs no
+# privilege.
+function New-RealPcAdminJunction {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Target
+    )
+
+    $null = & cmd.exe /c mklink /J $Path $Target 2>&1
+}
+
+<#
+.SYNOPSIS
+    Reads, without changing anything, who holds 'Log on as a batch job' and 'Deny log on as a batch
+    job': the planting task's S4U logon needs the first and must not meet the second.
+.DESCRIPTION
+    secedit /export writes the machine's user rights to a file in a new temporary folder, which is
+    read and deleted; only the two lines are kept (Get-RealPcBatchLogonRightLine). Microsoft's pages
+    disagree on whether a Windows client gives the right to Performance Log Users, so a run whose
+    task ends with 0x80070569 shows which it is.
+.PARAMETER HideName
+    Names and SIDs to show as '<temporary user>'.
+.RETURNS
+    [string[]] the two lines, or one line saying why they could not be read.
+#>
+function Read-RealPcBatchLogonRight {
+    param (
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [AllowEmptyCollection()]
+        [string[]]$HideName = @()
+    )
+
+    $folder = Join-Path ([System.IO.Path]::GetTempPath()) ('wgt-rights-' + [guid]::NewGuid().ToString('N'))
+    $exportPath = Join-Path $folder 'user-rights.inf'
+    try {
+        [void](New-Item -ItemType Directory -Path $folder -ErrorAction Stop)
+        $run = Invoke-RealPcProcess -FilePath (Get-RealPcSystem32Path -ChildPath 'secedit.exe') -ArgumentList @('/export', '/areas', 'USER_RIGHTS', '/cfg', $exportPath, '/log', (Join-Path $folder 'secedit.log'), '/quiet')
+        if ($run.ExitCode -ne 0 -or -not (Test-Path -LiteralPath $exportPath)) {
+            return @("secedit /export could not read the user rights (exit $($run.ExitCode))")
+        }
+        # secedit writes UTF-16 with a byte-order mark, which ReadAllText detects.
+        return @(Get-RealPcBatchLogonRightLine -Text ([System.IO.File]::ReadAllText($exportPath)) -HideName $HideName)
+    }
+    catch {
+        return @("could not read the user rights: $($_.Exception.Message)")
+    }
+    finally {
+        Remove-Item -LiteralPath $folder -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
 <#
 .SYNOPSIS
     Copies what a stage left in the installer's log folder (transcripts, the RMM wrapper's log and
@@ -3099,61 +3348,101 @@ function Invoke-RealPcLinkGuardSetupStage {
     $script:LinkGuard.VictimBefore = Get-RealPcAclSnapshotTree -Path $publicRoot
     $rows += New-TestPlanRow -Check 'Created a victim folder under C:\Users\Public' -Result 'PASS' -Detail $publicRoot
 
-    # Random name and password, neither printed; the password is never written anywhere. A fixed
-    # complexity suffix keeps New-LocalUser from refusing it under a complexity policy.
+    # Random name and password, neither printed. The password is never written anywhere: it stays in
+    # memory, as a SecureString, until the planting task is registered, and is disposed of then (or
+    # in the finally below when no task is registered). A fixed complexity suffix keeps
+    # New-LocalUser from refusing it under a complexity policy.
     $userName = 'wgt' + (New-RealPcRandomSecret -Length 8)
+    $userSid = ''
     $userCreated = $false
     $userProblem = ''
-    try {
-        $secure = ConvertTo-SecureString -String ((New-RealPcRandomSecret -Length 20) + 'Aa9!') -AsPlainText -Force
-        $null = New-LocalUser -Name $userName -Password $secure -AccountNeverExpires -ErrorAction Stop
-        $secure = $null
-        $userCreated = $true
-        $script:LinkGuard.TempUser = $userName
-        # Kept after cleanup so the Diagnostics stage can check the bundle does not leak it.
-        $script:LinkGuard.TempUserName = $userName
-        # Users: BUILTIN\Users may create folders in %ProgramData%, and a junction is one. Performance
-        # Log Users: it holds the 'Log on as a batch job' right its S4U task needs. Neither is an
-        # administrator group.
-        $groupProblems = @(@((Add-RealPcUserToGroup -GroupSid 'S-1-5-32-545' -UserName $userName), (Add-RealPcUserToGroup -GroupSid 'S-1-5-32-559' -UserName $userName)) | Where-Object { $_ })
-        $detail = 'random name and password (neither shown); a member of Users and Performance Log Users, not of Administrators'
-        if ($groupProblems.Count -gt 0) {
-            $detail += '; ' + ($groupProblems -join '; ')
-        }
-        $rows += New-TestPlanRow -Check 'Created a temporary standard user' -Result 'PASS' -Detail $detail
-    }
-    catch {
-        $userProblem = $_.Exception.Message
-        $rows += New-TestPlanRow -Check 'Created a temporary standard user' -Result 'SKIP' -Detail "could not create it ($userProblem); planting the junction as the admin instead"
-    }
-
-    # Plant the junction as the temporary standard user, from a one-shot task with an S4U logon: it
-    # runs without the user signing in and stores no password. A junction needs no network or
-    # encrypted-file access, which S4U does not give.
+    $secure = $null
+    $taskStep = ''
     $taskProblem = ''
     $taskResult = $null
     $junctionAfterTask = $false
-    if ($userCreated) {
+    try {
         try {
-            $action = New-ScheduledTaskAction -Execute (Join-Path $env:SystemRoot 'System32\cmd.exe') -Argument ('/c mklink /J "{0}" "{1}"' -f $baseFolder, $publicRoot)
-            $principal = New-ScheduledTaskPrincipal -UserId "$env:COMPUTERNAME\$userName" -LogonType S4U -RunLevel Limited
-            $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes 5) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
-            $null = Register-ScheduledTask -TaskName $script:PlantTaskName -Action $action -Principal $principal -Settings $settings -Force -ErrorAction Stop
-            $taskStartedAt = Get-Date
-            Start-ScheduledTask -TaskName $script:PlantTaskName -ErrorAction Stop
-            $taskResult = Wait-RealPcScheduledTask -TaskName $script:PlantTaskName -StartedAt $taskStartedAt -TimeoutSeconds 90
+            $secure = ConvertTo-SecureString -String ((New-RealPcRandomSecret -Length 20) + 'Aa9!') -AsPlainText -Force
+            $newUser = New-LocalUser -Name $userName -Password $secure -AccountNeverExpires -ErrorAction Stop
+            $userCreated = $true
+            $script:LinkGuard.TempUser = $userName
+            # Kept after cleanup so the Diagnostics stage can check the bundle does not leak it.
+            $script:LinkGuard.TempUserName = $userName
+            if ($newUser -and $newUser.SID) {
+                $userSid = [string]$newUser.SID.Value
+            }
+            # Users: BUILTIN\Users may create folders in %ProgramData%, and a junction is one.
+            # Performance Log Users: on a server it holds 'Log on as a batch job', which the S4U logon
+            # needs; Microsoft's pages disagree for a client, so the right's holders are recorded below.
+            # Neither is an administrator group.
+            $groupProblems = @(@((Add-RealPcUserToGroup -GroupSid 'S-1-5-32-545' -UserName $userName), (Add-RealPcUserToGroup -GroupSid 'S-1-5-32-559' -UserName $userName)) | Where-Object { $_ })
+            $detail = 'random name and password (neither shown); a member of Users and Performance Log Users, not of Administrators'
+            if ($groupProblems.Count -gt 0) {
+                $detail += '; ' + ($groupProblems -join '; ')
+            }
+            $rows += New-TestPlanRow -Check 'Created a temporary standard user' -Result 'PASS' -Detail $detail
         }
         catch {
-            $taskProblem = $_.Exception.Message
+            $userProblem = ([string]$_.Exception.Message -replace '\s*[\r\n]+\s*', ' ').Trim()
+            $rows += New-TestPlanRow -Check 'Created a temporary standard user' -Result 'SKIP' -Detail "could not create it ($userProblem); planting the junction as the admin instead"
         }
-        finally {
-            Unregister-ScheduledTask -TaskName $script:PlantTaskName -Confirm:$false -ErrorAction SilentlyContinue
+
+        # Plant the junction as the temporary standard user, from a one-shot task with an S4U logon:
+        # it runs without the user signing in, and Task Scheduler stores no password. An administrator
+        # registers such a task for another account only with that account's password, which
+        # Register-RealPcPlantTask gives through the COM API. A junction needs no network or
+        # encrypted-file access, which S4U does not give.
+        if ($userCreated) {
+            try {
+                $taskStep = 'Register'
+                try {
+                    Register-RealPcPlantTask -TaskName $script:PlantTaskName -UserId "$env:COMPUTERNAME\$userName" -Password $secure -Execute (Get-RealPcSystem32Path -ChildPath 'cmd.exe') -Argument ('/c mklink /J "{0}" "{1}"' -f $baseFolder, $publicRoot)
+                }
+                finally {
+                    # The password's last use.
+                    $secure.Dispose()
+                    $secure = $null
+                }
+                $taskStep = 'Start'
+                $taskStartedAt = Get-Date
+                Start-ScheduledTask -TaskName $script:PlantTaskName -ErrorAction Stop
+                $taskStep = 'Wait'
+                $taskResult = Wait-RealPcScheduledTask -TaskName $script:PlantTaskName -StartedAt $taskStartedAt -TimeoutSeconds 90
+                $taskStep = ''
+            }
+            catch {
+                $taskProblem = ConvertTo-RealPcTaskProblem -ErrorRecord $_
+            }
+            finally {
+                Unregister-ScheduledTask -TaskName $script:PlantTaskName -Confirm:$false -ErrorAction SilentlyContinue
+            }
+            $junctionAfterTask = (Test-RealPcReparsePoint -Path $baseFolder) -eq $true
+
+            # Read-only evidence for the S4U logon: who holds, or is denied, the batch-logon right
+            # (a task that ends with 0x80070569 lacked it). The temporary user's name and SID are hidden.
+            $rights = @(Read-RealPcBatchLogonRight -HideName @($userName, $userSid))
+            if ($null -ne $script:MachineFacts) {
+                $script:MachineFacts['Log on as a batch job (secedit)'] = ($rights -join '; ')
+            }
+            if ($EvidenceFolder) {
+                try {
+                    [System.IO.File]::WriteAllText((Join-Path $EvidenceFolder 'batch-logon-rights.txt'), (($rights -join [Environment]::NewLine) + [Environment]::NewLine))
+                }
+                catch {
+                }
+            }
         }
-        $junctionAfterTask = (Test-RealPcReparsePoint -Path $baseFolder) -eq $true
     }
-    $plant = Get-RealPcJunctionPlantResult -UserCreated $userCreated -UserProblem $userProblem -TaskProblem $taskProblem -TaskResult $taskResult -JunctionAfterTask $junctionAfterTask
+    finally {
+        if ($null -ne $secure) {
+            $secure.Dispose()
+        }
+        $secure = $null
+    }
+    $plant = Get-RealPcJunctionPlantResult -UserCreated $userCreated -UserProblem $userProblem -TaskStep $taskStep -TaskProblem $taskProblem -TaskResult $taskResult -JunctionAfterTask $junctionAfterTask
     if ($plant.PlantedBy -ne 'StandardUser' -and (Test-RealPcReparsePoint -Path $baseFolder) -ne $true) {
-        $null = & cmd.exe /c mklink /J $baseFolder $publicRoot 2>&1
+        New-RealPcAdminJunction -Path $baseFolder -Target $publicRoot
     }
     $script:LinkGuard.PlantedBy = $plant.PlantedBy
     $script:LinkGuard.PlantNote = $plant.Note
