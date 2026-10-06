@@ -337,6 +337,8 @@ Describe 'The applicability record taken before each pass' {
         $save[0].Extent.StartOffset | Should -BeLessThan $start[0].Extent.StartOffset
     }
 
+    # The child imports the real module, so on Windows it reads this machine (read-only CIM, Appx
+    # and HKCU queries); the test asserts only the record's shape and timing, never its values.
     It 'Is there, with the module''s answer, when the installer starts' {
         $record = Join-Path $TestDrive 'e2e-applicability-second.json'
         Set-Content -LiteralPath $record -Value 'stale'

@@ -800,6 +800,7 @@ Describe 'Applicability recorded before a pass (Save-ApplicabilityRecord, Read-A
         @{ Case = 'is not JSON'; Content = 'not json {'; Problem = 'the applicability record * is not JSON: *' }
         @{ Case = 'is empty'; Content = ''; Problem = 'the applicability record *' }
         @{ Case = 'has no NotApplicable list'; Content = '{"Label": "before the first pass"}'; Problem = 'the applicability record * has no NotApplicable list' }
+        @{ Case = 'holds an array as Windows PowerShell 5.1 wraps it'; Content = '{"Label": "before the first pass", "NotApplicable": {"value": [{"Id": "Contoso.Gated", "Reason": "x"}], "Count": 1}}'; Problem = 'the applicability record * has a NotApplicable entry without an Id*' }
     ) {
         $path = Join-Path $TestDrive "$([guid]::NewGuid().ToString('N')).json"
         if ($null -ne $Content) {

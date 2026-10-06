@@ -362,7 +362,8 @@ if ($MyInvocation.InvocationName -ne '.') {
     }
 
     # Recorded just before the installer starts, which decides applicability before it changes
-    # the machine: its Windows Terminal step changes what Terminal's condition reads.
+    # the machine: its Windows Terminal step changes what Terminal's condition reads. In the 5.1 leg
+    # this is Windows PowerShell's answer (pwsh is not there yet before the first pass).
     if ($ApplicabilityPath) {
         $ApplicabilityPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($ApplicabilityPath)
         Remove-Item -LiteralPath $ApplicabilityPath -Force -ErrorAction SilentlyContinue

@@ -444,7 +444,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Get-CatalogAppApplicability` in `e2e/TranscriptAssertions.ps1`, instead of a copy that read only
   `condition`. It still expects every app with neither an `arch` list nor a condition installed,
   whatever the module says, and fails a new `Apps with no arch list or condition apply` assertion
-  when the module skips one.
+  when the module skips one. (Since changed: it reads a record taken before each pass; see Fixed.)
 - A run as SYSTEM now prints an `Install engine:` line near its start once `winget.exe` or the
   module is ready, with or without the opt-in `Microsoft.WinGet.Client` engine (see Added): by
   default `Install engine: winget.exe (<path>).` (wgt-gq8.42). A run that stops with exit code 2

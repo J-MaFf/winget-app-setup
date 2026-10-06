@@ -577,8 +577,9 @@ function New-TranscriptAssertionResult {
     Splits catalog apps into the ones the assertions expect installed and the ones whose
     not-applicable skip line they expect, by the installer's own rule.
 .DESCRIPTION
-    Asks the module's Test-AppApplicability and Get-AppNotApplicableReason (Assert-Install.ps1
-    imports the module), so the arch list and the condition decide here as they did in the run,
+    Asks the module's Test-AppApplicability and Get-AppNotApplicableReason (Assert-Install.ps1 and,
+    for the record taken before each pass, Invoke-InstallPass.ps1 import the module), so the arch
+    list and the condition decide here as they did in the run,
     and a gate that cannot answer leaves the app expected installed (fail open).
 
     One check does not ask the module: an entry with neither an arch list nor a condition applies
@@ -699,6 +700,11 @@ function Read-ApplicabilityRecord {
         }
         if (-not $problem -and ($null -eq $record -or $null -eq $record.PSObject.Properties['NotApplicable'])) {
             $problem = "the applicability record $Path has no NotApplicable list"
+        }
+        # Windows PowerShell 5.1 writes an unwrapped array as {"value":[...],"Count":n}; read that as
+        # unreadable instead of finding no Id and expecting every app installed.
+        if (-not $problem -and @(@($record.NotApplicable) | Where-Object { $null -eq $_ -or -not $_.PSObject.Properties['Id'] }).Count -gt 0) {
+            $problem = "the applicability record $Path has a NotApplicable entry without an Id (not a list of {Id, Reason})"
         }
     }
     if ($problem) {
