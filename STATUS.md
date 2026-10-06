@@ -126,7 +126,7 @@ summary row, neither installed nor failed, exit code unchanged) instead of being
 SYSTEM's or the admin's profile and reported as installed, and Windows Terminal is decided from
 whether it is provisioned for every user, which Windows 11 does. Microsoft does not support the
 winget command line as SYSTEM; its `Microsoft.WinGet.Client` module on PowerShell 7 is the supported
-route and a follow-up.
+route, which a run as SYSTEM can now opt in to (wgt-gq8.42, below).
 
 Setting winget up is now one step, `Initialize-Winget`, in place of three ladders that ran back to
 back and gave one cause three diagnoses. It stops with exit code 2 and names the policy when App
@@ -281,6 +281,29 @@ E2E leg now checks each catalog app's entry in `last-run.json` against the check
 (wgt-gq8.45), and fails when the job could not remove Chrome, 7-Zip or Git first. None of this has
 run on a real PC yet, and no E2E leg runs the uninstaller, a budget that runs out or an ARM64 PC.
 
+A fifth follow-up, wgt-gq8.42, lets a run as SYSTEM install the apps with the
+`Microsoft.WinGet.Client` module, which Microsoft documents as the supported route as SYSTEM,
+instead of `winget.exe`, which it documents as unsupported there. It is opt-in only
+(`WINGET_APP_SETUP_SYSTEM_ENGINE=WinGetClient`, or the machine phase's
+`-SystemInstallEngine WinGetClient`), for runs as SYSTEM only, and falls back to `winget.exe`
+whenever the module is not ready. `winget.exe` stays the default. The installer downloads
+Microsoft.WinGet.Client 1.29.380 from the PowerShell Gallery, pinned by size and SHA256
+(`Get-WingetClientModulePin`) and checked for Microsoft signatures, stages it in a folder only
+SYSTEM and Administrators can change, caches the package, and runs each module call in a child
+`pwsh` under a time limit. Results map onto winget's result codes, so deferral, retries, restarts
+and failure reporting are unchanged, and `last-run.json` gains `installEngine` and a per-app
+`installerCode`. It needs PowerShell 7.4 or later, Windows build 17763 or later, and
+`www.powershellgallery.com` and `cdn.powershellgallery.com` on port 443. Winget-AutoUpdate, the
+uninstaller and the `winget download` path of `Install-PowerShellLatest` still use `winget.exe`.
+`build/Set-WingetClientModulePin.ps1` checks the pin against the Gallery or moves it. A probe on the
+hosted runner on 2026-10-06 (Windows Server 2025, PowerShell 7.6, as SYSTEM) loaded the pinned
+module, found each file the pin requires to be signed valid from Microsoft Corporation, listed
+installed packages and installed one with `-Scope System`. So winget-cli bug 5991
+(`Get-WinGetPackage` failing as SYSTEM) did not reproduce there. The module's native engine
+imports no Visual C++ runtime DLL, so it does not need that runtime. A fourth E2E leg,
+`e2e-install-system-winget-client`, runs the SYSTEM pass twice with the engine. It has not run
+yet, and no real PC has used the engine.
+
 The same branch changes CI. Fork pull requests that leave `windows-tests.yml` alone no longer run
 on the self-hosted win-test runner, and `claude.yml` calls the shared Claude workflow at a pinned
 commit SHA instead of `@main`. The E2E workflow files its failure issue from a separate ubuntu job,
@@ -289,8 +312,10 @@ diagnostics snapshots next to the transcripts. It now also runs on pull requests
 product, and pull-request and dispatched runs install the checkout instead of raw `main`, so this
 branch's own E2E run tests its changes before they merge. A second E2E leg,
 `e2e-install-windows-powershell`, starts every pass from Windows PowerShell 5.1 with PowerShell 7
-removed first, so the bootstrap's install and relaunch get a real run, and a third,
-`e2e-install-system`, runs one pass as SYSTEM through the Endpoint Central machine phase. Every leg
+removed first, so the bootstrap's install and relaunch get a real run, a third,
+`e2e-install-system`, runs one pass as SYSTEM through the Endpoint Central machine phase, and a
+fourth, `e2e-install-system-winget-client`, runs that SYSTEM pass twice with the
+`Microsoft.WinGet.Client` engine. Every leg
 first uninstalls the Chrome, 7-Zip and Git the runner image ships with, so those installs run too.
 The transcript
 checks moved into `e2e/TranscriptAssertions.ps1`, which is tested against sample transcripts and
@@ -464,20 +489,21 @@ every repository secret.
 |------|-------------|
 | `WingetAppSetup/` | Source-of-truth PowerShell module (`.psd1` manifest + `.psm1` loader) |
 | `WingetAppSetup/Public/` | Entry points and main steps (the module exports every function, `Public/` and `Private/` alike): logging, winget core, app validation, Windows Terminal config, install orchestration (updates are outsourced to WAU), uninstall orchestration (`Invoke-WingetUninstall`), the Endpoint Central user phase (`Invoke-WingetUserPhase`) |
-| `WingetAppSetup/Private/` | Helpers: system info, elevation, the Windows PowerShell 5.1 → PowerShell 7 bootstrap, the environment checks (`EnvironmentPreflight.ps1`), the machine-wide winget and provisioning lookups a run as SYSTEM uses (`MachineContext.ps1`), the run lock (`RunLock.ps1`), the `RESULT` line and `last-run.json` (`RunRecord.ps1`), the catalog entry fields and post-install hooks (`CatalogSchema.ps1`), TightVNC's password hook (`TightVnc.ps1`), log retention (`Housekeeping.ps1`), the diagnostics bundle (`Diagnostics.ps1`), the user phase's helpers (`UserPhaseSupport.ps1`), the uninstaller's per-app step (`AppUninstall.ps1`), Winget-AutoUpdate's checks (`WauSupport.ps1`) and the pinned `Microsoft.WindowsAppRuntime.1.8` install before Winget-AutoUpdate (`WindowsAppRuntime.ps1`) |
+| `WingetAppSetup/Private/` | Helpers: system info, elevation, the Windows PowerShell 5.1 → PowerShell 7 bootstrap, the environment checks (`EnvironmentPreflight.ps1`), the machine-wide winget and provisioning lookups a run as SYSTEM uses (`MachineContext.ps1`), the run lock (`RunLock.ps1`), the `RESULT` line and `last-run.json` (`RunRecord.ps1`), the catalog entry fields and post-install hooks (`CatalogSchema.ps1`), TightVNC's password hook (`TightVnc.ps1`), log retention (`Housekeeping.ps1`), the diagnostics bundle (`Diagnostics.ps1`), the user phase's helpers (`UserPhaseSupport.ps1`), the uninstaller's per-app step (`AppUninstall.ps1`), Winget-AutoUpdate's checks (`WauSupport.ps1`), the pinned `Microsoft.WindowsAppRuntime.1.8` install before Winget-AutoUpdate (`WindowsAppRuntime.ps1`), and the opt-in Microsoft.WinGet.Client engine of runs as SYSTEM: its pin, download, checks and child script (`WingetClientModule.ps1`) and its requests and result mapping (`WingetClientEngine.ps1`) |
 | `build/Build-WingetInstallScript.ps1` | Assembles the module, without its comments, and the entry fragments into `winget-app-install.ps1` and `winget-app-uninstall.ps1`; every guard runs on both, and `-Check` verifies both |
 | `build/Set-RmmInstallerPin.ps1` | Sets the pinned installer commit and SHA256 in both Endpoint Central phases |
-| `rmm/` | Standalone Endpoint Central scripts, not generated: the machine phase (`Invoke-WingetAppSetup.ps1`, as SYSTEM, with an optional `-MaxRuntimeMinutes` time budget), the user phase (`Invoke-WingetAppSetupUserPhase.ps1`, at each sign-in), the fleet health probe (`Get-WingetFleetHealth.ps1`) and the WAU at-logon fix (`Repair-WauLogonTrigger.ps1`); see readme "Endpoint Central and other RMM tools" |
+| `build/Set-WingetClientModulePin.ps1` | Checks the Microsoft.WinGet.Client pin in `Get-WingetClientModulePin` against the PowerShell Gallery (`-Check`, exit 1 on a mismatch) or moves it (`-Write`); run the `e2e-install-system-winget-client` job after moving it |
+| `rmm/` | Standalone Endpoint Central scripts, not generated: the machine phase (`Invoke-WingetAppSetup.ps1`, as SYSTEM, with an optional `-MaxRuntimeMinutes` time budget and an optional `-SystemInstallEngine WinGetClient`), the user phase (`Invoke-WingetAppSetupUserPhase.ps1`, at each sign-in), the fleet health probe (`Get-WingetFleetHealth.ps1`) and the WAU at-logon fix (`Repair-WauLogonTrigger.ps1`); see readme "Endpoint Central and other RMM tools" |
 | `build/fragments/` | `head.ps1` (PSScriptInfo, help, `param`) and `tail.ps1` (entry-point dispatch) for the installer; `uninstall-head.ps1` and `uninstall-tail.ps1` for the uninstaller |
 | `winget-app-install.ps1` | **Generated** single-file installer for local and `irm \| iex` use — do not edit by hand |
 | `winget-app-uninstall.ps1` | **Generated** single-file uninstaller; runs `Invoke-WingetUninstall` and relaunches elevated as a checked copy (exit codes in readme "Uninstall") — do not edit by hand |
-| `tests/` | Pester suite, one `<Area>.Tests.ps1` per module file plus `EntryPoint.Tests.ps1`, `TestHarness.Tests.ps1`, `BuildGuards.Tests.ps1` (the build guards and the pre-commit hook), the `Rmm*.Tests.ps1` files (the `rmm/` scripts and the pin helper) and the `E2E*.Tests.ps1` files (for the `e2e/` scripts, with sample transcripts and a sample SYSTEM-run `last-run.json`, `system-last-run.json`, in `tests/fixtures/e2e`; `Diagnostics.Tests.ps1` has sample logs in `tests/fixtures/diagnostics`); `TestHelpers.ps1` loads the module once per file and stands in for Windows-only commands, so the suite also runs on Linux/macOS |
+| `tests/` | Pester suite, one `<Area>.Tests.ps1` per module file plus `EntryPoint.Tests.ps1`, `TestHarness.Tests.ps1`, `BuildGuards.Tests.ps1` (the build guards and the pre-commit hook), the `Rmm*.Tests.ps1` files (the `rmm/` scripts and the pin helper) and the `E2E*.Tests.ps1` files (for the `e2e/` scripts, with sample transcripts and a sample SYSTEM-run `last-run.json`, `system-last-run.json`, in `tests/fixtures/e2e`; `Diagnostics.Tests.ps1` has sample logs in `tests/fixtures/diagnostics`, and `WingetClientEngine.Tests.ps1` sample child `pwsh` results in `tests/fixtures/winget-client`); `TestHelpers.ps1` loads the module once per file and stands in for Windows-only commands, so the suite also runs on Linux/macOS |
 | `e2e/Assert-Install.ps1` | Shared post-install assertions for end-to-end runs (tier 1 workflow below; tier 2 [#215](https://github.com/J-MaFf/winget-app-setup/issues/215) reuses it); decides which apps apply with the module's `Test-AppApplicability`; the transcript checks are in `e2e/TranscriptAssertions.ps1` and fixture-tested; `-InstallerPath` checks that every pass ran the checkout's build |
 | `e2e/Invoke-InstallPass.ps1` | Starts each E2E install pass (one-liner or `-File`, from PowerShell 7 or Windows PowerShell 5.1) and applies the exit-code policy: 0 and 3010 pass, 8 only when the pass's transcript says WAU was skipped for the missing `Microsoft.WindowsAppRuntime.1.8`, the installer could not try to install it (quoting its `Windows App Runtime:` line) and its pinned framework still meets what the latest winget release needs, 1 only while `KNOWN_PLATFORM_INCOMPATIBLE` is non-empty |
-| `e2e/Invoke-SystemInstallPass.ps1` | The SYSTEM leg's pass: a one-shot SYSTEM scheduled task starts `rmm/Invoke-WingetAppSetup.ps1` with the 32-bit `powershell.exe` and the checkout's installer, then checks the exit code, the machine phase's log, `last-run.json` (its Deferred entries and each catalog app's entry, against the checkout's catalog decided as SYSTEM), WAU and the framework, and that nothing was installed into SYSTEM's own profile |
+| `e2e/Invoke-SystemInstallPass.ps1` | The SYSTEM leg's pass: a one-shot SYSTEM scheduled task starts `rmm/Invoke-WingetAppSetup.ps1` with the 32-bit `powershell.exe` and the checkout's installer, then checks the exit code, the machine phase's log, `last-run.json` (its Deferred entries and each catalog app's entry, against the checkout's catalog decided as SYSTEM), WAU and the framework, and that nothing was installed into SYSTEM's own profile; with `-SystemInstallEngine WinGetClient -PassCount 2`, two passes and the Microsoft.WinGet.Client engine's checks (module ready at its pin, every install through `Install-WinGetPackage`, the removed apps in `winget list` as the runner account, the module from the cache on the second pass) |
 | `e2e/Remove-PreinstalledApps.ps1` | Uninstalls the catalog apps the runner image ships with (Chrome, 7-Zip, Git; with `-IncludePowerShell7`, PowerShell 7 too) before the first E2E pass; every call time-limited, failures become warnings |
-| `e2e/Collect-Diagnostics.ps1` | Windows PowerShell 5.1 snapshots for the E2E run: pwsh versions, App Installer / WindowsAppRuntime AppX state, WAU tasks; at the end MsiInstaller and RestartManager events, AppX deployment errors and warnings, and WAU logs (`e2e-diagnostics` artifact); always exits 0 |
-| `.github/workflows/e2e-install.yml` | E2E tier 1: real install runs on GitHub-hosted `windows-latest` in three legs, `e2e-install` from PowerShell 7, `e2e-install-windows-powershell` from Windows PowerShell 5.1 through the PowerShell 7 bootstrap, and `e2e-install-system` as SYSTEM through the Endpoint Central machine phase, after removing the preinstalled Chrome, 7-Zip and Git (weekly against raw `main`, the SYSTEM leg against the checkout; dispatches and PRs that touch the product, `rmm/` or e2e files against the checkout; uploads transcripts and diagnostics; a failed, timed-out or cancelled weekly or `main`-dispatched run files an issue from the ubuntu `report-failure` job) |
+| `e2e/Collect-Diagnostics.ps1` | Windows PowerShell 5.1 snapshots for the E2E run: pwsh versions, App Installer / WindowsAppRuntime AppX state, WAU tasks; at the end MsiInstaller and RestartManager events, AppX deployment errors and warnings, WAU logs and the newest 10 `WinGetCOM-*.log` files of the WinGet engine that Microsoft.WinGet.Client runs as SYSTEM (`e2e-diagnostics` artifact); always exits 0 |
+| `.github/workflows/e2e-install.yml` | E2E tier 1: real install runs on GitHub-hosted `windows-latest` in four legs, `e2e-install` from PowerShell 7, `e2e-install-windows-powershell` from Windows PowerShell 5.1 through the PowerShell 7 bootstrap, `e2e-install-system` as SYSTEM through the Endpoint Central machine phase, and `e2e-install-system-winget-client` as SYSTEM with the Microsoft.WinGet.Client engine (two passes, after an informational pin check), after removing the preinstalled Chrome, 7-Zip and Git (weekly against raw `main`, the SYSTEM legs against the checkout; dispatches and PRs that touch the product, `rmm/` or e2e files against the checkout; uploads transcripts and diagnostics; a failed, timed-out or cancelled weekly or `main`-dispatched run files an issue from the ubuntu `report-failure` job) |
 | `.github/workflows/windows-tests.yml` | Pester suite and build `-Check` (job `pester`, the required check on `main`): self-hosted win-test for pushes, dispatch and same-repo PRs; GitHub-hosted `windows-latest` for fork PRs and `hosted` dispatches |
 | `readme.md` | How to run the installer, what it does, its exit codes and logs, Endpoint Central deployment, and the E2E monitoring |
 | `CHANGELOG.md` | Keep a Changelog history. |
@@ -546,8 +572,8 @@ every repository secret.
 ## Natural Next Steps
 
 - After #285 merges: close #279, #283 and #284, and watch the next weekly E2E run against raw `main` (Mondays 06:00 UTC). A failed, timed-out or cancelled run creates or comments on the `E2E install run failed` issue.
-- After #285 merges and that E2E run passes: pin the Endpoint Central phases with `pwsh -File build/Set-RmmInstallerPin.ps1 -Commit <commit on main>`, commit the two `rmm/` scripts, upload them to the Script Repository, and try both phases, the health probe and the at-logon fix on a pilot PC (readme "Endpoint Central and other RMM tools"). Until the pins are set, both phases exit 5 and run nothing. Check that Endpoint Central's Remarks show the output; its script time limit and the time budget are the `-MaxRuntimeMinutes` item below.
-- Make `e2e-install` a required status check for `main` (next to `pester`); it is green on #285. Every PR now gets an `e2e-install` status, and a skip counts as passed, so requiring it does not block docs-only PRs. Keep the job id `e2e-install` and give it no `name:`, or the required check stops matching. The Windows PowerShell 5.1 leg, `e2e-install-windows-powershell`, and the SYSTEM leg, `e2e-install-system`, are separate checks with the same `if:`; decide whether to require them too (each adds hosted-runner minutes per run, not wall-clock time, since the legs run in parallel).
+- After #285 merges and that E2E run passes: pin the Endpoint Central phases with `pwsh -File build/Set-RmmInstallerPin.ps1 -Commit <commit on main>`, commit the two `rmm/` scripts, upload them to the Script Repository, and try both phases, the health probe and the at-logon fix on a pilot PC (readme "Endpoint Central and other RMM tools"). Until the pins are set, both phases exit 5 and run nothing. Check that Endpoint Central's Remarks show the output; its script time limit and the time budget are the `-MaxRuntimeMinutes` item below. The Microsoft.WinGet.Client engine is the pilot item below.
+- Make `e2e-install` a required status check for `main` (next to `pester`); it is green on #285. Every PR now gets an `e2e-install` status, and a skip counts as passed, so requiring it does not block docs-only PRs. Keep the job id `e2e-install` and give it no `name:`, or the required check stops matching. The Windows PowerShell 5.1 leg, `e2e-install-windows-powershell`, and the SYSTEM legs, `e2e-install-system` and `e2e-install-system-winget-client`, are separate checks with the same `if:`; decide whether to require them too (each adds hosted-runner minutes per run, not wall-clock time, since the legs run in parallel).
 - Dispatch Windows Tests once with `hosted` ticked (`gh workflow run windows-tests.yml -f hosted=true`) to confirm the suite passes on GitHub-hosted `windows-latest`, the runner fork pull requests now use.
 - Before the first fork PR, turn on "Require approval for all external contributors" (Settings > Actions > General) and add a job-started hook on win-test (`ACTIONS_RUNNER_HOOK_JOB_STARTED`) that refuses fork pull request jobs, since a fork PR can rewrite `runs-on` in its copy of `windows-tests.yml`.
 - In [J-MaFf/.github](https://github.com/J-MaFf/.github): pin `anthropics/claude-code-action` and `actions/checkout` in the shared `claude.yml` to commit SHAs, fetch git-policies at a pinned ref, and declare `CLAUDE_CODE_OAUTH_TOKEN` under `on.workflow_call.secrets`. Then move this repository's `claude.yml` pin to that SHA and replace `secrets: inherit` with that one secret.
@@ -557,8 +583,9 @@ every repository secret.
   `psexec -s` from a 32-bit PowerShell) before relying on it from the RMM: the machine-wide
   `winget.exe` lookup and launch, `--scope machine` installs of the catalog, the `Deferred` report,
   the Windows Terminal provisioning check, and whether a clean PC without the Visual C++ runtime
-  fails with `0xC0000135`. Then decide whether to move SYSTEM runs to `Microsoft.WinGet.Client`,
-  whether the Windows PowerShell 5.1 bootstrap should install PowerShell 7 as SYSTEM with the
+  fails with `0xC0000135`. Then decide whether to make the `Microsoft.WinGet.Client` engine the
+  default for SYSTEM runs (the owner decision below), and whether the Windows PowerShell 5.1
+  bootstrap should install PowerShell 7 as SYSTEM with the
   machine-wide `winget.exe` instead of the MSI download (whose GitHub release list can answer 429
   when many PCs ask at once). On a standard user's PC, check that the user phase installs the
   deferred apps at the next sign-in without a UAC prompt.
@@ -629,6 +656,52 @@ every repository secret.
   E2E dispatch input that runs one SYSTEM pass with a small budget would cover it. With a budget,
   the elevated relaunch's command line fits only when `%TEMP%` is about 145 characters or shorter
   (a longer one exits 4).
+- Microsoft.WinGet.Client engine (wgt-gq8.42): the first run of `e2e-install-system-winget-client`
+  has not happened yet, and it must pass both passes before the engine is used anywhere. Still to
+  check on Windows:
+  - `pwsh -File build/Set-WingetClientModulePin.ps1 -Check` on a Windows PC of your own, and that its
+    list of signed files matches the pin's `SignedFiles` (the session that wrote the engine could
+    not reach the Gallery, and signatures read `n/a` off Windows);
+  - the Windows CI Pester run (`windows-tests.yml`) with the real cmdlets: `Test-AuthenticodeSigner`
+    against the real `Get-AuthenticodeSignature`, `Set-RestrictedDirectoryAcl` on the cache and
+    staging folders, and the link and owner checks of `Remove-StaleWingetClientFolder`;
+  - under the Endpoint Central agent, which has no console, that the child `pwsh`'s
+    `WINGET-CLIENT-RESULT` line arrives;
+  - where the engine writes `WinGetCOM-*.log` as SYSTEM (`WinGet\defaultState` under
+    `%SystemRoot%\SystemTemp` or `%SystemRoot%\Temp`), and that `e2e/Collect-Diagnostics.ps1` finds
+    them;
+  - a Group Policy `AllSigned` execution policy that the run itself gets past (a run a Group Policy
+    script started): expect `WinGet client module: NOT READY` and a fallback to `winget.exe`;
+  - an ARM64 PC, an x86 PowerShell process, and Windows 10 1809 (build 17763) or later;
+  - the generated installer under Windows PowerShell 5.1 (the 5.1 E2E leg runs it; the parse and
+    ASCII guards pass on Linux);
+  - an Endpoint Central pilot with `-SystemInstallEngine WinGetClient` behind the fleet's proxy or
+    allowlist (`www.powershellgallery.com` and `cdn.powershellgallery.com` on port 443). It needs
+    an installer pin from a commit on `main` that has the engine; an older pinned installer ignores
+    the switch.
+- Owner: decide whether `WinGetClient` becomes the default for SYSTEM runs (an unset variable would
+  then mean the module, and `Cli` would be the opt-out). Decide only after
+  `e2e-install-system-winget-client` has been green on `main` for several weekly runs in a row (at
+  least four, next to a green `e2e-install-system`), and after the Endpoint Central
+  pilot (10 to 20 PCs with Windows 10 22H2 and Windows 11, for 2 to 4 weeks) shows no app failing
+  that `winget.exe` installs, the same Deferred apps, restarts where expected, and fallbacks
+  (`installEngine.fallbackReason`) only where explained. The run time must fit Endpoint Central's
+  limit, and the Gallery hosts must be allowed on the fleet. Decide at the same time: the PowerShell
+  7.4 floor (a PC with 7.2 or 7.3 falls back, and 7.4 reaches end of support on 2026-11-10; should
+  the bootstrap install the current LTS on such PCs?), and whether a module run whose `winget.exe`
+  does not start at the end should exit 8 ("apps OK, auto-updates at risk") instead of 2.
+- Engine follow-ups: `rmm/Get-WingetFleetHealth.ps1` does not report `last-run.json`'s
+  `installEngine` in its `HEALTH:` line yet, so a fleet-wide fallback is not visible. Nothing tells
+  the team when the Gallery or the engine moves past 1.29.380 (the E2E pin check is informational).
+  Winget-AutoUpdate, the uninstaller (`Uninstall-WinGetPackage` would be the module's form) and the
+  `winget download` path of `Install-PowerShellLatest` still use `winget.exe` as SYSTEM. The child
+  script cannot run under a Group Policy `AllSigned` execution policy; running it through
+  `-Command`, or signing it, would avoid that fallback. A link at `%ProgramData%\winget-app-setup`
+  itself is not refused yet: `New-WauStagingDirectory`, which the Winget-AutoUpdate MSI staging
+  shares, should refuse or replace one, with a test (the part of review finding F6 left out of
+  wgt-gq8.42). Restart codes other than 3010 stay undetected under the engine, since the module
+  does not expose a manifest's expected return codes (review finding F4); only the pending-restart
+  check catches them.
 - Validate the dormant DISM MSIX-provisioning path in `Install-PowerShellLatest` end-to-end on a real Windows 10 machine before PowerShell 7.7 GA makes it load-bearing (as of [#166](https://github.com/J-MaFf/winget-app-setup/issues/166)).
 - Cut a tagged release and move the `[Unreleased]` CHANGELOG entries under a versioned heading.
 

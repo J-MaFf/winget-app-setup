@@ -385,14 +385,21 @@ carries on:
 | `winget source update` | 2 minutes |
 | `winget source reset` | 5 minutes |
 | One `winget uninstall` (`winget-app-uninstall.ps1`), the app's own uninstaller included | 15 minutes |
+| One `Install-WinGetPackage` of the opt-in Microsoft.WinGet.Client engine (as SYSTEM, see [Microsoft.WinGet.Client engine (opt-in)](#microsoftwingetclient-engine-opt-in)), the installer included | 30 minutes |
+| The engine's per-app `Get-WinGetPackage` check before and after each install | 45 seconds |
+| The engine's check that it can be started (`Get-WinGetVersion`) | 60 seconds |
+| The engine's probe at the start of the run (loading the module, `Get-WinGetVersion` and one `Get-WinGetPackage`) | 3 minutes |
 | `msiexec` for Winget-AutoUpdate (install and uninstall) | 15 minutes |
-| The Winget-AutoUpdate MSI download, and the Windows App Runtime package download (see [Automatic updates](#automatic-updates)) | 5 minutes until the server starts sending the file; on PowerShell 7.4 and newer, also 2 minutes without data while it arrives |
+| The Winget-AutoUpdate MSI download, the Windows App Runtime package download (see [Automatic updates](#automatic-updates)), and the engine's Microsoft.WinGet.Client package download | 5 minutes until the server starts sending the file; on PowerShell 7.4 and newer, also 2 minutes without data while it arrives |
 | `Add-AppxProvisionedPackage` for the Windows App Runtime framework | 10 minutes |
 | Reading which Windows App Runtime the latest winget release needs (`DesktopAppInstaller_Dependencies.json`) | 30 seconds, and on PowerShell 7.4 and newer also 30 seconds without data; when it runs out, the built-in requirement is used |
 
 A stopped install is checked like any other: unless the app turns out to be installed anyway, it
 fails, gets its one retry in the retry pass, and counts toward exit code 1, with
-`winget install stopped after 30 minutes` in its failure reason. The limits are set in one place,
+`winget install stopped after 30 minutes` (with the engine,
+`the WinGet client install stopped after 30 minutes`) in its failure reason. The engine's checks
+get longer limits than `winget.exe`'s because each one starts `pwsh` and loads the module. The
+limits are set in one place,
 `Get-ProcessTimeoutSeconds` (`WingetAppSetup/Private/ProcessInvocation.ps1`).
 
 Some steps still have no time limit of their own: the PowerShell cmdlets that set up winget
@@ -472,6 +479,10 @@ a run. When something cannot be fixed it prints one line that says why and what 
 
 A run as SYSTEM checks the machine-wide `winget.exe` instead of step 2's account fixes, which cannot
 work for SYSTEM (see [Running as SYSTEM](#running-as-system-rmm-tools-such-as-endpoint-central)).
+When a run as SYSTEM installs with the opt-in Microsoft.WinGet.Client engine, step 3 is skipped,
+and a `winget.exe` that does not start is a warning instead of exit code 2 (see
+[Microsoft.WinGet.Client engine (opt-in)](#microsoftwingetclient-engine-opt-in)). The checks below
+then run against the engine (`Get-WinGetPackage`, `Get-WinGetVersion`), with the same tries.
 
 A winget that cannot be started is not retried app by app either. If winget stops starting partway
 through the installs, the app that hit it fails with
@@ -574,9 +585,10 @@ winget command line as SYSTEM: winget is a per-user packaged app that cannot be 
 SYSTEM ([WinGet troubleshooting, System
 Context](https://learn.microsoft.com/windows/package-manager/winget/troubleshooting#system-context)),
 and Microsoft's supported route there is the `Microsoft.WinGet.Client` PowerShell module on
-PowerShell 7, which this installer does not use yet. So a SYSTEM run can fail where a run as a
-signed-in user would not; test it on a pilot PC before rolling it out. What a SYSTEM run does
-differently:
+PowerShell 7. By default this installer still runs the winget command line as SYSTEM. The module is
+an opt-in (see [Microsoft.WinGet.Client engine (opt-in)](#microsoftwingetclient-engine-opt-in)
+below). So a SYSTEM run can fail where a run as a signed-in user would not; test it on a pilot PC
+before rolling it out. What a SYSTEM run does differently:
 
 - It is never interactive: no "press any key", and winget installs with `--silent`.
 - It runs the `winget.exe` that App Installer installed for the PC, by its full path, for every
@@ -589,12 +601,14 @@ differently:
   PC, or the `winget.exe` found could not be started. `0xC0000135 STATUS_DLL_NOT_FOUND` is reported
   for a `winget.exe` started outside its package when a DLL it needs, reportedly the Microsoft
   Visual C++ 2015-2022 runtime, is missing; that `winget.exe` is not checked again, since it fails
-  the same way until the runtime is installed.
+  the same way until the runtime is installed. With the opt-in module engine ready, a `winget.exe`
+  that does not start is only a warning (see below).
 - It skips every step that sets winget up for one account, since SYSTEM cannot have one:
-  registering App Installer and `Repair-WinGetPackageManager` (so the `Microsoft.WinGet.Client`
-  module it comes from is never installed). It still updates the winget source, and resets it if
-  it is missing or corrupted.
-- Every app is installed with `--scope machine` only. An app that has no machine-wide installer is
+  registering App Installer and `Repair-WinGetPackageManager` (so `Install-Module` never installs
+  the `Microsoft.WinGet.Client` module it comes from). It still updates the winget source, and
+  resets it if it is missing or corrupted, unless the module engine installs the apps.
+- Every app is installed with `--scope machine` only (`-Scope System` with the module engine). An
+  app that has no machine-wide installer is
   not installed at winget's default scope, which as SYSTEM is SYSTEM's own profile: it is reported
   as `Deferred` in the summary. So is every app the catalog marks per-user (`scope = 'user'` or
   `userPhase = $true`, see [Catalog entry fields](#catalog-entry-fields)), before any winget call,
@@ -651,6 +665,95 @@ run; decide whether your RMM job should count it as a success. Exit code 9 means
 [time budget](#time-budget-for-rmm-jobs--maxruntimeminutes) ran out before every app, or the
 Winget-AutoUpdate setup, was attempted. It is not a success: run the job again to finish.
 
+#### Microsoft.WinGet.Client engine (opt-in)
+
+A run as SYSTEM can install the apps with the `Microsoft.WinGet.Client` PowerShell module instead
+of `winget.exe`. Microsoft documents the winget command line as unsupported in the system context,
+and this module as the supported route there
+([WinGet troubleshooting, System Context](https://learn.microsoft.com/windows/package-manager/winget/troubleshooting#system-context)).
+The engine is opt-in and for runs as SYSTEM only. When the module is not ready, the run falls back
+to `winget.exe`. The default stays `winget.exe`.
+
+To opt in, set `WINGET_APP_SETUP_SYSTEM_ENGINE` to `WinGetClient` in the run's environment, or give
+the Endpoint Central machine phase `-SystemInstallEngine WinGetClient` (see
+[Machine phase](#machine-phase)). `Cli`, unset or empty keeps `winget.exe`. Any other value is
+warned about and means `Cli`. A run that is not SYSTEM ignores the variable and says so. A dry run
+(`-WhatIf`) downloads nothing and says what a real run would do.
+
+- **What it needs.** PowerShell 7.4 or later, as an x64, x86 or Arm64 process, and Windows build
+  17763 or later. A PC that already has an older PowerShell 7 falls back; the bootstrap installs
+  the latest PowerShell 7 only on a PC that has none. The PC must reach the PowerShell Gallery:
+  allow `www.powershellgallery.com` and `cdn.powershellgallery.com` on port 443. SYSTEM does not
+  use the signed-in user's proxy settings (see **Environment checks** under
+  [Unattended runs](#unattended-runs)). After the first download, later runs use the cache. The
+  module's native engine imports no Visual C++ runtime DLL, only the Universal C Runtime that
+  Windows includes.
+- **Where the module comes from.** The installer downloads Microsoft.WinGet.Client 1.29.380 as its
+  `.nupkg` straight from the PowerShell Gallery. It never uses `Install-Module` and installs nothing
+  into PowerShell's module folders. It checks the package's size and SHA256 against the pin in
+  `Get-WingetClientModulePin` (`WingetAppSetup/Private/WingetClientModule.ps1`), extracts only the
+  PowerShell 7 build and this process's engine, and requires a valid Microsoft Corporation
+  signature on the module's manifest, its cmdlet and engine DLLs and the native engine files. It
+  extracts into a new `%ProgramData%\winget-app-setup\wingetclient-<id>` folder that only SYSTEM
+  and Administrators can change, and removes that folder when the run ends. A folder a killed run
+  left behind is removed by a later run once it is a day old. The checked package is kept in
+  `%ProgramData%\winget-app-setup\cache` and checked again on every use. A link found where the
+  cache folder should be is removed, never followed, and the folder is created again.
+- **How it installs.** Each module call runs in its own `pwsh` under a time limit (see the table
+  under [Unattended runs](#unattended-runs)), so a hung call is stopped together with what it
+  started. Before any app, a probe (`Get-WinGetVersion` and one `Get-WinGetPackage`) must answer.
+  Each app is checked with `Get-WinGetPackage`, as before, then installed with
+  `Install-WinGetPackage -Id <id> -Source winget -MatchOption Equals -Scope System -Mode Silent`.
+  Its installer log goes to the logs folder under the usual `winget-install-<id>-<time>.log` name.
+  The transcript shows each call as a `> Install-WinGetPackage ...` line and its outcome as a
+  `WinGet client result: ...` line. Results map onto winget's own result codes, so deferral,
+  retries, the circuit breaker, restarts and failure reasons work as with `winget.exe`. The module
+  prints no restart message, so a restart after a successful install is recognised from the
+  installer's exit code 3010 (the MSI, WiX and Burn default). The module does not expose a
+  manifest's other restart codes, so only the pending-restart check notices those.
+- **What it reports.** Near its start the run prints
+  `WinGet client module: ready - Microsoft.WinGet.Client 1.29.380, SHA256 <hash>, ...` (downloaded
+  or from the cache) and an `Install engine:` line. A run as SYSTEM prints that line once winget or
+  the module is ready, with or without the opt-in: it names the engine, the folder of the engine's
+  own logs (`WinGetCOM-*.log`, in `WinGet\defaultState` under `%SystemRoot%\SystemTemp` or the
+  run's temp folder) and, after a fallback, why.
+  `last-run.json` records `installEngine` and, for each app, the installer's own exit code as
+  `installerCode` (see [Run result](#run-result)).
+- **When it is not ready.** The run prints `WinGet client module: NOT READY - <reason>.` and installs
+  every app with the machine-wide `winget.exe`, as it would without the variable. The
+  `Install engine:` line, a warning next to the summary and `installEngine.fallbackReason` in
+  `last-run.json` say why. A fallback does not change the exit code. Typical reasons: the Gallery
+  cannot be reached, a size, hash or signature does not match, PowerShell is older than 7.4, or the
+  probe failed. The engine is decided once, at the start: one that stops working partway through
+  trips the circuit breaker, as `winget.exe` does.
+- **What still uses `winget.exe`.** Only the app installs and their checks move to the module.
+  Winget-AutoUpdate runs `winget.exe` for every update, so its setup is unchanged and the
+  end-of-run check still checks the machine-wide `winget.exe` (exit code 2 when it does not start).
+  At the start of a run with the module ready, a `winget.exe` that does not start is only a
+  warning: the apps install, and the warning says automatic updates will not work until App
+  Installer is repaired. The Windows App Runtime install is unchanged: it calls no winget, and is
+  there for `winget.exe` and Winget-AutoUpdate. The winget source update and reset are skipped,
+  since the module cannot manage sources as SYSTEM. The uninstaller, and the `winget download` path
+  of `Install-PowerShellLatest` (PowerShell 7.7 and later on Windows builds before 26100), use
+  `winget.exe` as before; PowerShell's MSI install goes through the module like any other app.
+- **Moving the pin.** On a Windows PC, run
+  `pwsh -File build/Set-WingetClientModulePin.ps1 -Version <version>`. It downloads the Gallery
+  package twice (and once more with `Save-PSResource` where that exists), checks it against the
+  Gallery's own hash, lists every file with its SHA256 and signature, compares the engine with
+  Microsoft's build of it on nuget.org, and prints the new `Size` and `Sha256`. Add `-Write` to
+  write them into `Get-WingetClientModulePin`. When the package's layout changed, it fails and
+  says so; then update the pin's `Framework` and `SignedFiles` by hand. Then rebuild the installer
+  (`build/Build-WingetInstallScript.ps1`) and let the `e2e-install-system-winget-client` job pass
+  (see [End-to-end monitoring](#end-to-end-monitoring-e2e-tier-1)) before you move the Endpoint
+  Central pin. `-Check` exits 1 when the Gallery's package no longer matches the pin.
+
+What has been checked so far: a probe on a GitHub-hosted Windows Server 2025 runner (2026-10-06)
+loaded the pinned module as SYSTEM under PowerShell 7.6, found each file the pin requires to be
+signed valid from Microsoft Corporation, listed installed packages with `Get-WinGetPackage`, and
+installed a package with `Install-WinGetPackage -Scope System`. The
+`e2e-install-system-winget-client` job has not run yet, and no real PC has used the engine. Try it
+on a pilot PC first.
+
 ### Endpoint Central and other RMM tools
 
 `rmm/` holds four scripts for ManageEngine Endpoint Central. Each is one file that needs nothing
@@ -673,14 +776,17 @@ phase needs no relaunch: it reads only files a 32-bit process sees as they are, 
 64-bit PowerShell 7.
 
 The machine phase runs this installer as SYSTEM, so the caveat above applies: Microsoft does not
-support the winget command line as SYSTEM. None of this has run from Endpoint Central on a real PC
-yet. What this section says about Endpoint Central (its 32-bit agent, output in the Remarks only
-for frequency Once, User Configuration scripts running as the signed-in user) comes from search
-results quoting its documentation, not from a test, and its own time limit for a script has not
-been measured: check that it covers a first run, which installs every app, or give the machine
-phase a time budget below it (`-MaxRuntimeMinutes`, see [Setting it up](#setting-it-up)). Check all
-of it on a pilot PC first. The E2E run's SYSTEM leg runs the machine phase the way the 32-bit agent
-would (see [End-to-end monitoring](#end-to-end-monitoring-e2e-tier-1)).
+support the winget command line as SYSTEM. `-SystemInstallEngine WinGetClient` moves the app
+installs to the supported `Microsoft.WinGet.Client` module (see
+[Microsoft.WinGet.Client engine (opt-in)](#microsoftwingetclient-engine-opt-in)). None of this has
+run from Endpoint Central on a real PC yet. What this section says about Endpoint Central (its
+32-bit agent, output in the Remarks only for frequency Once, User Configuration scripts running as
+the signed-in user) comes from search results quoting its documentation, not from a test, and its
+own time limit for a script has not been measured: check that it covers a first run, which
+installs every app, or give the machine phase a time budget below it (`-MaxRuntimeMinutes`, see
+[Setting it up](#setting-it-up)). Check all of it on a pilot PC first. The E2E run's SYSTEM legs
+run the machine phase the way the 32-bit agent would (see
+[End-to-end monitoring](#end-to-end-monitoring-e2e-tier-1)).
 
 #### Setting it up
 
@@ -712,7 +818,10 @@ would (see [End-to-end monitoring](#end-to-end-monitoring-e2e-tier-1)).
    add `-MaxRuntimeMinutes <n>` to the script's arguments, with n about 45 minutes below that limit
    (see [Time budget for RMM jobs](#time-budget-for-rmm-jobs--maxruntimeminutes)). The machine
    phase starts the clock as soon as it starts, before its 64-bit relaunch and the download, and a
-   run whose budget runs out exits 9 with the rest not attempted.
+   run whose budget runs out exits 9 with the rest not attempted. To install with the
+   `Microsoft.WinGet.Client` module instead of `winget.exe`, add `-SystemInstallEngine WinGetClient`
+   to the arguments (see
+   [Microsoft.WinGet.Client engine (opt-in)](#microsoftwingetclient-engine-opt-in)).
 
    Exit codes 8 and 9 are left out of the success codes on purpose. Exit code 8 means the apps are
    installed but automatic updates are not set up or will not run (for example, the Windows App
@@ -746,7 +855,14 @@ would (see [End-to-end monitoring](#end-to-end-monitoring-e2e-tier-1)).
    relaunches under it. With `-MaxRuntimeMinutes`, it also passes the budget and the deadline
    counted from the machine phase's own start. Without it (0, the default), it passes no budget,
    and the installer reads `WINGET_APP_SETUP_MAX_RUNTIME_MINUTES` if the job sets it. Use
-   `-MaxRuntimeMinutes` only with a pinned installer that has it;
+   `-MaxRuntimeMinutes` only with a pinned installer that has it. With `-SystemInstallEngine
+   WinGetClient` (or `Cli`), it sets `WINGET_APP_SETUP_SYSTEM_ENGINE` for the installer only, logs
+   `Install engine requested: <engine>`, and restores the job's own value afterwards (see
+   [Microsoft.WinGet.Client engine (opt-in)](#microsoftwingetclient-engine-opt-in)). Without it,
+   the installer uses `winget.exe` unless the job sets that variable itself. It takes effect only
+   with an installer pin from a commit that has the engine; an older pinned installer ignores the
+   variable. Allow `www.powershellgallery.com` and `cdn.powershellgallery.com` on port 443 for
+   those PCs;
 5. exits with the installer's exit code, unchanged (see [Exit codes](#exit-codes)). It exits 5
    without running the installer when the pins are not set, the download failed, the SHA256 does
    not match, or the 64-bit relaunch could not start.
@@ -929,7 +1045,7 @@ installed, and with `-WhatIf` when the fix would succeed. It exits 1, with `-Wha
 |------|---------|
 | 0 | Success — every app is installed, already present, or does not apply to this machine (`not applicable`); apps reported as `Deferred` do not count against it, and neither do apps whose post-install hook could not configure them (`Configuration: NOT DONE`) |
 | 1 | One or more apps failed to install, including an install stopped at its time limit, the apps not attempted because winget could no longer be started partway through the run, an app with `scope = 'machine'` that has no machine-wide installer, and an installed app whose post-install hook failed (also: a blocking pre-flight system check failed). An app whose catalog condition could not be evaluated is attempted (fail open), so its failed install counts here too |
-| 2 | Winget is unavailable or cannot be started (`winget --version` must run and print a version) and could not be set up (as SYSTEM: no machine-wide `winget.exe` was found, or none could be started), App Installer's Group Policy turns winget or its source off (the pre-flight checks it before the run waits for anything or sets winget up; see **Setting winget up** above), or winget could no longer be launched at the end of the run (no app failed, but automatic updates and the next run would) |
+| 2 | Winget is unavailable or cannot be started (`winget --version` must run and print a version) and could not be set up (as SYSTEM: no machine-wide `winget.exe` was found, or none could be started, and the opt-in [Microsoft.WinGet.Client engine](#microsoftwingetclient-engine-opt-in) is not ready either), App Installer's Group Policy turns winget or its source off (the pre-flight checks it before the run waits for anything or sets winget up; see **Setting winget up** above), or winget could no longer be launched at the end of the run (no app failed, but automatic updates and the next run would) |
 | 3 | App-definition validation failed (for example an invalid `scope`, `arch`, `postInstall` or `userPhase` value, see [Catalog entry fields](#catalog-entry-fields)), or no valid app definitions remain |
 | 4 | Administrator rights are required and the run was not elevated: the UAC prompt was declined or the elevated window could not be started, the run is non-interactive (no prompt is shown), it runs through `irm \| iex` in PowerShell 7, `Invoke-WingetInstall` was called from the imported module, or Group Policy sets the Windows PowerShell execution policy to `AllSigned` or `Restricted`: for the PC, so no UAC prompt is shown, or for the account that approved the prompt, so the elevated window stops before it runs anything (see [Administrator rights](#administrator-rights)) |
 | 5 | The run was aborted before it finished: an unexpected error (the message and stack trace are in the log), the run was stopped from outside (Ctrl+C, the console closing, an installer stopping the console) when run from a file or non-interactively, the installer file changed before its elevated copy could run (see [Administrator rights](#administrator-rights)), or PowerShell runs the installer in Constrained Language Mode (an App Control for Business or AppLocker policy), which the installer checks before anything else. With `-CollectDiagnostics`, the installer installs nothing and exits 0 when it saved the diagnostics bundle, 5 when it could not (see [Diagnostics bundle](#diagnostics-bundle--collectdiagnostics)). The machine phase `rmm/Invoke-WingetAppSetup.ps1` also exits 5, without running the installer, when its pins are not set, the download failed or the SHA256 does not match; otherwise it passes the installer's code back unchanged |
@@ -1015,10 +1131,11 @@ that found another one in progress leave the file alone. Fields:
 | `exitCode` | The exit code the run ends with, or `null` until it ends |
 | `summaryReached` | `false` for an early exit, an aborted run or a run still going |
 | `counts` | `installed`, `skipped`, `deferred`, `failed`, `notAttempted` |
-| `apps` | One entry per app processed, in catalog order: `id`; `status` (`Installed`, `Skipped`, `Deferred`, `Failed`, `NotAttempted`); `reason` (why it was skipped, deferred, not attempted or failed, as the run printed it, e.g. `already installed`, `not applicable: ...`, for a deferred app `winget found no machine-wide installer for it`, `per-user app (catalog scope 'user'): ...` or `per-user setup (catalog userPhase): ...`, or, for an app the time budget did not reach, `the run's <n>-minute time budget was used up`; `null` for an installed app); `code` (the winget or installer exit code, or `null`); `codeHex` (e.g. `0x8A150102`, or `null`); `restartRequired`; `postInstall` (`Configured`, `NotConfigured` or `Failed` when the app's post-install hook ran, otherwise `null`) and `postInstallReason` (why it is not `Configured`, or `null`) |
+| `apps` | One entry per app processed, in catalog order: `id`; `status` (`Installed`, `Skipped`, `Deferred`, `Failed`, `NotAttempted`); `reason` (why it was skipped, deferred, not attempted or failed, as the run printed it, e.g. `already installed`, `not applicable: ...`, for a deferred app `winget found no machine-wide installer for it`, `per-user app (catalog scope 'user'): ...` or `per-user setup (catalog userPhase): ...`, or, for an app the time budget did not reach, `the run's <n>-minute time budget was used up`; `null` for an installed app); `code` (the winget or installer exit code, or `null`; with the Microsoft.WinGet.Client engine, the code `winget.exe` would have returned); `codeHex` (e.g. `0x8A150102`, or `null`); `installerCode` (the installer's own exit code when the [Microsoft.WinGet.Client engine](#microsoftwingetclient-engine-opt-in) ran an installer, otherwise `null`); `restartRequired`; `postInstall` (`Configured`, `NotConfigured` or `Failed` when the app's post-install hook ran, otherwise `null`) and `postInstallReason` (why it is not `Configured`, or `null`) |
 | `autoUpdates` | `status` (as in the `RESULT` line) and `version` (or `null`) |
 | `restartRequired` | The run needs a restart to finish |
 | `wingetUsable` | Result of the end-of-run winget check; `null` when it did not run or could not complete |
+| `installEngine` | Which engine installed the apps: `requested` and `used` (`Cli` for `winget.exe`, `WinGetClient` for the [Microsoft.WinGet.Client engine](#microsoftwingetclient-engine-opt-in); a run that is not SYSTEM is always `Cli`), `module` (`name`, `version`, `sha256` and `engineVersion` when the module installed the apps, otherwise `null`) and `fallbackReason` (why a requested module was not used, otherwise `null`) |
 | `transcriptPath` | This run's transcript, or `null` |
 
 An RMM tool can collect the file. It has no transcript header, but a failure reason can contain a
@@ -1042,7 +1159,9 @@ what winget printed, indented: for example
 bar are left out, apart from the last progress line of each download, and a message winget shows
 next to its spinner, such as `Waiting for another install/uninstall to complete...`, is logged once
 rather than at every redraw. The per-app `winget list` checks print nothing; the source update
-prints winget's output only when it fails.
+prints winget's output only when it fails. With the opt-in
+[Microsoft.WinGet.Client engine](#microsoftwingetclient-engine-opt-in), each install is a
+`> Install-WinGetPackage ...` line followed by one `WinGet client result: ...` line instead.
 
 The same folder also holds:
 
@@ -1053,9 +1172,9 @@ The same folder also holds:
 - `pwsh-msi-<yyyyMMdd-HHmmss>-<attempt>.log` — `msiexec`'s verbose log when the bootstrap installs
   PowerShell 7 from the MSI.
 - `winget-install-<package id>-<yyyyMMdd-HHmmss>.log` — the installer's own log for each
-  `winget install` attempt (winget's `--log`), when the installer writes one: MSI, WiX, Burn and
-  Inno installers do, most other EXE installers do not. A failed app's reason in the summary names
-  this file.
+  `winget install` attempt (winget's `--log`, or `Install-WinGetPackage -Log` with the module
+  engine), when the installer writes one: MSI, WiX, Burn and Inno installers do, most other EXE
+  installers do not. A failed app's reason in the summary names this file.
 - `wau-msi-<install|uninstall>-<yyyyMMdd-HHmmss>-<attempt>.log` — `msiexec`'s verbose log of the
   Winget-AutoUpdate install, or of its removal by `winget-app-uninstall.ps1` (which writes it here
   although it keeps no transcript), one per attempt. A failed install or removal names it.
@@ -1081,8 +1200,10 @@ they are a day old (the uninstaller's elevated copies use the same folders, and 
 run removes the ones a stopped uninstall left behind): from `%SystemRoot%\Temp` and, for a run as
 SYSTEM, from SYSTEM's own temp folders. Only a folder of files owned by SYSTEM or Administrators is
 removed. An elevated run by an administrator does not clean that administrator's own `%TEMP%` (a
-user profile folder), so copies a killed interactive run left there can be deleted by hand. These
-numbers are the defaults of `Invoke-InstallerHousekeeping`
+user profile folder), so copies a killed interactive run left there can be deleted by hand. It
+removes the Microsoft.WinGet.Client engine's `wingetclient-<id>` folders that a killed run left in
+`%ProgramData%\winget-app-setup` once they are a day old, under the same owner rule, and leaves
+the engine's `cache` folder alone. These numbers are the defaults of `Invoke-InstallerHousekeeping`
 (`WingetAppSetup/Private/Housekeeping.ps1`).
 
 An elevated run gives standard users read access to the `logs` folder, so the log can be opened
@@ -1320,8 +1441,10 @@ powershell -ExecutionPolicy Unrestricted -File .\winget-app-uninstall.ps1 -WhatI
 ```
 
 - It first sets winget up the way the installer does (as SYSTEM, with the machine-wide
-  `winget.exe`). When winget still cannot be used, or Group Policy turns it off, it removes nothing,
-  Winget-AutoUpdate included, and exits 2.
+  `winget.exe`; it never uses the
+  [Microsoft.WinGet.Client engine](#microsoftwingetclient-engine-opt-in), whatever
+  `WINGET_APP_SETUP_SYSTEM_ENGINE` says). When winget still cannot be used, or Group Policy turns
+  it off, it removes nothing, Winget-AutoUpdate included, and exits 2.
 - An app counts as not installed only when `winget list` answered. A check that could not start
   winget, ran out of time or failed is a failure.
 - Each app is removed with `winget uninstall --exact --id <id> --silent` under a 15-minute limit.
@@ -1377,7 +1500,7 @@ The unit suite mocks every external call, so a real install is exercised by an e
 throwaway VMs by construction:
 
 - **When it runs:** weekly (Mondays 06:00 UTC), on manual dispatch, and on pull requests. Every
-  pull request starts the workflow. A `changes` job lets the three install jobs run only when the PR
+  pull request starts the workflow. A `changes` job lets the four install jobs run only when the PR
   touches the product (`WingetAppSetup/**`, `build/**`, `winget-app-install.ps1`, `rmm/**`) or the e2e
   machinery (`.github/workflows/e2e-install.yml`, `e2e/**`), and they install anyway if that job
   does not succeed. The filter is a job rather than a `paths:` filter so that `e2e-install` can be
@@ -1390,11 +1513,11 @@ throwaway VMs by construction:
   Windows PowerShell 5.1, the way a fresh PC runs the one-liner. It removes PowerShell 7 first, so
   its first pass goes through the bootstrap that installs PowerShell 7 and relaunches the
   installer, and its second pass finds PowerShell 7 and relaunches. Before the first pass, every
-  leg, the SYSTEM leg below included, uninstalls the catalog apps the runner image ships with
+  leg, the SYSTEM legs below included, uninstalls the catalog apps the runner image ships with
   (Google Chrome, 7-Zip and Git; `e2e/Remove-PreinstalledApps.ps1`), so the first pass really
   installs them. Every call there has a time limit (`winget list` 45 s, uninstall 150 s), each
   app's result prints as soon as it is done, and an app that cannot be removed gets a warning
-  annotation and is skipped by the first pass as already installed (the SYSTEM leg fails on it
+  annotation and is skipped by the first pass as already installed (the SYSTEM legs fail on it
   instead: see below).
 - **The SYSTEM leg:** `e2e-install-system`, on a third VM, runs one pass the way Endpoint Central
   does, after the same removal of the preinstalled catalog apps. A one-shot scheduled task runs as
@@ -1424,6 +1547,21 @@ throwaway VMs by construction:
   schema 1 fails the step. Apps on `KNOWN_PLATFORM_INCOMPATIBLE` are not checked. Unlike the other
   legs, an app the removal step could not remove fails this leg. The user phase is not run here: it
   would change the runner account's Windows Terminal settings.
+- **The SYSTEM leg with Microsoft.WinGet.Client:** `e2e-install-system-winget-client`, on a fourth
+  VM, runs the SYSTEM leg's pass twice through the machine phase with
+  `-SystemInstallEngine WinGetClient`
+  (`e2e/Invoke-SystemInstallPass.ps1 -SystemInstallEngine WinGetClient -PassCount 2`; see
+  [Microsoft.WinGet.Client engine (opt-in)](#microsoftwingetclient-engine-opt-in)). Each pass makes
+  every check of the SYSTEM leg. On top of those, it fails unless the machine phase logged the
+  request, the module was ready at its pin (`WinGet client module: ready - ` with the pin's version
+  and SHA256, and no `NOT READY` line), the `Install engine:` line and `last-run.json`'s
+  `installEngine` name the module at its pin, each app the job removed has a
+  `> Install-WinGetPackage -Id <id>` line, and no `> winget install` line appears. After the first
+  pass, it looks up the removed apps with `winget list` as the runner account, a check that does
+  not trust the engine's own detection. The second pass must take the module from the cache, find
+  every app that applies already there, and not install the framework again. Before the passes, a
+  step runs `build/Set-WingetClientModulePin.ps1 -Check` against the Gallery and saves its report;
+  it cannot fail the job. This job has not run yet.
 - **What it does:** the weekly run uses the one-liner above, against raw `main`, in both passes.
   Pull-request and dispatched runs install the checkout (the PR's merge commit, or the dispatched
   branch). The first pass pipes it to `iex` like the one-liner, and the second runs it with
@@ -1486,20 +1624,27 @@ throwaway VMs by construction:
   PowerShell install (`Install-PowerShellLatest`: PowerShell 7 is preinstalled in one leg and
   installed by the bootstrap in the other), the Endpoint Central user phase, the fleet health probe
   and the at-logon fix, a TightVNC password, the uninstaller, a time budget that runs out (exit
-  code 9), an ARM64 PC, and cross-user elevation (tier 2, below).
+  code 9), an ARM64 PC, cross-user elevation (tier 2, below), and the Microsoft.WinGet.Client
+  engine's fallback to `winget.exe` and its rarer results (an installer's 3010, an unknown id,
+  Group Policy), which only the unit tests cover.
 - **Where the evidence lands:** transcripts are written on the runner under
   `%ProgramData%\winget-app-setup\logs` (the same place as production runs) and always uploaded
   as the `e2e-install-transcripts` artifact (`e2e-install-transcripts-windows-powershell` for the
-  5.1 leg, which also holds its `-bootstrap` transcripts, and `e2e-install-transcripts-system` for
-  the SYSTEM leg, with the machine phase's `-rmm.log` and `last-run.json`). `e2e/Collect-Diagnostics.ps1` runs in
+  5.1 leg, which also holds its `-bootstrap` transcripts, `e2e-install-transcripts-system` for
+  the SYSTEM leg, with the machine phase's `-rmm.log` and `last-run.json`, and
+  `e2e-install-transcripts-system-winget-client` for the SYSTEM leg with Microsoft.WinGet.Client,
+  with the same files). `e2e/Collect-Diagnostics.ps1` runs in
   Windows PowerShell 5.1 before the first pass, after it and at the end of the job. It records the
   pwsh versions, the App Installer and `Microsoft.WindowsAppRuntime*` AppX packages registered for
   any user or provisioned, and the `\WAU\` tasks with their last run. The end-of-job snapshot adds
-  MsiInstaller and RestartManager events, AppX deployment errors and warnings, and
-  Winget-AutoUpdate's logs. A missing source is noted and the script still exits 0, so it never
-  fails the job. The snapshots, plus the assertion output saved by the assertions step, are
-  always uploaded as the `e2e-diagnostics` artifact (`e2e-diagnostics-windows-powershell` for the
-  5.1 leg, `e2e-diagnostics-system` for the SYSTEM leg).
+  MsiInstaller and RestartManager events, AppX deployment errors and warnings,
+  Winget-AutoUpdate's logs, and the newest 10 `WinGetCOM-*.log` files of the WinGet engine that
+  Microsoft.WinGet.Client runs as SYSTEM (`winget-engine-logs`). A missing source is noted and the
+  script still exits 0, so it never fails the job. The snapshots, plus the assertion output saved
+  by the assertions step, are always uploaded as the `e2e-diagnostics` artifact
+  (`e2e-diagnostics-windows-powershell` for the 5.1 leg, `e2e-diagnostics-system` for the SYSTEM
+  leg, and `e2e-diagnostics-system-winget-client`, which also holds the pin check's report
+  `pin-check.txt`, for the SYSTEM leg with Microsoft.WinGet.Client).
 - **On failure:** when a scheduled run or a run dispatched on `main` fails, times out or is
   cancelled in any leg, a separate `report-failure` job on `ubuntu-latest` downloads the
   artifacts. It creates a GitHub issue titled `E2E install run failed`, or comments on an existing
@@ -1507,7 +1652,7 @@ throwaway VMs by construction:
   leg that passed says so. For a leg that did not succeed it shows the steps that did not succeed
   and how long each ran, the assertion PASS/FAIL table, the last 50 lines of the earliest and
   latest install transcripts, the last 50 lines of the latest Windows PowerShell 5.1 bootstrap
-  transcript (5.1 leg), the last 30 lines of the latest machine phase log (SYSTEM leg), and the
+  transcript (5.1 leg), the last 30 lines of the latest machine phase log (SYSTEM legs), and the
   diagnostics snapshots. The same text goes to the run's summary
   page. The job runs outside the Windows jobs, so it still reports a run that lost PowerShell 7 or
   hit its time limit. Pull-request runs and runs dispatched on another branch never file the
@@ -1515,8 +1660,9 @@ throwaway VMs by construction:
   run after a failed install pass (the idempotence checks only when the second pass ran). Removing
   the preinstalled apps has a 15-minute limit (20 in the 5.1 leg, which also removes PowerShell 7),
   each install pass 35 minutes and the assertions 40, under the job's 145 (150 in the 5.1 leg);
-  the SYSTEM leg's pass has 45 minutes under its job's 80. So a hung step fails at its own limit
-  while the diagnostics and uploads still run.
+  the SYSTEM leg's pass has 45 minutes under its job's 80, and the Microsoft.WinGet.Client leg's
+  pin check 10 minutes and its two passes 100 under its job's 145. So a hung step fails at its
+  own limit while the diagnostics and uploads still run.
 - **Trigger manually:** `gh workflow run e2e-install.yml` tests `main`.
   `gh workflow run e2e-install.yml --ref <branch>` installs that branch's checkout, so a change
   can be tested before it merges. The branch must already contain this version of the workflow,
@@ -1553,6 +1699,13 @@ They also keep the helpers the scripts share identical, keep the two phases' pin
 that every script stays ASCII-only Windows PowerShell 5.1 code. `build/Set-RmmInstallerPin.ps1`
 sets the pins.
 
+The opt-in Microsoft.WinGet.Client engine of runs as SYSTEM lives in
+`WingetAppSetup/Private/WingetClientModule.ps1` (the pin, the download and its checks, and the
+script each child `pwsh` runs) and `WingetAppSetup/Private/WingetClientEngine.ps1` (the requests
+and how their results map onto winget's result codes). `build/Set-WingetClientModulePin.ps1`
+checks the pin against the PowerShell Gallery (`-Check`) or moves it (`-Write`; see
+[Microsoft.WinGet.Client engine (opt-in)](#microsoftwingetclient-engine-opt-in)).
+
 After changing anything under `WingetAppSetup/` or `build/fragments/`, regenerate both scripts and
 commit them with the change:
 
@@ -1575,9 +1728,10 @@ Run the test suite (one `<Area>.Tests.ps1` per module file under `tests/`, plus
 files and the `E2E*.Tests.ps1` files for the entry point, the suite's own loading rules, the build
 guards and pre-commit hook, the `rmm/` scripts and the pin helper, and the `e2e/` scripts, with
 sample transcripts and a sample `last-run.json` of the SYSTEM run (`system-last-run.json`, to
-update when the catalog changes) in `tests/fixtures/e2e` and the sample logs the diagnostics
-bundle's redaction is tested on in `tests/fixtures/diagnostics`; each loads the module directly via
-`tests/TestHelpers.ps1`, and none dot-sources a generated script):
+update when the catalog changes) in `tests/fixtures/e2e`, the sample logs the diagnostics
+bundle's redaction is tested on in `tests/fixtures/diagnostics`, and the sample results of the
+Microsoft.WinGet.Client engine's child `pwsh` in `tests/fixtures/winget-client`; each loads the
+module directly via `tests/TestHelpers.ps1`, and none dot-sources a generated script):
 
 ```powershell
 Invoke-Pester .\tests
@@ -1594,7 +1748,9 @@ Start winget through `Invoke-WingetProcess` and `msiexec` through `Invoke-Extern
 from the process. One older caller still uses `Start-Process`, with its own time limit: the
 PowerShell 7 bootstrap's `msiexec`. To check that winget can be started, use
 `Test-WingetLaunchable` (`WingetAppSetup/Private/WingetLaunchResilience.ps1`), not
-`Get-Command winget`.
+`Get-Command winget`. The engine's cmdlets (`Get-WinGetVersion`, `Get-WinGetPackage`,
+`Install-WinGetPackage`) run only in a child `pwsh`, through `Invoke-WingetClientRequest`; the
+pinned module is never loaded into the installer's own process.
 Tests mock the two functions and build their results with `New-TestProcessResult` from
 `tests/TestHelpers.ps1`; a test that scripts winget with `Mock winget` routes it through
 `Invoke-TestWingetMock`.

@@ -290,7 +290,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   now has a name in the exit-code table, with a hint about the Visual C++ runtime for SYSTEM. Microsoft does not support
   the winget command line as SYSTEM; moving SYSTEM runs to its `Microsoft.WinGet.Client` module is
   a follow-up. Checked as SYSTEM only by the E2E run's SYSTEM leg on Windows Server 2025 (see the
-  Endpoint Central entry), not yet on a Windows 10 or Windows 11 PC.
+  Endpoint Central entry), not yet on a Windows 10 or Windows 11 PC. (Since changed: a run as
+  SYSTEM can opt in to the module; see the next entry. `winget.exe` stays the default.)
+
+- An opt-in `Microsoft.WinGet.Client` install engine for runs as SYSTEM (wgt-gq8.42). Microsoft
+  documents the winget command line as unsupported in the system context, and this module as the
+  supported route there. Set `WINGET_APP_SETUP_SYSTEM_ENGINE=WinGetClient`, or run
+  `rmm/Invoke-WingetAppSetup.ps1 -SystemInstallEngine WinGetClient`, which sets the variable for the
+  installer and restores it afterwards. `Cli`, unset or empty keeps `winget.exe`, the default. Any
+  other value is warned about and means `Cli`, and a run that is not SYSTEM ignores the variable
+  and says so.
+  - **The module.** `Initialize-WingetClientModule` (`WingetAppSetup/Private/WingetClientModule.ps1`)
+    downloads Microsoft.WinGet.Client 1.29.380 as its `.nupkg` straight from the PowerShell Gallery,
+    never through `Install-Module`. It checks the size and SHA256 pinned in
+    `Get-WingetClientModulePin`, the package's own id and version, and a valid Microsoft Corporation
+    signature on the module's manifest, cmdlet and engine files. It extracts only the PowerShell 7
+    build and this process's engine, from the same locked handle it hashed, into a new
+    `%ProgramData%\winget-app-setup\wingetclient-<id>` folder that only SYSTEM and Administrators
+    can change, and removes the folder when the run ends; housekeeping removes one a killed run
+    left once it is a day old. The checked package is cached in
+    `%ProgramData%\winget-app-setup\cache` and hashed again on every use. It needs PowerShell 7.4
+    or later, an x64, x86 or Arm64 process, Windows build 17763 or later, and
+    `www.powershellgallery.com` and `cdn.powershellgallery.com` on port 443.
+  - **The engine.** `WingetAppSetup/Private/WingetClientEngine.ps1` runs every module call in a
+    child `pwsh` under `Invoke-ExternalProcess`, so each has a time limit and a hung call is stopped
+    with what it started (new `Get-ProcessTimeoutSeconds` operations: `WingetClientProbe` 3
+    minutes, `WingetClientVersion` 60 seconds, `WingetClientListCheck` 45 seconds; installs keep 30
+    minutes). A probe (`Get-WinGetVersion` and one `Get-WinGetPackage`) must answer first. The
+    installed checks are `Get-WinGetPackage`, and installs are
+    `Install-WinGetPackage -Source winget -MatchOption Equals -Scope System -Mode Silent` with an
+    installer log. `Get-WingetClientResultCode` maps every result onto the winget result code
+    `winget.exe` would have returned, so deferral, retries, the circuit breaker, restarts and
+    failure reasons work as before. The module prints no restart message, so a restart is the
+    installer's own exit code 3010.
+  - **Fallback.** When the module is not ready (no Gallery, a size, hash or signature mismatch,
+    PowerShell older than 7.4, a failed probe), the run prints
+    `WinGet client module: NOT READY - <reason>.`, installs with `winget.exe` as before, and says
+    why next to the summary and in `last-run.json`. The exit code does not change. With the module
+    ready, a machine-wide `winget.exe` that does not start is a warning instead of exit code 2,
+    because the installs no longer need it (Winget-AutoUpdate still does); the end-of-run check is
+    unchanged. The winget
+    source update and reset are skipped then. Winget-AutoUpdate, the uninstaller and the
+    `winget download` path of `Install-PowerShellLatest` keep using `winget.exe`.
+  - **Pin and E2E.** `build/Set-WingetClientModulePin.ps1` checks the pin against the Gallery
+    (`-Check`, exit 1 on a mismatch) or moves it (`-Write`). A fourth E2E leg,
+    `e2e-install-system-winget-client`, runs the SYSTEM pass twice through the machine phase with
+    the engine. It fails unless the module was ready at its pin and installed every app the job
+    removed, `winget list` as the runner account finds those apps, and the second pass takes the
+    module from the cache and finds every app present. It runs the pin check first, without
+    failing on it, and collects the engine's `WinGetCOM-*.log` files with the diagnostics. A probe
+    on the hosted runner (Windows Server 2025, PowerShell 7.6) loaded the module as SYSTEM, listed
+    and installed a package with it; the new leg has not run yet.
 
 - The E2E install also runs from Windows PowerShell 5.1, in a second job,
   `e2e-install-windows-powershell` (review finding P3-40). Every step there uses
@@ -377,6 +427,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `condition`. It still expects every app with neither an `arch` list nor a condition installed,
   whatever the module says, and fails a new `Apps with no arch list or condition apply` assertion
   when the module skips one.
+- Every run as SYSTEM now prints an `Install engine:` line near its start, with or without the
+  opt-in `Microsoft.WinGet.Client` engine (see Added): by default
+  `Install engine: winget.exe (<path>).` (wgt-gq8.42). `last-run.json` gains `installEngine`
+  (`requested`, `used`, `module`, `fallbackReason`; `requested` and `used` are `Cli` in a run that
+  did not ask for the engine) and,
+  for each app, `installerCode` (the installer's own exit code when the engine ran an installer,
+  otherwise `null`). Both are additions, so `schemaVersion` stays 1.
 - The generated `winget-app-install.ps1` leaves out the comments of the module and of the entry
   block, `build/fragments/tail.ps1` (work-order item 30, review finding P3-53): 439 KB and 11,111
   lines instead of 867 KB and 17,766, so every `irm | iex` run downloads about half as much.
