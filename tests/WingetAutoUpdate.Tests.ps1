@@ -138,24 +138,76 @@ Describe 'Winget-AutoUpdate integration (issue #168)' {
             $env:ProgramData = $script:origProgramData
         }
 
-        It 'creates a unique directory under ProgramData\winget-app-setup and restricts base and staging ACLs' {
+        It 'creates a unique directory under ProgramData\winget-app-setup once the base folder is made safe, and restricts its ACL' {
+            $baseDir = Join-Path $env:ProgramData 'winget-app-setup'
+            Mock Initialize-ProgramDataFolder { $baseDir }
             Mock New-Item { }
             Mock Set-RestrictedDirectoryAcl { }
 
             $dir = New-WauStagingDirectory
 
-            $baseDir = Join-Path $env:ProgramData 'winget-app-setup'
             $dir | Should -BeLike (Join-Path $baseDir 'wau-msi-*')
-            Should -Invoke New-Item -Times 2 -Exactly
-            Should -Invoke Set-RestrictedDirectoryAcl -Times 1 -Exactly -ParameterFilter { $Path -eq $baseDir }
+            # The base folder: a planted link removed and the folder locked (wgt-gq8.46).
+            Should -Invoke Initialize-ProgramDataFolder -Times 1 -Exactly -ParameterFilter { -not $ChildName -and -not $ReadableByUsers }
+            Should -Invoke New-Item -Times 1 -Exactly -ParameterFilter { $Path -eq $dir }
             Should -Invoke Set-RestrictedDirectoryAcl -Times 1 -Exactly -ParameterFilter { $Path -eq $dir }
         }
 
         It 'generates a different staging directory name on every run' {
+            Mock Initialize-ProgramDataFolder { Join-Path $env:ProgramData 'winget-app-setup' }
             Mock New-Item { }
             Mock Set-RestrictedDirectoryAcl { }
 
             (New-WauStagingDirectory) | Should -Not -Be (New-WauStagingDirectory)
+        }
+
+        # wgt-gq8.46: a standard user can create %ProgramData%\winget-app-setup as a junction before the
+        # first elevated run; icacls follows it by default, and the staged downloads would land in its
+        # target. A junction on Windows (no privilege needed), a symbolic link elsewhere.
+        It 'removes a link planted as the base folder instead of locking or staging through it, and leaves its target alone' {
+            $savedProgramData = $env:ProgramData
+            $env:ProgramData = Join-Path $TestDrive ('ProgramData-' + [guid]::NewGuid().ToString('N'))
+            try {
+                [void](New-Item -ItemType Directory -Path $env:ProgramData)
+                $baseDir = Join-Path $env:ProgramData 'winget-app-setup'
+                $victim = Join-Path $TestDrive ('victim-' + [guid]::NewGuid().ToString('N'))
+                [void](New-Item -ItemType Directory -Path $victim)
+                Set-Content -LiteralPath (Join-Path $victim 'keep.txt') -Value 'not the installer''s'
+                $victimSddl = $null
+                $linkType = 'SymbolicLink'
+                if ($IsWindows) {
+                    $linkType = 'Junction'
+                    $victimSddl = (Get-Acl -LiteralPath $victim).Sddl
+                }
+                [void](New-Item -ItemType $linkType -Path $baseDir -Target $victim)
+                $script:lockedLinks = @()
+                $script:lockedPaths = @()
+                Mock Set-RestrictedDirectoryAcl {
+                    $script:lockedPaths += $Path
+                    $item = Get-Item -LiteralPath $Path -Force
+                    if ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+                        $script:lockedLinks += $Path
+                    }
+                }
+                Mock New-RestrictedDirectory { [void](New-Item -ItemType Directory -Path $Path) }
+                Mock Write-WarningMessage { }
+
+                $dir = New-WauStagingDirectory
+
+                $script:lockedLinks | Should -BeNullOrEmpty
+                $script:lockedPaths | Should -Be @($baseDir, $dir)
+                ((Get-Item -LiteralPath $baseDir -Force).Attributes -band [System.IO.FileAttributes]::ReparsePoint) | Should -Be 0
+                Split-Path -Parent $dir | Should -Be $baseDir
+                Test-Path -LiteralPath $dir -PathType Container | Should -BeTrue
+                @(Get-ChildItem -LiteralPath $victim -Force | ForEach-Object { $_.Name }) | Should -Be @('keep.txt')
+                if ($IsWindows) {
+                    (Get-Acl -LiteralPath $victim).Sddl | Should -Be $victimSddl
+                }
+                Should -Invoke Write-WarningMessage -Times 1 -Exactly -ParameterFilter { $Message -like "'$baseDir' was a link (a junction or symbolic link), not a folder.*" }
+            }
+            finally {
+                $env:ProgramData = $savedProgramData
+            }
         }
 
         It 'makes Administrators the owner first, then removes inherited entries and replaces the SYSTEM and Administrators grants (review finding P2-21)' {
@@ -168,10 +220,64 @@ Describe 'Winget-AutoUpdate integration (issue #168)' {
             $script:icaclsCalls.Count | Should -Be 2
             # The installer's non-elevated first launch creates the folder, owned by the signed-in
             # user, and an owner can always rewrite the access list: ownership has to change first.
-            $script:icaclsCalls[0] | Should -Be '"C:\ProgramData\winget-app-setup\wau-msi-test" /setowner *S-1-5-32-544 /q'
+            # /L: a folder swapped for a link has the link changed, never its target (wgt-gq8.46).
+            $script:icaclsCalls[0] | Should -Be '"C:\ProgramData\winget-app-setup\wau-msi-test" /setowner *S-1-5-32-544 /L /q'
             # /grant:r replaces explicit SYSTEM and Administrators entries instead of adding to them.
-            $script:icaclsCalls[1] | Should -Be '"C:\ProgramData\winget-app-setup\wau-msi-test" /inheritance:r /grant:r *S-1-5-18:(OI)(CI)F *S-1-5-32-544:(OI)(CI)F /q'
-            Should -Invoke Assert-RestrictedDirectoryAcl -Times 1 -Exactly -ParameterFilter { $Path -eq 'C:\ProgramData\winget-app-setup\wau-msi-test' }
+            $script:icaclsCalls[1] | Should -Be '"C:\ProgramData\winget-app-setup\wau-msi-test" /inheritance:r /grant:r *S-1-5-18:(OI)(CI)F *S-1-5-32-544:(OI)(CI)F /L /q'
+            Should -Invoke Assert-RestrictedDirectoryAcl -Times 1 -Exactly -ParameterFilter { $Path -eq 'C:\ProgramData\winget-app-setup\wau-msi-test' -and -not $ReadableByUsers }
+        }
+
+        It 'lets BUILTIN\Users read the folder with -ReadableByUsers, by SID, in the same /grant:r (the logs folder, review finding P3-14)' {
+            $script:icaclsCalls = @()
+            Mock Start-Process { $script:icaclsCalls += $ArgumentList; [pscustomobject]@{ ExitCode = 0 } } -ParameterFilter { $FilePath -eq 'icacls.exe' }
+            Mock Assert-RestrictedDirectoryAcl { }
+
+            Set-RestrictedDirectoryAcl -Path 'C:\ProgramData\winget-app-setup\logs' -ReadableByUsers
+
+            $script:icaclsCalls[1] | Should -Be '"C:\ProgramData\winget-app-setup\logs" /inheritance:r /grant:r *S-1-5-18:(OI)(CI)F *S-1-5-32-544:(OI)(CI)F *S-1-5-32-545:(OI)(CI)RX /L /q'
+            Should -Invoke Assert-RestrictedDirectoryAcl -Times 1 -Exactly -ParameterFilter { $ReadableByUsers }
+        }
+
+        # wgt-gq8.46: icacls follows a junction by default, so a planted one would have the owner and
+        # access list of its target rewritten (System32, another user's profile).
+        It 'refuses a link before icacls runs, with the error id DirectoryIsLink' {
+            $victim = Join-Path $TestDrive ('victim-' + [guid]::NewGuid().ToString('N'))
+            [void](New-Item -ItemType Directory -Path $victim)
+            $link = Join-Path $TestDrive ('link-' + [guid]::NewGuid().ToString('N'))
+            $linkType = 'SymbolicLink'
+            if ($IsWindows) {
+                $linkType = 'Junction'
+            }
+            [void](New-Item -ItemType $linkType -Path $link -Target $victim)
+            Mock Start-Process { throw 'icacls must not run on a link' } -ParameterFilter { $FilePath -eq 'icacls.exe' }
+
+            { Set-RestrictedDirectoryAcl -Path $link } | Should -Throw -ErrorId 'DirectoryIsLink' -ExpectedMessage "'$link' is a link (a junction or symbolic link), not a folder, so its access list was not changed."
+
+            Should -Invoke Start-Process -Times 0 -Exactly -ParameterFilter { $FilePath -eq 'icacls.exe' }
+        }
+
+        It 'refuses a folder that became a link while icacls ran, with the error id DirectoryIsLink rather than the reset advice, even when the check of the result failed' {
+            $victim = Join-Path $TestDrive ('victim-' + [guid]::NewGuid().ToString('N'))
+            [void](New-Item -ItemType Directory -Path $victim)
+            $folder = Join-Path $TestDrive ('swapped-' + [guid]::NewGuid().ToString('N'))
+            [void](New-Item -ItemType Directory -Path $folder)
+            $script:linkTarget = $victim
+            # The first icacls call swaps the folder for a link, as a racing user would.
+            Mock Start-Process {
+                $path = ($ArgumentList -split '"')[1]
+                if (-not ((Get-Item -LiteralPath $path -Force).Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
+                    Remove-Item -LiteralPath $path -Force
+                    $linkType = 'SymbolicLink'
+                    if ($IsWindows) {
+                        $linkType = 'Junction'
+                    }
+                    [void](New-Item -ItemType $linkType -Path $path -Target $script:linkTarget)
+                }
+                [pscustomobject]@{ ExitCode = 0 }
+            } -ParameterFilter { $FilePath -eq 'icacls.exe' }
+            Mock Assert-RestrictedDirectoryAcl { throw "'$Path' is not limited to SYSTEM and Administrators: it is owned by PC01\enduser (S-1-5-21-1-2-3-1001)." }
+
+            { Set-RestrictedDirectoryAcl -Path $folder } | Should -Throw -ErrorId 'DirectoryIsLink' -ExpectedMessage "'$folder' was replaced by a link (a junction or symbolic link) while its access list was being set, so it is not used."
         }
 
         It 'changes only the folder itself, so the read grant on the logs folder inside it survives' {
@@ -245,8 +351,8 @@ Describe 'Winget-AutoUpdate integration (issue #168)' {
     Context 'Assert-RestrictedDirectoryAcl (review finding P2-21)' {
         BeforeAll {
             function New-TestAccessRule {
-                param ([string]$Sid, [string]$Name = $Sid, [string]$Type = 'Allow', [switch]$Inherited)
-                [pscustomobject]@{ Sid = $Sid; Name = $Name; AccessControlType = $Type; IsInherited = [bool]$Inherited }
+                param ([string]$Sid, [string]$Name = $Sid, [string]$Type = 'Allow', [switch]$Inherited, [long]$Rights = 0x1F01FF)
+                [pscustomobject]@{ Sid = $Sid; Name = $Name; AccessControlType = $Type; IsInherited = [bool]$Inherited; Rights = $Rights }
             }
             function New-TestAccessSummary {
                 param ([string]$OwnerSid = 'S-1-5-32-544', [string]$OwnerName = 'BUILTIN\Administrators', [switch]$Unprotected, [object[]]$ExtraRules = @())
@@ -304,6 +410,39 @@ Describe 'Winget-AutoUpdate integration (issue #168)' {
             Mock Get-DirectoryAccessSummary { throw 'Attempted to perform an unauthorized operation.' }
 
             { Assert-RestrictedDirectoryAcl -Path 'C:\ProgramData\winget-app-setup' } | Should -Throw '*unauthorized operation*'
+        }
+
+        # The logs folder (review finding P3-14, wgt-gq8.46): read and execute (0x1200A9) only.
+        It 'accepts a read-only BUILTIN\Users entry with -ReadableByUsers, and only then' {
+            Mock Get-DirectoryAccessSummary { New-TestAccessSummary -ExtraRules @(New-TestAccessRule -Sid 'S-1-5-32-545' -Name 'BUILTIN\Users' -Rights 0x1200A9) }
+
+            { Assert-RestrictedDirectoryAcl -Path 'C:\ProgramData\winget-app-setup\logs' -ReadableByUsers } | Should -Not -Throw
+            { Assert-RestrictedDirectoryAcl -Path 'C:\ProgramData\winget-app-setup\logs' } | Should -Throw '*BUILTIN\Users (S-1-5-32-545) has an access entry (allow)*'
+        }
+
+        It 'rejects a BUILTIN\Users entry that lets them change the folder (<Name>), even with -ReadableByUsers' -ForEach @(
+            @{ Name = 'add a file'; Rights = 0x1200AB }
+            @{ Name = 'add a folder'; Rights = 0x1200AD }
+            @{ Name = 'write attributes, which turns an empty folder into a junction'; Rights = 0x1201A9 }
+            @{ Name = 'delete what is in it'; Rights = 0x1200E9 }
+            @{ Name = 'modify'; Rights = 0x1301BF }
+            @{ Name = 'generic write'; Rights = 0x40000000 }
+        ) {
+            Mock Get-DirectoryAccessSummary { New-TestAccessSummary -ExtraRules @(New-TestAccessRule -Sid 'S-1-5-32-545' -Name 'BUILTIN\Users' -Rights $Rights) }
+
+            { Assert-RestrictedDirectoryAcl -Path 'C:\ProgramData\winget-app-setup\logs' -ReadableByUsers } | Should -Throw '*BUILTIN\Users (S-1-5-32-545) has an access entry (allow)*'
+        }
+
+        It 'rejects another account''s read-only entry and a BUILTIN\Users deny entry with -ReadableByUsers' {
+            Mock Get-DirectoryAccessSummary {
+                New-TestAccessSummary -ExtraRules @(
+                    (New-TestAccessRule -Sid 'S-1-5-21-1-2-3-1001' -Name 'PC01\enduser' -Rights 0x1200A9),
+                    (New-TestAccessRule -Sid 'S-1-5-32-545' -Name 'BUILTIN\Users' -Type 'Deny' -Rights 0x1200A9)
+                )
+            }
+
+            { Assert-RestrictedDirectoryAcl -Path 'C:\ProgramData\winget-app-setup\logs' -ReadableByUsers } |
+                Should -Throw '*PC01\enduser (S-1-5-21-1-2-3-1001) has an access entry (allow); BUILTIN\Users (S-1-5-32-545) has an access entry (deny)*'
         }
     }
 
@@ -627,6 +766,7 @@ Describe 'Winget-AutoUpdate integration (issue #168)' {
             $env:ProgramData = Join-Path $TestDrive 'ProgramData'
             try {
                 Mock Test-WauInstalled { $false }
+                Mock New-RestrictedDirectory { [void](New-Item -ItemType Directory -Path $Path) }
                 Mock Start-Process { [pscustomobject]@{ ExitCode = 0 } } -ParameterFilter { $FilePath -eq 'icacls.exe' }
                 Mock Get-DirectoryAccessSummary {
                     [pscustomobject]@{
@@ -662,10 +802,12 @@ Describe 'Winget-AutoUpdate integration (issue #168)' {
         # and the 'could have been swapped' wording would send the teammate the wrong way.
         It 'reports a download folder that cannot be created without the ownership wording or the reset hint' {
             $savedProgramData = $env:ProgramData
-            $env:ProgramData = Join-Path $TestDrive 'ProgramData'
+            # A folder of its own: an earlier test's base folder would already be there.
+            $env:ProgramData = Join-Path $TestDrive ('ProgramData-' + [guid]::NewGuid().ToString('N'))
             try {
                 Mock Test-WauInstalled { $false }
                 Mock New-Item { throw 'There is not enough space on the disk.' }
+                Mock New-RestrictedDirectory { throw 'There is not enough space on the disk.' }
                 Mock Start-Process { throw 'must not run icacls on a folder that was not created' } -ParameterFilter { $FilePath -eq 'icacls.exe' }
                 Mock Invoke-WebRequest { throw 'must not download without a download folder' }
                 $script:errors = @()
@@ -690,6 +832,7 @@ Describe 'Winget-AutoUpdate integration (issue #168)' {
             $env:ProgramData = Join-Path $TestDrive 'ProgramData'
             try {
                 Mock Test-WauInstalled { $false }
+                Mock New-RestrictedDirectory { [void](New-Item -ItemType Directory -Path $Path) }
                 Mock Start-Process { throw "An error occurred trying to start process 'icacls.exe'." } -ParameterFilter { $FilePath -eq 'icacls.exe' }
                 Mock Invoke-WebRequest { throw 'must not download without a secured download folder' }
                 $script:errors = @()
@@ -703,6 +846,43 @@ Describe 'Winget-AutoUpdate integration (issue #168)' {
                 $message | Should -BeLike "*could not be set up: An error occurred trying to start process 'icacls.exe'.*"
                 $message | Should -Not -BeLike '*takeown*'
                 $message | Should -Not -BeLike '*limited to SYSTEM and Administrators*'
+            }
+            finally {
+                $env:ProgramData = $savedProgramData
+            }
+        }
+
+        # wgt-gq8.46: takeown and icacls /reset, the advice for an access-list failure, would follow
+        # the link and change what it points to.
+        It 'does not download when a link planted as the base folder cannot be removed, and gives no reset advice' {
+            $savedProgramData = $env:ProgramData
+            $env:ProgramData = Join-Path $TestDrive ('ProgramData-' + [guid]::NewGuid().ToString('N'))
+            try {
+                [void](New-Item -ItemType Directory -Path $env:ProgramData)
+                $victim = Join-Path $TestDrive ('victim-' + [guid]::NewGuid().ToString('N'))
+                [void](New-Item -ItemType Directory -Path $victim)
+                $baseDir = Join-Path $env:ProgramData 'winget-app-setup'
+                $linkType = 'SymbolicLink'
+                if ($IsWindows) {
+                    $linkType = 'Junction'
+                }
+                [void](New-Item -ItemType $linkType -Path $baseDir -Target $victim)
+                Mock Test-WauInstalled { $false }
+                Mock Remove-FileSystemLink { throw 'Access is denied.' }
+                Mock Start-Process { throw 'must not run icacls on a link' } -ParameterFilter { $FilePath -eq 'icacls.exe' }
+                Mock Invoke-WebRequest { throw 'must not download through a link' }
+                $script:errors = @()
+                Mock Write-ErrorMessage { $script:errors += $Message }
+
+                $result = Install-WingetAutoUpdate
+
+                $result.Status | Should -Be 'Failed'
+                Should -Invoke Invoke-WebRequest -Times 0 -Exactly
+                Should -Invoke Start-Process -Times 0 -Exactly -ParameterFilter { $FilePath -eq 'icacls.exe' }
+                @(Get-ChildItem -LiteralPath $victim -Force) | Should -BeNullOrEmpty
+                $message = $script:errors -join "`n"
+                $message | Should -BeLike "Winget-AutoUpdate was NOT installed: its download folder in '$baseDir' could not be set up: '$baseDir' is a link (a junction or symbolic link), not a folder, and the link could not be removed: Access is denied.*"
+                $message | Should -Not -BeLike '*takeown*'
             }
             finally {
                 $env:ProgramData = $savedProgramData
@@ -2289,19 +2469,54 @@ Describe 'New-WauMsiLogPath (review finding P3-37)' {
         Test-Path -LiteralPath $directory -PathType Container | Should -BeTrue
     }
 
-    It 'Uses the installer''s logs folder under ProgramData when the run has no transcript (winget-app-uninstall.ps1)' {
+    It 'Uses the installer''s logs folder under ProgramData, made safe first, when the run has no transcript (winget-app-uninstall.ps1)' {
+        Mock Get-InstallerLogDirectory { $null }
+        $logs = Join-Path $TestDrive 'ProgramData/winget-app-setup/logs'
+        Mock Initialize-ProgramDataFolder { [void](New-Item -ItemType Directory -Path $logs -Force); $logs }
+
+        $path = New-WauMsiLogPath -Action install
+
+        Split-Path -Parent $path | Should -Be $logs
+        Split-Path -Leaf $path | Should -Match '^wau-msi-install-\d{8}-\d{6}-1\.log$'
+        Should -Invoke Initialize-ProgramDataFolder -Times 1 -Exactly -ParameterFilter { $ChildName -eq 'logs' -and $ReadableByUsers }
+    }
+
+    # wgt-gq8.46: msiexec writes the log with the run's elevated rights, so a link planted as the
+    # logs folder would have it write into whatever the link points to.
+    It 'Never names a log inside a link planted as the logs folder when the run has no transcript' {
         Mock Get-InstallerLogDirectory { $null }
         $savedProgramData = $env:ProgramData
-        $env:ProgramData = Join-Path $TestDrive 'ProgramData'
+        $env:ProgramData = Join-Path $TestDrive ('ProgramData-' + [guid]::NewGuid().ToString('N'))
         try {
-            $path = New-WauMsiLogPath -Action install
+            $baseDir = Join-Path $env:ProgramData 'winget-app-setup'
+            [void](New-Item -ItemType Directory -Path $baseDir -Force)
+            $victim = Join-Path $TestDrive ('victim-' + [guid]::NewGuid().ToString('N'))
+            [void](New-Item -ItemType Directory -Path $victim)
+            $linkType = 'SymbolicLink'
+            if ($IsWindows) {
+                $linkType = 'Junction'
+            }
+            [void](New-Item -ItemType $linkType -Path (Join-Path $baseDir 'logs') -Target $victim)
+            Mock Set-RestrictedDirectoryAcl { }
+            Mock Write-WarningMessage { }
 
-            Split-Path -Parent $path | Should -Be (Join-Path $env:ProgramData 'winget-app-setup\logs')
-            Split-Path -Leaf $path | Should -Match '^wau-msi-install-\d{8}-\d{6}-1\.log$'
+            $path = New-WauMsiLogPath -Action uninstall
+
+            $directory = Split-Path -Parent $path
+            $directory | Should -Be (Join-Path $baseDir 'logs')
+            ((Get-Item -LiteralPath $directory -Force).Attributes -band [System.IO.FileAttributes]::ReparsePoint) | Should -Be 0
+            Should -Invoke Set-RestrictedDirectoryAcl -Times 1 -Exactly -ParameterFilter { $Path -eq $directory -and $ReadableByUsers }
         }
         finally {
             $env:ProgramData = $savedProgramData
         }
+    }
+
+    It 'Returns no path when the logs folder cannot be made safe, so msiexec writes nothing there' {
+        Mock Get-InstallerLogDirectory { $null }
+        Mock Initialize-ProgramDataFolder { throw "'C:\ProgramData\winget-app-setup\logs' is a link (a junction or symbolic link), not a folder, and the link could not be removed: Access is denied." }
+
+        New-WauMsiLogPath -Action uninstall | Should -BeNullOrEmpty
     }
 
     It 'Returns no path when the folder cannot be created, so msiexec is not given a log it cannot open' {

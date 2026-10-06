@@ -330,7 +330,7 @@ Describe 'Initialize-WingetClientModule' {
         ((Get-Item -LiteralPath $script:cacheDirectory -Force).Attributes -band [System.IO.FileAttributes]::ReparsePoint) | Should -Be 0
         (Get-FileHash -LiteralPath (Join-Path $script:cacheDirectory $script:pin.FileName) -Algorithm SHA256).Hash | Should -Be $script:pin.Sha256
         @(Get-ChildItem -LiteralPath $target -Force | ForEach-Object { $_.Name }) | Should -Be @('keep.txt')
-        @($script:lines | Where-Object { $_ -like 'WARN: *cache was a link, not a folder; it was removed and the cache folder is created again.' }).Count | Should -Be 1
+        @($script:lines | Where-Object { $_ -like "WARN: '*cache' was a link (a junction or symbolic link), not a folder. The link was removed without changing what it pointed to, and a folder is created in its place." }).Count | Should -Be 1
     }
 
     It 'Deletes a cached package that does not match the pin and downloads it again' {

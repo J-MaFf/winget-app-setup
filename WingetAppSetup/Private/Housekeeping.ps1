@@ -127,6 +127,7 @@ function Get-SystemProfileTempRoot {
     installer log older than the oldest transcript kept (a run writes its installer logs after its
     transcript starts). Names decide the order, not file timestamps. Other files (last-run.json) and
     the current transcript are never touched; a file that cannot be deleted is left for the next run.
+    A logs folder that is a link is left alone.
 .PARAMETER LogDirectory
     The logs folder.
 .PARAMETER KeepTranscripts
@@ -151,7 +152,8 @@ function Remove-OldInstallerLog {
         [string]$CurrentTranscriptPath
     )
 
-    if (-not (Test-Path -LiteralPath $LogDirectory -PathType Container)) {
+    # Never through a link (wgt-gq8.46): the deletes would reach whatever it points to.
+    if (-not (Test-Path -LiteralPath $LogDirectory -PathType Container) -or (Test-FileSystemLink -Path $LogDirectory)) {
         return 0
     }
 
@@ -299,7 +301,8 @@ function Remove-StaleInstallerCopy {
     A run as SYSTEM that opted in to the engine extracts the module into
     %ProgramData%\winget-app-setup\wingetclient-<32 hex> and removes it when it ends, unless it was
     killed. This removes those at least MaxAgeHours old that SYSTEM or Administrators own and that
-    are not links, with everything in them (a link inside is removed, not followed).
+    are not links, with everything in them (a link inside is removed, not followed). Nothing is
+    removed when Root itself is a link.
 .PARAMETER Root
     The folder to look in (%ProgramData%\winget-app-setup, which only SYSTEM and Administrators can
     change). Missing: nothing to do.
@@ -318,7 +321,8 @@ function Remove-StaleWingetClientFolder {
         [int]$MaxAgeHours
     )
 
-    if (-not (Test-Path -LiteralPath $Root -PathType Container)) {
+    # Never through a link (wgt-gq8.46): the deletes would reach whatever it points to.
+    if (-not (Test-Path -LiteralPath $Root -PathType Container) -or (Test-FileSystemLink -Path $Root)) {
         return 0
     }
     $cutoffUtc = [DateTime]::UtcNow.AddHours(-$MaxAgeHours)

@@ -2787,7 +2787,7 @@ function Remove-OldInstallerLog {
         [string]$CurrentTranscriptPath
     )
 
-    if (-not (Test-Path -LiteralPath $LogDirectory -PathType Container)) {
+    if (-not (Test-Path -LiteralPath $LogDirectory -PathType Container) -or (Test-FileSystemLink -Path $LogDirectory)) {
         return 0
     }
 
@@ -2908,7 +2908,7 @@ function Remove-StaleWingetClientFolder {
         [int]$MaxAgeHours
     )
 
-    if (-not (Test-Path -LiteralPath $Root -PathType Container)) {
+    if (-not (Test-Path -LiteralPath $Root -PathType Container) -or (Test-FileSystemLink -Path $Root)) {
         return 0
     }
     $cutoffUtc = [DateTime]::UtcNow.AddHours(-$MaxAgeHours)
@@ -3625,50 +3625,32 @@ function Start-InstallerTranscript {
         $whatIfSuffix = '-whatif'
     }
     try {
-        if ($UserPhase) {
-            $logDirectory = Join-Path $env:LOCALAPPDATA 'winget-app-setup\logs'
+        if (-not $UserPhase -and (Test-IsAdmin)) {
+            $logDirectory = Initialize-ProgramDataFolder -ChildName 'logs' -ReadableByUsers
         }
         else {
-            $logDirectory = Join-Path $env:ProgramData 'winget-app-setup\logs'
-        }
-        if (-not (Test-Path -LiteralPath $logDirectory)) {
-            [void](New-Item -Path $logDirectory -ItemType Directory -Force -ErrorAction Stop)
+            if ($UserPhase) {
+                $logDirectory = Join-Path $env:LOCALAPPDATA 'winget-app-setup\logs'
+            }
+            else {
+                $logDirectory = Join-Path $env:ProgramData 'winget-app-setup\logs'
+            }
+            if (-not (Test-Path -LiteralPath $logDirectory)) {
+                [void](New-Item -Path $logDirectory -ItemType Directory -Force -ErrorAction Stop)
+            }
         }
         $logPath = Join-Path $logDirectory ('install-{0:yyyyMMdd-HHmmss}{1}{2}.log' -f (Get-Date), $phaseSuffix, $whatIfSuffix)
         [void](Start-Transcript -Path $logPath -ErrorAction Stop)
     }
     catch {
-        Write-WarningMessage "Transcript logging could not be started: $_. Continuing without a log file."
+        $resetHint = ''
+        if ($_.FullyQualifiedErrorId -eq 'RestrictedDirectoryAclFailed' -and $_.TargetObject) {
+            $resetHint = " To reset the folder, run in an elevated prompt: takeown /f `"$($_.TargetObject)`" /a, then icacls `"$($_.TargetObject)`" /reset, and re-run this installer."
+        }
+        Write-WarningMessage "Transcript logging could not be started: $_. Continuing without a log file.$resetHint"
         return $null
     }
-
-    if (-not $UserPhase) {
-        [void](Grant-InstallLogReadAccess -Path $logDirectory)
-    }
     return $logPath
-}
-
-function Grant-InstallLogReadAccess {
-    param (
-        [Parameter(Mandatory = $true)]
-        [string]$Path
-    )
-
-    if (-not (Test-IsAdmin)) {
-        return $false
-    }
-    try {
-        $icaclsArgs = '"{0}" /grant *S-1-5-32-545:(OI)(CI)RX' -f $Path
-        $proc = Start-Process -FilePath 'icacls.exe' -ArgumentList $icaclsArgs -Wait -PassThru -WindowStyle Hidden -ErrorAction Stop
-        if ($proc.ExitCode -eq 0) {
-            return $true
-        }
-        Write-WarningMessage ("Could not make the log folder readable for standard users (icacls exit code {0}). Open the log from an elevated session." -f $proc.ExitCode)
-    }
-    catch {
-        Write-WarningMessage "Could not make the log folder readable for standard users: $_. Open the log from an elevated session."
-    }
-    return $false
 }
 
 # --- MachineContext ---
@@ -5095,6 +5077,137 @@ function Invoke-WingetProcess {
     $result = Invoke-ExternalProcess -FilePath $WingetPath -ArgumentList $arguments -TimeoutSeconds $TimeoutSeconds -Echo $Echo
     $result.LogPath = $logPath
     return $result
+}
+
+# --- ProgramDataFolder ---
+function Get-FileSystemEntryAttribute {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    try {
+        return [System.IO.File]::GetAttributes($Path)
+    }
+    catch [System.IO.FileNotFoundException], [System.IO.DirectoryNotFoundException] {
+        return $null
+    }
+}
+
+function Test-FileSystemLink {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    $attributes = Get-FileSystemEntryAttribute -Path $Path
+    return ($null -ne $attributes -and ($attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0)
+}
+
+function Remove-FileSystemLink {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    $attributes = Get-FileSystemEntryAttribute -Path $Path
+    if ($null -eq $attributes) {
+        return
+    }
+    if (($attributes -band [System.IO.FileAttributes]::ReparsePoint) -eq 0) {
+        throw "'$Path' is not a link."
+    }
+    if ($attributes -band [System.IO.FileAttributes]::Directory) {
+        [System.IO.Directory]::Delete($Path, $false)
+    }
+    else {
+        [System.IO.File]::Delete($Path)
+    }
+    if ($null -ne (Get-FileSystemEntryAttribute -Path $Path)) {
+        throw "'$Path' is still there after it was removed."
+    }
+}
+
+function New-DirectoryIsLinkError {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Message
+    )
+
+    $exception = New-Object System.InvalidOperationException($Message)
+    return (New-Object System.Management.Automation.ErrorRecord($exception, 'DirectoryIsLink', [System.Management.Automation.ErrorCategory]::SecurityError, $Path))
+}
+
+function New-RestrictedDirectory {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    $security = New-Object System.Security.AccessControl.DirectorySecurity
+    $security.SetAccessRuleProtection($true, $false)
+    foreach ($sid in @('S-1-5-18', 'S-1-5-32-544')) {
+        $identity = New-Object System.Security.Principal.SecurityIdentifier($sid)
+        $rule = New-Object System.Security.AccessControl.FileSystemAccessRule($identity, 'FullControl', 'ContainerInherit, ObjectInherit', 'None', 'Allow')
+        $security.AddAccessRule($rule)
+    }
+    if ($PSVersionTable.PSEdition -eq 'Core') {
+        [System.IO.FileSystemAclExtensions]::Create((New-Object System.IO.DirectoryInfo($Path)), $security)
+    }
+    else {
+        [void][System.IO.Directory]::CreateDirectory($Path, $security)
+    }
+}
+
+function Initialize-ProgramDataFolder {
+    param (
+        [Parameter(Mandatory = $false)]
+        [ValidatePattern('^[A-Za-z0-9-]*$')]
+        [string]$ChildName = '',
+
+        [Parameter(Mandatory = $false)]
+        [switch]$ReadableByUsers
+    )
+
+    if ([string]::IsNullOrWhiteSpace($env:ProgramData)) {
+        throw 'The ProgramData environment variable is not set, so the installer has no folder for its data.'
+    }
+    $baseDirectory = Join-Path $env:ProgramData 'winget-app-setup'
+    $folders = @($baseDirectory)
+    if (-not [string]::IsNullOrEmpty($ChildName)) {
+        $folders += (Join-Path $baseDirectory $ChildName)
+    }
+
+    foreach ($folder in $folders) {
+        $attributes = Get-FileSystemEntryAttribute -Path $folder
+        if ($null -ne $attributes -and ($attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
+            try {
+                Remove-FileSystemLink -Path $folder
+            }
+            catch {
+                throw (New-DirectoryIsLinkError -Path $folder -Message ("'{0}' is a link (a junction or symbolic link), not a folder, and the link could not be removed: {1} Nothing was written through it. Remove the link in an elevated prompt (rmdir `"{0}`" removes a junction, not what it points to) and re-run this installer." -f $folder, $_.Exception.Message))
+            }
+            Write-WarningMessage ("'{0}' was a link (a junction or symbolic link), not a folder. The link was removed without changing what it pointed to, and a folder is created in its place." -f $folder)
+            $attributes = $null
+        }
+        if ($null -eq $attributes) {
+            if ($folder -eq $baseDirectory) {
+                New-RestrictedDirectory -Path $folder
+            }
+            else {
+                [void](New-Item -ItemType Directory -Path $folder -ErrorAction Stop)
+            }
+        }
+        elseif (($attributes -band [System.IO.FileAttributes]::Directory) -eq 0) {
+            throw "'$folder' is a file, not a folder."
+        }
+        $usersRead = [bool]$ReadableByUsers -and $folder -ne $baseDirectory
+        Set-RestrictedDirectoryAcl -Path $folder -ReadableByUsers:$usersRead
+    }
+    return $folders[-1]
 }
 
 # --- RunBudget ---
@@ -6980,10 +7093,14 @@ function Get-DirectoryAccessSummary {
 function Assert-RestrictedDirectoryAcl {
     param (
         [Parameter(Mandatory = $true)]
-        [string]$Path
+        [string]$Path,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$ReadableByUsers
     )
 
     $allowedSids = @('S-1-5-18', 'S-1-5-32-544')
+    $changeRights = 0x2 -bor 0x4 -bor 0x10 -bor 0x40 -bor 0x100 -bor 0x10000 -bor 0x40000 -bor 0x80000 -bor 0x10000000 -bor 0x40000000
     $security = Get-DirectoryAccessSummary -Path $Path
     $problems = @()
     if ($allowedSids -notcontains $security.OwnerSid) {
@@ -6993,9 +7110,13 @@ function Assert-RestrictedDirectoryAcl {
         $problems += 'it still inherits permissions from its parent folder'
     }
     foreach ($rule in @($security.AccessRules)) {
-        if ($allowedSids -notcontains $rule.Sid) {
-            $problems += "$($rule.Name) ($($rule.Sid)) has an access entry ($($rule.AccessControlType.ToLowerInvariant()))"
+        if ($allowedSids -contains $rule.Sid) {
+            continue
         }
+        if ($ReadableByUsers -and $rule.Sid -eq 'S-1-5-32-545' -and $rule.AccessControlType -eq 'Allow' -and ([long]$rule.Rights -band $changeRights) -eq 0) {
+            continue
+        }
+        $problems += "$($rule.Name) ($($rule.Sid)) has an access entry ($($rule.AccessControlType.ToLowerInvariant()))"
     }
     if ($problems.Count -gt 0) {
         throw ("'{0}' is not limited to SYSTEM and Administrators: {1}." -f $Path, ($problems -join '; '))
@@ -7005,17 +7126,28 @@ function Assert-RestrictedDirectoryAcl {
 function Set-RestrictedDirectoryAcl {
     param (
         [Parameter(Mandatory = $true)]
-        [string]$Path
+        [string]$Path,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$ReadableByUsers
     )
 
+    if (Test-FileSystemLink -Path $Path) {
+        throw (New-DirectoryIsLinkError -Path $Path -Message ("'{0}' is a link (a junction or symbolic link), not a folder, so its access list was not changed." -f $Path))
+    }
+
+    $grants = '*S-1-5-18:(OI)(CI)F *S-1-5-32-544:(OI)(CI)F'
+    if ($ReadableByUsers) {
+        $grants += ' *S-1-5-32-545:(OI)(CI)RX'
+    }
     $failure = $null
     $steps = @(
         @{
-            Arguments   = "`"$Path`" /setowner *S-1-5-32-544 /q"
+            Arguments   = "`"$Path`" /setowner *S-1-5-32-544 /L /q"
             Description = 'make Administrators the owner of'
         },
         @{
-            Arguments   = "`"$Path`" /inheritance:r /grant:r *S-1-5-18:(OI)(CI)F *S-1-5-32-544:(OI)(CI)F /q"
+            Arguments   = "`"$Path`" /inheritance:r /grant:r $grants /L /q"
             Description = 'restrict'
         }
     )
@@ -7028,11 +7160,14 @@ function Set-RestrictedDirectoryAcl {
     }
     if (-not $failure) {
         try {
-            Assert-RestrictedDirectoryAcl -Path $Path
+            Assert-RestrictedDirectoryAcl -Path $Path -ReadableByUsers:$ReadableByUsers
         }
         catch {
             $failure = "$_"
         }
+    }
+    if (Test-FileSystemLink -Path $Path) {
+        throw (New-DirectoryIsLinkError -Path $Path -Message ("'{0}' was replaced by a link (a junction or symbolic link) while its access list was being set, so it is not used." -f $Path))
     }
     if ($failure) {
         $exception = [System.InvalidOperationException]::new($failure)
@@ -7089,12 +7224,10 @@ function New-WauStagingDirectory {
         [string]$Prefix = 'wau-msi'
     )
 
-    $baseDir = Join-Path $env:ProgramData 'winget-app-setup'
-    $null = New-Item -Path $baseDir -ItemType Directory -Force -ErrorAction Stop
-    Set-RestrictedDirectoryAcl -Path $baseDir
+    $baseDir = Initialize-ProgramDataFolder
 
     $stagingDir = Join-Path $baseDir ($Prefix + '-' + [guid]::NewGuid().ToString('N'))
-    $null = New-Item -Path $stagingDir -ItemType Directory -Force -ErrorAction Stop
+    $null = New-Item -Path $stagingDir -ItemType Directory -ErrorAction Stop
     Set-RestrictedDirectoryAcl -Path $stagingDir
     return $stagingDir
 }
@@ -7576,14 +7709,11 @@ function New-WauMsiLogPath {
     )
 
     $directory = Get-InstallerLogDirectory
-    if ([string]::IsNullOrWhiteSpace($directory)) {
-        if ([string]::IsNullOrWhiteSpace($env:ProgramData)) {
-            return $null
-        }
-        $directory = Join-Path $env:ProgramData 'winget-app-setup\logs'
-    }
     try {
-        if (-not (Test-Path -LiteralPath $directory)) {
+        if ([string]::IsNullOrWhiteSpace($directory)) {
+            $directory = Initialize-ProgramDataFolder -ChildName 'logs' -ReadableByUsers
+        }
+        elseif (-not (Test-Path -LiteralPath $directory)) {
             [void](New-Item -Path $directory -ItemType Directory -Force -ErrorAction Stop)
         }
     }
@@ -9469,14 +9599,7 @@ function Initialize-WingetClientModule {
         if (-not $reason) {
             $stage = 'setting up its folders'
             $directory = New-WauStagingDirectory -Prefix 'wingetclient'
-            $cacheDirectory = Join-Path $env:ProgramData 'winget-app-setup\cache'
-            $cacheItem = Get-Item -LiteralPath $cacheDirectory -Force -ErrorAction SilentlyContinue
-            if ($cacheItem -and ($cacheItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
-                $cacheItem.Delete()
-                Write-WarningMessage "$cacheDirectory was a link, not a folder; it was removed and the cache folder is created again."
-            }
-            [void](New-Item -ItemType Directory -Path $cacheDirectory -Force -ErrorAction Stop)
-            Set-RestrictedDirectoryAcl -Path $cacheDirectory
+            $cacheDirectory = Initialize-ProgramDataFolder -ChildName 'cache'
             $cachePath = Join-Path $cacheDirectory $pin.FileName
             $expectedSha256 = "$($pin.Sha256)".ToUpperInvariant()
 

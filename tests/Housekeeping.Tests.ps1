@@ -30,6 +30,17 @@ BeforeAll {
         }
     }
 
+    # A link to Target at Path (wgt-gq8.46): a junction on Windows, as a standard user plants one; a
+    # symbolic link elsewhere.
+    function New-TestDirectoryLink {
+        param ([string]$Path, [string]$Target)
+        $linkType = 'SymbolicLink'
+        if ($IsWindows) {
+            $linkType = 'Junction'
+        }
+        [void](New-Item -ItemType $linkType -Path $Path -Target $Target -ErrorAction Stop)
+    }
+
     # A copy folder like the installer's, with one file in it, last written -AgeHours ago.
     function New-TestCopyFolder {
         param ([string]$Root, [string]$Prefix = 'winget-app-setup-', [double]$AgeHours, [string]$FileName = 'winget-app-install.ps1')
@@ -44,6 +55,19 @@ Describe 'Remove-OldInstallerLog (review finding P3-42)' {
     BeforeEach {
         $script:logDirectory = Join-Path $TestDrive ('logs-' + [Guid]::NewGuid().ToString('N'))
         [void](New-Item -ItemType Directory -Path $script:logDirectory -Force)
+    }
+
+    # wgt-gq8.46: a link planted as the logs folder would have an elevated run delete files in
+    # whatever it points to.
+    It 'Deletes nothing through a logs folder that is a link' {
+        $target = Join-Path $TestDrive ('target-' + [Guid]::NewGuid().ToString('N'))
+        New-TestTranscriptSet -Directory $target -Count 7
+        $link = Join-Path $TestDrive ('linked-logs-' + [Guid]::NewGuid().ToString('N'))
+        New-TestDirectoryLink -Path $link -Target $target
+
+        Remove-OldInstallerLog -LogDirectory $link -KeepTranscripts 4 | Should -Be 0
+
+        @(Get-TestFileName -Directory $target).Count | Should -Be 7
     }
 
     It 'Keeps the newest transcripts and deletes the older ones' {
@@ -401,6 +425,19 @@ Describe 'Remove-StaleWingetClientFolder (wgt-gq8.42)' {
         Test-Path -LiteralPath $recent | Should -BeTrue
         Test-Path -LiteralPath $otherName | Should -BeTrue
         Test-Path -LiteralPath (Join-Path $cache 'microsoft.winget.client.1.29.380.nupkg') | Should -BeTrue
+    }
+
+    # wgt-gq8.46: the folders below a link planted as %ProgramData%\winget-app-setup are not the
+    # installer's, whatever their names and owners.
+    It 'Removes nothing through a folder that is a link' {
+        $target = Join-Path $TestDrive ('target-' + [Guid]::NewGuid().ToString('N'))
+        $folder = New-TestWingetClientFolder -Root $target -AgeHours 30
+        $link = Join-Path $TestDrive ('linked-staging-' + [Guid]::NewGuid().ToString('N'))
+        New-TestDirectoryLink -Path $link -Target $target
+
+        Remove-StaleWingetClientFolder -Root $link -MaxAgeHours 24 | Should -Be 0
+
+        Test-Path -LiteralPath (Join-Path $folder 'Invoke-WingetClientRequest.ps1') | Should -BeTrue
     }
 
     It 'Leaves a folder another account owns, or whose owner cannot be read' {

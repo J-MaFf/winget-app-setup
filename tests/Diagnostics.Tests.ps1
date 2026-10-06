@@ -749,7 +749,7 @@ Describe 'Making the bundle (Invoke-DiagnosticsCollection)' {
         Mock Save-InstallerRunRecord { }
         Mock Save-InstallerRunStartRecord { }
         Mock Invoke-InstallerHousekeeping { }
-        Mock Grant-InstallLogReadAccess { $true }
+        Mock Initialize-ProgramDataFolder { }
         Mock Initialize-Winget { }
         Mock Invoke-WingetInstall { 0 }
         Mock Restart-WithElevation { }
@@ -829,7 +829,7 @@ Describe 'Making the bundle (Invoke-DiagnosticsCollection)' {
     It 'Changes nothing on the PC: no transcript, run lock, run record, housekeeping, winget setup, install, elevation or PowerShell 7 bootstrap' {
         [void](Invoke-DiagnosticsCollection -LogDirectory $script:logDirectory -OutputDirectory $script:outputDirectory)
 
-        foreach ($command in @('Start-Transcript', 'Lock-InstallerRun', 'Save-InstallerRunRecord', 'Save-InstallerRunStartRecord', 'Invoke-InstallerHousekeeping', 'Grant-InstallLogReadAccess', 'Initialize-Winget', 'Invoke-WingetInstall', 'Restart-WithElevation', 'Invoke-PowerShell7Bootstrap')) {
+        foreach ($command in @('Start-Transcript', 'Lock-InstallerRun', 'Save-InstallerRunRecord', 'Save-InstallerRunStartRecord', 'Invoke-InstallerHousekeeping', 'Initialize-ProgramDataFolder', 'Initialize-Winget', 'Invoke-WingetInstall', 'Restart-WithElevation', 'Invoke-PowerShell7Bootstrap')) {
             Should -Invoke $command -Times 0 -Exactly
         }
         # The logs it read are as they were, and it wrote nothing next to them.

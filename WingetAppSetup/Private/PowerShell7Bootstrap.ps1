@@ -9,8 +9,9 @@
 # (Private/WingetResultCodes.ps1), Get-ScriptExecutionPolicyBlock, Test-LaunchedByGroupPolicyScript,
 # Test-FullLanguageMode, Get-PowerShellLanguageMode, Test-EffectiveNonInteractive,
 # Test-NonInteractiveRequested, Test-IsContinuousIntegration, Resolve-InstallerRunBudget and
-# Get-InstallerRunBudgetArgument (Private/RunBudget.ps1), Start-InstallerTranscript,
-# Grant-InstallLogReadAccess, Write-Prompt, Exit-Installer, Write-InstallerExitNotice,
+# Get-InstallerRunBudgetArgument (Private/RunBudget.ps1), Start-InstallerTranscript with
+# Private/ProgramDataFolder.ps1, Set-RestrictedDirectoryAcl, Assert-RestrictedDirectoryAcl and
+# Get-DirectoryAccessSummary, Write-Prompt, Exit-Installer, Write-InstallerExitNotice,
 # Wait-InstallerExitKeyPress, Write-InstallerReportHint, Get-DiagnosticsCommandLine,
 # Write-InstallerNotStartedResult, Complete-InstallerRun and the Private/RunRecord.ps1 functions
 # they reach, and Unlock-InstallerRun; and, for -CollectDiagnostics, Invoke-DiagnosticsCollection

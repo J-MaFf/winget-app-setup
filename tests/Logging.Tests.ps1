@@ -152,13 +152,13 @@ Describe 'Write-Prompt' {
     }
 }
 
-Describe 'Start-InstallerTranscript (issue #189, review findings P2-13 and P3-14)' {
+Describe 'Start-InstallerTranscript (issue #189, review findings P2-13 and P3-14, wgt-gq8.46)' {
     BeforeEach {
         $script:savedProgramData = $env:ProgramData
-        $env:ProgramData = Join-Path $TestDrive 'ProgramData'
+        $env:ProgramData = Join-Path $TestDrive ('ProgramData-' + [guid]::NewGuid().ToString('N'))
         $script:logDirectory = Join-Path $env:ProgramData 'winget-app-setup\logs'
         Mock Start-Transcript { }
-        Mock Grant-InstallLogReadAccess { $true }
+        Mock Test-IsAdmin { $true }
         Mock Write-WarningMessage { }
     }
 
@@ -166,106 +166,129 @@ Describe 'Start-InstallerTranscript (issue #189, review findings P2-13 and P3-14
         $env:ProgramData = $script:savedProgramData
     }
 
-    It 'Creates the log folder under ProgramData and starts install-<timestamp>.log there' {
-        $script:transcriptPath = Start-InstallerTranscript
-
-        Test-Path -LiteralPath $script:logDirectory | Should -BeTrue
-        $script:transcriptPath | Should -Match ('^' + [regex]::Escape($script:logDirectory) + '[\\/]install-\d{8}-\d{6}\.log$')
-        Should -Invoke Start-Transcript -Times 1 -Exactly -ParameterFilter { $Path -eq $script:transcriptPath }
-    }
-
-    It 'Names the files of a dry run, the 5.1 bootstrap and a bootstrapped dry run apart' {
-        Start-InstallerTranscript -WhatIf | Should -Match 'install-\d{8}-\d{6}-whatif\.log$'
-        Start-InstallerTranscript -Bootstrap | Should -Match 'install-\d{8}-\d{6}-bootstrap\.log$'
-        Start-InstallerTranscript -Bootstrap -WhatIf | Should -Match 'install-\d{8}-\d{6}-bootstrap-whatif\.log$'
-    }
-
-    It 'Makes the log folder readable for standard users once the transcript runs' {
-        Start-InstallerTranscript | Out-Null
-
-        Should -Invoke Grant-InstallLogReadAccess -Times 1 -Exactly -ParameterFilter { $Path -eq $script:logDirectory }
-    }
-
-    # Work-order item 34: the user phase runs as a standard user, who cannot write to the machine's
-    # logs folder, so it logs to its own %LOCALAPPDATA% and leaves the access list alone.
-    It 'Logs the user phase to the user''s own LOCALAPPDATA, as an install-(time)-userphase.log, without changing any access list' {
-        $savedLocalAppData = $env:LOCALAPPDATA
-        try {
-            $env:LOCALAPPDATA = Join-Path $TestDrive 'LocalAppData'
-            $userLogDirectory = Join-Path $env:LOCALAPPDATA 'winget-app-setup\logs'
-
-            $script:userTranscriptPath = Start-InstallerTranscript -UserPhase
-
-            $script:userTranscriptPath | Should -Match ('^' + [regex]::Escape($userLogDirectory) + '[\\/]install-\d{8}-\d{6}-userphase\.log$')
-            Test-Path -LiteralPath $userLogDirectory | Should -BeTrue
-            Should -Invoke Start-Transcript -Times 1 -Exactly -ParameterFilter { $Path -eq $script:userTranscriptPath }
-            Should -Invoke Grant-InstallLogReadAccess -Times 0 -Exactly
+    Context 'With the log folder''s checks stood in for' {
+        BeforeEach {
+            Mock Initialize-ProgramDataFolder { [void](New-Item -ItemType Directory -Path $script:logDirectory -Force); $script:logDirectory }
         }
-        finally {
-            $env:LOCALAPPDATA = $savedLocalAppData
+
+        It 'Creates the log folder under ProgramData and starts install-<timestamp>.log there' {
+            $script:transcriptPath = Start-InstallerTranscript
+
+            Test-Path -LiteralPath $script:logDirectory | Should -BeTrue
+            $script:transcriptPath | Should -Match ('^' + [regex]::Escape($script:logDirectory) + '[\\/]install-\d{8}-\d{6}\.log$')
+            Should -Invoke Start-Transcript -Times 1 -Exactly -ParameterFilter { $Path -eq $script:transcriptPath }
+        }
+
+        It 'Names the files of a dry run, the 5.1 bootstrap and a bootstrapped dry run apart' {
+            Start-InstallerTranscript -WhatIf | Should -Match 'install-\d{8}-\d{6}-whatif\.log$'
+            Start-InstallerTranscript -Bootstrap | Should -Match 'install-\d{8}-\d{6}-bootstrap\.log$'
+            Start-InstallerTranscript -Bootstrap -WhatIf | Should -Match 'install-\d{8}-\d{6}-bootstrap-whatif\.log$'
+        }
+
+        It 'Makes the log folder safe, readable for standard users, before an elevated run starts the transcript in it' {
+            Start-InstallerTranscript | Out-Null
+
+            Should -Invoke Initialize-ProgramDataFolder -Times 1 -Exactly -ParameterFilter { $ChildName -eq 'logs' -and $ReadableByUsers }
+        }
+
+        It 'Leaves the access list alone in a run that is not elevated, which writes with its own rights only' {
+            Mock Test-IsAdmin { $false }
+
+            $path = Start-InstallerTranscript
+
+            Split-Path -Parent $path | Should -Be $script:logDirectory
+            Test-Path -LiteralPath $script:logDirectory -PathType Container | Should -BeTrue
+            Should -Invoke Initialize-ProgramDataFolder -Times 0 -Exactly
+        }
+
+        # Work-order item 34: the user phase runs as a standard user, who cannot write to the machine's
+        # logs folder, so it logs to its own %LOCALAPPDATA% and leaves the access list alone.
+        It 'Logs the user phase to the user''s own LOCALAPPDATA, as an install-(time)-userphase.log, without changing any access list' {
+            $savedLocalAppData = $env:LOCALAPPDATA
+            try {
+                $env:LOCALAPPDATA = Join-Path $TestDrive 'LocalAppData'
+                $userLogDirectory = Join-Path $env:LOCALAPPDATA 'winget-app-setup\logs'
+
+                $script:userTranscriptPath = Start-InstallerTranscript -UserPhase
+
+                $script:userTranscriptPath | Should -Match ('^' + [regex]::Escape($userLogDirectory) + '[\\/]install-\d{8}-\d{6}-userphase\.log$')
+                Test-Path -LiteralPath $userLogDirectory | Should -BeTrue
+                Should -Invoke Start-Transcript -Times 1 -Exactly -ParameterFilter { $Path -eq $script:userTranscriptPath }
+                Should -Invoke Initialize-ProgramDataFolder -Times 0 -Exactly
+            }
+            finally {
+                $env:LOCALAPPDATA = $savedLocalAppData
+            }
+        }
+
+        It 'Warns and returns $null instead of failing the run when the transcript cannot start' {
+            Mock Start-Transcript { throw 'Access to the path is denied.' }
+
+            Start-InstallerTranscript | Should -BeNullOrEmpty
+
+            Should -Invoke Write-WarningMessage -Times 1 -Exactly -ParameterFilter { $Message -match 'Transcript logging could not be started: Access to the path is denied' -and $Message -notmatch 'takeown' }
+        }
+
+        It 'Starts no transcript when the log folder cannot be made safe, and says how to reset a folder whose access list could not be set' {
+            Mock Initialize-ProgramDataFolder {
+                throw [System.Management.Automation.ErrorRecord]::new([System.InvalidOperationException]::new("'C:\ProgramData\winget-app-setup\logs' is not limited to SYSTEM and Administrators: PC01\enduser (S-1-5-21-1-2-3-1001) has an access entry (allow)."), 'RestrictedDirectoryAclFailed', [System.Management.Automation.ErrorCategory]::SecurityError, 'C:\ProgramData\winget-app-setup\logs')
+            }
+
+            Start-InstallerTranscript | Should -BeNullOrEmpty
+
+            Should -Invoke Start-Transcript -Times 0 -Exactly
+            Should -Invoke Write-WarningMessage -Times 1 -Exactly -ParameterFilter {
+                $Message -like "Transcript logging could not be started: 'C:\ProgramData\winget-app-setup\logs' is not limited to SYSTEM and Administrators*Continuing without a log file. To reset the folder, run in an elevated prompt: takeown /f `"C:\ProgramData\winget-app-setup\logs`" /a, then icacls `"C:\ProgramData\winget-app-setup\logs`" /reset, and re-run this installer."
+            }
         }
     }
 
-    It 'Warns and returns $null instead of failing the run when the transcript cannot start' {
-        Mock Start-Transcript { throw 'Access to the path is denied.' }
+    Context 'With real links and the real folder checks (wgt-gq8.46)' {
+        # wgt-gq8.46: an elevated or SYSTEM run would otherwise write its transcript, last-run.json and
+        # the installer logs into whatever a link planted as the logs folder points to. Real links here
+        # (a junction on Windows, a symbolic link elsewhere); only icacls and the locked creation of the
+        # base folder are stood in for.
+        It 'Never starts the transcript inside a link planted as the logs folder, and leaves its target alone' {
+            $baseDir = Join-Path $env:ProgramData 'winget-app-setup'
+            [void](New-Item -ItemType Directory -Path $baseDir -Force)
+            $victim = Join-Path $TestDrive ('victim-' + [guid]::NewGuid().ToString('N'))
+            [void](New-Item -ItemType Directory -Path $victim)
+            Set-Content -LiteralPath (Join-Path $victim 'keep.txt') -Value 'not the installer''s'
+            $linkType = 'SymbolicLink'
+            if ($IsWindows) {
+                $linkType = 'Junction'
+            }
+            [void](New-Item -ItemType $linkType -Path $script:logDirectory -Target $victim)
+            Mock Set-RestrictedDirectoryAcl { }
+            Mock New-RestrictedDirectory { [void](New-Item -ItemType Directory -Path $Path) }
 
-        Start-InstallerTranscript | Should -BeNullOrEmpty
+            $path = Start-InstallerTranscript
 
-        Should -Invoke Write-WarningMessage -Times 1 -Exactly -ParameterFilter { $Message -match 'Transcript logging could not be started: Access to the path is denied' }
-        Should -Invoke Grant-InstallLogReadAccess -Times 0 -Exactly
-    }
-}
-
-Describe 'Grant-InstallLogReadAccess (review finding P3-14)' {
-    BeforeEach {
-        Mock Test-IsAdmin { $true }
-        Mock Write-WarningMessage { }
-        Mock Start-Process { [pscustomobject]@{ ExitCode = 0 } } -ParameterFilter { $FilePath -eq 'icacls.exe' }
-        $script:logFolder = 'C:\ProgramData\winget-app-setup\logs'
-    }
-
-    It 'Grants BUILTIN\Users inheritable read access to the log folder, by SID' {
-        # Installing Winget-AutoUpdate strips inherited access from %ProgramData%\winget-app-setup;
-        # an explicit grant on the logs folder survives that, so the teammate can open the log from
-        # the end user's session.
-        Grant-InstallLogReadAccess -Path $script:logFolder | Should -BeTrue
-
-        Should -Invoke Start-Process -Times 1 -Exactly -ParameterFilter {
-            $FilePath -eq 'icacls.exe' -and
-            $ArgumentList -eq ('"{0}" /grant *S-1-5-32-545:(OI)(CI)RX' -f $script:logFolder)
+            $directory = Split-Path -Parent $path
+            $directory | Should -Be $script:logDirectory
+            ((Get-Item -LiteralPath $directory -Force).Attributes -band [System.IO.FileAttributes]::ReparsePoint) | Should -Be 0
+            @(Get-ChildItem -LiteralPath $victim -Force | ForEach-Object { $_.Name }) | Should -Be @('keep.txt')
+            Should -Invoke Start-Transcript -Times 1 -Exactly -ParameterFilter { $Path -eq $path }
         }
-    }
 
-    It 'Never touches inheritance, other folders or write access (the WAU staging lockdown stays as it is)' {
-        Grant-InstallLogReadAccess -Path $script:logFolder | Out-Null
+        It 'Starts no transcript when a link planted as the logs folder cannot be removed' {
+            $baseDir = Join-Path $env:ProgramData 'winget-app-setup'
+            [void](New-Item -ItemType Directory -Path $baseDir -Force)
+            $victim = Join-Path $TestDrive ('victim-' + [guid]::NewGuid().ToString('N'))
+            [void](New-Item -ItemType Directory -Path $victim)
+            $linkType = 'SymbolicLink'
+            if ($IsWindows) {
+                $linkType = 'Junction'
+            }
+            [void](New-Item -ItemType $linkType -Path $script:logDirectory -Target $victim)
+            Mock Set-RestrictedDirectoryAcl { }
+            Mock Remove-FileSystemLink { throw 'Access is denied.' }
 
-        Should -Invoke Start-Process -Times 0 -ParameterFilter {
-            $ArgumentList -match '/inheritance|/reset|/T\b|/remove|/deny|:\(OI\)\(CI\)(F|M|W)'
+            Start-InstallerTranscript | Should -BeNullOrEmpty
+
+            Should -Invoke Start-Transcript -Times 0 -Exactly
+            @(Get-ChildItem -LiteralPath $victim -Force) | Should -BeNullOrEmpty
+            Should -Invoke Write-WarningMessage -Times 1 -Exactly -ParameterFilter { $Message -like "Transcript logging could not be started: '$($script:logDirectory)' is a link*Continuing without a log file." }
         }
-    }
-
-    It 'Leaves the ACL alone in a non-elevated process (the elevated run does it)' {
-        Mock Test-IsAdmin { $false }
-
-        Grant-InstallLogReadAccess -Path $script:logFolder | Should -BeFalse
-
-        Should -Invoke Start-Process -Times 0 -Exactly
-        Should -Invoke Write-WarningMessage -Times 0 -Exactly
-    }
-
-    It 'Warns and carries on when icacls fails' {
-        Mock Start-Process { [pscustomobject]@{ ExitCode = 5 } } -ParameterFilter { $FilePath -eq 'icacls.exe' }
-
-        Grant-InstallLogReadAccess -Path $script:logFolder | Should -BeFalse
-
-        Should -Invoke Write-WarningMessage -Times 1 -Exactly -ParameterFilter { $Message -match 'icacls exit code 5' }
-    }
-
-    It 'Warns and carries on when icacls cannot be started' {
-        Mock Start-Process { throw 'The system cannot find the file specified.' } -ParameterFilter { $FilePath -eq 'icacls.exe' }
-
-        { Grant-InstallLogReadAccess -Path $script:logFolder } | Should -Not -Throw
-
-        Should -Invoke Write-WarningMessage -Times 1 -Exactly -ParameterFilter { $Message -match 'cannot find the file' }
     }
 }

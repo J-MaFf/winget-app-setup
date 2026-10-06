@@ -166,6 +166,10 @@ Describe 'rmm/Invoke-WingetAppSetup.ps1: the machine phase' {
             $null = New-Item -ItemType Directory -Path $path
             $path
         }
+        # The transcript's folders (wgt-gq8.46): their access lists are Windows-only; the checks
+        # themselves have their own tests below.
+        Mock New-RmmSecuredFolder { $null = New-Item -ItemType Directory -Path $Path }
+        Mock Get-RmmFolderTrustProblem { $null }
         Mock Save-RmmInstallerDownload { throw 'no download in this test' }
         $script:copyRoot = New-TestFolder
         $script:logs = Join-Path (New-TestFolder) 'logs'
@@ -530,7 +534,101 @@ exit 6
 
         $exitCode | Should -Be 5
         ($output -join "`n") | Should -Match 'no pinned installer yet'
+    }
+
+    # The whole wrapper in a process of its own, so its folders get real access lists: Windows only.
+    It 'Logs a run without pins too, in folders it creates for SYSTEM and Administrators' -Skip:(-not $IsWindows) {
+        $copy = New-UnpinnedWrapperCopy -Path $script:MachineWrapperPath
+        $programData = New-TestFolder
+        $savedProgramData = $env:ProgramData
+        try {
+            $env:ProgramData = $programData
+            $null = & $script:Pwsh -NoProfile -NonInteractive -File $copy 2>&1
+        }
+        finally {
+            $env:ProgramData = $savedProgramData
+        }
+
         @(Get-ChildItem -LiteralPath (Join-Path $programData 'winget-app-setup/logs') -Filter 'install-*-rmm.log').Count | Should -Be 1
+    }
+
+    Context 'The transcript''s folders (wgt-gq8.46)' {
+        BeforeEach {
+            $script:programData = New-TestFolder
+            $script:baseDirectory = Join-Path $script:programData 'winget-app-setup'
+            $script:logDirectory = Join-Path $script:baseDirectory 'logs'
+            $script:victim = New-TestFolder
+            Set-Content -LiteralPath (Join-Path $script:victim 'keep.txt') -Value 'not the installer''s'
+            $script:linkType = 'SymbolicLink'
+            if ($IsWindows) {
+                $script:linkType = 'Junction'
+            }
+            Mock Start-Transcript { }
+        }
+
+        It 'Creates both folders with their access lists set at creation, the logs folder readable by Users, and logs there' {
+            $path = Start-RmmTranscript -LogDirectory $script:logDirectory
+
+            Split-Path -Parent $path | Should -Be $script:logDirectory
+            Should -Invoke New-RmmSecuredFolder -Times 1 -Exactly -ParameterFilter { $Path -eq $script:baseDirectory -and -not $ReadableByUsers }
+            Should -Invoke New-RmmSecuredFolder -Times 1 -Exactly -ParameterFilter { $Path -eq $script:logDirectory -and $ReadableByUsers }
+            Should -Invoke Start-Transcript -Times 1 -Exactly -ParameterFilter { $Path -eq $path }
+        }
+
+        # As SYSTEM, before the installer has locked anything: a standard user can plant either link.
+        It 'Removes a link planted as the <Name> folder instead of logging through it, and leaves its target alone' -ForEach @(
+            @{ Name = 'base' }
+            @{ Name = 'logs' }
+        ) {
+            if ($Name -eq 'base') {
+                $link = $script:baseDirectory
+            }
+            else {
+                $null = New-Item -ItemType Directory -Path $script:baseDirectory
+                $link = $script:logDirectory
+            }
+            $null = New-Item -ItemType $script:linkType -Path $link -Target $script:victim
+
+            $path = Start-RmmTranscript -LogDirectory $script:logDirectory
+
+            Split-Path -Parent $path | Should -Be $script:logDirectory
+            foreach ($folder in @($script:baseDirectory, $script:logDirectory)) {
+                ((Get-Item -LiteralPath $folder -Force).Attributes -band [System.IO.FileAttributes]::ReparsePoint) | Should -Be 0
+            }
+            @(Get-ChildItem -LiteralPath $script:victim -Force | ForEach-Object { $_.Name }) | Should -Be @('keep.txt')
+            $script:lines | Should -Contain ("'{0}' was a link (a junction or symbolic link), not a folder. The link was removed without changing what it pointed to." -f $link)
+        }
+
+        It 'Keeps no log in a folder another account could change, and says why' {
+            $null = New-Item -ItemType Directory -Path $script:logDirectory -Force
+            Mock Get-RmmFolderTrustProblem { 'it is owned by S-1-5-21-1-2-3-1001, not by SYSTEM or Administrators' } -ParameterFilter { $Path -eq $script:baseDirectory }
+
+            Start-RmmTranscript -LogDirectory $script:logDirectory | Should -BeNullOrEmpty
+
+            Should -Invoke Start-Transcript -Times 0 -Exactly
+            $script:lines | Should -Contain ("Could not start the wrapper's log: '{0}' could be changed by an account other than SYSTEM and Administrators (it is owned by S-1-5-21-1-2-3-1001, not by SYSTEM or Administrators). The installer limits it, and the next run logs there. Continuing without it." -f $script:baseDirectory)
+        }
+
+        It 'Keeps no log when a planted link cannot be removed' {
+            $null = New-Item -ItemType $script:linkType -Path $script:baseDirectory -Target $script:victim
+            Mock Get-RmmEntryAttribute { [System.IO.FileAttributes]'Directory, ReparsePoint' }
+
+            Start-RmmTranscript -LogDirectory $script:logDirectory | Should -BeNullOrEmpty
+
+            Should -Invoke Start-Transcript -Times 0 -Exactly
+            Should -Invoke New-RmmSecuredFolder -Times 0 -Exactly
+            @(Get-ChildItem -LiteralPath $script:victim -Force | ForEach-Object { $_.Name }) | Should -Be @('keep.txt')
+            $script:lines | Should -Contain ("Could not start the wrapper's log: '{0}' is a link (a junction or symbolic link), and it could not be removed. Continuing without it." -f $script:baseDirectory)
+        }
+
+        It 'Keeps no log when a file is in a folder''s place' {
+            Set-Content -LiteralPath $script:baseDirectory -Value 'a file'
+
+            Start-RmmTranscript -LogDirectory $script:logDirectory | Should -BeNullOrEmpty
+
+            Should -Invoke Start-Transcript -Times 0 -Exactly
+            $script:lines | Should -Contain ("Could not start the wrapper's log: '{0}' is a file, not a folder. Continuing without it." -f $script:baseDirectory)
+        }
     }
 }
 
@@ -570,6 +668,28 @@ Describe 'rmm/Invoke-WingetAppSetup.ps1 and rmm/Invoke-WingetAppSetupUserPhase.p
 Describe 'rmm/Invoke-WingetAppSetup.ps1: the protected copy folder' -Skip:(-not $IsWindows) {
     BeforeAll {
         . $script:MachineWrapperPath
+    }
+
+    # wgt-gq8.46: the transcript's folders.
+    It 'Creates the logs folder for SYSTEM and Administrators, readable by Users, which the folder check trusts' {
+        $folder = Join-Path $TestDrive ('logs-' + [guid]::NewGuid().ToString('N'))
+
+        New-RmmSecuredFolder -Path $folder -ReadableByUsers
+
+        $acl = Get-Acl -LiteralPath $folder
+        $acl.AreAccessRulesProtected | Should -BeTrue
+        $sids = @($acl.Access | ForEach-Object { $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value } | Sort-Object -Unique)
+        $sids | Should -Be @('S-1-5-18', 'S-1-5-32-544', 'S-1-5-32-545')
+        Get-RmmFolderTrustProblem -Path $folder | Should -BeNullOrEmpty
+    }
+
+    It 'Does not trust a folder that BUILTIN\Users can change' {
+        $folder = Join-Path $TestDrive ('logs-' + [guid]::NewGuid().ToString('N'))
+        New-RmmSecuredFolder -Path $folder
+        $grant = Start-Process -FilePath 'icacls.exe' -ArgumentList "`"$folder`" /grant *S-1-5-32-545:(OI)(CI)M /q" -Wait -PassThru -WindowStyle Hidden
+        $grant.ExitCode | Should -Be 0
+
+        Get-RmmFolderTrustProblem -Path $folder | Should -Be 'S-1-5-32-545 can change it'
     }
 
     It 'Creates it for SYSTEM and Administrators only, with no inherited entries' {

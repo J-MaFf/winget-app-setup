@@ -377,7 +377,8 @@ exit 0
          MinimumPowerShell or later, a run as SYSTEM, a process architecture the module has an
          engine for, and Windows build 17763 or later.
       2. A new folder (New-WauStagingDirectory -Prefix wingetclient) and the cache folder
-         %ProgramData%\winget-app-setup\cache, both limited to SYSTEM and Administrators.
+         %ProgramData%\winget-app-setup\cache, both limited to SYSTEM and Administrators; a link
+         planted as the cache folder is removed (Initialize-ProgramDataFolder).
       3. The cached package is used when its size and SHA256 are the pin's, read from a handle
          that keeps it from changing; otherwise it is deleted and downloaded again (twice at most,
          15 seconds apart, with Get-WebDownloadTimeoutParameters' limits) and checked the same way.
@@ -434,16 +435,9 @@ function Initialize-WingetClientModule {
         if (-not $reason) {
             $stage = 'setting up its folders'
             $directory = New-WauStagingDirectory -Prefix 'wingetclient'
-            $cacheDirectory = Join-Path $env:ProgramData 'winget-app-setup\cache'
-            # A link planted as the cache folder before its parent was locked is removed, not
-            # followed: icacls and the cache writes below would otherwise change its target.
-            $cacheItem = Get-Item -LiteralPath $cacheDirectory -Force -ErrorAction SilentlyContinue
-            if ($cacheItem -and ($cacheItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
-                $cacheItem.Delete()
-                Write-WarningMessage "$cacheDirectory was a link, not a folder; it was removed and the cache folder is created again."
-            }
-            [void](New-Item -ItemType Directory -Path $cacheDirectory -Force -ErrorAction Stop)
-            Set-RestrictedDirectoryAcl -Path $cacheDirectory
+            # A link planted as the cache folder is removed, not followed: icacls and the cache
+            # writes below would otherwise change its target.
+            $cacheDirectory = Initialize-ProgramDataFolder -ChildName 'cache'
             $cachePath = Join-Path $cacheDirectory $pin.FileName
             $expectedSha256 = "$($pin.Sha256)".ToUpperInvariant()
 

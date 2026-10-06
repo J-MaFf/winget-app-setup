@@ -366,11 +366,51 @@ function Get-RmmRunDeadline {
 
 <#
 .SYNOPSIS
+    Creates a folder whose access list is set when it is created: SYSTEM and Administrators full
+    control, inherited by everything inside, no entries inherited from its parent.
+.DESCRIPTION
+    No other account can add or replace anything in it, or turn it into a junction, at any moment.
+    Does nothing when the path exists; the caller checks what is there.
+.PARAMETER Path
+    The folder to create.
+.PARAMETER ReadableByUsers
+    Also let BUILTIN\Users read it and what is in it (the logs folder).
+#>
+function New-RmmSecuredFolder {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$ReadableByUsers
+    )
+
+    $security = New-Object System.Security.AccessControl.DirectorySecurity
+    $security.SetAccessRuleProtection($true, $false)
+    $grants = @(@('S-1-5-18', 'FullControl'), @('S-1-5-32-544', 'FullControl'))
+    if ($ReadableByUsers) {
+        $grants += , @('S-1-5-32-545', 'ReadAndExecute')
+    }
+    foreach ($grant in $grants) {
+        $identity = New-Object System.Security.Principal.SecurityIdentifier($grant[0])
+        $rule = New-Object System.Security.AccessControl.FileSystemAccessRule($identity, $grant[1], 'ContainerInherit, ObjectInherit', 'None', 'Allow')
+        $security.AddAccessRule($rule)
+    }
+    if ($PSVersionTable.PSEdition -eq 'Core') {
+        [System.IO.FileSystemAclExtensions]::Create((New-Object System.IO.DirectoryInfo($Path)), $security)
+    }
+    else {
+        [void][System.IO.Directory]::CreateDirectory($Path, $security)
+    }
+}
+
+<#
+.SYNOPSIS
     Creates a new folder that only SYSTEM and Administrators can change, for the installer's copy.
 .DESCRIPTION
     Named winget-app-setup-<32 hex digits>, the name the installer's housekeeping removes once it is
     a day old, should a run be killed before it removes the folder itself. The access list is set
-    when the folder is created (no inherited entries), so no other account can add or replace a
+    when the folder is created (New-RmmSecuredFolder), so no other account can add or replace a
     file in it in between.
 .PARAMETER Root
     The folder to create it in (%SystemRoot%\Temp).
@@ -384,25 +424,149 @@ function New-RmmRestrictedDirectory {
     )
 
     $path = Join-Path $Root ('winget-app-setup-' + [Guid]::NewGuid().ToString('N'))
-    $security = New-Object System.Security.AccessControl.DirectorySecurity
-    $security.SetAccessRuleProtection($true, $false)
-    foreach ($sid in @('S-1-5-18', 'S-1-5-32-544')) {
-        $identity = New-Object System.Security.Principal.SecurityIdentifier($sid)
-        $rule = New-Object System.Security.AccessControl.FileSystemAccessRule($identity, 'FullControl', 'ContainerInherit, ObjectInherit', 'None', 'Allow')
-        $security.AddAccessRule($rule)
-    }
-    if ($PSVersionTable.PSEdition -eq 'Core') {
-        [void][System.IO.FileSystemAclExtensions]::Create((New-Object System.IO.DirectoryInfo($path)), $security)
-    }
-    else {
-        [void][System.IO.Directory]::CreateDirectory($path, $security)
-    }
+    New-RmmSecuredFolder -Path $path
     return $path
 }
 
 <#
 .SYNOPSIS
-    Starts the wrapper's transcript: <LogDirectory>\install-<time>-rmm.log.
+    Returns the attributes of a file system entry itself, never of what a link points to.
+.RETURNS
+    [System.IO.FileAttributes], or $null when nothing is at the path.
+#>
+function Get-RmmEntryAttribute {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    try {
+        return [System.IO.File]::GetAttributes($Path)
+    }
+    catch [System.IO.FileNotFoundException], [System.IO.DirectoryNotFoundException] {
+        return $null
+    }
+}
+
+<#
+.SYNOPSIS
+    Says why a folder could be changed by an account other than SYSTEM and Administrators, or
+    returns $null when it cannot be.
+.DESCRIPTION
+    Its owner must be SYSTEM or Administrators, and no access entry that applies to the folder may
+    let another account add, remove or rename what is in it, delete it, set its attributes (which
+    turns an empty folder into a junction), change its access list or take ownership of it. Such a
+    folder stays as it is: only an administrator could change it.
+.RETURNS
+    [string] What is wrong, or $null.
+#>
+function Get-RmmFolderTrustProblem {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    $trustedSids = @('S-1-5-18', 'S-1-5-32-544')
+    # WriteData, AppendData, WriteExtendedAttributes, DeleteChild, WriteAttributes, Delete,
+    # ChangePermissions, TakeOwnership, GENERIC_ALL, GENERIC_WRITE.
+    $changeRights = 0x2 -bor 0x4 -bor 0x10 -bor 0x40 -bor 0x100 -bor 0x10000 -bor 0x40000 -bor 0x80000 -bor 0x10000000 -bor 0x40000000
+    $sidType = [System.Security.Principal.SecurityIdentifier]
+    try {
+        $acl = Get-Acl -LiteralPath $Path -ErrorAction Stop
+        $owner = $acl.GetOwner($sidType)
+        $rules = @($acl.GetAccessRules($true, $true, $sidType))
+    }
+    catch {
+        return "its owner and access list could not be read ($($_.Exception.Message))"
+    }
+
+    $problems = @()
+    $ownerSid = ''
+    if ($owner) {
+        $ownerSid = [string]$owner.Value
+    }
+    if ($trustedSids -notcontains $ownerSid) {
+        $problems += "it is owned by $ownerSid, not by SYSTEM or Administrators"
+    }
+    foreach ($rule in $rules) {
+        $sid = [string]$rule.IdentityReference.Value
+        $inheritOnly = (([int]$rule.PropagationFlags) -band 2) -ne 0
+        if ([string]$rule.AccessControlType -ne 'Allow' -or $inheritOnly -or $trustedSids -contains $sid) {
+            continue
+        }
+        if (([long]$rule.FileSystemRights -band $changeRights) -ne 0) {
+            $problems += "$sid can change it"
+        }
+    }
+    if ($problems.Count -eq 0) {
+        return $null
+    }
+    return ($problems -join '; ')
+}
+
+<#
+.SYNOPSIS
+    Makes sure the transcript's folder and the folder above it are real folders that only SYSTEM and
+    Administrators can change, and returns the transcript's folder.
+.DESCRIPTION
+    The wrapper writes its transcript as SYSTEM, before the installer has locked these folders, and
+    any user can create %ProgramData%\winget-app-setup, or turn an empty folder there into a
+    junction (wgt-gq8.46). For the folder above, then the transcript's folder:
+      1. A link (junction, symbolic link or mount point) is removed, never followed.
+      2. A missing folder is created with its access list set at creation (New-RmmSecuredFolder;
+         the transcript's folder also lets BUILTIN\Users read, as the installer leaves it).
+      3. An existing folder is used only when no account other than SYSTEM and Administrators can
+         change it (Get-RmmFolderTrustProblem), and only while it is still not a link. The
+         installer locks a folder that fails this, so a later run logs there.
+.PARAMETER LogDirectory
+    The transcript's folder, %ProgramData%\winget-app-setup\logs.
+.RETURNS
+    [string] LogDirectory. Throws when it cannot be used; the wrapper then keeps no log.
+#>
+function Initialize-RmmLogDirectory {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$LogDirectory
+    )
+
+    $reparsePoint = [System.IO.FileAttributes]::ReparsePoint
+    foreach ($folder in @((Split-Path -Parent $LogDirectory), $LogDirectory)) {
+        $attributes = Get-RmmEntryAttribute -Path $folder
+        if ($null -ne $attributes -and ($attributes -band $reparsePoint)) {
+            if ($attributes -band [System.IO.FileAttributes]::Directory) {
+                [System.IO.Directory]::Delete($folder, $false)
+            }
+            else {
+                [System.IO.File]::Delete($folder)
+            }
+            if ($null -ne (Get-RmmEntryAttribute -Path $folder)) {
+                throw "'$folder' is a link (a junction or symbolic link), and it could not be removed"
+            }
+            Write-RmmLine ("'{0}' was a link (a junction or symbolic link), not a folder. The link was removed without changing what it pointed to." -f $folder) 'Yellow'
+            $attributes = $null
+        }
+        if ($null -eq $attributes) {
+            New-RmmSecuredFolder -Path $folder -ReadableByUsers:($folder -eq $LogDirectory)
+        }
+        elseif (($attributes -band [System.IO.FileAttributes]::Directory) -eq 0) {
+            throw "'$folder' is a file, not a folder"
+        }
+        $problem = Get-RmmFolderTrustProblem -Path $folder
+        if ($problem) {
+            throw "'$folder' could be changed by an account other than SYSTEM and Administrators ($problem). The installer limits it, and the next run logs there"
+        }
+        $attributes = Get-RmmEntryAttribute -Path $folder
+        if ($null -eq $attributes -or ($attributes -band $reparsePoint)) {
+            throw "'$folder' was replaced while it was checked"
+        }
+    }
+    return $LogDirectory
+}
+
+<#
+.SYNOPSIS
+    Starts the wrapper's transcript: <LogDirectory>\install-<time>-rmm.log, in a folder
+    Initialize-RmmLogDirectory has checked.
 .RETURNS
     [string] The transcript's path, or $null when it could not be started (the run goes on).
 #>
@@ -413,10 +577,8 @@ function Start-RmmTranscript {
     )
 
     try {
-        if (-not (Test-Path -LiteralPath $LogDirectory -PathType Container)) {
-            [void](New-Item -Path $LogDirectory -ItemType Directory -Force -ErrorAction Stop)
-        }
-        $path = Join-Path $LogDirectory ('install-{0:yyyyMMdd-HHmmss}-rmm.log' -f (Get-Date))
+        $directory = Initialize-RmmLogDirectory -LogDirectory $LogDirectory
+        $path = Join-Path $directory ('install-{0:yyyyMMdd-HHmmss}-rmm.log' -f (Get-Date))
         [void](Start-Transcript -Path $path -ErrorAction Stop)
         return $path
     }

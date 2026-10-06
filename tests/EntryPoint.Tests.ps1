@@ -35,14 +35,15 @@ BeforeAll {
         $entryIndex = $text.LastIndexOf("if (`$MyInvocation.InvocationName -ne '.') {")
         $entryIndex | Should -BeGreaterThan 0
         # Test-SystemRequirements is stubbed too: an irm | iex run cannot pass -SkipSystemCheck,
-        # and the real pre-flight checks probe the network and the OS. Grant-InstallLogReadAccess
-        # is stubbed because it runs icacls on the log folder in an elevated run (Windows-only, and
-        # a test has no business changing ACLs); its own tests are in Logging.Tests.ps1.
+        # and the real pre-flight checks probe the network and the OS. Initialize-ProgramDataFolder
+        # is stubbed to just create the folder because it runs icacls on the log folder in an
+        # elevated run (Windows-only, and a test has no business changing ACLs); its own tests are
+        # in ProgramDataFolder.Tests.ps1 and Logging.Tests.ps1.
         # Invoke-InstallerHousekeeping is stubbed because it prunes the account's temp folder and
         # %SystemRoot%\Temp (its own tests are in Housekeeping.Tests.ps1), and the run lock gets a
         # name of this test run's own, so a child never contends with a real run on the machine.
         $override = "function Test-SystemRequirements { param([switch]`$WhatIf) `$true }`n"
-        $override += "function Grant-InstallLogReadAccess { param([string]`$Path) `$true }`n"
+        $override += "function Initialize-ProgramDataFolder { param([string]`$ChildName, [switch]`$ReadableByUsers) `$path = Join-Path (Join-Path `$env:ProgramData 'winget-app-setup') `$ChildName; [void](New-Item -ItemType Directory -Path `$path -Force); `$path }`n"
         $override += "function Invoke-InstallerHousekeeping { param([string]`$CurrentScriptPath) Write-Host ""HOUSEKEEPING RAN: `$CurrentScriptPath"" }`n"
         $override += "function Get-InstallerRunLockName { '$($script:testRunLockName)' }`n"
         # The environment pre-flight's registry reads (wgt-gq8.39): no Group Policy execution policy

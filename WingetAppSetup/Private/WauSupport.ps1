@@ -119,21 +119,32 @@ function Get-DirectoryAccessSummary {
 <#
 .SYNOPSIS
     Throws unless a directory is owned by Administrators (or SYSTEM) and only SYSTEM and
-    Administrators have access entries on it.
+    Administrators have access entries on it (with -ReadableByUsers, standard users may also read).
 .DESCRIPTION
     Checks what Set-RestrictedDirectoryAcl was meant to leave, before anything is downloaded into it
     (P2-21). Fails on another owner (an owner can always change the access list), on any entry for
     another account (allow or deny, explicit or inherited), and on inheritance still turned on.
+    -ReadableByUsers allows BUILTIN\Users allow entries that cannot change the folder or its
+    contents.
 .PARAMETER Path
     The directory to check.
+.PARAMETER ReadableByUsers
+    Accept read-only allow entries for BUILTIN\Users (S-1-5-32-545), as the logs folder has.
 #>
 function Assert-RestrictedDirectoryAcl {
     param (
         [Parameter(Mandatory = $true)]
-        [string]$Path
+        [string]$Path,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$ReadableByUsers
     )
 
     $allowedSids = @('S-1-5-18', 'S-1-5-32-544')
+    # WriteData, AppendData, WriteExtendedAttributes, DeleteChild, WriteAttributes, Delete,
+    # ChangePermissions, TakeOwnership, GENERIC_ALL and GENERIC_WRITE: with any of them an account
+    # could add, remove or replace entries, or turn the empty folder into a junction.
+    $changeRights = 0x2 -bor 0x4 -bor 0x10 -bor 0x40 -bor 0x100 -bor 0x10000 -bor 0x40000 -bor 0x80000 -bor 0x10000000 -bor 0x40000000
     $security = Get-DirectoryAccessSummary -Path $Path
     $problems = @()
     if ($allowedSids -notcontains $security.OwnerSid) {
@@ -143,9 +154,13 @@ function Assert-RestrictedDirectoryAcl {
         $problems += 'it still inherits permissions from its parent folder'
     }
     foreach ($rule in @($security.AccessRules)) {
-        if ($allowedSids -notcontains $rule.Sid) {
-            $problems += "$($rule.Name) ($($rule.Sid)) has an access entry ($($rule.AccessControlType.ToLowerInvariant()))"
+        if ($allowedSids -contains $rule.Sid) {
+            continue
         }
+        if ($ReadableByUsers -and $rule.Sid -eq 'S-1-5-32-545' -and $rule.AccessControlType -eq 'Allow' -and ([long]$rule.Rights -band $changeRights) -eq 0) {
+            continue
+        }
+        $problems += "$($rule.Name) ($($rule.Sid)) has an access entry ($($rule.AccessControlType.ToLowerInvariant()))"
     }
     if ($problems.Count -gt 0) {
         throw ("'{0}' is not limited to SYSTEM and Administrators: {1}." -f $Path, ($problems -join '; '))
@@ -162,30 +177,49 @@ function Assert-RestrictedDirectoryAcl {
     Ownership comes first (P2-21): the installer's first, non-elevated launch creates
     %ProgramData%\winget-app-setup, owned by the signed-in user, who could otherwise grant themselves
     access again. icacls makes Administrators the owner, removes the inherited entries and replaces
-    (/grant:r) SYSTEM's and Administrators', and Assert-RestrictedDirectoryAcl reads the result back.
-    Only the directory itself changes (no /T, no /reset), so the logs folder's read grant
-    (Grant-InstallLogReadAccess) stays. Throws when icacls or the check fails, with the error id
+    (/grant:r) SYSTEM's and Administrators' (and, with -ReadableByUsers, BUILTIN\Users' read)
+    entries, and Assert-RestrictedDirectoryAcl reads the result back. Only the directory itself
+    changes (no /T, no /reset).
+
+    Never through a link (wgt-gq8.46): icacls follows one by default, and would rewrite the owner and
+    access list of whatever a planted junction points to. A link is refused before icacls runs;
+    icacls gets /L, so a folder swapped for a link meanwhile has the link changed, not its target;
+    and a folder that is a link afterwards is refused. Both refusals have the error id
+    'DirectoryIsLink'. Throws when icacls or the check fails, with the error id
     'RestrictedDirectoryAclFailed', so a caller can suggest resetting the folder only then.
 .PARAMETER Path
     The directory whose ACL should be replaced.
+.PARAMETER ReadableByUsers
+    Also grant BUILTIN\Users read and execute, inherited by everything inside (the logs folder, review
+    finding P3-14), replacing any other entry they had.
 #>
 function Set-RestrictedDirectoryAcl {
     param (
         [Parameter(Mandatory = $true)]
-        [string]$Path
+        [string]$Path,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$ReadableByUsers
     )
 
+    if (Test-FileSystemLink -Path $Path) {
+        throw (New-DirectoryIsLinkError -Path $Path -Message ("'{0}' is a link (a junction or symbolic link), not a folder, so its access list was not changed." -f $Path))
+    }
+
+    $grants = '*S-1-5-18:(OI)(CI)F *S-1-5-32-544:(OI)(CI)F'
+    if ($ReadableByUsers) {
+        $grants += ' *S-1-5-32-545:(OI)(CI)RX'
+    }
     $failure = $null
     $steps = @(
         @{
-            Arguments   = "`"$Path`" /setowner *S-1-5-32-544 /q"
+            Arguments   = "`"$Path`" /setowner *S-1-5-32-544 /L /q"
             Description = 'make Administrators the owner of'
         },
         @{
-            # /inheritance:r strips inherited ACEs; /grant:r replaces any explicit SYSTEM and
-            # Administrators entries with these (OI)(CI)F grants, inherited by everything created
-            # inside.
-            Arguments   = "`"$Path`" /inheritance:r /grant:r *S-1-5-18:(OI)(CI)F *S-1-5-32-544:(OI)(CI)F /q"
+            # /inheritance:r strips inherited ACEs; /grant:r replaces any explicit entries of these
+            # accounts with these (OI)(CI) grants, inherited by everything created inside.
+            Arguments   = "`"$Path`" /inheritance:r /grant:r $grants /L /q"
             Description = 'restrict'
         }
     )
@@ -198,11 +232,16 @@ function Set-RestrictedDirectoryAcl {
     }
     if (-not $failure) {
         try {
-            Assert-RestrictedDirectoryAcl -Path $Path
+            Assert-RestrictedDirectoryAcl -Path $Path -ReadableByUsers:$ReadableByUsers
         }
         catch {
             $failure = "$_"
         }
+    }
+    # Checked even after a failure: the check above reads a link's target, and the reset advice
+    # that goes with 'RestrictedDirectoryAclFailed' would follow the link too.
+    if (Test-FileSystemLink -Path $Path) {
+        throw (New-DirectoryIsLinkError -Path $Path -Message ("'{0}' was replaced by a link (a junction or symbolic link) while its access list was being set, so it is not used." -f $Path))
     }
     if ($failure) {
         $exception = [System.InvalidOperationException]::new($failure)
@@ -282,14 +321,16 @@ function Open-ReadLockedFile {
 <#
 .SYNOPSIS
     Creates a fresh staging directory only SYSTEM and Administrators can change, for a download that
-    runs elevated: the WAU MSI, or the Windows App Runtime framework.
+    runs elevated: the WAU MSI, the Windows App Runtime framework or the Microsoft.WinGet.Client
+    module.
 .DESCRIPTION
     Not %TEMP%, where a non-elevated process of the same user could swap the file (issue #186): a
     uniquely named folder under %ProgramData%\winget-app-setup, locked down before anything is
-    downloaded. The base folder is locked down first, with Administrators as its owner (P2-21), so
+    downloaded. The base folder is made safe first (Initialize-ProgramDataFolder: a planted link is
+    removed, never followed, and the folder is locked with Administrators as its owner, P2-21), so
     nobody unprivileged can see the per-run name or recreate the folder through the parent. Throws
-    when the folder cannot be created or secured; only the latter has the error id
-    'RestrictedDirectoryAclFailed'. Callers remove it.
+    when the folder cannot be created or secured: the error id 'RestrictedDirectoryAclFailed' when
+    its access list could not be set, 'DirectoryIsLink' for a link. Callers remove it.
 .PARAMETER Prefix
     The start of the per-run folder's name, which ends with a new GUID. Default 'wau-msi'.
 .OUTPUTS
@@ -302,12 +343,12 @@ function New-WauStagingDirectory {
         [string]$Prefix = 'wau-msi'
     )
 
-    $baseDir = Join-Path $env:ProgramData 'winget-app-setup'
-    $null = New-Item -Path $baseDir -ItemType Directory -Force -ErrorAction Stop
-    Set-RestrictedDirectoryAcl -Path $baseDir
+    $baseDir = Initialize-ProgramDataFolder
 
+    # Without -Force: a name that exists already, which only an administrator could have made in the
+    # locked base folder, is an error rather than a folder to reuse.
     $stagingDir = Join-Path $baseDir ($Prefix + '-' + [guid]::NewGuid().ToString('N'))
-    $null = New-Item -Path $stagingDir -ItemType Directory -Force -ErrorAction Stop
+    $null = New-Item -Path $stagingDir -ItemType Directory -ErrorAction Stop
     Set-RestrictedDirectoryAcl -Path $stagingDir
     return $stagingDir
 }
@@ -957,9 +998,11 @@ function Write-WauTaskHealth {
 .SYNOPSIS
     Returns a new path for one msiexec verbose log of a Winget-AutoUpdate install or uninstall.
 .DESCRIPTION
-    In the run's logs folder, or %ProgramData%\winget-app-setup\logs without a transcript (P3-37).
-    The folder is created when missing; when it cannot be, there is no log, since msiexec fails
-    (1622) when it cannot open its log.
+    In the run's logs folder, or %ProgramData%\winget-app-setup\logs without a transcript (P3-37),
+    made safe first like the transcript's (Initialize-ProgramDataFolder, wgt-gq8.46), since msiexec
+    writes the log with this run's elevated rights. The folder is created when missing; when it
+    cannot be, or cannot be made safe, there is no log, since msiexec fails (1622) when it cannot
+    open its log.
 .PARAMETER Action
     'install' or 'uninstall', for the file name.
 .PARAMETER Attempt
@@ -978,14 +1021,11 @@ function New-WauMsiLogPath {
     )
 
     $directory = Get-InstallerLogDirectory
-    if ([string]::IsNullOrWhiteSpace($directory)) {
-        if ([string]::IsNullOrWhiteSpace($env:ProgramData)) {
-            return $null
-        }
-        $directory = Join-Path $env:ProgramData 'winget-app-setup\logs'
-    }
     try {
-        if (-not (Test-Path -LiteralPath $directory)) {
+        if ([string]::IsNullOrWhiteSpace($directory)) {
+            $directory = Initialize-ProgramDataFolder -ChildName 'logs' -ReadableByUsers
+        }
+        elseif (-not (Test-Path -LiteralPath $directory)) {
             [void](New-Item -Path $directory -ItemType Directory -Force -ErrorAction Stop)
         }
     }
