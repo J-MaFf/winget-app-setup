@@ -3,7 +3,8 @@
 
 <#
 .SYNOPSIS
-    Deletes the installer's old logs and its leftover temporary copies, never the current run's.
+    Deletes the installer's old logs and the leftover temporary copies of the installer and the
+    uninstaller (they share the folder names), never the current run's.
 .DESCRIPTION
     The entry script calls it once a real elevated run holds the run lock, so two runs never prune
     at once and a dry run changes nothing. It keeps the logs of the newest KeepTranscripts
@@ -192,7 +193,7 @@ function Remove-OldInstallerLog {
 
 <#
 .SYNOPSIS
-    Deletes the installer's leftover temporary copy folders.
+    Deletes the leftover temporary copy folders of the installer and the uninstaller.
 .DESCRIPTION
     winget-app-setup-<32 hex> (the bootstrap's copy, the elevated relaunch's checked copy),
     winget-app-setup-elevate-<32 hex> and winget-app-setup-pwsh-<32 hex> folders are removed by the
