@@ -537,19 +537,31 @@ exit 6
     }
 
     # The whole wrapper in a process of its own, so its folders get real access lists: Windows only.
+    # Their owner is this account's default owner for new objects (Administrators for an elevated
+    # administrator, by default), which the wrapper, as SYSTEM, always trusts; the test follows it.
     It 'Logs a run without pins too, in folders it creates for SYSTEM and Administrators' -Skip:(-not $IsWindows) {
         $copy = New-UnpinnedWrapperCopy -Path $script:MachineWrapperPath
         $programData = New-TestFolder
+        $probe = Join-Path (New-TestFolder) 'probe'
+        [void][System.IO.Directory]::CreateDirectory($probe)
+        $defaultOwner = (Get-Acl -LiteralPath $probe).GetOwner([System.Security.Principal.SecurityIdentifier]).Value
         $savedProgramData = $env:ProgramData
         try {
             $env:ProgramData = $programData
-            $null = & $script:Pwsh -NoProfile -NonInteractive -File $copy 2>&1
+            $output = & $script:Pwsh -NoProfile -NonInteractive -File $copy 2>&1
         }
         finally {
             $env:ProgramData = $savedProgramData
         }
 
-        @(Get-ChildItem -LiteralPath (Join-Path $programData 'winget-app-setup/logs') -Filter 'install-*-rmm.log').Count | Should -Be 1
+        $logs = @(Get-ChildItem -LiteralPath (Join-Path $programData 'winget-app-setup/logs') -Filter 'install-*-rmm.log')
+        if (@('S-1-5-18', 'S-1-5-32-544') -contains $defaultOwner) {
+            $logs.Count | Should -Be 1
+        }
+        else {
+            $logs.Count | Should -Be 0
+            ($output -join "`n") | Should -Match ([regex]::Escape("(it is owned by $defaultOwner, not by SYSTEM or Administrators)"))
+        }
     }
 
     Context 'The transcript''s folders (wgt-gq8.46)' {
@@ -680,7 +692,15 @@ Describe 'rmm/Invoke-WingetAppSetup.ps1: the protected copy folder' -Skip:(-not 
         $acl.AreAccessRulesProtected | Should -BeTrue
         $sids = @($acl.Access | ForEach-Object { $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value } | Sort-Object -Unique)
         $sids | Should -Be @('S-1-5-18', 'S-1-5-32-544', 'S-1-5-32-545')
-        Get-RmmFolderTrustProblem -Path $folder | Should -BeNullOrEmpty
+        # The owner is this account's default owner (SYSTEM's when the wrapper runs): only the access
+        # entries are New-RmmSecuredFolder's.
+        $owner = $acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value
+        if (@('S-1-5-18', 'S-1-5-32-544') -contains $owner) {
+            Get-RmmFolderTrustProblem -Path $folder | Should -BeNullOrEmpty
+        }
+        else {
+            Get-RmmFolderTrustProblem -Path $folder | Should -Be "it is owned by $owner, not by SYSTEM or Administrators"
+        }
     }
 
     It 'Does not trust a folder that BUILTIN\Users can change' {
@@ -689,7 +709,8 @@ Describe 'rmm/Invoke-WingetAppSetup.ps1: the protected copy folder' -Skip:(-not 
         $grant = Start-Process -FilePath 'icacls.exe' -ArgumentList "`"$folder`" /grant *S-1-5-32-545:(OI)(CI)M /q" -Wait -PassThru -WindowStyle Hidden
         $grant.ExitCode | Should -Be 0
 
-        Get-RmmFolderTrustProblem -Path $folder | Should -Be 'S-1-5-32-545 can change it'
+        # Whoever owns it (this account's default owner), the Users entry is named.
+        Get-RmmFolderTrustProblem -Path $folder | Should -Match '(^|; )S-1-5-32-545 can change it'
     }
 
     It 'Creates it for SYSTEM and Administrators only, with no inherited entries' {

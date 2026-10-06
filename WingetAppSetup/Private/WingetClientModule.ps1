@@ -521,19 +521,23 @@ function Initialize-WingetClientModule {
 
             # The next run then needs no download. Not keeping it costs only that.
             if (-not $reason -and $source -eq 'Download') {
-                $partialPath = $cachePath + '.partial'
+                # A new name, created only if nothing is there (wgt-gq8.46 review): an entry another
+                # account left in the cache folder before it was locked is never opened for writing.
+                $partialPath = Join-Path $cacheDirectory ('{0}.{1}.partial' -f $pin.FileName, [guid]::NewGuid().ToString('N'))
                 try {
                     $stream.Position = 0
-                    $cacheFile = [System.IO.File]::Create($partialPath)
+                    $cacheFile = [System.IO.File]::Open($partialPath, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
                     try {
                         $stream.CopyTo($cacheFile)
                     }
                     finally {
                         $cacheFile.Dispose()
                     }
+                    # Replaces the entry at the cache name itself, a link included, never its target.
                     [System.IO.File]::Move($partialPath, $cachePath, $true)
-                    foreach ($old in @(Get-ChildItem -LiteralPath $cacheDirectory -Filter 'microsoft.winget.client.*.nupkg' -File -ErrorAction SilentlyContinue)) {
-                        if ($old.Name -ne $pin.FileName) {
+                    # Older packages and the copies of killed runs; a file link is removed itself.
+                    foreach ($old in @(Get-ChildItem -LiteralPath $cacheDirectory -File -Force -ErrorAction SilentlyContinue)) {
+                        if (($old.Name -like 'microsoft.winget.client.*.nupkg' -and $old.Name -ne $pin.FileName) -or $old.Name -like '*.partial') {
                             Remove-Item -LiteralPath $old.FullName -Force -ErrorAction SilentlyContinue
                         }
                     }
@@ -549,7 +553,7 @@ function Initialize-WingetClientModule {
         $reason = "$stage failed: $($_.Exception.Message)"
         if ($_.FullyQualifiedErrorId -eq 'RestrictedDirectoryAclFailed') {
             $baseDir = Join-Path $env:ProgramData 'winget-app-setup'
-            $reason += " To reset the folder, run in an elevated prompt: takeown /f `"$baseDir`" /a, then icacls `"$baseDir`" /reset, and re-run this installer."
+            $reason += (Get-RestrictedDirectoryResetHint -Path $baseDir)
         }
     }
     finally {

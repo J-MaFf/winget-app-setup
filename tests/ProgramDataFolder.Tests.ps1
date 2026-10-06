@@ -29,25 +29,32 @@ BeforeAll {
         [void](New-Item -ItemType $linkType -Path $Path -Target $Target -ErrorAction Stop)
     }
 
-    # A folder another account owns, with one file in it, standing in for System32 or another
-    # user's profile: what a planted link points at.
+    # A folder another account owns, with a file and a subfolder holding a file, standing in for
+    # System32 or another user's profile: what a planted link points at.
     function New-TestVictimFolder {
         $path = Join-Path $TestDrive ('victim-' + [guid]::NewGuid().ToString('N'))
         [void](New-Item -ItemType Directory -Path $path)
         Set-Content -LiteralPath (Join-Path $path 'keep.txt') -Value 'not the installer''s'
+        [void](New-Item -ItemType Directory -Path (Join-Path $path 'sub'))
+        Set-Content -LiteralPath (Join-Path $path 'sub/inner.txt') -Value 'not the installer''s either'
         return $path
     }
 
-    # What a test can compare before and after: the names of the files, and the access list where
-    # one can be read.
+    # What a test can compare before and after: the names of everything in the folder, and, where
+    # access lists can be read, the folder's and everything's in it. Setting an access list passes
+    # its inheritable entries on to what is inside, so the folder's own is not enough (wgt-gq8.46
+    # review).
     function Get-TestFolderState {
         param ([Parameter(Mandatory = $true)][string]$Path)
+        $entries = @(Get-ChildItem -LiteralPath $Path -Recurse -Force | Sort-Object FullName)
         $sddl = $null
         if ($IsWindows) {
-            $sddl = (Get-Acl -LiteralPath $Path).Sddl
+            $sddl = ((@($Path) + @($entries | ForEach-Object { $_.FullName })) | ForEach-Object {
+                    '{0}={1}' -f $_.Substring($Path.Length), (Get-Acl -LiteralPath $_).Sddl
+                }) -join "`n"
         }
         return [pscustomobject]@{
-            Files = (@(Get-ChildItem -LiteralPath $Path -Force | ForEach-Object { $_.Name } | Sort-Object) -join ',')
+            Files = (@($entries | ForEach-Object { $_.FullName.Substring($Path.Length) }) -join ',')
             Sddl  = $sddl
         }
     }
@@ -112,6 +119,25 @@ Describe 'Remove-FileSystemLink' {
         { Remove-FileSystemLink -Path $folder } | Should -Throw "*'$folder' is not a link.*"
 
         Test-Path -LiteralPath (Join-Path $folder 'keep.txt') | Should -BeTrue
+    }
+}
+
+# The advice for 'RestrictedDirectoryAclFailed' (wgt-gq8.46 review): other accounts may still change
+# the folder, so it may be a link by the time an administrator acts on it.
+Describe 'Get-RestrictedDirectoryResetHint' {
+    It 'Says to rename the folder aside, by its full path, to a new name in the same folder' {
+        Mock Get-Date { [datetime]::new(2026, 10, 6, 15, 18, 36) }
+
+        Get-RestrictedDirectoryResetHint -Path 'C:\ProgramData\winget-app-setup' |
+            Should -Be ' To start over with a new folder, rename this one in an elevated prompt: ren "C:\ProgramData\winget-app-setup" winget-app-setup-old-20261006-151836 (ren renames a junction or symbolic link itself, never what it points to), then re-run this installer.'
+    }
+
+    It 'Never suggests a command that follows a link (takeown, or icacls without /L)' {
+        $hint = Get-RestrictedDirectoryResetHint -Path 'C:\ProgramData\winget-app-setup\logs'
+
+        $hint | Should -Not -Match 'takeown'
+        $hint | Should -Not -Match 'icacls'
+        $hint | Should -Match ' ren "C:\\ProgramData\\winget-app-setup\\logs" logs-old-\d{8}-\d{6} '
     }
 }
 
@@ -227,20 +253,25 @@ Describe 'Initialize-ProgramDataFolder (wgt-gq8.46)' {
         { Initialize-ProgramDataFolder -ChildName 'logs' } | Should -Throw '*ProgramData environment variable is not set*'
     }
 
-    It 'Accepts only a plain folder name as the child' {
+    It 'Accepts only a plain folder name as the child, with nothing after it' {
         { Initialize-ProgramDataFolder -ChildName '..\Windows' } | Should -Throw '*ChildName*'
+        # .NET's $ also matches before a final newline; \z does not.
+        { Initialize-ProgramDataFolder -ChildName "logs`n" } | Should -Throw '*ChildName*'
+
+        $script:locked | Should -BeNullOrEmpty
     }
 }
 
 # Real icacls and access lists, on Windows as an administrator (icacls /setowner needs one). These
-# check what the mocks above cannot: that icacls /L leaves a junction's target alone, and that a
-# planted junction's target keeps its access list through the whole sequence.
+# check what the mocks above cannot: that icacls /L leaves a junction's target and everything in it
+# alone (inheritable entries are passed on to what a folder holds), and that a planted junction's
+# target keeps its access lists through the whole sequence.
 Describe 'ProgramData folders on real Windows (wgt-gq8.46)' -Skip:(-not $script:IsWindowsAdmin) {
     BeforeEach {
         Mock Write-WarningMessage { }
     }
 
-    It 'Changes neither the owner nor the access list of a junction''s target when the folder is swapped for a junction after the check (icacls /L), and refuses it' {
+    It 'Changes neither the owner nor the access list of a junction''s target, or of anything in it, when the folder is swapped for a junction after the check (icacls /L), and refuses it' {
         $victim = New-TestVictimFolder
         $before = Get-TestFolderState -Path $victim
         $link = Join-Path $TestDrive ('swapped-' + [guid]::NewGuid().ToString('N'))

@@ -84,8 +84,9 @@ function Remove-FileSystemLink {
 .SYNOPSIS
     Returns the error a folder that is a link raises, with the error id 'DirectoryIsLink'.
 .DESCRIPTION
-    Callers tell it apart from 'RestrictedDirectoryAclFailed': takeown and icacls /reset, the advice
-    for that one, would follow a link and change what it points to.
+    Callers tell it apart from 'RestrictedDirectoryAclFailed', which gets the advice to rename the
+    folder aside (Get-RestrictedDirectoryResetHint): a link that could not be removed needs no new
+    folder name, and an administrator removes it with rmdir.
 .PARAMETER Path
     The folder.
 .PARAMETER Message
@@ -104,6 +105,30 @@ function New-DirectoryIsLinkError {
 
     $exception = New-Object System.InvalidOperationException($Message)
     return (New-Object System.Management.Automation.ErrorRecord($exception, 'DirectoryIsLink', [System.Management.Automation.ErrorCategory]::SecurityError, $Path))
+}
+
+<#
+.SYNOPSIS
+    Returns the advice for a folder whose access list could not be set (the error id
+    'RestrictedDirectoryAclFailed'): rename it aside, so the next run creates a new one.
+.DESCRIPTION
+    That error means another account may still change the folder, so by the time an administrator
+    acts it may be a link. ren renames a link itself, never what it points to; takeown and icacls
+    without /L would follow it. The next run then creates the folder already locked
+    (Initialize-ProgramDataFolder), with nothing another account left in it.
+.PARAMETER Path
+    The folder.
+.OUTPUTS
+    [string] The advice, starting with a space, to append to the error.
+#>
+function Get-RestrictedDirectoryResetHint {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    $newName = '{0}-old-{1}' -f (Split-Path -Leaf $Path), (Get-Date).ToString('yyyyMMdd-HHmmss', [System.Globalization.CultureInfo]::InvariantCulture)
+    return (" To start over with a new folder, rename this one in an elevated prompt: ren `"{0}`" {1} (ren renames a junction or symbolic link itself, never what it points to), then re-run this installer." -f $Path, $newName)
 }
 
 <#
@@ -154,7 +179,9 @@ function New-RestrictedDirectory {
          can change it; -ReadableByUsers lets standard users read the child), with icacls /L so a
          folder swapped for a link meanwhile has the link changed, not its target, and checks that
          it is still a real folder afterwards.
-    Once locked, no other account can rename, replace or relink either folder. Throws on any
+    Once locked, no other account can open either folder to rename, replace or relink it. A folder
+    that existed already is locked in place: what is already in it stays, and a handle a process of
+    its former owner opened before the lock keeps the access it was opened with. Throws on any
     failure: 'RestrictedDirectoryAclFailed' when the access list could not be set, 'DirectoryIsLink'
     for a link, or the error of a folder that could not be created (a file in the way, a full disk).
 .PARAMETER ChildName
@@ -168,7 +195,7 @@ function New-RestrictedDirectory {
 function Initialize-ProgramDataFolder {
     param (
         [Parameter(Mandatory = $false)]
-        [ValidatePattern('^[A-Za-z0-9-]*$')]
+        [ValidatePattern('^[A-Za-z0-9-]*\z')]
         [string]$ChildName = '',
 
         [Parameter(Mandatory = $false)]

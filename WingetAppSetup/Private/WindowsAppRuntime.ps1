@@ -316,7 +316,7 @@ function Install-WindowsAppRuntimeFramework {
                 $reason = "$stage failed: $_"
                 if ($_.FullyQualifiedErrorId -eq 'RestrictedDirectoryAclFailed') {
                     $baseDir = Join-Path $env:ProgramData 'winget-app-setup'
-                    $reason += " To reset the folder, run in an elevated prompt: takeown /f `"$baseDir`" /a, then icacls `"$baseDir`" /reset, and re-run this installer."
+                    $reason += (Get-RestrictedDirectoryResetHint -Path $baseDir)
                 }
             }
             finally {

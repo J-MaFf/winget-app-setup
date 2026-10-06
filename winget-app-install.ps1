@@ -106,12 +106,12 @@ param (
 # the function source under WingetAppSetup/Public and WingetAppSetup/Private, or the entry block in
 # build/fragments/tail.ps1, then re-run the build to regenerate this file.
 # See readme.md ("Project layout") for details.
-# Build id: 1.0.0+8581c4d8 (module version + SHA256 fragment of this whole script; issue #189).
+# Build id: 1.0.0+46fd3a22 (module version + SHA256 fragment of this whole script; issue #189).
 # ------------------------------------------------------------------------------------------------
 
 # Content-derived build identity, logged at startup so a transcript from a remote machine
 # identifies exactly which installer build produced it (issue #189).
-$script:InstallerBuildId = '1.0.0+8581c4d8'
+$script:InstallerBuildId = '1.0.0+46fd3a22'
 
 # ------------------------------------------------Functions------------------------------------------------
 
@@ -2973,14 +2973,20 @@ function Remove-StaleWingetClientFolder {
     $allowedOwnerSids = @('S-1-5-18', 'S-1-5-32-544')
     $removed = 0
     $candidates = @(Get-ChildItem -LiteralPath $Root -Directory -Force -ErrorAction SilentlyContinue |
-            Where-Object { $_.Name -match '^wingetclient-[0-9a-fA-F]{32}$' })
+            Where-Object {
+                $_.Name -match '^wingetclient-[0-9a-fA-F]{32}$' -and $_.LastWriteTimeUtc -le $cutoffUtc -and
+                -not ($_.Attributes -band [System.IO.FileAttributes]::ReparsePoint)
+            })
+    if ($candidates.Count -eq 0) {
+        return 0
+    }
+    try {
+        Assert-RestrictedDirectoryAcl -Path $Root
+    }
+    catch {
+        return 0
+    }
     foreach ($directory in $candidates) {
-        if ($directory.LastWriteTimeUtc -gt $cutoffUtc) {
-            continue
-        }
-        if ($directory.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
-            continue
-        }
         try {
             $ownerSid = (Get-DirectoryAccessSummary -Path $directory.FullName).OwnerSid
             if ($allowedOwnerSids -notcontains $ownerSid) {
@@ -3703,7 +3709,7 @@ function Start-InstallerTranscript {
     catch {
         $resetHint = ''
         if ($_.FullyQualifiedErrorId -eq 'RestrictedDirectoryAclFailed' -and $_.TargetObject) {
-            $resetHint = " To reset the folder, run in an elevated prompt: takeown /f `"$($_.TargetObject)`" /a, then icacls `"$($_.TargetObject)`" /reset, and re-run this installer."
+            $resetHint = Get-RestrictedDirectoryResetHint -Path ([string]$_.TargetObject)
         }
         Write-WarningMessage "Transcript logging could not be started: $_. Continuing without a log file.$resetHint"
         return $null
@@ -5199,6 +5205,16 @@ function New-DirectoryIsLinkError {
     return (New-Object System.Management.Automation.ErrorRecord($exception, 'DirectoryIsLink', [System.Management.Automation.ErrorCategory]::SecurityError, $Path))
 }
 
+function Get-RestrictedDirectoryResetHint {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    $newName = '{0}-old-{1}' -f (Split-Path -Leaf $Path), (Get-Date).ToString('yyyyMMdd-HHmmss', [System.Globalization.CultureInfo]::InvariantCulture)
+    return (" To start over with a new folder, rename this one in an elevated prompt: ren `"{0}`" {1} (ren renames a junction or symbolic link itself, never what it points to), then re-run this installer." -f $Path, $newName)
+}
+
 function New-RestrictedDirectory {
     param (
         [Parameter(Mandatory = $true)]
@@ -5223,7 +5239,7 @@ function New-RestrictedDirectory {
 function Initialize-ProgramDataFolder {
     param (
         [Parameter(Mandatory = $false)]
-        [ValidatePattern('^[A-Za-z0-9-]*$')]
+        [ValidatePattern('^[A-Za-z0-9-]*\z')]
         [string]$ChildName = '',
 
         [Parameter(Mandatory = $false)]
@@ -7210,7 +7226,7 @@ function Set-RestrictedDirectoryAcl {
         }
     )
     foreach ($step in $steps) {
-        $proc = Start-Process -FilePath 'icacls.exe' -ArgumentList $step.Arguments -Wait -PassThru -NoNewWindow
+        $proc = Start-Process -FilePath 'icacls.exe' -ArgumentList $step.Arguments -Wait -PassThru -WindowStyle Hidden
         if ($proc.ExitCode -ne 0) {
             $failure = "icacls failed to $($step.Description) '$Path' (exit code $($proc.ExitCode))."
             break
@@ -7278,7 +7294,7 @@ function Open-ReadLockedFile {
 function New-WauStagingDirectory {
     param (
         [Parameter(Mandatory = $false)]
-        [ValidatePattern('^[A-Za-z0-9-]+$')]
+        [ValidatePattern('^[A-Za-z0-9-]+\z')]
         [string]$Prefix = 'wau-msi'
     )
 
@@ -8035,7 +8051,7 @@ function Install-WindowsAppRuntimeFramework {
                 $reason = "$stage failed: $_"
                 if ($_.FullyQualifiedErrorId -eq 'RestrictedDirectoryAclFailed') {
                     $baseDir = Join-Path $env:ProgramData 'winget-app-setup'
-                    $reason += " To reset the folder, run in an elevated prompt: takeown /f `"$baseDir`" /a, then icacls `"$baseDir`" /reset, and re-run this installer."
+                    $reason += (Get-RestrictedDirectoryResetHint -Path $baseDir)
                 }
             }
             finally {
@@ -9739,10 +9755,10 @@ function Initialize-WingetClientModule {
             }
 
             if (-not $reason -and $source -eq 'Download') {
-                $partialPath = $cachePath + '.partial'
+                $partialPath = Join-Path $cacheDirectory ('{0}.{1}.partial' -f $pin.FileName, [guid]::NewGuid().ToString('N'))
                 try {
                     $stream.Position = 0
-                    $cacheFile = [System.IO.File]::Create($partialPath)
+                    $cacheFile = [System.IO.File]::Open($partialPath, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
                     try {
                         $stream.CopyTo($cacheFile)
                     }
@@ -9750,8 +9766,8 @@ function Initialize-WingetClientModule {
                         $cacheFile.Dispose()
                     }
                     [System.IO.File]::Move($partialPath, $cachePath, $true)
-                    foreach ($old in @(Get-ChildItem -LiteralPath $cacheDirectory -Filter 'microsoft.winget.client.*.nupkg' -File -ErrorAction SilentlyContinue)) {
-                        if ($old.Name -ne $pin.FileName) {
+                    foreach ($old in @(Get-ChildItem -LiteralPath $cacheDirectory -File -Force -ErrorAction SilentlyContinue)) {
+                        if (($old.Name -like 'microsoft.winget.client.*.nupkg' -and $old.Name -ne $pin.FileName) -or $old.Name -like '*.partial') {
                             Remove-Item -LiteralPath $old.FullName -Force -ErrorAction SilentlyContinue
                         }
                     }
@@ -9767,7 +9783,7 @@ function Initialize-WingetClientModule {
         $reason = "$stage failed: $($_.Exception.Message)"
         if ($_.FullyQualifiedErrorId -eq 'RestrictedDirectoryAclFailed') {
             $baseDir = Join-Path $env:ProgramData 'winget-app-setup'
-            $reason += " To reset the folder, run in an elevated prompt: takeown /f `"$baseDir`" /a, then icacls `"$baseDir`" /reset, and re-run this installer."
+            $reason += (Get-RestrictedDirectoryResetHint -Path $baseDir)
         }
     }
     finally {
@@ -11842,7 +11858,7 @@ function Install-WingetAutoUpdate {
         catch {
             $baseDir = Join-Path $env:ProgramData 'winget-app-setup'
             if ($_.FullyQualifiedErrorId -eq 'RestrictedDirectoryAclFailed') {
-                Write-ErrorMessage "Winget-AutoUpdate was NOT installed: its download folder could not be limited to SYSTEM and Administrators, so its installer could have been swapped before it ran. $_ To reset the folder, run in an elevated prompt: takeown /f `"$baseDir`" /a, then icacls `"$baseDir`" /reset, and re-run this installer."
+                Write-ErrorMessage "Winget-AutoUpdate was NOT installed: its download folder could not be limited to SYSTEM and Administrators, so its installer could have been swapped before it ran. $_$(Get-RestrictedDirectoryResetHint -Path $baseDir)"
             }
             else {
                 Write-ErrorMessage "Winget-AutoUpdate was NOT installed: its download folder in '$baseDir' could not be set up: $_"

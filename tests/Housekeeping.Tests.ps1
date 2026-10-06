@@ -440,6 +440,29 @@ Describe 'Remove-StaleWingetClientFolder (wgt-gq8.42)' {
         Test-Path -LiteralPath (Join-Path $folder 'Invoke-WingetClientRequest.ps1') | Should -BeTrue
     }
 
+    # A run that could not lock %ProgramData%\winget-app-setup goes on without its transcript, and
+    # another account could still swap an engine folder between its checks and its removal.
+    It 'Removes nothing from a folder other accounts can still change, or whose access list cannot be read' {
+        $folder = New-TestWingetClientFolder -Root $script:stagingRoot -AgeHours 30
+        Mock Get-DirectoryAccessSummary {
+            [pscustomobject]@{ OwnerSid = 'S-1-5-21-1-2-3-1001'; OwnerName = 'CONTOSO\jdoe'; InheritanceProtected = $false; AccessRules = @() }
+        } -ParameterFilter { $Path -eq $script:stagingRoot }
+
+        Remove-StaleWingetClientFolder -Root $script:stagingRoot -MaxAgeHours 24 | Should -Be 0
+        Mock Get-DirectoryAccessSummary { throw 'Access is denied.' } -ParameterFilter { $Path -eq $script:stagingRoot }
+        Remove-StaleWingetClientFolder -Root $script:stagingRoot -MaxAgeHours 24 | Should -Be 0
+
+        Test-Path -LiteralPath (Join-Path $folder 'Invoke-WingetClientRequest.ps1') | Should -BeTrue
+    }
+
+    It 'Reads the access list of the folder it looks in only when there is something to remove' {
+        $null = New-TestWingetClientFolder -Root $script:stagingRoot -AgeHours 2
+
+        Remove-StaleWingetClientFolder -Root $script:stagingRoot -MaxAgeHours 24 | Should -Be 0
+
+        Should -Invoke Get-DirectoryAccessSummary -Times 0 -Exactly
+    }
+
     It 'Leaves a folder another account owns, or whose owner cannot be read' {
         $folder = New-TestWingetClientFolder -Root $script:stagingRoot -AgeHours 30
         Mock Get-DirectoryAccessSummary { [pscustomobject]@{ OwnerSid = 'S-1-5-21-1-2-3-1001'; OwnerName = 'CONTOSO\jdoe'; InheritanceProtected = $false; AccessRules = @() } }

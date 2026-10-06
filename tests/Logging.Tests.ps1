@@ -226,10 +226,10 @@ Describe 'Start-InstallerTranscript (issue #189, review findings P2-13 and P3-14
 
             Start-InstallerTranscript | Should -BeNullOrEmpty
 
-            Should -Invoke Write-WarningMessage -Times 1 -Exactly -ParameterFilter { $Message -match 'Transcript logging could not be started: Access to the path is denied' -and $Message -notmatch 'takeown' }
+            Should -Invoke Write-WarningMessage -Times 1 -Exactly -ParameterFilter { $Message -match 'Transcript logging could not be started: Access to the path is denied' -and $Message -notmatch 'start over' }
         }
 
-        It 'Starts no transcript when the log folder cannot be made safe, and says how to reset a folder whose access list could not be set' {
+        It 'Starts no transcript when the log folder cannot be made safe, and says how to replace a folder whose access list could not be set without following a link' {
             Mock Initialize-ProgramDataFolder {
                 throw [System.Management.Automation.ErrorRecord]::new([System.InvalidOperationException]::new("'C:\ProgramData\winget-app-setup\logs' is not limited to SYSTEM and Administrators: PC01\enduser (S-1-5-21-1-2-3-1001) has an access entry (allow)."), 'RestrictedDirectoryAclFailed', [System.Management.Automation.ErrorCategory]::SecurityError, 'C:\ProgramData\winget-app-setup\logs')
             }
@@ -238,7 +238,7 @@ Describe 'Start-InstallerTranscript (issue #189, review findings P2-13 and P3-14
 
             Should -Invoke Start-Transcript -Times 0 -Exactly
             Should -Invoke Write-WarningMessage -Times 1 -Exactly -ParameterFilter {
-                $Message -like "Transcript logging could not be started: 'C:\ProgramData\winget-app-setup\logs' is not limited to SYSTEM and Administrators*Continuing without a log file. To reset the folder, run in an elevated prompt: takeown /f `"C:\ProgramData\winget-app-setup\logs`" /a, then icacls `"C:\ProgramData\winget-app-setup\logs`" /reset, and re-run this installer."
+                $Message -like "Transcript logging could not be started: 'C:\ProgramData\winget-app-setup\logs' is not limited to SYSTEM and Administrators*Continuing without a log file. To start over with a new folder, rename this one in an elevated prompt: ren `"C:\ProgramData\winget-app-setup\logs`" logs-old-*, then re-run this installer." -and $Message -notlike '*takeown*'
             }
         }
     }

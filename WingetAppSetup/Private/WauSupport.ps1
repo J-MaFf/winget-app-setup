@@ -224,7 +224,9 @@ function Set-RestrictedDirectoryAcl {
         }
     )
     foreach ($step in $steps) {
-        $proc = Start-Process -FilePath 'icacls.exe' -ArgumentList $step.Arguments -Wait -PassThru -NoNewWindow
+        # -WindowStyle Hidden, not -NoNewWindow: icacls prints a summary line even with /q, and
+        # every elevated run locks the base and logs folders before its transcript starts.
+        $proc = Start-Process -FilePath 'icacls.exe' -ArgumentList $step.Arguments -Wait -PassThru -WindowStyle Hidden
         if ($proc.ExitCode -ne 0) {
             $failure = "icacls failed to $($step.Description) '$Path' (exit code $($proc.ExitCode))."
             break
@@ -339,7 +341,7 @@ function Open-ReadLockedFile {
 function New-WauStagingDirectory {
     param (
         [Parameter(Mandatory = $false)]
-        [ValidatePattern('^[A-Za-z0-9-]+$')]
+        [ValidatePattern('^[A-Za-z0-9-]+\z')]
         [string]$Prefix = 'wau-msi'
     )
 

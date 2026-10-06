@@ -374,7 +374,7 @@ Describe 'Install-WindowsAppRuntimeFramework (work-order item 31)' {
         $result = Install-WindowsAppRuntimeFramework
 
         $result.Installed | Should -BeFalse
-        $result.Reason | Should -Match '^setting up its download folder failed: .*is owned by PC\\User.* To reset the folder, run in an elevated prompt: takeown /f '
+        $result.Reason | Should -Match '^setting up its download folder failed: .*is owned by PC\\User.* To start over with a new folder, rename this one in an elevated prompt: ren "[^"]+winget-app-setup" winget-app-setup-old-\d{8}-\d{6} '
         Should -Invoke Invoke-WebRequest -Times 0 -Exactly
     }
 

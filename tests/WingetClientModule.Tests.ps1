@@ -291,6 +291,30 @@ Describe 'Initialize-WingetClientModule' {
         $script:lines | Should -Contain 'INFO: Downloading Microsoft.WinGet.Client 1.29.380 from the PowerShell Gallery...'
     }
 
+    # A standard user can fill the cache folder before an elevated run first locks it (wgt-gq8.46
+    # review): the copy must not open an entry at a name known from the public pin.
+    It 'Copies the package into the cache under a new name, never through a file link left at a predictable one' {
+        [void](New-Item -ItemType Directory -Path $script:cacheDirectory -Force)
+        $victim = Join-Path $TestDrive ('victim-' + [guid]::NewGuid().ToString('N') + '.txt')
+        Set-Content -LiteralPath $victim -Value 'not the installer''s' -NoNewline
+        $planted = Join-Path $script:cacheDirectory ($script:pin.FileName + '.partial')
+        try {
+            [void](New-Item -ItemType SymbolicLink -Path $planted -Target $victim -ErrorAction Stop)
+        }
+        catch {
+            Set-ItResult -Skipped -Because "this account cannot create a symbolic link ($($_.Exception.Message))"
+            return
+        }
+
+        $result = Initialize-WingetClientModule
+
+        $result.Ready | Should -BeTrue
+        Get-Content -Raw -LiteralPath $victim | Should -Be 'not the installer''s'
+        (Get-FileHash -LiteralPath (Join-Path $script:cacheDirectory $script:pin.FileName) -Algorithm SHA256).Hash | Should -Be $script:pin.Sha256
+        Test-Path -LiteralPath $planted | Should -BeFalse
+        @(Get-ChildItem -LiteralPath $script:cacheDirectory -Force | Where-Object { $_.Name -like '*.partial' }) | Should -BeNullOrEmpty
+    }
+
     It 'Uses a cached package that matches the pin, without downloading' {
         [void](New-Item -ItemType Directory -Path $script:cacheDirectory -Force)
         Copy-Item -LiteralPath $script:package -Destination (Join-Path $script:cacheDirectory $script:pin.FileName)
@@ -434,7 +458,7 @@ Describe 'Initialize-WingetClientModule' {
         { $script:result = Initialize-WingetClientModule } | Should -Not -Throw
 
         $script:result.Ready | Should -BeFalse
-        $script:result.Reason | Should -Match '^setting up its folders failed: icacls failed\. To reset the folder, run in an elevated prompt: takeown /f '
+        $script:result.Reason | Should -Match '^setting up its folders failed: icacls failed\. To start over with a new folder, rename this one in an elevated prompt: ren "[^"]+winget-app-setup" winget-app-setup-old-\d{8}-\d{6} '
         @($script:lines | Where-Object { $_ -match 'WinGet client module:' }).Count | Should -Be 1
     }
 

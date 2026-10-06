@@ -83,7 +83,7 @@ function Start-InstallerTranscript {
     catch {
         $resetHint = ''
         if ($_.FullyQualifiedErrorId -eq 'RestrictedDirectoryAclFailed' -and $_.TargetObject) {
-            $resetHint = " To reset the folder, run in an elevated prompt: takeown /f `"$($_.TargetObject)`" /a, then icacls `"$($_.TargetObject)`" /reset, and re-run this installer."
+            $resetHint = Get-RestrictedDirectoryResetHint -Path ([string]$_.TargetObject)
         }
         Write-WarningMessage "Transcript logging could not be started: $_. Continuing without a log file.$resetHint"
         return $null

@@ -302,10 +302,11 @@ function Remove-StaleInstallerCopy {
     %ProgramData%\winget-app-setup\wingetclient-<32 hex> and removes it when it ends, unless it was
     killed. This removes those at least MaxAgeHours old that SYSTEM or Administrators own and that
     are not links, with everything in them (a link inside is removed, not followed). Nothing is
-    removed when Root itself is a link.
+    removed when Root itself is a link, or when other accounts can still change it
+    (Assert-RestrictedDirectoryAcl): they could swap a folder between its checks and its removal.
 .PARAMETER Root
-    The folder to look in (%ProgramData%\winget-app-setup, which only SYSTEM and Administrators can
-    change). Missing: nothing to do.
+    The folder to look in (%ProgramData%\winget-app-setup, which every elevated run limits to SYSTEM
+    and Administrators). Missing: nothing to do.
 .PARAMETER MaxAgeHours
     The age (last write time) from which a folder is removed.
 .OUTPUTS
@@ -329,14 +330,21 @@ function Remove-StaleWingetClientFolder {
     $allowedOwnerSids = @('S-1-5-18', 'S-1-5-32-544')
     $removed = 0
     $candidates = @(Get-ChildItem -LiteralPath $Root -Directory -Force -ErrorAction SilentlyContinue |
-            Where-Object { $_.Name -match '^wingetclient-[0-9a-fA-F]{32}$' })
+            Where-Object {
+                $_.Name -match '^wingetclient-[0-9a-fA-F]{32}$' -and $_.LastWriteTimeUtc -le $cutoffUtc -and
+                -not ($_.Attributes -band [System.IO.FileAttributes]::ReparsePoint)
+            })
+    if ($candidates.Count -eq 0) {
+        return 0
+    }
+    # A run that could not lock Root (wgt-gq8.46 review) leaves it to a later one that can.
+    try {
+        Assert-RestrictedDirectoryAcl -Path $Root
+    }
+    catch {
+        return 0
+    }
     foreach ($directory in $candidates) {
-        if ($directory.LastWriteTimeUtc -gt $cutoffUtc) {
-            continue
-        }
-        if ($directory.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
-            continue
-        }
         try {
             $ownerSid = (Get-DirectoryAccessSummary -Path $directory.FullName).OwnerSid
             if ($allowedOwnerSids -notcontains $ownerSid) {

@@ -153,6 +153,16 @@ Describe 'Winget-AutoUpdate integration (issue #168)' {
             Should -Invoke Set-RestrictedDirectoryAcl -Times 1 -Exactly -ParameterFilter { $Path -eq $dir }
         }
 
+        It 'accepts only letters, digits and hyphens as the prefix, with nothing after them' {
+            Mock Initialize-ProgramDataFolder { throw 'must not set up a folder for a rejected prefix' }
+
+            { New-WauStagingDirectory -Prefix '..\wau' } | Should -Throw '*Prefix*'
+            # .NET's $ also matches before a final newline; \z does not.
+            { New-WauStagingDirectory -Prefix "wau-msi`n" } | Should -Throw '*Prefix*'
+
+            Should -Invoke Initialize-ProgramDataFolder -Times 0 -Exactly
+        }
+
         It 'generates a different staging directory name on every run' {
             Mock Initialize-ProgramDataFolder { Join-Path $env:ProgramData 'winget-app-setup' }
             Mock New-Item { }
@@ -173,11 +183,14 @@ Describe 'Winget-AutoUpdate integration (issue #168)' {
                 $victim = Join-Path $TestDrive ('victim-' + [guid]::NewGuid().ToString('N'))
                 [void](New-Item -ItemType Directory -Path $victim)
                 Set-Content -LiteralPath (Join-Path $victim 'keep.txt') -Value 'not the installer''s'
+                [void](New-Item -ItemType Directory -Path (Join-Path $victim 'sub'))
+                # The target's access lists, its own and those of what it holds, which inherit from it.
+                $victimItems = @($victim, (Join-Path $victim 'keep.txt'), (Join-Path $victim 'sub'))
                 $victimSddl = $null
                 $linkType = 'SymbolicLink'
                 if ($IsWindows) {
                     $linkType = 'Junction'
-                    $victimSddl = (Get-Acl -LiteralPath $victim).Sddl
+                    $victimSddl = @($victimItems | ForEach-Object { (Get-Acl -LiteralPath $_).Sddl })
                 }
                 [void](New-Item -ItemType $linkType -Path $baseDir -Target $victim)
                 $script:lockedLinks = @()
@@ -199,9 +212,9 @@ Describe 'Winget-AutoUpdate integration (issue #168)' {
                 ((Get-Item -LiteralPath $baseDir -Force).Attributes -band [System.IO.FileAttributes]::ReparsePoint) | Should -Be 0
                 Split-Path -Parent $dir | Should -Be $baseDir
                 Test-Path -LiteralPath $dir -PathType Container | Should -BeTrue
-                @(Get-ChildItem -LiteralPath $victim -Force | ForEach-Object { $_.Name }) | Should -Be @('keep.txt')
+                @(Get-ChildItem -LiteralPath $victim -Force | ForEach-Object { $_.Name } | Sort-Object) | Should -Be @('keep.txt', 'sub')
                 if ($IsWindows) {
-                    (Get-Acl -LiteralPath $victim).Sddl | Should -Be $victimSddl
+                    @($victimItems | ForEach-Object { (Get-Acl -LiteralPath $_).Sddl }) | Should -Be $victimSddl
                 }
                 Should -Invoke Write-WarningMessage -Times 1 -Exactly -ParameterFilter { $Message -like "'$baseDir' was a link (a junction or symbolic link), not a folder.*" }
             }
@@ -225,6 +238,18 @@ Describe 'Winget-AutoUpdate integration (issue #168)' {
             # /grant:r replaces explicit SYSTEM and Administrators entries instead of adding to them.
             $script:icaclsCalls[1] | Should -Be '"C:\ProgramData\winget-app-setup\wau-msi-test" /inheritance:r /grant:r *S-1-5-18:(OI)(CI)F *S-1-5-32-544:(OI)(CI)F /L /q'
             Should -Invoke Assert-RestrictedDirectoryAcl -Times 1 -Exactly -ParameterFilter { $Path -eq 'C:\ProgramData\winget-app-setup\wau-msi-test' -and -not $ReadableByUsers }
+        }
+
+        # Every elevated run locks the base and logs folders before its transcript starts, so
+        # icacls's summary lines would land on its console, outside the log.
+        It 'runs icacls in a hidden window, never in the run''s own console' {
+            Mock Start-Process { [pscustomobject]@{ ExitCode = 0 } } -ParameterFilter { $FilePath -eq 'icacls.exe' }
+            Mock Assert-RestrictedDirectoryAcl { }
+
+            Set-RestrictedDirectoryAcl -Path 'C:\ProgramData\winget-app-setup\logs' -ReadableByUsers
+
+            Should -Invoke Start-Process -Times 2 -Exactly -ParameterFilter { $FilePath -eq 'icacls.exe' }
+            Should -Invoke Start-Process -Times 2 -Exactly -ParameterFilter { $FilePath -eq 'icacls.exe' -and $WindowStyle -eq 'Hidden' -and -not $NoNewWindow }
         }
 
         It 'lets BUILTIN\Users read the folder with -ReadableByUsers, by SID, in the same /grant:r (the logs folder, review finding P3-14)' {
@@ -287,8 +312,9 @@ Describe 'Winget-AutoUpdate integration (issue #168)' {
 
             Set-RestrictedDirectoryAcl -Path 'C:\ProgramData\winget-app-setup'
 
-            # /T would replace the logs folder's explicit BUILTIN\Users read grant
-            # (Grant-InstallLogReadAccess, review finding P3-14), and so would /reset.
+            # /T would replace the logs folder's explicit BUILTIN\Users read grant (set by
+            # Set-RestrictedDirectoryAcl -ReadableByUsers through Initialize-ProgramDataFolder, review
+            # finding P3-14), and so would /reset.
             foreach ($arguments in $script:icaclsCalls) {
                 $arguments | Should -Not -Match '(^|\s)/[tT](\s|$)'
                 $arguments | Should -Not -Match '/reset'
@@ -790,7 +816,10 @@ Describe 'Winget-AutoUpdate integration (issue #168)' {
                 $message = $script:errors -join "`n"
                 $message | Should -BeLike '*Winget-AutoUpdate was NOT installed: its download folder could not be limited to SYSTEM and Administrators*'
                 $message | Should -BeLike "*it is owned by PC01\enduser (S-1-5-21-1-2-3-1001)*"
-                $message | Should -BeLike "*takeown /f `"$baseDir`" /a, then icacls `"$baseDir`" /reset*"
+                # Renamed aside, never takeown or icacls without /L: both would follow a link that
+                # another account put in the folder's place meanwhile (wgt-gq8.46 review).
+                $message | Should -BeLike "*To start over with a new folder, rename this one in an elevated prompt: ren `"$baseDir`" winget-app-setup-old-*, then re-run this installer.*"
+                $message | Should -Not -BeLike '*takeown*'
             }
             finally {
                 $env:ProgramData = $savedProgramData
@@ -844,7 +873,7 @@ Describe 'Winget-AutoUpdate integration (issue #168)' {
                 Should -Invoke Invoke-WebRequest -Times 0 -Exactly
                 $message = $script:errors -join "`n"
                 $message | Should -BeLike "*could not be set up: An error occurred trying to start process 'icacls.exe'.*"
-                $message | Should -Not -BeLike '*takeown*'
+                $message | Should -Not -BeLike '*start over*'
                 $message | Should -Not -BeLike '*limited to SYSTEM and Administrators*'
             }
             finally {
@@ -852,8 +881,7 @@ Describe 'Winget-AutoUpdate integration (issue #168)' {
             }
         }
 
-        # wgt-gq8.46: takeown and icacls /reset, the advice for an access-list failure, would follow
-        # the link and change what it points to.
+        # wgt-gq8.46: a link that could not be removed needs rmdir, not a new folder name.
         It 'does not download when a link planted as the base folder cannot be removed, and gives no reset advice' {
             $savedProgramData = $env:ProgramData
             $env:ProgramData = Join-Path $TestDrive ('ProgramData-' + [guid]::NewGuid().ToString('N'))
@@ -882,7 +910,7 @@ Describe 'Winget-AutoUpdate integration (issue #168)' {
                 @(Get-ChildItem -LiteralPath $victim -Force) | Should -BeNullOrEmpty
                 $message = $script:errors -join "`n"
                 $message | Should -BeLike "Winget-AutoUpdate was NOT installed: its download folder in '$baseDir' could not be set up: '$baseDir' is a link (a junction or symbolic link), not a folder, and the link could not be removed: Access is denied.*"
-                $message | Should -Not -BeLike '*takeown*'
+                $message | Should -Not -BeLike '*start over*'
             }
             finally {
                 $env:ProgramData = $savedProgramData

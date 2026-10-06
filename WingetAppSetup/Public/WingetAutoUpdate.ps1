@@ -210,12 +210,11 @@ function Install-WingetAutoUpdate {
         catch {
             $baseDir = Join-Path $env:ProgramData 'winget-app-setup'
             if ($_.FullyQualifiedErrorId -eq 'RestrictedDirectoryAclFailed') {
-                Write-ErrorMessage "Winget-AutoUpdate was NOT installed: its download folder could not be limited to SYSTEM and Administrators, so its installer could have been swapped before it ran. $_ To reset the folder, run in an elevated prompt: takeown /f `"$baseDir`" /a, then icacls `"$baseDir`" /reset, and re-run this installer."
+                Write-ErrorMessage "Winget-AutoUpdate was NOT installed: its download folder could not be limited to SYSTEM and Administrators, so its installer could have been swapped before it ran. $_$(Get-RestrictedDirectoryResetHint -Path $baseDir)"
             }
             else {
                 # Not an access-list problem (a link that could not be removed, a file already named
-                # winget-app-setup, a full disk, icacls.exe not starting): resetting the folder's
-                # owner would not help, and takeown would follow a link.
+                # winget-app-setup, a full disk, icacls.exe not starting): the error says what to do.
                 Write-ErrorMessage "Winget-AutoUpdate was NOT installed: its download folder in '$baseDir' could not be set up: $_"
             }
             return [pscustomobject]@{ Status = 'Failed'; Version = $pin.Version; FrameworkMissing = $false; RestartRequired = $false }
