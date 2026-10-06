@@ -146,7 +146,9 @@ Catalog conditions are now decided once per run, before anything is installed, a
 that answer, so the retry pass can no longer count an app it found not applicable as installed. A
 condition that cannot answer (a failed CIM query, for example) fails open and the install is
 attempted. x64 PCs get the 64-bit Adobe Reader, and ARM64 and 32-bit PCs the 32-bit one (`arch`
-lists read through `Get-OSArchitecture`). Dell Command Update is limited to x64 Windows. Google
+lists read through `Get-OSArchitecture`). Dell Command Update is installed on x64 Windows only:
+Dell ships an ARM64 build of it, but winget's `Dell.CommandUpdate.Universal` package carries only
+the x64 one (as of 2026-10-06). Google
 Drive stays on ARM64, where Google serves the same installer and it runs natively on Windows 11; on
 Windows 10 ARM64 (x86 emulation only) it still fails with `0x8A150010`. Stale default-terminal
 values no longer make the installer skip a removed Windows Terminal. Winget-AutoUpdate counts as
@@ -275,7 +277,8 @@ guard and `-Check` cover both, and `-Check` now compares ordinally. A whole-run 
 `-MaxRuntimeMinutes`; wgt-gq8.41) lets an RMM job end with a report instead of being killed: once
 it is used up, no app install, retry or Winget-AutoUpdate setup starts, the apps left are
 `NotAttempted` (summary, `RESULT` line, `last-run.json`), and the run exits with the new code 9.
-The catalog's architecture gates use `arch` lists (wgt-gq8.44): Dell Command Update is x64 only,
+The catalog's architecture gates use `arch` lists (wgt-gq8.44): Dell Command Update is installed
+on x64 only, because winget's package has no ARM64 installer (Dell's ARM64 build is separate),
 the Reader split moved from conditions to `arch` lists, and Google Drive stays ungated. The SYSTEM
 E2E leg now checks each catalog app's entry in `last-run.json` against the checkout's catalog
 (wgt-gq8.45), and fails when the job could not remove Chrome, 7-Zip or Git first. None of this has
