@@ -7,9 +7,11 @@
     pieces:
       1. The app list is validated with Test-AppDefinitions (exit code 3).
       2. winget is set up as Invoke-WingetInstall does it, with Initialize-Winget for the account
-         Get-InstallAccountContext decides. When winget still cannot be used, nothing is removed
-         and the run returns 2: without winget the uninstaller cannot tell what is installed, and
-         removing Winget-AutoUpdate anyway would leave every app without updates.
+         Get-InstallAccountContext decides. When winget still cannot be used, or cannot open its
+         source (SourceUnusable), nothing is removed and the run returns 2: without winget and its
+         source the uninstaller cannot tell what is installed, and removing Winget-AutoUpdate anyway
+         would leave every app without updates. An app whose `winget list` check fails later is
+         Failed, never 'not installed', so Winget-AutoUpdate is kept then too.
       3. Each app goes through Uninstall-CatalogApp.
       4. Once winget no longer lists Windows Terminal, the default terminal setting that still names
          it is removed (Reset-WindowsTerminalDelegation).
@@ -29,7 +31,8 @@
     Winget-AutoUpdate was removed or was not installed; 3010 = the same, and a restart finishes a
     removal (an uninstaller returned 3010 or 1641); 1 = an app could not be removed or checked
     (Winget-AutoUpdate is then kept), or Winget-AutoUpdate could not be removed; 2 = winget cannot be
-    started for this account, or Group Policy turns it off, so nothing was removed; 3 = the app list
+    started for this account, cannot open its source, or Group Policy turns it off, so nothing was
+    removed; 3 = the app list
     has invalid entries or is empty. 1 ranks above 3010. A dry run returns 0 when winget cannot be
     started, and never 3010. winget-app-uninstall.ps1 adds 4 (not elevated, and the UAC prompt was
     declined or could not be shown) and 5 (an unexpected error, a run without a script file, or a
@@ -80,6 +83,7 @@ function Invoke-WingetUninstall {
         # Group Policy (review finding P3-30) is not fixed by another account or by installing App
         # Installer: Initialize-Winget has named the policy, and this says what that means here.
         $policyBlocked = $winget.Diagnosis -eq 'PolicyBlocked'
+        $sourceUnusable = $winget.Diagnosis -eq 'SourceUnusable'
         if ($WhatIf) {
             if ($policyBlocked) {
                 Write-Info '[DRY-RUN] Group Policy on this PC blocks winget (see above). A real run would stop with exit code 2 before removing anything. Without winget this preview cannot tell which apps are installed, so it stops here.'
@@ -92,6 +96,10 @@ function Invoke-WingetUninstall {
         if ($policyBlocked) {
             $message = 'Group Policy on this PC blocks winget (see above), so nothing was uninstalled: without winget the uninstaller cannot tell which apps are installed.'
         }
+        elseif ($sourceUnusable) {
+            # Without its source, winget lists no catalog app, so every app would read as not installed.
+            $message = 'winget cannot open its source for this account (see above), so nothing was uninstalled: without it winget cannot tell which apps are installed.'
+        }
         else {
             $message = 'winget cannot be started for this account, so nothing was uninstalled: without winget the uninstaller cannot tell which apps are installed.'
         }
@@ -100,6 +108,9 @@ function Invoke-WingetUninstall {
         }
         if ($policyBlocked) {
             $message += ' Run the uninstaller again once the policy allows winget.'
+        }
+        elseif ($sourceUnusable) {
+            $message += ' Fix the source as the line above says, or run the uninstaller from an account where winget works (for example the signed-in user, elevated), then run it again.'
         }
         else {
             $message += ' Run the uninstaller from an account where winget works (for example the signed-in user, elevated), or install App Installer from https://aka.ms/getwinget, then run it again.'

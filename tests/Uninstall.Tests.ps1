@@ -113,6 +113,45 @@ Describe 'Invoke-WingetUninstall' {
             $script:errorMessages | Should -Be @('Group Policy on this PC blocks winget (see above), so nothing was uninstalled: without winget the uninstaller cannot tell which apps are installed. Winget-AutoUpdate was left in place, so the apps keep getting updates. Run the uninstaller again once the policy allows winget.')
         }
 
+        It 'Returns 2 and removes nothing, Winget-AutoUpdate included, when the winget source cannot be opened (wgt-gq8.64)' {
+            Mock Initialize-Winget { [pscustomobject]@{ Ready = $false; Diagnosis = 'SourceUnusable' } }
+
+            $result = Invoke-WingetUninstall -Apps $script:apps
+
+            $result | Should -Be 2
+            Should -Invoke Invoke-WingetProcess -Times 0 -Exactly
+            Should -Invoke Remove-LegacyScheduledUpdates -Times 0 -Exactly
+            Should -Invoke Uninstall-WingetAutoUpdate -Times 0 -Exactly
+            Should -Invoke Write-Table -Times 0 -Exactly
+            $script:errorMessages | Should -Be @('winget cannot open its source for this account (see above), so nothing was uninstalled: without it winget cannot tell which apps are installed. Winget-AutoUpdate was left in place, so the apps keep getting updates. Fix the source as the line above says, or run the uninstaller from an account where winget works (for example the signed-in user, elevated), then run it again.')
+        }
+
+        # wgt-gq8.64: before --source winget, such a list exited 0x8A150014 and every app read as
+        # not installed.
+        It 'Returns 1, uninstalls nothing and keeps Winget-AutoUpdate when every winget list fails with 0x8A15000F' {
+            # What winget answers then: without --source a warning and 0x8A150014, with it 0x8A15000F.
+            Mock Invoke-WingetProcess {
+                $arguments = @($ArgumentList)
+                $script:sequence += ('{0} {1}' -f $arguments[0], $arguments[[array]::IndexOf($arguments, '--id') + 1])
+                if (($arguments -join ' ') -match '--source winget') {
+                    return New-TestProcessResult -ExitCode -1978335217 -Output @('0x8a15000f : Data required by the source is missing')
+                }
+                New-TestProcessResult -ExitCode -1978335212 -Output @('Failed when searching source; results will not be included: winget', 'No installed package found matching input criteria.')
+            }
+
+            $result = Invoke-WingetUninstall -Apps $script:apps
+
+            $result | Should -Be 1
+            $script:sequence | Should -Be @('list Contoso.AppOne', 'list Contoso.AppTwo')
+            Should -Invoke Invoke-WingetProcess -Times 2 -Exactly -ParameterFilter { ($ArgumentList -join ' ') -match '--source winget' }
+            Should -Invoke Uninstall-WingetAutoUpdate -Times 0 -Exactly
+            Should -Invoke Remove-LegacyScheduledUpdates -Times 0 -Exactly
+            $script:capturedTables['Uninstallation Summary'] | Should -Be @(, @('Failed', 'Contoso.AppOne, Contoso.AppTwo'))
+            $script:errorMessages | Should -Contain "Failed to uninstall: Contoso.AppOne (could not check whether it is installed: 'winget list' failed with 0x8A15000F SOURCE_DATA_MISSING)."
+            ($script:warningMessages -join "`n") | Should -Match 'Winget-AutoUpdate is kept: 2 app\(s\) could not be uninstalled'
+            ($script:warningMessages -join "`n") | Should -Not -Match 'Skipping:'
+        }
+
         It 'Does not claim Winget-AutoUpdate was left in place when it is not installed (winget unusable)' {
             Mock Initialize-Winget { [pscustomobject]@{ Ready = $false; Diagnosis = 'NotLaunchable' } }
             Mock Test-WauInstalled { $false }
@@ -749,6 +788,8 @@ function Get-WindowsAppRuntimeStatus { [pscustomobject]@{ Present = $true; Detai
 function Invoke-WingetPackageManagerRepair { [pscustomobject]@{ Available = $false; Succeeded = $false; ErrorCodes = @() } }
 function Invoke-WebRequest { throw 'no network in this test' }
 function Add-AppxPackage { throw 'no App Installer in this test' }
+function Register-WingetSourcePackage { Write-Host 'FAKE: register the winget source package'; [pscustomobject]@{ Registered = $false; ErrorCodes = @(-2147009255); Reason = 'registering it failed' } }
+function Get-WingetClientRepairVersion { $null }
 function Get-ProcessUserName { 'CONTOSO\admin-tech' }
 function Get-InteractiveSessionUserName { $null }
 function Start-Sleep { param ([int]$Seconds) }
@@ -781,6 +822,19 @@ function Invoke-WingetProcess {
     $result.ExitCode = 0
     if ($arguments[0] -eq '--version') {
         $result.StandardOutput = @('v1.12.350')
+    }
+    elseif ($scenario -eq 'SourceMissing' -and $arguments[0] -eq 'source') {
+        # winget's real answer when it cannot deploy its source package: 'Cancelled', exit 0.
+        $result.StandardOutput = @('Updating source: winget...', 'Cancelled')
+    }
+    elseif ($scenario -eq 'SourceMissing' -and @('search', 'list') -contains $arguments[0]) {
+        # With --source winget the source's own code; without it a warning and 'nothing found'.
+        $result.ExitCode = -1978335217
+        $result.StandardOutput = @('0x8a15000f : Data required by the source is missing')
+        if (($arguments -join ' ') -notmatch '--source winget') {
+            $result.ExitCode = -1978335212
+            $result.StandardOutput = @('Failed when searching source; results will not be included: winget', 'No installed package found matching input criteria.')
+        }
     }
     elseif ($arguments[0] -eq 'list') {
         $result.StandardOutput = @(('{0}  1.0  winget' -f $arguments[[array]::IndexOf($arguments, '--id') + 1]))
@@ -817,6 +871,22 @@ function Invoke-WingetProcess {
         $run.Output | Should -Not -Match 'Skipping:'
         $run.Output | Should -Match "Group Policy on this PC blocks winget: 'Enable App Installer' is Disabled"
         $run.Output | Should -Match ([regex]::Escape('Group Policy on this PC blocks winget (see above), so nothing was uninstalled'))
+    }
+
+    # wgt-gq8.64, the owner's real-PC run: every lookup answered 'not installed' while the source
+    # could not be opened, so the uninstaller removed Winget-AutoUpdate and exited 0 with the apps
+    # still installed.
+    It 'Exits 2, looks up no app and keeps Winget-AutoUpdate when the winget source cannot be opened' {
+        $run = Invoke-TestUninstallerScript -Root (Join-Path $TestDrive 'source-missing') -Overrides $script:moduleOverrides -Environment @{ UNINSTALL_TEST_SCENARIO = 'SourceMissing'; WINGET_APP_SETUP_NONINTERACTIVE = '1' }
+
+        $run.ExitCode | Should -Be 2
+        $run.Output | Should -Match 'FAKE: winget search --exact --id Microsoft\.PowerShell --source winget'
+        $run.Output | Should -Match 'FAKE: register the winget source package'
+        $run.Output | Should -Not -Match 'FAKE: winget (list|uninstall)'
+        $run.Output | Should -Not -Match 'FAKE: Winget-AutoUpdate removed'
+        $run.Output | Should -Not -Match 'Skipping:|up to date'
+        $run.Output | Should -Match "The winget source cannot be opened for 'CONTOSO\\admin-tech'"
+        $run.Output | Should -Match ([regex]::Escape('winget cannot open its source for this account (see above), so nothing was uninstalled'))
     }
 
     It 'Exits 1 and keeps Winget-AutoUpdate when winget starts but cannot check the apps' {

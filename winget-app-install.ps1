@@ -106,12 +106,12 @@ param (
 # the function source under WingetAppSetup/Public and WingetAppSetup/Private, or the entry block in
 # build/fragments/tail.ps1, then re-run the build to regenerate this file.
 # See readme.md ("Project layout") for details.
-# Build id: 1.0.0+e1a34a75 (module version + SHA256 fragment of this whole script; issue #189).
+# Build id: 1.0.0+8387a718 (module version + SHA256 fragment of this whole script; issue #189).
 # ------------------------------------------------------------------------------------------------
 
 # Content-derived build identity, logged at startup so a transcript from a remote machine
 # identifies exactly which installer build produced it (issue #189).
-$script:InstallerBuildId = '1.0.0+e1a34a75'
+$script:InstallerBuildId = '1.0.0+8387a718'
 
 # ------------------------------------------------Functions------------------------------------------------
 
@@ -11915,6 +11915,7 @@ function Invoke-WingetUninstall {
     $wingetAvailable = [bool]$winget.Ready
     if (-not $wingetAvailable) {
         $policyBlocked = $winget.Diagnosis -eq 'PolicyBlocked'
+        $sourceUnusable = $winget.Diagnosis -eq 'SourceUnusable'
         if ($WhatIf) {
             if ($policyBlocked) {
                 Write-Info '[DRY-RUN] Group Policy on this PC blocks winget (see above). A real run would stop with exit code 2 before removing anything. Without winget this preview cannot tell which apps are installed, so it stops here.'
@@ -11927,6 +11928,9 @@ function Invoke-WingetUninstall {
         if ($policyBlocked) {
             $message = 'Group Policy on this PC blocks winget (see above), so nothing was uninstalled: without winget the uninstaller cannot tell which apps are installed.'
         }
+        elseif ($sourceUnusable) {
+            $message = 'winget cannot open its source for this account (see above), so nothing was uninstalled: without it winget cannot tell which apps are installed.'
+        }
         else {
             $message = 'winget cannot be started for this account, so nothing was uninstalled: without winget the uninstaller cannot tell which apps are installed.'
         }
@@ -11935,6 +11939,9 @@ function Invoke-WingetUninstall {
         }
         if ($policyBlocked) {
             $message += ' Run the uninstaller again once the policy allows winget.'
+        }
+        elseif ($sourceUnusable) {
+            $message += ' Fix the source as the line above says, or run the uninstaller from an account where winget works (for example the signed-in user, elevated), then run it again.'
         }
         else {
             $message += ' Run the uninstaller from an account where winget works (for example the signed-in user, elevated), or install App Installer from https://aka.ms/getwinget, then run it again.'
