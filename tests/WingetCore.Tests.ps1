@@ -360,7 +360,7 @@ Describe 'Initialize-Winget: the winget source (review findings P3-25, P3-28)' {
         @($script:log | Where-Object { $_ -like 'ERROR: *' })[0] | Should -BeLike '*Registering the winget source package (Microsoft.Winget.Source) for the account failed: it could not be downloaded from https://cdn.winget.microsoft.com/cache.*'
     }
 
-    It 'Advises signing in once or the SYSTEM machine phase under cross-user elevation' {
+    It 'Advises running the installer signed in as the account or the SYSTEM machine phase under cross-user elevation' {
         $script:openAnswers = @(-1978335217)
 
         $result = Initialize-Winget -AccountContext (New-TestAccountContext -CrossUser -ProcessUser 'KFI\admin-jmaffiola' -SessionUser 'KFI\tuser')
@@ -368,7 +368,7 @@ Describe 'Initialize-Winget: the winget source (review findings P3-25, P3-28)' {
         $result.Diagnosis | Should -Be 'SourceUnusable'
         $line = @($script:log | Where-Object { $_ -like 'ERROR: *' })[0]
         $line | Should -BeLike "ERROR: The winget source cannot be opened for 'KFI\admin-jmaffiola': *"
-        $line | Should -BeLike "*Fix: 'KFI\admin-jmaffiola' is elevated in the session of 'KFI\tuser' and has no logon session of its own*sign in to Windows once as 'KFI\admin-jmaffiola', or run the machine phase as SYSTEM with rmm/Invoke-WingetAppSetup.ps1, then re-run the installer."
+        $line | Should -BeLike "*Fix: 'KFI\admin-jmaffiola' is elevated in the session of 'KFI\tuser' and has no logon session of its own*run the installer while signed in to Windows as 'KFI\admin-jmaffiola', or run the machine phase as SYSTEM with rmm/Invoke-WingetAppSetup.ps1."
         $line | Should -Not -BeLike '*AppXDeploymentServer*'
     }
 
@@ -490,7 +490,7 @@ Describe 'Initialize-Winget: the winget source (review findings P3-25, P3-28)' {
 
         $lines = @($script:log | Where-Object { $_ -like 'WARN: The winget source could not be set up*' })
         $lines.Count | Should -Be 1
-        $lines[0] | Should -Be "WARN: The winget source could not be set up for 'CONTOSO\admin-tech' ('winget search --source winget' exited with 0x80073D19 ERROR_DEPLOYMENT_BLOCKED_BY_USER_LOG_OFF). Fix: sign in to Windows as 'CONTOSO\admin-tech' once (that sets winget up for the account), or run the machine phase as SYSTEM with rmm/Invoke-WingetAppSetup.ps1, then re-run the installer. Installations may fail."
+        $lines[0] | Should -Be "WARN: The winget source could not be set up for 'CONTOSO\admin-tech' ('winget search --source winget' exited with 0x80073D19 ERROR_DEPLOYMENT_BLOCKED_BY_USER_LOG_OFF). Fix: run the installer while signed in to Windows as 'CONTOSO\admin-tech' (Windows deploys winget's packages for an account only in its own logon session), or run the machine phase as SYSTEM with rmm/Invoke-WingetAppSetup.ps1. Installations may fail."
         ($script:log -join "`n") | Should -Not -Match "appears to be missing|source\.msix|Run as local user|run 'winget source update'"
     }
 
@@ -530,8 +530,9 @@ Describe 'Initialize-Winget when winget cannot deploy its source package (wgt-gq
             }
             throw "unexpected winget call: $($arguments -join ' ')"
         }
-        # No copy of the source package on this PC.
-        Mock powershell.exe { $global:LASTEXITCODE = 0 }
+        # No copy of the source package on this PC (Get-AppxPackage -AllUsers, in Windows PowerShell).
+        Mock Invoke-WindowsPowerShellScript { [pscustomobject]@{ ExitCode = 0; TimedOut = $false; LaunchFailed = $false; LaunchError = $null; StandardOutput = @() } } -ParameterFilter { $Script -match "Get-AppxPackage -AllUsers -Name 'Microsoft\.Winget\.Source'" }
+        Mock Invoke-WindowsPowerShellScript { throw "unexpected Windows PowerShell script: $Script" }
         $script:sourceStaging = Join-Path $TestDrive ('wingetsource-' + [guid]::NewGuid().ToString('N'))
         Mock New-WauStagingDirectory { [void](New-Item -ItemType Directory -Path $script:sourceStaging -Force); $script:sourceStaging }
         Mock Invoke-WebRequest { [pscustomobject]@{ RawContentStream = [System.IO.MemoryStream]::new([byte[]](1, 2, 3)) } }
@@ -553,7 +554,17 @@ Describe 'Initialize-Winget when winget cannot deploy its source package (wgt-gq
         Should -Invoke Reset-WingetSource -Times 0 -Exactly
         $errors = @($script:log | Where-Object { $_ -like 'ERROR: *' })
         $errors.Count | Should -Be 1
-        $errors[0] | Should -BeLike "ERROR: The winget source cannot be opened for 'KFI\admin-jmaffiola': 'winget search --source winget' answered 0x8A15000F SOURCE_DATA_MISSING*(0x80073D19 ERROR_DEPLOYMENT_BLOCKED_BY_USER_LOG_OFF)*DiagOutputDir*sign in to Windows once as 'KFI\admin-jmaffiola', or run the machine phase as SYSTEM with rmm/Invoke-WingetAppSetup.ps1*"
+        $errors[0] | Should -BeLike "ERROR: The winget source cannot be opened for 'KFI\admin-jmaffiola': 'winget search --source winget' answered 0x8A15000F SOURCE_DATA_MISSING*(0x80073D19 ERROR_DEPLOYMENT_BLOCKED_BY_USER_LOG_OFF)*DiagOutputDir*run the installer while signed in to Windows as 'KFI\admin-jmaffiola', or run the machine phase as SYSTEM with rmm/Invoke-WingetAppSetup.ps1."
+    }
+
+    It 'Tells the uninstaller to run itself signed in as the account or as SYSTEM, never the machine phase, which installs the catalog' {
+        $result = Initialize-Winget -AccountContext $script:account -Tool Uninstaller
+
+        $result.Diagnosis | Should -Be 'SourceUnusable'
+        $errors = @($script:log | Where-Object { $_ -like 'ERROR: *' })
+        $errors.Count | Should -Be 1
+        $errors[0] | Should -BeLike "*Fix: 'KFI\admin-jmaffiola' is elevated in the session of 'KFI\tuser'*: run the uninstaller while signed in to Windows as 'KFI\admin-jmaffiola', or run winget-app-uninstall.ps1 as SYSTEM."
+        $errors[0] | Should -Not -Match 'rmm/|machine phase|\binstaller\b'
     }
 
     It 'Is ready once Add-AppxPackage of the downloaded source package works, as it did from the owner''s elevated window' {
@@ -738,7 +749,7 @@ Describe 'Initialize-Winget dry run (P2-16)' {
         Should -Invoke Register-WingetSourcePackage -Times 0 -Exactly
         Should -Invoke Reset-WingetSource -Times 0 -Exactly
         Should -Invoke Invoke-WebRequest -Times 0 -Exactly
-        $script:log | Should -Contain "INFO: [DRY-RUN] Would update the winget source for 'CONTOSO\admin-tech' (winget source update --name winget), check that winget can open it (winget search --source winget), and fix it if it cannot: for missing source data (0x8A15000F), registering the winget source package (Microsoft.Winget.Source) for this account, from the copy already on this PC or a download from https://cdn.winget.microsoft.com/cache that must carry a valid Microsoft signature, then Repair-WinGetPackageManager if Microsoft.WinGet.Client 1.28.190 or later is installed; winget source reset --force for a corrupted or unconfigured source (it also removes any source added beyond the defaults). A real run stops with exit code 2 when the source still cannot be opened."
+        $script:log | Should -Contain "INFO: [DRY-RUN] Would update the winget source for 'CONTOSO\admin-tech' (winget source update --name winget), check that winget can open it (winget search --source winget), and fix it if it cannot: for missing source data (0x8A15000F), registering the winget source package (Microsoft.Winget.Source) for this account, from a download from https://cdn.winget.microsoft.com/cache that must carry a valid Microsoft signature, else from the copy already on this PC, then Repair-WinGetPackageManager if Microsoft.WinGet.Client 1.28.190 or later is installed; winget source reset --force for a corrupted or unconfigured source (it also removes any source added beyond the defaults). A real run stops with exit code 2 when the source still cannot be opened."
     }
 }
 
@@ -769,8 +780,9 @@ Describe 'Initialize-Winget on the #279 wedge (review findings P3-25, P3-27, P3-
         } -ParameterFilter { $RegisterByFamilyName }
         Mock Add-AppxPackage { throw 'Deployment failed with HRESULT: 0x80073D06, The package could not be installed because a higher version of this package is already installed.' }
         # Under PowerShell 7 the registrations run in Windows PowerShell, which prints the HRESULT.
-        Mock powershell.exe { $global:LASTEXITCODE = 1; 'ERR|-2147009293|Deployment failed with HRESULT: 0x80073CF3, Package failed updates, dependency or conflict validation. Windows cannot install package Microsoft.DesktopAppInstaller_1.29.290.0_x64__8wekyb3d8bbwe because this package depends on a framework that could not be found. Provide the framework "Microsoft.WindowsAppRuntime.1.8"' } -ParameterFilter { "$args" -match 'Add-AppxPackage -RegisterByFamilyName' }
-        Mock powershell.exe { $global:LASTEXITCODE = 1; 'ERR|-2147009274|Deployment failed with HRESULT: 0x80073D06, The package could not be installed because a higher version of this package is already installed.' } -ParameterFilter { "$args" -match 'Add-AppxPackage -Path' }
+        Mock Invoke-WindowsPowerShellScript { throw "unexpected Windows PowerShell script: $Script" }
+        Mock Invoke-WindowsPowerShellScript { [pscustomobject]@{ ExitCode = 1; TimedOut = $false; LaunchFailed = $false; LaunchError = $null; StandardOutput = @('ERR|-2147009293|Deployment failed with HRESULT: 0x80073CF3, Package failed updates, dependency or conflict validation. Windows cannot install package Microsoft.DesktopAppInstaller_1.29.290.0_x64__8wekyb3d8bbwe because this package depends on a framework that could not be found. Provide the framework "Microsoft.WindowsAppRuntime.1.8"') } } -ParameterFilter { $Script -match 'Add-AppxPackage -RegisterByFamilyName' }
+        Mock Invoke-WindowsPowerShellScript { [pscustomobject]@{ ExitCode = 1; TimedOut = $false; LaunchFailed = $false; LaunchError = $null; StandardOutput = @('ERR|-2147009274|Deployment failed with HRESULT: 0x80073D06, The package could not be installed because a higher version of this package is already installed.') } } -ParameterFilter { $Script -match 'Add-AppxPackage -Path' }
         Mock Get-WindowsAppRuntimePackageInfo { }
         Mock Test-AndInstallWingetModule { $true }
         Mock Repair-WinGetPackageManager { throw 'Failed to repair winget. Try running with -AllUsers in administrator mode.' }

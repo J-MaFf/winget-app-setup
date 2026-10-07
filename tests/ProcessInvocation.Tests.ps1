@@ -44,7 +44,7 @@ BeforeAll {
 
 Describe 'Get-ProcessTimeoutSeconds' {
     It 'Gives every operation a positive limit' {
-        foreach ($operation in 'WingetInstall', 'WingetDownload', 'WingetUninstall', 'WingetListCheck', 'WingetVersion', 'WingetSourceUpdate', 'WingetSourceReset', 'MsiExec', 'AppxProvisioning', 'WebDownload', 'WebDownloadStall', 'WebLookup') {
+        foreach ($operation in 'WingetInstall', 'WingetDownload', 'WingetUninstall', 'WingetListCheck', 'WingetVersion', 'WingetSourceUpdate', 'WingetSourceOpen', 'WingetSourceReset', 'MsiExec', 'AppxProvisioning', 'AppxRegistration', 'AppxQuery', 'WebDownload', 'WebDownloadStall', 'WebLookup') {
             Get-ProcessTimeoutSeconds -Operation $operation | Should -BeGreaterThan 0 -Because $operation
         }
     }
@@ -80,6 +80,42 @@ Describe 'Get-ProcessTimeoutSeconds' {
         @{ Operation = 'WingetClientListCheck'; Seconds = 45 }
     ) {
         Get-ProcessTimeoutSeconds -Operation $Operation | Should -Be $Seconds
+    }
+
+    # wgt-gq8.63 review: Add-AppxPackage and Get-AppxPackage -AllUsers in Windows PowerShell had no limit.
+    It 'Gives the Appx calls in Windows PowerShell their own limits: <Operation> <Seconds> s' -ForEach @(
+        @{ Operation = 'AppxRegistration'; Seconds = 300 }
+        @{ Operation = 'AppxQuery'; Seconds = 120 }
+    ) {
+        Get-ProcessTimeoutSeconds -Operation $Operation | Should -Be $Seconds
+    }
+}
+
+Describe 'Invoke-WindowsPowerShellScript (wgt-gq8.63 review)' {
+    BeforeEach {
+        Mock Get-WindowsPowerShellPath { 'X:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe' }
+        Mock Invoke-ExternalProcess { [pscustomobject]@{ ExitCode = 0; TimedOut = $false; LaunchFailed = $false; StandardOutput = @('done') } }
+    }
+
+    It 'Runs the script in System32''s Windows PowerShell as -EncodedCommand, writing UTF-8, without PSModulePath, within the given limit, echoing nothing' {
+        $result = Invoke-WindowsPowerShellScript -Script "Add-AppxPackage -Path 'C:\x\O''Neil.msix'" -TimeoutSeconds 300
+
+        $result.StandardOutput | Should -Be @('done')
+        Should -Invoke Invoke-ExternalProcess -Times 1 -Exactly -ParameterFilter {
+            $encoded = $ArgumentList[[array]::IndexOf($ArgumentList, '-EncodedCommand') + 1]
+            $decoded = [System.Text.Encoding]::Unicode.GetString([Convert]::FromBase64String($encoded))
+            $FilePath -eq 'X:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe' -and
+            ($ArgumentList -join ' ') -like '-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand *' -and
+            $decoded -like "*UTF8Encoding*SilentlyContinue*; Add-AppxPackage -Path 'C:\x\O''Neil.msix'" -and
+            $TimeoutSeconds -eq 300 -and $Echo -eq 'None' -and @($RemoveEnvironmentVariable) -contains 'PSModulePath'
+        }
+    }
+
+    It 'Runs another powershell.exe when given one' {
+        [void](Invoke-WindowsPowerShellScript -Script 'Get-Date' -TimeoutSeconds 5 -FilePath 'X:\Windows\Sysnative\WindowsPowerShell\v1.0\powershell.exe')
+
+        Should -Invoke Invoke-ExternalProcess -Times 1 -Exactly -ParameterFilter { $FilePath -eq 'X:\Windows\Sysnative\WindowsPowerShell\v1.0\powershell.exe' }
+        Should -Invoke Get-WindowsPowerShellPath -Times 0 -Exactly
     }
 }
 

@@ -33,6 +33,9 @@
                       starts pwsh and loads the module each time (45 seconds).
     MsiExec           one msiexec install or uninstall (15 minutes).
     AppxProvisioning  one Add-AppxProvisionedPackage, run in Windows PowerShell (10 minutes).
+    AppxRegistration  one Add-AppxPackage for this account (a registration, or an .msix such as the
+                      winget source package), run in Windows PowerShell (5 minutes).
+    AppxQuery         one Get-AppxPackage -AllUsers, run in Windows PowerShell (2 minutes).
     WebDownload       a file download's connection and wait for the response headers (5 minutes);
                       Invoke-WebRequest's -TimeoutSec does not cover the body.
     WebDownloadStall  how long a download may receive nothing once the file is arriving, on
@@ -45,7 +48,7 @@
 function Get-ProcessTimeoutSeconds {
     param (
         [Parameter(Mandatory = $true)]
-        [ValidateSet('WingetInstall', 'WingetDownload', 'WingetUninstall', 'WingetListCheck', 'WingetVersion', 'WingetSourceUpdate', 'WingetSourceOpen', 'WingetSourceReset', 'WingetClientProbe', 'WingetClientVersion', 'WingetClientListCheck', 'MsiExec', 'AppxProvisioning', 'WebDownload', 'WebDownloadStall', 'WebLookup')]
+        [ValidateSet('WingetInstall', 'WingetDownload', 'WingetUninstall', 'WingetListCheck', 'WingetVersion', 'WingetSourceUpdate', 'WingetSourceOpen', 'WingetSourceReset', 'WingetClientProbe', 'WingetClientVersion', 'WingetClientListCheck', 'MsiExec', 'AppxProvisioning', 'AppxRegistration', 'AppxQuery', 'WebDownload', 'WebDownloadStall', 'WebLookup')]
         [string]$Operation
     )
 
@@ -63,6 +66,8 @@ function Get-ProcessTimeoutSeconds {
         'WingetClientListCheck' { return 45 }
         'MsiExec' { return 900 }
         'AppxProvisioning' { return 600 }
+        'AppxRegistration' { return 300 }
+        'AppxQuery' { return 120 }
         'WebDownload' { return 300 }
         'WebDownloadStall' { return 120 }
         'WebLookup' { return 30 }
@@ -702,6 +707,44 @@ function Invoke-ExternalProcess {
     catch {
     }
     return $result
+}
+
+<#
+.SYNOPSIS
+    Runs a script in Windows PowerShell 5.1, with a time limit, and returns the process result.
+.DESCRIPTION
+    For the Appx cmdlets, which cannot load under PowerShell 7 before Windows build 10.0.22453
+    (0x80131539) and always load in 5.1. As -EncodedCommand, so no quoting changes the script, with
+    UTF-8 output, so localized error text arrives intact, and without PSModulePath: inherited
+    through Process.Start, PowerShell 7's module folders come first and their Utility and Security
+    modules cannot load in 5.1 (about_PSModulePath). Nothing is echoed.
+.PARAMETER Script
+    The script.
+.PARAMETER TimeoutSeconds
+    The time limit (see Get-ProcessTimeoutSeconds).
+.PARAMETER FilePath
+    The powershell.exe to run. Default: Get-WindowsPowerShellPath.
+.OUTPUTS
+    Invoke-ExternalProcess's result.
+#>
+function Invoke-WindowsPowerShellScript {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$Script,
+
+        [Parameter(Mandatory = $true)]
+        [int]$TimeoutSeconds,
+
+        [Parameter(Mandatory = $false)]
+        [string]$FilePath
+    )
+
+    if ([string]::IsNullOrWhiteSpace($FilePath)) {
+        $FilePath = Get-WindowsPowerShellPath
+    }
+    $prologue = '[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false); $ProgressPreference = ''SilentlyContinue''; '
+    $encoded = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($prologue + $Script))
+    return (Invoke-ExternalProcess -FilePath $FilePath -ArgumentList @('-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', $encoded) -TimeoutSeconds $TimeoutSeconds -Echo None -RemoveEnvironmentVariable @('PSModulePath'))
 }
 
 <#

@@ -57,8 +57,9 @@
  pins), the execution policy, the App Installer and Store Group Policy, the pending-restart state,
  the Winget-AutoUpdate task, winget --version and --info, and the Windows build and architecture. Account and computer names, user
  profile folders, the SIDs of real accounts and email addresses are replaced with placeholders,
- because the repository's issues are public. It changes nothing on the PC (no log, no run lock, no
- PowerShell 7 install, no elevation) and works without winget; run it from PowerShell started as
+ because the repository's issues are public. It sets nothing up on the PC (no log, no run lock, no
+ PowerShell 7 install, no elevation; its winget source check may let winget update its own source
+ data, as any install does) and works without winget; run it from PowerShell started as
  administrator to include everything. The irm | iex one-liner cannot pass a switch, so a failed run
  prints this command instead:
      & ([scriptblock]::Create((irm "https://raw.githubusercontent.com/J-MaFf/winget-app-setup/refs/heads/main/winget-app-install.ps1"))) -CollectDiagnostics

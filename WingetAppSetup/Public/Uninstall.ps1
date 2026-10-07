@@ -77,7 +77,7 @@ function Invoke-WingetUninstall {
     # removed. A dry run only probes.
     $script:MachineWingetPath = $null
     $account = Get-InstallAccountContext
-    $winget = Initialize-Winget -WhatIf:$WhatIf -AccountContext $account
+    $winget = Initialize-Winget -WhatIf:$WhatIf -AccountContext $account -Tool Uninstaller
     $wingetAvailable = [bool]$winget.Ready
     if (-not $wingetAvailable) {
         # Group Policy (review finding P3-30) is not fixed by another account or by installing App

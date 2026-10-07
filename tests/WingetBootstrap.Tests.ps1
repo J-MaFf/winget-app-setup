@@ -19,6 +19,17 @@ BeforeAll {
     $script:downgrade = -2147009274
     # What Repair-WinGetPackageManager really throws in the #279 wedge (E2E run 36384683838).
     $script:realRepairMessage = 'Failed to repair winget. Try running with -AllUsers in administrator mode.'
+    # What Invoke-WindowsPowerShellScript returns (Invoke-ExternalProcess's result, in part).
+    function New-PowerShellRun {
+        param ([Nullable[int]]$ExitCode = 0, [string[]]$Lines = @(), [switch]$TimedOut, [string]$LaunchError)
+        [pscustomobject]@{
+            ExitCode       = $ExitCode
+            TimedOut       = [bool]$TimedOut
+            LaunchFailed   = [bool]$LaunchError
+            LaunchError    = $LaunchError
+            StandardOutput = $Lines
+        }
+    }
 }
 
 Describe 'Get-WingetPolicyBlock (review finding P3-30)' {
@@ -202,24 +213,24 @@ Describe 'Register-WingetAppInstallerForUser under PowerShell 7 where Appx canno
         Mock Get-AppxPackage { throw [System.PlatformNotSupportedException]::new("The 'Get-AppxPackage' command was found in the module 'Appx', but the module could not be loaded. Operation is not supported on this platform. (0x80131539)") }
         Mock Add-AppxPackage { throw [System.PlatformNotSupportedException]::new("The 'Add-AppxPackage' command was found in the module 'Appx', but the module could not be loaded. Operation is not supported on this platform. (0x80131539)") }
         # Windows PowerShell, where Appx always loads, answers: it lists App Installer and registers it.
-        Mock powershell.exe { $global:LASTEXITCODE = 0 }
-        Mock powershell.exe { $global:LASTEXITCODE = 0; "1.26.510.0|X64|Ok|$script:installLocation" } -ParameterFilter { "$args" -match 'Get-AppxPackage -AllUsers' }
+        Mock Invoke-WindowsPowerShellScript { New-PowerShellRun }
+        Mock Invoke-WindowsPowerShellScript { New-PowerShellRun -Lines @("1.26.510.0|X64|Ok|$script:installLocation") } -ParameterFilter { $Script -match 'Get-AppxPackage -AllUsers' }
     }
 
-    It 'Lists and registers App Installer through Windows PowerShell' -Skip:($PSVersionTable.PSEdition -ne 'Core') {
+    It 'Lists and registers App Installer through Windows PowerShell, each within its time limit' -Skip:($PSVersionTable.PSEdition -ne 'Core') {
         $result = Register-WingetAppInstallerForUser
 
         $result.Registered | Should -Be $true
         $script:warnings | Should -BeNullOrEmpty
-        Should -Invoke powershell.exe -Times 1 -Exactly -ParameterFilter { "$args" -match "Get-AppxPackage -AllUsers -Name 'Microsoft\.DesktopAppInstaller'" }
-        Should -Invoke powershell.exe -Times 1 -Exactly -ParameterFilter { "$args" -match "Add-AppxPackage -RegisterByFamilyName -MainPackage 'Microsoft\.DesktopAppInstaller_8wekyb3d8bbwe'" }
+        Should -Invoke Invoke-WindowsPowerShellScript -Times 1 -Exactly -ParameterFilter { $Script -match "Get-AppxPackage -AllUsers -Name 'Microsoft\.DesktopAppInstaller'" -and $TimeoutSeconds -eq (Get-ProcessTimeoutSeconds -Operation AppxQuery) }
+        Should -Invoke Invoke-WindowsPowerShellScript -Times 1 -Exactly -ParameterFilter { $Script -match "Add-AppxPackage -RegisterByFamilyName -MainPackage 'Microsoft\.DesktopAppInstaller_8wekyb3d8bbwe'" -and $TimeoutSeconds -eq (Get-ProcessTimeoutSeconds -Operation AppxRegistration) }
         Should -Invoke Get-AppxPackage -Times 0 -Exactly
         Should -Invoke Add-AppxPackage -Times 0 -Exactly
     }
 
     It 'Returns the codes Windows PowerShell reports, read from the HRESULT it prints' -Skip:($PSVersionTable.PSEdition -ne 'Core') {
-        Mock powershell.exe { $global:LASTEXITCODE = 1; 'ERR|-2147009293|Das Paket hängt von einem Framework ab, das nicht gefunden wurde.' } -ParameterFilter { "$args" -match 'RegisterByFamilyName' }
-        Mock powershell.exe { $global:LASTEXITCODE = 1; 'ERR|-2147009274|Deployment failed with HRESULT: 0x80073D06, The package could not be installed because a higher version of this package is already installed.' } -ParameterFilter { "$args" -match 'Add-AppxPackage -Path' }
+        Mock Invoke-WindowsPowerShellScript { New-PowerShellRun -ExitCode 1 -Lines @('ERR|-2147009293|Das Paket hängt von einem Framework ab, das nicht gefunden wurde.') } -ParameterFilter { $Script -match 'RegisterByFamilyName' }
+        Mock Invoke-WindowsPowerShellScript { New-PowerShellRun -ExitCode 1 -Lines @('ERR|-2147009274|Deployment failed with HRESULT: 0x80073D06, The package could not be installed because a higher version of this package is already installed.') } -ParameterFilter { $Script -match 'Add-AppxPackage -Path' }
 
         $result = Register-WingetAppInstallerForUser
 
@@ -232,16 +243,15 @@ Describe 'Register-WingetAppInstallerForUser under PowerShell 7 where Appx canno
 Describe 'Invoke-AppxRegistration (review findings P3-27, P3-29)' {
     BeforeEach {
         Mock Add-AppxPackage { throw [System.PlatformNotSupportedException]::new("The 'Add-AppxPackage' command was found in the module 'Appx', but the module could not be loaded. Operation is not supported on this platform. (0x80131539)") }
-        Mock powershell.exe { $global:LASTEXITCODE = 0 }
+        Mock Invoke-WindowsPowerShellScript { New-PowerShellRun }
     }
 
-    It 'Registers by family name in Windows PowerShell under PowerShell 7, without progress output' -Skip:($PSVersionTable.PSEdition -ne 'Core') {
+    It 'Registers by family name in Windows PowerShell under PowerShell 7, within the AppxRegistration limit' -Skip:($PSVersionTable.PSEdition -ne 'Core') {
         Invoke-AppxRegistration -FamilyName 'Microsoft.DesktopAppInstaller_8wekyb3d8bbwe'
 
-        Should -Invoke powershell.exe -Times 1 -Exactly -ParameterFilter {
-            $command = "$($args[-1])"
-            $args -contains '-NoProfile' -and $args -contains '-Command' -and
-            $command -match "^\`$ProgressPreference = 'SilentlyContinue'; try \{ Add-AppxPackage -RegisterByFamilyName -MainPackage 'Microsoft\.DesktopAppInstaller_8wekyb3d8bbwe' -ErrorAction Stop \}"
+        Should -Invoke Invoke-WindowsPowerShellScript -Times 1 -Exactly -ParameterFilter {
+            $Script -match "^try \{ Add-AppxPackage -RegisterByFamilyName -MainPackage 'Microsoft\.DesktopAppInstaller_8wekyb3d8bbwe' -ErrorAction Stop \}" -and
+            $TimeoutSeconds -eq (Get-ProcessTimeoutSeconds -Operation AppxRegistration)
         }
         Should -Invoke Add-AppxPackage -Times 0 -Exactly
     }
@@ -249,24 +259,23 @@ Describe 'Invoke-AppxRegistration (review findings P3-27, P3-29)' {
     It 'Registers from a manifest, keeping an apostrophe in its path inside the quoted literal (issue #178)' -Skip:($PSVersionTable.PSEdition -ne 'Core') {
         Invoke-AppxRegistration -ManifestPath "C:\Users\O'Brien\AppXManifest.xml"
 
-        Should -Invoke powershell.exe -Times 1 -Exactly -ParameterFilter {
-            "$($args[-1])".Contains("Add-AppxPackage -Path 'C:\Users\O''Brien\AppXManifest.xml' -Register -DisableDevelopmentMode -ErrorAction Stop")
+        Should -Invoke Invoke-WindowsPowerShellScript -Times 1 -Exactly -ParameterFilter {
+            $Script.Contains("Add-AppxPackage -Path 'C:\Users\O''Brien\AppXManifest.xml' -Register -DisableDevelopmentMode -ErrorAction Stop")
         }
     }
 
     It 'Installs a package file, keeping an apostrophe in its path inside the quoted literal (wgt-gq8.63)' -Skip:($PSVersionTable.PSEdition -ne 'Core') {
         Invoke-AppxRegistration -PackagePath "C:\ProgramData\winget-app-setup\wingetsource-1\O'Neil.msix"
 
-        Should -Invoke powershell.exe -Times 1 -Exactly -ParameterFilter {
-            $command = "$($args[-1])"
-            $command.Contains("Add-AppxPackage -Path 'C:\ProgramData\winget-app-setup\wingetsource-1\O''Neil.msix' -ErrorAction Stop") -and
-            $command -notmatch '-Register'
+        Should -Invoke Invoke-WindowsPowerShellScript -Times 1 -Exactly -ParameterFilter {
+            $Script.Contains("Add-AppxPackage -Path 'C:\ProgramData\winget-app-setup\wingetsource-1\O''Neil.msix' -ErrorAction Stop") -and
+            $Script -notmatch '-Register'
         }
         Should -Invoke Add-AppxPackage -Times 0 -Exactly
     }
 
     It 'Throws the HRESULT Windows PowerShell printed, whatever language the message is in' -Skip:($PSVersionTable.PSEdition -ne 'Core') {
-        Mock powershell.exe { $global:LASTEXITCODE = 1; 'ERR|-2147009293|Das Paket hängt von einem Framework ab, das nicht gefunden wurde.' }
+        Mock Invoke-WindowsPowerShellScript { New-PowerShellRun -ExitCode 1 -Lines @('WARNING: noise', 'ERR|-2147009293|Das Paket hängt von einem Framework ab, das nicht gefunden wurde.') }
 
         try { Invoke-AppxRegistration -FamilyName 'Microsoft.DesktopAppInstaller_8wekyb3d8bbwe'; $record = $null }
         catch { $record = $_ }
@@ -278,9 +287,25 @@ Describe 'Invoke-AppxRegistration (review findings P3-27, P3-29)' {
     }
 
     It 'Throws with the exit code when Windows PowerShell failed without saying why' -Skip:($PSVersionTable.PSEdition -ne 'Core') {
-        Mock powershell.exe { $global:LASTEXITCODE = 1 }
+        Mock Invoke-WindowsPowerShellScript { New-PowerShellRun -ExitCode 1 }
 
         { Invoke-AppxRegistration -FamilyName 'Microsoft.DesktopAppInstaller_8wekyb3d8bbwe' } | Should -Throw '*failed in Windows PowerShell (exit code 1)*'
+    }
+
+    It 'Throws, with no AppX code, when Add-AppxPackage was stopped at its time limit' -Skip:($PSVersionTable.PSEdition -ne 'Core') {
+        Mock Invoke-WindowsPowerShellScript { New-PowerShellRun -ExitCode $null -TimedOut }
+
+        try { Invoke-AppxRegistration -PackagePath 'X:\staging\source.msix'; $record = $null }
+        catch { $record = $_ }
+
+        "$record" | Should -Be "Add-AppxPackage -Path 'X:\staging\source.msix' did not finish within 5 minutes and was stopped."
+        Get-AppxErrorCode -ErrorRecord $record | Should -BeNullOrEmpty
+    }
+
+    It 'Throws when Windows PowerShell cannot be started' -Skip:($PSVersionTable.PSEdition -ne 'Core') {
+        Mock Invoke-WindowsPowerShellScript { New-PowerShellRun -ExitCode $null -LaunchError 'The system cannot find the file specified' }
+
+        { Invoke-AppxRegistration -FamilyName 'Microsoft.DesktopAppInstaller_8wekyb3d8bbwe' } | Should -Throw '*could not run: Windows PowerShell could not be started (The system cannot find the file specified)*'
     }
 }
 
@@ -649,21 +674,11 @@ Describe 'Register-WingetSourcePackage (wgt-gq8.63)' {
         }
     }
 
-    It 'Registers a copy already on this PC by family name, with no download' {
-        Mock Get-WingetSourcePackageInfo { [pscustomobject]@{ Version = [version]'2026.1006.1845.38'; Architecture = 'Neutral'; Status = 'Ok'; InstallLocation = 'X:\WindowsApps\Microsoft.Winget.Source' } }
-
-        $result = Register-WingetSourcePackage
-
-        $result.Registered | Should -Be $true
-        Should -Invoke Invoke-AppxRegistration -Times 1 -Exactly -ParameterFilter { $FamilyName -eq 'Microsoft.Winget.Source_8wekyb3d8bbwe' }
-        Should -Invoke Invoke-WebRequest -Times 0 -Exactly
-        Should -Invoke New-WauStagingDirectory -Times 0 -Exactly
-    }
-
     It 'Downloads source2.msix into a new file in a folder only administrators can change, checks its Microsoft signature, installs that file and deletes it' {
         $result = Register-WingetSourcePackage
 
         $result.Registered | Should -Be $true
+        $result.Route | Should -Be 'Download'
         $result.Reason | Should -BeNullOrEmpty
         $script:downloads | Should -Be @('https://cdn.winget.microsoft.com/cache/source2.msix')
         Should -Invoke New-WauStagingDirectory -Times 1 -Exactly -ParameterFilter { $Prefix -eq 'wingetsource' }
@@ -674,16 +689,86 @@ Describe 'Register-WingetSourcePackage (wgt-gq8.63)' {
         Test-Path -LiteralPath $script:stagingDir | Should -Be $false
     }
 
-    It 'Falls back to the download when registering the copy on this PC fails' {
+    It 'Holds the download read-locked from its signature check until Add-AppxPackage has run, then releases it' {
+        # The real lock: a write handle cannot be opened on the file while it is held.
+        $script:steps = @()
+        $script:heldStream = $null
+        Mock Open-ReadLockedFile { $script:steps += 'lock'; $script:heldStream = [System.IO.File]::Open($Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read); $script:heldStream }
+        Mock Get-AuthenticodeSignature {
+            $script:steps += 'signature'
+            [pscustomobject]@{ Status = 'Valid'; SignerCertificate = [pscustomobject]@{ Subject = 'CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US' } }
+        }
+        $script:heldDuringRegistration = $null
+        $script:writeRefused = $null
+        Mock Invoke-AppxRegistration {
+            $script:steps += 'register'
+            $script:heldDuringRegistration = ($null -ne $script:heldStream) -and $script:heldStream.CanRead
+            try {
+                $writer = [System.IO.File]::Open($PackagePath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+                $writer.Dispose()
+                $script:writeRefused = $false
+            }
+            catch {
+                $script:writeRefused = $_.Exception.InnerException -is [System.IO.IOException]
+            }
+        }
+
+        (Register-WingetSourcePackage).Registered | Should -Be $true
+
+        $script:steps | Should -Be @('lock', 'signature', 'register')
+        $script:heldDuringRegistration | Should -BeTrue
+        $script:writeRefused | Should -BeTrue
+        $script:heldStream.CanRead | Should -BeFalse
+        Test-Path -LiteralPath $script:stagingDir | Should -Be $false
+    }
+
+    It 'Downloads first even when another account''s copy is on this PC, and leaves that copy alone' {
         Mock Get-WingetSourcePackageInfo { [pscustomobject]@{ Version = [version]'2026.1006.1845.38'; Architecture = 'Neutral'; Status = 'Ok'; InstallLocation = 'X:\WindowsApps\Microsoft.Winget.Source' } }
-        Mock Invoke-AppxRegistration { throw (New-AppxException -HResult -2147009255) } -ParameterFilter { $FamilyName }
 
         $result = Register-WingetSourcePackage
 
         $result.Registered | Should -Be $true
-        $result.ErrorCodes | Should -Be @(-2147009255)
+        $result.Route | Should -Be 'Download'
+        $script:downloads | Should -Be @('https://cdn.winget.microsoft.com/cache/source2.msix')
+        Should -Invoke Invoke-AppxRegistration -Times 0 -Exactly -ParameterFilter { $FamilyName }
+        Should -Invoke Get-WingetSourcePackageInfo -Times 0 -Exactly
+    }
+
+    It 'Registers the copy already on this PC by family name only when <Case>' -ForEach @(
+        @{ Case = 'neither download works'; SignerSubject = 'CN=Microsoft Corporation, O=Microsoft Corporation'; Reason = 'it could not be downloaded from https://cdn.winget.microsoft.com/cache'; DownloadCount = 2 }
+        @{ Case = 'the download is not signed by Microsoft'; SignerSubject = 'CN=Contoso Ltd, O=Contoso Ltd'; Reason = 'the package downloaded from https://cdn.winget.microsoft.com/cache/source2.msix failed its signature check*'; DownloadCount = 1 }
+    ) {
+        Mock Get-WingetSourcePackageInfo { [pscustomobject]@{ Version = [version]'2026.1006.1845.38'; Architecture = 'Neutral'; Status = 'Ok'; InstallLocation = 'X:\WindowsApps\Microsoft.Winget.Source' } }
+        if ($DownloadCount -eq 2) {
+            Mock Invoke-WebRequest { $script:downloads += $Uri; throw 'No such host is known.' }
+        }
+        $script:signer = $SignerSubject
+        Mock Get-AuthenticodeSignature { [pscustomobject]@{ Status = 'Valid'; SignerCertificate = [pscustomobject]@{ Subject = $script:signer } } }
+
+        $result = Register-WingetSourcePackage
+
+        $result.Registered | Should -Be $true
+        $result.Route | Should -Be 'FamilyName'
+        $result.Reason | Should -BeLike $Reason
+        $script:downloads.Count | Should -Be $DownloadCount
         $script:registered.Count | Should -Be 1
-        $script:registered[0].PackagePath | Should -Not -BeNullOrEmpty
+        $script:registered[0].FamilyName | Should -Be 'Microsoft.Winget.Source_8wekyb3d8bbwe'
+        $script:registered[0].PackagePath | Should -BeNullOrEmpty
+        Test-Path -LiteralPath $script:stagingDir | Should -Be $false
+    }
+
+    It 'Falls back to the copy on this PC when installing the download fails, and returns both codes when that fails too' {
+        Mock Get-WingetSourcePackageInfo { [pscustomobject]@{ Version = [version]'2026.1006.1845.38'; Architecture = 'Neutral'; Status = 'Ok'; InstallLocation = 'X:\WindowsApps\Microsoft.Winget.Source' } }
+        Mock Invoke-AppxRegistration { throw (New-AppxException -HResult -2147009255 -Message 'Deployment failed with HRESULT: 0x80073D19, An error occurred because a user was logged off.') } -ParameterFilter { $PackagePath }
+        Mock Invoke-AppxRegistration { throw (New-AppxException -HResult -2147009293) } -ParameterFilter { $FamilyName }
+
+        $result = Register-WingetSourcePackage
+
+        $result.Registered | Should -Be $false
+        $result.Route | Should -BeNullOrEmpty
+        $result.ErrorCodes | Should -Be @(-2147009255, -2147009293)
+        $result.Reason | Should -BeLike 'registering it failed: Deployment failed with HRESULT: 0x80073D19*'
+        Should -Invoke Invoke-AppxRegistration -Times 1 -Exactly -ParameterFilter { $FamilyName -eq 'Microsoft.Winget.Source_8wekyb3d8bbwe' }
     }
 
     It 'Takes source.msix, as winget does, when source2.msix cannot be downloaded' {
@@ -696,7 +781,7 @@ Describe 'Register-WingetSourcePackage (wgt-gq8.63)' {
         $script:registered[0].Bytes | Should -Be $script:packageBytes
     }
 
-    It 'Registers nothing, and says so, when neither download works' {
+    It 'Registers nothing, and says so, when neither download works and no copy is on this PC' {
         Mock Invoke-WebRequest { $script:downloads += $Uri; throw 'No such host is known.' }
 
         $result = Register-WingetSourcePackage
@@ -704,7 +789,9 @@ Describe 'Register-WingetSourcePackage (wgt-gq8.63)' {
         $result.Registered | Should -Be $false
         $result.Reason | Should -Be 'it could not be downloaded from https://cdn.winget.microsoft.com/cache'
         $script:downloads.Count | Should -Be 2
+        Should -Invoke Get-WingetSourcePackageInfo -Times 1 -Exactly
         Should -Invoke Invoke-AppxRegistration -Times 0 -Exactly
+        $script:warnings | Should -Contain 'The downloaded winget source package could not be registered for this account: it could not be downloaded from https://cdn.winget.microsoft.com/cache.'
         Test-Path -LiteralPath $script:stagingDir | Should -Be $false
     }
 
@@ -824,11 +911,63 @@ Describe 'Invoke-NextWingetSourceFix (wgt-gq8.63)' {
 }
 
 Describe 'Get-WingetSetupAdvice for a source blocked by 0x80073D19 (wgt-gq8.63)' {
-    It 'Advises signing in or the SYSTEM machine phase, never winget source update, which exits 0 when it fails' {
+    It 'Advises running the installer signed in as the account or the SYSTEM machine phase, never winget source update, which exits 0 when it fails' {
         $advice = Get-WingetSetupAdvice -State @{ ErrorCodes = @() } -Account 'CONTOSO\admin-tech' -Source -SourceExitCode -2147009255
 
-        $advice | Should -Be "Fix: sign in to Windows as 'CONTOSO\admin-tech' once (that sets winget up for the account), or run the machine phase as SYSTEM with rmm/Invoke-WingetAppSetup.ps1, then re-run the installer."
+        $advice | Should -Be "Fix: run the installer while signed in to Windows as 'CONTOSO\admin-tech' (Windows deploys winget's packages for an account only in its own logon session), or run the machine phase as SYSTEM with rmm/Invoke-WingetAppSetup.ps1."
         $advice | Should -Not -Match 'source update'
+    }
+
+    It 'Tells the uninstaller to run itself, never the machine phase, which installs the catalog' {
+        $advice = Get-WingetSetupAdvice -State @{ ErrorCodes = @() } -Account 'CONTOSO\admin-tech' -Source -SourceExitCode -2147009255 -Tool Uninstaller
+
+        $advice | Should -Be "Fix: run the uninstaller while signed in to Windows as 'CONTOSO\admin-tech' (Windows deploys winget's packages for an account only in its own logon session), or run winget-app-uninstall.ps1 as SYSTEM."
+        $advice | Should -Not -Match '\binstaller\b|rmm/'
+    }
+}
+
+Describe 'Get-WingetSetupAdvice and Get-WingetSourceUnusableMessage name the tool that runs (wgt-gq8.64)' {
+    BeforeAll {
+        $script:crossUser = [pscustomobject]@{ IsSystem = $false; IsCrossUserElevation = $true; ProcessUser = 'KFI\admin-jmaffiola'; SessionUser = 'KFI\tuser' }
+        $script:sameUser = [pscustomobject]@{ IsSystem = $false; IsCrossUserElevation = $false; ProcessUser = 'CONTOSO\jdoe'; SessionUser = 'CONTOSO\jdoe' }
+        $script:system = [pscustomobject]@{ IsSystem = $true; IsCrossUserElevation = $false; ProcessUser = 'NT AUTHORITY\SYSTEM'; SessionUser = $null }
+    }
+
+    It 'Under cross-user elevation, advises running the <Name> signed in as the account (signing in once deploys nothing) or <System>' -ForEach @(
+        @{ Tool = 'Installer'; Name = 'installer'; System = 'run the machine phase as SYSTEM with rmm/Invoke-WingetAppSetup.ps1' }
+        @{ Tool = 'Uninstaller'; Name = 'uninstaller'; System = 'run winget-app-uninstall.ps1 as SYSTEM' }
+    ) {
+        $message = Get-WingetSourceUnusableMessage -State @{ ErrorCodes = @() } -AccountContext $script:crossUser -ExitCode -1978335217 -Tool $Tool
+
+        $message | Should -BeLike "*Fix: 'KFI\admin-jmaffiola' is elevated in the session of 'KFI\tuser' and has no logon session of its own, which Windows needs to deploy winget's source package for it: run the $Name while signed in to Windows as 'KFI\admin-jmaffiola', or $System."
+        $message | Should -Not -Match 'sign in to Windows once'
+    }
+
+    It 'Says to re-run the <Name> in every other case' -ForEach @(
+        @{ Tool = 'Installer'; Name = 'installer' }
+        @{ Tool = 'Uninstaller'; Name = 'uninstaller' }
+    ) {
+        $lines = @(
+            Get-WingetSourceUnusableMessage -State @{ ErrorCodes = @() } -AccountContext $script:sameUser -ExitCode -1978335217 -Tool $Tool
+            Get-WingetSourceUnusableMessage -State @{ ErrorCodes = @(); SourceReset = $true } -AccountContext $script:sameUser -ExitCode -1978335169 -Tool $Tool
+            Get-WingetSourceUnusableMessage -State @{ ErrorCodes = @() } -AccountContext $script:system -ExitCode -1978335217 -Tool $Tool
+            Get-WingetSetupAdvice -State @{ ErrorCodes = @() } -Account 'CONTOSO\jdoe' -Source -SourceExitCode -1978335162 -Tool $Tool
+            Get-WingetSetupAdvice -State @{ ErrorCodes = @() } -Account 'CONTOSO\jdoe' -Tool $Tool
+            Get-WingetSetupAdvice -State @{ ErrorCodes = @(-2147009274) } -Account 'CONTOSO\jdoe' -Tool $Tool
+        )
+
+        foreach ($line in $lines) {
+            $line | Should -BeLike "*then re-run the $Name."
+            $line | Should -Not -Match 'rmm/'
+        }
+    }
+
+    It 'Tells SYSTEM what to do if the <Work> fail, by the <Name>' -ForEach @(
+        @{ Tool = 'Installer'; Name = 'installer'; Work = 'installs' }
+        @{ Tool = 'Uninstaller'; Name = 'uninstaller'; Work = 'removals' }
+    ) {
+        Get-WingetSetupAdvice -State @{ ErrorCodes = @() } -Account 'SYSTEM' -Source -SourceExitCode -2147009255 -Tool $Tool |
+            Should -Be "The steps that set winget up for a signed-in account do not apply to SYSTEM; if the $Work fail, run the $Name once as an administrator signed in to this PC."
     }
 }
 

@@ -3361,7 +3361,7 @@ Describe 'Invoke-WingetInstall with the real winget setup ladder (review finding
         Mock Invoke-ExternalProcess { New-TestProcessResult -ExitCode -1978335217 -Output @("Failed when opening source(s); try the 'source reset' command if the problem persists.", '0x8a15000f : Data required by the source is missing') } -ParameterFilter { $ArgumentList[0] -eq 'search' }
         # No copy of the source package on this PC; the download is Microsoft's, and Windows refuses
         # to deploy it for an account with no logon session.
-        Mock powershell.exe { $global:LASTEXITCODE = 0 }
+        Mock Invoke-WindowsPowerShellScript { [pscustomobject]@{ ExitCode = 0; TimedOut = $false; LaunchFailed = $false; LaunchError = $null; StandardOutput = @() } }
         $script:sourceStaging = Join-Path $TestDrive 'wingetsource-owner-run'
         Mock New-WauStagingDirectory { [void](New-Item -ItemType Directory -Path $script:sourceStaging -Force); $script:sourceStaging }
         Mock Invoke-WebRequest { [pscustomobject]@{ RawContentStream = [System.IO.MemoryStream]::new([byte[]](1, 2, 3)) } }
@@ -3378,7 +3378,7 @@ Describe 'Invoke-WingetInstall with the real winget setup ladder (review finding
         $text | Should -Not -Match 'up to date'
         $text | Should -Match "ERROR: The winget source cannot be opened for 'KFI\\admin-jmaffiola': 'winget search --source winget' answered 0x8A15000F SOURCE_DATA_MISSING"
         $text | Should -Match 'Registering the winget source package \(Microsoft\.Winget\.Source\) for the account failed \(0x80073D19 ERROR_DEPLOYMENT_BLOCKED_BY_USER_LOG_OFF\)'
-        $text | Should -Match 'sign in to Windows once as .KFI\\admin-jmaffiola., or run the machine phase as SYSTEM with rmm/Invoke-WingetAppSetup\.ps1'
+        $text | Should -Match 'run the installer while signed in to Windows as .KFI\\admin-jmaffiola., or run the machine phase as SYSTEM with rmm/Invoke-WingetAppSetup\.ps1'
         Test-Path -LiteralPath $script:sourceStaging | Should -Be $false
     }
 

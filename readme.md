@@ -498,21 +498,27 @@ a run. When something cannot be fixed it prints one line that says why and what 
    deployment, as it does for an admin account elevated in another user's session, every install
    fails with `0x8A15000F` (`SOURCE_DATA_MISSING`). For that code the installer registers the
    source package for the account itself (not as SYSTEM, whose `winget.exe` keeps its source in a
-   file): the copy already on the PC, or a fresh download of
-   `https://cdn.winget.microsoft.com/cache/source2.msix` (then `source.msix`), saved in a folder only
-   administrators can change and installed only with a valid Microsoft signature. Then, if
+   file): a fresh download of `https://cdn.winget.microsoft.com/cache/source2.msix` (then
+   `source.msix`), saved in a folder only administrators can change and installed only with a valid
+   Microsoft signature, or, only when that fails, the copy another account already has on the PC,
+   which is usually older. Then, if
    `Microsoft.WinGet.Client` 1.28.190 or later is installed, `Repair-WinGetPackageManager`, which
    checks the source package too. `winget source reset --force` deploys no package, so it is used
    only for a corrupted or unconfigured source (`0x8A15000B`, `0x8A150012`, `0x8A150015`,
    `0x8A15003F`). `0x80073D19` (the account has no logon session) gets the account fixes that have
    not run yet. When the source still answers one of those codes, the run stops with exit code 2
    before it installs anything or sets up Winget-AutoUpdate, and one line names the account, the
-   code, winget's log folder and what to do: under cross-user elevation, sign in to Windows once
-   as that account or run the machine phase as SYSTEM with `rmm/Invoke-WingetAppSetup.ps1`;
-   otherwise check the `Microsoft-Windows-AppXDeploymentServer/Operational` event log and access
-   to `cdn.winget.microsoft.com`. A timeout, a network error or any other code gets no fix: no
-   repair fixes a network. Such a source is reported in one line and the run carries on; each
-   install then says why it failed.
+   code, winget's log folder and what to do: under cross-user elevation, run the installer while
+   signed in to Windows as that account (winget deploys its source package only in the account's
+   own session, so signing in once is not enough) or run the machine phase as SYSTEM with
+   `rmm/Invoke-WingetAppSetup.ps1`; otherwise check the
+   `Microsoft-Windows-AppXDeploymentServer/Operational` event log and access to
+   `cdn.winget.microsoft.com`. The uninstaller gives the same advice for itself: run it while
+   signed in as that account, or run `winget-app-uninstall.ps1` as SYSTEM. A timeout, a network
+   error or any other code gets no fix: no repair fixes a network. While the source already has
+   data, such a source is reported in one line and the run carries on; each install then says why
+   it failed. An account (or SYSTEM) with no source data yet that cannot download it gets
+   `0x8A15000F` instead, and stops with exit code 2 as above.
 
 A run as SYSTEM checks the machine-wide `winget.exe` instead of step 2's account fixes, which cannot
 work for SYSTEM (see [Running as SYSTEM](#running-as-system-rmm-tools-such-as-endpoint-central)).
@@ -653,8 +659,12 @@ before rolling it out. What a SYSTEM run does differently:
   that does not start is only a warning (see below).
 - It skips every step that sets winget up for one account, since SYSTEM cannot have one:
   registering App Installer and `Repair-WinGetPackageManager` (so `Install-Module` never installs
-  the `Microsoft.WinGet.Client` module it comes from). It still updates the winget source, and
-  resets it if it is missing or corrupted, unless the module engine installs the apps.
+  the `Microsoft.WinGet.Client` module it comes from), and registering the winget source package.
+  Unless the module engine installs the apps, it still updates the winget source and checks that it
+  opens (`winget search --source winget`), and resets it only when it is corrupted or unconfigured.
+  Missing source data (`0x8A15000F`) gets no fix as SYSTEM: a source that still cannot be opened
+  stops the run with exit code 2 before any install (check that the PC can reach
+  `cdn.winget.microsoft.com`).
 - Every app is installed with `--scope machine` only (`-Scope System` with the module engine). An
   app that has no machine-wide installer is
   not installed at winget's default scope, which as SYSTEM is SYSTEM's own profile: it is reported
@@ -1342,8 +1352,11 @@ From a clone, `pwsh -File .\winget-app-install.ps1 -CollectDiagnostics` does the
 32-bit registry, where PowerShell 7, Winget-AutoUpdate and the pending-restart keys are not. The
 bundle says so in `system.txt` and `README.txt` when it was made that way.
 
-It installs nothing and changes nothing on the PC: no transcript, no run lock, no `last-run.json`,
-no `RESULT` line, no PowerShell 7 install and no elevation, and it works when winget does not. It
+It installs nothing and sets nothing up on the PC: no transcript, no run lock, no `last-run.json`,
+no `RESULT` line, no PowerShell 7 install and no elevation, and it works when winget does not. Its
+winget source check (`winget.txt`) opens the source as every install does, so winget may update
+its source data for the account the bundle runs as, which needs the network and, for an account
+without that data, deploys winget's source package (`Microsoft.Winget.Source`). It
 saves `winget-app-setup-diagnostics-<yyyyMMdd-HHmmss>.zip` on the Desktop of the account that ran
 it. For a run as SYSTEM, or as another admin account than the signed-in user, it saves it in
 `C:\Users\Public\Documents`, which every account can open, and falls back to `%TEMP%`. It prints

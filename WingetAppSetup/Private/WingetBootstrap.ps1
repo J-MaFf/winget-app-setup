@@ -155,10 +155,11 @@ function Test-AndInstallWingetModule {
     its AppXManifest.xml or from a package file; throws when the registration fails.
 .DESCRIPTION
     A seam for Register-WingetAppInstallerForUser and Register-WingetSourcePackage. Under
-    PowerShell 7 it runs in Windows PowerShell 5.1 as the same account: the Appx module cannot load
-    under PowerShell 7 before Windows build 10.0.22453 (0x80131539, PowerShell issue #13138), and
-    always loads in 5.1. The HRESULT the child caught is rethrown as a COMException carrying it, so
-    Get-AppxErrorCode reads it as it would from Add-AppxPackage itself.
+    PowerShell 7 it runs in Windows PowerShell 5.1 as the same account (Invoke-WindowsPowerShellScript,
+    within the AppxRegistration limit): the Appx module cannot load under PowerShell 7 before
+    Windows build 10.0.22453 (0x80131539, PowerShell issue #13138), and always loads in 5.1. The
+    HRESULT the child caught is rethrown as a COMException carrying it, so Get-AppxErrorCode reads it
+    as it would from Add-AppxPackage itself; a child stopped at the limit throws.
 .PARAMETER FamilyName
     Add-AppxPackage -RegisterByFamilyName -MainPackage <FamilyName>.
 .PARAMETER ManifestPath
@@ -181,8 +182,8 @@ function Invoke-AppxRegistration {
 
     if ($PSCmdlet.ParameterSetName -eq 'FamilyName') {
         $parameters = @{ RegisterByFamilyName = $true; MainPackage = $FamilyName }
-        # Each value goes into a single-quoted literal of the child's -Command string, so embedded
-        # single quotes are doubled (issue #178).
+        # Each value goes into a single-quoted literal of the child's script, so embedded single
+        # quotes are doubled (issue #178).
         $arguments = "-RegisterByFamilyName -MainPackage '{0}'" -f $FamilyName.Replace("'", "''")
     }
     elseif ($PSCmdlet.ParameterSetName -eq 'Package') {
@@ -199,13 +200,20 @@ function Invoke-AppxRegistration {
         return
     }
 
-    $command = "`$ProgressPreference = 'SilentlyContinue'; try { Add-AppxPackage $arguments -ErrorAction Stop } catch { 'ERR|{0}|{1}' -f `$_.Exception.HResult, (`$_.Exception.Message -replace '\s+', ' '); exit 1 }"
-    $lines = @(& powershell.exe -NoProfile -ExecutionPolicy Bypass -Command $command)
-    $exitCode = $LASTEXITCODE
+    $command = "try { Add-AppxPackage $arguments -ErrorAction Stop } catch { 'ERR|{0}|{1}' -f `$_.Exception.HResult, (`$_.Exception.Message -replace '\s+', ' '); exit 1 }"
+    $timeout = Get-ProcessTimeoutSeconds -Operation AppxRegistration
+    $run = Invoke-WindowsPowerShellScript -Script $command -TimeoutSeconds $timeout
+    if ($run.LaunchFailed) {
+        throw "Add-AppxPackage $arguments could not run: Windows PowerShell could not be started ($($run.LaunchError))."
+    }
+    if ($run.TimedOut) {
+        throw ("Add-AppxPackage $arguments did not finish within {0} minutes and was stopped." -f [Math]::Round($timeout / 60))
+    }
+    $exitCode = $run.ExitCode
     if ($exitCode -eq 0) {
         return
     }
-    foreach ($line in $lines) {
+    foreach ($line in @($run.StandardOutput)) {
         $parts = "$line" -split '\|', 3
         if ($parts.Count -eq 3 -and $parts[0] -eq 'ERR') {
             $hresult = 0
@@ -456,44 +464,26 @@ function Save-WebFileAsNew {
 .DESCRIPTION
     winget deploys its source package for each account itself, and that deployment fails without a
     word under cross-user elevation (0x80073D19), while Add-AppxPackage from this process succeeds
-    there (wgt-gq8.63). Cheapest first:
-      1. A copy already on this PC (Get-WingetSourcePackageInfo): -RegisterByFamilyName, no download.
-      2. Otherwise source2.msix, then source.msix if that download fails (winget's own order), into
-         a new file in a new folder only SYSTEM and Administrators can change
-         (New-WauStagingDirectory, Save-WebFileAsNew). It is held open read-only from its signature
-         check (Microsoft Corporation, Test-AuthenticodeSigner) until Add-AppxPackage -Path has
-         installed it, then deleted.
+    there (wgt-gq8.63). Freshest first:
+      1. source2.msix, then source.msix if that download fails (winget's own order), into a new
+         file in a new folder only SYSTEM and Administrators can change (New-WauStagingDirectory,
+         Save-WebFileAsNew). It is held open read-only from its signature check (Microsoft
+         Corporation, Test-AuthenticodeSigner) until Add-AppxPackage -Path has installed it, then
+         deleted.
+      2. Only when that fails, a copy already on this PC (Get-WingetSourcePackageInfo) by family
+         name: it is usually older than the download, and winget cannot replace it while its own
+         deployment fails for the account.
     Both run through Invoke-AppxRegistration, in Windows PowerShell under PowerShell 7. Not for
     SYSTEM, whose winget.exe keeps its source in a file and has no packages of its own.
 .OUTPUTS
     [pscustomobject] Registered ([bool]: Add-AppxPackage completed; the caller opens the source
-    again), ErrorCodes ([int[]], the AppX codes seen) and Reason (why it is not registered, or $null).
+    again), Route ('Download', 'FamilyName' or $null), ErrorCodes ([int[]], the AppX codes seen) and
+    Reason (why the download was not registered, or $null).
 #>
 function Register-WingetSourcePackage {
     $definition = Get-WingetSourcePackageDefinition
     $codes = @()
     $reason = $null
-
-    $staged = @()
-    try {
-        $staged = @(Get-WingetSourcePackageInfo)
-    }
-    catch {
-        Write-WarningMessage "Could not list the winget source packages on this PC: $_"
-    }
-    if ($staged.Count -gt 0) {
-        Write-Info "Registering the winget source package already on this PC ($($definition.Name)) for this account..."
-        try {
-            Invoke-AppxRegistration -FamilyName $definition.FamilyName -ErrorAction Stop
-            Write-Success 'The winget source package is registered for this account (by family name).'
-            return [pscustomobject]@{ Registered = $true; ErrorCodes = $codes; Reason = $null }
-        }
-        catch {
-            $code = Get-AppxErrorCode -ErrorRecord $_
-            if ($null -ne $code) { $codes += $code }
-            Write-WarningMessage "Registering the winget source package by family name failed: $_"
-        }
-    }
 
     $stagingDir = $null
     $stream = $null
@@ -554,13 +544,35 @@ function Register-WingetSourcePackage {
             Remove-Item -LiteralPath $stagingDir -Recurse -Force -ErrorAction SilentlyContinue
         }
     }
-
-    if (-not $registered -and $reason) {
-        # The reset hint ends with a full stop of its own.
-        $reason = "$reason".Trim().TrimEnd('.')
-        Write-WarningMessage "The winget source package could not be registered for this account: $reason."
+    if ($registered) {
+        return [pscustomobject]@{ Registered = $true; Route = 'Download'; ErrorCodes = $codes; Reason = $null }
     }
-    return [pscustomobject]@{ Registered = $registered; ErrorCodes = $codes; Reason = $reason }
+
+    # The reset hint ends with a full stop of its own.
+    $reason = "$reason".Trim().TrimEnd('.')
+    Write-WarningMessage "The downloaded winget source package could not be registered for this account: $reason."
+
+    $staged = @()
+    try {
+        $staged = @(Get-WingetSourcePackageInfo)
+    }
+    catch {
+        Write-WarningMessage "Could not list the winget source packages on this PC: $_"
+    }
+    if ($staged.Count -gt 0) {
+        Write-Info "Registering the winget source package already on this PC ($($definition.Name)) for this account instead..."
+        try {
+            Invoke-AppxRegistration -FamilyName $definition.FamilyName -ErrorAction Stop
+            Write-Success 'The winget source package is registered for this account (by family name, from the copy already on this PC).'
+            return [pscustomobject]@{ Registered = $true; Route = 'FamilyName'; ErrorCodes = $codes; Reason = $reason }
+        }
+        catch {
+            $code = Get-AppxErrorCode -ErrorRecord $_
+            if ($null -ne $code) { $codes += $code }
+            Write-WarningMessage "Registering the winget source package by family name failed: $_"
+        }
+    }
+    return [pscustomobject]@{ Registered = $false; Route = $null; ErrorCodes = $codes; Reason = $reason }
 }
 
 <#
@@ -670,6 +682,30 @@ function Get-WingetLogDirectory {
 
 <#
 .SYNOPSIS
+    Returns how the advice lines name the tool that runs: what to re-run, what it does to the apps,
+    and how to run it as SYSTEM instead.
+.PARAMETER Tool
+    'Installer' (default) or 'Uninstaller': the uninstaller must never be told to run the machine
+    phase, which installs every catalog app.
+.OUTPUTS
+    [pscustomobject] Name ('installer' or 'uninstaller'), Work ('installs' or 'removals') and
+    RunAsSystem.
+#>
+function Get-WingetToolAdviceText {
+    param (
+        [Parameter(Mandatory = $false)]
+        [ValidateSet('Installer', 'Uninstaller')]
+        [string]$Tool = 'Installer'
+    )
+
+    if ($Tool -eq 'Uninstaller') {
+        return [pscustomobject]@{ Name = 'uninstaller'; Work = 'removals'; RunAsSystem = 'run winget-app-uninstall.ps1 as SYSTEM' }
+    }
+    return [pscustomobject]@{ Name = 'installer'; Work = 'installs'; RunAsSystem = 'run the machine phase as SYSTEM with rmm/Invoke-WingetAppSetup.ps1' }
+}
+
+<#
+.SYNOPSIS
     Returns the one line that says the winget source cannot be opened, why, where winget's log is
     and what to do.
 .PARAMETER State
@@ -679,6 +715,8 @@ function Get-WingetLogDirectory {
 .PARAMETER ExitCode
     The exit code the source check answered: 0x8A15000F gets advice on the source package, any
     other code advice on winget's source settings.
+.PARAMETER Tool
+    The tool that runs (Get-WingetToolAdviceText): 'Installer' (default) or 'Uninstaller'.
 .OUTPUTS
     [string]
 #>
@@ -692,9 +730,14 @@ function Get-WingetSourceUnusableMessage {
 
         [Parameter(Mandatory = $false)]
         [AllowNull()]
-        [Nullable[int]]$ExitCode
+        [Nullable[int]]$ExitCode,
+
+        [Parameter(Mandatory = $false)]
+        [ValidateSet('Installer', 'Uninstaller')]
+        [string]$Tool = 'Installer'
     )
 
+    $toolText = Get-WingetToolAdviceText -Tool $Tool
     $isSystem = [bool]$AccountContext.IsSystem
     $account = 'SYSTEM'
     $who = 'SYSTEM'
@@ -721,20 +764,22 @@ function Get-WingetSourceUnusableMessage {
     # source package Windows did not deploy; the others are winget's own source settings.
     $dataMissing = $ExitCode -eq -1978335217
     if ($isSystem) {
-        $message += ' Fix: check that this PC can reach https://cdn.winget.microsoft.com, where winget downloads its source from, then re-run the installer.'
+        $message += " Fix: check that this PC can reach https://cdn.winget.microsoft.com, where winget downloads its source from, then re-run the $($toolText.Name)."
     }
     elseif (-not $dataMissing) {
         $resetNote = ''
         if ($State.ContainsKey('SourceReset')) {
             $resetNote = " 'winget source reset --force' did not fix it."
         }
-        $message += "$resetNote Fix: read winget's log for why it cannot read its source settings, check 'winget source list' in a window running as '$account' and that this PC can reach https://cdn.winget.microsoft.com, then re-run the installer."
+        $message += "$resetNote Fix: read winget's log for why it cannot read its source settings, check 'winget source list' in a window running as '$account' and that this PC can reach https://cdn.winget.microsoft.com, then re-run the $($toolText.Name)."
     }
     elseif ($AccountContext.IsCrossUserElevation) {
-        $message += " Fix: '$account' is elevated in the session of '$($AccountContext.SessionUser)' and has no logon session of its own, which Windows needs to deploy winget's source package for it: sign in to Windows once as '$account', or run the machine phase as SYSTEM with rmm/Invoke-WingetAppSetup.ps1, then re-run the installer."
+        # Signing in once is not enough: the package is not provisioned, and winget deploys it only
+        # when it runs in the account's own session.
+        $message += " Fix: '$account' is elevated in the session of '$($AccountContext.SessionUser)' and has no logon session of its own, which Windows needs to deploy winget's source package for it: run the $($toolText.Name) while signed in to Windows as '$account', or $($toolText.RunAsSystem)."
     }
     else {
-        $message += " Fix: look in the Microsoft-Windows-AppXDeploymentServer/Operational event log for why Windows could not deploy the Microsoft.Winget.Source package for '$account', and check that this PC can reach https://cdn.winget.microsoft.com, then re-run the installer."
+        $message += " Fix: look in the Microsoft-Windows-AppXDeploymentServer/Operational event log for why Windows could not deploy the Microsoft.Winget.Source package for '$account', and check that this PC can reach https://cdn.winget.microsoft.com, then re-run the $($toolText.Name)."
     }
     return $message
 }
@@ -751,6 +796,8 @@ function Get-WingetSourceUnusableMessage {
     started.
 .PARAMETER SourceExitCode
     The source check's exit code, if it ran to the end.
+.PARAMETER Tool
+    The tool that runs (Get-WingetToolAdviceText): 'Installer' (default) or 'Uninstaller'.
 .OUTPUTS
     [string]
 #>
@@ -767,29 +814,36 @@ function Get-WingetSetupAdvice {
 
         [Parameter(Mandatory = $false)]
         [AllowNull()]
-        [Nullable[int]]$SourceExitCode
+        [Nullable[int]]$SourceExitCode,
+
+        [Parameter(Mandatory = $false)]
+        [ValidateSet('Installer', 'Uninstaller')]
+        [string]$Tool = 'Installer'
     )
 
+    $toolText = Get-WingetToolAdviceText -Tool $Tool
+    $tool = $toolText.Name
     if ($Source) {
         if ($SourceExitCode -eq -2147009255 -and $Account -eq 'SYSTEM') {
-            return 'The steps that set winget up for a signed-in account do not apply to SYSTEM; if the installs fail, run the installer once as an administrator signed in to this PC.'
+            return "The steps that set winget up for a signed-in account do not apply to SYSTEM; if the $($toolText.Work) fail, run the $tool once as an administrator signed in to this PC."
         }
         if ($SourceExitCode -eq -2147009255) {
-            # Not 'winget source update' as that account: it exits 0 when its update fails.
-            return "Fix: sign in to Windows as '$Account' once (that sets winget up for the account), or run the machine phase as SYSTEM with rmm/Invoke-WingetAppSetup.ps1, then re-run the installer."
+            # Not 'winget source update' as that account: it exits 0 when its update fails. Not
+            # 'sign in once' either: winget deploys its packages only when it runs in that session.
+            return "Fix: run the $tool while signed in to Windows as '$Account' (Windows deploys winget's packages for an account only in its own logon session), or $($toolText.RunAsSystem)."
         }
-        return 'Fix: check that this PC can reach https://cdn.winget.microsoft.com, then re-run the installer.'
+        return "Fix: check that this PC can reach https://cdn.winget.microsoft.com, then re-run the $tool."
     }
     if ($State.Framework -and $State.Framework.Present -eq $false) {
-        return "Fix: install the Microsoft.WindowsAppRuntime.1.8 framework App Installer depends on, which this PC lacks ($($State.Framework.Detail)), or let the Microsoft Store update App Installer, then re-run the installer (issue #279)."
+        return "Fix: install the Microsoft.WindowsAppRuntime.1.8 framework App Installer depends on, which this PC lacks ($($State.Framework.Detail)), or let the Microsoft Store update App Installer, then re-run the $tool (issue #279)."
     }
     if (@($State.ErrorCodes) -contains -2147009274) {
-        return 'Fix: a framework package on this PC is newer than the one the WinGet release deploys, so App Installer could not be repaired; update App Installer from the Microsoft Store on this PC, then re-run the installer.'
+        return "Fix: a framework package on this PC is newer than the one the WinGet release deploys, so App Installer could not be repaired; update App Installer from the Microsoft Store on this PC, then re-run the $tool."
     }
     if ($State.Repair -and -not $State.Repair.Available) {
-        return 'Fix: install App Installer from the Microsoft Store or https://aka.ms/getwinget (Repair-WinGetPackageManager could not run: its PowerShell module could not be installed), then re-run the installer.'
+        return "Fix: install App Installer from the Microsoft Store or https://aka.ms/getwinget (Repair-WinGetPackageManager could not run: its PowerShell module could not be installed), then re-run the $tool."
     }
-    return 'Fix: install or update App Installer from the Microsoft Store or https://aka.ms/getwinget, then re-run the installer.'
+    return "Fix: install or update App Installer from the Microsoft Store or https://aka.ms/getwinget, then re-run the $tool."
 }
 
 <#

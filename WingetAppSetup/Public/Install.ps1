@@ -34,7 +34,8 @@
     Exit codes: 0 = success; 1 = an app failed (including those failed once winget could no longer
     start mid-run, and a failed post-install hook); 2 = winget unavailable (at the start, including
     Group Policy turning it off and, as SYSTEM, no machine-wide winget.exe that starts; or no longer
-    launchable at the end); 3 = the catalog failed validation or no valid apps remain; 4 =
+    launchable at the end), or winget cannot open its source for the account even after the repair
+    (SourceUnusable: nothing installed, Winget-AutoUpdate not set up); 3 = the catalog failed validation or no valid apps remain; 4 =
     administrator rights are required and the run was not elevated (the prompt was declined or could
     not be shown, a non-interactive run, an execution policy that would refuse the elevated script,
     irm | iex, or the imported module); 8 = apps installed, but automatic updates are FAILED, NOT

@@ -1176,7 +1176,7 @@ Describe 'The time budget from the entry script (-MaxRuntimeMinutes, wgt-gq8.41)
             "function Get-PendingRestartState { `$null }`n" +
             "function Get-WingetPolicyBlock { `$null }`n" +
             "function Wait-WauIdle { throw 'no wait for Winget-AutoUpdate once the time budget is used up' }`n" +
-            "function Initialize-Winget { param([switch]`$WhatIf, `$AccountContext) [pscustomobject]@{ Ready = `$true; Diagnosis = 'Ok' } }`n" +
+            "function Initialize-Winget { param([switch]`$WhatIf, `$AccountContext, [string]`$Tool) [pscustomobject]@{ Ready = `$true; Diagnosis = 'Ok' } }`n" +
             "function Remove-LegacyScheduledUpdates { param([switch]`$WhatIf) `$true }`n" +
             "function Get-DefaultAppCatalog { @(@{ name = 'Contoso.AppOne' }, @{ name = 'Contoso.AppTwo' }) }`n" +
             "function Test-AppApplicability { param(`$App, `$Purpose) `$true }`n" +

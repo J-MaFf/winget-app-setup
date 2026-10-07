@@ -37,6 +37,9 @@
 .PARAMETER SystemInstallEngine
     The engine a run as SYSTEM asked for (Get-SystemInstallEngineRequest): 'Cli' (default) or
     'WinGetClient'. Ignored in any other run.
+.PARAMETER Tool
+    The tool that runs, for the advice lines (Get-WingetToolAdviceText): 'Installer' (default) or
+    'Uninstaller', which is never told to run the machine phase.
 .OUTPUTS
     [pscustomobject] Ready ([bool]: winget starts, no policy blocks it and its source is not known
     to be unusable; a real run stops with exit code 2 when it is $false) and Diagnosis: 'Ok',
@@ -55,7 +58,11 @@ function Initialize-Winget {
 
         [Parameter(Mandatory = $false)]
         [ValidateSet('Cli', 'WinGetClient')]
-        [string]$SystemInstallEngine = 'Cli'
+        [string]$SystemInstallEngine = 'Cli',
+
+        [Parameter(Mandatory = $false)]
+        [ValidateSet('Installer', 'Uninstaller')]
+        [string]$Tool = 'Installer'
     )
 
     if ($null -eq $AccountContext) {
@@ -142,7 +149,7 @@ function Initialize-Winget {
             if ($codes.Count -gt 0) {
                 $seen = ' App Installer could not be registered or repaired ({0}).' -f (@($codes | ForEach-Object { Format-WingetExitCode -ExitCode $_ }) -join ', ')
             }
-            Write-ErrorMessage ("Winget cannot be started for {0}: {1}.{2} {3}" -f $who, $probe.Reason, $seen, (Get-WingetSetupAdvice -State $state -Account $account))
+            Write-ErrorMessage ("Winget cannot be started for {0}: {1}.{2} {3}" -f $who, $probe.Reason, $seen, (Get-WingetSetupAdvice -State $state -Account $account -Tool $Tool))
             return [pscustomobject]@{ Ready = $false; Diagnosis = 'NotLaunchable' }
         }
         Write-Success "Winget is available ($($probe.Version))."
@@ -151,7 +158,7 @@ function Initialize-Winget {
     if ($WhatIf) {
         $sourceFixes = 'winget source reset --force for a corrupted or unconfigured source (it also removes any source added beyond the defaults)'
         if (-not $isSystem) {
-            $sourceFixes = 'for missing source data (0x8A15000F), registering the winget source package (Microsoft.Winget.Source) for this account, from the copy already on this PC or a download from https://cdn.winget.microsoft.com/cache that must carry a valid Microsoft signature, then Repair-WinGetPackageManager if Microsoft.WinGet.Client 1.28.190 or later is installed; ' + $sourceFixes
+            $sourceFixes = 'for missing source data (0x8A15000F), registering the winget source package (Microsoft.Winget.Source) for this account, from a download from https://cdn.winget.microsoft.com/cache that must carry a valid Microsoft signature, else from the copy already on this PC, then Repair-WinGetPackageManager if Microsoft.WinGet.Client 1.28.190 or later is installed; ' + $sourceFixes
         }
         Write-Info "[DRY-RUN] Would update the winget source for $who (winget source update --name winget), check that winget can open it (winget search --source winget), and fix it if it cannot: $sourceFixes. A real run stops with exit code 2 when the source still cannot be opened."
         return [pscustomobject]@{ Ready = $true; Diagnosis = 'Ok' }
@@ -192,7 +199,7 @@ function Initialize-Winget {
     # The installs open the source as the check does (--source winget), so each would fail the same way.
     $codeInfo = Get-WingetExitCodeInfo -ExitCode $source.ExitCode
     if ($codeInfo -and $codeInfo.Class -eq 'SourceBroken') {
-        Write-ErrorMessage (Get-WingetSourceUnusableMessage -State $state -AccountContext $AccountContext -ExitCode $source.ExitCode)
+        Write-ErrorMessage (Get-WingetSourceUnusableMessage -State $state -AccountContext $AccountContext -ExitCode $source.ExitCode -Tool $Tool)
         return [pscustomobject]@{ Ready = $false; Diagnosis = 'SourceUnusable' }
     }
 
@@ -203,7 +210,7 @@ function Initialize-Winget {
     elseif (-not $source.TimedOut) {
         $detail = '{0} exited with {1}' -f $sourceCommand, (Format-WingetExitCode -ExitCode $source.ExitCode)
     }
-    Write-WarningMessage ('The winget source could not be set up for {0} ({1}). {2} Installations may fail.' -f $who, $detail, (Get-WingetSetupAdvice -State $state -Account $account -Source -SourceExitCode $source.ExitCode))
+    Write-WarningMessage ('The winget source could not be set up for {0} ({1}). {2} Installations may fail.' -f $who, $detail, (Get-WingetSetupAdvice -State $state -Account $account -Source -SourceExitCode $source.ExitCode -Tool $Tool))
     return [pscustomobject]@{ Ready = $true; Diagnosis = 'SourceFailed' }
 }
 

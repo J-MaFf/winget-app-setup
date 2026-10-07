@@ -12,7 +12,8 @@
 .DESCRIPTION
     `Get-AppxPackage -AllUsers` needs administrator rights and also lists a package only staged on
     the machine. Under PowerShell 7 it runs in Windows PowerShell 5.1, where the Appx module always
-    loads. Throws when the query fails.
+    loads (Invoke-WindowsPowerShellScript, within the AppxQuery limit). Throws when the query fails
+    or is stopped at its limit.
 .PARAMETER Name
     The package name, e.g. Microsoft.DesktopAppInstaller. It goes into a command, so only
     package-name characters are accepted.
@@ -29,10 +30,18 @@ function Get-AllUsersAppxPackageInfo {
 
     $query = "Get-AppxPackage -AllUsers -Name '$Name' -ErrorAction Stop | ForEach-Object { '{0}|{1}|{2}|{3}' -f `$_.Version, `$_.Architecture, `$_.Status, `$_.InstallLocation }"
     if ($PSVersionTable.PSEdition -eq 'Core') {
-        $lines = @(& powershell.exe -NoProfile -ExecutionPolicy Bypass -Command $query)
-        if ($LASTEXITCODE -ne 0) {
-            throw "Get-AppxPackage -AllUsers failed in Windows PowerShell (exit code $LASTEXITCODE)."
+        $timeout = Get-ProcessTimeoutSeconds -Operation AppxQuery
+        $run = Invoke-WindowsPowerShellScript -Script $query -TimeoutSeconds $timeout
+        if ($run.LaunchFailed) {
+            throw "Get-AppxPackage -AllUsers could not run: Windows PowerShell could not be started ($($run.LaunchError))."
         }
+        if ($run.TimedOut) {
+            throw "Get-AppxPackage -AllUsers did not finish within $timeout seconds and was stopped."
+        }
+        if ($run.ExitCode -ne 0) {
+            throw "Get-AppxPackage -AllUsers failed in Windows PowerShell (exit code $($run.ExitCode))."
+        }
+        $lines = @($run.StandardOutput)
     }
     else {
         $lines = @(Get-AppxPackage -AllUsers -Name $Name -ErrorAction Stop |

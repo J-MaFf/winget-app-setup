@@ -1,13 +1,16 @@
 # The diagnostics bundle (-CollectDiagnostics): one .zip a teammate attaches to a GitHub issue after a
 # failed run, with the latest run's logs and the state that decides whether winget works, and with
 # account, computer and profile names and real accounts' SIDs replaced, since the issues are public.
-# It changes nothing on the PC (no transcript, run lock, last-run.json, setup or elevation) and writes
-# only the .zip; a source it cannot read is noted in README.txt. It runs before the 5.1 bootstrap, so
-# this file and the helpers it reaches must stay Windows PowerShell 5.1-compatible: the account and
-# elevation helpers (Elevation.ps1, EnvironmentPreflight.ps1), Get-OSArchitecture,
-# Get-PendingRestartState, the WAU readers and Get-DefaultWindowsAppRuntimeRequirement
-# (WauSupport.ps1), Get-MachineWingetCandidate, ProcessInvocation.ps1, Format-WingetExitCode,
-# Format-RunRecordTime, Get-WindowsAppRuntimePin and the Write-* helpers.
+# It sets nothing up on the PC (no transcript, run lock, last-run.json, setup or elevation) and writes
+# only the .zip; a source it cannot read is noted in README.txt. Its winget source check opens the
+# source as the installs do, so winget may update its source data (and deploy its source package)
+# for the account it runs as. It runs before the 5.1 bootstrap, so this file and the helpers it
+# reaches must stay Windows PowerShell 5.1-compatible: the account and elevation helpers
+# (Elevation.ps1, EnvironmentPreflight.ps1), Get-OSArchitecture, Get-PendingRestartState, the WAU
+# readers and Get-DefaultWindowsAppRuntimeRequirement (WauSupport.ps1), Get-MachineWingetCandidate
+# (MachineContext.ps1), ProcessInvocation.ps1, Format-WingetExitCode, Get-WingetSourceOpenArgument
+# and Test-WingetSourceOpenExitCode (WingetBootstrap.ps1), Format-RunRecordTime,
+# Get-WindowsAppRuntimePin and the Write-* helpers.
 
 <#
 .SYNOPSIS
@@ -30,7 +33,7 @@ function Get-DiagnosticsCommandLine {
 #>
 function Write-InstallerReportHint {
     Write-Info 'To report this, open https://github.com/J-MaFf/winget-app-setup/issues/new?template=install-failure.yml and give the exit code, the installer build and a diagnostics bundle (or the log file).'
-    Write-Info 'A diagnostics bundle is a .zip of the installer''s logs and the state of winget, App Installer and auto-updates on this PC, with account and computer names removed. Making one changes nothing. Run this in PowerShell (as administrator, for everything it can collect), then attach the file it names:'
+    Write-Info 'A diagnostics bundle is a .zip of the installer''s logs and the state of winget, App Installer and auto-updates on this PC, with account and computer names removed. Making one installs and sets up nothing (winget may refresh its own source data while it is checked). Run this in PowerShell (as administrator, for everything it can collect), then attach the file it names:'
     Write-Info ('    ' + (Get-DiagnosticsCommandLine))
     Write-WarningMessage 'That repository is public, and the log names this computer and the accounts that ran the installer: remove or redact the log''s header before attaching it. The bundle has those names removed already; look through it anyway.'
 }
@@ -1142,9 +1145,11 @@ function Format-DiagnosticsProcessResult {
     source, each with a time limit.
 .DESCRIPTION
     The first two change nothing and need no network. The source check is Initialize-Winget's
-    (Get-WingetSourceOpenArgument): it needs the network, and winget downloads the source first when
-    it is missing. As SYSTEM the first machine-wide winget.exe runs. A winget that cannot be found
-    or started is reported, not fatal: that is often why the bundle is made.
+    (Get-WingetSourceOpenArgument): it needs the network, accepts the source agreements, and lets
+    winget update its source data first, as any install does, which for an account without it
+    deploys the source package (up to the WingetSourceOpen limit). As SYSTEM the first machine-wide
+    winget.exe runs. A winget that cannot be found or started is reported, not fatal: that is often
+    why the bundle is made.
 .PARAMETER AccountContext
     Get-InstallAccountContext's result, or $null.
 .OUTPUTS
@@ -1235,11 +1240,8 @@ function Get-DiagnosticsWindowsPowerShellPath {
 .SYNOPSIS
     Runs a script in Windows PowerShell, with a time limit, and returns the process result.
 .DESCRIPTION
-    As -EncodedCommand, so no quoting changes it, writing UTF-8, so non-ANSI names arrive intact
-    (and can be redacted). The Appx and DISM cmdlets always load there. It starts without
-    PSModulePath, so it builds its own default: inherited through Process.Start, PowerShell 7's
-    module folders come first and their Utility and Security modules cannot load in 5.1
-    (about_PSModulePath).
+    Invoke-WindowsPowerShellScript with Get-DiagnosticsWindowsPowerShellPath: UTF-8 output, so
+    non-ANSI names arrive intact (and can be redacted). The Appx and DISM cmdlets always load there.
 .PARAMETER Script
     The script.
 .PARAMETER TimeoutSeconds
@@ -1256,9 +1258,7 @@ function Invoke-DiagnosticsWindowsPowerShell {
         [int]$TimeoutSeconds = 120
     )
 
-    $prologue = '[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false); $ProgressPreference = ''SilentlyContinue''; '
-    $encoded = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($prologue + $Script))
-    return (Invoke-ExternalProcess -FilePath (Get-DiagnosticsWindowsPowerShellPath) -ArgumentList @('-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', $encoded) -TimeoutSeconds $TimeoutSeconds -Echo None -RemoveEnvironmentVariable @('PSModulePath'))
+    return (Invoke-WindowsPowerShellScript -Script $Script -TimeoutSeconds $TimeoutSeconds -FilePath (Get-DiagnosticsWindowsPowerShellPath))
 }
 
 <#

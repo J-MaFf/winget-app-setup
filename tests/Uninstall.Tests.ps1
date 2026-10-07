@@ -791,7 +791,7 @@ function Add-AppxPackage { throw 'no App Installer in this test' }
 function Register-WingetSourcePackage { Write-Host 'FAKE: register the winget source package'; [pscustomobject]@{ Registered = $false; ErrorCodes = @(-2147009255); Reason = 'registering it failed' } }
 function Get-WingetClientRepairVersion { $null }
 function Get-ProcessUserName { 'CONTOSO\admin-tech' }
-function Get-InteractiveSessionUserName { $null }
+function Get-InteractiveSessionUserName { $env:UNINSTALL_TEST_SESSION_USER }
 function Start-Sleep { param ([int]$Seconds) }
 function Remove-LegacyScheduledUpdates { param ([switch]$WhatIf) $false }
 # Whether someone is at the console is the test's choice, never the console this child inherits.
@@ -887,6 +887,18 @@ function Invoke-WingetProcess {
         $run.Output | Should -Not -Match 'Skipping:|up to date'
         $run.Output | Should -Match "The winget source cannot be opened for 'CONTOSO\\admin-tech'"
         $run.Output | Should -Match ([regex]::Escape('winget cannot open its source for this account (see above), so nothing was uninstalled'))
+        # The uninstaller's own advice: never the installer, nor the machine phase, which installs the catalog.
+        $run.Output | Should -Match 'then re-run the uninstaller\.'
+        $run.Output | Should -Not -Match 'rmm/|machine phase|re-run the installer'
+    }
+
+    It 'Under cross-user elevation, advises running the uninstaller signed in as the account or as SYSTEM, never the machine phase (wgt-gq8.64 review)' {
+        $run = Invoke-TestUninstallerScript -Root (Join-Path $TestDrive 'source-missing-cross-user') -Overrides $script:moduleOverrides -Environment @{ UNINSTALL_TEST_SCENARIO = 'SourceMissing'; UNINSTALL_TEST_SESSION_USER = 'CONTOSO\jdoe'; WINGET_APP_SETUP_NONINTERACTIVE = '1' }
+
+        $run.ExitCode | Should -Be 2
+        $run.Output | Should -Not -Match 'FAKE: Winget-AutoUpdate removed'
+        $run.Output | Should -Match ([regex]::Escape("Fix: 'CONTOSO\admin-tech' is elevated in the session of 'CONTOSO\jdoe' and has no logon session of its own, which Windows needs to deploy winget's source package for it: run the uninstaller while signed in to Windows as 'CONTOSO\admin-tech', or run winget-app-uninstall.ps1 as SYSTEM."))
+        $run.Output | Should -Not -Match 'rmm/|machine phase|re-run the installer|sign in to Windows once'
     }
 
     It 'Exits 1 and keeps Winget-AutoUpdate when winget starts but cannot check the apps' {

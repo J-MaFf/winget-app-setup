@@ -766,27 +766,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     exit code decides. 'The winget source is up to date' is gone; a source that opens prints
     'The winget source opens for <account>'.
   - **`0x8A15000F` is repaired by registering the source package** (`Register-WingetSourcePackage`,
-    at most once a run, never as SYSTEM): by family name when a copy is already on the PC, otherwise
-    `source2.msix`, then `source.msix` (winget's order), downloaded into a new file
+    at most once a run, never as SYSTEM): `source2.msix`, then `source.msix` (winget's order),
+    downloaded into a new file
     (`Save-WebFileAsNew`, opened `CreateNew`) in a new folder only SYSTEM and Administrators can
     change (`New-WauStagingDirectory`), held open read-only from its signature check
     (Microsoft Corporation, `Test-AuthenticodeSigner`) until `Add-AppxPackage -Path` has installed
-    it, then deleted. Both go through `Invoke-AppxRegistration`, in Windows PowerShell under
-    PowerShell 7. Then `Repair-WinGetPackageManager`, but only from Microsoft.WinGet.Client
-    1.28.190 or later (older ones never check the source package). `winget source reset --force`
+    it, then deleted; only when that fails, a copy another account already has on the PC, by family
+    name (usually older than the download, and winget cannot replace it for the account while its
+    own deployment fails). Both go through `Invoke-AppxRegistration`, in Windows PowerShell under
+    PowerShell 7, now within new time limits (`AppxRegistration`, 5 minutes; the
+    `Get-AppxPackage -AllUsers` query `AppxQuery`, 2 minutes) through
+    `Invoke-WindowsPowerShellScript`, instead of an unbounded `& powershell.exe`. Then
+    `Repair-WinGetPackageManager`, but only from Microsoft.WinGet.Client 1.28.190 or later (older
+    ones never check the source package). `winget source reset --force`
     is kept for the other SourceBroken codes (corrupted or unconfigured source) and never runs for
     `0x8A15000F`.
   - **A source that stays closed stops the run.** `Initialize-Winget` returns Ready `$false` with
     Diagnosis `SourceUnusable` and prints one line naming the account, the code, winget's log folder
     (`%LOCALAPPDATA%\Packages\Microsoft.DesktopAppInstaller_8wekyb3d8bbwe\LocalState\DiagOutputDir`)
-    and what to do: under cross-user elevation, sign in to Windows once as that account or run the
-    machine phase as SYSTEM with `rmm/Invoke-WingetAppSetup.ps1`; otherwise read the
-    AppXDeploymentServer/Operational events and check access to `cdn.winget.microsoft.com`. The
+    and what to do: under cross-user elevation, run the installer while signed in to Windows as that
+    account (winget deploys its source package only in the account's own session) or run the
+    machine phase as SYSTEM with `rmm/Invoke-WingetAppSetup.ps1` (the uninstaller: run it signed in
+    as that account, or `winget-app-uninstall.ps1` as SYSTEM, never the machine phase, which
+    installs the catalog); otherwise read the AppXDeploymentServer/Operational events and check
+    access to `cdn.winget.microsoft.com`. The
     installer exits 2 before any app install or Winget-AutoUpdate setup (recorded as early exits
     are: `last-run.json` and the RESULT line with exit 2, `autoupdates=NotRun`); the uninstaller
     removes nothing, keeps Winget-AutoUpdate and exits 2. A timeout, a network error or another
-    code still only warns and the run goes on. The advice for a source blocked by `0x80073D19` no
-    longer says to run `winget source update` as the account, which exits 0 when it fails.
+    code still only warns and the run goes on while the source has data; an account, or SYSTEM,
+    with no source data yet that cannot download it gets `0x8A15000F` and stops with exit 2. As
+    SYSTEM, `0x8A15000F` gets no fix (no reset, no package registration). The advice for a source
+    blocked by `0x80073D19` no longer says to run `winget source update` as the account, which
+    exits 0 when it fails, nor to sign in once: it says to run the installer while signed in as
+    that account.
   - **The installed check names the source.** `Test-WingetPackageInstalled` runs
     `winget list --exact --id <id> --source winget`: without `--source`, winget only warns that a
     source failed and exits `0x8A150014`, so every app read as not installed. Now such a list fails
@@ -796,7 +808,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     this check found the app, and a lookup that fails there is already a failure, not a success.
   - **Diagnostics show it.** `appx.txt` lists `Microsoft.Winget.Source` for every account, and
     `winget.txt` says whether winget can open the source (`Winget source: opens` or
-    `CANNOT BE OPENED (<code>)`), from the same check.
+    `CANNOT BE OPENED (<code>)`), from the same check. Since that check opens the source as an
+    install does, letting winget update its source data for the account, the bundle's help, the
+    failure hint and the readme no longer say that making one changes nothing.
 - The uninstaller no longer hangs for 15 minutes on Google Drive and then fails it (wgt-gq8.61).
   Drive is an exe app, so `winget uninstall` ran the `UninstallString` Drive registers, a bare
   `uninstall.exe` with no switches, exactly as written, and waited on it with no limit of its own:

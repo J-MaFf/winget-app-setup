@@ -26,8 +26,15 @@ BeforeAll {
 }
 
 Describe 'Get-DesktopAppInstallerPackageInfo (the Get-AppxPackage -AllUsers query seam)' {
-    It 'Lists App Installer for every account through Windows PowerShell and parses Version|Architecture|Status|InstallLocation' -Skip:($PSVersionTable.PSEdition -ne 'Core') {
-        Mock powershell.exe { $global:LASTEXITCODE = 0; '1.27.460.0|X64|Ok|C:\Program Files\WindowsApps\Microsoft.DesktopAppInstaller_1.27.460.0_x64__8wekyb3d8bbwe'; 'WARNING: noise'; '' }
+    BeforeAll {
+        function New-PowerShellRun {
+            param ([Nullable[int]]$ExitCode = 0, [string[]]$Lines = @(), [switch]$TimedOut, [string]$LaunchError)
+            [pscustomobject]@{ ExitCode = $ExitCode; TimedOut = [bool]$TimedOut; LaunchFailed = [bool]$LaunchError; LaunchError = $LaunchError; StandardOutput = $Lines }
+        }
+    }
+
+    It 'Lists App Installer for every account through Windows PowerShell, within the AppxQuery limit, and parses Version|Architecture|Status|InstallLocation' -Skip:($PSVersionTable.PSEdition -ne 'Core') {
+        Mock Invoke-WindowsPowerShellScript { New-PowerShellRun -Lines @('1.27.460.0|X64|Ok|C:\Program Files\WindowsApps\Microsoft.DesktopAppInstaller_1.27.460.0_x64__8wekyb3d8bbwe', 'WARNING: noise', '') }
 
         $packages = @(Get-DesktopAppInstallerPackageInfo)
 
@@ -36,13 +43,20 @@ Describe 'Get-DesktopAppInstallerPackageInfo (the Get-AppxPackage -AllUsers quer
         $packages[0].Architecture | Should -Be 'X64'
         $packages[0].Status | Should -Be 'Ok'
         $packages[0].InstallLocation | Should -Be 'C:\Program Files\WindowsApps\Microsoft.DesktopAppInstaller_1.27.460.0_x64__8wekyb3d8bbwe'
-        Should -Invoke powershell.exe -Times 1 -Exactly -ParameterFilter { "$args" -match "Get-AppxPackage -AllUsers -Name 'Microsoft\.DesktopAppInstaller'" }
+        Should -Invoke Invoke-WindowsPowerShellScript -Times 1 -Exactly -ParameterFilter {
+            $Script -match "Get-AppxPackage -AllUsers -Name 'Microsoft\.DesktopAppInstaller'" -and $TimeoutSeconds -eq (Get-ProcessTimeoutSeconds -Operation AppxQuery)
+        }
     }
 
-    It 'Throws when the Windows PowerShell query fails' -Skip:($PSVersionTable.PSEdition -ne 'Core') {
-        Mock powershell.exe { $global:LASTEXITCODE = 1 }
+    It 'Throws when the Windows PowerShell query <Case>' -ForEach @(
+        @{ Case = 'fails'; Run = @{ ExitCode = 1 }; Message = '*Get-AppxPackage -AllUsers failed in Windows PowerShell (exit code 1)*' }
+        @{ Case = 'is stopped at its time limit'; Run = @{ ExitCode = $null; TimedOut = $true }; Message = '*Get-AppxPackage -AllUsers did not finish within 120 seconds and was stopped*' }
+        @{ Case = 'cannot start'; Run = @{ ExitCode = $null; LaunchError = 'Access is denied' }; Message = '*Get-AppxPackage -AllUsers could not run: Windows PowerShell could not be started (Access is denied)*' }
+    ) -Skip:($PSVersionTable.PSEdition -ne 'Core') {
+        $script:run = $Run
+        Mock Invoke-WindowsPowerShellScript { $parameters = $script:run; New-PowerShellRun @parameters }
 
-        { Get-DesktopAppInstallerPackageInfo } | Should -Throw '*Get-AppxPackage -AllUsers failed*'
+        { Get-DesktopAppInstallerPackageInfo } | Should -Throw $Message
     }
 }
 
