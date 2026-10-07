@@ -104,7 +104,7 @@ function Write-InstallerExitNotice {
     if (-not $why) {
         switch ($Code) {
             1 { $why = 'a pre-flight check failed (see above)' }
-            2 { $why = 'winget is not available, could not be started, or is turned off by Group Policy (see above)' }
+            2 { $why = 'winget is not available, could not be started, cannot open its source, or is turned off by Group Policy (see above)' }
             3 { $why = 'the app catalog failed validation (see above)' }
             4 { $why = 'administrator rights are required, and this run was not elevated, or Group Policy''s execution policy keeps the elevated window from running the installer (see above)' }
             5 { $why = 'the run was aborted before it finished (see above)' }

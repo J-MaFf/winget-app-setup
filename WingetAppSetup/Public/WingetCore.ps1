@@ -12,28 +12,37 @@
          Then the account fixes (Invoke-NextWingetAccountFix), each followed by two checks 5 seconds
          apart: register the App Installer already on the PC, then Repair-WinGetPackageManager. Still
          not startable: one line says why and what to do, and the run stops with exit code 2.
-      3. The winget source (Invoke-WingetSourceProbe). 0x80073D19 (no logon session, issue #159)
-         gets the account fixes not yet run; a missing or corrupted source (SourceBroken) gets
-         `winget source reset --force`. A timeout, a network error or another code gets no repair
-         (P3-28). A source that still fails is one line, and the run goes on.
-    As SYSTEM, step 2 is Test-MachineWingetAvailable and no account fix runs. With
+      3. The winget source (Invoke-WingetSourceCheck): `winget source update`, which exits 0 even
+         when its update fails, then Test-WingetSourceOpen, which opens the source as the installs
+         do; its answer decides. 0x8A15000F SOURCE_DATA_MISSING (winget could not deploy its source
+         package for this account, e.g. under cross-user elevation) gets
+         Register-WingetSourcePackage, then Repair-WinGetPackageManager from Microsoft.WinGet.Client
+         1.28.190 or later if installed; another SourceBroken code gets `winget source reset
+         --force` (Invoke-NextWingetSourceFix); 0x80073D19 gets the account fixes not yet run. A
+         source that still answers a SourceBroken code is one ERROR line
+         (Get-WingetSourceUnusableMessage) and Ready $false: every install would fail. A timeout,
+         a network error or another code gets no repair (P3-28): one line, and the run goes on.
+    As SYSTEM, step 2 is Test-MachineWingetAvailable, and neither an account fix nor the source
+    package registration runs. With
     -SystemInstallEngine WinGetClient a run as SYSTEM first readies Microsoft.WinGet.Client
     (Initialize-WingetClientEngine): ready, it installs the apps, winget.exe is only checked for
     Winget-AutoUpdate (a warning, not exit 2) and step 3 is skipped; not ready, the run goes on with
     winget.exe as without it. Either way it prints the 'Install engine: ' line.
 .PARAMETER WhatIf
     Dry run (P2-16): only the policy and `winget --version` checks run. Nothing is registered,
-    repaired, updated or reset, and no module is downloaded; [DRY-RUN] lines say what a real run
-    would do.
+    repaired, updated, opened or reset, and nothing is downloaded; [DRY-RUN] lines say what a real
+    run would do.
 .PARAMETER AccountContext
     Get-InstallAccountContext's result, which Invoke-WingetInstall passes; read here when not given.
 .PARAMETER SystemInstallEngine
     The engine a run as SYSTEM asked for (Get-SystemInstallEngineRequest): 'Cli' (default) or
     'WinGetClient'. Ignored in any other run.
 .OUTPUTS
-    [pscustomobject] Ready ([bool]: winget starts and no policy blocks it; a real run stops with exit
-    code 2 when it is $false) and Diagnosis: 'Ok', 'SourceFailed' (ready, but the winget source
-    could not be set up), 'PolicyBlocked' or 'NotLaunchable'.
+    [pscustomobject] Ready ([bool]: winget starts, no policy blocks it and its source is not known
+    to be unusable; a real run stops with exit code 2 when it is $false) and Diagnosis: 'Ok',
+    'SourceFailed' (ready, but the source check gave no clear answer or failed for another reason,
+    such as the network), 'SourceUnusable' (the source cannot be opened), 'PolicyBlocked' or
+    'NotLaunchable'.
 #>
 function Initialize-Winget {
     param (
@@ -140,46 +149,59 @@ function Initialize-Winget {
     }
 
     if ($WhatIf) {
-        Write-Info "[DRY-RUN] Would update the winget source for $who (winget source update --name winget), and fix it if that fails: winget source reset --force for a missing or corrupted source, which also removes any source added beyond the defaults."
+        $sourceFixes = 'winget source reset --force for a corrupted or unconfigured source (it also removes any source added beyond the defaults)'
+        if (-not $isSystem) {
+            $sourceFixes = 'for missing source data (0x8A15000F), registering the winget source package (Microsoft.Winget.Source) for this account, from the copy already on this PC or a download from https://cdn.winget.microsoft.com/cache that must carry a valid Microsoft signature, then Repair-WinGetPackageManager if Microsoft.WinGet.Client 1.28.190 or later is installed; ' + $sourceFixes
+        }
+        Write-Info "[DRY-RUN] Would update the winget source for $who (winget source update --name winget), check that winget can open it (winget search --source winget), and fix it if it cannot: $sourceFixes. A real run stops with exit code 2 when the source still cannot be opened."
         return [pscustomobject]@{ Ready = $true; Diagnosis = 'Ok' }
     }
 
     Write-Info "Updating the winget source for $who (this may take a moment)..."
-    $source = Invoke-WingetSourceProbe
+    $source = Invoke-WingetSourceCheck
     while (-not $source.Succeeded) {
         $fixed = $false
         $codeInfo = Get-WingetExitCodeInfo -ExitCode $source.ExitCode
         if ($source.ExitCode -eq $sessionBlockedExitCode -and -not $isSystem) {
             $fixed = Invoke-NextWingetAccountFix -State $state
         }
-        elseif ($codeInfo -and $codeInfo.Class -eq 'SourceBroken' -and -not $state.ContainsKey('SourceReset')) {
-            $state.SourceReset = Reset-WingetSource
-            $fixed = $true
+        elseif ($codeInfo -and $codeInfo.Class -eq 'SourceBroken') {
+            $fixed = Invoke-NextWingetSourceFix -State $state -ExitCode $source.ExitCode -IsSystem:$isSystem
         }
         if (-not $fixed) {
             break
         }
-        $source = Invoke-WingetSourceProbe
+        $source = Invoke-WingetSourceCheck
     }
 
     if ($source.Succeeded) {
-        Write-Success "The winget source is up to date for $who."
+        Write-Success "The winget source opens for $who."
         return [pscustomobject]@{ Ready = $true; Diagnosis = 'Ok' }
     }
+    $sourceCommand = "'winget search --source winget'"
+    if ($source.Step -eq 'update') {
+        $sourceCommand = "'winget source update'"
+    }
     if ($source.ExitCode -eq $policyExitCode) {
-        return (& $policyBlocked ("'winget source update' answered {0}" -f (Format-WingetExitCode -ExitCode $source.ExitCode)))
+        return (& $policyBlocked ('{0} answered {1}' -f $sourceCommand, (Format-WingetExitCode -ExitCode $source.ExitCode)))
     }
     if ($source.ExitCode -eq $agreementsExitCode) {
         Write-Info 'The winget source agreements are not accepted for this account yet (0x8A150046); each install accepts them.'
         return [pscustomobject]@{ Ready = $true; Diagnosis = 'Ok' }
     }
+    # The installs open the source as the check does (--source winget), so each would fail the same way.
+    $codeInfo = Get-WingetExitCodeInfo -ExitCode $source.ExitCode
+    if ($codeInfo -and $codeInfo.Class -eq 'SourceBroken') {
+        Write-ErrorMessage (Get-WingetSourceUnusableMessage -State $state -AccountContext $AccountContext -ExitCode $source.ExitCode)
+        return [pscustomobject]@{ Ready = $false; Diagnosis = 'SourceUnusable' }
+    }
 
-    $detail = 'it did not finish in time and was stopped'
+    $detail = "$sourceCommand did not finish in time and was stopped"
     if ($source.LaunchError) {
         $detail = "winget could not be started: $($source.LaunchError)"
     }
     elseif (-not $source.TimedOut) {
-        $detail = 'exit code {0}' -f (Format-WingetExitCode -ExitCode $source.ExitCode)
+        $detail = '{0} exited with {1}' -f $sourceCommand, (Format-WingetExitCode -ExitCode $source.ExitCode)
     }
     Write-WarningMessage ('The winget source could not be set up for {0} ({1}). {2} Installations may fail.' -f $who, $detail, (Get-WingetSetupAdvice -State $state -Account $account -Source -SourceExitCode $source.ExitCode))
     return [pscustomobject]@{ Ready = $true; Diagnosis = 'SourceFailed' }
@@ -572,11 +594,13 @@ function Install-WingetPackage {
 .SYNOPSIS
     Returns whether winget reports the given package id as installed for the current account.
 .DESCRIPTION
-    `winget list --exact --id <id>` through Invoke-WingetProcess, quietly and always under a time
-    limit (issues #176, #188). It tells installed, not installed and no answer apart: a timeout, a
-    winget that could not start (P2-9) or a `winget list` that failed is no answer, never "not
-    installed". `winget list` exits 0 when it lists the package and 0x8A150014 when nothing matches;
-    any other code without a match (e.g. 0x8A15004B, no source opened) is CheckFailed. A failed
+    `winget list --exact --id <id> --source winget` through Invoke-WingetProcess, quietly and always
+    under a time limit (issues #176, #188). It tells installed, not installed and no answer apart:
+    a timeout, a winget that could not start (P2-9) or a `winget list` that failed is no answer,
+    never "not installed". `winget list` exits 0 when it lists the package and 0x8A150014 when
+    nothing matches; any other code without a match is CheckFailed. --source winget, the source of
+    every catalog id, makes a source that cannot be opened fail the list with its code (e.g.
+    0x8A15000F): without it, winget only warns, matches nothing and exits 0x8A150014. A failed
     launch is not retried here; the caller's circuit breaker decides. The id is matched as a whole
     id (Test-WingetListOutputContainsPackageId), so 'Foo.Bar' does not match 'Foo.BarBaz'. While the
     Microsoft.WinGet.Client engine is active, Invoke-WingetClientInstalledCheck answers instead.
@@ -606,7 +630,7 @@ function Test-WingetPackageInstalled {
         return (Invoke-WingetClientInstalledCheck -PackageId $PackageId -TimeoutSeconds $TimeoutSeconds)
     }
 
-    $listArgs = @('list', '--exact', '--id', $PackageId, '--accept-source-agreements', '--disable-interactivity')
+    $listArgs = @('list', '--exact', '--id', $PackageId, '--source', 'winget', '--accept-source-agreements', '--disable-interactivity')
     $run = Invoke-WingetProcess -ArgumentList $listArgs -TimeoutSeconds $TimeoutSeconds -Echo None
     if ($run.LaunchFailed) {
         return @{ Installed = $false; TimedOut = $false; LaunchFailed = $true; LaunchError = $run.LaunchError; CheckFailed = $false; ExitCode = $null }

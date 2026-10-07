@@ -19,8 +19,11 @@
       RestartRequired       The package installed, and a restart finishes it (MSI 3010 on winget
                             1.6 and older, which newer winget reports as exit 0 with a warning), or
                             the installer started a restart itself (MSI 1641).
-      SourceBroken          The winget source is missing or its data is corrupted.
-                            Initialize-Winget runs `winget source reset --force` for it.
+      SourceBroken          The winget source is missing or its data is corrupted. When the
+                            source check (Test-WingetSourceOpen) answers one, Initialize-Winget
+                            registers the source package for 0x8A15000F and runs `winget source
+                            reset --force` for the others (Invoke-NextWingetSourceFix); still
+                            there, the run stops with exit code 2 (SourceUnusable).
       (empty)               Named for the reader only; no special handling.
 .PARAMETER ExitCode
     The exit code as winget reports it (a signed Int32), or $null.

@@ -422,6 +422,9 @@ Describe 'winget in the bundle (Get-DiagnosticsWingetReport)' {
             if ($ArgumentList[0] -eq '--version') {
                 New-TestProcessResult -ExitCode 0 -Output @('v1.26.510')
             }
+            elseif ($ArgumentList[0] -eq 'search') {
+                New-TestProcessResult -ExitCode 0 -Output @('PowerShell Microsoft.PowerShell 7.6.6 winget')
+            }
             else {
                 New-TestProcessResult -ExitCode 0 -Output @('Windows Package Manager v1.26.510', 'Windows: Windows.Desktop v10.0.26100.4061')
             }
@@ -432,7 +435,7 @@ Describe 'winget in the bundle (Get-DiagnosticsWingetReport)' {
     It 'Runs winget --version and --info with the version-check time limit, no echo and no installer log' {
         $lines = @(Get-DiagnosticsWingetReport -AccountContext (New-TestAccountContext))
 
-        Should -Invoke Invoke-WingetProcess -Times 2 -Exactly
+        Should -Invoke Invoke-WingetProcess -Times 3 -Exactly
         Should -Invoke Invoke-WingetProcess -Times 1 -Exactly -ParameterFilter {
             ($ArgumentList -join ' ') -eq '--version' -and $TimeoutSeconds -eq (Get-ProcessTimeoutSeconds -Operation WingetVersion) -and $Echo -eq 'None' -and $LogDirectory -eq '' -and $WingetPath -eq 'winget'
         }
@@ -440,6 +443,28 @@ Describe 'winget in the bundle (Get-DiagnosticsWingetReport)' {
         $lines | Should -Contain 'winget --version: exit 0x00000000 (0), 0 seconds'
         $lines | Should -Contain '  v1.26.510'
         $lines | Should -Contain '  Windows: Windows.Desktop v10.0.26100.4061'
+    }
+
+    # wgt-gq8.63: `winget source update` exits 0 when it fails, so the bundle records whether winget
+    # can open the source, as Initialize-Winget checks it.
+    It 'Records whether winget can open the winget source, as the installer checks it' {
+        $lines = @(Get-DiagnosticsWingetReport -AccountContext (New-TestAccountContext))
+
+        Should -Invoke Invoke-WingetProcess -Times 1 -Exactly -ParameterFilter {
+            ($ArgumentList -join ' ') -eq 'search --exact --id Microsoft.PowerShell --source winget --accept-source-agreements --disable-interactivity' -and
+            $TimeoutSeconds -eq (Get-ProcessTimeoutSeconds -Operation WingetSourceOpen) -and $Echo -eq 'None' -and $LogDirectory -eq '' -and $WingetPath -eq 'winget'
+        }
+        $lines | Should -Contain 'Winget source: opens'
+        $lines | Should -Contain 'winget search --exact --id Microsoft.PowerShell --source winget --accept-source-agreements --disable-interactivity: exit 0x00000000 (0), 0 seconds'
+    }
+
+    It 'Says the winget source cannot be opened, with the code, when it answers 0x8A15000F' {
+        Mock Invoke-WingetProcess { New-TestProcessResult -ExitCode -1978335217 -Output @('0x8a15000f : Data required by the source is missing') } -ParameterFilter { $ArgumentList[0] -eq 'search' }
+
+        $lines = @(Get-DiagnosticsWingetReport -AccountContext (New-TestAccountContext))
+
+        $lines | Should -Contain 'Winget source: CANNOT BE OPENED (0x8A15000F SOURCE_DATA_MISSING)'
+        $lines | Should -Contain '  0x8a15000f : Data required by the source is missing'
     }
 
     It 'Reports a winget that cannot be started instead of failing' {
@@ -467,7 +492,7 @@ Describe 'winget in the bundle (Get-DiagnosticsWingetReport)' {
 
         $lines = @(Get-DiagnosticsWingetReport -AccountContext (New-TestAccountContext -System))
 
-        Should -Invoke Invoke-WingetProcess -Times 2 -Exactly -ParameterFilter { $WingetPath -like '*\Microsoft.DesktopAppInstaller_1.26.510.0_x64__8wekyb3d8bbwe\winget.exe' }
+        Should -Invoke Invoke-WingetProcess -Times 3 -Exactly -ParameterFilter { $WingetPath -like '*\Microsoft.DesktopAppInstaller_1.26.510.0_x64__8wekyb3d8bbwe\winget.exe' }
         $lines[0] | Should -Match '^winget\.exe for this PC \(as SYSTEM\): '
     }
 
@@ -505,7 +530,8 @@ Describe 'AppX packages in the bundle (Get-DiagnosticsAppxReport)' {
         $call.Arguments | Should -Contain '-NonInteractive'
         $call.Timeout | Should -Be 120
         $call.Echo | Should -Be 'None'
-        $call.Script | Should -Match ([regex]::Escape("@('Microsoft.DesktopAppInstaller', 'Microsoft.WindowsAppRuntime.*')"))
+        # Microsoft.Winget.Source: winget deploys it for each account (wgt-gq8.63).
+        $call.Script | Should -Match ([regex]::Escape("@('Microsoft.DesktopAppInstaller', 'Microsoft.Winget.Source', 'Microsoft.WindowsAppRuntime.*')"))
         $call.Script | Should -Match 'Get-AppxPackage -AllUsers -Name \$name'
         $call.Script | Should -Match 'PackageUserInformation'
         $call.Script | Should -Match 'Get-AppxProvisionedPackage -Online'

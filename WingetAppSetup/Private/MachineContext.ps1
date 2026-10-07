@@ -8,17 +8,26 @@
 
 <#
 .SYNOPSIS
-    Lists the App Installer (Microsoft.DesktopAppInstaller) packages installed for any account.
+    Lists the packages of one name installed for any account, or only staged on the machine.
 .DESCRIPTION
-    A query seam for Get-MachineWingetCandidate. `Get-AppxPackage -AllUsers` needs administrator
-    rights and also lists a package only staged on the machine. Under PowerShell 7 it runs in
-    Windows PowerShell 5.1, where the Appx module always loads. Throws when the query fails.
+    `Get-AppxPackage -AllUsers` needs administrator rights and also lists a package only staged on
+    the machine. Under PowerShell 7 it runs in Windows PowerShell 5.1, where the Appx module always
+    loads. Throws when the query fails.
+.PARAMETER Name
+    The package name, e.g. Microsoft.DesktopAppInstaller. It goes into a command, so only
+    package-name characters are accepted.
 .OUTPUTS
     [pscustomobject[]] with Version ([version]), Architecture ([string], e.g. 'X64'), Status
     ([string], e.g. 'Ok') and InstallLocation ([string]).
 #>
-function Get-DesktopAppInstallerPackageInfo {
-    $query = "Get-AppxPackage -AllUsers -Name 'Microsoft.DesktopAppInstaller' -ErrorAction Stop | ForEach-Object { '{0}|{1}|{2}|{3}' -f `$_.Version, `$_.Architecture, `$_.Status, `$_.InstallLocation }"
+function Get-AllUsersAppxPackageInfo {
+    param (
+        [Parameter(Mandatory = $true)]
+        [ValidatePattern('^[A-Za-z0-9.-]+\z')]
+        [string]$Name
+    )
+
+    $query = "Get-AppxPackage -AllUsers -Name '$Name' -ErrorAction Stop | ForEach-Object { '{0}|{1}|{2}|{3}' -f `$_.Version, `$_.Architecture, `$_.Status, `$_.InstallLocation }"
     if ($PSVersionTable.PSEdition -eq 'Core') {
         $lines = @(& powershell.exe -NoProfile -ExecutionPolicy Bypass -Command $query)
         if ($LASTEXITCODE -ne 0) {
@@ -26,7 +35,7 @@ function Get-DesktopAppInstallerPackageInfo {
         }
     }
     else {
-        $lines = @(Get-AppxPackage -AllUsers -Name 'Microsoft.DesktopAppInstaller' -ErrorAction Stop |
+        $lines = @(Get-AppxPackage -AllUsers -Name $Name -ErrorAction Stop |
                 ForEach-Object { '{0}|{1}|{2}|{3}' -f $_.Version, $_.Architecture, $_.Status, $_.InstallLocation })
     }
 
@@ -42,6 +51,34 @@ function Get-DesktopAppInstallerPackageInfo {
             }
         }
     }
+}
+
+<#
+.SYNOPSIS
+    Lists the App Installer (Microsoft.DesktopAppInstaller) packages installed for any account.
+.DESCRIPTION
+    A query seam for Get-MachineWingetCandidate and the App Installer registration
+    (Get-AllUsersAppxPackageInfo). Throws when the query fails.
+.OUTPUTS
+    [pscustomobject[]] as Get-AllUsersAppxPackageInfo.
+#>
+function Get-DesktopAppInstallerPackageInfo {
+    Get-AllUsersAppxPackageInfo -Name 'Microsoft.DesktopAppInstaller'
+}
+
+<#
+.SYNOPSIS
+    Lists the winget source packages (Microsoft.Winget.Source) installed for any account, or only
+    staged on the machine.
+.DESCRIPTION
+    A query seam for Register-WingetSourcePackage: one listed here can be registered for another
+    account by family name, with no download (Get-AllUsersAppxPackageInfo). Throws when the query
+    fails.
+.OUTPUTS
+    [pscustomobject[]] as Get-AllUsersAppxPackageInfo.
+#>
+function Get-WingetSourcePackageInfo {
+    Get-AllUsersAppxPackageInfo -Name 'Microsoft.Winget.Source'
 }
 
 <#

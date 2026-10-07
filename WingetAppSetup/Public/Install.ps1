@@ -256,8 +256,8 @@ function Invoke-WingetInstall {
     }
 
     # Make winget usable for this account (Initialize-Winget); a real run stops with 2 when it cannot
-    # be started or Group Policy turns it off. A dry run only probes and carries on (P2-16), and skips
-    # it when the pre-flight already reported the policy block.
+    # be started, cannot open its source, or Group Policy turns it off. A dry run only probes and
+    # carries on (P2-16), and skips it when the pre-flight already reported the policy block.
     if ($preflight.WingetPolicyBlocked) {
         $winget = [pscustomobject]@{ Ready = $false; Diagnosis = 'PolicyBlocked' }
     }
@@ -270,7 +270,13 @@ function Invoke-WingetInstall {
     }
     $wingetAvailable = [bool]$winget.Ready
     if (-not $wingetAvailable -and -not $WhatIf) {
-        Write-ErrorMessage 'Winget is required for this script. Exiting.'
+        if ($winget.Diagnosis -eq 'SourceUnusable') {
+            # Before any app or Winget-AutoUpdate work: every install would fail the same way.
+            Write-ErrorMessage 'Nothing was installed and Winget-AutoUpdate was not set up: winget cannot open its source for this account (see above). Exiting.'
+        }
+        else {
+            Write-ErrorMessage 'Winget is required for this script. Exiting.'
+        }
         Clear-TightVncSecret
         return 2
     }
@@ -340,8 +346,8 @@ function Invoke-WingetInstall {
     $notAttemptedApps = @()
 
     # No separate source-trust pass here: only the winget community source is used (every install
-    # forces --source winget), and Initialize-Winget above already updated it, and repaired it if
-    # needed (issues #172, #177).
+    # forces --source winget), and Initialize-Winget above already updated it, checked that it
+    # opens, and repaired it if needed (issues #172, #177).
 
     # Run-level circuit breaker (P2-8, P2-10): once winget cannot be started, every remaining app
     # fails at once with one reason and the retry pass is skipped.

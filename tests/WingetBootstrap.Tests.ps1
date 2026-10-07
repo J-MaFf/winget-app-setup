@@ -254,6 +254,17 @@ Describe 'Invoke-AppxRegistration (review findings P3-27, P3-29)' {
         }
     }
 
+    It 'Installs a package file, keeping an apostrophe in its path inside the quoted literal (wgt-gq8.63)' -Skip:($PSVersionTable.PSEdition -ne 'Core') {
+        Invoke-AppxRegistration -PackagePath "C:\ProgramData\winget-app-setup\wingetsource-1\O'Neil.msix"
+
+        Should -Invoke powershell.exe -Times 1 -Exactly -ParameterFilter {
+            $command = "$($args[-1])"
+            $command.Contains("Add-AppxPackage -Path 'C:\ProgramData\winget-app-setup\wingetsource-1\O''Neil.msix' -ErrorAction Stop") -and
+            $command -notmatch '-Register'
+        }
+        Should -Invoke Add-AppxPackage -Times 0 -Exactly
+    }
+
     It 'Throws the HRESULT Windows PowerShell printed, whatever language the message is in' -Skip:($PSVersionTable.PSEdition -ne 'Core') {
         Mock powershell.exe { $global:LASTEXITCODE = 1; 'ERR|-2147009293|Das Paket hängt von einem Framework ab, das nicht gefunden wurde.' }
 
@@ -496,6 +507,328 @@ Describe 'Invoke-WingetSourceProbe' {
         $result.Succeeded | Should -Be $false
         $result.ExitCode | Should -Be $null
         $result.LaunchError | Should -Be 'winget not found'
+    }
+}
+
+# wgt-gq8.63: `winget source update` exits 0 when its update fails, so the run checks that winget
+# can open the source the way the installs do (`--source winget`).
+Describe 'Test-WingetSourceOpen (wgt-gq8.63)' {
+    BeforeEach {
+        Mock Write-ProcessOutput { }
+    }
+
+    It 'Opens the winget source as the installs do, quietly and under its own time limit' {
+        Mock Invoke-WingetProcess { New-TestProcessResult -ExitCode 0 -Output @('PowerShell Microsoft.PowerShell 7.6.6 winget') }
+
+        $result = Test-WingetSourceOpen
+
+        $result.Opened | Should -Be $true
+        $result.ExitCode | Should -Be 0
+        Should -Invoke Invoke-WingetProcess -Times 1 -Exactly -ParameterFilter {
+            ($ArgumentList -join ' ') -eq 'search --exact --id Microsoft.PowerShell --source winget --accept-source-agreements --disable-interactivity' -and
+            $TimeoutSeconds -eq (Get-ProcessTimeoutSeconds -Operation WingetSourceOpen) -and
+            $Echo -eq 'None'
+        }
+        Should -Invoke Write-ProcessOutput -Times 0 -Exactly
+    }
+
+    It 'Counts 0x8A150014 (nothing found) as opened' {
+        Mock Invoke-WingetProcess { New-TestProcessResult -ExitCode -1978335212 -Output @('No package found matching input criteria.') }
+
+        (Test-WingetSourceOpen).Opened | Should -Be $true
+    }
+
+    It 'Reports 0x8A15000F SOURCE_DATA_MISSING as not opened and echoes what winget said' {
+        Mock Invoke-WingetProcess { New-TestProcessResult -ExitCode -1978335217 -Output @("Failed when opening source(s); try the 'source reset' command if the problem persists.", '0x8a15000f : Data required by the source is missing') }
+
+        $result = Test-WingetSourceOpen
+
+        $result.Opened | Should -Be $false
+        $result.ExitCode | Should -Be -1978335217
+        Should -Invoke Write-ProcessOutput -Times 1 -Exactly -ParameterFilter { ($Line -join ' ') -match '0x8a15000f : Data required by the source is missing' }
+    }
+
+    It 'Has no answer when winget times out or cannot be started' {
+        Mock Invoke-WingetProcess { New-TestProcessResult -TimedOut }
+        $timedOut = Test-WingetSourceOpen
+        $timedOut.Opened | Should -BeNullOrEmpty
+        $timedOut.TimedOut | Should -Be $true
+
+        Mock Invoke-WingetProcess { New-TestProcessResult -LaunchFailed -LaunchErrorCode 2 -LaunchError 'winget not found' }
+        $notStarted = Test-WingetSourceOpen
+        $notStarted.Opened | Should -BeNullOrEmpty
+        $notStarted.LaunchError | Should -Be 'winget not found'
+    }
+}
+
+Describe 'Invoke-WingetSourceCheck (wgt-gq8.63)' {
+    BeforeEach {
+        Mock Invoke-WingetSourceProbe { @{ Succeeded = $true; ExitCode = 0; TimedOut = $false; LaunchError = $null } }
+        Mock Test-WingetSourceOpen { @{ Opened = $true; ExitCode = 0; TimedOut = $false; LaunchError = $null } }
+    }
+
+    It 'Takes the answer of the open, not the update that exited 0' {
+        Mock Test-WingetSourceOpen { @{ Opened = $false; ExitCode = -1978335217; TimedOut = $false; LaunchError = $null } }
+
+        $result = Invoke-WingetSourceCheck
+
+        $result.Succeeded | Should -Be $false
+        $result.ExitCode | Should -Be -1978335217
+        $result.Step | Should -Be 'open'
+    }
+
+    It 'Is fine when the update failed but the source opens' {
+        Mock Invoke-WingetSourceProbe { @{ Succeeded = $false; ExitCode = -2147012889; TimedOut = $false; LaunchError = $null } }
+
+        (Invoke-WingetSourceCheck).Succeeded | Should -Be $true
+    }
+
+    It 'Does not open the source after an update that <Case>' -ForEach @(
+        @{ Case = 'timed out'; Update = @{ Succeeded = $false; ExitCode = $null; TimedOut = $true; LaunchError = $null } }
+        @{ Case = 'could not start'; Update = @{ Succeeded = $false; ExitCode = $null; TimedOut = $false; LaunchError = 'winget not found' } }
+        @{ Case = 'Group Policy blocked'; Update = @{ Succeeded = $false; ExitCode = -1978335174; TimedOut = $false; LaunchError = $null } }
+    ) {
+        $script:update = $Update
+        Mock Invoke-WingetSourceProbe { $script:update }
+
+        $result = Invoke-WingetSourceCheck
+
+        $result.Succeeded | Should -Be $false
+        $result.Step | Should -Be 'update'
+        Should -Invoke Test-WingetSourceOpen -Times 0 -Exactly
+    }
+}
+
+Describe 'Save-WebFileAsNew (wgt-gq8.63)' {
+    BeforeEach {
+        $script:bytes = [byte[]](1, 2, 3, 4, 5)
+        Mock Invoke-WebRequest { [pscustomobject]@{ RawContentStream = [System.IO.MemoryStream]::new($script:bytes) } }
+    }
+
+    It 'Writes what it downloaded into a new file' {
+        $path = Join-Path $TestDrive 'new.msix'
+
+        Save-WebFileAsNew -Uri 'https://cdn.winget.microsoft.com/cache/source2.msix' -Path $path
+
+        [System.IO.File]::ReadAllBytes($path) | Should -Be $script:bytes
+        Should -Invoke Invoke-WebRequest -Times 1 -Exactly -ParameterFilter { $Uri -eq 'https://cdn.winget.microsoft.com/cache/source2.msix' -and $UseBasicParsing -and $TimeoutSec -gt 0 -and -not $OutFile }
+    }
+
+    It 'Never opens a file that is already there for writing' {
+        $path = Join-Path $TestDrive 'planted.msix'
+        Set-Content -LiteralPath $path -Value 'planted' -NoNewline
+
+        { Save-WebFileAsNew -Uri 'https://cdn.winget.microsoft.com/cache/source2.msix' -Path $path } | Should -Throw
+
+        Get-Content -Raw -LiteralPath $path | Should -Be 'planted'
+    }
+}
+
+Describe 'Register-WingetSourcePackage (wgt-gq8.63)' {
+    BeforeEach {
+        Mock Write-Info { }
+        Mock Write-Success { }
+        $script:warnings = @()
+        Mock Write-WarningMessage { $script:warnings += $Message }
+        Mock Get-WingetSourcePackageInfo { }
+        $script:stagingDir = Join-Path $TestDrive ('wingetsource-' + [guid]::NewGuid().ToString('N'))
+        Mock New-WauStagingDirectory { [void](New-Item -ItemType Directory -Path $script:stagingDir); $script:stagingDir }
+        $script:packageBytes = [byte[]](0x50, 0x4B, 0x03, 0x04, 7, 7)
+        $script:downloads = @()
+        Mock Invoke-WebRequest { $script:downloads += $Uri; [pscustomobject]@{ RawContentStream = [System.IO.MemoryStream]::new($script:packageBytes) } }
+        Mock Get-AuthenticodeSignature { [pscustomobject]@{ Status = 'Valid'; SignerCertificate = [pscustomobject]@{ Subject = 'CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US' } } }
+        # Safety net: the package is installed only through Invoke-AppxRegistration.
+        Mock Add-AppxPackage { throw 'must not install a package directly' }
+        $script:registered = @()
+        Mock Invoke-AppxRegistration {
+            $entry = @{ FamilyName = $FamilyName; PackagePath = $PackagePath; Bytes = $null }
+            if ($PackagePath) {
+                $entry.Bytes = [System.IO.File]::ReadAllBytes($PackagePath)
+            }
+            $script:registered += $entry
+        }
+    }
+
+    It 'Registers a copy already on this PC by family name, with no download' {
+        Mock Get-WingetSourcePackageInfo { [pscustomobject]@{ Version = [version]'2026.1006.1845.38'; Architecture = 'Neutral'; Status = 'Ok'; InstallLocation = 'X:\WindowsApps\Microsoft.Winget.Source' } }
+
+        $result = Register-WingetSourcePackage
+
+        $result.Registered | Should -Be $true
+        Should -Invoke Invoke-AppxRegistration -Times 1 -Exactly -ParameterFilter { $FamilyName -eq 'Microsoft.Winget.Source_8wekyb3d8bbwe' }
+        Should -Invoke Invoke-WebRequest -Times 0 -Exactly
+        Should -Invoke New-WauStagingDirectory -Times 0 -Exactly
+    }
+
+    It 'Downloads source2.msix into a new file in a folder only administrators can change, checks its Microsoft signature, installs that file and deletes it' {
+        $result = Register-WingetSourcePackage
+
+        $result.Registered | Should -Be $true
+        $result.Reason | Should -BeNullOrEmpty
+        $script:downloads | Should -Be @('https://cdn.winget.microsoft.com/cache/source2.msix')
+        Should -Invoke New-WauStagingDirectory -Times 1 -Exactly -ParameterFilter { $Prefix -eq 'wingetsource' }
+        Should -Invoke Get-AuthenticodeSignature -Times 1 -Exactly
+        $script:registered.Count | Should -Be 1
+        $script:registered[0].PackagePath | Should -BeLike (Join-Path $script:stagingDir 'source-*.msix')
+        $script:registered[0].Bytes | Should -Be $script:packageBytes
+        Test-Path -LiteralPath $script:stagingDir | Should -Be $false
+    }
+
+    It 'Falls back to the download when registering the copy on this PC fails' {
+        Mock Get-WingetSourcePackageInfo { [pscustomobject]@{ Version = [version]'2026.1006.1845.38'; Architecture = 'Neutral'; Status = 'Ok'; InstallLocation = 'X:\WindowsApps\Microsoft.Winget.Source' } }
+        Mock Invoke-AppxRegistration { throw (New-AppxException -HResult -2147009255) } -ParameterFilter { $FamilyName }
+
+        $result = Register-WingetSourcePackage
+
+        $result.Registered | Should -Be $true
+        $result.ErrorCodes | Should -Be @(-2147009255)
+        $script:registered.Count | Should -Be 1
+        $script:registered[0].PackagePath | Should -Not -BeNullOrEmpty
+    }
+
+    It 'Takes source.msix, as winget does, when source2.msix cannot be downloaded' {
+        Mock Invoke-WebRequest { $script:downloads += $Uri; throw 'Response status code does not indicate success: 404 (Not Found).' } -ParameterFilter { $Uri -like '*source2.msix' }
+
+        $result = Register-WingetSourcePackage
+
+        $result.Registered | Should -Be $true
+        $script:downloads | Should -Be @('https://cdn.winget.microsoft.com/cache/source2.msix', 'https://cdn.winget.microsoft.com/cache/source.msix')
+        $script:registered[0].Bytes | Should -Be $script:packageBytes
+    }
+
+    It 'Registers nothing, and says so, when neither download works' {
+        Mock Invoke-WebRequest { $script:downloads += $Uri; throw 'No such host is known.' }
+
+        $result = Register-WingetSourcePackage
+
+        $result.Registered | Should -Be $false
+        $result.Reason | Should -Be 'it could not be downloaded from https://cdn.winget.microsoft.com/cache'
+        $script:downloads.Count | Should -Be 2
+        Should -Invoke Invoke-AppxRegistration -Times 0 -Exactly
+        Test-Path -LiteralPath $script:stagingDir | Should -Be $false
+    }
+
+    It 'Installs nothing when the download is <Case>' -ForEach @(
+        @{ Case = 'signed by someone else'; Status = 'Valid'; Subject = 'CN=Contoso Ltd, O=Contoso Ltd'; Detail = 'signature status: Valid; signer: CN=Contoso Ltd, O=Contoso Ltd' }
+        @{ Case = 'not signed'; Status = 'NotSigned'; Subject = $null; Detail = 'signature status: NotSigned; signer: none' }
+        @{ Case = 'signed but tampered with'; Status = 'HashMismatch'; Subject = 'CN=Microsoft Corporation, O=Microsoft Corporation'; Detail = 'signature status: HashMismatch' }
+    ) {
+        $script:status = $Status
+        $script:subject = $Subject
+        Mock Get-AuthenticodeSignature {
+            $certificate = $null
+            if ($script:subject) { $certificate = [pscustomobject]@{ Subject = $script:subject } }
+            [pscustomobject]@{ Status = $script:status; SignerCertificate = $certificate }
+        }
+
+        $result = Register-WingetSourcePackage
+
+        $result.Registered | Should -Be $false
+        $result.Reason | Should -BeLike "*failed its signature check: it is not signed by Microsoft Corporation ($Detail*"
+        Should -Invoke Invoke-AppxRegistration -Times 0 -Exactly
+        Should -Invoke Add-AppxPackage -Times 0 -Exactly
+        Test-Path -LiteralPath $script:stagingDir | Should -Be $false
+    }
+
+    It 'Returns the AppX code Add-AppxPackage failed with, and deletes the download' {
+        Mock Invoke-AppxRegistration { throw (New-AppxException -HResult -2147009255 -Message 'Deployment failed with HRESULT: 0x80073D19, An error occurred because a user was logged off.') }
+
+        $result = Register-WingetSourcePackage
+
+        $result.Registered | Should -Be $false
+        $result.ErrorCodes | Should -Be @(-2147009255)
+        $result.Reason | Should -BeLike 'registering it failed: Deployment failed with HRESULT: 0x80073D19*'
+        Test-Path -LiteralPath $script:stagingDir | Should -Be $false
+    }
+
+    It 'Says how to reset the folder when its access list cannot be set' {
+        Mock New-WauStagingDirectory {
+            $exception = [System.UnauthorizedAccessException]::new('icacls failed')
+            throw [System.Management.Automation.ErrorRecord]::new($exception, 'RestrictedDirectoryAclFailed', [System.Management.Automation.ErrorCategory]::SecurityError, $null)
+        }
+        Mock Get-RestrictedDirectoryResetHint { ' HINT' }
+
+        $result = Register-WingetSourcePackage
+
+        $result.Registered | Should -Be $false
+        $result.Reason | Should -Be 'setting up its download folder failed: icacls failed HINT'
+        Should -Invoke Invoke-WebRequest -Times 0 -Exactly
+    }
+}
+
+Describe 'Get-WingetClientRepairVersion (wgt-gq8.63)' {
+    It 'Returns the version of the module Repair-WinGetPackageManager comes from' {
+        Mock Get-Command { [pscustomobject]@{ Name = 'Repair-WinGetPackageManager'; Version = [version]'1.28.190'; Module = $null } } -ParameterFilter { $Name -eq 'Repair-WinGetPackageManager' }
+
+        Get-WingetClientRepairVersion | Should -Be ([version]'1.28.190')
+    }
+
+    It 'Returns nothing when the cmdlet is not there' {
+        Mock Get-Command { $null } -ParameterFilter { $Name -eq 'Repair-WinGetPackageManager' }
+
+        Get-WingetClientRepairVersion | Should -BeNullOrEmpty
+    }
+}
+
+Describe 'Invoke-NextWingetSourceFix (wgt-gq8.63)' {
+    BeforeEach {
+        Mock Register-WingetSourcePackage { [pscustomobject]@{ Registered = $false; ErrorCodes = @(-2147009255); Reason = 'registering it failed' } }
+        Mock Invoke-WingetPackageManagerRepair { [pscustomobject]@{ Available = $true; Succeeded = $false; ErrorCodes = @() } }
+        Mock Get-WingetClientRepairVersion { [version]'1.29.380' }
+        Mock Reset-WingetSource { $true }
+        $script:state = @{ ErrorCodes = @() }
+    }
+
+    It 'Registers the source package for 0x8A15000F and asks for a check when that worked' {
+        Mock Register-WingetSourcePackage { [pscustomobject]@{ Registered = $true; ErrorCodes = @(); Reason = $null } }
+
+        Invoke-NextWingetSourceFix -State $script:state -ExitCode -1978335217 | Should -Be $true
+
+        Should -Invoke Invoke-WingetPackageManagerRepair -Times 0 -Exactly
+        Should -Invoke Reset-WingetSource -Times 0 -Exactly
+    }
+
+    It 'Goes on to Repair-WinGetPackageManager, told the codes the registration saw, then has nothing left' {
+        Invoke-NextWingetSourceFix -State $script:state -ExitCode -1978335217 | Should -Be $true
+        Invoke-NextWingetSourceFix -State $script:state -ExitCode -1978335217 | Should -Be $false
+
+        Should -Invoke Register-WingetSourcePackage -Times 1 -Exactly
+        Should -Invoke Invoke-WingetPackageManagerRepair -Times 1 -Exactly -ParameterFilter { @($KnownErrorCodes) -contains -2147009255 -and -not $AllUsersFirst }
+        Should -Invoke Reset-WingetSource -Times 0 -Exactly
+        $script:state.ErrorCodes | Should -Contain -2147009255
+    }
+
+    It 'Skips Repair-WinGetPackageManager from a module older than 1.28.190, which never checks the source' {
+        Mock Get-WingetClientRepairVersion { [version]'1.12.470' }
+
+        Invoke-NextWingetSourceFix -State $script:state -ExitCode -1978335217 | Should -Be $false
+
+        Should -Invoke Invoke-WingetPackageManagerRepair -Times 0 -Exactly
+    }
+
+    It 'Runs no fix at all for SYSTEM' {
+        Invoke-NextWingetSourceFix -State $script:state -ExitCode -1978335217 -IsSystem | Should -Be $false
+
+        Should -Invoke Register-WingetSourcePackage -Times 0 -Exactly
+        Should -Invoke Invoke-WingetPackageManagerRepair -Times 0 -Exactly
+        Should -Invoke Reset-WingetSource -Times 0 -Exactly
+    }
+
+    It 'Resets a corrupted or unconfigured source once, for SYSTEM too' {
+        Invoke-NextWingetSourceFix -State $script:state -ExitCode -1978335169 -IsSystem | Should -Be $true
+        Invoke-NextWingetSourceFix -State $script:state -ExitCode -1978335214 -IsSystem | Should -Be $false
+
+        Should -Invoke Reset-WingetSource -Times 1 -Exactly
+        Should -Invoke Register-WingetSourcePackage -Times 0 -Exactly
+    }
+}
+
+Describe 'Get-WingetSetupAdvice for a source blocked by 0x80073D19 (wgt-gq8.63)' {
+    It 'Advises signing in or the SYSTEM machine phase, never winget source update, which exits 0 when it fails' {
+        $advice = Get-WingetSetupAdvice -State @{ ErrorCodes = @() } -Account 'CONTOSO\admin-tech' -Source -SourceExitCode -2147009255
+
+        $advice | Should -Be "Fix: sign in to Windows as 'CONTOSO\admin-tech' once (that sets winget up for the account), or run the machine phase as SYSTEM with rmm/Invoke-WingetAppSetup.ps1, then re-run the installer."
+        $advice | Should -Not -Match 'source update'
     }
 }
 

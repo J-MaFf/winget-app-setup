@@ -1138,11 +1138,13 @@ function Format-DiagnosticsProcessResult {
 
 <#
 .SYNOPSIS
-    Builds winget.txt: `winget --version` and `winget --info`, each with a time limit.
+    Builds winget.txt: `winget --version`, `winget --info` and whether winget can open the winget
+    source, each with a time limit.
 .DESCRIPTION
-    Neither changes anything or needs the network. As SYSTEM the first machine-wide winget.exe runs.
-    A winget that cannot be found or started is reported, not fatal: that is often why the bundle
-    is made.
+    The first two change nothing and need no network. The source check is Initialize-Winget's
+    (Get-WingetSourceOpenArgument): it needs the network, and winget downloads the source first when
+    it is missing. As SYSTEM the first machine-wide winget.exe runs. A winget that cannot be found
+    or started is reported, not fatal: that is often why the bundle is made.
 .PARAMETER AccountContext
     Get-InstallAccountContext's result, or $null.
 .OUTPUTS
@@ -1183,6 +1185,29 @@ function Get-DiagnosticsWingetReport {
         }
         $lines += ''
     }
+
+    # Whether winget can open the source the installs use: `winget source update` exits 0 even when
+    # its update fails, so only opening it tells (wgt-gq8.63).
+    $openArguments = @(Get-WingetSourceOpenArgument)
+    $label = 'winget ' + ($openArguments -join ' ')
+    try {
+        $result = Invoke-WingetProcess -ArgumentList $openArguments -TimeoutSeconds (Get-ProcessTimeoutSeconds -Operation WingetSourceOpen) -WingetPath $wingetPath -Echo None -LogDirectory ''
+        $verdict = 'Winget source: not checked (winget did not answer)'
+        if (-not $result.LaunchFailed -and -not $result.TimedOut) {
+            if (Test-WingetSourceOpenExitCode -ExitCode $result.ExitCode) {
+                $verdict = 'Winget source: opens'
+            }
+            else {
+                $verdict = 'Winget source: CANNOT BE OPENED ({0})' -f (Format-WingetExitCode -ExitCode $result.ExitCode)
+            }
+        }
+        $lines += $verdict
+        $lines += @(Format-DiagnosticsProcessResult -Label $label -Result $result)
+    }
+    catch {
+        $lines += ('{0}: not run: {1}' -f $label, $_.Exception.Message)
+    }
+    $lines += ''
     return $lines
 }
 
@@ -1238,18 +1263,22 @@ function Invoke-DiagnosticsWindowsPowerShell {
 
 <#
 .SYNOPSIS
-    Builds appx.txt: App Installer and the Windows App Runtime packages, registered and provisioned.
+    Builds appx.txt: App Installer, the winget source package and the Windows App Runtime packages,
+    registered and provisioned.
 .DESCRIPTION
     In Windows PowerShell: Get-AppxPackage -AllUsers (with each account's install state; without
-    administrator rights, this account's packages) and Get-AppxProvisionedPackage -Online for
-    Microsoft.DesktopAppInstaller and Microsoft.WindowsAppRuntime.*; under PowerShell 7 also Windows
-    PowerShell's execution policy, which decides whether the elevated relaunch can run.
+    administrator rights, this account's packages) for Microsoft.DesktopAppInstaller,
+    Microsoft.Winget.Source (winget deploys it for each account; an account without it gets
+    0x8A15000F SOURCE_DATA_MISSING) and Microsoft.WindowsAppRuntime.*, and
+    Get-AppxProvisionedPackage -Online for App Installer and the Windows App Runtime; under
+    PowerShell 7 also Windows PowerShell's execution policy, which decides whether the elevated
+    relaunch can run.
 .OUTPUTS
     [string[]]
 #>
 function Get-DiagnosticsAppxReport {
     $query = @'
-$names = @('Microsoft.DesktopAppInstaller', 'Microsoft.WindowsAppRuntime.*')
+$names = @('Microsoft.DesktopAppInstaller', 'Microsoft.Winget.Source', 'Microsoft.WindowsAppRuntime.*')
 function Write-DiagnosticsPackage($package) {
     '{0} {1} {2} Status={3} Framework={4}' -f $package.Name, $package.Version, $package.Architecture, $package.Status, $package.IsFramework
     '  PackageFullName: {0}' -f $package.PackageFullName

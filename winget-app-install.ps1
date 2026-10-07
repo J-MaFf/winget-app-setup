@@ -106,12 +106,12 @@ param (
 # the function source under WingetAppSetup/Public and WingetAppSetup/Private, or the entry block in
 # build/fragments/tail.ps1, then re-run the build to regenerate this file.
 # See readme.md ("Project layout") for details.
-# Build id: 1.0.0+48639b25 (module version + SHA256 fragment of this whole script; issue #189).
+# Build id: 1.0.0+e1a34a75 (module version + SHA256 fragment of this whole script; issue #189).
 # ------------------------------------------------------------------------------------------------
 
 # Content-derived build identity, logged at startup so a transcript from a remote machine
 # identifies exactly which installer build produced it (issue #189).
-$script:InstallerBuildId = '1.0.0+48639b25'
+$script:InstallerBuildId = '1.0.0+e1a34a75'
 
 # ------------------------------------------------Functions------------------------------------------------
 
@@ -1750,6 +1750,27 @@ function Get-DiagnosticsWingetReport {
         }
         $lines += ''
     }
+
+    $openArguments = @(Get-WingetSourceOpenArgument)
+    $label = 'winget ' + ($openArguments -join ' ')
+    try {
+        $result = Invoke-WingetProcess -ArgumentList $openArguments -TimeoutSeconds (Get-ProcessTimeoutSeconds -Operation WingetSourceOpen) -WingetPath $wingetPath -Echo None -LogDirectory ''
+        $verdict = 'Winget source: not checked (winget did not answer)'
+        if (-not $result.LaunchFailed -and -not $result.TimedOut) {
+            if (Test-WingetSourceOpenExitCode -ExitCode $result.ExitCode) {
+                $verdict = 'Winget source: opens'
+            }
+            else {
+                $verdict = 'Winget source: CANNOT BE OPENED ({0})' -f (Format-WingetExitCode -ExitCode $result.ExitCode)
+            }
+        }
+        $lines += $verdict
+        $lines += @(Format-DiagnosticsProcessResult -Label $label -Result $result)
+    }
+    catch {
+        $lines += ('{0}: not run: {1}' -f $label, $_.Exception.Message)
+    }
+    $lines += ''
     return $lines
 }
 
@@ -1779,7 +1800,7 @@ function Invoke-DiagnosticsWindowsPowerShell {
 
 function Get-DiagnosticsAppxReport {
     $query = @'
-$names = @('Microsoft.DesktopAppInstaller', 'Microsoft.WindowsAppRuntime.*')
+$names = @('Microsoft.DesktopAppInstaller', 'Microsoft.Winget.Source', 'Microsoft.WindowsAppRuntime.*')
 function Write-DiagnosticsPackage($package) {
     '{0} {1} {2} Status={3} Framework={4}' -f $package.Name, $package.Version, $package.Architecture, $package.Status, $package.IsFramework
     '  PackageFullName: {0}' -f $package.PackageFullName
@@ -2727,7 +2748,7 @@ function Write-InstallerExitNotice {
     if (-not $why) {
         switch ($Code) {
             1 { $why = 'a pre-flight check failed (see above)' }
-            2 { $why = 'winget is not available, could not be started, or is turned off by Group Policy (see above)' }
+            2 { $why = 'winget is not available, could not be started, cannot open its source, or is turned off by Group Policy (see above)' }
             3 { $why = 'the app catalog failed validation (see above)' }
             4 { $why = 'administrator rights are required, and this run was not elevated, or Group Policy''s execution policy keeps the elevated window from running the installer (see above)' }
             5 { $why = 'the run was aborted before it finished (see above)' }
@@ -4114,8 +4135,14 @@ function Start-InstallerTranscript {
 }
 
 # --- MachineContext ---
-function Get-DesktopAppInstallerPackageInfo {
-    $query = "Get-AppxPackage -AllUsers -Name 'Microsoft.DesktopAppInstaller' -ErrorAction Stop | ForEach-Object { '{0}|{1}|{2}|{3}' -f `$_.Version, `$_.Architecture, `$_.Status, `$_.InstallLocation }"
+function Get-AllUsersAppxPackageInfo {
+    param (
+        [Parameter(Mandatory = $true)]
+        [ValidatePattern('^[A-Za-z0-9.-]+\z')]
+        [string]$Name
+    )
+
+    $query = "Get-AppxPackage -AllUsers -Name '$Name' -ErrorAction Stop | ForEach-Object { '{0}|{1}|{2}|{3}' -f `$_.Version, `$_.Architecture, `$_.Status, `$_.InstallLocation }"
     if ($PSVersionTable.PSEdition -eq 'Core') {
         $lines = @(& powershell.exe -NoProfile -ExecutionPolicy Bypass -Command $query)
         if ($LASTEXITCODE -ne 0) {
@@ -4123,7 +4150,7 @@ function Get-DesktopAppInstallerPackageInfo {
         }
     }
     else {
-        $lines = @(Get-AppxPackage -AllUsers -Name 'Microsoft.DesktopAppInstaller' -ErrorAction Stop |
+        $lines = @(Get-AppxPackage -AllUsers -Name $Name -ErrorAction Stop |
                 ForEach-Object { '{0}|{1}|{2}|{3}' -f $_.Version, $_.Architecture, $_.Status, $_.InstallLocation })
     }
 
@@ -4139,6 +4166,14 @@ function Get-DesktopAppInstallerPackageInfo {
             }
         }
     }
+}
+
+function Get-DesktopAppInstallerPackageInfo {
+    Get-AllUsersAppxPackageInfo -Name 'Microsoft.DesktopAppInstaller'
+}
+
+function Get-WingetSourcePackageInfo {
+    Get-AllUsersAppxPackageInfo -Name 'Microsoft.Winget.Source'
 }
 
 function Get-WindowsAppsDirectory {
@@ -4949,7 +4984,7 @@ function Invoke-PowerShell7Bootstrap {
 function Get-ProcessTimeoutSeconds {
     param (
         [Parameter(Mandatory = $true)]
-        [ValidateSet('WingetInstall', 'WingetDownload', 'WingetUninstall', 'WingetListCheck', 'WingetVersion', 'WingetSourceUpdate', 'WingetSourceReset', 'WingetClientProbe', 'WingetClientVersion', 'WingetClientListCheck', 'MsiExec', 'AppxProvisioning', 'WebDownload', 'WebDownloadStall', 'WebLookup')]
+        [ValidateSet('WingetInstall', 'WingetDownload', 'WingetUninstall', 'WingetListCheck', 'WingetVersion', 'WingetSourceUpdate', 'WingetSourceOpen', 'WingetSourceReset', 'WingetClientProbe', 'WingetClientVersion', 'WingetClientListCheck', 'MsiExec', 'AppxProvisioning', 'WebDownload', 'WebDownloadStall', 'WebLookup')]
         [string]$Operation
     )
 
@@ -4960,6 +4995,7 @@ function Get-ProcessTimeoutSeconds {
         'WingetListCheck' { return 15 }
         'WingetVersion' { return 30 }
         'WingetSourceUpdate' { return 120 }
+        'WingetSourceOpen' { return 120 }
         'WingetSourceReset' { return 300 }
         'WingetClientProbe' { return 180 }
         'WingetClientVersion' { return 60 }
@@ -8871,12 +8907,19 @@ function Invoke-AppxRegistration {
         [string]$FamilyName,
 
         [Parameter(Mandatory = $true, ParameterSetName = 'Manifest')]
-        [string]$ManifestPath
+        [string]$ManifestPath,
+
+        [Parameter(Mandatory = $true, ParameterSetName = 'Package')]
+        [string]$PackagePath
     )
 
     if ($PSCmdlet.ParameterSetName -eq 'FamilyName') {
         $parameters = @{ RegisterByFamilyName = $true; MainPackage = $FamilyName }
         $arguments = "-RegisterByFamilyName -MainPackage '{0}'" -f $FamilyName.Replace("'", "''")
+    }
+    elseif ($PSCmdlet.ParameterSetName -eq 'Package') {
+        $parameters = @{ Path = $PackagePath }
+        $arguments = "-Path '{0}'" -f $PackagePath.Replace("'", "''")
     }
     else {
         $parameters = @{ Path = $ManifestPath; Register = $true; DisableDevelopmentMode = $true }
@@ -9026,6 +9069,261 @@ function Invoke-NextWingetAccountFix {
     return $false
 }
 
+function Get-WingetSourcePackageDefinition {
+    [pscustomobject]@{
+        Name             = 'Microsoft.Winget.Source'
+        FamilyName       = 'Microsoft.Winget.Source_8wekyb3d8bbwe'
+        Urls             = @('https://cdn.winget.microsoft.com/cache/source2.msix', 'https://cdn.winget.microsoft.com/cache/source.msix')
+        SignerCommonName = 'Microsoft Corporation'
+    }
+}
+
+function Save-WebFileAsNew {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$Uri,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    $ProgressPreference = 'SilentlyContinue'
+    if ($PSVersionTable.PSEdition -ne 'Core') {
+        try {
+            [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor [System.Net.SecurityProtocolType]::Tls12
+        }
+        catch {
+        }
+    }
+    $timeouts = Get-WebDownloadTimeoutParameters
+    $response = Invoke-WebRequest @timeouts -Uri $Uri -UseBasicParsing -ErrorAction Stop
+    $content = $response.RawContentStream
+    if ($null -eq $content) {
+        throw "the response from $Uri has no content"
+    }
+    $file = [System.IO.File]::Open($Path, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+    try {
+        $content.Position = 0
+        $content.CopyTo($file)
+    }
+    finally {
+        $file.Dispose()
+    }
+}
+
+function Register-WingetSourcePackage {
+    $definition = Get-WingetSourcePackageDefinition
+    $codes = @()
+    $reason = $null
+
+    $staged = @()
+    try {
+        $staged = @(Get-WingetSourcePackageInfo)
+    }
+    catch {
+        Write-WarningMessage "Could not list the winget source packages on this PC: $_"
+    }
+    if ($staged.Count -gt 0) {
+        Write-Info "Registering the winget source package already on this PC ($($definition.Name)) for this account..."
+        try {
+            Invoke-AppxRegistration -FamilyName $definition.FamilyName -ErrorAction Stop
+            Write-Success 'The winget source package is registered for this account (by family name).'
+            return [pscustomobject]@{ Registered = $true; ErrorCodes = $codes; Reason = $null }
+        }
+        catch {
+            $code = Get-AppxErrorCode -ErrorRecord $_
+            if ($null -ne $code) { $codes += $code }
+            Write-WarningMessage "Registering the winget source package by family name failed: $_"
+        }
+    }
+
+    $stagingDir = $null
+    $stream = $null
+    $registered = $false
+    $stage = 'setting up its download folder'
+    try {
+        $stagingDir = New-WauStagingDirectory -Prefix 'wingetsource'
+        $packagePath = Join-Path $stagingDir ('source-{0}.msix' -f [guid]::NewGuid().ToString('N'))
+        $downloadedFrom = $null
+        foreach ($url in @($definition.Urls)) {
+            $stage = "downloading $url"
+            Write-Info "Downloading the winget source package from $url..."
+            try {
+                Save-WebFileAsNew -Uri $url -Path $packagePath
+                $downloadedFrom = $url
+                break
+            }
+            catch {
+                Write-WarningMessage "Could not download $url ($($_.Exception.Message))."
+                Remove-Item -LiteralPath $packagePath -Force -ErrorAction SilentlyContinue
+            }
+        }
+        if (-not $downloadedFrom) {
+            $reason = 'it could not be downloaded from https://cdn.winget.microsoft.com/cache'
+        }
+        else {
+            $stage = 'checking its signature'
+            $stream = Open-ReadLockedFile -Path $packagePath
+            $signature = Test-AuthenticodeSigner -Path $packagePath -SignerCommonName $definition.SignerCommonName
+            if (-not $signature.Valid) {
+                $reason = "the package downloaded from $downloadedFrom failed its signature check: $($signature.Detail)"
+            }
+            else {
+                $stage = 'registering it'
+                Write-Info "Verified its signature ($($signature.Detail)); registering it for this account..."
+                Invoke-AppxRegistration -PackagePath $packagePath -ErrorAction Stop
+                Write-Success "The winget source package is registered for this account (from $downloadedFrom)."
+                $registered = $true
+            }
+        }
+    }
+    catch {
+        $code = Get-AppxErrorCode -ErrorRecord $_
+        if ($null -ne $code) { $codes += $code }
+        $reason = "$stage failed: $("$($_.Exception.Message)".Trim().TrimEnd('.'))"
+        if ($_.FullyQualifiedErrorId -eq 'RestrictedDirectoryAclFailed') {
+            $reason += (Get-RestrictedDirectoryResetHint -Path (Join-Path $env:ProgramData 'winget-app-setup'))
+        }
+    }
+    finally {
+        if ($stream) {
+            $stream.Dispose()
+        }
+        if ($stagingDir) {
+            Remove-Item -LiteralPath $stagingDir -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    if (-not $registered -and $reason) {
+        $reason = "$reason".Trim().TrimEnd('.')
+        Write-WarningMessage "The winget source package could not be registered for this account: $reason."
+    }
+    return [pscustomobject]@{ Registered = $registered; ErrorCodes = $codes; Reason = $reason }
+}
+
+function Get-WingetClientRepairVersion {
+    $command = Get-Command -Name 'Repair-WinGetPackageManager' -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $command) {
+        return $null
+    }
+    $version = $command.Version
+    if (-not $version -and $command.Module) {
+        $version = $command.Module.Version
+    }
+    if (-not $version) {
+        return $null
+    }
+    return [version]$version
+}
+
+function Invoke-NextWingetSourceFix {
+    param (
+        [Parameter(Mandatory = $true)]
+        [hashtable]$State,
+
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [Nullable[int]]$ExitCode,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$IsSystem
+    )
+
+    if ($ExitCode -eq -1978335217) {
+        if ($IsSystem) {
+            return $false
+        }
+        if (-not $State.ContainsKey('SourcePackage')) {
+            $State.SourcePackage = Register-WingetSourcePackage
+            $State.ErrorCodes += @($State.SourcePackage.ErrorCodes)
+            if ($State.SourcePackage.Registered) {
+                return $true
+            }
+        }
+        if (-not $State.ContainsKey('Repair')) {
+            $moduleVersion = Get-WingetClientRepairVersion
+            if ($moduleVersion -and $moduleVersion -ge [version]'1.28.190') {
+                $State.Repair = Invoke-WingetPackageManagerRepair -KnownErrorCodes @($State.ErrorCodes)
+                $State.ErrorCodes += @($State.Repair.ErrorCodes)
+                return [bool]$State.Repair.Available
+            }
+        }
+        return $false
+    }
+    if (-not $State.ContainsKey('SourceReset')) {
+        $State.SourceReset = Reset-WingetSource
+        return $true
+    }
+    return $false
+}
+
+function Get-WingetLogDirectory {
+    param (
+        [Parameter(Mandatory = $false)]
+        [switch]$System
+    )
+
+    if ($System) {
+        return ('{0}\Temp\WinGet\defaultState (or {0}\SystemTemp\WinGet\defaultState)' -f $env:SystemRoot)
+    }
+    return ('{0}\Packages\Microsoft.DesktopAppInstaller_8wekyb3d8bbwe\LocalState\DiagOutputDir' -f $env:LOCALAPPDATA)
+}
+
+function Get-WingetSourceUnusableMessage {
+    param (
+        [Parameter(Mandatory = $true)]
+        [hashtable]$State,
+
+        [Parameter(Mandatory = $true)]
+        [object]$AccountContext,
+
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [Nullable[int]]$ExitCode
+    )
+
+    $isSystem = [bool]$AccountContext.IsSystem
+    $account = 'SYSTEM'
+    $who = 'SYSTEM'
+    if (-not $isSystem) {
+        $account = "$($AccountContext.ProcessUser)"
+        $who = "'$account'"
+    }
+    $codeText = 'no exit code'
+    if ($null -ne $ExitCode) {
+        $codeText = Format-WingetExitCode -ExitCode $ExitCode
+    }
+    $message = "The winget source cannot be opened for ${who}: 'winget search --source winget' answered $codeText, so winget can neither install the apps nor tell which are installed."
+    if ($State.SourcePackage -and -not $State.SourcePackage.Registered) {
+        $packageCodes = @(@($State.SourcePackage.ErrorCodes) | Select-Object -Unique)
+        if ($packageCodes.Count -gt 0) {
+            $message += ' Registering the winget source package (Microsoft.Winget.Source) for the account failed ({0}).' -f (@($packageCodes | ForEach-Object { Format-WingetExitCode -ExitCode $_ }) -join ', ')
+        }
+        elseif ($State.SourcePackage.Reason) {
+            $message += " Registering the winget source package (Microsoft.Winget.Source) for the account failed: $($State.SourcePackage.Reason)."
+        }
+    }
+    $message += " winget's log: $(Get-WingetLogDirectory -System:$isSystem)."
+    $dataMissing = $ExitCode -eq -1978335217
+    if ($isSystem) {
+        $message += ' Fix: check that this PC can reach https://cdn.winget.microsoft.com, where winget downloads its source from, then re-run the installer.'
+    }
+    elseif (-not $dataMissing) {
+        $resetNote = ''
+        if ($State.ContainsKey('SourceReset')) {
+            $resetNote = " 'winget source reset --force' did not fix it."
+        }
+        $message += "$resetNote Fix: read winget's log for why it cannot read its source settings, check 'winget source list' in a window running as '$account' and that this PC can reach https://cdn.winget.microsoft.com, then re-run the installer."
+    }
+    elseif ($AccountContext.IsCrossUserElevation) {
+        $message += " Fix: '$account' is elevated in the session of '$($AccountContext.SessionUser)' and has no logon session of its own, which Windows needs to deploy winget's source package for it: sign in to Windows once as '$account', or run the machine phase as SYSTEM with rmm/Invoke-WingetAppSetup.ps1, then re-run the installer."
+    }
+    else {
+        $message += " Fix: look in the Microsoft-Windows-AppXDeploymentServer/Operational event log for why Windows could not deploy the Microsoft.Winget.Source package for '$account', and check that this PC can reach https://cdn.winget.microsoft.com, then re-run the installer."
+    }
+    return $message
+}
+
 function Get-WingetSetupAdvice {
     param (
         [Parameter(Mandatory = $true)]
@@ -9047,7 +9345,7 @@ function Get-WingetSetupAdvice {
             return 'The steps that set winget up for a signed-in account do not apply to SYSTEM; if the installs fail, run the installer once as an administrator signed in to this PC.'
         }
         if ($SourceExitCode -eq -2147009255) {
-            return "Fix: sign in to Windows as '$Account' once (that sets winget up for the account), or run 'winget source update' in a session running as '$Account', then re-run the installer."
+            return "Fix: sign in to Windows as '$Account' once (that sets winget up for the account), or run the machine phase as SYSTEM with rmm/Invoke-WingetAppSetup.ps1, then re-run the installer."
         }
         return 'Fix: check that this PC can reach https://cdn.winget.microsoft.com, then re-run the installer.'
     }
@@ -9077,6 +9375,45 @@ function Invoke-WingetSourceProbe {
         TimedOut    = [bool]$probe.TimedOut
         LaunchError = $null
     }
+}
+
+function Get-WingetSourceOpenArgument {
+    return @('search', '--exact', '--id', 'Microsoft.PowerShell', '--source', 'winget', '--accept-source-agreements', '--disable-interactivity')
+}
+
+function Test-WingetSourceOpenExitCode {
+    param (
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [Nullable[int]]$ExitCode
+    )
+
+    return ($null -ne $ExitCode -and @(0, -1978335212) -contains [int]$ExitCode)
+}
+
+function Test-WingetSourceOpen {
+    $run = Invoke-WingetProcess -ArgumentList (Get-WingetSourceOpenArgument) -TimeoutSeconds (Get-ProcessTimeoutSeconds -Operation WingetSourceOpen) -Echo None
+    if ($run.LaunchFailed) {
+        return @{ Opened = $null; ExitCode = $null; TimedOut = $false; LaunchError = $run.LaunchError }
+    }
+    if ($run.TimedOut) {
+        Write-ProcessOutput -Line $run.Output -Tail 20
+        return @{ Opened = $null; ExitCode = $null; TimedOut = $true; LaunchError = $null }
+    }
+    $opened = Test-WingetSourceOpenExitCode -ExitCode $run.ExitCode
+    if (-not $opened) {
+        Write-ProcessOutput -Line $run.Output -Tail 20
+    }
+    return @{ Opened = $opened; ExitCode = $run.ExitCode; TimedOut = $false; LaunchError = $null }
+}
+
+function Invoke-WingetSourceCheck {
+    $update = Invoke-WingetSourceProbe
+    if ($update.LaunchError -or $update.TimedOut -or $update.ExitCode -eq -1978335174) {
+        return @{ Succeeded = $false; ExitCode = $update.ExitCode; TimedOut = [bool]$update.TimedOut; LaunchError = $update.LaunchError; Step = 'update' }
+    }
+    $open = Test-WingetSourceOpen
+    return @{ Succeeded = ($open.Opened -eq $true); ExitCode = $open.ExitCode; TimedOut = [bool]$open.TimedOut; LaunchError = $open.LaunchError; Step = 'open' }
 }
 
 function Reset-WingetSource {
@@ -10846,7 +11183,12 @@ function Invoke-WingetInstall {
     }
     $wingetAvailable = [bool]$winget.Ready
     if (-not $wingetAvailable -and -not $WhatIf) {
-        Write-ErrorMessage 'Winget is required for this script. Exiting.'
+        if ($winget.Diagnosis -eq 'SourceUnusable') {
+            Write-ErrorMessage 'Nothing was installed and Winget-AutoUpdate was not set up: winget cannot open its source for this account (see above). Exiting.'
+        }
+        else {
+            Write-ErrorMessage 'Winget is required for this script. Exiting.'
+        }
         Clear-TightVncSecret
         return 2
     }
@@ -12552,46 +12894,58 @@ function Initialize-Winget {
     }
 
     if ($WhatIf) {
-        Write-Info "[DRY-RUN] Would update the winget source for $who (winget source update --name winget), and fix it if that fails: winget source reset --force for a missing or corrupted source, which also removes any source added beyond the defaults."
+        $sourceFixes = 'winget source reset --force for a corrupted or unconfigured source (it also removes any source added beyond the defaults)'
+        if (-not $isSystem) {
+            $sourceFixes = 'for missing source data (0x8A15000F), registering the winget source package (Microsoft.Winget.Source) for this account, from the copy already on this PC or a download from https://cdn.winget.microsoft.com/cache that must carry a valid Microsoft signature, then Repair-WinGetPackageManager if Microsoft.WinGet.Client 1.28.190 or later is installed; ' + $sourceFixes
+        }
+        Write-Info "[DRY-RUN] Would update the winget source for $who (winget source update --name winget), check that winget can open it (winget search --source winget), and fix it if it cannot: $sourceFixes. A real run stops with exit code 2 when the source still cannot be opened."
         return [pscustomobject]@{ Ready = $true; Diagnosis = 'Ok' }
     }
 
     Write-Info "Updating the winget source for $who (this may take a moment)..."
-    $source = Invoke-WingetSourceProbe
+    $source = Invoke-WingetSourceCheck
     while (-not $source.Succeeded) {
         $fixed = $false
         $codeInfo = Get-WingetExitCodeInfo -ExitCode $source.ExitCode
         if ($source.ExitCode -eq $sessionBlockedExitCode -and -not $isSystem) {
             $fixed = Invoke-NextWingetAccountFix -State $state
         }
-        elseif ($codeInfo -and $codeInfo.Class -eq 'SourceBroken' -and -not $state.ContainsKey('SourceReset')) {
-            $state.SourceReset = Reset-WingetSource
-            $fixed = $true
+        elseif ($codeInfo -and $codeInfo.Class -eq 'SourceBroken') {
+            $fixed = Invoke-NextWingetSourceFix -State $state -ExitCode $source.ExitCode -IsSystem:$isSystem
         }
         if (-not $fixed) {
             break
         }
-        $source = Invoke-WingetSourceProbe
+        $source = Invoke-WingetSourceCheck
     }
 
     if ($source.Succeeded) {
-        Write-Success "The winget source is up to date for $who."
+        Write-Success "The winget source opens for $who."
         return [pscustomobject]@{ Ready = $true; Diagnosis = 'Ok' }
     }
+    $sourceCommand = "'winget search --source winget'"
+    if ($source.Step -eq 'update') {
+        $sourceCommand = "'winget source update'"
+    }
     if ($source.ExitCode -eq $policyExitCode) {
-        return (& $policyBlocked ("'winget source update' answered {0}" -f (Format-WingetExitCode -ExitCode $source.ExitCode)))
+        return (& $policyBlocked ('{0} answered {1}' -f $sourceCommand, (Format-WingetExitCode -ExitCode $source.ExitCode)))
     }
     if ($source.ExitCode -eq $agreementsExitCode) {
         Write-Info 'The winget source agreements are not accepted for this account yet (0x8A150046); each install accepts them.'
         return [pscustomobject]@{ Ready = $true; Diagnosis = 'Ok' }
     }
+    $codeInfo = Get-WingetExitCodeInfo -ExitCode $source.ExitCode
+    if ($codeInfo -and $codeInfo.Class -eq 'SourceBroken') {
+        Write-ErrorMessage (Get-WingetSourceUnusableMessage -State $state -AccountContext $AccountContext -ExitCode $source.ExitCode)
+        return [pscustomobject]@{ Ready = $false; Diagnosis = 'SourceUnusable' }
+    }
 
-    $detail = 'it did not finish in time and was stopped'
+    $detail = "$sourceCommand did not finish in time and was stopped"
     if ($source.LaunchError) {
         $detail = "winget could not be started: $($source.LaunchError)"
     }
     elseif (-not $source.TimedOut) {
-        $detail = 'exit code {0}' -f (Format-WingetExitCode -ExitCode $source.ExitCode)
+        $detail = '{0} exited with {1}' -f $sourceCommand, (Format-WingetExitCode -ExitCode $source.ExitCode)
     }
     Write-WarningMessage ('The winget source could not be set up for {0} ({1}). {2} Installations may fail.' -f $who, $detail, (Get-WingetSetupAdvice -State $state -Account $account -Source -SourceExitCode $source.ExitCode))
     return [pscustomobject]@{ Ready = $true; Diagnosis = 'SourceFailed' }
@@ -12872,7 +13226,7 @@ function Test-WingetPackageInstalled {
         return (Invoke-WingetClientInstalledCheck -PackageId $PackageId -TimeoutSeconds $TimeoutSeconds)
     }
 
-    $listArgs = @('list', '--exact', '--id', $PackageId, '--accept-source-agreements', '--disable-interactivity')
+    $listArgs = @('list', '--exact', '--id', $PackageId, '--source', 'winget', '--accept-source-agreements', '--disable-interactivity')
     $run = Invoke-WingetProcess -ArgumentList $listArgs -TimeoutSeconds $TimeoutSeconds -Echo None
     if ($run.LaunchFailed) {
         return @{ Installed = $false; TimedOut = $false; LaunchFailed = $true; LaunchError = $run.LaunchError; CheckFailed = $false; ExitCode = $null }

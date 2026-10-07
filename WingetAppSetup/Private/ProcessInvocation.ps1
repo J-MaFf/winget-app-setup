@@ -21,7 +21,10 @@
                       for its uninstall entry to go (15 minutes).
     WingetListCheck   the per-app `winget list` check before and after an install (15 seconds).
     WingetVersion     the `winget --version` launch check (30 seconds; no network or source I/O).
-    WingetSourceUpdate `winget source update`, the source check before the installs (2 minutes).
+    WingetSourceUpdate `winget source update`, before the installs (2 minutes).
+    WingetSourceOpen  the `winget search --source winget` that checks winget can open its source
+                      after that update, which downloads the source first when it is missing (2
+                      minutes).
     WingetSourceReset `winget source reset`, which downloads the source again (5 minutes).
     WingetClientProbe the Microsoft.WinGet.Client engine's start-of-run probe in a child pwsh: the
                       module load, Get-WinGetVersion and one Get-WinGetPackage (3 minutes).
@@ -42,7 +45,7 @@
 function Get-ProcessTimeoutSeconds {
     param (
         [Parameter(Mandatory = $true)]
-        [ValidateSet('WingetInstall', 'WingetDownload', 'WingetUninstall', 'WingetListCheck', 'WingetVersion', 'WingetSourceUpdate', 'WingetSourceReset', 'WingetClientProbe', 'WingetClientVersion', 'WingetClientListCheck', 'MsiExec', 'AppxProvisioning', 'WebDownload', 'WebDownloadStall', 'WebLookup')]
+        [ValidateSet('WingetInstall', 'WingetDownload', 'WingetUninstall', 'WingetListCheck', 'WingetVersion', 'WingetSourceUpdate', 'WingetSourceOpen', 'WingetSourceReset', 'WingetClientProbe', 'WingetClientVersion', 'WingetClientListCheck', 'MsiExec', 'AppxProvisioning', 'WebDownload', 'WebDownloadStall', 'WebLookup')]
         [string]$Operation
     )
 
@@ -53,6 +56,7 @@ function Get-ProcessTimeoutSeconds {
         'WingetListCheck' { return 15 }
         'WingetVersion' { return 30 }
         'WingetSourceUpdate' { return 120 }
+        'WingetSourceOpen' { return 120 }
         'WingetSourceReset' { return 300 }
         'WingetClientProbe' { return 180 }
         'WingetClientVersion' { return 60 }

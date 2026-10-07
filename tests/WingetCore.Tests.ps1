@@ -39,6 +39,18 @@ BeforeAll {
         @{ Succeeded = ($ExitCode -eq 0); ExitCode = $ExitCode; TimedOut = $false; LaunchError = $null }
     }
 
+    # What Test-WingetSourceOpen answers: opened for 0 and 0x8A150014, no answer for a timeout.
+    function New-SourceOpen {
+        param ($ExitCode = 0, [switch]$TimedOut, [string]$LaunchError)
+        if ($LaunchError) {
+            return @{ Opened = $null; ExitCode = $null; TimedOut = $false; LaunchError = $LaunchError }
+        }
+        if ($TimedOut) {
+            return @{ Opened = $null; ExitCode = $null; TimedOut = $true; LaunchError = $null }
+        }
+        @{ Opened = (@(0, -1978335212) -contains $ExitCode); ExitCode = $ExitCode; TimedOut = $false; LaunchError = $null }
+    }
+
     # The ladder's helpers, mocked: winget starts unless a test says otherwise, no fix changes
     # anything, and the source updates. Commands that would change the machine throw.
     function Register-LadderMocks {
@@ -54,6 +66,9 @@ BeforeAll {
         Mock Invoke-WingetPackageManagerRepair { [pscustomobject]@{ Available = $true; Succeeded = $false; ErrorCodes = @() } }
         Mock Get-WindowsAppRuntimeStatus { [pscustomobject]@{ Present = $true; Detail = 'Microsoft.WindowsAppRuntime.1.8 >= 8000.616.304.0 for X64 required; found: X64 8000.994.2142.0' } }
         Mock Invoke-WingetSourceProbe { New-SourceProbe -ExitCode 0 }
+        Mock Test-WingetSourceOpen { New-SourceOpen -ExitCode 0 }
+        Mock Register-WingetSourcePackage { [pscustomobject]@{ Registered = $false; ErrorCodes = @(); Reason = 'it could not be downloaded from https://cdn.winget.microsoft.com/cache' } }
+        Mock Get-WingetClientRepairVersion { $null }
         Mock Reset-WingetSource { $true }
         Mock Repair-WinGetPackageManager { throw 'must not run the real repair cmdlet' }
         Mock Invoke-WebRequest { throw 'must not download App Installer' }
@@ -175,7 +190,7 @@ Describe 'Initialize-Winget: can winget start? (review findings P3-9, P3-25)' {
         (Initialize-Winget).Ready | Should -Be $true
 
         Should -Invoke Get-InstallAccountContext -Times 1 -Exactly
-        $script:log | Should -Contain "OK: The winget source is up to date for 'CONTOSO\admin-other'."
+        $script:log | Should -Contain "OK: The winget source opens for 'CONTOSO\admin-other'."
     }
 }
 
@@ -249,7 +264,8 @@ Describe 'Initialize-Winget with winget locked at the start of the run' {
 Describe 'Initialize-Winget: the winget source (review findings P3-25, P3-28)' {
     BeforeEach {
         Register-LadderMocks
-        # Exit codes the source update answers, one per call; the last one repeats.
+        # Exit codes the source update and the source-open check answer, one per call; the last one
+        # repeats.
         $script:sourceAnswers = @(0)
         $script:sourceCalls = 0
         Mock Invoke-WingetSourceProbe {
@@ -258,10 +274,18 @@ Describe 'Initialize-Winget: the winget source (review findings P3-25, P3-28)' {
             if ($answer -is [hashtable]) { return $answer }
             New-SourceProbe -ExitCode $answer
         }
+        $script:openAnswers = @(0)
+        $script:openCalls = 0
+        Mock Test-WingetSourceOpen {
+            $answer = $script:openAnswers[[Math]::Min($script:openCalls, $script:openAnswers.Count - 1)]
+            $script:openCalls++
+            if ($answer -is [hashtable]) { return $answer }
+            New-SourceOpen -ExitCode $answer
+        }
     }
 
     It 'Registers App Installer, then repairs, for an account Windows blocked with 0x80073D19, checking the source after each fix (issue #159)' {
-        $script:sourceAnswers = @(-2147009255, -2147009255, 0)
+        $script:openAnswers = @(-2147009255, -2147009255, 0)
         Mock Register-WingetAppInstallerForUser { [pscustomobject]@{ Registered = $true; ErrorCodes = @() } }
 
         $result = Initialize-Winget -AccountContext $script:account
@@ -270,13 +294,15 @@ Describe 'Initialize-Winget: the winget source (review findings P3-25, P3-28)' {
         Should -Invoke Register-WingetAppInstallerForUser -Times 1 -Exactly
         Should -Invoke Invoke-WingetPackageManagerRepair -Times 1 -Exactly
         Should -Invoke Invoke-WingetSourceProbe -Times 3 -Exactly
+        Should -Invoke Test-WingetSourceOpen -Times 3 -Exactly
         Should -Invoke Reset-WingetSource -Times 0 -Exactly
+        Should -Invoke Register-WingetSourcePackage -Times 0 -Exactly
     }
 
     It 'Runs no fix twice in a run: none is left for the source when the launch check used them' {
         $script:wingetLaunchable = $false
         Mock Invoke-WingetPackageManagerRepair { $script:wingetLaunchable = $true; [pscustomobject]@{ Available = $true; Succeeded = $true; ErrorCodes = @() } }
-        $script:sourceAnswers = @(-2147009255)
+        $script:openAnswers = @(-2147009255)
 
         $result = Initialize-Winget -AccountContext $script:account
 
@@ -287,37 +313,154 @@ Describe 'Initialize-Winget: the winget source (review findings P3-25, P3-28)' {
         Should -Invoke Invoke-WingetSourceProbe -Times 1 -Exactly
     }
 
-    It 'Resets a missing or corrupted source once and checks it again (<Name>)' -ForEach @(
-        @{ Name = '0x8A15000F SOURCE_DATA_MISSING'; Code = -1978335217 }
+    # wgt-gq8.63: `winget source update` printed 'Cancelled' and exited 0 while winget could not
+    # deploy its source package for the account, so the run said the source was up to date and then
+    # failed every install with 0x8A15000F.
+    It 'Does not call the source up to date when the update exits 0 but the source does not open, registers its package once, and is ready when it then opens' {
+        $script:sourceAnswers = @(@{ Succeeded = $true; ExitCode = 0; TimedOut = $false; LaunchError = $null })
+        $script:openAnswers = @(-1978335217, 0)
+        Mock Register-WingetSourcePackage { [pscustomobject]@{ Registered = $true; ErrorCodes = @(); Reason = $null } }
+
+        $result = Initialize-Winget -AccountContext $script:account
+
+        $result.Ready | Should -Be $true
+        $result.Diagnosis | Should -Be 'Ok'
+        Should -Invoke Register-WingetSourcePackage -Times 1 -Exactly
+        Should -Invoke Test-WingetSourceOpen -Times 2 -Exactly
+        Should -Invoke Reset-WingetSource -Times 0 -Exactly
+        ($script:log -join "`n") | Should -Not -Match 'up to date'
+        @($script:log | Where-Object { $_ -like 'OK: The winget source*' }) | Should -Be @("OK: The winget source opens for 'CONTOSO\admin-tech'.")
+    }
+
+    It 'Stops with SourceUnusable and one ERROR line when the source still does not open after the registration (0x8A15000F), without a reset' {
+        $script:openAnswers = @(-1978335217)
+        Mock Register-WingetSourcePackage { [pscustomobject]@{ Registered = $false; ErrorCodes = @(-2147009255); Reason = 'registering it failed: Deployment failed with HRESULT: 0x80073D19' } }
+
+        $result = Initialize-Winget -AccountContext $script:account
+
+        $result.Ready | Should -Be $false
+        $result.Diagnosis | Should -Be 'SourceUnusable'
+        Should -Invoke Register-WingetSourcePackage -Times 1 -Exactly
+        Should -Invoke Reset-WingetSource -Times 0 -Exactly
+        Should -Invoke Test-WingetSourceOpen -Times 1 -Exactly
+        $errors = @($script:log | Where-Object { $_ -like 'ERROR: *' })
+        $errors.Count | Should -Be 1
+        $errors[0] | Should -BeLike "ERROR: The winget source cannot be opened for 'CONTOSO\admin-tech': 'winget search --source winget' answered 0x8A15000F SOURCE_DATA_MISSING, so winget can neither install the apps nor tell which are installed.*"
+        $errors[0] | Should -BeLike '*Registering the winget source package (Microsoft.Winget.Source) for the account failed (0x80073D19 ERROR_DEPLOYMENT_BLOCKED_BY_USER_LOG_OFF).*'
+        $errors[0] | Should -BeLike "*winget's log: *\Packages\Microsoft.DesktopAppInstaller_8wekyb3d8bbwe\LocalState\DiagOutputDir.*"
+        $errors[0] | Should -BeLike '*Fix: look in the Microsoft-Windows-AppXDeploymentServer/Operational event log*https://cdn.winget.microsoft.com*'
+        ($script:log -join "`n") | Should -Not -Match 'Installations may fail|up to date'
+    }
+
+    It 'Says why the registration failed when it saw no AppX code' {
+        $script:openAnswers = @(-1978335217)
+
+        [void](Initialize-Winget -AccountContext $script:account)
+
+        @($script:log | Where-Object { $_ -like 'ERROR: *' })[0] | Should -BeLike '*Registering the winget source package (Microsoft.Winget.Source) for the account failed: it could not be downloaded from https://cdn.winget.microsoft.com/cache.*'
+    }
+
+    It 'Advises signing in once or the SYSTEM machine phase under cross-user elevation' {
+        $script:openAnswers = @(-1978335217)
+
+        $result = Initialize-Winget -AccountContext (New-TestAccountContext -CrossUser -ProcessUser 'KFI\admin-jmaffiola' -SessionUser 'KFI\tuser')
+
+        $result.Diagnosis | Should -Be 'SourceUnusable'
+        $line = @($script:log | Where-Object { $_ -like 'ERROR: *' })[0]
+        $line | Should -BeLike "ERROR: The winget source cannot be opened for 'KFI\admin-jmaffiola': *"
+        $line | Should -BeLike "*Fix: 'KFI\admin-jmaffiola' is elevated in the session of 'KFI\tuser' and has no logon session of its own*sign in to Windows once as 'KFI\admin-jmaffiola', or run the machine phase as SYSTEM with rmm/Invoke-WingetAppSetup.ps1, then re-run the installer."
+        $line | Should -Not -BeLike '*AppXDeploymentServer*'
+    }
+
+    It 'Runs Repair-WinGetPackageManager after a failed registration only with Microsoft.WinGet.Client <Version> (<Runs>)' -ForEach @(
+        @{ Version = '1.28.190'; Runs = $true }
+        @{ Version = '1.29.380'; Runs = $true }
+        @{ Version = '1.12.470'; Runs = $false }
+        @{ Version = $null; Runs = $false }
+    ) {
+        $script:moduleVersion = $Version
+        Mock Get-WingetClientRepairVersion { if ($script:moduleVersion) { [version]$script:moduleVersion } }
+        $script:openAnswers = @(-1978335217)
+
+        $result = Initialize-Winget -AccountContext $script:account
+
+        $result.Diagnosis | Should -Be 'SourceUnusable'
+        $times = 0
+        if ($Runs) { $times = 1 }
+        Should -Invoke Invoke-WingetPackageManagerRepair -Times $times -Exactly
+        Should -Invoke Invoke-WingetPackageManagerRepair -Times 0 -Exactly -ParameterFilter { $AllUsersFirst }
+        Should -Invoke Register-WingetSourcePackage -Times 1 -Exactly
+        Should -Invoke Test-WingetSourceOpen -Times (1 + $times) -Exactly
+    }
+
+    It 'Is ready when the repair makes the source open' {
+        Mock Get-WingetClientRepairVersion { [version]'1.29.380' }
+        $script:openAnswers = @(-1978335217, 0)
+
+        (Initialize-Winget -AccountContext $script:account).Diagnosis | Should -Be 'Ok'
+
+        Should -Invoke Invoke-WingetPackageManagerRepair -Times 1 -Exactly
+    }
+
+    It 'Resets a corrupted or unconfigured source once and checks it again (<Name>)' -ForEach @(
         @{ Name = '0x8A150012 SOURCE_NAME_DOES_NOT_EXIST'; Code = -1978335214 }
         @{ Name = '0x8A15003F SOURCE_DATA_INTEGRITY_FAILURE'; Code = -1978335169 }
+        @{ Name = '0x8A15000B SOURCES_INVALID'; Code = -1978335221 }
     ) {
-        $script:sourceAnswers = @($Code, 0)
+        $script:openAnswers = @($Code, 0)
 
         (Initialize-Winget -AccountContext $script:account).Diagnosis | Should -Be 'Ok'
 
         Should -Invoke Reset-WingetSource -Times 1 -Exactly
         Should -Invoke Invoke-WingetSourceProbe -Times 2 -Exactly
+        Should -Invoke Test-WingetSourceOpen -Times 2 -Exactly
+        Should -Invoke Register-WingetSourcePackage -Times 0 -Exactly
         Should -Invoke Register-WingetAppInstallerForUser -Times 0 -Exactly
         Should -Invoke Invoke-WingetPackageManagerRepair -Times 0 -Exactly
     }
 
-    It 'Resets only once when the source is still broken after the reset' {
-        $script:sourceAnswers = @(-1978335217)
+    It 'Never resets for 0x8A15000F SOURCE_DATA_MISSING: a reset deploys no source package' {
+        $script:openAnswers = @(-1978335217)
 
-        (Initialize-Winget -AccountContext $script:account).Diagnosis | Should -Be 'SourceFailed'
+        [void](Initialize-Winget -AccountContext $script:account)
 
-        Should -Invoke Reset-WingetSource -Times 1 -Exactly
-        Should -Invoke Invoke-WingetSourceProbe -Times 2 -Exactly
-        @($script:log | Where-Object { $_ -like 'WARN: The winget source could not be set up*' }) | Should -Be @("WARN: The winget source could not be set up for 'CONTOSO\admin-tech' (exit code 0x8A15000F SOURCE_DATA_MISSING). Fix: check that this PC can reach https://cdn.winget.microsoft.com, then re-run the installer. Installations may fail.")
+        Should -Invoke Reset-WingetSource -Times 0 -Exactly
     }
 
-    It 'Fixes nothing when <Case>, which no repair fixes (review finding P3-28)' -ForEach @(
-        @{ Case = 'the update times out'; Answer = @{ Succeeded = $false; ExitCode = $null; TimedOut = $true; LaunchError = $null }; Detail = 'it did not finish in time and was stopped' }
-        @{ Case = 'the network fails'; Answer = -2147012889; Detail = 'exit code 0x80072EE7 WININET_E_NAME_NOT_RESOLVED' }
-        @{ Case = 'winget cannot be started for it'; Answer = @{ Succeeded = $false; ExitCode = $null; TimedOut = $false; LaunchError = 'The file cannot be accessed by the system.' }; Detail = 'winget could not be started: The file cannot be accessed by the system.' }
+    It 'Resets only once and stops with SourceUnusable when the source is still corrupted after the reset' {
+        $script:openAnswers = @(-1978335169)
+
+        $result = Initialize-Winget -AccountContext $script:account
+
+        $result.Ready | Should -Be $false
+        $result.Diagnosis | Should -Be 'SourceUnusable'
+        Should -Invoke Reset-WingetSource -Times 1 -Exactly
+        Should -Invoke Test-WingetSourceOpen -Times 2 -Exactly
+        $line = @($script:log | Where-Object { $_ -like 'ERROR: *' })[0]
+        $line | Should -BeLike "*answered 0x8A15003F SOURCE_DATA_INTEGRITY_FAILURE*"
+        # Not a source package Windows failed to deploy, so no AppX or sign-in advice.
+        $line | Should -BeLike "*'winget source reset --force' did not fix it. Fix: read winget's log for why it cannot read its source settings*"
+        $line | Should -Not -BeLike '*AppXDeploymentServer*'
+    }
+
+    It 'Stops when the source check answers 0x8A15003A, without resetting the source' {
+        $script:openAnswers = @(-1978335174)
+
+        (Initialize-Winget -AccountContext $script:account).Diagnosis | Should -Be 'PolicyBlocked'
+
+        Should -Invoke Reset-WingetSource -Times 0 -Exactly
+        Should -Invoke Register-WingetSourcePackage -Times 0 -Exactly
+        @($script:log | Where-Object { $_ -like 'ERROR: *' })[0] | Should -Match "^ERROR: Group Policy on this PC blocks winget: 'winget search --source winget' answered 0x8A15003A BLOCKED_BY_POLICY\."
+    }
+
+    It 'Fixes nothing when <Case>, which no repair fixes, and goes on (review finding P3-28)' -ForEach @(
+        @{ Case = 'the update times out'; Update = @{ Succeeded = $false; ExitCode = $null; TimedOut = $true; LaunchError = $null }; Open = 0; Opens = 0; Detail = "'winget source update' did not finish in time and was stopped" }
+        @{ Case = 'winget cannot be started for the update'; Update = @{ Succeeded = $false; ExitCode = $null; TimedOut = $false; LaunchError = 'The file cannot be accessed by the system.' }; Open = 0; Opens = 0; Detail = 'winget could not be started: The file cannot be accessed by the system.' }
+        @{ Case = 'opening the source times out'; Update = 0; Open = @{ Opened = $null; ExitCode = $null; TimedOut = $true; LaunchError = $null }; Opens = 1; Detail = "'winget search --source winget' did not finish in time and was stopped" }
+        @{ Case = 'the network fails'; Update = -2147012889; Open = -2147012889; Opens = 1; Detail = "'winget search --source winget' exited with 0x80072EE7 WININET_E_NAME_NOT_RESOLVED" }
     ) {
-        $script:sourceAnswers = @(, $Answer)
+        $script:sourceAnswers = @(, $Update)
+        $script:openAnswers = @(, $Open)
 
         $result = Initialize-Winget -AccountContext $script:account
 
@@ -325,23 +468,33 @@ Describe 'Initialize-Winget: the winget source (review findings P3-25, P3-28)' {
         $result.Diagnosis | Should -Be 'SourceFailed'
         Should -Invoke Register-WingetAppInstallerForUser -Times 0 -Exactly
         Should -Invoke Invoke-WingetPackageManagerRepair -Times 0 -Exactly
+        Should -Invoke Register-WingetSourcePackage -Times 0 -Exactly
         Should -Invoke Reset-WingetSource -Times 0 -Exactly
         Should -Invoke Invoke-WingetSourceProbe -Times 1 -Exactly
+        Should -Invoke Test-WingetSourceOpen -Times $Opens -Exactly
         $script:log | Should -Contain "WARN: The winget source could not be set up for 'CONTOSO\admin-tech' ($Detail). Fix: check that this PC can reach https://cdn.winget.microsoft.com, then re-run the installer. Installations may fail."
     }
 
+    It 'Is ready when the update fails but the source still opens' {
+        $script:sourceAnswers = @(-2147012889)
+
+        (Initialize-Winget -AccountContext $script:account).Diagnosis | Should -Be 'Ok'
+
+        @($script:log | Where-Object { $_ -like 'WARN:*' -or $_ -like 'ERROR:*' }).Count | Should -Be 0
+    }
+
     It 'Gives one diagnosis, the sign-in advice, when 0x80073D19 outlasts every fix under cross-user elevation' {
-        $script:sourceAnswers = @(-2147009255)
+        $script:openAnswers = @(-2147009255)
 
         [void](Initialize-Winget -AccountContext (New-TestAccountContext -CrossUser -ProcessUser 'CONTOSO\admin-tech' -SessionUser 'CONTOSO\jdoe'))
 
         $lines = @($script:log | Where-Object { $_ -like 'WARN: The winget source could not be set up*' })
         $lines.Count | Should -Be 1
-        $lines[0] | Should -Be "WARN: The winget source could not be set up for 'CONTOSO\admin-tech' (exit code 0x80073D19 ERROR_DEPLOYMENT_BLOCKED_BY_USER_LOG_OFF). Fix: sign in to Windows as 'CONTOSO\admin-tech' once (that sets winget up for the account), or run 'winget source update' in a session running as 'CONTOSO\admin-tech', then re-run the installer. Installations may fail."
-        ($script:log -join "`n") | Should -Not -Match 'appears to be missing|source\.msix|Run as local user'
+        $lines[0] | Should -Be "WARN: The winget source could not be set up for 'CONTOSO\admin-tech' ('winget search --source winget' exited with 0x80073D19 ERROR_DEPLOYMENT_BLOCKED_BY_USER_LOG_OFF). Fix: sign in to Windows as 'CONTOSO\admin-tech' once (that sets winget up for the account), or run the machine phase as SYSTEM with rmm/Invoke-WingetAppSetup.ps1, then re-run the installer. Installations may fail."
+        ($script:log -join "`n") | Should -Not -Match "appears to be missing|source\.msix|Run as local user|run 'winget source update'"
     }
 
-    It 'Takes unaccepted source agreements (0x8A150046) as no fault: each install accepts them' {
+    It 'Takes unaccepted source agreements (0x8A150046) as no fault: the source check accepts them' {
         $script:sourceAnswers = @(-1978335162)
 
         (Initialize-Winget -AccountContext $script:account).Diagnosis | Should -Be 'Ok'
@@ -349,6 +502,71 @@ Describe 'Initialize-Winget: the winget source (review findings P3-25, P3-28)' {
         Should -Invoke Register-WingetAppInstallerForUser -Times 0 -Exactly
         Should -Invoke Invoke-WingetPackageManagerRepair -Times 0 -Exactly
         @($script:log | Where-Object { $_ -like 'WARN:*' }).Count | Should -Be 0
+    }
+}
+
+# wgt-gq8.63, the owner's real-PC run under cross-user elevation, through the real source check
+# and source-package registration: only winget, Windows PowerShell, the download, the signature
+# check, the folder and the Appx registration are mocked. winget's own deployment of its source
+# package failed with 0x80073D19, `winget source update` printed 'Cancelled' and exited 0, the run
+# said the source was up to date, and every install failed with 0x8A15000F.
+Describe 'Initialize-Winget when winget cannot deploy its source package (wgt-gq8.63)' {
+    BeforeEach {
+        Register-LadderMessageCapture
+        Mock Start-Sleep { }
+        Mock Get-WingetPolicyBlock { $null }
+        Mock Test-WingetLaunchable { New-LaunchProbe -Launchable }
+        $script:sourceRegistered = $false
+        Mock Invoke-WingetProcess {
+            $arguments = @($ArgumentList)
+            if ($arguments[0] -eq 'source' -and $arguments[1] -eq 'update') {
+                return New-TestProcessResult -ExitCode 0 -Output @('Updating source: winget...', 'Cancelled')
+            }
+            if ($arguments[0] -eq 'search') {
+                if ($script:sourceRegistered) {
+                    return New-TestProcessResult -ExitCode 0 -Output @('PowerShell Microsoft.PowerShell 7.6.6 winget')
+                }
+                return New-TestProcessResult -ExitCode -1978335217 -Output @("Failed when opening source(s); try the 'source reset' command if the problem persists.", '0x8a15000f : Data required by the source is missing')
+            }
+            throw "unexpected winget call: $($arguments -join ' ')"
+        }
+        # No copy of the source package on this PC.
+        Mock powershell.exe { $global:LASTEXITCODE = 0 }
+        $script:sourceStaging = Join-Path $TestDrive ('wingetsource-' + [guid]::NewGuid().ToString('N'))
+        Mock New-WauStagingDirectory { [void](New-Item -ItemType Directory -Path $script:sourceStaging -Force); $script:sourceStaging }
+        Mock Invoke-WebRequest { [pscustomobject]@{ RawContentStream = [System.IO.MemoryStream]::new([byte[]](1, 2, 3)) } }
+        Mock Get-AuthenticodeSignature { [pscustomobject]@{ Status = 'Valid'; SignerCertificate = [pscustomobject]@{ Subject = 'CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US' } } }
+        Mock Invoke-AppxRegistration { throw [System.Runtime.InteropServices.COMException]::new('Deployment failed with HRESULT: 0x80073D19, An error occurred because a user was logged off.', -2147009255) }
+        Mock Add-AppxPackage { throw 'must not install a package directly' }
+        Mock Repair-WinGetPackageManager { throw 'must not run the real repair cmdlet' }
+        Mock Reset-WingetSource { throw 'a reset deploys no source package' }
+        $script:account = New-TestAccountContext -CrossUser -ProcessUser 'KFI\admin-jmaffiola' -SessionUser 'KFI\tuser'
+    }
+
+    It 'Stops with SourceUnusable and one ERROR line, never saying the source is up to date, when registering the package fails too' {
+        $result = Initialize-Winget -AccountContext $script:account
+
+        $result.Ready | Should -Be $false
+        $result.Diagnosis | Should -Be 'SourceUnusable'
+        ($script:log -join "`n") | Should -Not -Match 'up to date|Installations may fail'
+        Should -Invoke Invoke-AppxRegistration -Times 1 -Exactly -ParameterFilter { $PackagePath -like (Join-Path $script:sourceStaging 'source-*.msix') }
+        Should -Invoke Reset-WingetSource -Times 0 -Exactly
+        $errors = @($script:log | Where-Object { $_ -like 'ERROR: *' })
+        $errors.Count | Should -Be 1
+        $errors[0] | Should -BeLike "ERROR: The winget source cannot be opened for 'KFI\admin-jmaffiola': 'winget search --source winget' answered 0x8A15000F SOURCE_DATA_MISSING*(0x80073D19 ERROR_DEPLOYMENT_BLOCKED_BY_USER_LOG_OFF)*DiagOutputDir*sign in to Windows once as 'KFI\admin-jmaffiola', or run the machine phase as SYSTEM with rmm/Invoke-WingetAppSetup.ps1*"
+    }
+
+    It 'Is ready once Add-AppxPackage of the downloaded source package works, as it did from the owner''s elevated window' {
+        Mock Invoke-AppxRegistration { $script:sourceRegistered = $true }
+
+        $result = Initialize-Winget -AccountContext $script:account
+
+        $result.Ready | Should -Be $true
+        $result.Diagnosis | Should -Be 'Ok'
+        Should -Invoke Invoke-AppxRegistration -Times 1 -Exactly
+        Should -Invoke Invoke-WingetProcess -Times 2 -Exactly -ParameterFilter { $ArgumentList[0] -eq 'search' }
+        $script:log | Should -Contain "OK: The winget source opens for 'KFI\admin-jmaffiola'."
+        Test-Path -LiteralPath $script:sourceStaging | Should -Be $false
     }
 }
 
@@ -426,13 +644,14 @@ Describe 'Initialize-Winget as SYSTEM (review findings P2-24, P3-23)' {
         $script:account = New-TestAccountContext -System -SessionUser 'CONTOSO\jdoe'
     }
 
-    It 'Checks the machine-wide winget.exe, updates the source and runs no per-account fix' {
+    It 'Checks the machine-wide winget.exe, updates and opens the source and runs no per-account fix' {
         $result = Initialize-Winget -AccountContext $script:account
 
         $result.Ready | Should -Be $true
         Should -Invoke Test-MachineWingetAvailable -Times 1 -Exactly
         Should -Invoke Invoke-WingetSourceProbe -Times 1 -Exactly
-        $script:log | Should -Contain 'OK: The winget source is up to date for SYSTEM.'
+        Should -Invoke Test-WingetSourceOpen -Times 1 -Exactly
+        $script:log | Should -Contain 'OK: The winget source opens for SYSTEM.'
     }
 
     It 'Is not ready, so the run stops with exit code 2, when no machine-wide winget starts' {
@@ -444,24 +663,42 @@ Describe 'Initialize-Winget as SYSTEM (review findings P2-24, P3-23)' {
     }
 
     It 'Fixes nothing for 0x80073D19 and gives no advice to sign in, nor any cross-user banner' {
-        Mock Invoke-WingetSourceProbe { New-SourceProbe -ExitCode -2147009255 }
+        Mock Test-WingetSourceOpen { New-SourceOpen -ExitCode -2147009255 }
 
         (Initialize-Winget -AccountContext $script:account).Diagnosis | Should -Be 'SourceFailed'
 
         $text = $script:log -join "`n"
-        $text | Should -Match 'could not be set up for SYSTEM \(exit code 0x80073D19 ERROR_DEPLOYMENT_BLOCKED_BY_USER_LOG_OFF\)\. The steps that set winget up for a signed-in account do not apply to SYSTEM'
+        $text | Should -Match "could not be set up for SYSTEM \('winget search --source winget' exited with 0x80073D19 ERROR_DEPLOYMENT_BLOCKED_BY_USER_LOG_OFF\)\. The steps that set winget up for a signed-in account do not apply to SYSTEM"
         $text | Should -Not -Match 'Cross-user elevation|sign in to Windows|NT AUTHORITY'
     }
 
     It 'Still resets a corrupted source, without registering any package' {
-        $script:sourceCalls = 0
-        Mock Invoke-WingetSourceProbe { $script:sourceCalls++; if ($script:sourceCalls -eq 1) { return New-SourceProbe -ExitCode -1978335217 } New-SourceProbe -ExitCode 0 }
+        $script:openCalls = 0
+        Mock Test-WingetSourceOpen { $script:openCalls++; if ($script:openCalls -eq 1) { return New-SourceOpen -ExitCode -1978335169 } New-SourceOpen -ExitCode 0 }
 
         (Initialize-Winget -AccountContext $script:account).Diagnosis | Should -Be 'Ok'
 
         Should -Invoke Reset-WingetSource -Times 1 -Exactly
+        Should -Invoke Register-WingetSourcePackage -Times 0 -Exactly
         Should -Invoke Add-AppxPackage -Times 0 -Exactly
         Should -Invoke Invoke-AppxRegistration -Times 0 -Exactly
+    }
+
+    It 'Never registers the source package or repairs for SYSTEM when the source data is missing, and stops with SourceUnusable' {
+        Mock Test-WingetSourceOpen { New-SourceOpen -ExitCode -1978335217 }
+        Mock Get-WingetClientRepairVersion { [version]'1.29.380' }
+
+        $result = Initialize-Winget -AccountContext $script:account
+
+        $result.Ready | Should -Be $false
+        $result.Diagnosis | Should -Be 'SourceUnusable'
+        Should -Invoke Register-WingetSourcePackage -Times 0 -Exactly
+        Should -Invoke Reset-WingetSource -Times 0 -Exactly
+        Should -Invoke Test-WingetSourceOpen -Times 1 -Exactly
+        $line = @($script:log | Where-Object { $_ -like 'ERROR: *' })[0]
+        $line | Should -BeLike "ERROR: The winget source cannot be opened for SYSTEM: 'winget search --source winget' answered 0x8A15000F SOURCE_DATA_MISSING*"
+        $line | Should -BeLike '*\Temp\WinGet\defaultState*Fix: check that this PC can reach https://cdn.winget.microsoft.com*'
+        $line | Should -Not -BeLike '*sign in*'
     }
 
     It 'Passes a dry run on' {
@@ -492,13 +729,16 @@ Describe 'Initialize-Winget dry run (P2-16)' {
         @($script:log | Where-Object { $_ -like 'WARN: *' -or $_ -like 'ERROR: *' }).Count | Should -Be 0
     }
 
-    It 'Neither updates nor resets the source when winget starts, and says what a real run would do' {
+    It 'Neither updates, opens, registers nor resets the source when winget starts, and says what a real run would do' {
         $result = Initialize-Winget -AccountContext $script:account -WhatIf
 
         $result.Ready | Should -Be $true
         Should -Invoke Invoke-WingetSourceProbe -Times 0 -Exactly
+        Should -Invoke Test-WingetSourceOpen -Times 0 -Exactly
+        Should -Invoke Register-WingetSourcePackage -Times 0 -Exactly
         Should -Invoke Reset-WingetSource -Times 0 -Exactly
-        $script:log | Should -Contain "INFO: [DRY-RUN] Would update the winget source for 'CONTOSO\admin-tech' (winget source update --name winget), and fix it if that fails: winget source reset --force for a missing or corrupted source, which also removes any source added beyond the defaults."
+        Should -Invoke Invoke-WebRequest -Times 0 -Exactly
+        $script:log | Should -Contain "INFO: [DRY-RUN] Would update the winget source for 'CONTOSO\admin-tech' (winget source update --name winget), check that winget can open it (winget search --source winget), and fix it if it cannot: for missing source data (0x8A15000F), registering the winget source package (Microsoft.Winget.Source) for this account, from the copy already on this PC or a download from https://cdn.winget.microsoft.com/cache that must carry a valid Microsoft signature, then Repair-WinGetPackageManager if Microsoft.WinGet.Client 1.28.190 or later is installed; winget source reset --force for a corrupted or unconfigured source (it also removes any source added beyond the defaults). A real run stops with exit code 2 when the source still cannot be opened."
     }
 }
 
@@ -1284,11 +1524,32 @@ Describe 'Test-WingetPackageInstalled (timeout support, issue #188)' {
                 ($ArgumentList -contains '--exact') -and
                 ($ArgumentList -contains '--id') -and
                 ($ArgumentList -contains 'Test.App') -and
+                # The catalog's source: a source that cannot be opened then fails the list
+                # (wgt-gq8.63) instead of matching nothing.
+                (($ArgumentList -join ' ') -match '--source winget') -and
                 ($ArgumentList -contains '--accept-source-agreements') -and
                 $TimeoutSeconds -eq 15 -and
                 # Quiet: the per-app checks would otherwise print winget's table twice per app.
                 $Echo -eq 'None'
             }
+        }
+
+        # wgt-gq8.63: without --source, winget only warned 'Failed when searching source' and exited
+        # 0x8A150014, so every catalog app read as not installed while the source could not open.
+        It 'Reports no answer (CheckFailed), never not installed, when the winget source cannot be opened (0x8A15000F)' {
+            # What winget answers then: without --source a warning and 0x8A150014, with it 0x8A15000F.
+            Mock Invoke-WingetProcess {
+                if (($ArgumentList -join ' ') -match '--source winget') {
+                    return New-TestProcessResult -ExitCode -1978335217 -Output @("Failed when opening source(s); try the 'source reset' command if the problem persists.", '0x8a15000f : Data required by the source is missing')
+                }
+                New-TestProcessResult -ExitCode -1978335212 -Output @('Failed when searching source; results will not be included: winget', 'No installed package found matching input criteria.')
+            }
+
+            $result = Test-WingetPackageInstalled -PackageId 'Test.App' -TimeoutSeconds 15
+
+            $result.Installed | Should -Be $false
+            $result.CheckFailed | Should -Be $true
+            $result.ExitCode | Should -Be -1978335217
         }
 
         It 'Reports not-installed when the output only contains a different id that has the target as a substring' {

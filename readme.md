@@ -341,8 +341,9 @@ checks a real run starts with (the **Environment checks** under [Unattended runs
 App Installer's Group Policy among them, and `winget --version`) and prints a `[DRY-RUN]`
 line for each change a real run would make: setting up winget for the account (registering App
 Installer, then `Repair-WinGetPackageManager`, after installing its `Microsoft.WinGet.Client`
-module), updating the winget source and repairing it if needed (a real repair runs
-`winget source reset --force`, which also removes any source added beyond the defaults),
+module), updating the winget source, checking that winget can open it and repairing it if needed
+(registering the winget source package for the account, or `winget source reset --force`, which
+also removes any source added beyond the defaults),
 relaunching elevated, and each app it would install. When the account has no winget yet, for
 example an admin account used only to elevate, or winget is there but cannot be started, the
 preview lists every app as one a real run would install, because it cannot check which are already
@@ -401,6 +402,7 @@ carries on:
 | The per-app `winget list` check before and after each install | 15 seconds |
 | The `winget --version` check that winget can be started | 30 seconds |
 | `winget source update` | 2 minutes |
+| The `winget search --source winget` check that winget can open its source | 2 minutes |
 | `winget source reset` | 5 minutes |
 | One `winget uninstall` (`winget-app-uninstall.ps1`), the app's own uninstaller included; for an app with `quietUninstall`, its own uninstaller and the wait for its uninstall entry to go | 15 minutes |
 | One `Install-WinGetPackage` of the opt-in Microsoft.WinGet.Client engine (as SYSTEM, see [Microsoft.WinGet.Client engine (opt-in)](#microsoftwingetclient-engine-opt-in)), the installer included | 30 minutes |
@@ -488,12 +490,29 @@ a run. When something cannot be fixed it prints one line that says why and what 
    from the Microsoft Store, or install it from the Store or https://aka.ms/getwinget). The
    installer no longer downloads App Installer from aka.ms/getwinget itself: it installed the same
    bundle as `Repair-WinGetPackageManager -Latest`, without the frameworks it needs.
-3. **The winget source.** `winget source update --name winget` also registers the source for an
-   account that never used winget. `0x80073D19` (the account has no logon session) gets the account
-   fixes that have not run yet; a missing or corrupted source (`0x8A15000B`, `0x8A15000F`,
-   `0x8A150012`, `0x8A150015`, `0x8A15003F`) gets `winget source reset --force`. A timeout, a
-   network error or any other code gets no fix: no repair fixes a network. A source that still
-   fails is reported in one line and the run carries on; each install then says why it failed.
+3. **The winget source.** `winget source update --name winget`, then
+   `winget search --exact --id Microsoft.PowerShell --source winget`, which opens the source the
+   way every install does. The search decides: `winget source update` exits 0 even when its update
+   fails (it prints `Cancelled`), so on its own it proves nothing. winget deploys its source as an
+   app package (`Microsoft.Winget.Source`) for each account, and when Windows refuses that
+   deployment, as it does for an admin account elevated in another user's session, every install
+   fails with `0x8A15000F` (`SOURCE_DATA_MISSING`). For that code the installer registers the
+   source package for the account itself (not as SYSTEM, whose `winget.exe` keeps its source in a
+   file): the copy already on the PC, or a fresh download of
+   `https://cdn.winget.microsoft.com/cache/source2.msix` (then `source.msix`), saved in a folder only
+   administrators can change and installed only with a valid Microsoft signature. Then, if
+   `Microsoft.WinGet.Client` 1.28.190 or later is installed, `Repair-WinGetPackageManager`, which
+   checks the source package too. `winget source reset --force` deploys no package, so it is used
+   only for a corrupted or unconfigured source (`0x8A15000B`, `0x8A150012`, `0x8A150015`,
+   `0x8A15003F`). `0x80073D19` (the account has no logon session) gets the account fixes that have
+   not run yet. When the source still answers one of those codes, the run stops with exit code 2
+   before it installs anything or sets up Winget-AutoUpdate, and one line names the account, the
+   code, winget's log folder and what to do: under cross-user elevation, sign in to Windows once
+   as that account or run the machine phase as SYSTEM with `rmm/Invoke-WingetAppSetup.ps1`;
+   otherwise check the `Microsoft-Windows-AppXDeploymentServer/Operational` event log and access
+   to `cdn.winget.microsoft.com`. A timeout, a network error or any other code gets no fix: no
+   repair fixes a network. Such a source is reported in one line and the run carries on; each
+   install then says why it failed.
 
 A run as SYSTEM checks the machine-wide `winget.exe` instead of step 2's account fixes, which cannot
 work for SYSTEM (see [Running as SYSTEM](#running-as-system-rmm-tools-such-as-endpoint-central)).
@@ -515,7 +534,10 @@ winget stops the checks at once. Before, each app spent its own retries, twice, 
 about 24 minutes to fail. A `winget list` check that runs but fails (any exit code other than 0 or
 `0x8A150014`, no packages found) is not read as "not installed" either: the app fails with
 `winget list failed during the pre-install check with exit 0x...` (or `post-install check`) and
-gets its retry. With the Microsoft.WinGet.Client engine the reasons name it instead:
+gets its retry. The check names the source (`winget list --exact --id <id> --source winget`): without
+it, a winget source that cannot be opened is only a warning, and the list exits `0x8A150014` as if
+the app were not installed; with it, the list fails with the source's own code, such as
+`0x8A15000F`. With the Microsoft.WinGet.Client engine the reasons name it instead:
 `the WinGet client engine could not be started ...`,
 `not attempted: the WinGet client engine cannot be started on this machine (see above)` and
 `Get-WinGetPackage failed during the pre-install check with exit 0x...`. Its launch checks
@@ -1092,7 +1114,7 @@ installed, and with `-WhatIf` when the fix would succeed. It exits 1, with `-Wha
 |------|---------|
 | 0 | Success — every app is installed, already present, or does not apply to this machine (`not applicable`); apps reported as `Deferred` do not count against it, and neither do apps whose post-install hook could not configure them (`Configuration: NOT DONE`) |
 | 1 | One or more apps failed to install, including an install stopped at its time limit, the apps not attempted because winget could no longer be started partway through the run, an app with `scope = 'machine'` that has no machine-wide installer, and an installed app whose post-install hook failed (also: a blocking pre-flight system check failed). An app whose catalog condition could not be evaluated is attempted (fail open), so its failed install counts here too |
-| 2 | Winget is unavailable or cannot be started (`winget --version` must run and print a version) and could not be set up (as SYSTEM: no machine-wide `winget.exe` was found, or none could be started, and the opt-in [Microsoft.WinGet.Client engine](#microsoftwingetclient-engine-opt-in) is not ready either), App Installer's Group Policy turns winget or its source off (the pre-flight checks it before the run waits for anything or sets winget up; see **Setting winget up** above), or winget could no longer be launched at the end of the run (no app failed, but automatic updates and the next run would) |
+| 2 | Winget is unavailable or cannot be started (`winget --version` must run and print a version) and could not be set up (as SYSTEM: no machine-wide `winget.exe` was found, or none could be started, and the opt-in [Microsoft.WinGet.Client engine](#microsoftwingetclient-engine-opt-in) is not ready either), winget cannot open the winget source for the account even after the installer's repair (`0x8A15000F` and the other codes under **Setting winget up**, step 3; nothing is installed and Winget-AutoUpdate is not set up), App Installer's Group Policy turns winget or its source off (the pre-flight checks it before the run waits for anything or sets winget up; see **Setting winget up** above), or winget could no longer be launched at the end of the run (no app failed, but automatic updates and the next run would) |
 | 3 | App-definition validation failed (for example an invalid `scope`, `arch`, `postInstall` or `userPhase` value, see [Catalog entry fields](#catalog-entry-fields)), or no valid app definitions remain |
 | 4 | Administrator rights are required and the run was not elevated: the UAC prompt was declined or the elevated window could not be started, the run is non-interactive (no prompt is shown), it runs through `irm \| iex` in PowerShell 7, `Invoke-WingetInstall` was called from the imported module, or Group Policy sets the Windows PowerShell execution policy to `AllSigned` or `Restricted`: for the PC, so no UAC prompt is shown, or for the account that approved the prompt, so the elevated window stops before it runs anything (see [Administrator rights](#administrator-rights)) |
 | 5 | The run was aborted before it finished: an unexpected error (the message and stack trace are in the log), the run was stopped from outside (Ctrl+C, the console closing, an installer stopping the console) when run from a file or non-interactively, the installer file changed before its elevated copy could run (see [Administrator rights](#administrator-rights)), or PowerShell runs the installer in Constrained Language Mode (an App Control for Business or AppLocker policy), which the installer checks before anything else. With `-CollectDiagnostics`, the installer installs nothing and exits 0 when it saved the diagnostics bundle, 5 when it could not (see [Diagnostics bundle](#diagnostics-bundle--collectdiagnostics)). The machine phase `rmm/Invoke-WingetAppSetup.ps1` also exits 5, without running the installer, when its pins are not set, the download failed or the SHA256 does not match; otherwise it passes the installer's code back unchanged |
@@ -1209,7 +1231,8 @@ what winget printed, indented: for example
 bar are left out, apart from the last progress line of each download, and a message winget shows
 next to its spinner, such as `Waiting for another install/uninstall to complete...`, is logged once
 rather than at every redraw. The per-app `winget list` checks print nothing; the source update
-prints winget's output only when it fails. With the opt-in
+prints winget's output only when it exits with an error, and the source check when winget cannot
+open the source. With the opt-in
 [Microsoft.WinGet.Client engine](#microsoftwingetclient-engine-opt-in), each install is instead a
 `> Install-WinGetPackage ...` line, then the child `pwsh`'s own output, indented (at most its last
 20 lines, usually just `Microsoft.WinGet.Client Install <id>: Ok`), then one
@@ -1338,11 +1361,15 @@ the path and exits 0, or 5 when no folder takes the file. The bundle holds:
   policy and its Group Policy keys, the App Installer and Microsoft Store Group Policy keys, the
   pending-restart state, the Windows App Runtime this build pins and its built-in requirement, and
   the Winget-AutoUpdate version and task.
-- `winget.txt`: `winget --version` and `winget --info`, each with the 30-second time limit (as
-  SYSTEM, the machine-wide `winget.exe`).
-- `appx.txt`: `Get-AppxPackage -AllUsers` for `Microsoft.DesktopAppInstaller` and
+- `winget.txt`: `winget --version` and `winget --info`, each with the 30-second time limit, and
+  whether winget can open the winget source (`Winget source: opens`, or
+  `CANNOT BE OPENED (0x8A15000F SOURCE_DATA_MISSING)`), from the installer's own source check with
+  its 2-minute limit, which needs the network (as SYSTEM, the machine-wide `winget.exe`).
+- `appx.txt`: `Get-AppxPackage -AllUsers` for `Microsoft.DesktopAppInstaller`,
+  `Microsoft.Winget.Source` (the winget source package, deployed for each account) and
   `Microsoft.WindowsAppRuntime.*`, with each account's install state by SID, and
-  `Get-AppxProvisionedPackage -Online` for the same. These run in Windows PowerShell.
+  `Get-AppxProvisionedPackage -Online` for App Installer and the Windows App Runtime. These run in
+  Windows PowerShell.
 - `wau-updates-log-tail.txt`: the last 400 lines of Winget-AutoUpdate's `updates.log`.
 - `README.txt`: what each source returned, or why it could not be read, and the list of files in
   the logs folder.
@@ -1524,10 +1551,13 @@ powershell -ExecutionPolicy Unrestricted -File .\winget-app-uninstall.ps1 -WhatI
 - It first sets winget up the way the installer does (as SYSTEM, with the machine-wide
   `winget.exe`; it never uses the
   [Microsoft.WinGet.Client engine](#microsoftwingetclient-engine-opt-in), whatever
-  `WINGET_APP_SETUP_SYSTEM_ENGINE` says). When winget still cannot be used, or Group Policy turns
-  it off, it removes nothing, Winget-AutoUpdate included, and exits 2.
-- An app counts as not installed only when `winget list` answered. A check that could not start
-  winget, ran out of time or failed is a failure.
+  `WINGET_APP_SETUP_SYSTEM_ENGINE` says). When winget still cannot be used, cannot open the winget
+  source for the account (see **Setting winget up**, step 3), or Group Policy turns it off, it
+  removes nothing, Winget-AutoUpdate included, and exits 2: without its source, winget lists no
+  catalog app, so every app would read as not installed.
+- An app counts as not installed only when `winget list --source winget` answered. A check that
+  could not start winget, ran out of time or failed (a source that cannot be opened included) is a
+  failure, so Winget-AutoUpdate is kept.
 - Each app without `quietUninstall` (see the next point) is removed with
   `winget uninstall --exact --id <id> --silent` under a 15-minute limit. An app whose own
   uninstaller returns 3010 or 1641 (a restart finishes the removal) counts as removed, although
@@ -1580,7 +1610,7 @@ powershell -ExecutionPolicy Unrestricted -File .\winget-app-uninstall.ps1 -WhatI
 |------|---------|
 | 0 | Done: every app was removed, was not installed, or was kept on purpose (a shell the run depends on, or an app whose condition or `arch` list does not hold), and Winget-AutoUpdate was removed or was not installed |
 | 1 | An app could not be removed or checked (Winget-AutoUpdate is then kept), or Winget-AutoUpdate could not be removed |
-| 2 | winget cannot be started for this account, or Group Policy turns it off, so nothing was removed |
+| 2 | winget cannot be started for this account, cannot open its source, or Group Policy turns it off, so nothing was removed (Winget-AutoUpdate included) |
 | 3 | The app list has invalid entries or is empty |
 | 4 | Not elevated, and the UAC prompt was declined or could not be shown (a non-interactive run shows none), or the execution policy Group Policy sets would refuse the elevated run |
 | 5 | Stopped by an unexpected error; started without a script file (`irm \| iex`); or the file changed after the run started, or could not be read or copied, before its elevated run |
