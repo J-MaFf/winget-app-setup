@@ -32,14 +32,70 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   task result of 0x80070569 says the user lacks 'Log on as a batch job'. The report's machine facts
   and `batch-logon-rights.txt` in the stage's evidence list who holds and who is denied that right
   (`secedit /export`, read-only, temporary file deleted, the temporary user's name and SID hidden).
-  A throwaway TightVNC test password is written only to `manual-steps.txt` in
-  `<report folder>-local`, which is never zipped; the harness checks the diagnostics bundle, every
-  file going into the zip and the zip itself for it. The installer prints its `was a link` warning
+  A throwaway TightVNC test password is written only to `manual-steps.txt` in the
+  `winget-app-setup-localsecrets-...` folder next to the report folder (the run prints its exact
+  path), which is never zipped; the harness checks the diagnostics bundle, every file going into the
+  zip, the report itself and the zip itself for it. The installer prints its `was a link` warning
   before its transcript starts, so each run's console output is kept and searched.
   `tests/E2ERealPcTestPlan.Tests.ps1` tests the pure parts (stage/dependency logic, the change plan,
   the gate decision, each stage's check evaluation, the ACL/SDDL comparison, the secret scan, and
   the report and exit-code logic), and `.github/workflows/real-pc-test-plan.yml` self-tests the
   harness end to end on a `windows-latest` runner.
+
+  An owner run (2026-10-06, signed in over Remote Desktop as a standard user, the window elevated
+  as an administrator, winget v1.29.380) showed PASS rows that winget could not back up (bead
+  wgt-gq8.65). winget's own registration of its source package for the elevated account failed
+  (0x80073D19), so every install failed with 0x8A15000F, while `winget list` and `winget uninstall`
+  without `--source` only warn and answer 'no package found' (0x8A150014). The harness read that
+  as 'not installed': Preflight passed 'No catalog app installed yet', the time-budget stage passed
+  the removal of 7-Zip that `winget uninstall` never found, and the uninstaller rows passed while
+  the uninstaller skipped every app as not installed and removed Winget-AutoUpdate. Now:
+  - its lookups and its 7-Zip removal name `--source winget` (as does
+    `e2e/Remove-PreinstalledApps.ps1`), so a source that cannot open is no answer, never 'not
+    installed';
+  - Preflight, the first run and the uninstaller stage (before it runs) check that winget can open
+    its source in this account (`winget search --id Microsoft.PowerShell --exact --source winget`,
+    PASS only on exit 0, the code named otherwise; SKIP at Preflight when winget is not on the PC
+    yet, as the check after the first run decides). Preflight's failed check is SKIP, with its
+    code, once the latest check opened the source: that was the PC before the run. While the
+    source cannot open, the rows that ask winget what is installed are SKIP, and the report starts
+    with a warning that names the installer and the uninstaller only when they ran with that blind
+    winget; the run continues for evidence. The uninstaller must then refuse as SourceUnusable: the
+    real uninstall passes only with exit 2 (exit 0 or 3010 fails as 'reported success although
+    winget could not see this account's apps'), each run that printed 'Skipping: <id> (not
+    installed)' fails ('the uninstaller could not see installed apps'), and Winget-AutoUpdate must
+    be kept (removed fails; SKIP when it was not installed);
+  - Preflight records the elevated account and SID, the signed-in user of its session (the
+    explorer.exe owner), the console user, `qwinsta`'s sessions and 'Cross-user elevation:
+    yes/no/unknown' (compared by SID), winget's and App Installer's versions and whether
+    `Microsoft.Winget.Source` is registered for the account, and writes the raw `winget --info`,
+    `winget source list` and every account's registration of the source package to
+    `evidence\0-Preflight\winget-info.txt`;
+  - the removal check fails an uninstall that found no package, and the '-WhatIf changed nothing'
+    row is SKIP when winget listed no catalog app before or after the preview;
+  - the re-run and the SYSTEM run expect an app found already there only when the first run's
+    `last-run.json` recorded it installed or already there; any other app may be installed or
+    found, one SKIP row names them, and the re-run checks that case instead of dropping its row.
+    The owner's SYSTEM stage had failed Adobe Reader, Git and Bulk Crap Uninstaller as 'App
+    already present on the second run' because the first run had failed them;
+  - each stage's evidence has `arp.txt`, the Apps & features entries (both HKLM registry views and
+    HKCU) before Preflight and after each stage that installs or uninstalls, as evidence only, and
+    keeps the first 15 and the last 25 winget logs per source instead of the last 20, with a
+    `README.txt` of the counts;
+  - the run ends with `report.txt`'s exact path, a ready-to-paste
+    `Get-Content -LiteralPath '<path>' -Raw -Encoding UTF8 | Set-Clipboard` line (the path quoted
+    with `CodeGeneration.EscapeSingleQuotedStringContent`, so a typographic apostrophe cannot end
+    the string; UTF-8, so Windows PowerShell does not read the BOM-less report as ANSI), the zip's
+    exact path and a privacy note (the report and the zip name the PC's accounts and their SIDs:
+    send them privately or replace the names). The report's own text is checked for the test
+    password too; when it or the zip holds it, there is no copy line, only 'do not paste or send'.
+    The folder with the test password is `winget-app-setup-localsecrets-<timestamp>` (for a
+    `-ReportPath` folder `<name>`, `winget-app-setup-localsecrets-<name>`) instead of
+    `<report folder>-local`, which a `winget-app-setup-testplan-*` wildcard also matched; the
+    report's manual steps name its exact path.
+
+  `tests/E2ERealPcTestPlan.Tests.ps1` replays the owner's run from fixtures (a `last-run.json` in
+  which every applicable app Failed with 0x8A15000F, and the uninstaller's console output).
 - Endpoint Central deployment in two phases (work-order item 34), in `rmm/`. Both are standalone
   Windows PowerShell 5.1 scripts that need nothing beside them.
   - **Machine phase.** `rmm/Invoke-WingetAppSetup.ps1` is a Computer Configuration script run as

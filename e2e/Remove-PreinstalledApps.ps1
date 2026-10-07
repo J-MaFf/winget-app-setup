@@ -25,7 +25,9 @@
     in all.
 
     The catalog apps are checked the way the installer checks them, with
-    'winget list --id <id> --exact': absent there means the first pass installs it. PowerShell 7 is
+    'winget list --id <id> --exact --source winget': absent there means the first pass installs it.
+    With --source winget, a winget source that cannot open fails the lookup ('unknown') instead of
+    reading as absent, and the uninstall names the same source. PowerShell 7 is
     checked by its pwsh.exe, which is what the bootstrap looks for; the image installs it from the
     MSI, so its Windows Installer entry is removed first and winget is the fallback.
 
@@ -134,7 +136,8 @@ function Format-ProcessOutcome {
 
 <#
 .SYNOPSIS
-    Asks winget whether a package is installed, the way the installer does.
+    Asks winget whether a package is installed, the way the installer does: from the winget
+    source, so a source that cannot open is 'unknown', never 'absent'.
 .RETURNS
     [pscustomobject] with State ('present', 'absent' or 'unknown') and Detail.
 #>
@@ -146,7 +149,7 @@ function Get-WingetPackagePresence {
         [int]$TimeoutSeconds
     )
 
-    $outcome = Invoke-BoundedProcess -FilePath 'winget' -ArgumentList @('list', '--id', $Id, '--exact', '--accept-source-agreements', '--disable-interactivity') -TimeoutSeconds $TimeoutSeconds
+    $outcome = Invoke-BoundedProcess -FilePath 'winget' -ArgumentList @('list', '--id', $Id, '--exact', '--source', 'winget', '--accept-source-agreements', '--disable-interactivity') -TimeoutSeconds $TimeoutSeconds
     if ($outcome.ExitCode -eq 0) {
         return [pscustomobject]@{ State = 'present'; Detail = 'winget list found it' }
     }
@@ -179,7 +182,7 @@ function Remove-PreinstalledPackage {
         return [pscustomobject]@{ App = $Id; Result = 'absent'; Detail = 'not installed on this runner' }
     }
 
-    $uninstall = Invoke-BoundedProcess -FilePath 'winget' -ArgumentList @('uninstall', '--id', $Id, '--exact', '--silent', '--accept-source-agreements', '--disable-interactivity') -TimeoutSeconds $UninstallTimeoutSeconds
+    $uninstall = Invoke-BoundedProcess -FilePath 'winget' -ArgumentList @('uninstall', '--id', $Id, '--exact', '--source', 'winget', '--silent', '--accept-source-agreements', '--disable-interactivity') -TimeoutSeconds $UninstallTimeoutSeconds
     $uninstallText = 'winget uninstall ' + (Format-ProcessOutcome -Outcome $uninstall -TimeoutSeconds $UninstallTimeoutSeconds)
     $after = Get-WingetPackagePresence -Id $Id -TimeoutSeconds $ListTimeoutSeconds
     switch ($after.State) {

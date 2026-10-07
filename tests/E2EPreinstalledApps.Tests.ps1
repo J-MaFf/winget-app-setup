@@ -31,6 +31,12 @@ BeforeAll {
         if ($idIndex -ge 0) {
             $id = $ArgumentList[$idIndex + 1]
         }
+        if ($FilePath -eq 'winget' -and $script:SourceBroken) {
+            # A winget source that cannot open (0x8A15000F): with --source winget the call fails;
+            # without it, winget only warns and finds nothing (0x8A150014).
+            if ($ArgumentList -contains '--source') { return (New-FakeProcess -ExitCode -1978335217) }
+            return (New-FakeProcess -ExitCode -1978335212)
+        }
         if ($FilePath -eq 'winget' -and $ArgumentList[0] -eq 'list') {
             if ($script:ListHangs) { return (New-FakeProcess -Hang) }
             if ($script:ListFails) { return (New-FakeProcess -ExitCode -1978335217) }
@@ -88,6 +94,7 @@ Describe 'Removing the preinstalled apps' {
         $script:RemovableByWinget = @('Google.Chrome', '7zip.7zip', 'Git.Git')
         $script:ListFails = $false
         $script:ListHangs = $false
+        $script:SourceBroken = $false
         $script:MsiRemovesPwsh = $true
         $script:KilledProcesses = 0
 
@@ -135,9 +142,22 @@ Describe 'Removing the preinstalled apps' {
         $result.Result | Should -Be 'removed'
         $result.Detail | Should -Be 'winget uninstall exit 0x00000000'
         Should -Invoke Start-Process -Times 1 -Exactly -ParameterFilter {
-            $FilePath -eq 'winget' -and ($ArgumentList -join ' ') -eq 'uninstall --id Google.Chrome --exact --silent --accept-source-agreements --disable-interactivity'
+            $FilePath -eq 'winget' -and ($ArgumentList -join ' ') -eq 'uninstall --id Google.Chrome --exact --source winget --silent --accept-source-agreements --disable-interactivity'
         }
-        Should -Invoke Start-Process -Times 2 -Exactly -ParameterFilter { $ArgumentList[0] -eq 'list' -and ($ArgumentList -join ' ') -match '--id Google\.Chrome --exact' }
+        Should -Invoke Start-Process -Times 2 -Exactly -ParameterFilter { $ArgumentList[0] -eq 'list' -and ($ArgumentList -join ' ') -match '--id Google\.Chrome --exact --source winget' }
+    }
+
+    It 'Reads a winget source that cannot open as unknown, never as not installed (wgt-gq8.65)' {
+        # Without --source, winget answered 'not installed' for an installed app and it was left
+        # in place as 'absent'.
+        $script:SourceBroken = $true
+
+        $result = Remove-PreinstalledPackage -Id 'Google.Chrome' -ListTimeoutSeconds 5 -UninstallTimeoutSeconds 5
+
+        $result.Result | Should -Be 'unknown'
+        $result.Detail | Should -Be 'winget uninstall exit 0x8A15000F; then winget list exit 0x8A15000F'
+        Should -Invoke Start-Process -Times 2 -Exactly -ParameterFilter { $ArgumentList[0] -eq 'list' -and ($ArgumentList -join ' ') -match '--source winget' }
+        Should -Invoke Start-Process -Times 1 -Exactly -ParameterFilter { $ArgumentList[0] -eq 'uninstall' -and ($ArgumentList -join ' ') -match '--source winget' }
     }
 
     It 'Reports an app the uninstall left installed' {

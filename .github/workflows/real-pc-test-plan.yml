@@ -30,8 +30,12 @@ name: Real-PC test plan self-test
 #     so a child's stderr line cannot stop it.
 #
 # What is uploaded: the report folder and its zip. The throwaway TightVNC test password is written
-# only to '<report folder>-local' (real-pc-report-local here), which is never zipped or uploaded,
-# and the harness checks that no file in the zip holds it.
+# only to the folder next to it named winget-app-setup-localsecrets-<report folder's name>
+# (winget-app-setup-localsecrets-real-pc-report here), which is never zipped or uploaded, and the
+# harness checks that no file in the zip holds it.
+#
+# On this runner winget can open its source, so the harness's source check passes; the blind-winget
+# rows (wgt-gq8.65) are covered by tests/E2ERealPcTestPlan.Tests.ps1's replay of an owner run.
 
 on:
   workflow_dispatch:
@@ -69,8 +73,9 @@ jobs:
           & .\e2e\Invoke-RealPcTestPlan.ps1 -ConfirmDisposableMachine -ReportPath "$env:RUNNER_TEMP\real-pc-report"
           exit $LASTEXITCODE
 
-      # Never the '-local' folder next to the report folder: that one holds the TightVNC test
-      # password.
+      # Never the winget-app-setup-localsecrets-* folder next to the report folder: that one holds
+      # the TightVNC test password. The paths name the report folder and zip exactly, and the
+      # exclusion keeps that folder out even if a pattern ever widens.
       - name: Upload the report and zip
         if: always()
         uses: actions/upload-artifact@v7
@@ -79,4 +84,5 @@ jobs:
           path: |
             ${{ runner.temp }}\real-pc-report.zip
             ${{ runner.temp }}\real-pc-report
+            !${{ runner.temp }}\winget-app-setup-localsecrets-*
           if-no-files-found: warn

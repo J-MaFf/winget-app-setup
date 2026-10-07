@@ -1653,7 +1653,29 @@ the owner test plan needs a real desktop PC: cross-user elevation, a TightVNC vi
   on as a batch job"), a time-budget run that exits 9 and then finishes, the `-CollectDiagnostics`
   bundle, and the uninstaller (preview then real; it removes PowerShell 7 too). Each check is a
   PASS/FAIL/SKIP row with evidence, and each stage keeps its console output, transcripts,
-  `last-run.json` and winget logs.
+  `last-run.json` and winget logs (of a long stage the first 15 and the last 25 per source, with a
+  `README.txt` of the counts). `arp.txt` lists the Apps & features entries (name, version, install
+  date, hive and key) before Preflight and after each stage that installs or uninstalls; it is
+  evidence only.
+- **winget's source in your account:** Preflight records who is signed in and who the window is
+  elevated as (compared by SID: "Cross-user elevation: yes/no/unknown"), winget's and App
+  Installer's versions and whether winget's source package (`Microsoft.Winget.Source`) is
+  registered for your account, with the raw `winget --info`, `winget source list` and every
+  account's registration in `evidence\0-Preflight\winget-info.txt`. It then checks that winget can
+  open its `winget` source in your account (`winget search --id Microsoft.PowerShell --exact
+  --source winget`; PASS only on exit 0, the code named otherwise), again after the first run, and
+  again before the uninstaller stage. At Preflight the check is SKIP when winget is not on the PC
+  yet: the check after the first run decides. Preflight's check is also SKIP, its code kept, when
+  the latest check opened the source: that was the PC before the run, not a product result.
+  Without that source, winget reads every installed app as not installed in your account
+  (`winget list` and `winget uninstall` without `--source` only warn). So when the check fails,
+  the report starts with a warning, the rows that ask winget what is installed in your account are
+  SKIP or FAIL, never PASS, and the run goes on to collect evidence. The uninstaller must then
+  refuse: the real uninstall passes only with exit 2 (it reported success otherwise), each
+  "Skipping: <id> (not installed)" it printed fails, and Winget-AutoUpdate must be kept. The
+  harness's own lookups and removals name `--source winget`. The re-run and the SYSTEM run expect
+  an app found already there only when the first run's `last-run.json` recorded it installed or
+  already there; any other app may be installed or found (one SKIP row names them).
 - **How to run it:** from a checkout of the branch on the test machine, in an **administrator**
   window, starting under Windows PowerShell (a fresh PC has no PowerShell 7):
   `powershell -ExecutionPolicy Bypass -File .\e2e\Invoke-RealPcTestPlan.ps1`. It refuses unless
@@ -1665,14 +1687,23 @@ the owner test plan needs a real desktop PC: cross-user elevation, a TightVNC vi
   each install run.
 - **How long:** about 30-60 minutes.
 - **What to send back:** it writes a report (`report.md` and `report.txt`) and a zip to
-  `%PUBLIC%\winget-app-setup-testplan-<timestamp>` (or a new or empty `-ReportPath`), prints the zip
-  path and the overall result, and exits 0 when every non-skipped row passed, 1 otherwise, 2 if it
-  refused. Send the zip. A throwaway TightVNC test password for the manual viewer step is in
-  `manual-steps.txt` in the folder next to it ending in `-local`: do not send that one. The harness
-  checks that neither the diagnostics bundle nor the zip holds the password. The uninstaller stage
-  removes TightVNC, so to try a viewer, run with `-SkipStage Uninstaller`. The report's "Still to do
-  by hand" section lists the items the harness cannot automate. `.github/workflows/real-pc-test-plan.yml`
-  self-tests the harness end to end on a `windows-latest` runner.
+  `%PUBLIC%\winget-app-setup-testplan-<timestamp>` (or a new or empty `-ReportPath`), and exits 0
+  when every non-skipped row passed, 1 otherwise, 2 if it refused. It ends with the overall result,
+  `report.txt`'s exact path, a line to paste into any PowerShell window that copies the report
+  (`Get-Content -LiteralPath '<path>' -Raw -Encoding UTF8 | Set-Clipboard`), and the zip's exact
+  path. Send the zip (or paste the report). **Privacy:** the report and the zip name this PC's
+  accounts and their SIDs (the machine facts, `winget-info.txt`, the transcripts), so send them
+  privately, or replace the names before you post them on a public issue or pull request (the
+  privacy note under [Logs](#logs) says what to replace). A throwaway TightVNC test password for the
+  manual viewer step is in `manual-steps.txt` in the `winget-app-setup-localsecrets-...` folder next
+  to the report folder (the run prints its exact path; for the default report folder it is
+  `winget-app-setup-localsecrets-<timestamp>`): do not send that one. Its name does not start with
+  the report folder's, so a `winget-app-setup-testplan-*` wildcard cannot pick it up. The harness
+  checks that neither the diagnostics bundle, the zip nor the report itself holds the password; when
+  one does, it prints no copy line and says to send nothing. The uninstaller stage removes TightVNC,
+  so to try a viewer, run with `-SkipStage Uninstaller`. The report's "Still to do by hand" section
+  lists the items the harness cannot automate. `.github/workflows/real-pc-test-plan.yml` self-tests
+  the harness end to end on a `windows-latest` runner.
 
 ## End-to-end monitoring (e2e tier 1)
 
@@ -1696,10 +1727,11 @@ throwaway VMs by construction:
   installer, and its second pass finds PowerShell 7 and relaunches. Before the first pass, every
   leg, the SYSTEM legs below included, uninstalls the catalog apps the runner image ships with
   (Google Chrome, 7-Zip and Git; `e2e/Remove-PreinstalledApps.ps1`), so the first pass really
-  installs them. Every call there has a time limit (`winget list` 45 s, uninstall 150 s), each
-  app's result prints as soon as it is done, and an app that cannot be removed gets a warning
-  annotation and is skipped by the first pass as already installed (the SYSTEM legs fail on it
-  instead: see below).
+  installs them. Every call there has a time limit (`winget list` 45 s, uninstall 150 s) and names
+  `--source winget`, so a winget source that cannot open leaves an app 'unknown' rather than 'not
+  installed'. Each app's result prints as soon as it is done, and an app that cannot be removed
+  gets a warning annotation and is skipped by the first pass as already installed (the SYSTEM legs
+  fail on it instead: see below).
 - **The SYSTEM leg:** `e2e-install-system`, on a third VM, runs one pass the way Endpoint Central
   does, after the same removal of the preinstalled catalog apps. A one-shot scheduled task runs as
   SYSTEM and starts `rmm/Invoke-WingetAppSetup.ps1` with
