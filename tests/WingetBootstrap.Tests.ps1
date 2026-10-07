@@ -928,7 +928,7 @@ Describe 'Get-WingetSetupAdvice for a source blocked by 0x80073D19 (wgt-gq8.63)'
 
 Describe 'Get-WingetSetupAdvice and Get-WingetSourceUnusableMessage name the tool that runs (wgt-gq8.64)' {
     BeforeAll {
-        $script:crossUser = [pscustomobject]@{ IsSystem = $false; IsCrossUserElevation = $true; ProcessUser = 'KFI\admin-jmaffiola'; SessionUser = 'KFI\tuser' }
+        $script:crossUser = [pscustomobject]@{ IsSystem = $false; IsCrossUserElevation = $true; ProcessUser = 'CONTOSO\admin-jmaffiola'; SessionUser = 'CONTOSO\tuser' }
         $script:sameUser = [pscustomobject]@{ IsSystem = $false; IsCrossUserElevation = $false; ProcessUser = 'CONTOSO\jdoe'; SessionUser = 'CONTOSO\jdoe' }
         $script:system = [pscustomobject]@{ IsSystem = $true; IsCrossUserElevation = $false; ProcessUser = 'NT AUTHORITY\SYSTEM'; SessionUser = $null }
     }
@@ -939,7 +939,7 @@ Describe 'Get-WingetSetupAdvice and Get-WingetSourceUnusableMessage name the too
     ) {
         $message = Get-WingetSourceUnusableMessage -State @{ ErrorCodes = @() } -AccountContext $script:crossUser -ExitCode -1978335217 -Tool $Tool
 
-        $message | Should -BeLike "*Fix: 'KFI\admin-jmaffiola' is elevated in the session of 'KFI\tuser' and has no logon session of its own, which Windows needs to deploy winget's source package for it: run the $Name while signed in to Windows as 'KFI\admin-jmaffiola', or $System."
+        $message | Should -BeLike "*Fix: 'CONTOSO\admin-jmaffiola' is elevated in the session of 'CONTOSO\tuser' and has no logon session of its own, which Windows needs to deploy winget's source package for it: run the $Name while signed in to Windows as 'CONTOSO\admin-jmaffiola', or $System."
         $message | Should -Not -Match 'sign in to Windows once'
     }
 

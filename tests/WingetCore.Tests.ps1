@@ -363,12 +363,12 @@ Describe 'Initialize-Winget: the winget source (review findings P3-25, P3-28)' {
     It 'Advises running the installer signed in as the account or the SYSTEM machine phase under cross-user elevation' {
         $script:openAnswers = @(-1978335217)
 
-        $result = Initialize-Winget -AccountContext (New-TestAccountContext -CrossUser -ProcessUser 'KFI\admin-jmaffiola' -SessionUser 'KFI\tuser')
+        $result = Initialize-Winget -AccountContext (New-TestAccountContext -CrossUser -ProcessUser 'CONTOSO\admin-jmaffiola' -SessionUser 'CONTOSO\tuser')
 
         $result.Diagnosis | Should -Be 'SourceUnusable'
         $line = @($script:log | Where-Object { $_ -like 'ERROR: *' })[0]
-        $line | Should -BeLike "ERROR: The winget source cannot be opened for 'KFI\admin-jmaffiola': *"
-        $line | Should -BeLike "*Fix: 'KFI\admin-jmaffiola' is elevated in the session of 'KFI\tuser' and has no logon session of its own*run the installer while signed in to Windows as 'KFI\admin-jmaffiola', or run the machine phase as SYSTEM with rmm/Invoke-WingetAppSetup.ps1."
+        $line | Should -BeLike "ERROR: The winget source cannot be opened for 'CONTOSO\admin-jmaffiola': *"
+        $line | Should -BeLike "*Fix: 'CONTOSO\admin-jmaffiola' is elevated in the session of 'CONTOSO\tuser' and has no logon session of its own*run the installer while signed in to Windows as 'CONTOSO\admin-jmaffiola', or run the machine phase as SYSTEM with rmm/Invoke-WingetAppSetup.ps1."
         $line | Should -Not -BeLike '*AppXDeploymentServer*'
     }
 
@@ -541,7 +541,7 @@ Describe 'Initialize-Winget when winget cannot deploy its source package (wgt-gq
         Mock Add-AppxPackage { throw 'must not install a package directly' }
         Mock Repair-WinGetPackageManager { throw 'must not run the real repair cmdlet' }
         Mock Reset-WingetSource { throw 'a reset deploys no source package' }
-        $script:account = New-TestAccountContext -CrossUser -ProcessUser 'KFI\admin-jmaffiola' -SessionUser 'KFI\tuser'
+        $script:account = New-TestAccountContext -CrossUser -ProcessUser 'CONTOSO\admin-jmaffiola' -SessionUser 'CONTOSO\tuser'
     }
 
     It 'Stops with SourceUnusable and one ERROR line, never saying the source is up to date, when registering the package fails too' {
@@ -554,7 +554,7 @@ Describe 'Initialize-Winget when winget cannot deploy its source package (wgt-gq
         Should -Invoke Reset-WingetSource -Times 0 -Exactly
         $errors = @($script:log | Where-Object { $_ -like 'ERROR: *' })
         $errors.Count | Should -Be 1
-        $errors[0] | Should -BeLike "ERROR: The winget source cannot be opened for 'KFI\admin-jmaffiola': 'winget search --source winget' answered 0x8A15000F SOURCE_DATA_MISSING*(0x80073D19 ERROR_DEPLOYMENT_BLOCKED_BY_USER_LOG_OFF)*DiagOutputDir*run the installer while signed in to Windows as 'KFI\admin-jmaffiola', or run the machine phase as SYSTEM with rmm/Invoke-WingetAppSetup.ps1."
+        $errors[0] | Should -BeLike "ERROR: The winget source cannot be opened for 'CONTOSO\admin-jmaffiola': 'winget search --source winget' answered 0x8A15000F SOURCE_DATA_MISSING*(0x80073D19 ERROR_DEPLOYMENT_BLOCKED_BY_USER_LOG_OFF)*DiagOutputDir*run the installer while signed in to Windows as 'CONTOSO\admin-jmaffiola', or run the machine phase as SYSTEM with rmm/Invoke-WingetAppSetup.ps1."
     }
 
     It 'Tells the uninstaller to run itself signed in as the account or as SYSTEM, never the machine phase, which installs the catalog' {
@@ -563,7 +563,7 @@ Describe 'Initialize-Winget when winget cannot deploy its source package (wgt-gq
         $result.Diagnosis | Should -Be 'SourceUnusable'
         $errors = @($script:log | Where-Object { $_ -like 'ERROR: *' })
         $errors.Count | Should -Be 1
-        $errors[0] | Should -BeLike "*Fix: 'KFI\admin-jmaffiola' is elevated in the session of 'KFI\tuser'*: run the uninstaller while signed in to Windows as 'KFI\admin-jmaffiola', or run winget-app-uninstall.ps1 as SYSTEM."
+        $errors[0] | Should -BeLike "*Fix: 'CONTOSO\admin-jmaffiola' is elevated in the session of 'CONTOSO\tuser'*: run the uninstaller while signed in to Windows as 'CONTOSO\admin-jmaffiola', or run winget-app-uninstall.ps1 as SYSTEM."
         $errors[0] | Should -Not -Match 'rmm/|machine phase|\binstaller\b'
     }
 
@@ -576,7 +576,7 @@ Describe 'Initialize-Winget when winget cannot deploy its source package (wgt-gq
         $result.Diagnosis | Should -Be 'Ok'
         Should -Invoke Invoke-AppxRegistration -Times 1 -Exactly
         Should -Invoke Invoke-WingetProcess -Times 2 -Exactly -ParameterFilter { $ArgumentList[0] -eq 'search' }
-        $script:log | Should -Contain "OK: The winget source opens for 'KFI\admin-jmaffiola'."
+        $script:log | Should -Contain "OK: The winget source opens for 'CONTOSO\admin-jmaffiola'."
         Test-Path -LiteralPath $script:sourceStaging | Should -Be $false
     }
 }

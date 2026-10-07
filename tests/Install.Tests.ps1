@@ -3356,7 +3356,7 @@ Describe 'Invoke-WingetInstall with the real winget setup ladder (review finding
     # 'Cancelled' and exited 0, every install then failed with 0x8A15000F, and Winget-AutoUpdate was
     # set up anyway.
     It 'Registers the source package and stops with exit code 2, installing nothing, when the source still cannot be opened after an update that exited 0' {
-        Mock Get-InstallAccountContext { New-TestAccountContext -CrossUser -ProcessUser 'KFI\admin-jmaffiola' -SessionUser 'KFI\tuser' }
+        Mock Get-InstallAccountContext { New-TestAccountContext -CrossUser -ProcessUser 'CONTOSO\admin-jmaffiola' -SessionUser 'CONTOSO\tuser' }
         Mock Invoke-ExternalProcess { New-TestProcessResult -ExitCode 0 -Output @('Updating source: winget...', 'Cancelled') } -ParameterFilter { $ArgumentList[0] -eq 'source' -and $ArgumentList[1] -eq 'update' }
         Mock Invoke-ExternalProcess { New-TestProcessResult -ExitCode -1978335217 -Output @("Failed when opening source(s); try the 'source reset' command if the problem persists.", '0x8a15000f : Data required by the source is missing') } -ParameterFilter { $ArgumentList[0] -eq 'search' }
         # No copy of the source package on this PC; the download is Microsoft's, and Windows refuses
@@ -3376,9 +3376,9 @@ Describe 'Invoke-WingetInstall with the real winget setup ladder (review finding
         Should -Invoke Invoke-ExternalProcess -Times 0 -Exactly -ParameterFilter { $ArgumentList[0] -eq 'install' -or ($ArgumentList[0] -eq 'source' -and $ArgumentList[1] -eq 'reset') }
         $text = $script:messages -join "`n"
         $text | Should -Not -Match 'up to date'
-        $text | Should -Match "ERROR: The winget source cannot be opened for 'KFI\\admin-jmaffiola': 'winget search --source winget' answered 0x8A15000F SOURCE_DATA_MISSING"
+        $text | Should -Match "ERROR: The winget source cannot be opened for 'CONTOSO\\admin-jmaffiola': 'winget search --source winget' answered 0x8A15000F SOURCE_DATA_MISSING"
         $text | Should -Match 'Registering the winget source package \(Microsoft\.Winget\.Source\) for the account failed \(0x80073D19 ERROR_DEPLOYMENT_BLOCKED_BY_USER_LOG_OFF\)'
-        $text | Should -Match 'run the installer while signed in to Windows as .KFI\\admin-jmaffiola., or run the machine phase as SYSTEM with rmm/Invoke-WingetAppSetup\.ps1'
+        $text | Should -Match 'run the installer while signed in to Windows as .CONTOSO\\admin-jmaffiola., or run the machine phase as SYSTEM with rmm/Invoke-WingetAppSetup\.ps1'
         Test-Path -LiteralPath $script:sourceStaging | Should -Be $false
     }
 
