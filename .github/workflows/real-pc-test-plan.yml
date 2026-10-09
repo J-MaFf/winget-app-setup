@@ -1,0 +1,88 @@
+name: Real-PC test plan self-test
+
+# Self-test for e2e/Invoke-RealPcTestPlan.ps1 (bead wgt-gq8.60): the harness an owner runs on a
+# disposable Windows test machine to run PR #285's owner test plan. A GitHub-hosted windows-latest
+# runner is a throwaway VM by construction, so this runs the harness end to end there with
+# -ConfirmDisposableMachine and uploads the report zip, even on failure. It does NOT touch
+# e2e-install.yml's jobs; it runs only when the harness, its tests or this workflow change.
+#
+# Runner facts this relies on (the same the E2E install jobs rely on, see e2e-install.yml):
+#   - windows-latest is Windows Server 2025, elevated by default (the harness's elevation gate
+#     passes, and the installer's SYSTEM scheduled task and the ProgramData link guard work as in
+#     e2e-install-system), and has no %ProgramData%\winget-app-setup, so the link-guard stage runs.
+#   - It ships winget, PowerShell 7, Windows Terminal and the catalog apps Chrome, 7-Zip and Git.
+#     The harness tolerates a preinstalled catalog app (preflight lists them as a warning, and the
+#     first run's app check accepts an 'already installed' skip), so no Remove-PreinstalledApps step
+#     is needed; the uninstaller stage then removes them, PowerShell 7 included.
+#   - The harness itself starts under Windows PowerShell 5.1 (shell: powershell), as on a fresh PC,
+#     and reads the catalog through the module in a child Windows PowerShell, so it needs no
+#     PowerShell 7 of its own.
+#   - The temporary standard user plants its junction from a scheduled task with an S4U logon. An
+#     administrator may register such a task for another account only with that account's
+#     password, so the harness registers it through the Task Scheduler COM API with the user's
+#     random password, kept in memory only (S4U stores none; wgt-gq8.62). The launch needs 'Log on
+#     as a batch job': the user is put in Performance Log Users, which holds it on Windows Server,
+#     and the report's machine facts list who holds the right (secedit /export, read-only). Where
+#     the task cannot be registered or run, the harness plants the junction as the admin and marks
+#     that row SKIP with the failing step and its HRESULT, or 'lacks Log on as a batch job' for
+#     0x80070569; that does not fail the run.
+#   - The step's shell sets $ErrorActionPreference to Stop; the harness sets Continue for itself,
+#     so a child's stderr line cannot stop it.
+#
+# What is uploaded: the report folder and its zip. The throwaway TightVNC test password is written
+# only to the folder next to it named winget-app-setup-localsecrets-<report folder's name>
+# (winget-app-setup-localsecrets-real-pc-report here), which is never zipped or uploaded, and the
+# harness checks that no file in the zip holds it.
+#
+# On this runner winget can open its source, so the harness's source check passes; the blind-winget
+# rows (wgt-gq8.65) are covered by tests/E2ERealPcTestPlan.Tests.ps1's replay of an owner run.
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'e2e/Invoke-RealPcTestPlan.ps1'
+      - 'tests/E2ERealPcTestPlan.Tests.ps1'
+      - '.github/workflows/real-pc-test-plan.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: real-pc-test-plan-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  real-pc-test-plan:
+    runs-on: windows-latest
+    # Backstop above the harness step's own limit, so the upload still runs after that step times
+    # out. The harness installs the catalog, the Windows App Runtime and WAU, then re-runs, runs the
+    # SYSTEM pass, a time-budget pair, diagnostics and the uninstaller (about 45 minutes); every
+    # install run has its own 60-minute budget (-TimeoutMinutes).
+    timeout-minutes: 130
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      # Starts under Windows PowerShell 5.1 (shell: powershell), as a fresh PC does. The harness
+      # exits non-zero if any check failed; the report zip is uploaded either way by the next step.
+      - name: Run the real-PC test plan harness
+        shell: powershell
+        timeout-minutes: 115
+        run: |
+          & .\e2e\Invoke-RealPcTestPlan.ps1 -ConfirmDisposableMachine -ReportPath "$env:RUNNER_TEMP\real-pc-report"
+          exit $LASTEXITCODE
+
+      # Never the winget-app-setup-localsecrets-* folder next to the report folder: that one holds
+      # the TightVNC test password. The paths name the report folder and zip exactly, and the
+      # exclusion keeps that folder out even if a pattern ever widens.
+      - name: Upload the report and zip
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: real-pc-test-plan-report
+          path: |
+            ${{ runner.temp }}\real-pc-report.zip
+            ${{ runner.temp }}\real-pc-report
+            !${{ runner.temp }}\winget-app-setup-localsecrets-*
+          if-no-files-found: warn

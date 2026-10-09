@@ -1,0 +1,28 @@
+# Windows-only commands that winget-app-install.ps1 invokes.
+#
+# build/Build-WingetInstallScript.ps1 checks that every hyphenated command the generated installer
+# calls resolves to a module function or an external command (the undefined-reference guard,
+# issue #154). The commands below cannot resolve on Linux or macOS, so a build there treats them as
+# resolvable and checks every other name normally (review finding P3-48).
+#
+# On Windows this list is not used to resolve anything, and every entry must resolve there, so a
+# name cannot be added here to hide a missing module function. The build warns about an entry the
+# installer no longer calls.
+#
+# One command name per line. Blank lines and lines starting with # are ignored.
+Add-AppxPackage
+Add-AppxProvisionedPackage
+Get-Acl
+Get-AppxPackage
+Get-AppxProvisionedPackage
+Get-AuthenticodeSignature
+Get-CimInstance
+Get-ScheduledTask
+Get-ScheduledTaskInfo
+Get-Service
+Invoke-CimMethod
+Repair-WinGetPackageManager
+Restart-Service
+Set-ScheduledTask
+Start-Service
+Unregister-ScheduledTask

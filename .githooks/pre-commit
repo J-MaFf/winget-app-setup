@@ -1,12 +1,19 @@
 #!/bin/sh
-# Pre-commit drift guard for the generated installer (issue #211).
+# Pre-commit drift guard for the generated installer and uninstaller (issue #211).
 #
 # Mirrors the CI drift check locally: when a staged change can affect the generated
-# winget-app-install.ps1 - the WingetAppSetup module, the build script/fragments, a
-# module manifest (*.psd1), or the installer itself - run
-# build/Build-WingetInstallScript.ps1 -Check and block the commit if the installer
+# winget-app-install.ps1 or winget-app-uninstall.ps1 - the WingetAppSetup module, the
+# build script/fragments, a module manifest (*.psd1), or either generated script itself -
+# run build/Build-WingetInstallScript.ps1 -Check and block the commit if either script
 # is out of sync with the module or any other -Check assertion fails (parse errors,
-# non-ASCII code tokens, undefined references, export-list drift, UTF-8 BOM).
+# non-ASCII code tokens, PowerShell-7-only syntax, undefined references, UTF-8 BOM).
+#
+# The check runs against the STAGED files - exactly what the commit will contain - not
+# the working tree: they are exported with git checkout-index into a temporary
+# directory and -Check runs there. Checking the working tree let a commit through when
+# the developer rebuilt the scripts but staged only the module change (review finding
+# P3-47). git sets GIT_INDEX_FILE for hooks, so `git commit -a` and `git commit <path>`
+# are checked against the index they actually commit.
 #
 # One-time setup (per clone):  git config core.hooksPath .githooks
 # See readme.md ("Why winget-app-install.ps1 cannot drift from the module") for the
@@ -16,8 +23,8 @@
 #
 # POSIX sh on purpose: on Windows this runs under Git for Windows' sh.exe.
 
-# Fast path: exit immediately unless the staged files can change the generated installer.
-if ! git diff --cached --name-only | grep -Eq '^WingetAppSetup/|^build/|^winget-app-install\.ps1$|^.*\.psd1$'; then
+# Fast path: exit immediately unless the staged files can change a generated script.
+if ! git diff --cached --name-only | grep -Eq '^WingetAppSetup/|^build/|^winget-app-(un)?install\.ps1$|^.*\.psd1$'; then
     exit 0
 fi
 
@@ -28,19 +35,46 @@ if ! command -v pwsh >/dev/null 2>&1; then
     exit 0
 fi
 
-if ! pwsh -NoProfile -File ./build/Build-WingetInstallScript.ps1 -Check; then
+# Export the staged snapshot (see the header) and run -Check inside it.
+snapshot=$(mktemp -d 2>/dev/null)
+if [ -z "$snapshot" ] || [ ! -d "$snapshot" ]; then
+    echo "pre-commit: could not create a temporary directory; skipping drift check - CI will enforce it" >&2
+    exit 0
+fi
+trap 'rm -rf "$snapshot"' EXIT
+trap 'exit 1' HUP INT TERM
+
+# Git for Windows: hand git.exe a Windows path rather than relying on MSYS converting the
+# /tmp/... inside --prefix=.
+snapshot_for_git=$snapshot
+if command -v cygpath >/dev/null 2>&1; then
+    snapshot_for_git=$(cygpath -m "$snapshot")
+fi
+
+if ! git checkout-index --all --prefix="$snapshot_for_git/"; then
+    echo "pre-commit: could not export the staged files for the drift check (git checkout-index failed)." >&2
+    exit 1
+fi
+
+if ! (cd "$snapshot" && pwsh -NoProfile -File ./build/Build-WingetInstallScript.ps1 -Check); then
     echo "" >&2
     echo "pre-commit: drift check FAILED (details above)." >&2
     echo "" >&2
-    echo "winget-app-install.ps1 is generated from the WingetAppSetup module and must be" >&2
-    echo "regenerated whenever the module, the build script, or the fragments change:" >&2
+    echo "The check ran against the STAGED files (what this commit contains), exported to a" >&2
+    echo "temporary directory, so paths above point there. A regenerated script that is" >&2
+    echo "not staged still fails it." >&2
+    echo "" >&2
+    echo "winget-app-install.ps1 and winget-app-uninstall.ps1 are generated from the" >&2
+    echo "WingetAppSetup module and must be regenerated whenever the module, the build" >&2
+    echo "script, or the fragments change:" >&2
     echo "" >&2
     echo "    pwsh -NoProfile -File ./build/Build-WingetInstallScript.ps1" >&2
-    echo "    git add winget-app-install.ps1    # stage it together with your module change" >&2
+    echo "    git add winget-app-install.ps1 winget-app-uninstall.ps1    # with your module change" >&2
     echo "" >&2
     echo "If -Check failed on an assertion instead (parse error, undefined reference," >&2
-    echo "non-ASCII code token, export-list drift), fix the offending source under" >&2
-    echo "WingetAppSetup/ or build/fragments/, then re-run the build." >&2
+    echo "non-ASCII code token, PowerShell-7-only syntax), fix the" >&2
+    echo "offending source under WingetAppSetup/ or build/fragments/, re-run the build," >&2
+    echo "and stage both." >&2
     exit 1
 fi
 

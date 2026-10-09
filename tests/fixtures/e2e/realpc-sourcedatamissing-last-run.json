@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "buildId": "1.0.0+5ea1f00d",
+  "startedUtc": "2026-10-06T19:36:05Z",
+  "endedUtc": "2026-10-06T19:44:40Z",
+  "exitCode": 1,
+  "summaryReached": true,
+  "counts": {
+    "installed": 0,
+    "skipped": 2,
+    "deferred": 0,
+    "failed": 9,
+    "notAttempted": 0
+  },
+  "apps": [
+    {"id": "7zip.7zip", "status": "Failed", "reason": "the winget source data is missing; winget exit 0x8A15000F SOURCE_DATA_MISSING, 1 attempt, machine-scope fallback: no", "code": -1978335217, "codeHex": "0x8A15000F", "installerCode": null, "restartRequired": false, "postInstall": null, "postInstallReason": null},
+    {"id": "GlavSoft.TightVNC", "status": "Failed", "reason": "the winget source data is missing; winget exit 0x8A15000F SOURCE_DATA_MISSING, 1 attempt, machine-scope fallback: no", "code": -1978335217, "codeHex": "0x8A15000F", "installerCode": null, "restartRequired": false, "postInstall": null, "postInstallReason": null},
+    {"id": "Adobe.Acrobat.Reader.64-bit", "status": "Failed", "reason": "the winget source data is missing; winget exit 0x8A15000F SOURCE_DATA_MISSING, 1 attempt, machine-scope fallback: no", "code": -1978335217, "codeHex": "0x8A15000F", "installerCode": null, "restartRequired": false, "postInstall": null, "postInstallReason": null},
+    {"id": "Adobe.Acrobat.Reader.32-bit", "status": "Skipped", "reason": "not applicable: ARM64 and 32-bit Windows only; x64 PCs get the 64-bit Reader", "code": null, "codeHex": null, "installerCode": null, "restartRequired": false, "postInstall": null, "postInstallReason": null},
+    {"id": "Google.Chrome", "status": "Failed", "reason": "the winget source data is missing; winget exit 0x8A15000F SOURCE_DATA_MISSING, 1 attempt, machine-scope fallback: no", "code": -1978335217, "codeHex": "0x8A15000F", "installerCode": null, "restartRequired": false, "postInstall": null, "postInstallReason": null},
+    {"id": "Google.GoogleDrive", "status": "Failed", "reason": "the winget source data is missing; winget exit 0x8A15000F SOURCE_DATA_MISSING, 1 attempt, machine-scope fallback: no", "code": -1978335217, "codeHex": "0x8A15000F", "installerCode": null, "restartRequired": false, "postInstall": null, "postInstallReason": null},
+    {"id": "Git.Git", "status": "Failed", "reason": "the winget source data is missing; winget exit 0x8A15000F SOURCE_DATA_MISSING, 1 attempt, machine-scope fallback: no", "code": -1978335217, "codeHex": "0x8A15000F", "installerCode": null, "restartRequired": false, "postInstall": null, "postInstallReason": null},
+    {"id": "Klocman.BulkCrapUninstaller", "status": "Failed", "reason": "the winget source data is missing; winget exit 0x8A15000F SOURCE_DATA_MISSING, 1 attempt, machine-scope fallback: no", "code": -1978335217, "codeHex": "0x8A15000F", "installerCode": null, "restartRequired": false, "postInstall": null, "postInstallReason": null},
+    {"id": "Dell.CommandUpdate.Universal", "status": "Failed", "reason": "the winget source data is missing; winget exit 0x8A15000F SOURCE_DATA_MISSING, 1 attempt, machine-scope fallback: no", "code": -1978335217, "codeHex": "0x8A15000F", "installerCode": null, "restartRequired": false, "postInstall": null, "postInstallReason": null},
+    {"id": "Microsoft.PowerShell", "status": "Failed", "reason": "the winget source data is missing; winget exit 0x8A15000F SOURCE_DATA_MISSING, 1 attempt, machine-scope fallback: no", "code": -1978335217, "codeHex": "0x8A15000F", "installerCode": null, "restartRequired": false, "postInstall": null, "postInstallReason": null},
+    {"id": "Microsoft.WindowsTerminal", "status": "Skipped", "reason": "not applicable: winget cannot self-update Windows Terminal from a session Windows Terminal itself is hosting (issue #271)", "code": null, "codeHex": null, "installerCode": null, "restartRequired": false, "postInstall": null, "postInstallReason": null}
+  ],
+  "autoUpdates": { "status": "Configured", "version": "2.12.0" },
+  "restartRequired": false,
+  "wingetUsable": true,
+  "installEngine": { "requested": "Cli", "used": "Cli", "module": null, "fallbackReason": null },
+  "transcriptPath": "C:\\ProgramData\\winget-app-setup\\logs\\install-20261006-143605.log"
+}

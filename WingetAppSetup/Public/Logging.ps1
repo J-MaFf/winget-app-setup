@@ -71,7 +71,7 @@ function Write-ErrorMessage {
     This function checks if an array has content and formats it as a comma-separated string.
 .PARAMETER AppArray
     The array of app names to format
-.RETURNS
+.OUTPUTS
     A formatted string of app names, or $null if the array is empty
 #>
 function Format-AppList {
@@ -90,26 +90,14 @@ function Format-AppList {
 
 <#
 .SYNOPSIS
-    Displays a formatted table of results, and optionally also in an interactive GUI view.
-.DESCRIPTION
-    Always renders the summary as text via PowerShell's built-in Format-Table, then additionally
-    opens Out-GridView when a caller asked for it and the session can show one.
-
-    The grid view is never offered as a question (issue #230): it used to be a Read-Host that
-    stalled the documented one-liner, so -AutoGridView now just opens it. Text output is
-    unconditional for the same reason — the grid view renders in its own window and is never
-    captured by Start-Transcript, so returning early once it opened would drop the summary from
-    the log of every interactive run.
+    Writes a table of results as text, so it reaches both the console and the transcript.
 .PARAMETER Headers
-    Array of column header names
+    The column names.
 .PARAMETER Rows
-    Array of row data (each row is an array matching the header count)
-.PARAMETER UseGridView
-    Caller explicitly wants the grid view. Warns when Out-GridView is unavailable.
-.PARAMETER AutoGridView
-    Open the grid view whenever the session can show one, silently doing nothing when it cannot.
-    Callers pass the session's effective interactivity here, so an unattended run never opens a
-    window that nothing is around to close. (Formerly -PromptForGridView, which asked first.)
+    The rows, each an array with one value per header.
+.PARAMETER Title
+    The table's name ('Installation Summary', 'Failed Installations', ...). Not printed: it tells
+    a caller or a test which table it captured.
 #>
 function Write-Table {
     param (
@@ -118,10 +106,6 @@ function Write-Table {
         [Parameter(Mandatory = $true)]
         [AllowEmptyCollection()]
         [string[][]]$Rows,
-        [Parameter(Mandatory = $false)]
-        [bool]$UseGridView = $false,
-        [Parameter(Mandatory = $false)]
-        [bool]$AutoGridView = $false,
         [Parameter(Mandatory = $false)]
         [string]$Title = 'Summary'
     )
@@ -136,30 +120,9 @@ function Write-Table {
         $tableData += $obj
     }
 
-    # Text output first, unconditionally: Out-GridView is a window, not console output, so it is
-    # never transcribed (issue #230).
-    $output = $tableData | Format-Table -AutoSize | Out-String
+    # An explicit width: the console's (120 columns on a runner or an RMM agent, none without a
+    # console) cut failure reasons off or emptied the table. Lines are not padded to it.
+    $output = $tableData | Format-Table -AutoSize -Wrap | Out-String -Width 4096
     Write-Host $output.TrimEnd()
-
-    if (-not ($UseGridView -or $AutoGridView)) {
-        return
-    }
-
-    if (-not (Test-CanUseGridView)) {
-        # Only an explicit -UseGridView deserves a warning. -AutoGridView is an offer, not a
-        # request: on a session that cannot show a window, having no window is the right outcome
-        # and not worth a line of noise.
-        if ($UseGridView) {
-            Write-WarningMessage 'Out-GridView is not available. The results are in the text summary above.'
-        }
-        return
-    }
-
-    try {
-        $tableData | Out-GridView -Title $Title -Wait
-    }
-    catch {
-        Write-WarningMessage "Failed to display grid view: $_. The results are in the text summary above."
-    }
 }
 

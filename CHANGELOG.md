@@ -9,12 +9,503 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Diagnosed the 0x80073CF3 "depends on a framework that could not be found" AppX rejection distinctly (issue #279): `Test-AppxMissingFrameworkDependency` (`WingetAppSetup/Private/WingetBootstrap.ps1`) mirrors the existing `Test-AppxDowngradeRejection` (0x80073D06) classifier — it requires the 0x80073CF3 HRESULT together with the missing-framework phrasing or the specific `Microsoft.WindowsAppRuntime.1.8` name, so it stays narrow to the signature two independent GitHub-hosted E2E runs actually reproduced rather than over-matching every 0x80073CF3 (a broad "dependency or conflict validation" code reused for unrelated conflicts). `Invoke-WingetPackageManagerRepair` now returns a parallel `MissingFrameworkDependency` flag in its result hashtable and short-circuits its `-Force` retry the same way it already does for `DowngradeRejected` — retrying cannot conjure a framework that genuinely is not on the machine. `Initialize-WingetSourcesForUser` (`WingetAppSetup/Public/WingetCore.ps1`) surfaces a dedicated remediation warning naming the missing framework and linking to issue #279. This is purely diagnostic/fail-fast — it does not attempt to install the missing framework itself, since there is no verified redistributable for it to deploy safely. Pinning `e2e-install`'s runner off `windows-latest` to `windows-2022` was tried as a workaround for #279 and reverted in the same PR: that pin's own self-validating run failed every catalog app immediately with "No applicable app licenses found" — a distinct, total failure worse than #279's slow partial one, filed separately as issue #282. `e2e-install` stays on `windows-latest`; both issues remain open pending a viable runner target. A third distinct `e2e-install` failure surfaced on this PR's own re-validation run: the first install pass completed cleanly and then an uncaught `Start-Process` error ("The file cannot be accessed by the system") crashed the whole script under 5 minutes later, most likely inside `Wait-WingetLaunchable`'s post-WAU-install probe even though its try/catch appears to cover that call — filed as issue #283 rather than patched blind, since `e2e-install` isn't a required merge check and the root cause needs a real Windows repro to confirm.
+- Real-PC owner-test-plan harness (bead wgt-gq8.60): `e2e/Invoke-RealPcTestPlan.ps1`, one command an
+  owner runs as an administrator on a disposable Windows 10 22H2+ or Windows 11 test machine to run
+  every automatable item of PR #285's owner test plan and get one PASS/FAIL report plus one zip to
+  send back. It starts under Windows PowerShell 5.1, refuses unless elevated and confirmed disposable
+  (`-ConfirmDisposableMachine` for unattended use), and `-WhatIf`/`-Plan` prints the plan and changes
+  nothing. Stages: preflight; the ProgramData link guard; a first unattended install and its re-run;
+  a SYSTEM run through the Endpoint Central machine-phase wrapper (and, with `-IncludeWinGetClient`,
+  the Microsoft.WinGet.Client engine); a time-budget run that exits 9 then finishes; the
+  `-CollectDiagnostics` bundle (checked for secret leaks); and the uninstaller (preview then real).
+  A temporary standard user (random name and password, neither printed) plants the junction from a
+  one-shot S4U task. An administrator may register an S4U task for another account only with that
+  account's password, which `Register-ScheduledTask -Principal` cannot take, so on the runner the
+  registration was refused ('Access is denied') and the 'Junction planted by a standard user' row
+  was SKIP on every machine (wgt-gq8.62). The harness now keeps the password in memory, as a
+  SecureString, until it registers the task through the Task Scheduler COM API
+  (`Register-RealPcPlantTask`; S4U stores no password, and it never goes on a command line), then
+  disposes of it. When the task cannot be registered or run, the SKIP row names the failing step and
+  its HRESULT on one line (e.g. 'registering the S4U task: Access is denied. (0x80070005)'; a failed
+  COM call reaches PowerShell as the exception .NET maps the code to, such as an
+  UnauthorizedAccessException, so the code is read from the text or that exception's HResult), and a
+  task result of 0x80070569 says the user lacks 'Log on as a batch job'. The report's machine facts
+  and `batch-logon-rights.txt` in the stage's evidence list who holds and who is denied that right
+  (`secedit /export`, read-only, temporary file deleted, the temporary user's name and SID hidden).
+  A throwaway TightVNC test password is written only to `manual-steps.txt` in the
+  `winget-app-setup-localsecrets-...` folder next to the report folder (the run prints its exact
+  path), which is never zipped; the harness checks the diagnostics bundle, every file going into the
+  zip, the report itself and the zip itself for it. The installer prints its `was a link` warning
+  before its transcript starts, so each run's console output is kept and searched.
+  `tests/E2ERealPcTestPlan.Tests.ps1` tests the pure parts (stage/dependency logic, the change plan,
+  the gate decision, each stage's check evaluation, the ACL/SDDL comparison, the secret scan, and
+  the report and exit-code logic), and `.github/workflows/real-pc-test-plan.yml` self-tests the
+  harness end to end on a `windows-latest` runner.
+
+  An owner run (2026-10-06, signed in over Remote Desktop as a standard user, the window elevated
+  as an administrator, winget v1.29.380) showed PASS rows that winget could not back up (bead
+  wgt-gq8.65). winget's own registration of its source package for the elevated account failed
+  (0x80073D19), so every install failed with 0x8A15000F, while `winget list` and `winget uninstall`
+  without `--source` only warn and answer 'no package found' (0x8A150014). The harness read that
+  as 'not installed': Preflight passed 'No catalog app installed yet', the time-budget stage passed
+  the removal of 7-Zip that `winget uninstall` never found, and the uninstaller rows passed while
+  the uninstaller skipped every app as not installed and removed Winget-AutoUpdate. Now:
+  - its lookups and its 7-Zip removal name `--source winget` (as does
+    `e2e/Remove-PreinstalledApps.ps1`), so a source that cannot open is no answer, never 'not
+    installed';
+  - Preflight, the first run and the uninstaller stage (before it runs) check that winget can open
+    its source in this account (`winget search --id Microsoft.PowerShell --exact --source winget`,
+    PASS only on exit 0, the code named otherwise; SKIP at Preflight when winget is not on the PC
+    yet, as the check after the first run decides). Preflight's failed check is SKIP, with its
+    code, once the latest check opened the source: that was the PC before the run. While the
+    source cannot open, the rows that ask winget what is installed are SKIP, and the report starts
+    with a warning that names the installer and the uninstaller only when they ran with that blind
+    winget; the run continues for evidence. The uninstaller must then refuse as SourceUnusable: the
+    real uninstall passes only with exit 2 (exit 0 or 3010 fails as 'reported success although
+    winget could not see this account's apps'), each run that printed 'Skipping: <id> (not
+    installed)' fails ('the uninstaller could not see installed apps'), and Winget-AutoUpdate must
+    be kept (removed fails; SKIP when it was not installed);
+  - Preflight records the elevated account and SID, the signed-in user of its session (the
+    explorer.exe owner), the console user, `qwinsta`'s sessions and 'Cross-user elevation:
+    yes/no/unknown' (compared by SID), winget's and App Installer's versions and whether
+    `Microsoft.Winget.Source` is registered for the account, and writes the raw `winget --info`,
+    `winget source list` and every account's registration of the source package to
+    `evidence\0-Preflight\winget-info.txt`;
+  - the removal check fails an uninstall that found no package, and the '-WhatIf changed nothing'
+    row is SKIP when winget listed no catalog app before or after the preview;
+  - the re-run and the SYSTEM run expect an app found already there only when the first run's
+    `last-run.json` recorded it installed or already there; any other app may be installed or
+    found, one SKIP row names them, and the re-run checks that case instead of dropping its row.
+    The owner's SYSTEM stage had failed Adobe Reader, Git and Bulk Crap Uninstaller as 'App
+    already present on the second run' because the first run had failed them;
+  - each stage's evidence has `arp.txt`, the Apps & features entries (both HKLM registry views and
+    HKCU) before Preflight and after each stage that installs or uninstalls, as evidence only, and
+    keeps the first 15 and the last 25 winget logs per source instead of the last 20, with a
+    `README.txt` of the counts;
+  - the run ends with `report.txt`'s exact path, a ready-to-paste
+    `Get-Content -LiteralPath '<path>' -Raw -Encoding UTF8 | Set-Clipboard` line (the path quoted
+    with `CodeGeneration.EscapeSingleQuotedStringContent`, so a typographic apostrophe cannot end
+    the string; UTF-8, so Windows PowerShell does not read the BOM-less report as ANSI), the zip's
+    exact path and a privacy note (the report and the zip name the PC's accounts and their SIDs:
+    send them privately or replace the names). The report's own text is checked for the test
+    password too; when it or the zip holds it, there is no copy line, only 'do not paste or send'.
+    The folder with the test password is `winget-app-setup-localsecrets-<timestamp>` (for a
+    `-ReportPath` folder `<name>`, `winget-app-setup-localsecrets-<name>`) instead of
+    `<report folder>-local`, which a `winget-app-setup-testplan-*` wildcard also matched; the
+    report's manual steps name its exact path.
+
+  `tests/E2ERealPcTestPlan.Tests.ps1` replays the owner's run from fixtures (a `last-run.json` in
+  which every applicable app Failed with 0x8A15000F, and the uninstaller's console output).
+
+  A dry run of the owner's re-test (2026-10-09, read from the code) found rows that could not say
+  who fixed what, and a harness that disagreed with the installer about cross-user elevation (bead
+  wgt-gq8.71). Now:
+  - Preflight's session user is the owner of the oldest `explorer.exe` in its session, the
+    installer's new rule (wgt-gq8.70), with the same order and the same shells passed over, and
+    the `-WhatIf` plan says what a window elevated as another account leaves alone (the Windows
+    Terminal defaults and Windows Terminal itself); FirstRun adds 'The installer detected the cross-user
+    elevation as Preflight did': PASS when the installer printed `Cross-user elevation detected`
+    exactly when Preflight said yes, FAIL when not, SKIP when Preflight could not tell;
+  - under cross-user elevation FirstRun and ReRun expect what the installer does then, machine-wide
+    installs only, as for SYSTEM: an app it would install may also be Deferred as 'winget found no
+    machine-wide installer for it', and Windows Terminal counts as already there only when it is
+    provisioned for every user. A same-user run keeps its expectations;
+  - FirstRun adds 'The installer registered winget's source package for this account': PASS when
+    the run says it registered the package (naming the download URL, or the copy already on the
+    PC), whatever Preflight saw, so a freshly imaged PC where winget could not be started at
+    Preflight, or a Preflight check that ran out of time, still shows the repair. Without that line
+    it is judged only when Preflight's check failed with `0x8A15000F`: FAIL when the source was
+    still closed after the run (quoting the installer's 'cannot be opened for' line), SKIP
+    otherwise, with how to exercise it when the source already opened at Preflight;
+  - Preflight's source row and the report's warning name the check that opened the source after
+    the last failed one, not the latest check: a source the first run opened read 'It opened before
+    the uninstaller';
+  - the uninstaller stage counts an app as kept on purpose only when the uninstaller's console
+    says so (its skip line for PowerShell 7, Windows Terminal, or a per-user app). It used to keep
+    PowerShell 7 and Windows Terminal by default, which hid a PowerShell 7 the Windows PowerShell
+    run should have removed;
+  - when the harness's check before the uninstaller failed but the uninstaller's own check opened
+    the source (`The winget source opens for` in its console), the stage is no longer judged blind:
+    a PASS row quotes that line ('The uninstaller repaired winget's source for this account' when a
+    fix's success line comes before it, 'The uninstaller found winget's source open' otherwise),
+    the usual exit and removal rows apply to the lookups after the uninstall, and the preview row
+    is SKIP, since its lookups ran before the repair. The harness then checks the source again
+    ('after the uninstaller'), so the report's warning and Preflight's row no longer call the
+    uninstaller blind. It used to require exit 2;
+  - the SYSTEM stage also accepts an app deferred again because winget found no machine-wide
+    installer for it, when the cross-user first run deferred it for that reason (new
+    `Update-RealPcSystemRedeferredRow`);
+  - the harness's own winget calls have time limits (`list` 45 s; `search`, `--version`, `--info`
+    and `source list` 120 s, the installer's own source-check limit; `uninstall` 150 s) through
+    `Invoke-RealPcBoundedProcess`, modelled on
+    `Invoke-BoundedProcess`: output read asynchronously, stdin closed, and the program and
+    everything it started stopped at the limit (`taskkill /T` on Windows). One that runs out is no
+    answer, never 'not installed'. The time-budget stage keeps its `winget uninstall` output in
+    `winget-uninstall.txt`;
+  - a new 'Installer build' machine fact names the code under test: the build id in the checkout's
+    `winget-app-install.ps1`, or, with `-UseOneLiner`, the one the first run printed.
+
+  `tests/E2ERealPcTestPlan.Tests.ps1` covers each, with a cross-user first run in new fixtures
+  (`realpc-crossuser-firstrun-console.txt` and `realpc-crossuser-firstrun-last-run.json`).
+- Endpoint Central deployment in two phases (work-order item 34), in `rmm/`. Both are standalone
+  Windows PowerShell 5.1 scripts that need nothing beside them.
+  - **Machine phase.** `rmm/Invoke-WingetAppSetup.ps1` is a Computer Configuration script run as
+    SYSTEM (success codes 0,3010). It relaunches itself in 64-bit Windows PowerShell through
+    Sysnative when the 32-bit agent starts it, downloads `winget-app-install.ps1` from a pinned
+    commit into a folder only SYSTEM and Administrators can change, and runs it only when it
+    matches a pinned SHA256. It logs to `install-<time>-rmm.log`, runs the installer with
+    `-NonInteractive`, and exits with its code unchanged, or 5 when it cannot run it.
+  - **User phase.** `rmm/Invoke-WingetAppSetupUserPhase.ps1` is a User Configuration script run at
+    every sign-in as the user, never elevated. It ends at once, silently, when there is nothing to
+    do. Otherwise, once per machine run, the new `Invoke-WingetUserPhase` installs the apps
+    `last-run.json` lists as Deferred with `winget install --scope user` only (the new
+    `Install-WingetPackage -UserScopeOnly`) and the catalog entry's `installerType`, runs the entry's
+    `postInstall` hook in the user's account, and sets the per-user Windows Terminal defaults
+    (`Set-WindowsTerminalDefaults -PassThru`). It updates the winget source for the account first,
+    works within a 15-minute budget, tries again at later sign-ins up to 3 times per machine run,
+    and logs to `%LOCALAPPDATA%\winget-app-setup\logs`. It uses only a `last-run.json` that SYSTEM
+    or Administrators own and no other account can change (`Get-RunRecordTrustProblem`, checked on
+    the open file). The summary's Deferred line for per-user catalog apps names the user phase.
+  - **Pins.** `build/Set-RmmInstallerPin.ps1 -Commit <commit>` sets the pinned commit and SHA256 of
+    both phases, and refuses an installer older than the user phase. The pins ship empty, and both
+    phases exit 5 until they are set from a commit on `main`.
+  - **E2E.** A third leg, `e2e-install-system`, runs the machine phase as SYSTEM from a 32-bit
+    (SysWOW64) `powershell.exe` scheduled task, with the checkout's installer
+    (`e2e/Invoke-SystemInstallPass.ps1`). It checks the exit code; the 64-bit relaunch, the SHA256
+    check and the exit-code pass-through in the `-rmm.log`; `Auto-updates: Configured` and the
+    framework installed once; `last-run.json` and its Deferred entries (each with a package id and
+    a reason, matching the summary); and that nothing was installed into SYSTEM's own profile. It
+    also checks each catalog app's entry in `last-run.json` against the checkout's catalog, decided
+    as SYSTEM (wgt-gq8.45): Installed or already there (Installed for Chrome, 7-Zip and Git, which
+    the job removes first, so a removal that failed fails this leg), Skipped with its reason where
+    the app does not apply, and Deferred only for per-user work. A missing entry, an entry for an
+    app the catalog lacks, or a record that is not schema 1 fails it too. The per-app checks are
+    tested against `tests/fixtures/e2e/system-last-run.json`, which follows the catalog. The
+    workflow's product paths now include `rmm/**`.
+  - Not yet run on a real PC from Endpoint Central.
+- `rmm/Get-WingetFleetHealth.ps1` and `rmm/Repair-WauLogonTrigger.ps1`, to push from Endpoint
+  Central as SYSTEM (work-order item 36). The probe changes nothing. It reports App Installer
+  versions with each account's install state, whether `Microsoft.WindowsAppRuntime.1.8`
+  8000.616.304.0 or newer is installed, whether the machine-wide `winget.exe` starts (time-limited,
+  and only as SYSTEM: an administrator's run reports `winget=skipped`), Winget-AutoUpdate's task
+  (state, triggers, last result) and the telling lines of its `updates.log`. It ends with a
+  machine-readable `HEALTH:` line and exits 1 on an unhealthy PC. The fix is for PCs set up before
+  the installer stopped adding Winget-AutoUpdate's at-logon trigger: it removes the trigger while
+  keeping WAU's schedule, sets `WAU_UpdatesAtLogon` to 0, and reads both back. It supports
+  `-WhatIf`, ends with a `REPAIR:` line, and exits 1 when the trigger stays or Group Policy would
+  put it back. Both relaunch themselves in 64-bit Windows PowerShell from a 32-bit PowerShell or
+  PowerShell 7, and `tests/RmmFleetHealth.Tests.ps1` checks the logic they repeat against the
+  module's own functions.
+- A diagnostics bundle for failed-run reports (work-order item 35). `-CollectDiagnostics` installs
+  nothing and needs neither winget nor elevation. It runs before the PowerShell 7 bootstrap, so it
+  works under Windows PowerShell 5.1 too. It writes one .zip (`Invoke-DiagnosticsCollection`,
+  `WingetAppSetup/Private/Diagnostics.ps1`) with the latest run's transcripts (the machine phase's
+  `-rmm.log` included), installer logs and `last-run.json`; this account's user-phase state and
+  logs; the Windows build and architecture, the accounts and elevation style, the execution policy
+  and the App Installer, Store and PowerShell Group Policy keys, the pending-restart state, the
+  Windows App Runtime this build pins, and Winget-AutoUpdate's install and task; the end of WAU's
+  `updates.log`; `winget --version` and `--info` (time-limited); and the App Installer and Windows
+  App Runtime packages for every account and provisioned for new ones. Those run in Windows
+  PowerShell, started without PowerShell 7's `PSModulePath` (the new
+  `Invoke-ExternalProcess -RemoveEnvironmentVariable`). Account, computer and domain names,
+  profile folders, the SIDs of real accounts and email addresses are replaced by placeholders, the
+  same in every file and whatever the culture, because the issues are public. A bundle made from a
+  32-bit PowerShell says that its registry values come from the 32-bit view. It saves to the
+  Desktop, or to Public Documents for SYSTEM and cross-user runs. Every failed run (early exits,
+  and summaries that exit 1, 2 or 8) prints the command that makes it:
+  `& ([scriptblock]::Create((irm "https://raw.githubusercontent.com/J-MaFf/winget-app-setup/refs/heads/main/winget-app-install.ps1"))) -CollectDiagnostics`.
+  The install-failure issue form asks for the bundle, the elevation style and the Windows build.
+- Environment checks that stop a run legibly before it changes anything (work-order item 39,
+  `WingetAppSetup/Private/EnvironmentPreflight.ps1`). No new exit codes.
+  - Constrained Language Mode (an App Control for Business or AppLocker policy) stops the run at
+    once with exit code 5 and one line, before the PowerShell 7 bootstrap, and still prints the
+    `RESULT: exit=5 ... log=none` line, from Windows PowerShell 5.1 too. The run used to die later
+    with PowerShell's own errors and an `UNEXPECTED ERROR`.
+  - A Group Policy execution policy of `AllSigned` or `Restricted` overrides the
+    `-ExecutionPolicy Bypass` the installer relaunches itself with. It now stops the PowerShell 7
+    relaunch with exit code 7, before PowerShell 7 is installed, and the elevated relaunch with
+    exit code 4 and no UAC prompt when it is set for the PC. The elevated window checks the policy
+    of the account that approved the prompt: under `AllSigned` or `Restricted` it says so, waits
+    for Enter and exits 4, instead of closing at once with exit code 1. As in PowerShell, a run
+    that a Group Policy startup or logon script (`gpscript.exe`) started is not stopped for it.
+  - `Invoke-EnvironmentPreflight` runs after the elevation gate and before the Winget-AutoUpdate
+    wait. It warns about a proxy the signed-in user has and the run's account (SYSTEM, or another
+    admin) does not, reports a restart that is already pending (the warning moved here), and stops
+    with exit code 2 when App Installer's Group Policy turns winget off
+    (`Write-WingetPolicyBlockMessage`), now before the Winget-AutoUpdate wait.
+  - `-WhatIf` runs every check and says what a real run would do. Exit codes 2, 4, 5 and 7 read the
+    same in the early-exit notice, the issue form and the readme.
+- Declarative catalog entry fields (work-order item 38), checked by `Test-AppDefinitions` before a
+  run uses them (a wrong value stops the run with exit code 3 and names the entry; a field the
+  schema does not know is a warning), in `WingetAppSetup/Private/CatalogSchema.ps1`:
+  - `scope`: `any` (default, the behaviour so far), `machine` (machine scope only, in every run: a
+    package with no machine-wide installer fails with `no machine-scope installer applies to this
+    PC, and its catalog entry allows only a machine-wide install (scope 'machine')` instead of
+    being installed per-user or deferred, and the retry pass does not try it again) or `user`
+    (`--scope user`; `Install-WingetPackage -Scope`). The scope is how the installer installs an
+    app: an app `winget list` already shows, at either scope, is skipped as already installed.
+  - `arch`: the OS architectures the app is for (`X86`, `X64`, `Arm`, `Arm64`), decided by
+    `Test-AppApplicability` with `Get-OSArchitecture` together with the condition, once per run and
+    fail open (`Architecture check for <id> failed (...); treating its arch list as met ...`). The
+    skip line uses `conditionDescription`, or says `for <list> Windows only; this PC is <arch>`
+    (`Get-AppNotApplicableReason`, now also used for condition skips and by the uninstaller).
+  - `userPhase`: per-user apps and settings. As SYSTEM and under cross-user elevation, `userPhase`
+    and `scope = 'user'` apps are `Deferred` before any winget call, with
+    `per-user setup (catalog userPhase): ...` or `per-user app (catalog scope 'user'): ...` as the
+    reason on the app's line and in `last-run.json`, and their own explanation under the summary
+    (`Write-DeferredAppsSummary -PerUserApps`); any other run installs them as usual.
+  - `postInstall`: a scriptblock or function name that configures the app once it is installed
+    (after the install is verified, and on every run that finds it installed; never in a dry run).
+    It returns `Configured`, or `NotConfigured` or `Failed` with a reason (`Invoke-AppPostInstall`,
+    `ConvertTo-AppPostInstallResult`). The run prints `Configured: <id>` or
+    `Not configured: <id> (<reason>)`; a failed or throwing hook makes the app `Failed`
+    (`installed, but its post-install configuration failed (<reason>)`, exit code 1, retried once;
+    the install's restart and exit code stay with the app, and an app that was already installed
+    stays `Skipped` when the retry pass configures it), while `NotConfigured` leaves the exit code
+    alone and adds a `Configuration: NOT DONE for <id> (<reason>) - ...` line under the summary.
+    Each app's entry in `last-run.json` gains `postInstall` and `postInstallReason`. The build's
+    catalog reference guard (`Get-UndefinedCatalogInstallReference`) now checks a `postInstall`
+    function name as it checks `install`. The first catalog app with a hook is `GlavSoft.TightVNC`
+    (see Fixed).
+- The Winget-AutoUpdate gate now checks for the Windows App Runtime the winget release WAU installs
+  actually needs, instead of only the constant `Microsoft.WindowsAppRuntime.1.8 >= 8000.616.304.0`
+  (work-order item 32, product-F4). WAU's `Install-Prerequisites` installs the latest winget-cli
+  release, so a winget that moved to a newer build or another framework family would have passed
+  the gate on a PC with the 1.8 framework and then left winget unusable after WAU's next run.
+  `Get-WindowsAppRuntimeRequirement` (`WingetAppSetup/Private/WauSupport.ps1`) reads the latest
+  release's `DesktopAppInstaller_Dependencies.json` through
+  `https://github.com/microsoft/winget-cli/releases/latest/download/DesktopAppInstaller_Dependencies.json`
+  (the release WAU's `api.github.com` query names, without the API's 60-calls-an-hour limit) with a
+  30-second limit (new operation `WebLookup` in `Get-ProcessTimeoutSeconds`,
+  `Get-WebDownloadTimeoutParameters -Lookup`), and `ConvertFrom-WingetDependenciesJson` takes its
+  `Microsoft.WindowsAppRuntime*` entries (a list per architecture is read too, for the PC's). When
+  the file cannot be read or lists no Windows App Runtime, the run warns and checks for the
+  built-in requirement (`Get-DefaultWindowsAppRuntimeRequirement`); the lookup never stops a run.
+  The warning gives the error's message on one line of at most 300 characters (for an HTTP error,
+  its status line, not the page a proxy or GitHub sent with it). `Get-WindowsAppRuntimeStatus
+  -Requirement` checks every framework the requirement names, by
+  package name (`Get-WindowsAppRuntimePackageInfo -Name`, which accepts only package-name
+  characters because the name goes into the Windows PowerShell query), so a newer family never
+  satisfies a dependency on 1.8, and returns the ones this PC lacks as `Missing`.
+  `Install-WindowsAppRuntimeFramework -Requirement -MissingFrameworks` installs nothing
+  when the pinned framework (`Get-WindowsAppRuntimePin`, now with `FrameworkName`) does not meet
+  every framework the PC lacks (one it already has does not count), with
+  `Windows App Runtime: NOT INSTALLED - the latest winget release needs ...,
+  and the framework this installer installs, ..., does not meet that; a newer version of this
+  installer is needed`; WAU is then skipped (`NOT CONFIGURED`) or reported `AT RISK`, and the run
+  exits 8, unless the PC already has what winget needs. `Install-WingetAutoUpdate` returns the
+  missing framework as `FrameworkName`, and the summary's `NOT CONFIGURED` and `AT RISK` lines name
+  it (unchanged text for 1.8). `-WhatIf` does not look anything up. `e2e/Invoke-InstallPass.ps1`
+  fails an exit 8 whose transcript shows that refusal, for a newer 1.8 build or another family
+  alike (`e2e/TranscriptAssertions.ps1` reads it as `WindowsAppRuntimePinStale`), so the weekly run
+  goes red when the pin has to move. Fixtures:
+  `tests/fixtures/winget-dependencies` (the files of v1.29.380, v1.12.350 and v1.11.510, and a
+  made-up file with a list per architecture).
+- When `Microsoft.WindowsAppRuntime.1.8` is missing, the installer now installs a pinned, verified
+  copy for every user of the PC before it sets up Winget-AutoUpdate (work-order item 31, finding
+  R13-3). A freshly imaged PC, one whose Microsoft Store updates are blocked, and Windows Server lack
+  the framework until something installs it, so such a run used to end with
+  `Auto-updates: NOT CONFIGURED` and exit code 8 and needed a re-run once the Store had updated App
+  Installer. `Install-WindowsAppRuntimeFramework` (`WingetAppSetup/Private/WindowsAppRuntime.ps1`)
+  downloads `Microsoft.WindowsAppSDK.Runtime` 1.8.260921001 (Windows App Runtime 1.8.12, framework
+  8000.994.2142.0) from NuGet.org into a folder limited to SYSTEM and Administrators, takes the
+  framework `.msix` for the PC's architecture (x64, x86 or ARM64) out of it, checks its pinned size
+  and SHA256 (`Get-WindowsAppRuntimePin`) and its Authenticode signature (`Microsoft Corporation`),
+  keeps it open from the hash until it is provisioned, provisions it with
+  `Add-AppxProvisionedPackage -Online -SkipLicense` in Windows PowerShell with a 10-minute limit
+  (`Invoke-AppxProvisioning -TimeoutSeconds`, new operation `AppxProvisioning` in
+  `Get-ProcessTimeoutSeconds`), and then checks again with `Get-WindowsAppRuntimeStatus` (and
+  `Get-AppxProvisionedPackage`, which only warns). It runs on a first install and on a re-run that
+  finds WAU already installed, which is then no longer `AT RISK`. It installs nothing when the run
+  is not elevated, on 32-bit Arm or a Windows build older than 17763, over a provisioned framework
+  of the same or a newer version, or when the all-users check could not run, and it never uses
+  `Repair-WinGetPackageManager -AllUsers` (#265). The whole 150 MB package is downloaded rather than
+  a byte range of it: the framework's offset moves when NuGet re-signs the package, and a proxy can
+  ignore a range request. A failed install is not remembered, so until one succeeds every run on
+  that PC downloads the package again. `Microsoft.WindowsAppSDK.Runtime` is the developer package,
+  published under the Windows App SDK license terms for developers, not one of the end-user runtime
+  installers Microsoft documents for redistribution. When the check after provisioning cannot run,
+  the install counts as done, with a warning, and WAU is set up, as on any run where that check
+  cannot run. The transcript gets a `Windows App Runtime: installed ...` or
+  `Windows App Runtime: NOT INSTALLED - <reason>` line; when the install fails, WAU is skipped as
+  before, exit code 8, and the summary's `Auto-updates:` line is followed by the reason. `-WhatIf`
+  previews it. `New-WauStagingDirectory` takes a `-Prefix` for the folder name.
+  `Invoke-ExternalProcess` takes an `-Encoding` for the program's output (default UTF-8, which
+  winget writes); the time-limited Windows PowerShell child of `Invoke-AppxProvisioning` is read in
+  `[Console]::OutputEncoding`, the console code page Windows PowerShell writes redirected output in,
+  so a localized DISM error keeps its non-ASCII letters in the transcript. That child starts without
+  PowerShell 7's `PSModulePath` (`-RemoveEnvironmentVariable`), so Windows PowerShell loads its own
+  modules.
+  - **E2E.** `windows-latest` ships without the framework, so both passes there are now expected to
+    install it (first pass) and set up Winget-AutoUpdate, and to exit 0. `e2e/Invoke-InstallPass.ps1`
+    accepts exit 8 for the missing framework only when the installer could not try to install it
+    (not elevated, an unsupported Windows build or architecture, or a framework already
+    provisioned), and its message then quotes the transcript's `Windows App Runtime:` line. An
+    install that started and failed (download, checks or provisioning) fails the pass, so a broken
+    framework install turns the run red instead of passing as a skipped WAU.
+    `e2e/TranscriptAssertions.ps1` reads that line (`WindowsAppRuntimeLine`,
+    `WindowsAppRuntimeInstalled`) and whether the install started (`WindowsAppRuntimeAttempted`),
+    quotes the line in the `NOT CONFIGURED` detail, and `-ExpectAllSkippedOnSecondRun` adds the
+    check that the second pass did not install the framework again. New fixtures
+    `first-pass-runtime-installed` and `second-pass-runtime-present`.
+  - The bead's first idea, starting the Store's App Installer update and waiting for it, is not
+    done: the pinned install covers Store-blocked PCs and Windows Server too, and the Store update
+    can take hours.
+  - Checked by the E2E runs on the Windows Server 2025 runner, in all three legs: the signature
+    check passes under PowerShell 7, `Add-AppxProvisionedPackage` reads the file the installer holds
+    open, and the framework and WAU are installed. Not yet checked on a real PC: whether
+    provisioning the framework on its own registers it for accounts that sign in later, and on
+    Windows 10 and Windows 11.
+
+- A whole-run time budget for RMM jobs (wgt-gq8.41, deferred from review finding P3-42), so a job
+  with a hard time limit ends with a report instead of being killed mid-run. `-MaxRuntimeMinutes`
+  (1 to 1440) sets it, or `WINGET_APP_SETUP_MAX_RUNTIME_MINUTES` for the one-liner
+  (`Resolve-InstallerRunBudget`, `WingetAppSetup/Private/RunBudget.ps1`); a `-MaxRuntimeMinutes 0`
+  that is given turns off the variable's budget. The clock starts with the script, before the
+  PowerShell 7 bootstrap, and the deadline goes on the command line to the PowerShell 7 run and the
+  elevated window (`-RunDeadlineUtc`, internal). `rmm/Invoke-WingetAppSetup.ps1` takes
+  `-MaxRuntimeMinutes` too and counts from its own start, before its 64-bit relaunch; with 0, its
+  default, it passes nothing on. Once the budget is used up, the run starts no app install, retry or
+  Winget-AutoUpdate setup (the Windows App Runtime install included). It reports the apps left as
+  `NotAttempted` (a `Not attempted` summary row, `notattempted=` in the `RESULT` line,
+  `counts.notAttempted` in `last-run.json`) and the WAU setup as `Auto-updates: NOT ATTEMPTED`,
+  prints `Time budget: USED UP ...`, and exits with the new code 9 (precedence
+  1 > 2 > 9 > 8 > 3010 > 0). A retry it does not start leaves its app failed. Apps that do not
+  apply are still skipped, and per-user apps in a run for the whole PC still deferred. The waits for
+  a busy Windows Installer last no longer than the budget had left when the step started, the wait
+  for a Winget-AutoUpdate run in progress never lasts past the deadline, and a dry run shows the
+  budget without being cut short. The issue form and the readme explain exit code 9, which is not a
+  success code: the readme says to set the budget about 45 minutes below the RMM tool's limit.
+
+- RMM runs get a non-interactive switch for the one-liner, one run at a time, a machine-readable
+  result and log retention (review findings P3-41, P3-42).
+  - **`WINGET_APP_SETUP_NONINTERACTIVE`.** `1`, `true` or `yes` turns on non-interactive mode, for
+    the `irm | iex` one-liner, which cannot pass `-NonInteractive` (`Test-NonInteractiveRequested`).
+    The PowerShell 7 run the 5.1 bootstrap starts inherits it, and the uninstaller reads it too.
+  - **Exit code 6.** A real, elevated run takes the machine-wide `Global\winget-app-setup-run`
+    mutex (`Lock-InstallerRun`) before its pre-flight checks. A run started while another one
+    holds it exits 6 at once, without waiting for that run or stopping it. The lock is released
+    before any key-press prompt, so a window left open does not block the next scheduled run.
+  - **`RESULT` line and `last-run.json`.** Every real run prints
+    `RESULT: exit=... installed=... skipped=... deferred=... failed=... notattempted=... autoupdates=... restart=... build=... log=...`
+    after its summary or early-exit notice (`Format-InstallerResultLine`). The run that holds the
+    lock writes `%ProgramData%\winget-app-setup\logs\last-run.json` (`schemaVersion` 1: build id,
+    start and end UTC, exit code, counts with `deferred` and `notAttempted`, per-app status, reason
+    and exit code, auto-update status, restart flag, end-of-run winget check, transcript path),
+    through a temporary file and a replacing move. It writes the file once when it takes the lock,
+    with `exitCode` null, so a killed run no longer leaves the previous run's record, and again
+    however it ends. `wingetUsable` is null when the end-of-run check did not run or could not
+    complete.
+  - **Retention.** The run that holds the lock keeps the newest 30 transcripts and the `winget-*`
+    and `pwsh-msi-*` logs of their runs (`Invoke-InstallerHousekeeping`), and removes the
+    installer's temporary copy folders once they are a day old, only from `%SystemRoot%\Temp` (and
+    SYSTEM's temp folders for a SYSTEM run) and only when SYSTEM or Administrators owns them. The
+    5.1 bootstrap now deletes its `irm | iex` relaunch copy when the PowerShell 7 run ends.
+  - The whole-run time budget came later (`-MaxRuntimeMinutes`, above).
+
+- Runs as SYSTEM are supported for the apps that install for the whole PC (review findings P2-24,
+  P3-23, P3-24). An RMM agent such as ManageEngine Endpoint Central runs scripts as SYSTEM, which
+  has no winget of its own (winget is a per-user packaged app that cannot be registered for
+  SYSTEM), so such a run registered, repaired and downloaded App Installer for minutes and then
+  stopped with exit code 2. `Invoke-WingetInstall` now reads once who it installs as
+  (`Get-InstallAccountContext`, built on `Test-IsSystemAccount`), and as SYSTEM:
+  `Test-AndInstallWinget` finds the `winget.exe` that App Installer installed for the PC
+  (`Get-AppxPackage -AllUsers`, status `Ok`, newest version as a version, the PC's architecture
+  first; the `WindowsApps` folder when that query fails or finds none, leaving out any package the
+  query listed with another status) and checks that it starts, trying the next one if not (at once
+  after `0xC0000135`, which `Test-WingetLaunchable` no longer checks again), and
+  `Resolve-WingetExecutable` hands its full path to every winget call; every step that sets winget
+  up for one account is skipped (registering App Installer, `Repair-WinGetPackageManager` and the
+  `Microsoft.WinGet.Client` install, the aka.ms/getwinget download, registering the winget source
+  package); the run is always non-interactive
+  (`Test-EffectiveNonInteractive`); Windows Terminal's #271 console check does not apply, and
+  Terminal counts as installed when it is provisioned for every user (`msixName` in the catalog,
+  `Test-AppxPackageProvisionedForMachine`), where `winget list`, which sees no user's MSIX apps as
+  SYSTEM, made it fail on every run; and the messages no longer call SYSTEM a cross-user elevation
+  or advise signing in to Windows as `NT AUTHORITY\SYSTEM`, and the Windows PowerShell 5.1
+  bootstrap says SYSTEM has no winget command instead of that winget is not on the PC. When no
+  machine-wide `winget.exe` starts, the run exits 2 and says why. `0xC0000135 STATUS_DLL_NOT_FOUND`
+  now has a name in the exit-code table, with a hint about the Visual C++ runtime for SYSTEM. Microsoft does not support
+  the winget command line as SYSTEM; moving SYSTEM runs to its `Microsoft.WinGet.Client` module is
+  a follow-up. Checked as SYSTEM only by the E2E run's SYSTEM leg on Windows Server 2025 (see the
+  Endpoint Central entry), not yet on a Windows 10 or Windows 11 PC. (Since changed: a run as
+  SYSTEM can opt in to the module; see the next entry. `winget.exe` stays the default.)
+
+- An opt-in `Microsoft.WinGet.Client` install engine for runs as SYSTEM (wgt-gq8.42). Microsoft
+  documents the winget command line as unsupported in the system context, and this module as the
+  supported route there. Set `WINGET_APP_SETUP_SYSTEM_ENGINE=WinGetClient`, or run
+  `rmm/Invoke-WingetAppSetup.ps1 -SystemInstallEngine WinGetClient`, which sets the variable for the
+  installer and restores it afterwards. `Cli`, unset or empty keeps `winget.exe`, the default. Any
+  other value is warned about and means `Cli`, and a run that is not SYSTEM ignores the variable
+  and says so.
+  - **The module.** `Initialize-WingetClientModule` (`WingetAppSetup/Private/WingetClientModule.ps1`)
+    downloads Microsoft.WinGet.Client 1.29.380 as its `.nupkg` straight from the PowerShell Gallery,
+    never through `Install-Module`. It checks the size and SHA256 pinned in
+    `Get-WingetClientModulePin`, the package's own id and version, and a valid Microsoft Corporation
+    signature on the module's manifest, cmdlet and engine files. It extracts only the PowerShell 7
+    build and this process's engine, from the same locked handle it hashed, into a new
+    `%ProgramData%\winget-app-setup\wingetclient-<id>` folder that only SYSTEM and Administrators
+    can change, and removes the folder when the run ends; housekeeping removes one a killed run
+    left once it is a day old. The checked package is cached in
+    `%ProgramData%\winget-app-setup\cache` and hashed again on every use. It needs PowerShell 7.4
+    or later, an x64, x86 or Arm64 process, Windows build 17763 or later, and
+    `www.powershellgallery.com` and `cdn.powershellgallery.com` on port 443.
+  - **The engine.** `WingetAppSetup/Private/WingetClientEngine.ps1` runs every module call in a
+    child `pwsh` under `Invoke-ExternalProcess`, so each has a time limit and a hung call is stopped
+    with what it started (new `Get-ProcessTimeoutSeconds` operations: `WingetClientProbe` 3
+    minutes, `WingetClientVersion` 60 seconds, `WingetClientListCheck` 45 seconds; installs keep 30
+    minutes). A probe (`Get-WinGetVersion` and one `Get-WinGetPackage`) must answer first. The
+    installed checks are `Get-WinGetPackage`, and installs are
+    `Install-WinGetPackage -Source winget -MatchOption Equals -Scope System -Mode Silent` with an
+    installer log. `Get-WingetClientResultCode` maps every result onto the winget result code
+    `winget.exe` would have returned, so deferral, retries, the circuit breaker, restarts and
+    failure reasons work as before. The module prints no restart message, so a restart is the
+    installer's own exit code 3010.
+  - **Fallback.** When the module is not ready (no Gallery, a size, hash or signature mismatch,
+    PowerShell older than 7.4, a failed probe), the run prints
+    `WinGet client module: NOT READY - <reason>.`, installs with `winget.exe` as before, and says
+    why next to the summary and in `last-run.json`. The exit code does not change. With the module
+    ready, a machine-wide `winget.exe` that does not start is a warning instead of exit code 2,
+    because the installs no longer need it (Winget-AutoUpdate still does); the end-of-run check is
+    unchanged. The winget
+    source update and reset are skipped then. Winget-AutoUpdate, the uninstaller and the
+    `winget download` path of `Install-PowerShellLatest` keep using `winget.exe`.
+  - **Pin and E2E.** `build/Set-WingetClientModulePin.ps1` checks the pin against the Gallery
+    (`-Check`, exit 1 on a mismatch) or moves it (`-Write`). A fourth E2E leg,
+    `e2e-install-system-winget-client`, runs the SYSTEM pass twice through the machine phase with
+    the engine. It fails unless the module was ready at its pin and installed every app the job
+    removed, `winget list` as the runner account finds those apps, and the second pass takes the
+    module from the cache and finds every app present. It runs the pin check first, without
+    failing on it, and collects the engine's `WinGetCOM-*.log` files with the diagnostics. A probe
+    on the hosted runner (Windows Server 2025, PowerShell 7.6) loaded the module as SYSTEM, listed
+    and installed a package with it; the new leg passed on its first run.
+
+- The E2E install also runs from Windows PowerShell 5.1, in a second job,
+  `e2e-install-windows-powershell` (review finding P3-40). Every step there uses
+  `shell: powershell`, and PowerShell 7 is removed first, so the first pass goes through the
+  bootstrap that installs PowerShell 7 and relaunches the installer, as on a fresh PC, and the
+  second pass finds PowerShell 7 and relaunches.
+  `e2e/Assert-Install.ps1 -ExpectPowerShell7Bootstrap -ExpectPowerShell7Installed` checks that
+  every pass went through the bootstrap and that the first one installed PowerShell 7. On checkout
+  runs, the bootstrap's download of raw `main` for the relaunch is answered with the checkout by an
+  `Invoke-RestMethod` shim that lives only in the Windows PowerShell process, and the build-id
+  check covers the `-bootstrap` transcripts too. Both legs first uninstall the Chrome, 7-Zip and
+  Git that the runner image ships with (`e2e/Remove-PreinstalledApps.ps1`), so the first pass
+  really installs them; every call there has a time limit, and an app that cannot be removed only
+  gets a warning. The new `e2e/Invoke-InstallPass.ps1` starts every pass in both legs and holds the
+  exit-code policy the step scripts used to repeat: 0 and 3010 (OK, restart required) pass, and 1
+  passes only while `KNOWN_PLATFORM_INCOMPATIBLE` is non-empty. The weekly run now runs the
+  readme's one-liner verbatim (`Set-ExecutionPolicy` and the `refs/heads/main` URL), and a test
+  fails if the two drift apart. `report-failure` covers both legs, one section each, and shows the
+  latest 5.1 bootstrap transcript in a section of its own. A Winget-AutoUpdate leg (starting
+  WAU's task and checking that winget still starts) is not added yet; `windows-latest` lacks
+  `Microsoft.WindowsAppRuntime.1.8`, which the installer now installs itself (see above).
+- Diagnosed the 0x80073CF3 "depends on a framework that could not be found" AppX rejection distinctly (issue #279): `Test-AppxMissingFrameworkDependency` (`WingetAppSetup/Private/WingetBootstrap.ps1`) mirrors the existing `Test-AppxDowngradeRejection` (0x80073D06) classifier — it requires the 0x80073CF3 HRESULT together with the missing-framework phrasing or the specific `Microsoft.WindowsAppRuntime.1.8` name, so it stays narrow to the signature two independent GitHub-hosted E2E runs actually reproduced rather than over-matching every 0x80073CF3 (a broad "dependency or conflict validation" code reused for unrelated conflicts). `Invoke-WingetPackageManagerRepair` now returns a parallel `MissingFrameworkDependency` flag in its result hashtable and short-circuits its `-Force` retry the same way it already does for `DowngradeRejected` — retrying cannot conjure a framework that genuinely is not on the machine. `Initialize-WingetSourcesForUser` (`WingetAppSetup/Public/WingetCore.ps1`) surfaces a dedicated remediation warning naming the missing framework and linking to issue #279. This is purely diagnostic/fail-fast — it does not attempt to install the missing framework itself, since there is no verified redistributable for it to deploy safely. Pinning `e2e-install`'s runner off `windows-latest` to `windows-2022` was tried as a workaround for #279 and reverted in the same PR: that pin's own self-validating run failed every catalog app immediately with "No applicable app licenses found" — a distinct, total failure worse than #279's slow partial one, filed separately as issue #282. `e2e-install` stays on `windows-latest`; both issues remain open pending a viable runner target. A third distinct `e2e-install` failure surfaced on this PR's own re-validation run: the first install pass completed cleanly and then an uncaught `Start-Process` error ("The file cannot be accessed by the system") crashed the whole script under 5 minutes later, most likely inside `Wait-WingetLaunchable`'s post-WAU-install probe even though its try/catch appears to cover that call — filed as issue #283 rather than patched blind, since `e2e-install` isn't a required merge check and the root cause needs a real Windows repro to confirm. (Superseded on this branch: the wedge came from the Winget-AutoUpdate run that the installer's own `RUN_WAU=YES` started, and #283 most likely from that run upgrading PowerShell under the running installer; see the `RUN_WAU=YES` entry under Fixed. `Test-AppxMissingFrameworkDependency` and `Wait-WingetLaunchable` are removed (see Removed), and the installer now installs a pinned, verified `Microsoft.WindowsAppRuntime.1.8` when it is missing (see Added). #282 is still open.)
 - The PS7 bootstrap's terminal failure message now recognizes a GitHub-wide 429 throttle (issue #274): `Test-GitHubRateLimitError` (`WingetAppSetup/Private/PowerShell7Bootstrap.ps1`) matches "429"/"Too Many Requests" in the caught error text from the `raw.githubusercontent.com` metadata read and the `aka.ms/install-powershell.ps1` fallback — both of which independently depend on GitHub, so a machine already throttled loses them together. When either sets the flag, the final "PowerShell 7 could not be installed automatically" message explains the shared-throttle cause and suggests `winget source reset --force` (which does not depend on GitHub) instead of just repeating the generic manual-install instructions.
 - Documented a jsDelivr CDN mirror fallback in readme.md for the one-line bootstrap, for when `raw.githubusercontent.com` throttles a shared/corporate NAT egress IP with `429: Too Many Requests` (issue #272).
 - The installer now bootstraps PowerShell 7 when started from Windows PowerShell 5.1 (issue #225) instead of failing fast with manual instructions (#210 behavior): the new 5.1-runtime-safe `Invoke-PowerShell7Bootstrap` (`WingetAppSetup/Private/PowerShell7Bootstrap.ps1`) finds an existing `pwsh` (PATH, then `%ProgramFiles%`/`%ProgramW6432%`/WindowsApps for stale-PATH, 32-bit-host, and MSIX cases) or installs it — winget with agreement flags first, the official `aka.ms/install-powershell.ps1` MSI script as fallback, with interactive consent and a non-admin UAC warning — then relaunches the installer under `pwsh -NoProfile -ExecutionPolicy Bypass` in the same console, forwarding `-WhatIf`/`-NonInteractive`/`-SkipSystemCheck` and propagating the child's exit code. File-based runs relaunch `$PSCommandPath`; `irm | iex` runs re-download the installer into a unique GUID-named temp directory (the in-memory text is unrecoverable under `iex`; the unique directory prevents pre-planting and concurrent-run collisions), which also makes the previously dead-end "iex + non-admin" case self-elevatable. `-WhatIf` without PowerShell 7 present previews the bootstrap and exits 0 without installing anything. Hardened per the adversarial review: every discovered candidate is validated by execution (`Test-PowerShell7Executable` requires `PSVersion.Major >= 7`, rejecting EOL PowerShell 6.x and the 0-byte WindowsApps alias of a broken MSIX — either would otherwise relaunch-loop or false-succeed), a `WINGET_APP_SETUP_PS7_BOOTSTRAP` sentinel fails a re-entered dispatch fast, and a failed `pwsh` launch returns exit 1 instead of the `exit ($null)` = 0 false success 5.1's non-terminating `Start-Process` errors would produce. Covered by a mocked unit suite (`tests/PowerShell7Bootstrap.Tests.ps1`) plus real `powershell.exe` 5.1 integration tests: a poisoned-env `-WhatIf` preview that runs everywhere, and an opt-in live relaunch (`$env:WINGET_APP_SETUP_RUN_51_RELAUNCH_TEST = '1'`) that drives the machine's real pwsh end-to-end.
-- Added manufacturer-aware applicability gating to the app catalog (issue #217): `Get-DefaultAppCatalog` entries can declare an optional `condition` scriptblock plus a human-readable `conditionDescription`, evaluated by `Install-AppWithVerification` before any winget probe on both install passes (including `-WhatIf`). A falsy condition reports the app as `Skipping: <id> (not applicable: <reason>)` in the existing Skipped summary bucket; a throwing condition fails open (warns and installs) so a broken probe can never silently drop an app. `Dell.CommandUpdate.Universal` is gated on `(Get-ComputerManufacturer) -match 'Dell'` (`Dell hardware only`) via the new private CIM seam `Get-ComputerManufacturer`, so non-Dell machines skip it instead of failing its Server-incompatible .NET Desktop Runtime dependency ([#220](https://github.com/J-MaFf/winget-app-setup/pull/220)).
-- Retired the e2e workflow's `KNOWN_PLATFORM_INCOMPATIBLE` skip-list entry for Dell Command Update and restored strict exit-0 install passes (an empty list makes the tolerate-exit-1 branches inert; the containment machinery stays for future runner-only incompatibilities), and made `e2e/Assert-Install.ps1` condition-aware: it evaluates each catalog condition on the machine under test (same fail-open rule), asserts applicable apps as before, and asserts not-applicable apps show their `not applicable` skip line in the latest transcript instead of being expected as installed ([#220](https://github.com/J-MaFf/winget-app-setup/pull/220)).
+- Added manufacturer-aware applicability gating to the app catalog (issue #217): `Get-DefaultAppCatalog` entries can declare an optional `condition` scriptblock plus a human-readable `conditionDescription`, evaluated by `Install-AppWithVerification` before any winget probe on both install passes (including `-WhatIf`). A falsy condition reports the app as `Skipping: <id> (not applicable: <reason>)` in the existing Skipped summary bucket; a throwing condition fails open (warns and installs) so a broken probe can never silently drop an app. `Dell.CommandUpdate.Universal` is gated on `(Get-ComputerManufacturer) -match 'Dell'` (`Dell hardware only`) via the new private CIM seam `Get-ComputerManufacturer`, so non-Dell machines skip it instead of failing its Server-incompatible .NET Desktop Runtime dependency ([#220](https://github.com/J-MaFf/winget-app-setup/pull/220)). (Since changed: it is also limited to x64 Windows, with the reason `Dell hardware with x64 Windows only; winget has no ARM64 installer for it`; see the `arch` entry under Changed.)
+- Retired the e2e workflow's `KNOWN_PLATFORM_INCOMPATIBLE` skip-list entry for Dell Command Update and restored strict exit-0 install passes (an empty list makes the tolerate-exit-1 branches inert; the containment machinery stays for future runner-only incompatibilities), and made `e2e/Assert-Install.ps1` condition-aware: it evaluates each catalog condition on the machine under test (same fail-open rule), asserts applicable apps as before, and asserts not-applicable apps show their `not applicable` skip line in the latest transcript instead of being expected as installed ([#220](https://github.com/J-MaFf/winget-app-setup/pull/220)). (Since changed: it decides applicability with the module's own `Test-AppApplicability`, `arch` lists included; see Changed.)
 - Added a scheduled end-to-end install run on GitHub-hosted `windows-latest` runners (e2e tier 1, issue #214): `.github/workflows/e2e-install.yml` installs the curated catalog for real twice — weekly (Mondays 06:00 UTC) and on manual dispatch via the production `irm <raw main> | iex` path, on e2e-machinery pull requests via the checkout's installer so those changes validate themselves pre-merge — asserting exit 0 both times (the second pass proves idempotence), always uploading the `%ProgramData%` transcripts as an artifact, and, for scheduled/dispatched failures, creating-or-commenting a deduplicated `E2E install run failed` issue with the run URL and transcript tail ([#216](https://github.com/J-MaFf/winget-app-setup/pull/216)).
 - Added the shared post-install assertion script `e2e/Assert-Install.ps1` (reused by e2e tier 2, issue #215): verifies every `Get-DefaultAppCatalog` app via `winget list --exact --id` classified by immediately-captured `$LASTEXITCODE`, the `\WAU\Winget-AutoUpdate` scheduled task, the installed WAU version against `Get-WauPin` at the pin's precision (the WAU MSI registers a DisplayVersion with an extra build segment), and the transcript's presence plus `Installer build` stamp; `-ExpectAllSkippedOnSecondRun` adds the idempotence assertions and `-SkipApps` is a documented, issue-referenced escape hatch for runner-platform incompatibilities. Prints a per-assertion PASS/FAIL table and exits nonzero listing failures ([#216](https://github.com/J-MaFf/winget-app-setup/pull/216)).
 - Added a local pre-commit drift check (`.githooks/pre-commit`, one-time `git config core.hooksPath .githooks` setup) that runs the build's `-Check` when module/build files are staged, and documented the full 8-guard stack behind the generated-installer drift guarantee in readme.md ([#213](https://github.com/J-MaFf/winget-app-setup/pull/213)).
@@ -37,6 +528,218 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `winget-app-uninstall.ps1` is now generated from the `WingetAppSetup` module as a single file,
+  like the installer (wgt-gq8.43, work-order items 10 and 15, review finding P3-11). It needs
+  nothing next to it, and its elevated run is a copy checked against the SHA256 the file had when it
+  started, in a folder only SYSTEM and Administrators can change. Before, it imported the module
+  folder next to it and ran its files in place, unchecked (`Restart-WithElevation -InPlace`, now
+  removed), so files in a user-writable folder could be rewritten while the UAC prompt was up. It
+  still runs under Windows PowerShell 5.1 in the elevated window, with the same parameters and exit
+  codes. Exit 5 now also covers a file that changed before its elevated run, and 4 an execution
+  policy Group Policy sets for the approving account, which the checked copy's window now checks
+  too. Started through `irm | iex` it says it runs only from a file and changes nothing (exit 5, or
+  `$LASTEXITCODE` 5 in an interactive console that stays open).
+  `build/Build-WingetInstallScript.ps1` builds both scripts through one code path
+  (`build/fragments/uninstall-head.ps1` and `uninstall-tail.ps1` around the module); every guard and
+  `-Check` (byte compare, BOM, parse, comment removal, references, 5.1 parse safety) covers both,
+  each guard's report names its script (the comment check names the source file), and nothing is
+  written unless both pass. The uninstaller has no build id. The pre-commit hook checks both staged
+  files, and `.gitattributes` marks the uninstaller `linguist-generated`. New
+  `-UninstallerOutputPath`, defaulting to the folder of `-OutputPath`. The module's only manifest consumers are now the `e2e/` scripts. Tests run the
+  uninstaller's real entry block in a child process (`New-TestUninstallerScript`,
+  `Invoke-TestUninstallerScript`), and `tests/TestHarness.Tests.ps1` refuses a dot-sourced
+  uninstaller as it does the installer. The Windows CI job's timeout goes from 15 to 25 minutes,
+  since every build-guard fixture now builds both scripts.
+- The catalog's architecture gates use the `arch` field (wgt-gq8.44). `Dell.CommandUpdate.Universal`
+  is limited to x64 Windows (`arch = 'X64'`, plus its Dell condition): winget has only Dell's x64
+  build, and on ARM64 it would pair it with the Arm64 .NET runtime. Its skip reason is now
+  `Dell hardware with x64 Windows only; winget has no ARM64 installer for it`. The Adobe Reader
+  split moves from conditions to `arch` lists: `Adobe.Acrobat.Reader.64-bit` for X64,
+  `Adobe.Acrobat.Reader.32-bit` for Arm64 and X86. 32-bit Windows therefore now gets the 32-bit
+  Reader instead of failing the x64-only one. `Google.GoogleDrive` stays ungated: Google serves the
+  same installer to ARM64 PCs, and Drive runs natively on Windows 11 ARM64. On Windows 10 ARM64
+  (end of servicing), which emulates only x86, winget still has no applicable Drive installer
+  (`0x8A150010`); an `arch` list cannot tell it from Windows 11. `e2e/Assert-Install.ps1` decides
+  which apps it expects installed with the installer's own `Test-AppApplicability`, through
+  `Get-CatalogAppApplicability` in `e2e/TranscriptAssertions.ps1`, instead of a copy that read only
+  `condition`. It still expects every app with neither an `arch` list nor a condition installed,
+  whatever the module says, and fails a new `Apps with no arch list or condition apply` assertion
+  when the module skips one. (Since changed: it reads a record taken before each pass; see Fixed.)
+- A run as SYSTEM now prints an `Install engine:` line near its start once `winget.exe` or the
+  module is ready, with or without the opt-in `Microsoft.WinGet.Client` engine (see Added): by
+  default `Install engine: winget.exe (<path>).` (wgt-gq8.42). A run that stops with exit code 2
+  before that prints none, and a dry run that asked for the module prints a `[DRY-RUN]` line
+  instead. `last-run.json` gains `installEngine` (`requested`, `used`, `module`,
+  `fallbackReason`; `requested` and `used` are `Cli` in a run that did not ask for the engine)
+  and, for each app, `installerCode` (the installer's own exit code when the engine ran an
+  installer, otherwise `null`). Both are additions, so `schemaVersion` stays 1.
+- The generated `winget-app-install.ps1` leaves out the comments of the module and of the entry
+  block, `build/fragments/tail.ps1` (work-order item 30, review finding P3-53): 439 KB and 11,111
+  lines instead of 867 KB and 17,766, so every `irm | iex` run downloads about half as much.
+  `build/Build-WingetInstallScript.ps1` removes the comments with the PowerShell tokenizer
+  (`Remove-PowerShellComment`), and only those that end their line, so a `#` inside a string,
+  here-string or regex stays, as would a `#Requires`; `build/fragments/head.ps1` (the script's
+  help) is kept as it is. A new build check fails the build when removing the comments changed the
+  code tokens of a module file or of `tail.ps1` (compared case-sensitively), and the parse, ASCII
+  and PowerShell-7-syntax guards now name the source file and line behind each line they report.
+  Every function in the installer has the same syntax tree as before. A change to a comment in the
+  module or `tail.ps1` alone no longer changes the installer or its build id.
+- The module's comments are shorter (work-order item 30, review finding P3-53): the incident
+  narratives in its help and inline comments now say what the code does and why in a few lines,
+  with the history left to the commit messages and this changelog (6,508 comment lines and 408 KB
+  down to 4,763 and 264 KB). The comment-based help of every module function uses `.OUTPUTS`
+  instead of `.RETURNS`, an unknown keyword that made `Get-Help` ignore the whole help block, so
+  `Get-Help` now reads the help of all 258 functions instead of 56; a test keeps it that way. No
+  code changed: the generated installer is byte-identical.
+- Auto-updates now count as set up only when Winget-AutoUpdate's `\WAU\Winget-AutoUpdate` task
+  exists, is enabled and has an enabled trigger (`Get-WauTaskHealth`), checked after installing WAU
+  and on every run that finds it already installed (review finding P3-36). WAU's registry key, or
+  `msiexec` exit 0, used to be enough, so a machine whose task was missing or disabled showed a
+  green `Auto-updates:` line and never updated. Otherwise the summary shows
+  `Auto-updates: UNHEALTHY - <reason>`, and `Install-WingetAutoUpdate` returns the new status
+  `Unhealthy`. A task the Task Scheduler query cannot read is reported as unknown ("it is not known
+  whether apps will update automatically") with a pointer to Task Scheduler, not as broken with
+  advice to reinstall WAU. The task's state, triggers, last run and result, and the last 20 lines
+  of WAU's `updates.log`, go to the transcript (`Write-WauTaskHealth`). The installer does not
+  repair the task.
+  - **Exit code 8.** The apps installed but auto-updates are not configured or will not run: the
+    `Auto-updates:` line is `FAILED`, `NOT CONFIGURED`, `AT RISK` or `UNHEALTHY`.
+    `Get-InstallerExitCode` now ranks 1 > 2 > 8 > 3010 > 0, and 1 > 2 > 9 > 8 > 3010 > 0 with the
+    time budget's exit code 9 (see Added). A machine without
+    `Microsoft.WindowsAppRuntime.1.8` that the installer could not install it on (see Added)
+    therefore exits 8 even when every app installed.
+  - **`msiexec` logs** (P3-37). WAU's install and uninstall run through `Invoke-WauMsiexec`, which
+    writes a verbose log (`wau-msi-<install|uninstall>-<time>-<attempt>.log`) to the logs folder,
+    names it on failure, and gives the uninstall the same time limit and 1618 wait as the install.
+  - **Quieter transcripts** (P3-38). The 'task not found' probes no longer write
+    `PS>TerminatingError(Get-ScheduledTask)` into every transcript, which #283's was misread as.
+  - **E2E.** `e2e/Invoke-InstallPass.ps1` accepts exit 8 only when the pass's own transcript says
+    WAU was skipped because `Microsoft.WindowsAppRuntime.1.8` is missing. Before the installer
+    installed the framework itself (see Added), that was every pass on `windows-latest`.
+
+- A run as SYSTEM or under cross-user elevation no longer installs an app at winget's default
+  (per-user) scope (review finding P3-22). An app with no machine-scope installer used to be
+  retried at the default scope, which put it into SYSTEM's own profile or the elevating admin's
+  instead of the signed-in user's, and the check, run as that same account, reported it installed.
+  `Install-WingetPackage -MachineScopeOnly` now stops there, and the app is reported as `Deferred`:
+  a new summary row, a line saying what can still install it (only the signed-in user's own
+  account: this installer run as that user when the account is an administrator, otherwise a
+  per-user deployment), and no effect on the exit code (it counts neither as installed nor as
+  failed). Under cross-user elevation, Windows Terminal is decided from whether it is provisioned
+  for every user too, not from the admin's `winget list`. In a signed-in user's own run the
+  fallback stays, and a successful one now says the app was installed for that account only.
+
+- The Windows Terminal step no longer configures the elevating admin account (review finding
+  P3-21). Under cross-user elevation it wrote the admin's `settings.json` and
+  `HKCU:\Console\%%Startup` delegation values, behind a 6-line warning banner and a closing
+  warning. Both settings are per-user, so the step is now skipped, with one line, when the process
+  account is not the logged-on user and when the run is SYSTEM (as under an RMM agent; the new
+  private `Test-IsSystemAccount` in `WingetAppSetup/Private/Elevation.ps1` detects it). When no
+  console user is reported, the step runs as before. It never writes to another user's profile or
+  registry hive.
+- `e2e/Assert-Install.ps1` reads the transcripts through functions in the new
+  `e2e/TranscriptAssertions.ps1`, which `tests/E2EAssertions.Tests.ps1` tests against sample
+  transcripts in `tests/fixtures/e2e` (saved as `.txt`, because the repository ignores `*.log`)
+  (review finding P3-39). The containment check now reads each run's final outcome: the summary's
+  `Failed` row plus every failure line the retry pass did not recover, including the
+  `Winget list timed out` and `Verification timed out` lines it used to miss. A first-pass failure
+  that the retry pass recovered no longer fails it (the detail names it), and a transcript without
+  a summary (an aborted run or an early exit) now fails instead of passing with no failed apps. The
+  Windows PowerShell 5.1 `-bootstrap` transcripts are kept apart, so they are no longer taken for
+  the latest run. A test checks that the installer still writes every message the parser keys on.
+- The end-to-end install run (`.github/workflows/e2e-install.yml`) now also runs on pull requests
+  that change the product (`WingetAppSetup/**`, `build/**`, `winget-app-install.ps1`), not only on
+  changes to the workflow or `e2e/**`, so a module change gets a real install before it reaches the
+  one-liner on `main` (review finding P2-7). Every pull request starts the workflow, and a `changes`
+  job decides whether to install; if that job does not succeed, the install runs anyway. The filter
+  is a job rather than a `paths:` filter so that `e2e-install` can become a required check: a job
+  skipped by its `if:` reports success, while a workflow skipped by `paths:` reports no status.
+  Dispatched runs now install the checkout instead of raw `main`, so
+  `gh workflow run e2e-install.yml --ref <branch>` tests that branch. Pull-request and dispatched
+  runs pipe the checkout to `iex` in the first pass, like the one-liner, and run it with `pwsh -File`
+  in the second, like a clone or RMM run; before this change, pull-request runs used `-File` for both
+  passes. Only the weekly run still fetches raw `main`. On checkout runs,
+  `e2e/Assert-Install.ps1 -InstallerPath` checks that every pass's transcript logged the checkout's
+  build id. Runs are grouped per ref: a pull-request push can no longer cancel a pending weekly run,
+  and each pull request's run is cancelled by the run for its next push. The `E2E install run failed`
+  issue is filed only for scheduled runs and runs dispatched on `main`.
+- Kept fork pull requests off the self-hosted win-test runner (review finding P2-20).
+  `windows-tests.yml` ran every pull request on that persistent runner, forks included, and the
+  runner runs jobs elevated. The `pester` job now picks its runner on each run. Pushes to `main`,
+  manual dispatch and pull requests from a branch of this repository stay on
+  `[self-hosted, windows]`. Fork pull requests, including those whose fork has been deleted, and any
+  other run go to GitHub-hosted `windows-latest`. The job id is unchanged, so `pester` is still the
+  required check on `main`. A new `hosted` dispatch input runs the `windows-latest` leg on demand. A
+  fork pull request that edits the workflow can still choose its own runner, because a
+  `pull_request` run uses the PR's copy of the file. Closing that gap needs the "Require approval
+  for all external contributors" setting and a job-started hook on the runner that refuses fork
+  pull request jobs.
+- Pinned `claude.yml`'s call to the shared Claude workflow in
+  [J-MaFf/.github](https://github.com/J-MaFf/.github) to a commit SHA (`e5f8b3f4`, `main` as of
+  2026-09-15) instead of `@main` (review finding P3-19). An edit to that workflow file now reaches
+  this repository's write token only after someone reads it and moves the pin. The pin does not
+  cover what that workflow pulls in when it runs: `anthropics/claude-code-action@v1`,
+  `actions/checkout@v7` and the git-policies text it fetches from `J-MaFf/J-MaFf.github.io` at
+  `main` still follow their tags or branch until J-MaFf/.github pins them. `secrets: inherit` also
+  stays, so every repository secret still reaches the shared workflow: that workflow declares no
+  `workflow_call` secrets, and a caller can pass a secret by name only when the callee declares it.
+- `Invoke-WingetInstall` now returns its exit code as an `[int]` instead of calling `exit` itself,
+  and the generated entry script exits with the returned code (review finding P3-4 and the exit part
+  of P3-5, wgt-gq8.6; P3-5's other part, one helper for the near-duplicate first-pass and retry-pass
+  loops, is still open). The codes do not change, and neither do the abort guard's cases: an aborted
+  run still exits 5, Ctrl+C at the final prompt keeps the run's code, and an interactive `irm | iex`
+  console stays open after a success or an unexpected error. An `exit` inside the function used to
+  end the Pester process, so its exit paths were pinned only by regexes over its source, which broke
+  on any rewording yet let a real regression through. The tests now run those paths and assert the
+  returned code: failed and recovered apps, winget unusable at the end of the run, winget
+  unavailable, a bad catalog, a declined or impossible elevation, the winget deadlock, the
+  retry-pass messages (#237) and the summary rows. The summary tests used to check their own inline
+  copy of the summary code. One AST check remains, guarding that the function never calls `exit`
+  again. Tests no longer depend on whether the runner is elevated: they mock `Test-IsAdmin`. Before,
+  the #232 IEX dry-run tests skipped on elevated runners and the retry-pass tests on non-elevated
+  ones, so the #232 regression tests never ran in CI. The #226/#229 IEX test now overrides
+  `Test-IsAdmin` in its child process and runs on every runner. New child-process tests check that
+  the entry script exits with the returned code under `-File` and `irm | iex`, ignores values leaked
+  into the output stream before it, does not exit after a successful `irm | iex` run (so the
+  caller's console stays open), and still exits 1 when a pre-flight check fails. Code that imports
+  the module and calls `Invoke-WingetInstall`
+  itself now gets the code back as the return value: a failed run (1, 2 or 3) no longer ends the
+  calling script, so a wrapper run with `pwsh -File` exits 0 unless it passes the code on
+  (`exit (Invoke-WingetInstall -NonInteractive)`), and at an interactive prompt the code is printed.
+  Called from the imported module without elevation, the function now returns a code instead of
+  nothing (4: see the elevation entry under Fixed).
+- The build guards now catch three more mistakes locally instead of leaving them to Windows CI
+  (review findings P3-46, P3-47, P3-48). `build/Build-WingetInstallScript.ps1` (build and `-Check`)
+  rejects syntax that only PowerShell 7 parses: `??`, `??=`, `?.`, `?[`, the ternary `?:`, `&&` /
+  `||`, the background operator `&` (`Get-Process &`) and `clean { }` blocks. Windows PowerShell
+  5.1 parses the whole installer before it runs any of it, so one such token anywhere broke the
+  one-liner before the PowerShell 7 bootstrap, and only Windows CI's real 5.1 parse test noticed.
+  The guard reads token kinds and the AST, so the same characters inside strings, comments and
+  regexes still pass, and so does the call operator `& $cmd`. The undefined-reference guards
+  (#154, and the catalog `install` names) now also run on Linux and macOS instead of being skipped:
+  the Windows-only cmdlets the installer calls are listed in the new
+  `build/windows-only-commands.txt` and count as resolvable there, every entry must resolve on
+  Windows, and an entry the installer no longer calls draws a warning. The pre-commit hook runs
+  `-Check` against the staged files (exported with `git checkout-index`) instead of the working
+  tree, so a module change committed without its regenerated installer is blocked even when the
+  working tree was rebuilt. Covered by the new `tests/BuildGuards.Tests.ps1`.
+- The Pester suite now runs on Linux and macOS, so a local run there shows a new failure instead of
+  hiding it among about 100 environment failures (wgt-gq8.5). `tests/TestHelpers.ps1` defines a
+  stand-in for each Windows-only command the tests mock (`Get-AppxPackage`, `Add-AppxPackage`,
+  `Get-CimInstance`, `Get-/Set-/Unregister-ScheduledTask`, `Repair-WinGetPackageManager`, `winget`,
+  `powershell.exe`), only where the command is missing, so Windows still mocks the real cmdlets.
+  Each stand-in declares the real parameter names that `-ParameterFilter` blocks read (and the real
+  `CimInstance` types for the scheduled-task objects) and throws like a missing command when called
+  without a `Mock`. TestHelpers also sets the Windows folder
+  variables when they are unset. Tests whose `C:\` paths reached `Join-Path` now use `TestDrive`;
+  off Windows those paths had become `$null`, so several `Find-PowerShell7`,
+  `Resolve-WingetExecutable` and Winget-AutoUpdate tests failed or passed without checking
+  anything. `Elevation`, `GraphicalTools`, `Install`, `Logging` and `WingetCore` tests no longer
+  dot-source the generated `winget-app-install.ps1` over the module source, which made them test the
+  last build instead of the code being edited. The new `tests/TestHarness.Tests.ps1` enforces all of
+  this. A Linux run went from 113 failures to 2: `Write-Table` printed nothing without a console
+  (wgt-gq8.11) and the IEX dry-run test depended on real elevation (wgt-gq8.6). Both are fixed, so
+  the whole suite passes on Linux.
 - `claude.yml` now calls the shared reusable Claude workflow in [J-MaFf/.github](https://github.com/J-MaFf/.github) instead of carrying its own copy ([#261](https://github.com/J-MaFf/winget-app-setup/pull/261))
 - Follow-up hardening from the 2026-07-17 integration mega-review (issue #255): the pre-elevation `Invoke-WingetSourceProbe` call in `Invoke-WingetInstall` now passes `-TimeoutSeconds 30` instead of the function's 120s default, since its result is discarded and `Initialize-WingetSourcesForUser` re-probes for real after elevation anyway; the `-WhatIf`-never-elevates invariant is checked once at the top of `Invoke-WingetInstall`'s non-admin block instead of once per execution-context branch, so a future branch cannot forget it; `Test-WingetPackageInstalled` now joins `winget list` output lines with a newline instead of an empty string before boundary-matching a package id, closing an artificial-seam false-negative the empty join could theoretically create; `Test-IsAdmin`'s docstring now explains why fail-open (assume elevated on an unexpected exception) is the right direction at its two elevation-gating call sites rather than just describing the mechanism; the build's two AST-walking reference guards (`Get-UndefinedCommandReference`, `Get-UndefinedCatalogInstallReference`) now share one `Get-UndefinedName` resolution loop instead of each carrying its own copy; `AppCatalog.ps1`'s schema docs and `InstallVerification.ps1`'s `& $App.install` dispatch site now cross-reference the build guard that validates catalog-carried function names, so a future string-carried field (e.g. `uninstall`, `verify`) doesn't reopen the issue-#236 blind spot silently; `PowerShell7Bootstrap.ps1`'s 5.1-safety header now lists `Test-IsAdmin`/`Get-CurrentWindowsPrincipal`/`Get-WingetAgreementArgs` among the helpers it depends on; repo CLAUDE.md documents the discovery-time `TestHelpers.ps1` dot-source pattern `EntryPoint.Tests.ps1`/`Install.Tests.ps1` use; two `Test-WingetPackageInstalled` timeout assertions in `tests/WingetCore.Tests.ps1` that were strictly subsumed by more specific tests added later in the same file were removed; and `Invoke-WingetInstall`'s merged pre-elevation comment block was split back into its two separate narratives (the source-update probe and the admin check) instead of reading as one glued paragraph.
 - Consolidated the `IsInRole('Administrator')` check — copy-pasted across `WingetAppSetup/Public/Install.ps1`, `winget-app-uninstall.ps1`, and `WingetAppSetup/Private/PowerShell7Bootstrap.ps1`, with already-diverged failure behavior on an unexpected exception (full-repo review finding, 2026-07-16) — into one shared, exported `Test-IsAdmin` (`WingetAppSetup/Public/Elevation.ps1`), backed by the new private `Get-CurrentWindowsPrincipal` (`WingetAppSetup/Private/Elevation.ps1`) so the underlying static .NET call can be mocked in tests. All three call sites now use `Test-IsAdmin`, which fails safe (warns and returns `$true`) if the identity/role check throws — previously only the PowerShell 7 bootstrap had that protection; the installer and uninstaller would have let the exception propagate. Non-exception behavior is unchanged at every call site.
@@ -65,6 +768,76 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
+- Removed `specs/` and `Test-WindowsTerminalConfiguration.ps1` (work-order item 29, review finding
+  P3-52). The ten specs were the one-shot inputs for the fixes of issues #232 to #241, all shipped
+  in #254. They had no status line and cited line numbers that have long moved, so an agent could
+  take them for open requirements. They stay in git history (`git show 673a09c`) and in those
+  issues. The Windows Terminal smoke script at the repository root kept its own list of
+  `settings.json` paths and parsed the file with plain `ConvertFrom-Json` instead of the module's
+  JSONC helper; it had no tests, and nothing referenced it.
+- Removed the summary grid view and the module that provided it (work-order item 26, review
+  findings P3-43, P3-45). An interactive run opened the installation and uninstall summaries in an
+  `Out-GridView` window as well as the text table, and the window held the run until it was closed;
+  it only repeated the table, which is in the console and the transcript either way, and never
+  reached the log. To provide it, `Test-AndInstallGraphicalTools` (`WingetAppSetup/Private/GraphicalTools.ps1`)
+  installed the NuGet provider and `Microsoft.PowerShell.GraphicalTools` for all users from the
+  PowerShell Gallery wherever `Out-GridView` was missing (in-box in PowerShell 7 on Windows, so on
+  the target PCs that branch never ran). Gone with it: `Test-CanUseGridView`, `Write-Table`'s
+  `-UseGridView` and `-AutoGridView`, `Invoke-WingetUninstall`'s `-NonInteractive` (it gated only
+  the grid view; `winget-app-uninstall.ps1 -NonInteractive` still keeps the UAC prompt away), the
+  dry run's `Out-GridView is not available` line, and `Out-GridView` in
+  `build/windows-only-commands.txt`. The installer's `-NonInteractive` still skips the final key
+  press, the TightVNC question and the UAC prompt, and still adds `--silent`. The grid view was
+  what held the uninstaller's elevated window open, so `winget-app-uninstall.ps1` now ends with
+  `Press any key to exit...` when someone is at the console, as the installer does: that window
+  closes as soon as the run ends, and the uninstaller keeps no transcript, so the summary used to
+  vanish with it. Its `-NonInteractive`, a run as SYSTEM and a CI run do not wait, and Ctrl+C at the
+  prompt keeps the run's exit code instead of exiting 0.
+- Removed dead helpers and modes (review finding P3-43): `Get-WindowsTerminalSettingsPath`, which
+  nothing called, and `Test-WingetPackageInstalled`'s mode without `-TimeoutSeconds`, which returned
+  a plain `[bool]` under a 2-minute limit and read a winget that could not start, or that ran out
+  of time, as "not installed". No caller used it; `-TimeoutSeconds` is now required, the result is
+  always the hashtable, and the `WingetList` time limit went with it (the readme's time-limit table
+  no longer lists "other `winget list` calls"). Also removed the Pester tests that only asserted
+  that already-removed functions stayed removed (the old winget-setup ladders, the msstore-era
+  source-trust helpers, `ConvertTo-CommandArguments`). `Write-Prompt` stays: it is the seam the tests
+  use to stop a run at its final key press. `Convert-JsoncToJson` stays (PowerShell 7.6's
+  `ConvertFrom-Json` rejects a comment between a key and its colon), and so does the dormant
+  MSIX/DISM provisioning path.
+- Removed the module's export list and its build check (review finding P3-44).
+  `WingetAppSetup.psd1` exports every function (`FunctionsToExport = '*'`, and the psm1 exports
+  `'*'` instead of reading the manifest), so `winget-app-uninstall.ps1` and `e2e/Assert-Install.ps1`
+  get every function, `Private/` ones included, and moving a function between `Public/` and
+  `Private/` changes nothing else. (The uninstaller has since become a generated single file that
+  imports nothing; see Changed.) The explicit list had to match `Public/*.ps1` exactly, which
+  `build/Build-WingetInstallScript.ps1` asserted in build and `-Check` modes (#191: a function
+  missing from it failed only at the uninstaller's prompt); with `'*'` there is nothing to drift,
+  and `tests/EntryPoint.Tests.ps1` checks that a manifest import exports every function the module
+  defines.
+- Removed the aka.ms/getwinget download rung and the source.msix registration rung (review findings
+  P3-25, P3-31), with `Test-AndInstallWinget`, `Initialize-WingetSourcesForUser`,
+  `Test-WingetSources`, `Test-WingetSourceHealth` (the `winget source list` and `winget search 7zip`
+  checks), and the text classifiers `Test-AppxDowngradeRejection` and
+  `Test-AppxMissingFrameworkDependency`. The download saved App Installer to a fixed file name in
+  `%TEMP%` and registered it with `Add-AppxPackage`, without the frameworks it needs and through the
+  per-account deployment that 0x80073D19 blocks under cross-user elevation;
+  `Repair-WinGetPackageManager -Latest` installs the same bundle with its frameworks, and the run it
+  once rescued (#265) is now rescued by registering the App Installer already on the PC. The
+  source.msix registration was the same per-account deployment, which `winget source update` and
+  `winget source reset` make themselves (wrong: see the `0x8A15000F` entry under Fixed, which brings
+  a checked source-package registration back). `Test-AndInstallWingetModule` is private now and installs
+  the module only for the repair. The `WingetSourceList` and `WingetSearch` time limits went with
+  their checks (`WingetSourceUpdate` is the source update's).
+- Removed the launch-resilience code that existed to survive the Winget-AutoUpdate run the
+  installer used to start mid-run (`RUN_WAU=YES`, removed earlier on this branch), now replaced by
+  the run-level circuit breaker under Fixed (review findings P2-10, P3-7, P3-10):
+  `Get-ConflictingDesktopAppInstallerVersions` and the #279 deadlock gate in `Invoke-WingetInstall`
+  (it read the current user's AppX view and never fired on the real wedge; counting versions with
+  `-AllUsers` instead would fail every app on multi-user desktops where users have different App
+  Installer versions), `Wait-WingetLaunchable`, and the `-BypassAlias` path of
+  `Resolve-WingetExecutable` with its three call sites (launching `winget.exe` from the App
+  Installer package folder failed with `Access is denied` in every E2E run and never recovered a
+  launch). `Resolve-WingetExecutable` now returns `winget`. Their tests went with them.
 - Removed the orphaned PATH-mutation helpers in `WingetAppSetup/Private/Environment.ps1` — `Add-ToEnvironmentPath`, `Test-PathInEnvironment`, `Test-PathListContainsEntry`, `Get-PersistedEnvironmentPath`, and `Set-PersistedEnvironmentPath` — dead since the homegrown updater that used them was removed (#168) and PATH mutation was deliberately dropped from the install path (issue #179); a repo-wide grep found zero remaining callers outside their own dedicated tests. The file's two still-live functions, `Get-WindowsBuildNumber` and `Get-ComputerManufacturer`, move to the renamed `WingetAppSetup/Private/SystemInfo.ps1`; their tests move from `tests/Environment.Tests.ps1` to `tests/SystemInfo.Tests.ps1` alongside the deletion of the five orphaned functions' tests.
 - Removed five tautological tests found by the 2026-07-08 review (issue #192): two `Should -BeOfType` assertions on framework constants in the 'Administrator check' context, two mock-then-assert-the-mock 'Winget check' tests, and a `Test-CanUseGridView` test whose only assertion was wrapped in `if ([Environment]::UserInteractive)` and asserted the opposite of its name. Each behavior they named is now pinned by a falsifiable replacement (the `Invoke-WingetInstall` admin gate and `Exit 2` winget gate structurally; the grid-view interactivity guard via its definition), the unfalsifiable `Write-Table` non-interactive prompt test was rewritten against the real `Test-CanUseGridView` seam, and the forbidden conditional `if (-not (Get-Command Out-GridView...))` stub was replaced with an unconditional test double plus `Mock` in `BeforeEach` ([#209](https://github.com/J-MaFf/winget-app-setup/pull/209)).
 - Removed the dead `ConvertTo-CommandArguments` helper (`WingetAppSetup/Private/Environment.ps1`, ~45 lines) and its 4 Pester tests — a remnant of the removed homegrown updater with zero production callers that still shipped in every generated installer ([#205](https://github.com/J-MaFf/winget-app-setup/pull/205)).
@@ -73,6 +846,820 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Cross-user elevation is now detected over Remote Desktop (wgt-gq8.70). Since issue #159 the
+  installer and the uninstaller took the signed-in user from `Win32_ComputerSystem.UserName`, which
+  Microsoft documents as the console's user: over Remote Desktop it is empty. On the owner's real PC
+  (2026-10-06, signed in over Remote Desktop as a standard user, the window elevated as an admin
+  account) the console had no user, so the run counted as a same-user run. A dry run of the
+  owner's re-test (2026-10-09) found what that switches off: no `Cross-user elevation detected`
+  warning, no machine-wide-only installs (an app with no machine-wide installer went into the
+  admin's profile, and Windows Terminal was judged by the admin's `winget list`), the Windows
+  Terminal defaults written for the admin account, and, when the source stayed closed, the AppX
+  event-log advice instead of the cross-user one. The other way round, a user elevating as
+  themselves over Remote Desktop while another user was at the console read as cross-user.
+  - **The session's shell decides.** `Get-InteractiveSessionUserName` now returns the owner of the
+    oldest `explorer.exe` in this process's own Windows session (new `Get-SessionShellOwnerName`:
+    `Win32_Process` filtered by session, oldest `CreationDate` first, `GetOwner` through
+    `Invoke-CimMethod`). The oldest shell is the one Windows started at sign-in; one a technician
+    starts later as another account is newer. A shell whose owner cannot be read is passed over.
+    `Win32_ComputerSystem.UserName` is only the fallback, when no owner is found (session 0, no
+    shell, a failed query), and the function still never throws. `Invoke-CimMethod` joins
+    `build/windows-only-commands.txt` and the test stand-ins in `tests/TestHelpers.ps1`. The
+    Windows Terminal defaults step now takes the account context the installer read at the start
+    of the run (`Set-WindowsTerminalDefaults -AccountContext`), so it cannot decide otherwise
+    later in the run; the user phase, which passes none, still reads it there. The diagnostics
+    bundle's line is 'Signed-in user (this session)', or '(at the console)' for a collection as
+    SYSTEM, whose session 0 has no shell.
+  - **A registered source package that still does not open says so.** When the run registered
+    `Microsoft.Winget.Source` for the account and `winget search --source winget` still fails, the
+    line now says the registration succeeded, and how (downloaded from
+    `https://cdn.winget.microsoft.com`, or by family name from the copy already on the PC). For
+    `0x8A15000F` its fix is to read winget's log and check access to `cdn.winget.microsoft.com`;
+    under cross-user elevation it then adds, in case that does not help, to run the tool signed in
+    as the account or as SYSTEM. It used to say nothing of the registration and send the reader
+    to the AppX deployment event log or to sign in as the admin account, though Windows had
+    deployed the package. Another code after a successful registration keeps the source-settings
+    advice.
+  - **The uninstaller leaves per-user MSIX apps alone as SYSTEM or under cross-user elevation.** An
+    entry with `msixName` (Windows Terminal) is now `Skipped` (`PerUserApp`, new
+    `Get-PerUserAppSkipReason`) before any winget call:
+    `Skipping: Microsoft.WindowsTerminal (a per-user app that this run cannot remove: it runs as
+    '<admin>' in the session of '<user>'; to remove it, run winget-app-uninstall.ps1 signed in as
+    the user it belongs to)`, or `it runs as SYSTEM`. In those runs even `winget list` answers for
+    the running account, not for the user the app belongs to. The installer decides Windows
+    Terminal from the PC there (skipped when provisioned for every user, else installed for every
+    user with `--scope machine`), and the uninstaller removes no provisioned package. It counts as
+    kept on purpose: the exit code stays 0, Winget-AutoUpdate is still removed, and the
+    default-terminal setting is not reset. A preview (`-WhatIf`) from the same elevated window, or
+    as SYSTEM, shows the same skip; a preview in a window that is not elevated runs as the
+    signed-in user, and now says that a real run elevated as another account keeps such an app.
+    `Uninstall-CatalogApp` takes the run's `-AccountContext`, so the account is read once a run.
+    A standard user's Terminal cannot be removed this way: the UAC prompt elevates as another
+    account.
+- A winget source that cannot be opened is detected, repaired once and, if it stays closed, stops
+  the installer and the uninstaller with exit code 2 (wgt-gq8.63, wgt-gq8.64). On the owner's real
+  PC (winget v1.29.380, signed in over Remote Desktop as a standard user, the window elevated as an
+  admin account with no logon session of its own), winget downloaded `source2.msix` and its own
+  per-account deployment of the source package `Microsoft.Winget.Source_8wekyb3d8bbwe` failed with
+  `0x80073D19` (AppXDeploymentServer events 401/404), without a word in winget's output.
+  `winget source update` still exited 0, the run printed 'The winget source is up to date', every
+  install then failed with `0x8A15000F SOURCE_DATA_MISSING` (9 apps, twice), Winget-AutoUpdate was
+  set up anyway and the run exited 1. The uninstaller read every app as 'not installed', removed
+  Winget-AutoUpdate and exited 0 while the apps stayed. `Add-AppxPackage -Path
+  https://cdn.winget.microsoft.com/cache/source2.msix` from the same elevated Windows PowerShell
+  window succeeded, and winget worked from then on.
+  - **A regression of commit 05e7ee2 on this branch.** It removed `Test-WingetSourceHealth` (a
+    `winget search --source winget` check) and the `source.msix` `Add-AppxPackage` rung, and left
+    the exit code of `winget source update` as the only source check. The reason given under
+    Removed, that `winget source update` and `winget source reset` make that deployment
+    themselves, was wrong on both counts: `winget source update` prints `Cancelled` and exits 0
+    when its update fails (winget-cli `SourceFlow.cpp`, `UpdateSources`), and
+    `winget source reset --force` only drops winget's source settings and deploys nothing. This
+    also corrects the #174 entry below: a failed update never made the probe see `0x80073D19`.
+  - **The source is opened, not just updated.** After `winget source update`, `Test-WingetSourceOpen`
+    runs `winget search --exact --id Microsoft.PowerShell --source winget
+    --accept-source-agreements --disable-interactivity` (new `WingetSourceOpen` limit, 2 minutes),
+    which opens the source the way every install does; 0 or `0x8A150014` means it opened, and its
+    exit code decides. 'The winget source is up to date' is gone; a source that opens prints
+    'The winget source opens for <account>'.
+  - **`0x8A15000F` is repaired by registering the source package** (`Register-WingetSourcePackage`,
+    at most once a run, never as SYSTEM): `source2.msix`, then `source.msix` (winget's order),
+    downloaded into a new file
+    (`Save-WebFileAsNew`, opened `CreateNew`) in a new folder only SYSTEM and Administrators can
+    change (`New-WauStagingDirectory`), held open read-only from its signature check
+    (Microsoft Corporation, `Test-AuthenticodeSigner`) until `Add-AppxPackage -Path` has installed
+    it, then deleted; only when that fails, a copy another account already has on the PC, by family
+    name (usually older than the download, and winget cannot replace it for the account while its
+    own deployment fails). Both go through `Invoke-AppxRegistration`, in Windows PowerShell under
+    PowerShell 7, now within new time limits (`AppxRegistration`, 5 minutes; the
+    `Get-AppxPackage -AllUsers` query `AppxQuery`, 2 minutes) through
+    `Invoke-WindowsPowerShellScript`, instead of an unbounded `& powershell.exe`. Then
+    `Repair-WinGetPackageManager`, but only from Microsoft.WinGet.Client 1.28.190 or later (older
+    ones never check the source package). `winget source reset --force`
+    is kept for the other SourceBroken codes (corrupted or unconfigured source) and never runs for
+    `0x8A15000F`.
+  - **A source that stays closed stops the run.** `Initialize-Winget` returns Ready `$false` with
+    Diagnosis `SourceUnusable` and prints one line naming the account, the code, winget's log folder
+    (`%LOCALAPPDATA%\Packages\Microsoft.DesktopAppInstaller_8wekyb3d8bbwe\LocalState\DiagOutputDir`)
+    and what to do: under cross-user elevation, run the installer while signed in to Windows as that
+    account (winget deploys its source package only in the account's own session) or run the
+    machine phase as SYSTEM with `rmm/Invoke-WingetAppSetup.ps1` (the uninstaller: run it signed in
+    as that account, or `winget-app-uninstall.ps1` as SYSTEM, never the machine phase, which
+    installs the catalog); otherwise read the AppXDeploymentServer/Operational events and check
+    access to `cdn.winget.microsoft.com`. The
+    installer exits 2 before any app install or Winget-AutoUpdate setup (recorded as early exits
+    are: `last-run.json` and the RESULT line with exit 2, `autoupdates=NotRun`); the uninstaller
+    removes nothing, keeps Winget-AutoUpdate and exits 2. A timeout, a network error or another
+    code still only warns and the run goes on while the source has data; an account, or SYSTEM,
+    with no source data yet that cannot download it gets `0x8A15000F` and stops with exit 2. As
+    SYSTEM, `0x8A15000F` gets no fix (no reset, no package registration). The advice for a source
+    blocked by `0x80073D19` no longer says to run `winget source update` as the account, which
+    exits 0 when it fails, nor to sign in once: it says to run the installer while signed in as
+    that account.
+  - **The installed check names the source.** `Test-WingetPackageInstalled` runs
+    `winget list --exact --id <id> --source winget`: without `--source`, winget only warns that a
+    source failed and exits `0x8A150014`, so every app read as not installed. Now such a list fails
+    with the source's code and is no answer (CheckFailed): the installer fails the app with
+    `PreCheckFailed` and installs nothing blind, and the uninstaller fails it and keeps
+    Winget-AutoUpdate (exit 1). The `winget uninstall` call itself is unchanged: it runs only after
+    this check found the app, and a lookup that fails there is already a failure, not a success.
+  - **Diagnostics show it.** `appx.txt` lists `Microsoft.Winget.Source` for every account, and
+    `winget.txt` says whether winget can open the source (`Winget source: opens` or
+    `CANNOT BE OPENED (<code>)`), from the same check. Since that check opens the source as an
+    install does, letting winget update its source data for the account, the bundle's help, the
+    failure hint and the readme no longer say that making one changes nothing.
+- The uninstaller no longer hangs for 15 minutes on Google Drive and then fails it (wgt-gq8.61).
+  Drive is an exe app, so `winget uninstall` ran the `UninstallString` Drive registers, a bare
+  `uninstall.exe` with no switches, exactly as written, and waited on it with no limit of its own:
+  `--silent` only makes an MSI quiet, and `winget uninstall` has no `--override`
+  (winget-cli#4700). That `uninstall.exe` asks "Uninstall Google Drive?" and waits for a click,
+  which nobody can give in an unattended or SYSTEM run. The 15-minute `WingetUninstall` limit then
+  stopped it, Drive stayed, Winget-AutoUpdate was kept and the run exited 1 (seen in the real-PC
+  test plan's self-test on `windows-latest`). Before this PR the uninstaller had no limit and
+  would have waited for ever.
+  - **New catalog field `quietUninstall`.** `@{ productCode = '{<GUID>}'; arguments = @(...) }`,
+    set for `Google.GoogleDrive` to `{6BBAE539-2232-434A-A4E5-9A33560C6283}` and Google's
+    documented `--silent --force_stop` (`--force_stop` closes a running Drive). The schema refuses
+    a value without a braced-GUID product code or with no arguments, an argument with a double
+    quote, or an unknown key (exit code 3).
+  - **Its own uninstaller, never `winget uninstall`.** For such an entry the uninstaller reads the
+    entry's `UninstallString` from HKLM (the 64-bit view, then `WOW6432Node`, also from a 32-bit
+    PowerShell), takes the quoted program (the entry's own arguments are dropped) and runs it with
+    the catalog's switches through `Invoke-ExternalProcess`, under the same 15-minute limit. It runs
+    it only when the path is a full, normalised path to an existing `.exe` under
+    Program Files (`ProgramW6432`, or `ProgramFiles` on 32-bit Windows) or Program Files (x86).
+    Otherwise the app fails at once (`UninstallerNotFound`), with nothing run: falling back to
+    `winget uninstall` would hang again.
+  - **Then it checks.** Drive's `uninstall.exe` hands its work to a copy of itself and exits, so
+    the uninstaller waits, for what is left of the 15 minutes, until the uninstall entry is gone,
+    then asks `winget list`. Gone and not listed is `Uninstalled` (with a restart for 3010 or 1641);
+    anything else is the new `UninstallVerifyFailed`. Another exit code is `UninstallFailed`, and a
+    timeout or a failed start names `uninstall.exe`. A preview (`-WhatIf`) prints the exact command
+    line it would run.
+  - **The limit covers the copy too.** `Invoke-ExternalProcess`'s tree kill only reaches a process
+    still running at the limit, not one its exited parent left behind. So once `uninstall.exe` has
+    exited, the uninstaller records the processes it started while it ran (`Win32_Process` by
+    parent id and creation time; `Invoke-ExternalProcess` now returns `ProcessId`, `StartedAtUtc`
+    and `ExitedAtUtc`). When the entry is still there at the limit, it stops those still running,
+    with what they started, and names them in the reason; a process that reused the id is left
+    alone, and a process one of them hands off to in turn is not found. When the entry is gone,
+    they are left to finish.
+  - The help of `Uninstall-CatalogApp`, which said `--silent` keeps an interactive uninstaller from
+    waiting, and the `WingetUninstall` time-limit description are corrected. Entries without the
+    field keep `winget uninstall` as before. `winget uninstall` still gets no `--log`: the
+    uninstaller keeps no transcript, so it has no logs folder for one (`Invoke-WingetProcess` adds
+    `--log` whenever there is one).
+- The E2E assertions now check which apps apply as it stood just before the pass whose transcript
+  they read: `e2e/Invoke-InstallPass.ps1 -ApplicabilityPath` records it before each pass, and
+  `e2e/Assert-Install.ps1 -ApplicabilityPath` reads it. The installer decides applicability before
+  it changes the machine, and its Windows Terminal step then makes Terminal the default terminal,
+  which Terminal's condition reads. Deciding after the install expected Terminal's `not applicable`
+  skip line from a first pass that had found Terminal applicable, so every run whose second pass
+  was skipped also failed that assertion. A record that is missing or cannot be read fails the new
+  `Applicability recorded before the latest pass` assertion.
+- **Security fix:** an elevated run, or a run as SYSTEM, no longer follows a junction or symbolic
+  link planted at `%ProgramData%\winget-app-setup` or at its `logs` or `cache` folder
+  (wgt-gq8.46). Any standard user can create these folders before the first elevated run, and can
+  turn an empty folder there into a junction. The installer's own first, non-elevated launch also
+  creates the base and `logs` folders, owned by the signed-in user. An elevated or SYSTEM run then
+  followed such a link: `icacls` changed the owner and access list of the folder it pointed to
+  (System32, for example), the `logs` folder's read grant let every user read it, and the run
+  wrote its transcripts, `last-run.json` and installer logs into it and deleted old logs and
+  engine folders there. Only the `cache` folder had a link check (wgt-gq8.42).
+  - **One way in.** `Initialize-ProgramDataFolder` (in the new
+    `WingetAppSetup/Private/ProgramDataFolder.ps1`) makes the base folder, then `logs` or `cache`,
+    safe before use. A link in a folder's place is removed without being followed, and the run
+    warns about it. A missing base folder is created with its access list already set, so it is
+    never an empty folder another account can turn into a junction; `logs` and `cache` are created
+    inside it. Each folder is then locked. A link that cannot be removed stops that use (error id
+    `DirectoryIsLink`), and the message says how to remove it with `rmdir`.
+  - **The lock.** `Set-RestrictedDirectoryAcl` refuses a link, runs `icacls` with `/L`, so a folder
+    swapped for a link in the meantime has the link changed and not its target, and refuses the
+    folder if it is a link afterwards. `icacls` runs in a hidden window. A folder that existed
+    already is locked in place: what is in it stays.
+  - **Logs.** Every elevated or SYSTEM run, a `-WhatIf` dry run and the Windows PowerShell 5.1
+    bootstrap included, now locks the base and `logs` folders before its transcript starts, not
+    only when it downloads Winget-AutoUpdate, the Windows App Runtime or the Microsoft.WinGet.Client
+    module. The `logs` folder is owned by Administrators, only SYSTEM and Administrators can change
+    it, and standard users can read it (`Set-RestrictedDirectoryAcl -ReadableByUsers`, which
+    replaces `Grant-InstallLogReadAccess`). When it cannot be made safe, the run continues without a
+    transcript and without `last-run.json`, and says why. Once an elevated run has locked the
+    folder, a window that is not elevated cannot write its transcript there, as after any
+    Winget-AutoUpdate install before. The `wau-msi-*` log of a run without a transcript (the
+    uninstaller's) goes through the same check, and `msiexec` runs without a log when the folder
+    cannot be made safe.
+  - **Reset advice.** When a folder's access list cannot be set, the run now says to rename the
+    folder aside with `ren` (`Get-RestrictedDirectoryResetHint`); the next run then creates a new,
+    locked folder. It no longer suggests `takeown` and `icacls /reset`: another account may still
+    change the folder, and both commands would follow a link put in its place.
+  - **Housekeeping** deletes nothing through a link at the base or `logs` folder. It removes old
+    `wingetclient-<id>` folders only from a base folder that passes the access-list check, so
+    another account cannot swap a folder before it is removed.
+  - **WinGet client cache.** A new download is written under a new random name, created only when
+    nothing is there yet, and then moved over the cached package. Before, it was written to
+    `<package>.partial`, a name known from the public pin, which followed a file link a standard
+    user could leave in the cache folder before an elevated run first locked it.
+  - **Endpoint Central machine phase.** `rmm/Invoke-WingetAppSetup.ps1` writes its log as SYSTEM
+    before the installer runs. It now removes a link at the base or `logs` folder, creates a missing
+    one with its access list already set, and logs only into folders that no account other than
+    SYSTEM and Administrators can change (`Initialize-RmmLogDirectory`). Otherwise it continues
+    without its log, and the installer locks the folders for the next run.
+  - Not changed: a base or `logs` folder that a standard user created before the first elevated
+    run is locked in place, not replaced, so the files other accounts left in it stay.
+    `-CollectDiagnostics`, the fleet health probe and the user phase only read these folders and
+    do not check them for links yet.
+- Ctrl+C at the final `Press any key to exit...` prompt of an elevated run keeps the run's exit
+  code again (review of wgt-gq8.43). The elevated window runs a command that checks the file and
+  runs its copy in the same console, and Ctrl+C reaches both: the copy kept its code, but the
+  command was stopped after the copy ended and exited 1, which the window that asked for elevation
+  reported as an app that could not be installed or removed. The command now passes the copy's exit
+  code on with `$host.SetShouldExit` (exit 5 when it is stopped before the copy starts). The
+  installer had this since its checked copy (work-order item 10); the uninstaller since it runs one.
+- `build/Build-WingetInstallScript.ps1 -Check`, and so the pre-commit hook, compares each generated
+  script with the build ordinally (review of wgt-gq8.43). It used `-ne`, which ignores letter case,
+  and culture comparison also ignores characters such as U+00AD (soft hyphen) and U+200B, so a hand
+  edit that only changed case, or typed a soft hyphen into a command name, which breaks that
+  command, passed both.
+- The documentation matches the code again (work-order item 29, review findings P3-51, P3-52). The
+  readme no longer says the installer "trusts the required Winget sources" and "installs or
+  updates" the apps: there is no source-trust step, and an installed app is skipped. It documents
+  the Endpoint Central scripts (setup, the pins, the user phase, the TightVNC variables, the health
+  probe and the at-logon fix), the environment checks, `-CollectDiagnostics` and the SYSTEM E2E
+  leg. STATUS.md tells #279, #283 and #284 as they were: the installer's own `RUN_WAU=YES`, fixed
+  on this branch and verified by the E2E run of 2026-10-05, not a runner-image defect.
+  `Install-WingetPackage`'s help and a test comment now call 0x80073D19
+  `ERROR_DEPLOYMENT_BLOCKED_BY_USER_LOG_OFF`, and a new test in `tests/WingetResultCodes.Tests.ps1`
+  fails when a file in the repository writes a known code next to a symbol other than the one
+  `Get-WingetExitCodeInfo` gives it. CLAUDE.md lists `rmm/`, the third E2E leg and the current test
+  stand-ins, and the E2E workflow's header no longer cites a 259-test suite.
+- TightVNC is no longer reported as installed while its server refuses every viewer (review finding
+  P2-22, work-order item 18). winget installs `GlavSoft.TightVNC` with no password, so the server
+  answered every viewer with "Server is not configured properly", and with no control password any
+  signed-in user could reconfigure or stop it from its tray icon; the run said `Successfully
+  installed` and exited 0, and later runs skipped it as already installed. The catalog entry now has
+  a `postInstall` hook, `Set-TightVncServerPassword` (`WingetAppSetup/Private/TightVnc.ps1`):
+  - The password comes from `WINGET_APP_SETUP_TIGHTVNC_PASSWORD` (and the control password from
+    `WINGET_APP_SETUP_TIGHTVNC_CONTROL_PASSWORD`, optional) in the run's environment, read at the
+    start of the PowerShell 7 run and removed from its environment before it starts winget or any
+    installer (`Initialize-TightVncSecretForRun`, `Import-TightVncSecretFromEnvironment`); processes
+    started before that, such as the Windows PowerShell 5.1 bootstrap and its PowerShell 7 install,
+    keep a copy. Without it, an interactive run asks for it at its start, before anything is
+    installed (`Read-Host -AsSecureString`, twice, Enter to skip), and only when TightVNC Server has
+    no password yet; the prompt waits at most 5 minutes for someone to start typing
+    (`Wait-TightVncPromptAnswer`), since the run holds the run lock meanwhile, and is not shown when
+    PowerShell was started with `-NonInteractive` (`Test-PowerShellHostNonInteractive`), where
+    `Read-Host` throws. A non-interactive run never asks. It is never taken from the repository.
+    The passwords are dropped on every way out of the run, early exits (2, 3) and aborts included,
+    so an `irm | iex` console does not keep them.
+  - It is written straight to `HKLM\SOFTWARE\TightVNC\Server` (`Password` and `ControlPassword` as
+    8-byte `REG_BINARY` values in VNC's DES encoding, `ConvertTo-TightVncPasswordBytes`;
+    `UseVncAuthentication` and `UseControlAuthentication` set to 1), never through MSI properties or
+    `tvnserver -setservicevncpass`, whose command lines winget and MSI logs record, and through the
+    .NET registry API (`Set-TightVncServerValue`), not `New-ItemProperty`, whose parameter values
+    PowerShell module logging records. Without a control password, a separate control password the
+    server already has is kept; otherwise the server password protects the control interface too,
+    with a warning. A password longer than 8 characters is used with a warning that TightVNC reads
+    only the first 8; one with a character that is not printable ASCII is refused.
+  - Before a password goes in, and whenever the key already holds one, the key is limited to
+    SYSTEM and Administrators with no inherited permissions (`Protect-TightVncServerKey`, checked by
+    `Get-TightVncServerKeyAclProblem`), since the stored value is reversible. The values are read
+    back, then the `tvnserver` service is restarted (`Restart-Service`, or started when it was
+    stopped) and must be running. A `WingetAppSetupRestartPending` value written before the first
+    change and removed after the restart makes the retry pass, or the next run, restart a service
+    whose restart failed or never happened, instead of reporting the unchanged values as
+    configured.
+  - Idempotent: a run with the same password changes nothing and does not restart the service, one
+    with a different password updates it, and a run without one keeps the passwords a configured
+    server already has (and still locks the key).
+  - Without a password TightVNC is `Not configured` (`TightVNC installed but NOT configured: no
+    server password was supplied. ...`, saying what the server lets through: it refuses every
+    viewer, it accepts viewers without a password, or its control interface is unprotected; and the
+    summary's `Configuration: NOT DONE` line); the exit code does not change. A step that fails (the
+    key cannot be locked, the values do not read back, the service does not restart) makes the app
+    `Failed` (exit code 1).
+  - The password, its encoded bytes and the bytes already stored are never printed, written to the
+    transcript, passed to a cmdlet or put on a command line, and the buffers holding them are
+    cleared. A dry run says only whether each variable is set and whether a real run could use it
+    (`[DRY-RUN] TightVNC: ... (value not shown)`) and leaves the variables in place.
+  - The module now calls `Get-Service`, `Restart-Service` and `Start-Service`, which are listed in
+    `build/windows-only-commands.txt` and have stand-ins in `tests/TestHelpers.ps1`.
+- The uninstaller no longer reports every app as not installed, removes Winget-AutoUpdate and exits
+  0 when winget cannot be started (review findings P2-19, P3-18). `winget-app-uninstall.ps1` is now
+  a thin entry script that runs `Invoke-WingetUninstall` (`WingetAppSetup/Public/Uninstall.ps1`),
+  with one app at a time in `Uninstall-CatalogApp` (`WingetAppSetup/Private/AppUninstall.ps1`).
+  - It sets winget up as the installer does (`Initialize-Winget`) and, when winget still cannot be
+    used, removes nothing and exits 2.
+  - A check winget could not answer fails the app instead of skipping it as not installed.
+  - `winget uninstall` runs with `--silent` through `Invoke-WingetProcess`, under a new 15-minute
+    `WingetUninstall` limit. An uninstaller that returns 3010 or 1641, which winget reports as
+    `0x8A150030`, counts as removed (`Test-WingetUninstallRestartRequiredResult`).
+  - Catalog conditions are honoured (`Test-AppApplicability`), and PowerShell 7 and Windows
+    Terminal are kept when the run depends on them (`Get-HostingShellSkipReason`).
+  - Once Windows Terminal is gone, the default-terminal setting that still names it is removed
+    (`Reset-WindowsTerminalDelegation`).
+  - Winget-AutoUpdate is removed last, and only when no app failed; the messages saying it was kept
+    appear only when it is installed.
+  - New `-WhatIf` and `-NonInteractive`. Exit codes: 0 done, 3010 done with a restart to finish,
+    1 an app or Winget-AutoUpdate failure, 2 winget unusable, 3 invalid or empty app list, 4 not
+    elevated, 5 an unexpected error or a module that could not be loaded. It used to exit 0
+    always.
+  - Since changed: the uninstaller is now a generated single file (see Changed), so it loads no
+    module, and exit 5 covers a run without a script file and a file that changed before its
+    elevated run instead.
+- Catalog applicability is decided once per run, fails open, and no longer reports a missing app
+  as installed (review findings P3-32 to P3-35).
+  - Each condition is evaluated once, before anything is installed and before the Windows Terminal
+    step writes HKCU, by the new private `Test-AppApplicability`, and both passes use that verdict
+    (`Install-AppWithVerification -Applicable`). The retry pass used to evaluate it again and
+    report a `not applicable` answer as `Retry succeeded` and Installed (exit 0, app missing); it
+    now counts such a result as Skipped.
+  - A condition that throws or writes an error is treated as applicable, so the install is
+    attempted. `Get-ComputerManufacturer` now uses `-ErrorAction Stop` and throws on an empty
+    manufacturer, so a CIM error no longer skips Dell Command Update on a Dell PC with exit 0.
+  - Windows Terminal's default-terminal values count as "Windows Terminal hosts this session" only
+    while Windows Terminal is installed, and `Test-WindowsTerminalInstalled` now asks for exactly
+    `Microsoft.WindowsTerminal`, so a removed Windows Terminal is installed again instead of being
+    skipped on every run.
+  - ARM64 PCs no longer fail Adobe Acrobat Reader on every run. The catalog installs
+    `Adobe.Acrobat.Reader.32-bit` (x86, the build Adobe supports on Windows on ARM) on ARM64 and
+    `Adobe.Acrobat.Reader.64-bit` everywhere else, and reports the other one as not applicable. The
+    new private `Get-OSArchitecture` reads `RuntimeInformation.OSArchitecture`. (Since changed: the
+    split uses `arch` lists, and 32-bit Windows gets the 32-bit Reader; see Changed.)
+- Setting winget up is one step that diagnoses a failure once, instead of three ladders that ran
+  back to back and gave one cause three diagnoses (review findings P3-25 to P3-31). On the #279
+  wedge (E2E run 36384683838) the run used to say 'Installations may fail with 0x80073D19', then
+  'source "winget" appears to be missing', then print a source.msix rejection and manual steps,
+  after running `Repair-WinGetPackageManager` up to four times and downloading App Installer from
+  aka.ms/getwinget. `Initialize-Winget` (`WingetAppSetup/Public/WingetCore.ps1`) replaces
+  `Test-AndInstallWinget`, `Initialize-WingetSourcesForUser` and `Test-WingetSources`: it checks
+  App Installer's Group Policy, then `winget --version`, then `winget source update --name winget`,
+  picks the fix from the exit code, runs each fix at most once a run, and prints one line with the
+  cause and what to do when it cannot fix it.
+  - **Group Policy** (P3-30). When `EnableAppInstaller`,
+    `EnableWindowsPackageManagerCommandLineInterfaces` or `EnableDefaultSource` is 0 under
+    `HKLM\SOFTWARE\Policies\Microsoft\Windows\AppInstaller`, or winget answers
+    `0x8A15003A BLOCKED_BY_POLICY` (no longer checked again for 75 seconds), the run stops with
+    exit code 2 and names the policy, instead of repairing App Installer, resetting the source,
+    installing Winget-AutoUpdate and blaming 0x80073D19 or a corrupted source.
+  - **Codes, not text** (P3-27). The 0x80073CF3 (missing framework) and 0x80073D06 (newer
+    framework) classifiers only read `Repair-WinGetPackageManager`'s message, which never holds
+    those codes ('Failed to repair winget. Try running with -AllUsers in administrator mode.'), so
+    the framework advice never printed. The codes are now read from the HRESULT of what the App
+    Installer registration and the repair throw (`Get-AppxErrorCode`), and whether the framework
+    is missing comes from the all-users check `Get-WindowsAppRuntimeStatus` already makes. The
+    forced repair (`-Force`, which only closes running App Installer processes) no longer runs
+    when those codes, from the registration or the repair, or a missing framework the all-users
+    repair could not install, already explain the failure: on the wedge it ran anyway, and
+    downloaded App Installer once more.
+  - **`-AllUsers`** (P3-28). When that check finds `Microsoft.WindowsAppRuntime.1.8` missing, the
+    repair runs `Repair-WinGetPackageManager -AllUsers -Latest` first, as the cmdlet asks; never
+    otherwise, since it aborts with 0x80073D06 on a PC with a newer framework (#265). A source
+    update that times out or fails for any reason other than 0x80073D19 or a missing or corrupted
+    source no longer gets App Installer registered or repaired.
+  - **Microsoft.WinGet.Client only when needed** (P3-26). The module (and the NuGet provider) was
+    installed from the PowerShell Gallery on every first run, for a repair that rarely runs, with
+    two warnings about an 'Update functionality' that no longer exists when the Gallery was
+    blocked. It is now installed inside the repair step, the first time a run needs it.
+  - **App Installer listed and registered through Windows PowerShell** (P3-29). Under PowerShell 7
+    the registration step lists the App Installer packages (`Get-DesktopAppInstallerPackageInfo`,
+    `Get-AppxPackage -AllUsers`) and registers them (`Invoke-AppxRegistration`,
+    `Add-AppxPackage`) in Windows PowerShell. The Appx module both cmdlets come from cannot load
+    in PowerShell 7 on Windows 10 and Windows Server 2022 (0x80131539, seen on Server 2022), so the
+    step failed there at the listing and would have failed at the registration; it only worked
+    once `Repair-WinGetPackageManager` had loaded Appx into the session.
+  - The source is reset (`winget source reset --force`, its exit code reported) only for a missing
+    or corrupted source (`0x8A15000B`, `0x8A15000F`, `0x8A150012`, `0x8A150015`, `0x8A15003F`),
+    which the exit-code table now marks as `SourceBroken`. `0x8A150046` (agreements not accepted)
+    is no fault: every install accepts them.
+  - No winget call before elevating: the source update the non-elevated window made set up the
+    signed-in user's source, not the account the elevated run installs as.
+
+- The Winget-AutoUpdate MSI can no longer be swapped between its hash check and `msiexec`, and the
+  modules the installer adds for all users now come only from the PowerShell Gallery (review
+  findings P2-21, P3-20).
+  - **Folder owner.** The installer's first, non-elevated launch creates
+    `%ProgramData%\winget-app-setup` for its log, so the signed-in user owned it. The #186 lockdown
+    (`icacls /inheritance:r /grant`) removed only inherited entries, and a folder's owner can always
+    change its access list, so that user (or malware running as them) could give themselves full
+    control again, replace the per-run `wau-msi-<guid>` folder and swap the MSI before `msiexec`
+    ran it elevated. `Set-RestrictedDirectoryAcl` now makes Administrators the owner first
+    (`/setowner *S-1-5-32-544`), then removes the inherited entries and replaces the SYSTEM and
+    Administrators grants (`/grant:r`), with `/q`. `Assert-RestrictedDirectoryAcl` then reads the
+    result back with `Get-Acl` and fails unless the owner is Administrators or SYSTEM, inheritance
+    is off and every entry belongs to SYSTEM or Administrators (an explicit entry another account
+    added survives `/grant:r`). When it fails nothing is downloaded: the run says `Winget-AutoUpdate
+    was NOT installed`, names the owner or entry at fault and how to reset the folder (`takeown /f
+    ... /a`, then `icacls ... /reset`; since replaced by renaming the folder aside with `ren`,
+    which follows no link, wgt-gq8.46), and the summary shows `Auto-updates: FAILED`. Only these
+    failures carry that advice (`Set-RestrictedDirectoryAcl` tags them with the error id
+    `RestrictedDirectoryAclFailed`); when the folder cannot be created or `icacls` does not start,
+    the run gives that reason without it.
+  - **MSI held open.** After the download the MSI is opened once with read-only sharing
+    (`Open-ReadLockedFile`), hashed from that open stream and kept open until `msiexec` has
+    finished, so it cannot be overwritten, renamed or deleted in between. It is closed before the
+    staging folder is removed.
+  - **Logs.** Only the folders themselves are changed (no `/T`, no `/reset`), so the read grant for
+    standard users on the `logs` folder inside `%ProgramData%\winget-app-setup` stays, and the
+    logs still open by their full path. (Since wgt-gq8.46 that grant is part of the `logs`
+    folder's own lock.)
+  - **PowerShell Gallery only.** `Install-Module` for Microsoft.WinGet.Client and
+    Microsoft.PowerShell.GraphicalTools passes `-Repository PSGallery`: both run elevated and
+    install for all users, so another repository registered on the machine can no longer serve
+    them. `Install-PackageProvider` has no `-Repository` parameter and is unchanged. The module
+    versions are still not pinned.
+  - `Get-Acl` is added to `build/windows-only-commands.txt`, and `tests/TestHelpers.ps1` gets a
+    stand-in for it.
+- A run that is not elevated now waits for the elevated run it starts and exits with its exit code,
+  never shows a UAC prompt when nobody is at the console, and has the elevated window run a checked
+  copy of the installer (review findings P2-11, P2-12, P3-11). New exit code 4: administrator rights
+  are required and the run was not elevated.
+  - **Exit code.** `Invoke-WingetInstall` returned 0 as soon as it had asked for elevation, before
+    anything was installed, so a script or RMM tool saw success whatever the elevated window did.
+    `Restart-WithElevation` now starts the elevated process with `Process.Start` (ShellExecuteEx,
+    `runas`), waits for it and returns `@{ Started; ExitCode }`, and the run that asked exits with
+    the elevated run's code. The elevated window has already shown its summary (or why it stopped)
+    and waited for a key press, so the first window adds no second notice.
+  - **No unattended prompt.** A non-interactive run (`-NonInteractive`, a non-interactive session,
+    or redirected input) that is not elevated now exits 4 without a UAC prompt; it used to leave a
+    prompt on the signed-in user's desktop and exit 0 within seconds. `Restart-WithElevation` itself
+    refuses to prompt in a non-interactive session too, for its other caller.
+  - **Declined prompt.** A declined UAC prompt (Win32 error 1223, `ERROR_CANCELLED`, read from the
+    exception rather than its translated message) now exits 4 after one prompt; the Windows
+    Terminal branch used to retry with a second prompt. The irm | iex and imported-module cases,
+    which cannot relaunch, also exit 4 instead of 1.
+  - **Relaunch host.** The elevated window is always System32's `powershell.exe`, which every
+    account has. It used to be `wt.exe` (resolved through the signed-in user's app aliases) running
+    a bare `pwsh.exe`, or a bare `pwsh.exe` as the fallback: with cross-user elevation and
+    PowerShell 7 installed as the signed-in user's per-user MSIX, the admin account resolves
+    neither, so the elevated window failed to start while the first window had already exited 0.
+    The installer's Windows PowerShell 5.1 dispatch now finds or installs PowerShell 7 as the
+    elevating account and runs under it in the same elevated window. The Windows Terminal relaunch
+    is gone.
+  - **Checked copy.** The elevated process used to run `-File <path>` on the first window's file,
+    which on the Windows PowerShell 5.1 one-liner is a copy in the signed-in user's `%TEMP%`: that
+    user, or malware running as them, could rewrite it while the UAC prompt was up. The entry
+    script now takes the file's SHA256 at startup. Before elevating, `Restart-WithElevation` reads
+    the file once, checks it against that hash and stages those bytes in the account's own
+    `%TEMP%`, which administrators can read even when the elevating account cannot see the original
+    (drive mappings belong to the signed-in session; a share may be out of its reach), and removes
+    them once the elevated run has ended. The elevated process runs a short command given on its own
+    command line (`New-ElevationVerifierCommand`) that reads the staged file once, compares its
+    SHA256, writes those bytes into a new folder under `%SystemRoot%\Temp` with its own access list
+    (SYSTEM and Administrators only, nothing inherited) and runs that copy. A file that changed
+    since startup is not run (exit code 5). The check cannot live in the file itself, since a
+    replaced file would not contain it, and the copy has to be made by the elevated process: a
+    non-elevated process cannot create a folder that it cannot change itself. The access list
+    leaves out the elevating account's own entry, which in same-account elevation (Admin Approval
+    Mode) would let that account's non-elevated processes rewrite the copy until the elevated
+    PowerShell 7 reads it. Same-account elevation is not a security boundary all the same (the
+    non-elevated processes build the elevated command line), so this protects the cross-user case.
+    The paths in that command are quoted with `CodeGeneration.EscapeSingleQuotedStringContent`, so
+    a typographic apostrophe in a profile folder name (U+2019, as in a curly `O'Brien`) cannot
+    break it.
+  - **Uninstaller.** `winget-app-uninstall.ps1` gets the same relaunch (System32 Windows PowerShell,
+    waits, exits with the elevated run's code, 4 when declined or non-interactive). It runs its own
+    file in place (`Restart-WithElevation -InPlace`), because it imports the module from its folder,
+    so it gets no checked copy: the elevated window runs whatever the script and the
+    `WingetAppSetup` folder next to it hold when it starts. Run it from a folder only
+    administrators can change, or from an elevated session, when another account approves the
+    prompt. (Superseded: the uninstaller is now generated as one file and runs a checked copy too,
+    and `-InPlace` is gone; see Changed.)
+  - The readme's exit-code table also gains code 7 (the PowerShell 7 bootstrap failed), which the
+    installer has returned since the bootstrap hardening but the table still listed under 1.
+
+- An install that hits another installation in progress now waits for it instead of failing at
+  once, a run that needs a restart to finish says so and exits 3010, and winget's exit codes are
+  named everywhere they are printed (review findings P2-15, P3-16):
+  - **Another installation in progress.** Windows Installer refuses a second installation at once
+    with `msiexec` 1618, which winget reports as `0x8A150102`. On a freshly enrolled PC that made
+    an app fail after one launch with no wait, reported as
+    `package not found after install; winget exit 0x8A150102`. `Install-WingetPackage` now waits
+    until Windows Installer is idle (`Wait-WindowsInstallerIdle`, which checks every 15 seconds
+    whether an installation owns the `Global\_MSIExecute` mutex) and retries, up to 3 times. The
+    check (`Test-WindowsInstallerBusy`) tries to take the mutex without waiting and releases it at
+    once when it can, the test PSAppDeployToolkit makes: the mutex lives as long as any process
+    holds a handle to it, so a check for its existence alone could read busy with no installation
+    running and spend the whole wait. An abandoned mutex counts as idle. All of a run's waits, the
+    Winget-AutoUpdate `msiexec` included (which now also waits out 1618 instead of reporting
+    `Auto-updates: FAILED`), share one 10-minute budget that `Invoke-WingetInstall` passes down
+    through `Install-AppWithVerification` and `Install-PowerShellLatest`, so a machine that stays
+    busy costs a run 10 minutes at most.
+  - **In use.** `0x8A150101`, `0x8A150103` and `0x8A150111` (the app or its files are in use) get
+    one retry after 60 seconds.
+  - **Restart before installing.** `0x8A15010A` (for example Inno setup exit 8 while a Windows
+    Update restart is pending) is no longer retried in the retry pass, where it could only fail
+    again; the summary says
+    `Restart: REQUIRED before <app> can install - restart this PC, then re-run the installer.`
+  - **Restart to finish.** winget reports an MSI's 3010 as exit 0 plus a console warning, and the
+    run used to report a plain success with no notice. `Install-WingetPackage` returns
+    `RestartRequired` for winget's `Restart your PC to finish installation.` warning (English
+    display language only), `0x8A150109` (winget 1.6 and older) and `0x8A15010B` (MSI 1641), all
+    read by `Test-WingetRestartRequiredResult`, and `Install-WingetAutoUpdate` for its `msiexec`
+    3010. On a run started from Windows PowerShell, the PowerShell 7 bootstrap reads its own
+    install the same way (the MSI's 3010, or winget's restart result): it says
+    `Restart: REQUIRED to finish the PowerShell 7 installation - restart this PC before it is used.`
+    after the PowerShell 7 run and turns that run's 0 into 3010, because the PowerShell 7 run checks
+    the pending-restart state only after that install. `Invoke-WingetInstall` also reads Windows'
+    pending-restart state (`Get-PendingRestartState`: component servicing, Windows Update, and the
+    file replacements queued in `PendingFileRenameOperations`, leaving out queued deletes) before
+    and after the run. A run that needs a restart prints
+    `Restart: REQUIRED to finish this run - restart this PC before it is used (...)` and returns
+    exit code 3010 when nothing failed and winget still works (`Get-InstallerExitCode`: 1 > 2 >
+    3010 > 0, with room for code 8 between 2 and 3010; codes 8 and 9 came later, so the order is now
+    1 > 2 > 9 > 8 > 3010 > 0). A restart that was already pending before
+    the run is reported at the start and next to the summary, without making the run 3010. An
+    installed app whose winget exit code was not 0 now says so instead of the code being dropped.
+  - **Named codes.** `Get-WingetExitCodeInfo` (`WingetAppSetup/Private/WingetResultCodes.ps1`) is
+    one table of the winget exit codes the installer knows, with winget's symbol, a meaning and a
+    class that drives the retries above. `Format-WingetExitCode` prints `0x8A150102
+    INSTALL_INSTALL_IN_PROGRESS` wherever a winget exit code is printed (failure reasons, the
+    `winget list` check, `winget --version`, the source update and reset, `winget download`, the
+    PowerShell 7 bootstrap's winget install). When winget reported why an install failed, the
+    failure reason now starts with what the code means, for example
+    `another installation was in progress (Windows Installer was busy) - re-run the installer once it has finished`,
+    or `winget install failed` for a code the table does not know, instead of
+    `package not found after install`, which is kept for an install winget reported as successful.
+- A run on a machine where winget cannot be started now stops trying after one app, instead of
+  spending about 24 minutes on retries and then reporting every app as
+  `package not found after install` (review findings P2-8, P2-9, P2-10, P3-7, P3-8, P3-9, P3-10):
+  - **Launch check.** The new private `Test-WingetLaunchable`
+    (`WingetAppSetup/Private/WingetLaunchResilience.ps1`) runs `winget --version` under a
+    30-second limit and counts winget as usable only when it exits 0 and prints a version (a line
+    starting `v` and a digit). It can check again after a delay for a failure that may clear on
+    its own (a locked `winget.exe`, a timeout, a non-zero exit); winget missing or `Access is
+    denied` is final at once. `Test-AndInstallWinget` uses it instead of `Get-Command winget`,
+    which only proved that the app-execution alias is on PATH: a run on E2E run 35406706712 printed
+    `Winget bootstrapped successfully` after both repair attempts had failed, and every winget call
+    after it failed. A winget that is on PATH but cannot run now goes down the same bootstrap
+    ladder, and the run exits 2 when nothing makes it start. Before the first rung, a failure that
+    may clear on its own gets up to six tries 15 seconds apart (the 75 seconds the install's launch
+    retries cover), so App Installer is not re-registered or repaired while a Store update of it
+    is still deploying.
+  - **"Could not check" is no longer "not installed".** `Test-WingetPackageInstalled -TimeoutSeconds`
+    returns `LaunchFailed` and `LaunchError` when winget could not be started. The per-app
+    pipeline no longer installs an app whose pre-check could not run (`PreCheckLaunchFailed`),
+    skips the post-install check when winget could not be launched for the install
+    (`InstallLaunchFailed`), and says that the post-install check could not launch winget
+    (`VerifyLaunchFailed`) instead of `package not found after install`. Each reason ends with the
+    launch error, for example
+    `winget could not be launched for the pre-install check; launch error: Access is denied`.
+    A `winget list` that ran but failed is not "not installed" either: it exits 0 when it lists
+    the package and `0x8A150014` when nothing matches, so any other exit code without a match
+    returns `CheckFailed`, and the app fails as `PreCheckFailed` (without an install attempt) or
+    `VerifyFailed`, for example
+    `winget list failed during the pre-install check with exit 0x8A15004B`.
+    `Install-WingetPackage` reports any launch failure in its result (`LaunchErrorExhausted`,
+    `LaunchError`) instead of throwing for one it does not retry, so it no longer shows up as an
+    `Unexpected error`.
+  - **Run-level circuit breaker.** After an app could not launch winget, `Invoke-WingetInstall`
+    checks once whether winget can still be started (`Invoke-WingetLaunchCircuitBreaker`: up to
+    six tries 15 seconds apart, the 75 seconds the install's own launch retries cover, because the
+    pre-check and the post-install check do not retry a failed launch and an App Installer update
+    in progress outlasts a short check; `Access is denied` or a missing winget after one try). If
+    it can, the run carries on and the app gets its retry. If it cannot, the run prints one
+    `winget cannot be launched on this machine (...)` line, marks every remaining applicable app
+    failed with `not attempted: winget cannot be launched on this machine (see above)` without
+    running winget, and skips the retry pass. Not-applicable apps are still skipped. The breaker
+    also works inside the retry pass. The worst case on a wedged winget drops from about 24 minutes
+    (each app: 9 launches and 75 seconds of backoff, twice) to about 2.5 minutes: at most 75
+    seconds of launch backoff for the one app whose install hit the failure, then 75 seconds of
+    the breaker's checks; the end-of-run check makes a single try once the breaker has tripped.
+    Every check has a 30-second limit, so even checks that hang until their limit keep it to about
+    6 minutes. When the pre-check is what fails, the run stops after about 75 seconds. The exit
+    code stays 1.
+  - **PowerShell's failure reason.** `Install-PowerShellLatest` returns `Install-WingetPackage`'s
+    whole result (exit code, attempts, scope fallback, session and launch errors) plus the outcome
+    of its own `winget list` check (`VerifyTimedOut`, `VerifyLaunchFailed`, `VerifyCheckFailed`),
+    so the summary says why PowerShell failed like it does for every other app instead of
+    `installer reported failure`.
+    A check that timed out reads `post-install verification timed out`.
+  - **End-of-run check.** The check that keeps a run from exiting 0 with winget unusable (exit 2)
+    now uses `Test-WingetLaunchable`: up to five tries 15 seconds apart, about the minute
+    `Wait-WingetLaunchable` allowed, and it also requires the version output. The
+    `winget: NOT USABLE` line now says why, for example
+    `(winget could not be started: Access is denied)`.
+  - `e2e/Assert-Install.ps1` uses `Test-WingetLaunchable` before its per-app checks (up to seven
+    tries 30 seconds apart, about the 6.5 minutes `Wait-WingetLaunchable` allowed, which the
+    assertions step's time limit is sized for) and names a launch failure in a failed check's
+    detail, and `e2e/TranscriptAssertions.ps1` reads the breaker's line (`WingetNotLaunchable`)
+    instead of the removed deadlock line.
+- The Windows PowerShell 5.1 bootstrap checks what it downloads, keeps working once PowerShell 7.7
+  is the current release, and exits 7 when it fails (review findings P2-17, P2-18, P3-17):
+  - **MSI version.** The MSI fallback built its URL from `metadata.json`'s `ReleaseTag`, which
+    404s once that is 7.7: PowerShell 7.7 and later ship no MSI. `Get-PowerShell7MsiInfo` now
+    picks the newest release below 7.7 from `ReleaseTag` and `LTSReleaseTag` (a list, so it picks
+    by version, not position), which is the 7.6 LTS release once 7.7 is current. The installer
+    runs on any PowerShell 7.
+  - **Signature check.** Before `msiexec` runs, the downloaded MSI must carry a valid Authenticode
+    signature whose signer is `CN=Microsoft Corporation` (`Test-PowerShell7MsiSignature`). A web
+    page a proxy answered with now gets a clear message instead of `msiexec` exit code 1620.
+  - **No `aka.ms` tier.** The `aka.ms/install-powershell.ps1` tier behind the MSI path is gone. It
+    reads the same `metadata.json` and downloads the same MSI with no signature check, runs a
+    downloaded script with no check, and 404s once `ReleaseTag` is 7.7. It also had no time
+    limits, which let it finish a download on a slow link after the MSI path had given up. So the
+    MSI download's overall limit is now 60 minutes instead of 15
+    (`Install-PowerShell7FromMsi -DownloadTimeoutSeconds`, default 3600). The 60-second stall
+    timeout still fails a dead link quickly, and the 15-minute `msiexec` limit is unchanged. The
+    #274 throttle message now covers only the `metadata.json` read.
+  - **Relaunch download.** An `irm | iex` run has no file to relaunch under `pwsh`, so the
+    bootstrap downloads the installer again. It used to fetch raw `main` only and run whatever came
+    back: a run started from a branch URL relaunched `main`, and a run started from the jsDelivr
+    mirror went back to the throttled raw host. `Get-PowerShell7RelaunchInstaller` now tries
+    `raw.githubusercontent.com`, then the jsDelivr mirror, and uses a copy only when its stamped
+    build id matches the running build (the entry script passes `$script:InstallerBuildId`). When
+    no copy matches, the run says that PowerShell 7 is installed and to run the same one-liner from
+    an elevated `pwsh`, which needs no second download.
+  - **Exit 7.** Every bootstrap failure, an unexpected error in the bootstrap included, now exits 7
+    instead of 1. The early-exit notice explains code 7, and the install-failure issue form lists
+    it.
+- Setting the Windows Terminal default profile no longer rewrites `settings.json` (review finding
+  P2-23). It parsed the file and wrote it back with `ConvertTo-Json`, which deleted every comment
+  (including commented-out profiles and admin notes), reindented the file and moved keys, with no
+  backup and a success message. Now only the value of the top-level `defaultProfile` changes, or
+  the key is inserted before the first top-level key when it is missing
+  (`Set-JsoncTopLevelStringProperty`, `WingetAppSetup/Private/Jsonc.ps1`). The edited text must
+  parse with every other setting unchanged, or the file is left alone. The original is saved next
+  to it as `settings.json.winget-app-setup.bak`. The new content replaces the file from a temp
+  file in the same folder, so it is never left half-written. A `settings.json` that is a symbolic
+  or hard link (a dotfiles setup) is instead written in place through the link, so the link is
+  kept and the linked file gets the change. A UTF-8 byte-order mark and the file's line endings are
+  kept, and a file that is not valid UTF-8 is left alone.
+- winget and `msiexec` now run through one helper, `Invoke-ExternalProcess` with
+  `Invoke-WingetProcess` on top (`WingetAppSetup/Private/ProcessInvocation.ps1`), so every winget
+  and `msiexec` call has a time limit, its output reaches the log, and a failed launch is recognized
+  in any display language (review findings P2-5, P2-6 and P3-6):
+  - **Time limits.** The app installs (`Start-Process -Wait`), `winget download`,
+    `winget source list`, `winget search`, `winget source reset`, the `winget list` check called
+    without a timeout, and the Winget-AutoUpdate `msiexec` install and uninstall had no time limit,
+    so one stuck installer hung an unattended run with no summary and no exit code. Each call now
+    has a limit, set in one place (`Get-ProcessTimeoutSeconds`: 30 minutes per install or
+    download, 2 minutes for queries, 5 for `source reset`, 15 for `msiexec`). When it runs out, the
+    process and every process it started are stopped (`taskkill /T /F`), and an install that did
+    not land is reported as failed with `winget install stopped after 30 minutes`. The limit also
+    holds for a program that writes output faster than it is read. The WAU MSI download gets
+    `-TimeoutSec`, which bounds the connection and the response headers, plus
+    `-OperationTimeoutSeconds`, which bounds a stall while the file arrives, on PowerShell 7.4 and
+    newer. The per-app 15-second `winget list` check is unchanged. Still without a time limit of
+    their own: the cmdlets that set up winget and the summary grid (`Install-Module`,
+    `Repair-WinGetPackageManager`, `Add-AppxPackage`, the App Installer download) and, on
+    PowerShell 7.3 and older, the rest of the WAU MSI download once the file has started to arrive.
+  - **winget's output in the transcript.** winget wrote straight to the console, which
+    Start-Transcript does not record, so the log a teammate attached never showed lines such as
+    `Installer failed with exit code: 1603`. Output is now captured and echoed into the transcript
+    as it arrives, under a `> winget ...` line with the full command line, without the spinner and
+    with only the last line of each progress bar. A message winget shows next to its spinner, such
+    as `Waiting for another install/uninstall to complete...`, is logged once, not at each of its
+    four redraws a second. Each `winget install` also passes `--log`, so the installer's own log
+    is written to the logs folder as `winget-install-<package id>-<timestamp>.log`, and a failed
+    app's reason names it. The source
+    probes print winget's output when they fail. Exit codes come from the process object, never
+    from `$LASTEXITCODE`.
+  - **Launch failures in any language.** The transient "file cannot be accessed by the system" and
+    "being used by another process" launch failures were recognized by their English text, so on a
+    German or French Windows every launch retry gave up on the first failure. The helper reports
+    the Win32 error code of a failed launch (32 and 1920 for these two, 2 not found, 5 access
+    denied), `Test-TransientWingetLaunchError` classifies by that code, and a message without a
+    code is also matched against the texts Windows gives those codes in its own display language.
+  - **Unattended installs pass `--silent`.** In a non-interactive run (`-NonInteractive`, a
+    service, a scheduled task, redirected stdin) winget gets `--silent`, so MSI and WiX packages
+    install with `/quiet` instead of `/passive` and Inno installers run `/VERYSILENT`. The same
+    applies to the PowerShell 7 bootstrap's winget install and to the catalog's PowerShell install
+    (`Install-PowerShellLatest`), whose failure reason also names a stopped install and its
+    installer log.
+  - **`winget source list` and `winget source reset` no longer pass `--accept-source-agreements`.**
+    Neither subcommand accepts it, so winget rejected both with 0x8A150002: the reset never ran,
+    and the usage text the rejected `source list` printed contains the word winget, so a missing
+    source still read as listed. A failed reset is now reported with its exit code instead of
+    `Source reset completed.`
+
+  Covered by `tests/ProcessInvocation.Tests.ps1`, which runs the helper against real programs on
+  Linux and Windows (time limit, stopping a process tree, a child that keeps the output pipe open,
+  closed stdin, transcript capture), and by seam tests that every winget and `msiexec` call site
+  goes through it. Still to confirm on real Windows: that the winget app-execution alias launches
+  this way with redirected output, and how winget's output reads when it is piped.
+- The E2E install workflow now reports every failed scheduled run and every failed run dispatched
+  on `main`, with the evidence needed to diagnose it (review findings P2-4, P3-1). The failure issue
+  used to be filed by a step inside the Windows job that ran under PowerShell 7 with
+  `if: failure()`. Run 35566866223 removed PowerShell 7, so that step died with
+  `pwsh: command not found` and the failure was never reported. A job that hits its time limit is
+  cancelled, which `failure()` does not match, so a hung run never filed one either. A separate
+  `report-failure` job on `ubuntu-latest` now works from the uploaded artifacts and creates or
+  comments on `E2E install run failed` when the run fails, times out or is cancelled. The issue
+  lists which installer ran, the steps that did not succeed and how long each ran, the assertion
+  PASS/FAIL table, the last 50 lines of the earliest and latest transcripts, and the diagnostics
+  snapshots; the same text goes to the run's summary page. `issues: write` moved from the whole
+  workflow to that job, so the Windows job that runs the installer no longer holds it. The
+  assertions also run after a failed install pass. The install passes, the assertions and the job
+  have time limits (35, 35, 40 and 130 minutes), so a hung step fails at its own limit and the
+  diagnostics and uploads still run. The new `e2e/Collect-Diagnostics.ps1` runs in Windows
+  PowerShell 5.1 before the first pass, after it and at the end of the job. It records the pwsh
+  versions, the App Installer and `Microsoft.WindowsAppRuntime*` AppX packages registered for any
+  user or provisioned, and the `\WAU\` tasks with their last run; at the end it adds MsiInstaller
+  and RestartManager events, AppX deployment errors and warnings, and Winget-AutoUpdate's logs. It
+  always exits 0, so it never fails the job. The snapshots and the assertion output are uploaded as
+  the `e2e-diagnostics` artifact. Red runs that kept only transcripts were misdiagnosed twice
+  (#279, #283). Covered by `tests/E2EDiagnostics.Tests.ps1`.
+- Failed runs can now be debugged from what the teammate attaches (review findings P2-13, P2-14,
+  P3-12, P3-13, P3-14 and P3-15):
+  - **Early exits explain themselves.** Every early exit (a failed pre-flight check, winget
+    missing, a declined elevation, a bad catalog, a failed PowerShell 7 bootstrap, an aborted run)
+    goes through `Exit-Installer`, which prints one block: the exit code and why, the log file
+    path, the installer build and where to report it, with a privacy note. When someone is at the
+    console it then waits for a key press; under `irm | iex` the exit ends the PowerShell window,
+    which used to close before anyone could read the error. Non-interactive and CI runs never wait
+    (`Test-IsContinuousIntegration` checks `CI`, `GITHUB_ACTIONS` and `TF_BUILD`), and a run that
+    reached its summary adds nothing after its own final prompt. The irm | iex non-admin path no
+    longer sleeps 5 seconds before exiting. Exit codes are unchanged.
+  - **The Windows PowerShell 5.1 bootstrap is logged.** It writes its own transcript,
+    `install-<timestamp>-bootstrap.log`, next to the PowerShell 7 run's, ending with the exit code
+    the relaunched run returned; the PowerShell 7 install (winget, MSI, aka.ms fallback), GitHub
+    throttling and relaunch errors used to leave no log at all. The PowerShell 7 MSI install
+    writes a verbose `msiexec` log (`pwsh-msi-<timestamp>-<attempt>.log`) there too, and waits 30
+    seconds and retries, up to 6 times, when `msiexec` returns 1618 (another installation in
+    progress), which it does at once on a freshly enrolled machine still installing its agents.
+  - **Logs stay readable from the end user's session.** Installing Winget-AutoUpdate makes
+    `%ProgramData%\winget-app-setup` admin-only, and that reached the `logs` folder, so a teammate
+    who elevated as an admin got Access Denied opening the log from the end user's session. Every
+    elevated run now grants `BUILTIN\Users` read access to the `logs` folder only
+    (`Grant-InstallLogReadAccess`, since replaced by the `logs` folder's own lock,
+    `Set-RestrictedDirectoryAcl -ReadableByUsers`, wgt-gq8.46); the WAU staging folder's lockdown
+    is unchanged.
+  - **Tables are written at full width.** `Write-Table` renders with `Out-String -Width 4096`, so
+    the summary and failed-apps tables are no longer cut off at 120 columns in transcripts and
+    captured output (issue #284's failed list dropped `Microsoft.PowerShell` that way) or empty
+    without a console. This also fixes the known Linux test failure in `Logging.Tests.ps1`.
+  - **The build id covers the whole installer.** It is now the SHA256 of the whole generated
+    script with the id slots blanked, not only of the functions, so a change to
+    `build/fragments/head.ps1` or to the code of `tail.ps1` gets a new `Installer build:` id.
+  - **An issue form for install failures** (`.github/ISSUE_TEMPLATE/install-failure.yml`) asks for
+    the exit code, the installer build, the target (cross-user, fresh 5.1 machine, SYSTEM) and the
+    log file, and tells the reporter to remove the transcript header (it names the computer and
+    the accounts) because the repository is public; readme.md's new "When a run fails" section
+    says the same.
+- A `-WhatIf` dry run no longer changes the machine (review finding P2-16). It printed "No system
+  changes will be made", but its setup steps ran their real fixes: on a machine missing them it
+  installed the NuGet provider, `Microsoft.WinGet.Client` and `Microsoft.PowerShell.GraphicalTools`
+  for all users, registered, repaired or downloaded App Installer for the account, and ran
+  `winget source reset --force` on an unhealthy source, which also removes any source added beyond
+  the defaults. `Test-AndInstallWingetModule`, `Test-AndInstallWinget`,
+  `Test-AndInstallGraphicalTools` and `Test-WingetSources` now take `-WhatIf`: they only check, and
+  print a `[DRY-RUN]` line naming the fix a real run would make. A dry run on an account without
+  winget (the cross-user elevation case) carries on with the preview, since a real run would set
+  winget up first; it skips the source check and says that it cannot tell which apps are already
+  installed. The existing dry-run tests mocked all four helpers, which is how this went unnoticed;
+  a new test runs the whole dry run with them unmocked and asserts that no install, AppX,
+  download, registry, scheduled-task, `winget` or installer-process command runs.
+- `Test-AppDefinitions` now rejects a catalog name that has text after a valid package id, such as
+  `Google.Chrome --override "/S"` (review finding P3-49). The package-id pattern had no end anchor,
+  so any valid prefix passed, and `Start-Process -ArgumentList` would have handed the rest to
+  winget as extra switches. The pattern in `WingetAppSetup/Private/PackageIdValidation.ps1` and
+  CLAUDE.md is now `^[\w][\w.\-]+\.[\w][\w.\-]+\z`, anchored with `\z` because .NET's `$` also
+  matches before a final newline. Surrounding whitespace is still trimmed first, and the curated
+  catalog is unaffected.
+- Kept Winget-AutoUpdate from breaking winget after the installer has finished. Dropping
+  `RUN_WAU=YES` only moved WAU's `Install-Prerequisites` (newest winget, provisioned without
+  `Microsoft.WindowsAppRuntime.1.8`) to WAU's own runs, and WAU 2.12.0 also defaulted to a run at
+  every user logon, so a technician signing in to re-run the installer collided with it. WAU is now
+  installed (or upgraded) only when that framework is present for this OS architecture
+  (`Get-WindowsAppRuntimeStatus`); otherwise the summary shows `Auto-updates: NOT CONFIGURED`, and an
+  existing WAU on such a machine is reported as `Auto-updates: AT RISK`. New installs pass
+  `UPDATESATLOGON=0`, machines deployed earlier have the at-logon trigger removed and
+  `WAU_UpdatesAtLogon` set to 0 on the next run (`Disable-WauLogonTrigger`), and a run that starts
+  while a WAU task is running waits up to 15 minutes for it (`Wait-WauIdle`). The schedule is
+  described correctly now: weekly on Tuesdays at 02:00, not "weekly at 2 AM". `-WhatIf` previews
+  the logon-trigger change on machines that already have WAU, and `e2e/Assert-Install.ps1` expects
+  no WAU plus `Auto-updates: NOT CONFIGURED` on runners without the framework (windows-latest,
+  until the installer installed the framework itself: see Added).
+- An aborted run no longer exits 0. The entry script's top-level `try/finally` (`build/fragments/tail.ps1`)
+  had no catch, so inside it a .NET exception, a method call on `$null` or a parameter-binding
+  error anywhere in the run aborted everything - no retry pass, no summary - and the process exited
+  0; an outside stop (Ctrl+C, or an MSI upgrade of PowerShell sending a console stop, as in #283)
+  did the same under `-File`. The entry script now catches unexpected errors, writes the message,
+  position and stack trace into the transcript and exits 5; a completion marker in its `finally`
+  turns an uncaught stop into exit 5. Both force the exit only when the process was started to run
+  the script or the session is non-interactive: in a console where someone typed `irm | iex` or
+  `.\winget-app-install.ps1`, the error stays on screen with `$LASTEXITCODE` = 5 instead of the
+  window closing. Ctrl+C at the final "Press any key" prompt keeps the run's own exit code, the 5.1
+  bootstrap parent no longer exits 0 when stopped, and a declined UAC prompt no longer throws out of
+  the run (it exits 4: see the elevation entry above). Every intended exit goes through the new
+  `Exit-Installer`, so the guard
+  can tell the two apart. Windows Terminal setup, Winget-AutoUpdate setup and the end-of-run winget
+  check are each isolated, so one failing helper can no longer skip the summary or the exit-code
+  decision, and the 5.1 bootstrap dispatch is wrapped so an error there cannot fall through into
+  the PowerShell 7 body.
+- Stopped the installer from starting Winget-AutoUpdate's first update pass in the middle of its
+  own run, the root cause of the red E2E runs (issues #279, #283, #284). The WAU MSI was installed
+  with `RUN_WAU=YES`, so WAU 2.12.0's SYSTEM run began immediately; every such run calls WAU's
+  `Install-Prerequisites`, which provisions the newest winget release from GitHub with
+  `-SkipLicense` but without the `Microsoft.WindowsAppRuntime.1.8` framework it needs, then runs
+  `winget source reset --force` and upgrades apps (PowerShell included). On the Server 2025 runner
+  that wedged App Installer for the rest of the job (#279, #284), and the PowerShell upgrade stopped
+  the running console (#283); the "Store servicing" and "runner image" explanations were wrong.
+  `RUN_WAU=YES` is gone, WAU is now set up after the retry pass so nothing else in the run touches
+  winget afterwards, and the up-to-6-minute post-WAU wait is removed. A run also can no longer exit
+  0 while leaving winget broken: a single bounded `winget --version` probe at the end reports
+  `winget: NOT USABLE` and exits 2 when no app failed (1 still takes precedence), via the new
+  `Get-InstallerExitCode`.
 - Fixed the installer hanging for 30+ minutes instead of failing fast when winget is deadlocked
   between two conflicting `Microsoft.DesktopAppInstaller` versions (issue #279) — observed twice,
   reproducibly, on independently-provisioned GitHub-hosted E2E runners: a second App Installer
@@ -89,7 +1676,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Wait-WingetLaunchable`, in case the conflict appears partway through) to skip straight to a clear,
   all-apps-failed diagnostic and skip the retry pass, instead of driving every app through the same
   dead end. Best-effort and narrowly scoped: it only short-circuits on a positively-detected version
-  conflict, never on ordinary or ambiguous failures.
+  conflict, never on ordinary or ambiguous failures. (Superseded on this branch: the second App
+  Installer version came from the Winget-AutoUpdate run that the installer's own `RUN_WAU=YES`
+  started, not from outside the installer; see the `RUN_WAU=YES` entry above.
+  `Get-ConflictingDesktopAppInstallerVersions`, the deadlock gate and `Wait-WingetLaunchable` are
+  removed, replaced by the run-level circuit breaker under Fixed; see Removed.)
 - Fixed the scheduled end-to-end install workflow failing 3 of its last 4 runs (issue #277). Root
   cause: `Install-WingetAutoUpdate`'s `RUN_WAU=YES` triggers an immediate background WAU update run
   right after WAU installs, and that run's own winget invocations were observed holding the
@@ -142,7 +1733,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   plus a full MSI install with zero output. Measured on a real link that is 3.5 minutes of silence
   on a *healthy* run, and unbounded on a stalled one, with nothing to tell the two apart. The
   bootstrap now downloads and installs the MSI itself first (`Install-PowerShell7FromMsi`), falling
-  back to the upstream script only if that fails: the release is resolved from the same
+  back to the upstream script only if that fails (a later change removed that fallback; see the
+  P2-17 entry above): the release is resolved from the same
   `tools/metadata.json` the upstream script reads (not the rate-limited GitHub releases API, whose
   unauthenticated budget is per source IP and so is shared by everyone behind one office NAT), the
   architecture comes from `PROCESSOR_ARCHITEW6432`/`PROCESSOR_ARCHITECTURE` rather than a

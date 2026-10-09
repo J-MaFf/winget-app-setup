@@ -1,0 +1,74 @@
+**********************
+PowerShell transcript start
+Start time: 20261005060449
+Username: RUNNERVM00\runneradmin
+RunAs User: RUNNERVM00\runneradmin
+Configuration Name: 
+Machine: RUNNERVM00 (Microsoft Windows NT 10.0.26100.0)
+Host Application: C:\Program Files\PowerShell\7\pwsh.dll -NoProfile -EncodedCommand <base64>
+Process ID: 4242
+PSVersion: 7.6.5
+PSEdition: Core
+**********************
+Transcript started, output file is C:\ProgramData\winget-app-setup\logs\install-20261005-060449.log
+Logging this run to: C:\ProgramData\winget-app-setup\logs\install-20261005-060449.log
+Installer build: 1.0.0+5ea1f00d
+
+Pre-flight System Checks:
+[OK] OS Version: Windows Server 2025 Datacenter
+[WARN] Disk Space: 24.2 GB free on C: (50 GB recommended)
+[OK] Network: cdn.winget.microsoft.com reachable (HTTP 404)
+
+Disk space is below the 50 GB recommendation. Continuing anyway.
+Starting...
+Successfully imported Microsoft.WinGet.Client module
+Winget is available.
+Installing the following Apps:
+7zip.7zip
+GlavSoft.TightVNC
+Adobe.Acrobat.Reader.64-bit
+Google.Chrome
+Google.GoogleDrive
+Git.Git
+Klocman.BulkCrapUninstaller
+Dell.CommandUpdate.Universal
+Microsoft.PowerShell
+Microsoft.WindowsTerminal
+Installing: 7zip.7zip
+Successfully installed
+Successfully installed: 7zip.7zip
+Installing: GlavSoft.TightVNC
+Successfully installed: GlavSoft.TightVNC
+Installing: Adobe.Acrobat.Reader.64-bit
+Successfully installed: Adobe.Acrobat.Reader.64-bit
+Installing: Google.Chrome
+Successfully installed: Google.Chrome
+Installing: Google.GoogleDrive
+Successfully installed: Google.GoogleDrive
+Installing: Git.Git
+Successfully installed: Git.Git
+Installing: Klocman.BulkCrapUninstaller
+Successfully installed: Klocman.BulkCrapUninstaller
+Skipping: Dell.CommandUpdate.Universal (not applicable: Dell hardware only)
+Skipping: Microsoft.PowerShell (already installed)
+Skipping: Microsoft.WindowsTerminal (already installed)
+Microsoft.WindowsAppRuntime.1.8 is missing; installing the pinned Windows App Runtime 1.8.12 (framework 8000.994.2142.0, X64) for all users first...
+Downloading Microsoft.WindowsAppSDK.Runtime 1.8.260921001 from NuGet.org (about 150 MB)...
+Verified its SHA256 and its signature (CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US); provisioning it for all users...
+  > powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "$ProgressPreference = 'SilentlyContinue'; Add-AppxProvisionedPackage -Online -PackagePath 'C:\ProgramData\winget-app-setup\appruntime-0f3c2b1a9e8d4c7b6a5f4e3d2c1b0a99\Microsoft.WindowsAppRuntime.1.8.msix'  -SkipLicense -ErrorAction Stop | Out-Null"
+Windows App Runtime: installed Microsoft.WindowsAppRuntime.1.8 8000.994.2142.0 (X64) for all users.
+Setting up automatic app updates via Winget-AutoUpdate 2.12.0...
+Winget-AutoUpdate 2.12.0 installed. Apps will update weekly, on Tuesdays at 02:00 (or soon after the next start if the machine was off).
+Winget-AutoUpdate task \WAU\Winget-AutoUpdate: state Ready; triggers: Weekly on Tuesday from 2026-10-06T02:00:00; last run: never, result 0x00041303 (has not run yet); next run: 2026-10-06 02:00.
+Summary:
+
+Status    Apps
+------    ----
+Installed 7zip.7zip, GlavSoft.TightVNC, Adobe.Acrobat.Reader.64-bit, Google.Chrome, Google.GoogleDrive, Git.Git, Klocman.BulkCrapUninstaller
+Skipped   Dell.CommandUpdate.Universal, Microsoft.PowerShell, Microsoft.WindowsTerminal
+Auto-updates: Configured (Winget-AutoUpdate v2.12.0).
+Full transcript of this run: C:\ProgramData\winget-app-setup\logs\install-20261005-060449.log
+**********************
+PowerShell transcript end
+End time: 20261005061507
+**********************

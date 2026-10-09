@@ -1,11 +1,8 @@
 function Get-WindowsBuildNumber {
     <#
     .SYNOPSIS
-        Returns the current Windows OS build number as an integer (e.g. 19045, 26100).
-    .DESCRIPTION
-        Wrapped in a function so callers (and tests) can reason about the build gate used to decide
-        how to install the latest PowerShell: winget's machine-scope MSIX provisioning only works on
-        build 26100 (Windows 11 24H2) and later (issue #166).
+        Returns the Windows build number (e.g. 19045, 26100): a seam for the 24H2 (26100) gate on
+        winget's machine-scope MSIX provisioning (issue #166).
     #>
     return [int][System.Environment]::OSVersion.Version.Build
 }
@@ -13,12 +10,79 @@ function Get-WindowsBuildNumber {
 function Get-ComputerManufacturer {
     <#
     .SYNOPSIS
-        Returns the machine's manufacturer string (e.g. 'Dell Inc.', 'Microsoft Corporation').
+        Returns the PC's manufacturer (e.g. 'Dell Inc.'): a mockable seam for catalog conditions.
     .DESCRIPTION
-        Thin, mockable wrapper around the Win32_ComputerSystem CIM class so catalog applicability
-        conditions (issue #217) — e.g. gating Dell Command Update on Dell hardware — can be unit
-        tested without touching real system state. Private on purpose: it is a seam for the
-        catalog's condition scriptblocks, not part of the module's public surface.
+        Throws when CIM fails or the manufacturer is empty, so a condition built on it fails open
+        (Test-AppApplicability) instead of reading "not Dell" (review finding P3-33).
+    .OUTPUTS
+        [string] The manufacturer, never empty.
     #>
-    return [string](Get-CimInstance -ClassName Win32_ComputerSystem).Manufacturer
+    $computerSystem = Get-CimInstance -ClassName Win32_ComputerSystem -ErrorAction Stop
+    $manufacturer = [string]($computerSystem | Select-Object -First 1).Manufacturer
+    if ([string]::IsNullOrWhiteSpace($manufacturer)) {
+        throw 'Win32_ComputerSystem reported no manufacturer.'
+    }
+    return $manufacturer.Trim()
+}
+
+function Get-OSArchitecture {
+    <#
+    .SYNOPSIS
+        Returns the operating system's processor architecture, 'X64', 'Arm64', 'X86' or 'Arm': a
+        mockable seam for the catalog's arch lists (Test-AppApplicability: the Adobe Reader split,
+        Dell Command Update's x64-only gate), the Windows App Runtime framework's per-architecture
+        choice and the diagnostics report.
+    .DESCRIPTION
+        RuntimeInformation.OSArchitecture answers for the OS, not for this process, from .NET 7
+        (PowerShell 7.3): Arm64 even in an emulated x64 PowerShell, whose PROCESSOR_ARCHITECTURE says
+        AMD64. PowerShell 7.0-7.2 under emulation reads X64. Throws when the architecture cannot be
+        read, so an arch list counts as met (fail open).
+    .OUTPUTS
+        [string] A System.Runtime.InteropServices.Architecture name.
+    #>
+    $architecture = [string][System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture
+    if ([string]::IsNullOrWhiteSpace($architecture)) {
+        throw 'The OS architecture could not be read.'
+    }
+    return $architecture
+}
+
+function Get-PowerShellEdition {
+    <#
+    .SYNOPSIS
+        Returns the running PowerShell's edition, 'Core' or 'Desktop': a mockable seam for
+        $PSVersionTable.PSEdition (the uninstaller keeps the PowerShell 7 it runs in).
+    #>
+    return [string]$PSVersionTable.PSEdition
+}
+
+function Get-PowerShellVersion {
+    <#
+    .SYNOPSIS
+        Returns the running PowerShell's version as major.minor.build: a mockable seam for
+        $PSVersionTable.PSVersion (the Microsoft.WinGet.Client engine needs 7.4 or later).
+    .OUTPUTS
+        [version]
+    #>
+    $psVersion = $PSVersionTable.PSVersion
+    $patch = 0
+    if ($psVersion.PSObject.Properties['Patch']) {
+        $patch = [int]$psVersion.Patch
+    }
+    elseif ($psVersion.Build -ge 0) {
+        $patch = [int]$psVersion.Build
+    }
+    return [version]::new([int]$psVersion.Major, [int]$psVersion.Minor, $patch)
+}
+
+function Get-ProcessArchitecture {
+    <#
+    .SYNOPSIS
+        Returns this process's architecture, e.g. 'X64', 'X86' or 'Arm64': a mockable seam for
+        RuntimeInformation.ProcessArchitecture. An x64 PowerShell emulated on ARM64 Windows says X64,
+        the native DLLs it can load.
+    .OUTPUTS
+        [string] A System.Runtime.InteropServices.Architecture name.
+    #>
+    return [string][System.Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture
 }

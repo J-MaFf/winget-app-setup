@@ -2,38 +2,114 @@ name: E2E Install
 
 # End-to-end tier 1 (issue #214): a REAL install run of the curated catalog on a GitHub-hosted
 # windows-latest runner - a throwaway VM by construction, so this is the only automated place
-# where the installer executes without mocks. The 259-test Pester suite (windows-tests.yml)
-# mocks every external call; this workflow is the top rung of the testing pyramid.
+# where the installer executes without mocks. The Pester suite (windows-tests.yml) mocks every
+# external call; this workflow is the top rung of the testing pyramid.
 #
-# Two modes, selected by the trigger:
-#   - schedule / workflow_dispatch: runs the TRUE production path - the installer is fetched
-#     from raw main and piped to iex, exactly like the documented end-user one-liner.
-#   - pull_request (paths-filtered to the e2e machinery): runs the CHECKOUT's
-#     winget-app-install.ps1, so a PR that changes this workflow or e2e/** validates its own
-#     code before merge.
+# Two legs, each on its own throwaway VM, run the same two passes:
+#   - e2e-install starts every pass from PowerShell 7 (pwsh).
+#   - e2e-install-windows-powershell starts every pass from Windows PowerShell 5.1, the way a fresh
+#     box runs the documented one-liner (review finding P3-40): every step uses
+#     'shell: powershell', and PowerShell 7 is removed first, so the first pass has to install it
+#     through the installer's 5.1 bootstrap and relaunch under it, and the second pass finds it and
+#     relaunches. Assert-Install.ps1 -ExpectPowerShell7Bootstrap checks both bootstraps.
+# A third leg, e2e-install-system (work-order item 34), runs one pass the way ManageEngine Endpoint
+# Central does: as SYSTEM, from a one-shot scheduled task that starts the RMM wrapper
+# (rmm/Invoke-WingetAppSetup.ps1) with the 32-bit SysWOW64 powershell.exe, as Endpoint Central's
+# 32-bit agent would. The wrapper runs the checkout's installer (-InstallerPath, SHA256-checked),
+# never its pinned commit, so the leg tests the code under review on every trigger, the weekly run
+# included. e2e/Invoke-SystemInstallPass.ps1 checks the task's exit code (same policy as every
+# pass: on windows-latest the SYSTEM run installs the framework and WAU and is expected to exit 0),
+# the wrapper's 64-bit relaunch and exit-code pass-through, 'Auto-updates: Configured' and the
+# framework installed once, last-run.json and its Deferred entries (each with an id and a reason,
+# as the user phase reads them), each catalog app's entry in last-run.json against the checkout's
+# catalog (Chrome, 7-Zip and Git must be Installed, so an app the removal step left in place fails
+# this leg), and that nothing was installed per-user into SYSTEM's own profile.
+# A fourth leg, e2e-install-system-winget-client (wgt-gq8.42), runs that SYSTEM pass twice with the
+# wrapper's -SystemInstallEngine WinGetClient: the installer installs with the pinned
+# Microsoft.WinGet.Client module, which Microsoft supports as SYSTEM, instead of winget.exe. On top
+# of the SYSTEM leg's checks it fails unless the module was downloaded and verified at its pin, the
+# 'Install engine:' line and last-run.json name it, no app went through winget.exe, the removed apps
+# show in `winget list` as the runner account afterwards, and the second pass takes the module from
+# its cache and finds every app already there. It also checks the pin against the PowerShell Gallery
+# (build/Set-WingetClientModulePin.ps1 -Check, which may not fail the job) and uploads the engine's
+# WinGetCOM logs with the diagnostics.
+# All legs first uninstall the catalog apps the runner image ships with (Google Chrome, 7-Zip and
+# Git; e2e/Remove-PreinstalledApps.ps1), so the first pass really installs them instead of
+# skipping them as already installed. PowerShell 7 and Windows Terminal stay preinstalled in the
+# PowerShell 7 leg, which runs in them.
 #
-# The install runs TWICE: the second pass proves idempotence (must exit 0 with every app
-# Skipped), verified by e2e/Assert-Install.ps1 -ExpectAllSkippedOnSecondRun - the shared
-# assertion script that tier 2 (issue #215, snapshot-rollback Proxmox VM) will reuse.
+# Which installer runs (INSTALLER_SOURCE), and how (e2e/Invoke-InstallPass.ps1 starts every pass):
+#   - schedule: the TRUE production path - the readme's one-liner, fetched from raw main and piped
+#     to iex in a fresh process, in both passes, exactly as every helpdesk run gets it.
+#   - pull_request and workflow_dispatch: the CHECKOUT's winget-app-install.ps1 (the PR's merge
+#     commit, or the branch the run was dispatched on). main is production - the one-liner
+#     downloads it directly - so this is the only un-mocked run a change gets before it reaches
+#     users, and any branch can be tested on demand with
+#     'gh workflow run e2e-install.yml --ref <branch>'. The two passes use the two documented
+#     entry points: the first pipes the file to iex the way the one-liner runs (from memory, no
+#     file path), the second runs it with -File the way a clone, RMM or CI run does (which sets
+#     $PSCommandPath for the abort guard in build/fragments/tail.ps1). Under Windows PowerShell
+#     the bootstrap of an iex run downloads the installer again from raw main for its PowerShell 7
+#     relaunch; Invoke-InstallPass.ps1 answers that one download with the checkout, so the
+#     PowerShell 7 half of the pass tests the change too. e2e/Assert-Install.ps1 -InstallerPath
+#     then checks that every transcript, the 5.1 bootstrap ones included, logged the checkout's
+#     build id.
+#
+# Winget-AutoUpdate: windows-latest ships without the Microsoft.WindowsAppRuntime.1.8 framework
+# that WAU's winget updates need. The installer now installs a pinned, verified copy of it for all
+# users before it sets up WAU (work-order item 31), so the first pass is expected to install the
+# framework and WAU and both passes to exit 0, and the assertions then expect WAU at its pin. Exit
+# 8 (apps OK, auto-updates not configured) with 'Auto-updates: NOT CONFIGURED' for the missing
+# framework is accepted by e2e/Invoke-InstallPass.ps1 only when the installer could not try that
+# install; a framework install that started and failed fails the pass. WAU's own update run is
+# still not exercised: a WAU leg (start the task, wait for it, check that winget still starts) is
+# left for a follow-up.
+#
+# Pull requests: every PR starts this workflow, and the changes job lets the legs run only when
+# the PR touches the product (WingetAppSetup/**, build/**, winget-app-install.ps1, the RMM
+# wrappers in rmm/**) or the e2e machinery (this file, e2e/**). The filter is a job rather than
+# pull_request.paths so that e2e-install can be a required check: a workflow that a paths filter
+# skips reports no status, and a required check left without one blocks the PR from merging, while
+# a job skipped by its if: reports success. For the same reason the 5.1 leg is its own job and not a matrix entry of
+# e2e-install: a skipped matrix job reports its check under the unexpanded matrix name, and the
+# matrix would rename the e2e-install check.
+#
+# The install runs TWICE: the second pass proves idempotence (must pass the same exit-code policy
+# as the first, with every app Skipped and the framework not installed again), verified by
+# e2e/Assert-Install.ps1 -ExpectAllSkippedOnSecondRun - the shared assertion script that tier 2
+# (issue #215, snapshot-rollback Proxmox VM) will reuse.
+#
+# Evidence: e2e/Collect-Diagnostics.ps1 snapshots the pwsh version, the all-users AppX state of
+# App Installer and WindowsAppRuntime, and the WAU tasks before and after the first pass and at
+# the end of the job, where it also collects MsiInstaller and RestartManager events, AppX
+# deployment errors and warnings, and WAU's logs. It is uploaded as the e2e-diagnostics artifact
+# next to the transcripts, together with the assertion output: red runs that kept only
+# transcripts were misdiagnosed twice (#279, #283).
+#
+# Failure reporting lives in its own ubuntu-latest job (report-failure) that reads the uploaded
+# artifacts of every leg, so it still files the issue when a Windows job lost PowerShell 7, timed
+# out or was cancelled. The old in-job step needed pwsh and failure(), and missed all three.
 
 on:
   schedule:
     - cron: '0 6 * * 1' # weekly, Mondays 06:00 UTC
   workflow_dispatch:
-  pull_request:
-    paths:
-      - '.github/workflows/e2e-install.yml'
-      - 'e2e/**'
+  pull_request: # every PR; the changes job decides whether it needs the real install
 
 permissions:
-  contents: read
-  issues: write # failure reporting: create-or-comment 'E2E install run failed'
+  contents: read # report-failure adds what it needs at job level
 
-# Never cancel a real install mid-flight (a half-provisioned runner produces misleading
-# failures); later runs queue behind the active one instead.
+# One group per ref, so only runs of the same code queue behind each other: the weekly run and runs
+# dispatched on main share refs/heads/main, a branch dispatch gets its branch, and each pull request
+# its refs/pull/<n>/merge. A pull request push therefore cannot cancel a pending weekly run (in a
+# group, a newer pending run cancels the older pending one), and runs in different groups get
+# separate throwaway VMs. A scheduled or dispatched install is never cancelled mid-flight -
+# report-failure would file an issue for a run nobody chose to stop. A pull request's run is
+# cancelled by the run for its next push, which tests the newer code; its result only shows on the
+# PR, so nothing is filed.
 concurrency:
-  group: e2e-install
-  cancel-in-progress: false
+  group: e2e-install-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   # Catalog apps that provably CANNOT install on GitHub-hosted (Server-based) runner images —
@@ -41,22 +117,72 @@ env:
   # tolerate exit 1 only because Assert-Install.ps1 verifies that NOTHING outside this list
   # failed. Currently EMPTY — and empty means STRICT: on the runner an empty env var reads as
   # $null in pwsh, so the tolerate-exit-1 branches below are inert and both install passes must
-  # exit 0. The containment machinery is kept for future runner-only incompatibilities.
+  # succeed: exit 0 or 3010, or 8 only for a missing WindowsAppRuntime framework the installer
+  # could not try to install (see e2e/Invoke-InstallPass.ps1). The containment machinery is kept
+  # for future runner-only incompatibilities.
   #   - Dell.CommandUpdate.Universal was retired from this list by issue #217: the product now
   #     gates it with a manufacturer condition in the catalog, so non-Dell machines (including
-  #     these runners) report it 'Skipped (not applicable: Dell hardware only)' instead of
-  #     failing its Server-incompatible Microsoft.DotNet.DesktopRuntime.8 dependency (0x8A150104).
+  #     these runners) report it 'Skipped (not applicable: Dell hardware with x64 Windows only; ...)'
+  #     instead of failing its Server-incompatible Microsoft.DotNet.DesktopRuntime.8 dependency
+  #     (0x8A150104).
   KNOWN_PLATFORM_INCOMPATIBLE: ''
 
 jobs:
+  changes:
+    # Pull requests only: does this PR need the real install? Yes when it changes the product
+    # (WingetAppSetup/**, build/**, winget-app-install.ps1, rmm/**) or the e2e machinery (this
+    # file, e2e/**). Scheduled and dispatched runs skip this job and always install.
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      e2e: ${{ steps.filter.outputs.e2e }}
+    steps:
+      # The PR's merge commit and its parents: the first parent is the base branch.
+      - name: Checkout the merge commit
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+
+      - name: Match the changed files against the e2e paths
+        id: filter
+        shell: bash
+        run: |
+          set -uo pipefail
+          # Merge commit against its base: the files this PR changes, the same set a paths filter
+          # sees. --no-renames lists both sides of a rename, so moving a file out of the product
+          # still counts. If git cannot tell, install rather than skip.
+          if ! changed=$(git diff --no-renames --name-only HEAD^1 HEAD); then
+            echo '::warning::Could not list the files this pull request changes; running the e2e install anyway.'
+            echo 'e2e=true' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          pattern='^(WingetAppSetup/|build/|e2e/|rmm/)|^(winget-app-install\.ps1|\.github/workflows/e2e-install\.yml)$'
+          if matched=$(grep -E "$pattern" <<< "$changed"); then
+            echo 'Changed files that need the real install:'
+            echo "$matched"
+            echo 'e2e=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'This pull request changes no product or e2e file; skipping the e2e install.'
+            echo 'e2e=false' >> "$GITHUB_OUTPUT"
+          fi
+
   e2e-install:
+    needs: changes
+    # Pull requests: only when the changes job found a product or e2e file. If that job did not
+    # succeed, install anyway: a skipped e2e-install counts as passed for a required check, so
+    # skipping on an unknown answer would let an untested change merge. Scheduled and dispatched
+    # runs always install (changes is skipped for them, hence !cancelled() instead of the default
+    # success()).
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.changes.result != 'success' || needs.changes.outputs.e2e == 'true') }}
     # windows-latest (issue #279): windows-latest currently resolves to Windows Server 2025,
-    # whose image ships/stages a newer Microsoft.DesktopAppInstaller (1.29.290.0) than the one
-    # already registered (1.26.510.0) and is missing the Microsoft.WindowsAppRuntime.1.8
-    # framework that newer version depends on. Two independent runs hit the identical,
-    # non-retryable AppX registration deadlock during the idempotence (second) install pass -
-    # Repair-WinGetPackageManager itself fails against that wedged state, so nothing in this
-    # repo can recover a runner that already hit it.
+    # which lacks the Microsoft.WindowsAppRuntime.1.8 framework that winget 1.12+ depends on.
+    # The newer Microsoft.DesktopAppInstaller (1.29.x) seen in the #279/#284 deadlock was NOT
+    # shipped by the image: it was provisioned mid-job by Winget-AutoUpdate's own
+    # Install-Prerequisites, which the installer used to start immediately with RUN_WAU=YES
+    # (now removed). Without the framework that version cannot register and the older one is
+    # then rejected as a downgrade - a state Repair-WinGetPackageManager cannot recover.
     #
     # Pinning to windows-2022 was tried as a workaround and reverted: this PR's own
     # self-validating run on windows-2022 failed every app on the FIRST install pass with
@@ -64,97 +190,153 @@ jobs:
     # #279's slow partial one (issue #282). Staying on windows-latest until either GitHub
     # ships a corrected Server 2025 image, or a viable pinned alternative is found.
     runs-on: windows-latest
-    timeout-minutes: 90
+    # Backstop. The long steps have their own timeout-minutes, which add up to less than this
+    # (15 + 3 + 35 + 3 + 35 + 40 + 5 = 136, plus checkout and uploads), so a hung pass fails at its
+    # own limit and the diagnostics and upload steps still run. A job that reaches this limit is
+    # cancelled instead; report-failure still files the issue. Each step limit sits above that
+    # step's slow red-run path, so it ends with its own summary instead of being cut off:
+    #   - runner preparation, 15: uninstalling three apps takes a minute or two. Every winget
+    #     call in it is bounded, at most 4 min per app (list 45 s, uninstall 150 s, list 45 s), so
+    #     12 min for the three; each app's result prints as soon as it is done, and the step
+    #     continues on error, so a hang there only costs time.
+    #   - install passes, 35 each: first passes have taken 3-11 min and passing second passes
+    #     under 1 min. A pass where winget stops launching now ends after about 2.5 min (75 s of
+    #     launch retries for one app, then the circuit breaker's 75 s check), about 6 min if every
+    #     30 s check hangs to its limit; it used to cost about 1.4 min per applicable app on each
+    #     of its two loops (run 36384683838's second pass took 23.9 min). The end-of-run launch
+    #     check adds up to 1 min (3.5 min if every check hangs).
+    #   - assertions, 40: Assert-Install.ps1 checks for up to about 6.5 min that winget launches
+    #     (7 checks 30 s apart, each up to 30 s), then spends up to 3.25 min per applicable app
+    #     when winget hangs (3 probes of 60 s plus 15 s of pauses), about 36 min for the 9 apps
+    #     that apply on this runner. Raise it if the catalog grows.
+    timeout-minutes: 145
+    env:
+      # What both install passes run: 'raw-main' (the production one-liner) only for the weekly run,
+      # 'checkout' for pull requests and dispatched runs (piped to iex, then run with -File). See
+      # the header comment.
+      INSTALLER_SOURCE: ${{ github.event_name == 'schedule' && 'raw-main' || 'checkout' }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
 
-      - name: First install pass (real install)
-        shell: pwsh
-        env:
-          EVENT_NAME: ${{ github.event_name }}
+      # Chrome, 7-Zip and Git come with the runner image; without this the first pass skipped them
+      # as already installed and their install paths never ran (review finding P3-40). Runner
+      # preparation, not a check: an app it cannot remove gets a warning and the pass skips it.
+      - name: Remove the catalog apps the runner image ships with
+        shell: powershell
+        continue-on-error: true
+        timeout-minutes: 15
         run: |
-          # Mode selection (see the header comment): PRs run their own checkout so e2e-machinery
-          # changes validate themselves pre-merge; scheduled/dispatched runs exercise the
-          # production irm | iex path against raw main. Both paths rely on the installer's
-          # effective non-interactive auto-detection (redirected stdin on a runner) - that
-          # detection is itself part of what this run verifies (issue #214).
-          if ($env:EVENT_NAME -eq 'pull_request') {
-            & pwsh -NoProfile -ExecutionPolicy Bypass -File ./winget-app-install.ps1
-          }
-          else {
-            & pwsh -NoProfile -Command 'irm https://raw.githubusercontent.com/J-MaFf/winget-app-setup/main/winget-app-install.ps1 | iex'
-          }
-          $exitCode = $LASTEXITCODE
-          # NOTE: GitHub's pwsh shell wrapper ends every step with 'exit $LASTEXITCODE', so the
-          # success/tolerated branches must exit 0 explicitly or the installer's lingering
-          # nonzero code fails the step anyway (observed on run 3).
-          if ($exitCode -eq 0) {
-            Write-Host 'First install pass exited 0.' -ForegroundColor Green
-            exit 0
-          }
-          elseif ($exitCode -eq 1 -and $env:KNOWN_PLATFORM_INCOMPATIBLE) {
-            # Exit 1 = 'some apps failed'. Tolerated ONLY when KNOWN_PLATFORM_INCOMPATIBLE is
-            # non-empty (an empty workflow env var reads as $null here, making this branch
-            # inert - exit 1 then hard-fails below), and only pending the assertion step's
-            # containment check that nothing outside that list failed.
-            Write-Host "First install pass exited 1 (some apps failed) - tolerated pending containment check against known platform-incompatible apps: $env:KNOWN_PLATFORM_INCOMPATIBLE" -ForegroundColor Yellow
-            exit 0
-          }
-          else {
-            # 2 = winget unavailable, 3 = validation failed, or anything unexpected: hard fail.
-            Write-Host "First install pass FAILED with exit code $exitCode" -ForegroundColor Red
-            exit $exitCode
-          }
+          & .\e2e\Remove-PreinstalledApps.ps1
+
+      # The diagnostics steps run in Windows PowerShell 5.1, which a broken or removed PowerShell 7
+      # cannot take down, and never fail the job: the script exits 0 whatever source is missing,
+      # and continue-on-error covers anything else.
+      - name: Diagnostics before the first install pass
+        shell: powershell
+        continue-on-error: true
+        timeout-minutes: 3
+        run: |
+          & .\e2e\Collect-Diagnostics.ps1 -OutputDirectory (Join-Path $env:RUNNER_TEMP 'e2e-diagnostics') -Label '1-before-first-pass'
+
+      - name: First install pass (real install)
+        id: first-pass
+        shell: pwsh
+        timeout-minutes: 35
+        # INSTALLER_SOURCE (see the header comment): the weekly run exercises the production
+        # one-liner against raw main; pull requests and dispatched runs pipe the checkout's
+        # installer to iex the same way, so they test the code under review. Both rely on the
+        # installer's effective non-interactive auto-detection (redirected stdin on a runner) - that
+        # detection is itself part of what this run verifies (issue #214). Invoke-InstallPass.ps1
+        # applies the exit-code policy: 0 and 3010 (OK, restart required) pass; 8 (apps OK,
+        # auto-updates not configured or unhealthy) passes only when the pass's own transcript
+        # says 'Auto-updates: NOT CONFIGURED - Microsoft.WindowsAppRuntime.1.8 is missing' and
+        # the installer could not try to install the framework (on windows-latest it can, so a
+        # pass there is expected to exit 0), and fails the step with 8 for a framework install
+        # that started and failed, for any other reason or with no transcript to check; 1 (some
+        # apps failed) is tolerated only while KNOWN_PLATFORM_INCOMPATIBLE is non-empty, pending
+        # the assertion step's containment check; anything else (2 = winget unavailable,
+        # 3 = validation failed, 5 = aborted, ...) fails the step with the installer's code.
+        run: ./e2e/Invoke-InstallPass.ps1 -Pass first -Shell pwsh -Entry OneLiner -ApplicabilityPath (Join-Path $env:RUNNER_TEMP 'e2e-applicability-first.json')
+
+      - name: Diagnostics after the first install pass
+        if: always()
+        shell: powershell
+        continue-on-error: true
+        timeout-minutes: 3
+        run: |
+          & .\e2e\Collect-Diagnostics.ps1 -OutputDirectory (Join-Path $env:RUNNER_TEMP 'e2e-diagnostics') -Label '2-after-first-pass'
 
       - name: Second install pass (idempotence leg)
+        id: second-pass
         shell: pwsh
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-        run: |
-          # Same command as the first pass, on the now-provisioned machine: it must exit 0
-          # again, and the assertions step below verifies (via the latest transcript) that
-          # every catalog app was Skipped and nothing was installed or failed.
-          if ($env:EVENT_NAME -eq 'pull_request') {
-            & pwsh -NoProfile -ExecutionPolicy Bypass -File ./winget-app-install.ps1
-          }
-          else {
-            & pwsh -NoProfile -Command 'irm https://raw.githubusercontent.com/J-MaFf/winget-app-setup/main/winget-app-install.ps1 | iex'
-          }
-          $exitCode = $LASTEXITCODE
-          # Same explicit-exit-0 requirement as the first pass (pwsh shell wrapper behavior).
-          if ($exitCode -eq 0) {
-            Write-Host 'Second install pass exited 0.' -ForegroundColor Green
-            exit 0
-          }
-          elseif ($exitCode -eq 1 -and $env:KNOWN_PLATFORM_INCOMPATIBLE) {
-            # Known-incompatible apps are still missing on the second pass, so the installer
-            # retries and fails them again - same containment rule (and same empty-means-strict
-            # behavior) as the first pass.
-            Write-Host "Second install pass exited 1 (some apps failed) - tolerated pending containment check against known platform-incompatible apps: $env:KNOWN_PLATFORM_INCOMPATIBLE" -ForegroundColor Yellow
-            exit 0
-          }
-          else {
-            Write-Host "Second install pass FAILED with exit code $exitCode" -ForegroundColor Red
-            exit $exitCode
-          }
+        timeout-minutes: 35
+        # Same installer as the first pass, on the now-provisioned machine: it must succeed again
+        # (exit 0, finding the framework and WAU the first pass installed), and the assertions
+        # step below verifies (via the latest transcript) that every catalog app was Skipped and
+        # nothing was installed or failed. The weekly run repeats the one-liner.
+        # Checkout runs switch to 'pwsh -File', the entry the readme documents for clone, RMM and
+        # CI runs, so that path also gets an un-mocked run before it ships. Same exit-code policy
+        # as the first pass: known-incompatible apps are still missing here, so the installer
+        # retries and fails them again.
+        run: ./e2e/Invoke-InstallPass.ps1 -Pass second -Shell pwsh -Entry File -ApplicabilityPath (Join-Path $env:RUNNER_TEMP 'e2e-applicability-second.json')
 
       - name: Run assertions (e2e/Assert-Install.ps1, shared with tier 2)
+        # Also after a failed pass, so a red run still gets its per-app PASS/FAIL table.
+        if: ${{ !cancelled() }}
         shell: pwsh
+        timeout-minutes: 40
+        env:
+          SECOND_PASS_OUTCOME: ${{ steps.second-pass.outcome }}
         run: |
           # Verifies from the checkout: every APPLICABLE Get-DefaultAppCatalog app resolves via
-          # `winget list` (exit-code classified) - the script evaluates each app's catalog
-          # condition on this machine, and not-applicable apps (e.g. Dell Command Update on
-          # these non-Dell runners, issue #217) must instead show their 'not applicable' skip
-          # line in the latest transcript. Also: the WAU scheduled task exists, the installed
-          # WAU version matches Get-WauPin, a transcript with the 'Installer build' stamp
-          # exists under %ProgramData%, and (idempotence) the latest transcript shows every
-          # applicable app Skipped. -SkipApps is the documented escape hatch for runner-platform
-          # incompatibilities ONLY - each entry is justified at the KNOWN_PLATFORM_INCOMPATIBLE
-          # definition at the top of this file (currently empty). The script also asserts
-          # CONTAINMENT: no app outside the skip list failed in either install pass.
-          & pwsh -NoProfile -ExecutionPolicy Bypass -File ./e2e/Assert-Install.ps1 -ExpectAllSkippedOnSecondRun -SkipApps "$env:KNOWN_PLATFORM_INCOMPATIBLE"
+          # `winget list` (exit-code classified) - the script decides each app's applicability on
+          # this machine with the installer's own rule (Test-AppApplicability: the arch list and
+          # the condition; an app with neither must apply), and not-applicable apps (e.g. Dell
+          # Command Update on these non-Dell runners, issue #217) must instead show their
+          # 'not applicable' skip line in the latest transcript. Also: the WAU scheduled task
+          # exists, the installed WAU version matches Get-WauPin, a transcript with the
+          # 'Installer build' stamp exists under %ProgramData%, and (idempotence) the latest
+          # transcript shows every applicable app Skipped. -SkipApps is the documented escape
+          # hatch for runner-platform incompatibilities ONLY - each entry is justified at the
+          # KNOWN_PLATFORM_INCOMPATIBLE definition at the top of this file (currently empty). The
+          # script also asserts CONTAINMENT: no app outside the skip list failed in either install
+          # pass.
+          #
+          # The idempotence assertions read the latest transcript as the second pass's. When that
+          # pass never ran (the first one failed), they would only add noise, so leave them out.
+          # Applicability comes from the record Invoke-InstallPass.ps1 took just before the pass
+          # that wrote the latest transcript: the first pass changes what Terminal's condition reads.
+          $assertArgs = @('-SkipApps', "$env:KNOWN_PLATFORM_INCOMPATIBLE")
+          $latestPass = 'first'
+          if ($env:SECOND_PASS_OUTCOME -eq 'success' -or $env:SECOND_PASS_OUTCOME -eq 'failure') {
+            $assertArgs = @('-ExpectAllSkippedOnSecondRun') + $assertArgs
+            $latestPass = 'second'
+          }
+          else {
+            Write-Host "The second install pass did not run (outcome: '$env:SECOND_PASS_OUTCOME'); skipping the idempotence assertions." -ForegroundColor Yellow
+          }
+          # Runs that installed the checkout must show its build id in every pass's transcript, so a
+          # run that quietly tested another copy (raw main) fails here. The weekly run fetches raw
+          # main, which can trail the checkout by a few minutes of CDN caching, so it is not checked.
+          if ($env:INSTALLER_SOURCE -ne 'raw-main') {
+            $assertArgs += @('-InstallerPath', (Join-Path $env:GITHUB_WORKSPACE 'winget-app-install.ps1'))
+          }
+          $assertArgs += @('-ApplicabilityPath', (Join-Path $env:RUNNER_TEMP "e2e-applicability-$latestPass.json"))
+          # Also saved with the diagnostics, so report-failure can put the table in the issue.
+          $diagnosticsDir = Join-Path $env:RUNNER_TEMP 'e2e-diagnostics'
+          $null = New-Item -ItemType Directory -Path $diagnosticsDir -Force
+          & pwsh -NoProfile -ExecutionPolicy Bypass -File ./e2e/Assert-Install.ps1 @assertArgs 2>&1 |
+            Tee-Object -FilePath (Join-Path $diagnosticsDir 'assertions.txt')
           exit $LASTEXITCODE
+
+      - name: Diagnostics at the end of the job (with event logs and WAU logs)
+        if: always()
+        shell: powershell
+        continue-on-error: true
+        timeout-minutes: 5
+        run: |
+          & .\e2e\Collect-Diagnostics.ps1 -OutputDirectory (Join-Path $env:RUNNER_TEMP 'e2e-diagnostics') -Label '3-end-of-job' -IncludeLogs
 
       - name: Upload install transcripts
         if: always()
@@ -164,47 +346,544 @@ jobs:
           path: C:\ProgramData\winget-app-setup\logs\*.log
           if-no-files-found: warn
 
-      - name: Create or update failure issue (scheduled/dispatch runs only)
-        # Never for pull_request runs: a PR failure is visible on the PR itself; the issue
-        # channel exists so unattended scheduled runs cannot fail silently.
-        if: failure() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+      - name: Upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: e2e-diagnostics
+          path: ${{ runner.temp }}\e2e-diagnostics
+          if-no-files-found: warn
+
+  e2e-install-windows-powershell:
+    # The Windows PowerShell 5.1 leg (review finding P3-40; see the header comment): the same two
+    # passes as e2e-install, on a second throwaway VM, with every step in 'shell: powershell' so
+    # nothing depends on the image's PowerShell 7. That is removed before the first pass, so the
+    # first pass is a fresh box: the 5.1 bootstrap installs PowerShell 7 (winget, then its MSI
+    # fallbacks) and relaunches the installer under it. The second pass finds PowerShell 7 and
+    # relaunches. Same if: as e2e-install.
+    needs: changes
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.changes.result != 'success' || needs.changes.outputs.e2e == 'true') }}
+    runs-on: windows-latest
+    # Backstop, sized like e2e-install's: 20 + 3 + 35 + 3 + 35 + 40 + 5 = 141, plus checkout and
+    # uploads. Installing PowerShell 7 adds a minute or two to the first pass.
+    timeout-minutes: 150
+    env:
+      INSTALLER_SOURCE: ${{ github.event_name == 'schedule' && 'raw-main' || 'checkout' }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      # As in e2e-install, plus PowerShell 7 (MSI uninstall, winget as the fallback). If it cannot
+      # be removed, a warning says so, the first pass finds it instead of installing it, and the
+      # assertions fail (-ExpectPowerShell7Installed): the leg would not have tested the install.
+      # 20 minutes: at most 12 for the three apps, as in e2e-install, and 6.5 for PowerShell 7
+      # (msiexec 150 s, then the winget fallback's 4 min).
+      - name: Remove the catalog apps the runner image ships with, and PowerShell 7
+        shell: powershell
+        continue-on-error: true
+        timeout-minutes: 20
+        run: |
+          & .\e2e\Remove-PreinstalledApps.ps1 -IncludePowerShell7
+
+      - name: Diagnostics before the first install pass
+        shell: powershell
+        continue-on-error: true
+        timeout-minutes: 3
+        run: |
+          & .\e2e\Collect-Diagnostics.ps1 -OutputDirectory (Join-Path $env:RUNNER_TEMP 'e2e-diagnostics') -Label '1-before-first-pass'
+
+      - name: First install pass (real install, from Windows PowerShell 5.1)
+        id: first-pass
+        shell: powershell
+        timeout-minutes: 35
+        # The one-liner in a fresh Windows PowerShell: raw main for the weekly run, the checkout
+        # piped to iex otherwise. Same exit-code policy as e2e-install; the exit code is the one
+        # the bootstrap passes on from the PowerShell 7 run.
+        run: |
+          & .\e2e\Invoke-InstallPass.ps1 -Pass first -Shell powershell -Entry OneLiner -ApplicabilityPath (Join-Path $env:RUNNER_TEMP 'e2e-applicability-first.json')
+
+      - name: Diagnostics after the first install pass
+        if: always()
+        shell: powershell
+        continue-on-error: true
+        timeout-minutes: 3
+        run: |
+          & .\e2e\Collect-Diagnostics.ps1 -OutputDirectory (Join-Path $env:RUNNER_TEMP 'e2e-diagnostics') -Label '2-after-first-pass'
+
+      - name: Second install pass (idempotence leg, from Windows PowerShell 5.1)
+        id: second-pass
+        shell: powershell
+        timeout-minutes: 35
+        # Weekly: the one-liner again. Checkout runs: 'powershell -File', whose bootstrap relaunches
+        # the file itself instead of downloading it.
+        run: |
+          & .\e2e\Invoke-InstallPass.ps1 -Pass second -Shell powershell -Entry File -ApplicabilityPath (Join-Path $env:RUNNER_TEMP 'e2e-applicability-second.json')
+
+      - name: Run assertions (e2e/Assert-Install.ps1, with the bootstrap checks)
+        if: ${{ !cancelled() }}
+        shell: powershell
+        timeout-minutes: 40
+        env:
+          SECOND_PASS_OUTCOME: ${{ steps.second-pass.outcome }}
+        run: |
+          # The same assertions as in e2e-install, plus -ExpectPowerShell7Bootstrap: one bootstrap
+          # transcript per pass, each of which relaunched the installer under PowerShell 7; and
+          # -ExpectPowerShell7Installed: the first pass's bootstrap installed PowerShell 7 rather
+          # than finding one, so its install path really ran.
+          # Windows PowerShell turns a program's stderr into errors and drops empty arguments, so
+          # errors do not stop this step and -SkipApps is passed only when the list has entries.
+          $ErrorActionPreference = 'Continue'
+          $assertArgs = @('-ExpectPowerShell7Bootstrap', '-ExpectPowerShell7Installed')
+          if ($env:KNOWN_PLATFORM_INCOMPATIBLE) {
+            $assertArgs += @('-SkipApps', $env:KNOWN_PLATFORM_INCOMPATIBLE)
+          }
+          # As in e2e-install: applicability as recorded just before the pass of the latest transcript.
+          $latestPass = 'first'
+          if ($env:SECOND_PASS_OUTCOME -eq 'success' -or $env:SECOND_PASS_OUTCOME -eq 'failure') {
+            $assertArgs += '-ExpectAllSkippedOnSecondRun'
+            $latestPass = 'second'
+          }
+          else {
+            Write-Host "The second install pass did not run (outcome: '$env:SECOND_PASS_OUTCOME'); skipping the idempotence assertions." -ForegroundColor Yellow
+          }
+          if ($env:INSTALLER_SOURCE -ne 'raw-main') {
+            $assertArgs += @('-InstallerPath', (Join-Path $env:GITHUB_WORKSPACE 'winget-app-install.ps1'))
+          }
+          $assertArgs += @('-ApplicabilityPath', (Join-Path $env:RUNNER_TEMP "e2e-applicability-$latestPass.json"))
+          # Saved as UTF-8 with the diagnostics, line by line, for report-failure (Tee-Object in
+          # Windows PowerShell writes UTF-16).
+          $diagnosticsDir = Join-Path $env:RUNNER_TEMP 'e2e-diagnostics'
+          $null = New-Item -ItemType Directory -Path $diagnosticsDir -Force
+          $assertionsFile = Join-Path $diagnosticsDir 'assertions.txt'
+          # Assert-Install.ps1 needs PowerShell 7, which this leg's first pass installed: look where
+          # the bootstrap looks (PATH, Program Files, the per-user app alias of the MSIX build).
+          $pwsh = $null
+          $candidates = @(
+            (Get-Command -Name 'pwsh.exe' -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty Source),
+            (Join-Path $env:ProgramFiles 'PowerShell\7\pwsh.exe'),
+            (Join-Path $env:LOCALAPPDATA 'Microsoft\WindowsApps\pwsh.exe')
+          )
+          foreach ($candidate in $candidates) {
+            if ($candidate -and (Test-Path -LiteralPath $candidate)) {
+              $pwsh = $candidate
+              break
+            }
+          }
+          if (-not $pwsh) {
+            $message = 'PowerShell 7 is not installed after the install passes, so the assertions cannot run: the bootstrap did not install it (see the -bootstrap transcripts).'
+            Write-Host $message -ForegroundColor Red
+            [System.IO.File]::WriteAllText($assertionsFile, $message + [Environment]::NewLine)
+            exit 1
+          }
+          Write-Host "Running the assertions with $pwsh"
+          & $pwsh -NoProfile -ExecutionPolicy Bypass -File .\e2e\Assert-Install.ps1 @assertArgs 2>&1 | ForEach-Object {
+            $line = "$_"
+            Write-Host $line
+            [System.IO.File]::AppendAllText($assertionsFile, $line + [Environment]::NewLine)
+          }
+          exit $LASTEXITCODE
+
+      - name: Diagnostics at the end of the job (with event logs and WAU logs)
+        if: always()
+        shell: powershell
+        continue-on-error: true
+        timeout-minutes: 5
+        run: |
+          & .\e2e\Collect-Diagnostics.ps1 -OutputDirectory (Join-Path $env:RUNNER_TEMP 'e2e-diagnostics') -Label '3-end-of-job' -IncludeLogs
+
+      # The -bootstrap transcripts of the 5.1 phase are in the same folder.
+      - name: Upload install transcripts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: e2e-install-transcripts-windows-powershell
+          path: C:\ProgramData\winget-app-setup\logs\*.log
+          if-no-files-found: warn
+
+      - name: Upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: e2e-diagnostics-windows-powershell
+          path: ${{ runner.temp }}\e2e-diagnostics
+          if-no-files-found: warn
+
+  e2e-install-system:
+    # The SYSTEM leg (work-order item 34; see the header comment): one install pass as SYSTEM,
+    # through the RMM wrapper started by a 32-bit Windows PowerShell, on a third throwaway VM. Same
+    # if: as e2e-install.
+    needs: changes
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.changes.result != 'success' || needs.changes.outputs.e2e == 'true') }}
+    runs-on: windows-latest
+    # Backstop: 15 + 3 + 45 + 5 = 68, plus checkout and uploads. The pass step's 45 minutes cover the
+    # task's own 40-minute limit and the two minutes the script waits past it before stopping it.
+    timeout-minutes: 80
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      # As in e2e-install: Chrome, 7-Zip and Git come with the image, so the SYSTEM run would only
+      # skip them. PowerShell 7 stays: the SYSTEM run finds it, as on a PC the bootstrap set up.
+      - name: Remove the catalog apps the runner image ships with
+        shell: powershell
+        continue-on-error: true
+        timeout-minutes: 15
+        run: |
+          & .\e2e\Remove-PreinstalledApps.ps1
+
+      - name: Diagnostics before the SYSTEM install pass
+        shell: powershell
+        continue-on-error: true
+        timeout-minutes: 3
+        run: |
+          & .\e2e\Collect-Diagnostics.ps1 -OutputDirectory (Join-Path $env:RUNNER_TEMP 'e2e-diagnostics') -Label '1-before-system-pass'
+
+      - name: Install as SYSTEM through the RMM wrapper (scheduled task, 32-bit Windows PowerShell)
+        id: system-pass
         shell: pwsh
+        timeout-minutes: 45
+        run: |
+          # Registers and starts a one-shot SYSTEM task running SysWOW64 powershell.exe -File
+          # rmm/Invoke-WingetAppSetup.ps1 -InstallerPath <checkout's installer>, waits for it and
+          # checks the run (e2e/Invoke-SystemInstallPass.ps1). Exit codes 0 and 3010 pass; 8 only
+          # when the run's transcript gives the missing Microsoft.WindowsAppRuntime.1.8 as the
+          # reason and the installer could not try to install it (on windows-latest it can, so the
+          # SYSTEM run is expected to install the framework and WAU and exit 0; a framework install
+          # that started and failed fails the step); 1 only while KNOWN_PLATFORM_INCOMPATIBLE is
+          # non-empty and every app the run left failed is on it (the containment check the other
+          # legs get from Assert-Install.ps1). The output is also saved with the diagnostics, so
+          # report-failure can put the table in the issue.
+          $diagnosticsDir = Join-Path $env:RUNNER_TEMP 'e2e-diagnostics'
+          $null = New-Item -ItemType Directory -Path $diagnosticsDir -Force
+          & pwsh -NoProfile -ExecutionPolicy Bypass -File ./e2e/Invoke-SystemInstallPass.ps1 2>&1 |
+            Tee-Object -FilePath (Join-Path $diagnosticsDir 'assertions.txt')
+          exit $LASTEXITCODE
+
+      - name: Diagnostics at the end of the job (with event logs and WAU logs)
+        if: always()
+        shell: powershell
+        continue-on-error: true
+        timeout-minutes: 5
+        run: |
+          & .\e2e\Collect-Diagnostics.ps1 -OutputDirectory (Join-Path $env:RUNNER_TEMP 'e2e-diagnostics') -Label '3-end-of-job' -IncludeLogs
+
+      # The wrapper's install-*-rmm.log and the run's last-run.json are in the same folder.
+      - name: Upload install transcripts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: e2e-install-transcripts-system
+          path: |
+            C:\ProgramData\winget-app-setup\logs\*.log
+            C:\ProgramData\winget-app-setup\logs\last-run.json
+          if-no-files-found: warn
+
+      - name: Upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: e2e-diagnostics-system
+          path: ${{ runner.temp }}\e2e-diagnostics
+          if-no-files-found: warn
+
+  e2e-install-system-winget-client:
+    # The SYSTEM leg with the opt-in Microsoft.WinGet.Client engine (wgt-gq8.42; see the header
+    # comment), two passes on a fourth throwaway VM. Same if: as e2e-install.
+    needs: changes
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.changes.result != 'success' || needs.changes.outputs.e2e == 'true') }}
+    runs-on: windows-latest
+    # Backstop: 15 + 10 + 3 + 100 + 5 = 133, plus checkout and uploads. The install step's 100
+    # minutes cover two tasks of at most 42 minutes each (the second finds everything installed,
+    # so it is short).
+    timeout-minutes: 145
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      # As in e2e-install-system: the run must install Chrome, 7-Zip and Git itself.
+      - name: Remove the catalog apps the runner image ships with
+        shell: powershell
+        continue-on-error: true
+        timeout-minutes: 15
+        run: |
+          & .\e2e\Remove-PreinstalledApps.ps1
+
+      # What the Gallery serves today against the committed pin. Its report (every file with its
+      # hash and signature) goes with the diagnostics as pin-check.txt; the downloads stay out of
+      # them. Informational: the install step's own checks decide the job.
+      - name: Check the WinGet client module pin
+        id: pin
+        shell: pwsh
+        continue-on-error: true
+        timeout-minutes: 10
+        run: |
+          $diagnosticsDir = Join-Path $env:RUNNER_TEMP 'e2e-diagnostics'
+          $null = New-Item -ItemType Directory -Path $diagnosticsDir -Force
+          & pwsh -NoProfile -File ./build/Set-WingetClientModulePin.ps1 -Check -OutputDirectory (Join-Path $env:RUNNER_TEMP 'wingetclient-pin') 2>&1 |
+            Tee-Object -FilePath (Join-Path $diagnosticsDir 'pin-check.txt')
+          exit $LASTEXITCODE
+
+      - name: Diagnostics before the SYSTEM install passes
+        shell: powershell
+        continue-on-error: true
+        timeout-minutes: 3
+        run: |
+          & .\e2e\Collect-Diagnostics.ps1 -OutputDirectory (Join-Path $env:RUNNER_TEMP 'e2e-diagnostics') -Label '1-before-system-winget-client'
+
+      - name: Install as SYSTEM with Microsoft.WinGet.Client, twice (scheduled task, 32-bit Windows PowerShell)
+        id: system-winget-client-pass
+        shell: pwsh
+        timeout-minutes: 100
+        run: |
+          # As the SYSTEM leg, with -SystemInstallEngine WinGetClient passed to the wrapper and the
+          # engine's checks added, then a second pass that must find every app already there
+          # (e2e/Invoke-SystemInstallPass.ps1). The output is saved with the diagnostics, for
+          # report-failure.
+          $diagnosticsDir = Join-Path $env:RUNNER_TEMP 'e2e-diagnostics'
+          $null = New-Item -ItemType Directory -Path $diagnosticsDir -Force
+          & pwsh -NoProfile -ExecutionPolicy Bypass -File ./e2e/Invoke-SystemInstallPass.ps1 -SystemInstallEngine WinGetClient -PassCount 2 2>&1 |
+            Tee-Object -FilePath (Join-Path $diagnosticsDir 'assertions.txt')
+          exit $LASTEXITCODE
+
+      - name: Diagnostics at the end of the job (with event logs, WAU logs and WinGet engine logs)
+        if: always()
+        shell: powershell
+        continue-on-error: true
+        timeout-minutes: 5
+        run: |
+          & .\e2e\Collect-Diagnostics.ps1 -OutputDirectory (Join-Path $env:RUNNER_TEMP 'e2e-diagnostics') -Label '3-end-of-job' -IncludeLogs
+
+      - name: Upload install transcripts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: e2e-install-transcripts-system-winget-client
+          path: |
+            C:\ProgramData\winget-app-setup\logs\*.log
+            C:\ProgramData\winget-app-setup\logs\last-run.json
+          if-no-files-found: warn
+
+      - name: Upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: e2e-diagnostics-system-winget-client
+          path: ${{ runner.temp }}\e2e-diagnostics
+          if-no-files-found: warn
+
+  report-failure:
+    # Creates, or comments on, the 'E2E install run failed' issue when a scheduled run, or a run
+    # dispatched on main, does not succeed in any leg: failed, timed out or cancelled. Those
+    # runs test what users get. Never for pull_request runs, whose result shows on the PR, nor for
+    # a run dispatched on another branch, which tests unmerged code and reports to whoever started
+    # it; the issue channel exists so production failures cannot go unnoticed.
+    #
+    # A separate ubuntu-latest job, so it needs nothing from the Windows runners but the uploaded
+    # artifacts. The old step inside e2e-install ran with 'shell: pwsh' and 'if: failure()': run
+    # 35566866223 removed PowerShell 7 and the step died with 'pwsh: command not found', and a
+    # job that hits timeout-minutes is cancelled, which failure() does not match.
+    needs: [e2e-install, e2e-install-windows-powershell, e2e-install-system, e2e-install-system-winget-client]
+    if: ${{ always() && (needs.e2e-install.result != 'success' || needs.e2e-install-windows-powershell.result != 'success' || needs.e2e-install-system.result != 'success' || needs.e2e-install-system-winget-client.result != 'success') && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: read # list the steps of each leg that did not succeed
+      issues: write # create-or-comment 'E2E install run failed'
+    steps:
+      # Every leg's transcripts and diagnostics, each artifact into artifacts/<artifact name>. Any
+      # of them can be missing (a job stopped before uploading); the issue says so.
+      - name: Download install transcripts and diagnostics
+        continue-on-error: true
+        uses: actions/download-artifact@v8
+        with:
+          pattern: e2e-*
+          path: artifacts
+
+      - name: Create or update the failure issue
+        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          EVENT_NAME: ${{ github.event_name }}
+          TESTED_SHA: ${{ github.sha }}
+          PWSH_LEG_RESULT: ${{ needs.e2e-install.result }}
+          WINDOWS_POWERSHELL_LEG_RESULT: ${{ needs.e2e-install-windows-powershell.result }}
+          SYSTEM_LEG_RESULT: ${{ needs.e2e-install-system.result }}
+          SYSTEM_WINGET_CLIENT_LEG_RESULT: ${{ needs.e2e-install-system-winget-client.result }}
         run: |
-          $title = 'E2E install run failed'
+          set -uo pipefail
+          title='E2E install run failed'
+          body="$RUNNER_TEMP/e2e-failure-body.md"
+          jobs_json="$RUNNER_TEMP/e2e-jobs.json"
 
-          $logDir = Join-Path $env:ProgramData 'winget-app-setup\logs'
-          $latest = Get-ChildItem -Path $logDir -Filter '*.log' -ErrorAction SilentlyContinue |
-            Sort-Object LastWriteTime | Select-Object -Last 1
+          # Print stdin inside a code fence: BOM and CRs stripped, very long lines cut, and any
+          # UTF-8 sequence the cut split dropped.
+          fence() {
+            echo '````text'
+            sed -e '1s/^\xEF\xBB\xBF//' -e 's/\r$//' | cut -c1-1000 | iconv -f UTF-8 -t UTF-8 -c
+            echo '````'
+          }
 
-          $lines = @()
-          $lines += 'A scheduled/dispatched end-to-end install run failed.'
-          $lines += ''
-          $lines += "Run: $env:RUN_URL"
-          $lines += ''
-          if ($latest) {
-            $lines += "Last 50 lines of the most recent transcript ($($latest.Name); full logs are attached to the run as the e2e-install-transcripts artifact):"
-            $lines += ''
-            $lines += '```'
-            $lines += @(Get-Content -Path $latest.FullName -Tail 50)
-            $lines += '```'
-          }
-          else {
-            $lines += 'No install transcript was found on the runner (the run may have failed before the installer started); see the run log.'
-          }
-          $bodyFile = Join-Path $env:RUNNER_TEMP 'e2e-failure-body.md'
-          Set-Content -Path $bodyFile -Value ($lines -join "`n") -Encoding utf8
+          # The run's jobs, for the steps of each leg that did not succeed. Without them the issue
+          # still goes out.
+          if ! gh api "repos/$REPO/actions/runs/$RUN_ID/attempts/$RUN_ATTEMPT/jobs" > "$jobs_json"; then
+            echo '{"jobs":[]}' > "$jobs_json"
+          fi
+          # A leg's steps that did not succeed, with how long each ran: a pass that ran for its
+          # whole timeout-minutes hung rather than failed. ($job and $s are jq variables.)
+          # shellcheck disable=SC2016
+          steps_jq='.jobs[] | select(.name == $job) | .steps[]
+            | select(.conclusion != null and .conclusion != "success" and .conclusion != "skipped")
+            | "  - \(.name): \(.conclusion)" + (if .started_at and .completed_at then
+                ((.completed_at | fromdateiso8601) - (.started_at | fromdateiso8601)) as $s
+                | if $s < 120 then " after \($s) s" else " after \($s / 60 | floor) min" end
+              else "" end)'
 
-          # Dedup: comment on an existing open issue with this exact title instead of piling
-          # up a new issue per failed weekly run.
-          $existing = gh issue list --repo $env:REPO --state open --search "in:title `"$title`"" --json number,title |
-            ConvertFrom-Json | Where-Object { $_.title -eq $title } | Select-Object -First 1
-          if ($existing) {
-            gh issue comment $existing.number --repo $env:REPO --body-file $bodyFile
+          # One section per leg: its result and failed steps and, when it did not succeed, its
+          # assertion table, transcripts and diagnostics snapshots.
+          leg_section() {
+            local job=$1 label=$2 result=$3 transcripts=$4 diagnostics=$5
+            echo "## \`$job\` ($label): \`$result\`"
+            echo
+            if [ "$result" = 'success' ]; then
+              echo 'This leg passed.'
+              echo
+              return
+            fi
+            if [ "$result" = 'cancelled' ]; then
+              echo "The job was cancelled: it reached its job-level \`timeout-minutes\`, or someone cancelled the run. Steps after that point did not run, so some evidence below may be missing."
+              echo
+            fi
+            if steps=$(jq -r --arg job "$job" "$steps_jq" "$jobs_json") && [ -n "$steps" ]; then
+              echo 'Steps that did not succeed:'
+              echo "$steps"
+              echo
+            fi
+
+            echo '### Assertion results'
+            echo
+            assertions="$diagnostics/assertions.txt"
+            if [ -s "$assertions" ] && grep -q '=== E2E assertion results ===' "$assertions"; then
+              sed -n '/=== E2E assertion results ===/,$p' "$assertions" | head -n 150 | fence
+            elif [ -s "$assertions" ]; then
+              echo 'The assertions did not finish. The last 40 lines of their output:'
+              echo
+              tail -n 40 "$assertions" | fence
+            else
+              echo 'The assertions did not run, or left no output. See the run log.'
+            fi
+            echo
+
+            # Transcripts are install-yyyyMMdd-HHmmss.log, so name order is run order. The earliest
+            # is shown too: a red second pass often starts from damage done in the first. The
+            # Windows PowerShell 5.1 phase of a pass writes its own install-*-bootstrap.log, which
+            # holds no install and is named before the PowerShell 7 run it starts, so it is kept
+            # out of that pair and its latest one gets a section of its own. So does the RMM
+            # wrapper's install-*-rmm.log (the SYSTEM leg), which repeats the run's output.
+            mapfile -t logs < <(find "$transcripts" -maxdepth 1 -type f -name 'install-*.log' ! -name '*-whatif.log' ! -name '*-bootstrap.log' ! -name '*-rmm.log' -printf '%f\n' 2>/dev/null | sort)
+            mapfile -t bootstraps < <(find "$transcripts" -maxdepth 1 -type f -name 'install-*-bootstrap.log' -printf '%f\n' 2>/dev/null | sort)
+            mapfile -t wrappers < <(find "$transcripts" -maxdepth 1 -type f -name 'install-*-rmm.log' -printf '%f\n' 2>/dev/null | sort)
+            if [ "${#logs[@]}" -eq 0 ]; then
+              echo '### Install transcripts'
+              echo
+              if [ "${#bootstraps[@]}" -gt 0 ]; then
+                echo 'No PowerShell 7 install transcript was uploaded: the Windows PowerShell 5.1 bootstrap did not start PowerShell 7 (see its transcript below), or the run stopped before the upload step.'
+              else
+                echo 'No install transcript was uploaded: the run stopped before the installer started, or before the upload step. See the run log.'
+              fi
+            else
+              earliest=${logs[0]}
+              latest=${logs[${#logs[@]}-1]}
+              if [ "$earliest" != "$latest" ]; then
+                echo "### Earliest install transcript, last 50 lines (\`$earliest\`)"
+                echo
+                tail -n 50 "$transcripts/$earliest" | fence
+                echo
+              fi
+              echo "### Latest install transcript, last 50 lines (\`$latest\`)"
+              echo
+              tail -n 50 "$transcripts/$latest" | fence
+            fi
+            echo
+            if [ "${#bootstraps[@]}" -gt 0 ]; then
+              bootstrap=${bootstraps[${#bootstraps[@]}-1]}
+              echo "### Latest Windows PowerShell 5.1 bootstrap transcript, last 50 lines (\`$bootstrap\`)"
+              echo
+              tail -n 50 "$transcripts/$bootstrap" | fence
+              echo
+            fi
+            if [ "${#wrappers[@]}" -gt 0 ]; then
+              wrapper=${wrappers[${#wrappers[@]}-1]}
+              echo "### Latest RMM wrapper log, last 30 lines (\`$wrapper\`)"
+              echo
+              tail -n 30 "$transcripts/$wrapper" | fence
+              echo
+            fi
+
+            echo '### Diagnostics snapshots'
+            echo
+            found=0
+            for snapshot in "$diagnostics"/*/snapshot.txt; do
+              [ -f "$snapshot" ] || continue
+              found=1
+              echo "<details><summary>$(basename "$(dirname "$snapshot")")</summary>"
+              echo
+              head -n 150 "$snapshot" | fence
+              echo
+              echo '</details>'
+              echo
+            done
+            if [ "$found" -eq 0 ]; then
+              echo 'No diagnostics were uploaded. See the run log.'
+              echo
+            fi
           }
-          else {
-            gh issue create --repo $env:REPO --title $title --body-file $bodyFile --label bug --assignee J-MaFf
-          }
+
+          {
+            echo 'A scheduled or dispatched end-to-end install run did not succeed.'
+            echo
+            echo "- Run: $RUN_URL (attempt $RUN_ATTEMPT)"
+            echo "- Trigger: \`$EVENT_NAME\`"
+            if [ "$EVENT_NAME" = 'schedule' ]; then
+              echo "- Installer: the production one-liner, fetched from raw \`main\`"
+            else
+              echo "- Installer: the checkout of \`main\` at $TESTED_SHA"
+            fi
+            echo
+            leg_section e2e-install 'started from PowerShell 7' "$PWSH_LEG_RESULT" \
+              artifacts/e2e-install-transcripts artifacts/e2e-diagnostics
+            leg_section e2e-install-windows-powershell 'started from Windows PowerShell 5.1' "$WINDOWS_POWERSHELL_LEG_RESULT" \
+              artifacts/e2e-install-transcripts-windows-powershell artifacts/e2e-diagnostics-windows-powershell
+            leg_section e2e-install-system 'run as SYSTEM through the RMM wrapper' "$SYSTEM_LEG_RESULT" \
+              artifacts/e2e-install-transcripts-system artifacts/e2e-diagnostics-system
+            leg_section e2e-install-system-winget-client 'run as SYSTEM with the Microsoft.WinGet.Client engine' "$SYSTEM_WINGET_CLIENT_LEG_RESULT" \
+              artifacts/e2e-install-transcripts-system-winget-client artifacts/e2e-diagnostics-system-winget-client
+            echo "Full transcripts, event logs, Winget-AutoUpdate logs and assertion output, as far as each job got, are in the run's artifacts: \`e2e-install-transcripts\` and \`e2e-diagnostics\` for \`e2e-install\`, the same names with \`-windows-powershell\` for the Windows PowerShell 5.1 leg, \`-system\` for the SYSTEM leg and \`-system-winget-client\` for the SYSTEM leg with the Microsoft.WinGet.Client engine (whose diagnostics also hold the pin check and the WinGet engine logs)."
+          } > "$body"
+
+          # GitHub rejects an issue or comment body over 65536 characters.
+          limit=60000
+          if [ "$(wc -c < "$body")" -gt "$limit" ]; then
+            { head -c "$limit" "$body" | iconv -f UTF-8 -t UTF-8 -c
+              printf '\n\n(Cut to fit the GitHub size limit; the artifacts have everything.)\n'
+            } > "$body.cut"
+            mv "$body.cut" "$body"
+          fi
+          # Also on the run's summary page, in case filing the issue fails.
+          cat "$body" >> "$GITHUB_STEP_SUMMARY"
+
+          # Dedup: comment on an open issue with this exact title instead of piling up a new issue
+          # per failed weekly run. If the search itself fails, a duplicate beats no issue.
+          if ! existing=$(gh issue list --repo "$REPO" --state open --search "in:title \"$title\"" --json number,title \
+              --jq "map(select(.title == \"$title\")) | .[0].number // empty"); then
+            echo "::warning::Could not search for an open '$title' issue; creating a new one."
+            existing=''
+          fi
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --repo "$REPO" --body-file "$body"
+          else
+            gh issue create --repo "$REPO" --title "$title" --body-file "$body" --label bug --assignee J-MaFf
+          fi

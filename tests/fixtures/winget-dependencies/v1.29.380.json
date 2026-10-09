@@ -1,0 +1,16 @@
+{
+  "Dependencies": [
+    {
+      "Name": "Microsoft.VCLibs.140.00",
+      "Version": "14.0.33519.0"
+    },
+    {
+      "Name": "Microsoft.VCLibs.140.00.UWPDesktop",
+      "Version": "14.0.33728.0"
+    },
+    {
+      "Name": "Microsoft.WindowsAppRuntime.1.8",
+      "Version": "8000.616.304.0"
+    }
+  ]
+}

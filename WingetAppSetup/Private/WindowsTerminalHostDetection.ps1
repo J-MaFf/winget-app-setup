@@ -1,40 +1,22 @@
-# Windows Terminal self-lock detection (issue #271). A scheduled/dispatched E2E run showed
-# winget repeatedly fail to even LAUNCH while installing/verifying Microsoft.WindowsTerminal -
-# "Access is denied" / "The file cannot be accessed by the system" - across 5 launch retries plus
-# a full final retry pass, all failing identically, while every other catalog app installed fine
-# in the same run. That failure shape (persistent, not transient; unique to this one package) does
-# not match the DesktopAppInstaller re-registration race WingetLaunchResilience.ps1 already
-# retries around (issue #258) - that lock clears once registration finishes, so retries recover.
-# It matches a structural self-lock instead: when the CURRENT session's console is itself hosted
-# by Windows Terminal (directly, via wt.exe, or delegated via the "default terminal application"
-# registry setting), winget cannot safely replace the very console-host files rendering that
-# session, and no amount of waiting fixes that - the lock only clears when the session ends. These
-# helpers detect that condition so the caller can skip the doomed attempt instead of retrying it.
+# Windows Terminal self-lock detection (issue #271). winget cannot replace the console-host files of
+# a session Windows Terminal itself hosts: its launch fails with "Access is denied" until the session
+# ends, so retries never recover. These helpers let the catalog skip that attempt instead.
 
 <#
 .SYNOPSIS
     Returns whether the current process's console session is hosted by Windows Terminal.
 .DESCRIPTION
-    Checked via three independent signals, cheapest and most direct first. Any single positive
-    match is sufficient:
-
-      1. $env:WT_SESSION - set directly by Windows Terminal for anything running inside one of
-         its panes/tabs. The standard, documented signal for "am I inside Windows Terminal".
-      2. HKCU:\Console\%%Startup DelegationConsole/DelegationTerminal - the "default terminal
-         application" values Set-WindowsTerminalAsDefaultTerminalApplication also writes. When
-         these already point at Windows Terminal, a freshly created console with no inherited
-         console (e.g. a new top-level pwsh.exe process - exactly what each step of a CI job
-         spawns) is delegated to Windows Terminal's console host even though nothing launched
-         wt.exe directly. The GUIDs here must stay in sync with
-         Set-WindowsTerminalAsDefaultTerminalApplication.
-      3. Process ancestry - walks parent processes (bounded to 10 hops) looking for
-         WindowsTerminal.exe or OpenConsole.exe, covering direct wt.exe hosting that neither of
-         the above catches.
-
-    Fail-open throughout: any probe that throws (missing registry key, Get-CimInstance
-    unavailable, non-Windows Pester run, restricted session) is treated as "not hosted" rather
-    than propagating, so a broken probe can never cause an unnecessary skip.
-.RETURNS
+    Any one of three signals, cheapest first:
+      1. $env:WT_SESSION, which Windows Terminal sets for everything in its tabs.
+      2. The default terminal application values under HKCU:\Console\%%Startup
+         (DelegationConsole/DelegationTerminal) naming Windows Terminal, which hands every new
+         console (such as each step of a CI job) to it. The GUIDs must match
+         Set-WindowsTerminalAsDefaultTerminalApplication's. Counted only while Windows Terminal is
+         installed (Test-WindowsTerminalInstalled, P3-35): removing it leaves the values behind,
+         and the console then falls back to conhost.
+      3. A WindowsTerminal.exe or OpenConsole.exe among the parent processes (at most 10 hops).
+    A probe that throws counts as "not hosted", so a broken probe never causes a skip.
+.OUTPUTS
     [bool]
 #>
 function Test-WindowsTerminalHostsCurrentSession {
@@ -51,7 +33,8 @@ function Test-WindowsTerminalHostsCurrentSession {
         $delegationTerminal = '{E12CFF52-A866-4C77-9A90-F570A7AA2C6B}'
         $existingValues = Get-ItemProperty -Path $registryPath -ErrorAction Stop
         if ($existingValues.DelegationConsole -eq $delegationConsole -and
-            $existingValues.DelegationTerminal -eq $delegationTerminal) {
+            $existingValues.DelegationTerminal -eq $delegationTerminal -and
+            (Test-WindowsTerminalInstalled)) {
             return $true
         }
     }
@@ -82,16 +65,15 @@ function Test-WindowsTerminalHostsCurrentSession {
 
 <#
 .SYNOPSIS
-    Returns whether Windows Terminal is registered/installed for the current user.
+    Returns whether Windows Terminal (the stable Microsoft.WindowsTerminal package) is registered
+    for the current user.
 .DESCRIPTION
-    Prefers Get-AppxPackage (the authoritative package-registration check, same technique
-    Resolve-WingetExecutable already uses for Microsoft.DesktopAppInstaller) and falls back to
-    Get-WindowsTerminalSettingsPaths when Get-AppxPackage is unavailable (e.g. PowerShell 7
-    without the Appx compatibility session). Used to gate Set-WindowsTerminalDefaults so it never
-    configures Windows Terminal as the default terminal application when Windows Terminal is not
-    actually present (issue #271) - doing so unconditionally is what let a single failed install
-    attempt poison every subsequent console session on the machine.
-.RETURNS
+    Get-AppxPackage's answer for exactly 'Microsoft.WindowsTerminal' is final: Preview is another
+    package with other default-terminal GUIDs, and a leftover settings.json is not an install
+    (P3-34, P3-35). Only when Get-AppxPackage itself fails (PowerShell 7 where the Appx module
+    cannot load, 0x80131539) does the stable package's settings.json stand in. Gates the default
+    terminal setting (issue #271) and Test-WindowsTerminalHostsCurrentSession's registry signal.
+.OUTPUTS
     [bool]
 #>
 function Test-WindowsTerminalInstalled {
@@ -99,15 +81,69 @@ function Test-WindowsTerminalInstalled {
     param ()
 
     try {
-        $package = Get-AppxPackage -Name 'Microsoft.WindowsTerminal*' -ErrorAction Stop
-        if ($package) {
-            return $true
-        }
+        return [bool](Get-AppxPackage -Name 'Microsoft.WindowsTerminal' -ErrorAction Stop)
     }
     catch {
-        # Get-AppxPackage can fail under PowerShell 7 when the Appx compatibility session is
-        # unavailable; the settings.json presence check below keeps this function functional.
+        # Get-AppxPackage can fail under PowerShell 7 when the Appx module cannot load; the stable
+        # package's settings.json (its LocalState folder goes when the package is removed) is the
+        # next best sign.
     }
 
-    return (Get-WindowsTerminalSettingsPaths).Count -gt 0
+    return @(Get-WindowsTerminalSettingsPaths | Where-Object { $_ -match '\\Packages\\Microsoft\.WindowsTerminal_8wekyb3d8bbwe\\' }).Count -gt 0
+}
+
+<#
+.SYNOPSIS
+    Removes the default terminal application setting that names Windows Terminal when Windows
+    Terminal is not installed for this account.
+.DESCRIPTION
+    Removing Windows Terminal leaves DelegationConsole and DelegationTerminal behind under
+    HKCU:\Console\%%Startup (P3-18), and they would make it the default again if it came back. The
+    uninstaller calls this once winget no longer lists Windows Terminal: when both values still name
+    Windows Terminal and Test-WindowsTerminalInstalled finds none, both are removed, which is
+    Windows' own default ("Let Windows decide"). Values naming another terminal are left alone. Per
+    user: only the account running it changes.
+.PARAMETER WhatIf
+    Dry run: says what would be removed and changes nothing.
+.OUTPUTS
+    [bool] True when the values were removed (under -WhatIf: would be removed).
+#>
+function Reset-WindowsTerminalDelegation {
+    param (
+        [Parameter(Mandatory = $false)]
+        [switch]$WhatIf
+    )
+
+    # The values Set-WindowsTerminalAsDefaultTerminalApplication writes.
+    $registryPath = 'HKCU:\Console\%%Startup'
+    $delegationConsole = '{2EACA947-7F5F-4CFA-BA87-8F7FBEEFBE69}'
+    $delegationTerminal = '{E12CFF52-A866-4C77-9A90-F570A7AA2C6B}'
+
+    try {
+        $values = Get-ItemProperty -Path $registryPath -ErrorAction Stop
+    }
+    catch {
+        # No such key: nothing names Windows Terminal.
+        return $false
+    }
+    if ($values.DelegationConsole -ne $delegationConsole -or $values.DelegationTerminal -ne $delegationTerminal) {
+        return $false
+    }
+    if (Test-WindowsTerminalInstalled) {
+        return $false
+    }
+
+    if ($WhatIf) {
+        Write-Info "[DRY-RUN] Would remove the default terminal application setting ($registryPath DelegationConsole and DelegationTerminal), which names Windows Terminal although it is not installed."
+        return $true
+    }
+    try {
+        Remove-ItemProperty -Path $registryPath -Name 'DelegationConsole', 'DelegationTerminal' -ErrorAction Stop
+        Write-Success 'Removed the default terminal application setting that named Windows Terminal, which is not installed: Windows chooses the terminal again.'
+        return $true
+    }
+    catch {
+        Write-WarningMessage "Could not remove the default terminal application setting that names Windows Terminal ($registryPath): $_"
+        return $false
+    }
 }

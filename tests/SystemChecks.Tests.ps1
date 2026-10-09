@@ -23,6 +23,10 @@ Describe 'Test-SystemRequirements' -Tag 'SystemRequirements' {
         Mock Get-ItemProperty {
             [PSCustomObject]@{ ProductName = 'Windows 11 Pro'; CurrentBuildNumber = '22631' }
         }
+        # The proxy hint on a failed network check (wgt-gq8.39): never the runner's real account or
+        # proxy settings.
+        Mock Get-InstallAccountContext { New-TestAccountContext }
+        Mock Get-ProxyInheritanceWarning { $null }
         # No Test-EffectiveNonInteractive mock: Test-SystemRequirements stopped consulting the
         # detection when its low-disk prompt was removed (issue #230), so these checks now behave
         # identically on an interactive console and a CI runner. That invariance is the point, and
@@ -38,6 +42,39 @@ Describe 'Test-SystemRequirements' -Tag 'SystemRequirements' {
         Mock Invoke-WebRequest { throw 'No network' }
         $result = Test-SystemRequirements
         $result | Should -BeFalse
+    }
+
+    Context 'A failed network check names a proxy this account lacks (wgt-gq8.39)' {
+        BeforeEach {
+            Mock Get-InstallAccountContext { New-TestAccountContext -System -SessionUser 'CONTOSO\jdoe' }
+            Mock Get-ProxyInheritanceWarning { 'PROXY LINE' }
+            $script:warnings = @()
+            Mock Write-WarningMessage { $script:warnings += $Message }
+        }
+
+        It 'Adds the proxy warning under the failed network check of a run that stops there' {
+            Mock Invoke-WebRequest { throw 'No network' }
+
+            Test-SystemRequirements | Should -BeFalse
+
+            Should -Invoke Get-ProxyInheritanceWarning -Times 1 -Exactly -ParameterFilter { $AccountContext.IsSystem -and $AccountContext.SessionUser -eq 'CONTOSO\jdoe' }
+            $script:warnings | Should -Contain '[WARN] Proxy: PROXY LINE'
+        }
+
+        It 'Leaves it to the run''s pre-flight in a dry run, which goes on' {
+            Mock Invoke-WebRequest { throw 'No network' }
+
+            Test-SystemRequirements -WhatIf | Should -BeFalse
+
+            Should -Invoke Get-ProxyInheritanceWarning -Times 0 -Exactly
+            $script:warnings | Should -Not -Contain '[WARN] Proxy: PROXY LINE'
+        }
+
+        It 'Does not look when the network check passes' {
+            Test-SystemRequirements | Should -BeTrue
+
+            Should -Invoke Get-ProxyInheritanceWarning -Times 0 -Exactly
+        }
     }
 
     It 'Treats an HTTP error response (e.g. 403) as reachable and returns $true' {

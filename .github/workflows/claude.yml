@@ -2,6 +2,26 @@ name: Claude Code
 
 # Thin caller for the shared reusable workflow — the @claude mention filter,
 # permissions, git-policies fetch, and action invocation live in J-MaFf/.github.
+#
+# The reusable workflow is pinned to a full commit SHA, not @main. This job holds contents: write
+# on a repository whose main branch is served straight to production machines (irm | iex), so an
+# edit to the shared workflow file reaches that token only after someone reads it and moves the
+# pin. The pin freezes that file and nothing it pulls in when it runs. At the pinned SHA it still
+# runs anthropics/claude-code-action@v1 and actions/checkout@v7, which are movable tags, inside
+# this job, and it appends git-policies.md, fetched from J-MaFf/J-MaFf.github.io at main, to
+# CLAUDE.md as instructions for the agent that holds the token. Pinning those is a change in
+# J-MaFf/.github; move this pin once it lands.
+#
+# To move the pin, read the diff of .github/workflows/claude.yml in J-MaFf/.github since the
+# pinned SHA, then pin the new main SHA (git ls-remote https://github.com/J-MaFf/.github
+# refs/heads/main) and update the date in the comment.
+#
+# secrets: inherit hands every secret of this repository to the shared workflow. It stays until
+# that workflow declares CLAUDE_CODE_OAUTH_TOKEN under on.workflow_call.secrets, because a caller
+# can pass a secret by name only when the callee declares it. Then replace it with
+#   secrets:
+#     CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+# and move the pin to the SHA that adds the declaration.
 
 on:
   issue_comment:
@@ -15,7 +35,7 @@ on:
 
 jobs:
   claude:
-    uses: J-MaFf/.github/.github/workflows/claude.yml@main
+    uses: J-MaFf/.github/.github/workflows/claude.yml@e5f8b3f4cc99d2c89f8218180ed135052cf13af1 # main as of 2026-09-15
     permissions:
       contents: write
       pull-requests: write

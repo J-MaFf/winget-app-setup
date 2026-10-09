@@ -1,0 +1,30 @@
+{
+  "x64": {
+    "Dependencies": [
+      {
+        "Name": "Microsoft.VCLibs.140.00.UWPDesktop",
+        "Version": "14.0.33728.0"
+      },
+      {
+        "Name": "Microsoft.WindowsAppRuntime.2",
+        "Version": "2000.120.5.0"
+      }
+    ]
+  },
+  "x86": {
+    "Dependencies": [
+      {
+        "Name": "Microsoft.WindowsAppRuntime.2",
+        "Version": "2000.120.5.0"
+      }
+    ]
+  },
+  "arm64": {
+    "Dependencies": [
+      {
+        "Name": "Microsoft.WindowsAppRuntime.1.8",
+        "Version": "8000.1001.5.0"
+      }
+    ]
+  }
+}

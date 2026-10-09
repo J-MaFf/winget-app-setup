@@ -1,0 +1,22 @@
+**********************
+Windows PowerShell transcript start
+Start time: 20261005061510
+Username: RUNNERVM00\runneradmin
+RunAs User: RUNNERVM00\runneradmin
+Configuration Name: 
+Machine: RUNNERVM00 (Microsoft Windows NT 10.0.26100.0)
+Host Application: C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -NoProfile -ExecutionPolicy Bypass -File D:\a\winget-app-setup\winget-app-setup\winget-app-install.ps1
+Process ID: 4300
+PSVersion: 5.1.26100.1
+PSEdition: Desktop
+**********************
+Transcript started, output file is C:\ProgramData\winget-app-setup\logs\install-20261005-061510-bootstrap.log
+Logging the PowerShell 7 bootstrap to: C:\ProgramData\winget-app-setup\logs\install-20261005-061510-bootstrap.log
+Installer build: 1.0.0+5ea1f00d
+This installer requires PowerShell 7+ (pwsh), but this session is Windows PowerShell. Handing off...
+Relaunching the installer under PowerShell 7: C:\Users\runneradmin\AppData\Local\Microsoft\WindowsApps\pwsh.exe
+The PowerShell 7 run ended with exit code 0.
+**********************
+Windows PowerShell transcript end
+End time: 20261005061621
+**********************

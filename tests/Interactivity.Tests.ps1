@@ -1,7 +1,7 @@
 # Interactivity.Tests.ps1
 # Tests for WingetAppSetup/Private/Interactivity.ps1: the shared Test-EffectiveNonInteractive
-# detection (issue #214), whose sole remaining caller is Invoke-WingetInstall (issue #230), plus
-# the repo-wide "no install path prompts" contract that issue #230 established.
+# detection (issue #214) and Test-IsContinuousIntegration (review finding P2-14), plus the
+# repo-wide "no install path prompts" contract that issue #230 established.
 
 # Load the module's functions once for this file. TestHelpers.ps1 resolves the repo paths
 # and dot-sources WingetAppSetup/Private + Public (the single source of truth; the
@@ -13,6 +13,15 @@ BeforeAll {
 Describe 'Test-EffectiveNonInteractive (issue #214)' {
     It 'Returns $true when the explicit -NonInteractive switch is passed' {
         Test-EffectiveNonInteractive -NonInteractive | Should -BeTrue
+    }
+
+    It 'Returns $true for a run as SYSTEM, which is never a person at a console (review finding P3-23)' {
+        # [Environment]::UserInteractive and the stdin probe are not mockable, so the SYSTEM check
+        # is pinned by its seam being consulted, and answering for itself.
+        Mock Test-IsSystemAccount { $true }
+
+        Test-EffectiveNonInteractive | Should -BeTrue
+        Should -Invoke Test-IsSystemAccount -Times 1 -Exactly
     }
 
     It 'Returns a boolean either way (auto-detection path)' {
@@ -32,6 +41,120 @@ Describe 'Test-EffectiveNonInteractive (issue #214)' {
         $body | Should -Match '\[Environment\]::UserInteractive'
         $body | Should -Match '\[System\.Console\]::IsInputRedirected'
         $body | Should -Match '(?s)catch\s*\{.*return \$true'
+    }
+}
+
+# Review finding P3-41: the irm | iex one-liner cannot pass -NonInteractive, so an RMM job that runs
+# it as the logged-on user, with a console nobody watches, sets an environment variable instead.
+Describe 'Test-NonInteractiveRequested: the -NonInteractive switch or WINGET_APP_SETUP_NONINTERACTIVE (review finding P3-41)' {
+    BeforeEach {
+        $script:savedNonInteractiveVariable = [Environment]::GetEnvironmentVariable('WINGET_APP_SETUP_NONINTERACTIVE')
+        [Environment]::SetEnvironmentVariable('WINGET_APP_SETUP_NONINTERACTIVE', $null)
+    }
+
+    AfterEach {
+        [Environment]::SetEnvironmentVariable('WINGET_APP_SETUP_NONINTERACTIVE', $script:savedNonInteractiveVariable)
+    }
+
+    It 'Returns $true for the explicit switch' {
+        Test-NonInteractiveRequested -NonInteractive | Should -BeTrue
+    }
+
+    It 'Returns $false when neither the switch nor the variable is set' {
+        Test-NonInteractiveRequested | Should -BeFalse
+    }
+
+    It 'Returns $true for WINGET_APP_SETUP_NONINTERACTIVE=''<_>''' -ForEach @('1', 'true', 'TRUE', 'yes', 'Yes', ' 1 ') {
+        [Environment]::SetEnvironmentVariable('WINGET_APP_SETUP_NONINTERACTIVE', $_)
+
+        Test-NonInteractiveRequested | Should -BeTrue
+    }
+
+    It 'Returns $false for WINGET_APP_SETUP_NONINTERACTIVE=''<_>''' -ForEach @('0', 'false', 'no', 'off', '2') {
+        [Environment]::SetEnvironmentVariable('WINGET_APP_SETUP_NONINTERACTIVE', $_)
+
+        Test-NonInteractiveRequested | Should -BeFalse
+    }
+
+    It 'Makes Test-EffectiveNonInteractive report non-interactive before any auto-detection' {
+        # The auto-detection reads statics a test cannot set ([Environment]::UserInteractive, a
+        # redirected stdin), so the request is mocked and its use checked.
+        Mock Test-NonInteractiveRequested { $true }
+
+        Test-EffectiveNonInteractive | Should -BeTrue
+
+        Should -Invoke Test-NonInteractiveRequested -Times 1 -Exactly
+    }
+
+    It 'Passes the explicit switch through to it' {
+        Mock Test-NonInteractiveRequested { [bool]$NonInteractive }
+
+        Test-EffectiveNonInteractive -NonInteractive | Should -BeTrue
+
+        Should -Invoke Test-NonInteractiveRequested -Times 1 -Exactly -ParameterFilter { $NonInteractive }
+    }
+}
+
+Describe 'Test-PowerShellHostNonInteractive: PowerShell started with -NonInteractive (work-order item 18 review)' {
+    # `pwsh -NonInteractive` with a console attached looks interactive to
+    # Test-EffectiveNonInteractive, but Read-Host throws there; the TightVNC password prompt checks
+    # this so it never prints its 'type the password' text for a prompt that cannot come.
+    It 'Is <Expected> for <Case>' -ForEach @(
+        @{ Case = 'pwsh -NonInteractive -File'; Arguments = @('C:\Program Files\PowerShell\7\pwsh.dll', '-NoProfile', '-NonInteractive', '-File', 'C:\x\winget-app-install.ps1'); Expected = $true }
+        @{ Case = 'the shortest abbreviation, any case'; Arguments = @('pwsh', '-NONI', '-c', 'irm x | iex'); Expected = $true }
+        @{ Case = 'a slash or a double dash'; Arguments = @('powershell.exe', '/NonInter', '-File', 'x.ps1'); Expected = $true }
+        @{ Case = 'the double dash form'; Arguments = @('pwsh', '--noninteractive'); Expected = $true }
+        @{ Case = 'the script''s own -NonInteractive switch'; Arguments = @('pwsh', '-File', 'x.ps1', '-NonInteractive'); Expected = $true }
+        @{ Case = 'an ordinary console'; Arguments = @('pwsh', '-NoProfile', '-NoLogo', '-ExecutionPolicy', 'Bypass', '-File', 'x.ps1'); Expected = $false }
+        @{ Case = 'an abbreviation too short to be unambiguous'; Arguments = @('pwsh', '-non'); Expected = $false }
+        @{ Case = 'the program name alone'; Arguments = @('-NonInteractive'); Expected = $false }
+        @{ Case = 'a word that only starts the same'; Arguments = @('pwsh', '-NoninteractiveX'); Expected = $false }
+    ) {
+        Test-PowerShellHostNonInteractive -CommandLineArgs $Arguments | Should -Be $Expected
+    }
+
+    It 'Reads this process''s own command line by default' {
+        { Test-PowerShellHostNonInteractive } | Should -Not -Throw
+        (Test-PowerShellHostNonInteractive) | Should -BeOfType [bool]
+    }
+}
+
+Describe 'Test-IsContinuousIntegration (review finding P2-14)' {
+    # The early-exit notice waits for a key press only outside CI, so these pin which variables
+    # count. Every variable is saved and restored, because the suite itself may run under CI.
+    BeforeEach {
+        $script:savedCiVariables = @{}
+        foreach ($ciVariableName in @('CI', 'GITHUB_ACTIONS', 'TF_BUILD')) {
+            $script:savedCiVariables[$ciVariableName] = [Environment]::GetEnvironmentVariable($ciVariableName)
+            [Environment]::SetEnvironmentVariable($ciVariableName, $null)
+        }
+    }
+
+    AfterEach {
+        foreach ($ciVariableName in $script:savedCiVariables.Keys) {
+            [Environment]::SetEnvironmentVariable($ciVariableName, $script:savedCiVariables[$ciVariableName])
+        }
+    }
+
+    It 'Returns $false when no CI variable is set' {
+        Test-IsContinuousIntegration | Should -BeFalse
+    }
+
+    It 'Returns $true for <Name>=<Value>' -ForEach @(
+        @{ Name = 'CI'; Value = 'true' }
+        @{ Name = 'CI'; Value = '1' }
+        @{ Name = 'GITHUB_ACTIONS'; Value = 'true' }
+        @{ Name = 'TF_BUILD'; Value = 'True' }
+    ) {
+        [Environment]::SetEnvironmentVariable($Name, $Value)
+
+        Test-IsContinuousIntegration | Should -BeTrue
+    }
+
+    It 'Returns $false for CI=<_>' -ForEach @('false', '0') {
+        [Environment]::SetEnvironmentVariable('CI', $_)
+
+        Test-IsContinuousIntegration | Should -BeFalse
     }
 }
 
@@ -68,7 +191,30 @@ Describe 'No install path asks a yes/no question (issue #230)' {
     # that path (the iex pipe leaves stdin alone), so no interactivity check can be trusted to
     # suppress a prompt - the prompts have to not exist. Structural, because there is no way to
     # assert "nothing blocked" from inside a test that would itself hang if something did.
+    #
+    # One exception, by the owner's decision (2026-10-04, work-order item 18, review finding
+    # P2-22): TightVNC's server password, which must never come from this public repository.
+    # Read-TightVncPasswordFromHost asks for it masked (Read-Host -AsSecureString) at the START of
+    # an interactive run, before anything is installed, and only when
+    # WINGET_APP_SETUP_TIGHTVNC_PASSWORD is not set and TightVNC Server has no password yet; Enter
+    # skips it (TightVNC is then reported not configured), and so does nobody typing for 5 minutes
+    # (Wait-TightVncPromptAnswer), so a console nobody watches cannot hold the run, or the run
+    # lock, for longer than that. Its gating is tested in
+    # TightVnc.Tests.ps1 and its place in the run in Install.Tests.ps1. Every other Read-Host or
+    # Pause is still banned.
     BeforeAll {
+        $script:SanctionedPromptFunction = 'Read-TightVncPasswordFromHost'
+
+        function Test-IsSanctionedPrompt {
+            param([System.Management.Automation.Language.CommandAst]$Command)
+            $parent = $Command.Parent
+            while ($parent -and $parent -isnot [System.Management.Automation.Language.FunctionDefinitionAst]) {
+                $parent = $parent.Parent
+            }
+            $masked = @($Command.CommandElements | Where-Object { $_ -is [System.Management.Automation.Language.CommandParameterAst] -and $_.ParameterName -eq 'AsSecureString' }).Count -eq 1
+            return ($parent -and $parent.Name -eq $script:SanctionedPromptFunction -and $Command.GetCommandName() -eq 'Read-Host' -and $masked)
+        }
+
         # Parse rather than grep. These files explain at length, in comment-based help, WHY they no
         # longer prompt — so a regex for 'Read-Host' matches the documentation of its own removal.
         # The AST only ever reports a real invocation, which is the thing that can actually block.
@@ -78,21 +224,65 @@ Describe 'No install path asks a yes/no question (issue #230)' {
                 $ast = [System.Management.Automation.Language.Parser]::ParseFile($file, [ref]$null, [ref]$null)
                 $ast.FindAll({ param($node) $node -is [System.Management.Automation.Language.CommandAst] }, $true) |
                     Where-Object { $_.GetCommandName() -in 'Read-Host', 'Pause' } |
+                    Where-Object { -not (Test-IsSanctionedPrompt -Command $_) } |
                     ForEach-Object { '{0}:{1}: {2}' -f (Split-Path $file -Leaf), $_.Extent.StartLineNumber, $_.Extent.Text }
             }
         }
+
+        function Get-CommandCaller {
+            param([string]$Path, [string]$CommandName)
+            $ast = [System.Management.Automation.Language.Parser]::ParseFile($Path, [ref]$null, [ref]$null)
+            $ast.FindAll({ param($node) $node -is [System.Management.Automation.Language.CommandAst] -and $node.GetCommandName() -eq $CommandName }, $true) |
+                ForEach-Object {
+                    $parent = $_.Parent
+                    while ($parent -and $parent -isnot [System.Management.Automation.Language.FunctionDefinitionAst]) {
+                        $parent = $parent.Parent
+                    }
+                    if ($parent) { $parent.Name } else { '<script>' }
+                }
+        }
     }
 
-    It 'No module source file calls Read-Host or Pause' {
+    It 'No module source file calls Read-Host or Pause, except the masked TightVNC password prompt' {
         $sourceFiles = Get-ChildItem -Path (Join-Path $script:WingetAppSetupRoot 'Private'), (Join-Path $script:WingetAppSetupRoot 'Public') -Filter '*.ps1' |
             Select-Object -ExpandProperty FullName
         Get-PromptingCommand -Path $sourceFiles | Should -BeNullOrEmpty
     }
 
-    It 'Neither shipped entry point calls Read-Host or Pause' {
-        # The generated installer and the uninstaller are what users actually run. The uninstaller
-        # is checked here because it is not generated - it hand-calls into the module, so nothing
-        # else would catch a prompt reappearing in it.
+    It 'Neither shipped entry point calls Read-Host or Pause, except the masked TightVNC password prompt' {
+        # The generated installer and uninstaller are what users actually run. Their entry blocks
+        # come from build/fragments, which the module scan above does not cover.
         Get-PromptingCommand -Path $script:InstallerScriptPath, $script:UninstallerScriptPath | Should -BeNullOrEmpty
+    }
+
+    It 'Reaches the TightVNC password prompt only through Get-TightVncSecret, and never from the uninstaller' {
+        # Get-TightVncSecret asks only in an interactive run outside CI, once per run, and only when
+        # neither the environment nor TightVNC Server has a password (TightVnc.Tests.ps1).
+        $tightVncFile = Join-Path $script:WingetAppSetupRoot 'Private/TightVnc.ps1'
+        @(Get-CommandCaller -Path $tightVncFile -CommandName 'Read-Host' | Sort-Object -Unique) | Should -Be @($script:SanctionedPromptFunction)
+        @(Get-CommandCaller -Path $script:InstallerScriptPath -CommandName $script:SanctionedPromptFunction | Sort-Object -Unique) | Should -Be @('Get-TightVncSecret')
+
+        # The generated uninstaller carries every module function (wgt-gq8.43), the TightVNC ones
+        # included, so what matters is that nothing its entry block calls, directly or through other
+        # functions, reaches them, or the post-install hooks that configure TightVNC.
+        $uninstallerAst = [System.Management.Automation.Language.Parser]::ParseFile($script:UninstallerScriptPath, [ref]$null, [ref]$null)
+        $calls = @{}
+        foreach ($function in $uninstallerAst.FindAll({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $false)) {
+            $calls[$function.Name] = @($function.Body.FindAll({ param($node) $node -is [System.Management.Automation.Language.CommandAst] }, $true) | ForEach-Object { $_.GetCommandName() } | Where-Object { $_ } | Sort-Object -Unique)
+        }
+        $entryCalls = @($uninstallerAst.EndBlock.Statements | Where-Object { $_ -isnot [System.Management.Automation.Language.FunctionDefinitionAst] } | ForEach-Object {
+                $_.FindAll({ param($node) $node -is [System.Management.Automation.Language.CommandAst] }, $true) | ForEach-Object { $_.GetCommandName() }
+            } | Where-Object { $_ } | Sort-Object -Unique)
+        $entryCalls | Should -Contain 'Invoke-WingetUninstall'
+        $reached = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+        $pending = [System.Collections.Generic.Queue[string]]::new([string[]]$entryCalls)
+        while ($pending.Count -gt 0) {
+            $name = $pending.Dequeue()
+            if (-not $reached.Add($name) -or -not $calls.ContainsKey($name)) { continue }
+            foreach ($callee in $calls[$name]) { $pending.Enqueue($callee) }
+        }
+
+        $reached | Should -Contain 'Uninstall-CatalogApp' -Because 'the walk must follow the uninstall path'
+        @($reached | Where-Object { $_ -match 'TightVnc' -or $_ -in @($script:SanctionedPromptFunction, 'Read-Host', 'Invoke-AppPostInstall') }) | Should -BeNullOrEmpty
     }
 }
