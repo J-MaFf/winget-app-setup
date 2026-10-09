@@ -184,7 +184,8 @@ they do not hold (see [Uninstall](#uninstall)).
 An entry may also name its MSIX package (`msixName`, set for `Microsoft.WindowsTerminal`): a run
 as SYSTEM or under cross-user elevation then decides whether the app is installed from whether that
 package is provisioned for every user, not from `winget list` (see
-[Running as SYSTEM](#running-as-system-rmm-tools-such-as-endpoint-central)).
+[Running as SYSTEM](#running-as-system-rmm-tools-such-as-endpoint-central)). The uninstaller
+leaves such an app alone in those runs (see [Uninstall](#uninstall)).
 
 ### Catalog entry fields
 
@@ -514,7 +515,12 @@ a run. When something cannot be fixed it prints one line that says why and what 
    `rmm/Invoke-WingetAppSetup.ps1`; otherwise check the
    `Microsoft-Windows-AppXDeploymentServer/Operational` event log and access to
    `cdn.winget.microsoft.com`. The uninstaller gives the same advice for itself: run it while
-   signed in as that account, or run `winget-app-uninstall.ps1` as SYSTEM. A timeout, a network
+   signed in as that account, or run `winget-app-uninstall.ps1` as SYSTEM. When the run did
+   register the source package for the account and `0x8A15000F` stays, the line says the
+   registration succeeded, and how (the download, or the copy already on the PC), and points to
+   winget's log and access to `cdn.winget.microsoft.com` instead of the AppX event log: Windows
+   deployed the package, so that log has nothing to add. Under cross-user elevation it then adds
+   the advice above (signed in as that account, or as SYSTEM) in case that does not help. A timeout, a network
    error or any other code gets no fix: no repair fixes a network. While the source already has
    data, such a source is reported in one line and the run carries on; each install then says why
    it failed. An account (or SYSTEM) with no source data yet that cannot download it gets
@@ -707,7 +713,13 @@ A run elevated as a different account than the signed-in user (cross-user elevat
 the whole PC the same way: an app with no machine-wide installer is `Deferred` instead of being
 installed into the admin account's profile and reported as installed, and Windows Terminal is
 decided from provisioning, not from the admin's `winget list`. That run still sets winget up for
-the admin account as before.
+the admin account as before, and says so when it does (`Cross-user elevation detected: ...`).
+
+The signed-in user is the user signed in to the elevated window's own Windows session, at the
+console or over Remote Desktop: the owner of the oldest `explorer.exe` in that session, the shell
+Windows started at sign-in. Only when no such owner can be read (session 0, no shell, or a query
+that failed) is it the console's user from `Win32_ComputerSystem`, which is empty over Remote
+Desktop.
 
 Only one run works on a PC at a time: a run started while another one is in progress exits 6 at
 once (see [One run at a time](#one-run-at-a-time)). A real run prints a machine-readable `RESULT`
@@ -1542,7 +1554,10 @@ Terminal is installed ([#271](https://github.com/J-MaFf/winget-app-setup/issues/
 
 Both settings are per-user, so the step is skipped, with one line in the log, when the run is
 SYSTEM (for example under an RMM agent) or is elevated as a different account than the logged-on
-user. It never writes to another user's profile. After a run as SYSTEM, the Endpoint Central user
+user (the user of the window's own session, at the console or over Remote Desktop, as in
+[Running as SYSTEM](#running-as-system-rmm-tools-such-as-endpoint-central); the installer decides
+this once, at the start of the run, for this step too). It never writes to
+another user's profile. After a run as SYSTEM, the Endpoint Central user
 phase (`rmm/Invoke-WingetAppSetupUserPhase.ps1`) sets them in each user's own account at sign-in.
 Until the user has opened Windows Terminal once (it creates `settings.json` then), it sets the
 default terminal application and leaves `defaultProfile` for a later sign-in.
@@ -1604,6 +1619,21 @@ powershell -ExecutionPolicy Unrestricted -File .\winget-app-uninstall.ps1 -WhatI
   console windows to Windows Terminal when it is installed) is not detected: to remove Windows
   Terminal on such a PC, start the uninstaller from a Windows Console Host window, or first set the
   default terminal application (Settings, For developers, Terminal) to Windows Console Host.
+- A per-user app (an entry with `msixName`: Windows Terminal) is kept in a run as SYSTEM or under
+  cross-user elevation (see [Running as SYSTEM](#running-as-system-rmm-tools-such-as-endpoint-central)),
+  before any winget call: `Skipping: Microsoft.WindowsTerminal (a per-user app that this run cannot
+  remove: it runs as '<admin>' in the session of '<user>'; ...)`. There, even `winget list` answers
+  for SYSTEM or the admin account, not for the user the app belongs to. In the same runs the
+  installer decides Windows Terminal from the PC: it skips it when its package is provisioned for
+  every user (as on Windows 11), and otherwise installs it for every user with `--scope machine`.
+  The uninstaller removes no provisioned package, and a run signed in as the user removes only that
+  user's copy. It counts as kept on purpose, so Winget-AutoUpdate is still removed and the
+  default-terminal setting is left as it is. A preview (`-WhatIf`) started from the same elevated
+  window, or as SYSTEM, shows the same skip; a preview in a window that is not elevated runs as the
+  signed-in user and cannot know which account the UAC prompt will elevate as, so it may list
+  Windows Terminal (it says so). To remove it, run the uninstaller signed in as that user. A
+  standard user cannot: the UAC prompt elevates as another account, which is cross-user elevation
+  again.
 - Once winget no longer lists Windows Terminal, and the package check agrees, the default-terminal
   setting (`HKCU:\Console\%%Startup`) that still names it is removed for the account that runs the
   uninstaller, so Windows chooses the terminal again and a later installer run no longer skips
@@ -1621,7 +1651,7 @@ powershell -ExecutionPolicy Unrestricted -File .\winget-app-uninstall.ps1 -WhatI
 
 | Code | Meaning |
 |------|---------|
-| 0 | Done: every app was removed, was not installed, or was kept on purpose (a shell the run depends on, or an app whose condition or `arch` list does not hold), and Winget-AutoUpdate was removed or was not installed |
+| 0 | Done: every app was removed, was not installed, or was kept on purpose (a shell the run depends on, a per-user app in a run as SYSTEM or under cross-user elevation, or an app whose condition or `arch` list does not hold), and Winget-AutoUpdate was removed or was not installed |
 | 1 | An app could not be removed or checked (Winget-AutoUpdate is then kept), or Winget-AutoUpdate could not be removed |
 | 2 | winget cannot be started for this account, cannot open its source, or Group Policy turns it off, so nothing was removed (Winget-AutoUpdate included) |
 | 3 | The app list has invalid entries or is empty |
@@ -1650,14 +1680,17 @@ the owner test plan needs a real desktop PC: cross-user elevation, a TightVNC vi
   junction there from a one-shot S4U task, registered with the user's random password, which stays
   in memory and which Task Scheduler does not store; if the task cannot be registered or run, the
   admin plants it and that row is SKIP with the failing step, and the report lists who holds "Log
-  on as a batch job"), a time-budget run that exits 9 and then finishes, the `-CollectDiagnostics`
-  bundle, and the uninstaller (preview then real; it removes PowerShell 7 too). Each check is a
+  on as a batch job"), a time-budget run that exits 9 and then finishes (the harness's own
+  `winget uninstall` of 7-Zip before it is kept in that stage's `winget-uninstall.txt`), the
+  `-CollectDiagnostics` bundle, and the uninstaller (preview then real; it runs in Windows
+  PowerShell, so it must remove PowerShell 7 too). Each check is a
   PASS/FAIL/SKIP row with evidence, and each stage keeps its console output, transcripts,
   `last-run.json` and winget logs (of a long stage the first 15 and the last 25 per source, with a
   `README.txt` of the counts). `arp.txt` lists the Apps & features entries (name, version, install
   date, hive and key) before Preflight and after each stage that installs or uninstalls; it is
   evidence only.
-- **winget's source in your account:** Preflight records who is signed in and who the window is
+- **winget's source in your account:** Preflight records who is signed in (the owner of the oldest
+  `explorer.exe` in the window's session, the installer's own rule) and who the window is
   elevated as (compared by SID: "Cross-user elevation: yes/no/unknown"), winget's and App
   Installer's versions and whether winget's source package (`Microsoft.Winget.Source`) is
   registered for your account, with the raw `winget --info`, `winget source list` and every
@@ -1666,16 +1699,52 @@ the owner test plan needs a real desktop PC: cross-user elevation, a TightVNC vi
   --source winget`; PASS only on exit 0, the code named otherwise), again after the first run, and
   again before the uninstaller stage. At Preflight the check is SKIP when winget is not on the PC
   yet: the check after the first run decides. Preflight's check is also SKIP, its code kept, when
-  the latest check opened the source: that was the PC before the run, not a product result.
+  the latest check opened the source: that was the PC before the run, not a product result. That
+  row and the report's warning say when it opened: at the first check that opened after the last
+  failed one (for example "after the first run"), not at the latest check, which may only have
+  found it still open.
   Without that source, winget reads every installed app as not installed in your account
   (`winget list` and `winget uninstall` without `--source` only warn). So when the check fails,
   the report starts with a warning, the rows that ask winget what is installed in your account are
   SKIP or FAIL, never PASS, and the run goes on to collect evidence. The uninstaller must then
   refuse: the real uninstall passes only with exit 2 (it reported success otherwise), each
-  "Skipping: <id> (not installed)" it printed fails, and Winget-AutoUpdate must be kept. The
-  harness's own lookups and removals name `--source winget`. The re-run and the SYSTEM run expect
+  "Skipping: <id> (not installed)" it printed fails, and Winget-AutoUpdate must be kept. Unless
+  the uninstaller's own check opened the source (its console says `The winget source opens for`):
+  then a PASS row quotes that line ("The uninstaller repaired winget's source for this account"
+  when a fix's success line comes before it, such as the source package registered for the
+  account; "The uninstaller found winget's source open" otherwise), the stage is judged as usual
+  on the lookups made after the uninstall, and the preview row is SKIP, since its lookups ran
+  before the repair. The harness then checks the source once more ("after the uninstaller"), so
+  the report's warning and Preflight's row say when it opened. The harness's own lookups and
+  removals name `--source winget` and have time limits (`winget list` 45 s; `winget search`,
+  `--version`, `--info` and `source list` 120 s, the installer's own limit for its source check;
+  `winget uninstall` 150 s). A call that runs out is stopped with everything it started and counts
+  as no answer, never as "not installed". The re-run and the SYSTEM run expect
   an app found already there only when the first run's `last-run.json` recorded it installed or
-  already there; any other app may be installed or found (one SKIP row names them).
+  already there; any other app may be installed or found (one SKIP row names them). An app the
+  first run deferred because winget found no machine-wide installer for it (cross-user elevation)
+  may also be deferred again, for that reason, by the re-run and by the SYSTEM run.
+- **Cross-user elevation and the source repair:** FirstRun checks that the installer agrees with
+  Preflight. "The installer detected the cross-user elevation as Preflight did" passes when the
+  installer printed `Cross-user elevation detected` exactly when Preflight said yes, fails
+  otherwise, and is SKIP when Preflight could not tell. Under cross-user elevation the installer
+  installs machine-wide only, as SYSTEM does, so FirstRun and ReRun expect the same: an app may be
+  `Deferred` as having no machine-wide installer, and Windows Terminal counts as already there only
+  when it is provisioned for every user. "The installer registered winget's source package for
+  this account" passes when the first run says it registered the package, and names how (the
+  download URL, or the copy already on the PC), whatever Preflight saw: Preflight makes no source
+  check while winget cannot be started in your account yet (as on a freshly imaged PC), and its
+  check can run out of time. Without that line, the row is judged only when Preflight's check
+  failed with `0x8A15000F` (`SOURCE_DATA_MISSING`): it fails when the source was still closed
+  after the run, quoting the installer's "cannot be opened" line, and is SKIP otherwise; when the
+  source already opened at Preflight, the row says how to exercise the repair
+  (`Get-AppxPackage Microsoft.Winget.Source* | Remove-AppxPackage`). The uninstaller stage
+  counts an app as kept on purpose only when the uninstaller's console says so: its skip line for
+  PowerShell 7 (when it runs in it), Windows Terminal (when it hosts the window or is the default
+  terminal) or a per-user app (as SYSTEM or under cross-user elevation).
+- **The code under test:** the report's machine facts include "Installer build", the build id of
+  the checkout's `winget-app-install.ps1`, or, with `-UseOneLiner`, the build id the first run
+  printed (`Installer build: <id>`), so the report names the code it tested.
 - **How to run it:** from a checkout of the branch on the test machine, in an **administrator**
   window, starting under Windows PowerShell (a fresh PC has no PowerShell 7):
   `powershell -ExecutionPolicy Bypass -File .\e2e\Invoke-RealPcTestPlan.ps1`. It refuses unless

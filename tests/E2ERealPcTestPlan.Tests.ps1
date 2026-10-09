@@ -259,6 +259,12 @@ Describe 'Get-RealPcChangePlan' {
         $plan | Should -Not -Match 'except PowerShell 7'
     }
 
+    It 'Says what a window elevated as another account than the signed-in user leaves alone (wgt-gq8.71 review)' {
+        $plan = (Get-RealPcChangePlan -Stages (Resolve-RealPcTestPlanStage).Stages -ReportFolder 'C:\report') -join "`n"
+        $plan | Should -Match 'make Windows Terminal the default terminal \(not when this window is elevated as another account than the signed-in user'
+        $plan | Should -Match 'or this window is elevated as another account than the signed-in user \(it then keeps it as a per-user app\)'
+    }
+
     It 'Says -ResetProgramData renames the existing folder aside, and only then' {
         $stages = (Resolve-RealPcTestPlanStage).Stages
         ((Get-RealPcChangePlan -Stages $stages -ResetProgramData) -join "`n") | Should -Match 'rename it to winget-app-setup-old-<time>.*never delete'
@@ -1281,6 +1287,9 @@ Describe 'Invoke-RealPcFirstRunStage (wiring, with every outside call mocked)' {
         $script:WingetSourceChecks = @()
         $script:WingetSourceOpen = $null
         $script:FirstRunRecord = $null
+        $script:CrossUserElevation = ''
+        $script:RealPcOptions = [pscustomobject]@{ UseOneLiner = $false; Branch = 'claude/trusting-dirac-foyiaa'; ResetProgramData = $false }
+        $script:MachineFacts = [ordered]@{}
     }
 
     It 'Checks the winget source again after the run, and keeps the run record for the later stages' {
@@ -1322,6 +1331,27 @@ Describe 'Invoke-RealPcFirstRunStage (wiring, with every outside call mocked)' {
         Mock Invoke-RealPcInstaller { $script:InstallerHasRun = $true; return [pscustomobject]@{ ExitCode = $null; Output = @() } }
         $rows = Invoke-RealPcFirstRunStage -EvidenceFolder $script:FirstRunEvidence
         ($rows | Where-Object { $_.Check -match 'First run exit code' }).Result | Should -Be 'FAIL'
+    }
+
+    It 'Keeps the same-user expectations when Preflight said <Case>: a machine-scope deferral fails' -ForEach @(
+        @{ Case = 'no'; Fact = 'no (signed in and elevated as CONTOSO\admin-jmaffiola)' }
+        @{ Case = 'nothing'; Fact = '' }
+        @{ Case = 'unknown'; Fact = 'unknown (no signed-in user found in this session; elevated as CONTOSO\admin-jmaffiola)' }
+    ) {
+        # wgt-gq8.71 review: only 'yes' makes FirstRun expect a machine-wide-only run.
+        $script:CrossUserElevation = $Fact
+        Mock Read-RealPcRunRecord {
+            $record = Get-FirstRunRecord
+            $terminal = $record.apps | Where-Object { $_.id -eq 'Microsoft.WindowsTerminal' }
+            $terminal.status = 'Deferred'
+            $terminal.reason = $script:NoMachineScopeDeferReason
+            return [pscustomobject]@{ Record = $record; Problem = $null }
+        }
+        $rows = @(Invoke-RealPcFirstRunStage -EvidenceFolder $script:FirstRunEvidence)
+        $row = $rows | Where-Object { $_.Check -eq 'App installed or present: Microsoft.WindowsTerminal' }
+        $row.Result | Should -Be 'FAIL'
+        $row.Detail | Should -Be 'Deferred (winget found no machine-wide installer for it)'
+        @($rows | Where-Object { $_.Check -match 'machine-wide only' }) | Should -BeNullOrEmpty
     }
 }
 
@@ -1539,48 +1569,54 @@ Describe 'Format-RealPcReport and the manual steps' {
 }
 
 Describe 'winget lookups ask the winget source (wgt-gq8.65 H1)' {
-    BeforeEach {
-        # winget as on the owner's PC (2026-10-06): without --source the broken 'winget' source is
-        # only a warning and an installed app reads 'no package found' (0x8A150014); with it, the
-        # lookup fails with SOURCE_DATA_MISSING (0x8A15000F).
-        Mock winget {
-            if ($args -contains '--source') {
-                'Failed when opening source(s); try the ''source reset'' command if the problem persists.'
-                '0x8a15000f : Data required by the source is missing'
-                $global:LASTEXITCODE = -1978335217
+    Context 'winget answers' {
+        BeforeEach {
+            # winget as on the owner's PC (2026-10-06): without --source the broken 'winget' source
+            # is only a warning and an installed app reads 'no package found' (0x8A150014); with it,
+            # the lookup fails with SOURCE_DATA_MISSING (0x8A15000F). Every call goes through
+            # Invoke-RealPcWinget, the bounded runner (wgt-gq8.71).
+            Mock Invoke-RealPcWinget {
+                if ($ArgumentList -contains '--source') {
+                    return (Get-RealPcBoundedProcessResult -ExitCode -1978335217 -Output @('Failed when opening source(s); try the ''source reset'' command if the problem persists.', '0x8a15000f : Data required by the source is missing'))
+                }
+                return (Get-RealPcBoundedProcessResult -ExitCode -1978335212 -Output @('Failed when searching source; results will not be included: winget', 'No installed package found matching input criteria.'))
             }
-            else {
-                'Failed when searching source; results will not be included: winget'
-                'No installed package found matching input criteria.'
-                $global:LASTEXITCODE = -1978335212
-            }
+        }
+
+        It 'Reads a lookup through a source that cannot open as no answer, never as not installed' {
+            Test-RealPcWingetInstalled -Id '7zip.7zip' | Should -BeNullOrEmpty
+            Should -Invoke Invoke-RealPcWinget -Times 1 -Exactly -ParameterFilter { $ArgumentList[0] -eq 'list' -and ($ArgumentList -join ' ') -match '--id 7zip\.7zip --exact --source winget' -and $TimeoutSeconds -eq 45 }
+        }
+
+        It 'Uninstalls from the winget source too, and keeps the exit code and what winget printed' {
+            $result = Invoke-RealPcWingetUninstall -Id '7zip.7zip'
+            $result.ExitCode | Should -Be -1978335217
+            $result.Problem | Should -BeNullOrEmpty
+            ($result.Output -join "`n") | Should -Match 'Data required by the source is missing'
+            Should -Invoke Invoke-RealPcWinget -Times 1 -Exactly -ParameterFilter { $ArgumentList[0] -eq 'uninstall' -and ($ArgumentList -join ' ') -match '--id 7zip\.7zip --exact --source winget --silent' -and $TimeoutSeconds -eq 150 }
+        }
+
+        It 'Checks the source with a search of the winget source, and keeps what winget printed' {
+            $result = Invoke-RealPcWingetSourceCheck
+            $result.ExitCode | Should -Be -1978335217
+            ($result.Output -join "`n") | Should -Match 'Data required by the source is missing'
+            Should -Invoke Invoke-RealPcWinget -Times 1 -Exactly -ParameterFilter { ($ArgumentList -join ' ') -eq 'search --id Microsoft.PowerShell --exact --source winget --accept-source-agreements --disable-interactivity' -and $TimeoutSeconds -eq 120 }
         }
     }
 
-    It 'Reads a lookup through a source that cannot open as no answer, never as not installed' {
-        Test-RealPcWingetInstalled -Id '7zip.7zip' | Should -BeNullOrEmpty
-        Should -Invoke winget -Times 1 -Exactly -ParameterFilter { $args[0] -eq 'list' -and ($args -join ' ') -match '--id 7zip\.7zip --exact --source winget' }
-    }
+    Context 'winget is not here' {
+        BeforeEach {
+            Mock Get-RealPcWingetPath { return $null }
+            Mock Invoke-RealPcBoundedProcess { throw 'must not start anything' }
+        }
 
-    It 'Uninstalls from the winget source too, and keeps the exit code' {
-        $result = Invoke-RealPcWingetUninstall -Id '7zip.7zip'
-        $result.ExitCode | Should -Be -1978335217
-        $result.Problem | Should -BeNullOrEmpty
-        Should -Invoke winget -Times 1 -Exactly -ParameterFilter { $args[0] -eq 'uninstall' -and ($args -join ' ') -match '--id 7zip\.7zip --exact --source winget --silent' }
-    }
-
-    It 'Checks the source with a search of the winget source, and keeps what winget printed' {
-        $result = Invoke-RealPcWingetSourceCheck
-        $result.ExitCode | Should -Be -1978335217
-        ($result.Output -join "`n") | Should -Match 'Data required by the source is missing'
-        Should -Invoke winget -Times 1 -Exactly -ParameterFilter { ($args -join ' ') -eq 'search --id Microsoft.PowerShell --exact --source winget --accept-source-agreements --disable-interactivity' }
-    }
-
-    It 'Gives no exit code, and no answer, when winget cannot run' {
-        Mock winget { throw [System.Management.Automation.CommandNotFoundException]::new('winget is not here') }
-        (Invoke-RealPcWingetSourceCheck).ExitCode | Should -BeNullOrEmpty
-        (Invoke-RealPcWingetUninstall -Id '7zip.7zip').Problem | Should -Match '^not run: '
-        Test-RealPcWingetInstalled -Id '7zip.7zip' | Should -BeNullOrEmpty
+        It 'Gives no exit code, and no answer, when winget cannot run' {
+            (Invoke-RealPcWingetSourceCheck).ExitCode | Should -BeNullOrEmpty
+            (Invoke-RealPcWingetUninstall -Id '7zip.7zip').Problem | Should -Match '^not run: '
+            Test-RealPcWingetInstalled -Id '7zip.7zip' | Should -BeNullOrEmpty
+            Test-RealPcWingetPresent | Should -BeFalse
+            Should -Invoke Invoke-RealPcBoundedProcess -Times 0 -Exactly
+        }
     }
 }
 
@@ -1791,6 +1827,18 @@ Describe 'Invoke-RealPcPreflightStage (wiring, with every outside call mocked)' 
         $info | Should -Match 'no account has it registered'
     }
 
+    It 'Names the installer under test by the build id in the checkout''s winget-app-install.ps1 (wgt-gq8.71)' {
+        $null = Invoke-RealPcPreflightStage -EvidenceFolder $script:PreflightEvidence
+        $expected = Get-InstallerBuildIdFromScript -Content ([System.IO.File]::ReadAllText((Join-Path $script:RepoRoot 'winget-app-install.ps1')))
+        $expected | Should -Not -BeNullOrEmpty
+        $script:MachineFacts['Installer build'] | Should -Be ('{0} (the checkout''s winget-app-install.ps1)' -f $expected)
+        $names = @($script:MachineFacts.Keys)
+        [array]::IndexOf($names, 'Installer build') | Should -Be ([array]::IndexOf($names, 'Installer under test') + 1)
+        $script:RealPcOptions = [pscustomobject]@{ UseOneLiner = $true; Branch = 'claude/trusting-dirac-foyiaa'; ResetProgramData = $false }
+        $null = Invoke-RealPcPreflightStage -EvidenceFolder $script:PreflightEvidence
+        $script:MachineFacts['Installer build'] | Should -Be 'one-liner from claude/trusting-dirac-foyiaa'
+    }
+
     It 'Passes the source check, and asks winget what is installed, when the source opens' {
         Mock Invoke-RealPcWingetSourceCheck { return [pscustomobject]@{ ExitCode = 0; Output = @('PowerShell Microsoft.PowerShell 7.6.6 winget') } }
         Mock Test-RealPcWingetInstalled { return $false }
@@ -1993,6 +2041,8 @@ Describe 'Invoke-RealPcReRunStage (wiring, after the owner''s failed first run)'
         $script:StageTimeoutMinutes = 60
         $script:ReRunEvidence = Join-Path $TestDrive 'evidence-rerun'
         $null = New-Item -ItemType Directory -Path $script:ReRunEvidence -Force
+        # A same-user run: the owner's PC before the cross-user retest (wgt-gq8.71).
+        $script:CrossUserElevation = 'no (signed in and elevated as CONTOSO\admin-jmaffiola)'
         $script:FirstRunRecord = ConvertFrom-Json -InputObject ([string](Get-Content -Raw -LiteralPath (Join-Path $script:FixtureDirectory 'realpc-sourcedatamissing-last-run.json')))
         Mock Get-RealPcAppExpectation { return [pscustomobject]@{ Value = @([pscustomobject]@{ Id = '7zip.7zip'; Expected = 'AlreadyPresent'; Reason = $null; AlreadyPresentReasons = @('already installed'); MustInstall = $false }); Problem = $null } }
         Mock Invoke-RealPcInstaller { return [pscustomobject]@{ ExitCode = 0; Output = @() } }
@@ -2173,6 +2223,794 @@ Describe 'Invoke-RealPcTestPlanMain (the report and its finish lines, every stag
         $script:Printed | Should -Contain 'Do not paste or send this report, the report folder or a zip of it: the TightVNC test password was found in the report or the zip (see the lines above).'
         # The zip holds report.txt, so its own scan deletes it too.
         Test-Path -LiteralPath ($script:MainReportPath + '.zip') | Should -BeFalse
+    }
+}
+
+# ---- The cross-user retest over Remote Desktop (wgt-gq8.71) -------------------------------------
+# CONTOSO\stduser signs in over Remote Desktop and runs the harness in a window elevated as
+# CONTOSO\admin-jmaffiola: cross-user elevation, with winget's source package missing for the admin.
+
+Describe 'The source check names when the source opened after the last failure (wgt-gq8.71, item 1)' {
+    BeforeAll {
+        function New-RealPcCheckSequence {
+            param ([bool[]]$Opened, [string[]]$When)
+            $checks = @()
+            for ($index = 0; $index -lt $Opened.Count; $index++) {
+                $code = -1978335217
+                if ($Opened[$index]) {
+                    $code = 0
+                }
+                $checks += [pscustomobject]@{ When = $When[$index]; ExitCode = $code; Opened = $Opened[$index]; SourcePackage = 'not registered' }
+            }
+            return $checks
+        }
+
+        # Preflight's row after Update-RealPcPreflightSourceRow, and the report banner, for a sequence.
+        function Get-RealPcOpenedText {
+            param ([object[]]$Checks)
+            $stages = @([pscustomobject]@{ Name = 'Preflight'; Number = 0; Item = '0'; DurationSeconds = 1; Rows = @(Get-RealPcWingetSourceRow -ExitCode -1978335217 -SourcePackage 'not registered') })
+            $row = @(@(Update-RealPcPreflightSourceRow -StageResult $stages -SourceCheck $Checks)[0].Rows)[0]
+            return [pscustomobject]@{ Row = $row; Banner = ((Get-RealPcReportBanner -SourceCheck $Checks) -join "`n") }
+        }
+
+        $script:FullRunWhen = @('', 'after the first run', 'before the uninstaller')
+    }
+
+    It 'Names the check after the first run, not the latest one, when the source stayed open (fail, open, open)' {
+        $checks = New-RealPcCheckSequence -Opened @($false, $true, $true) -When $script:FullRunWhen
+        (Get-RealPcSourceOpenedCheck -SourceCheck $checks).When | Should -Be 'after the first run'
+        $seen = Get-RealPcOpenedText -Checks $checks
+        $seen.Row.Result | Should -Be 'SKIP'
+        $seen.Row.Detail | Should -Match 'It opened after the first run;'
+        $seen.Banner | Should -Match 'It opened after the first run, so the stages after that asked winget as usual\.'
+        $seen.Banner | Should -Not -Match 'before the uninstaller'
+    }
+
+    It 'Names the check before the uninstaller when only that one opened it (fail, fail, open)' {
+        $checks = New-RealPcCheckSequence -Opened @($false, $false, $true) -When $script:FullRunWhen
+        $seen = Get-RealPcOpenedText -Checks $checks
+        $seen.Row.Detail | Should -Match 'It opened before the uninstaller;'
+        $seen.Banner | Should -Match 'It opened before the uninstaller, so the stages after that asked winget as usual\.'
+    }
+
+    It 'Names the opening after the last failure when the source closed again in between (fail, open, fail, open)' {
+        $checks = New-RealPcCheckSequence -Opened @($false, $true, $false, $true) -When @('', 'after the first run', 'after the re-run', 'before the uninstaller')
+        (Get-RealPcSourceOpenedCheck -SourceCheck $checks).When | Should -Be 'before the uninstaller'
+        $seen = Get-RealPcOpenedText -Checks $checks
+        $seen.Row.Detail | Should -Match 'It opened before the uninstaller;'
+        $seen.Banner | Should -Match 'It opened before the uninstaller,'
+        $seen.Banner | Should -Not -Match 'It opened after the first run'
+        $seen.Banner | Should -Match 'after the re-run: 0x8A15000F'
+    }
+
+    It 'Names no opening while the latest check fails, and the first check when none failed' {
+        Get-RealPcSourceOpenedCheck -SourceCheck (New-RealPcCheckSequence -Opened @($false, $true, $false) -When $script:FullRunWhen) | Should -BeNullOrEmpty
+        (Get-RealPcSourceOpenedCheck -SourceCheck (New-RealPcCheckSequence -Opened @($true, $true) -When $script:FullRunWhen)).When | Should -Be ''
+        Get-RealPcSourceOpenedCheck -SourceCheck @() | Should -BeNullOrEmpty
+        (Get-RealPcOpenedText -Checks (New-RealPcCheckSequence -Opened @($false, $true, $false) -When $script:FullRunWhen)).Row.Result | Should -Be 'FAIL'
+    }
+}
+
+Describe 'Get-RealPcSourceRepairRow (the installer registers winget''s source package, wgt-gq8.71, item 2)' {
+    BeforeAll {
+        $script:MissingCheck = [pscustomobject]@{ When = ''; ExitCode = -1978335217; Opened = $false; SourcePackage = 'not registered' }
+        $script:OpenAfter = [pscustomobject]@{ When = 'after the first run'; ExitCode = 0; Opened = $true; SourcePackage = '2026.1009.1.0' }
+        $script:ClosedAfter = [pscustomobject]@{ When = 'after the first run'; ExitCode = -1978335217; Opened = $false; SourcePackage = 'not registered' }
+        $script:RepairCheck = 'The installer registered winget''s source package for this account'
+    }
+
+    It 'Passes when the installer registered the downloaded package, and names the URL' {
+        $row = Get-RealPcSourceRepairRow -PreflightCheck $script:MissingCheck -AfterCheck $script:OpenAfter -Text 'The winget source package is registered for this account (from https://cdn.winget.microsoft.com/cache/source2.msix).'
+        $row.Check | Should -Be $script:RepairCheck
+        $row.Result | Should -Be 'PASS'
+        $row.Detail | Should -Be 'Preflight: 0x8A15000F; registered from https://cdn.winget.microsoft.com/cache/source2.msix; the source check after the first run: 0x00000000'
+    }
+
+    It 'Passes when it registered the copy already on this PC, and says so' {
+        $row = Get-RealPcSourceRepairRow -PreflightCheck $script:MissingCheck -AfterCheck $script:ClosedAfter -Text 'The winget source package is registered for this account (by family name, from the copy already on this PC).'
+        $row.Result | Should -Be 'PASS'
+        $row.Detail | Should -Match 'registered from the copy already on this PC \(by family name\); the source check after the first run: 0x8A15000F'
+    }
+
+    It 'Fails when the installer registered nothing and the source is still closed, quoting the installer''s error' {
+        $red = "The winget source cannot be opened for 'CONTOSO\admin-jmaffiola': 'winget search --source winget' answered 0x8A15000F (SOURCE_DATA_MISSING), so winget can neither install the apps nor tell which are installed."
+        $row = Get-RealPcSourceRepairRow -PreflightCheck $script:MissingCheck -AfterCheck $script:ClosedAfter -Text ("Downloading the winget source package from https://cdn.winget.microsoft.com/cache/source2.msix...`n" + $red)
+        $row.Result | Should -Be 'FAIL'
+        $row.Detail | Should -Match "the installer's repair did not get the source open: no 'registered for this account' line, and the source check after the first run: 0x8A15000F"
+        $row.Detail | Should -Match ([regex]::Escape('The installer said: ' + $red))
+        $quiet = Get-RealPcSourceRepairRow -PreflightCheck $script:MissingCheck -AfterCheck $script:ClosedAfter -Text ''
+        $quiet.Result | Should -Be 'FAIL'
+        $quiet.Detail | Should -Not -Match 'The installer said'
+    }
+
+    It 'Skips when the source opened after the run, but the run did not register the package itself' {
+        $row = Get-RealPcSourceRepairRow -PreflightCheck $script:MissingCheck -AfterCheck $script:OpenAfter -Text 'The winget source opens for ''CONTOSO\admin-jmaffiola''.'
+        $row.Result | Should -Be 'SKIP'
+        $row.Detail | Should -Be 'Preflight: 0x8A15000F; the source opened after the first run, but the run did not register the source package itself (no ''registered for this account'' line)'
+    }
+
+    It 'Skips, saying how to exercise it, when the source already opened at Preflight' {
+        $row = Get-RealPcSourceRepairRow -PreflightCheck ([pscustomobject]@{ When = ''; ExitCode = 0; Opened = $true }) -AfterCheck $script:OpenAfter -Text 'The winget source opens for ''CONTOSO\admin-jmaffiola''.'
+        $row.Result | Should -Be 'SKIP'
+        $row.Detail | Should -Be 'not exercised: winget''s source already opened before the first run; to exercise the repair, first run: Get-AppxPackage Microsoft.Winget.Source* | Remove-AppxPackage'
+    }
+
+    It 'Passes on the installer''s line whatever Preflight saw: <Case>' -ForEach @(
+        @{ Case = 'no check (winget could not be started in this account yet)'; Preflight = $null; Expected = 'Preflight: no source check (winget could not be started in this account yet); registered from https://cdn.winget.microsoft.com/cache/source2.msix; the source check after the first run: 0x00000000' }
+        @{ Case = 'a check that ran out of time'; Preflight = [pscustomobject]@{ When = ''; ExitCode = $null; Opened = $false }; Expected = 'Preflight: no exit code; registered from https://cdn.winget.microsoft.com/cache/source2.msix; the source check after the first run: 0x00000000' }
+        @{ Case = 'another failure'; Preflight = [pscustomobject]@{ When = ''; ExitCode = -1978335163; Opened = $false }; Expected = 'Preflight: 0x8A150045 (SOURCE_OPEN_FAILED); registered from https://cdn.winget.microsoft.com/cache/source2.msix; the source check after the first run: 0x00000000' }
+        @{ Case = 'an open source'; Preflight = [pscustomobject]@{ When = ''; ExitCode = 0; Opened = $true }; Expected = 'Preflight: the source opened; registered from https://cdn.winget.microsoft.com/cache/source2.msix; the source check after the first run: 0x00000000' }
+    ) {
+        # wgt-gq8.71 review: on a reimaged PC winget is not registered for the admin at Preflight.
+        $row = Get-RealPcSourceRepairRow -PreflightCheck $Preflight -AfterCheck $script:OpenAfter -Text 'The winget source package is registered for this account (from https://cdn.winget.microsoft.com/cache/source2.msix).'
+        $row.Result | Should -Be 'PASS'
+        $row.Detail | Should -Be $Expected
+        $family = Get-RealPcSourceRepairRow -PreflightCheck $Preflight -AfterCheck $script:OpenAfter -Text 'The winget source package is registered for this account (by family name, from the copy already on this PC).'
+        $family.Result | Should -Be 'PASS'
+        $family.Detail | Should -Match 'registered from the copy already on this PC \(by family name\)'
+    }
+
+    It 'Skips another failure, a Preflight with no check, and a run with no check after it' {
+        $openFailed = Get-RealPcSourceRepairRow -PreflightCheck ([pscustomobject]@{ When = ''; ExitCode = -1978335163; Opened = $false }) -AfterCheck $script:ClosedAfter -Text ''
+        $openFailed.Result | Should -Be 'SKIP'
+        $openFailed.Detail | Should -Be 'not the missing-package case: Preflight''s check answered 0x8A150045 (SOURCE_OPEN_FAILED), not 0x8A15000F (SOURCE_DATA_MISSING), and the installer printed no ''registered for this account'' line'
+        (Get-RealPcSourceRepairRow -PreflightCheck ([pscustomobject]@{ When = ''; ExitCode = $null; Opened = $false }) -AfterCheck $script:ClosedAfter).Detail | Should -Match 'answered no exit code'
+        $none = Get-RealPcSourceRepairRow -PreflightCheck $null -AfterCheck $script:OpenAfter
+        $none.Result | Should -Be 'SKIP'
+        $none.Detail | Should -Match 'Preflight made no source check'
+        (Get-RealPcSourceRepairRow -PreflightCheck $script:MissingCheck -AfterCheck $null -Text '').Result | Should -Be 'SKIP'
+    }
+}
+
+Describe 'Get-RealPcCrossUserDetectionRow (the installer sees the cross-user elevation, wgt-gq8.71, item 3)' {
+    BeforeAll {
+        $script:CrossUserYes = 'yes (signed in as CONTOSO\stduser S-1-5-21-1-2-3-1104, elevated as CONTOSO\admin-jmaffiola S-1-5-21-1-2-3-1107)'
+        $script:DetectedLine = "Cross-user elevation detected: running as 'CONTOSO\admin-jmaffiola' while 'CONTOSO\stduser' owns the interactive session."
+        $script:DetectionCheck = 'The installer detected the cross-user elevation as Preflight did'
+    }
+
+    It 'Reads the fact''s first word: yes, no, or unknown for anything else' {
+        Get-RealPcCrossUserAnswer -CrossUser $script:CrossUserYes | Should -Be 'yes'
+        Get-RealPcCrossUserAnswer -CrossUser 'no (signed in and elevated as CONTOSO\admin-jmaffiola)' | Should -Be 'no'
+        Get-RealPcCrossUserAnswer -CrossUser 'unknown (no signed-in user found in this session; elevated as CONTOSO\admin-jmaffiola)' | Should -Be 'unknown'
+        Get-RealPcCrossUserAnswer -CrossUser '' | Should -Be 'unknown'
+        Get-RealPcCrossUserAnswer -CrossUser $null | Should -Be 'unknown'
+        Get-RealPcCrossUserAnswer -CrossUser 'yesterday' | Should -Be 'unknown'
+    }
+
+    It 'Passes when Preflight said yes and the installer printed its cross-user line' {
+        $row = Get-RealPcCrossUserDetectionRow -CrossUser $script:CrossUserYes -Text ("Installer build: 1.0.0+7c0ffee1`n" + $script:DetectedLine)
+        $row.Check | Should -Be $script:DetectionCheck
+        $row.Result | Should -Be 'PASS'
+        $row.Detail | Should -Be ('Preflight: yes; the installer printed: ' + $script:DetectedLine)
+    }
+
+    It 'Fails when Preflight said yes and the installer did not detect it' {
+        $row = Get-RealPcCrossUserDetectionRow -CrossUser $script:CrossUserYes -Text 'Installer build: 1.0.0+7c0ffee1'
+        $row.Result | Should -Be 'FAIL'
+        $row.Detail | Should -Match 'the installer did not detect it'
+        $row.Detail | Should -Match 'its cross-user handling \(machine-wide installs only\) did not run'
+    }
+
+    It 'Passes when neither found cross-user elevation, and fails an installer that reports one Preflight did not find' {
+        (Get-RealPcCrossUserDetectionRow -CrossUser 'no (signed in and elevated as CONTOSO\admin-jmaffiola)' -Text 'Installer build: 1.0.0+7c0ffee1').Result | Should -Be 'PASS'
+        $wrong = Get-RealPcCrossUserDetectionRow -CrossUser 'no (signed in and elevated as CONTOSO\admin-jmaffiola)' -Text $script:DetectedLine
+        $wrong.Result | Should -Be 'FAIL'
+        $wrong.Detail | Should -Match '^Preflight: no \(the same account is signed in and elevated\); the installer printed: Cross-user elevation detected'
+    }
+
+    It 'Skips when Preflight could not tell' {
+        $unknown = Get-RealPcCrossUserDetectionRow -CrossUser 'unknown (no signed-in user found in this session; elevated as CONTOSO\admin-jmaffiola)' -Text $script:DetectedLine
+        $unknown.Result | Should -Be 'SKIP'
+        $unknown.Detail | Should -Match '^Preflight: unknown'
+        (Get-RealPcCrossUserDetectionRow -CrossUser '' -Text '').Detail | Should -Be 'Preflight did not record who is signed in'
+    }
+}
+
+Describe 'App checks under cross-user elevation expect a machine-wide-only run (wgt-gq8.71, item 4)' {
+    BeforeAll {
+        $script:CrossUserRecord = ConvertFrom-Json -InputObject ([string](Get-Content -Raw -LiteralPath (Join-Path $script:FixtureDirectory 'realpc-crossuser-firstrun-last-run.json')))
+        # The catalog's applicability on an x64 PC that is not a Dell, as the installer decides it.
+        $script:X64Applicability = @{ 'Adobe.Acrobat.Reader.32-bit' = $false; 'Dell.CommandUpdate.Universal' = $false }
+
+        # Built as the harness builds them: SYSTEM's expectations (Get-SystemPassAppExpectation),
+        # then the machine-wide conversion.
+        function Get-RealPcCrossUserExpectation {
+            param ([switch]$AlreadyPresent)
+            $system = @(Get-SystemPassAppExpectation -Catalog @(Get-DefaultAppCatalog) -Applicability $script:X64Applicability -AlreadyPresent:$AlreadyPresent)
+            return @(ConvertTo-RealPcMachineWideExpectation -AppExpectation $system)
+        }
+
+        # A re-run record: every app found again, Google Drive deferred again.
+        function Get-RealPcCrossUserReRunRecord {
+            $record = ConvertFrom-Json -InputObject ([string](Get-Content -Raw -LiteralPath (Join-Path $script:FixtureDirectory 'realpc-crossuser-firstrun-last-run.json')))
+            foreach ($app in @($record.apps | Where-Object { $_.status -eq 'Installed' })) {
+                $app.status = 'Skipped'
+                $app.reason = 'already installed'
+            }
+            return $record
+        }
+    }
+
+    It 'Uses the product''s own text for an app deferred for want of a machine-wide installer' {
+        $script:NoMachineScopeDeferReason | Should -Be (Get-AppDeferReasonText -DeferReason 'NoMachineScopeInstaller')
+    }
+
+    It 'Lets an Installed or AlreadyPresent app be deferred, keeps the other expectations, and leaves the input alone' {
+        $input = @(
+            New-RealPcExpectation -Id '7zip.7zip' -Expected 'Installed'
+            New-RealPcExpectation -Id 'Git.Git' -Expected 'AlreadyPresent'
+            New-RealPcExpectation -Id 'Adobe.Acrobat.Reader.32-bit' -Expected 'NotApplicable' -Reason 'not applicable: x' -AlreadyPresentReasons @()
+            New-RealPcExpectation -Id 'Contoso.UserApp' -Expected 'Deferred' -Reason 'per-user app' -AlreadyPresentReasons @()
+        )
+        $converted = @(ConvertTo-RealPcMachineWideExpectation -AppExpectation $input)
+        @($converted | ForEach-Object { $_.Expected }) | Should -Be @('Installed', 'AlreadyPresent', 'NotApplicable', 'Deferred')
+        @($converted | Where-Object { -not $_.MachineWide }) | Should -BeNullOrEmpty
+        $converted[0].DeferReasons | Should -Be @('winget found no machine-wide installer for it')
+        $converted[1].DeferReasons | Should -Be @('winget found no machine-wide installer for it')
+        @($converted[2].DeferReasons) | Should -BeNullOrEmpty
+        @($converted[3].DeferReasons) | Should -BeNullOrEmpty
+        $converted[3].Reason | Should -Be 'per-user app'
+        $input[0].PSObject.Properties['MachineWide'] | Should -BeNullOrEmpty
+    }
+
+    It 'Passes the cross-user first run: Google Drive deferred, Windows Terminal judged by its provisioning' {
+        $rows = @(Get-RealPcAppResult -RunRecord $script:CrossUserRecord -AppExpectation (Get-RealPcCrossUserExpectation))
+        @($rows | Where-Object { $_.Result -eq 'FAIL' }) | Should -BeNullOrEmpty
+        $drive = $rows | Where-Object { $_.Check -eq 'App installed, present or deferred (machine-wide only): Google.GoogleDrive' }
+        $drive.Result | Should -Be 'PASS'
+        $drive.Detail | Should -Be 'Deferred (winget found no machine-wide installer for it)'
+        ($rows | Where-Object { $_.Check -eq 'App installed, present or deferred (machine-wide only): Microsoft.WindowsTerminal' }).Detail | Should -Be 'Skipped (already provisioned for every user on this PC)'
+        ($rows | Where-Object { $_.Check -eq 'App not applicable, skipped: Dell.CommandUpdate.Universal' }).Result | Should -Be 'PASS'
+    }
+
+    It 'Keeps the same-user expectations: there a deferred app fails' {
+        $sameUser = @(Get-SystemPassAppExpectation -Catalog @(Get-DefaultAppCatalog) -Applicability $script:X64Applicability)
+        $rows = @(Get-RealPcAppResult -RunRecord $script:CrossUserRecord -AppExpectation $sameUser)
+        ($rows | Where-Object { $_.Check -eq 'App installed or present: Google.GoogleDrive' }).Result | Should -Be 'FAIL'
+        ($rows | Where-Object { $_.Check -eq 'App installed or present: 7zip.7zip' }).Result | Should -Be 'PASS'
+    }
+
+    It 'Fails what a machine-wide-only run must not record: another deferral, a Terminal found by winget list, a failure' {
+        $record = ConvertFrom-Json -InputObject ([string](Get-Content -Raw -LiteralPath (Join-Path $script:FixtureDirectory 'realpc-crossuser-firstrun-last-run.json')))
+        ($record.apps | Where-Object { $_.id -eq 'Google.GoogleDrive' }).reason = 'per-user app (catalog scope ''user''): it installs only into the signed-in user''s own account'
+        ($record.apps | Where-Object { $_.id -eq 'Microsoft.WindowsTerminal' }).reason = 'already installed'
+        ($record.apps | Where-Object { $_.id -eq '7zip.7zip' }).status = 'Failed'
+        $rows = @(Get-RealPcAppResult -RunRecord $record -AppExpectation (Get-RealPcCrossUserExpectation))
+        @($rows | Where-Object { $_.Result -eq 'FAIL' } | ForEach-Object { $_.Check }) | Should -Be @(
+            'App installed, present or deferred (machine-wide only): 7zip.7zip',
+            'App installed, present or deferred (machine-wide only): Google.GoogleDrive',
+            'App installed, present or deferred (machine-wide only): Microsoft.WindowsTerminal'
+        )
+    }
+
+    It 'Lets the SYSTEM run defer again, or install, an app the cross-user first run deferred for want of a machine-wide installer (wgt-gq8.71 review)' {
+        $system = @(Get-SystemPassAppExpectation -Catalog @(Get-DefaultAppCatalog) -Applicability $script:X64Applicability -AlreadyPresent)
+        $adjusted = Set-RealPcFirstRunExpectation -AppExpectation $system -FirstRunRecord $script:CrossUserRecord
+        $systemRecord = Get-RealPcCrossUserReRunRecord
+        $rows = @(Get-SystemPassAppResult -RunRecord $systemRecord -AppExpectation $adjusted.Value | ForEach-Object { New-TestPlanRow -Check $_.Assertion -Result $_.Result -Detail $_.Detail })
+        ($rows | Where-Object { $_.Check -eq 'App installed: Google.GoogleDrive' }).Result | Should -Be 'FAIL'
+        $updated = @(Update-RealPcSystemRedeferredRow -Row $rows -RunRecord $systemRecord -FirstRunRecord $script:CrossUserRecord)
+        @($updated | Where-Object { $_.Result -eq 'FAIL' } | ForEach-Object { '{0}: {1}' -f $_.Check, $_.Detail }) | Should -BeNullOrEmpty
+        $updated.Count | Should -Be $rows.Count
+        $drive = $updated | Where-Object { $_.Check -eq 'App installed, or deferred again as the first run did: Google.GoogleDrive' }
+        $drive.Result | Should -Be 'PASS'
+        $drive.Detail | Should -Match '^last-run\.json: Deferred \(winget found no machine-wide installer for it\).*; the first run, machine-wide only, deferred it for the same reason$'
+        # The other app rows are kept as they are.
+        @($updated | Where-Object { $_.Check -like 'App installed, or deferred again*' }).Count | Should -Be 1
+
+        # Installed as SYSTEM passes too; deferred for another reason still fails.
+        $installed = Get-RealPcCrossUserReRunRecord
+        $entry = $installed.apps | Where-Object { $_.id -eq 'Google.GoogleDrive' }
+        $entry.status = 'Installed'
+        $entry.reason = $null
+        $installedRows = @(Get-SystemPassAppResult -RunRecord $installed -AppExpectation $adjusted.Value | ForEach-Object { New-TestPlanRow -Check $_.Assertion -Result $_.Result -Detail $_.Detail })
+        (@(Update-RealPcSystemRedeferredRow -Row $installedRows -RunRecord $installed -FirstRunRecord $script:CrossUserRecord) | Where-Object { $_.Check -like '*Google.GoogleDrive' }).Result | Should -Be 'PASS'
+        $entry.status = 'Deferred'
+        $entry.reason = 'per-user app (catalog scope ''user''): it installs only into the signed-in user''s own account'
+        $otherRows = @(Get-SystemPassAppResult -RunRecord $installed -AppExpectation $adjusted.Value | ForEach-Object { New-TestPlanRow -Check $_.Assertion -Result $_.Result -Detail $_.Detail })
+        (@(Update-RealPcSystemRedeferredRow -Row $otherRows -RunRecord $installed -FirstRunRecord $script:CrossUserRecord) | Where-Object { $_.Check -like '*Google.GoogleDrive' }).Result | Should -Be 'FAIL'
+        # A first run that left no such deferral changes nothing.
+        @(Update-RealPcSystemRedeferredRow -Row $rows -RunRecord $systemRecord -FirstRunRecord (Get-FirstRunRecord) | ForEach-Object { $_.Check }) | Should -Be @($rows | ForEach-Object { $_.Check })
+    }
+
+    It 'Lets the re-run defer again what the first run deferred, and fails a deferral of an app the first run installed' {
+        $adjusted = Set-RealPcFirstRunExpectation -AppExpectation (Get-RealPcCrossUserExpectation -AlreadyPresent) -FirstRunRecord $script:CrossUserRecord
+        $drive = $adjusted.Value | Where-Object { $_.Id -eq 'Google.GoogleDrive' }
+        $drive.Expected | Should -Be 'Installed'
+        $drive.MachineWide | Should -BeTrue
+        @($adjusted.Changed) | Should -Be @('Google.GoogleDrive (Deferred (winget found no machine-wide installer for it))')
+        $transcript = New-RealPcTestTranscript -AutoUpdates 'Already present (Winget-AutoUpdate v2.12.0).'
+        $rows = @(Get-RealPcReRunResult -ExitCode 0 -Transcript $transcript -RunRecord (Get-RealPcCrossUserReRunRecord) -AppExpectation $adjusted.Value)
+        @($rows | Where-Object { $_.Result -eq 'FAIL' }) | Should -BeNullOrEmpty
+        ($rows | Where-Object { $_.Check -eq 'Re-run installed, found or deferred (machine-wide only): Google.GoogleDrive' }).Result | Should -Be 'PASS'
+        ($rows | Where-Object { $_.Check -eq 'Re-run skipped as present: Microsoft.WindowsTerminal' }).Result | Should -Be 'PASS'
+
+        $deferred = Get-RealPcCrossUserReRunRecord
+        $sevenZip = $deferred.apps | Where-Object { $_.id -eq '7zip.7zip' }
+        $sevenZip.status = 'Deferred'
+        $sevenZip.reason = 'winget found no machine-wide installer for it'
+        $terminal = $deferred.apps | Where-Object { $_.id -eq 'Microsoft.WindowsTerminal' }
+        $terminal.reason = 'already installed'
+        $failed = @(Get-RealPcReRunResult -ExitCode 0 -Transcript $transcript -RunRecord $deferred -AppExpectation $adjusted.Value | Where-Object { $_.Result -eq 'FAIL' } | ForEach-Object { $_.Check })
+        $failed | Should -Be @('Re-run skipped as present: 7zip.7zip', 'Re-run skipped as present: Microsoft.WindowsTerminal')
+    }
+}
+
+Describe 'Invoke-RealPcFirstRunStage and Invoke-RealPcReRunStage under cross-user elevation (wiring, wgt-gq8.71)' {
+    BeforeEach {
+        $script:TightVncPassword = 'Tvnc2345'
+        $script:StageTimeoutMinutes = 60
+        $script:LinkGuard = [pscustomobject]@{ VictimFolder = $null; VictimBefore = @(); TempUser = $null; TempUserName = $null; PlantedBy = 'Admin'; PlantNote = ''; Planted = $false }
+        $script:CrossUserEvidence = Join-Path $TestDrive ('evidence-crossuser-' + [guid]::NewGuid().ToString('N'))
+        $null = New-Item -ItemType Directory -Path $script:CrossUserEvidence -Force
+        $script:CrossUserElevation = 'yes (signed in as CONTOSO\stduser S-1-5-21-1-2-3-1104, elevated as CONTOSO\admin-jmaffiola S-1-5-21-1-2-3-1107)'
+        $script:RealPcOptions = [pscustomobject]@{ UseOneLiner = $false; Branch = 'claude/trusting-dirac-foyiaa'; ResetProgramData = $false }
+        $script:MachineFacts = [ordered]@{ 'Installer build' = 'one-liner from claude/trusting-dirac-foyiaa' }
+        # Preflight could not open the source: the admin has no source package (0x8A15000F).
+        $script:WingetSourceChecks = @([pscustomobject]@{ When = ''; ExitCode = -1978335217; Opened = $false; SourcePackage = 'not registered' })
+        $script:WingetSourceOpen = $false
+        $script:FirstRunRecord = $null
+        $script:CrossUserConsole = @(Get-Content -LiteralPath (Join-Path $script:FixtureDirectory 'realpc-crossuser-firstrun-console.txt'))
+
+        Mock Get-RealPcAppExpectation {
+            $catalog = @(Get-DefaultAppCatalog)
+            $applicability = @{ 'Adobe.Acrobat.Reader.32-bit' = $false; 'Dell.CommandUpdate.Universal' = $false }
+            return [pscustomobject]@{ Value = @(Get-SystemPassAppExpectation -Catalog $catalog -Applicability $applicability -AlreadyPresent:$AlreadyPresent); Problem = $null }
+        }
+        Mock Invoke-RealPcInstaller { return [pscustomobject]@{ ExitCode = 0; Output = $script:CrossUserConsole } }
+        Mock Get-InstallPassTranscript { return (New-RealPcTestTranscript) }
+        Mock Read-RealPcRunRecord { return [pscustomobject]@{ Record = (ConvertFrom-Json -InputObject ([string](Get-Content -Raw -LiteralPath (Join-Path $script:FixtureDirectory 'realpc-crossuser-firstrun-last-run.json')))); Problem = $null } }
+        Mock Get-RealPcTranscriptText { return '' }
+        Mock Get-RealPcWauTaskHealth { return [pscustomobject]@{ Exists = $true; Healthy = $true; Triggers = @('Daily') } }
+        Mock Invoke-RealPcModuleJson { return [pscustomobject]@{ Ok = $true; Value = [pscustomobject]@{ Present = $true; Detail = 'found' }; Problem = $null } }
+        Mock Remove-RealPcLinkGuardArtifact { return @() }
+        Mock Invoke-RealPcWingetSourceCheck { return [pscustomobject]@{ ExitCode = 0; Output = @('PowerShell Microsoft.PowerShell 7.6.6 winget') } }
+        Mock Get-RealPcWingetSourcePackage { return '2026.1009.1.0' }
+    }
+
+    It 'Passes the first run the fixed product owes: cross-user detected, source package registered, Google Drive deferred' {
+        $rows = @(Invoke-RealPcFirstRunStage -EvidenceFolder $script:CrossUserEvidence)
+        @($rows | Where-Object { $_.Result -eq 'FAIL' } | ForEach-Object { '{0}: {1}' -f $_.Check, $_.Detail }) | Should -BeNullOrEmpty
+        ($rows | Where-Object { $_.Check -eq 'The installer detected the cross-user elevation as Preflight did' }).Result | Should -Be 'PASS'
+        $repair = $rows | Where-Object { $_.Check -eq 'The installer registered winget''s source package for this account' }
+        $repair.Result | Should -Be 'PASS'
+        $repair.Detail | Should -Match 'registered from https://cdn\.winget\.microsoft\.com/cache/source2\.msix'
+        ($rows | Where-Object { $_.Check -eq 'App installed, present or deferred (machine-wide only): Google.GoogleDrive' }).Result | Should -Be 'PASS'
+        # Not a one-liner run: the fact Preflight read from the checkout stays.
+        $script:MachineFacts['Installer build'] | Should -Be 'one-liner from claude/trusting-dirac-foyiaa'
+    }
+
+    It 'Fails the first run when the installer did not detect the cross-user elevation or repair the source' {
+        $script:CrossUserConsole = @($script:CrossUserConsole | Where-Object { $_ -notmatch 'Cross-user elevation detected|registered for this account' })
+        Mock Invoke-RealPcWingetSourceCheck { return [pscustomobject]@{ ExitCode = -1978335217; Output = @('0x8a15000f : Data required by the source is missing') } }
+        $rows = @(Invoke-RealPcFirstRunStage -EvidenceFolder $script:CrossUserEvidence)
+        ($rows | Where-Object { $_.Check -eq 'The installer detected the cross-user elevation as Preflight did' }).Result | Should -Be 'FAIL'
+        ($rows | Where-Object { $_.Check -eq 'The installer registered winget''s source package for this account' }).Result | Should -Be 'FAIL'
+    }
+
+    It 'Names the one-liner''s build from what the first run printed' {
+        $script:RealPcOptions = [pscustomobject]@{ UseOneLiner = $true; Branch = 'claude/trusting-dirac-foyiaa'; ResetProgramData = $false }
+        Mock Get-InstallPassTranscript { return $null }
+        $null = Invoke-RealPcFirstRunStage -EvidenceFolder $script:CrossUserEvidence
+        $script:MachineFacts['Installer build'] | Should -Be '1.0.0+7c0ffee1 (one-liner from claude/trusting-dirac-foyiaa, as the first run printed it)'
+    }
+
+    It 'Lets the re-run defer Google Drive again after a cross-user first run' {
+        $script:FirstRunRecord = ConvertFrom-Json -InputObject ([string](Get-Content -Raw -LiteralPath (Join-Path $script:FixtureDirectory 'realpc-crossuser-firstrun-last-run.json')))
+        Mock Get-InstallPassTranscript { return (New-RealPcTestTranscript -AutoUpdates 'Already present (Winget-AutoUpdate v2.12.0).') }
+        Mock Read-RealPcRunRecord {
+            $record = ConvertFrom-Json -InputObject ([string](Get-Content -Raw -LiteralPath (Join-Path $script:FixtureDirectory 'realpc-crossuser-firstrun-last-run.json')))
+            foreach ($app in @($record.apps | Where-Object { $_.status -eq 'Installed' })) {
+                $app.status = 'Skipped'
+                $app.reason = 'already installed'
+            }
+            return [pscustomobject]@{ Record = $record; Problem = $null }
+        }
+        $rows = @(Invoke-RealPcReRunStage -EvidenceFolder $script:CrossUserEvidence)
+        @($rows | Where-Object { $_.Result -eq 'FAIL' } | ForEach-Object { '{0}: {1}' -f $_.Check, $_.Detail }) | Should -BeNullOrEmpty
+        ($rows | Where-Object { $_.Check -eq 'Re-run installed, found or deferred (machine-wide only): Google.GoogleDrive' }).Result | Should -Be 'PASS'
+        ($rows | Where-Object { $_.Check -eq 'Apps the first run did not leave installed' }).Detail | Should -Match 'Google\.GoogleDrive \(Deferred'
+    }
+}
+
+Describe 'What the uninstaller kept comes from its own console (wgt-gq8.71, item 5)' {
+    BeforeAll {
+        $script:TerminalHostsReason = 'Windows Terminal hosts this window, or is set as the default terminal application, so removing it would close this window; to remove it, set the default terminal application to Windows Console Host and run winget-app-uninstall.ps1 from a window Windows Terminal does not host'
+        $script:PerUserReason = 'a per-user app that this run cannot remove: it runs as ''CONTOSO\admin-jmaffiola'' in the session of ''CONTOSO\stduser''; to remove it, run winget-app-uninstall.ps1 signed in as the user it belongs to'
+        $script:RemovedCheck = 'Catalog apps removed (except what the uninstaller keeps on purpose)'
+    }
+
+    It 'Reads the three reasons the uninstaller keeps an app for, and nothing else' {
+        $text = @(
+            'Skipping: Microsoft.PowerShell (this uninstaller is running in PowerShell 7; to remove it, run winget-app-uninstall.ps1 from Windows PowerShell)',
+            ('Skipping: Microsoft.WindowsTerminal ({0})' -f $script:PerUserReason),
+            'Skipping: 7zip.7zip (not installed)',
+            'Skipping: Dell.CommandUpdate.Universal (not applicable: Dell hardware with x64 Windows only; winget has no ARM64 installer for it)'
+        ) -join "`r`n"
+        @(Get-RealPcKeptSkip -Text $text) | Should -Be @('Microsoft.PowerShell', 'Microsoft.WindowsTerminal')
+        @(Get-RealPcKeptSkip -Text ('Skipping: Microsoft.WindowsTerminal ({0})' -f $script:TerminalHostsReason)) | Should -Be @('Microsoft.WindowsTerminal')
+        @(Get-RealPcKeptSkip -Text '') | Should -BeNullOrEmpty
+    }
+
+    It 'Reads the reasons the module gives for the shell it runs in' {
+        Mock Get-PowerShellEdition { return 'Core' }
+        Mock Test-WindowsTerminalHostsCurrentSession { return $true }
+        @(Get-RealPcKeptSkip -Text ('Skipping: Microsoft.PowerShell ({0})' -f (Get-HostingShellSkipReason -PackageId 'Microsoft.PowerShell'))) | Should -Be @('Microsoft.PowerShell')
+        @(Get-RealPcKeptSkip -Text ('Skipping: Microsoft.WindowsTerminal ({0})' -f (Get-HostingShellSkipReason -PackageId 'Microsoft.WindowsTerminal'))) | Should -Be @('Microsoft.WindowsTerminal')
+    }
+
+    It 'Fails the removal row when PowerShell 7 is still there after a Windows PowerShell uninstall, which removes it' {
+        $console = ('Skipping: Microsoft.WindowsTerminal ({0})' -f $script:TerminalHostsReason) + "`nSuccessfully uninstalled: 7zip.7zip"
+        $rows = Get-RealPcUninstallerResult -WhatIfInstalledBefore @('7zip.7zip', 'Microsoft.PowerShell') -WhatIfInstalledAfter @('7zip.7zip', 'Microsoft.PowerShell') -WhatIfWauBefore $true -WhatIfWauAfter $true -ExitCode 0 -InstalledAfter @('Microsoft.PowerShell', 'Microsoft.WindowsTerminal') -WauPresentAfter $false -SourceOpen $true -UninstallConsoleText $console
+        $row = $rows | Where-Object { $_.Check -eq $script:RemovedCheck }
+        $row.Result | Should -Be 'FAIL'
+        $row.Detail | Should -Be 'still installed: Microsoft.PowerShell; kept on purpose: Microsoft.WindowsTerminal'
+    }
+
+    It 'Counts Windows Terminal as kept for each reason the uninstaller gives (<Name>)' -ForEach @(
+        @{ Name = 'it hosts the window'; Reason = 'Windows Terminal hosts this window, or is set as the default terminal application, so removing it would close this window' }
+        @{ Name = 'a per-user app'; Reason = 'a per-user app that this run cannot remove: it runs as ''CONTOSO\admin-jmaffiola'' in the session of ''CONTOSO\stduser''' }
+    ) {
+        $console = 'Skipping: Microsoft.WindowsTerminal ({0})' -f $Reason
+        $rows = Get-RealPcUninstallerResult -WhatIfWauBefore $true -WhatIfWauAfter $true -ExitCode 0 -InstalledAfter @('Microsoft.WindowsTerminal') -WauPresentAfter $false -SourceOpen $true -UninstallConsoleText $console
+        $row = $rows | Where-Object { $_.Check -eq $script:RemovedCheck }
+        $row.Result | Should -Be 'PASS'
+        $row.Detail | Should -Be 'every removable catalog app is gone; kept on purpose: Microsoft.WindowsTerminal'
+    }
+
+    It 'Keeps only what the console names; with no console at all, the apps the uninstaller may keep' {
+        $named = Get-RealPcUninstallerResult -ExitCode 0 -InstalledAfter @('Microsoft.WindowsTerminal') -WauPresentAfter $false -SourceOpen $true -UninstallConsoleText 'Successfully uninstalled: 7zip.7zip' -WhatIfWauBefore $true -WhatIfWauAfter $true
+        ($named | Where-Object { $_.Check -eq $script:RemovedCheck }).Result | Should -Be 'FAIL'
+        $none = Get-RealPcUninstallerResult -ExitCode 0 -InstalledAfter @('Microsoft.PowerShell', 'Microsoft.WindowsTerminal') -WauPresentAfter $false -SourceOpen $true -WhatIfWauBefore $true -WhatIfWauAfter $true
+        ($none | Where-Object { $_.Check -eq $script:RemovedCheck }).Result | Should -Be 'PASS'
+        $given = Get-RealPcUninstallerResult -ExitCode 0 -InstalledAfter @('Microsoft.WindowsTerminal') -KeptIds @() -WauPresentAfter $false -SourceOpen $true -WhatIfWauBefore $true -WhatIfWauAfter $true
+        ($given | Where-Object { $_.Check -eq $script:RemovedCheck }).Result | Should -Be 'FAIL'
+    }
+}
+
+Describe 'An uninstaller that opens winget''s source itself is judged as usual (wgt-gq8.71, item 6)' {
+    BeforeAll {
+        $script:RepairedConsole = @(
+            'Downloading the winget source package from https://cdn.winget.microsoft.com/cache/source2.msix...',
+            'The winget source package is registered for this account (from https://cdn.winget.microsoft.com/cache/source2.msix).',
+            'The winget source opens for ''CONTOSO\admin-jmaffiola''.',
+            'Successfully uninstalled: 7zip.7zip'
+        ) -join "`n"
+    }
+
+    It 'Raises no FAIL for a run that repaired the source, exited 0 and removed Winget-AutoUpdate' {
+        $rows = @(Get-RealPcUninstallerResult -WhatIfWauBefore $true -WhatIfWauAfter $true -ExitCode 0 -WauPresentAfter $false -SourceOpen $false -UninstallConsoleText $script:RepairedConsole)
+        @($rows | Where-Object { $_.Result -eq 'FAIL' } | ForEach-Object { '{0}: {1}' -f $_.Check, $_.Detail }) | Should -BeNullOrEmpty
+        $repaired = $rows | Where-Object { $_.Check -eq 'The uninstaller repaired winget''s source for this account' }
+        $repaired.Result | Should -Be 'PASS'
+        $repaired.Detail | Should -Be 'the harness''s check before it could not open it; the uninstaller printed: The winget source package is registered for this account (from https://cdn.winget.microsoft.com/cache/source2.msix). Then: The winget source opens for ''CONTOSO\admin-jmaffiola''.'
+        ($rows | Where-Object { $_.Check -eq 'Real uninstall exits 0 or 3010' }).Result | Should -Be 'PASS'
+        ($rows | Where-Object { $_.Check -eq 'Winget-AutoUpdate removed' }).Result | Should -Be 'PASS'
+        ($rows | Where-Object { $_.Check -eq 'Catalog apps removed (except what the uninstaller keeps on purpose)' }).Result | Should -Be 'PASS'
+        @($rows | Where-Object { $_.Check -like '*while winget cannot open its source' -or $_.Check -like 'Uninstaller (*' }) | Should -BeNullOrEmpty
+    }
+
+    It 'Says the uninstaller only found the source open when no fix line comes before its open line' {
+        # wgt-gq8.71 review: 'The winget source opens for' is printed on every check that opens.
+        $console = @('The winget source opens for ''CONTOSO\admin-jmaffiola''.', 'The winget source package is registered for this account (from https://cdn.winget.microsoft.com/cache/source2.msix).', 'Successfully uninstalled: 7zip.7zip') -join "`n"
+        $rows = @(Get-RealPcUninstallerResult -WhatIfWauBefore $true -WhatIfWauAfter $true -ExitCode 0 -WauPresentAfter $false -SourceOpen $false -UninstallConsoleText $console)
+        $found = $rows | Where-Object { $_.Check -eq 'The uninstaller found winget''s source open' }
+        $found.Result | Should -Be 'PASS'
+        $found.Detail | Should -Be 'the harness''s check before it could not open it, the uninstaller''s own check did, with no repair; it printed: The winget source opens for ''CONTOSO\admin-jmaffiola''.'
+        @($rows | Where-Object { $_.Check -like '*repaired*' }) | Should -BeNullOrEmpty
+        $reset = @(Get-RealPcUninstallerResult -WhatIfWauBefore $true -WhatIfWauAfter $true -ExitCode 0 -WauPresentAfter $false -SourceOpen $false -UninstallConsoleText (@('Resetting the winget source (winget source reset --force)...', 'Source reset completed.', 'The winget source opens for ''CONTOSO\admin-jmaffiola''.') -join "`r`n"))
+        ($reset | Where-Object { $_.Check -eq 'The uninstaller repaired winget''s source for this account' }).Detail | Should -Match 'printed: Source reset completed\. Then: The winget source opens for'
+    }
+
+    It 'Skips the preview, whose lookups ran before the repair, and counts only the lookups after the uninstaller' {
+        $rows = @(Get-RealPcUninstallerResult -WhatIfInstalledBefore @() -WhatIfInstalledAfter @() -WhatIfWauBefore $true -WhatIfWauAfter $true -ExitCode 0 -InstalledAfter @() -UnknownIds @('7zip.7zip', 'Git.Git') -UnknownAfterIds @() -WauPresentAfter $false -SourceOpen $false -UninstallConsoleText $script:RepairedConsole)
+        @($rows | Where-Object { $_.Result -eq 'FAIL' }) | Should -BeNullOrEmpty
+        ($rows | Where-Object { $_.Check -eq 'Uninstaller -WhatIf changed nothing' }).Result | Should -Be 'SKIP'
+        $after = @(Get-RealPcUninstallerResult -WhatIfWauBefore $true -WhatIfWauAfter $true -ExitCode 0 -UnknownIds @('7zip.7zip', 'Git.Git') -UnknownAfterIds @('Git.Git') -WauPresentAfter $false -SourceOpen $false -UninstallConsoleText $script:RepairedConsole)
+        ($after | Where-Object { $_.Check -eq 'winget answered for every catalog app' }).Detail | Should -Be 'winget list could not answer for: Git.Git, so their removal is unchecked'
+    }
+
+    It 'Wires the stage: the lookups after the uninstaller count, and only the harness''s own check before it fails' {
+        $script:CatalogId = @('7zip.7zip', 'Microsoft.PowerShell')
+        $script:RepairEvidence = Join-Path $TestDrive 'evidence-uninstaller-repaired'
+        $null = New-Item -ItemType Directory -Path $script:RepairEvidence -Force
+        $script:WingetSourceChecks = @()
+        $script:WingetSourceOpen = $true
+        $script:CatalogReads = 0
+        $script:WauReads = 0
+        # The check before the uninstaller fails; the one after it, which the repair calls for, opens.
+        $script:SourceChecksRun = 0
+        Mock Invoke-RealPcWingetSourceCheck {
+            $script:SourceChecksRun++
+            if ($script:SourceChecksRun -eq 1) {
+                return [pscustomobject]@{ ExitCode = -1978335217; Output = @('0x8a15000f : Data required by the source is missing') }
+            }
+            return [pscustomobject]@{ ExitCode = 0; Output = @('PowerShell Microsoft.PowerShell 7.6.6 winget') }
+        }
+        Mock Get-RealPcWingetSourcePackage { if ($script:SourceChecksRun -eq 1) { return 'not registered' } return '2026.1009.1.0' }
+        Mock Get-RealPcInstalledCatalogId {
+            $script:CatalogReads++
+            if ($script:CatalogReads -lt 3) {
+                return [pscustomobject]@{ Installed = @(); Unknown = @('7zip.7zip', 'Microsoft.PowerShell') }
+            }
+            return [pscustomobject]@{ Installed = @(); Unknown = @() }
+        }
+        Mock Get-RealPcWauTaskHealth { $script:WauReads++; return [pscustomobject]@{ Exists = ($script:WauReads -lt 3); Healthy = $true; Triggers = @('Daily') } }
+        Mock Invoke-RealPcProcess {
+            if ($ArgumentList -contains '-WhatIf') {
+                return [pscustomobject]@{ ExitCode = 0; Output = @('[DRY-RUN] Would uninstall: 7zip.7zip') }
+            }
+            return [pscustomobject]@{ ExitCode = 0; Output = @($script:RepairedConsole -split "`n") }
+        }
+        $rows = @(Invoke-RealPcUninstallerStage -EvidenceFolder $script:RepairEvidence)
+        @($rows | Where-Object { $_.Result -eq 'FAIL' } | ForEach-Object { $_.Check }) | Should -Be @('winget can open its source in this account (before the uninstaller)')
+        ($rows | Where-Object { $_.Check -eq 'The uninstaller repaired winget''s source for this account' }).Result | Should -Be 'PASS'
+        ($rows | Where-Object { $_.Check -eq 'winget can open its source in this account (after the uninstaller)' }).Result | Should -Be 'PASS'
+        Should -Invoke Invoke-RealPcWingetSourceCheck -Times 2 -Exactly
+        [System.IO.File]::ReadAllText((Join-Path $script:RepairEvidence 'winget-source-check.txt')) | Should -Match 'the source check after the uninstaller; exit 0x00000000'
+    }
+
+    It 'Makes the banner and Preflight''s row agree with an uninstaller that repaired the source (wgt-gq8.71 review)' {
+        $script:RepairEvidence = Join-Path $TestDrive 'evidence-uninstaller-banner'
+        $null = New-Item -ItemType Directory -Path $script:RepairEvidence -Force
+        $script:CatalogId = @('7zip.7zip')
+        # Preflight and the check after the first run failed: the installer's repair did not open it.
+        $script:WingetSourceChecks = @(
+            [pscustomobject]@{ When = ''; ExitCode = -1978335217; Opened = $false; SourcePackage = 'not registered' }
+            [pscustomobject]@{ When = 'after the first run'; ExitCode = -1978335217; Opened = $false; SourcePackage = 'not registered' }
+        )
+        $script:WingetSourceOpen = $false
+        $script:SourceChecksRun = 0
+        $script:WauReads = 0
+        Mock Invoke-RealPcWingetSourceCheck {
+            $script:SourceChecksRun++
+            if ($script:SourceChecksRun -eq 1) {
+                return [pscustomobject]@{ ExitCode = -1978335217; Output = @() }
+            }
+            return [pscustomobject]@{ ExitCode = 0; Output = @() }
+        }
+        Mock Get-RealPcWingetSourcePackage { return 'not registered' }
+        Mock Get-RealPcInstalledCatalogId { return [pscustomobject]@{ Installed = @(); Unknown = @() } }
+        Mock Get-RealPcWauTaskHealth { $script:WauReads++; return [pscustomobject]@{ Exists = ($script:WauReads -lt 3); Healthy = $true; Triggers = @('Daily') } }
+        Mock Invoke-RealPcProcess { return [pscustomobject]@{ ExitCode = 0; Output = @($script:RepairedConsole -split "`n") } }
+        $rows = @(Invoke-RealPcUninstallerStage -EvidenceFolder $script:RepairEvidence)
+        $banner = @(Get-RealPcReportBanner -SourceCheck $script:WingetSourceChecks -Account 'CONTOSO\admin-jmaffiola' -StageName @('Preflight', 'FirstRun', 'Uninstaller')) -join "`n"
+        $banner | Should -Match 'It opened after the uninstaller'
+        $banner | Should -Not -Match 'blind winget'
+        $preflight = [pscustomobject]@{ Name = 'Preflight'; Number = 0; Item = '-'; DurationSeconds = 1; Rows = @(Get-RealPcWingetSourceRow -ExitCode -1978335217) }
+        $updated = @(Update-RealPcPreflightSourceRow -StageResult @($preflight) -SourceCheck $script:WingetSourceChecks)
+        $updated[0].Rows[0].Result | Should -Be 'SKIP'
+        $updated[0].Rows[0].Detail | Should -Match 'It opened after the uninstaller'
+        ($rows | Where-Object { $_.Check -eq 'Real uninstall exits 0 or 3010' }).Result | Should -Be 'PASS'
+    }
+
+    It 'Fails the stage''s removal row when the uninstaller left PowerShell 7 in place under Windows PowerShell' {
+        $script:CatalogId = @('7zip.7zip', 'Microsoft.PowerShell')
+        $script:KeptEvidence = Join-Path $TestDrive 'evidence-uninstaller-kept'
+        $null = New-Item -ItemType Directory -Path $script:KeptEvidence -Force
+        $script:WingetSourceChecks = @()
+        $script:WingetSourceOpen = $true
+        $script:WauReads = 0
+        Mock Invoke-RealPcWingetSourceCheck { return [pscustomobject]@{ ExitCode = 0; Output = @() } }
+        Mock Get-RealPcWingetSourcePackage { return '2026.1009.1.0' }
+        Mock Get-RealPcInstalledCatalogId { return [pscustomobject]@{ Installed = @('Microsoft.PowerShell'); Unknown = @() } }
+        Mock Get-RealPcWauTaskHealth { $script:WauReads++; return [pscustomobject]@{ Exists = ($script:WauReads -lt 3); Healthy = $true; Triggers = @('Daily') } }
+        Mock Invoke-RealPcProcess { return [pscustomobject]@{ ExitCode = 0; Output = @('Successfully uninstalled: 7zip.7zip') } }
+        $rows = @(Invoke-RealPcUninstallerStage -EvidenceFolder $script:KeptEvidence)
+        $row = $rows | Where-Object { $_.Check -eq 'Catalog apps removed (except what the uninstaller keeps on purpose)' }
+        $row.Result | Should -Be 'FAIL'
+        $row.Detail | Should -Be 'still installed: Microsoft.PowerShell'
+    }
+}
+
+Describe 'The harness''s own winget calls have time limits (wgt-gq8.71, item 7)' {
+    BeforeAll {
+        $script:ShellPath = (Get-Process -Id $PID).Path
+    }
+
+    It 'Quotes arguments as Windows splits them again' {
+        ConvertTo-RealPcCommandLine -ArgumentList @('list', '--id', '7zip.7zip', '--exact') | Should -Be 'list --id 7zip.7zip --exact'
+        ConvertTo-RealPcCommandLine -ArgumentList @('a b', '', 'say "hi"', 'C:\dir with space\') | Should -Be '"a b" "" "say \"hi\"" "C:\dir with space\\"'
+        ConvertTo-RealPcCommandLine -ArgumentList @() | Should -Be ''
+    }
+
+    It 'Turns a timeout into no exit code, and says so in the output' {
+        $timedOut = Get-RealPcBoundedProcessResult -TimedOut $true -TimeoutSeconds 45 -Output @('Searching...')
+        $timedOut.ExitCode | Should -BeNullOrEmpty
+        $timedOut.TimedOut | Should -BeTrue
+        $timedOut.Problem | Should -Be 'timed out after 45 s'
+        $timedOut.Output | Should -Be @('Searching...', 'timed out after 45 s')
+        $notRun = Get-RealPcBoundedProcessResult -StartProblem 'The system cannot find the file specified.' -TimeoutSeconds 45
+        $notRun.ExitCode | Should -BeNullOrEmpty
+        $notRun.Problem | Should -Be 'not run: The system cannot find the file specified.'
+        $ended = Get-RealPcBoundedProcessResult -ExitCode 0 -TimeoutSeconds 45 -Output @('ok')
+        $ended.ExitCode | Should -Be 0
+        $ended.ExitCode | Should -Not -BeNullOrEmpty
+        $ended.Problem | Should -Be ''
+        $ended.Output | Should -Be @('ok')
+    }
+
+    It 'Cleans winget''s redirected output: colours, spinner and carriage-return redraws' {
+        $escape = [string][char]27
+        $text = "  -`r  \`r  |`r" + $escape + "[32mFound" + "`r`n" + $escape + "[0mName  Id`n`n   /`n7-Zip 7zip.7zip   "
+        @(ConvertTo-RealPcOutputLine -Text $text) | Should -Be @('Found', 'Name  Id', '7-Zip 7zip.7zip')
+        @(ConvertTo-RealPcOutputLine -Text '') | Should -BeNullOrEmpty
+    }
+
+    It 'Reads a timed-out lookup as no answer, a timed-out uninstall as not run to the end, and a timed-out search as a failed check' {
+        Mock Get-RealPcWingetPath { return 'C:\fake\winget.exe' }
+        Mock Invoke-RealPcBoundedProcess { return (Get-RealPcBoundedProcessResult -TimedOut $true -TimeoutSeconds $TimeoutSeconds) }
+        Test-RealPcWingetInstalled -Id '7zip.7zip' | Should -BeNullOrEmpty
+        $uninstall = Invoke-RealPcWingetUninstall -Id '7zip.7zip'
+        $uninstall.ExitCode | Should -BeNullOrEmpty
+        $uninstall.Problem | Should -Be 'timed out after 150 s'
+        $row = Get-RealPcUninstallCheckRow -AppId '7zip.7zip' -Present $null -UninstallExitCode $uninstall.ExitCode -UninstallProblem $uninstall.Problem -SourceOpen $true
+        $row.Result | Should -Be 'FAIL'
+        $row.Detail | Should -Be 'winget uninstall no exit code (timed out after 150 s): it did not run to the end, so nothing was removed'
+        $search = Invoke-RealPcWingetSourceCheck
+        $search.ExitCode | Should -BeNullOrEmpty
+        ($search.Output -join "`n") | Should -Match 'timed out after 120 s'
+        (Get-RealPcWingetSourceRow -ExitCode $search.ExitCode).Result | Should -Be 'FAIL'
+        Should -Invoke Invoke-RealPcBoundedProcess -Times 1 -Exactly -ParameterFilter { $FilePath -eq 'C:\fake\winget.exe' -and $ArgumentList[0] -eq 'list' -and $TimeoutSeconds -eq 45 }
+        Should -Invoke Invoke-RealPcBoundedProcess -Times 1 -Exactly -ParameterFilter { $ArgumentList[0] -eq 'uninstall' -and $TimeoutSeconds -eq 150 }
+        Should -Invoke Invoke-RealPcBoundedProcess -Times 1 -Exactly -ParameterFilter { $ArgumentList[0] -eq 'search' -and $TimeoutSeconds -eq 120 }
+    }
+
+    It 'Bounds winget''s version, info and source list in Preflight''s facts too' {
+        Mock Get-RealPcWingetPath { return 'C:\fake\winget.exe' }
+        Mock Invoke-RealPcBoundedProcess { return (Get-RealPcBoundedProcessResult -TimedOut $true -TimeoutSeconds $TimeoutSeconds) }
+        Mock Get-AppxPackage { return $null }
+        $fact = Get-RealPcWingetFact
+        $fact.WingetVersion | Should -Be 'winget could not run (timed out after 120 s)'
+        Should -Invoke Invoke-RealPcBoundedProcess -Times 3 -Exactly -ParameterFilter { $TimeoutSeconds -eq 120 }
+    }
+
+    It 'Keeps the time-budget stage''s winget uninstall output in winget-uninstall.txt' {
+        $script:BudgetEvidence = Join-Path $TestDrive 'evidence-budget'
+        $null = New-Item -ItemType Directory -Path $script:BudgetEvidence -Force
+        $script:WingetSourceOpen = $true
+        $script:StageTimeoutMinutes = 60
+        Mock Invoke-RealPcWingetUninstall { return [pscustomobject]@{ ExitCode = $null; Problem = 'timed out after 150 s'; Output = @('Starting package uninstall...', 'timed out after 150 s') } }
+        Mock Test-RealPcWingetInstalled { return $true }
+        Mock Save-RealPcArpSnapshot { }
+        Mock Invoke-RealPcInstaller { return [pscustomobject]@{ ExitCode = 0; Output = @() } }
+        Mock Read-RealPcRunRecord { return [pscustomobject]@{ Record = $null; Problem = 'no last-run.json' } }
+        Mock Get-RealPcTranscriptText { return '' }
+        $rows = @(Invoke-RealPcTimeBudgetStage -EvidenceFolder $script:BudgetEvidence)
+        ($rows | Where-Object { $_.Check -eq 'Uninstalled 7zip.7zip before the budget run' }).Result | Should -Be 'FAIL'
+        $evidence = [System.IO.File]::ReadAllText((Join-Path $script:BudgetEvidence 'winget-uninstall.txt'))
+        $evidence | Should -Match '== winget uninstall --id 7zip\.7zip --exact --source winget --silent \(exit no exit code\) =='
+        $evidence | Should -Match 'Starting package uninstall\.\.\.'
+        $evidence | Should -Match 'timed out after 150 s'
+    }
+
+    It 'Stops a real program at its limit, with the program it started' {
+        $pidFile = Join-Path $TestDrive 'child.pid'
+        $command = "`$child = Start-Process -FilePath '$($script:ShellPath)' -ArgumentList '-NoProfile','-NonInteractive','-Command','Start-Sleep -Seconds 120' -NoNewWindow -PassThru; Set-Content -LiteralPath '$pidFile' -Value `$child.Id; Start-Sleep -Seconds 120"
+        $watch = [System.Diagnostics.Stopwatch]::StartNew()
+        $result = Invoke-RealPcBoundedProcess -FilePath $script:ShellPath -ArgumentList @('-NoProfile', '-NonInteractive', '-Command', $command) -TimeoutSeconds 20
+        $watch.Stop()
+        $result.TimedOut | Should -BeTrue
+        $result.ExitCode | Should -BeNullOrEmpty
+        $result.Problem | Should -Be 'timed out after 20 s'
+        $watch.Elapsed.TotalSeconds | Should -BeLessThan 60
+        Test-Path -LiteralPath $pidFile | Should -BeTrue
+        $childId = [int]([string](Get-Content -LiteralPath $pidFile -Raw)).Trim()
+        $deadline = (Get-Date).AddSeconds(15)
+        while ((Get-Process -Id $childId -ErrorAction SilentlyContinue) -and (Get-Date) -lt $deadline) {
+            Start-Sleep -Milliseconds 200
+        }
+        Get-Process -Id $childId -ErrorAction SilentlyContinue | Should -BeNullOrEmpty
+    }
+
+    It 'Reads a real program''s full output on both streams without stalling, and keeps its exit code' {
+        $command = "[Console]::Out.Write('x' * 300000); [Console]::Out.WriteLine(); [Console]::Error.Write('y' * 300000); [Console]::Error.WriteLine(); exit 3"
+        $result = Invoke-RealPcBoundedProcess -FilePath $script:ShellPath -ArgumentList @('-NoProfile', '-NonInteractive', '-Command', $command) -TimeoutSeconds 120
+        $result.TimedOut | Should -BeFalse
+        $result.ExitCode | Should -Be 3
+        $result.Problem | Should -Be ''
+        ($result.Output -join '').Length | Should -BeGreaterOrEqual 600000
+    }
+
+    It 'Says why a program did not start' {
+        $result = Invoke-RealPcBoundedProcess -FilePath (Join-Path $TestDrive 'no-such-program') -ArgumentList @('x') -TimeoutSeconds 5
+        $result.ExitCode | Should -BeNullOrEmpty
+        $result.TimedOut | Should -BeFalse
+        $result.Problem | Should -Match '^not run: .+'
+    }
+}
+
+Describe 'The signed-in user is the owner of the session''s oldest explorer.exe (wgt-gq8.71, item 8)' {
+    It 'Orders processes oldest first, an undated one first, as the installer''s Sort-Object does' {
+        $processes = @(
+            [pscustomobject]@{ ProcessId = 3; CreationDate = $null }
+            [pscustomobject]@{ ProcessId = 2; CreationDate = [datetime]'2026-10-09T09:30:00' }
+            [pscustomobject]@{ ProcessId = 1; CreationDate = [datetime]'2026-10-09T08:00:00' }
+        )
+        @(Select-RealPcOldestProcess -Process $processes | ForEach-Object { $_.ProcessId }) | Should -Be @(3, 1, 2)
+        @(Select-RealPcOldestProcess -Process $processes | ForEach-Object { $_.ProcessId }) | Should -Be @($processes | Sort-Object -Property CreationDate | ForEach-Object { $_.ProcessId })
+        @(Select-RealPcOldestProcess -Process @()) | Should -BeNullOrEmpty
+    }
+
+    It 'Passes over a shell whose owner <Case>, as the installer does, and takes the next one' -ForEach @(
+        @{ Case = 'cannot be read (GetOwner throws)'; Owner = $null }
+        @{ Case = 'comes back with ReturnValue 2'; Owner = [pscustomobject]@{ ReturnValue = 2; Domain = 'CONTOSO'; User = 'admin-jmaffiola' } }
+        @{ Case = 'has no domain'; Owner = [pscustomobject]@{ ReturnValue = 0; Domain = ''; User = 'admin-jmaffiola' } }
+    ) {
+        # wgt-gq8.71 review: the same rule as Get-SessionShellOwnerName, so Preflight's fact is the
+        # installer's decision.
+        $script:OldestShell = [pscustomobject]@{ Name = 'explorer.exe'; ProcessId = 100; CreationDate = [datetime]'2026-10-09T07:00:00' }
+        $script:NextShell = [pscustomobject]@{ Name = 'explorer.exe'; ProcessId = 200; CreationDate = [datetime]'2026-10-09T08:00:00' }
+        $script:OldestOwner = $Owner
+        Mock Get-CimInstance { return [pscustomobject]@{ UserName = '' } }
+        Mock Get-CimInstance -ParameterFilter { $ClassName -eq 'Win32_Process' } { return @($script:NextShell, $script:OldestShell) }
+        Mock Invoke-CimMethod -RemoveParameterType InputObject {
+            if ($InputObject.ProcessId -eq 100) {
+                if ($null -eq $script:OldestOwner) {
+                    throw 'Not found'
+                }
+                if ($MethodName -eq 'GetOwner') {
+                    return $script:OldestOwner
+                }
+                return [pscustomobject]@{ ReturnValue = 0; Sid = 'S-1-5-21-1-2-3-1107' }
+            }
+            if ($MethodName -eq 'GetOwner') {
+                return [pscustomobject]@{ ReturnValue = 0; Domain = 'CONTOSO'; User = 'stduser' }
+            }
+            return [pscustomobject]@{ ReturnValue = 0; Sid = 'S-1-5-21-1-2-3-1104' }
+        }
+        Mock Invoke-RealPcQuietProcess { return [pscustomobject]@{ ExitCode = 0; Output = @() } }
+        $fact = Get-RealPcAccountFact
+        $fact.SessionUser | Should -Be 'CONTOSO\stduser'
+        $fact.SessionUserSid | Should -Be 'S-1-5-21-1-2-3-1104'
+    }
+
+    It 'Takes the oldest explorer.exe''s owner, not one an admin started later in the same session' {
+        # The admin's explorer.exe, started later over Remote Desktop, is listed first.
+        $script:AdminShell = [pscustomobject]@{ Name = 'explorer.exe'; ProcessId = 300; CreationDate = [datetime]'2026-10-09T09:30:00' }
+        $script:UserShell = [pscustomobject]@{ Name = 'explorer.exe'; ProcessId = 200; CreationDate = [datetime]'2026-10-09T08:00:00' }
+        Mock Get-CimInstance { return [pscustomobject]@{ UserName = '' } }
+        Mock Get-CimInstance -ParameterFilter { $ClassName -eq 'Win32_Process' } { return @($script:AdminShell, $script:UserShell) }
+        Mock Invoke-CimMethod -RemoveParameterType InputObject {
+            $isUser = ($InputObject.ProcessId -eq 200)
+            if ($MethodName -eq 'GetOwner') {
+                if ($isUser) {
+                    return [pscustomobject]@{ ReturnValue = 0; Domain = 'CONTOSO'; User = 'stduser' }
+                }
+                return [pscustomobject]@{ ReturnValue = 0; Domain = 'CONTOSO'; User = 'admin-jmaffiola' }
+            }
+            if ($isUser) {
+                return [pscustomobject]@{ ReturnValue = 0; Sid = 'S-1-5-21-1-2-3-1104' }
+            }
+            return [pscustomobject]@{ ReturnValue = 0; Sid = 'S-1-5-21-1-2-3-1107' }
+        }
+        Mock Invoke-RealPcQuietProcess { return [pscustomobject]@{ ExitCode = 0; Output = @() } }
+        $fact = Get-RealPcAccountFact
+        $fact.SessionUser | Should -Be 'CONTOSO\stduser'
+        $fact.SessionUserSid | Should -Be 'S-1-5-21-1-2-3-1104'
+    }
+}
+
+Describe 'The installer build under test (wgt-gq8.71, item 9)' {
+    It 'Reads the build id stamped into the checkout''s installer' {
+        Get-RealPcInstallerBuildFact -ScriptText ("# head`n`$script:InstallerBuildId = '1.0.0+72a23fa5'`n") | Should -Be '1.0.0+72a23fa5 (the checkout''s winget-app-install.ps1)'
+        $real = [System.IO.File]::ReadAllText((Join-Path $script:RepoRoot 'winget-app-install.ps1'))
+        Get-RealPcInstallerBuildFact -ScriptText $real | Should -Match '^\d+\.\d+\.\d+\+[0-9a-f]{8} \(the checkout''s winget-app-install\.ps1\)$'
+        Get-RealPcInstallerBuildFact -ScriptText '' | Should -Match '^unknown'
+    }
+
+    It 'Names the one-liner''s branch, and its build once the first run printed it' {
+        Get-RealPcInstallerBuildFact -UseOneLiner -Branch 'claude/trusting-dirac-foyiaa' | Should -Be 'one-liner from claude/trusting-dirac-foyiaa'
+        Get-RealPcInstallerBuildFact -UseOneLiner -Branch 'claude/trusting-dirac-foyiaa' -RunBuildId '1.0.0+7c0ffee1' | Should -Be '1.0.0+7c0ffee1 (one-liner from claude/trusting-dirac-foyiaa, as the first run printed it)'
+        Get-RealPcRunBuildId -Text ([string](Get-Content -Raw -LiteralPath (Join-Path $script:FixtureDirectory 'realpc-crossuser-firstrun-console.txt'))) | Should -Be '1.0.0+7c0ffee1'
+        Get-RealPcRunBuildId -Text 'nothing here' | Should -Be ''
+    }
+
+    It 'Shows it in report.txt next to the other machine facts' {
+        $facts = [ordered]@{ 'Installer under test' = 'the checkout''s files'; 'Installer build' = '1.0.0+72a23fa5 (the checkout''s winget-app-install.ps1)'; 'Elevated account' = 'CONTOSO\admin-jmaffiola' }
+        $text = Format-RealPcReport -MachineFacts $facts -StageResult @()
+        $text | Should -Match "(?m)^  Installer under test: the checkout's files\r?\n  Installer build: 1\.0\.0\+72a23fa5 \(the checkout's winget-app-install\.ps1\)\r?$"
     }
 }
 

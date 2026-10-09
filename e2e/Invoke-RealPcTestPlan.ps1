@@ -4,7 +4,8 @@
     as one command, and writes one pass/fail report plus one zip to send back (bead wgt-gq8.60).
 .DESCRIPTION
     An administrator runs this on a DISPOSABLE Windows 10 22H2+ or Windows 11 test machine (a VM
-    with a checkpoint, or a spare PC; internet access; signed in as an administrator). It installs
+    with a checkpoint, or a spare PC; internet access; signed in as an administrator, or as another
+    user with the window elevated as an administrator: cross-user elevation). It installs
     and removes apps, sets up and removes Winget-AutoUpdate, changes %ProgramData%\winget-app-setup,
     creates a temporary local user, registers one-shot scheduled tasks and writes a folder under
     C:\Users\Public. It is NOT for a work PC.
@@ -33,15 +34,26 @@
     installer prints its 'was a link ... removed' warning before its transcript starts, so only the
     console has it. After each stage, the transcripts, last-run.json and the winget logs it wrote are
     copied into that stage's evidence folder, and the Apps & features entries are written to arp.txt
-    there before Preflight and after each stage that installs or uninstalls (evidence only).
+    there before Preflight and after each stage that installs or uninstalls (evidence only). The
+    TimeBudget stage's own 'winget uninstall' output goes to winget-uninstall.txt in its folder.
 
-    Preflight records who runs the harness and who is signed in (cross-user elevation), winget's
-    version and source state (evidence\0-Preflight\winget-info.txt), and checks that winget can
-    open its 'winget' source in this account; FirstRun checks that again, and so does the
-    Uninstaller stage before it runs. When it cannot, winget reads every installed app as 'not
-    installed' here, so the rows that ask it are SKIP or FAIL, never PASS, the uninstaller must
-    refuse (exit 2) and keep Winget-AutoUpdate, and the report starts with a warning. Preflight's
-    failed check is SKIP once the latest check opened the source: that was the PC before the run.
+    Preflight records who runs the harness and who is signed in (the owner of the oldest
+    explorer.exe in its session, as the installer reads it: cross-user elevation), the build
+    id of the installer under test, winget's version and source state
+    (evidence\0-Preflight\winget-info.txt), and checks that winget can open its 'winget' source in
+    this account; FirstRun checks that again, and so does the Uninstaller stage before it runs.
+    When it cannot, winget reads every installed app as 'not installed' here, so the rows that ask
+    it are SKIP or FAIL, never PASS, the uninstaller must refuse (exit 2) and keep
+    Winget-AutoUpdate unless it opens the source itself, and the report starts with a warning.
+    Preflight's failed check is SKIP once the latest check opened the source: that was the PC
+    before the run, and the row and the warning name the check that opened it.
+
+    FirstRun also checks that the installer registered winget's source package itself when
+    Preflight found it missing (0x8A15000F), and that it detected the cross-user elevation exactly
+    when Preflight did. Under cross-user elevation the installer installs machine-wide only, as
+    SYSTEM does, so FirstRun and ReRun accept an app deferred for want of a machine-wide installer
+    and judge Windows Terminal by its provisioning. The harness's own winget calls have time limits
+    (list 45 s, search 120 s, uninstall 150 s); one that runs out reads as 'winget could not answer'.
 
     Never prints or stores a real secret. The temporary standard user's name and password are random
     and never printed, and the password is never written to disk: it stays in memory until its
@@ -148,6 +160,22 @@ $script:PlantTaskName = 'winget-app-setup-plantjunction'
 $script:ModuleJsonSentinel = 'WGT-TESTPLAN-JSON:'
 # winget's APPINSTALLER_CLI_ERROR_NO_APPLICATIONS_FOUND (0x8A150014): 'winget list' found no package.
 $script:WingetNoPackageFoundExitCode = -1978335212
+# winget's APPINSTALLER_CLI_ERROR_SOURCE_DATA_MISSING (0x8A15000F): no source package for the account.
+$script:WingetSourceDataMissingExitCode = -1978335217
+# The time limits of the harness's own winget calls, in seconds (Invoke-RealPcWinget). The search
+# opens the source as the installer's own check does, with its limit ('WingetSourceOpen', 120 s).
+$script:RealPcWingetListTimeoutSeconds = 45
+$script:RealPcWingetSearchTimeoutSeconds = 120
+$script:RealPcWingetUninstallTimeoutSeconds = 150
+# The reason a machine-wide-only run defers an app winget has no machine-scope installer for
+# (Get-AppDeferReasonText 'NoMachineScopeInstaller', WingetAppSetup/Private/FailureReporting.ps1).
+$script:NoMachineScopeDeferReason = 'winget found no machine-wide installer for it'
+# The reasons the uninstaller gives for an app it keeps on purpose ('Skipping: <id> (<reason>...').
+$script:UninstallerKeptReasons = @(
+    'this uninstaller is running in PowerShell 7',
+    'Windows Terminal hosts this window',
+    'a per-user app that this run cannot remove'
+)
 # The winget result codes the report names (AppInstallerErrors.h), by their hex digits.
 $script:RealPcWingetCodeName = @{
     '8A15000B' = 'SOURCES_INVALID'
@@ -210,7 +238,7 @@ function Get-RealPcTestPlanStage {
     return @(
         [pscustomobject]@{ Name = 'Preflight'; Number = 0; Item = '0'; AlwaysRun = $true; Optional = $false; DependsOn = @(); NeedsAfter = @(); Summary = 'admin, who is signed in, OS, PowerShell, internet, winget and its source, disk, catalog apps already installed, existing ProgramData' }
         [pscustomobject]@{ Name = 'LinkGuardSetup'; Number = 1; Item = '11'; AlwaysRun = $false; Optional = $false; DependsOn = @('Preflight'); NeedsAfter = @('FirstRun'); Summary = 'plant a junction at ProgramData\winget-app-setup as a temporary standard user (only when the folder does not exist)' }
-        [pscustomobject]@{ Name = 'FirstRun'; Number = 2; Item = '1+4+5+11'; AlwaysRun = $false; Optional = $false; DependsOn = @('Preflight', 'LinkGuardSetup'); NeedsAfter = @(); Summary = 'first unattended install; verify apps, WAU, runtime, TightVNC and the link guard' }
+        [pscustomobject]@{ Name = 'FirstRun'; Number = 2; Item = '1+4+5+11'; AlwaysRun = $false; Optional = $false; DependsOn = @('Preflight', 'LinkGuardSetup'); NeedsAfter = @(); Summary = 'first unattended install; verify apps, WAU, runtime, TightVNC, the link guard, the cross-user detection and the source repair' }
         [pscustomobject]@{ Name = 'ReRun'; Number = 3; Item = '2'; AlwaysRun = $false; Optional = $false; DependsOn = @('FirstRun'); NeedsAfter = @(); Summary = 're-run: everything already installed, nothing reinstalled' }
         [pscustomobject]@{ Name = 'System'; Number = 4; Item = '3'; AlwaysRun = $false; Optional = $false; DependsOn = @('FirstRun'); NeedsAfter = @(); Summary = 'SYSTEM run through the Endpoint Central machine-phase wrapper' }
         [pscustomobject]@{ Name = 'WinGetClient'; Number = 5; Item = '10'; AlwaysRun = $false; Optional = $true; DependsOn = @('FirstRun'); NeedsAfter = @(); Summary = 'SYSTEM run with the Microsoft.WinGet.Client engine (opt-in)' }
@@ -524,10 +552,43 @@ function Get-RealPcWingetSourceRow {
 
 <#
 .SYNOPSIS
+    The source check that opened winget's source for good: the first check that opened after the
+    last failed one, or $null while the latest check fails.
+.DESCRIPTION
+    A full run checks three times (Preflight, 'after the first run', 'before the uninstaller'):
+    when the first run opened the source, the latest check only found it still open.
+.PARAMETER SourceCheck
+    The source checks (When, ExitCode, Opened, SourcePackage), in order.
+.RETURNS
+    The check, or $null.
+#>
+function Get-RealPcSourceOpenedCheck {
+    param (
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [AllowEmptyCollection()]
+        [object[]]$SourceCheck = @()
+    )
+
+    $checks = @($SourceCheck | Where-Object { $null -ne $_ })
+    if ($checks.Count -eq 0 -or -not $checks[$checks.Count - 1].Opened) {
+        return $null
+    }
+    $index = $checks.Count - 1
+    while ($index -gt 0 -and $checks[$index - 1].Opened) {
+        $index--
+    }
+    return $checks[$index]
+}
+
+<#
+.SYNOPSIS
     Turns Preflight's failed source check into SKIP when the latest later check opened the source.
 .DESCRIPTION
     Preflight sees the PC as it was before the first run: a source that only the installer's own
     repair registered is not a product failure. The row stays FAIL while the latest check fails.
+    The row names the check that opened the source after the last failure
+    (Get-RealPcSourceOpenedCheck).
 .PARAMETER StageResult
     The stage results (Name, Number, Item, DurationSeconds, Rows).
 .PARAMETER SourceCheck
@@ -554,8 +615,8 @@ function Update-RealPcPreflightSourceRow {
         return $stages
     }
     $first = $checks[0]
-    $latest = $checks[$checks.Count - 1]
-    if ($first.When -or $first.Opened -or -not $latest.Opened) {
+    $opened = Get-RealPcSourceOpenedCheck -SourceCheck $checks
+    if ($first.When -or $first.Opened -or $null -eq $opened) {
         return $stages
     }
     $check = 'winget can open its source in this account'
@@ -567,7 +628,7 @@ function Update-RealPcPreflightSourceRow {
         }
         $rows = @(foreach ($row in @($stage.Rows | Where-Object { $null -ne $_ })) {
                 if ($row.Check -eq $check -and $row.Result -eq 'FAIL') {
-                    Get-RealPcWingetSourceRow -ExitCode $first.ExitCode -SourcePackage ([string]$first.SourcePackage) -OpenedLater ([string]$latest.When)
+                    Get-RealPcWingetSourceRow -ExitCode $first.ExitCode -SourcePackage ([string]$first.SourcePackage) -OpenedLater ([string]$opened.When)
                 }
                 else {
                     $row
@@ -628,6 +689,163 @@ function Get-RealPcCrossUserElevation {
     return ('yes (signed in as {0} {1}, elevated as {2} {3})' -f $SessionUser, $SessionUserSid.Trim(), $ElevatedUser, $ElevatedSid.Trim())
 }
 
+# The first word of Get-RealPcCrossUserElevation's answer: 'yes', 'no', or 'unknown' for anything
+# else (an empty fact included).
+function Get-RealPcCrossUserAnswer {
+    param (
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [AllowEmptyString()]
+        [string]$CrossUser = ''
+    )
+
+    if ([string]$CrossUser -match '^\s*(yes|no)\b') {
+        return $Matches[1].ToLowerInvariant()
+    }
+    return 'unknown'
+}
+
+<#
+.SYNOPSIS
+    The FirstRun row that says whether the installer saw the cross-user elevation Preflight found.
+.DESCRIPTION
+    The installer prints 'Cross-user elevation detected: ...' (WingetAppSetup/Public/WingetCore.ps1)
+    and then installs machine-wide only. Without that line its cross-user handling did not run.
+.PARAMETER CrossUser
+    Get-RealPcCrossUserElevation's answer, or empty.
+.PARAMETER Text
+    The first run's console output and transcripts.
+.RETURNS
+    One row: PASS when the line is there exactly when Preflight said 'yes', FAIL when not, SKIP
+    when Preflight could not tell.
+#>
+function Get-RealPcCrossUserDetectionRow {
+    param (
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [AllowEmptyString()]
+        [string]$CrossUser = '',
+
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [AllowEmptyString()]
+        [string]$Text = ''
+    )
+
+    $check = 'The installer detected the cross-user elevation as Preflight did'
+    $line = [regex]::Match([string]$Text, 'Cross-user elevation detected[^\r\n]*')
+    $answer = Get-RealPcCrossUserAnswer -CrossUser $CrossUser
+    if ($answer -eq 'yes') {
+        if ($line.Success) {
+            return (New-TestPlanRow -Check $check -Result 'PASS' -Detail ('Preflight: yes; the installer printed: {0}' -f $line.Value.Trim()))
+        }
+        return (New-TestPlanRow -Check $check -Result 'FAIL' -Detail "Preflight: yes; the installer did not detect it (no 'Cross-user elevation detected' line), so its cross-user handling (machine-wide installs only) did not run")
+    }
+    if ($answer -eq 'no') {
+        if ($line.Success) {
+            return (New-TestPlanRow -Check $check -Result 'FAIL' -Detail ('Preflight: no (the same account is signed in and elevated); the installer printed: {0}' -f $line.Value.Trim()))
+        }
+        return (New-TestPlanRow -Check $check -Result 'PASS' -Detail 'Preflight: no; the installer reported no cross-user elevation either')
+    }
+    $known = 'Preflight did not record who is signed in'
+    if (-not [string]::IsNullOrWhiteSpace($CrossUser)) {
+        $known = 'Preflight: ' + $CrossUser.Trim()
+    }
+    return (New-TestPlanRow -Check $check -Result 'SKIP' -Detail $known)
+}
+
+<#
+.SYNOPSIS
+    The FirstRun row that says whether the installer registered winget's source package for this
+    account itself (Register-WingetSourcePackage), when Preflight found it missing.
+.DESCRIPTION
+    The installer registers it only when its own source check answers 0x8A15000F
+    (SOURCE_DATA_MISSING), and then prints 'The winget source package is registered for this
+    account (from <url>).' or '(by family name, from the copy already on this PC).'
+    (WingetAppSetup/Private/WingetBootstrap.ps1). That line passes whatever Preflight saw: Preflight
+    makes no check before winget can be started in this account, and its check can run out of time.
+    Without the line, the row is judged only when Preflight's check answered 0x8A15000F.
+.PARAMETER PreflightCheck
+    Preflight's source check (When '', ExitCode, Opened), or $null when it made none.
+.PARAMETER AfterCheck
+    The source check after the first run, or $null.
+.PARAMETER Text
+    The first run's console output and transcripts.
+.RETURNS
+    One row: PASS when the line is there, naming the route; FAIL when it is not and the source was
+    still closed after the run; SKIP when the source opened without it, or the repair was not
+    exercised.
+#>
+function Get-RealPcSourceRepairRow {
+    param (
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        $PreflightCheck,
+
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        $AfterCheck,
+
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [AllowEmptyString()]
+        [string]$Text = ''
+    )
+
+    $check = 'The installer registered winget''s source package for this account'
+    $preflightCode = $null
+    if ($null -ne $PreflightCheck -and $null -ne $PreflightCheck.ExitCode) {
+        $preflightCode = [int]$PreflightCheck.ExitCode
+    }
+    if ($null -eq $PreflightCheck) {
+        $preflightText = 'Preflight: no source check (winget could not be started in this account yet)'
+    }
+    elseif ($PreflightCheck.Opened) {
+        $preflightText = 'Preflight: the source opened'
+    }
+    elseif ($preflightCode -eq $script:WingetSourceDataMissingExitCode) {
+        $preflightText = 'Preflight: 0x8A15000F'
+    }
+    else {
+        $preflightText = 'Preflight: ' + (Format-RealPcWingetExitCode -ExitCode $preflightCode)
+    }
+    $afterText = 'no source check after the first run'
+    if ($null -ne $AfterCheck) {
+        $afterText = 'the source check after the first run: ' + (Format-RealPcWingetExitCode -ExitCode $AfterCheck.ExitCode)
+    }
+    # The installer's own line first: it registers the package only after its own check answered
+    # 0x8A15000F, whatever Preflight could see.
+    $download = [regex]::Match([string]$Text, 'The winget source package is registered for this account \(from (?<url>[^\s)]+)\)\.')
+    if ($download.Success) {
+        return (New-TestPlanRow -Check $check -Result 'PASS' -Detail ('{0}; registered from {1}; {2}' -f $preflightText, $download.Groups['url'].Value, $afterText))
+    }
+    if ([string]$Text -match 'The winget source package is registered for this account \(by family name, from the copy already on this PC\)\.') {
+        return (New-TestPlanRow -Check $check -Result 'PASS' -Detail ('{0}; registered from the copy already on this PC (by family name); {1}' -f $preflightText, $afterText))
+    }
+
+    if ($null -eq $PreflightCheck) {
+        return (New-TestPlanRow -Check $check -Result 'SKIP' -Detail 'not exercised: Preflight made no source check (winget was not on this PC yet), and the installer printed no ''registered for this account'' line')
+    }
+    if ($PreflightCheck.Opened) {
+        return (New-TestPlanRow -Check $check -Result 'SKIP' -Detail 'not exercised: winget''s source already opened before the first run; to exercise the repair, first run: Get-AppxPackage Microsoft.Winget.Source* | Remove-AppxPackage')
+    }
+    if ($preflightCode -ne $script:WingetSourceDataMissingExitCode) {
+        return (New-TestPlanRow -Check $check -Result 'SKIP' -Detail ('not the missing-package case: Preflight''s check answered {0}, not 0x8A15000F (SOURCE_DATA_MISSING), and the installer printed no ''registered for this account'' line' -f (Format-RealPcWingetExitCode -ExitCode $preflightCode)))
+    }
+    if ($null -ne $AfterCheck -and $AfterCheck.Opened) {
+        return (New-TestPlanRow -Check $check -Result 'SKIP' -Detail ("Preflight: 0x8A15000F; the source opened after the first run, but the run did not register the source package itself (no 'registered for this account' line)"))
+    }
+    if ($null -eq $AfterCheck) {
+        return (New-TestPlanRow -Check $check -Result 'SKIP' -Detail "Preflight: 0x8A15000F; no 'registered for this account' line, and no source check after the first run to tell whether the source opened")
+    }
+    $detail = "Preflight: 0x8A15000F; the installer's repair did not get the source open: no 'registered for this account' line, and " + $afterText
+    $redLine = [regex]::Match([string]$Text, 'The winget source cannot be opened for [^\r\n]*')
+    if ($redLine.Success) {
+        $detail += ('. The installer said: {0}' -f $redLine.Value.Trim())
+    }
+    return (New-TestPlanRow -Check $check -Result 'FAIL' -Detail $detail)
+}
+
 <#
 .SYNOPSIS
     The warning the report starts with when winget could not open its source in the account the
@@ -683,11 +901,12 @@ function Get-RealPcReportBanner {
             '{0}: {1}' -f $label, (Format-RealPcWingetExitCode -ExitCode $check.ExitCode)
         }) -join '; '
     $lines = @(("WARNING: winget could not open its 'winget' source in {0} ({1})." -f $who, $when))
-    $latest = $checks[$checks.Count - 1]
-    if ($latest.Opened) {
+    # Named after the check that opened it after the last failure, not the latest check.
+    $opened = Get-RealPcSourceOpenedCheck -SourceCheck $checks
+    if ($null -ne $opened) {
         $label = 'at Preflight'
-        if ($latest.When) {
-            $label = [string]$latest.When
+        if ($opened.When) {
+            $label = [string]$opened.When
         }
         $lines += 'Until it opened, winget read every installed app as not installed there: the checks that asked it then are SKIP, never PASS.'
         $lines += ('It opened {0}, so the stages after that asked winget as usual.' -f $label)
@@ -835,6 +1054,78 @@ function Get-RealPcInstalledCatalogRow {
         return (New-TestPlanRow -Check $check -Result 'SKIP' -Detail ('winget could not answer for: {0} (a fresh PC may not have winget registered yet)' -f ($unknownIds -join ', ')))
     }
     return (New-TestPlanRow -Check $check -Result 'PASS' -Detail ('none of the {0} catalog apps is installed' -f @($CatalogId).Count))
+}
+
+<#
+.SYNOPSIS
+    The 'Installer build' machine fact: the build id of the winget-app-install.ps1 the run uses.
+.DESCRIPTION
+    The build stamps '$script:InstallerBuildId = ''<id>''' into the installer
+    (build/Build-WingetInstallScript.ps1), read here with Get-InstallerBuildIdFromScript. The
+    one-liner downloads the installer, so its id comes from the first run's 'Installer build: <id>'
+    line, once there is one.
+.PARAMETER ScriptText
+    The checkout's winget-app-install.ps1, or empty when it could not be read.
+.PARAMETER UseOneLiner
+    The install stages run the one-liner.
+.PARAMETER Branch
+    The branch the one-liner fetches from.
+.PARAMETER RunBuildId
+    The build id the first run printed, or empty.
+.RETURNS
+    [string]
+#>
+function Get-RealPcInstallerBuildFact {
+    param (
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [AllowEmptyString()]
+        [string]$ScriptText = '',
+
+        [Parameter(Mandatory = $false)]
+        [switch]$UseOneLiner,
+
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [AllowEmptyString()]
+        [string]$Branch = '',
+
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [AllowEmptyString()]
+        [string]$RunBuildId = ''
+    )
+
+    if ($UseOneLiner) {
+        if ($RunBuildId) {
+            return ('{0} (one-liner from {1}, as the first run printed it)' -f $RunBuildId, $Branch)
+        }
+        return ('one-liner from {0}' -f $Branch)
+    }
+    $buildId = $null
+    if ($ScriptText) {
+        $buildId = Get-InstallerBuildIdFromScript -Content $ScriptText
+    }
+    if (-not $buildId) {
+        return 'unknown (no build id in the checkout''s winget-app-install.ps1)'
+    }
+    return ('{0} (the checkout''s winget-app-install.ps1)' -f $buildId)
+}
+
+# The build id an installer run printed first ('Installer build: <id>'), or empty.
+function Get-RealPcRunBuildId {
+    param (
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [AllowEmptyString()]
+        [string]$Text = ''
+    )
+
+    $match = [regex]::Match([string]$Text, '(?m)^\s*Installer build:\s+(?<id>\S+)\s*$')
+    if ($match.Success) {
+        return $match.Groups['id'].Value
+    }
+    return ''
 }
 
 <#
@@ -1156,19 +1447,78 @@ function Get-RealPcRunRecordResult {
 
 <#
 .SYNOPSIS
-    Checks each catalog app's entry in last-run.json for an elevated same-user first run: an app that
-    applies is Installed or Skipped (already installed/provisioned); one that does not apply is
-    Skipped with its not-applicable reason; a per-user app is Deferred only under cross-user
-    elevation, which this run is not, so here every applicable app must be Installed or Skipped.
+    Turns an install run's expectations into those of a run that installs machine-wide only, as
+    the installer does under cross-user elevation (and as SYSTEM).
+.DESCRIPTION
+    Get-SystemPassAppExpectation already gives what such a run decides from the catalog: per-user
+    apps Deferred, and an msixName app judged by its provisioning ('already provisioned for every
+    user on this PC'). What no catalog field predicts is an app winget has no machine-scope
+    installer for: Install-WingetPackage -MachineScopeOnly defers it. So an Installed or
+    AlreadyPresent expectation also accepts that deferral (DeferReasons), and its 'already there'
+    skip must be one of its AlreadyPresentReasons, as for SYSTEM (MachineWide).
+.PARAMETER AppExpectation
+    Get-SystemPassAppExpectation's result (Id, Expected, Reason, AlreadyPresentReasons,
+    MustInstall).
+.RETURNS
+    [object[]] copies, with MachineWide $true and DeferReasons ([string[]]).
+#>
+function ConvertTo-RealPcMachineWideExpectation {
+    param (
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [AllowEmptyCollection()]
+        [object[]]$AppExpectation = @()
+    )
+
+    return @(foreach ($expectation in @($AppExpectation | Where-Object { $null -ne $_ })) {
+            $deferReasons = @()
+            if (@('Installed', 'AlreadyPresent') -contains [string]$expectation.Expected) {
+                $deferReasons = @($script:NoMachineScopeDeferReason)
+            }
+            [pscustomobject]@{
+                Id                    = [string]$expectation.Id
+                Expected              = [string]$expectation.Expected
+                Reason                = $expectation.Reason
+                AlreadyPresentReasons = [string[]]@(@($expectation.AlreadyPresentReasons) | Where-Object { $null -ne $_ })
+                MustInstall           = [bool]$expectation.MustInstall
+                MachineWide           = $true
+                DeferReasons          = [string[]]$deferReasons
+            }
+        })
+}
+
+# Whether an expectation is for a machine-wide-only run (ConvertTo-RealPcMachineWideExpectation).
+function Test-RealPcMachineWideExpectation {
+    param (
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        $Expectation
+    )
+
+    return ($null -ne $Expectation -and $null -ne $Expectation.PSObject.Properties['MachineWide'] -and [bool]$Expectation.MachineWide)
+}
+
+<#
+.SYNOPSIS
+    Checks each catalog app's entry in last-run.json after the first run: an app that applies is
+    Installed or Skipped as already there; one that does not apply is Skipped with its
+    not-applicable reason; a per-user app is Deferred with its reason.
 .DESCRIPTION
     The expectations come from Get-SystemPassAppExpectation (e2e/Invoke-SystemInstallPass.ps1) with
     the applicability decided for this PC BEFORE the run, as the installer decides it: the run's
     Windows Terminal step changes what the Terminal condition reads. This evaluator compares
     last-run.json's entries with them.
+
+    A same-user run accepts any 'already' skip. Under cross-user elevation the installer installs
+    machine-wide only, as SYSTEM does, and the stage passes MachineWide expectations
+    (ConvertTo-RealPcMachineWideExpectation): an applicable app is then Installed, Skipped with one
+    of its AlreadyPresentReasons (an msixName app: provisioned for every user), or Deferred because
+    winget has no machine-wide installer for it.
 .PARAMETER RunRecord
     last-run.json parsed, or $null.
 .PARAMETER AppExpectation
-    Get-SystemPassAppExpectation's result (Id, Expected, Reason, AlreadyPresentReasons).
+    Get-SystemPassAppExpectation's result (Id, Expected, Reason, AlreadyPresentReasons), or
+    ConvertTo-RealPcMachineWideExpectation's.
 .PARAMETER AppExpectationProblem
     Why there are no expectations (the catalog query failed), for the failed row.
 .RETURNS
@@ -1224,6 +1574,14 @@ function Get-RealPcAppResult {
         elseif ($expectation.Expected -eq 'Deferred') {
             $passed = ($status -eq 'Deferred' -and $reason -eq $expectation.Reason)
             $rows += New-TestPlanBoolRow -Check "App deferred to the user: $id" -Passed $passed -Detail $detail
+        }
+        elseif (Test-RealPcMachineWideExpectation -Expectation $expectation) {
+            # A machine-wide-only run: SYSTEM's skip reasons, or deferred for want of a
+            # machine-scope installer.
+            $present = ($status -eq 'Skipped' -and @($expectation.AlreadyPresentReasons) -contains $reason)
+            $deferred = ($status -eq 'Deferred' -and @($expectation.DeferReasons) -contains $reason)
+            $passed = ($status -eq 'Installed') -or $present -or $deferred
+            $rows += New-TestPlanBoolRow -Check "App installed, present or deferred (machine-wide only): $id" -Passed $passed -Detail $detail
         }
         else {
             # Installed, or already present (tolerant of an app the machine already had, so the
@@ -1346,7 +1704,10 @@ function Get-RealPcAutoUpdateResult {
 .PARAMETER AppExpectation
     Get-SystemPassAppExpectation's result, with -AlreadyPresent, after Set-RealPcFirstRunExpectation:
     an app the first run left installed must now be Skipped as already there ('AlreadyPresent');
-    one it did not may be installed now or found ('Installed').
+    one it did not may be installed now or found ('Installed'). Under cross-user elevation they
+    are MachineWide (ConvertTo-RealPcMachineWideExpectation): the skip must be one of the
+    AlreadyPresentReasons, and an app the first run did not leave installed may be Deferred again
+    because winget has no machine-wide installer for it.
 .PARAMETER AppExpectationProblem
     Why there are no expectations, for the failed row.
 .RETURNS
@@ -1423,6 +1784,9 @@ function Get-RealPcReRunResult {
             }
             elseif ($expectation.Expected -eq 'AlreadyPresent') {
                 $passed = ($status -eq 'Skipped' -and [string]$reason -match '(?i)already')
+                if (Test-RealPcMachineWideExpectation -Expectation $expectation) {
+                    $passed = ($status -eq 'Skipped' -and @($expectation.AlreadyPresentReasons) -contains $reason)
+                }
                 $rows += New-TestPlanBoolRow -Check "Re-run skipped as present: $id" -Passed $passed -Detail $detail
             }
             elseif ($expectation.Expected -eq 'NotApplicable') {
@@ -1432,6 +1796,14 @@ function Get-RealPcReRunResult {
             elseif ($expectation.Expected -eq 'Deferred') {
                 $passed = ($status -eq 'Deferred' -and $reason -eq $expectation.Reason)
                 $rows += New-TestPlanBoolRow -Check "Re-run deferred: $id" -Passed $passed -Detail $detail
+            }
+            elseif ($expectation.Expected -eq 'Installed' -and (Test-RealPcMachineWideExpectation -Expectation $expectation)) {
+                # Machine-wide only: an app the first run deferred for want of a machine-scope
+                # installer is deferred again.
+                $present = ($status -eq 'Skipped' -and @($expectation.AlreadyPresentReasons) -contains $reason)
+                $deferred = ($status -eq 'Deferred' -and @($expectation.DeferReasons) -contains $reason)
+                $passed = ($status -eq 'Installed') -or $present -or $deferred
+                $rows += New-TestPlanBoolRow -Check "Re-run installed, found or deferred (machine-wide only): $id" -Passed $passed -Detail $detail
             }
             elseif ($expectation.Expected -eq 'Installed') {
                 # The first run did not leave it installed: installed now, or found already there.
@@ -1462,10 +1834,11 @@ function Get-RealPcReRunResult {
     An app the first run recorded Installed, or Skipped as already there, must be found already
     there (AlreadyPresent stays). Any other app (Failed, NotAttempted, no entry, or no record at
     all) may be installed by the later run or found: its expectation becomes Installed with
-    MustInstall off, which accepts both. NotApplicable and Deferred expectations are kept.
+    MustInstall off, which accepts both. NotApplicable and Deferred expectations are kept, and so
+    are MachineWide and DeferReasons (ConvertTo-RealPcMachineWideExpectation).
 .PARAMETER AppExpectation
     Get-SystemPassAppExpectation's result with -AlreadyPresent (Id, Expected, Reason,
-    AlreadyPresentReasons, MustInstall).
+    AlreadyPresentReasons, MustInstall), or ConvertTo-RealPcMachineWideExpectation's.
 .PARAMETER FirstRunRecord
     The first run's last-run.json, parsed, or $null when it left none.
 .RETURNS
@@ -1497,6 +1870,10 @@ function Set-RealPcFirstRunExpectation {
                 AlreadyPresentReasons = [string[]]@(@($expectation.AlreadyPresentReasons) | Where-Object { $null -ne $_ })
                 MustInstall           = [bool]$expectation.MustInstall
             }
+            if (Test-RealPcMachineWideExpectation -Expectation $expectation) {
+                $copy | Add-Member -NotePropertyName 'MachineWide' -NotePropertyValue $true
+                $copy | Add-Member -NotePropertyName 'DeferReasons' -NotePropertyValue ([string[]]@(@($expectation.DeferReasons) | Where-Object { $null -ne $_ }))
+            }
             if ($copy.Expected -eq 'AlreadyPresent') {
                 $entry = @($entries | Where-Object { [string]$_.id -eq $copy.Id }) | Select-Object -First 1
                 $recorded = 'no entry in its last-run.json'
@@ -1517,6 +1894,72 @@ function Set-RealPcFirstRunExpectation {
             $copy
         })
     return [pscustomobject]@{ Value = $values; Changed = $changed }
+}
+
+<#
+.SYNOPSIS
+    In the SYSTEM run's rows, also accepts an app deferred again because winget found no
+    machine-wide installer for it, when the first run deferred it for that reason.
+.DESCRIPTION
+    Get-SystemPassAppResult expects every app the first run did not leave installed to be
+    installed as SYSTEM. A first run that installed machine-wide only (cross-user elevation)
+    deferred such an app for want of a machine-scope installer, and SYSTEM installs machine-wide
+    only too: for those apps either outcome passes. Every other row is kept as it is.
+.PARAMETER Row
+    The SYSTEM stage's rows (New-TestPlanRow).
+.PARAMETER RunRecord
+    The SYSTEM run's last-run.json, parsed, or $null.
+.PARAMETER FirstRunRecord
+    The first run's last-run.json, parsed, or $null.
+.RETURNS
+    [object[]] the rows, a new one in place of each app row this changes.
+#>
+function Update-RealPcSystemRedeferredRow {
+    param (
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [AllowEmptyCollection()]
+        [object[]]$Row = @(),
+
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        $RunRecord,
+
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        $FirstRunRecord
+    )
+
+    $rows = @($Row | Where-Object { $null -ne $_ })
+    if ($null -eq $FirstRunRecord -or $null -eq $FirstRunRecord.apps) {
+        return $rows
+    }
+    $deferredIds = @($FirstRunRecord.apps | Where-Object { $null -ne $_ -and [string]$_.status -eq 'Deferred' -and [string]$_.reason -eq $script:NoMachineScopeDeferReason } | ForEach-Object { [string]$_.id })
+    if ($deferredIds.Count -eq 0) {
+        return $rows
+    }
+    $entries = @()
+    if ($null -ne $RunRecord -and $null -ne $RunRecord.apps) {
+        $entries = @($RunRecord.apps | Where-Object { $null -ne $_ })
+    }
+    return @(foreach ($item in $rows) {
+            $id = ''
+            if ([string]$item.Check -match '^App installed: (?<id>\S+)$') {
+                $id = $Matches['id']
+            }
+            if (-not $id -or $deferredIds -notcontains $id) {
+                $item
+                continue
+            }
+            $check = 'App installed, or deferred again as the first run did: ' + $id
+            $entry = @($entries | Where-Object { [string]$_.id -eq $id })
+            if ($item.Result -ne 'PASS' -and $entry.Count -eq 1 -and [string]$entry[0].status -eq 'Deferred' -and [string]$entry[0].reason -eq $script:NoMachineScopeDeferReason) {
+                New-TestPlanRow -Check $check -Result 'PASS' -Detail ('last-run.json: {0}; the first run, machine-wide only, deferred it for the same reason' -f (Format-SystemPassAppEntry -Entry $entry[0]))
+            }
+            else {
+                New-TestPlanRow -Check $check -Result $item.Result -Detail $item.Detail
+            }
+        })
 }
 
 <#
@@ -1634,6 +2077,32 @@ function Get-RealPcNotInstalledSkip {
     foreach ($line in @([string]$Text -split '\r?\n')) {
         if ($line -match 'Skipping: ([\w][\w.\-]+\.[\w][\w.\-]+) \(not installed\)') {
             $ids += $Matches[1]
+        }
+    }
+    return @($ids | Sort-Object -Unique)
+}
+
+# The ids an uninstaller run's console says it kept on purpose: 'Skipping: <id> (' followed by one
+# of $script:UninstallerKeptReasons (WingetAppSetup/Private/AppUninstall.ps1).
+function Get-RealPcKeptSkip {
+    param (
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [AllowEmptyString()]
+        [string]$Text = ''
+    )
+
+    $ids = @()
+    foreach ($line in @([string]$Text -split '\r?\n')) {
+        $match = [regex]::Match($line, 'Skipping: (?<id>[\w][\w.\-]+\.[\w][\w.\-]+) \((?<reason>.*)$')
+        if (-not $match.Success) {
+            continue
+        }
+        foreach ($reason in $script:UninstallerKeptReasons) {
+            if ($match.Groups['reason'].Value.StartsWith($reason, [System.StringComparison]::Ordinal)) {
+                $ids += $match.Groups['id'].Value
+                break
+            }
         }
     }
     return @($ids | Sort-Object -Unique)
@@ -2015,8 +2484,9 @@ function Get-RealPcFolderSecretLeak {
 .DESCRIPTION
     Two halves: the -WhatIf preview changed nothing (the catalog apps winget lists and the WAU task
     are the same before and after), and a real elevated uninstall exited 0 or 3010, removed the
-    catalog apps except the ones the uninstaller keeps on purpose (PowerShell 7 when it runs in it,
-    Windows Terminal when that hosts the window or is the default terminal), and removed
+    catalog apps except the ones its console says it kept on purpose (Get-RealPcKeptSkip:
+    PowerShell 7 when it runs in it, Windows Terminal when that hosts the window or is the default
+    terminal, a per-user app a SYSTEM or cross-user run cannot remove), and removed
     Winget-AutoUpdate (its task is gone). A catalog app winget could not answer for fails: an
     unanswered lookup is never read as 'removed'. No row passes on 'found nothing': the -WhatIf
     row is SKIP when winget listed no catalog app before or after the preview. When the source
@@ -2024,6 +2494,9 @@ function Get-RealPcFolderSecretLeak {
     run's 'Skipping: <id> (not installed)' lines fail ('the uninstaller could not see installed
     apps'), and the real uninstall must refuse as SourceUnusable: exit 2 passes, a success exit
     fails, and Winget-AutoUpdate must be kept (removed fails; SKIP when it was not installed).
+    Unless the real uninstall's console says 'The winget source opens for': its own source check
+    (and repair, when a fix's success line comes first) opened the source, so it is judged as
+    usual, apart from the preview, whose lookups ran before the repair.
 .PARAMETER WhatIfInstalledBefore
     The catalog ids winget listed as installed before the -WhatIf preview.
 .PARAMETER WhatIfInstalledAfter
@@ -2038,8 +2511,14 @@ function Get-RealPcFolderSecretLeak {
     The catalog ids still installed after the real uninstall.
 .PARAMETER UnknownIds
     The catalog ids winget could not answer for in any of the three lookups.
+.PARAMETER UnknownAfterIds
+    The catalog ids winget could not answer for after the real uninstall. Used instead of
+    UnknownIds when the uninstaller repaired the source: the lookups before it were blind. Default:
+    UnknownIds.
 .PARAMETER KeptIds
-    The catalog ids the uninstaller may keep on purpose (PowerShell 7, Windows Terminal).
+    The catalog ids the uninstaller kept on purpose. Default: the ones the real uninstall's console
+    names (Get-RealPcKeptSkip); with no console text, PowerShell 7 and Windows Terminal, the apps
+    it may keep.
 .PARAMETER WauPresentAfter
     Whether the WAU task still exists after the real uninstall (must be false, or true while the
     source is closed).
@@ -2090,7 +2569,12 @@ function Get-RealPcUninstallerResult {
         [Parameter(Mandatory = $false)]
         [AllowNull()]
         [AllowEmptyCollection()]
-        [string[]]$KeptIds = @('Microsoft.PowerShell', 'Microsoft.WindowsTerminal'),
+        [string[]]$UnknownAfterIds,
+
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [AllowEmptyCollection()]
+        [string[]]$KeptIds,
 
         [Parameter(Mandatory = $false)]
         [AllowNull()]
@@ -2112,8 +2596,26 @@ function Get-RealPcUninstallerResult {
     )
 
     $rows = @()
-    $blind = ($SourceOpen -eq $false)
-    $unknown = @($UnknownIds | Where-Object { $_ } | Sort-Object -Unique)
+    # The uninstaller runs the installer's source check and repair: once it says the source opens,
+    # its own winget calls, and the lookups after it, are no longer blind.
+    $repairLine = [regex]::Match([string]$UninstallConsoleText, 'The winget source opens for[^\r\n]*')
+    $repaired = ($SourceOpen -eq $false) -and $repairLine.Success
+    $blind = ($SourceOpen -eq $false) -and -not $repaired
+    if ($repaired) {
+        # 'Repaired' only when a fix's success line comes before it; else its first check opened.
+        $fixLines = @([regex]::Matches([string]$UninstallConsoleText, '(The winget source package is registered for this account|App Installer registered for this account|Source reset completed)[^\r\n]*') | Where-Object { $_.Index -lt $repairLine.Index })
+        if ($fixLines.Count -gt 0) {
+            $rows += New-TestPlanRow -Check 'The uninstaller repaired winget''s source for this account' -Result 'PASS' -Detail ('the harness''s check before it could not open it; the uninstaller printed: {0} Then: {1}' -f $fixLines[-1].Value.Trim(), $repairLine.Value.Trim())
+        }
+        else {
+            $rows += New-TestPlanRow -Check 'The uninstaller found winget''s source open' -Result 'PASS' -Detail ('the harness''s check before it could not open it, the uninstaller''s own check did, with no repair; it printed: {0}' -f $repairLine.Value.Trim())
+        }
+    }
+    $unknownSource = $UnknownIds
+    if ($repaired -and $PSBoundParameters.ContainsKey('UnknownAfterIds')) {
+        $unknownSource = $UnknownAfterIds
+    }
+    $unknown = @($unknownSource | Where-Object { $_ } | Sort-Object -Unique)
     if ($blind) {
         $rows += New-TestPlanRow -Check 'winget answered for every catalog app' -Result 'SKIP' -Detail (Get-RealPcWingetBlindDetail)
     }
@@ -2130,7 +2632,8 @@ function Get-RealPcUninstallerResult {
     if (-not $sameWau) {
         $rows += New-TestPlanRow -Check $whatIfCheck -Result 'FAIL' -Detail ('the preview changed Winget-AutoUpdate: {0}' -f $wauText)
     }
-    elseif ($blind) {
+    elseif ($blind -or $repaired) {
+        # The preview's lookups ran before the uninstaller's repair, so they were blind either way.
         $rows += New-TestPlanRow -Check $whatIfCheck -Result 'SKIP' -Detail ('{0}; only Winget-AutoUpdate could be compared: {1}' -f (Get-RealPcWingetBlindDetail), $wauText)
     }
     elseif ($before.Count -eq 0 -and $after.Count -eq 0) {
@@ -2168,7 +2671,17 @@ function Get-RealPcUninstallerResult {
         $rows += New-TestPlanRow -Check $removedCheck -Result 'SKIP' -Detail (Get-RealPcWingetBlindDetail)
     }
     else {
-        $kept = @($KeptIds)
+        # Kept only when the uninstaller said so: a PowerShell 7 left behind by a Windows PowerShell
+        # run, which removes it, is a failure.
+        if ($PSBoundParameters.ContainsKey('KeptIds')) {
+            $kept = @($KeptIds | Where-Object { $_ })
+        }
+        elseif (-not [string]::IsNullOrWhiteSpace($UninstallConsoleText)) {
+            $kept = @(Get-RealPcKeptSkip -Text $UninstallConsoleText)
+        }
+        else {
+            $kept = @('Microsoft.PowerShell', 'Microsoft.WindowsTerminal')
+        }
         $stillThere = @($InstalledAfter | Where-Object { $_ -and $kept -notcontains $_ } | Sort-Object -Unique)
         $removedDetail = 'every removable catalog app is gone'
         if ($stillThere.Count -gt 0) {
@@ -2705,7 +3218,7 @@ function Get-RealPcChangePlan {
     $stageNames = @($Stages | ForEach-Object { $_.Name })
     $lines = @('This run will change this machine as follows:')
     if ($stageNames -contains 'FirstRun') {
-        $lines += '  - Install the curated catalog apps (7-Zip, TightVNC with a throwaway test password, Adobe Reader, Chrome, Google Drive, Git, Bulk Crap Uninstaller, Dell Command Update where applicable, PowerShell 7, Windows Terminal) and make Windows Terminal the default terminal.'
+        $lines += '  - Install the curated catalog apps (7-Zip, TightVNC with a throwaway test password, Adobe Reader, Chrome, Google Drive, Git, Bulk Crap Uninstaller, Dell Command Update where applicable, PowerShell 7, Windows Terminal) and make Windows Terminal the default terminal (not when this window is elevated as another account than the signed-in user: those per-user settings are then left alone).'
         $lines += '  - Set up Winget-AutoUpdate and install the Windows App Runtime 1.8 for all users.'
         $lines += '  - Create and lock %ProgramData%\winget-app-setup (logs and cache).'
     }
@@ -2723,7 +3236,7 @@ function Get-RealPcChangePlan {
         $lines += '  - Uninstall and reinstall 7-Zip (the time-budget stage).'
     }
     if ($stageNames -contains 'Uninstaller') {
-        $lines += '  - Remove the catalog apps and Winget-AutoUpdate with the uninstaller. PowerShell 7 is removed too (the uninstaller runs in Windows PowerShell), and Windows Terminal unless it hosts this window or is the default terminal.'
+        $lines += '  - Remove the catalog apps and Winget-AutoUpdate with the uninstaller. PowerShell 7 is removed too (the uninstaller runs in Windows PowerShell), and Windows Terminal unless it hosts this window, is the default terminal, or this window is elevated as another account than the signed-in user (it then keeps it as a per-user app).'
     }
     $lines += '  - Read, without changing them, who is signed in, winget''s version and source state, and the Apps & features entries, for the report.'
     $lines += "  - Write a report and a zip to $ReportFolder (and $ReportFolder.zip), and the manual steps, with the TightVNC test password, to $LocalFolder (never zipped)."
@@ -3126,7 +3639,7 @@ function Get-RealPcManualLeftover {
         $where = $LocalFolder
     }
     return @(
-        'Cross-user elevation: run the one-liner from a standard user and approve the UAC prompt as a DIFFERENT admin account; check that apps with no machine-scope installer are Deferred, not put in the admin profile. (The machine fact ''Cross-user elevation'' says whether this run already was one.)',
+        'Cross-user elevation: run the one-liner from a standard user and approve the UAC prompt as a DIFFERENT admin account; check that apps with no machine-scope installer are Deferred, not put in the admin profile. (When the machine fact ''Cross-user elevation'' is yes, this run already was one, and FirstRun and ReRun checked that.)',
         ('TightVNC: connect a viewer with the throwaway test password in manual-steps.txt (in {0}; it is not in the zip), and confirm the server accepts it. The Uninstaller stage removes TightVNC: to try a viewer, run with -SkipStage Uninstaller, or connect while stages 3 to 7 run.' -f $where),
         'Endpoint Central: after this branch merges and the RMM pins are set (build/Set-RmmInstallerPin.ps1), deploy the machine and user phases from Endpoint Central and watch the Remarks.',
         'ARM64 hardware: on a real Windows 11 ARM64 PC, check the 32-bit Reader installs, the 64-bit Reader and Dell Command Update are skipped, and Google Drive installs and mounts.'
@@ -3485,6 +3998,271 @@ function Invoke-RealPcProcess {
     return [pscustomobject]@{ ExitCode = $exitCode; Output = $lines.ToArray() }
 }
 
+<#
+.SYNOPSIS
+    Joins arguments into one command line, quoted the way Windows programs split it again.
+.DESCRIPTION
+    For ProcessStartInfo.Arguments: Windows PowerShell's .NET has no ArgumentList. An argument that
+    is empty or holds white space or a double quote is wrapped in double quotes, with backslashes
+    before a quote doubled (CommandLineToArgvW). A copy of the module's
+    ConvertTo-ProcessArgumentString: this script loads no module code.
+.PARAMETER ArgumentList
+    The arguments.
+.RETURNS
+    [string]
+#>
+function ConvertTo-RealPcCommandLine {
+    param (
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [AllowEmptyCollection()]
+        [string[]]$ArgumentList = @()
+    )
+
+    if ($null -eq $ArgumentList) {
+        return ''
+    }
+    $parts = foreach ($argument in $ArgumentList) {
+        $text = [string]$argument
+        if ($text.Length -gt 0 -and $text -notmatch '[\s"]') {
+            $text
+            continue
+        }
+        $builder = New-Object System.Text.StringBuilder
+        [void]$builder.Append('"')
+        $backslashes = 0
+        foreach ($character in $text.ToCharArray()) {
+            if ($character -eq [char]'\') {
+                $backslashes++
+                continue
+            }
+            if ($character -eq [char]'"') {
+                [void]$builder.Append([char]'\', (2 * $backslashes) + 1)
+            }
+            elseif ($backslashes -gt 0) {
+                [void]$builder.Append([char]'\', $backslashes)
+            }
+            [void]$builder.Append($character)
+            $backslashes = 0
+        }
+        [void]$builder.Append([char]'\', 2 * $backslashes)
+        [void]$builder.Append('"')
+        $builder.ToString()
+    }
+    return (@($parts) -join ' ')
+}
+
+# A program's redirected output as lines: terminal control sequences, blank lines and winget's
+# spinner lines (- \ | /) dropped; carriage returns split lines as winget's redraws do.
+function ConvertTo-RealPcOutputLine {
+    param (
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [AllowEmptyString()]
+        [string]$Text = ''
+    )
+
+    $lines = @()
+    foreach ($line in @([string]$Text -split '[\r\n]+')) {
+        $plain = ($line -replace '\x1b\[[0-?]*[ -/]*[@-~]', '' -replace '\x1b\][^\x07\x1b]*(\x07|\x1b\\)', '').TrimEnd()
+        if ([string]::IsNullOrWhiteSpace($plain) -or $plain -match '^\s*[-\\|/]\s*$') {
+            continue
+        }
+        $lines += $plain
+    }
+    return $lines
+}
+
+<#
+.SYNOPSIS
+    The result of a bounded program run (Invoke-RealPcBoundedProcess), from what happened.
+.DESCRIPTION
+    Only a program that ended on its own has an exit code. A timeout and a program that did not
+    start give ExitCode $null, which every verdict reads as 'no answer' or a failure, and a Problem
+    that is also the last output line, so the evidence says why.
+.PARAMETER ExitCode
+    The exit code, when the program ended on its own.
+.PARAMETER TimedOut
+    The time limit ran out and the program was stopped.
+.PARAMETER StartProblem
+    Why the program did not start, or empty.
+.PARAMETER TimeoutSeconds
+    The limit, for the Problem.
+.PARAMETER Output
+    What the program printed (ConvertTo-RealPcOutputLine).
+.RETURNS
+    [pscustomobject] with ExitCode, TimedOut, Output ([string[]]) and Problem ('' when it ended on
+    its own).
+#>
+function Get-RealPcBoundedProcessResult {
+    param (
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [Nullable[int]]$ExitCode,
+
+        [Parameter(Mandatory = $false)]
+        [bool]$TimedOut = $false,
+
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [AllowEmptyString()]
+        [string]$StartProblem = '',
+
+        [Parameter(Mandatory = $false)]
+        [int]$TimeoutSeconds = 0,
+
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [AllowEmptyCollection()]
+        [string[]]$Output = @()
+    )
+
+    $lines = @($Output | Where-Object { $null -ne $_ })
+    $problem = ''
+    if ($StartProblem) {
+        $problem = 'not run: ' + $StartProblem
+    }
+    elseif ($TimedOut) {
+        $problem = 'timed out after {0} s' -f $TimeoutSeconds
+    }
+    elseif ($null -eq $ExitCode) {
+        $problem = 'ended without an exit code'
+    }
+    if ($problem) {
+        return [pscustomobject]@{ ExitCode = $null; TimedOut = [bool]$TimedOut; Output = [string[]]@($lines + @($problem)); Problem = $problem }
+    }
+    return [pscustomobject]@{ ExitCode = [int]$ExitCode; TimedOut = $false; Output = [string[]]$lines; Problem = '' }
+}
+
+# Stops a program and everything it started: taskkill /T on Windows (Windows PowerShell's .NET has
+# no tree kill), else Process.Kill($true), and Kill() as the last resort. Adapted from the module's
+# Stop-ProcessTree.
+function Stop-RealPcProcessTree {
+    param (
+        [Parameter(Mandatory = $true)]
+        [System.Diagnostics.Process]$Process
+    )
+
+    if ([System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Win32NT) {
+        try {
+            $killerInfo = New-Object System.Diagnostics.ProcessStartInfo
+            $killerInfo.FileName = Get-RealPcSystem32Path -ChildPath 'taskkill.exe'
+            $killerInfo.Arguments = '/PID {0} /T /F' -f $Process.Id
+            $killerInfo.UseShellExecute = $false
+            $killerInfo.CreateNoWindow = $true
+            $killerInfo.RedirectStandardOutput = $true
+            $killerInfo.RedirectStandardError = $true
+            $killer = [System.Diagnostics.Process]::Start($killerInfo)
+            $null = $killer.StandardOutput.ReadToEndAsync()
+            $null = $killer.StandardError.ReadToEndAsync()
+            if ($killer.WaitForExit(30000) -and $Process.WaitForExit(10000)) {
+                return
+            }
+        }
+        catch {
+        }
+    }
+    try {
+        $Process.Kill($true)
+    }
+    catch {
+        # Kill(bool) does not exist on .NET Framework; the process may also be gone already.
+        try {
+            $Process.Kill()
+        }
+        catch {
+        }
+    }
+    try {
+        [void]$Process.WaitForExit(10000)
+    }
+    catch {
+    }
+}
+
+<#
+.SYNOPSIS
+    Runs a program with a time limit and returns its exit code and output; never reads
+    $LASTEXITCODE.
+.DESCRIPTION
+    Modelled on Invoke-BoundedProcess in e2e/Remove-PreinstalledApps.ps1, which this standalone
+    script does not load. stdout and stderr are read asynchronously, so a full pipe cannot stall
+    the program, and stdin is closed, so nothing waits for a key. When the limit runs out, the
+    program and everything it started are stopped (Stop-RealPcProcessTree). Each output stream is
+    waited for at most 5 seconds after that, in case a child the program started still holds it.
+.PARAMETER FilePath
+    The program.
+.PARAMETER ArgumentList
+    Its arguments (ConvertTo-RealPcCommandLine).
+.PARAMETER TimeoutSeconds
+    The limit.
+.RETURNS
+    Get-RealPcBoundedProcessResult's result: ExitCode ($null when it did not start or timed out),
+    TimedOut, Output and Problem.
+#>
+function Invoke-RealPcBoundedProcess {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$FilePath,
+
+        [Parameter(Mandatory = $false)]
+        [AllowEmptyCollection()]
+        [string[]]$ArgumentList = @(),
+
+        [Parameter(Mandatory = $true)]
+        [int]$TimeoutSeconds
+    )
+
+    $process = $null
+    $readers = @()
+    $exitCode = $null
+    $timedOut = $false
+    $startProblem = ''
+    try {
+        $info = New-Object System.Diagnostics.ProcessStartInfo
+        $info.FileName = $FilePath
+        $info.Arguments = ConvertTo-RealPcCommandLine -ArgumentList $ArgumentList
+        $info.UseShellExecute = $false
+        $info.CreateNoWindow = $true
+        $info.RedirectStandardInput = $true
+        $info.RedirectStandardOutput = $true
+        $info.RedirectStandardError = $true
+        $info.StandardOutputEncoding = New-Object System.Text.UTF8Encoding($false)
+        $info.StandardErrorEncoding = New-Object System.Text.UTF8Encoding($false)
+        $process = [System.Diagnostics.Process]::Start($info)
+        $readers = @($process.StandardOutput.ReadToEndAsync(), $process.StandardError.ReadToEndAsync())
+        try {
+            $process.StandardInput.Close()
+        }
+        catch {
+        }
+        if ($process.WaitForExit($TimeoutSeconds * 1000)) {
+            $exitCode = $process.ExitCode
+        }
+        else {
+            $timedOut = $true
+            Stop-RealPcProcessTree -Process $process
+        }
+    }
+    catch {
+        $startProblem = ([string]$_.Exception.Message -replace '\s*[\r\n]+\s*', ' ').Trim()
+    }
+    $output = @()
+    foreach ($reader in $readers) {
+        try {
+            if ($reader.Wait(5000)) {
+                $output += @(ConvertTo-RealPcOutputLine -Text ([string]$reader.Result))
+            }
+        }
+        catch {
+        }
+    }
+    if ($null -ne $process) {
+        $process.Dispose()
+    }
+    return (Get-RealPcBoundedProcessResult -ExitCode $exitCode -TimedOut $timedOut -StartProblem $startProblem -TimeoutSeconds $TimeoutSeconds -Output $output)
+}
+
 # The 64-bit Windows PowerShell 5.1 path, which the installer's 5.1 bootstrap relaunches from.
 function Get-RealPcWindowsPowerShellPath {
     $root = $env:SystemRoot
@@ -3727,66 +4505,78 @@ function Get-RealPcWauTaskHealth {
     return $result
 }
 
+# winget's full path as a program in this account (its App Installer alias), or $null.
+function Get-RealPcWingetPath {
+    $command = Get-Command -Name 'winget' -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($command) {
+        return [string]$command.Path
+    }
+    return $null
+}
+
+<#
+.SYNOPSIS
+    Runs winget with a time limit (Invoke-RealPcBoundedProcess), found by Get-RealPcWingetPath.
+.PARAMETER ArgumentList
+    winget's arguments.
+.PARAMETER TimeoutSeconds
+    The limit: $script:RealPcWingetListTimeoutSeconds and its siblings.
+.RETURNS
+    Invoke-RealPcBoundedProcess's result; ExitCode $null and Problem 'not run: ...' when winget is
+    not here.
+#>
+function Invoke-RealPcWinget {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string[]]$ArgumentList,
+
+        [Parameter(Mandatory = $true)]
+        [int]$TimeoutSeconds
+    )
+
+    $wingetPath = Get-RealPcWingetPath
+    if (-not $wingetPath) {
+        return (Get-RealPcBoundedProcessResult -StartProblem 'winget was not found in this account' -TimeoutSeconds $TimeoutSeconds)
+    }
+    return (Invoke-RealPcBoundedProcess -FilePath $wingetPath -ArgumentList $ArgumentList -TimeoutSeconds $TimeoutSeconds)
+}
+
 # Whether winget lists a package id as installed: $true, $false, or $null when winget could not
-# answer (Get-RealPcWingetListVerdict). --source winget: without it, a source that cannot open is
-# only a warning and an installed app reads as not installed (0x8A150014). $LASTEXITCODE is read
-# at once.
+# answer, a timeout included (Get-RealPcWingetListVerdict). --source winget: without it, a source
+# that cannot open is only a warning and an installed app reads as not installed (0x8A150014).
 function Test-RealPcWingetInstalled {
     param (
         [Parameter(Mandatory = $true)]
         [string]$Id
     )
 
-    $ErrorActionPreference = 'Continue'
-    $code = $null
-    try {
-        $global:LASTEXITCODE = $null
-        $null = & winget list --id $Id --exact --source winget --accept-source-agreements --disable-interactivity 2>&1
-        $code = $global:LASTEXITCODE
-    }
-    catch {
-        $code = $null
-    }
-    return (Get-RealPcWingetListVerdict -ExitCode $code)
+    $run = Invoke-RealPcWinget -ArgumentList @('list', '--id', $Id, '--exact', '--source', 'winget', '--accept-source-agreements', '--disable-interactivity') -TimeoutSeconds $script:RealPcWingetListTimeoutSeconds
+    return (Get-RealPcWingetListVerdict -ExitCode $run.ExitCode)
 }
 
 # Whether winget can be started as a program in this account (its App Installer alias).
 function Test-RealPcWingetPresent {
-    return [bool](Get-Command -Name 'winget' -CommandType Application -ErrorAction SilentlyContinue)
+    return [bool](Get-RealPcWingetPath)
 }
 
 # Uninstalls one package with winget, silently, as this account, from the winget source (as
-# Test-RealPcWingetInstalled looks it up). Returns ExitCode ($null when winget could not run) and
-# Problem.
+# Test-RealPcWingetInstalled looks it up). Returns ExitCode ($null when winget did not run to the
+# end), Problem (why, e.g. 'timed out after 150 s') and Output (for the evidence).
 function Invoke-RealPcWingetUninstall {
     param (
         [Parameter(Mandatory = $true)]
         [string]$Id
     )
 
-    $ErrorActionPreference = 'Continue'
-    try {
-        $global:LASTEXITCODE = $null
-        $null = & winget uninstall --id $Id --exact --source winget --silent --accept-source-agreements --disable-interactivity 2>&1
-        return [pscustomobject]@{ ExitCode = $global:LASTEXITCODE; Problem = '' }
-    }
-    catch {
-        return [pscustomobject]@{ ExitCode = $null; Problem = "not run: $($_.Exception.Message)" }
-    }
+    $run = Invoke-RealPcWinget -ArgumentList @('uninstall', '--id', $Id, '--exact', '--source', 'winget', '--silent', '--accept-source-agreements', '--disable-interactivity') -TimeoutSeconds $script:RealPcWingetUninstallTimeoutSeconds
+    return [pscustomobject]@{ ExitCode = $run.ExitCode; Problem = [string]$run.Problem; Output = @($run.Output) }
 }
 
 # The source check: winget looks one package up in its 'winget' source, as this account. Returns
-# ExitCode ($null when winget could not run) and Output (for the evidence).
+# ExitCode ($null when winget did not run to the end) and Output (for the evidence, with why).
 function Invoke-RealPcWingetSourceCheck {
-    $ErrorActionPreference = 'Continue'
-    try {
-        $global:LASTEXITCODE = $null
-        $output = @(& winget search --id Microsoft.PowerShell --exact --source winget --accept-source-agreements --disable-interactivity 2>&1 | ForEach-Object { [string]$_ })
-        return [pscustomobject]@{ ExitCode = $global:LASTEXITCODE; Output = $output }
-    }
-    catch {
-        return [pscustomobject]@{ ExitCode = $null; Output = @("could not run winget: $($_.Exception.Message)") }
-    }
+    $run = Invoke-RealPcWinget -ArgumentList @('search', '--id', 'Microsoft.PowerShell', '--exact', '--source', 'winget', '--accept-source-agreements', '--disable-interactivity') -TimeoutSeconds $script:RealPcWingetSearchTimeoutSeconds
+    return [pscustomobject]@{ ExitCode = $run.ExitCode; Output = @($run.Output) }
 }
 
 <#
@@ -3874,13 +4664,14 @@ function Get-RealPcWingetFact {
     $ErrorActionPreference = 'Continue'
     $fact = [pscustomobject]@{ WingetVersion = ''; AppInstallerVersion = ''; SourcePackage = ''; Raw = [ordered]@{} }
 
-    $version = Invoke-RealPcQuietProcess -FilePath 'winget' -ArgumentList @('--version')
+    # Bounded like a search: none of these may hold the run up.
+    $version = Invoke-RealPcWinget -ArgumentList @('--version') -TimeoutSeconds $script:RealPcWingetSearchTimeoutSeconds
     $fact.WingetVersion = (@($version.Output | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }) | Select-Object -First 1)
     if ($null -eq $version.ExitCode) {
-        $fact.WingetVersion = 'winget could not run'
+        $fact.WingetVersion = ('winget could not run ({0})' -f $version.Problem)
     }
     foreach ($argumentText in @('--info', 'source list')) {
-        $run = Invoke-RealPcQuietProcess -FilePath 'winget' -ArgumentList @($argumentText -split ' ')
+        $run = Invoke-RealPcWinget -ArgumentList @($argumentText -split ' ') -TimeoutSeconds $script:RealPcWingetSearchTimeoutSeconds
         $fact.Raw[('winget {0} (exit {1})' -f $argumentText, (Format-RealPcWingetExitCode -ExitCode $run.ExitCode))] = @($run.Output)
     }
 
@@ -3916,12 +4707,27 @@ function Get-RealPcWingetFact {
     return $fact
 }
 
+# Processes oldest first, by CreationDate, sorted as the installer sorts them
+# (Get-SessionShellOwnerName: Sort-Object CreationDate, which puts one without a date first). The
+# session's first explorer.exe is the signed-in user's shell: one started later may run as another
+# account.
+function Select-RealPcOldestProcess {
+    param (
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [AllowEmptyCollection()]
+        [object[]]$Process = @()
+    )
+
+    return @($Process | Where-Object { $null -ne $_ } | Sort-Object -Property CreationDate)
+}
+
 <#
 .SYNOPSIS
     Who runs the harness and who is signed in: the elevated account and its SID, its profile's
-    creation time, the owner of explorer.exe in this process's session, the console user
-    (Win32_ComputerSystem) and the sessions qwinsta lists. Reads only; what cannot be read stays
-    empty. Windows only.
+    creation time, the owner of the oldest explorer.exe in this process's session (the same rule
+    as the installer's), the console user (Win32_ComputerSystem) and the sessions qwinsta lists.
+    Reads only; what cannot be read stays empty. Windows only.
 .RETURNS
     [pscustomobject] with ElevatedUser, ElevatedSid, ProfileCreated, SessionUser, SessionUserSid,
     ConsoleUser and Sessions ([string[]]).
@@ -3943,13 +4749,33 @@ function Get-RealPcAccountFact {
     }
     try {
         $sessionId = [System.Diagnostics.Process]::GetCurrentProcess().SessionId
-        foreach ($explorer in @(Get-CimInstance -ClassName Win32_Process -Filter ("Name = 'explorer.exe' AND SessionId = {0}" -f $sessionId) -ErrorAction Stop)) {
-            $owner = Invoke-CimMethod -InputObject $explorer -MethodName GetOwner -ErrorAction Stop
-            if ($owner -and $owner.User) {
-                $fact.SessionUser = '{0}\{1}' -f $owner.Domain, $owner.User
-                $fact.SessionUserSid = [string](Invoke-CimMethod -InputObject $explorer -MethodName GetOwnerSid -ErrorAction Stop).Sid
-                break
+        $explorers = @(Get-CimInstance -ClassName Win32_Process -Filter ("Name = 'explorer.exe' AND SessionId = {0}" -f $sessionId) -ErrorAction Stop)
+        # The installer's rule (Get-SessionShellOwnerName): a shell whose owner cannot be read, or
+        # comes back without ReturnValue 0, a user and a domain, is passed over.
+        foreach ($explorer in @(Select-RealPcOldestProcess -Process $explorers)) {
+            try {
+                $owner = Invoke-CimMethod -InputObject $explorer -MethodName GetOwner -ErrorAction Stop
             }
+            catch {
+                continue
+            }
+            if (-not ($owner -and $owner.ReturnValue -eq 0 -and -not [string]::IsNullOrWhiteSpace($owner.User) -and -not [string]::IsNullOrWhiteSpace($owner.Domain))) {
+                continue
+            }
+            $fact.SessionUser = '{0}\{1}' -f $owner.Domain, $owner.User
+            try {
+                $fact.SessionUserSid = [string](Invoke-CimMethod -InputObject $explorer -MethodName GetOwnerSid -ErrorAction Stop).Sid
+            }
+            catch {
+            }
+            if ([string]::IsNullOrWhiteSpace($fact.SessionUserSid)) {
+                try {
+                    $fact.SessionUserSid = ([System.Security.Principal.NTAccount]$fact.SessionUser).Translate([System.Security.Principal.SecurityIdentifier]).Value
+                }
+                catch {
+                }
+            }
+            break
         }
     }
     catch {
@@ -4534,6 +5360,16 @@ function Invoke-RealPcPreflightStage {
     $facts['Elevated'] = (Test-RealPcElevated)
     $facts['Report folder'] = $script:ReportFolder
     $facts['Installer under test'] = $(if ($script:RealPcOptions.UseOneLiner) { "one-liner, branch $($script:RealPcOptions.Branch)" } else { 'the checkout''s files' })
+    # The code under test by its build id; for the one-liner, FirstRun fills it in from its run.
+    $installerText = ''
+    if (-not $script:RealPcOptions.UseOneLiner) {
+        try {
+            $installerText = [System.IO.File]::ReadAllText((Join-Path (Split-Path -Parent $PSScriptRoot) 'winget-app-install.ps1'))
+        }
+        catch {
+        }
+    }
+    $facts['Installer build'] = Get-RealPcInstallerBuildFact -ScriptText $installerText -UseOneLiner:([bool]$script:RealPcOptions.UseOneLiner) -Branch ([string]$script:RealPcOptions.Branch)
 
     # Who runs the harness and who is signed in: under cross-user elevation (issue #159) the
     # elevated account's per-user packages, winget's source among them, may fail to register.
@@ -4792,7 +5628,8 @@ function Invoke-RealPcLinkGuardSetupStage {
     return $rows
 }
 
-# Stage 2 FirstRun: items 1 + 4 + 5, then the item-11 verification and cleanup.
+# Stage 2 FirstRun: items 1 + 4 + 5, whether the installer saw the cross-user elevation and
+# registered winget's source package itself, then the item-11 verification and cleanup.
 function Invoke-RealPcFirstRunStage {
     param (
         [Parameter(Mandatory = $true)]
@@ -4804,6 +5641,12 @@ function Invoke-RealPcFirstRunStage {
     # Before the run, as the installer decides it: its Windows Terminal step changes what the
     # Terminal condition reads (Install.ps1).
     $expectationRead = Get-RealPcAppExpectation
+    # Under cross-user elevation the installer installs machine-wide only, as SYSTEM does.
+    $expectations = $expectationRead.Value
+    if ((Get-RealPcCrossUserAnswer -CrossUser $script:CrossUserElevation) -eq 'yes' -and $null -ne $expectations) {
+        $expectations = @(ConvertTo-RealPcMachineWideExpectation -AppExpectation $expectations)
+    }
+    $preflightCheck = @(@($script:WingetSourceChecks) | Where-Object { $null -ne $_ -and -not $_.When }) | Select-Object -First 1
     $startedAt = Get-Date
     $run = Invoke-RealPcInstaller -ConsoleLogPath (Join-Path $EvidenceFolder 'console.txt') -Environment @{
         WINGET_APP_SETUP_NONINTERACTIVE      = '1'
@@ -4820,11 +5663,26 @@ function Invoke-RealPcFirstRunStage {
     # The later runs' expectations follow what this run left installed (Set-RealPcFirstRunExpectation).
     $script:FirstRunRecord = $record
 
-    # Items 1 + 4 + 5: exit code, run record, each app, auto-updates, runtime, WAU, TightVNC.
+    $runText = $consoleText + [Environment]::NewLine + $transcriptText
+    # The one-liner's build is known only from what the run printed.
+    if ($script:RealPcOptions -and $script:RealPcOptions.UseOneLiner -and $null -ne $script:MachineFacts) {
+        $runBuildId = ''
+        if ($transcript -and $transcript.Parsed) {
+            $runBuildId = [string]$transcript.Parsed.BuildId
+        }
+        if (-not $runBuildId) {
+            $runBuildId = Get-RealPcRunBuildId -Text $runText
+        }
+        $script:MachineFacts['Installer build'] = Get-RealPcInstallerBuildFact -UseOneLiner -Branch ([string]$script:RealPcOptions.Branch) -RunBuildId $runBuildId
+    }
+
+    # Items 1 + 4 + 5: exit code, run record, cross-user detection, each app, auto-updates, runtime,
+    # WAU, TightVNC.
     $verdict = Get-RealPcInstallExitVerdict -ExitCode $exitCode -Transcript $transcript -Pass 'first'
     $rows += New-TestPlanBoolRow -Check 'First run exit code acceptable (0, 3010 or 8 with reason)' -Passed $verdict.Passed -Detail $verdict.Message
     $rows += Get-RealPcRunRecordResult -RunRecord $record -RunRecordProblem $recordRead.Problem -ExpectedExitCode $exitCode
-    $rows += Get-RealPcAppResult -RunRecord $record -AppExpectation $expectationRead.Value -AppExpectationProblem $expectationRead.Problem
+    $rows += Get-RealPcCrossUserDetectionRow -CrossUser $script:CrossUserElevation -Text $runText
+    $rows += Get-RealPcAppResult -RunRecord $record -AppExpectation $expectations -AppExpectationProblem $expectationRead.Problem
 
     $wauHealth = Get-RealPcWauTaskHealth
     $runtimePresent = $null
@@ -4845,6 +5703,8 @@ function Invoke-RealPcFirstRunStage {
     $sourceCheck = Invoke-RealPcWingetSourceCheck
     $sourcePackage = Get-RealPcWingetSourcePackage
     $rows += Add-RealPcWingetSourceCheck -ExitCode $sourceCheck.ExitCode -When 'after the first run' -SourcePackage $sourcePackage
+    $afterCheck = @($script:WingetSourceChecks)[-1]
+    $rows += Get-RealPcSourceRepairRow -PreflightCheck $preflightCheck -AfterCheck $afterCheck -Text $runText
     $sections = [ordered]@{}
     $sections[('winget search --id Microsoft.PowerShell --exact --source winget (the source check after the first run; exit {0}; Microsoft.Winget.Source for this account: {1})' -f (Format-RealPcWingetExitCode -ExitCode $sourceCheck.ExitCode), $sourcePackage)] = @($sourceCheck.Output)
     Save-RealPcText -Path (Join-Path $EvidenceFolder 'winget-source-check.txt') -Text (Format-RealPcEvidenceText -Section $sections)
@@ -5005,9 +5865,14 @@ function Invoke-RealPcReRunStage {
     )
 
     $logDirectory = Join-Path $env:ProgramData 'winget-app-setup\logs'
-    # What the first run left installed must be found; what it did not may be installed now.
+    # What the first run left installed must be found; what it did not may be installed now, or,
+    # machine-wide only (cross-user elevation), deferred again.
     $expectationRead = Get-RealPcAppExpectation -AlreadyPresent
-    $adjusted = Set-RealPcFirstRunExpectation -AppExpectation $expectationRead.Value -FirstRunRecord $script:FirstRunRecord
+    $baseExpectation = $expectationRead.Value
+    if ((Get-RealPcCrossUserAnswer -CrossUser $script:CrossUserElevation) -eq 'yes' -and $null -ne $baseExpectation) {
+        $baseExpectation = @(ConvertTo-RealPcMachineWideExpectation -AppExpectation $baseExpectation)
+    }
+    $adjusted = Set-RealPcFirstRunExpectation -AppExpectation $baseExpectation -FirstRunRecord $script:FirstRunRecord
     $expectations = $expectationRead.Value
     if ($null -ne $expectationRead.Value) {
         $expectations = @($adjusted.Value)
@@ -5068,6 +5933,7 @@ function Invoke-RealPcSystemStage {
     }
     $check = Get-SystemInstallPassResult -TaskExitCode $taskRun.TaskExitCode -Transcript $taskRun.Transcript -WrapperLog $taskRun.WrapperLog -RunRecord $record -RunRecordProblem $recordProblem -NewSystemProfileEntries $taskRun.NewSystemProfileEntries -AppExpectation $expectations -AppExpectationProblem $expectationRead.Problem -SecondPass
     $rows = @($check.Results | ForEach-Object { New-TestPlanRow -Check $_.Assertion -Result $_.Result -Detail $_.Detail })
+    $rows = @(Update-RealPcSystemRedeferredRow -Row $rows -RunRecord $record -FirstRunRecord $script:FirstRunRecord)
     $rows += @(Get-RealPcFirstRunGapRow -Changed $adjusted.Changed -Run 'The SYSTEM run')
 
     if ($SystemEngine -eq 'WinGetClient') {
@@ -5096,7 +5962,8 @@ function Invoke-RealPcSystemStage {
     return $rows
 }
 
-# Stage 6 TimeBudget (item 8): uninstall 7-Zip, run with a spent budget (exit 9), then finish.
+# Stage 6 TimeBudget (item 8): uninstall 7-Zip (its output kept in winget-uninstall.txt), run with a
+# spent budget (exit 9), then finish.
 function Invoke-RealPcTimeBudgetStage {
     param (
         [Parameter(Mandatory = $true)]
@@ -5109,6 +5976,9 @@ function Invoke-RealPcTimeBudgetStage {
     $appId = '7zip.7zip'
 
     $uninstall = Invoke-RealPcWingetUninstall -Id $appId
+    $uninstallSection = [ordered]@{}
+    $uninstallSection[('winget uninstall --id {0} --exact --source winget --silent (exit {1})' -f $appId, (Format-RealPcWingetExitCode -ExitCode $uninstall.ExitCode))] = @($uninstall.Output)
+    Save-RealPcText -Path (Join-Path $EvidenceFolder 'winget-uninstall.txt') -Text (Format-RealPcEvidenceText -Section $uninstallSection)
     $rows += Get-RealPcUninstallCheckRow -AppId $appId -Present (Test-RealPcWingetInstalled -Id $appId) -UninstallExitCode $uninstall.ExitCode -UninstallProblem $uninstall.Problem -SourceOpen $script:WingetSourceOpen
     Save-RealPcArpSnapshot -Path (Join-Path $EvidenceFolder 'arp-after-uninstall.txt') -Title "after 'winget uninstall --id $appId'"
 
@@ -5215,6 +6085,7 @@ function Invoke-RealPcUninstallerStage {
     $sourceCheck = Invoke-RealPcWingetSourceCheck
     $sourcePackage = Get-RealPcWingetSourcePackage
     $sourceRow = Add-RealPcWingetSourceCheck -ExitCode $sourceCheck.ExitCode -When 'before the uninstaller' -SourcePackage $sourcePackage
+    $sourceOpenBefore = $script:WingetSourceOpen
     $sections = [ordered]@{}
     $sections[('winget search --id Microsoft.PowerShell --exact --source winget (the source check before the uninstaller; exit {0}; Microsoft.Winget.Source for this account: {1})' -f (Format-RealPcWingetExitCode -ExitCode $sourceCheck.ExitCode), $sourcePackage)] = @($sourceCheck.Output)
     Save-RealPcText -Path (Join-Path $EvidenceFolder 'winget-source-check.txt') -Text (Format-RealPcEvidenceText -Section $sections)
@@ -5231,7 +6102,20 @@ function Invoke-RealPcUninstallerStage {
     $wauAfterReal = (Get-RealPcWauTaskHealth).Exists
     $unknown = @(@($before.Unknown) + @($after.Unknown) + @($afterReal.Unknown) | Where-Object { $_ })
 
-    return (@($sourceRow) + @(Get-RealPcUninstallerResult -WhatIfInstalledBefore $before.Installed -WhatIfInstalledAfter $after.Installed -WhatIfWauBefore $beforeWau -WhatIfWauAfter $afterWau -ExitCode $real.ExitCode -InstalledAfter $afterReal.Installed -UnknownIds $unknown -WauPresentAfter $wauAfterReal -SourceOpen $script:WingetSourceOpen -WhatIfConsoleText (@($preview.Output) -join "`n") -UninstallConsoleText (@($real.Output) -join "`n")))
+    # What the uninstaller kept on purpose comes from its console only (Get-RealPcKeptSkip): it runs
+    # in Windows PowerShell here, so it must remove PowerShell 7.
+    $uninstallText = @($real.Output) -join "`n"
+    # The uninstaller opened the source although the check before it could not: check again, so the
+    # report's banner and Preflight's row read the source as it is after the uninstaller.
+    $afterRows = @()
+    if ($sourceOpenBefore -eq $false -and $uninstallText -match 'The winget source opens for') {
+        $afterSource = Invoke-RealPcWingetSourceCheck
+        $afterPackage = Get-RealPcWingetSourcePackage
+        $afterRows = @(Add-RealPcWingetSourceCheck -ExitCode $afterSource.ExitCode -When 'after the uninstaller' -SourcePackage $afterPackage)
+        $sections[('winget search --id Microsoft.PowerShell --exact --source winget (the source check after the uninstaller; exit {0}; Microsoft.Winget.Source for this account: {1})' -f (Format-RealPcWingetExitCode -ExitCode $afterSource.ExitCode), $afterPackage)] = @($afterSource.Output)
+        Save-RealPcText -Path (Join-Path $EvidenceFolder 'winget-source-check.txt') -Text (Format-RealPcEvidenceText -Section $sections)
+    }
+    return (@($sourceRow) + @(Get-RealPcUninstallerResult -WhatIfInstalledBefore $before.Installed -WhatIfInstalledAfter $after.Installed -WhatIfWauBefore $beforeWau -WhatIfWauAfter $afterWau -ExitCode $real.ExitCode -InstalledAfter $afterReal.Installed -UnknownIds $unknown -UnknownAfterIds @($afterReal.Unknown | Where-Object { $_ }) -KeptIds @(Get-RealPcKeptSkip -Text $uninstallText) -WauPresentAfter $wauAfterReal -SourceOpen $sourceOpenBefore -WhatIfConsoleText (@($preview.Output) -join "`n") -UninstallConsoleText $uninstallText) + $afterRows)
 }
 
 <#

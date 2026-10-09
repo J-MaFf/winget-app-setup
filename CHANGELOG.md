@@ -96,6 +96,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   `tests/E2ERealPcTestPlan.Tests.ps1` replays the owner's run from fixtures (a `last-run.json` in
   which every applicable app Failed with 0x8A15000F, and the uninstaller's console output).
+
+  A dry run of the owner's re-test (2026-10-09, read from the code) found rows that could not say
+  who fixed what, and a harness that disagreed with the installer about cross-user elevation (bead
+  wgt-gq8.71). Now:
+  - Preflight's session user is the owner of the oldest `explorer.exe` in its session, the
+    installer's new rule (wgt-gq8.70), with the same order and the same shells passed over, and
+    the `-WhatIf` plan says what a window elevated as another account leaves alone (the Windows
+    Terminal defaults and Windows Terminal itself); FirstRun adds 'The installer detected the cross-user
+    elevation as Preflight did': PASS when the installer printed `Cross-user elevation detected`
+    exactly when Preflight said yes, FAIL when not, SKIP when Preflight could not tell;
+  - under cross-user elevation FirstRun and ReRun expect what the installer does then, machine-wide
+    installs only, as for SYSTEM: an app it would install may also be Deferred as 'winget found no
+    machine-wide installer for it', and Windows Terminal counts as already there only when it is
+    provisioned for every user. A same-user run keeps its expectations;
+  - FirstRun adds 'The installer registered winget's source package for this account': PASS when
+    the run says it registered the package (naming the download URL, or the copy already on the
+    PC), whatever Preflight saw, so a freshly imaged PC where winget could not be started at
+    Preflight, or a Preflight check that ran out of time, still shows the repair. Without that line
+    it is judged only when Preflight's check failed with `0x8A15000F`: FAIL when the source was
+    still closed after the run (quoting the installer's 'cannot be opened for' line), SKIP
+    otherwise, with how to exercise it when the source already opened at Preflight;
+  - Preflight's source row and the report's warning name the check that opened the source after
+    the last failed one, not the latest check: a source the first run opened read 'It opened before
+    the uninstaller';
+  - the uninstaller stage counts an app as kept on purpose only when the uninstaller's console
+    says so (its skip line for PowerShell 7, Windows Terminal, or a per-user app). It used to keep
+    PowerShell 7 and Windows Terminal by default, which hid a PowerShell 7 the Windows PowerShell
+    run should have removed;
+  - when the harness's check before the uninstaller failed but the uninstaller's own check opened
+    the source (`The winget source opens for` in its console), the stage is no longer judged blind:
+    a PASS row quotes that line ('The uninstaller repaired winget's source for this account' when a
+    fix's success line comes before it, 'The uninstaller found winget's source open' otherwise),
+    the usual exit and removal rows apply to the lookups after the uninstall, and the preview row
+    is SKIP, since its lookups ran before the repair. The harness then checks the source again
+    ('after the uninstaller'), so the report's warning and Preflight's row no longer call the
+    uninstaller blind. It used to require exit 2;
+  - the SYSTEM stage also accepts an app deferred again because winget found no machine-wide
+    installer for it, when the cross-user first run deferred it for that reason (new
+    `Update-RealPcSystemRedeferredRow`);
+  - the harness's own winget calls have time limits (`list` 45 s; `search`, `--version`, `--info`
+    and `source list` 120 s, the installer's own source-check limit; `uninstall` 150 s) through
+    `Invoke-RealPcBoundedProcess`, modelled on
+    `Invoke-BoundedProcess`: output read asynchronously, stdin closed, and the program and
+    everything it started stopped at the limit (`taskkill /T` on Windows). One that runs out is no
+    answer, never 'not installed'. The time-budget stage keeps its `winget uninstall` output in
+    `winget-uninstall.txt`;
+  - a new 'Installer build' machine fact names the code under test: the build id in the checkout's
+    `winget-app-install.ps1`, or, with `-UseOneLiner`, the one the first run printed.
+
+  `tests/E2ERealPcTestPlan.Tests.ps1` covers each, with a cross-user first run in new fixtures
+  (`realpc-crossuser-firstrun-console.txt` and `realpc-crossuser-firstrun-last-run.json`).
 - Endpoint Central deployment in two phases (work-order item 34), in `rmm/`. Both are standalone
   Windows PowerShell 5.1 scripts that need nothing beside them.
   - **Machine phase.** `rmm/Invoke-WingetAppSetup.ps1` is a Computer Configuration script run as
@@ -795,6 +846,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Cross-user elevation is now detected over Remote Desktop (wgt-gq8.70). Since issue #159 the
+  installer and the uninstaller took the signed-in user from `Win32_ComputerSystem.UserName`, which
+  Microsoft documents as the console's user: over Remote Desktop it is empty. On the owner's real PC
+  (2026-10-06, signed in over Remote Desktop as a standard user, the window elevated as an admin
+  account) the console had no user, so the run counted as a same-user run. A dry run of the
+  owner's re-test (2026-10-09) found what that switches off: no `Cross-user elevation detected`
+  warning, no machine-wide-only installs (an app with no machine-wide installer went into the
+  admin's profile, and Windows Terminal was judged by the admin's `winget list`), the Windows
+  Terminal defaults written for the admin account, and, when the source stayed closed, the AppX
+  event-log advice instead of the cross-user one. The other way round, a user elevating as
+  themselves over Remote Desktop while another user was at the console read as cross-user.
+  - **The session's shell decides.** `Get-InteractiveSessionUserName` now returns the owner of the
+    oldest `explorer.exe` in this process's own Windows session (new `Get-SessionShellOwnerName`:
+    `Win32_Process` filtered by session, oldest `CreationDate` first, `GetOwner` through
+    `Invoke-CimMethod`). The oldest shell is the one Windows started at sign-in; one a technician
+    starts later as another account is newer. A shell whose owner cannot be read is passed over.
+    `Win32_ComputerSystem.UserName` is only the fallback, when no owner is found (session 0, no
+    shell, a failed query), and the function still never throws. `Invoke-CimMethod` joins
+    `build/windows-only-commands.txt` and the test stand-ins in `tests/TestHelpers.ps1`. The
+    Windows Terminal defaults step now takes the account context the installer read at the start
+    of the run (`Set-WindowsTerminalDefaults -AccountContext`), so it cannot decide otherwise
+    later in the run; the user phase, which passes none, still reads it there. The diagnostics
+    bundle's line is 'Signed-in user (this session)', or '(at the console)' for a collection as
+    SYSTEM, whose session 0 has no shell.
+  - **A registered source package that still does not open says so.** When the run registered
+    `Microsoft.Winget.Source` for the account and `winget search --source winget` still fails, the
+    line now says the registration succeeded, and how (downloaded from
+    `https://cdn.winget.microsoft.com`, or by family name from the copy already on the PC). For
+    `0x8A15000F` its fix is to read winget's log and check access to `cdn.winget.microsoft.com`;
+    under cross-user elevation it then adds, in case that does not help, to run the tool signed in
+    as the account or as SYSTEM. It used to say nothing of the registration and send the reader
+    to the AppX deployment event log or to sign in as the admin account, though Windows had
+    deployed the package. Another code after a successful registration keeps the source-settings
+    advice.
+  - **The uninstaller leaves per-user MSIX apps alone as SYSTEM or under cross-user elevation.** An
+    entry with `msixName` (Windows Terminal) is now `Skipped` (`PerUserApp`, new
+    `Get-PerUserAppSkipReason`) before any winget call:
+    `Skipping: Microsoft.WindowsTerminal (a per-user app that this run cannot remove: it runs as
+    '<admin>' in the session of '<user>'; to remove it, run winget-app-uninstall.ps1 signed in as
+    the user it belongs to)`, or `it runs as SYSTEM`. In those runs even `winget list` answers for
+    the running account, not for the user the app belongs to. The installer decides Windows
+    Terminal from the PC there (skipped when provisioned for every user, else installed for every
+    user with `--scope machine`), and the uninstaller removes no provisioned package. It counts as
+    kept on purpose: the exit code stays 0, Winget-AutoUpdate is still removed, and the
+    default-terminal setting is not reset. A preview (`-WhatIf`) from the same elevated window, or
+    as SYSTEM, shows the same skip; a preview in a window that is not elevated runs as the
+    signed-in user, and now says that a real run elevated as another account keeps such an app.
+    `Uninstall-CatalogApp` takes the run's `-AccountContext`, so the account is read once a run.
+    A standard user's Terminal cannot be removed this way: the UAC prompt elevates as another
+    account.
 - A winget source that cannot be opened is detected, repaired once and, if it stays closed, stops
   the installer and the uninstaller with exit code 2 (wgt-gq8.63, wgt-gq8.64). On the owner's real
   PC (winget v1.29.380, signed in over Remote Desktop as a standard user, the window elevated as an

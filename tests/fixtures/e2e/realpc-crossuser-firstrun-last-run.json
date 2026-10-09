@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "buildId": "1.0.0+7c0ffee1",
+  "startedUtc": "2026-10-09T10:00:00Z",
+  "endedUtc": "2026-10-09T10:09:00Z",
+  "exitCode": 0,
+  "summaryReached": true,
+  "counts": {
+    "installed": 7,
+    "skipped": 3,
+    "deferred": 1,
+    "failed": 0,
+    "notAttempted": 0
+  },
+  "apps": [
+    { "id": "7zip.7zip", "status": "Installed", "reason": null, "code": 0, "codeHex": "0x00000000", "installerCode": null, "restartRequired": false, "postInstall": null, "postInstallReason": null },
+    { "id": "GlavSoft.TightVNC", "status": "Installed", "reason": null, "code": 0, "codeHex": "0x00000000", "installerCode": null, "restartRequired": false, "postInstall": "Configured", "postInstallReason": null },
+    { "id": "Adobe.Acrobat.Reader.64-bit", "status": "Installed", "reason": null, "code": 0, "codeHex": "0x00000000", "installerCode": null, "restartRequired": false, "postInstall": null, "postInstallReason": null },
+    { "id": "Adobe.Acrobat.Reader.32-bit", "status": "Skipped", "reason": "not applicable: ARM64 and 32-bit Windows only; x64 PCs get the 64-bit Reader", "code": null, "codeHex": null, "installerCode": null, "restartRequired": false, "postInstall": null, "postInstallReason": null },
+    { "id": "Google.Chrome", "status": "Installed", "reason": null, "code": 0, "codeHex": "0x00000000", "installerCode": null, "restartRequired": false, "postInstall": null, "postInstallReason": null },
+    { "id": "Google.GoogleDrive", "status": "Deferred", "reason": "winget found no machine-wide installer for it", "code": -1978335216, "codeHex": "0x8A150010", "installerCode": null, "restartRequired": false, "postInstall": null, "postInstallReason": null },
+    { "id": "Git.Git", "status": "Installed", "reason": null, "code": 0, "codeHex": "0x00000000", "installerCode": null, "restartRequired": false, "postInstall": null, "postInstallReason": null },
+    { "id": "Klocman.BulkCrapUninstaller", "status": "Installed", "reason": null, "code": 0, "codeHex": "0x00000000", "installerCode": null, "restartRequired": false, "postInstall": null, "postInstallReason": null },
+    { "id": "Dell.CommandUpdate.Universal", "status": "Skipped", "reason": "not applicable: Dell hardware with x64 Windows only; winget has no ARM64 installer for it", "code": null, "codeHex": null, "installerCode": null, "restartRequired": false, "postInstall": null, "postInstallReason": null },
+    { "id": "Microsoft.PowerShell", "status": "Installed", "reason": null, "code": 0, "codeHex": "0x00000000", "installerCode": null, "restartRequired": false, "postInstall": null, "postInstallReason": null },
+    { "id": "Microsoft.WindowsTerminal", "status": "Skipped", "reason": "already provisioned for every user on this PC", "code": null, "codeHex": null, "installerCode": null, "restartRequired": false, "postInstall": null, "postInstallReason": null }
+  ],
+  "autoUpdates": { "status": "Configured", "version": "2.12.0" },
+  "restartRequired": false,
+  "wingetUsable": true,
+  "installEngine": { "requested": "Cli", "used": "Cli", "module": null, "fallbackReason": null },
+  "transcriptPath": "C:\\ProgramData\\winget-app-setup\\logs\\install-20261009-100000.log"
+}
