@@ -12,7 +12,10 @@
          source the uninstaller cannot tell what is installed, and removing Winget-AutoUpdate anyway
          would leave every app without updates. An app whose `winget list` check fails later is
          Failed, never 'not installed', so Winget-AutoUpdate is kept then too.
-      3. Each app goes through Uninstall-CatalogApp.
+      3. Each app goes through Uninstall-CatalogApp, with that account: as SYSTEM or under
+         cross-user elevation a per-user MSIX app (Windows Terminal) is skipped. In those runs the
+         installer decides it from its provisioning, and this uninstaller removes no provisioned
+         package.
       4. Once winget no longer lists Windows Terminal, the default terminal setting that still names
          it is removed (Reset-WindowsTerminalDelegation).
       5. Winget-AutoUpdate (and the legacy scheduled-update task) goes last, and only when no app
@@ -132,7 +135,7 @@ function Invoke-WingetUninstall {
     $terminalGone = $false
     foreach ($app in $apps) {
         try {
-            $outcome = Uninstall-CatalogApp -App $app -WhatIf:$WhatIf
+            $outcome = Uninstall-CatalogApp -App $app -AccountContext $account -WhatIf:$WhatIf
             if ($app.name -eq 'Microsoft.WindowsTerminal') {
                 $terminalGone = ($outcome.Status -eq 'Uninstalled' -and -not $WhatIf) -or ($outcome.SkipReason -eq 'NotInstalled')
             }

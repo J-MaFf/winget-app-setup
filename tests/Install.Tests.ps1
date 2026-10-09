@@ -873,6 +873,9 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
 
             Should -Invoke Install-AppWithVerification -Times 1 -Exactly -ParameterFilter { $MachineWide }
             Should -Invoke Initialize-Winget -Times 1 -Exactly -ParameterFilter { $AccountContext.IsCrossUserElevation -and -not $AccountContext.IsSystem }
+            # The Terminal step decides from the same context, read once (wgt-gq8.71 review).
+            Should -Invoke Set-WindowsTerminalDefaults -Times 1 -Exactly -ParameterFilter { $AccountContext.IsCrossUserElevation -and $AccountContext.SessionUser -eq 'CONTOSO\jdoe' }
+            Should -Invoke Get-InstallAccountContext -Times 1 -Exactly
             ($script:infoMessages -join "`n") | Should -Not -Match 'Running as SYSTEM'
         }
 

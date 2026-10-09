@@ -971,8 +971,13 @@ function Get-DiagnosticsSystemReport {
     if ($IsAdmin) {
         $elevated = 'yes'
     }
+    # SYSTEM runs in session 0, which has no shell: its session user is the console's.
+    $sessionLabel = 'this session'
+    if ($AccountContext -and $AccountContext.IsSystem) {
+        $sessionLabel = 'at the console'
+    }
     $lines.Add("This collection ran as: $processUser, elevated: $elevated")
-    $lines.Add("Signed-in user (console session): $sessionUser")
+    $lines.Add("Signed-in user ($sessionLabel): $sessionUser")
     $lines.Add("Elevation style: $(Get-DiagnosticsElevationStyle -AccountContext $AccountContext -IsAdmin $IsAdmin)")
     $lines.Add('(The transcripts'' headers show the accounts of the runs themselves: Username is the signed-in user, RunAs User the account that ran the installer.)')
 

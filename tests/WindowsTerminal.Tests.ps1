@@ -611,6 +611,36 @@ Describe 'Windows Terminal configuration' {
             Should -Invoke Set-WindowsTerminalAsDefaultTerminalApplication -Times 0
         }
 
+        It 'Decides from the account context it is given, <Case>, without reading the account again' -ForEach @(
+            @{ Case = 'cross-user elevation: skipped'; Context = [pscustomobject]@{ IsSystem = $false; ProcessUser = 'CONTOSO\admin-jmaffiola'; SessionUser = 'CONTOSO\stduser'; IsCrossUserElevation = $true }; Expected = 'Skipped'; Line = "this run is elevated as 'CONTOSO\admin-jmaffiola' while 'CONTOSO\stduser' is logged on" }
+            @{ Case = 'SYSTEM: skipped'; Context = [pscustomobject]@{ IsSystem = $true; ProcessUser = 'NT AUTHORITY\SYSTEM'; SessionUser = 'CONTOSO\stduser'; IsCrossUserElevation = $false }; Expected = 'Skipped'; Line = 'this run is SYSTEM' }
+            @{ Case = 'the signed-in user''s own run: applied'; Context = [pscustomobject]@{ IsSystem = $false; ProcessUser = 'CONTOSO\jdoe'; SessionUser = 'CONTOSO\jdoe'; IsCrossUserElevation = $false }; Expected = 'Applied'; Line = $null }
+        ) {
+            # wgt-gq8.71 review: the installer reads the context once; a second read at this step
+            # (a WMI failure, an Explorer restart) could disagree with the run's own decision.
+            Mock Get-WindowsTerminalSettingsPaths { return @('C:\temp\settings.json') }
+            Mock Set-WindowsTerminalDefaultProfile { return $true }
+            Mock Set-WindowsTerminalAsDefaultTerminalApplication { return $true }
+            Mock Write-Info { }
+            Mock Get-ProcessUserName { 'CONTOSO\admin-jmaffiola' }
+            Mock Get-InteractiveSessionUserName { $null }
+            Mock Get-CimInstance { throw 'no CIM query when a context is given' }
+
+            Set-WindowsTerminalDefaults -PassThru -AccountContext $Context | Should -Be $Expected
+
+            Should -Invoke Test-IsSystemAccount -Times 0 -Exactly
+            Should -Invoke Get-ProcessUserName -Times 0 -Exactly
+            Should -Invoke Get-InteractiveSessionUserName -Times 0 -Exactly
+            Should -Invoke Get-CimInstance -Times 0 -Exactly
+            if ($Line) {
+                Should -Invoke Write-Info -Times 1 -Exactly -ParameterFilter { $Message -like ('Skipping Windows Terminal defaults: *' + $Line + '*') }
+                Should -Invoke Set-WindowsTerminalDefaultProfile -Times 0 -Exactly
+            }
+            else {
+                Should -Invoke Set-WindowsTerminalDefaultProfile -Times 1 -Exactly
+            }
+        }
+
         It 'Still configures the process account when the interactive user is unknown' {
             Mock Get-WindowsTerminalSettingsPaths { return @('C:\temp\settings.json') }
             Mock Set-WindowsTerminalDefaultProfile { return $true }

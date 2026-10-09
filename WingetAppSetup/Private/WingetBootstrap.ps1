@@ -709,12 +709,13 @@ function Get-WingetToolAdviceText {
     Returns the one line that says the winget source cannot be opened, why, where winget's log is
     and what to do.
 .PARAMETER State
-    The ladder state (Invoke-NextWingetSourceFix).
+    The ladder state (Invoke-NextWingetSourceFix). The line says how its source package
+    registration went: failed, or succeeded (and by which route) while the source still did not open.
 .PARAMETER AccountContext
     Get-InstallAccountContext's result: SYSTEM and cross-user elevation get their own advice.
 .PARAMETER ExitCode
-    The exit code the source check answered: 0x8A15000F gets advice on the source package, any
-    other code advice on winget's source settings.
+    The exit code the source check answered: 0x8A15000F gets advice on the source package (winget's
+    log once the package is registered), any other code advice on winget's source settings.
 .PARAMETER Tool
     The tool that runs (Get-WingetToolAdviceText): 'Installer' (default) or 'Uninstaller'.
 .OUTPUTS
@@ -750,7 +751,16 @@ function Get-WingetSourceUnusableMessage {
         $codeText = Format-WingetExitCode -ExitCode $ExitCode
     }
     $message = "The winget source cannot be opened for ${who}: 'winget search --source winget' answered $codeText, so winget can neither install the apps nor tell which are installed."
-    if ($State.SourcePackage -and -not $State.SourcePackage.Registered) {
+    $packageRegistered = [bool]($State.SourcePackage -and $State.SourcePackage.Registered)
+    if ($packageRegistered) {
+        $routeText = switch ("$($State.SourcePackage.Route)") {
+            'Download' { ' (downloaded from https://cdn.winget.microsoft.com)' }
+            'FamilyName' { ' (by family name, from the copy already on this PC)' }
+            default { '' }
+        }
+        $message += " Registering the winget source package (Microsoft.Winget.Source) for the account succeeded$routeText, but winget still cannot open its source."
+    }
+    elseif ($State.SourcePackage) {
         $packageCodes = @(@($State.SourcePackage.ErrorCodes) | Select-Object -Unique)
         if ($packageCodes.Count -gt 0) {
             $message += ' Registering the winget source package (Microsoft.Winget.Source) for the account failed ({0}).' -f (@($packageCodes | ForEach-Object { Format-WingetExitCode -ExitCode $_ }) -join ', ')
@@ -772,6 +782,15 @@ function Get-WingetSourceUnusableMessage {
             $resetNote = " 'winget source reset --force' did not fix it."
         }
         $message += "$resetNote Fix: read winget's log for why it cannot read its source settings, check 'winget source list' in a window running as '$account' and that this PC can reach https://cdn.winget.microsoft.com, then re-run the $($toolText.Name)."
+    }
+    elseif ($packageRegistered) {
+        # Windows deployed the package for the account, so the AppX deployment log has nothing to
+        # say: why winget still cannot open it is in winget's own log.
+        $message += " Fix: read winget's log for why it still cannot open the source, check that this PC can reach https://cdn.winget.microsoft.com, then re-run the $($toolText.Name)."
+        if ($AccountContext.IsCrossUserElevation) {
+            # winget cannot deploy a newer source package for an account with no logon session.
+            $message += " If it still fails, run the $($toolText.Name) while signed in to Windows as '$account', or $($toolText.RunAsSystem)."
+        }
     }
     elseif ($AccountContext.IsCrossUserElevation) {
         # Signing in once is not enough: the package is not provisioned, and winget deploys it only

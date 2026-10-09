@@ -971,6 +971,77 @@ Describe 'Get-WingetSetupAdvice and Get-WingetSourceUnusableMessage name the too
     }
 }
 
+# wgt-gq8.70: once Add-AppxPackage had registered the source package, the ERROR line still sent
+# the reader to the AppX deployment log, as if Windows had not deployed it.
+Describe 'Get-WingetSourceUnusableMessage after the source package was registered (wgt-gq8.70)' {
+    BeforeAll {
+        $script:crossUser = [pscustomobject]@{ IsSystem = $false; IsCrossUserElevation = $true; ProcessUser = 'CONTOSO\admin-jmaffiola'; SessionUser = 'CONTOSO\stduser' }
+        $script:sameUser = [pscustomobject]@{ IsSystem = $false; IsCrossUserElevation = $false; ProcessUser = 'CONTOSO\jdoe'; SessionUser = 'CONTOSO\jdoe' }
+    }
+
+    It 'Says the registration <Text> succeeded and points to winget''s log, not the AppX deployment log, under <Case>' -ForEach @(
+        @{ Case = 'same-user elevation'; Route = 'Download'; Text = '(downloaded from https://cdn.winget.microsoft.com)'; Reason = $null; Cross = $false }
+        @{ Case = 'same-user elevation'; Route = 'FamilyName'; Text = '(by family name, from the copy already on this PC)'; Reason = 'it could not be downloaded from https://cdn.winget.microsoft.com/cache'; Cross = $false }
+        @{ Case = 'cross-user elevation'; Route = 'Download'; Text = '(downloaded from https://cdn.winget.microsoft.com)'; Reason = $null; Cross = $true }
+        @{ Case = 'cross-user elevation'; Route = 'FamilyName'; Text = '(by family name, from the copy already on this PC)'; Reason = 'registering it failed: Deployment failed with HRESULT: 0x80073D19'; Cross = $true }
+    ) {
+        $account = $script:sameUser
+        if ($Cross) {
+            $account = $script:crossUser
+        }
+        $state = @{ ErrorCodes = @(); SourcePackage = [pscustomobject]@{ Registered = $true; Route = $Route; ErrorCodes = @(); Reason = $Reason } }
+
+        $message = Get-WingetSourceUnusableMessage -State $state -AccountContext $account -ExitCode -1978335217
+
+        $message | Should -BeLike "The winget source cannot be opened for '$($account.ProcessUser)': 'winget search --source winget' answered 0x8A15000F SOURCE_DATA_MISSING, *"
+        $message | Should -BeLike "* Registering the winget source package (Microsoft.Winget.Source) for the account succeeded $Text, but winget still cannot open its source. winget's log: *"
+        $fix = "* Fix: read winget's log for why it still cannot open the source, check that this PC can reach https://cdn.winget.microsoft.com, then re-run the installer."
+        if ($Cross) {
+            # wgt-gq8.71 review: the account's own sign-in, or SYSTEM, is still the way out.
+            $fix += " If it still fails, run the installer while signed in to Windows as 'CONTOSO\admin-jmaffiola', or run the machine phase as SYSTEM with rmm/Invoke-WingetAppSetup.ps1."
+        }
+        $message | Should -BeLike $fix
+        $message | Should -Not -BeLike '*AppXDeploymentServer*'
+        $message | Should -Not -BeLike '*failed*'
+        $message | Should -Not -BeLike '*no logon session*'
+    }
+
+    It 'Names the uninstaller as the tool to re-run, and as SYSTEM under cross-user elevation' {
+        $state = @{ ErrorCodes = @(); SourcePackage = [pscustomobject]@{ Registered = $true; Route = 'Download'; ErrorCodes = @(); Reason = $null } }
+
+        Get-WingetSourceUnusableMessage -State $state -AccountContext $script:crossUser -ExitCode -1978335217 -Tool Uninstaller |
+            Should -BeLike "* Fix: read winget's log for why it still cannot open the source, check that this PC can reach https://cdn.winget.microsoft.com, then re-run the uninstaller. If it still fails, run the uninstaller while signed in to Windows as 'CONTOSO\admin-jmaffiola', or run winget-app-uninstall.ps1 as SYSTEM."
+        Get-WingetSourceUnusableMessage -State $state -AccountContext $script:sameUser -ExitCode -1978335217 -Tool Uninstaller |
+            Should -BeLike "* Fix: read winget's log for why it still cannot open the source, check that this PC can reach https://cdn.winget.microsoft.com, then re-run the uninstaller."
+    }
+
+    It 'Still says the registration succeeded when the source then answers another code, with the source settings advice' {
+        $state = @{ ErrorCodes = @(); SourceReset = $true; SourcePackage = [pscustomobject]@{ Registered = $true; Route = 'Download'; ErrorCodes = @(); Reason = $null } }
+
+        $message = Get-WingetSourceUnusableMessage -State $state -AccountContext $script:sameUser -ExitCode -1978335169
+
+        $message | Should -BeLike '* for the account succeeded (downloaded from https://cdn.winget.microsoft.com), but winget still cannot open its source.*'
+        $message | Should -BeLike "*Fix: read winget's log for why it cannot read its source settings, *"
+    }
+
+    It 'Keeps the failed registration and its advice when the package was not registered (<Case>)' -ForEach @(
+        @{ Case = 'same-user'; Cross = $false; Fix = '* Fix: look in the Microsoft-Windows-AppXDeploymentServer/Operational event log*' }
+        @{ Case = 'cross-user'; Cross = $true; Fix = "* Fix: 'CONTOSO\admin-jmaffiola' is elevated in the session of 'CONTOSO\stduser' and has no logon session of its own*" }
+    ) {
+        $account = $script:sameUser
+        if ($Cross) {
+            $account = $script:crossUser
+        }
+        $state = @{ ErrorCodes = @(); SourcePackage = [pscustomobject]@{ Registered = $false; Route = $null; ErrorCodes = @(-2147009255); Reason = 'registering it failed' } }
+
+        $message = Get-WingetSourceUnusableMessage -State $state -AccountContext $account -ExitCode -1978335217
+
+        $message | Should -BeLike '* Registering the winget source package (Microsoft.Winget.Source) for the account failed (0x80073D19 ERROR_DEPLOYMENT_BLOCKED_BY_USER_LOG_OFF).*'
+        $message | Should -BeLike $Fix
+        $message | Should -Not -BeLike '*succeeded*'
+    }
+}
+
 Describe 'Reset-WingetSource (review findings P2-5, P2-6)' {
     BeforeEach {
         $script:warnings = @()

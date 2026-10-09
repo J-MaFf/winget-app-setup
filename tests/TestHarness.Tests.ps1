@@ -212,13 +212,14 @@ Describe 'Test harness (tests/TestHelpers.ps1, wgt-gq8.5)' {
         $undeclared | Should -BeNullOrEmpty
     }
 
-    It 'types the scheduled-task object parameters as CimInstance, as the real cmdlets do' {
-        # The real cmdlets reject a fake [pscustomobject] trigger before a Mock body runs, so the
-        # tests that pass one use -RemoveParameterType. An [object] stand-in would accept it and
-        # let a test that forgets -RemoveParameterType pass here and fail on Windows.
+    It 'types the CIM object parameters (scheduled tasks, Invoke-CimMethod) as CimInstance, as the real cmdlets do' {
+        # The real cmdlets reject a fake [pscustomobject] trigger or process before a Mock body
+        # runs, so the tests that pass one use -RemoveParameterType. An [object] stand-in would
+        # accept it and let a test that forgets -RemoveParameterType pass here and fail on Windows.
         $cimParameters = [ordered]@{
             'Set-ScheduledTask'        = @('Action', 'Trigger', 'Settings', 'Principal', 'InputObject')
             'Unregister-ScheduledTask' = @('InputObject')
+            'Invoke-CimMethod'         = @('InputObject')
         }
 
         $wrongType = foreach ($name in $cimParameters.Keys) {

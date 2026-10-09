@@ -609,9 +609,17 @@ Describe 'The machine''s state in the bundle (Get-DiagnosticsSystemReport)' {
         $lines | Should -Contain 'Version: 24H2'
         $lines | Should -Contain 'Build: 26100.4061'
         $lines | Should -Contain 'OS architecture: Arm64'
-        $lines | Should -Contain 'Signed-in user (console session): CONTOSO\jdoe (S-1-5-21-1004336348-1177238915-682003330-1104)'
+        $lines | Should -Contain 'Signed-in user (this session): CONTOSO\jdoe (S-1-5-21-1004336348-1177238915-682003330-1104)'
         $lines | Should -Contain 'Elevation style: cross-user (elevated as another account than the signed-in user)'
         ($lines -join "`n") | Should -Match 'This collection ran as: CONTOSO\\admin-tech.*, elevated: yes'
+    }
+
+    It 'Names the console''s user, not this session''s, for a collection as SYSTEM (wgt-gq8.71 review)' {
+        # Session 0 has no shell, so the session user of a run as SYSTEM is Win32_ComputerSystem's.
+        $lines = @(Get-DiagnosticsSystemReport -AccountContext (New-TestAccountContext -System -SessionUser 'CONTOSO\jdoe') -IsAdmin $true)
+
+        $lines | Should -Contain 'Signed-in user (at the console): CONTOSO\jdoe (S-1-5-21-1004336348-1177238915-682003330-1104)'
+        @($lines | Where-Object { $_ -like 'Signed-in user (this session)*' }) | Should -BeNullOrEmpty
     }
 
     It 'Has the execution policy, Group Policy, the pending restart and Winget-AutoUpdate, and goes on past a key it cannot read' {
@@ -761,7 +769,7 @@ Describe 'Making the bundle (Invoke-DiagnosticsCollection)' {
         Mock Get-InstallAccountContext { New-TestAccountContext -CrossUser -ProcessUser 'CONTOSO\admin-tech' -SessionUser 'CONTOSO\jdoe' }
         Mock Test-IsAdmin { $true }
         Mock Get-DiagnosticsIdentityHint { New-TestIdentityHint }
-        Mock Get-DiagnosticsSystemReport { @('This collection ran as: CONTOSO\admin-tech, elevated: yes', 'Signed-in user (console session): CONTOSO\jdoe') }
+        Mock Get-DiagnosticsSystemReport { @('This collection ran as: CONTOSO\admin-tech, elevated: yes', 'Signed-in user (this session): CONTOSO\jdoe') }
         Mock Get-DiagnosticsWingetReport { @('winget --version: exit 0x00000000 (0), 0.2 seconds', '  v1.26.510') }
         Mock Get-DiagnosticsAppxReport { $script:fixtures['appx.txt'] -split '\r?\n' }
         Mock Get-DiagnosticsWauLogTail { $script:fixtures['wau-updates.txt'] -split '\r?\n' }

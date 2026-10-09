@@ -57,12 +57,64 @@ function Test-IsSystemAccount {
 
 <#
 .SYNOPSIS
-    Returns the account that owns the interactive console session (DOMAIN\user), or $null.
+    Returns the owner (DOMAIN\user) of the oldest explorer.exe in a Windows session, or $null.
+.DESCRIPTION
+    The oldest shell is the one Windows started at sign-in; an explorer.exe a technician starts
+    later as another account is newer. A shell whose owner cannot be read is passed over. Throws
+    when the session's processes cannot be listed.
+.PARAMETER SessionId
+    The Windows session, as Process.SessionId gives it.
+.OUTPUTS
+    [string] DOMAIN\user, or $null when no shell in the session has an owner that can be read.
+#>
+function Get-SessionShellOwnerName {
+    param (
+        [Parameter(Mandatory = $true)]
+        [int]$SessionId
+    )
+
+    $filter = "Name = 'explorer.exe' AND SessionId = {0}" -f $SessionId
+    $shells = @(Get-CimInstance -ClassName Win32_Process -Filter $filter -ErrorAction Stop | Sort-Object -Property CreationDate)
+    foreach ($shell in $shells) {
+        try {
+            $owner = Invoke-CimMethod -InputObject $shell -MethodName GetOwner -ErrorAction Stop
+        }
+        catch {
+            continue
+        }
+        # GetOwner returns 0 on success; 2 (access denied) and the others leave User empty.
+        if ($owner -and $owner.ReturnValue -eq 0 -and -not [string]::IsNullOrWhiteSpace($owner.User) -and -not [string]::IsNullOrWhiteSpace($owner.Domain)) {
+            return '{0}\{1}' -f $owner.Domain, $owner.User
+        }
+    }
+    return $null
+}
+
+<#
+.SYNOPSIS
+    Returns the user signed in to this process's Windows session (DOMAIN\user), or $null.
 .DESCRIPTION
     Compared with Get-ProcessUserName to detect cross-user elevation, where winget's per-user MSIX
     setup fails with 0x80073D19 because the process account has no interactive logon (issue #159).
+    An elevated window stays in the session it was opened from, at the console or over Remote
+    Desktop, so the user is the owner of that session's shell (Get-SessionShellOwnerName).
+    Win32_ComputerSystem's UserName names the console's user only, empty over Remote Desktop, so
+    it is the answer only when no shell owner is found: session 0 (SYSTEM, a service), no shell, or
+    a query that failed.
+.OUTPUTS
+    [string] DOMAIN\user, or $null when neither names a user. Never throws.
 #>
 function Get-InteractiveSessionUserName {
+    try {
+        $sessionId = [System.Diagnostics.Process]::GetCurrentProcess().SessionId
+        $shellOwner = Get-SessionShellOwnerName -SessionId $sessionId
+        if ($shellOwner) {
+            return $shellOwner
+        }
+    }
+    catch {
+        # No answer from this session's shell: the console user below.
+    }
     try {
         $userName = (Get-CimInstance -ClassName Win32_ComputerSystem -ErrorAction Stop).UserName
         if ([string]::IsNullOrWhiteSpace($userName)) {
@@ -82,8 +134,9 @@ function Get-InteractiveSessionUserName {
     Read once by Invoke-WingetInstall and passed to the steps that depend on it:
       - IsSystem: the process runs as SYSTEM (an RMM agent), which has no per-user winget and whose
         per-user installs would land in its own profile.
-      - IsCrossUserElevation: the process runs as another account than the user signed in at the
-        console (issue #159), such as a technician's admin account. Always False for SYSTEM.
+      - IsCrossUserElevation: the process runs as another account than the user signed in to this
+        session (issue #159), at the console or over Remote Desktop, such as a technician's admin
+        account (Get-InteractiveSessionUserName). Always False for SYSTEM.
     In both cases the run installs machine-wide only, and defers an app with no machine-wide
     installer instead of installing it for the wrong account.
 .OUTPUTS

@@ -512,7 +512,7 @@ function Invoke-WingetInstall {
     # Best-effort and isolated: an unexpected error here must not skip the retry pass, the summary
     # or the exit-code decision below.
     try {
-        Set-WindowsTerminalDefaults -WhatIf:$WhatIf
+        Set-WindowsTerminalDefaults -WhatIf:$WhatIf -AccountContext $account
     }
     catch {
         Write-WarningMessage "Windows Terminal configuration failed unexpectedly: $_. Continuing; app installs are not affected."

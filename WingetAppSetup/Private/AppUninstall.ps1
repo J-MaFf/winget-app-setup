@@ -33,6 +33,51 @@ function Get-HostingShellSkipReason {
 
 <#
 .SYNOPSIS
+    Returns why a run as SYSTEM or under cross-user elevation must leave a per-user MSIX app alone,
+    or $null.
+.DESCRIPTION
+    An entry with msixName is registered for each user. Such a run acts for another account than
+    the user it belongs to: `winget list` and `winget uninstall` would answer for SYSTEM or the
+    elevated admin, not for that user. The same runs make the installer install machine-wide only
+    (Install.ps1's $machineWide), and decide such an app from its provisioning; this uninstaller
+    removes no provisioned package.
+.PARAMETER App
+    A validated catalog entry (Test-AppDefinitions).
+.PARAMETER AccountContext
+    Get-InstallAccountContext's result; read here when not given and the entry has msixName.
+.OUTPUTS
+    [string] The skip reason, or $null when this run can remove the app.
+#>
+function Get-PerUserAppSkipReason {
+    param (
+        [Parameter(Mandatory = $true)]
+        [hashtable]$App,
+
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [object]$AccountContext
+    )
+
+    if ([string]::IsNullOrWhiteSpace([string]$App['msixName'])) {
+        return $null
+    }
+    if ($null -eq $AccountContext) {
+        $AccountContext = Get-InstallAccountContext
+    }
+    if ($AccountContext.IsSystem) {
+        $runsAs = 'it runs as SYSTEM'
+    }
+    elseif ($AccountContext.IsCrossUserElevation) {
+        $runsAs = "it runs as '$($AccountContext.ProcessUser)' in the session of '$($AccountContext.SessionUser)'"
+    }
+    else {
+        return $null
+    }
+    return "a per-user app that this run cannot remove: $runsAs; to remove it, run winget-app-uninstall.ps1 signed in as the user it belongs to"
+}
+
+<#
+.SYNOPSIS
     Returns whether a `winget uninstall` result says the app was removed and a restart finishes it.
 .DESCRIPTION
     winget's uninstall has no restart result of its own: any non-zero return from the app's
@@ -538,39 +583,47 @@ function Invoke-AppQuietUninstall {
     Uninstalls one catalog app without prompting, and says what happened.
 .DESCRIPTION
     The uninstaller's counterpart of Install-AppWithVerification, in this order:
-      1. Installed check (Test-WingetPackageInstalled, WingetListCheck time limit). A winget that
+      1. A per-user MSIX app (msixName) in a run as SYSTEM or under cross-user elevation
+         (Get-PerUserAppSkipReason): Skipped, PerUserApp, before any winget call, since even
+         `winget list` would answer for the running account rather than the app's user.
+      2. Installed check (Test-WingetPackageInstalled, WingetListCheck time limit). A winget that
          could not start, ran out of time or failed is a failure, never "not installed" (P2-19).
-      2. Not installed: Skipped, NotInstalled.
-      3. A shell this run depends on (Get-HostingShellSkipReason): Skipped, HostsThisRun.
-      4. Not applicable by the installer's own rule (Test-AppApplicability, failing open): Skipped,
+      3. Not installed: Skipped, NotInstalled.
+      4. A shell this run depends on (Get-HostingShellSkipReason): Skipped, HostsThisRun.
+      5. Not applicable by the installer's own rule (Test-AppApplicability, failing open): Skipped,
          NotApplicable, and left alone.
-      5. An entry with quietUninstall: its own uninstaller (Get-AppQuietUninstallCommand). When it
+      6. An entry with quietUninstall: its own uninstaller (Get-AppQuietUninstallCommand). When it
          cannot be found, Failed, UninstallerNotFound, with nothing run: `winget uninstall` would
          start the same entry's command as written and wait. Otherwise Invoke-AppQuietUninstall.
-      6. Any other entry: `winget uninstall --exact --id <id> --silent --accept-source-agreements
+      7. Any other entry: `winget uninstall --exact --id <id> --silent --accept-source-agreements
          --disable-interactivity` through Invoke-WingetProcess (WingetUninstall time limit). For an
          MSI, --silent adds /quiet. For an exe app winget runs the entry's QuietUninstallString,
          else its UninstallString, exactly as written, whatever --silent says: such an app needs
          quietUninstall when that command waits for a click. Exit 0 is Uninstalled; a 3010 or 1641
          from the app's uninstaller (Test-WingetUninstallRestartRequiredResult) is Uninstalled with
          RestartRequired; anything else is Failed.
-    The installed check comes first, so an app that is not there is reported as not installed.
+    After step 1, which asks winget nothing, the installed check comes first, so an app that is not
+    there is reported as not installed.
 .PARAMETER App
     A validated catalog entry (Test-AppDefinitions).
+.PARAMETER AccountContext
+    Get-InstallAccountContext's result, which Invoke-WingetUninstall passes; read in step 1 when not
+    given and the entry has msixName.
 .PARAMETER WhatIf
-    Dry run: steps 1 to 4, and step 5's search for the uninstaller, run (they only read); an app
-    that would be removed is reported as Uninstalled, with Command set for step 5, and nothing runs.
+    Dry run: steps 1 to 5, and step 6's search for the uninstaller, run (they only read); an app
+    that would be removed is reported as Uninstalled, with Command set for step 6, and nothing runs.
 .OUTPUTS
     [hashtable] @{
         Status          = 'Uninstalled' | 'Skipped' | 'Failed'
-        SkipReason      = 'NotInstalled' | 'HostsThisRun' | 'NotApplicable' when Skipped
+        SkipReason      = 'PerUserApp' | 'NotInstalled' | 'HostsThisRun' | 'NotApplicable' when
+                          Skipped
         FailureReason   = 'CheckTimeout' | 'CheckLaunchFailed' | 'CheckFailed' |
                           'UninstallerNotFound' | 'UninstallLaunchFailed' | 'UninstallTimeout' |
                           'UninstallFailed' | 'UninstallVerifyFailed' when Failed
         Reason          = the text shown in parentheses after the app id
         ExitCode        = the exit code of the call that decided a failure, or $null
         RestartRequired = True when the app's uninstaller said a restart finishes removing it
-        Command         = the command line of the app's own uninstaller (step 5), or $null
+        Command         = the command line of the app's own uninstaller (step 6), or $null
     }
 #>
 function Uninstall-CatalogApp {
@@ -579,11 +632,25 @@ function Uninstall-CatalogApp {
         [hashtable]$App,
 
         [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [object]$AccountContext,
+
+        [Parameter(Mandatory = $false)]
         [switch]$WhatIf
     )
 
     $id = $App.name
     $result = @{ Status = 'Failed'; SkipReason = $null; FailureReason = $null; Reason = $null; ExitCode = $null; RestartRequired = $false; Command = $null }
+
+    # First, with no winget call: as SYSTEM or another user's admin, winget would check and remove
+    # the app for the wrong account (the installer's machine-wide rule, wgt-gq8.70).
+    $perUserReason = Get-PerUserAppSkipReason -App $App -AccountContext $AccountContext
+    if ($perUserReason) {
+        $result.Status = 'Skipped'
+        $result.SkipReason = 'PerUserApp'
+        $result.Reason = $perUserReason
+        return $result
+    }
 
     $checkTimeoutSeconds = Get-ProcessTimeoutSeconds -Operation WingetListCheck
     $check = Test-WingetPackageInstalled -PackageId $id -TimeoutSeconds $checkTimeoutSeconds

@@ -462,6 +462,108 @@ Describe 'Invoke-WingetUninstall' {
         }
     }
 
+    # wgt-gq8.70: as SYSTEM or as an admin elevated in another user's session, the uninstaller
+    # asked winget to list and remove Windows Terminal, a per-user MSIX, for the wrong account.
+    Context 'Per-user MSIX apps in a run as SYSTEM or under cross-user elevation (wgt-gq8.70)' {
+        BeforeEach {
+            Mock Test-IsSystemAccount { $false }
+            $script:installed['Microsoft.WindowsTerminal'] = $true
+            $script:terminal = @(Get-DefaultAppCatalog) | Where-Object { $_.name -eq 'Microsoft.WindowsTerminal' }
+            $script:crossUserReason = "a per-user app that this run cannot remove: it runs as 'CONTOSO\admin-jmaffiola' in the session of 'CONTOSO\stduser'; to remove it, run winget-app-uninstall.ps1 signed in as the user it belongs to"
+            $script:systemReason = 'a per-user app that this run cannot remove: it runs as SYSTEM; to remove it, run winget-app-uninstall.ps1 signed in as the user it belongs to'
+        }
+
+        It 'Skips Windows Terminal under cross-user elevation without asking winget, still removes the other apps and Winget-AutoUpdate, and exits 0' {
+            Mock Get-InstallAccountContext { New-TestAccountContext -CrossUser -ProcessUser 'CONTOSO\admin-jmaffiola' -SessionUser 'CONTOSO\stduser' }
+
+            $result = Invoke-WingetUninstall -Apps (@($script:terminal) + @($script:apps))
+
+            $result | Should -Be 0
+            $script:warningMessages | Should -Contain "Skipping: Microsoft.WindowsTerminal ($script:crossUserReason)"
+            $script:sequence | Should -Be @('list Contoso.AppOne', 'uninstall Contoso.AppOne', 'list Contoso.AppTwo', 'uninstall Contoso.AppTwo')
+            $script:capturedTables['Uninstallation Summary'] | Should -HaveCount 2
+            $script:capturedTables['Uninstallation Summary'][0] | Should -Be @('Uninstalled', 'Contoso.AppOne, Contoso.AppTwo')
+            $script:capturedTables['Uninstallation Summary'][1] | Should -Be @('Skipped', 'Microsoft.WindowsTerminal')
+            Should -Invoke Uninstall-WingetAutoUpdate -Times 1 -Exactly -ParameterFilter { -not $WhatIf }
+            # Not gone, only left alone: the admin's default-terminal setting is not touched.
+            Should -Invoke Reset-WindowsTerminalDelegation -Times 0 -Exactly
+            # Read once for the run and passed to each app.
+            Should -Invoke Get-InstallAccountContext -Times 1 -Exactly
+        }
+
+        It 'Skips Windows Terminal as SYSTEM without asking winget, and exits 0' {
+            Mock Get-InstallAccountContext { New-TestAccountContext -System -SessionUser 'CONTOSO\stduser' }
+
+            $result = Invoke-WingetUninstall -Apps @($script:terminal)
+
+            $result | Should -Be 0
+            $script:warningMessages | Should -Contain "Skipping: Microsoft.WindowsTerminal ($script:systemReason)"
+            Should -Invoke Invoke-WingetProcess -Times 0 -Exactly
+            Should -Invoke Uninstall-WingetAutoUpdate -Times 1 -Exactly
+        }
+
+        It 'Shows the same skip in a dry run' {
+            Mock Get-InstallAccountContext { New-TestAccountContext -CrossUser -ProcessUser 'CONTOSO\admin-jmaffiola' -SessionUser 'CONTOSO\stduser' }
+
+            $result = Invoke-WingetUninstall -Apps @($script:terminal) -WhatIf
+
+            $result | Should -Be 0
+            $script:warningMessages | Should -Contain "Skipping: Microsoft.WindowsTerminal ($script:crossUserReason)"
+            $script:infoMessages | Should -Not -Contain '[DRY-RUN] Would uninstall: Microsoft.WindowsTerminal'
+            $script:capturedTables['Uninstallation Summary'][0] | Should -Be @('Skipped', 'Microsoft.WindowsTerminal')
+            Should -Invoke Invoke-WingetProcess -Times 0 -Exactly
+        }
+
+        It 'Still removes Windows Terminal in the signed-in user''s own elevated run' {
+            $result = Invoke-WingetUninstall -Apps @($script:terminal)
+
+            $result | Should -Be 0
+            $script:sequence | Should -Be @('list Microsoft.WindowsTerminal', 'uninstall Microsoft.WindowsTerminal')
+            $script:successMessages | Should -Contain 'Successfully uninstalled: Microsoft.WindowsTerminal'
+        }
+
+        It 'Returns Skipped, PerUserApp, and calls no winget, for <Case>' -ForEach @(
+            @{ Case = 'cross-user elevation'; System = $false }
+            @{ Case = 'SYSTEM'; System = $true }
+        ) {
+            Mock Test-WingetPackageInstalled { throw 'the installed check must not run' }
+            $account = New-TestAccountContext -CrossUser -ProcessUser 'CONTOSO\admin-jmaffiola' -SessionUser 'CONTOSO\stduser'
+            $reason = $script:crossUserReason
+            if ($System) {
+                $account = New-TestAccountContext -System -SessionUser 'CONTOSO\stduser'
+                $reason = $script:systemReason
+            }
+
+            $result = Uninstall-CatalogApp -App $script:terminal -AccountContext $account
+
+            $result.Status | Should -Be 'Skipped'
+            $result.SkipReason | Should -Be 'PerUserApp'
+            $result.Reason | Should -Be $reason
+            $result.Reason | Should -BeLike 'a per-user app that this run cannot remove: *'
+            Should -Invoke Test-WingetPackageInstalled -Times 0 -Exactly
+            Should -Invoke Invoke-WingetProcess -Times 0 -Exactly
+            Should -Invoke Get-InstallAccountContext -Times 0 -Exactly
+        }
+
+        It 'Removes an entry without msixName under cross-user elevation as before' {
+            $account = New-TestAccountContext -CrossUser -ProcessUser 'CONTOSO\admin-jmaffiola' -SessionUser 'CONTOSO\stduser'
+
+            $result = Uninstall-CatalogApp -App @{ name = 'Contoso.AppOne' } -AccountContext $account
+
+            $result.Status | Should -Be 'Uninstalled'
+            $script:sequence | Should -Be @('list Contoso.AppOne', 'uninstall Contoso.AppOne')
+        }
+
+        It 'Reads the account itself when not given one, only for an entry with msixName' {
+            Mock Get-InstallAccountContext { New-TestAccountContext -CrossUser -ProcessUser 'CONTOSO\admin-jmaffiola' -SessionUser 'CONTOSO\stduser' }
+
+            (Uninstall-CatalogApp -App $script:terminal).SkipReason | Should -Be 'PerUserApp'
+            (Uninstall-CatalogApp -App @{ name = 'Contoso.AppOne' }).Status | Should -Be 'Uninstalled'
+
+            Should -Invoke Get-InstallAccountContext -Times 1 -Exactly
+        }
+    }
+
     Context 'The winget uninstall call (P3-18)' {
         It 'Runs through Invoke-WingetProcess with --silent and the uninstall time limit, even when someone is at the console' {
             Mock Test-EffectiveNonInteractive { $false }
@@ -744,6 +846,8 @@ function Wait-InstallerExitKeyPress {
         $run.Output | Should -Not -Match 'RELAUNCH'
         $run.Output | Should -Match 'UNINSTALL WhatIf=True'
         $run.Output | Should -Match 'INFO: \[DRY-RUN\] A real run needs administrator rights'
+        # wgt-gq8.71 review: this preview runs as the signed-in user, the real run perhaps not.
+        $run.Output | Should -Match 'the real run keeps the per-user apps \(Windows Terminal\) this preview may list\.'
     }
 
     It 'Changes nothing and exits 5 under irm | iex when nobody is at the console: it runs only from a file' {

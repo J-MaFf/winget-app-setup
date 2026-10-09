@@ -722,18 +722,171 @@ Describe 'Get-InstallAccountContext (review findings P2-24, P3-22, P3-23)' {
         $context.IsCrossUserElevation | Should -BeTrue
     }
 
-    It 'Says neither for <Case>' -ForEach @(
-        @{ Case = 'the signed-in user''s own run'; Session = 'CONTOSO\jdoe' }
-        @{ Case = 'the same account in other letter case'; Session = 'contoso\JDOE' }
-        @{ Case = 'no console user reported'; Session = $null }
+    It 'Says neither for <Case>, with no shell owner found in this session' -ForEach @(
+        @{ Case = 'the signed-in user''s own run'; Console = 'CONTOSO\jdoe' }
+        @{ Case = 'the same account in other letter case'; Console = 'contoso\JDOE' }
+        @{ Case = 'no console user reported'; Console = $null }
     ) {
         Mock Test-IsSystemAccount { $false }
         Mock Get-ProcessUserName { 'CONTOSO\jdoe' }
-        Mock Get-InteractiveSessionUserName { $Session }
+        # No shell owner, so the console user (Win32_ComputerSystem) is the only answer.
+        Mock Get-SessionShellOwnerName { $null }
+        Mock Get-CimInstance { [pscustomobject]@{ UserName = $Console } } -ParameterFilter { $ClassName -eq 'Win32_ComputerSystem' }
+        Mock Get-CimInstance { throw "unexpected query: $ClassName" }
 
         $context = Get-InstallAccountContext
 
         $context.IsSystem | Should -BeFalse
         $context.IsCrossUserElevation | Should -BeFalse
+        $context.SessionUser | Should -Be $Console
+        Should -Invoke Get-SessionShellOwnerName -Times 1 -Exactly
+    }
+}
+
+# wgt-gq8.70: Win32_ComputerSystem.UserName names the console's user only, so over Remote Desktop
+# it was empty and an admin elevated in the standard user's RDP session read as a same-user run.
+Describe 'Get-InteractiveSessionUserName and Get-InstallAccountContext: the user signed in to this session (wgt-gq8.70)' {
+    BeforeAll {
+        # What the code asks WMI for: the shells in this test process's own session.
+        $script:shellFilter = "Name = 'explorer.exe' AND SessionId = {0}" -f [System.Diagnostics.Process]::GetCurrentProcess().SessionId
+        $script:signIn = [datetime]'2026-10-09T08:00:00'
+
+        # A Win32_Process row for explorer.exe, and what GetOwner answers for it.
+        function New-TestShell {
+            param ([int]$ProcessId, [datetime]$Started, [string]$Domain, [string]$User, [int]$ReturnValue = 0)
+            $script:owners[$ProcessId] = [pscustomobject]@{ ReturnValue = [uint32]$ReturnValue; Domain = $Domain; User = $User }
+            [pscustomobject]@{ Name = 'explorer.exe'; ProcessId = $ProcessId; CreationDate = $Started }
+        }
+    }
+
+    BeforeEach {
+        Mock Test-IsSystemAccount { $false }
+        Mock Get-ProcessUserName { 'CONTOSO\admin-jmaffiola' }
+        $script:consoleUser = $null
+        $script:shells = @()
+        $script:owners = @{}
+        Mock Get-CimInstance { throw "unexpected query: $ClassName $Filter" }
+        Mock Get-CimInstance { [pscustomobject]@{ UserName = $script:consoleUser } } -ParameterFilter { $ClassName -eq 'Win32_ComputerSystem' }
+        Mock Get-CimInstance { $script:shells } -ParameterFilter { $ClassName -eq 'Win32_Process' -and $Filter -eq $script:shellFilter }
+        # -RemoveParameterType: the real -InputObject is a CimInstance, which the fake rows are not.
+        Mock Invoke-CimMethod { throw "unexpected method: $MethodName" } -RemoveParameterType InputObject
+        Mock Invoke-CimMethod { $script:owners[[int]$InputObject.ProcessId] } -ParameterFilter { $MethodName -eq 'GetOwner' } -RemoveParameterType InputObject
+    }
+
+    It 'Says cross-user elevation over Remote Desktop, where the console has no user and this session''s shell is the standard user''s' {
+        $script:shells = @(New-TestShell -ProcessId 4100 -Started $script:signIn -Domain 'CONTOSO' -User 'stduser')
+
+        $context = Get-InstallAccountContext
+
+        $context.IsCrossUserElevation | Should -BeTrue
+        $context.SessionUser | Should -Be 'CONTOSO\stduser'
+        $context.ProcessUser | Should -Be 'CONTOSO\admin-jmaffiola'
+        Should -Invoke Get-CimInstance -Times 1 -Exactly -ParameterFilter { $ClassName -eq 'Win32_Process' -and $Filter -eq $script:shellFilter }
+        Should -Invoke Invoke-CimMethod -Times 1 -Exactly -ParameterFilter { $MethodName -eq 'GetOwner' -and $InputObject.ProcessId -eq 4100 }
+        # The shell answered, so the console is never asked.
+        Should -Invoke Get-CimInstance -Times 0 -Exactly -ParameterFilter { $ClassName -eq 'Win32_ComputerSystem' }
+    }
+
+    It 'Says same-user when this session''s shell is the process''s own account, whoever is at the console' {
+        $script:consoleUser = 'CONTOSO\otheruser'
+        $script:shells = @(New-TestShell -ProcessId 4100 -Started $script:signIn -Domain 'CONTOSO' -User 'admin-jmaffiola')
+
+        $context = Get-InstallAccountContext
+
+        $context.IsCrossUserElevation | Should -BeFalse
+        $context.SessionUser | Should -Be 'CONTOSO\admin-jmaffiola'
+    }
+
+    It 'Takes the oldest shell''s owner, the one Windows started at sign-in, not a later explorer.exe started as another account' {
+        # Listed newest first, so the order has to come from CreationDate.
+        $script:shells = @(
+            New-TestShell -ProcessId 5200 -Started $script:signIn.AddMinutes(30) -Domain 'CONTOSO' -User 'admin-jmaffiola'
+            New-TestShell -ProcessId 4100 -Started $script:signIn -Domain 'CONTOSO' -User 'stduser'
+        )
+
+        $context = Get-InstallAccountContext
+
+        $context.SessionUser | Should -Be 'CONTOSO\stduser'
+        $context.IsCrossUserElevation | Should -BeTrue
+    }
+
+    It 'Takes the next shell when the oldest one''s owner cannot be read' {
+        $script:shells = @(
+            New-TestShell -ProcessId 4100 -Started $script:signIn -Domain '' -User '' -ReturnValue 2
+            New-TestShell -ProcessId 5200 -Started $script:signIn.AddMinutes(30) -Domain 'CONTOSO' -User 'stduser'
+        )
+
+        Get-InteractiveSessionUserName | Should -Be 'CONTOSO\stduser'
+    }
+
+    It 'Passes over the oldest shell when <Case>, takes the next one, and never asks the console' -ForEach @(
+        @{ Case = 'GetOwner throws (the shell exited after the query)'; Throws = $true; ReturnValue = 0; Domain = 'CONTOSO'; User = 'admin-jmaffiola' }
+        @{ Case = 'GetOwner answers 2 with a user still set'; Throws = $false; ReturnValue = 2; Domain = 'CONTOSO'; User = 'admin-jmaffiola' }
+        @{ Case = 'GetOwner answers 0 with no domain'; Throws = $false; ReturnValue = 0; Domain = ''; User = 'admin-jmaffiola' }
+    ) {
+        # wgt-gq8.71 review: a per-shell failure must not end the walk, or the RDP case falls back to
+        # the console's user, which is empty over Remote Desktop.
+        $script:shells = @(
+            New-TestShell -ProcessId 4100 -Started $script:signIn -Domain $Domain -User $User -ReturnValue $ReturnValue
+            New-TestShell -ProcessId 5200 -Started $script:signIn.AddMinutes(30) -Domain 'CONTOSO' -User 'stduser'
+        )
+        if ($Throws) {
+            Mock Invoke-CimMethod { throw 'Not found' } -ParameterFilter { $MethodName -eq 'GetOwner' -and $InputObject.ProcessId -eq 4100 } -RemoveParameterType InputObject
+        }
+
+        Get-InteractiveSessionUserName | Should -Be 'CONTOSO\stduser'
+        Should -Invoke Invoke-CimMethod -Times 1 -Exactly -ParameterFilter { $MethodName -eq 'GetOwner' -and $InputObject.ProcessId -eq 4100 }
+        Should -Invoke Get-CimInstance -Times 0 -Exactly -ParameterFilter { $ClassName -eq 'Win32_ComputerSystem' }
+    }
+
+    It 'Falls back to the console user (<Console>) when this session has no explorer.exe: cross-user <CrossUser>' -ForEach @(
+        @{ Console = 'CONTOSO\stduser'; CrossUser = $true }
+        @{ Console = 'CONTOSO\admin-jmaffiola'; CrossUser = $false }
+    ) {
+        $script:consoleUser = $Console
+
+        $context = Get-InstallAccountContext
+
+        $context.SessionUser | Should -Be $Console
+        $context.IsCrossUserElevation | Should -Be $CrossUser
+        Should -Invoke Get-CimInstance -Times 1 -Exactly -ParameterFilter { $ClassName -eq 'Win32_Process' -and $Filter -eq $script:shellFilter }
+        Should -Invoke Get-CimInstance -Times 1 -Exactly -ParameterFilter { $ClassName -eq 'Win32_ComputerSystem' }
+        Should -Invoke Invoke-CimMethod -Times 0 -Exactly
+    }
+
+    It 'Falls back to the console user when GetOwner <Case>' -ForEach @(
+        @{ Case = 'throws'; Throws = $true; ReturnValue = 0; User = 'stduser' }
+        @{ Case = 'answers access denied (2)'; Throws = $false; ReturnValue = 2; User = '' }
+        @{ Case = 'answers 0 with no user'; Throws = $false; ReturnValue = 0; User = '' }
+    ) {
+        $script:consoleUser = 'CONTOSO\consoleuser'
+        $script:shells = @(New-TestShell -ProcessId 4100 -Started $script:signIn -Domain 'CONTOSO' -User $User -ReturnValue $ReturnValue)
+        if ($Throws) {
+            Mock Invoke-CimMethod { throw 'Access denied' } -ParameterFilter { $MethodName -eq 'GetOwner' } -RemoveParameterType InputObject
+        }
+
+        Get-InteractiveSessionUserName | Should -Be 'CONTOSO\consoleuser'
+        Should -Invoke Invoke-CimMethod -Times 1 -Exactly -ParameterFilter { $MethodName -eq 'GetOwner' -and $InputObject.ProcessId -eq 4100 }
+    }
+
+    It 'Falls back to the console user, and never throws, when the shells cannot be listed' {
+        $script:consoleUser = 'CONTOSO\consoleuser'
+        Mock Get-CimInstance { throw 'The RPC server is unavailable.' } -ParameterFilter { $ClassName -eq 'Win32_Process' }
+
+        { $script:sessionUser = Get-InteractiveSessionUserName } | Should -Not -Throw
+
+        $script:sessionUser | Should -Be 'CONTOSO\consoleuser'
+        Should -Invoke Get-CimInstance -Times 1 -Exactly -ParameterFilter { $ClassName -eq 'Win32_Process' }
+    }
+
+    It 'Returns $null, and never throws, when neither WMI query answers' {
+        Mock Get-CimInstance { throw 'The RPC server is unavailable.' } -ParameterFilter { $ClassName -eq 'Win32_Process' }
+        Mock Get-CimInstance { throw 'The RPC server is unavailable.' } -ParameterFilter { $ClassName -eq 'Win32_ComputerSystem' }
+
+        { $script:sessionUser = Get-InteractiveSessionUserName } | Should -Not -Throw
+
+        $script:sessionUser | Should -BeNullOrEmpty
+        Should -Invoke Get-CimInstance -Times 1 -Exactly -ParameterFilter { $ClassName -eq 'Win32_Process' }
+        Should -Invoke Get-CimInstance -Times 1 -Exactly -ParameterFilter { $ClassName -eq 'Win32_ComputerSystem' }
     }
 }

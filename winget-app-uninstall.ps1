@@ -8,9 +8,11 @@
     so it needs nothing next to it. The work is Invoke-WingetUninstall
     (WingetAppSetup/Public/Uninstall.ps1): it sets up winget the way the installer does and removes
     nothing when winget cannot be started; it keeps the PowerShell 7 and Windows Terminal this run
-    depends on, and the apps whose catalog condition does not hold here; and it removes
-    Winget-AutoUpdate last, only when every app is gone. The app list is the module's catalog
-    (Get-DefaultAppCatalog in WingetAppSetup/Public/AppCatalog.ps1): edit it there, never here.
+    depends on, the apps whose catalog condition does not hold here, and, as SYSTEM or elevated as
+    another account than the signed-in user, the per-user apps (Windows Terminal), which it cannot
+    remove for that user; and it removes Winget-AutoUpdate last, only when every app is gone. The
+    app list is the module's catalog (Get-DefaultAppCatalog in WingetAppSetup/Public/AppCatalog.ps1):
+    edit it there, never here.
 
     Run it from a file. Started without one (irm | iex), it changes nothing and stops with exit
     code 5.
@@ -72,6 +74,34 @@ function Get-HostingShellSkipReason {
         return 'Windows Terminal hosts this window, or is set as the default terminal application, so removing it would close this window; to remove it, set the default terminal application to Windows Console Host and run winget-app-uninstall.ps1 from a window Windows Terminal does not host'
     }
     return $null
+}
+
+function Get-PerUserAppSkipReason {
+    param (
+        [Parameter(Mandatory = $true)]
+        [hashtable]$App,
+
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [object]$AccountContext
+    )
+
+    if ([string]::IsNullOrWhiteSpace([string]$App['msixName'])) {
+        return $null
+    }
+    if ($null -eq $AccountContext) {
+        $AccountContext = Get-InstallAccountContext
+    }
+    if ($AccountContext.IsSystem) {
+        $runsAs = 'it runs as SYSTEM'
+    }
+    elseif ($AccountContext.IsCrossUserElevation) {
+        $runsAs = "it runs as '$($AccountContext.ProcessUser)' in the session of '$($AccountContext.SessionUser)'"
+    }
+    else {
+        return $null
+    }
+    return "a per-user app that this run cannot remove: $runsAs; to remove it, run winget-app-uninstall.ps1 signed in as the user it belongs to"
 }
 
 function Test-WingetUninstallRestartRequiredResult {
@@ -441,11 +471,23 @@ function Uninstall-CatalogApp {
         [hashtable]$App,
 
         [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [object]$AccountContext,
+
+        [Parameter(Mandatory = $false)]
         [switch]$WhatIf
     )
 
     $id = $App.name
     $result = @{ Status = 'Failed'; SkipReason = $null; FailureReason = $null; Reason = $null; ExitCode = $null; RestartRequired = $false; Command = $null }
+
+    $perUserReason = Get-PerUserAppSkipReason -App $App -AccountContext $AccountContext
+    if ($perUserReason) {
+        $result.Status = 'Skipped'
+        $result.SkipReason = 'PerUserApp'
+        $result.Reason = $perUserReason
+        return $result
+    }
 
     $checkTimeoutSeconds = Get-ProcessTimeoutSeconds -Operation WingetListCheck
     $check = Test-WingetPackageInstalled -PackageId $id -TimeoutSeconds $checkTimeoutSeconds
@@ -1502,8 +1544,12 @@ function Get-DiagnosticsSystemReport {
     if ($IsAdmin) {
         $elevated = 'yes'
     }
+    $sessionLabel = 'this session'
+    if ($AccountContext -and $AccountContext.IsSystem) {
+        $sessionLabel = 'at the console'
+    }
     $lines.Add("This collection ran as: $processUser, elevated: $elevated")
-    $lines.Add("Signed-in user (console session): $sessionUser")
+    $lines.Add("Signed-in user ($sessionLabel): $sessionUser")
     $lines.Add("Elevation style: $(Get-DiagnosticsElevationStyle -AccountContext $AccountContext -IsAdmin $IsAdmin)")
     $lines.Add('(The transcripts'' headers show the accounts of the runs themselves: Username is the signed-in user, RunAs User the account that ran the installer.)')
 
@@ -2176,7 +2222,38 @@ function Test-IsSystemAccount {
     }
 }
 
+function Get-SessionShellOwnerName {
+    param (
+        [Parameter(Mandatory = $true)]
+        [int]$SessionId
+    )
+
+    $filter = "Name = 'explorer.exe' AND SessionId = {0}" -f $SessionId
+    $shells = @(Get-CimInstance -ClassName Win32_Process -Filter $filter -ErrorAction Stop | Sort-Object -Property CreationDate)
+    foreach ($shell in $shells) {
+        try {
+            $owner = Invoke-CimMethod -InputObject $shell -MethodName GetOwner -ErrorAction Stop
+        }
+        catch {
+            continue
+        }
+        if ($owner -and $owner.ReturnValue -eq 0 -and -not [string]::IsNullOrWhiteSpace($owner.User) -and -not [string]::IsNullOrWhiteSpace($owner.Domain)) {
+            return '{0}\{1}' -f $owner.Domain, $owner.User
+        }
+    }
+    return $null
+}
+
 function Get-InteractiveSessionUserName {
+    try {
+        $sessionId = [System.Diagnostics.Process]::GetCurrentProcess().SessionId
+        $shellOwner = Get-SessionShellOwnerName -SessionId $sessionId
+        if ($shellOwner) {
+            return $shellOwner
+        }
+    }
+    catch {
+    }
     try {
         $userName = (Get-CimInstance -ClassName Win32_ComputerSystem -ErrorAction Stop).UserName
         if ([string]::IsNullOrWhiteSpace($userName)) {
@@ -9291,7 +9368,16 @@ function Get-WingetSourceUnusableMessage {
         $codeText = Format-WingetExitCode -ExitCode $ExitCode
     }
     $message = "The winget source cannot be opened for ${who}: 'winget search --source winget' answered $codeText, so winget can neither install the apps nor tell which are installed."
-    if ($State.SourcePackage -and -not $State.SourcePackage.Registered) {
+    $packageRegistered = [bool]($State.SourcePackage -and $State.SourcePackage.Registered)
+    if ($packageRegistered) {
+        $routeText = switch ("$($State.SourcePackage.Route)") {
+            'Download' { ' (downloaded from https://cdn.winget.microsoft.com)' }
+            'FamilyName' { ' (by family name, from the copy already on this PC)' }
+            default { '' }
+        }
+        $message += " Registering the winget source package (Microsoft.Winget.Source) for the account succeeded$routeText, but winget still cannot open its source."
+    }
+    elseif ($State.SourcePackage) {
         $packageCodes = @(@($State.SourcePackage.ErrorCodes) | Select-Object -Unique)
         if ($packageCodes.Count -gt 0) {
             $message += ' Registering the winget source package (Microsoft.Winget.Source) for the account failed ({0}).' -f (@($packageCodes | ForEach-Object { Format-WingetExitCode -ExitCode $_ }) -join ', ')
@@ -9311,6 +9397,12 @@ function Get-WingetSourceUnusableMessage {
             $resetNote = " 'winget source reset --force' did not fix it."
         }
         $message += "$resetNote Fix: read winget's log for why it cannot read its source settings, check 'winget source list' in a window running as '$account' and that this PC can reach https://cdn.winget.microsoft.com, then re-run the $($toolText.Name)."
+    }
+    elseif ($packageRegistered) {
+        $message += " Fix: read winget's log for why it still cannot open the source, check that this PC can reach https://cdn.winget.microsoft.com, then re-run the $($toolText.Name)."
+        if ($AccountContext.IsCrossUserElevation) {
+            $message += " If it still fails, run the $($toolText.Name) while signed in to Windows as '$account', or $($toolText.RunAsSystem)."
+        }
     }
     elseif ($AccountContext.IsCrossUserElevation) {
         $message += " Fix: '$account' is elevated in the session of '$($AccountContext.SessionUser)' and has no logon session of its own, which Windows needs to deploy winget's source package for it: run the $($toolText.Name) while signed in to Windows as '$account', or $($toolText.RunAsSystem)."
@@ -11365,7 +11457,7 @@ function Invoke-WingetInstall {
     }
 
     try {
-        Set-WindowsTerminalDefaults -WhatIf:$WhatIf
+        Set-WindowsTerminalDefaults -WhatIf:$WhatIf -AccountContext $account
     }
     catch {
         Write-WarningMessage "Windows Terminal configuration failed unexpectedly: $_. Continuing; app installs are not affected."
@@ -11965,7 +12057,7 @@ function Invoke-WingetUninstall {
     $terminalGone = $false
     foreach ($app in $apps) {
         try {
-            $outcome = Uninstall-CatalogApp -App $app -WhatIf:$WhatIf
+            $outcome = Uninstall-CatalogApp -App $app -AccountContext $account -WhatIf:$WhatIf
             if ($app.name -eq 'Microsoft.WindowsTerminal') {
                 $terminalGone = ($outcome.Status -eq 'Uninstalled' -and -not $WhatIf) -or ($outcome.SkipReason -eq 'NotInstalled')
             }
@@ -12431,18 +12523,34 @@ function Set-WindowsTerminalDefaults {
         [switch]$WhatIf,
 
         [Parameter(Mandatory = $false)]
-        [switch]$PassThru
+        [switch]$PassThru,
+
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [object]$AccountContext
     )
 
-    if (Test-IsSystemAccount) {
+    if ($null -ne $AccountContext) {
+        $isSystem = [bool]$AccountContext.IsSystem
+    }
+    else {
+        $isSystem = [bool](Test-IsSystemAccount)
+    }
+    if ($isSystem) {
         Write-Info 'Skipping Windows Terminal defaults: they are per-user settings, and this run is SYSTEM, not a logged-on user.'
         if ($PassThru) {
             return 'Skipped'
         }
         return
     }
-    $processUser = Get-ProcessUserName
-    $sessionUser = Get-InteractiveSessionUserName
+    if ($null -ne $AccountContext) {
+        $processUser = $AccountContext.ProcessUser
+        $sessionUser = $AccountContext.SessionUser
+    }
+    else {
+        $processUser = Get-ProcessUserName
+        $sessionUser = Get-InteractiveSessionUserName
+    }
     if ($processUser -and $sessionUser -and ($processUser -ne $sessionUser)) {
         Write-Info "Skipping Windows Terminal defaults: they are per-user settings, and this run is elevated as '$processUser' while '$sessionUser' is logged on."
         if ($PassThru) {
@@ -13510,7 +13618,7 @@ catch {
 
 if ($WhatIf) {
     if (-not (Test-IsAdmin)) {
-        Write-Info '[DRY-RUN] A real run needs administrator rights and would ask for them. Continuing the preview in this session; nothing will be changed.'
+        Write-Info '[DRY-RUN] A real run needs administrator rights and would ask for them. Continuing the preview in this session; nothing will be changed. If the prompt elevates as another account than the signed-in user, the real run keeps the per-user apps (Windows Terminal) this preview may list.'
     }
 }
 elseif (-not (Test-IsAdmin)) {

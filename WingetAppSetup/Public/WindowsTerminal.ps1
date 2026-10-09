@@ -202,7 +202,8 @@ function Set-WindowsTerminalAsDefaultTerminalApplication {
     so the step is skipped, with one line, when the process runs as SYSTEM or as another account
     than the interactive session's user (cross-user elevation, issue #159): it would configure the
     wrong account. When the session user is unknown, it runs. It never writes to another user's
-    profile or hive.
+    profile or hive. The installer passes the account context it read at the start of the run, so
+    this step decides as the rest of the run did; without one (the user phase), it reads it here.
 
     The default terminal application is set only when Windows Terminal is installed
     (Test-WindowsTerminalInstalled, issue #271): pointing it at a Terminal that failed to install
@@ -212,6 +213,9 @@ function Set-WindowsTerminalAsDefaultTerminalApplication {
 .PARAMETER PassThru
     Return what happened (the user phase records it, and tries again at a later sign-in unless it is
     Applied). Without it, nothing is returned.
+.PARAMETER AccountContext
+    The run's Get-InstallAccountContext result (IsSystem, ProcessUser, SessionUser). Optional: when
+    omitted, the step reads the account itself.
 .OUTPUTS
     With -PassThru, [string]: 'Applied' (defaultProfile is set in every settings.json found and, when
     Windows Terminal is installed, the default terminal application too), 'SettingsNotFound' (no
@@ -225,19 +229,35 @@ function Set-WindowsTerminalDefaults {
         [switch]$WhatIf,
 
         [Parameter(Mandatory = $false)]
-        [switch]$PassThru
+        [switch]$PassThru,
+
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [object]$AccountContext
     )
 
     # Per-user settings: only write them for the logged-on user (see the description above).
-    if (Test-IsSystemAccount) {
+    if ($null -ne $AccountContext) {
+        $isSystem = [bool]$AccountContext.IsSystem
+    }
+    else {
+        $isSystem = [bool](Test-IsSystemAccount)
+    }
+    if ($isSystem) {
         Write-Info 'Skipping Windows Terminal defaults: they are per-user settings, and this run is SYSTEM, not a logged-on user.'
         if ($PassThru) {
             return 'Skipped'
         }
         return
     }
-    $processUser = Get-ProcessUserName
-    $sessionUser = Get-InteractiveSessionUserName
+    if ($null -ne $AccountContext) {
+        $processUser = $AccountContext.ProcessUser
+        $sessionUser = $AccountContext.SessionUser
+    }
+    else {
+        $processUser = Get-ProcessUserName
+        $sessionUser = Get-InteractiveSessionUserName
+    }
     if ($processUser -and $sessionUser -and ($processUser -ne $sessionUser)) {
         Write-Info "Skipping Windows Terminal defaults: they are per-user settings, and this run is elevated as '$processUser' while '$sessionUser' is logged on."
         if ($PassThru) {

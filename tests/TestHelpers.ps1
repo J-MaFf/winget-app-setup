@@ -44,7 +44,8 @@ $null = Get-Command Install-Module, Install-PackageProvider, Get-PackageProvider
 # parameter names (and switch types): -ParameterFilter blocks read them ($Name, $AllUsers,
 # $TaskName, $Force, ...) and the code under test passes them, so a parameterless stand-in would
 # leave every filter seeing $null. The scheduled-task objects keep their real CimInstance types, so
-# a fake trigger fails to bind here exactly as on Windows unless the Mock uses -RemoveParameterType.
+# a fake trigger fails to bind here exactly as on Windows unless the Mock uses -RemoveParameterType;
+# so does a fake process passed to Invoke-CimMethod -InputObject.
 # An unmocked call throws CommandNotFoundException, as calling the missing command did. That fails
 # the test only if the code under test lets it through: production code that catches it (for
 # example around Get-AppxPackage) hides it here, while on Windows the same call reads the real
@@ -57,6 +58,7 @@ $windowsOnlyCommandParameters = [ordered]@{
     'Get-AppxPackage'             = { [CmdletBinding()] param([Parameter(Position = 0)][string]$Name, [Parameter(Position = 1)][string]$Publisher, [switch]$AllUsers, [string]$User, [string]$PackageTypeFilter, [string]$Volume) }
     'Add-AppxPackage'             = { [CmdletBinding()] param([Parameter(Position = 0)][string]$Path, [string[]]$DependencyPath, [switch]$Register, [switch]$DisableDevelopmentMode, [switch]$RegisterByFamilyName, [string]$MainPackage, [string[]]$DependencyPackages, [switch]$ForceApplicationShutdown, [switch]$ForceTargetApplicationShutdown, [switch]$ForceUpdateFromAnyVersion, [switch]$Stage, [switch]$Update, [string]$Volume) }
     'Get-CimInstance'             = { [CmdletBinding()] param([Parameter(Position = 0)][string]$ClassName, [string]$Namespace, [string]$Filter, [string]$Query, [string[]]$Property, [string[]]$ComputerName, [switch]$KeyOnly, [uint32]$OperationTimeoutSec) }
+    'Invoke-CimMethod'            = { [CmdletBinding()] param([Parameter(Position = 0)][Microsoft.Management.Infrastructure.CimInstance]$InputObject, [Parameter(Position = 1)][System.Collections.IDictionary]$Arguments, [Parameter(Position = 2)][string]$MethodName, [string]$ClassName, [string]$Namespace, [string]$Query, [string[]]$ComputerName, [uint32]$OperationTimeoutSec) }
     'Get-ScheduledTask'           = { [CmdletBinding()] param([Parameter(Position = 0)][string[]]$TaskName, [Parameter(Position = 1)][string[]]$TaskPath) }
     'Get-ScheduledTaskInfo'       = { [CmdletBinding()] param([Parameter(Position = 0)][string]$TaskName, [Parameter(Position = 1)][string]$TaskPath, [Microsoft.Management.Infrastructure.CimInstance]$InputObject) }
     'Set-ScheduledTask'           = { [CmdletBinding()] param([Parameter(Position = 0)][string]$TaskName, [string]$TaskPath, [Microsoft.Management.Infrastructure.CimInstance[]]$Action, [Microsoft.Management.Infrastructure.CimInstance[]]$Trigger, [Microsoft.Management.Infrastructure.CimInstance]$Settings, [Microsoft.Management.Infrastructure.CimInstance]$Principal, [string]$User, [string]$Password, [Microsoft.Management.Infrastructure.CimInstance]$InputObject) }
@@ -230,7 +232,7 @@ function New-TestRestartState {
 
 # A Get-InstallAccountContext result (review findings P2-24, P3-22, P3-23), for
 # `Mock Get-InstallAccountContext`. Every test that drives Invoke-WingetInstall past its admin check
-# mocks that read: on Windows it reads the real process token and the console session (CIM), and a
+# mocks that read: on Windows it reads the real process token and the session's user (CIM), and a
 # runner that runs as SYSTEM, or one with another account signed in at the console, would turn the
 # run into one for the whole PC. The default is a same-user run.
 function New-TestAccountContext {

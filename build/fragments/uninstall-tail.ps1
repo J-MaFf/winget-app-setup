@@ -35,7 +35,7 @@ catch {
 if ($WhatIf) {
     # A preview changes nothing, so it runs as whoever started it (as the installer's does).
     if (-not (Test-IsAdmin)) {
-        Write-Info '[DRY-RUN] A real run needs administrator rights and would ask for them. Continuing the preview in this session; nothing will be changed.'
+        Write-Info '[DRY-RUN] A real run needs administrator rights and would ask for them. Continuing the preview in this session; nothing will be changed. If the prompt elevates as another account than the signed-in user, the real run keeps the per-user apps (Windows Terminal) this preview may list.'
     }
 }
 elseif (-not (Test-IsAdmin)) {

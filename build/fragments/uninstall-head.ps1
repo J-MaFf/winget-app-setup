@@ -8,9 +8,11 @@
     so it needs nothing next to it. The work is Invoke-WingetUninstall
     (WingetAppSetup/Public/Uninstall.ps1): it sets up winget the way the installer does and removes
     nothing when winget cannot be started; it keeps the PowerShell 7 and Windows Terminal this run
-    depends on, and the apps whose catalog condition does not hold here; and it removes
-    Winget-AutoUpdate last, only when every app is gone. The app list is the module's catalog
-    (Get-DefaultAppCatalog in WingetAppSetup/Public/AppCatalog.ps1): edit it there, never here.
+    depends on, the apps whose catalog condition does not hold here, and, as SYSTEM or elevated as
+    another account than the signed-in user, the per-user apps (Windows Terminal), which it cannot
+    remove for that user; and it removes Winget-AutoUpdate last, only when every app is gone. The
+    app list is the module's catalog (Get-DefaultAppCatalog in WingetAppSetup/Public/AppCatalog.ps1):
+    edit it there, never here.
 
     Run it from a file. Started without one (irm | iex), it changes nothing and stops with exit
     code 5.
