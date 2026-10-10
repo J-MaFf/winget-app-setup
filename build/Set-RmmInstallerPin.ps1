@@ -153,10 +153,11 @@ function Get-ReleasePin {
     if ($Tag -notmatch '^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(-[0-9A-Za-z][0-9A-Za-z.-]*)?\z') {
         throw "'$Tag' is not a release tag (vMAJOR.MINOR.PATCH)."
     }
-    $null = & gh release download $Tag --repo $Repository --pattern 'release-manifest.json' --dir $WorkDirectory --clobber 2>&1
+    $download = & gh release download $Tag --repo $Repository --pattern 'release-manifest.json' --dir $WorkDirectory --clobber 2>&1
+    $downloadExitCode = $LASTEXITCODE
     $manifestPath = Join-Path $WorkDirectory 'release-manifest.json'
-    if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
-        throw "Could not download release-manifest.json from release $Tag of $Repository (gh exit code $LASTEXITCODE). Is the release published by .github/workflows/release.yml, and is gh signed in (gh auth status)?"
+    if ($downloadExitCode -ne 0 -or -not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
+        throw "Could not download release-manifest.json from release $Tag of $Repository (gh exit code $downloadExitCode): $(($download | Out-String).Trim()) Is the release published by .github/workflows/release.yml, and is gh signed in (gh auth status)?"
     }
     $manifest = Get-Content -Raw -LiteralPath $manifestPath | ConvertFrom-Json -AsHashtable
     # Schema 1 is the format release-kit's release.yml writes; a newer one may mean something else.

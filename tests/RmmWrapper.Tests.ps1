@@ -1051,7 +1051,7 @@ Describe 'build/Set-RmmInstallerPin.ps1' -Skip:(-not $script:GitAvailable) {
             Set-Content -LiteralPath (Join-Path $script:ghFolder 'gh.ps1') -Value @'
 Add-Content -LiteralPath $env:FAKE_GH_LOG -Value ($args -join ' ')
 if ($args[0] -eq 'release' -and $args[1] -eq 'download') {
-    if (-not $env:FAKE_GH_MANIFEST) { exit 1 }
+    if (-not $env:FAKE_GH_MANIFEST) { Write-Output 'release not found'; exit 1 }
     $folder = $args[[array]::IndexOf($args, '--dir') + 1]
     Copy-Item -LiteralPath $env:FAKE_GH_MANIFEST -Destination (Join-Path $folder 'release-manifest.json')
     exit 0
@@ -1176,7 +1176,7 @@ exit 64
             $result = Invoke-PinRelease
 
             $result.ExitCode | Should -Not -Be 0
-            $result.Text | Should -Match 'Could not download release-manifest\.json from release v9\.9\.9'
+            $result.Text | Should -Match '(?s)Could not download release-manifest\.json from release v9\.9\.9 .*release not found'
             @(& git -C $script:repository status --porcelain) | Should -BeNullOrEmpty
         }
 
