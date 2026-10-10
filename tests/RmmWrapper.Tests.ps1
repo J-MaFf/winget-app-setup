@@ -1040,4 +1040,156 @@ Describe 'build/Set-RmmInstallerPin.ps1' -Skip:(-not $script:GitAvailable) {
         $LASTEXITCODE | Should -Not -Be 0
         @(& git -C $script:repository status --porcelain) | Should -BeNullOrEmpty
     }
+
+    # -Release reaches GitHub only through gh, so a stand-in gh.ps1 first on PATH serves the
+    # manifest from FAKE_GH_MANIFEST, answers the attestation check with FAKE_GH_ATTEST_EXIT and
+    # logs every call to FAKE_GH_LOG.
+    Context '-Release' {
+        BeforeEach {
+            $null = & git -C $script:repository tag v9.9.9 2>&1
+            $script:ghFolder = New-TestFolder
+            Set-Content -LiteralPath (Join-Path $script:ghFolder 'gh.ps1') -Value @'
+Add-Content -LiteralPath $env:FAKE_GH_LOG -Value ($args -join ' ')
+if ($args[0] -eq 'release' -and $args[1] -eq 'download') {
+    if (-not $env:FAKE_GH_MANIFEST) { exit 1 }
+    $folder = $args[[array]::IndexOf($args, '--dir') + 1]
+    Copy-Item -LiteralPath $env:FAKE_GH_MANIFEST -Destination (Join-Path $folder 'release-manifest.json')
+    exit 0
+}
+if ($args[0] -eq 'attestation' -and $args[1] -eq 'verify') { exit [int]$env:FAKE_GH_ATTEST_EXIT }
+exit 64
+'@
+            $script:savedGhEnvironment = @{}
+            foreach ($name in @('PATH', 'FAKE_GH_LOG', 'FAKE_GH_MANIFEST', 'FAKE_GH_ATTEST_EXIT')) {
+                $script:savedGhEnvironment[$name] = [System.Environment]::GetEnvironmentVariable($name)
+            }
+            $env:PATH = $script:ghFolder + [System.IO.Path]::PathSeparator + $env:PATH
+            $env:FAKE_GH_LOG = Join-Path $script:ghFolder 'calls.log'
+            $env:FAKE_GH_ATTEST_EXIT = '0'
+            $script:installerSha256 = [System.Convert]::ToHexString([System.Security.Cryptography.SHA256]::HashData($script:committed)).ToLowerInvariant()
+
+            # Writes a manifest like release-kit's for tag v9.9.9 at the test commit, with $Change
+            # applied to it first, and points the stand-in gh at it.
+            function Set-TestManifest {
+                param ([scriptblock]$Change = {})
+                $manifest = [ordered]@{
+                    schema     = 1
+                    repository = 'J-MaFf/winget-app-setup'
+                    tag        = 'v9.9.9'
+                    version    = '9.9.9'
+                    commit     = $script:commit
+                    files      = [ordered]@{
+                        'winget-app-install.ps1' = [ordered]@{
+                            path   = 'winget-app-install.ps1'
+                            url    = 'asset:winget-app-install.ps1'
+                            sha256 = $script:installerSha256
+                            size   = $script:committed.Length
+                        }
+                    }
+                }
+                & $Change $manifest
+                $path = Join-Path $script:ghFolder 'release-manifest.json'
+                Set-Content -LiteralPath $path -Value ($manifest | ConvertTo-Json -Depth 5)
+                $env:FAKE_GH_MANIFEST = $path
+            }
+
+            function Invoke-PinRelease {
+                param ([string]$Tag = 'v9.9.9')
+                $output = & $script:Pwsh -NoProfile -NonInteractive -File $script:PinScriptPath -Release $Tag -RepositoryRoot $script:repository 2>&1
+                $exitCode = $LASTEXITCODE
+                # The error view wraps a long message to the console width behind '|' markers;
+                # join it back up so a match does not depend on where it wrapped.
+                return [pscustomobject]@{ ExitCode = $exitCode; Text = (($output -join "`n") -replace '\r?\n\s*\|\s*', ' ') }
+            }
+
+            function Get-GhCall {
+                if (Test-Path -LiteralPath $env:FAKE_GH_LOG) { return @(Get-Content -LiteralPath $env:FAKE_GH_LOG) }
+                return @()
+            }
+        }
+
+        AfterEach {
+            foreach ($name in $script:savedGhEnvironment.Keys) {
+                [System.Environment]::SetEnvironmentVariable($name, $script:savedGhEnvironment[$name])
+            }
+        }
+
+        It 'Pins both wrappers to the release''s commit once its manifest and attestation check out' {
+            Set-TestManifest
+
+            $result = Invoke-PinRelease
+
+            $result.ExitCode | Should -Be 0 -Because $result.Text
+            $result.Text | Should -Match 'release v9\.9\.9, commit [0-9a-f]{40}, attested'
+            foreach ($name in @('Invoke-WingetAppSetup.ps1', 'Invoke-WingetAppSetupUserPhase.ps1')) {
+                $path = Join-Path $script:repository "rmm/$name"
+                Get-PinValue -Path $path -Name 'PinnedInstallerCommit' | Should -Be $script:commit
+                Get-PinValue -Path $path -Name 'PinnedInstallerSha256' | Should -Be $script:installerSha256.ToUpperInvariant()
+                @(& git -C $script:repository diff --numstat -- "rmm/$name") | Should -Be @("2`t2`trmm/$name")
+            }
+            $calls = Get-GhCall
+            $calls[0] | Should -Match '^release download v9\.9\.9 --repo J-MaFf/winget-app-setup --pattern release-manifest\.json --dir '
+            $calls[1] | Should -Match '^attestation verify \S*winget-app-install\.ps1 --repo J-MaFf/winget-app-setup --signer-workflow J-MaFf/release-kit/\.github/workflows/release\.yml$'
+        }
+
+        It 'Refuses, changing nothing, a release whose manifest lists <Case>' -ForEach @(
+            @{ Case = 'another SHA256 for the installer'; Change = { param ($m) $m.files['winget-app-install.ps1'].sha256 = '0' * 64 }; Message = 'Do not pin it' }
+            @{ Case = 'another size for the installer'; Change = { param ($m) $m.files['winget-app-install.ps1'].size = 1 }; Message = 'Do not pin it' }
+            @{ Case = 'another commit than the tag'; Change = { param ($m) $m.commit = 'a' * 40 }; Message = 'was built from a{40}' }
+            @{ Case = 'an unknown schema'; Change = { param ($m) $m.schema = 2 }; Message = "has schema '2'" }
+            @{ Case = 'another tag'; Change = { param ($m) $m.tag = 'v9.9.8' }; Message = "tag 'v9\.9\.8'" }
+            @{ Case = 'another repository'; Change = { param ($m) $m.repository = 'someone/else' }; Message = "repository 'someone/else'" }
+            @{ Case = 'no installer'; Change = { param ($m) $m.files.Clear() }; Message = 'no valid entry for winget-app-install\.ps1' }
+        ) {
+            Set-TestManifest -Change $Change
+
+            $result = Invoke-PinRelease
+
+            $result.ExitCode | Should -Not -Be 0
+            $result.Text | Should -Match $Message
+            @(& git -C $script:repository status --porcelain) | Should -BeNullOrEmpty
+            Get-GhCall | Where-Object { $_ -like 'attestation*' } | Should -BeNullOrEmpty
+        }
+
+        It 'Refuses, changing nothing, when the attestation does not verify' {
+            Set-TestManifest
+            $env:FAKE_GH_ATTEST_EXIT = '1'
+
+            $result = Invoke-PinRelease
+
+            $result.ExitCode | Should -Not -Be 0
+            $result.Text | Should -Match 'gh attestation verify could not prove'
+            @(& git -C $script:repository status --porcelain) | Should -BeNullOrEmpty
+        }
+
+        It 'Refuses, changing nothing, a release whose tag is not here' {
+            Set-TestManifest -Change { param ($m) $m.tag = 'v9.9.8' }
+
+            $result = Invoke-PinRelease -Tag 'v9.9.8'
+
+            $result.ExitCode | Should -Not -Be 0
+            $result.Text | Should -Match 'There is no tag v9\.9\.8 here\. Fetch it'
+            @(& git -C $script:repository status --porcelain) | Should -BeNullOrEmpty
+        }
+
+        It 'Refuses, changing nothing, when the manifest cannot be downloaded' {
+            $result = Invoke-PinRelease
+
+            $result.ExitCode | Should -Not -Be 0
+            $result.Text | Should -Match 'Could not download release-manifest\.json from release v9\.9\.9'
+            @(& git -C $script:repository status --porcelain) | Should -BeNullOrEmpty
+        }
+
+        It 'Refuses <Tag>, which is not a release tag, without calling gh' -ForEach @(
+            @{ Tag = 'latest' }, @{ Tag = '9.9.9' }, @{ Tag = 'v9.9' }
+        ) {
+            Set-TestManifest
+
+            $result = Invoke-PinRelease -Tag $Tag
+
+            $result.ExitCode | Should -Not -Be 0
+            $result.Text | Should -Match 'is not a release tag'
+            Get-GhCall | Should -BeNullOrEmpty
+        }
+    }
 }
