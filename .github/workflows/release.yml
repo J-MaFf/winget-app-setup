@@ -1,0 +1,73 @@
+name: Release
+
+# Publishes a release from a version tag through the shared workflow in J-MaFf/release-kit: the
+# installer and the uninstaller as assets, release-manifest.json pinning both by SHA256 and size,
+# and a build-provenance attestation for each. build/Set-RmmInstallerPin.ps1 -Release checks all
+# three before it pins the Endpoint Central wrappers to a release.
+#
+# To release: move CHANGELOG.md's [Unreleased] entries under "## [X.Y.Z] - YYYY-MM-DD", set
+# ModuleVersion in WingetAppSetup/WingetAppSetup.psd1 to X.Y.Z, merge that, then tag the merge
+# commit on main: git tag vX.Y.Z <commit> && git push origin vX.Y.Z
+#
+# The rmm/ wrappers are not assets: a release's own wrappers cannot pin that release, so they are
+# pinned after it (Set-RmmInstallerPin.ps1 -Release vX.Y.Z), committed and uploaded to Endpoint
+# Central's Script Repository.
+#
+# Both jobs run on GitHub-hosted runners, never the self-hosted win-test runner: this workflow
+# can write releases.
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check the tag
+        shell: pwsh
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:TAG -notmatch '^v(?<version>(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*))(-[0-9A-Za-z][0-9A-Za-z.-]*)?\z') {
+              throw "Tag '$env:TAG' is not vMAJOR.MINOR.PATCH (optionally -prerelease)."
+          }
+          $tagVersion = $Matches.version
+          $moduleVersion = (Import-PowerShellDataFile -LiteralPath WingetAppSetup/WingetAppSetup.psd1).ModuleVersion
+          if ($tagVersion -ne $moduleVersion) {
+              throw "Tag $env:TAG is version $tagVersion, but WingetAppSetup.psd1 says ModuleVersion $moduleVersion. Set it and tag the commit that does."
+          }
+          # Released only from main: what the wrappers pin has been through review and CI there.
+          git merge-base --is-ancestor HEAD origin/main
+          if ($LASTEXITCODE -ne 0) { throw "Tag $env:TAG is not on main. Tag a commit on main." }
+          Write-Host "Tag $env:TAG matches ModuleVersion $moduleVersion and is on main."
+
+      - name: Check the generated scripts are in sync
+        shell: pwsh
+        run: ./build/Build-WingetInstallScript.ps1 -Check
+
+  release:
+    needs: verify
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    uses: J-MaFf/release-kit/.github/workflows/release.yml@v1
+    with:
+      files: |
+        winget-app-install.ps1
+        winget-app-uninstall.ps1

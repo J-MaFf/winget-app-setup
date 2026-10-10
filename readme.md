@@ -883,7 +883,14 @@ run the machine phase the way the 32-bit agent would (see
    reaches the PCs only when you move the pin. Both scripts ship with empty pins
    (`$PinnedInstallerCommit` and `$PinnedInstallerSha256`), because no commit on `main` had this
    code when they were written, and they exit 5 without running anything until the pins are set.
-   Once the change has merged to `main` and its E2E run has passed, run:
+   Pin a [release](#releases) (needs the GitHub CLI, `gh`, signed in, and the tag fetched:
+   `git fetch --tags`):
+
+   ```powershell
+   pwsh -File build/Set-RmmInstallerPin.ps1 -Release <tag, such as v1.1.0>
+   ```
+
+   or, before there is a release with the change, a commit on `main` whose E2E run has passed:
 
    ```powershell
    pwsh -File build/Set-RmmInstallerPin.ps1 -Commit <commit on main>
@@ -892,8 +899,13 @@ run the machine phase the way the 32-bit agent would (see
    It reads `winget-app-install.ps1` from that commit with git, hashes it, and writes both pins
    into both scripts. It writes nothing when either script does not have exactly one of each pin
    line, or when the file has no `Invoke-WingetUserPhase` (a commit older than the user phase,
-   which would fail at every sign-in). It warns about a commit that is not on `origin/main`. Commit
-   the two scripts. To roll back, pin an older commit that has the user phase.
+   which would fail at every sign-in). It warns about a commit that is not on `origin/main`. With
+   `-Release` it also writes nothing unless the release's `release-manifest.json` names this
+   release and the commit the tag points at, lists the same SHA256 and size for the installer, and
+   `gh attestation verify` proves that release-kit's release workflow built that file here. Either
+   way the pins are a commit and a SHA256: the wrappers trust a release exactly as they trust a
+   commit. Commit the two scripts. To roll back, pin an older release (or commit) that has the user
+   phase.
 2. **Script Repository** (Configurations > Settings > Script Repository): add the scripts you use.
    Upload the two phases again after every pin change.
 3. **Machine phase:** Computer Configuration > Custom Script. Run As: System user. Script:
@@ -1957,6 +1969,39 @@ throwaway VMs by construction:
 
 Tier 2 ([#215](https://github.com/J-MaFf/winget-app-setup/issues/215)) will reuse
 `e2e/Assert-Install.ps1` for a cross-user elevation run on a snapshot-rollback VM.
+
+## Releases
+
+A tag `vX.Y.Z` on `main` publishes a GitHub release through the shared workflow in
+[J-MaFf/release-kit](https://github.com/J-MaFf/release-kit) (`.github/workflows/release.yml`). It
+publishes:
+
+- `winget-app-install.ps1` and `winget-app-uninstall.ps1`, byte for byte as git has them at the tag;
+- `release-manifest.json`, which names the tag and commit and pins both files by SHA256 and size;
+- a signed build-provenance attestation for each.
+
+The release notes are the version's section of `CHANGELOG.md`. Before release-kit publishes
+anything, a `verify` job refuses a tag that is not on `main`, whose version is not the module's
+`ModuleVersion`, or whose generated scripts are out of sync with the module.
+
+To release:
+
+1. Move the `[Unreleased]` entries in `CHANGELOG.md` under `## [X.Y.Z] - YYYY-MM-DD`, set
+   `ModuleVersion` in `WingetAppSetup/WingetAppSetup.psd1` to `X.Y.Z`, and merge that.
+2. Tag the merge commit and push the tag: `git tag vX.Y.Z <commit> && git push origin vX.Y.Z`.
+3. For Endpoint Central, pin the wrappers to it (`Set-RmmInstallerPin.ps1 -Release vX.Y.Z`, see
+   [Setting it up](#setting-it-up)), commit them, and upload them to the Script Repository again.
+   The `rmm/` wrappers are not release assets, because a release's own wrappers cannot pin that
+   same release.
+
+To check a downloaded release file yourself:
+
+```powershell
+gh attestation verify winget-app-install.ps1 --repo J-MaFf/winget-app-setup `
+    --signer-workflow J-MaFf/release-kit/.github/workflows/release.yml
+```
+
+The `irm | iex` one-liner still runs `main`.
 
 ## Project layout (for contributors)
 

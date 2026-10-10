@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Releases (bead wgt-z70, [#286](https://github.com/J-MaFf/winget-app-setup/issues/286)): a `vX.Y.Z`
+  tag on `main` now publishes a GitHub release through the shared workflow in
+  [J-MaFf/release-kit](https://github.com/J-MaFf/release-kit): `winget-app-install.ps1` and
+  `winget-app-uninstall.ps1`, a `release-manifest.json` pinning both by SHA256 and size, and a
+  build-provenance attestation for each, with the version's CHANGELOG section as the notes. A
+  `verify` job first refuses a tag that is not on `main`, does not match the module's
+  `ModuleVersion`, or has generated scripts out of sync.
+- `build/Set-RmmInstallerPin.ps1 -Release vX.Y.Z` (wgt-z70): pins the Endpoint Central wrappers to a
+  release. It writes nothing unless the release's manifest names that release and the commit the
+  tag points at, lists the same SHA256 and size as the installer git has at that commit, and
+  `gh attestation verify --signer-workflow J-MaFf/release-kit/.github/workflows/release.yml`
+  passes. The pins and the wrappers are unchanged: still a commit and a SHA256. `-Commit` still
+  works.
 - Real-PC owner-test-plan harness (bead wgt-gq8.60): `e2e/Invoke-RealPcTestPlan.ps1`, one command an
   owner runs as an administrator on a disposable Windows 10 22H2+ or Windows 11 test machine to run
   every automatable item of PR #285's owner test plan and get one PASS/FAIL report plus one zip to
