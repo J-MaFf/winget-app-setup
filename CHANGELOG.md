@@ -853,6 +853,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The one-liner started from a standard user's window no longer stalls installing PowerShell 7**
+  (bead wgt-gq8.75, found on the owner's test PC on 2026-10-12, over Remote Desktop). On a PC
+  without PowerShell 7, the Windows PowerShell 5.1 bootstrap installed it before the run asked for
+  elevation. As a standard user that install needs administrator rights, the PowerShell 7
+  installer's own UAC prompt never reached the Remote Desktop session, and winget waited for it
+  with no end. Its log could not be written either: standard users cannot write to the run's locked
+  `logs` folder. Now a bootstrap that is not elevated and finds no PowerShell 7 relaunches the
+  installer elevated first (`Invoke-PowerShell7BootstrapElevation`, through the same checked-copy
+  `Restart-WithElevation` the PowerShell 7 run used), so the elevated window installs PowerShell 7
+  and runs the install. Under `irm | iex` it downloads the same build for that window, as the
+  PowerShell 7 relaunch does (`Get-PowerShell7RelaunchFile`, shared by both). A non-interactive run
+  that is not elevated stops with exit code 4 at once instead of trying the install. A PC that
+  already has PowerShell 7 is unchanged: it relaunches under `pwsh`, which then asks for elevation.
+
 - Cross-user elevation is now detected over Remote Desktop (wgt-gq8.70). Since issue #159 the
   installer and the uninstaller took the signed-in user from `Win32_ComputerSystem.UserName`, which
   Microsoft documents as the console's user: over Remote Desktop it is empty. On the owner's real PC

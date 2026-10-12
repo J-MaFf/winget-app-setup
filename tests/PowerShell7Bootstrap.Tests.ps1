@@ -680,9 +680,117 @@ Describe 'Invoke-PowerShell7Bootstrap' {
         # No Group Policy execution policy for PowerShell 7 (wgt-gq8.39) unless a context sets one;
         # never the runner's real registry.
         Mock Get-ScriptExecutionPolicyBlock { $null }
+        # Elevated unless a context says otherwise (wgt-gq8.75): never the runner's real token, and
+        # never a real UAC prompt.
+        Mock Test-IsAdmin { $true }
+        Mock Restart-WithElevation { [pscustomobject]@{ Started = $false; ExitCode = 4 } }
     }
     AfterEach {
         $env:WINGET_APP_SETUP_PS7_BOOTSTRAP = ''
+    }
+
+    Context 'Not elevated and PowerShell 7 missing: elevation comes first (wgt-gq8.75)' {
+        # On the owner's PC the one-liner, started from a standard user's window over Remote
+        # Desktop, installed PowerShell 7 before asking for elevation; the MSI's own UAC prompt
+        # never appeared and winget waited for it with no end.
+        BeforeEach {
+            Mock Test-IsAdmin { $false }
+            Mock Find-PowerShell7 { $null }
+            Mock Test-EffectiveNonInteractive { $false }
+            Mock Start-Process { [pscustomobject]@{ ExitCode = 0 } }
+            Mock Restart-WithElevation {
+                $script:ElevatedPath = $ScriptPath
+                $script:ElevatedFileThere = Test-Path -LiteralPath $ScriptPath
+                [pscustomobject]@{ Started = $true; ExitCode = 0 }
+            }
+            $script:ElevatedPath = $null
+            $script:ElevatedFileThere = $null
+            $script:errors = @()
+            Mock Write-ErrorMessage { $script:errors += $Message }
+        }
+
+        It 'Relaunches the caller''s file elevated, forwards its switches, and installs nothing itself' {
+            $file = Join-Path $TestDrive 'winget-app-install.ps1'
+            Set-Content -LiteralPath $file -Value '# installer'
+            $script:PowerShell7BootstrapRelaunched = $false
+
+            $result = Invoke-PowerShell7Bootstrap -CommandPath $file -SkipSystemCheck -AdditionalArguments @('-MaxRuntimeMinutes', '60')
+
+            $result | Should -Be 0
+            Should -Invoke Restart-WithElevation -Times 1 -Exactly -ParameterFilter {
+                $ScriptPath -eq $file -and ($AdditionalArguments -join ' ') -eq '-SkipSystemCheck -MaxRuntimeMinutes 60'
+            }
+            Should -Invoke Invoke-WingetProcess -Times 0 -Exactly
+            Should -Invoke Install-PowerShell7FromMsi -Times 0 -Exactly
+            Should -Invoke Start-Process -Times 0 -Exactly
+            # The elevated window showed the outcome.
+            $script:PowerShell7BootstrapRelaunched | Should -BeTrue
+            Test-Path -LiteralPath $file | Should -BeTrue
+        }
+
+        It 'Under irm | iex downloads the same build, relaunches that copy elevated, then removes it' {
+            Mock Invoke-RestMethod { "`$script:InstallerBuildId = '1.0.0+abc12345'`n# installer" }
+
+            $result = Invoke-PowerShell7Bootstrap -CommandPath '' -ExpectedBuildId '1.0.0+abc12345' -InstallerUrl @('https://example.invalid/winget-app-install.ps1')
+
+            $result | Should -Be 0
+            Should -Invoke Restart-WithElevation -Times 1 -Exactly
+            (Split-Path -Leaf $script:ElevatedPath) | Should -Be 'winget-app-install.ps1'
+            $script:ElevatedFileThere | Should -BeTrue
+            Test-Path -LiteralPath (Split-Path -Parent $script:ElevatedPath) | Should -BeFalse
+            Should -Invoke Invoke-WingetProcess -Times 0 -Exactly
+        }
+
+        It 'Returns the elevated run''s exit code' {
+            Mock Restart-WithElevation { [pscustomobject]@{ Started = $true; ExitCode = 3010 } }
+            $file = Join-Path $TestDrive 'winget-app-install.ps1'
+            Set-Content -LiteralPath $file -Value '# installer'
+            Invoke-PowerShell7Bootstrap -CommandPath $file | Should -Be 3010
+        }
+
+        It 'Returns 4 and says nothing was installed when the prompt is declined' {
+            Mock Restart-WithElevation { [pscustomobject]@{ Started = $false; ExitCode = 4 } }
+            $file = Join-Path $TestDrive 'winget-app-install.ps1'
+            Set-Content -LiteralPath $file -Value '# installer'
+            $script:PowerShell7BootstrapRelaunched = $true
+
+            Invoke-PowerShell7Bootstrap -CommandPath $file | Should -Be 4
+
+            $script:PowerShell7BootstrapRelaunched | Should -BeFalse
+            ($script:errors -join "`n") | Should -Match 'neither PowerShell 7 nor the apps were installed'
+            Should -Invoke Invoke-WingetProcess -Times 0 -Exactly
+        }
+
+        It 'Returns 4 without a prompt, a download or an install in a non-interactive run' {
+            Mock Test-EffectiveNonInteractive { $true }
+
+            Invoke-PowerShell7Bootstrap -CommandPath '' -NonInteractive | Should -Be 4
+
+            Should -Invoke Restart-WithElevation -Times 0 -Exactly
+            Should -Invoke Invoke-RestMethod -Times 0 -Exactly
+            Should -Invoke Invoke-WingetProcess -Times 0 -Exactly
+            ($script:errors -join "`n") | Should -Match 'non-interactive'
+        }
+
+        It 'Returns 7 when the same build cannot be downloaded for the elevated run' {
+            Mock Invoke-RestMethod { "`$script:InstallerBuildId = '1.0.0+other'`n# installer" }
+
+            Invoke-PowerShell7Bootstrap -CommandPath '' -ExpectedBuildId '1.0.0+abc12345' -InstallerUrl @('https://example.invalid/winget-app-install.ps1') | Should -Be 7
+
+            Should -Invoke Restart-WithElevation -Times 0 -Exactly
+            ($script:errors -join "`n") | Should -Match 'Windows PowerShell as administrator'
+        }
+
+        It 'Still relaunches unelevated when PowerShell 7 is already installed (the PowerShell 7 run elevates)' {
+            Mock Find-PowerShell7 { 'C:\Program Files\PowerShell\7\pwsh.exe' }
+            $file = Join-Path $TestDrive 'winget-app-install.ps1'
+            Set-Content -LiteralPath $file -Value '# installer'
+
+            Invoke-PowerShell7Bootstrap -CommandPath $file | Should -Be 0
+
+            Should -Invoke Restart-WithElevation -Times 0 -Exactly
+            Should -Invoke Start-Process -Times 1 -Exactly
+        }
     }
 
     Context 'Group Policy refuses scripts for PowerShell 7 (wgt-gq8.39)' {

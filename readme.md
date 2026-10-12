@@ -13,6 +13,12 @@ automatic updates for them.
 > A `-WhatIf` run never installs anything — without PowerShell 7 present it just previews the
 > bootstrap.
 >
+> Installing PowerShell 7 needs administrator rights, so a window that is not elevated and has no
+> PowerShell 7 asks for elevation first (the UAC prompt) and lets the elevated window install it and
+> run the rest. It used to start the PowerShell 7 install unelevated and ask only afterwards: the
+> installer's own UAC prompt then never appeared over Remote Desktop, and the run waited with no
+> end (wgt-gq8.75). Unattended, with nobody to approve a prompt, it stops with exit code 4.
+>
 > Installing it takes one of two paths, in order:
 >
 > 1. **winget**, when the invoking account has it.
