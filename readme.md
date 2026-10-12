@@ -421,6 +421,7 @@ carries on:
 | The engine's per-app `Get-WinGetPackage` check before and after each install | 45 seconds |
 | The engine's check that it can be started (`Get-WinGetVersion`) | 60 seconds |
 | The engine's probe at the start of the run (loading the module, `Get-WinGetVersion` and one `Get-WinGetPackage`) | 3 minutes |
+| The wait for the SYSTEM run of a [hand-over to SYSTEM](#hand-over-to-system-under-cross-user-elevation) (the whole run) | 3 hours, or what is left of the time budget plus 45 minutes |
 | `msiexec` for Winget-AutoUpdate (install and uninstall) | 15 minutes |
 | The Winget-AutoUpdate MSI download, the Windows App Runtime package download (see [Automatic updates](#automatic-updates)), and the engine's Microsoft.WinGet.Client package download | 5 minutes until the server starts sending the file; on PowerShell 7.4 and newer, also 2 minutes without data while it arrives |
 | `Add-AppxProvisionedPackage` for the Windows App Runtime framework | 10 minutes |
@@ -526,7 +527,10 @@ a run. When something cannot be fixed it prints one line that says why and what 
    own session, so signing in once is not enough) or run the machine phase as SYSTEM with
    `rmm/Invoke-WingetAppSetup.ps1`; otherwise check the
    `Microsoft-Windows-AppXDeploymentServer/Operational` event log and access to
-   `cdn.winget.microsoft.com`. The uninstaller gives the same advice for itself: run it while
+   `cdn.winget.microsoft.com`. Under cross-user elevation the installer then does not stop there:
+   it hands the install over to SYSTEM (see
+   [Hand-over to SYSTEM under cross-user elevation](#hand-over-to-system-under-cross-user-elevation)),
+   and exits 2 only when that cannot start. The uninstaller gives the same advice for itself: run it while
    signed in as that account, or run `winget-app-uninstall.ps1` as SYSTEM. When the run did
    register the source package for the account and `0x8A15000F` stays, the line says the
    registration succeeded, and how (the download, or the copy already on the PC), and points to
@@ -758,6 +762,49 @@ script. Exit code 8 means the apps are installed but automatic updates are not s
 run; decide whether your RMM job should count it as a success. Exit code 9 means the run's
 [time budget](#time-budget-for-rmm-jobs--maxruntimeminutes) ran out before every app, or the
 Winget-AutoUpdate setup, was attempted. It is not a success: run the job again to finish.
+
+#### Hand-over to SYSTEM under cross-user elevation
+
+Under cross-user elevation (a technician's admin account elevated in a standard user's session),
+Windows can refuse to deploy winget's source package for the admin account, which has no logon
+session of its own. When the installer's repair (see **Setting winget up** above, step 3) still
+cannot open the source, the run does not stop with exit code 2: it hands the install over to SYSTEM,
+whose machine-wide `winget.exe` keeps its source in a file, interactive or not. It prints
+`Switching to SYSTEM: winget cannot open its source for '<admin>', elevated in <user>'s session (cross-user elevation), ...`
+and then:
+
+1. copies this installer build into a new folder under `%ProgramData%\winget-app-setup` that only
+   SYSTEM and Administrators can change, only when the file still has the SHA256 it had when the run
+   started, and checks the copy's SHA256 again right before the task is registered;
+2. releases the [run lock](#one-run-at-a-time), which the SYSTEM run takes, and registers a one-shot
+   scheduled task with a name of its own (`winget-app-setup-system-<id>`), for SYSTEM at the highest
+   run level, that runs the copy with the PowerShell 7 installed for the whole PC
+   (`%ProgramFiles%\PowerShell\7\pwsh.exe`), with `-NonInteractive`, `-SkipSystemCheck` when the
+   run was given it, and the [time budget](#time-budget-for-rmm-jobs--maxruntimeminutes)'s deadline;
+3. starts it and waits for it: up to 3 hours, or what is left of the time budget plus 45 minutes. It
+   prints where the SYSTEM run's transcript is (the newest `install-*.log` in
+   `%ProgramData%\winget-app-setup\logs`, then its exact path), and a SYSTEM run that does not end
+   in time is stopped;
+4. reads the SYSTEM run's `last-run.json`, only when SYSTEM or an administrator wrote it, it started
+   after the task did and it carries this build's id, and takes the task's exit code from Task
+   Scheduler;
+5. always removes the task and the copy, and takes the run lock back.
+
+The SYSTEM run installs every app for the whole PC, as any run as SYSTEM does (see above), so an app
+that installs only per user, such as Windows Terminal where it is not provisioned, is `Deferred`.
+The hand-started run then lists those apps, says that they need the Endpoint Central user phase
+(`rmm/Invoke-WingetAppSetupUserPhase.ps1`) at the user's next sign-in or a run of the installer as
+that user, and exits 1 so that the technician notices. Otherwise it exits with the SYSTEM run's
+code. Its own `last-run.json` keeps the SYSTEM run's apps, so the user phase still finds the
+deferred ones, and says that it handed over (`handoff`, see [Run result](#run-result)).
+
+The hand-over does not start, and the run stops with exit code 2 as before, when there is no
+PowerShell 7 for the whole PC, when the run has no installer file to hand over (the `irm | iex`
+one-liner in PowerShell 7; the Windows PowerShell one-liner saves a copy and can), when the file or
+its copy does not have the expected SHA256, or when the task cannot be registered or started. A
+TightVNC password typed at the start of the run is not passed on (a command line or a file would
+expose it), so TightVNC is reported as not configured. A run as SYSTEM is never cross-user, so it
+never hands over again. A dry run (`-WhatIf`) says that a real run would hand over.
 
 #### Microsoft.WinGet.Client engine (opt-in)
 
@@ -1195,11 +1242,11 @@ installed, and with `-WhatIf` when the fix would succeed. It exits 1, with `-Wha
 | Code | Meaning |
 |------|---------|
 | 0 | Success — every app is installed, already present, or does not apply to this machine (`not applicable`); apps reported as `Deferred` do not count against it, and neither do apps whose post-install hook could not configure them (`Configuration: NOT DONE`) |
-| 1 | One or more apps failed to install, including an install stopped at its time limit, the apps not attempted because winget could no longer be started, or could no longer open its source, partway through the run, an app with `scope = 'machine'` that has no machine-wide installer, and an installed app whose post-install hook failed (also: a blocking pre-flight system check failed). An app whose catalog condition could not be evaluated is attempted (fail open), so its failed install counts here too |
-| 2 | Winget is unavailable or cannot be started (`winget --version` must run and print a version) and could not be set up (as SYSTEM: no machine-wide `winget.exe` was found, or none could be started, and the opt-in [Microsoft.WinGet.Client engine](#microsoftwingetclient-engine-opt-in) is not ready either), winget cannot open the winget source for the account even after the installer's repair (`0x8A15000F` and the other codes under **Setting winget up**, step 3; nothing is installed and Winget-AutoUpdate is not set up), App Installer's Group Policy turns winget or its source off (the pre-flight checks it before the run waits for anything or sets winget up; see **Setting winget up** above), or winget could no longer be launched at the end of the run (no app failed, but automatic updates and the next run would; a run whose apps the Microsoft.WinGet.Client engine installed exits 8 instead) |
+| 1 | One or more apps failed to install, including an install stopped at its time limit, the apps not attempted because winget could no longer be started, or could no longer open its source, partway through the run, an app with `scope = 'machine'` that has no machine-wide installer, and an installed app whose post-install hook failed (also: a blocking pre-flight system check failed). An app whose catalog condition could not be evaluated is attempted (fail open), so its failed install counts here too. After a [hand-over to SYSTEM](#hand-over-to-system-under-cross-user-elevation), also when the SYSTEM run left any app `Deferred`: the run lists them, and they need the user phase or a run as the signed-in user |
+| 2 | Winget is unavailable or cannot be started (`winget --version` must run and print a version) and could not be set up (as SYSTEM: no machine-wide `winget.exe` was found, or none could be started, and the opt-in [Microsoft.WinGet.Client engine](#microsoftwingetclient-engine-opt-in) is not ready either), winget cannot open the winget source for the account even after the installer's repair (`0x8A15000F` and the other codes under **Setting winget up**, step 3; nothing is installed and Winget-AutoUpdate is not set up; under cross-user elevation only when the [hand-over to SYSTEM](#hand-over-to-system-under-cross-user-elevation) cannot start, for example without PowerShell 7 for the whole PC), App Installer's Group Policy turns winget or its source off (the pre-flight checks it before the run waits for anything or sets winget up; see **Setting winget up** above), or winget could no longer be launched at the end of the run (no app failed, but automatic updates and the next run would; a run whose apps the Microsoft.WinGet.Client engine installed exits 8 instead) |
 | 3 | App-definition validation failed (for example an invalid `scope`, `arch`, `postInstall` or `userPhase` value, see [Catalog entry fields](#catalog-entry-fields)), or no valid app definitions remain |
 | 4 | Administrator rights are required and the run was not elevated: the UAC prompt was declined or the elevated window could not be started, the run is non-interactive (no prompt is shown), it runs through `irm \| iex` in PowerShell 7, `Invoke-WingetInstall` was called from the imported module, or Group Policy sets the Windows PowerShell execution policy to `AllSigned` or `Restricted`: for the PC, so no UAC prompt is shown, or for the account that approved the prompt, so the elevated window stops before it runs anything (see [Administrator rights](#administrator-rights)) |
-| 5 | The run was aborted before it finished: an unexpected error (the message and stack trace are in the log), the run was stopped from outside (Ctrl+C, the console closing, an installer stopping the console) when run from a file or non-interactively, the installer file changed before its elevated copy could run (see [Administrator rights](#administrator-rights)), or PowerShell runs the installer in Constrained Language Mode (an App Control for Business or AppLocker policy), which the installer checks before anything else. With `-CollectDiagnostics`, the installer installs nothing and exits 0 when it saved the diagnostics bundle, 5 when it could not (see [Diagnostics bundle](#diagnostics-bundle--collectdiagnostics)). The machine phase `rmm/Invoke-WingetAppSetup.ps1` also exits 5, without running the installer, when its pins are not set, the download failed or the SHA256 does not match; otherwise it passes the installer's code back unchanged |
+| 5 | The run was aborted before it finished: an unexpected error (the message and stack trace are in the log), the run was stopped from outside (Ctrl+C, the console closing, an installer stopping the console) when run from a file or non-interactively, the installer file changed before its elevated copy could run (see [Administrator rights](#administrator-rights)), the SYSTEM run a [hand-over](#hand-over-to-system-under-cross-user-elevation) started did not end in time and was stopped, or PowerShell runs the installer in Constrained Language Mode (an App Control for Business or AppLocker policy), which the installer checks before anything else. With `-CollectDiagnostics`, the installer installs nothing and exits 0 when it saved the diagnostics bundle, 5 when it could not (see [Diagnostics bundle](#diagnostics-bundle--collectdiagnostics)). The machine phase `rmm/Invoke-WingetAppSetup.ps1` also exits 5, without running the installer, when its pins are not set, the download failed or the SHA256 does not match; otherwise it passes the installer's code back unchanged |
 | 6 | Another run of the installer, or of `winget-app-uninstall.ps1`, is in progress on this PC (started by an RMM job, a scheduled task or someone else). This run stopped before its pre-flight checks and changed nothing. Run it again once the other run has finished (see [One run at a time](#one-run-at-a-time)) |
 | 7 | Started from Windows PowerShell 5.1, the installer could not install PowerShell 7 or could not relaunch itself under it, including when Group Policy sets PowerShell 7's execution policy to `AllSigned` or `Restricted` (checked before PowerShell 7 is installed) |
 | 8 | The apps are fine and winget still works, but automatic updates will not work or could not be verified. The summary's `Auto-updates:` line says which: `FAILED` (Winget-AutoUpdate could not be installed), `NOT CONFIGURED` (skipped because the Windows App Runtime the latest winget release needs, today `Microsoft.WindowsAppRuntime.1.8`, is missing and the installer could not install it, for example because that release needs a newer build or another family than the installer's pinned one), `AT RISK` (installed while that framework is missing and could not be installed) or `UNHEALTHY` (installed, but its `\WAU\Winget-AutoUpdate` task is missing, disabled, has no enabled trigger or could not be checked; see [Automatic updates](#automatic-updates)). Also: the [Microsoft.WinGet.Client engine](#microsoftwingetclient-engine-opt-in) installed the apps, and the machine-wide `winget.exe` that Winget-AutoUpdate runs did not start at the end of the run (the `winget: NOT USABLE` line) |
@@ -1209,7 +1256,8 @@ installed, and with `-WhatIf` when the fix would succeed. It exits 1, with `-Wha
 At the end of a run, when more than one applies, the code is the first of 1, 2, 9, 8, 3010 and 0.
 A restart the run needs is still recorded (`restart=yes` in the `RESULT` line, `restartRequired`
 in `last-run.json`) when another code wins. A run that relaunched itself elevated exits with the
-elevated run's code. Apps reported as `Deferred` (a run as SYSTEM or under cross-user elevation
+elevated run's code. A run that [handed its install over to SYSTEM](#hand-over-to-system-under-cross-user-elevation)
+exits with the SYSTEM run's code, or 1 when that run deferred any app. Otherwise, apps reported as `Deferred` (a run as SYSTEM or under cross-user elevation
 found no machine-wide installer for them, or the catalog marks them per-user) do not change the
 code.
 
@@ -1292,6 +1340,7 @@ file alone. Fields:
 | `wingetSource` | Whether winget could open its source in this run: `ok`; `unusable` (it could not at the start, exit code 2, or it stopped opening partway through the installs, so the apps left were not attempted); `unknown` (the check gave no clear answer, or did not run because the [Microsoft.WinGet.Client engine](#microsoftwingetclient-engine-opt-in) installed); `null` when the run stopped before the check |
 | `installEngine` | Which engine installed the apps: `requested` and `used` (`Cli` for `winget.exe`, `WinGetClient` for the [Microsoft.WinGet.Client engine](#microsoftwingetclient-engine-opt-in); a run that is not SYSTEM is always `Cli`), `module` (`name`, `version`, `sha256` and `engineVersion` when the module installed the apps, otherwise `null`) and `fallbackReason` (why a requested module was not used, otherwise `null`) |
 | `transcriptPath` | This run's transcript, or `null` |
+| `handoff` | `null`, unless the run [handed its install over to SYSTEM](#hand-over-to-system-under-cross-user-elevation): then `to` (`SYSTEM`), `reason` (`SourceUnusable`), `exitCode` (the SYSTEM run's, or `null` when it was stopped), `recordRead` (whether the SYSTEM run's `last-run.json` could be read), `deferred` (the apps it deferred) and `transcriptPath` (its transcript, or `null`). `apps`, `counts`, `autoUpdates`, `restartRequired`, `wingetUsable` and `summaryReached` are then the SYSTEM run's |
 
 An RMM tool can collect the file. It has no transcript header, but a failure reason can contain a
 path, so check it before you attach it to a public issue.

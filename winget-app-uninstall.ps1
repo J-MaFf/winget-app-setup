@@ -5300,7 +5300,7 @@ function Invoke-PowerShell7Bootstrap {
 function Get-ProcessTimeoutSeconds {
     param (
         [Parameter(Mandatory = $true)]
-        [ValidateSet('WingetInstall', 'WingetDownload', 'WingetUninstall', 'WingetListCheck', 'WingetVersion', 'WingetSourceUpdate', 'WingetSourceOpen', 'WingetSourceReset', 'WingetClientProbe', 'WingetClientVersion', 'WingetClientListCheck', 'MsiExec', 'AppxProvisioning', 'AppxRegistration', 'AppxQuery', 'WingetPackageManagerRepair', 'WebDownload', 'WebDownloadStall', 'WebLookup')]
+        [ValidateSet('WingetInstall', 'WingetDownload', 'WingetUninstall', 'WingetListCheck', 'WingetVersion', 'WingetSourceUpdate', 'WingetSourceOpen', 'WingetSourceReset', 'WingetClientProbe', 'WingetClientVersion', 'WingetClientListCheck', 'SystemHandoff', 'MsiExec', 'AppxProvisioning', 'AppxRegistration', 'AppxQuery', 'WingetPackageManagerRepair', 'WebDownload', 'WebDownloadStall', 'WebLookup')]
         [string]$Operation
     )
 
@@ -5316,6 +5316,7 @@ function Get-ProcessTimeoutSeconds {
         'WingetClientProbe' { return 180 }
         'WingetClientVersion' { return 60 }
         'WingetClientListCheck' { return 45 }
+        'SystemHandoff' { return 10800 }
         'MsiExec' { return 900 }
         'AppxProvisioning' { return 600 }
         'AppxRegistration' { return 300 }
@@ -6457,7 +6458,11 @@ function New-InstallerRunRecord {
 
         [Parameter(Mandatory = $false)]
         [AllowNull()]
-        [System.Collections.IDictionary]$InstallEngine
+        [System.Collections.IDictionary]$InstallEngine,
+
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [System.Collections.IDictionary]$Handoff
     )
 
     if ($null -eq $InstallEngine) {
@@ -6510,6 +6515,7 @@ function New-InstallerRunRecord {
         wingetSource    = $wingetSourceText
         installEngine   = $InstallEngine
         transcriptPath  = $transcriptPath
+        handoff         = $Handoff
     }
 }
 
@@ -6671,6 +6677,459 @@ function Write-InstallerNotStartedResult {
         transcriptPath  = $null
     }
     Write-Host (Format-InstallerResultLine -Record $record)
+}
+
+# --- SystemHandoff ---
+function Find-MachinePowerShell7 {
+    $roots = @($env:ProgramW6432, $env:ProgramFiles | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique)
+    foreach ($root in $roots) {
+        $candidate = Join-Path $root 'PowerShell\7\pwsh.exe'
+        if ((Test-Path -LiteralPath $candidate -PathType Leaf) -and (Test-PowerShell7Executable -Path $candidate)) {
+            return $candidate
+        }
+    }
+    return $null
+}
+
+function Get-SystemHandoffWaitSeconds {
+    param (
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [object]$Budget
+    )
+
+    $limit = Get-ProcessTimeoutSeconds -Operation 'SystemHandoff'
+    $secondsLeft = Get-InstallerRunBudgetSecondsLeft -Budget $Budget
+    if ($null -ne $secondsLeft) {
+        $limit = [Math]::Min($limit, $secondsLeft + 2700)
+    }
+    return [int][Math]::Max(60, $limit)
+}
+
+function Get-SystemHandoffTaskArgument {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$ScriptPath,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$SkipSystemCheck,
+
+        [Parameter(Mandatory = $false)]
+        [AllowEmptyCollection()]
+        [ValidatePattern('^(?:-[A-Za-z][A-Za-z0-9]*|[0-9][0-9A-Za-z:.-]*)\z')]
+        [string[]]$BudgetArguments = @()
+    )
+
+    $argument = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}" -NonInteractive' -f $ScriptPath
+    if ($SkipSystemCheck) {
+        $argument += ' -SkipSystemCheck'
+    }
+    if ($BudgetArguments.Count -gt 0) {
+        $argument += ' ' + ($BudgetArguments -join ' ')
+    }
+    return $argument
+}
+
+function New-SystemHandoffTaskXml {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$Command,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Arguments,
+
+        [Parameter(Mandatory = $true)]
+        [int]$TimeLimitSeconds
+    )
+
+    $limitMinutes = [int][Math]::Ceiling(($TimeLimitSeconds + 300) / 60)
+    $escape = { param ([string]$Text) [System.Security.SecurityElement]::Escape($Text) }
+    return @"
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Description>winget-app-setup: one run of the installer as SYSTEM, handed over by a run that could not open winget's source under cross-user elevation. Removed when the run ends.</Description>
+  </RegistrationInfo>
+  <Principals>
+    <Principal id="Author">
+      <UserId>S-1-5-18</UserId>
+      <RunLevel>HighestAvailable</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <AllowHardTerminate>true</AllowHardTerminate>
+    <StartWhenAvailable>false</StartWhenAvailable>
+    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
+    <AllowStartOnDemand>true</AllowStartOnDemand>
+    <Enabled>true</Enabled>
+    <Hidden>false</Hidden>
+    <RunOnlyIfIdle>false</RunOnlyIfIdle>
+    <ExecutionTimeLimit>PT$($limitMinutes)M</ExecutionTimeLimit>
+    <Priority>7</Priority>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>$(& $escape $Command)</Command>
+      <Arguments>$(& $escape $Arguments)</Arguments>
+    </Exec>
+  </Actions>
+</Task>
+"@
+}
+
+function Copy-SystemHandoffInstaller {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$ScriptPath,
+
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [AllowEmptyString()]
+        [string]$ExpectedSha256
+    )
+
+    $bytes = [System.IO.File]::ReadAllBytes($ScriptPath)
+    $sha256 = Get-Sha256Hex -Bytes $bytes
+    if (-not [string]::IsNullOrWhiteSpace($ExpectedSha256) -and $sha256 -ne $ExpectedSha256.ToUpperInvariant()) {
+        throw "$ScriptPath changed after this run started"
+    }
+    $directory = New-WauStagingDirectory -Prefix 'system-handoff'
+    try {
+        $path = Join-Path $directory 'winget-app-install.ps1'
+        [System.IO.File]::WriteAllBytes($path, $bytes)
+    }
+    catch {
+        Remove-Item -LiteralPath $directory -Recurse -Force -ErrorAction SilentlyContinue
+        throw
+    }
+    return [pscustomobject]@{ Directory = $directory; Path = $path; Sha256 = $sha256 }
+}
+
+function Test-SystemHandoffCopy {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Sha256
+    )
+
+    try {
+        return ((Get-Sha256Hex -Bytes ([System.IO.File]::ReadAllBytes($Path))) -eq $Sha256.ToUpperInvariant())
+    }
+    catch {
+        return $false
+    }
+}
+
+function Wait-SystemHandoffTask {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$TaskName,
+
+        [Parameter(Mandatory = $true)]
+        [DateTime]$StartedUtc,
+
+        [Parameter(Mandatory = $true)]
+        [int]$TimeoutSeconds,
+
+        [Parameter(Mandatory = $false)]
+        [int]$PollSeconds = 5
+    )
+
+    $waitStartedUtc = [DateTime]::UtcNow
+    $deadlineUtc = $waitStartedUtc.AddSeconds($TimeoutSeconds)
+    $nextReportUtc = $waitStartedUtc.AddMinutes(5)
+    while ([DateTime]::UtcNow -lt $deadlineUtc) {
+        Start-Sleep -Seconds $PollSeconds
+        $task = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+        $info = Get-ScheduledTaskInfo -TaskName $TaskName -ErrorAction SilentlyContinue
+        if ($task -and $info -and "$($task.State)" -ne 'Running' -and $null -ne $info.LastTaskResult -and @(267009, 267011) -notcontains [long]$info.LastTaskResult -and $info.LastRunTime -is [DateTime] -and $info.LastRunTime.ToUniversalTime() -ge $StartedUtc.AddMinutes(-1)) {
+            $result = [long]$info.LastTaskResult
+            if ($result -gt [int]::MaxValue) {
+                $result -= 4294967296
+            }
+            return [int]$result
+        }
+        if ([DateTime]::UtcNow -ge $nextReportUtc) {
+            $nextReportUtc = [DateTime]::UtcNow.AddMinutes(5)
+            Write-Info ('Still waiting for the SYSTEM run ({0:N0} minutes so far).' -f ([DateTime]::UtcNow - $waitStartedUtc).TotalMinutes)
+        }
+    }
+    return $null
+}
+
+function Read-SystemHandoffRunRecord {
+    param (
+        [Parameter(Mandatory = $true)]
+        [DateTime]$StartedUtc,
+
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [AllowEmptyString()]
+        [string]$BuildId = $script:InstallerBuildId,
+
+        [Parameter(Mandatory = $false)]
+        [string]$Path = (Get-InstallerRunRecordPath)
+    )
+
+    $read = Read-InstallerRunRecord -Path $Path
+    if ($null -eq $read) {
+        return [pscustomobject]@{ Record = $null; Problem = "there is no last-run.json at $Path that SYSTEM or an administrator wrote" }
+    }
+    $recordStartedUtc = [DateTime]::MinValue
+    $styles = [System.Globalization.DateTimeStyles]::AdjustToUniversal -bor [System.Globalization.DateTimeStyles]::AssumeUniversal
+    $parsed = [DateTime]::TryParseExact([string]$read.StartedUtc, "yyyy-MM-dd'T'HH:mm:ss'Z'", [System.Globalization.CultureInfo]::InvariantCulture, $styles, [ref]$recordStartedUtc)
+    if (-not $parsed -or $recordStartedUtc -lt $StartedUtc.ToUniversalTime().AddSeconds(-5)) {
+        return [pscustomobject]@{ Record = $null; Problem = "$Path is an earlier run's (started $($read.StartedUtc))" }
+    }
+    if (-not [string]::IsNullOrWhiteSpace($BuildId) -and $read.BuildId -ne $BuildId) {
+        return [pscustomobject]@{ Record = $null; Problem = "$Path is installer build $($read.BuildId)'s, not this run's build $BuildId" }
+    }
+    if ($null -eq $read.ExitCode) {
+        return [pscustomobject]@{ Record = $null; Problem = "$Path has no exit code: the SYSTEM run stopped before it reported" }
+    }
+    return [pscustomobject]@{ Record = $read; Problem = $null }
+}
+
+function Invoke-SystemHandoff {
+    param (
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [AllowEmptyString()]
+        [string]$ScriptPath,
+
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [AllowEmptyString()]
+        [string]$ExpectedSha256,
+
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [object]$Budget,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$SkipSystemCheck,
+
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [object]$AccountContext
+    )
+
+    $notStarted = {
+        param ([string]$Reason)
+        Write-ErrorMessage "The install was not handed over to SYSTEM: $Reason"
+        return [pscustomobject]@{ Started = $false; ExitCode = 2; TaskExitCode = $null; WaitSeconds = $null; RunRecord = $null; RecordProblem = $null; DeferredApps = [string[]]@() }
+    }
+
+    $processUser = 'this account'
+    $sessionText = ''
+    if ($AccountContext) {
+        if ($AccountContext.ProcessUser) {
+            $processUser = "'$($AccountContext.ProcessUser)'"
+        }
+        if ($AccountContext.SessionUser) {
+            $sessionText = " in $($AccountContext.SessionUser)'s session"
+        }
+    }
+    Write-WarningMessage "Switching to SYSTEM: winget cannot open its source for $processUser, elevated$sessionText (cross-user elevation), so this run hands the install over to a one-shot scheduled task that runs this installer build as SYSTEM, with the winget.exe installed for the whole PC. An app that installs only per user is Deferred there."
+
+    if ([string]::IsNullOrWhiteSpace($ScriptPath)) {
+        return (& $notStarted 'this run has no installer file to hand over (irm | iex in PowerShell 7, or the imported module). Run the Windows PowerShell one-liner, which saves a copy, or run winget-app-install.ps1 from a file.')
+    }
+    $pwshPath = Find-MachinePowerShell7
+    if (-not $pwshPath) {
+        return (& $notStarted 'PowerShell 7 is not installed for the whole PC (%ProgramFiles%\PowerShell\7\pwsh.exe), and the SYSTEM run needs it.')
+    }
+
+    $copy = $null
+    $taskName = $null
+    $registered = $false
+    $relock = $false
+    try {
+        try {
+            $copy = Copy-SystemHandoffInstaller -ScriptPath $ScriptPath -ExpectedSha256 $ExpectedSha256
+        }
+        catch {
+            $resetHint = ''
+            if ($_.FullyQualifiedErrorId -eq 'RestrictedDirectoryAclFailed' -and $_.TargetObject) {
+                $resetHint = Get-RestrictedDirectoryResetHint -Path ([string]$_.TargetObject)
+            }
+            return (& $notStarted "the installer could not be copied for the SYSTEM run ($($_.Exception.Message)).$resetHint")
+        }
+        if (-not (Test-SystemHandoffCopy -Path $copy.Path -Sha256 $copy.Sha256)) {
+            return (& $notStarted "the copy $($copy.Path) does not have the SHA256 $($copy.Sha256) it was written with, so it is not run as SYSTEM.")
+        }
+
+        $waitSeconds = Get-SystemHandoffWaitSeconds -Budget $Budget
+        $taskArgument = Get-SystemHandoffTaskArgument -ScriptPath $copy.Path -SkipSystemCheck:$SkipSystemCheck -BudgetArguments @(Get-InstallerRunBudgetArgument -Budget $Budget)
+        $taskXml = New-SystemHandoffTaskXml -Command $pwshPath -Arguments $taskArgument -TimeLimitSeconds $waitSeconds
+        $taskName = 'winget-app-setup-system-' + [guid]::NewGuid().ToString('N')
+
+        if ($null -ne $script:InstallerRunLock) {
+            Unlock-InstallerRun
+            $relock = $true
+        }
+        $startedUtc = [DateTime]::UtcNow
+        try {
+            [void](Register-ScheduledTask -TaskName $taskName -Xml $taskXml -Force -ErrorAction Stop)
+            $registered = $true
+            Start-ScheduledTask -TaskName $taskName -ErrorAction Stop
+        }
+        catch {
+            return (& $notStarted "the scheduled task $taskName could not be registered or started: $($_.Exception.Message)")
+        }
+
+        $logDirectory = Split-Path -Parent (Get-InstallerRunRecordPath)
+        Write-Info ('The SYSTEM run has started (scheduled task {0}, {1}). Its transcript is the newest install-*.log in {2}; this window waits for it, for at most {3:N0} minutes.' -f $taskName, $pwshPath, $logDirectory, ($waitSeconds / 60))
+        $taskExitCode = Wait-SystemHandoffTask -TaskName $taskName -StartedUtc $startedUtc -TimeoutSeconds $waitSeconds
+        if ($null -eq $taskExitCode) {
+            Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+        }
+        $recordRead = Read-SystemHandoffRunRecord -StartedUtc $startedUtc
+        $deferred = [string[]]@()
+        if ($recordRead.Record) {
+            $deferred = [string[]]@($recordRead.Record.DeferredApps)
+        }
+        return [pscustomobject]@{
+            Started       = $true
+            ExitCode      = $null
+            TaskExitCode  = $taskExitCode
+            WaitSeconds   = $waitSeconds
+            RunRecord     = $recordRead.Record
+            RecordProblem = $recordRead.Problem
+            DeferredApps  = $deferred
+        }
+    }
+    finally {
+        if ($registered) {
+            Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
+        }
+        if ($copy -and $copy.Directory) {
+            Remove-Item -LiteralPath $copy.Directory -Recurse -Force -ErrorAction SilentlyContinue
+        }
+        if ($relock -and (Lock-InstallerRun) -eq 'Busy') {
+            $script:InstallerRunRecordEnabled = $false
+            Write-WarningMessage 'Another run of the installer started after the SYSTEM run; this run leaves last-run.json to it.'
+        }
+    }
+}
+
+function Get-SystemHandoffExitCode {
+    param (
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [Nullable[int]]$TaskExitCode,
+
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [AllowEmptyCollection()]
+        [string[]]$DeferredApps = @()
+    )
+
+    if ($null -eq $TaskExitCode) {
+        return 5
+    }
+    if (@($DeferredApps | Where-Object { $_ }).Count -gt 0) {
+        return 1
+    }
+    return [int]$TaskExitCode
+}
+
+function Write-SystemHandoffResult {
+    param (
+        [Parameter(Mandatory = $true)]
+        [object]$Handoff,
+
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [object]$AccountContext
+    )
+
+    $deferred = @($Handoff.DeferredApps | Where-Object { $_ })
+    if ($null -eq $Handoff.TaskExitCode) {
+        Write-ErrorMessage ('The SYSTEM run did not end within {0:N0} minutes and was stopped: apps may be only partly installed. Its transcript is in {1}.' -f ($Handoff.WaitSeconds / 60), (Split-Path -Parent (Get-InstallerRunRecordPath)))
+    }
+    else {
+        Write-Info "The SYSTEM run ended with exit code $($Handoff.TaskExitCode)."
+    }
+    if ($Handoff.RunRecord) {
+        $systemTranscript = $null
+        if ($Handoff.RunRecord.Record) {
+            $systemTranscript = [string]$Handoff.RunRecord.Record.transcriptPath
+        }
+        if (-not [string]::IsNullOrWhiteSpace($systemTranscript)) {
+            Write-Info "Transcript of the SYSTEM run (its summary, and why any app failed): $systemTranscript"
+        }
+    }
+    elseif ($Handoff.RecordProblem) {
+        Write-WarningMessage "The SYSTEM run's result could not be read: $($Handoff.RecordProblem). Which apps it deferred is not known; see its transcript."
+    }
+    if ($deferred.Count -gt 0) {
+        $user = 'the signed-in user'
+        if ($AccountContext -and $AccountContext.SessionUser) {
+            $user = [string]$AccountContext.SessionUser
+        }
+        Write-ErrorMessage ('Deferred by the SYSTEM run, so not installed for {0}: {1}.' -f $user, ($deferred -join ', '))
+        Write-ErrorMessage ("They need the Endpoint Central user phase (rmm/Invoke-WingetAppSetupUserPhase.ps1, at {0}'s next sign-in) or a run of the installer as {0}. This run exits 1 so that they are not missed." -f $user)
+    }
+    return (Get-SystemHandoffExitCode -TaskExitCode $Handoff.TaskExitCode -DeferredApps $deferred)
+}
+
+function New-SystemHandoffRunRecord {
+    param (
+        [Parameter(Mandatory = $true)]
+        [object]$Handoff,
+
+        [Parameter(Mandatory = $true)]
+        [int]$ExitCode
+    )
+
+    $systemRecord = $null
+    if ($Handoff.RunRecord) {
+        $systemRecord = $Handoff.RunRecord.Record
+    }
+    $apps = @()
+    $autoUpdates = 'NotRun'
+    $autoUpdatesVersion = $null
+    $restartRequired = $false
+    $wingetUsable = $null
+    $wingetSource = $null
+    $summaryReached = $false
+    $systemTranscript = $null
+    if ($systemRecord) {
+        $apps = @($systemRecord.apps | Where-Object { $null -ne $_ })
+        if ($systemRecord.autoUpdates -and -not [string]::IsNullOrWhiteSpace([string]$systemRecord.autoUpdates.status)) {
+            $autoUpdates = [string]$systemRecord.autoUpdates.status
+            $autoUpdatesVersion = $systemRecord.autoUpdates.version
+        }
+        $restartRequired = [bool]$systemRecord.restartRequired
+        if ($null -ne $systemRecord.wingetUsable) {
+            $wingetUsable = [bool]$systemRecord.wingetUsable
+        }
+        if ([string]$systemRecord.wingetSource -in @('ok', 'unusable', 'unknown')) {
+            $wingetSource = [string]$systemRecord.wingetSource
+        }
+        $summaryReached = [bool]$systemRecord.summaryReached
+        if (-not [string]::IsNullOrWhiteSpace([string]$systemRecord.transcriptPath)) {
+            $systemTranscript = [string]$systemRecord.transcriptPath
+        }
+    }
+    $taskExitCode = $null
+    if ($null -ne $Handoff.TaskExitCode) {
+        $taskExitCode = [int]$Handoff.TaskExitCode
+    }
+    $handoffEntry = [ordered]@{
+        to             = 'SYSTEM'
+        reason         = 'SourceUnusable'
+        exitCode       = $taskExitCode
+        recordRead     = ($null -ne $systemRecord)
+        deferred       = [string[]]@($Handoff.DeferredApps | Where-Object { $_ })
+        transcriptPath = $systemTranscript
+    }
+    return (New-InstallerRunRecord -ExitCode $ExitCode -Apps $apps -AutoUpdates $autoUpdates -AutoUpdatesVersion $autoUpdatesVersion -RestartRequired $restartRequired -WingetUsable $wingetUsable -WingetSource $wingetSource -SummaryReached:$summaryReached -Handoff $handoffEntry)
 }
 
 # --- SystemInfo ---
@@ -7707,6 +8166,7 @@ function Read-InstallerRunRecord {
         ExitCode           = $exitCode
         DeferredApps       = [string[]]$deferred
         InvalidDeferredIds = [string[]]$invalid
+        Record             = $record
     }
 }
 
@@ -11817,6 +12277,41 @@ function Invoke-WingetInstall {
         $wingetSource = 'ok'
     }
     $script:InstallerWingetSource = $wingetSource
+    $handOverToSystem = (-not $wingetAvailable) -and $winget.Diagnosis -eq 'SourceUnusable' -and [bool]$account.IsCrossUserElevation -and -not [bool]$account.IsSystem
+    if ($handOverToSystem -and $WhatIf) {
+        Write-Info '[DRY-RUN] winget cannot open its source for this account under cross-user elevation: a real run would hand the install over to SYSTEM, through a one-shot scheduled task that runs this installer as SYSTEM.'
+    }
+    if ($handOverToSystem -and -not $WhatIf) {
+        if ($script:TightVncSecret -and $null -ne $script:TightVncSecret.Password) {
+            Write-WarningMessage 'The TightVNC password given to this run is not passed on to the SYSTEM run, so TightVNC is reported as not configured there.'
+        }
+        Clear-TightVncSecret
+        $handoffScriptPath = $PSCommandPath
+        if (Test-InvokedFromModuleContext -InvocationModule $MyInvocation.MyCommand.Module -CommandPath $PSCommandPath) {
+            $handoffScriptPath = ''
+        }
+        $handoff = Invoke-SystemHandoff -ScriptPath $handoffScriptPath -ExpectedSha256 $script:InstallerScriptSha256 -Budget $runBudget -SkipSystemCheck:$SkipSystemCheck -AccountContext $account
+        if ($handoff.Started) {
+            $exitCode = Write-SystemHandoffResult -Handoff $handoff -AccountContext $account
+            $script:InstallerPendingExitCode = $exitCode
+            if ($script:InstallLogPath) {
+                Write-Info "Full transcript of this run: $script:InstallLogPath"
+            }
+            try {
+                [void](Write-InstallerRunResult -Record (New-SystemHandoffRunRecord -Handoff $handoff -ExitCode $exitCode))
+            }
+            catch {
+                Write-WarningMessage "Could not report this run's result: $_"
+            }
+            $script:InstallerRunReportPending = $false
+            Unlock-InstallerRun
+            if (-not $effectiveNonInteractive) {
+                Write-Prompt 'Press any key to exit...'
+                [void][System.Console]::ReadKey($true)
+            }
+            return $exitCode
+        }
+    }
     if (-not $wingetAvailable -and -not $WhatIf) {
         if ($winget.Diagnosis -eq 'SourceUnusable') {
             Write-ErrorMessage 'Nothing was installed and Winget-AutoUpdate was not set up: winget cannot open its source for this account (see above). Exiting.'

@@ -59,6 +59,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Invoke-EnvironmentPreflight`) saying the configuration is unsupported and naming the apps known to
   fail there, then goes on. The readme states the supported Windows: 10 and 11 on x64, and 11 on
   ARM64. The catalog's architecture gates are unchanged.
+- Hand-over to SYSTEM (bead wgt-gq8.68, owner decision 2026-10-12): under cross-user elevation, when
+  winget still cannot open its source after the repair (the run would stop with exit code 2,
+  `SourceUnusable`), the installer now hands the install over to SYSTEM on its own, interactive or
+  not. It copies this installer build into a new folder under `%ProgramData%\winget-app-setup` that
+  only SYSTEM and Administrators can change (after checking the SHA256 the run started with, and
+  again before the task is registered), registers a one-shot scheduled task that runs the copy as
+  SYSTEM with the PowerShell 7 installed for the whole PC (`-NonInteractive`, the time budget's
+  deadline, `-SkipSystemCheck` when given), releases the run lock for it, waits (3 hours, or what
+  is left of the time budget plus 45 minutes), and always removes the task and the copy. The run
+  exits with the SYSTEM run's code, or 1 when that run deferred any app (such as Windows Terminal),
+  which it lists with a line saying they need the Endpoint Central user phase or a run as the
+  signed-in user; 5 when the SYSTEM run did not end in time; still 2 when the hand-over cannot
+  start (no PowerShell 7 for the whole PC, no installer file under `irm | iex` in PowerShell 7, a
+  copy that does not check out, a task that cannot be started). Its `last-run.json` keeps the
+  SYSTEM run's apps, so the user phase still finds what it deferred, and a new `handoff` field
+  (`to`, `reason`, `exitCode`, `recordRead`, `deferred`, `transcriptPath`; `null` for every other
+  run). A run as SYSTEM never hands over.
 - merge-gate caller (`.github/workflows/merge-gate.yml`): the required check that keeps the claude-sandbox App from merging its own PRs; logic in the reusable J-MaFf/.github merge-gate.yml.
 - Releases (bead wgt-z70, [#286](https://github.com/J-MaFf/winget-app-setup/issues/286)): a `vX.Y.Z`
   tag on `main` now publishes a GitHub release through the shared workflow in

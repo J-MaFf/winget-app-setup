@@ -45,7 +45,10 @@
     was used up, so some apps or the Winget-AutoUpdate setup were not attempted: run it again to finish; 3010 = success,
     but a restart finishes it. At the end of a run the precedence is 1 > 2 > 9 > 8 > 3010 > 0
     (Get-InstallerExitCode). Deferred apps and NotConfigured hooks do not change the code. A run
-    that relaunched itself elevated returns the elevated run's code. The entry script also exits 1
+    that relaunched itself elevated returns the elevated run's code. Under cross-user elevation, a
+    source that stays closed hands the install over to SYSTEM (Invoke-SystemHandoff, wgt-gq8.68):
+    the run returns 1 when the SYSTEM run deferred any app, 5 when it did not end in time, otherwise
+    its code; 2 when the hand-over could not start. The entry script also exits 1
     for a failed blocking pre-flight check, 5 for an abort or Constrained Language Mode, and 6 when
     another run is in progress.
 
@@ -282,6 +285,45 @@ function Invoke-WingetInstall {
         $wingetSource = 'ok'
     }
     $script:InstallerWingetSource = $wingetSource
+    # Under cross-user elevation a source that stays closed hands the install over to SYSTEM
+    # (wgt-gq8.68). Never as SYSTEM, which is never cross-user, so a SYSTEM run never hands over.
+    $handOverToSystem = (-not $wingetAvailable) -and $winget.Diagnosis -eq 'SourceUnusable' -and [bool]$account.IsCrossUserElevation -and -not [bool]$account.IsSystem
+    if ($handOverToSystem -and $WhatIf) {
+        Write-Info '[DRY-RUN] winget cannot open its source for this account under cross-user elevation: a real run would hand the install over to SYSTEM, through a one-shot scheduled task that runs this installer as SYSTEM.'
+    }
+    if ($handOverToSystem -and -not $WhatIf) {
+        # The password stays in this process: a task's command line or a file would expose it.
+        if ($script:TightVncSecret -and $null -ne $script:TightVncSecret.Password) {
+            Write-WarningMessage 'The TightVNC password given to this run is not passed on to the SYSTEM run, so TightVNC is reported as not configured there.'
+        }
+        Clear-TightVncSecret
+        $handoffScriptPath = $PSCommandPath
+        if (Test-InvokedFromModuleContext -InvocationModule $MyInvocation.MyCommand.Module -CommandPath $PSCommandPath) {
+            $handoffScriptPath = ''
+        }
+        $handoff = Invoke-SystemHandoff -ScriptPath $handoffScriptPath -ExpectedSha256 $script:InstallerScriptSha256 -Budget $runBudget -SkipSystemCheck:$SkipSystemCheck -AccountContext $account
+        if ($handoff.Started) {
+            $exitCode = Write-SystemHandoffResult -Handoff $handoff -AccountContext $account
+            $script:InstallerPendingExitCode = $exitCode
+            if ($script:InstallLogPath) {
+                Write-Info "Full transcript of this run: $script:InstallLogPath"
+            }
+            # This run's record replaces the SYSTEM run's in last-run.json, with its apps.
+            try {
+                [void](Write-InstallerRunResult -Record (New-SystemHandoffRunRecord -Handoff $handoff -ExitCode $exitCode))
+            }
+            catch {
+                Write-WarningMessage "Could not report this run's result: $_"
+            }
+            $script:InstallerRunReportPending = $false
+            Unlock-InstallerRun
+            if (-not $effectiveNonInteractive) {
+                Write-Prompt 'Press any key to exit...'
+                [void][System.Console]::ReadKey($true)
+            }
+            return $exitCode
+        }
+    }
     if (-not $wingetAvailable -and -not $WhatIf) {
         if ($winget.Diagnosis -eq 'SourceUnusable') {
             # Before any app or Winget-AutoUpdate work: every install would fail the same way.

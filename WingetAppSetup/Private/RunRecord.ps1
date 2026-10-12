@@ -178,6 +178,9 @@ function Format-RunRecordTime {
 .PARAMETER InstallEngine
     Which engine was asked for and which installed (New-InstallEngineRecord). Default: this run's
     (Get-InstallEngineRecord).
+.PARAMETER Handoff
+    For a run that handed its install over to SYSTEM (wgt-gq8.68), what New-SystemHandoffRunRecord
+    puts there; otherwise $null.
 .OUTPUTS
     [System.Collections.Specialized.OrderedDictionary]
 #>
@@ -216,7 +219,11 @@ function New-InstallerRunRecord {
 
         [Parameter(Mandatory = $false)]
         [AllowNull()]
-        [System.Collections.IDictionary]$InstallEngine
+        [System.Collections.IDictionary]$InstallEngine,
+
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [System.Collections.IDictionary]$Handoff
     )
 
     if ($null -eq $InstallEngine) {
@@ -269,6 +276,7 @@ function New-InstallerRunRecord {
         wingetSource    = $wingetSourceText
         installEngine   = $InstallEngine
         transcriptPath  = $transcriptPath
+        handoff         = $Handoff
     }
 }
 

@@ -950,6 +950,182 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
         }
     }
 
+    # wgt-gq8.68 (owner decision 2026-10-12): under cross-user elevation, a winget source that stays
+    # closed hands the install over to SYSTEM, interactive or not, and the run passes its result on.
+    Context 'Hand-over to SYSTEM when the source stays closed under cross-user elevation (wgt-gq8.68)' {
+        BeforeEach {
+            Mock Initialize-Winget { [pscustomobject]@{ Ready = $false; Diagnosis = 'SourceUnusable' } }
+            Mock Get-InstallAccountContext { New-TestAccountContext -CrossUser -ProcessUser 'CONTOSO\admin-jmaffiola' -SessionUser 'CONTOSO\stduser' }
+            # Not the imported module's Public/Install.ps1: the run hands over its own file.
+            Mock Test-InvokedFromModuleContext { $false }
+            $script:InstallerScriptSha256 = 'AB' * 32
+            $script:InstallLogPath = $null
+            $script:InstallerRunReportPending = $true
+            $script:InstallerPendingExitCode = $null
+            $script:TightVncSecret = $null
+            $script:systemRecord = [pscustomobject]@{
+                schemaVersion   = 1
+                exitCode        = 0
+                summaryReached  = $true
+                apps            = @(
+                    [pscustomobject]@{ id = '7zip.7zip'; status = 'Installed'; reason = $null }
+                )
+                autoUpdates     = [pscustomobject]@{ status = 'Configured'; version = '2.12.0' }
+                restartRequired = $false
+                wingetUsable    = $true
+                transcriptPath  = 'C:\ProgramData\winget-app-setup\logs\install-20261012-101500.log'
+            }
+            Mock Invoke-SystemHandoff {
+                [pscustomobject]@{
+                    Started = $true; ExitCode = $null; TaskExitCode = 0; WaitSeconds = 10800
+                    RunRecord = [pscustomobject]@{ DeferredApps = [string[]]@(); Record = $script:systemRecord }
+                    RecordProblem = $null; DeferredApps = [string[]]@()
+                }
+            }
+            $script:reportedRecords = @()
+            Mock Write-InstallerRunResult { $script:reportedRecords += , $Record; $null }
+            Mock Unlock-InstallerRun { }
+        }
+
+        AfterEach {
+            $script:InstallerScriptSha256 = $null
+            $script:InstallerRunReportPending = $false
+            $script:InstallerPendingExitCode = $null
+            $script:TightVncSecret = $null
+        }
+
+        It 'Hands over, passes the SYSTEM run''s exit code on, and installs nothing itself' {
+            Mock Invoke-SystemHandoff {
+                [pscustomobject]@{
+                    Started = $true; ExitCode = $null; TaskExitCode = 3010; WaitSeconds = 10800
+                    RunRecord = [pscustomobject]@{ DeferredApps = [string[]]@(); Record = $script:systemRecord }
+                    RecordProblem = $null; DeferredApps = [string[]]@()
+                }
+            }
+
+            Invoke-WingetInstall -Apps @(@{ name = 'Contoso.App' }) -NonInteractive | Should -Be 3010
+
+            Should -Invoke Invoke-SystemHandoff -Times 1 -Exactly -ParameterFilter {
+                -not [string]::IsNullOrEmpty($ScriptPath) -and $ExpectedSha256 -eq ('AB' * 32) -and $AccountContext.IsCrossUserElevation -and -not $SkipSystemCheck
+            }
+            Should -Invoke Install-AppWithVerification -Times 0 -Exactly
+            Should -Invoke Install-WingetAutoUpdate -Times 0 -Exactly
+            Should -Invoke Remove-LegacyScheduledUpdates -Times 0 -Exactly
+            Should -Invoke Unlock-InstallerRun -Times 1 -Exactly
+            $script:InstallerPendingExitCode | Should -Be 3010
+            $script:InstallerRunReportPending | Should -BeFalse
+            $script:infoMessages | Should -Contain 'The SYSTEM run ended with exit code 3010.'
+            $script:infoMessages | Should -Contain 'Transcript of the SYSTEM run (its summary, and why any app failed): C:\ProgramData\winget-app-setup\logs\install-20261012-101500.log'
+            $script:errorMessages | Should -Not -Contain 'Nothing was installed and Winget-AutoUpdate was not set up: winget cannot open its source for this account (see above). Exiting.'
+
+            $script:reportedRecords.Count | Should -Be 1
+            $record = $script:reportedRecords[0]
+            $record.exitCode | Should -Be 3010
+            $record.handoff.to | Should -Be 'SYSTEM'
+            $record.handoff.reason | Should -Be 'SourceUnusable'
+            $record.handoff.exitCode | Should -Be 3010
+            $record.handoff.recordRead | Should -BeTrue
+            @($record.handoff.deferred).Count | Should -Be 0
+            $record.handoff.transcriptPath | Should -Be 'C:\ProgramData\winget-app-setup\logs\install-20261012-101500.log'
+            $record.apps[0].id | Should -Be '7zip.7zip'
+            $record.counts.installed | Should -Be 1
+            $record.autoUpdates.status | Should -Be 'Configured'
+        }
+
+        It 'Exits 1 and lists the apps the SYSTEM run deferred, with who can install them' {
+            $script:systemRecord.apps += [pscustomobject]@{ id = 'Microsoft.WindowsTerminal'; status = 'Deferred'; reason = 'per-user app' }
+            Mock Invoke-SystemHandoff {
+                [pscustomobject]@{
+                    Started = $true; ExitCode = $null; TaskExitCode = 0; WaitSeconds = 10800
+                    RunRecord = [pscustomobject]@{ DeferredApps = [string[]]@('Microsoft.WindowsTerminal'); Record = $script:systemRecord }
+                    RecordProblem = $null; DeferredApps = [string[]]@('Microsoft.WindowsTerminal')
+                }
+            }
+
+            Invoke-WingetInstall -Apps @(@{ name = 'Contoso.App' }) -NonInteractive | Should -Be 1
+
+            $script:errorMessages | Should -Contain 'Deferred by the SYSTEM run, so not installed for CONTOSO\stduser: Microsoft.WindowsTerminal.'
+            $script:errorMessages | Should -Contain "They need the Endpoint Central user phase (rmm/Invoke-WingetAppSetupUserPhase.ps1, at CONTOSO\stduser's next sign-in) or a run of the installer as CONTOSO\stduser. This run exits 1 so that they are not missed."
+            $record = $script:reportedRecords[0]
+            $record.exitCode | Should -Be 1
+            $record.handoff.exitCode | Should -Be 0
+            @($record.handoff.deferred) | Should -Be @('Microsoft.WindowsTerminal')
+            # The user phase still finds the deferred app in last-run.json.
+            @($record.apps | Where-Object { $_.status -eq 'Deferred' } | ForEach-Object { $_.id }) | Should -Be @('Microsoft.WindowsTerminal')
+            $record.counts.deferred | Should -Be 1
+        }
+
+        It 'Passes the time budget and -SkipSystemCheck on to the hand-over' {
+            Invoke-WingetInstall -Apps @(@{ name = 'Contoso.App' }) -NonInteractive -SkipSystemCheck -MaxRuntimeMinutes 60 | Should -Be 0
+
+            Should -Invoke Invoke-SystemHandoff -Times 1 -Exactly -ParameterFilter { $SkipSystemCheck -and $Budget.Minutes -eq 60 -and $null -ne $Budget.DeadlineUtc }
+        }
+
+        It 'Hands over nothing to run from the imported module: it passes no script path' {
+            Mock Test-InvokedFromModuleContext { $true }
+            Mock Invoke-SystemHandoff { [pscustomobject]@{ Started = $false; ExitCode = 2 } }
+
+            Invoke-WingetInstall -Apps @(@{ name = 'Contoso.App' }) -NonInteractive | Should -Be 2
+
+            Should -Invoke Invoke-SystemHandoff -Times 1 -Exactly -ParameterFilter { [string]::IsNullOrEmpty($ScriptPath) }
+        }
+
+        It 'Stops with exit code 2, as before, when the hand-over could not start' {
+            Mock Invoke-SystemHandoff { [pscustomobject]@{ Started = $false; ExitCode = 2 } }
+
+            Invoke-WingetInstall -Apps @(@{ name = 'Contoso.App' }) -NonInteractive | Should -Be 2
+
+            Should -Invoke Install-AppWithVerification -Times 0 -Exactly
+            Should -Invoke Install-WingetAutoUpdate -Times 0 -Exactly
+            Should -Invoke Write-InstallerRunResult -Times 0 -Exactly
+            $script:errorMessages | Should -Contain 'Nothing was installed and Winget-AutoUpdate was not set up: winget cannot open its source for this account (see above). Exiting.'
+        }
+
+        It 'Does not hand over when the same user that is signed in runs it' {
+            Mock Get-InstallAccountContext { New-TestAccountContext }
+
+            Invoke-WingetInstall -Apps @(@{ name = 'Contoso.App' }) -NonInteractive | Should -Be 2
+
+            Should -Invoke Invoke-SystemHandoff -Times 0 -Exactly
+        }
+
+        # Get-InstallAccountContext never reports SYSTEM as cross-user (tests/SystemHandoff.Tests.ps1);
+        # the run does not hand over as SYSTEM even if it did, so the SYSTEM task never hands over.
+        It 'Never hands over again from a run as SYSTEM, so the hand-over cannot loop' {
+            Mock Get-InstallAccountContext {
+                $context = New-TestAccountContext -System -SessionUser 'CONTOSO\stduser'
+                $context.IsCrossUserElevation = $true
+                $context
+            }
+
+            Invoke-WingetInstall -Apps @(@{ name = 'Contoso.App' }) -NonInteractive | Should -Be 2
+
+            Should -Invoke Invoke-SystemHandoff -Times 0 -Exactly
+            Should -Invoke Initialize-Winget -Times 1 -Exactly -ParameterFilter { $AccountContext.IsSystem }
+        }
+
+        It 'Does not hand over for any other reason winget is not ready' {
+            Mock Initialize-Winget { [pscustomobject]@{ Ready = $false; Diagnosis = 'NotLaunchable' } }
+
+            Invoke-WingetInstall -Apps @(@{ name = 'Contoso.App' }) -NonInteractive | Should -Be 2
+
+            Should -Invoke Invoke-SystemHandoff -Times 0 -Exactly
+        }
+
+        It 'Does not keep the TightVNC password for the SYSTEM run, and says so' {
+            Mock Initialize-TightVncSecretForRun { $script:TightVncSecret = @{ Password = (ConvertTo-SecureString 'x' -AsPlainText -Force) } }
+            Mock Invoke-SystemHandoff {
+                $script:secretAtHandoff = $script:TightVncSecret
+                [pscustomobject]@{ Started = $false; ExitCode = 2 }
+            }
+
+            Invoke-WingetInstall -Apps @(@{ name = 'Contoso.App' }) -NonInteractive | Should -Be 2
+
+            $script:secretAtHandoff | Should -BeNullOrEmpty
+            $script:warningMessages | Should -Contain 'The TightVNC password given to this run is not passed on to the SYSTEM run, so TightVNC is reported as not configured there.'
+        }
+    }
+
     Context 'Environment pre-flight for the account the run installs as (wgt-gq8.39)' {
         BeforeEach {
             $script:blockedPolicy = [pscustomobject]@{ Name = 'EnableAppInstaller'; Policy = 'Enable App Installer' }
@@ -3619,9 +3795,12 @@ Describe 'Invoke-WingetInstall with the real winget setup ladder (review finding
         Mock Invoke-WebRequest { [pscustomobject]@{ RawContentStream = [System.IO.MemoryStream]::new([byte[]](1, 2, 3)) } }
         Mock Get-AuthenticodeSignature { [pscustomobject]@{ Status = 'Valid'; SignerCertificate = [pscustomobject]@{ Subject = 'CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US' } } }
         Mock Invoke-AppxRegistration { throw [System.Runtime.InteropServices.COMException]::new('Deployment failed with HRESULT: 0x80073D19, An error occurred because a user was logged off.', -2147009255) }
+        # The hand-over to SYSTEM (wgt-gq8.68) has its own tests; here it cannot start.
+        Mock Invoke-SystemHandoff { [pscustomobject]@{ Started = $false; ExitCode = 2 } }
 
         Invoke-WingetInstall -Apps @(@{ name = 'Contoso.AppOne' }) -NonInteractive | Should -Be 2
 
+        Should -Invoke Invoke-SystemHandoff -Times 1 -Exactly
         Should -Invoke Invoke-AppxRegistration -Times 1 -Exactly -ParameterFilter { $PackagePath -like (Join-Path $script:sourceStaging 'source-*.msix') }
         Should -Invoke Install-AppWithVerification -Times 0 -Exactly
         Should -Invoke Install-WingetAutoUpdate -Times 0 -Exactly

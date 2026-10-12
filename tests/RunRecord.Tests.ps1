@@ -117,7 +117,7 @@ Describe 'New-InstallerRunRecord and Format-InstallerResultLine (review finding 
     It 'Records the run: build, times, exit code, counts, apps, auto-updates, restart, winget and the log' {
         $record = New-InstallerRunRecord -ExitCode 1 -Apps $script:apps -AutoUpdates 'Configured' -AutoUpdatesVersion ([version]'2.12.0') -RestartRequired $true -WingetUsable $true -WingetSource 'ok' -SummaryReached
 
-        @($record.Keys) | Should -Be @('schemaVersion', 'buildId', 'startedUtc', 'endedUtc', 'exitCode', 'summaryReached', 'counts', 'apps', 'autoUpdates', 'restartRequired', 'wingetUsable', 'wingetSource', 'installEngine', 'transcriptPath')
+        @($record.Keys) | Should -Be @('schemaVersion', 'buildId', 'startedUtc', 'endedUtc', 'exitCode', 'summaryReached', 'counts', 'apps', 'autoUpdates', 'restartRequired', 'wingetUsable', 'wingetSource', 'installEngine', 'transcriptPath', 'handoff')
         $record.schemaVersion | Should -Be 1
         $record.buildId | Should -Be '1.0.0+1a2b3c4d'
         $record.startedUtc | Should -Be '2026-10-04T14:30:05Z'
@@ -137,6 +137,8 @@ Describe 'New-InstallerRunRecord and Format-InstallerResultLine (review finding 
         $record.wingetUsable | Should -BeTrue
         $record.wingetSource | Should -Be 'ok'
         $record.transcriptPath | Should -Be 'C:\ProgramData\winget-app-setup\logs\install-20261004-163005.log'
+        # Only a run that handed its install over to SYSTEM fills it (wgt-gq8.68).
+        $record.handoff | Should -BeNullOrEmpty
     }
 
     # wgt-gq8.66

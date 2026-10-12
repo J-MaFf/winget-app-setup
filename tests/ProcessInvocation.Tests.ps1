@@ -82,6 +82,11 @@ Describe 'Get-ProcessTimeoutSeconds' {
         Get-ProcessTimeoutSeconds -Operation $Operation | Should -Be $Seconds
     }
 
+    # wgt-gq8.68: a whole installer run as SYSTEM, handed over under cross-user elevation.
+    It 'Gives the wait for the SYSTEM run a run hands its install over to 3 hours' {
+        Get-ProcessTimeoutSeconds -Operation SystemHandoff | Should -Be 10800
+    }
+
     # wgt-gq8.63 review: Add-AppxPackage and Get-AppxPackage -AllUsers in Windows PowerShell had no limit.
     It 'Gives the Appx calls in Windows PowerShell their own limits: <Operation> <Seconds> s' -ForEach @(
         @{ Operation = 'AppxRegistration'; Seconds = 300 }
