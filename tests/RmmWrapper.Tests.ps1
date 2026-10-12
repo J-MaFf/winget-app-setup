@@ -611,6 +611,50 @@ exit 6
             $script:lines | Should -Contain ("'{0}' was a link (a junction or symbolic link), not a folder. The link was removed without changing what it pointed to." -f $link)
         }
 
+        # wgt-gq8.59: that message is printed before the transcript starts, so only the console had it.
+        It 'Repeats the message about a removed link once the transcript has started' {
+            $null = New-Item -ItemType $script:linkType -Path $script:baseDirectory -Target $script:victim
+            Mock Start-Transcript { $script:lines += '<transcript started>' }
+
+            [void](Start-RmmTranscript -LogDirectory $script:logDirectory)
+
+            $message = "'{0}' was a link (a junction or symbolic link), not a folder. The link was removed without changing what it pointed to." -f $script:baseDirectory
+            $started = [array]::IndexOf($script:lines, '<transcript started>')
+            $started | Should -BeGreaterThan ([array]::IndexOf($script:lines, $message))
+            [array]::IndexOf($script:lines, "Before this log started: $message") | Should -Be ($started + 1)
+        }
+
+        It 'Repeats nothing when no link was removed' {
+            [void](Start-RmmTranscript -LogDirectory $script:logDirectory)
+
+            @($script:lines | Where-Object { $_ -like 'Before this log started:*' }) | Should -BeNullOrEmpty
+        }
+
+        # wgt-gq8.58: a file a standard user left under the transcript's name before the folder was
+        # locked stays theirs; a hard link stands for it.
+        It 'Starts the transcript in a new file of its own, never in an entry left at its name' {
+            $null = New-Item -ItemType Directory -Path $script:logDirectory -Force
+            Mock Get-Date { [datetime]::new(2026, 10, 12, 10, 15, 0) }
+            $outside = Join-Path $script:victim 'outside.txt'
+            Set-Content -LiteralPath $outside -Value 'not the installer''s' -NoNewline
+            $null = New-Item -ItemType HardLink -Path (Join-Path $script:logDirectory 'install-20261012-101500-rmm.log') -Target $outside
+
+            $path = Start-RmmTranscript -LogDirectory $script:logDirectory
+
+            $path | Should -Be (Join-Path $script:logDirectory 'install-20261012-101500-2-rmm.log')
+            (Get-Item -LiteralPath $path).Length | Should -Be 0
+            Get-Content -Raw -LiteralPath $outside | Should -Be 'not the installer''s'
+            Should -Invoke Start-Transcript -Times 1 -Exactly -ParameterFilter { $Path -eq $path }
+        }
+
+        It 'Removes the file it created for the transcript when the transcript cannot start' {
+            Mock Start-Transcript { throw 'Access to the path is denied.' }
+
+            Start-RmmTranscript -LogDirectory $script:logDirectory | Should -BeNullOrEmpty
+
+            @(Get-ChildItem -LiteralPath $script:logDirectory -Force) | Should -BeNullOrEmpty
+        }
+
         It 'Keeps no log in a folder another account could change, and says why' {
             $null = New-Item -ItemType Directory -Path $script:logDirectory -Force
             Mock Get-RmmFolderTrustProblem { 'it is owned by S-1-5-21-1-2-3-1001, not by SYSTEM or Administrators' } -ParameterFilter { $Path -eq $script:baseDirectory }

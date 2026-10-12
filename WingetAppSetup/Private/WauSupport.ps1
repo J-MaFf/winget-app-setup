@@ -1010,7 +1010,8 @@ function Write-WauTaskHealth {
 .PARAMETER Attempt
     The attempt number, for the file name: each retry after msiexec exit code 1618 gets its own log.
 .OUTPUTS
-    [string] wau-msi-<action>-<yyyyMMdd-HHmmss>-<attempt>.log in that folder, or $null.
+    [string] wau-msi-<action>-<yyyyMMdd-HHmmss>-<attempt>[-<n>].log in that folder, created empty
+    (New-ExclusiveLogFile), or $null.
 #>
 function New-WauMsiLogPath {
     param (
@@ -1030,11 +1031,12 @@ function New-WauMsiLogPath {
         elseif (-not (Test-Path -LiteralPath $directory)) {
             [void](New-Item -Path $directory -ItemType Directory -Force -ErrorAction Stop)
         }
+        # Created new, never an entry left at the name (wgt-gq8.58).
+        return (New-ExclusiveLogFile -Directory $directory -Stem ('wau-msi-{0}-{1:yyyyMMdd-HHmmss}-{2}' -f $Action, (Get-Date), $Attempt))
     }
     catch {
         return $null
     }
-    return (Join-Path $directory ('wau-msi-{0}-{1:yyyyMMdd-HHmmss}-{2}.log' -f $Action, (Get-Date), $Attempt))
 }
 
 <#

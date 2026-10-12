@@ -318,9 +318,10 @@ function Format-InstallerResultLine {
 .SYNOPSIS
     Writes a run record to <folder>\last-run.json, replacing the previous one in one step.
 .DESCRIPTION
-    Written to a temporary file in the same folder and moved over last-run.json, so no reader sees
-    a half-written file. A failure warns and leaves the previous file. PowerShell 7 only (File.Move
-    with overwrite).
+    Written to a new temporary file in the same folder, created with CreateNew under a random name,
+    and moved over last-run.json, so no reader sees a half-written file and an entry another account
+    left at either name is never opened for writing (wgt-gq8.58). A failure warns and leaves the
+    previous file. PowerShell 7 only (File.Move with overwrite).
 .PARAMETER Record
     A record from New-InstallerRunRecord.
 .PARAMETER Directory
@@ -339,16 +340,27 @@ function Save-InstallerRunRecord {
 
     $path = Join-Path $Directory 'last-run.json'
     $temporaryPath = Join-Path $Directory ('last-run.{0}.tmp' -f [System.Guid]::NewGuid().ToString('N'))
+    $temporaryCreated = $false
     try {
         $json = ConvertTo-Json -InputObject $Record -Depth 6
-        [System.IO.File]::WriteAllText($temporaryPath, $json, (New-Object System.Text.UTF8Encoding($false)))
+        $bytes = (New-Object System.Text.UTF8Encoding($false)).GetBytes($json)
+        # CreateNew: never an entry already at the name; the move then replaces the entry at
+        # last-run.json itself, never writing into a file someone left there (wgt-gq8.58).
+        $file = [System.IO.File]::Open($temporaryPath, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+        $temporaryCreated = $true
+        try {
+            $file.Write($bytes, 0, $bytes.Length)
+        }
+        finally {
+            $file.Dispose()
+        }
         [System.IO.File]::Move($temporaryPath, $path, $true)
         return $path
     }
     catch {
         Write-WarningMessage "Could not write the run record ${path}: $($_.Exception.Message)"
         try {
-            if (Test-Path -LiteralPath $temporaryPath) {
+            if ($temporaryCreated -and (Test-Path -LiteralPath $temporaryPath)) {
                 Remove-Item -LiteralPath $temporaryPath -Force -ErrorAction Stop
             }
         }

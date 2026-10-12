@@ -372,7 +372,8 @@ function Test-PowerShell7MsiSignature {
     Maximum seconds for one msiexec attempt before it is killed. msiexec does not wait for another
     installation (it returns 1618), so reaching this means it hung.
 .PARAMETER MsiLogDirectory
-    Folder for msiexec's verbose logs, named pwsh-msi-<timestamp>-<attempt>.log. Empty: no msiexec
+    Folder for msiexec's verbose logs, named pwsh-msi-<timestamp>-<attempt>[-<n>].log and created
+    empty (New-ExclusiveLogFile). Empty: no msiexec
     log. msiexec fails the whole install (1622) when it cannot open its log.
 .PARAMETER BusyRetryCount
     How many times to retry after msiexec exit code 1618.
@@ -436,7 +437,15 @@ function Install-PowerShell7FromMsi {
             $msiArguments = @('/i', ('"' + $msiPath + '"'), '/quiet', '/norestart')
             $msiLogPath = $null
             if ($MsiLogDirectory) {
-                $msiLogPath = Join-Path $MsiLogDirectory ('pwsh-msi-{0:yyyyMMdd-HHmmss}-{1}.log' -f (Get-Date), $attempt)
+                # Created new, never an entry left at the name (wgt-gq8.58); without one, no log.
+                try {
+                    $msiLogPath = New-ExclusiveLogFile -Directory $MsiLogDirectory -Stem ('pwsh-msi-{0:yyyyMMdd-HHmmss}-{1}' -f (Get-Date), $attempt)
+                }
+                catch {
+                    Write-WarningMessage ('  No msiexec log: {0}' -f $_.Exception.Message)
+                }
+            }
+            if ($msiLogPath) {
                 $msiArguments += @('/l*v', ('"' + $msiLogPath + '"'))
                 Write-Info ('  msiexec log: {0}' -f $msiLogPath)
             }

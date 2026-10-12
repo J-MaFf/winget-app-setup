@@ -260,6 +260,96 @@ Describe 'Initialize-ProgramDataFolder (wgt-gq8.46)' {
 
         $script:locked | Should -BeNullOrEmpty
     }
+
+    # wgt-gq8.59: the caller's log starts only after this, so it gets the warning to repeat there.
+    It 'Also adds the warning about a removed link to -LinkWarning, and adds nothing without a link' {
+        $victim = New-TestVictimFolder
+        [void](New-Item -ItemType Directory -Path $script:baseDirectory)
+        New-TestDirectoryLink -Path $script:logsDirectory -Target $victim
+        $collected = [System.Collections.Generic.List[string]]::new()
+
+        [void](Initialize-ProgramDataFolder -ChildName 'logs' -ReadableByUsers -LinkWarning $collected)
+
+        @($collected) | Should -Be @($script:warnings)
+        $collected.Count | Should -Be 1
+        $collected[0] | Should -BeLike "'$($script:logsDirectory)' was a link*"
+
+        $again = [System.Collections.Generic.List[string]]::new()
+        [void](Initialize-ProgramDataFolder -ChildName 'logs' -ReadableByUsers -LinkWarning $again)
+        $again.Count | Should -Be 0
+    }
+}
+
+# wgt-gq8.58: a logs folder a standard user created before the first elevated run is locked in
+# place, so files that user left under the names the installer uses stay theirs. A hard link stands
+# for such a file: writing through it would change its other name.
+Describe 'New-ExclusiveLogFile (wgt-gq8.58)' {
+    BeforeEach {
+        $script:directory = Join-Path $TestDrive ('logs-' + [guid]::NewGuid().ToString('N'))
+        [void](New-Item -ItemType Directory -Path $script:directory)
+    }
+
+    It 'Creates the first name, empty, when it is free' {
+        $path = New-ExclusiveLogFile -Directory $script:directory -Stem 'install-20261012-101500' -Tail '-bootstrap.log'
+
+        $path | Should -Be (Join-Path $script:directory 'install-20261012-101500-bootstrap.log')
+        (Get-Item -LiteralPath $path).Length | Should -Be 0
+    }
+
+    It 'Never opens an entry already at the name: it takes the next number and leaves that entry as it was' {
+        $outside = Join-Path $TestDrive ('outside-' + [guid]::NewGuid().ToString('N') + '.txt')
+        Set-Content -LiteralPath $outside -Value 'not the installer''s' -NoNewline
+        [void](New-Item -ItemType HardLink -Path (Join-Path $script:directory 'winget-install-Test.App-20261012-101500.log') -Target $outside)
+        Set-Content -LiteralPath (Join-Path $script:directory 'winget-install-Test.App-20261012-101500-2.log') -Value 'planted' -NoNewline
+
+        $path = New-ExclusiveLogFile -Directory $script:directory -Stem 'winget-install-Test.App-20261012-101500'
+
+        $path | Should -Be (Join-Path $script:directory 'winget-install-Test.App-20261012-101500-3.log')
+        (Get-Item -LiteralPath $path).Length | Should -Be 0
+        Get-Content -Raw -LiteralPath $outside | Should -Be 'not the installer''s'
+        Get-Content -Raw -LiteralPath (Join-Path $script:directory 'winget-install-Test.App-20261012-101500-2.log') | Should -Be 'planted'
+    }
+
+    It 'Never opens a link left at the name, even one whose target does not exist' {
+        $missingTarget = Join-Path $TestDrive ('missing-' + [guid]::NewGuid().ToString('N') + '.txt')
+        $linkPath = Join-Path $script:directory 'install-20261012-101500.log'
+        try {
+            [void](New-Item -ItemType SymbolicLink -Path $linkPath -Target $missingTarget -ErrorAction Stop)
+        }
+        catch {
+            # A file symbolic link needs a privilege on Windows; the hard link test covers it there.
+            Set-ItResult -Skipped -Because 'this account cannot create a file symbolic link'
+            return
+        }
+
+        $path = New-ExclusiveLogFile -Directory $script:directory -Stem 'install-20261012-101500'
+
+        $path | Should -Be (Join-Path $script:directory 'install-20261012-101500-2.log')
+        Test-Path -LiteralPath $missingTarget | Should -BeFalse
+    }
+
+    It 'Throws when every name it may try is taken, and on any failure other than a taken name' {
+        foreach ($name in @('install-20261012-101500.log', 'install-20261012-101500-2.log')) {
+            Set-Content -LiteralPath (Join-Path $script:directory $name) -Value 'planted'
+        }
+
+        { New-ExclusiveLogFile -Directory $script:directory -Stem 'install-20261012-101500' -MaxAttempts 2 } | Should -Throw '*No new log file could be created*'
+        { New-ExclusiveLogFile -Directory (Join-Path $script:directory 'missing') -Stem 'install-20261012-101500' } | Should -Throw
+    }
+
+    It 'Remove-EmptyLogFile removes a log nothing was written to, keeps one that was written, and never throws' {
+        $empty = New-ExclusiveLogFile -Directory $script:directory -Stem 'winget-install-A.B-20261012-101500'
+        $written = New-ExclusiveLogFile -Directory $script:directory -Stem 'winget-install-C.D-20261012-101500'
+        Set-Content -LiteralPath $written -Value 'MSI (s) log'
+
+        Remove-EmptyLogFile -Path $empty
+        Remove-EmptyLogFile -Path $written
+        Remove-EmptyLogFile -Path (Join-Path $script:directory 'missing.log')
+        Remove-EmptyLogFile -Path $null
+
+        Test-Path -LiteralPath $empty | Should -BeFalse
+        Get-Content -LiteralPath $written | Should -Be 'MSI (s) log'
+    }
 }
 
 # Real icacls and access lists, on Windows as an administrator (icacls /setowner needs one). These

@@ -779,7 +779,9 @@ function Get-InstallerLogDirectory {
     Returns a new path for one installer log in the run's logs folder, or $null.
 .DESCRIPTION
     winget-<subcommand>-<package id>-<yyyyMMdd-HHmmss>[-<n>].log, the name diagnostics and
-    housekeeping look for, with -<n> added when that file exists. The folder is created first:
+    housekeeping look for, created empty with -<n> added when that name is taken
+    (New-ExclusiveLogFile, wgt-gq8.58), so winget never writes into an entry left there. The folder
+    is created first:
     msiexec fails the install (1622) when it cannot open its log. $null when there is no logs folder
     or it cannot be created: no installer log is better than an install that fails over it. Used by
     Invoke-WingetProcess (--log) and Invoke-WingetClientInstall (-Log).
@@ -825,13 +827,7 @@ function New-WingetInstallerLogPath {
             [void](New-Item -Path $directory -ItemType Directory -Force -ErrorAction Stop)
         }
         $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
-        $candidate = Join-Path $directory ('winget-{0}-{1}-{2}.log' -f $Subcommand, $label, $stamp)
-        $suffix = 2
-        while (Test-Path -LiteralPath $candidate) {
-            $candidate = Join-Path $directory ('winget-{0}-{1}-{2}-{3}.log' -f $Subcommand, $label, $stamp, $suffix)
-            $suffix++
-        }
-        return $candidate
+        return (New-ExclusiveLogFile -Directory $directory -Stem ('winget-{0}-{1}-{2}' -f $Subcommand, $label, $stamp))
     }
     catch {
         return $null
@@ -908,6 +904,8 @@ function Invoke-WingetProcess {
     }
 
     $result = Invoke-ExternalProcess -FilePath $WingetPath -ArgumentList $arguments -TimeoutSeconds $TimeoutSeconds -Echo $Echo
+    # The log was created empty (wgt-gq8.58); an installer that wrote none leaves no file.
+    Remove-EmptyLogFile -Path $logPath
     $result.LogPath = $logPath
     return $result
 }

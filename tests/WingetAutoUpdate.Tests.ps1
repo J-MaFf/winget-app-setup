@@ -2540,6 +2540,24 @@ Describe 'New-WauMsiLogPath (review finding P3-37)' {
         }
     }
 
+    # wgt-gq8.58: msiexec writes the log with the run's rights, so never into an entry another
+    # account left at the name before the folder was locked (a hard link stands for one).
+    It 'Creates the log empty under a name nothing was at, leaving an entry already at the name alone' {
+        $directory = Join-Path $TestDrive ('run-logs-planted-' + [guid]::NewGuid().ToString('N'))
+        [void](New-Item -ItemType Directory -Path $directory)
+        Mock Get-InstallerLogDirectory { $directory }
+        Mock Get-Date { [datetime]::new(2026, 10, 12, 10, 15, 0) }
+        $outside = Join-Path $TestDrive ('outside-' + [guid]::NewGuid().ToString('N') + '.txt')
+        Set-Content -LiteralPath $outside -Value 'not the installer''s' -NoNewline
+        [void](New-Item -ItemType HardLink -Path (Join-Path $directory 'wau-msi-install-20261012-101500-1.log') -Target $outside)
+
+        $path = New-WauMsiLogPath -Action install
+
+        $path | Should -Be (Join-Path $directory 'wau-msi-install-20261012-101500-1-2.log')
+        (Get-Item -LiteralPath $path).Length | Should -Be 0
+        Get-Content -Raw -LiteralPath $outside | Should -Be 'not the installer''s'
+    }
+
     It 'Returns no path when the logs folder cannot be made safe, so msiexec writes nothing there' {
         Mock Get-InstallerLogDirectory { $null }
         Mock Initialize-ProgramDataFolder { throw "'C:\ProgramData\winget-app-setup\logs' is a link (a junction or symbolic link), not a folder, and the link could not be removed: Access is denied." }

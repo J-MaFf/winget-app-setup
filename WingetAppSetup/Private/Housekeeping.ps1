@@ -120,9 +120,9 @@ function Get-SystemProfileTempRoot {
     deletes the rest.
 .DESCRIPTION
     Reads the start time (yyyyMMdd-HHmmss) in the names the installer gives its logs:
-      - transcripts: install-<time>[-bootstrap|-rmm|-userphase][-whatif].log;
+      - transcripts: install-<time>[-<n>][-bootstrap|-rmm|-userphase][-whatif].log;
       - installer logs: winget-<install|upgrade|uninstall|repair>-<package id>-<time>[-<n>].log and
-        pwsh-msi-<time>-<attempt>.log.
+        pwsh-msi-<time>-<attempt>[-<n>].log (-<n>: New-ExclusiveLogFile found the name taken).
     When there are more than KeepTranscripts transcripts, the older ones go, and so does every
     installer log older than the oldest transcript kept (a run writes its installer logs after its
     transcript starts). Names decide the order, not file timestamps. Other files (last-run.json) and
@@ -160,10 +160,10 @@ function Remove-OldInstallerLog {
     $transcripts = @()
     $installerLogs = @()
     foreach ($file in @(Get-ChildItem -LiteralPath $LogDirectory -File -Force -ErrorAction Stop)) {
-        if ($file.Name -match '^install-(\d{8}-\d{6})(?:-bootstrap|-rmm|-userphase)?(?:-whatif)?\.log$') {
+        if ($file.Name -match '^install-(\d{8}-\d{6})(?:-\d+)?(?:-bootstrap|-rmm|-userphase)?(?:-whatif)?\.log$') {
             $transcripts += [pscustomobject]@{ File = $file; Stamp = $Matches[1] }
         }
-        elseif ($file.Name -match '^(?:winget-(?:install|upgrade|uninstall|repair)-.+|pwsh-msi)-(\d{8}-\d{6})(?:-\d+)?\.log$') {
+        elseif ($file.Name -match '^(?:winget-(?:install|upgrade|uninstall|repair)-.+|pwsh-msi)-(\d{8}-\d{6})(?:-\d+)*\.log$') {
             $installerLogs += [pscustomobject]@{ File = $file; Stamp = $Matches[1] }
         }
     }

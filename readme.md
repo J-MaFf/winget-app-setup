@@ -1361,12 +1361,20 @@ Every elevated run, and every run as SYSTEM (a `-WhatIf` dry run included), make
 `%ProgramData%\winget-app-setup` and its `logs` folder safe before its transcript starts (see
 [Administrator rights](#administrator-rights)). A
 junction or symbolic link planted in place of either folder is removed without changing what it
-points to, and the run warns about it. The warning comes before the transcript starts, so it is on
-the console but not in that run's log. Both folders are then owned by Administrators, and only
-SYSTEM and Administrators can change them. Standard users can read the `logs` folder and the logs
-in it, so a log can be opened from the end user's own session after a cross-user elevated run.
+points to, and the run warns about it. The warning comes before the transcript starts, so it is
+repeated, starting `Before this log started:`, once the transcript runs (the Endpoint Central
+machine phase does the same in its `-rmm.log`). Both folders are then owned by Administrators, and
+only SYSTEM and Administrators can change them. Standard users can read the `logs` folder and the
+logs in it, so a log can be opened from the end user's own session after a cross-user elevated run.
 They cannot list the parent folder, so open the logs by their full path (for example, paste
 `C:\ProgramData\winget-app-setup\logs` into File Explorer's address bar).
+
+A folder that was already there is locked in place, so files another account left in it before it
+was locked stay as they were. The installer therefore never writes into a file that is already
+there: each transcript and installer log is created new, and when its name is taken a number is
+added after the time (`install-<yyyyMMdd-HHmmss>-2.log`, `winget-install-<id>-<time>-2.log`,
+`wau-msi-install-<time>-1-2.log`). `last-run.json` is written to a new file under a random name and
+then moved over the old one, which replaces that entry without opening it.
 
 If the `logs` folder cannot be made safe, the run continues without a transcript and without
 `last-run.json`, and the warning says why. When a link there cannot be removed, the warning says

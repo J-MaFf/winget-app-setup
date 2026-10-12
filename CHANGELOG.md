@@ -921,6 +921,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   SourceBroken code such as `0x8A15000F` installs nothing: every deferred app is `NotAttempted` with
   that code in `user-phase.json`, and the user phase exits 2, so the next sign-in tries again. It
   still runs no `winget source reset` or other repair, which need administrator rights.
+- **An elevated or SYSTEM run never writes into a file another account left in the logs folder**
+  (bead wgt-gq8.58). A `%ProgramData%\winget-app-setup` or `logs` folder a standard user created
+  before the first elevated run is locked in place, so what that user left there stays theirs. The
+  transcripts (the RMM machine phase's `-rmm.log` included) and the winget, `wau-msi` and
+  `pwsh-msi` logs are now created new with `CreateNew` (`New-ExclusiveLogFile`), taking the next
+  name (`-2`, `-3`...) when one is taken, and `last-run.json` is written to a `CreateNew` file under
+  a random name and moved over the old one, as the WinGet client cache copy already was.
+  Housekeeping and diagnostics read the numbered names. Chosen over renaming the folder aside and
+  creating a new one: the first, non-elevated launch's transcript is still open there, so renaming
+  the logs folder fails.
+- **The warning about a link removed in place of the logs folder is now in the log too** (bead
+  wgt-gq8.59, part 1). It is printed before the transcript starts, so only the console had it; the
+  installer and the RMM machine phase now repeat it, starting `Before this log started:`, once
+  their transcript runs.
 - **The one-liner started from a standard user's window no longer stalls installing PowerShell 7**
   (bead wgt-gq8.75, found on the owner's test PC on 2026-10-12, over Remote Desktop). On a PC
   without PowerShell 7, the Windows PowerShell 5.1 bootstrap installed it before the run asked for

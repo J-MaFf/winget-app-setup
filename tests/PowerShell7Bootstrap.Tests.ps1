@@ -556,6 +556,7 @@ Describe 'Install-PowerShell7FromMsi' {
         It 'Writes a verbose msiexec log, one file per attempt, into the given folder' {
             Mock Start-Sleep { }
             $logDirectory = Join-Path $TestDrive 'logs'
+            [void][System.IO.Directory]::CreateDirectory($logDirectory)
             $script:msiExitCodes = [System.Collections.Generic.Queue[int]]::new([int[]]@(1618, 0))
             $script:msiProcess | Add-Member -MemberType ScriptProperty -Name ExitCode -Force -Value { $script:msiExitCodes.Dequeue() }
             $script:msiLogArguments = @()
@@ -574,8 +575,11 @@ Describe 'Install-PowerShell7FromMsi' {
 
         It 'Names the log of a failed attempt' {
             $script:msiExitCode = 1603
+            # A folder of its own: the earlier tests' logs, made in the same second, would take the name.
+            $logDirectory = Join-Path $TestDrive 'logs-failed-attempt'
+            [void][System.IO.Directory]::CreateDirectory($logDirectory)
 
-            Install-PowerShell7FromMsi -MsiLogDirectory (Join-Path $TestDrive 'logs') | Should -Be $false
+            Install-PowerShell7FromMsi -MsiLogDirectory $logDirectory | Should -Be $false
 
             Should -Invoke Write-WarningMessage -Times 1 -Exactly -ParameterFilter { $Message -match 'log of the failed attempt: .*pwsh-msi-.*-1\.log' }
         }
