@@ -70,7 +70,7 @@ BeforeAll {
         Mock Register-WingetSourcePackage { [pscustomobject]@{ Registered = $false; ErrorCodes = @(); Reason = 'it could not be downloaded from https://cdn.winget.microsoft.com/cache' } }
         Mock Get-WingetClientRepairVersion { $null }
         Mock Reset-WingetSource { $true }
-        Mock Repair-WinGetPackageManager { throw 'must not run the real repair cmdlet' }
+        Mock Invoke-RepairWinGetPackageManagerProcess { throw 'must not run the real repair cmdlet' }
         Mock Invoke-WebRequest { throw 'must not download App Installer' }
         Mock Add-AppxPackage { throw 'must not register a package' }
         Mock Invoke-AppxRegistration { throw 'must not register a package' }
@@ -539,7 +539,7 @@ Describe 'Initialize-Winget when winget cannot deploy its source package (wgt-gq
         Mock Get-AuthenticodeSignature { [pscustomobject]@{ Status = 'Valid'; SignerCertificate = [pscustomobject]@{ Subject = 'CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US' } } }
         Mock Invoke-AppxRegistration { throw [System.Runtime.InteropServices.COMException]::new('Deployment failed with HRESULT: 0x80073D19, An error occurred because a user was logged off.', -2147009255) }
         Mock Add-AppxPackage { throw 'must not install a package directly' }
-        Mock Repair-WinGetPackageManager { throw 'must not run the real repair cmdlet' }
+        Mock Invoke-RepairWinGetPackageManagerProcess { throw 'must not run the real repair cmdlet' }
         Mock Reset-WingetSource { throw 'a reset deploys no source package' }
         $script:account = New-TestAccountContext -CrossUser -ProcessUser 'CONTOSO\admin-jmaffiola' -SessionUser 'CONTOSO\tuser'
     }
@@ -785,7 +785,7 @@ Describe 'Initialize-Winget on the #279 wedge (review findings P3-25, P3-27, P3-
         Mock Invoke-WindowsPowerShellScript { [pscustomobject]@{ ExitCode = 1; TimedOut = $false; LaunchFailed = $false; LaunchError = $null; StandardOutput = @('ERR|-2147009274|Deployment failed with HRESULT: 0x80073D06, The package could not be installed because a higher version of this package is already installed.') } } -ParameterFilter { $Script -match 'Add-AppxPackage -Path' }
         Mock Get-WindowsAppRuntimePackageInfo { }
         Mock Test-AndInstallWingetModule { $true }
-        Mock Repair-WinGetPackageManager { throw 'Failed to repair winget. Try running with -AllUsers in administrator mode.' }
+        Mock Invoke-RepairWinGetPackageManagerProcess { throw 'Failed to repair winget. Try running with -AllUsers in administrator mode.' }
         Mock Invoke-WebRequest { throw 'must not download App Installer (the aka.ms/getwinget rung is gone)' }
     }
 
@@ -796,9 +796,9 @@ Describe 'Initialize-Winget on the #279 wedge (review findings P3-25, P3-27, P3-
         $result.Diagnosis | Should -Be 'NotLaunchable'
         # -AllUsers first, as the cmdlet asks, because the framework is missing; then this account,
         # but not forced: the codes the registration saw say forcing cannot help (P3-27).
-        Should -Invoke Repair-WinGetPackageManager -Times 2 -Exactly
-        Should -Invoke Repair-WinGetPackageManager -Times 1 -Exactly -ParameterFilter { $AllUsers -and $Latest }
-        Should -Invoke Repair-WinGetPackageManager -Times 0 -Exactly -ParameterFilter { $Force }
+        Should -Invoke Invoke-RepairWinGetPackageManagerProcess -Times 2 -Exactly
+        Should -Invoke Invoke-RepairWinGetPackageManagerProcess -Times 1 -Exactly -ParameterFilter { $AllUsers -and $Latest }
+        Should -Invoke Invoke-RepairWinGetPackageManagerProcess -Times 0 -Exactly -ParameterFilter { $Force }
         Should -Invoke Invoke-WebRequest -Times 0 -Exactly
         # winget never started, so the source was not touched: no update, no reset, no source.msix.
         Should -Invoke Invoke-WingetProcess -Times 0 -Exactly -ParameterFilter { $ArgumentList[0] -ne '--version' }

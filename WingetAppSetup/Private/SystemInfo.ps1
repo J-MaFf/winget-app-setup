@@ -47,6 +47,24 @@ function Get-OSArchitecture {
     return $architecture
 }
 
+function Write-OSArchitectureLine {
+    <#
+    .SYNOPSIS
+        Prints 'OS architecture: <arch>' (Get-OSArchitecture), the architecture the catalog's arch
+        lists are decided on, near the top of a transcript (wgt-gq8.52).
+    .DESCRIPTION
+        Never throws: when the architecture cannot be read, it prints 'unknown' with the reason, and
+        the arch lists count as met (Get-OSArchitecture).
+    #>
+    try {
+        $architecture = Get-OSArchitecture
+    }
+    catch {
+        $architecture = "unknown ($($_.Exception.Message))"
+    }
+    Write-Info "OS architecture: $architecture"
+}
+
 function Get-PowerShellEdition {
     <#
     .SYNOPSIS

@@ -104,6 +104,18 @@ Describe 'Invoke-WingetUserPhase (work-order item 34)' {
         $script:output | Should -Contain 'USER PHASE RESULT: exit=0 installed=2 skipped=0 failed=0 terminal=Applied attempt=1/3 complete=true log=none'
     }
 
+    It 'Logs the OS architecture the catalog''s arch lists are decided on before it installs (wgt-gq8.52)' {
+        $script:recordPath = New-TestRunRecordFile -Directory (Split-Path -Parent $script:recordPath) -Deferred @('Contoso.UserOnly')
+        Mock Get-OSArchitecture { 'Arm64' }
+        Mock Install-UserPhaseApp { $script:output += "INSTALL: $PackageId"; New-AppRunRecord -Id $PackageId -Status 'Installed' -InstallResult @{ ExitCode = 0 } }
+
+        Invoke-TestUserPhase | Should -Be 0
+
+        $index = [array]::IndexOf($script:output, 'INFO: OS architecture: Arm64')
+        $index | Should -BeGreaterOrEqual 0
+        $index | Should -BeLessThan ([array]::IndexOf($script:output, 'INSTALL: Contoso.UserOnly'))
+    }
+
     It 'Does nothing more for this account once it has finished this run, and runs again for the next run' {
         $script:recordPath = New-TestRunRecordFile -Directory (Split-Path -Parent $script:recordPath) -Deferred @('Contoso.UserOnly')
         Invoke-TestUserPhase | Should -Be 0

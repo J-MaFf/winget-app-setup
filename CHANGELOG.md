@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Every install transcript (the PowerShell 7 run, the Windows PowerShell 5.1 bootstrap and the user
+  phase) now prints `OS architecture: <arch>` right after `Installer build:` (bead wgt-gq8.52): the
+  architecture `Get-OSArchitecture` reads and the catalog's `arch` lists are decided on, which only
+  the diagnostics bundle recorded before. `unknown (<reason>)` when it cannot be read.
 - merge-gate caller (`.github/workflows/merge-gate.yml`): the required check that keeps the claude-sandbox App from merging its own PRs; logic in the reusable J-MaFf/.github merge-gate.yml.
 - Releases (bead wgt-z70, [#286](https://github.com/J-MaFf/winget-app-setup/issues/286)): a `vX.Y.Z`
   tag on `main` now publishes a GitHub release through the shared workflow in
@@ -549,6 +553,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The elevated relaunch's check-and-copy command is shorter (bead wgt-gq8.48): short variable names
+  and fewer spaces, with the same steps, messages and exit codes, the Ctrl+C exit-code fix of
+  wgt-gq8.43 included. With `-MaxRuntimeMinutes` and `-RunDeadlineUtc` forwarded, the command now
+  fits ShellExecuteEx's 2000-character limit with a `%TEMP%` path of up to 367 characters (135
+  before; 432 without the time budget, 200 before), more than a staged copy's path can be under
+  MAX_PATH.
 - `winget-app-uninstall.ps1` is now generated from the `WingetAppSetup` module as a single file,
   like the installer (wgt-gq8.43, work-order items 10 and 15, review finding P3-11). It needs
   nothing next to it, and its elevated run is a copy checked against the SHA256 the file had when it
@@ -867,6 +877,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A run no longer changes the code page of the console it was started from, and
+  `Repair-WinGetPackageManager` can no longer hang a run** (bead wgt-gq8.72). The Windows
+  PowerShell 5.1 child that runs the Appx cmdlets set its console's output code page to UTF-8, and
+  that console was the operator's: programs started from the window afterwards wrote in code page
+  65001. The child now gets a hidden console of its own (`Invoke-ExternalProcess -CreateNoWindow`).
+  `Repair-WinGetPackageManager`, which downloads and deploys App Installer, ran inside the installer
+  with no time limit; each attempt now runs in a child PowerShell under `Invoke-ExternalProcess`
+  (`Invoke-RepairWinGetPackageManagerProcess`), stopped with its process tree after 15 minutes
+  (`Get-ProcessTimeoutSeconds -Operation WingetPackageManagerRepair`). The AppX code it fails with
+  still reaches the repair ladder, so its decisions (no `-Force` after 0x80073CF3 or 0x80073D06)
+  are unchanged.
 - **The one-liner started from a standard user's window no longer stalls installing PowerShell 7**
   (bead wgt-gq8.75, found on the owner's test PC on 2026-10-12, over Remote Desktop). On a PC
   without PowerShell 7, the Windows PowerShell 5.1 bootstrap installed it before the run asked for

@@ -281,6 +281,104 @@ function Register-WingetAppInstallerForUser {
 
 <#
 .SYNOPSIS
+    Runs Repair-WinGetPackageManager in a child PowerShell, within the WingetPackageManagerRepair
+    limit; throws when it fails.
+.DESCRIPTION
+    A seam for Invoke-WingetPackageManagerRepair (wgt-gq8.72). The cmdlet downloads and deploys App
+    Installer with no time limit of its own, so it runs in a child of this PowerShell under
+    Invoke-ExternalProcess, which stops the process tree at the limit, with a hidden console of its
+    own. The AppX HRESULT the child caught is rethrown as a COMException carrying it, so
+    Get-AppxErrorCode reads it as it would from the cmdlet itself; a child that could not start or
+    was stopped at the limit throws. The child's other output goes to the transcript.
+.PARAMETER AllUsers
+    Passed to Repair-WinGetPackageManager.
+.PARAMETER Latest
+    Passed to Repair-WinGetPackageManager.
+.PARAMETER Force
+    Passed to Repair-WinGetPackageManager.
+#>
+function Invoke-RepairWinGetPackageManagerProcess {
+    param (
+        [Parameter(Mandatory = $false)]
+        [switch]$AllUsers,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$Latest,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$Force
+    )
+
+    $switches = @()
+    if ($AllUsers) {
+        $switches += '-AllUsers'
+    }
+    if ($Latest) {
+        $switches += '-Latest'
+    }
+    if ($Force) {
+        $switches += '-Force'
+    }
+    $label = ('Repair-WinGetPackageManager ' + ($switches -join ' ')).TrimEnd()
+    # The child reports the first AppX HRESULT (0x80073xxx) in the exception chain, else 0.
+    $script = @(
+        '$ProgressPreference = ''SilentlyContinue'''
+        'try { [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false) } catch { }'
+        'try {'
+        '    Import-Module Microsoft.WinGet.Client -ErrorAction Stop'
+        ('    {0} -ErrorAction Stop' -f $label)
+        '}'
+        'catch {'
+        '    $hresult = 0'
+        '    $exception = $_.Exception'
+        '    while ($null -ne $exception) {'
+        '        if ((''0x{0:X8}'' -f $exception.HResult).StartsWith(''0x80073'')) { $hresult = [int]$exception.HResult; break }'
+        '        $exception = $exception.InnerException'
+        '    }'
+        '    ''ERR|{0}|{1}'' -f $hresult, ("$_" -replace ''\s+'', '' '')'
+        '    exit 1'
+        '}'
+    ) -join "`n"
+    $encoded = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($script))
+    $powerShellPath = [Environment]::ProcessPath
+    if ([string]::IsNullOrWhiteSpace($powerShellPath)) {
+        $powerShellPath = (Get-Process -Id $PID).Path
+    }
+    $timeout = Get-ProcessTimeoutSeconds -Operation WingetPackageManagerRepair
+    $run = Invoke-ExternalProcess -FilePath $powerShellPath -ArgumentList @('-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', $encoded) -TimeoutSeconds $timeout -Echo None -CreateNoWindow
+    if ($run.LaunchFailed) {
+        throw "$label could not run: PowerShell could not be started ($($run.LaunchError))."
+    }
+    $errorLine = $null
+    $shown = @()
+    foreach ($line in @($run.Output)) {
+        if ($null -eq $errorLine -and "$line" -like 'ERR|*|*') {
+            $errorLine = "$line"
+        }
+        else {
+            $shown += "$line"
+        }
+    }
+    Write-ProcessOutput -Line $shown
+    if ($run.TimedOut) {
+        throw ("$label did not finish within {0} minutes and was stopped." -f [Math]::Round($timeout / 60))
+    }
+    if ($run.ExitCode -eq 0) {
+        return
+    }
+    if ($errorLine) {
+        $parts = $errorLine -split '\|', 3
+        $hresult = 0
+        if ([int]::TryParse($parts[1], [ref]$hresult) -and $hresult -ne 0) {
+            throw [System.Runtime.InteropServices.COMException]::new($parts[2].Trim(), $hresult)
+        }
+        throw $parts[2].Trim()
+    }
+    throw "$label failed in a child PowerShell (exit code $($run.ExitCode))."
+}
+
+<#
+.SYNOPSIS
     Runs Repair-WinGetPackageManager: for all users first when the framework App Installer needs is
     missing, then for this account, unforced and then, unless the cause is known, forced.
 .DESCRIPTION
@@ -290,7 +388,8 @@ function Register-WingetAppInstallerForUser {
     running App Installer processes and downloads it again, so it is tried only after a failure
     nothing has named: not after a missing framework (0x80073CF3) or a downgrade (0x80073D06), seen
     here or by the registration before it (KnownErrorCodes), nor when the all-users repair for a
-    missing framework failed (P3-27). The module is installed here, when first needed.
+    missing framework failed (P3-27). The module is installed here, when first needed. Each attempt
+    runs in a child PowerShell with a time limit (Invoke-RepairWinGetPackageManagerProcess).
 .PARAMETER AllUsersFirst
     Microsoft.WindowsAppRuntime.1.8 is missing for this PC (Get-WindowsAppRuntimeStatus).
 .PARAMETER KnownErrorCodes
@@ -341,7 +440,7 @@ function Invoke-WingetPackageManagerRepair {
         }
         Write-Info "Running Repair-WinGetPackageManager $($attempt.Label)..."
         try {
-            Repair-WinGetPackageManager @parameters -ErrorAction Stop
+            Invoke-RepairWinGetPackageManagerProcess @parameters
             return [pscustomobject]@{ Available = $true; Succeeded = $true; ErrorCodes = $codes }
         }
         catch {

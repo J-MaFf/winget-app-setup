@@ -107,12 +107,12 @@ param (
 # the function source under WingetAppSetup/Public and WingetAppSetup/Private, or the entry block in
 # build/fragments/tail.ps1, then re-run the build to regenerate this file.
 # See readme.md ("Project layout") for details.
-# Build id: 1.0.0+d3b7f51a (module version + SHA256 fragment of this whole script; issue #189).
+# Build id: 1.0.0+449a03ea (module version + SHA256 fragment of this whole script; issue #189).
 # ------------------------------------------------------------------------------------------------
 
 # Content-derived build identity, logged at startup so a transcript from a remote machine
 # identifies exactly which installer build produced it (issue #189).
-$script:InstallerBuildId = '1.0.0+d3b7f51a'
+$script:InstallerBuildId = '1.0.0+449a03ea'
 
 # ------------------------------------------------Functions------------------------------------------------
 
@@ -2395,29 +2395,29 @@ function New-ElevationVerifierCommand {
     )
 
     $template = @'
-$ErrorActionPreference = 'Stop';
-$LASTEXITCODE = 5;
-$copyDirectory = $null;
-try {
-    $p = Get-ExecutionPolicy;
-    if ($p -in 2, 3) { $LASTEXITCODE = 4; throw ('Group Policy sets the execution policy to ' + $p + ', which -ExecutionPolicy Bypass cannot override'); }
-    $bytes = [IO.File]::ReadAllBytes(@SOURCE@);
-    $hash = [BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash($bytes)).Replace('-', '');
-    if ($hash -ne @SHA256@) { throw 'the file changed after administrator rights were requested'; }
-    $security = New-Object Security.AccessControl.DirectorySecurity;
-    $security.SetAccessRuleProtection($true, $false);
-    foreach ($sid in @('S-1-5-18', 'S-1-5-32-544')) { $security.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule((New-Object Security.Principal.SecurityIdentifier($sid)), 'FullControl', 'ContainerInherit, ObjectInherit', 'None', 'Allow'))); }
-    $copyDirectory = Join-Path @COPYROOT@ ('winget-app-setup-' + [Guid]::NewGuid().ToString('N'));
-    [void][IO.Directory]::CreateDirectory($copyDirectory, $security);
-    $copy = Join-Path $copyDirectory @NAME@;
-    [IO.File]::WriteAllBytes($copy, $bytes);
-    & @POWERSHELL@ -NoProfile -ExecutionPolicy Bypass -File $copy@ARGUMENTS@;
-} catch {
-    Write-Host ('Did not run ' + @NAME@ + ': ' + $_) -ForegroundColor Red;
-    try { [void](Read-Host 'Press Enter to close this window'); } catch { }
-} finally {
-    $host.SetShouldExit($LASTEXITCODE);
-    if ($copyDirectory) { Remove-Item -LiteralPath $copyDirectory -Recurse -Force -ErrorAction SilentlyContinue; }
+$ErrorActionPreference='Stop';
+$LASTEXITCODE=5;
+$d=$null;
+$n=@NAME@;
+try{
+$p=Get-ExecutionPolicy;
+if($p -in 2,3){$LASTEXITCODE=4;throw ('Group Policy sets the execution policy to '+$p+', which -ExecutionPolicy Bypass cannot override')}
+$b=[IO.File]::ReadAllBytes(@SOURCE@);
+if([BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash($b)).Replace('-','') -ne @SHA256@){throw 'the file changed after administrator rights were requested'}
+$s=New-Object Security.AccessControl.DirectorySecurity;
+$s.SetAccessRuleProtection($true,$false);
+foreach($i in 'S-1-5-18','S-1-5-32-544'){$s.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule((New-Object Security.Principal.SecurityIdentifier($i)),'FullControl','ContainerInherit, ObjectInherit','None','Allow')))}
+$d=Join-Path @COPYROOT@ ('winget-app-setup-'+[Guid]::NewGuid().ToString('N'));
+[void][IO.Directory]::CreateDirectory($d,$s);
+$c=Join-Path $d $n;
+[IO.File]::WriteAllBytes($c,$b);
+& @POWERSHELL@ -NoProfile -ExecutionPolicy Bypass -File $c@ARGUMENTS@
+}catch{
+Write-Host ('Did not run '+$n+': '+$_) -ForegroundColor Red;
+try{[void](Read-Host 'Press Enter to close this window')}catch{}
+}finally{
+$host.SetShouldExit($LASTEXITCODE);
+if($d){Remove-Item -LiteralPath $d -Recurse -Force -ErrorAction SilentlyContinue}
 }
 '@
 
@@ -5136,7 +5136,7 @@ function Invoke-PowerShell7Bootstrap {
 function Get-ProcessTimeoutSeconds {
     param (
         [Parameter(Mandatory = $true)]
-        [ValidateSet('WingetInstall', 'WingetDownload', 'WingetUninstall', 'WingetListCheck', 'WingetVersion', 'WingetSourceUpdate', 'WingetSourceOpen', 'WingetSourceReset', 'WingetClientProbe', 'WingetClientVersion', 'WingetClientListCheck', 'MsiExec', 'AppxProvisioning', 'AppxRegistration', 'AppxQuery', 'WebDownload', 'WebDownloadStall', 'WebLookup')]
+        [ValidateSet('WingetInstall', 'WingetDownload', 'WingetUninstall', 'WingetListCheck', 'WingetVersion', 'WingetSourceUpdate', 'WingetSourceOpen', 'WingetSourceReset', 'WingetClientProbe', 'WingetClientVersion', 'WingetClientListCheck', 'MsiExec', 'AppxProvisioning', 'AppxRegistration', 'AppxQuery', 'WingetPackageManagerRepair', 'WebDownload', 'WebDownloadStall', 'WebLookup')]
         [string]$Operation
     )
 
@@ -5156,6 +5156,7 @@ function Get-ProcessTimeoutSeconds {
         'AppxProvisioning' { return 600 }
         'AppxRegistration' { return 300 }
         'AppxQuery' { return 120 }
+        'WingetPackageManagerRepair' { return 900 }
         'WebDownload' { return 300 }
         'WebDownloadStall' { return 120 }
         'WebLookup' { return 30 }
@@ -5430,7 +5431,10 @@ function Invoke-ExternalProcess {
 
         [Parameter(Mandatory = $false)]
         [AllowEmptyCollection()]
-        [string[]]$RemoveEnvironmentVariable = @()
+        [string[]]$RemoveEnvironmentVariable = @(),
+
+        [Parameter(Mandatory = $false)]
+        [switch]$CreateNoWindow
     )
 
     $arguments = $ArgumentString
@@ -5480,6 +5484,7 @@ function Invoke-ExternalProcess {
     $startInfo.RedirectStandardInput = $true
     $startInfo.RedirectStandardOutput = $true
     $startInfo.RedirectStandardError = $true
+    $startInfo.CreateNoWindow = [bool]$CreateNoWindow
     if (-not $Encoding) {
         $Encoding = New-Object System.Text.UTF8Encoding($false)
     }
@@ -5655,7 +5660,7 @@ function Invoke-WindowsPowerShellScript {
     }
     $prologue = '[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false); $ProgressPreference = ''SilentlyContinue''; '
     $encoded = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($prologue + $Script))
-    return (Invoke-ExternalProcess -FilePath $FilePath -ArgumentList @('-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', $encoded) -TimeoutSeconds $TimeoutSeconds -Echo None -RemoveEnvironmentVariable @('PSModulePath'))
+    return (Invoke-ExternalProcess -FilePath $FilePath -ArgumentList @('-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', $encoded) -TimeoutSeconds $TimeoutSeconds -Echo None -RemoveEnvironmentVariable @('PSModulePath') -CreateNoWindow)
 }
 
 function Get-InstallerLogDirectory {
@@ -6440,6 +6445,16 @@ function Get-OSArchitecture {
         throw 'The OS architecture could not be read.'
     }
     return $architecture
+}
+
+function Write-OSArchitectureLine {
+    try {
+        $architecture = Get-OSArchitecture
+    }
+    catch {
+        $architecture = "unknown ($($_.Exception.Message))"
+    }
+    Write-Info "OS architecture: $architecture"
 }
 
 function Get-PowerShellEdition {
@@ -9170,6 +9185,85 @@ function Register-WingetAppInstallerForUser {
     return [pscustomobject]@{ Registered = $false; ErrorCodes = $codes }
 }
 
+function Invoke-RepairWinGetPackageManagerProcess {
+    param (
+        [Parameter(Mandatory = $false)]
+        [switch]$AllUsers,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$Latest,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$Force
+    )
+
+    $switches = @()
+    if ($AllUsers) {
+        $switches += '-AllUsers'
+    }
+    if ($Latest) {
+        $switches += '-Latest'
+    }
+    if ($Force) {
+        $switches += '-Force'
+    }
+    $label = ('Repair-WinGetPackageManager ' + ($switches -join ' ')).TrimEnd()
+    $script = @(
+        '$ProgressPreference = ''SilentlyContinue'''
+        'try { [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false) } catch { }'
+        'try {'
+        '    Import-Module Microsoft.WinGet.Client -ErrorAction Stop'
+        ('    {0} -ErrorAction Stop' -f $label)
+        '}'
+        'catch {'
+        '    $hresult = 0'
+        '    $exception = $_.Exception'
+        '    while ($null -ne $exception) {'
+        '        if ((''0x{0:X8}'' -f $exception.HResult).StartsWith(''0x80073'')) { $hresult = [int]$exception.HResult; break }'
+        '        $exception = $exception.InnerException'
+        '    }'
+        '    ''ERR|{0}|{1}'' -f $hresult, ("$_" -replace ''\s+'', '' '')'
+        '    exit 1'
+        '}'
+    ) -join "`n"
+    $encoded = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($script))
+    $powerShellPath = [Environment]::ProcessPath
+    if ([string]::IsNullOrWhiteSpace($powerShellPath)) {
+        $powerShellPath = (Get-Process -Id $PID).Path
+    }
+    $timeout = Get-ProcessTimeoutSeconds -Operation WingetPackageManagerRepair
+    $run = Invoke-ExternalProcess -FilePath $powerShellPath -ArgumentList @('-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', $encoded) -TimeoutSeconds $timeout -Echo None -CreateNoWindow
+    if ($run.LaunchFailed) {
+        throw "$label could not run: PowerShell could not be started ($($run.LaunchError))."
+    }
+    $errorLine = $null
+    $shown = @()
+    foreach ($line in @($run.Output)) {
+        if ($null -eq $errorLine -and "$line" -like 'ERR|*|*') {
+            $errorLine = "$line"
+        }
+        else {
+            $shown += "$line"
+        }
+    }
+    Write-ProcessOutput -Line $shown
+    if ($run.TimedOut) {
+        throw ("$label did not finish within {0} minutes and was stopped." -f [Math]::Round($timeout / 60))
+    }
+    if ($run.ExitCode -eq 0) {
+        return
+    }
+    if ($errorLine) {
+        $parts = $errorLine -split '\|', 3
+        $hresult = 0
+        if ([int]::TryParse($parts[1], [ref]$hresult) -and $hresult -ne 0) {
+            throw [System.Runtime.InteropServices.COMException]::new($parts[2].Trim(), $hresult)
+        }
+        throw $parts[2].Trim()
+    }
+    throw "$label failed in a child PowerShell (exit code $($run.ExitCode))."
+}
+
 function Invoke-WingetPackageManagerRepair {
     param (
         [Parameter(Mandatory = $false)]
@@ -9210,7 +9304,7 @@ function Invoke-WingetPackageManagerRepair {
         }
         Write-Info "Running Repair-WinGetPackageManager $($attempt.Label)..."
         try {
-            Repair-WinGetPackageManager @parameters -ErrorAction Stop
+            Invoke-RepairWinGetPackageManagerProcess @parameters
             return [pscustomobject]@{ Available = $true; Succeeded = $true; ErrorCodes = $codes }
         }
         catch {
@@ -12371,6 +12465,7 @@ function Invoke-WingetUserPhase {
         if ($script:InstallerBuildId) {
             Write-Info "Installer build: $script:InstallerBuildId"
         }
+        Write-OSArchitectureLine
         $buildText = 'unknown build'
         if ($record.BuildId) {
             $buildText = "build $($record.BuildId)"
@@ -13808,6 +13903,7 @@ if ($MyInvocation.InvocationName -ne '.') {
                 Write-Info "Logging the PowerShell 7 bootstrap to: $script:InstallLogPath"
             }
             Write-Info "Installer build: $script:InstallerBuildId"
+            Write-OSArchitectureLine
             try {
                 $bootstrapParameters = @{}
                 $bootstrapBudgetParameters = @{ RunDeadlineUtc = $RunDeadlineUtc; StartedUtc = $script:InstallerRunStartedUtc }
@@ -13863,6 +13959,7 @@ if ($MyInvocation.InvocationName -ne '.') {
             Write-Info "Logging this run to: $script:InstallLogPath"
         }
         Write-Info "Installer build: $script:InstallerBuildId"
+        Write-OSArchitectureLine
 
         if (-not $WhatIf -and (Test-IsAdmin)) {
             if ((Lock-InstallerRun) -eq 'Busy') {

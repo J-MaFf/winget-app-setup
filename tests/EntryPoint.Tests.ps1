@@ -152,11 +152,15 @@ Describe 'Generated installer: build stamp and transcript wiring (issue #189)' {
         $transcripts = Get-ChildTranscript
         $transcripts.Name | Should -Match '^install-\d{8}-\d{6}-whatif\.log$'
         $result.Output | Should -Match ('Logging this run to: ' + [regex]::Escape($transcripts[0].FullName))
+        # wgt-gq8.52: the architecture the catalog's arch lists are decided on, right after the build.
+        $architecture = [string][System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture
+        (Get-Content -Raw -LiteralPath $transcripts[0].FullName) | Should -Match ('Installer build: [^\r\n]+\r?\n[^\r\n]*OS architecture: ' + $architecture + '\r?\n')
     }
 
     It 'Logs the log path and the build id at startup' {
         $script:generatedInstaller | Should -Match ([regex]::Escape('Write-Info "Logging this run to: $script:InstallLogPath"'))
         $script:generatedInstaller | Should -Match ([regex]::Escape('Write-Info "Installer build: $script:InstallerBuildId"'))
+        $script:generatedInstaller | Should -Match ([regex]::Escape('Write-Info "Installer build: $script:InstallerBuildId"') + '\r?\n\s*Write-OSArchitectureLine')
     }
 }
 
@@ -685,6 +689,7 @@ Describe 'Early exits explain themselves before the window closes (review findin
             $result.Output | Should -Match 'The installer stopped early with exit code 7: PowerShell 7 could not be installed, or the installer could not be relaunched under it'
             $bootstrapLog = Get-PrintedLog -Output $result.Output -Label 'Logging the PowerShell 7 bootstrap to:'
             $bootstrapLog | Should -Match ('Installer build: ' + [regex]::Escape($script:buildId))
+            $bootstrapLog | Should -Match 'OS architecture: (X64|X86|Arm64|Arm)\r?\n'
             $bootstrapLog | Should -Match 'PowerShell 7 could not be installed automatically'
             $bootstrapLog | Should -Match 'stopped early with exit code 7'
             $result.Output -match 'Logging the PowerShell 7 bootstrap to:\s*([^\r\n\x1b]+?)[\\/]install-' | Should -BeTrue
@@ -1405,7 +1410,7 @@ function Start-ElevatedProcess {
         $result.Output | Should -Match 'ELEVATED: \S*\\System32\\WindowsPowerShell\\v1\.0\\powershell\.exe -NoProfile -ExecutionPolicy Bypass -Command "'
         # The SHA256 the entry block took at startup, and the forwarded switch.
         $result.Output | Should -Match ([regex]::Escape("-ne '$sha256'"))
-        $result.Output | Should -Match ([regex]::Escape('-File $copy -SkipSystemCheck;'))
+        $result.Output | Should -Match ([regex]::Escape('-File $c -SkipSystemCheck }catch{'))
         $result.Output | Should -Match 'The elevated run ended with exit code 1\.'
         # The elevated window showed the outcome and waited for its own key press.
         $result.Output | Should -Not -Match 'stopped early|PROMPT:|UNEXPECTED ERROR'
@@ -1519,8 +1524,8 @@ function Start-ElevatedProcess {
         # The SHA256 the entry block took at startup; the copy keeps the uninstaller's own name and is
         # run with no switches forwarded.
         $run.Output | Should -Match ([regex]::Escape("-ne '$sha256'"))
-        $run.Output | Should -Match ([regex]::Escape("Join-Path `$copyDirectory 'winget-app-uninstall.ps1';"))
-        $run.Output | Should -Match ([regex]::Escape('-File $copy;'))
+        $run.Output | Should -Match ([regex]::Escape("`$n='winget-app-uninstall.ps1';"))
+        $run.Output | Should -Match ([regex]::Escape('-File $c }catch{'))
         $run.Output | Should -Match 'The elevated run ended with exit code 3\.'
         # The elevated window showed the outcome and waited for its own key press.
         $run.Output | Should -Not -Match 'UNINSTALL RAN|PROMPT:'

@@ -79,6 +79,29 @@ Describe 'Get-OSArchitecture (review finding P3-32)' {
     }
 }
 
+Describe 'Write-OSArchitectureLine (wgt-gq8.52)' {
+    BeforeEach {
+        $script:infos = @()
+        Mock Write-Info { $script:infos += $Message }
+    }
+
+    It 'Prints the architecture the catalog''s arch lists are decided on' {
+        Mock Get-OSArchitecture { 'Arm64' }
+
+        Write-OSArchitectureLine
+
+        $script:infos | Should -Be @('OS architecture: Arm64')
+    }
+
+    It 'Prints unknown with the reason, and does not throw, when the architecture cannot be read' {
+        Mock Get-OSArchitecture { throw 'The OS architecture could not be read.' }
+
+        { Write-OSArchitectureLine } | Should -Not -Throw
+
+        $script:infos | Should -Be @('OS architecture: unknown (The OS architecture could not be read.)')
+    }
+}
+
 Describe 'Get-PowerShellEdition (review finding P3-18)' {
     It 'Returns the running PowerShell''s edition' {
         $edition = Get-PowerShellEdition

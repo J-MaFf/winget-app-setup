@@ -44,7 +44,7 @@ BeforeAll {
 
 Describe 'Get-ProcessTimeoutSeconds' {
     It 'Gives every operation a positive limit' {
-        foreach ($operation in 'WingetInstall', 'WingetDownload', 'WingetUninstall', 'WingetListCheck', 'WingetVersion', 'WingetSourceUpdate', 'WingetSourceOpen', 'WingetSourceReset', 'MsiExec', 'AppxProvisioning', 'AppxRegistration', 'AppxQuery', 'WebDownload', 'WebDownloadStall', 'WebLookup') {
+        foreach ($operation in 'WingetInstall', 'WingetDownload', 'WingetUninstall', 'WingetListCheck', 'WingetVersion', 'WingetSourceUpdate', 'WingetSourceOpen', 'WingetSourceReset', 'MsiExec', 'AppxProvisioning', 'AppxRegistration', 'AppxQuery', 'WingetPackageManagerRepair', 'WebDownload', 'WebDownloadStall', 'WebLookup') {
             Get-ProcessTimeoutSeconds -Operation $operation | Should -BeGreaterThan 0 -Because $operation
         }
     }
@@ -97,7 +97,7 @@ Describe 'Invoke-WindowsPowerShellScript (wgt-gq8.63 review)' {
         Mock Invoke-ExternalProcess { [pscustomobject]@{ ExitCode = 0; TimedOut = $false; LaunchFailed = $false; StandardOutput = @('done') } }
     }
 
-    It 'Runs the script in System32''s Windows PowerShell as -EncodedCommand, writing UTF-8, without PSModulePath, within the given limit, echoing nothing' {
+    It 'Runs the script in System32''s Windows PowerShell as -EncodedCommand, writing UTF-8 in a hidden console of its own (wgt-gq8.72), without PSModulePath, within the given limit, echoing nothing' {
         $result = Invoke-WindowsPowerShellScript -Script "Add-AppxPackage -Path 'C:\x\O''Neil.msix'" -TimeoutSeconds 300
 
         $result.StandardOutput | Should -Be @('done')
@@ -107,7 +107,7 @@ Describe 'Invoke-WindowsPowerShellScript (wgt-gq8.63 review)' {
             $FilePath -eq 'X:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe' -and
             ($ArgumentList -join ' ') -like '-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand *' -and
             $decoded -like "*UTF8Encoding*SilentlyContinue*; Add-AppxPackage -Path 'C:\x\O''Neil.msix'" -and
-            $TimeoutSeconds -eq 300 -and $Echo -eq 'None' -and @($RemoveEnvironmentVariable) -contains 'PSModulePath'
+            $TimeoutSeconds -eq 300 -and $Echo -eq 'None' -and @($RemoveEnvironmentVariable) -contains 'PSModulePath' -and $CreateNoWindow
         }
     }
 
@@ -406,6 +406,30 @@ Describe 'Invoke-ExternalProcess (real processes)' {
 
         $result.ExitCode | Should -Be 4
         $global:LASTEXITCODE | Should -Be 12345
+    }
+
+    It 'Captures the output and exit code of a process started with -CreateNoWindow (wgt-gq8.72)' {
+        $fake = New-FakeExecutable -Directory $TestDrive -Name 'fake-hidden' -StandardOutput 'HIDDEN-CONSOLE-LINE' -ExitCode 2
+
+        $result = Invoke-ExternalProcess -FilePath $fake -TimeoutSeconds 60 -Echo None -CreateNoWindow
+
+        $result.ExitCode | Should -Be 2
+        $result.StandardOutput | Should -Be @('HIDDEN-CONSOLE-LINE')
+    }
+
+    # wgt-gq8.72: the child set its console's code page to 65001, which was the operator's console.
+    It 'Leaves this console''s output code page alone when Invoke-WindowsPowerShellScript''s child switches its own to UTF-8' -Skip:(-not $IsWindows) {
+        $before = [Console]::OutputEncoding.CodePage
+        if ($before -eq 65001) {
+            Set-ItResult -Skipped -Because 'this console already uses code page 65001, so a change could not be seen'
+            return
+        }
+
+        $result = Invoke-WindowsPowerShellScript -Script '[Console]::OutputEncoding.CodePage' -TimeoutSeconds 60
+
+        $result.ExitCode | Should -Be 0
+        $result.StandardOutput | Should -Contain '65001'
+        [Console]::OutputEncoding.CodePage | Should -Be $before
     }
 
     It 'Stops a process that runs past its time limit and reports TimedOut (review finding P2-5)' {

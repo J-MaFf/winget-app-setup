@@ -36,6 +36,8 @@
     AppxRegistration  one Add-AppxPackage for this account (a registration, or an .msix such as the
                       winget source package), run in Windows PowerShell (5 minutes).
     AppxQuery         one Get-AppxPackage -AllUsers, run in Windows PowerShell (2 minutes).
+    WingetPackageManagerRepair one Repair-WinGetPackageManager in a child PowerShell, which
+                      downloads and deploys App Installer (15 minutes).
     WebDownload       a file download's connection and wait for the response headers (5 minutes);
                       Invoke-WebRequest's -TimeoutSec does not cover the body.
     WebDownloadStall  how long a download may receive nothing once the file is arriving, on
@@ -48,7 +50,7 @@
 function Get-ProcessTimeoutSeconds {
     param (
         [Parameter(Mandatory = $true)]
-        [ValidateSet('WingetInstall', 'WingetDownload', 'WingetUninstall', 'WingetListCheck', 'WingetVersion', 'WingetSourceUpdate', 'WingetSourceOpen', 'WingetSourceReset', 'WingetClientProbe', 'WingetClientVersion', 'WingetClientListCheck', 'MsiExec', 'AppxProvisioning', 'AppxRegistration', 'AppxQuery', 'WebDownload', 'WebDownloadStall', 'WebLookup')]
+        [ValidateSet('WingetInstall', 'WingetDownload', 'WingetUninstall', 'WingetListCheck', 'WingetVersion', 'WingetSourceUpdate', 'WingetSourceOpen', 'WingetSourceReset', 'WingetClientProbe', 'WingetClientVersion', 'WingetClientListCheck', 'MsiExec', 'AppxProvisioning', 'AppxRegistration', 'AppxQuery', 'WingetPackageManagerRepair', 'WebDownload', 'WebDownloadStall', 'WebLookup')]
         [string]$Operation
     )
 
@@ -68,6 +70,7 @@ function Get-ProcessTimeoutSeconds {
         'AppxProvisioning' { return 600 }
         'AppxRegistration' { return 300 }
         'AppxQuery' { return 120 }
+        'WingetPackageManagerRepair' { return 900 }
         'WebDownload' { return 300 }
         'WebDownloadStall' { return 120 }
         'WebLookup' { return 30 }
@@ -457,6 +460,9 @@ function Stop-ProcessTree {
     Environment variables the program starts without; the rest of this process's environment is
     passed on, and this process's own environment does not change (PSModulePath, for Windows
     PowerShell started from PowerShell 7).
+.PARAMETER CreateNoWindow
+    Start the program with a console of its own, hidden, instead of this process's console, so a
+    program that changes its console's code page leaves the operator's window as it was.
 .OUTPUTS
     [pscustomobject] with FilePath, Arguments, ExitCode ($null when the process timed out or did
     not start), TimedOut, LaunchFailed, LaunchErrorCode, LaunchError (message), LaunchException,
@@ -489,7 +495,10 @@ function Invoke-ExternalProcess {
 
         [Parameter(Mandatory = $false)]
         [AllowEmptyCollection()]
-        [string[]]$RemoveEnvironmentVariable = @()
+        [string[]]$RemoveEnvironmentVariable = @(),
+
+        [Parameter(Mandatory = $false)]
+        [switch]$CreateNoWindow
     )
 
     $arguments = $ArgumentString
@@ -541,6 +550,7 @@ function Invoke-ExternalProcess {
     $startInfo.RedirectStandardInput = $true
     $startInfo.RedirectStandardOutput = $true
     $startInfo.RedirectStandardError = $true
+    $startInfo.CreateNoWindow = [bool]$CreateNoWindow
     # winget writes UTF-8 whatever the console code page is; msiexec writes nothing.
     if (-not $Encoding) {
         $Encoding = New-Object System.Text.UTF8Encoding($false)
@@ -717,7 +727,9 @@ function Invoke-ExternalProcess {
     (0x80131539) and always load in 5.1. As -EncodedCommand, so no quoting changes the script, with
     UTF-8 output, so localized error text arrives intact, and without PSModulePath: inherited
     through Process.Start, PowerShell 7's module folders come first and their Utility and Security
-    modules cannot load in 5.1 (about_PSModulePath). Nothing is echoed.
+    modules cannot load in 5.1 (about_PSModulePath). With a hidden console of its own
+    (-CreateNoWindow), so setting the child's output code page leaves the operator's console as it
+    was (wgt-gq8.72). Nothing is echoed.
 .PARAMETER Script
     The script.
 .PARAMETER TimeoutSeconds
@@ -744,7 +756,7 @@ function Invoke-WindowsPowerShellScript {
     }
     $prologue = '[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false); $ProgressPreference = ''SilentlyContinue''; '
     $encoded = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($prologue + $Script))
-    return (Invoke-ExternalProcess -FilePath $FilePath -ArgumentList @('-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', $encoded) -TimeoutSeconds $TimeoutSeconds -Echo None -RemoveEnvironmentVariable @('PSModulePath'))
+    return (Invoke-ExternalProcess -FilePath $FilePath -ArgumentList @('-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', $encoded) -TimeoutSeconds $TimeoutSeconds -Echo None -RemoveEnvironmentVariable @('PSModulePath') -CreateNoWindow)
 }
 
 <#
