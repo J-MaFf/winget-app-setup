@@ -6083,6 +6083,9 @@ function New-ExclusiveLogFile {
             $name = '{0}-{1}{2}' -f $Stem, $number, $Tail
         }
         $path = Join-Path $Directory $name
+        if ($null -ne (Get-FileSystemEntryAttribute -Path $path)) {
+            continue
+        }
         try {
             $stream = [System.IO.File]::Open($path, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
             $stream.Dispose()

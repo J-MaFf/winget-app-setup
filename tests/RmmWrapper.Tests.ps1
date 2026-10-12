@@ -647,6 +647,24 @@ exit 6
             Should -Invoke Start-Transcript -Times 1 -Exactly -ParameterFilter { $Path -eq $path }
         }
 
+        It 'Never follows a link left at its name whose target is missing' {
+            $null = New-Item -ItemType Directory -Path $script:logDirectory -Force
+            Mock Get-Date { [datetime]::new(2026, 10, 12, 10, 15, 0) }
+            $missingTarget = Join-Path $script:victim ('missing-' + [guid]::NewGuid().ToString('N') + '.txt')
+            try {
+                $null = New-Item -ItemType SymbolicLink -Path (Join-Path $script:logDirectory 'install-20261012-101500-rmm.log') -Target $missingTarget -ErrorAction Stop
+            }
+            catch {
+                Set-ItResult -Skipped -Because 'this account cannot create a file symbolic link'
+                return
+            }
+
+            $path = Start-RmmTranscript -LogDirectory $script:logDirectory
+
+            $path | Should -Be (Join-Path $script:logDirectory 'install-20261012-101500-2-rmm.log')
+            Test-Path -LiteralPath $missingTarget | Should -BeFalse
+        }
+
         It 'Removes the file it created for the transcript when the transcript cannot start' {
             Mock Start-Transcript { throw 'Access to the path is denied.' }
 

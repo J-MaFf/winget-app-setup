@@ -297,6 +297,11 @@ function New-ExclusiveLogFile {
             $name = '{0}-{1}{2}' -f $Stem, $number, $Tail
         }
         $path = Join-Path $Directory $name
+        # Windows' CreateNew follows a link whose target is missing and creates that target, so an
+        # entry of any kind at the name (read without following it) takes the next name.
+        if ($null -ne (Get-FileSystemEntryAttribute -Path $path)) {
+            continue
+        }
         try {
             $stream = [System.IO.File]::Open($path, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
             $stream.Dispose()

@@ -107,12 +107,12 @@ param (
 # the function source under WingetAppSetup/Public and WingetAppSetup/Private, or the entry block in
 # build/fragments/tail.ps1, then re-run the build to regenerate this file.
 # See readme.md ("Project layout") for details.
-# Build id: 1.0.0+65c8fd95 (module version + SHA256 fragment of this whole script; issue #189).
+# Build id: 1.0.0+dbe76fb0 (module version + SHA256 fragment of this whole script; issue #189).
 # ------------------------------------------------------------------------------------------------
 
 # Content-derived build identity, logged at startup so a transcript from a remote machine
 # identifies exactly which installer build produced it (issue #189).
-$script:InstallerBuildId = '1.0.0+65c8fd95'
+$script:InstallerBuildId = '1.0.0+dbe76fb0'
 
 # ------------------------------------------------Functions------------------------------------------------
 
@@ -6139,6 +6139,9 @@ function New-ExclusiveLogFile {
             $name = '{0}-{1}{2}' -f $Stem, $number, $Tail
         }
         $path = Join-Path $Directory $name
+        if ($null -ne (Get-FileSystemEntryAttribute -Path $path)) {
+            continue
+        }
         try {
             $stream = [System.IO.File]::Open($path, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
             $stream.Dispose()
