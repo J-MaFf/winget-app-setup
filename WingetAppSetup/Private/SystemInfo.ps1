@@ -65,6 +65,31 @@ function Write-OSArchitectureLine {
     Write-Info "OS architecture: $architecture"
 }
 
+function Get-UnsupportedWindowsWarning {
+    <#
+    .SYNOPSIS
+        The warning for a Windows this installer does not support (wgt-gq8.51): 32-bit Windows, or
+        Windows 10 on ARM64. $null on a supported Windows (10/11 x64, Windows 11 ARM64).
+    .DESCRIPTION
+        Fails open: when the architecture or the build cannot be read, there is no warning.
+    .OUTPUTS
+        [string] The warning, or $null.
+    #>
+    try {
+        $architecture = Get-OSArchitecture
+        if ($architecture -eq 'X86') {
+            return 'This PC runs 32-bit Windows, which this installer does not support. The run goes on, but some apps may fail: Google Drive and Git, for example, have no 32-bit installer. Supported: Windows 10 and 11 x64, and Windows 11 on ARM64.'
+        }
+        if ($architecture -eq 'Arm64' -and (Get-WindowsBuildNumber) -lt 22000) {
+            return 'This PC runs Windows 10 on ARM64, which this installer does not support. The run goes on, but some apps may fail: Windows 10 on ARM cannot run x64-only installers such as Google Drive''s. Supported: Windows 10 and 11 x64, and Windows 11 on ARM64.'
+        }
+    }
+    catch {
+        return $null
+    }
+    return $null
+}
+
 function Get-PowerShellEdition {
     <#
     .SYNOPSIS

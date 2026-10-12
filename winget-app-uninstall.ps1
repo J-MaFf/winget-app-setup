@@ -2812,6 +2812,11 @@ function Invoke-EnvironmentPreflight {
         $AccountContext = Get-InstallAccountContext
     }
 
+    $unsupportedWindows = Get-UnsupportedWindowsWarning
+    if ($unsupportedWindows) {
+        Write-WarningMessage $unsupportedWindows
+    }
+
     $proxyWarning = $null
     try {
         $proxyWarning = Get-ProxyInheritanceWarning -AccountContext $AccountContext
@@ -6698,6 +6703,22 @@ function Write-OSArchitectureLine {
         $architecture = "unknown ($($_.Exception.Message))"
     }
     Write-Info "OS architecture: $architecture"
+}
+
+function Get-UnsupportedWindowsWarning {
+    try {
+        $architecture = Get-OSArchitecture
+        if ($architecture -eq 'X86') {
+            return 'This PC runs 32-bit Windows, which this installer does not support. The run goes on, but some apps may fail: Google Drive and Git, for example, have no 32-bit installer. Supported: Windows 10 and 11 x64, and Windows 11 on ARM64.'
+        }
+        if ($architecture -eq 'Arm64' -and (Get-WindowsBuildNumber) -lt 22000) {
+            return 'This PC runs Windows 10 on ARM64, which this installer does not support. The run goes on, but some apps may fail: Windows 10 on ARM cannot run x64-only installers such as Google Drive''s. Supported: Windows 10 and 11 x64, and Windows 11 on ARM64.'
+        }
+    }
+    catch {
+        return $null
+    }
+    return $null
 }
 
 function Get-PowerShellEdition {

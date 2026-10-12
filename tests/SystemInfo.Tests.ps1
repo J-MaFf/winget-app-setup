@@ -102,6 +102,53 @@ Describe 'Write-OSArchitectureLine (wgt-gq8.52)' {
     }
 }
 
+Describe 'Get-UnsupportedWindowsWarning (wgt-gq8.51)' {
+    It 'Warns for <Name> only when that Windows is unsupported' -ForEach @(
+        @{ Name = 'Windows 11 x64'; Architecture = 'X64'; Build = 26100; Expected = $null }
+        @{ Name = 'Windows 10 x64'; Architecture = 'X64'; Build = 19045; Expected = $null }
+        @{ Name = 'Windows 11 ARM64'; Architecture = 'Arm64'; Build = 22631; Expected = $null }
+        @{ Name = 'Windows 10 ARM64'; Architecture = 'Arm64'; Build = 19045; Expected = 'Windows 10 on ARM64' }
+        @{ Name = '32-bit Windows 10'; Architecture = 'X86'; Build = 19045; Expected = '32-bit Windows' }
+    ) {
+        Mock Get-OSArchitecture { $Architecture }
+        Mock Get-WindowsBuildNumber { $Build }
+
+        $warning = Get-UnsupportedWindowsWarning
+
+        if ($null -eq $Expected) {
+            $warning | Should -BeNullOrEmpty
+        }
+        else {
+            $warning | Should -BeLike "This PC runs $Expected, which this installer does not support.*"
+            $warning | Should -Match 'Google Drive'
+            $warning | Should -Match 'Supported: Windows 10 and 11 x64, and Windows 11 on ARM64\.$'
+        }
+    }
+
+    It 'Names Git as well as Google Drive for 32-bit Windows' {
+        Mock Get-OSArchitecture { 'X86' }
+        Mock Get-WindowsBuildNumber { 19045 }
+
+        Get-UnsupportedWindowsWarning | Should -Match 'Google Drive and Git'
+    }
+
+    It 'Stays quiet when the architecture cannot be read (fail open)' {
+        Mock Get-OSArchitecture { throw 'The OS architecture could not be read.' }
+        Mock Get-WindowsBuildNumber { 19045 }
+
+        Get-UnsupportedWindowsWarning | Should -BeNullOrEmpty
+    }
+
+    It 'Does not read the build on x64' {
+        Mock Get-OSArchitecture { 'X64' }
+        Mock Get-WindowsBuildNumber { 19045 }
+
+        $null = Get-UnsupportedWindowsWarning
+
+        Should -Invoke Get-WindowsBuildNumber -Times 0 -Exactly
+    }
+}
+
 Describe 'Get-PowerShellEdition (review finding P3-18)' {
     It 'Returns the running PowerShell''s edition' {
         $edition = Get-PowerShellEdition
