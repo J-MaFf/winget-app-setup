@@ -115,9 +115,9 @@ Describe 'New-InstallerRunRecord and Format-InstallerResultLine (review finding 
     }
 
     It 'Records the run: build, times, exit code, counts, apps, auto-updates, restart, winget and the log' {
-        $record = New-InstallerRunRecord -ExitCode 1 -Apps $script:apps -AutoUpdates 'Configured' -AutoUpdatesVersion ([version]'2.12.0') -RestartRequired $true -WingetUsable $true -SummaryReached
+        $record = New-InstallerRunRecord -ExitCode 1 -Apps $script:apps -AutoUpdates 'Configured' -AutoUpdatesVersion ([version]'2.12.0') -RestartRequired $true -WingetUsable $true -WingetSource 'ok' -SummaryReached
 
-        @($record.Keys) | Should -Be @('schemaVersion', 'buildId', 'startedUtc', 'endedUtc', 'exitCode', 'summaryReached', 'counts', 'apps', 'autoUpdates', 'restartRequired', 'wingetUsable', 'installEngine', 'transcriptPath')
+        @($record.Keys) | Should -Be @('schemaVersion', 'buildId', 'startedUtc', 'endedUtc', 'exitCode', 'summaryReached', 'counts', 'apps', 'autoUpdates', 'restartRequired', 'wingetUsable', 'wingetSource', 'installEngine', 'transcriptPath')
         $record.schemaVersion | Should -Be 1
         $record.buildId | Should -Be '1.0.0+1a2b3c4d'
         $record.startedUtc | Should -Be '2026-10-04T14:30:05Z'
@@ -135,7 +135,20 @@ Describe 'New-InstallerRunRecord and Format-InstallerResultLine (review finding 
         $record.autoUpdates.version | Should -Be '2.12.0'
         $record.restartRequired | Should -BeTrue
         $record.wingetUsable | Should -BeTrue
+        $record.wingetSource | Should -Be 'ok'
         $record.transcriptPath | Should -Be 'C:\ProgramData\winget-app-setup\logs\install-20261004-163005.log'
+    }
+
+    # wgt-gq8.66
+    It 'Records whether winget could open its source (<Value>), and refuses any other word' -ForEach @(
+        @{ Value = 'ok' }
+        @{ Value = 'unusable' }
+        @{ Value = 'unknown' }
+    ) {
+        $json = ConvertTo-Json -InputObject (New-InstallerRunRecord -ExitCode 1 -WingetSource $Value) -Depth 6 | ConvertFrom-Json
+
+        $json.wingetSource | Should -Be $Value
+        { New-InstallerRunRecord -ExitCode 1 -WingetSource 'broken' } | Should -Throw
     }
 
     # wgt-gq8.42: which engine was asked for, which installed, and why a fallback happened.
@@ -181,6 +194,8 @@ Describe 'New-InstallerRunRecord and Format-InstallerResultLine (review finding 
         $record.autoUpdates.version | Should -BeNullOrEmpty
         $record.restartRequired | Should -BeFalse
         $record.wingetUsable | Should -BeNullOrEmpty
+        $record.Contains('wingetSource') | Should -BeTrue
+        $record.wingetSource | Should -BeNullOrEmpty
     }
 
     It 'Leaves the entry script''s values empty outside it (the imported module)' {
@@ -363,6 +378,8 @@ Describe 'Write-InstallerRunResult and Write-InstallerEarlyExitResult (review fi
         $script:savedLogPath = $script:InstallLogPath
         $script:savedAppRecords = $script:InstallerAppRecords
         $script:savedAutoUpdate = $script:InstallerAutoUpdateResult
+        $script:savedWingetSource = $script:InstallerWingetSource
+        $script:InstallerWingetSource = $null
         $script:logDirectory = Join-Path $TestDrive ('logs-' + [Guid]::NewGuid().ToString('N'))
         [void](New-Item -ItemType Directory -Path $script:logDirectory -Force)
         $script:InstallLogPath = Join-Path $script:logDirectory 'install-20261004-163005.log'
@@ -379,6 +396,17 @@ Describe 'Write-InstallerRunResult and Write-InstallerEarlyExitResult (review fi
         $script:InstallLogPath = $script:savedLogPath
         $script:InstallerAppRecords = $script:savedAppRecords
         $script:InstallerAutoUpdateResult = $script:savedAutoUpdate
+        $script:InstallerWingetSource = $script:savedWingetSource
+    }
+
+    It 'Reports what the run''s source check found in the record of an early exit (wgt-gq8.66)' {
+        $script:InstallerWingetSource = 'unusable'
+        $script:savedRecord = $null
+        Mock Write-InstallerRunResult { $script:savedRecord = $Record }
+
+        [void](Write-InstallerEarlyExitResult -ExitCode 2)
+
+        $script:savedRecord.wingetSource | Should -Be 'unusable'
     }
 
     It 'Writes last-run.json next to the transcript, then prints the RESULT line last' {

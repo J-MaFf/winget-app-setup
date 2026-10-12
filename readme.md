@@ -565,6 +565,18 @@ later than with `winget.exe` (about 9 minutes), and a module that cannot load, a
 cannot start for a reason that does not clear on its own, or Group Policy (`0x8A15003A`) stops
 the checks at once.
 
+The winget source gets the same treatment. When an app fails with a code that says
+the source cannot be opened (`0x8A15000F` and the other codes under **Setting winget up**, step 3)
+from its install or its `winget list` check, the installer runs the source check once
+(`winget search --source winget`). If the source opens, the run carries on. If it answers such a
+code again, every remaining app is marked failed with
+`not attempted: winget can no longer open its source (see above)` without running winget, the
+retry pass is skipped, Winget-AutoUpdate is still set up, and the run ends with exit code 1, as
+for a winget that can no longer be started; `last-run.json` records `wingetSource: unusable`. No
+repair runs partway through: the next run repairs the source before it installs anything. A check
+that gives no clear answer (a timeout, or another code) does not stop the run. This applies to
+`winget.exe` only: the Microsoft.WinGet.Client engine keeps its own checks.
+
 Some install results clear on their own, and are waited out instead of failing at once:
 
 - **Another installation in progress** (`0x8A150102`, `msiexec` 1618). Windows Installer runs one
@@ -1006,8 +1018,12 @@ that run's `last-run.json`.
 - It checks that winget starts for this account (Windows sets winget up for an account shortly
   after its first sign-in), then updates the winget source for it
   (`winget source update --name winget`, with a 2-minute limit). At an account's first sign-in
-  this also registers the source. A source that cannot be updated is reported in one line, and the
-  installs go ahead. It runs no `winget source reset`, which needs administrator rights.
+  this also registers the source. `winget source update` exits 0 even when it fails, so it then
+  opens the source (`winget search --source winget`). A source that answers `0x8A15000F` or
+  another code that says it cannot be opened installs nothing: every deferred app is
+  `NotAttempted` with that code, and the user phase exits 2, so the next sign-in tries again. Any
+  other source failure is reported in one line, and the installs go ahead. It runs no
+  `winget source reset` or other repair, which need administrator rights.
 - It installs each deferred app with `--scope user` only, checked with `winget list` before and
   after. It never tries another scope, so it never picks a machine-wide installer that would ask
   for administrator rights. A per-user installer that elevates itself would still show a UAC
@@ -1033,7 +1049,10 @@ The user phase exits with:
 - 0: done, or nothing to do;
 - 1: a deferred app failed, its post-install hook failed, or it was not reached within the time
   budget;
-- 2: winget cannot be started for this account yet;
+- 2: winget cannot be started for this account yet, or it cannot open its source (`winget source
+  update` exits 0 even when it fails, so the user phase also opens the source with
+  `winget search --source winget`; a code such as `0x8A15000F` makes every deferred app
+  `NotAttempted` with that code). Nothing was installed, and the next sign-in tries again;
 - 3010: done, and an install needs a restart to finish;
 - 5: the installer could not be run (pins not set, download failed, SHA256 mismatch, or a pinned
   commit older than the user phase), the run did not end in time, or an unexpected error;
@@ -1154,7 +1173,7 @@ installed, and with `-WhatIf` when the fix would succeed. It exits 1, with `-Wha
 | Code | Meaning |
 |------|---------|
 | 0 | Success — every app is installed, already present, or does not apply to this machine (`not applicable`); apps reported as `Deferred` do not count against it, and neither do apps whose post-install hook could not configure them (`Configuration: NOT DONE`) |
-| 1 | One or more apps failed to install, including an install stopped at its time limit, the apps not attempted because winget could no longer be started partway through the run, an app with `scope = 'machine'` that has no machine-wide installer, and an installed app whose post-install hook failed (also: a blocking pre-flight system check failed). An app whose catalog condition could not be evaluated is attempted (fail open), so its failed install counts here too |
+| 1 | One or more apps failed to install, including an install stopped at its time limit, the apps not attempted because winget could no longer be started, or could no longer open its source, partway through the run, an app with `scope = 'machine'` that has no machine-wide installer, and an installed app whose post-install hook failed (also: a blocking pre-flight system check failed). An app whose catalog condition could not be evaluated is attempted (fail open), so its failed install counts here too |
 | 2 | Winget is unavailable or cannot be started (`winget --version` must run and print a version) and could not be set up (as SYSTEM: no machine-wide `winget.exe` was found, or none could be started, and the opt-in [Microsoft.WinGet.Client engine](#microsoftwingetclient-engine-opt-in) is not ready either), winget cannot open the winget source for the account even after the installer's repair (`0x8A15000F` and the other codes under **Setting winget up**, step 3; nothing is installed and Winget-AutoUpdate is not set up), App Installer's Group Policy turns winget or its source off (the pre-flight checks it before the run waits for anything or sets winget up; see **Setting winget up** above), or winget could no longer be launched at the end of the run (no app failed, but automatic updates and the next run would) |
 | 3 | App-definition validation failed (for example an invalid `scope`, `arch`, `postInstall` or `userPhase` value, see [Catalog entry fields](#catalog-entry-fields)), or no valid app definitions remain |
 | 4 | Administrator rights are required and the run was not elevated: the UAC prompt was declined or the elevated window could not be started, the run is non-interactive (no prompt is shown), it runs through `irm \| iex` in PowerShell 7, `Invoke-WingetInstall` was called from the imported module, or Group Policy sets the Windows PowerShell execution policy to `AllSigned` or `Restricted`: for the PC, so no UAC prompt is shown, or for the account that approved the prompt, so the elevated window stops before it runs anything (see [Administrator rights](#administrator-rights)) |
@@ -1246,6 +1265,7 @@ file alone. Fields:
 | `autoUpdates` | `status` (as in the `RESULT` line) and `version` (or `null`) |
 | `restartRequired` | The run needs a restart to finish |
 | `wingetUsable` | Result of the end-of-run winget check; `null` when it did not run or could not complete |
+| `wingetSource` | Whether winget could open its source in this run: `ok`; `unusable` (it could not at the start, exit code 2, or it stopped opening partway through the installs, so the apps left were not attempted); `unknown` (the check gave no clear answer, or did not run because the [Microsoft.WinGet.Client engine](#microsoftwingetclient-engine-opt-in) installed); `null` when the run stopped before the check |
 | `installEngine` | Which engine installed the apps: `requested` and `used` (`Cli` for `winget.exe`, `WinGetClient` for the [Microsoft.WinGet.Client engine](#microsoftwingetclient-engine-opt-in); a run that is not SYSTEM is always `Cli`), `module` (`name`, `version`, `sha256` and `engineVersion` when the module installed the apps, otherwise `null`) and `fallbackReason` (why a requested module was not used, otherwise `null`) |
 | `transcriptPath` | This run's transcript, or `null` |
 

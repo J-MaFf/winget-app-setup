@@ -58,7 +58,8 @@
     when it runs itself under PowerShell 7.
 .NOTES
     Exit codes: 0 = done, or nothing to do; 1 = a deferred app failed, or was not attempted within
-    the time budget; 2 = winget cannot be started for this account yet; 3010 = done, an install
+    the time budget; 2 = winget cannot be started for this account yet, or cannot open its source
+    (nothing was installed; the next sign-in tries again); 3010 = done, an install
     needs a restart; 5 = the installer could not be run (pins not set, download failed, SHA256
     mismatch), the run did not end in time, or an unexpected error; 7 = PowerShell 7 is not
     installed (the machine phase installs it).

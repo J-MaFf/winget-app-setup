@@ -115,6 +115,7 @@ if ($MyInvocation.InvocationName -ne '.') {
     $script:InstallerRunReportPending = $false
     $script:InstallerAppRecords = $null
     $script:InstallerAutoUpdateResult = $null
+    $script:InstallerWingetSource = $null
     # The opt-in Microsoft.WinGet.Client engine of a run as SYSTEM and its run-record entry: never an
     # earlier run's in this console.
     $script:WingetClientEngine = $null

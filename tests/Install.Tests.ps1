@@ -1248,6 +1248,145 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
         }
     }
 
+    # wgt-gq8.66: the winget source lost partway through the installs (the owner's real-PC run: every
+    # app, then every retry, failed with 0x8A15000F).
+    Context 'Source breaker: winget can no longer open its source' {
+        BeforeEach {
+            $script:apps = @(@{ name = 'Contoso.AppOne' }, @{ name = 'Contoso.AppTwo' }, @{ name = 'Contoso.AppThree' })
+            $script:appCalls = [System.Collections.Generic.List[string]]::new()
+            # AppOne's install and its verify fail on the source; the others would install.
+            Mock Install-AppWithVerification {
+                $script:appCalls.Add("$($App.name):$([bool]$WingetSourceUnusable)")
+                if ($WingetSourceUnusable) {
+                    return @{ Status = 'Failed'; InstallResult = $null; FailureReason = 'WingetSourceUnusable'; LaunchError = $null }
+                }
+                if ($App.name -eq 'Contoso.AppOne') {
+                    return @{ Status = 'Failed'; InstallResult = @{ ExitCode = -1978335217; Attempts = 1 }; FailureReason = 'VerifyFailed'; CheckExitCode = -1978335217 }
+                }
+                @{ Status = 'Installed'; InstallResult = @{ ExitCode = 0 }; FailureReason = $null }
+            }
+            Mock Test-WingetSourceOpen { @{ Opened = $false; ExitCode = -1978335217; TimedOut = $false; LaunchError = $null } }
+            Mock Install-WingetAutoUpdate { [pscustomobject]@{ Status = 'Configured'; Version = [version]'2.12.0'; FrameworkMissing = $false; RestartRequired = $false } }
+            $script:reportedRecords = @()
+            Mock Write-InstallerRunResult { $script:reportedRecords += , $Record; $null }
+            Mock Unlock-InstallerRun { }
+        }
+
+        It 'Fails the remaining apps without running winget, skips the retry pass, still sets up Winget-AutoUpdate, exits 1 and records the source unusable when it still cannot be opened' {
+            $result = Invoke-WingetInstall -Apps $script:apps -NonInteractive
+
+            $result | Should -Be 1
+            Should -Invoke Test-WingetSourceOpen -Times 1 -Exactly
+            $script:appCalls | Should -Be @('Contoso.AppOne:False', 'Contoso.AppTwo:True', 'Contoso.AppThree:True')
+            $script:warningMessages | Should -Contain 'winget could not open its source for that app (0x8A15000F SOURCE_DATA_MISSING). Checking whether the winget source still opens...'
+            $script:errorMessages | Should -Contain "The winget source can no longer be opened: 'winget search --source winget' answered 0x8A15000F SOURCE_DATA_MISSING. The remaining apps are marked failed without an install attempt and are not retried. Re-run the installer: it checks the winget source, and repairs it where it can, before it installs anything."
+            $script:warningMessages | Should -Contain 'Skipping the retry pass: winget can no longer open its source (see above); retrying would not help.'
+            $script:infoMessages | Should -Not -Contain 'Retrying failed installations (1 final attempt)...'
+            Should -Invoke Install-WingetAutoUpdate -Times 1 -Exactly
+
+            $failedRows = @($script:capturedTables['Failed Installations'])
+            $failedRows.Count | Should -Be 3
+            $failedRows[0][1] | Should -Be 'winget list failed during the post-install check with exit 0x8A15000F SOURCE_DATA_MISSING; winget exit 0x8A15000F SOURCE_DATA_MISSING, 1 attempt'
+            $failedRows[1][1] | Should -Be 'not attempted: winget can no longer open its source (see above)'
+            $failedRows[2][1] | Should -Be 'not attempted: winget can no longer open its source (see above)'
+
+            $record = $script:reportedRecords[0]
+            $record.wingetSource | Should -Be 'unusable'
+            $record.counts.failed | Should -Be 3
+            @($record.apps | ForEach-Object { $_.code }) | Should -Be @(-1978335217, $null, $null)
+        }
+
+        It 'Carries on with the next app, retries the failed one, and records the source ok when it opens again' {
+            Mock Test-WingetSourceOpen { @{ Opened = $true; ExitCode = 0; TimedOut = $false; LaunchError = $null } }
+
+            Invoke-WingetInstall -Apps $script:apps -NonInteractive | Should -Be 1
+
+            $script:appCalls | Should -Be @('Contoso.AppOne:False', 'Contoso.AppTwo:False', 'Contoso.AppThree:False', 'Contoso.AppOne:False')
+            $script:infoMessages | Should -Contain 'The winget source opens; carrying on with the next app.'
+            $script:infoMessages | Should -Contain 'Retrying failed installations (1 final attempt)...'
+            # AppOne failed again in the retry pass, so the breaker checked again.
+            Should -Invoke Test-WingetSourceOpen -Times 2 -Exactly
+            $script:reportedRecords[0].wingetSource | Should -Be 'ok'
+        }
+
+        It 'Does not stop the run when the source check gives no clear answer (<Case>), and records the source unknown' -ForEach @(
+            @{ Case = 'it timed out'; Open = @{ Opened = $null; ExitCode = $null; TimedOut = $true; LaunchError = $null }; Detail = 'it did not finish in time and was stopped' }
+            @{ Case = 'another code'; Open = @{ Opened = $false; ExitCode = -2147012894; TimedOut = $false; LaunchError = $null }; Detail = 'exit 0x80072EE2 WININET_E_TIMEOUT' }
+        ) {
+            $openResult = $Open
+            Mock Test-WingetSourceOpen { $openResult }
+
+            Invoke-WingetInstall -Apps $script:apps -NonInteractive | Should -Be 1
+
+            $script:appCalls | Should -Be @('Contoso.AppOne:False', 'Contoso.AppTwo:False', 'Contoso.AppThree:False', 'Contoso.AppOne:False')
+            $script:warningMessages | Should -Contain "The winget source check gave no clear answer ($Detail); carrying on with the next app."
+            $script:reportedRecords[0].wingetSource | Should -Be 'unknown'
+        }
+
+        It 'Does not check the source after a failure that is not about it, and records the source ok' {
+            Mock Install-AppWithVerification { @{ Status = 'Failed'; InstallResult = @{ ExitCode = -1978335226; Attempts = 1 }; FailureReason = 'VerifyNotFound' } }
+
+            Invoke-WingetInstall -Apps $script:apps -NonInteractive | Should -Be 1
+
+            Should -Invoke Test-WingetSourceOpen -Times 0 -Exactly
+            $script:reportedRecords[0].wingetSource | Should -Be 'ok'
+        }
+
+        It 'Trips in the retry pass too, failing the rest of the retries without running winget' {
+            $script:pass = @{}
+            Mock Install-AppWithVerification {
+                $script:appCalls.Add("$($App.name):$([bool]$WingetSourceUnusable)")
+                $script:pass[$App.name] = 1 + [int]$script:pass[$App.name]
+                if ($WingetSourceUnusable) {
+                    return @{ Status = 'Failed'; InstallResult = $null; FailureReason = 'WingetSourceUnusable'; LaunchError = $null }
+                }
+                if ($script:pass[$App.name] -eq 2 -and $App.name -eq 'Contoso.AppOne') {
+                    return @{ Status = 'Failed'; InstallResult = $null; FailureReason = 'PreCheckFailed'; CheckExitCode = -1978335217 }
+                }
+                @{ Status = 'Failed'; InstallResult = @{ ExitCode = 1 }; FailureReason = 'VerifyNotFound' }
+            }
+
+            Invoke-WingetInstall -Apps $script:apps -NonInteractive | Should -Be 1
+
+            $script:appCalls | Should -Be @('Contoso.AppOne:False', 'Contoso.AppTwo:False', 'Contoso.AppThree:False', 'Contoso.AppOne:False', 'Contoso.AppTwo:True', 'Contoso.AppThree:True')
+            ($script:errorMessages -join "`n") | Should -Match 'Retry failed: Contoso\.AppTwo \(not attempted: winget can no longer open its source \(see above\)\)\.'
+            $script:reportedRecords[0].wingetSource | Should -Be 'unusable'
+        }
+
+        It 'Never checks the source in a dry run' {
+            Invoke-WingetInstall -Apps $script:apps -WhatIf -NonInteractive | Out-Null
+
+            Should -Invoke Test-WingetSourceOpen -Times 0 -Exactly
+        }
+
+        It 'Records the source as <Expected> when the setup found it <Diagnosis><EngineText>' -ForEach @(
+            @{ Diagnosis = 'Ok'; Engine = $false; EngineText = ''; Expected = 'ok' }
+            @{ Diagnosis = 'SourceFailed'; Engine = $false; EngineText = ''; Expected = 'unknown' }
+            @{ Diagnosis = 'Ok'; Engine = $true; EngineText = ' with the WinGet client engine installing'; Expected = 'unknown' }
+        ) {
+            $diagnosis = $Diagnosis
+            Mock Initialize-Winget { [pscustomobject]@{ Ready = $true; Diagnosis = $diagnosis } }
+            $engineActive = $Engine
+            Mock Test-WingetClientEngineActive { $engineActive }
+            Mock Remove-WingetClientEngine { }
+            Mock Install-AppWithVerification { @{ Status = 'Installed'; InstallResult = @{ ExitCode = 0 }; FailureReason = $null } }
+
+            Invoke-WingetInstall -Apps $script:apps -NonInteractive | Should -Be 0
+
+            $script:reportedRecords[0].wingetSource | Should -Be $Expected
+            $script:InstallerWingetSource | Should -Be $Expected
+        }
+
+        It 'Leaves the source unusable for the record of a run the setup stopped with exit code 2' {
+            Mock Initialize-Winget { [pscustomobject]@{ Ready = $false; Diagnosis = 'SourceUnusable' } }
+            $script:InstallerWingetSource = $null
+
+            Invoke-WingetInstall -Apps $script:apps -NonInteractive | Should -Be 2
+
+            $script:InstallerWingetSource | Should -Be 'unusable'
+        }
+    }
+
     # Elevated through the Test-IsAdmin mock in BeforeEach; these were skipped on any runner that
     # was not itself elevated (wgt-gq8.6).
     Context 'Restart required, and the wait for another installation (review findings P2-15, P3-16)' {
@@ -2639,6 +2778,21 @@ Describe 'Install-AppWithVerification when winget cannot be launched (review fin
         Should -Invoke Invoke-WingetProcess -Times 0 -Exactly
     }
 
+    It 'Runs no winget at all once the source breaker tripped, but still skips a not-applicable app (wgt-gq8.66)' {
+        Mock Invoke-WingetProcess { throw 'winget must not run once the source breaker tripped' }
+
+        $failed = Install-AppWithVerification -App @{ name = '7zip.7zip' } -WingetSourceUnusable
+        $skipped = Install-AppWithVerification -App @{ name = 'Dell.CommandUpdate.Universal'; condition = { $false } } -WingetSourceUnusable
+
+        $failed.Status | Should -Be 'Failed'
+        $failed.FailureReason | Should -Be 'WingetSourceUnusable'
+        $failed.InstallResult | Should -BeNullOrEmpty
+        $skipped.Status | Should -Be 'Skipped'
+        $skipped.SkipReason | Should -Be 'NotApplicable'
+        Should -Invoke Invoke-WingetProcess -Times 0 -Exactly
+        Format-InstallFailureReason -FailureReason 'WingetSourceUnusable' -InstallEngine Cli | Should -Be 'not attempted: winget can no longer open its source (see above)'
+    }
+
     It 'Lists the app as one a real run would install in a dry run, where the run already said winget is unavailable' {
         Mock Invoke-WingetProcess { $script:launchFailure }
 
@@ -3256,6 +3410,72 @@ Describe 'Invoke-WingetLaunchCircuitBreaker with the Microsoft.WinGet.Client eng
 
         Format-InstallFailureReason -FailureReason 'WingetNotLaunchable' | Should -Be 'not attempted: winget cannot be launched on this machine (see above)'
         Format-InstallFailureReason -FailureReason 'VerifyNotFound' -InstallResult @{ ExitCode = -1978335159; InstallerErrorCode = $null; Attempts = 1; Engine = 'Cli' } | Should -Be 'the MSI installer failed (its own exit code is in the log above, and in its installer log); winget exit 0x8A150049 MSI_INSTALL_FAILED, 1 attempt'
+    }
+}
+
+Describe 'Invoke-WingetSourceCircuitBreaker (wgt-gq8.66)' {
+    BeforeEach {
+        $script:breakerWarnings = @()
+        Mock Write-WarningMessage { $script:breakerWarnings += $Message }
+        Mock Write-Info { }
+        $script:breakerErrors = @()
+        Mock Write-ErrorMessage { $script:breakerErrors += $Message }
+        Mock Test-WingetClientEngineActive { $false }
+        Mock Test-WingetSourceOpen { @{ Opened = $false; ExitCode = -1978335217; TimedOut = $false; LaunchError = $null } }
+    }
+
+    It 'Checks nothing for <Case>' -ForEach @(
+        @{ Case = 'an app that did not fail'; Outcome = @{ Status = 'Skipped'; InstallResult = $null; FailureReason = $null; CheckExitCode = -1978335217 } }
+        @{ Case = 'a failure with another code'; Outcome = @{ Status = 'Failed'; InstallResult = @{ ExitCode = -1978334966 }; FailureReason = 'VerifyNotFound' } }
+        @{ Case = 'a failure with no code'; Outcome = @{ Status = 'Failed'; InstallResult = $null; FailureReason = 'PreCheckTimeout' } }
+        @{ Case = 'a launch failure'; Outcome = @{ Status = 'Failed'; InstallResult = @{ ExitCode = $null; LaunchErrorExhausted = $true }; FailureReason = 'InstallLaunchFailed'; LaunchError = 'Access is denied.' } }
+    ) {
+        Invoke-WingetSourceCircuitBreaker -Outcome $Outcome | Should -BeNullOrEmpty
+
+        Should -Invoke Test-WingetSourceOpen -Times 0 -Exactly
+    }
+
+    It 'Trips on a SourceBroken code from the <Where>' -ForEach @(
+        @{ Where = 'install'; Outcome = @{ Status = 'Failed'; InstallResult = @{ ExitCode = -1978335217; Attempts = 1 }; FailureReason = 'VerifyNotFound' }; Seen = '0x8A15000F SOURCE_DATA_MISSING' }
+        @{ Where = 'pre-install check'; Outcome = @{ Status = 'Failed'; InstallResult = $null; FailureReason = 'PreCheckFailed'; CheckExitCode = -1978335169 }; Seen = '0x8A15003F SOURCE_DATA_INTEGRITY_FAILURE' }
+        @{ Where = 'package-specific installer''s check'; Outcome = @{ Status = 'Failed'; InstallResult = @{ Installed = $false; VerifyCheckFailed = $true }; FailureReason = 'VerifyFailed'; CheckExitCode = -1978335221 }; Seen = '0x8A15000B SOURCES_INVALID' }
+    ) {
+        Invoke-WingetSourceCircuitBreaker -Outcome $Outcome | Should -Be 'unusable'
+
+        Should -Invoke Test-WingetSourceOpen -Times 1 -Exactly
+        $script:breakerWarnings | Should -Contain "winget could not open its source for that app ($Seen). Checking whether the winget source still opens..."
+        $script:breakerErrors.Count | Should -Be 1
+    }
+
+    It 'Answers <Expected> without tripping when the check finds <Case>' -ForEach @(
+        @{ Case = 'the source open'; Open = @{ Opened = $true; ExitCode = -1978335212; TimedOut = $false; LaunchError = $null }; Expected = 'ok' }
+        @{ Case = 'another code'; Open = @{ Opened = $false; ExitCode = -1978335163; TimedOut = $false; LaunchError = $null }; Expected = 'unknown' }
+        @{ Case = 'winget not starting'; Open = @{ Opened = $null; ExitCode = $null; TimedOut = $false; LaunchError = 'Access is denied.' }; Expected = 'unknown' }
+    ) {
+        $openResult = $Open
+        Mock Test-WingetSourceOpen { $openResult }
+
+        Invoke-WingetSourceCircuitBreaker -Outcome @{ Status = 'Failed'; InstallResult = @{ ExitCode = -1978335217 }; FailureReason = 'VerifyNotFound' } | Should -Be $Expected
+
+        $script:breakerErrors | Should -BeNullOrEmpty
+    }
+
+    It 'Leaves the Microsoft.WinGet.Client engine to its own checks' {
+        Mock Test-WingetClientEngineActive { $true }
+
+        Invoke-WingetSourceCircuitBreaker -Outcome @{ Status = 'Failed'; InstallResult = @{ ExitCode = -1978335217; Engine = 'WinGetClient' }; FailureReason = 'VerifyNotFound' } | Should -BeNullOrEmpty
+
+        Should -Invoke Test-WingetSourceOpen -Times 0 -Exactly
+    }
+
+    It 'Never repairs or resets the source itself' {
+        Mock Invoke-WingetProcess { throw 'no winget call but the source check' }
+        Mock Register-WingetSourcePackage { throw 'no repair partway through a run' }
+
+        Invoke-WingetSourceCircuitBreaker -Outcome @{ Status = 'Failed'; InstallResult = @{ ExitCode = -1978335217 }; FailureReason = 'VerifyNotFound' } | Should -Be 'unusable'
+
+        Should -Invoke Invoke-WingetProcess -Times 0 -Exactly
+        Should -Invoke Register-WingetSourcePackage -Times 0 -Exactly
     }
 }
 

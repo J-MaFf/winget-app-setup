@@ -141,6 +141,7 @@
   },
   "restartRequired": false,
   "wingetUsable": true,
+  "wingetSource": "unknown",
   "installEngine": {
     "requested": "WinGetClient",
     "used": "WinGetClient",

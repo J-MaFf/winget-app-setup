@@ -888,6 +888,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`Get-ProcessTimeoutSeconds -Operation WingetPackageManagerRepair`). The AppX code it fails with
   still reaches the repair ladder, so its decisions (no `-Force` after 0x80073CF3 or 0x80073D06)
   are unchanged.
+- **A winget source lost partway through a run no longer fails every app twice** (bead wgt-gq8.66,
+  from the owner's real-PC run of 2026-10-06, where all 9 apps and then all 9 retries failed with
+  `0x8A15000F` `SOURCE_DATA_MISSING`). When an app's install or `winget list` check fails with a
+  code that says the source cannot be opened (the SourceBroken class: `0x8A15000F`, `0x8A15000B`,
+  `0x8A150012`, `0x8A150015`, `0x8A15003F`), the installer now opens the source once more
+  (`Invoke-WingetSourceCircuitBreaker`, `winget search --source winget`). Still closed: the
+  remaining apps fail at once with `not attempted: winget can no longer open its source (see
+  above)`, the retry pass is skipped, Winget-AutoUpdate is still set up and the run exits 1, as when
+  winget can no longer be started. No repair runs partway through: the next run's setup repairs the
+  source before it installs. A check that gives no clear answer does not stop the run. Only
+  `winget.exe` installs are checked; the Microsoft.WinGet.Client engine keeps its own checks.
+  `last-run.json` gains `wingetSource`: `ok`, `unusable` (at the start, exit 2, or lost mid-run),
+  `unknown` (no clear answer, or not checked because the engine installed), or `null` for a run
+  that stopped before the check.
+- **The user phase no longer installs into a winget source that cannot be opened** (bead
+  wgt-gq8.67). `winget source update` prints `Cancelled` and exits 0 when its update fails, so
+  `Update-UserPhaseWingetSource` now opens the source after it (`Invoke-WingetSourceCheck`). A
+  SourceBroken code such as `0x8A15000F` installs nothing: every deferred app is `NotAttempted` with
+  that code in `user-phase.json`, and the user phase exits 2, so the next sign-in tries again. It
+  still runs no `winget source reset` or other repair, which need administrator rights.
 - **The one-liner started from a standard user's window no longer stalls installing PowerShell 7**
   (bead wgt-gq8.75, found on the owner's test PC on 2026-10-12, over Remote Desktop). On a PC
   without PowerShell 7, the Windows PowerShell 5.1 bootstrap installed it before the run asked for

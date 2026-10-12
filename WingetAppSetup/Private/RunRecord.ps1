@@ -169,6 +169,10 @@ function Format-RunRecordTime {
     The run needs a restart to finish (what makes it exit 3010 when nothing failed).
 .PARAMETER WingetUsable
     The end-of-run winget check's result, or $null when it did not run.
+.PARAMETER WingetSource
+    Whether winget could open its source in this run (wgt-gq8.66): 'ok', 'unusable' (at the start,
+    or lost mid-run), 'unknown' (no clear answer, or not checked: the Microsoft.WinGet.Client engine
+    installed), or $null when the run stopped before the check.
 .PARAMETER SummaryReached
     The run reached its summary.
 .PARAMETER InstallEngine
@@ -202,6 +206,12 @@ function New-InstallerRunRecord {
         [Nullable[bool]]$WingetUsable = $null,
 
         [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [AllowEmptyString()]
+        [ValidateSet('ok', 'unusable', 'unknown', '')]
+        [string]$WingetSource,
+
+        [Parameter(Mandatory = $false)]
         [switch]$SummaryReached,
 
         [Parameter(Mandatory = $false)]
@@ -230,6 +240,11 @@ function New-InstallerRunRecord {
         $transcriptPath = [string]$script:InstallLogPath
     }
 
+    $wingetSourceText = $null
+    if (-not [string]::IsNullOrWhiteSpace($WingetSource)) {
+        $wingetSourceText = $WingetSource
+    }
+
     return [ordered]@{
         schemaVersion   = 1
         buildId         = $buildId
@@ -251,6 +266,7 @@ function New-InstallerRunRecord {
         }
         restartRequired = $RestartRequired
         wingetUsable    = $WingetUsable
+        wingetSource    = $wingetSourceText
         installEngine   = $InstallEngine
         transcriptPath  = $transcriptPath
     }
@@ -453,7 +469,8 @@ function Complete-InstallerRun {
     For an early exit or an aborted run. The record holds the apps finished by then
     ($script:InstallerAppRecords) and the auto-update outcome if it got that far
     ($script:InstallerAutoUpdateResult); restartRequired is set when one of those apps needs a
-    restart, summaryReached is false and wingetUsable $null.
+    restart, summaryReached is false, wingetUsable $null and wingetSource what the run's source check
+    found, if it got that far ($script:InstallerWingetSource).
 .PARAMETER ExitCode
     The exit code the run ends with.
 .OUTPUTS
@@ -475,7 +492,7 @@ function Write-InstallerEarlyExitResult {
         $autoUpdateVersion = $autoUpdateResult.Version
     }
     $restartRequired = @($apps | Where-Object { $_.restartRequired }).Count -gt 0
-    $record = New-InstallerRunRecord -ExitCode $ExitCode -Apps $apps -AutoUpdates (Get-AutoUpdateResultStatus -WauResult $autoUpdateResult) -AutoUpdatesVersion $autoUpdateVersion -RestartRequired $restartRequired
+    $record = New-InstallerRunRecord -ExitCode $ExitCode -Apps $apps -AutoUpdates (Get-AutoUpdateResultStatus -WauResult $autoUpdateResult) -AutoUpdatesVersion $autoUpdateVersion -RestartRequired $restartRequired -WingetSource $script:InstallerWingetSource
     return (Write-InstallerRunResult -Record $record)
 }
 

@@ -61,6 +61,7 @@ Describe 'Invoke-WingetUserPhase (work-order item 34)' {
         Mock Remove-OldInstallerLog { 0 }
         Mock Test-WingetLaunchable { [pscustomobject]@{ Launchable = $true; Version = 'v1.12.350'; Reason = $null; ExitCode = 0; Attempts = 1 } }
         Mock Invoke-WingetSourceProbe { @{ Succeeded = $true; ExitCode = 0; TimedOut = $false; LaunchError = $null } }
+        Mock Test-WingetSourceOpen { @{ Opened = $true; ExitCode = 0; TimedOut = $false; LaunchError = $null } }
         Mock Install-UserPhaseApp { New-AppRunRecord -Id $PackageId -Status 'Installed' -InstallResult @{ ExitCode = 0 } }
         Mock Get-UserPhaseCatalogEntry { @{} }
         Mock Set-WindowsTerminalDefaults { 'Applied' }
@@ -182,6 +183,7 @@ Describe 'Invoke-WingetUserPhase (work-order item 34)' {
 
         Should -Invoke Test-WingetLaunchable -Times 0 -Exactly
         Should -Invoke Invoke-WingetSourceProbe -Times 0 -Exactly
+        Should -Invoke Test-WingetSourceOpen -Times 0 -Exactly
         Should -Invoke Set-WindowsTerminalDefaults -Times 1 -Exactly
         (Get-TestState).complete | Should -BeTrue
     }
@@ -191,23 +193,69 @@ Describe 'Invoke-WingetUserPhase (work-order item 34)' {
         $script:calls = @()
         Mock Test-WingetLaunchable { $script:calls += 'launch'; [pscustomobject]@{ Launchable = $true; Version = 'v1.12.350'; Reason = $null; ExitCode = 0; Attempts = 1 } }
         Mock Invoke-WingetSourceProbe { $script:calls += 'source'; @{ Succeeded = $true; ExitCode = 0; TimedOut = $false; LaunchError = $null } }
+        Mock Test-WingetSourceOpen { $script:calls += 'open'; @{ Opened = $true; ExitCode = 0; TimedOut = $false; LaunchError = $null } }
         Mock Install-UserPhaseApp { $script:calls += "install $PackageId"; New-AppRunRecord -Id $PackageId -Status 'Installed' }
 
         Invoke-TestUserPhase | Should -Be 0
 
-        $script:calls | Should -Be @('launch', 'source', 'install Contoso.UserOnly', 'install Contoso.Other')
-        $script:output | Should -Contain 'OK: The winget source is up to date for this account.'
+        $script:calls | Should -Be @('launch', 'source', 'open', 'install Contoso.UserOnly', 'install Contoso.Other')
+        $script:output | Should -Contain 'OK: The winget source opens for this account.'
     }
 
-    It 'Still installs, and says so, when the winget source cannot be updated (<Case>)' -ForEach @(
-        @{ Case = 'timed out'; SourceResult = @{ Succeeded = $false; ExitCode = $null; TimedOut = $true; LaunchError = $null }; Expected = 'WARN: The winget source could not be updated for this account (it did not finish in time and was stopped). The installs may fail; a later sign-in tries again.' }
-        @{ Case = 'agreements not accepted yet'; SourceResult = @{ Succeeded = $false; ExitCode = -1978335162; TimedOut = $false; LaunchError = $null }; Expected = 'INFO: The winget source agreements are not accepted for this account yet (0x8A150046); each install accepts them.' }
+    # wgt-gq8.67: `winget source update` exits 0 when its update fails, so only opening the source
+    # tells whether any install can work.
+    It 'Installs nothing, records each deferred app NotAttempted with the code, and exits 2 when the source cannot be opened after an update that exited 0 (<Case>)' -ForEach @(
+        @{ Case = 'source data missing'; Code = -1978335217; Hex = '0x8A15000F'; Name = 'SOURCE_DATA_MISSING' }
+        @{ Case = 'source data corrupted'; Code = -1978335169; Hex = '0x8A15003F'; Name = 'SOURCE_DATA_INTEGRITY_FAILURE' }
+    ) {
+        $script:recordPath = New-TestRunRecordFile -Directory (Split-Path -Parent $script:recordPath) -Deferred @('Contoso.UserOnly', 'Contoso.Other')
+        $openCode = $Code
+        Mock Test-WingetSourceOpen { @{ Opened = $false; ExitCode = $openCode; TimedOut = $false; LaunchError = $null } }
+        Mock Invoke-WingetProcess { throw 'no other winget call, a source reset included' }
+
+        Invoke-TestUserPhase | Should -Be 2
+
+        Should -Invoke Install-UserPhaseApp -Times 0 -Exactly
+        Should -Invoke Invoke-WingetProcess -Times 0 -Exactly
+        Should -Invoke Set-WindowsTerminalDefaults -Times 1 -Exactly
+        $state = Get-TestState
+        $state.exitCode | Should -Be 2
+        $state.complete | Should -BeFalse
+        @($state.apps | ForEach-Object { '{0}={1}' -f $_.id, $_.status }) | Should -Be @('Contoso.UserOnly=NotAttempted', 'Contoso.Other=NotAttempted')
+        $state.apps[0].code | Should -Be $Code
+        $state.apps[0].codeHex | Should -Be $Hex
+        $state.apps[0].reason | Should -Be "the winget source cannot be opened for this account ($Hex $Name)"
+        $script:output | Should -Contain "ERROR: The winget source cannot be opened for this account: 'winget search --source winget' answered $Hex $Name, so no install can work. Nothing is installed now; the next sign-in tries again."
+        $script:output | Should -Contain 'USER PHASE RESULT: exit=2 installed=0 skipped=0 failed=2 terminal=Applied attempt=1/3 complete=false log=none'
+    }
+
+    It 'Tries again at the next sign-in once the source opens' {
+        $script:recordPath = New-TestRunRecordFile -Directory (Split-Path -Parent $script:recordPath) -Deferred @('Contoso.UserOnly')
+        Mock Test-WingetSourceOpen { @{ Opened = $false; ExitCode = -1978335217; TimedOut = $false; LaunchError = $null } }
+        Invoke-TestUserPhase | Should -Be 2
+
+        Mock Test-WingetSourceOpen { @{ Opened = $true; ExitCode = 0; TimedOut = $false; LaunchError = $null } }
+        Invoke-TestUserPhase | Should -Be 0
+
+        Should -Invoke Install-UserPhaseApp -Times 1 -Exactly
+        $state = Get-TestState
+        $state.attempts | Should -Be 2
+        $state.complete | Should -BeTrue
+    }
+
+    It 'Still installs, and says so, when the winget source cannot be set up for another reason (<Case>)' -ForEach @(
+        @{ Case = 'the update timed out'; SourceResult = @{ Succeeded = $false; ExitCode = $null; TimedOut = $true; LaunchError = $null }; OpenResult = $null; Expected = "WARN: The winget source could not be set up for this account ('winget source update' did not finish in time and was stopped). The installs may fail; a later sign-in tries again." }
+        @{ Case = 'the open check timed out'; SourceResult = @{ Succeeded = $true; ExitCode = 0; TimedOut = $false; LaunchError = $null }; OpenResult = @{ Opened = $null; ExitCode = $null; TimedOut = $true; LaunchError = $null }; Expected = "WARN: The winget source could not be set up for this account ('winget search --source winget' did not finish in time and was stopped). The installs may fail; a later sign-in tries again." }
+        @{ Case = 'the open check answered a network error'; SourceResult = @{ Succeeded = $true; ExitCode = 0; TimedOut = $false; LaunchError = $null }; OpenResult = @{ Opened = $false; ExitCode = -2147012894; TimedOut = $false; LaunchError = $null }; Expected = "WARN: The winget source could not be set up for this account ('winget search --source winget' exited with 0x80072EE2 WININET_E_TIMEOUT). The installs may fail; a later sign-in tries again." }
+        @{ Case = 'agreements not accepted yet'; SourceResult = @{ Succeeded = $false; ExitCode = -1978335162; TimedOut = $false; LaunchError = $null }; OpenResult = @{ Opened = $false; ExitCode = -1978335162; TimedOut = $false; LaunchError = $null }; Expected = 'INFO: The winget source agreements are not accepted for this account yet (0x8A150046); each install accepts them.' }
     ) {
         $script:recordPath = New-TestRunRecordFile -Directory (Split-Path -Parent $script:recordPath) -Deferred @('Contoso.UserOnly')
         # Not $probe: a mock body sees the caller's variables first, and Invoke-WingetUserPhase has
         # its own $probe.
         $sourceAnswer = $SourceResult
+        $openAnswer = $OpenResult
         Mock Invoke-WingetSourceProbe { $sourceAnswer }
+        Mock Test-WingetSourceOpen { $openAnswer }
 
         Invoke-TestUserPhase | Should -Be 0
 

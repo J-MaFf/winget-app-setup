@@ -533,34 +533,52 @@ function Complete-UserPhaseAppConfiguration {
 
 <#
 .SYNOPSIS
-    Updates the winget source for the signed-in user before the user phase's installs.
+    Updates the winget source for the signed-in user before the user phase's installs, and checks
+    that winget can open it.
 .DESCRIPTION
     At an account's first sign-in winget has never been used there, and the source update
     (Invoke-WingetSourceProbe, 2-minute limit) registers it; otherwise the 15-second `winget list`
-    check before the first install would do that work and time out at every sign-in. No `source
-    reset`: it needs administrator rights. A failure is one line and the installs go ahead.
-    Agreements not accepted yet (0x8A150046) are not a failure: each install accepts them.
+    check before the first install would do that work and time out at every sign-in. The update
+    exits 0 even when it fails, so Test-WingetSourceOpen decides (Invoke-WingetSourceCheck,
+    wgt-gq8.67): a source that answers a SourceBroken code (such as 0x8A15000F) cannot serve any
+    install, and the caller installs nothing. No `source reset` and no repair: they need
+    administrator rights, and a later sign-in tries again. Any other failure is one line and the
+    installs go ahead. Agreements not accepted yet (0x8A150046) are not a failure: each install
+    accepts them.
+.OUTPUTS
+    [hashtable] @{ Usable ($false only when the source answered a SourceBroken code); ExitCode (that
+    code, or $null) }
 #>
 function Update-UserPhaseWingetSource {
     Write-Info 'Updating the winget source for this account (this may take a moment)...'
-    $source = Invoke-WingetSourceProbe
+    $source = Invoke-WingetSourceCheck
     if ($source.Succeeded) {
-        Write-Success 'The winget source is up to date for this account.'
-        return
+        Write-Success 'The winget source opens for this account.'
+        return @{ Usable = $true; ExitCode = $null }
     }
     # 0x8A150046 SOURCE_AGREEMENTS_NOT_ACCEPTED, as the signed Int32 winget exits with.
     if ($source.ExitCode -eq -1978335162) {
         Write-Info 'The winget source agreements are not accepted for this account yet (0x8A150046); each install accepts them.'
-        return
+        return @{ Usable = $true; ExitCode = $null }
     }
-    $detail = 'it did not finish in time and was stopped'
+    $sourceCommand = "'winget search --source winget'"
+    if ($source.Step -eq 'update') {
+        $sourceCommand = "'winget source update'"
+    }
+    $codeInfo = Get-WingetExitCodeInfo -ExitCode $source.ExitCode
+    if ($codeInfo -and $codeInfo.Class -eq 'SourceBroken') {
+        Write-ErrorMessage ('The winget source cannot be opened for this account: {0} answered {1}, so no install can work. Nothing is installed now; the next sign-in tries again.' -f $sourceCommand, (Format-WingetExitCode -ExitCode $source.ExitCode))
+        return @{ Usable = $false; ExitCode = [int]$source.ExitCode }
+    }
+    $detail = "$sourceCommand did not finish in time and was stopped"
     if ($source.LaunchError) {
         $detail = "winget could not be started: $($source.LaunchError)"
     }
     elseif (-not $source.TimedOut) {
-        $detail = 'exit code {0}' -f (Format-WingetExitCode -ExitCode $source.ExitCode)
+        $detail = '{0} exited with {1}' -f $sourceCommand, (Format-WingetExitCode -ExitCode $source.ExitCode)
     }
-    Write-WarningMessage "The winget source could not be updated for this account ($detail). The installs may fail; a later sign-in tries again."
+    Write-WarningMessage "The winget source could not be set up for this account ($detail). The installs may fail; a later sign-in tries again."
+    return @{ Usable = $true; ExitCode = $source.ExitCode }
 }
 
 <#
