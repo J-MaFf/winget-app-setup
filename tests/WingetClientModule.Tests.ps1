@@ -276,8 +276,9 @@ Describe 'Initialize-WingetClientModule' {
         $result.Directory | Should -Be $script:stagingDirectories[0]
         $result.PowerShellPath | Should -Be ([Environment]::ProcessPath)
         Test-Path -LiteralPath $result.ManifestPath -PathType Leaf | Should -BeTrue
-        $result.ChildScriptPath | Should -Be (Join-Path $result.Directory 'Invoke-WingetClientRequest.ps1')
-        Get-Content -Raw -LiteralPath $result.ChildScriptPath | Should -Be (Get-WingetClientChildScript)
+        # No request script file (wgt-gq8.57): each request runs as -EncodedCommand.
+        $result.PSObject.Properties.Name | Should -Not -Contain 'ChildScriptPath'
+        @(Get-ChildItem -LiteralPath $result.Directory -Filter '*.ps1' -Recurse).Count | Should -Be 0
         (Get-FileHash -LiteralPath (Join-Path $script:cacheDirectory $script:pin.FileName) -Algorithm SHA256).Hash | Should -Be $script:pin.Sha256
         Test-Path -LiteralPath $oldCached | Should -BeFalse
         @(Get-ChildItem -LiteralPath $script:cacheDirectory -Filter '*.partial').Count | Should -Be 0

@@ -51,10 +51,30 @@ BeforeAll {
             Source          = 'Download'
             Directory       = $Directory
             ManifestPath    = (Join-Path $Directory 'Microsoft.WinGet.Client/Microsoft.WinGet.Client.psd1')
-            ChildScriptPath = (Join-Path $Directory 'Invoke-WingetClientRequest.ps1')
             PowerShellPath  = [Environment]::ProcessPath
             Architecture    = 'x64'
         }
+    }
+
+    # The request parameters inside a child pwsh's -EncodedCommand (Get-WingetClientRequestArgument).
+    function Get-ClientRequestParameter {
+        param ([string[]]$ArgumentList)
+        $command = [System.Text.Encoding]::Unicode.GetString([Convert]::FromBase64String($ArgumentList[-1]))
+        if ($command -notmatch "FromBase64String\('([A-Za-z0-9+/=]+)'\)") {
+            throw 'The command carries no request parameters.'
+        }
+        ConvertFrom-Json -AsHashtable -InputObject ([System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($Matches[1])))
+    }
+
+    # Those parameters as '-Operation Install -PackageId <id> -Mode Silent ...', in a fixed order.
+    function Get-ClientRequestText {
+        param ([string[]]$ArgumentList)
+        $parameters = Get-ClientRequestParameter -ArgumentList $ArgumentList
+        @(foreach ($name in @('Operation', 'PackageId', 'Mode', 'InstallerType', 'Log')) {
+                if ($parameters.ContainsKey($name)) {
+                    '-{0} {1}' -f $name, $parameters[$name]
+                }
+            }) -join ' '
     }
 
     function Set-TestEngineActive {
@@ -224,6 +244,22 @@ Describe 'Get-WingetClientResultCode' {
         $result.LaunchError | Should -Be "the WinGet client engine could not start: FileLoadException: Could not load file or assembly 'Microsoft.WinGet.Client.Engine'"
     }
 
+    # wgt-gq8.57: the child reports the effective execution policy after a failed load.
+    It 'Names an <Policy> execution policy in the reason when the module does not load' -ForEach @(
+        @{ Policy = 'AllSigned'; Hint = "; the execution policy is AllSigned, which loads the module's files only when their signer, Microsoft Corporation, is a trusted publisher on this PC" }
+        @{ Policy = 'Restricted'; Hint = '; the execution policy is Restricted, which loads no module files' }
+        @{ Policy = 'RemoteSigned'; Hint = '' }
+    ) {
+        $response = ConvertFrom-Json -InputObject (Get-ClientFixture -Name 'load-failed') -AsHashtable
+        $response['exceptions'] = @(@{ type = 'System.Management.Automation.PSSecurityException'; name = 'PSSecurityException'; hresult = -2146233087; message = 'File Microsoft.WinGet.Client.psd1 cannot be loaded.' })
+        $response['executionPolicy'] = $Policy
+
+        $result = Get-WingetClientResultCode -Request (New-ClientRequest -Json (ConvertTo-Json -InputObject $response -Compress -Depth 5))
+
+        $result.Failure | Should -Be 'Load'
+        $result.LaunchError | Should -Be ('the WinGet client engine could not start: PSSecurityException: File Microsoft.WinGet.Client.psd1 cannot be loaded' + $Hint)
+    }
+
     It 'Treats a call that fails because the engine cannot work here as an engine that cannot start' {
         $result = Get-WingetClientResultCode -Request (New-ClientRequest -Fixture 'install-type-initialization')
 
@@ -274,21 +310,69 @@ Describe 'Invoke-WingetClientRequest' {
         $script:WingetClientEngine = $null
     }
 
-    It 'Runs the request script in a child pwsh, quietly, with the module''s manifest and version' {
+    # wgt-gq8.57: no script file, which an AllSigned execution policy from Group Policy refuses.
+    It 'Runs the request as -EncodedCommand in a child pwsh, quietly, with the module''s manifest and version' {
+        $script:arguments = $null
+        Mock Invoke-ExternalProcess {
+            $script:arguments = $ArgumentList
+            New-ClientRun -Json (Get-ClientFixture -Name 'install-ok')
+        }
+
         $request = Invoke-WingetClientRequest -Operation Install -PackageId 'Contoso.App' -InstallerType 'wix' -Mode Silent -Log 'X:\logs\l.log' -TimeoutSeconds 1800
 
         $request.Response.status | Should -Be 'Ok'
         $module = $script:WingetClientEngine.Module
-        Should -Invoke Invoke-ExternalProcess -Times 1 -Exactly -ParameterFilter {
-            $FilePath -eq $module.PowerShellPath -and $TimeoutSeconds -eq 1800 -and $Echo -eq 'None' -and
-            ($ArgumentList -join '|') -eq ('-NoProfile|-NonInteractive|-ExecutionPolicy|Bypass|-File|{0}|-ModuleManifest|{1}|-ExpectedVersion|1.29.380|-Operation|Install|-PackageId|Contoso.App|-Mode|Silent|-InstallerType|wix|-Log|X:\logs\l.log' -f $module.ChildScriptPath, $module.ManifestPath)
-        }
+        Should -Invoke Invoke-ExternalProcess -Times 1 -Exactly -ParameterFilter { $FilePath -eq $module.PowerShellPath -and $TimeoutSeconds -eq 1800 -and $Echo -eq 'None' }
+        @($script:arguments | Select-Object -First 5) | Should -Be @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand')
+        @($script:arguments).Count | Should -Be 6
+        $script:arguments | Should -Not -Contain '-File'
+        $command = [System.Text.Encoding]::Unicode.GetString([Convert]::FromBase64String($script:arguments[5]))
+        $command.Contains((Get-WingetClientChildScript)) | Should -BeTrue
+        $parameters = Get-ClientRequestParameter -ArgumentList $script:arguments
+        @($parameters.Keys | Sort-Object) | Should -Be @('ExpectedVersion', 'InstallerType', 'Log', 'Mode', 'ModuleManifest', 'Operation', 'PackageId')
+        $parameters.ModuleManifest | Should -Be $module.ManifestPath
+        $parameters.ExpectedVersion | Should -Be '1.29.380'
+        $parameters.Operation | Should -Be 'Install'
+        $parameters.PackageId | Should -Be 'Contoso.App'
+        $parameters.Mode | Should -Be 'Silent'
+        $parameters.InstallerType | Should -Be 'wix'
+        $parameters.Log | Should -Be 'X:\logs\l.log'
     }
 
-    It 'Passes no empty argument' {
+    It 'Passes no empty parameter' {
+        $script:arguments = $null
+        Mock Invoke-ExternalProcess {
+            $script:arguments = $ArgumentList
+            New-ClientRun -Json (Get-ClientFixture -Name 'install-ok')
+        }
+
         [void](Invoke-WingetClientRequest -Operation Version -TimeoutSeconds 60)
 
-        Should -Invoke Invoke-ExternalProcess -Times 1 -Exactly -ParameterFilter { @($ArgumentList | Where-Object { [string]::IsNullOrEmpty($_) }).Count -eq 0 -and $ArgumentList[-1] -eq 'Version' }
+        $parameters = Get-ClientRequestParameter -ArgumentList $script:arguments
+        @($parameters.Keys | Sort-Object) | Should -Be @('ExpectedVersion', 'ModuleManifest', 'Operation')
+        $parameters.Operation | Should -Be 'Version'
+    }
+
+    # CreateProcess takes at most 32,767 characters. The script is about 6,700 characters, which
+    # -EncodedCommand (UTF-16, then base64) makes about 18,000.
+    It 'Stays well inside the Windows command-line limit with long paths and ids' {
+        $long = 'C:\ProgramData\winget-app-setup\' + ('x' * 220)
+        $arguments = Get-WingetClientRequestArgument -Parameters ([ordered]@{ ModuleManifest = "$long\Microsoft.WinGet.Client.psd1"; ExpectedVersion = '1.29.380'; Operation = 'Install'; PackageId = ('Contoso.' + ('a' * 120)); Mode = 'Default'; InstallerType = 'burn'; Log = "$long\winget-install.log" })
+
+        $length = 'C:\Program Files\PowerShell\7\pwsh.exe'.Length + 3 + (ConvertTo-ProcessArgumentString -ArgumentList $arguments).Length
+        $length | Should -BeLessThan 26000
+    }
+
+    It 'Does not start a request whose command line would be too long, and says why' {
+        $module = New-TestClientModule
+        $module.ManifestPath = 'C:\' + ('m' * 12000) + '\Microsoft.WinGet.Client.psd1'
+
+        $request = Invoke-WingetClientRequest -Module $module -Operation Version -TimeoutSeconds 60
+        $result = Get-WingetClientResultCode -Request $request
+
+        Should -Invoke Invoke-ExternalProcess -Times 0 -Exactly
+        $result.Failure | Should -Be 'Launch'
+        $result.LaunchError | Should -Match "^the request's command line would be \d+ characters, more than the 32767 Windows allows$"
     }
 
     It 'Refuses to run without a ready module' {
@@ -325,8 +409,8 @@ Describe 'Invoke-WingetClientInstall' {
         $result.LogPath | Should -Match ('^{0}[\\/]winget-install-Contoso\.App-\d{{8}}-\d{{6}}\.log$' -f [regex]::Escape($script:logs))
         $result.Output | Should -Be @('Microsoft.WinGet.Client Install Contoso.App: Ok')
         Should -Invoke Invoke-ExternalProcess -Times 1 -Exactly -ParameterFilter {
-            $joined = $ArgumentList -join ' '
-            $joined -match '-Operation Install -PackageId Contoso\.App -Mode Silent -InstallerType wix -Log \S+winget-install-Contoso\.App-\d{8}-\d{6}\.log$' -and $TimeoutSeconds -eq 1800
+            $joined = Get-ClientRequestText -ArgumentList $ArgumentList
+            $joined -match '^-Operation Install -PackageId Contoso\.App -Mode Silent -InstallerType wix -Log \S+winget-install-Contoso\.App-\d{8}-\d{6}\.log$' -and $TimeoutSeconds -eq 1800
         }
         $script:hostLines[0] | Should -Be ('  > Install-WinGetPackage -Id Contoso.App -Source winget -MatchOption Equals -Scope System -Mode Silent -InstallerType wix -Log {0}' -f $result.LogPath)
         $script:hostLines | Should -Contain '    WinGet client result: Ok, 0x00000000, installer exit code 0 (0 s)'
@@ -338,7 +422,7 @@ Describe 'Invoke-WingetClientInstall' {
         $result = Invoke-WingetClientInstall -PackageId 'Contoso.App' -Scope machine -TimeoutSeconds 1800
 
         $result.LogPath | Should -BeNullOrEmpty
-        Should -Invoke Invoke-ExternalProcess -Times 1 -Exactly -ParameterFilter { ($ArgumentList -join ' ') -match '-Mode Default$' }
+        Should -Invoke Invoke-ExternalProcess -Times 1 -Exactly -ParameterFilter { (Get-ClientRequestText -ArgumentList $ArgumentList) -eq '-Operation Install -PackageId Contoso.App -Mode Default' }
         $script:hostLines[0] | Should -Be '  > Install-WinGetPackage -Id Contoso.App -Source winget -MatchOption Equals -Scope System -Mode Default'
     }
 
@@ -455,7 +539,7 @@ Describe 'Invoke-WingetClientInstalledCheck' {
     ) {
         [void](Invoke-WingetClientInstalledCheck -PackageId '7zip.7zip' -TimeoutSeconds $Caller)
 
-        Should -Invoke Invoke-ExternalProcess -Times 1 -Exactly -ParameterFilter { $TimeoutSeconds -eq $Expected -and ($ArgumentList -join ' ') -match '-Operation Installed -PackageId 7zip\.7zip$' }
+        Should -Invoke Invoke-ExternalProcess -Times 1 -Exactly -ParameterFilter { $TimeoutSeconds -eq $Expected -and (Get-ClientRequestText -ArgumentList $ArgumentList) -eq '-Operation Installed -PackageId 7zip.7zip' }
     }
 }
 
@@ -486,7 +570,7 @@ Describe 'Test-WingetClientEngineLaunchable' {
         $result.Launchable | Should -BeTrue
         $result.Version | Should -Be 'v1.29.380'
         $result.Attempts | Should -Be 1
-        Should -Invoke Invoke-ExternalProcess -Times 1 -Exactly -ParameterFilter { $TimeoutSeconds -eq 60 -and $ArgumentList[-1] -eq 'Version' }
+        Should -Invoke Invoke-ExternalProcess -Times 1 -Exactly -ParameterFilter { $TimeoutSeconds -eq 60 -and (Get-ClientRequestText -ArgumentList $ArgumentList) -eq '-Operation Version' }
     }
 
     It 'Checks again after <Case>' -ForEach @(
@@ -560,7 +644,7 @@ Describe 'Initialize-WingetClientEngine' {
         $result.EngineVersion | Should -Be 'v1.29.380'
         Test-WingetClientEngineActive | Should -BeTrue
         $script:WingetClientEngine.PowerShellVersion | Should -Be '7.6.6'
-        Should -Invoke Invoke-ExternalProcess -Times 1 -Exactly -ParameterFilter { $TimeoutSeconds -eq 180 -and ($ArgumentList -join ' ') -match '-Operation Probe$' }
+        Should -Invoke Invoke-ExternalProcess -Times 1 -Exactly -ParameterFilter { $TimeoutSeconds -eq 180 -and (Get-ClientRequestText -ArgumentList $ArgumentList) -eq '-Operation Probe' }
         $record = Get-InstallEngineRecord
         $record.requested | Should -Be 'WinGetClient'
         $record.used | Should -Be 'WinGetClient'
@@ -736,15 +820,12 @@ function Install-WinGetPackage {
     }
 }
 '@
-        $script:childScriptPath = Join-Path $script:fakeRoot 'Invoke-WingetClientRequest.ps1'
-        [System.IO.File]::WriteAllText($script:childScriptPath, (Get-WingetClientChildScript))
         $script:fakeModule = [pscustomobject]@{
             Ready           = $true
             Version         = '1.29.380'
             Sha256          = 'AB' * 32
             Directory       = $script:fakeRoot
             ManifestPath    = (Join-Path $moduleDirectory 'Microsoft.WinGet.Client.psd1')
-            ChildScriptPath = $script:childScriptPath
             PowerShellPath  = [Environment]::ProcessPath
             Architecture    = 'x64'
         }
@@ -782,6 +863,23 @@ function Install-WinGetPackage {
         $request.Run.StandardOutput | Should -Contain "Microsoft.WinGet.Client Install Contoso.App: $Status"
     }
 
+    # wgt-gq8.57: the request runs as -EncodedCommand, from no script file, and its values are data.
+    It 'Runs without a script file, and passes quotes and subexpressions in a value through as text' {
+        $env:FAKE_WINGET_CLIENT_MODE = 'ok'
+        $marker = Join-Path $TestDrive 'injected.txt'
+        $packageId = "Contoso.App'); `$(Set-Content -LiteralPath '$marker' -Value y) #`""
+
+        $request = Invoke-WingetClientRequest -Module $script:fakeModule -Operation Installed -PackageId $packageId -TimeoutSeconds 120
+
+        $request.ProtocolError | Should -BeNullOrEmpty
+        $request.Run.ExitCode | Should -Be 0
+        $request.Response.ok | Should -BeTrue
+        @($request.Response.packages).Count | Should -Be 0
+        $request.Run.StandardOutput | Should -Contain "Microsoft.WinGet.Client Installed ${packageId}: 0 installed package(s)"
+        @(Get-ChildItem -LiteralPath $script:fakeRoot -Filter '*.ps1' -Recurse).Count | Should -Be 0
+        Test-Path -LiteralPath $marker | Should -BeFalse
+    }
+
     It 'Reads a catalog that cannot be opened as its inner HRESULT' {
         $env:FAKE_WINGET_CLIENT_MODE = 'catalog'
 
@@ -810,6 +908,7 @@ function Install-WinGetPackage {
 
         $request.Run.ExitCode | Should -Be 3
         $request.Response.stage | Should -Be 'load'
+        $request.Response.executionPolicy | Should -Not -BeNullOrEmpty
         $result.LaunchFailed | Should -BeTrue
         $result.LaunchError | Should -Be 'the WinGet client engine could not start: InvalidOperationException: Microsoft.WinGet.Client 1.29.380 was loaded, not 1.30.50'
     }

@@ -173,11 +173,16 @@ function Wait-InstallerExitKeyPress {
     because the run's time budget was used up (9: run it again to finish; wgt-gq8.41); apps
     installed but automatic updates not configured or unhealthy (8, P3-36); a restart needed to
     finish (3010, which RMM tools read as "succeeded, restart required", P3-16). A restart still
-    shows in the run record when another code wins.
+    shows in the run record when another code wins. When Microsoft.WinGet.Client did the installs,
+    a winget.exe that no longer starts breaks only automatic updates, so it rates 8, not 2
+    (wgt-gq8.57).
 .PARAMETER FailedAppCount
     Number of apps still failed after the retry pass.
 .PARAMETER WingetUsable
     Result of the end-of-run winget launch probe.
+.PARAMETER InstalledWithWingetClient
+    The Microsoft.WinGet.Client engine did this run's installs (installEngine.used WinGetClient).
+    Default False.
 .PARAMETER WorkNotAttempted
     The time budget was used up before an app install or the Winget-AutoUpdate setup could start.
     Default False.
@@ -199,6 +204,9 @@ function Get-InstallerExitCode {
         [bool]$WingetUsable,
 
         [Parameter(Mandatory = $false)]
+        [bool]$InstalledWithWingetClient = $false,
+
+        [Parameter(Mandatory = $false)]
         [bool]$WorkNotAttempted = $false,
 
         [Parameter(Mandatory = $false)]
@@ -211,13 +219,14 @@ function Get-InstallerExitCode {
     if ($FailedAppCount -gt 0) {
         return 1
     }
-    if (-not $WingetUsable) {
+    if (-not $WingetUsable -and -not $InstalledWithWingetClient) {
         return 2
     }
     if ($WorkNotAttempted) {
         return 9
     }
-    if (-not $AutoUpdatesHealthy) {
+    # Winget-AutoUpdate runs winget.exe: with the engine's installs done, that is all it breaks.
+    if (-not $AutoUpdatesHealthy -or -not $WingetUsable) {
         return 8
     }
     if ($RestartRequired) {

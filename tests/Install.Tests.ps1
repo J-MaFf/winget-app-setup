@@ -3219,7 +3219,7 @@ Describe 'A run as SYSTEM from an RMM agent (review findings P2-24, P3-22, P3-23
                 if (-not $script:moduleReady) {
                     return [pscustomobject]@{ Ready = $false; Reason = 'downloading the package failed: No such host is known' }
                 }
-                [pscustomobject]@{ Ready = $true; Reason = $null; Version = '1.29.380'; Sha256 = ('AB' * 32); Source = 'Download'; Directory = $null; ManifestPath = 'X:\m\Microsoft.WinGet.Client.psd1'; ChildScriptPath = 'X:\m\Invoke-WingetClientRequest.ps1'; PowerShellPath = 'X:\pwsh.exe'; Architecture = 'x64' }
+                [pscustomobject]@{ Ready = $true; Reason = $null; Version = '1.29.380'; Sha256 = ('AB' * 32); Source = 'Download'; Directory = $null; ManifestPath = 'X:\m\Microsoft.WinGet.Client.psd1'; PowerShellPath = 'X:\pwsh.exe'; Architecture = 'x64' }
             }
             $script:clientCalls = @()
             Mock Invoke-WingetClientRequest {
@@ -3294,6 +3294,35 @@ Describe 'A run as SYSTEM from an RMM agent (review findings P2-24, P3-22, P3-23
             ($script:runRecord.apps | Where-Object { $_.id -eq 'Contoso.MachineApp' }).installerCode | Should -Be 0
             ($script:runRecord.apps | Where-Object { $_.id -eq 'Contoso.UserOnlyApp' }).codeHex | Should -Be '0x8A150010'
             Should -Invoke Test-AndInstallWingetModule -Times 0 -Exactly
+        }
+
+        It 'Exits 8, not 2, when only winget.exe does not start at the end, and says what it breaks (wgt-gq8.57)' {
+            Mock Test-WingetLaunchable { [pscustomobject]@{ Launchable = $false; Version = $null; Reason = 'winget could not be started: Access is denied'; ExitCode = $null; Attempts = 5 } }
+
+            $result = Invoke-WingetInstall -Apps @(@{ name = 'Contoso.MachineApp' })
+
+            $result | Should -Be 8
+            @($script:capturedRows | Where-Object { $_[0] -eq 'Installed' })[0][1] | Should -Be 'Contoso.MachineApp'
+            $script:messages | Should -Contain 'winget: NOT USABLE - the machine-wide winget.exe did not work at the end of this run (winget could not be started: Access is denied). The apps were installed with Microsoft.WinGet.Client, but Winget-AutoUpdate runs winget.exe, so automatic updates will not work on this machine, nor will the uninstaller or a run without the Microsoft.WinGet.Client engine. Repair App Installer (or restart the machine) and re-run the installer; if it persists, attach this transcript to a GitHub issue.'
+            $script:runRecord.exitCode | Should -Be 8
+            $script:runRecord.wingetUsable | Should -BeFalse
+        }
+
+        It 'Still exits 2 for an unusable winget.exe at the end when the module was not ready and winget.exe installed' {
+            $script:moduleReady = $false
+            # winget.exe starts at the start of the run (6 or 2 tries), not at the end (5 tries).
+            Mock Test-WingetLaunchable {
+                if ($Attempts -eq 5) {
+                    return [pscustomobject]@{ Launchable = $false; Version = $null; Reason = 'winget could not be started: Access is denied'; ExitCode = $null; Attempts = 5 }
+                }
+                [pscustomobject]@{ Launchable = $true; Version = 'v1.29.380'; Reason = $null; ExitCode = 0; Attempts = 1 }
+            }
+
+            $result = Invoke-WingetInstall -Apps @(@{ name = 'Contoso.MachineApp' })
+
+            $result | Should -Be 2
+            @($script:launches | Where-Object { $_.Arguments -match '^install ' -and $_.FilePath -eq $script:machineWinget }).Count | Should -Be 1
+            $script:messages | Should -Contain 'winget: NOT USABLE - winget did not work at the end of this run (winget could not be started: Access is denied), so automatic updates and the next run of this installer will fail on this machine. Restart the machine and re-run the installer; if it persists, attach this transcript to a GitHub issue.'
         }
 
         It 'Records no installer exit code for the deferred app, whose installer never ran' {
@@ -4315,6 +4344,20 @@ Describe 'Get-InstallerExitCode' {
         Get-InstallerExitCode -FailedAppCount 0 -WingetUsable $true -WorkNotAttempted $true -AutoUpdatesHealthy $false | Should -Be 9
         Get-InstallerExitCode -FailedAppCount 0 -WingetUsable $true -WorkNotAttempted $true -RestartRequired $true | Should -Be 9
         Get-InstallerExitCode -FailedAppCount 0 -WingetUsable $true -WorkNotAttempted $false -RestartRequired $true | Should -Be 3010
+    }
+
+    # wgt-gq8.57: the engine needs no winget.exe, so a broken one only stops automatic updates.
+    It 'Returns 8, not 2, for an unusable winget.exe when Microsoft.WinGet.Client did the installs' {
+        Get-InstallerExitCode -FailedAppCount 0 -WingetUsable $false -InstalledWithWingetClient $true | Should -Be 8
+        Get-InstallerExitCode -FailedAppCount 0 -WingetUsable $false -InstalledWithWingetClient $true -RestartRequired $true | Should -Be 8
+        Get-InstallerExitCode -FailedAppCount 0 -WingetUsable $false -InstalledWithWingetClient $true -AutoUpdatesHealthy $false | Should -Be 8
+    }
+
+    It 'Keeps 1 and 9 above that 8, and changes nothing while winget.exe works' {
+        Get-InstallerExitCode -FailedAppCount 1 -WingetUsable $false -InstalledWithWingetClient $true | Should -Be 1
+        Get-InstallerExitCode -FailedAppCount 0 -WingetUsable $false -InstalledWithWingetClient $true -WorkNotAttempted $true | Should -Be 9
+        Get-InstallerExitCode -FailedAppCount 0 -WingetUsable $true -InstalledWithWingetClient $true | Should -Be 0
+        Get-InstallerExitCode -FailedAppCount 0 -WingetUsable $true -InstalledWithWingetClient $true -RestartRequired $true | Should -Be 3010
     }
 }
 

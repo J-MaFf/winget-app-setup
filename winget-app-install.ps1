@@ -107,12 +107,12 @@ param (
 # the function source under WingetAppSetup/Public and WingetAppSetup/Private, or the entry block in
 # build/fragments/tail.ps1, then re-run the build to regenerate this file.
 # See readme.md ("Project layout") for details.
-# Build id: 1.0.0+219c1017 (module version + SHA256 fragment of this whole script; issue #189).
+# Build id: 1.0.0+43166249 (module version + SHA256 fragment of this whole script; issue #189).
 # ------------------------------------------------------------------------------------------------
 
 # Content-derived build identity, logged at startup so a transcript from a remote machine
 # identifies exactly which installer build produced it (issue #189).
-$script:InstallerBuildId = '1.0.0+219c1017'
+$script:InstallerBuildId = '1.0.0+43166249'
 
 # ------------------------------------------------Functions------------------------------------------------
 
@@ -3017,6 +3017,9 @@ function Get-InstallerExitCode {
         [bool]$WingetUsable,
 
         [Parameter(Mandatory = $false)]
+        [bool]$InstalledWithWingetClient = $false,
+
+        [Parameter(Mandatory = $false)]
         [bool]$WorkNotAttempted = $false,
 
         [Parameter(Mandatory = $false)]
@@ -3029,13 +3032,13 @@ function Get-InstallerExitCode {
     if ($FailedAppCount -gt 0) {
         return 1
     }
-    if (-not $WingetUsable) {
+    if (-not $WingetUsable -and -not $InstalledWithWingetClient) {
         return 2
     }
     if ($WorkNotAttempted) {
         return 9
     }
-    if (-not $AutoUpdatesHealthy) {
+    if (-not $AutoUpdatesHealthy -or -not $WingetUsable) {
         return 8
     }
     if ($RestartRequired) {
@@ -10224,6 +10227,19 @@ function ConvertFrom-WingetClientResponse {
     return [pscustomobject]@{ Response = $response; ProtocolError = $null }
 }
 
+function Get-WingetClientRequestArgument {
+    param (
+        [Parameter(Mandatory = $true)]
+        [System.Collections.IDictionary]$Parameters
+    )
+
+    $json = ConvertTo-Json -InputObject $Parameters -Compress
+    $encodedParameters = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($json))
+    $command = ("`$requestParameters = ConvertFrom-Json -AsHashtable -InputObject ([System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('{0}')))`n& {{`n{1}`n}} @requestParameters`n" -f $encodedParameters, (Get-WingetClientChildScript))
+    $encodedCommand = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($command))
+    return [string[]]@('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', $encodedCommand)
+}
+
 function Invoke-WingetClientRequest {
     param (
         [Parameter(Mandatory = $false)]
@@ -10258,21 +10274,46 @@ function Invoke-WingetClientRequest {
         throw [System.InvalidOperationException]::new('Invoke-WingetClientRequest: the Microsoft.WinGet.Client module is not ready.')
     }
 
-    $arguments = @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', [string]$Module.ChildScriptPath, '-ModuleManifest', [string]$Module.ManifestPath, '-ExpectedVersion', [string]$Module.Version, '-Operation', $Operation)
+    $parameters = [ordered]@{ ModuleManifest = [string]$Module.ManifestPath; ExpectedVersion = [string]$Module.Version; Operation = $Operation }
     if (-not [string]::IsNullOrWhiteSpace($PackageId)) {
-        $arguments += @('-PackageId', $PackageId)
+        $parameters['PackageId'] = $PackageId
     }
     if ($Operation -eq 'Install') {
-        $arguments += @('-Mode', $Mode)
+        $parameters['Mode'] = $Mode
         if (-not [string]::IsNullOrWhiteSpace($InstallerType)) {
-            $arguments += @('-InstallerType', $InstallerType)
+            $parameters['InstallerType'] = $InstallerType
         }
         if (-not [string]::IsNullOrWhiteSpace($Log)) {
-            $arguments += @('-Log', $Log)
+            $parameters['Log'] = $Log
         }
     }
+    $arguments = Get-WingetClientRequestArgument -Parameters $parameters
 
-    $run = Invoke-ExternalProcess -FilePath ([string]$Module.PowerShellPath) -ArgumentList $arguments -TimeoutSeconds $TimeoutSeconds -Echo None
+    $filePath = [string]$Module.PowerShellPath
+    $commandLineLength = $filePath.Length + 3 + (ConvertTo-ProcessArgumentString -ArgumentList $arguments).Length
+    if ($commandLineLength -gt 32767) {
+        $run = [pscustomobject]@{
+            FilePath        = $filePath
+            Arguments       = $null
+            ExitCode        = $null
+            TimedOut        = $false
+            LaunchFailed    = $true
+            LaunchErrorCode = $null
+            LaunchError     = "the request's command line would be $commandLineLength characters, more than the 32767 Windows allows"
+            LaunchException = $null
+            Output          = @()
+            StandardOutput  = @()
+            StandardError   = @()
+            DurationSeconds = 0
+            LogPath         = $null
+            ProcessId       = $null
+            StartedAtUtc    = $null
+            ExitedAtUtc     = $null
+        }
+        return [pscustomobject]@{ Run = $run; Response = $null; ProtocolError = $null }
+    }
+
+    $run = Invoke-ExternalProcess -FilePath $filePath -ArgumentList $arguments -TimeoutSeconds $TimeoutSeconds -Echo None
     $response = $null
     $protocolError = $null
     if (-not $run.LaunchFailed -and -not $run.TimedOut) {
@@ -10398,6 +10439,10 @@ function Get-WingetClientResultCode {
         $result.Failure = 'Load'
         $result.LaunchFailed = $true
         $result.Detail = & $formatException $loadRecord
+        switch ([string]$response.executionPolicy) {
+            'AllSigned' { $result.Detail += '; the execution policy is AllSigned, which loads the module''s files only when their signer, Microsoft Corporation, is a trusted publisher on this PC' }
+            'Restricted' { $result.Detail += '; the execution policy is Restricted, which loads no module files' }
+        }
         $result.LaunchError = 'the WinGet client engine could not start: ' + $result.Detail
         return $result
     }
@@ -10929,7 +10974,10 @@ try {
 }
 catch {
     $records = Get-ExceptionRecord -Exception $_.Exception
-    Send-RequestResult -Result @{ stage = 'load'; ok = $false; exceptions = $records } -Outcome ('load failed: ' + $records[0].name)
+    $loadResult = @{ stage = 'load'; ok = $false; exceptions = $records }
+    # AllSigned or Restricted applies to the module's own manifest and Format.ps1xml.
+    try { $loadResult['executionPolicy'] = [string](Get-ExecutionPolicy) } catch { }
+    Send-RequestResult -Result $loadResult -Outcome ('load failed: ' + $records[0].name)
     exit 3
 }
 
@@ -11001,7 +11049,6 @@ function Initialize-WingetClientModule {
     $source = $null
     $architecture = $null
     $manifestPath = $null
-    $childScriptPath = $null
     try {
         $pin = Get-WingetClientModulePin
         if (-not ([long]$pin.Size -gt 0 -and "$($pin.Sha256)" -match '^[0-9A-Fa-f]{64}$')) {
@@ -11110,12 +11157,6 @@ function Initialize-WingetClientModule {
                 }
             }
 
-            if (-not $reason) {
-                $stage = 'writing its request script'
-                $childScriptPath = Join-Path $directory 'Invoke-WingetClientRequest.ps1'
-                [System.IO.File]::WriteAllText($childScriptPath, (Get-WingetClientChildScript), (New-Object System.Text.UTF8Encoding($false)))
-            }
-
             if (-not $reason -and $source -eq 'Download') {
                 $partialPath = Join-Path $cacheDirectory ('{0}.{1}.partial' -f $pin.FileName, [guid]::NewGuid().ToString('N'))
                 try {
@@ -11166,7 +11207,7 @@ function Initialize-WingetClientModule {
     if ($reason) {
         $reason = "$reason".Trim().TrimEnd('.')
         Write-WarningMessage "WinGet client module: NOT READY - $reason."
-        return [pscustomobject]@{ Ready = $false; Reason = $reason; Version = $version; Sha256 = $sha256; Source = $source; Directory = $null; ManifestPath = $null; ChildScriptPath = $null; PowerShellPath = $null; Architecture = $architecture }
+        return [pscustomobject]@{ Ready = $false; Reason = $reason; Version = $version; Sha256 = $sha256; Source = $source; Directory = $null; ManifestPath = $null; PowerShellPath = $null; Architecture = $architecture }
     }
     $from = 'downloaded from the PowerShell Gallery'
     if ($source -eq 'Cache') {
@@ -11181,7 +11222,6 @@ function Initialize-WingetClientModule {
         Source          = $source
         Directory       = $directory
         ManifestPath    = $manifestPath
-        ChildScriptPath = $childScriptPath
         PowerShellPath  = [Environment]::ProcessPath
         Architecture    = $architecture
     }
@@ -12297,12 +12337,18 @@ function Invoke-WingetInstall {
         }
     }
 
+    $installedWithWingetClient = ($installEngineRecord.used -eq 'WinGetClient')
     if (-not $wingetUsableAtEnd) {
         $endCheckDetail = ''
         if (-not [string]::IsNullOrWhiteSpace($endCheckReason)) {
             $endCheckDetail = " ($endCheckReason)"
         }
-        Write-ErrorMessage "winget: NOT USABLE - winget did not work at the end of this run$endCheckDetail, so automatic updates and the next run of this installer will fail on this machine. Restart the machine and re-run the installer; if it persists, attach this transcript to a GitHub issue."
+        if ($installedWithWingetClient) {
+            Write-ErrorMessage "winget: NOT USABLE - the machine-wide winget.exe did not work at the end of this run$endCheckDetail. The apps were installed with Microsoft.WinGet.Client, but Winget-AutoUpdate runs winget.exe, so automatic updates will not work on this machine, nor will the uninstaller or a run without the Microsoft.WinGet.Client engine. Repair App Installer (or restart the machine) and re-run the installer; if it persists, attach this transcript to a GitHub issue."
+        }
+        else {
+            Write-ErrorMessage "winget: NOT USABLE - winget did not work at the end of this run$endCheckDetail, so automatic updates and the next run of this installer will fail on this machine. Restart the machine and re-run the installer; if it persists, attach this transcript to a GitHub issue."
+        }
     }
 
     if ($restartFirstApps.Count -gt 0) {
@@ -12327,7 +12373,7 @@ function Invoke-WingetInstall {
         Write-Info "Full transcript of this run: $script:InstallLogPath"
     }
 
-    $exitCode = Get-InstallerExitCode -FailedAppCount $failedApps.Count -WingetUsable $wingetUsableAtEnd -WorkNotAttempted ($notAttemptedSteps.Count -gt 0) -AutoUpdatesHealthy $autoUpdatesHealthy -RestartRequired $restartRequired
+    $exitCode = Get-InstallerExitCode -FailedAppCount $failedApps.Count -WingetUsable $wingetUsableAtEnd -InstalledWithWingetClient $installedWithWingetClient -WorkNotAttempted ($notAttemptedSteps.Count -gt 0) -AutoUpdatesHealthy $autoUpdatesHealthy -RestartRequired $restartRequired
     $script:InstallerPendingExitCode = $exitCode
 
     if (-not $WhatIf -and @(1, 2, 8) -contains $exitCode) {
