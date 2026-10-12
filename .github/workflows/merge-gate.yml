@@ -1,0 +1,22 @@
+# merge-gate — the required check that keeps the claude-sandbox GitHub App
+# (homelab-sandbox-agent) from merging its own PRs into main. The logic lives in the
+# reusable J-MaFf/.github/.github/workflows/merge-gate.yml (J-MaFf/homelab
+# claude-sandbox/README.md, "Enrolling a repo"). Keep this file's name and the job name:
+# the check reports as `merge-gate / merge-gate`, the context the main ruleset requires
+# (integration_id 15368).
+name: merge-gate
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  pull_request_review:
+    types: [submitted, dismissed]
+
+permissions: {}
+
+jobs:
+  merge-gate:
+    uses: J-MaFf/.github/.github/workflows/merge-gate.yml@main
+    permissions:
+      contents: read
+      pull-requests: read
+      actions: write

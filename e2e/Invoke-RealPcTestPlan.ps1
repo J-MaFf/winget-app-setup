@@ -156,6 +156,9 @@ param (
 
 $script:DisposableConfirmationPhrase = 'yes destroy this machine'
 $script:PlantTaskName = 'winget-app-setup-plantjunction'
+# How long the planting task may take: its first S4U logon builds the temporary user's profile,
+# which under domain Group Policy took more than 90 s on a real PC (wgt-gq8.74).
+$script:PlantTaskTimeoutSeconds = 300
 # The sentinel a child Windows PowerShell writes before its JSON result (Invoke-RealPcModuleJson).
 $script:ModuleJsonSentinel = 'WGT-TESTPLAN-JSON:'
 # winget's APPINSTALLER_CLI_ERROR_NO_APPLICATIONS_FOUND (0x8A150014): 'winget list' found no package.
@@ -2868,6 +2871,10 @@ function Compare-RealPcAclSnapshot {
     The task's LastTaskResult, or $null when it did not finish in time.
 .PARAMETER JunctionAfterTask
     A junction was at the folder once the task had ended.
+.PARAMETER TimeoutSeconds
+    How long the harness waited for the task, for the note when it did not finish.
+.PARAMETER TaskStateAtTimeout
+    What the task was doing when the wait ended (Get-RealPcTaskStateText), for the same note.
 .RETURNS
     [pscustomobject] with PlantedBy ('StandardUser' or 'Admin') and Note (what happened, on one line,
     for the report).
@@ -2897,7 +2904,15 @@ function Get-RealPcJunctionPlantResult {
         [Nullable[long]]$TaskResult,
 
         [Parameter(Mandatory = $false)]
-        [bool]$JunctionAfterTask = $false
+        [bool]$JunctionAfterTask = $false,
+
+        [Parameter(Mandatory = $false)]
+        [int]$TimeoutSeconds = 0,
+
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [AllowEmptyString()]
+        [string]$TaskStateAtTimeout
     )
 
     # An error's text can end in CR/LF (a CimException's does), which would break the report's line.
@@ -2922,7 +2937,16 @@ function Get-RealPcJunctionPlantResult {
         return [pscustomobject]@{ PlantedBy = 'Admin'; Note = ("the standard user's planting task failed ({0}: {1}){2}, so the admin planted the junction" -f $stepText, $TaskProblem, $hint) }
     }
     if ($null -eq $TaskResult) {
-        return [pscustomobject]@{ PlantedBy = 'Admin'; Note = "the standard user's planting task did not finish in time, so the admin planted the junction" }
+        $within = 'in time'
+        if ($TimeoutSeconds -gt 0) {
+            $within = "within $TimeoutSeconds s"
+        }
+        $state = ''
+        $TaskStateAtTimeout = ([string]$TaskStateAtTimeout -replace '\s*[\r\n]+\s*', ' ').Trim()
+        if ($TaskStateAtTimeout) {
+            $state = " ($TaskStateAtTimeout)"
+        }
+        return [pscustomobject]@{ PlantedBy = 'Admin'; Note = "the standard user's planting task did not finish $within$state, so the admin planted the junction" }
     }
     if ($TaskResult -ne 0) {
         $code = [long]$TaskResult -band 0xFFFFFFFFL
@@ -5115,6 +5139,44 @@ function Wait-RealPcScheduledTask {
     return $null
 }
 
+<#
+.SYNOPSIS
+    What a scheduled task is doing, on one line, for a report: its state and last result.
+.PARAMETER State
+    The task's State ('Queued', 'Running', 'Ready', ...), or empty when it could not be read.
+.PARAMETER LastTaskResult
+    Its LastTaskResult, or $null.
+.RETURNS
+    [string] e.g. 'task state Queued, last result 0x00041303 (has not run yet)', or empty.
+#>
+function Get-RealPcTaskStateText {
+    param (
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [AllowEmptyString()]
+        [string]$State,
+
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [Nullable[long]]$LastTaskResult
+    )
+
+    $parts = @()
+    if ($State) {
+        $parts += "task state $State"
+    }
+    if ($null -ne $LastTaskResult) {
+        $code = [long]$LastTaskResult -band 0xFFFFFFFFL
+        $meaning = ''
+        switch ($code) {
+            0x41301L { $meaning = ' (running)' }
+            0x41303L { $meaning = ' (has not run yet)' }
+        }
+        $parts += ('last result 0x{0:X8}{1}' -f $code, $meaning)
+    }
+    return ($parts -join ', ')
+}
+
 # The Task Scheduler COM service, connected (tests give Register-RealPcPlantTask a stand-in).
 function New-RealPcTaskService {
     $service = New-Object -ComObject 'Schedule.Service'
@@ -5533,6 +5595,7 @@ function Invoke-RealPcLinkGuardSetupStage {
     $taskProblem = ''
     $taskResult = $null
     $junctionAfterTask = $false
+    $taskStateAtTimeout = ''
     try {
         try {
             $secure = ConvertTo-SecureString -String ((New-RealPcRandomSecret -Length 20) + 'Aa9!') -AsPlainText -Force
@@ -5580,8 +5643,19 @@ function Invoke-RealPcLinkGuardSetupStage {
                 $taskStartedAt = Get-Date
                 Start-ScheduledTask -TaskName $script:PlantTaskName -ErrorAction Stop
                 $taskStep = 'Wait'
-                $taskResult = Wait-RealPcScheduledTask -TaskName $script:PlantTaskName -StartedAt $taskStartedAt -TimeoutSeconds 90
+                $taskResult = Wait-RealPcScheduledTask -TaskName $script:PlantTaskName -StartedAt $taskStartedAt -TimeoutSeconds $script:PlantTaskTimeoutSeconds
                 $taskStep = ''
+                if ($null -eq $taskResult) {
+                    # Say what the task was doing, then stop it so it cannot plant after the admin.
+                    $lateTask = Get-ScheduledTask -TaskName $script:PlantTaskName -ErrorAction SilentlyContinue
+                    $lateInfo = Get-ScheduledTaskInfo -TaskName $script:PlantTaskName -ErrorAction SilentlyContinue
+                    $lateResult = $null
+                    if ($lateInfo) {
+                        $lateResult = [long]$lateInfo.LastTaskResult
+                    }
+                    $taskStateAtTimeout = Get-RealPcTaskStateText -State ([string]$(if ($lateTask) { $lateTask.State })) -LastTaskResult $lateResult
+                    Stop-ScheduledTask -TaskName $script:PlantTaskName -ErrorAction SilentlyContinue
+                }
             }
             catch {
                 $taskProblem = ConvertTo-RealPcTaskProblem -ErrorRecord $_
@@ -5612,7 +5686,7 @@ function Invoke-RealPcLinkGuardSetupStage {
         }
         $secure = $null
     }
-    $plant = Get-RealPcJunctionPlantResult -UserCreated $userCreated -UserProblem $userProblem -TaskStep $taskStep -TaskProblem $taskProblem -TaskResult $taskResult -JunctionAfterTask $junctionAfterTask
+    $plant = Get-RealPcJunctionPlantResult -UserCreated $userCreated -UserProblem $userProblem -TaskStep $taskStep -TaskProblem $taskProblem -TaskResult $taskResult -JunctionAfterTask $junctionAfterTask -TimeoutSeconds $script:PlantTaskTimeoutSeconds -TaskStateAtTimeout $taskStateAtTimeout
     if ($plant.PlantedBy -ne 'StandardUser' -and (Test-RealPcReparsePoint -Path $baseFolder) -ne $true) {
         New-RealPcAdminJunction -Path $baseFolder -Target $publicRoot
     }

@@ -4808,6 +4808,99 @@ function Get-PowerShell7RelaunchInstaller {
     return $null
 }
 
+function Get-PowerShell7RelaunchFile {
+    param (
+        [Parameter(Mandatory = $false)]
+        [string]$CommandPath,
+        [Parameter(Mandatory = $true)]
+        [string[]]$InstallerUrl,
+        [Parameter(Mandatory = $false)]
+        [string]$ExpectedBuildId,
+        [Parameter(Mandatory = $false)]
+        [switch]$PowerShell7Installed
+    )
+
+    if ($CommandPath) {
+        return [pscustomobject]@{ Path = $CommandPath; Directory = $null }
+    }
+    $installerContent = Get-PowerShell7RelaunchInstaller -Url $InstallerUrl -ExpectedBuildId $ExpectedBuildId
+    if (-not $installerContent) {
+        if ($ExpectedBuildId) {
+            Write-ErrorMessage ('Could not download installer build {0}, the build this run started with, for the relaunch (see above).' -f $ExpectedBuildId)
+        }
+        else {
+            Write-ErrorMessage 'Could not download the installer for the relaunch (see above).'
+        }
+        if ($PowerShell7Installed) {
+            Write-ErrorMessage 'PowerShell 7 is installed on this machine. Open PowerShell 7 (pwsh) as administrator and run the same one-liner there: it needs no second download. If raw.githubusercontent.com answers 429 Too Many Requests, use the jsDelivr one-liner from the readme.'
+        }
+        else {
+            Write-ErrorMessage 'Open Windows PowerShell as administrator and run the same one-liner there. If raw.githubusercontent.com answers 429 Too Many Requests, use the jsDelivr one-liner from the readme.'
+        }
+        return $null
+    }
+    $directory = $null
+    try {
+        $directory = Join-Path ([System.IO.Path]::GetTempPath()) ('winget-app-setup-' + [System.Guid]::NewGuid().ToString('N'))
+        [void](New-Item -Path $directory -ItemType Directory -Force -ErrorAction Stop)
+        $path = Join-Path $directory 'winget-app-install.ps1'
+        Set-Content -LiteralPath $path -Value $installerContent -Encoding UTF8 -ErrorAction Stop
+        return [pscustomobject]@{ Path = $path; Directory = $directory }
+    }
+    catch {
+        Write-ErrorMessage "Could not save the installer for the relaunch: $_"
+        if ($directory) {
+            Remove-Item -LiteralPath $directory -Recurse -Force -ErrorAction SilentlyContinue
+        }
+        return $null
+    }
+}
+
+function Invoke-PowerShell7BootstrapElevation {
+    param (
+        [Parameter(Mandatory = $false)]
+        [string]$CommandPath,
+        [Parameter(Mandatory = $true)]
+        [string[]]$InstallerUrl,
+        [Parameter(Mandatory = $false)]
+        [string]$ExpectedBuildId,
+        [Parameter(Mandatory = $false)]
+        [switch]$NonInteractive,
+        [Parameter(Mandatory = $false)]
+        [switch]$SkipSystemCheck,
+        [Parameter(Mandatory = $false)]
+        [string[]]$AdditionalArguments = @()
+    )
+
+    Write-Info 'PowerShell 7 (pwsh) is required but not installed, and installing it needs administrator rights.'
+    if (Test-EffectiveNonInteractive -NonInteractive:$NonInteractive) {
+        Write-ErrorMessage 'This run is non-interactive, so there is nobody to approve a UAC prompt and none was shown. Run it from an elevated session, or as SYSTEM (for example from an RMM tool).'
+        return 4
+    }
+    $relaunchFile = Get-PowerShell7RelaunchFile -CommandPath $CommandPath -InstallerUrl $InstallerUrl -ExpectedBuildId $ExpectedBuildId
+    if (-not $relaunchFile) {
+        return 7
+    }
+    try {
+        $elevationArguments = @()
+        if ($SkipSystemCheck) {
+            $elevationArguments += '-SkipSystemCheck'
+        }
+        $elevationArguments += @($AdditionalArguments)
+        $elevation = Restart-WithElevation -ScriptPath $relaunchFile.Path -AdditionalArguments $elevationArguments
+        if (-not $elevation.Started) {
+            Write-ErrorMessage 'No elevated run was started, so neither PowerShell 7 nor the apps were installed.'
+        }
+        $script:PowerShell7BootstrapRelaunched = [bool]$elevation.Started
+        return [int]$elevation.ExitCode
+    }
+    finally {
+        if ($relaunchFile.Directory) {
+            Remove-Item -LiteralPath $relaunchFile.Directory -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
 function Invoke-PowerShell7Bootstrap {
     param (
         [Parameter(Mandatory = $false)]
@@ -4869,17 +4962,16 @@ function Invoke-PowerShell7Bootstrap {
             return 0
         }
 
-        Write-Info 'PowerShell 7 (pwsh) is required but not installed. Installing it now...'
-
-        $isAdmin = Test-IsAdmin
-        if (-not $isAdmin) {
-            Write-WarningMessage 'Not running as administrator: the PowerShell 7 install may show a UAC prompt or fail. If it fails, re-run this installer from an elevated prompt.'
+        if (-not (Test-IsAdmin)) {
+            return (Invoke-PowerShell7BootstrapElevation -CommandPath $CommandPath -InstallerUrl $InstallerUrl -ExpectedBuildId $ExpectedBuildId -NonInteractive:$NonInteractive -SkipSystemCheck:$SkipSystemCheck -AdditionalArguments $AdditionalArguments)
         }
+
+        Write-Info 'PowerShell 7 (pwsh) is required but not installed. Installing it now...'
 
         $wingetCommand = Get-Command -Name 'winget' -CommandType Application -ErrorAction SilentlyContinue
         if ($wingetCommand) {
             Write-Info 'Installing PowerShell 7 via winget...'
-            $wingetArguments = @('install', '--id', 'Microsoft.PowerShell', '--exact', '--source', 'winget') + (Get-WingetAgreementArgs)
+            $wingetArguments = @('install', '--id', 'Microsoft.PowerShell', '--exact', '--source', 'winget', '--scope', 'machine') + (Get-WingetAgreementArgs)
             if (Test-EffectiveNonInteractive -NonInteractive:$NonInteractive) {
                 $wingetArguments += '--silent'
             }
@@ -4931,34 +5023,12 @@ function Invoke-PowerShell7Bootstrap {
         Write-Success 'PowerShell 7 is installed.'
     }
 
-    $relaunchPath = $CommandPath
-    $relaunchDirectory = $null
-    if (-not $relaunchPath) {
-        $installerContent = Get-PowerShell7RelaunchInstaller -Url $InstallerUrl -ExpectedBuildId $ExpectedBuildId
-        if (-not $installerContent) {
-            if ($ExpectedBuildId) {
-                Write-ErrorMessage ('Could not download installer build {0}, the build this run started with, for the PowerShell 7 relaunch (see above).' -f $ExpectedBuildId)
-            }
-            else {
-                Write-ErrorMessage 'Could not download the installer for the PowerShell 7 relaunch (see above).'
-            }
-            Write-ErrorMessage 'PowerShell 7 is installed on this machine. Open PowerShell 7 (pwsh) as administrator and run the same one-liner there: it needs no second download. If raw.githubusercontent.com answers 429 Too Many Requests, use the jsDelivr one-liner from the readme.'
-            return 7
-        }
-        try {
-            $relaunchDirectory = Join-Path ([System.IO.Path]::GetTempPath()) ('winget-app-setup-' + [System.Guid]::NewGuid().ToString('N'))
-            [void](New-Item -Path $relaunchDirectory -ItemType Directory -Force -ErrorAction Stop)
-            $relaunchPath = Join-Path $relaunchDirectory 'winget-app-install.ps1'
-            Set-Content -LiteralPath $relaunchPath -Value $installerContent -Encoding UTF8 -ErrorAction Stop
-        }
-        catch {
-            Write-ErrorMessage "Could not save the installer for the relaunch: $_"
-            if ($relaunchDirectory) {
-                Remove-Item -LiteralPath $relaunchDirectory -Recurse -Force -ErrorAction SilentlyContinue
-            }
-            return 7
-        }
+    $relaunchFile = Get-PowerShell7RelaunchFile -CommandPath $CommandPath -InstallerUrl $InstallerUrl -ExpectedBuildId $ExpectedBuildId -PowerShell7Installed
+    if (-not $relaunchFile) {
+        return 7
     }
+    $relaunchPath = $relaunchFile.Path
+    $relaunchDirectory = $relaunchFile.Directory
 
     Write-Info ('Relaunching the installer under PowerShell 7: {0}' -f $pwshPath)
     $quotedRelaunchPath = '"' + $relaunchPath.Replace('"', '`"') + '"'
