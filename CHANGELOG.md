@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- merge-gate caller (`.github/workflows/merge-gate.yml`): the required check that keeps the claude-sandbox App from merging its own PRs; logic in the reusable J-MaFf/.github merge-gate.yml.
 - Real-PC owner-test-plan harness (bead wgt-gq8.60): `e2e/Invoke-RealPcTestPlan.ps1`, one command an
   owner runs as an administrator on a disposable Windows 10 22H2+ or Windows 11 test machine to run
   every automatable item of PR #285's owner test plan and get one PASS/FAIL report plus one zip to
