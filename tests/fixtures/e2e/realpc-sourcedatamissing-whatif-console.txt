@@ -1,0 +1,15 @@
+Winget is available (v1.29.380).
+Updating the winget source for 'CONTOSO\admin-tech' (this may take a moment)...
+The winget source is up to date for 'CONTOSO\admin-tech'.
+Skipping: 7zip.7zip (not installed)
+Skipping: GlavSoft.TightVNC (not installed)
+Skipping: Adobe.Acrobat.Reader.64-bit (not installed)
+Skipping: Adobe.Acrobat.Reader.32-bit (not installed)
+Skipping: Google.Chrome (not installed)
+Skipping: Google.GoogleDrive (not installed)
+Skipping: Git.Git (not installed)
+Skipping: Klocman.BulkCrapUninstaller (not installed)
+Skipping: Dell.CommandUpdate.Universal (not installed)
+Skipping: Microsoft.PowerShell (not installed)
+Skipping: Microsoft.WindowsTerminal (not installed)
+[DRY-RUN] Would uninstall Winget-AutoUpdate.

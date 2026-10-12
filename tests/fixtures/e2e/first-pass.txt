@@ -1,0 +1,68 @@
+**********************
+PowerShell transcript start
+Start time: 20261005060449
+Username: RUNNERVM00\runneradmin
+RunAs User: RUNNERVM00\runneradmin
+Configuration Name: 
+Machine: RUNNERVM00 (Microsoft Windows NT 10.0.26100.0)
+Host Application: C:\Program Files\PowerShell\7\pwsh.dll -NoProfile -EncodedCommand <base64>
+Process ID: 4242
+PSVersion: 7.6.5
+PSEdition: Core
+**********************
+Transcript started, output file is C:\ProgramData\winget-app-setup\logs\install-20261005-060449.log
+Logging this run to: C:\ProgramData\winget-app-setup\logs\install-20261005-060449.log
+Installer build: 1.0.0+5ea1f00d
+
+Pre-flight System Checks:
+[OK] OS Version: Windows Server 2025 Datacenter
+[WARN] Disk Space: 24.2 GB free on C: (50 GB recommended)
+[OK] Network: cdn.winget.microsoft.com reachable (HTTP 404)
+
+Disk space is below the 50 GB recommendation. Continuing anyway.
+Starting...
+Successfully imported Microsoft.WinGet.Client module
+Winget is available.
+Installing the following Apps:
+7zip.7zip
+GlavSoft.TightVNC
+Adobe.Acrobat.Reader.64-bit
+Google.Chrome
+Google.GoogleDrive
+Git.Git
+Klocman.BulkCrapUninstaller
+Dell.CommandUpdate.Universal
+Microsoft.PowerShell
+Microsoft.WindowsTerminal
+Installing: 7zip.7zip
+Successfully installed
+Successfully installed: 7zip.7zip
+Installing: GlavSoft.TightVNC
+Successfully installed: GlavSoft.TightVNC
+Installing: Adobe.Acrobat.Reader.64-bit
+Successfully installed: Adobe.Acrobat.Reader.64-bit
+Installing: Google.Chrome
+Successfully installed: Google.Chrome
+Installing: Google.GoogleDrive
+Successfully installed: Google.GoogleDrive
+Installing: Git.Git
+Successfully installed: Git.Git
+Installing: Klocman.BulkCrapUninstaller
+Successfully installed: Klocman.BulkCrapUninstaller
+Skipping: Dell.CommandUpdate.Universal (not applicable: Dell hardware only)
+Skipping: Microsoft.PowerShell (already installed)
+Skipping: Microsoft.WindowsTerminal (already installed)
+Setting up automatic app updates via Winget-AutoUpdate 2.12.0...
+Winget-AutoUpdate was NOT installed: Microsoft.WindowsAppRuntime.1.8 is missing (not installed for any user). Every WAU update run installs the newest winget, which needs that framework, so WAU would leave winget unusable here. Install the Windows App Runtime 1.8 (update App Installer from the Microsoft Store, or install Microsoft's Windows App SDK 1.8 runtime), then re-run this installer. On a newly set-up PC this usually clears once the Store has updated App Installer.
+Summary:
+
+Status    Apps
+------    ----
+Installed 7zip.7zip, GlavSoft.TightVNC, Adobe.Acrobat.Reader.64-bit, Google.Chrome, Google.GoogleDrive, Git.Git, Klocman.BulkCrapUninstaller
+Skipped   Dell.CommandUpdate.Universal, Microsoft.PowerShell, Microsoft.WindowsTerminal
+Auto-updates: NOT CONFIGURED - Microsoft.WindowsAppRuntime.1.8 is missing, and Winget-AutoUpdate would leave winget unusable without it. Install the Windows App Runtime 1.8 (or let the Microsoft Store update App Installer), then re-run the installer.
+Full transcript of this run: C:\ProgramData\winget-app-setup\logs\install-20261005-060449.log
+**********************
+PowerShell transcript end
+End time: 20261005061507
+**********************

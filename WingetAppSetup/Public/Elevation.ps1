@@ -1,35 +1,19 @@
-# Public (exported) elevation helpers. The rest of the elevation detection helpers live in
-# Private/Elevation.ps1; these are exported (issue #190) so winget-app-uninstall.ps1 can reuse
-# them instead of hand-rolling its own admin check / Start-Process relaunch.
+# The elevation helpers the entry blocks call: the installer and the uninstaller share them
+# instead of each hand-rolling its own admin check and relaunch (issue #190). The rest live in
+# Private/Elevation.ps1.
 
 <#
 .SYNOPSIS
-    Detects whether the current process is running with administrator privileges.
+    Returns whether the current process runs with administrator rights.
 .DESCRIPTION
-    The single shared implementation of the
-    "[Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(...)"
-    check, previously copy-pasted (and already behaviorally diverged) across
-    WingetAppSetup/Public/Install.ps1, winget-app-uninstall.ps1, and
-    WingetAppSetup/Private/PowerShell7Bootstrap.ps1 (full-repo review finding, 2026-07-16).
-    Fails safe: if the underlying identity/role check throws for any reason (an exotic restricted
-    token, a non-interactive service context, or a mocked failure in tests), this warns and
-    returns $true rather than letting the exception propagate and abort the caller - matching the
-    PowerShell7Bootstrap.ps1 behavior that is now applied at every call site.
-
-    At the two call sites that gate elevation (Invoke-WingetInstall, winget-app-uninstall.ps1),
-    "assume elevated" on failure means a broken check SKIPS Restart-WithElevation and proceeds
-    unelevated rather than retrying elevation. This is a deliberate tradeoff, not an oversight
-    (full-repo mega-review, 2026-07-17): the trigger is vanishingly rare on a real Windows
-    session, the caller still warns loudly before proceeding, any operation that genuinely needed
-    elevation then fails just as loudly with an access-denied error, and the alternative
-    (fail-closed: assume non-admin, always attempt Restart-WithElevation) risks a relaunch loop if
-    the same check throws deterministically in the relaunched process too - a worse failure mode
-    than a noisy unelevated run. If a future caller's failure consequence is instead silent/unsafe
-    rather than loud, that caller should check the exception itself rather than rely on this
-    shared default.
-.RETURNS
-    [bool] $true when the current process is elevated (or when the check itself failed and could
-    not determine elevation), $false when it is confirmed non-elevated.
+    The one implementation for the installer, the uninstaller and the PowerShell 7 bootstrap. When
+    the check itself throws, it warns and returns $true: a broken check then skips the elevated
+    relaunch and the run goes on unelevated, where anything that needed elevation fails loudly.
+    Assuming non-admin instead could relaunch forever if the check fails the same way in the
+    relaunched process. A caller for which proceeding unelevated would be silent or unsafe should
+    check the identity itself.
+.OUTPUTS
+    [bool] $true when elevated, or when the check failed; $false when confirmed not elevated.
 #>
 function Test-IsAdmin {
     try {
@@ -44,67 +28,165 @@ function Test-IsAdmin {
 
 <#
 .SYNOPSIS
-    Relaunches the script with elevated privileges, preferring Windows Terminal when available.
+    Runs the script again in an elevated Windows PowerShell window, waits for it, and returns its
+    exit code.
 .DESCRIPTION
-    Attempts to restart the current script in an elevated session. When Windows Terminal is installed,
-    the script is relaunched inside an elevated Windows Terminal tab running the specified PowerShell
-    executable. If Windows Terminal is unavailable or fails to start, the function falls back to the
-    standard Start-Process call for the provided PowerShell executable.
-.PARAMETER PowerShellExecutable
-    The PowerShell executable to use when relaunching (for example, pwsh.exe or powershell.exe).
+    Starts System32's powershell.exe (Get-WindowsPowerShellPath), which every account has, after the
+    UAC prompt (review finding P2-11): the installer's 5.1 dispatch then finds or installs
+    PowerShell 7 as the elevating account in the same window, and the uninstaller runs there as it
+    is. Waiting for it lets the run that asked report what the elevated run did.
+
+    The elevated process never runs ScriptPath itself (review finding P3-11), so ScriptPath must be
+    a self-contained script: the generated installer or uninstaller. This function reads the file
+    once, checks it against -ExpectedSha256 and stages the bytes in this account's %TEMP%, which the
+    elevating account can read even when it cannot see ScriptPath (a mapped drive, a share). The
+    elevated process checks the staged file against the hash, copies it into a folder only
+    administrators can change and runs the copy (New-ElevationVerifierCommand), so a file rewritten
+    while the UAC prompt is up is not run. Each run stages and copies into folders of its own, under
+    the file's own name. The staged copy is removed once the elevated run ends.
+
+    Never shows a UAC prompt when nobody is at the console (Test-EffectiveNonInteractive), and asks
+    once: a declined prompt (1223, ERROR_CANCELLED) is reported, not asked again. Never asks either
+    when Group Policy sets the PC's execution policy to AllSigned or Restricted
+    (Get-ScriptExecutionPolicyBlock), which -ExecutionPolicy Bypass cannot override; such a policy
+    for this account only is a warning, and the checked copy's window checks the approving
+    account's.
 .PARAMETER ScriptPath
-    The full path to the script that should be relaunched.
-.PARAMETER WindowsTerminalExecutable
-    Optional explicit path to the Windows Terminal executable (wt.exe). When not supplied, the
-    function attempts to discover it automatically.
+    The full path of the script to run elevated.
 .PARAMETER AdditionalArguments
-    Optional switches/arguments to forward to the elevated relaunch (for example, '-WhatIf'). These
-    are appended after the -File argument so the elevated session inherits the caller's intent.
-.RETURNS
-    [string] Returns 'WindowsTerminal' when the Windows Terminal relaunch path succeeds, otherwise
-    returns 'PowerShell'.
+    Arguments forwarded to the elevated run: parameter names (for example '-SkipSystemCheck') and
+    values that start with a digit and hold only letters, digits, '.', ':' and '-' (the time
+    budget's '60' and '2026-10-05T12:00:00Z'). Nothing else is accepted: they become part of a
+    command line.
+.PARAMETER ExpectedSha256
+    The script's SHA256 when this run started; nothing is started when the file no longer has it.
+    Empty: the hash is taken now.
+.PARAMETER NonInteractive
+    The caller's -NonInteractive switch.
+.OUTPUTS
+    [pscustomobject] @{ Started; ExitCode }. Started is $true when an elevated run started, and
+    ExitCode is then its exit code (4 when its window found the execution policy would refuse the
+    script, 5 when the file changed). Otherwise ExitCode is 4 (no prompt in a non-interactive run,
+    an execution policy that would refuse the script, a declined prompt, or a process that could
+    not start) or 5 (the script could not be read, or changed since the run started).
 #>
 function Restart-WithElevation {
+    [OutputType([pscustomobject])]
     param (
-        [Parameter(Mandatory = $true)]
-        [string]$PowerShellExecutable,
-
         [Parameter(Mandatory = $true)]
         [string]$ScriptPath,
 
         [Parameter(Mandatory = $false)]
-        [string]$WindowsTerminalExecutable,
+        [ValidatePattern('^(?:-[A-Za-z][A-Za-z0-9]*|[0-9][0-9A-Za-z:.-]*)\z')]
+        [string[]]$AdditionalArguments = @(),
 
         [Parameter(Mandatory = $false)]
-        [string[]]$AdditionalArguments = @()
+        [string]$ExpectedSha256,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$NonInteractive
     )
 
-    $quotedScriptPath = '"' + $ScriptPath.Replace('"', '`"') + '"'
-    $commandArguments = "-NoProfile -ExecutionPolicy Bypass -File $quotedScriptPath"
-    if ($AdditionalArguments.Count -gt 0) {
-        $commandArguments += ' ' + ($AdditionalArguments -join ' ')
+    if (Test-EffectiveNonInteractive -NonInteractive:$NonInteractive) {
+        Write-ErrorMessage 'Administrator rights are required, and this run is non-interactive, so there is nobody to approve a UAC prompt and none was shown. Run it from an elevated session, or as SYSTEM.'
+        return [pscustomobject]@{ Started = $false; ExitCode = 4 }
     }
-    $windowsTerminalPath = $WindowsTerminalExecutable
 
-    if (-not $windowsTerminalPath) {
-        $wtCommand = Get-Command -Name 'wt.exe' -ErrorAction SilentlyContinue
-        if ($wtCommand) {
-            $windowsTerminalPath = $wtCommand.Source
+    # Group Policy's execution policy overrides the elevated window's -ExecutionPolicy Bypass, so
+    # the PC's AllSigned or Restricted stops here. This account's own policy holds only if this
+    # account approves the prompt: a warning, and the checked copy's window checks the approver's.
+    $policyBlock = Get-ScriptExecutionPolicyBlock -Engine WindowsPowerShell
+    if ($policyBlock) {
+        $policyMessage = Format-ElevationPolicyBlockMessage -Block $policyBlock
+        if ($policyBlock.Scope -eq 'MachinePolicy') {
+            Write-ErrorMessage "$policyMessage No UAC prompt was shown."
+            return [pscustomobject]@{ Started = $false; ExitCode = 4 }
         }
+        Write-WarningMessage $policyMessage
     }
 
-    if ($windowsTerminalPath) {
-        Write-Info 'Attempting to relaunch script in Windows Terminal with elevated privileges...'
+    $powerShellPath = Get-WindowsPowerShellPath
+    # Read once: the hash and the staged copy below are both of these bytes.
+    try {
+        $bytes = [System.IO.File]::ReadAllBytes($ScriptPath)
+    }
+    catch {
+        Write-ErrorMessage "Could not read $ScriptPath to run it elevated: $($_.Exception.Message)"
+        return [pscustomobject]@{ Started = $false; ExitCode = 5 }
+    }
+    $sha256 = [System.BitConverter]::ToString([System.Security.Cryptography.SHA256]::Create().ComputeHash($bytes)).Replace('-', '')
+    if ($ExpectedSha256 -and $sha256 -ne $ExpectedSha256) {
+        Write-ErrorMessage "$ScriptPath changed after this run started, so it is not run with administrator rights. Start it again."
+        return [pscustomobject]@{ Started = $false; ExitCode = 5 }
+    }
+    # Staged in this account's %TEMP%, which administrators can read: the elevated account may not
+    # see ScriptPath (a mapped drive belongs to the signed-in session). The elevated process checks
+    # the staged copy against the hash all the same.
+    $stagingDirectory = $null
+    try {
+        $stagingDirectory = Join-Path ([System.IO.Path]::GetTempPath()) ('winget-app-setup-elevate-' + [System.Guid]::NewGuid().ToString('N'))
+        [void](New-Item -ItemType Directory -Path $stagingDirectory -Force -ErrorAction Stop)
+        $stagedPath = Join-Path $stagingDirectory (($ScriptPath -split '[\\/]')[-1])
+        [System.IO.File]::WriteAllBytes($stagedPath, $bytes)
+    }
+    catch {
+        Write-ErrorMessage "Could not copy $ScriptPath to run it elevated: $($_.Exception.Message)"
+        if ($stagingDirectory) {
+            Remove-Item -LiteralPath $stagingDirectory -Recurse -Force -ErrorAction SilentlyContinue
+        }
+        return [pscustomobject]@{ Started = $false; ExitCode = 5 }
+    }
+    $verifierCommand = New-ElevationVerifierCommand -ScriptPath $stagedPath -Sha256 $sha256 -PowerShellPath $powerShellPath -CopyRoot (Get-ElevatedCopyRoot) -AdditionalArguments $AdditionalArguments
+    # -ExecutionPolicy Bypass as for the copy it runs, so the check's Get-ExecutionPolicy sees only a
+    # policy Group Policy sets.
+    $argumentString = ConvertTo-ProcessArgumentString -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', $verifierCommand)
+
+    try {
+        # ShellExecuteEx, which starts an elevated process, accepts a command line of about 2048
+        # characters; a longer one would not start or would arrive cut off. It holds the staged
+        # copy's path and the file name, not the folder ScriptPath is in, so moving the file would
+        # not help.
+        if ($argumentString.Length -gt 2000) {
+            Write-ErrorMessage "The command that starts $ScriptPath elevated is too long, because the file name or this account's %TEMP% path ($([System.IO.Path]::GetTempPath())) is long. Give the file a shorter name, or start it from an elevated session."
+            return [pscustomobject]@{ Started = $false; ExitCode = 4 }
+        }
+
+        # The elevated Windows PowerShell legitimately enters the PowerShell 7 bootstrap, so it must
+        # not inherit this process's relaunch-loop guard.
+        Remove-Item -Path Env:\WINGET_APP_SETUP_PS7_BOOTSTRAP -ErrorAction SilentlyContinue
+
+        Write-Info 'Approve the administrator (UAC) prompt. The run continues in a new, elevated Windows PowerShell window, and this window waits for it to finish.'
+        $process = $null
         try {
-            Start-Process $windowsTerminalPath -ArgumentList @("$PowerShellExecutable $commandArguments") -Verb RunAs
-            return 'WindowsTerminal'
+            $process = Start-ElevatedProcess -FilePath $powerShellPath -ArgumentString $argumentString
         }
         catch {
-            Write-Warning "Failed to start Windows Terminal: $_"
+            if ((Get-NativeErrorCode -Exception $_.Exception) -eq 1223) {
+                # ERROR_CANCELLED: the UAC prompt was declined. Reported once; no second prompt.
+                Write-ErrorMessage 'The administrator (UAC) prompt was declined, so no elevated run was started. Run it again and approve the prompt, or start it from an elevated session.'
+            }
+            else {
+                Write-ErrorMessage "Could not start an elevated Windows PowerShell ($powerShellPath): $($_.Exception.Message)"
+            }
+            return [pscustomobject]@{ Started = $false; ExitCode = 4 }
+        }
+        if (-not $process) {
+            Write-ErrorMessage 'An elevated Windows PowerShell was requested, but Windows returned no process to wait for, so its outcome is unknown. Check the elevated window and its log.'
+            return [pscustomobject]@{ Started = $true; ExitCode = 5 }
+        }
+
+        # Short waits in a loop rather than one WaitForExit(): Ctrl+C in this window is handled
+        # between statements, never during a blocking .NET call.
+        while (-not $process.WaitForExit(1000)) {
+        }
+        $exitCode = [int]$process.ExitCode
+        Write-Info "The elevated run ended with exit code $exitCode."
+        return [pscustomobject]@{ Started = $true; ExitCode = $exitCode }
+    }
+    finally {
+        # The elevated process made its own copy, and it has ended (or never started).
+        if ($stagingDirectory) {
+            Remove-Item -LiteralPath $stagingDirectory -Recurse -Force -ErrorAction SilentlyContinue
         }
     }
-
-    Write-Info 'Relaunching script in standard PowerShell window with elevated privileges...'
-    Start-Process $PowerShellExecutable -ArgumentList $commandArguments -Verb RunAs
-    return 'PowerShell'
 }

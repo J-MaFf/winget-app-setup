@@ -1,0 +1,59 @@
+**********************
+PowerShell transcript start
+Start time: 20261005061511
+Username: RUNNERVM00\runneradmin
+RunAs User: RUNNERVM00\runneradmin
+Configuration Name: 
+Machine: RUNNERVM00 (Microsoft Windows NT 10.0.26100.0)
+Host Application: C:\Program Files\PowerShell\7\pwsh.dll -NoProfile -ExecutionPolicy Bypass -File D:\a\winget-app-setup\winget-app-setup\winget-app-install.ps1
+Process ID: 4242
+PSVersion: 7.6.5
+PSEdition: Core
+**********************
+Transcript started, output file is C:\ProgramData\winget-app-setup\logs\install-20261005-061511.log
+Logging this run to: C:\ProgramData\winget-app-setup\logs\install-20261005-061511.log
+Installer build: 1.0.0+5ea1f00d
+
+Pre-flight System Checks:
+[OK] OS Version: Windows Server 2025 Datacenter
+[WARN] Disk Space: 24.2 GB free on C: (50 GB recommended)
+[OK] Network: cdn.winget.microsoft.com reachable (HTTP 404)
+
+Disk space is below the 50 GB recommendation. Continuing anyway.
+Starting...
+Successfully imported Microsoft.WinGet.Client module
+Winget is available.
+Installing the following Apps:
+7zip.7zip
+GlavSoft.TightVNC
+Adobe.Acrobat.Reader.64-bit
+Google.Chrome
+Google.GoogleDrive
+Git.Git
+Klocman.BulkCrapUninstaller
+Dell.CommandUpdate.Universal
+Microsoft.PowerShell
+Microsoft.WindowsTerminal
+Skipping: 7zip.7zip (already installed)
+Skipping: GlavSoft.TightVNC (already installed)
+Skipping: Adobe.Acrobat.Reader.64-bit (already installed)
+Skipping: Google.Chrome (already installed)
+Skipping: Google.GoogleDrive (already installed)
+Skipping: Git.Git (already installed)
+Skipping: Klocman.BulkCrapUninstaller (already installed)
+Skipping: Dell.CommandUpdate.Universal (not applicable: Dell hardware only)
+Skipping: Microsoft.PowerShell (already installed)
+Skipping: Microsoft.WindowsTerminal (already installed)
+Winget-AutoUpdate is already installed (v2.12.0.2118); leaving its configuration unchanged apart from the at-logon trigger.
+Winget-AutoUpdate task \WAU\Winget-AutoUpdate: state Ready; triggers: Weekly on Tuesday from 2026-10-06T02:00:00; last run: never, result 0x00041303 (has not run yet); next run: 2026-10-06 02:00.
+Summary:
+
+Status  Apps
+------  ----
+Skipped 7zip.7zip, GlavSoft.TightVNC, Adobe.Acrobat.Reader.64-bit, Google.Chrome, Google.GoogleDrive, Git.Git, Klocman.BulkCrapUninstaller, Dell.CommandUpdate.Universal, Microsoft.PowerShell, Microsoft.WindowsTerminal
+Auto-updates: Already present (v2.12.0.2118).
+Full transcript of this run: C:\ProgramData\winget-app-setup\logs\install-20261005-061511.log
+**********************
+PowerShell transcript end
+End time: 20261005061620
+**********************

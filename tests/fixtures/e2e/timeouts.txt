@@ -1,0 +1,78 @@
+**********************
+PowerShell transcript start
+Start time: 20261005070102
+Username: RUNNERVM00\runneradmin
+RunAs User: RUNNERVM00\runneradmin
+Configuration Name: 
+Machine: RUNNERVM00 (Microsoft Windows NT 10.0.26100.0)
+Host Application: C:\Program Files\PowerShell\7\pwsh.dll -NoProfile -EncodedCommand <base64>
+Process ID: 4242
+PSVersion: 7.6.5
+PSEdition: Core
+**********************
+Transcript started, output file is C:\ProgramData\winget-app-setup\logs\install-20261005-070102.log
+Logging this run to: C:\ProgramData\winget-app-setup\logs\install-20261005-070102.log
+Installer build: 1.0.0+5ea1f00d
+
+Pre-flight System Checks:
+[OK] OS Version: Windows Server 2025 Datacenter
+[WARN] Disk Space: 24.2 GB free on C: (50 GB recommended)
+[OK] Network: cdn.winget.microsoft.com reachable (HTTP 404)
+
+Disk space is below the 50 GB recommendation. Continuing anyway.
+Starting...
+Successfully imported Microsoft.WinGet.Client module
+Winget is available.
+Installing the following Apps:
+7zip.7zip
+GlavSoft.TightVNC
+Adobe.Acrobat.Reader.64-bit
+Google.Chrome
+Google.GoogleDrive
+Git.Git
+Klocman.BulkCrapUninstaller
+Dell.CommandUpdate.Universal
+Microsoft.PowerShell
+Microsoft.WindowsTerminal
+Installing: 7zip.7zip
+Successfully installed: 7zip.7zip
+Installing: GlavSoft.TightVNC
+Successfully installed: GlavSoft.TightVNC
+Installing: Adobe.Acrobat.Reader.64-bit
+Failed to install: Adobe.Acrobat.Reader.64-bit (package not found after install; winget exit 0x80073D19, 3 attempts, machine-scope fallback: no, session error 0x80073D19 persisted through every retry).
+Installing: Google.Chrome
+Successfully installed: Google.Chrome
+Winget list timed out for Google.GoogleDrive. Marking as failed; it will be retried.
+Installing: Git.Git
+Successfully installed: Git.Git
+Installing: Klocman.BulkCrapUninstaller
+Verification timed out for: Klocman.BulkCrapUninstaller. Assuming installation failed.
+Skipping: Dell.CommandUpdate.Universal (not applicable: Dell hardware only)
+Skipping: Microsoft.PowerShell (already installed)
+Skipping: Microsoft.WindowsTerminal (already installed)
+
+Retrying failed installations (1 final attempt)...
+Retrying: Adobe.Acrobat.Reader.64-bit
+Retry succeeded: Adobe.Acrobat.Reader.64-bit
+Retrying: Google.GoogleDrive
+Winget list timed out for retry: Google.GoogleDrive. Assuming installation failed.
+Retrying: Klocman.BulkCrapUninstaller
+Verification timed out for retry: Klocman.BulkCrapUninstaller. Assuming installation failed.
+Summary:
+
+Status    Apps
+------    ----
+Installed 7zip.7zip, GlavSoft.TightVNC, Google.Chrome, Git.Git, Adobe.Acrobat.Reader.64-bit
+Skipped   Dell.CommandUpdate.Universal, Microsoft.PowerShell, Microsoft.WindowsTerminal
+Failed    Google.GoogleDrive, Klocman.BulkCrapUninstaller
+
+App                         Reason
+---                         ------
+Google.GoogleDrive          winget list timed out during the pre-install check
+Klocman.BulkCrapUninstaller post-install verification timed out
+Auto-updates: NOT CONFIGURED - Microsoft.WindowsAppRuntime.1.8 is missing, and Winget-AutoUpdate would leave winget unusable without it. Install the Windows App Runtime 1.8 (or let the Microsoft Store update App Installer), then re-run the installer.
+Full transcript of this run: C:\ProgramData\winget-app-setup\logs\install-20261005-070102.log
+**********************
+PowerShell transcript end
+End time: 20261005072210
+**********************

@@ -1,0 +1,16 @@
+'C:\ProgramData\winget-app-setup' was a link (a junction or symbolic link), not a folder. The link was removed without changing what it pointed to, and a folder is created in its place.
+Transcript started, output file is C:\ProgramData\winget-app-setup\logs\install-20261006-100000-bootstrap.log
+Logging the PowerShell 7 bootstrap to: C:\ProgramData\winget-app-setup\logs\install-20261006-100000-bootstrap.log
+Installer build: 1.0.0+5ea1f00d
+This installer requires PowerShell 7+ (pwsh), but this session is Windows PowerShell. Handing off...
+PowerShell 7 (pwsh) is required but not installed. Installing it now...
+Installing PowerShell 7 via winget...
+PowerShell 7 is installed.
+Relaunching the installer under PowerShell 7: C:\Program Files\PowerShell\7\pwsh.exe
+Transcript started, output file is C:\ProgramData\winget-app-setup\logs\install-20261006-100105.log
+Logging this run to: C:\ProgramData\winget-app-setup\logs\install-20261006-100105.log
+Installer build: 1.0.0+5ea1f00d
+Successfully installed: 7zip.7zip
+Auto-updates: Configured (Winget-AutoUpdate v2.12.0).
+RESULT: exit=0 installed=9 skipped=2 deferred=0 failed=0 notattempted=0 autoupdates=Configured restart=no build=1.0.0+5ea1f00d log=C:\ProgramData\winget-app-setup\logs\install-20261006-100105.log
+The PowerShell 7 run ended with exit code 0.

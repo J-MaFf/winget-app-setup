@@ -1,0 +1,1 @@
+{"operation":"Install","stage":"call","ok":false,"exceptions":[{"type":"Microsoft.WinGet.Client.Engine.Exceptions.NoPackageFoundException","name":"NoPackageFoundException","hresult":-2146233087,"message":"No packages matched the given input criteria."}],"protocol":1,"moduleVersion":"1.29.380","psVersion":"7.6.6","architecture":"X64"}

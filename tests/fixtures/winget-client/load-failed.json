@@ -1,0 +1,1 @@
+{"operation":"Version","stage":"load","ok":false,"exceptions":[{"type":"System.IO.FileLoadException","name":"FileLoadException","hresult":-2146232799,"message":"Could not load file or assembly 'Microsoft.WinGet.Client.Engine'."}],"protocol":1,"moduleVersion":null,"psVersion":"7.6.6","architecture":"X64"}

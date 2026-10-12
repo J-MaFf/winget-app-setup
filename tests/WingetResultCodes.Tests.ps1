@@ -1,0 +1,188 @@
+# WingetResultCodes.Tests.ps1
+# Tests for WingetAppSetup/Private/WingetResultCodes.ps1: the one table of winget exit codes the
+# installer names and acts on (review findings P2-15 and P3-16).
+
+BeforeAll {
+    . (Join-Path $PSScriptRoot 'TestHelpers.ps1')
+}
+
+Describe 'Get-WingetExitCodeInfo' {
+    # Hex values from winget's returnCodes.md; the Int32 is what winget's process exit code holds.
+    It 'Names <Hex> <Name> with class "<Class>"' -ForEach @(
+        @{ Hex = '8A150102'; Name = 'INSTALL_INSTALL_IN_PROGRESS'; Class = 'InstallInProgress' }
+        @{ Hex = '8A150101'; Name = 'INSTALL_PACKAGE_IN_USE'; Class = 'InUse' }
+        @{ Hex = '8A150103'; Name = 'INSTALL_FILE_IN_USE'; Class = 'InUse' }
+        @{ Hex = '8A150111'; Name = 'INSTALL_PACKAGE_IN_USE_BY_APPLICATION'; Class = 'InUse' }
+        @{ Hex = '8A150109'; Name = 'INSTALL_REBOOT_REQUIRED_TO_FINISH'; Class = 'RestartRequired' }
+        @{ Hex = '8A15010A'; Name = 'INSTALL_REBOOT_REQUIRED_FOR_INSTALL'; Class = 'RestartRequiredFirst' }
+        @{ Hex = '8A15010B'; Name = 'INSTALL_REBOOT_INITIATED'; Class = 'RestartRequired' }
+        @{ Hex = '8A150105'; Name = 'INSTALL_DISK_FULL'; Class = '' }
+        @{ Hex = '8A15003A'; Name = 'BLOCKED_BY_POLICY'; Class = '' }
+        @{ Hex = '8A15010F'; Name = 'INSTALL_BLOCKED_BY_POLICY'; Class = '' }
+        @{ Hex = '8A150010'; Name = 'NO_APPLICABLE_INSTALLER'; Class = '' }
+        @{ Hex = '8A15002B'; Name = 'UPDATE_NOT_APPLICABLE'; Class = '' }
+        # Install-WinGetPackage's VagueCriteriaException (wgt-gq8.42).
+        @{ Hex = '8A150016'; Name = 'MULTIPLE_APPLICATIONS_FOUND'; Class = '' }
+        @{ Hex = '80004004'; Name = 'E_ABORT'; Class = '' }
+        @{ Hex = '80073D19'; Name = 'ERROR_DEPLOYMENT_BLOCKED_BY_USER_LOG_OFF'; Class = '' }
+        # A missing or corrupted source, which Initialize-Winget resets (review finding P3-25).
+        @{ Hex = '8A15000B'; Name = 'SOURCES_INVALID'; Class = 'SourceBroken' }
+        @{ Hex = '8A15000F'; Name = 'SOURCE_DATA_MISSING'; Class = 'SourceBroken' }
+        @{ Hex = '8A150012'; Name = 'SOURCE_NAME_DOES_NOT_EXIST'; Class = 'SourceBroken' }
+        @{ Hex = '8A150015'; Name = 'NO_SOURCES_DEFINED'; Class = 'SourceBroken' }
+        @{ Hex = '8A15003F'; Name = 'SOURCE_DATA_INTEGRITY_FAILURE'; Class = 'SourceBroken' }
+        # A source that cannot be opened may be a network failure, which a reset does not fix.
+        @{ Hex = '8A150045'; Name = 'SOURCE_OPEN_FAILED'; Class = '' }
+        # App Installer registration and repair (issues #265, #279, review finding P3-27).
+        @{ Hex = '80073CF3'; Name = 'ERROR_INSTALL_RESOLVE_DEPENDENCY_FAILED'; Class = '' }
+        @{ Hex = '80073D06'; Name = 'ERROR_INSTALL_PACKAGE_DOWNGRADE'; Class = '' }
+        # winget.exe not starting at all, reported for winget run outside its package as SYSTEM
+        # (review finding P2-24).
+        @{ Hex = 'C0000135'; Name = 'STATUS_DLL_NOT_FOUND'; Class = '' }
+    ) {
+        $code = [Convert]::ToInt32($Hex, 16)
+
+        $info = Get-WingetExitCodeInfo -ExitCode $code
+
+        $info.ExitCode | Should -Be $code
+        $info.Hex | Should -Be "0x$Hex"
+        $info.Name | Should -Be $Name
+        $info.Class | Should -Be $Class
+        $info.Meaning | Should -Not -BeNullOrEmpty
+    }
+
+    It 'Returns nothing for <Case>' -ForEach @(
+        @{ Case = 'success (0)'; Code = 0 }
+        @{ Case = 'no exit code'; Code = $null }
+        @{ Case = 'a code it does not know'; Code = 1 }
+    ) {
+        Get-WingetExitCodeInfo -ExitCode $Code | Should -BeNullOrEmpty
+    }
+
+    It 'Gives every named code a meaning that can follow "Failed to install: X (" and is plain ASCII' {
+        # The generated installer must stay ASCII (Windows PowerShell 5.1 parses it), and the meaning
+        # is the first clause of a failure reason.
+        $definition = (Get-Command Get-WingetExitCodeInfo).Definition
+        $hexes = [regex]::Matches($definition, "'0x([0-9A-F]{8})' = @\(") | ForEach-Object { $_.Groups[1].Value }
+        @($hexes).Count | Should -BeGreaterThan 40
+
+        foreach ($hex in $hexes) {
+            $info = Get-WingetExitCodeInfo -ExitCode ([Convert]::ToInt32($hex, 16))
+            $info.Name | Should -Match '^[A-Z0-9_]+$'
+            $info.Meaning | Should -Match '^[a-z0-9]'
+            $info.Meaning | Should -Not -Match '[^\x20-\x7E]'
+            $info.Meaning | Should -Not -Match '[.;]$'
+        }
+    }
+
+    It 'Is the one source of the symbols the code, the tests and the docs give a known code' {
+        # A comment and a test once gave 0x80073D19 another name, ERROR_INSTALL_USER_LOGOFF, while
+        # this table, the readme and CLAUDE.md said ERROR_DEPLOYMENT_BLOCKED_BY_USER_LOG_OFF (review
+        # finding P3-51). Wherever a known code is written next to a symbol ("0x8A150102
+        # INSTALL_INSTALL_IN_PROGRESS", "0x80073D19 (ERROR_...)"), the symbol must be this table's
+        # name, or winget's full APPINSTALLER_CLI_ERROR_ form of it. The generated installer is left
+        # out: -Check keeps it equal to the module.
+        # Each file is read whole, so a pair that a line break splits, with the next line's comment
+        # leader and indentation between the two ("0x80073d19" at the end of one help line and
+        # "(ERROR_..." on the next, as in Install-WingetPackage's help), is checked too.
+        $repoRoot = Split-Path -Parent $PSScriptRoot
+        $files = @(
+            foreach ($folder in 'WingetAppSetup', 'build', 'rmm', 'e2e', 'tests') {
+                Get-ChildItem -LiteralPath (Join-Path $repoRoot $folder) -Recurse -File |
+                    Where-Object { $_.Extension -in '.ps1', '.psm1', '.psd1' }
+            }
+            Get-ChildItem -LiteralPath (Join-Path $repoRoot '.github') -Recurse -File |
+                Where-Object { $_.Extension -in '.yml', '.yaml', '.md' }
+            Get-ChildItem -LiteralPath $repoRoot -File |
+                Where-Object { ($_.Extension -in '.md', '.ps1') -and $_.Name -ne 'winget-app-install.ps1' }
+        )
+        $pairPattern = '0x(?<hex>[0-9A-Fa-f]{8})[\s(`''"#*>]{1,12}(?<symbol>[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+)\b'
+
+        $checked = 0
+        $mismatches = foreach ($file in $files) {
+            $text = [System.IO.File]::ReadAllText($file.FullName)
+            foreach ($match in [regex]::Matches($text, $pairPattern)) {
+                $info = Get-WingetExitCodeInfo -ExitCode ([Convert]::ToInt32($match.Groups['hex'].Value, 16))
+                if (-not $info) {
+                    continue
+                }
+                $checked++
+                $symbol = $match.Groups['symbol'].Value
+                if ($symbol -cne $info.Name -and $symbol -cne ('APPINSTALLER_CLI_ERROR_' + $info.Name)) {
+                    # The line the code is on.
+                    $lineNumber = 1 + [regex]::Matches($text.Substring(0, $match.Index), "`n").Count
+                    '{0}:{1}: {2} {3} (the table says {4})' -f $file.FullName.Substring($repoRoot.Length + 1), $lineNumber, $info.Hex, $symbol, $info.Name
+                }
+            }
+        }
+
+        # The scan must keep finding the pairs, or it would pass on nothing.
+        $checked | Should -BeGreaterThan 20
+        (@($mismatches) -join [Environment]::NewLine) | Should -BeNullOrEmpty
+    }
+}
+
+Describe 'Format-WingetExitCode' {
+    It 'Prints a known code in hex with its name' {
+        Format-WingetExitCode -ExitCode -1978334974 | Should -Be '0x8A150102 INSTALL_INSTALL_IN_PROGRESS'
+    }
+
+    It 'Prints <Case> in hex only' -ForEach @(
+        @{ Case = 'an unknown code'; Code = 1; Expected = '0x00000001' }
+        @{ Case = 'success'; Code = 0; Expected = '0x00000000' }
+        @{ Case = 'an unknown HRESULT'; Code = -2147024891; Expected = '0x80070005' }
+    ) {
+        Format-WingetExitCode -ExitCode $Code | Should -Be $Expected
+    }
+}
+
+Describe 'Test-RestartRequiredFirst' {
+    It 'Is true for 0x8A15010A, the installer that cannot run until Windows restarts' {
+        Test-RestartRequiredFirst -InstallResult @{ ExitCode = -1978334966 } | Should -BeTrue
+    }
+
+    It 'Is false for <Case>' -ForEach @(
+        @{ Case = 'no install result'; Result = $null }
+        @{ Case = 'no exit code'; Result = @{ ExitCode = $null } }
+        @{ Case = 'success'; Result = @{ ExitCode = 0 } }
+        @{ Case = 'a restart that finishes the install (0x8A150109)'; Result = @{ ExitCode = -1978334967 } }
+        @{ Case = 'another installation in progress'; Result = @{ ExitCode = -1978334974 } }
+    ) {
+        Test-RestartRequiredFirst -InstallResult $Result | Should -BeFalse
+    }
+}
+
+Describe 'Test-WingetRestartRequiredResult' {
+    It 'Is true for <Case>' -ForEach @(
+        @{ Case = 'winget 1.6 and older (0x8A150109)'; Code = -1978334967; Output = @() }
+        @{ Case = 'an installer that started a restart (0x8A15010B, MSI 1641)'; Code = -1978334965; Output = @() }
+        @{ Case = 'winget 1.7 and later (exit 0 with its restart warning)'; Code = 0; Output = @('Starting package install...', 'Restart your PC to finish installation.') }
+    ) {
+        Test-WingetRestartRequiredResult -ExitCode $Code -Output $Output | Should -BeTrue
+    }
+
+    # wgt-gq8.42: Microsoft.WinGet.Client prints no warning and never sets RebootRequired; an
+    # installer's 3010 arrives as Status Ok with InstallerErrorCode 3010.
+    It 'Is true for an install the WinGet client engine reports as 0 with installer exit code 3010' {
+        Test-WingetRestartRequiredResult -ExitCode 0 -Output @() -InstallerErrorCode 3010 | Should -BeTrue
+    }
+
+    It 'Is false for the WinGet client engine''s <Case>' -ForEach @(
+        @{ Case = 'plain success'; Code = 0; InstallerCode = 0 }
+        @{ Case = 'failure with installer exit code 3010'; Code = -1978335159; InstallerCode = 3010 }
+        @{ Case = 'success with another installer code'; Code = 0; InstallerCode = 1641 }
+        @{ Case = 'success with no installer code (winget.exe)'; Code = 0; InstallerCode = $null }
+    ) {
+        Test-WingetRestartRequiredResult -ExitCode $Code -Output @() -InstallerErrorCode $InstallerCode | Should -BeFalse
+    }
+
+    It 'Is false for <Case>' -ForEach @(
+        @{ Case = 'a plain success'; Code = 0; Output = @('Starting package install...', 'Successfully installed') }
+        @{ Case = 'no exit code (winget did not run to the end)'; Code = $null; Output = @('Restart your PC to finish installation.') }
+        @{ Case = 'a restart required before the installer can run (0x8A15010A)'; Code = -1978334966; Output = @() }
+        @{ Case = 'a failure that printed the restart warning'; Code = -1978334974; Output = @('Restart your PC to finish installation.') }
+        @{ Case = 'no output'; Code = 0; Output = $null }
+    ) {
+        Test-WingetRestartRequiredResult -ExitCode $Code -Output $Output | Should -BeFalse
+    }
+}

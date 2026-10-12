@@ -1,0 +1,1 @@
+{"operation":"Install","stage":"call","ok":true,"status":"InstallError","hresult":-1978335159,"installerErrorCode":1603,"rebootRequired":false,"id":"Contoso.MsiApp","protocol":1,"moduleVersion":"1.29.380","psVersion":"7.6.6","architecture":"X64"}

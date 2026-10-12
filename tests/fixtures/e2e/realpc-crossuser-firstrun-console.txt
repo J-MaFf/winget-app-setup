@@ -1,0 +1,23 @@
+Transcript started, output file is C:\ProgramData\winget-app-setup\logs\install-20261009-100000-bootstrap.log
+Logging the PowerShell 7 bootstrap to: C:\ProgramData\winget-app-setup\logs\install-20261009-100000-bootstrap.log
+Installer build: 1.0.0+7c0ffee1
+This installer requires PowerShell 7+ (pwsh), but this session is Windows PowerShell. Handing off...
+PowerShell 7 (pwsh) is required but not installed. Installing it now...
+Installing PowerShell 7 via winget...
+PowerShell 7 is installed.
+Relaunching the installer under PowerShell 7: C:\Program Files\PowerShell\7\pwsh.exe
+Transcript started, output file is C:\ProgramData\winget-app-setup\logs\install-20261009-100105.log
+Logging this run to: C:\ProgramData\winget-app-setup\logs\install-20261009-100105.log
+Installer build: 1.0.0+7c0ffee1
+Cross-user elevation detected: running as 'CONTOSO\admin-jmaffiola' while 'CONTOSO\stduser' owns the interactive session.
+Updating the winget source for 'CONTOSO\admin-jmaffiola' (this may take a moment)...
+Downloading the winget source package from https://cdn.winget.microsoft.com/cache/source2.msix...
+Verified its signature (CN=Microsoft Corporation); registering it for this account...
+The winget source package is registered for this account (from https://cdn.winget.microsoft.com/cache/source2.msix).
+The winget source opens for 'CONTOSO\admin-jmaffiola'.
+Successfully installed: 7zip.7zip
+Deferred: Google.GoogleDrive (winget found no machine-wide installer for it)
+Skipping: Microsoft.WindowsTerminal (already provisioned for every user on this PC)
+Auto-updates: Configured (Winget-AutoUpdate v2.12.0).
+RESULT: exit=0 installed=7 skipped=3 deferred=1 failed=0 notattempted=0 autoupdates=Configured restart=no build=1.0.0+7c0ffee1 log=C:\ProgramData\winget-app-setup\logs\install-20261009-100105.log
+The PowerShell 7 run ended with exit code 0.

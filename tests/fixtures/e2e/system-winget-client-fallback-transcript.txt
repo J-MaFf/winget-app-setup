@@ -1,0 +1,93 @@
+**********************
+PowerShell transcript start
+Start time: 20261006061430
+Username: WORKGROUP\SYSTEM
+RunAs User: WORKGROUP\SYSTEM
+Configuration Name: 
+Machine: RUNNERVM00 (Microsoft Windows NT 10.0.26100.0)
+Host Application: C:\Program Files\PowerShell\7\pwsh.dll -NoProfile -NonInteractive -ExecutionPolicy Bypass -File C:\Windows\Temp\winget-app-setup-pwsh-3c1f0e2d4b5a69788796a5b4c3d2e1f0\winget-app-install.ps1 -NonInteractive
+Process ID: 5120
+PSVersion: 7.6.6
+PSEdition: Core
+**********************
+Transcript started, output file is C:\ProgramData\winget-app-setup\logs\install-20261006-061430.log
+Logging this run to: C:\ProgramData\winget-app-setup\logs\install-20261006-061430.log
+Installer build: 1.0.0+7c2e91ab
+Starting...
+Running as SYSTEM (for example from an RMM agent): installing for the whole PC only, with the Microsoft.WinGet.Client module (requested by WINGET_APP_SETUP_SYSTEM_ENGINE), or the machine-wide winget.exe if the module is not ready. An app with no machine-wide installer is not installed: it is reported as Deferred, with how it can still be installed for the user.
+Downloading Microsoft.WinGet.Client 1.29.380 from the PowerShell Gallery...
+Could not download Microsoft.WinGet.Client (No such host is known. (www.powershellgallery.com:443)); trying again in 15 seconds...
+WinGet client module: NOT READY - downloading https://www.powershellgallery.com/api/v2/package/Microsoft.WinGet.Client/1.29.380 failed: No such host is known. (www.powershellgallery.com:443).
+Winget is available (v1.11.510): C:\Program Files\WindowsApps\Microsoft.DesktopAppInstaller_1.26.510.0_x64__8wekyb3d8bbwe\winget.exe (App Installer for this PC, 1.26.510.0).
+Install engine: winget.exe (C:\Program Files\WindowsApps\Microsoft.DesktopAppInstaller_1.26.510.0_x64__8wekyb3d8bbwe\winget.exe), not the requested Microsoft.WinGet.Client: the module is not ready: downloading https://www.powershellgallery.com/api/v2/package/Microsoft.WinGet.Client/1.29.380 failed: No such host is known. (www.powershellgallery.com:443).
+Updating the winget source for SYSTEM (this may take a moment)...
+The winget source is up to date for SYSTEM.
+Installing the following Apps:
+7zip.7zip
+GlavSoft.TightVNC
+Adobe.Acrobat.Reader.64-bit
+Adobe.Acrobat.Reader.32-bit
+Google.Chrome
+Google.GoogleDrive
+Git.Git
+Klocman.BulkCrapUninstaller
+Dell.CommandUpdate.Universal
+Microsoft.PowerShell
+Microsoft.WindowsTerminal
+Installing: 7zip.7zip
+  > winget install -e --accept-source-agreements --accept-package-agreements --disable-interactivity --source winget --id 7zip.7zip --scope machine --silent --log C:\ProgramData\winget-app-setup\logs\winget-install-7zip.7zip-20261006-061512.log
+    Found an existing package already installed. Trying to upgrade the installed package...
+    Successfully installed
+Successfully installed: 7zip.7zip
+Installing: GlavSoft.TightVNC
+  > winget install -e --accept-source-agreements --accept-package-agreements --disable-interactivity --source winget --id GlavSoft.TightVNC --scope machine --silent --log C:\ProgramData\winget-app-setup\logs\winget-install-GlavSoft.TightVNC-20261006-061512.log
+    Found an existing package already installed. Trying to upgrade the installed package...
+    Successfully installed
+Successfully installed: GlavSoft.TightVNC
+Not configured: GlavSoft.TightVNC (no server password was supplied)
+Installing: Adobe.Acrobat.Reader.64-bit
+  > winget install -e --accept-source-agreements --accept-package-agreements --disable-interactivity --source winget --id Adobe.Acrobat.Reader.64-bit --scope machine --silent --log C:\ProgramData\winget-app-setup\logs\winget-install-Adobe.Acrobat.Reader.64-bit-20261006-061512.log
+    Found an existing package already installed. Trying to upgrade the installed package...
+    Successfully installed
+Successfully installed: Adobe.Acrobat.Reader.64-bit
+Skipping: Adobe.Acrobat.Reader.32-bit (not applicable: ARM64 and 32-bit Windows only; x64 PCs get the 64-bit Reader)
+Installing: Google.Chrome
+  > winget install -e --accept-source-agreements --accept-package-agreements --disable-interactivity --source winget --id Google.Chrome --scope machine --silent --log C:\ProgramData\winget-app-setup\logs\winget-install-Google.Chrome-20261006-061512.log
+    Found an existing package already installed. Trying to upgrade the installed package...
+    Successfully installed
+Successfully installed: Google.Chrome
+Installing: Google.GoogleDrive
+  > winget install -e --accept-source-agreements --accept-package-agreements --disable-interactivity --source winget --id Google.GoogleDrive --scope machine --silent --log C:\ProgramData\winget-app-setup\logs\winget-install-Google.GoogleDrive-20261006-061512.log
+    Found an existing package already installed. Trying to upgrade the installed package...
+    Successfully installed
+Successfully installed: Google.GoogleDrive
+Installing: Git.Git
+  > winget install -e --accept-source-agreements --accept-package-agreements --disable-interactivity --source winget --id Git.Git --scope machine --silent --log C:\ProgramData\winget-app-setup\logs\winget-install-Git.Git-20261006-061512.log
+    Found an existing package already installed. Trying to upgrade the installed package...
+    Successfully installed
+Successfully installed: Git.Git
+Installing: Klocman.BulkCrapUninstaller
+  > winget install -e --accept-source-agreements --accept-package-agreements --disable-interactivity --source winget --id Klocman.BulkCrapUninstaller --scope machine --silent --log C:\ProgramData\winget-app-setup\logs\winget-install-Klocman.BulkCrapUninstaller-20261006-061512.log
+    Found an existing package already installed. Trying to upgrade the installed package...
+    Successfully installed
+Successfully installed: Klocman.BulkCrapUninstaller
+Skipping: Dell.CommandUpdate.Universal (not applicable: Dell hardware with x64 Windows only; winget has no ARM64 installer for it)
+Skipping: Microsoft.PowerShell (already installed)
+Skipping: Microsoft.WindowsTerminal (already provisioned for every user on this PC)
+Microsoft.WindowsAppRuntime.1.8 is missing; installing the pinned Windows App Runtime 1.8.12 (framework 8000.994.2142.0, X64) for all users first...
+Windows App Runtime: installed Microsoft.WindowsAppRuntime.1.8 8000.994.2142.0 (X64) for all users.
+Summary:
+
+Status    Apps
+------    ----
+Installed 7zip.7zip, GlavSoft.TightVNC, Adobe.Acrobat.Reader.64-bit, Google.Chrome, Google.GoogleDrive, Git.Git, Klocman.BulkCrapUninstaller
+Skipped   Adobe.Acrobat.Reader.32-bit, Dell.CommandUpdate.Universal, Microsoft.PowerShell, Microsoft.WindowsTerminal
+Configuration: NOT DONE for GlavSoft.TightVNC (no server password was supplied) - installed, but the post-install configuration did not finish. Not counted as failed; re-run the installer once the reason is fixed.
+Install engine: Microsoft.WinGet.Client was requested but not used (the module is not ready: downloading https://www.powershellgallery.com/api/v2/package/Microsoft.WinGet.Client/1.29.380 failed: No such host is known. (www.powershellgallery.com:443)); this run installed with winget.exe.
+Auto-updates: Configured (Winget-AutoUpdate v2.12.0).
+Full transcript of this run: C:\ProgramData\winget-app-setup\logs\install-20261006-061430.log
+RESULT: exit=0 installed=7 skipped=4 deferred=0 failed=0 notattempted=0 autoupdates=Configured restart=no build=1.0.0+7c2e91ab log=C:\ProgramData\winget-app-setup\logs\install-20261006-061430.log
+**********************
+PowerShell transcript end
+End time: 20261006063350
+**********************

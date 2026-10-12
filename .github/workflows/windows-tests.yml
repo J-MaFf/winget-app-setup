@@ -4,15 +4,33 @@ name: Windows Tests (Pester)
 # test execution happens, since the Claude Code action (claude.yml) cannot run on
 # Windows runners. @claude (on ubuntu) can read these results via `actions: read`.
 #
-# Runs on the self-hosted win-test runner (Windows Server 2025, pwsh 7.6.3). Module
-# installs (Microsoft.WinGet.Client, Pester) persist across runs there, so the guarded
-# installs below are no-ops after the first run.
+# Which runner: trusted runs (pushes to main, manual dispatch, and pull requests from a branch
+# of this repository) use the self-hosted win-test runner (Windows Server 2025, pwsh 7.6.3).
+# Module installs (Microsoft.WinGet.Client, Pester) persist across runs there, so the guarded
+# installs below are no-ops after the first run. That runner is a persistent machine and runs
+# jobs elevated, so pull requests from forks run on GitHub-hosted windows-latest instead, a
+# throwaway VM where the guarded installs run every time. The choice fails closed: anything
+# not listed as trusted, including a PR whose fork has been deleted, gets windows-latest.
+# Dispatch with "hosted" ticked to run the windows-latest leg without a fork PR.
+#
+# This only covers fork PRs that leave this file alone. A pull_request run uses the workflow
+# file from the PR's merge commit, so a fork PR can rewrite runs-on. The repository setting
+# "Require approval for all external contributors" (check .github/ changes before approving a
+# run) and a job-started hook on the runner that refuses fork PR jobs close that gap.
+#
+# `pester` (the job id) is the required status check on main, whichever runner the job lands
+# on: renaming the job, or giving it a different `name:`, blocks every PR from merging.
 
 on:
   push:
     branches: [main]
   pull_request:
   workflow_dispatch:
+    inputs:
+      hosted:
+        description: Run on GitHub-hosted windows-latest (the runner fork PRs use) instead of the self-hosted runner
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -23,19 +41,27 @@ concurrency:
 
 jobs:
   pester:
-    runs-on: [self-hosted, windows]
-    timeout-minutes: 15
+    runs-on: >-
+      ${{ (github.event_name == 'push'
+      || (github.event_name == 'workflow_dispatch' && !inputs.hosted)
+      || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository))
+      && fromJSON('["self-hosted", "windows"]') || 'windows-latest' }}
+    # The suite took about 9 minutes on the self-hosted runner before every build-guard fixture
+    # built the uninstaller too, which roughly doubled BuildGuards.Tests.ps1; windows-latest is slower.
+    timeout-minutes: 25
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
 
-      - name: Install Microsoft.WinGet.Client (mockable winget cmdlets)
+      - name: Install Microsoft.WinGet.Client (Repair-WinGetPackageManager)
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          # The unit suite mocks Get-WinGetPackage etc.; Pester can only mock commands that
-          # already exist, so the Microsoft.WinGet.Client cmdlets must be present on the runner.
-          if (-not (Get-Command Get-WinGetPackage -ErrorAction SilentlyContinue)) {
+          # The installer's only cmdlet from this module is Repair-WinGetPackageManager, which it
+          # installs the module for only when it has to repair winget. Here it is needed twice: the
+          # build guard below requires every entry of build/windows-only-commands.txt to resolve on
+          # Windows, and the repair tests mock the real cmdlet with its typed parameters.
+          if (-not (Get-Command Repair-WinGetPackageManager -ErrorAction SilentlyContinue)) {
             Install-Module Microsoft.WinGet.Client -Force -SkipPublisherCheck -Scope CurrentUser
           }
           Import-Module Microsoft.WinGet.Client
@@ -43,15 +69,16 @@ jobs:
       - name: Verify generated installer is in sync with the module
         shell: pwsh
         run: |
-          # Verify winget-app-install.ps1 has not drifted from the WingetAppSetup module, and
-          # that the installer invokes no hyphenated command that resolves to neither a module
-          # function nor an external cmdlet. Both checks live in the build script's -Check mode,
-          # which exits non-zero on failure; that propagates through $LASTEXITCODE and fails the job.
+          # Verify winget-app-install.ps1 and winget-app-uninstall.ps1 have not drifted from the
+          # WingetAppSetup module, and that neither invokes a hyphenated command that resolves to
+          # neither a module function nor an external cmdlet. Both checks live in the build
+          # script's -Check mode, which exits non-zero on failure; that propagates through
+          # $LASTEXITCODE and fails the job.
           #
           # This runs AFTER the Microsoft.WinGet.Client install: the undefined-reference guard
-          # resolves external cmdlets via Get-Command, so the WinGet client cmdlets the installer
-          # calls (Get-WinGetPackage, etc.) must already be discoverable on the runner or the guard
-          # false-positives on them.
+          # resolves external cmdlets via Get-Command, so the WinGet client cmdlet the module
+          # calls (Repair-WinGetPackageManager) must already be discoverable on the runner or the
+          # guard false-positives on it.
           pwsh -File ./build/Build-WingetInstallScript.ps1 -Check
 
       - name: Run Pester
