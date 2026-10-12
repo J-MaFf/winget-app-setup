@@ -860,7 +860,9 @@ function Invoke-PowerShell7Bootstrap {
             # --disable-interactivity always (issue #230): the one-liner reads as interactive, so it
             # was the run most likely to let winget stop and ask. Get-WingetAgreementArgs keeps this
             # call in line with the others.
-            $wingetArguments = @('install', '--id', 'Microsoft.PowerShell', '--exact', '--source', 'winget') + (Get-WingetAgreementArgs)
+            # --scope machine: the package lists a per-user MSIX first, which winget would pick and
+            # which installs for this account only, where Find-PowerShell7 may not see it (wgt-gq8.76).
+            $wingetArguments = @('install', '--id', 'Microsoft.PowerShell', '--exact', '--source', 'winget', '--scope', 'machine') + (Get-WingetAgreementArgs)
             if (Test-EffectiveNonInteractive -NonInteractive:$NonInteractive) {
                 # Unattended: the MSI installs with /quiet instead of /passive.
                 $wingetArguments += '--silent'

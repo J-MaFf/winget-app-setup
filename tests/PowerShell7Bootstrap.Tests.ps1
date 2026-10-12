@@ -1031,6 +1031,15 @@ Describe 'Invoke-PowerShell7Bootstrap' {
             Should -Invoke Start-Process -Times 1 -Exactly -ParameterFilter { $FilePath -eq 'C:\pf7\pwsh.exe' }
         }
 
+        It 'Asks winget for the machine-wide installer, never the per-user MSIX it lists first (wgt-gq8.76)' {
+            Invoke-PowerShell7Bootstrap -CommandPath 'C:\repo\winget-app-install.ps1' | Out-Null
+
+            Should -Invoke Invoke-WingetProcess -Times 1 -Exactly -ParameterFilter {
+                $scopeAt = [array]::IndexOf([string[]]$ArgumentList, '--scope')
+                $scopeAt -ge 0 -and $ArgumentList[$scopeAt + 1] -eq 'machine'
+            }
+        }
+
         It 'Passes --disable-interactivity and never prompts' {
             Invoke-PowerShell7Bootstrap -CommandPath 'C:\repo\winget-app-install.ps1' | Out-Null
 
