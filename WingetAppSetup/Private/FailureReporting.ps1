@@ -108,7 +108,7 @@ function Write-InstallerExitNotice {
             3 { $why = 'the app catalog failed validation (see above)' }
             4 { $why = 'administrator rights are required, and this run was not elevated, or Group Policy''s execution policy keeps the elevated window from running the installer (see above)' }
             5 { $why = 'the run was aborted before it finished (see above)' }
-            6 { $why = 'another run of the installer is in progress on this PC' }
+            6 { $why = 'another run of the installer or the uninstaller is in progress on this PC' }
             7 { $why = 'PowerShell 7 could not be installed, or the installer could not be relaunched under it (see above)' }
         }
     }

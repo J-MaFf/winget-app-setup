@@ -785,8 +785,8 @@ Describe 'One run at a time, and the RESULT line and last-run.json of every run 
         $result = Invoke-ChildInstaller -Arguments @('-File', $path, '-SkipSystemCheck', '-NonInteractive')
 
         $result.ExitCode | Should -Be 6
-        $result.Output | Should -Match 'Another run of this installer is in progress on this PC'
-        $result.Output | Should -Match 'The installer stopped early with exit code 6: another run of the installer is in progress on this PC'
+        $result.Output | Should -Match 'Another run of the installer or the uninstaller is in progress on this PC'
+        $result.Output | Should -Match 'The installer stopped early with exit code 6: another run of the installer or the uninstaller is in progress on this PC'
         $result.Output | Should -Not -Match 'install ran'
         $result.Output | Should -Not -Match 'HOUSEKEEPING RAN'
         $result.Output | Should -Not -Match 'UNEXPECTED ERROR|stopped before it finished'

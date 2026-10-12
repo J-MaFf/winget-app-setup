@@ -1190,7 +1190,7 @@ installed, and with `-WhatIf` when the fix would succeed. It exits 1, with `-Wha
 | 3 | App-definition validation failed (for example an invalid `scope`, `arch`, `postInstall` or `userPhase` value, see [Catalog entry fields](#catalog-entry-fields)), or no valid app definitions remain |
 | 4 | Administrator rights are required and the run was not elevated: the UAC prompt was declined or the elevated window could not be started, the run is non-interactive (no prompt is shown), it runs through `irm \| iex` in PowerShell 7, `Invoke-WingetInstall` was called from the imported module, or Group Policy sets the Windows PowerShell execution policy to `AllSigned` or `Restricted`: for the PC, so no UAC prompt is shown, or for the account that approved the prompt, so the elevated window stops before it runs anything (see [Administrator rights](#administrator-rights)) |
 | 5 | The run was aborted before it finished: an unexpected error (the message and stack trace are in the log), the run was stopped from outside (Ctrl+C, the console closing, an installer stopping the console) when run from a file or non-interactively, the installer file changed before its elevated copy could run (see [Administrator rights](#administrator-rights)), or PowerShell runs the installer in Constrained Language Mode (an App Control for Business or AppLocker policy), which the installer checks before anything else. With `-CollectDiagnostics`, the installer installs nothing and exits 0 when it saved the diagnostics bundle, 5 when it could not (see [Diagnostics bundle](#diagnostics-bundle--collectdiagnostics)). The machine phase `rmm/Invoke-WingetAppSetup.ps1` also exits 5, without running the installer, when its pins are not set, the download failed or the SHA256 does not match; otherwise it passes the installer's code back unchanged |
-| 6 | Another run of the installer is in progress on this PC (started by an RMM job, a scheduled task or someone else). This run stopped before its pre-flight checks and changed nothing. Run it again once the other run has finished (see [One run at a time](#one-run-at-a-time)) |
+| 6 | Another run of the installer, or of `winget-app-uninstall.ps1`, is in progress on this PC (started by an RMM job, a scheduled task or someone else). This run stopped before its pre-flight checks and changed nothing. Run it again once the other run has finished (see [One run at a time](#one-run-at-a-time)) |
 | 7 | Started from Windows PowerShell 5.1, the installer could not install PowerShell 7 or could not relaunch itself under it, including when Group Policy sets PowerShell 7's execution policy to `AllSigned` or `Restricted` (checked before PowerShell 7 is installed) |
 | 8 | The apps are fine and winget still works, but automatic updates will not work or could not be verified. The summary's `Auto-updates:` line says which: `FAILED` (Winget-AutoUpdate could not be installed), `NOT CONFIGURED` (skipped because the Windows App Runtime the latest winget release needs, today `Microsoft.WindowsAppRuntime.1.8`, is missing and the installer could not install it, for example because that release needs a newer build or another family than the installer's pinned one), `AT RISK` (installed while that framework is missing and could not be installed) or `UNHEALTHY` (installed, but its `\WAU\Winget-AutoUpdate` task is missing, disabled, has no enabled trigger or could not be checked; see [Automatic updates](#automatic-updates)) |
 | 9 | The run's time budget ran out (`-MaxRuntimeMinutes`, or `WINGET_APP_SETUP_MAX_RUNTIME_MINUTES` for the one-liner; see [Time budget for RMM jobs](#time-budget-for-rmm-jobs--maxruntimeminutes)): from then on the run started no app install, retry or Winget-AutoUpdate setup, so some apps (`Not attempted` in the summary, `NotAttempted` in `last-run.json`) or the Winget-AutoUpdate setup (`Auto-updates: NOT ATTEMPTED`) were not attempted. No app failed and winget still works. Run the installer again to finish; 9 is not a success code |
@@ -1214,14 +1214,16 @@ failed run. Codes 5, 6 and 7, and code 1 for a failed pre-flight check, come fro
 Only one real run works on a PC at a time. An elevated run, or one as SYSTEM, takes a machine-wide
 lock (the `Global\winget-app-setup-run` mutex) before its pre-flight checks. A run started while
 another one holds it stops at once with exit code 6
-(`Another run of this installer is in progress on this PC ...`): it neither waits for that run nor
-stops it. A dry run takes no lock, and neither does a run that is not elevated: the elevated run it
-starts takes the lock. The lock is released as soon as the run's outcome is decided, before any
-`Press any key to exit...`, so a window left open does not block the next scheduled run. The
+(`Another run of the installer or the uninstaller is in progress on this PC ...`): it neither waits
+for that run nor stops it. [`winget-app-uninstall.ps1`](#uninstall) takes the same lock, so an
+install and an uninstall never run at once either. A dry run takes no lock, and neither does a run
+that is not elevated: the elevated run it starts takes the lock. The lock is released as soon as
+the run's outcome is decided, before any `Press any key to exit...`, so a window left open does not
+block the next scheduled run. The
 [TightVNC password prompt](#tightvnc-server-password) at the start of an interactive run is asked
 while the lock is held, so it waits at most 5 minutes for someone to start typing. A run that
 is killed releases it too. Any process that holds the mutex's name makes a run exit 6, not only
-another run of the installer.
+another run of the installer or the uninstaller.
 
 ### Run result
 
@@ -1339,15 +1341,16 @@ write here, so it logs to that user's own
 per-app `--log` files next to it, and keeps its state in
 `%LOCALAPPDATA%\winget-app-setup\user-phase.json`.
 
-Old logs are removed automatically. The run that holds the run lock (a real, elevated run) keeps
-the newest 30 `install-*.log` transcripts (bootstrap, `-rmm` and `-whatif` ones included) and
-deletes the older ones, together with the `winget-*` and `pwsh-msi-*` logs older than the oldest transcript it
-keeps. Other files there, such as `last-run.json` and the `wau-msi-*` logs, are left alone. It also
-removes the installer's temporary copy folders (`winget-app-setup-<id>`,
-`winget-app-setup-elevate-<id>`, `winget-app-setup-pwsh-<id>`) that a stopped run left behind, once
-they are a day old (the uninstaller's elevated copies use the same folders, and a later installer
-run removes the ones a stopped uninstall left behind): from `%SystemRoot%\Temp` and, for a run as
-SYSTEM, from SYSTEM's own temp folders. Only a folder of files owned by SYSTEM or Administrators is
+Old logs are removed automatically. The installer run that holds the run lock (a real, elevated
+run) keeps the newest 30 `install-*.log` transcripts (bootstrap, `-rmm` and `-whatif` ones
+included) and deletes the older ones, together with the `winget-*` and `pwsh-msi-*` logs older than
+the oldest transcript it keeps. Other files there, such as `last-run.json` and the `wau-msi-*`
+logs, are left alone. Every run that holds the run lock, of the installer or of
+`winget-app-uninstall.ps1` (which keeps no transcript, so it prunes no logs), also removes the
+temporary copy folders (`winget-app-setup-<id>`, `winget-app-setup-elevate-<id>`,
+`winget-app-setup-pwsh-<id>`) that a stopped run of either script left behind, once they are a day
+old (the two scripts' elevated copies use the same folders), never the running script's own: from
+`%SystemRoot%\Temp` and, for a run as SYSTEM, from SYSTEM's own temp folders. Only a folder of files owned by SYSTEM or Administrators is
 removed. An elevated run by an administrator does not clean that administrator's own `%TEMP%` (a
 user profile folder), so copies a killed interactive run left there can be deleted by hand. It
 removes the Microsoft.WinGet.Client engine's `wingetclient-<id>` folders that a killed run left in
@@ -1712,6 +1715,11 @@ powershell -ExecutionPolicy Unrestricted -File .\winget-app-uninstall.ps1 -WhatI
 - `-NonInteractive` (or `WINGET_APP_SETUP_NONINTERACTIVE`, see
   [Unattended runs](#unattended-runs)) never shows a UAC prompt (it exits 4 when not elevated) and
   does not wait for a key press at the end.
+- A real run takes the installer's run lock first (see [One run at a time](#one-run-at-a-time)),
+  so it never runs at the same time as an install or another uninstall on the PC: started while
+  one is in progress, it changes nothing and exits 6. It then removes the temporary copy folders a
+  stopped run of either script left in `%SystemRoot%\Temp` (see [Logs](#logs)). A preview takes no
+  lock and removes nothing.
 
 | Code | Meaning |
 |------|---------|
@@ -1721,14 +1729,15 @@ powershell -ExecutionPolicy Unrestricted -File .\winget-app-uninstall.ps1 -WhatI
 | 3 | The app list has invalid entries or is empty |
 | 4 | Not elevated, and the UAC prompt was declined or could not be shown (a non-interactive run shows none), or the execution policy Group Policy sets would refuse the elevated run |
 | 5 | Stopped by an unexpected error; started without a script file (`irm \| iex`); or the file changed after the run started, or could not be read or copied, before its elevated run |
+| 6 | Another run of the installer or the uninstaller is in progress on this PC, so nothing was changed (see [One run at a time](#one-run-at-a-time)) |
 | 3010 | Done, and a restart finishes removing an app (its uninstaller returned 3010 or 1641) or Winget-AutoUpdate (its `msiexec` returned 3010) |
 
 When more than one applies, 1 ranks above 3010. A preview (`-WhatIf`) needs no administrator
 rights, exits 0 when winget cannot be started yet, and never exits 3010. Started without
 administrator rights, the window you started it in waits for the elevated run and exits with its
 code. The elevated window runs a checked copy of the file, as the installer's does (see
-[Administrator rights](#administrator-rights)). The uninstaller keeps no transcript, prints no
-`RESULT` line and takes no run lock.
+[Administrator rights](#administrator-rights)). The uninstaller keeps no transcript and prints no
+`RESULT` line.
 
 ## Testing on a real PC
 
@@ -1847,7 +1856,8 @@ throwaway VMs by construction:
 
 - **When it runs:** weekly (Mondays 06:00 UTC), on manual dispatch, and on pull requests. Every
   pull request starts the workflow. A `changes` job lets the four install jobs run only when the PR
-  touches the product (`WingetAppSetup/**`, `build/**`, `winget-app-install.ps1`, `rmm/**`) or the e2e
+  touches the product (`WingetAppSetup/**`, `build/**`, `winget-app-install.ps1`,
+  `winget-app-uninstall.ps1`, `rmm/**`) or the e2e
   machinery (`.github/workflows/e2e-install.yml`, `e2e/**`), and they install anyway if that job
   does not succeed. The filter is a job rather than a `paths:` filter so that `e2e-install` can be
   a required check: a job skipped by its `if:` reports success, while a workflow that `paths:`
@@ -1969,12 +1979,23 @@ throwaway VMs by construction:
   `arch` list gate it in the product itself, so the non-Dell runners exercise the gating for real
   on every run. The runners are x64, so the ARM64 side of the Reader split and of the Dell gate
   is not exercised.
+- **The uninstall pass:** after its assertions, the `e2e-install` leg runs the checkout's
+  `winget-app-uninstall.ps1 -NonInteractive` once from PowerShell 7
+  (`e2e/Invoke-UninstallPass.ps1`, when both install passes succeeded). It fails unless the
+  uninstaller exits 0 or 3010, reaches its summary and removes at least one app, `winget list` no
+  longer lists any catalog app it did not keep on purpose (it keeps PowerShell 7, which it runs in,
+  and Windows Terminal, which the installer made the default terminal), and the
+  `\WAU\Winget-AutoUpdate` task is gone. A diagnostics snapshot with Winget-AutoUpdate's logs is
+  taken just before it, since removing WAU removes them. The uninstaller's output is saved as
+  `uninstall-output.txt`, and the checks as `uninstall-pass.txt`, in the `e2e-diagnostics`
+  artifact; the parsing and the verdicts are tested against `tests/fixtures/e2e/uninstall-pass.txt`.
 - **Not covered yet:** Winget-AutoUpdate's own update run (the installer now installs
   `Microsoft.WindowsAppRuntime.1.8` and WAU on `windows-latest`, but no step starts WAU's task and
   checks that winget still starts afterwards), the catalog's own
   PowerShell install (`Install-PowerShellLatest`: PowerShell 7 is preinstalled in one leg and
   installed by the bootstrap in the other), the Endpoint Central user phase, the fleet health probe
-  and the at-logon fix, a TightVNC password, the uninstaller, a time budget that runs out (exit
+  and the at-logon fix, a TightVNC password, the uninstaller from Windows PowerShell 5.1 or as
+  SYSTEM, a time budget that runs out (exit
   code 9), an ARM64 PC, cross-user elevation (tier 2, below), and the Microsoft.WinGet.Client
   engine's fallback to `winget.exe` and its rarer results (an installer's 3010, an unknown id,
   Group Policy), which only the unit tests cover.

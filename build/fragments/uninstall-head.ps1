@@ -23,6 +23,10 @@
     had when the run started, in a new folder under %SystemRoot%\Temp that only SYSTEM and
     Administrators can change, so a file rewritten while the UAC prompt is up is not run.
 
+    A real run takes the installer's machine-wide run lock, so an install and an uninstall never
+    run at once on a PC (exit code 6 when another run holds it), and removes the leftover copies
+    a stopped run of either script left there, as the installer does.
+
     When someone is at the console, the run ends with 'Press any key to exit...', as the installer
     does, so the summary stays on screen: the elevated window closes as soon as the run ends, and
     the uninstaller keeps no transcript. A non-interactive run, a run as SYSTEM and a run under CI
@@ -42,7 +46,8 @@
     has invalid entries; 4 = not elevated, and the UAC prompt was declined or could not be shown (a
     non-interactive run shows none), or the execution policy Group Policy sets would refuse the
     elevated run; 5 = stopped by an unexpected error, started without a script file (irm | iex), or
-    the file changed or could not be copied before its elevated run.
+    the file changed or could not be copied before its elevated run; 6 = another run of the
+    installer or the uninstaller is in progress on this PC, so nothing was changed.
 #>
 param (
     [switch]$WhatIf,

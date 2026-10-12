@@ -107,12 +107,12 @@ param (
 # the function source under WingetAppSetup/Public and WingetAppSetup/Private, or the entry block in
 # build/fragments/tail.ps1, then re-run the build to regenerate this file.
 # See readme.md ("Project layout") for details.
-# Build id: 1.0.0+dbe76fb0 (module version + SHA256 fragment of this whole script; issue #189).
+# Build id: 1.0.0+219c1017 (module version + SHA256 fragment of this whole script; issue #189).
 # ------------------------------------------------------------------------------------------------
 
 # Content-derived build identity, logged at startup so a transcript from a remote machine
 # identifies exactly which installer build produced it (issue #189).
-$script:InstallerBuildId = '1.0.0+dbe76fb0'
+$script:InstallerBuildId = '1.0.0+219c1017'
 
 # ------------------------------------------------Functions------------------------------------------------
 
@@ -2962,7 +2962,7 @@ function Write-InstallerExitNotice {
             3 { $why = 'the app catalog failed validation (see above)' }
             4 { $why = 'administrator rights are required, and this run was not elevated, or Group Policy''s execution policy keeps the elevated window from running the installer (see above)' }
             5 { $why = 'the run was aborted before it finished (see above)' }
-            6 { $why = 'another run of the installer is in progress on this PC' }
+            6 { $why = 'another run of the installer or the uninstaller is in progress on this PC' }
             7 { $why = 'PowerShell 7 could not be installed, or the installer could not be relaunched under it (see above)' }
         }
     }
@@ -3436,7 +3436,7 @@ function Invoke-InstallerHousekeeping {
         }
         $copiesRemoved = Remove-StaleInstallerCopy -Root $TempRoot -MaxAgeHours $TempCopyMaxAgeHours -CurrentScriptPath $CurrentScriptPath
         if ($logsRemoved -gt 0 -or $copiesRemoved -gt 0) {
-            Write-Info ('Removed {0} old log file(s), keeping the logs of the newest {1} transcripts, and {2} leftover temporary copy folder(s) of the installer.' -f $logsRemoved, $KeepTranscripts, $copiesRemoved)
+            Write-Info ('Removed {0} old log file(s), keeping the logs of the newest {1} transcripts, and {2} leftover temporary copy folder(s) of the installer and the uninstaller.' -f $logsRemoved, $KeepTranscripts, $copiesRemoved)
         }
         if (-not $PSBoundParameters.ContainsKey('StagingRoot') -and -not [string]::IsNullOrWhiteSpace($env:ProgramData)) {
             $StagingRoot = Join-Path $env:ProgramData 'winget-app-setup'
@@ -3449,7 +3449,7 @@ function Invoke-InstallerHousekeeping {
         }
     }
     catch {
-        Write-WarningMessage "Could not remove the installer's old logs and temporary copies: $($_.Exception.Message.Trim().TrimEnd('.')). Continuing."
+        Write-WarningMessage "Could not remove old logs and leftover temporary copies: $($_.Exception.Message.Trim().TrimEnd('.')). Continuing."
     }
     return [pscustomobject]@{ LogsRemoved = $logsRemoved; CopiesRemoved = $copiesRemoved; WingetClientFoldersRemoved = $wingetClientFoldersRemoved }
 }
@@ -6330,7 +6330,7 @@ function Lock-InstallerRun {
         return 'Busy'
     }
     catch {
-        Write-WarningMessage "Could not check whether another run of the installer is in progress: $($_.Exception.Message.Trim().TrimEnd('.')). Continuing without that check."
+        Write-WarningMessage "Could not check whether another run of the installer or the uninstaller is in progress: $($_.Exception.Message.Trim().TrimEnd('.')). Continuing without that check."
         return 'Unavailable'
     }
 
@@ -6342,7 +6342,7 @@ function Lock-InstallerRun {
         $acquired = $true
     }
     catch {
-        Write-WarningMessage "Could not check whether another run of the installer is in progress: $($_.Exception.Message.Trim().TrimEnd('.')). Continuing without that check."
+        Write-WarningMessage "Could not check whether another run of the installer or the uninstaller is in progress: $($_.Exception.Message.Trim().TrimEnd('.')). Continuing without that check."
         $mutex.Dispose()
         return 'Unavailable'
     }
@@ -14304,8 +14304,8 @@ if ($MyInvocation.InvocationName -ne '.') {
 
         if (-not $WhatIf -and (Test-IsAdmin)) {
             if ((Lock-InstallerRun) -eq 'Busy') {
-                Write-ErrorMessage 'Another run of this installer is in progress on this PC (started by an RMM tool, a scheduled task or someone else). This run stops without changing anything: let that run finish, then run the installer again if needed.'
-                Exit-Installer -Code 6 -Reason 'another run of the installer is in progress on this PC' -NonInteractive:$NonInteractive
+                Write-ErrorMessage 'Another run of the installer or the uninstaller is in progress on this PC (started by an RMM tool, a scheduled task or someone else). This run stops without changing anything: let that run finish, then run the installer again if needed.'
+                Exit-Installer -Code 6 -Reason 'another run of the installer or the uninstaller is in progress on this PC' -NonInteractive:$NonInteractive
             }
             $script:InstallerRunRecordEnabled = $true
             [void](Save-InstallerRunStartRecord)

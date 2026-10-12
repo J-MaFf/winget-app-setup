@@ -747,6 +747,19 @@ function Invoke-WingetUninstall {
     if ($env:UNINSTALL_TEST_THROW -eq '1') { throw 'unexpected (test)' }
     [int]$env:UNINSTALL_TEST_CODE
 }
+function Lock-InstallerRun {
+    $answer = 'Acquired'
+    if ($env:UNINSTALL_TEST_LOCK) { $answer = $env:UNINSTALL_TEST_LOCK }
+    Write-Host "LOCK $answer"
+    $answer
+}
+function Unlock-InstallerRun { Write-Host 'UNLOCK' }
+function Invoke-InstallerHousekeeping {
+    [CmdletBinding()]
+    param ([string]$LogDirectory, [int]$KeepTranscripts, [string[]]$TempRoot, [int]$TempCopyMaxAgeHours, [string]$CurrentScriptPath, [string]$StagingRoot)
+    Write-Host "HOUSEKEEPING CurrentScriptPath=$CurrentScriptPath"
+    [pscustomobject]@{ LogsRemoved = 0; CopiesRemoved = 0; WingetClientFoldersRemoved = 0 }
+}
 function Wait-InstallerExitKeyPress {
     param ([switch]$NonInteractive)
     Write-Host "WAIT NonInteractive=$([bool]$NonInteractive)"
@@ -868,6 +881,48 @@ function Wait-InstallerExitKeyPress {
         $run.Output | Should -Match 'console kept LASTEXITCODE=5'
         $run.Output | Should -Not -Match 'UNINSTALL |RELAUNCH|WAIT '
     }
+
+    # wgt-gq8.47: the installer's run lock, so an install and an uninstall never run at once.
+    It 'Takes the run lock, removes leftover copies except its own, uninstalls, and releases the lock before the key press' {
+        $run = Invoke-TestUninstallerScript -Root (Join-Path $TestDrive 'lock-acquired') -Overrides $script:standIns -Environment @{ UNINSTALL_TEST_ADMIN = '1'; UNINSTALL_TEST_CODE = '0'; UNINSTALL_TEST_THROW = $null; UNINSTALL_TEST_LOCK = $null }
+
+        $run.ExitCode | Should -Be 0
+        $run.Output | Should -Match ([regex]::Escape("HOUSEKEEPING CurrentScriptPath=$($run.Path)"))
+        $order = @('LOCK Acquired', 'HOUSEKEEPING ', 'UNINSTALL WhatIf=False', 'UNLOCK', 'WAIT ') | ForEach-Object { $run.Output.IndexOf($_) }
+        $order | Should -Not -Contain -1
+        ($order -join ',') | Should -Be ((@($order) | Sort-Object) -join ',')
+    }
+
+    It 'Exits 6 without changing anything when another run of the installer or the uninstaller holds the lock' {
+        $run = Invoke-TestUninstallerScript -Root (Join-Path $TestDrive 'lock-busy') -Overrides $script:standIns -ScriptArguments @('-NonInteractive') -Environment @{ UNINSTALL_TEST_ADMIN = '1'; UNINSTALL_TEST_CODE = '0'; UNINSTALL_TEST_THROW = $null; UNINSTALL_TEST_LOCK = 'Busy' }
+
+        $run.ExitCode | Should -Be 6
+        $run.Output | Should -Match 'ERROR: Another run of the installer or the uninstaller is in progress on this PC \(started by an RMM tool, a scheduled task or someone else\)\. This run stops without changing anything'
+        $run.Output | Should -Not -Match 'UNINSTALL |HOUSEKEEPING '
+        $run.Output | Should -Match 'WAIT NonInteractive=True'
+    }
+
+    It 'Goes on without the check when the lock is unavailable' {
+        $run = Invoke-TestUninstallerScript -Root (Join-Path $TestDrive 'lock-unavailable') -Overrides $script:standIns -ScriptArguments @('-NonInteractive') -Environment @{ UNINSTALL_TEST_ADMIN = '1'; UNINSTALL_TEST_CODE = '1'; UNINSTALL_TEST_THROW = $null; UNINSTALL_TEST_LOCK = 'Unavailable' }
+
+        $run.ExitCode | Should -Be 1
+        $run.Output | Should -Match 'UNINSTALL WhatIf=False'
+    }
+
+    It 'Releases the lock when the uninstall stops on an unexpected error' {
+        $run = Invoke-TestUninstallerScript -Root (Join-Path $TestDrive 'lock-error') -Overrides $script:standIns -ScriptArguments @('-NonInteractive') -Environment @{ UNINSTALL_TEST_ADMIN = '1'; UNINSTALL_TEST_CODE = '0'; UNINSTALL_TEST_THROW = '1'; UNINSTALL_TEST_LOCK = $null }
+
+        $run.ExitCode | Should -Be 5
+        $run.Output.IndexOf('ERROR: The uninstaller stopped on an unexpected error') | Should -BeLessThan $run.Output.IndexOf('UNLOCK')
+    }
+
+    It 'Takes no lock and removes nothing in a preview' {
+        $run = Invoke-TestUninstallerScript -Root (Join-Path $TestDrive 'lock-preview') -Overrides $script:standIns -ScriptArguments @('-WhatIf', '-NonInteractive') -Environment @{ UNINSTALL_TEST_ADMIN = '1'; UNINSTALL_TEST_CODE = '0'; UNINSTALL_TEST_THROW = $null; UNINSTALL_TEST_LOCK = 'Busy' }
+
+        $run.ExitCode | Should -Be 0
+        $run.Output | Should -Match 'UNINSTALL WhatIf=True'
+        $run.Output | Should -Not -Match 'LOCK |HOUSEKEEPING '
+    }
 }
 
 # The P2-19 scenario end to end: the generated winget-app-uninstall.ps1 with every module function,
@@ -898,6 +953,10 @@ function Get-ProcessUserName { 'CONTOSO\admin-tech' }
 function Get-InteractiveSessionUserName { $env:UNINSTALL_TEST_SESSION_USER }
 function Start-Sleep { param ([int]$Seconds) }
 function Remove-LegacyScheduledUpdates { param ([switch]$WhatIf) $false }
+# Never the machine's run lock or temp folders (wgt-gq8.47).
+function Lock-InstallerRun { 'Acquired' }
+function Unlock-InstallerRun { }
+function Invoke-InstallerHousekeeping { param ([string]$CurrentScriptPath) }
 # Whether someone is at the console is the test's choice, never the console this child inherits.
 function Test-EffectiveNonInteractive {
     param ([switch]$NonInteractive)

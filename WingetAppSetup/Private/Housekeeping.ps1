@@ -1,14 +1,15 @@
-# Retention for what the installer leaves on disk (P3-42): without it an RMM schedule's runs grew the
-# transcripts, installer logs and temporary installer copies without bound.
+# Retention for what the installer and the uninstaller leave on disk (P3-42): without it an RMM
+# schedule's runs grew the transcripts, installer logs and temporary script copies without bound.
 
 <#
 .SYNOPSIS
     Deletes the installer's old logs and the leftover temporary copies of the installer and the
     uninstaller (they share the folder names), never the current run's.
 .DESCRIPTION
-    The entry script calls it once a real elevated run holds the run lock, so two runs never prune
-    at once and a dry run changes nothing. It keeps the logs of the newest KeepTranscripts
-    transcripts (Remove-OldInstallerLog), removes copy folders older than TempCopyMaxAgeHours
+    The installer's and the uninstaller's entry scripts call it once a real elevated run holds the
+    run lock, so two runs never prune at once and a dry run changes nothing. It keeps the logs of
+    the newest KeepTranscripts transcripts (Remove-OldInstallerLog; the uninstaller keeps no
+    transcript, so it prunes no logs), removes copy folders older than TempCopyMaxAgeHours
     (Remove-StaleInstallerCopy) and Microsoft.WinGet.Client folders as old
     (Remove-StaleWingetClientFolder). The defaults here are the one place the numbers are set.
     Never stops a run: a failure warns.
@@ -26,7 +27,7 @@
 .PARAMETER TempCopyMaxAgeHours
     A copy folder at least this old is removed; no run lasts this long.
 .PARAMETER CurrentScriptPath
-    The path of the running installer ($PSCommandPath). Its folder is never removed.
+    The path of the running installer or uninstaller ($PSCommandPath). Its folder is never removed.
 .PARAMETER StagingRoot
     Where the Microsoft.WinGet.Client engine's folders are. Default:
     %ProgramData%\winget-app-setup.
@@ -80,7 +81,7 @@ function Invoke-InstallerHousekeeping {
         }
         $copiesRemoved = Remove-StaleInstallerCopy -Root $TempRoot -MaxAgeHours $TempCopyMaxAgeHours -CurrentScriptPath $CurrentScriptPath
         if ($logsRemoved -gt 0 -or $copiesRemoved -gt 0) {
-            Write-Info ('Removed {0} old log file(s), keeping the logs of the newest {1} transcripts, and {2} leftover temporary copy folder(s) of the installer.' -f $logsRemoved, $KeepTranscripts, $copiesRemoved)
+            Write-Info ('Removed {0} old log file(s), keeping the logs of the newest {1} transcripts, and {2} leftover temporary copy folder(s) of the installer and the uninstaller.' -f $logsRemoved, $KeepTranscripts, $copiesRemoved)
         }
         if (-not $PSBoundParameters.ContainsKey('StagingRoot') -and -not [string]::IsNullOrWhiteSpace($env:ProgramData)) {
             $StagingRoot = Join-Path $env:ProgramData 'winget-app-setup'
@@ -93,7 +94,7 @@ function Invoke-InstallerHousekeeping {
         }
     }
     catch {
-        Write-WarningMessage "Could not remove the installer's old logs and temporary copies: $($_.Exception.Message.Trim().TrimEnd('.')). Continuing."
+        Write-WarningMessage "Could not remove old logs and leftover temporary copies: $($_.Exception.Message.Trim().TrimEnd('.')). Continuing."
     }
     return [pscustomobject]@{ LogsRemoved = $logsRemoved; CopiesRemoved = $copiesRemoved; WingetClientFoldersRemoved = $wingetClientFoldersRemoved }
 }
@@ -202,7 +203,7 @@ function Remove-OldInstallerLog {
     run that made them, unless it was killed. This removes those at least MaxAgeHours old. Any
     account can create such names in %SystemRoot%\Temp, so a folder goes only when SYSTEM or
     Administrators own it and it is a flat folder of files: links, subfolders and unreadable owners
-    are left alone, as is the running installer's folder. It deletes the files it listed, then the
+    are left alone, as is the running script's folder. It deletes the files it listed, then the
     folder without recursing, so a file added meanwhile keeps the folder.
 
     Root must be a folder where a non-administrator cannot rename or replace what SYSTEM or
@@ -212,7 +213,7 @@ function Remove-OldInstallerLog {
 .PARAMETER MaxAgeHours
     The age (last write time) from which a folder is removed.
 .PARAMETER CurrentScriptPath
-    The running installer's path; its folder is kept.
+    The running installer's or uninstaller's path; its folder is kept.
 .OUTPUTS
     [int] The number of folders deleted.
 #>

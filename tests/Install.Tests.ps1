@@ -4211,7 +4211,7 @@ Describe 'Write-InstallerExitNotice (review findings P2-14 and P3-15)' {
         @{ Code = 3; Meaning = 'the app catalog failed validation (see above)' }
         @{ Code = 4; Meaning = 'administrator rights are required, and this run was not elevated, or Group Policy''s execution policy keeps the elevated window from running the installer (see above)' }
         @{ Code = 5; Meaning = 'the run was aborted before it finished (see above)' }
-        @{ Code = 6; Meaning = 'another run of the installer is in progress on this PC' }
+        @{ Code = 6; Meaning = 'another run of the installer or the uninstaller is in progress on this PC' }
         @{ Code = 7; Meaning = 'PowerShell 7 could not be installed, or the installer could not be relaunched under it (see above)' }
     ) {
         Write-InstallerExitNotice -Code $Code

@@ -144,7 +144,7 @@ Describe 'Lock-InstallerRun and Unlock-InstallerRun (review finding P3-41)' {
         Lock-InstallerRun -Name $script:lockName | Should -Be 'Unavailable'
 
         $script:InstallerRunLock | Should -BeNullOrEmpty
-        Should -Invoke Write-WarningMessage -Times 1 -Exactly -ParameterFilter { $Message -match 'Could not check whether another run of the installer is in progress: The handle is invalid\. Continuing without that check\.' }
+        Should -Invoke Write-WarningMessage -Times 1 -Exactly -ParameterFilter { $Message -match 'Could not check whether another run of the installer or the uninstaller is in progress: The handle is invalid\. Continuing without that check\.' }
     }
 
     It 'Does nothing when no lock is held' {
