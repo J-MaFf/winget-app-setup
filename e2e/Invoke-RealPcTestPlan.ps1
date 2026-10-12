@@ -4596,6 +4596,39 @@ function Invoke-RealPcWingetUninstall {
     return [pscustomobject]@{ ExitCode = $run.ExitCode; Problem = [string]$run.Problem; Output = @($run.Output) }
 }
 
+<#
+.SYNOPSIS
+    Whether winget still lists a package after an uninstall that exited 0. An app's uninstaller can
+    return before its entry leaves the installed-programs list (7-Zip's does), so a listed package
+    is checked again, every DelaySeconds, up to Attempts times in all.
+.RETURNS
+    $true (still listed after the last attempt), $false (gone) or $null (winget could not answer).
+#>
+function Wait-RealPcWingetUninstalled {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$Id,
+
+        [Parameter(Mandatory = $false)]
+        [int]$Attempts = 6,
+
+        [Parameter(Mandatory = $false)]
+        [int]$DelaySeconds = 5
+    )
+
+    $present = $null
+    for ($attempt = 1; $attempt -le $Attempts; $attempt++) {
+        $present = Test-RealPcWingetInstalled -Id $Id
+        if ($present -ne $true) {
+            return $present
+        }
+        if ($attempt -lt $Attempts) {
+            Start-Sleep -Seconds $DelaySeconds
+        }
+    }
+    return $present
+}
+
 # The source check: winget looks one package up in its 'winget' source, as this account. Returns
 # ExitCode ($null when winget did not run to the end) and Output (for the evidence, with why).
 function Invoke-RealPcWingetSourceCheck {
@@ -6300,7 +6333,13 @@ function Invoke-RealPcTimeBudgetStage {
     $uninstallSection = [ordered]@{}
     $uninstallSection[('winget uninstall --id {0} --exact --source winget --silent (exit {1})' -f $appId, (Format-RealPcWingetExitCode -ExitCode $uninstall.ExitCode))] = @($uninstall.Output)
     Save-RealPcText -Path (Join-Path $EvidenceFolder 'winget-uninstall.txt') -Text (Format-RealPcEvidenceText -Section $uninstallSection)
-    $rows += Get-RealPcUninstallCheckRow -AppId $appId -Present (Test-RealPcWingetInstalled -Id $appId) -UninstallExitCode $uninstall.ExitCode -UninstallProblem $uninstall.Problem -SourceOpen $script:WingetSourceOpen
+    if ($uninstall.ExitCode -eq 0) {
+        $present = Wait-RealPcWingetUninstalled -Id $appId
+    }
+    else {
+        $present = Test-RealPcWingetInstalled -Id $appId
+    }
+    $rows += Get-RealPcUninstallCheckRow -AppId $appId -Present $present -UninstallExitCode $uninstall.ExitCode -UninstallProblem $uninstall.Problem -SourceOpen $script:WingetSourceOpen
     Save-RealPcArpSnapshot -Path (Join-Path $EvidenceFolder 'arp-after-uninstall.txt') -Title "after 'winget uninstall --id $appId'"
 
     # A deterministic spent budget: -MaxRuntimeMinutes 1 and a deadline already in the past, in the

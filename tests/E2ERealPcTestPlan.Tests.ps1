@@ -550,6 +550,40 @@ Describe 'Get-RealPcReRunResult' {
     }
 }
 
+Describe 'Wait-RealPcWingetUninstalled' {
+    BeforeEach {
+        Mock Start-Sleep {}
+    }
+
+    It 'Checks again while winget still lists the package, and returns once it is gone' {
+        $script:listAnswers = [System.Collections.Generic.Queue[object]]::new()
+        $script:listAnswers.Enqueue($true)
+        $script:listAnswers.Enqueue($true)
+        $script:listAnswers.Enqueue($false)
+        Mock Test-RealPcWingetInstalled { return $script:listAnswers.Dequeue() }
+
+        Wait-RealPcWingetUninstalled -Id '7zip.7zip' | Should -Be $false
+        Should -Invoke Test-RealPcWingetInstalled -Times 3 -Exactly
+        Should -Invoke Start-Sleep -Times 2 -Exactly
+    }
+
+    It 'Returns $true when it is still listed after the last attempt, without a sleep after it' {
+        Mock Test-RealPcWingetInstalled { return $true }
+
+        Wait-RealPcWingetUninstalled -Id '7zip.7zip' -Attempts 3 | Should -Be $true
+        Should -Invoke Test-RealPcWingetInstalled -Times 3 -Exactly
+        Should -Invoke Start-Sleep -Times 2 -Exactly
+    }
+
+    It 'Returns at once when winget cannot answer' {
+        Mock Test-RealPcWingetInstalled { return $null }
+
+        Wait-RealPcWingetUninstalled -Id '7zip.7zip' | Should -BeNullOrEmpty
+        Should -Invoke Test-RealPcWingetInstalled -Times 1 -Exactly
+        Should -Invoke Start-Sleep -Times 0 -Exactly
+    }
+}
+
 Describe 'Get-RealPcTimeBudget* and Get-RealPcUninstallCheckRow (item 8)' {
     It 'Passes the spent-budget run: exit 9, app NotAttempted, notattempted >= 1' {
         $record = [pscustomobject]@{ apps = @([pscustomobject]@{ id = '7zip.7zip'; status = 'NotAttempted' }) }
