@@ -790,6 +790,15 @@ Describe 'Compare-RealPcAclSnapshot' {
     }
 }
 
+Describe 'Get-RealPcTaskStateText' {
+    It 'Names the state and the last result, with the meaning of the two not-finished codes (wgt-gq8.74)' {
+        Get-RealPcTaskStateText -State 'Queued' -LastTaskResult 267011 | Should -BeExactly 'task state Queued, last result 0x00041303 (has not run yet)'
+        Get-RealPcTaskStateText -State 'Running' -LastTaskResult 267009 | Should -BeExactly 'task state Running, last result 0x00041301 (running)'
+        Get-RealPcTaskStateText -State 'Ready' -LastTaskResult -2147023511 | Should -BeExactly 'task state Ready, last result 0x80070569'
+        Get-RealPcTaskStateText -State '' -LastTaskResult $null | Should -BeExactly ''
+    }
+}
+
 Describe 'Get-RealPcJunctionPlantResult' {
     It 'Credits the standard user only when its task exited 0 and the junction is there' {
         (Get-RealPcJunctionPlantResult -UserCreated $true -TaskResult 0 -JunctionAfterTask $true).PlantedBy | Should -Be 'StandardUser'
@@ -799,6 +808,8 @@ Describe 'Get-RealPcJunctionPlantResult' {
         (Get-RealPcJunctionPlantResult -UserCreated $false -UserProblem 'blocked by policy').Note | Should -Match 'could not be created \(blocked by policy\)'
         (Get-RealPcJunctionPlantResult -UserCreated $true -TaskStep 'Start' -TaskProblem 'The service is not running. (0x80070426)').Note | Should -Match 'failed \(starting the S4U task: The service is not running\. \(0x80070426\)\)'
         (Get-RealPcJunctionPlantResult -UserCreated $true -TaskResult $null).Note | Should -Match 'did not finish in time'
+        $late = Get-RealPcJunctionPlantResult -UserCreated $true -TaskResult $null -TimeoutSeconds 300 -TaskStateAtTimeout "task state Queued, last result 0x00041303 (has not run yet)`r`n"
+        $late.Note | Should -BeExactly "the standard user's planting task did not finish within 300 s (task state Queued, last result 0x00041303 (has not run yet)), so the admin planted the junction"
         $failed = Get-RealPcJunctionPlantResult -UserCreated $true -TaskResult -2147023511 -JunctionAfterTask $false
         $failed.PlantedBy | Should -Be 'Admin'
         $failed.Note | Should -Match 'ended with 0x80070569'
@@ -1132,6 +1143,35 @@ Describe 'Invoke-RealPcLinkGuardSetupStage (wiring, with every outside call mock
         $planted = $rows | Where-Object { $_.Check -eq 'Planted the junction at the ProgramData folder' }
         $planted.Result | Should -Be 'PASS'
         $planted.Detail | Should -Match 'registering the S4U task'
+    }
+
+    It 'Waits 300 s, says what the task was doing, and stops it before the admin plants, when it does not finish (wgt-gq8.74)' {
+        # On a domain-joined PC the temporary user's first S4U logon took longer than the old 90 s.
+        Mock Start-ScheduledTask { }
+        Mock Wait-RealPcScheduledTask { return $null }
+        Mock Get-ScheduledTask { return [pscustomobject]@{ TaskName = $TaskName; State = 'Queued' } }
+        Mock Get-ScheduledTaskInfo { return [pscustomobject]@{ LastTaskResult = 267011 } }
+        Mock Stop-ScheduledTask { $script:StoppedBeforeUnregister = -not $script:Unregistered }
+        Mock Unregister-ScheduledTask { $script:Unregistered = $true }
+        $script:Unregistered = $false
+        $script:StoppedBeforeUnregister = $null
+        $rows = @(Invoke-RealPcLinkGuardSetupStage -EvidenceFolder $script:LinkGuardEvidence)
+
+        Should -Invoke Wait-RealPcScheduledTask -Times 1 -Exactly -ParameterFilter { $TimeoutSeconds -eq 300 }
+        Should -Invoke Stop-ScheduledTask -Times 1 -Exactly -ParameterFilter { $TaskName -eq 'winget-app-setup-plantjunction' }
+        $script:StoppedBeforeUnregister | Should -BeTrue
+        Should -Invoke New-RealPcAdminJunction -Times 1 -Exactly
+        $script:LinkGuard.PlantedBy | Should -Be 'Admin'
+        $script:LinkGuard.PlantNote | Should -BeExactly "the standard user's planting task did not finish within 300 s (task state Queued, last result 0x00041303 (has not run yet)), so the admin planted the junction"
+        ($rows | Where-Object { $_.Check -eq 'Planted the junction at the ProgramData folder' }).Detail | Should -Match 'within 300 s \(task state Queued'
+    }
+
+    It 'Does not stop the task or read its state when it finished in time' {
+        Mock Stop-ScheduledTask { }
+        Mock Get-ScheduledTaskInfo { }
+        $null = Invoke-RealPcLinkGuardSetupStage -EvidenceFolder $script:LinkGuardEvidence
+        Should -Invoke Stop-ScheduledTask -Times 0 -Exactly
+        Should -Invoke Get-ScheduledTaskInfo -Times 0 -Exactly
     }
 
     It 'Says the user lacks the batch-logon right when its task ends with 0x80070569' {

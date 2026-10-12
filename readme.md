@@ -1678,9 +1678,10 @@ the owner test plan needs a real desktop PC: cross-user elevation, a TightVNC vi
 - **What it does:** a first unattended install and its re-run, a run as SYSTEM through the Endpoint
   Central machine-phase wrapper, the `%ProgramData%` link guard (a temporary standard user plants a
   junction there from a one-shot S4U task, registered with the user's random password, which stays
-  in memory and which Task Scheduler does not store; if the task cannot be registered or run, the
-  admin plants it and that row is SKIP with the failing step, and the report lists who holds "Log
-  on as a batch job"), a time-budget run that exits 9 and then finishes (the harness's own
+  in memory and which Task Scheduler does not store; if the task cannot be registered or run, or
+  does not finish within 300 s (that user's first logon builds its profile), the admin plants it
+  and that row is SKIP with the failing step or the task's state, and the report lists who holds
+  "Log on as a batch job"), a time-budget run that exits 9 and then finishes (the harness's own
   `winget uninstall` of 7-Zip before it is kept in that stage's `winget-uninstall.txt`), the
   `-CollectDiagnostics` bundle, and the uninstaller (preview then real; it runs in Windows
   PowerShell, so it must remove PowerShell 7 too). Each check is a

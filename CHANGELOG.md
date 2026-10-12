@@ -147,6 +147,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   `tests/E2ERealPcTestPlan.Tests.ps1` covers each, with a cross-user first run in new fixtures
   (`realpc-crossuser-firstrun-console.txt` and `realpc-crossuser-firstrun-last-run.json`).
+
+  The owner's re-test on that PC (2026-10-09) passed, with one SKIP: the temporary standard user's
+  planting task did not finish within 90 s on the domain-joined PC, so the admin planted the
+  junction (bead wgt-gq8.74). The harness now waits 300 s, since that user's first S4U logon builds
+  its profile. When the task still has not finished, the row says what it was doing (its state and
+  last result, e.g. 'task state Queued, last result 0x00041303 (has not run yet)'), and the task is
+  stopped before the admin plants the junction.
 - Endpoint Central deployment in two phases (work-order item 34), in `rmm/`. Both are standalone
   Windows PowerShell 5.1 scripts that need nothing beside them.
   - **Machine phase.** `rmm/Invoke-WingetAppSetup.ps1` is a Computer Configuration script run as
