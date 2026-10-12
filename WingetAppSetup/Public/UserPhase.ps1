@@ -110,6 +110,7 @@ function Invoke-WingetUserPhase {
         if ($script:InstallerBuildId) {
             Write-Info "Installer build: $script:InstallerBuildId"
         }
+        Write-OSArchitectureLine
         $buildText = 'unknown build'
         if ($record.BuildId) {
             $buildText = "build $($record.BuildId)"

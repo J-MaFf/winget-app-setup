@@ -138,6 +138,7 @@ if ($MyInvocation.InvocationName -ne '.') {
                 Write-Info "Logging the PowerShell 7 bootstrap to: $script:InstallLogPath"
             }
             Write-Info "Installer build: $script:InstallerBuildId"
+            Write-OSArchitectureLine
             # try/catch, not a bare `exit (Invoke-PowerShell7Bootstrap ...)`: a statement-terminating
             # error inside the bootstrap would abort only that `exit` statement, and 5.1 would then
             # fall through into the PowerShell-7-only body below. The build id goes along so an
@@ -220,6 +221,7 @@ if ($MyInvocation.InvocationName -ne '.') {
         # Content-derived build id stamped by build/Build-WingetInstallScript.ps1 (issue #189), so
         # a transcript identifies exactly which installer build produced it.
         Write-Info "Installer build: $script:InstallerBuildId"
+        Write-OSArchitectureLine
 
         # One real run at a time (review finding P3-41): an elevated run takes the machine-wide run
         # lock before it checks or changes anything, and a run started while another one holds it

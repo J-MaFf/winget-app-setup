@@ -419,6 +419,7 @@ carries on:
 | `msiexec` for Winget-AutoUpdate (install and uninstall) | 15 minutes |
 | The Winget-AutoUpdate MSI download, the Windows App Runtime package download (see [Automatic updates](#automatic-updates)), and the engine's Microsoft.WinGet.Client package download | 5 minutes until the server starts sending the file; on PowerShell 7.4 and newer, also 2 minutes without data while it arrives |
 | `Add-AppxProvisionedPackage` for the Windows App Runtime framework | 10 minutes |
+| One `Repair-WinGetPackageManager` attempt, which downloads and deploys App Installer (run in a child PowerShell) | 15 minutes |
 | Reading which Windows App Runtime the latest winget release needs (`DesktopAppInstaller_Dependencies.json`) | 30 seconds, and on PowerShell 7.4 and newer also 30 seconds without data; when it runs out, the built-in requirement is used |
 
 A stopped install is checked like any other: unless the app turns out to be installed anyway, it
@@ -430,8 +431,8 @@ limits are set in one place,
 `Get-ProcessTimeoutSeconds` (`WingetAppSetup/Private/ProcessInvocation.ps1`).
 
 Some steps still have no time limit of their own: the PowerShell cmdlets that set up winget
-(`Install-Module` for Microsoft.WinGet.Client, `Repair-WinGetPackageManager`, and
-`Add-AppxPackage` registering App Installer); the `Add-AppxProvisionedPackage` of the PowerShell
+(`Install-Module` for Microsoft.WinGet.Client, and `Add-AppxPackage` registering App
+Installer); the `Add-AppxProvisionedPackage` of the PowerShell
 MSIX fallback (PowerShell 7.7 and later, which ship no MSI, on Windows builds before 26100);
 and, on PowerShell 7.3 and older, the Winget-AutoUpdate MSI and Windows App Runtime downloads
 once the file has started to arrive. For a time limit on the whole run, see

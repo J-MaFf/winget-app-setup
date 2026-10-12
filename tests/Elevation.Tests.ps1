@@ -211,7 +211,7 @@ Describe 'Restart-WithElevation (review findings P2-11, P2-12, P3-11)' {
         $script:launch.ArgumentString | Should -BeExactly ('-NoProfile -ExecutionPolicy Bypass -Command "' + $expectedCommand + '"')
         # The only -File in the command line is the one that runs the checked copy.
         ([regex]::Matches($script:launch.ArgumentString, '-File ')).Count | Should -Be 1
-        $script:launch.ArgumentString | Should -Match ([regex]::Escape('-File $copy -SkipSystemCheck;'))
+        $script:launch.ArgumentString | Should -Match ([regex]::Escape('-File $c -SkipSystemCheck }catch{'))
         # Removed once the elevated run has ended.
         Test-Path -LiteralPath (Split-Path -Parent $script:stagedPath) | Should -BeFalse
     }
@@ -268,7 +268,7 @@ Describe 'Restart-WithElevation (review findings P2-11, P2-12, P3-11)' {
 
         $result.Started | Should -BeTrue
         $script:launch.ArgumentString | Should -Match "ReadAllBytes\('[^']*[\\/]winget-app-setup-elevate-[0-9a-f]{32}[\\/]winget-app-uninstall\.ps1'\)"
-        $script:launch.ArgumentString | Should -Match ([regex]::Escape("Join-Path `$copyDirectory 'winget-app-uninstall.ps1';"))
+        $script:launch.ArgumentString | Should -Match ([regex]::Escape("`$n='winget-app-uninstall.ps1';"))
         $script:launch.ArgumentString | Should -Match ([regex]::Escape("-ne '$uninstallerSha256'"))
         $script:launch.ArgumentString | Should -Not -Match 'winget-app-install\.ps1'
     }
@@ -294,7 +294,7 @@ Describe 'Restart-WithElevation (review findings P2-11, P2-12, P3-11)' {
     It 'Forwards the time budget''s values to the checked copy, each value in single quotes' {
         Restart-WithElevation -ScriptPath $script:scriptPath -AdditionalArguments '-SkipSystemCheck', '-MaxRuntimeMinutes', '60', '-RunDeadlineUtc', '2026-10-05T12:00:00Z'
 
-        $script:launch.ArgumentString | Should -Match ([regex]::Escape("-File `$copy -SkipSystemCheck -MaxRuntimeMinutes '60' -RunDeadlineUtc '2026-10-05T12:00:00Z';"))
+        $script:launch.ArgumentString | Should -Match ([regex]::Escape("-File `$c -SkipSystemCheck -MaxRuntimeMinutes '60' -RunDeadlineUtc '2026-10-05T12:00:00Z' }catch{"))
     }
 
     It 'Accepts on every relaunch the same arguments: Restart-WithElevation, New-ElevationVerifierCommand and Invoke-PowerShell7Bootstrap' {
@@ -423,13 +423,13 @@ Describe 'New-ElevationVerifierCommand (review finding P3-11)' {
             $copyRoot = Join-Path $TestDrive "copies-$Name"
             [void](New-Item -ItemType Directory -Path $copyRoot)
             $command = New-ElevationVerifierCommand -ScriptPath $sourcePath -Sha256 $sha256 -PowerShellPath 'Invoke-StoppedCopy' -CopyRoot $copyRoot
-            $aclStart = $command.IndexOf('$security = New-Object')
-            $aclEnd = $command.IndexOf('$copyDirectory = Join-Path')
-            $createWithAcl = '[IO.Directory]::CreateDirectory($copyDirectory, $security)'
+            $aclStart = $command.IndexOf('$s=New-Object')
+            $aclEnd = $command.IndexOf('$d=Join-Path')
+            $createWithAcl = '[IO.Directory]::CreateDirectory($d,$s)'
             $aclStart | Should -BeGreaterThan 0
             $aclEnd | Should -BeGreaterThan $aclStart
             $command.Contains($createWithAcl) | Should -BeTrue
-            $command = $command.Remove($aclStart, $aclEnd - $aclStart).Replace($createWithAcl, '[IO.Directory]::CreateDirectory($copyDirectory)')
+            $command = $command.Remove($aclStart, $aclEnd - $aclStart).Replace($createWithAcl, '[IO.Directory]::CreateDirectory($d)')
             $standIn = "function Invoke-StoppedCopy { & '$($Engine.Replace("'", "''"))' @args; throw [System.Management.Automation.PipelineStoppedException]::new() }; "
 
             $output = & $Engine -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command ($standIn + $command) 2>&1 | Out-String
@@ -447,7 +447,7 @@ Describe 'New-ElevationVerifierCommand (review finding P3-11)' {
         # Paths are single-quoted literals with quotes doubled; the hash is compared upper-case.
         $command | Should -Match ([regex]::Escape("ReadAllBytes('C:\Users\o''brien\AppData\Local\Temp\winget-app-setup-1\winget-app-install.ps1')"))
         $command | Should -Match ([regex]::Escape("-ne '$($script:sampleSha256.ToUpperInvariant())'"))
-        $command | Should -Match ([regex]::Escape('-File $copy -SkipSystemCheck;'))
+        $command | Should -Match ([regex]::Escape('-File $c -SkipSystemCheck }catch{'))
     }
 
     It 'Escapes the typographic single quote <Name> in a path, which PowerShell reads as a quote too' -ForEach @(
@@ -490,19 +490,32 @@ Describe 'New-ElevationVerifierCommand (review finding P3-11)' {
         $elements[-5..-1] | Should -Be @('-SkipSystemCheck', '-MaxRuntimeMinutes', "'60'", '-RunDeadlineUtc', "'2026-10-05T12:00:00Z'")
     }
 
-    It 'Leaves room, with the time budget forwarded, for a staged copy under a %TEMP% path of 130 characters (wgt-gq8.41)' {
+    # wgt-gq8.48: the shortened command fits a %TEMP% of 367 characters with the time budget
+    # forwarded (135 before), and 432 without it (200 before): longer than MAX_PATH lets a staged
+    # copy's path be, so the limit is no longer reached through %TEMP%.
+    It 'Leaves room, with the time budget forwarded, for a staged copy under a %TEMP% path of <Length> characters (wgt-gq8.41, wgt-gq8.48)' -ForEach @(
+        @{ Length = 367; Budget = $true; Fits = $true }
+        @{ Length = 368; Budget = $true; Fits = $false }
+        @{ Length = 432; Budget = $false; Fits = $true }
+        @{ Length = 433; Budget = $false; Fits = $false }
+    ) {
         # The script path here is always the staged copy: %TEMP%, a 57-character folder, the file.
-        $stagedPath = 'C:\' + ('t' * 127) + '\winget-app-setup-elevate-' + ('0' * 32) + '\winget-app-install.ps1'
-        $command = New-ElevationVerifierCommand -ScriptPath $stagedPath -Sha256 $script:sampleSha256 -PowerShellPath 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe' -CopyRoot 'C:\Windows\Temp' -AdditionalArguments '-WhatIf', '-SkipSystemCheck', '-MaxRuntimeMinutes', '1440', '-RunDeadlineUtc', '2026-10-05T12:00:00Z'
+        $stagedPath = 'C:\' + ('t' * ($Length - 3)) + '\winget-app-setup-elevate-' + ('0' * 32) + '\winget-app-install.ps1'
+        $arguments = @('-WhatIf', '-SkipSystemCheck')
+        if ($Budget) {
+            $arguments += @('-MaxRuntimeMinutes', '1440', '-RunDeadlineUtc', '2026-10-05T12:00:00Z')
+        }
+        $command = New-ElevationVerifierCommand -ScriptPath $stagedPath -Sha256 $script:sampleSha256 -PowerShellPath 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe' -CopyRoot 'C:\Windows\Temp' -AdditionalArguments $arguments
+        $argumentString = ConvertTo-ProcessArgumentString -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', $command)
 
-        ('-NoProfile -ExecutionPolicy Bypass -Command "' + $command + '"').Length | Should -BeLessOrEqual 2000
+        ($argumentString.Length -le 2000) | Should -Be $Fits -Because "the command line is $($argumentString.Length) characters"
     }
 
-    It 'Leaves room for a MAX_PATH script path within ShellExecuteEx''s command-line limit' {
+    It 'Leaves room, with the time budget forwarded, for a MAX_PATH script path within ShellExecuteEx''s command-line limit' {
         $longPath = 'C:\' + ('p' * 240) + '\winget-app-install.ps1'
-        $command = New-ElevationVerifierCommand -ScriptPath $longPath -Sha256 $script:sampleSha256 -PowerShellPath 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe' -CopyRoot 'C:\Windows\Temp' -AdditionalArguments '-WhatIf', '-SkipSystemCheck'
+        $command = New-ElevationVerifierCommand -ScriptPath $longPath -Sha256 $script:sampleSha256 -PowerShellPath 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe' -CopyRoot 'C:\Windows\Temp' -AdditionalArguments '-WhatIf', '-SkipSystemCheck', '-MaxRuntimeMinutes', '1440', '-RunDeadlineUtc', '2026-10-05T12:00:00Z'
 
-        ('-NoProfile -ExecutionPolicy Bypass -Command "' + $command + '"').Length | Should -BeLessOrEqual 2000
+        (ConvertTo-ProcessArgumentString -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', $command)).Length | Should -BeLessOrEqual 2000
     }
 
     It 'Does not run the script, and exits 5, when the file no longer has the expected SHA256' {
@@ -622,7 +635,8 @@ Describe 'New-ElevationVerifierCommand (review finding P3-11)' {
 param ([switch]$SkipSystemCheck, [int]$MaxRuntimeMinutes = 0, [string]$RunDeadlineUtc)
 $acl = Get-Acl -LiteralPath (Split-Path -Parent $PSCommandPath)
 $identities = @($acl.Access | ForEach-Object { $_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value })
-@{ Path = $PSCommandPath; SkipSystemCheck = [bool]$SkipSystemCheck; MaxRuntimeMinutes = $MaxRuntimeMinutes; RunDeadlineUtc = ('deadline=' + $RunDeadlineUtc); Protected = $acl.AreAccessRulesProtected; Inherited = @($acl.Access | Where-Object { $_.IsInherited }).Count; Identities = $identities } | ConvertTo-Json | Set-Content -LiteralPath '@RESULT@'
+$rules = @($acl.Access | ForEach-Object { '{0}|{1}|{2}|{3}' -f $_.FileSystemRights, $_.InheritanceFlags, $_.PropagationFlags, $_.AccessControlType })
+@{ Path = $PSCommandPath; SkipSystemCheck = [bool]$SkipSystemCheck; MaxRuntimeMinutes = $MaxRuntimeMinutes; RunDeadlineUtc = ('deadline=' + $RunDeadlineUtc); Protected = $acl.AreAccessRulesProtected; Inherited = @($acl.Access | Where-Object { $_.IsInherited }).Count; Identities = $identities; Rules = $rules } | ConvertTo-Json | Set-Content -LiteralPath '@RESULT@'
 exit 42
 '@
         Set-Content -LiteralPath $sourcePath -Value $fixture.Replace('@RESULT@', $resultPath) -Encoding UTF8
@@ -646,6 +660,7 @@ exit 42
         $result.Protected | Should -BeTrue
         $result.Inherited | Should -Be 0
         (@($result.Identities | Sort-Object -Unique) -join ',') | Should -BeExactly 'S-1-5-18,S-1-5-32-544'
+        @($result.Rules | Sort-Object -Unique) | Should -Be @('FullControl|ContainerInherit, ObjectInherit|None|Allow')
         @(Get-ChildItem -LiteralPath $copyRoot).Count | Should -Be 0
     }
 }

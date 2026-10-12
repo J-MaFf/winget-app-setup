@@ -21,7 +21,6 @@ Get-ScheduledTask
 Get-ScheduledTaskInfo
 Get-Service
 Invoke-CimMethod
-Repair-WinGetPackageManager
 Restart-Service
 Set-ScheduledTask
 Start-Service

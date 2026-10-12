@@ -316,7 +316,7 @@ Describe 'Invoke-WingetPackageManagerRepair (issue #265, review findings P3-26, 
         $script:warnings = @()
         Mock Write-WarningMessage { $script:warnings += $Message }
         # Safety net (#181): never let the real cmdlet run during unit tests.
-        Mock Repair-WinGetPackageManager { }
+        Mock Invoke-RepairWinGetPackageManagerProcess { }
         Mock Test-AndInstallWingetModule { $true }
     }
 
@@ -327,52 +327,52 @@ Describe 'Invoke-WingetPackageManagerRepair (issue #265, review findings P3-26, 
 
         $result.Available | Should -Be $false
         $result.Succeeded | Should -Be $false
-        Should -Invoke Repair-WinGetPackageManager -Times 0 -Exactly
+        Should -Invoke Invoke-RepairWinGetPackageManagerProcess -Times 0 -Exactly
     }
 
     It 'Tries the unforced repair for this account first, and stops there when it completes' {
         $result = Invoke-WingetPackageManagerRepair
 
         $result.Succeeded | Should -Be $true
-        Should -Invoke Repair-WinGetPackageManager -Times 1 -Exactly
-        Should -Invoke Repair-WinGetPackageManager -Times 1 -Exactly -ParameterFilter { $Latest -and -not $Force -and -not $AllUsers }
+        Should -Invoke Invoke-RepairWinGetPackageManagerProcess -Times 1 -Exactly
+        Should -Invoke Invoke-RepairWinGetPackageManagerProcess -Times 1 -Exactly -ParameterFilter { $Latest -and -not $Force -and -not $AllUsers }
     }
 
     It 'Never repairs for all users unless told the framework is missing (issue #265: -AllUsers aborts on a newer framework)' {
-        Mock Repair-WinGetPackageManager { throw $script:realRepairMessage }
+        Mock Invoke-RepairWinGetPackageManagerProcess { throw $script:realRepairMessage }
 
         [void](Invoke-WingetPackageManagerRepair)
 
-        Should -Invoke Repair-WinGetPackageManager -Times 0 -Exactly -ParameterFilter { $AllUsers }
+        Should -Invoke Invoke-RepairWinGetPackageManagerProcess -Times 0 -Exactly -ParameterFilter { $AllUsers }
     }
 
     It 'Repairs for all users first when the framework is missing, as the cmdlet itself asks (review finding P3-28)' {
         $script:calls = @()
-        Mock Repair-WinGetPackageManager { $script:calls += [bool]$AllUsers; if ($AllUsers) { return } throw 'unexpected' }
+        Mock Invoke-RepairWinGetPackageManagerProcess { $script:calls += [bool]$AllUsers; if ($AllUsers) { return } throw 'unexpected' }
 
         $result = Invoke-WingetPackageManagerRepair -AllUsersFirst
 
         $result.Succeeded | Should -Be $true
         $script:calls | Should -Be @($true)
-        Should -Invoke Repair-WinGetPackageManager -Times 1 -Exactly -ParameterFilter { $AllUsers -and $Latest -and -not $Force }
+        Should -Invoke Invoke-RepairWinGetPackageManagerProcess -Times 1 -Exactly -ParameterFilter { $AllUsers -and $Latest -and -not $Force }
     }
 
     It 'Goes on to an unforced, then a forced repair for this account when nothing names the cause' {
-        Mock Repair-WinGetPackageManager { throw $script:realRepairMessage }
+        Mock Invoke-RepairWinGetPackageManagerProcess { throw $script:realRepairMessage }
 
         $result = Invoke-WingetPackageManagerRepair
 
         $result.Available | Should -Be $true
         $result.Succeeded | Should -Be $false
-        Should -Invoke Repair-WinGetPackageManager -Times 2 -Exactly
-        Should -Invoke Repair-WinGetPackageManager -Times 1 -Exactly -ParameterFilter { $Latest -and -not $Force -and -not $AllUsers }
-        Should -Invoke Repair-WinGetPackageManager -Times 1 -Exactly -ParameterFilter { $Latest -and $Force -and -not $AllUsers }
+        Should -Invoke Invoke-RepairWinGetPackageManagerProcess -Times 2 -Exactly
+        Should -Invoke Invoke-RepairWinGetPackageManagerProcess -Times 1 -Exactly -ParameterFilter { $Latest -and -not $Force -and -not $AllUsers }
+        Should -Invoke Invoke-RepairWinGetPackageManagerProcess -Times 1 -Exactly -ParameterFilter { $Latest -and $Force -and -not $AllUsers }
     }
 
     # Review finding P3-27, the #279 wedge (E2E run 36384683838): the repair only says 'Try running
     # with -AllUsers', with no code, and used to be forced anyway.
     It 'Does not force a repair for this account after the all-users repair for a missing framework failed' {
-        Mock Repair-WinGetPackageManager { throw $script:realRepairMessage }
+        Mock Invoke-RepairWinGetPackageManagerProcess { throw $script:realRepairMessage }
         $script:infos = @()
         Mock Write-Info { $script:infos += $Message }
 
@@ -380,10 +380,10 @@ Describe 'Invoke-WingetPackageManagerRepair (issue #265, review findings P3-26, 
 
         $result.Available | Should -Be $true
         $result.Succeeded | Should -Be $false
-        Should -Invoke Repair-WinGetPackageManager -Times 2 -Exactly
-        Should -Invoke Repair-WinGetPackageManager -Times 1 -Exactly -ParameterFilter { $AllUsers -and $Latest -and -not $Force }
-        Should -Invoke Repair-WinGetPackageManager -Times 1 -Exactly -ParameterFilter { $Latest -and -not $Force -and -not $AllUsers }
-        Should -Invoke Repair-WinGetPackageManager -Times 0 -Exactly -ParameterFilter { $Force }
+        Should -Invoke Invoke-RepairWinGetPackageManagerProcess -Times 2 -Exactly
+        Should -Invoke Invoke-RepairWinGetPackageManagerProcess -Times 1 -Exactly -ParameterFilter { $AllUsers -and $Latest -and -not $Force }
+        Should -Invoke Invoke-RepairWinGetPackageManagerProcess -Times 1 -Exactly -ParameterFilter { $Latest -and -not $Force -and -not $AllUsers }
+        Should -Invoke Invoke-RepairWinGetPackageManagerProcess -Times 0 -Exactly -ParameterFilter { $Force }
         ($script:warnings -join "`n") | Should -Match 'Repair-WinGetPackageManager -AllUsers -Latest failed: Failed to repair winget'
         $script:infos | Should -Contain 'Not running Repair-WinGetPackageManager -Latest -Force: the Microsoft.WindowsAppRuntime.1.8 framework App Installer needs is missing, and the all-users repair for it failed, which forcing cannot fix (-Force only closes running App Installer processes).'
     }
@@ -393,7 +393,7 @@ Describe 'Invoke-WingetPackageManagerRepair (issue #265, review findings P3-26, 
         @{ Name = '0x80073D06 (a newer framework, issue #265)'; Codes = @(-2147009274); Shown = '0x80073D06 ERROR_INSTALL_PACKAGE_DOWNGRADE' }
         @{ Name = 'both, as on the #279 wedge'; Codes = @(-2147009293, -2147009274, -2147009293); Shown = '0x80073CF3 ERROR_INSTALL_RESOLVE_DEPENDENCY_FAILED, 0x80073D06 ERROR_INSTALL_PACKAGE_DOWNGRADE' }
     ) {
-        Mock Repair-WinGetPackageManager { throw $script:realRepairMessage }
+        Mock Invoke-RepairWinGetPackageManagerProcess { throw $script:realRepairMessage }
         $script:infos = @()
         Mock Write-Info { $script:infos += $Message }
 
@@ -401,17 +401,17 @@ Describe 'Invoke-WingetPackageManagerRepair (issue #265, review findings P3-26, 
 
         $result.Succeeded | Should -Be $false
         $result.ErrorCodes | Should -BeNullOrEmpty
-        Should -Invoke Repair-WinGetPackageManager -Times 1 -Exactly
-        Should -Invoke Repair-WinGetPackageManager -Times 0 -Exactly -ParameterFilter { $Force }
+        Should -Invoke Invoke-RepairWinGetPackageManagerProcess -Times 1 -Exactly
+        Should -Invoke Invoke-RepairWinGetPackageManagerProcess -Times 0 -Exactly -ParameterFilter { $Force }
         $script:infos | Should -Contain "Not running Repair-WinGetPackageManager -Latest -Force: registering App Installer failed with $Shown, which forcing cannot fix (-Force only closes running App Installer processes)."
     }
 
     It 'Still forces the repair when the registration failed with another code' {
-        Mock Repair-WinGetPackageManager { throw $script:realRepairMessage }
+        Mock Invoke-RepairWinGetPackageManagerProcess { throw $script:realRepairMessage }
 
         [void](Invoke-WingetPackageManagerRepair -KnownErrorCodes @(-2147009255))
 
-        Should -Invoke Repair-WinGetPackageManager -Times 1 -Exactly -ParameterFilter { $Force }
+        Should -Invoke Invoke-RepairWinGetPackageManagerProcess -Times 1 -Exactly -ParameterFilter { $Force }
     }
 
     It 'Does not escalate to -Force on <Name>, which fails the same way however hard it is pushed' -ForEach @(
@@ -419,13 +419,164 @@ Describe 'Invoke-WingetPackageManagerRepair (issue #265, review findings P3-26, 
         @{ Name = '0x80073CF3 (a missing framework, issue #279)'; Code = -2147009293 }
     ) {
         $script:code = $Code
-        Mock Repair-WinGetPackageManager { throw (New-AppxException -HResult $script:code) }
+        Mock Invoke-RepairWinGetPackageManagerProcess { throw (New-AppxException -HResult $script:code) }
 
         $result = Invoke-WingetPackageManagerRepair
 
         $result.Succeeded | Should -Be $false
         $result.ErrorCodes | Should -Be @($Code)
-        Should -Invoke Repair-WinGetPackageManager -Times 1 -Exactly
+        Should -Invoke Invoke-RepairWinGetPackageManagerProcess -Times 1 -Exactly
+    }
+}
+
+# wgt-gq8.72: the cmdlet used to run in the installer's own process, with no time limit.
+Describe 'Invoke-RepairWinGetPackageManagerProcess (wgt-gq8.72)' {
+    BeforeAll {
+        function New-RepairRun {
+            param ([Nullable[int]]$ExitCode = 0, [string[]]$Lines = @(), [switch]$TimedOut, [string]$LaunchError)
+            [pscustomobject]@{
+                ExitCode       = $ExitCode
+                TimedOut       = [bool]$TimedOut
+                LaunchFailed   = [bool]$LaunchError
+                LaunchError    = $LaunchError
+                Output         = $Lines
+                StandardOutput = $Lines
+            }
+        }
+    }
+
+    BeforeEach {
+        $script:shown = @()
+        Mock Write-Host { $script:shown += "$Object" }
+        Mock Invoke-ExternalProcess { New-RepairRun -Lines @('Repaired.') }
+    }
+
+    It 'Runs the cmdlet in a child of this PowerShell with a hidden console, within the WingetPackageManagerRepair limit' {
+        Invoke-RepairWinGetPackageManagerProcess -AllUsers -Latest -Force
+
+        Get-ProcessTimeoutSeconds -Operation WingetPackageManagerRepair | Should -Be 900
+        Should -Invoke Invoke-ExternalProcess -Times 1 -Exactly -ParameterFilter {
+            $encoded = $ArgumentList[[array]::IndexOf($ArgumentList, '-EncodedCommand') + 1]
+            $decoded = [System.Text.Encoding]::Unicode.GetString([Convert]::FromBase64String($encoded))
+            $FilePath -eq [Environment]::ProcessPath -and
+            ($ArgumentList -join ' ') -like '-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand *' -and
+            $decoded -match 'Import-Module Microsoft\.WinGet\.Client -ErrorAction Stop' -and
+            $decoded -match '(?m)^\s*Repair-WinGetPackageManager -AllUsers -Latest -Force -ErrorAction Stop$' -and
+            $TimeoutSeconds -eq 900 -and $Echo -eq 'None' -and $CreateNoWindow
+        }
+        $script:shown | Should -Contain '    Repaired.'
+    }
+
+    It 'Passes only the switches it was given' {
+        Invoke-RepairWinGetPackageManagerProcess -Latest
+
+        Should -Invoke Invoke-ExternalProcess -Times 1 -Exactly -ParameterFilter {
+            $encoded = $ArgumentList[[array]::IndexOf($ArgumentList, '-EncodedCommand') + 1]
+            $decoded = [System.Text.Encoding]::Unicode.GetString([Convert]::FromBase64String($encoded))
+            $decoded -match '(?m)^\s*Repair-WinGetPackageManager -Latest -ErrorAction Stop$'
+        }
+    }
+
+    It 'Rethrows the AppX HRESULT the child reported, so Get-AppxErrorCode reads it, and shows the rest of its output' {
+        Mock Invoke-ExternalProcess { New-RepairRun -ExitCode 1 -Lines @('Installing...', 'ERR|-2147009274|Deployment failed with HRESULT: 0x80073D06.') }
+
+        try { Invoke-RepairWinGetPackageManagerProcess -Latest; $record = $null }
+        catch { $record = $_ }
+
+        "$record" | Should -Be 'Deployment failed with HRESULT: 0x80073D06.'
+        $record.Exception | Should -BeOfType ([System.Runtime.InteropServices.COMException])
+        Get-AppxErrorCode -ErrorRecord $record | Should -Be -2147009274
+        $script:shown | Should -Contain '    Installing...'
+        @($script:shown | Where-Object { $_ -like '*ERR|*' }) | Should -BeNullOrEmpty
+    }
+
+    It 'Rethrows the child''s message as it is when it carried no AppX HRESULT' {
+        Mock Invoke-ExternalProcess { New-RepairRun -ExitCode 1 -Lines @("ERR|0|$script:realRepairMessage") }
+
+        { Invoke-RepairWinGetPackageManagerProcess -Latest } | Should -Throw -ExpectedMessage $script:realRepairMessage
+    }
+
+    It 'Throws with the exit code when the child failed without a word' {
+        Mock Invoke-ExternalProcess { New-RepairRun -ExitCode 3 }
+
+        { Invoke-RepairWinGetPackageManagerProcess -Latest } | Should -Throw -ExpectedMessage 'Repair-WinGetPackageManager -Latest failed in a child PowerShell (exit code 3).'
+    }
+
+    It 'Throws without an AppX code when the child was stopped at the limit' {
+        Mock Invoke-ExternalProcess { New-RepairRun -ExitCode $null -TimedOut }
+
+        try { Invoke-RepairWinGetPackageManagerProcess -Latest -Force; $record = $null }
+        catch { $record = $_ }
+
+        "$record" | Should -Be 'Repair-WinGetPackageManager -Latest -Force did not finish within 15 minutes and was stopped.'
+        Get-AppxErrorCode -ErrorRecord $record | Should -BeNullOrEmpty
+    }
+
+    It 'Throws when the child PowerShell cannot be started' {
+        Mock Invoke-ExternalProcess { New-RepairRun -ExitCode $null -LaunchError 'The system cannot find the file specified' }
+
+        { Invoke-RepairWinGetPackageManagerProcess -Latest } | Should -Throw -ExpectedMessage '*could not run: PowerShell could not be started (The system cannot find the file specified)*'
+    }
+
+    It 'Lets Invoke-WingetPackageManagerRepair go on to the forced repair after a timed-out one, as after any failure nothing names' {
+        Mock Write-Info { }
+        Mock Write-WarningMessage { }
+        Mock Test-AndInstallWingetModule { $true }
+        Mock Invoke-ExternalProcess { New-RepairRun -ExitCode $null -TimedOut }
+
+        $result = Invoke-WingetPackageManagerRepair
+
+        $result.Succeeded | Should -Be $false
+        $result.ErrorCodes | Should -BeNullOrEmpty
+        Should -Invoke Invoke-ExternalProcess -Times 2 -Exactly
+        Should -Invoke Write-WarningMessage -Times 1 -Exactly -ParameterFilter { $Message -eq 'Repair-WinGetPackageManager -Latest failed: Repair-WinGetPackageManager -Latest did not finish within 15 minutes and was stopped.' }
+    }
+}
+
+Describe 'Invoke-RepairWinGetPackageManagerProcess in a real child PowerShell (wgt-gq8.72)' {
+    BeforeAll {
+        # A stand-in Microsoft.WinGet.Client on the child's PSModulePath: -Force fails with
+        # 0x80073CF3 inside another exception, anything else succeeds.
+        $script:moduleRoot = Join-Path $TestDrive 'modules'
+        $moduleDirectory = Join-Path $script:moduleRoot 'Microsoft.WinGet.Client'
+        [void](New-Item -ItemType Directory -Path $moduleDirectory -Force)
+        Set-Content -LiteralPath (Join-Path $moduleDirectory 'Microsoft.WinGet.Client.psm1') -Encoding utf8 -Value @'
+function Repair-WinGetPackageManager {
+    [CmdletBinding()]
+    param ([switch]$Latest, [switch]$AllUsers, [switch]$Force)
+    if ($Force) {
+        $inner = [System.Runtime.InteropServices.COMException]::new('Abhängigkeit fehlt.', -2147009293)
+        throw [System.InvalidOperationException]::new('Deployment failed.', $inner)
+    }
+    'Repaired with AllUsers={0}' -f [bool]$AllUsers
+}
+'@
+        $script:savedModulePath = $env:PSModulePath
+        $env:PSModulePath = $script:moduleRoot + [System.IO.Path]::PathSeparator + $env:PSModulePath
+    }
+
+    AfterAll {
+        $env:PSModulePath = $script:savedModulePath
+    }
+
+    BeforeEach {
+        $script:shown = @()
+        Mock Write-Host { $script:shown += "$Object" }
+    }
+
+    It 'Runs the cmdlet in the child and shows its output' {
+        Invoke-RepairWinGetPackageManagerProcess -AllUsers -Latest
+
+        $script:shown | Should -Contain '    Repaired with AllUsers=True'
+    }
+
+    It 'Brings back the AppX HRESULT from inside the child''s exception chain' {
+        try { Invoke-RepairWinGetPackageManagerProcess -Latest -Force; $record = $null }
+        catch { $record = $_ }
+
+        $record | Should -Not -BeNullOrEmpty
+        "$record" | Should -Be 'Deployment failed.'
+        Get-AppxErrorCode -ErrorRecord $record | Should -Be -2147009293
     }
 }
 

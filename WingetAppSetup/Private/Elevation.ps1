@@ -312,30 +312,32 @@ function New-ElevationVerifierCommand {
     # Each statement ends with ';' or a closing brace, so joining the lines with spaces keeps it valid.
     # $LASTEXITCODE holds the exit code throughout (-Command runs at the top level, so it is the
     # global the copy's run sets): nothing has to run after the copy, which Ctrl+C would skip.
+    # Short names and few spaces leave room on the command line (wgt-gq8.48): $n the file name, $b
+    # its bytes, $s the access list, $d the copy's folder, $c the copy.
     $template = @'
-$ErrorActionPreference = 'Stop';
-$LASTEXITCODE = 5;
-$copyDirectory = $null;
-try {
-    $p = Get-ExecutionPolicy;
-    if ($p -in 2, 3) { $LASTEXITCODE = 4; throw ('Group Policy sets the execution policy to ' + $p + ', which -ExecutionPolicy Bypass cannot override'); }
-    $bytes = [IO.File]::ReadAllBytes(@SOURCE@);
-    $hash = [BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash($bytes)).Replace('-', '');
-    if ($hash -ne @SHA256@) { throw 'the file changed after administrator rights were requested'; }
-    $security = New-Object Security.AccessControl.DirectorySecurity;
-    $security.SetAccessRuleProtection($true, $false);
-    foreach ($sid in @('S-1-5-18', 'S-1-5-32-544')) { $security.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule((New-Object Security.Principal.SecurityIdentifier($sid)), 'FullControl', 'ContainerInherit, ObjectInherit', 'None', 'Allow'))); }
-    $copyDirectory = Join-Path @COPYROOT@ ('winget-app-setup-' + [Guid]::NewGuid().ToString('N'));
-    [void][IO.Directory]::CreateDirectory($copyDirectory, $security);
-    $copy = Join-Path $copyDirectory @NAME@;
-    [IO.File]::WriteAllBytes($copy, $bytes);
-    & @POWERSHELL@ -NoProfile -ExecutionPolicy Bypass -File $copy@ARGUMENTS@;
-} catch {
-    Write-Host ('Did not run ' + @NAME@ + ': ' + $_) -ForegroundColor Red;
-    try { [void](Read-Host 'Press Enter to close this window'); } catch { }
-} finally {
-    $host.SetShouldExit($LASTEXITCODE);
-    if ($copyDirectory) { Remove-Item -LiteralPath $copyDirectory -Recurse -Force -ErrorAction SilentlyContinue; }
+$ErrorActionPreference='Stop';
+$LASTEXITCODE=5;
+$d=$null;
+$n=@NAME@;
+try{
+$p=Get-ExecutionPolicy;
+if($p -in 2,3){$LASTEXITCODE=4;throw ('Group Policy sets the execution policy to '+$p+', which -ExecutionPolicy Bypass cannot override')}
+$b=[IO.File]::ReadAllBytes(@SOURCE@);
+if([BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash($b)).Replace('-','') -ne @SHA256@){throw 'the file changed after administrator rights were requested'}
+$s=New-Object Security.AccessControl.DirectorySecurity;
+$s.SetAccessRuleProtection($true,$false);
+foreach($i in 'S-1-5-18','S-1-5-32-544'){$s.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule((New-Object Security.Principal.SecurityIdentifier($i)),'FullControl','ContainerInherit, ObjectInherit','None','Allow')))}
+$d=Join-Path @COPYROOT@ ('winget-app-setup-'+[Guid]::NewGuid().ToString('N'));
+[void][IO.Directory]::CreateDirectory($d,$s);
+$c=Join-Path $d $n;
+[IO.File]::WriteAllBytes($c,$b);
+& @POWERSHELL@ -NoProfile -ExecutionPolicy Bypass -File $c@ARGUMENTS@
+}catch{
+Write-Host ('Did not run '+$n+': '+$_) -ForegroundColor Red;
+try{[void](Read-Host 'Press Enter to close this window')}catch{}
+}finally{
+$host.SetShouldExit($LASTEXITCODE);
+if($d){Remove-Item -LiteralPath $d -Recurse -Force -ErrorAction SilentlyContinue}
 }
 '@
 
