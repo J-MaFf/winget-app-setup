@@ -270,6 +270,14 @@ Describe 'rmm/Get-WingetFleetHealth.ps1: the probe' {
         Mock Get-RmmWauInstall { $script:wauInstall }
         Mock Get-ScheduledTask { [pscustomobject]@{ TaskName = 'Winget-AutoUpdate'; State = $script:taskState; Triggers = $script:taskTriggers } }
         Mock Get-ScheduledTaskInfo { [pscustomobject]@{ LastRunTime = [datetime]'2026-10-04T02:00:00'; LastTaskResult = 0; NextRunTime = [datetime]'2026-10-11T02:00:00' } }
+
+        # last-run.json in TestDrive: a finished run that installed with winget.exe.
+        $script:recordBase = Join-Path $TestDrive ([guid]::NewGuid().ToString('N'))
+        $script:recordLogs = Join-Path $script:recordBase 'logs'
+        $null = New-Item -ItemType Directory -Path $script:recordLogs
+        $script:recordLocation = [pscustomobject]@{ BaseDirectory = $script:recordBase; LogDirectory = $script:recordLogs; Path = (Join-Path $script:recordLogs 'last-run.json') }
+        Copy-Item -LiteralPath (Join-Path $script:RepoRoot 'tests/fixtures/e2e/system-last-run.json') -Destination $script:recordLocation.Path
+        Mock Get-RmmRunRecordLocation { $script:recordLocation }
     }
 
     It 'Reports a healthy PC with one line per check, a HEALTH line last, and exit code 0' {
@@ -277,12 +285,110 @@ Describe 'rmm/Get-WingetFleetHealth.ps1: the probe' {
 
         $result.ExitCode | Should -Be 0
         $result.Problems | Should -BeNullOrEmpty
-        $result.Lines[-1] | Should -BeLike 'HEALTH: status=healthy problems=none computer=* appinstaller=1.29.380.0 runtime=present winget=ok wingetversion=1.29.380 wau=2.12.0 wautask=Ready wauresult=0x00000000 logontrigger=no wauwingetinstalls=1'
+        $result.Lines[-1] | Should -BeLike 'HEALTH: status=healthy problems=none computer=* appinstaller=1.29.380.0 runtime=present winget=ok wingetversion=1.29.380 wau=2.12.0 wautask=Ready wauresult=0x00000000 logontrigger=no wauwingetinstalls=1 wingetsource=open lastrun=ok engine=Cli enginerequested=Cli'
         $result.Lines | Should -Contain 'Healthy.'
+        $result.Lines | Should -Contain 'Install engine of the last run: Cli (requested Cli).'
         $result.Lines | Should -Contain 'Windows App Runtime: present (Microsoft.WindowsAppRuntime.1.8 >= 8000.616.304.0 for X64; found X64 8000.616.304.0, X86 8000.616.304.0).'
         $result.Lines | Should -Contain 'WAU task \WAU\Winget-AutoUpdate: state Ready; triggers: Weekly on Tuesday from 2026-10-06T02:00:00; at-logon trigger: no; last run 2026-10-04 02:00, result 0x00000000 (success); next run 2026-10-11 02:00.'
         $result.Lines | Should -Contain 'Winget-AutoUpdate: installed: version 2.12.0; WAU_UpdatesAtLogon = 0.'
         @($result.Lines | Where-Object { $_ -match '[\r\n]' }) | Should -BeNullOrEmpty
+    }
+
+    It 'Opens the winget source with the winget.exe that ran, with its own time limit' {
+        $result = Invoke-RmmFleetHealthProbe -SourceTimeoutSeconds 90
+
+        $result.Problems | Should -BeNullOrEmpty
+        @($result.Lines | Where-Object { $_ -like 'winget source: opens (winget search --exact --id Microsoft.PowerShell --source winget *' }).Count | Should -Be 1
+        Should -Invoke Invoke-RmmTimedProcess -Times 1 -Exactly -ParameterFilter { $FilePath -eq (Join-Path $script:newestFolder 'winget.exe') -and $TimeoutSeconds -eq 90 -and ($ArgumentList -join ' ') -eq ((Get-RmmWingetSourceOpenArgument) -join ' ') }
+    }
+
+    It 'Counts 0x8A150014 (nothing found) as an open source' {
+        Mock Invoke-RmmTimedProcess { [pscustomobject]@{ ExitCode = -1978335212; TimedOut = $false; LaunchError = $null; LaunchErrorCode = $null; Output = @('No package found'); DurationSeconds = 2 } } -ParameterFilter { $ArgumentList -contains 'search' }
+
+        $result = Invoke-RmmFleetHealthProbe
+
+        $result.Problems | Should -BeNullOrEmpty
+        $result.Lines[-1] | Should -BeLike '* wingetsource=open *'
+    }
+
+    It 'Is unhealthy when the winget source <Case>' -ForEach @(
+        @{ Case = 'cannot be opened'; Run = @{ ExitCode = -1978335217; TimedOut = $false; LaunchError = $null; LaunchErrorCode = $null; Output = @('Failed when opening source(s)'); DurationSeconds = 3 }; State = 'closed'; Expected = 'winget source: CANNOT BE OPENED (*0x8A15000F*: Failed when opening source(s)).' }
+        @{ Case = 'does not answer in time'; Run = @{ ExitCode = $null; TimedOut = $true; LaunchError = $null; LaunchErrorCode = $null; Output = @(); DurationSeconds = 120 }; State = 'timedout'; Expected = 'winget source: * did not finish within 120 seconds and was stopped.' }
+    ) {
+        $run = $Run
+        Mock Invoke-RmmTimedProcess { [pscustomobject]$run } -ParameterFilter { $ArgumentList -contains 'search' }
+
+        $result = Invoke-RmmFleetHealthProbe
+
+        $result.ExitCode | Should -Be 1
+        $result.Problems | Should -Be @('winget-source')
+        $result.Lines[-1] | Should -BeLike "* winget=ok * wingetsource=$State *"
+        @($result.Lines | Where-Object { $_ -like 'winget source: *' }) | Should -BeLike $Expected
+    }
+
+    It 'Checks no source when winget.exe does not run, or does not run as SYSTEM' {
+        Mock Test-RmmSystemAccount { $false }
+
+        $result = Invoke-RmmFleetHealthProbe
+
+        $result.Lines[-1] | Should -BeLike '* wingetsource=skipped *'
+        Should -Invoke Invoke-RmmTimedProcess -Times 0 -Exactly
+    }
+
+    It 'Reports the install engine the last run used, and is unhealthy when it fell back from Microsoft.WinGet.Client' {
+        $record = Get-Content -Raw -LiteralPath $script:recordLocation.Path | ConvertFrom-Json
+        $record.installEngine.requested = 'WinGetClient'
+        $record.installEngine.fallbackReason = 'the module''s signature could not be checked.'
+        [System.IO.File]::WriteAllText($script:recordLocation.Path, ($record | ConvertTo-Json -Depth 8))
+
+        $result = Invoke-RmmFleetHealthProbe
+
+        $result.ExitCode | Should -Be 1
+        $result.Problems | Should -Be @('engine-fallback')
+        $result.Lines[-1] | Should -BeLike '* lastrun=ok engine=Cli enginerequested=WinGetClient'
+        $result.Lines | Should -Contain 'Install engine of the last run: Cli (requested WinGetClient); fell back: the module''s signature could not be checked.'
+    }
+
+    It 'Reports Microsoft.WinGet.Client as healthy when the last run used it' {
+        Copy-Item -LiteralPath (Join-Path $script:RepoRoot 'tests/fixtures/e2e/system-winget-client-last-run.json') -Destination $script:recordLocation.Path -Force
+
+        $result = Invoke-RmmFleetHealthProbe
+
+        $result.Problems | Should -BeNullOrEmpty
+        $result.Lines[-1] | Should -BeLike '* engine=WinGetClient enginerequested=WinGetClient'
+    }
+
+    It 'Reports no engine, and no problem, when <Case>' -ForEach @(
+        @{ Case = 'there is no last-run.json'; State = 'none' }
+        @{ Case = 'last-run.json is not JSON'; State = 'unreadable' }
+        @{ Case = 'the record has no installEngine'; State = 'ok' }
+    ) {
+        switch ($Case) {
+            'there is no last-run.json' { Remove-Item -LiteralPath $script:recordLocation.Path }
+            'last-run.json is not JSON' { [System.IO.File]::WriteAllText($script:recordLocation.Path, 'not json') }
+            default { [System.IO.File]::WriteAllText($script:recordLocation.Path, '{"exitCode":0,"apps":[]}') }
+        }
+
+        $result = Invoke-RmmFleetHealthProbe
+
+        $result.Problems | Should -BeNullOrEmpty
+        $result.Lines[-1] | Should -BeLike "* lastrun=$State engine=- enginerequested=-"
+    }
+
+    It 'Does not read last-run.json through a link at the <Entry>' -ForEach @(
+        @{ Entry = 'BaseDirectory' }
+        @{ Entry = 'LogDirectory' }
+        @{ Entry = 'Path' }
+    ) {
+        $linked = $script:recordLocation.$Entry
+        Mock Get-RmmEntryAttribute { [System.IO.FileAttributes]'Directory' }
+        Mock Get-RmmEntryAttribute { [System.IO.FileAttributes]'Directory, ReparsePoint' } -ParameterFilter { $Path -eq $linked }
+
+        $result = Invoke-RmmFleetHealthProbe
+
+        $result.Problems | Should -BeNullOrEmpty
+        $result.Lines[-1] | Should -BeLike '* lastrun=link engine=- enginerequested=-'
+        @($result.Lines | Where-Object { $_ -like "Install engine of the last run: unknown ($linked is a link*" }).Count | Should -Be 1
     }
 
     It 'Lists each App Installer version, newest first, with each account''s install state' {
@@ -340,7 +446,7 @@ Describe 'rmm/Get-WingetFleetHealth.ps1: the probe' {
 
         $result.ExitCode | Should -Be 0
         $result.Lines | Should -Contain 'Winget-AutoUpdate: not installed.'
-        $result.Lines[-1] | Should -BeLike '* runtime=missing winget=ok * wau=none wautask=- wauresult=- logontrigger=- wauwingetinstalls=-'
+        $result.Lines[-1] | Should -BeLike '* runtime=missing winget=ok * wau=none wautask=- wauresult=- logontrigger=- wauwingetinstalls=- *'
         Should -Invoke Get-ScheduledTaskInfo -Times 0 -Exactly
     }
 
@@ -428,7 +534,7 @@ Describe 'rmm/Get-WingetFleetHealth.ps1: the probe' {
         $result = Invoke-RmmFleetHealthProbe
 
         $result.Lines[-1] | Should -BeLike '* appinstaller=unknown * winget=ok wingetversion=1.29.380 *'
-        Should -Invoke Invoke-RmmTimedProcess -Times 1 -Exactly -ParameterFilter { $FilePath -eq (Join-Path $folder 'winget.exe') }
+        Should -Invoke Invoke-RmmTimedProcess -Times 1 -Exactly -ParameterFilter { $FilePath -eq (Join-Path $folder 'winget.exe') -and $ArgumentList -contains '--version' }
     }
 
     It 'Is unhealthy when WAU is installed and its task <Case>' -ForEach @(
@@ -497,7 +603,7 @@ Describe 'rmm/Get-WingetFleetHealth.ps1: the probe' {
         $result = Invoke-RmmFleetHealthProbe
 
         ($result.Lines -join "`n") | Should -BeLike '*updates.log does not exist (WAU creates it on its first run).*'
-        $result.Lines[-1] | Should -BeLike '* wauwingetinstalls=-'
+        $result.Lines[-1] | Should -BeLike '* wauwingetinstalls=- *'
         $result.ExitCode | Should -Be 0
     }
 
@@ -743,6 +849,30 @@ Describe 'rmm/Get-WingetFleetHealth.ps1: the same answers as the installer' {
 
         $installer.Count | Should -BeGreaterThan 1
         $probe | Should -Be $installer
+    }
+
+    It 'Opens the winget source with the installer''s command, and reads its exit code the same way' {
+        Get-RmmWingetSourceOpenArgument | Should -Be @(Get-WingetSourceOpenArgument)
+        foreach ($code in @($null, 0, -1978335212, -1978335217, 1, -1073741515)) {
+            Test-RmmWingetSourceOpenExitCode -ExitCode $code | Should -Be (Test-WingetSourceOpenExitCode -ExitCode $code) -Because "exit code $code"
+        }
+    }
+
+    It 'Gives the source check the installer''s time limit by default' {
+        $probe = Get-Command -Name $script:ProbePath
+        $probe.Parameters['SourceTimeoutSeconds'] | Should -Not -BeNullOrEmpty
+        (Get-FunctionText -Path $script:ProbePath -Name 'Invoke-RmmFleetHealthProbe') | Should -BeLike ('*`[int`]$SourceTimeoutSeconds = {0},*' -f (Get-ProcessTimeoutSeconds -Operation WingetSourceOpen))
+    }
+
+    It 'Reads an entry''s attributes as the machine phase and the installer do, without following a link' {
+        $wrapperPath = Join-Path $script:RepoRoot 'rmm/Invoke-WingetAppSetup.ps1'
+        Get-FunctionText -Path $script:ProbePath -Name 'Get-RmmEntryAttribute' | Should -BeExactly (Get-FunctionText -Path $wrapperPath -Name 'Get-RmmEntryAttribute')
+
+        $folder = Join-Path $TestDrive 'attribute-folder'
+        $null = New-Item -ItemType Directory -Path $folder
+        foreach ($path in @($folder, (Join-Path $TestDrive 'missing'), (Join-Path $TestDrive 'missing/below'))) {
+            Get-RmmEntryAttribute -Path $path | Should -Be (Get-FileSystemEntryAttribute -Path $path)
+        }
     }
 
     It 'Describes a trigger as the installer''s transcript does' {

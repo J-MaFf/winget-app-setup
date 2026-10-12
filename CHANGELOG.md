@@ -13,6 +13,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   phase) now prints `OS architecture: <arch>` right after `Installer build:` (bead wgt-gq8.52): the
   architecture `Get-OSArchitecture` reads and the catalog's `arch` lists are decided on, which only
   the diagnostics bundle recorded before. `unknown (<reason>)` when it cannot be read.
+- Fleet health (`rmm/Get-WingetFleetHealth.ps1`): the HEALTH line now ends with
+  `wingetsource=`, `lastrun=`, `engine=` and `enginerequested=` (existing fields unchanged).
+  As SYSTEM it checks that the machine-wide winget.exe opens the winget source, with the
+  installer's own command and codes and a `-SourceTimeoutSeconds` limit (default 120), and reports
+  problem `winget-source` when it does not (wgt-gq8.69). It reads the last run's `installEngine`
+  from `last-run.json` and reports problem `engine-fallback` when Microsoft.WinGet.Client was
+  requested and winget.exe installed (wgt-gq8.54).
+- Diagnostics bundle (`-CollectDiagnostics`): adds the account's newest winget logs (`winget-logs\`,
+  at most 5, 1 MB each) and the AppXDeploymentServer/Operational errors that mention
+  Microsoft.Winget.Source (`appx-source-events.txt`), both redacted like the rest (wgt-gq8.69).
 - merge-gate caller (`.github/workflows/merge-gate.yml`): the required check that keeps the claude-sandbox App from merging its own PRs; logic in the reusable J-MaFf/.github merge-gate.yml.
 - Releases (bead wgt-z70, [#286](https://github.com/J-MaFf/winget-app-setup/issues/286)): a `vX.Y.Z`
   tag on `main` now publishes a GitHub release through the shared workflow in
@@ -559,6 +569,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fits ShellExecuteEx's 2000-character limit with a `%TEMP%` path of up to 367 characters (135
   before; 432 without the time budget, 200 before), more than a staged copy's path can be under
   MAX_PATH.
+- The diagnostics bundle and the fleet health probe no longer read through a link at
+  `%ProgramData%\winget-app-setup` or its `logs` folder, and the bundle leaves out a link inside
+  that folder (wgt-gq8.59).
 - `winget-app-uninstall.ps1` is now generated from the `WingetAppSetup` module as a single file,
   like the installer (wgt-gq8.43, work-order items 10 and 15, review finding P3-11). It needs
   nothing next to it, and its elevated run is a copy checked against the SHA256 the file had when it
