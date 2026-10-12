@@ -36,6 +36,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   gone from `winget list`, and Winget-AutoUpdate's task gone, with its output in the
   `e2e-diagnostics` artifact and a diagnostics snapshot (WAU's logs included) taken just before
   it. Pull requests that change only `winget-app-uninstall.ps1` now run the e2e jobs too.
+- E2E SYSTEM leg, spent time budget (wgt-gq8.49): dispatching `e2e-install.yml` with `budget_pass`
+  ticked runs one more SYSTEM pass first, through `rmm/Invoke-WingetAppSetup.ps1 -MaxRuntimeMinutes 1`
+  with a `-RunDeadlineUtc` already past, and requires exit 9 passed back by the wrapper, every app
+  that applies `NotAttempted` with the budget's reason, nothing installed or failed and
+  `autoUpdates` `NotAttempted` in `last-run.json` (`Get-SystemPassBudgetResult` in
+  `e2e/Invoke-SystemInstallPass.ps1 -BudgetPass`, tested against
+  `tests/fixtures/e2e/system-budget-last-run.json`). The normal pass then runs without a budget.
+- Weekly Microsoft.WinGet.Client pin freshness signal (wgt-gq8.55):
+  `.github/workflows/wingetclient-pin-freshness.yml` runs
+  `build/Set-WingetClientModulePin.ps1 -Check -Latest` on windows-latest (the signature checks need
+  Windows) and, when the Gallery's latest stable version is past the pin, an ubuntu job with
+  `issues: write` opens the 'Microsoft.WinGet.Client pin is behind the PowerShell Gallery' issue
+  with the check's output, or comments on the open one once per new version. `-Latest` reads the
+  Gallery's OData feed (every page) and prints a `PIN-FRESHNESS:` line.
+- `.github/workflows/arm64-probe.yml` (wgt-gq8.50, first step): a dispatch-only job on
+  `windows-11-arm` that installs nothing and prints the account, the architecture as each
+  PowerShell (7, 5.1 and 32-bit 5.1) sees it, App Installer's registration and provisioning,
+  Microsoft.WindowsAppRuntime.1.8 and `winget --version`. The ARM64 install leg waits on its results.
 - merge-gate caller (`.github/workflows/merge-gate.yml`): the required check that keeps the claude-sandbox App from merging its own PRs; logic in the reusable J-MaFf/.github merge-gate.yml.
 - Releases (bead wgt-z70, [#286](https://github.com/J-MaFf/winget-app-setup/issues/286)): a `vX.Y.Z`
   tag on `main` now publishes a GitHub release through the shared workflow in
@@ -948,6 +966,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   wgt-gq8.59, part 1). It is printed before the transcript starts, so only the console had it; the
   installer and the RMM machine phase now repeat it, starting `Before this log started:`, once
   their transcript runs.
+- E2E SYSTEM legs no longer fail on an app the runner preparation could not uninstall (wgt-gq8.53):
+  `e2e/Remove-PreinstalledApps.ps1 -ResultPath` writes, after each app, which ids it removed, found
+  absent, left installed or could not tell about, and `e2e/Invoke-SystemInstallPass.ps1
+  -PreparationResultPath` requires `Installed` only for the removed and absent ones (an app left in
+  place may be `Skipped` as already there). Without a readable record it keeps the old default list.
+- Real-PC test plan (wgt-gq8.73): the link-guard cleanup now takes 'Log on as a batch job'
+  (`SeBatchLogonRight`) back from the deleted temporary user's SID when registering its S4U task
+  granted it, through `LsaRemoveAccountRights` (only that right; best effort, a `SKIP` row with the
+  manual step when it cannot, never a failure of the plan). Needs a check on Windows.
 - **The one-liner started from a standard user's window no longer stalls installing PowerShell 7**
   (bead wgt-gq8.75, found on the owner's test PC on 2026-10-12, over Remote Desktop). On a PC
   without PowerShell 7, the Windows PowerShell 5.1 bootstrap installed it before the run asked for

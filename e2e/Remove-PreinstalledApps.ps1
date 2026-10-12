@@ -12,10 +12,14 @@
 
     Tolerant: an app that is not installed is fine, and an app that cannot be removed is reported
     as a GitHub warning annotation and left in place, so this step never fails on its own. The
-    PowerShell 7 and 5.1 legs' first pass then skips that app as already installed, as before; the
-    SYSTEM leg fails on it, because e2e/Invoke-SystemInstallPass.ps1 expects the apps this script
-    removes by default to be Installed in last-run.json. Each app's result and warning are printed
-    as soon as that app is done, so a step stopped part-way still shows what it got through.
+    first pass of every leg then skips that app as already installed. Each app's result and warning
+    are printed as soon as that app is done, so a step stopped part-way still shows what it got
+    through.
+
+    With -ResultPath (the SYSTEM legs, wgt-gq8.53) it also writes what it did to a JSON file, again
+    after each app: 'removed' and 'absent' list the ids that are not installed when it ends, which
+    e2e/Invoke-SystemInstallPass.ps1 -PreparationResultPath then requires the run to install, and
+    'leftInstalled' and 'unknown' the ones it could not remove or could not tell about.
 
     Every winget and msiexec call is bounded, and the limits add up to less than the step's
     timeout-minutes (Get-RunnerPreparationWorstCase; tests/E2EPreinstalledApps.Tests.ps1 checks
@@ -41,6 +45,9 @@
     Limit for each 'winget list'. Default 45 (the installer's own list check allows 15).
 .PARAMETER UninstallTimeoutSeconds
     Limit for each uninstall. Default 150.
+.PARAMETER ResultPath
+    Where to write the JSON record of what was removed (ConvertTo-PreparationRecord). Not given:
+    none is written.
 .NOTES
     Exit codes: 0 = done (warnings for anything left installed), 1 = unexpected error.
 #>
@@ -56,7 +63,10 @@ param (
     [int]$ListTimeoutSeconds = 45,
 
     [Parameter(Mandatory = $false)]
-    [int]$UninstallTimeoutSeconds = 150
+    [int]$UninstallTimeoutSeconds = 150,
+
+    [Parameter(Mandatory = $false)]
+    [string]$ResultPath
 )
 
 <#
@@ -308,11 +318,75 @@ function Write-PreparationResult {
 
 <#
 .SYNOPSIS
+    The record -ResultPath gets: the per-app results sorted by what is true now.
+.PARAMETER Results
+    The per-app results so far (Remove-PreinstalledPackage, Remove-PowerShell7).
+.PARAMETER Complete
+    Every app was done.
+.RETURNS
+    [System.Collections.Specialized.OrderedDictionary] schemaVersion 1, complete, and the id lists
+    removed, absent (not installed to begin with), leftInstalled ('still present') and unknown.
+#>
+function ConvertTo-PreparationRecord {
+    param (
+        [Parameter(Mandatory = $false)]
+        [AllowEmptyCollection()]
+        [object[]]$Results = @(),
+        [Parameter(Mandatory = $false)]
+        [switch]$Complete
+    )
+
+    $byResult = @{ 'removed' = @(); 'absent' = @(); 'still present' = @(); 'unknown' = @() }
+    foreach ($result in @($Results | Where-Object { $null -ne $_ })) {
+        $key = [string]$result.Result
+        if (-not $byResult.ContainsKey($key)) {
+            $key = 'unknown'
+        }
+        $byResult[$key] += [string]$result.App
+    }
+    return [ordered]@{
+        schemaVersion = 1
+        complete      = [bool]$Complete
+        removed       = [string[]]$byResult['removed']
+        absent        = [string[]]$byResult['absent']
+        leftInstalled = [string[]]$byResult['still present']
+        unknown       = [string[]]$byResult['unknown']
+    }
+}
+
+# Writes the record to -ResultPath; a failure is a warning, never the step's end.
+function Save-PreparationRecord {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+        [Parameter(Mandatory = $false)]
+        [AllowEmptyCollection()]
+        [object[]]$Results = @(),
+        [Parameter(Mandatory = $false)]
+        [switch]$Complete
+    )
+
+    try {
+        $folder = Split-Path -Parent $Path
+        if ($folder -and -not (Test-Path -LiteralPath $folder -PathType Container)) {
+            $null = New-Item -ItemType Directory -Path $folder -Force -ErrorAction Stop
+        }
+        $json = ConvertTo-Json -InputObject (ConvertTo-PreparationRecord -Results $Results -Complete:$Complete) -Depth 3
+        [System.IO.File]::WriteAllText($Path, $json + "`n", (New-Object System.Text.UTF8Encoding($false)))
+    }
+    catch {
+        Write-Host "::warning title=E2E runner preparation::Could not write ${Path}: $(($_.Exception.Message) -replace '[\r\n%]', ' ')"
+    }
+}
+
+<#
+.SYNOPSIS
     Removes the preinstalled apps and prints what happened, one line per app.
 .DESCRIPTION
     Each app's line is printed as soon as that app is done, and an app left installed (or whose
     state winget could not tell) gets a GitHub warning annotation right away: the run carries on,
-    and the first pass will skip that app. A summary of every app follows at the end.
+    and the first pass will skip that app. A summary of every app follows at the end. With
+    -ResultPath the record is written after each app, and once more, complete, at the end.
 .RETURNS
     The per-app results (see Remove-PreinstalledPackage).
 #>
@@ -326,7 +400,9 @@ function Invoke-RunnerPreparation {
         [Parameter(Mandatory = $true)]
         [int]$ListTimeoutSeconds,
         [Parameter(Mandatory = $true)]
-        [int]$UninstallTimeoutSeconds
+        [int]$UninstallTimeoutSeconds,
+        [Parameter(Mandatory = $false)]
+        [string]$ResultPath
     )
 
     $worstCase = Get-RunnerPreparationWorstCase -PackageCount @($PackageId).Count -IncludePowerShell7:$IncludePowerShell7 -ListTimeoutSeconds $ListTimeoutSeconds -UninstallTimeoutSeconds $UninstallTimeoutSeconds
@@ -338,12 +414,19 @@ function Invoke-RunnerPreparation {
         $result = Remove-PreinstalledPackage -Id $id -ListTimeoutSeconds $ListTimeoutSeconds -UninstallTimeoutSeconds $UninstallTimeoutSeconds
         Write-PreparationResult -Result $result
         $results += $result
+        if ($ResultPath) {
+            Save-PreparationRecord -Path $ResultPath -Results $results
+        }
     }
     if ($IncludePowerShell7) {
         Write-Host 'Removing PowerShell 7...'
         $result = Remove-PowerShell7 -ListTimeoutSeconds $ListTimeoutSeconds -UninstallTimeoutSeconds $UninstallTimeoutSeconds
         Write-PreparationResult -Result $result
         $results += $result
+    }
+    if ($ResultPath) {
+        Save-PreparationRecord -Path $ResultPath -Results $results -Complete
+        Write-Host "Wrote what was removed to $ResultPath."
     }
 
     Write-Host ''
@@ -357,7 +440,7 @@ function Invoke-RunnerPreparation {
 if ($MyInvocation.InvocationName -ne '.') {
     $ErrorActionPreference = 'Continue'
     try {
-        $null = Invoke-RunnerPreparation -PackageId $PackageId -IncludePowerShell7:$IncludePowerShell7 -ListTimeoutSeconds $ListTimeoutSeconds -UninstallTimeoutSeconds $UninstallTimeoutSeconds
+        $null = Invoke-RunnerPreparation -PackageId $PackageId -IncludePowerShell7:$IncludePowerShell7 -ListTimeoutSeconds $ListTimeoutSeconds -UninstallTimeoutSeconds $UninstallTimeoutSeconds -ResultPath $ResultPath
         exit 0
     }
     catch {

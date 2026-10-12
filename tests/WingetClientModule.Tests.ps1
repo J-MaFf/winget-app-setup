@@ -591,6 +591,68 @@ Describe 'build/Set-WingetClientModulePin.ps1' {
         [System.IO.File]::ReadAllText($copy) | Should -BeExactly $text
     }
 
+    # wgt-gq8.55: -Latest, which the weekly pin-freshness workflow runs.
+    It 'Reads each feed page''s versions, prerelease flags and next link' {
+        $page = Read-GalleryFeedPage -FeedXml ([System.IO.File]::ReadAllText((Join-Path $PSScriptRoot 'fixtures/winget-client/gallery-feed-page1.xml')))
+
+        @($page.Versions | ForEach-Object { '{0}:{1}' -f $_.Version, $_.IsPrerelease }) | Should -Be @('1.9.25190:False', '1.29.380:False', '1.31.10-preview:True')
+        $page.NextUrl | Should -Be "https://www.powershellgallery.com/api/v2/FindPackagesById?id='Microsoft.WinGet.Client'&`$skiptoken='Microsoft.WinGet.Client','1.31.10-preview'"
+        (Read-GalleryFeedPage -FeedXml ([System.IO.File]::ReadAllText((Join-Path $PSScriptRoot 'fixtures/winget-client/gallery-feed-page2.xml')))).NextUrl | Should -BeNullOrEmpty
+    }
+
+    It 'Picks the highest stable version by version order, never a prerelease' {
+        Select-GalleryLatestStableVersion -Versions @(
+            [pscustomobject]@{ Version = '1.9.25190'; IsPrerelease = $false }
+            [pscustomobject]@{ Version = '1.29.380'; IsPrerelease = $false }
+            [pscustomobject]@{ Version = '1.31.10-preview'; IsPrerelease = $true }
+            [pscustomobject]@{ Version = '1.32.1'; IsPrerelease = $true }
+        ) | Should -Be '1.29.380'
+        Select-GalleryLatestStableVersion -Versions @([pscustomobject]@{ Version = '1.31.10-preview'; IsPrerelease = $false }) | Should -BeNullOrEmpty
+        Select-GalleryLatestStableVersion -Versions @() | Should -BeNullOrEmpty
+    }
+
+    It 'Says the pin is behind only when the latest stable version is higher' {
+        Test-WingetClientPinBehind -PinnedVersion '1.29.380' -LatestVersion '1.30.120' | Should -BeTrue
+        Test-WingetClientPinBehind -PinnedVersion '1.29.380' -LatestVersion '1.29.380' | Should -BeFalse
+        Test-WingetClientPinBehind -PinnedVersion '1.29.380' -LatestVersion '1.9.25190' | Should -BeFalse
+    }
+
+    It 'Follows the feed''s pages to the latest stable version' {
+        $script:FeedPages = @{
+            "https://www.powershellgallery.com/api/v2/FindPackagesById()?id='Microsoft.WinGet.Client'" = 'gallery-feed-page1.xml'
+            "https://www.powershellgallery.com/api/v2/FindPackagesById?id='Microsoft.WinGet.Client'&`$skiptoken='Microsoft.WinGet.Client','1.31.10-preview'" = 'gallery-feed-page2.xml'
+        }
+        Mock Invoke-WebRequest { [pscustomobject]@{ Content = [System.IO.File]::ReadAllText((Join-Path $PSScriptRoot ('fixtures/winget-client/' + $script:FeedPages[$Uri.ToString()]))) } }
+
+        Get-GalleryLatestStableVersion | Should -Be '1.30.120'
+        Should -Invoke Invoke-WebRequest -Times 2 -Exactly
+    }
+
+    It 'Throws when the feed lists no stable version' {
+        Mock Invoke-WebRequest { [pscustomobject]@{ Content = '<feed xmlns="http://www.w3.org/2005/Atom"></feed>' } }
+
+        { Get-GalleryLatestStableVersion } | Should -Throw '*lists no stable Microsoft.WinGet.Client version*'
+    }
+
+    It 'Is run weekly by the pin-freshness workflow, which reads its PIN-FRESHNESS line and files the issue from ubuntu only' {
+        $workflow = Get-Content -Raw -LiteralPath (Join-Path $script:RepoRoot '.github/workflows/wingetclient-pin-freshness.yml')
+        $script = Get-Content -Raw -LiteralPath (Join-Path $script:RepoRoot 'build/Set-WingetClientModulePin.ps1')
+        $checkJob = $workflow.Substring($workflow.IndexOf("`n  check:"), $workflow.IndexOf("`n  report:") - $workflow.IndexOf("`n  check:"))
+        $reportJob = $workflow.Substring($workflow.IndexOf("`n  report:"))
+
+        $workflow | Should -Match "(?m)^  schedule:\r?\n    - cron: '[^']+'"
+        $workflow | Should -Match '(?m)^permissions:\r?\n  contents: read'
+        $checkJob | Should -Match 'runs-on: windows-latest'
+        $checkJob | Should -Not -Match 'issues: write'
+        $checkJob | Should -Match 'Set-WingetClientModulePin\.ps1 -Check -Latest'
+        $reportJob | Should -Match 'runs-on: ubuntu-latest'
+        $reportJob | Should -Match "(?m)^    permissions:\r?\n      contents: read\r?\n      issues: write"
+        $reportJob | Should -Match "needs\.check\.outputs\.behind == 'true'"
+        # The line the workflow parses is the one the script prints.
+        $script | Should -Match ([regex]::Escape("Write-Host ('PIN-FRESHNESS: pinned={0} latest={1} behind={2}'"))
+        $checkJob | Should -Match ([regex]::Escape("'^PIN-FRESHNESS: pinned=(\S+) latest=(\S+) behind=(yes|no)$'"))
+    }
+
     It 'Holds the cross-check of nuget.org''s build of the same engine' {
         $script:InProcComEngineHashes['x64'].Sha256 | Should -Be '0FB0F8EEE1214AE3C17ABE740EA32964A7DA8B01F829FFA66DEC241B9FB3B384'
         $script:InProcComEngineHashes['arm64'].Size | Should -Be 8628064

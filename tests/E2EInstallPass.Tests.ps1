@@ -401,3 +401,17 @@ Describe 'e2e scripts run by Windows PowerShell 5.1' {
         @($tokens | Where-Object { $ps7OnlyKinds -contains $_.Kind.ToString() } | ForEach-Object { "$($_.Kind) at line $($_.Extent.StartLineNumber)" }) | Should -BeNullOrEmpty
     }
 }
+
+# wgt-gq8.50, first step: the ARM64 probe only reads and prints.
+Describe '.github/workflows/arm64-probe.yml' {
+    It 'Runs on dispatch only, on windows-11-arm, with read-only permissions, and installs nothing' {
+        $workflow = Get-Content -Raw -LiteralPath (Join-Path $script:RepoRoot '.github/workflows/arm64-probe.yml')
+
+        $workflow | Should -Match '(?m)^on:\r?\n  workflow_dispatch:\s*\r?\n\r?\npermissions:\r?\n  contents: read\s*$'
+        $workflow | Should -Match 'runs-on: windows-11-arm'
+        $workflow | Should -Not -Match '(?i)winget(\.exe)? (install|uninstall|upgrade)|Install-Module|Add-AppxPackage|Repair-WinGetPackageManager|winget-app-install\.ps1'
+        foreach ($probe in @('whoami', 'PROCESSOR_ARCHITECTURE', 'OSArchitecture', 'SysWOW64\WindowsPowerShell', 'Get-AppxProvisionedPackage', 'Microsoft.WindowsAppRuntime.1.8', 'winget --version')) {
+            $workflow | Should -Match ([regex]::Escape($probe))
+        }
+    }
+}

@@ -1,0 +1,88 @@
+name: ARM64 Runner Probe
+
+# First step of the ARM64 e2e leg (wgt-gq8.50): before any install runs on windows-11-arm, find out
+# what that image gives a job. It installs and changes nothing; it only prints:
+#   - the account (whoami), RUNNER_ARCH, PROCESSOR_ARCHITECTURE and PROCESSOR_ARCHITEW6432;
+#   - RuntimeInformation.OSArchitecture and ProcessArchitecture, the values Get-OSArchitecture and
+#     the catalog's arch gates rely on, in native PowerShell 7, native Windows PowerShell 5.1 and
+#     the 32-bit (SysWOW64) Windows PowerShell;
+#   - App Installer (Microsoft.DesktopAppInstaller): registered for this account, for any user,
+#     and provisioned for new users;
+#   - Microsoft.WindowsAppRuntime.1.8, which winget 1.12+ and Winget-AutoUpdate need;
+#   - winget on PATH and 'winget --version', when it is there;
+#   - the manufacturer and model.
+# The full ARM64 install leg (two passes and the assertions, see e2e-install.yml) waits on what
+# this probe shows, above all whether winget is usable for the job's account at all.
+# Dispatch only: 'gh workflow run arm64-probe.yml'.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: windows-11-arm
+    timeout-minutes: 15
+    steps:
+      - name: Account and architecture (PowerShell 7)
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          Write-Host "whoami: $(whoami)"
+          Write-Host "RUNNER_ARCH: $env:RUNNER_ARCH"
+          Write-Host "PROCESSOR_ARCHITECTURE: $env:PROCESSOR_ARCHITECTURE"
+          Write-Host "PROCESSOR_ARCHITEW6432: $env:PROCESSOR_ARCHITEW6432"
+          Write-Host "PowerShell: $($PSVersionTable.PSVersion) at $((Get-Process -Id $PID).Path)"
+          Write-Host "OSArchitecture: $([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture)"
+          Write-Host "ProcessArchitecture: $([System.Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture)"
+          Write-Host "Is64BitOperatingSystem: $([Environment]::Is64BitOperatingSystem), Is64BitProcess: $([Environment]::Is64BitProcess)"
+          $os = Get-CimInstance -ClassName Win32_OperatingSystem
+          Write-Host "OS: $($os.Caption) $($os.Version) ($($os.OSArchitecture))"
+          $computer = Get-CimInstance -ClassName Win32_ComputerSystem
+          Write-Host "Manufacturer: $($computer.Manufacturer), Model: $($computer.Model)"
+
+      - name: Architecture (Windows PowerShell 5.1, native and 32-bit)
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          # .NET Framework 4.8 has RuntimeInformation too; on an older one the line says so.
+          $probe = 'Write-Output ("PowerShell {0}, PROCESSOR_ARCHITECTURE {1}, PROCESSOR_ARCHITEW6432 {2}, Is64BitProcess {3}" -f $PSVersionTable.PSVersion, $env:PROCESSOR_ARCHITECTURE, $env:PROCESSOR_ARCHITEW6432, [Environment]::Is64BitProcess); try { Write-Output ("OSArchitecture {0}, ProcessArchitecture {1}" -f [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture, [System.Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture) } catch { Write-Output ("RuntimeInformation not available: {0}" -f $_.Exception.Message) }'
+          foreach ($path in @("$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe", "$env:SystemRoot\SysWOW64\WindowsPowerShell\v1.0\powershell.exe")) {
+            Write-Host "--- $path"
+            if (Test-Path -LiteralPath $path -PathType Leaf) {
+              # Encoded, so no quoting of the probe's own quotes is needed on the command line.
+              & $path -NoProfile -NonInteractive -EncodedCommand ([Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($probe)))
+            }
+            else {
+              Write-Host 'not present'
+            }
+          }
+
+      # Windows PowerShell: the Appx and DISM cmdlets are its own.
+      - name: App Installer and Windows App Runtime
+        shell: powershell
+        continue-on-error: true
+        run: |
+          Write-Host '--- Microsoft.DesktopAppInstaller for this account'
+          Get-AppxPackage -Name Microsoft.DesktopAppInstaller | Format-Table Name, Version, Architecture, PackageFullName -AutoSize | Out-String -Width 300 | Write-Host
+          Write-Host '--- Microsoft.DesktopAppInstaller for any user'
+          Get-AppxPackage -AllUsers -Name Microsoft.DesktopAppInstaller | Format-Table Name, Version, Architecture, PackageFullName -AutoSize | Out-String -Width 300 | Write-Host
+          Write-Host '--- Provisioned for new users (App Installer)'
+          Get-AppxProvisionedPackage -Online | Where-Object { $_.DisplayName -like '*DesktopAppInstaller*' } | Format-Table DisplayName, Version, Architecture, PackageName -AutoSize | Out-String -Width 300 | Write-Host
+          Write-Host '--- Microsoft.WindowsAppRuntime.1.8 for any user'
+          Get-AppxPackage -AllUsers -Name Microsoft.WindowsAppRuntime.1.8 | Format-Table Name, Version, Architecture, PackageFullName -AutoSize | Out-String -Width 300 | Write-Host
+
+      - name: winget
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          $commands = @(Get-Command -Name winget -All -ErrorAction SilentlyContinue)
+          if ($commands.Count -eq 0) {
+            Write-Host 'winget is not on PATH for this account.'
+            exit 0
+          }
+          $commands | Format-Table CommandType, Source -AutoSize | Out-String -Width 300 | Write-Host
+          $output = & winget --version 2>&1
+          Write-Host "winget --version (exit $LASTEXITCODE): $output"

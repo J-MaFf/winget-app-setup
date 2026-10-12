@@ -1,0 +1,151 @@
+{
+  "schemaVersion": 1,
+  "buildId": "1.0.0+5ea1f00d",
+  "startedUtc": "2026-10-05T05:30:12Z",
+  "endedUtc": "2026-10-05T05:31:40Z",
+  "exitCode": 9,
+  "summaryReached": true,
+  "counts": {
+    "installed": 0,
+    "skipped": 2,
+    "deferred": 0,
+    "failed": 0,
+    "notAttempted": 9
+  },
+  "apps": [
+    {
+      "id": "7zip.7zip",
+      "status": "NotAttempted",
+      "reason": "the run's 1-minute time budget was used up",
+      "code": null,
+      "codeHex": null,
+      "installerCode": null,
+      "restartRequired": false,
+      "postInstall": null,
+      "postInstallReason": null
+    },
+    {
+      "id": "GlavSoft.TightVNC",
+      "status": "NotAttempted",
+      "reason": "the run's 1-minute time budget was used up",
+      "code": null,
+      "codeHex": null,
+      "installerCode": null,
+      "restartRequired": false,
+      "postInstall": null,
+      "postInstallReason": null
+    },
+    {
+      "id": "Adobe.Acrobat.Reader.64-bit",
+      "status": "NotAttempted",
+      "reason": "the run's 1-minute time budget was used up",
+      "code": null,
+      "codeHex": null,
+      "installerCode": null,
+      "restartRequired": false,
+      "postInstall": null,
+      "postInstallReason": null
+    },
+    {
+      "id": "Adobe.Acrobat.Reader.32-bit",
+      "status": "Skipped",
+      "reason": "not applicable: ARM64 and 32-bit Windows only; x64 PCs get the 64-bit Reader",
+      "code": null,
+      "codeHex": null,
+      "installerCode": null,
+      "restartRequired": false,
+      "postInstall": null,
+      "postInstallReason": null
+    },
+    {
+      "id": "Google.Chrome",
+      "status": "NotAttempted",
+      "reason": "the run's 1-minute time budget was used up",
+      "code": null,
+      "codeHex": null,
+      "installerCode": null,
+      "restartRequired": false,
+      "postInstall": null,
+      "postInstallReason": null
+    },
+    {
+      "id": "Google.GoogleDrive",
+      "status": "NotAttempted",
+      "reason": "the run's 1-minute time budget was used up",
+      "code": null,
+      "codeHex": null,
+      "installerCode": null,
+      "restartRequired": false,
+      "postInstall": null,
+      "postInstallReason": null
+    },
+    {
+      "id": "Git.Git",
+      "status": "NotAttempted",
+      "reason": "the run's 1-minute time budget was used up",
+      "code": null,
+      "codeHex": null,
+      "installerCode": null,
+      "restartRequired": false,
+      "postInstall": null,
+      "postInstallReason": null
+    },
+    {
+      "id": "Klocman.BulkCrapUninstaller",
+      "status": "NotAttempted",
+      "reason": "the run's 1-minute time budget was used up",
+      "code": null,
+      "codeHex": null,
+      "installerCode": null,
+      "restartRequired": false,
+      "postInstall": null,
+      "postInstallReason": null
+    },
+    {
+      "id": "Dell.CommandUpdate.Universal",
+      "status": "Skipped",
+      "reason": "not applicable: Dell hardware with x64 Windows only; winget has no ARM64 installer for it",
+      "code": null,
+      "codeHex": null,
+      "installerCode": null,
+      "restartRequired": false,
+      "postInstall": null,
+      "postInstallReason": null
+    },
+    {
+      "id": "Microsoft.PowerShell",
+      "status": "NotAttempted",
+      "reason": "the run's 1-minute time budget was used up",
+      "code": null,
+      "codeHex": null,
+      "installerCode": null,
+      "restartRequired": false,
+      "postInstall": null,
+      "postInstallReason": null
+    },
+    {
+      "id": "Microsoft.WindowsTerminal",
+      "status": "NotAttempted",
+      "reason": "the run's 1-minute time budget was used up",
+      "code": null,
+      "codeHex": null,
+      "installerCode": null,
+      "restartRequired": false,
+      "postInstall": null,
+      "postInstallReason": null
+    }
+  ],
+  "autoUpdates": {
+    "status": "NotAttempted",
+    "version": null
+  },
+  "restartRequired": false,
+  "wingetUsable": true,
+  "installEngine": {
+    "requested": "Cli",
+    "used": "Cli",
+    "module": null,
+    "fallbackReason": null
+  },
+  "transcriptPath": "C:\\ProgramData\\winget-app-setup\\logs\\install-20261005-053012.log"
+}
