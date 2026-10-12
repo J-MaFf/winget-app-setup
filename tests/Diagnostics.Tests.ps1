@@ -943,6 +943,9 @@ Describe 'Making the bundle (Invoke-DiagnosticsCollection)' {
                 $linked = $base
             }
             Mock Test-FileSystemLink { $true } -ParameterFilter { $Path -eq $linked }
+            # The bundle redacts user profile folder names, which a TestDrive under C:\Users holds,
+            # so the check matches the path from the made-up ProgramData folder on.
+            $linkedTail = $linked.Substring((Split-Path -Parent $env:ProgramData).Length)
 
             $exitCode = Invoke-DiagnosticsCollection -LogDirectory $logs -OutputDirectory $script:outputDirectory
         }
@@ -953,7 +956,7 @@ Describe 'Making the bundle (Invoke-DiagnosticsCollection)' {
         $exitCode | Should -Be 0
         $entries = Get-ZipEntryText -Path (@(Get-ChildItem -LiteralPath $script:outputDirectory -Filter '*.zip')[0]).FullName
         @($entries.Keys | Where-Object { $_ -like 'logs/*' }).Count | Should -Be 0
-        $entries['README.txt'] | Should -Match ('Installer logs \(.+\): not read: ' + [regex]::Escape($linked) + ' is a link')
+        $entries['README.txt'] | Should -Match ('Installer logs \(.+\): not read: .*' + [regex]::Escape($linkedTail) + ' is a link')
     }
 
     It 'Says in README.txt when the user phase has not run in this account' {
