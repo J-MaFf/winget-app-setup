@@ -483,7 +483,8 @@ function Stop-AppUninstallHandOffProcess {
     has found the program:
       1. Invoke-ExternalProcess under the WingetUninstall limit: still running at the limit, it is
          stopped with what it started. Not started: UninstallLaunchFailed. Out of time:
-         UninstallTimeout. An exit code other than 0, 3010 or 1641: UninstallFailed.
+         UninstallTimeout. An exit code other than 0, 3010, 1641 or one of the entry's
+         successExitCodes (Chrome's 19, UNINSTALL_SUCCESSFUL): UninstallFailed.
       2. It exited, so the tree kill no longer reaches what it left running (Drive's uninstall.exe
          hands its work to a copy of itself): Get-AppUninstallHandOffProcess records those
          processes. For what is left of the limit, Wait-AppUninstallEntryRemoved. Still there:
@@ -529,7 +530,8 @@ function Invoke-AppQuietUninstall {
 
     $exitCode = [int]$run.ExitCode
     $restartRequired = @(3010, 1641) -contains $exitCode
-    if ($exitCode -ne 0 -and -not $restartRequired) {
+    $successCodes = @(0) + @($App['quietUninstall']['successExitCodes'] | Where-Object { $null -ne $_ })
+    if ($successCodes -notcontains $exitCode -and -not $restartRequired) {
         $result.FailureReason = 'UninstallFailed'
         $result.ExitCode = $exitCode
         $result.Reason = '{0} exited with {1} (0x{1:X8})' -f $program, $exitCode

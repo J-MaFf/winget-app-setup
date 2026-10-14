@@ -527,6 +527,29 @@ Describe 'Uninstall-CatalogApp for an entry with quietUninstall (wgt-gq8.61)' {
         $result.RestartRequired | Should -BeTrue
     }
 
+    It 'Counts an exit code the entry lists in successExitCodes as removed, with no restart (wgt-zu3)' {
+        # Chrome's setup.exe --uninstall --force-uninstall ends with 19, UNINSTALL_SUCCESSFUL.
+        $script:drive.quietUninstall['successExitCodes'] = @(19)
+        $script:exitCode = 19
+
+        $result = Uninstall-CatalogApp -App $script:drive
+
+        $result.Status | Should -Be 'Uninstalled'
+        $result.RestartRequired | Should -BeFalse
+        Should -Invoke Test-WingetPackageInstalled -Times 2 -Exactly
+    }
+
+    It 'Fails, UninstallFailed, on an exit code the entry does not list, though it lists others' {
+        # 21 is Chrome's UNINSTALL_CANCELLED.
+        $script:drive.quietUninstall['successExitCodes'] = @(19)
+        $script:exitCode = 21
+
+        $result = Uninstall-CatalogApp -App $script:drive
+
+        $result.FailureReason | Should -Be 'UninstallFailed'
+        $result.Reason | Should -Be "its uninstaller 'uninstall.exe' exited with 21 (0x00000015)"
+    }
+
     It 'Fails, UninstallFailed, on any other exit code, without waiting' {
         $script:exitCode = 1603
 

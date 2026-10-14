@@ -961,6 +961,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Chrome installs again after each Chrome release: the catalog installs `Google.Chrome.EXE`**
+  (bead wgt-zu3). `Google.Chrome` downloads `googlechromestandaloneenterprise64.msi` from a link
+  that never changes while Google replaces the file with every release, so every install failed
+  with `0x8A150011 INSTALLER_HASH_MISMATCH` until winget-pkgs updated its hash. On 2026-10-14 the
+  catalog listed 155.0.8059.40 while Google served 155.0.8059.80, and that update
+  (microsoft/winget-pkgs#452153) was held by a Defender validation flag, failing every e2e leg.
+  `Google.Chrome.EXE` downloads each release from its own link and installs for the whole PC with
+  `--system-level`.
+  - **Uninstall:** Chrome registers no `QuietUninstallString`, and its `setup.exe --uninstall`
+    asks first. The entry carries `quietUninstall`: the program the `Google Chrome` uninstall
+    entry names, run with `--uninstall --system-level --force-uninstall`.
+  - **`quietUninstall` schema:** `productCode` now also takes a plain entry name (letters, digits,
+    spaces and `. _ ( ) + -`, no backslash, at most 128 characters; a bare GUID without braces is
+    still refused as a typo). The new optional `successExitCodes` lists the codes, besides 0, 3010
+    and 1641, that mean the app was removed: Chrome's is 19, `UNINSTALL_SUCCESSFUL` in Chromium's
+    installer.
+  - **e2e:** `e2e/Remove-PreinstalledApps.ps1` removes the runner image's Chrome as the MSI package
+    it is (`Google.Chrome`, `Get-PreinstalledRemovalId`), records it as `Google.Chrome.EXE`, and
+    says whether winget lists that MSI Chrome under the new id. That decides whether a PC that
+    already has the MSI skips Chrome or installs the EXE package over it. The PowerShell 7 leg's
+    preparation step gets 21 minutes for the extra `winget list`.
 - **A run no longer changes the code page of the console it was started from, and
   `Repair-WinGetPackageManager` can no longer hang a run** (bead wgt-gq8.72). The Windows
   PowerShell 5.1 child that runs the Appx cmdlets set its console's output code page to UTF-8, and

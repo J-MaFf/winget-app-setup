@@ -328,7 +328,7 @@ Describe 'Invoke-WingetUninstall' {
 
         It 'Returns 3, removing nothing, for an app list with an invalid declarative field (<Case>)' -ForEach @(
             @{ Case = 'arch'; App = @{ name = 'Contoso.AppOne'; arch = 'amd64' } }
-            @{ Case = 'quietUninstall, wgt-gq8.61'; App = @{ name = 'Contoso.AppOne'; quietUninstall = @{ productCode = 'uninstall.exe'; arguments = @('--silent') } } }
+            @{ Case = 'quietUninstall, wgt-gq8.61'; App = @{ name = 'Contoso.AppOne'; quietUninstall = @{ productCode = 'C:\Program Files\Contoso\uninstall.exe'; arguments = @('--silent') } } }
         ) {
             $result = Invoke-WingetUninstall -Apps @($App)
 

@@ -212,8 +212,9 @@ jobs:
     # cancelled instead; report-failure still files the issue. Each step limit sits above that
     # step's slow red-run path, so it ends with its own summary instead of being cut off:
     #   - runner preparation, 15: uninstalling three apps takes a minute or two. Every winget
-    #     call in it is bounded, at most 4 min per app (list 45 s, uninstall 150 s, list 45 s), so
-    #     12 min for the three; each app's result prints as soon as it is done, and the step
+    #     call in it is bounded, at most 4 min per app (list 45 s, uninstall 150 s, list 45 s), and
+    #     45 s more for Chrome's list under its catalog id, so 12.75 min for the three; each app's
+    #     result prints as soon as it is done, and the step
     #     continues on error, so a hang there only costs time.
     #   - install passes, 35 each: first passes have taken 3-11 min and passing second passes
     #     under 1 min. A pass where winget stops launching now ends after about 2.5 min (75 s of
@@ -423,12 +424,12 @@ jobs:
       # As in e2e-install, plus PowerShell 7 (MSI uninstall, winget as the fallback). If it cannot
       # be removed, a warning says so, the first pass finds it instead of installing it, and the
       # assertions fail (-ExpectPowerShell7Installed): the leg would not have tested the install.
-      # 20 minutes: at most 12 for the three apps, as in e2e-install, and 6.5 for PowerShell 7
+      # 21 minutes: at most 12.75 for the three apps, as in e2e-install, and 6.5 for PowerShell 7
       # (msiexec 150 s, then the winget fallback's 4 min).
       - name: Remove the catalog apps the runner image ships with, and PowerShell 7
         shell: powershell
         continue-on-error: true
-        timeout-minutes: 20
+        timeout-minutes: 21
         run: |
           & .\e2e\Remove-PreinstalledApps.ps1 -IncludePowerShell7
 

@@ -46,7 +46,7 @@ BeforeAll {
         return $path
     }
 
-    $script:CatalogIds = @('7zip.7zip', 'GlavSoft.TightVNC', 'Adobe.Acrobat.Reader.64-bit', 'Google.Chrome', 'Google.GoogleDrive', 'Git.Git', 'Klocman.BulkCrapUninstaller', 'Microsoft.PowerShell', 'Microsoft.WindowsTerminal')
+    $script:CatalogIds = @('7zip.7zip', 'GlavSoft.TightVNC', 'Adobe.Acrobat.Reader.64-bit', 'Google.Chrome.EXE', 'Google.GoogleDrive', 'Git.Git', 'Klocman.BulkCrapUninstaller', 'Microsoft.PowerShell', 'Microsoft.WindowsTerminal')
     $script:NotApplicable = [ordered]@{ 'Dell.CommandUpdate.Universal' = 'Dell hardware only' }
 }
 
@@ -80,7 +80,7 @@ Describe 'ConvertFrom-InstallTranscript' {
         $transcript = ConvertFrom-InstallTranscript -Content (Get-Fixture -Name 'first-pass')
 
         $transcript.BuildId | Should -Be '1.0.0+5ea1f00d'
-        $transcript.Installed | Should -Be @('7zip.7zip', 'Adobe.Acrobat.Reader.64-bit', 'Git.Git', 'GlavSoft.TightVNC', 'Google.Chrome', 'Google.GoogleDrive', 'Klocman.BulkCrapUninstaller')
+        $transcript.Installed | Should -Be @('7zip.7zip', 'Adobe.Acrobat.Reader.64-bit', 'Git.Git', 'GlavSoft.TightVNC', 'Google.Chrome.EXE', 'Google.GoogleDrive', 'Klocman.BulkCrapUninstaller')
         $transcript.AlreadyInstalled | Should -Be @('Microsoft.PowerShell', 'Microsoft.WindowsTerminal')
         $transcript.NotApplicable['Dell.CommandUpdate.Universal'] | Should -Be 'Dell hardware only'
         $transcript.HasSummary | Should -BeTrue
@@ -270,13 +270,13 @@ Describe 'ConvertFrom-InstallTranscript' {
     }
 
     It 'Reads the summary table the way Write-Table renders it' {
-        $rows = @(@('Installed', '7zip.7zip, Git.Git'), @('Failed', 'Google.Chrome, Google.GoogleDrive'))
+        $rows = @(@('Installed', '7zip.7zip, Git.Git'), @('Failed', 'Google.Chrome.EXE, Google.GoogleDrive'))
         $table = Write-Table -Headers @('Status', 'Apps') -Rows $rows 6>&1 | Out-String
 
         $transcript = ConvertFrom-InstallTranscript -Content ("Summary:`n" + $table + "`nAuto-updates: NOT CONFIGURED - missing.")
 
         $transcript.SummaryInstalled | Should -Be @('7zip.7zip', 'Git.Git')
-        $transcript.SummaryFailed | Should -Be @('Google.Chrome', 'Google.GoogleDrive')
+        $transcript.SummaryFailed | Should -Be @('Google.Chrome.EXE', 'Google.GoogleDrive')
         $transcript.AutoUpdatesStatus | Should -Be 'NOT CONFIGURED'
     }
 
@@ -284,7 +284,7 @@ Describe 'ConvertFrom-InstallTranscript' {
         # A run as SYSTEM or under cross-user elevation prints a Deferred row between Skipped and
         # Failed; it used to end the table there, so the Failed row was never read. The RESULT line
         # after the summary is for RMM tools, not for this parser.
-        $rows = @(@('Installed', '7zip.7zip'), @('Skipped', 'Git.Git'), @('Deferred', 'Microsoft.WindowsTerminal, Zoom.Zoom'), @('Failed', 'Google.Chrome'))
+        $rows = @(@('Installed', '7zip.7zip'), @('Skipped', 'Git.Git'), @('Deferred', 'Microsoft.WindowsTerminal, Zoom.Zoom'), @('Failed', 'Google.Chrome.EXE'))
         $table = Write-Table -Headers @('Status', 'Apps') -Rows $rows 6>&1 | Out-String
         $result = 'RESULT: exit=1 installed=1 skipped=1 deferred=2 failed=1 autoupdates=Configured restart=no build=1.0.0+5ea1f00d log=C:\ProgramData\winget-app-setup\logs\install-20261005-060000.log'
 
@@ -293,8 +293,8 @@ Describe 'ConvertFrom-InstallTranscript' {
         $transcript.SummaryInstalled | Should -Be @('7zip.7zip')
         $transcript.SummarySkipped | Should -Be @('Git.Git')
         $transcript.SummaryDeferred | Should -Be @('Microsoft.WindowsTerminal', 'Zoom.Zoom')
-        $transcript.SummaryFailed | Should -Be @('Google.Chrome')
-        $transcript.FinalFailed | Should -Be @('Google.Chrome')
+        $transcript.SummaryFailed | Should -Be @('Google.Chrome.EXE')
+        $transcript.FinalFailed | Should -Be @('Google.Chrome.EXE')
         $transcript.AutoUpdatesStatus | Should -Be 'Configured'
         $transcript.AutoUpdatesLine | Should -Be 'Configured (Winget-AutoUpdate v2.12.0).'
     }
@@ -313,7 +313,7 @@ Describe 'ConvertFrom-InstallTranscript' {
         $parsed.WingetClientModuleSha256 | Should -Be '3469E5747EB6B100E51FED3F2057386B5BA60BC8955A6669B5C2EB562E316619'
         $parsed.WingetClientModuleFromCache | Should -BeFalse
         $parsed.WingetClientModuleNotReadyReason | Should -BeNullOrEmpty
-        $parsed.WingetClientInstallIds | Should -Be @('7zip.7zip', 'Adobe.Acrobat.Reader.64-bit', 'Git.Git', 'GlavSoft.TightVNC', 'Google.Chrome', 'Google.GoogleDrive', 'Klocman.BulkCrapUninstaller')
+        $parsed.WingetClientInstallIds | Should -Be @('7zip.7zip', 'Adobe.Acrobat.Reader.64-bit', 'Git.Git', 'GlavSoft.TightVNC', 'Google.Chrome.EXE', 'Google.GoogleDrive', 'Klocman.BulkCrapUninstaller')
         $parsed.WingetExeInstallCount | Should -Be 0
         $parsed.WingetClientEngineNotStartable | Should -BeFalse
         $parsed.SummaryInstalled.Count | Should -Be 7
@@ -565,7 +565,7 @@ Describe 'Get-TranscriptAssertionResult' {
         $rows = @(Get-TranscriptAssertionResult -LogDirectory $logs -ExpectedAppIds $script:CatalogIds -NotApplicableApps $script:NotApplicable -ExpectAllSkippedOnSecondRun)
 
         ($rows | Where-Object Assertion -EQ 'Second run failed nothing (non-skip-listed)').Detail | Should -Be 'failed on second run: Adobe.Acrobat.Reader.64-bit, Google.GoogleDrive, Klocman.BulkCrapUninstaller'
-        ($rows | Where-Object Assertion -EQ 'Second run installed nothing (non-skip-listed)').Detail | Should -Be 'installed on second run: 7zip.7zip, GlavSoft.TightVNC, Adobe.Acrobat.Reader.64-bit, Google.Chrome, Git.Git'
+        ($rows | Where-Object Assertion -EQ 'Second run installed nothing (non-skip-listed)').Detail | Should -Be 'installed on second run: 7zip.7zip, GlavSoft.TightVNC, Adobe.Acrobat.Reader.64-bit, Google.Chrome.EXE, Git.Git'
         ($rows | Where-Object Assertion -EQ 'Second run skipped: Google.GoogleDrive').Result | Should -Be 'FAIL'
         ($rows | Where-Object Assertion -EQ 'Failures contained (install-20261005-060100.log)').Result | Should -Be 'FAIL'
         ($rows | Where-Object Assertion -EQ 'Failures contained (install-20261005-060000.log)').Result | Should -Be 'PASS'

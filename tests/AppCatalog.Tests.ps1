@@ -354,7 +354,7 @@ Describe 'Get-DefaultAppCatalog (issue #190)' {
         It 'No catalog entry other than the reviewed ones carries quietUninstall' {
             $quiet = @(Get-DefaultAppCatalog) | Where-Object { $_.ContainsKey('quietUninstall') }
 
-            @($quiet | ForEach-Object { $_.name }) | Should -Be @('Google.GoogleDrive')
+            @($quiet | ForEach-Object { $_.name }) | Should -Be @('Google.Chrome.EXE', 'Google.GoogleDrive')
         }
     }
 

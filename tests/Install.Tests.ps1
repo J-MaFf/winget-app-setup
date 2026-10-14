@@ -529,7 +529,7 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
             $script:verifiedApps = @()
             Mock Install-AppWithVerification {
                 $script:verifiedApps += $App.name
-                if ($App.name -eq 'Google.Chrome') {
+                if ($App.name -eq 'Google.Chrome.EXE') {
                     return @{ Status = 'Skipped'; InstallResult = $null; FailureReason = $null }
                 }
                 @{ Status = 'Installed'; InstallResult = $null; FailureReason = $null }
@@ -552,8 +552,8 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
             $installedRow = @($script:capturedRows | Where-Object { $_[0] -eq 'Installed' })[0]
             $skippedRow = @($script:capturedRows | Where-Object { $_[0] -eq 'Skipped' })[0]
             $installedRow[1] | Should -Match '7zip\.7zip'
-            $installedRow[1] | Should -Not -Match 'Google\.Chrome'
-            $skippedRow[1] | Should -Match 'Google\.Chrome'
+            $installedRow[1] | Should -Not -Match 'Google\.Chrome\.EXE'
+            $skippedRow[1] | Should -Match 'Google\.Chrome\.EXE'
             @($script:capturedRows | Where-Object { $_[0] -eq 'Failed' }).Count | Should -Be 0
         }
     }

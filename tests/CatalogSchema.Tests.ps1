@@ -29,6 +29,8 @@ Describe 'Get-AppDefinitionSchemaIssue (work-order item 38)' {
         @{ Case = 'every existing field'; App = @{ name = 'Contoso.App'; install = 'Install-PowerShellLatest'; installerType = 'wix'; condition = { $true }; conditionDescription = 'x'; msixName = 'Contoso.App' } }
         @{ Case = 'a quietUninstall with switches (wgt-gq8.61)'; App = @{ name = 'Contoso.App'; quietUninstall = @{ productCode = '{6BBAE539-2232-434A-A4E5-9A33560C6283}'; arguments = @('--silent', '--force_stop') } } }
         @{ Case = 'a quietUninstall with one switch as a string, a lower-case GUID and keys in any case'; App = @{ name = 'Contoso.App'; quietUninstall = @{ ProductCode ='{6bbae539-2232-434a-a4e5-9a33560c6283}'; Arguments = '/S' } } }
+        @{ Case = 'a quietUninstall whose entry has a plain name, with success exit codes (wgt-zu3)'; App = @{ name = 'Contoso.App'; quietUninstall = @{ productCode = 'Google Chrome'; arguments = @('--uninstall', '--system-level', '--force-uninstall'); successExitCodes = @(19) } } }
+        @{ Case = 'a quietUninstall with one success exit code given alone'; App = @{ name = 'Contoso.App'; quietUninstall = @{ productCode = 'Contoso App (x64) 1.2_3+beta'; arguments = @('/S'); successExitCodes = -1 } } }
     ) {
         $issues = Get-AppDefinitionSchemaIssue -App $App -Label 'App entry at index 0'
 
@@ -61,7 +63,13 @@ Describe 'Get-AppDefinitionSchemaIssue (work-order item 38)' {
         @{ Case = 'a string instead of a hashtable'; Value = 'uninstall.exe --silent'; Pattern = "invalid 'quietUninstall' value: use @\{ productCode" }
         @{ Case = 'no value'; Value = $null; Pattern = "invalid 'quietUninstall' value" }
         @{ Case = 'no productCode'; Value = @{ arguments = @('--silent') }; Pattern = "invalid 'quietUninstall' productCode ''" }
-        @{ Case = 'a productCode without braces'; Value = @{ productCode = '6BBAE539-2232-434A-A4E5-9A33560C6283'; arguments = @('--silent') }; Pattern = "invalid 'quietUninstall' productCode '6BBAE539-2232-434A-A4E5-9A33560C6283': use the braced GUID" }
+        @{ Case = 'a productCode that is a GUID without braces'; Value = @{ productCode = '6BBAE539-2232-434A-A4E5-9A33560C6283'; arguments = @('--silent') }; Pattern = "invalid 'quietUninstall' productCode '6BBAE539-2232-434A-A4E5-9A33560C6283': use the name its uninstall entry has under HKLM, a GUID in braces" }
+        @{ Case = 'a plain name with a backslash'; Value = @{ productCode = 'Google Chrome\..\Other'; arguments = @('--silent') }; Pattern = "invalid 'quietUninstall' productCode 'Google Chrome\\\.\.\\Other'" }
+        @{ Case = 'a plain name starting with a space'; Value = @{ productCode = ' Google Chrome'; arguments = @('--silent') }; Pattern = "invalid 'quietUninstall' productCode ' Google Chrome'" }
+        @{ Case = 'a plain name longer than 128 characters'; Value = @{ productCode = ('a' * 129); arguments = @('--silent') }; Pattern = "invalid 'quietUninstall' productCode 'a{129}'" }
+        @{ Case = 'an empty success exit code list'; Value = @{ productCode = 'Google Chrome'; arguments = @('--silent'); successExitCodes = @() }; Pattern = "empty 'quietUninstall' successExitCodes" }
+        @{ Case = 'a success exit code that always counts'; Value = @{ productCode = 'Google Chrome'; arguments = @('--silent'); successExitCodes = @(19, 3010) }; Pattern = "invalid 'quietUninstall' success exit code '3010': use an integer other than 0, 3010 and 1641" }
+        @{ Case = 'a success exit code that is not an integer'; Value = @{ productCode = 'Google Chrome'; arguments = @('--silent'); successExitCodes = @('19') }; Pattern = "invalid 'quietUninstall' success exit code '19'" }
         @{ Case = 'a productCode that is a path'; Value = @{ productCode = '{6BBAE539-2232-434A-A4E5-9A33560C6283}\..\Other'; arguments = @('--silent') }; Pattern = "invalid 'quietUninstall' productCode" }
         @{ Case = 'a productCode with a trailing line break'; Value = @{ productCode = "{6BBAE539-2232-434A-A4E5-9A33560C6283}`n"; arguments = @('--silent') }; Pattern = "invalid 'quietUninstall' productCode" }
         @{ Case = 'no arguments'; Value = @{ productCode = '{6BBAE539-2232-434A-A4E5-9A33560C6283}' }; Pattern = "no 'quietUninstall' arguments" }

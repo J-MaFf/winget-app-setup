@@ -422,7 +422,8 @@ function Invoke-AppQuietUninstall {
 
     $exitCode = [int]$run.ExitCode
     $restartRequired = @(3010, 1641) -contains $exitCode
-    if ($exitCode -ne 0 -and -not $restartRequired) {
+    $successCodes = @(0) + @($App['quietUninstall']['successExitCodes'] | Where-Object { $null -ne $_ })
+    if ($successCodes -notcontains $exitCode -and -not $restartRequired) {
         $result.FailureReason = 'UninstallFailed'
         $result.ExitCode = $exitCode
         $result.Reason = '{0} exited with {1} (0x{1:X8})' -f $program, $exitCode
@@ -671,21 +672,22 @@ function Get-AppQuietUninstallSchemaIssue {
         [string]$Label
     )
 
-    $usage = "use @{ productCode = '{<GUID>}'; arguments = @('<switch>', ...) }"
+    $usage = "use @{ productCode = '{<GUID>}' or '<uninstall entry name>'; arguments = @('<switch>', ...); successExitCodes = @(<code>, ...) (optional) }"
     if (-not ($Value -is [System.Collections.IDictionary])) {
         return @("$Label has an invalid 'quietUninstall' value: $usage.")
     }
 
     $errors = @()
     foreach ($key in @($Value.Keys)) {
-        if (@('productCode', 'arguments') -notcontains [string]$key) {
+        if (@('productCode', 'arguments', 'successExitCodes') -notcontains [string]$key) {
             $errors += "$Label has an unknown key '$key' in its 'quietUninstall' value: $usage."
         }
     }
 
     $productCode = $Value['productCode']
-    if (-not ($productCode -is [string]) -or $productCode -notmatch '^\{[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}\}\z') {
-        $errors += "$Label has an invalid 'quietUninstall' productCode '$productCode': use the braced GUID its uninstall entry is named after, such as '{00000000-0000-0000-0000-000000000000}'."
+    $guid = '[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}'
+    if (-not ($productCode -is [string]) -or $productCode -match "^$guid\z" -or ($productCode -notmatch "^\{$guid\}\z" -and $productCode -notmatch '^[A-Za-z0-9][A-Za-z0-9 ._()+-]{0,127}\z')) {
+        $errors += "$Label has an invalid 'quietUninstall' productCode '$productCode': use the name its uninstall entry has under HKLM, a GUID in braces such as '{00000000-0000-0000-0000-000000000000}' or a plain name such as 'Google Chrome'."
     }
 
     $arguments = @()
@@ -698,6 +700,18 @@ function Get-AppQuietUninstallSchemaIssue {
     foreach ($argument in $arguments) {
         if (-not ($argument -is [string]) -or [string]::IsNullOrWhiteSpace($argument) -or $argument -match '["\r\n]') {
             $errors += "$Label has an invalid 'quietUninstall' argument '$argument': use a non-empty string without a double quote or a line break."
+        }
+    }
+
+    if ($Value.Contains('successExitCodes')) {
+        $successCodes = @($Value['successExitCodes'])
+        if ($successCodes.Count -eq 0) {
+            $errors += "$Label has an empty 'quietUninstall' successExitCodes: leave it out, or list the codes its uninstaller returns when it has removed the app."
+        }
+        foreach ($code in $successCodes) {
+            if (-not ($code -is [int]) -or @(0, 3010, 1641) -contains $code) {
+                $errors += "$Label has an invalid 'quietUninstall' success exit code '$code': use an integer other than 0, 3010 and 1641, which always count."
+            }
         }
     }
     return $errors
@@ -11923,7 +11937,7 @@ function Get-DefaultAppCatalog {
         @{name = 'GlavSoft.TightVNC'; postInstall = 'Set-TightVncServerPassword' },
         @{name = 'Adobe.Acrobat.Reader.64-bit'; arch = 'X64'; conditionDescription = 'its only installer is x64, and Adobe supports only the 32-bit Reader on ARM64 Windows' },
         @{name = 'Adobe.Acrobat.Reader.32-bit'; arch = @('Arm64', 'X86'); conditionDescription = 'ARM64 and 32-bit Windows only; x64 PCs get the 64-bit Reader' },
-        @{name = 'Google.Chrome' },
+        @{name = 'Google.Chrome.EXE'; quietUninstall = @{ productCode = 'Google Chrome'; arguments = @('--uninstall', '--system-level', '--force-uninstall'); successExitCodes = @(19) } },
         @{name = 'Google.GoogleDrive'; quietUninstall = @{ productCode = '{6BBAE539-2232-434A-A4E5-9A33560C6283}'; arguments = @('--silent', '--force_stop') } },
         @{name = 'Git.Git' },
         @{name = 'Klocman.BulkCrapUninstaller' },

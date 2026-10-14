@@ -27,7 +27,7 @@ Installing the following Apps:
 7zip.7zip
 GlavSoft.TightVNC
 Adobe.Acrobat.Reader.64-bit
-Google.Chrome
+Google.Chrome.EXE
 Google.GoogleDrive
 Git.Git
 Klocman.BulkCrapUninstaller
@@ -40,7 +40,7 @@ winget is not usable yet (winget could not be started: The file cannot be access
 winget cannot be launched on this machine (winget could not be started: The file cannot be accessed by the system). The remaining apps are marked failed without an install attempt and are not retried. Restart the machine and re-run the installer; if it persists, attach this transcript to a GitHub issue.
 Failed to install: GlavSoft.TightVNC (not attempted: winget cannot be launched on this machine (see above)).
 Failed to install: Adobe.Acrobat.Reader.64-bit (not attempted: winget cannot be launched on this machine (see above)).
-Failed to install: Google.Chrome (not attempted: winget cannot be launched on this machine (see above)).
+Failed to install: Google.Chrome.EXE (not attempted: winget cannot be launched on this machine (see above)).
 Failed to install: Google.GoogleDrive (not attempted: winget cannot be launched on this machine (see above)).
 Failed to install: Git.Git (not attempted: winget cannot be launched on this machine (see above)).
 Failed to install: Klocman.BulkCrapUninstaller (not attempted: winget cannot be launched on this machine (see above)).
@@ -55,14 +55,14 @@ Summary:
 Status  Apps
 ------  ----
 Skipped Dell.CommandUpdate.Universal
-Failed  7zip.7zip, GlavSoft.TightVNC, Adobe.Acrobat.Reader.64-bit, Google.Chrome, Google.GoogleDrive, Git.Git, Klocman.BulkCrapUninstaller, Microsoft.PowerShell, Microsoft.WindowsTerminal
+Failed  7zip.7zip, GlavSoft.TightVNC, Adobe.Acrobat.Reader.64-bit, Google.Chrome.EXE, Google.GoogleDrive, Git.Git, Klocman.BulkCrapUninstaller, Microsoft.PowerShell, Microsoft.WindowsTerminal
 
 App                         Reason
 ---                         ------
 7zip.7zip                   winget could not be launched for the pre-install check; launch error: The file cannot be accessed by the system
 GlavSoft.TightVNC           not attempted: winget cannot be launched on this machine (see above)
 Adobe.Acrobat.Reader.64-bit not attempted: winget cannot be launched on this machine (see above)
-Google.Chrome               not attempted: winget cannot be launched on this machine (see above)
+Google.Chrome.EXE               not attempted: winget cannot be launched on this machine (see above)
 Google.GoogleDrive          not attempted: winget cannot be launched on this machine (see above)
 Git.Git                     not attempted: winget cannot be launched on this machine (see above)
 Klocman.BulkCrapUninstaller not attempted: winget cannot be launched on this machine (see above)

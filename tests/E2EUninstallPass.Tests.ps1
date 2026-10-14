@@ -27,7 +27,7 @@ Describe 'ConvertFrom-UninstallerOutput' {
         $parsed = ConvertFrom-UninstallerOutput -Content $script:SampleOutput
 
         $parsed.HasSummary | Should -BeTrue
-        $parsed.Uninstalled | Should -Be @('7zip.7zip', 'Adobe.Acrobat.Reader.64-bit', 'Git.Git', 'GlavSoft.TightVNC', 'Google.Chrome', 'Google.GoogleDrive', 'Klocman.BulkCrapUninstaller')
+        $parsed.Uninstalled | Should -Be @('7zip.7zip', 'Adobe.Acrobat.Reader.64-bit', 'Git.Git', 'GlavSoft.TightVNC', 'Google.Chrome.EXE', 'Google.GoogleDrive', 'Klocman.BulkCrapUninstaller')
         $parsed.NotInstalled | Should -Be @('Adobe.Acrobat.Reader.32-bit', 'Dell.CommandUpdate.Universal')
         @($parsed.Kept.Keys | Sort-Object) | Should -Be @('Microsoft.PowerShell', 'Microsoft.WindowsTerminal')
         $parsed.Kept['Microsoft.PowerShell'] | Should -Match '^this uninstaller is running in PowerShell 7'
@@ -47,13 +47,13 @@ Describe 'ConvertFrom-UninstallerOutput' {
 
     It 'Reads failures, in both of the uninstaller''s forms' {
         $content = @(
-            'Failed to uninstall: Google.Chrome (winget uninstall exited with 0x8A150030).'
+            'Failed to uninstall: Google.Chrome.EXE (winget uninstall exited with 0x8A150030).'
             'Failed to uninstall: Git.Git. Error: unexpected (test)'
         ) -join "`r`n"
 
         $parsed = ConvertFrom-UninstallerOutput -Content $content
 
-        $parsed.Failed['Google.Chrome'] | Should -Be 'winget uninstall exited with 0x8A150030'
+        $parsed.Failed['Google.Chrome.EXE'] | Should -Be 'winget uninstall exited with 0x8A150030'
         $parsed.Failed['Git.Git'] | Should -Be 'Error: unexpected (test)'
         $parsed.HasSummary | Should -BeFalse
     }
@@ -88,7 +88,7 @@ Describe 'Get-UninstallPassCheckId' {
 
         $ids | Should -Not -Contain 'Microsoft.PowerShell'
         $ids | Should -Not -Contain 'Microsoft.WindowsTerminal'
-        $ids | Should -Contain 'Google.Chrome'
+        $ids | Should -Contain 'Google.Chrome.EXE'
         $ids | Should -Contain 'Dell.CommandUpdate.Universal'
         @($ids).Count | Should -Be ($script:CatalogIds.Count - 2)
     }
@@ -108,7 +108,7 @@ Describe 'Get-UninstallPassResult' {
 
         @($rows | Where-Object { $_.Result -eq 'FAIL' }) | Should -BeNullOrEmpty
         ($rows | Where-Object { $_.Assertion -eq 'App kept on purpose: Microsoft.PowerShell' }).Result | Should -Be 'PASS'
-        ($rows | Where-Object { $_.Assertion -eq 'App removed: Google.Chrome' }).Detail | Should -Be 'winget no longer lists it; uninstalled by this run'
+        ($rows | Where-Object { $_.Assertion -eq 'App removed: Google.Chrome.EXE' }).Detail | Should -Be 'winget no longer lists it; uninstalled by this run'
         ($rows | Where-Object { $_.Assertion -eq 'App removed: Dell.CommandUpdate.Universal' }).Detail | Should -Be 'winget no longer lists it; not installed before the uninstall'
     }
 
@@ -133,23 +133,23 @@ Describe 'Get-UninstallPassResult' {
 
     It 'Fails an app winget still lists, and one winget gave no answer for' {
         $checks = New-AllGoneCheck -Ids $script:CheckIds
-        $checks['Google.Chrome'] = @{ Installed = $true; Detail = '' }
+        $checks['Google.Chrome.EXE'] = @{ Installed = $true; Detail = '' }
         $checks['Git.Git'] = @{ Installed = $null; Detail = 'timed out' }
         $checks.Remove('7zip.7zip')
 
         $rows = @(Get-UninstallPassResult -ExitCode 0 -Parsed $script:Parsed -CatalogIds $script:CatalogIds -InstalledAfter $checks -WauTaskPresent $false)
         $failed = @($rows | Where-Object { $_.Result -eq 'FAIL' })
 
-        @($failed | ForEach-Object { $_.Assertion } | Sort-Object) | Should -Be @('App removed: 7zip.7zip', 'App removed: Git.Git', 'App removed: Google.Chrome')
-        ($failed | Where-Object { $_.Assertion -eq 'App removed: Google.Chrome' }).Detail | Should -Be 'winget still lists it; uninstalled by this run'
+        @($failed | ForEach-Object { $_.Assertion } | Sort-Object) | Should -Be @('App removed: 7zip.7zip', 'App removed: Git.Git', 'App removed: Google.Chrome.EXE')
+        ($failed | Where-Object { $_.Assertion -eq 'App removed: Google.Chrome.EXE' }).Detail | Should -Be 'winget still lists it; uninstalled by this run'
         ($failed | Where-Object { $_.Assertion -eq 'App removed: Git.Git' }).Detail | Should -Be 'winget list could not answer (timed out); uninstalled by this run'
         ($failed | Where-Object { $_.Assertion -eq 'App removed: 7zip.7zip' }).Detail | Should -Be 'winget list could not answer (no answer); uninstalled by this run'
     }
 
     It 'Fails a run that removed nothing or printed no summary' {
-        $parsed = ConvertFrom-UninstallerOutput -Content 'Skipping: Google.Chrome (not installed)'
+        $parsed = ConvertFrom-UninstallerOutput -Content 'Skipping: Google.Chrome.EXE (not installed)'
 
-        $rows = @(Get-UninstallPassResult -ExitCode 0 -Parsed $parsed -CatalogIds @('Google.Chrome') -InstalledAfter (New-AllGoneCheck -Ids @('Google.Chrome')) -WauTaskPresent $false)
+        $rows = @(Get-UninstallPassResult -ExitCode 0 -Parsed $parsed -CatalogIds @('Google.Chrome.EXE') -InstalledAfter (New-AllGoneCheck -Ids @('Google.Chrome.EXE')) -WauTaskPresent $false)
 
         ($rows | Where-Object { $_.Assertion -eq 'Uninstaller removed apps' }).Result | Should -Be 'FAIL'
         ($rows | Where-Object { $_.Assertion -eq 'Uninstaller reached its summary' }).Result | Should -Be 'FAIL'
