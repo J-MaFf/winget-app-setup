@@ -208,8 +208,10 @@ function Expand-WingetClientModulePackage {
     It prints one plain line, then the result as one line 'WINGET-CLIENT-RESULT <json>' (protocol
     1: operation, stage 'load' or 'call', ok, moduleVersion, psVersion, architecture, and version,
     packages, or the install result's status, hresult, installerErrorCode, rebootRequired and id,
-    or the exception chain). A failed load exits 3; anything else exits 0. Never passes -Debug,
-    which the module refuses, and never calls a result's ErrorMessage(), which throws on success.
+    or the exception chain, with the effective executionPolicy after a failed load). A failed load
+    exits 3; anything else exits 0. Never passes -Debug, which the module refuses, and never calls
+    a result's ErrorMessage(), which throws on success. Get-WingetClientRequestArgument runs it as
+    a script block, so it needs no script file (wgt-gq8.57).
 .OUTPUTS
     [string] ASCII script text.
 #>
@@ -303,7 +305,10 @@ try {
 }
 catch {
     $records = Get-ExceptionRecord -Exception $_.Exception
-    Send-RequestResult -Result @{ stage = 'load'; ok = $false; exceptions = $records } -Outcome ('load failed: ' + $records[0].name)
+    $loadResult = @{ stage = 'load'; ok = $false; exceptions = $records }
+    # AllSigned or Restricted applies to the module's own manifest and Format.ps1xml.
+    try { $loadResult['executionPolicy'] = [string](Get-ExecutionPolicy) } catch { }
+    Send-RequestResult -Result $loadResult -Outcome ('load failed: ' + $records[0].name)
     exit 3
 }
 
@@ -384,13 +389,13 @@ exit 0
          15 seconds apart, with Get-WebDownloadTimeoutParameters' limits) and checked the same way.
       4. Extraction from that same handle (Expand-WingetClientModulePackage), then each of the
          pin's SignedFiles must be signed by its SignerCommonName (Test-AuthenticodeSigner).
-      5. The child script (Get-WingetClientChildScript) is written next to the module, and a
-         downloaded package is copied into the cache for the next run.
+      5. A downloaded package is copied into the cache for the next run. No script file is
+         written: each request runs as -EncodedCommand (Get-WingetClientRequestArgument).
     Writes one 'WinGet client module: ready - ...' or 'WinGet client module: NOT READY - <reason>.'
     line; the folder is removed when it is not ready. Never throws.
 .OUTPUTS
     [pscustomobject] with Ready, Reason, Version, Sha256, Source ('Cache' or 'Download'),
-    Directory, ManifestPath, ChildScriptPath, PowerShellPath (this pwsh) and Architecture.
+    Directory, ManifestPath, PowerShellPath (this pwsh) and Architecture.
 #>
 function Initialize-WingetClientModule {
     $pin = $null
@@ -401,7 +406,6 @@ function Initialize-WingetClientModule {
     $source = $null
     $architecture = $null
     $manifestPath = $null
-    $childScriptPath = $null
     try {
         $pin = Get-WingetClientModulePin
         if (-not ([long]$pin.Size -gt 0 -and "$($pin.Sha256)" -match '^[0-9A-Fa-f]{64}$')) {
@@ -513,12 +517,6 @@ function Initialize-WingetClientModule {
                 }
             }
 
-            if (-not $reason) {
-                $stage = 'writing its request script'
-                $childScriptPath = Join-Path $directory 'Invoke-WingetClientRequest.ps1'
-                [System.IO.File]::WriteAllText($childScriptPath, (Get-WingetClientChildScript), (New-Object System.Text.UTF8Encoding($false)))
-            }
-
             # The next run then needs no download. Not keeping it costs only that.
             if (-not $reason -and $source -eq 'Download') {
                 # A new name, created only if nothing is there (wgt-gq8.46 review): an entry another
@@ -575,7 +573,7 @@ function Initialize-WingetClientModule {
     if ($reason) {
         $reason = "$reason".Trim().TrimEnd('.')
         Write-WarningMessage "WinGet client module: NOT READY - $reason."
-        return [pscustomobject]@{ Ready = $false; Reason = $reason; Version = $version; Sha256 = $sha256; Source = $source; Directory = $null; ManifestPath = $null; ChildScriptPath = $null; PowerShellPath = $null; Architecture = $architecture }
+        return [pscustomobject]@{ Ready = $false; Reason = $reason; Version = $version; Sha256 = $sha256; Source = $source; Directory = $null; ManifestPath = $null; PowerShellPath = $null; Architecture = $architecture }
     }
     $from = 'downloaded from the PowerShell Gallery'
     if ($source -eq 'Cache') {
@@ -590,7 +588,6 @@ function Initialize-WingetClientModule {
         Source          = $source
         Directory       = $directory
         ManifestPath    = $manifestPath
-        ChildScriptPath = $childScriptPath
         PowerShellPath  = [Environment]::ProcessPath
         Architecture    = $architecture
     }

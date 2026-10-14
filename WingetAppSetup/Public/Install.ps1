@@ -34,14 +34,15 @@
     Exit codes: 0 = success; 1 = an app failed (including those failed once winget could no longer
     start, or open its source, mid-run, and a failed post-install hook); 2 = winget unavailable (at
     the start, including Group Policy turning it off and, as SYSTEM, no machine-wide winget.exe that
-    starts; or no longer launchable at the end), or winget cannot open its source for the account
-    even after the repair
+    starts; or no longer launchable at the end, unless Microsoft.WinGet.Client did the installs:
+    then 8), or winget cannot open its source for the account even after the repair
     (SourceUnusable: nothing installed, Winget-AutoUpdate not set up); 3 = the catalog failed validation or no valid apps remain; 4 =
     administrator rights are required and the run was not elevated (the prompt was declined or could
     not be shown, a non-interactive run, an execution policy that would refuse the elevated script,
     irm | iex, or the imported module); 8 = apps installed, but automatic updates are FAILED, NOT
-    CONFIGURED, AT RISK or UNHEALTHY; 9 = the time budget (-MaxRuntimeMinutes) was used up, so some
-    apps or the Winget-AutoUpdate setup were not attempted: run it again to finish; 3010 = success,
+    CONFIGURED, AT RISK or UNHEALTHY, or the Microsoft.WinGet.Client engine installed them and the
+    winget.exe Winget-AutoUpdate runs no longer starts; 9 = the time budget (-MaxRuntimeMinutes)
+    was used up, so some apps or the Winget-AutoUpdate setup were not attempted: run it again to finish; 3010 = success,
     but a restart finishes it. At the end of a run the precedence is 1 > 2 > 9 > 8 > 3010 > 0
     (Get-InstallerExitCode). Deferred apps and NotConfigured hooks do not change the code. A run
     that relaunched itself elevated returns the elevated run's code. The entry script also exits 1
@@ -895,12 +896,20 @@ function Invoke-WingetInstall {
         }
     }
 
+    # The engine needs no winget.exe, so with its installs done a broken winget.exe breaks
+    # automatic updates, not the apps or the next run with the engine: exit code 8 (wgt-gq8.57).
+    $installedWithWingetClient = ($installEngineRecord.used -eq 'WinGetClient')
     if (-not $wingetUsableAtEnd) {
         $endCheckDetail = ''
         if (-not [string]::IsNullOrWhiteSpace($endCheckReason)) {
             $endCheckDetail = " ($endCheckReason)"
         }
-        Write-ErrorMessage "winget: NOT USABLE - winget did not work at the end of this run$endCheckDetail, so automatic updates and the next run of this installer will fail on this machine. Restart the machine and re-run the installer; if it persists, attach this transcript to a GitHub issue."
+        if ($installedWithWingetClient) {
+            Write-ErrorMessage "winget: NOT USABLE - the machine-wide winget.exe did not work at the end of this run$endCheckDetail. The apps were installed with Microsoft.WinGet.Client, but Winget-AutoUpdate runs winget.exe, so automatic updates will not work on this machine, nor will the uninstaller or a run without the Microsoft.WinGet.Client engine. Repair App Installer (or restart the machine) and re-run the installer; if it persists, attach this transcript to a GitHub issue."
+        }
+        else {
+            Write-ErrorMessage "winget: NOT USABLE - winget did not work at the end of this run$endCheckDetail, so automatic updates and the next run of this installer will fail on this machine. Restart the machine and re-run the installer; if it persists, attach this transcript to a GitHub issue."
+        }
     }
 
     # Restart (review finding P3-16): a run whose installs need a restart says so here and exits
@@ -930,7 +939,7 @@ function Invoke-WingetInstall {
         Write-Info "Full transcript of this run: $script:InstallLogPath"
     }
 
-    $exitCode = Get-InstallerExitCode -FailedAppCount $failedApps.Count -WingetUsable $wingetUsableAtEnd -WorkNotAttempted ($notAttemptedSteps.Count -gt 0) -AutoUpdatesHealthy $autoUpdatesHealthy -RestartRequired $restartRequired
+    $exitCode = Get-InstallerExitCode -FailedAppCount $failedApps.Count -WingetUsable $wingetUsableAtEnd -InstalledWithWingetClient $installedWithWingetClient -WorkNotAttempted ($notAttemptedSteps.Count -gt 0) -AutoUpdatesHealthy $autoUpdatesHealthy -RestartRequired $restartRequired
     # Recorded before the final prompt: Ctrl+C there stops a run that has already finished, and
     # the entry script's abort guard then reports this code instead of an abort (5).
     $script:InstallerPendingExitCode = $exitCode

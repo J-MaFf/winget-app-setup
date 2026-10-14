@@ -603,6 +603,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The diagnostics bundle and the fleet health probe no longer read through a link at
   `%ProgramData%\winget-app-setup` or its `logs` folder, and the bundle leaves out a link inside
   that folder (wgt-gq8.59).
+- **A run whose apps the Microsoft.WinGet.Client engine installed now exits 8, not 2, when only
+  `winget.exe` fails the end-of-run check** (bead wgt-gq8.57). The engine needs no `winget.exe`,
+  and a run with it ready already carries on past a `winget.exe` that does not start, so what such
+  a run leaves broken is automatic updates (Winget-AutoUpdate runs `winget.exe`), which is what
+  exit code 8 means: the apps are installed. The `winget: NOT USABLE` line says so, and names the
+  uninstaller and runs without the engine as the other things that need `winget.exe`. A run that
+  installed with `winget.exe` still exits 2. `last-run.json` still records `wingetUsable: false`.
+- **The Microsoft.WinGet.Client engine no longer runs a script file** (bead wgt-gq8.57). Each
+  request's child `pwsh` gets its script, and its parameters as base64 JSON, through
+  `-EncodedCommand`, which an `AllSigned` execution policy set by Group Policy does not apply to:
+  before, the unsigned `Invoke-WingetClientRequest.ps1` the run wrote next to the module could not
+  run under that policy and the engine always fell back to `winget.exe`. The time limits, the tree
+  kill and the result parsing are unchanged, and the command line (about 19,000 characters) stays
+  under Windows' 32,767; a longer one is not started and fails as a launch that says why. The
+  module's own manifest and `Format.ps1xml` are signed by Microsoft Corporation and still fall
+  under the policy, so when the module does not load, the child reports the effective policy and,
+  for `AllSigned` or `Restricted`, the fallback reason names it.
+
 - `winget-app-uninstall.ps1` is now generated from the `WingetAppSetup` module as a single file,
   like the installer (wgt-gq8.43, work-order items 10 and 15, review finding P3-11). It needs
   nothing next to it, and its elevated run is a copy checked against the SHA256 the file had when it
