@@ -949,6 +949,9 @@ function Select-DiagnosticsLogFile {
     $installerLogs = @()
     $runRecord = $null
     foreach ($file in $files) {
+        if (($file.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+            continue
+        }
         if ($file.Name -match '^install-(?<stamp>\d{8}-\d{6})(?:-bootstrap|-rmm|-userphase)?\.log$') {
             $time = ConvertFrom-DiagnosticsLogStamp -Stamp $Matches['stamp']
             if ($null -ne $time) {
@@ -1886,6 +1889,89 @@ function Get-DiagnosticsWauLogTail {
     return @(('Winget-AutoUpdate''s updates.log was not found ({0}).' -f (@($candidates) -join '; ')))
 }
 
+function Get-DiagnosticsWingetLogDirectory {
+    param (
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [object]$AccountContext
+    )
+
+    if ($AccountContext -and $AccountContext.IsSystem) {
+        return @(Get-WingetEngineLogDirectory)
+    }
+    if ([string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) {
+        return @()
+    }
+    return @(Join-Path $env:LOCALAPPDATA 'Packages\Microsoft.DesktopAppInstaller_8wekyb3d8bbwe\LocalState\DiagOutputDir')
+}
+
+function Select-DiagnosticsWingetLogFile {
+    param (
+        [Parameter(Mandatory = $false)]
+        [AllowEmptyCollection()]
+        [string[]]$Directory = @(),
+
+        [Parameter(Mandatory = $false)]
+        [int]$MaximumFiles = 5
+    )
+
+    $files = @()
+    foreach ($folder in @($Directory)) {
+        if ([string]::IsNullOrWhiteSpace($folder) -or -not (Test-Path -LiteralPath $folder -PathType Container)) {
+            continue
+        }
+        $files += @(Get-ChildItem -LiteralPath $folder -File -Filter '*.log' -Force -ErrorAction SilentlyContinue |
+                Where-Object { ($_.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -eq 0 })
+    }
+    $names = @{}
+    $selected = @()
+    foreach ($file in @($files | Sort-Object -Property LastWriteTimeUtc -Descending)) {
+        if ($selected.Count -ge $MaximumFiles) {
+            break
+        }
+        if ($names.ContainsKey($file.Name)) {
+            continue
+        }
+        $names[$file.Name] = $true
+        $selected += $file
+    }
+    return $selected
+}
+
+function Get-DiagnosticsAppxSourceEvent {
+    param (
+        [Parameter(Mandatory = $false)]
+        [int]$MaximumEvents = 50,
+
+        [Parameter(Mandatory = $false)]
+        [int]$MaximumScanned = 2000
+    )
+
+    $logName = 'Microsoft-Windows-AppXDeploymentServer/Operational'
+    $events = @()
+    try {
+        $events = @(Get-WinEvent -FilterHashtable @{ LogName = $logName; Level = @(1, 2) } -MaxEvents $MaximumScanned -ErrorAction Stop)
+    }
+    catch {
+        if ("$($_.FullyQualifiedErrorId)" -notlike 'NoMatchingEventsFound*') {
+            throw
+        }
+    }
+    $matching = @($events | Where-Object { "$($_.Message)" -match 'Microsoft\.Winget\.Source' } | Select-Object -First $MaximumEvents)
+    if ($matching.Count -eq 0) {
+        return @(('No errors in {0} mention Microsoft.Winget.Source (the newest {1} errors were read).' -f $logName, $MaximumScanned))
+    }
+    $lines = @(('Errors in {0} that mention Microsoft.Winget.Source, oldest first ({1}):' -f $logName, $matching.Count))
+    foreach ($entry in @($matching | Sort-Object -Property TimeCreated)) {
+        $time = ''
+        if ($entry.TimeCreated) {
+            $time = ([datetime]$entry.TimeCreated).ToString('yyyy-MM-dd HH:mm:ss', [System.Globalization.CultureInfo]::InvariantCulture)
+        }
+        $lines += ('{0}  event {1}  {2}' -f $time, $entry.Id, ("$($entry.Message)" -replace '\s*[\r\n]+\s*', ' ').Trim())
+    }
+    return $lines
+}
+
 function Save-DiagnosticsBundle {
     param (
         [Parameter(Mandatory = $true)]
@@ -1956,7 +2042,10 @@ function Add-DiagnosticsLogEntry {
         [System.Collections.Generic.List[string]]$Sources,
 
         [Parameter(Mandatory = $true)]
-        [long]$BudgetBytes
+        [long]$BudgetBytes,
+
+        [Parameter(Mandatory = $false)]
+        [long]$MaxFileBytes = 4MB
     )
 
     $skipped = @()
@@ -1969,8 +2058,8 @@ function Add-DiagnosticsLogEntry {
             continue
         }
         try {
-            $content = Read-DiagnosticsTextFile -Path $file.FullName -MaxBytes ([Math]::Min([long]4MB, $BudgetBytes))
-            $BudgetBytes -= [Math]::Min([long]$file.Length, [long]4MB)
+            $content = Read-DiagnosticsTextFile -Path $file.FullName -MaxBytes ([Math]::Min($MaxFileBytes, $BudgetBytes))
+            $BudgetBytes -= [Math]::Min([long]$file.Length, $MaxFileBytes)
             $Entries[$Prefix + $file.Name] = $content
         }
         catch {
@@ -2015,7 +2104,32 @@ function Invoke-DiagnosticsCollection {
     $entries['README.txt'] = ''
 
     $budget = [long]64MB
-    if ($LogDirectory -and (Test-Path -LiteralPath $LogDirectory -PathType Container)) {
+    $linkedFolder = $null
+    if ($LogDirectory) {
+        $checked = @($LogDirectory)
+        if ($env:ProgramData) {
+            $baseDirectory = Join-Path $env:ProgramData 'winget-app-setup'
+            if ($LogDirectory.StartsWith($baseDirectory, [System.StringComparison]::OrdinalIgnoreCase)) {
+                $checked = @($baseDirectory, $LogDirectory)
+            }
+        }
+        foreach ($folder in $checked) {
+            try {
+                $isLink = Test-FileSystemLink -Path $folder
+            }
+            catch {
+                $isLink = $true
+            }
+            if ($isLink) {
+                $linkedFolder = $folder
+                break
+            }
+        }
+    }
+    if ($linkedFolder) {
+        $sources.Add(('Installer logs ({0}): not read: {1} is a link (junction or symbolic link), which the installer never makes; its next run removes it' -f $LogDirectory, $linkedFolder))
+    }
+    elseif ($LogDirectory -and (Test-Path -LiteralPath $LogDirectory -PathType Container)) {
         try {
             $selection = Select-DiagnosticsLogFile -LogDirectory $LogDirectory
             $files = @($selection.Transcripts) + @($selection.InstallerLogs)
@@ -2113,6 +2227,26 @@ function Invoke-DiagnosticsCollection {
     catch {
         $sources.Add("Winget-AutoUpdate log (wau-updates-log-tail.txt): not collected: $($_.Exception.Message)")
     }
+    try {
+        $wingetLogDirectories = @(Get-DiagnosticsWingetLogDirectory -AccountContext $account)
+        $wingetLogs = @(Select-DiagnosticsWingetLogFile -Directory $wingetLogDirectories)
+        $added = Add-DiagnosticsLogEntry -Files $wingetLogs -Prefix 'winget-logs/' -Entries $entries -Sources $sources -BudgetBytes $budget -MaxFileBytes 1MB
+        $budget = $added.BudgetBytes
+        $sources.Add(('winget''s own logs ({0}): the newest {1}' -f ($wingetLogDirectories -join '; '), $wingetLogs.Count))
+        if (@($added.Skipped).Count -gt 0) {
+            $sources.Add(('Left out to keep the bundle small: {0}' -f (@($added.Skipped) -join ', ')))
+        }
+    }
+    catch {
+        $sources.Add("winget's own logs (winget-logs\): not collected: $($_.Exception.Message)")
+    }
+    try {
+        $entries['appx-source-events.txt'] = (@(Get-DiagnosticsAppxSourceEvent) -join [Environment]::NewLine)
+        $sources.Add('AppX deployment errors for Microsoft.Winget.Source (appx-source-events.txt): collected')
+    }
+    catch {
+        $sources.Add("AppX deployment errors for Microsoft.Winget.Source (appx-source-events.txt): not collected: $($_.Exception.Message)")
+    }
 
     $buildId = 'unknown'
     if ($script:InstallerBuildId) {
@@ -2129,6 +2263,8 @@ function Invoke-DiagnosticsCollection {
         '  winget.txt                winget --version and winget --info',
         '  appx.txt                  App Installer and Windows App Runtime packages, registered and provisioned',
         '  wau-updates-log-tail.txt  the end of Winget-AutoUpdate''s updates.log',
+        '  appx-source-events.txt    AppX deployment errors that mention Microsoft.Winget.Source',
+        '  winget-logs\              winget''s own newest logs for the account that made the bundle (at most 5, 1 MB each)',
         '  logs\                     the latest run''s transcripts (the RMM wrapper''s install-<time>-rmm.log too) and installer logs, and last-run.json',
         '  user-phase\               this account''s user phase, when it has run here: user-phase.json, its latest transcripts and winget logs'
     )

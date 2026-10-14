@@ -1103,6 +1103,13 @@ probe finds such PCs first. It writes one line per check:
   reported too. Only a run as SYSTEM makes this check. Run by an administrator, the probe starts no
   `winget.exe` and reports `winget=skipped`, because Windows can refuse an administrator's start of
   it (`Access is denied`) on a healthy PC;
+- as SYSTEM, whether that `winget.exe` opens the winget source the installs use, with the
+  installer's own check (`winget search --exact --id Microsoft.PowerShell --source winget`, exit 0
+  or `0x8A150014`) and its 2-minute limit (`-SourceTimeoutSeconds`). winget may refresh its source
+  data while it does;
+- the install engine of the installer's last run, from `last-run.json` (`installEngine`): which one
+  was requested and which installed. It is not read through a link at
+  `%ProgramData%\winget-app-setup`, its `logs` folder or the file;
 - whether WAU is installed, its `WAU_UpdatesAtLogon` setting and Group Policy, and its
   `\WAU\Winget-AutoUpdate` task: state, triggers (and whether the at-logon one is still there),
   last run and result, next run;
@@ -1113,16 +1120,21 @@ probe finds such PCs first. It writes one line per check:
 Its last line can be read by a machine, for example:
 
 ```text
-HEALTH: status=unhealthy problems=wau-logon-trigger computer=PC01 appinstaller=1.29.380.0 runtime=present winget=ok wingetversion=1.29.380 wau=2.12.0 wautask=Ready wauresult=0x00000000 logontrigger=yes wauwingetinstalls=0
+HEALTH: status=unhealthy problems=wau-logon-trigger computer=PC01 appinstaller=1.29.380.0 runtime=present winget=ok wingetversion=1.29.380 wau=2.12.0 wautask=Ready wauresult=0x00000000 logontrigger=yes wauwingetinstalls=0 wingetsource=open lastrun=ok engine=Cli enginerequested=Cli
 ```
 
-`winget` is `ok`, `fallback`, `failed`, `timedout`, `notfound` or `skipped`. The probe exits 1 when
+`winget` is `ok`, `fallback`, `failed`, `timedout`, `notfound` or `skipped`. `wingetsource` is
+`open`, `closed`, `timedout`, `failed`, `skipped` (not SYSTEM) or `-` (no `winget.exe` ran).
+`lastrun` is `ok`, `running`, `none`, `unreadable` or `link`; `engine` and `enginerequested` are
+`Cli`, `WinGetClient` or `-`. New fields are only ever added at the end. The probe exits 1 when
 the PC is unhealthy and 0 otherwise. The `problems` codes:
 
 | Code | Meaning |
 |------|---------|
 | `winget-notfound` | There is no machine-wide `winget.exe` |
 | `winget-launch` | The machine-wide `winget.exe` does not print its version in time (`winget=failed` or `timedout`), or only an older one does (`winget=fallback`; WAU runs the newest) |
+| `winget-source` | `winget.exe` runs but cannot open the winget source as SYSTEM (`wingetsource=closed` or `timedout`), so every install from it fails |
+| `engine-fallback` | The last run was asked for Microsoft.WinGet.Client (`-SystemInstallEngine WinGetClient`) and installed with `winget.exe` |
 | `runtime-missing`, `runtime-unknown` | WAU is installed, and the Windows App Runtime above is missing or could not be read: WAU's next run can install a winget that cannot start |
 | `wau-task-missing`, `wau-task-unknown`, `wau-task-disabled`, `wau-task-no-trigger` | WAU is installed, and its task does not exist, could not be read, is disabled, or has no enabled trigger: automatic updates never run |
 | `wau-logon-trigger` | WAU's task still runs at every sign-in. Fix it with `rmm/Repair-WauLogonTrigger.ps1` |
@@ -1435,6 +1447,11 @@ the path and exits 0, or 5 when no folder takes the file. The bundle holds:
   `Get-AppxProvisionedPackage -Online` for App Installer and the Windows App Runtime. These run in
   Windows PowerShell.
 - `wau-updates-log-tail.txt`: the last 400 lines of Winget-AutoUpdate's `updates.log`.
+- `winget-logs\`: winget's own newest logs (at most 5, the last 1 MB of each) for the account that
+  made the bundle: its `DiagOutputDir`, or as SYSTEM `WinGet\defaultState` under the temp folders.
+- `appx-source-events.txt`: the errors in the `Microsoft-Windows-AppXDeploymentServer/Operational`
+  log that mention `Microsoft.Winget.Source` (at most 50 of the newest 2,000 errors), which say why
+  the winget source package could not be deployed for an account.
 - `README.txt`: what each source returned, or why it could not be read, and the list of files in
   the logs folder.
 

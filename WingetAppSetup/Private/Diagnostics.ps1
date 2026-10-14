@@ -9,7 +9,8 @@
 # (Elevation.ps1, EnvironmentPreflight.ps1), Get-OSArchitecture, Get-PendingRestartState, the WAU
 # readers and Get-DefaultWindowsAppRuntimeRequirement (WauSupport.ps1), Get-MachineWingetCandidate
 # (MachineContext.ps1), ProcessInvocation.ps1, Format-WingetExitCode, Get-WingetSourceOpenArgument
-# and Test-WingetSourceOpenExitCode (WingetBootstrap.ps1), Format-RunRecordTime,
+# and Test-WingetSourceOpenExitCode (WingetBootstrap.ps1), Test-FileSystemLink (ProgramDataFolder.ps1),
+# Get-WingetEngineLogDirectory (WingetClientEngine.ps1), Format-RunRecordTime,
 # Get-WindowsAppRuntimePin and the Write-* helpers.
 
 <#
@@ -205,6 +206,10 @@ function Select-DiagnosticsLogFile {
     $installerLogs = @()
     $runRecord = $null
     foreach ($file in $files) {
+        if (($file.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+            # A link in the logs folder is never the installer's: not read (wgt-gq8.59).
+            continue
+        }
         if ($file.Name -match '^install-(?<stamp>\d{8}-\d{6})(?:-bootstrap|-rmm|-userphase)?\.log$') {
             $time = ConvertFrom-DiagnosticsLogStamp -Stamp $Matches['stamp']
             if ($null -ne $time) {
@@ -1393,6 +1398,124 @@ function Get-DiagnosticsWauLogTail {
 
 <#
 .SYNOPSIS
+    Returns the folders winget writes its own logs to for the account making the bundle.
+.DESCRIPTION
+    Packaged winget's DiagOutputDir under %LOCALAPPDATA%; as SYSTEM, unpackaged winget's
+    WinGet\defaultState under the temp folders (Get-WingetEngineLogDirectory).
+.PARAMETER AccountContext
+    Get-InstallAccountContext's result, or $null.
+.OUTPUTS
+    [string[]]
+#>
+function Get-DiagnosticsWingetLogDirectory {
+    param (
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [object]$AccountContext
+    )
+
+    if ($AccountContext -and $AccountContext.IsSystem) {
+        return @(Get-WingetEngineLogDirectory)
+    }
+    if ([string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) {
+        return @()
+    }
+    return @(Join-Path $env:LOCALAPPDATA 'Packages\Microsoft.DesktopAppInstaller_8wekyb3d8bbwe\LocalState\DiagOutputDir')
+}
+
+<#
+.SYNOPSIS
+    Picks winget's newest own logs (*.log) from its log folders (wgt-gq8.69).
+.PARAMETER Directory
+    The folders (Get-DiagnosticsWingetLogDirectory).
+.PARAMETER MaximumFiles
+    Default 5.
+.OUTPUTS
+    [System.IO.FileInfo[]] Newest first, one file per name; links are left out.
+#>
+function Select-DiagnosticsWingetLogFile {
+    param (
+        [Parameter(Mandatory = $false)]
+        [AllowEmptyCollection()]
+        [string[]]$Directory = @(),
+
+        [Parameter(Mandatory = $false)]
+        [int]$MaximumFiles = 5
+    )
+
+    $files = @()
+    foreach ($folder in @($Directory)) {
+        if ([string]::IsNullOrWhiteSpace($folder) -or -not (Test-Path -LiteralPath $folder -PathType Container)) {
+            continue
+        }
+        $files += @(Get-ChildItem -LiteralPath $folder -File -Filter '*.log' -Force -ErrorAction SilentlyContinue |
+                Where-Object { ($_.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -eq 0 })
+    }
+    $names = @{}
+    $selected = @()
+    foreach ($file in @($files | Sort-Object -Property LastWriteTimeUtc -Descending)) {
+        if ($selected.Count -ge $MaximumFiles) {
+            break
+        }
+        if ($names.ContainsKey($file.Name)) {
+            continue
+        }
+        $names[$file.Name] = $true
+        $selected += $file
+    }
+    return $selected
+}
+
+<#
+.SYNOPSIS
+    Returns the AppX deployment errors that mention the winget source package (wgt-gq8.69).
+.DESCRIPTION
+    Errors and critical events of Microsoft-Windows-AppXDeploymentServer/Operational whose message
+    names Microsoft.Winget.Source: why Windows could not deploy the source package for an account
+    (0x8A15000F SOURCE_DATA_MISSING). Reads at most MaximumScanned events, newest first.
+.PARAMETER MaximumEvents
+    Default 50.
+.PARAMETER MaximumScanned
+    Default 2000.
+.OUTPUTS
+    [string[]] One line per event, oldest first, or a line saying there were none.
+#>
+function Get-DiagnosticsAppxSourceEvent {
+    param (
+        [Parameter(Mandatory = $false)]
+        [int]$MaximumEvents = 50,
+
+        [Parameter(Mandatory = $false)]
+        [int]$MaximumScanned = 2000
+    )
+
+    $logName = 'Microsoft-Windows-AppXDeploymentServer/Operational'
+    $events = @()
+    try {
+        $events = @(Get-WinEvent -FilterHashtable @{ LogName = $logName; Level = @(1, 2) } -MaxEvents $MaximumScanned -ErrorAction Stop)
+    }
+    catch {
+        if ("$($_.FullyQualifiedErrorId)" -notlike 'NoMatchingEventsFound*') {
+            throw
+        }
+    }
+    $matching = @($events | Where-Object { "$($_.Message)" -match 'Microsoft\.Winget\.Source' } | Select-Object -First $MaximumEvents)
+    if ($matching.Count -eq 0) {
+        return @(('No errors in {0} mention Microsoft.Winget.Source (the newest {1} errors were read).' -f $logName, $MaximumScanned))
+    }
+    $lines = @(('Errors in {0} that mention Microsoft.Winget.Source, oldest first ({1}):' -f $logName, $matching.Count))
+    foreach ($entry in @($matching | Sort-Object -Property TimeCreated)) {
+        $time = ''
+        if ($entry.TimeCreated) {
+            $time = ([datetime]$entry.TimeCreated).ToString('yyyy-MM-dd HH:mm:ss', [System.Globalization.CultureInfo]::InvariantCulture)
+        }
+        $lines += ('{0}  event {1}  {2}' -f $time, $entry.Id, ("$($entry.Message)" -replace '\s*[\r\n]+\s*', ' ').Trim())
+    }
+    return $lines
+}
+
+<#
+.SYNOPSIS
     Writes the bundle: a .zip with one UTF-8 text file per entry.
 .DESCRIPTION
     Created new (an existing file is never overwritten); a bundle that could not be written whole
@@ -1475,6 +1598,8 @@ function Get-DiagnosticsUserPhaseDirectory {
     README.txt's list of sources: a file that cannot be read is noted there.
 .PARAMETER BudgetBytes
     What is left of the bundle's size budget.
+.PARAMETER MaxFileBytes
+    The most to read of one file (its end). Default 4 MB.
 .OUTPUTS
     [pscustomobject] with BudgetBytes (what is left after these files) and Skipped (the names of the
     files left out because the budget was spent).
@@ -1497,7 +1622,10 @@ function Add-DiagnosticsLogEntry {
         [System.Collections.Generic.List[string]]$Sources,
 
         [Parameter(Mandatory = $true)]
-        [long]$BudgetBytes
+        [long]$BudgetBytes,
+
+        [Parameter(Mandatory = $false)]
+        [long]$MaxFileBytes = 4MB
     )
 
     $skipped = @()
@@ -1510,8 +1638,8 @@ function Add-DiagnosticsLogEntry {
             continue
         }
         try {
-            $content = Read-DiagnosticsTextFile -Path $file.FullName -MaxBytes ([Math]::Min([long]4MB, $BudgetBytes))
-            $BudgetBytes -= [Math]::Min([long]$file.Length, [long]4MB)
+            $content = Read-DiagnosticsTextFile -Path $file.FullName -MaxBytes ([Math]::Min($MaxFileBytes, $BudgetBytes))
+            $BudgetBytes -= [Math]::Min([long]$file.Length, $MaxFileBytes)
             $Entries[$Prefix + $file.Name] = $content
         }
         catch {
@@ -1531,6 +1659,8 @@ function Add-DiagnosticsLogEntry {
       winget.txt                  Get-DiagnosticsWingetReport
       appx.txt                    Get-DiagnosticsAppxReport
       wau-updates-log-tail.txt    Get-DiagnosticsWauLogTail
+      appx-source-events.txt      Get-DiagnosticsAppxSourceEvent
+      winget-logs\                winget's own newest logs (Select-DiagnosticsWingetLogFile)
       logs\                       the latest run's transcripts (the RMM wrapper's included), its
                                   installer logs and last-run.json (Select-DiagnosticsLogFile)
       user-phase\                 this account's user-phase.json and latest user phase logs, when
@@ -1581,7 +1711,33 @@ function Invoke-DiagnosticsCollection {
     $entries['README.txt'] = ''
 
     $budget = [long]64MB
-    if ($LogDirectory -and (Test-Path -LiteralPath $LogDirectory -PathType Container)) {
+    # Never read through a link at %ProgramData%\winget-app-setup or its logs folder (wgt-gq8.59).
+    $linkedFolder = $null
+    if ($LogDirectory) {
+        $checked = @($LogDirectory)
+        if ($env:ProgramData) {
+            $baseDirectory = Join-Path $env:ProgramData 'winget-app-setup'
+            if ($LogDirectory.StartsWith($baseDirectory, [System.StringComparison]::OrdinalIgnoreCase)) {
+                $checked = @($baseDirectory, $LogDirectory)
+            }
+        }
+        foreach ($folder in $checked) {
+            try {
+                $isLink = Test-FileSystemLink -Path $folder
+            }
+            catch {
+                $isLink = $true
+            }
+            if ($isLink) {
+                $linkedFolder = $folder
+                break
+            }
+        }
+    }
+    if ($linkedFolder) {
+        $sources.Add(('Installer logs ({0}): not read: {1} is a link (junction or symbolic link), which the installer never makes; its next run removes it' -f $LogDirectory, $linkedFolder))
+    }
+    elseif ($LogDirectory -and (Test-Path -LiteralPath $LogDirectory -PathType Container)) {
         try {
             $selection = Select-DiagnosticsLogFile -LogDirectory $LogDirectory
             $files = @($selection.Transcripts) + @($selection.InstallerLogs)
@@ -1681,6 +1837,26 @@ function Invoke-DiagnosticsCollection {
     catch {
         $sources.Add("Winget-AutoUpdate log (wau-updates-log-tail.txt): not collected: $($_.Exception.Message)")
     }
+    try {
+        $wingetLogDirectories = @(Get-DiagnosticsWingetLogDirectory -AccountContext $account)
+        $wingetLogs = @(Select-DiagnosticsWingetLogFile -Directory $wingetLogDirectories)
+        $added = Add-DiagnosticsLogEntry -Files $wingetLogs -Prefix 'winget-logs/' -Entries $entries -Sources $sources -BudgetBytes $budget -MaxFileBytes 1MB
+        $budget = $added.BudgetBytes
+        $sources.Add(('winget''s own logs ({0}): the newest {1}' -f ($wingetLogDirectories -join '; '), $wingetLogs.Count))
+        if (@($added.Skipped).Count -gt 0) {
+            $sources.Add(('Left out to keep the bundle small: {0}' -f (@($added.Skipped) -join ', ')))
+        }
+    }
+    catch {
+        $sources.Add("winget's own logs (winget-logs\): not collected: $($_.Exception.Message)")
+    }
+    try {
+        $entries['appx-source-events.txt'] = (@(Get-DiagnosticsAppxSourceEvent) -join [Environment]::NewLine)
+        $sources.Add('AppX deployment errors for Microsoft.Winget.Source (appx-source-events.txt): collected')
+    }
+    catch {
+        $sources.Add("AppX deployment errors for Microsoft.Winget.Source (appx-source-events.txt): not collected: $($_.Exception.Message)")
+    }
 
     $buildId = 'unknown'
     if ($script:InstallerBuildId) {
@@ -1697,6 +1873,8 @@ function Invoke-DiagnosticsCollection {
         '  winget.txt                winget --version and winget --info',
         '  appx.txt                  App Installer and Windows App Runtime packages, registered and provisioned',
         '  wau-updates-log-tail.txt  the end of Winget-AutoUpdate''s updates.log',
+        '  appx-source-events.txt    AppX deployment errors that mention Microsoft.Winget.Source',
+        '  winget-logs\              winget''s own newest logs for the account that made the bundle (at most 5, 1 MB each)',
         '  logs\                     the latest run''s transcripts (the RMM wrapper''s install-<time>-rmm.log too) and installer logs, and last-run.json',
         '  user-phase\               this account''s user phase, when it has run here: user-phase.json, its latest transcripts and winget logs'
     )

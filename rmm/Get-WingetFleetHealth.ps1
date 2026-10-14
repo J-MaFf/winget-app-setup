@@ -16,6 +16,9 @@
               runtime=<present|missing|unknown> winget=<ok|fallback|failed|timedout|notfound|skipped>
               wingetversion=<version> wau=<version|installed|none> wautask=<state|missing|unknown|->
               wauresult=<0xHEX|-> logontrigger=<yes|no|-> wauwingetinstalls=<count|->
+              wingetsource=<open|closed|timedout|failed|skipped|->
+              lastrun=<ok|running|none|link|unreadable> engine=<Cli|WinGetClient|->
+              enginerequested=<Cli|WinGetClient|->
 
     (all on one line; '-' when there is nothing to report). The checks:
 
@@ -31,6 +34,13 @@
         WAU's SYSTEM run uses the newest one. Only a run as SYSTEM checks this: run by an
         administrator, the probe starts no winget.exe and reports winget=skipped, because that
         start would not be SYSTEM's and Windows can refuse it ('Access is denied') on a healthy PC.
+      - winget source: as SYSTEM, with the winget.exe that printed its version, whether
+        `winget search --exact --id Microsoft.PowerShell --source winget` opens the source the
+        installs use (exit 0 or 0x8A150014), within a time limit. winget may refresh its source data
+        while it does.
+      - Install engine: from the installer's last-run.json, which engine its last run was asked for
+        and which installed. Not read through a link at %ProgramData%\winget-app-setup, its logs
+        folder or the file.
       - Winget-AutoUpdate: whether it is installed (its MSI's uninstall entry or its settings key),
         its WAU_UpdatesAtLogon setting and Group Policy, and its \WAU\Winget-AutoUpdate task: state,
         triggers, last run and result, next run.
@@ -44,6 +54,9 @@
       winget-notfound      no machine-wide winget.exe exists.
       winget-launch        the newest machine-wide winget.exe did not print its version in time
                            (status 'fallback' when an older one still did).
+      winget-source        winget.exe runs but cannot open the winget source as SYSTEM.
+      engine-fallback      the last run was asked for Microsoft.WinGet.Client
+                           (-SystemInstallEngine WinGetClient) and installed with winget.exe.
       runtime-missing      WAU is installed and the Windows App Runtime above is not: WAU's next run
       runtime-unknown      can install a winget that cannot start (or that could not be read).
       wau-task-missing     WAU is installed and its task does not exist,
@@ -63,6 +76,8 @@
     there do the registry, Program Files and the Appx cmdlets read the machine as it is.
 .PARAMETER WingetTimeoutSeconds
     The time limit for each `winget.exe --version`. Default 30 seconds, the installer's own.
+.PARAMETER SourceTimeoutSeconds
+    The time limit for the winget source check. Default 120 seconds, the installer's own.
 .PARAMETER LogMatchCount
     How many of the last matching updates.log entries to show. Default 20; 0 shows none.
 .PARAMETER Relaunched
@@ -78,6 +93,10 @@ param (
     [Parameter(Mandatory = $false)]
     [ValidateRange(5, 600)]
     [int]$WingetTimeoutSeconds = 30,
+
+    [Parameter(Mandatory = $false)]
+    [ValidateRange(5, 600)]
+    [int]$SourceTimeoutSeconds = 120,
 
     [Parameter(Mandatory = $false)]
     [ValidateRange(0, 500)]
@@ -1238,6 +1257,169 @@ function Read-RmmWauLogMatch {
 
 <#
 .SYNOPSIS
+    Returns the attributes of a file system entry itself, never of what a link points to.
+.RETURNS
+    [System.IO.FileAttributes], or $null when nothing is at the path.
+#>
+function Get-RmmEntryAttribute {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    try {
+        return [System.IO.File]::GetAttributes($Path)
+    }
+    catch [System.IO.FileNotFoundException], [System.IO.DirectoryNotFoundException] {
+        return $null
+    }
+}
+
+<#
+.SYNOPSIS
+    Returns the installer's run record, %ProgramData%\winget-app-setup\logs\last-run.json, with the
+    two folders it sits in.
+.RETURNS
+    [pscustomobject] with BaseDirectory, LogDirectory and Path, or $null without ProgramData.
+#>
+function Get-RmmRunRecordLocation {
+    if ([string]::IsNullOrWhiteSpace($env:ProgramData)) {
+        return $null
+    }
+    $base = Join-Path $env:ProgramData 'winget-app-setup'
+    $logs = Join-Path $base 'logs'
+    return [pscustomobject]@{ BaseDirectory = $base; LogDirectory = $logs; Path = (Join-Path $logs 'last-run.json') }
+}
+
+<#
+.SYNOPSIS
+    Reads the install engine of the installer's last run from last-run.json (wgt-gq8.54).
+.DESCRIPTION
+    Refuses to read through a link at the base folder, the logs folder or the file (wgt-gq8.59):
+    any user can plant one there, and the installer never makes one.
+.PARAMETER Location
+    Get-RmmRunRecordLocation's result.
+.RETURNS
+    [pscustomobject] with State ('ok', 'running', 'none', 'link' or 'unreadable'), Detail,
+    Requested, Used and FallbackReason ($null when the record has no installEngine).
+#>
+function Get-RmmLastRunEngine {
+    param (
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [object]$Location
+    )
+
+    $result = [pscustomobject]@{ State = 'none'; Detail = $null; Requested = $null; Used = $null; FallbackReason = $null }
+    if ($null -eq $Location) {
+        $result.Detail = 'ProgramData is not set'
+        return $result
+    }
+    foreach ($entry in @($Location.BaseDirectory, $Location.LogDirectory, $Location.Path)) {
+        $attributes = Get-RmmEntryAttribute -Path $entry
+        if ($null -eq $attributes) {
+            $result.Detail = "$entry does not exist"
+            return $result
+        }
+        if (($attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+            $result.State = 'link'
+            $result.Detail = "$entry is a link (junction or symbolic link), which the installer never makes: not read"
+            return $result
+        }
+    }
+    try {
+        $bytes = [System.IO.File]::ReadAllBytes($Location.Path)
+        $record = ConvertFrom-Json -InputObject ([System.Text.Encoding]::UTF8.GetString($bytes).TrimStart([char]0xFEFF)) -ErrorAction Stop
+    }
+    catch {
+        $result.State = 'unreadable'
+        $result.Detail = "$($Location.Path) could not be read: $($_.Exception.Message)"
+        return $result
+    }
+    if ($null -eq $record) {
+        $result.State = 'unreadable'
+        $result.Detail = "$($Location.Path) is empty"
+        return $result
+    }
+    $result.State = 'ok'
+    if ($null -eq $record.exitCode) {
+        $result.State = 'running'
+    }
+    if ($record.PSObject.Properties['installEngine'] -and $null -ne $record.installEngine) {
+        $result.Requested = [string]$record.installEngine.requested
+        $result.Used = [string]$record.installEngine.used
+        if (-not [string]::IsNullOrWhiteSpace([string]$record.installEngine.fallbackReason)) {
+            $result.FallbackReason = [string]$record.installEngine.fallbackReason
+        }
+    }
+    return $result
+}
+
+<#
+.SYNOPSIS
+    Returns the arguments of the winget call that opens the winget source, as the module's
+    Get-WingetSourceOpenArgument (WingetBootstrap.ps1) does; tests keep the two the same.
+#>
+function Get-RmmWingetSourceOpenArgument {
+    return @('search', '--exact', '--id', 'Microsoft.PowerShell', '--source', 'winget', '--accept-source-agreements', '--disable-interactivity')
+}
+
+<#
+.SYNOPSIS
+    Returns whether a source-open exit code means winget opened the winget source: 0, or
+    0x8A150014 NO_APPLICATIONS_FOUND. The module's Test-WingetSourceOpenExitCode; tests compare them.
+#>
+function Test-RmmWingetSourceOpenExitCode {
+    param (
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [Nullable[int]]$ExitCode
+    )
+
+    return ($null -ne $ExitCode -and @(0, -1978335212) -contains [int]$ExitCode)
+}
+
+<#
+.SYNOPSIS
+    Checks that the machine-wide winget.exe opens the winget source as SYSTEM (wgt-gq8.69).
+.PARAMETER WingetPath
+    The winget.exe that printed its version.
+.PARAMETER TimeoutSeconds
+    The time limit.
+.RETURNS
+    [pscustomobject] with State ('open', 'closed', 'timedout' or 'failed') and Line.
+#>
+function Test-RmmWingetSourceOpen {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$WingetPath,
+
+        [Parameter(Mandatory = $true)]
+        [int]$TimeoutSeconds
+    )
+
+    $arguments = @(Get-RmmWingetSourceOpenArgument)
+    $command = 'winget ' + ($arguments -join ' ')
+    $run = Invoke-RmmTimedProcess -FilePath $WingetPath -ArgumentList $arguments -TimeoutSeconds $TimeoutSeconds
+    if ($run.LaunchError) {
+        return [pscustomobject]@{ State = 'failed'; Line = ('winget source: {0} could not be started: {1}' -f $command, $run.LaunchError) }
+    }
+    if ($run.TimedOut) {
+        return [pscustomobject]@{ State = 'timedout'; Line = ('winget source: {0} did not finish within {1} seconds and was stopped.' -f $command, $TimeoutSeconds) }
+    }
+    if (Test-RmmWingetSourceOpenExitCode -ExitCode $run.ExitCode) {
+        return [pscustomobject]@{ State = 'open'; Line = ('winget source: opens ({0}: exit {1}, {2} s).' -f $command, (Format-RmmExitCode -ExitCode ([int]$run.ExitCode)), $run.DurationSeconds) }
+    }
+    $said = ''
+    $lastLine = @($run.Output) | Select-Object -Last 1
+    if ($lastLine) {
+        $said = ": $lastLine"
+    }
+    return [pscustomobject]@{ State = 'closed'; Line = ('winget source: CANNOT BE OPENED ({0}: exit {1} after {2} s{3}).' -f $command, (Format-RmmExitCode -ExitCode ([int]$run.ExitCode)), $run.DurationSeconds, $said) }
+}
+
+<#
+.SYNOPSIS
     The probe: reads everything, decides whether this PC is healthy, and returns the report.
 .PARAMETER WingetTimeoutSeconds
     The time limit for each `winget.exe --version`.
@@ -1253,6 +1435,9 @@ function Invoke-RmmFleetHealthProbe {
     param (
         [Parameter(Mandatory = $false)]
         [int]$WingetTimeoutSeconds = 30,
+
+        [Parameter(Mandatory = $false)]
+        [int]$SourceTimeoutSeconds = 120,
 
         [Parameter(Mandatory = $false)]
         [int]$LogMatchCount = 20,
@@ -1357,6 +1542,47 @@ function Invoke-RmmFleetHealthProbe {
         else {
             $reasons.Add('winget.exe does not run, so neither the installer as SYSTEM nor Winget-AutoUpdate can install or update anything')
         }
+    }
+
+    # The winget source, as SYSTEM, with the winget.exe that ran (wgt-gq8.69).
+    $sourceValue = '-'
+    if ($winget.State -eq 'ok' -or $winget.State -eq 'fallback') {
+        $source = Test-RmmWingetSourceOpen -WingetPath $winget.Path -TimeoutSeconds $SourceTimeoutSeconds
+        $sourceValue = $source.State
+        $lines.Add($source.Line)
+        if ($source.State -ne 'open') {
+            $problems.Add('winget-source')
+            $reasons.Add('winget cannot open the winget source as SYSTEM, so every install from it fails')
+        }
+    }
+    elseif ($winget.State -eq 'skipped') {
+        $sourceValue = 'skipped'
+    }
+
+    # The install engine of the installer's last run (wgt-gq8.54).
+    $runRecord = Get-RmmLastRunEngine -Location (Get-RmmRunRecordLocation)
+    $engineValue = '-'
+    $engineRequestedValue = '-'
+    if ($runRecord.State -eq 'ok' -or $runRecord.State -eq 'running') {
+        if ($runRecord.Used) {
+            $engineValue = $runRecord.Used
+            $engineRequestedValue = $runRecord.Requested
+            $engineLine = 'Install engine of the last run: {0} (requested {1})' -f $runRecord.Used, $runRecord.Requested
+            if ($runRecord.FallbackReason) {
+                $engineLine += "; fell back: $($runRecord.FallbackReason)"
+            }
+            $lines.Add($engineLine.TrimEnd('.') + '.')
+        }
+        else {
+            $lines.Add('Install engine of the last run: not recorded (an installer build from before installEngine).')
+        }
+        if ($runRecord.Requested -eq 'WinGetClient' -and $runRecord.Used -eq 'Cli') {
+            $problems.Add('engine-fallback')
+            $reasons.Add('the last run was asked to install with Microsoft.WinGet.Client and fell back to winget.exe')
+        }
+    }
+    else {
+        $lines.Add("Install engine of the last run: unknown ($($runRecord.Detail)).")
     }
 
     # Winget-AutoUpdate.
@@ -1522,7 +1748,11 @@ function Invoke-RmmFleetHealthProbe {
         ('wautask=' + (ConvertTo-RmmResultValue -Value $taskValue)),
         ('wauresult=' + $resultValue),
         ('logontrigger=' + $logonValue),
-        ('wauwingetinstalls=' + $installsValue)
+        ('wauwingetinstalls=' + $installsValue),
+        ('wingetsource=' + $sourceValue),
+        ('lastrun=' + $runRecord.State),
+        ('engine=' + (ConvertTo-RmmResultValue -Value $engineValue)),
+        ('enginerequested=' + (ConvertTo-RmmResultValue -Value $engineRequestedValue))
     )
     $lines.Add('HEALTH: ' + ($health -join ' '))
 
@@ -1567,6 +1797,9 @@ function Invoke-RmmFleetHealthMain {
         [int]$WingetTimeoutSeconds = 30,
 
         [Parameter(Mandatory = $false)]
+        [int]$SourceTimeoutSeconds = 120,
+
+        [Parameter(Mandatory = $false)]
         [int]$LogMatchCount = 20
     )
 
@@ -1581,7 +1814,7 @@ function Invoke-RmmFleetHealthMain {
         }
     }
     try {
-        return (Invoke-RmmFleetHealthProbe -WingetTimeoutSeconds $WingetTimeoutSeconds -LogMatchCount $LogMatchCount -Note $note)
+        return (Invoke-RmmFleetHealthProbe -WingetTimeoutSeconds $WingetTimeoutSeconds -SourceTimeoutSeconds $SourceTimeoutSeconds -LogMatchCount $LogMatchCount -Note $note)
     }
     catch {
         return (New-RmmFailureResult -Message "The probe stopped on an unexpected error: $($_.Exception.Message)" -ResultPrefix 'HEALTH' -FailureStatus 'unhealthy' -FailureProblem 'probe-error')
@@ -1589,7 +1822,7 @@ function Invoke-RmmFleetHealthMain {
 }
 
 if ($MyInvocation.InvocationName -ne '.') {
-    $fleetHealth = Invoke-RmmFleetHealthMain -ScriptPath $PSCommandPath -ForwardedArguments (ConvertTo-RmmForwardedArgument -BoundParameters $PSBoundParameters) -Relaunched:$Relaunched -WingetTimeoutSeconds $WingetTimeoutSeconds -LogMatchCount $LogMatchCount
+    $fleetHealth = Invoke-RmmFleetHealthMain -ScriptPath $PSCommandPath -ForwardedArguments (ConvertTo-RmmForwardedArgument -BoundParameters $PSBoundParameters) -Relaunched:$Relaunched -WingetTimeoutSeconds $WingetTimeoutSeconds -SourceTimeoutSeconds $SourceTimeoutSeconds -LogMatchCount $LogMatchCount
     foreach ($fleetHealthLine in @($fleetHealth.Lines)) {
         Write-Output $fleetHealthLine
     }

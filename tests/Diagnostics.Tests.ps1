@@ -759,6 +759,35 @@ Describe 'The names the PC knows (Get-DiagnosticsIdentityHint)' {
     }
 }
 
+Describe 'winget''s own logs and links in the logs folder (wgt-gq8.69, wgt-gq8.59)' {
+    It 'Reads winget''s DiagOutputDir for an account, and the SYSTEM temp folders as SYSTEM' {
+        Mock Get-WingetEngineLogDirectory { @('C:\Windows\SystemTemp\WinGet\defaultState', 'C:\Windows\Temp\WinGet\defaultState') }
+
+        @(Get-DiagnosticsWingetLogDirectory -AccountContext (New-TestAccountContext -System)) | Should -Be @('C:\Windows\SystemTemp\WinGet\defaultState', 'C:\Windows\Temp\WinGet\defaultState')
+        @(Get-DiagnosticsWingetLogDirectory -AccountContext (New-TestAccountContext)) | Should -Be @(Join-Path $env:LOCALAPPDATA 'Packages\Microsoft.DesktopAppInstaller_8wekyb3d8bbwe\LocalState\DiagOutputDir')
+    }
+
+    It 'Leaves a link in the logs folder out of the bundle' {
+        $folder = Join-Path $TestDrive ('links-' + [Guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Path $folder | Out-Null
+        $target = Join-Path $TestDrive ('elsewhere-' + [Guid]::NewGuid().ToString('N') + '.txt')
+        Set-Content -LiteralPath $target -Value 'a file outside the logs folder'
+        Set-Content -LiteralPath (Join-Path $folder 'install-20261004-143205.log') -Value 'transcript'
+        try {
+            New-Item -ItemType SymbolicLink -Path (Join-Path $folder 'install-20261004-143300.log') -Target $target -ErrorAction Stop | Out-Null
+        }
+        catch {
+            Set-ItResult -Skipped -Because "this account cannot create a symbolic link: $($_.Exception.Message)"
+            return
+        }
+
+        $selection = Select-DiagnosticsLogFile -LogDirectory $folder
+
+        @($selection.Transcripts | ForEach-Object { $_.Name }) | Should -Be @('install-20261004-143205.log')
+        @(Select-DiagnosticsWingetLogFile -Directory @($folder) | ForEach-Object { $_.Name }) | Should -Be @('install-20261004-143205.log')
+    }
+}
+
 Describe 'Making the bundle (Invoke-DiagnosticsCollection)' {
     BeforeEach {
         $script:messages = @()
@@ -776,6 +805,12 @@ Describe 'Making the bundle (Invoke-DiagnosticsCollection)' {
         # This account's user phase (work-order item 34): none, unless a test makes one.
         $script:userPhaseDirectory = Join-Path $TestDrive ('userphase-' + [Guid]::NewGuid().ToString('N'))
         Mock Get-DiagnosticsUserPhaseDirectory { $script:userPhaseDirectory }
+        # winget's own logs (wgt-gq8.69): an empty folder, unless a test fills it.
+        $script:wingetLogDirectory = Join-Path $TestDrive ('diagoutputdir-' + [Guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Path $script:wingetLogDirectory | Out-Null
+        Mock Get-DiagnosticsWingetLogDirectory { @($script:wingetLogDirectory) }
+        Mock Get-WinEvent { }
+        Mock Test-FileSystemLink { $false }
 
         # What a real run does and a diagnostics run must not.
         Mock Start-Transcript { }
@@ -807,7 +842,7 @@ Describe 'Making the bundle (Invoke-DiagnosticsCollection)' {
         $zip[0].Name | Should -Match '^winget-app-setup-diagnostics-\d{8}-\d{6}\.zip$'
         $script:messages | Should -Contain "OK: Diagnostics bundle saved: $($zip[0].FullName)"
         $entries = Get-ZipEntryText -Path $zip[0].FullName
-        @($entries.Keys) | Should -Be @('README.txt', 'logs/install-20261004-143205.log', 'logs/winget-install-Git.Git-20261004-143300.log', 'logs/last-run.json', 'system.txt', 'winget.txt', 'appx.txt', 'wau-updates-log-tail.txt')
+        @($entries.Keys) | Should -Be @('README.txt', 'logs/install-20261004-143205.log', 'logs/winget-install-Git.Git-20261004-143300.log', 'logs/last-run.json', 'system.txt', 'winget.txt', 'appx.txt', 'wau-updates-log-tail.txt', 'appx-source-events.txt')
         $entries['logs/install-20261004-143205.log'] | Should -Match 'Installer failed with exit code: 1603'
         $entries['winget.txt'] | Should -Match 'v1\.26\.510'
         $entries['README.txt'] | Should -Match 'Installer logs \(.+\): 1 transcript\(s\), 1 installer log\(s\), last-run\.json included'
@@ -837,6 +872,91 @@ Describe 'Making the bundle (Invoke-DiagnosticsCollection)' {
         }
         # Read-only: the user's files are as they were.
         @(Get-ChildItem -LiteralPath $userLogs).Count | Should -Be 2
+    }
+
+    It 'Adds winget''s own newest logs, at most 5 and 1 MB each, redacted (wgt-gq8.69)' {
+        for ($index = 1; $index -le 7; $index++) {
+            $path = Join-Path $script:wingetLogDirectory ('WinGet-2026-10-0{0}-10-00-00.000.log' -f $index)
+            Set-Content -LiteralPath $path -Value ('winget log {0} for C:\Users\jdoe\AppData' -f $index) -NoNewline
+            (Get-Item -LiteralPath $path).LastWriteTimeUtc = [datetime]::new(2026, 10, $index, 10, 0, 0, [DateTimeKind]::Utc)
+        }
+        $big = Join-Path $script:wingetLogDirectory 'WinGet-2026-10-09-10-00-00.000.log'
+        [System.IO.File]::WriteAllText($big, ('x' * 1MB) + 'THE-END')
+        (Get-Item -LiteralPath $big).LastWriteTimeUtc = [datetime]::new(2026, 10, 9, 10, 0, 0, [DateTimeKind]::Utc)
+        Set-Content -LiteralPath (Join-Path $script:wingetLogDirectory 'notes.txt') -Value 'not a log'
+
+        [void](Invoke-DiagnosticsCollection -LogDirectory $script:logDirectory -OutputDirectory $script:outputDirectory)
+
+        $entries = Get-ZipEntryText -Path (@(Get-ChildItem -LiteralPath $script:outputDirectory -Filter '*.zip')[0]).FullName
+        $wingetEntries = @($entries.Keys | Where-Object { $_ -like 'winget-logs/*' } | Sort-Object)
+        $wingetEntries | Should -Be @('winget-logs/WinGet-2026-10-04-10-00-00.000.log', 'winget-logs/WinGet-2026-10-05-10-00-00.000.log', 'winget-logs/WinGet-2026-10-06-10-00-00.000.log', 'winget-logs/WinGet-2026-10-07-10-00-00.000.log', 'winget-logs/WinGet-2026-10-09-10-00-00.000.log')
+        $entries['winget-logs/WinGet-2026-10-09-10-00-00.000.log'] | Should -Match 'THE-END$'
+        $entries['winget-logs/WinGet-2026-10-09-10-00-00.000.log'].Length | Should -BeLessThan (1MB + 200)
+        $entries['winget-logs/WinGet-2026-10-07-10-00-00.000.log'] | Should -Not -Match 'jdoe'
+        $entries['README.txt'] | Should -Match 'winget''s own logs \(.+\): the newest 5'
+    }
+
+    It 'Adds the AppX deployment errors that mention the winget source package, redacted (wgt-gq8.69)' {
+        Mock Get-WinEvent {
+            @(
+                [pscustomobject]@{ TimeCreated = [datetime]'2026-10-06T08:00:00'; Id = 404; Message = "AppX Deployment operation failed for package Microsoft.Winget.Source_2026.1006.0.0_neutral__8wekyb3d8bbwe with error 0x80073D19.`r`nThe user CONTOSO\jdoe has no interactive session." },
+                [pscustomobject]@{ TimeCreated = [datetime]'2026-10-06T07:00:00'; Id = 401; Message = 'Deployment Register operation on Package Contoso.Other_1.0.0.0_x64 failed.' },
+                [pscustomobject]@{ TimeCreated = [datetime]'2026-10-06T06:00:00'; Id = 465; Message = 'Microsoft.Winget.Source could not be staged.' }
+            )
+        }
+
+        [void](Invoke-DiagnosticsCollection -LogDirectory $script:logDirectory -OutputDirectory $script:outputDirectory)
+
+        $entries = Get-ZipEntryText -Path (@(Get-ChildItem -LiteralPath $script:outputDirectory -Filter '*.zip')[0]).FullName
+        $lines = @($entries['appx-source-events.txt'] -split '\r?\n')
+        $lines[0] | Should -BeExactly 'Errors in Microsoft-Windows-AppXDeploymentServer/Operational that mention Microsoft.Winget.Source, oldest first (2):'
+        $lines[1] | Should -BeLike '2026-10-06 06:00:00  event 465  Microsoft.Winget.Source could not be staged.'
+        $lines[2] | Should -BeLike '2026-10-06 08:00:00  event 404  AppX Deployment operation failed * 0x80073D19. The user <domain1>\<user*> has no interactive session.'
+        $entries['appx-source-events.txt'] | Should -Not -Match 'Contoso\.Other'
+        Should -Invoke Get-WinEvent -Times 1 -Exactly -ParameterFilter { $FilterHashtable[0].LogName -eq 'Microsoft-Windows-AppXDeploymentServer/Operational' -and (@($FilterHashtable[0].Level) -join ',') -eq '1,2' -and $MaxEvents -eq 2000 }
+    }
+
+    It 'Says there are no such AppX errors when the log has none, and notes a log it cannot read' {
+        Mock Get-WinEvent { throw [System.Management.Automation.ErrorRecord]::new([System.Exception]::new('No events were found that match the specified selection criteria.'), 'NoMatchingEventsFound,Microsoft.PowerShell.Commands.GetWinEventCommand', [System.Management.Automation.ErrorCategory]::ObjectNotFound, $null) }
+
+        Get-DiagnosticsAppxSourceEvent | Should -BeExactly 'No errors in Microsoft-Windows-AppXDeploymentServer/Operational mention Microsoft.Winget.Source (the newest 2000 errors were read).'
+
+        Mock Get-WinEvent { throw 'Attempted to perform an unauthorized operation.' }
+        [void](Invoke-DiagnosticsCollection -LogDirectory $script:logDirectory -OutputDirectory $script:outputDirectory)
+        $entries = Get-ZipEntryText -Path (@(Get-ChildItem -LiteralPath $script:outputDirectory -Filter '*.zip')[0]).FullName
+        $entries['README.txt'] | Should -Match 'AppX deployment errors for Microsoft\.Winget\.Source \(appx-source-events\.txt\): not collected: Attempted to perform an unauthorized operation\.'
+    }
+
+    It 'Does not read the installer''s logs through a link at the <Case> (wgt-gq8.59)' -ForEach @(
+        @{ Case = 'logs folder' }
+        @{ Case = 'base folder' }
+    ) {
+        $savedProgramData = $env:ProgramData
+        try {
+            $env:ProgramData = Join-Path $TestDrive ('programdata-' + [Guid]::NewGuid().ToString('N'))
+            $base = Join-Path $env:ProgramData 'winget-app-setup'
+            $logs = Join-Path $base 'logs'
+            New-Item -ItemType Directory -Path $logs -Force | Out-Null
+            Copy-Item -Path (Join-Path $script:logDirectory '*') -Destination $logs
+            $linked = $logs
+            if ($Case -eq 'base folder') {
+                $linked = $base
+            }
+            Mock Test-FileSystemLink { $true } -ParameterFilter { $Path -eq $linked }
+            # The bundle redacts user profile folder names, which a TestDrive under C:\Users holds,
+            # so the check matches the path from the made-up ProgramData folder on.
+            $linkedTail = $linked.Substring((Split-Path -Parent $env:ProgramData).Length)
+
+            $exitCode = Invoke-DiagnosticsCollection -LogDirectory $logs -OutputDirectory $script:outputDirectory
+        }
+        finally {
+            $env:ProgramData = $savedProgramData
+        }
+
+        $exitCode | Should -Be 0
+        $entries = Get-ZipEntryText -Path (@(Get-ChildItem -LiteralPath $script:outputDirectory -Filter '*.zip')[0]).FullName
+        @($entries.Keys | Where-Object { $_ -like 'logs/*' }).Count | Should -Be 0
+        $entries['README.txt'] | Should -Match ('Installer logs \(.+\): not read: .*' + [regex]::Escape($linkedTail) + ' is a link')
     }
 
     It 'Says in README.txt when the user phase has not run in this account' {

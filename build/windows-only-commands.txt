@@ -20,6 +20,7 @@ Get-CimInstance
 Get-ScheduledTask
 Get-ScheduledTaskInfo
 Get-Service
+Get-WinEvent
 Invoke-CimMethod
 Restart-Service
 Set-ScheduledTask
