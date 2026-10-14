@@ -1679,6 +1679,9 @@ Describe 'Test-WingetPackageInstalled (timeout support, issue #188)' {
 
 Describe 'Install-PowerShellLatest (always-latest strategy, issue #166)' {
     BeforeEach {
+        # Every Windows runner has a PowerShell 7 its MSI registered, which would end
+        # Install-PowerShellLatest before any winget call (wgt-9j1).
+        Mock Find-RegisteredPowerShell7 { $null }
         Mock Write-Host { }
         Mock Write-Info { }
         Mock Write-Success { }
@@ -1903,6 +1906,82 @@ Describe 'Install-PowerShellLatest (always-latest strategy, issue #166)' {
         $result.LaunchErrorExhausted | Should -Be $true
         $result.LaunchError | Should -Be 'Access is denied.'
         Should -Invoke Test-WingetPackageInstalled -Times 0 -Exactly
+    }
+
+    It 'keeps a PowerShell 7 its MSI registered for the whole PC, with no winget call (wgt-9j1)' {
+        Mock Find-RegisteredPowerShell7 { @{ Version = [version]'7.6.7'; InstallLocation = 'C:\Program Files\PowerShell\7\' } }
+        Mock Install-WingetPackage { throw 'winget''s older MSI must not run over a newer registered PowerShell' }
+        Mock Test-WingetPackageInstalled { throw 'no winget check either' }
+        Mock Install-MsixProvisionedPackage { throw 'no DISM provisioning either' }
+
+        $result = Install-PowerShellLatest
+
+        $result.Installed | Should -Be $true
+        $result.AlreadyInstalled | Should -Be $true
+        $result.Method | Should -Be 'registered'
+        $result.RegisteredVersion | Should -Be '7.6.7'
+        $result.ExitCode | Should -Be 0
+        Should -Invoke Write-Info -Times 1 -Exactly -ParameterFilter {
+            $Message -eq "PowerShell 7.6.7 is already installed for every user (C:\Program Files\PowerShell\7\). winget does not list it, most likely because it is newer than the version in winget's catalog, so it is kept as it is."
+        }
+    }
+}
+
+Describe 'Find-RegisteredPowerShell7 (wgt-9j1)' {
+    BeforeEach {
+        # Folders that hold a pwsh.exe, named after the version registered for them.
+        $script:withPwsh = @{}
+        foreach ($name in @('7.5.3', '7.6.7', '7.7.0-preview.1', '6.2.7')) {
+            $folder = Join-Path $TestDrive "with-pwsh-$name"
+            New-Item -ItemType Directory -Path $folder -Force | Out-Null
+            Set-Content -LiteralPath (Join-Path $folder 'pwsh.exe') -Value ''
+            $script:withPwsh[$name] = $folder
+        }
+        $script:empty = Join-Path $TestDrive 'no-pwsh'
+        New-Item -ItemType Directory -Path $script:empty -Force | Out-Null
+    }
+
+    It 'Returns the newest stable PowerShell 7 whose folder holds pwsh.exe' {
+        Mock Get-DiagnosticsPowerShellInstall {
+            [pscustomobject]@{ SemanticVersion = '7.5.3'; InstallLocation = $script:withPwsh['7.5.3'] }
+            [pscustomobject]@{ SemanticVersion = '7.6.7'; InstallLocation = $script:withPwsh['7.6.7'] }
+            [pscustomobject]@{ SemanticVersion = '7.7.0-preview.1'; InstallLocation = $script:withPwsh['7.7.0-preview.1'] }
+        }
+
+        $found = Find-RegisteredPowerShell7
+
+        $found.Version | Should -Be ([version]'7.6.7')
+        $found.InstallLocation | Should -Be $script:withPwsh['7.6.7']
+    }
+
+    It 'Ignores <Case>' -ForEach @(
+        @{ Case = 'an entry whose folder has no pwsh.exe'; Version = '7.6.7'; Folder = 'empty' }
+        @{ Case = 'a preview'; Version = '7.7.0-preview.1'; Folder = '7.7.0-preview.1' }
+        @{ Case = 'PowerShell 6'; Version = '6.2.7'; Folder = '6.2.7' }
+        @{ Case = 'an entry with no version'; Version = ''; Folder = '7.6.7' }
+        @{ Case = 'an entry with no folder'; Version = '7.6.7'; Folder = 'none' }
+    ) {
+        $location = switch ($Folder) {
+            'empty' { $script:empty }
+            'none' { '' }
+            default { $script:withPwsh[$Folder] }
+        }
+        $script:entry = [pscustomobject]@{ SemanticVersion = $Version; InstallLocation = $location }
+        Mock Get-DiagnosticsPowerShellInstall { $script:entry }
+
+        Find-RegisteredPowerShell7 | Should -BeNullOrEmpty
+    }
+
+    It 'Returns nothing when no PowerShell 7 is registered' {
+        Mock Get-DiagnosticsPowerShellInstall { }
+
+        Find-RegisteredPowerShell7 | Should -BeNullOrEmpty
+    }
+
+    It 'Returns nothing when the registry cannot be read, so the install goes ahead through winget' {
+        Mock Get-DiagnosticsPowerShellInstall { throw 'Access is denied' }
+
+        Find-RegisteredPowerShell7 | Should -BeNullOrEmpty
     }
 }
 

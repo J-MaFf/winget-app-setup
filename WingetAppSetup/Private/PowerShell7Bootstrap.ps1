@@ -871,15 +871,27 @@ function Invoke-PowerShell7Bootstrap {
             # call in line with the others.
             # --scope machine: the package lists a per-user MSIX first, which winget would pick and
             # which installs for this account only, where Find-PowerShell7 may not see it (wgt-gq8.76).
-            $wingetArguments = @('install', '--id', 'Microsoft.PowerShell', '--exact', '--source', 'winget', '--scope', 'machine') + (Get-WingetAgreementArgs)
+            $wingetTargetArguments = @('install', '--id', 'Microsoft.PowerShell', '--exact', '--source', 'winget', '--scope', 'machine')
+            $wingetOptionArguments = @(Get-WingetAgreementArgs)
             if (Test-EffectiveNonInteractive -NonInteractive:$NonInteractive) {
                 # Unattended: the MSI installs with /quiet instead of /passive.
-                $wingetArguments += '--silent'
+                $wingetOptionArguments += '--silent'
             }
+            # The MSI first, as Install-PowerShellLatest does, so this installs the version the
+            # catalog step finds in `winget list`. Without a type, winget's pick was refused on
+            # Windows Server (0x8A150113), and the MSI fallback then installed a release newer than
+            # winget's catalog (wgt-9j1).
+            $wingetInstallTimeout = Get-ProcessTimeoutSeconds -Operation WingetInstall
             # Invoke-WingetProcess (review findings P2-5, P2-6): time-limited, winget's output goes
             # into the bootstrap transcript, the MSI's log into the logs folder, and a winget that
             # cannot start is reported instead of thrown, so it degrades to the MSI fallback below.
-            $wingetRun = Invoke-WingetProcess -ArgumentList $wingetArguments -TimeoutSeconds (Get-ProcessTimeoutSeconds -Operation WingetInstall) -LogDirectory $LogDirectory
+            $wingetRun = Invoke-WingetProcess -ArgumentList ($wingetTargetArguments + @('--installer-type', 'wix') + $wingetOptionArguments) -TimeoutSeconds $wingetInstallTimeout -LogDirectory $LogDirectory
+            # 0x8A150010 (NO_APPLICABLE_INSTALLER) as a signed Int32: no MSI for the latest version
+            # (7.7 and later ship none), so winget's machine-wide installer instead.
+            if (-not $wingetRun.LaunchFailed -and -not $wingetRun.TimedOut -and $wingetRun.ExitCode -eq -1978335216) {
+                Write-Info 'winget has no MSI for the latest PowerShell 7; installing its machine-wide package instead...'
+                $wingetRun = Invoke-WingetProcess -ArgumentList ($wingetTargetArguments + $wingetOptionArguments) -TimeoutSeconds $wingetInstallTimeout -LogDirectory $LogDirectory
+            }
             if ($wingetRun.LaunchFailed) {
                 Write-WarningMessage "winget could not be started: $($wingetRun.LaunchError)"
             }

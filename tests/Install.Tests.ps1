@@ -2770,6 +2770,9 @@ Describe 'Install-AppWithVerification (shared install-and-verify pipeline, issue
 # run and failed its verification.
 Describe 'Install-AppWithVerification for the whole PC (-MachineWide; review findings P3-22, P3-24)' {
     BeforeEach {
+        # Every Windows runner has a PowerShell 7 its MSI registered, which would end
+        # Install-PowerShellLatest before any winget call (wgt-9j1).
+        Mock Find-RegisteredPowerShell7 { $null }
         Mock Write-Host { }
         Mock Write-Info { }
         Mock Install-WingetPackage { @{ ExitCode = 0; Attempts = 1; SessionErrorExhausted = $false; MachineScopeFellBack = $false; NoMachineScopeInstaller = $false } }
@@ -2877,6 +2880,9 @@ Describe 'Install-AppWithVerification for the whole PC (-MachineWide; review fin
 
 Describe 'Install-AppWithVerification when winget cannot be launched (review finding P2-9)' {
     BeforeEach {
+        # Every Windows runner has a PowerShell 7 its MSI registered, which would end
+        # Install-PowerShellLatest before any winget call (wgt-9j1).
+        Mock Find-RegisteredPowerShell7 { $null }
         Mock Write-Host { }
         Mock Write-WarningMessage { }
         Mock Write-Info { }
@@ -3097,6 +3103,9 @@ Describe 'PowerShell''s own installer in the install pipeline (review of finding
     # Install-AppWithVerification -> Install-PowerShellLatest -> Install-WingetPackage, with only the
     # winget process mocked: the path the catalog's Microsoft.PowerShell entry takes.
     BeforeEach {
+        # Every Windows runner has a PowerShell 7 its MSI registered, which would end
+        # Install-PowerShellLatest before any winget call (wgt-9j1).
+        Mock Find-RegisteredPowerShell7 { $null }
         Mock Write-Host { }
         Mock Write-Info { }
         Mock Write-Success { }
@@ -3125,6 +3134,30 @@ Describe 'PowerShell''s own installer in the install pipeline (review of finding
         $reason = Format-InstallFailureReason -FailureReason $result.FailureReason -InstallResult $result.InstallResult
         $reason | Should -Match 'winget install stopped after 30 minutes'
         $reason | Should -Match ([regex]::Escape("installer log: $($script:installerLog)"))
+    }
+
+    It 'Skips PowerShell, with no winget install, when its MSI registered a release winget does not list (wgt-9j1)' {
+        # The e2e 5.1 leg of 2026-10-14: the bootstrap's MSI fallback installed 7.6.7 from GitHub,
+        # winget's catalog still had 7.6.6, and its MSI failed over the newer one with 1603.
+        Mock Find-RegisteredPowerShell7 { @{ Version = [version]'7.6.7'; InstallLocation = 'C:\Program Files\PowerShell\7\' } }
+        Mock Invoke-WingetProcess { New-TestProcessResult -ExitCode -1978335159 -Output @('Installer failed with exit code: 1603') }
+
+        $result = Install-AppWithVerification -App @{ name = 'Microsoft.PowerShell'; install = 'Install-PowerShellLatest' } -Silent
+
+        $result.Status | Should -Be 'Skipped'
+        $result.FailureReason | Should -BeNullOrEmpty
+        $result.InstallResult | Should -BeNullOrEmpty
+        Should -Invoke Invoke-WingetProcess -Times 0 -Exactly
+        Should -Invoke Write-Info -Times 1 -Exactly -ParameterFilter { $Message -match '^PowerShell 7\.6\.7 is already installed for every user' }
+    }
+
+    It 'Still installs through winget when no PowerShell 7 is registered for the whole PC' {
+        Mock Invoke-WingetProcess { New-TestProcessResult -ExitCode -1978335159 -Output @('Installer failed with exit code: 1603') }
+
+        $result = Install-AppWithVerification -App @{ name = 'Microsoft.PowerShell'; install = 'Install-PowerShellLatest' } -Silent
+
+        $result.Status | Should -Be 'Failed'
+        Should -Invoke Invoke-WingetProcess -ParameterFilter { $ArgumentList[0] -eq 'install' -and $ArgumentList -contains 'wix' }
     }
 }
 
@@ -4063,6 +4096,9 @@ Describe 'The early-exit notice, the issue form and the readme agree on what an 
 # only the winget process and the setup steps around the installs are mocked.
 Describe 'Wedged winget: the run fails fast (review findings P2-8, P2-9, P2-10)' {
     BeforeEach {
+        # Every Windows runner has a PowerShell 7 its MSI registered, which would end
+        # Install-PowerShellLatest before any winget call (wgt-9j1).
+        Mock Find-RegisteredPowerShell7 { $null }
         Mock Write-Host { }
         Mock Test-IsAdmin { $true }
         Mock Test-IsRunningLocally { $true }
@@ -4820,6 +4856,9 @@ Describe 'WhatIf Mode - Unit Tests' {
 # and the provisioning check are mocked.
 Describe 'Install-AppWithVerification: declarative catalog fields (work-order item 38)' {
     BeforeEach {
+        # Every Windows runner has a PowerShell 7 its MSI registered, which would end
+        # Install-PowerShellLatest before any winget call (wgt-9j1).
+        Mock Find-RegisteredPowerShell7 { $null }
         Mock Write-Host { }
         $script:infoMessages = @()
         Mock Write-Info { $script:infoMessages += $Message }

@@ -1044,6 +1044,50 @@ Describe 'Invoke-PowerShell7Bootstrap' {
             }
         }
 
+        It 'Asks winget for the MSI, the installer the catalog step uses, before anything else (wgt-9j1)' {
+            # Without a type, winget's pick was refused on Windows Server (0x8A150113), and the MSI
+            # fallback then installed a release newer than winget's catalog.
+            Invoke-PowerShell7Bootstrap -CommandPath 'C:\repo\winget-app-install.ps1' | Out-Null
+
+            Should -Invoke Invoke-WingetProcess -Times 1 -Exactly -ParameterFilter {
+                $typeAt = [array]::IndexOf([string[]]$ArgumentList, '--installer-type')
+                $typeAt -ge 0 -and $ArgumentList[$typeAt + 1] -eq 'wix'
+            }
+        }
+
+        It 'Asks for winget''s machine-wide package when it has no MSI for the latest PowerShell (0x8A150010)' {
+            $script:wingetCalls = 0
+            Mock Invoke-WingetProcess {
+                $script:wingetCalls++
+                if ($script:wingetCalls -eq 1) {
+                    return (New-TestProcessResult -ExitCode -1978335216)
+                }
+                New-TestProcessResult -ExitCode 0
+            }
+
+            Invoke-PowerShell7Bootstrap -CommandPath 'C:\repo\winget-app-install.ps1' | Should -Be 0
+
+            Should -Invoke Invoke-WingetProcess -Times 2 -Exactly
+            Should -Invoke Invoke-WingetProcess -Times 1 -Exactly -ParameterFilter {
+                $scopeAt = [array]::IndexOf([string[]]$ArgumentList, '--scope')
+                $ArgumentList -notcontains '--installer-type' -and $scopeAt -ge 0 -and $ArgumentList[$scopeAt + 1] -eq 'machine' -and
+                $ArgumentList -contains '--disable-interactivity' -and $ArgumentList -contains '--silent'
+            }
+            Should -Invoke Write-Info -Times 1 -Exactly -ParameterFilter { $Message -eq 'winget has no MSI for the latest PowerShell 7; installing its machine-wide package instead...' }
+            Should -Invoke Install-PowerShell7FromMsi -Times 0
+        }
+
+        It 'Goes to the MSI download when winget refuses its MSI for another reason, without a second winget install' {
+            Mock Invoke-WingetProcess { New-TestProcessResult -ExitCode -1978334957 }
+            Mock Find-PowerShell7 { $null }
+
+            Invoke-PowerShell7Bootstrap -CommandPath 'C:\repo\winget-app-install.ps1' | Out-Null
+
+            Should -Invoke Invoke-WingetProcess -Times 1 -Exactly
+            Should -Invoke Write-WarningMessage -Times 1 -Exactly -ParameterFilter { $Message -eq 'winget could not install PowerShell 7 (exit code 0x8A150113 INSTALL_SYSTEM_NOT_SUPPORTED).' }
+            Should -Invoke Install-PowerShell7FromMsi -Times 1 -Exactly
+        }
+
         It 'Passes --disable-interactivity and never prompts' {
             Invoke-PowerShell7Bootstrap -CommandPath 'C:\repo\winget-app-install.ps1' | Out-Null
 
