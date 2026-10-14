@@ -2919,6 +2919,7 @@ function Format-InstallFailureReason {
         'VerifyNotFound' { 'package not found after install' }
         'CustomInstallFailed' { 'installer reported failure' }
         'WingetNotLaunchable' { 'not attempted: winget cannot be launched on this machine (see above)' }
+        'WingetSourceUnusable' { 'not attempted: winget can no longer open its source (see above)' }
         'MachineCheckFailed' { 'could not check whether it is provisioned for every user on this PC (see the warning above)' }
         'NoMachineScopeInstaller' { "no machine-scope installer applies to this PC, and its catalog entry allows only a machine-wide install (scope 'machine')" }
         'NoUserScopeInstaller' { 'winget found no per-user installer for it that applies to this PC (0x8A150010 NO_APPLICABLE_INSTALLER with --scope user)' }
@@ -3495,6 +3496,9 @@ function Install-AppWithVerification {
         [switch]$WingetNotLaunchable,
 
         [Parameter(Mandatory = $false)]
+        [switch]$WingetSourceUnusable,
+
+        [Parameter(Mandatory = $false)]
         [switch]$MachineWide,
 
         [Parameter(Mandatory = $false)]
@@ -3539,6 +3543,9 @@ function Install-AppWithVerification {
 
     if ($WingetNotLaunchable) {
         return @{ Status = 'Failed'; InstallResult = $null; FailureReason = 'WingetNotLaunchable'; LaunchError = $null }
+    }
+    if ($WingetSourceUnusable) {
+        return @{ Status = 'Failed'; InstallResult = $null; FailureReason = 'WingetSourceUnusable'; LaunchError = $null }
     }
 
     $checkTimeoutSeconds = Get-ProcessTimeoutSeconds -Operation WingetListCheck
@@ -3730,6 +3737,53 @@ function Invoke-WingetLaunchCircuitBreaker {
 
     Write-ErrorMessage "winget cannot be launched on this machine ($($probe.Reason)). The remaining apps are marked failed without an install attempt and are not retried. Restart the machine and re-run the installer; if it persists, attach this transcript to a GitHub issue."
     return $true
+}
+
+function Invoke-WingetSourceCircuitBreaker {
+    param (
+        [Parameter(Mandatory = $true)]
+        [hashtable]$Outcome
+    )
+
+    if ($Outcome.Status -ne 'Failed' -or (Test-WingetClientEngineActive)) {
+        return $null
+    }
+    $installExitCode = $null
+    if ($Outcome.InstallResult) {
+        $installExitCode = $Outcome.InstallResult.ExitCode
+    }
+    $failedOn = $null
+    foreach ($code in @($Outcome.CheckExitCode, $installExitCode)) {
+        $info = Get-WingetExitCodeInfo -ExitCode $code
+        if ($info -and $info.Class -eq 'SourceBroken') {
+            $failedOn = $info
+            break
+        }
+    }
+    if (-not $failedOn) {
+        return $null
+    }
+
+    Write-WarningMessage "winget could not open its source for that app ($($failedOn.Hex) $($failedOn.Name)). Checking whether the winget source still opens..."
+    $open = Test-WingetSourceOpen
+    if ($open.Opened -eq $true) {
+        Write-Info 'The winget source opens; carrying on with the next app.'
+        return 'ok'
+    }
+    $openInfo = Get-WingetExitCodeInfo -ExitCode $open.ExitCode
+    if ($open.Opened -eq $false -and $openInfo -and $openInfo.Class -eq 'SourceBroken') {
+        Write-ErrorMessage ("The winget source can no longer be opened: 'winget search --source winget' answered {0}. The remaining apps are marked failed without an install attempt and are not retried. Re-run the installer: it checks the winget source, and repairs it where it can, before it installs anything." -f (Format-WingetExitCode -ExitCode $open.ExitCode))
+        return 'unusable'
+    }
+    $detail = 'it did not finish in time and was stopped'
+    if ($open.LaunchError) {
+        $detail = "winget could not be started: $($open.LaunchError)"
+    }
+    elseif (-not $open.TimedOut) {
+        $detail = 'exit {0}' -f (Format-WingetExitCode -ExitCode $open.ExitCode)
+    }
+    Write-WarningMessage "The winget source check gave no clear answer ($detail); carrying on with the next app."
+    return 'unknown'
 }
 
 # --- Interactivity ---
@@ -6164,6 +6218,12 @@ function New-InstallerRunRecord {
         [Nullable[bool]]$WingetUsable = $null,
 
         [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [AllowEmptyString()]
+        [ValidateSet('ok', 'unusable', 'unknown', '')]
+        [string]$WingetSource,
+
+        [Parameter(Mandatory = $false)]
         [switch]$SummaryReached,
 
         [Parameter(Mandatory = $false)]
@@ -6192,6 +6252,11 @@ function New-InstallerRunRecord {
         $transcriptPath = [string]$script:InstallLogPath
     }
 
+    $wingetSourceText = $null
+    if (-not [string]::IsNullOrWhiteSpace($WingetSource)) {
+        $wingetSourceText = $WingetSource
+    }
+
     return [ordered]@{
         schemaVersion   = 1
         buildId         = $buildId
@@ -6213,6 +6278,7 @@ function New-InstallerRunRecord {
         }
         restartRequired = $RestartRequired
         wingetUsable    = $WingetUsable
+        wingetSource    = $wingetSourceText
         installEngine   = $InstallEngine
         transcriptPath  = $transcriptPath
     }
@@ -6348,7 +6414,7 @@ function Write-InstallerEarlyExitResult {
         $autoUpdateVersion = $autoUpdateResult.Version
     }
     $restartRequired = @($apps | Where-Object { $_.restartRequired }).Count -gt 0
-    $record = New-InstallerRunRecord -ExitCode $ExitCode -Apps $apps -AutoUpdates (Get-AutoUpdateResultStatus -WauResult $autoUpdateResult) -AutoUpdatesVersion $autoUpdateVersion -RestartRequired $restartRequired
+    $record = New-InstallerRunRecord -ExitCode $ExitCode -Apps $apps -AutoUpdates (Get-AutoUpdateResultStatus -WauResult $autoUpdateResult) -AutoUpdatesVersion $autoUpdateVersion -RestartRequired $restartRequired -WingetSource $script:InstallerWingetSource
     return (Write-InstallerRunResult -Record $record)
 }
 
@@ -7623,23 +7689,33 @@ function Complete-UserPhaseAppConfiguration {
 
 function Update-UserPhaseWingetSource {
     Write-Info 'Updating the winget source for this account (this may take a moment)...'
-    $source = Invoke-WingetSourceProbe
+    $source = Invoke-WingetSourceCheck
     if ($source.Succeeded) {
-        Write-Success 'The winget source is up to date for this account.'
-        return
+        Write-Success 'The winget source opens for this account.'
+        return @{ Usable = $true; ExitCode = $null }
     }
     if ($source.ExitCode -eq -1978335162) {
         Write-Info 'The winget source agreements are not accepted for this account yet (0x8A150046); each install accepts them.'
-        return
+        return @{ Usable = $true; ExitCode = $null }
     }
-    $detail = 'it did not finish in time and was stopped'
+    $sourceCommand = "'winget search --source winget'"
+    if ($source.Step -eq 'update') {
+        $sourceCommand = "'winget source update'"
+    }
+    $codeInfo = Get-WingetExitCodeInfo -ExitCode $source.ExitCode
+    if ($codeInfo -and $codeInfo.Class -eq 'SourceBroken') {
+        Write-ErrorMessage ('The winget source cannot be opened for this account: {0} answered {1}, so no install can work. Nothing is installed now; the next sign-in tries again.' -f $sourceCommand, (Format-WingetExitCode -ExitCode $source.ExitCode))
+        return @{ Usable = $false; ExitCode = [int]$source.ExitCode }
+    }
+    $detail = "$sourceCommand did not finish in time and was stopped"
     if ($source.LaunchError) {
         $detail = "winget could not be started: $($source.LaunchError)"
     }
     elseif (-not $source.TimedOut) {
-        $detail = 'exit code {0}' -f (Format-WingetExitCode -ExitCode $source.ExitCode)
+        $detail = '{0} exited with {1}' -f $sourceCommand, (Format-WingetExitCode -ExitCode $source.ExitCode)
     }
-    Write-WarningMessage "The winget source could not be updated for this account ($detail). The installs may fail; a later sign-in tries again."
+    Write-WarningMessage "The winget source could not be set up for this account ($detail). The installs may fail; a later sign-in tries again."
+    return @{ Usable = $true; ExitCode = $source.ExitCode }
 }
 
 function Get-UserPhaseElapsedSeconds {
@@ -11441,6 +11517,14 @@ function Invoke-WingetInstall {
         $winget = Initialize-Winget -WhatIf:$WhatIf -AccountContext $account @engineParameters
     }
     $wingetAvailable = [bool]$winget.Ready
+    $wingetSource = 'unknown'
+    if ($winget.Diagnosis -eq 'SourceUnusable') {
+        $wingetSource = 'unusable'
+    }
+    elseif ($winget.Diagnosis -eq 'Ok' -and -not (Test-WingetClientEngineActive)) {
+        $wingetSource = 'ok'
+    }
+    $script:InstallerWingetSource = $wingetSource
     if (-not $wingetAvailable -and -not $WhatIf) {
         if ($winget.Diagnosis -eq 'SourceUnusable') {
             Write-ErrorMessage 'Nothing was installed and Winget-AutoUpdate was not set up: winget cannot open its source for this account (see above). Exiting.'
@@ -11502,6 +11586,7 @@ function Invoke-WingetInstall {
     $notAttemptedApps = @()
 
     $wingetNotLaunchable = $false
+    $wingetSourceUnusable = $false
 
     $installerBusyWaitSecondsLeft = 600
 
@@ -11522,7 +11607,7 @@ function Invoke-WingetInstall {
             Write-WarningMessage "Time budget: $runBudgetReason, so no further app install starts. The apps left are reported as not attempted; run the installer again to install them."
         }
         try {
-            $outcome = Install-AppWithVerification -App $app -Applicable $applicableByName[$app.name] -Silent:$effectiveNonInteractive -WhatIf:$WhatIf -WingetNotLaunchable:$wingetNotLaunchable -MachineWide:$machineWide -TimeBudgetSpent:$runBudgetSpent -InstallInProgressWaitSeconds (Get-InstallerRunBudgetWaitSeconds -Budget $runBudget -Seconds $installerBusyWaitSecondsLeft)
+            $outcome = Install-AppWithVerification -App $app -Applicable $applicableByName[$app.name] -Silent:$effectiveNonInteractive -WhatIf:$WhatIf -WingetNotLaunchable:$wingetNotLaunchable -WingetSourceUnusable:$wingetSourceUnusable -MachineWide:$machineWide -TimeBudgetSpent:$runBudgetSpent -InstallInProgressWaitSeconds (Get-InstallerRunBudgetWaitSeconds -Budget $runBudget -Seconds $installerBusyWaitSecondsLeft)
             if ($outcome.InstallResult -and $outcome.InstallResult.InstallInProgressWaitedSeconds) {
                 $installerBusyWaitSecondsLeft = [Math]::Max(0, $installerBusyWaitSecondsLeft - [int]$outcome.InstallResult.InstallInProgressWaitedSeconds)
             }
@@ -11618,6 +11703,14 @@ function Invoke-WingetInstall {
         if (-not $WhatIf -and -not $wingetNotLaunchable -and $outcome -and (Invoke-WingetLaunchCircuitBreaker -Outcome $outcome)) {
             $wingetNotLaunchable = $true
         }
+        if (-not $WhatIf -and -not $wingetNotLaunchable -and -not $wingetSourceUnusable -and $outcome) {
+            $sourceCheck = Invoke-WingetSourceCircuitBreaker -Outcome $outcome
+            if ($sourceCheck) {
+                $wingetSource = $sourceCheck
+                $script:InstallerWingetSource = $sourceCheck
+                $wingetSourceUnusable = $sourceCheck -eq 'unusable'
+            }
+        }
     }
 
     try {
@@ -11634,6 +11727,9 @@ function Invoke-WingetInstall {
                 $notLaunchable = 'the WinGet client engine cannot be started on this machine'
             }
             Write-WarningMessage "Skipping the retry pass: $notLaunchable (see above); retrying would not help."
+        }
+        elseif ($wingetSourceUnusable) {
+            Write-WarningMessage 'Skipping the retry pass: winget can no longer open its source (see above); retrying would not help.'
         }
         elseif (-not $WhatIf) {
             Write-Host ''
@@ -11668,7 +11764,7 @@ function Invoke-WingetInstall {
                     Write-Info "Retrying: $appName"
                     $appDef = $apps | Where-Object { $_.name -eq $appName } | Select-Object -First 1
 
-                    $outcome = Install-AppWithVerification -App $appDef -Applicable $applicableByName[$appName] -Silent:$effectiveNonInteractive -WingetNotLaunchable:$wingetNotLaunchable -MachineWide:$machineWide -InstallInProgressWaitSeconds (Get-InstallerRunBudgetWaitSeconds -Budget $runBudget -Seconds $installerBusyWaitSecondsLeft)
+                    $outcome = Install-AppWithVerification -App $appDef -Applicable $applicableByName[$appName] -Silent:$effectiveNonInteractive -WingetNotLaunchable:$wingetNotLaunchable -WingetSourceUnusable:$wingetSourceUnusable -MachineWide:$machineWide -InstallInProgressWaitSeconds (Get-InstallerRunBudgetWaitSeconds -Budget $runBudget -Seconds $installerBusyWaitSecondsLeft)
                     if ($outcome.InstallResult -and $outcome.InstallResult.InstallInProgressWaitedSeconds) {
                         $installerBusyWaitSecondsLeft = [Math]::Max(0, $installerBusyWaitSecondsLeft - [int]$outcome.InstallResult.InstallInProgressWaitedSeconds)
                     }
@@ -11743,6 +11839,14 @@ function Invoke-WingetInstall {
 
                 if (-not $wingetNotLaunchable -and $outcome -and (Invoke-WingetLaunchCircuitBreaker -Outcome $outcome)) {
                     $wingetNotLaunchable = $true
+                }
+                if (-not $wingetNotLaunchable -and -not $wingetSourceUnusable -and $outcome) {
+                    $sourceCheck = Invoke-WingetSourceCircuitBreaker -Outcome $outcome
+                    if ($sourceCheck) {
+                        $wingetSource = $sourceCheck
+                        $script:InstallerWingetSource = $sourceCheck
+                        $wingetSourceUnusable = $sourceCheck -eq 'unusable'
+                    }
                 }
             }
         }
@@ -11950,7 +12054,7 @@ function Invoke-WingetInstall {
 
     if (-not $WhatIf) {
         try {
-            $runRecord = New-InstallerRunRecord -ExitCode $exitCode -Apps @($appRecords.Values) -AutoUpdates (Get-AutoUpdateResultStatus -WauResult $wauResult) -AutoUpdatesVersion $wauResult.Version -RestartRequired $restartRequired -WingetUsable $wingetUsableForRecord -InstallEngine $installEngineRecord -SummaryReached
+            $runRecord = New-InstallerRunRecord -ExitCode $exitCode -Apps @($appRecords.Values) -AutoUpdates (Get-AutoUpdateResultStatus -WauResult $wauResult) -AutoUpdatesVersion $wauResult.Version -RestartRequired $restartRequired -WingetUsable $wingetUsableForRecord -WingetSource $wingetSource -InstallEngine $installEngineRecord -SummaryReached
             [void](Write-InstallerRunResult -Record $runRecord)
         }
         catch {
@@ -12426,6 +12530,7 @@ function Invoke-WingetUserPhase {
         }
         else {
             Write-Info ('Apps the run for the whole PC left for each account (installed per-user, with --scope user): {0}' -f ($deferredApps -join ', '))
+            $source = $null
             $probe = Test-WingetLaunchable -Attempts 4 -RetryDelaySeconds 15
             if (-not $probe.Launchable) {
                 $wingetUsable = $false
@@ -12436,7 +12541,16 @@ function Invoke-WingetUserPhase {
                 }
             }
             else {
-                Update-UserPhaseWingetSource
+                $source = Update-UserPhaseWingetSource
+            }
+            if ($wingetUsable -and $source.Usable -eq $false) {
+                $wingetUsable = $false
+                $reason = 'the winget source cannot be opened for this account ({0})' -f (Format-WingetExitCode -ExitCode $source.ExitCode)
+                foreach ($id in $deferredApps) {
+                    $appRecords[$id] = New-AppRunRecord -Id $id -Status 'NotAttempted' -Reason $reason -InstallResult @{ ExitCode = $source.ExitCode }
+                }
+            }
+            elseif ($wingetUsable) {
                 $catalogEntries = Get-UserPhaseCatalogEntry
                 foreach ($id in $deferredApps) {
                     $remainingSeconds = $budgetSeconds - (Get-UserPhaseElapsedSeconds -Stopwatch $stopwatch)

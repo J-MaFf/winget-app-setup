@@ -14,9 +14,11 @@
       2. It starts a transcript in %LOCALAPPDATA%\winget-app-setup\logs, keeping the newest 10.
       3. For the deferred apps: it checks that winget starts for this account (four checks 15
          seconds apart, since App Installer registers shortly after a first sign-in), updates the
-         winget source (Update-UserPhaseWingetSource; a first use also registers it), and installs
-         each app with --scope user (Install-UserPhaseApp) while the time budget lasts; an app the
-         budget does not cover is NotAttempted. The catalog entry, when there is one, gives the
+         winget source and checks that it opens (Update-UserPhaseWingetSource; a first use also
+         registers it), and installs each app with --scope user (Install-UserPhaseApp) while the
+         time budget lasts; an app the budget does not cover is NotAttempted. A source that cannot
+         be opened (0x8A15000F and the other SourceBroken codes) makes every app NotAttempted with
+         that code, and the user phase exits 2 (wgt-gq8.67). The catalog entry, when there is one, gives the
          installerType and a postInstall hook, which runs here once the app is there: a failed hook
          fails the app, and NotConfigured leaves it to a later sign-in.
       4. It sets the Windows Terminal defaults (Set-WindowsTerminalDefaults -PassThru); anything but
@@ -38,7 +40,7 @@
 .OUTPUTS
     [int] 0 = done, or nothing to do; 1 = a deferred app failed to install, its post-install hook
     failed, or it was not attempted in the time budget; 2 = winget cannot be started for this
-    account (nothing was installed); 3010 = done, but an install needs a restart to finish; 5 = an
+    account, or cannot open its source (nothing was installed); 3010 = done, but an install needs a restart to finish; 5 = an
     unexpected error (in the transcript). A later sign-in tries again after 1, 2 or 5 while
     attempts are left.
 #>
@@ -127,6 +129,7 @@ function Invoke-WingetUserPhase {
         }
         else {
             Write-Info ('Apps the run for the whole PC left for each account (installed per-user, with --scope user): {0}' -f ($deferredApps -join ', '))
+            $source = $null
             $probe = Test-WingetLaunchable -Attempts 4 -RetryDelaySeconds 15
             if (-not $probe.Launchable) {
                 $wingetUsable = $false
@@ -137,7 +140,17 @@ function Invoke-WingetUserPhase {
                 }
             }
             else {
-                Update-UserPhaseWingetSource
+                $source = Update-UserPhaseWingetSource
+            }
+            if ($wingetUsable -and $source.Usable -eq $false) {
+                # Every install opens the source, so each would fail the same way.
+                $wingetUsable = $false
+                $reason = 'the winget source cannot be opened for this account ({0})' -f (Format-WingetExitCode -ExitCode $source.ExitCode)
+                foreach ($id in $deferredApps) {
+                    $appRecords[$id] = New-AppRunRecord -Id $id -Status 'NotAttempted' -Reason $reason -InstallResult @{ ExitCode = $source.ExitCode }
+                }
+            }
+            elseif ($wingetUsable) {
                 # What the record cannot carry: a userPhase entry's post-install hook and the entry's
                 # installer type.
                 $catalogEntries = Get-UserPhaseCatalogEntry

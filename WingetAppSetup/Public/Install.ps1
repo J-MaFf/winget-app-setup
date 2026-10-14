@@ -32,9 +32,10 @@
     path here can be tested.
 .NOTES
     Exit codes: 0 = success; 1 = an app failed (including those failed once winget could no longer
-    start mid-run, and a failed post-install hook); 2 = winget unavailable (at the start, including
-    Group Policy turning it off and, as SYSTEM, no machine-wide winget.exe that starts; or no longer
-    launchable at the end), or winget cannot open its source for the account even after the repair
+    start, or open its source, mid-run, and a failed post-install hook); 2 = winget unavailable (at
+    the start, including Group Policy turning it off and, as SYSTEM, no machine-wide winget.exe that
+    starts; or no longer launchable at the end), or winget cannot open its source for the account
+    even after the repair
     (SourceUnusable: nothing installed, Winget-AutoUpdate not set up); 3 = the catalog failed validation or no valid apps remain; 4 =
     administrator rights are required and the run was not elevated (the prompt was declined or could
     not be shown, a non-interactive run, an execution policy that would refuse the elevated script,
@@ -270,6 +271,16 @@ function Invoke-WingetInstall {
         $winget = Initialize-Winget -WhatIf:$WhatIf -AccountContext $account @engineParameters
     }
     $wingetAvailable = [bool]$winget.Ready
+    # For last-run.json (wgt-gq8.66): whether winget opened its source. The WinGet client engine
+    # skips the source check, so it is not known then.
+    $wingetSource = 'unknown'
+    if ($winget.Diagnosis -eq 'SourceUnusable') {
+        $wingetSource = 'unusable'
+    }
+    elseif ($winget.Diagnosis -eq 'Ok' -and -not (Test-WingetClientEngineActive)) {
+        $wingetSource = 'ok'
+    }
+    $script:InstallerWingetSource = $wingetSource
     if (-not $wingetAvailable -and -not $WhatIf) {
         if ($winget.Diagnosis -eq 'SourceUnusable') {
             # Before any app or Winget-AutoUpdate work: every install would fail the same way.
@@ -350,9 +361,11 @@ function Invoke-WingetInstall {
     # forces --source winget), and Initialize-Winget above already updated it, checked that it
     # opens, and repaired it if needed (issues #172, #177).
 
-    # Run-level circuit breaker (P2-8, P2-10): once winget cannot be started, every remaining app
-    # fails at once with one reason and the retry pass is skipped.
+    # Run-level circuit breakers (P2-8, P2-10; wgt-gq8.66): once winget cannot be started, or can no
+    # longer open its source, every remaining app fails at once with one reason and the retry pass is
+    # skipped.
     $wingetNotLaunchable = $false
+    $wingetSourceUnusable = $false
 
     # Run-level budget for waiting on a busy Windows Installer (0x8A150102, msiexec 1618; P2-15):
     # every wait, the Winget-AutoUpdate msiexec's included, comes out of these 10 minutes, and none
@@ -386,7 +399,7 @@ function Invoke-WingetInstall {
             # Shared per-app pipeline — pre-check, dispatch, post-verify (issue #188). Messages,
             # summary bucketing, and exit-code policy stay here in the orchestrator.
             # -Silent: an unattended run installs MSI packages with /quiet, not /passive.
-            $outcome = Install-AppWithVerification -App $app -Applicable $applicableByName[$app.name] -Silent:$effectiveNonInteractive -WhatIf:$WhatIf -WingetNotLaunchable:$wingetNotLaunchable -MachineWide:$machineWide -TimeBudgetSpent:$runBudgetSpent -InstallInProgressWaitSeconds (Get-InstallerRunBudgetWaitSeconds -Budget $runBudget -Seconds $installerBusyWaitSecondsLeft)
+            $outcome = Install-AppWithVerification -App $app -Applicable $applicableByName[$app.name] -Silent:$effectiveNonInteractive -WhatIf:$WhatIf -WingetNotLaunchable:$wingetNotLaunchable -WingetSourceUnusable:$wingetSourceUnusable -MachineWide:$machineWide -TimeBudgetSpent:$runBudgetSpent -InstallInProgressWaitSeconds (Get-InstallerRunBudgetWaitSeconds -Budget $runBudget -Seconds $installerBusyWaitSecondsLeft)
             if ($outcome.InstallResult -and $outcome.InstallResult.InstallInProgressWaitedSeconds) {
                 $installerBusyWaitSecondsLeft = [Math]::Max(0, $installerBusyWaitSecondsLeft - [int]$outcome.InstallResult.InstallInProgressWaitedSeconds)
             }
@@ -502,6 +515,14 @@ function Invoke-WingetInstall {
         if (-not $WhatIf -and -not $wingetNotLaunchable -and $outcome -and (Invoke-WingetLaunchCircuitBreaker -Outcome $outcome)) {
             $wingetNotLaunchable = $true
         }
+        if (-not $WhatIf -and -not $wingetNotLaunchable -and -not $wingetSourceUnusable -and $outcome) {
+            $sourceCheck = Invoke-WingetSourceCircuitBreaker -Outcome $outcome
+            if ($sourceCheck) {
+                $wingetSource = $sourceCheck
+                $script:InstallerWingetSource = $sourceCheck
+                $wingetSourceUnusable = $sourceCheck -eq 'unusable'
+            }
+        }
     }
 
     # Ongoing app updates are handled by Winget-AutoUpdate (set up below), which runs as SYSTEM on a
@@ -527,6 +548,9 @@ function Invoke-WingetInstall {
                 $notLaunchable = 'the WinGet client engine cannot be started on this machine'
             }
             Write-WarningMessage "Skipping the retry pass: $notLaunchable (see above); retrying would not help."
+        }
+        elseif ($wingetSourceUnusable) {
+            Write-WarningMessage 'Skipping the retry pass: winget can no longer open its source (see above); retrying would not help.'
         }
         elseif (-not $WhatIf) {
             Write-Host ''
@@ -568,7 +592,7 @@ function Invoke-WingetInstall {
 
                     # The same pipeline as the first pass, with what is left of the wait budget,
                     # the circuit breaker, and the run's applicability verdict.
-                    $outcome = Install-AppWithVerification -App $appDef -Applicable $applicableByName[$appName] -Silent:$effectiveNonInteractive -WingetNotLaunchable:$wingetNotLaunchable -MachineWide:$machineWide -InstallInProgressWaitSeconds (Get-InstallerRunBudgetWaitSeconds -Budget $runBudget -Seconds $installerBusyWaitSecondsLeft)
+                    $outcome = Install-AppWithVerification -App $appDef -Applicable $applicableByName[$appName] -Silent:$effectiveNonInteractive -WingetNotLaunchable:$wingetNotLaunchable -WingetSourceUnusable:$wingetSourceUnusable -MachineWide:$machineWide -InstallInProgressWaitSeconds (Get-InstallerRunBudgetWaitSeconds -Budget $runBudget -Seconds $installerBusyWaitSecondsLeft)
                     if ($outcome.InstallResult -and $outcome.InstallResult.InstallInProgressWaitedSeconds) {
                         $installerBusyWaitSecondsLeft = [Math]::Max(0, $installerBusyWaitSecondsLeft - [int]$outcome.InstallResult.InstallInProgressWaitedSeconds)
                     }
@@ -656,6 +680,14 @@ function Invoke-WingetInstall {
 
                 if (-not $wingetNotLaunchable -and $outcome -and (Invoke-WingetLaunchCircuitBreaker -Outcome $outcome)) {
                     $wingetNotLaunchable = $true
+                }
+                if (-not $wingetNotLaunchable -and -not $wingetSourceUnusable -and $outcome) {
+                    $sourceCheck = Invoke-WingetSourceCircuitBreaker -Outcome $outcome
+                    if ($sourceCheck) {
+                        $wingetSource = $sourceCheck
+                        $script:InstallerWingetSource = $sourceCheck
+                        $wingetSourceUnusable = $sourceCheck -eq 'unusable'
+                    }
                 }
             }
         }
@@ -914,7 +946,7 @@ function Invoke-WingetInstall {
     # A dry run changes nothing and reports neither.
     if (-not $WhatIf) {
         try {
-            $runRecord = New-InstallerRunRecord -ExitCode $exitCode -Apps @($appRecords.Values) -AutoUpdates (Get-AutoUpdateResultStatus -WauResult $wauResult) -AutoUpdatesVersion $wauResult.Version -RestartRequired $restartRequired -WingetUsable $wingetUsableForRecord -InstallEngine $installEngineRecord -SummaryReached
+            $runRecord = New-InstallerRunRecord -ExitCode $exitCode -Apps @($appRecords.Values) -AutoUpdates (Get-AutoUpdateResultStatus -WauResult $wauResult) -AutoUpdatesVersion $wauResult.Version -RestartRequired $restartRequired -WingetUsable $wingetUsableForRecord -WingetSource $wingetSource -InstallEngine $installEngineRecord -SummaryReached
             [void](Write-InstallerRunResult -Record $runRecord)
         }
         catch {

@@ -141,6 +141,7 @@
   },
   "restartRequired": false,
   "wingetUsable": true,
+  "wingetSource": "ok",
   "installEngine": {
     "requested": "Cli",
     "used": "Cli",

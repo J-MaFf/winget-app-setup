@@ -267,31 +267,52 @@ Describe 'Update-UserPhaseWingetSource' {
         Mock Write-Info { $script:output += "INFO: $Message" }
         Mock Write-Success { $script:output += "OK: $Message" }
         Mock Write-WarningMessage { $script:output += "WARN: $Message" }
+        Mock Write-ErrorMessage { $script:output += "ERROR: $Message" }
+        Mock Write-ProcessOutput { }
     }
 
-    It 'Updates only the winget source, without the agreements flag source update rejects, within its time limit' {
+    It 'Updates only the winget source, without the agreements flag source update rejects, then opens it, each within its time limit' {
         Mock Invoke-WingetProcess { New-TestProcessResult -ExitCode 0 }
 
-        Update-UserPhaseWingetSource
+        $result = Update-UserPhaseWingetSource
 
+        $result.Usable | Should -BeTrue
         Should -Invoke Invoke-WingetProcess -Times 1 -Exactly -ParameterFilter {
             ($ArgumentList -join ' ') -eq 'source update --name winget --disable-interactivity' -and $TimeoutSeconds -eq 120
         }
-        $script:output | Should -Contain 'OK: The winget source is up to date for this account.'
+        Should -Invoke Invoke-WingetProcess -Times 1 -Exactly -ParameterFilter {
+            ($ArgumentList -join ' ') -eq ((Get-WingetSourceOpenArgument) -join ' ') -and $TimeoutSeconds -eq (Get-ProcessTimeoutSeconds -Operation WingetSourceOpen)
+        }
+        Should -Invoke Invoke-WingetProcess -Times 2 -Exactly
+        $script:output | Should -Contain 'OK: The winget source opens for this account.'
     }
 
-    It 'Says why the source could not be updated (<Case>), and never resets it' -ForEach @(
-        @{ Case = 'an exit code'; Result = @{ ExitCode = -1978335221 }; Expected = 'WARN: The winget source could not be updated for this account (exit code 0x8A15000B*). The installs may fail; a later sign-in tries again.' }
-        @{ Case = 'winget could not start'; Result = @{ LaunchFailed = $true; LaunchError = 'Access is denied.' }; Expected = 'WARN: The winget source could not be updated for this account (winget could not be started: Access is denied.). The installs may fail; a later sign-in tries again.' }
+    # wgt-gq8.67: the update prints 'Cancelled' and exits 0 when it fails.
+    It 'Reports the source unusable, with the code, when it cannot be opened after an update that exited 0, and never resets it' {
+        Mock Invoke-WingetProcess { New-TestProcessResult -ExitCode 0 -Output @('Cancelled') } -ParameterFilter { $ArgumentList[0] -eq 'source' -and $ArgumentList[1] -eq 'update' }
+        Mock Invoke-WingetProcess { New-TestProcessResult -ExitCode -1978335217 } -ParameterFilter { $ArgumentList[0] -eq 'search' }
+        Mock Invoke-WingetProcess { throw "unexpected winget call: $($ArgumentList -join ' ')" }
+
+        $result = Update-UserPhaseWingetSource
+
+        $result.Usable | Should -BeFalse
+        $result.ExitCode | Should -Be -1978335217
+        Should -Invoke Invoke-WingetProcess -Times 2 -Exactly
+        Should -Invoke Invoke-WingetProcess -Times 0 -Exactly -ParameterFilter { $ArgumentList -contains 'reset' }
+        $script:output | Should -Contain "ERROR: The winget source cannot be opened for this account: 'winget search --source winget' answered 0x8A15000F SOURCE_DATA_MISSING, so no install can work. Nothing is installed now; the next sign-in tries again."
+    }
+
+    It 'Says why the source could not be set up (<Case>), lets the installs go ahead, and never resets it' -ForEach @(
+        @{ Case = 'winget could not start'; Result = @{ LaunchFailed = $true; LaunchError = 'Access is denied.' }; Expected = 'WARN: The winget source could not be set up for this account (winget could not be started: Access is denied.). The installs may fail; a later sign-in tries again.'; Calls = 1 }
+        @{ Case = 'another exit code'; Result = @{ ExitCode = -2147012894 }; Expected = "WARN: The winget source could not be set up for this account ('winget search --source winget' exited with 0x80072EE2 WININET_E_TIMEOUT). The installs may fail; a later sign-in tries again."; Calls = 2 }
     ) {
         $result = $Result
         Mock Invoke-WingetProcess { New-TestProcessResult @result }
-        Mock Write-ProcessOutput { }
 
-        Update-UserPhaseWingetSource
+        (Update-UserPhaseWingetSource).Usable | Should -BeTrue
 
-        @($script:output | Where-Object { $_ -like $Expected }).Count | Should -Be 1
-        Should -Invoke Invoke-WingetProcess -Times 1 -Exactly
+        @($script:output | Where-Object { $_ -eq $Expected }).Count | Should -Be 1
+        Should -Invoke Invoke-WingetProcess -Times $Calls -Exactly
     }
 }
 

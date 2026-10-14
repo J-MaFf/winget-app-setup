@@ -244,8 +244,8 @@ function Get-InstallerExitCode {
     The FailureReason string from the shared install pipeline ('PreCheckTimeout',
     'PreCheckLaunchFailed', 'PreCheckFailed', 'InstallLaunchFailed', 'VerifyTimeout',
     'VerifyLaunchFailed', 'VerifyFailed', 'VerifyNotFound', 'CustomInstallFailed',
-    'WingetNotLaunchable', 'MachineCheckFailed', 'NoMachineScopeInstaller', 'PostInstallFailed', and
-    the user phase's 'NoUserScopeInstaller'). Unknown or empty values fall back to a generic 'install
+    'WingetNotLaunchable', 'WingetSourceUnusable', 'MachineCheckFailed', 'NoMachineScopeInstaller',
+    'PostInstallFailed', and the user phase's 'NoUserScopeInstaller'). Unknown or empty values fall back to a generic 'install
     failed'.
 .PARAMETER InstallResult
     The pipeline's InstallResult (Install-WingetPackage's or a custom installer's), or $null when no
@@ -334,6 +334,7 @@ function Format-InstallFailureReason {
         'VerifyNotFound' { 'package not found after install' }
         'CustomInstallFailed' { 'installer reported failure' }
         'WingetNotLaunchable' { 'not attempted: winget cannot be launched on this machine (see above)' }
+        'WingetSourceUnusable' { 'not attempted: winget can no longer open its source (see above)' }
         'MachineCheckFailed' { 'could not check whether it is provisioned for every user on this PC (see the warning above)' }
         'NoMachineScopeInstaller' { "no machine-scope installer applies to this PC, and its catalog entry allows only a machine-wide install (scope 'machine')" }
         'NoUserScopeInstaller' { 'winget found no per-user installer for it that applies to this PC (0x8A150010 NO_APPLICABLE_INSTALLER with --scope user)' }

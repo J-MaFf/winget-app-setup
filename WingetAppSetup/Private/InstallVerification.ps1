@@ -108,6 +108,9 @@ function Test-AppApplicability {
 .PARAMETER WingetNotLaunchable
     The circuit breaker found that winget cannot be started: an applicable app is Failed
     ('WingetNotLaunchable') without running winget; a not-applicable one is still Skipped.
+.PARAMETER WingetSourceUnusable
+    The source breaker (Invoke-WingetSourceCircuitBreaker) found that winget can no longer open its
+    source: an applicable app is Failed ('WingetSourceUnusable') without running winget.
 .PARAMETER MachineWide
     The run installs for the whole PC only (a run as SYSTEM or under cross-user elevation).
     Forwarded to Install-WingetPackage, and to a package-specific installer that has it, as
@@ -130,6 +133,7 @@ function Test-AppApplicability {
                         'PreCheckLaunchFailed', 'PreCheckFailed', 'InstallLaunchFailed',
                         'CustomInstallFailed', 'VerifyTimeout', 'VerifyLaunchFailed',
                         'VerifyFailed', 'VerifyNotFound', 'WingetNotLaunchable',
+                        'WingetSourceUnusable',
                         'MachineCheckFailed' (with -MachineWide, the provisioned packages could not
                         be read), 'NoMachineScopeInstaller' (scope 'machine', and the package has
                         no machine-scope installer) or 'PostInstallFailed' (installed, but its
@@ -166,6 +170,9 @@ function Install-AppWithVerification {
 
         [Parameter(Mandatory = $false)]
         [switch]$WingetNotLaunchable,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$WingetSourceUnusable,
 
         [Parameter(Mandatory = $false)]
         [switch]$MachineWide,
@@ -226,6 +233,10 @@ function Install-AppWithVerification {
         # The run already found that winget cannot be started (Invoke-WingetInstall's circuit
         # breaker): another launch attempt per app is what made a wedged winget cost 24 minutes.
         return @{ Status = 'Failed'; InstallResult = $null; FailureReason = 'WingetNotLaunchable'; LaunchError = $null }
+    }
+    if ($WingetSourceUnusable) {
+        # Every install opens the source, so each would fail on it as the last one did (wgt-gq8.66).
+        return @{ Status = 'Failed'; InstallResult = $null; FailureReason = 'WingetSourceUnusable'; LaunchError = $null }
     }
 
     # Same 15-second guard the inlined blocks used: `winget list` can hang indefinitely on broken
@@ -477,4 +488,70 @@ function Invoke-WingetLaunchCircuitBreaker {
 
     Write-ErrorMessage "winget cannot be launched on this machine ($($probe.Reason)). The remaining apps are marked failed without an install attempt and are not retried. Restart the machine and re-run the installer; if it persists, attach this transcript to a GitHub issue."
     return $true
+}
+
+<#
+.SYNOPSIS
+    Invoke-WingetInstall's source breaker: after an app failed on a winget source code, checks once
+    whether winget can still open its source (wgt-gq8.66).
+.DESCRIPTION
+    The sibling of Invoke-WingetLaunchCircuitBreaker for a source lost mid-run: when a failed
+    outcome's install or `winget list` exit code is SourceBroken-class (0x8A15000F
+    SOURCE_DATA_MISSING and the others in Get-WingetExitCodeInfo), one Test-WingetSourceOpen
+    decides. The source opens, and the run goes on; it answers a SourceBroken code again, the breaker
+    trips, and the caller fails the remaining apps at once and skips the retry pass; no clear answer
+    (a timeout, a launch failure or another code) does not trip it. No repair runs here: the next
+    run's Initialize-Winget repairs the source before it installs. Only for winget.exe: while the
+    Microsoft.WinGet.Client engine installs, it does nothing (the engine has its own checks).
+.PARAMETER Outcome
+    The app's Install-AppWithVerification result.
+.OUTPUTS
+    [string] $null when the outcome is not a source failure (nothing was checked); otherwise what
+    the check found: 'ok', 'unusable' (the breaker tripped) or 'unknown'.
+#>
+function Invoke-WingetSourceCircuitBreaker {
+    param (
+        [Parameter(Mandatory = $true)]
+        [hashtable]$Outcome
+    )
+
+    if ($Outcome.Status -ne 'Failed' -or (Test-WingetClientEngineActive)) {
+        return $null
+    }
+    $installExitCode = $null
+    if ($Outcome.InstallResult) {
+        $installExitCode = $Outcome.InstallResult.ExitCode
+    }
+    $failedOn = $null
+    foreach ($code in @($Outcome.CheckExitCode, $installExitCode)) {
+        $info = Get-WingetExitCodeInfo -ExitCode $code
+        if ($info -and $info.Class -eq 'SourceBroken') {
+            $failedOn = $info
+            break
+        }
+    }
+    if (-not $failedOn) {
+        return $null
+    }
+
+    Write-WarningMessage "winget could not open its source for that app ($($failedOn.Hex) $($failedOn.Name)). Checking whether the winget source still opens..."
+    $open = Test-WingetSourceOpen
+    if ($open.Opened -eq $true) {
+        Write-Info 'The winget source opens; carrying on with the next app.'
+        return 'ok'
+    }
+    $openInfo = Get-WingetExitCodeInfo -ExitCode $open.ExitCode
+    if ($open.Opened -eq $false -and $openInfo -and $openInfo.Class -eq 'SourceBroken') {
+        Write-ErrorMessage ("The winget source can no longer be opened: 'winget search --source winget' answered {0}. The remaining apps are marked failed without an install attempt and are not retried. Re-run the installer: it checks the winget source, and repairs it where it can, before it installs anything." -f (Format-WingetExitCode -ExitCode $open.ExitCode))
+        return 'unusable'
+    }
+    $detail = 'it did not finish in time and was stopped'
+    if ($open.LaunchError) {
+        $detail = "winget could not be started: $($open.LaunchError)"
+    }
+    elseif (-not $open.TimedOut) {
+        $detail = 'exit {0}' -f (Format-WingetExitCode -ExitCode $open.ExitCode)
+    }
+    Write-WarningMessage "The winget source check gave no clear answer ($detail); carrying on with the next app."
+    return 'unknown'
 }
