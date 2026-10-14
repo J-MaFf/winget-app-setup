@@ -22,8 +22,12 @@ name: E2E Install
 # the wrapper's 64-bit relaunch and exit-code pass-through, 'Auto-updates: Configured' and the
 # framework installed once, last-run.json and its Deferred entries (each with an id and a reason,
 # as the user phase reads them), each catalog app's entry in last-run.json against the checkout's
-# catalog (Chrome, 7-Zip and Git must be Installed, so an app the removal step left in place fails
-# this leg), and that nothing was installed per-user into SYSTEM's own profile.
+# catalog (the apps the removal step recorded as removed must be Installed; one it could not remove
+# may be Skipped as already there, wgt-gq8.53), and that nothing was installed per-user into
+# SYSTEM's own profile. Dispatched with budget_pass ticked (wgt-gq8.49), the leg first runs one more
+# SYSTEM pass whose time budget (-MaxRuntimeMinutes 1, with a deadline already past) is used up
+# before the first app, and requires exit 9, every app that applies NotAttempted and auto-updates
+# NotAttempted in last-run.json; the normal pass then runs without a budget and installs everything.
 # A fourth leg, e2e-install-system-winget-client (wgt-gq8.42), runs that SYSTEM pass twice with the
 # wrapper's -SystemInstallEngine WinGetClient: the installer installs with the pinned
 # Microsoft.WinGet.Client module, which Microsoft supports as SYSTEM, instead of winget.exe. On top
@@ -100,6 +104,11 @@ on:
   schedule:
     - cron: '0 6 * * 1' # weekly, Mondays 06:00 UTC
   workflow_dispatch:
+    inputs:
+      budget_pass:
+        description: 'SYSTEM leg: first run a pass whose time budget is already used up, and check it exits 9 with every app not attempted (wgt-gq8.49)'
+        type: boolean
+        default: false
   pull_request: # every PR; the changes job decides whether it needs the real install
 
 permissions:
@@ -553,21 +562,23 @@ jobs:
     needs: changes
     if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.changes.result != 'success' || needs.changes.outputs.e2e == 'true') }}
     runs-on: windows-latest
-    # Backstop: 15 + 3 + 45 + 5 = 68, plus checkout and uploads. The pass step's 45 minutes cover the
-    # task's own 40-minute limit and the two minutes the script waits past it before stopping it.
-    timeout-minutes: 80
+    # Backstop: 15 + 3 + 62 + 5 = 85, plus checkout and uploads. The pass step's 45 minutes cover the
+    # task's own 40-minute limit and the two minutes the script waits past it before stopping it;
+    # with budget_pass, 17 more cover the budget task's 15-minute limit and its 2 minutes.
+    timeout-minutes: 100
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
 
       # As in e2e-install: Chrome, 7-Zip and Git come with the image, so the SYSTEM run would only
-      # skip them. PowerShell 7 stays: the SYSTEM run finds it, as on a PC the bootstrap set up.
+      # skip them. PowerShell 7 stays: the SYSTEM run finds it, as on a PC the bootstrap set up. What
+      # was removed goes to preinstalled-apps.json, which the install step reads (wgt-gq8.53).
       - name: Remove the catalog apps the runner image ships with
         shell: powershell
         continue-on-error: true
         timeout-minutes: 15
         run: |
-          & .\e2e\Remove-PreinstalledApps.ps1
+          & .\e2e\Remove-PreinstalledApps.ps1 -ResultPath (Join-Path $env:RUNNER_TEMP 'e2e-diagnostics\preinstalled-apps.json')
 
       - name: Diagnostics before the SYSTEM install pass
         shell: powershell
@@ -579,7 +590,9 @@ jobs:
       - name: Install as SYSTEM through the RMM wrapper (scheduled task, 32-bit Windows PowerShell)
         id: system-pass
         shell: pwsh
-        timeout-minutes: 45
+        timeout-minutes: ${{ inputs.budget_pass && 62 || 45 }}
+        env:
+          BUDGET_PASS: ${{ inputs.budget_pass }}
         run: |
           # Registers and starts a one-shot SYSTEM task running SysWOW64 powershell.exe -File
           # rmm/Invoke-WingetAppSetup.ps1 -InstallerPath <checkout's installer>, waits for it and
@@ -589,11 +602,17 @@ jobs:
           # SYSTEM run is expected to install the framework and WAU and exit 0; a framework install
           # that started and failed fails the step); 1 only while KNOWN_PLATFORM_INCOMPATIBLE is
           # non-empty and every app the run left failed is on it (the containment check the other
-          # legs get from Assert-Install.ps1). The output is also saved with the diagnostics, so
-          # report-failure can put the table in the issue.
+          # legs get from Assert-Install.ps1). The apps the removal step recorded must be
+          # Installed. With budget_pass, a spent-budget pass runs first (see the header comment).
+          # The output is also saved with the diagnostics, so report-failure can put the table in
+          # the issue.
           $diagnosticsDir = Join-Path $env:RUNNER_TEMP 'e2e-diagnostics'
           $null = New-Item -ItemType Directory -Path $diagnosticsDir -Force
-          & pwsh -NoProfile -ExecutionPolicy Bypass -File ./e2e/Invoke-SystemInstallPass.ps1 2>&1 |
+          $passArguments = @('-PreparationResultPath', (Join-Path $diagnosticsDir 'preinstalled-apps.json'))
+          if ($env:BUDGET_PASS -eq 'true') {
+            $passArguments += '-BudgetPass'
+          }
+          & pwsh -NoProfile -ExecutionPolicy Bypass -File ./e2e/Invoke-SystemInstallPass.ps1 @passArguments 2>&1 |
             Tee-Object -FilePath (Join-Path $diagnosticsDir 'assertions.txt')
           exit $LASTEXITCODE
 
@@ -638,13 +657,13 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6
 
-      # As in e2e-install-system: the run must install Chrome, 7-Zip and Git itself.
+      # As in e2e-install-system: the run must install the apps this step removed itself.
       - name: Remove the catalog apps the runner image ships with
         shell: powershell
         continue-on-error: true
         timeout-minutes: 15
         run: |
-          & .\e2e\Remove-PreinstalledApps.ps1
+          & .\e2e\Remove-PreinstalledApps.ps1 -ResultPath (Join-Path $env:RUNNER_TEMP 'e2e-diagnostics\preinstalled-apps.json')
 
       # What the Gallery serves today against the committed pin. Its report (every file with its
       # hash and signature) goes with the diagnostics as pin-check.txt; the downloads stay out of
@@ -679,7 +698,7 @@ jobs:
           # report-failure.
           $diagnosticsDir = Join-Path $env:RUNNER_TEMP 'e2e-diagnostics'
           $null = New-Item -ItemType Directory -Path $diagnosticsDir -Force
-          & pwsh -NoProfile -ExecutionPolicy Bypass -File ./e2e/Invoke-SystemInstallPass.ps1 -SystemInstallEngine WinGetClient -PassCount 2 2>&1 |
+          & pwsh -NoProfile -ExecutionPolicy Bypass -File ./e2e/Invoke-SystemInstallPass.ps1 -SystemInstallEngine WinGetClient -PassCount 2 -PreparationResultPath (Join-Path $diagnosticsDir 'preinstalled-apps.json') 2>&1 |
             Tee-Object -FilePath (Join-Path $diagnosticsDir 'assertions.txt')
           exit $LASTEXITCODE
 

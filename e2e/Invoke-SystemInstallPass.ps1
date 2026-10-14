@@ -49,10 +49,20 @@
         winget list): the catalog and its applicability come from the checkout's module
         (Get-DefaultAppCatalog, Test-AppApplicability), decided before the run as the run as SYSTEM
         decides them. An app that applies is Installed or Skipped as already there, and Installed
-        only for the apps the job uninstalled first (e2e/Remove-PreinstalledApps.ps1's defaults:
-        Chrome, 7-Zip, Git); one that does not apply is Skipped with its not-applicable reason;
-        per-user work is Deferred with its reason. Failed, Deferred otherwise, or no entry fails.
-        Apps on KNOWN_PLATFORM_INCOMPATIBLE are not checked.
+        only for the apps the job's preparation left uninstalled: with -PreparationResultPath, the
+        ids e2e/Remove-PreinstalledApps.ps1 -ResultPath recorded as removed or absent (wgt-gq8.53),
+        so an app it could not remove may be Skipped as already there; without it, or when that
+        file cannot be read, its default list (Chrome, 7-Zip, Git). One that does not apply is
+        Skipped with its not-applicable reason; per-user work is Deferred with its reason. Failed,
+        Deferred otherwise, or no entry fails. Apps on KNOWN_PLATFORM_INCOMPATIBLE are not checked.
+
+    With -BudgetPass (wgt-gq8.49) one more SYSTEM run comes first, before any app is installed: the
+    wrapper gets -MaxRuntimeMinutes 1 and a -RunDeadlineUtc already past when the task starts, so
+    the budget is used up before the first app whatever the runner's speed. Its rows, each
+    'Budget pass: ...' (Get-SystemPassBudgetResult), require exit 9 passed back by the wrapper,
+    every app that applies NotAttempted with the budget's reason (not-applicable and per-user ones
+    as in a normal run), no app Installed or Failed, and autoUpdates NotAttempted in last-run.json.
+    The normal passes then run without a budget and are checked as above.
 
     With -SystemInstallEngine WinGetClient (the e2e-install-system-winget-client job, wgt-gq8.42)
     the wrapper also gets -SystemInstallEngine WinGetClient, and these rows are added
@@ -90,6 +100,11 @@
     given: nothing is passed, as before.
 .PARAMETER PassCount
     1 (default) or 2: run the task again, for the checks of a second run.
+.PARAMETER PreparationResultPath
+    The JSON file e2e/Remove-PreinstalledApps.ps1 -ResultPath wrote: the apps it removed (or found
+    absent) are the ones the run must install.
+.PARAMETER BudgetPass
+    Run a spent-budget pass first, and check it.
 .NOTES
     Exit codes: 0 = every check passed; the run's exit code or 1 = a check failed; 64 = bad
     arguments; 127 = the task could not be registered or started.
@@ -115,7 +130,13 @@ param (
 
     [Parameter(Mandatory = $false)]
     [ValidateRange(1, 2)]
-    [int]$PassCount = 1
+    [int]$PassCount = 1,
+
+    [Parameter(Mandatory = $false)]
+    [string]$PreparationResultPath,
+
+    [Parameter(Mandatory = $false)]
+    [switch]$BudgetPass
 )
 
 # Get-InstallPassVerdict and Get-InstallPassTranscript (and, through it, TranscriptAssertions.ps1).
@@ -130,6 +151,10 @@ $script:SystemTaskName = 'winget-app-setup-e2e-system'
     Returns the scheduled task's command line arguments for the wrapper.
 .PARAMETER SystemInstallEngine
     Appended as -SystemInstallEngine <value> when given.
+.PARAMETER MaxRuntimeMinutes
+    Appended as -MaxRuntimeMinutes <value> when above 0 (the budget pass).
+.PARAMETER RunDeadlineUtc
+    Appended as -RunDeadlineUtc <value> when given (the budget pass).
 #>
 function Get-SystemPassTaskArgument {
     param (
@@ -141,14 +166,43 @@ function Get-SystemPassTaskArgument {
         [string]$InstallerSha256,
         [Parameter(Mandatory = $false)]
         [AllowEmptyString()]
-        [string]$SystemInstallEngine
+        [string]$SystemInstallEngine,
+        [Parameter(Mandatory = $false)]
+        [int]$MaxRuntimeMinutes = 0,
+        [Parameter(Mandatory = $false)]
+        [AllowEmptyString()]
+        [string]$RunDeadlineUtc
     )
 
     $argument = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}" -InstallerPath "{1}" -InstallerSha256 {2}' -f $WrapperPath, $InstallerPath, $InstallerSha256
     if (-not [string]::IsNullOrWhiteSpace($SystemInstallEngine)) {
         $argument += " -SystemInstallEngine $SystemInstallEngine"
     }
+    if ($MaxRuntimeMinutes -gt 0) {
+        $argument += " -MaxRuntimeMinutes $MaxRuntimeMinutes"
+    }
+    if (-not [string]::IsNullOrWhiteSpace($RunDeadlineUtc)) {
+        $argument += " -RunDeadlineUtc $RunDeadlineUtc"
+    }
     return $argument
+}
+
+<#
+.SYNOPSIS
+    The -RunDeadlineUtc of the budget pass: a minute before Now, in the form the wrapper takes
+    (yyyy-MM-ddTHH:mm:ssZ), so the budget is used up before the installer reaches its first app.
+.PARAMETER Now
+    Default: now.
+.RETURNS
+    [string]
+#>
+function Get-SystemPassBudgetDeadline {
+    param (
+        [Parameter(Mandatory = $false)]
+        [DateTime]$Now = [DateTime]::UtcNow
+    )
+
+    return $Now.ToUniversalTime().AddMinutes(-1).ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", [System.Globalization.CultureInfo]::InvariantCulture)
 }
 
 <#
@@ -273,6 +327,43 @@ function Get-PreinstalledAppRemovalList {
         throw "$ScriptPath has no default value for -PackageId"
     }
     return [string[]]@($parameter.DefaultValue.SafeGetValue())
+}
+
+<#
+.SYNOPSIS
+    Reads which apps the job's preparation left uninstalled, from the record
+    e2e/Remove-PreinstalledApps.ps1 -ResultPath wrote (wgt-gq8.53).
+.DESCRIPTION
+    The ids it removed and the ones that were not installed to begin with: the run has to install
+    both. An app it could not remove, or could not tell about, is not listed, so the run may find
+    it already there.
+.PARAMETER Path
+    The record.
+.RETURNS
+    [pscustomobject] with Ids ([string[]], or $null when the record cannot be read), Problem (why,
+    or $null) and Detail (what the record says, for the log).
+#>
+function Get-PreparationRemovedList {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        return [pscustomobject]@{ Ids = $null; Problem = "no record at $Path"; Detail = $null }
+    }
+    try {
+        $record = ConvertFrom-Json -InputObject ([System.IO.File]::ReadAllText($Path)) -ErrorAction Stop
+    }
+    catch {
+        return [pscustomobject]@{ Ids = $null; Problem = "could not read ${Path}: $($_.Exception.Message)"; Detail = $null }
+    }
+    if ($null -eq $record -or "$($record.schemaVersion)" -ne '1' -or $null -eq $record.PSObject.Properties['removed'] -or $null -eq $record.PSObject.Properties['absent']) {
+        return [pscustomobject]@{ Ids = $null; Problem = "$Path is not a schema 1 record with removed and absent lists"; Detail = $null }
+    }
+    $ids = @(@($record.removed) + @($record.absent) | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | ForEach-Object { [string]$_ } | Select-Object -Unique)
+    $detail = 'removed: {0}; absent: {1}; left installed: {2}; unknown: {3}; complete: {4}' -f (@($record.removed) -join ', '), (@($record.absent) -join ', '), (@($record.leftInstalled) -join ', '), (@($record.unknown) -join ', '), $record.complete
+    return [pscustomobject]@{ Ids = [string[]]$ids; Problem = $null; Detail = $detail }
 }
 
 <#
@@ -880,6 +971,166 @@ function Get-SystemInstallPassResult {
 
 <#
 .SYNOPSIS
+    Checks the budget pass (wgt-gq8.49): a SYSTEM run whose time budget was used up before its
+    first app.
+.DESCRIPTION
+    Rows, each named 'Budget pass: ...':
+      - 'exit code 9': the task's exit code, as the wrapper passed it back;
+      - 'wrapper passed the time budget on': the wrapper log's 'Time budget: <n> minutes' line and
+        'The installer exited with 9.';
+      - 'last-run.json records the run': exitCode 9 and summaryReached;
+      - 'auto-updates not attempted': autoUpdates.status NotAttempted;
+      - 'nothing installed or failed': no entry Installed or Failed, and at least one NotAttempted;
+      - per catalog app that is not skip-listed: 'not attempted: <id>' for an app that applies
+        (NotAttempted, with the reason 'the run's <n>-minute time budget was used up'), and the
+        not-applicable and per-user rows of a normal run (Skipped or Deferred, with the catalog's
+        reason, both decided before the budget is looked at).
+.PARAMETER TaskExitCode
+    The task's exit code, or $null when it did not finish.
+.PARAMETER WrapperLog
+    The wrapper log's text, or $null.
+.PARAMETER RunRecord
+    last-run.json, parsed, or $null.
+.PARAMETER RunRecordProblem
+    Why there is no RunRecord, or $null.
+.PARAMETER AppExpectation
+    Get-SystemPassAppExpectation's result for a first run, or $null (no per-app rows).
+.PARAMETER SkipApps
+    The KNOWN_PLATFORM_INCOMPATIBLE package ids, which are not checked.
+.RETURNS
+    Assertion rows ([pscustomobject] with Assertion, Result and Detail).
+#>
+function Get-SystemPassBudgetResult {
+    param (
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [Nullable[int]]$TaskExitCode,
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [AllowEmptyString()]
+        [string]$WrapperLog,
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        $RunRecord,
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [AllowEmptyString()]
+        [string]$RunRecordProblem,
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [AllowEmptyCollection()]
+        [object[]]$AppExpectation,
+        [Parameter(Mandatory = $false)]
+        [AllowEmptyCollection()]
+        [string[]]$SkipApps = @()
+    )
+
+    $rows = @()
+    $noRecordDetail = 'no last-run.json'
+    if ($RunRecordProblem) {
+        $noRecordDetail = $RunRecordProblem
+    }
+    $exitDetail = 'the scheduled task did not finish'
+    if ($null -ne $TaskExitCode) {
+        $exitDetail = "exit $TaskExitCode"
+        if ($TaskExitCode -ne 9) {
+            $exitDetail += ', expected 9 (time budget used up)'
+        }
+    }
+    $rows += [pscustomobject]@{ Assertion = 'Budget pass: exit code 9'; Result = $(if ($TaskExitCode -eq 9) { 'PASS' } else { 'FAIL' }); Detail = $exitDetail }
+
+    $wrapperText = [string]$WrapperLog
+    $budgetLine = [regex]::Match($wrapperText, 'Time budget: \d+ minutes, until \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z')
+    $passedBack = $wrapperText.Contains('The installer exited with 9.')
+    $wrapperProblems = @()
+    if (-not $WrapperLog) {
+        $wrapperProblems += 'no wrapper log (install-<time>-rmm.log) from this run'
+    }
+    else {
+        if (-not $budgetLine.Success) {
+            $wrapperProblems += 'no ''Time budget: <n> minutes'' line'
+        }
+        if (-not $passedBack) {
+            $wrapperProblems += 'no ''The installer exited with 9.'' line'
+        }
+    }
+    $wrapperDetail = $wrapperProblems -join '; '
+    if ($wrapperProblems.Count -eq 0) {
+        $wrapperDetail = $budgetLine.Value + '; the installer exited with 9'
+    }
+    $rows += [pscustomobject]@{ Assertion = 'Budget pass: wrapper passed the time budget on'; Result = $(if ($wrapperProblems.Count -eq 0) { 'PASS' } else { 'FAIL' }); Detail = $wrapperDetail }
+
+    if ($null -eq $RunRecord) {
+        foreach ($assertion in @('Budget pass: last-run.json records the run', 'Budget pass: auto-updates not attempted', 'Budget pass: nothing installed or failed')) {
+            $rows += [pscustomobject]@{ Assertion = $assertion; Result = 'FAIL'; Detail = $noRecordDetail }
+        }
+        return $rows
+    }
+
+    $recordOk = ($null -ne $RunRecord.exitCode -and [int]$RunRecord.exitCode -eq 9 -and $RunRecord.summaryReached -eq $true)
+    $rows += [pscustomobject]@{ Assertion = 'Budget pass: last-run.json records the run'; Result = $(if ($recordOk) { 'PASS' } else { 'FAIL' }); Detail = ('exitCode {0}, summaryReached {1}' -f $RunRecord.exitCode, $RunRecord.summaryReached) }
+
+    $autoUpdates = $null
+    if ($RunRecord.PSObject.Properties['autoUpdates'] -and $null -ne $RunRecord.autoUpdates) {
+        $autoUpdates = [string]$RunRecord.autoUpdates.status
+    }
+    $rows += [pscustomobject]@{ Assertion = 'Budget pass: auto-updates not attempted'; Result = $(if ($autoUpdates -eq 'NotAttempted') { 'PASS' } else { 'FAIL' }); Detail = "autoUpdates.status: $autoUpdates" }
+
+    $entries = @($RunRecord.apps | Where-Object { $null -ne $_ })
+    $done =@($entries | Where-Object { @('Installed', 'Failed') -contains [string]$_.status } | ForEach-Object { '{0} {1}' -f $_.id, (Format-SystemPassAppEntry -Entry $_) })
+    $notAttemptedCount = @($entries | Where-Object { [string]$_.status -eq 'NotAttempted' }).Count
+    $nothingDetail = "$notAttemptedCount app(s) not attempted"
+    if ($done.Count -gt 0) {
+        $nothingDetail = 'with the budget used up, the run still did: ' + ($done -join '; ')
+    }
+    elseif ($notAttemptedCount -eq 0) {
+        $nothingDetail = 'no app NotAttempted'
+    }
+    $rows += [pscustomobject]@{ Assertion = 'Budget pass: nothing installed or failed'; Result = $(if ($done.Count -eq 0 -and $notAttemptedCount -gt 0) { 'PASS' } else { 'FAIL' }); Detail = $nothingDetail }
+
+    foreach ($expectation in @($AppExpectation | Where-Object { $null -ne $_ })) {
+        if ($SkipApps -contains $expectation.Id) {
+            continue
+        }
+        $expectedStatus = 'NotAttempted'
+        $assertion = "Budget pass: not attempted: $($expectation.Id)"
+        if ($expectation.Expected -eq 'NotApplicable') {
+            $expectedStatus = 'Skipped'
+            $assertion = "Budget pass: not-applicable skip recorded: $($expectation.Id)"
+        }
+        elseif ($expectation.Expected -eq 'Deferred') {
+            $expectedStatus = 'Deferred'
+            $assertion = "Budget pass: deferred to the user phase: $($expectation.Id)"
+        }
+        $matching = @($entries | Where-Object { [string]$_.id -eq $expectation.Id })
+        $passed = $false
+        if ($matching.Count -ne 1) {
+            $detail = "$($matching.Count) entries in last-run.json"
+        }
+        else {
+            $status = [string]$matching[0].status
+            $reason = [string]$matching[0].reason
+            $detail = 'last-run.json: ' + (Format-SystemPassAppEntry -Entry $matching[0])
+            if ($expectedStatus -eq 'NotAttempted') {
+                $passed = ($status -eq 'NotAttempted' -and $reason -match '^the run''s \d+-minute time budget was used up$')
+                if (-not $passed) {
+                    $detail += '; expected NotAttempted (the run''s <n>-minute time budget was used up)'
+                }
+            }
+            else {
+                $passed = ($status -eq $expectedStatus -and $reason -eq $expectation.Reason)
+                if (-not $passed) {
+                    $detail += "; expected $expectedStatus ($($expectation.Reason))"
+                }
+            }
+        }
+        $rows += [pscustomobject]@{ Assertion = $assertion; Result = $(if ($passed) { 'PASS' } else { 'FAIL' }); Detail = $detail }
+    }
+    return $rows
+}
+
+<#
+.SYNOPSIS
     Checks that a run that asked for Microsoft.WinGet.Client installed with it (wgt-gq8.42).
 .DESCRIPTION
     Three rows:
@@ -1260,7 +1511,20 @@ if ($MyInvocation.InvocationName -ne '.') {
         $wingetAppSetupModule = Import-Module (Join-Path $repositoryRoot 'WingetAppSetup\WingetAppSetup.psd1') -Force -PassThru -ErrorAction Stop
         $catalog = @(Get-DefaultAppCatalog)
         $applicability = Get-SystemRunApplicability -Catalog $catalog -Module $wingetAppSetupModule
-        $removedApps = Get-PreinstalledAppRemovalList -ScriptPath (Join-Path $PSScriptRoot 'Remove-PreinstalledApps.ps1')
+        $removedApps = $null
+        if ($PreparationResultPath) {
+            $preparation = Get-PreparationRemovedList -Path $PreparationResultPath
+            if ($preparation.Problem) {
+                Write-Host "The preparation record cannot be read ($($preparation.Problem)); expecting the run to install every app e2e/Remove-PreinstalledApps.ps1 removes by default." -ForegroundColor Yellow
+            }
+            else {
+                $removedApps = $preparation.Ids
+                Write-Host "Runner preparation ($PreparationResultPath): $($preparation.Detail)"
+            }
+        }
+        if ($null -eq $removedApps) {
+            $removedApps = Get-PreinstalledAppRemovalList -ScriptPath (Join-Path $PSScriptRoot 'Remove-PreinstalledApps.ps1')
+        }
         $catalogExpectation = @(Get-SystemPassAppExpectation -Catalog $catalog -Applicability $applicability -RemovedApps $removedApps)
         foreach ($expected in @('Installed', 'NotApplicable', 'Deferred')) {
             $ids = @($catalogExpectation | Where-Object { $_.Expected -eq $expected } | ForEach-Object { $_.Id })
@@ -1282,6 +1546,18 @@ if ($MyInvocation.InvocationName -ne '.') {
 
     $allResults = @()
     $stepExitCode = 0
+    if ($BudgetPass) {
+        # wgt-gq8.49: a deadline already past, so the budget is spent before the first app.
+        Write-Host '=== SYSTEM budget pass (-MaxRuntimeMinutes 1, deadline already past) ==='
+        $budgetArgument = Get-SystemPassTaskArgument -WrapperPath $wrapperFilePath -InstallerPath $installerFilePath -InstallerSha256 $installerSha256 -SystemInstallEngine $SystemInstallEngine -MaxRuntimeMinutes 1 -RunDeadlineUtc (Get-SystemPassBudgetDeadline)
+        Write-Host "The budget task runs as SYSTEM: $powerShell32 $budgetArgument"
+        $budgetRun = Invoke-SystemPassTask -PowerShellPath $powerShell32 -TaskArgument $budgetArgument -TimeoutMinutes ([Math]::Min($TimeoutMinutes, 15)) -LogFolder $logFolder
+        if ($budgetRun.StartError) {
+            Write-Host "Could not register or start the SYSTEM budget task: $($budgetRun.StartError)" -ForegroundColor Red
+            exit 127
+        }
+        $allResults += @(Get-SystemPassBudgetResult -TaskExitCode $budgetRun.TaskExitCode -WrapperLog $budgetRun.WrapperLog -RunRecord $budgetRun.RunRecordRead.Record -RunRecordProblem $budgetRun.RunRecordRead.Problem -AppExpectation $catalogExpectation -SkipApps $skipApps)
+    }
     for ($passNumber = 1; $passNumber -le $PassCount; $passNumber++) {
         if ($PassCount -gt 1) {
             Write-Host "=== SYSTEM pass $passNumber of $PassCount ==="

@@ -1754,7 +1754,8 @@ the owner test plan needs a real desktop PC: cross-user elevation, a TightVNC vi
   in memory and which Task Scheduler does not store; if the task cannot be registered or run, or
   does not finish within 300 s (that user's first logon builds its profile), the admin plants it
   and that row is SKIP with the failing step or the task's state, and the report lists who holds
-  "Log on as a batch job"), a time-budget run that exits 9 and then finishes (the harness's own
+  "Log on as a batch job", and the cleanup takes that right back from the deleted user's SID when
+  registering the task granted it), a time-budget run that exits 9 and then finishes (the harness's own
   `winget uninstall` of 7-Zip before it is kept in that stage's `winget-uninstall.txt`), the
   `-CollectDiagnostics` bundle, and the uninstaller (preview then real; it runs in Windows
   PowerShell, so it must remove PowerShell 7 too). Each check is a
@@ -1897,13 +1898,21 @@ throwaway VMs by construction:
   checkout's module, decided before the run the way the run as SYSTEM decides them: Windows
   Terminal's condition holds as SYSTEM, and an app with `msixName` counts as already there only
   when it is provisioned for every user. An app that applies must be `Installed` or `Skipped` as
-  already there, and `Installed` for Chrome, 7-Zip and Git, which the job removes first
-  (`e2e/Remove-PreinstalledApps.ps1`'s defaults). An app that does not apply must be `Skipped` with
+  already there, and `Installed` for the apps the job's removal step left uninstalled: it writes
+  `preinstalled-apps.json` with the diagnostics (`e2e/Remove-PreinstalledApps.ps1 -ResultPath`),
+  and the apps it lists as removed or absent must be `Installed`, while one it could not remove
+  may be `Skipped` as already there (wgt-gq8.53; without a readable record, Chrome, 7-Zip and Git,
+  its defaults). An app that does not apply must be `Skipped` with
   its `not applicable:` reason, and per-user work must be `Deferred` with its reason. `Failed`, any
   other `Deferred`, a missing entry, an entry for an app the catalog lacks, or a record that is not
-  schema 1 fails the step. Apps on `KNOWN_PLATFORM_INCOMPATIBLE` are not checked. Unlike the other
-  legs, an app the removal step could not remove fails this leg. The user phase is not run here: it
-  would change the runner account's Windows Terminal settings.
+  schema 1 fails the step. Apps on `KNOWN_PLATFORM_INCOMPATIBLE` are not checked. The user phase is
+  not run here: it would change the runner account's Windows Terminal settings. Dispatched with
+  `budget_pass` ticked (`gh workflow run e2e-install.yml -f budget_pass=true`, wgt-gq8.49), the leg
+  first runs one more SYSTEM pass whose time budget is already used up (`-MaxRuntimeMinutes 1` with
+  a `-RunDeadlineUtc` in the past, so the runner's speed cannot change the outcome), and fails
+  unless it exits 9 through the machine phase, every app that applies is `NotAttempted` with the
+  budget's reason, nothing is installed or failed, and `autoUpdates` is `NotAttempted`; the normal
+  pass then runs without a budget.
 - **The SYSTEM leg with Microsoft.WinGet.Client:** `e2e-install-system-winget-client`, on a fourth
   VM, runs the SYSTEM leg's pass twice through the machine phase with
   `-SystemInstallEngine WinGetClient`
@@ -1919,6 +1928,16 @@ throwaway VMs by construction:
   every app that applies already there, and not install the framework again. Before the passes, a
   step runs `build/Set-WingetClientModulePin.ps1 -Check` against the Gallery and saves its report;
   it cannot fail the job. The job passed on its first run, on 2026-10-06.
+- **Pin freshness:** `.github/workflows/wingetclient-pin-freshness.yml` runs every Tuesday (and on
+  dispatch) `build/Set-WingetClientModulePin.ps1 -Check -Latest` on windows-latest, where the
+  signature checks work, against the Gallery's latest stable Microsoft.WinGet.Client
+  (wgt-gq8.55). When that version is past the pin, an ubuntu job, the only one with
+  `issues: write`, opens the 'Microsoft.WinGet.Client pin is behind the PowerShell Gallery' issue
+  with the check's output, or comments on the open one once per new version.
+- **ARM64 probe:** `.github/workflows/arm64-probe.yml` (dispatch only, `windows-11-arm`,
+  wgt-gq8.50) installs nothing: it prints the job's account, the architecture each PowerShell sees,
+  App Installer's registration and provisioning, `Microsoft.WindowsAppRuntime.1.8` and
+  `winget --version`. An ARM64 install leg waits on what it shows.
 - **What it does:** the weekly run uses the one-liner above, against raw `main`, in both passes.
   Pull-request and dispatched runs install the checkout (the PR's merge commit, or the dispatched
   branch). The first pass pipes it to `iex` like the one-liner, and the second runs it with
@@ -1995,8 +2014,9 @@ throwaway VMs by construction:
   PowerShell install (`Install-PowerShellLatest`: PowerShell 7 is preinstalled in one leg and
   installed by the bootstrap in the other), the Endpoint Central user phase, the fleet health probe
   and the at-logon fix, a TightVNC password, the uninstaller from Windows PowerShell 5.1 or as
-  SYSTEM, a time budget that runs out (exit
-  code 9), an ARM64 PC, cross-user elevation (tier 2, below), and the Microsoft.WinGet.Client
+  SYSTEM, a time budget that runs out in the middle of a run (the SYSTEM leg's `budget_pass` covers
+  one used up before the first app), an ARM64 PC, cross-user elevation (tier 2, below), and the
+  Microsoft.WinGet.Client
   engine's fallback to `winget.exe` and its rarer results (an installer's 3010, an unknown id,
   Group Policy), which only the unit tests cover.
 - **Where the evidence lands:** transcripts are written on the runner under

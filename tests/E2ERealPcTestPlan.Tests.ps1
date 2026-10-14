@@ -550,6 +550,40 @@ Describe 'Get-RealPcReRunResult' {
     }
 }
 
+Describe 'Wait-RealPcWingetUninstalled' {
+    BeforeEach {
+        Mock Start-Sleep {}
+    }
+
+    It 'Checks again while winget still lists the package, and returns once it is gone' {
+        $script:listAnswers = [System.Collections.Generic.Queue[object]]::new()
+        $script:listAnswers.Enqueue($true)
+        $script:listAnswers.Enqueue($true)
+        $script:listAnswers.Enqueue($false)
+        Mock Test-RealPcWingetInstalled { return $script:listAnswers.Dequeue() }
+
+        Wait-RealPcWingetUninstalled -Id '7zip.7zip' | Should -Be $false
+        Should -Invoke Test-RealPcWingetInstalled -Times 3 -Exactly
+        Should -Invoke Start-Sleep -Times 2 -Exactly
+    }
+
+    It 'Returns $true when it is still listed after the last attempt, without a sleep after it' {
+        Mock Test-RealPcWingetInstalled { return $true }
+
+        Wait-RealPcWingetUninstalled -Id '7zip.7zip' -Attempts 3 | Should -Be $true
+        Should -Invoke Test-RealPcWingetInstalled -Times 3 -Exactly
+        Should -Invoke Start-Sleep -Times 2 -Exactly
+    }
+
+    It 'Returns at once when winget cannot answer' {
+        Mock Test-RealPcWingetInstalled { return $null }
+
+        Wait-RealPcWingetUninstalled -Id '7zip.7zip' | Should -BeNullOrEmpty
+        Should -Invoke Test-RealPcWingetInstalled -Times 1 -Exactly
+        Should -Invoke Start-Sleep -Times 0 -Exactly
+    }
+}
+
 Describe 'Get-RealPcTimeBudget* and Get-RealPcUninstallCheckRow (item 8)' {
     It 'Passes the spent-budget run: exit 9, app NotAttempted, notattempted >= 1' {
         $record = [pscustomobject]@{ apps = @([pscustomobject]@{ id = '7zip.7zip'; status = 'NotAttempted' }) }
@@ -3051,6 +3085,115 @@ Describe 'The installer build under test (wgt-gq8.71, item 9)' {
         $facts = [ordered]@{ 'Installer under test' = 'the checkout''s files'; 'Installer build' = '1.0.0+72a23fa5 (the checkout''s winget-app-install.ps1)'; 'Elevated account' = 'CONTOSO\admin-jmaffiola' }
         $text = Format-RealPcReport -MachineFacts $facts -StageResult @()
         $text | Should -Match "(?m)^  Installer under test: the checkout's files\r?\n  Installer build: 1\.0\.0\+72a23fa5 \(the checkout's winget-app-install\.ps1\)\r?$"
+    }
+}
+
+# wgt-gq8.73: registering the S4U planting task can grant the temporary user 'Log on as a batch
+# job'; the cleanup takes it back from the user's SID. The LSA calls themselves need Windows, so
+# Invoke-RealPcLsaAccountRight is mocked here.
+Describe 'Taking the batch-logon right back from the temporary user (wgt-gq8.73)' {
+    BeforeAll {
+        $script:TempSid = 'S-1-5-21-1-2-3-1001'
+    }
+
+    BeforeEach {
+        $script:HeldRights = @('SeBatchLogonRight', 'SeNetworkLogonRight')
+        $script:RemoveFails = $false
+        $script:ReadFails = $false
+        $script:RemoveIgnored = $false
+        Mock Invoke-RealPcLsaAccountRight {
+            if ($RemoveRight) {
+                if ($script:RemoveFails) { throw 'LsaRemoveAccountRights failed with Win32 error 5' }
+                if (-not $script:RemoveIgnored) { $script:HeldRights = @($script:HeldRights | Where-Object { $_ -ne $RemoveRight }) }
+                return
+            }
+            if ($script:ReadFails) { throw "LsaOpenPolicy failed with Win32 error 5`r`n" }
+            return [string[]]$script:HeldRights
+        }
+    }
+
+    It 'Removes SeBatchLogonRight, and only it, when the SID holds it' {
+        $result = Remove-RealPcBatchLogonRight -Sid $script:TempSid
+
+        $result.Outcome | Should -Be 'Removed'
+        Should -Invoke Invoke-RealPcLsaAccountRight -Times 1 -Exactly -ParameterFilter { $Sid -eq $script:TempSid -and $RemoveRight -eq 'SeBatchLogonRight' }
+        $script:HeldRights | Should -Be @('SeNetworkLogonRight')
+    }
+
+    It 'Removes nothing when the SID does not hold it' {
+        $script:HeldRights = @()
+
+        (Remove-RealPcBatchLogonRight -Sid $script:TempSid).Outcome | Should -Be 'NotHeld'
+        Should -Invoke Invoke-RealPcLsaAccountRight -Times 0 -Exactly -ParameterFilter { $RemoveRight }
+    }
+
+    It 'Reports, never throws, when the rights cannot be read, the removal fails or does not take: <Case>' -ForEach @(
+        @{ Case = 'read fails'; Read = $true; Remove = $false; Ignored = $false; Detail = 'could not read its rights: LsaOpenPolicy failed with Win32 error 5' }
+        @{ Case = 'remove fails'; Read = $false; Remove = $true; Ignored = $false; Detail = 'could not remove it: LsaRemoveAccountRights failed with Win32 error 5' }
+        @{ Case = 'still held'; Read = $false; Remove = $false; Ignored = $true; Detail = 'it still holds the right after the removal' }
+    ) {
+        $script:ReadFails = $Read
+        $script:RemoveFails = $Remove
+        $script:RemoveIgnored = $Ignored
+
+        $result = Remove-RealPcBatchLogonRight -Sid $script:TempSid
+
+        $result.Outcome | Should -Be 'Failed'
+        $result.Detail | Should -Be $Detail
+    }
+
+    It 'Does nothing without a SID' {
+        (Remove-RealPcBatchLogonRight -Sid '').Outcome | Should -Be 'NoSid'
+        Should -Invoke Invoke-RealPcLsaAccountRight -Times 0 -Exactly
+    }
+
+    It 'Reports PASS when the right is gone, SKIP with what to do by hand when not, never FAIL, and no row without a user' {
+        (Get-RealPcBatchLogonRightCleanupRow -Result ([pscustomobject]@{ Outcome = 'Removed'; Detail = 'removed' })).Result | Should -Be 'PASS'
+        (Get-RealPcBatchLogonRightCleanupRow -Result ([pscustomobject]@{ Outcome = 'NotHeld'; Detail = 'x' })).Result | Should -Be 'PASS'
+        $skip = Get-RealPcBatchLogonRightCleanupRow -Result ([pscustomobject]@{ Outcome = 'Failed'; Detail = 'could not remove it: denied' })
+        $skip.Result | Should -Be 'SKIP'
+        $skip.Detail | Should -Be 'could not remove it: denied; remove the unresolved S-1-5-21-... entry from Local Security Policy > User Rights Assignment > Log on as a batch job'
+        @(Get-RealPcBatchLogonRightCleanupRow -Result ([pscustomobject]@{ Outcome = 'NoSid'; Detail = 'x' })).Count | Should -Be 0
+    }
+
+    It 'Revokes it in the link-guard cleanup once, after the user is gone, without naming the SID' {
+        $script:LinkGuard = [pscustomobject]@{ VictimFolder = $null; VictimBefore = @(); TempUser = $null; TempUserName = $null; TempUserSid = $script:TempSid; PlantedBy = 'StandardUser'; PlantNote = ''; Planted = $false }
+
+        $rows = @(Remove-RealPcLinkGuardArtifact)
+        $again = @(Remove-RealPcLinkGuardArtifact)
+
+        $row = $rows | Where-Object { $_.Check -eq 'Took ''Log on as a batch job'' back from the temporary user' }
+        $row.Result | Should -Be 'PASS'
+        $row.Detail | Should -Not -Match 'S-1-5-21-1-2-3'
+        $script:LinkGuard.TempUserSid | Should -BeNullOrEmpty
+        $again | Should -BeNullOrEmpty
+        Should -Invoke Invoke-RealPcLsaAccountRight -Times 1 -Exactly -ParameterFilter { $RemoveRight -eq 'SeBatchLogonRight' }
+    }
+
+    It 'Keeps the user''s SID for the cleanup when the setup stage creates the user' {
+        $stage = [System.Management.Automation.Language.Parser]::ParseFile($script:HarnessPath, [ref]$null, [ref]$null).Find({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Invoke-RealPcLinkGuardSetupStage' }, $true)
+
+        $stage.Extent.Text | Should -Match ([regex]::Escape('$script:LinkGuard | Add-Member -NotePropertyName TempUserSid -NotePropertyValue $userSid -Force'))
+    }
+
+    It 'Has LSA source that is ASCII and compiles, with the calls it needs' {
+        $source = Get-RealPcLsaAccountRightSource
+
+        @([System.Text.Encoding]::UTF8.GetBytes($source) | Where-Object { $_ -gt 0x7F }).Count | Should -Be 0
+        $source | Should -Match 'LsaRemoveAccountRights\(IntPtr policyHandle, byte\[\] accountSid, \[MarshalAs\(UnmanagedType\.U1\)\] bool allRights'
+        $source | Should -Match 'LsaEnumerateAccountRights'
+        # Compiled in a child process, so this session gets no new type.
+        $probe = Join-Path $TestDrive 'Compile-LsaSource.ps1'
+        $lines = @(
+            '$ErrorActionPreference = ''Stop'''
+            ('. ''{0}''' -f $script:HarnessPath.Replace("'", "''"))
+            'Add-Type -TypeDefinition (Get-RealPcLsaAccountRightSource)'
+            '[WgtRealPcLsaAccountRights].GetMethod(''RemoveRight'') -ne $null'
+        )
+        Set-Content -LiteralPath $probe -Value $lines
+        $output = & (Get-Process -Id $PID).Path -NoProfile -NonInteractive -File $probe 2>&1
+        $LASTEXITCODE | Should -Be 0 -Because ($output | Out-String)
+        [string]($output | Select-Object -Last 1) | Should -Be 'True'
     }
 }
 

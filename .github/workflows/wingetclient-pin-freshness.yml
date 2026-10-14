@@ -1,0 +1,142 @@
+name: WinGet Client Pin Freshness
+
+# Weekly freshness signal for the Microsoft.WinGet.Client pin of the opt-in SYSTEM install engine
+# (wgt-gq8.55; Get-WingetClientModulePin in WingetAppSetup/Private/WingetClientModule.ps1). The pin
+# never moves by itself, so a newer stable module on the PowerShell Gallery would otherwise go
+# unnoticed until something breaks.
+#
+# check (windows-latest): build/Set-WingetClientModulePin.ps1 -Check -Latest downloads the
+# Gallery's latest stable version and checks it as a pin move would (two downloads, the Gallery's
+# own hash, every file's Authenticode signature: those signature checks need Windows, so this job
+# cannot run on ubuntu), and prints 'PIN-FRESHNESS: pinned=<v> latest=<v> behind=yes|no'. Behind,
+# the -Check failure that says so is expected and the job passes, handing its output to report.
+# Not behind, the job fails only when the check itself failed (the pinned package changed on the
+# Gallery, or a signature no longer verifies), which shows as a red run.
+#
+# report (ubuntu-latest, only when behind): opens the 'Microsoft.WinGet.Client pin is behind the
+# PowerShell Gallery' issue with the -Check output, or comments on the open one when it does not
+# yet name this version. Modelled on report-failure in e2e-install.yml: its own job, the only one
+# that can write issues, on a hosted runner.
+
+on:
+  schedule:
+    - cron: '23 7 * * 2' # weekly, Tuesdays 07:23 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read # report adds issues: write at job level
+
+concurrency:
+  group: wingetclient-pin-freshness
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    outputs:
+      behind: ${{ steps.pin.outputs.behind }}
+      pinned: ${{ steps.pin.outputs.pinned }}
+      latest: ${{ steps.pin.outputs.latest }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Check the pin against the Gallery's latest stable version
+        id: pin
+        shell: pwsh
+        run: |
+          $reportPath = Join-Path $env:RUNNER_TEMP 'pin-check.txt'
+          & pwsh -NoProfile -File ./build/Set-WingetClientModulePin.ps1 -Check -Latest -OutputDirectory (Join-Path $env:RUNNER_TEMP 'wingetclient-pin') 2>&1 |
+            Tee-Object -FilePath $reportPath
+          $checkExitCode = $LASTEXITCODE
+          $line = Select-String -LiteralPath $reportPath -Pattern '^PIN-FRESHNESS: pinned=(\S+) latest=(\S+) behind=(yes|no)$' | Select-Object -Last 1
+          if (-not $line) {
+            Write-Host '::error::The pin check printed no PIN-FRESHNESS line: the Gallery could not be read. See the log above.'
+            exit 1
+          }
+          $groups = $line.Matches[0].Groups
+          $behind = ($groups[3].Value -eq 'yes')
+          "pinned=$($groups[1].Value)" >> $env:GITHUB_OUTPUT
+          "latest=$($groups[2].Value)" >> $env:GITHUB_OUTPUT
+          "behind=$($behind.ToString().ToLowerInvariant())" >> $env:GITHUB_OUTPUT
+          if ($behind) {
+            Write-Host "::notice::Microsoft.WinGet.Client $($groups[2].Value) is on the Gallery; the pin is $($groups[1].Value)."
+            exit 0
+          }
+          exit $checkExitCode
+
+      - name: Upload the pin check
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: wingetclient-pin-check
+          path: ${{ runner.temp }}\pin-check.txt
+          if-no-files-found: warn
+
+  report:
+    needs: check
+    if: ${{ needs.check.result == 'success' && needs.check.outputs.behind == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write # create-or-comment the pin issue
+    steps:
+      - name: Download the pin check
+        continue-on-error: true
+        uses: actions/download-artifact@v8
+        with:
+          name: wingetclient-pin-check
+          path: pin-check
+
+      - name: Create or update the pin issue
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          PINNED: ${{ needs.check.outputs.pinned }}
+          LATEST: ${{ needs.check.outputs.latest }}
+        run: |
+          set -uo pipefail
+          title='Microsoft.WinGet.Client pin is behind the PowerShell Gallery'
+          marker="<!-- wingetclient-pin-latest: $LATEST -->"
+          body="$RUNNER_TEMP/pin-body.md"
+          {
+            echo "$marker"
+            echo "The PowerShell Gallery's latest stable Microsoft.WinGet.Client is \`$LATEST\`; the SYSTEM install engine is pinned to \`$PINNED\` (\`Get-WingetClientModulePin\` in \`WingetAppSetup/Private/WingetClientModule.ps1\`)."
+            echo
+            echo "- Run: $RUN_URL"
+            echo "- To move the pin, on Windows: \`pwsh -File build/Set-WingetClientModulePin.ps1 -Version $LATEST -Write\`, then \`pwsh -File build/Build-WingetInstallScript.ps1\`, and run the \`e2e-install-system-winget-client\` job of \`e2e-install.yml\` on the branch."
+            echo
+            echo "### \`Set-WingetClientModulePin.ps1 -Check -Latest\` output"
+            echo
+            echo '````text'
+            if [ -s pin-check/pin-check.txt ]; then
+              sed -e '1s/^\xEF\xBB\xBF//' -e 's/\r$//' pin-check/pin-check.txt | cut -c1-1000 | head -n 400 | iconv -f UTF-8 -t UTF-8 -c
+            else
+              echo '(the check output was not uploaded; see the run log)'
+            fi
+            echo '````'
+          } > "$body"
+          cat "$body" >> "$GITHUB_STEP_SUMMARY"
+
+          # Dedup on the exact title, as report-failure does; comment only when this version is new
+          # to the open issue, so a weekly run does not repeat itself.
+          if ! existing=$(gh issue list --repo "$REPO" --state open --search "in:title \"$title\"" --json number,title \
+              --jq "map(select(.title == \"$title\")) | .[0].number // empty"); then
+            echo "::warning::Could not search for an open '$title' issue; creating a new one."
+            existing=''
+          fi
+          if [ -n "$existing" ]; then
+            if gh issue view "$existing" --repo "$REPO" --json body,comments --jq '[.body] + [.comments[].body] | join("\n")' | grep -qF "$marker"; then
+              echo "Issue #$existing already names $LATEST."
+            else
+              gh issue comment "$existing" --repo "$REPO" --body-file "$body"
+            fi
+          else
+            gh issue create --repo "$REPO" --title "$title" --body-file "$body" --assignee J-MaFf
+          fi

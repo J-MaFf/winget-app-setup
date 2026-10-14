@@ -3250,7 +3250,7 @@ function Get-RealPcChangePlan {
         $lines += '  - If %ProgramData%\winget-app-setup exists, rename it to winget-app-setup-old-<time> in the same folder (never delete it).'
     }
     if ($stageNames -contains 'LinkGuardSetup') {
-        $lines += "  - Create a temporary STANDARD local user (random name and password, never printed or written down; member of Users and Performance Log Users, for the batch logon its one-shot task needs), a victim folder under $PublicVictimFolder, and a junction at %ProgramData%\winget-app-setup planted by that user from a one-shot S4U task (registered with the user's password, which Task Scheduler does not store); the user, its profile, its task and the victim folder are removed afterwards."
+        $lines += "  - Create a temporary STANDARD local user (random name and password, never printed or written down; member of Users and Performance Log Users, for the batch logon its one-shot task needs), a victim folder under $PublicVictimFolder, and a junction at %ProgramData%\winget-app-setup planted by that user from a one-shot S4U task (registered with the user's password, which Task Scheduler does not store); the user, its profile, its task, the victim folder and any 'Log on as a batch job' right registering the task gave the user are removed afterwards."
         $lines += "  - Read who holds 'Log on as a batch job' (secedit /export, read-only, into a temporary file that is deleted) for the report."
     }
     if ($stageNames -contains 'System' -or $stageNames -contains 'WinGetClient') {
@@ -4596,6 +4596,39 @@ function Invoke-RealPcWingetUninstall {
     return [pscustomobject]@{ ExitCode = $run.ExitCode; Problem = [string]$run.Problem; Output = @($run.Output) }
 }
 
+<#
+.SYNOPSIS
+    Whether winget still lists a package after an uninstall that exited 0. An app's uninstaller can
+    return before its entry leaves the installed-programs list (7-Zip's does), so a listed package
+    is checked again, every DelaySeconds, up to Attempts times in all.
+.RETURNS
+    $true (still listed after the last attempt), $false (gone) or $null (winget could not answer).
+#>
+function Wait-RealPcWingetUninstalled {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$Id,
+
+        [Parameter(Mandatory = $false)]
+        [int]$Attempts = 6,
+
+        [Parameter(Mandatory = $false)]
+        [int]$DelaySeconds = 5
+    )
+
+    $present = $null
+    for ($attempt = 1; $attempt -le $Attempts; $attempt++) {
+        $present = Test-RealPcWingetInstalled -Id $Id
+        if ($present -ne $true) {
+            return $present
+        }
+        if ($attempt -lt $Attempts) {
+            Start-Sleep -Seconds $DelaySeconds
+        }
+    }
+    return $present
+}
+
 # The source check: winget looks one package up in its 'winget' source, as this account. Returns
 # ExitCode ($null when winget did not run to the end) and Output (for the evidence, with why).
 function Invoke-RealPcWingetSourceCheck {
@@ -5321,6 +5354,244 @@ function Read-RealPcBatchLogonRight {
 
 <#
 .SYNOPSIS
+    The C# that reads and removes one account's user rights through the LSA (advapi32), for
+    Remove-RealPcBatchLogonRight (wgt-gq8.73). ASCII, and compiles under Windows PowerShell 5.1.
+.DESCRIPTION
+    LsaRemoveAccountRights works on a SID whose account is already deleted, and changes only the
+    right named, where a secedit export and import would rewrite every user right.
+.RETURNS
+    [string]
+#>
+function Get-RealPcLsaAccountRightSource {
+    return @'
+using System;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
+
+public static class WgtRealPcLsaAccountRights
+{
+    [StructLayout(LayoutKind.Sequential)]
+    private struct LSA_UNICODE_STRING
+    {
+        public ushort Length;
+        public ushort MaximumLength;
+        public IntPtr Buffer;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct LSA_OBJECT_ATTRIBUTES
+    {
+        public int Length;
+        public IntPtr RootDirectory;
+        public IntPtr ObjectName;
+        public uint Attributes;
+        public IntPtr SecurityDescriptor;
+        public IntPtr SecurityQualityOfService;
+    }
+
+    [DllImport("advapi32.dll")]
+    private static extern uint LsaOpenPolicy(IntPtr systemName, ref LSA_OBJECT_ATTRIBUTES objectAttributes, uint desiredAccess, out IntPtr policyHandle);
+
+    [DllImport("advapi32.dll")]
+    private static extern uint LsaEnumerateAccountRights(IntPtr policyHandle, byte[] accountSid, out IntPtr userRights, out uint countOfRights);
+
+    [DllImport("advapi32.dll")]
+    private static extern uint LsaRemoveAccountRights(IntPtr policyHandle, byte[] accountSid, [MarshalAs(UnmanagedType.U1)] bool allRights, LSA_UNICODE_STRING[] userRights, uint countOfRights);
+
+    [DllImport("advapi32.dll")]
+    private static extern uint LsaFreeMemory(IntPtr buffer);
+
+    [DllImport("advapi32.dll")]
+    private static extern uint LsaClose(IntPtr objectHandle);
+
+    [DllImport("advapi32.dll")]
+    private static extern int LsaNtStatusToWinError(uint status);
+
+    // POLICY_ALL_ACCESS, as Microsoft's LsaAddAccountRights sample opens it (an administrator has
+    // it); removing the last right also deletes the LSA account object.
+    private const uint PolicyAccess = 0x000F0FFF;
+    private const uint StatusObjectNameNotFound = 0xC0000034;
+
+    private static IntPtr Open()
+    {
+        LSA_OBJECT_ATTRIBUTES attributes = new LSA_OBJECT_ATTRIBUTES();
+        attributes.Length = Marshal.SizeOf(typeof(LSA_OBJECT_ATTRIBUTES));
+        IntPtr handle;
+        uint status = LsaOpenPolicy(IntPtr.Zero, ref attributes, PolicyAccess, out handle);
+        if (status != 0)
+        {
+            throw new InvalidOperationException("LsaOpenPolicy failed with Win32 error " + LsaNtStatusToWinError(status));
+        }
+        return handle;
+    }
+
+    public static string[] GetRights(byte[] sid)
+    {
+        IntPtr policy = Open();
+        try
+        {
+            IntPtr rights;
+            uint count;
+            uint status = LsaEnumerateAccountRights(policy, sid, out rights, out count);
+            if (status == StatusObjectNameNotFound)
+            {
+                return new string[0];
+            }
+            if (status != 0)
+            {
+                throw new InvalidOperationException("LsaEnumerateAccountRights failed with Win32 error " + LsaNtStatusToWinError(status));
+            }
+            try
+            {
+                List<string> names = new List<string>();
+                int size = Marshal.SizeOf(typeof(LSA_UNICODE_STRING));
+                for (int i = 0; i < count; i++)
+                {
+                    LSA_UNICODE_STRING right = (LSA_UNICODE_STRING)Marshal.PtrToStructure(new IntPtr(rights.ToInt64() + (long)i * size), typeof(LSA_UNICODE_STRING));
+                    names.Add(Marshal.PtrToStringUni(right.Buffer, right.Length / 2));
+                }
+                return names.ToArray();
+            }
+            finally
+            {
+                LsaFreeMemory(rights);
+            }
+        }
+        finally
+        {
+            LsaClose(policy);
+        }
+    }
+
+    public static void RemoveRight(byte[] sid, string right)
+    {
+        IntPtr policy = Open();
+        IntPtr buffer = Marshal.StringToHGlobalUni(right);
+        try
+        {
+            LSA_UNICODE_STRING[] rights = new LSA_UNICODE_STRING[1];
+            rights[0].Buffer = buffer;
+            rights[0].Length = (ushort)(right.Length * 2);
+            rights[0].MaximumLength = (ushort)((right.Length + 1) * 2);
+            uint status = LsaRemoveAccountRights(policy, sid, false, rights, 1);
+            if (status != 0 && status != StatusObjectNameNotFound)
+            {
+                throw new InvalidOperationException("LsaRemoveAccountRights failed with Win32 error " + LsaNtStatusToWinError(status));
+            }
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(buffer);
+            LsaClose(policy);
+        }
+    }
+}
+'@
+}
+
+<#
+.SYNOPSIS
+    Reads, or removes one of, an account's user rights by its SID, through the LSA. Windows only.
+.PARAMETER Sid
+    The account's SID (S-1-5-...).
+.PARAMETER RemoveRight
+    The right to remove (for example SeBatchLogonRight). Not given: the rights are read.
+.RETURNS
+    [string[]] the rights when reading; nothing when removing. Throws on failure.
+#>
+function Invoke-RealPcLsaAccountRight {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$Sid,
+
+        [Parameter(Mandatory = $false)]
+        [string]$RemoveRight
+    )
+
+    if (-not ('WgtRealPcLsaAccountRights' -as [type])) {
+        Add-Type -TypeDefinition (Get-RealPcLsaAccountRightSource) -ErrorAction Stop
+    }
+    $identifier = New-Object System.Security.Principal.SecurityIdentifier($Sid)
+    $bytes = New-Object byte[] ($identifier.BinaryLength)
+    $identifier.GetBinaryForm($bytes, 0)
+    if ($RemoveRight) {
+        [WgtRealPcLsaAccountRights]::RemoveRight($bytes, $RemoveRight)
+        return
+    }
+    return [string[]]@([WgtRealPcLsaAccountRights]::GetRights($bytes))
+}
+
+<#
+.SYNOPSIS
+    Takes 'Log on as a batch job' (SeBatchLogonRight) back from the temporary user's SID, if it
+    holds it (wgt-gq8.73).
+.DESCRIPTION
+    Registering the S4U planting task can grant the account that right, and deleting the account
+    leaves its SID in the right's list. Best effort: never throws.
+.PARAMETER Sid
+    The temporary user's SID, or empty.
+.RETURNS
+    [pscustomobject] with Outcome ('Removed', 'NotHeld', 'NoSid' or 'Failed') and Detail (never the
+    SID).
+#>
+function Remove-RealPcBatchLogonRight {
+    param (
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [AllowEmptyString()]
+        [string]$Sid
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Sid)) {
+        return [pscustomobject]@{ Outcome = 'NoSid'; Detail = 'the temporary user''s SID is not known' }
+    }
+    try {
+        $rights = @(Invoke-RealPcLsaAccountRight -Sid $Sid)
+    }
+    catch {
+        return [pscustomobject]@{ Outcome = 'Failed'; Detail = "could not read its rights: $(($_.Exception.Message -replace '\s*[\r\n]+\s*', ' ').Trim())" }
+    }
+    if ($rights -notcontains 'SeBatchLogonRight') {
+        return [pscustomobject]@{ Outcome = 'NotHeld'; Detail = 'it does not hold the right' }
+    }
+    try {
+        Invoke-RealPcLsaAccountRight -Sid $Sid -RemoveRight 'SeBatchLogonRight'
+        $left = @(Invoke-RealPcLsaAccountRight -Sid $Sid)
+    }
+    catch {
+        return [pscustomobject]@{ Outcome = 'Failed'; Detail = "could not remove it: $(($_.Exception.Message -replace '\s*[\r\n]+\s*', ' ').Trim())" }
+    }
+    if ($left -contains 'SeBatchLogonRight') {
+        return [pscustomobject]@{ Outcome = 'Failed'; Detail = 'it still holds the right after the removal' }
+    }
+    return [pscustomobject]@{ Outcome = 'Removed'; Detail = 'removed' }
+}
+
+<#
+.SYNOPSIS
+    The report row for Remove-RealPcBatchLogonRight's result: PASS when the SID no longer holds
+    the right, SKIP with what to do by hand when that could not be done; never FAIL, so the
+    cleanup never fails the plan. None for NoSid (no user was created).
+.RETURNS
+    [pscustomobject[]] New-TestPlanRow rows.
+#>
+function Get-RealPcBatchLogonRightCleanupRow {
+    param (
+        [Parameter(Mandatory = $true)]
+        $Result
+    )
+
+    $check = 'Took ''Log on as a batch job'' back from the temporary user'
+    switch ([string]$Result.Outcome) {
+        'Removed' { return @(New-TestPlanRow -Check $check -Result 'PASS' -Detail 'its SID held the right the S4U task registration grants; removed') }
+        'NotHeld' { return @(New-TestPlanRow -Check $check -Result 'PASS' -Detail 'its SID did not hold the right; nothing to remove') }
+        'NoSid' { return @() }
+    }
+    return @(New-TestPlanRow -Check $check -Result 'SKIP' -Detail ("$($Result.Detail); remove the unresolved S-1-5-21-... entry from Local Security Policy > User Rights Assignment > Log on as a batch job"))
+}
+
+<#
+.SYNOPSIS
     Copies what a stage left in the installer's log folder (transcripts, the RMM wrapper's log and
     last-run.json) and the winget logs it wrote into the stage's evidence folder: every run
     overwrites last-run.json, so each stage keeps its own copy.
@@ -5607,6 +5878,8 @@ function Invoke-RealPcLinkGuardSetupStage {
             if ($newUser -and $newUser.SID) {
                 $userSid = [string]$newUser.SID.Value
             }
+            # For the cleanup's revoke of the batch-logon right (wgt-gq8.73), even once the user is gone.
+            $script:LinkGuard | Add-Member -NotePropertyName TempUserSid -NotePropertyValue $userSid -Force
             # Users: BUILTIN\Users may create folders in %ProgramData%, and a junction is one.
             # Performance Log Users: on a server it holds 'Log on as a batch job', which the S4U logon
             # needs; Microsoft's pages disagree for a client, so the right's holders are recorded below.
@@ -5865,6 +6138,13 @@ function Remove-RealPcLinkGuardArtifact {
         }
         $script:LinkGuard.TempUser = $null
     }
+    # wgt-gq8.73: registering the S4U task can grant the user 'Log on as a batch job', which
+    # deleting the user leaves behind under its SID. Best effort; never fails the plan.
+    $userSid = [string]$script:LinkGuard.TempUserSid
+    if (-not [string]::IsNullOrWhiteSpace($userSid)) {
+        $rows += @(Get-RealPcBatchLogonRightCleanupRow -Result (Remove-RealPcBatchLogonRight -Sid $userSid))
+        $script:LinkGuard.TempUserSid = $null
+    }
     $victim = $script:LinkGuard.VictimFolder
     if ($victim) {
         $victimProblem = ''
@@ -6053,7 +6333,13 @@ function Invoke-RealPcTimeBudgetStage {
     $uninstallSection = [ordered]@{}
     $uninstallSection[('winget uninstall --id {0} --exact --source winget --silent (exit {1})' -f $appId, (Format-RealPcWingetExitCode -ExitCode $uninstall.ExitCode))] = @($uninstall.Output)
     Save-RealPcText -Path (Join-Path $EvidenceFolder 'winget-uninstall.txt') -Text (Format-RealPcEvidenceText -Section $uninstallSection)
-    $rows += Get-RealPcUninstallCheckRow -AppId $appId -Present (Test-RealPcWingetInstalled -Id $appId) -UninstallExitCode $uninstall.ExitCode -UninstallProblem $uninstall.Problem -SourceOpen $script:WingetSourceOpen
+    if ($uninstall.ExitCode -eq 0) {
+        $present = Wait-RealPcWingetUninstalled -Id $appId
+    }
+    else {
+        $present = Test-RealPcWingetInstalled -Id $appId
+    }
+    $rows += Get-RealPcUninstallCheckRow -AppId $appId -Present $present -UninstallExitCode $uninstall.ExitCode -UninstallProblem $uninstall.Problem -SourceOpen $script:WingetSourceOpen
     Save-RealPcArpSnapshot -Path (Join-Path $EvidenceFolder 'arp-after-uninstall.txt') -Title "after 'winget uninstall --id $appId'"
 
     # A deterministic spent budget: -MaxRuntimeMinutes 1 and a deadline already in the past, in the
@@ -6259,7 +6545,7 @@ function Invoke-RealPcTestPlanMain {
     $script:RealPcOptions = [pscustomobject]@{ UseOneLiner = [bool]$UseOneLiner; Branch = $Branch; ResetProgramData = [bool]$ResetProgramData }
     $script:StageTimeoutMinutes = $TimeoutMinutes
     $script:MachineFacts = [ordered]@{}
-    $script:LinkGuard = [pscustomobject]@{ VictimFolder = $null; VictimBefore = @(); TempUser = $null; TempUserName = $null; PlantedBy = 'Admin'; PlantNote = ''; Planted = $false }
+    $script:LinkGuard = [pscustomobject]@{ VictimFolder = $null; VictimBefore = @(); TempUser = $null; TempUserName = $null; TempUserSid = $null; PlantedBy = 'Admin'; PlantNote = ''; Planted = $false }
     $script:CatalogId = @()
     # 8 characters: TightVNC uses only the first 8, so this is the whole password that works.
     $script:TightVncPassword = New-RealPcRandomSecret -Length 8

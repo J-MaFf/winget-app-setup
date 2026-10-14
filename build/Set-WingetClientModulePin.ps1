@@ -30,12 +30,20 @@
     Exit 1 unless the pin matches the Gallery's package.
 .PARAMETER Write
     Write the measured values into the pin.
+.PARAMETER Latest
+    Use the Gallery's latest stable version instead of -Version (wgt-gq8.55), and print
+    'PIN-FRESHNESS: pinned=<v> latest=<v> behind=yes|no' first. With -Check, a pin behind it fails
+    the check, and the report covers the new version: what -Write would pin.
 .PARAMETER OutputDirectory
     Where the downloads, the extracted files and pin-report.txt go. Default: a new temp folder.
 .PARAMETER ModuleFile
     The file that holds the pin. Default: WingetAppSetup/Private/WingetClientModule.ps1.
 .EXAMPLE
     pwsh -File build/Set-WingetClientModulePin.ps1 -Check
+.EXAMPLE
+    pwsh -File build/Set-WingetClientModulePin.ps1 -Check -Latest
+    Is the pin behind the Gallery's latest stable version? (The weekly
+    .github/workflows/wingetclient-pin-freshness.yml runs this.)
 .NOTES
     Exit codes: 0 = done (with -Check: the pin matches); 1 = a download, hash, signature or pin
     check failed, or -Write could not rewrite the pin.
@@ -51,6 +59,9 @@ param (
 
     [Parameter(Mandatory = $false)]
     [switch]$Write,
+
+    [Parameter(Mandatory = $false)]
+    [switch]$Latest,
 
     [Parameter(Mandatory = $false)]
     [string]$OutputDirectory,
@@ -190,6 +201,109 @@ function Get-GalleryPackageHash {
     }
 }
 
+<#
+.SYNOPSIS
+    Reads the versions in one page of the Gallery's OData feed, and the link to its next page.
+.PARAMETER FeedXml
+    The page (an Atom feed, as FindPackagesById() returns it).
+.OUTPUTS
+    [pscustomobject] with Versions ([pscustomobject[]] Version and IsPrerelease, one per entry) and
+    NextUrl (the next page, or $null).
+#>
+function Read-GalleryFeedPage {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$FeedXml
+    )
+
+    $document = [System.Xml.XmlDocument]::new()
+    $document.XmlResolver = $null
+    $document.LoadXml($FeedXml)
+    $versions = @()
+    foreach ($properties in @($document.SelectNodes("//*[local-name()='entry']/*[local-name()='properties']"))) {
+        $versionNode = $properties.SelectSingleNode("*[local-name()='Version']")
+        if (-not $versionNode) {
+            continue
+        }
+        $version = ([string]$versionNode.InnerText).Trim()
+        $prereleaseNode = $properties.SelectSingleNode("*[local-name()='IsPrerelease']")
+        $isPrerelease = $version.Contains('-')
+        if ($prereleaseNode -and [string]$prereleaseNode.InnerText -eq 'true') {
+            $isPrerelease = $true
+        }
+        $versions += [pscustomobject]@{ Version = $version; IsPrerelease = $isPrerelease }
+    }
+    $next = $document.SelectSingleNode("/*[local-name()='feed']/*[local-name()='link'][@rel='next']")
+    $nextUrl = $null
+    if ($next) {
+        $nextUrl = [string]$next.GetAttribute('href')
+    }
+    return [pscustomobject]@{ Versions = $versions; NextUrl = $nextUrl }
+}
+
+<#
+.SYNOPSIS
+    Picks the highest stable version (x.y.z, not a prerelease) from the feed's versions.
+.PARAMETER Versions
+    Read-GalleryFeedPage's Versions, from every page.
+.OUTPUTS
+    [string] The version, or $null when there is none.
+#>
+function Select-GalleryLatestStableVersion {
+    param (
+        [Parameter(Mandatory = $false)]
+        [AllowEmptyCollection()]
+        [object[]]$Versions = @()
+    )
+
+    $stable = @($Versions | Where-Object { $null -ne $_ -and -not $_.IsPrerelease -and [string]$_.Version -match '^\d+\.\d+\.\d+$' })
+    if ($stable.Count -eq 0) {
+        return $null
+    }
+    return [string](@($stable | Sort-Object -Property { [version]$_.Version } -Descending)[0].Version)
+}
+
+<#
+.SYNOPSIS
+    Says whether the Gallery's latest stable version is past the pin (wgt-gq8.55).
+.OUTPUTS
+    [bool]
+#>
+function Test-WingetClientPinBehind {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$PinnedVersion,
+
+        [Parameter(Mandatory = $true)]
+        [string]$LatestVersion
+    )
+
+    return ([version]$LatestVersion -gt [version]$PinnedVersion)
+}
+
+<#
+.SYNOPSIS
+    Asks the Gallery for Microsoft.WinGet.Client's latest stable version, following the feed's
+    pages (at most 20).
+.OUTPUTS
+    [string] The version; throws when the feed lists none.
+#>
+function Get-GalleryLatestStableVersion {
+    $url = "https://www.powershellgallery.com/api/v2/FindPackagesById()?id='Microsoft.WinGet.Client'"
+    $versions = @()
+    for ($page = 1; $page -le 20 -and $url; $page++) {
+        $response = Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 120 -ErrorAction Stop
+        $read = Read-GalleryFeedPage -FeedXml ([string]$response.Content)
+        $versions += @($read.Versions)
+        $url = $read.NextUrl
+    }
+    $latest = Select-GalleryLatestStableVersion -Versions $versions
+    if (-not $latest) {
+        throw 'The PowerShell Gallery lists no stable Microsoft.WinGet.Client version.'
+    }
+    return $latest
+}
+
 if ($MyInvocation.InvocationName -ne '.') {
     $ErrorActionPreference = 'Stop'
     $ProgressPreference = 'SilentlyContinue'
@@ -203,6 +317,12 @@ if ($MyInvocation.InvocationName -ne '.') {
 
     . $ModuleFile
     $pin = Get-WingetClientModulePin
+    if ($Latest) {
+        $Version = Get-GalleryLatestStableVersion
+        $behind = Test-WingetClientPinBehind -PinnedVersion $pin.Version -LatestVersion $Version
+        # One line for .github/workflows/wingetclient-pin-freshness.yml to read.
+        Write-Host ('PIN-FRESHNESS: pinned={0} latest={1} behind={2}' -f $pin.Version, $Version, $(if ($behind) { 'yes' } else { 'no' }))
+    }
     if (-not $Version) {
         $Version = $pin.Version
     }

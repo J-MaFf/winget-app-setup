@@ -239,6 +239,70 @@ Describe 'Removing the preinstalled apps' {
         $results = @($output | Where-Object { $_ -isnot [System.Management.Automation.InformationRecord] })
         @($results | ForEach-Object { "$($_.App)=$($_.Result)" }) | Should -Be @('Google.Chrome=removed', '7zip.7zip=still present', 'Git.Git=absent', 'Microsoft.PowerShell=still present')
     }
+
+    It 'Writes what it removed to -ResultPath, the record the SYSTEM legs read (wgt-gq8.53)' {
+        $script:RemovableByWinget = @('Google.Chrome')
+        $path = Join-Path $TestDrive ('new-folder-' + [guid]::NewGuid().ToString('N') + '/preinstalled-apps.json')
+
+        $null = Invoke-RunnerPreparation -PackageId @('Google.Chrome', '7zip.7zip', 'Git.Git') -ListTimeoutSeconds 5 -UninstallTimeoutSeconds 5 -ResultPath $path 6>$null
+
+        $record = Get-Content -Raw -LiteralPath $path | ConvertFrom-Json
+        $record.schemaVersion | Should -Be 1
+        $record.complete | Should -BeTrue
+        @($record.removed) | Should -Be @('Google.Chrome')
+        @($record.absent) | Should -Be @('Git.Git')
+        @($record.leftInstalled) | Should -Be @('7zip.7zip')
+        @($record.unknown) | Should -BeNullOrEmpty
+    }
+
+    It 'Writes the record after each app, so a step stopped part-way leaves what it got through' {
+        $script:PartialPath = Join-Path $TestDrive ('partial-' + [guid]::NewGuid().ToString('N') + '.json')
+        $path = $script:PartialPath
+        $script:Snapshots = @()
+        Mock Write-PreparationResult { if (Test-Path -LiteralPath $script:PartialPath) { $script:Snapshots += (Get-Content -Raw -LiteralPath $script:PartialPath | ConvertFrom-Json) } }
+
+        $null = Invoke-RunnerPreparation -PackageId @('Google.Chrome', '7zip.7zip') -ListTimeoutSeconds 5 -UninstallTimeoutSeconds 5 -ResultPath $path 6>$null
+
+        # Before the second app's line: the first app's record, not yet complete.
+        $script:Snapshots.Count | Should -Be 1
+        @($script:Snapshots[0].removed) | Should -Be @('Google.Chrome')
+        $script:Snapshots[0].complete | Should -BeFalse
+        (Get-Content -Raw -LiteralPath $path | ConvertFrom-Json).complete | Should -BeTrue
+    }
+
+    It 'Writes no record without -ResultPath' {
+        Mock Save-PreparationRecord { }
+
+        $null = Invoke-RunnerPreparation -PackageId @('Google.Chrome') -ListTimeoutSeconds 5 -UninstallTimeoutSeconds 5 6>$null
+
+        Should -Invoke Save-PreparationRecord -Times 0 -Exactly
+    }
+}
+
+Describe 'ConvertTo-PreparationRecord' {
+    It 'Sorts the results by what is true now, and counts an unexpected result as unknown' {
+        $record = ConvertTo-PreparationRecord -Results @(
+            [pscustomobject]@{ App = 'Google.Chrome'; Result = 'removed' }
+            [pscustomobject]@{ App = 'Git.Git'; Result = 'absent' }
+            [pscustomobject]@{ App = '7zip.7zip'; Result = 'still present' }
+            [pscustomobject]@{ App = 'Microsoft.PowerShell'; Result = 'unknown' }
+            [pscustomobject]@{ App = 'Contoso.Odd'; Result = 'something else' }
+        ) -Complete
+
+        $record.complete | Should -BeTrue
+        $record.removed | Should -Be @('Google.Chrome')
+        $record.absent | Should -Be @('Git.Git')
+        $record.leftInstalled | Should -Be @('7zip.7zip')
+        $record.unknown | Should -Be @('Microsoft.PowerShell', 'Contoso.Odd')
+    }
+
+    It 'Writes empty lists as JSON arrays, and one id as a one-element array' {
+        $json = ConvertTo-Json -InputObject (ConvertTo-PreparationRecord -Results @([pscustomobject]@{ App = 'Google.Chrome'; Result = 'removed' })) -Depth 3
+
+        $json | Should -Match '"removed":\s*\[\s*"Google\.Chrome"\s*\]'
+        $json | Should -Match '"absent":\s*\[\s*\]'
+        $json | Should -Match '"complete":\s*false'
+    }
 }
 
 Describe 'The time limits of runner preparation' {

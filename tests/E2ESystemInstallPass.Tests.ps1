@@ -661,13 +661,18 @@ Describe 'e2e/Invoke-SystemInstallPass.ps1 per-app wiring' {
         $main.IndexOf('Get-SystemPassAppExpectation') | Should -BeLessThan $main.IndexOf('Invoke-SystemPassTask')
     }
 
-    It 'Runs e2e/Remove-PreinstalledApps.ps1 in the e2e-install-system job with its defaults, the list the checks read' {
+    It 'Runs e2e/Remove-PreinstalledApps.ps1 in both SYSTEM jobs with its default apps, writing the record the install step reads (wgt-gq8.53)' {
         $workflow = Get-Content -Raw -LiteralPath (Join-Path $script:RepoRoot '.github/workflows/e2e-install.yml')
         $start = $workflow.IndexOf("`n  e2e-install-system:")
-        $job = $workflow.Substring($start, $workflow.IndexOf("`n  report-failure:") - $start)
+        $jobs = $workflow.Substring($start, $workflow.IndexOf("`n  report-failure:") - $start)
 
-        $job | Should -Match '(?m)^\s+& \.\\e2e\\Remove-PreinstalledApps\.ps1\s*$'
-        $job | Should -Not -Match 'Remove-PreinstalledApps\.ps1 +-'
+        $removals = [regex]::Matches($jobs, '(?m)^\s+& \.\\e2e\\Remove-PreinstalledApps\.ps1(?<args>.*)$')
+        $removals.Count | Should -Be 2
+        foreach ($removal in $removals) {
+            $removal.Groups['args'].Value | Should -Match "^ -ResultPath \(Join-Path \`$env:RUNNER_TEMP 'e2e-diagnostics\\preinstalled-apps\.json'\)\s*$"
+        }
+        $passes = [regex]::Matches($jobs, "(?m)^.*Invoke-SystemInstallPass\.ps1.*$|^\s+\`$passArguments = .*$")
+        @($passes | Where-Object { $_.Value -match "-PreparationResultPath', \(Join-Path \`$diagnosticsDir 'preinstalled-apps\.json'\)|-PreparationResultPath \(Join-Path \`$diagnosticsDir 'preinstalled-apps\.json'\)" }).Count | Should -Be 2
     }
 }
 
@@ -902,5 +907,219 @@ Describe 'The SYSTEM pass with the Microsoft.WinGet.Client engine' {
         $main | Should -Match "& \`$wingetAppSetupModule \{ Get-WingetClientModulePin \}"
         $main | Should -Match 'Test-WingetPackageInstalled -PackageId \$PackageId -TimeoutSeconds 60'
         (Get-Command -Name (Join-Path $script:RepoRoot 'e2e/Invoke-SystemInstallPass.ps1')).Parameters['PassCount'].Attributes.Where({ $_ -is [System.Management.Automation.ValidateRangeAttribute] }).MaxRange | Should -Be 2
+    }
+}
+
+# wgt-gq8.53: the apps the run must install are the ones the preparation step recorded as removed
+# (or absent), not its default list, so an app it could not remove does not fail the leg.
+Describe 'Get-PreparationRemovedList' {
+    BeforeAll {
+        function Write-PreparationFixture {
+            param ([string]$Text)
+            $path = Join-Path $TestDrive ([guid]::NewGuid().ToString('N') + '.json')
+            [System.IO.File]::WriteAllText($path, $Text)
+            return $path
+        }
+    }
+
+    It 'Reads the removed and absent ids, which the run must install, and leaves out the ones still installed' {
+        $path = Write-PreparationFixture -Text '{ "schemaVersion": 1, "complete": true, "removed": ["Google.Chrome", "Git.Git"], "absent": ["7zip.7zip"], "leftInstalled": ["Contoso.Stuck"], "unknown": [] }'
+
+        $read = Get-PreparationRemovedList -Path $path
+
+        $read.Problem | Should -BeNullOrEmpty
+        $read.Ids | Should -Be @('Google.Chrome', 'Git.Git', '7zip.7zip')
+        $read.Detail | Should -Be 'removed: Google.Chrome, Git.Git; absent: 7zip.7zip; left installed: Contoso.Stuck; unknown: ; complete: True'
+    }
+
+    It 'Reads a record that lists nothing as no app to require' {
+        $path = Write-PreparationFixture -Text '{ "schemaVersion": 1, "complete": false, "removed": [], "absent": [], "leftInstalled": [], "unknown": ["Google.Chrome"] }'
+
+        $read = Get-PreparationRemovedList -Path $path
+
+        $read.Problem | Should -BeNullOrEmpty
+        $null -eq $read.Ids | Should -BeFalse
+        @($read.Ids).Count | Should -Be 0
+    }
+
+    It 'Reports a missing, unreadable or foreign record instead of guessing: <Case>' -ForEach @(
+        @{ Case = 'missing'; Text = $null; Problem = 'no record at *' }
+        @{ Case = 'not JSON'; Text = 'not json'; Problem = 'could not read *' }
+        @{ Case = 'another schema'; Text = '{ "schemaVersion": 2, "removed": [], "absent": [] }'; Problem = '*is not a schema 1 record with removed and absent lists' }
+        @{ Case = 'no absent list'; Text = '{ "schemaVersion": 1, "removed": [] }'; Problem = '*is not a schema 1 record with removed and absent lists' }
+    ) {
+        $path = Join-Path $TestDrive 'no-such-record.json'
+        if ($null -ne $Text) {
+            $path = Write-PreparationFixture -Text $Text
+        }
+
+        $read = Get-PreparationRemovedList -Path $path
+
+        $read.Ids | Should -BeNullOrEmpty
+        $read.Problem | Should -BeLike $Problem
+    }
+
+    It 'Reads the record e2e/Remove-PreinstalledApps.ps1 writes' {
+        $path = Join-Path $TestDrive 'written-by-the-step.json'
+        & {
+            . (Join-Path $script:RepoRoot 'e2e/Remove-PreinstalledApps.ps1')
+            Save-PreparationRecord -Path $path -Results @(
+                [pscustomobject]@{ App = 'Google.Chrome'; Result = 'removed' }
+                [pscustomobject]@{ App = '7zip.7zip'; Result = 'still present' }
+                [pscustomobject]@{ App = 'Git.Git'; Result = 'absent' }
+            ) -Complete
+        }
+
+        (Get-PreparationRemovedList -Path $path).Ids | Should -Be @('Google.Chrome', 'Git.Git')
+    }
+
+    It 'Requires Installed only for the apps the record lists, and accepts one left installed as already there' {
+        Mock Get-OSArchitecture { 'X64' }
+        Mock Get-ComputerManufacturer { 'Microsoft Corporation' }
+        Mock Test-WindowsTerminalHostsCurrentSession { $true }
+        $catalog = @(Get-DefaultAppCatalog)
+
+        $expectations = @(Get-SystemPassAppExpectation -Catalog $catalog -Applicability (Get-SystemRunApplicability -Catalog $catalog) -RemovedApps @('Google.Chrome', 'Git.Git'))
+        $sevenZip = $expectations | Where-Object { $_.Id -eq '7zip.7zip' }
+        $rows = @(Get-SystemPassAppResult -RunRecord ([pscustomobject]@{ schemaVersion = 1; apps = @([pscustomobject]@{ id = '7zip.7zip'; status = 'Skipped'; reason = 'already installed' }) }) -AppExpectation @($sevenZip))
+
+        @($expectations | Where-Object { $_.MustInstall } | ForEach-Object { $_.Id } | Sort-Object) | Should -Be @('Git.Git', 'Google.Chrome')
+        ($rows | Where-Object { $_.Assertion -eq 'App installed: 7zip.7zip' }).Result | Should -Be 'PASS'
+    }
+}
+
+Describe 'e2e/Invoke-SystemInstallPass.ps1 reads the preparation record (wiring, wgt-gq8.53)' {
+    It 'Takes the ids from -PreparationResultPath, and falls back to the default list only when the record cannot be read' {
+        $script = Get-Content -Raw -LiteralPath (Join-Path $script:RepoRoot 'e2e/Invoke-SystemInstallPass.ps1')
+        $main = $script.Substring($script.IndexOf('if ($MyInvocation.InvocationName -ne ''.'')'))
+
+        $main | Should -Match '\$preparation = Get-PreparationRemovedList -Path \$PreparationResultPath'
+        $main | Should -Match '\$removedApps = \$preparation\.Ids'
+        $main.IndexOf('$removedApps = $preparation.Ids') | Should -BeLessThan $main.IndexOf('Get-PreinstalledAppRemovalList')
+        $main | Should -Match 'if \(\$null -eq \$removedApps\) \{\s+\$removedApps = Get-PreinstalledAppRemovalList'
+    }
+}
+
+# wgt-gq8.49: the SYSTEM leg's optional first pass with a time budget already used up.
+Describe 'The SYSTEM budget pass' {
+    BeforeAll {
+        $script:BudgetRecordPath = Join-Path $script:RepoRoot 'tests/fixtures/e2e/system-budget-last-run.json'
+        $script:BudgetWrapperLog = @(
+            'winget-app-setup RMM wrapper (machine phase): running as NT AUTHORITY\SYSTEM, 64-bit process: True, PowerShell 5.1.26100.1.',
+            'Started by a 32-bit PowerShell on 64-bit Windows, and relaunched in 64-bit Windows PowerShell through Sysnative.',
+            'Time budget: 1 minutes, until 2026-10-05T05:29:12Z: the installer starts no app install after that and exits 9 for the next run to finish.',
+            "Installer checked (SHA256 $($script:Sha256)).",
+            'The installer exited with 9. Its transcripts and last-run.json are in C:\ProgramData\winget-app-setup\logs.'
+        ) -join "`r`n"
+
+        function Get-BudgetRecord {
+            return (Read-SystemPassRunRecord -Path $script:BudgetRecordPath).Record
+        }
+
+        function Get-WindowsLatestFirstRunExpectation {
+            $catalog = @(Get-DefaultAppCatalog)
+            return @(Get-SystemPassAppExpectation -Catalog $catalog -Applicability (Get-SystemRunApplicability -Catalog $catalog) -RemovedApps @('Google.Chrome', '7zip.7zip', 'Git.Git'))
+        }
+
+        function Get-BudgetRow {
+            param ($Rows, [string]$Assertion)
+            $Rows | Where-Object Assertion -EQ $Assertion
+        }
+    }
+
+    BeforeEach {
+        Mock Get-OSArchitecture { 'X64' }
+        Mock Get-ComputerManufacturer { 'Microsoft Corporation' }
+        Mock Test-WindowsTerminalHostsCurrentSession { $true }
+    }
+
+    It 'Builds the budget task''s arguments: a 1-minute budget and the deadline' {
+        Get-SystemPassTaskArgument -WrapperPath 'D:\a\repo\rmm\Invoke-WingetAppSetup.ps1' -InstallerPath 'D:\a\repo\winget-app-install.ps1' -InstallerSha256 $script:Sha256 -MaxRuntimeMinutes 1 -RunDeadlineUtc '2026-10-05T05:29:12Z' |
+            Should -Be "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File ""D:\a\repo\rmm\Invoke-WingetAppSetup.ps1"" -InstallerPath ""D:\a\repo\winget-app-install.ps1"" -InstallerSha256 $($script:Sha256) -MaxRuntimeMinutes 1 -RunDeadlineUtc 2026-10-05T05:29:12Z"
+    }
+
+    It 'Sets the deadline a minute in the past, in the form the wrapper''s -RunDeadlineUtc accepts' {
+        $deadline = Get-SystemPassBudgetDeadline -Now ([DateTime]::new(2026, 10, 5, 5, 30, 12, [DateTimeKind]::Utc))
+
+        $deadline | Should -Be '2026-10-05T05:29:12Z'
+        $wrapperAst = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $script:RepoRoot 'rmm/Invoke-WingetAppSetup.ps1'), [ref]$null, [ref]$null)
+        $parameter = @($wrapperAst.ParamBlock.Parameters | Where-Object { $_.Name.VariablePath.UserPath -eq 'RunDeadlineUtc' })[0]
+        $pattern = @($parameter.Attributes | Where-Object { $_.TypeName.Name -eq 'ValidatePattern' })[0].PositionalArguments[0].Value
+        $deadline | Should -Match $pattern
+    }
+
+    It 'Passes a run that exits 9 with every app that applies not attempted (the fixture of such a run)' {
+        $rows = @(Get-SystemPassBudgetResult -TaskExitCode 9 -WrapperLog $script:BudgetWrapperLog -RunRecord (Get-BudgetRecord) -AppExpectation (Get-WindowsLatestFirstRunExpectation))
+
+        @($rows | Where-Object { $_.Result -ne 'PASS' } | ForEach-Object { "$($_.Assertion): $($_.Detail)" }) | Should -BeNullOrEmpty
+        @($rows | ForEach-Object { $_.Assertion }) | Should -Contain 'Budget pass: not attempted: Google.Chrome'
+        @($rows | ForEach-Object { $_.Assertion }) | Should -Contain 'Budget pass: not-applicable skip recorded: Dell.CommandUpdate.Universal'
+        @($rows | Where-Object { $_.Assertion -like 'Budget pass: not attempted: *' }).Count | Should -Be 9
+        (Get-BudgetRow -Rows $rows -Assertion 'Budget pass: wrapper passed the time budget on').Detail | Should -Be 'Time budget: 1 minutes, until 2026-10-05T05:29:12Z; the installer exited with 9'
+        (Get-BudgetRow -Rows $rows -Assertion 'Budget pass: nothing installed or failed').Detail | Should -Be '9 app(s) not attempted'
+    }
+
+    It 'Fails a run that the budget did not stop: exit 0, apps installed, WAU configured (the normal SYSTEM fixture)' {
+        $normal = (Read-SystemPassRunRecord -Path (Join-Path $script:RepoRoot 'tests/fixtures/e2e/system-last-run.json')).Record
+
+        $rows = @(Get-SystemPassBudgetResult -TaskExitCode 0 -WrapperLog $script:GoodWrapperLog -RunRecord $normal -AppExpectation (Get-WindowsLatestFirstRunExpectation))
+
+        (Get-BudgetRow -Rows $rows -Assertion 'Budget pass: exit code 9').Result | Should -Be 'FAIL'
+        (Get-BudgetRow -Rows $rows -Assertion 'Budget pass: exit code 9').Detail | Should -Be 'exit 0, expected 9 (time budget used up)'
+        (Get-BudgetRow -Rows $rows -Assertion 'Budget pass: wrapper passed the time budget on').Detail | Should -Be 'no ''Time budget: <n> minutes'' line; no ''The installer exited with 9.'' line'
+        (Get-BudgetRow -Rows $rows -Assertion 'Budget pass: last-run.json records the run').Result | Should -Be 'FAIL'
+        (Get-BudgetRow -Rows $rows -Assertion 'Budget pass: auto-updates not attempted').Detail | Should -Be 'autoUpdates.status: Configured'
+        (Get-BudgetRow -Rows $rows -Assertion 'Budget pass: nothing installed or failed').Detail | Should -Match '^with the budget used up, the run still did: 7zip\.7zip Installed; '
+        (Get-BudgetRow -Rows $rows -Assertion 'Budget pass: not attempted: Google.Chrome').Detail | Should -Be 'last-run.json: Installed; expected NotAttempted (the run''s <n>-minute time budget was used up)'
+        # Not-applicable apps are decided before the budget is looked at, so they pass either way.
+        (Get-BudgetRow -Rows $rows -Assertion 'Budget pass: not-applicable skip recorded: Adobe.Acrobat.Reader.32-bit').Result | Should -Be 'PASS'
+    }
+
+    It 'Fails every record row when there is no last-run.json, and when the task did not finish' {
+        $rows = @(Get-SystemPassBudgetResult -TaskExitCode $null -WrapperLog $null -RunRecord $null -RunRecordProblem 'no last-run.json at C:\x' -AppExpectation (Get-WindowsLatestFirstRunExpectation))
+
+        @($rows).Count | Should -Be 5
+        @($rows | Where-Object { $_.Result -eq 'PASS' }) | Should -BeNullOrEmpty
+        (Get-BudgetRow -Rows $rows -Assertion 'Budget pass: exit code 9').Detail | Should -Be 'the scheduled task did not finish'
+        (Get-BudgetRow -Rows $rows -Assertion 'Budget pass: auto-updates not attempted').Detail | Should -Be 'no last-run.json at C:\x'
+    }
+
+    It 'Requires the budget''s reason, and leaves KNOWN_PLATFORM_INCOMPATIBLE apps unchecked' {
+        $record = Get-BudgetRecord
+        ($record.apps | Where-Object { $_.id -eq 'Google.Chrome' }).reason = 'something else'
+
+        $rows = @(Get-SystemPassBudgetResult -TaskExitCode 9 -WrapperLog $script:BudgetWrapperLog -RunRecord $record -AppExpectation (Get-WindowsLatestFirstRunExpectation) -SkipApps @('Git.Git'))
+
+        (Get-BudgetRow -Rows $rows -Assertion 'Budget pass: not attempted: Google.Chrome').Result | Should -Be 'FAIL'
+        Get-BudgetRow -Rows $rows -Assertion 'Budget pass: not attempted: Git.Git' | Should -BeNullOrEmpty
+    }
+
+    It 'Matches the reason and status the installer records for a spent budget' {
+        $install = Get-Content -Raw -LiteralPath (Join-Path $script:RepoRoot 'WingetAppSetup/Public/Install.ps1')
+
+        $install | Should -Match ([regex]::Escape('$runBudgetReason = "the run''s $($runBudget.Minutes)-minute time budget was used up"'))
+        $install | Should -Match ([regex]::Escape('New-AppRunRecord -Id $app.name -Status ''NotAttempted'' -Reason $runBudgetReason'))
+        $install | Should -Match ([regex]::Escape("`$wauResult = [pscustomobject]@{ Status = 'NotAttempted'"))
+        (Get-Content -Raw -LiteralPath (Join-Path $script:RepoRoot 'rmm/Invoke-WingetAppSetup.ps1')) | Should -Match ([regex]::Escape("Write-RmmLine ('Time budget: {0} minutes, until {1}:"))
+    }
+
+    It 'Runs the budget pass first, only with -BudgetPass, and the workflow passes it only when budget_pass is ticked' {
+        $script = Get-Content -Raw -LiteralPath (Join-Path $script:RepoRoot 'e2e/Invoke-SystemInstallPass.ps1')
+        $main = $script.Substring($script.IndexOf('if ($MyInvocation.InvocationName -ne ''.'')'))
+        $workflow = Get-Content -Raw -LiteralPath (Join-Path $script:RepoRoot '.github/workflows/e2e-install.yml')
+        $start = $workflow.IndexOf("`n  e2e-install-system:")
+        $job = $workflow.Substring($start, $workflow.IndexOf("`n  e2e-install-system-winget-client:") - $start)
+
+        $main | Should -Match 'if \(\$BudgetPass\) \{'
+        $main | Should -Match '-MaxRuntimeMinutes 1 -RunDeadlineUtc \(Get-SystemPassBudgetDeadline\)'
+        $main | Should -Match 'Get-SystemPassBudgetResult [^\r\n]*-AppExpectation \$catalogExpectation'
+        $main.IndexOf('Get-SystemPassBudgetResult') | Should -BeLessThan $main.IndexOf('for ($passNumber = 1;')
+        $workflow | Should -Match '(?m)^      budget_pass:\r?\n(.*\r?\n)*?        type: boolean\r?\n        default: false'
+        $job | Should -Match 'BUDGET_PASS: \$\{\{ inputs\.budget_pass \}\}'
+        $job | Should -Match "if \(\`$env:BUDGET_PASS -eq 'true'\) \{\s+\`$passArguments \+= '-BudgetPass'"
+        $job | Should -Match 'timeout-minutes: \$\{\{ inputs\.budget_pass && 62 \|\| 45 \}\}'
+        # The job's backstop covers its steps' longest limits, plus a few minutes for checkout and uploads.
+        $jobLimit = [int][regex]::Match($job, '(?m)^    timeout-minutes: (\d+)').Groups[1].Value
+        $jobLimit | Should -BeGreaterOrEqual (15 + 3 + 62 + 5 + 5)
     }
 }
