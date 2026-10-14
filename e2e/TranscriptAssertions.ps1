@@ -24,7 +24,8 @@
 .SYNOPSIS
     Lists the installer transcripts in a log folder, oldest first.
 .DESCRIPTION
-    Real-run transcripts are install-<yyyyMMdd-HHmmss>.log. A dry run adds '-whatif': those are
+    Real-run transcripts are install-<yyyyMMdd-HHmmss>[-<n>].log (-<n> when that name was taken,
+    wgt-gq8.58), the suffixes below coming last. A dry run adds '-whatif': those are
     left out, they prove nothing about an install. The Windows PowerShell 5.1 phase of a run
     (finding or installing PowerShell 7, then relaunching) adds '-bootstrap'. The 5.1 bootstrap
     transcripts are returned separately: they hold no install, and the 5.1 parent keeps its

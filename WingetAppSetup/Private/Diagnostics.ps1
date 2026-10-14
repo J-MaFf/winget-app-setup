@@ -166,9 +166,9 @@ function ConvertFrom-DiagnosticsLogStamp {
     Picks the logs of the latest run from the installer's logs folder.
 .DESCRIPTION
     By the names the installer gives its logs (see Remove-OldInstallerLog):
-      - Transcripts (install-<time>[-bootstrap|-rmm|-userphase].log; -whatif ones left out): the
-        newest and every other started up to WindowMinutes before it, at most MaximumTranscripts,
-        since one run can write four. The one last-run.json names is kept too.
+      - Transcripts (install-<time>[-<n>][-bootstrap|-rmm|-userphase].log; -whatif ones left
+        out): the newest and every other started up to WindowMinutes before it, at most
+        MaximumTranscripts, since one run can write four. The one last-run.json names is kept too.
       - Installer logs (winget-*, pwsh-msi-*, wau-msi-*), from the oldest transcript kept on, at
         most MaximumInstallerLogs, newest first.
       - last-run.json.
@@ -210,13 +210,13 @@ function Select-DiagnosticsLogFile {
             # A link in the logs folder is never the installer's: not read (wgt-gq8.59).
             continue
         }
-        if ($file.Name -match '^install-(?<stamp>\d{8}-\d{6})(?:-bootstrap|-rmm|-userphase)?\.log$') {
+        if ($file.Name -match '^install-(?<stamp>\d{8}-\d{6})(?:-\d+)?(?:-bootstrap|-rmm|-userphase)?\.log$') {
             $time = ConvertFrom-DiagnosticsLogStamp -Stamp $Matches['stamp']
             if ($null -ne $time) {
                 $transcripts += [pscustomobject]@{ File = $file; Stamp = $Matches['stamp']; Time = $time }
             }
         }
-        elseif ($file.Name -match '^(?:winget-(?:install|upgrade|uninstall|repair)-.+|pwsh-msi|wau-msi-(?:install|uninstall))-(?<stamp>\d{8}-\d{6})(?:-\d+)?\.log$') {
+        elseif ($file.Name -match '^(?:winget-(?:install|upgrade|uninstall|repair)-.+|pwsh-msi|wau-msi-(?:install|uninstall))-(?<stamp>\d{8}-\d{6})(?:-\d+)*\.log$') {
             $installerLogs += [pscustomobject]@{ File = $file; Stamp = $Matches['stamp'] }
         }
         elseif ($file.Name -eq 'last-run.json') {

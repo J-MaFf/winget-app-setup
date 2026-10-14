@@ -181,7 +181,9 @@ function New-RestrictedDirectory {
          it is still a real folder afterwards.
     Once locked, no other account can open either folder to rename, replace or relink it. A folder
     that existed already is locked in place: what is already in it stays, and a handle a process of
-    its former owner opened before the lock keeps the access it was opened with. Throws on any
+    its former owner opened before the lock keeps the access it was opened with, so files the
+    installer writes there under a predictable name are always new entries (New-ExclusiveLogFile,
+    or a CreateNew temporary file moved into place, wgt-gq8.58). Throws on any
     failure: 'RestrictedDirectoryAclFailed' when the access list could not be set, 'DirectoryIsLink'
     for a link, or the error of a folder that could not be created (a file in the way, a full disk).
 .PARAMETER ChildName
@@ -189,6 +191,9 @@ function New-RestrictedDirectory {
 .PARAMETER ReadableByUsers
     Standard users may read the child folder and what is in it (the logs folder, review finding
     P3-14).
+.PARAMETER LinkWarning
+    A list each warning about a removed link is also added to, so a caller whose log starts only
+    afterwards can repeat it there (wgt-gq8.59).
 .OUTPUTS
     [string] The folder's path.
 #>
@@ -199,7 +204,11 @@ function Initialize-ProgramDataFolder {
         [string]$ChildName = '',
 
         [Parameter(Mandatory = $false)]
-        [switch]$ReadableByUsers
+        [switch]$ReadableByUsers,
+
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [System.Collections.Generic.List[string]]$LinkWarning
     )
 
     if ([string]::IsNullOrWhiteSpace($env:ProgramData)) {
@@ -220,7 +229,11 @@ function Initialize-ProgramDataFolder {
             catch {
                 throw (New-DirectoryIsLinkError -Path $folder -Message ("'{0}' is a link (a junction or symbolic link), not a folder, and the link could not be removed: {1} Nothing was written through it. Remove the link in an elevated prompt (rmdir `"{0}`" removes a junction, not what it points to) and re-run this installer." -f $folder, $_.Exception.Message))
             }
-            Write-WarningMessage ("'{0}' was a link (a junction or symbolic link), not a folder. The link was removed without changing what it pointed to, and a folder is created in its place." -f $folder)
+            $linkMessage = "'{0}' was a link (a junction or symbolic link), not a folder. The link was removed without changing what it pointed to, and a folder is created in its place." -f $folder
+            Write-WarningMessage $linkMessage
+            if ($null -ne $LinkWarning) {
+                $LinkWarning.Add($linkMessage)
+            }
             $attributes = $null
         }
         if ($null -eq $attributes) {
@@ -238,4 +251,96 @@ function Initialize-ProgramDataFolder {
         Set-RestrictedDirectoryAcl -Path $folder -ReadableByUsers:$usersRead
     }
     return $folders[-1]
+}
+
+<#
+.SYNOPSIS
+    Creates a new, empty log file in a folder and returns its path, never opening an entry that is
+    already there (wgt-gq8.58).
+.DESCRIPTION
+    A logs folder a standard user created before the first elevated run is locked in place, so what
+    that user left in it stays, owned by them, under the names the installer uses. Each name is
+    created with CreateNew, which fails on any existing entry (a file, a hard link, a link), and then
+    the next name is tried: <Stem><Tail>, then <Stem>-2<Tail>, <Stem>-3<Tail> and so on. The program
+    that writes the log (Start-Transcript, winget, msiexec) then opens this run's own file. Runs
+    under Windows PowerShell 5.1 too (the bootstrap's transcript and msiexec log).
+.PARAMETER Directory
+    The folder, which must exist.
+.PARAMETER Stem
+    The name up to where a number is added, e.g. install-20261012-101500.
+.PARAMETER Tail
+    The rest of the name, e.g. -bootstrap.log.
+.PARAMETER MaxAttempts
+    How many names to try before giving up.
+.OUTPUTS
+    [string] The new file's path. Throws when no name could be created.
+#>
+function New-ExclusiveLogFile {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$Directory,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Stem,
+
+        [Parameter(Mandatory = $false)]
+        [string]$Tail = '.log',
+
+        [Parameter(Mandatory = $false)]
+        [ValidateRange(1, 1000)]
+        [int]$MaxAttempts = 100
+    )
+
+    for ($number = 1; $number -le $MaxAttempts; $number++) {
+        $name = $Stem + $Tail
+        if ($number -gt 1) {
+            $name = '{0}-{1}{2}' -f $Stem, $number, $Tail
+        }
+        $path = Join-Path $Directory $name
+        # Windows' CreateNew follows a link whose target is missing and creates that target, so an
+        # entry of any kind at the name (read without following it) takes the next name.
+        if ($null -ne (Get-FileSystemEntryAttribute -Path $path)) {
+            continue
+        }
+        try {
+            $stream = [System.IO.File]::Open($path, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+            $stream.Dispose()
+            return $path
+        }
+        catch {
+            # Only an entry already at the name moves on to the next name; any other failure stops.
+            if ($null -eq (Get-FileSystemEntryAttribute -Path $path)) {
+                throw
+            }
+        }
+    }
+    throw ("No new log file could be created in '{0}': {1}{2} and the next {3} names are taken." -f $Directory, $Stem, $Tail, ($MaxAttempts - 1))
+}
+
+<#
+.SYNOPSIS
+    Removes a log file New-ExclusiveLogFile created when the program it was meant for wrote nothing
+    to it, so only a log that was written is left and named (an EXE installer writes no log).
+.PARAMETER Path
+    The log file; empty: nothing to do. Never throws.
+#>
+function Remove-EmptyLogFile {
+    param (
+        [Parameter(Mandatory = $false)]
+        [AllowEmptyString()]
+        [AllowNull()]
+        [string]$Path
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Path)) {
+        return
+    }
+    try {
+        $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+        if (-not $item.PSIsContainer -and $item.Length -eq 0) {
+            Remove-Item -LiteralPath $Path -Force -ErrorAction Stop
+        }
+    }
+    catch {
+    }
 }

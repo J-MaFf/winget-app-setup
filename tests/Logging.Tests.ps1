@@ -185,6 +185,53 @@ Describe 'Start-InstallerTranscript (issue #189, review findings P2-13 and P3-14
             Start-InstallerTranscript -Bootstrap -WhatIf | Should -Match 'install-\d{8}-\d{6}-bootstrap-whatif\.log$'
         }
 
+        # wgt-gq8.58: a logs folder a standard user created is locked in place, so a file that user
+        # left under the transcript's name stays theirs. A hard link stands for it.
+        It 'Starts the transcript in a new file of its own, never in an entry left at its name' {
+            Mock Get-Date { [datetime]::new(2026, 10, 12, 10, 15, 0) }
+            [void](New-Item -ItemType Directory -Path $script:logDirectory -Force)
+            $outside = Join-Path $TestDrive ('outside-' + [guid]::NewGuid().ToString('N') + '.txt')
+            Set-Content -LiteralPath $outside -Value 'not the installer''s' -NoNewline
+            [void](New-Item -ItemType HardLink -Path (Join-Path $script:logDirectory 'install-20261012-101500-bootstrap.log') -Target $outside)
+
+            $path = Start-InstallerTranscript -Bootstrap
+
+            $path | Should -Be (Join-Path $script:logDirectory 'install-20261012-101500-2-bootstrap.log')
+            (Get-Item -LiteralPath $path).Length | Should -Be 0
+            Get-Content -Raw -LiteralPath $outside | Should -Be 'not the installer''s'
+            Should -Invoke Start-Transcript -Times 1 -Exactly -ParameterFilter { $Path -eq $path }
+        }
+
+        It 'Removes the file it created for the transcript when the transcript cannot start' {
+            Mock Start-Transcript { throw 'Access to the path is denied.' }
+
+            Start-InstallerTranscript | Should -BeNullOrEmpty
+
+            @(Get-ChildItem -LiteralPath $script:logDirectory -Force) | Should -BeNullOrEmpty
+        }
+
+        # wgt-gq8.59: the warning about a removed link is printed before the transcript starts.
+        It 'Repeats a warning about a link removed from the log folder once the transcript has started' {
+            $script:events = [System.Collections.Generic.List[string]]::new()
+            Mock Initialize-ProgramDataFolder {
+                [void](New-Item -ItemType Directory -Path $script:logDirectory -Force)
+                $LinkWarning.Add("'X' was a link (a junction or symbolic link), not a folder.")
+                $script:logDirectory
+            }
+            Mock Start-Transcript { $script:events.Add('transcript') }
+            Mock Write-WarningMessage { $script:events.Add($Message) }
+
+            [void](Start-InstallerTranscript)
+
+            @($script:events) | Should -Be @('transcript', "Before this log started: 'X' was a link (a junction or symbolic link), not a folder.")
+        }
+
+        It 'Repeats nothing when no link was removed' {
+            [void](Start-InstallerTranscript)
+
+            Should -Invoke Write-WarningMessage -Times 0 -Exactly
+        }
+
         It 'Makes the log folder safe, readable for standard users, before an elevated run starts the transcript in it' {
             Start-InstallerTranscript | Out-Null
 
@@ -269,6 +316,9 @@ Describe 'Start-InstallerTranscript (issue #189, review findings P2-13 and P3-14
             ((Get-Item -LiteralPath $directory -Force).Attributes -band [System.IO.FileAttributes]::ReparsePoint) | Should -Be 0
             @(Get-ChildItem -LiteralPath $victim -Force | ForEach-Object { $_.Name }) | Should -Be @('keep.txt')
             Should -Invoke Start-Transcript -Times 1 -Exactly -ParameterFilter { $Path -eq $path }
+            # Printed once before the transcript started and once in it (wgt-gq8.59).
+            Should -Invoke Write-WarningMessage -Times 1 -Exactly -ParameterFilter { $Message -like "'$($script:logDirectory)' was a link*" }
+            Should -Invoke Write-WarningMessage -Times 1 -Exactly -ParameterFilter { $Message -like "Before this log started: '$($script:logDirectory)' was a link*" }
         }
 
         It 'Starts no transcript when a link planted as the logs folder cannot be removed' {

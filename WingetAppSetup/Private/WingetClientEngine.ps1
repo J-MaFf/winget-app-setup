@@ -637,6 +637,8 @@ function Invoke-WingetClientInstall {
         $requestParameters['Log'] = $logPath
     }
     $request = Invoke-WingetClientRequest @requestParameters
+    # The log was created empty (wgt-gq8.58); an installer that wrote none leaves no file.
+    Remove-EmptyLogFile -Path $logPath
     $run = $request.Run
     $mapped = Get-WingetClientResultCode -Request $request
 

@@ -145,6 +145,23 @@ Describe 'New-WingetInstallerLogPath (wgt-gq8.42)' {
         Split-Path -Leaf $path | Should -Match '^(?:winget-(?:install|upgrade|uninstall|repair)-.+|pwsh-msi)-(\d{8}-\d{6})(?:-\d+)?\.log$'
     }
 
+    # wgt-gq8.58: winget writes the log with the run's rights, so it gets a new, empty file of this
+    # run's own and never an entry another account left at the name (a hard link stands for one).
+    It 'Creates the log empty under a name nothing was at, leaving an entry already at the name alone' {
+        $logs = Join-Path $TestDrive ('logs-planted-' + [guid]::NewGuid().ToString('N'))
+        [void](New-Item -ItemType Directory -Path $logs)
+        Mock Get-Date { '20261012-101500' }
+        $outside = Join-Path $TestDrive ('outside-' + [guid]::NewGuid().ToString('N') + '.txt')
+        Set-Content -LiteralPath $outside -Value 'not the installer''s' -NoNewline
+        [void](New-Item -ItemType HardLink -Path (Join-Path $logs 'winget-install-Test.App-20261012-101500.log') -Target $outside)
+
+        $path = New-WingetInstallerLogPath -Subcommand install -PackageId 'Test.App' -LogDirectory $logs
+
+        $path | Should -Be (Join-Path $logs 'winget-install-Test.App-20261012-101500-2.log')
+        (Get-Item -LiteralPath $path).Length | Should -Be 0
+        Get-Content -Raw -LiteralPath $outside | Should -Be 'not the installer''s'
+    }
+
     It 'Replaces characters a file name cannot hold, and names a log without an id after winget' {
         $logs = Join-Path $TestDrive 'logs-label'
 
@@ -725,6 +742,26 @@ Describe 'Invoke-WingetProcess' {
         $result = Invoke-WingetProcess -ArgumentList @('install', '--id', 'Test.App') -TimeoutSeconds 5 -LogDirectory $logs
 
         $result.LogPath | Should -Be (Join-Path $logs 'winget-install-Test.App-20261004-101500-2.log')
+    }
+
+    # wgt-gq8.58: the log is created empty before winget runs; an installer that writes none (most
+    # EXE installers) leaves no file behind, so no reason names an empty log.
+    It 'Removes the log it created when the installer wrote nothing to it, and keeps one that was written' {
+        $logs = Join-Path $TestDrive ('logs-empty-' + [guid]::NewGuid().ToString('N'))
+
+        $empty = Invoke-WingetProcess -ArgumentList @('install', '--id', 'Test.App') -TimeoutSeconds 5 -LogDirectory $logs
+
+        $empty.LogPath | Should -Not -BeNullOrEmpty
+        Test-Path -LiteralPath $empty.LogPath | Should -BeFalse
+
+        Mock Invoke-ExternalProcess {
+            $index = [array]::IndexOf([string[]]$ArgumentList, '--log')
+            Set-Content -LiteralPath $ArgumentList[$index + 1] -Value 'MSI (s) log'
+            New-TestProcessResult -ExitCode 0
+        }
+        $written = Invoke-WingetProcess -ArgumentList @('install', '--id', 'Other.App') -TimeoutSeconds 5 -LogDirectory $logs
+
+        Get-Content -LiteralPath $written.LogPath | Should -Be 'MSI (s) log'
     }
 
     It 'Passes no --log to <Subcommand>, which runs no installer' -ForEach @(

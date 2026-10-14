@@ -26,7 +26,9 @@ function Write-Prompt {
     SYSTEM run first makes the logs folder safe (Initialize-ProgramDataFolder -ReadableByUsers): a
     link a standard user planted there is removed, never written through (wgt-gq8.46), and the
     folder is left for SYSTEM and Administrators to change and for standard users to read (review
-    finding P3-14). When that fails, there is no transcript. Runs under Windows PowerShell 5.1 too
+    finding P3-14). When that fails, there is no transcript. The file is created new
+    (New-ExclusiveLogFile: install-<time>[-<n>]<suffixes>.log), and a warning about a removed link is
+    repeated once the transcript runs. Runs under Windows PowerShell 5.1 too
     (the bootstrap phase), so it must stay 5.1-compatible.
 .PARAMETER WhatIf
     A dry run: the file name gets a -whatif suffix.
@@ -60,9 +62,12 @@ function Start-InstallerTranscript {
     if ($WhatIf) {
         $whatIfSuffix = '-whatif'
     }
+    $linkWarnings = New-Object System.Collections.Generic.List[string]
+    $logPath = $null
+    $transcriptStarted = $false
     try {
         if (-not $UserPhase -and (Test-IsAdmin)) {
-            $logDirectory = Initialize-ProgramDataFolder -ChildName 'logs' -ReadableByUsers
+            $logDirectory = Initialize-ProgramDataFolder -ChildName 'logs' -ReadableByUsers -LinkWarning $linkWarnings
         }
         else {
             # This account's own rights only: nothing written here is more privileged than the
@@ -77,10 +82,19 @@ function Start-InstallerTranscript {
                 [void](New-Item -Path $logDirectory -ItemType Directory -Force -ErrorAction Stop)
             }
         }
-        $logPath = Join-Path $logDirectory ('install-{0:yyyyMMdd-HHmmss}{1}{2}.log' -f (Get-Date), $phaseSuffix, $whatIfSuffix)
+        # A new file of this run's own, never an entry left at the name (wgt-gq8.58).
+        $logPath = New-ExclusiveLogFile -Directory $logDirectory -Stem ('install-{0:yyyyMMdd-HHmmss}' -f (Get-Date)) -Tail ('{0}{1}.log' -f $phaseSuffix, $whatIfSuffix)
         [void](Start-Transcript -Path $logPath -ErrorAction Stop)
+        $transcriptStarted = $true
+        # Printed before the transcript started: repeated so the log has it too (wgt-gq8.59).
+        foreach ($linkWarning in $linkWarnings) {
+            Write-WarningMessage "Before this log started: $linkWarning"
+        }
     }
     catch {
+        if ($logPath -and -not $transcriptStarted) {
+            Remove-Item -LiteralPath $logPath -Force -ErrorAction SilentlyContinue
+        }
         $resetHint = ''
         if ($_.FullyQualifiedErrorId -eq 'RestrictedDirectoryAclFailed' -and $_.TargetObject) {
             $resetHint = Get-RestrictedDirectoryResetHint -Path ([string]$_.TargetObject)

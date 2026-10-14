@@ -318,6 +318,22 @@ Describe 'Save-InstallerRunRecord (review finding P3-41)' {
         @(Get-ChildItem -LiteralPath $script:directory | ForEach-Object { $_.Name }) | Should -Be @('last-run.json')
     }
 
+    # wgt-gq8.58: a logs folder a standard user created is locked in place, so a last-run.json that
+    # user left there stays theirs. A hard link stands for it: writing through it would change its
+    # other name, and only a replace of the entry itself leaves that alone.
+    It 'Replaces a last-run.json left in the folder without opening it for writing, and the record lands' {
+        $outside = Join-Path $TestDrive ('outside-' + [Guid]::NewGuid().ToString('N') + '.txt')
+        Set-Content -LiteralPath $outside -Value 'not the installer''s' -NoNewline
+        [void](New-Item -ItemType HardLink -Path (Join-Path $script:directory 'last-run.json') -Target $outside)
+
+        $path = Save-InstallerRunRecord -Record $script:record -Directory $script:directory
+
+        $path | Should -Be (Join-Path $script:directory 'last-run.json')
+        Get-Content -Raw -LiteralPath $outside | Should -Be 'not the installer''s'
+        (Get-Content -Raw -LiteralPath $path | ConvertFrom-Json).exitCode | Should -Be 1
+        @(Get-ChildItem -LiteralPath $script:directory | ForEach-Object { $_.Name }) | Should -Be @('last-run.json')
+    }
+
     It 'Keeps an apps list with one app a list in the JSON' {
         $path = Save-InstallerRunRecord -Record $script:record -Directory $script:directory
 

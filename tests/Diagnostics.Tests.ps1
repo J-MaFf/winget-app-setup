@@ -248,6 +248,17 @@ Describe 'Choosing the latest run''s logs (Select-DiagnosticsLogFile)' {
         )
     }
 
+    # wgt-gq8.58: New-ExclusiveLogFile numbers a name that was taken.
+    It 'Takes a transcript and an msiexec log whose name was numbered because it was taken' {
+        Set-Content -LiteralPath (Join-Path $script:logDirectory 'install-20261004-170000-2.log') -Value 'x'
+        Set-Content -LiteralPath (Join-Path $script:logDirectory 'wau-msi-install-20261004-170100-1-2.log') -Value 'x'
+
+        $selection = Select-DiagnosticsLogFile -LogDirectory $script:logDirectory
+
+        @($selection.Transcripts | ForEach-Object { $_.Name }) | Should -Be @('install-20261004-170000-2.log')
+        @($selection.InstallerLogs | ForEach-Object { $_.Name }) | Should -Be @('wau-msi-install-20261004-170100-1-2.log')
+    }
+
     It 'Takes every transcript of the latest run and its installer logs, oldest first, and no dry run' {
         $selection = Select-DiagnosticsLogFile -LogDirectory $script:logDirectory
 

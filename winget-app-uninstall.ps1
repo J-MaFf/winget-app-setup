@@ -952,13 +952,13 @@ function Select-DiagnosticsLogFile {
         if (($file.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
             continue
         }
-        if ($file.Name -match '^install-(?<stamp>\d{8}-\d{6})(?:-bootstrap|-rmm|-userphase)?\.log$') {
+        if ($file.Name -match '^install-(?<stamp>\d{8}-\d{6})(?:-\d+)?(?:-bootstrap|-rmm|-userphase)?\.log$') {
             $time = ConvertFrom-DiagnosticsLogStamp -Stamp $Matches['stamp']
             if ($null -ne $time) {
                 $transcripts += [pscustomobject]@{ File = $file; Stamp = $Matches['stamp']; Time = $time }
             }
         }
-        elseif ($file.Name -match '^(?:winget-(?:install|upgrade|uninstall|repair)-.+|pwsh-msi|wau-msi-(?:install|uninstall))-(?<stamp>\d{8}-\d{6})(?:-\d+)?\.log$') {
+        elseif ($file.Name -match '^(?:winget-(?:install|upgrade|uninstall|repair)-.+|pwsh-msi|wau-msi-(?:install|uninstall))-(?<stamp>\d{8}-\d{6})(?:-\d+)*\.log$') {
             $installerLogs += [pscustomobject]@{ File = $file; Stamp = $Matches['stamp'] }
         }
         elseif ($file.Name -eq 'last-run.json') {
@@ -3424,10 +3424,10 @@ function Remove-OldInstallerLog {
     $transcripts = @()
     $installerLogs = @()
     foreach ($file in @(Get-ChildItem -LiteralPath $LogDirectory -File -Force -ErrorAction Stop)) {
-        if ($file.Name -match '^install-(\d{8}-\d{6})(?:-bootstrap|-rmm|-userphase)?(?:-whatif)?\.log$') {
+        if ($file.Name -match '^install-(\d{8}-\d{6})(?:-\d+)?(?:-bootstrap|-rmm|-userphase)?(?:-whatif)?\.log$') {
             $transcripts += [pscustomobject]@{ File = $file; Stamp = $Matches[1] }
         }
-        elseif ($file.Name -match '^(?:winget-(?:install|upgrade|uninstall|repair)-.+|pwsh-msi)-(\d{8}-\d{6})(?:-\d+)?\.log$') {
+        elseif ($file.Name -match '^(?:winget-(?:install|upgrade|uninstall|repair)-.+|pwsh-msi)-(\d{8}-\d{6})(?:-\d+)*\.log$') {
             $installerLogs += [pscustomobject]@{ File = $file; Stamp = $Matches[1] }
         }
     }
@@ -4313,9 +4313,12 @@ function Start-InstallerTranscript {
     if ($WhatIf) {
         $whatIfSuffix = '-whatif'
     }
+    $linkWarnings = New-Object System.Collections.Generic.List[string]
+    $logPath = $null
+    $transcriptStarted = $false
     try {
         if (-not $UserPhase -and (Test-IsAdmin)) {
-            $logDirectory = Initialize-ProgramDataFolder -ChildName 'logs' -ReadableByUsers
+            $logDirectory = Initialize-ProgramDataFolder -ChildName 'logs' -ReadableByUsers -LinkWarning $linkWarnings
         }
         else {
             if ($UserPhase) {
@@ -4328,10 +4331,17 @@ function Start-InstallerTranscript {
                 [void](New-Item -Path $logDirectory -ItemType Directory -Force -ErrorAction Stop)
             }
         }
-        $logPath = Join-Path $logDirectory ('install-{0:yyyyMMdd-HHmmss}{1}{2}.log' -f (Get-Date), $phaseSuffix, $whatIfSuffix)
+        $logPath = New-ExclusiveLogFile -Directory $logDirectory -Stem ('install-{0:yyyyMMdd-HHmmss}' -f (Get-Date)) -Tail ('{0}{1}.log' -f $phaseSuffix, $whatIfSuffix)
         [void](Start-Transcript -Path $logPath -ErrorAction Stop)
+        $transcriptStarted = $true
+        foreach ($linkWarning in $linkWarnings) {
+            Write-WarningMessage "Before this log started: $linkWarning"
+        }
     }
     catch {
+        if ($logPath -and -not $transcriptStarted) {
+            Remove-Item -LiteralPath $logPath -Force -ErrorAction SilentlyContinue
+        }
         $resetHint = ''
         if ($_.FullyQualifiedErrorId -eq 'RestrictedDirectoryAclFailed' -and $_.TargetObject) {
             $resetHint = Get-RestrictedDirectoryResetHint -Path ([string]$_.TargetObject)
@@ -4893,7 +4903,14 @@ function Install-PowerShell7FromMsi {
             $msiArguments = @('/i', ('"' + $msiPath + '"'), '/quiet', '/norestart')
             $msiLogPath = $null
             if ($MsiLogDirectory) {
-                $msiLogPath = Join-Path $MsiLogDirectory ('pwsh-msi-{0:yyyyMMdd-HHmmss}-{1}.log' -f (Get-Date), $attempt)
+                try {
+                    $msiLogPath = New-ExclusiveLogFile -Directory $MsiLogDirectory -Stem ('pwsh-msi-{0:yyyyMMdd-HHmmss}-{1}' -f (Get-Date), $attempt)
+                }
+                catch {
+                    Write-WarningMessage ('  No msiexec log: {0}' -f $_.Exception.Message)
+                }
+            }
+            if ($msiLogPath) {
                 $msiArguments += @('/l*v', ('"' + $msiLogPath + '"'))
                 Write-Info ('  msiexec log: {0}' -f $msiLogPath)
             }
@@ -5836,13 +5853,7 @@ function New-WingetInstallerLogPath {
             [void](New-Item -Path $directory -ItemType Directory -Force -ErrorAction Stop)
         }
         $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
-        $candidate = Join-Path $directory ('winget-{0}-{1}-{2}.log' -f $Subcommand, $label, $stamp)
-        $suffix = 2
-        while (Test-Path -LiteralPath $candidate) {
-            $candidate = Join-Path $directory ('winget-{0}-{1}-{2}-{3}.log' -f $Subcommand, $label, $stamp, $suffix)
-            $suffix++
-        }
-        return $candidate
+        return (New-ExclusiveLogFile -Directory $directory -Stem ('winget-{0}-{1}-{2}' -f $Subcommand, $label, $stamp))
     }
     catch {
         return $null
@@ -5896,6 +5907,7 @@ function Invoke-WingetProcess {
     }
 
     $result = Invoke-ExternalProcess -FilePath $WingetPath -ArgumentList $arguments -TimeoutSeconds $TimeoutSeconds -Echo $Echo
+    Remove-EmptyLogFile -Path $logPath
     $result.LogPath = $logPath
     return $result
 }
@@ -6000,7 +6012,11 @@ function Initialize-ProgramDataFolder {
         [string]$ChildName = '',
 
         [Parameter(Mandatory = $false)]
-        [switch]$ReadableByUsers
+        [switch]$ReadableByUsers,
+
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [System.Collections.Generic.List[string]]$LinkWarning
     )
 
     if ([string]::IsNullOrWhiteSpace($env:ProgramData)) {
@@ -6021,7 +6037,11 @@ function Initialize-ProgramDataFolder {
             catch {
                 throw (New-DirectoryIsLinkError -Path $folder -Message ("'{0}' is a link (a junction or symbolic link), not a folder, and the link could not be removed: {1} Nothing was written through it. Remove the link in an elevated prompt (rmdir `"{0}`" removes a junction, not what it points to) and re-run this installer." -f $folder, $_.Exception.Message))
             }
-            Write-WarningMessage ("'{0}' was a link (a junction or symbolic link), not a folder. The link was removed without changing what it pointed to, and a folder is created in its place." -f $folder)
+            $linkMessage = "'{0}' was a link (a junction or symbolic link), not a folder. The link was removed without changing what it pointed to, and a folder is created in its place." -f $folder
+            Write-WarningMessage $linkMessage
+            if ($null -ne $LinkWarning) {
+                $LinkWarning.Add($linkMessage)
+            }
             $attributes = $null
         }
         if ($null -eq $attributes) {
@@ -6039,6 +6059,66 @@ function Initialize-ProgramDataFolder {
         Set-RestrictedDirectoryAcl -Path $folder -ReadableByUsers:$usersRead
     }
     return $folders[-1]
+}
+
+function New-ExclusiveLogFile {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$Directory,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Stem,
+
+        [Parameter(Mandatory = $false)]
+        [string]$Tail = '.log',
+
+        [Parameter(Mandatory = $false)]
+        [ValidateRange(1, 1000)]
+        [int]$MaxAttempts = 100
+    )
+
+    for ($number = 1; $number -le $MaxAttempts; $number++) {
+        $name = $Stem + $Tail
+        if ($number -gt 1) {
+            $name = '{0}-{1}{2}' -f $Stem, $number, $Tail
+        }
+        $path = Join-Path $Directory $name
+        if ($null -ne (Get-FileSystemEntryAttribute -Path $path)) {
+            continue
+        }
+        try {
+            $stream = [System.IO.File]::Open($path, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+            $stream.Dispose()
+            return $path
+        }
+        catch {
+            if ($null -eq (Get-FileSystemEntryAttribute -Path $path)) {
+                throw
+            }
+        }
+    }
+    throw ("No new log file could be created in '{0}': {1}{2} and the next {3} names are taken." -f $Directory, $Stem, $Tail, ($MaxAttempts - 1))
+}
+
+function Remove-EmptyLogFile {
+    param (
+        [Parameter(Mandatory = $false)]
+        [AllowEmptyString()]
+        [AllowNull()]
+        [string]$Path
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Path)) {
+        return
+    }
+    try {
+        $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+        if (-not $item.PSIsContainer -and $item.Length -eq 0) {
+            Remove-Item -LiteralPath $Path -Force -ErrorAction Stop
+        }
+    }
+    catch {
+    }
 }
 
 # --- RunBudget ---
@@ -6456,16 +6536,25 @@ function Save-InstallerRunRecord {
 
     $path = Join-Path $Directory 'last-run.json'
     $temporaryPath = Join-Path $Directory ('last-run.{0}.tmp' -f [System.Guid]::NewGuid().ToString('N'))
+    $temporaryCreated = $false
     try {
         $json = ConvertTo-Json -InputObject $Record -Depth 6
-        [System.IO.File]::WriteAllText($temporaryPath, $json, (New-Object System.Text.UTF8Encoding($false)))
+        $bytes = (New-Object System.Text.UTF8Encoding($false)).GetBytes($json)
+        $file = [System.IO.File]::Open($temporaryPath, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+        $temporaryCreated = $true
+        try {
+            $file.Write($bytes, 0, $bytes.Length)
+        }
+        finally {
+            $file.Dispose()
+        }
         [System.IO.File]::Move($temporaryPath, $path, $true)
         return $path
     }
     catch {
         Write-WarningMessage "Could not write the run record ${path}: $($_.Exception.Message)"
         try {
-            if (Test-Path -LiteralPath $temporaryPath) {
+            if ($temporaryCreated -and (Test-Path -LiteralPath $temporaryPath)) {
                 Remove-Item -LiteralPath $temporaryPath -Force -ErrorAction Stop
             }
         }
@@ -8579,11 +8668,11 @@ function New-WauMsiLogPath {
         elseif (-not (Test-Path -LiteralPath $directory)) {
             [void](New-Item -Path $directory -ItemType Directory -Force -ErrorAction Stop)
         }
+        return (New-ExclusiveLogFile -Directory $directory -Stem ('wau-msi-{0}-{1:yyyyMMdd-HHmmss}-{2}' -f $Action, (Get-Date), $Attempt))
     }
     catch {
         return $null
     }
-    return (Join-Path $directory ('wau-msi-{0}-{1:yyyyMMdd-HHmmss}-{2}.log' -f $Action, (Get-Date), $Attempt))
 }
 
 function Invoke-WauMsiexec {
@@ -10359,6 +10448,7 @@ function Invoke-WingetClientInstall {
         $requestParameters['Log'] = $logPath
     }
     $request = Invoke-WingetClientRequest @requestParameters
+    Remove-EmptyLogFile -Path $logPath
     $run = $request.Run
     $mapped = Get-WingetClientResultCode -Request $request
 

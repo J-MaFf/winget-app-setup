@@ -520,13 +520,20 @@ function Get-RmmFolderTrustProblem {
          installer locks a folder that fails this, so a later run logs there.
 .PARAMETER LogDirectory
     The transcript's folder, %ProgramData%\winget-app-setup\logs.
+.PARAMETER LinkMessage
+    A list each message about a removed link is also added to, so the transcript, which starts only
+    afterwards, can repeat it (wgt-gq8.59).
 .RETURNS
     [string] LogDirectory. Throws when it cannot be used; the wrapper then keeps no log.
 #>
 function Initialize-RmmLogDirectory {
     param (
         [Parameter(Mandatory = $true)]
-        [string]$LogDirectory
+        [string]$LogDirectory,
+
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [System.Collections.Generic.List[string]]$LinkMessage
     )
 
     $reparsePoint = [System.IO.FileAttributes]::ReparsePoint
@@ -542,7 +549,11 @@ function Initialize-RmmLogDirectory {
             if ($null -ne (Get-RmmEntryAttribute -Path $folder)) {
                 throw "'$folder' is a link (a junction or symbolic link), and it could not be removed"
             }
-            Write-RmmLine ("'{0}' was a link (a junction or symbolic link), not a folder. The link was removed without changing what it pointed to." -f $folder) 'Yellow'
+            $message = "'{0}' was a link (a junction or symbolic link), not a folder. The link was removed without changing what it pointed to." -f $folder
+            Write-RmmLine $message 'Yellow'
+            if ($null -ne $LinkMessage) {
+                $LinkMessage.Add($message)
+            }
             $attributes = $null
         }
         if ($null -eq $attributes) {
@@ -565,8 +576,58 @@ function Initialize-RmmLogDirectory {
 
 <#
 .SYNOPSIS
-    Starts the wrapper's transcript: <LogDirectory>\install-<time>-rmm.log, in a folder
-    Initialize-RmmLogDirectory has checked.
+    Creates a new, empty log file in a folder and returns its path, never opening an entry that is
+    already there (wgt-gq8.58).
+.DESCRIPTION
+    A logs folder a standard user created before the installer locked it keeps what that user left
+    in it. Each name is created with CreateNew, which fails on any existing entry, and then the next
+    is tried: <Stem><Tail>, <Stem>-2<Tail>, <Stem>-3<Tail> and so on, up to 100 names.
+.RETURNS
+    [string] The new file's path. Throws when no name could be created.
+#>
+function New-RmmExclusiveLogFile {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$Directory,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Stem,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Tail
+    )
+
+    for ($number = 1; $number -le 100; $number++) {
+        $name = $Stem + $Tail
+        if ($number -gt 1) {
+            $name = '{0}-{1}{2}' -f $Stem, $number, $Tail
+        }
+        $path = Join-Path $Directory $name
+        # Windows' CreateNew follows a link whose target is missing and creates that target, so an
+        # entry of any kind at the name (read without following it) takes the next name.
+        if ($null -ne (Get-RmmEntryAttribute -Path $path)) {
+            continue
+        }
+        try {
+            $stream = [System.IO.File]::Open($path, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+            $stream.Dispose()
+            return $path
+        }
+        catch {
+            # Only an entry already at the name moves on to the next name; any other failure stops.
+            if ($null -eq (Get-RmmEntryAttribute -Path $path)) {
+                throw
+            }
+        }
+    }
+    throw ("No new log file could be created in '{0}': {1}{2} and the next 99 names are taken" -f $Directory, $Stem, $Tail)
+}
+
+<#
+.SYNOPSIS
+    Starts the wrapper's transcript: <LogDirectory>\install-<time>[-<n>]-rmm.log, created new
+    (New-RmmExclusiveLogFile) in a folder Initialize-RmmLogDirectory has checked. A message about a
+    link that folder check removed is repeated once the transcript runs.
 .RETURNS
     [string] The transcript's path, or $null when it could not be started (the run goes on).
 #>
@@ -576,13 +637,24 @@ function Start-RmmTranscript {
         [string]$LogDirectory
     )
 
+    $linkMessages = New-Object System.Collections.Generic.List[string]
+    $path = $null
+    $started = $false
     try {
-        $directory = Initialize-RmmLogDirectory -LogDirectory $LogDirectory
-        $path = Join-Path $directory ('install-{0:yyyyMMdd-HHmmss}-rmm.log' -f (Get-Date))
+        $directory = Initialize-RmmLogDirectory -LogDirectory $LogDirectory -LinkMessage $linkMessages
+        $path = New-RmmExclusiveLogFile -Directory $directory -Stem ('install-{0:yyyyMMdd-HHmmss}' -f (Get-Date)) -Tail '-rmm.log'
         [void](Start-Transcript -Path $path -ErrorAction Stop)
+        $started = $true
+        # Printed before the transcript started: repeated so the log has it too (wgt-gq8.59).
+        foreach ($linkMessage in $linkMessages) {
+            Write-RmmLine ('Before this log started: {0}' -f $linkMessage) 'Yellow'
+        }
         return $path
     }
     catch {
+        if ($path -and -not $started) {
+            Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+        }
         Write-RmmLine "Could not start the wrapper's log: $($_.Exception.Message). Continuing without it." 'Yellow'
         return $null
     }

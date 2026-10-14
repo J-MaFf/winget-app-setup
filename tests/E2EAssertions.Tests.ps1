@@ -863,9 +863,9 @@ Describe 'Installer messages the transcript parser keys on' {
         @{ File = 'WingetAppSetup/Private/PowerShell7Bootstrap.ps1'; Text = "Write-Info ('The PowerShell 7 run ended with exit code {0}.' -f `$relaunchProcess.ExitCode)" }
         @{ File = 'WingetAppSetup/Private/LoggingInternal.ps1'; Text = "`$phaseSuffix = '-bootstrap'" }
         @{ File = 'WingetAppSetup/Private/LoggingInternal.ps1'; Text = "`$whatIfSuffix = '-whatif'" }
-        @{ File = 'WingetAppSetup/Private/LoggingInternal.ps1'; Text = "'install-{0:yyyyMMdd-HHmmss}{1}{2}.log'" }
+        @{ File = 'WingetAppSetup/Private/LoggingInternal.ps1'; Text = "-Stem ('install-{0:yyyyMMdd-HHmmss}' -f (Get-Date)) -Tail ('{0}{1}.log' -f `$phaseSuffix, `$whatIfSuffix)" }
         @{ File = 'WingetAppSetup/Public/Install.ps1'; Text = "Write-Info 'Running as SYSTEM (for example from an RMM agent): " }
-        @{ File = 'rmm/Invoke-WingetAppSetup.ps1'; Text = "'install-{0:yyyyMMdd-HHmmss}-rmm.log'" }
+        @{ File = 'rmm/Invoke-WingetAppSetup.ps1'; Text = "-Stem ('install-{0:yyyyMMdd-HHmmss}' -f (Get-Date)) -Tail '-rmm.log'" }
         # wgt-gq8.42: the Microsoft.WinGet.Client engine.
         @{ File = 'WingetAppSetup/Private/WingetClientEngine.ps1'; Text = "Write-Info ('Install engine: Microsoft.WinGet.Client {0} (WinGet engine {1}, PowerShell {2} {3}; engine log folder {4}).'" }
         @{ File = 'WingetAppSetup/Private/WingetClientEngine.ps1'; Text = "Write-Info ('Install engine: winget.exe ({0}), not the requested Microsoft.WinGet.Client: {1}.'" }

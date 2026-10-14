@@ -105,6 +105,20 @@ Describe 'Remove-OldInstallerLog (review finding P3-42)' {
         Get-TestFileName -Directory $script:logDirectory | Should -Be @('install-20261001-110000-bootstrap.log', 'install-20261001-110001.log')
     }
 
+    # wgt-gq8.58: New-ExclusiveLogFile numbers a name that was taken; those logs are the run's too.
+    It 'Counts and prunes transcripts and installer logs whose name was numbered because it was taken' {
+        foreach ($name in @(
+                'install-20261001-100000-2-bootstrap.log', 'install-20261001-100001-2.log', 'pwsh-msi-20261001-100005-1-2.log',
+                'install-20261001-110000-2-rmm.log', 'install-20261001-110001.log'
+            )) {
+            [void](New-TestFile -Directory $script:logDirectory -Name $name)
+        }
+
+        Remove-OldInstallerLog -LogDirectory $script:logDirectory -KeepTranscripts 2 | Should -Be 3
+
+        Get-TestFileName -Directory $script:logDirectory | Should -Be @('install-20261001-110000-2-rmm.log', 'install-20261001-110001.log')
+    }
+
     It 'Deletes the installer logs of the runs whose transcripts it deleted, and keeps the rest' {
         New-TestTranscriptSet -Directory $script:logDirectory -Count 3
         # Written during the 10:00 run (deleted below) and during the 10:01 and 10:02 runs (kept).
