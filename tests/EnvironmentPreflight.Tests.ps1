@@ -421,6 +421,8 @@ Describe 'Invoke-EnvironmentPreflight (wgt-gq8.39)' {
         Mock Get-ProxyInheritanceWarning { $null }
         Mock Get-PendingRestartState { New-TestRestartState }
         Mock Get-WingetPolicyBlock { $null }
+        Mock Get-OSArchitecture { 'X64' }
+        Mock Get-WindowsBuildNumber { 26100 }
         $script:blockedPolicy = [pscustomobject]@{ Name = 'EnableAppInstaller'; Policy = 'Enable App Installer' }
     }
 
@@ -491,5 +493,34 @@ Describe 'Invoke-EnvironmentPreflight (wgt-gq8.39)' {
         Invoke-EnvironmentPreflight | Out-Null
 
         Should -Invoke Get-InstallAccountContext -Times 1 -Exactly
+    }
+
+    It 'Prints the unsupported-Windows warning once, first, for <Name>, and lets the run go on (wgt-gq8.51)' -ForEach @(
+        @{ Name = 'Windows 10 on ARM64'; Architecture = 'Arm64'; Build = 19045 }
+        @{ Name = '32-bit Windows'; Architecture = 'X86'; Build = 19045 }
+    ) {
+        Mock Get-OSArchitecture { $Architecture }
+        Mock Get-WindowsBuildNumber { $Build }
+        Mock Get-ProxyInheritanceWarning { 'PROXY WARNING' }
+
+        $result = Invoke-EnvironmentPreflight -AccountContext (New-TestAccountContext)
+
+        $result.ExitCode | Should -Be 0
+        $script:lines | Should -HaveCount 2
+        $script:lines[0] | Should -BeLike "WARN: This PC runs $Name, which this installer does not support.*"
+        $script:lines[1] | Should -Be 'WARN: PROXY WARNING'
+    }
+
+    It 'Prints no unsupported-Windows warning for <Name>' -ForEach @(
+        @{ Name = 'Windows 11 x64'; Architecture = 'X64'; Build = 26100 }
+        @{ Name = 'Windows 11 ARM64'; Architecture = 'Arm64'; Build = 26100 }
+    ) {
+        Mock Get-OSArchitecture { $Architecture }
+        Mock Get-WindowsBuildNumber { $Build }
+
+        $result = Invoke-EnvironmentPreflight -AccountContext (New-TestAccountContext)
+
+        $result.ExitCode | Should -Be 0
+        $script:lines | Should -HaveCount 0
     }
 }

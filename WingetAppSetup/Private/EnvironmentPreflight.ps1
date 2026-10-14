@@ -383,10 +383,11 @@ function Get-ProxyInheritanceWarning {
 .DESCRIPTION
     Invoke-WingetInstall runs it once elevated (or as SYSTEM), before the WAU wait and the winget
     setup. Read-only, so a dry run runs it too. In this order:
-      1. Proxy (warning): Get-ProxyInheritanceWarning.
-      2. Pending restart (warning): returned, so the end of the run can tell a restart its own
+      1. Unsupported Windows (warning): Get-UnsupportedWindowsWarning (wgt-gq8.51).
+      2. Proxy (warning): Get-ProxyInheritanceWarning.
+      3. Pending restart (warning): returned, so the end of the run can tell a restart its own
          installs need (exit code 3010) from this one.
-      3. App Installer's Group Policy (stop): Get-WingetPolicyBlock; a real run stops with exit code
+      4. App Installer's Group Policy (stop): Get-WingetPolicyBlock; a real run stops with exit code
          2, since no repair can help. Initialize-Winget checks the same policy, so the line appears
          once.
     The warnings come first, so the line that stops the run is the last one.
@@ -412,6 +413,11 @@ function Invoke-EnvironmentPreflight {
 
     if ($null -eq $AccountContext) {
         $AccountContext = Get-InstallAccountContext
+    }
+
+    $unsupportedWindows = Get-UnsupportedWindowsWarning
+    if ($unsupportedWindows) {
+        Write-WarningMessage $unsupportedWindows
     }
 
     $proxyWarning = $null

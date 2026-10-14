@@ -54,6 +54,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `windows-11-arm` that installs nothing and prints the account, the architecture as each
   PowerShell (7, 5.1 and 32-bit 5.1) sees it, App Installer's registration and provisioning,
   Microsoft.WindowsAppRuntime.1.8 and `winget --version`. The ARM64 install leg waits on its results.
+- Unsupported Windows warning (wgt-gq8.51): on 32-bit Windows or Windows 10 on ARM64, the installer
+  prints one warning before it changes anything (`Get-UnsupportedWindowsWarning`, from
+  `Invoke-EnvironmentPreflight`) saying the configuration is unsupported and naming the apps known to
+  fail there, then goes on. The readme states the supported Windows: 10 and 11 on x64, and 11 on
+  ARM64. The catalog's architecture gates are unchanged.
 - merge-gate caller (`.github/workflows/merge-gate.yml`): the required check that keeps the claude-sandbox App from merging its own PRs; logic in the reusable J-MaFf/.github merge-gate.yml.
 - Releases (bead wgt-z70, [#286](https://github.com/J-MaFf/winget-app-setup/issues/286)): a `vX.Y.Z`
   tag on `main` now publishes a GitHub release through the shared workflow in

@@ -107,12 +107,12 @@ param (
 # the function source under WingetAppSetup/Public and WingetAppSetup/Private, or the entry block in
 # build/fragments/tail.ps1, then re-run the build to regenerate this file.
 # See readme.md ("Project layout") for details.
-# Build id: 1.0.0+43166249 (module version + SHA256 fragment of this whole script; issue #189).
+# Build id: 1.0.0+29a3a800 (module version + SHA256 fragment of this whole script; issue #189).
 # ------------------------------------------------------------------------------------------------
 
 # Content-derived build identity, logged at startup so a transcript from a remote machine
 # identifies exactly which installer build produced it (issue #189).
-$script:InstallerBuildId = '1.0.0+43166249'
+$script:InstallerBuildId = '1.0.0+29a3a800'
 
 # ------------------------------------------------Functions------------------------------------------------
 
@@ -2861,6 +2861,11 @@ function Invoke-EnvironmentPreflight {
 
     if ($null -eq $AccountContext) {
         $AccountContext = Get-InstallAccountContext
+    }
+
+    $unsupportedWindows = Get-UnsupportedWindowsWarning
+    if ($unsupportedWindows) {
+        Write-WarningMessage $unsupportedWindows
     }
 
     $proxyWarning = $null
@@ -6749,6 +6754,22 @@ function Write-OSArchitectureLine {
         $architecture = "unknown ($($_.Exception.Message))"
     }
     Write-Info "OS architecture: $architecture"
+}
+
+function Get-UnsupportedWindowsWarning {
+    try {
+        $architecture = Get-OSArchitecture
+        if ($architecture -eq 'X86') {
+            return 'This PC runs 32-bit Windows, which this installer does not support. The run goes on, but some apps may fail: Google Drive and Git, for example, have no 32-bit installer. Supported: Windows 10 and 11 x64, and Windows 11 on ARM64.'
+        }
+        if ($architecture -eq 'Arm64' -and (Get-WindowsBuildNumber) -lt 22000) {
+            return 'This PC runs Windows 10 on ARM64, which this installer does not support. The run goes on, but some apps may fail: Windows 10 on ARM cannot run x64-only installers such as Google Drive''s. Supported: Windows 10 and 11 x64, and Windows 11 on ARM64.'
+        }
+    }
+    catch {
+        return $null
+    }
+    return $null
 }
 
 function Get-PowerShellEdition {

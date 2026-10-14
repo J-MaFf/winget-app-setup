@@ -5,6 +5,11 @@ automatic updates for them.
 
 ## Run the installer
 
+> **Supported Windows:** Windows 10 and 11 on x64, and Windows 11 on ARM64. 32-bit Windows and
+> Windows 10 on ARM are unsupported: the installer prints one warning near the start and goes on,
+> but some apps may fail there (Google Drive and Git have no 32-bit installer, and Windows 10 on ARM
+> cannot run x64-only installers such as Google Drive's).
+
 > **Runs on PowerShell 7+ (`pwsh`), but bootstraps itself from Windows PowerShell 5.1.** The
 > installer's logic requires PowerShell 7. Run from the built-in Windows PowerShell 5.1
 > (`powershell.exe`) — the only shell on a fresh machine — and it finds PowerShell 7, or
