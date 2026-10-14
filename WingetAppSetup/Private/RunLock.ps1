@@ -1,9 +1,9 @@
-# One installer run at a time on a machine (exit code 6): two runs side by side would fail each
-# other's winget and msiexec installs with 'another installation is in progress'.
+# One run of the installer or the uninstaller at a time on a machine (exit code 6): two runs side by
+# side would fail each other's winget and msiexec calls with 'another installation is in progress'.
 
 <#
 .SYNOPSIS
-    Returns the name of the machine-wide mutex that marks an installer run in progress.
+    Returns the name of the machine-wide mutex that marks a run of the installer or the uninstaller.
 .DESCRIPTION
     Global\ is shared by every session, so a run as SYSTEM (session 0) and a run on the desktop see
     the same mutex. A function so tests can use a name of their own.
@@ -35,9 +35,10 @@ function New-InstallerRunMutex {
 .SYNOPSIS
     Takes the machine-wide installer run lock, without waiting for it.
 .DESCRIPTION
-    The entry script takes it at the start of every elevated run that is not -WhatIf and exits 6
-    when it is busy; Unlock-InstallerRun releases it in the entry script's finally block. The
-    mutex of a run that was killed is abandoned, and the next run takes it over. Another account's
+    The installer's and the uninstaller's entry scripts take it at the start of every elevated run
+    that is not -WhatIf and exit 6 when it is busy; Unlock-InstallerRun releases it in the entry
+    script's finally block. The mutex of a run that was killed is abandoned, and the next run takes
+    it over. Another account's
     mutex that this account may not open (UnauthorizedAccessException) counts as busy; any other
     failure warns and returns 'Unavailable', so the run goes on without the check. Any process
     holding the name counts as another run.
@@ -61,7 +62,7 @@ function Lock-InstallerRun {
         return 'Busy'
     }
     catch {
-        Write-WarningMessage "Could not check whether another run of the installer is in progress: $($_.Exception.Message.Trim().TrimEnd('.')). Continuing without that check."
+        Write-WarningMessage "Could not check whether another run of the installer or the uninstaller is in progress: $($_.Exception.Message.Trim().TrimEnd('.')). Continuing without that check."
         return 'Unavailable'
     }
 
@@ -75,7 +76,7 @@ function Lock-InstallerRun {
         $acquired = $true
     }
     catch {
-        Write-WarningMessage "Could not check whether another run of the installer is in progress: $($_.Exception.Message.Trim().TrimEnd('.')). Continuing without that check."
+        Write-WarningMessage "Could not check whether another run of the installer or the uninstaller is in progress: $($_.Exception.Message.Trim().TrimEnd('.')). Continuing without that check."
         $mutex.Dispose()
         return 'Unavailable'
     }

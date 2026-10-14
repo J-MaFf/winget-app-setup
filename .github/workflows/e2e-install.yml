@@ -66,8 +66,9 @@ name: E2E Install
 # left for a follow-up.
 #
 # Pull requests: every PR starts this workflow, and the changes job lets the legs run only when
-# the PR touches the product (WingetAppSetup/**, build/**, winget-app-install.ps1, the RMM
-# wrappers in rmm/**) or the e2e machinery (this file, e2e/**). The filter is a job rather than
+# the PR touches the product (WingetAppSetup/**, build/** (the uninstaller's fragments included),
+# winget-app-install.ps1, winget-app-uninstall.ps1, the RMM wrappers in rmm/**) or the e2e
+# machinery (this file, e2e/**). The filter is a job rather than
 # pull_request.paths so that e2e-install can be a required check: a workflow that a paths filter
 # skips reports no status, and a required check left without one blocks the PR from merging, while
 # a job skipped by its if: reports success. For the same reason the 5.1 leg is its own job and not a matrix entry of
@@ -78,6 +79,11 @@ name: E2E Install
 # as the first, with every app Skipped and the framework not installed again), verified by
 # e2e/Assert-Install.ps1 -ExpectAllSkippedOnSecondRun - the shared assertion script that tier 2
 # (issue #215, snapshot-rollback Proxmox VM) will reuse.
+#
+# The PowerShell 7 leg then runs the checkout's winget-app-uninstall.ps1 -NonInteractive once
+# (wgt-gq8.47, e2e/Invoke-UninstallPass.ps1): it must exit 0 or 3010 and leave no catalog app it
+# did not keep on purpose (PowerShell 7, which it runs in; Windows Terminal, the default terminal)
+# and no Winget-AutoUpdate behind. Its output is saved with the diagnostics.
 #
 # Evidence: e2e/Collect-Diagnostics.ps1 snapshots the pwsh version, the all-users AppX state of
 # App Installer and WindowsAppRuntime, and the WAU tasks before and after the first pass and at
@@ -130,8 +136,9 @@ env:
 jobs:
   changes:
     # Pull requests only: does this PR need the real install? Yes when it changes the product
-    # (WingetAppSetup/**, build/**, winget-app-install.ps1, rmm/**) or the e2e machinery (this
-    # file, e2e/**). Scheduled and dispatched runs skip this job and always install.
+    # (WingetAppSetup/**, build/**, winget-app-install.ps1, winget-app-uninstall.ps1, rmm/**) or
+    # the e2e machinery (this file, e2e/**). Scheduled and dispatched runs skip this job and always
+    # install.
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -158,7 +165,7 @@ jobs:
             echo 'e2e=true' >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          pattern='^(WingetAppSetup/|build/|e2e/|rmm/)|^(winget-app-install\.ps1|\.github/workflows/e2e-install\.yml)$'
+          pattern='^(WingetAppSetup/|build/|e2e/|rmm/)|^(winget-app-install\.ps1|winget-app-uninstall\.ps1|\.github/workflows/e2e-install\.yml)$'
           if matched=$(grep -E "$pattern" <<< "$changed"); then
             echo 'Changed files that need the real install:'
             echo "$matched"
@@ -191,7 +198,7 @@ jobs:
     # ships a corrected Server 2025 image, or a viable pinned alternative is found.
     runs-on: windows-latest
     # Backstop. The long steps have their own timeout-minutes, which add up to less than this
-    # (15 + 3 + 35 + 3 + 35 + 40 + 5 = 136, plus checkout and uploads), so a hung pass fails at its
+    # (15 + 3 + 35 + 3 + 35 + 40 + 5 + 45 + 5 = 186, plus checkout and uploads), so a hung pass fails at its
     # own limit and the diagnostics and upload steps still run. A job that reaches this limit is
     # cancelled instead; report-failure still files the issue. Each step limit sits above that
     # step's slow red-run path, so it ends with its own summary instead of being cut off:
@@ -209,7 +216,11 @@ jobs:
     #     (7 checks 30 s apart, each up to 30 s), then spends up to 3.25 min per applicable app
     #     when winget hangs (3 probes of 60 s plus 15 s of pauses), about 36 min for the 9 apps
     #     that apply on this runner. Raise it if the catalog grows.
-    timeout-minutes: 145
+    #   - uninstall pass, 45 (wgt-gq8.47): removing the apps takes a few minutes; each removal
+    #     has a 15-minute limit of its own, and the checks after it the assertions' 3.25 min per
+    #     app when winget hangs. A pass that reaches the limit still leaves its output for the
+    #     diagnostics upload.
+    timeout-minutes: 195
     env:
       # What both install passes run: 'raw-main' (the production one-liner) only for the weekly run,
       # 'checkout' for pull requests and dispatched runs (piped to iex, then run with -File). See
@@ -328,6 +339,33 @@ jobs:
           $null = New-Item -ItemType Directory -Path $diagnosticsDir -Force
           & pwsh -NoProfile -ExecutionPolicy Bypass -File ./e2e/Assert-Install.ps1 @assertArgs 2>&1 |
             Tee-Object -FilePath (Join-Path $diagnosticsDir 'assertions.txt')
+          exit $LASTEXITCODE
+
+      # Winget-AutoUpdate's logs and the event logs as the installs left them: the uninstall pass
+      # below removes WAU, and its logs with it.
+      - name: Diagnostics before the uninstall pass (with event logs and WAU logs)
+        if: ${{ !cancelled() && steps.second-pass.outcome == 'success' }}
+        shell: powershell
+        continue-on-error: true
+        timeout-minutes: 5
+        run: |
+          & .\e2e\Collect-Diagnostics.ps1 -OutputDirectory (Join-Path $env:RUNNER_TEMP 'e2e-diagnostics') -Label '3-before-uninstall' -IncludeLogs
+
+      # wgt-gq8.47: the checkout's winget-app-uninstall.ps1 -NonInteractive on the machine the two
+      # passes provisioned, the only un-mocked run the uninstaller gets. e2e/Invoke-UninstallPass.ps1
+      # fails the step unless it exits 0 or 3010, every catalog app it did not keep on purpose
+      # (PowerShell 7, which it runs in; Windows Terminal, the default terminal) is gone from
+      # `winget list`, and Winget-AutoUpdate's task is gone. Runs only when both passes installed,
+      # also after failed assertions, for the evidence; its output goes with the diagnostics.
+      - name: Uninstall pass (winget-app-uninstall.ps1 from the checkout)
+        if: ${{ !cancelled() && steps.second-pass.outcome == 'success' }}
+        shell: pwsh
+        timeout-minutes: 45
+        run: |
+          $diagnosticsDir = Join-Path $env:RUNNER_TEMP 'e2e-diagnostics'
+          $null = New-Item -ItemType Directory -Path $diagnosticsDir -Force
+          & pwsh -NoProfile -ExecutionPolicy Bypass -File ./e2e/Invoke-UninstallPass.ps1 -OutputPath (Join-Path $diagnosticsDir 'uninstall-output.txt') 2>&1 |
+            Tee-Object -FilePath (Join-Path $diagnosticsDir 'uninstall-pass.txt')
           exit $LASTEXITCODE
 
       - name: Diagnostics at the end of the job (with event logs and WAU logs)
@@ -776,6 +814,21 @@ jobs:
               echo 'The assertions did not run, or left no output. See the run log.'
             fi
             echo
+
+            # Only the e2e-install leg runs the uninstall pass (wgt-gq8.47).
+            uninstall="$diagnostics/uninstall-pass.txt"
+            if [ -s "$uninstall" ]; then
+              echo '### Uninstall pass'
+              echo
+              if grep -q '=== E2E uninstall results ===' "$uninstall"; then
+                sed -n '/=== E2E uninstall results ===/,$p' "$uninstall" | head -n 80 | fence
+              else
+                echo 'The uninstall pass did not finish. The last 40 lines of its output:'
+                echo
+                tail -n 40 "$uninstall" | fence
+              fi
+              echo
+            fi
 
             # Transcripts are install-yyyyMMdd-HHmmss.log, so name order is run order. The earliest
             # is shown too: a red second pass often starts from damage done in the first. The

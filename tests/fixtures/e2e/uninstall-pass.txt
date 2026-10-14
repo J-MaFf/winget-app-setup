@@ -1,0 +1,44 @@
+Starting...
+Winget is available (v1.12.350).
+Updating the winget source for 'runnervm\runneradmin' (this may take a moment)...
+The winget source opens for 'runnervm\runneradmin'.
+Uninstalling the following apps:
+7zip.7zip
+GlavSoft.TightVNC
+Adobe.Acrobat.Reader.64-bit
+Adobe.Acrobat.Reader.32-bit
+Google.Chrome
+Google.GoogleDrive
+Git.Git
+Klocman.BulkCrapUninstaller
+Dell.CommandUpdate.Universal
+Microsoft.PowerShell
+Microsoft.WindowsTerminal
+Uninstalling: 7zip.7zip
+Successfully uninstalled: 7zip.7zip
+Uninstalling: GlavSoft.TightVNC
+Successfully uninstalled: GlavSoft.TightVNC
+Uninstalling: Adobe.Acrobat.Reader.64-bit
+Successfully uninstalled: Adobe.Acrobat.Reader.64-bit (a restart finishes removing it)
+Skipping: Adobe.Acrobat.Reader.32-bit (not installed)
+Uninstalling: Google.Chrome
+Successfully uninstalled: Google.Chrome
+Uninstalling: Google.GoogleDrive (its own uninstaller: "C:\Program Files\Google\Drive File Stream\uninstall.exe" --silent --force_stop)
+Successfully uninstalled: Google.GoogleDrive
+Uninstalling: Git.Git
+Successfully uninstalled: Git.Git
+Uninstalling: Klocman.BulkCrapUninstaller
+Successfully uninstalled: Klocman.BulkCrapUninstaller
+Skipping: Dell.CommandUpdate.Universal (not installed)
+Skipping: Microsoft.PowerShell (this uninstaller is running in PowerShell 7; to remove it, run winget-app-uninstall.ps1 from Windows PowerShell)
+Skipping: Microsoft.WindowsTerminal (Windows Terminal hosts this window, or is set as the default terminal application, so removing it would close this window; to remove it, set the default terminal application to Windows Console Host and run winget-app-uninstall.ps1 from a window Windows Terminal does not host)
+Removing automatic-update components...
+Uninstalling Winget-AutoUpdate...
+Winget-AutoUpdate uninstalled.
+Summary:
+
+Status      Apps
+------      ----
+Uninstalled 7zip.7zip, GlavSoft.TightVNC, Adobe.Acrobat.Reader.64-bit, Google.Chrome, Google.GoogleDrive, Git.Git, Klocman.BulkCrapUninstaller
+Skipped     Adobe.Acrobat.Reader.32-bit, Dell.CommandUpdate.Universal, Microsoft.PowerShell, Microsoft.WindowsTerminal
+Restart: REQUIRED to finish removing Adobe.Acrobat.Reader.64-bit.

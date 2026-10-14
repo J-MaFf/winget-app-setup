@@ -23,6 +23,10 @@
     had when the run started, in a new folder under %SystemRoot%\Temp that only SYSTEM and
     Administrators can change, so a file rewritten while the UAC prompt is up is not run.
 
+    A real run takes the installer's machine-wide run lock, so an install and an uninstall never
+    run at once on a PC (exit code 6 when another run holds it), and removes the leftover copies
+    a stopped run of either script left there, as the installer does.
+
     When someone is at the console, the run ends with 'Press any key to exit...', as the installer
     does, so the summary stays on screen: the elevated window closes as soon as the run ends, and
     the uninstaller keeps no transcript. A non-interactive run, a run as SYSTEM and a run under CI
@@ -42,7 +46,8 @@
     has invalid entries; 4 = not elevated, and the UAC prompt was declined or could not be shown (a
     non-interactive run shows none), or the execution policy Group Policy sets would refuse the
     elevated run; 5 = stopped by an unexpected error, started without a script file (irm | iex), or
-    the file changed or could not be copied before its elevated run.
+    the file changed or could not be copied before its elevated run; 6 = another run of the
+    installer or the uninstaller is in progress on this PC, so nothing was changed.
 #>
 param (
     [switch]$WhatIf,
@@ -2906,7 +2911,7 @@ function Write-InstallerExitNotice {
             3 { $why = 'the app catalog failed validation (see above)' }
             4 { $why = 'administrator rights are required, and this run was not elevated, or Group Policy''s execution policy keeps the elevated window from running the installer (see above)' }
             5 { $why = 'the run was aborted before it finished (see above)' }
-            6 { $why = 'another run of the installer is in progress on this PC' }
+            6 { $why = 'another run of the installer or the uninstaller is in progress on this PC' }
             7 { $why = 'PowerShell 7 could not be installed, or the installer could not be relaunched under it (see above)' }
         }
     }
@@ -3380,7 +3385,7 @@ function Invoke-InstallerHousekeeping {
         }
         $copiesRemoved = Remove-StaleInstallerCopy -Root $TempRoot -MaxAgeHours $TempCopyMaxAgeHours -CurrentScriptPath $CurrentScriptPath
         if ($logsRemoved -gt 0 -or $copiesRemoved -gt 0) {
-            Write-Info ('Removed {0} old log file(s), keeping the logs of the newest {1} transcripts, and {2} leftover temporary copy folder(s) of the installer.' -f $logsRemoved, $KeepTranscripts, $copiesRemoved)
+            Write-Info ('Removed {0} old log file(s), keeping the logs of the newest {1} transcripts, and {2} leftover temporary copy folder(s) of the installer and the uninstaller.' -f $logsRemoved, $KeepTranscripts, $copiesRemoved)
         }
         if (-not $PSBoundParameters.ContainsKey('StagingRoot') -and -not [string]::IsNullOrWhiteSpace($env:ProgramData)) {
             $StagingRoot = Join-Path $env:ProgramData 'winget-app-setup'
@@ -3393,7 +3398,7 @@ function Invoke-InstallerHousekeeping {
         }
     }
     catch {
-        Write-WarningMessage "Could not remove the installer's old logs and temporary copies: $($_.Exception.Message.Trim().TrimEnd('.')). Continuing."
+        Write-WarningMessage "Could not remove old logs and leftover temporary copies: $($_.Exception.Message.Trim().TrimEnd('.')). Continuing."
     }
     return [pscustomobject]@{ LogsRemoved = $logsRemoved; CopiesRemoved = $copiesRemoved; WingetClientFoldersRemoved = $wingetClientFoldersRemoved }
 }
@@ -6274,7 +6279,7 @@ function Lock-InstallerRun {
         return 'Busy'
     }
     catch {
-        Write-WarningMessage "Could not check whether another run of the installer is in progress: $($_.Exception.Message.Trim().TrimEnd('.')). Continuing without that check."
+        Write-WarningMessage "Could not check whether another run of the installer or the uninstaller is in progress: $($_.Exception.Message.Trim().TrimEnd('.')). Continuing without that check."
         return 'Unavailable'
     }
 
@@ -6286,7 +6291,7 @@ function Lock-InstallerRun {
         $acquired = $true
     }
     catch {
-        Write-WarningMessage "Could not check whether another run of the installer is in progress: $($_.Exception.Message.Trim().TrimEnd('.')). Continuing without that check."
+        Write-WarningMessage "Could not check whether another run of the installer or the uninstaller is in progress: $($_.Exception.Message.Trim().TrimEnd('.')). Continuing without that check."
         $mutex.Dispose()
         return 'Unavailable'
     }
@@ -14136,11 +14141,23 @@ else {
 }
 
 try {
-    $exitCode = Invoke-WingetUninstall -WhatIf:$WhatIf
+    if (-not $WhatIf -and (Lock-InstallerRun) -eq 'Busy') {
+        Write-ErrorMessage 'Another run of the installer or the uninstaller is in progress on this PC (started by an RMM tool, a scheduled task or someone else). This run stops without changing anything: let that run finish, then run the uninstaller again if needed.'
+        $exitCode = 6
+    }
+    else {
+        if (-not $WhatIf) {
+            [void](Invoke-InstallerHousekeeping -CurrentScriptPath $PSCommandPath)
+        }
+        $exitCode = Invoke-WingetUninstall -WhatIf:$WhatIf
+    }
 }
 catch {
     $exitCode = 5
     Write-ErrorMessage "The uninstaller stopped on an unexpected error before it finished: $_"
+}
+finally {
+    Unlock-InstallerRun
 }
 
 $stoppedAtPrompt = $true

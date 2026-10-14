@@ -225,14 +225,15 @@ if ($MyInvocation.InvocationName -ne '.') {
         Write-OSArchitectureLine
 
         # One real run at a time (review finding P3-41): an elevated run takes the machine-wide run
-        # lock before it checks or changes anything, and a run started while another one holds it
-        # exits 6 at once, without waiting for that run or stopping it. A run that is not elevated
+        # lock (shared with the uninstaller, wgt-gq8.47) before it checks or changes anything, and a
+        # run started while another one holds it exits 6 at once, without waiting for that run or
+        # stopping it. A run that is not elevated
         # takes no lock: it stops with exit code 4, or relaunches itself elevated and the elevated
         # run takes it. A dry run changes nothing and takes none.
         if (-not $WhatIf -and (Test-IsAdmin)) {
             if ((Lock-InstallerRun) -eq 'Busy') {
-                Write-ErrorMessage 'Another run of this installer is in progress on this PC (started by an RMM tool, a scheduled task or someone else). This run stops without changing anything: let that run finish, then run the installer again if needed.'
-                Exit-Installer -Code 6 -Reason 'another run of the installer is in progress on this PC' -NonInteractive:$NonInteractive
+                Write-ErrorMessage 'Another run of the installer or the uninstaller is in progress on this PC (started by an RMM tool, a scheduled task or someone else). This run stops without changing anything: let that run finish, then run the installer again if needed.'
+                Exit-Installer -Code 6 -Reason 'another run of the installer or the uninstaller is in progress on this PC' -NonInteractive:$NonInteractive
             }
             # This run does the work: it writes last-run.json, and it removes old logs and the
             # installer's leftover temporary copies (review finding P3-42). Its record replaces the

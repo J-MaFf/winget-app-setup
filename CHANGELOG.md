@@ -23,6 +23,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Diagnostics bundle (`-CollectDiagnostics`): adds the account's newest winget logs (`winget-logs\`,
   at most 5, 1 MB each) and the AppXDeploymentServer/Operational errors that mention
   Microsoft.Winget.Source (`appx-source-events.txt`), both redacted like the rest (wgt-gq8.69).
+- Uninstaller: run lock, housekeeping and an e2e uninstall pass (bead wgt-gq8.47).
+  `winget-app-uninstall.ps1` now takes the installer's machine-wide run lock
+  (`Global\winget-app-setup-run`) in every real run, so an install and an uninstall can no longer
+  run at once on a PC and fail each other's winget and msiexec calls: started while either holds
+  it, the uninstaller changes nothing and exits 6, the installer's code for the same case (the
+  installer's message now names both scripts). A preview (`-WhatIf`) takes no lock. The run that
+  holds the lock also removes the leftover elevated copies a stopped run of either script left in
+  `%SystemRoot%\Temp` (`Invoke-InstallerHousekeeping`), which before only a later installer run
+  did. The `e2e-install` leg now ends with a real uninstall from PowerShell 7
+  (`e2e/Invoke-UninstallPass.ps1`): exit 0 or 3010, every catalog app it did not keep on purpose
+  gone from `winget list`, and Winget-AutoUpdate's task gone, with its output in the
+  `e2e-diagnostics` artifact and a diagnostics snapshot (WAU's logs included) taken just before
+  it. Pull requests that change only `winget-app-uninstall.ps1` now run the e2e jobs too.
 - merge-gate caller (`.github/workflows/merge-gate.yml`): the required check that keeps the claude-sandbox App from merging its own PRs; logic in the reusable J-MaFf/.github merge-gate.yml.
 - Releases (bead wgt-z70, [#286](https://github.com/J-MaFf/winget-app-setup/issues/286)): a `vX.Y.Z`
   tag on `main` now publishes a GitHub release through the shared workflow in

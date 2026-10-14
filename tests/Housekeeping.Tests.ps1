@@ -336,7 +336,7 @@ Describe 'Invoke-InstallerHousekeeping (review finding P3-42)' {
         Test-Path -LiteralPath (Join-Path $script:logDirectory 'install-20261001-100300.log') | Should -BeTrue
         Test-Path -LiteralPath $dayOld | Should -BeFalse
         Test-Path -LiteralPath $hoursOld | Should -BeTrue
-        Should -Invoke Write-Info -Times 1 -Exactly -ParameterFilter { $Message -eq 'Removed 3 old log file(s), keeping the logs of the newest 30 transcripts, and 1 leftover temporary copy folder(s) of the installer.' }
+        Should -Invoke Write-Info -Times 1 -Exactly -ParameterFilter { $Message -eq 'Removed 3 old log file(s), keeping the logs of the newest 30 transcripts, and 1 leftover temporary copy folder(s) of the installer and the uninstaller.' }
     }
 
     It 'Looks only in the elevated relaunch''s copy folder by default, not in a user profile''s temp folder' {
@@ -402,7 +402,7 @@ Describe 'Invoke-InstallerHousekeeping (review finding P3-42)' {
         { $script:housekeepingResult = Invoke-InstallerHousekeeping -LogDirectory $script:logDirectory -TempRoot @($script:tempRoot) } | Should -Not -Throw
 
         $script:housekeepingResult.LogsRemoved | Should -Be 0
-        Should -Invoke Write-WarningMessage -Times 1 -Exactly -ParameterFilter { $Message -match "Could not remove the installer's old logs and temporary copies: Access to the path is denied\. Continuing\." }
+        Should -Invoke Write-WarningMessage -Times 1 -Exactly -ParameterFilter { $Message -match "Could not remove old logs and leftover temporary copies: Access to the path is denied\. Continuing\." }
     }
 }
 

@@ -57,11 +57,29 @@ else {
 # 5, as in the installer, rather than the 1 PowerShell would exit with, which means an app could not
 # be removed.
 try {
-    $exitCode = Invoke-WingetUninstall -WhatIf:$WhatIf
+    # The installer's run lock (wgt-gq8.47): an install and an uninstall side by side would fail
+    # each other's winget and msiexec calls, so a real run started while either holds it exits 6
+    # at once. A preview changes nothing and takes none.
+    if (-not $WhatIf -and (Lock-InstallerRun) -eq 'Busy') {
+        Write-ErrorMessage 'Another run of the installer or the uninstaller is in progress on this PC (started by an RMM tool, a scheduled task or someone else). This run stops without changing anything: let that run finish, then run the uninstaller again if needed.'
+        $exitCode = 6
+    }
+    else {
+        if (-not $WhatIf) {
+            # The run that holds the lock removes the leftover elevated copies a stopped run of
+            # either script left behind, as the installer does; this file's own folder is kept.
+            [void](Invoke-InstallerHousekeeping -CurrentScriptPath $PSCommandPath)
+        }
+        $exitCode = Invoke-WingetUninstall -WhatIf:$WhatIf
+    }
 }
 catch {
     $exitCode = 5
     Write-ErrorMessage "The uninstaller stopped on an unexpected error before it finished: $_"
+}
+finally {
+    # Released before the key press, as the installer does, so a window left open blocks no run.
+    Unlock-InstallerRun
 }
 
 # Hold the window until a key is pressed when someone is at the console, as the installer does: the
