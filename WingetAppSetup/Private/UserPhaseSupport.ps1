@@ -121,8 +121,8 @@ function Get-RunRecordTrustProblem {
     The record's path (Get-InstallerRunRecordPath).
 .OUTPUTS
     [pscustomobject] with Path, Sha256, BuildId, StartedUtc, ExitCode ([int], or $null while the run
-    has not reported), DeferredApps ([string[]], in record order, each once) and InvalidDeferredIds
-    ([string[]]); or $null.
+    has not reported), DeferredApps ([string[]], in record order, each once), InvalidDeferredIds
+    ([string[]]) and Record (the whole record as read); or $null.
 #>
 function Read-InstallerRunRecord {
     param (
@@ -202,6 +202,7 @@ function Read-InstallerRunRecord {
         ExitCode           = $exitCode
         DeferredApps       = [string[]]$deferred
         InvalidDeferredIds = [string[]]$invalid
+        Record             = $record
     }
 }
 

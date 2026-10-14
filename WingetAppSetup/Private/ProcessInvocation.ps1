@@ -31,6 +31,9 @@
     WingetClientVersion Get-WinGetVersion in a child pwsh, the engine's launch check (60 seconds).
     WingetClientListCheck the engine's per-app Get-WinGetPackage check in a child pwsh, which
                       starts pwsh and loads the module each time (45 seconds).
+    SystemHandoff     the wait for the SYSTEM run a run under cross-user elevation hands its
+                      install over to (Invoke-SystemHandoff, wgt-gq8.68): a whole installer run
+                      (3 hours).
     MsiExec           one msiexec install or uninstall (15 minutes).
     AppxProvisioning  one Add-AppxProvisionedPackage, run in Windows PowerShell (10 minutes).
     AppxRegistration  one Add-AppxPackage for this account (a registration, or an .msix such as the
@@ -50,7 +53,7 @@
 function Get-ProcessTimeoutSeconds {
     param (
         [Parameter(Mandatory = $true)]
-        [ValidateSet('WingetInstall', 'WingetDownload', 'WingetUninstall', 'WingetListCheck', 'WingetVersion', 'WingetSourceUpdate', 'WingetSourceOpen', 'WingetSourceReset', 'WingetClientProbe', 'WingetClientVersion', 'WingetClientListCheck', 'MsiExec', 'AppxProvisioning', 'AppxRegistration', 'AppxQuery', 'WingetPackageManagerRepair', 'WebDownload', 'WebDownloadStall', 'WebLookup')]
+        [ValidateSet('WingetInstall', 'WingetDownload', 'WingetUninstall', 'WingetListCheck', 'WingetVersion', 'WingetSourceUpdate', 'WingetSourceOpen', 'WingetSourceReset', 'WingetClientProbe', 'WingetClientVersion', 'WingetClientListCheck', 'SystemHandoff', 'MsiExec', 'AppxProvisioning', 'AppxRegistration', 'AppxQuery', 'WingetPackageManagerRepair', 'WebDownload', 'WebDownloadStall', 'WebLookup')]
         [string]$Operation
     )
 
@@ -66,6 +69,7 @@ function Get-ProcessTimeoutSeconds {
         'WingetClientProbe' { return 180 }
         'WingetClientVersion' { return 60 }
         'WingetClientListCheck' { return 45 }
+        'SystemHandoff' { return 10800 }
         'MsiExec' { return 900 }
         'AppxProvisioning' { return 600 }
         'AppxRegistration' { return 300 }

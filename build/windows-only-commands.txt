@@ -22,7 +22,10 @@ Get-ScheduledTaskInfo
 Get-Service
 Get-WinEvent
 Invoke-CimMethod
+Register-ScheduledTask
 Restart-Service
 Set-ScheduledTask
+Start-ScheduledTask
 Start-Service
+Stop-ScheduledTask
 Unregister-ScheduledTask

@@ -148,5 +148,6 @@
     "module": null,
     "fallbackReason": null
   },
-  "transcriptPath": "C:\\ProgramData\\winget-app-setup\\logs\\install-20261005-053448.log"
+  "transcriptPath": "C:\\ProgramData\\winget-app-setup\\logs\\install-20261005-053448.log",
+  "handoff": null
 }
