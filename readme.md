@@ -747,7 +747,11 @@ before rolling it out. What a SYSTEM run does differently:
 - Started from Windows PowerShell 5.1 on a PC without PowerShell 7, it installs PowerShell 7 from
   the MSI download, not with winget, since SYSTEM has no `winget` command; the bootstrap says so
   instead of saying winget is missing. The MSI path reads its release list from GitHub, which can
-  answer `429 Too Many Requests` when many PCs on one network ask at once (exit code 7).
+  answer `429 Too Many Requests` when many PCs on one network ask at once (exit code 7). For a day
+  or two after a PowerShell release, that MSI is newer than winget's catalog, and `winget list`
+  does not show it until the catalog has it: the `Microsoft.PowerShell` step then reports it as
+  already installed, from the version the MSI registered for the whole PC, rather than installing
+  winget's older MSI over it, which fails.
 
 A run elevated as a different account than the signed-in user (cross-user elevation) installs for
 the whole PC the same way: an app with no machine-wide installer is `Deferred` instead of being

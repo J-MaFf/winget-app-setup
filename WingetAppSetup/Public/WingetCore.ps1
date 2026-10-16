@@ -913,11 +913,55 @@ function Install-MsixProvisionedPackage {
 
 <#
 .SYNOPSIS
+    Finds the newest stable PowerShell 7 that its MSI registered for the whole PC.
+.DESCRIPTION
+    Reads HKLM\SOFTWARE\Microsoft\PowerShellCore\InstalledVersions through
+    Get-DiagnosticsPowerShellInstall. An entry counts when its SemanticVersion is a plain 7.x.y or
+    later (no preview or release candidate) and its InstallLocation holds pwsh.exe. A registry that
+    cannot be read counts as nothing registered.
+.OUTPUTS
+    [hashtable] @{ Version = [version]; InstallLocation = <string> }, or $null.
+#>
+function Find-RegisteredPowerShell7 {
+    try {
+        $installs = @(Get-DiagnosticsPowerShellInstall)
+    }
+    catch {
+        return $null
+    }
+
+    $newest = $null
+    foreach ($install in $installs) {
+        if ([string]$install.SemanticVersion -notmatch '^(\d+\.\d+\.\d+)\z') {
+            continue
+        }
+        $version = [version]$Matches[1]
+        $location = [string]$install.InstallLocation
+        if ($version.Major -lt 7 -or [string]::IsNullOrWhiteSpace($location)) {
+            continue
+        }
+        if (-not (Test-Path -LiteralPath (Join-Path $location 'pwsh.exe') -PathType Leaf)) {
+            continue
+        }
+        if (-not $newest -or $version -gt $newest.Version) {
+            $newest = @{ Version = $version; InstallLocation = $location }
+        }
+    }
+    return $newest
+}
+
+<#
+.SYNOPSIS
     Installs the newest available PowerShell, choosing a delivery that works in an elevated
     cross-user / machine-scope context (no version pinning).
 .DESCRIPTION
     winget's default tracks the latest PowerShell; this only chooses how to deliver it machine-wide
     (issues #163, #166):
+      0. A stable PowerShell 7 its MSI registered for the whole PC (Find-RegisteredPowerShell7) is
+         kept, with no winget call: Install-AppWithVerification calls this only when `winget list`
+         did not find PowerShell, and winget does not list a release newer than its catalog (the
+         5.1 bootstrap's MSI fallback installs GitHub's latest), over which its older MSI fails
+         with 1603 (wgt-9j1).
       1. The MSI while the current line ships one (7.6 and older): machine-wide on any build.
       2. Then the MSIX: installed directly on build 26100 and later; provisioned for all users via
          DISM (Install-MsixProvisionedPackage) before, where winget's machine-scope MSIX is broken.
@@ -936,11 +980,13 @@ function Install-MsixProvisionedPackage {
     installed per user. An MSIX with no machine-scope installer gives NoMachineScopeInstaller, with
     no `winget list` check, and the caller defers it.
 .OUTPUTS
-    [hashtable] @{ ExitCode = <int>; Installed = <bool>; Method = 'msi' | 'msix-native' | 'msix-provisioned' }
-    The winget paths (msi, msix-native) return Install-WingetPackage's whole result (P3-8) with
-    Installed and Method added, and the `winget list` check's outcome: VerifyTimedOut,
-    VerifyLaunchFailed, VerifyLaunchError, VerifyCheckFailed and VerifyExitCode. When winget could
-    not be launched for the install (LaunchErrorExhausted), the check is skipped.
+    [hashtable] @{ ExitCode = <int>; Installed = <bool>; Method = 'msi' | 'msix-native' | 'msix-provisioned' | 'registered' }
+    'registered' (step 0) also has AlreadyInstalled = $true and RegisteredVersion; nothing was
+    installed, and the caller reports the app as already installed. The winget paths (msi,
+    msix-native) return Install-WingetPackage's whole result (P3-8) with Installed and Method added,
+    and the `winget list` check's outcome: VerifyTimedOut, VerifyLaunchFailed, VerifyLaunchError,
+    VerifyCheckFailed and VerifyExitCode. When winget could not be launched for the install
+    (LaunchErrorExhausted), the check is skipped.
 #>
 function Install-PowerShellLatest {
     param (
@@ -978,6 +1024,14 @@ function Install-PowerShellLatest {
     # attempts below.
     if ($PSBoundParameters.ContainsKey('InstallInProgressWaitSeconds')) {
         $installParameters['InstallInProgressWaitSeconds'] = $InstallInProgressWaitSeconds
+    }
+
+    # 0. A PowerShell 7 that `winget list` missed but its MSI registered for the whole PC: most
+    # likely newer than winget's catalog, so winget's MSI would be a downgrade and fail (wgt-9j1).
+    $registered = Find-RegisteredPowerShell7
+    if ($registered) {
+        Write-Info ("PowerShell {0} is already installed for every user ({1}). winget does not list it, most likely because it is newer than the version in winget's catalog, so it is kept as it is." -f $registered.Version, $registered.InstallLocation)
+        return @{ ExitCode = 0; Installed = $true; AlreadyInstalled = $true; Method = 'registered'; RegisteredVersion = [string]$registered.Version; InstallInProgressWaitedSeconds = 0 }
     }
 
     # 1. Prefer the MSI while the latest version still ships one.

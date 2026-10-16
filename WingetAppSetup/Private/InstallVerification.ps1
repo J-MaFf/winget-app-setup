@@ -75,7 +75,8 @@ function Test-AppApplicability {
          attempt, since "could not check" is not "not installed" (issue #176, P2-9).
       3. Dispatch: the entry's own self-verifying installer ($App.install, e.g.
          Install-PowerShellLatest), or Install-WingetPackage. A winget that could not launch for the
-         install is Failed (InstallLaunchFailed).
+         install is Failed (InstallLaunchFailed). An entry installer that finds the app present
+         where `winget list` did not (AlreadyInstalled) makes it Skipped.
       4. Post-verify: a winget install is checked again; not found is VerifyNotFound, and a check
          that could not run says why (VerifyTimeout, VerifyLaunchFailed, VerifyFailed).
     The three launch-failure reasons are what the circuit breaker watches for.
@@ -311,6 +312,11 @@ function Install-AppWithVerification {
             }
         }
         $customResult = & $App.install @customParameters
+        if ($customResult.AlreadyInstalled) {
+            # Present already where `winget list` could not see it (Install-PowerShellLatest: a
+            # PowerShell 7 its MSI registered for the whole PC, wgt-9j1). Nothing was installed.
+            return (Complete-AppPostInstallStep -App $App -Outcome @{ Status = 'Skipped'; InstallResult = $null; FailureReason = $null })
+        }
         if ($customResult.Installed) {
             return (Complete-AppPostInstallStep -App $App -Outcome @{ Status = 'Installed'; InstallResult = $customResult; FailureReason = $null })
         }

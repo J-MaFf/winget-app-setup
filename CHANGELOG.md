@@ -961,6 +961,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`Microsoft.PowerShell` no longer fails right after a PowerShell release** (bead wgt-9j1). The
+  Windows PowerShell 5.1 bootstrap's `winget install --scope machine` gave no installer type, and
+  on Windows Server winget refused the installer it picked (`0x8A150113 INSTALL_SYSTEM_NOT_SUPPORTED`,
+  after checking its hash with no download, so most likely the MSIX), and the MSI fallback then installed GitHub's latest release (7.6.7) while winget's catalog still
+  had 7.6.6. `winget list` does not show a release newer than its catalog, so the catalog step ran
+  winget's 7.6.6 MSI over 7.6.7, which failed with 1603 on both passes and the run exited 1 (the
+  e2e Windows PowerShell 5.1 leg of 2026-10-14). The bootstrap now asks winget for the MSI first
+  (`--installer-type wix`), as `Install-PowerShellLatest` does, and for winget's machine-wide
+  package only when there is no MSI (`0x8A150010`, PowerShell 7.7 and later). When the MSI fallback
+  still runs (no winget, as SYSTEM), `Install-PowerShellLatest` first looks for a stable
+  PowerShell 7 its MSI registered for the whole PC (`Find-RegisteredPowerShell7`, reading
+  `HKLM\SOFTWARE\Microsoft\PowerShellCore\InstalledVersions`, with pwsh.exe in its folder) and
+  reports the app as already installed instead of running winget. A dry run still says it would
+  install PowerShell in that case.
 - **Chrome installs again after each Chrome release: the catalog installs `Google.Chrome.EXE`**
   (bead wgt-zu3). `Google.Chrome` downloads `googlechromestandaloneenterprise64.msi` from a link
   that never changes while Google replaces the file with every release, so every install failed

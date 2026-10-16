@@ -3799,6 +3799,9 @@ function Install-AppWithVerification {
             }
         }
         $customResult = & $App.install @customParameters
+        if ($customResult.AlreadyInstalled) {
+            return (Complete-AppPostInstallStep -App $App -Outcome @{ Status = 'Skipped'; InstallResult = $null; FailureReason = $null })
+        }
         if ($customResult.Installed) {
             return (Complete-AppPostInstallStep -App $App -Outcome @{ Status = 'Installed'; InstallResult = $customResult; FailureReason = $null })
         }
@@ -5245,11 +5248,17 @@ function Invoke-PowerShell7Bootstrap {
         $wingetCommand = Get-Command -Name 'winget' -CommandType Application -ErrorAction SilentlyContinue
         if ($wingetCommand) {
             Write-Info 'Installing PowerShell 7 via winget...'
-            $wingetArguments = @('install', '--id', 'Microsoft.PowerShell', '--exact', '--source', 'winget', '--scope', 'machine') + (Get-WingetAgreementArgs)
+            $wingetTargetArguments = @('install', '--id', 'Microsoft.PowerShell', '--exact', '--source', 'winget', '--scope', 'machine')
+            $wingetOptionArguments = @(Get-WingetAgreementArgs)
             if (Test-EffectiveNonInteractive -NonInteractive:$NonInteractive) {
-                $wingetArguments += '--silent'
+                $wingetOptionArguments += '--silent'
             }
-            $wingetRun = Invoke-WingetProcess -ArgumentList $wingetArguments -TimeoutSeconds (Get-ProcessTimeoutSeconds -Operation WingetInstall) -LogDirectory $LogDirectory
+            $wingetInstallTimeout = Get-ProcessTimeoutSeconds -Operation WingetInstall
+            $wingetRun = Invoke-WingetProcess -ArgumentList ($wingetTargetArguments + @('--installer-type', 'wix') + $wingetOptionArguments) -TimeoutSeconds $wingetInstallTimeout -LogDirectory $LogDirectory
+            if (-not $wingetRun.LaunchFailed -and -not $wingetRun.TimedOut -and $wingetRun.ExitCode -eq -1978335216) {
+                Write-Info 'winget has no MSI for the latest PowerShell 7; installing its machine-wide package instead...'
+                $wingetRun = Invoke-WingetProcess -ArgumentList ($wingetTargetArguments + $wingetOptionArguments) -TimeoutSeconds $wingetInstallTimeout -LogDirectory $LogDirectory
+            }
             if ($wingetRun.LaunchFailed) {
                 Write-WarningMessage "winget could not be started: $($wingetRun.LaunchError)"
             }
@@ -14686,6 +14695,34 @@ function Install-MsixProvisionedPackage {
     }
 }
 
+function Find-RegisteredPowerShell7 {
+    try {
+        $installs = @(Get-DiagnosticsPowerShellInstall)
+    }
+    catch {
+        return $null
+    }
+
+    $newest = $null
+    foreach ($install in $installs) {
+        if ([string]$install.SemanticVersion -notmatch '^(\d+\.\d+\.\d+)\z') {
+            continue
+        }
+        $version = [version]$Matches[1]
+        $location = [string]$install.InstallLocation
+        if ($version.Major -lt 7 -or [string]::IsNullOrWhiteSpace($location)) {
+            continue
+        }
+        if (-not (Test-Path -LiteralPath (Join-Path $location 'pwsh.exe') -PathType Leaf)) {
+            continue
+        }
+        if (-not $newest -or $version -gt $newest.Version) {
+            $newest = @{ Version = $version; InstallLocation = $location }
+        }
+    }
+    return $newest
+}
+
 function Install-PowerShellLatest {
     param (
         [Parameter(Mandatory = $false)]
@@ -14715,6 +14752,12 @@ function Install-PowerShellLatest {
 
     if ($PSBoundParameters.ContainsKey('InstallInProgressWaitSeconds')) {
         $installParameters['InstallInProgressWaitSeconds'] = $InstallInProgressWaitSeconds
+    }
+
+    $registered = Find-RegisteredPowerShell7
+    if ($registered) {
+        Write-Info ("PowerShell {0} is already installed for every user ({1}). winget does not list it, most likely because it is newer than the version in winget's catalog, so it is kept as it is." -f $registered.Version, $registered.InstallLocation)
+        return @{ ExitCode = 0; Installed = $true; AlreadyInstalled = $true; Method = 'registered'; RegisteredVersion = [string]$registered.Version; InstallInProgressWaitedSeconds = 0 }
     }
 
     $method = 'msi'
