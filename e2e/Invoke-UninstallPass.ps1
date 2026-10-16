@@ -11,7 +11,8 @@
       2. It reached its summary ('Summary:') and removed at least one app ('Successfully
          uninstalled: <id>'): the install passes left Chrome, 7-Zip and Git there, so a pass that
          removed nothing proves nothing.
-      3. Each catalog app is gone: `winget list` (the module's Test-WingetPackageInstalled, with
+      3. Each catalog app is gone: `winget list` (the module's Test-CatalogAppInstalled, its own id
+         and its installedAs ids, with
          retries when winget gives no answer) no longer lists it, unless the uninstaller kept it on
          purpose. Kept on purpose is a 'Skipping: <id> (<reason>)' line whose reason is one of
          $script:UninstallKeptReasons: PowerShell 7 while the uninstaller runs in it, Windows
@@ -309,7 +310,12 @@ if ($MyInvocation.InvocationName -ne '.') {
 
     $parsed = ConvertFrom-UninstallerOutput -Content $output
     Import-Module (Join-Path $repoRoot 'WingetAppSetup\WingetAppSetup.psd1') -Force
-    $catalogIds = @(Get-DefaultAppCatalog | ForEach-Object { $_.name })
+    $catalog = @(Get-DefaultAppCatalog)
+    $catalogIds = @($catalog | ForEach-Object { $_.name })
+    $catalogById = @{}
+    foreach ($entry in $catalog) {
+        $catalogById[$entry.name] = $entry
+    }
 
     # Retried only when winget gives no answer, as Assert-Install.ps1 does: winget list is flaky on
     # hosted runners, and an answer either way is what is checked.
@@ -318,7 +324,8 @@ if ($MyInvocation.InvocationName -ne '.') {
     foreach ($id in (Get-UninstallPassCheckId -CatalogIds $catalogIds -Parsed $parsed)) {
         $answer = @{ Installed = $null; Detail = 'not checked' }
         for ($attempt = 1; $attempt -le $probeAttempts; $attempt++) {
-            $check = Test-WingetPackageInstalled -PackageId $id -TimeoutSeconds 60
+            # Its installedAs ids too, so an app left under its old package is not missed.
+            $check = Test-CatalogAppInstalled -App $catalogById[$id] -TimeoutSeconds 60
             if ($check.Installed) {
                 $answer = @{ Installed = $true; Detail = '' }
                 break

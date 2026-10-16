@@ -483,7 +483,8 @@ function Stop-AppUninstallHandOffProcess {
     has found the program:
       1. Invoke-ExternalProcess under the WingetUninstall limit: still running at the limit, it is
          stopped with what it started. Not started: UninstallLaunchFailed. Out of time:
-         UninstallTimeout. An exit code other than 0, 3010 or 1641: UninstallFailed.
+         UninstallTimeout. An exit code other than 0, 3010, 1641 or one of the entry's
+         successExitCodes (Chrome's 19, UNINSTALL_SUCCESSFUL): UninstallFailed.
       2. It exited, so the tree kill no longer reaches what it left running (Drive's uninstall.exe
          hands its work to a copy of itself): Get-AppUninstallHandOffProcess records those
          processes. For what is left of the limit, Wait-AppUninstallEntryRemoved. Still there:
@@ -529,7 +530,8 @@ function Invoke-AppQuietUninstall {
 
     $exitCode = [int]$run.ExitCode
     $restartRequired = @(3010, 1641) -contains $exitCode
-    if ($exitCode -ne 0 -and -not $restartRequired) {
+    $successCodes = @(0) + @($App['quietUninstall']['successExitCodes'] | Where-Object { $null -ne $_ })
+    if ($successCodes -notcontains $exitCode -and -not $restartRequired) {
         $result.FailureReason = 'UninstallFailed'
         $result.ExitCode = $exitCode
         $result.Reason = '{0} exited with {1} (0x{1:X8})' -f $program, $exitCode
@@ -586,16 +588,19 @@ function Invoke-AppQuietUninstall {
       1. A per-user MSIX app (msixName) in a run as SYSTEM or under cross-user elevation
          (Get-PerUserAppSkipReason): Skipped, PerUserApp, before any winget call, since even
          `winget list` would answer for the running account rather than the app's user.
-      2. Installed check (Test-WingetPackageInstalled, WingetListCheck time limit). A winget that
-         could not start, ran out of time or failed is a failure, never "not installed" (P2-19).
+      2. Installed check (Test-CatalogAppInstalled, WingetListCheck time limit): its own id, then
+         its installedAs ids. A winget that could not start, ran out of time or failed is a
+         failure, never "not installed" (P2-19).
       3. Not installed: Skipped, NotInstalled.
       4. A shell this run depends on (Get-HostingShellSkipReason): Skipped, HostsThisRun.
       5. Not applicable by the installer's own rule (Test-AppApplicability, failing open): Skipped,
          NotApplicable, and left alone.
-      6. An entry with quietUninstall: its own uninstaller (Get-AppQuietUninstallCommand). When it
+      6. Installed under an installedAs id (wgt-zu3): that package, by step 8's `winget uninstall`,
+         since quietUninstall names its own package's uninstaller. InstalledAs says which.
+      7. An entry with quietUninstall: its own uninstaller (Get-AppQuietUninstallCommand). When it
          cannot be found, Failed, UninstallerNotFound, with nothing run: `winget uninstall` would
          start the same entry's command as written and wait. Otherwise Invoke-AppQuietUninstall.
-      7. Any other entry: `winget uninstall --exact --id <id> --silent --accept-source-agreements
+      8. Any other entry: `winget uninstall --exact --id <id> --silent --accept-source-agreements
          --disable-interactivity` through Invoke-WingetProcess (WingetUninstall time limit). For an
          MSI, --silent adds /quiet. For an exe app winget runs the entry's QuietUninstallString,
          else its UninstallString, exactly as written, whatever --silent says: such an app needs
@@ -610,8 +615,8 @@ function Invoke-AppQuietUninstall {
     Get-InstallAccountContext's result, which Invoke-WingetUninstall passes; read in step 1 when not
     given and the entry has msixName.
 .PARAMETER WhatIf
-    Dry run: steps 1 to 5, and step 6's search for the uninstaller, run (they only read); an app
-    that would be removed is reported as Uninstalled, with Command set for step 6, and nothing runs.
+    Dry run: steps 1 to 6, and step 7's search for the uninstaller, run (they only read); an app
+    that would be removed is reported as Uninstalled, with Command set for step 7, and nothing runs.
 .OUTPUTS
     [hashtable] @{
         Status          = 'Uninstalled' | 'Skipped' | 'Failed'
@@ -623,7 +628,8 @@ function Invoke-AppQuietUninstall {
         Reason          = the text shown in parentheses after the app id
         ExitCode        = the exit code of the call that decided a failure, or $null
         RestartRequired = True when the app's uninstaller said a restart finishes removing it
-        Command         = the command line of the app's own uninstaller (step 6), or $null
+        Command         = the command line of the app's own uninstaller (step 7), or $null
+        InstalledAs     = the installedAs id it was installed under (step 6), or $null
     }
 #>
 function Uninstall-CatalogApp {
@@ -640,7 +646,7 @@ function Uninstall-CatalogApp {
     )
 
     $id = $App.name
-    $result = @{ Status = 'Failed'; SkipReason = $null; FailureReason = $null; Reason = $null; ExitCode = $null; RestartRequired = $false; Command = $null }
+    $result = @{ Status = 'Failed'; SkipReason = $null; FailureReason = $null; Reason = $null; ExitCode = $null; RestartRequired = $false; Command = $null; InstalledAs = $null }
 
     # First, with no winget call: as SYSTEM or another user's admin, winget would check and remove
     # the app for the wrong account (the installer's machine-wide rule, wgt-gq8.70).
@@ -653,7 +659,7 @@ function Uninstall-CatalogApp {
     }
 
     $checkTimeoutSeconds = Get-ProcessTimeoutSeconds -Operation WingetListCheck
-    $check = Test-WingetPackageInstalled -PackageId $id -TimeoutSeconds $checkTimeoutSeconds
+    $check = Test-CatalogAppInstalled -App $App -TimeoutSeconds $checkTimeoutSeconds
     if ($check.TimedOut) {
         $result.FailureReason = 'CheckTimeout'
         $result.Reason = "could not check whether it is installed: 'winget list' did not answer within $checkTimeoutSeconds seconds"
@@ -695,9 +701,15 @@ function Uninstall-CatalogApp {
         return $result
     }
 
+    $uninstallId = $id
+    if ($check.InstalledAs) {
+        $uninstallId = $check.InstalledAs
+        $result.InstalledAs = $check.InstalledAs
+    }
+
     # wgt-gq8.61: never fall back to winget here, which would run the command that waits.
     $quietCommand = $null
-    if ($null -ne $App['quietUninstall']) {
+    if ($null -ne $App['quietUninstall'] -and $uninstallId -eq $id) {
         $quietCommand = Get-AppQuietUninstallCommand -App $App
         if ($quietCommand.Problem) {
             $result.FailureReason = 'UninstallerNotFound'
@@ -716,9 +728,14 @@ function Uninstall-CatalogApp {
         return (Invoke-AppQuietUninstall -App $App -Command $quietCommand)
     }
 
-    Write-Info "Uninstalling: $id"
+    if ($uninstallId -ne $id) {
+        Write-Info "Uninstalling: $id (installed as $uninstallId)"
+    }
+    else {
+        Write-Info "Uninstalling: $id"
+    }
     $timeoutSeconds = Get-ProcessTimeoutSeconds -Operation WingetUninstall
-    $run = Invoke-WingetProcess -ArgumentList @('uninstall', '--exact', '--id', $id, '--silent', '--accept-source-agreements', '--disable-interactivity') -TimeoutSeconds $timeoutSeconds
+    $run = Invoke-WingetProcess -ArgumentList @('uninstall', '--exact', '--id', $uninstallId, '--silent', '--accept-source-agreements', '--disable-interactivity') -TimeoutSeconds $timeoutSeconds
     if ($run.LaunchFailed) {
         $result.FailureReason = 'UninstallLaunchFailed'
         $result.Reason = 'winget could not be started ({0})' -f "$($run.LaunchError)".Trim().TrimEnd('.')

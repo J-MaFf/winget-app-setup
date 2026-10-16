@@ -58,7 +58,7 @@
       "postInstallReason": null
     },
     {
-      "id": "Google.Chrome",
+      "id": "Google.Chrome.EXE",
       "status": "NotAttempted",
       "reason": "the run's 1-minute time budget was used up",
       "code": null,

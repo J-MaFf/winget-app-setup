@@ -27,7 +27,7 @@ Installing the following Apps:
 7zip.7zip
 GlavSoft.TightVNC
 Adobe.Acrobat.Reader.64-bit
-Google.Chrome
+Google.Chrome.EXE
 Google.GoogleDrive
 Git.Git
 Klocman.BulkCrapUninstaller
@@ -41,8 +41,8 @@ Installing: GlavSoft.TightVNC
 Successfully installed: GlavSoft.TightVNC
 Installing: Adobe.Acrobat.Reader.64-bit
 Successfully installed: Adobe.Acrobat.Reader.64-bit
-Installing: Google.Chrome
-Successfully installed: Google.Chrome
+Installing: Google.Chrome.EXE
+Successfully installed: Google.Chrome.EXE
 Installing: Google.GoogleDrive
 Successfully installed: Google.GoogleDrive
 Installing: Git.Git
@@ -64,7 +64,7 @@ Summary:
 
 Status    Apps
 ------    ----
-Installed 7zip.7zip, GlavSoft.TightVNC, Adobe.Acrobat.Reader.64-bit, Google.Chrome, Google.GoogleDrive, Git.Git, Klocman.BulkCrapUninstaller
+Installed 7zip.7zip, GlavSoft.TightVNC, Adobe.Acrobat.Reader.64-bit, Google.Chrome.EXE, Google.GoogleDrive, Git.Git, Klocman.BulkCrapUninstaller
 Skipped   Dell.CommandUpdate.Universal, Microsoft.PowerShell, Microsoft.WindowsTerminal
 Auto-updates: Configured (Winget-AutoUpdate v2.12.0).
 Full transcript of this run: C:\ProgramData\winget-app-setup\logs\install-20261005-060449.log

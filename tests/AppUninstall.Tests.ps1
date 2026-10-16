@@ -527,6 +527,29 @@ Describe 'Uninstall-CatalogApp for an entry with quietUninstall (wgt-gq8.61)' {
         $result.RestartRequired | Should -BeTrue
     }
 
+    It 'Counts an exit code the entry lists in successExitCodes as removed, with no restart (wgt-zu3)' {
+        # Chrome's setup.exe --uninstall --force-uninstall ends with 19, UNINSTALL_SUCCESSFUL.
+        $script:drive.quietUninstall['successExitCodes'] = @(19)
+        $script:exitCode = 19
+
+        $result = Uninstall-CatalogApp -App $script:drive
+
+        $result.Status | Should -Be 'Uninstalled'
+        $result.RestartRequired | Should -BeFalse
+        Should -Invoke Test-WingetPackageInstalled -Times 2 -Exactly
+    }
+
+    It 'Fails, UninstallFailed, on an exit code the entry does not list, though it lists others' {
+        # 21 is Chrome's UNINSTALL_CANCELLED.
+        $script:drive.quietUninstall['successExitCodes'] = @(19)
+        $script:exitCode = 21
+
+        $result = Uninstall-CatalogApp -App $script:drive
+
+        $result.FailureReason | Should -Be 'UninstallFailed'
+        $result.Reason | Should -Be "its uninstaller 'uninstall.exe' exited with 21 (0x00000015)"
+    }
+
     It 'Fails, UninstallFailed, on any other exit code, without waiting' {
         $script:exitCode = 1603
 
@@ -618,6 +641,35 @@ Describe 'Uninstall-CatalogApp for an entry with quietUninstall (wgt-gq8.61)' {
         Should -Invoke Invoke-WingetProcess -Times 1 -Exactly -ParameterFilter { $ArgumentList[0] -eq 'uninstall' -and $ArgumentList -contains 'Contoso.App' }
         Should -Invoke Invoke-ExternalProcess -Times 0 -Exactly
         Should -Invoke Get-AppUninstallEntry -Times 0 -Exactly
+    }
+
+    It 'Removes an app installed under its installedAs id with winget uninstall of that id, not its quietUninstall (wgt-zu3)' {
+        # A PC set up before Chrome moved to Google.Chrome.EXE: the Google.Chrome MSI is what is
+        # there, and its own winget uninstall is silent; setup.exe --force-uninstall is the EXE's.
+        Mock Test-WingetPackageInstalled { New-TestCheckResult -Installed ($PackageId -eq 'Google.Chrome' -and -not $script:removed) }
+        Mock Invoke-WingetProcess { $script:removed = $true; New-TestProcessResult -ExitCode 0 }
+        $chrome = @{ name = 'Google.Chrome.EXE'; installedAs = 'Google.Chrome'; quietUninstall = @{ productCode = 'Google Chrome'; arguments = @('--uninstall', '--system-level', '--force-uninstall'); successExitCodes = @(19) } }
+
+        $result = Uninstall-CatalogApp -App $chrome
+
+        $result.Status | Should -Be 'Uninstalled'
+        $result.InstalledAs | Should -Be 'Google.Chrome'
+        $result.Command | Should -BeNullOrEmpty
+        Should -Invoke Invoke-WingetProcess -Times 1 -Exactly -ParameterFilter { $ArgumentList[0] -eq 'uninstall' -and ($ArgumentList -join ' ') -match '--id Google\.Chrome --silent' }
+        Should -Invoke Invoke-ExternalProcess -Times 0 -Exactly
+        Should -Invoke Get-AppUninstallEntry -Times 0 -Exactly
+        Should -Invoke Write-Info -Times 1 -Exactly -ParameterFilter { $Message -eq 'Uninstalling: Google.Chrome.EXE (installed as Google.Chrome)' }
+    }
+
+    It 'Still runs its own uninstaller when it is installed under its own id' {
+        $chrome = @{ name = 'Google.GoogleDrive'; installedAs = 'Google.DriveOld'; quietUninstall = @{ productCode = $script:driveProductCode; arguments = @('--silent', '--force_stop') } }
+
+        $result = Uninstall-CatalogApp -App $chrome
+
+        $result.Status | Should -Be 'Uninstalled'
+        $result.InstalledAs | Should -BeNullOrEmpty
+        Should -Invoke Invoke-ExternalProcess -Times 1 -Exactly
+        Should -Invoke Invoke-WingetProcess -Times 0 -Exactly
     }
 }
 

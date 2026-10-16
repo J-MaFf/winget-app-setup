@@ -27,7 +27,7 @@ Installing the following Apps:
 7zip.7zip
 GlavSoft.TightVNC
 Adobe.Acrobat.Reader.64-bit
-Google.Chrome
+Google.Chrome.EXE
 Google.GoogleDrive
 Git.Git
 Klocman.BulkCrapUninstaller
@@ -40,8 +40,8 @@ Installing: GlavSoft.TightVNC
 Successfully installed: GlavSoft.TightVNC
 Installing: Adobe.Acrobat.Reader.64-bit
 Failed to install: Adobe.Acrobat.Reader.64-bit (package not found after install; winget exit 0x80073D19, 3 attempts, machine-scope fallback: no, session error 0x80073D19 persisted through every retry).
-Installing: Google.Chrome
-Successfully installed: Google.Chrome
+Installing: Google.Chrome.EXE
+Successfully installed: Google.Chrome.EXE
 Winget list timed out for Google.GoogleDrive. Marking as failed; it will be retried.
 Installing: Git.Git
 Successfully installed: Git.Git
@@ -62,7 +62,7 @@ Summary:
 
 Status    Apps
 ------    ----
-Installed 7zip.7zip, GlavSoft.TightVNC, Google.Chrome, Git.Git, Adobe.Acrobat.Reader.64-bit
+Installed 7zip.7zip, GlavSoft.TightVNC, Google.Chrome.EXE, Git.Git, Adobe.Acrobat.Reader.64-bit
 Skipped   Dell.CommandUpdate.Universal, Microsoft.PowerShell, Microsoft.WindowsTerminal
 Failed    Google.GoogleDrive, Klocman.BulkCrapUninstaller
 

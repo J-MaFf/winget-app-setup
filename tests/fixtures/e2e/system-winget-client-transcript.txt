@@ -24,7 +24,7 @@ Installing the following Apps:
 GlavSoft.TightVNC
 Adobe.Acrobat.Reader.64-bit
 Adobe.Acrobat.Reader.32-bit
-Google.Chrome
+Google.Chrome.EXE
 Google.GoogleDrive
 Git.Git
 Klocman.BulkCrapUninstaller
@@ -48,11 +48,11 @@ Installing: Adobe.Acrobat.Reader.64-bit
     WinGet client result: Ok, 0x00000000, installer exit code 0 (21 s)
 Successfully installed: Adobe.Acrobat.Reader.64-bit
 Skipping: Adobe.Acrobat.Reader.32-bit (not applicable: ARM64 and 32-bit Windows only; x64 PCs get the 64-bit Reader)
-Installing: Google.Chrome
-  > Install-WinGetPackage -Id Google.Chrome -Source winget -MatchOption Equals -Scope System -Mode Silent -Log C:\ProgramData\winget-app-setup\logs\winget-install-Google.Chrome-20261006-061512.log
-    Microsoft.WinGet.Client Install Google.Chrome: Ok
+Installing: Google.Chrome.EXE
+  > Install-WinGetPackage -Id Google.Chrome.EXE -Source winget -MatchOption Equals -Scope System -Mode Silent -Log C:\ProgramData\winget-app-setup\logs\winget-install-Google.Chrome.EXE-20261006-061512.log
+    Microsoft.WinGet.Client Install Google.Chrome.EXE: Ok
     WinGet client result: Ok, 0x00000000, installer exit code 0 (21 s)
-Successfully installed: Google.Chrome
+Successfully installed: Google.Chrome.EXE
 Installing: Google.GoogleDrive
   > Install-WinGetPackage -Id Google.GoogleDrive -Source winget -MatchOption Equals -Scope System -Mode Silent -Log C:\ProgramData\winget-app-setup\logs\winget-install-Google.GoogleDrive-20261006-061512.log
     Microsoft.WinGet.Client Install Google.GoogleDrive: Ok
@@ -77,7 +77,7 @@ Summary:
 
 Status    Apps
 ------    ----
-Installed 7zip.7zip, GlavSoft.TightVNC, Adobe.Acrobat.Reader.64-bit, Google.Chrome, Google.GoogleDrive, Git.Git, Klocman.BulkCrapUninstaller
+Installed 7zip.7zip, GlavSoft.TightVNC, Adobe.Acrobat.Reader.64-bit, Google.Chrome.EXE, Google.GoogleDrive, Git.Git, Klocman.BulkCrapUninstaller
 Skipped   Adobe.Acrobat.Reader.32-bit, Dell.CommandUpdate.Universal, Microsoft.PowerShell, Microsoft.WindowsTerminal
 Configuration: NOT DONE for GlavSoft.TightVNC (no server password was supplied) - installed, but the post-install configuration did not finish. Not counted as failed; re-run the installer once the reason is fixed.
 Auto-updates: Configured (Winget-AutoUpdate v2.12.0).
