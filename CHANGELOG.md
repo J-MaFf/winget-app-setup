@@ -977,11 +977,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     still refused as a typo). The new optional `successExitCodes` lists the codes, besides 0, 3010
     and 1641, that mean the app was removed: Chrome's is 19, `UNINSTALL_SUCCESSFUL` in Chromium's
     installer.
+  - **PCs set up before (new catalog field `installedAs`):** the PR's first e2e run showed that
+    winget does not list the `Google.Chrome` MSI, which every earlier run installed, as
+    `Google.Chrome.EXE`. Their next run would have installed the EXE package over it, and the
+    uninstaller would have skipped Chrome as not installed. `installedAs` lists other winget ids an
+    app may already be installed as (Chrome: `Google.Chrome`). `Test-CatalogAppInstalled` checks the
+    entry's id, then those, and the installer reports `Skipping: <id> (already installed as <other
+    id>)` with that reason in `last-run.json`. The uninstaller removes it with `winget uninstall` of
+    that id (silent for the MSI), not the entry's `quietUninstall`. A check with no answer for any
+    id is still a failure, not "not installed".
   - **e2e:** `e2e/Remove-PreinstalledApps.ps1` removes the runner image's Chrome as the MSI package
     it is (`Google.Chrome`, `Get-PreinstalledRemovalId`), records it as `Google.Chrome.EXE`, and
-    says whether winget lists that MSI Chrome under the new id. That decides whether a PC that
-    already has the MSI skips Chrome or installs the EXE package over it. The PowerShell 7 leg's
-    preparation step gets 21 minutes for the extra `winget list`.
+    says whether winget lists that MSI Chrome under the new id. The PowerShell 7 leg's preparation
+    step gets 21 minutes for the extra `winget list`. The Windows PowerShell 5.1 leg keeps the
+    image's MSI Chrome, and `Assert-Install.ps1 -ExpectInstalledAs 'Google.Chrome.EXE=Google.Chrome'`
+    checks that its first pass skipped Chrome as installed under `Google.Chrome`. `Assert-Install`
+    and the uninstall pass check each app through `Test-CatalogAppInstalled`, its `installedAs` ids
+    included.
 - **A run no longer changes the code page of the console it was started from, and
   `Repair-WinGetPackageManager` can no longer hang a run** (bead wgt-gq8.72). The Windows
   PowerShell 5.1 child that runs the Appx cmdlets set its console's output code page to UTF-8, and

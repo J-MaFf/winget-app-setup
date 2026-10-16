@@ -9,7 +9,7 @@
     [string[]]
 #>
 function Get-AppDefinitionFieldName {
-    return @('name', 'install', 'installerType', 'condition', 'conditionDescription', 'msixName', 'scope', 'arch', 'postInstall', 'userPhase', 'quietUninstall')
+    return @('name', 'install', 'installerType', 'condition', 'conditionDescription', 'msixName', 'scope', 'arch', 'postInstall', 'userPhase', 'quietUninstall', 'installedAs')
 }
 
 <#
@@ -27,8 +27,8 @@ function Get-AppDefinitionArchitectureName {
 
 <#
 .SYNOPSIS
-    Checks a catalog entry's optional fields: scope, arch, postInstall, userPhase and
-    quietUninstall.
+    Checks a catalog entry's optional fields: scope, arch, postInstall, userPhase, quietUninstall
+    and installedAs.
 .DESCRIPTION
     An error makes the entry invalid, and the run stops with exit code 3 before it installs anything:
       - scope: not 'machine', 'user' or 'any'.
@@ -37,6 +37,7 @@ function Get-AppDefinitionArchitectureName {
       - postInstall: neither a scriptblock nor the name of a command that exists.
       - userPhase: not $true or $false.
       - quietUninstall: anything Get-AppQuietUninstallSchemaIssue refuses.
+      - installedAs: empty, an id Test-WingetPackageIdFormat refuses, or the entry's own name.
     A field the schema does not know (Get-AppDefinitionFieldName) is a warning: the installer
     ignores it.
 .PARAMETER App
@@ -100,6 +101,21 @@ function Get-AppDefinitionSchemaIssue {
 
     if ($App.ContainsKey('quietUninstall')) {
         $errors += @(Get-AppQuietUninstallSchemaIssue -Value $App['quietUninstall'] -Label $Label)
+    }
+
+    if ($App.ContainsKey('installedAs')) {
+        $otherIds = @($App['installedAs'] | Where-Object { $null -ne $_ })
+        if ($otherIds.Count -eq 0) {
+            $errors += "$Label has an empty 'installedAs' list: name the other winget ids it may be installed as, or leave it out."
+        }
+        foreach ($otherId in $otherIds) {
+            if (-not ($otherId -is [string]) -or -not (Test-WingetPackageIdFormat -PackageId $otherId)) {
+                $errors += "$Label has an invalid 'installedAs' id '$otherId': use a winget package id such as 'Publisher.App'."
+            }
+            elseif ($otherId -eq [string]$App['name']) {
+                $errors += "$Label names its own id '$otherId' in 'installedAs': list only the other ids it may be installed as."
+            }
+        }
     }
 
     $knownFields = Get-AppDefinitionFieldName
@@ -191,6 +207,28 @@ function Get-AppQuietUninstallSchemaIssue {
         }
     }
     return $errors
+}
+
+<#
+.SYNOPSIS
+    Returns the other winget ids a catalog entry may already be installed as (its installedAs
+    list), in order.
+.DESCRIPTION
+    An app the catalog moved to another package stays installed under its old id on the PCs set
+    up before: Chrome is Google.Chrome.EXE, and earlier runs installed the Google.Chrome MSI, which
+    winget does not list as Google.Chrome.EXE (wgt-zu3).
+.PARAMETER App
+    A validated catalog entry.
+.OUTPUTS
+    [string[]] Empty when the entry has no installedAs.
+#>
+function Get-AppInstalledAsId {
+    param (
+        [Parameter(Mandatory = $true)]
+        [hashtable]$App
+    )
+
+    return @($App['installedAs'] | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | ForEach-Object { ([string]$_).Trim() })
 }
 
 <#

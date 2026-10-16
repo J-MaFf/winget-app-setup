@@ -107,12 +107,12 @@ param (
 # the function source under WingetAppSetup/Public and WingetAppSetup/Private, or the entry block in
 # build/fragments/tail.ps1, then re-run the build to regenerate this file.
 # See readme.md ("Project layout") for details.
-# Build id: 1.0.0+53ab7be0 (module version + SHA256 fragment of this whole script; issue #189).
+# Build id: 1.0.0+69b1b4eb (module version + SHA256 fragment of this whole script; issue #189).
 # ------------------------------------------------------------------------------------------------
 
 # Content-derived build identity, logged at startup so a transcript from a remote machine
 # identifies exactly which installer build produced it (issue #189).
-$script:InstallerBuildId = '1.0.0+53ab7be0'
+$script:InstallerBuildId = '1.0.0+69b1b4eb'
 
 # ------------------------------------------------Functions------------------------------------------------
 
@@ -536,7 +536,7 @@ function Uninstall-CatalogApp {
     )
 
     $id = $App.name
-    $result = @{ Status = 'Failed'; SkipReason = $null; FailureReason = $null; Reason = $null; ExitCode = $null; RestartRequired = $false; Command = $null }
+    $result = @{ Status = 'Failed'; SkipReason = $null; FailureReason = $null; Reason = $null; ExitCode = $null; RestartRequired = $false; Command = $null; InstalledAs = $null }
 
     $perUserReason = Get-PerUserAppSkipReason -App $App -AccountContext $AccountContext
     if ($perUserReason) {
@@ -547,7 +547,7 @@ function Uninstall-CatalogApp {
     }
 
     $checkTimeoutSeconds = Get-ProcessTimeoutSeconds -Operation WingetListCheck
-    $check = Test-WingetPackageInstalled -PackageId $id -TimeoutSeconds $checkTimeoutSeconds
+    $check = Test-CatalogAppInstalled -App $App -TimeoutSeconds $checkTimeoutSeconds
     if ($check.TimedOut) {
         $result.FailureReason = 'CheckTimeout'
         $result.Reason = "could not check whether it is installed: 'winget list' did not answer within $checkTimeoutSeconds seconds"
@@ -587,8 +587,14 @@ function Uninstall-CatalogApp {
         return $result
     }
 
+    $uninstallId = $id
+    if ($check.InstalledAs) {
+        $uninstallId = $check.InstalledAs
+        $result.InstalledAs = $check.InstalledAs
+    }
+
     $quietCommand = $null
-    if ($null -ne $App['quietUninstall']) {
+    if ($null -ne $App['quietUninstall'] -and $uninstallId -eq $id) {
         $quietCommand = Get-AppQuietUninstallCommand -App $App
         if ($quietCommand.Problem) {
             $result.FailureReason = 'UninstallerNotFound'
@@ -607,9 +613,14 @@ function Uninstall-CatalogApp {
         return (Invoke-AppQuietUninstall -App $App -Command $quietCommand)
     }
 
-    Write-Info "Uninstalling: $id"
+    if ($uninstallId -ne $id) {
+        Write-Info "Uninstalling: $id (installed as $uninstallId)"
+    }
+    else {
+        Write-Info "Uninstalling: $id"
+    }
     $timeoutSeconds = Get-ProcessTimeoutSeconds -Operation WingetUninstall
-    $run = Invoke-WingetProcess -ArgumentList @('uninstall', '--exact', '--id', $id, '--silent', '--accept-source-agreements', '--disable-interactivity') -TimeoutSeconds $timeoutSeconds
+    $run = Invoke-WingetProcess -ArgumentList @('uninstall', '--exact', '--id', $uninstallId, '--silent', '--accept-source-agreements', '--disable-interactivity') -TimeoutSeconds $timeoutSeconds
     if ($run.LaunchFailed) {
         $result.FailureReason = 'UninstallLaunchFailed'
         $result.Reason = 'winget could not be started ({0})' -f "$($run.LaunchError)".Trim().TrimEnd('.')
@@ -639,7 +650,7 @@ function Uninstall-CatalogApp {
 
 # --- CatalogSchema ---
 function Get-AppDefinitionFieldName {
-    return @('name', 'install', 'installerType', 'condition', 'conditionDescription', 'msixName', 'scope', 'arch', 'postInstall', 'userPhase', 'quietUninstall')
+    return @('name', 'install', 'installerType', 'condition', 'conditionDescription', 'msixName', 'scope', 'arch', 'postInstall', 'userPhase', 'quietUninstall', 'installedAs')
 }
 
 function Get-AppDefinitionArchitectureName {
@@ -698,6 +709,21 @@ function Get-AppDefinitionSchemaIssue {
 
     if ($App.ContainsKey('quietUninstall')) {
         $errors += @(Get-AppQuietUninstallSchemaIssue -Value $App['quietUninstall'] -Label $Label)
+    }
+
+    if ($App.ContainsKey('installedAs')) {
+        $otherIds = @($App['installedAs'] | Where-Object { $null -ne $_ })
+        if ($otherIds.Count -eq 0) {
+            $errors += "$Label has an empty 'installedAs' list: name the other winget ids it may be installed as, or leave it out."
+        }
+        foreach ($otherId in $otherIds) {
+            if (-not ($otherId -is [string]) -or -not (Test-WingetPackageIdFormat -PackageId $otherId)) {
+                $errors += "$Label has an invalid 'installedAs' id '$otherId': use a winget package id such as 'Publisher.App'."
+            }
+            elseif ($otherId -eq [string]$App['name']) {
+                $errors += "$Label names its own id '$otherId' in 'installedAs': list only the other ids it may be installed as."
+            }
+        }
     }
 
     $knownFields = Get-AppDefinitionFieldName
@@ -766,6 +792,15 @@ function Get-AppQuietUninstallSchemaIssue {
         }
     }
     return $errors
+}
+
+function Get-AppInstalledAsId {
+    param (
+        [Parameter(Mandatory = $true)]
+        [hashtable]$App
+    )
+
+    return @($App['installedAs'] | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | ForEach-Object { ([string]$_).Trim() })
 }
 
 function Get-AppInstallScope {
@@ -3766,7 +3801,7 @@ function Install-AppWithVerification {
 
     $preCheck = @{ Installed = $false; TimedOut = $false; LaunchFailed = $false; LaunchError = $null; CheckFailed = $false; ExitCode = $null }
     if (-not $checkProvisioning) {
-        $preCheck = Test-WingetPackageInstalled -PackageId $App.name -TimeoutSeconds $checkTimeoutSeconds
+        $preCheck = Test-CatalogAppInstalled -App $App -TimeoutSeconds $checkTimeoutSeconds
     }
     if ($preCheck.TimedOut) {
         return @{ Status = 'Failed'; InstallResult = $null; FailureReason = 'PreCheckTimeout' }
@@ -3778,7 +3813,12 @@ function Install-AppWithVerification {
         return @{ Status = 'Failed'; InstallResult = $null; FailureReason = 'PreCheckFailed'; CheckExitCode = $preCheck.ExitCode }
     }
     if ($preCheck.Installed) {
-        return (Complete-AppPostInstallStep -App $App -Outcome @{ Status = 'Skipped'; InstallResult = $null; FailureReason = $null } -WhatIf:$WhatIf)
+        $skipped = @{ Status = 'Skipped'; InstallResult = $null; FailureReason = $null }
+        if ($preCheck.InstalledAs) {
+            $skipped['SkipReason'] = 'InstalledAs'
+            $skipped['InstalledAs'] = $preCheck.InstalledAs
+        }
+        return (Complete-AppPostInstallStep -App $App -Outcome $skipped -WhatIf:$WhatIf)
     }
 
     if ($WhatIf) {
@@ -11988,7 +12028,7 @@ function Get-DefaultAppCatalog {
         @{name = 'GlavSoft.TightVNC'; postInstall = 'Set-TightVncServerPassword' },
         @{name = 'Adobe.Acrobat.Reader.64-bit'; arch = 'X64'; conditionDescription = 'its only installer is x64, and Adobe supports only the 32-bit Reader on ARM64 Windows' },
         @{name = 'Adobe.Acrobat.Reader.32-bit'; arch = @('Arm64', 'X86'); conditionDescription = 'ARM64 and 32-bit Windows only; x64 PCs get the 64-bit Reader' },
-        @{name = 'Google.Chrome.EXE'; quietUninstall = @{ productCode = 'Google Chrome'; arguments = @('--uninstall', '--system-level', '--force-uninstall'); successExitCodes = @(19) } },
+        @{name = 'Google.Chrome.EXE'; installedAs = 'Google.Chrome'; quietUninstall = @{ productCode = 'Google Chrome'; arguments = @('--uninstall', '--system-level', '--force-uninstall'); successExitCodes = @(19) } },
         @{name = 'Google.GoogleDrive'; quietUninstall = @{ productCode = '{6BBAE539-2232-434A-A4E5-9A33560C6283}'; arguments = @('--silent', '--force_stop') } },
         @{name = 'Git.Git' },
         @{name = 'Klocman.BulkCrapUninstaller' },
@@ -12475,6 +12515,10 @@ function Invoke-WingetInstall {
                         Write-WarningMessage "Skipping: $($app.name) (already provisioned for every user on this PC)"
                         $skipReason = 'already provisioned for every user on this PC'
                     }
+                    elseif ($outcome.SkipReason -eq 'InstalledAs') {
+                        Write-WarningMessage "Skipping: $($app.name) (already installed as $($outcome.InstalledAs))"
+                        $skipReason = "already installed as $($outcome.InstalledAs)"
+                    }
                     else {
                         Write-WarningMessage "Skipping: $($app.name) (already installed)"
                         $skipReason = 'already installed'
@@ -12673,6 +12717,9 @@ function Invoke-WingetInstall {
                             $skipReason = 'already installed'
                             if ($outcome.SkipReason -eq 'Provisioned') {
                                 $skipReason = 'already provisioned for every user on this PC'
+                            }
+                            elseif ($outcome.SkipReason -eq 'InstalledAs') {
+                                $skipReason = "already installed as $($outcome.InstalledAs)"
                             }
                             $skippedApps += $appName
                             $appRecords[$appName] = New-AppRunRecord -Id $appName -Status 'Skipped' -Reason $skipReason -PostInstall $outcome.Configuration
@@ -13192,12 +13239,18 @@ function Invoke-WingetUninstall {
                     if ($WhatIf -and $outcome.Command) {
                         Write-Info "[DRY-RUN] Would uninstall: $($app.name) (its own uninstaller: $($outcome.Command))"
                     }
+                    elseif ($WhatIf -and $outcome.InstalledAs) {
+                        Write-Info "[DRY-RUN] Would uninstall: $($app.name) (installed as $($outcome.InstalledAs))"
+                    }
                     elseif ($WhatIf) {
                         Write-Info "[DRY-RUN] Would uninstall: $($app.name)"
                     }
                     elseif ($outcome.RestartRequired) {
                         Write-Success "Successfully uninstalled: $($app.name) (a restart finishes removing it)"
                         $restartRequiredApps += $app.name
+                    }
+                    elseif ($outcome.InstalledAs) {
+                        Write-Success "Successfully uninstalled: $($app.name) (installed as $($outcome.InstalledAs))"
                     }
                     else {
                         Write-Success "Successfully uninstalled: $($app.name)"
@@ -14470,6 +14523,44 @@ function Install-WingetPackage {
         InstallerErrorCode             = $installerErrorCode
         Engine                         = $engine
     }
+}
+
+function Test-CatalogAppInstalled {
+    param (
+        [Parameter(Mandatory = $true)]
+        [hashtable]$App,
+
+        [Parameter(Mandatory = $true)]
+        [int]$TimeoutSeconds
+    )
+
+    $ownId = [string]$App.name
+    $outcome = $null
+    foreach ($id in @($ownId) + @(Get-AppInstalledAsId -App $App)) {
+        $check = Test-WingetPackageInstalled -PackageId $id -TimeoutSeconds $TimeoutSeconds
+        $outcome = @{}
+        if ($check -is [System.Collections.IDictionary]) {
+            foreach ($key in @($check.Keys)) {
+                $outcome[$key] = $check[$key]
+            }
+        }
+        else {
+            foreach ($property in $check.PSObject.Properties) {
+                $outcome[$property.Name] = $property.Value
+            }
+        }
+        $outcome['InstalledAs'] = $null
+        if ($outcome.TimedOut -or $outcome.LaunchFailed -or $outcome.CheckFailed) {
+            return $outcome
+        }
+        if ($outcome.Installed) {
+            if ($id -ne $ownId) {
+                $outcome['InstalledAs'] = $id
+            }
+            return $outcome
+        }
+    }
+    return $outcome
 }
 
 function Test-WingetPackageInstalled {

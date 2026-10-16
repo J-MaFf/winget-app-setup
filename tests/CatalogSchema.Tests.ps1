@@ -31,6 +31,8 @@ Describe 'Get-AppDefinitionSchemaIssue (work-order item 38)' {
         @{ Case = 'a quietUninstall with one switch as a string, a lower-case GUID and keys in any case'; App = @{ name = 'Contoso.App'; quietUninstall = @{ ProductCode ='{6bbae539-2232-434a-a4e5-9a33560c6283}'; Arguments = '/S' } } }
         @{ Case = 'a quietUninstall whose entry has a plain name, with success exit codes (wgt-zu3)'; App = @{ name = 'Contoso.App'; quietUninstall = @{ productCode = 'Google Chrome'; arguments = @('--uninstall', '--system-level', '--force-uninstall'); successExitCodes = @(19) } } }
         @{ Case = 'a quietUninstall with one success exit code given alone'; App = @{ name = 'Contoso.App'; quietUninstall = @{ productCode = 'Contoso App (x64) 1.2_3+beta'; arguments = @('/S'); successExitCodes = -1 } } }
+        @{ Case = 'one installedAs id (wgt-zu3)'; App = @{ name = 'Contoso.App.EXE'; installedAs = 'Contoso.App' } }
+        @{ Case = 'a list of installedAs ids'; App = @{ name = 'Contoso.App.EXE'; installedAs = @('Contoso.App', 'Contoso.AppLegacy') } }
     ) {
         $issues = Get-AppDefinitionSchemaIssue -App $App -Label 'App entry at index 0'
 
@@ -49,6 +51,10 @@ Describe 'Get-AppDefinitionSchemaIssue (work-order item 38)' {
         @{ Case = 'a hook that is neither a scriptblock nor a name'; App = @{ name = 'Contoso.App'; postInstall = 42 }; Pattern = "invalid 'postInstall' value: use a scriptblock or the name of a function" }
         @{ Case = 'an empty hook name'; App = @{ name = 'Contoso.App'; postInstall = ' ' }; Pattern = "invalid 'postInstall' value" }
         @{ Case = 'a userPhase that is not a boolean'; App = @{ name = 'Contoso.App'; userPhase = 'yes' }; Pattern = "invalid 'userPhase' value 'yes': use \`$true or \`$false" }
+        @{ Case = 'an empty installedAs list'; App = @{ name = 'Contoso.App'; installedAs = @() }; Pattern = "empty 'installedAs' list" }
+        @{ Case = 'an installedAs id with winget switches in it'; App = @{ name = 'Contoso.App'; installedAs = 'Contoso.Old --override /S' }; Pattern = "invalid 'installedAs' id 'Contoso\.Old --override /S'" }
+        @{ Case = 'an installedAs id that is not a string'; App = @{ name = 'Contoso.App'; installedAs = @(5) }; Pattern = "invalid 'installedAs' id '5'" }
+        @{ Case = 'its own id in installedAs'; App = @{ name = 'Contoso.App'; installedAs = 'Contoso.App' }; Pattern = "names its own id 'Contoso\.App' in 'installedAs'" }
     ) {
         $issues = Get-AppDefinitionSchemaIssue -App $App -Label "App entry at index 2 ('Contoso.App')"
 

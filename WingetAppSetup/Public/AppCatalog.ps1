@@ -59,7 +59,8 @@ function Get-DefaultAppCatalog {
         # Google.Chrome.EXE, not Google.Chrome: that MSI's download URL never changes while Google
         # replaces the file each release, so its hash fails until winget-pkgs catches up (wgt-zu3).
         # Chrome registers no quiet uninstall, and its own asks first; --force-uninstall does not.
-        @{name = 'Google.Chrome.EXE'; quietUninstall = @{ productCode = 'Google Chrome'; arguments = @('--uninstall', '--system-level', '--force-uninstall'); successExitCodes = @(19) } },
+        # PCs set up before have the Google.Chrome MSI, which winget does not list under this id.
+        @{name = 'Google.Chrome.EXE'; installedAs = 'Google.Chrome'; quietUninstall = @{ productCode = 'Google Chrome'; arguments = @('--uninstall', '--system-level', '--force-uninstall'); successExitCodes = @(19) } },
         # No arch list: winget's only installer is labelled x64, but Google serves the same file to
         # ARM64 PCs, and Drive runs natively on Windows 11 ARM64. Windows 10 ARM64 emulates only x86,
         # so winget finds no installer there (0x8A150010); an arch list cannot tell the two apart.

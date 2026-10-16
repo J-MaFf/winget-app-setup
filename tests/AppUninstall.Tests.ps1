@@ -642,6 +642,35 @@ Describe 'Uninstall-CatalogApp for an entry with quietUninstall (wgt-gq8.61)' {
         Should -Invoke Invoke-ExternalProcess -Times 0 -Exactly
         Should -Invoke Get-AppUninstallEntry -Times 0 -Exactly
     }
+
+    It 'Removes an app installed under its installedAs id with winget uninstall of that id, not its quietUninstall (wgt-zu3)' {
+        # A PC set up before Chrome moved to Google.Chrome.EXE: the Google.Chrome MSI is what is
+        # there, and its own winget uninstall is silent; setup.exe --force-uninstall is the EXE's.
+        Mock Test-WingetPackageInstalled { New-TestCheckResult -Installed ($PackageId -eq 'Google.Chrome' -and -not $script:removed) }
+        Mock Invoke-WingetProcess { $script:removed = $true; New-TestProcessResult -ExitCode 0 }
+        $chrome = @{ name = 'Google.Chrome.EXE'; installedAs = 'Google.Chrome'; quietUninstall = @{ productCode = 'Google Chrome'; arguments = @('--uninstall', '--system-level', '--force-uninstall'); successExitCodes = @(19) } }
+
+        $result = Uninstall-CatalogApp -App $chrome
+
+        $result.Status | Should -Be 'Uninstalled'
+        $result.InstalledAs | Should -Be 'Google.Chrome'
+        $result.Command | Should -BeNullOrEmpty
+        Should -Invoke Invoke-WingetProcess -Times 1 -Exactly -ParameterFilter { $ArgumentList[0] -eq 'uninstall' -and ($ArgumentList -join ' ') -match '--id Google\.Chrome --silent' }
+        Should -Invoke Invoke-ExternalProcess -Times 0 -Exactly
+        Should -Invoke Get-AppUninstallEntry -Times 0 -Exactly
+        Should -Invoke Write-Info -Times 1 -Exactly -ParameterFilter { $Message -eq 'Uninstalling: Google.Chrome.EXE (installed as Google.Chrome)' }
+    }
+
+    It 'Still runs its own uninstaller when it is installed under its own id' {
+        $chrome = @{ name = 'Google.GoogleDrive'; installedAs = 'Google.DriveOld'; quietUninstall = @{ productCode = $script:driveProductCode; arguments = @('--silent', '--force_stop') } }
+
+        $result = Uninstall-CatalogApp -App $chrome
+
+        $result.Status | Should -Be 'Uninstalled'
+        $result.InstalledAs | Should -BeNullOrEmpty
+        Should -Invoke Invoke-ExternalProcess -Times 1 -Exactly
+        Should -Invoke Invoke-WingetProcess -Times 0 -Exactly
+    }
 }
 
 # The CI hang end to end through Invoke-WingetUninstall, with the catalog's own Google Drive entry:

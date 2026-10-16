@@ -424,14 +424,17 @@ jobs:
       # As in e2e-install, plus PowerShell 7 (MSI uninstall, winget as the fallback). If it cannot
       # be removed, a warning says so, the first pass finds it instead of installing it, and the
       # assertions fail (-ExpectPowerShell7Installed): the leg would not have tested the install.
-      # 21 minutes: at most 12.75 for the three apps, as in e2e-install, and 6.5 for PowerShell 7
-      # (msiexec 150 s, then the winget fallback's 4 min).
+      # Chrome stays: the image's Google.Chrome MSI is what PCs set up before the catalog moved to
+      # Google.Chrome.EXE have, so the first pass must skip it as Google.Chrome (wgt-zu3,
+      # -ExpectInstalledAs below).
+      # 21 minutes: at most 12.75 for the three default apps, as in e2e-install, and 6.5 for
+      # PowerShell 7 (msiexec 150 s, then the winget fallback's 4 min).
       - name: Remove the catalog apps the runner image ships with, and PowerShell 7
         shell: powershell
         continue-on-error: true
         timeout-minutes: 21
         run: |
-          & .\e2e\Remove-PreinstalledApps.ps1 -IncludePowerShell7
+          & .\e2e\Remove-PreinstalledApps.ps1 -PackageId '7zip.7zip', 'Git.Git' -IncludePowerShell7
 
       - name: Diagnostics before the first install pass
         shell: powershell
@@ -477,11 +480,12 @@ jobs:
           # The same assertions as in e2e-install, plus -ExpectPowerShell7Bootstrap: one bootstrap
           # transcript per pass, each of which relaunched the installer under PowerShell 7; and
           # -ExpectPowerShell7Installed: the first pass's bootstrap installed PowerShell 7 rather
-          # than finding one, so its install path really ran.
+          # than finding one, so its install path really ran; and -ExpectInstalledAs: the first
+          # pass skipped Chrome as the image's Google.Chrome MSI, which this leg keeps.
           # Windows PowerShell turns a program's stderr into errors and drops empty arguments, so
           # errors do not stop this step and -SkipApps is passed only when the list has entries.
           $ErrorActionPreference = 'Continue'
-          $assertArgs = @('-ExpectPowerShell7Bootstrap', '-ExpectPowerShell7Installed')
+          $assertArgs = @('-ExpectPowerShell7Bootstrap', '-ExpectPowerShell7Installed', '-ExpectInstalledAs', 'Google.Chrome.EXE=Google.Chrome')
           if ($env:KNOWN_PLATFORM_INCOMPATIBLE) {
             $assertArgs += @('-SkipApps', $env:KNOWN_PLATFORM_INCOMPATIBLE)
           }

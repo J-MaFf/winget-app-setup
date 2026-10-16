@@ -159,7 +159,10 @@ Chrome is the `Google.Chrome.EXE` package, not `Google.Chrome`. That package's M
 never changes while Google replaces the file with every release, so its hash fails
 (`0x8A150011 INSTALLER_HASH_MISMATCH`) from each Chrome release until winget's catalog catches up,
 which can take days. `Google.Chrome.EXE` downloads each release from its own link and
-installs for the whole PC (`--system-level`).
+installs for the whole PC (`--system-level`). PCs set up before have Chrome as the `Google.Chrome`
+MSI, which winget does not list as `Google.Chrome.EXE`, so the entry names it in `installedAs`:
+the installer reports Chrome there as `already installed as Google.Chrome` instead of installing
+the EXE package over it, and the uninstaller removes that MSI with `winget uninstall`.
 
 Gated entries:
 
@@ -227,6 +230,7 @@ reported as a warning and ignored.
 | `installerType` | winget `--installer-type` override |
 | `msixName` | The app's MSIX package name (see above) |
 | `quietUninstall` | `@{ productCode = '{<GUID>}' or '<entry name>'; arguments = @('<switch>', ...); successExitCodes = @(<code>, ...) }`: for an exe app whose registered uninstall command waits for a click, the uninstaller runs the program the `productCode` uninstall entry names with these switches instead of `winget uninstall` (see [Uninstall](#uninstall)). `productCode` is the entry's name under `HKLM\...\Uninstall`: a braced GUID, or a plain name such as `Google Chrome` (letters, digits, spaces and `. _ ( ) + -`, no backslash). `arguments` is one or more strings without a double quote. `successExitCodes` (optional) lists the codes, besides 0, 3010 and 1641, that the uninstaller returns when it has removed the app. Set for `Google.GoogleDrive` (`--silent --force_stop`) and `Google.Chrome.EXE` (entry `Google Chrome`, `--uninstall --system-level --force-uninstall`, success code 19) |
+| `installedAs` | `'<id>'` or `@('<id>', ...)`: other winget ids the app may already be installed as, on PCs set up before the catalog moved it to its current package. The installer counts the app as installed when winget lists any of them (`Skipping: <name> (already installed as <id>)`), and the uninstaller removes it with `winget uninstall` of that id (its `quietUninstall` is for its own package). Each must be a valid package id other than `name`. Set for `Google.Chrome.EXE` (`Google.Chrome`, the MSI package earlier runs installed) |
 
 **Post-install hooks.** A `postInstall` hook runs after the install is verified, and on every run
 that finds the app already installed (or provisioned for every user), so it must be idempotent:
@@ -1735,8 +1739,11 @@ powershell -ExecutionPolicy Unrestricted -File .\winget-app-uninstall.ps1 -WhatI
   closes a running Drive), under the same 15-minute limit. Chrome is the same case: it registers
   no quiet command, and its `setup.exe --uninstall` asks first, so its entry runs it with
   `--uninstall --system-level --force-uninstall`, which ends with 19 (`UNINSTALL_SUCCESSFUL` in
-  Chromium's installer), counted as removed through the entry's `successExitCodes`. It runs it only when the entry names an
-  existing `.exe` under Program Files or Program Files (x86); otherwise the app fails at once
+  Chromium's installer), counted as removed through the entry's `successExitCodes`. A Chrome
+  installed as the `Google.Chrome` MSI (the entry's `installedAs`) is removed with
+  `winget uninstall --id Google.Chrome` instead, which is silent for an MSI. It runs its own
+  uninstaller only when the entry names an existing `.exe` under Program Files or Program Files
+  (x86); otherwise the app fails at once
   (`its own uninstaller was not found: ...`), and `winget uninstall` is not tried, since it would
   hang. Drive's `uninstall.exe` hands its work to a copy of itself and exits, so the uninstaller
   then waits, for what is left of the 15 minutes, until the uninstall entry is gone, and counts
@@ -1944,8 +1951,11 @@ throwaway VMs by construction:
   (Google Chrome, 7-Zip and Git; `e2e/Remove-PreinstalledApps.ps1`), so the first pass really
   installs them. The image installs Chrome's enterprise MSI, which winget lists as `Google.Chrome`:
   it is removed as that package and recorded as the catalog's `Google.Chrome.EXE`, and its line
-  says whether winget also lists it as `Google.Chrome.EXE`. Every call there has a time limit (`winget list` 45 s, uninstall 150 s) and names
-  `--source winget`, so a winget source that cannot open leaves an app 'unknown' rather than 'not
+  says whether winget also lists it as `Google.Chrome.EXE`. The Windows PowerShell 5.1 leg keeps
+  that MSI instead, as a PC set up before Chrome moved to `Google.Chrome.EXE` has it, and checks
+  that its first pass skips Chrome as `already installed as Google.Chrome`
+  (`Assert-Install.ps1 -ExpectInstalledAs`). Every call there has a time limit (`winget list`
+  45 s, uninstall 150 s) and names `--source winget`, so a winget source that cannot open leaves an app 'unknown' rather than 'not
   installed'. Each app's result prints as soon as it is done, and an app that cannot be removed
   gets a warning annotation and is skipped by the first pass as already installed (the SYSTEM legs
   fail on it instead: see below).

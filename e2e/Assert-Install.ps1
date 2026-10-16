@@ -17,8 +17,8 @@
          apply whatever the module says: it stays expected installed, and the module finding it
          not applicable fails an assertion of its own.
       2. Every APPLICABLE app in Get-DefaultAppCatalog (minus -SkipApps) resolves via
-         `winget list --exact --id <id>`, classified by $LASTEXITCODE captured immediately
-         after the call (exit 0 = installed; nonzero = missing).
+         `winget list --exact --id <id>`, or via one of its installedAs ids (the module's
+         Test-CatalogAppInstalled), classified by the exit code (0 = installed).
       3. The Winget-AutoUpdate scheduled task exists ('\WAU\Winget-AutoUpdate') - or, when
          Microsoft.WindowsAppRuntime.1.8 is still missing after the run (the installer installs
          the pinned framework itself where it can, work-order item 31, so on windows-latest it is
@@ -52,6 +52,8 @@
          relaunched the installer under PowerShell 7 and logged how that run ended. With
          -ExpectPowerShell7Installed also: the first pass's bootstrap installed PowerShell 7
          instead of finding one.
+     10. With -ExpectInstalledAs: the first pass skipped each named app as already installed
+         under the other id given (wgt-zu3).
 
     Prints a per-assertion PASS/FAIL table and exits nonzero listing the failures.
 .PARAMETER SkipApps
@@ -85,6 +87,11 @@
     Adds the assertion that the first pass's bootstrap installed PowerShell 7 (9). Pass this when
     the first pass started on a machine without PowerShell 7 (the e2e-install-windows-powershell
     leg removes it first), so a leftover PowerShell 7 cannot leave the install path untested.
+.PARAMETER ExpectInstalledAs
+    '<catalog id>=<installedAs id>' pairs (comma-separated in one string also works): the first
+    pass must have skipped each app as already installed under that id (10). The
+    e2e-install-windows-powershell leg keeps the runner image's Chrome MSI for this:
+    'Google.Chrome.EXE=Google.Chrome'.
 .NOTES
     Exit codes: 0 = all assertions passed, 1 = one or more assertions failed (each listed).
 #>
@@ -106,7 +113,10 @@ param (
     [switch]$ExpectPowerShell7Bootstrap,
 
     [Parameter(Mandatory = $false)]
-    [switch]$ExpectPowerShell7Installed
+    [switch]$ExpectPowerShell7Installed,
+
+    [Parameter(Mandatory = $false)]
+    [string[]]$ExpectInstalledAs = @()
 )
 
 $ErrorActionPreference = 'Stop'
@@ -114,6 +124,15 @@ $ErrorActionPreference = 'Stop'
 # pwsh -File passes arguments as literal strings (no PowerShell array parsing), so accept a
 # comma-separated single token too: -SkipApps 'App.One,App.Two' == -SkipApps @('App.One','App.Two').
 $SkipApps = @($SkipApps | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+# '<catalog id>=<installedAs id>' pairs, comma-separated alike.
+$expectedInstalledAs = [ordered]@{}
+foreach ($pair in @($ExpectInstalledAs | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })) {
+    $parts = $pair -split '=', 2
+    if ($parts.Count -ne 2 -or -not $parts[0].Trim() -or -not $parts[1].Trim()) {
+        throw "-ExpectInstalledAs '$pair' is not '<catalog id>=<installedAs id>'."
+    }
+    $expectedInstalledAs[$parts[0].Trim()] = $parts[1].Trim()
+}
 
 # Import the module from the checkout - same source of truth, no reimplementation drift. The
 # manifest exports every function (FunctionsToExport = '*', review finding P3-44), Private/ ones
@@ -219,7 +238,8 @@ foreach ($app in $appsToAssert) {
     $id = $app.name
     $result = $null
     for ($attempt = 1; $attempt -le $probeAttempts; $attempt++) {
-        $result = Test-WingetPackageInstalled -PackageId $id -TimeoutSeconds 60
+        # Its installedAs ids too: a PC set up before Chrome's move lists it as Google.Chrome.
+        $result = Test-CatalogAppInstalled -App $app -TimeoutSeconds 60
         if ($result.Installed) { break }
         if ($attempt -lt $probeAttempts) {
             $reason = Get-InstalledCheckFailureText -Result $result
@@ -229,6 +249,9 @@ foreach ($app in $appsToAssert) {
     }
     if ($result.Installed) {
         $detail = if ($attempt -gt 1) { "winget list confirmed installed (attempt $attempt/$probeAttempts)" } else { 'winget list confirmed installed' }
+        if ($result.InstalledAs) {
+            $detail += " as $($result.InstalledAs)"
+        }
         Add-AssertionResult -Name "App installed: $id" -Passed $true -Detail $detail
     }
     else {
@@ -305,6 +328,7 @@ $transcriptAssertionArgs = @{
     ExpectAllSkippedOnSecondRun = $ExpectAllSkippedOnSecondRun
     ExpectPowerShell7Bootstrap  = $ExpectPowerShell7Bootstrap
     ExpectPowerShell7Installed  = $ExpectPowerShell7Installed
+    ExpectedInstalledAs         = $expectedInstalledAs
 }
 if ($InstallerPath) {
     $transcriptAssertionArgs.InstallerPath = $InstallerPath

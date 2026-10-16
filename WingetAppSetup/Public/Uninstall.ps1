@@ -145,12 +145,18 @@ function Invoke-WingetUninstall {
                     if ($WhatIf -and $outcome.Command) {
                         Write-Info "[DRY-RUN] Would uninstall: $($app.name) (its own uninstaller: $($outcome.Command))"
                     }
+                    elseif ($WhatIf -and $outcome.InstalledAs) {
+                        Write-Info "[DRY-RUN] Would uninstall: $($app.name) (installed as $($outcome.InstalledAs))"
+                    }
                     elseif ($WhatIf) {
                         Write-Info "[DRY-RUN] Would uninstall: $($app.name)"
                     }
                     elseif ($outcome.RestartRequired) {
                         Write-Success "Successfully uninstalled: $($app.name) (a restart finishes removing it)"
                         $restartRequiredApps += $app.name
+                    }
+                    elseif ($outcome.InstalledAs) {
+                        Write-Success "Successfully uninstalled: $($app.name) (installed as $($outcome.InstalledAs))"
                     }
                     else {
                         Write-Success "Successfully uninstalled: $($app.name)"

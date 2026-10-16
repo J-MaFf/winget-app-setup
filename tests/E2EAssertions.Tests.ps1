@@ -76,6 +76,17 @@ Describe 'Get-InstallTranscriptFile' {
 }
 
 Describe 'ConvertFrom-InstallTranscript' {
+    It 'Reads an app skipped as installed under another id as already installed, and that id (wgt-zu3)' {
+        $content = (Get-Fixture -Name 'first-pass').Replace("Installing: Google.Chrome.EXE`nSuccessfully installed: Google.Chrome.EXE", 'Skipping: Google.Chrome.EXE (already installed as Google.Chrome)')
+
+        $transcript = ConvertFrom-InstallTranscript -Content $content
+
+        $transcript.AlreadyInstalled | Should -Contain 'Google.Chrome.EXE'
+        $transcript.AlreadyInstalledAs['Google.Chrome.EXE'] | Should -Be 'Google.Chrome'
+        $transcript.Installed | Should -Not -Contain 'Google.Chrome.EXE'
+        @($transcript.AlreadyInstalledAs.Keys) | Should -Be @('Google.Chrome.EXE')
+    }
+
     It 'Reads the installs, skips, not-applicable apps, build id and auto-update status of a first pass' {
         $transcript = ConvertFrom-InstallTranscript -Content (Get-Fixture -Name 'first-pass')
 
@@ -442,6 +453,23 @@ Describe 'Test-InstallFailureContainment' {
 }
 
 Describe 'Get-TranscriptAssertionResult' {
+    It 'Passes a first pass that found Chrome as the Google.Chrome MSI, and fails one that installed it (-ExpectedInstalledAs, wgt-zu3)' {
+        $skipped = Join-Path $TestDrive ([guid]::NewGuid().ToString('N'))
+        $null = New-Item -ItemType Directory -Path $skipped
+        $content = (Get-Fixture -Name 'first-pass').Replace("Installing: Google.Chrome.EXE`nSuccessfully installed: Google.Chrome.EXE", 'Skipping: Google.Chrome.EXE (already installed as Google.Chrome)')
+        Set-Content -LiteralPath (Join-Path $skipped 'install-20261005-060449.log') -Value $content -NoNewline
+        $installedFresh = New-TestLogDirectory -Fixture @('first-pass') -Name @('install-20261005-060449.log')
+        $expected = [ordered]@{ 'Google.Chrome.EXE' = 'Google.Chrome' }
+
+        $pass = @(Get-TranscriptAssertionResult -LogDirectory $skipped -ExpectedInstalledAs $expected) | Where-Object Assertion -EQ 'First pass found Google.Chrome.EXE as Google.Chrome'
+        $fail = @(Get-TranscriptAssertionResult -LogDirectory $installedFresh -ExpectedInstalledAs $expected) | Where-Object Assertion -EQ 'First pass found Google.Chrome.EXE as Google.Chrome'
+
+        $pass.Result | Should -Be 'PASS'
+        $pass.Detail | Should -Be 'install-20261005-060449.log: Skipping: Google.Chrome.EXE (already installed as Google.Chrome)'
+        $fail.Result | Should -Be 'FAIL'
+        $fail.Detail | Should -Be "transcript install-20261005-060449.log has no 'Skipping: Google.Chrome.EXE (already installed as Google.Chrome)'"
+    }
+
     It 'Passes a clean PowerShell 7 leg and leaves the dry-run transcript out' {
         $logs = New-TestLogDirectory -Fixture @('first-pass', 'second-pass', 'timeouts') -Name @('install-20261005-060449.log', 'install-20261005-061511.log', 'install-20261005-061700-whatif.log')
         $installer = New-TestInstaller -BuildId '1.0.0+5ea1f00d'
@@ -827,6 +855,7 @@ Describe 'Installer messages the transcript parser keys on' {
     It 'Is still written by <File>: <Text>' -ForEach @(
         @{ File = 'WingetAppSetup/Public/Install.ps1'; Text = 'Write-Success "Successfully installed: $($app.name)"' }
         @{ File = 'WingetAppSetup/Public/Install.ps1'; Text = 'Write-WarningMessage "Skipping: $($app.name) (already installed)"' }
+        @{ File = 'WingetAppSetup/Public/Install.ps1'; Text = 'Write-WarningMessage "Skipping: $($app.name) (already installed as $($outcome.InstalledAs))"' }
         @{ File = 'WingetAppSetup/Public/Install.ps1'; Text = 'Write-WarningMessage "Skipping: $($app.name) (not applicable: $conditionText)"' }
         @{ File = 'WingetAppSetup/Public/Install.ps1'; Text = 'Write-ErrorMessage "Failed to install: $($app.name) ($failureReason)."' }
         @{ File = 'WingetAppSetup/Public/Install.ps1'; Text = 'Write-ErrorMessage "Failed to install: $($app.name). Error: $_"' }

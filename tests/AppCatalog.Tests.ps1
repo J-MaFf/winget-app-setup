@@ -58,7 +58,9 @@ Describe 'App list consistency (issue #190)' {
         $entryBlock | Should -Match 'Restart-WithElevation -ScriptPath \$PSCommandPath -ExpectedSha256 \$uninstallerSha256 -NonInteractive:\$NonInteractive'
         $entryBlock | Should -Not -Match 'Start-Process powershell\.exe|Import-Module'
         $appStep = ${function:Uninstall-CatalogApp}.ToString()
-        $appStep | Should -Match 'Test-WingetPackageInstalled -PackageId'
+        # Through the installer's own check of an app's ids (wgt-zu3), which asks winget per id.
+        $appStep | Should -Match 'Test-CatalogAppInstalled -App'
+        ${function:Test-CatalogAppInstalled}.ToString() | Should -Match 'Test-WingetPackageInstalled -PackageId'
         $appStep | Should -Match 'Invoke-WingetProcess -ArgumentList'
         # No bare winget call anywhere in the uninstaller (review finding P3-18): it had no time limit
         # and its output never reached the log.
@@ -349,6 +351,18 @@ Describe 'Get-DefaultAppCatalog (issue #190)' {
 
             $driveApp.quietUninstall.productCode | Should -Be '{6BBAE539-2232-434A-A4E5-9A33560C6283}'
             @($driveApp.quietUninstall.arguments) | Should -Be @('--silent', '--force_stop')
+        }
+
+        It 'Installs Chrome as Google.Chrome.EXE, counts the Google.Chrome MSI of PCs set up before as installed, and removes the EXE with setup.exe --force-uninstall (wgt-zu3)' {
+            $chrome = @(Get-DefaultAppCatalog) | Where-Object { $_.name -like 'Google.Chrome*' }
+
+            @($chrome).Count | Should -Be 1
+            $chrome.name | Should -Be 'Google.Chrome.EXE'
+            @(Get-AppInstalledAsId -App $chrome) | Should -Be @('Google.Chrome')
+            $chrome.quietUninstall.productCode | Should -Be 'Google Chrome'
+            @($chrome.quietUninstall.arguments) | Should -Be @('--uninstall', '--system-level', '--force-uninstall')
+            @($chrome.quietUninstall.successExitCodes) | Should -Be @(19)
+            (Get-AppDefinitionSchemaIssue -App $chrome -Label 'Chrome').Errors | Should -BeNullOrEmpty
         }
 
         It 'No catalog entry other than the reviewed ones carries quietUninstall' {
