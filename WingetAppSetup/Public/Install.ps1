@@ -461,6 +461,11 @@ function Invoke-WingetInstall {
                         Write-WarningMessage "Skipping: $($app.name) (already provisioned for every user on this PC)"
                         $skipReason = 'already provisioned for every user on this PC'
                     }
+                    elseif ($outcome.SkipReason -eq 'InstalledAs') {
+                        # Under an id the catalog moved from (wgt-zu3); e2e/TranscriptAssertions.ps1 reads it.
+                        Write-WarningMessage "Skipping: $($app.name) (already installed as $($outcome.InstalledAs))"
+                        $skipReason = "already installed as $($outcome.InstalledAs)"
+                    }
                     else {
                         Write-WarningMessage "Skipping: $($app.name) (already installed)"
                         $skipReason = 'already installed'
@@ -705,6 +710,9 @@ function Invoke-WingetInstall {
                             $skipReason = 'already installed'
                             if ($outcome.SkipReason -eq 'Provisioned') {
                                 $skipReason = 'already provisioned for every user on this PC'
+                            }
+                            elseif ($outcome.SkipReason -eq 'InstalledAs') {
+                                $skipReason = "already installed as $($outcome.InstalledAs)"
                             }
                             $skippedApps += $appName
                             $appRecords[$appName] = New-AppRunRecord -Id $appName -Status 'Skipped' -Reason $skipReason -PostInstall $outcome.Configuration

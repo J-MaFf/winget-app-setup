@@ -7,7 +7,7 @@ Uninstalling the following apps:
 GlavSoft.TightVNC
 Adobe.Acrobat.Reader.64-bit
 Adobe.Acrobat.Reader.32-bit
-Google.Chrome
+Google.Chrome.EXE
 Google.GoogleDrive
 Git.Git
 Klocman.BulkCrapUninstaller
@@ -21,8 +21,8 @@ Successfully uninstalled: GlavSoft.TightVNC
 Uninstalling: Adobe.Acrobat.Reader.64-bit
 Successfully uninstalled: Adobe.Acrobat.Reader.64-bit (a restart finishes removing it)
 Skipping: Adobe.Acrobat.Reader.32-bit (not installed)
-Uninstalling: Google.Chrome
-Successfully uninstalled: Google.Chrome
+Uninstalling: Google.Chrome.EXE
+Successfully uninstalled: Google.Chrome.EXE
 Uninstalling: Google.GoogleDrive (its own uninstaller: "C:\Program Files\Google\Drive File Stream\uninstall.exe" --silent --force_stop)
 Successfully uninstalled: Google.GoogleDrive
 Uninstalling: Git.Git
@@ -39,6 +39,6 @@ Summary:
 
 Status      Apps
 ------      ----
-Uninstalled 7zip.7zip, GlavSoft.TightVNC, Adobe.Acrobat.Reader.64-bit, Google.Chrome, Google.GoogleDrive, Git.Git, Klocman.BulkCrapUninstaller
+Uninstalled 7zip.7zip, GlavSoft.TightVNC, Adobe.Acrobat.Reader.64-bit, Google.Chrome.EXE, Google.GoogleDrive, Git.Git, Klocman.BulkCrapUninstaller
 Skipped     Adobe.Acrobat.Reader.32-bit, Dell.CommandUpdate.Universal, Microsoft.PowerShell, Microsoft.WindowsTerminal
 Restart: REQUIRED to finish removing Adobe.Acrobat.Reader.64-bit.

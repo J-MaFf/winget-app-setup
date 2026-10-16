@@ -338,7 +338,7 @@ Describe 'What the catalog expects of a run as SYSTEM' {
     }
 
     It 'Reads the apps the job uninstalls first from e2e/Remove-PreinstalledApps.ps1''s defaults' {
-        Get-PreinstalledAppRemovalList -ScriptPath $script:RemovalScriptPath | Should -Be @('Google.Chrome', '7zip.7zip', 'Git.Git')
+        Get-PreinstalledAppRemovalList -ScriptPath $script:RemovalScriptPath | Should -Be @('Google.Chrome.EXE', '7zip.7zip', 'Git.Git')
     }
 
     It 'Throws when the removal script has no -PackageId default' {
@@ -390,8 +390,8 @@ Describe 'What the catalog expects of a run as SYSTEM' {
         $byId = Get-ExpectationById
 
         @($byId.Keys).Count | Should -Be @(Get-DefaultAppCatalog).Count
-        @($byId.Values | Where-Object { $_.Expected -eq 'Installed' } | ForEach-Object { $_.Id } | Sort-Object) | Should -Be @('7zip.7zip', 'Adobe.Acrobat.Reader.64-bit', 'Git.Git', 'GlavSoft.TightVNC', 'Google.Chrome', 'Google.GoogleDrive', 'Klocman.BulkCrapUninstaller', 'Microsoft.PowerShell', 'Microsoft.WindowsTerminal')
-        @($byId.Values | Where-Object { $_.MustInstall } | ForEach-Object { $_.Id } | Sort-Object) | Should -Be @('7zip.7zip', 'Git.Git', 'Google.Chrome')
+        @($byId.Values | Where-Object { $_.Expected -eq 'Installed' } | ForEach-Object { $_.Id } | Sort-Object) | Should -Be @('7zip.7zip', 'Adobe.Acrobat.Reader.64-bit', 'Git.Git', 'GlavSoft.TightVNC', 'Google.Chrome.EXE', 'Google.GoogleDrive', 'Klocman.BulkCrapUninstaller', 'Microsoft.PowerShell', 'Microsoft.WindowsTerminal')
+        @($byId.Values | Where-Object { $_.MustInstall } | ForEach-Object { $_.Id } | Sort-Object) | Should -Be @('7zip.7zip', 'Git.Git', 'Google.Chrome.EXE')
         $byId['Dell.CommandUpdate.Universal'].Expected | Should -Be 'NotApplicable'
         $byId['Dell.CommandUpdate.Universal'].Reason | Should -Be 'not applicable: Dell hardware with x64 Windows only; winget has no ARM64 installer for it'
         $byId['Adobe.Acrobat.Reader.32-bit'].Reason | Should -Be 'not applicable: ARM64 and 32-bit Windows only; x64 PCs get the 64-bit Reader'
@@ -514,7 +514,7 @@ Describe 'Get-SystemInstallPassResult: each catalog app in last-run.json' {
         $result.StepExitCode | Should -Be 0
         @($result.Results).Count | Should -Be (10 + 1 + @(Get-DefaultAppCatalog).Count)
         (Get-Row $result 'last-run.json lists the catalog''s apps').Detail | Should -Be 'schemaVersion 1, 11 entries for the catalog''s 11 apps'
-        (Get-Row $result 'App installed: Google.Chrome').Detail | Should -Be 'last-run.json: Installed'
+        (Get-Row $result 'App installed: Google.Chrome.EXE').Detail | Should -Be 'last-run.json: Installed'
         (Get-Row $result 'App installed: GlavSoft.TightVNC').Detail | Should -Be 'last-run.json: Installed, post-install NotConfigured'
         (Get-Row $result 'App installed: Microsoft.PowerShell').Detail | Should -Be 'last-run.json: Skipped (already installed)'
         (Get-Row $result 'App installed: Microsoft.WindowsTerminal').Detail | Should -Be 'last-run.json: Skipped (already provisioned for every user on this PC)'
@@ -539,7 +539,7 @@ Describe 'Get-SystemInstallPassResult: each catalog app in last-run.json' {
         @{ Case = 'an app with no entry'; Change = { param ($r) $r.apps = @($r.apps | Where-Object id -NE 'Google.GoogleDrive') }; Assertion = 'App installed: Google.GoogleDrive'; Detail = 'no entry in last-run.json' }
         @{ Case = 'a Failed app'; Change = { param ($r) $e = $r.apps | Where-Object id -EQ 'Klocman.BulkCrapUninstaller'; $e.status = 'Failed'; $e.reason = 'winget install exited 0x8A15002B' }; Assertion = 'App installed: Klocman.BulkCrapUninstaller'; Detail = 'last-run.json: Failed (winget install exited 0x8A15002B)' }
         @{ Case = 'a Deferred machine-wide app'; Change = { param ($r) $e = $r.apps | Where-Object id -EQ 'Adobe.Acrobat.Reader.64-bit'; $e.status = 'Deferred'; $e.reason = 'winget found no machine-wide installer for it' }; Assertion = 'App installed: Adobe.Acrobat.Reader.64-bit'; Detail = 'last-run.json: Deferred (winget found no machine-wide installer for it); its catalog entry is not per-user, so the run as SYSTEM had to install it for the whole PC' }
-        @{ Case = 'an app the job removed first that the run only skipped'; Change = { param ($r) $e = $r.apps | Where-Object id -EQ 'Google.Chrome'; $e.status = 'Skipped'; $e.reason = 'already installed' }; Assertion = 'App installed: Google.Chrome'; Detail = 'last-run.json: Skipped (already installed); the job uninstalled it before the run (e2e/Remove-PreinstalledApps.ps1), so the run had to install it: see that step''s warnings' }
+        @{ Case = 'an app the job removed first that the run only skipped'; Change = { param ($r) $e = $r.apps | Where-Object id -EQ 'Google.Chrome.EXE'; $e.status = 'Skipped'; $e.reason = 'already installed' }; Assertion = 'App installed: Google.Chrome.EXE'; Detail = 'last-run.json: Skipped (already installed); the job uninstalled it before the run (e2e/Remove-PreinstalledApps.ps1), so the run had to install it: see that step''s warnings' }
         @{ Case = 'Windows Terminal skipped as not applicable, although it applies as SYSTEM'; Change = { param ($r) $e = $r.apps | Where-Object id -EQ 'Microsoft.WindowsTerminal'; $e.reason = 'not applicable: winget cannot self-update Windows Terminal from a session Windows Terminal itself is hosting (issue #271)' }; Assertion = 'App installed: Microsoft.WindowsTerminal'; Detail = '; it applies to this PC as SYSTEM, so expected Installed, or Skipped (already provisioned for every user on this PC)' }
         @{ Case = 'an MSIX app skipped by winget list, not by its provisioning'; Change = { param ($r) ($r.apps | Where-Object id -EQ 'Microsoft.WindowsTerminal').reason = 'already installed' }; Assertion = 'App installed: Microsoft.WindowsTerminal'; Detail = 'last-run.json: Skipped (already installed); it applies to this PC as SYSTEM' }
         @{ Case = 'an app that does not apply but was installed'; Change = { param ($r) $e = $r.apps | Where-Object id -EQ 'Dell.CommandUpdate.Universal'; $e.status = 'Installed'; $e.reason = $null }; Assertion = 'Not-applicable skip recorded: Dell.CommandUpdate.Universal'; Detail = 'last-run.json: Installed; expected Skipped (not applicable: Dell hardware with x64 Windows only; winget has no ARM64 installer for it)' }
@@ -740,7 +740,7 @@ Describe 'The SYSTEM pass with the Microsoft.WinGet.Client engine' {
         $engine.Detail | Should -Match "the run's 'Install engine:' line is 'winget\.exe \("
         $engine.Detail | Should -Match 'WinGet client module: NOT READY - downloading'
         $engine.Detail | Should -Match "7 '> winget install' line\(s\): winget\.exe installed apps"
-        $engine.Detail | Should -Match "no '> Install-WinGetPackage -Id <id>' line for 7zip\.7zip, Google\.Chrome, Git\.Git"
+        $engine.Detail | Should -Match "no '> Install-WinGetPackage -Id <id>' line for 7zip\.7zip, Google\.Chrome\.EXE, Git\.Git"
         $engine.Detail | Should -Match "last-run\.json says installEngine\.used 'Cli' \(the module is not ready: downloading failed\)"
     }
 
@@ -800,8 +800,8 @@ Describe 'The SYSTEM pass with the Microsoft.WinGet.Client engine' {
             $byId[$expectation.Id] = $expectation
         }
 
-        $byId['Google.Chrome'].Expected | Should -Be 'AlreadyPresent'
-        $byId['Google.Chrome'].MustInstall | Should -BeFalse
+        $byId['Google.Chrome.EXE'].Expected | Should -Be 'AlreadyPresent'
+        $byId['Google.Chrome.EXE'].MustInstall | Should -BeFalse
         $byId['Microsoft.WindowsTerminal'].AlreadyPresentReasons | Should -Be @('already provisioned for every user on this PC')
         $byId['Dell.CommandUpdate.Universal'].Expected | Should -Be 'NotApplicable'
         @($byId.Values | Where-Object { $_.MustInstall }) | Should -BeNullOrEmpty
@@ -821,8 +821,8 @@ Describe 'The SYSTEM pass with the Microsoft.WinGet.Client engine' {
         $fail = @(Get-SystemPassAppResult -RunRecord $installedAgain -AppExpectation (Get-EngineExpectation -AlreadyPresent))
 
         @($pass | Where-Object Result -EQ 'FAIL') | Should -BeNullOrEmpty
-        ($pass | Where-Object Assertion -EQ 'App already present on the second run: Google.Chrome').Detail | Should -Be 'last-run.json: Skipped (already installed)'
-        $chrome = $fail | Where-Object Assertion -EQ 'App already present on the second run: Google.Chrome'
+        ($pass | Where-Object Assertion -EQ 'App already present on the second run: Google.Chrome.EXE').Detail | Should -Be 'last-run.json: Skipped (already installed)'
+        $chrome = $fail | Where-Object Assertion -EQ 'App already present on the second run: Google.Chrome.EXE'
         $chrome.Result | Should -Be 'FAIL'
         $chrome.Detail | Should -Be 'last-run.json: Installed; the first run installed or found it, so the second run had to find it: expected Skipped (already installed)'
     }
@@ -843,14 +843,14 @@ Describe 'The SYSTEM pass with the Microsoft.WinGet.Client engine' {
 
     It 'Looks the removed apps up with winget list as the runner account, retrying before it fails' {
         Mock Start-Sleep { }
-        $script:answers = @{ '7zip.7zip' = 0; 'Google.Chrome' = 0; 'Git.Git' = 0 }
+        $script:answers = @{ '7zip.7zip' = 0; 'Google.Chrome.EXE' = 0; 'Git.Git' = 0 }
         $check = {
             param ($Id)
             $script:answers[$Id]++
             if ($Id -eq 'Git.Git') {
                 return @{ Installed = $false; TimedOut = $false; LaunchFailed = $false; LaunchError = $null; CheckFailed = $false; ExitCode = -1978335212 }
             }
-            if ($Id -eq 'Google.Chrome' -and $script:answers[$Id] -lt 2) {
+            if ($Id -eq 'Google.Chrome.EXE' -and $script:answers[$Id] -lt 2) {
                 return @{ Installed = $false; TimedOut = $true; LaunchFailed = $false; LaunchError = $null; CheckFailed = $false; ExitCode = $null }
             }
             @{ Installed = $true; TimedOut = $false; LaunchFailed = $false; LaunchError = $null; CheckFailed = $false; ExitCode = 0 }
@@ -858,11 +858,11 @@ Describe 'The SYSTEM pass with the Microsoft.WinGet.Client engine' {
 
         $rows = @(Get-SystemPassIndependentInstallResult -AppExpectation (Get-EngineExpectation) -TestInstalled $check -RetryDelaySeconds 20)
 
-        @($rows | ForEach-Object { $_.Assertion }) | Should -Be @('Installed per winget list as the runner account: 7zip.7zip', 'Installed per winget list as the runner account: Google.Chrome', 'Installed per winget list as the runner account: Git.Git')
+        @($rows | ForEach-Object { $_.Assertion }) | Should -Be @('Installed per winget list as the runner account: 7zip.7zip', 'Installed per winget list as the runner account: Google.Chrome.EXE', 'Installed per winget list as the runner account: Git.Git')
         @($rows | ForEach-Object { $_.Result }) | Should -Be @('PASS', 'PASS', 'FAIL')
         $rows[2].Detail | Should -Be 'winget list does not list it (3 checks)'
         $script:answers['Git.Git'] | Should -Be 3
-        $script:answers['Google.Chrome'] | Should -Be 2
+        $script:answers['Google.Chrome.EXE'] | Should -Be 2
         Should -Invoke Start-Sleep -Times 3 -Exactly -ParameterFilter { $Seconds -eq 20 }
     }
 
@@ -923,17 +923,17 @@ Describe 'Get-PreparationRemovedList' {
     }
 
     It 'Reads the removed and absent ids, which the run must install, and leaves out the ones still installed' {
-        $path = Write-PreparationFixture -Text '{ "schemaVersion": 1, "complete": true, "removed": ["Google.Chrome", "Git.Git"], "absent": ["7zip.7zip"], "leftInstalled": ["Contoso.Stuck"], "unknown": [] }'
+        $path = Write-PreparationFixture -Text '{ "schemaVersion": 1, "complete": true, "removed": ["Google.Chrome.EXE", "Git.Git"], "absent": ["7zip.7zip"], "leftInstalled": ["Contoso.Stuck"], "unknown": [] }'
 
         $read = Get-PreparationRemovedList -Path $path
 
         $read.Problem | Should -BeNullOrEmpty
-        $read.Ids | Should -Be @('Google.Chrome', 'Git.Git', '7zip.7zip')
-        $read.Detail | Should -Be 'removed: Google.Chrome, Git.Git; absent: 7zip.7zip; left installed: Contoso.Stuck; unknown: ; complete: True'
+        $read.Ids | Should -Be @('Google.Chrome.EXE', 'Git.Git', '7zip.7zip')
+        $read.Detail | Should -Be 'removed: Google.Chrome.EXE, Git.Git; absent: 7zip.7zip; left installed: Contoso.Stuck; unknown: ; complete: True'
     }
 
     It 'Reads a record that lists nothing as no app to require' {
-        $path = Write-PreparationFixture -Text '{ "schemaVersion": 1, "complete": false, "removed": [], "absent": [], "leftInstalled": [], "unknown": ["Google.Chrome"] }'
+        $path = Write-PreparationFixture -Text '{ "schemaVersion": 1, "complete": false, "removed": [], "absent": [], "leftInstalled": [], "unknown": ["Google.Chrome.EXE"] }'
 
         $read = Get-PreparationRemovedList -Path $path
 
@@ -964,13 +964,13 @@ Describe 'Get-PreparationRemovedList' {
         & {
             . (Join-Path $script:RepoRoot 'e2e/Remove-PreinstalledApps.ps1')
             Save-PreparationRecord -Path $path -Results @(
-                [pscustomobject]@{ App = 'Google.Chrome'; Result = 'removed' }
+                [pscustomobject]@{ App = 'Google.Chrome.EXE'; Result = 'removed' }
                 [pscustomobject]@{ App = '7zip.7zip'; Result = 'still present' }
                 [pscustomobject]@{ App = 'Git.Git'; Result = 'absent' }
             ) -Complete
         }
 
-        (Get-PreparationRemovedList -Path $path).Ids | Should -Be @('Google.Chrome', 'Git.Git')
+        (Get-PreparationRemovedList -Path $path).Ids | Should -Be @('Google.Chrome.EXE', 'Git.Git')
     }
 
     It 'Requires Installed only for the apps the record lists, and accepts one left installed as already there' {
@@ -979,11 +979,11 @@ Describe 'Get-PreparationRemovedList' {
         Mock Test-WindowsTerminalHostsCurrentSession { $true }
         $catalog = @(Get-DefaultAppCatalog)
 
-        $expectations = @(Get-SystemPassAppExpectation -Catalog $catalog -Applicability (Get-SystemRunApplicability -Catalog $catalog) -RemovedApps @('Google.Chrome', 'Git.Git'))
+        $expectations = @(Get-SystemPassAppExpectation -Catalog $catalog -Applicability (Get-SystemRunApplicability -Catalog $catalog) -RemovedApps @('Google.Chrome.EXE', 'Git.Git'))
         $sevenZip = $expectations | Where-Object { $_.Id -eq '7zip.7zip' }
         $rows = @(Get-SystemPassAppResult -RunRecord ([pscustomobject]@{ schemaVersion = 1; apps = @([pscustomobject]@{ id = '7zip.7zip'; status = 'Skipped'; reason = 'already installed' }) }) -AppExpectation @($sevenZip))
 
-        @($expectations | Where-Object { $_.MustInstall } | ForEach-Object { $_.Id } | Sort-Object) | Should -Be @('Git.Git', 'Google.Chrome')
+        @($expectations | Where-Object { $_.MustInstall } | ForEach-Object { $_.Id } | Sort-Object) | Should -Be @('Git.Git', 'Google.Chrome.EXE')
         ($rows | Where-Object { $_.Assertion -eq 'App installed: 7zip.7zip' }).Result | Should -Be 'PASS'
     }
 }
@@ -1018,7 +1018,7 @@ Describe 'The SYSTEM budget pass' {
 
         function Get-WindowsLatestFirstRunExpectation {
             $catalog = @(Get-DefaultAppCatalog)
-            return @(Get-SystemPassAppExpectation -Catalog $catalog -Applicability (Get-SystemRunApplicability -Catalog $catalog) -RemovedApps @('Google.Chrome', '7zip.7zip', 'Git.Git'))
+            return @(Get-SystemPassAppExpectation -Catalog $catalog -Applicability (Get-SystemRunApplicability -Catalog $catalog) -RemovedApps @('Google.Chrome.EXE', '7zip.7zip', 'Git.Git'))
         }
 
         function Get-BudgetRow {
@@ -1052,7 +1052,7 @@ Describe 'The SYSTEM budget pass' {
         $rows = @(Get-SystemPassBudgetResult -TaskExitCode 9 -WrapperLog $script:BudgetWrapperLog -RunRecord (Get-BudgetRecord) -AppExpectation (Get-WindowsLatestFirstRunExpectation))
 
         @($rows | Where-Object { $_.Result -ne 'PASS' } | ForEach-Object { "$($_.Assertion): $($_.Detail)" }) | Should -BeNullOrEmpty
-        @($rows | ForEach-Object { $_.Assertion }) | Should -Contain 'Budget pass: not attempted: Google.Chrome'
+        @($rows | ForEach-Object { $_.Assertion }) | Should -Contain 'Budget pass: not attempted: Google.Chrome.EXE'
         @($rows | ForEach-Object { $_.Assertion }) | Should -Contain 'Budget pass: not-applicable skip recorded: Dell.CommandUpdate.Universal'
         @($rows | Where-Object { $_.Assertion -like 'Budget pass: not attempted: *' }).Count | Should -Be 9
         (Get-BudgetRow -Rows $rows -Assertion 'Budget pass: wrapper passed the time budget on').Detail | Should -Be 'Time budget: 1 minutes, until 2026-10-05T05:29:12Z; the installer exited with 9'
@@ -1070,7 +1070,7 @@ Describe 'The SYSTEM budget pass' {
         (Get-BudgetRow -Rows $rows -Assertion 'Budget pass: last-run.json records the run').Result | Should -Be 'FAIL'
         (Get-BudgetRow -Rows $rows -Assertion 'Budget pass: auto-updates not attempted').Detail | Should -Be 'autoUpdates.status: Configured'
         (Get-BudgetRow -Rows $rows -Assertion 'Budget pass: nothing installed or failed').Detail | Should -Match '^with the budget used up, the run still did: 7zip\.7zip Installed; '
-        (Get-BudgetRow -Rows $rows -Assertion 'Budget pass: not attempted: Google.Chrome').Detail | Should -Be 'last-run.json: Installed; expected NotAttempted (the run''s <n>-minute time budget was used up)'
+        (Get-BudgetRow -Rows $rows -Assertion 'Budget pass: not attempted: Google.Chrome.EXE').Detail | Should -Be 'last-run.json: Installed; expected NotAttempted (the run''s <n>-minute time budget was used up)'
         # Not-applicable apps are decided before the budget is looked at, so they pass either way.
         (Get-BudgetRow -Rows $rows -Assertion 'Budget pass: not-applicable skip recorded: Adobe.Acrobat.Reader.32-bit').Result | Should -Be 'PASS'
     }
@@ -1086,11 +1086,11 @@ Describe 'The SYSTEM budget pass' {
 
     It 'Requires the budget''s reason, and leaves KNOWN_PLATFORM_INCOMPATIBLE apps unchecked' {
         $record = Get-BudgetRecord
-        ($record.apps | Where-Object { $_.id -eq 'Google.Chrome' }).reason = 'something else'
+        ($record.apps | Where-Object { $_.id -eq 'Google.Chrome.EXE' }).reason = 'something else'
 
         $rows = @(Get-SystemPassBudgetResult -TaskExitCode 9 -WrapperLog $script:BudgetWrapperLog -RunRecord $record -AppExpectation (Get-WindowsLatestFirstRunExpectation) -SkipApps @('Git.Git'))
 
-        (Get-BudgetRow -Rows $rows -Assertion 'Budget pass: not attempted: Google.Chrome').Result | Should -Be 'FAIL'
+        (Get-BudgetRow -Rows $rows -Assertion 'Budget pass: not attempted: Google.Chrome.EXE').Result | Should -Be 'FAIL'
         Get-BudgetRow -Rows $rows -Assertion 'Budget pass: not attempted: Git.Git' | Should -BeNullOrEmpty
     }
 

@@ -147,6 +147,34 @@ Describe 'Removing the preinstalled apps' {
         Should -Invoke Start-Process -Times 2 -Exactly -ParameterFilter { $ArgumentList[0] -eq 'list' -and ($ArgumentList -join ' ') -match '--id Google\.Chrome --exact --source winget' }
     }
 
+    It 'Removes the catalog''s Google.Chrome.EXE as the image''s MSI package, Google.Chrome, and says whether winget lists that under the catalog id (<Listed>; wgt-zu3)' -ForEach @(
+        @{ Listed = 'listed'; CatalogView = 'winget list found it' }
+        @{ Listed = 'not listed'; CatalogView = 'winget list does not find it' }
+    ) {
+        $script:Installed['Google.Chrome.EXE'] = ($Listed -eq 'listed')
+
+        $result = Remove-PreinstalledPackage -Id 'Google.Chrome.EXE' -ListTimeoutSeconds 5 -UninstallTimeoutSeconds 5
+
+        $result.App | Should -Be 'Google.Chrome.EXE'
+        $result.Result | Should -Be 'removed'
+        $result.Detail | Should -Be "as Google.Chrome (as Google.Chrome.EXE: $CatalogView); winget uninstall exit 0x00000000"
+        Should -Invoke Start-Process -Times 1 -Exactly -ParameterFilter {
+            $FilePath -eq 'winget' -and ($ArgumentList -join ' ') -eq 'uninstall --id Google.Chrome --exact --source winget --silent --accept-source-agreements --disable-interactivity'
+        }
+        Should -Invoke Start-Process -Times 0 -Exactly -ParameterFilter { $ArgumentList[0] -eq 'uninstall' -and $ArgumentList -contains 'Google.Chrome.EXE' }
+        Should -Invoke Start-Process -Times 1 -Exactly -ParameterFilter { $ArgumentList[0] -eq 'list' -and $ArgumentList -contains 'Google.Chrome.EXE' }
+    }
+
+    It 'Says Google.Chrome.EXE is absent when the image has no Chrome MSI' {
+        $script:Installed['Google.Chrome'] = $false
+
+        $result = Remove-PreinstalledPackage -Id 'Google.Chrome.EXE' -ListTimeoutSeconds 5 -UninstallTimeoutSeconds 5
+
+        $result.Result | Should -Be 'absent'
+        $result.Detail | Should -Be 'as Google.Chrome (as Google.Chrome.EXE: winget list does not find it); not installed on this runner'
+        Should -Invoke Start-Process -Times 0 -Exactly -ParameterFilter { $ArgumentList[0] -eq 'uninstall' }
+    }
+
     It 'Reads a winget source that cannot open as unknown, never as not installed (wgt-gq8.65)' {
         # Without --source, winget answered 'not installed' for an installed app and it was left
         # in place as 'absent'.
@@ -309,6 +337,8 @@ Describe 'The time limits of runner preparation' {
     It 'Adds up the worst case of every bounded call' {
         Get-RunnerPreparationWorstCase -PackageCount 3 -ListTimeoutSeconds 45 -UninstallTimeoutSeconds 150 | Should -Be 720
         Get-RunnerPreparationWorstCase -PackageCount 3 -IncludePowerShell7 -ListTimeoutSeconds 45 -UninstallTimeoutSeconds 150 | Should -Be 1110
+        # Chrome's extra list under its catalog id (wgt-zu3).
+        Get-RunnerPreparationWorstCase -PackageCount 3 -AliasedCount 1 -IncludePowerShell7 -ListTimeoutSeconds 45 -UninstallTimeoutSeconds 150 | Should -Be 1155
     }
 
     It 'Fits the defaults into the timeout-minutes of every workflow step <Step> (<Count>), with a minute to spare' -ForEach @(
@@ -325,7 +355,9 @@ Describe 'The time limits of runner preparation' {
                 $defaults[$parameter.Name.VariablePath.UserPath] = $parameter.DefaultValue.SafeGetValue()
             }
         }
-        $worstCase = Get-RunnerPreparationWorstCase -PackageCount @($defaults['PackageId']).Count -IncludePowerShell7:$IncludePowerShell7 -ListTimeoutSeconds $defaults['ListTimeoutSeconds'] -UninstallTimeoutSeconds $defaults['UninstallTimeoutSeconds']
+        $aliasedCount = @($defaults['PackageId'] | Where-Object { (Get-PreinstalledRemovalId -Id $_) -ne $_ }).Count
+        $aliasedCount | Should -Be 1
+        $worstCase = Get-RunnerPreparationWorstCase -PackageCount @($defaults['PackageId']).Count -AliasedCount $aliasedCount -IncludePowerShell7:$IncludePowerShell7 -ListTimeoutSeconds $defaults['ListTimeoutSeconds'] -UninstallTimeoutSeconds $defaults['UninstallTimeoutSeconds']
 
         $workflow = Get-Content -Raw -LiteralPath (Join-Path $script:RepoRoot '.github/workflows/e2e-install.yml')
         $stepPattern = '(?ms)^\s+- name: ' + [regex]::Escape($Step) + '\r?\n(?<body>.*?)(?=^\s+- name: |\z)'

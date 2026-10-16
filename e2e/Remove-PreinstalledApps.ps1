@@ -24,9 +24,15 @@
     Every winget and msiexec call is bounded, and the limits add up to less than the step's
     timeout-minutes (Get-RunnerPreparationWorstCase; tests/E2EPreinstalledApps.Tests.ps1 checks
     every step in .github/workflows/e2e-install.yml that runs this): with the defaults an app
-    costs at most 45 + 150 + 45 s = 4 min (winget list, uninstall, list again), so 12 min for the
-    three apps, and PowerShell 7 at most 150 s (its MSI) + 4 min (the winget fallback), 18.5 min
-    in all.
+    costs at most 45 + 150 + 45 s = 4 min (winget list, uninstall, list again), and Chrome one
+    more list (45 s, below), so 12.75 min for the three apps, and PowerShell 7 at most 150 s (its
+    MSI) + 4 min (the winget fallback), 19.25 min in all.
+
+    Chrome is in the catalog as Google.Chrome.EXE, but the image installs Google's enterprise MSI,
+    which winget lists as Google.Chrome: Get-PreinstalledRemovalId names the package it is removed
+    as, and the record still names the catalog id. Its line also says whether winget lists that
+    MSI Chrome under the catalog id, which decides whether a PC with the MSI skips Chrome
+    (wgt-zu3).
 
     The catalog apps are checked the way the installer checks them, with
     'winget list --id <id> --exact --source winget': absent there means the first pass installs it.
@@ -38,7 +44,7 @@
     Runs under Windows PowerShell 5.1 (the steps use 'shell: powershell', which does not depend on
     PowerShell 7): ASCII only, no 7-only syntax.
 .PARAMETER PackageId
-    winget ids to remove. Default: Google.Chrome, 7zip.7zip, Git.Git.
+    Catalog ids to remove. Default: Google.Chrome.EXE, 7zip.7zip, Git.Git.
 .PARAMETER IncludePowerShell7
     Also remove PowerShell 7.
 .PARAMETER ListTimeoutSeconds
@@ -54,7 +60,7 @@
 [CmdletBinding()]
 param (
     [Parameter(Mandatory = $false)]
-    [string[]]$PackageId = @('Google.Chrome', '7zip.7zip', 'Git.Git'),
+    [string[]]$PackageId = @('Google.Chrome.EXE', '7zip.7zip', 'Git.Git'),
 
     [Parameter(Mandatory = $false)]
     [switch]$IncludePowerShell7,
@@ -172,10 +178,36 @@ function Get-WingetPackagePresence {
 
 <#
 .SYNOPSIS
-    Uninstalls one catalog app with winget, if it is installed.
+    The winget package a catalog app is removed as: the one the runner image installed.
+.DESCRIPTION
+    The image installs Chrome's enterprise MSI (Google.Chrome), while the catalog installs
+    Google.Chrome.EXE (wgt-zu3); `winget uninstall` of the MSI package removes it silently. Any
+    other id is removed as itself.
 .RETURNS
-    [pscustomobject] with App, Result ('absent', 'removed', 'still present' or 'unknown') and
-    Detail.
+    [string]
+#>
+function Get-PreinstalledRemovalId {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$Id
+    )
+
+    if ($Id -eq 'Google.Chrome.EXE') {
+        return 'Google.Chrome'
+    }
+    return $Id
+}
+
+<#
+.SYNOPSIS
+    Uninstalls one catalog app with winget, if it is installed.
+.DESCRIPTION
+    Listed, uninstalled and listed again as Get-PreinstalledRemovalId's package. When that is not
+    the catalog id, a first `winget list` of the catalog id says in Detail whether winget lists
+    the image's install under it.
+.RETURNS
+    [pscustomobject] with App (the catalog id), Result ('absent', 'removed', 'still present' or
+    'unknown') and Detail.
 #>
 function Remove-PreinstalledPackage {
     param (
@@ -187,14 +219,21 @@ function Remove-PreinstalledPackage {
         [int]$UninstallTimeoutSeconds
     )
 
-    $before = Get-WingetPackagePresence -Id $Id -TimeoutSeconds $ListTimeoutSeconds
-    if ($before.State -eq 'absent') {
-        return [pscustomobject]@{ App = $Id; Result = 'absent'; Detail = 'not installed on this runner' }
+    $removalId = Get-PreinstalledRemovalId -Id $Id
+    $note = ''
+    if ($removalId -ne $Id) {
+        $catalogView = Get-WingetPackagePresence -Id $Id -TimeoutSeconds $ListTimeoutSeconds
+        $note = "as $removalId (as ${Id}: $($catalogView.Detail)); "
     }
 
-    $uninstall = Invoke-BoundedProcess -FilePath 'winget' -ArgumentList @('uninstall', '--id', $Id, '--exact', '--source', 'winget', '--silent', '--accept-source-agreements', '--disable-interactivity') -TimeoutSeconds $UninstallTimeoutSeconds
-    $uninstallText = 'winget uninstall ' + (Format-ProcessOutcome -Outcome $uninstall -TimeoutSeconds $UninstallTimeoutSeconds)
-    $after = Get-WingetPackagePresence -Id $Id -TimeoutSeconds $ListTimeoutSeconds
+    $before = Get-WingetPackagePresence -Id $removalId -TimeoutSeconds $ListTimeoutSeconds
+    if ($before.State -eq 'absent') {
+        return [pscustomobject]@{ App = $Id; Result = 'absent'; Detail = "${note}not installed on this runner" }
+    }
+
+    $uninstall = Invoke-BoundedProcess -FilePath 'winget' -ArgumentList @('uninstall', '--id', $removalId, '--exact', '--source', 'winget', '--silent', '--accept-source-agreements', '--disable-interactivity') -TimeoutSeconds $UninstallTimeoutSeconds
+    $uninstallText = $note + 'winget uninstall ' + (Format-ProcessOutcome -Outcome $uninstall -TimeoutSeconds $UninstallTimeoutSeconds)
+    $after = Get-WingetPackagePresence -Id $removalId -TimeoutSeconds $ListTimeoutSeconds
     switch ($after.State) {
         'absent' { return [pscustomobject]@{ App = $Id; Result = 'removed'; Detail = $uninstallText } }
         'present' { return [pscustomobject]@{ App = $Id; Result = 'still present'; Detail = "$uninstallText; $($after.Detail)" } }
@@ -275,9 +314,11 @@ function Remove-PowerShell7 {
 .SYNOPSIS
     The longest runner preparation can take with the given limits.
 .DESCRIPTION
-    Per app: winget list, winget uninstall, winget list. PowerShell 7: msiexec for one Windows
-    Installer entry (the image has one), then the same three winget calls as the fallback. Process
-    start-up is not counted; leave a minute or two of slack under the step's timeout-minutes.
+    Per app: winget list, winget uninstall, winget list, and one more winget list for each app
+    removed as another package (-AliasedCount, Get-PreinstalledRemovalId). PowerShell 7: msiexec
+    for one Windows Installer entry (the image has one), then the same three winget calls as the
+    fallback. Process start-up is not counted; leave a minute or two of slack under the step's
+    timeout-minutes.
 .RETURNS
     [int] seconds.
 #>
@@ -285,6 +326,8 @@ function Get-RunnerPreparationWorstCase {
     param (
         [Parameter(Mandatory = $true)]
         [int]$PackageCount,
+        [Parameter(Mandatory = $false)]
+        [int]$AliasedCount = 0,
         [Parameter(Mandatory = $false)]
         [switch]$IncludePowerShell7,
         [Parameter(Mandatory = $true)]
@@ -294,7 +337,7 @@ function Get-RunnerPreparationWorstCase {
     )
 
     $perPackage = (2 * $ListTimeoutSeconds) + $UninstallTimeoutSeconds
-    $total = $PackageCount * $perPackage
+    $total = ($PackageCount * $perPackage) + ($AliasedCount * $ListTimeoutSeconds)
     if ($IncludePowerShell7) {
         $total += $UninstallTimeoutSeconds + $perPackage
     }
@@ -405,7 +448,8 @@ function Invoke-RunnerPreparation {
         [string]$ResultPath
     )
 
-    $worstCase = Get-RunnerPreparationWorstCase -PackageCount @($PackageId).Count -IncludePowerShell7:$IncludePowerShell7 -ListTimeoutSeconds $ListTimeoutSeconds -UninstallTimeoutSeconds $UninstallTimeoutSeconds
+    $aliasedCount = @($PackageId | Where-Object { (Get-PreinstalledRemovalId -Id $_) -ne $_ }).Count
+    $worstCase = Get-RunnerPreparationWorstCase -PackageCount @($PackageId).Count -AliasedCount $aliasedCount -IncludePowerShell7:$IncludePowerShell7 -ListTimeoutSeconds $ListTimeoutSeconds -UninstallTimeoutSeconds $UninstallTimeoutSeconds
     Write-Host ('Every call is bounded (winget list {0} s, uninstall {1} s): at most {2:N1} min in all.' -f $ListTimeoutSeconds, $UninstallTimeoutSeconds, ($worstCase / 60))
 
     $results = @()

@@ -1509,6 +1509,83 @@ Describe 'Install-WingetPackage with a real process (review findings P2-5, P2-6)
     }
 }
 
+Describe 'Test-CatalogAppInstalled: its own id, then its installedAs ids (wgt-zu3)' {
+    BeforeEach {
+        # What winget answers for each id; an id not listed is not installed.
+        $script:answers = @{}
+        Mock Test-WingetPackageInstalled {
+            $answer = $script:answers[$PackageId]
+            if ($null -eq $answer) {
+                return @{ Installed = $false; TimedOut = $false; LaunchFailed = $false; LaunchError = $null; CheckFailed = $false; ExitCode = -1978335212 }
+            }
+            return $answer
+        }
+        $script:installedAnswer = @{ Installed = $true; TimedOut = $false; LaunchFailed = $false; LaunchError = $null; CheckFailed = $false; ExitCode = 0 }
+        $script:chrome = @{ name = 'Google.Chrome.EXE'; installedAs = 'Google.Chrome' }
+    }
+
+    It 'Finds the app under its own id, and asks nothing more' {
+        $script:answers['Google.Chrome.EXE'] = $script:installedAnswer
+
+        $result = Test-CatalogAppInstalled -App $script:chrome -TimeoutSeconds 15
+
+        $result.Installed | Should -BeTrue
+        $result.InstalledAs | Should -BeNullOrEmpty
+        Should -Invoke Test-WingetPackageInstalled -Times 1 -Exactly
+        Should -Invoke Test-WingetPackageInstalled -Times 1 -Exactly -ParameterFilter { $PackageId -eq 'Google.Chrome.EXE' -and $TimeoutSeconds -eq 15 }
+    }
+
+    It 'Finds the app under an installedAs id, and says which' {
+        $script:answers['Google.Chrome'] = $script:installedAnswer
+
+        $result = Test-CatalogAppInstalled -App $script:chrome -TimeoutSeconds 15
+
+        $result.Installed | Should -BeTrue
+        $result.InstalledAs | Should -Be 'Google.Chrome'
+        Should -Invoke Test-WingetPackageInstalled -Times 2 -Exactly
+    }
+
+    It 'Reports not installed when no id is installed' {
+        $result = Test-CatalogAppInstalled -App @{ name = 'Contoso.App'; installedAs = @('Contoso.Old', 'Contoso.Older') } -TimeoutSeconds 15
+
+        $result.Installed | Should -BeFalse
+        $result.InstalledAs | Should -BeNullOrEmpty
+        $result.CheckFailed | Should -BeFalse
+        Should -Invoke Test-WingetPackageInstalled -Times 3 -Exactly
+    }
+
+    It 'Stops at the first check with no answer, which is not "not installed" (<Case>)' -ForEach @(
+        @{ Case = 'its own id timed out'; Id = 'Google.Chrome.EXE'; Answer = @{ Installed = $false; TimedOut = $true; LaunchFailed = $false; LaunchError = $null; CheckFailed = $false; ExitCode = $null }; Calls = 1 }
+        @{ Case = 'the installedAs id could not start winget'; Id = 'Google.Chrome'; Answer = @{ Installed = $false; TimedOut = $false; LaunchFailed = $true; LaunchError = 'Access is denied.'; CheckFailed = $false; ExitCode = $null }; Calls = 2 }
+        @{ Case = 'the installedAs id failed winget list'; Id = 'Google.Chrome'; Answer = @{ Installed = $false; TimedOut = $false; LaunchFailed = $false; LaunchError = $null; CheckFailed = $true; ExitCode = -1978335217 }; Calls = 2 }
+    ) {
+        $script:answers[$Id] = $Answer
+
+        $result = Test-CatalogAppInstalled -App $script:chrome -TimeoutSeconds 15
+
+        $result.Installed | Should -BeFalse
+        ($result.TimedOut -or $result.LaunchFailed -or $result.CheckFailed) | Should -BeTrue
+        $result.InstalledAs | Should -BeNullOrEmpty
+        Should -Invoke Test-WingetPackageInstalled -Times $Calls -Exactly
+    }
+
+    It 'Takes an answer that is an object, as a mock or the engine may give' {
+        Mock Test-WingetPackageInstalled { [pscustomobject]@{ Installed = ($PackageId -eq 'Google.Chrome'); TimedOut = $false; LaunchFailed = $false; LaunchError = $null; CheckFailed = $false; ExitCode = 0 } }
+
+        $result = Test-CatalogAppInstalled -App $script:chrome -TimeoutSeconds 15
+
+        $result.Installed | Should -BeTrue
+        $result.InstalledAs | Should -Be 'Google.Chrome'
+    }
+
+    It 'Checks only its own id for an entry with no installedAs' {
+        $null = Test-CatalogAppInstalled -App @{ name = '7zip.7zip' } -TimeoutSeconds 15
+
+        Should -Invoke Test-WingetPackageInstalled -Times 1 -Exactly -ParameterFilter { $PackageId -eq '7zip.7zip' }
+        Should -Invoke Test-WingetPackageInstalled -Times 1 -Exactly
+    }
+}
+
 Describe 'Test-WingetPackageInstalled (timeout support, issue #188)' {
     BeforeEach {
         Mock Write-Host { }

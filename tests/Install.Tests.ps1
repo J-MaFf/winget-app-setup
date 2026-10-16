@@ -529,7 +529,7 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
             $script:verifiedApps = @()
             Mock Install-AppWithVerification {
                 $script:verifiedApps += $App.name
-                if ($App.name -eq 'Google.Chrome') {
+                if ($App.name -eq 'Google.Chrome.EXE') {
                     return @{ Status = 'Skipped'; InstallResult = $null; FailureReason = $null }
                 }
                 @{ Status = 'Installed'; InstallResult = $null; FailureReason = $null }
@@ -552,8 +552,8 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
             $installedRow = @($script:capturedRows | Where-Object { $_[0] -eq 'Installed' })[0]
             $skippedRow = @($script:capturedRows | Where-Object { $_[0] -eq 'Skipped' })[0]
             $installedRow[1] | Should -Match '7zip\.7zip'
-            $installedRow[1] | Should -Not -Match 'Google\.Chrome'
-            $skippedRow[1] | Should -Match 'Google\.Chrome'
+            $installedRow[1] | Should -Not -Match 'Google\.Chrome\.EXE'
+            $skippedRow[1] | Should -Match 'Google\.Chrome\.EXE'
             @($script:capturedRows | Where-Object { $_[0] -eq 'Failed' }).Count | Should -Be 0
         }
     }
@@ -947,6 +947,15 @@ Describe 'Invoke-WingetInstall wiring (issue #188)' {
 
             $script:warningMessages | Should -Contain 'Skipping: Microsoft.WindowsTerminal (already provisioned for every user on this PC)'
             @($script:capturedRows | Where-Object { $_[0] -eq 'Skipped' })[0][1] | Should -Be 'Microsoft.WindowsTerminal'
+        }
+
+        It 'Says an app is skipped because it is installed under its installedAs id, naming it (wgt-zu3)' {
+            Mock Install-AppWithVerification { @{ Status = 'Skipped'; InstallResult = $null; FailureReason = $null; SkipReason = 'InstalledAs'; InstalledAs = 'Google.Chrome' } }
+
+            Invoke-WingetInstall -Apps @(@{ name = 'Google.Chrome.EXE'; installedAs = 'Google.Chrome' }) -NonInteractive | Should -Be 0
+
+            $script:warningMessages | Should -Contain 'Skipping: Google.Chrome.EXE (already installed as Google.Chrome)'
+            @($script:capturedRows | Where-Object { $_[0] -eq 'Skipped' })[0][1] | Should -Be 'Google.Chrome.EXE'
         }
     }
 
@@ -2443,6 +2452,45 @@ Describe 'Install-AppWithVerification (shared install-and-verify pipeline, issue
         $result.FailureReason | Should -Be $null
         Should -Invoke Install-WingetPackage -Times 0 -Exactly
         Should -Invoke Test-WingetPackageInstalled -Times 1 -Exactly
+    }
+
+    It 'Skips an app installed under one of its installedAs ids, saying which, without an install (wgt-zu3)' {
+        # A PC set up before Chrome moved to Google.Chrome.EXE has the Google.Chrome MSI, which
+        # winget does not list under the new id; installing over it could fail and leave both.
+        Mock Test-WingetPackageInstalled { @{ Installed = ($PackageId -eq 'Google.Chrome'); TimedOut = $false; LaunchFailed = $false; LaunchError = $null; CheckFailed = $false; ExitCode = 0 } }
+
+        $result = Install-AppWithVerification -App @{ name = 'Google.Chrome.EXE'; installedAs = 'Google.Chrome' }
+
+        $result.Status | Should -Be 'Skipped'
+        $result.SkipReason | Should -Be 'InstalledAs'
+        $result.InstalledAs | Should -Be 'Google.Chrome'
+        Should -Invoke Install-WingetPackage -Times 0 -Exactly
+        Should -Invoke Test-WingetPackageInstalled -Times 1 -Exactly -ParameterFilter { $PackageId -eq 'Google.Chrome.EXE' }
+        Should -Invoke Test-WingetPackageInstalled -Times 1 -Exactly -ParameterFilter { $PackageId -eq 'Google.Chrome' }
+    }
+
+    It 'Says the same in a dry run, which only reads' {
+        Mock Test-WingetPackageInstalled { @{ Installed = ($PackageId -eq 'Google.Chrome'); TimedOut = $false; LaunchFailed = $false; LaunchError = $null; CheckFailed = $false; ExitCode = 0 } }
+
+        $result = Install-AppWithVerification -App @{ name = 'Google.Chrome.EXE'; installedAs = 'Google.Chrome' } -WhatIf
+
+        $result.Status | Should -Be 'Skipped'
+        $result.SkipReason | Should -Be 'InstalledAs'
+    }
+
+    It 'Fails as PreCheckFailed, without an install, when winget list fails for an installedAs id' {
+        Mock Test-WingetPackageInstalled {
+            if ($PackageId -eq 'Google.Chrome') {
+                return @{ Installed = $false; TimedOut = $false; LaunchFailed = $false; LaunchError = $null; CheckFailed = $true; ExitCode = -1978335217 }
+            }
+            @{ Installed = $false; TimedOut = $false; LaunchFailed = $false; LaunchError = $null; CheckFailed = $false; ExitCode = -1978335212 }
+        }
+
+        $result = Install-AppWithVerification -App @{ name = 'Google.Chrome.EXE'; installedAs = 'Google.Chrome' }
+
+        $result.Status | Should -Be 'Failed'
+        $result.FailureReason | Should -Be 'PreCheckFailed'
+        Should -Invoke Install-WingetPackage -Times 0 -Exactly
     }
 
     It 'Installs a missing app and reports Installed when the post-verify finds it' {

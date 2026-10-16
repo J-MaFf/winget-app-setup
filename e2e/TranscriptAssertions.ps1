@@ -82,7 +82,8 @@ function ConvertTo-TranscriptAppId {
     Reads what one PowerShell 7 run of the installer did from its transcript.
 .DESCRIPTION
     Per-app lines come from Invoke-WingetInstall:
-      - first pass: 'Successfully installed: <id>', 'Skipping: <id> (already installed)',
+      - first pass: 'Successfully installed: <id>', 'Skipping: <id> (already installed)' (or
+        '(already installed as <other id>)', an installedAs id),
         'Skipping: <id> (not applicable: <reason>)', and the three failure forms
         'Failed to install: <id> ...', 'Winget list timed out for <id>. ...' and
         'Verification timed out for: <id>. ...';
@@ -102,7 +103,8 @@ function ConvertTo-TranscriptAppId {
     [pscustomobject] with:
       BuildId            'Installer build: <id>' (first one), or $null.
       Installed          ids with 'Successfully installed'.
-      AlreadyInstalled   ids skipped as already installed.
+      AlreadyInstalled   ids skipped as already installed, under their own id or another.
+      AlreadyInstalledAs ordered dictionary of id -> the installedAs id it was found under.
       NotApplicable      ordered dictionary of id -> reason for the not-applicable skips.
       FirstPassFailed    ids with a first-pass failure line (any of the three forms).
       RetrySucceeded     ids with 'Retry succeeded'.
@@ -174,6 +176,7 @@ function ConvertFrom-InstallTranscript {
     $buildId = $null
     $installed = [System.Collections.Generic.List[string]]::new()
     $alreadyInstalled = [System.Collections.Generic.List[string]]::new()
+    $alreadyInstalledAs = [ordered]@{}
     $notApplicable = [ordered]@{}
     $firstPassFailed = [System.Collections.Generic.List[string]]::new()
     $retrySucceeded = [System.Collections.Generic.List[string]]::new()
@@ -237,8 +240,11 @@ function ConvertFrom-InstallTranscript {
             $installed.Add((ConvertTo-TranscriptAppId -Text $Matches.app))
             continue
         }
-        if ($line -match '^Skipping:\s+(?<app>\S+) \(already installed\)$') {
+        if ($line -match '^Skipping:\s+(?<app>\S+) \(already installed(?: as (?<as>\S+))?\)$') {
             $alreadyInstalled.Add($Matches.app)
+            if ($Matches.as) {
+                $alreadyInstalledAs[$Matches.app] = $Matches.as
+            }
             continue
         }
         if ($line -match '^Skipping:\s+(?<app>\S+) \(not applicable: (?<reason>.*)\)$') {
@@ -382,6 +388,7 @@ function ConvertFrom-InstallTranscript {
         BuildId             = $buildId
         Installed           = @($installed | Sort-Object -Unique)
         AlreadyInstalled    = @($alreadyInstalled | Sort-Object -Unique)
+        AlreadyInstalledAs  = $alreadyInstalledAs
         NotApplicable       = $notApplicable
         FirstPassFailed     = $firstPassFailedIds
         RetrySucceeded      = $retrySucceededIds
@@ -806,7 +813,10 @@ function Resolve-AssertionApplicability {
         bootstrap (one bootstrap transcript per real-run transcript), and each bootstrap
         relaunched the installer under PowerShell 7 and recorded how that run ended;
       - with -ExpectPowerShell7Installed: the earliest bootstrap (the first pass's) installed
-        PowerShell 7 rather than finding one, so the bootstrap's install path really ran.
+        PowerShell 7 rather than finding one, so the bootstrap's install path really ran;
+      - with -ExpectedInstalledAs: the earliest real run (the first pass) skipped each app as
+        already installed under the other id given, as a PC set up before the catalog moved the
+        app to another package would (wgt-zu3).
 .PARAMETER LogDirectory
     The installer's log folder.
 .PARAMETER ExpectedAppIds
@@ -827,6 +837,8 @@ function Resolve-AssertionApplicability {
 .PARAMETER ExpectPowerShell7Installed
     Adds the assertion that the first pass's bootstrap installed PowerShell 7. For runs that
     start on a machine without it (the 5.1 leg removes it first).
+.PARAMETER ExpectedInstalledAs
+    Ordered dictionary of catalog id -> the installedAs id the first pass must find it under.
 .RETURNS
     Assertion rows ([pscustomobject] with Assertion, Result and Detail).
 #>
@@ -851,7 +863,9 @@ function Get-TranscriptAssertionResult {
         [Parameter(Mandatory = $false)]
         [switch]$ExpectPowerShell7Bootstrap,
         [Parameter(Mandatory = $false)]
-        [switch]$ExpectPowerShell7Installed
+        [switch]$ExpectPowerShell7Installed,
+        [Parameter(Mandatory = $false)]
+        [System.Collections.IDictionary]$ExpectedInstalledAs = @{}
     )
 
     $files = Get-InstallTranscriptFile -LogDirectory $LogDirectory
@@ -870,6 +884,9 @@ function Get-TranscriptAssertionResult {
         }
         foreach ($id in $NotApplicableApps.Keys) {
             New-TranscriptAssertionResult -Name "Not-applicable skip logged: $id" -Passed $false -Detail 'no transcript to inspect'
+        }
+        foreach ($id in $ExpectedInstalledAs.Keys) {
+            New-TranscriptAssertionResult -Name "First pass found $id as $($ExpectedInstalledAs[$id])" -Passed $false -Detail 'no transcript to inspect'
         }
     }
     else {
@@ -907,6 +924,18 @@ function Get-TranscriptAssertionResult {
                 $detail = "transcript $($latest.File.Name) has no '$expectedLine'"
             }
             New-TranscriptAssertionResult -Name "Not-applicable skip logged: $id" -Passed $passed -Detail $detail
+        }
+
+        $first = $realRuns[0]
+        foreach ($id in $ExpectedInstalledAs.Keys) {
+            $otherId = [string]$ExpectedInstalledAs[$id]
+            $expectedLine = "Skipping: $id (already installed as $otherId)"
+            $passed = $first.Parsed.AlreadyInstalledAs.Contains($id) -and $first.Parsed.AlreadyInstalledAs[$id] -eq $otherId
+            $detail = "$($first.File.Name): $expectedLine"
+            if (-not $passed) {
+                $detail = "transcript $($first.File.Name) has no '$expectedLine'"
+            }
+            New-TranscriptAssertionResult -Name "First pass found $id as ${otherId}" -Passed $passed -Detail $detail
         }
 
         foreach ($run in $realRuns) {

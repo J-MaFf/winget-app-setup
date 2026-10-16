@@ -599,6 +599,62 @@ function Install-WingetPackage {
 
 <#
 .SYNOPSIS
+    Returns whether a catalog app is installed, under its own winget id or one of the ids its
+    entry lists in installedAs.
+.DESCRIPTION
+    Test-WingetPackageInstalled for the entry's name, then for each installedAs id in order
+    (Get-AppInstalledAsId), while the answer is "not installed" (wgt-zu3). The first check with no
+    answer (timed out, winget not started, winget list failed) ends it as it is: no answer is not
+    "not installed", for any of the ids.
+.PARAMETER App
+    A validated catalog entry.
+.PARAMETER TimeoutSeconds
+    Each check's limit, as for Test-WingetPackageInstalled.
+.OUTPUTS
+    [hashtable] The deciding check's result (Test-WingetPackageInstalled's keys), with InstalledAs:
+    the installedAs id it is installed under, or $null (installed under its own id, not installed,
+    or no answer).
+#>
+function Test-CatalogAppInstalled {
+    param (
+        [Parameter(Mandatory = $true)]
+        [hashtable]$App,
+
+        [Parameter(Mandatory = $true)]
+        [int]$TimeoutSeconds
+    )
+
+    $ownId = [string]$App.name
+    $outcome = $null
+    foreach ($id in @($ownId) + @(Get-AppInstalledAsId -App $App)) {
+        $check = Test-WingetPackageInstalled -PackageId $id -TimeoutSeconds $TimeoutSeconds
+        $outcome = @{}
+        if ($check -is [System.Collections.IDictionary]) {
+            foreach ($key in @($check.Keys)) {
+                $outcome[$key] = $check[$key]
+            }
+        }
+        else {
+            foreach ($property in $check.PSObject.Properties) {
+                $outcome[$property.Name] = $property.Value
+            }
+        }
+        $outcome['InstalledAs'] = $null
+        if ($outcome.TimedOut -or $outcome.LaunchFailed -or $outcome.CheckFailed) {
+            return $outcome
+        }
+        if ($outcome.Installed) {
+            if ($id -ne $ownId) {
+                $outcome['InstalledAs'] = $id
+            }
+            return $outcome
+        }
+    }
+    return $outcome
+}
+
+<#
+.SYNOPSIS
     Returns whether winget reports the given package id as installed for the current account.
 .DESCRIPTION
     `winget list --exact --id <id> --source winget` through Invoke-WingetProcess, quietly and always

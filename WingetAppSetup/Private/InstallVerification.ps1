@@ -69,9 +69,10 @@ function Test-AppApplicability {
     The per-app install pipeline both passes of Invoke-WingetInstall share (issue #188):
       1. Applicability: an app that does not apply is Skipped (NotApplicable) before any winget call.
          The verdict comes in -Applicable; without it, Test-AppApplicability decides here.
-      2. Pre-check (Test-WingetPackageInstalled, time-limited): installed is Skipped. A check that
-         timed out, could not start winget or failed is Failed without an install attempt, since
-         "could not check" is not "not installed" (issue #176, P2-9).
+      2. Pre-check (Test-CatalogAppInstalled, time-limited): installed is Skipped, and installed
+         under one of the entry's installedAs ids is Skipped with SkipReason InstalledAs (wgt-zu3).
+         A check that timed out, could not start winget or failed is Failed without an install
+         attempt, since "could not check" is not "not installed" (issue #176, P2-9).
       3. Dispatch: the entry's own self-verifying installer ($App.install, e.g.
          Install-PowerShellLatest), or Install-WingetPackage. A winget that could not launch for the
          install is Failed (InstallLaunchFailed). An entry installer that finds the app present
@@ -144,8 +145,10 @@ function Test-AppApplicability {
         CheckExitCode = for PreCheckFailed and VerifyFailed, the exit code of the `winget list`
                         that failed; otherwise $null
         SkipReason    = 'NotApplicable' (the app does not apply); 'Provisioned' (with -MachineWide,
-                        its MSIX package is already provisioned for every user); absent/$null for an
+                        its MSIX package is already provisioned for every user); 'InstalledAs'
+                        (installed under one of its installedAs ids); absent/$null for an
                         already-installed skip
+        InstalledAs   = for SkipReason InstalledAs, the id it is installed under
         DeferReason   = when Status is 'Deferred', with -MachineWide: 'NoMachineScopeInstaller',
                         'UserScope' (catalog scope 'user') or 'UserPhase' (catalog userPhase)
         Configuration = the post-install hook's result, @{ Status = 'Configured' |
@@ -246,7 +249,7 @@ function Install-AppWithVerification {
 
     $preCheck = @{ Installed = $false; TimedOut = $false; LaunchFailed = $false; LaunchError = $null; CheckFailed = $false; ExitCode = $null }
     if (-not $checkProvisioning) {
-        $preCheck = Test-WingetPackageInstalled -PackageId $App.name -TimeoutSeconds $checkTimeoutSeconds
+        $preCheck = Test-CatalogAppInstalled -App $App -TimeoutSeconds $checkTimeoutSeconds
     }
     if ($preCheck.TimedOut) {
         # Failed, not skipped: the app then flows through the retry pass, appears in the summary,
@@ -264,7 +267,14 @@ function Install-AppWithVerification {
         return @{ Status = 'Failed'; InstallResult = $null; FailureReason = 'PreCheckFailed'; CheckExitCode = $preCheck.ExitCode }
     }
     if ($preCheck.Installed) {
-        return (Complete-AppPostInstallStep -App $App -Outcome @{ Status = 'Skipped'; InstallResult = $null; FailureReason = $null } -WhatIf:$WhatIf)
+        $skipped = @{ Status = 'Skipped'; InstallResult = $null; FailureReason = $null }
+        if ($preCheck.InstalledAs) {
+            # Installed under an id the catalog moved from (Chrome's Google.Chrome MSI): installing
+            # the catalog's package over it can fail, and both would then be on the PC (wgt-zu3).
+            $skipped['SkipReason'] = 'InstalledAs'
+            $skipped['InstalledAs'] = $preCheck.InstalledAs
+        }
+        return (Complete-AppPostInstallStep -App $App -Outcome $skipped -WhatIf:$WhatIf)
     }
 
     if ($WhatIf) {

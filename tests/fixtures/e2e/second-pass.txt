@@ -27,7 +27,7 @@ Installing the following Apps:
 7zip.7zip
 GlavSoft.TightVNC
 Adobe.Acrobat.Reader.64-bit
-Google.Chrome
+Google.Chrome.EXE
 Google.GoogleDrive
 Git.Git
 Klocman.BulkCrapUninstaller
@@ -37,7 +37,7 @@ Microsoft.WindowsTerminal
 Skipping: 7zip.7zip (already installed)
 Skipping: GlavSoft.TightVNC (already installed)
 Skipping: Adobe.Acrobat.Reader.64-bit (already installed)
-Skipping: Google.Chrome (already installed)
+Skipping: Google.Chrome.EXE (already installed)
 Skipping: Google.GoogleDrive (already installed)
 Skipping: Git.Git (already installed)
 Skipping: Klocman.BulkCrapUninstaller (already installed)
@@ -48,7 +48,7 @@ Summary:
 
 Status  Apps
 ------  ----
-Skipped 7zip.7zip, GlavSoft.TightVNC, Adobe.Acrobat.Reader.64-bit, Google.Chrome, Google.GoogleDrive, Git.Git, Klocman.BulkCrapUninstaller, Dell.CommandUpdate.Universal, Microsoft.PowerShell, Microsoft.WindowsTerminal
+Skipped 7zip.7zip, GlavSoft.TightVNC, Adobe.Acrobat.Reader.64-bit, Google.Chrome.EXE, Google.GoogleDrive, Git.Git, Klocman.BulkCrapUninstaller, Dell.CommandUpdate.Universal, Microsoft.PowerShell, Microsoft.WindowsTerminal
 Auto-updates: NOT CONFIGURED - Microsoft.WindowsAppRuntime.1.8 is missing, and Winget-AutoUpdate would leave winget unusable without it. Install the Windows App Runtime 1.8 (or let the Microsoft Store update App Installer), then re-run the installer.
 Full transcript of this run: C:\ProgramData\winget-app-setup\logs\install-20261005-061511.log
 **********************

@@ -27,7 +27,7 @@ Installing the following Apps:
 GlavSoft.TightVNC
 Adobe.Acrobat.Reader.64-bit
 Adobe.Acrobat.Reader.32-bit
-Google.Chrome
+Google.Chrome.EXE
 Google.GoogleDrive
 Git.Git
 Klocman.BulkCrapUninstaller
@@ -51,11 +51,11 @@ Installing: Adobe.Acrobat.Reader.64-bit
     Successfully installed
 Successfully installed: Adobe.Acrobat.Reader.64-bit
 Skipping: Adobe.Acrobat.Reader.32-bit (not applicable: ARM64 and 32-bit Windows only; x64 PCs get the 64-bit Reader)
-Installing: Google.Chrome
-  > winget install -e --accept-source-agreements --accept-package-agreements --disable-interactivity --source winget --id Google.Chrome --scope machine --silent --log C:\ProgramData\winget-app-setup\logs\winget-install-Google.Chrome-20261006-061512.log
+Installing: Google.Chrome.EXE
+  > winget install -e --accept-source-agreements --accept-package-agreements --disable-interactivity --source winget --id Google.Chrome.EXE --scope machine --silent --log C:\ProgramData\winget-app-setup\logs\winget-install-Google.Chrome.EXE-20261006-061512.log
     Found an existing package already installed. Trying to upgrade the installed package...
     Successfully installed
-Successfully installed: Google.Chrome
+Successfully installed: Google.Chrome.EXE
 Installing: Google.GoogleDrive
   > winget install -e --accept-source-agreements --accept-package-agreements --disable-interactivity --source winget --id Google.GoogleDrive --scope machine --silent --log C:\ProgramData\winget-app-setup\logs\winget-install-Google.GoogleDrive-20261006-061512.log
     Found an existing package already installed. Trying to upgrade the installed package...
@@ -80,7 +80,7 @@ Summary:
 
 Status    Apps
 ------    ----
-Installed 7zip.7zip, GlavSoft.TightVNC, Adobe.Acrobat.Reader.64-bit, Google.Chrome, Google.GoogleDrive, Git.Git, Klocman.BulkCrapUninstaller
+Installed 7zip.7zip, GlavSoft.TightVNC, Adobe.Acrobat.Reader.64-bit, Google.Chrome.EXE, Google.GoogleDrive, Git.Git, Klocman.BulkCrapUninstaller
 Skipped   Adobe.Acrobat.Reader.32-bit, Dell.CommandUpdate.Universal, Microsoft.PowerShell, Microsoft.WindowsTerminal
 Configuration: NOT DONE for GlavSoft.TightVNC (no server password was supplied) - installed, but the post-install configuration did not finish. Not counted as failed; re-run the installer once the reason is fixed.
 Install engine: Microsoft.WinGet.Client was requested but not used (the module is not ready: downloading https://www.powershellgallery.com/api/v2/package/Microsoft.WinGet.Client/1.29.380 failed: No such host is known. (www.powershellgallery.com:443)); this run installed with winget.exe.

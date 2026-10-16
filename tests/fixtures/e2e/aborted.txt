@@ -27,7 +27,7 @@ Installing the following Apps:
 7zip.7zip
 GlavSoft.TightVNC
 Adobe.Acrobat.Reader.64-bit
-Google.Chrome
+Google.Chrome.EXE
 Google.GoogleDrive
 Git.Git
 Klocman.BulkCrapUninstaller

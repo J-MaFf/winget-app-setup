@@ -9,7 +9,7 @@
     [string[]]
 #>
 function Get-AppDefinitionFieldName {
-    return @('name', 'install', 'installerType', 'condition', 'conditionDescription', 'msixName', 'scope', 'arch', 'postInstall', 'userPhase', 'quietUninstall')
+    return @('name', 'install', 'installerType', 'condition', 'conditionDescription', 'msixName', 'scope', 'arch', 'postInstall', 'userPhase', 'quietUninstall', 'installedAs')
 }
 
 <#
@@ -27,8 +27,8 @@ function Get-AppDefinitionArchitectureName {
 
 <#
 .SYNOPSIS
-    Checks a catalog entry's optional fields: scope, arch, postInstall, userPhase and
-    quietUninstall.
+    Checks a catalog entry's optional fields: scope, arch, postInstall, userPhase, quietUninstall
+    and installedAs.
 .DESCRIPTION
     An error makes the entry invalid, and the run stops with exit code 3 before it installs anything:
       - scope: not 'machine', 'user' or 'any'.
@@ -37,6 +37,7 @@ function Get-AppDefinitionArchitectureName {
       - postInstall: neither a scriptblock nor the name of a command that exists.
       - userPhase: not $true or $false.
       - quietUninstall: anything Get-AppQuietUninstallSchemaIssue refuses.
+      - installedAs: empty, an id Test-WingetPackageIdFormat refuses, or the entry's own name.
     A field the schema does not know (Get-AppDefinitionFieldName) is a warning: the installer
     ignores it.
 .PARAMETER App
@@ -102,6 +103,21 @@ function Get-AppDefinitionSchemaIssue {
         $errors += @(Get-AppQuietUninstallSchemaIssue -Value $App['quietUninstall'] -Label $Label)
     }
 
+    if ($App.ContainsKey('installedAs')) {
+        $otherIds = @($App['installedAs'] | Where-Object { $null -ne $_ })
+        if ($otherIds.Count -eq 0) {
+            $errors += "$Label has an empty 'installedAs' list: name the other winget ids it may be installed as, or leave it out."
+        }
+        foreach ($otherId in $otherIds) {
+            if (-not ($otherId -is [string]) -or -not (Test-WingetPackageIdFormat -PackageId $otherId)) {
+                $errors += "$Label has an invalid 'installedAs' id '$otherId': use a winget package id such as 'Publisher.App'."
+            }
+            elseif ($otherId -eq [string]$App['name']) {
+                $errors += "$Label names its own id '$otherId' in 'installedAs': list only the other ids it may be installed as."
+            }
+        }
+    }
+
     $knownFields = Get-AppDefinitionFieldName
     foreach ($key in @($App.Keys)) {
         if ($knownFields -notcontains $key) {
@@ -119,10 +135,15 @@ function Get-AppDefinitionSchemaIssue {
 .SYNOPSIS
     Returns the errors in a catalog entry's quietUninstall value: none when it is valid.
 .DESCRIPTION
-    Valid is a hashtable with exactly these keys:
-      - productCode: a braced GUID, the name of the app's uninstall entry under HKLM.
+    Valid is a hashtable with these keys:
+      - productCode: the name of the app's uninstall entry under HKLM: a braced GUID, or a plain
+        name such as 'Google Chrome' (letters, digits, spaces and . _ ( ) + -, starting with a
+        letter or digit, at most 128 characters, so it can only name a key directly under
+        Uninstall).
       - arguments: one or more non-empty strings without a double quote or a line break, each passed
         to the uninstaller as one argument (Get-AppQuietUninstallCommand).
+      - successExitCodes (optional): integers other than 0, 3010 and 1641 that the uninstaller
+        returns when it has removed the app, such as Chrome's 19 (UNINSTALL_SUCCESSFUL).
     The uninstaller could not use any other value, so it is refused before any run.
 .PARAMETER Value
     The entry's quietUninstall value.
@@ -141,21 +162,24 @@ function Get-AppQuietUninstallSchemaIssue {
         [string]$Label
     )
 
-    $usage = "use @{ productCode = '{<GUID>}'; arguments = @('<switch>', ...) }"
+    $usage = "use @{ productCode = '{<GUID>}' or '<uninstall entry name>'; arguments = @('<switch>', ...); successExitCodes = @(<code>, ...) (optional) }"
     if (-not ($Value -is [System.Collections.IDictionary])) {
         return @("$Label has an invalid 'quietUninstall' value: $usage.")
     }
 
     $errors = @()
     foreach ($key in @($Value.Keys)) {
-        if (@('productCode', 'arguments') -notcontains [string]$key) {
+        if (@('productCode', 'arguments', 'successExitCodes') -notcontains [string]$key) {
             $errors += "$Label has an unknown key '$key' in its 'quietUninstall' value: $usage."
         }
     }
 
     $productCode = $Value['productCode']
-    if (-not ($productCode -is [string]) -or $productCode -notmatch '^\{[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}\}\z') {
-        $errors += "$Label has an invalid 'quietUninstall' productCode '$productCode': use the braced GUID its uninstall entry is named after, such as '{00000000-0000-0000-0000-000000000000}'."
+    # A braced GUID, or a plain entry name with no backslash, so it never reaches another key. A
+    # GUID without its braces names no MSI entry, so it is refused as a typo.
+    $guid = '[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}'
+    if (-not ($productCode -is [string]) -or $productCode -match "^$guid\z" -or ($productCode -notmatch "^\{$guid\}\z" -and $productCode -notmatch '^[A-Za-z0-9][A-Za-z0-9 ._()+-]{0,127}\z')) {
+        $errors += "$Label has an invalid 'quietUninstall' productCode '$productCode': use the name its uninstall entry has under HKLM, a GUID in braces such as '{00000000-0000-0000-0000-000000000000}' or a plain name such as 'Google Chrome'."
     }
 
     $arguments = @()
@@ -170,7 +194,41 @@ function Get-AppQuietUninstallSchemaIssue {
             $errors += "$Label has an invalid 'quietUninstall' argument '$argument': use a non-empty string without a double quote or a line break."
         }
     }
+
+    if ($Value.Contains('successExitCodes')) {
+        $successCodes = @($Value['successExitCodes'])
+        if ($successCodes.Count -eq 0) {
+            $errors += "$Label has an empty 'quietUninstall' successExitCodes: leave it out, or list the codes its uninstaller returns when it has removed the app."
+        }
+        foreach ($code in $successCodes) {
+            if (-not ($code -is [int]) -or @(0, 3010, 1641) -contains $code) {
+                $errors += "$Label has an invalid 'quietUninstall' success exit code '$code': use an integer other than 0, 3010 and 1641, which always count."
+            }
+        }
+    }
     return $errors
+}
+
+<#
+.SYNOPSIS
+    Returns the other winget ids a catalog entry may already be installed as (its installedAs
+    list), in order.
+.DESCRIPTION
+    An app the catalog moved to another package stays installed under its old id on the PCs set
+    up before: Chrome is Google.Chrome.EXE, and earlier runs installed the Google.Chrome MSI, which
+    winget does not list as Google.Chrome.EXE (wgt-zu3).
+.PARAMETER App
+    A validated catalog entry.
+.OUTPUTS
+    [string[]] Empty when the entry has no installedAs.
+#>
+function Get-AppInstalledAsId {
+    param (
+        [Parameter(Mandatory = $true)]
+        [hashtable]$App
+    )
+
+    return @($App['installedAs'] | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | ForEach-Object { ([string]$_).Trim() })
 }
 
 <#
