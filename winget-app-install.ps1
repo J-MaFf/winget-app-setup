@@ -107,12 +107,12 @@ param (
 # the function source under WingetAppSetup/Public and WingetAppSetup/Private, or the entry block in
 # build/fragments/tail.ps1, then re-run the build to regenerate this file.
 # See readme.md ("Project layout") for details.
-# Build id: 1.0.0+d7a983e4 (module version + SHA256 fragment of this whole script; issue #189).
+# Build id: 1.0.0+90edf021 (module version + SHA256 fragment of this whole script; issue #189).
 # ------------------------------------------------------------------------------------------------
 
 # Content-derived build identity, logged at startup so a transcript from a remote machine
 # identifies exactly which installer build produced it (issue #189).
-$script:InstallerBuildId = '1.0.0+d7a983e4'
+$script:InstallerBuildId = '1.0.0+90edf021'
 
 # ------------------------------------------------Functions------------------------------------------------
 
@@ -10938,7 +10938,7 @@ function Invoke-WingetClientRequest {
         return [pscustomobject]@{ Run = $run; Response = $null; ProtocolError = $null }
     }
 
-    $run = Invoke-ExternalProcess -FilePath $filePath -ArgumentList $arguments -TimeoutSeconds $TimeoutSeconds -Echo None
+    $run = Invoke-ExternalProcess -FilePath $filePath -ArgumentList $arguments -TimeoutSeconds $TimeoutSeconds -Echo None -CreateNoWindow
     $response = $null
     $protocolError = $null
     if (-not $run.LaunchFailed -and -not $run.TimedOut) {

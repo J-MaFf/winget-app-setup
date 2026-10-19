@@ -310,6 +310,14 @@ Describe 'Invoke-WingetClientRequest' {
         $script:WingetClientEngine = $null
     }
 
+    # wgt-gq8.79: the child sets its console's output code page to UTF-8, which in a shared console
+    # would change the code page of the window the run was started from (as wgt-gq8.72 for Appx).
+    It 'Starts the child pwsh with a hidden console of its own' {
+        [void](Invoke-WingetClientRequest -Operation Installed -PackageId 'Contoso.App' -TimeoutSeconds 45)
+
+        Should -Invoke Invoke-ExternalProcess -Times 1 -Exactly -ParameterFilter { $CreateNoWindow }
+    }
+
     # wgt-gq8.57: no script file, which an AllSigned execution policy from Group Policy refuses.
     It 'Runs the request as -EncodedCommand in a child pwsh, quietly, with the module''s manifest and version' {
         $script:arguments = $null
