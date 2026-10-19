@@ -961,6 +961,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A hand-over to SYSTEM whose window was closed no longer leaves its task and its copy behind**
+  (bead wgt-gq8.77). `Invoke-SystemHandoff` unregisters its one-shot task and removes its staged
+  copy in a `finally` block, which does not run when the hand-started window is closed while it
+  waits, so `winget-app-setup-system-<id>` stayed in Task Scheduler and `system-handoff-<id>` in
+  `%ProgramData%\winget-app-setup`. The next run's housekeeping (`Invoke-InstallerHousekeeping`,
+  installer and uninstaller) now removes both once they are older than any hand-over lasts: the
+  `SystemHandoff` wait (3 hours), Task Scheduler's 5-minute backstop and 10 minutes to spare.
+  `Remove-StaleSystemHandoffTask` unregisters only a task in the root folder that runs as SYSTEM,
+  is neither running nor queued, and last ran before that (one that never ran is left alone). The
+  copy goes under the rules the Microsoft.WinGet.Client engine's folders already had, now shared as
+  `Remove-StaleStagingFolder`: owned by SYSTEM or Administrators, not a link, never through a
+  linked or unlocked `%ProgramData%\winget-app-setup`, and never the running script's own folder.
 - **`Microsoft.PowerShell` no longer fails right after a PowerShell release** (bead wgt-9j1). The
   Windows PowerShell 5.1 bootstrap's `winget install --scope machine` gave no installer type, and
   on Windows Server winget refused the installer it picked (`0x8A150113 INSTALL_SYSTEM_NOT_SUPPORTED`,

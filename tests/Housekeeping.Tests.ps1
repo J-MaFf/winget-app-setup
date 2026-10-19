@@ -296,12 +296,51 @@ Describe 'Invoke-InstallerHousekeeping (review finding P3-42)' {
         [void](New-Item -ItemType Directory -Path $script:logDirectory, $script:tempRoot -Force)
         Mock Get-DirectoryAccessSummary { [pscustomobject]@{ OwnerSid = 'S-1-5-32-544'; OwnerName = 'BUILTIN\Administrators'; InheritanceProtected = $true; AccessRules = @() } }
         Mock Test-IsSystemAccount { $false }
-        # Never this machine's %ProgramData%.
+        # Never this machine's %ProgramData% or Task Scheduler.
         Mock Remove-StaleWingetClientFolder { 0 }
+        Mock Remove-StaleStagingFolder { 0 }
+        Mock Remove-StaleSystemHandoffTask { 0 }
     }
 
     AfterEach {
         $script:InstallLogPath = $script:savedInstallLogPath
+    }
+
+    # wgt-gq8.77: a hand-over to SYSTEM whose window was closed while it waited never ran its
+    # finally block, so its task and its staged copy stayed.
+    It 'Removes the task and staged copy a hand-over to SYSTEM left, once older than any hand-over lasts, and says so' {
+        Mock Remove-StaleSystemHandoffTask { 1 }
+        Mock Remove-StaleStagingFolder { 2 } -ParameterFilter { $NamePattern -eq '^system-handoff-[0-9a-fA-F]{32}$' }
+        $savedProgramData = $env:ProgramData
+        try {
+            $env:ProgramData = Join-Path $TestDrive 'ProgramData'
+            $result = Invoke-InstallerHousekeeping -LogDirectory $script:logDirectory -TempRoot @($script:tempRoot) -CurrentScriptPath 'X:\copy\winget-app-install.ps1'
+        }
+        finally {
+            $env:ProgramData = $savedProgramData
+        }
+
+        $result.SystemHandoffTasksRemoved | Should -Be 1
+        $result.SystemHandoffFoldersRemoved | Should -Be 2
+        # The 3-hour SystemHandoff wait, the task's 5-minute backstop and 10 minutes to spare.
+        $expectedCutoffUtc = [DateTime]::UtcNow.AddMinutes(-195)
+        Should -Invoke Remove-StaleSystemHandoffTask -Times 1 -Exactly -ParameterFilter { [Math]::Abs(($CutoffUtc - $expectedCutoffUtc).TotalMinutes) -lt 1 }
+        Should -Invoke Remove-StaleStagingFolder -Times 1 -Exactly -ParameterFilter {
+            $Root -eq (Join-Path (Join-Path $TestDrive 'ProgramData') 'winget-app-setup') -and $NamePattern -eq '^system-handoff-[0-9a-fA-F]{32}$' -and
+            [Math]::Abs(($CutoffUtc - $expectedCutoffUtc).TotalMinutes) -lt 1 -and $CurrentScriptPath -eq 'X:\copy\winget-app-install.ps1'
+        }
+        Should -Invoke Write-Info -Times 1 -Exactly -ParameterFilter { $Message -eq 'Removed 1 scheduled task(s) and 2 staged installer copy folder(s) that a hand-over to SYSTEM left behind when its window was closed.' }
+    }
+
+    It 'Takes the hand-over''s age limit from the SystemHandoff wait' {
+        Mock Get-ProcessTimeoutSeconds { 600 }
+
+        [void](Invoke-InstallerHousekeeping -LogDirectory $script:logDirectory -TempRoot @($script:tempRoot) -StagingRoot '')
+
+        $expectedCutoffUtc = [DateTime]::UtcNow.AddMinutes(-25)
+        Should -Invoke Get-ProcessTimeoutSeconds -ParameterFilter { $Operation -eq 'SystemHandoff' }
+        Should -Invoke Remove-StaleSystemHandoffTask -Times 1 -Exactly -ParameterFilter { [Math]::Abs(($CutoffUtc - $expectedCutoffUtc).TotalMinutes) -lt 1 }
+        Should -Invoke Remove-StaleStagingFolder -Times 0
     }
 
     # wgt-gq8.42: the Microsoft.WinGet.Client engine's folders of runs that were killed.
@@ -503,5 +542,127 @@ Describe 'Remove-StaleWingetClientFolder (wgt-gq8.42)' {
         Remove-StaleWingetClientFolder -Root (Join-Path $TestDrive 'missing') -MaxAgeHours 24 | Should -Be 0
 
         Test-Path -LiteralPath (Join-Path $target 'Invoke-WingetClientRequest.ps1') | Should -BeTrue
+    }
+}
+
+Describe 'Remove-StaleSystemHandoffTask (wgt-gq8.77)' {
+    BeforeAll {
+        # A task like Invoke-SystemHandoff's, as Get-ScheduledTask lists it.
+        function New-TestHandoffTask {
+            param ([string]$Name = ('winget-app-setup-system-' + [Guid]::NewGuid().ToString('N')), [string]$State = 'Ready', [string]$UserId = 'SYSTEM')
+            [pscustomobject]@{ TaskName = $Name; TaskPath = '\'; State = $State; Principal = [pscustomobject]@{ UserId = $UserId } }
+        }
+    }
+
+    BeforeEach {
+        $script:cutoffUtc = [DateTime]::UtcNow.AddMinutes(-195)
+        $script:handoffTasks = @()
+        $script:lastRunTimes = @{}
+        Mock Get-ScheduledTask { $script:handoffTasks }
+        Mock Get-ScheduledTaskInfo { [pscustomobject]@{ LastRunTime = $script:lastRunTimes[$TaskName] } }
+        Mock Unregister-ScheduledTask { }
+    }
+
+    It 'Unregisters the SYSTEM hand-over tasks that last ran before the cutoff and are not running, and only those' {
+        $stale = @(
+            (New-TestHandoffTask),
+            (New-TestHandoffTask -UserId 'S-1-5-18' -State 'Disabled'),
+            (New-TestHandoffTask -UserId 'NT AUTHORITY\SYSTEM')
+        )
+        $kept = @(
+            (New-TestHandoffTask),
+            (New-TestHandoffTask -State 'Running'),
+            (New-TestHandoffTask -State 'Queued'),
+            (New-TestHandoffTask),
+            (New-TestHandoffTask -UserId 'CONTOSO\stduser'),
+            (New-TestHandoffTask -Name 'winget-app-setup-system-keep'),
+            (New-TestHandoffTask -Name 'Winget-AutoUpdate')
+        )
+        foreach ($task in $stale + $kept) {
+            $script:lastRunTimes[$task.TaskName] = (Get-Date).AddHours(-5)
+        }
+        $script:lastRunTimes[$kept[0].TaskName] = (Get-Date).AddHours(-3)
+        # Task Scheduler's date for a task that never ran.
+        $script:lastRunTimes[$kept[3].TaskName] = [DateTime]::new(1999, 11, 30)
+        $script:handoffTasks = $stale + $kept
+        $script:staleNames = @($stale | ForEach-Object { $_.TaskName })
+
+        Remove-StaleSystemHandoffTask -CutoffUtc $script:cutoffUtc | Should -Be 3
+
+        Should -Invoke Get-ScheduledTask -Times 1 -Exactly -ParameterFilter { @($TaskPath) -contains '\' }
+        Should -Invoke Unregister-ScheduledTask -Times 3 -Exactly
+        foreach ($name in $script:staleNames) {
+            $script:expectedName = $name
+            Should -Invoke Unregister-ScheduledTask -Times 1 -Exactly -ParameterFilter { @($TaskName) -contains $script:expectedName -and @($TaskPath) -contains '\' }
+        }
+    }
+
+    It 'Removes nothing, and does not fail, when the tasks cannot be listed' {
+        Mock Get-ScheduledTask { throw 'The Task Scheduler service is not available.' }
+
+        Remove-StaleSystemHandoffTask -CutoffUtc $script:cutoffUtc | Should -Be 0
+
+        Should -Invoke Unregister-ScheduledTask -Times 0
+    }
+
+    It 'Leaves a task it cannot read or unregister, and goes on with the next' {
+        $unreadable = New-TestHandoffTask
+        $locked = New-TestHandoffTask
+        $stale = New-TestHandoffTask
+        $script:handoffTasks = @($unreadable, $locked, $stale)
+        foreach ($task in $script:handoffTasks) {
+            $script:lastRunTimes[$task.TaskName] = (Get-Date).AddHours(-5)
+        }
+        $script:unreadableName = $unreadable.TaskName
+        $script:lockedName = $locked.TaskName
+        Mock Get-ScheduledTaskInfo { throw 'The system cannot find the file specified.' } -ParameterFilter { $TaskName -eq $script:unreadableName }
+        Mock Unregister-ScheduledTask { throw 'Access is denied.' } -ParameterFilter { @($TaskName) -contains $script:lockedName }
+
+        Remove-StaleSystemHandoffTask -CutoffUtc $script:cutoffUtc | Should -Be 1
+    }
+}
+
+Describe 'Remove-StaleStagingFolder: the staged copies of a hand-over to SYSTEM (wgt-gq8.77)' {
+    BeforeAll {
+        # A copy like Copy-SystemHandoffInstaller's, last written -AgeHours ago.
+        function New-TestHandoffFolder {
+            param ([string]$Root, [string]$Name = ('system-handoff-' + [Guid]::NewGuid().ToString('N')), [double]$AgeHours)
+            $path = Join-Path $Root $Name
+            [void](New-TestFile -Directory $path -Name 'winget-app-install.ps1')
+            (Get-Item -LiteralPath $path).LastWriteTimeUtc = [DateTime]::UtcNow.AddHours(-$AgeHours)
+            $path
+        }
+    }
+
+    BeforeEach {
+        $script:stagingRoot = Join-Path $TestDrive ('staging-' + [Guid]::NewGuid().ToString('N'))
+        [void](New-Item -ItemType Directory -Path $script:stagingRoot -Force)
+        $script:handoffPattern = '^system-handoff-[0-9a-fA-F]{32}$'
+        Mock Get-DirectoryAccessSummary { [pscustomobject]@{ OwnerSid = 'S-1-5-18'; OwnerName = 'NT AUTHORITY\SYSTEM'; InheritanceProtected = $true; AccessRules = @() } }
+    }
+
+    It 'Removes the copies older than the cutoff, and keeps newer ones, the running script''s and other folders' {
+        $old = New-TestHandoffFolder -Root $script:stagingRoot -AgeHours 4
+        $recent = New-TestHandoffFolder -Root $script:stagingRoot -AgeHours 1
+        $running = New-TestHandoffFolder -Root $script:stagingRoot -AgeHours 4
+        $otherName = New-TestHandoffFolder -Root $script:stagingRoot -Name 'system-handoff-keep' -AgeHours 48
+        $wauStaging = New-TestHandoffFolder -Root $script:stagingRoot -Name ('wau-msi-' + [Guid]::NewGuid().ToString('N')) -AgeHours 48
+
+        Remove-StaleStagingFolder -Root $script:stagingRoot -NamePattern $script:handoffPattern -CutoffUtc ([DateTime]::UtcNow.AddMinutes(-195)) -CurrentScriptPath (Join-Path $running 'winget-app-install.ps1') | Should -Be 1
+
+        Test-Path -LiteralPath $old | Should -BeFalse
+        Test-Path -LiteralPath $recent | Should -BeTrue
+        Test-Path -LiteralPath (Join-Path $running 'winget-app-install.ps1') | Should -BeTrue
+        Test-Path -LiteralPath $otherName | Should -BeTrue
+        Test-Path -LiteralPath $wauStaging | Should -BeTrue
+    }
+
+    It 'Leaves a copy another account owns' {
+        $script:foreignFolder = New-TestHandoffFolder -Root $script:stagingRoot -AgeHours 4
+        Mock Get-DirectoryAccessSummary { [pscustomobject]@{ OwnerSid = 'S-1-5-21-1-2-3-1001'; OwnerName = 'CONTOSO\stduser'; InheritanceProtected = $false; AccessRules = @() } } -ParameterFilter { $Path -eq $script:foreignFolder }
+
+        Remove-StaleStagingFolder -Root $script:stagingRoot -NamePattern $script:handoffPattern -CutoffUtc ([DateTime]::UtcNow.AddMinutes(-195)) | Should -Be 0
+
+        Test-Path -LiteralPath $script:foreignFolder | Should -BeTrue
     }
 }

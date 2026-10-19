@@ -350,7 +350,8 @@ function Read-SystemHandoffRunRecord {
       3. waits for it (Get-SystemHandoffWaitSeconds), stopping it when it does not end in time;
       4. reads the SYSTEM run's last-run.json (Read-SystemHandoffRunRecord) for its deferred apps.
     Whatever happens, the task is unregistered, the copy removed and the run lock taken again; when
-    another run holds it by then, this run leaves last-run.json alone.
+    another run holds it by then, this run leaves last-run.json alone. When the window is closed
+    while it waits, a later run's Invoke-InstallerHousekeeping removes the task and the copy.
 .PARAMETER ScriptPath
     The running installer ($PSCommandPath); empty when there is none (irm | iex, the module).
 .PARAMETER ExpectedSha256

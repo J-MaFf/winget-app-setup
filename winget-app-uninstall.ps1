@@ -3421,12 +3421,18 @@ function Invoke-InstallerHousekeeping {
         [Parameter(Mandatory = $false)]
         [AllowEmptyString()]
         [AllowNull()]
-        [string]$StagingRoot
+        [string]$StagingRoot,
+
+        [Parameter(Mandatory = $false)]
+        [ValidateRange(1, 10080)]
+        [int]$SystemHandoffMaxAgeMinutes = ([int][Math]::Ceiling((Get-ProcessTimeoutSeconds -Operation 'SystemHandoff') / 60) + 15)
     )
 
     $logsRemoved = 0
     $copiesRemoved = 0
     $wingetClientFoldersRemoved = 0
+    $handoffTasksRemoved = 0
+    $handoffFoldersRemoved = 0
     try {
         if (-not $PSBoundParameters.ContainsKey('LogDirectory')) {
             $LogDirectory = Get-InstallerLogDirectory
@@ -3453,11 +3459,26 @@ function Invoke-InstallerHousekeeping {
                 Write-Info ('Removed {0} leftover Microsoft.WinGet.Client folder(s) from {1}.' -f $wingetClientFoldersRemoved, $StagingRoot)
             }
         }
+
+        $handoffCutoffUtc = [DateTime]::UtcNow.AddMinutes(-$SystemHandoffMaxAgeMinutes)
+        $handoffTasksRemoved = Remove-StaleSystemHandoffTask -CutoffUtc $handoffCutoffUtc
+        if (-not [string]::IsNullOrWhiteSpace($StagingRoot)) {
+            $handoffFoldersRemoved = Remove-StaleStagingFolder -Root $StagingRoot -NamePattern '^system-handoff-[0-9a-fA-F]{32}$' -CutoffUtc $handoffCutoffUtc -CurrentScriptPath $CurrentScriptPath
+        }
+        if ($handoffTasksRemoved -gt 0 -or $handoffFoldersRemoved -gt 0) {
+            Write-Info ('Removed {0} scheduled task(s) and {1} staged installer copy folder(s) that a hand-over to SYSTEM left behind when its window was closed.' -f $handoffTasksRemoved, $handoffFoldersRemoved)
+        }
     }
     catch {
         Write-WarningMessage "Could not remove old logs and leftover temporary copies: $($_.Exception.Message.Trim().TrimEnd('.')). Continuing."
     }
-    return [pscustomobject]@{ LogsRemoved = $logsRemoved; CopiesRemoved = $copiesRemoved; WingetClientFoldersRemoved = $wingetClientFoldersRemoved }
+    return [pscustomobject]@{
+        LogsRemoved                 = $logsRemoved
+        CopiesRemoved               = $copiesRemoved
+        WingetClientFoldersRemoved  = $wingetClientFoldersRemoved
+        SystemHandoffTasksRemoved   = $handoffTasksRemoved
+        SystemHandoffFoldersRemoved = $handoffFoldersRemoved
+    }
 }
 
 function Get-SystemProfileTempRoot {
@@ -3600,16 +3621,41 @@ function Remove-StaleWingetClientFolder {
         [int]$MaxAgeHours
     )
 
+    return (Remove-StaleStagingFolder -Root $Root -NamePattern '^wingetclient-[0-9a-fA-F]{32}$' -CutoffUtc ([DateTime]::UtcNow.AddHours(-$MaxAgeHours)))
+}
+
+function Remove-StaleStagingFolder {
+    [OutputType([int])]
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$Root,
+
+        [Parameter(Mandatory = $true)]
+        [string]$NamePattern,
+
+        [Parameter(Mandatory = $true)]
+        [DateTime]$CutoffUtc,
+
+        [Parameter(Mandatory = $false)]
+        [AllowEmptyString()]
+        [AllowNull()]
+        [string]$CurrentScriptPath
+    )
+
     if (-not (Test-Path -LiteralPath $Root -PathType Container) -or (Test-FileSystemLink -Path $Root)) {
         return 0
     }
-    $cutoffUtc = [DateTime]::UtcNow.AddHours(-$MaxAgeHours)
     $allowedOwnerSids = @('S-1-5-18', 'S-1-5-32-544')
+    $currentDirectory = $null
+    if (-not [string]::IsNullOrWhiteSpace($CurrentScriptPath)) {
+        $currentDirectory = [System.IO.Path]::GetDirectoryName([System.IO.Path]::GetFullPath($CurrentScriptPath)).TrimEnd('\', '/')
+    }
     $removed = 0
     $candidates = @(Get-ChildItem -LiteralPath $Root -Directory -Force -ErrorAction SilentlyContinue |
             Where-Object {
-                $_.Name -match '^wingetclient-[0-9a-fA-F]{32}$' -and $_.LastWriteTimeUtc -le $cutoffUtc -and
-                -not ($_.Attributes -band [System.IO.FileAttributes]::ReparsePoint)
+                $_.Name -match $NamePattern -and $_.LastWriteTimeUtc -le $CutoffUtc -and
+                -not ($_.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -and
+                -not ($currentDirectory -and [string]::Equals($_.FullName.TrimEnd('\', '/'), $currentDirectory, [System.StringComparison]::OrdinalIgnoreCase))
             })
     if ($candidates.Count -eq 0) {
         return 0
@@ -3627,6 +3673,41 @@ function Remove-StaleWingetClientFolder {
                 continue
             }
             [System.IO.Directory]::Delete($directory.FullName, $true)
+            $removed++
+        }
+        catch {
+        }
+    }
+    return $removed
+}
+
+function Remove-StaleSystemHandoffTask {
+    [OutputType([int])]
+    param (
+        [Parameter(Mandatory = $true)]
+        [DateTime]$CutoffUtc
+    )
+
+    try {
+        $tasks = @(Get-ScheduledTask -TaskPath '\' -ErrorAction Stop | Where-Object { $_.TaskName -match '^winget-app-setup-system-[0-9a-fA-F]{32}$' })
+    }
+    catch {
+        return 0
+    }
+    $removed = 0
+    foreach ($task in $tasks) {
+        try {
+            if (@('S-1-5-18', 'SYSTEM', 'NT AUTHORITY\SYSTEM') -notcontains [string]$task.Principal.UserId) {
+                continue
+            }
+            if (@('Running', 'Queued') -contains [string]$task.State) {
+                continue
+            }
+            $lastRun = (Get-ScheduledTaskInfo -TaskName $task.TaskName -TaskPath '\' -ErrorAction Stop).LastRunTime
+            if (-not ($lastRun -is [DateTime]) -or $lastRun.Year -lt 2000 -or $lastRun.ToUniversalTime() -gt $CutoffUtc) {
+                continue
+            }
+            Unregister-ScheduledTask -TaskName $task.TaskName -TaskPath '\' -Confirm:$false -ErrorAction Stop
             $removed++
         }
         catch {

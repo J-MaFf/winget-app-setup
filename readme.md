@@ -804,7 +804,9 @@ and then:
 4. reads the SYSTEM run's `last-run.json`, only when SYSTEM or an administrator wrote it, it started
    after the task did and it carries this build's id, and takes the task's exit code from Task
    Scheduler;
-5. always removes the task and the copy, and takes the run lock back.
+5. always removes the task and the copy, and takes the run lock back. When the window is closed
+   while it waits, the task and the copy stay, and a later run's cleanup removes them (see
+   [Logs](#logs)).
 
 The SYSTEM run installs every app for the whole PC, as any run as SYSTEM does (see above), so an app
 that installs only per user, such as Windows Terminal where it is not provisioned, is `Deferred`.
@@ -1431,7 +1433,11 @@ user profile folder), so copies a killed interactive run left there can be delet
 removes the Microsoft.WinGet.Client engine's `wingetclient-<id>` folders that a killed run left in
 `%ProgramData%\winget-app-setup` once they are a day old, under the same owner rule and only
 while that folder is locked to SYSTEM and Administrators, and leaves the engine's `cache` folder
-alone. Nothing is deleted through a link: when the `logs` folder or
+alone. It also removes what a [hand-over to SYSTEM](#hand-over-to-system-under-cross-user-elevation)
+leaves when its window is closed while it waits, once it is older than any hand-over lasts (the
+3-hour wait plus 15 minutes): the `winget-app-setup-system-<id>` scheduled task, when it runs as
+SYSTEM and is not running, and the `system-handoff-<id>` copy folder in
+`%ProgramData%\winget-app-setup`, under the same owner and lock rules. Nothing is deleted through a link: when the `logs` folder or
 `%ProgramData%\winget-app-setup` is one, that cleanup is skipped. These numbers are the defaults of
 `Invoke-InstallerHousekeeping` (`WingetAppSetup/Private/Housekeeping.ps1`).
 

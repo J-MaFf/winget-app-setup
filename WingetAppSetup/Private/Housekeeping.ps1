@@ -11,7 +11,9 @@
     the newest KeepTranscripts transcripts (Remove-OldInstallerLog; the uninstaller keeps no
     transcript, so it prunes no logs), removes copy folders older than TempCopyMaxAgeHours
     (Remove-StaleInstallerCopy) and Microsoft.WinGet.Client folders as old
-    (Remove-StaleWingetClientFolder). The defaults here are the one place the numbers are set.
+    (Remove-StaleWingetClientFolder), and the task and staged copy of a hand-over to SYSTEM whose
+    window was closed while it waited, older than any hand-over lasts (Remove-StaleSystemHandoffTask,
+    Remove-StaleStagingFolder). The defaults here are the one place the numbers are set.
     Never stops a run: a failure warns.
 .PARAMETER LogDirectory
     The logs folder. Default: the folder of this run's transcript (Get-InstallerLogDirectory);
@@ -29,10 +31,14 @@
 .PARAMETER CurrentScriptPath
     The path of the running installer or uninstaller ($PSCommandPath). Its folder is never removed.
 .PARAMETER StagingRoot
-    Where the Microsoft.WinGet.Client engine's folders are. Default:
+    Where the Microsoft.WinGet.Client engine's folders and the hand-over's copies are. Default:
     %ProgramData%\winget-app-setup.
+.PARAMETER SystemHandoffMaxAgeMinutes
+    A hand-over's task or copy at least this old is removed: the SystemHandoff wait, plus Task
+    Scheduler's 5-minute backstop (New-SystemHandoffTaskXml) and 10 minutes to spare.
 .OUTPUTS
-    [pscustomobject] @{ LogsRemoved; CopiesRemoved; WingetClientFoldersRemoved }.
+    [pscustomobject] @{ LogsRemoved; CopiesRemoved; WingetClientFoldersRemoved;
+    SystemHandoffTasksRemoved; SystemHandoffFoldersRemoved }.
 #>
 function Invoke-InstallerHousekeeping {
     param (
@@ -60,12 +66,18 @@ function Invoke-InstallerHousekeeping {
         [Parameter(Mandatory = $false)]
         [AllowEmptyString()]
         [AllowNull()]
-        [string]$StagingRoot
+        [string]$StagingRoot,
+
+        [Parameter(Mandatory = $false)]
+        [ValidateRange(1, 10080)]
+        [int]$SystemHandoffMaxAgeMinutes = ([int][Math]::Ceiling((Get-ProcessTimeoutSeconds -Operation 'SystemHandoff') / 60) + 15)
     )
 
     $logsRemoved = 0
     $copiesRemoved = 0
     $wingetClientFoldersRemoved = 0
+    $handoffTasksRemoved = 0
+    $handoffFoldersRemoved = 0
     try {
         if (-not $PSBoundParameters.ContainsKey('LogDirectory')) {
             $LogDirectory = Get-InstallerLogDirectory
@@ -92,11 +104,27 @@ function Invoke-InstallerHousekeeping {
                 Write-Info ('Removed {0} leftover Microsoft.WinGet.Client folder(s) from {1}.' -f $wingetClientFoldersRemoved, $StagingRoot)
             }
         }
+
+        # wgt-gq8.77: a running hand-over's own task and copy are younger than this.
+        $handoffCutoffUtc = [DateTime]::UtcNow.AddMinutes(-$SystemHandoffMaxAgeMinutes)
+        $handoffTasksRemoved = Remove-StaleSystemHandoffTask -CutoffUtc $handoffCutoffUtc
+        if (-not [string]::IsNullOrWhiteSpace($StagingRoot)) {
+            $handoffFoldersRemoved = Remove-StaleStagingFolder -Root $StagingRoot -NamePattern '^system-handoff-[0-9a-fA-F]{32}$' -CutoffUtc $handoffCutoffUtc -CurrentScriptPath $CurrentScriptPath
+        }
+        if ($handoffTasksRemoved -gt 0 -or $handoffFoldersRemoved -gt 0) {
+            Write-Info ('Removed {0} scheduled task(s) and {1} staged installer copy folder(s) that a hand-over to SYSTEM left behind when its window was closed.' -f $handoffTasksRemoved, $handoffFoldersRemoved)
+        }
     }
     catch {
         Write-WarningMessage "Could not remove old logs and leftover temporary copies: $($_.Exception.Message.Trim().TrimEnd('.')). Continuing."
     }
-    return [pscustomobject]@{ LogsRemoved = $logsRemoved; CopiesRemoved = $copiesRemoved; WingetClientFoldersRemoved = $wingetClientFoldersRemoved }
+    return [pscustomobject]@{
+        LogsRemoved                 = $logsRemoved
+        CopiesRemoved               = $copiesRemoved
+        WingetClientFoldersRemoved  = $wingetClientFoldersRemoved
+        SystemHandoffTasksRemoved   = $handoffTasksRemoved
+        SystemHandoffFoldersRemoved = $handoffFoldersRemoved
+    }
 }
 
 <#
@@ -301,10 +329,7 @@ function Remove-StaleInstallerCopy {
 .DESCRIPTION
     A run as SYSTEM that opted in to the engine extracts the module into
     %ProgramData%\winget-app-setup\wingetclient-<32 hex> and removes it when it ends, unless it was
-    killed. This removes those at least MaxAgeHours old that SYSTEM or Administrators own and that
-    are not links, with everything in them (a link inside is removed, not followed). Nothing is
-    removed when Root itself is a link, or when other accounts can still change it
-    (Assert-RestrictedDirectoryAcl): they could swap a folder between its checks and its removal.
+    killed. This removes those at least MaxAgeHours old, under Remove-StaleStagingFolder's rules.
 .PARAMETER Root
     The folder to look in (%ProgramData%\winget-app-setup, which every elevated run limits to SYSTEM
     and Administrators). Missing: nothing to do.
@@ -323,17 +348,64 @@ function Remove-StaleWingetClientFolder {
         [int]$MaxAgeHours
     )
 
+    return (Remove-StaleStagingFolder -Root $Root -NamePattern '^wingetclient-[0-9a-fA-F]{32}$' -CutoffUtc ([DateTime]::UtcNow.AddHours(-$MaxAgeHours)))
+}
+
+<#
+.SYNOPSIS
+    Deletes the folders a run made in %ProgramData%\winget-app-setup and could not remove, once they
+    are old enough.
+.DESCRIPTION
+    Removes the folders in Root whose names match NamePattern, last written at or before CutoffUtc,
+    that SYSTEM or Administrators own and that are not links, with everything in them (a link
+    inside is removed, not followed). The folder of CurrentScriptPath is kept. Nothing is removed
+    when Root itself is a link, or when other accounts can still change it
+    (Assert-RestrictedDirectoryAcl): they could swap a folder between its checks and its removal.
+.PARAMETER Root
+    The folder to look in (%ProgramData%\winget-app-setup, which every elevated run limits to SYSTEM
+    and Administrators). Missing: nothing to do.
+.PARAMETER NamePattern
+    The names of the folders to remove (a regular expression), such as '^wingetclient-<32 hex>$'.
+.PARAMETER CutoffUtc
+    A folder last written at or before this time is removed.
+.PARAMETER CurrentScriptPath
+    The running installer's or uninstaller's path; its folder is kept.
+.OUTPUTS
+    [int] The number of folders deleted.
+#>
+function Remove-StaleStagingFolder {
+    [OutputType([int])]
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$Root,
+
+        [Parameter(Mandatory = $true)]
+        [string]$NamePattern,
+
+        [Parameter(Mandatory = $true)]
+        [DateTime]$CutoffUtc,
+
+        [Parameter(Mandatory = $false)]
+        [AllowEmptyString()]
+        [AllowNull()]
+        [string]$CurrentScriptPath
+    )
+
     # Never through a link (wgt-gq8.46): the deletes would reach whatever it points to.
     if (-not (Test-Path -LiteralPath $Root -PathType Container) -or (Test-FileSystemLink -Path $Root)) {
         return 0
     }
-    $cutoffUtc = [DateTime]::UtcNow.AddHours(-$MaxAgeHours)
     $allowedOwnerSids = @('S-1-5-18', 'S-1-5-32-544')
+    $currentDirectory = $null
+    if (-not [string]::IsNullOrWhiteSpace($CurrentScriptPath)) {
+        $currentDirectory = [System.IO.Path]::GetDirectoryName([System.IO.Path]::GetFullPath($CurrentScriptPath)).TrimEnd('\', '/')
+    }
     $removed = 0
     $candidates = @(Get-ChildItem -LiteralPath $Root -Directory -Force -ErrorAction SilentlyContinue |
             Where-Object {
-                $_.Name -match '^wingetclient-[0-9a-fA-F]{32}$' -and $_.LastWriteTimeUtc -le $cutoffUtc -and
-                -not ($_.Attributes -band [System.IO.FileAttributes]::ReparsePoint)
+                $_.Name -match $NamePattern -and $_.LastWriteTimeUtc -le $CutoffUtc -and
+                -not ($_.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -and
+                -not ($currentDirectory -and [string]::Equals($_.FullName.TrimEnd('\', '/'), $currentDirectory, [System.StringComparison]::OrdinalIgnoreCase))
             })
     if ($candidates.Count -eq 0) {
         return 0
@@ -357,6 +429,59 @@ function Remove-StaleWingetClientFolder {
         }
         catch {
             # In use, or its owner could not be read: left for a later run.
+        }
+    }
+    return $removed
+}
+
+<#
+.SYNOPSIS
+    Unregisters the one-shot SYSTEM tasks that hand-overs to SYSTEM left registered.
+.DESCRIPTION
+    Invoke-SystemHandoff unregisters its task (winget-app-setup-system-<32 hex>, in Task
+    Scheduler's root folder) in a finally block, which does not run when its window is closed while
+    it waits (wgt-gq8.77). This unregisters such a task when it runs as SYSTEM, is neither running
+    nor queued, and last ran at or before CutoffUtc. A task that never ran is left alone, since its
+    age is not known; it has no trigger, so a leftover never runs by itself. A task that cannot be
+    read or unregistered is left for a later run.
+.PARAMETER CutoffUtc
+    A task whose last run started at or before this time is removed.
+.OUTPUTS
+    [int] The number of tasks unregistered.
+#>
+function Remove-StaleSystemHandoffTask {
+    [OutputType([int])]
+    param (
+        [Parameter(Mandatory = $true)]
+        [DateTime]$CutoffUtc
+    )
+
+    try {
+        $tasks = @(Get-ScheduledTask -TaskPath '\' -ErrorAction Stop | Where-Object { $_.TaskName -match '^winget-app-setup-system-[0-9a-fA-F]{32}$' })
+    }
+    catch {
+        return 0
+    }
+    $removed = 0
+    foreach ($task in $tasks) {
+        try {
+            # Only an administrator can register a task that runs as SYSTEM: any account can take the name.
+            if (@('S-1-5-18', 'SYSTEM', 'NT AUTHORITY\SYSTEM') -notcontains [string]$task.Principal.UserId) {
+                continue
+            }
+            if (@('Running', 'Queued') -contains [string]$task.State) {
+                continue
+            }
+            $lastRun = (Get-ScheduledTaskInfo -TaskName $task.TaskName -TaskPath '\' -ErrorAction Stop).LastRunTime
+            # Task Scheduler reports a task that never ran with a date in 1999.
+            if (-not ($lastRun -is [DateTime]) -or $lastRun.Year -lt 2000 -or $lastRun.ToUniversalTime() -gt $CutoffUtc) {
+                continue
+            }
+            Unregister-ScheduledTask -TaskName $task.TaskName -TaskPath '\' -Confirm:$false -ErrorAction Stop
+            $removed++
+        }
+        catch {
+            # Gone meanwhile, or not this account's to remove: left for a later run.
         }
     }
     return $removed
