@@ -40,3 +40,5 @@ $RECYCLE.BIN/
 .dolt/
 *.db
 .beads-credential-key
+# Lock file bd's schema migrations leave at the repo root (BD_SMART_GATE).
+.beads.gate.lock
