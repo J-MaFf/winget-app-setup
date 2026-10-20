@@ -126,6 +126,20 @@ Describe 'Invoke-WingetUninstall' {
             $script:errorMessages | Should -Be @('winget cannot open its source for this account (see above), so nothing was uninstalled: without it winget cannot tell which apps are installed. Winget-AutoUpdate was left in place, so the apps keep getting updates. Fix the source as the line above says, or run the uninstaller from an account where winget works (for example the signed-in user, elevated), then run it again.')
         }
 
+        # wgt-gq8.78 (owner decision): the uninstaller does not hand over to SYSTEM, and the
+        # session's user is a standard account, so 'the signed-in user, elevated' cannot help.
+        It 'Under cross-user elevation, returns 2 and says to run the uninstaller as SYSTEM or signed in as the elevated account' {
+            Mock Initialize-Winget { [pscustomobject]@{ Ready = $false; Diagnosis = 'SourceUnusable' } }
+            Mock Get-InstallAccountContext { New-TestAccountContext -CrossUser -ProcessUser 'CONTOSO\admin-jmaffiola' -SessionUser 'CONTOSO\stduser' }
+
+            $result = Invoke-WingetUninstall -Apps $script:apps
+
+            $result | Should -Be 2
+            Should -Invoke Invoke-WingetProcess -Times 0 -Exactly
+            Should -Invoke Uninstall-WingetAutoUpdate -Times 0 -Exactly
+            $script:errorMessages | Should -Be @("winget cannot open its source for this account (see above), so nothing was uninstalled: without it winget cannot tell which apps are installed. Winget-AutoUpdate was left in place, so the apps keep getting updates. Windows cannot set winget's source up for 'CONTOSO\admin-jmaffiola', elevated in the session of 'CONTOSO\stduser', and the uninstaller does not hand its work over to SYSTEM as the installer does: run winget-app-uninstall.ps1 as SYSTEM (for example as an Endpoint Central script), or while signed in to Windows as 'CONTOSO\admin-jmaffiola'.")
+        }
+
         # wgt-gq8.64: before --source winget, such a list exited 0x8A150014 and every app read as
         # not installed.
         It 'Returns 1, uninstalls nothing and keeps Winget-AutoUpdate when every winget list fails with 0x8A15000F' {
@@ -1062,6 +1076,9 @@ function Invoke-WingetProcess {
         $run.Output | Should -Not -Match 'FAKE: Winget-AutoUpdate removed'
         $run.Output | Should -Match ([regex]::Escape("Fix: 'CONTOSO\admin-tech' is elevated in the session of 'CONTOSO\jdoe' and has no logon session of its own, which Windows needs to deploy winget's source package for it: run the uninstaller while signed in to Windows as 'CONTOSO\admin-tech', or run winget-app-uninstall.ps1 as SYSTEM."))
         $run.Output | Should -Not -Match 'rmm/|machine phase|re-run the installer|sign in to Windows once'
+        # wgt-gq8.78: the closing line says the same, and never the signed-in standard user.
+        $run.Output | Should -Match ([regex]::Escape("the uninstaller does not hand its work over to SYSTEM as the installer does: run winget-app-uninstall.ps1 as SYSTEM (for example as an Endpoint Central script), or while signed in to Windows as 'CONTOSO\admin-tech'."))
+        $run.Output | Should -Not -Match 'the signed-in user, elevated'
     }
 
     It 'Exits 1 and keeps Winget-AutoUpdate when winget starts but cannot check the apps' {

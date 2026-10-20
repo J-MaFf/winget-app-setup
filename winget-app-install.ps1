@@ -107,12 +107,12 @@ param (
 # the function source under WingetAppSetup/Public and WingetAppSetup/Private, or the entry block in
 # build/fragments/tail.ps1, then re-run the build to regenerate this file.
 # See readme.md ("Project layout") for details.
-# Build id: 1.0.0+90edf021 (module version + SHA256 fragment of this whole script; issue #189).
+# Build id: 1.0.0+dd9c56e7 (module version + SHA256 fragment of this whole script; issue #189).
 # ------------------------------------------------------------------------------------------------
 
 # Content-derived build identity, logged at startup so a transcript from a remote machine
 # identifies exactly which installer build produced it (issue #189).
-$script:InstallerBuildId = '1.0.0+90edf021'
+$script:InstallerBuildId = '1.0.0+dd9c56e7'
 
 # ------------------------------------------------Functions------------------------------------------------
 
@@ -13297,6 +13297,13 @@ function Invoke-WingetUninstall {
         }
         if ($policyBlocked) {
             $message += ' Run the uninstaller again once the policy allows winget.'
+        }
+        elseif ($sourceUnusable -and $account -and $account.IsCrossUserElevation) {
+            $sessionText = 'in another user''s session'
+            if (-not [string]::IsNullOrWhiteSpace([string]$account.SessionUser)) {
+                $sessionText = "in the session of '$($account.SessionUser)'"
+            }
+            $message += " Windows cannot set winget's source up for '$($account.ProcessUser)', elevated $sessionText, and the uninstaller does not hand its work over to SYSTEM as the installer does: run winget-app-uninstall.ps1 as SYSTEM (for example as an Endpoint Central script), or while signed in to Windows as '$($account.ProcessUser)'."
         }
         elseif ($sourceUnusable) {
             $message += ' Fix the source as the line above says, or run the uninstaller from an account where winget works (for example the signed-in user, elevated), then run it again.'

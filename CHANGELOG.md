@@ -961,6 +961,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Under cross-user elevation, the uninstaller's advice for a winget source that stays closed now
+  works** (bead wgt-gq8.78). It still removes nothing and exits 2 (owner decision 2026-10-20: no
+  hand-over to SYSTEM for the uninstaller), but its last line told the technician to run it from
+  "the signed-in user, elevated", a standard account that cannot elevate. It now says that the
+  uninstaller does not hand over to SYSTEM as the installer does, and to run
+  `winget-app-uninstall.ps1` as SYSTEM (for example as an Endpoint Central script) or while signed
+  in to Windows as the elevated account.
 - **The Microsoft.WinGet.Client engine's requests no longer change the code page of the console
   a SYSTEM run was started from** (bead wgt-gq8.79). Each request's child `pwsh` sets its console's
   output code page to UTF-8, and it shared the run's console, as the Appx child did before

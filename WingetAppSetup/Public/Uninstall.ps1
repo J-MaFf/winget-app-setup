@@ -113,6 +113,15 @@ function Invoke-WingetUninstall {
         if ($policyBlocked) {
             $message += ' Run the uninstaller again once the policy allows winget.'
         }
+        elseif ($sourceUnusable -and $account -and $account.IsCrossUserElevation) {
+            # wgt-gq8.78: no hand-over to SYSTEM here, unlike the installer, and the session's user is
+            # a standard account that cannot elevate.
+            $sessionText = 'in another user''s session'
+            if (-not [string]::IsNullOrWhiteSpace([string]$account.SessionUser)) {
+                $sessionText = "in the session of '$($account.SessionUser)'"
+            }
+            $message += " Windows cannot set winget's source up for '$($account.ProcessUser)', elevated $sessionText, and the uninstaller does not hand its work over to SYSTEM as the installer does: run winget-app-uninstall.ps1 as SYSTEM (for example as an Endpoint Central script), or while signed in to Windows as '$($account.ProcessUser)'."
+        }
         elseif ($sourceUnusable) {
             $message += ' Fix the source as the line above says, or run the uninstaller from an account where winget works (for example the signed-in user, elevated), then run it again.'
         }
