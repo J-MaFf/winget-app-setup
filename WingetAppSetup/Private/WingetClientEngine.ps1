@@ -285,8 +285,10 @@ function Get-WingetClientRequestArgument {
 .DESCRIPTION
     The request (Get-WingetClientRequestArgument) runs under Invoke-ExternalProcess with
     -NoProfile -NonInteractive, quietly and under the given time limit; on a timeout the child and
-    the installer it started are stopped. A command line longer than Windows allows (32,767
-    characters) is not started, and comes back as a launch failure that says so.
+    the installer it started are stopped. It gets a hidden console of its own (-CreateNoWindow), so
+    the UTF-8 output code page the child sets leaves the run's console as it was (wgt-gq8.79). A
+    command line longer than Windows allows (32,767 characters) is not started, and comes back as a
+    launch failure that says so.
 .PARAMETER Module
     Initialize-WingetClientModule's ready result. Default: the active engine's.
 .PARAMETER Operation
@@ -380,7 +382,7 @@ function Invoke-WingetClientRequest {
         return [pscustomobject]@{ Run = $run; Response = $null; ProtocolError = $null }
     }
 
-    $run = Invoke-ExternalProcess -FilePath $filePath -ArgumentList $arguments -TimeoutSeconds $TimeoutSeconds -Echo None
+    $run = Invoke-ExternalProcess -FilePath $filePath -ArgumentList $arguments -TimeoutSeconds $TimeoutSeconds -Echo None -CreateNoWindow
     $response = $null
     $protocolError = $null
     if (-not $run.LaunchFailed -and -not $run.TimedOut) {

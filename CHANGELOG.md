@@ -961,6 +961,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The Microsoft.WinGet.Client engine's requests no longer change the code page of the console
+  a SYSTEM run was started from** (bead wgt-gq8.79). Each request's child `pwsh` sets its console's
+  output code page to UTF-8, and it shared the run's console, as the Appx child did before
+  wgt-gq8.72. `Invoke-WingetClientRequest` now starts it with a hidden console of its own
+  (`Invoke-ExternalProcess -CreateNoWindow`). It showed in a SYSTEM run started from a console
+  window (for example `psexec -s -i`): programs started from that window afterwards wrote in code
+  page 65001.
 - **A hand-over to SYSTEM whose window was closed no longer leaves its task and its copy behind**
   (bead wgt-gq8.77). `Invoke-SystemHandoff` unregisters its one-shot task and removes its staged
   copy in a `finally` block, which does not run when the hand-started window is closed while it

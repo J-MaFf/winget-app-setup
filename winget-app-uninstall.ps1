@@ -10887,7 +10887,7 @@ function Invoke-WingetClientRequest {
         return [pscustomobject]@{ Run = $run; Response = $null; ProtocolError = $null }
     }
 
-    $run = Invoke-ExternalProcess -FilePath $filePath -ArgumentList $arguments -TimeoutSeconds $TimeoutSeconds -Echo None
+    $run = Invoke-ExternalProcess -FilePath $filePath -ArgumentList $arguments -TimeoutSeconds $TimeoutSeconds -Echo None -CreateNoWindow
     $response = $null
     $protocolError = $null
     if (-not $run.LaunchFailed -and -not $run.TimedOut) {
