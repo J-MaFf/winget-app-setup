@@ -3865,7 +3865,7 @@ Describe 'Invoke-WingetInstall with the real winget setup ladder (review finding
     # 'Cancelled' and exited 0, every install then failed with 0x8A15000F, and Winget-AutoUpdate was
     # set up anyway.
     It 'Registers the source package and stops with exit code 2, installing nothing, when the source still cannot be opened after an update that exited 0' {
-        Mock Get-InstallAccountContext { New-TestAccountContext -CrossUser -ProcessUser 'CONTOSO\admin-jmaffiola' -SessionUser 'CONTOSO\tuser' }
+        Mock Get-InstallAccountContext { New-TestAccountContext -CrossUser -ProcessUser 'CONTOSO\admin-jmaffiola' -SessionUser 'CONTOSO\stduser' }
         Mock Invoke-ExternalProcess { New-TestProcessResult -ExitCode 0 -Output @('Updating source: winget...', 'Cancelled') } -ParameterFilter { $ArgumentList[0] -eq 'source' -and $ArgumentList[1] -eq 'update' }
         Mock Invoke-ExternalProcess { New-TestProcessResult -ExitCode -1978335217 -Output @("Failed when opening source(s); try the 'source reset' command if the problem persists.", '0x8a15000f : Data required by the source is missing') } -ParameterFilter { $ArgumentList[0] -eq 'search' }
         # No copy of the source package on this PC; the download is Microsoft's, and Windows refuses

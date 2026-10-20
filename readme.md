@@ -1730,7 +1730,11 @@ powershell -ExecutionPolicy Unrestricted -File .\winget-app-uninstall.ps1 -WhatI
   `WINGET_APP_SETUP_SYSTEM_ENGINE` says). When winget still cannot be used, cannot open the winget
   source for the account (see **Setting winget up**, step 3), or Group Policy turns it off, it
   removes nothing, Winget-AutoUpdate included, and exits 2: without its source, winget lists no
-  catalog app, so every app would read as not installed.
+  catalog app, so every app would read as not installed. Under cross-user elevation it does not
+  hand its work over to SYSTEM as the installer does
+  ([Hand-over to SYSTEM](#hand-over-to-system-under-cross-user-elevation)): it says to run
+  `winget-app-uninstall.ps1` as SYSTEM (for example as an Endpoint Central script) or while signed
+  in to Windows as the elevated account.
 - An app counts as not installed only when `winget list --source winget` answered. A check that
   could not start winget, ran out of time or failed (a source that cannot be opened included) is a
   failure, so Winget-AutoUpdate is kept.
