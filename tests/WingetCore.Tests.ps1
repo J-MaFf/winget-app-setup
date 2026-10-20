@@ -363,12 +363,12 @@ Describe 'Initialize-Winget: the winget source (review findings P3-25, P3-28)' {
     It 'Advises running the installer signed in as the account or the SYSTEM machine phase under cross-user elevation' {
         $script:openAnswers = @(-1978335217)
 
-        $result = Initialize-Winget -AccountContext (New-TestAccountContext -CrossUser -ProcessUser 'CONTOSO\admin-jmaffiola' -SessionUser 'CONTOSO\tuser')
+        $result = Initialize-Winget -AccountContext (New-TestAccountContext -CrossUser -ProcessUser 'CONTOSO\admin-jmaffiola' -SessionUser 'CONTOSO\stduser')
 
         $result.Diagnosis | Should -Be 'SourceUnusable'
         $line = @($script:log | Where-Object { $_ -like 'ERROR: *' })[0]
         $line | Should -BeLike "ERROR: The winget source cannot be opened for 'CONTOSO\admin-jmaffiola': *"
-        $line | Should -BeLike "*Fix: 'CONTOSO\admin-jmaffiola' is elevated in the session of 'CONTOSO\tuser' and has no logon session of its own*run the installer while signed in to Windows as 'CONTOSO\admin-jmaffiola', or run the machine phase as SYSTEM with rmm/Invoke-WingetAppSetup.ps1."
+        $line | Should -BeLike "*Fix: 'CONTOSO\admin-jmaffiola' is elevated in the session of 'CONTOSO\stduser' and has no logon session of its own*run the installer while signed in to Windows as 'CONTOSO\admin-jmaffiola', or run the machine phase as SYSTEM with rmm/Invoke-WingetAppSetup.ps1."
         $line | Should -Not -BeLike '*AppXDeploymentServer*'
     }
 
@@ -541,7 +541,7 @@ Describe 'Initialize-Winget when winget cannot deploy its source package (wgt-gq
         Mock Add-AppxPackage { throw 'must not install a package directly' }
         Mock Invoke-RepairWinGetPackageManagerProcess { throw 'must not run the real repair cmdlet' }
         Mock Reset-WingetSource { throw 'a reset deploys no source package' }
-        $script:account = New-TestAccountContext -CrossUser -ProcessUser 'CONTOSO\admin-jmaffiola' -SessionUser 'CONTOSO\tuser'
+        $script:account = New-TestAccountContext -CrossUser -ProcessUser 'CONTOSO\admin-jmaffiola' -SessionUser 'CONTOSO\stduser'
     }
 
     It 'Stops with SourceUnusable and one ERROR line, never saying the source is up to date, when registering the package fails too' {
@@ -563,7 +563,7 @@ Describe 'Initialize-Winget when winget cannot deploy its source package (wgt-gq
         $result.Diagnosis | Should -Be 'SourceUnusable'
         $errors = @($script:log | Where-Object { $_ -like 'ERROR: *' })
         $errors.Count | Should -Be 1
-        $errors[0] | Should -BeLike "*Fix: 'CONTOSO\admin-jmaffiola' is elevated in the session of 'CONTOSO\tuser'*: run the uninstaller while signed in to Windows as 'CONTOSO\admin-jmaffiola', or run winget-app-uninstall.ps1 as SYSTEM."
+        $errors[0] | Should -BeLike "*Fix: 'CONTOSO\admin-jmaffiola' is elevated in the session of 'CONTOSO\stduser'*: run the uninstaller while signed in to Windows as 'CONTOSO\admin-jmaffiola', or run winget-app-uninstall.ps1 as SYSTEM."
         $errors[0] | Should -Not -Match 'rmm/|machine phase|\binstaller\b'
     }
 
