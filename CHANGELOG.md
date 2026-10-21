@@ -50,6 +50,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `issues: write` opens the 'Microsoft.WinGet.Client pin is behind the PowerShell Gallery' issue
   with the check's output, or comments on the open one once per new version. `-Latest` reads the
   Gallery's OData feed (every page) and prints a `PIN-FRESHNESS:` line.
+- E2E SYSTEM leg on ARM64 (wgt-gq8.50): `e2e-install-system-arm64` runs the SYSTEM leg's pass,
+  through `rmm/Invoke-WingetAppSetup.ps1` from a 32-bit `powershell.exe` scheduled task, on the
+  `windows-11-arm` runner, with a 60-minute task, and reports to `report-failure` like the other
+  legs. The probe below showed that the runner account has no winget alias, but as SYSTEM the
+  module finds App Installer's machine-wide `winget.exe` and opens the winget source.
+  - `e2e/Invoke-SystemInstallPass.ps1` takes `-ExpectOSArchitecture`, `-ExpectApplicable` and
+    `-ExpectNotApplicable`. These check the leg's own idea of its architecture, which a misread
+    `Get-OSArchitecture` cannot fool, against the checkout's module, the run's
+    `OS architecture:` line (now read by `ConvertFrom-InstallTranscript` as `OSArchitecture`)
+    and `last-run.json`.
+  - The ARM64 leg requires Reader 32-bit and Google Drive to apply and Reader 64-bit and Dell
+    Command Update not to. `e2e-install-system` requires the reverse for the two Readers on x64,
+    and Dell Command Update not applicable there too.
+  - Both legs print the PE machine type of each app's main executable, as evidence that fails
+    nothing.
+  - `e2e/Remove-PreinstalledApps.ps1` runs the `winget.exe` of the newest registered App Installer
+    when the account has no alias (`Resolve-PreparationWingetPath`).
 - `.github/workflows/arm64-probe.yml` (wgt-gq8.50, first step): a dispatch-only job on
   `windows-11-arm` that installs nothing and prints the account, the architecture as each
   PowerShell (7, 5.1 and 32-bit 5.1) sees it, App Installer's registration and provisioning,

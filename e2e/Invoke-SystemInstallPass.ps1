@@ -74,6 +74,15 @@
     looked up with `winget list` as the runner account (Get-SystemPassIndependentInstallResult), a
     check that does not trust the engine's own detection.
 
+    With -ExpectOSArchitecture (wgt-gq8.50) the leg names its runner's architecture, so a misread
+    one cannot fool the per-app rows, which compare last-run.json with the module on the same PC
+    (Get-SystemPassArchitectureResult): Get-OSArchitecture in the checkout's module must return it,
+    each -ExpectApplicable app must apply and not be recorded as not applicable, and each
+    -ExpectNotApplicable app must not apply and be recorded Skipped as not applicable. The script
+    then also prints the machine type of each installed app's main executable
+    (Get-InstalledExecutableArchitecture), evidence for the catalog's ARM64 decisions that fails
+    nothing.
+
     -PassCount 2 runs the task a second time, with every row prefixed 'Pass 1: ' or 'Pass 2: '. The
     second pass is checked the same way, except that every app that applies must be Skipped as
     already there ('App already present on the second run: <id>'), the framework must not be
@@ -105,6 +114,14 @@
     absent) are the ones the run must install.
 .PARAMETER BudgetPass
     Run a spent-budget pass first, and check it.
+.PARAMETER ExpectOSArchitecture
+    The runner's architecture as Get-OSArchitecture names it (X64, Arm64), which adds the
+    architecture rows and the executable report.
+.PARAMETER ExpectApplicable
+    Catalog ids that must apply on that architecture; comma-separated items are split, since
+    pwsh -File passes 'a,b' as one string. Needs -ExpectOSArchitecture.
+.PARAMETER ExpectNotApplicable
+    Catalog ids that must not apply there, given the same way. Needs -ExpectOSArchitecture.
 .NOTES
     Exit codes: 0 = every check passed; the run's exit code or 1 = a check failed; 64 = bad
     arguments; 127 = the task could not be registered or started.
@@ -136,7 +153,17 @@ param (
     [string]$PreparationResultPath,
 
     [Parameter(Mandatory = $false)]
-    [switch]$BudgetPass
+    [switch]$BudgetPass,
+
+    [Parameter(Mandatory = $false)]
+    [ValidateSet('X64', 'Arm64', 'X86')]
+    [string]$ExpectOSArchitecture,
+
+    [Parameter(Mandatory = $false)]
+    [string[]]$ExpectApplicable = @(),
+
+    [Parameter(Mandatory = $false)]
+    [string[]]$ExpectNotApplicable = @()
 )
 
 # Get-InstallPassVerdict and Get-InstallPassTranscript (and, through it, TranscriptAssertions.ps1).
@@ -1359,6 +1386,285 @@ function Get-SystemPassIndependentInstallResult {
 
 <#
 .SYNOPSIS
+    Splits list parameters given as comma-separated text: pwsh -File passes 'a,b' as one string.
+.RETURNS
+    [string[]] The trimmed, non-empty items.
+#>
+function Split-SystemPassList {
+    param (
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [AllowEmptyCollection()]
+        [string[]]$Value
+    )
+
+    return [string[]]@($Value | ForEach-Object { "$_" -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+}
+
+<#
+.SYNOPSIS
+    Checks the architecture the leg names against the module's and the run's (wgt-gq8.50).
+.DESCRIPTION
+    The per-app rows compare last-run.json with Test-AppApplicability on the same PC, so a
+    Get-OSArchitecture that misread ARM64 as x64 would fool both. These rows hold whatever the
+    module computes, since the workflow names its runner's architecture and the apps that must, or
+    must not, apply there:
+      - 'OS architecture is <architecture>': Get-OSArchitecture, in the checkout's module;
+      - 'The run''s OS architecture is <architecture>': the run's own 'OS architecture:' line;
+      - 'Applies on <architecture>: <id>': the catalog app applies, and last-run.json does not
+        record it as not applicable;
+      - 'Not applicable on <architecture>: <id>': it does not apply, and last-run.json records it
+        Skipped as not applicable.
+    An id the catalog does not have fails its row.
+.PARAMETER ExpectedArchitecture
+    The leg's architecture, as Get-OSArchitecture names it.
+.PARAMETER DetectedArchitecture
+    What Get-OSArchitecture returned, or $null when it threw.
+.PARAMETER DetectionProblem
+    Why there is no DetectedArchitecture, or $null.
+.PARAMETER RunnerArchitecture
+    RUNNER_ARCH, for the detail only.
+.PARAMETER Transcript
+    The run's transcript (Get-InstallPassTranscript), or $null.
+.PARAMETER Applicability
+    Get-SystemRunApplicability's verdicts, or $null when the catalog could not be read.
+.PARAMETER ExpectApplicable
+    Catalog ids that must apply.
+.PARAMETER ExpectNotApplicable
+    Catalog ids that must not.
+.PARAMETER RunRecord
+    last-run.json, parsed, or $null.
+.RETURNS
+    Assertion rows ([pscustomobject] with Assertion, Result and Detail).
+#>
+function Get-SystemPassArchitectureResult {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$ExpectedArchitecture,
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [AllowEmptyString()]
+        [string]$DetectedArchitecture,
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [AllowEmptyString()]
+        [string]$DetectionProblem,
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [AllowEmptyString()]
+        [string]$RunnerArchitecture,
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        $Transcript,
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [hashtable]$Applicability,
+        [Parameter(Mandatory = $false)]
+        [AllowEmptyCollection()]
+        [string[]]$ExpectApplicable = @(),
+        [Parameter(Mandatory = $false)]
+        [AllowEmptyCollection()]
+        [string[]]$ExpectNotApplicable = @(),
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        $RunRecord
+    )
+
+    $detail = "Get-OSArchitecture: $DetectedArchitecture"
+    if ([string]::IsNullOrWhiteSpace($DetectedArchitecture)) {
+        $detail = 'Get-OSArchitecture gave no answer'
+        if ($DetectionProblem) {
+            $detail += ": $DetectionProblem"
+        }
+    }
+    if ($RunnerArchitecture) {
+        $detail += "; RUNNER_ARCH: $RunnerArchitecture"
+    }
+    $passed = (-not [string]::IsNullOrWhiteSpace($DetectedArchitecture) -and $DetectedArchitecture -eq $ExpectedArchitecture)
+    if (-not $passed) {
+        $detail += "; this leg's runner is $ExpectedArchitecture"
+    }
+    $rows = @([pscustomobject]@{ Assertion = "OS architecture is $ExpectedArchitecture"; Result = $(if ($passed) { 'PASS' } else { 'FAIL' }); Detail = $detail })
+
+    $runDetail = 'no transcript of the run'
+    $runPassed = $false
+    if ($null -ne $Transcript) {
+        $logged = [string]$Transcript.Parsed.OSArchitecture
+        if ([string]::IsNullOrWhiteSpace($logged)) {
+            $runDetail = "$($Transcript.Name) has no 'OS architecture:' line"
+        }
+        else {
+            $runDetail = "$($Transcript.Name): OS architecture: $logged"
+            $runPassed = ($logged -eq $ExpectedArchitecture)
+        }
+    }
+    $rows += [pscustomobject]@{ Assertion = "The run's OS architecture is $ExpectedArchitecture"; Result = $(if ($runPassed) { 'PASS' } else { 'FAIL' }); Detail = $runDetail }
+
+    $entries = @()
+    if ($null -ne $RunRecord -and $null -ne $RunRecord.PSObject.Properties['apps']) {
+        $entries = @($RunRecord.apps | Where-Object { $null -ne $_ })
+    }
+    $cases = @(
+        @{ Ids = @($ExpectApplicable); MustApply = $true; Assertion = "Applies on ${ExpectedArchitecture}: " }
+        @{ Ids = @($ExpectNotApplicable); MustApply = $false; Assertion = "Not applicable on ${ExpectedArchitecture}: " }
+    )
+    foreach ($case in $cases) {
+        foreach ($id in $case.Ids) {
+            $facts = @()
+            $problems = @()
+            if ($null -eq $Applicability) {
+                $problems += 'the checkout''s catalog could not be read'
+            }
+            elseif (-not $Applicability.ContainsKey($id)) {
+                $problems += 'the checkout''s catalog has no such app'
+            }
+            elseif ([bool]$Applicability[$id]) {
+                $facts += 'the catalog says it applies'
+                if (-not $case.MustApply) {
+                    $problems += "it must not apply on $ExpectedArchitecture"
+                }
+            }
+            else {
+                $facts += 'the catalog says it does not apply'
+                if ($case.MustApply) {
+                    $problems += "it must apply on $ExpectedArchitecture"
+                }
+            }
+            $matching = @($entries | Where-Object { [string]$_.id -eq $id })
+            if ($null -eq $RunRecord) {
+                $problems += 'no last-run.json'
+            }
+            elseif ($matching.Count -ne 1) {
+                $problems += "$($matching.Count) entries in last-run.json"
+            }
+            else {
+                $entry = $matching[0]
+                $facts += 'last-run.json: ' + (Format-SystemPassAppEntry -Entry $entry)
+                $recordedNotApplicable = ([string]$entry.status -eq 'Skipped' -and ([string]$entry.reason).StartsWith('not applicable: '))
+                if ($case.MustApply -and $recordedNotApplicable) {
+                    $problems += 'the run skipped it as not applicable'
+                }
+                elseif (-not $case.MustApply -and -not $recordedNotApplicable) {
+                    $problems += 'the run had to skip it as not applicable'
+                }
+            }
+            $rows += [pscustomobject]@{
+                Assertion = $case.Assertion + $id
+                Result    = $(if ($problems.Count -eq 0) { 'PASS' } else { 'FAIL' })
+                Detail    = (@($facts) + @($problems)) -join '; '
+            }
+        }
+    }
+    return $rows
+}
+
+<#
+.SYNOPSIS
+    Reads the machine type in a Windows executable's PE header.
+.RETURNS
+    [string] 'X64' (0x8664), 'Arm64' (0xAA64), 'X86' (0x014C), 'Arm' (0x01C4) or 'unknown (0x....)';
+    $null when the file is not a PE image or cannot be read.
+#>
+function Get-PeMachineType {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    try {
+        $stream = [System.IO.File]::Open($Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+        try {
+            $reader = New-Object System.IO.BinaryReader($stream)
+            # 'MZ', then the PE header's offset at 0x3C, 'PE\0\0' there and the machine after it.
+            if ($stream.Length -lt 64 -or $reader.ReadUInt16() -ne 0x5A4D) {
+                return $null
+            }
+            $stream.Position = 0x3C
+            $peOffset = [long]$reader.ReadInt32()
+            if ($peOffset -lt 64 -or ($peOffset + 6) -gt $stream.Length) {
+                return $null
+            }
+            $stream.Position = $peOffset
+            if ($reader.ReadUInt32() -ne 0x00004550) {
+                return $null
+            }
+            $machine = [int]$reader.ReadUInt16()
+        }
+        finally {
+            $stream.Dispose()
+        }
+    }
+    catch {
+        return $null
+    }
+    switch ($machine) {
+        0x8664 { return 'X64' }
+        0xAA64 { return 'Arm64' }
+        0x014C { return 'X86' }
+        0x01C4 { return 'Arm' }
+    }
+    return ('unknown (0x{0:X4})' -f $machine)
+}
+
+# The main executable of each catalog app, under Program Files: which build landed, for the
+# catalog's ARM64 decisions (Google Drive's installer is labelled x64; wgt-gq8.50).
+$script:SystemPassExecutables = [ordered]@{
+    'Google.GoogleDrive'          = @('Google\Drive File Stream\*\GoogleDriveFS.exe')
+    'GlavSoft.TightVNC'           = @('TightVNC\tvnserver.exe')
+    'Klocman.BulkCrapUninstaller' = @('BCUninstaller\BCUninstaller.exe')
+    'Adobe.Acrobat.Reader'        = @('Adobe\Acrobat Reader DC\Reader\AcroRd32.exe', 'Adobe\Acrobat DC\Acrobat\Acrobat.exe')
+    'Google.Chrome.EXE'           = @('Google\Chrome\Application\chrome.exe')
+    '7zip.7zip'                   = @('7-Zip\7z.exe')
+    'Git.Git'                     = @('Git\cmd\git.exe')
+    'Microsoft.PowerShell'        = @('PowerShell\7\pwsh.exe')
+}
+
+<#
+.SYNOPSIS
+    Finds each app's main executable under the Program Files folders and reads its machine type.
+.PARAMETER Executables
+    App -> paths relative to a Program Files folder, wildcards allowed. Default:
+    $script:SystemPassExecutables.
+.PARAMETER ProgramFilesRoots
+    Default: ProgramW6432, ProgramFiles and ProgramFiles(x86), each once.
+.RETURNS
+    [pscustomobject[]] App, Path ($null when none was found) and Machine (Get-PeMachineType, 'not
+    found' or 'not a PE image').
+#>
+function Get-InstalledExecutableArchitecture {
+    param (
+        [Parameter(Mandatory = $false)]
+        [System.Collections.IDictionary]$Executables = $script:SystemPassExecutables,
+        [Parameter(Mandatory = $false)]
+        [string[]]$ProgramFilesRoots
+    )
+
+    if (-not $ProgramFilesRoots) {
+        $ProgramFilesRoots = @(@($env:ProgramW6432, $env:ProgramFiles, ${env:ProgramFiles(x86)}) | Where-Object { $_ } | Select-Object -Unique)
+    }
+    foreach ($app in $Executables.Keys) {
+        $found = @()
+        foreach ($root in $ProgramFilesRoots) {
+            foreach ($pattern in @($Executables[$app])) {
+                $found += @(Get-ChildItem -Path (Join-Path $root $pattern) -File -ErrorAction SilentlyContinue)
+            }
+        }
+        if ($found.Count -eq 0) {
+            [pscustomobject]@{ App = $app; Path = $null; Machine = 'not found' }
+            continue
+        }
+        foreach ($file in @($found | Sort-Object -Property FullName -Unique)) {
+            $machine = Get-PeMachineType -Path $file.FullName
+            if (-not $machine) {
+                $machine = 'not a PE image'
+            }
+            [pscustomobject]@{ App = $app; Path = $file.FullName; Machine = $machine }
+        }
+    }
+}
+
+<#
+.SYNOPSIS
     Prefixes each row's assertion with 'Pass <n>: ', for a job that runs the task twice.
 #>
 function Add-SystemPassPrefix {
@@ -1494,6 +1800,12 @@ if ($MyInvocation.InvocationName -ne '.') {
         Write-Host "Invoke-SystemInstallPass.ps1: no wrapper at $wrapperFilePath or no installer at $installerFilePath." -ForegroundColor Red
         exit 64
     }
+    $expectApplicableIds = @(Split-SystemPassList -Value $ExpectApplicable)
+    $expectNotApplicableIds = @(Split-SystemPassList -Value $ExpectNotApplicable)
+    if (-not $ExpectOSArchitecture -and ($expectApplicableIds.Count -gt 0 -or $expectNotApplicableIds.Count -gt 0)) {
+        Write-Host 'Invoke-SystemInstallPass.ps1: -ExpectApplicable and -ExpectNotApplicable need -ExpectOSArchitecture.' -ForegroundColor Red
+        exit 64
+    }
     $ErrorActionPreference = 'Continue'
 
     $installerSha256 = (Get-FileHash -LiteralPath $installerFilePath -Algorithm SHA256).Hash
@@ -1507,10 +1819,22 @@ if ($MyInvocation.InvocationName -ne '.') {
     $catalogExpectation = $null
     $appExpectationProblem = $null
     $wingetClientPin = $null
+    $applicability = $null
+    $detectedArchitecture = $null
+    $architectureProblem = $null
     try {
         $wingetAppSetupModule = Import-Module (Join-Path $repositoryRoot 'WingetAppSetup\WingetAppSetup.psd1') -Force -PassThru -ErrorAction Stop
         $catalog = @(Get-DefaultAppCatalog)
         $applicability = Get-SystemRunApplicability -Catalog $catalog -Module $wingetAppSetupModule
+        if ($ExpectOSArchitecture) {
+            try {
+                $detectedArchitecture = [string](& $wingetAppSetupModule { Get-OSArchitecture })
+            }
+            catch {
+                $architectureProblem = $_.Exception.Message
+            }
+            Write-Host ('OS architecture: {0} (Get-OSArchitecture), RUNNER_ARCH {1}; this leg expects {2}.' -f $detectedArchitecture, $env:RUNNER_ARCH, $ExpectOSArchitecture)
+        }
         $removedApps = $null
         if ($PreparationResultPath) {
             $preparation = Get-PreparationRemovedList -Path $PreparationResultPath
@@ -1596,6 +1920,9 @@ if ($MyInvocation.InvocationName -ne '.') {
                 $passResults += @(Get-SystemPassIndependentInstallResult -AppExpectation $appExpectation -TestInstalled $testInstalled -SkipApps $skipApps)
             }
         }
+        if ($ExpectOSArchitecture) {
+            $passResults += @(Get-SystemPassArchitectureResult -ExpectedArchitecture $ExpectOSArchitecture -DetectedArchitecture $detectedArchitecture -DetectionProblem $architectureProblem -RunnerArchitecture "$env:RUNNER_ARCH" -Transcript $taskRun.Transcript -Applicability $applicability -ExpectApplicable $expectApplicableIds -ExpectNotApplicable $expectNotApplicableIds -RunRecord $runRecordRead.Record)
+        }
         if ($PassCount -gt 1) {
             $passResults = Add-SystemPassPrefix -Rows $passResults -PassNumber $passNumber
         }
@@ -1603,6 +1930,13 @@ if ($MyInvocation.InvocationName -ne '.') {
     }
     if ($stepExitCode -eq 0 -and @($allResults | Where-Object { $_.Result -eq 'FAIL' }).Count -gt 0) {
         $stepExitCode = 1
+    }
+
+    if ($ExpectOSArchitecture) {
+        # Evidence only: which build of each app landed on this architecture.
+        Write-Host ''
+        Write-Host '=== Installed executables: PE machine type ==='
+        Write-Host (@(Get-InstalledExecutableArchitecture) | Format-Table -AutoSize -Wrap | Out-String -Width 4096).TrimEnd()
     }
 
     Write-Host ''

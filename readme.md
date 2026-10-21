@@ -1963,7 +1963,8 @@ throwaway VMs by construction:
   installer, and its second pass finds PowerShell 7 and relaunches. Before the first pass, every
   leg, the SYSTEM legs below included, uninstalls the catalog apps the runner image ships with
   (Google Chrome, 7-Zip and Git; `e2e/Remove-PreinstalledApps.ps1`), so the first pass really
-  installs them. The image installs Chrome's enterprise MSI, which winget lists as `Google.Chrome`:
+  installs them. Where the job's account has no winget alias (the ARM64 runner), it runs the
+  `winget.exe` in the folder of the newest App Installer registered on the PC. The image installs Chrome's enterprise MSI, which winget lists as `Google.Chrome`:
   it is removed as that package and recorded as the catalog's `Google.Chrome.EXE`, and its line
   says whether winget also lists it as `Google.Chrome.EXE`. The Windows PowerShell 5.1 leg keeps
   that MSI instead, as a PC set up before Chrome moved to `Google.Chrome.EXE` has it, and checks
@@ -2009,7 +2010,18 @@ throwaway VMs by construction:
   unless it exits 9 through the machine phase, every app that applies is `NotAttempted` with the
   budget's reason, nothing is installed or failed, and `autoUpdates` is `NotAttempted`; the normal
   pass then runs without a budget.
-- **The SYSTEM leg with Microsoft.WinGet.Client:** `e2e-install-system-winget-client`, on a fourth
+
+  The per-app checks compare the run with the same module on the same PC, so a misread
+  architecture would fool both. So the leg also names its own (wgt-gq8.50):
+  `-ExpectOSArchitecture X64`, with `-ExpectApplicable Adobe.Acrobat.Reader.64-bit` and
+  `-ExpectNotApplicable Adobe.Acrobat.Reader.32-bit,Dell.CommandUpdate.Universal`. It fails unless:
+  - `Get-OSArchitecture` in the checkout's module returns that architecture;
+  - so does the run's own `OS architecture:` line;
+  - each app on the first list applies and is not recorded as not applicable;
+  - each app on the second list does not apply and is recorded `Skipped` as not applicable.
+
+  It then prints the PE machine type of each app's main executable under Program Files. That
+  output is evidence and fails nothing.- **The SYSTEM leg with Microsoft.WinGet.Client:** `e2e-install-system-winget-client`, on a fourth
   VM, runs the SYSTEM leg's pass twice through the machine phase with
   `-SystemInstallEngine WinGetClient`
   (`e2e/Invoke-SystemInstallPass.ps1 -SystemInstallEngine WinGetClient -PassCount 2`; see
@@ -2024,6 +2036,18 @@ throwaway VMs by construction:
   every app that applies already there, and not install the framework again. Before the passes, a
   step runs `build/Set-WingetClientModulePin.ps1 -Check` against the Gallery and saves its report;
   it cannot fail the job. The job passed on its first run, on 2026-10-06.
+- **The SYSTEM leg on ARM64:** `e2e-install-system-arm64`, on GitHub's `windows-11-arm` runner
+  (Windows 11 Enterprise on ARM64), runs the SYSTEM leg's pass and checks there, with
+  `-ExpectOSArchitecture Arm64`:
+  - Reader 32-bit and Google Drive must apply;
+  - Reader 64-bit and Dell Command Update must not.
+
+  The runner account has no winget alias, but App Installer is registered, and as SYSTEM the
+  module finds its machine-wide `winget.exe` and the winget source opens (the probe below). The
+  task gets 60 minutes instead of 40, since the x64 and x86 installers run emulated there. The
+  executable report shows which build of each app landed, for example whether Google Drive's
+  x64-labelled installer put an ARM64 `GoogleDriveFS.exe` in place. Dell Command Update on ARM64
+  still needs a real Dell PC: the runner is not Dell hardware.
 - **Pin freshness:** `.github/workflows/wingetclient-pin-freshness.yml` runs every Tuesday (and on
   dispatch) `build/Set-WingetClientModulePin.ps1 -Check -Latest` on windows-latest, where the
   signature checks work, against the Gallery's latest stable Microsoft.WinGet.Client
@@ -2039,8 +2063,10 @@ throwaway VMs by construction:
   - what the module finds as SYSTEM (`Test-MachineWingetAvailable`, then `Test-WingetSourceOpen`),
     from a one-shot SYSTEM scheduled task that it removes again.
 
-  An ARM64 install leg waits on what it shows. Its first run (2026-10-21) found App Installer 1.29
-  registered and the framework present, but no winget on PATH for the job's account.
+  Its runs on 2026-10-21 found App Installer 1.29 registered and the framework present, but no
+  winget alias for the job's account. The machine-wide `winget.exe` runs, and as SYSTEM the module
+  finds it and opens the winget source: the SYSTEM leg above runs there as it is. A leg as the
+  job's account would first need winget for that account.
 - **What it does:** the weekly run uses the one-liner above, against raw `main`, in both passes.
   Pull-request and dispatched runs install the checkout (the PR's merge commit, or the dispatched
   branch). The first pass pipes it to `iex` like the one-liner, and the second runs it with

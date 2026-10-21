@@ -145,6 +145,8 @@ function ConvertTo-TranscriptAppId {
                          INSTALLED - the latest winget release needs ...', work-order item 32), for
                          a newer 1.8 build or another family alike: the pin has to move.
       WingetNotUsable    the end-of-run check printed 'winget: NOT USABLE'.
+      OSArchitecture     the text after the first 'OS architecture: ' (the architecture the run's
+                         catalog decisions used, Write-OSArchitectureLine), or $null.
       RanAsSystem        the run said it runs as SYSTEM ('Running as SYSTEM (for example from an
                          RMM agent): ...').
       InstallEngineLine  the text after the first 'Install engine: ' (a run as SYSTEM prints it
@@ -195,6 +197,7 @@ function ConvertFrom-InstallTranscript {
     $windowsAppRuntimePinStale = $false
     $wingetNotUsable = $false
     $ranAsSystem = $false
+    $osArchitecture = $null
     $installEngineLine = $null
     $wingetClientModuleLine = $null
     $wingetClientNotReadyReason = $null
@@ -302,6 +305,10 @@ function ConvertFrom-InstallTranscript {
         }
         if ($line -match '^Running as SYSTEM \(for example from an RMM agent\)') {
             $ranAsSystem = $true
+            continue
+        }
+        if ($null -eq $osArchitecture -and $line -match '^OS architecture:\s+(?<arch>\S.*)$') {
+            $osArchitecture = $Matches.arch
             continue
         }
         # The first one is Initialize-Winget's; the summary's 'Install engine: ...was requested but
@@ -414,6 +421,7 @@ function ConvertFrom-InstallTranscript {
         WindowsAppRuntimePinStale = $windowsAppRuntimePinStale
         WingetNotUsable     = $wingetNotUsable
         RanAsSystem         = $ranAsSystem
+        OSArchitecture      = $osArchitecture
         InstallEngineLine   = $installEngineLine
         InstallEngine       = $installEngine
         InstallEngineVersion = $installEngineVersion

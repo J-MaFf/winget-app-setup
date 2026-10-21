@@ -41,6 +41,10 @@
     checked by its pwsh.exe, which is what the bootstrap looks for; the image installs it from the
     MSI, so its Windows Installer entry is removed first and winget is the fallback.
 
+    winget is the runner account's alias when it has one. windows-11-arm gives runneradmin none,
+    though App Installer is registered (wgt-gq8.50), so there it is that package's own winget.exe
+    (Resolve-PreparationWingetPath).
+
     Runs under Windows PowerShell 5.1 (the steps use 'shell: powershell', which does not depend on
     PowerShell 7): ASCII only, no 7-only syntax.
 .PARAMETER PackageId
@@ -150,6 +154,41 @@ function Format-ProcessOutcome {
     return ('exit 0x{0:X8}' -f [int]$Outcome.ExitCode)
 }
 
+# What every winget call starts (Resolve-PreparationWingetPath, set by Invoke-RunnerPreparation).
+$script:PreparationWinget = 'winget'
+
+<#
+.SYNOPSIS
+    The winget this script runs: the alias on PATH, else App Installer's own winget.exe.
+.DESCRIPTION
+    Without an alias, the winget.exe in the install folder of the newest App Installer registered
+    for any user, the copy the module runs as SYSTEM; failing that, 'winget', whose calls then
+    fail and read as 'unknown'.
+.RETURNS
+    [string] 'winget' or a full path.
+#>
+function Resolve-PreparationWingetPath {
+    if (Get-Command -Name 'winget' -CommandType Application -ErrorAction SilentlyContinue) {
+        return 'winget'
+    }
+    try {
+        $packages = @(Get-AppxPackage -AllUsers -Name 'Microsoft.DesktopAppInstaller' -ErrorAction Stop | Sort-Object -Property { [version][string]$_.Version } -Descending)
+    }
+    catch {
+        return 'winget'
+    }
+    foreach ($package in $packages) {
+        if ([string]::IsNullOrWhiteSpace([string]$package.InstallLocation)) {
+            continue
+        }
+        $path = Join-Path ([string]$package.InstallLocation) 'winget.exe'
+        if (Test-Path -LiteralPath $path -PathType Leaf) {
+            return $path
+        }
+    }
+    return 'winget'
+}
+
 <#
 .SYNOPSIS
     Asks winget whether a package is installed, the way the installer does: from the winget
@@ -165,7 +204,7 @@ function Get-WingetPackagePresence {
         [int]$TimeoutSeconds
     )
 
-    $outcome = Invoke-BoundedProcess -FilePath 'winget' -ArgumentList @('list', '--id', $Id, '--exact', '--source', 'winget', '--accept-source-agreements', '--disable-interactivity') -TimeoutSeconds $TimeoutSeconds
+    $outcome = Invoke-BoundedProcess -FilePath $script:PreparationWinget -ArgumentList @('list', '--id', $Id, '--exact', '--source', 'winget', '--accept-source-agreements', '--disable-interactivity') -TimeoutSeconds $TimeoutSeconds
     if ($outcome.ExitCode -eq 0) {
         return [pscustomobject]@{ State = 'present'; Detail = 'winget list found it' }
     }
@@ -231,7 +270,7 @@ function Remove-PreinstalledPackage {
         return [pscustomobject]@{ App = $Id; Result = 'absent'; Detail = "${note}not installed on this runner" }
     }
 
-    $uninstall = Invoke-BoundedProcess -FilePath 'winget' -ArgumentList @('uninstall', '--id', $removalId, '--exact', '--source', 'winget', '--silent', '--accept-source-agreements', '--disable-interactivity') -TimeoutSeconds $UninstallTimeoutSeconds
+    $uninstall = Invoke-BoundedProcess -FilePath $script:PreparationWinget -ArgumentList @('uninstall', '--id', $removalId, '--exact', '--source', 'winget', '--silent', '--accept-source-agreements', '--disable-interactivity') -TimeoutSeconds $UninstallTimeoutSeconds
     $uninstallText = $note + 'winget uninstall ' + (Format-ProcessOutcome -Outcome $uninstall -TimeoutSeconds $UninstallTimeoutSeconds)
     $after = Get-WingetPackagePresence -Id $removalId -TimeoutSeconds $ListTimeoutSeconds
     switch ($after.State) {
@@ -448,6 +487,10 @@ function Invoke-RunnerPreparation {
         [string]$ResultPath
     )
 
+    $script:PreparationWinget = Resolve-PreparationWingetPath
+    if ($script:PreparationWinget -ne 'winget') {
+        Write-Host "No winget alias for this account; using $($script:PreparationWinget)."
+    }
     $aliasedCount = @($PackageId | Where-Object { (Get-PreinstalledRemovalId -Id $_) -ne $_ }).Count
     $worstCase = Get-RunnerPreparationWorstCase -PackageCount @($PackageId).Count -AliasedCount $aliasedCount -IncludePowerShell7:$IncludePowerShell7 -ListTimeoutSeconds $ListTimeoutSeconds -UninstallTimeoutSeconds $UninstallTimeoutSeconds
     Write-Host ('Every call is bounded (winget list {0} s, uninstall {1} s): at most {2:N1} min in all.' -f $ListTimeoutSeconds, $UninstallTimeoutSeconds, ($worstCase / 60))

@@ -31,19 +31,20 @@ BeforeAll {
         if ($idIndex -ge 0) {
             $id = $ArgumentList[$idIndex + 1]
         }
-        if ($FilePath -eq 'winget' -and $script:SourceBroken) {
+        # winget is the alias, or the path Resolve-PreparationWingetPath gave (wgt-gq8.50).
+        if ($FilePath -eq $script:WingetCommand -and $script:SourceBroken) {
             # A winget source that cannot open (0x8A15000F): with --source winget the call fails;
             # without it, winget only warns and finds nothing (0x8A150014).
             if ($ArgumentList -contains '--source') { return (New-FakeProcess -ExitCode -1978335217) }
             return (New-FakeProcess -ExitCode -1978335212)
         }
-        if ($FilePath -eq 'winget' -and $ArgumentList[0] -eq 'list') {
+        if ($FilePath -eq $script:WingetCommand -and $ArgumentList[0] -eq 'list') {
             if ($script:ListHangs) { return (New-FakeProcess -Hang) }
             if ($script:ListFails) { return (New-FakeProcess -ExitCode -1978335217) }
             if ($script:Installed[$id]) { return (New-FakeProcess -ExitCode 0) }
             return (New-FakeProcess -ExitCode -1978335212)
         }
-        if ($FilePath -eq 'winget' -and $ArgumentList[0] -eq 'uninstall') {
+        if ($FilePath -eq $script:WingetCommand -and $ArgumentList[0] -eq 'uninstall') {
             if ($script:RemovableByWinget -contains $id) {
                 $script:Installed[$id] = $false
                 if ($id -eq 'Microsoft.PowerShell') { Remove-Item -LiteralPath $script:FakePwsh -Force }
@@ -97,6 +98,10 @@ Describe 'Removing the preinstalled apps' {
         $script:SourceBroken = $false
         $script:MsiRemovesPwsh = $true
         $script:KilledProcesses = 0
+        $script:WingetCommand = 'winget'
+        Mock Resolve-PreparationWingetPath { $script:WingetCommand }
+        # Set by Invoke-RunnerPreparation; the tests that call the helpers directly start from it.
+        $script:PreparationWinget = 'winget'
 
         # PowerShell 7 lives in a Program Files under TestDrive; the real ones are never looked at.
         $script:SavedProgramFiles = $env:ProgramFiles
@@ -127,6 +132,16 @@ Describe 'Removing the preinstalled apps' {
     AfterEach {
         $env:ProgramFiles = $script:SavedProgramFiles
         $env:ProgramW6432 = $script:SavedProgramW6432
+    }
+
+    It 'Runs every winget call through App Installer''s own winget.exe when the account has no alias (wgt-gq8.50)' {
+        $script:WingetCommand = 'C:\Program Files\WindowsApps\Microsoft.DesktopAppInstaller_1.29.379.0_arm64__8wekyb3d8bbwe\winget.exe'
+
+        $results = Invoke-RunnerPreparation -PackageId @('Google.Chrome.EXE', '7zip.7zip', 'Git.Git') -ListTimeoutSeconds 45 -UninstallTimeoutSeconds 150 6>$null
+
+        @($results | ForEach-Object { $_.Result }) | Should -Be @('removed', 'removed', 'absent')
+        Should -Invoke Start-Process -Times 0 -Exactly -ParameterFilter { $FilePath -eq 'winget' }
+        Should -Invoke Start-Process -Times 2 -Exactly -ParameterFilter { $FilePath -eq $script:WingetCommand -and $ArgumentList[0] -eq 'uninstall' }
     }
 
     It 'Leaves an app that is not installed alone' {
@@ -307,6 +322,57 @@ Describe 'Removing the preinstalled apps' {
     }
 }
 
+Describe 'Resolve-PreparationWingetPath (wgt-gq8.50)' {
+    BeforeEach {
+        # Two registered App Installers, each with its own winget.exe, and one without a folder.
+        $script:Older = Join-Path $TestDrive 'Microsoft.DesktopAppInstaller_1.28.240.0_arm64__8wekyb3d8bbwe'
+        $script:Newer = Join-Path $TestDrive 'Microsoft.DesktopAppInstaller_1.29.379.0_arm64__8wekyb3d8bbwe'
+        foreach ($folder in @($script:Older, $script:Newer)) {
+            $null = New-Item -ItemType Directory -Path $folder -Force
+            Set-Content -LiteralPath (Join-Path $folder 'winget.exe') -Value 'fake'
+        }
+        Mock Get-Command { $null } -ParameterFilter { $Name -eq 'winget' }
+        Mock Get-AppxPackage {
+            [pscustomobject]@{ Version = '1.9.25200.0'; InstallLocation = '' }
+            [pscustomobject]@{ Version = '1.28.240.0'; InstallLocation = $script:Older }
+            [pscustomobject]@{ Version = '1.29.379.0'; InstallLocation = $script:Newer }
+        }
+    }
+
+    It 'Runs the alias when the account has one, and looks no further' {
+        Mock Get-Command { [pscustomobject]@{ Name = 'winget.exe' } } -ParameterFilter { $Name -eq 'winget' }
+
+        Resolve-PreparationWingetPath | Should -Be 'winget'
+        Should -Invoke Get-Command -Times 1 -Exactly -ParameterFilter { $Name -eq 'winget' -and $CommandType -eq 'Application' }
+        Should -Invoke Get-AppxPackage -Times 0 -Exactly
+    }
+
+    It 'Otherwise runs the winget.exe of the newest App Installer registered for any user' {
+        Resolve-PreparationWingetPath | Should -Be (Join-Path $script:Newer 'winget.exe')
+        Should -Invoke Get-AppxPackage -Times 1 -Exactly -ParameterFilter { $AllUsers -and $Name -eq 'Microsoft.DesktopAppInstaller' }
+    }
+
+    It 'Passes over a package without winget.exe' {
+        Remove-Item -LiteralPath (Join-Path $script:Newer 'winget.exe')
+
+        Resolve-PreparationWingetPath | Should -Be (Join-Path $script:Older 'winget.exe')
+    }
+
+    It 'Falls back to the alias''s name when <Case>, so the calls fail and read as unknown' -ForEach @(
+        @{ Case = 'no App Installer is registered'; Throws = $false }
+        @{ Case = 'the AppX packages cannot be read'; Throws = $true }
+    ) {
+        if ($Throws) {
+            Mock Get-AppxPackage { throw 'Get-AppxPackage failed.' }
+        }
+        else {
+            Mock Get-AppxPackage { }
+        }
+
+        Resolve-PreparationWingetPath | Should -Be 'winget'
+    }
+}
+
 Describe 'ConvertTo-PreparationRecord' {
     It 'Sorts the results by what is true now, and counts an unexpected result as unknown' {
         $record = ConvertTo-PreparationRecord -Results @(
@@ -342,8 +408,8 @@ Describe 'The time limits of runner preparation' {
     }
 
     It 'Fits the defaults into the timeout-minutes of every workflow step <Step> (<Count>), with a minute to spare' -ForEach @(
-        # The PowerShell 7 leg and the two SYSTEM legs have a step each with the first name.
-        @{ Step = 'Remove the catalog apps the runner image ships with'; IncludePowerShell7 = $false; Count = 3 }
+        # The PowerShell 7 leg and the three SYSTEM legs have a step each with the first name.
+        @{ Step = 'Remove the catalog apps the runner image ships with'; IncludePowerShell7 = $false; Count = 4 }
         @{ Step = 'Remove the catalog apps the runner image ships with, and PowerShell 7'; IncludePowerShell7 = $true; Count = 1 }
     ) {
         # Over the limit, the runner stops the step part-way, and a killed winget's uninstaller
@@ -375,9 +441,9 @@ Describe 'The time limits of runner preparation' {
     }
 
     It 'Is run only by the steps whose time limit the test above checks' {
-        # A step under another name would escape that check: 3 + 1 steps above.
+        # A step under another name would escape that check: 4 + 1 steps above.
         $workflow = Get-Content -Raw -LiteralPath (Join-Path $script:RepoRoot '.github/workflows/e2e-install.yml')
         $calls = [regex]::Matches($workflow, '(?m)^\s+&?\s*\.[\\/]e2e[\\/]Remove-PreinstalledApps\.ps1\b')
-        $calls.Count | Should -Be 4
+        $calls.Count | Should -Be 5
     }
 }

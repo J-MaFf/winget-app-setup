@@ -306,7 +306,7 @@ Describe 'e2e/Invoke-SystemInstallPass.ps1 wiring' {
         $workflow | Should -Match '(?m)^  e2e-install-system:'
         $workflow | Should -Match 'Invoke-SystemInstallPass\.ps1'
         $workflow | Should -Match "pattern='\^\(WingetAppSetup/\|build/\|e2e/\|rmm/\)"
-        $workflow | Should -Match 'needs: \[e2e-install, e2e-install-windows-powershell, e2e-install-system, e2e-install-system-winget-client\]'
+        $workflow | Should -Match 'needs: \[e2e-install, e2e-install-windows-powershell, e2e-install-system, e2e-install-system-winget-client, e2e-install-system-arm64\]'
     }
 }
 
@@ -661,18 +661,18 @@ Describe 'e2e/Invoke-SystemInstallPass.ps1 per-app wiring' {
         $main.IndexOf('Get-SystemPassAppExpectation') | Should -BeLessThan $main.IndexOf('Invoke-SystemPassTask')
     }
 
-    It 'Runs e2e/Remove-PreinstalledApps.ps1 in both SYSTEM jobs with its default apps, writing the record the install step reads (wgt-gq8.53)' {
+    It 'Runs e2e/Remove-PreinstalledApps.ps1 in every SYSTEM job with its default apps, writing the record the install step reads (wgt-gq8.53)' {
         $workflow = Get-Content -Raw -LiteralPath (Join-Path $script:RepoRoot '.github/workflows/e2e-install.yml')
         $start = $workflow.IndexOf("`n  e2e-install-system:")
         $jobs = $workflow.Substring($start, $workflow.IndexOf("`n  report-failure:") - $start)
 
         $removals = [regex]::Matches($jobs, '(?m)^\s+& \.\\e2e\\Remove-PreinstalledApps\.ps1(?<args>.*)$')
-        $removals.Count | Should -Be 2
+        $removals.Count | Should -Be 3
         foreach ($removal in $removals) {
             $removal.Groups['args'].Value | Should -Match "^ -ResultPath \(Join-Path \`$env:RUNNER_TEMP 'e2e-diagnostics\\preinstalled-apps\.json'\)\s*$"
         }
-        $passes = [regex]::Matches($jobs, "(?m)^.*Invoke-SystemInstallPass\.ps1.*$|^\s+\`$passArguments = .*$")
-        @($passes | Where-Object { $_.Value -match "-PreparationResultPath', \(Join-Path \`$diagnosticsDir 'preinstalled-apps\.json'\)|-PreparationResultPath \(Join-Path \`$diagnosticsDir 'preinstalled-apps\.json'\)" }).Count | Should -Be 2
+        $passes = [regex]::Matches($jobs, "(?m)^.*(Invoke-SystemInstallPass\.ps1|'-PreparationResultPath').*$")
+        @($passes | Where-Object { $_.Value -match "-PreparationResultPath', \(Join-Path \`$diagnosticsDir 'preinstalled-apps\.json'\)|-PreparationResultPath \(Join-Path \`$diagnosticsDir 'preinstalled-apps\.json'\)" }).Count | Should -Be 3
     }
 }
 
@@ -883,7 +883,9 @@ Describe 'The SYSTEM pass with the Microsoft.WinGet.Client engine' {
     It 'Is run by its own job, which passes the engine and two passes, checks the pin, and reports to report-failure' {
         $workflow = Get-Content -Raw -LiteralPath (Join-Path $script:RepoRoot '.github/workflows/e2e-install.yml')
         $start = $workflow.IndexOf("`n  e2e-install-system-winget-client:")
-        $job = $workflow.Substring($start, $workflow.IndexOf("`n  report-failure:") - $start)
+        # Up to the next job.
+        $next = [regex]::Match($workflow.Substring($start + 1), '\n  [a-z0-9-]+:[ \t]*\r?\n')
+        $job = $workflow.Substring($start, $next.Index + 1)
 
         $job | Should -Match 'Invoke-SystemInstallPass\.ps1 -SystemInstallEngine WinGetClient -PassCount 2'
         $job | Should -Match 'Set-WingetClientModulePin\.ps1 -Check'
@@ -1121,5 +1123,352 @@ Describe 'The SYSTEM budget pass' {
         # The job's backstop covers its steps' longest limits, plus a few minutes for checkout and uploads.
         $jobLimit = [int][regex]::Match($job, '(?m)^    timeout-minutes: (\d+)').Groups[1].Value
         $jobLimit | Should -BeGreaterOrEqual (15 + 3 + 62 + 5 + 5)
+    }
+}
+
+# wgt-gq8.50: the SYSTEM legs without the engine name their runner's architecture and the apps that
+# must and must not apply there. That holds even if Get-OSArchitecture misread the architecture,
+# which the per-app rows, made by the same module on the same PC, would not see.
+Describe 'The architecture a SYSTEM leg names (wgt-gq8.50)' {
+    BeforeAll {
+        # The entries of last-run.json that matter here, from a run that decided as an ARM64 PC
+        # does, or with -AsX64 as an x64 one.
+        function New-ArchitectureRunRecord {
+            param ([switch]$AsX64)
+            $reader64 = [pscustomobject]@{ id = 'Adobe.Acrobat.Reader.64-bit'; status = 'Skipped'; reason = 'not applicable: its only installer is x64, and Adobe supports only the 32-bit Reader on ARM64 Windows' }
+            $reader32 = [pscustomobject]@{ id = 'Adobe.Acrobat.Reader.32-bit'; status = 'Installed'; reason = $null }
+            if ($AsX64) {
+                $reader64 = [pscustomobject]@{ id = 'Adobe.Acrobat.Reader.64-bit'; status = 'Installed'; reason = $null }
+                $reader32 = [pscustomobject]@{ id = 'Adobe.Acrobat.Reader.32-bit'; status = 'Skipped'; reason = 'not applicable: ARM64 and 32-bit Windows only; x64 PCs get the 64-bit Reader' }
+            }
+            return [pscustomobject]@{
+                schemaVersion = 1
+                apps          = @(
+                    $reader64
+                    $reader32
+                    [pscustomobject]@{ id = 'Google.GoogleDrive'; status = 'Installed'; reason = $null }
+                    [pscustomobject]@{ id = 'Dell.CommandUpdate.Universal'; status = 'Skipped'; reason = 'not applicable: Dell hardware with x64 Windows only; winget has no ARM64 installer for it' }
+                )
+            }
+        }
+
+        # The rows of the ARM64 leg, with the verdicts the (mocked) module gives.
+        function Get-ArchitectureRow {
+            param (
+                [string]$Detected = 'Arm64',
+                [string]$DetectionProblem,
+                $RunRecord = (New-ArchitectureRunRecord),
+                [string[]]$Applicable = @('Adobe.Acrobat.Reader.32-bit', 'Google.GoogleDrive'),
+                [string[]]$NotApplicable = @('Adobe.Acrobat.Reader.64-bit', 'Dell.CommandUpdate.Universal'),
+                [switch]$NoCatalog,
+                $Transcript = (New-ArchitectureTranscript -Architecture $Detected)
+            )
+            $verdicts = $null
+            if (-not $NoCatalog) {
+                $verdicts = Get-SystemRunApplicability -Catalog @(Get-DefaultAppCatalog)
+            }
+            return @(Get-SystemPassArchitectureResult -ExpectedArchitecture 'Arm64' -DetectedArchitecture $Detected -DetectionProblem $DetectionProblem -RunnerArchitecture 'ARM64' -Transcript $Transcript -Applicability $verdicts -ExpectApplicable $Applicable -ExpectNotApplicable $NotApplicable -RunRecord $RunRecord)
+        }
+
+        # The run's transcript, with its 'OS architecture:' line after the build id (none when empty).
+        function New-ArchitectureTranscript {
+            param ([string]$Architecture)
+            $lines = @('Installer build: 1.0.0+5ea1f00d')
+            if ($Architecture) {
+                $lines += "OS architecture: $Architecture"
+            }
+            $lines += 'Running as SYSTEM (for example from an RMM agent): installing for the whole PC only.'
+            return [pscustomobject]@{ Name = 'install-20261021-080010.log'; Parsed = (ConvertFrom-InstallTranscript -Content ($lines -join "`n")) }
+        }
+
+        function Get-WorkflowJob {
+            param ([string]$Name)
+            $workflow = Get-Content -Raw -LiteralPath (Join-Path $script:RepoRoot '.github/workflows/e2e-install.yml')
+            $start = $workflow.IndexOf("`n  ${Name}:")
+            $end = $workflow.IndexOf("`n  ", $start + 3)
+            while ($end -ge 0 -and $workflow.Substring($end + 3, 1) -eq ' ') {
+                $end = $workflow.IndexOf("`n  ", $end + 3)
+            }
+            return $workflow.Substring($start, $end - $start)
+        }
+    }
+
+    BeforeEach {
+        $script:MockedArchitecture = 'Arm64'
+        Mock Get-OSArchitecture { $script:MockedArchitecture }
+        Mock Get-ComputerManufacturer { 'Microsoft Corporation' }
+        Mock Test-WindowsTerminalHostsCurrentSession { $true }
+    }
+
+    It 'Passes an ARM64 run: the architecture, Reader 32-bit and Google Drive applied, Reader 64-bit and Dell Command Update skipped as not applicable' {
+        $rows = Get-ArchitectureRow
+
+        @($rows | ForEach-Object { $_.Assertion }) | Should -Be @('OS architecture is Arm64', 'The run''s OS architecture is Arm64', 'Applies on Arm64: Adobe.Acrobat.Reader.32-bit', 'Applies on Arm64: Google.GoogleDrive', 'Not applicable on Arm64: Adobe.Acrobat.Reader.64-bit', 'Not applicable on Arm64: Dell.CommandUpdate.Universal')
+        @($rows | Where-Object Result -NE 'PASS') | Should -BeNullOrEmpty
+        $rows[0].Detail | Should -Be 'Get-OSArchitecture: Arm64; RUNNER_ARCH: ARM64'
+        $rows[1].Detail | Should -Be 'install-20261021-080010.log: OS architecture: Arm64'
+        $rows[2].Detail | Should -Be 'the catalog says it applies; last-run.json: Installed'
+        $rows[4].Detail | Should -Be 'the catalog says it does not apply; last-run.json: Skipped (not applicable: its only installer is x64, and Adobe supports only the 32-bit Reader on ARM64 Windows)'
+    }
+
+    It 'Fails an architecture the module misread, which the per-app rows pass' {
+        # The module and the run both took the ARM64 runner for an x64 PC.
+        $script:MockedArchitecture = 'X64'
+        $record = New-ArchitectureRunRecord -AsX64
+        $catalog = @(Get-DefaultAppCatalog | Where-Object { @($record.apps | ForEach-Object { $_.id }) -contains $_.name })
+        $perApp = Get-SystemPassAppResult -RunRecord $record -AppExpectation @(Get-SystemPassAppExpectation -Catalog $catalog -Applicability (Get-SystemRunApplicability -Catalog $catalog))
+        @($perApp | Where-Object Result -EQ 'FAIL') | Should -BeNullOrEmpty
+
+        $rows = Get-ArchitectureRow -Detected 'X64' -RunRecord $record
+
+        @($rows | Where-Object Result -EQ 'FAIL' | ForEach-Object { $_.Assertion }) | Should -Be @('OS architecture is Arm64', 'The run''s OS architecture is Arm64', 'Applies on Arm64: Adobe.Acrobat.Reader.32-bit', 'Not applicable on Arm64: Adobe.Acrobat.Reader.64-bit')
+        $rows[0].Detail | Should -Be "Get-OSArchitecture: X64; RUNNER_ARCH: ARM64; this leg's runner is Arm64"
+        $rows[1].Detail | Should -Be 'install-20261021-080010.log: OS architecture: X64'
+        $rows[2].Detail | Should -Be 'the catalog says it does not apply; last-run.json: Skipped (not applicable: ARM64 and 32-bit Windows only; x64 PCs get the 64-bit Reader); it must apply on Arm64; the run skipped it as not applicable'
+        $rows[4].Detail | Should -Be 'the catalog says it applies; last-run.json: Installed; it must not apply on Arm64; the run had to skip it as not applicable'
+    }
+
+    It 'Fails the architecture row, saying why, when Get-OSArchitecture threw' {
+        $rows = Get-ArchitectureRow -Detected '' -DetectionProblem 'The OS architecture could not be read.' -Transcript (New-ArchitectureTranscript -Architecture 'Arm64')
+
+        $rows[0].Result | Should -Be 'FAIL'
+        $rows[0].Detail | Should -Be "Get-OSArchitecture gave no answer: The OS architecture could not be read.; RUNNER_ARCH: ARM64; this leg's runner is Arm64"
+        $rows[1].Result | Should -Be 'PASS'
+    }
+
+    It 'Fails the run''s architecture row when <Case>' -ForEach @(
+        @{ Case = 'the run logged another architecture'; Transcript = 'X64'; Detail = 'install-20261021-080010.log: OS architecture: X64' }
+        @{ Case = 'the run could not read it'; Transcript = 'unknown (The OS architecture could not be read.)'; Detail = 'install-20261021-080010.log: OS architecture: unknown (The OS architecture could not be read.)' }
+        @{ Case = 'the transcript has no such line'; Transcript = ''; Detail = 'install-20261021-080010.log has no ''OS architecture:'' line' }
+        @{ Case = 'there is no transcript'; Transcript = $null; Detail = 'no transcript of the run' }
+    ) {
+        $runTranscript = $null
+        if ($null -ne $Transcript) {
+            $runTranscript = New-ArchitectureTranscript -Architecture $Transcript
+        }
+
+        $rows = Get-ArchitectureRow -Transcript $runTranscript
+
+        $rows[0].Result | Should -Be 'PASS'
+        $rows[1].Result | Should -Be 'FAIL'
+        $rows[1].Detail | Should -Be $Detail
+        @($rows | Where-Object Result -EQ 'FAIL').Count | Should -Be 1
+    }
+
+    It 'Fails a run that recorded an app as the catalog does not decide it: <Case>' -ForEach @(
+        @{ Case = 'Google Drive skipped as not applicable'; Id = 'Google.GoogleDrive'; Status = 'Skipped'; Reason = 'not applicable: for X64 Windows only; this PC is Arm64'; Assertion = 'Applies on Arm64: Google.GoogleDrive'; Problem = 'the run skipped it as not applicable' }
+        @{ Case = 'Dell Command Update installed'; Id = 'Dell.CommandUpdate.Universal'; Status = 'Installed'; Reason = $null; Assertion = 'Not applicable on Arm64: Dell.CommandUpdate.Universal'; Problem = 'the run had to skip it as not applicable' }
+        @{ Case = 'Reader 64-bit failed'; Id = 'Adobe.Acrobat.Reader.64-bit'; Status = 'Failed'; Reason = 'winget exit 0x8A150010'; Assertion = 'Not applicable on Arm64: Adobe.Acrobat.Reader.64-bit'; Problem = 'the run had to skip it as not applicable' }
+    ) {
+        $record = New-ArchitectureRunRecord
+        $entry = $record.apps | Where-Object id -EQ $Id
+        $entry.status = $Status
+        $entry.reason = $Reason
+
+        $row = Get-ArchitectureRow -RunRecord $record | Where-Object Assertion -EQ $Assertion
+
+        $row.Result | Should -Be 'FAIL'
+        $row.Detail | Should -BeLike "*; $Problem"
+        @(Get-ArchitectureRow -RunRecord $record | Where-Object Result -EQ 'FAIL').Count | Should -Be 1
+    }
+
+    It 'Fails every app row when <Case>' -ForEach @(
+        @{ Case = 'there is no last-run.json'; NoRecord = $true; NoCatalog = $false; Problem = 'no last-run.json' }
+        @{ Case = 'the catalog could not be read'; NoRecord = $false; NoCatalog = $true; Problem = 'the checkout''s catalog could not be read' }
+    ) {
+        $arguments = @{ NoCatalog = $NoCatalog }
+        if ($NoRecord) {
+            $arguments.RunRecord = $null
+        }
+
+        $rows = Get-ArchitectureRow @arguments
+
+        $rows[0].Result | Should -Be 'PASS'
+        $rows[1].Result | Should -Be 'PASS'
+        foreach ($row in @($rows | Select-Object -Skip 2)) {
+            $row.Result | Should -Be 'FAIL'
+            $row.Detail | Should -BeLike "*$Problem*"
+        }
+    }
+
+    It 'Fails an id the catalog does not have, such as a typo in the workflow' {
+        $rows = Get-ArchitectureRow -Applicable @('Adobe.Acrobat.Reader.32bit') -NotApplicable @()
+
+        $rows.Count | Should -Be 3
+        $rows[2].Result | Should -Be 'FAIL'
+        $rows[2].Detail | Should -Be 'the checkout''s catalog has no such app; 0 entries in last-run.json'
+    }
+
+    It 'Splits the lists pwsh -File passes as one comma-separated string' {
+        Split-SystemPassList -Value @('Adobe.Acrobat.Reader.64-bit, Dell.CommandUpdate.Universal', ' Google.GoogleDrive ', '') | Should -Be @('Adobe.Acrobat.Reader.64-bit', 'Dell.CommandUpdate.Universal', 'Google.GoogleDrive')
+        @(Split-SystemPassList -Value @()).Count | Should -Be 0
+        @(Split-SystemPassList -Value $null).Count | Should -Be 0
+    }
+
+    It 'Refuses the app lists without -ExpectOSArchitecture, before it starts anything (exit 64)' {
+        $pwsh = (Get-Process -Id $PID).Path
+        $output = & $pwsh -NoProfile -File (Join-Path $script:RepoRoot 'e2e/Invoke-SystemInstallPass.ps1') -RmmWrapperPath (Join-Path $script:RepoRoot 'rmm/Invoke-WingetAppSetup.ps1') -CheckoutInstallerPath (Join-Path $script:RepoRoot 'winget-app-install.ps1') -ExpectApplicable 'Google.GoogleDrive' 2>&1
+
+        $LASTEXITCODE | Should -Be 64
+        ($output -join "`n") | Should -Match '-ExpectApplicable and -ExpectNotApplicable need -ExpectOSArchitecture'
+    }
+
+    It 'Adds the architecture rows to every pass, and prints the executables before the results, only with -ExpectOSArchitecture' {
+        $script = Get-Content -Raw -LiteralPath (Join-Path $script:RepoRoot 'e2e/Invoke-SystemInstallPass.ps1')
+        $main = $script.Substring($script.IndexOf('if ($MyInvocation.InvocationName -ne ''.'')'))
+
+        $main | Should -Match '\$detectedArchitecture = \[string\]\(& \$wingetAppSetupModule \{ Get-OSArchitecture \}\)'
+        $main | Should -Match 'Get-SystemPassArchitectureResult -ExpectedArchitecture \$ExpectOSArchitecture -DetectedArchitecture \$detectedArchitecture [^\r\n]*-Transcript \$taskRun\.Transcript -Applicability \$applicability -ExpectApplicable \$expectApplicableIds -ExpectNotApplicable \$expectNotApplicableIds -RunRecord \$runRecordRead\.Record'
+        $loop = $main.IndexOf('for ($passNumber = 1;')
+        $main.IndexOf('Get-SystemPassArchitectureResult') | Should -BeGreaterThan $loop
+        $main.IndexOf('Get-SystemPassArchitectureResult') | Should -BeLessThan $main.IndexOf('Add-SystemPassPrefix -Rows')
+        $main | Should -Match "(?s)if \(\`$ExpectOSArchitecture\) \{\s+# Evidence only[^\r\n]*\s+Write-Host ''\s+Write-Host '=== Installed executables: PE machine type ==='\s+Write-Host \(@\(Get-InstalledExecutableArchitecture\)"
+        $main.IndexOf('=== Installed executables: PE machine type ===') | Should -BeLessThan $main.IndexOf('=== E2E assertion results ===')
+    }
+
+    It 'Runs the ARM64 leg on windows-11-arm, as the other legs are run, and reports it to report-failure' {
+        $workflow = Get-Content -Raw -LiteralPath (Join-Path $script:RepoRoot '.github/workflows/e2e-install.yml')
+        $job = Get-WorkflowJob -Name 'e2e-install-system-arm64'
+        $systemJob = Get-WorkflowJob -Name 'e2e-install-system'
+
+        $job | Should -Match '(?m)^    runs-on: windows-11-arm\s*$'
+        [regex]::Match($job, '(?m)^    if: .*$').Value | Should -Be ([regex]::Match($systemJob, '(?m)^    if: .*$').Value)
+        $job | Should -Match "'-TimeoutMinutes', '60',"
+        $job | Should -Match "'-ExpectOSArchitecture', 'Arm64',"
+        $job | Should -Match 'Invoke-SystemInstallPass\.ps1 @passArguments 2>&1 \|'
+        # The pass step covers the task's 60 minutes and the 2 the script waits past them; the job's
+        # backstop covers every step's limit, plus a few minutes for checkout and uploads.
+        $passLimit = [int][regex]::Match($job, '(?ms)- name: Install as SYSTEM on ARM64[^\n]*\n(?:(?!      - name:).)*?timeout-minutes: (\d+)').Groups[1].Value
+        $passLimit | Should -BeGreaterOrEqual 63
+        $jobLimit = [int][regex]::Match($job, '(?m)^    timeout-minutes: (\d+)').Groups[1].Value
+        $stepLimits = @([regex]::Matches($job, '(?m)^        timeout-minutes: (\d+)') | ForEach-Object { [int]$_.Groups[1].Value })
+        $stepLimits.Count | Should -Be 4
+        $jobLimit | Should -BeGreaterOrEqual ((($stepLimits | Measure-Object -Sum).Sum) + 5)
+        $job | Should -Match 'name: e2e-install-transcripts-system-arm64'
+        $job | Should -Match 'name: e2e-diagnostics-system-arm64'
+        $workflow | Should -Match "needs\.e2e-install-system-arm64\.result != 'success'"
+        $workflow | Should -Match 'SYSTEM_ARM64_LEG_RESULT: \$\{\{ needs\.e2e-install-system-arm64\.result \}\}'
+        $workflow | Should -Match "leg_section e2e-install-system-arm64 'run as SYSTEM through the RMM wrapper on ARM64 Windows 11' `"\`$SYSTEM_ARM64_LEG_RESULT`" \\\s+artifacts/e2e-install-transcripts-system-arm64 artifacts/e2e-diagnostics-system-arm64"
+    }
+
+    It 'Names, in <Job>, its architecture and only catalog apps, each as the catalog decides there' -ForEach @(
+        @{ Job = 'e2e-install-system'; Architecture = 'X64'; Applicable = @('Adobe.Acrobat.Reader.64-bit'); NotApplicable = @('Adobe.Acrobat.Reader.32-bit', 'Dell.CommandUpdate.Universal') }
+        @{ Job = 'e2e-install-system-arm64'; Architecture = 'Arm64'; Applicable = @('Adobe.Acrobat.Reader.32-bit', 'Google.GoogleDrive'); NotApplicable = @('Adobe.Acrobat.Reader.64-bit', 'Dell.CommandUpdate.Universal') }
+    ) {
+        $job = Get-WorkflowJob -Name $Job
+        $named = @{}
+        foreach ($parameter in @('ExpectOSArchitecture', 'ExpectApplicable', 'ExpectNotApplicable')) {
+            $match = [regex]::Match($job, "'-$parameter', '(?<value>[^']*)'")
+            $match.Success | Should -BeTrue
+            $named[$parameter] = $match.Groups['value'].Value
+        }
+        $named['ExpectOSArchitecture'] | Should -Be $Architecture
+        @(Split-SystemPassList -Value $named['ExpectApplicable']) | Should -Be $Applicable
+        @(Split-SystemPassList -Value $named['ExpectNotApplicable']) | Should -Be $NotApplicable
+
+        # The catalog, on that architecture and as SYSTEM, agrees: a catalog change that moves one
+        # of these apps fails here before it fails the leg.
+        $script:MockedArchitecture = $Architecture
+        $verdicts = Get-SystemRunApplicability -Catalog @(Get-DefaultAppCatalog)
+        foreach ($id in $Applicable) {
+            $verdicts.ContainsKey($id) | Should -BeTrue -Because "$id is a catalog app"
+            $verdicts[$id] | Should -BeTrue -Because "$id applies on $Architecture"
+        }
+        foreach ($id in $NotApplicable) {
+            $verdicts.ContainsKey($id) | Should -BeTrue -Because "$id is a catalog app"
+            $verdicts[$id] | Should -BeFalse -Because "$id does not apply on $Architecture"
+        }
+    }
+}
+
+Describe 'Get-PeMachineType' {
+    BeforeAll {
+        # A minimal PE header: 'MZ', the PE header's offset (0x80) at 0x3C, 'PE\0\0' and the machine.
+        function New-TestPeFile {
+            param ([string]$Name, [int]$Machine = 0x8664, [switch]$NoMz, [switch]$NoPeSignature, [int]$Length = 0x200)
+            $bytes = New-Object byte[] $Length
+            if (-not $NoMz) {
+                $bytes[0] = 0x4D
+                $bytes[1] = 0x5A
+            }
+            if ($Length -ge 0x40) {
+                [BitConverter]::GetBytes([int]0x80).CopyTo($bytes, 0x3C)
+            }
+            if ($Length -ge 0x86) {
+                if (-not $NoPeSignature) {
+                    $bytes[0x80] = 0x50
+                    $bytes[0x81] = 0x45
+                }
+                [BitConverter]::GetBytes([uint16]$Machine).CopyTo($bytes, 0x84)
+            }
+            $path = Join-Path $TestDrive $Name
+            [System.IO.File]::WriteAllBytes($path, $bytes)
+            return $path
+        }
+    }
+
+    It 'Reads machine <Machine> as <Expected>' -ForEach @(
+        @{ Machine = 0x8664; Expected = 'X64' }
+        @{ Machine = 0xAA64; Expected = 'Arm64' }
+        @{ Machine = 0x014C; Expected = 'X86' }
+        @{ Machine = 0x01C4; Expected = 'Arm' }
+        @{ Machine = 0x0200; Expected = 'unknown (0x0200)' }
+    ) {
+        Get-PeMachineType -Path (New-TestPeFile -Name "machine-$Machine.exe" -Machine $Machine) | Should -Be $Expected
+    }
+
+    It 'Returns nothing for <Case>' -ForEach @(
+        @{ Case = 'a file without MZ'; Arguments = @{ Name = 'no-mz.exe'; NoMz = $true } }
+        @{ Case = 'a file without the PE signature'; Arguments = @{ Name = 'no-pe.exe'; NoPeSignature = $true } }
+        @{ Case = 'a file too short for its header'; Arguments = @{ Name = 'short.exe'; Length = 0x60 } }
+    ) {
+        Get-PeMachineType -Path (New-TestPeFile @Arguments) | Should -BeNullOrEmpty
+    }
+
+    It 'Returns nothing for a file that is not there' {
+        Get-PeMachineType -Path (Join-Path $TestDrive 'missing.exe') | Should -BeNullOrEmpty
+    }
+}
+
+Describe 'Get-InstalledExecutableArchitecture' {
+    It 'Finds each app''s executable under every Program Files folder, wildcards included, and reads its machine type' {
+        $programFiles = Join-Path $TestDrive 'Program Files'
+        $programFilesX86 = Join-Path $TestDrive 'Program Files (x86)'
+        $drive = Join-Path $programFiles 'Google/Drive File Stream/121.0.1.0'
+        $vnc = Join-Path $programFilesX86 'TightVNC'
+        $contoso = Join-Path $programFiles 'Contoso'
+        foreach ($folder in @($drive, $vnc, $contoso)) {
+            $null = New-Item -ItemType Directory -Path $folder -Force
+        }
+        $arm64 = New-Object byte[] 0x200
+        $arm64[0] = 0x4D; $arm64[1] = 0x5A; $arm64[0x80] = 0x50; $arm64[0x81] = 0x45
+        [BitConverter]::GetBytes([int]0x80).CopyTo($arm64, 0x3C)
+        [BitConverter]::GetBytes([uint16]0xAA64).CopyTo($arm64, 0x84)
+        [System.IO.File]::WriteAllBytes((Join-Path $drive 'GoogleDriveFS.exe'), $arm64)
+        [BitConverter]::GetBytes([uint16]0x8664).CopyTo($arm64, 0x84)
+        [System.IO.File]::WriteAllBytes((Join-Path $vnc 'tvnserver.exe'), $arm64)
+        Set-Content -LiteralPath (Join-Path $contoso 'text.exe') -Value 'not a program'
+        $executables = [ordered]@{
+            'Google.GoogleDrive' = @('Google/Drive File Stream/*/GoogleDriveFS.exe')
+            'GlavSoft.TightVNC'  = @('TightVNC/tvnserver.exe')
+            'Contoso.Text'       = @('Contoso/text.exe')
+            'Contoso.Missing'    = @('Contoso/missing.exe', 'Fabrikam/missing.exe')
+        }
+
+        $found = @(Get-InstalledExecutableArchitecture -Executables $executables -ProgramFilesRoots @($programFiles, $programFilesX86))
+
+        @($found | ForEach-Object { '{0}={1}' -f $_.App, $_.Machine }) | Should -Be @('Google.GoogleDrive=Arm64', 'GlavSoft.TightVNC=X64', 'Contoso.Text=not a PE image', 'Contoso.Missing=not found')
+        $found[0].Path | Should -Be (Join-Path $drive 'GoogleDriveFS.exe')
+        $found[3].Path | Should -BeNullOrEmpty
+    }
+
+    It 'Looks for the catalog apps whose build the ARM64 decisions rest on' {
+        @($script:SystemPassExecutables.Keys) | Should -Contain 'Google.GoogleDrive'
+        @($script:SystemPassExecutables.Keys) | Should -Contain 'GlavSoft.TightVNC'
+        @($script:SystemPassExecutables.Keys) | Should -Contain 'Klocman.BulkCrapUninstaller'
+        $catalogIds = @(Get-DefaultAppCatalog | ForEach-Object { $_.name })
+        foreach ($app in @($script:SystemPassExecutables.Keys | Where-Object { $_ -ne 'Adobe.Acrobat.Reader' })) {
+            $catalogIds | Should -Contain $app
+        }
     }
 }
