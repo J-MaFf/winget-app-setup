@@ -2031,9 +2031,16 @@ throwaway VMs by construction:
   `issues: write`, opens the 'Microsoft.WinGet.Client pin is behind the PowerShell Gallery' issue
   with the check's output, or comments on the open one once per new version.
 - **ARM64 probe:** `.github/workflows/arm64-probe.yml` (dispatch only, `windows-11-arm`,
-  wgt-gq8.50) installs nothing: it prints the job's account, the architecture each PowerShell sees,
-  App Installer's registration and provisioning, `Microsoft.WindowsAppRuntime.1.8` and
-  `winget --version`. An ARM64 install leg waits on what it shows.
+  wgt-gq8.50) installs nothing. It prints:
+  - the job's account and the architecture each PowerShell sees;
+  - App Installer's registration and provisioning, and `Microsoft.WindowsAppRuntime.1.8`;
+  - `winget --version`, and the winget alias in the account's `WindowsApps` folder;
+  - each App Installer package's `winget.exe`, run as the job's account;
+  - what the module finds as SYSTEM (`Test-MachineWingetAvailable`, then `Test-WingetSourceOpen`),
+    from a one-shot SYSTEM scheduled task that it removes again.
+
+  An ARM64 install leg waits on what it shows. Its first run (2026-10-21) found App Installer 1.29
+  registered and the framework present, but no winget on PATH for the job's account.
 - **What it does:** the weekly run uses the one-liner above, against raw `main`, in both passes.
   Pull-request and dispatched runs install the checkout (the PR's merge commit, or the dispatched
   branch). The first pass pipes it to `iex` like the one-liner, and the second runs it with

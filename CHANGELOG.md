@@ -54,6 +54,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `windows-11-arm` that installs nothing and prints the account, the architecture as each
   PowerShell (7, 5.1 and 32-bit 5.1) sees it, App Installer's registration and provisioning,
   Microsoft.WindowsAppRuntime.1.8 and `winget --version`. The ARM64 install leg waits on its results.
+  Its first run (2026-10-21) found App Installer 1.29.379 (Arm64) registered and the framework
+  present, but no winget on PATH for `runneradmin`. So the probe now also prints:
+  - the winget alias in the account's `WindowsApps` folder, and the `WindowsApps` entries on PATH;
+  - each App Installer package's `winget.exe`, with its `--version` as the job's account;
+  - what the checkout's module finds as SYSTEM: `Get-MachineWingetCandidate`,
+    `Test-MachineWingetAvailable` and `Test-WingetSourceOpen`. These run from a one-shot SYSTEM
+    scheduled task that the step always unregisters, the probe's only change to the machine.
 - Unsupported Windows warning (wgt-gq8.51): on 32-bit Windows or Windows 10 on ARM64, the installer
   prints one warning before it changes anything (`Get-UnsupportedWindowsWarning`, from
   `Invoke-EnvironmentPreflight`) saying the configuration is unsupported and naming the apps known to
