@@ -76,6 +76,13 @@ Describe 'Get-InstallTranscriptFile' {
 }
 
 Describe 'ConvertFrom-InstallTranscript' {
+    It 'Reads the run''s first OS architecture line, and nothing from a transcript without one (wgt-gq8.50)' {
+        $content = "Installer build: 1.0.0+5ea1f00d`nOS architecture: Arm64`nOS architecture: X64"
+
+        (ConvertFrom-InstallTranscript -Content $content).OSArchitecture | Should -Be 'Arm64'
+        (ConvertFrom-InstallTranscript -Content 'Installer build: 1.0.0+5ea1f00d').OSArchitecture | Should -BeNullOrEmpty
+    }
+
     It 'Reads an app skipped as installed under another id as already installed, and that id (wgt-zu3)' {
         $content = (Get-Fixture -Name 'first-pass').Replace("Installing: Google.Chrome.EXE`nSuccessfully installed: Google.Chrome.EXE", 'Skipping: Google.Chrome.EXE (already installed as Google.Chrome)')
 
