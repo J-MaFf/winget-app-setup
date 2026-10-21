@@ -10,9 +10,15 @@ name: ARM64 Runner Probe
 #     and provisioned for new users;
 #   - Microsoft.WindowsAppRuntime.1.8, which winget 1.12+ and Winget-AutoUpdate need;
 #   - winget on PATH and 'winget --version', when it is there;
+#   - the winget alias in the account's WindowsApps folder, and the WindowsApps entries on PATH;
+#   - each App Installer package's winget.exe and its 'winget --version', run as the job's account;
+#   - what the module itself finds as SYSTEM (Get-MachineWingetCandidate,
+#     Test-MachineWingetAvailable, Test-WingetSourceOpen): the one change the probe makes is a
+#     temporary SYSTEM scheduled task that runs those, which it removes again;
 #   - the manufacturer and model.
 # The full ARM64 install leg (two passes and the assertions, see e2e-install.yml) waits on what
-# this probe shows, above all whether winget is usable for the job's account at all.
+# this probe shows, above all whether winget is usable for the job's account at all. The first run
+# (2026-10-21) found App Installer registered but no winget on PATH for runneradmin.
 # Dispatch only: 'gh workflow run arm64-probe.yml'.
 
 on:
@@ -24,8 +30,12 @@ permissions:
 jobs:
   probe:
     runs-on: windows-11-arm
-    timeout-minutes: 15
+    timeout-minutes: 30
     steps:
+      # The module, for the SYSTEM step below.
+      - name: Check out the repository
+        uses: actions/checkout@v6
+
       - name: Account and architecture (PowerShell 7)
         shell: pwsh
         continue-on-error: true
@@ -86,3 +96,96 @@ jobs:
           $commands | Format-Table CommandType, Source -AutoSize | Out-String -Width 300 | Write-Host
           $output = & winget --version 2>&1
           Write-Host "winget --version (exit $LASTEXITCODE): $output"
+
+      - name: winget alias and WindowsApps on PATH
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          $windowsApps = Join-Path $env:LOCALAPPDATA 'Microsoft\WindowsApps'
+          Write-Host "LOCALAPPDATA: $env:LOCALAPPDATA"
+          Write-Host "PATH entries with WindowsApps: $((@($env:PATH -split ';' | Where-Object { $_ -like '*WindowsApps*' }) -join '; '))"
+          $alias = Join-Path $windowsApps 'winget.exe'
+          Write-Host "$alias present: $(Test-Path -LiteralPath $alias)"
+          if (Test-Path -LiteralPath $windowsApps) {
+            Get-ChildItem -LiteralPath $windowsApps -Force -ErrorAction SilentlyContinue | Format-Table Name, Length, Attributes -AutoSize | Out-String -Width 300 | Write-Host
+          }
+          if (Test-Path -LiteralPath $alias) {
+            $output = & $alias --version 2>&1
+            Write-Host "$alias --version (exit $LASTEXITCODE): $output"
+          }
+
+      # Windows PowerShell for the Appx cmdlets; Windows PowerShell turns a program's stderr into errors.
+      - name: The machine-wide winget.exe, run as this account
+        shell: powershell
+        continue-on-error: true
+        run: |
+          $ErrorActionPreference = 'Continue'
+          foreach ($package in @(Get-AppxPackage -AllUsers -Name Microsoft.DesktopAppInstaller | Sort-Object Version -Descending)) {
+            Write-Host "--- $($package.PackageFullName): Status $($package.Status), InstallLocation $($package.InstallLocation)"
+            $exe = Join-Path $package.InstallLocation 'winget.exe'
+            Write-Host "$exe present: $(Test-Path -LiteralPath $exe)"
+            if (Test-Path -LiteralPath $exe) {
+              $output = & $exe --version 2>&1
+              Write-Host "$exe --version (exit $LASTEXITCODE): $output"
+            }
+          }
+
+      # The installer's own SYSTEM path, through the checkout's module, from a one-shot SYSTEM task
+      # (S-1-5-18) that this step registers and always removes again.
+      - name: What the module finds as SYSTEM
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          $scriptPath = Join-Path $env:RUNNER_TEMP 'arm64-probe-system.ps1'
+          $transcriptPath = Join-Path $env:RUNNER_TEMP 'arm64-probe-system.log'
+          @'
+          param ([string]$RepoRoot, [string]$TranscriptPath)
+          $ErrorActionPreference = 'Continue'
+          Start-Transcript -LiteralPath $TranscriptPath | Out-Null
+          try {
+              Write-Host "whoami: $(whoami)"
+              Import-Module (Join-Path $RepoRoot 'WingetAppSetup\WingetAppSetup.psd1') -Force
+              Write-Host "Test-IsSystemAccount: $(Test-IsSystemAccount)"
+              Get-MachineWingetCandidate | Format-Table Path, Version, Architecture, Source -AutoSize | Out-String -Width 300 | Write-Host
+              $available = Test-MachineWingetAvailable
+              Write-Host "Test-MachineWingetAvailable: $available"
+              if ($available) {
+                  $source = Test-WingetSourceOpen
+                  Write-Host ('Test-WingetSourceOpen: Opened {0}, ExitCode {1}, TimedOut {2}, LaunchError {3}' -f $source.Opened, $source.ExitCode, $source.TimedOut, $source.LaunchError)
+              }
+          }
+          catch {
+              Write-Host "ERROR: $_"
+          }
+          finally {
+              Stop-Transcript | Out-Null
+          }
+          '@ | Set-Content -LiteralPath $scriptPath -Encoding utf8
+          $pwsh = Join-Path $env:ProgramFiles 'PowerShell\7\pwsh.exe'
+          $arguments = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}" -RepoRoot "{1}" -TranscriptPath "{2}"' -f $scriptPath, $env:GITHUB_WORKSPACE, $transcriptPath
+          $taskName = 'arm64-probe-system-' + [guid]::NewGuid().ToString('N')
+          $action = New-ScheduledTaskAction -Execute $pwsh -Argument $arguments
+          $principal = New-ScheduledTaskPrincipal -UserId 'S-1-5-18' -LogonType ServiceAccount -RunLevel Highest
+          $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes 12) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+          Register-ScheduledTask -TaskName $taskName -Action $action -Principal $principal -Settings $settings -Force | Out-Null
+          try {
+            Start-ScheduledTask -TaskName $taskName
+            # 267009: running; 267011: not yet run.
+            $deadline = (Get-Date).AddMinutes(12)
+            do {
+              Start-Sleep -Seconds 5
+              $task = Get-ScheduledTask -TaskName $taskName
+              $info = Get-ScheduledTaskInfo -TaskName $taskName
+            } while ((Get-Date) -lt $deadline -and ("$($task.State)" -eq 'Running' -or @(267009, 267011) -contains [long]$info.LastTaskResult))
+            Write-Host "SYSTEM task: state $($task.State), last result $($info.LastTaskResult)"
+            if (Test-Path -LiteralPath $transcriptPath) {
+              Get-Content -LiteralPath $transcriptPath | Write-Host
+            }
+            else {
+              Write-Host 'The SYSTEM task wrote no transcript.'
+            }
+          }
+          finally {
+            Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+            Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
+          }

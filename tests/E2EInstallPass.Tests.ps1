@@ -402,16 +402,31 @@ Describe 'e2e scripts run by Windows PowerShell 5.1' {
     }
 }
 
-# wgt-gq8.50, first step: the ARM64 probe only reads and prints.
+# wgt-gq8.50: the ARM64 probe only reads and prints; its one change, a SYSTEM task, it removes.
 Describe '.github/workflows/arm64-probe.yml' {
-    It 'Runs on dispatch only, on windows-11-arm, with read-only permissions, and installs nothing' {
-        $workflow = Get-Content -Raw -LiteralPath (Join-Path $script:RepoRoot '.github/workflows/arm64-probe.yml')
+    BeforeAll {
+        $script:probeWorkflow = Get-Content -Raw -LiteralPath (Join-Path $script:RepoRoot '.github/workflows/arm64-probe.yml')
+    }
 
-        $workflow | Should -Match '(?m)^on:\r?\n  workflow_dispatch:\s*\r?\n\r?\npermissions:\r?\n  contents: read\s*$'
-        $workflow | Should -Match 'runs-on: windows-11-arm'
-        $workflow | Should -Not -Match '(?i)winget(\.exe)? (install|uninstall|upgrade)|Install-Module|Add-AppxPackage|Repair-WinGetPackageManager|winget-app-install\.ps1'
+    It 'Runs on dispatch only, on windows-11-arm, with read-only permissions, and installs nothing' {
+        $script:probeWorkflow | Should -Match '(?m)^on:\r?\n  workflow_dispatch:\s*\r?\n\r?\npermissions:\r?\n  contents: read\s*$'
+        $script:probeWorkflow | Should -Match 'runs-on: windows-11-arm'
+        $script:probeWorkflow | Should -Not -Match '(?i)winget(\.exe)? (install|uninstall|upgrade)|Install-Module|Add-AppxPackage|Repair-WinGetPackageManager|winget-app-install\.ps1'
         foreach ($probe in @('whoami', 'PROCESSOR_ARCHITECTURE', 'OSArchitecture', 'SysWOW64\WindowsPowerShell', 'Get-AppxProvisionedPackage', 'Microsoft.WindowsAppRuntime.1.8', 'winget --version')) {
-            $workflow | Should -Match ([regex]::Escape($probe))
+            $script:probeWorkflow | Should -Match ([regex]::Escape($probe))
         }
+    }
+
+    # The first run found App Installer registered but no winget on PATH for runneradmin.
+    It 'Looks for the winget alias, the machine-wide winget.exe, and what the module finds as SYSTEM' {
+        foreach ($probe in @("Join-Path `$env:LOCALAPPDATA 'Microsoft\WindowsApps'", "Join-Path `$package.InstallLocation 'winget.exe'", 'Get-MachineWingetCandidate', 'Test-MachineWingetAvailable', 'Test-WingetSourceOpen', "WingetAppSetup\WingetAppSetup.psd1")) {
+            $script:probeWorkflow | Should -Match ([regex]::Escape($probe))
+        }
+    }
+
+    It 'Runs the SYSTEM check from a one-shot task that it always removes' {
+        $script:probeWorkflow | Should -Match "New-ScheduledTaskPrincipal -UserId 'S-1-5-18'"
+        $script:probeWorkflow | Should -Match '(?s)try \{\s+Start-ScheduledTask -TaskName \$taskName.+finally \{\s+Stop-ScheduledTask -TaskName \$taskName -ErrorAction SilentlyContinue\s+Unregister-ScheduledTask -TaskName \$taskName -Confirm:\$false'
+        $script:probeWorkflow | Should -Match "'arm64-probe-system-' \+ \[guid\]::NewGuid\(\)"
     }
 }
