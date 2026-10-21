@@ -50,6 +50,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `issues: write` opens the 'Microsoft.WinGet.Client pin is behind the PowerShell Gallery' issue
   with the check's output, or comments on the open one once per new version. `-Latest` reads the
   Gallery's OData feed (every page) and prints a `PIN-FRESHNESS:` line.
+- E2E PowerShell 7 leg on ARM64 (wgt-gq8.50): `e2e-install-arm64` runs the PowerShell 7 leg's two
+  passes and assertions on `windows-11-arm`, as the job's own account. That account has no winget
+  alias, so the installer's own ladder (register App Installer for the account, then
+  `Repair-WinGetPackageManager`) has to make winget start first. The leg has no uninstall pass and
+  reports to `report-failure` like the others.
+  - `e2e/Assert-Install.ps1` takes `-ExpectOSArchitecture`, `-ExpectApplicable` and
+    `-ExpectNotApplicable`, checked against the module, the latest transcript's
+    `OS architecture:` line and its skip lines.
+  - The shared check is `Get-ArchitectureAssertionResult` in `e2e/TranscriptAssertions.ps1`, with
+    `ConvertTo-TranscriptAppRecord`. `e2e/Invoke-SystemInstallPass.ps1` now uses it with
+    `last-run.json` as the record, and its rows are unchanged.
+  - The ARM64 leg names the ARM64 lists, and the x64 PowerShell 7 leg the reverse.
 - E2E SYSTEM leg on ARM64 (wgt-gq8.50): `e2e-install-system-arm64` runs the SYSTEM leg's pass,
   through `rmm/Invoke-WingetAppSetup.ps1` from a 32-bit `powershell.exe` scheduled task, on the
   `windows-11-arm` runner, with a 60-minute task, and reports to `report-failure` like the other

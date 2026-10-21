@@ -306,7 +306,7 @@ Describe 'e2e/Invoke-SystemInstallPass.ps1 wiring' {
         $workflow | Should -Match '(?m)^  e2e-install-system:'
         $workflow | Should -Match 'Invoke-SystemInstallPass\.ps1'
         $workflow | Should -Match "pattern='\^\(WingetAppSetup/\|build/\|e2e/\|rmm/\)"
-        $workflow | Should -Match 'needs: \[e2e-install, e2e-install-windows-powershell, e2e-install-system, e2e-install-system-winget-client, e2e-install-system-arm64\]'
+        $workflow | Should -Match 'needs: \[e2e-install, e2e-install-windows-powershell, e2e-install-arm64, e2e-install-system, e2e-install-system-winget-client, e2e-install-system-arm64\]'
     }
 }
 
@@ -1354,6 +1354,9 @@ Describe 'The architecture a SYSTEM leg names (wgt-gq8.50)' {
     It 'Names, in <Job>, its architecture and only catalog apps, each as the catalog decides there' -ForEach @(
         @{ Job = 'e2e-install-system'; Architecture = 'X64'; Applicable = @('Adobe.Acrobat.Reader.64-bit'); NotApplicable = @('Adobe.Acrobat.Reader.32-bit', 'Dell.CommandUpdate.Universal') }
         @{ Job = 'e2e-install-system-arm64'; Architecture = 'Arm64'; Applicable = @('Adobe.Acrobat.Reader.32-bit', 'Google.GoogleDrive'); NotApplicable = @('Adobe.Acrobat.Reader.64-bit', 'Dell.CommandUpdate.Universal') }
+        # The PowerShell 7 legs pass the same lists to e2e/Assert-Install.ps1.
+        @{ Job = 'e2e-install'; Architecture = 'X64'; Applicable = @('Adobe.Acrobat.Reader.64-bit'); NotApplicable = @('Adobe.Acrobat.Reader.32-bit', 'Dell.CommandUpdate.Universal') }
+        @{ Job = 'e2e-install-arm64'; Architecture = 'Arm64'; Applicable = @('Adobe.Acrobat.Reader.32-bit', 'Google.GoogleDrive'); NotApplicable = @('Adobe.Acrobat.Reader.64-bit', 'Dell.CommandUpdate.Universal') }
     ) {
         $job = Get-WorkflowJob -Name $Job
         $named = @{}

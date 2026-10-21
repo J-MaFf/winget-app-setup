@@ -2048,7 +2048,18 @@ throwaway VMs by construction:
   executable report shows which build of each app landed, for example whether Google Drive's
   x64-labelled installer put an ARM64 `GoogleDriveFS.exe` in place. Dell Command Update on ARM64
   still needs a real Dell PC: the runner is not Dell hardware.
-- **Pin freshness:** `.github/workflows/wingetclient-pin-freshness.yml` runs every Tuesday (and on
+- **The PowerShell 7 leg on ARM64:** `e2e-install-arm64` runs the PowerShell 7 leg's two passes
+  and assertions on `windows-11-arm`, as the job's own account. That account has no winget alias,
+  so the first pass has to make winget start itself: it registers the App Installer already on the
+  PC for the account, then runs `Repair-WinGetPackageManager`, as on a PC whose account never had
+  winget. The passes get 45 minutes instead of 35, and there is no uninstall pass (the x64
+  PowerShell 7 leg covers the uninstaller). Its assertions add `-ExpectOSArchitecture Arm64`:
+  - `Get-OSArchitecture` and the latest transcript's `OS architecture:` line must say Arm64;
+  - Reader 32-bit and Google Drive must apply and not be skipped as not applicable;
+  - Reader 64-bit and Dell Command Update must not apply and must be skipped as not applicable.
+
+  The x64 PowerShell 7 leg passes the reverse: `-ExpectOSArchitecture X64`, Reader 64-bit
+  applicable, Reader 32-bit and Dell Command Update not.- **Pin freshness:** `.github/workflows/wingetclient-pin-freshness.yml` runs every Tuesday (and on
   dispatch) `build/Set-WingetClientModulePin.ps1 -Check -Latest` on windows-latest, where the
   signature checks work, against the Gallery's latest stable Microsoft.WinGet.Client
   (wgt-gq8.55). When that version is past the pin, an ubuntu job, the only one with
@@ -2065,8 +2076,8 @@ throwaway VMs by construction:
 
   Its runs on 2026-10-21 found App Installer 1.29 registered and the framework present, but no
   winget alias for the job's account. The machine-wide `winget.exe` runs, and as SYSTEM the module
-  finds it and opens the winget source: the SYSTEM leg above runs there as it is. A leg as the
-  job's account would first need winget for that account.
+  finds it and opens the winget source: the SYSTEM leg above runs there as it is. As the job's
+  account, the PowerShell 7 leg on ARM64 has the installer set winget up first.
 - **What it does:** the weekly run uses the one-liner above, against raw `main`, in both passes.
   Pull-request and dispatched runs install the checkout (the PR's merge commit, or the dispatched
   branch). The first pass pipes it to `iex` like the one-liner, and the second runs it with

@@ -1015,3 +1015,159 @@ Describe 'e2e/Assert-Install.ps1 wiring' {
         @($bytes | Where-Object { $_ -gt 0x7F }).Count | Should -Be 0
     }
 }
+
+# wgt-gq8.50: e2e/Assert-Install.ps1 -ExpectOSArchitecture checks the architecture the leg names
+# against the module, the latest transcript's 'OS architecture:' line and its skip lines, which a
+# misread Get-OSArchitecture cannot fool. Get-ArchitectureAssertionResult is shared with
+# e2e/Invoke-SystemInstallPass.ps1, whose tests cover it with last-run.json as the record.
+Describe 'The architecture a PowerShell 7 leg names (wgt-gq8.50)' {
+    BeforeAll {
+        # A second pass's transcript on an ARM64 PC, or with -AsX64 one that took it for x64.
+        function New-ArchitectureTranscript {
+            param ([string]$Architecture = 'Arm64', [switch]$AsX64)
+            $lines = @('Installer build: 1.0.0+5ea1f00d', "OS architecture: $Architecture")
+            if ($AsX64) {
+                $lines += 'Skipping: Adobe.Acrobat.Reader.64-bit (already installed)'
+                $lines += 'Skipping: Adobe.Acrobat.Reader.32-bit (not applicable: ARM64 and 32-bit Windows only; x64 PCs get the 64-bit Reader)'
+            }
+            else {
+                $lines += 'Skipping: Adobe.Acrobat.Reader.64-bit (not applicable: its only installer is x64, and Adobe supports only the 32-bit Reader on ARM64 Windows)'
+                $lines += 'Skipping: Adobe.Acrobat.Reader.32-bit (already installed)'
+            }
+            $lines += 'Skipping: Google.GoogleDrive (already installed)'
+            $lines += 'Skipping: Dell.CommandUpdate.Universal (not applicable: Dell hardware with x64 Windows only; winget has no ARM64 installer for it)'
+            return [pscustomobject]@{ Name = 'install-20261021-190500.log'; Parsed = (ConvertFrom-InstallTranscript -Content ($lines -join "`n")) }
+        }
+
+        function Get-ArchitectureRow {
+            param ($Transcript = (New-ArchitectureTranscript), [string]$Detected = 'Arm64', [hashtable]$Verdicts, [string]$RecordProblem)
+            if (-not $Verdicts) {
+                $Verdicts = @{ 'Adobe.Acrobat.Reader.32-bit' = $true; 'Google.GoogleDrive' = $true; 'Adobe.Acrobat.Reader.64-bit' = $false; 'Dell.CommandUpdate.Universal' = $false }
+            }
+            $applicable = @('Adobe.Acrobat.Reader.32-bit', 'Google.GoogleDrive')
+            $notApplicable = @('Adobe.Acrobat.Reader.64-bit', 'Dell.CommandUpdate.Universal')
+            $recorded = @{}
+            if ($null -ne $Transcript) {
+                $recorded = ConvertTo-TranscriptAppRecord -Transcript $Transcript -Id ($applicable + $notApplicable)
+            }
+            return @(Get-ArchitectureAssertionResult -ExpectedArchitecture 'Arm64' -DetectedArchitecture $Detected -Transcript $Transcript -Applicability $Verdicts -ExpectApplicable $applicable -ExpectNotApplicable $notApplicable -Recorded $recorded -RecordProblem $RecordProblem)
+        }
+
+        function Get-WorkflowJob {
+            param ([string]$Name)
+            $workflow = Get-Content -Raw -LiteralPath (Join-Path $script:RepoRoot '.github/workflows/e2e-install.yml')
+            $start = $workflow.IndexOf("`n  ${Name}:")
+            $next = [regex]::Match($workflow.Substring($start + 1), '\n  [a-z0-9-]+:[ \t]*\r?\n')
+            return $workflow.Substring($start, $next.Index + 1)
+        }
+    }
+
+    It 'Passes an ARM64 second pass that skipped Reader 64-bit and Dell Command Update as not applicable' {
+        $rows = Get-ArchitectureRow
+
+        @($rows | ForEach-Object { $_.Assertion }) | Should -Be @('OS architecture is Arm64', 'The run''s OS architecture is Arm64', 'Applies on Arm64: Adobe.Acrobat.Reader.32-bit', 'Applies on Arm64: Google.GoogleDrive', 'Not applicable on Arm64: Adobe.Acrobat.Reader.64-bit', 'Not applicable on Arm64: Dell.CommandUpdate.Universal')
+        @($rows | Where-Object Result -NE 'PASS') | Should -BeNullOrEmpty
+        $rows[2].Detail | Should -Be 'the catalog says it applies; install-20261021-190500.log: Skipping (already installed)'
+        $rows[4].Detail | Should -Be 'the catalog says it does not apply; install-20261021-190500.log: Skipping (not applicable: its only installer is x64, and Adobe supports only the 32-bit Reader on ARM64 Windows)'
+    }
+
+    It 'Fails a run that took the ARM64 runner for x64, with the module agreeing' {
+        $verdicts = @{ 'Adobe.Acrobat.Reader.32-bit' = $false; 'Google.GoogleDrive' = $true; 'Adobe.Acrobat.Reader.64-bit' = $true; 'Dell.CommandUpdate.Universal' = $false }
+
+        $rows = Get-ArchitectureRow -Transcript (New-ArchitectureTranscript -Architecture 'X64' -AsX64) -Detected 'X64' -Verdicts $verdicts
+
+        @($rows | Where-Object Result -EQ 'FAIL' | ForEach-Object { $_.Assertion }) | Should -Be @('OS architecture is Arm64', 'The run''s OS architecture is Arm64', 'Applies on Arm64: Adobe.Acrobat.Reader.32-bit', 'Not applicable on Arm64: Adobe.Acrobat.Reader.64-bit')
+        $rows[1].Detail | Should -Be 'install-20261021-190500.log: OS architecture: X64'
+        $rows[2].Detail | Should -Be 'the catalog says it does not apply; install-20261021-190500.log: Skipping (not applicable: ARM64 and 32-bit Windows only; x64 PCs get the 64-bit Reader); it must apply on Arm64; the run skipped it as not applicable'
+    }
+
+    It 'Fails every app row, saying why, when there is no transcript' {
+        $rows = Get-ArchitectureRow -Transcript $null -RecordProblem 'no transcript of the run'
+
+        $rows[1].Detail | Should -Be 'no transcript of the run'
+        foreach ($row in @($rows | Select-Object -Skip 1)) {
+            $row.Result | Should -Be 'FAIL'
+            $row.Detail | Should -BeLike '*no transcript of the run'
+        }
+    }
+
+    It 'Fails an app the run left no record of, and one with a record problem' {
+        $rows = @(Get-ArchitectureAssertionResult -ExpectedArchitecture 'Arm64' -DetectedArchitecture 'Arm64' -Transcript (New-ArchitectureTranscript) -Applicability @{ 'Contoso.A' = $true; 'Contoso.B' = $false } -ExpectApplicable @('Contoso.A') -ExpectNotApplicable @('Contoso.B') -Recorded @{ 'Contoso.B' = @{ Problem = '2 entries in last-run.json' } })
+
+        $rows[2].Detail | Should -Be 'the catalog says it applies; the run left no record of it'
+        $rows[3].Detail | Should -Be 'the catalog says it does not apply; 2 entries in last-run.json'
+        @($rows | Select-Object -Skip 2 | Where-Object Result -EQ 'PASS') | Should -BeNullOrEmpty
+    }
+
+    It 'Reads what the transcript records for each app: <Id>' -ForEach @(
+        @{ Id = 'Contoso.NotApplicable'; Text = 'install-20261021-190500.log: Skipping (not applicable: Dell hardware only)'; NotApplicable = $true }
+        @{ Id = 'Contoso.Installed'; Text = 'install-20261021-190500.log: installed'; NotApplicable = $false }
+        @{ Id = 'Contoso.Present'; Text = 'install-20261021-190500.log: Skipping (already installed)'; NotApplicable = $false }
+        @{ Id = 'Contoso.Failed'; Text = 'install-20261021-190500.log: failed'; NotApplicable = $false }
+        @{ Id = 'Contoso.Silent'; Text = 'install-20261021-190500.log: no install, skip or failure line'; NotApplicable = $false }
+    ) {
+        $content = @(
+            'Installer build: 1.0.0+5ea1f00d'
+            'Skipping: Contoso.NotApplicable (not applicable: Dell hardware only)'
+            'Successfully installed: Contoso.Installed'
+            'Skipping: Contoso.Present (already installed)'
+            'Summary:'
+            ''
+            'Status    Apps'
+            '------    ----'
+            'Installed Contoso.Installed'
+            'Failed    Contoso.Failed'
+        ) -join "`n"
+        $transcript = [pscustomobject]@{ Name = 'install-20261021-190500.log'; Parsed = (ConvertFrom-InstallTranscript -Content $content) }
+
+        $record = (ConvertTo-TranscriptAppRecord -Transcript $transcript -Id @($Id))[$Id]
+
+        $record.Text | Should -Be $Text
+        $record.NotApplicable | Should -Be $NotApplicable
+    }
+
+    It 'Is checked by e2e/Assert-Install.ps1 only with -ExpectOSArchitecture, against the latest transcript' {
+        $ast = [System.Management.Automation.Language.Parser]::ParseFile($script:AssertInstallPath, [ref]$null, [ref]$null)
+        $parameters = @($ast.ParamBlock.Parameters | ForEach-Object { $_.Name.VariablePath.UserPath })
+        $script = Get-Content -Raw -LiteralPath $script:AssertInstallPath
+
+        $parameters | Should -Contain 'ExpectOSArchitecture'
+        $parameters | Should -Contain 'ExpectApplicable'
+        $parameters | Should -Contain 'ExpectNotApplicable'
+        $script | Should -Match '(?s)if \(\$ExpectOSArchitecture\) \{.*?\$latestFile = @\(\(Get-InstallTranscriptFile -LogDirectory \$logDirectory\)\.RealRun\) \| Select-Object -Last 1.*?ConvertTo-TranscriptAppRecord -Transcript \$latestTranscript.*?Get-ArchitectureAssertionResult -ExpectedArchitecture \$ExpectOSArchitecture -DetectedArchitecture \$detectedArchitecture [^\r\n]*-Transcript \$latestTranscript -Applicability \$verdicts [^\r\n]*-Recorded \$recorded -RecordProblem \$recordProblem'
+        $script.IndexOf('Get-ArchitectureAssertionResult') | Should -BeLessThan $script.IndexOf("Write-Host '=== E2E assertion results ==='")
+    }
+
+    It 'Refuses the app lists without -ExpectOSArchitecture' {
+        $pwsh = (Get-Process -Id $PID).Path
+        $output = & $pwsh -NoProfile -File $script:AssertInstallPath -ExpectNotApplicable 'Dell.CommandUpdate.Universal' 2>&1
+
+        $LASTEXITCODE | Should -Not -Be 0
+        ($output -join "`n") | Should -Match '-ExpectApplicable and -ExpectNotApplicable need -ExpectOSArchitecture'
+    }
+
+    It 'Runs the ARM64 PowerShell 7 leg on windows-11-arm, as e2e-install is run, and reports it to report-failure' {
+        $workflow = Get-Content -Raw -LiteralPath (Join-Path $script:RepoRoot '.github/workflows/e2e-install.yml')
+        $job = Get-WorkflowJob -Name 'e2e-install-arm64'
+        $x64Job = Get-WorkflowJob -Name 'e2e-install'
+
+        $job | Should -Match '(?m)^    runs-on: windows-11-arm\s*$'
+        [regex]::Match($job, '(?m)^    if: .*$').Value | Should -Be ([regex]::Match($x64Job, '(?m)^    if: .*$').Value)
+        [regex]::Match($job, '(?m)^      INSTALLER_SOURCE: .*$').Value | Should -Be ([regex]::Match($x64Job, '(?m)^      INSTALLER_SOURCE: .*$').Value)
+        $job | Should -Match '(?m)^\s+& \.\\e2e\\Remove-PreinstalledApps\.ps1\s*$'
+        $job | Should -Match 'Invoke-InstallPass\.ps1 -Pass first -Shell pwsh -Entry OneLiner '
+        $job | Should -Match 'Invoke-InstallPass\.ps1 -Pass second -Shell pwsh -Entry File '
+        $job | Should -Match "'-ExpectOSArchitecture', 'Arm64',"
+        $job | Should -Match 'Assert-Install\.ps1 @assertArgs 2>&1 \|'
+        $job | Should -Not -Match 'Invoke-UninstallPass'
+        $jobLimit = [int][regex]::Match($job, '(?m)^    timeout-minutes: (\d+)').Groups[1].Value
+        $stepLimits = @([regex]::Matches($job, '(?m)^        timeout-minutes: (\d+)') | ForEach-Object { [int]$_.Groups[1].Value })
+        $stepLimits.Count | Should -Be 7
+        $jobLimit | Should -BeGreaterOrEqual ((($stepLimits | Measure-Object -Sum).Sum) + 5)
+        $job | Should -Match 'name: e2e-install-transcripts-arm64'
+        $job | Should -Match 'name: e2e-diagnostics-arm64'
+        $workflow | Should -Match "needs\.e2e-install-arm64\.result != 'success'"
+        $workflow | Should -Match 'ARM64_LEG_RESULT: \$\{\{ needs\.e2e-install-arm64\.result \}\}'
+        $workflow | Should -Match "leg_section e2e-install-arm64 'started from PowerShell 7 on ARM64 Windows 11' `"\`$ARM64_LEG_RESULT`" \\\s+artifacts/e2e-install-transcripts-arm64 artifacts/e2e-diagnostics-arm64"
+    }
+}
