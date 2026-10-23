@@ -1002,6 +1002,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Test suite: two web-download tests failed when `Invoke-Pester` ran from a script with an `-OutFile`
+  parameter (bead wgt-gq8.82). Their parameter filters checked `-not $OutFile` for a call without
+  `-OutFile`, and Pester defines a filter variable only for the parameters the call bound, so the
+  name read the caller's `$OutFile` instead. All 46 such negated reads now go through
+  `$PesterBoundParameters` (`-not $PesterBoundParameters['OutFile']`), which means the same thing
+  and ignores the caller's variables, and `tests/TestHarness.Tests.ps1` fails on a new one.
 - **Under cross-user elevation, the uninstaller's advice for a winget source that stays closed now
   works** (bead wgt-gq8.78). It still removes nothing and exits 2 (owner decision 2026-10-20: no
   hand-over to SYSTEM for the uninstaller), but its last line told the technician to run it from

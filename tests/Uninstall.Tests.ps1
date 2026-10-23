@@ -79,7 +79,7 @@ Describe 'Invoke-WingetUninstall' {
             $result | Should -Be 0
             $script:sequence | Should -Be @('list Contoso.AppOne', 'uninstall Contoso.AppOne', 'list Contoso.AppTwo', 'uninstall Contoso.AppTwo')
             Should -Invoke Remove-LegacyScheduledUpdates -Times 1 -Exactly
-            Should -Invoke Uninstall-WingetAutoUpdate -Times 1 -Exactly -ParameterFilter { -not $WhatIf }
+            Should -Invoke Uninstall-WingetAutoUpdate -Times 1 -Exactly -ParameterFilter { -not $PesterBoundParameters['WhatIf'] }
             $script:capturedTables['Uninstallation Summary'][0] | Should -Be @('Uninstalled', 'Contoso.AppOne, Contoso.AppTwo')
             $script:successMessages | Should -Contain 'Successfully uninstalled: Contoso.AppOne'
         }
@@ -184,7 +184,7 @@ Describe 'Invoke-WingetUninstall' {
 
             $script:sequence[0..1] | Should -Be @('winget setup', 'list Contoso.AppOne')
             Should -Invoke Get-InstallAccountContext -Times 1 -Exactly
-            Should -Invoke Initialize-Winget -Times 1 -Exactly -ParameterFilter { -not $WhatIf -and $null -ne $AccountContext -and -not $AccountContext.IsSystem }
+            Should -Invoke Initialize-Winget -Times 1 -Exactly -ParameterFilter { -not $PesterBoundParameters['WhatIf'] -and $null -ne $AccountContext -and -not $AccountContext.IsSystem }
         }
 
         It 'Drops a machine-wide winget path left by an earlier run in this session before it sets winget up (review finding P2-24)' {
@@ -443,7 +443,7 @@ Describe 'Invoke-WingetUninstall' {
             $result = Invoke-WingetUninstall -Apps $apps
 
             $result | Should -Be 0
-            Should -Invoke Reset-WindowsTerminalDelegation -Times 1 -Exactly -ParameterFilter { -not $WhatIf }
+            Should -Invoke Reset-WindowsTerminalDelegation -Times 1 -Exactly -ParameterFilter { -not $PesterBoundParameters['WhatIf'] }
             # After the whole app loop, not right after Windows Terminal.
             $script:sequence[-1] | Should -Be 'reset delegation'
         }
@@ -498,7 +498,7 @@ Describe 'Invoke-WingetUninstall' {
             $script:capturedTables['Uninstallation Summary'] | Should -HaveCount 2
             $script:capturedTables['Uninstallation Summary'][0] | Should -Be @('Uninstalled', 'Contoso.AppOne, Contoso.AppTwo')
             $script:capturedTables['Uninstallation Summary'][1] | Should -Be @('Skipped', 'Microsoft.WindowsTerminal')
-            Should -Invoke Uninstall-WingetAutoUpdate -Times 1 -Exactly -ParameterFilter { -not $WhatIf }
+            Should -Invoke Uninstall-WingetAutoUpdate -Times 1 -Exactly -ParameterFilter { -not $PesterBoundParameters['WhatIf'] }
             # Not gone, only left alone: the admin's default-terminal setting is not touched.
             Should -Invoke Reset-WindowsTerminalDelegation -Times 0 -Exactly
             # Read once for the run and passed to each app.

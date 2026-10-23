@@ -148,7 +148,7 @@ Describe 'Winget-AutoUpdate integration (issue #168)' {
 
             $dir | Should -BeLike (Join-Path $baseDir 'wau-msi-*')
             # The base folder: a planted link removed and the folder locked (wgt-gq8.46).
-            Should -Invoke Initialize-ProgramDataFolder -Times 1 -Exactly -ParameterFilter { -not $ChildName -and -not $ReadableByUsers }
+            Should -Invoke Initialize-ProgramDataFolder -Times 1 -Exactly -ParameterFilter { -not $PesterBoundParameters['ChildName'] -and -not $PesterBoundParameters['ReadableByUsers'] }
             Should -Invoke New-Item -Times 1 -Exactly -ParameterFilter { $Path -eq $dir }
             Should -Invoke Set-RestrictedDirectoryAcl -Times 1 -Exactly -ParameterFilter { $Path -eq $dir }
         }
@@ -237,7 +237,7 @@ Describe 'Winget-AutoUpdate integration (issue #168)' {
             $script:icaclsCalls[0] | Should -Be '"C:\ProgramData\winget-app-setup\wau-msi-test" /setowner *S-1-5-32-544 /L /q'
             # /grant:r replaces explicit SYSTEM and Administrators entries instead of adding to them.
             $script:icaclsCalls[1] | Should -Be '"C:\ProgramData\winget-app-setup\wau-msi-test" /inheritance:r /grant:r *S-1-5-18:(OI)(CI)F *S-1-5-32-544:(OI)(CI)F /L /q'
-            Should -Invoke Assert-RestrictedDirectoryAcl -Times 1 -Exactly -ParameterFilter { $Path -eq 'C:\ProgramData\winget-app-setup\wau-msi-test' -and -not $ReadableByUsers }
+            Should -Invoke Assert-RestrictedDirectoryAcl -Times 1 -Exactly -ParameterFilter { $Path -eq 'C:\ProgramData\winget-app-setup\wau-msi-test' -and -not $PesterBoundParameters['ReadableByUsers'] }
         }
 
         # Every elevated run locks the base and logs folders before its transcript starts, so
@@ -249,7 +249,7 @@ Describe 'Winget-AutoUpdate integration (issue #168)' {
             Set-RestrictedDirectoryAcl -Path 'C:\ProgramData\winget-app-setup\logs' -ReadableByUsers
 
             Should -Invoke Start-Process -Times 2 -Exactly -ParameterFilter { $FilePath -eq 'icacls.exe' }
-            Should -Invoke Start-Process -Times 2 -Exactly -ParameterFilter { $FilePath -eq 'icacls.exe' -and $WindowStyle -eq 'Hidden' -and -not $NoNewWindow }
+            Should -Invoke Start-Process -Times 2 -Exactly -ParameterFilter { $FilePath -eq 'icacls.exe' -and $WindowStyle -eq 'Hidden' -and -not $PesterBoundParameters['NoNewWindow'] }
         }
 
         It 'lets BUILTIN\Users read the folder with -ReadableByUsers, by SID, in the same /grant:r (the logs folder, review finding P3-14)' {
@@ -1395,7 +1395,7 @@ Describe 'Winget-AutoUpdate integration (issue #168)' {
             $result.Status | Should -Be 'Configured'
             $msiPath = Join-Path $script:stagingDir "WAU-$((Get-WauPin).Version).msi"
             # The hash comes from the open stream, not from a second open by path.
-            Should -Invoke Get-FileHash -Times 1 -Exactly -ParameterFilter { $null -ne $InputStream -and -not $Path -and -not $LiteralPath }
+            Should -Invoke Get-FileHash -Times 1 -Exactly -ParameterFilter { $null -ne $InputStream -and -not $PesterBoundParameters['Path'] -and -not $PesterBoundParameters['LiteralPath'] }
             $script:hashedStream | Should -BeOfType [System.IO.FileStream]
             $script:hashedStream.Name | Should -Be $msiPath
             $script:streamOpenDuringMsiexec | Should -BeTrue
@@ -1783,7 +1783,7 @@ Describe 'Windows App Runtime requirement from the latest winget release (work-o
             $requirement.Frameworks[0].Name | Should -Be 'Microsoft.WindowsAppRuntime.1.8'
             $requirement.Frameworks[0].MinimumVersion | Should -Be ([version]'8000.616.304.0')
             Should -Invoke Invoke-WebRequest -Times 1 -Exactly -ParameterFilter {
-                $Uri -eq $script:latestUrl -and $TimeoutSec -eq 30 -and $UseBasicParsing -and -not $OutFile
+                $Uri -eq $script:latestUrl -and $TimeoutSec -eq 30 -and $UseBasicParsing -and -not $PesterBoundParameters['OutFile']
             }
             $script:infos | Should -Be @('The latest winget release needs Microsoft.WindowsAppRuntime.1.8 >= 8000.616.304.0 (its DesktopAppInstaller_Dependencies.json).')
             $script:warnings | Should -BeNullOrEmpty

@@ -582,7 +582,7 @@ exit 6
             $path = Start-RmmTranscript -LogDirectory $script:logDirectory
 
             Split-Path -Parent $path | Should -Be $script:logDirectory
-            Should -Invoke New-RmmSecuredFolder -Times 1 -Exactly -ParameterFilter { $Path -eq $script:baseDirectory -and -not $ReadableByUsers }
+            Should -Invoke New-RmmSecuredFolder -Times 1 -Exactly -ParameterFilter { $Path -eq $script:baseDirectory -and -not $PesterBoundParameters['ReadableByUsers'] }
             Should -Invoke New-RmmSecuredFolder -Times 1 -Exactly -ParameterFilter { $Path -eq $script:logDirectory -and $ReadableByUsers }
             Should -Invoke Start-Transcript -Times 1 -Exactly -ParameterFilter { $Path -eq $path }
         }

@@ -154,7 +154,7 @@ Describe 'Where a run gets the TightVNC passwords (Import-TightVncSecretFromEnvi
 
         ConvertTo-TestHex (ConvertTo-TightVncPasswordBytes -Password $secret.Password) | Should -Be 'D7A514D8C556AADE'
         $secret.PasswordSource | Should -Be 'the password entered at the prompt'
-        Should -Invoke Read-Host -Times 2 -Exactly -ParameterFilter { $AsSecureString -and -not $MaskInput }
+        Should -Invoke Read-Host -Times 2 -Exactly -ParameterFilter { $AsSecureString -and -not $PesterBoundParameters['MaskInput'] }
         # It waited (5 minutes at most) for someone to start typing before reading the password.
         Should -Invoke Wait-TightVncPromptAnswer -Times 1 -Exactly -ParameterFilter { $TimeoutSeconds -eq 300 }
     }
